@@ -4,4 +4,5 @@
 #include "flt_dbg.h"
 #include "filter.h"
 #include "avb_integration.h"
+#include "tsn_config.h"
 

@@ -250,12 +250,19 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_MDIO_READ:
         case IOCTL_AVB_MDIO_WRITE:
         {
+            DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: AVB IOCTL=0x%x\n", 
+                   IrpSp->Parameters.DeviceIoControl.IoControlCode);
+            
             // Find an Intel filter module to handle the request
             pFilter = AvbFindIntelFilterModule();
             if (pFilter != NULL && pFilter->AvbContext != NULL) {
+                DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: Found Intel filter, processing IOCTL\n");
                 Status = AvbHandleDeviceIoControl((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, Irp);
                 InfoLength = (ULONG)Irp->IoStatus.Information;
+                DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: IOCTL processed, Status=0x%x, InfoLength=%lu\n", 
+                       Status, InfoLength);
             } else {
+                DEBUGP(DL_ERROR, "IntelAvbFilterDeviceIoControl: No Intel filter found or AVB context not initialized\n");
                 Status = STATUS_DEVICE_NOT_READY;
             }
             break;

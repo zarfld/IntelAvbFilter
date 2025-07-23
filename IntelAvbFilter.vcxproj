@@ -181,12 +181,14 @@
     <ClCompile Include="device.c" />
     <ClCompile Include="flt_dbg.c" />
     <ClCompile Include="avb_integration.c" />
+    <ClCompile Include="tsn_config.c" />
     <ResourceCompile Include="filter.rc" />
     <ClInclude Include="precomp.h" />
     <ClInclude Include="filter.h" />
     <ClInclude Include="filteruser.h" />
     <ClInclude Include="flt_dbg.h" />
     <ClInclude Include="avb_integration.h" />
+    <ClInclude Include="tsn_config.h" />
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
   <ItemGroup>

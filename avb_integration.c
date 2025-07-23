@@ -140,9 +140,15 @@ AvbHandleDeviceIoControl(
     ULONG inputBufferLength, outputBufferLength;
     ULONG_PTR information = 0;
 
-    DEBUGP(DL_TRACE, "==>AvbHandleDeviceIoControl\n");
+    DEBUGP(DL_TRACE, "==>AvbHandleDeviceIoControl: IOCTL=0x%x\n", ioControlCode);
 
-    if (AvbContext == NULL || !AvbContext->initialized) {
+    if (AvbContext == NULL) {
+        DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: AvbContext is NULL\n");
+        return STATUS_DEVICE_NOT_READY;
+    }
+    
+    if (!AvbContext->initialized) {
+        DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: AvbContext not initialized\n");
         return STATUS_DEVICE_NOT_READY;
     }
 
@@ -190,15 +196,29 @@ AvbHandleDeviceIoControl(
         case IOCTL_AVB_READ_REGISTER:
         {
             PAVB_REGISTER_REQUEST request = (PAVB_REGISTER_REQUEST)inputBuffer;
-            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
+            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) && 
+                outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
+                
+                DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: READ_REGISTER offset=0x%x\n", request->offset);
+                
                 int result = intel_read_reg(
                     &AvbContext->intel_device,
                     request->offset,
                     &request->value
                 );
+                
                 request->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_REGISTER_REQUEST);
+                
+                if (result == 0) {
+                    DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: READ_REGISTER successful, value=0x%x\n", request->value);
+                } else {
+                    DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: READ_REGISTER failed, offset=0x%x, result=%d\n", 
+                           request->offset, result);
+                }
             } else {
+                DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: READ_REGISTER buffer too small, in=%lu, out=%lu, required=%lu\n",
+                       inputBufferLength, outputBufferLength, sizeof(AVB_REGISTER_REQUEST));
                 status = STATUS_BUFFER_TOO_SMALL;
             }
             break;
@@ -207,15 +227,30 @@ AvbHandleDeviceIoControl(
         case IOCTL_AVB_WRITE_REGISTER:
         {
             PAVB_REGISTER_REQUEST request = (PAVB_REGISTER_REQUEST)inputBuffer;
-            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
+            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) &&
+                outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
+                
+                DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: WRITE_REGISTER offset=0x%x, value=0x%x\n", 
+                       request->offset, request->value);
+                
                 int result = intel_write_reg(
                     &AvbContext->intel_device,
                     request->offset,
                     request->value
                 );
+                
                 request->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_REGISTER_REQUEST);
+                
+                if (result == 0) {
+                    DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: WRITE_REGISTER successful\n");
+                } else {
+                    DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: WRITE_REGISTER failed, offset=0x%x, value=0x%x, result=%d\n", 
+                           request->offset, request->value, result);
+                }
             } else {
+                DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: WRITE_REGISTER buffer too small, in=%lu, out=%lu, required=%lu\n",
+                       inputBufferLength, outputBufferLength, sizeof(AVB_REGISTER_REQUEST));
                 status = STATUS_BUFFER_TOO_SMALL;
             }
             break;
