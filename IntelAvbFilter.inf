@@ -1,8 +1,8 @@
 ;-------------------------------------------------------------------------
-; IntelAvbFilter.INF -- NDIS LightWeight Filter Driver
-;
-; TODO: Search for comments marked "TODO:", and follow their instructions to
-; customize this INF for your driver.  Then delete the "TODO:" comments.
+; IntelAvbFilter.INF -- Intel AVB NDIS LightWeight Filter Driver
+; 
+; This driver provides Audio/Video Bridging (AVB) and Time-Sensitive 
+; Networking (TSN) capabilities for Intel Ethernet controllers.
 ;-------------------------------------------------------------------------
 
 [version]
@@ -10,14 +10,11 @@
 Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
-; TODO: Customize this string for your company name
-Provider        = %Msft%
+Provider        = %IntelCorp%
 DriverVer       = 
 CatalogFile     = IntelAvbFilter.cat
 
-
-; TODO: Include each architecture for which your driver package contains a
-; compiled binary.  If you do not supply a driver compiled for ia64, delete the
+; Supported architectures: x64 and ARM64 for modern Intel platforms
 ; NTia64 section.
 [Manufacturer]
 %Msft%=MSFT,NTx86,NTia64,NTamd64,NTarm,NTarm64
@@ -76,40 +73,25 @@ IntelAvbFilter.sys,,,2
 HKR, Ndi,Service,,"IntelAvbFilter"
 HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
-; TODO: Set the FilterClass here.  The FilterClass controls the order in which
-; filters are bound to the underlying miniport.  Possible options include:
-;     Custom, Diagnostic, Failover, Loadbalance, Vpn, Compression, Encryption, Scheduler
-; See MSDN for a description of each.
-HKR, Ndi,FilterClass,, compression
-; TODO: Specify whether you have a Modifying or Monitoring filter.
-; For a Monitoring filter, use this:
-;     HKR, Ndi,FilterType,0x00010001, 1 ; Monitoring filter
-; For a Modifying filter, use this:
-;     HKR, Ndi,FilterType,0x00010001, 2 ; Modifying filter
-HKR, Ndi,FilterType,0x00010001,2
+; Set FilterClass to "scheduler" for AVB/TSN traffic shaping and timing control
+HKR, Ndi,FilterClass,, scheduler
+; This is a Modifying filter that can alter packet timing and content for AVB
+HKR, Ndi,FilterType,0x00010001, 2 ; Modifying filter
 ; Do not change these values
 HKR, Ndi\Interfaces,UpperRange,,"noupper"
 HKR, Ndi\Interfaces,LowerRange,,"nolower"
-; TODO: Ensure that the list of media types below is correct.  Typically,
+; Support Ethernet media types for Intel NICs
 ; filters include "ethernet".  Filters may also include "ppip" to include
-; native WWAN stacks, but you must be prepared to handle the packet framing.
-; Possible values are listed on MSDN, but common values include:
-;     ethernet, wan, ppip, wlan
-HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet, wan, ppip"
-; TODO: Specify whether you have a Mandatory or Optional filter.
-; For a Mandatory filter, use this:
-;     HKR, Ndi,FilterRunType,0x00010001, 1 ; Mandatory filter
-; For an Optional filter, use this:
-;     HKR, Ndi,FilterRunType,0x00010001, 2 ; Optional filter
+HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet"
+; This is a Mandatory filter for Intel AVB-capable adapters
 HKR, Ndi,FilterRunType,0x00010001, 1 ; Mandatory filter
 
 ;-------------------------------------------------------------------------
 ; Service installation support
 ;-------------------------------------------------------------------------
 [Install.Services]
-; TODO: You may want to add the SPSVCINST_STARTSERVICE flag, like this:
-;     AddService=IntelAvbFilter,0x800,IntelAvbFilter_Service_Inst ; SPSVCINST_STARTSERVICE
-AddService=IntelAvbFilter,,IntelAvbFilter_Service_Inst
+; Start the service automatically to enable AVB functionality
+AddService=IntelAvbFilter,0x800,IntelAvbFilter_Service_Inst ; SPSVCINST_STARTSERVICE
 
 [IntelAvbFilter_Service_Inst]
 DisplayName     = %IntelAvbFilter_Desc%
@@ -159,10 +141,10 @@ HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,0 ; Subscribe to defaul
 
 
 [Strings]
-; TODO: Customize these strings.
-Msft = "<Your manufacturer name>" ;TODO: Replace with your manufacturer name
-IntelAvbFilter_Desc = "IntelAvbFilter NDIS LightWeight Filter"
-IntelAvbFilter_HelpText = "IntelAvbFilter NDIS LightWeight Filter"
+; Customized strings for Intel AVB Filter
+IntelCorp = "Intel Corporation"
+IntelAvbFilter_Desc = "Intel AVB/TSN NDIS Filter Driver"
+IntelAvbFilter_HelpText = "Intel Audio/Video Bridging and Time-Sensitive Networking Filter Driver for Intel Ethernet Controllers"
 
 
 

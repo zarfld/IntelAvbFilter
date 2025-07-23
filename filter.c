@@ -102,12 +102,8 @@ Return Value:
         FChars.FriendlyName = FriendlyName;
         FChars.UniqueName = UniqueName;
         FChars.ServiceName = ServiceName;
-
         //
-        // TODO: Most handlers are optional, however, this sample includes them
-        // all for illustrative purposes.  If you do not need a particular
-        // handler, set it to NULL and NDIS will more efficiently pass the
-        // operation through on your behalf.
+        // Set up all the filter entry points for AVB functionality
         //
         FChars.SetOptionsHandler = FilterRegisterOptions;
         FChars.AttachHandler = FilterAttach;

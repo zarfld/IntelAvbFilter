@@ -15,21 +15,13 @@ Abstract:
 #pragma warning(disable:28930) // Unused assignment of pointer, by design in samples
 #pragma warning(disable:28931) // Unused assignment of variable, by design in samples
 
-// TODO: Customize these to hint at your component for memory leak tracking.
-// These should be treated like a pooltag.
-#define FILTER_REQUEST_ID          'RTLF'
-#define FILTER_ALLOC_TAG           'tliF'
-#define FILTER_TAG                 'dnTF'
+// AVB Filter Driver pool tags for memory leak tracking
+#define FILTER_REQUEST_ID          'AvbR'  // AVB Request
+#define FILTER_ALLOC_TAG           'AvbM'  // AVB Memory
+#define FILTER_TAG                 'AvbF'  // AVB Filter
 
-// TODO: Specify which version of the NDIS contract you will use here.
-// In many cases, 6.0 is the best choice.  You only need to select a later
-// version if you need a feature that is not available in 6.0.
-//
-// Legal values include:
-//    6.0  Available starting with Windows Vista RTM
-//    6.1  Available starting with Windows Vista SP1 / Windows Server 2008
-//    6.20 Available starting with Windows 7 / Windows Server 2008 R2
-//    6.30 Available starting with Windows 8 / Windows Server "8"
+// Using NDIS 6.30 for Windows 8+ compatibility with enhanced features
+// This provides access to advanced TSN and AVB capabilities
 #define FILTER_MAJOR_NDIS_VERSION   6
 
 #if defined(NDIS60)

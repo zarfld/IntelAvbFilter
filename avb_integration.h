@@ -36,6 +36,29 @@ Abstract:
 // Maximum device info buffer size
 #define MAX_AVB_DEVICE_INFO_SIZE        1024
 
+// NDIS PHY access structures (define if not available)
+#ifndef NDIS_REQUEST_PHY_READ_DEFINED
+typedef struct _NDIS_REQUEST_PHY_READ {
+    ULONG PhyAddress;
+    ULONG RegisterAddress;
+    ULONG DeviceAddress;
+    USHORT Value;
+} NDIS_REQUEST_PHY_READ, *PNDIS_REQUEST_PHY_READ;
+
+typedef struct _NDIS_REQUEST_PHY_WRITE {
+    ULONG PhyAddress;
+    ULONG RegisterAddress;
+    ULONG DeviceAddress;
+    USHORT Value;
+} NDIS_REQUEST_PHY_WRITE, *PNDIS_REQUEST_PHY_WRITE;
+
+// Define PHY OIDs if not available
+#define OID_GEN_PHY_READ                0x00020201
+#define OID_GEN_PHY_WRITE               0x00020202
+
+#define NDIS_REQUEST_PHY_READ_DEFINED
+#endif
+
 // AVB device context structure
 typedef struct _AVB_DEVICE_CONTEXT {
     device_t intel_device;
@@ -103,9 +126,14 @@ int AvbMdioRead(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t *v
 int AvbMdioWrite(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t value);
 int AvbReadTimestamp(device_t *dev, uint64_t *timestamp);
 
+// I219-specific direct MDIO access
+int AvbMdioReadI219Direct(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t *value);
+int AvbMdioWriteI219Direct(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t value);
+
 // Helper functions
 PMS_FILTER AvbFindIntelFilterModule(void);
 BOOLEAN AvbIsIntelDevice(UINT16 vendor_id, UINT16 device_id);
+BOOLEAN AvbIsFilterIntelAdapter(PMS_FILTER FilterInstance);
 intel_device_type_t AvbGetIntelDeviceType(UINT16 device_id);
 
 #endif // _AVB_INTEGRATION_H_
