@@ -93,7 +93,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;.;external\intel_avb\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
       <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
@@ -180,11 +180,13 @@
     <ClCompile Include="filter.c" />
     <ClCompile Include="device.c" />
     <ClCompile Include="flt_dbg.c" />
+    <ClCompile Include="avb_integration.c" />
     <ResourceCompile Include="filter.rc" />
     <ClInclude Include="precomp.h" />
     <ClInclude Include="filter.h" />
     <ClInclude Include="filteruser.h" />
     <ClInclude Include="flt_dbg.h" />
+    <ClInclude Include="avb_integration.h" />
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
   <ItemGroup>

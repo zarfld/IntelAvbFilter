@@ -237,6 +237,29 @@ IntelAvbFilterDeviceIoControl(
             }
             break;
 
+        // AVB IOCTLs - Handle through AVB integration layer
+        case IOCTL_AVB_INIT_DEVICE:
+        case IOCTL_AVB_GET_DEVICE_INFO:
+        case IOCTL_AVB_READ_REGISTER:
+        case IOCTL_AVB_WRITE_REGISTER:
+        case IOCTL_AVB_GET_TIMESTAMP:
+        case IOCTL_AVB_SET_TIMESTAMP:
+        case IOCTL_AVB_SETUP_TAS:
+        case IOCTL_AVB_SETUP_FP:
+        case IOCTL_AVB_SETUP_PTM:
+        case IOCTL_AVB_MDIO_READ:
+        case IOCTL_AVB_MDIO_WRITE:
+        {
+            // Find an Intel filter module to handle the request
+            pFilter = AvbFindIntelFilterModule();
+            if (pFilter != NULL && pFilter->AvbContext != NULL) {
+                Status = AvbHandleDeviceIoControl((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, Irp);
+                InfoLength = (ULONG)Irp->IoStatus.Information;
+            } else {
+                Status = STATUS_DEVICE_NOT_READY;
+            }
+            break;
+        }
              
         default:
             break;

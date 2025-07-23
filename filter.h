@@ -292,6 +292,9 @@ typedef struct _MS_FILTER
 
     PNDIS_OID_REQUEST               PendingOidRequest;
 
+    // AVB Integration
+    PVOID                           AvbContext;      // Points to AVB_DEVICE_CONTEXT
+
 }MS_FILTER, * PMS_FILTER;
 
 

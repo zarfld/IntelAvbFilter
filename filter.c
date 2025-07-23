@@ -354,6 +354,15 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
 
         pFilter->State = FilterPaused;
 
+        // Initialize AVB context for Intel devices
+        pFilter->AvbContext = NULL;
+        Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
+        if (Status != STATUS_SUCCESS) {
+            DEBUGP(DL_WARN, "Failed to initialize AVB context: 0x%x\n", Status);
+            // Continue anyway, AVB functionality will be disabled
+            Status = NDIS_STATUS_SUCCESS;
+        }
+
         FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
         InsertHeadList(&FilterModuleList, &pFilter->FilterModuleLink);
         FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
@@ -661,6 +670,11 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     RemoveEntryList(&pFilter->FilterModuleLink);
     FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
 
+    // Cleanup AVB context
+    if (pFilter->AvbContext != NULL) {
+        AvbCleanupDevice((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+        pFilter->AvbContext = NULL;
+    }
 
     //
     // Free the memory allocated
