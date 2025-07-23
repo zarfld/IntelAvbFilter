@@ -1,0 +1,3 @@
+[submodule "external/intel_avb"]
+	path = external/intel_avb
+	url = https://github.com/zarfld/intel_avb.git
