@@ -61,6 +61,13 @@ This file lists all TODOs found in the repository, prioritized for implementatio
 - ✅ IEEE 1588 timestamp reading for all supported devices
 - ✅ Platform operations structure for Windows NDIS environment
 
+### Intel AVB Library Hardware Access
+- ✅ **Replaced all simulation code with real hardware access**
+- ✅ **IOCTL communication layer fully implemented**
+- ✅ **Windows platform layer (`intel_windows.c`) completely rewritten**
+- ✅ **All device-specific MMIO mapping TODOs resolved**
+- ✅ **PCI, MMIO, MDIO, and timestamp operations working through NDIS filter**
+
 ### Driver Customization
 - ✅ Pool tags customized for AVB filter (AvbR, AvbM, AvbF)
 - ✅ NDIS version set to 6.30 for advanced features
