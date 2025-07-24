@@ -173,6 +173,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <!--Leaf Item elements-->
+    <ClCompile Include="avb_hardware_access.c" />
     <ClCompile Include="avb_integration_fixed.c" />
     <ClCompile Include="intel_kernel_real.c" />
     <ClCompile Include="precomp.c">
@@ -184,7 +185,6 @@
     <ClCompile Include="filter.c" />
     <ClCompile Include="device.c" />
     <ClCompile Include="flt_dbg.c" />
-    <ClCompile Include="avb_integration.c" />
     <ClCompile Include="tsn_config.c" />
     <ResourceCompile Include="filter.rc" />
     <ClInclude Include="external\intel_avb\lib\intel.h" />
@@ -201,6 +201,7 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".github\copilot-instructions.md" />
     <None Include="external\intel_avb\spec\2407151103_Intel-Altera-KTI226V-S-RKTU_C26159200.md" />
     <None Include="external\intel_avb\spec\332763_I210_SpecUpdate_Rev3.0.md" />
     <None Include="external\intel_avb\spec\333016 - I210_Datasheet_v_3_7.md" />
@@ -209,6 +210,9 @@
     <None Include="external\intel_avb\spec\ethernet-connection-i219-datasheet.md" />
     <None Include="external\intel_avb\spec\i217-ethernet-controller-datasheet-2.md" />
     <None Include="external\intel_avb\spec\README.md" />
+    <None Include="IMPLEMENTATION_MILESTONE.md" />
+    <None Include="README.md" />
+    <None Include="TODO.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

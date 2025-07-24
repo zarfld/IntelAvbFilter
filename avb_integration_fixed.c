@@ -27,18 +27,20 @@ struct platform_ops {
     int (*read_timestamp)(device_t *dev, ULONGLONG *timestamp);
 };
 
-// Forward declarations
+// Forward declarations with correct Windows kernel types
 NTSTATUS AvbPlatformInit(device_t *dev);
 VOID AvbPlatformCleanup(device_t *dev);
-int AvbPciReadConfig(device_t *dev, ULONG offset, ULONG *value);
-int AvbPciWriteConfig(device_t *dev, ULONG offset, ULONG value);
-int AvbMmioRead(device_t *dev, ULONG offset, ULONG *value);
-int AvbMmioWrite(device_t *dev, ULONG offset, ULONG value);
-int AvbMdioRead(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWrite(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-int AvbReadTimestamp(device_t *dev, ULONGLONG *timestamp);
-int AvbMdioReadI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWriteI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
+
+// Forward declarations for real hardware access implementations
+int AvbPciReadConfigReal(device_t *dev, ULONG offset, ULONG *value);
+int AvbPciWriteConfigReal(device_t *dev, ULONG offset, ULONG value);
+int AvbMmioReadReal(device_t *dev, ULONG offset, ULONG *value);
+int AvbMmioWriteReal(device_t *dev, ULONG offset, ULONG value);
+int AvbMdioReadReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
+int AvbMdioWriteReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
+int AvbReadTimestampReal(device_t *dev, ULONGLONG *timestamp);
+int AvbMdioReadI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
+int AvbMdioWriteI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
 
 // Intel library function declarations (implemented in intel_kernel_real.c)
 int intel_init(device_t *dev);
@@ -54,10 +56,20 @@ int intel_setup_ptm(device_t *dev, struct ptm_config *config);
 int intel_mdio_read(device_t *dev, ULONG page, ULONG reg, USHORT *value);
 int intel_mdio_write(device_t *dev, ULONG page, ULONG reg, USHORT value);
 
-// Platform operations structure
+// Platform operations with wrapper functions to handle NTSTATUS conversion
+static int PlatformInitWrapper(device_t *dev) {
+    NTSTATUS status = AvbPlatformInit(dev);
+    return NT_SUCCESS(status) ? 0 : -1;
+}
+
+static void PlatformCleanupWrapper(device_t *dev) {
+    AvbPlatformCleanup(dev);
+}
+
+// Platform operations structure with correct types
 const struct platform_ops ndis_platform_ops = {
-    AvbPlatformInit,
-    AvbPlatformCleanup,
+    PlatformInitWrapper,
+    PlatformCleanupWrapper,
     AvbPciReadConfig,
     AvbPciWriteConfig,
     AvbMmioRead,
@@ -267,76 +279,60 @@ AvbPlatformCleanup(
     DEBUGP(DL_TRACE, "<==AvbPlatformCleanup\n");
 }
 
-// Simplified implementations for compilation
+// Real hardware access implementations replacing stub placeholders
 
 int AvbPciReadConfig(device_t *dev, ULONG offset, ULONG *value)
 {
-    DEBUGP(DL_TRACE, "AvbPciReadConfig: offset=0x%x\n", offset);
-    if (dev == NULL || value == NULL) return -1;
-    *value = 0x12345678; // Placeholder
-    return 0;
+    DEBUGP(DL_TRACE, "AvbPciReadConfig: Calling real hardware implementation\n");
+    return AvbPciReadConfigReal(dev, offset, value);
 }
 
 int AvbPciWriteConfig(device_t *dev, ULONG offset, ULONG value)
 {
-    DEBUGP(DL_TRACE, "AvbPciWriteConfig: offset=0x%x, value=0x%x\n", offset, value);
-    if (dev == NULL) return -1;
-    return 0;
+    DEBUGP(DL_TRACE, "AvbPciWriteConfig: Calling real hardware implementation\n");
+    return AvbPciWriteConfigReal(dev, offset, value);
 }
 
 int AvbMmioRead(device_t *dev, ULONG offset, ULONG *value)
 {
-    DEBUGP(DL_TRACE, "AvbMmioRead: offset=0x%x\n", offset);
-    if (dev == NULL || value == NULL) return -1;
-    *value = 0x87654321; // Placeholder
-    return 0;
+    DEBUGP(DL_TRACE, "AvbMmioRead: Calling real hardware implementation\n");
+    return AvbMmioReadReal(dev, offset, value);
 }
 
 int AvbMmioWrite(device_t *dev, ULONG offset, ULONG value)
 {
-    DEBUGP(DL_TRACE, "AvbMmioWrite: offset=0x%x, value=0x%x\n", offset, value);
-    if (dev == NULL) return -1;
-    return 0;
+    DEBUGP(DL_TRACE, "AvbMmioWrite: Calling real hardware implementation\n");
+    return AvbMmioWriteReal(dev, offset, value);
 }
 
 int AvbMdioRead(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value)
 {
-    DEBUGP(DL_TRACE, "AvbMdioRead: phy=0x%x, reg=0x%x\n", phy_addr, reg_addr);
-    if (dev == NULL || value == NULL) return -1;
-    *value = 0x1234; // Placeholder
-    return 0;
+    DEBUGP(DL_TRACE, "AvbMdioRead: Calling real hardware implementation\n");
+    return AvbMdioReadReal(dev, phy_addr, reg_addr, value);
 }
 
 int AvbMdioWrite(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value)
 {
-    DEBUGP(DL_TRACE, "AvbMdioWrite: phy=0x%x, reg=0x%x, value=0x%x\n", phy_addr, reg_addr, value);
-    if (dev == NULL) return -1;
-    return 0;
+    DEBUGP(DL_TRACE, "AvbMdioWrite: Calling real hardware implementation\n");
+    return AvbMdioWriteReal(dev, phy_addr, reg_addr, value);
 }
 
 int AvbReadTimestamp(device_t *dev, ULONGLONG *timestamp)
 {
-    LARGE_INTEGER currentTime;
-    DEBUGP(DL_TRACE, "AvbReadTimestamp\n");
-    if (dev == NULL || timestamp == NULL) return -1;
-    KeQuerySystemTime(&currentTime);
-    *timestamp = currentTime.QuadPart;
-    return 0;
+    DEBUGP(DL_TRACE, "AvbReadTimestamp: Calling real hardware implementation\n");
+    return AvbReadTimestampReal(dev, timestamp);
 }
 
 int AvbMdioReadI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value)
 {
-    DEBUGP(DL_TRACE, "AvbMdioReadI219Direct: phy=0x%x, reg=0x%x\n", phy_addr, reg_addr);
-    if (dev == NULL || value == NULL) return -1;
-    *value = 0x5678; // Placeholder
-    return 0;
+    DEBUGP(DL_TRACE, "AvbMdioReadI219Direct: Calling real hardware implementation\n");
+    return AvbMdioReadI219DirectReal(dev, phy_addr, reg_addr, value);
 }
 
 int AvbMdioWriteI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value)
 {
-    DEBUGP(DL_TRACE, "AvbMdioWriteI219Direct: phy=0x%x, reg=0x%x, value=0x%x\n", phy_addr, reg_addr, value);
-    if (dev == NULL) return -1;
-    return 0;
+    DEBUGP(DL_TRACE, "AvbMdioWriteI219Direct: Calling real hardware implementation\n");
+    return AvbMdioWriteI219DirectReal(dev, phy_addr, reg_addr, value);
 }
 
 // Helper functions
@@ -355,4 +351,41 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 device_id)
         case 0x125B: return INTEL_DEVICE_I226;
         default: return INTEL_DEVICE_UNKNOWN;
     }
+}
+
+/**
+ * @brief Helper function to find Intel filter modules
+ */
+PMS_FILTER 
+AvbFindIntelFilterModule(void)
+{
+    // For now, return the global context's filter instance
+    // In a more complete implementation, this would search through all filter instances
+    if (g_AvbContext != NULL && g_AvbContext->filter_instance != NULL) {
+        return g_AvbContext->filter_instance;
+    }
+    
+    DEBUGP(DL_WARN, "AvbFindIntelFilterModule: No Intel filter module found\n");
+    return NULL;
+}
+
+/**
+ * @brief Check if a filter instance is attached to an Intel adapter
+ */
+BOOLEAN 
+AvbIsFilterIntelAdapter(
+    _In_ PMS_FILTER FilterInstance
+)
+{
+    if (FilterInstance == NULL) {
+        return FALSE;
+    }
+    
+    // For simplified implementation, assume any filter instance with AVB context is Intel
+    if (FilterInstance->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT context = (PAVB_DEVICE_CONTEXT)FilterInstance->AvbContext;
+        return (context->intel_device.pci_vendor_id == INTEL_VENDOR_ID);
+    }
+    
+    return FALSE;
 }
