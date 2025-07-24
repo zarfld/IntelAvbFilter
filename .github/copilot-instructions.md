@@ -42,6 +42,18 @@ All AVB IOCTLs follow this pattern in `AvbHandleDeviceIoControl()`:
 - **Error reporting**: `DEBUGP(DL_ERROR, "Specific failure reason: 0x%x", errorCode)`
 - **Hardware operations**: Always log register offsets, values, and results
 
+### TSN Configuration Pattern
+TSN features use configuration templates defined in `tsn_config.c`:
+```c
+// Example: Audio streaming configuration
+const struct tsn_tas_config AVB_TAS_CONFIG_AUDIO = {
+    .cycle_time = 125000,  // 125us cycle
+    .num_entries = 4,
+    .entries = { /* gate control entries */ }
+};
+```
+**Device capability detection**: Use `AvbSupportsTas()`, `AvbSupportsFp()`, `AvbSupportsPtm()` functions.
+
 ## Critical Build Requirements
 
 ### Visual Studio Project Configuration
@@ -52,15 +64,15 @@ All AVB IOCTLs follow this pattern in `AvbHandleDeviceIoControl()`:
 
 ### Precompiled Headers
 - **All .c files must include `precomp.h`** - no exceptions
-- **precomp.h includes**: `ndis.h`, `filteruser.h`, project headers in dependency order
+- **precomp.h includes**: `ndis.h`, `filteruser.h`, `flt_dbg.h`, `filter.h`, `avb_integration.h`, `tsn_config.h` in dependency order
 
 ## Device Integration Patterns
 
 ### Filter Attachment
-Each Intel adapter gets an `MS_FILTER` instance with embedded `AVB_DEVICE_CONTEXT`:
+Each Intel adapter gets an `MS_FILTER` instance with embedded AVB context:
 ```c
 // In MS_FILTER structure (filter.h):
-PAVB_DEVICE_CONTEXT AvbContext;  // AVB integration context
+PVOID AvbContext;  // Points to AVB_DEVICE_CONTEXT
 
 // Initialization pattern in FilterAttach:
 Status = AvbInitializeDevice(pFilter, &pFilter->AvbContext);
@@ -76,7 +88,7 @@ Device detection happens through PCI vendor/device ID checking:
 ## Cross-Component Communication
 
 ### User-Space to Kernel
-- **Device name**: `\\\\.\\IntelAvbFilter` 
+- **Device name**: `\\Device\\IntelAvbFilter` (kernel), `\\DosDevices\\IntelAvbFilter` (user-mode)
 - **IOCTL codes**: Defined in `avb_integration.h` using `_NDIS_CONTROL_CODE` macro
 - **Always use METHOD_BUFFERED** for IOCTL definitions
 
@@ -106,6 +118,7 @@ nmake -f avb_test.mak
 - **`filter.h`**: Core NDIS filter definitions, MS_FILTER structure with AvbContext
 - **`avb_integration.c`**: Main hardware abstraction implementation, IOCTL handlers
 - **`device.c`**: IOCTL routing, connects user-space to AVB integration layer
+- **`tsn_config.c/.h`**: TSN configuration templates and device capability detection
 - **`external/intel_avb/lib/intel_windows.c`**: Windows-specific hardware access using our IOCTL interface
 - **`IntelAvbFilter.inf`**: Driver installation, filter class "scheduler", service auto-start
 
