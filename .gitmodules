@@ -1,3 +1,11 @@
 [submodule "external/intel_avb"]
-	path = external/intel_avb
-	url = https://github.com/zarfld/intel_avb.git
+    path = external/intel_avb
+    url = https://github.com/zarfld/intel_avb.git
+
+[submodule "external/intel_igb"]
+    path = external/intel_igb
+    url = https://github.com/intel/ethernet-linux-igb.git
+
+[submodule "external/iotg_tsn_ref_sw"]
+	path = external/iotg_tsn_ref_sw
+	url = https://github.com/intel/iotg_tsn_ref_sw.git
