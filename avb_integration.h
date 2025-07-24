@@ -19,64 +19,61 @@ Abstract:
 // Intel constants
 #define INTEL_VENDOR_ID         0x8086
 
-// Forward declarations
+// Forward declarations using Windows kernel types
 typedef enum {
-    DEVICE_TYPE_UNKNOWN = 0,
-    DEVICE_TYPE_I210,
-    DEVICE_TYPE_I219,
-    DEVICE_TYPE_I225,
-    DEVICE_TYPE_I226
+    INTEL_DEVICE_I210,
+    INTEL_DEVICE_I217,
+    INTEL_DEVICE_I219,
+    INTEL_DEVICE_I225,
+    INTEL_DEVICE_I226,
+    INTEL_DEVICE_UNKNOWN
 } intel_device_type_t;
 
-typedef int clockid_t;
-
-// Simple device structure for Intel AVB library compatibility
-typedef struct {
+typedef struct _device_t {
     PVOID private_data;
     USHORT pci_vendor_id;
     USHORT pci_device_id;
+    USHORT domain;
+    UCHAR bus;
+    UCHAR dev;
+    UCHAR func;
     intel_device_type_t device_type;
-} device_t, *pdevice_t;
+    ULONG capabilities;
+} device_t;
 
-// TSN Gate Control Entry
-typedef struct {
-    UCHAR gate_states;
-    ULONG time_interval;
-} tsn_gate_entry_t;
+typedef int clockid_t;
 
-// TSN Configuration structures
+// TSN Configuration structures using Windows kernel types
 struct tsn_tas_config {
-    ULONGLONG base_time;
-    ULONG cycle_time;
-    ULONG cycle_extension;
-    ULONG num_entries;
-    tsn_gate_entry_t entries[16];
+    ULONGLONG base_time_s;
+    ULONG base_time_ns;
+    ULONG cycle_time_s;
+    ULONG cycle_time_ns;
+    UCHAR gate_states[8];
+    ULONG gate_durations[8];
 };
 
 struct tsn_fp_config {
-    UCHAR preemptible_queues;
-    UCHAR express_queues;
-    UCHAR express_mask;
-    UCHAR preemption_enabled;
-    USHORT additional_fragment_size;
-    ULONG verify_disable_timeout;
-    ULONG verify_enable_timeout;
+    UCHAR preemptable_queues;
+    ULONG min_fragment_size;
+    UCHAR verify_disable;
 };
 
-struct tsn_ptm_config {
-    BOOLEAN enable;
-    BOOLEAN root_select;
-    ULONG local_clock_granularity;
-    ULONG effective_granularity;
-    BOOLEAN enabled;
-    ULONG timeout_value;
+struct ptm_config {
+    UCHAR enabled;
+    ULONG clock_granularity;
 };
 
-// Timespec structure
 struct timespec {
-    long tv_sec;
-    long tv_nsec;
+    LONG tv_sec;
+    LONG tv_nsec;
 };
+
+// I219 register definitions for direct MDIO access
+#define I219_REG_MDIO_CTRL      0x12018
+#define I219_REG_MDIO_DATA      0x1201C
+#define I219_REG_1588_TS_LOW    0x15F84
+#define I219_REG_1588_TS_HIGH   0x15F88
 
 // AVB-specific IOCTLs
 #define IOCTL_AVB_INIT_DEVICE           _NDIS_CONTROL_CODE(20, METHOD_BUFFERED)
@@ -134,7 +131,7 @@ typedef struct _AVB_FP_REQUEST {
 } AVB_FP_REQUEST, *PAVB_FP_REQUEST;
 
 typedef struct _AVB_PTM_REQUEST {
-    struct tsn_ptm_config config;
+    struct ptm_config config;
     NDIS_STATUS status;
 } AVB_PTM_REQUEST, *PAVB_PTM_REQUEST;
 
@@ -153,31 +150,17 @@ NTSTATUS AvbHandleDeviceIoControl(PAVB_DEVICE_CONTEXT AvbContext, PIRP Irp);
 // Hardware access functions for NDIS filter integration
 NTSTATUS AvbPlatformInit(device_t *dev);
 VOID AvbPlatformCleanup(device_t *dev);
-int AvbPciReadConfig(device_t *dev, ULONG offset, PULONG value);
+int AvbPciReadConfig(device_t *dev, ULONG offset, ULONG *value);
 int AvbPciWriteConfig(device_t *dev, ULONG offset, ULONG value);
-int AvbMmioRead(device_t *dev, ULONG offset, PULONG value);
+int AvbMmioRead(device_t *dev, ULONG offset, ULONG *value);
 int AvbMmioWrite(device_t *dev, ULONG offset, ULONG value);
-int AvbMdioRead(device_t *dev, USHORT phy_addr, USHORT reg_addr, PUSHORT value);
+int AvbMdioRead(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
 int AvbMdioWrite(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-int AvbReadTimestamp(device_t *dev, PULONGLONG timestamp);
+int AvbReadTimestamp(device_t *dev, ULONGLONG *timestamp);
 
 // I219-specific direct MDIO access
-int AvbMdioReadI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, PUSHORT value);
+int AvbMdioReadI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
 int AvbMdioWriteI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-
-// Stub function declarations for Intel AVB library functions  
-int intel_init(device_t *dev);
-void intel_detach(device_t *dev);
-int intel_get_device_info(device_t *dev, char *buffer, size_t buffer_size);
-int intel_read_reg(device_t *dev, ULONG offset, PULONG value);
-int intel_write_reg(device_t *dev, ULONG offset, ULONG value);
-int intel_gettime(device_t *dev, clockid_t clock_id, PULONGLONG timestamp, struct timespec *tp);
-int intel_set_systime(device_t *dev, ULONGLONG timestamp);
-int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config);
-int intel_setup_frame_preemption(device_t *dev, struct tsn_fp_config *config);
-int intel_setup_ptm(device_t *dev, struct tsn_ptm_config *config);
-int intel_mdio_read(device_t *dev, ULONG page, ULONG reg, PUSHORT value);
-int intel_mdio_write(device_t *dev, ULONG page, ULONG reg, USHORT value);
 
 // Helper functions
 PMS_FILTER AvbFindIntelFilterModule(void);

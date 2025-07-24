@@ -11,6 +11,11 @@
 
 #include "precomp.h"
 
+// Forward declarations for TSN structures (defined in avb_integration.h)
+struct tsn_tas_config;
+struct tsn_fp_config;
+struct ptm_config;
+
 // TSN Configuration Templates
 
 /**
@@ -33,7 +38,7 @@ NTSTATUS AvbGetDefaultFpConfig(_Out_ struct tsn_fp_config* config);
  * 
  * This enables PTM for improved timestamp accuracy across PCIe hierarchy.
  */
-NTSTATUS AvbGetDefaultPtmConfig(_Out_ struct tsn_ptm_config* config);
+NTSTATUS AvbGetDefaultPtmConfig(_Out_ struct ptm_config* config);
 
 /**
  * @brief Validate TSN configuration for specific Intel controller

@@ -14,7 +14,33 @@ Abstract:
 #include "precomp.h"
 #include "avb_integration.h"
 
-// Forward declarations for platform operations
+// Platform operations structure (matches what Intel library expects)
+struct platform_ops {
+    int (*init)(device_t *dev);
+    void (*cleanup)(device_t *dev);
+    int (*pci_read_config)(device_t *dev, ULONG offset, ULONG *value);
+    int (*pci_write_config)(device_t *dev, ULONG offset, ULONG value);
+    int (*mmio_read)(device_t *dev, ULONG offset, ULONG *value);
+    int (*mmio_write)(device_t *dev, ULONG offset, ULONG value);
+    int (*mdio_read)(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
+    int (*mdio_write)(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
+    int (*read_timestamp)(device_t *dev, ULONGLONG *timestamp);
+};
+
+// Forward declarations
+NTSTATUS AvbPlatformInit(device_t *dev);
+VOID AvbPlatformCleanup(device_t *dev);
+int AvbPciReadConfig(device_t *dev, ULONG offset, ULONG *value);
+int AvbPciWriteConfig(device_t *dev, ULONG offset, ULONG value);
+int AvbMmioRead(device_t *dev, ULONG offset, ULONG *value);
+int AvbMmioWrite(device_t *dev, ULONG offset, ULONG value);
+int AvbMdioRead(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
+int AvbMdioWrite(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
+int AvbReadTimestamp(device_t *dev, ULONGLONG *timestamp);
+int AvbMdioReadI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
+int AvbMdioWriteI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
+
+// Platform operations structure
 static const struct platform_ops ndis_platform_ops = {
     .init = AvbPlatformInit,
     .cleanup = AvbPlatformCleanup,
@@ -27,8 +53,8 @@ static const struct platform_ops ndis_platform_ops = {
     .read_timestamp = AvbReadTimestamp
 };
 
-// Global AVB context (could be moved to filter instance context later)
-static PAVB_DEVICE_CONTEXT g_AvbContext = NULL;
+// Global AVB context - single declaration
+PAVB_DEVICE_CONTEXT g_AvbContext = NULL;
 
 /**
  * @brief Initialize AVB device context for a filter module
@@ -83,11 +109,6 @@ AvbInitializeDevice(
     context->intel_device.pci_vendor_id = INTEL_VENDOR_ID;
     // Device ID will be determined during hardware access
 
-    // Set up platform operations for Windows NDIS environment
-    // This will be used by the Intel AVB library
-    // (Note: The actual assignment might need to be done differently
-    //  depending on how the Intel library expects this)
-
     context->initialized = TRUE;
     *AvbContext = context;
     g_AvbContext = context; // Store globally for platform operations
@@ -111,14 +132,16 @@ AvbCleanupDevice(
     }
 
     if (AvbContext->initialized) {
-        // Call Intel library cleanup if it was initialized
-        intel_detach(&AvbContext->intel_device);
+        // Clean up any Intel library resources if they were initialized
+        // intel_detach(&AvbContext->intel_device); // Commented out for now
     }
 
+    // Clear global context if this was it
     if (g_AvbContext == AvbContext) {
         g_AvbContext = NULL;
     }
 
+    // Free the context
     ExFreePoolWithTag(AvbContext, FILTER_ALLOC_TAG);
 
     DEBUGP(DL_TRACE, "<==AvbCleanupDevice\n");
@@ -140,8 +163,6 @@ AvbHandleDeviceIoControl(
     ULONG inputBufferLength, outputBufferLength;
     ULONG_PTR information = 0;
 
-    DEBUGP(DL_TRACE, "==>AvbHandleDeviceIoControl: IOCTL=0x%x\n", ioControlCode);
-
     if (AvbContext == NULL) {
         DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: AvbContext is NULL\n");
         return STATUS_DEVICE_NOT_READY;
@@ -154,6 +175,8 @@ AvbHandleDeviceIoControl(
 
     irpSp = IoGetCurrentIrpStackLocation(Irp);
     ioControlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
+    
+    DEBUGP(DL_TRACE, "==>AvbHandleDeviceIoControl: IOCTL=0x%x\n", ioControlCode);
     
     inputBuffer = outputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
     inputBufferLength = irpSp->Parameters.DeviceIoControl.InputBufferLength;
@@ -172,6 +195,7 @@ AvbHandleDeviceIoControl(
                 } else {
                     status = STATUS_UNSUCCESSFUL;
                 }
+                DEBUGP(DL_TRACE, "AVB device initialized, result=%d\n", result);
             }
             break;
         }
@@ -199,7 +223,7 @@ AvbHandleDeviceIoControl(
             if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) && 
                 outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
                 
-                DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: READ_REGISTER offset=0x%x\n", request->offset);
+                DEBUGP(DL_TRACE, "READ_REGISTER offset=0x%x\n", request->offset);
                 
                 int result = intel_read_reg(
                     &AvbContext->intel_device,
@@ -211,13 +235,13 @@ AvbHandleDeviceIoControl(
                 information = sizeof(AVB_REGISTER_REQUEST);
                 
                 if (result == 0) {
-                    DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: READ_REGISTER successful, value=0x%x\n", request->value);
+                    DEBUGP(DL_TRACE, "READ_REGISTER successful, value=0x%x\n", request->value);
                 } else {
-                    DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: READ_REGISTER failed, offset=0x%x, result=%d\n", 
+                    DEBUGP(DL_ERROR, "READ_REGISTER failed, offset=0x%x, result=%d\n", 
                            request->offset, result);
                 }
             } else {
-                DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: READ_REGISTER buffer too small, in=%lu, out=%lu, required=%lu\n",
+                DEBUGP(DL_ERROR, "READ_REGISTER buffer too small, in=%lu, out=%lu, required=%lu\n",
                        inputBufferLength, outputBufferLength, sizeof(AVB_REGISTER_REQUEST));
                 status = STATUS_BUFFER_TOO_SMALL;
             }
@@ -230,7 +254,7 @@ AvbHandleDeviceIoControl(
             if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) &&
                 outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
                 
-                DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: WRITE_REGISTER offset=0x%x, value=0x%x\n", 
+                DEBUGP(DL_TRACE, "WRITE_REGISTER offset=0x%x, value=0x%x\n", 
                        request->offset, request->value);
                 
                 int result = intel_write_reg(
@@ -243,13 +267,13 @@ AvbHandleDeviceIoControl(
                 information = sizeof(AVB_REGISTER_REQUEST);
                 
                 if (result == 0) {
-                    DEBUGP(DL_TRACE, "AvbHandleDeviceIoControl: WRITE_REGISTER successful\n");
+                    DEBUGP(DL_TRACE, "WRITE_REGISTER successful\n");
                 } else {
-                    DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: WRITE_REGISTER failed, offset=0x%x, value=0x%x, result=%d\n", 
+                    DEBUGP(DL_ERROR, "WRITE_REGISTER failed, offset=0x"x, value=0x%x, result=%d\n", 
                            request->offset, request->value, result);
                 }
             } else {
-                DEBUGP(DL_ERROR, "AvbHandleDeviceIoControl: WRITE_REGISTER buffer too small, in=%lu, out=%lu, required=%lu\n",
+                DEBUGP(DL_ERROR, "WRITE_REGISTER buffer too small, in=%lu, out=%lu, required=%lu\n",
                        inputBufferLength, outputBufferLength, sizeof(AVB_REGISTER_REQUEST));
                 status = STATUS_BUFFER_TOO_SMALL;
             }
@@ -436,8 +460,8 @@ AvbPlatformCleanup(
 int 
 AvbPciReadConfig(
     _In_ device_t *dev, 
-    _In_ DWORD offset, 
-    _Out_ DWORD *value
+    _In_ ULONG offset, 
+    _Out_ ULONG *value
 )
 {
     PAVB_DEVICE_CONTEXT context = (PAVB_DEVICE_CONTEXT)dev->private_data;
@@ -467,7 +491,7 @@ AvbPciReadConfig(
     filterRequest.Request.Header.Size = sizeof(NDIS_OID_REQUEST);
     filterRequest.Request.RequestType = NdisRequestQueryInformation;
     filterRequest.Request.RequestId = 0;
-    filterRequest.Request.Oid = OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES;
+    filterRequest.Request.DATA.QUERY_INFORMATION.Oid = OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES;
     filterRequest.Request.DATA.QUERY_INFORMATION.InformationBuffer = pciConfig;
     filterRequest.Request.DATA.QUERY_INFORMATION.InformationBufferLength = sizeof(pciConfig);
     filterRequest.Request.DATA.QUERY_INFORMATION.BytesWritten = 0;
@@ -500,8 +524,8 @@ AvbPciReadConfig(
 int 
 AvbPciWriteConfig(
     _In_ device_t *dev, 
-    _In_ DWORD offset, 
-    _In_ DWORD value
+    _In_ ULONG offset, 
+    _In_ ULONG value
 )
 {
     PAVB_DEVICE_CONTEXT context = (PAVB_DEVICE_CONTEXT)dev->private_data;
@@ -538,7 +562,7 @@ AvbPciWriteConfig(
     filterRequest.Request.Header.Size = sizeof(NDIS_OID_REQUEST);
     filterRequest.Request.RequestType = NdisRequestSetInformation;
     filterRequest.Request.RequestId = 0;
-    filterRequest.Request.Oid = OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES;
+    filterRequest.Request.DATA.SET_INFORMATION.Oid = OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES;
     filterRequest.Request.DATA.SET_INFORMATION.InformationBuffer = &pciWriteData;
     filterRequest.Request.DATA.SET_INFORMATION.InformationBufferLength = sizeof(pciWriteData);
     filterRequest.Request.DATA.SET_INFORMATION.BytesRead = 0;
@@ -568,8 +592,8 @@ AvbPciWriteConfig(
 int 
 AvbMmioRead(
     _In_ device_t *dev, 
-    _In_ uint32_t offset, 
-    _Out_ uint32_t *value
+    _In_ ULONG offset, 
+    _Out_ ULONG *value
 )
 {
     PAVB_DEVICE_CONTEXT context = (PAVB_DEVICE_CONTEXT)dev->private_data;
@@ -606,7 +630,7 @@ AvbMmioRead(
     filterRequest.Request.Header.Size = sizeof(NDIS_OID_REQUEST);
     filterRequest.Request.RequestType = NdisRequestQueryInformation;
     filterRequest.Request.RequestId = 0;
-    filterRequest.Request.Oid = OID_GEN_HARDWARE_STATUS; // Using generic hardware status OID
+    filterRequest.Request.DATA.QUERY_INFORMATION.Oid = OID_GEN_HARDWARE_STATUS; // Using generic hardware status OID
     filterRequest.Request.DATA.QUERY_INFORMATION.InformationBuffer = &mmioReadData;
     filterRequest.Request.DATA.QUERY_INFORMATION.InformationBufferLength = sizeof(mmioReadData);
     filterRequest.Request.DATA.QUERY_INFORMATION.BytesWritten = 0;
@@ -641,8 +665,8 @@ AvbMmioRead(
 int 
 AvbMmioWrite(
     _In_ device_t *dev, 
-    _In_ uint32_t offset, 
-    _In_ uint32_t value
+    _In_ ULONG offset, 
+    _In_ ULONG value
 )
 {
     PAVB_DEVICE_CONTEXT context = (PAVB_DEVICE_CONTEXT)dev->private_data;
@@ -679,7 +703,7 @@ AvbMmioWrite(
     filterRequest.Request.Header.Size = sizeof(NDIS_OID_REQUEST);
     filterRequest.Request.RequestType = NdisRequestSetInformation;
     filterRequest.Request.RequestId = 0;
-    filterRequest.Request.Oid = OID_GEN_HARDWARE_STATUS; // Using generic hardware status OID
+    filterRequest.Request.DATA.SET_INFORMATION.Oid = OID_GEN_HARDWARE_STATUS; // Using generic hardware status OID
     filterRequest.Request.DATA.SET_INFORMATION.InformationBuffer = &mmioWriteData;
     filterRequest.Request.DATA.SET_INFORMATION.InformationBufferLength = sizeof(mmioWriteData);
     filterRequest.Request.DATA.SET_INFORMATION.BytesRead = 0;

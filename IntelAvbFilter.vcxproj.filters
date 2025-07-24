@@ -17,6 +17,15 @@
       <UniqueIdentifier>{8E41214B-6785-4CFE-B992-037D68949A14}</UniqueIdentifier>
       <Extensions>inf;inv;inx;mof;mc;</Extensions>
     </Filter>
+    <Filter Include="Intel AVB Library">
+      <UniqueIdentifier>{91f626ab-1890-40cb-824d-8b4669a844d8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Intel AVB Library\header">
+      <UniqueIdentifier>{3c496780-a5b7-444a-b1e4-67ac18dc96c9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Intel AVB Library\spec">
+      <UniqueIdentifier>{3f7b5d36-b8fa-4c34-b2da-8d9b314e8392}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <Inf Include="IntelAvbFilter.inf">
@@ -42,6 +51,12 @@
     <ClInclude Include="tsn_config.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="external\intel_avb\lib\intel.h">
+      <Filter>Intel AVB Library\header</Filter>
+    </ClInclude>
+    <ClInclude Include="external\intel_avb\lib\intel_private.h">
+      <Filter>Intel AVB Library\header</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="filter.c">
@@ -62,10 +77,42 @@
     <ClCompile Include="tsn_config.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="intel_kernel_real.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="avb_integration_fixed.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="filter.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="external\intel_avb\spec\332763_I210_SpecUpdate_Rev3.0.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
+    <None Include="external\intel_avb\spec\333016 - I210_Datasheet_v_3_7.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
+    <None Include="external\intel_avb\spec\335761 - I210_CS_CL_Datasheet_v_1_8.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
+    <None Include="external\intel_avb\spec\621661-Intel® Ethernet Controller I225-Public External Specification Update-v1.2.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
+    <None Include="external\intel_avb\spec\2407151103_Intel-Altera-KTI226V-S-RKTU_C26159200.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
+    <None Include="external\intel_avb\spec\ethernet-connection-i219-datasheet.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
+    <None Include="external\intel_avb\spec\i217-ethernet-controller-datasheet-2.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
+    <None Include="external\intel_avb\spec\README.md">
+      <Filter>Intel AVB Library\spec</Filter>
+    </None>
   </ItemGroup>
 </Project>
