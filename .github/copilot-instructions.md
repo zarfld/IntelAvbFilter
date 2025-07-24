@@ -1,105 +1,118 @@
-# Copilot Instructions - Intel AVB Filter Driver
+# Intel AVB Filter Driver - AI Coding Instructions
 
-## Project Overview
+## Architecture Overview
 
-This is a Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bridging) and TSN (Time-Sensitive Networking) capabilities for Intel Ethernet controllers (I210, I219, I225, I226). The architecture creates a bridge between user-mode applications and hardware through three key layers.
+This is a **Windows NDIS 6.30 lightweight filter driver** that bridges AVB/TSN capabilities between user applications and Intel Ethernet hardware (I210, I219, I225, I226). The key architectural insight is the **three-layer abstraction**:
 
-## Architecture Flow
+1. **NDIS Filter Layer** (`filter.c`, `device.c`) - Windows kernel driver that attaches to Intel adapters
+2. **AVB Integration Layer** (`avb_integration.c/.h`) - Hardware abstraction bridge with IOCTL interface  
+3. **Intel AVB Library** (`external/intel_avb/lib/`) - Cross-platform hardware access library
 
+**Critical Data Flow**: User App → DeviceIoControl → NDIS Filter → Platform Operations → Intel Library → Hardware
+
+## Essential Patterns
+
+### Memory Management
+- **Always use AVB-specific pool tags**: `FILTER_ALLOC_TAG` ('AvbM'), `FILTER_REQUEST_ID` ('AvbR'), `FILTER_TAG` ('AvbF')
+- **NonPagedPool** for all contexts that might be accessed at DISPATCH_LEVEL
+- **Zero memory on allocation**: Use `ExAllocatePoolZero()` pattern consistently
+
+### Hardware Access Abstraction
+The core pattern is **platform operations structure** in `avb_integration.c`:
+```c
+static const struct platform_ops ndis_platform_ops = {
+    .init = AvbPlatformInit,
+    .pci_read_config = AvbPciReadConfig,
+    .mmio_read = AvbMmioRead,
+    .mdio_read = AvbMdioRead,
+    .read_timestamp = AvbReadTimestamp
+};
 ```
-User Application → DeviceIoControl → NDIS Filter Driver → Intel AVB Library → Hardware
-```
+**Never access hardware directly** - always go through these platform operations.
 
-**Key components:**
-- **NDIS Filter** (`filter.c/h`): Lightweight filter that attaches to Intel network adapters
-- **AVB Integration** (`avb_integration.c/h`): Bridge layer handling IOCTLs and hardware abstraction
-- **Intel AVB Library** (`external/intel_avb/lib/`): Cross-platform library with Windows-specific implementation
-- **User API** (`avb_test.c`): Example of IOCTL-based communication
+### IOCTL Processing Pattern
+All AVB IOCTLs follow this pattern in `AvbHandleDeviceIoControl()`:
+1. Validate buffer sizes (`inputBufferLength >= sizeof(REQUEST_TYPE)`)
+2. Call Intel library function
+3. Set `request->status` based on result
+4. Set `information = sizeof(REQUEST_TYPE)`
 
-## Critical Architectural Patterns
+### Debug Output Conventions
+- **Entry/Exit tracing**: `DEBUGP(DL_TRACE, "==>FunctionName")` and `<==FunctionName`
+- **Error reporting**: `DEBUGP(DL_ERROR, "Specific failure reason: 0x%x", errorCode)`
+- **Hardware operations**: Always log register offsets, values, and results
 
-### 1. Filter Module Context Pattern
-Every filter instance has an `MS_FILTER` structure with an `AvbContext` field pointing to `AVB_DEVICE_CONTEXT`:
-```cpp
-typedef struct _MS_FILTER {
-    // ... NDIS fields
-    PVOID AvbContext;  // Points to AVB_DEVICE_CONTEXT
-} MS_FILTER;
-```
+## Critical Build Requirements
 
-### 2. IOCTL Communication Pattern
-User-mode apps communicate via device path `\\\\.\\IntelAvbFilter` using IOCTLs defined with `_NDIS_CONTROL_CODE(n, METHOD_BUFFERED)`:
-```cpp
-#define IOCTL_AVB_READ_REGISTER _NDIS_CONTROL_CODE(22, METHOD_BUFFERED)
-```
+### Visual Studio Project Configuration
+- **NDIS630=1** preprocessor definition is mandatory
+- **Include paths must include**: `external\intel_avb\lib` for Intel library headers
+- **Output name**: `ndislwf.sys` (not the project name)
+- **Link with**: `ndis.lib` for NDIS functions
 
-### 3. Hardware Abstraction via Platform Operations
-The Intel AVB library uses a platform operations structure (`intel_windows.c`) that routes all hardware access through NDIS filter IOCTLs, eliminating direct hardware access.
+### Precompiled Headers
+- **All .c files must include `precomp.h`** - no exceptions
+- **precomp.h includes**: `ndis.h`, `filteruser.h`, project headers in dependency order
 
-### 4. Pool Tag Convention
-All memory allocations use AVB-specific pool tags for leak tracking:
-- `'AvbR'` - AVB Request
-- `'AvbM'` - AVB Memory  
-- `'AvbF'` - AVB Filter
+## Device Integration Patterns
 
-## Development Workflows
+### Filter Attachment
+Each Intel adapter gets an `MS_FILTER` instance with embedded `AVB_DEVICE_CONTEXT`:
+```c
+// In MS_FILTER structure (filter.h):
+PAVB_DEVICE_CONTEXT AvbContext;  // AVB integration context
 
-### Building
-Open `IntelAvbFilter.sln` in Visual Studio with WDK installed. The project uses NDIS 6.30 (`FILTER_MINOR_NDIS_VERSION = 30`) for Windows 8+ compatibility with advanced TSN features.
-
-### Testing
-Build user-mode test app: `nmake -f avb_test.mak` then run `avb_test.exe`
-
-### Debugging
-Enable debug output via DebugView. Use these debug levels:
-- `DL_TRACE` - Normal operation flow
-- `DL_ERROR` - Error conditions with specific details
-- `DL_WARN` - Warnings and recoverable issues
-
-## Device-Specific Implementations
-
-### Hardware Support Matrix
-- **I210**: Basic IEEE 1588, 4 traffic classes
-- **I219**: IEEE 1588 + MDIO PHY access
-- **I225/I226**: Full TSN (TAS, FP, PTM), 8 traffic classes
-
-### TSN Configuration Pattern
-Use helper functions in `tsn_config.c` for device capability detection:
-```cpp
-if (AvbSupportsTas(deviceId)) {
-    // Configure Time-Aware Shaper
-    AvbGetDefaultTasConfig(&config);
-}
+// Initialization pattern in FilterAttach:
+Status = AvbInitializeDevice(pFilter, &pFilter->AvbContext);
 ```
 
-## Integration Points
+### Intel Device Identification
+Device detection happens through PCI vendor/device ID checking:
+```c
+#define INTEL_VENDOR_ID 0x8086
+// Supported devices: I210 (0x1533), I219 (0x15B7), I225 (0x15F2), I226 (0x3100)
+```
 
-### NDIS Filter Integration
-- Filter attaches only to Intel adapters (vendor ID 0x8086)
-- Hardware access flows through NDIS OID requests rather than direct MMIO
-- Device detection uses `AvbFindIntelFilterModule()` to locate appropriate filter instance
+## Cross-Component Communication
 
-### Intel AVB Library Integration
-- Library's Windows platform layer (`intel_windows.c`) communicates with filter via IOCTLs
-- All hardware operations (PCI config, MMIO, MDIO, timestamps) route through filter
-- Platform operations structure provides abstraction for cross-platform compatibility
+### User-Space to Kernel
+- **Device name**: `\\\\.\\IntelAvbFilter` 
+- **IOCTL codes**: Defined in `avb_integration.h` using `_NDIS_CONTROL_CODE` macro
+- **Always use METHOD_BUFFERED** for IOCTL definitions
 
-### User-Mode API
-- Applications open device handle to `\\\\.\\IntelAvbFilter`
-- Use predefined IOCTL structures (e.g., `AVB_REGISTER_REQUEST`, `AVB_TIMESTAMP_REQUEST`)
-- All operations are synchronous and return status in request structure
+### Kernel to Hardware  
+- **NDIS OID requests** for PCI config space access
+- **Memory-mapped I/O** through NDIS resource management
+- **Intel library abstraction** handles device-specific register layouts
 
-## Key Files for New Features
+## Testing and Debugging
 
-- **Add new IOCTL**: Update `avb_integration.h` (define), `avb_integration.c` (handler), `device.c` (dispatch)
-- **Hardware support**: Extend device detection in `avb_integration.c`, add device-specific code to `external/intel_avb/lib/intel_*.c`
-- **TSN features**: Use templates in `tsn_config.h/c`, implement hardware-specific logic in Intel library
-- **Debug enhancement**: Add DEBUGP calls with appropriate debug levels throughout call paths
+### Build Commands
+```cmd
+# Driver build (Visual Studio required)
+# Open IntelAvbFilter.sln, build for x64/ARM64
 
-## Common Gotchas
+# Test application build
+nmake -f avb_test.mak
+```
 
-- Always check `AvbContext` initialization before hardware operations
-- IOCTL buffer sizes must be validated (input AND output buffer lengths)
-- Hardware access is asynchronous - operations may need retry logic
-- Pool tag mismatches indicate memory leaks - always use AVB-specific tags
-- Device IDs determine feature availability - check capability before configuring TSN features
+### Debug Setup
+- **Enable debug output**: Set debug levels in driver, use DebugView.exe
+- **Kernel debugging**: Use DbgengKernelDebugger (configured in .vcxproj)
+- **Driver installation**: `pnputil /add-driver IntelAvbFilter.inf /install`
+
+## Critical Files Reference
+
+- **`filter.h`**: Core NDIS filter definitions, MS_FILTER structure with AvbContext
+- **`avb_integration.c`**: Main hardware abstraction implementation, IOCTL handlers
+- **`device.c`**: IOCTL routing, connects user-space to AVB integration layer
+- **`external/intel_avb/lib/intel_windows.c`**: Windows-specific hardware access using our IOCTL interface
+- **`IntelAvbFilter.inf`**: Driver installation, filter class "scheduler", service auto-start
+
+## External Dependencies
+
+- **Intel AVB Library**: Git submodule at `external/intel_avb/`, provides hardware abstraction
+- **Windows Driver Kit**: Required for NDIS headers and kernel development
+- **NDIS 6.30**: Minimum version for required TSN/AVB features
+
+When modifying this codebase, always consider the impact across all three architectural layers and maintain the platform operations abstraction pattern.
