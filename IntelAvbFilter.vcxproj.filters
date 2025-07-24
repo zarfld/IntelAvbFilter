@@ -36,6 +36,12 @@
     <ClInclude Include="flt_dbg.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="avb_integration.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="tsn_config.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="filter.c">
@@ -48,6 +54,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="precomp.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="avb_integration.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tsn_config.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

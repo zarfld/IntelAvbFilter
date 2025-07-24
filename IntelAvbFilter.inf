@@ -145,6 +145,7 @@ HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,0 ; Subscribe to defaul
 IntelCorp = "Intel Corporation"
 IntelAvbFilter_Desc = "Intel AVB/TSN NDIS Filter Driver"
 IntelAvbFilter_HelpText = "Intel Audio/Video Bridging and Time-Sensitive Networking Filter Driver for Intel Ethernet Controllers"
+Msft = "Microsoft"
 
 
 
