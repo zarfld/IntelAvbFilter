@@ -85,6 +85,11 @@ Device detection happens through PCI vendor/device ID checking:
 // Supported devices: I210 (0x1533), I219 (0x15B7), I225 (0x15F2), I226 (0x3100)
 ```
 
+**Hardware Specifications**: Detailed NIC specifications are available in `external/intel_avb/spec/`:
+- **I210**: `333016 - I210_Datasheet_v_3_7.pdf`, `332763_I210_SpecUpdate_Rev3.0.md`
+- **I219**: `ethernet-connection-i219-datasheet.md`
+- **I225/I226**: `2407151103_Intel-Altera-KTI226V-S-RKTU_C26159200.pdf`, `621661-Intel® Ethernet Controller I225-Public External Specification Update-v1.2.md`
+
 ## Cross-Component Communication
 
 ### User-Space to Kernel
@@ -125,6 +130,7 @@ nmake -f avb_test.mak
 ## External Dependencies
 
 - **Intel AVB Library**: Git submodule at `external/intel_avb/`, provides hardware abstraction
+- **Intel NIC Specifications**: Hardware datasheets and specification updates in `external/intel_avb/spec/`
 - **Windows Driver Kit**: Required for NDIS headers and kernel development
 - **NDIS 6.30**: Minimum version for required TSN/AVB features
 
