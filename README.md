@@ -49,24 +49,112 @@ A Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bri
 ## 🔧 Quick Start
 
 ### Prerequisites
-- Windows Driver Kit (WDK)
-- Visual Studio 2019/2022
-- Intel Ethernet Controller (I210, I217, I219, I225, or I226)
+
+#### **Critical: Windows Driver Kit (WDK) Version Requirements**
+
+**⚠️ IMPORTANT: Specific WDK versions are required for NDIS 6.30 and KMDF compatibility**
+
+**Recommended WDK Versions:**
+- **Primary**: **WDK 10.0.22621** (Windows 11, version 22H2) - Latest stable
+- **Alternative**: **WDK 10.0.19041** (Windows 10, version 2004) - Proven compatibility
+- **Minimum**: **WDK 10.0.17763** (Windows 10, version 1809) - NDIS 6.30 minimum
+
+**Download Links:**
+- **Latest WDK**: https://developer.microsoft.com/windows/hardware/windows-driver-kit
+- **Previous WDK Versions**: https://learn.microsoft.com/en-us/windows-hardware/drivers/other-wdk-downloads
+- **Known Issues**: https://learn.microsoft.com/en-us/windows-hardware/drivers/wdk-known-issues
+
+#### **Visual Studio Compatibility Matrix:**
+| WDK Version | Visual Studio | NDIS Support | KMDF Support | Status |
+|-------------|---------------|--------------|--------------|---------|
+| **WDK 11 (22621)** | **VS 2022** | ✅ NDIS 6.30+ | ✅ KMDF 1.33+ | **Recommended** |
+| **WDK 10 (19041)** | **VS 2019/2022** | ✅ NDIS 6.30+ | ✅ KMDF 1.31+ | **Proven** |
+| WDK 10 (17763) | VS 2017/2019 | ✅ NDIS 6.30 | ✅ KMDF 1.29+ | Minimum |
+
+#### **Additional Requirements:**
+- **Visual Studio 2019** (minimum) or **Visual Studio 2022** (recommended)
+- **Intel Ethernet Controller** (I210, I217, I219, I225, or I226)
+- **Windows 10 1809+** or **Windows 11** (for NDIS 6.30 runtime support)
+
+#### **KMDF Coinstaller Requirements:**
+Based on Microsoft samples, you'll need the appropriate KMDF coinstaller:
+```
+WdfCoinstaller[Version].dll (e.g., WdfCoinstaller01033.dll for KMDF 1.33)
+```
+**Source**: Download from WDK Redistributable Components or included with WDK installation.
 
 ### Build
+
+#### **Step 1: Environment Setup**
+```cmd
+# Verify WDK installation
+reg query "HKLM\SOFTWARE\Microsoft\Windows Kits\Installed Roots" /v KitsRoot10
+
+# Verify Visual Studio + WDK integration
+# Open Visual Studio -> Extensions -> Verify "Windows Driver Kit" extension
+```
+
+#### **Step 2: Clone and Build**
 ```cmd
 git clone --recursive https://github.com/zarfld/intel_avb.git
 cd intel_avb
-# Open IntelAvbFilter.sln in Visual Studio and build
+
+# Open IntelAvbFilter.sln in Visual Studio
+# Verify project targets:
+# - Configuration: Debug/Release
+# - Platform: x64 (required for modern Intel controllers)
+# - Windows SDK Version: 10.0.22621.0 (or compatible)
+# - Platform Toolset: WindowsKernelModeDriver10.0
+```
+
+#### **Step 3: Build Verification**
+```cmd
+# Build output should show:
+# - NDIS630=1 preprocessor definition
+# - Proper WDK include paths
+# - Successful linking with ndis.lib
+# - Output: ndislwf.sys (filter driver binary)
 ```
 
 ### Install
+
+#### **Driver Installation Requirements:**
 ```cmd
-# Copy driver files to temp directory
+# Enable test signing (required for development)
+bcdedit /set testsigning on
+# Reboot required
+
+# Copy driver files to deployment directory
+# Files needed:
+# - ndislwf.sys (driver binary)
+# - IntelAvbFilter.inf (installation information)
+# - WdfCoinstaller[Version].dll (KMDF coinstaller)
+
+# Install driver
 pnputil /add-driver IntelAvbFilter.inf /install
 ```
 
 **Status**: Driver now attempts real hardware access and falls back to simulation gracefully.
+
+### Build Troubleshooting
+
+#### **Common WDK Issues:**
+
+**1. "NDIS.h not found"**
+- **Solution**: Verify WDK installation and Visual Studio integration
+- **Check**: Project properties → Include Directories should contain WDK paths
+
+**2. "Unresolved external symbol NdisXxx"**
+- **Solution**: Add `ndis.lib` to additional dependencies
+- **Check**: Project properties → Linker → Input → Additional Dependencies
+
+**3. "Incompatible KMDF version"**
+- **Solution**: Use KMDF coinstaller matching your WDK version
+- **Check**: Download from WDK redistributables or use installed version
+
+**4. "Target platform version mismatch"**
+- **Solution**: Set Windows SDK version to match your WDK installation
+- **Recommended**: 10.0.22621.0 for WDK 11
 
 ## 📋 Device Support Status
 
@@ -171,10 +259,11 @@ Enable debug tracing shows transition to real hardware:
 **Current Focus**: Hardware validation and testing
 
 1. Fork the repository
-2. Test on real Intel hardware if available
-3. Report hardware access results (success/failure)
-4. Validate timing accuracy on production hardware
-5. Submit pull request with validation results
+2. **Ensure compatible WDK version** (see prerequisites above)
+3. Test on real Intel hardware if available
+4. Report hardware access results (success/failure)
+5. Validate timing accuracy on production hardware
+6. Submit pull request with validation results
 
 ## ✅ **MAJOR ACHIEVEMENT**
 
@@ -186,6 +275,7 @@ This project has **completed the architecture and implementation** phase. The dr
 
 ## ⚠️ Important Notes
 
+- **WDK Version Critical**: Use WDK 10.0.22621 (recommended) or 10.0.19041 (proven) for best compatibility
 - **Ready for Hardware Testing**: Implementation complete, needs validation on real Intel controllers
 - **Smart Fallback System**: Gracefully handles both hardware access and simulation
 - **Production Foundation**: Architecture and code ready for deployment
@@ -205,4 +295,5 @@ This project incorporates the Intel AVB library and follows its licensing terms.
 
 **Last Updated**: January 2025  
 **Status**: **IMPLEMENTATION COMPLETE - READY FOR HARDWARE VALIDATION** ✅  
-**Next Milestone**: Hardware testing and timing accuracy validation
+**Next Milestone**: Hardware testing and timing accuracy validation  
+**WDK Requirement**: **WDK 10.0.22621** (Windows 11 22H2) or **WDK 10.0.19041** (Windows 10 2004)

@@ -92,13 +92,68 @@ const struct tsn_tas_config AVB_TAS_CONFIG_AUDIO = {
 ```
 **Device capability detection**: `AvbSupportsTas()`, `AvbSupportsFp()`, `AvbSupportsPtm()` functions work correctly.
 
-## Critical Build Requirements ✅ **WORKING**
+## Critical Build Requirements ✅ **WORKING - WITH SPECIFIC WDK REQUIREMENTS**
 
 ### Visual Studio Project Configuration
+
+#### **Mandatory WDK Version Requirements:**
+Based on Microsoft documentation and NDIS 6.30 compatibility:
+
+**Recommended WDK Setup:**
+- **Primary**: **WDK 10.0.22621** (Windows 11, version 22H2) + **Visual Studio 2022**
+- **Alternative**: **WDK 10.0.19041** (Windows 10, version 2004) + **Visual Studio 2019/2022**
+- **Minimum**: **WDK 10.0.17763** (Windows 10, version 1809) + **Visual Studio 2017/2019**
+
+**Critical Build Settings:**
 - **NDIS630=1** preprocessor definition is mandatory
+- **Platform Toolset**: `WindowsKernelModeDriver10.0`
+- **Windows SDK Version**: Must match WDK version (e.g., `10.0.22621.0`)
+- **Target Platform**: `x64` (required for modern Intel controllers)
 - **Include paths must include**: `external\intel_avb\lib` for Intel library headers
 - **Output name**: `ndislwf.sys` (not the project name)
 - **Link with**: `ndis.lib` for NDIS functions
+
+#### **KMDF Coinstaller Requirements:**
+```xml
+<!-- Required in driver package for installation -->
+WdfCoinstaller[Version].dll
+<!-- Examples based on WDK version: -->
+<!-- WDK 11: WdfCoinstaller01033.dll (KMDF 1.33) -->
+<!-- WDK 10.0.19041: WdfCoinstaller01031.dll (KMDF 1.31) -->
+<!-- WDK 10.0.17763: WdfCoinstaller01029.dll (KMDF 1.29) -->
+```
+**Coinstaller Source**: Available from:
+1. WDK installation: `%ProgramFiles(x86)%\Windows Kits\10\Redist\wdf\`
+2. Download: [WDK Redistributable Components](https://developer.microsoft.com/windows/hardware/windows-driver-kit)
+
+#### **Build Troubleshooting:**
+
+**Common Issues and Solutions:**
+
+1. **"Cannot find NDIS.h"**
+   ```
+   Solution: Verify WDK Visual Studio integration
+   Check: Extensions → Manage Extensions → "Windows Driver Kit" installed
+   ```
+
+2. **"Unresolved external symbol NdisFxxx"**
+   ```
+   Solution: Add ndis.lib to linker dependencies
+   Path: Project Properties → Linker → Input → Additional Dependencies
+   ```
+
+3. **"KMDF version mismatch"**
+   ```
+   Solution: Use coinstaller matching your WDK version
+   Check: Verify WdfCoinstaller[Version].dll matches KMDF version
+   ```
+
+4. **"Target platform version not supported"**
+   ```
+   Solution: Set Windows SDK version to match WDK
+   Recommended: 10.0.22621.0 for WDK 11
+   Path: Project Properties → General → Windows SDK Version
+   ```
 
 ### New Files Added ✅ **IMPLEMENTED**
 - **`avb_bar0_discovery.c`**: Microsoft NDIS BAR0 resource discovery patterns
