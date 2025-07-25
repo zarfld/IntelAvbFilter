@@ -91,41 +91,10 @@ AvbInitializeDevice(
     _Out_ PAVB_DEVICE_CONTEXT *AvbContext
 )
 {
-    PAVB_DEVICE_CONTEXT context = NULL;
-
-    DEBUGP(DL_TRACE, "==>AvbInitializeDevice\n");
-
-    *AvbContext = NULL;
-
-    // Allocate context
-    context = (PAVB_DEVICE_CONTEXT)ExAllocatePoolZero(
-        NonPagedPool,
-        sizeof(AVB_DEVICE_CONTEXT),
-        FILTER_ALLOC_TAG
-    );
-
-    if (context == NULL) {
-        DEBUGP(DL_ERROR, "Failed to allocate AVB device context\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    // Initialize context
-    context->initialized = FALSE;
-    context->filter_instance = FilterModule;
-    context->hw_access_enabled = FALSE;
-    context->miniport_handle = FilterModule->FilterHandle;
-
-    // Initialize Intel device structure
-    RtlZeroMemory(&context->intel_device, sizeof(device_t));
-    context->intel_device.private_data = context;
-    context->intel_device.pci_vendor_id = INTEL_VENDOR_ID;
-
-    context->initialized = TRUE;
-    *AvbContext = context;
-    g_AvbContext = context;
-
-    DEBUGP(DL_TRACE, "<==AvbInitializeDevice: Success\n");
-    return STATUS_SUCCESS;
+    DEBUGP(DL_TRACE, "==>AvbInitializeDevice: Transitioning to real hardware access\n");
+    
+    // Call the BAR0 discovery version instead of simulation version
+    return AvbInitializeDeviceWithBar0Discovery(FilterModule, AvbContext);
 }
 
 /**

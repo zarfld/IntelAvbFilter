@@ -17,7 +17,3 @@
 [submodule "external/windows_driver_samples"]
 	path = external/windows_driver_samples
 	url = https://github.com/microsoft/Windows-driver-samples.git
-
-[submodule "external/open_network_insight"]
-	path = external/open_network_insight
-	url = https://github.com/Open-Network-Insight

@@ -86,6 +86,12 @@
     <ClCompile Include="avb_hardware_access.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="avb_bar0_discovery.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="avb_bar0_enhanced.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="filter.rc">
@@ -127,5 +133,13 @@
       <Filter>Docs</Filter>
     </None>
     <None Include="IMPLEMENTATION_MILESTONE.md" />
+    <None Include="HARDWARE_ACCESS_IMPLEMENTATION.md" />
+    <None Include="INTEGRATION_GUIDE.md" />
+    <None Include="BREAKTHROUGH_SUMMARY.md" />
+    <None Include="MICROSOFT_SAMPLES_INTEGRATION.md" />
+    <None Include="BAR0_IMPLEMENTATION_COMPLETE.md" />
+    <None Include="IMPLEMENTATION_COMPLETE.md" />
+    <None Include="COMPILATION_ERRORS_FIXED.md" />
+    <None Include="HONEST_CUSTOMER_STATUS_REPORT.md" />
   </ItemGroup>
 </Project>
