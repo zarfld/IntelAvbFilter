@@ -315,9 +315,16 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 device_id)
 {
     switch (device_id) {
         case 0x1533: return INTEL_DEVICE_I210;
-        case 0x153A: return INTEL_DEVICE_I217; // I217-LM hinzugef�gt
-        case 0x153B: return INTEL_DEVICE_I217; // I217-V added
-        case 0x15B7: return INTEL_DEVICE_I219;
+        case 0x153A: return INTEL_DEVICE_I217;  // I217-LM
+        case 0x153B: return INTEL_DEVICE_I217;  // I217-V
+        case 0x15B7: return INTEL_DEVICE_I219;  // I219-LM
+        case 0x15B8: return INTEL_DEVICE_I219;  // I219-V (NEW!)
+        case 0x15D6: return INTEL_DEVICE_I219;  // I219-V (NEW!)
+        case 0x15D7: return INTEL_DEVICE_I219;  // I219-LM (NEW!)
+        case 0x15D8: return INTEL_DEVICE_I219;  // I219-V (NEW!)
+        case 0x0DC7: return INTEL_DEVICE_I219;  // I219-LM (22) (NEW!)
+        case 0x1570: return INTEL_DEVICE_I219;  // I219-V (5) (NEW!)
+        case 0x15E3: return INTEL_DEVICE_I219;  // I219-LM (6) (NEW!)
         case 0x15F2: return INTEL_DEVICE_I225;
         case 0x125B: return INTEL_DEVICE_I226;
         default: return INTEL_DEVICE_UNKNOWN;
