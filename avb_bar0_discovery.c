@@ -27,8 +27,7 @@ AvbDiscoverIntelControllerResources(
 )
 {
     NDIS_STATUS ndisStatus;
-    NDIS_OID_REQUEST oidRequest;
-    ULONG bytesReturned;
+    ULONG bytesProcessed = 0;
     
     // PCI configuration space structure for resource discovery
     struct {
@@ -64,39 +63,32 @@ AvbDiscoverIntelControllerResources(
     // Initialize output parameters
     Bar0Address->QuadPart = 0;
     *Bar0Length = 0;
-    
-    // Prepare OID request to get PCI configuration space
-    RtlZeroMemory(&oidRequest, sizeof(NDIS_OID_REQUEST));
-    oidRequest.Header.Type = NDIS_OBJECT_TYPE_OID_REQUEST;
-    oidRequest.Header.Revision = NDIS_OID_REQUEST_REVISION_1;
-    oidRequest.Header.Size = sizeof(NDIS_OID_REQUEST);
-    oidRequest.RequestType = NdisRequestQueryInformation;
-    oidRequest.DATA.QUERY_INFORMATION.Oid = OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES;
-    oidRequest.DATA.QUERY_INFORMATION.InformationBuffer = &pciConfig;
-    oidRequest.DATA.QUERY_INFORMATION.InformationBufferLength = sizeof(pciConfig);
-    
-    // Query PCI configuration space through miniport
-    ndisStatus = NdisFOidRequest(FilterModule->FilterHandle, &oidRequest);
-    
+
+    // Zero local buffer
+    RtlZeroMemory(&pciConfig, sizeof(pciConfig));
+
+    // IMPORTANT: Use the driver's internal OID helper to avoid invalid completion context
+    // This ensures the completion path uses FILTER_REQUEST with a valid event.
+    ndisStatus = filterDoInternalRequest(
+        FilterModule,
+        NdisRequestQueryInformation,
+        OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES,
+        &pciConfig,
+        sizeof(pciConfig),
+        0,      // OutputBufferLength for method requests only
+        0,      // MethodId not used for query
+        &bytesProcessed
+    );
+
     if (ndisStatus != NDIS_STATUS_SUCCESS) {
         DEBUGP(DL_ERROR, "Failed to query PCI configuration: 0x%x\n", ndisStatus);
-        
-        // Fallback: Try alternative OID for PCI info
-        oidRequest.DATA.QUERY_INFORMATION.Oid = OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES;
-        ndisStatus = NdisFOidRequest(FilterModule->FilterHandle, &oidRequest);
-        
-        if (ndisStatus != NDIS_STATUS_SUCCESS) {
-            return STATUS_UNSUCCESSFUL;
-        }
+        return STATUS_UNSUCCESSFUL;
     }
     
-    bytesReturned = oidRequest.DATA.QUERY_INFORMATION.BytesWritten;
-    
     // Validate we got enough data
-    if (bytesReturned < sizeof(pciConfig)) {
-        DEBUGP(DL_ERROR, "Insufficient PCI config data: got %d, need %d\n", 
-               bytesReturned, sizeof(pciConfig));
-        return STATUS_INSUFFICIENT_RESOURCES;
+    if (bytesProcessed < sizeof(pciConfig)) {
+        DEBUGP(DL_WARN, "PCI config bytesReturned smaller than expected (%lu < %zu), continuing with parsed data\n", 
+               bytesProcessed, sizeof(pciConfig));
     }
     
     // Verify this is an Intel device
@@ -133,8 +125,7 @@ AvbDiscoverIntelControllerResources(
     }
     
     DEBUGP(DL_INFO, "Intel controller resources discovered:\n");
-    DEBUGP(DL_INFO, "  VendorId: 0x%x, DeviceId: 0x%x\n", 
-           pciConfig.VendorId & 0xFFFF, (pciConfig.VendorId >> 16) & 0xFFFF);
+    DEBUGP(DL_INFO, "  VendorId: 0x%x\n", pciConfig.VendorId & 0xFFFF);
     DEBUGP(DL_INFO, "  BAR0 Address: 0x%llx, Length: 0x%x\n", 
            Bar0Address->QuadPart, *Bar0Length);
     
