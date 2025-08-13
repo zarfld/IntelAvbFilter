@@ -11,7 +11,7 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer       = 
+DriverVer       = 08/13/2025,16.28.59.605
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
@@ -73,6 +73,7 @@ IntelAvbFilter.sys,,,2
 [Inst_Ndi]
 HKR, Ndi,Service,,"IntelAvbFilter"
 HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
+HKR, Ndi,ComponentId,,"MS_IntelAvbFilter" 
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
 ; Set FilterClass to "scheduler" for AVB/TSN traffic shaping and timing control
 HKR, Ndi,FilterClass,, scheduler
@@ -123,14 +124,14 @@ DelService=IntelAvbFilter,0x200 ; SPSVCINST_STOPSERVICE
 ; TODO: Remove the sample parameters below.
 
 ; Sample 1: "DriverParam" is a per-driver parameter.
-HKR, FilterDriverParams\DriverParam,     ParamDesc,   , "Driverparam for lwf"
-HKR, FilterDriverParams\DriverParam,     default,     , "5"
-HKR, FilterDriverParams\DriverParam,     type,        , "int"
+;HKR, FilterDriverParams\DriverParam,     ParamDesc,   , "Driverparam for lwf"
+;HKR, FilterDriverParams\DriverParam,     default,     , "5"
+;HKR, FilterDriverParams\DriverParam,     type,        , "int"
 
 ; Sample 2: "AdapterParam" is a per-module parameter.
-HKR, FilterAdapterParams\AdapterParam,   ParamDesc,   , "Adapterparam for lwf"
-HKR, FilterAdapterParams\AdapterParam,   default,     , "10"
-HKR, FilterAdapterParams\AdapterParam,   type,        , "int"
+;HKR, FilterAdapterParams\AdapterParam,   ParamDesc,   , "Adapterparam for lwf"
+;HKR, FilterAdapterParams\AdapterParam,   default,     , "10"
+;HKR, FilterAdapterParams\AdapterParam,   type,        , "int"
 
 [NdisImPlatformBindingOptions.reg]
 ; By default, when an LBFO team or Bridge is created, all filters will be
@@ -152,6 +153,8 @@ IntelCorp = "Intel Corporation"
 IntelAvbFilter_Desc = "Intel AVB/TSN NDIS Filter Driver"
 IntelAvbFilter_HelpText = "Intel Audio/Video Bridging and Time-Sensitive Networking Filter Driver for Intel Ethernet Controllers"
 Msft = "Microsoft"
+
+
 
 
 

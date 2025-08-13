@@ -141,5 +141,11 @@
     <None Include="IMPLEMENTATION_COMPLETE.md" />
     <None Include="COMPILATION_ERRORS_FIXED.md" />
     <None Include="HONEST_CUSTOMER_STATUS_REPORT.md" />
+    <None Include="IntelAvbFilter.cdf" />
+    <None Include="Generate-CATFile.ps1" />
+    <None Include="CAT-FILE-MANAGEMENT.md" />
+    <None Include="Sign-Driver.ps1" />
+    <None Include="Manage-Certificate.ps1" />
+    <None Include="Build-And-Sign-Driver.ps1" />
   </ItemGroup>
 </Project>
