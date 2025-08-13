@@ -337,12 +337,29 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 device_id)
 PMS_FILTER 
 AvbFindIntelFilterModule(void)
 {
-    // For now, return the global context's filter instance
-    // In a more complete implementation, this would search through all filter instances
-    if (g_AvbContext != NULL && g_AvbContext->filter_instance != NULL) {
-        return g_AvbContext->filter_instance;
+    // Prefer a filter instance that has an initialized AVB context
+    PMS_FILTER pFilter = NULL;
+    PLIST_ENTRY Link;
+    BOOLEAN bFalse = FALSE;
+
+    // FilterModuleList/FilterListLock are defined in filter.c
+    FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+    Link = FilterModuleList.Flink;
+
+    while (Link != &FilterModuleList)
+    {
+        pFilter = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+        if (pFilter != NULL && pFilter->AvbContext != NULL)
+        {
+            // Found an attached Intel filter (AVB context created in FilterAttach)
+            FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+            return pFilter;
+        }
+        Link = Link->Flink;
     }
-    
+
+    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+
     DEBUGP(DL_WARN, "AvbFindIntelFilterModule: No Intel filter module found\n");
     return NULL;
 }
