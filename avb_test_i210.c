@@ -20,24 +20,37 @@ Abstract:
 #include <winioctl.h>
 #endif
 
-#define IOCTL_AVB_INIT_DEVICE         CTL_CODE(FILE_DEVICE_NETWORK, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_READ_REGISTER       CTL_CODE(FILE_DEVICE_NETWORK, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_GET_DEVICE_INFO     CTL_CODE(FILE_DEVICE_NETWORK, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Match driver's _NDIS_CONTROL_CODE definitions (see avb_integration.h)
+#ifndef _NDIS_CONTROL_CODE
+#define _NDIS_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, request, method, FILE_ANY_ACCESS)
+#endif
+
+#define IOCTL_AVB_INIT_DEVICE         _NDIS_CONTROL_CODE(20, METHOD_BUFFERED)
+#define IOCTL_AVB_GET_DEVICE_INFO     _NDIS_CONTROL_CODE(21, METHOD_BUFFERED)
+#define IOCTL_AVB_READ_REGISTER       _NDIS_CONTROL_CODE(22, METHOD_BUFFERED)
+#define IOCTL_AVB_WRITE_REGISTER      _NDIS_CONTROL_CODE(23, METHOD_BUFFERED)
+#define IOCTL_AVB_GET_TIMESTAMP       _NDIS_CONTROL_CODE(24, METHOD_BUFFERED)
+#define IOCTL_AVB_SET_TIMESTAMP       _NDIS_CONTROL_CODE(25, METHOD_BUFFERED)
+#define IOCTL_AVB_SETUP_TAS           _NDIS_CONTROL_CODE(26, METHOD_BUFFERED)
+#define IOCTL_AVB_SETUP_FP            _NDIS_CONTROL_CODE(27, METHOD_BUFFERED)
+#define IOCTL_AVB_SETUP_PTM           _NDIS_CONTROL_CODE(28, METHOD_BUFFERED)
+#define IOCTL_AVB_MDIO_READ           _NDIS_CONTROL_CODE(29, METHOD_BUFFERED)
+#define IOCTL_AVB_MDIO_WRITE          _NDIS_CONTROL_CODE(30, METHOD_BUFFERED)
 
 // Request/response structures (must match driver side)
 typedef struct _AVB_REGISTER_REQUEST {
     ULONG offset;
     ULONG value;
-    ULONG status;
+    ULONG status; // maps to NDIS_STATUS in driver
 } AVB_REGISTER_REQUEST, *PAVB_REGISTER_REQUEST;
 
-typedef struct _AVB_DEVICE_INFO {
-    ULONG device_type;
-    ULONG vendor_id;
-    ULONG device_id;
-    BOOLEAN hw_access_enabled;
-    char device_name[64];
-} AVB_DEVICE_INFO, *PAVB_DEVICE_INFO;
+// Matches AVB_DEVICE_INFO_REQUEST in avb_integration.h
+#define MAX_AVB_DEVICE_INFO_SIZE 1024
+typedef struct _AVB_DEVICE_INFO_REQUEST {
+    char device_info[MAX_AVB_DEVICE_INFO_SIZE];
+    ULONG buffer_size;
+    ULONG status; // maps to NDIS_STATUS in driver
+} AVB_DEVICE_INFO_REQUEST, *PAVB_DEVICE_INFO_REQUEST;
 
 static BOOL ReadReg(HANDLE hDevice, ULONG offset, ULONG *outValue)
 {
@@ -119,12 +132,15 @@ int main(void)
                              NULL);
     printf(result ? "? Device initialization: SUCCESS\n" : "? Device initialization: FAILED (GLE=%lu)\n", GetLastError());
 
-    // Query device info
-    AVB_DEVICE_INFO info = {0};
+    // Query device info (string buffer from driver)
+    AVB_DEVICE_INFO_REQUEST infoReq;
+    ZeroMemory(&infoReq, sizeof(infoReq));
+    infoReq.buffer_size = MAX_AVB_DEVICE_INFO_SIZE;
+
     result = DeviceIoControl(hDevice,
                              IOCTL_AVB_GET_DEVICE_INFO,
-                             NULL, 0,
-                             &info, sizeof(info),
+                             &infoReq, sizeof(infoReq),
+                             &infoReq, sizeof(infoReq),
                              &bytesReturned,
                              NULL);
     if (!result) {
@@ -134,22 +150,10 @@ int main(void)
     }
 
     printf("? Device info: SUCCESS\n");
-    printf("  Name: %s\n", info.device_name);
-    printf("  VID: 0x%04lx  DID: 0x%04lx\n", info.vendor_id & 0xFFFF, info.device_id & 0xFFFF);
-    printf("  HW access: %s\n", info.hw_access_enabled ? "ENABLED" : "DISABLED (simulation)");
-
-    // Check that we are on an I210 family device
-    switch (info.device_id & 0xFFFF) {
-        case 0x1533: // I210
-        case 0x1536: // I210
-        case 0x1537: // I210
-        case 0x1538: // I210
-        case 0x157B: // I210
-            printf("  Detected I210 family device.\n");
-            break;
-        default:
-            printf("  WARNING: Not an I210 device ID. Proceeding anyway.\n");
-            break;
+    if (infoReq.device_info[0] != '\0') {
+        printf("%s\n", infoReq.device_info);
+    } else {
+        printf("  (Driver returned empty device info)\n");
     }
 
     // Dump a few key registers (works in real hardware mode)
