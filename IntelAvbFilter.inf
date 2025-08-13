@@ -13,6 +13,7 @@ ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
 DriverVer       = 
 CatalogFile     = IntelAvbFilter.cat
+PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
 ; Supported architectures: x64 and ARM64 for modern Intel platforms
 ; NTia64 section.
@@ -39,7 +40,7 @@ CatalogFile     = IntelAvbFilter.cat
 ; Installation Section
 ;-------------------------------------------------------------------------
 [Install]
-AddReg=Inst_Ndi
+AddReg=Inst_Ndi,IntelAvbFilter_Service_Params
 ; All LWFs must include the 0x40000 bit (NCF_LW_FILTER). Unlike miniports, you
 ; don't usually need to customize this value.
 Characteristics=0x40000
@@ -60,7 +61,7 @@ IntelAvbFilter.sys=1
 
 [DestinationDirs]
 DefaultDestDir=12
-IntelAvbFilter.copyfiles.sys=12
+IntelAvbFilter.copyfiles.sys=13   ; %SystemRoot%\System32\drivers
 
 [IntelAvbFilter.copyfiles.sys]
 IntelAvbFilter.sys,,,2
@@ -86,6 +87,11 @@ HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet"
 ; This is a Mandatory filter for Intel AVB-capable adapters
 HKR, Ndi,FilterRunType,0x00010001, 1 ; Mandatory filter
 
+[IntelAvbFilter_Service_Params]
+HKR,"Parameters","Default",   0x10001,0
+HKR,"Parameters","Type",      0x10001,1
+HKR,"Parameters","ParamDesc", 0, "Intel AVB Filter parameters"
+
 ;-------------------------------------------------------------------------
 ; Service installation support
 ;-------------------------------------------------------------------------
@@ -100,7 +106,7 @@ ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
 ; If it is an Optional filter, you may also use 3;SERVICE_DEMAND_START.
 StartType       = 1 ;SERVICE_SYSTEM_START
 ErrorControl    = 1 ;SERVICE_ERROR_NORMAL
-ServiceBinary   = %12%\IntelAvbFilter.sys
+ServiceBinary   = %13%\IntelAvbFilter.sys
 LoadOrderGroup  = NDIS
 Description     = %IntelAvbFilter_Desc%
 AddReg          = Common.Params.reg, NdisImPlatformBindingOptions.reg
