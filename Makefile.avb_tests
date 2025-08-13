@@ -1,0 +1,28 @@
+#
+# nmake makefile to build AVB test tools (I219 and I210)
+#
+
+!IF "$(CFG)" == ""
+CFG=Release
+!ENDIF
+
+CC=cl.exe
+CFLAGS=/nologo /W3 /EHsc /DWIN32 /D_WINDOWS /DUNICODE /D_UNICODE /std:c++14 /O2
+LDFLAGS=/nologo
+LIBS=kernel32.lib user32.lib
+
+!IF "$(CFG)" == "Debug"
+CFLAGS=$(CFLAGS) /Zi /Od
+LDFLAGS=$(LDFLAGS) /DEBUG
+!ENDIF
+
+all: avb_test_i219.exe avb_test_i210.exe
+
+avb_test_i219.exe: avb_test_i219.c
+	$(CC) $(CFLAGS) $** /link $(LDFLAGS) $(LIBS) /out:$@
+
+avb_test_i210.exe: avb_test_i210.c
+	$(CC) $(CFLAGS) $** /link $(LDFLAGS) $(LIBS) /out:$@
+
+clean:
+	del /f /q *.obj *.pdb *.exe 2>NUL

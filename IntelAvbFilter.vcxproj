@@ -185,6 +185,7 @@
     <ClCompile Include="avb_bar0_enhanced.c" />
     <ClCompile Include="avb_hardware_access.c" />
     <ClCompile Include="avb_integration_fixed.c" />
+    <ClCompile Include="avb_test_i210.c" />
     <ClCompile Include="intel_kernel_real.c" />
     <ClCompile Include="precomp.c">
       <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -243,6 +244,7 @@
     <None Include="IMPLEMENTATION_MILESTONE.md" />
     <None Include="INTEGRATION_GUIDE.md" />
     <None Include="IntelAvbFilter.cdf" />
+    <None Include="Makefile.avb_tests" />
     <None Include="Manage-Certificate.ps1" />
     <None Include="MICROSOFT_SAMPLES_INTEGRATION.md" />
     <None Include="README.md" />
