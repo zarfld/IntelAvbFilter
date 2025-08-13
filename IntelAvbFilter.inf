@@ -105,7 +105,7 @@ DisplayName     = %IntelAvbFilter_Desc%
 ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
 ; Typically you will want your filter driver to start with SERVICE_SYSTEM_START.
 ; If it is an Optional filter, you may also use 3;SERVICE_DEMAND_START.
-StartType       = 1 ;SERVICE_SYSTEM_START
+StartType       = 3 ;SERVICE_DEMAND_START
 ErrorControl    = 1 ;SERVICE_ERROR_NORMAL
 ServiceBinary   = %13%\IntelAvbFilter.sys
 LoadOrderGroup  = NDIS
