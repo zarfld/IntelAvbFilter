@@ -15,6 +15,10 @@ Abstract:
 #include "precomp.h"
 #include "avb_integration.h"
 
+// Some WDK SDKs do not declare this prototype in headers included by this project.
+// Declare it here; the symbol is exported by ntoskrnl.
+extern PDEVICE_OBJECT IoGetDeviceAttachmentBaseRef(_In_ PDEVICE_OBJECT DeviceObject);
+
 // Simple case-insensitive substring search for wide strings
 static
 BOOLEAN
@@ -120,12 +124,9 @@ AvbGetPdoFromFilter(
         return status;
     }
 
-    // Resolve PDO using supported API. Prefer IoGetDeviceAttachmentBaseRef if available in headers
-#if defined(IoGetDeviceAttachmentBaseRef)
+    // Resolve PDO using IoGetDeviceAttachmentBaseRef (exported by ntoskrnl)
     PDEVICE_OBJECT pdo = IoGetDeviceAttachmentBaseRef(devTop);
-#else
-    PDEVICE_OBJECT pdo = IoGetAttachedDeviceReference(devTop);
-#endif
+
     ObDereferenceObject(fileObj);
 
     if (!pdo) {
@@ -363,26 +364,22 @@ AvbInitializeDeviceWithBar0Discovery(
     // Discover BAR0 and classify device
     status = AvbDiscoverIntelControllerResources(FilterModule, &bar0, &barLen);
     if (NT_SUCCESS(status)) {
-        // Also read PCI IDs to populate intel_device fields
+        // Also read PCI IDs to populate intel_device fields using PDO
         do {
-            PFILE_OBJECT fileObj = NULL;
-            PDEVICE_OBJECT devObj = NULL;
+            PDEVICE_OBJECT pdo2 = NULL;
             ULONG busNumber = 0, address = 0, len = 0;
             AVB_PCI_SLOT_NUMBER slot = { 0 };
             ULONG id = 0;
             NTSTATUS st;
 
-            if (FilterModule->MiniportName.Buffer == NULL || FilterModule->MiniportName.Length == 0) {
-                break;
-            }
-            st = IoGetDeviceObjectPointer(&FilterModule->MiniportName, FILE_READ_DATA, &fileObj, &devObj);
+            st = AvbGetPdoFromFilter(FilterModule, &pdo2);
             if (!NT_SUCCESS(st)) break;
-            st = IoGetDeviceProperty(devObj, DevicePropertyBusNumber, sizeof(busNumber), &busNumber, &len);
+            st = IoGetDeviceProperty(pdo2, DevicePropertyBusNumber, sizeof(busNumber), &busNumber, &len);
             if (NT_SUCCESS(st)) {
                 len = 0;
-                st = IoGetDeviceProperty(devObj, DevicePropertyAddress, sizeof(address), &address, &len);
+                st = IoGetDeviceProperty(pdo2, DevicePropertyAddress, sizeof(address), &address, &len);
             }
-            ObDereferenceObject(fileObj);
+            ObDereferenceObject(pdo2);
             if (!NT_SUCCESS(st)) break;
 
             slot.bits.DeviceNumber = (address >> 16) & 0xFFFF;
