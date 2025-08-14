@@ -41,6 +41,10 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
       FilterReturnNetBufferLists
 };
 
+// Forward declarations for local helper functions used in FilterAttach
+static BOOLEAN UnicodeStringContainsInsensitive(_In_ PCUNICODE_STRING Str, _In_ PCWSTR Sub);
+static BOOLEAN IsUnsupportedTeamOrVirtualAdapter(_In_ PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters);
+
 
 _Use_decl_annotations_
 NTSTATUS
@@ -355,15 +359,12 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
 
         // Only attach AVB context for supported Intel controllers
         {
-            USHORT ven = 0, dev = 0;
-            if (AvbIsSupportedIntelController(pFilter, &ven, &dev)) {
-                USHORT nameLenChars = (USHORT)(pFilter->MiniportFriendlyName.Length / sizeof(WCHAR));
-                // Skip TNICs like Microsoft Network Adapter Multiplexor Driver (LBFO/Team/Bridge)
-                if (WideCharStrStrIW(pFilter->MiniportFriendlyName.Buffer, L"Multiplexor", nameLenChars) ||
-                    WideCharStrStrIW(pFilter->MiniportFriendlyName.Buffer, L"Team", nameLenChars) ||
-                    WideCharStrStrIW(pFilter->MiniportFriendlyName.Buffer, L"Bridge", nameLenChars)) {
-                    DEBUGP(DL_INFO, "Skipping AVB init; NIC is a team/bridge TNIC: %wZ\n", &pFilter->MiniportFriendlyName);
-                } else {
+            // Skip virtual or aggregated adapters (Multiplexor/Team/Bridge/Hyper-V vNIC)
+            if (IsUnsupportedTeamOrVirtualAdapter(AttachParameters)) {
+                DEBUGP(DL_INFO, "Skipping AVB init; unsupported virtual/teamed adapter: %wZ\n", AttachParameters->BaseMiniportInstanceName);
+            } else {
+                USHORT ven = 0, dev = 0;
+                if (AvbIsSupportedIntelController(pFilter, &ven, &dev)) {
                     Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
                     if (Status != STATUS_SUCCESS) {
                         DEBUGP(DL_WARN, "Failed to initialize AVB context for 0x%04x:0x%04x: 0x%x\n", ven, dev, Status);
@@ -372,9 +373,9 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                     } else {
                         DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
                     }
+                } else {
+                    DEBUGP(DL_INFO, "Skipping AVB init; NIC not supported or not Intel: %wZ\n", &pFilter->MiniportFriendlyName);
                 }
-            } else {
-                DEBUGP(DL_INFO, "Skipping AVB init; NIC not supported or not Intel: %wZ\n", &pFilter->MiniportFriendlyName);
             }
         }
 
@@ -1931,5 +1932,49 @@ Return Value:
     //  Wake up the thread blocked for this request to complete.
     //
     NdisSetEvent(&FilterRequest->ReqEvent);
+}
+
+/* Helper: case-insensitive substring search for UNICODE_STRING */
+static
+BOOLEAN
+UnicodeStringContainsInsensitive(
+    _In_ PCUNICODE_STRING Str,
+    _In_ PCWSTR Sub
+)
+{
+    if (!Str || !Str->Buffer || Str->Length == 0 || !Sub) return FALSE;
+    USHORT lenChars = (USHORT)(Str->Length / sizeof(WCHAR));
+    USHORT nlen = 0; while (Sub[nlen] != L'\0') nlen++;
+    if (nlen == 0 || nlen > lenChars) return FALSE;
+    for (USHORT i = 0; i + nlen <= lenChars; ++i) {
+        BOOLEAN match = TRUE;
+        for (USHORT j = 0; j < nlen; ++j) {
+            WCHAR c1 = Str->Buffer[i + j];
+            WCHAR c2 = Sub[j];
+            if (c1 >= L'a' && c1 <= L'z') c1 = (WCHAR)(c1 - L'a' + L'A');
+            if (c2 >= L'a' && c2 <= L'z') c2 = (WCHAR)(c2 - L'a' + L'A');
+            if (c1 != c2) { match = FALSE; break; }
+        }
+        if (match) return TRUE;
+    }
+    return FALSE;
+}
+
+/* Helper: decide if the miniport instance is a TNIC/virtual adapter we do not support */
+static
+BOOLEAN
+IsUnsupportedTeamOrVirtualAdapter(
+    _In_ PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters
+)
+{
+    PCUNICODE_STRING name = AttachParameters->BaseMiniportInstanceName;
+    if (!name || !name->Buffer) return FALSE;
+    if (UnicodeStringContainsInsensitive(name, L"Multiplexor")) return TRUE;   // Microsoft Network Adapter Multiplexor Driver (LBFO)
+    if (UnicodeStringContainsInsensitive(name, L"Team")) return TRUE;          // Teaming TNIC
+    if (UnicodeStringContainsInsensitive(name, L"Bridge")) return TRUE;        // Bridge/ICS
+    if (UnicodeStringContainsInsensitive(name, L"vEthernet")) return TRUE;     // Hyper-V vNIC
+    if (UnicodeStringContainsInsensitive(name, L"Hyper-V")) return TRUE;       // Hyper-V naming
+    if (UnicodeStringContainsInsensitive(name, L"Virtual")) return TRUE;       // Generic virtual NICs
+    return FALSE;
 }
 
