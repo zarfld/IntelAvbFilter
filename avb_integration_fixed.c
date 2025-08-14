@@ -174,6 +174,24 @@ AvbHandleDeviceIoControl(
             break;
         }
 
+        case IOCTL_AVB_GET_DEVICE_INFO:
+        {
+            if (outputBufferLength >= sizeof(AVB_DEVICE_INFO_REQUEST)) {
+                PAVB_DEVICE_INFO_REQUEST req = (PAVB_DEVICE_INFO_REQUEST)outputBuffer;
+                RtlZeroMemory(req->device_info, sizeof(req->device_info));
+                // Compose device info string via Intel library helper
+                int r = intel_get_device_info(&AvbContext->intel_device, req->device_info, sizeof(req->device_info));
+                req->buffer_size = (ULONG)strnlen(req->device_info, sizeof(req->device_info));
+                req->status = (r == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
+                information = sizeof(AVB_DEVICE_INFO_REQUEST);
+                status = (r == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                DEBUGP(DL_TRACE, "GET_DEVICE_INFO: result=%d, size=%lu, text=\"%s\"\n", r, req->buffer_size, req->device_info);
+            } else {
+                status = STATUS_BUFFER_TOO_SMALL;
+            }
+            break;
+        }
+
         case IOCTL_AVB_READ_REGISTER:
         {
             PAVB_REGISTER_REQUEST request = (PAVB_REGISTER_REQUEST)inputBuffer;

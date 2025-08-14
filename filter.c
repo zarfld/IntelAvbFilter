@@ -141,7 +141,7 @@ Return Value:
                                            &FilterDriverHandle);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_WARN, "Register filter driver failed.\n");
+            DEBUGP(DL_WARN, "Register filter driver failed. Status=0x%x\n", Status);
             break;
         }
 
@@ -151,7 +151,7 @@ Return Value:
         {
             NdisFDeregisterFilterDriver(FilterDriverHandle);
             FILTER_FREE_LOCK(&FilterListLock);
-            DEBUGP(DL_WARN, "Register device for the filter driver failed.\n");
+            DEBUGP(DL_WARN, "Register device for the filter driver failed. Status=0x%x\n", Status);
             break;
         }
 
@@ -357,16 +357,24 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         {
             USHORT ven = 0, dev = 0;
             if (AvbIsSupportedIntelController(pFilter, &ven, &dev)) {
-                Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
-                if (Status != STATUS_SUCCESS) {
-                    DEBUGP(DL_WARN, "Failed to initialize AVB context for 0x%04x:0x%04x: 0x%x\n", ven, dev, Status);
-                    // Do not fail attach, just continue without AVB on this NIC
-                    Status = NDIS_STATUS_SUCCESS;
+                USHORT nameLenChars = (USHORT)(pFilter->MiniportFriendlyName.Length / sizeof(WCHAR));
+                // Skip TNICs like Microsoft Network Adapter Multiplexor Driver (LBFO/Team/Bridge)
+                if (WideCharStrStrIW(pFilter->MiniportFriendlyName.Buffer, L"Multiplexor", nameLenChars) ||
+                    WideCharStrStrIW(pFilter->MiniportFriendlyName.Buffer, L"Team", nameLenChars) ||
+                    WideCharStrStrIW(pFilter->MiniportFriendlyName.Buffer, L"Bridge", nameLenChars)) {
+                    DEBUGP(DL_INFO, "Skipping AVB init; NIC is a team/bridge TNIC: %wZ\n", &pFilter->MiniportFriendlyName);
                 } else {
-                    DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
+                    Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
+                    if (Status != STATUS_SUCCESS) {
+                        DEBUGP(DL_WARN, "Failed to initialize AVB context for 0x%04x:0x%04x: 0x%x\n", ven, dev, Status);
+                        // Do not fail attach, just continue without AVB on this NIC
+                        Status = NDIS_STATUS_SUCCESS;
+                    } else {
+                        DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
+                    }
                 }
             } else {
-                DEBUGP(DL_INFO, "Skipping AVB init; NIC not supported or not Intel\n");
+                DEBUGP(DL_INFO, "Skipping AVB init; NIC not supported or not Intel: %wZ\n", &pFilter->MiniportFriendlyName);
             }
         }
 

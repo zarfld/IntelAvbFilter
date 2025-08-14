@@ -189,5 +189,29 @@ DbgPrintHexDump(
 
 #endif    // DBG
 
+// Simple case-insensitive substring search for wide strings
+__forceinline BOOLEAN WideCharStrStrIW(_In_reads_(lenChars) const WCHAR* haystack, _In_ const WCHAR* needle, _In_ USHORT lenChars)
+{
+    if (!haystack || !needle || lenChars == 0) return FALSE;
+    SIZE_T nlen = wcslen(needle);
+    if (nlen == 0 || nlen > lenChars) return FALSE;
+    for (USHORT i = 0; i + nlen <= lenChars; ++i)
+    {
+        BOOLEAN match = TRUE;
+        for (SIZE_T j = 0; j < nlen; ++j)
+        {
+            WCHAR c1 = haystack[i + j];
+            WCHAR c2 = needle[j];
+            if (c1 >= L'a' && c1 <= L'z') c1 = (WCHAR)(c1 - L'a' + L'A');
+            if (c2 >= L'a' && c2 <= L'z') c2 = (WCHAR)(c2 - L'a' + L'A');
+            if (c1 != c2) { match = FALSE; break; }
+        }
+        if (match) return TRUE;
+    }
+    return FALSE;
+}
+
+// Helper macro for %wZ logging safely
+#define WSTRZ(_pStr) ((_pStr) ? (_pStr) : L"")
 
 #endif // _FILTDEBUG__H
