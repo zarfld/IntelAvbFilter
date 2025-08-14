@@ -24,7 +24,6 @@
 #define IOCTL_AVB_GET_DEVICE_INFO       _NDIS_CONTROL_CODE(21, METHOD_BUFFERED)
 #define IOCTL_AVB_READ_REGISTER         _NDIS_CONTROL_CODE(22, METHOD_BUFFERED)
 #define IOCTL_AVB_WRITE_REGISTER        _NDIS_CONTROL_CODE(23, METHOD_BUFFERED)
-// The following IOCTLs may not be supported by your current driver build; avoid using by default
 #define IOCTL_AVB_GET_TIMESTAMP         _NDIS_CONTROL_CODE(24, METHOD_BUFFERED)
 #define IOCTL_AVB_SET_TIMESTAMP         _NDIS_CONTROL_CODE(25, METHOD_BUFFERED)
 #define IOCTL_AVB_SETUP_TAS             _NDIS_CONTROL_CODE(26, METHOD_BUFFERED)
@@ -78,31 +77,24 @@ typedef struct _AVB_PTM_REQUEST { struct ptm_config_um config; unsigned long sta
 typedef struct _AVB_MDIO_REQUEST { unsigned long page; unsigned long reg; unsigned short value; unsigned long status; } AVB_MDIO_REQUEST;
 #pragma pack(pop)
 
-static BOOL Ioctl(HANDLE h, DWORD code, void* inbuf, DWORD inlen, void* outbuf, DWORD outlen) {
-    DWORD ret=0; BOOL ok = DeviceIoControl(h, code, inbuf, inlen, outbuf, outlen, &ret, NULL);
-    if (!ok) fprintf(stderr, "DeviceIoControl 0x%lx failed: %lu\n", code, GetLastError());
-    return ok;
-}
-
 static HANDLE OpenDev(void) {
     HANDLE h = CreateFileA(LINKNAME, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h==INVALID_HANDLE_VALUE) fprintf(stderr, "Open %s failed: %lu\n", LINKNAME, GetLastError());
     return h;
 }
 
+static int read_reg(HANDLE h, unsigned long off, unsigned long* val){ AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL); if(!ok) return 0; *val=r.value; return 1; }
+static void reg_read(HANDLE h, unsigned long off){ unsigned long v=0; if(read_reg(h,off,&v)) printf("MMIO[0x%08lX]=0x%08lX\n", off, v); else fprintf(stderr, "Read 0x%lX failed (GLE=%lu)\n", off, GetLastError()); }
+static void reg_write(HANDLE h, unsigned long off, unsigned long val){ AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; r.value=val; DWORD br=0; DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL); }
+
 static void test_init(HANDLE h){ DWORD br=0; DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL,0, NULL,0, &br, NULL); }
-static void test_device_info(HANDLE h){ AVB_DEVICE_INFO_REQUEST r; ZeroMemory(&r,sizeof(r)); r.buffer_size=sizeof(r.device_info); if(Ioctl(h,IOCTL_AVB_GET_DEVICE_INFO,&r,sizeof(r),&r,sizeof(r))) printf("Device: %s (0x%lx)\n", r.device_info, r.status); }
+static void test_device_info(HANDLE h){ AVB_DEVICE_INFO_REQUEST r; ZeroMemory(&r,sizeof(r)); r.buffer_size=sizeof(r.device_info); DWORD br=0; if(DeviceIoControl(h,IOCTL_AVB_GET_DEVICE_INFO,&r,sizeof(r),&r,sizeof(r),&br,NULL)) printf("Device: %s (0x%lx)\n", r.device_info, r.status); }
 
-static int read_reg(HANDLE h, unsigned long off, unsigned long* val){ AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; if(!Ioctl(h,IOCTL_AVB_READ_REGISTER,&r,sizeof(r),&r,sizeof(r))) return 0; *val=r.value; return 1; }
-static void reg_read(HANDLE h, unsigned long off){ unsigned long v=0; if(read_reg(h,off,&v)) printf("MMIO[0x%08lX]=0x%08lX\n", off, v); }
-static void reg_write(HANDLE h, unsigned long off, unsigned long val){ AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; r.value=val; Ioctl(h,IOCTL_AVB_WRITE_REGISTER,&r,sizeof(r),&r,sizeof(r)); }
-
-// Timestamp via direct register reads to stay compatible with minimal driver IOCTL set
-static void ts_get(HANDLE h){ unsigned long hi=0, lo=0; // read high first to latch
-    if (read_reg(h, REG_SYSTIMH, &hi) && read_reg(h, REG_SYSTIML, &lo)) {
-        unsigned long long ts = ((unsigned long long)hi<<32) | lo;
-        printf("TS=0x%016llX\n", ts);
-    }
+// Timestamp via IOCTL (preferred). If IOCTL not supported, fallback to direct register reads.
+static void ts_get(HANDLE h){
+    AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL);
+    if (ok) { printf("TS(IOCTL)=0x%016llX\n", (unsigned long long)t.timestamp); return; }
+    unsigned long hi=0, lo=0; if (read_reg(h, REG_SYSTIMH, &hi) && read_reg(h, REG_SYSTIML, &lo)) { unsigned long long ts = ((unsigned long long)hi<<32)|lo; printf("TS=0x%016llX\n", ts); }
 }
 
 static void snapshot_i210(HANDLE h){
@@ -118,21 +110,43 @@ static void snapshot_i210(HANDLE h){
     if (read_reg(h, REG_TXSTMPH, &v))  printf("  TXSTMPH         = 0x%08lX\n", v);
 }
 
-// Stubs for unsupported features in current driver build
-static void tas_audio(HANDLE h){ (void)h; printf("TAS: not supported by current driver build\n"); }
-static void fp_on(HANDLE h){ (void)h; printf("FP: not supported by current driver build\n"); }
-static void fp_off(HANDLE h){ (void)h; printf("FP: not supported by current driver build\n"); }
-static void ptm_on(HANDLE h){ (void)h; printf("PTM: not supported by current driver build\n"); }
-static void ptm_off(HANDLE h){ (void)h; printf("PTM: not supported by current driver build\n"); }
-static void mdio_read_cmd(HANDLE h){ (void)h; printf("MDIO: not supported by current driver build\n"); }
+static int tas_audio(HANDLE h){
+    FILETIME ft; GetSystemTimeAsFileTime(&ft); ULARGE_INTEGER now; now.LowPart=ft.dwLowDateTime; now.HighPart=ft.dwHighDateTime;
+    unsigned long long start=((unsigned long long)now.QuadPart*100ULL)+1000000000ULL; // +1s
+    AVB_TAS_REQUEST q; ZeroMemory(&q,sizeof(q));
+    q.config.base_time_s = start/1000000000ULL;
+    q.config.base_time_ns = (unsigned long)(start%1000000000ULL);
+    q.config.cycle_time_s = 0;
+    q.config.cycle_time_ns = 125000; // 125us
+    q.config.gate_states[0] = 0x01; q.config.gate_durations[0]=62500; // 62.5us on
+    q.config.gate_states[1] = 0x00; q.config.gate_durations[1]=62500; // 62.5us off
+    DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_SETUP_TAS, &q, sizeof(q), &q, sizeof(q), &br, NULL);
+    if (ok) { printf("TAS OK (0x%lx)\n", q.status); return 1; }
+    if (GetLastError()==ERROR_INVALID_FUNCTION) { printf("TAS: not supported\n"); return 0; }
+    fprintf(stderr, "TAS failed (GLE=%lu)\n", GetLastError()); return 0;
+}
+
+static int fp_on(HANDLE h){ AVB_FP_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.preemptable_queues=0x01; r.config.min_fragment_size=128; r.config.verify_disable=0; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_FP,&r,sizeof(r),&r,sizeof(r),&br,NULL); if (ok) { printf("FP ON OK (0x%lx)\n", r.status); return 1; } if (GetLastError()==ERROR_INVALID_FUNCTION){ printf("FP: not supported\n"); return 0;} fprintf(stderr,"FP ON failed (GLE=%lu)\n", GetLastError()); return 0; }
+static int fp_off(HANDLE h){ AVB_FP_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.preemptable_queues=0x00; r.config.verify_disable=1; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_FP,&r,sizeof(r),&r,sizeof(r),&br,NULL); if (ok) { printf("FP OFF OK (0x%lx)\n", r.status); return 1; } if (GetLastError()==ERROR_INVALID_FUNCTION){ printf("FP: not supported\n"); return 0;} fprintf(stderr,"FP OFF failed (GLE=%lu)\n", GetLastError()); return 0; }
+
+static int ptm_on(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.enabled=1; r.config.clock_granularity=16; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_PTM,&r,sizeof(r),&r,sizeof(r),&br,NULL); if (ok) { printf("PTM ON OK (0x%lx)\n", r.status); return 1; } if (GetLastError()==ERROR_INVALID_FUNCTION){ printf("PTM: not supported\n"); return 0;} fprintf(stderr,"PTM ON failed (GLE=%lu)\n", GetLastError()); return 0; }
+static int ptm_off(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.enabled=0; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_PTM,&r,sizeof(r),&r,sizeof(r),&br,NULL); if (ok) { printf("PTM OFF OK (0x%lx)\n", r.status); return 1; } if (GetLastError()==ERROR_INVALID_FUNCTION){ printf("PTM: not supported\n"); return 0;} fprintf(stderr,"PTM OFF failed (GLE=%lu)\n", GetLastError()); return 0; }
+
+static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m)); m.page=0; m.reg=1; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_MDIO_READ,&m,sizeof(m),&m,sizeof(m),&br,NULL); if (ok) { printf("MDIO[0,1]=0x%04X (0x%lx)\n", m.value, m.status); return 1; } if (GetLastError()==ERROR_INVALID_FUNCTION){ printf("MDIO: not supported\n"); return 0;} fprintf(stderr,"MDIO failed (GLE=%lu)\n", GetLastError()); return 0; }
 
 static void usage(const char* e){
-    printf("Usage: %s [all|snapshot|info|reg-read <hexOff>|reg-write <hexOff> <hexVal>|ts-get]\n", e);
+    printf("Usage: %s [all|selftest|snapshot|info|reg-read <hexOff>|reg-write <hexOff> <hexVal>|ts-get]\n", e);
+}
+
+static int selftest(HANDLE h){ int base_ok=1; int optional_ok=1; test_device_info(h); snapshot_i210(h); ts_get(h);
+    if (!tas_audio(h)) optional_ok=0; if (!fp_on(h)) optional_ok=0; if (!fp_off(h)) optional_ok=0; if (!ptm_on(h)) optional_ok=0; if (!ptm_off(h)) optional_ok=0; if (!mdio_read_cmd(h)) optional_ok=0;
+    printf("\nSummary: base=%s, optional=%s\n", base_ok?"OK":"FAIL", optional_ok?"OK/Skipped":"FAIL");
+    return base_ok?0:1;
 }
 
 int main(int argc, char** argv){
     HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE) return 1; test_init(h);
-    if(argc<2 || _stricmp(argv[1],"all")==0){ test_device_info(h); snapshot_i210(h); CloseHandle(h); return 0; }
+    if(argc<2 || _stricmp(argv[1],"all")==0 || _stricmp(argv[1],"selftest")==0){ int rc=selftest(h); CloseHandle(h); return rc; }
     if(_stricmp(argv[1],"snapshot")==0){ snapshot_i210(h); }
     else if(_stricmp(argv[1],"info")==0){ test_device_info(h); }
     else if(_stricmp(argv[1],"reg-read")==0 && argc>=3){ reg_read(h,(unsigned long)strtoul(argv[2],NULL,16)); }
