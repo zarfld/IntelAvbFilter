@@ -215,15 +215,11 @@
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
   <ItemGroup>
-    <FilesToPackage Include="$(OutDir)IntelAvbFilter.cat" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <FilesToPackage Include="D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter.inf">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="$(OutDir)IntelAvbFilter.inf" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-      <PackageRelativeDirectory>
-      </PackageRelativeDirectory>
-    </FilesToPackage>
-    <FilesToPackage Include="$(OutDir)IntelAvbFilter.sys" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <FilesToPackage Include="D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter.sys">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
