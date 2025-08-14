@@ -1,0 +1,161 @@
+;-------------------------------------------------------------------------
+; IntelAvbFilter.INF -- Intel AVB NDIS LightWeight Filter Driver
+; 
+; This driver provides Audio/Video Bridging (AVB) and Time-Sensitive 
+; Networking (TSN) capabilities for Intel Ethernet controllers.
+;-------------------------------------------------------------------------
+
+[version]
+; Do not change these values
+Signature       = "$Windows NT$"
+Class           = NetService
+ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
+Provider        = %IntelCorp%
+DriverVer = 08/14/2025,8.46.25.335
+CatalogFile     = IntelAvbFilter.cat
+PnpLockdown     = 1   ; Prevent external modification of installed driver files
+
+; Supported architectures: x64 and ARM64 for modern Intel platforms
+; NTia64 section.
+[Manufacturer]
+%Msft%=MSFT,NTx86,NTia64,NTamd64,NTarm,NTarm64
+
+; MS_IntelAvbFilter can be used with netcfg.exe to install/uninstall the driver.
+[MSFT.NTx86]
+%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
+
+[MSFT.NTia64]
+%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
+
+[MSFT.NTamd64]
+%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
+
+[MSFT.NTarm]
+%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
+
+[MSFT.NTarm64]
+%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
+
+;-------------------------------------------------------------------------
+; Installation Section
+;-------------------------------------------------------------------------
+[Install]
+AddReg=Inst_Ndi,IntelAvbFilter_Service_Params
+; All LWFs must include the 0x40000 bit (NCF_LW_FILTER). Unlike miniports, you
+; don't usually need to customize this value.
+Characteristics=0x40000
+
+; This must be a random, unique value.
+; FILTER_UNIQUE_NAME in filter.h must match this GUID identically.
+; Both should have {curly braces}.
+NetCfgInstanceId="{3f74ae86-14f9-4e79-9445-5b1e52ccd192}"
+
+Copyfiles = IntelAvbFilter.copyfiles.sys
+
+[SourceDisksNames]
+1=%IntelAvbFilter_Desc%,"",,
+
+[SourceDisksFiles]
+; TODO: Include any related files that should be installed with your driver.
+IntelAvbFilter.sys=1
+
+[DestinationDirs]
+DefaultDestDir=12
+IntelAvbFilter.copyfiles.sys=13   ; %SystemRoot%\System32\drivers
+
+[IntelAvbFilter.copyfiles.sys]
+IntelAvbFilter.sys,,,2
+
+
+;-------------------------------------------------------------------------
+; Ndi installation support
+;-------------------------------------------------------------------------
+[Inst_Ndi]
+HKR, Ndi,Service,,"IntelAvbFilter"
+HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
+HKR, Ndi,ComponentId,,"MS_IntelAvbFilter" 
+HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
+; Set FilterClass to "scheduler" for AVB/TSN traffic shaping and timing control
+HKR, Ndi,FilterClass,, scheduler
+; This is a Modifying filter that can alter packet timing and content for AVB
+HKR, Ndi,FilterType,0x00010001, 2 ; Modifying filter
+; Do not change these values
+HKR, Ndi\Interfaces,UpperRange,,"noupper"
+HKR, Ndi\Interfaces,LowerRange,,"nolower"
+; Support Ethernet media types for Intel NICs
+; filters include "ethernet".  Filters may also include "ppip" to include
+HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet"
+; This is a Mandatory filter for Intel AVB-capable adapters
+HKR, Ndi,FilterRunType,0x00010001, 1 ; Mandatory filter
+
+[IntelAvbFilter_Service_Params]
+HKR,"Parameters","Default",   0x10001,0
+HKR,"Parameters","Type",      0x10001,1
+HKR,"Parameters","ParamDesc", 0, "Intel AVB Filter parameters"
+
+;-------------------------------------------------------------------------
+; Service installation support
+;-------------------------------------------------------------------------
+[Install.Services]
+; Start the service automatically to enable AVB functionality
+AddService=IntelAvbFilter,0x800,IntelAvbFilter_Service_Inst ; SPSVCINST_STARTSERVICE
+
+[IntelAvbFilter_Service_Inst]
+DisplayName     = %IntelAvbFilter_Desc%
+ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
+; Typically you will want your filter driver to start with SERVICE_SYSTEM_START.
+; If it is an Optional filter, you may also use 3;SERVICE_DEMAND_START.
+StartType       = 3 ;SERVICE_DEMAND_START
+ErrorControl    = 1 ;SERVICE_ERROR_NORMAL
+ServiceBinary   = %13%\IntelAvbFilter.sys
+LoadOrderGroup  = NDIS
+Description     = %IntelAvbFilter_Desc%
+AddReg          = Common.Params.reg, NdisImPlatformBindingOptions.reg
+
+[Install.Remove.Services]
+; The SPSVCINST_STOPSERVICE flag instructs SCM to stop the NT service
+; before uninstalling the driver.
+DelService=IntelAvbFilter,0x200 ; SPSVCINST_STOPSERVICE
+
+[Common.Params.reg]
+; TODO: You can add any sort of NDIS parameters here.  Filter drivers
+; don't always need NDIS parameters, so it's okay to have nothing here.
+
+; TODO: Remove the sample parameters below.
+
+; Sample 1: "DriverParam" is a per-driver parameter.
+;HKR, FilterDriverParams\DriverParam,     ParamDesc,   , "Driverparam for lwf"
+;HKR, FilterDriverParams\DriverParam,     default,     , "5"
+;HKR, FilterDriverParams\DriverParam,     type,        , "int"
+
+; Sample 2: "AdapterParam" is a per-module parameter.
+;HKR, FilterAdapterParams\AdapterParam,   ParamDesc,   , "Adapterparam for lwf"
+;HKR, FilterAdapterParams\AdapterParam,   default,     , "10"
+;HKR, FilterAdapterParams\AdapterParam,   type,        , "int"
+
+[NdisImPlatformBindingOptions.reg]
+; By default, when an LBFO team or Bridge is created, all filters will be
+; unbound from the underlying members and bound to the TNic(s). This keyword
+; allows a component to opt out of the default behavior
+; To prevent binding this filter to the TNic(s):
+;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,1 ; Do not bind to TNic
+; To prevent unbinding this filter from underlying members:
+;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,2 ; Do not unbind from Members
+; To prevent both binding to TNic and unbinding from members:
+;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,3 ; Do not bind to TNic or unbind from Members
+HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,0 ; Subscribe to default behavior
+
+
+
+[Strings]
+; Customized strings for Intel AVB Filter
+IntelCorp = "Intel Corporation"
+IntelAvbFilter_Desc = "Intel AVB/TSN NDIS Filter Driver"
+IntelAvbFilter_HelpText = "Intel Audio/Video Bridging and Time-Sensitive Networking Filter Driver for Intel Ethernet Controllers"
+Msft = "Microsoft"
+
+
+
+
+
+

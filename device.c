@@ -253,10 +253,38 @@ IntelAvbFilterDeviceIoControl(
             DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: AVB IOCTL=0x%x\n", 
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
             
-            // Find an Intel filter module to handle the request
+            // Try to find an Intel filter instance with initialized AVB context
             pFilter = AvbFindIntelFilterModule();
+
+            // If not found, iterate all filter instances and lazily initialize until one succeeds
+            if (pFilter == NULL)
+            {
+                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                Link = FilterModuleList.Flink;
+                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+
+                while (Link != &FilterModuleList)
+                {
+                    PMS_FILTER cand = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                    // Attempt lazy initialization if needed
+                    if (cand->AvbContext == NULL)
+                    {
+                        NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                        DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: Lazy init on %p status=0x%x\n", cand, initSt);
+                    }
+                    if (cand->AvbContext != NULL)
+                    {
+                        pFilter = cand;
+                        break;
+                    }
+                    FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                    Link = Link->Flink;
+                    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                }
+            }
+
             if (pFilter != NULL && pFilter->AvbContext != NULL) {
-                DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: Found Intel filter, processing IOCTL\n");
+                DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: Using filter %p for IOCTL\n", pFilter);
                 Status = AvbHandleDeviceIoControl((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, Irp);
                 InfoLength = (ULONG)Irp->IoStatus.Information;
                 DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: IOCTL processed, Status=0x%x, InfoLength=%lu\n", 
@@ -319,6 +347,10 @@ filterFindFilterModule(
    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
    return NULL;
 }
+
+
+
+
 
 
 
