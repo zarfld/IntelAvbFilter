@@ -2,11 +2,16 @@
 
 ## Working principles
 -- ensure you understand the architecture and patterns before coding
--- No Stubs, no Simulations, simplified code,
--- no assumtions (search for missing information, and ask if required)
--- prove and ensure correctness
+-- No Fake, No Stubs, no Simulations, simplified code allowed in productive Code
+-- no implementation based assumtions, use specification or analysis results (ask if required)
+-- no false advertising, prove and ensure correctness
 -- always use real hardware access patterns
 -- use Intel hardware specifications for register access
+-- code needs to compile before commit, no broken code
+-- Always reference the exact Intel datasheet section or spec version when implementing register access.
+-- Validate all hardware reads/writes with range checks or masks from the specification.
+-- Every function must have a Doxygen comment explaining purpose, parameters, return values, and hardware context.
+
 
 ## Architecture Overview
 
