@@ -1,5 +1,13 @@
 # Intel AVB Filter Driver - AI Coding Instructions
 
+## Working principles
+-- ensure you understand the architecture and patterns before coding
+-- No Stubs, no Simulations, simplified code,
+-- no assumtions (search for missing information, and ask if required)
+-- prove and ensure correctness
+-- always use real hardware access patterns
+-- use Intel hardware specifications for register access
+
 ## Architecture Overview
 
 This is a **Windows NDIS 6.30 lightweight filter driver** that bridges AVB/TSN capabilities between user applications and Intel Ethernet hardware. The key architectural insight is the **three-layer abstraction**:
