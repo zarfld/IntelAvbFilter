@@ -15,6 +15,8 @@ Abstract:
 #define _AVB_INTEGRATION_H_
 
 #include "precomp.h"
+/* Share IOCTL ABI (codes and request structs) with user-mode */
+#include "include/avb_ioctl.h"
 
 // Intel constants
 #define INTEL_VENDOR_ID         0x8086
@@ -47,27 +49,7 @@ typedef int clockid_t;
 // Hardware context for real MMIO access
 typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
 
-// TSN Configuration structures using Windows kernel types
-struct tsn_tas_config {
-    ULONGLONG base_time_s;
-    ULONG base_time_ns;
-    ULONG cycle_time_s;
-    ULONG cycle_time_ns;
-    UCHAR gate_states[8];
-    ULONG gate_durations[8];
-};
-
-struct tsn_fp_config {
-    UCHAR preemptable_queues;
-    ULONG min_fragment_size;
-    UCHAR verify_disable;
-};
-
-struct ptm_config {
-    UCHAR enabled;
-    ULONG clock_granularity;
-};
-
+// timespec used by intel_gettime
 struct timespec {
     LONG tv_sec;
     LONG tv_nsec;
@@ -85,22 +67,6 @@ struct timespec {
 #define I219_REG_1588_TS_LOW    0x15F84
 #define I219_REG_1588_TS_HIGH   0x15F88
 
-// AVB-specific IOCTLs
-#define IOCTL_AVB_INIT_DEVICE           _NDIS_CONTROL_CODE(20, METHOD_BUFFERED)
-#define IOCTL_AVB_GET_DEVICE_INFO       _NDIS_CONTROL_CODE(21, METHOD_BUFFERED)
-#define IOCTL_AVB_READ_REGISTER         _NDIS_CONTROL_CODE(22, METHOD_BUFFERED)
-#define IOCTL_AVB_WRITE_REGISTER        _NDIS_CONTROL_CODE(23, METHOD_BUFFERED)
-#define IOCTL_AVB_GET_TIMESTAMP         _NDIS_CONTROL_CODE(24, METHOD_BUFFERED)
-#define IOCTL_AVB_SET_TIMESTAMP         _NDIS_CONTROL_CODE(25, METHOD_BUFFERED)
-#define IOCTL_AVB_SETUP_TAS             _NDIS_CONTROL_CODE(26, METHOD_BUFFERED)
-#define IOCTL_AVB_SETUP_FP              _NDIS_CONTROL_CODE(27, METHOD_BUFFERED)
-#define IOCTL_AVB_SETUP_PTM             _NDIS_CONTROL_CODE(28, METHOD_BUFFERED)
-#define IOCTL_AVB_MDIO_READ             _NDIS_CONTROL_CODE(29, METHOD_BUFFERED)
-#define IOCTL_AVB_MDIO_WRITE            _NDIS_CONTROL_CODE(30, METHOD_BUFFERED)
-
-// Maximum device info buffer size
-#define MAX_AVB_DEVICE_INFO_SIZE        1024
-
 // AVB device context structure
 typedef struct _AVB_DEVICE_CONTEXT {
     device_t intel_device;
@@ -111,47 +77,6 @@ typedef struct _AVB_DEVICE_CONTEXT {
     NDIS_HANDLE miniport_handle;
     PINTEL_HARDWARE_CONTEXT hardware_context;  // Real hardware access context
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
-
-// IOCTL data structures
-typedef struct _AVB_DEVICE_INFO_REQUEST {
-    CHAR device_info[MAX_AVB_DEVICE_INFO_SIZE];
-    ULONG buffer_size;
-    NDIS_STATUS status;
-} AVB_DEVICE_INFO_REQUEST, *PAVB_DEVICE_INFO_REQUEST;
-
-typedef struct _AVB_REGISTER_REQUEST {
-    ULONG offset;
-    ULONG value;
-    NDIS_STATUS status;
-} AVB_REGISTER_REQUEST, *PAVB_REGISTER_REQUEST;
-
-typedef struct _AVB_TIMESTAMP_REQUEST {
-    ULONGLONG timestamp;
-    clockid_t clock_id;
-    NDIS_STATUS status;
-} AVB_TIMESTAMP_REQUEST, *PAVB_TIMESTAMP_REQUEST;
-
-typedef struct _AVB_TAS_REQUEST {
-    struct tsn_tas_config config;
-    NDIS_STATUS status;
-} AVB_TAS_REQUEST, *PAVB_TAS_REQUEST;
-
-typedef struct _AVB_FP_REQUEST {
-    struct tsn_fp_config config;
-    NDIS_STATUS status;
-} AVB_FP_REQUEST, *PAVB_FP_REQUEST;
-
-typedef struct _AVB_PTM_REQUEST {
-    struct ptm_config config;
-    NDIS_STATUS status;
-} AVB_PTM_REQUEST, *PAVB_PTM_REQUEST;
-
-typedef struct _AVB_MDIO_REQUEST {
-    ULONG page;
-    ULONG reg;
-    USHORT value;
-    NDIS_STATUS status;
-} AVB_MDIO_REQUEST, *PAVB_MDIO_REQUEST;
 
 // Function prototypes
 NTSTATUS AvbInitializeDevice(PMS_FILTER FilterModule, PAVB_DEVICE_CONTEXT *AvbContext);

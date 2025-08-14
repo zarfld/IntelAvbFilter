@@ -205,6 +205,7 @@
     <ResourceCompile Include="filter.rc" />
     <ClInclude Include="external\intel_avb\lib\intel.h" />
     <ClInclude Include="external\intel_avb\lib\intel_private.h" />
+    <ClInclude Include="include\avb_ioctl.h" />
     <ClInclude Include="precomp.h" />
     <ClInclude Include="filter.h" />
     <ClInclude Include="filteruser.h" />

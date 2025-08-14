@@ -13,6 +13,7 @@ Abstract:
 
 #include "precomp.h"
 #include "avb_integration.h"
+#include <ntstrsafe.h>
 
 // Platform operations structure (matches what Intel library expects)
 struct platform_ops {
@@ -169,7 +170,9 @@ AvbHandleDeviceIoControl(
             PAVB_DEVICE_INFO_REQUEST req = (PAVB_DEVICE_INFO_REQUEST)buffer;
             RtlZeroMemory(req->device_info, sizeof(req->device_info));
             int r = intel_get_device_info(&AvbContext->intel_device, req->device_info, sizeof(req->device_info));
-            req->buffer_size = (ULONG)strnlen(req->device_info, sizeof(req->device_info));
+            size_t cbLen = 0;
+            NTSTATUS lenSt = RtlStringCbLengthA(req->device_info, sizeof(req->device_info), &cbLen);
+            req->buffer_size = NT_SUCCESS(lenSt) ? (ULONG)cbLen : 0;
             req->status = (r == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
             information = sizeof(AVB_DEVICE_INFO_REQUEST);
             status = (r == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
@@ -183,7 +186,9 @@ AvbHandleDeviceIoControl(
     {
         if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) && outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
             PAVB_REGISTER_REQUEST req = (PAVB_REGISTER_REQUEST)buffer;
-            int result = intel_read_reg(&AvbContext->intel_device, req->offset, &req->value);
+            ULONG tmp = 0;
+            int result = intel_read_reg(&AvbContext->intel_device, req->offset, &tmp);
+            req->value = (avb_u32)tmp;
             req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
             information = sizeof(AVB_REGISTER_REQUEST);
             status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
