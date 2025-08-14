@@ -8,8 +8,8 @@
 extern "C" {
 #endif
 
-// Kernel-mode placeholder for user-mode AVB test files
-// Real user-mode tool is built separately via nmake and NOT included in the driver build.
+// Kernel-mode placeholder for the user-mode AVB test tool.
+// The real user-mode tool is built separately via nmake and is not part of the driver build.
 VOID AvbTestActual_KmBuildPlaceHolder(void)
 {
     // Intentionally empty

@@ -199,7 +199,6 @@
     <ClCompile Include="tools\avb_test\avb_test_actual.c" />
     <ClCompile Include="tools\avb_test\avb_test_app.c" />
     <ClCompile Include="tools\avb_test\avb_test_standalone.c" />
-    <ClCompile Include="tools\avb_test\avb_test_um.c" />
     <ClCompile Include="tools\avb_test\avb_test_user.c" />
     <ClCompile Include="tools\avb_test\avb_test_user_main.c" />
     <ClCompile Include="tsn_config.c" />

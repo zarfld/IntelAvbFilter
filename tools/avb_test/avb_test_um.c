@@ -1,6 +1,10 @@
 // User-mode AVB/TSN test tool implementation
 // Build only via: nmake -f tools\\avb_test\\avb_test.mak
-// This file must NOT be compiled as part of the kernel driver project.
+// This file must NOT be compiled as part of the kernel driver project
+
+#ifdef _KERNEL_MODE
+#error "tools/avb_test/avb_test_um.c must not be compiled in kernel-mode driver project"
+#endif
 
 #include <windows.h>
 #include <winioctl.h>
@@ -8,7 +12,12 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include "filteruser.h" // for _NDIS_CONTROL_CODE macro matching the driver
+
+// Define local _NDIS_CONTROL_CODE to match driver without pulling NDIS headers
+#ifndef _NDIS_CONTROL_CODE
+#define _NDIS_CONTROL_CODE(request,method) \
+            CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, request, method, FILE_ANY_ACCESS)
+#endif
 
 // IOCTLs (must exactly match avb_integration.h)
 #define IOCTL_AVB_INIT_DEVICE           _NDIS_CONTROL_CODE(20, METHOD_BUFFERED)
