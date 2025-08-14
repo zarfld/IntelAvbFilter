@@ -196,6 +196,11 @@
     <ClCompile Include="filter.c" />
     <ClCompile Include="device.c" />
     <ClCompile Include="flt_dbg.c" />
+    <ClCompile Include="tools\avb_test\avb_test_actual.c" />
+    <ClCompile Include="tools\avb_test\avb_test_app.c" />
+    <ClCompile Include="tools\avb_test\avb_test_standalone.c" />
+    <ClCompile Include="tools\avb_test\avb_test_user.c" />
+    <ClCompile Include="tools\avb_test\avb_test_user_main.c" />
     <ClCompile Include="tsn_config.c" />
     <ResourceCompile Include="filter.rc" />
     <ClInclude Include="external\intel_avb\lib\intel.h" />
@@ -250,6 +255,7 @@
     <None Include="README.md" />
     <None Include="Sign-Driver.ps1" />
     <None Include="TODO.md" />
+    <None Include="tools\avb_test\avb_test.mak" />
     <None Include="x64\Debug\IntelAvbFilter.cat" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
