@@ -270,21 +270,22 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             break;
         }
 
-        // Verify the media type is supported.  This is a last resort; the
-        // the filter should never have been bound to an unsupported miniport
-        // to begin with.  If this driver is marked as a Mandatory filter (which
-        // is the default for this sample; see the INF file), failing to attach
-        // here will leave the network adapter in an unusable state.
-        //
-        // Your setup/install code should not bind the filter to unsupported
-        // media types.
+        // Reject virtual/teamed/bridge adapters outright
+        if (IsUnsupportedTeamOrVirtualAdapter(AttachParameters))
+        {
+            DEBUGP(DL_INFO, "FilterAttach: Rejecting virtual/teamed adapter: %wZ\n", AttachParameters->BaseMiniportInstanceName);
+            Status = NDIS_STATUS_NOT_SUPPORTED;
+            break;
+        }
+
+        // Verify the media type is supported.
         if ((AttachParameters->MiniportMediaType != NdisMedium802_3)
                 && (AttachParameters->MiniportMediaType != NdisMediumWan)
                 && (AttachParameters->MiniportMediaType != NdisMediumWirelessWan))
         {
            DEBUGP(DL_ERROR, "Unsupported media type.\n");
 
-           Status = NDIS_STATUS_INVALID_PARAMETER;
+           Status = NDIS_STATUS_NOT_SUPPORTED;
            break;
         }
 
@@ -357,25 +358,27 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         // Initialize AVB context for Intel devices
         pFilter->AvbContext = NULL;
 
-        // Only attach AVB context for supported Intel controllers
+        // Only attach to supported Intel controllers; otherwise fail attach
         {
-            // Skip virtual or aggregated adapters (Multiplexor/Team/Bridge/Hyper-V vNIC)
-            if (IsUnsupportedTeamOrVirtualAdapter(AttachParameters)) {
-                DEBUGP(DL_INFO, "Skipping AVB init; unsupported virtual/teamed adapter: %wZ\n", AttachParameters->BaseMiniportInstanceName);
-            } else {
-                USHORT ven = 0, dev = 0;
-                if (AvbIsSupportedIntelController(pFilter, &ven, &dev)) {
-                    Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
-                    if (Status != STATUS_SUCCESS) {
-                        DEBUGP(DL_WARN, "Failed to initialize AVB context for 0x%04x:0x%04x: 0x%x\n", ven, dev, Status);
-                        // Do not fail attach, just continue without AVB on this NIC
-                        Status = NDIS_STATUS_SUCCESS;
-                    } else {
-                        DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
-                    }
-                } else {
-                    DEBUGP(DL_INFO, "Skipping AVB init; NIC not supported or not Intel: %wZ\n", &pFilter->MiniportFriendlyName);
-                }
+            USHORT ven = 0, dev = 0;
+            if (!AvbIsSupportedIntelController(pFilter, &ven, &dev))
+            {
+                DEBUGP(DL_INFO, "FilterAttach: Rejecting non-supported adapter: %wZ\n", &pFilter->MiniportFriendlyName);
+                Status = NDIS_STATUS_NOT_SUPPORTED;
+                break;
+            }
+
+            // Supported Intel controller: initialize AVB context
+            Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
+            if (Status != STATUS_SUCCESS)
+            {
+                DEBUGP(DL_WARN, "FilterAttach: Supported Intel NIC 0x%04x:0x%04x but AVB init failed (0x%x)\n", ven, dev, Status);
+                // Do not hard-fail the attach if AVB init fails; still allow basic filter attach
+                Status = NDIS_STATUS_SUCCESS;
+            }
+            else
+            {
+                DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
             }
         }
 
@@ -390,6 +393,10 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
     {
         if (pFilter != NULL)
         {
+            if (pFilter->AvbContext != NULL) {
+                AvbCleanupDevice((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+                pFilter->AvbContext = NULL;
+            }
             FILTER_FREE_MEM(pFilter);
         }
     }
@@ -1903,7 +1910,7 @@ Routine Description:
 
 Arguments:
 
-    FilterModuleContext - pointer to filter module context
+    FilterModuleContext - pointer to our filter module context
     NdisRequest - pointer to NDIS request
     Status - status of request completion
 
