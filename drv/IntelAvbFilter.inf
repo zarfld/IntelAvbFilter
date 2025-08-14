@@ -11,7 +11,7 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 08/14/2025,10.29.40.176
+DriverVer = 08/14/2025,23.27.47.225
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
@@ -85,8 +85,8 @@ HKR, Ndi\Interfaces,LowerRange,,"nolower"
 ; Support Ethernet media types for Intel NICs
 ; filters include "ethernet".  Filters may also include "ppip" to include
 HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet"
-; This is a Mandatory filter for Intel AVB-capable adapters
-HKR, Ndi,FilterRunType,0x00010001, 1 ; Mandatory filter
+; Make filter optional; FilterAttach will refuse unsupported/virtual adapters
+HKR, Ndi,FilterRunType,0x00010001, 0 ; Optional filter
 
 [IntelAvbFilter_Service_Params]
 HKR,"Parameters","Default",   0x10001,0
@@ -134,16 +134,9 @@ DelService=IntelAvbFilter,0x200 ; SPSVCINST_STOPSERVICE
 ;HKR, FilterAdapterParams\AdapterParam,   type,        , "int"
 
 [NdisImPlatformBindingOptions.reg]
-; By default, when an LBFO team or Bridge is created, all filters will be
-; unbound from the underlying members and bound to the TNic(s). This keyword
-; allows a component to opt out of the default behavior
-; To prevent binding this filter to the TNic(s):
-;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,1 ; Do not bind to TNic
-; To prevent unbinding this filter from underlying members:
-;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,2 ; Do not unbind from Members
-; To prevent both binding to TNic and unbinding from members:
-;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,3 ; Do not bind to TNic or unbind from Members
-HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,0 ; Subscribe to default behavior
+; Opt-out of binding to TNICs and avoid unbinding from members
+; 3 => Do not bind to TNic and do not unbind from Members
+HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,3
 
 
 
