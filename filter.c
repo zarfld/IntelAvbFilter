@@ -352,11 +352,22 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
 
         // Initialize AVB context for Intel devices
         pFilter->AvbContext = NULL;
-        Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
-        if (Status != STATUS_SUCCESS) {
-            DEBUGP(DL_WARN, "Failed to initialize AVB context: 0x%x\n", Status);
-            // Continue anyway, AVB functionality will be disabled
-            Status = NDIS_STATUS_SUCCESS;
+
+        // Only attach AVB context for supported Intel controllers
+        {
+            USHORT ven = 0, dev = 0;
+            if (AvbIsSupportedIntelController(pFilter, &ven, &dev)) {
+                Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
+                if (Status != STATUS_SUCCESS) {
+                    DEBUGP(DL_WARN, "Failed to initialize AVB context for 0x%04x:0x%04x: 0x%x\n", ven, dev, Status);
+                    // Do not fail attach, just continue without AVB on this NIC
+                    Status = NDIS_STATUS_SUCCESS;
+                } else {
+                    DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
+                }
+            } else {
+                DEBUGP(DL_INFO, "Skipping AVB init; NIC not supported or not Intel\n");
+            }
         }
 
         FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);

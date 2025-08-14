@@ -198,5 +198,6 @@ PMS_FILTER AvbFindIntelFilterModule(void);
 BOOLEAN AvbIsIntelDevice(USHORT vendor_id, USHORT device_id);
 BOOLEAN AvbIsFilterIntelAdapter(PMS_FILTER FilterInstance);
 intel_device_type_t AvbGetIntelDeviceType(USHORT device_id);
+BOOLEAN AvbIsSupportedIntelController(PMS_FILTER FilterModule, USHORT* OutVendorId, USHORT* OutDeviceId);
 
 #endif // _AVB_INTEGRATION_H_

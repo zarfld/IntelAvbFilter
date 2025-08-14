@@ -15,9 +15,98 @@ Abstract:
 #include "precomp.h"
 #include "avb_integration.h"
 
+static
+BOOLEAN
+WideContainsInsensitive(
+    _In_reads_(lenChars) const WCHAR* buf,
+    _In_ USHORT lenChars,
+    _In_ const WCHAR* needle
+)
+{
+    if (!buf || !needle || lenChars == 0) return FALSE;
+
+    // Compute needle length
+    USHORT nlen = 0;
+    while (needle[nlen] != L'\0') nlen++;
+    if (nlen == 0 || nlen > lenChars) return FALSE;
+
+    for (USHORT i = 0; i + nlen <= lenChars; ++i) {
+        BOOLEAN match = TRUE;
+        for (USHORT j = 0; j < nlen; ++j) {
+            WCHAR c1 = buf[i + j];
+            WCHAR c2 = needle[j];
+            // Uppercase ASCII letters for case-insensitive compare
+            if (c1 >= L'a' && c1 <= L'z') c1 = (WCHAR)(c1 - L'a' + L'A');
+            if (c2 >= L'a' && c2 <= L'z') c2 = (WCHAR)(c2 - L'a' + L'A');
+            if (c1 != c2) { match = FALSE; break; }
+        }
+        if (match) return TRUE;
+    }
+    return FALSE;
+}
+
+/**
+ * @brief Check if NIC is one of our supported Intel controllers using friendly name
+ */
+BOOLEAN
+AvbIsSupportedIntelController(
+    _In_ PMS_FILTER FilterModule,
+    _Out_opt_ USHORT* OutVendorId,
+    _Out_opt_ USHORT* OutDeviceId
+)
+{
+    if (OutVendorId) *OutVendorId = 0;
+    if (OutDeviceId) *OutDeviceId = 0;
+
+    if (FilterModule == NULL || FilterModule->MiniportFriendlyName.Buffer == NULL) {
+        return FALSE;
+    }
+
+    const WCHAR* name = FilterModule->MiniportFriendlyName.Buffer;
+    USHORT lenChars = (USHORT)(FilterModule->MiniportFriendlyName.Length / sizeof(WCHAR));
+
+    // Must contain "Intel"
+    if (!WideContainsInsensitive(name, lenChars, L"INTEL")) {
+        return FALSE;
+    }
+
+    if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID;
+
+    // Match specific controller families
+    if (WideContainsInsensitive(name, lenChars, L"I210")) {
+        if (OutDeviceId) *OutDeviceId = 0x1533; // representative I210 ID
+        return TRUE;
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I225")) {
+        if (OutDeviceId) *OutDeviceId = 0x15F2;
+        return TRUE;
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I226")) {
+        if (OutDeviceId) *OutDeviceId = 0x125B;
+        return TRUE;
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I219")) {
+        if (OutDeviceId) *OutDeviceId = 0x15B7;
+        return TRUE;
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I217")) {
+        if (OutDeviceId) *OutDeviceId = 0x153A;
+        return TRUE;
+    }
+
+    // Also accept common marketing names
+    if (WideContainsInsensitive(name, lenChars, L"ETHERNET CONNECTION I219") ||
+        WideContainsInsensitive(name, lenChars, L"ETHERNET CONNECTION I217")) {
+        if (OutDeviceId) *OutDeviceId = 0x15B7;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 /**
  * @brief Discover Intel controller hardware resources using NDIS patterns
- * Based on Microsoft Windows Driver Samples filter implementation
+ * Note: As an NDIS LWF we validate the controller but do not directly map BARs here.
  */
 NTSTATUS
 AvbDiscoverIntelControllerResources(
@@ -26,116 +115,30 @@ AvbDiscoverIntelControllerResources(
     _Out_ PULONG Bar0Length
 )
 {
-    NDIS_STATUS ndisStatus;
-    ULONG bytesProcessed = 0;
-    
-    // PCI configuration space structure for resource discovery
-    struct {
-        ULONG VendorId;
-        ULONG DeviceId;
-        ULONG Command;
-        ULONG Status;
-        ULONG RevisionId;
-        ULONG ClassCode;
-        ULONG CacheLineSize;
-        ULONG LatencyTimer;
-        ULONG HeaderType;
-        ULONG BIST;
-        ULONG BaseAddresses[6];  // BAR0-BAR5
-        ULONG CardbusCISPointer;
-        ULONG SubVendorId;
-        ULONG SubSystemId;
-        ULONG ExpansionROMBaseAddress;
-        ULONG CapabilitiesPointer;
-        ULONG Reserved1;
-        ULONG InterruptLine;
-        ULONG InterruptPin;
-        ULONG MinGrant;
-        ULONG MaxLatency;
-    } pciConfig;
-    
+    USHORT ven = 0, dev = 0;
+
     DEBUGP(DL_TRACE, "==>AvbDiscoverIntelControllerResources\n");
-    
+
     if (FilterModule == NULL || Bar0Address == NULL || Bar0Length == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
-    
-    // Initialize output parameters
+
     Bar0Address->QuadPart = 0;
     *Bar0Length = 0;
 
-    // Zero local buffer
-    RtlZeroMemory(&pciConfig, sizeof(pciConfig));
-
-    // IMPORTANT: Use the driver's internal OID helper to avoid invalid completion context
-    // This ensures the completion path uses FILTER_REQUEST with a valid event.
-    ndisStatus = filterDoInternalRequest(
-        FilterModule,
-        NdisRequestQueryInformation,
-        OID_GEN_PCI_DEVICE_CUSTOM_PROPERTIES,
-        &pciConfig,
-        sizeof(pciConfig),
-        0,      // OutputBufferLength for method requests only
-        0,      // MethodId not used for query
-        &bytesProcessed
-    );
-
-    if (ndisStatus != NDIS_STATUS_SUCCESS) {
-        DEBUGP(DL_ERROR, "Failed to query PCI configuration: 0x%x\n", ndisStatus);
-        return STATUS_UNSUCCESSFUL;
-    }
-    
-    // Validate we got enough data
-    if (bytesProcessed < sizeof(pciConfig)) {
-        DEBUGP(DL_WARN, "PCI config bytesReturned smaller than expected (%lu < %zu), continuing with parsed data\n", 
-               bytesProcessed, sizeof(pciConfig));
-    }
-    
-    // Verify this is an Intel device
-    if ((pciConfig.VendorId & 0xFFFF) != INTEL_VENDOR_ID) {
-        DEBUGP(DL_ERROR, "Not an Intel device: VendorId=0x%x\n", pciConfig.VendorId & 0xFFFF);
+    if (!AvbIsSupportedIntelController(FilterModule, &ven, &dev)) {
+        DEBUGP(DL_ERROR, "AvbDiscoverIntelControllerResources: Unsupported controller or non-Intel\n");
         return STATUS_DEVICE_NOT_READY;
     }
-    
-    // Extract BAR0 information (Intel controllers use BAR0 for MMIO)
-    ULONG bar0_raw = pciConfig.BaseAddresses[0];
-    
-    if (bar0_raw == 0) {
-        DEBUGP(DL_ERROR, "BAR0 is not configured\n");
-        return STATUS_DEVICE_NOT_READY;
-    }
-    
-    // Check if BAR0 is memory-mapped (bit 0 should be 0 for memory)
-    if (bar0_raw & 0x1) {
-        DEBUGP(DL_ERROR, "BAR0 is I/O space, not memory: 0x%x\n", bar0_raw);
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
-    }
-    
-    // Extract physical address (clear lower 4 bits which contain flags)
-    Bar0Address->QuadPart = bar0_raw & 0xFFFFFFF0;
-    
-    // Determine BAR0 length by standard PCI method
-    // Intel controllers typically use 128KB (0x20000) for MMIO
-    *Bar0Length = 0x20000;  // 128KB - standard for Intel I210/I219/I225/I226
-    
-    // Verify the address is reasonable
-    if (Bar0Address->QuadPart == 0 || Bar0Address->QuadPart == 0xFFFFFFF0) {
-        DEBUGP(DL_ERROR, "Invalid BAR0 address: 0x%llx\n", Bar0Address->QuadPart);
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
-    }
-    
-    DEBUGP(DL_INFO, "Intel controller resources discovered:\n");
-    DEBUGP(DL_INFO, "  VendorId: 0x%x\n", pciConfig.VendorId & 0xFFFF);
-    DEBUGP(DL_INFO, "  BAR0 Address: 0x%llx, Length: 0x%x\n", 
-           Bar0Address->QuadPart, *Bar0Length);
-    
-    DEBUGP(DL_TRACE, "<==AvbDiscoverIntelControllerResources: Success\n");
-    return STATUS_SUCCESS;
+
+    DEBUGP(DL_INFO, "Intel controller detected (VendorId=0x%04x, DeviceId=0x%04x); BAR0 mapping not available in LWF context\n", ven, dev);
+
+    DEBUGP(DL_TRACE, "<==AvbDiscoverIntelControllerResources (no BAR mapping)\n");
+    return STATUS_NOT_SUPPORTED;
 }
 
 /**
  * @brief Enhanced initialization with Microsoft NDIS patterns for BAR0 discovery
- * Replaces the TODO placeholder in the original AvbInitializeDevice
  */
 NTSTATUS
 AvbInitializeDeviceWithBar0Discovery(
@@ -147,7 +150,7 @@ AvbInitializeDeviceWithBar0Discovery(
     NTSTATUS status;
     PHYSICAL_ADDRESS bar0_address = { 0 };
     ULONG bar0_length = 0;
-    
+
     DEBUGP(DL_TRACE, "==>AvbInitializeDeviceWithBar0Discovery\n");
 
     *AvbContext = NULL;
@@ -176,22 +179,20 @@ AvbInitializeDeviceWithBar0Discovery(
     context->intel_device.private_data = context;
     context->intel_device.pci_vendor_id = INTEL_VENDOR_ID;
 
-    // NEW: BAR0 discovery using Microsoft NDIS patterns
+    // Validate controller and (optionally) discover resources
     status = AvbDiscoverIntelControllerResources(FilterModule, &bar0_address, &bar0_length);
     if (NT_SUCCESS(status)) {
-        // Map Intel controller memory using discovered BAR0
         status = AvbMapIntelControllerMemory(context, bar0_address, bar0_length);
         if (NT_SUCCESS(status)) {
             context->hw_access_enabled = TRUE;
-            DEBUGP(DL_INFO, "Real hardware access enabled: BAR0=0x%llx, Length=0x%x\n", 
+            DEBUGP(DL_INFO, "Real hardware access enabled: BAR0=0x%llx, Length=0x%x\n",
                    bar0_address.QuadPart, bar0_length);
         } else {
             DEBUGP(DL_ERROR, "Failed to map Intel controller memory: 0x%x\n", status);
-            // Continue without hardware access - graceful degradation
         }
     } else {
-        DEBUGP(DL_ERROR, "Failed to discover Intel controller resources: 0x%x\n", status);
-        // Continue without hardware access - graceful degradation
+        // STATUS_NOT_SUPPORTED expected: run with simulation fallback
+        DEBUGP(DL_WARN, "Hardware BAR mapping not available (status=0x%x); using simulation fallback if needed\n", status);
     }
 
     context->initialized = TRUE;
@@ -202,10 +203,6 @@ AvbInitializeDeviceWithBar0Discovery(
     return STATUS_SUCCESS;
 }
 
-/**
- * @brief Alternative resource discovery using WMI/Registry approach
- * Backup method if direct OID queries fail
- */
 NTSTATUS
 AvbDiscoverIntelControllerResourcesAlternative(
     _In_ PMS_FILTER FilterModule,
@@ -214,22 +211,12 @@ AvbDiscoverIntelControllerResourcesAlternative(
 )
 {
     UNREFERENCED_PARAMETER(FilterModule);
-    
+    UNREFERENCED_PARAMETER(Bar0Address);
+    UNREFERENCED_PARAMETER(Bar0Length);
+
     DEBUGP(DL_TRACE, "==>AvbDiscoverIntelControllerResourcesAlternative\n");
-    
-    // For Intel controllers, we can use known safe defaults if discovery fails
-    // This provides a fallback for development and testing
-    
-    // Initialize with safe defaults for Intel controllers
-    Bar0Address->QuadPart = 0;  // Will be filled by registry lookup if available
-    *Bar0Length = 0x20000;      // 128KB - standard Intel controller MMIO size
-    
-    // TODO: Implement registry-based resource discovery as fallback
-    // This would involve querying the Windows registry for PCI device information
-    // under HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\PCI\...
-    
-    DEBUGP(DL_WARN, "Alternative resource discovery not yet implemented\n");
+    DEBUGP(DL_WARN, "Alternative resource discovery not implemented for LWF context\n");
     DEBUGP(DL_TRACE, "<==AvbDiscoverIntelControllerResourcesAlternative: Not implemented\n");
-    
+
     return STATUS_NOT_IMPLEMENTED;
 }
