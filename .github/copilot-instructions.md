@@ -11,7 +11,15 @@
 -- Always reference the exact Intel datasheet section or spec version when implementing register access.
 -- Validate all hardware reads/writes with range checks or masks from the specification.
 -- Every function must have a Doxygen comment explaining purpose, parameters, return values, and hardware context.
-
+-- no duplicate or redundant implementations to avoid inconsistencies and confusion; use centralized, reusable functions instead
+-- no ad-hoc file copies (e.g., *_fixed, *_new, *_correct); refactor in place step-by-step to avoid breakage
+-- Clean submit rules:
+   - each commit compiles and passes checks
+   - small, single-purpose, reviewable diffs (no WIP noise)
+   - no dead or commented-out code; remove unused files
+   - run formatter and static analysis before commit
+   - update docs/tests and reference the spec/issue in the message
+   - use feature flags or compatibility layers when incremental changes risk breakage
 
 ## Architecture Overview
 
