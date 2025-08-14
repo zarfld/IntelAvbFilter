@@ -134,7 +134,7 @@ AvbHandleDeviceIoControl(
     PIO_STACK_LOCATION irpSp;
     NTSTATUS status = STATUS_SUCCESS;
     ULONG ioControlCode;
-    PUCHAR inputBuffer, outputBuffer;
+    PUCHAR buffer;
     ULONG inputBufferLength, outputBufferLength;
     ULONG_PTR information = 0;
 
@@ -153,22 +153,17 @@ AvbHandleDeviceIoControl(
     
     DEBUGP(DL_TRACE, "==>AvbHandleDeviceIoControl: IOCTL=0x%x\n", ioControlCode);
     
-    inputBuffer = outputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
+    buffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
     inputBufferLength = irpSp->Parameters.DeviceIoControl.InputBufferLength;
     outputBufferLength = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
 
     switch (ioControlCode) {
-        
         case IOCTL_AVB_INIT_DEVICE:
         {
             if (!AvbContext->hw_access_enabled) {
                 int result = intel_init(&AvbContext->intel_device);
-                if (result == 0) {
-                    AvbContext->hw_access_enabled = TRUE;
-                    status = STATUS_SUCCESS;
-                } else {
-                    status = STATUS_UNSUCCESSFUL;
-                }
+                AvbContext->hw_access_enabled = (result == 0) ? TRUE : FALSE;
+                status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                 DEBUGP(DL_TRACE, "AVB device initialized, result=%d\n", result);
             }
             break;
@@ -177,15 +172,14 @@ AvbHandleDeviceIoControl(
         case IOCTL_AVB_GET_DEVICE_INFO:
         {
             if (outputBufferLength >= sizeof(AVB_DEVICE_INFO_REQUEST)) {
-                PAVB_DEVICE_INFO_REQUEST req = (PAVB_DEVICE_INFO_REQUEST)outputBuffer;
+                PAVB_DEVICE_INFO_REQUEST req = (PAVB_DEVICE_INFO_REQUEST)buffer;
                 RtlZeroMemory(req->device_info, sizeof(req->device_info));
-                // Compose device info string via Intel library helper
                 int r = intel_get_device_info(&AvbContext->intel_device, req->device_info, sizeof(req->device_info));
                 req->buffer_size = (ULONG)strnlen(req->device_info, sizeof(req->device_info));
                 req->status = (r == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_DEVICE_INFO_REQUEST);
                 status = (r == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-                DEBUGP(DL_TRACE, "GET_DEVICE_INFO: result=%d, size=%lu, text=\"%s\"\n", r, req->buffer_size, req->device_info);
+                DEBUGP(DL_TRACE, "GET_DEVICE_INFO: result=%d, size=%lu\n", r, req->buffer_size);
             } else {
                 status = STATUS_BUFFER_TOO_SMALL;
             }
@@ -194,18 +188,17 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_READ_REGISTER:
         {
-            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
-                PAVB_REGISTER_REQUEST request = (PAVB_REGISTER_REQUEST)outputBuffer; // echo style
-                DEBUGP(DL_TRACE, "READ_REGISTER offset=0x%x\n", request->offset);
-                int result = intel_read_reg(&AvbContext->intel_device, request->offset, &request->value);
-                request->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
+            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) && outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
+                PAVB_REGISTER_REQUEST req = (PAVB_REGISTER_REQUEST)buffer; // METHOD_BUFFERED echo
+                DEBUGP(DL_TRACE, "READ_REGISTER offset=0x%x\n", req->offset);
+                int result = intel_read_reg(&AvbContext->intel_device, req->offset, &req->value);
+                req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_REGISTER_REQUEST);
                 status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                 if (result == 0) {
-                    DEBUGP(DL_TRACE, "READ_REGISTER successful, value=0x%x\n", request->value);
+                    DEBUGP(DL_TRACE, "READ_REGISTER OK, value=0x%x\n", req->value);
                 } else {
-                    DEBUGP(DL_ERROR, "READ_REGISTER failed, offset=0x%x, result=%d\n", request->offset, result);
+                    DEBUGP(DL_ERROR, "READ_REGISTER failed, off=0x%x, res=%d\n", req->offset, result);
                 }
             } else {
                 status = STATUS_BUFFER_TOO_SMALL;
@@ -215,12 +208,11 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_WRITE_REGISTER:
         {
-            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
-                PAVB_REGISTER_REQUEST request = (PAVB_REGISTER_REQUEST)outputBuffer; // echo style
-                DEBUGP(DL_TRACE, "WRITE_REGISTER offset=0x%x, value=0x%x\n", request->offset, request->value);
-                int result = intel_write_reg(&AvbContext->intel_device, request->offset, request->value);
-                request->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
+            if (inputBufferLength >= sizeof(AVB_REGISTER_REQUEST) && outputBufferLength >= sizeof(AVB_REGISTER_REQUEST)) {
+                PAVB_REGISTER_REQUEST req = (PAVB_REGISTER_REQUEST)buffer; // METHOD_BUFFERED echo
+                DEBUGP(DL_TRACE, "WRITE_REGISTER offset=0x%x, value=0x%x\n", req->offset, req->value);
+                int result = intel_write_reg(&AvbContext->intel_device, req->offset, req->value);
+                req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_REGISTER_REQUEST);
                 status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
             } else {
@@ -231,14 +223,12 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_GET_TIMESTAMP:
         {
-            if (inputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST)) {
-                PAVB_TIMESTAMP_REQUEST req = (PAVB_TIMESTAMP_REQUEST)outputBuffer; // echo style
+            if (inputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST) && outputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST)) {
+                PAVB_TIMESTAMP_REQUEST req = (PAVB_TIMESTAMP_REQUEST)buffer; // METHOD_BUFFERED echo
                 ULONGLONG curtime = 0;
                 struct timespec sys = {0};
                 int result = intel_gettime(&AvbContext->intel_device, req->clock_id, &curtime, &sys);
                 if (result != 0) {
-                    // Fallback to direct hardware read if library call fails
                     result = AvbReadTimestamp(&AvbContext->intel_device, &curtime);
                 }
                 req->timestamp = curtime;
@@ -254,14 +244,13 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_SET_TIMESTAMP:
         {
-            if (inputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST)) {
-                PAVB_TIMESTAMP_REQUEST req = (PAVB_TIMESTAMP_REQUEST)outputBuffer; // echo style
+            if (inputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST) && outputBufferLength >= sizeof(AVB_TIMESTAMP_REQUEST)) {
+                PAVB_TIMESTAMP_REQUEST req = (PAVB_TIMESTAMP_REQUEST)buffer; // METHOD_BUFFERED echo
                 int result = intel_set_systime(&AvbContext->intel_device, req->timestamp);
                 req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_TIMESTAMP_REQUEST);
                 status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-                DEBUGP(DL_TRACE, "SET_TIMESTAMP: result=%d, ts=0x%llx\n", result, req->timestamp);
+                DEBUGP(DL_TRACE, "SET_TIMESTAMP: result=%d\n", result);
             } else {
                 status = STATUS_BUFFER_TOO_SMALL;
             }
@@ -270,9 +259,8 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_SETUP_TAS:
         {
-            if (inputBufferLength >= sizeof(AVB_TAS_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_TAS_REQUEST)) {
-                PAVB_TAS_REQUEST req = (PAVB_TAS_REQUEST)outputBuffer; // echo style
+            if (inputBufferLength >= sizeof(AVB_TAS_REQUEST) && outputBufferLength >= sizeof(AVB_TAS_REQUEST)) {
+                PAVB_TAS_REQUEST req = (PAVB_TAS_REQUEST)buffer; // METHOD_BUFFERED echo
                 int result = intel_setup_time_aware_shaper(&AvbContext->intel_device, &req->config);
                 req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_TAS_REQUEST);
@@ -286,9 +274,8 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_SETUP_FP:
         {
-            if (inputBufferLength >= sizeof(AVB_FP_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_FP_REQUEST)) {
-                PAVB_FP_REQUEST req = (PAVB_FP_REQUEST)outputBuffer; // echo style
+            if (inputBufferLength >= sizeof(AVB_FP_REQUEST) && outputBufferLength >= sizeof(AVB_FP_REQUEST)) {
+                PAVB_FP_REQUEST req = (PAVB_FP_REQUEST)buffer; // METHOD_BUFFERED echo
                 int result = intel_setup_frame_preemption(&AvbContext->intel_device, &req->config);
                 req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_FP_REQUEST);
@@ -302,9 +289,8 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_SETUP_PTM:
         {
-            if (inputBufferLength >= sizeof(AVB_PTM_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_PTM_REQUEST)) {
-                PAVB_PTM_REQUEST req = (PAVB_PTM_REQUEST)outputBuffer; // echo style
+            if (inputBufferLength >= sizeof(AVB_PTM_REQUEST) && outputBufferLength >= sizeof(AVB_PTM_REQUEST)) {
+                PAVB_PTM_REQUEST req = (PAVB_PTM_REQUEST)buffer; // METHOD_BUFFERED echo
                 int result = intel_setup_ptm(&AvbContext->intel_device, &req->config);
                 req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_PTM_REQUEST);
@@ -318,9 +304,8 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_MDIO_READ:
         {
-            if (inputBufferLength >= sizeof(AVB_MDIO_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_MDIO_REQUEST)) {
-                PAVB_MDIO_REQUEST req = (PAVB_MDIO_REQUEST)outputBuffer; // echo style
+            if (inputBufferLength >= sizeof(AVB_MDIO_REQUEST) && outputBufferLength >= sizeof(AVB_MDIO_REQUEST)) {
+                PAVB_MDIO_REQUEST req = (PAVB_MDIO_REQUEST)buffer; // METHOD_BUFFERED echo
                 USHORT val = 0;
                 int result = intel_mdio_read(&AvbContext->intel_device, req->page, req->reg, &val);
                 req->value = val;
@@ -336,9 +321,8 @@ AvbHandleDeviceIoControl(
 
         case IOCTL_AVB_MDIO_WRITE:
         {
-            if (inputBufferLength >= sizeof(AVB_MDIO_REQUEST) && 
-                outputBufferLength >= sizeof(AVB_MDIO_REQUEST)) {
-                PAVB_MDIO_REQUEST req = (PAVB_MDIO_REQUEST)outputBuffer; // echo style
+            if (inputBufferLength >= sizeof(AVB_MDIO_REQUEST) && outputBufferLength >= sizeof(AVB_MDIO_REQUEST)) {
+                PAVB_MDIO_REQUEST req = (PAVB_MDIO_REQUEST)buffer; // METHOD_BUFFERED echo
                 int result = intel_mdio_write(&AvbContext->intel_device, req->page, req->reg, req->value);
                 req->status = (result == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
                 information = sizeof(AVB_MDIO_REQUEST);
@@ -526,7 +510,6 @@ AvbIsFilterIntelAdapter(
         return FALSE;
     }
     
-    // For simplified implementation, assume any filter instance with AVB context is Intel
     if (FilterInstance->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT context = (PAVB_DEVICE_CONTEXT)FilterInstance->AvbContext;
         return (context->intel_device.pci_vendor_id == INTEL_VENDOR_ID);

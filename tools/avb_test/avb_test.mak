@@ -11,7 +11,7 @@ PLATFORM=x64
 OUTDIR=build\tools\avb_test\$(PLATFORM)\$(CFG)
 CC=cl
 LD=link
-CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /I.
+CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_TEST_USERMODE /I.
 LDFLAGS=/nologo /DEBUG
 LIBS=kernel32.lib user32.lib advapi32.lib
 
