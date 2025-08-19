@@ -20,6 +20,12 @@
    - run formatter and static analysis before commit
    - update docs/tests and reference the spec/issue in the message
    - use feature flags or compatibility layers when incremental changes risk breakage
+-- Avoid unnecessary duplication. Duplication is acceptable when it improves clarity, isolates modules, or is required for performance.
+-- Avoid code that is difficult to understand. Prefer clear naming and structure over excessive comments or unnecessary helper variables.
+-- Avoid unnecessary complexity. Keep required abstractions for maintainability, testability, or hardware safety
+-- Design modules so that changes in one module do not require changes in unrelated modules. Avoid dependencies that cause single changes to break multiple areas.
+-- Design components for reuse where practical, but prioritize correctness and domain fit over forced generalization.
+-- Prefer incremental modification of existing code over reimplementation; adapt existing functions instead of creating redundant new ones
 
 ## Architecture Overview
 
