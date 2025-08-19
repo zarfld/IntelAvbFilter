@@ -17,3 +17,6 @@
 [submodule "external/windows_driver_samples"]
 	path = external/windows_driver_samples
 	url = https://github.com/microsoft/Windows-driver-samples.git
+[submodule "intel-ethernet-regs"]
+	path = intel-ethernet-regs
+	url = https://github.com/zarfld/intel-ethernet-regs.git
