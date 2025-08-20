@@ -12,6 +12,9 @@ extern "C" {
 /* ABI versioning for coordination across components */
 #define AVB_IOCTL_ABI_VERSION 0x00010000u
 
+/* Bring in SSOT TSN/PTM types */
+#include "external/intel_avb/lib/intel.h"
+
 /* Basic fixed-width types for UM/KM */
 #if defined(_KERNEL_MODE)
   #include <ntdef.h>
@@ -68,42 +71,19 @@ typedef struct AVB_TIMESTAMP_REQUEST {
     avb_u32 status;    /* NDIS_STATUS value */
 } AVB_TIMESTAMP_REQUEST, *PAVB_TIMESTAMP_REQUEST;
 
-/* TSN/FP/PTM config structures */
-typedef struct tsn_tas_config {
-    avb_u64 base_time_s;
-    avb_u32 base_time_ns;
-    avb_u32 cycle_time_s;
-    avb_u32 cycle_time_ns;
-    avb_u8  gate_states[8];
-    avb_u32 gate_durations[8];
-} tsn_tas_config;
-
-typedef struct tsn_fp_config {
-    avb_u8  preemptable_queues;
-    /* padding to 4-byte alignment occurs naturally */
-    avb_u32 min_fragment_size;
-    avb_u8  verify_disable;
-    /* implicit padding to 12 bytes total under default packing */
-} tsn_fp_config;
-
-typedef struct ptm_config {
-    avb_u8  enabled;
-    avb_u32 clock_granularity;
-    /* implicit padding to 8 bytes total under default packing */
-} ptm_config;
-
+/* TSN/FP/PTM config request wrappers using SSOT types */
 typedef struct AVB_TAS_REQUEST {
-    tsn_tas_config config;
+    struct tsn_tas_config config;
     avb_u32        status; /* NDIS_STATUS value */
 } AVB_TAS_REQUEST, *PAVB_TAS_REQUEST;
 
 typedef struct AVB_FP_REQUEST {
-    tsn_fp_config  config;
+    struct tsn_fp_config  config;
     avb_u32        status; /* NDIS_STATUS value */
 } AVB_FP_REQUEST, *PAVB_FP_REQUEST;
 
 typedef struct AVB_PTM_REQUEST {
-    ptm_config     config;
+    struct ptm_config     config;
     avb_u32        status; /* NDIS_STATUS value */
 } AVB_PTM_REQUEST, *PAVB_PTM_REQUEST;
 

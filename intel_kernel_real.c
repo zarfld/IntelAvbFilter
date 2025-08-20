@@ -14,6 +14,7 @@ Abstract:
 
 #include "precomp.h"
 #include "avb_integration.h"
+#include "external/intel_avb/lib/intel_private.h"
 
 // Platform operations structure (matches what Intel library expects)
 struct platform_ops {
@@ -214,6 +215,10 @@ int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct ti
 
 /**
  * @brief Set system time (real hardware access)
+ * Note: Uses common INTEL_REG_SYSTIML/H (0x0B600/0x0B604) from SSOT/common
+ * for devices that support MMIO timestamp. I219 may require MDIO-based access;
+ * in that case, intel_i219.c implements proper handling via MDIO and this path
+ * is not used.
  */
 int intel_set_systime(device_t *dev, ULONGLONG systime)
 {
@@ -236,33 +241,21 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     ts_low = (ULONG)(systime & 0xFFFFFFFF);
     ts_high = (ULONG)((systime >> 32) & 0xFFFFFFFF);
     
-    // Write timestamp based on device type - REAL HARDWARE ACCESS
     switch (context->intel_device.device_type) {
         case INTEL_DEVICE_I210:
-            // I210 IEEE 1588 timestamp registers
-            result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);  // SYSTIML
-            if (result != 0) return result;
-            result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high); // SYSTIMH
-            if (result != 0) return result;
-            break;
-            
-        case INTEL_DEVICE_I219:
-            // I219 IEEE 1588 timestamp registers
-            result = ndis_platform_ops.mmio_write(dev, I219_REG_1588_TS_LOW, ts_low);
-            if (result != 0) return result;
-            result = ndis_platform_ops.mmio_write(dev, I219_REG_1588_TS_HIGH, ts_high);
-            if (result != 0) return result;
-            break;
-            
         case INTEL_DEVICE_I225:
         case INTEL_DEVICE_I226:
-            // I225/I226 IEEE 1588 timestamp registers
-            result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);  // SYSTIML
+            // Use common SYSTIML/H from SSOT/common
+            result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIML, ts_low);
             if (result != 0) return result;
-            result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high); // SYSTIMH
+            result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIMH, ts_high);
             if (result != 0) return result;
             break;
-            
+        case INTEL_DEVICE_I219:
+        case INTEL_DEVICE_I217:
+            // I219/I217: MMIO timestamp may not be directly writable; handled via MDIO in intel_i219.c/intel_i217.c.
+            DEBUGP(DL_ERROR, "intel_set_systime: Device type requires MDIO-based timestamp handling\n");
+            return -1;
         default:
             DEBUGP(DL_ERROR, "Unsupported device type for timestamp write: %d\n", 
                    context->intel_device.device_type);
@@ -272,6 +265,11 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     DEBUGP(DL_TRACE, "<==intel_set_systime: Hardware timestamp written successfully\n");
     return 0;
 }
+
+/*
+ * Note: TAS/FP/PTM offsets used below are not yet provided by SSOT i225/i226 headers.
+ * They must be validated against Intel datasheets before upstreaming into SSOT.
+ */
 
 /**
  * @brief Setup Time Aware Shaper (real hardware access)

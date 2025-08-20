@@ -21,51 +21,8 @@ Abstract:
 // Intel constants
 #define INTEL_VENDOR_ID         0x8086
 
-// Forward declarations using Windows kernel types
-typedef enum {
-    INTEL_DEVICE_I210,
-    INTEL_DEVICE_I217,
-    INTEL_DEVICE_I219,
-    INTEL_DEVICE_I225,
-    INTEL_DEVICE_I226,
-    INTEL_DEVICE_UNKNOWN
-} intel_device_type_t;
-
-typedef struct _device_t {
-    PVOID private_data;
-    PUCHAR hw_addr;             // Hardware MMIO base address
-    USHORT pci_vendor_id;
-    USHORT pci_device_id;
-    USHORT domain;
-    UCHAR bus;
-    UCHAR dev;
-    UCHAR func;
-    intel_device_type_t device_type;
-    ULONG capabilities;
-} device_t;
-
-typedef int clockid_t;
-
 // Hardware context for real MMIO access
 typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
-
-// timespec used by intel_gettime
-struct timespec {
-    LONG tv_sec;
-    LONG tv_nsec;
-};
-
-// Intel register definitions (from I210/IGB specifications)
-#define E1000_SYSTIMR           0x0B6F8  /* System time register Residue (latch) */
-#define E1000_SYSTIML           0x0B600  /* System time register Low */
-#define E1000_SYSTIMH           0x0B604  /* System time register High */
-#define E1000_TIMINCA           0x0B608  /* Increment attributes register */
-
-// I219 register definitions for direct MDIO access
-#define I219_REG_MDIO_CTRL      0x12018
-#define I219_REG_MDIO_DATA      0x1201C
-#define I219_REG_1588_TS_LOW    0x15F84
-#define I219_REG_1588_TS_HIGH   0x15F88
 
 // AVB device context structure
 typedef struct _AVB_DEVICE_CONTEXT {

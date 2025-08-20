@@ -60,6 +60,24 @@
     <ClInclude Include="external\intel_avb\lib\intel_private.h">
       <Filter>Intel AVB Library\header</Filter>
     </ClInclude>
+    <ClInclude Include="include\avb_ioctl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="intel-ethernet-regs\gen\i210_regs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="intel-ethernet-regs\gen\i217_regs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="intel-ethernet-regs\gen\i219_regs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="intel-ethernet-regs\gen\i225_regs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="intel-ethernet-regs\gen\i226_regs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="filter.c">
@@ -90,6 +108,24 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="avb_bar0_enhanced.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="avb_test_i210.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\avb_test\avb_test_actual.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\avb_test\avb_test_app.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\avb_test\avb_test_standalone.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\avb_test\avb_test_user.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\avb_test\avb_test_user_main.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -147,5 +183,8 @@
     <None Include="Sign-Driver.ps1" />
     <None Include="Manage-Certificate.ps1" />
     <None Include="Build-And-Sign-Driver.ps1" />
+    <None Include="Makefile.avb_tests" />
+    <None Include="tools\avb_test\avb_test.mak" />
+    <None Include="x64\Debug\IntelAvbFilter.cat" />
   </ItemGroup>
 </Project>
