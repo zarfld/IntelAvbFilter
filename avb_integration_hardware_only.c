@@ -336,28 +336,46 @@ int AvbMmioWriteHardwareOnly(device_t *dev, ULONG offset, ULONG value)
  */
 int AvbReadTimestampHardwareOnly(device_t *dev, ULONGLONG *timestamp)
 {
-    ULONG timestamp_low, timestamp_high;
+    ULONG timestamp_low = 0, timestamp_high = 0;
     int result;
+    PAVB_DEVICE_CONTEXT context;
     
     if (dev == NULL || timestamp == NULL) {
         DEBUGP(DL_ERROR, "? AvbReadTimestampHardwareOnly: Invalid parameters\n");
         return -EINVAL;
     }
-    
-    // ? NO FALLBACK: Must read from real hardware registers
-    
-    // Read timestamp high register first (latches the value)
-    result = AvbMmioReadHardwareOnly(dev, INTEL_REG_SYSTIMH, &timestamp_high);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "? AvbReadTimestampHardwareOnly: Failed to read timestamp high register\n");
-        return result;  // ? EXPLICIT FAILURE
+    context = (PAVB_DEVICE_CONTEXT)dev->private_data;
+    if (!context) {
+        return -ENODEV;
     }
-    
-    // Read timestamp low register
-    result = AvbMmioReadHardwareOnly(dev, INTEL_REG_SYSTIML, &timestamp_low);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "? AvbReadTimestampHardwareOnly: Failed to read timestamp low register\n");
-        return result;  // ? EXPLICIT FAILURE
+
+    // ? NO FALLBACK: Must read from real hardware registers
+    switch (context->intel_device.device_type) {
+    case INTEL_DEVICE_I210:
+    case INTEL_DEVICE_I217:
+    case INTEL_DEVICE_I225:
+        case INTEL_DEVICE_I226:
+            // Use I210 PTP SYSTIM registers from SSOT
+            result = AvbMmioReadHardwareOnly(dev, I210_SYSTIMH, &timestamp_high);
+            if (result != 0) {
+                DEBUGP(DL_ERROR, "? AvbReadTimestampHardwareOnly: Failed to read SYSTIMH\n");
+                return result;
+            }
+            result = AvbMmioReadHardwareOnly(dev, I210_SYSTIML, &timestamp_low);
+            if (result != 0) {
+                DEBUGP(DL_ERROR, "? AvbReadTimestampHardwareOnly: Failed to read SYSTIML\n");
+                return result;
+            }
+            break;
+
+        case INTEL_DEVICE_I219:
+            // Not yet verified in SSOT/spec for I219; avoid guessing offsets.
+            DEBUGP(DL_ERROR, "? AvbReadTimestampHardwareOnly: I219 timestamp registers not verified in SSOT/spec yet\n");
+            return -ENOTSUP;
+
+        default:
+            DEBUGP(DL_ERROR, "? AvbReadTimestampHardwareOnly: Unsupported device type %d\n", context->intel_device.device_type);
+            return -ENOTSUP;
     }
     
     // Combine to 64-bit timestamp

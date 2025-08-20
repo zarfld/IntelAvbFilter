@@ -1,0 +1,37 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "generate-headers",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"intel-ethernet-regs\\tools\\reggen.py",
+				"intel-ethernet-regs\\devices\\i225.yaml",
+				"intel-ethernet-regs\\gen"
+			]
+		},
+		{
+			"label": "generate-headers-i210-v37",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"intel-ethernet-regs\\tools\\reggen.py",
+				"intel-ethernet-regs\\devices\\i210_v3_7.yaml",
+				"intel-ethernet-regs\\gen"
+			]
+		},
+		{
+			"label": "generate-headers-i210-cscl",
+			"type": "shell",
+			"command": "py",
+			"args": [
+				"-3",
+				"intel-ethernet-regs\\tools\\reggen.py",
+				"intel-ethernet-regs\\devices\\i210_cscl_v1_8.yaml",
+				"intel-ethernet-regs\\gen"
+			]
+		}
+	]
+}

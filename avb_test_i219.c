@@ -118,12 +118,12 @@ int main()
         printf("? Device info: FAILED (Error: %lu)\n", GetLastError());
     }
     
-    // Test 3: Read basic registers
+    // Test 3: Read basic registers (from SSOT where available)
     printf("\n--- Test 3: Register Access Tests ---\n");
     
     // Test reading device control register
     AVB_REGISTER_REQUEST regRequest = {0};
-    regRequest.offset = 0x00000;  // Device Control Register
+    regRequest.offset = 0x00000;  // Device Control Register (CTRL)
     
     result = DeviceIoControl(
         hDevice,
@@ -148,7 +148,7 @@ int main()
     }
     
     // Test reading device status register  
-    regRequest.offset = 0x00008;  // Device Status Register
+    regRequest.offset = 0x00008;  // Device Status Register (STATUS)
     
     result = DeviceIoControl(
         hDevice,
@@ -174,53 +174,8 @@ int main()
     
     // Test I219 IEEE 1588 timestamp register
     printf("\n--- Test 4: I219 IEEE 1588 Timestamp ---\n");
-    regRequest.offset = 0x15F84;  // I219 timestamp low
-    
-    result = DeviceIoControl(
-        hDevice,
-        IOCTL_AVB_READ_REGISTER,
-        &regRequest,
-        sizeof(regRequest),
-        &regRequest,
-        sizeof(regRequest),
-        &bytesReturned,
-        NULL
-    );
-    
-    if (result) {
-        ULONG timestamp_low = regRequest.value;
-        printf("? Timestamp Low (0x15F84): 0x%08X\n", timestamp_low);
-        
-        // Read high part
-        regRequest.offset = 0x15F88;  // I219 timestamp high
-        result = DeviceIoControl(
-            hDevice,
-            IOCTL_AVB_READ_REGISTER,
-            &regRequest,
-            sizeof(regRequest),
-            &regRequest,
-            sizeof(regRequest),
-            &bytesReturned,
-            NULL
-        );
-        
-        if (result) {
-            ULONG timestamp_high = regRequest.value;
-            printf("? Timestamp High (0x15F88): 0x%08X\n", timestamp_high);
-            
-            ULONGLONG full_timestamp = ((ULONGLONG)timestamp_high << 32) | timestamp_low;
-            printf("   ?? Full 64-bit timestamp: 0x%016llX\n", full_timestamp);
-            
-            // Basic check for realistic timestamp
-            if (full_timestamp != 0 && timestamp_low != timestamp_high) {
-                printf("   ? Timestamp appears to be from real hardware!\n");
-            } else {
-                printf("   ??  Timestamp might be simulated\n");
-            }
-        }
-    } else {
-        printf("? Timestamp read: FAILED (Error: %lu)\n", GetLastError());
-    }
+    printf("I219 timestamp register offsets are not verified in SSOT yet; skipping raw reads.\n");
+    printf("Use IOCTL_AVB_GET_TIMESTAMP once the kernel path is wired for I219.\n");
     
     // Summary
     printf("\n=== TEST SUMMARY ===\n");
