@@ -30,6 +30,12 @@ extern "C" {
   typedef uint64_t avb_u64;
 #endif
 
+/* Optional request header carried at the start of IOCTL payloads to convey ABI info */
+typedef struct AVB_REQUEST_HEADER {
+    avb_u32 abi_version;   /* must match AVB_IOCTL_ABI_VERSION major */
+    avb_u32 header_size;   /* sizeof(AVB_REQUEST_HEADER) when present */
+} AVB_REQUEST_HEADER, *PAVB_REQUEST_HEADER;
+
 /* IOCTL macro (METHOD_BUFFERED) */
 #ifndef _NDIS_CONTROL_CODE
   #include <winioctl.h>
