@@ -20,12 +20,15 @@
 #define REG_STATUS          0x00008
 #define REG_SYSTIML         0x0B600
 #define REG_SYSTIMH         0x0B604
+#define REG_TIMINCA         0x0B608  /* Time Sync Increment Attributes */
 #define REG_TSYNCTXCTL      0x0B614
 #define REG_TXSTMPL         0x0B618
 #define REG_TXSTMPH         0x0B61C
 #define REG_TSYNCRXCTL      0x0B620
 #define REG_RXSTMPL         0x0B624
 #define REG_RXSTMPH         0x0B628
+
+#define TSYNCTL_ENABLE      0x00000001
 
 static HANDLE OpenDev(void) {
     HANDLE h = CreateFileA(LINKNAME, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -59,10 +62,22 @@ static void print_caps(uint32_t caps){
     printf("\n");
 }
 
+/* Ensure PTP (SYSTIM) is running; if not, initialize minimal increment and enable RX/TX timestamp capture */
+static void ptp_ensure_started(HANDLE h){
+    unsigned long l1=0,h1=0; if(!read_reg(h,REG_SYSTIML,&l1) || !read_reg(h,REG_SYSTIMH,&h1)) return; Sleep(10);
+    unsigned long l2=0,h2=0; int running = (read_reg(h,REG_SYSTIML,&l2) && read_reg(h,REG_SYSTIMH,&h2) && (l1!=l2 || h1!=h2));
+    if(running){ printf("PTP: running (SYSTIM=0x%08lX%08lX)\n", h2, l2); return; }
+    reg_write(h, REG_SYSTIML, 0); reg_write(h, REG_SYSTIMH, 0); // reset base time
+    reg_write(h, REG_TIMINCA, 0x00000001); // basic increment (improve later if needed)
+    reg_write(h, REG_TSYNCRXCTL, TSYNCTL_ENABLE);
+    reg_write(h, REG_TSYNCTXCTL, TSYNCTL_ENABLE);
+    Sleep(10); unsigned long l3=0,h3=0; if(read_reg(h,REG_SYSTIML,&l3) && read_reg(h,REG_SYSTIMH,&h3) && (l3||h3)) printf("PTP: started (SYSTIM=0x%08lX%08lX)\n", h3, l3); else fprintf(stderr,"PTP: start failed\n");
+}
+
 static void ts_get(HANDLE h){ AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL); if (ok) { printf("TS(IOCTL)=0x%016llX\n", (unsigned long long)t.timestamp); return; } unsigned long hi=0, lo=0; if (read_reg(h, REG_SYSTIMH, &hi) && read_reg(h, REG_SYSTIML, &lo)) { unsigned long long ts = ((unsigned long long)hi<<32)|lo; printf("TS=0x%016llX\n", ts); } else { printf("TS=read-failed\n"); } }
 static void ts_set_now(HANDLE h){ FILETIME ft; GetSystemTimeAsFileTime(&ft); ULARGE_INTEGER now; now.LowPart=ft.dwLowDateTime; now.HighPart=ft.dwHighDateTime; unsigned long long ts=(unsigned long long)now.QuadPart*100ULL; AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); t.timestamp=ts; DWORD br=0; if (DeviceIoControl(h, IOCTL_AVB_SET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL)) printf("TS set (0x%lx)\n", t.status); else fprintf(stderr, "TS set failed (GLE=%lu)\n", GetLastError()); }
 
-static void snapshot_i210(HANDLE h){ unsigned long v; printf("\n--- Basic I210 register snapshot ---\n"); if (read_reg(h, REG_CTRL, &v))     printf("  CTRL(0x%05X)   = 0x%08lX\n", REG_CTRL, v); if (read_reg(h, REG_STATUS, &v))   printf("  STATUS(0x%05X) = 0x%08lX\n", REG_STATUS, v); if (read_reg(h, REG_SYSTIML, &v))  printf("  SYSTIML        = 0x%08lX\n", v); if (read_reg(h, REG_SYSTIMH, &v))  printf("  SYSTIMH        = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCRXCTL, &v)) printf("  TSYNCRXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCTXCTL, &v)) printf("  TSYNCTXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPL, &v))  printf("  RXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPH, &v))  printf("  RXSTMPH         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPL, &v))  printf("  TXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPH, &v))  printf("  TXSTMPH         = 0x%08lX\n", v); }
+static void snapshot_i210(HANDLE h){ unsigned long v; printf("\n--- Basic I210 register snapshot ---\n"); if (read_reg(h, REG_CTRL, &v))     printf("  CTRL(0x%05X)   = 0x%08lX\n", REG_CTRL, v); if (read_reg(h, REG_STATUS, &v))   printf("  STATUS(0x%05X) = 0x%08lX\n", REG_STATUS, v); if (read_reg(h, REG_SYSTIML, &v))  printf("  SYSTIML        = 0x%08lX\n", v); if (read_reg(h, REG_SYSTIMH, &v))  printf("  SYSTIMH        = 0x%08lX\n", v); if (read_reg(h, REG_TIMINCA, &v))  printf("  TIMINCA        = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCRXCTL, &v)) printf("  TSYNCRXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCTXCTL, &v)) printf("  TSYNCTXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPL, &v))  printf("  RXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPH, &v))  printf("  RXSTMPH         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPL, &v))  printf("  TXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPH, &v))  printf("  TXSTMPH         = 0x%08lX\n", v); }
 
 /* Optional feature IOCTL wrappers (unchanged core logic, but return tri-state) */
 #define AVB_OPT_OK        1
@@ -79,6 +94,7 @@ static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m))
 static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
 static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
+    ptp_ensure_started(h); /* ensure timer running */
     test_device_info(h); snapshot_i210(h); ts_get(h);
     /* Conditional optional feature probing */
     if(er.capabilities & INTEL_CAP_TSN_TAS){ optional_used++; int r=tas_audio(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else printf("TAS: SKIPPED (unsupported)\n");
