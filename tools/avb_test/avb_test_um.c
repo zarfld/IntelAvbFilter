@@ -44,7 +44,7 @@ static void reg_read(HANDLE h, unsigned long off){ unsigned long v=0; if(read_re
 /* Write with verification */
 static int reg_write_checked(HANDLE h, unsigned long off, unsigned long val, const char* tag){
     AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; r.value=val; DWORD br=0;
-    BOOL ok = DeviceIoControl(h, IOCTL AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL);
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL);
     unsigned long rb=0; int rb_ok = read_reg(h, off, &rb);
     if(!ok){ fprintf(stderr,"WRITE FAIL off=0x%05lX (%s) GLE=%lu\n", off, tag?tag:"", GetLastError()); return 0; }
     if(!rb_ok){ fprintf(stderr,"WRITE VERIFY READ FAIL off=0x%05lX (%s)\n", off, tag?tag:"" ); return 0; }
