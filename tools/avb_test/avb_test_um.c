@@ -44,7 +44,7 @@ static void reg_read(HANDLE h, unsigned long off){ unsigned long v=0; if(read_re
 /* Write with verification */
 static int reg_write_checked(HANDLE h, unsigned long off, unsigned long val, const char* tag){
     AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; r.value=val; DWORD br=0;
-    BOOL ok = DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL);
+    BOOL ok = DeviceIoControl(h, IOCTL AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL);
     unsigned long rb=0; int rb_ok = read_reg(h, off, &rb);
     if(!ok){ fprintf(stderr,"WRITE FAIL off=0x%05lX (%s) GLE=%lu\n", off, tag?tag:"", GetLastError()); return 0; }
     if(!rb_ok){ fprintf(stderr,"WRITE VERIFY READ FAIL off=0x%05lX (%s)\n", off, tag?tag:"" ); return 0; }
@@ -145,6 +145,13 @@ static void ptp_probe(HANDLE h){
     printf("PTP probe: reading SYSTIM 5 samples @10ms\n");
     for(int i=0;i<5;i++){ unsigned long lo=0,hi=0; read_reg(h,REG_SYSTIML,&lo); read_reg(h,REG_SYSTIMH,&hi); printf("  [%d] SYSTIM=0x%08lX%08lX\n", i, hi, lo); Sleep(10); }
     unsigned long timinca=0; if(read_reg(h,REG_TIMINCA,&timinca)) printf("  TIMINCA=0x%08lX\n", timinca); }
+/* Allow manual TIMINCA programming for experimentation */
+static void ptp_set_timinca(HANDLE h, unsigned long val){
+    if(reg_write_checked(h, REG_TIMINCA, val, "TIMINCA(cli)")){
+        unsigned long rb=0; read_reg(h, REG_TIMINCA, &rb);
+        printf("TIMINCA set to 0x%08lX\n", rb);
+    }
+}
 
 static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
     ptp_ensure_started(h); /* ensure timer running */
