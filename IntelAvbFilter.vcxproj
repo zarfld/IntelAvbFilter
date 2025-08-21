@@ -196,6 +196,8 @@
     <ClCompile Include="filter.c" />
     <ClCompile Include="device.c" />
     <ClCompile Include="flt_dbg.c" />
+    <ClCompile Include="tests\integration\AvbIntegrationTests.cpp" />
+    <ClCompile Include="tests\taef\AvbTaefTests.cpp" />
     <ClCompile Include="tools\avb_test\avb_test_actual.c" />
     <ClCompile Include="tools\avb_test\avb_test_app.c" />
     <ClCompile Include="tools\avb_test\avb_test_standalone.c" />
@@ -216,6 +218,7 @@
     <ClInclude Include="filteruser.h" />
     <ClInclude Include="flt_dbg.h" />
     <ClInclude Include="avb_integration.h" />
+    <ClInclude Include="tests\taef\AvbTestCommon.h" />
     <ClInclude Include="tsn_config.h" />
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
@@ -256,6 +259,9 @@
     <None Include="MICROSOFT_SAMPLES_INTEGRATION.md" />
     <None Include="README.md" />
     <None Include="Sign-Driver.ps1" />
+    <None Include="tests\integration\Makefile.mak" />
+    <None Include="tests\README.md" />
+    <None Include="tests\taef\Makefile.mak" />
     <None Include="TODO.md" />
     <None Include="tools\avb_test\avb_test.mak" />
     <None Include="x64\Debug\IntelAvbFilter.cat" />

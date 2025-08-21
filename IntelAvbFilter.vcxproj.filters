@@ -78,6 +78,9 @@
     <ClInclude Include="intel-ethernet-regs\gen\i226_regs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="tests\taef\AvbTestCommon.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="filter.c">
@@ -126,6 +129,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="tools\avb_test\avb_test_user_main.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\integration\AvbIntegrationTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\taef\AvbTaefTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -186,5 +195,8 @@
     <None Include="Makefile.avb_tests" />
     <None Include="tools\avb_test\avb_test.mak" />
     <None Include="x64\Debug\IntelAvbFilter.cat" />
+    <None Include="tests\integration\Makefile.mak" />
+    <None Include="tests\README.md" />
+    <None Include="tests\taef\Makefile.mak" />
   </ItemGroup>
 </Project>
