@@ -139,7 +139,12 @@ static int ptm_on(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.conf
 static int ptm_off(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.enabled=0; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_PTM,&r,sizeof(r),&r,sizeof(r),&br,NULL); if(ok){ printf("PTM OFF OK (0x%lx)\n", r.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"PTM OFF failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m)); m.page=0; m.reg=1; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_MDIO_READ,&m,sizeof(m),&m,sizeof(m),&br,NULL); if(ok){ printf("MDIO[0,1]=0x%04X (0x%lx)\n", m.value, m.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"MDIO failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 
-static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
+static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
+
+static void ptp_probe(HANDLE h){
+    printf("PTP probe: reading SYSTIM 5 samples @10ms\n");
+    for(int i=0;i<5;i++){ unsigned long lo=0,hi=0; read_reg(h,REG_SYSTIML,&lo); read_reg(h,REG_SYSTIMH,&hi); printf("  [%d] SYSTIM=0x%08lX%08lX\n", i, hi, lo); Sleep(10); }
+    unsigned long timinca=0; if(read_reg(h,REG_TIMINCA,&timinca)) printf("  TIMINCA=0x%08lX\n", timinca); }
 
 static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
     ptp_ensure_started(h); /* ensure timer running */
@@ -155,6 +160,8 @@ int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE)
     if(_stricmp(argv[1],"snapshot")==0){ snapshot_i210_basic(h); }
     else if(_stricmp(argv[1],"snapshot-ssot")==0){ snapshot_i210_ssot(h); }
     else if(_stricmp(argv[1],"ptp-enable-ssot")==0){ ptp_enable_ssot_cmd(h); }
+    else if(_stricmp(argv[1],"ptp-probe")==0){ ptp_probe(h); }
+    else if(_stricmp(argv[1],"ptp-timinca")==0 && argc>=3){ unsigned long v=(unsigned long)strtoul(argv[2],NULL,16); ptp_set_timinca(h,v); }
     else if(_stricmp(argv[1],"info")==0){ test_device_info(h); }
     else if(_stricmp(argv[1],"caps")==0){ AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else fprintf(stderr,"caps enum failed (GLE=%lu)\n", GetLastError()); }
     else if(_stricmp(argv[1],"ts-get")==0){ ts_get(h); }
