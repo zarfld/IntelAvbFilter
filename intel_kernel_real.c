@@ -555,6 +555,8 @@ int intel_setup_ptm(device_t *dev, struct ptm_config *config)
     if (result == 0) {
         BOOLEAN ptmEnabled = (regValue & 0x00000001) != 0;
         UINT8 effectiveGranularity = (UINT8)((regValue >> 8) & 0xFF);
+        /* In release builds DEBUGP may compile out; prevent unused variable warning */
+        (void)effectiveGranularity;
         DEBUGP(DL_INFO, "PTM Status: enabled=%s, granularity=%u\n",
                ptmEnabled ? "YES" : "NO", effectiveGranularity);
         if (config->enabled && !ptmEnabled) {
