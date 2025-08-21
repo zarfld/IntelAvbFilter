@@ -144,7 +144,7 @@ typedef struct AVB_TS_RING_MAP_REQUEST {
     avb_u32 ring_id;      /* in */
     avb_u32 length;       /* in/out: requested/actual length in bytes */
     avb_u64 user_cookie;  /* in: opaque UM cookie; KM echoes back */
-    avb_u64 shm_token;    /* out: opaque token to map shared buffer */
+    avb_u64 shm_token;    /* out: opaque token to map shared buffer (HANDLE value on UM) */
     avb_u32 status;       /* out: NDIS_STATUS */
 } AVB_TS_RING_MAP_REQUEST, *PAVB_TS_RING_MAP_REQUEST;
 

@@ -31,20 +31,6 @@ int AvbReadTimestampReal(device_t *dev, ULONGLONG *timestamp);
 int AvbMdioReadI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
 int AvbMdioWriteI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
 
-// Intel library function declarations (implemented in intel_kernel_real.c)
-int intel_init(device_t *dev);
-int intel_detach(device_t *dev);
-int intel_get_device_info(device_t *dev, char *info_buffer, size_t buffer_size);
-int intel_read_reg(device_t *dev, ULONG offset, ULONG *value);
-int intel_write_reg(device_t *dev, ULONG offset, ULONG value);
-int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct timespec *system_time);
-int intel_set_systime(device_t *dev, ULONGLONG systime);  
-int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config);
-int intel_setup_frame_preemption(device_t *dev, struct tsn_fp_config *config);
-int intel_setup_ptm(device_t *dev, struct ptm_config *config);
-int intel_mdio_read(device_t *dev, ULONG page, ULONG reg, USHORT *value);
-int intel_mdio_write(device_t *dev, ULONG page, ULONG reg, USHORT value);
-
 // Platform operations with wrapper functions to handle NTSTATUS conversion
 static int PlatformInitWrapper(device_t *dev) {
     NTSTATUS status = AvbPlatformInit(dev);
@@ -373,6 +359,7 @@ AvbHandleDeviceIoControl(
                     information = sizeof(AVB_TS_SUBSCRIBE_REQUEST);
                     break;
                 }
+                RtlZeroMemory(AvbContext->ts_ring_buffer, AvbContext->ts_ring_length);
                 AvbContext->ts_ring_allocated = TRUE;
                 AvbContext->ts_ring_id = 1; // single ring id
             }
@@ -390,15 +377,52 @@ AvbHandleDeviceIoControl(
     {
         if (inputBufferLength >= sizeof(AVB_TS_RING_MAP_REQUEST) && outputBufferLength >= sizeof(AVB_TS_RING_MAP_REQUEST)) {
             PAVB_TS_RING_MAP_REQUEST req = (PAVB_TS_RING_MAP_REQUEST)buffer;
+            HANDLE sectionHandle = NULL;
+            LARGE_INTEGER maxSize = {0};
+            SIZE_T viewSize = 0;
+            PVOID sysBase = NULL;
+            NTSTATUS st;
+
             if (!AvbContext->ts_ring_allocated || req->ring_id != AvbContext->ts_ring_id) {
                 req->status = (avb_u32)STATUS_INVALID_PARAMETER;
                 status = STATUS_INVALID_PARAMETER;
                 information = sizeof(AVB_TS_RING_MAP_REQUEST);
                 break;
             }
-            // For now return a dummy token (KM VA)
-            req->length = AvbContext->ts_ring_length;
-            req->shm_token = (ULONGLONG)(ULONG_PTR)AvbContext->ts_ring_buffer;
+
+            maxSize.QuadPart = AvbContext->ts_ring_length;
+            st = ZwCreateSection(&sectionHandle,
+                                 SECTION_MAP_READ | SECTION_MAP_WRITE,
+                                 NULL,                 // no OBJ_KERNEL_HANDLE so UM can use it
+                                 &maxSize,
+                                 PAGE_READWRITE,
+                                 SEC_COMMIT,
+                                 NULL);
+            if (!NT_SUCCESS(st)) {
+                req->status = (avb_u32)st;
+                status = st;
+                information = sizeof(AVB_TS_RING_MAP_REQUEST);
+                break;
+            }
+
+            viewSize = (SIZE_T)AvbContext->ts_ring_length;
+            st = MmMapViewInSystemSpace(sectionHandle, &sysBase, &viewSize);
+            if (!NT_SUCCESS(st)) {
+                // Failure; close section handle
+                ZwClose(sectionHandle);
+                req->status = (avb_u32)st;
+                status = st;
+                information = sizeof(AVB_TS_RING_MAP_REQUEST);
+                break;
+            }
+
+            // Copy current content into section view and unmap
+            RtlCopyMemory(sysBase, AvbContext->ts_ring_buffer, AvbContext->ts_ring_length);
+            MmUnmapViewInSystemSpace(sysBase);
+
+            // Return handle to UM for mapping
+            req->length = (avb_u32)viewSize;
+            req->shm_token = (ULONGLONG)(ULONG_PTR)sectionHandle;
             AvbContext->ts_user_cookie = req->user_cookie;
             req->status = NDIS_STATUS_SUCCESS;
             information = sizeof(AVB_TS_RING_MAP_REQUEST);
