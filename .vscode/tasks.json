@@ -85,25 +85,63 @@
 			"problemMatcher": ["$msCompile"]
 		},
 		{
+			"label": "build-tests-nmake",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile","-ExecutionPolicy","Bypass","-Command",
+				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath; if(!$vs){ Write-Error 'VS C++ tools not found'; exit 1 }; $vcvars=Join-Path $vs 'VC/ Auxiliary/Build/vcvars64.bat'.Replace(' /','/'); if(!(Test-Path $vcvars)){ Write-Error 'vcvars64.bat not found'; exit 1 }; cmd /c \"call \"$vcvars\" && nmake -f avb_test.mak\""
+			],
+			"problemMatcher": ["$msCompile"],
+			"group": "test"
+		},
+		{
+			"label": "build-test-i210",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-File","tools/vs_compile.ps1","-BuildCmd","cl /nologo /W4 /Zi avb_test_i210.c /Fe:avb_test_i210.exe"],
+			"problemMatcher": ["$msCompile"],
+			"group": "test"
+		},
+		{
+			"label": "build-test-i219",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-File","tools/vs_compile.ps1","-BuildCmd","cl /nologo /W4 /Zi avb_test_i219.c /Fe:avb_test_i219.exe"],
+			"problemMatcher": ["$msCompile"],
+			"group": "test"
+		},
+		{
+			"label": "build-quick-diagnostics",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-File","tools/vs_compile.ps1","-BuildCmd","cl /nologo /W4 /Zi quick_diagnostics.c /Fe:quick_diagnostics.exe"],
+			"problemMatcher": ["$msCompile"],
+			"group": "test"
+		},
+		{
 			"label": "run-i210-test",
 			"type": "shell",
 			"command": "powershell",
 			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./avb_test_i210.exe"],
-			"presentation": {"reveal":"always"}
+			"presentation": {"reveal":"always"},
+			"dependsOn": ["build-test-i210"]
 		},
 		{
 			"label": "run-i219-test",
 			"type": "shell",
 			"command": "powershell",
 			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./avb_test_i219.exe"],
-			"presentation": {"reveal":"always"}
+			"presentation": {"reveal":"always"},
+			"dependsOn": ["build-test-i219"]
 		},
 		{
 			"label": "run-quick-diagnostics",
 			"type": "shell",
 			"command": "powershell",
 			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./quick_diagnostics.exe"],
-			"presentation": {"reveal":"always"}
+			"presentation": {"reveal":"always"},
+			"dependsOn": ["build-quick-diagnostics"]
 		},
 		{
 			"label": "run-full-diagnostics",

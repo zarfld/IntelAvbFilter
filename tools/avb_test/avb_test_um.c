@@ -12,23 +12,24 @@
 #include <string.h>
 #include <stdlib.h>
 #include "include/avb_ioctl.h"
+#include "intel-ethernet-regs/gen/i210_regs.h"  /* SSOT register definitions */
 
 #define LINKNAME "\\\\.\\IntelAvbFilter"
 
-// i210 register offsets
-#define REG_CTRL            0x00000
-#define REG_STATUS          0x00008
-#define REG_SYSTIML         0x0B600
-#define REG_SYSTIMH         0x0B604
-#define REG_TIMINCA         0x0B608  /* Time Sync Increment Attributes */
-#define REG_TSYNCTXCTL      0x0B614
-#define REG_TXSTMPL         0x0B618
-#define REG_TXSTMPH         0x0B61C
-#define REG_TSYNCRXCTL      0x0B620
-#define REG_RXSTMPL         0x0B624
-#define REG_RXSTMPH         0x0B628
+// Legacy local aliases kept for backward compat (prefer SSOT names)
+#define REG_CTRL        I210_CTRL
+#define REG_STATUS      I210_STATUS
+#define REG_SYSTIML     I210_SYSTIML
+#define REG_SYSTIMH     I210_SYSTIMH
+#define REG_TIMINCA     I210_TIMINCA
+#define REG_TSYNCTXCTL  I210_TSYNCTXCTL
+#define REG_TXSTMPL     I210_TXSTMPL
+#define REG_TXSTMPH     I210_TXSTMPH
+#define REG_TSYNCRXCTL  I210_TSYNCRXCTL
+#define REG_RXSTMPL     I210_RXSTMPL
+#define REG_RXSTMPH     I210_RXSTMPH
 
-#define TSYNCTL_ENABLE      0x00000001
+#define TSYNCTL_ENABLE  0x00000001 /* legacy minimal enable; SSOT shift is bit4 */
 
 static HANDLE OpenDev(void) {
     HANDLE h = CreateFileA(LINKNAME, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -48,7 +49,6 @@ static int reg_write_checked(HANDLE h, unsigned long off, unsigned long val, con
     if(!ok){ fprintf(stderr,"WRITE FAIL off=0x%05lX (%s) GLE=%lu\n", off, tag?tag:"", GetLastError()); return 0; }
     if(!rb_ok){ fprintf(stderr,"WRITE VERIFY READ FAIL off=0x%05lX (%s)\n", off, tag?tag:"" ); return 0; }
     if(rb!=val){ fprintf(stderr,"WRITE MISMATCH off=0x%05lX (%s) want=0x%08lX got=0x%08lX\n", off, tag?tag:"", val, rb); return 0; }
-    // Optional status field r.status currently unused here
     return 1;
 }
 static void reg_write(HANDLE h, unsigned long off, unsigned long val){ reg_write_checked(h, off, val, NULL); }
@@ -85,6 +85,7 @@ static void ptp_ensure_started(HANDLE h){
     ok &= reg_write_checked(h, REG_SYSTIML, 0x00000000, "SYSTIML");
     ok &= reg_write_checked(h, REG_SYSTIMH, 0x00000000, "SYSTIMH");
     ok &= reg_write_checked(h, REG_TIMINCA, 0x00000001, "TIMINCA");
+    /* Using legacy bit since full mask enable (bit4) might be blocked; still test SSOT decode later */
     ok &= reg_write_checked(h, REG_TSYNCRXCTL, TSYNCTL_ENABLE, "TSYNCRXCTL");
     ok &= reg_write_checked(h, REG_TSYNCTXCTL, TSYNCTL_ENABLE, "TSYNCTXCTL");
     if(!ok){ fprintf(stderr,"PTP: write sequence incomplete (writes blocked?)\n"); return; }
@@ -97,7 +98,18 @@ static void ptp_ensure_started(HANDLE h){
 static void ts_get(HANDLE h){ AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL); if (ok) { printf("TS(IOCTL)=0x%016llX\n", (unsigned long long)t.timestamp); return; } unsigned long hi=0, lo=0; if (read_reg(h, REG_SYSTIMH, &hi) && read_reg(h, REG_SYSTIML, &lo)) { unsigned long long ts = ((unsigned long long)hi<<32)|lo; printf("TS=0x%016llX\n", ts); } else { printf("TS=read-failed\n"); } }
 static void ts_set_now(HANDLE h){ FILETIME ft; GetSystemTimeAsFileTime(&ft); ULARGE_INTEGER now; now.LowPart=ft.dwLowDateTime; now.HighPart=ft.dwHighDateTime; unsigned long long ts=(unsigned long long)now.QuadPart*100ULL; AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); t.timestamp=ts; DWORD br=0; if (DeviceIoControl(h, IOCTL_AVB_SET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL)) printf("TS set (0x%lx)\n", t.status); else fprintf(stderr, "TS set failed (GLE=%lu)\n", GetLastError()); }
 
-static void snapshot_i210(HANDLE h){ unsigned long v; printf("\n--- Basic I210 register snapshot ---\n"); if (read_reg(h, REG_CTRL, &v))     printf("  CTRL(0x%05X)   = 0x%08lX\n", REG_CTRL, v); if (read_reg(h, REG_STATUS, &v))   printf("  STATUS(0x%05X) = 0x%08lX\n", REG_STATUS, v); if (read_reg(h, REG_SYSTIML, &v))  printf("  SYSTIML        = 0x%08lX\n", v); if (read_reg(h, REG_SYSTIMH, &v))  printf("  SYSTIMH        = 0x%08lX\n", v); if (read_reg(h, REG_TIMINCA, &v))  printf("  TIMINCA        = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCRXCTL, &v)) printf("  TSYNCRXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCTXCTL, &v)) printf("  TSYNCTXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPL, &v))  printf("  RXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPH, &v))  printf("  RXSTMPH         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPL, &v))  printf("  TXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPH, &v))  printf("  TXSTMPH         = 0x%08lX\n", v); }
+static void snapshot_i210_basic(HANDLE h){ unsigned long v; printf("\n--- Basic I210 register snapshot (legacy offsets) ---\n"); if (read_reg(h, REG_CTRL, &v))     printf("  CTRL(0x%05X)   = 0x%08lX\n", REG_CTRL, v); if (read_reg(h, REG_STATUS, &v))   printf("  STATUS(0x%05X) = 0x%08lX\n", REG_STATUS, v); if (read_reg(h, REG_SYSTIML, &v))  printf("  SYSTIML        = 0x%08lX\n", v); if (read_reg(h, REG_SYSTIMH, &v))  printf("  SYSTIMH        = 0x%08lX\n", v); if (read_reg(h, REG_TIMINCA, &v))  printf("  TIMINCA        = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCRXCTL, &v)) printf("  TSYNCRXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCTXCTL, &v)) printf("  TSYNCTXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPL, &v))  printf("  RXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPH, &v))  printf("  RXSTMPH         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPL, &v))  printf("  TXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPH, &v))  printf("  TXSTMPH         = 0x%08lX\n", v); }
+
+static void snapshot_i210_ssot(HANDLE h){
+    unsigned long vtx=0, vrx=0; read_reg(h, I210_TSYNCTXCTL, &vtx); read_reg(h, I210_TSYNCRXCTL, &vrx);
+    unsigned long tx_en = (unsigned long)I210_TSYNCTXCTL_GET(vtx, (unsigned long)I210_TSYNCTXCTL_EN_MASK, I210_TSYNCTXCTL_EN_SHIFT);
+    unsigned long tx_type = (unsigned long)I210_TSYNCTXCTL_GET(vtx, (unsigned long)I210_TSYNCTXCTL_TYPE_MASK, I210_TSYNCTXCTL_TYPE_SHIFT);
+    unsigned long rx_en = (unsigned long)I210_TSYNCRXCTL_GET(vrx, (unsigned long)I210_TSYNCRXCTL_EN_MASK, I210_TSYNCRXCTL_EN_SHIFT);
+    unsigned long rx_type = (unsigned long)I210_TSYNCRXCTL_GET(vrx, (unsigned long)I210_TSYNCRXCTL_TYPE_MASK, I210_TSYNCRXCTL_TYPE_SHIFT);
+    printf("\n--- SSOT I210 PTP decode ---\n");
+    printf("  TSYNCTXCTL raw=0x%08lX EN=%lu TYPE=%lu\n", vtx, tx_en, tx_type);
+    printf("  TSYNCRXCTL raw=0x%08lX EN=%lu TYPE=%lu\n", vrx, rx_en, rx_type);
+}
 
 /* Optional feature IOCTL wrappers (unchanged core logic, but return tri-state) */
 #define AVB_OPT_OK        1
@@ -111,12 +123,11 @@ static int ptm_on(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.conf
 static int ptm_off(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.enabled=0; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_PTM,&r,sizeof(r),&r,sizeof(r),&br,NULL); if(ok){ printf("PTM OFF OK (0x%lx)\n", r.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"PTM OFF failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m)); m.page=0; m.reg=1; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_MDIO_READ,&m,sizeof(m),&m,sizeof(m),&br,NULL); if(ok){ printf("MDIO[0,1]=0x%04X (0x%lx)\n", m.value, m.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"MDIO failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 
-static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
+static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
 static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
     ptp_ensure_started(h); /* ensure timer running */
-    test_device_info(h); snapshot_i210(h); ts_get(h);
-    /* Conditional optional feature probing */
+    test_device_info(h); snapshot_i210_basic(h); snapshot_i210_ssot(h); ts_get(h);
     if(er.capabilities & INTEL_CAP_TSN_TAS){ optional_used++; int r=tas_audio(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else printf("TAS: SKIPPED (unsupported)\n");
     if(er.capabilities & INTEL_CAP_TSN_FP){ optional_used++; int r1=fp_on(h); if(r1==AVB_OPT_FAIL) optional_fail=1; int r2=fp_off(h); if(r2==AVB_OPT_FAIL) optional_fail=1; } else { printf("FP: SKIPPED (unsupported)\n"); }
     if(er.capabilities & INTEL_CAP_PCIe_PTM){ optional_used++; int r=ptm_on(h); if(r==AVB_OPT_FAIL) optional_fail=1; r=ptm_off(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else { printf("PTM: SKIPPED (unsupported)\n"); }
@@ -125,7 +136,8 @@ static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_
 
 int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE) return 1; test_init(h);
     if(argc<2 || _stricmp(argv[1],"selftest")==0){ int rc=selftest(h); CloseHandle(h); return rc; }
-    if(_stricmp(argv[1],"snapshot")==0){ snapshot_i210(h); }
+    if(_stricmp(argv[1],"snapshot")==0){ snapshot_i210_basic(h); }
+    else if(_stricmp(argv[1],"snapshot-ssot")==0){ snapshot_i210_ssot(h); }
     else if(_stricmp(argv[1],"info")==0){ test_device_info(h); }
     else if(_stricmp(argv[1],"caps")==0){ AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else fprintf(stderr,"caps enum failed (GLE=%lu)\n", GetLastError()); }
     else if(_stricmp(argv[1],"ts-get")==0){ ts_get(h); }
