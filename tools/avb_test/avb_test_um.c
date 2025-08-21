@@ -29,7 +29,7 @@
 #define REG_RXSTMPL     I210_RXSTMPL
 #define REG_RXSTMPH     I210_RXSTMPH
 
-#define TSYNCTL_ENABLE  0x00000001 /* legacy minimal enable; SSOT shift is bit4 */
+/* Legacy minimal enable constant removed; use SSOT bit/mask */
 
 static HANDLE OpenDev(void) {
     HANDLE h = CreateFileA(LINKNAME, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -80,14 +80,16 @@ static void ptp_ensure_started(HANDLE h){
     Sleep(10);
     unsigned long l2=0,h2=0; int running = (read_reg(h,REG_SYSTIML,&l2) && read_reg(h,REG_SYSTIMH,&h2) && (l1!=l2 || h1!=h2));
     if(running){ printf("PTP: running (SYSTIM=0x%08lX%08lX)\n", h2, l2); return; }
-    printf("PTP: not running, attempting start...\n");
+    printf("PTP: not running, attempting start (legacy seq, then SSOT)...\n");
     int ok = 1;
     ok &= reg_write_checked(h, REG_SYSTIML, 0x00000000, "SYSTIML");
     ok &= reg_write_checked(h, REG_SYSTIMH, 0x00000000, "SYSTIMH");
     ok &= reg_write_checked(h, REG_TIMINCA, 0x00000001, "TIMINCA");
-    /* Using legacy bit since full mask enable (bit4) might be blocked; still test SSOT decode later */
-    ok &= reg_write_checked(h, REG_TSYNCRXCTL, TSYNCTL_ENABLE, "TSYNCRXCTL");
-    ok &= reg_write_checked(h, REG_TSYNCTXCTL, TSYNCTL_ENABLE, "TSYNCTXCTL");
+    /* First try with proper SSOT enable bits */
+    unsigned long tx_en_val = (1U << I210_TSYNCTXCTL_EN_SHIFT) | (I210_TSYNCTXCTL_TYPE_ALL << I210_TSYNCTXCTL_TYPE_SHIFT);
+    unsigned long rx_en_val = (1U << I210_TSYNCRXCTL_EN_SHIFT) | (I210_TSYNCRXCTL_TYPE_ALL << I210_TSYNCRXCTL_TYPE_SHIFT);
+    ok &= reg_write_checked(h, REG_TSYNCRXCTL, rx_en_val, "TSYNCRXCTL(SSOT)");
+    ok &= reg_write_checked(h, REG_TSYNCTXCTL, tx_en_val, "TSYNCTXCTL(SSOT)");
     if(!ok){ fprintf(stderr,"PTP: write sequence incomplete (writes blocked?)\n"); return; }
     Sleep(10);
     unsigned long l3=0,h3=0; read_reg(h,REG_SYSTIML,&l3); read_reg(h,REG_SYSTIMH,&h3);
@@ -106,9 +108,23 @@ static void snapshot_i210_ssot(HANDLE h){
     unsigned long tx_type = (unsigned long)I210_TSYNCTXCTL_GET(vtx, (unsigned long)I210_TSYNCTXCTL_TYPE_MASK, I210_TSYNCTXCTL_TYPE_SHIFT);
     unsigned long rx_en = (unsigned long)I210_TSYNCRXCTL_GET(vrx, (unsigned long)I210_TSYNCRXCTL_EN_MASK, I210_TSYNCRXCTL_EN_SHIFT);
     unsigned long rx_type = (unsigned long)I210_TSYNCRXCTL_GET(vrx, (unsigned long)I210_TSYNCRXCTL_TYPE_MASK, I210_TSYNCRXCTL_TYPE_SHIFT);
+    unsigned long rxl=0, rxh=0, txl=0, txh=0; read_reg(h,I210_RXSTMPL,&rxl); read_reg(h,I210_RXSTMPH,&rxh); read_reg(h,I210_TXSTMPL,&txl); read_reg(h,I210_TXSTMPH,&txh);
     printf("\n--- SSOT I210 PTP decode ---\n");
     printf("  TSYNCTXCTL raw=0x%08lX EN=%lu TYPE=%lu\n", vtx, tx_en, tx_type);
     printf("  TSYNCRXCTL raw=0x%08lX EN=%lu TYPE=%lu\n", vrx, rx_en, rx_type);
+    printf("  RXSTMP = 0x%08lX%08lX  TXSTMP = 0x%08lX%08lX\n", rxh, rxl, txh, txl);
+}
+
+/* Explicit SSOT enable attempt command */
+static void ptp_enable_ssot_cmd(HANDLE h){
+    unsigned long val_before=0; read_reg(h, I210_TSYNCRXCTL, &val_before);
+    unsigned long rx_en_val = (1U << I210_TSYNCRXCTL_EN_SHIFT) | (I210_TSYNCRXCTL_TYPE_ALL << I210_TSYNCRXCTL_TYPE_SHIFT);
+    unsigned long tx_en_val = (1U << I210_TSYNCTXCTL_EN_SHIFT) | (I210_TSYNCTXCTL_TYPE_ALL << I210_TSYNCTXCTL_TYPE_SHIFT);
+    int ok_rx = reg_write_checked(h, I210_TSYNCRXCTL, rx_en_val, "TSYNCRXCTL(SSOT)");
+    int ok_tx = reg_write_checked(h, I210_TSYNCTXCTL, tx_en_val, "TSYNCTXCTL(SSOT)");
+    unsigned long vtx=0, vrx=0; read_reg(h, I210_TSYNCTXCTL, &vtx); read_reg(h, I210_TSYNCRXCTL, &vrx);
+    printf("PTP SSOT enable attempt: rx_ok=%d tx_ok=%d new_rx=0x%08lX new_tx=0x%08lX\n", ok_rx, ok_tx, vrx, vtx);
+    snapshot_i210_ssot(h);
 }
 
 /* Optional feature IOCTL wrappers (unchanged core logic, but return tri-state) */
@@ -123,7 +139,7 @@ static int ptm_on(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.conf
 static int ptm_off(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.enabled=0; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_PTM,&r,sizeof(r),&r,sizeof(r),&br,NULL); if(ok){ printf("PTM OFF OK (0x%lx)\n", r.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"PTM OFF failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m)); m.page=0; m.reg=1; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_MDIO_READ,&m,sizeof(m),&m,sizeof(m),&br,NULL); if(ok){ printf("MDIO[0,1]=0x%04X (0x%lx)\n", m.value, m.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"MDIO failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 
-static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
+static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
 static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
     ptp_ensure_started(h); /* ensure timer running */
@@ -138,6 +154,7 @@ int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE)
     if(argc<2 || _stricmp(argv[1],"selftest")==0){ int rc=selftest(h); CloseHandle(h); return rc; }
     if(_stricmp(argv[1],"snapshot")==0){ snapshot_i210_basic(h); }
     else if(_stricmp(argv[1],"snapshot-ssot")==0){ snapshot_i210_ssot(h); }
+    else if(_stricmp(argv[1],"ptp-enable-ssot")==0){ ptp_enable_ssot_cmd(h); }
     else if(_stricmp(argv[1],"info")==0){ test_device_info(h); }
     else if(_stricmp(argv[1],"caps")==0){ AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else fprintf(stderr,"caps enum failed (GLE=%lu)\n", GetLastError()); }
     else if(_stricmp(argv[1],"ts-get")==0){ ts_get(h); }
