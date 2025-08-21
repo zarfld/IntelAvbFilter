@@ -16,28 +16,13 @@ Abstract:
 #include "external/intel_avb/lib/intel_windows.h"
 #include <ntstrsafe.h>
 
-// Forward declarations with correct Windows kernel types
-NTSTATUS AvbPlatformInit(device_t *dev);
-VOID AvbPlatformCleanup(device_t *dev);
-
-// Forward declarations for real hardware access implementations
-int AvbPciReadConfigReal(device_t *dev, ULONG offset, ULONG *value);
-int AvbPciWriteConfigReal(device_t *dev, ULONG offset, ULONG value);
-int AvbMmioReadReal(device_t *dev, ULONG offset, ULONG *value);
-int AvbMmioWriteReal(device_t *dev, ULONG offset, ULONG value);
-int AvbMdioReadReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWriteReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-int AvbReadTimestampReal(device_t *dev, ULONGLONG *timestamp);
-int AvbMdioReadI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWriteI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-
 // Platform operations with wrapper functions to handle NTSTATUS conversion
-static int PlatformInitWrapper(device_t *dev) {
+static int PlatformInitWrapper(_In_ device_t *dev) {
     NTSTATUS status = AvbPlatformInit(dev);
     return NT_SUCCESS(status) ? 0 : -1;
 }
 
-static void PlatformCleanupWrapper(device_t *dev) {
+static void PlatformCleanupWrapper(_In_ device_t *dev) {
     AvbPlatformCleanup(dev);
 }
 

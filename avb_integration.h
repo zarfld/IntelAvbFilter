@@ -55,51 +55,260 @@ typedef struct _AVB_DEVICE_CONTEXT {
     ULONG   qav_lo_credit;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
-// Function prototypes
-NTSTATUS AvbInitializeDevice(PMS_FILTER FilterModule, PAVB_DEVICE_CONTEXT *AvbContext);
-VOID AvbCleanupDevice(PAVB_DEVICE_CONTEXT AvbContext);
-NTSTATUS AvbHandleDeviceIoControl(PAVB_DEVICE_CONTEXT AvbContext, PIRP Irp);
+/*========================================================================
+ * Device lifecycle & IOCTL handling
+ *=======================================================================*/
+/**
+ * @brief Initialize AVB device context and bind to an Intel miniport filter instance.
+ * @param FilterModule Pointer to NDIS filter module instance.
+ * @param AvbContext Pointer to receive allocated AVB device context.
+ * @return NTSTATUS STATUS_SUCCESS on success or appropriate NTSTATUS error.
+ */
+NTSTATUS AvbInitializeDevice(
+    _In_ PMS_FILTER FilterModule,
+    _Outptr_ PAVB_DEVICE_CONTEXT *AvbContext
+);
 
-// BAR0 hardware resource discovery functions (NEW - Microsoft NDIS patterns)
-NTSTATUS AvbDiscoverIntelControllerResources(PMS_FILTER FilterModule, PPHYSICAL_ADDRESS Bar0Address, PULONG Bar0Length);
-NTSTATUS AvbInitializeDeviceWithBar0Discovery(PMS_FILTER FilterModule, PAVB_DEVICE_CONTEXT *AvbContext);
-NTSTATUS AvbDiscoverIntelControllerResourcesAlternative(PMS_FILTER FilterModule, PPHYSICAL_ADDRESS Bar0Address, PULONG Bar0Length);
+/**
+ * @brief Cleanup and free an AVB device context.
+ * @param AvbContext Device context returned by AvbInitializeDevice (may be NULL).
+ */
+VOID AvbCleanupDevice(
+    _In_opt_ PAVB_DEVICE_CONTEXT AvbContext
+);
 
-// Real hardware access functions (REPLACES simulation)
-NTSTATUS AvbMapIntelControllerMemory(PAVB_DEVICE_CONTEXT AvbContext, PHYSICAL_ADDRESS PhysicalAddress, ULONG Length);
-VOID AvbUnmapIntelControllerMemory(PAVB_DEVICE_CONTEXT AvbContext);
-int AvbMmioReadReal(device_t *dev, ULONG offset, ULONG *value);
-int AvbMmioWriteReal(device_t *dev, ULONG offset, ULONG value);
-int AvbReadTimestampReal(device_t *dev, ULONGLONG *timestamp);
-int AvbPciReadConfigReal(device_t *dev, ULONG offset, ULONG *value);
-int AvbPciWriteConfigReal(device_t *dev, ULONG offset, ULONG value);
+/**
+ * @brief Handle an incoming DeviceIoControl IRP targeting the AVB filter device.
+ * @param AvbContext Device context.
+ * @param Irp Pointer to IRP from I/O manager.
+ * @return NTSTATUS from processing.
+ */
+NTSTATUS AvbHandleDeviceIoControl(
+    _In_ PAVB_DEVICE_CONTEXT AvbContext,
+    _In_ PIRP Irp
+);
 
-// Hardware access functions for NDIS filter integration (wrapper functions)
-NTSTATUS AvbPlatformInit(device_t *dev);
-VOID AvbPlatformCleanup(device_t *dev);
-int AvbPciReadConfig(device_t *dev, ULONG offset, ULONG *value);
-int AvbPciWriteConfig(device_t *dev, ULONG offset, ULONG value);
-int AvbMmioRead(device_t *dev, ULONG offset, ULONG *value);
-int AvbMmioWrite(device_t *dev, ULONG offset, ULONG value);
-int AvbMdioRead(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWrite(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-int AvbReadTimestamp(device_t *dev, ULONGLONG *timestamp);
+/*========================================================================
+ * BAR0 hardware resource discovery (NDIS patterns)
+ *=======================================================================*/
+/**
+ * @brief Discover Intel controller BAR0 physical address and length from filter module resources.
+ * @param FilterModule NDIS filter module.
+ * @param Bar0Address Output physical address of BAR0.
+ * @param Bar0Length Output length (bytes) of BAR0 region.
+ * @return NTSTATUS STATUS_SUCCESS or error.
+ */
+NTSTATUS AvbDiscoverIntelControllerResources(
+    _In_ PMS_FILTER FilterModule,
+    _Out_ PPHYSICAL_ADDRESS Bar0Address,
+    _Out_ PULONG Bar0Length
+);
 
-// MDIO access functions (REAL implementations for different devices)
-int AvbMdioReadReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWriteReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-int AvbMdioReadI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWriteI219DirectReal(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
+/**
+ * @brief Convenience initializer that performs BAR0 discovery then device initialization.
+ * @param FilterModule NDIS filter module.
+ * @param AvbContext Receives created context.
+ * @return NTSTATUS.
+ */
+NTSTATUS AvbInitializeDeviceWithBar0Discovery(
+    _In_ PMS_FILTER FilterModule,
+    _Outptr_ PAVB_DEVICE_CONTEXT *AvbContext
+);
 
-// I219-specific direct MDIO access (legacy wrapper functions)
-int AvbMdioReadI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-int AvbMdioWriteI219Direct(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
+/**
+ * @brief Alternative BAR0 discovery path (fallback enumeration strategy).
+ * @param FilterModule NDIS filter module.
+ * @param Bar0Address Output BAR0 physical address.
+ * @param Bar0Length Output BAR0 size.
+ * @return NTSTATUS.
+ */
+NTSTATUS AvbDiscoverIntelControllerResourcesAlternative(
+    _In_ PMS_FILTER FilterModule,
+    _Out_ PPHYSICAL_ADDRESS Bar0Address,
+    _Out_ PULONG Bar0Length
+);
 
-// Helper functions
-PMS_FILTER AvbFindIntelFilterModule(void);
-BOOLEAN AvbIsIntelDevice(USHORT vendor_id, USHORT device_id);
-BOOLEAN AvbIsFilterIntelAdapter(PMS_FILTER FilterInstance);
-intel_device_type_t AvbGetIntelDeviceType(USHORT device_id);
-BOOLEAN AvbIsSupportedIntelController(PMS_FILTER FilterModule, USHORT* OutVendorId, USHORT* OutDeviceId);
+/*========================================================================
+ * Real hardware memory mapping
+ *=======================================================================*/
+/**
+ * @brief Map Intel controller MMIO register space (BAR0) into system virtual address space.
+ * @param AvbContext Device context.
+ * @param PhysicalAddress Physical BAR0 base.
+ * @param Length Length (bytes) to map.
+ * @return NTSTATUS STATUS_SUCCESS if mapped.
+ */
+NTSTATUS AvbMapIntelControllerMemory(
+    _In_ PAVB_DEVICE_CONTEXT AvbContext,
+    _In_ PHYSICAL_ADDRESS PhysicalAddress,
+    _In_ ULONG Length
+);
+
+/**
+ * @brief Unmap previously mapped controller MMIO space.
+ * @param AvbContext Device context.
+ */
+VOID AvbUnmapIntelControllerMemory(
+    _In_ PAVB_DEVICE_CONTEXT AvbContext
+);
+
+/*========================================================================
+ * Low-level real hardware accessors
+ *=======================================================================*/
+/**
+ * @brief Read 32-bit MMIO register from real hardware.
+ * @param dev Intel library device wrapper.
+ * @param offset Byte offset into BAR0.
+ * @param value Output register value.
+ * @return 0 on success, negative errno style on failure.
+ */
+int AvbMmioReadReal(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _Out_ ULONG *value
+);
+
+/**
+ * @brief Write 32-bit MMIO register.
+ */
+int AvbMmioWriteReal(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _In_ ULONG value
+);
+
+/**
+ * @brief Read raw IEEE 1588 timestamp registers and compose 64-bit value.
+ */
+int AvbReadTimestampReal(
+    _In_ device_t *dev,
+    _Out_ ULONGLONG *timestamp
+);
+
+/**
+ * @brief Read DWORD from PCI configuration space (filter mediated).
+ */
+int AvbPciReadConfigReal(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _Out_ ULONG *value
+);
+
+/**
+ * @brief Attempt to write PCI configuration dword (not supported in filter context).
+ */
+int AvbPciWriteConfigReal(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _In_ ULONG value
+);
+
+/*========================================================================
+ * Platform wrapper ops (selected by Intel library)
+ *=======================================================================*/
+NTSTATUS AvbPlatformInit(
+    _In_ device_t *dev
+);
+VOID AvbPlatformCleanup(
+    _In_ device_t *dev
+);
+int AvbPciReadConfig(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _Out_ ULONG *value
+);
+int AvbPciWriteConfig(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _In_ ULONG value
+);
+int AvbMmioRead(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _Out_ ULONG *value
+);
+int AvbMmioWrite(
+    _In_ device_t *dev,
+    _In_ ULONG offset,
+    _In_ ULONG value
+);
+int AvbMdioRead(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _Out_ USHORT *value
+);
+int AvbMdioWrite(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _In_ USHORT value
+);
+int AvbReadTimestamp(
+    _In_ device_t *dev,
+    _Out_ ULONGLONG *timestamp
+);
+
+/*========================================================================
+ * MDIO accessors (real hardware)
+ *=======================================================================*/
+int AvbMdioReadReal(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _Out_ USHORT *value
+);
+int AvbMdioWriteReal(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _In_ USHORT value
+);
+int AvbMdioReadI219DirectReal(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _Out_ USHORT *value
+);
+int AvbMdioWriteI219DirectReal(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _In_ USHORT value
+);
+
+/* Legacy/direct wrappers (to be unified) */
+int AvbMdioReadI219Direct(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _Out_ USHORT *value
+);
+int AvbMdioWriteI219Direct(
+    _In_ device_t *dev,
+    _In_ USHORT phy_addr,
+    _In_ USHORT reg_addr,
+    _In_ USHORT value
+);
+
+/*========================================================================
+ * Helper / discovery utilities
+ *=======================================================================*/
+PMS_FILTER AvbFindIntelFilterModule(VOID);
+BOOLEAN AvbIsIntelDevice(
+    _In_ USHORT vendor_id,
+    _In_ USHORT device_id
+);
+BOOLEAN AvbIsFilterIntelAdapter(
+    _In_ PMS_FILTER FilterInstance
+);
+intel_device_type_t AvbGetIntelDeviceType(
+    _In_ USHORT device_id
+);
+BOOLEAN AvbIsSupportedIntelController(
+    _In_ PMS_FILTER FilterModule,
+    _Out_opt_ USHORT* OutVendorId,
+    _Out_opt_ USHORT* OutDeviceId
+);
 
 #endif // _AVB_INTEGRATION_H_
