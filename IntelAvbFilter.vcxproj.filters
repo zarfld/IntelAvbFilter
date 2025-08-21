@@ -131,12 +131,6 @@
     <ClCompile Include="tools\avb_test\avb_test_user_main.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="tests\integration\AvbIntegrationTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="tests\taef\AvbTaefTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="tests\integration\AvbIntegrationTests.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -204,5 +198,6 @@
     <None Include="tests\integration\Makefile.mak" />
     <None Include="tests\README.md" />
     <None Include="tests\taef\Makefile.mak" />
+    <None Include="Directory.Build.props" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <!-- Exclude user-mode test C++ sources from kernel driver builds -->
+  <ItemGroup>
+    <ClCompile Update="tests\integration\AvbIntegrationTests.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Update="tests\taef\AvbTaefTests.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+</Project>
