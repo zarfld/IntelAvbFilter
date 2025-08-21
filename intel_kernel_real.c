@@ -200,6 +200,7 @@ int intel_write_reg(device_t *dev, ULONG offset, ULONG value)
 int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct timespec *system_time)
 {
     LARGE_INTEGER currentTime;
+    UNREFERENCED_PARAMETER(clk_id);
     
     DEBUGP(DL_TRACE, "==>intel_gettime (real hardware): clk_id=%d\n", clk_id);
     

@@ -270,6 +270,7 @@ IntelAvbFilterDeviceIoControl(
                     if (cand->AvbContext == NULL)
                     {
                         NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                        UNREFERENCED_PARAMETER(initSt); // avoid C4189 when warnings-as-errors on other machines
                         DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: Lazy init on %p status=0x%x\n", cand, initSt);
                     }
                     if (cand->AvbContext != NULL)
@@ -347,6 +348,13 @@ filterFindFilterModule(
    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
    return NULL;
 }
+
+
+
+
+
+
+
 
 
 
