@@ -141,15 +141,17 @@ AvbHandleDeviceIoControl(
 
     DEBUGP(DL_TRACE, "==>AvbHandleDeviceIoControl: IOCTL=0x%x\n", ioControlCode);
 
-    // Runtime ABI version check if caller provides a header version at the start of the buffer
-    if (inputBufferLength >= sizeof(ULONG)) {
-        ULONG umAbi = *((ULONG*)buffer);
-        AvbContext->last_seen_abi_version = umAbi;
-        if ((umAbi & 0xFFFF0000u) != (AVB_IOCTL_ABI_VERSION & 0xFFFF0000u)) {
-            DEBUGP(DL_ERROR, "ABI major mismatch: UM=0x%08x KM=0x%08x\n", umAbi, AVB_IOCTL_ABI_VERSION);
-            status = STATUS_REVISION_MISMATCH;
-            Irp->IoStatus.Information = 0;
-            return status;
+    // Runtime ABI version check via optional header
+    if (inputBufferLength >= sizeof(AVB_REQUEST_HEADER)) {
+        PAVB_REQUEST_HEADER hdr = (PAVB_REQUEST_HEADER)buffer;
+        if (hdr->header_size >= sizeof(AVB_REQUEST_HEADER)) {
+            AvbContext->last_seen_abi_version = hdr->abi_version;
+            if ((hdr->abi_version & 0xFFFF0000u) != (AVB_IOCTL_ABI_VERSION & 0xFFFF0000u)) {
+                DEBUGP(DL_ERROR, "ABI major mismatch: UM=0x%08x KM=0x%08x\n", hdr->abi_version, AVB_IOCTL_ABI_VERSION);
+                status = STATUS_REVISION_MISMATCH;
+                Irp->IoStatus.Information = 0;
+                return status;
+            }
         }
     }
 
