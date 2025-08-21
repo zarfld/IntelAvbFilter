@@ -32,6 +32,92 @@
 				"intel-ethernet-regs\\devices\\i210_cscl_v1_8.yaml",
 				"intel-ethernet-regs\\gen"
 			]
+		},
+		{
+			"label": "generate-headers-all",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy","Bypass",
+				"-Command",
+				"Get-ChildItem intel-ethernet-regs/devices -Filter *.yaml | ForEach-Object { py -3 intel-ethernet-regs/tools/reggen.py $_.FullName intel-ethernet-regs/gen }"
+			]
+		},
+		{
+			"label": "build-driver-release",
+			"type": "shell",
+			"command": "msbuild",
+			"args": [
+				"IntelAvbFilter.sln",
+				"/t:Build",
+				"/p:Configuration=Release;Platform=x64",
+				"/m"
+			],
+			"problemMatcher": ["$msCompile"],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		},
+		{
+			"label": "build-driver-debug",
+			"type": "shell",
+			"command": "msbuild",
+			"args": [
+				"IntelAvbFilter.sln",
+				"/t:Build",
+				"/p:Configuration=Debug;Platform=x64",
+				"/m"
+			],
+			"problemMatcher": ["$msCompile"]
+		},
+		{
+			"label": "rebuild-driver-release",
+			"type": "shell",
+			"command": "msbuild",
+			"args": [
+				"IntelAvbFilter.sln",
+				"/t:Clean;Build",
+				"/p:Configuration=Release;Platform=x64",
+				"/m"
+			],
+			"problemMatcher": ["$msCompile"]
+		},
+		{
+			"label": "run-i210-test",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./avb_test_i210.exe"],
+			"presentation": {"reveal":"always"}
+		},
+		{
+			"label": "run-i219-test",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./avb_test_i219.exe"],
+			"presentation": {"reveal":"always"}
+		},
+		{
+			"label": "run-quick-diagnostics",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./quick_diagnostics.exe"],
+			"presentation": {"reveal":"always"}
+		},
+		{
+			"label": "run-full-diagnostics",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./run_complete_diagnostics.bat"],
+			"presentation": {"reveal":"always"}
+		},
+		{
+			"label": "sign-driver",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-File","Sign-Driver.ps1"],
+			"problemMatcher": []
 		}
 	]
 }
