@@ -37,13 +37,15 @@ typedef struct _AVB_DEVICE_CONTEXT {
     // ABI and capabilities tracking
     ULONG last_seen_abi_version;
 
-    // Timestamp event ring (dev-side allocation; future UM mapping support)
+    // Timestamp event ring (section-based mapping)
     BOOLEAN ts_ring_allocated;
     ULONG   ts_ring_id;
-    PVOID   ts_ring_buffer;     // NonPaged allocation
-    ULONG   ts_ring_length;     // bytes
-    PMDL    ts_ring_mdl;        // MDL for mapping (future)
+    PVOID   ts_ring_buffer;     // System-space view base address
+    ULONG   ts_ring_length;     // bytes (requested/actual)
+    PMDL    ts_ring_mdl;        // reserved for MDL-based mapping option
     ULONGLONG ts_user_cookie;   // echoed back to UM
+    HANDLE  ts_ring_section;    // section handle returned to UM
+    SIZE_T  ts_ring_view_size;  // mapped system-space view size
 
     // Qav (Credit-Based Shaper) last request snapshot (placeholder)
     UCHAR   qav_last_tc;
