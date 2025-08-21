@@ -15,6 +15,7 @@ Abstract:
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"
 #include <ntstrsafe.h>
+#include "intel-ethernet-regs/gen/i210_regs.h"  /* Single Source Of Truth register definitions for i210 family */
 
 // Platform operations with wrapper functions to handle NTSTATUS conversion
 static int PlatformInitWrapper(_In_ device_t *dev) {
@@ -137,6 +138,28 @@ AvbHandleDeviceIoControl(
             int result = intel_init(&AvbContext->intel_device);
             AvbContext->hw_access_enabled = (result == 0);
             status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+            if (result == 0) {
+                /* Set baseline capabilities now that real hw ops are active */
+                AvbContext->intel_device.capabilities |= INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588; /* Datasheet: IEEE 1588 hardware timer present (i210 spec section Time Sync) */
+                /* Attempt enhanced timestamp capability detection (simple heuristic: i210 family) */
+                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
+                    AvbContext->intel_device.capabilities |= INTEL_CAP_ENHANCED_TS;
+                }
+                /* Minimal PTP bring-up if SYSTIM is zero (avoid interfering if already running) */
+                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
+                    ULONG lo=0, hi=0;
+                    if (intel_read_reg(&AvbContext->intel_device, I210_SYSTIML, &lo)==0 && 
+                        intel_read_reg(&AvbContext->intel_device, I210_SYSTIMH, &hi)==0 &&
+                        lo==0 && hi==0) {
+                        /* Program a conservative increment (1) – caller/User tool may refine; real value per spec (ref: i210 Datasheet IEEE 1588 Timer Increment Configuration) */
+                        (void)intel_write_reg(&AvbContext->intel_device, I210_TIMINCA, 0x00000001);
+                        /* Enable RX/TX timestamp capture (EN bit 4, TYPE=ALL (0)) */
+                        (void)intel_write_reg(&AvbContext->intel_device, I210_TSYNCRXCTL, (1U<<I210_TSYNCRXCTL_EN_SHIFT));
+                        (void)intel_write_reg(&AvbContext->intel_device, I210_TSYNCTXCTL, (1U<<I210_TSYNCTXCTL_EN_SHIFT));
+                        DEBUGP(DL_INFO, "PTP minimal init attempted (TIMINCA=1, EN bits set)\n");
+                    }
+                }
+            }
         }
         break;
     }
