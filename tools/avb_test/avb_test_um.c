@@ -39,7 +39,19 @@ static HANDLE OpenDev(void) {
 /* Generic helpers */
 static int read_reg(HANDLE h, unsigned long off, unsigned long* val){ AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL); if(!ok) return 0; *val=r.value; return 1; }
 static void reg_read(HANDLE h, unsigned long off){ unsigned long v=0; if(read_reg(h,off,&v)) printf("MMIO[0x%08lX]=0x%08lX\n", off, v); else fprintf(stderr, "Read 0x%lX failed (GLE=%lu)\n", off, GetLastError()); }
-static void reg_write(HANDLE h, unsigned long off, unsigned long val){ AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; r.value=val; DWORD br=0; DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL); }
+
+/* Write with verification */
+static int reg_write_checked(HANDLE h, unsigned long off, unsigned long val, const char* tag){
+    AVB_REGISTER_REQUEST r; ZeroMemory(&r,sizeof(r)); r.offset=off; r.value=val; DWORD br=0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL);
+    unsigned long rb=0; int rb_ok = read_reg(h, off, &rb);
+    if(!ok){ fprintf(stderr,"WRITE FAIL off=0x%05lX (%s) GLE=%lu\n", off, tag?tag:"", GetLastError()); return 0; }
+    if(!rb_ok){ fprintf(stderr,"WRITE VERIFY READ FAIL off=0x%05lX (%s)\n", off, tag?tag:"" ); return 0; }
+    if(rb!=val){ fprintf(stderr,"WRITE MISMATCH off=0x%05lX (%s) want=0x%08lX got=0x%08lX\n", off, tag?tag:"", val, rb); return 0; }
+    // Optional status field r.status currently unused here
+    return 1;
+}
+static void reg_write(HANDLE h, unsigned long off, unsigned long val){ reg_write_checked(h, off, val, NULL); }
 static void test_init(HANDLE h){ DWORD br=0; DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL,0, NULL,0, &br, NULL); }
 static void test_device_info(HANDLE h){ AVB_DEVICE_INFO_REQUEST r; ZeroMemory(&r,sizeof(r)); r.buffer_size=sizeof(r.device_info); DWORD br=0; if(DeviceIoControl(h,IOCTL_AVB_GET_DEVICE_INFO,&r,sizeof(r),&r,sizeof(r),&br,NULL)) printf("Device: %s (0x%lx)\n", r.device_info, r.status); }
 
@@ -64,14 +76,22 @@ static void print_caps(uint32_t caps){
 
 /* Ensure PTP (SYSTIM) is running; if not, initialize minimal increment and enable RX/TX timestamp capture */
 static void ptp_ensure_started(HANDLE h){
-    unsigned long l1=0,h1=0; if(!read_reg(h,REG_SYSTIML,&l1) || !read_reg(h,REG_SYSTIMH,&h1)) return; Sleep(10);
+    unsigned long l1=0,h1=0; if(!read_reg(h,REG_SYSTIML,&l1) || !read_reg(h,REG_SYSTIMH,&h1)){ fprintf(stderr,"PTP: base read failed\n"); return; }
+    Sleep(10);
     unsigned long l2=0,h2=0; int running = (read_reg(h,REG_SYSTIML,&l2) && read_reg(h,REG_SYSTIMH,&h2) && (l1!=l2 || h1!=h2));
     if(running){ printf("PTP: running (SYSTIM=0x%08lX%08lX)\n", h2, l2); return; }
-    reg_write(h, REG_SYSTIML, 0); reg_write(h, REG_SYSTIMH, 0); // reset base time
-    reg_write(h, REG_TIMINCA, 0x00000001); // basic increment (improve later if needed)
-    reg_write(h, REG_TSYNCRXCTL, TSYNCTL_ENABLE);
-    reg_write(h, REG_TSYNCTXCTL, TSYNCTL_ENABLE);
-    Sleep(10); unsigned long l3=0,h3=0; if(read_reg(h,REG_SYSTIML,&l3) && read_reg(h,REG_SYSTIMH,&h3) && (l3||h3)) printf("PTP: started (SYSTIM=0x%08lX%08lX)\n", h3, l3); else fprintf(stderr,"PTP: start failed\n");
+    printf("PTP: not running, attempting start...\n");
+    int ok = 1;
+    ok &= reg_write_checked(h, REG_SYSTIML, 0x00000000, "SYSTIML");
+    ok &= reg_write_checked(h, REG_SYSTIMH, 0x00000000, "SYSTIMH");
+    ok &= reg_write_checked(h, REG_TIMINCA, 0x00000001, "TIMINCA");
+    ok &= reg_write_checked(h, REG_TSYNCRXCTL, TSYNCTL_ENABLE, "TSYNCRXCTL");
+    ok &= reg_write_checked(h, REG_TSYNCTXCTL, TSYNCTL_ENABLE, "TSYNCTXCTL");
+    if(!ok){ fprintf(stderr,"PTP: write sequence incomplete (writes blocked?)\n"); return; }
+    Sleep(10);
+    unsigned long l3=0,h3=0; read_reg(h,REG_SYSTIML,&l3); read_reg(h,REG_SYSTIMH,&h3);
+    if(l3||h3){ printf("PTP: started (SYSTIM=0x%08lX%08lX)\n", h3, l3); }
+    else fprintf(stderr,"PTP: start failed (SYSTIM still zero)\n");
 }
 
 static void ts_get(HANDLE h){ AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL); if (ok) { printf("TS(IOCTL)=0x%016llX\n", (unsigned long long)t.timestamp); return; } unsigned long hi=0, lo=0; if (read_reg(h, REG_SYSTIMH, &hi) && read_reg(h, REG_SYSTIML, &lo)) { unsigned long long ts = ((unsigned long long)hi<<32)|lo; printf("TS=0x%016llX\n", ts); } else { printf("TS=read-failed\n"); } }
