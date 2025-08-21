@@ -196,7 +196,9 @@
     <ClCompile Include="filter.c" />
     <ClCompile Include="device.c" />
     <ClCompile Include="flt_dbg.c" />
+    <ClCompile Include="tests\integration\AvbIntegrationTests.c" />
     <ClCompile Include="tests\integration\AvbIntegrationTests.cpp" />
+    <ClCompile Include="tests\taef\AvbTaefTests.c" />
     <ClCompile Include="tests\taef\AvbTaefTests.cpp" />
     <ClCompile Include="tools\avb_test\avb_test_actual.c" />
     <ClCompile Include="tools\avb_test\avb_test_app.c" />
