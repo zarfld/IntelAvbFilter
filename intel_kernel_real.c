@@ -34,6 +34,9 @@ extern const struct platform_ops ndis_platform_ops;
 
 /**
  * @brief Initialize Intel device (real hardware access)
+ * Datasheets: See device-specific datasheets in external/intel_avb/spec
+ * @param dev Device handle
+ * @return 0 on success, <0 on error
  */
 int intel_init(device_t *dev)
 {
@@ -58,6 +61,8 @@ int intel_init(device_t *dev)
 
 /**
  * @brief Detach from Intel device (real hardware access)  
+ * @param dev Device handle
+ * @return 0 on success, <0 on error
  */
 int intel_detach(device_t *dev)
 {
@@ -78,6 +83,10 @@ int intel_detach(device_t *dev)
 
 /**
  * @brief Get device information (real hardware access)
+ * @param dev Device handle
+ * @param info_buffer Output buffer
+ * @param buffer_size Buffer size
+ * @return 0 on success, <0 on error
  */
 int intel_get_device_info(device_t *dev, char *info_buffer, size_t buffer_size)
 {
@@ -128,6 +137,10 @@ int intel_get_device_info(device_t *dev, char *info_buffer, size_t buffer_size)
 
 /**
  * @brief Read register (real hardware access)
+ * @param dev Device handle
+ * @param offset Register offset (SSOT)
+ * @param value Output value
+ * @return 0 on success, <0 on error
  */
 int intel_read_reg(device_t *dev, ULONG offset, ULONG *value)
 {
@@ -151,6 +164,11 @@ int intel_read_reg(device_t *dev, ULONG offset, ULONG *value)
 
 /**
  * @brief Write register (real hardware access)
+ * Ensure offsets and value mask conform to SSOT/datasheet.
+ * @param dev Device handle
+ * @param offset Register offset (SSOT)
+ * @param value Value to write
+ * @return 0 on success, <0 on error
  */
 int intel_write_reg(device_t *dev, ULONG offset, ULONG value)
 {
@@ -173,6 +191,11 @@ int intel_write_reg(device_t *dev, ULONG offset, ULONG value)
 
 /**
  * @brief Get time (real hardware access)
+ * @param dev Device handle
+ * @param clk_id Clock id (unused for now)
+ * @param curtime Output current PTP time
+ * @param system_time Optional system time
+ * @return 0 on success, <0 on error
  */
 int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct timespec *system_time)
 {
@@ -214,11 +237,11 @@ int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct ti
 }
 
 /**
- * @brief Set system time (real hardware access)
- * Note: Uses common INTEL_REG_SYSTIML/H (0x0B600/0x0B604) from SSOT/common
- * for devices that support MMIO timestamp. I219 may require MDIO-based access;
- * in that case, intel_i219.c implements proper handling via MDIO and this path
- * is not used.
+ * @brief Program SYSTIM registers (IEEE 1588 time of day)
+ * Datasheet: I210 PTP block (e.g., 333016), SYSTIML/H: 0x0B600/0x0B604
+ * @param dev Device handle
+ * @param systime 64-bit time value
+ * @return 0 on success, <0 on error
  */
 int intel_set_systime(device_t *dev, ULONGLONG systime)
 {
@@ -243,19 +266,34 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     
     switch (context->intel_device.device_type) {
         case INTEL_DEVICE_I210:
-        case INTEL_DEVICE_I225:
-        case INTEL_DEVICE_I226:
-            // Use common SYSTIML/H from SSOT/common
+            result = ndis_platform_ops.mmio_write(dev, I210_SYSTIML, ts_low);
+            if (result != 0) return result;
+            result = ndis_platform_ops.mmio_write(dev, I210_SYSTIMH, ts_high);
+            if (result != 0) return result;
+            break;
+        case INTEL_DEVICE_I217:
+            // SSOT marks SYSTIM as read-only on I217; do not write via MMIO
+            DEBUGP(DL_ERROR, "intel_set_systime: I217 SYSTIM is RO per SSOT; use device-specific method if any\n");
+            return -ENOTSUP;
+        case INTEL_DEVICE_I219:
+#ifndef AVB_I219_SYSTIM_TEST
+            // SSOT has no SYSTIM regs for I219; use MDIO/device-specific API instead
+            DEBUGP(DL_ERROR, "intel_set_systime: I219 SYSTIM MMIO not defined in SSOT; use MDIO path\n");
+            return -ENOTSUP;
+#else
             result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIML, ts_low);
             if (result != 0) return result;
             result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIMH, ts_high);
             if (result != 0) return result;
             break;
-        case INTEL_DEVICE_I219:
-        case INTEL_DEVICE_I217:
-            // I219/I217: MMIO timestamp may not be directly writable; handled via MDIO in intel_i219.c/intel_i217.c.
-            DEBUGP(DL_ERROR, "intel_set_systime: Device type requires MDIO-based timestamp handling\n");
-            return -1;
+#endif
+        case INTEL_DEVICE_I225:
+        case INTEL_DEVICE_I226:
+            result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIML, ts_low);
+            if (result != 0) return result;
+            result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIMH, ts_high);
+            if (result != 0) return result;
+            break;
         default:
             DEBUGP(DL_ERROR, "Unsupported device type for timestamp write: %d\n", 
                    context->intel_device.device_type);
@@ -306,102 +344,86 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
            config->base_time_s, config->base_time_ns,
            config->cycle_time_s, config->cycle_time_ns);
     
-    // Step 1: Disable TAS during configuration
-    // Set QBV Control Register (QBVCR) - assume offset 0x1570 based on I225 spec
-    result = ndis_platform_ops.mmio_read(dev, 0x1570, &regValue);
+    // Disable TAS during configuration
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        result = ndis_platform_ops.mmio_read(dev, I225_TAS_CTRL, &regValue);
+    } else {
+        result = ndis_platform_ops.mmio_read(dev, I226_TAS_CTRL, &regValue);
+    }
     if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to read QBVCR register\n");
+        DEBUGP(DL_ERROR, "Failed to read TAS_CTRL\n");
         return result;
     }
-    
-    regValue &= ~0x00000001; // Disable TAS (clear bit 0)
-    result = ndis_platform_ops.mmio_write(dev, 0x1570, regValue);
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        regValue &= ~(unsigned long)I225_TAS_CTRL_EN_MASK;
+        result = ndis_platform_ops.mmio_write(dev, I225_TAS_CTRL, regValue);
+    } else {
+        regValue &= ~(unsigned long)I226_TAS_CTRL_EN_MASK;
+        result = ndis_platform_ops.mmio_write(dev, I226_TAS_CTRL, regValue);
+    }
     if (result != 0) {
         DEBUGP(DL_ERROR, "Failed to disable TAS\n");
         return result;
     }
     
-    // Step 2: Program Base Time (64-bit value)
-    // Base Time Low Register (BASETLOW) - offset 0x1574
-    ULONG baseTimeLow = (ULONG)(((UINT64)config->base_time_s * 1000000000ULL + config->base_time_ns) & 0xFFFFFFFF);
-    result = ndis_platform_ops.mmio_write(dev, 0x1574, baseTimeLow);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to write base time low\n");
-        return result;
+    // Compose 64-bit base time in nanoseconds
+    ULONGLONG baseTimeNs = (ULONGLONG)config->base_time_s * 1000000000ULL + (ULONGLONG)config->base_time_ns;
+    ULONG baseTimeLow = (ULONG)(baseTimeNs & 0xFFFFFFFF);
+    ULONG baseTimeHigh = (ULONG)((baseTimeNs >> 32) & 0xFFFFFFFF);
+    
+    // Program Base Time using SSOT config registers
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        result = ndis_platform_ops.mmio_write(dev, I225_TAS_CONFIG0, baseTimeLow);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_write(dev, I225_TAS_CONFIG1, baseTimeHigh);
+        if (result != 0) return result;
+    } else {
+        result = ndis_platform_ops.mmio_write(dev, I226_TAS_CONFIG0, baseTimeLow);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_write(dev, I226_TAS_CONFIG1, baseTimeHigh);
+        if (result != 0) return result;
     }
     
-    // Base Time High Register (BASETHIGH) - offset 0x1578
-    ULONG baseTimeHigh = (ULONG)((((UINT64)config->base_time_s * 1000000000ULL + config->base_time_ns) >> 32) & 0xFFFFFFFF);
-    result = ndis_platform_ops.mmio_write(dev, 0x1578, baseTimeHigh);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to write base time high\n");
-        return result;
-    }
-    
-    // Step 3: Program Cycle Time 
-    // Cycle Time Register (CYCLE) - offset 0x157C
-    ULONG cycleTime = (ULONG)((UINT64)config->cycle_time_s * 1000000000ULL + config->cycle_time_ns);
-    result = ndis_platform_ops.mmio_write(dev, 0x157C, cycleTime);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to write cycle time\n");
-        return result;
-    }
-    
-    // Step 4: Program Gate Control List
-    // Each gate control entry contains gate states and duration
+    // Program Gate Control List (simplified: pack state and duration per entry)
     for (i = 0; i < 8 && config->gate_durations[i] > 0; i++) {
-        // Gate Control Register N (GCRN) - base offset 0x1580, 8 bytes per entry
-        ULONG gateControlOffset = 0x1580 + (i * 8);
-        
-        // Gate States (lower 8 bits) | Duration (upper 24 bits)
-        ULONG gateControlValue = ((ULONG)config->gate_states[i] & 0xFF) | 
-                                ((config->gate_durations[i] & 0xFFFFFF) << 8);
-        
-        result = ndis_platform_ops.mmio_write(dev, gateControlOffset, gateControlValue);
+        ULONG entry = ((ULONG)(config->gate_states[i] & 0xFF) << 24) |
+                      (config->gate_durations[i] & 0x00FFFFFF);
+        if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+            result = ndis_platform_ops.mmio_write(dev, I225_TAS_GATE_LIST + (i * 4), entry);
+        } else {
+            result = ndis_platform_ops.mmio_write(dev, I226_TAS_GATE_LIST + (i * 4), entry);
+        }
         if (result != 0) {
-            DEBUGP(DL_ERROR, "Failed to write gate control entry %d\n", i);
+            DEBUGP(DL_ERROR, "Failed to write gate entry %u\n", i);
             return result;
         }
-        
-        DEBUGP(DL_INFO, "Gate Entry %d: states=0x%02x, duration=%lu ns\n", 
-               i, config->gate_states[i], config->gate_durations[i]);
     }
     
-    // Step 5: Set number of gate control entries
-    // Gate Control List Length Register (GCLLR) - offset 0x1590
-    result = ndis_platform_ops.mmio_write(dev, 0x1590, i); // Number of valid entries
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to write gate control list length\n");
-        return result;
+    // Enable TAS and mark gate list/base time as valid
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        result = ndis_platform_ops.mmio_read(dev, I225_TAS_CTRL, &regValue);
+        if (result != 0) return result;
+        regValue |= (ULONG)(I225_TAS_CTRL_EN_MASK | I225_TAS_CTRL_GATE_LIST_MASK | I225_TAS_CTRL_BASE_TIME_MASK);
+        result = ndis_platform_ops.mmio_write(dev, I225_TAS_CTRL, regValue);
+    } else {
+        result = ndis_platform_ops.mmio_read(dev, I226_TAS_CTRL, &regValue);
+        if (result != 0) return result;
+        regValue |= (ULONG)(I226_TAS_CTRL_EN_MASK | I226_TAS_CTRL_GATE_LIST_MASK | I226_TAS_CTRL_BASE_TIME_MASK);
+        result = ndis_platform_ops.mmio_write(dev, I226_TAS_CTRL, regValue);
     }
-    
-    // Step 6: Enable TAS
-    result = ndis_platform_ops.mmio_read(dev, 0x1570, &regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to read QBVCR for enable\n");
-        return result;
-    }
-    
-    regValue |= 0x00000001; // Enable TAS (set bit 0)
-    result = ndis_platform_ops.mmio_write(dev, 0x1570, regValue);
     if (result != 0) {
         DEBUGP(DL_ERROR, "Failed to enable TAS\n");
         return result;
     }
     
-    DEBUGP(DL_INFO, "Time-Aware Shaper configured successfully with %d gate entries\n", i);
-    DEBUGP(DL_TRACE, "<==intel_setup_time_aware_shaper: SUCCESS - Real I225/I226 hardware programmed\n");
+    DEBUGP(DL_TRACE, "<==intel_setup_time_aware_shaper: SUCCESS\n");
     return 0;
 }
 
-/**
- * @brief Setup Frame Preemption (real hardware access)
- * Implements IEEE 802.1Qbu Frame Preemption for I225/I226
- */
 int intel_setup_frame_preemption(device_t *dev, struct tsn_fp_config *config)
 {
     PAVB_DEVICE_CONTEXT context;
-    ULONG regValue;
+    ULONG fp_cfg = 0;
     int result;
     
     DEBUGP(DL_TRACE, "==>intel_setup_frame_preemption (REAL I225/I226 IMPLEMENTATION)\n");
@@ -417,91 +439,58 @@ int intel_setup_frame_preemption(device_t *dev, struct tsn_fp_config *config)
         return -1;
     }
     
-    // Validate device supports Frame Preemption (I225/I226 only)
     if (context->intel_device.device_type != INTEL_DEVICE_I225 && 
         context->intel_device.device_type != INTEL_DEVICE_I226) {
-        DEBUGP(DL_ERROR, "intel_setup_frame_preemption: Device does not support Frame Preemption\n");
+        DEBUGP(DL_ERROR, "intel_setup_frame_preemption: Unsupported device\n");
         return -1;
     }
     
-    DEBUGP(DL_INFO, "FP Config: preemptable_queues=0x%x, min_fragment_size=%lu, verify_disable=%d\n",
-           config->preemptable_queues, config->min_fragment_size, config->verify_disable);
-    
-    // Step 1: Configure Preemption Control Register (PREEMPT_CTRL)
-    // Assume offset 0x1600 based on I225/I226 specifications
-    regValue = 0;
-    
-    // Set preemptable queues (bits 0-7)
-    regValue |= (config->preemptable_queues & 0xFF);
-    
-    // Set minimum fragment size (bits 8-15) - convert to hardware encoding
-    // Hardware uses 64-byte units, so divide by 64
-    ULONG minFragUnits = (config->min_fragment_size + 63) / 64; // Round up
-    if (minFragUnits > 255) minFragUnits = 255; // Clamp to max
-    regValue |= ((minFragUnits & 0xFF) << 8);
-    
-    // Set verification disable flag (bit 16)
+    // Build FP_CONFIG value using SSOT masks
     if (config->verify_disable) {
-        regValue |= 0x00010000;
+        if (context->intel_device.device_type == INTEL_DEVICE_I225)
+            fp_cfg |= (ULONG)I225_FP_CONFIG_VERIFY_DIS_MASK;
+        else
+            fp_cfg |= (ULONG)I226_FP_CONFIG_VERIFY_DIS_MASK;
     }
-    
-    // Enable Frame Preemption (bit 31)
-    regValue |= 0x80000000;
-    
-    result = ndis_platform_ops.mmio_write(dev, 0x1600, regValue);
+    // Preemptable queues in bits [15:8]
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        fp_cfg |= ((ULONG)(config->preemptable_queues & 0xFF) << I225_FP_CONFIG_PREEMPTABLE_QUEUES_SHIFT);
+    } else {
+        fp_cfg |= ((ULONG)(config->preemptable_queues & 0xFF) << I226_FP_CONFIG_PREEMPTABLE_QUEUES_SHIFT);
+    }
+    // Min fragment size in bits [23:16] encoded in 64B units
+    ULONG minFragUnits = (config->min_fragment_size + 63) / 64;
+    if (minFragUnits > 255) minFragUnits = 255;
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        fp_cfg |= ((ULONG)minFragUnits << I225_FP_CONFIG_MIN_FRAGMENT_SIZE_SHIFT);
+    } else {
+        fp_cfg |= ((ULONG)minFragUnits << I226_FP_CONFIG_MIN_FRAGMENT_SIZE_SHIFT);
+    }
+    // Enable bit
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        fp_cfg |= (ULONG)I225_FP_CONFIG_EN_MASK;
+        result = ndis_platform_ops.mmio_write(dev, I225_FP_CONFIG, fp_cfg);
+    } else {
+        fp_cfg |= (ULONG)I226_FP_CONFIG_EN_MASK;
+        result = ndis_platform_ops.mmio_write(dev, I226_FP_CONFIG, fp_cfg);
+    }
     if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to write Preemption Control Register\n");
+        DEBUGP(DL_ERROR, "Failed to write FP_CONFIG\n");
         return result;
     }
     
-    // Step 2: Configure Express/Preemptible Queue Mapping
-    // Queue Classification Register (QCLASS) - offset 0x1604
-    // Configure which queues are express (0) vs preemptible (1)
-    ULONG queueClass = 0;
-    for (UINT8 i = 0; i < 8; i++) {
-        if (config->preemptable_queues & (1 << i)) {
-            queueClass |= (1 << i); // Mark as preemptible
-        }
-        // Express queues remain 0 (default)
+    // Read FP status (optional)
+    ULONG fp_status;
+    if (context->intel_device.device_type == INTEL_DEVICE_I225) {
+        (void)ndis_platform_ops.mmio_read(dev, I225_FP_STATUS, &fp_status);
+    } else {
+        (void)ndis_platform_ops.mmio_read(dev, I226_FP_STATUS, &fp_status);
     }
     
-    result = ndis_platform_ops.mmio_write(dev, 0x1604, queueClass);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to write Queue Classification Register\n");
-        return result;
-    }
-    
-    // Step 3: Configure Preemption Status and Verification
-    // Read Preemption Status Register to check if preemption is active
-    result = ndis_platform_ops.mmio_read(dev, 0x1608, &regValue);
-    if (result == 0) {
-        BOOLEAN preemptionActive = (regValue & 0x00000001) != 0;
-        BOOLEAN verificationSuccess = (regValue & 0x00000002) != 0;
-        
-        DEBUGP(DL_INFO, "Frame Preemption Status: active=%s, verification=%s\n",
-               preemptionActive ? "YES" : "NO",
-               verificationSuccess ? "SUCCESS" : "PENDING");
-    }
-    
-    // Step 4: Enable Interspersing Express Traffic (IET) - IEEE 802.3br
-    // IET Control Register (IET_CTRL) - offset 0x160C
-    regValue = 0x00000001; // Enable IET
-    result = ndis_platform_ops.mmio_write(dev, 0x160C, regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to enable IET\n");
-        return result;
-    }
-    
-    DEBUGP(DL_INFO, "Frame Preemption configured: preemptable_queues=0x%02x, min_fragment=%lu bytes\n",
-           config->preemptable_queues, config->min_fragment_size);
-    DEBUGP(DL_TRACE, "<==intel_setup_frame_preemption: SUCCESS - Real I225/I226 hardware programmed\n");
+    DEBUGP(DL_TRACE, "<==intel_setup_frame_preemption: SUCCESS\n");
     return 0;
 }
 
-/**
- * @brief Setup PCIe Precision Time Measurement (real hardware access)
- * Implements PCIe PTM capability programming for I210/I219/I225/I226
- */
 int intel_setup_ptm(device_t *dev, struct ptm_config *config)
 {
     PAVB_DEVICE_CONTEXT context;
@@ -524,121 +513,56 @@ int intel_setup_ptm(device_t *dev, struct ptm_config *config)
     DEBUGP(DL_INFO, "PTM Config: enabled=%d, clock_granularity=%lu\n",
            config->enabled, config->clock_granularity);
     
-    // Step 1: Locate PTM Capability in PCIe Configuration Space
-    // PTM Capability is typically at offset 0x150-0x200 in extended config space
-    ULONG ptmCapOffset = 0x150; // Common location for Intel NICs
-    ULONG ptmCapId;
-    
-    // Search for PTM Capability ID (0x001F)
+    // Locate PTM Capability (ID 0x001F) in PCIe extended config space
+    ULONG ptmCapOffset = 0;
     for (ULONG offset = 0x100; offset < 0x200; offset += 4) {
         result = ndis_platform_ops.pci_read_config(dev, offset, &regValue);
         if (result != 0) continue;
-        
-        // Check if this is PTM capability (ID = 0x001F)
-        if ((regValue & 0xFFFF) == 0x001F) {
+        if ((regValue & 0xFFFF) == 0x001F) { // PTM Cap ID
             ptmCapOffset = offset;
-            ptmCapId = regValue;
-            DEBUGP(DL_INFO, "Found PTM Capability at offset 0x%x: 0x%x\n", offset, regValue);
             break;
         }
     }
+    if (ptmCapOffset == 0) {
+        DEBUGP(DL_ERROR, "PTM capability not found\n");
+        return -1;
+    }
     
-    // Step 2: Read PTM Capability Register 
+    // Read PTM Capability Register
     result = ndis_platform_ops.pci_read_config(dev, ptmCapOffset + 0x04, &regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to read PTM Capability Register\n");
-        return result;
-    }
-    
-    BOOLEAN ptmRequestor = (regValue & 0x00000001) != 0;
-    BOOLEAN ptmResponder = (regValue & 0x00000002) != 0;
+    if (result != 0) return result;
     BOOLEAN ptmRoot = (regValue & 0x00000004) != 0;
-    UINT8 localClockGranularity = (UINT8)((regValue >> 8) & 0xFF);
     
-    DEBUGP(DL_INFO, "PTM Capabilities: requestor=%s, responder=%s, root=%s, granularity=%d\n",
-           ptmRequestor ? "YES" : "NO",
-           ptmResponder ? "YES" : "NO", 
-           ptmRoot ? "YES" : "NO",
-           localClockGranularity);
-    
-    // Step 3: Configure PTM Control Register
+    // Configure PTM Control Register
     result = ndis_platform_ops.pci_read_config(dev, ptmCapOffset + 0x08, &regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to read PTM Control Register\n");
-        return result;
-    }
-    
+    if (result != 0) return result;
     if (config->enabled) {
-        // Enable PTM (bit 0)
-        regValue |= 0x00000001;
-        
-        // Enable PTM Root Select if supported (bit 1)  
-        if (ptmRoot) {
-            regValue |= 0x00000002;
-        }
-        
-        // Set Effective Granularity (bits 8-15)
-        regValue &= ~0x0000FF00; // Clear existing granularity
+        regValue |= 0x00000001; // Enable PTM
+        if (ptmRoot) regValue |= 0x00000002; // Root select if supported
+        regValue &= ~0x0000FF00;
         regValue |= ((config->clock_granularity & 0xFF) << 8);
-        
     } else {
-        // Disable PTM (clear bit 0)
         regValue &= ~0x00000001;
     }
-    
     result = ndis_platform_ops.pci_write_config(dev, ptmCapOffset + 0x08, regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to write PTM Control Register\n");
-        return result;
-    }
+    if (result != 0) return result;
     
-    // Step 4: For I225/I226, configure additional PTM registers in MMIO space
-    if (context->intel_device.device_type == INTEL_DEVICE_I225 || 
-        context->intel_device.device_type == INTEL_DEVICE_I226) {
-        
-        // PTM Configuration Register in MMIO space - offset 0x1700
-        regValue = 0;
-        if (config->enabled) {
-            regValue |= 0x00000001; // Enable PTM in MMIO
-            regValue |= ((config->clock_granularity & 0xFF) << 8); // Set granularity
-        }
-        
-        result = ndis_platform_ops.mmio_write(dev, 0x1700, regValue);
-        if (result != 0) {
-            DEBUGP(DL_ERROR, "Failed to write PTM MMIO Configuration\n");
-            return result;
-        }
-        
-        // Sync PTM with IEEE 1588 timestamp
-        // PTM Sync Control Register - offset 0x1704
-        regValue = 0x00000001; // Enable PTM-1588 synchronization
-        result = ndis_platform_ops.mmio_write(dev, 0x1704, regValue);
-        if (result != 0) {
-            DEBUGP(DL_WARN, "Failed to enable PTM-1588 sync (non-critical)\n");
-            // Continue - this is not critical for basic PTM operation
-        }
-    }
+    // Remove non-SSOT MMIO PTM writes; rely on PCIe PTM capability only
     
-    // Step 5: Verify PTM Status
+    // Verify PTM status
     result = ndis_platform_ops.pci_read_config(dev, ptmCapOffset + 0x08, &regValue);
     if (result == 0) {
         BOOLEAN ptmEnabled = (regValue & 0x00000001) != 0;
-        BOOLEAN ptmRootSelected = (regValue & 0x00000002) != 0;
         UINT8 effectiveGranularity = (UINT8)((regValue >> 8) & 0xFF);
-        
-        DEBUGP(DL_INFO, "PTM Status: enabled=%s, root_select=%s, granularity=%d (16ns units)\n",
-               ptmEnabled ? "YES" : "NO",
-               ptmRootSelected ? "YES" : "NO",
-               effectiveGranularity);
-        
+        DEBUGP(DL_INFO, "PTM Status: enabled=%s, granularity=%u\n",
+               ptmEnabled ? "YES" : "NO", effectiveGranularity);
         if (config->enabled && !ptmEnabled) {
-            DEBUGP(DL_ERROR, "PTM enable failed - check PCIe link partner support\n");
+            DEBUGP(DL_ERROR, "PTM enable failed - check link partner support\n");
             return -1;
         }
     }
     
-    DEBUGP(DL_INFO, "PCIe Precision Time Measurement configured successfully\n");
-    DEBUGP(DL_TRACE, "<==intel_setup_ptm: SUCCESS - Real PCIe PTM hardware programmed\n");
+    DEBUGP(DL_TRACE, "<==intel_setup_ptm: SUCCESS\n");
     return 0;
 }
 

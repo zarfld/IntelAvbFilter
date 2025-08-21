@@ -33,6 +33,24 @@ typedef struct _AVB_DEVICE_CONTEXT {
     BOOLEAN hw_access_enabled;
     NDIS_HANDLE miniport_handle;
     PINTEL_HARDWARE_CONTEXT hardware_context;  // Real hardware access context
+    
+    // ABI and capabilities tracking
+    ULONG last_seen_abi_version;
+
+    // Timestamp event ring (dev-side allocation; future UM mapping support)
+    BOOLEAN ts_ring_allocated;
+    ULONG   ts_ring_id;
+    PVOID   ts_ring_buffer;     // NonPaged allocation
+    ULONG   ts_ring_length;     // bytes
+    PMDL    ts_ring_mdl;        // MDL for mapping (future)
+    ULONGLONG ts_user_cookie;   // echoed back to UM
+
+    // Qav (Credit-Based Shaper) last request snapshot (placeholder)
+    UCHAR   qav_last_tc;
+    ULONG   qav_idle_slope;
+    ULONG   qav_send_slope;
+    ULONG   qav_hi_credit;
+    ULONG   qav_lo_credit;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
 // Function prototypes

@@ -13,20 +13,8 @@ Abstract:
 
 #include "precomp.h"
 #include "avb_integration.h"
+#include "external/intel_avb/lib/intel_windows.h"
 #include <ntstrsafe.h>
-
-// Platform operations structure (matches what Intel library expects)
-struct platform_ops {
-    int (*init)(device_t *dev);
-    void (*cleanup)(device_t *dev);
-    int (*pci_read_config)(device_t *dev, ULONG offset, ULONG *value);
-    int (*pci_write_config)(device_t *dev, ULONG offset, ULONG value);
-    int (*mmio_read)(device_t *dev, ULONG offset, ULONG *value);
-    int (*mmio_write)(device_t *dev, ULONG offset, ULONG value);
-    int (*mdio_read)(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT *value);
-    int (*mdio_write)(device_t *dev, USHORT phy_addr, USHORT reg_addr, USHORT value);
-    int (*read_timestamp)(device_t *dev, ULONGLONG *timestamp);
-};
 
 // Forward declarations with correct Windows kernel types
 NTSTATUS AvbPlatformInit(device_t *dev);
@@ -152,6 +140,18 @@ AvbHandleDeviceIoControl(
     outputBufferLength = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
 
     DEBUGP(DL_TRACE, "==>AvbHandleDeviceIoControl: IOCTL=0x%x\n", ioControlCode);
+
+    // Runtime ABI version check if caller provides a header version at the start of the buffer
+    if (inputBufferLength >= sizeof(ULONG)) {
+        ULONG umAbi = *((ULONG*)buffer);
+        AvbContext->last_seen_abi_version = umAbi;
+        if ((umAbi & 0xFFFF0000u) != (AVB_IOCTL_ABI_VERSION & 0xFFFF0000u)) {
+            DEBUGP(DL_ERROR, "ABI major mismatch: UM=0x%08x KM=0x%08x\n", umAbi, AVB_IOCTL_ABI_VERSION);
+            status = STATUS_REVISION_MISMATCH;
+            Irp->IoStatus.Information = 0;
+            return status;
+        }
+    }
 
     switch (ioControlCode) {
     case IOCTL_AVB_INIT_DEVICE:
@@ -318,13 +318,121 @@ AvbHandleDeviceIoControl(
         break;
     }
 
+    // New IOCTL cases
+    case IOCTL_AVB_ENUM_ADAPTERS:
+    {
+        if (outputBufferLength >= sizeof(AVB_ENUM_REQUEST)) {
+            PAVB_ENUM_REQUEST req = (PAVB_ENUM_REQUEST)buffer;
+            // Minimal implementation: single adapter context
+            req->count = 1;
+            req->vendor_id = AvbContext->intel_device.pci_vendor_id;
+            req->device_id = AvbContext->intel_device.pci_device_id;
+            req->capabilities = AvbContext->intel_device.capabilities;
+            req->status = NDIS_STATUS_SUCCESS;
+            information = sizeof(AVB_ENUM_REQUEST);
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case IOCTL_AVB_OPEN_ADAPTER:
+    {
+        if (inputBufferLength >= sizeof(AVB_OPEN_REQUEST) && outputBufferLength >= sizeof(AVB_OPEN_REQUEST)) {
+            PAVB_OPEN_REQUEST req = (PAVB_OPEN_REQUEST)buffer;
+            // For now, we validate that requested VID/DID matches current bound adapter
+            if (req->vendor_id == AvbContext->intel_device.pci_vendor_id &&
+                req->device_id == AvbContext->intel_device.pci_device_id) {
+                req->status = NDIS_STATUS_SUCCESS;
+                status = STATUS_SUCCESS;
+            } else {
+                req->status = (avb_u32)STATUS_INVALID_PARAMETER; // use NTSTATUS code in NDIS_STATUS field
+                status = STATUS_UNSUCCESSFUL;
+            }
+            information = sizeof(AVB_OPEN_REQUEST);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case IOCTL_AVB_TS_SUBSCRIBE:
+    {
+        if (inputBufferLength >= sizeof(AVB_TS_SUBSCRIBE_REQUEST) && outputBufferLength >= sizeof(AVB_TS_SUBSCRIBE_REQUEST)) {
+            PAVB_TS_SUBSCRIBE_REQUEST req = (PAVB_TS_SUBSCRIBE_REQUEST)buffer;
+            UNREFERENCED_PARAMETER(req); // Filters not yet applied at driver layer
+            if (!AvbContext->ts_ring_allocated) {
+                AvbContext->ts_ring_length = 64 * 1024; // 64KB default
+                AvbContext->ts_ring_buffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, AvbContext->ts_ring_length, FILTER_ALLOC_TAG);
+                if (AvbContext->ts_ring_buffer == NULL) {
+                    req->status = (avb_u32)STATUS_INSUFFICIENT_RESOURCES;
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    information = sizeof(AVB_TS_SUBSCRIBE_REQUEST);
+                    break;
+                }
+                AvbContext->ts_ring_allocated = TRUE;
+                AvbContext->ts_ring_id = 1; // single ring id
+            }
+            req->ring_id = AvbContext->ts_ring_id;
+            req->status = NDIS_STATUS_SUCCESS;
+            information = sizeof(AVB_TS_SUBSCRIBE_REQUEST);
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case IOCTL_AVB_TS_RING_MAP:
+    {
+        if (inputBufferLength >= sizeof(AVB_TS_RING_MAP_REQUEST) && outputBufferLength >= sizeof(AVB_TS_RING_MAP_REQUEST)) {
+            PAVB_TS_RING_MAP_REQUEST req = (PAVB_TS_RING_MAP_REQUEST)buffer;
+            if (!AvbContext->ts_ring_allocated || req->ring_id != AvbContext->ts_ring_id) {
+                req->status = (avb_u32)STATUS_INVALID_PARAMETER;
+                status = STATUS_INVALID_PARAMETER;
+                information = sizeof(AVB_TS_RING_MAP_REQUEST);
+                break;
+            }
+            // For now return a dummy token (KM VA)
+            req->length = AvbContext->ts_ring_length;
+            req->shm_token = (ULONGLONG)(ULONG_PTR)AvbContext->ts_ring_buffer;
+            AvbContext->ts_user_cookie = req->user_cookie;
+            req->status = NDIS_STATUS_SUCCESS;
+            information = sizeof(AVB_TS_RING_MAP_REQUEST);
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case IOCTL_AVB_SETUP_QAV:
+    {
+        if (inputBufferLength >= sizeof(AVB_QAV_REQUEST) && outputBufferLength >= sizeof(AVB_QAV_REQUEST)) {
+            PAVB_QAV_REQUEST req = (PAVB_QAV_REQUEST)buffer;
+            // Placeholder: store the config; actual programming via SSOT when ready
+            AvbContext->qav_last_tc = req->tc;
+            AvbContext->qav_idle_slope = req->idle_slope;
+            AvbContext->qav_send_slope = req->send_slope;
+            AvbContext->qav_hi_credit = req->hi_credit;
+            AvbContext->qav_lo_credit = req->lo_credit;
+            req->status = NDIS_STATUS_SUCCESS;
+            information = sizeof(AVB_QAV_REQUEST);
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }
 
     Irp->IoStatus.Information = information;
-    DEBUGP(DL_TRACE, "<==AvbHandleDeviceIoControl: 0x%x\n", status);
+    DEBUGP(DL_TRACE, "<--AvbHandleDeviceIoControl: 0x%x\n", status);
     return status;
 }
 
