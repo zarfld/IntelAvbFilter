@@ -146,6 +146,34 @@ static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m))
 
 static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|ptp-unlock|ptp-bringup|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
+static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
+    ptp_ensure_started(h); /* ensure timer running */
+    test_device_info(h); snapshot_i210_basic(h); snapshot_i210_ssot(h); ts_get(h);
+    if(er.capabilities & INTEL_CAP_TSN_TAS){ optional_used++; int r=tas_audio(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else printf("TAS: SKIPPED (unsupported)\n");
+    if(er.capabilities & INTEL_CAP_TSN_FP){ optional_used++; int r1=fp_on(h); if(r1==AVB_OPT_FAIL) optional_fail=1; int r2=fp_off(h); if(r2==AVB_OPT_FAIL) optional_fail=1; } else { printf("FP: SKIPPED (unsupported)\n"); }
+    if(er.capabilities & INTEL_CAP_PCIe_PTM){ optional_used++; int r=ptm_on(h); if(r==AVB_OPT_FAIL) optional_fail=1; r=ptm_off(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else { printf("PTM: SKIPPED (unsupported)\n"); }
+    if(er.capabilities & INTEL_CAP_MDIO){ optional_used++; int r=mdio_read_cmd(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else { printf("MDIO: SKIPPED (unsupported)\n"); }
+    printf("\nSummary: base=%s, optional=%s\n", base_ok?"OK":"FAIL", optional_fail?"FAIL":(optional_used?"OK":"NONE")); return base_ok?0:1; }
+
+int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE) return 1; test_init(h);
+    if(argc<2 || _stricmp(argv[1],"selftest")==0){ int rc=selftest(h); CloseHandle(h); return rc; }
+    if(_stricmp(argv[1],"snapshot")==0){ snapshot_i210_basic(h); }
+    else if(_stricmp(argv[1],"snapshot-ssot")==0){ snapshot_i210_ssot(h); }
+    else if(_stricmp(argv[1],"ptp-enable-ssot")==0){ ptp_enable_ssot_cmd(h); }
+    else if(_stricmp(argv[1],"ptp-probe")==0){ ptp_probe(h); }
+    else if(_stricmp(argv[1],"ptp-timinca")==0 && argc>=3){ unsigned long v=(unsigned long)strtoul(argv[2],NULL,16); ptp_set_timinca(h,v); }
+    else if(_stricmp(argv[1],"ptp-unlock")==0){ ptp_unlock(h); }
+    else if(_stricmp(argv[1],"info")==0){ test_device_info(h); }
+    else if(_stricmp(argv[1],"caps")==0){ AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else fprintf(stderr,"caps enum failed (GLE=%lu)\n", GetLastError()); }
+    else if(_stricmp(argv[1],"ts-get")==0){ ts_get(h); }
+    else if(_stricmp(argv[1],"ts-set-now")==0){ ts_set_now(h); }
+    else if(_stricmp(argv[1],"reg-read")==0 && argc>=3){ reg_read(h,(unsigned long)strtoul(argv[2],NULL,16)); }
+    else if(_stricmp(argv[1],"reg-write")==0 && argc>=4){ reg_write(h,(unsigned long)strtoul(argv[2],NULL,16),(unsigned long)strtoul(argv[3],NULL,16)); }
+    else if(_stricmp(argv[1],"ptp-bringup")==0){ ptp_bringup(h); }
+    else { usage(argv[0]); CloseHandle(h); return 2; }
+    CloseHandle(h); return 0; }
+
+/* Clear TSAUXC.DisableSystime (bit31) to allow SYSTIM to run */
 static void ptp_unlock(HANDLE h){
     unsigned long v=0; if(!read_reg(h, REG_TSAUXC, &v)){ fprintf(stderr,"TSAUXC read fail\n"); return; }
     printf("TSAUXC before=0x%08lX\n", v);
@@ -157,6 +185,7 @@ static void ptp_unlock(HANDLE h){
         printf("DisableSystime already cleared.\n");
     }
 }
+
 /* Minimal PHC bring-up test: enable PHC, zero time, verify movement via SYSTIML or residue SYSTIMR, capture AUX snapshot */
 static void ptp_bringup(HANDLE h)
 {
@@ -184,36 +213,6 @@ static void ptp_bringup(HANDLE h)
     unsigned long lo1=0, hi1=0, lo2=0, hi2=0; read_reg(h, REG_SYSTIML, &lo1); read_reg(h, REG_SYSTIMH, &hi1); Sleep(5); read_reg(h, REG_SYSTIML, &lo2); read_reg(h, REG_SYSTIMH, &hi2);
     printf("Confirm: first=0x%08lX%08lX second=0x%08lX%08lX delta=%s\n", hi1, lo1, hi2, lo2, (hi2>hi1)||(lo2>lo1)?"INC":"NO");
 }
-
-static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
-    ptp_ensure_started(h); /* ensure timer running */
-    test_device_info(h); snapshot_i210_basic(h); snapshot_i210_ssot(h); ts_get(h);
-    if(er.capabilities & INTEL_CAP_TSN_TAS){ optional_used++; int r=tas_audio(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else printf("TAS: SKIPPED (unsupported)\n");
-    if(er.capabilities & INTEL_CAP_TSN_FP){ optional_used++; int r1=fp_on(h); if(r1==AVB_OPT_FAIL) optional_fail=1; int r2=fp_off(h); if(r2==AVB_OPT_FAIL) optional_fail=1; } else { printf("FP: SKIPPED (unsupported)\n"); }
-    if(er.capabilities & INTEL_CAP_PCIe_PTM){ optional_used++; int r=ptm_on(h); if(r==AVB_OPT_FAIL) optional_fail=1; r=ptm_off(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else { printf("PTM: SKIPPED (unsupported)\n"); }
-    if(er.capabilities & INTEL_CAP_MDIO){ optional_used++; int r=mdio_read_cmd(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else { printf("MDIO: SKIPPED (unsupported)\n"); }
-    printf("\nSummary: base=%s, optional=%s\n", base_ok?"OK":"FAIL", optional_fail?"FAIL":(optional_used?"OK":"NONE")); return base_ok?0:1; }
-
-int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE) return 1; test_init(h);
-    if(argc<2 || _stricmp(argv[1],"selftest")==0){ int rc=selftest(h); CloseHandle(h); return rc; }
-    if(_stricmp(argv[1],"snapshot")==0){ snapshot_i210_basic(h); }
-    else if(_stricmp(argv[1],"snapshot-ssot")==0){ snapshot_i210_ssot(h); }
-    else if(_stricmp(argv[1],"ptp-enable-ssot")==0){ ptp_enable_ssot_cmd(h); }
-    else if(_stricmp(argv[1],"ptp-probe")==0){ ptp_probe(h); }
-    else if(_stricmp(argv[1],"ptp-timinca")==0 && argc>=3){ unsigned long v=(unsigned long)strtoul(argv[2],NULL,16); ptp_set_timinca(h,v); }
-    else if(_stricmp(argv[1],"ptp-unlock")==0){ ptp_unlock(h); }
-    else if(_stricmp(argv[1],"info")==0){ test_device_info(h); }
-    else if(_stricmp(argv[1],"caps")==0){ AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else fprintf(stderr,"caps enum failed (GLE=%lu)\n", GetLastError()); }
-    else if(_stricmp(argv[1],"ts-get")==0){ ts_get(h); }
-    else if(_stricmp(argv[1],"ts-set-now")==0){ ts_set_now(h); }
-    else if(_stricmp(argv[1],"reg-read")==0 && argc>=3){ reg_read(h,(unsigned long)strtoul(argv[2],NULL,16)); }
-    else if(_stricmp(argv[1],"reg-write")==0 && argc>=4){ reg_write(h,(unsigned long)strtoul(argv[2],NULL,16),(unsigned long)strtoul(argv[3],NULL,16)); }
-    else if(_stricmp(argv[1],"ptp-bringup")==0){ ptp_bringup(h); }
-    else { usage(argv[0]); CloseHandle(h); return 2; }
-    CloseHandle(h); return 0; }
-/* Forward declarations for PTP helper commands */
-static void ptp_probe(HANDLE h);
-static void ptp_set_timinca(HANDLE h, unsigned long val);
 
 /* PTP probe: sample SYSTIM over several intervals */
 static void ptp_probe(HANDLE h){
