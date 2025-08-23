@@ -211,3 +211,27 @@ int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE)
     else if(_stricmp(argv[1],"ptp-bringup")==0){ ptp_bringup(h); }
     else { usage(argv[0]); CloseHandle(h); return 2; }
     CloseHandle(h); return 0; }
+/* Forward declarations for PTP helper commands */
+static void ptp_probe(HANDLE h);
+static void ptp_set_timinca(HANDLE h, unsigned long val);
+
+/* PTP probe: sample SYSTIM over several intervals */
+static void ptp_probe(HANDLE h){
+    printf("PTP probe: reading SYSTIM 5 samples @10ms\n");
+    for(int i=0;i<5;i++){
+        unsigned long lo=0, hi=0;
+        read_reg(h, REG_SYSTIML, &lo);
+        read_reg(h, REG_SYSTIMH, &hi);
+        printf("  [%d] SYSTIM=0x%08lX%08lX\n", i, hi, lo);
+        Sleep(10);
+    }
+    unsigned long timinca=0; if(read_reg(h, REG_TIMINCA, &timinca)) printf("  TIMINCA=0x%08lX\n", timinca);
+}
+
+/* Set TIMINCA (PTP increment) */
+static void ptp_set_timinca(HANDLE h, unsigned long val){
+    if(reg_write_checked(h, REG_TIMINCA, val, "TIMINCA(cli)")){
+        unsigned long rb=0; read_reg(h, REG_TIMINCA, &rb);
+        printf("TIMINCA set to 0x%08lX\n", rb);
+    }
+}
