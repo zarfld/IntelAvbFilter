@@ -81,6 +81,9 @@
     <ClInclude Include="tests\taef\AvbTestCommon.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="external\intel_igb\src\e1000_regs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="filter.c">
