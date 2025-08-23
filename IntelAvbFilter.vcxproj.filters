@@ -203,5 +203,6 @@
     <None Include="tests\taef\Makefile.mak" />
     <None Include="Directory.Build.props" />
     <None Include="scripts\build_and_test.ps1" />
+    <None Include="I210_PTP_FIX_SUMMARY.md" />
   </ItemGroup>
 </Project>

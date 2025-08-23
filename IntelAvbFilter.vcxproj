@@ -252,6 +252,7 @@
     <None Include="Generate-CATFile.ps1" />
     <None Include="HARDWARE_ACCESS_IMPLEMENTATION.md" />
     <None Include="HONEST_CUSTOMER_STATUS_REPORT.md" />
+    <None Include="I210_PTP_FIX_SUMMARY.md" />
     <None Include="IMPLEMENTATION_COMPLETE.md" />
     <None Include="IMPLEMENTATION_MILESTONE.md" />
     <None Include="INTEGRATION_GUIDE.md" />

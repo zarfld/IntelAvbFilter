@@ -18,43 +18,142 @@ Abstract:
 #include "intel-ethernet-regs/gen/i210_regs.h"  /* Single Source Of Truth register definitions for i210 family */
 #include "external/intel_avb/lib/intel_private.h" /* For INTEL_REG_TSAUXC */
 
-// Helper: ensure i210 PTP system time is running (clear disable bit, program TIMINCA & enable)
+// Helper: ensure i210 PTP system time is running (complete initialization sequence)
 static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
 {
     ULONG lo=0, hi=0;
+    
+    DEBUGP(DL_INFO, "==>AvbI210EnsureSystimRunning: Starting I210 PTP initialization\n");
+    
+    // Step 1: Check if SYSTIM is already running
     if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo)!=0 ||
         intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi)!=0) {
-        DEBUGP(DL_ERROR, "PTP init: read SYSTIM failed\n");
+        DEBUGP(DL_ERROR, "PTP init: read SYSTIM failed - hardware access problem\n");
         return;
     }
+    
+    DEBUGP(DL_TRACE, "PTP init: Initial SYSTIM=0x%08X%08X\n", hi, lo);
+    
+    // If already running (non-zero timestamp), just verify it's incrementing
     if (lo || hi) {
-        DEBUGP(DL_TRACE, "PTP init: SYSTIM already running (0x%08X%08X)\n", hi, lo);
-        return; // already active
+        // Wait briefly and check again to verify it's incrementing
+        KeStallExecutionProcessor(10000); // 10ms delay
+        ULONG lo2=0, hi2=0;
+        if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo2)==0 &&
+            intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi2)==0) {
+            if ((hi2 > hi) || (hi2 == hi && lo2 > lo)) {
+                DEBUGP(DL_INFO, "PTP init: SYSTIM already running and incrementing (0x%08X%08X)\n", hi2, lo2);
+                return;
+            }
+            DEBUGP(DL_WARN, "PTP init: SYSTIM non-zero but not incrementing - reinitializing\n");
+        }
     }
+    
+    // Step 2: Read and configure TSAUXC register
     ULONG aux=0;
     if (intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux)==0) {
         DEBUGP(DL_INFO, "PTP init: TSAUXC before=0x%08X\n", aux);
-        if (aux & 0x80000000UL) {
-            (void)intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, aux & 0x7FFFFFFFUL);
-            ULONG aux2=0; (void)intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux2);
-            DEBUGP(DL_INFO, "PTP init: cleared DisableSystime, TSAUXC now=0x%08X\n", aux2);
+        
+        // Clear DisableSystime bit (bit 31) and ensure PHC is enabled (bit 30)
+        ULONG new_aux = (aux & 0x7FFFFFFFUL) | 0x40000000UL; // Clear bit 31, set bit 30
+        if (aux != new_aux) {
+            if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, new_aux)==0) {
+                ULONG aux_verify=0;
+                if (intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux_verify)==0) {
+                    DEBUGP(DL_INFO, "PTP init: TSAUXC updated to 0x%08X (PHC enabled, DisableSystime cleared)\n", aux_verify);
+                } else {
+                    DEBUGP(DL_ERROR, "PTP init: TSAUXC verification read failed\n");
+                }
+            } else {
+                DEBUGP(DL_ERROR, "PTP init: TSAUXC write failed\n");
+                return;
+            }
+        } else {
+            DEBUGP(DL_INFO, "PTP init: TSAUXC already properly configured\n");
         }
     } else {
-        DEBUGP(DL_ERROR, "PTP init: read TSAUXC failed\n");
+        DEBUGP(DL_ERROR, "PTP init: read TSAUXC failed - cannot configure PHC\n");
+        return;
     }
-    /* Zero frequency correction -> nominal 8ns tick */
-    (void)intel_write_reg(&ctx->intel_device, I210_TIMINCA, 0x00000000);
-    ULONG tim=0; (void)intel_read_reg(&ctx->intel_device, I210_TIMINCA, &tim);
-    DEBUGP(DL_INFO, "PTP init: TIMINCA=0x%08X\n", tim);
-    /* Optionally reset base time to 0 */
-    (void)intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0x00000000);
-    (void)intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0x00000000);
-    /* Enable RX/TX timestamp capture (EN bit only, TYPE=ALL) */
-    (void)intel_write_reg(&ctx->intel_device, I210_TSYNCRXCTL, (1U<<I210_TSYNCRXCTL_EN_SHIFT));
-    (void)intel_write_reg(&ctx->intel_device, I210_TSYNCTXCTL, (1U<<I210_TSYNCTXCTL_EN_SHIFT));
-    (void)intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo);
-    (void)intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi);
-    DEBUGP(DL_INFO, "PTP init: SYSTIM after init=0x%08X%08X\n", hi, lo);
+    
+    // Step 3: Configure TIMINCA for proper clock operation
+    // I210 default: 8ns per clock tick (125MHz system clock)
+    // TIMINCA = 0x08000000 (8ns) for normal operation
+    ULONG timinca_value = 0x08000000UL; // 8ns increment per tick
+    if (intel_write_reg(&ctx->intel_device, I210_TIMINCA, timinca_value)==0) {
+        ULONG tim_verify=0;
+        if (intel_read_reg(&ctx->intel_device, I210_TIMINCA, &tim_verify)==0) {
+            DEBUGP(DL_INFO, "PTP init: TIMINCA set to 0x%08X (8ns per tick)\n", tim_verify);
+        }
+    } else {
+        DEBUGP(DL_ERROR, "PTP init: TIMINCA write failed\n");
+        return;
+    }
+    
+    // Step 4: Reset SYSTIM to start the clock
+    DEBUGP(DL_INFO, "PTP init: Resetting SYSTIM to start PTP clock\n");
+    if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0x00000000)!=0 ||
+        intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0x00000000)!=0) {
+        DEBUGP(DL_ERROR, "PTP init: SYSTIM reset failed\n");
+        return;
+    }
+    
+    // Step 5: Enable RX/TX timestamp capture with proper settings
+    // Enable timestamping for all packet types (EN=1, TYPE=0 for all packets)
+    ULONG tsyncrx = (1U << I210_TSYNCRXCTL_EN_SHIFT) | (0U << I210_TSYNCRXCTL_TYPE_SHIFT);
+    ULONG tsynctx = (1U << I210_TSYNCTXCTL_EN_SHIFT) | (0U << I210_TSYNCTXCTL_TYPE_SHIFT);
+    
+    if (intel_write_reg(&ctx->intel_device, I210_TSYNCRXCTL, tsyncrx)==0 &&
+        intel_write_reg(&ctx->intel_device, I210_TSYNCTXCTL, tsynctx)==0) {
+        ULONG rx_verify=0, tx_verify=0;
+        intel_read_reg(&ctx->intel_device, I210_TSYNCRXCTL, &rx_verify);
+        intel_read_reg(&ctx->intel_device, I210_TSYNCTXCTL, &tx_verify);
+        DEBUGP(DL_INFO, "PTP init: Timestamp capture enabled - RX=0x%08X, TX=0x%08X\n", rx_verify, tx_verify);
+    } else {
+        DEBUGP(DL_ERROR, "PTP init: Timestamp capture enable failed\n");
+        return;
+    }
+    
+    // Step 6: Allow clock to start and verify operation
+    KeStallExecutionProcessor(50000); // 50ms delay to allow clock to start
+    
+    // Verify that SYSTIM is now incrementing
+    if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo)==0 &&
+        intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi)==0) {
+        
+        DEBUGP(DL_INFO, "PTP init: SYSTIM after initialization=0x%08X%08X\n", hi, lo);
+        
+        // Wait and check if it's incrementing
+        KeStallExecutionProcessor(10000); // 10ms delay
+        ULONG lo2=0, hi2=0;
+        if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo2)==0 &&
+            intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi2)==0) {
+            
+            DEBUGP(DL_INFO, "PTP init: SYSTIM after delay=0x%08X%08X\n", hi2, lo2);
+            
+            if ((hi2 > hi) || (hi2 == hi && lo2 > lo)) {
+                DEBUGP(DL_INFO, "? PTP init: SUCCESS - I210 PTP clock is running and incrementing\n");
+                // Set capability flags to indicate working PTP
+                ctx->intel_device.capabilities |= INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS;
+            } else {
+                DEBUGP(DL_ERROR, "? PTP init: FAILED - SYSTIM is not incrementing\n");
+                // Debug: Check other registers that might affect PTP
+                ULONG ctrl=0, status=0;
+                if (intel_read_reg(&ctx->intel_device, I210_CTRL, &ctrl)==0) {
+                    DEBUGP(DL_INFO, "Debug: CTRL register = 0x%08X\n", ctrl);
+                }
+                if (intel_read_reg(&ctx->intel_device, I210_STATUS, &status)==0) {
+                    DEBUGP(DL_INFO, "Debug: STATUS register = 0x%08X\n", status);
+                }
+            }
+        } else {
+            DEBUGP(DL_ERROR, "PTP init: Final SYSTIM verification read failed\n");
+        }
+    } else {
+        DEBUGP(DL_ERROR, "PTP init: Post-initialization SYSTIM read failed\n");
+    }
+    
+    DEBUGP(DL_INFO, "<==AvbI210EnsureSystimRunning: I210 PTP initialization complete\n");
 }
 
 // Platform operations with wrapper functions to handle NTSTATUS conversion
@@ -174,11 +273,15 @@ AvbHandleDeviceIoControl(
     switch (ioControlCode) {
     case IOCTL_AVB_INIT_DEVICE:
     {
+        DEBUGP(DL_INFO, "IOCTL_AVB_INIT_DEVICE: Starting hardware initialization\n");
+        
         if (!AvbContext->hw_access_enabled) {
             int result = intel_init(&AvbContext->intel_device);
             AvbContext->hw_access_enabled = (result == 0);
             status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+            DEBUGP(DL_INFO, "Intel library init result: %d, hw_access_enabled: %d\n", result, AvbContext->hw_access_enabled);
         }
+        
         if (AvbContext->hw_access_enabled) {
             /* Idempotent capability publish */
             if (!(AvbContext->intel_device.capabilities & INTEL_CAP_MMIO)) {
@@ -187,7 +290,10 @@ AvbHandleDeviceIoControl(
                     AvbContext->intel_device.capabilities |= INTEL_CAP_ENHANCED_TS;
                 DEBUGP(DL_INFO, "Capabilities set: 0x%08X\n", AvbContext->intel_device.capabilities);
             }
+            
+            // Perform device-specific initialization
             if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
+                DEBUGP(DL_INFO, "Performing I210-specific PTP initialization\n");
                 AvbI210EnsureSystimRunning(AvbContext);
             }
         }
