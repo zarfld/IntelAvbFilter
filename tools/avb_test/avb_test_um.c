@@ -30,6 +30,9 @@
 #define REG_RXSTMPL     I210_RXSTMPL
 #define REG_RXSTMPH     I210_RXSTMPH
 #define REG_TSAUXC      0x0B640
+#define REG_AUXSTMPL0   0x0B65C
+#define REG_AUXSTMPH0   0x0B660
+#define REG_SYSTIMR     0x0B60C  /* Fractional residue (2^-32 ns units) */
 
 /* Legacy minimal enable constant removed; use SSOT bit/mask */
 
@@ -141,7 +144,7 @@ static int ptm_on(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.conf
 static int ptm_off(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.enabled=0; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_PTM,&r,sizeof(r),&r,sizeof(r),&br,NULL); if(ok){ printf("PTM OFF OK (0x%lx)\n", r.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"PTM OFF failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m)); m.page=0; m.reg=1; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_MDIO_READ,&m,sizeof(m),&m,sizeof(m),&br,NULL); if(ok){ printf("MDIO[0,1]=0x%04X (0x%lx)\n", m.value, m.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"MDIO failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 
-static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|ptp-unlock|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
+static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|ptp-unlock|ptp-bringup|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
 static void ptp_probe(HANDLE h){
     printf("PTP probe: reading SYSTIM 5 samples @10ms\n");
@@ -190,5 +193,6 @@ int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE)
     else if(_stricmp(argv[1],"ts-set-now")==0){ ts_set_now(h); }
     else if(_stricmp(argv[1],"reg-read")==0 && argc>=3){ reg_read(h,(unsigned long)strtoul(argv[2],NULL,16)); }
     else if(_stricmp(argv[1],"reg-write")==0 && argc>=4){ reg_write(h,(unsigned long)strtoul(argv[2],NULL,16),(unsigned long)strtoul(argv[3],NULL,16)); }
+    else if(_stricmp(argv[1],"ptp-bringup")==0){ ptp_bringup(h); }
     else { usage(argv[0]); CloseHandle(h); return 2; }
     CloseHandle(h); return 0; }
