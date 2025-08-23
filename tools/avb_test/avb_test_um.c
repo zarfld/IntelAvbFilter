@@ -146,6 +146,17 @@ static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m))
 
 static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|ptp-unlock|ptp-bringup|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
+static void ptp_unlock(HANDLE h){
+    unsigned long v=0; if(!read_reg(h, REG_TSAUXC, &v)){ fprintf(stderr,"TSAUXC read fail\n"); return; }
+    printf("TSAUXC before=0x%08lX\n", v);
+    if(v & 0x80000000UL){
+        if(reg_write_checked(h, REG_TSAUXC, v & 0x7FFFFFFFUL, "TSAUXC(clear disable)")){
+            unsigned long v2=0; read_reg(h, REG_TSAUXC, &v2); printf("TSAUXC after =0x%08lX\n", v2);
+        }
+    } else {
+        printf("DisableSystime already cleared.\n");
+    }
+}
 /* Minimal PHC bring-up test: enable PHC, zero time, verify movement via SYSTIML or residue SYSTIMR, capture AUX snapshot */
 static void ptp_bringup(HANDLE h)
 {
