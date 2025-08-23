@@ -19,8 +19,6 @@
   Skip building the user-mode test tool.
 .PARAMETER SelfTestOnly
   Only run selftest (skip other test commands).
-.PARAMETER verbose
-  Extra logging.
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/build_and_test.ps1 -Configuration Debug -Platform x64
 #>
@@ -31,8 +29,7 @@
   [switch]$RestartAdapter,
   [switch]$SkipDriver,
   [switch]$SkipUserTool,
-  [switch]$SelfTestOnly,
-  [switch]$Verbose
+  [switch]$SelfTestOnly
 )
 
 $ErrorActionPreference = 'Stop'
