@@ -276,38 +276,45 @@ AvbHandleDeviceIoControl(
         DEBUGP(DL_INFO, "IOCTL_AVB_INIT_DEVICE: Starting hardware initialization\n");
         
         if (!AvbContext->hw_access_enabled) {
-            // Step 1: Simple device structure population (temporary until full BAR0 discovery)
-            AvbContext->intel_device.pci_vendor_id = INTEL_VENDOR_ID;  // 0x8086
-            AvbContext->intel_device.pci_device_id = 0x1533;           // I210
-            AvbContext->intel_device.device_type = INTEL_DEVICE_I210;
-            AvbContext->intel_device.private_data = AvbContext;
-            AvbContext->intel_device.capabilities = INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588;
-            
-            DEBUGP(DL_INFO, "Device structure populated: VID=0x%04X, DID=0x%04X\n",
-                   AvbContext->intel_device.pci_vendor_id,
-                   AvbContext->intel_device.pci_device_id);
-            
-            // Step 2: Initialize Intel library with populated device structure
+            // Preserve intended IDs in case library init zeroes fields
+            USHORT vid = INTEL_VENDOR_ID;   // 0x8086
+            USHORT did = 0x1533;            // I210 default (fallback)
+
+            AvbContext->intel_device.pci_vendor_id = vid;
+            AvbContext->intel_device.pci_device_id = did;
+            AvbContext->intel_device.device_type   = INTEL_DEVICE_I210;
+            AvbContext->intel_device.private_data  = AvbContext;
+            AvbContext->intel_device.capabilities  = INTEL_CAP_MMIO; // start minimal
+
+            DEBUGP(DL_INFO, "(PRE) Device structure set VID=0x%04X DID=0x%04X\n", vid, did);
+
             int result = intel_init(&AvbContext->intel_device);
-            AvbContext->hw_access_enabled = (result == 0);
-            status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-            DEBUGP(DL_INFO, "Intel library init result: %d, hw_access_enabled: %d\n", result, AvbContext->hw_access_enabled);
+            if (result != 0) {
+                DEBUGP(DL_ERROR, "intel_init failed (%d)\n", result);
+                status = STATUS_UNSUCCESSFUL;
+                break;
+            }
+
+            // Re-assert IDs & baseline caps in case intel_init overwrote
+            AvbContext->intel_device.pci_vendor_id = vid;
+            AvbContext->intel_device.pci_device_id = did;
+            if (!(AvbContext->intel_device.capabilities & INTEL_CAP_MMIO)) {
+                AvbContext->intel_device.capabilities |= INTEL_CAP_MMIO;
+            }
+            AvbContext->hw_access_enabled = TRUE;
+            AvbContext->initialized = TRUE;
+            status = STATUS_SUCCESS;
+            DEBUGP(DL_INFO, "intel_init OK, hw_access_enabled=1 caps=0x%08X\n", AvbContext->intel_device.capabilities);
         }
         
         if (AvbContext->hw_access_enabled) {
-            /* Idempotent capability publish */
-            if (!(AvbContext->intel_device.capabilities & INTEL_CAP_ENHANCED_TS)) {
-                AvbContext->intel_device.capabilities |= INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588;
-                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210)
-                    AvbContext->intel_device.capabilities |= INTEL_CAP_ENHANCED_TS;
-                DEBUGP(DL_INFO, "Capabilities enhanced: 0x%08X\n", AvbContext->intel_device.capabilities);
-            }
-            
-            // Step 3: Perform device-specific initialization (this was missing!)
             if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
-                DEBUGP(DL_INFO, "Performing I210-specific PTP initialization\n");
+                // Always ensure basic 1588 capability advertised once PTP init succeeds
+                if (!(AvbContext->intel_device.capabilities & INTEL_CAP_BASIC_1588)) {
+                    AvbContext->intel_device.capabilities |= INTEL_CAP_BASIC_1588;
+                }
+                DEBUGP(DL_INFO, "Performing I210-specific PTP initialization (caps=0x%08X)\n", AvbContext->intel_device.capabilities);
                 AvbI210EnsureSystimRunning(AvbContext);
-                DEBUGP(DL_INFO, "I210 PTP initialization completed\n");
             }
         } else {
             DEBUGP(DL_ERROR, "Hardware access not enabled - skipping PTP initialization\n");
@@ -474,37 +481,43 @@ AvbHandleDeviceIoControl(
     {
         if (outputBufferLength >= sizeof(AVB_ENUM_REQUEST)) {
             PAVB_ENUM_REQUEST req = (PAVB_ENUM_REQUEST)buffer;
-            
-            // First ensure device initialization has run
+
+            // Guarantee a minimally initialized device for enumeration
             if (!AvbContext->hw_access_enabled) {
-                // Initialize device structure if not already done
-                AvbContext->intel_device.pci_vendor_id = INTEL_VENDOR_ID;  // 0x8086
-                AvbContext->intel_device.pci_device_id = 0x1533;           // I210
-                AvbContext->intel_device.device_type = INTEL_DEVICE_I210;
-                AvbContext->intel_device.private_data = AvbContext;
-                AvbContext->intel_device.capabilities = INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS;
-                
-                // CRITICAL: Also call Intel library initialization
-                int result = intel_init(&AvbContext->intel_device);
-                AvbContext->hw_access_enabled = (result == 0);
-                
-                DEBUGP(DL_INFO, "Device structure populated during enum: VID=0x%04X, DID=0x%04X, hw_enabled=%d\n",
-                       AvbContext->intel_device.pci_vendor_id,
-                       AvbContext->intel_device.pci_device_id,
-                       AvbContext->hw_access_enabled);
+                // Fallback minimal path mirrors INIT logic (no BAR discovery here)
+                AvbContext->intel_device.pci_vendor_id = INTEL_VENDOR_ID;
+                AvbContext->intel_device.pci_device_id = 0x1533; // I210
+                AvbContext->intel_device.device_type   = INTEL_DEVICE_I210;
+                AvbContext->intel_device.private_data  = AvbContext;
+                if (!(AvbContext->intel_device.capabilities & INTEL_CAP_MMIO))
+                    AvbContext->intel_device.capabilities |= INTEL_CAP_MMIO;
+                // Do not call intel_init twice if INIT path will handle full setup later
+                DEBUGP(DL_WARN, "ENUM: hw not yet enabled - providing static fallback descriptor\n");
             }
-            
-            // Report single adapter with proper values
-            req->count = 1;  // We have one Intel adapter
-            req->vendor_id = AvbContext->intel_device.pci_vendor_id;
-            req->device_id = AvbContext->intel_device.pci_device_id;
-            req->capabilities = AvbContext->intel_device.capabilities;
-            req->status = NDIS_STATUS_SUCCESS;
-            information = sizeof(AVB_ENUM_REQUEST);
-            status = STATUS_SUCCESS;
-            
-            DEBUGP(DL_INFO, "ENUM_ADAPTERS: count=%d, VID=0x%04X, DID=0x%04X, caps=0x%08X\n",
-                   req->count, req->vendor_id, req->device_id, req->capabilities);
+
+            // If IDs somehow zeroed, reapply fallback
+            if (AvbContext->intel_device.pci_vendor_id == 0) {
+                AvbContext->intel_device.pci_vendor_id = INTEL_VENDOR_ID;
+            }
+            if (AvbContext->intel_device.pci_device_id == 0) {
+                AvbContext->intel_device.pci_device_id = 0x1533;
+            }
+            if (!(AvbContext->intel_device.capabilities & INTEL_CAP_MMIO)) {
+                AvbContext->intel_device.capabilities |= INTEL_CAP_MMIO; // advertise at least MMIO capability
+            }
+
+            req->index       = 0;
+            req->count       = 1; // Single adapter (current filter binding)
+            req->vendor_id   = AvbContext->intel_device.pci_vendor_id;
+            req->device_id   = AvbContext->intel_device.pci_device_id;
+            req->capabilities= AvbContext->intel_device.capabilities;
+            req->status      = NDIS_STATUS_SUCCESS;
+            information      = sizeof(AVB_ENUM_REQUEST);
+            status           = STATUS_SUCCESS;
+
+            DEBUGP(DL_INFO, "ENUM_ADAPTERS: count=1 VID=0x%04X DID=0x%04X caps=0x%08X hw_enabled=%d initialized=%d\n",
+                   req->vendor_id, req->device_id, req->capabilities,
+                   AvbContext->hw_access_enabled, AvbContext->initialized);
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
