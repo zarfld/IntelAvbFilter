@@ -18,6 +18,45 @@ Abstract:
 #include "intel-ethernet-regs/gen/i210_regs.h"  /* Single Source Of Truth register definitions for i210 family */
 #include "external/intel_avb/lib/intel_private.h" /* For INTEL_REG_TSAUXC */
 
+// Helper: ensure i210 PTP system time is running (clear disable bit, program TIMINCA & enable)
+static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
+{
+    ULONG lo=0, hi=0;
+    if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo)!=0 ||
+        intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi)!=0) {
+        DEBUGP(DL_ERROR, "PTP init: read SYSTIM failed\n");
+        return;
+    }
+    if (lo || hi) {
+        DEBUGP(DL_TRACE, "PTP init: SYSTIM already running (0x%08X%08X)\n", hi, lo);
+        return; // already active
+    }
+    ULONG aux=0;
+    if (intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux)==0) {
+        DEBUGP(DL_INFO, "PTP init: TSAUXC before=0x%08X\n", aux);
+        if (aux & 0x80000000UL) {
+            (void)intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, aux & 0x7FFFFFFFUL);
+            ULONG aux2=0; (void)intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux2);
+            DEBUGP(DL_INFO, "PTP init: cleared DisableSystime, TSAUXC now=0x%08X\n", aux2);
+        }
+    } else {
+        DEBUGP(DL_ERROR, "PTP init: read TSAUXC failed\n");
+    }
+    /* Zero frequency correction -> nominal 8ns tick */
+    (void)intel_write_reg(&ctx->intel_device, I210_TIMINCA, 0x00000000);
+    ULONG tim=0; (void)intel_read_reg(&ctx->intel_device, I210_TIMINCA, &tim);
+    DEBUGP(DL_INFO, "PTP init: TIMINCA=0x%08X\n", tim);
+    /* Optionally reset base time to 0 */
+    (void)intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0x00000000);
+    (void)intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0x00000000);
+    /* Enable RX/TX timestamp capture (EN bit only, TYPE=ALL) */
+    (void)intel_write_reg(&ctx->intel_device, I210_TSYNCRXCTL, (1U<<I210_TSYNCRXCTL_EN_SHIFT));
+    (void)intel_write_reg(&ctx->intel_device, I210_TSYNCTXCTL, (1U<<I210_TSYNCTXCTL_EN_SHIFT));
+    (void)intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo);
+    (void)intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi);
+    DEBUGP(DL_INFO, "PTP init: SYSTIM after init=0x%08X%08X\n", hi, lo);
+}
+
 // Platform operations with wrapper functions to handle NTSTATUS conversion
 static int PlatformInitWrapper(_In_ device_t *dev) {
     NTSTATUS status = AvbPlatformInit(dev);
@@ -139,37 +178,17 @@ AvbHandleDeviceIoControl(
             int result = intel_init(&AvbContext->intel_device);
             AvbContext->hw_access_enabled = (result == 0);
             status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-            if (result == 0) {
-                /* Set baseline capabilities now that real hw ops are active */
-                AvbContext->intel_device.capabilities |= INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588; /* Datasheet: IEEE 1588 hardware timer present (i210 spec Time Sync block) */
-                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
+        }
+        if (AvbContext->hw_access_enabled) {
+            /* Idempotent capability publish */
+            if (!(AvbContext->intel_device.capabilities & INTEL_CAP_MMIO)) {
+                AvbContext->intel_device.capabilities |= INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588;
+                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210)
                     AvbContext->intel_device.capabilities |= INTEL_CAP_ENHANCED_TS;
-                }
-                /* Minimal PTP bring-up if SYSTIM is zero (avoid interfering if already running)
-                   i210 Datasheet (PTP / SYSTIM description):
-                   - TIMINCA encodes fractional frequency correction; base tick is 8ns.
-                   - TSAUXC.Disable Systime (bit31) defaults to 1 on power-up and must be cleared to allow SYSTIM to run. */
-                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
-                    ULONG lo=0, hi=0;
-                    if (intel_read_reg(&AvbContext->intel_device, I210_SYSTIML, &lo)==0 && 
-                        intel_read_reg(&AvbContext->intel_device, I210_SYSTIMH, &hi)==0 &&
-                        lo==0 && hi==0) {
-                        /* Clear TSAUXC.DisableSystime (bit31) if set */
-                        ULONG aux=0;
-                        if (intel_read_reg(&AvbContext->intel_device, INTEL_REG_TSAUXC, &aux)==0) {
-                            if (aux & 0x80000000UL) {
-                                (void)intel_write_reg(&AvbContext->intel_device, INTEL_REG_TSAUXC, aux & 0x7FFFFFFFUL);
-                                DEBUGP(DL_INFO, "PTP: Cleared TSAUXC.DisableSystime (bit31)\n");
-                            }
-                        }
-                        /* Program zero correction (TIMINCA=0) so clock runs at nominal 8ns tick */
-                        (void)intel_write_reg(&AvbContext->intel_device, I210_TIMINCA, 0x00000000);
-                        /* Enable RX/TX timestamp capture (EN bit 4, TYPE=ALL (0)) */
-                        (void)intel_write_reg(&AvbContext->intel_device, I210_TSYNCRXCTL, (1U<<I210_TSYNCRXCTL_EN_SHIFT));
-                        (void)intel_write_reg(&AvbContext->intel_device, I210_TSYNCTXCTL, (1U<<I210_TSYNCTXCTL_EN_SHIFT));
-                        DEBUGP(DL_INFO, "PTP minimal init: TIMINCA=0, TSYNCRX/TX EN=1\n");
-                    }
-                }
+                DEBUGP(DL_INFO, "Capabilities set: 0x%08X\n", AvbContext->intel_device.capabilities);
+            }
+            if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
+                AvbI210EnsureSystimRunning(AvbContext);
             }
         }
         break;
