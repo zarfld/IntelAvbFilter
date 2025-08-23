@@ -483,10 +483,15 @@ AvbHandleDeviceIoControl(
                 AvbContext->intel_device.device_type = INTEL_DEVICE_I210;
                 AvbContext->intel_device.private_data = AvbContext;
                 AvbContext->intel_device.capabilities = INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS;
-                AvbContext->hw_access_enabled = TRUE;
-                DEBUGP(DL_INFO, "Device structure populated during enum: VID=0x%04X, DID=0x%04X\n",
+                
+                // CRITICAL: Also call Intel library initialization
+                int result = intel_init(&AvbContext->intel_device);
+                AvbContext->hw_access_enabled = (result == 0);
+                
+                DEBUGP(DL_INFO, "Device structure populated during enum: VID=0x%04X, DID=0x%04X, hw_enabled=%d\n",
                        AvbContext->intel_device.pci_vendor_id,
-                       AvbContext->intel_device.pci_device_id);
+                       AvbContext->intel_device.pci_device_id,
+                       AvbContext->hw_access_enabled);
             }
             
             // Report single adapter with proper values

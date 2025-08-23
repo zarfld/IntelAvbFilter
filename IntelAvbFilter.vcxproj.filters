@@ -212,5 +212,7 @@
     <None Include="install_driver.cmd" />
     <None Include="DEVELOPMENT_COMPLETE.md" />
     <None Include="CURRENT_STATUS_ANALYSIS.md" />
+    <None Include="FIX_STATUS_SUMMARY.md" />
+    <None Include="IMPLEMENTATION_COMPLETE_FINAL.md" />
   </ItemGroup>
 </Project>
