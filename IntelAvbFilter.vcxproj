@@ -241,6 +241,7 @@
     <None Include="Build-And-Sign-Driver.ps1" />
     <None Include="CAT-FILE-MANAGEMENT.md" />
     <None Include="COMPILATION_ERRORS_FIXED.md" />
+    <None Include="CURRENT_STATUS_ANALYSIS.md" />
     <None Include="DEVELOPMENT_COMPLETE.md" />
     <None Include="Directory.Build.props" />
     <None Include="external\intel_avb\spec\2407151103_Intel-Altera-KTI226V-S-RKTU_C26159200.md" />

@@ -211,5 +211,6 @@
     <None Include="tools\avb_test\avb_diagnostic.mak" />
     <None Include="install_driver.cmd" />
     <None Include="DEVELOPMENT_COMPLETE.md" />
+    <None Include="CURRENT_STATUS_ANALYSIS.md" />
   </ItemGroup>
 </Project>
