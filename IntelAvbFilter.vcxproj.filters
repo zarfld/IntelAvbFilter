@@ -140,6 +140,9 @@
     <ClCompile Include="tests\taef\AvbTaefTests.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="tools\avb_test\avb_diagnostic_test.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="filter.rc">
@@ -204,5 +207,9 @@
     <None Include="Directory.Build.props" />
     <None Include="scripts\build_and_test.ps1" />
     <None Include="I210_PTP_FIX_SUMMARY.md" />
+    <None Include="I210_DRIVER_VALIDATION_GUIDE.md" />
+    <None Include="tools\avb_test\avb_diagnostic.mak" />
+    <None Include="install_driver.cmd" />
+    <None Include="DEVELOPMENT_COMPLETE.md" />
   </ItemGroup>
 </Project>
