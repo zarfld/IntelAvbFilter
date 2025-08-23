@@ -13,7 +13,7 @@
 #include <stdlib.h>
 /* Use correct relative paths to shared headers (two levels up from tools/avb_test) */
 #include "../../include/avb_ioctl.h" /* shared IOCTL ABI */
-#include "../../intel-ethernet-regs/gen/i210_regs.h"  /* SSOT register definitions */
+#include "intel-ethernet-regs/gen/i210_regs.h"  /* SSOT register definitions */
 
 #define LINKNAME "\\\\.\\IntelAvbFilter"
 
@@ -29,6 +29,7 @@
 #define REG_TSYNCRXCTL  I210_TSYNCRXCTL
 #define REG_RXSTMPL     I210_RXSTMPL
 #define REG_RXSTMPH     I210_RXSTMPH
+#define REG_TSAUXC      0x0B640
 
 /* Legacy minimal enable constant removed; use SSOT bit/mask */
 
@@ -101,7 +102,7 @@ static void ptp_ensure_started(HANDLE h){
 static void ts_get(HANDLE h){ AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); DWORD br=0; BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL); if (ok) { printf("TS(IOCTL)=0x%016llX\n", (unsigned long long)t.timestamp); return; } unsigned long hi=0, lo=0; if (read_reg(h, REG_SYSTIMH, &hi) && read_reg(h, REG_SYSTIML, &lo)) { unsigned long long ts = ((unsigned long long)hi<<32)|lo; printf("TS=0x%016llX\n", ts); } else { printf("TS=read-failed\n"); } }
 static void ts_set_now(HANDLE h){ FILETIME ft; GetSystemTimeAsFileTime(&ft); ULARGE_INTEGER now; now.LowPart=ft.dwLowDateTime; now.HighPart=ft.dwHighDateTime; unsigned long long ts=(unsigned long long)now.QuadPart*100ULL; AVB_TIMESTAMP_REQUEST t; ZeroMemory(&t,sizeof(t)); t.timestamp=ts; DWORD br=0; if (DeviceIoControl(h, IOCTL_AVB_SET_TIMESTAMP, &t, sizeof(t), &t, sizeof(t), &br, NULL)) printf("TS set (0x%lx)\n", t.status); else fprintf(stderr, "TS set failed (GLE=%lu)\n", GetLastError()); }
 
-static void snapshot_i210_basic(HANDLE h){ unsigned long v; printf("\n--- Basic I210 register snapshot (legacy offsets) ---\n"); if (read_reg(h, REG_CTRL, &v))     printf("  CTRL(0x%05X)   = 0x%08lX\n", REG_CTRL, v); if (read_reg(h, REG_STATUS, &v))   printf("  STATUS(0x%05X) = 0x%08lX\n", REG_STATUS, v); if (read_reg(h, REG_SYSTIML, &v))  printf("  SYSTIML        = 0x%08lX\n", v); if (read_reg(h, REG_SYSTIMH, &v))  printf("  SYSTIMH        = 0x%08lX\n", v); if (read_reg(h, REG_TIMINCA, &v))  printf("  TIMINCA        = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCRXCTL, &v)) printf("  TSYNCRXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCTXCTL, &v)) printf("  TSYNCTXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPL, &v))  printf("  RXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPH, &v))  printf("  RXSTMPH         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPL, &v))  printf("  TXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPH, &v))  printf("  TXSTMPH         = 0x%08lX\n", v); }
+static void snapshot_i210_basic(HANDLE h){ unsigned long v; printf("\n--- Basic I210 register snapshot (legacy offsets) ---\n"); if (read_reg(h, REG_CTRL, &v))     printf("  CTRL(0x%05X)   = 0x%08lX\n", REG_CTRL, v); if (read_reg(h, REG_STATUS, &v))   printf("  STATUS(0x%05X) = 0x%08lX\n", REG_STATUS, v); if (read_reg(h, REG_SYSTIML, &v))  printf("  SYSTIML        = 0x%08lX\n", v); if (read_reg(h, REG_SYSTIMH, &v))  printf("  SYSTIMH        = 0x%08lX\n", v); if (read_reg(h, REG_TIMINCA, &v))  printf("  TIMINCA        = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCRXCTL, &v)) printf("  TSYNCRXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_TSYNCTXCTL, &v)) printf("  TSYNCTXCTL      = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPL, &v))  printf("  RXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_RXSTMPH, &v))  printf("  RXSTMPH         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPL, &v))  printf("  TXSTMPL         = 0x%08lX\n", v); if (read_reg(h, REG_TXSTMPH, &v))  printf("  TXSTMPH         = 0x%08lX\n", v); if (read_reg(h, REG_TSAUXC, &v)) printf("  TSAUXC          = 0x%08lX\n", v); }
 
 static void snapshot_i210_ssot(HANDLE h){
     unsigned long vtx=0, vrx=0; read_reg(h, I210_TSYNCTXCTL, &vtx); read_reg(h, I210_TSYNCRXCTL, &vrx);
@@ -140,7 +141,7 @@ static int ptm_on(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.conf
 static int ptm_off(HANDLE h){ AVB_PTM_REQUEST r; ZeroMemory(&r,sizeof(r)); r.config.enabled=0; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_SETUP_PTM,&r,sizeof(r),&r,sizeof(r),&br,NULL); if(ok){ printf("PTM OFF OK (0x%lx)\n", r.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"PTM OFF failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m)); m.page=0; m.reg=1; DWORD br=0; BOOL ok=DeviceIoControl(h,IOCTL_AVB_MDIO_READ,&m,sizeof(m),&m,sizeof(m),&br,NULL); if(ok){ printf("MDIO[0,1]=0x%04X (0x%lx)\n", m.value, m.status); return AVB_OPT_OK;} DWORD gle=GetLastError(); if (gle==ERROR_INVALID_FUNCTION) return AVB_OPT_UNSUP; fprintf(stderr,"MDIO failed (GLE=%lu)\n", gle); return AVB_OPT_FAIL; }
 
-static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
+static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|ptp-unlock|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
 static void ptp_probe(HANDLE h){
     printf("PTP probe: reading SYSTIM 5 samples @10ms\n");
@@ -170,6 +171,7 @@ int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE)
     else if(_stricmp(argv[1],"ptp-enable-ssot")==0){ ptp_enable_ssot_cmd(h); }
     else if(_stricmp(argv[1],"ptp-probe")==0){ ptp_probe(h); }
     else if(_stricmp(argv[1],"ptp-timinca")==0 && argc>=3){ unsigned long v=(unsigned long)strtoul(argv[2],NULL,16); ptp_set_timinca(h,v); }
+    else if(_stricmp(argv[1],"ptp-unlock")==0){ ptp_unlock(h); }
     else if(_stricmp(argv[1],"info")==0){ test_device_info(h); }
     else if(_stricmp(argv[1],"caps")==0){ AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else fprintf(stderr,"caps enum failed (GLE=%lu)\n", GetLastError()); }
     else if(_stricmp(argv[1],"ts-get")==0){ ts_get(h); }
