@@ -146,28 +146,32 @@ static int mdio_read_cmd(HANDLE h){ AVB_MDIO_REQUEST m; ZeroMemory(&m,sizeof(m))
 
 static void usage(const char* e){ printf("Usage: %s [selftest|snapshot|snapshot-ssot|ptp-enable-ssot|ptp-probe|ptp-timinca <hex>|ptp-unlock|ptp-bringup|info|caps|ts-get|ts-set-now|reg-read <hexOff>|reg-write <hexOff> <hexVal>]\n", e); }
 
-static void ptp_probe(HANDLE h){
-    printf("PTP probe: reading SYSTIM 5 samples @10ms\n");
-    for(int i=0;i<5;i++){ unsigned long lo=0,hi=0; read_reg(h,REG_SYSTIML,&lo); read_reg(h,REG_SYSTIMH,&hi); printf("  [%d] SYSTIM=0x%08lX%08lX\n", i, hi, lo); Sleep(10); }
-    unsigned long timinca=0; if(read_reg(h,REG_TIMINCA,&timinca)) printf("  TIMINCA=0x%08lX\n", timinca); }
-/* Allow manual TIMINCA programming for experimentation */
-static void ptp_set_timinca(HANDLE h, unsigned long val){
-    if(reg_write_checked(h, REG_TIMINCA, val, "TIMINCA(cli)")){
-        unsigned long rb=0; read_reg(h, REG_TIMINCA, &rb);
-        printf("TIMINCA set to 0x%08lX\n", rb);
-    }
-}
-/* Clear TSAUXC.DisableSystime (bit31) to allow SYSTIM to run */
-static void ptp_unlock(HANDLE h){
-    unsigned long v=0; if(!read_reg(h, REG_TSAUXC, &v)){ fprintf(stderr,"TSAUXC read fail\n"); return; }
-    printf("TSAUXC before=0x%08lX\n", v);
-    if(v & 0x80000000UL){
-        if(reg_write_checked(h, REG_TSAUXC, v & 0x7FFFFFFFUL, "TSAUXC(clear disable)")){
-            unsigned long v2=0; read_reg(h, REG_TSAUXC, &v2); printf("TSAUXC after =0x%08lX\n", v2);
-        }
-    } else {
-        printf("DisableSystime already cleared.\n");
-    }
+/* Minimal PHC bring-up test: enable PHC, zero time, verify movement via SYSTIML or residue SYSTIMR, capture AUX snapshot */
+static void ptp_bringup(HANDLE h)
+{
+    unsigned long tsa=0; if(!read_reg(h, REG_TSAUXC, &tsa)){ fprintf(stderr,"TSAUXC read fail\n"); return; }
+    unsigned long desired = (tsa | (1UL<<30)) & ~(1UL<<31); /* keep bit30=1, clear bit31 */
+    if(desired != tsa){ if(!reg_write_checked(h, REG_TSAUXC, desired, "TSAUXC(enable PHC)")) return; }
+    else printf("TSAUXC already 0x%08lX (PHC enabled)\n", tsa);
+
+    /* Program initial time */
+    if(!reg_write_checked(h, REG_SYSTIML, 0x00000000, "SYSTIML(init)")) return;
+    if(!reg_write_checked(h, REG_SYSTIMH, 0x00000000, "SYSTIMH(init)")) return;
+
+    unsigned long t0L=0, t0R=0; read_reg(h, REG_SYSTIML, &t0L); read_reg(h, REG_SYSTIMR, &t0R);
+    Sleep(10);
+    unsigned long t1L=0, t1R=0; read_reg(h, REG_SYSTIML, &t1L); read_reg(h, REG_SYSTIMR, &t1R);
+    printf("t0L=0x%08lX t0R=0x%08lX  t1L=0x%08lX t1R=0x%08lX movement=%s\n", t0L, t0R, t1L, t1R, ((t1L>t0L)||(t1R!=t0R))?"YES":"NO");
+
+    /* Force capture via SAMP_AUX0 (bit3) */
+    unsigned long tsa2=0; read_reg(h, REG_TSAUXC, &tsa2); unsigned long trigger = tsa2 | (1UL<<3); reg_write_checked(h, REG_TSAUXC, trigger, "TSAUXC(SAMP_AUX0)");
+    unsigned long auxL=0, auxH=0; read_reg(h, REG_AUXSTMPL0, &auxL); read_reg(h, REG_AUXSTMPH0, &auxH);
+    unsigned long curL=0, curH=0; read_reg(h, REG_SYSTIML, &curL); read_reg(h, REG_SYSTIMH, &curH);
+    printf("AUXSTMP0=0x%08lX%08lX  SYSTIM=0x%08lX%08lX\n", auxH, auxL, curH, curL);
+
+    /* Re-read sequence */
+    unsigned long lo1=0, hi1=0, lo2=0, hi2=0; read_reg(h, REG_SYSTIML, &lo1); read_reg(h, REG_SYSTIMH, &hi1); Sleep(5); read_reg(h, REG_SYSTIML, &lo2); read_reg(h, REG_SYSTIMH, &hi2);
+    printf("Confirm: first=0x%08lX%08lX second=0x%08lX%08lX delta=%s\n", hi1, lo1, hi2, lo2, (hi2>hi1)||(lo2>lo1)?"INC":"NO");
 }
 
 static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
