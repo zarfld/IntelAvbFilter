@@ -154,6 +154,18 @@ static void ptp_set_timinca(HANDLE h, unsigned long val){
         printf("TIMINCA set to 0x%08lX\n", rb);
     }
 }
+/* Clear TSAUXC.DisableSystime (bit31) to allow SYSTIM to run */
+static void ptp_unlock(HANDLE h){
+    unsigned long v=0; if(!read_reg(h, REG_TSAUXC, &v)){ fprintf(stderr,"TSAUXC read fail\n"); return; }
+    printf("TSAUXC before=0x%08lX\n", v);
+    if(v & 0x80000000UL){
+        if(reg_write_checked(h, REG_TSAUXC, v & 0x7FFFFFFFUL, "TSAUXC(clear disable)")){
+            unsigned long v2=0; read_reg(h, REG_TSAUXC, &v2); printf("TSAUXC after =0x%08lX\n", v2);
+        }
+    } else {
+        printf("DisableSystime already cleared.\n");
+    }
+}
 
 static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_used=0; AVB_ENUM_REQUEST er; if(enum_caps(h,&er)){ print_caps(er.capabilities); } else { printf("Capabilities: <enum failed GLE=%lu>\n", GetLastError()); er.capabilities=0; }
     ptp_ensure_started(h); /* ensure timer running */
