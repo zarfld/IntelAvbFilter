@@ -252,12 +252,14 @@
     <None Include="external\intel_avb\spec\ethernet-connection-i219-datasheet.md" />
     <None Include="external\intel_avb\spec\i217-ethernet-controller-datasheet-2.md" />
     <None Include="external\intel_avb\spec\README.md" />
+    <None Include="FIX_STATUS_SUMMARY.md" />
     <None Include="Generate-CATFile.ps1" />
     <None Include="HARDWARE_ACCESS_IMPLEMENTATION.md" />
     <None Include="HONEST_CUSTOMER_STATUS_REPORT.md" />
     <None Include="I210_DRIVER_VALIDATION_GUIDE.md" />
     <None Include="I210_PTP_FIX_SUMMARY.md" />
     <None Include="IMPLEMENTATION_COMPLETE.md" />
+    <None Include="IMPLEMENTATION_COMPLETE_FINAL.md" />
     <None Include="IMPLEMENTATION_MILESTONE.md" />
     <None Include="install_driver.cmd" />
     <None Include="INTEGRATION_GUIDE.md" />
