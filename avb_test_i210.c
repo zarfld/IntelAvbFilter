@@ -11,10 +11,9 @@ Abstract:
 
 --*/
 
-// This file is included in the kernel-mode driver project. To avoid user-mode
-// header conflicts under the WindowsKernelModeDriver toolset, compile only a
-// no-op placeholder here. Build the actual user-mode test tool in a separate
-// user-mode project (see avb_test.mak) that does not include precomp.h.
+// NOTE: Kernel build placeholder only. The real user-mode test binary is
+// built from avb_test_i210_um.c via VS Code task (build-test-i210) which
+// uses the shared IOCTL ABI header include/avb_ioctl.h without pulling WDK headers.
 
 #include "precomp.h"
 

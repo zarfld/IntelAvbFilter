@@ -11,29 +11,13 @@ Abstract:
 
 --*/
 
+/*
+ * POLICY COMPLIANCE: Use shared IOCTL ABI (include/avb_ioctl.h); remove ad-hoc copies
+ */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-// IOCTL definitions (from avb_integration.h)
-#define IOCTL_AVB_INIT_DEVICE         CTL_CODE(FILE_DEVICE_NETWORK, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_READ_REGISTER       CTL_CODE(FILE_DEVICE_NETWORK, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_GET_DEVICE_INFO     CTL_CODE(FILE_DEVICE_NETWORK, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
-
-// Request structures
-typedef struct _AVB_REGISTER_REQUEST {
-    ULONG offset;
-    ULONG value;
-    ULONG status;
-} AVB_REGISTER_REQUEST, *PAVB_REGISTER_REQUEST;
-
-typedef struct _AVB_DEVICE_INFO {
-    ULONG device_type;
-    ULONG vendor_id;
-    ULONG device_id;
-    BOOLEAN hw_access_enabled;
-    char device_name[64];
-} AVB_DEVICE_INFO, *PAVB_DEVICE_INFO;
+#include "include/avb_ioctl.h"
 
 /**
  * @brief Test I219 device detection and basic access
@@ -86,34 +70,20 @@ int main()
     
     // Test 2: Get device info
     printf("\n--- Test 2: Device Information ---\n");
-    AVB_DEVICE_INFO deviceInfo = {0};
+    AVB_DEVICE_INFO_REQUEST dir; ZeroMemory(&dir, sizeof(dir)); dir.buffer_size = sizeof(dir.device_info);
     result = DeviceIoControl(
         hDevice,
         IOCTL_AVB_GET_DEVICE_INFO,
-        NULL,
-        0,
-        &deviceInfo,
-        sizeof(deviceInfo),
+        &dir,
+        sizeof(dir),
+        &dir,
+        sizeof(dir),
         &bytesReturned,
         NULL
     );
-    
     if (result) {
-        printf("? Device info: SUCCESS\n");
-        printf("   Device Type: %lu\n", deviceInfo.device_type);
-        printf("   Vendor ID: 0x%04X\n", deviceInfo.vendor_id);
-        printf("   Device ID: 0x%04X\n", deviceInfo.device_id);
-        printf("   Hardware Access: %s\n", deviceInfo.hw_access_enabled ? "ENABLED" : "SIMULATED");
-        printf("   Device Name: %s\n", deviceInfo.device_name);
-        
-        // Check if this is I219
-        if (deviceInfo.vendor_id == 0x8086 && 
-            (deviceInfo.device_id == 0x15B7 || deviceInfo.device_id == 0x15B8 || 
-             deviceInfo.device_id == 0x15D6 || deviceInfo.device_id == 0x15D7 || 
-             deviceInfo.device_id == 0x15D8 || deviceInfo.device_id == 0x0DC7 || 
-             deviceInfo.device_id == 0x1570 || deviceInfo.device_id == 0x15E3)) {
-            printf("?? CONFIRMED: This is an Intel I219 controller!\n");
-        }
+        dir.device_info[(dir.buffer_size < sizeof(dir.device_info)) ? dir.buffer_size : (sizeof(dir.device_info)-1)]='\0';
+        printf("? Device info string: %s (status=0x%08X used=%u)\n", dir.device_info, dir.status, dir.buffer_size);
     } else {
         printf("? Device info: FAILED (Error: %lu)\n", GetLastError());
     }
@@ -122,8 +92,8 @@ int main()
     printf("\n--- Test 3: Register Access Tests ---\n");
     
     // Test reading device control register
-    AVB_REGISTER_REQUEST regRequest = {0};
-    regRequest.offset = 0x00000;  // Device Control Register (CTRL)
+    AVB_REGISTER_REQUEST regRequest; ZeroMemory(&regRequest, sizeof(regRequest));
+    regRequest.offset = 0x00000;  // CTRL
     
     result = DeviceIoControl(
         hDevice,
@@ -148,7 +118,7 @@ int main()
     }
     
     // Test reading device status register  
-    regRequest.offset = 0x00008;  // Device Status Register (STATUS)
+    regRequest.offset = 0x00008;  // STATUS
     
     result = DeviceIoControl(
         hDevice,

@@ -11,8 +11,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include "include/avb_ioctl.h"
-#include "intel-ethernet-regs/gen/i210_regs.h"  /* SSOT register definitions */
+/* Use correct relative paths to shared headers (two levels up from tools/avb_test) */
+#include "../../include/avb_ioctl.h" /* shared IOCTL ABI */
+#include "../../intel-ethernet-regs/gen/i210_regs.h"  /* SSOT register definitions */
 
 #define LINKNAME "\\\\.\\IntelAvbFilter"
 
