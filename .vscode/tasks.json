@@ -99,7 +99,12 @@
 			"label": "build-test-i210",
 			"type": "shell",
 			"command": "powershell",
-			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-File","tools/vs_compile.ps1","-BuildCmd","cl /nologo /W4 /Zi avb_test_i210.c /Fe:avb_test_i210.exe"],
+			"args": [
+				"-NoProfile","-ExecutionPolicy","Bypass","-File","tools/vs_compile.ps1",
+				"-BuildCmd",
+				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tools/avb_test/avb_test_um.c /Fe:avb_test_i210_um.exe"
+			],
+			"presentation": {"reveal":"always","panel":"dedicated","clear": true},
 			"problemMatcher": ["$msCompile"],
 			"group": "test"
 		},
@@ -123,7 +128,7 @@
 			"label": "run-i210-test",
 			"type": "shell",
 			"command": "powershell",
-			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./avb_test_i210.exe"],
+			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-Command","./avb_test_i210_um.exe"],
 			"presentation": {"reveal":"always"},
 			"dependsOn": ["build-test-i210"]
 		},
@@ -156,6 +161,7 @@
 			"command": "powershell",
 			"args": ["-NoProfile","-ExecutionPolicy","Bypass","-File","Sign-Driver.ps1"],
 			"problemMatcher": []
-		}
+		},
+		
 	]
 }

@@ -14,38 +14,12 @@ Abstract:
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+/* POLICY COMPLIANCE: use shared ABI header; remove ad-hoc duplicates */
 #include <winioctl.h>
-#include "filteruser.h"
+#include "include/avb_ioctl.h"
 
-// AVB-specific IOCTLs (should match the kernel definitions)
-#define IOCTL_AVB_INIT_DEVICE           _NDIS_CONTROL_CODE(20, METHOD_BUFFERED)
-#define IOCTL_AVB_GET_DEVICE_INFO       _NDIS_CONTROL_CODE(21, METHOD_BUFFERED)
-#define IOCTL_AVB_READ_REGISTER         _NDIS_CONTROL_CODE(22, METHOD_BUFFERED)
-#define IOCTL_AVB_WRITE_REGISTER        _NDIS_CONTROL_CODE(23, METHOD_BUFFERED)
-#define IOCTL_AVB_GET_TIMESTAMP         _NDIS_CONTROL_CODE(24, METHOD_BUFFERED)
-#define IOCTL_AVB_SET_TIMESTAMP         _NDIS_CONTROL_CODE(25, METHOD_BUFFERED)
-
-// Device path for the filter driver
+/* Device path for the filter driver */
 #define DEVICE_PATH L"\\\\.\\IntelAvbFilter"
-
-// Test structures (should match kernel definitions)
-typedef struct _AVB_DEVICE_INFO_REQUEST {
-    CHAR device_info[1024];
-    ULONG buffer_size;
-    ULONG status;  // Using ULONG instead of NDIS_STATUS for user-mode
-} AVB_DEVICE_INFO_REQUEST, *PAVB_DEVICE_INFO_REQUEST;
-
-typedef struct _AVB_REGISTER_REQUEST {
-    UINT32 offset;
-    UINT32 value;
-    ULONG status;
-} AVB_REGISTER_REQUEST, *PAVB_REGISTER_REQUEST;
-
-typedef struct _AVB_TIMESTAMP_REQUEST {
-    UINT64 timestamp;
-    int clock_id;  // Using int instead of clockid_t
-    ULONG status;
-} AVB_TIMESTAMP_REQUEST, *PAVB_TIMESTAMP_REQUEST;
 
 /**
  * @brief Open handle to the AVB filter driver
@@ -222,7 +196,7 @@ BOOL TestGetTimestamp(HANDLE hDevice)
     
     printf("Testing timestamp retrieval...\n");
     
-    request.clock_id = 0; // CLOCK_REALTIME equivalent
+    request.clock_id = 0; // default clock id
     request.timestamp = 0;
     request.status = 0;
     
