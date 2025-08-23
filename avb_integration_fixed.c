@@ -276,6 +276,18 @@ AvbHandleDeviceIoControl(
         DEBUGP(DL_INFO, "IOCTL_AVB_INIT_DEVICE: Starting hardware initialization\n");
         
         if (!AvbContext->hw_access_enabled) {
+            // Step 1: Simple device structure population (temporary until full BAR0 discovery)
+            AvbContext->intel_device.pci_vendor_id = INTEL_VENDOR_ID;  // 0x8086
+            AvbContext->intel_device.pci_device_id = 0x1533;           // I210
+            AvbContext->intel_device.device_type = INTEL_DEVICE_I210;
+            AvbContext->intel_device.private_data = AvbContext;
+            AvbContext->intel_device.capabilities = INTEL_CAP_MMIO | INTEL_CAP_BASIC_1588;
+            
+            DEBUGP(DL_INFO, "Device structure populated: VID=0x%04X, DID=0x%04X\n",
+                   AvbContext->intel_device.pci_vendor_id,
+                   AvbContext->intel_device.pci_device_id);
+            
+            // Step 2: Initialize Intel library with populated device structure
             int result = intel_init(&AvbContext->intel_device);
             AvbContext->hw_access_enabled = (result == 0);
             status = (result == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
