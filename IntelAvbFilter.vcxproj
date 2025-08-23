@@ -260,6 +260,7 @@
     <None Include="Manage-Certificate.ps1" />
     <None Include="MICROSOFT_SAMPLES_INTEGRATION.md" />
     <None Include="README.md" />
+    <None Include="scripts\build_and_test.ps1" />
     <None Include="Sign-Driver.ps1" />
     <None Include="tests\integration\Makefile.mak" />
     <None Include="tests\README.md" />
