@@ -56,8 +56,6 @@ typedef struct AVB_REQUEST_HEADER {
 #define IOCTL_AVB_SETUP_PTM             _NDIS_CONTROL_CODE(28, METHOD_BUFFERED)
 #define IOCTL_AVB_MDIO_READ             _NDIS_CONTROL_CODE(29, METHOD_BUFFERED)
 #define IOCTL_AVB_MDIO_WRITE            _NDIS_CONTROL_CODE(30, METHOD_BUFFERED)
-
-/* Recommended additions */
 #define IOCTL_AVB_ENUM_ADAPTERS         _NDIS_CONTROL_CODE(31, METHOD_BUFFERED)
 #define IOCTL_AVB_OPEN_ADAPTER          _NDIS_CONTROL_CODE(32, METHOD_BUFFERED)
 #define IOCTL_AVB_TS_SUBSCRIBE          _NDIS_CONTROL_CODE(33, METHOD_BUFFERED)
@@ -66,6 +64,7 @@ typedef struct AVB_REQUEST_HEADER {
 #ifdef AVB_DEV_SIMULATION
 #define IOCTL_AVB_REG_READ_UBER         _NDIS_CONTROL_CODE(36, METHOD_BUFFERED)
 #endif
+#define IOCTL_AVB_GET_HW_STATE          _NDIS_CONTROL_CODE(37, METHOD_BUFFERED)
 
 /* Request/response structures (mirror of avb_integration.h) */
 #define AVB_DEVICE_INFO_MAX 1024u
@@ -89,8 +88,6 @@ typedef struct AVB_TIMESTAMP_REQUEST {
     avb_u32 status;    /* NDIS_STATUS value */
 } AVB_TIMESTAMP_REQUEST, *PAVB_TIMESTAMP_REQUEST;
 
-/* Use SSOT config types from external/intel_avb/lib/intel.h; do not redefine here. */
-
 typedef struct AVB_TAS_REQUEST {
     struct tsn_tas_config  config;
     avb_u32                status; /* NDIS_STATUS value */
@@ -110,7 +107,6 @@ typedef struct AVB_MDIO_REQUEST {
     avb_u32 page;
     avb_u32 reg;
     avb_u16 value;   /* out for READ, in for WRITE */
-    /* natural padding to 4-byte alignment before status */
     avb_u32 status;  /* NDIS_STATUS value */
 } AVB_MDIO_REQUEST, *PAVB_MDIO_REQUEST;
 
@@ -131,7 +127,6 @@ typedef struct AVB_OPEN_REQUEST {
     avb_u32 status;       /* out: NDIS_STATUS */
 } AVB_OPEN_REQUEST, *PAVB_OPEN_REQUEST;
 
-/* Timestamp event subscription/ring mapping */
 typedef struct AVB_TS_SUBSCRIBE_REQUEST {
     avb_u32 types_mask;   /* in: bitmask of event types */
     avb_u16 vlan;         /* in: optional filter */
@@ -149,7 +144,6 @@ typedef struct AVB_TS_RING_MAP_REQUEST {
     avb_u32 status;       /* out: NDIS_STATUS */
 } AVB_TS_RING_MAP_REQUEST, *PAVB_TS_RING_MAP_REQUEST;
 
-/* Credit-Based Shaper (Qav) */
 typedef struct AVB_QAV_REQUEST {
     avb_u8  tc;           /* traffic class */
     avb_u8  reserved1[3]; /* align */
@@ -159,6 +153,15 @@ typedef struct AVB_QAV_REQUEST {
     avb_u32 lo_credit;    /* bytes */
     avb_u32 status;       /* out: NDIS_STATUS */
 } AVB_QAV_REQUEST, *PAVB_QAV_REQUEST;
+
+/* Hardware state query (diagnostics) */
+typedef struct AVB_HW_STATE_QUERY {
+    avb_u32 hw_state;     /* AVB_HW_STATE enum value */
+    avb_u16 vendor_id;
+    avb_u16 device_id;
+    avb_u32 capabilities; /* current published caps */
+    avb_u32 reserved;     /* future use */
+} AVB_HW_STATE_QUERY, *PAVB_HW_STATE_QUERY;
 
 #ifdef __cplusplus
 }
