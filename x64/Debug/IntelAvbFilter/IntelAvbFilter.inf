@@ -11,16 +11,13 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 08/24/2025,18.40.29.804
+DriverVer = 08/24/2025,19.34.3.685
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
-; Supported architectures: x64 and ARM64 for modern Intel platforms
-; NTia64 section.
 [Manufacturer]
 %Msft%=MSFT,NTx86,NTia64,NTamd64,NTarm,NTarm64
 
-; MS_IntelAvbFilter can be used with netcfg.exe to install/uninstall the driver.
 [MSFT.NTx86]
 %IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
 
@@ -75,17 +72,13 @@ HKR, Ndi,Service,,"IntelAvbFilter"
 HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
 HKR, Ndi,ComponentId,,"MS_IntelAvbFilter" 
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
-; Valid Microsoft-recognized FilterClass. Previous custom 'scheduler' entry removed.
-HKR, Ndi,FilterClass,, "ms_passthru"
-; This is a Modifying filter that can alter packet timing and content for AVB
-HKR, Ndi,FilterType,0x00010001, 2 ; Modifying filter
-; Do not change these values
+; Valid Microsoft FilterClass (removed prior invalid 'scheduler')
+HKR, Ndi,FilterClass,,ms_passthru
+HKR, Ndi,FilterType,0x00010001,2       ; 2 = Modifying
+HKR, Ndi,FilterRunType,0x00010001,0    ; 0 = Optional
 HKR, Ndi\Interfaces,UpperRange,,"noupper"
 HKR, Ndi\Interfaces,LowerRange,,"nolower"
-; Support Ethernet media types for Intel NICs
-HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet"
-; Make filter optional; FilterAttach will refuse unsupported/virtual adapters
-HKR, Ndi,FilterRunType,0x00010001, 0 ; Optional filter
+HKR, Ndi\Interfaces,FilterMediaTypes,,"ethernet"
 
 [IntelAvbFilter_Service_Params]
 HKR,"Parameters","Default",   0x10001,0
