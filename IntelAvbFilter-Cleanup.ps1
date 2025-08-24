@@ -40,6 +40,9 @@ function Invoke-PnpUtil {
     [string[]]$Args,
     [int]$TimeoutSec = 180
   )
+  if(-not $Args -or $Args.Count -eq 0){
+    throw "Invoke-PnpUtil ohne Argumente aufgerufen (Programmfehler)"
+  }
   Write-Verbose ("[pnputil] start: {0}" -f ($Args -join ' '))
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName               = 'pnputil.exe'
