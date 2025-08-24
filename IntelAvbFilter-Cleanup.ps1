@@ -18,13 +18,14 @@
 [CmdletBinding(SupportsShouldProcess=$true)]
 param(
   [string]$AdapterName = "Ethernet 2",
-  [string]$ComponentId = "ms_intelavbfilter",   # Case-insensitive
+  [string]$ComponentId = "ms_intelavbfilter",
   [Parameter(Mandatory=$true)]
   [string]$InfPath,
   [switch]$EnableTestSigning,
   [string]$CertPath,
   [switch]$AllAdapters,
-  [int]$PnPutilTimeoutSec = 120
+  [int]$PnPutilTimeoutSec = 180,          # erhöhtes Default
+  [switch]$SkipDriverEnum                 # optional: /enum-drivers überspringen
 )
 
 #region Helper Functions
@@ -37,9 +38,9 @@ function Assert-Admin {
 function Invoke-PnpUtil {
   param(
     [string[]]$Args,
-    [int]$TimeoutSec = 120
+    [int]$TimeoutSec = 180
   )
-  Write-Verbose ([string]::Format('[pnputil] {0}', ($Args -join ' ')))
+  Write-Verbose ("[pnputil] start: {0}" -f ($Args -join ' '))
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName               = 'pnputil.exe'
   $psi.Arguments              = ($Args -join ' ')
@@ -48,15 +49,28 @@ function Invoke-PnpUtil {
   $psi.UseShellExecute        = $false
   $psi.CreateNoWindow         = $true
   $p = [System.Diagnostics.Process]::Start($psi)
-  if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-    try { $p.Kill() | Out-Null } catch {}
-    throw "Timeout (${TimeoutSec}s) bei pnputil $($Args -join ' ')"
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $spinner = '|/-\\'
+  $i = 0
+  while(-not $p.HasExited){
+    if($sw.Elapsed.TotalSeconds -ge $TimeoutSec){
+      try { $p.Kill() | Out-Null } catch {}
+      throw "Timeout (${TimeoutSec}s) bei pnputil $($Args -join ' ')"
+    }
+    if($sw.Elapsed.TotalSeconds -ge 2){
+      Write-Host -NoNewline ("`r[pnputil] läuft {0:N1}s {1}" -f $sw.Elapsed.TotalSeconds, $spinner[$i%$spinner.Length])
+      $i++
+    }
+    Start-Sleep -Milliseconds 200
   }
+  $sw.Stop()
+  Write-Host ("`r[pnputil] fertig in {0:N1}s          " -f $sw.Elapsed.TotalSeconds)
   [PSCustomObject]@{
     ExitCode = $p.ExitCode
     StdOut   = $p.StandardOutput.ReadToEnd()
     StdErr   = $p.StandardError.ReadToEnd()
     Command  = $psi.Arguments
+    Duration = $sw.Elapsed
   }
 }
 
@@ -82,15 +96,19 @@ function Disable-LwfBinding {
   param([string]$Adapter,[string]$Cid)
   try {
     Write-Host "[-] Binding deaktivieren: $Adapter ($Cid)" -ForegroundColor DarkYellow
-    Disable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction Stop | Out-Null
-  } catch { Write-Warning "Disable-Binding fehlgeschlagen fuer ${Adapter}: $_" }
+    if(Get-NetAdapter -Name $Adapter -ErrorAction SilentlyContinue){
+      Disable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction SilentlyContinue | Out-Null
+    }
+  } catch { Write-Warning "Disable-Binding fehlgeschlagen fuer $Adapter: $_" }
 }
 function Enable-LwfBinding {
   param([string]$Adapter,[string]$Cid)
   try {
     Write-Host "[+] Binding aktivieren:   $Adapter ($Cid)" -ForegroundColor Green
-    Enable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction Stop | Out-Null
-  } catch { Write-Warning "Enable-Binding fehlgeschlagen fuer ${Adapter}: $_" }
+    if(Get-NetAdapter -Name $Adapter -ErrorAction SilentlyContinue){
+      Enable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction SilentlyContinue | Out-Null
+    }
+  } catch { Write-Warning "Enable-Binding fehlgeschlagen fuer $Adapter: $_" }
 }
 
 function Remove-OemInf {
@@ -183,8 +201,18 @@ try {
   Show-NdiStatus
 
   # 7) Kurzer Auszug der neuen Treibereinträge
-  $enum = Invoke-PnpUtil @('/enum-drivers') -TimeoutSec $PnPutilTimeoutSec
-  ($enum.StdOut -split "`r?`n" | Select-String -Pattern 'intelavbfilter\.inf' -Context 0,6) | Out-Host
+  if(-not $SkipDriverEnum){
+    Write-Host '[i] Sammle Treiberliste (/enum-drivers) ...' -ForegroundColor Gray
+    $enum = Invoke-PnpUtil @('/enum-drivers') -TimeoutSec $PnPutilTimeoutSec
+    ($enum.StdOut -split "`r?`n" | Select-String -Pattern 'intelavbfilter\.inf' -Context 0,6) | Out-Host
+  } else {
+    Write-Host '[i] /enum-drivers übersprungen (SkipDriverEnum gesetzt).'
+  }
+  # Fallback schnelle Prüfung via CIM falls pnputil übersprungen oder leer
+  if($SkipDriverEnum){
+    Write-Host '[i] Fallback: Suche via Win32_PnPSignedDriver ...'
+    Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object { $_.InfName -match 'intelavbfilter' } | Select-Object DeviceName, InfName, DriverVersion | Format-Table -AutoSize
+  }
 
   Write-Host 'Fertig. DebugView / reg query zur weiteren Analyse verwenden.' -ForegroundColor Cyan
 }
