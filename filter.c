@@ -139,13 +139,17 @@ Return Value:
 
         InitializeListHead(&FilterModuleList);
 
+        DEBUGP(DL_INFO, "DriverEntry: Preparing to register filter - Header.Size=%lu Rev=%u NdisVer=%u.%u DriverVer=%u.%u\n", (unsigned long)FChars.Header.Size, FChars.Header.Revision, FChars.MajorNdisVersion, FChars.MinorNdisVersion, FChars.MajorDriverVersion, FChars.MinorDriverVersion);
+        DEBUGP(DL_INFO, "DriverEntry: Names - Service='%wZ' Unique='%wZ' Friendly='%wZ'\n", &ServiceName, &UniqueName, &FriendlyName);
+        DEBUGP(DL_INFO, "DriverEntry: Function pointers - Attach=%p Detach=%p Restart=%p Pause=%p SendNBL=%p RecvNBL=%p OidReq=%p\n", FChars.AttachHandler, FChars.DetachHandler, FChars.RestartHandler, FChars.PauseHandler, FChars.SendNetBufferListsHandler, FChars.ReceiveNetBufferListsHandler, FChars.OidRequestHandler);
+        
         Status = NdisFRegisterFilterDriver(DriverObject,
                                            (NDIS_HANDLE)FilterDriverObject,
                                            &FChars,
                                            &FilterDriverHandle);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_WARN, "Register filter driver failed. Status=0x%x\n", Status);
+            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed: NDIS_STATUS=0x%08X (interpreted NTSTATUS=0x%08X)\n", Status, Status);
             break;
         }
 
