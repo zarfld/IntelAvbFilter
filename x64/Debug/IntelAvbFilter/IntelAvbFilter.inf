@@ -11,7 +11,7 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 08/24/2025,19.34.3.685
+DriverVer = 08/24/2025,19.39.5.28
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
@@ -72,10 +72,9 @@ HKR, Ndi,Service,,"IntelAvbFilter"
 HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
 HKR, Ndi,ComponentId,,"MS_IntelAvbFilter" 
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
-; Valid Microsoft FilterClass (removed prior invalid 'scheduler')
-HKR, Ndi,FilterClass,,ms_passthru
-HKR, Ndi,FilterType,0x00010001,2       ; 2 = Modifying
-HKR, Ndi,FilterRunType,0x00010001,0    ; 0 = Optional
+HKR, Ndi,FilterClass,,ms_passthru        ; single valid FilterClass
+HKR, Ndi,FilterType,0x00010001,2         ; 2 = Modifying
+HKR, Ndi,FilterRunType,0x00010001,0      ; 0 = Optional
 HKR, Ndi\Interfaces,UpperRange,,"noupper"
 HKR, Ndi\Interfaces,LowerRange,,"nolower"
 HKR, Ndi\Interfaces,FilterMediaTypes,,"ethernet"
