@@ -83,14 +83,14 @@ function Disable-LwfBinding {
   try {
     Write-Host "[-] Binding deaktivieren: $Adapter ($Cid)" -ForegroundColor DarkYellow
     Disable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction Stop | Out-Null
-  } catch { Write-Warning "Disable-Binding fehlgeschlagen für $Adapter: $_" }
+  } catch { Write-Warning "Disable-Binding fehlgeschlagen fuer ${Adapter}: $_" }
 }
 function Enable-LwfBinding {
   param([string]$Adapter,[string]$Cid)
   try {
     Write-Host "[+] Binding aktivieren:   $Adapter ($Cid)" -ForegroundColor Green
     Enable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction Stop | Out-Null
-  } catch { Write-Warning "Enable-Binding fehlgeschlagen für $Adapter: $_" }
+  } catch { Write-Warning "Enable-Binding fehlgeschlagen fuer ${Adapter}: $_" }
 }
 
 function Remove-OemInf {
