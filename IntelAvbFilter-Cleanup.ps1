@@ -99,7 +99,7 @@ function Disable-LwfBinding {
     if(Get-NetAdapter -Name $Adapter -ErrorAction SilentlyContinue){
       Disable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction SilentlyContinue | Out-Null
     }
-  } catch { Write-Warning "Disable-Binding fehlgeschlagen fuer $Adapter: $_" }
+  } catch { Write-Warning "Disable-Binding fehlgeschlagen fuer ${Adapter}: $_" }
 }
 function Enable-LwfBinding {
   param([string]$Adapter,[string]$Cid)
@@ -108,7 +108,7 @@ function Enable-LwfBinding {
     if(Get-NetAdapter -Name $Adapter -ErrorAction SilentlyContinue){
       Enable-NetAdapterBinding -Name $Adapter -ComponentID $Cid -ErrorAction SilentlyContinue | Out-Null
     }
-  } catch { Write-Warning "Enable-Binding fehlgeschlagen fuer $Adapter: $_" }
+  } catch { Write-Warning "Enable-Binding fehlgeschlagen fuer ${Adapter}: $_" }
 }
 
 function Remove-OemInf {
