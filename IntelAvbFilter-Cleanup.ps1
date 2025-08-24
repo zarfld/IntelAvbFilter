@@ -39,16 +39,16 @@ function Assert-Admin {
 
 function Invoke-PnpUtil {
   param(
-    [string[]]$Args,
+    [string[]]$PnpArgs,
     [int]$TimeoutSec = 180
   )
-  if(-not $Args -or $Args.Count -eq 0){
+  if(-not $PnpArgs -or $PnpArgs.Length -eq 0){
     throw "Invoke-PnpUtil ohne Argumente aufgerufen (Programmfehler)"
   }
-  Write-Verbose ("[pnputil] start: {0}" -f ($Args -join ' '))
+  Write-Verbose ("[pnputil] start: {0}" -f ($PnpArgs -join ' '))
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName               = 'pnputil.exe'
-  $psi.Arguments              = ($Args -join ' ')
+  $psi.Arguments              = ($PnpArgs -join ' ')
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError  = $true
   $psi.UseShellExecute        = $false
@@ -60,7 +60,7 @@ function Invoke-PnpUtil {
   while(-not $p.HasExited){
     if($sw.Elapsed.TotalSeconds -ge $TimeoutSec){
       try { $p.Kill() | Out-Null } catch {}
-      throw "Timeout (${TimeoutSec}s) bei pnputil $($Args -join ' ')"
+      throw "Timeout (${TimeoutSec}s) bei pnputil $($PnpArgs -join ' ')"
     }
     if($sw.Elapsed.TotalSeconds -ge 2){
       Write-Host -NoNewline ("`r[pnputil] läuft {0:N1}s {1}" -f $sw.Elapsed.TotalSeconds, $spinner[$i%$spinner.Length])
@@ -86,7 +86,7 @@ function Get-OemInfsByOriginalName {
   $pubName = $null
   $list = [System.Collections.Generic.List[string]]::new()
   Write-Verbose '[enum] Aufruf pnputil /enum-drivers'
-  $res = Invoke-PnpUtil -Args '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
+  $res = Invoke-PnpUtil -PnpArgs '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
   foreach($line in ($res.StdOut -split "`r?`n")) {
     if([string]::IsNullOrWhiteSpace($line)){ continue }
     if($line -match $rPub){ $pubName = $Matches[2]; continue }
@@ -121,7 +121,7 @@ function Enable-LwfBinding {
 function Remove-OemInf {
   param([string]$OemInf)
   Write-Host "[-] Entferne Paket: $OemInf" -ForegroundColor DarkYellow
-  $res = Invoke-PnpUtil -Args @('/delete-driver', $OemInf, '/uninstall', '/force') -TimeoutSec $PnPutilTimeoutSec
+  $res = Invoke-PnpUtil -PnpArgs @('/delete-driver', $OemInf, '/uninstall', '/force') -TimeoutSec $PnPutilTimeoutSec
   if($res.ExitCode -ne 0){
     Write-Warning "Fehler beim Entfernen $OemInf (ExitCode $($res.ExitCode))\n$($res.StdOut)\n$($res.StdErr)"
   } else {
@@ -149,7 +149,7 @@ function Install-Inf {
   if(-not (Test-Path $Path)){ throw "INF nicht gefunden: $Path" }
   $full = (Resolve-Path $Path).Path
   Write-Host "[+] Installiere INF: $full" -ForegroundColor Cyan
-  $res = Invoke-PnpUtil -Args @('/add-driver', $full, '/install') -TimeoutSec $PnPutilTimeoutSec
+  $res = Invoke-PnpUtil -PnpArgs @('/add-driver', $full, '/install') -TimeoutSec $PnPutilTimeoutSec
   Write-Host $res.StdOut
   if($res.ExitCode -ne 0){ Write-Warning $res.StdErr }
 }
@@ -210,7 +210,7 @@ try {
   # 7) Kurzer Auszug der neuen Treibereinträge
   if(-not $SkipDriverEnum){
     Write-Host '[i] Sammle Treiberliste (/enum-drivers) ...' -ForegroundColor Gray
-    $enum = Invoke-PnpUtil -Args '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
+    $enum = Invoke-PnpUtil -PnpArgs '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
     ($enum.StdOut -split "`r?`n" | Select-String -Pattern 'intelavbfilter\.inf' -Context 0,6) | Out-Host
   } else {
     Write-Host '[i] /enum-drivers übersprungen (SkipDriverEnum gesetzt).'
