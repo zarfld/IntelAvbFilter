@@ -373,11 +373,15 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             if (Status != STATUS_SUCCESS)
             {
                 DEBUGP(DL_WARN, "FilterAttach: Supported Intel NIC 0x%04x:0x%04x but AVB init failed (0x%x)\n", ven, dev, Status);
-                // Do not hard-fail the attach if AVB init fails; still allow basic filter attach
                 Status = NDIS_STATUS_SUCCESS;
             }
             else
             {
+                PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+                if (avbCtx) {
+                    avbCtx->hw_state = AVB_HW_BOUND; /* initial bound state */
+                    DEBUGP(DL_INFO, "AVB HW state -> %s (Miniport=%wZ IfIndex=%u)\n", AvbHwStateName(avbCtx->hw_state), &pFilter->MiniportFriendlyName, pFilter->MiniportIfIndex);
+                }
                 DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
             }
         }

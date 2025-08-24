@@ -21,7 +21,26 @@ Abstract:
 // Intel constants
 #define INTEL_VENDOR_ID         0x8086
 
-// Hardware context for real MMIO access
+/* ------------------------------------------------------------------------- */
+/* Hardware lifecycle state machine (no fabrication) */
+typedef enum _AVB_HW_STATE {
+    AVB_HW_UNBOUND = 0,      /* Filter not yet attached to supported Intel miniport */
+    AVB_HW_BOUND,            /* Filter attached to supported Intel adapter (no BAR/MMIO yet) */
+    AVB_HW_BAR_MAPPED,       /* BAR0 resources discovered + MMIO mapped + basic register access validated */
+    AVB_HW_PTP_READY         /* PTP clock verified incrementing & timestamp capture enabled */
+} AVB_HW_STATE;
+
+/* Utility: readable name for state (for debug prints) */
+__forceinline const char* AvbHwStateName(AVB_HW_STATE s) {
+    switch (s) {
+    case AVB_HW_UNBOUND: return "UNBOUND"; 
+    case AVB_HW_BOUND: return "BOUND"; 
+    case AVB_HW_BAR_MAPPED: return "BAR_MAPPED"; 
+    case AVB_HW_PTP_READY: return "PTP_READY"; 
+    default: return "?"; }
+}
+
+/* Forward decl */
 typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
 
 // AVB device context structure
@@ -33,7 +52,10 @@ typedef struct _AVB_DEVICE_CONTEXT {
     BOOLEAN hw_access_enabled;
     NDIS_HANDLE miniport_handle;
     PINTEL_HARDWARE_CONTEXT hardware_context;  // Real hardware access context
-    
+
+    // Hardware lifecycle state
+    AVB_HW_STATE hw_state;
+
     // ABI and capabilities tracking
     ULONG last_seen_abi_version;
 
