@@ -24,8 +24,9 @@ param(
   [switch]$EnableTestSigning,
   [string]$CertPath,
   [switch]$AllAdapters,
-  [int]$PnPutilTimeoutSec = 180,          # erhöhtes Default
-  [switch]$SkipDriverEnum                 # optional: /enum-drivers überspringen
+  [int]$PnPutilTimeoutSec = 180,
+  [switch]$SkipDriverEnum,
+  [switch]$FsEnum              # neue Option: nur Dateisystem-Abfrage statt pnputil
 )
 
 Set-StrictMode -Version Latest
@@ -80,23 +81,45 @@ function Invoke-PnpUtil {
 }
 
 function Get-OemInfsByOriginalName {
-  param([string]$OriginalNameRegex)
-  $rPub = '^(Published Name|Veröffentlichter Name)\s*:\s*(\S+)' 
+  param([string]$OriginalNameRegex,[switch]$ForceFs)
+  $results = @()
+  if($ForceFs){
+    Write-Verbose '[enum/fs] Scanne %WINDIR%\\INF nach oem*.inf (Filesystem Modus)'
+    $files = Get-ChildItem -Path "$env:WINDIR\INF" -Filter 'oem*.inf' -ErrorAction SilentlyContinue
+    $total = $files.Count
+    $idx = 0
+    foreach($f in $files){
+      $idx++
+      if($idx % 200 -eq 0){ Write-Host ("[enum/fs] {0}/{1}" -f $idx,$total) -ForegroundColor DarkGray }
+      try {
+        $head = Get-Content -Path $f.FullName -TotalCount 60 -ErrorAction Stop
+        if($head -match $OriginalNameRegex){ $results += $f.Name }
+      } catch {}
+    }
+    return $results | Sort-Object -Unique
+  }
+  # pnputil Variante (Fallback bei Timeout -> FS)
+  $rPub = '^(Published Name|Veröffentlichter Name)\s*:\s*(\S+)'
   $rOrg = '^(Original Name|Originalname)\s*:\s*(.+)$'
   $pubName = $null
   $list = [System.Collections.Generic.List[string]]::new()
   Write-Verbose '[enum] Aufruf pnputil /enum-drivers'
-  $res = Invoke-PnpUtil -PnpArgs '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
-  foreach($line in ($res.StdOut -split "`r?`n")) {
-    if([string]::IsNullOrWhiteSpace($line)){ continue }
-    if($line -match $rPub){ $pubName = $Matches[2]; continue }
-    if($line -match $rOrg){
-      $org = $Matches[2].Trim()
-      if($pubName -and ($org -imatch $OriginalNameRegex)){ $list.Add($pubName) }
-      $pubName = $null
+  try {
+    $res = Invoke-PnpUtil -PnpArgs '/enum-drivers' -TimeoutSec ([Math]::Min($PnPutilTimeoutSec,60))
+    foreach($line in ($res.StdOut -split "`r?`n")) {
+      if([string]::IsNullOrWhiteSpace($line)){ continue }
+      if($line -match $rPub){ $pubName = $Matches[2]; continue }
+      if($line -match $rOrg){
+        $org = $Matches[2].Trim()
+        if($pubName -and ($org -imatch $OriginalNameRegex)){ $list.Add($pubName) }
+        $pubName = $null
+      }
     }
+    return $list | Sort-Object -Unique
+  } catch {
+    Write-Warning "pnputil Enumeration fehlgeschlagen/Timeout -> Fallback FS: $_"
+    return Get-OemInfsByOriginalName -OriginalNameRegex $OriginalNameRegex -ForceFs
   }
-  $list | Sort-Object -Unique
 }
 
 function Disable-LwfBinding {
@@ -181,15 +204,18 @@ try {
   Toggle-BindingPhase -Phase 'Disable'
 
   # 2) Vorhandene Treiberpakete entfernen
-  $oems = Get-OemInfsByOriginalName -OriginalNameRegex 'intelavbfilter\.inf'
+  $useFs = ($FsEnum -or $SkipDriverEnum)
+  $oems = Get-OemInfsByOriginalName -OriginalNameRegex 'intelavbfilter\.inf' -ForceFs:$useFs
   if($oems.Count -eq 0){
     Write-Host '[i] Keine vorhandenen oem*.inf Pakete gefunden.' -ForegroundColor Yellow
   } else {
-    Write-Host "[-] Entferne Pakete: $($oems -join ', ')" -ForegroundColor Yellow
-    $i=0
+    Write-Host ("[-] Zu entfernende Pakete: {0}" -f ($oems -join ', ')) -ForegroundColor Yellow
+    $totalRemove = $oems.Count
+    $n=0
     foreach($o in $oems){
-      $i++
-      Write-Progress -Activity 'Remove driver packages' -Status $o -PercentComplete (($i/$oems.Count)*100)
+      $n++
+      Write-Host ("[remove] ({0}/{1}) {2}" -f $n,$totalRemove,$o) -ForegroundColor DarkYellow
+      Write-Progress -Activity 'Remove driver packages' -Status $o -PercentComplete (($n/$totalRemove)*100)
       Remove-OemInf -OemInf $o
     }
     Write-Progress -Activity 'Remove driver packages' -Completed
@@ -208,17 +234,16 @@ try {
   Show-NdiStatus
 
   # 7) Kurzer Auszug der neuen Treibereinträge
-  if(-not $SkipDriverEnum){
+  if(-not $SkipDriverEnum -and -not $FsEnum){
     Write-Host '[i] Sammle Treiberliste (/enum-drivers) ...' -ForegroundColor Gray
-    $enum = Invoke-PnpUtil -PnpArgs '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
-    ($enum.StdOut -split "`r?`n" | Select-String -Pattern 'intelavbfilter\.inf' -Context 0,6) | Out-Host
+    try {
+      $enum = Invoke-PnpUtil -PnpArgs '/enum-drivers' -TimeoutSec ([Math]::Min($PnPutilTimeoutSec,60))
+      ($enum.StdOut -split "`r?`n" | Select-String -Pattern 'intelavbfilter\.inf' -Context 0,6) | Out-Host
+    } catch { Write-Warning "enum-drivers fehlgeschlagen: $_" }
   } else {
-    Write-Host '[i] /enum-drivers übersprungen (SkipDriverEnum gesetzt).'
-  }
-  # Fallback schnelle Prüfung via CIM falls pnputil übersprungen oder leer
-  if($SkipDriverEnum){
-    Write-Host '[i] Fallback: Suche via Win32_PnPSignedDriver ...'
-    Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object { $_.InfName -match 'intelavbfilter' } | Select-Object DeviceName, InfName, DriverVersion | Format-Table -AutoSize
+    Write-Host '[i] Enumerierung via pnputil übersprungen.' -ForegroundColor Gray
+    Write-Host '[i] FS Snapshot (oem* mit Muster intelavbfilter):' -ForegroundColor Gray
+    Get-ChildItem "$env:WINDIR\INF" -Filter 'oem*.inf' | Where-Object { (Select-String -Path $_.FullName -Pattern 'intelavbfilter' -SimpleMatch -Quiet -ErrorAction SilentlyContinue) } | Select-Object Name,LastWriteTime | Format-Table -AutoSize
   }
 
   Write-Host 'Fertig. DebugView / reg query zur weiteren Analyse verwenden.' -ForegroundColor Cyan
