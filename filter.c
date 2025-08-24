@@ -12,6 +12,16 @@ Abstract:
 
 #include "precomp.h"
 
+#ifndef FILTER_SERVICE_NAME
+#define FILTER_SERVICE_NAME      L"IntelAvbFilter"
+#endif
+#ifndef FILTER_UNIQUE_NAME
+#define FILTER_UNIQUE_NAME       L"MS_IntelAvbFilter" /* Must match INF ComponentId (HKR,Ndi,ComponentId) */
+#endif
+#ifndef FILTER_FRIENDLY_NAME
+#define FILTER_FRIENDLY_NAME     L"Intel AVB/TSN NDIS Filter Driver" /* Must match INF DisplayName */
+#endif
+
 #define __FILENUMBER    'PNPF'
 
 // This directive puts the DriverEntry function into the INIT segment of the
