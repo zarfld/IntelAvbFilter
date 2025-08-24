@@ -75,7 +75,7 @@ HKR, Ndi,Service,,"IntelAvbFilter"
 HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
 HKR, Ndi,ComponentId,,"MS_IntelAvbFilter" 
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
-; Use a valid Microsoft-recognized FilterClass. Custom value 'scheduler' caused NdisFRegisterFilterDriver to fail.
+; Valid Microsoft-recognized FilterClass. Previous custom 'scheduler' entry removed.
 HKR, Ndi,FilterClass,, "ms_passthru"
 ; This is a Modifying filter that can alter packet timing and content for AVB
 HKR, Ndi,FilterType,0x00010001, 2 ; Modifying filter
