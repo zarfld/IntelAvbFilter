@@ -150,7 +150,21 @@ Return Value:
                                            &FilterDriverHandle);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed: NDIS_STATUS=0x%08X (interpreted NTSTATUS=0x%08X)\n", Status, Status);
+            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed first attempt (NDIS %u.%u): 0x%08X\n", FChars.MajorNdisVersion, FChars.MinorNdisVersion, Status);
+            // Fallback: try downgrading MinorNdisVersion to 0 if we requested >0
+            if (FChars.MinorNdisVersion != 0) {
+                UCHAR origMinor = FChars.MinorNdisVersion;
+                FChars.MinorNdisVersion = 0; // minimal NDIS 6.x
+                DEBUGP(DL_WARN, "Retrying registration with downgraded NDIS version %u.%u (was %u.%u)\n", FChars.MajorNdisVersion, FChars.MinorNdisVersion, FChars.MajorNdisVersion, origMinor);
+                Status = NdisFRegisterFilterDriver(DriverObject,
+                                                   (NDIS_HANDLE)FilterDriverObject,
+                                                   &FChars,
+                                                   &FilterDriverHandle);
+            }
+        }
+        if (Status != NDIS_STATUS_SUCCESS)
+        {
+            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver final failure: NDIS_STATUS=0x%08X\n", Status);
             break;
         }
 
