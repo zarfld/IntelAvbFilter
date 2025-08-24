@@ -28,6 +28,8 @@ param(
   [switch]$SkipDriverEnum                 # optional: /enum-drivers überspringen
 )
 
+Set-StrictMode -Version Latest
+
 #region Helper Functions
 function Assert-Admin {
   if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -83,8 +85,10 @@ function Get-OemInfsByOriginalName {
   $rOrg = '^(Original Name|Originalname)\s*:\s*(.+)$'
   $pubName = $null
   $list = [System.Collections.Generic.List[string]]::new()
-  $res = Invoke-PnpUtil @('/enum-drivers') -TimeoutSec $PnPutilTimeoutSec
+  Write-Verbose '[enum] Aufruf pnputil /enum-drivers'
+  $res = Invoke-PnpUtil -Args '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
   foreach($line in ($res.StdOut -split "`r?`n")) {
+    if([string]::IsNullOrWhiteSpace($line)){ continue }
     if($line -match $rPub){ $pubName = $Matches[2]; continue }
     if($line -match $rOrg){
       $org = $Matches[2].Trim()
@@ -117,7 +121,7 @@ function Enable-LwfBinding {
 function Remove-OemInf {
   param([string]$OemInf)
   Write-Host "[-] Entferne Paket: $OemInf" -ForegroundColor DarkYellow
-  $res = Invoke-PnpUtil @('/delete-driver', $OemInf, '/uninstall', '/force') -TimeoutSec $PnPutilTimeoutSec
+  $res = Invoke-PnpUtil -Args @('/delete-driver', $OemInf, '/uninstall', '/force') -TimeoutSec $PnPutilTimeoutSec
   if($res.ExitCode -ne 0){
     Write-Warning "Fehler beim Entfernen $OemInf (ExitCode $($res.ExitCode))\n$($res.StdOut)\n$($res.StdErr)"
   } else {
@@ -145,7 +149,7 @@ function Install-Inf {
   if(-not (Test-Path $Path)){ throw "INF nicht gefunden: $Path" }
   $full = (Resolve-Path $Path).Path
   Write-Host "[+] Installiere INF: $full" -ForegroundColor Cyan
-  $res = Invoke-PnpUtil @('/add-driver', $full, '/install') -TimeoutSec $PnPutilTimeoutSec
+  $res = Invoke-PnpUtil -Args @('/add-driver', $full, '/install') -TimeoutSec $PnPutilTimeoutSec
   Write-Host $res.StdOut
   if($res.ExitCode -ne 0){ Write-Warning $res.StdErr }
 }
@@ -206,7 +210,7 @@ try {
   # 7) Kurzer Auszug der neuen Treibereinträge
   if(-not $SkipDriverEnum){
     Write-Host '[i] Sammle Treiberliste (/enum-drivers) ...' -ForegroundColor Gray
-    $enum = Invoke-PnpUtil @('/enum-drivers') -TimeoutSec $PnPutilTimeoutSec
+    $enum = Invoke-PnpUtil -Args '/enum-drivers' -TimeoutSec $PnPutilTimeoutSec
     ($enum.StdOut -split "`r?`n" | Select-String -Pattern 'intelavbfilter\.inf' -Context 0,6) | Out-Host
   } else {
     Write-Host '[i] /enum-drivers übersprungen (SkipDriverEnum gesetzt).'
