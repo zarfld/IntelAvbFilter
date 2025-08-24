@@ -96,17 +96,39 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     if (!Ctx) return STATUS_INVALID_PARAMETER;
     if (Ctx->hw_access_enabled) return STATUS_SUCCESS;
 
+    /* Step 1: Discover & map BAR0 if not yet mapped */
+    if (Ctx->hardware_context == NULL) {
+        PHYSICAL_ADDRESS bar0 = {0};
+        ULONG barLen = 0;
+        NTSTATUS ds = AvbDiscoverIntelControllerResources(Ctx->filter_instance, &bar0, &barLen);
+        if (!NT_SUCCESS(ds)) {
+            DEBUGP(DL_ERROR, "BAR0 discovery failed 0x%08X (cannot map MMIO yet)\n", ds);
+            return ds; /* propagate so diagnostic can show reason */
+        }
+        DEBUGP(DL_INFO, "BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
+        NTSTATUS ms = AvbMapIntelControllerMemory(Ctx, bar0, barLen);
+        if (!NT_SUCCESS(ms)) {
+            DEBUGP(DL_ERROR, "BAR0 map failed 0x%08X (MmMapIoSpace)\n", ms);
+            return ms;
+        }
+        DEBUGP(DL_INFO, "MMIO mapped (opaque ctx=%p)\n", Ctx->hardware_context);
+    }
+
     Ctx->intel_device.private_data = Ctx;
     Ctx->intel_device.capabilities = 0; /* reset published caps */
 
     DEBUGP(DL_INFO, "intel_init: VID=0x%04X DID=0x%04X\n", Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
-    if (intel_init(&Ctx->intel_device) != 0) return STATUS_UNSUCCESSFUL;
+    if (intel_init(&Ctx->intel_device) != 0) {
+        DEBUGP(DL_ERROR, "intel_init failed (library)\n");
+        return STATUS_UNSUCCESSFUL;
+    }
 
     ULONG ctrl = 0xFFFFFFFF;
     if (intel_read_reg(&Ctx->intel_device, I210_CTRL, &ctrl) != 0 || ctrl == 0xFFFFFFFF) {
-        DEBUGP(DL_ERROR, "MMIO sanity read failed CTRL=0x%08X\n", ctrl);
+        DEBUGP(DL_ERROR, "MMIO sanity read failed CTRL=0x%08X (expected not 0xFFFFFFFF)\n", ctrl);
         return STATUS_DEVICE_NOT_READY;
     }
+
     Ctx->intel_device.capabilities |= INTEL_CAP_MMIO;
     if (Ctx->hw_state < AVB_HW_BAR_MAPPED) {
         Ctx->hw_state = AVB_HW_BAR_MAPPED;
