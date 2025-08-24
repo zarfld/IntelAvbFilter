@@ -91,11 +91,12 @@ Return Value:
     {
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-        FChars.Header.Size = sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS);
 #if NDIS_SUPPORT_NDIS61
         FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
+        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2; // correct size for rev2
 #else
         FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
+        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_1; // correct size for rev1
 #endif
         FChars.MajorNdisVersion = FILTER_MAJOR_NDIS_VERSION;
         FChars.MinorNdisVersion = FILTER_MINOR_NDIS_VERSION;
@@ -487,30 +488,10 @@ FilterRestart(
     NDIS_HANDLE                     FilterModuleContext,
     PNDIS_FILTER_RESTART_PARAMETERS RestartParameters
     )
-/*++
-
-Routine Description:
-
-    Filter restart routine.
-    Start the datapath - begin sending and receiving NBLs.
-
-Arguments:
-
-    FilterModuleContext - pointer to the filter context stucture.
-    RestartParameters   - additional information about the restart operation.
-
-Return Value:
-
-    NDIS_STATUS_SUCCESS: if filter restarts successfully
-    NDIS_STATUS_XXX: Otherwise.
-
---*/
 {
     NDIS_STATUS     Status;
     PMS_FILTER      pFilter = (PMS_FILTER)FilterModuleContext;
     NDIS_HANDLE     ConfigurationHandle = NULL;
-
-
     PNDIS_RESTART_GENERAL_ATTRIBUTES NdisGeneralAttributes;
     PNDIS_RESTART_ATTRIBUTES         NdisRestartAttributes;
     NDIS_CONFIGURATION_OBJECT        ConfigObject;
