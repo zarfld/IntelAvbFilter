@@ -263,6 +263,7 @@
     <None Include="IMPLEMENTATION_MILESTONE.md" />
     <None Include="install_driver.cmd" />
     <None Include="INTEGRATION_GUIDE.md" />
+    <None Include="IntelAvbFilter-Cleanup.ps1" />
     <None Include="IntelAvbFilter.cdf" />
     <None Include="Makefile.avb_tests" />
     <None Include="Manage-Certificate.ps1" />

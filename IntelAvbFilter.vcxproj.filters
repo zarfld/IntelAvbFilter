@@ -214,5 +214,6 @@
     <None Include="CURRENT_STATUS_ANALYSIS.md" />
     <None Include="FIX_STATUS_SUMMARY.md" />
     <None Include="IMPLEMENTATION_COMPLETE_FINAL.md" />
+    <None Include="IntelAvbFilter-Cleanup.ps1" />
   </ItemGroup>
 </Project>
