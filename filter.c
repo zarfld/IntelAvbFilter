@@ -151,15 +151,13 @@ Return Value:
         InitializeListHead(&FilterModuleList);
         FilterDriverHandle = NULL;
 
-        // Zero the characteristics structure
+        // Zero the characteristics structure - exactly like August 14th
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
-        
-        // Set up header - Force NDIS 6.0 for Windows 10 22H2 compatibility
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
         FChars.Header.Size = sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS);
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;  // Force Revision 1 (NDIS 6.0)
+        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;  // Force Revision 1 like August
         
-        // Use NDIS 6.0 explicitly (Windows 10 22H2)
+        // Use NDIS 6.0 explicitly like August
         FChars.MajorNdisVersion = 6;
         FChars.MinorNdisVersion = 0;
         FChars.MajorDriverVersion = 1;
