@@ -11,7 +11,7 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 08/25/2025,13.17.39.518
+DriverVer = 08/25/2025,18.25.21.780
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
@@ -75,7 +75,8 @@ HKR, Ndi,Service,,"IntelAvbFilter"
 HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
 HKR, Ndi,ComponentId,,"MS_IntelAvbFilter" 
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
-HKR, Ndi,FilterClass,,ms_passthru
+; Set FilterClass to "scheduler" for AVB/TSN traffic shaping and timing control
+HKR, Ndi,FilterClass,, scheduler
 ; This is a Modifying filter that can alter packet timing and content for AVB
 HKR, Ndi,FilterType,0x00010001,2       ; Modifying filter
 HKR, Ndi,FilterRunType,0x00010001,0    ; Optional
