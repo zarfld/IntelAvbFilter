@@ -11,27 +11,18 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 08/25/2025,21.11.52.907
+DriverVer = 08/25/2025,21.33.53.667
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
-; Supported architectures: x64 and ARM64 for modern Intel platforms
+; NDIS Filter Driver - must use proper manufacturer section
 [Manufacturer]
 %IntelCorp%=Intel,NTamd64
 
-; Intel hardware-specific device IDs for I210 (your hardware)
+; CRITICAL: Use MS_IntelAvbFilter as the primary identifier
+; Individual hardware IDs are for reference but NDIS binds to the component ID
 [Intel.NTamd64]
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1533  ; I210-AT (your hardware!)
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1536  ; I210-IS  
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1537  ; I210-IT
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1538  ; I210-CL/CS
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15F2  ; I225-LM
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15F3  ; I225-V
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_125B  ; I226-LM
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_125C  ; I226-V
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_125D  ; I226-IT
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15B7  ; I219-LM  
-%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15B8  ; I219-V
+%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
 
 ;-------------------------------------------------------------------------
 ; Installation Section (generic + NT decorated)
@@ -53,7 +44,6 @@ Copyfiles = IntelAvbFilter.copyfiles.sys
 1=%IntelAvbFilter_Desc%,"",,
 
 [SourceDisksFiles]
-; TODO: Include any related files that should be installed with your driver.
 IntelAvbFilter.sys=1
 
 [DestinationDirs]
@@ -74,12 +64,20 @@ HKR, Ndi,ComponentId,,"MS_IntelAvbFilter"
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
 HKR, Ndi,FilterClass,,ms_medium
 HKR, Ndi,FilterType,0x00010001,2       ; Modifying filter
-HKR, Ndi,FilterRunType,0x00010001,1    ; Optional (1 instead of 0)
+HKR, Ndi,FilterRunType,0x00010001,1    ; Mandatory filter (1 = required)
 HKR, Ndi\Interfaces,UpperRange,,"noupper"
 HKR, Ndi\Interfaces,LowerRange,,"nolower"
 HKR, Ndi\Interfaces,FilterMediaTypes,,"ethernet"
-; Make filter optional; FilterAttach will refuse unsupported/virtual adapters
-HKR, Ndi,FilterRunType,0x00010001, 0 ; Optional filter
+
+; CRITICAL: Hardware compatibility for Intel controllers
+; This tells Windows which adapters this filter supports
+HKR, Ndi\Params\SupportedAdapters,ParamDesc,,"Supported Intel Controllers"
+HKR, Ndi\Params\SupportedAdapters,Type,,"enum"
+HKR, Ndi\Params\SupportedAdapters,Default,,"I210"
+HKR, Ndi\Params\SupportedAdapters\enum,I210,,"Intel I210 Series"
+HKR, Ndi\Params\SupportedAdapters\enum,I225,,"Intel I225 Series" 
+HKR, Ndi\Params\SupportedAdapters\enum,I226,,"Intel I226 Series"
+HKR, Ndi\Params\SupportedAdapters\enum,I219,,"Intel I219 Series"
 
 [IntelAvbFilter_Service_Params]
 HKR,"Parameters","Default",   0x10001,0
@@ -90,14 +88,11 @@ HKR,"Parameters","ParamDesc", 0, "Intel AVB Filter parameters"
 ; Service installation support
 ;-------------------------------------------------------------------------
 [Install.Services]
-; Start the service automatically to enable AVB functionality
 AddService=IntelAvbFilter,0x800,IntelAvbFilter_Service_Inst ; SPSVCINST_STARTSERVICE
 
 [IntelAvbFilter_Service_Inst]
 DisplayName     = %IntelAvbFilter_Desc%
 ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
-; Typically you will want your filter driver to start with SERVICE_SYSTEM_START.
-; If it is an Optional filter, you may also use 3;SERVICE_DEMAND_START.
 StartType       = 3 ;SERVICE_DEMAND_START  
 ErrorControl    = 1 ;SERVICE_ERROR_NORMAL
 ServiceBinary   = %13%\IntelAvbFilter.sys
@@ -106,25 +101,10 @@ Description     = %IntelAvbFilter_Desc%
 AddReg          = Common.Params.reg, NdisImPlatformBindingOptions.reg
 
 [Install.Remove.Services]
-; The SPSVCINST_STOPSERVICE flag instructs SCM to stop the NT service
-; before uninstalling the driver.
 DelService=IntelAvbFilter,0x200 ; SPSVCINST_STOPSERVICE
 
 [Common.Params.reg]
-; TODO: You can add any sort of NDIS parameters here.  Filter drivers
-; don't always need NDIS parameters, so it's okay to have nothing here.
-
-; TODO: Remove the sample parameters below.
-
-; Sample 1: "DriverParam" is a per-driver parameter.
-;HKR, FilterDriverParams\DriverParam,     ParamDesc,   , "Driverparam for lwf"
-;HKR, FilterDriverParams\DriverParam,     default,     , "5"
-;HKR, FilterDriverParams\DriverParam,     type,        , "int"
-
-; Sample 2: "AdapterParam" is a per-module parameter.
-;HKR, FilterAdapterParams\AdapterParam,   ParamDesc,   , "Adapterparam for lwf"
-;HKR, FilterAdapterParams\AdapterParam,   default,     , "10"
-;HKR, FilterAdapterParams\AdapterParam,   type,        , "int"
+; No additional parameters needed
 
 [NdisImPlatformBindingOptions.reg]
 ; Opt-out of binding to TNICs and avoid unbinding from members
