@@ -199,8 +199,10 @@ Return Value:
 
         DEBUGP(DL_INFO, "DriverEntry: Attempting NDIS %u.%u filter registration\n", 
                FChars.MajorNdisVersion, FChars.MinorNdisVersion);
-        DEBUGP(DL_INFO, "DriverEntry: Header Size=%u, Revision=%u\n", 
-               FChars.Header.Size, FChars.Header.Revision);
+        DEBUGP(DL_INFO, "DriverEntry: Header Size=%u, Revision=%u, Type=0x%08x\n", 
+               FChars.Header.Size, FChars.Header.Revision, FChars.Header.Type);
+        DEBUGP(DL_INFO, "DriverEntry: DriverObject=%p, FilterDriverObject=%p\n", 
+               DriverObject, FilterDriverObject);
         
         // First attempt with NDIS 6.0 revision 1
         Status = NdisFRegisterFilterDriver(DriverObject,
@@ -211,6 +213,12 @@ Return Value:
         {
             DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed (NDIS %u.%u): 0x%08X\n", 
                    FChars.MajorNdisVersion, FChars.MinorNdisVersion, Status);
+            DEBUGP(DL_ERROR, "  Possible causes:\n");
+            DEBUGP(DL_ERROR, "  - Invalid header structure (Size=%u, Revision=%u)\n", 
+                   FChars.Header.Size, FChars.Header.Revision);
+            DEBUGP(DL_ERROR, "  - Missing required handlers\n");
+            DEBUGP(DL_ERROR, "  - NDIS version incompatibility\n");
+            DEBUGP(DL_ERROR, "  - Duplicate driver registration\n");
                    
             // No fallback needed since we already started with the most compatible version
             FILTER_FREE_LOCK(&FilterListLock);
@@ -335,21 +343,25 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         ASSERT(FilterDriverContext == (NDIS_HANDLE)FilterDriverObject);
         if (FilterDriverContext != (NDIS_HANDLE)FilterDriverObject)
         {
+            DEBUGP(DL_ERROR, "FilterAttach: Invalid FilterDriverContext: %p (expected %p)\n", 
+                   FilterDriverContext, FilterDriverObject);
             Status = NDIS_STATUS_INVALID_PARAMETER;
             break;
         }
 
-        // Log all adapter attach attempts
+        // Log all adapter attach attempts with detailed info
         if (AttachParameters && AttachParameters->BaseMiniportInstanceName)
         {
-            DEBUGP(DL_INFO, "FilterAttach: Attempting to attach to adapter: %wZ\n", 
-                   AttachParameters->BaseMiniportInstanceName);
-            DEBUGP(DL_INFO, "FilterAttach: Media Type: %u, IfIndex: %u\n", 
+            DEBUGP(DL_INFO, "FilterAttach: *** ADAPTER ATTACHMENT REQUEST ***\n");
+            DEBUGP(DL_INFO, "  Adapter Name: %wZ\n", AttachParameters->BaseMiniportInstanceName);
+            DEBUGP(DL_INFO, "  Media Type: %u, IfIndex: %u\n", 
                    AttachParameters->MiniportMediaType, AttachParameters->BaseMiniportIfIndex);
+            DEBUGP(DL_INFO, "  FilterModuleGUID: %wZ\n", AttachParameters->FilterModuleGuidName);
+            DEBUGP(DL_INFO, "  BaseMiniportName: %wZ\n", AttachParameters->BaseMiniportName);
         }
         else
         {
-            DEBUGP(DL_INFO, "FilterAttach: Attempting to attach to adapter: <unknown>\n");
+            DEBUGP(DL_ERROR, "FilterAttach: NULL AttachParameters or BaseMiniportInstanceName!\n");
         }
 
         // Reject virtual/teamed/bridge adapters outright
