@@ -11,7 +11,7 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 08/25/2025,19.2.16.595
+DriverVer = 08/25/2025,20.6.7.154
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
@@ -101,7 +101,7 @@ DisplayName     = %IntelAvbFilter_Desc%
 ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
 ; Typically you will want your filter driver to start with SERVICE_SYSTEM_START.
 ; If it is an Optional filter, you may also use 3;SERVICE_DEMAND_START.
-StartType       = 3 ;SERVICE_DEMAND_START
+StartType       = 2 ;SERVICE_SYSTEM_START  
 ErrorControl    = 1 ;SERVICE_ERROR_NORMAL
 ServiceBinary   = %13%\IntelAvbFilter.sys
 LoadOrderGroup  = NDIS

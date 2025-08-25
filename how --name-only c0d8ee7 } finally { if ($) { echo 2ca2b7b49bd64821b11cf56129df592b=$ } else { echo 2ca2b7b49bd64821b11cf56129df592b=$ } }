@@ -1,0 +1,26 @@
+[33mbdd746a[m Füge Unterstützung für i210 Zeitstempelung hinzu
+[33m1025ac0[m Korrektur der IOCTL-Befehlsyntax
+[33m927e5c8[m Fehlerbehebung und neue Funktion für TIMINCA hinzugefügt
+[33m73bfe6b[m Befehle für PTP-Probe und TIMINCA hinzugefügt
+[33m8519658[m SSOT-Aktivierung implementiert und Dokumentation aktualisiert
+[33m7d98a8d[m Neue Build-Tasks und Updates für I210-Controller
+[33mc0d8ee7[m Enhance register write functionality with verification and improve PTP initialization error handling
+[33m2626ba3[m Add new build and diagnostic tasks to tasks.json
+[33m91cbbf5[m PTP-Zeitstempel und Registerdiagnose verbessert
+[33m03dfdab[m Update subproject commits for intel_avb and intel-ethernet-regs
+[33mbd6c479[m Erweiterung von OpenDev um neue Hilfsfunktionen
+[33m6573fb4[m PTM-Statusprotokollierung und ungenutzte Variable behandelt
+[33m990be53[m Vermeidung von Warnungen und Debugging-Logs hinzugefügt
+[33m226ab56[m Verbesserung der Funktionsprototypen und Annotations
+[33m6b450c3[m Update subproject commit for intel_avb
+[33m5dbfb65[m Update subproject commit for intel_avb
+[33m225cbfe[m Update subproject commits for intel_avb and intel-ethernet-regs
+[33m7ac1823[m C++-Tests von Kernel-Treiber-Bauten ausgeschlossen
+[33mdbf3512[m Füge Integrationstests und TAEF-Tests für AVB hinzu
+[33m8d4da65[m Füge Tests und Dokumentation für AVB-Filter hinzu
+[33ma9a1616[m Überprüfung der header_size in AvbHandleDeviceIoControl
+[33m7dbf8f9[m Erweiterung der Zeitstempel-Ringverwaltung
+[33m3c937dd[m ABI-Version-Überprüfung mit Header aktualisiert
+[33mbd6c2e8[m Merge branch 'master' of https://github.com/zarfld/IntelAvbFilter
+[33m0217be8[m Verbesserungen am Intel AVB Filtertreiber
+[33mc028eba[m Create FUNDING.yml
