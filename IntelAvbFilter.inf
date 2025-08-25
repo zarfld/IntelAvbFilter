@@ -62,11 +62,15 @@ HKR, Ndi,Service,,"IntelAvbFilter"
 HKR, Ndi,CoServices,0x00010000,"IntelAvbFilter"
 HKR, Ndi,ComponentId,,"MS_IntelAvbFilter" 
 HKR, Ndi,HelpText,,%IntelAvbFilter_HelpText%
-HKR, Ndi,FilterClass,,ms_medium
+; Set FilterClass to "scheduler" for AVB/TSN traffic shaping and timing control
+HKR, Ndi,FilterClass,,scheduler
+; This is a Modifying filter that can alter packet timing and content for AVB
 HKR, Ndi,FilterType,0x00010001,2       ; Modifying filter
 HKR, Ndi,FilterRunType,0x00010001,1    ; Mandatory filter (1 = required)
 HKR, Ndi\Interfaces,UpperRange,,"noupper"
 HKR, Ndi\Interfaces,LowerRange,,"nolower"
+; Support Ethernet media types for Intel NICs
+; filters include "ethernet".  Filters may also include "ppip" to include
 HKR, Ndi\Interfaces,FilterMediaTypes,,"ethernet"
 
 ; CRITICAL: Hardware compatibility for Intel controllers
@@ -78,6 +82,8 @@ HKR, Ndi\Params\SupportedAdapters\enum,I210,,"Intel I210 Series"
 HKR, Ndi\Params\SupportedAdapters\enum,I225,,"Intel I225 Series" 
 HKR, Ndi\Params\SupportedAdapters\enum,I226,,"Intel I226 Series"
 HKR, Ndi\Params\SupportedAdapters\enum,I219,,"Intel I219 Series"
+; Make filter optional; FilterAttach will refuse unsupported/virtual adapters
+HKR, Ndi,FilterRunType,0x00010001, 0 ; Optional filter
 
 [IntelAvbFilter_Service_Params]
 HKR,"Parameters","Default",   0x10001,0
