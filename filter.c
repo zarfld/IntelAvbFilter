@@ -52,9 +52,52 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 };
 
 // Forward declarations for local helper functions used in FilterAttach
-static BOOLEAN UnicodeStringContainsInsensitive(_In_ PCUNICODE_STRING Str, _In_ PCWSTR Sub);
-static BOOLEAN IsUnsupportedTeamOrVirtualAdapter(_In_ PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters);
+static BOOLEAN UnicodeStringContainsInsensitive(PCUNICODE_STRING Str, PCWSTR Sub);
+static BOOLEAN IsUnsupportedTeamOrVirtualAdapter(PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters);
 
+/* Helper: case-insensitive substring search for UNICODE_STRING */
+static
+BOOLEAN
+UnicodeStringContainsInsensitive(
+    _In_ PCUNICODE_STRING Str,
+    _In_ PCWSTR Sub
+)
+{
+    if (!Str || !Str->Buffer || Str->Length == 0 || !Sub) return FALSE;
+    USHORT lenChars = (USHORT)(Str->Length / sizeof(WCHAR));
+    USHORT nlen = 0; while (Sub[nlen] != L'\0') nlen++;
+    if (nlen == 0 || nlen > lenChars) return FALSE;
+    for (USHORT i = 0; i + nlen <= lenChars; ++i) {
+        BOOLEAN match = TRUE;
+        for (USHORT j = 0; j < nlen; ++j) {
+            WCHAR c1 = Str->Buffer[i + j];
+            WCHAR c2 = Sub[j];
+            if (c1 >= L'a' && c1 <= L'z') c1 = (WCHAR)(c1 - L'a' + L'A');
+            if (c2 >= L'a' && c2 <= L'z') c2 = (WCHAR)(c2 - L'a' + L'A');
+            if (c1 != c2) { match = FALSE; break; }
+        }
+        if (match) return TRUE;
+    }
+    return FALSE;
+}
+
+/* Helper: decide if the miniport instance is a TNIC/virtual adapter we do not support */
+static
+BOOLEAN
+IsUnsupportedTeamOrVirtualAdapter(
+    _In_ PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters
+)
+{
+    PCUNICODE_STRING name = AttachParameters->BaseMiniportInstanceName;
+    if (!name || !name->Buffer) return FALSE;
+    if (UnicodeStringContainsInsensitive(name, L"Multiplexor")) return TRUE;   // Microsoft Network Adapter Multiplexor Driver (LBFO)
+    if (UnicodeStringContainsInsensitive(name, L"Team")) return TRUE;          // Teaming TNIC
+    if (UnicodeStringContainsInsensitive(name, L"Bridge")) return TRUE;        // Bridge/ICS
+    if (UnicodeStringContainsInsensitive(name, L"vEthernet")) return TRUE;     // Hyper-V vNIC
+    if (UnicodeStringContainsInsensitive(name, L"Hyper-V")) return TRUE;       // Hyper-V naming
+    if (UnicodeStringContainsInsensitive(name, L"Virtual")) return TRUE;       // Generic virtual NICs
+    return FALSE;
+}
 
 _Use_decl_annotations_
 NTSTATUS
@@ -84,6 +127,7 @@ Return Value:
 
 --*/
 {
+
     NDIS_STATUS Status;
     NDIS_FILTER_DRIVER_CHARACTERISTICS      FChars;
     NDIS_STRING ServiceName  = RTL_CONSTANT_STRING(FILTER_SERVICE_NAME);
@@ -1978,49 +2022,5 @@ Return Value:
     //  Wake up the thread blocked for this request to complete.
     //
     NdisSetEvent(&FilterRequest->ReqEvent);
-}
-
-/* Helper: case-insensitive substring search for UNICODE_STRING */
-static
-BOOLEAN
-UnicodeStringContainsInsensitive(
-    _In_ PCUNICODE_STRING Str,
-    _In_ PCWSTR Sub
-)
-{
-    if (!Str || !Str->Buffer || Str->Length == 0 || !Sub) return FALSE;
-    USHORT lenChars = (USHORT)(Str->Length / sizeof(WCHAR));
-    USHORT nlen = 0; while (Sub[nlen] != L'\0') nlen++;
-    if (nlen == 0 || nlen > lenChars) return FALSE;
-    for (USHORT i = 0; i + nlen <= lenChars; ++i) {
-        BOOLEAN match = TRUE;
-        for (USHORT j = 0; j < nlen; ++j) {
-            WCHAR c1 = Str->Buffer[i + j];
-            WCHAR c2 = Sub[j];
-            if (c1 >= L'a' && c1 <= L'z') c1 = (WCHAR)(c1 - L'a' + L'A');
-            if (c2 >= L'a' && c2 <= L'z') c2 = (WCHAR)(c2 - L'a' + L'A');
-            if (c1 != c2) { match = FALSE; break; }
-        }
-        if (match) return TRUE;
-    }
-    return FALSE;
-}
-
-/* Helper: decide if the miniport instance is a TNIC/virtual adapter we do not support */
-static
-BOOLEAN
-IsUnsupportedTeamOrVirtualAdapter(
-    _In_ PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters
-)
-{
-    PCUNICODE_STRING name = AttachParameters->BaseMiniportInstanceName;
-    if (!name || !name->Buffer) return FALSE;
-    if (UnicodeStringContainsInsensitive(name, L"Multiplexor")) return TRUE;   // Microsoft Network Adapter Multiplexor Driver (LBFO)
-    if (UnicodeStringContainsInsensitive(name, L"Team")) return TRUE;          // Teaming TNIC
-    if (UnicodeStringContainsInsensitive(name, L"Bridge")) return TRUE;        // Bridge/ICS
-    if (UnicodeStringContainsInsensitive(name, L"vEthernet")) return TRUE;     // Hyper-V vNIC
-    if (UnicodeStringContainsInsensitive(name, L"Hyper-V")) return TRUE;       // Hyper-V naming
-    if (UnicodeStringContainsInsensitive(name, L"Virtual")) return TRUE;       // Generic virtual NICs
-    return FALSE;
 }
 
