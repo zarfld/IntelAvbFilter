@@ -154,14 +154,14 @@ Return Value:
         // Zero the characteristics structure
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
         
-        // Set up header - update to NDIS 6.30 for Windows 10/11 compatibility
+        // Set up header - use NDIS 6.0 for maximum compatibility with Windows 10
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
-        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2;
+        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
+        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_1;
         
-        // Use NDIS 6.30 for Windows 10/11 compatibility
+        // Use NDIS 6.0 for Windows 10 compatibility 
         FChars.MajorNdisVersion = 6;
-        FChars.MinorNdisVersion = 30;
+        FChars.MinorNdisVersion = 0;
         FChars.MajorDriverVersion = 1;
         FChars.MinorDriverVersion = 0;
         FChars.Flags = 0;
