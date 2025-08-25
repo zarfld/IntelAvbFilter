@@ -18,7 +18,7 @@
 [CmdletBinding(SupportsShouldProcess=$true)]
 param(
   [string]$AdapterName = "Ethernet 2",
-  [string]$ComponentId = "ms_intelavbfilter",
+  [string]$ComponentId = "INTEL_AvbFilter",  # Updated to match INF
   [Parameter(Mandatory=$true)]
   [string]$InfPath,
   [switch]$EnableTestSigning,
@@ -172,9 +172,28 @@ function Install-Inf {
   if(-not (Test-Path $Path)){ throw "INF nicht gefunden: $Path" }
   $full = (Resolve-Path $Path).Path
   Write-Host "[+] Installiere INF: $full" -ForegroundColor Cyan
+  
+  # First try with pnputil
   $res = Invoke-PnpUtil -PnpArgs @('/add-driver', $full, '/install') -TimeoutSec $PnPutilTimeoutSec
   Write-Host $res.StdOut
-  if($res.ExitCode -ne 0){ Write-Warning $res.StdErr }
+  if($res.ExitCode -ne 0){ 
+    Write-Warning $res.StdErr 
+    
+    # Alternative: Try with netcfg for network service INFs
+    Write-Host "[*] Versuche Alternative Installation mit netcfg..." -ForegroundColor Yellow
+    try {
+      & netcfg.exe -l $full -c s -i INTEL_AvbFilter
+      if ($LASTEXITCODE -eq 0) {
+        Write-Host "[+] netcfg Installation erfolgreich" -ForegroundColor Green
+      } else {
+        Write-Warning "netcfg fehlgeschlagen mit Exit Code: $LASTEXITCODE"
+      }
+    } catch {
+      Write-Warning "netcfg Aufruf fehlgeschlagen: $_"
+    }
+  } else {
+    Write-Host "[+] pnputil Installation erfolgreich" -ForegroundColor Green
+  }
 }
 
 function Toggle-BindingPhase {
