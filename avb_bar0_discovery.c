@@ -61,26 +61,69 @@ AvbIsSupportedIntelController(
     if (OutDeviceId) *OutDeviceId = 0;
 
     if (FilterModule == NULL || FilterModule->MiniportFriendlyName.Buffer == NULL) {
+        DEBUGP(DL_ERROR, "AvbIsSupportedIntelController: NULL FilterModule or FriendlyName\n");
         return FALSE;
     }
 
     const WCHAR* name = FilterModule->MiniportFriendlyName.Buffer;
     USHORT lenChars = (USHORT)(FilterModule->MiniportFriendlyName.Length / sizeof(WCHAR));
 
-    if (!WideContainsInsensitive(name, lenChars, L"INTEL")) return FALSE;
+    DEBUGP(DL_INFO, "AvbIsSupportedIntelController: Checking adapter: %wZ\n", &FilterModule->MiniportFriendlyName);
+    
+    if (!WideContainsInsensitive(name, lenChars, L"INTEL")) {
+        DEBUGP(DL_INFO, "AvbIsSupportedIntelController: Not Intel device (no 'INTEL' string found)\n");
+        return FALSE;
+    }
 
-    if (WideContainsInsensitive(name, lenChars, L"I210")) { if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x1533; return TRUE; }
-    if (WideContainsInsensitive(name, lenChars, L"I225")) { if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x15F2; return TRUE; }
-    if (WideContainsInsensitive(name, lenChars, L"I226")) { if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x125B; return TRUE; }
-    if (WideContainsInsensitive(name, lenChars, L"I219")) { if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x15B7; return TRUE; }
-    if (WideContainsInsensitive(name, lenChars, L"I217")) { if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x153A; return TRUE; }
+    DEBUGP(DL_INFO, "AvbIsSupportedIntelController: Found Intel device, checking specific model...\n");
+
+    if (WideContainsInsensitive(name, lenChars, L"I210")) { 
+        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
+        if (OutDeviceId) *OutDeviceId = 0x1533; 
+        DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I210 (VID:0x%04X, DID:0x%04X)\n", 
+               INTEL_VENDOR_ID, 0x1533);
+        return TRUE; 
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I225")) { 
+        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
+        if (OutDeviceId) *OutDeviceId = 0x15F2; 
+        DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I225 (VID:0x%04X, DID:0x%04X)\n", 
+               INTEL_VENDOR_ID, 0x15F2);
+        return TRUE; 
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I226")) { 
+        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
+        if (OutDeviceId) *OutDeviceId = 0x125B; 
+        DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I226 (VID:0x%04X, DID:0x%04X)\n", 
+               INTEL_VENDOR_ID, 0x125B);
+        return TRUE; 
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I219")) { 
+        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
+        if (OutDeviceId) *OutDeviceId = 0x15B7; 
+        DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I219 (VID:0x%04X, DID:0x%04X)\n", 
+               INTEL_VENDOR_ID, 0x15B7);
+        return TRUE; 
+    }
+    if (WideContainsInsensitive(name, lenChars, L"I217")) { 
+        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
+        if (OutDeviceId) *OutDeviceId = 0x153A; 
+        DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I217 (VID:0x%04X, DID:0x%04X)\n", 
+               INTEL_VENDOR_ID, 0x153A);
+        return TRUE; 
+    }
 
     // Also accept common marketing names
     if (WideContainsInsensitive(name, lenChars, L"ETHERNET CONNECTION I219") ||
         WideContainsInsensitive(name, lenChars, L"ETHERNET CONNECTION I217")) {
-        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x15B7; return TRUE;
+        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x15B7; 
+        DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I219/I217 (marketing name, VID:0x%04X, DID:0x%04X)\n", 
+               INTEL_VENDOR_ID, 0x15B7);
+        return TRUE;
     }
 
+    DEBUGP(DL_WARN, "AvbIsSupportedIntelController: ? NOT SUPPORTED - Intel device but no AVB/TSN support: %wZ\n", 
+           &FilterModule->MiniportFriendlyName);
     return FALSE;
 }
 
