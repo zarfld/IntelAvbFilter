@@ -23,15 +23,15 @@ Abstract:
 // Using NDIS 6.20 for better Windows 7/8/10/11 compatibility  
 // This provides good balance of features and compatibility
 #define FILTER_MAJOR_NDIS_VERSION   6
-
-// Default to NDIS 6.20 which has excellent compatibility
-#ifndef FILTER_MINOR_NDIS_VERSION
 #define FILTER_MINOR_NDIS_VERSION   20
+
+// Ensure we have the right NDIS support flags
+#ifndef NDIS_SUPPORT_NDIS61
+#define NDIS_SUPPORT_NDIS61 1
 #endif
 
-// Ensure we're targeting the right NDIS revision
-#if !defined(NDIS_SUPPORT_NDIS61)
-#define NDIS_SUPPORT_NDIS61 1
+#ifndef NDIS_SUPPORT_NDIS620  
+#define NDIS_SUPPORT_NDIS620 1
 #endif
 
 //
@@ -56,7 +56,7 @@ extern LIST_ENTRY          FilterModuleList;
 #define NTDEVICE_STRING             L"\\Device\\IntelAvbFilter"
 
 //
-// Types and macros to manipulate packet queue
+ // Types and macros to manipulate packet queue
 //
 typedef struct _QUEUE_ENTRY
 {
@@ -224,7 +224,7 @@ ULONG_PTR    filterLogSendRef[0x10000];
 
 
 //
-// Enum of filter's states
+ // Enum of filter's states
 // Filter can only be in one state at one time
 //
 typedef enum _FILTER_STATE

@@ -99,27 +99,32 @@ Return Value:
 
     do
     {
+        // Initialize spin locks first
+        FILTER_INIT_LOCK(&FilterListLock);
+        InitializeListHead(&FilterModuleList);
+        FilterDriverHandle = NULL;
+
+        // Zero the characteristics structure
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
+        
+        // Set up header with correct NDIS 6.20 values
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-#if NDIS_SUPPORT_NDIS61
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
-        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2; // correct size for rev2
-#else
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
-        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_1; // correct size for rev1
-#endif
+        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;  // Use revision 2 for NDIS 6.20+
+        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2;
+        
+        // NDIS version - use 6.20 for broad compatibility
         FChars.MajorNdisVersion = FILTER_MAJOR_NDIS_VERSION;
         FChars.MinorNdisVersion = FILTER_MINOR_NDIS_VERSION;
         FChars.MajorDriverVersion = 1;
         FChars.MinorDriverVersion = 0;
         FChars.Flags = 0;
 
+        // Names
         FChars.FriendlyName = FriendlyName;
         FChars.UniqueName = UniqueName;
         FChars.ServiceName = ServiceName;
-        //
-        // Set up all the filter entry points for AVB functionality
-        //
+        
+        // Set up all the required filter entry points
         FChars.SetOptionsHandler = FilterRegisterOptions;
         FChars.AttachHandler = FilterAttach;
         FChars.DetachHandler = FilterDetach;
@@ -130,72 +135,77 @@ Return Value:
         FChars.OidRequestCompleteHandler = FilterOidRequestComplete;
         FChars.CancelOidRequestHandler = FilterCancelOidRequest;
 
+        // Network Buffer List handlers (these are optional but we provide them)
         FChars.SendNetBufferListsHandler = FilterSendNetBufferLists;
         FChars.ReturnNetBufferListsHandler = FilterReturnNetBufferLists;
         FChars.SendNetBufferListsCompleteHandler = FilterSendNetBufferListsComplete;
         FChars.ReceiveNetBufferListsHandler = FilterReceiveNetBufferLists;
+        
+        // PnP and Status handlers
         FChars.DevicePnPEventNotifyHandler = FilterDevicePnPEventNotify;
         FChars.NetPnPEventHandler = FilterNetPnPEvent;
         FChars.StatusHandler = FilterStatus;
         FChars.CancelSendNetBufferListsHandler = FilterCancelSendNetBufferLists;
 
+        // Set driver unload
         DriverObject->DriverUnload = FilterUnload;
 
-        FilterDriverHandle = NULL;
-
-        //
-        // Initialize spin locks
-        //
-        FILTER_INIT_LOCK(&FilterListLock);
-
-        InitializeListHead(&FilterModuleList);
-
-        DEBUGP(DL_INFO, "DriverEntry: Preparing to register filter - Header.Size=%lu Rev=%u NdisVer=%u.%u DriverVer=%u.%u\n", (unsigned long)FChars.Header.Size, FChars.Header.Revision, FChars.MajorNdisVersion, FChars.MinorNdisVersion, FChars.MajorDriverVersion, FChars.MinorDriverVersion);
-        DEBUGP(DL_INFO, "DriverEntry: Names - Service='%wZ' Unique='%wZ' Friendly='%wZ'\n", &ServiceName, &UniqueName, &FriendlyName);
-        DEBUGP(DL_INFO, "DriverEntry: Function pointers - Attach=%p Detach=%p Restart=%p Pause=%p SendNBL=%p RecvNBL=%p OidReq=%p\n", FChars.AttachHandler, FChars.DetachHandler, FChars.RestartHandler, FChars.PauseHandler, FChars.SendNetBufferListsHandler, FChars.ReceiveNetBufferListsHandler, FChars.OidRequestHandler);
+        DEBUGP(DL_INFO, "DriverEntry: Registering NDIS %u.%u filter driver\n", 
+               FChars.MajorNdisVersion, FChars.MinorNdisVersion);
+        DEBUGP(DL_INFO, "DriverEntry: Header Size=%u, Revision=%u\n", 
+               FChars.Header.Size, FChars.Header.Revision);
         
+        // First attempt with requested NDIS version
         Status = NdisFRegisterFilterDriver(DriverObject,
                                            (NDIS_HANDLE)FilterDriverObject,
                                            &FChars,
                                            &FilterDriverHandle);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed first attempt (NDIS %u.%u): 0x%08X\n", FChars.MajorNdisVersion, FChars.MinorNdisVersion, Status);
-            // Fallback: try downgrading MinorNdisVersion to 0 if we requested >0
-            if (FChars.MinorNdisVersion != 0) {
-                UCHAR origMinor = FChars.MinorNdisVersion;
-                FChars.MinorNdisVersion = 0; // minimal NDIS 6.x
-                DEBUGP(DL_WARN, "Retrying registration with downgraded NDIS version %u.%u (was %u.%u)\n", FChars.MajorNdisVersion, FChars.MinorNdisVersion, FChars.MajorNdisVersion, origMinor);
+            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed (NDIS %u.%u): 0x%08X\n", 
+                   FChars.MajorNdisVersion, FChars.MinorNdisVersion, Status);
+                   
+            // Try fallback to NDIS 6.0 with revision 1
+            if (FChars.MinorNdisVersion > 0) 
+            {
+                DEBUGP(DL_WARN, "Retrying with NDIS 6.0 and revision 1\n");
+                FChars.MinorNdisVersion = 0;
+                FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
+                FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_1;
+                
                 Status = NdisFRegisterFilterDriver(DriverObject,
                                                    (NDIS_HANDLE)FilterDriverObject,
                                                    &FChars,
                                                    &FilterDriverHandle);
             }
         }
+        
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver final failure: NDIS_STATUS=0x%08X\n", Status);
+            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver final failure: 0x%08X\n", Status);
+            FILTER_FREE_LOCK(&FilterListLock);
             break;
         }
 
-        Status = IntelAvbFilterRegisterDevice();
+        DEBUGP(DL_INFO, "NDIS filter driver registered successfully\n");
 
+        // Register device for user-mode communication
+        Status = IntelAvbFilterRegisterDevice();
         if (Status != NDIS_STATUS_SUCCESS)
         {
+            DEBUGP(DL_ERROR, "IntelAvbFilterRegisterDevice failed: 0x%x\n", Status);
             NdisFDeregisterFilterDriver(FilterDriverHandle);
             FILTER_FREE_LOCK(&FilterListLock);
-            DEBUGP(DL_WARN, "Register device for the filter driver failed. Status=0x%x\n", Status);
             break;
         }
 
+        DEBUGP(DL_INFO, "User-mode device interface registered successfully\n");
 
     }
     while(bFalse);
 
-
-    DEBUGP(DL_TRACE, "<===DriverEntry, Status = %8x\n", Status);
+    DEBUGP(DL_TRACE, "<===DriverEntry, Status = 0x%08x\n", Status);
     return Status;
-
 }
 
 _Use_decl_annotations_
