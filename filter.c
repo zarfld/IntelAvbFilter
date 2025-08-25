@@ -107,14 +107,14 @@ Return Value:
         // Zero the characteristics structure
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
         
-        // Set up header with correct NDIS 6.20 values
+        // Set up header - start with revision 1 for maximum compatibility
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
-        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2;
+        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
+        FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_1;
         
-        // NDIS version - use 6.20 for broad compatibility
-        FChars.MajorNdisVersion = FILTER_MAJOR_NDIS_VERSION;
-        FChars.MinorNdisVersion = FILTER_MINOR_NDIS_VERSION;
+        // Start with NDIS 6.0 for maximum compatibility
+        FChars.MajorNdisVersion = 6;
+        FChars.MinorNdisVersion = 0;
         FChars.MajorDriverVersion = 1;
         FChars.MinorDriverVersion = 0;
         FChars.Flags = 0;
@@ -135,7 +135,7 @@ Return Value:
         FChars.OidRequestCompleteHandler = FilterOidRequestComplete;
         FChars.CancelOidRequestHandler = FilterCancelOidRequest;
 
-        // Network Buffer List handlers (these are optional but we provide them)
+        // Network Buffer List handlers
         FChars.SendNetBufferListsHandler = FilterSendNetBufferLists;
         FChars.ReturnNetBufferListsHandler = FilterReturnNetBufferLists;
         FChars.SendNetBufferListsCompleteHandler = FilterSendNetBufferListsComplete;
@@ -150,14 +150,12 @@ Return Value:
         // Set driver unload
         DriverObject->DriverUnload = FilterUnload;
 
-        DEBUGP(DL_INFO, "DriverEntry: Registering NDIS %u.%u filter driver\n", 
+        DEBUGP(DL_INFO, "DriverEntry: Attempting NDIS %u.%u filter registration\n", 
                FChars.MajorNdisVersion, FChars.MinorNdisVersion);
         DEBUGP(DL_INFO, "DriverEntry: Header Size=%u, Revision=%u\n", 
                FChars.Header.Size, FChars.Header.Revision);
-        DEBUGP(DL_INFO, "DriverEntry: Function pointers - Attach=%p Detach=%p Restart=%p Pause=%p\n", 
-               FChars.AttachHandler, FChars.DetachHandler, FChars.RestartHandler, FChars.PauseHandler);
         
-        // First attempt with requested NDIS version
+        // First attempt with NDIS 6.0 revision 1
         Status = NdisFRegisterFilterDriver(DriverObject,
                                            (NDIS_HANDLE)FilterDriverObject,
                                            &FChars,
@@ -167,24 +165,7 @@ Return Value:
             DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed (NDIS %u.%u): 0x%08X\n", 
                    FChars.MajorNdisVersion, FChars.MinorNdisVersion, Status);
                    
-            // Try fallback to NDIS 6.0 with revision 1
-            if (FChars.MinorNdisVersion > 0) 
-            {
-                DEBUGP(DL_WARN, "Retrying with NDIS 6.0 and revision 1\n");
-                FChars.MinorNdisVersion = 0;
-                FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
-                FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_1;
-                
-                Status = NdisFRegisterFilterDriver(DriverObject,
-                                                   (NDIS_HANDLE)FilterDriverObject,
-                                                   &FChars,
-                                                   &FilterDriverHandle);
-            }
-        }
-        
-        if (Status != NDIS_STATUS_SUCCESS)
-        {
-            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver final failure: 0x%08X\n", Status);
+            // No fallback needed since we already started with the most compatible version
             FILTER_FREE_LOCK(&FilterListLock);
             break;
         }
@@ -1160,7 +1141,7 @@ NOTE: called at PASSIVE_LEVEL
     // does nothing, but it is included in this sample for illustrative purposes.
     //
     // * Trivia: Device PNP events percolate DOWN the stack, instead of upwards
-    // like status indications and Net PNP events.  So the next layer is the
+    // like status indications and Net PnP events.  So the next layer is the
     // LOWER layer.
     //
 
