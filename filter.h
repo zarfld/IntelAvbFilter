@@ -20,16 +20,18 @@ Abstract:
 #define FILTER_ALLOC_TAG           'AvbM'  // AVB Memory
 #define FILTER_TAG                 'AvbF'  // AVB Filter
 
-// Using NDIS 6.30 for Windows 8+ compatibility with enhanced features
-// This provides access to advanced TSN and AVB capabilities
+// Using NDIS 6.20 for better Windows 7/8/10/11 compatibility  
+// This provides good balance of features and compatibility
 #define FILTER_MAJOR_NDIS_VERSION   6
 
-#if defined(NDIS60)
-#define FILTER_MINOR_NDIS_VERSION   0
-#elif defined(NDIS620)
+// Default to NDIS 6.20 which has excellent compatibility
+#ifndef FILTER_MINOR_NDIS_VERSION
 #define FILTER_MINOR_NDIS_VERSION   20
-#elif defined(NDIS630)
-#define FILTER_MINOR_NDIS_VERSION   30
+#endif
+
+// Ensure we're targeting the right NDIS revision
+#if !defined(NDIS_SUPPORT_NDIS61)
+#define NDIS_SUPPORT_NDIS61 1
 #endif
 
 //
