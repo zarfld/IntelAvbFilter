@@ -281,7 +281,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
     BOOLEAN               bFalse = FALSE;
 
 
-    DEBUGP(DL_TRACE, "===>FilterAttach: NdisFilterHandle %p\n", NdisFilterHandle);
+    DEBUGP(DL_INFO, "===>FilterAttach: NdisFilterHandle %p\n", NdisFilterHandle);
 
     do
     {
@@ -290,6 +290,19 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         {
             Status = NDIS_STATUS_INVALID_PARAMETER;
             break;
+        }
+
+        // Log all adapter attach attempts
+        if (AttachParameters && AttachParameters->BaseMiniportInstanceName)
+        {
+            DEBUGP(DL_INFO, "FilterAttach: Attempting to attach to adapter: %wZ\n", 
+                   AttachParameters->BaseMiniportInstanceName);
+            DEBUGP(DL_INFO, "FilterAttach: Media Type: %u, IfIndex: %u\n", 
+                   AttachParameters->MiniportMediaType, AttachParameters->BaseMiniportIfIndex);
+        }
+        else
+        {
+            DEBUGP(DL_INFO, "FilterAttach: Attempting to attach to adapter: <unknown>\n");
         }
 
         // Reject virtual/teamed/bridge adapters outright
@@ -305,7 +318,9 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                 && (AttachParameters->MiniportMediaType != NdisMediumWan)
                 && (AttachParameters->MiniportMediaType != NdisMediumWirelessWan))
         {
-           DEBUGP(DL_ERROR, "Unsupported media type.\n");
+           DEBUGP(DL_ERROR, "FilterAttach: Unsupported media type %u for adapter %wZ\n", 
+                  AttachParameters->MiniportMediaType, 
+                  AttachParameters->BaseMiniportInstanceName);
 
            Status = NDIS_STATUS_NOT_SUPPORTED;
            break;
@@ -319,7 +334,8 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         pFilter = (PMS_FILTER)FILTER_ALLOC_MEM(NdisFilterHandle, Size);
         if (pFilter == NULL)
         {
-            DEBUGP(DL_WARN, "Failed to allocate context structure.\n");
+            DEBUGP(DL_WARN, "FilterAttach: Failed to allocate context structure for %wZ\n", 
+                   AttachParameters->BaseMiniportInstanceName);
             Status = NDIS_STATUS_RESOURCES;
             break;
         }
@@ -371,7 +387,8 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                                     &FilterAttributes);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_WARN, "Failed to set attributes.\n");
+            DEBUGP(DL_WARN, "FilterAttach: Failed to set attributes for %wZ, Status=0x%x\n", 
+                   &pFilter->MiniportFriendlyName, Status);
             break;
         }
 
@@ -380,21 +397,31 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         // Initialize AVB context for Intel devices
         pFilter->AvbContext = NULL;
 
-        // Only attach to supported Intel controllers; otherwise fail attach
+        // Check if this is a supported Intel controller
         {
             USHORT ven = 0, dev = 0;
+            DEBUGP(DL_INFO, "FilterAttach: Checking if %wZ is supported Intel controller\n", 
+                   &pFilter->MiniportFriendlyName);
+                   
             if (!AvbIsSupportedIntelController(pFilter, &ven, &dev))
             {
-                DEBUGP(DL_INFO, "FilterAttach: Rejecting non-supported adapter: %wZ\n", &pFilter->MiniportFriendlyName);
+                DEBUGP(DL_INFO, "FilterAttach: Rejecting non-supported adapter: %wZ (VID:0x%04x DID:0x%04x)\n", 
+                       &pFilter->MiniportFriendlyName, ven, dev);
                 Status = NDIS_STATUS_NOT_SUPPORTED;
                 break;
             }
+
+            DEBUGP(DL_INFO, "FilterAttach: Found supported Intel controller: %wZ (VID:0x%04x DID:0x%04x)\n", 
+                   &pFilter->MiniportFriendlyName, ven, dev);
 
             // Supported Intel controller: initialize AVB context
             Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
             if (Status != STATUS_SUCCESS)
             {
-                DEBUGP(DL_WARN, "FilterAttach: Supported Intel NIC 0x%04x:0x%04x but AVB init failed (0x%x)\n", ven, dev, Status);
+                DEBUGP(DL_WARN, "FilterAttach: Supported Intel NIC 0x%04x:0x%04x but AVB init failed (0x%x) for %wZ\n", 
+                       ven, dev, Status, &pFilter->MiniportFriendlyName);
+                // Don't fail attach if AVB init fails - continue with filter functionality
+                pFilter->AvbContext = NULL;
                 Status = NDIS_STATUS_SUCCESS;
             }
             else
@@ -402,15 +429,20 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                 PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
                 if (avbCtx) {
                     avbCtx->hw_state = AVB_HW_BOUND; /* initial bound state */
-                    DEBUGP(DL_INFO, "AVB HW state -> %s (Miniport=%wZ IfIndex=%u)\n", AvbHwStateName(avbCtx->hw_state), &pFilter->MiniportFriendlyName, pFilter->MiniportIfIndex);
+                    DEBUGP(DL_INFO, "AVB HW state -> %s (Miniport=%wZ IfIndex=%u)\n", 
+                           AvbHwStateName(avbCtx->hw_state), &pFilter->MiniportFriendlyName, pFilter->MiniportIfIndex);
                 }
-                DEBUGP(DL_INFO, "AVB context initialized for Intel NIC 0x%04x:0x%04x\n", ven, dev);
+                DEBUGP(DL_INFO, "FilterAttach: AVB context initialized successfully for Intel NIC 0x%04x:0x%04x (%wZ)\n", 
+                       ven, dev, &pFilter->MiniportFriendlyName);
             }
         }
 
         FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
         InsertHeadList(&FilterModuleList, &pFilter->FilterModuleLink);
         FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+
+        DEBUGP(DL_INFO, "FilterAttach: Successfully attached to %wZ with AVB context %p\n", 
+               &pFilter->MiniportFriendlyName, pFilter->AvbContext);
 
     }
     while (bFalse);
@@ -425,9 +457,10 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             }
             FILTER_FREE_MEM(pFilter);
         }
+        DEBUGP(DL_WARN, "FilterAttach: Failed to attach to adapter, Status=0x%x\n", Status);
     }
 
-    DEBUGP(DL_TRACE, "<===FilterAttach:    Status %x\n", Status);
+    DEBUGP(DL_INFO, "<===FilterAttach: Status 0x%x\n", Status);
     return Status;
 }
 
