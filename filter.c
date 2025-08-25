@@ -55,6 +55,9 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 static BOOLEAN UnicodeStringContainsInsensitive(PCUNICODE_STRING Str, PCWSTR Sub);
 static BOOLEAN IsUnsupportedTeamOrVirtualAdapter(PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters);
 
+// AvbIsSupportedIntelController is defined in avb_bar0_discovery.c
+extern BOOLEAN AvbIsSupportedIntelController(PMS_FILTER pFilter, PUSHORT pVendorId, PUSHORT pDeviceId);
+
 /* Helper: case-insensitive substring search for UNICODE_STRING */
 static
 BOOLEAN
@@ -489,7 +492,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                &pFilter->MiniportFriendlyName, pFilter->AvbContext);
 
     }
-    while (bFalse);
+    while ( bFalse);
 
     if (Status != NDIS_STATUS_SUCCESS)
     {
@@ -1623,7 +1626,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
         ASSERT(NumberOfNetBufferLists >= 1);
 
         //
-        // If you would like to drop a received packet, then you must carefully
+        // If you would like to drop a received packet, you must carefully
         // modify the NBL chain as follows:
         //
         //     if NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags):
