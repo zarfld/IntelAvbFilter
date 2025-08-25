@@ -109,7 +109,7 @@ Return Value:
         
         // Set up header with correct NDIS 6.20 values
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;  // Use revision 2 for NDIS 6.20+
+        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
         FChars.Header.Size = NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2;
         
         // NDIS version - use 6.20 for broad compatibility
@@ -154,6 +154,8 @@ Return Value:
                FChars.MajorNdisVersion, FChars.MinorNdisVersion);
         DEBUGP(DL_INFO, "DriverEntry: Header Size=%u, Revision=%u\n", 
                FChars.Header.Size, FChars.Header.Revision);
+        DEBUGP(DL_INFO, "DriverEntry: Function pointers - Attach=%p Detach=%p Restart=%p Pause=%p\n", 
+               FChars.AttachHandler, FChars.DetachHandler, FChars.RestartHandler, FChars.PauseHandler);
         
         // First attempt with requested NDIS version
         Status = NdisFRegisterFilterDriver(DriverObject,
