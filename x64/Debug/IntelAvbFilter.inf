@@ -11,30 +11,27 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 08/25/2025,21.5.43.630
+DriverVer = 08/25/2025,21.11.52.907
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 
 ; Supported architectures: x64 and ARM64 for modern Intel platforms
-; NTia64 section.
 [Manufacturer]
-%Msft%=MSFT,NTx86,NTia64,NTamd64,NTarm,NTarm64
+%IntelCorp%=Intel,NTamd64
 
-; MS_IntelAvbFilter can be used with netcfg.exe to install/uninstall the driver.
-[MSFT.NTx86]
-%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
-
-[MSFT.NTia64]
-%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
-
-[MSFT.NTamd64]
-%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
-
-[MSFT.NTarm]
-%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
-
-[MSFT.NTarm64]
-%IntelAvbFilter_Desc%=Install, MS_IntelAvbFilter
+; Intel hardware-specific device IDs for I210 (your hardware)
+[Intel.NTamd64]
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1533  ; I210-AT (your hardware!)
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1536  ; I210-IS  
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1537  ; I210-IT
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_1538  ; I210-CL/CS
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15F2  ; I225-LM
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15F3  ; I225-V
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_125B  ; I226-LM
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_125C  ; I226-V
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_125D  ; I226-IT
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15B7  ; I219-LM  
+%IntelAvbFilter_Desc%=Install, PCI\VEN_8086&DEV_15B8  ; I219-V
 
 ;-------------------------------------------------------------------------
 ; Installation Section (generic + NT decorated)
@@ -101,7 +98,7 @@ DisplayName     = %IntelAvbFilter_Desc%
 ServiceType     = 1 ;SERVICE_KERNEL_DRIVER
 ; Typically you will want your filter driver to start with SERVICE_SYSTEM_START.
 ; If it is an Optional filter, you may also use 3;SERVICE_DEMAND_START.
-StartType       = 2 ;SERVICE_SYSTEM_START  
+StartType       = 3 ;SERVICE_DEMAND_START  
 ErrorControl    = 1 ;SERVICE_ERROR_NORMAL
 ServiceBinary   = %13%\IntelAvbFilter.sys
 LoadOrderGroup  = NDIS
@@ -139,7 +136,6 @@ HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,3
 IntelCorp = "Intel Corporation"
 IntelAvbFilter_Desc = "Intel AVB/TSN NDIS Filter Driver"
 IntelAvbFilter_HelpText = "Intel Audio/Video Bridging and Time-Sensitive Networking Filter Driver for Intel Ethernet Controllers"
-Msft = "Microsoft"
 
 
 
