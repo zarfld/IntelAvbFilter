@@ -52,8 +52,8 @@ CopyFiles = IntelAvbFilter.copyfiles.sys
 IntelAvbFilter.sys=1
 
 [DestinationDirs]
-DefaultDestDir=12
-IntelAvbFilter.copyfiles.sys=13
+DefaultDestDir=12                      ; %SystemRoot%\System32\drivers
+IntelAvbFilter.copyfiles.sys=12        ; Ensure driver binary lands in drivers directory
 
 [IntelAvbFilter.copyfiles.sys]
 IntelAvbFilter.sys,,,2
@@ -90,7 +90,7 @@ DisplayName     = %IntelAvbFilter_Desc%
 ServiceType     = 1
 StartType       = 3
 ErrorControl    = 1
-ServiceBinary   = %13%\IntelAvbFilter.sys
+ServiceBinary   = %12%\IntelAvbFilter.sys   ; Correct path to driver binary
 LoadOrderGroup  = NDIS
 Description     = %IntelAvbFilter_Desc%
 AddReg          = NdisImPlatformBindingOptions.reg
