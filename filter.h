@@ -20,18 +20,14 @@ Abstract:
 #define FILTER_ALLOC_TAG           'AvbM'  // AVB Memory
 #define FILTER_TAG                 'AvbF'  // AVB Filter
 
-// Using NDIS 6.20 for better Windows 7/8/10/11 compatibility  
-// This provides good balance of features and compatibility
+// Using NDIS 6.0 for maximum Windows compatibility  
+// This ensures the driver works on Windows 7/8/10/11
 #define FILTER_MAJOR_NDIS_VERSION   6
-#define FILTER_MINOR_NDIS_VERSION   20
+#define FILTER_MINOR_NDIS_VERSION   0
 
 // Ensure we have the right NDIS support flags
-#ifndef NDIS_SUPPORT_NDIS61
-#define NDIS_SUPPORT_NDIS61 1
-#endif
-
-#ifndef NDIS_SUPPORT_NDIS620  
-#define NDIS_SUPPORT_NDIS620 1
+#ifndef NDIS_SUPPORT_NDIS60
+#define NDIS_SUPPORT_NDIS60 1
 #endif
 
 //
