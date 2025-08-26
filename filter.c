@@ -151,13 +151,14 @@ Return Value:
         InitializeListHead(&FilterModuleList);
         FilterDriverHandle = NULL;
 
-        // Zero the characteristics structure - exactly like August 14th
+        // Zero the characteristics structure - use manual size calculation for NDIS 6.0
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-        FChars.Header.Size = sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS);
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;  // Force Revision 1 like August
+        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;  // Force Revision 1
+        // Manual size calculation for NDIS 6.0 Revision 1 (exclude newer fields)
+        FChars.Header.Size = FIELD_OFFSET(NDIS_FILTER_DRIVER_CHARACTERISTICS, DirectOidRequestHandler);
         
-        // Use NDIS 6.0 explicitly like August
+        // Use NDIS 6.0 explicitly like August 14th
         FChars.MajorNdisVersion = 6;
         FChars.MinorNdisVersion = 0;
         FChars.MajorDriverVersion = 1;
