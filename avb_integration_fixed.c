@@ -274,7 +274,16 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     switch (code) {
     case IOCTL_AVB_INIT_DEVICE:
+        DEBUGP(DL_INFO, "?? IOCTL_AVB_INIT_DEVICE: Starting hardware bring-up\n");
+        DEBUGP(DL_INFO, "   - Current hw_state: %s (%d)\n", AvbHwStateName(AvbContext->hw_state), AvbContext->hw_state);
+        DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", AvbContext->hw_access_enabled ? "YES" : "NO");
+        DEBUGP(DL_INFO, "   - Initialized flag: %s\n", AvbContext->initialized ? "YES" : "NO");
+        
         status = AvbBringUpHardware(AvbContext);
+        
+        DEBUGP(DL_INFO, "?? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
+        DEBUGP(DL_INFO, "   - Final hw_state: %s (%d)\n", AvbHwStateName(AvbContext->hw_state), AvbContext->hw_state);
+        DEBUGP(DL_INFO, "   - Final hardware access: %s\n", AvbContext->hw_access_enabled ? "YES" : "NO");
         break;
     case IOCTL_AVB_ENUM_ADAPTERS:
         if (outLen < sizeof(AVB_ENUM_REQUEST)) { status = STATUS_BUFFER_TOO_SMALL; break; }
@@ -348,7 +357,44 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     case IOCTL_AVB_SET_TIMESTAMP:
         if (inLen < sizeof(AVB_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TIMESTAMP_REQUEST)) status = STATUS_BUFFER_TOO_SMALL; else if (AvbContext->hw_state < AVB_HW_PTP_READY) status = STATUS_DEVICE_NOT_READY; else { PAVB_TIMESTAMP_REQUEST r=(PAVB_TIMESTAMP_REQUEST)buf; if (code==IOCTL_AVB_GET_TIMESTAMP){ULONGLONG t=0; struct timespec sys={0}; int rc=intel_gettime(&AvbContext->intel_device,r->clock_id,&t,&sys); if (rc!=0) rc=AvbReadTimestamp(&AvbContext->intel_device,&t); r->timestamp=t; r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} else {int rc=intel_set_systime(&AvbContext->intel_device,r->timestamp); r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} info=sizeof(*r);} break;
     case IOCTL_AVB_GET_HW_STATE:
-        if (outLen < sizeof(AVB_HW_STATE_QUERY)) status = STATUS_BUFFER_TOO_SMALL; else { PAVB_HW_STATE_QUERY q=(PAVB_HW_STATE_QUERY)buf; RtlZeroMemory(q,sizeof(*q)); q->hw_state=AvbContext->hw_state; q->vendor_id=AvbContext->intel_device.pci_vendor_id; q->device_id=AvbContext->intel_device.pci_device_id; q->capabilities=AvbContext->intel_device.capabilities; info=sizeof(*q);} break;
+        DEBUGP(DL_INFO, "?? IOCTL_AVB_GET_HW_STATE: Hardware state query\n");
+        if (outLen < sizeof(AVB_HW_STATE_QUERY)) { 
+            status = STATUS_BUFFER_TOO_SMALL; 
+        } else { 
+            PAVB_HW_STATE_QUERY q = (PAVB_HW_STATE_QUERY)buf; 
+            RtlZeroMemory(q, sizeof(*q)); 
+            q->hw_state = AvbContext->hw_state; 
+            q->vendor_id = AvbContext->intel_device.pci_vendor_id; 
+            q->device_id = AvbContext->intel_device.pci_device_id; 
+            q->capabilities = AvbContext->intel_device.capabilities; 
+            info = sizeof(*q);
+            
+            DEBUGP(DL_INFO, "? HW_STATE: state=%s, VID=0x%04X, DID=0x%04X, caps=0x%08X\n",
+                   AvbHwStateName(q->hw_state), q->vendor_id, q->device_id, q->capabilities);
+            
+            // Force BAR0 discovery attempt if hardware is still in BOUND state
+            if (AvbContext->hw_state == AVB_HW_BOUND && AvbContext->hardware_context == NULL) {
+                DEBUGP(DL_INFO, "?? FORCING BAR0 DISCOVERY: Hardware stuck in BOUND state, attempting manual discovery...\n");
+                PHYSICAL_ADDRESS bar0 = {0};
+                ULONG barLen = 0;
+                NTSTATUS ds = AvbDiscoverIntelControllerResources(AvbContext->filter_instance, &bar0, &barLen);
+                if (NT_SUCCESS(ds)) {
+                    DEBUGP(DL_INFO, "? MANUAL BAR0 DISCOVERY SUCCESS: PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
+                    NTSTATUS ms = AvbMapIntelControllerMemory(AvbContext, bar0, barLen);
+                    if (NT_SUCCESS(ms)) {
+                        DEBUGP(DL_INFO, "? MANUAL BAR0 MAPPING SUCCESS: Hardware context now available\n");
+                        AvbContext->hw_state = AVB_HW_BAR_MAPPED;
+                        AvbContext->hw_access_enabled = TRUE;
+                        q->hw_state = AvbContext->hw_state; // Update return value
+                    } else {
+                        DEBUGP(DL_ERROR, "? MANUAL BAR0 MAPPING FAILED: 0x%08X\n", ms);
+                    }
+                } else {
+                    DEBUGP(DL_ERROR, "? MANUAL BAR0 DISCOVERY FAILED: 0x%08X\n", ds);
+                }
+            }
+        } 
+        break;
     default:
         status = STATUS_INVALID_DEVICE_REQUEST; break;
     }
