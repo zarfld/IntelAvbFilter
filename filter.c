@@ -458,25 +458,28 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         // Check if this is a supported Intel controller
         {
             USHORT ven = 0, dev = 0;
-            DEBUGP(DL_INFO, "FilterAttach: Checking if %wZ is supported Intel controller\n", 
+            DEBUGP(DL_WARN, "FilterAttach: *** CHECKING ADAPTER SUPPORT *** %wZ\n", 
                    &pFilter->MiniportFriendlyName);
                    
             if (!AvbIsSupportedIntelController(pFilter, &ven, &dev))
             {
-                DEBUGP(DL_INFO, "FilterAttach: Rejecting non-supported adapter: %wZ (VID:0x%04x DID:0x%04x)\n", 
+                DEBUGP(DL_WARN, "FilterAttach: REJECTING adapter: %wZ (VID:0x%04x DID:0x%04x) - Status=0xc00000bb\n", 
                        &pFilter->MiniportFriendlyName, ven, dev);
                 Status = NDIS_STATUS_NOT_SUPPORTED;
                 break;
             }
 
-            DEBUGP(DL_INFO, "FilterAttach: Found supported Intel controller: %wZ (VID:0x%04x DID:0x%04x)\n", 
+            DEBUGP(DL_WARN, "FilterAttach: *** FOUND SUPPORTED INTEL CONTROLLER *** %wZ (VID:0x%04x DID:0x%04x)\n", 
                    &pFilter->MiniportFriendlyName, ven, dev);
 
             // Supported Intel controller: initialize AVB context
+            DEBUGP(DL_WARN, "FilterAttach: *** STARTING AVB INITIALIZATION *** for %wZ\n", 
+                   &pFilter->MiniportFriendlyName);
+                   
             Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
             if (Status != STATUS_SUCCESS)
             {
-                DEBUGP(DL_WARN, "FilterAttach: Supported Intel NIC 0x%04x:0x%04x but AVB init failed (0x%x) for %wZ\n", 
+                DEBUGP(DL_WARN, "FilterAttach: *** AVB INIT FAILED *** Intel NIC 0x%04x:0x%04x Status=0x%x for %wZ\n", 
                        ven, dev, Status, &pFilter->MiniportFriendlyName);
                 // Don't fail attach if AVB init fails - continue with filter functionality
                 pFilter->AvbContext = NULL;
@@ -487,11 +490,12 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                 PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
                 if (avbCtx) {
                     avbCtx->hw_state = AVB_HW_BOUND; /* initial bound state */
-                    DEBUGP(DL_INFO, "AVB HW state -> %s (Miniport=%wZ IfIndex=%u)\n", 
-                           AvbHwStateName(avbCtx->hw_state), &pFilter->MiniportFriendlyName, pFilter->MiniportIfIndex);
+                    DEBUGP(DL_WARN, "*** AVB CONTEXT INITIALIZED SUCCESSFULLY *** %wZ HW_STATE=%s IfIndex=%u Context=%p\n", 
+                           &pFilter->MiniportFriendlyName, AvbHwStateName(avbCtx->hw_state), pFilter->MiniportIfIndex, avbCtx);
+                } else {
+                    DEBUGP(DL_WARN, "*** AVB CONTEXT IS NULL *** after successful init for %wZ\n", 
+                           &pFilter->MiniportFriendlyName);
                 }
-                DEBUGP(DL_INFO, "FilterAttach: AVB context initialized successfully for Intel NIC 0x%04x:0x%04x (%wZ)\n", 
-                       ven, dev, &pFilter->MiniportFriendlyName);
             }
         }
 
