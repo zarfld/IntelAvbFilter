@@ -199,7 +199,6 @@
     <ClCompile Include="tests\integration\AvbIntegrationTests.c" />
     <ClCompile Include="tests\taef\AvbTaefTests.c" />
     <ClCompile Include="tools\avb_test\avb_diagnostic_test.c" />
-    <ClCompile Include="tools\avb_test\avb_hw_state_test.c" />
     <ClCompile Include="tools\avb_test\avb_test_actual.c" />
     <ClCompile Include="tools\avb_test\avb_test_app.c" />
     <ClCompile Include="tools\avb_test\avb_test_standalone.c" />
