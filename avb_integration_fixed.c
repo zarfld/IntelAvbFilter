@@ -282,40 +282,40 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         
         // Force immediate BAR0 discovery if hardware context is missing
         if (AvbContext->hardware_context == NULL && AvbContext->hw_state == AVB_HW_BOUND) {
-            DEBUGP(DL_INFO, "?? INIT_DEVICE: No hardware context, forcing immediate BAR0 discovery...\n");
+            DEBUGP(DL_WARN, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
             
             PHYSICAL_ADDRESS bar0 = {0};
             ULONG barLen = 0;
             NTSTATUS ds = AvbDiscoverIntelControllerResources(AvbContext->filter_instance, &bar0, &barLen);
             if (NT_SUCCESS(ds)) {
-                DEBUGP(DL_INFO, "? INIT_DEVICE: BAR0 discovery success: PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
+                DEBUGP(DL_WARN, "*** BAR0 DISCOVERY SUCCESS *** PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
                 NTSTATUS ms = AvbMapIntelControllerMemory(AvbContext, bar0, barLen);
                 if (NT_SUCCESS(ms)) {
-                    DEBUGP(DL_INFO, "? INIT_DEVICE: BAR0 mapping success\n");
+                    DEBUGP(DL_WARN, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
                     
                     // Complete initialization sequence
                     AvbContext->intel_device.private_data = AvbContext;
                     if (intel_init(&AvbContext->intel_device) == 0) {
-                        DEBUGP(DL_INFO, "? INIT_DEVICE: intel_init success\n");
+                        DEBUGP(DL_WARN, "*** INTEL_INIT SUCCESS ***\n");
                         
                         // Test MMIO sanity
                         ULONG ctrl = 0xFFFFFFFF;
                         if (intel_read_reg(&AvbContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
-                            DEBUGP(DL_INFO, "? INIT_DEVICE: MMIO sanity success - CTRL=0x%08X\n", ctrl);
+                            DEBUGP(DL_WARN, "*** MMIO SANITY SUCCESS *** CTRL=0x%08X\n", ctrl);
                             AvbContext->hw_state = AVB_HW_BAR_MAPPED;
                             AvbContext->hw_access_enabled = TRUE;
                             AvbContext->initialized = TRUE;
                         } else {
-                            DEBUGP(DL_ERROR, "? INIT_DEVICE: MMIO sanity failed - CTRL=0x%08X\n", ctrl);
+                            DEBUGP(DL_ERROR, "*** MMIO SANITY FAILED *** CTRL=0x%08X\n", ctrl);
                         }
                     } else {
-                        DEBUGP(DL_ERROR, "? INIT_DEVICE: intel_init failed\n");
+                        DEBUGP(DL_ERROR, "*** INTEL_INIT FAILED ***\n");
                     }
                 } else {
-                    DEBUGP(DL_ERROR, "? INIT_DEVICE: BAR0 mapping failed: 0x%08X\n", ms);
+                    DEBUGP(DL_ERROR, "*** BAR0 MAPPING FAILED *** Status=0x%08X\n", ms);
                 }
             } else {
-                DEBUGP(DL_ERROR, "? INIT_DEVICE: BAR0 discovery failed: 0x%08X\n", ds);
+                DEBUGP(DL_ERROR, "*** BAR0 DISCOVERY FAILED *** Status=0x%08X\n", ds);
             }
         }
         
