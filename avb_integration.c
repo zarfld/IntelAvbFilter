@@ -53,6 +53,7 @@ int intel_setup_frame_preemption(device_t *dev, struct tsn_fp_config *config);
 int intel_setup_ptm(device_t *dev, struct ptm_config *config);
 int intel_mdio_read(device_t *dev, ULONG page, ULONG reg, USHORT *value);
 int intel_mdio_write(device_t *dev, ULONG page, ULONG reg, USHORT value);
+ULONG intel_get_capabilities(device_t *dev);
 
 // Platform operations with wrapper functions
 static int PlatformInitWrapper(device_t *dev) {
@@ -297,3 +298,37 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 device_id)
 }
 
 // Clean, professional implementation - no confusing naming conventions
+
+/**
+ * @brief Get device capabilities based on Intel device type
+ */
+ULONG intel_get_capabilities(device_t *dev)
+{
+    if (dev == NULL) {
+        return 0;
+    }
+    
+    // Return capabilities based on device type
+    switch (dev->device_type) {
+        case INTEL_DEVICE_I210:
+            return INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
+            
+        case INTEL_DEVICE_I217:
+            return INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
+            
+        case INTEL_DEVICE_I219:
+            return INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
+            
+        case INTEL_DEVICE_I225:
+            return INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                   INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO;
+            
+        case INTEL_DEVICE_I226:
+            return INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                   INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
+            
+        case INTEL_DEVICE_UNKNOWN:
+        default:
+            return 0;
+    }
+}

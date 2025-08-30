@@ -248,7 +248,6 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SETUP_PTM:
         case IOCTL_AVB_MDIO_READ:
         case IOCTL_AVB_MDIO_WRITE:
-        case IOCTL_AVB_ENUM_ADAPTERS:
         {
             DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: AVB IOCTL=0x%x\n", 
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
@@ -314,6 +313,139 @@ IntelAvbFilterDeviceIoControl(
             }
             break;
         }
+
+        case IOCTL_AVB_ENUM_ADAPTERS:
+        {
+            DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: ENUM_ADAPTERS (multi-adapter mode)\n");
+            
+            // ENUM_ADAPTERS needs special handling for multi-adapter support
+            // Count ALL Intel adapters, not just find one
+            
+            InputBuffer = OutputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
+            InputBufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+            OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+            
+            if (OutputBufferLength < sizeof(AVB_ENUM_REQUEST)) {
+                DEBUGP(DL_ERROR, "ENUM_ADAPTERS: Buffer too small (%lu < %lu)\n", 
+                       OutputBufferLength, (ULONG)sizeof(AVB_ENUM_REQUEST));
+                Status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            
+            PAVB_ENUM_REQUEST req = (PAVB_ENUM_REQUEST)OutputBuffer;
+            ULONG requestedIndex = req->index; // Input: which adapter index to query
+            ULONG adapterCount = 0;
+            BOOLEAN foundRequestedAdapter = FALSE;
+            
+            // Initialize response
+            req->count = 0;
+            req->vendor_id = 0;
+            req->device_id = 0;
+            req->capabilities = 0;
+            req->status = NDIS_STATUS_SUCCESS;
+            
+            DEBUGP(DL_INFO, "ENUM_ADAPTERS: Scanning for adapters, requested index=%lu\n", requestedIndex);
+            
+            // Scan ALL filter instances to count Intel adapters
+            FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+            Link = FilterModuleList.Flink;
+            
+            while (Link != &FilterModuleList)
+            {
+                PMS_FILTER cand = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                Link = Link->Flink; // Move to next
+                
+                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                
+                // Check if this is a supported Intel adapter
+                USHORT ven = 0, dev = 0;
+                if (AvbIsSupportedIntelController(cand, &ven, &dev))
+                {
+                    DEBUGP(DL_INFO, "ENUM_ADAPTERS: Found Intel adapter #%lu: %wZ (VID=0x%04X, DID=0x%04X)\n",
+                           adapterCount, &cand->MiniportFriendlyName, ven, dev);
+                    
+                    // If this is the requested adapter index, populate the response
+                    if (adapterCount == requestedIndex)
+                    {
+                        req->vendor_id = ven;
+                        req->device_id = dev;
+                        
+                        // Initialize AVB context if needed
+                        if (cand->AvbContext == NULL)
+                        {
+                            DEBUGP(DL_INFO, "ENUM_ADAPTERS: Initializing AVB context for requested adapter #%lu\n", adapterCount);
+                            NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                            if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
+                            {
+                                DEBUGP(DL_INFO, "ENUM_ADAPTERS: Successfully initialized AVB context for requested adapter #%lu\n", 
+                                       adapterCount);
+                            }
+                            else
+                            {
+                                DEBUGP(DL_WARN, "ENUM_ADAPTERS: Failed to initialize AVB context for requested adapter #%lu: 0x%x\n", 
+                                       adapterCount, initSt);
+                                // Still count it but with limited capabilities
+                                req->capabilities = 0;
+                            }
+                        }
+                        
+                        // Get capabilities from Intel library
+                        if (cand->AvbContext != NULL)
+                        {
+                            PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                            
+                            // Call Intel library initialization to get capabilities
+                            int result = intel_init(&ctx->intel_device);
+                            ctx->hw_access_enabled = (result == 0);
+                            
+                            if (result == 0)
+                            {
+                                req->capabilities = intel_get_capabilities(&ctx->intel_device);
+                                DEBUGP(DL_INFO, "ENUM_ADAPTERS: Adapter #%lu capabilities=0x%08X\n", 
+                                       adapterCount, req->capabilities);
+                            }
+                            else
+                            {
+                                DEBUGP(DL_WARN, "ENUM_ADAPTERS: Intel init failed for adapter #%lu\n", adapterCount);
+                                req->capabilities = 0;
+                            }
+                        }
+                        
+                        foundRequestedAdapter = TRUE;
+                    }
+                    
+                    adapterCount++;
+                }
+                
+                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+            }
+            
+            FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+            
+            // Set total count
+            req->count = adapterCount;
+            
+            if (adapterCount == 0)
+            {
+                DEBUGP(DL_WARN, "ENUM_ADAPTERS: No Intel adapters found with active bindings\n");
+                Status = STATUS_NO_SUCH_DEVICE;
+            }
+            else if (requestedIndex >= adapterCount)
+            {
+                DEBUGP(DL_WARN, "ENUM_ADAPTERS: Requested index %lu >= adapter count %lu\n", 
+                       requestedIndex, adapterCount);
+                Status = STATUS_INVALID_PARAMETER;
+            }
+            else
+            {
+                DEBUGP(DL_INFO, "ENUM_ADAPTERS: Success - Total adapters=%lu, returned adapter #%lu (VID=0x%04X, DID=0x%04X, caps=0x%08X)\n",
+                       adapterCount, requestedIndex, req->vendor_id, req->device_id, req->capabilities);
+                Status = NDIS_STATUS_SUCCESS;
+                InfoLength = sizeof(AVB_ENUM_REQUEST);
+            }
+            
+            break;
+        }
              
         default:
             break;
@@ -366,6 +498,578 @@ filterFindFilterModule(
    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
    return NULL;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
