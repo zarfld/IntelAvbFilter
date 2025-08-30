@@ -76,10 +76,40 @@ NTSTATUS AvbCreateMinimalContext(
 NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
 {
     if (!Ctx) return STATUS_INVALID_PARAMETER;
+    
+    // Always set baseline capabilities based on device type first
+    ULONG baseline_caps = 0;
+    switch (Ctx->intel_device.device_type) {
+        case INTEL_DEVICE_I210:
+            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
+            break;
+        case INTEL_DEVICE_I217:
+            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
+            break;
+        case INTEL_DEVICE_I219:
+            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
+            break;
+        case INTEL_DEVICE_I225:
+            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO;
+            break;
+        case INTEL_DEVICE_I226:
+            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
+            break;
+        default:
+            baseline_caps = INTEL_CAP_MMIO;
+            break;
+    }
+    
+    // Set baseline capabilities even if hardware init fails
+    Ctx->intel_device.capabilities = baseline_caps;
+    
     NTSTATUS status = AvbPerformBasicInitialization(Ctx);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_WARN, "AvbBringUpHardware: basic init failed 0x%08X (capabilities=0)\n", status);
-        return status;
+        DEBUGP(DL_WARN, "AvbBringUpHardware: basic init failed 0x%08X (capabilities=0x%08X)\n", status, baseline_caps);
+        // Don't return error - allow enumeration with baseline capabilities
+        return STATUS_SUCCESS;
     }
     if (Ctx->intel_device.device_type == INTEL_DEVICE_I210 && Ctx->hw_state >= AVB_HW_BAR_MAPPED) {
         AvbI210EnsureSystimRunning(Ctx);
@@ -291,43 +321,14 @@ int AvbMdioWriteI219Direct(device_t *dev, USHORT p, USHORT r, USHORT val){ retur
 /* Helpers */
 BOOLEAN AvbIsIntelDevice(UINT16 vid, UINT16 did){ UNREFERENCED_PARAMETER(did); return vid==INTEL_VENDOR_ID; }
 intel_device_type_t AvbGetIntelDeviceType(UINT16 did){ switch(did){case 0x1533:return INTEL_DEVICE_I210; case 0x153A:case 0x153B:return INTEL_DEVICE_I217; case 0x15B7:case 0x15B8:case 0x15D6:case 0x15D7:case 0x15D8:case 0x0DC7:case 0x1570:case 0x15E3:return INTEL_DEVICE_I219; case 0x15F2:return INTEL_DEVICE_I225; case 0x125B:return INTEL_DEVICE_I226; default:return INTEL_DEVICE_UNKNOWN; }}
+
 ULONG intel_get_capabilities(device_t *dev)
 {
     if (dev == NULL) {
         return 0;
     }
     
-    // If capabilities are already set, return them
-    if (dev->capabilities != 0) {
-        return dev->capabilities;
-    }
-    
-    // Set capabilities based on device type if not already set
-    switch (dev->device_type) {
-        case INTEL_DEVICE_I210:
-            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
-            break;
-        case INTEL_DEVICE_I217:
-            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
-            break;
-        case INTEL_DEVICE_I219:
-            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
-            break;
-        case INTEL_DEVICE_I225:
-            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
-                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO;
-            break;
-        case INTEL_DEVICE_I226:
-            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
-                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
-            break;
-        case INTEL_DEVICE_UNKNOWN:
-        default:
-            dev->capabilities = INTEL_CAP_MMIO; // Basic MMIO for unknown devices
-            break;
-    }
-    
     return dev->capabilities;
 }
+
 PMS_FILTER AvbFindIntelFilterModule(VOID){ if (g_AvbContext && g_AvbContext->filter_instance) return g_AvbContext->filter_instance; PMS_FILTER f=NULL; PLIST_ENTRY l; BOOLEAN bFalse=FALSE; FILTER_ACQUIRE_LOCK(&FilterListLock,bFalse); l=FilterModuleList.Flink; while(l!=&FilterModuleList){ f=CONTAINING_RECORD(l,MS_FILTER,FilterModuleLink); if (f && f->AvbContext){ FILTER_RELEASE_LOCK(&FilterListLock,bFalse); return f;} l=l->Flink; } FILTER_RELEASE_LOCK(&FilterListLock,bFalse); return NULL; }
-BOOLEAN AvbIsFilterIntelAdapter(_In_ PMS_FILTER F){ if(!F) return FALSE; if (F->AvbContext){ PAVB_DEVICE_CONTEXT c=(PAVB_DEVICE_CONTEXT)F->AvbContext; return c->intel_device.pci_vendor_id==INTEL_VENDOR_ID;} return FALSE; }
