@@ -28,6 +28,7 @@
 -- Design modules so that changes in one module do not require changes in unrelated modules. Avoid dependencies that cause single changes to break multiple areas.
 -- Design components for reuse where practical, but prioritize correctness and domain fit over forced generalization.
 -- Prefer incremental modification of existing code over reimplementation; adapt existing functions instead of creating redundant new ones
+-- NOT SUPPORTED - Intel device but no AVB/TSN support: Intel(R) 82574L
 
 ## Architecture Overview
 

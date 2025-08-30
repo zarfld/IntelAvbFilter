@@ -122,6 +122,13 @@ AvbIsSupportedIntelController(
         return TRUE;
     }
 
+    // Explicitly reject unsupported Intel devices to prevent attachment failures
+    if (WideContainsInsensitive(name, lenChars, L"82574L")) {
+        DEBUGP(DL_WARN, "AvbIsSupportedIntelController: ? EXPLICITLY NOT SUPPORTED - Intel 82574L has no AVB/TSN features: %wZ\n", 
+               &FilterModule->MiniportFriendlyName);
+        return FALSE;
+    }
+
     DEBUGP(DL_WARN, "AvbIsSupportedIntelController: ? NOT SUPPORTED - Intel device but no AVB/TSN support: %wZ\n", 
            &FilterModule->MiniportFriendlyName);
     return FALSE;
@@ -264,30 +271,38 @@ AvbDiscoverIntelControllerResources(
     AVB_PCI_SLOT_NUMBER slot = { 0 };
     ULONG id = 0, bar0lo = 0, bar0hi = 0;
 
-    DEBUGP(DL_TRACE, "==>AvbDiscoverIntelControllerResources (MMIO in LWF)\n");
+    DEBUGP(DL_TRACE, "==>AvbDiscoverIntelControllerResources (REAL HARDWARE BAR0 DISCOVERY)\n");
 
-    if (!FilterModule || !Bar0Address || !Bar0Length) return STATUS_INVALID_PARAMETER;
+    if (!FilterModule || !Bar0Address || !Bar0Length) {
+        DEBUGP(DL_ERROR, "AvbDiscoverIntelControllerResources: Invalid parameters\n");
+        return STATUS_INVALID_PARAMETER;
+    }
 
     Bar0Address->QuadPart = 0;
     *Bar0Length = 0;
 
+    DEBUGP(DL_INFO, "?? STEP 1: Resolving PDO from filter module...\n");
     status = AvbGetPdoFromFilter(FilterModule, &pdo);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "Failed to resolve PDO: 0x%x\n", status);
+        DEBUGP(DL_ERROR, "? STEP 1 FAILED: Failed to resolve PDO: 0x%x\n", status);
         return status;
     }
+    DEBUGP(DL_INFO, "? STEP 1 SUCCESS: PDO resolved\n");
 
+    DEBUGP(DL_INFO, "?? STEP 2: Reading PnP bus number...\n");
     status = IoGetDeviceProperty(pdo,
                                  DevicePropertyBusNumber,
                                  sizeof(busNumber),
                                  &busNumber,
                                  &len);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "IoGetDeviceProperty(DevicePropertyBusNumber) failed: 0x%x\n", status);
+        DEBUGP(DL_ERROR, "? STEP 2 FAILED: IoGetDeviceProperty(DevicePropertyBusNumber) failed: 0x%x\n", status);
         ObDereferenceObject(pdo);
         return status;
     }
+    DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Bus Number = %lu\n", busNumber);
 
+    DEBUGP(DL_INFO, "?? STEP 3: Reading PnP device address...\n");
     len = 0;
     status = IoGetDeviceProperty(pdo,
                                  DevicePropertyAddress,
@@ -295,7 +310,7 @@ AvbDiscoverIntelControllerResources(
                                  &address,
                                  &len);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "IoGetDeviceProperty(DevicePropertyAddress) failed: 0x%x\n", status);
+        DEBUGP(DL_ERROR, "? STEP 3 FAILED: IoGetDeviceProperty(DevicePropertyAddress) failed: 0x%x\n", status);
         ObDereferenceObject(pdo);
         return status;
     }
@@ -304,31 +319,36 @@ AvbDiscoverIntelControllerResources(
 
     slot.bits.DeviceNumber = (address >> 16) & 0xFFFF;
     slot.bits.FunctionNumber = (address & 0xFFFF) & 0x7;
+    DEBUGP(DL_INFO, "? STEP 3 SUCCESS: Device Address = Bus:%lu, Device:%lu, Function:%lu\n", 
+           busNumber, slot.bits.DeviceNumber, slot.bits.FunctionNumber);
 
+    DEBUGP(DL_INFO, "?? STEP 4: Reading PCI Vendor/Device ID...\n");
     // Read Vendor/Device ID (DWORD @ 0x00 per PCI spec)
     status = AvbReadPciConfigDword(busNumber, slot, 0x00, &id);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "Failed to read PCI ID dword: 0x%x\n", status);
+        DEBUGP(DL_ERROR, "? STEP 4 FAILED: Failed to read PCI ID dword: 0x%x\n", status);
         return status;
     }
 
     USHORT ven = (USHORT)(id & 0xFFFF);
     USHORT dev = (USHORT)((id >> 16) & 0xFFFF);
+    DEBUGP(DL_INFO, "? STEP 4 SUCCESS: VID=0x%04x, DID=0x%04x\n", ven, dev);
 
     if (ven != INTEL_VENDOR_ID) {
-        DEBUGP(DL_ERROR, "Not an Intel device: VEN=0x%04x, DEV=0x%04x\n", ven, dev);
+        DEBUGP(DL_ERROR, "? VALIDATION FAILED: Not an Intel device: VEN=0x%04x, DEV=0x%04x\n", ven, dev);
         return STATUS_DEVICE_NOT_READY;
     }
 
+    DEBUGP(DL_INFO, "?? STEP 5: Reading BAR0 configuration...\n");
     // Read BAR0 low DWORD (@ 0x10). If 64-bit memory BAR, also read BAR1 (@ 0x14)
     status = AvbReadPciConfigDword(busNumber, slot, 0x10, &bar0lo);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "Failed to read BAR0: 0x%x\n", status);
+        DEBUGP(DL_ERROR, "? STEP 5 FAILED: Failed to read BAR0: 0x%x\n", status);
         return status;
     }
 
     if (bar0lo & 0x1) {
-        DEBUGP(DL_ERROR, "BAR0 indicates I/O space, not MMIO: 0x%08x\n", bar0lo);
+        DEBUGP(DL_ERROR, "? VALIDATION FAILED: BAR0 indicates I/O space, not MMIO: 0x%08x\n", bar0lo);
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
@@ -336,19 +356,23 @@ AvbDiscoverIntelControllerResources(
 
     // Bits [2:1] == 0b10 indicates 64-bit memory BAR per PCI spec
     if ((bar0lo & 0x6) == 0x4) {
+        DEBUGP(DL_INFO, "?? STEP 5a: Reading BAR1 (high) for 64-bit BAR...\n");
         status = AvbReadPciConfigDword(busNumber, slot, 0x14, &bar0hi);
         if (!NT_SUCCESS(status)) {
-            DEBUGP(DL_ERROR, "Failed to read BAR1 (high) for 64-bit BAR: 0x%x\n", status);
+            DEBUGP(DL_ERROR, "? STEP 5a FAILED: Failed to read BAR1 (high) for 64-bit BAR: 0x%x\n", status);
             return status;
         }
         phys |= ((ULONGLONG)bar0hi) << 32;
+        DEBUGP(DL_INFO, "? STEP 5a SUCCESS: 64-bit BAR - BAR0=0x%08x, BAR1=0x%08x\n", bar0lo, bar0hi);
+    } else {
+        DEBUGP(DL_INFO, "? STEP 5 SUCCESS: 32-bit BAR - BAR0=0x%08x\n", bar0lo);
     }
 
     Bar0Address->QuadPart = phys;
     *Bar0Length = AvbGetIntelBarLengthByDeviceId(dev);
 
-    DEBUGP(DL_INFO, "Intel controller detected: VEN=0x%04x, DEV=0x%04x\n", ven, dev);
-    DEBUGP(DL_INFO, "BAR0=0x%llx, Length=0x%x (MMIO enabled, %s BAR)\n",
+    DEBUGP(DL_INFO, "?? DISCOVERY COMPLETE: Intel controller detected: VEN=0x%04x, DEV=0x%04x\n", ven, dev);
+    DEBUGP(DL_INFO, "?? DISCOVERY COMPLETE: BAR0=0x%llx, Length=0x%x (MMIO enabled, %s BAR)\n",
            Bar0Address->QuadPart, *Bar0Length,
            ((bar0lo & 0x6) == 0x4) ? "64-bit" : "32-bit");
 
