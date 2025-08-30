@@ -384,8 +384,8 @@ AvbInitializeDeviceWithBar0Discovery(
     if (!AvbContext || !FilterModule) return STATUS_INVALID_PARAMETER;
     *AvbContext = NULL;
 
-    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)ExAllocatePoolZero(
-        NonPagedPool,
+    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
         sizeof(AVB_DEVICE_CONTEXT),
         FILTER_ALLOC_TAG);
     if (!ctx) {
@@ -452,4 +452,112 @@ AvbInitializeDeviceWithBar0Discovery(
 
     DEBUGP(DL_TRACE, "<==AvbInitializeDeviceWithBar0Discovery (HW=%s)\n", ctx->hw_access_enabled ? "ENABLED" : "DISABLED");
     return STATUS_SUCCESS;
+}
+
+/**
+ * @brief Map Intel controller MMIO register space (BAR0) into system virtual address space
+ * @param AvbContext Device context
+ * @param PhysicalAddress Physical BAR0 base address
+ * @param Length Length (bytes) to map
+ * @return NTSTATUS STATUS_SUCCESS if mapped successfully
+ */
+NTSTATUS
+AvbMapIntelControllerMemory(
+    _In_ PAVB_DEVICE_CONTEXT AvbContext,
+    _In_ PHYSICAL_ADDRESS PhysicalAddress,
+    _In_ ULONG Length
+)
+{
+    PINTEL_HARDWARE_CONTEXT hwContext;
+    
+    DEBUGP(DL_TRACE, "==>AvbMapIntelControllerMemory: PA=0x%llx, Length=0x%x\n", 
+           PhysicalAddress.QuadPart, Length);
+    
+    if (AvbContext == NULL) {
+        DEBUGP(DL_ERROR, "AvbMapIntelControllerMemory: Invalid context\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    if (PhysicalAddress.QuadPart == 0 || Length == 0) {
+        DEBUGP(DL_ERROR, "AvbMapIntelControllerMemory: Invalid physical address or length\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    // Allocate hardware context
+    hwContext = (PINTEL_HARDWARE_CONTEXT)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        sizeof(INTEL_HARDWARE_CONTEXT),
+        FILTER_ALLOC_TAG
+    );
+    
+    if (hwContext == NULL) {
+        DEBUGP(DL_ERROR, "AvbMapIntelControllerMemory: Failed to allocate hardware context\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    // Initialize hardware context
+    RtlZeroMemory(hwContext, sizeof(INTEL_HARDWARE_CONTEXT));
+
+    // Store physical address and length
+    hwContext->physical_address = PhysicalAddress;
+    hwContext->mmio_length = Length;
+    hwContext->mapped = FALSE;
+    
+    // Map the MMIO region using Windows kernel memory manager
+    hwContext->mmio_base = (PUCHAR)MmMapIoSpace(
+        PhysicalAddress,
+        Length,
+        MmNonCached
+    );
+    
+    if (hwContext->mmio_base == NULL) {
+        DEBUGP(DL_ERROR, "AvbMapIntelControllerMemory: MmMapIoSpace failed\n");
+        ExFreePoolWithTag(hwContext, FILTER_ALLOC_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    hwContext->mapped = TRUE;
+    AvbContext->hardware_context = hwContext;
+    
+    DEBUGP(DL_INFO, "AvbMapIntelControllerMemory: Success - PA=0x%llx mapped to VA=0x%p\n", 
+           PhysicalAddress.QuadPart, hwContext->mmio_base);
+    DEBUGP(DL_TRACE, "<==AvbMapIntelControllerMemory: SUCCESS\n");
+    
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief Unmap previously mapped Intel controller MMIO space
+ * @param AvbContext Device context
+ */
+VOID
+AvbUnmapIntelControllerMemory(
+    _In_ PAVB_DEVICE_CONTEXT AvbContext
+)
+{
+    PINTEL_HARDWARE_CONTEXT hwContext;
+    
+    DEBUGP(DL_TRACE, "==>AvbUnmapIntelControllerMemory\n");
+    
+    if (AvbContext == NULL) {
+        return;
+    }
+    
+    hwContext = AvbContext->hardware_context;
+    if (hwContext == NULL) {
+        return;
+    }
+    
+    // Unmap MMIO if it was mapped
+    if (hwContext->mapped && hwContext->mmio_base != NULL) {
+        MmUnmapIoSpace(hwContext->mmio_base, hwContext->mmio_length);
+        DEBUGP(DL_INFO, "AvbUnmapIntelControllerMemory: Unmapped MMIO at VA=0x%p\n", 
+               hwContext->mmio_base);
+    }
+    
+    // Free hardware context
+    ExFreePoolWithTag(hwContext, FILTER_ALLOC_TAG);
+    AvbContext->hardware_context = NULL;
+    
+    DEBUGP(DL_TRACE, "<==AvbUnmapIntelControllerMemory\n");
 }

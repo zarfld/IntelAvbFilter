@@ -22,6 +22,15 @@ Abstract:
 #define INTEL_VENDOR_ID         0x8086
 
 /* ------------------------------------------------------------------------- */
+/* Intel hardware context for MMIO mapping */
+typedef struct _INTEL_HARDWARE_CONTEXT {
+    PHYSICAL_ADDRESS physical_address;  // BAR0 physical address
+    PUCHAR mmio_base;                  // Mapped virtual address for register access
+    ULONG mmio_length;                 // Size of mapped region
+    BOOLEAN mapped;                    // TRUE if successfully mapped
+} INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
+
+/* ------------------------------------------------------------------------- */
 /* Hardware lifecycle state machine (no fabrication) */
 typedef enum _AVB_HW_STATE {
     AVB_HW_UNBOUND = 0,      /* Filter not yet attached to supported Intel miniport */
