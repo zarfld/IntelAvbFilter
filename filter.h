@@ -384,6 +384,12 @@ filterFindFilterModule(
     );
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
+PMS_FILTER
+AvbFindIntelFilterModule(
+    VOID
+    );
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
 NDIS_STATUS
 filterDoInternalRequest(
     _In_ PMS_FILTER                   FilterModuleContext,
