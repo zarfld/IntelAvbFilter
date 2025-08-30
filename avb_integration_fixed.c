@@ -358,6 +358,11 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         if (inLen < sizeof(AVB_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TIMESTAMP_REQUEST)) status = STATUS_BUFFER_TOO_SMALL; else if (AvbContext->hw_state < AVB_HW_PTP_READY) status = STATUS_DEVICE_NOT_READY; else { PAVB_TIMESTAMP_REQUEST r=(PAVB_TIMESTAMP_REQUEST)buf; if (code==IOCTL_AVB_GET_TIMESTAMP){ULONGLONG t=0; struct timespec sys={0}; int rc=intel_gettime(&AvbContext->intel_device,r->clock_id,&t,&sys); if (rc!=0) rc=AvbReadTimestamp(&AvbContext->intel_device,&t); r->timestamp=t; r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} else {int rc=intel_set_systime(&AvbContext->intel_device,r->timestamp); r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} info=sizeof(*r);} break;
     case IOCTL_AVB_GET_HW_STATE:
         DEBUGP(DL_INFO, "?? IOCTL_AVB_GET_HW_STATE: Hardware state query\n");
+        DEBUGP(DL_INFO, "   - Context: %p\n", AvbContext);
+        DEBUGP(DL_INFO, "   - Global context: %p\n", g_AvbContext);
+        DEBUGP(DL_INFO, "   - Filter instance: %p\n", AvbContext->filter_instance);
+        DEBUGP(DL_INFO, "   - Device type: %d\n", AvbContext->intel_device.device_type);
+        
         if (outLen < sizeof(AVB_HW_STATE_QUERY)) { 
             status = STATUS_BUFFER_TOO_SMALL; 
         } else { 
@@ -375,6 +380,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             // Force BAR0 discovery attempt if hardware is still in BOUND state
             if (AvbContext->hw_state == AVB_HW_BOUND && AvbContext->hardware_context == NULL) {
                 DEBUGP(DL_INFO, "?? FORCING BAR0 DISCOVERY: Hardware stuck in BOUND state, attempting manual discovery...\n");
+                
+                // Ensure device type is properly set
+                if (AvbContext->intel_device.device_type == INTEL_DEVICE_UNKNOWN && 
+                    AvbContext->intel_device.pci_device_id != 0) {
+                    AvbContext->intel_device.device_type = AvbGetIntelDeviceType(AvbContext->intel_device.pci_device_id);
+                    DEBUGP(DL_INFO, "?? Updated device type to %d for DID=0x%04X\n", 
+                           AvbContext->intel_device.device_type, AvbContext->intel_device.pci_device_id);
+                }
+                
                 PHYSICAL_ADDRESS bar0 = {0};
                 ULONG barLen = 0;
                 NTSTATUS ds = AvbDiscoverIntelControllerResources(AvbContext->filter_instance, &bar0, &barLen);
@@ -383,9 +397,32 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     NTSTATUS ms = AvbMapIntelControllerMemory(AvbContext, bar0, barLen);
                     if (NT_SUCCESS(ms)) {
                         DEBUGP(DL_INFO, "? MANUAL BAR0 MAPPING SUCCESS: Hardware context now available\n");
-                        AvbContext->hw_state = AVB_HW_BAR_MAPPED;
-                        AvbContext->hw_access_enabled = TRUE;
-                        q->hw_state = AvbContext->hw_state; // Update return value
+                        
+                        // Complete the initialization sequence
+                        AvbContext->intel_device.private_data = AvbContext;
+                        if (intel_init(&AvbContext->intel_device) == 0) {
+                            DEBUGP(DL_INFO, "? MANUAL intel_init SUCCESS\n");
+                            
+                            // Test MMIO sanity
+                            ULONG ctrl = 0xFFFFFFFF;
+                            if (intel_read_reg(&AvbContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
+                                DEBUGP(DL_INFO, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
+                                AvbContext->hw_state = AVB_HW_BAR_MAPPED;
+                                AvbContext->hw_access_enabled = TRUE;
+                                AvbContext->initialized = TRUE;
+                                q->hw_state = AvbContext->hw_state; // Update return value
+                                
+                                // Try I210 PTP initialization if applicable
+                                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
+                                    DEBUGP(DL_INFO, "?? MANUAL I210 PTP INIT: Starting...\n");
+                                    AvbI210EnsureSystimRunning(AvbContext);
+                                }
+                            } else {
+                                DEBUGP(DL_ERROR, "? MANUAL MMIO SANITY FAILED: CTRL=0x%08X\n", ctrl);
+                            }
+                        } else {
+                            DEBUGP(DL_ERROR, "? MANUAL intel_init FAILED\n");
+                        }
                     } else {
                         DEBUGP(DL_ERROR, "? MANUAL BAR0 MAPPING FAILED: 0x%08X\n", ms);
                     }
