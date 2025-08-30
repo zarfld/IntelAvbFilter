@@ -128,49 +128,75 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
  */
 static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
 {
+    DEBUGP(DL_INFO, "?? AvbPerformBasicInitialization: Starting for VID=0x%04X DID=0x%04X\n", 
+           Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+    
     if (!Ctx) return STATUS_INVALID_PARAMETER;
-    if (Ctx->hw_access_enabled) return STATUS_SUCCESS;
+    
+    if (Ctx->hw_access_enabled) {
+        DEBUGP(DL_INFO, "? AvbPerformBasicInitialization: Already initialized, returning success\n");
+        return STATUS_SUCCESS;
+    }
 
     /* Step 1: Discover & map BAR0 if not yet mapped */
     if (Ctx->hardware_context == NULL) {
+        DEBUGP(DL_INFO, "?? STEP 1: Starting BAR0 discovery and mapping...\n");
         PHYSICAL_ADDRESS bar0 = {0};
         ULONG barLen = 0;
         NTSTATUS ds = AvbDiscoverIntelControllerResources(Ctx->filter_instance, &bar0, &barLen);
         if (!NT_SUCCESS(ds)) {
-            DEBUGP(DL_ERROR, "BAR0 discovery failed 0x%08X (cannot map MMIO yet) VID=0x%04X DID=0x%04X\n", ds, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+            DEBUGP(DL_ERROR, "? STEP 1 FAILED: BAR0 discovery failed 0x%08X (cannot map MMIO yet) VID=0x%04X DID=0x%04X\n", 
+                   ds, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
             return ds; /* propagate */
         }
-        DEBUGP(DL_INFO, "BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
+        DEBUGP(DL_INFO, "? STEP 1a SUCCESS: BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
+        
         NTSTATUS ms = AvbMapIntelControllerMemory(Ctx, bar0, barLen);
         if (!NT_SUCCESS(ms)) {
-            DEBUGP(DL_ERROR, "BAR0 map failed 0x%08X (MmMapIoSpace)\n", ms);
+            DEBUGP(DL_ERROR, "? STEP 1b FAILED: BAR0 map failed 0x%08X (MmMapIoSpace)\n", ms);
             return ms;
         }
-        DEBUGP(DL_INFO, "MMIO mapped (opaque ctx=%p)\n", Ctx->hardware_context);
+        DEBUGP(DL_INFO, "? STEP 1b SUCCESS: MMIO mapped (opaque ctx=%p)\n", Ctx->hardware_context);
+    } else {
+        DEBUGP(DL_INFO, "? STEP 1 SKIPPED: Hardware context already exists (%p)\n", Ctx->hardware_context);
     }
 
+    DEBUGP(DL_INFO, "?? STEP 2: Setting up Intel device structure...\n");
     Ctx->intel_device.private_data = Ctx;
     Ctx->intel_device.capabilities = 0; /* reset published caps */
+    DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Device structure prepared\n");
 
-    DEBUGP(DL_INFO, "intel_init: VID=0x%04X DID=0x%04X\n", Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+    DEBUGP(DL_INFO, "?? STEP 3: Calling intel_init library function...\n");
+    DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X\n", Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
     if (intel_init(&Ctx->intel_device) != 0) {
-        DEBUGP(DL_ERROR, "intel_init failed (library)\n");
+        DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
         return STATUS_UNSUCCESSFUL;
     }
+    DEBUGP(DL_INFO, "? STEP 3 SUCCESS: intel_init completed successfully\n");
 
+    DEBUGP(DL_INFO, "?? STEP 4: MMIO sanity check - reading CTRL register...\n");
     ULONG ctrl = 0xFFFFFFFF;
     if (intel_read_reg(&Ctx->intel_device, I210_CTRL, &ctrl) != 0 || ctrl == 0xFFFFFFFF) {
-        DEBUGP(DL_ERROR, "MMIO sanity read failed CTRL=0x%08X (expected != 0xFFFFFFFF)\n", ctrl);
+        DEBUGP(DL_ERROR, "? STEP 4 FAILED: MMIO sanity read failed CTRL=0x%08X (expected != 0xFFFFFFFF)\n", ctrl);
+        DEBUGP(DL_ERROR, "   This indicates BAR0 mapping is not working properly\n");
         return STATUS_DEVICE_NOT_READY;
     }
+    DEBUGP(DL_INFO, "? STEP 4 SUCCESS: MMIO sanity check passed - CTRL=0x%08X\n", ctrl);
 
+    DEBUGP(DL_INFO, "?? STEP 5: Promoting hardware state to BAR_MAPPED...\n");
     Ctx->intel_device.capabilities |= INTEL_CAP_MMIO;
     if (Ctx->hw_state < AVB_HW_BAR_MAPPED) {
         Ctx->hw_state = AVB_HW_BAR_MAPPED;
-        DEBUGP(DL_INFO, "HW state -> %s (CTRL=0x%08X)\n", AvbHwStateName(Ctx->hw_state), ctrl);
+        DEBUGP(DL_INFO, "? STEP 5 SUCCESS: HW state -> %s (CTRL=0x%08X)\n", AvbHwStateName(Ctx->hw_state), ctrl);
     }
     Ctx->initialized = TRUE;
     Ctx->hw_access_enabled = TRUE;
+    
+    DEBUGP(DL_INFO, "?? AvbPerformBasicInitialization: COMPLETE SUCCESS\n");
+    DEBUGP(DL_INFO, "   - Final hw_state: %s\n", AvbHwStateName(Ctx->hw_state));
+    DEBUGP(DL_INFO, "   - Final capabilities: 0x%08X\n", Ctx->intel_device.capabilities);
+    DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", Ctx->hw_access_enabled ? "YES" : "NO");
+    
     return STATUS_SUCCESS;
 }
 
@@ -270,8 +296,50 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         }
         break;
     case IOCTL_AVB_GET_DEVICE_INFO:
-        if (outLen < sizeof(AVB_DEVICE_INFO_REQUEST)) status = STATUS_BUFFER_TOO_SMALL; else if (AvbContext->hw_state < AVB_HW_BAR_MAPPED) status = STATUS_DEVICE_NOT_READY; else {
-            PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; RtlZeroMemory(r->device_info, sizeof(r->device_info)); int rc=intel_get_device_info(&AvbContext->intel_device, r->device_info, sizeof(r->device_info)); size_t used=0; (void)RtlStringCbLengthA(r->device_info, sizeof(r->device_info), &used); r->buffer_size=(ULONG)used; r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; info=sizeof(*r); status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL; }
+        DEBUGP(DL_INFO, "?? IOCTL_AVB_GET_DEVICE_INFO: Starting device info request\n");
+        DEBUGP(DL_INFO, "   - Buffer size check: inLen=%lu, outLen=%lu, required=%lu\n", 
+               inLen, outLen, sizeof(AVB_DEVICE_INFO_REQUEST));
+        DEBUGP(DL_INFO, "   - Hardware state: %s (%d)\n", AvbHwStateName(AvbContext->hw_state), AvbContext->hw_state);
+        DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", AvbContext->hw_access_enabled ? "YES" : "NO");
+        DEBUGP(DL_INFO, "   - Hardware context: %p\n", AvbContext->hardware_context);
+        
+        if (outLen < sizeof(AVB_DEVICE_INFO_REQUEST)) { 
+            DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Buffer too small\n");
+            status = STATUS_BUFFER_TOO_SMALL; 
+        } else if (AvbContext->hw_state < AVB_HW_BAR_MAPPED) { 
+            DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Hardware not ready - hw_state=%s, need=%s\n", 
+                   AvbHwStateName(AvbContext->hw_state), AvbHwStateName(AVB_HW_BAR_MAPPED));
+            DEBUGP(DL_ERROR, "   Possible causes:\n");
+            DEBUGP(DL_ERROR, "   - BAR0 discovery failed during initialization\n");
+            DEBUGP(DL_ERROR, "   - MmMapIoSpace failed\n");
+            DEBUGP(DL_ERROR, "   - intel_init failed\n");
+            DEBUGP(DL_ERROR, "   - MMIO sanity check failed\n");
+            status = STATUS_DEVICE_NOT_READY; 
+        } else {
+            DEBUGP(DL_INFO, "? DEVICE_INFO: Hardware state validation passed\n");
+            
+            PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; 
+            RtlZeroMemory(r->device_info, sizeof(r->device_info)); 
+            
+            DEBUGP(DL_INFO, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
+            int rc = intel_get_device_info(&AvbContext->intel_device, r->device_info, sizeof(r->device_info)); 
+            DEBUGP(DL_INFO, "?? DEVICE_INFO: intel_get_device_info returned %d\n", rc);
+            
+            if (rc == 0) {
+                DEBUGP(DL_INFO, "? DEVICE_INFO: Device info string: %s\n", r->device_info);
+            } else {
+                DEBUGP(DL_ERROR, "? DEVICE_INFO: intel_get_device_info failed with code %d\n", rc);
+            }
+            
+            size_t used = 0; 
+            (void)RtlStringCbLengthA(r->device_info, sizeof(r->device_info), &used); 
+            r->buffer_size = (ULONG)used; 
+            r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
+            info = sizeof(*r); 
+            status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL; 
+            
+            DEBUGP(DL_INFO, "?? DEVICE_INFO COMPLETE: status=0x%08X, buffer_size=%lu\n", status, r->buffer_size);
+        }
         break;
     case IOCTL_AVB_READ_REGISTER:
     case IOCTL_AVB_WRITE_REGISTER:
