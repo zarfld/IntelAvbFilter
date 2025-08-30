@@ -219,7 +219,40 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         if (outLen < sizeof(AVB_ENUM_REQUEST)) { status = STATUS_BUFFER_TOO_SMALL; break; }
         else {
             PAVB_ENUM_REQUEST r = (PAVB_ENUM_REQUEST)buf; RtlZeroMemory(r, sizeof(*r));
-            r->count=1; r->index=0; r->vendor_id=(USHORT)AvbContext->intel_device.pci_vendor_id; r->device_id=(USHORT)AvbContext->intel_device.pci_device_id; r->capabilities=AvbContext->intel_device.capabilities; r->status=NDIS_STATUS_SUCCESS; info=sizeof(*r);
+            
+            // Set capabilities based on device type
+            ULONG caps = 0;
+            switch (AvbContext->intel_device.device_type) {
+                case INTEL_DEVICE_I210:
+                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
+                    break;
+                case INTEL_DEVICE_I217:
+                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
+                    break;
+                case INTEL_DEVICE_I219:
+                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
+                    break;
+                case INTEL_DEVICE_I225:
+                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO;
+                    break;
+                case INTEL_DEVICE_I226:
+                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
+                    break;
+                default:
+                    caps = INTEL_CAP_MMIO; // Basic MMIO for unknown devices
+                    break;
+            }
+            
+            AvbContext->intel_device.capabilities = caps;
+            
+            r->count=1; r->index=0; 
+            r->vendor_id=(USHORT)AvbContext->intel_device.pci_vendor_id; 
+            r->device_id=(USHORT)AvbContext->intel_device.pci_device_id; 
+            r->capabilities=caps; 
+            r->status=NDIS_STATUS_SUCCESS; 
+            info=sizeof(*r);
         }
         break;
     case IOCTL_AVB_GET_DEVICE_INFO:
@@ -262,6 +295,36 @@ ULONG intel_get_capabilities(device_t *dev)
 {
     if (dev == NULL) {
         return 0;
+    }
+    
+    // If capabilities are already set, return them
+    if (dev->capabilities != 0) {
+        return dev->capabilities;
+    }
+    
+    // Set capabilities based on device type if not already set
+    switch (dev->device_type) {
+        case INTEL_DEVICE_I210:
+            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
+            break;
+        case INTEL_DEVICE_I217:
+            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
+            break;
+        case INTEL_DEVICE_I219:
+            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
+            break;
+        case INTEL_DEVICE_I225:
+            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO;
+            break;
+        case INTEL_DEVICE_I226:
+            dev->capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
+            break;
+        case INTEL_DEVICE_UNKNOWN:
+        default:
+            dev->capabilities = INTEL_CAP_MMIO; // Basic MMIO for unknown devices
+            break;
     }
     
     return dev->capabilities;
