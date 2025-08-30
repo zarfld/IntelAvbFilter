@@ -6,7 +6,7 @@
 -- Hardware-first policy: No Fake, No Stubs, no Simulations in production paths
 -- Optional DEV_SIMULATION feature flag may be used for developer-only fallback paths (must be guarded by AVB_DEV_SIMULATION)
 -- no implementation based assumtions, use specification or analysis results (ask if required)
--- no assumtions and no false advertising, investigate, prove and ensure correctness
+-- no assumtions and no false advertising, investigate, prove and ensure correctness (e.g. if you assume that a function, struct or whatever is missing: check code first, and see if it is really missing before adding a new function/struct - that would prevent redundand implementation and compile errors due to that)
 -- always use real hardware access patterns
 -- use Intel hardware specifications for register access (SSOT headers + datasheets)
 -- code needs to compile before commit, no broken code
