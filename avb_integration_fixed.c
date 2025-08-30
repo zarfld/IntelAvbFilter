@@ -71,7 +71,7 @@ NTSTATUS AvbCreateMinimalContext(
 
 /**
  * @brief Attempt full HW bring-up (intel_init + MMIO sanity + optional PTP for i210).
- *        Failure is non-fatal; enumeration remains with zero capabilities.
+ *        Failure is non-fatal; enumeration remains with baseline capabilities.
  */
 NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
 {
@@ -104,14 +104,19 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     
     // Set baseline capabilities even if hardware init fails
     Ctx->intel_device.capabilities = baseline_caps;
+    DEBUGP(DL_INFO, "?? AvbBringUpHardware: Set baseline capabilities 0x%08X for device type %d\n", 
+           baseline_caps, Ctx->intel_device.device_type);
     
     NTSTATUS status = AvbPerformBasicInitialization(Ctx);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_WARN, "AvbBringUpHardware: basic init failed 0x%08X (capabilities=0x%08X)\n", status, baseline_caps);
+        DEBUGP(DL_WARN, "?? AvbBringUpHardware: basic init failed 0x%08X (keeping baseline capabilities=0x%08X)\n", 
+               status, baseline_caps);
         // Don't return error - allow enumeration with baseline capabilities
         return STATUS_SUCCESS;
     }
+    
     if (Ctx->intel_device.device_type == INTEL_DEVICE_I210 && Ctx->hw_state >= AVB_HW_BAR_MAPPED) {
+        DEBUGP(DL_INFO, "?? Starting I210 PTP initialization...\n");
         AvbI210EnsureSystimRunning(Ctx);
     }
     return STATUS_SUCCESS;
@@ -248,41 +253,20 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     case IOCTL_AVB_ENUM_ADAPTERS:
         if (outLen < sizeof(AVB_ENUM_REQUEST)) { status = STATUS_BUFFER_TOO_SMALL; break; }
         else {
-            PAVB_ENUM_REQUEST r = (PAVB_ENUM_REQUEST)buf; RtlZeroMemory(r, sizeof(*r));
+            PAVB_ENUM_REQUEST r = (PAVB_ENUM_REQUEST)buf; 
+            RtlZeroMemory(r, sizeof(*r));
             
-            // Set capabilities based on device type
-            ULONG caps = 0;
-            switch (AvbContext->intel_device.device_type) {
-                case INTEL_DEVICE_I210:
-                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
-                    break;
-                case INTEL_DEVICE_I217:
-                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
-                    break;
-                case INTEL_DEVICE_I219:
-                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
-                    break;
-                case INTEL_DEVICE_I225:
-                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
-                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO;
-                    break;
-                case INTEL_DEVICE_I226:
-                    caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
-                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
-                    break;
-                default:
-                    caps = INTEL_CAP_MMIO; // Basic MMIO for unknown devices
-                    break;
-            }
-            
-            AvbContext->intel_device.capabilities = caps;
-            
-            r->count=1; r->index=0; 
+            // Use capabilities already set by AvbBringUpHardware
+            r->count=1; 
+            r->index=0; 
             r->vendor_id=(USHORT)AvbContext->intel_device.pci_vendor_id; 
             r->device_id=(USHORT)AvbContext->intel_device.pci_device_id; 
-            r->capabilities=caps; 
+            r->capabilities=AvbContext->intel_device.capabilities; 
             r->status=NDIS_STATUS_SUCCESS; 
             info=sizeof(*r);
+            
+            DEBUGP(DL_INFO, "? ENUM_ADAPTERS: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
+                   r->vendor_id, r->device_id, r->capabilities);
         }
         break;
     case IOCTL_AVB_GET_DEVICE_INFO:
