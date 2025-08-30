@@ -2,10 +2,11 @@
 
 ## Working principles
 -- ensure you understand the architecture and patterns before coding
+-- avvoid redundandcy, reuse existing functions and patterns (check existing code first)
 -- Hardware-first policy: No Fake, No Stubs, no Simulations in production paths
 -- Optional DEV_SIMULATION feature flag may be used for developer-only fallback paths (must be guarded by AVB_DEV_SIMULATION)
 -- no implementation based assumtions, use specification or analysis results (ask if required)
--- no false advertising, prove and ensure correctness
+-- no assumtions and no false advertising, investigate, prove and ensure correctness
 -- always use real hardware access patterns
 -- use Intel hardware specifications for register access (SSOT headers + datasheets)
 -- code needs to compile before commit, no broken code

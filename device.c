@@ -8,7 +8,6 @@
 
 #pragma NDIS_INIT_FUNCTION(IntelAvbFilterRegisterDevice)
 
-
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NDIS_STATUS
 IntelAvbFilterRegisterDevice(
@@ -249,6 +248,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SETUP_PTM:
         case IOCTL_AVB_MDIO_READ:
         case IOCTL_AVB_MDIO_WRITE:
+        case IOCTL_AVB_ENUM_ADAPTERS:
         {
             DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: AVB IOCTL=0x%x\n", 
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
@@ -259,29 +259,47 @@ IntelAvbFilterDeviceIoControl(
             // If not found, iterate all filter instances and lazily initialize until one succeeds
             if (pFilter == NULL)
             {
+                DEBUGP(DL_INFO, "No initialized Intel filter found, attempting lazy initialization\n");
+                
                 FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
                 Link = FilterModuleList.Flink;
-                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
-
+                
                 while (Link != &FilterModuleList)
                 {
                     PMS_FILTER cand = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
-                    // Attempt lazy initialization if needed
+                    Link = Link->Flink; // Move to next before releasing lock
+                    
+                    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                    
+                    // Check if this filter might be an Intel adapter
                     if (cand->AvbContext == NULL)
                     {
-                        NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
-                        UNREFERENCED_PARAMETER(initSt); // avoid C4189 when warnings-as-errors on other machines
-                        DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: Lazy init on %p status=0x%x\n", cand, initSt);
+                        USHORT ven = 0, dev = 0;
+                        if (AvbIsSupportedIntelController(cand, &ven, &dev))
+                        {
+                            DEBUGP(DL_INFO, "Found uninitialized Intel adapter %wZ, initializing AVB context\n",
+                                   &cand->MiniportFriendlyName);
+                            
+                            NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                            if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
+                            {
+                                DEBUGP(DL_INFO, "Successfully initialized AVB context for %wZ\n", 
+                                       &cand->MiniportFriendlyName);
+                                pFilter = cand;
+                                break;
+                            }
+                            else
+                            {
+                                DEBUGP(DL_WARN, "Failed to initialize AVB context for %wZ: 0x%x\n", 
+                                       &cand->MiniportFriendlyName, initSt);
+                            }
+                        }
                     }
-                    if (cand->AvbContext != NULL)
-                    {
-                        pFilter = cand;
-                        break;
-                    }
+                    
                     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
-                    Link = Link->Flink;
-                    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
                 }
+                
+                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
             }
 
             if (pFilter != NULL && pFilter->AvbContext != NULL) {
@@ -348,6 +366,184 @@ filterFindFilterModule(
    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
    return NULL;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
