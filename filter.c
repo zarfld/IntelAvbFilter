@@ -489,13 +489,15 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             {
                 PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
                 if (avbCtx) {
-                    avbCtx->hw_state = AVB_HW_BOUND; /* initial bound state */
+                    // Don't override the state - let the initialization set it correctly
                     DEBUGP(DL_WARN, "*** AVB CONTEXT INITIALIZED SUCCESSFULLY *** %wZ HW_STATE=%s IfIndex=%u Context=%p\n", 
                            &pFilter->MiniportFriendlyName, AvbHwStateName(avbCtx->hw_state), pFilter->MiniportIfIndex, avbCtx);
                 } else {
                     DEBUGP(DL_WARN, "*** AVB CONTEXT IS NULL *** after successful init for %wZ\n", 
                            &pFilter->MiniportFriendlyName);
                 }
+                DEBUGP(DL_INFO, "FilterAttach: AVB context initialized successfully for Intel NIC 0x%04x:0x%04x (%wZ)\n", 
+                       ven, dev, &pFilter->MiniportFriendlyName);
             }
         }
 
