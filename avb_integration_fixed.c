@@ -466,4 +466,63 @@ ULONG intel_get_capabilities(device_t *dev)
     return dev->capabilities;
 }
 
-PMS_FILTER AvbFindIntelFilterModule(VOID){ if (g_AvbContext && g_AvbContext->filter_instance) return g_AvbContext->filter_instance; PMS_FILTER f=NULL; PLIST_ENTRY l; BOOLEAN bFalse=FALSE; FILTER_ACQUIRE_LOCK(&FilterListLock,bFalse); l=FilterModuleList.Flink; while(l!=&FilterModuleList){ f=CONTAINING_RECORD(l,MS_FILTER,FilterModuleLink); if (f && f->AvbContext){ FILTER_RELEASE_LOCK(&FilterListLock,bFalse); return f;} l=l->Flink; } FILTER_RELEASE_LOCK(&FilterListLock,bFalse); return NULL; }
+PMS_FILTER AvbFindIntelFilterModule(VOID)
+{ 
+    if (g_AvbContext && g_AvbContext->filter_instance) {
+        // Verify this is actually a supported Intel device
+        if (g_AvbContext->intel_device.pci_vendor_id == INTEL_VENDOR_ID &&
+            g_AvbContext->intel_device.pci_device_id != 0) {
+            DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Using global context VID=0x%04X DID=0x%04X\n",
+                   g_AvbContext->intel_device.pci_vendor_id, g_AvbContext->intel_device.pci_device_id);
+            return g_AvbContext->filter_instance;
+        }
+    }
+    
+    PMS_FILTER bestFilter = NULL;
+    PAVB_DEVICE_CONTEXT bestContext = NULL;
+    PLIST_ENTRY l; 
+    BOOLEAN bFalse = FALSE; 
+    
+    DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Searching filter list for best Intel adapter...\n");
+    
+    FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse); 
+    l = FilterModuleList.Flink; 
+    
+    while (l != &FilterModuleList) { 
+        PMS_FILTER f = CONTAINING_RECORD(l, MS_FILTER, FilterModuleLink); 
+        l = l->Flink; // Move to next before potentially releasing lock
+        
+        if (f && f->AvbContext) { 
+            PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)f->AvbContext;
+            
+            DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Checking filter %wZ - VID=0x%04X DID=0x%04X state=%s\n",
+                   &f->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
+                   ctx->intel_device.pci_device_id, AvbHwStateName(ctx->hw_state));
+            
+            // Look for properly initialized Intel contexts
+            if (ctx->intel_device.pci_vendor_id == INTEL_VENDOR_ID && 
+                ctx->intel_device.pci_device_id != 0) {
+                
+                // Prefer contexts with better hardware state
+                if (bestContext == NULL || ctx->hw_state > bestContext->hw_state) {
+                    bestFilter = f;
+                    bestContext = ctx;
+                    DEBUGP(DL_INFO, "AvbFindIntelFilterModule: New best candidate: %wZ (state=%s)\n",
+                           &f->MiniportFriendlyName, AvbHwStateName(ctx->hw_state));
+                }
+            }
+        } 
+    } 
+    
+    FILTER_RELEASE_LOCK(&FilterListLock, bFalse); 
+    
+    if (bestFilter && bestContext) {
+        DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Selected best Intel filter: %wZ (VID=0x%04X DID=0x%04X state=%s)\n",
+               &bestFilter->MiniportFriendlyName, bestContext->intel_device.pci_vendor_id,
+               bestContext->intel_device.pci_device_id, AvbHwStateName(bestContext->hw_state));
+        return bestFilter;
+    }
+    
+    DEBUGP(DL_WARN, "AvbFindIntelFilterModule: No Intel filter found with valid context\n");
+    return NULL; 
+}

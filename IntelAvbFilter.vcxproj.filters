@@ -143,9 +143,6 @@
     <ClCompile Include="tools\avb_test\avb_diagnostic_test.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="tools\avb_test\avb_hw_state_test.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="filter.rc">
