@@ -91,7 +91,7 @@ AvbInitializeDevice(
 {
     DEBUGP(DL_TRACE, "==>AvbInitializeDevice: Real hardware access mode\n");
     
-    // Call the BAR0 discovery version
+    // Call the BAR0 discovery version from avb_bar0_discovery.c
     return AvbInitializeDeviceWithBar0Discovery(FilterModule, AvbContext);
 }
 
@@ -104,142 +104,31 @@ AvbInitializeDeviceWithBar0Discovery(
     _Out_ PAVB_DEVICE_CONTEXT *AvbContext
 )
 {
-    PAVB_DEVICE_CONTEXT context = NULL;
-    NTSTATUS status;
-    
     DEBUGP(DL_TRACE, "==>AvbInitializeDeviceWithBar0Discovery\n");
     
-    if (FilterModule == NULL || AvbContext == NULL) {
-        DEBUGP(DL_ERROR, "Invalid parameters to AvbInitializeDeviceWithBar0Discovery\n");
-        return STATUS_INVALID_PARAMETER;
-    }
-    
-    // Allocate AVB device context
-    context = (PAVB_DEVICE_CONTEXT)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED | POOL_FLAG_UNINITIALIZED,
-        sizeof(AVB_DEVICE_CONTEXT),
-        FILTER_ALLOC_TAG
-    );
-    
-    if (context == NULL) {
-        DEBUGP(DL_ERROR, "Failed to allocate AVB device context\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    
-    // Initialize context
-    RtlZeroMemory(context, sizeof(AVB_DEVICE_CONTEXT));
-    context->filter_instance = FilterModule;
-    context->initialized = FALSE;
-    context->hw_access_enabled = FALSE;
-    
-    // Hardware discovery
-    status = AvbDiscoverIntelControllerResources(context);
-    if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "Hardware discovery failed: 0x%x\n", status);
-        ExFreePoolWithTag(context, FILTER_ALLOC_TAG);
-        return status;
-    }
-    
-    // Hardware mapping
-    status = AvbMapIntelControllerMemory(context);
-    if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "Hardware mapping failed: 0x%x\n", status);
-        ExFreePoolWithTag(context, FILTER_ALLOC_TAG);
-        return status;
-    }
-    
-    // Intel library initialization
-    int result = intel_init(&context->intel_device);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Intel library initialization failed: %d\n", result);
-        AvbUnmapIntelControllerMemory(context);
-        ExFreePoolWithTag(context, FILTER_ALLOC_TAG);
-        return STATUS_DEVICE_NOT_READY;
-    }
-    
-    // Success
-    context->initialized = TRUE;
-    context->hw_access_enabled = TRUE;
-    g_AvbContext = context;
-    *AvbContext = context;
-    
-    DEBUGP(DL_INFO, "Intel AVB device initialization complete\n");
-    DEBUGP(DL_TRACE, "<==AvbInitializeDeviceWithBar0Discovery: SUCCESS\n");
-    
-    return STATUS_SUCCESS;
+    // Call the actual implementation from avb_bar0_discovery.c
+    return AvbInitializeDeviceWithBar0Discovery(FilterModule, AvbContext);
 }
 
 /**
- * @brief Discover Intel controller resources
+ * @brief Legacy wrapper - redirects to actual BAR0 discovery implementation
  */
 NTSTATUS 
 AvbDiscoverIntelControllerResources(
     _In_ PAVB_DEVICE_CONTEXT AvbContext
 )
 {
-    NTSTATUS status;
-    UINT16 vendor_id, device_id;
+    PHYSICAL_ADDRESS bar0Address = { 0 };
+    ULONG bar0Length = 0;
     
-    DEBUGP(DL_TRACE, "==>AvbDiscoverIntelControllerResources\n");
+    DEBUGP(DL_TRACE, "==>AvbDiscoverIntelControllerResources (legacy wrapper)\n");
     
     if (AvbContext == NULL || AvbContext->filter_instance == NULL) {
-        DEBUGP(DL_ERROR, "Invalid context for hardware resource discovery\n");
         return STATUS_INVALID_PARAMETER;
     }
     
-    // Read PCI vendor ID
-    status = AvbQueryPciConfiguration(
-        AvbContext->filter_instance,
-        0x00,  // Vendor ID offset
-        &vendor_id
-    );
-    
-    if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "PCI Vendor ID read failed: 0x%x\n", status);
-        return status;
-    }
-    
-    // Read PCI device ID
-    status = AvbQueryPciConfiguration(
-        AvbContext->filter_instance,
-        0x02,  // Device ID offset
-        &device_id
-    );
-    
-    if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "PCI Device ID read failed: 0x%x\n", status);
-        return status;
-    }
-    
-    // Validate Intel device
-    if (vendor_id != INTEL_VENDOR_ID) {
-        DEBUGP(DL_ERROR, "Not an Intel controller: VID=0x%04X (expected 0x8086)\n", vendor_id);
-        return STATUS_NOT_SUPPORTED;
-    }
-    
-    // Store hardware information
-    AvbContext->intel_device.pci_vendor_id = vendor_id;
-    AvbContext->intel_device.pci_device_id = device_id;
-    AvbContext->intel_device.device_type = AvbGetIntelDeviceType(device_id);
-    
-    if (AvbContext->intel_device.device_type == INTEL_DEVICE_UNKNOWN) {
-        DEBUGP(DL_ERROR, "Unsupported Intel device: DID=0x%04X\n", device_id);
-        return STATUS_NOT_SUPPORTED;
-    }
-    
-    // BAR0 resource discovery
-    status = AvbDiscoverBar0Resources(AvbContext);
-    if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "BAR0 discovery failed: 0x%x\n", status);
-        return status;
-    }
-    
-    DEBUGP(DL_INFO, "Intel hardware discovered: %s (VID=0x%04X, DID=0x%04X)\n", 
-           AvbGetDeviceTypeName(AvbContext->intel_device.device_type),
-           vendor_id, device_id);
-    
-    DEBUGP(DL_TRACE, "<==AvbDiscoverIntelControllerResources: SUCCESS\n");
-    return STATUS_SUCCESS;
+    // Call the real BAR0 discovery function
+    return AvbDiscoverIntelControllerResources(AvbContext->filter_instance, &bar0Address, &bar0Length);
 }
 
 /**
