@@ -311,8 +311,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         }
         break;
     case IOCTL_AVB_ENUM_ADAPTERS:
-        if (outLen < sizeof(AVB_ENUM_REQUEST)) { status = STATUS_BUFFER_TOO_SMALL; break; }
-        else {
+        if (outLen < sizeof(AVB_ENUM_REQUEST)) { 
+            status = STATUS_BUFFER_TOO_SMALL; 
+        } else {
             PAVB_ENUM_REQUEST r = (PAVB_ENUM_REQUEST)buf; 
             RtlZeroMemory(r, sizeof(*r));
             
@@ -375,7 +376,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 // Return count and first adapter info (for compatibility)
                 r->count = adapterCount;
                 if (adapterCount > 0) {
-                    // Use current context info or first found adapter
+                    // Use current context info
                     r->vendor_id = (USHORT)AvbContext->intel_device.pci_vendor_id;
                     r->device_id = (USHORT)AvbContext->intel_device.pci_device_id;
                     r->capabilities = AvbContext->intel_device.capabilities;
