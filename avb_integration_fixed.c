@@ -354,6 +354,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", AvbContext->hw_access_enabled ? "YES" : "NO");
         DEBUGP(DL_INFO, "   - Initialized flag: %s\n", AvbContext->initialized ? "YES" : "NO");
         DEBUGP(DL_INFO, "   - Hardware context: %p\n", AvbContext->hardware_context);
+        DEBUGP(DL_INFO, "   - Device type: %d (%s)\n", AvbContext->intel_device.device_type,
+               AvbContext->intel_device.device_type == INTEL_DEVICE_I210 ? "I210" :
+               AvbContext->intel_device.device_type == INTEL_DEVICE_I226 ? "I226" : "OTHER");
         
         // Force immediate BAR0 discovery if hardware context is missing
         if (AvbContext->hardware_context == NULL && AvbContext->hw_state == AVB_HW_BOUND) {
@@ -395,6 +398,14 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         }
         
         status = AvbBringUpHardware(AvbContext);
+        
+        // CRITICAL: Force I210 PTP initialization if this is an I210
+        if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210 && 
+            AvbContext->hw_state >= AVB_HW_BAR_MAPPED) {
+            DEBUGP(DL_INFO, "?? INIT_DEVICE: Forcing I210 PTP initialization...\n");
+            AvbI210EnsureSystimRunning(AvbContext);
+            DEBUGP(DL_INFO, "?? INIT_DEVICE: I210 PTP?????\n");
+        }
         
         DEBUGP(DL_INFO, "?? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
         DEBUGP(DL_INFO, "   - Final hw_state: %s (%d)\n", AvbHwStateName(AvbContext->hw_state), AvbContext->hw_state);
