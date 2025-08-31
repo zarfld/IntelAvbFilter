@@ -1,5 +1,6 @@
 {
     "files.associations": {
         "errno.h": "c"
-    }
+    },
+    "cmake.ignoreCMakeListsMissing": true
 }
