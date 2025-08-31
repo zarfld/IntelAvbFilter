@@ -326,6 +326,7 @@ int AvbMdioWriteI219Direct(
  * Helper / discovery utilities
  *=======================================================================*/
 PMS_FILTER AvbFindIntelFilterModule(VOID);
+
 BOOLEAN AvbIsIntelDevice(
     _In_ USHORT vendor_id,
     _In_ USHORT device_id

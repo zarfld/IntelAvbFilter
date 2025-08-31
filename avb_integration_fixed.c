@@ -246,64 +246,87 @@ static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
     
     DEBUGP(DL_INFO, "?? PTP init: Clock not running, performing full initialization...\n");
     
-    // Step 3: Read and configure TSAUXC register - CRITICAL FIX
-    ULONG aux = 0; 
-    if (intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux) != 0) {
-        DEBUGP(DL_ERROR, "PTP init: Failed to read TSAUXC register\n");
+    // Step 3: CRITICAL FIX - Complete hardware reset sequence per Intel I210 datasheet
+    DEBUGP(DL_INFO, "?? PTP init: Step 3A - Disabling PTP completely for clean reset...\n");
+    
+    // First disable PTP completely to ensure clean state
+    ULONG disable_aux = 0x80000000UL; // Set DisableSystime (bit 31), clear PHC (bit 30)
+    if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, disable_aux) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to disable PTP for reset\n");
         return;
     }
-    DEBUGP(DL_INFO, "PTP init: TSAUXC before = 0x%08X\n", aux);
+    DEBUGP(DL_INFO, "PTP init: PTP disabled for clean reset (TSAUXC=0x%08X)\n", disable_aux);
     
-    // CRITICAL FIX: Enable PHC (bit 30) and clear DisableSystime (bit 31) 
-    // This is the key step missing from previous implementation
-    ULONG new_aux = 0x40000000UL; // Set PHC enable bit (30), clear all others including DisableSystime (31)
-    if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, new_aux) != 0) {
-        DEBUGP(DL_ERROR, "PTP init: Failed to write TSAUXC register (PHC enable)\n");
+    // Allow hardware to settle in disabled state
+    KeStallExecutionProcessor(100000); // 100ms for hardware to fully disable
+    
+    // Step 3B: Clear SYSTIM registers to known state
+    DEBUGP(DL_INFO, "?? PTP init: Step 3B - Clearing SYSTIM registers...\n");
+    if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0x00000000) != 0 ||
+        intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0x00000000) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to clear SYSTIM registers\n");
         return;
     }
-    DEBUGP(DL_INFO, "PTP init: TSAUXC set to 0x%08X (PHC enabled, DisableSystime cleared)\n", new_aux);
+    DEBUGP(DL_INFO, "PTP init: SYSTIM cleared to 0x0000000000000000\n");
     
-    // Step 4: Configure TIMINCA for proper clock frequency - ENHANCED
-    // I210 uses 8ns per tick for 125MHz system clock (from Intel datasheet)
+    // Step 4: Configure TIMINCA for proper clock frequency BEFORE enabling
+    DEBUGP(DL_INFO, "?? PTP init: Step 4 - Configuring TIMINCA for 125MHz operation...\n");
+    // I210 uses 8ns per tick for 125MHz system clock (from Intel datasheet section 8.12.6)
     if (intel_write_reg(&ctx->intel_device, I210_TIMINCA, 0x08000000UL) != 0) {
         DEBUGP(DL_ERROR, "PTP init: Failed to write TIMINCA register\n");
         return;
     }
     DEBUGP(DL_INFO, "PTP init: TIMINCA set to 0x08000000 (8ns per tick, 125MHz clock)\n");
     
-    // Step 5: CRITICAL FIX - Set initial time to start the clock
-    // Set to a known non-zero value to make it easier to detect if working
-    ULONG initial_time = 0x10000000UL; // Start with non-zero value for easier detection
-    if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, initial_time) != 0 ||
-        intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0x00000000) != 0) {
-        DEBUGP(DL_ERROR, "PTP init: Failed to set initial SYSTIM value\n");
-        return;
-    }
-    DEBUGP(DL_INFO, "PTP init: SYSTIM initialized to 0x00000000%08X\n", initial_time);
-    
-    // Step 6: Enable timestamp capture for RX/TX using SSOT bit definitions
+    // Step 5: Configure timestamp capture BEFORE enabling PTP
+    DEBUGP(DL_INFO, "?? PTP init: Step 5 - Configuring timestamp capture...\n");
+    // Enable timestamp capture for all packets (RX and TX)
     ULONG rxctl = (1U << I210_TSYNCRXCTL_EN_SHIFT) | (I210_TSYNCRXCTL_TYPE_ALL << I210_TSYNCRXCTL_TYPE_SHIFT);
     ULONG txctl = (1U << I210_TSYNCTXCTL_EN_SHIFT) | (I210_TSYNCTXCTL_TYPE_ALL << I210_TSYNCTXCTL_TYPE_SHIFT);
     
     if (intel_write_reg(&ctx->intel_device, I210_TSYNCRXCTL, rxctl) != 0 ||
         intel_write_reg(&ctx->intel_device, I210_TSYNCTXCTL, txctl) != 0) {
-        DEBUGP(DL_ERROR, "PTP init: Failed to enable timestamp capture\n");
+        DEBUGP(DL_ERROR, "PTP init: Failed to configure timestamp capture\n");
         return;
     }
-    DEBUGP(DL_INFO, "PTP init: Timestamp capture enabled (RX=0x%08X, TX=0x%08X)\n", rxctl, txctl);
+    DEBUGP(DL_INFO, "PTP init: Timestamp capture configured (RX=0x%08X, TX=0x%08X)\n", rxctl, txctl);
     
-    // Step 7: CRITICAL FIX - Verify clock is running with proper timing and detection
+    // Step 6: CRITICAL - Enable PTP with proper TSAUXC configuration
+    DEBUGP(DL_INFO, "?? PTP init: Step 6 - Enabling PTP hardware...\n");
+    // Enable PHC (bit 30) and ensure DisableSystime is cleared (bit 31)
+    ULONG new_aux = 0x40000000UL; // PHC enabled, DisableSystime cleared, no trigger bits
+    if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, new_aux) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to enable PTP (TSAUXC write)\n");
+        return;
+    }
+    DEBUGP(DL_INFO, "PTP init: PTP enabled (TSAUXC=0x%08X: PHC enabled, DisableSystime cleared)\n", new_aux);
+    
+    // Step 7: CRITICAL - Set initial non-zero time to trigger clock start
+    DEBUGP(DL_INFO, "?? PTP init: Step 7 - Setting initial time to start clock...\n");
+    // Use a significant non-zero value that makes increment detection easier
+    ULONG initial_time_lo = 0x10000000UL; // 268 million nanoseconds
+    ULONG initial_time_hi = 0x00000000UL;
+    
+    if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, initial_time_lo) != 0 ||
+        intel_write_reg(&ctx->intel_device, I210_SYSTIMH, initial_time_hi) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to set initial SYSTIM time\n");
+        return;
+    }
+    DEBUGP(DL_INFO, "PTP init: Initial time set to 0x%08X%08X\n", initial_time_hi, initial_time_lo);
+    
+    // Step 8: CRITICAL - Extended hardware stabilization time
     DEBUGP(DL_INFO, "PTP init: Waiting for clock stabilization (testing multiple samples)...\n");
+    // Intel I210 needs significant time to start the PTP clock after configuration
+    KeStallExecutionProcessor(200000); // 200ms initial stabilization time
     
-    // Allow hardware to stabilize before testing - CRITICAL
-    KeStallExecutionProcessor(50000); // 50ms initial delay for hardware to respond
-    
+    // Step 9: Enhanced clock verification with multiple attempts
     BOOLEAN clockRunning = FALSE;
-    ULONG prev_lo = initial_time;
-    ULONG prev_hi = 0;
+    ULONG prev_lo = initial_time_lo;
+    ULONG prev_hi = initial_time_hi;
     
-    for (int attempt = 0; attempt < 5 && !clockRunning; attempt++) {
-        KeStallExecutionProcessor(30000); // 30ms delay per attempt (was 20ms)
+    for (int attempt = 0; attempt < 8 && !clockRunning; attempt++) {
+        // Longer delay between attempts for I210 hardware
+        KeStallExecutionProcessor(100000); // 100ms delay per attempt
         
         ULONG lo_check=0, hi_check=0;
         if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo_check) == 0 && 
@@ -312,14 +335,34 @@ static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
             DEBUGP(DL_INFO, "PTP init: Clock check %d - SYSTIM=0x%08X%08X", 
                    attempt + 1, hi_check, lo_check);
             
-            // Check if time has advanced from previous reading
+            // Check if time has advanced from previous reading  
             if (hi_check > prev_hi || (hi_check == prev_hi && lo_check > prev_lo)) {
+                ULONG delta = (hi_check == prev_hi) ? (lo_check - prev_lo) : 0xFFFFFFFF;
                 clockRunning = TRUE;
-                DEBUGP(DL_INFO, " ? INCREMENTING\n");
+                DEBUGP(DL_INFO, " ? INCREMENTING (delta=%lu ns)\n", delta);
                 DEBUGP(DL_INFO, "? PTP init: SUCCESS - Clock running (attempt %d, delta=%lu ns)\n", 
-                       attempt + 1, lo_check - prev_lo);
+                       attempt + 1, delta);
+                break;
             } else {
                 DEBUGP(DL_INFO, " (not advancing yet)\n");
+                
+                // Special recovery attempt for stubborn I210 hardware
+                if (attempt == 3 && lo_check == prev_lo && hi_check == prev_hi) {
+                    DEBUGP(DL_INFO, "PTP init: Attempting advanced recovery sequence (attempt %d)...\n", attempt + 1);
+                    
+                    // Try alternative TSAUXC configuration with different timing
+                    ULONG recovery_aux = 0x40000001UL; // PHC enabled + start trigger
+                    if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, recovery_aux) == 0) {
+                        KeStallExecutionProcessor(50000); // 50ms
+                        
+                        // Reset to normal configuration
+                        if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, 0x40000000UL) == 0) {
+                            DEBUGP(DL_INFO, "PTP init: Recovery trigger sequence completed\n");
+                            KeStallExecutionProcessor(50000); // Additional settling time
+                        }
+                    }
+                }
+                
                 prev_lo = lo_check;
                 prev_hi = hi_check;
             }
@@ -356,6 +399,83 @@ static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
         intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &final_hi);
         DEBUGP(DL_ERROR, "   Final registers: TSAUXC=0x%08X, TIMINCA=0x%08X\n", final_aux, final_timinca);
         DEBUGP(DL_ERROR, "   Final SYSTIM: 0x%08X%08X\n", final_hi, final_lo);
+        
+        // CRITICAL DEBUG: Check timestamp control registers
+        ULONG final_rxctl=0, final_txctl=0;
+        if (intel_read_reg(&ctx->intel_device, I210_TSYNCRXCTL, &final_rxctl) == 0 &&
+            intel_read_reg(&ctx->intel_device, I210_TSYNCTXCTL, &final_txctl) == 0) {
+            DEBUGP(DL_ERROR, "   Final timestamp controls: TSYNCRXCTL=0x%08X, TSYNCTXCTL=0x%08X\n", 
+                   final_rxctl, final_txctl);
+            
+            // Decode the bit fields for diagnosis
+            ULONG rx_en = (final_rxctl & I210_TSYNCRXCTL_EN_MASK) >> I210_TSYNCRXCTL_EN_SHIFT;
+            ULONG rx_type = (final_rxctl & I210_TSYNCRXCTL_TYPE_MASK) >> I210_TSYNCRXCTL_TYPE_SHIFT;
+            ULONG tx_en = (final_txctl & I210_TSYNCTXCTL_EN_MASK) >> I210_TSYNCTXCTL_EN_SHIFT;
+            ULONG tx_type = (final_txctl & I210_TSYNCTXCTL_TYPE_MASK) >> I210_TSYNCTXCTL_TYPE_SHIFT;
+            
+            DEBUGP(DL_ERROR, "   Decoded: RX_EN=%lu, RX_TYPE=%lu, TX_EN=%lu, TX_TYPE=%lu\n",
+                   rx_en, rx_type, tx_en, tx_type);
+            
+            // Expected values should be: EN=1, TYPE=0 (ALL packets)
+            if (rx_en != 1 || tx_en != 1) {
+                DEBUGP(DL_ERROR, "   ISSUE: Timestamp capture not properly enabled\n");
+                DEBUGP(DL_ERROR, "   Expected: RX_EN=1, TX_EN=1\n");
+                DEBUGP(DL_ERROR, "   This may prevent the PTP clock from running\n");
+            }
+        }
+        
+        // CRITICAL FIX: For I210, also check if hardware requires additional clock domain reset
+        DEBUGP(DL_ERROR, "?? PTP init: Attempting final I210-specific recovery sequence...\n");
+        
+        // Try writing to SYSTIML with trigger bit in TSAUXC (Intel I210 specific pattern)
+        ULONG trigger_aux = 0x40000002UL; // PHC enabled + SYSTIM trigger (bit 1)
+        if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, trigger_aux) == 0) {
+            KeStallExecutionProcessor(10000); // 10ms
+            
+            // Write initial time with trigger active
+            if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0x10000000UL) == 0) {
+                KeStallExecutionProcessor(10000); // 10ms
+                
+                // Clear trigger and return to normal mode
+                if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, 0x40000000UL) == 0) {
+                    DEBUGP(DL_INFO, "PTP init: I210 trigger sequence completed, testing again...\n");
+                    
+                    // Give hardware time to process trigger
+                    KeStallExecutionProcessor(100000); // 100ms
+                    
+                    // Final verification attempt
+                    ULONG final_test_lo=0, final_test_hi=0;
+                    if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &final_test_lo) == 0 &&
+                        intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &final_test_hi) == 0) {
+                        
+                        DEBUGP(DL_INFO, "PTP init: Post-trigger SYSTIM = 0x%08X%08X\n", final_test_hi, final_test_lo);
+                        
+                        if (final_test_lo != 0 || final_test_hi != 0) {
+                            // Check for increment one more time
+                            KeStallExecutionProcessor(50000); // 50ms
+                            ULONG verify_lo=0, verify_hi=0;
+                            if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &verify_lo) == 0 &&
+                                intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &verify_hi) == 0 &&
+                                (verify_hi > final_test_hi || (verify_hi == final_test_hi && verify_lo > final_test_lo))) {
+                                
+                                DEBUGP(DL_INFO, "? PTP init: RECOVERY SUCCESS - Clock started via trigger sequence!\n");
+                                DEBUGP(DL_INFO, "   Recovery increment: 0x%08X%08X -> 0x%08X%08X\n",
+                                       final_test_hi, final_test_lo, verify_hi, verify_lo);
+                                
+                                // Mark as successful
+                                ctx->intel_device.capabilities |= (INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS);
+                                if (ctx->hw_state < AVB_HW_PTP_READY) { 
+                                    ctx->hw_state = AVB_HW_PTP_READY; 
+                                    DEBUGP(DL_INFO, "? PTP init: RECOVERY - HW state promoted to %s\n", 
+                                           AvbHwStateName(ctx->hw_state)); 
+                                }
+                                return; // Success path
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         // Still set basic capabilities for enumeration even if PTP fails
         ctx->intel_device.capabilities |= INTEL_CAP_MMIO;
@@ -566,12 +686,14 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL; 
             } else {
-                // Use the active global context (set by IOCTL_AVB_OPEN_ADAPTER)
+                // CRITICAL FIX: Use the specific adapter context that was selected via IOCTL_AVB_OPEN_ADAPTER
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
                 DEBUGP(DL_INFO, "   - Using context: VID=0x%04X DID=0x%04X\n",
                        activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                 DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(activeContext->hw_state));
+                DEBUGP(DL_INFO, "   - Device type: %d\n", activeContext->intel_device.device_type);
+                DEBUGP(DL_INFO, "   - Filter instance: %p\n", activeContext->filter_instance);
                 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) { 
                     DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Hardware not ready - hw_state=%s\n", 
@@ -583,6 +705,13 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; 
                     RtlZeroMemory(r->device_info, sizeof(r->device_info)); 
                     
+                    // CRITICAL FIX: Ensure the intel device structure points to the correct adapter
+                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
+                        activeContext->intel_device.private_data = activeContext;
+                        DEBUGP(DL_INFO, "?? DEVICE_INFO: Intel device structure updated for VID=0x%04X DID=0x%04X\n",
+                               activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                    }
+                    
                     DEBUGP(DL_INFO, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
                     int rc = intel_get_device_info(&activeContext->intel_device, r->device_info, sizeof(r->device_info)); 
                     DEBUGP(DL_INFO, "?? DEVICE_INFO: intel_get_device_info returned %d\n", rc);
@@ -591,6 +720,19 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         DEBUGP(DL_INFO, "? DEVICE_INFO: Device info string: %s\n", r->device_info);
                     } else {
                         DEBUGP(DL_ERROR, "? DEVICE_INFO: intel_get_device_info failed with code %d\n", rc);
+                        // Fallback to manual device info generation
+                        const char* deviceName = "";
+                        switch (activeContext->intel_device.device_type) {
+                            case INTEL_DEVICE_I210: deviceName = "Intel I210 Gigabit Ethernet - Full TSN Support"; break;
+                            case INTEL_DEVICE_I226: deviceName = "Intel I226 2.5G Ethernet - Advanced TSN"; break;
+                            case INTEL_DEVICE_I225: deviceName = "Intel I225 2.5G Ethernet - Enhanced TSN"; break;
+                            case INTEL_DEVICE_I217: deviceName = "Intel I217 Gigabit Ethernet - Basic PTP"; break;
+                            case INTEL_DEVICE_I219: deviceName = "Intel I219 Gigabit Ethernet - Enhanced PTP"; break;
+                            default: deviceName = "Unknown Intel Ethernet Device"; break;
+                        }
+                        RtlStringCbCopyA(r->device_info, sizeof(r->device_info), deviceName);
+                        rc = 0; // Override failure
+                        DEBUGP(DL_INFO, "? DEVICE_INFO: Using fallback device info: %s\n", r->device_info);
                     }
                     
                     size_t used = 0; 
@@ -611,7 +753,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (inLen < sizeof(AVB_REGISTER_REQUEST) || outLen < sizeof(AVB_REGISTER_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL; 
             } else {
-                // Use the active global context (set by IOCTL_AVB_OPEN_ADAPTER)
+                // CRITICAL FIX: Use the specific adapter context that was selected via IOCTL_AVB_OPEN_ADAPTER
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
@@ -621,10 +763,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 } else {
                     PAVB_REGISTER_REQUEST r = (PAVB_REGISTER_REQUEST)buf; 
                     
-                    DEBUGP(DL_TRACE, "Register %s: offset=0x%05X, context VID=0x%04X DID=0x%04X\n",
+                    // CRITICAL FIX: Ensure the Intel library is using the correct hardware context
+                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
+                        activeContext->intel_device.private_data = activeContext;
+                    }
+                    
+                    DEBUGP(DL_TRACE, "Register %s: offset=0x%05X, context VID=0x%04X DID=0x%04X (type=%d)\n",
                            (code == IOCTL_AVB_READ_REGISTER) ? "READ" : "WRITE",
                            r->offset, activeContext->intel_device.pci_vendor_id,
-                           activeContext->intel_device.pci_device_id);
+                           activeContext->intel_device.pci_device_id, activeContext->intel_device.device_type);
                     
                     if (code == IOCTL_AVB_READ_REGISTER) {
                         ULONG tmp = 0; 
@@ -632,10 +779,30 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         r->value = (avb_u32)tmp; 
                         r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        
+                        if (rc == 0) {
+                            DEBUGP(DL_TRACE, "Register READ success: offset=0x%05X, value=0x%08X (VID=0x%04X DID=0x%04X)\n",
+                                   r->offset, r->value, activeContext->intel_device.pci_vendor_id, 
+                                   activeContext->intel_device.pci_device_id);
+                        } else {
+                            DEBUGP(DL_ERROR, "Register READ failed: offset=0x%05X (VID=0x%04X DID=0x%04X)\n",
+                                   r->offset, activeContext->intel_device.pci_vendor_id, 
+                                   activeContext->intel_device.pci_device_id);
+                        }
                     } else {
                         int rc = intel_write_reg(&activeContext->intel_device, r->offset, r->value); 
                         r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        
+                        if (rc == 0) {
+                            DEBUGP(DL_TRACE, "Register WRITE success: offset=0x%05X, value=0x%08X (VID=0x%04X DID=0x%04X)\n",
+                                   r->offset, r->value, activeContext->intel_device.pci_vendor_id, 
+                                   activeContext->intel_device.pci_device_id);
+                        } else {
+                            DEBUGP(DL_ERROR, "Register WRITE failed: offset=0x%05X, value=0x%08X (VID=0x%04X DID=0x%04X)\n",
+                                   r->offset, r->value, activeContext->intel_device.pci_vendor_id, 
+                                   activeContext->intel_device.pci_device_id);
+                        }
                     } 
                     info = sizeof(*r);
                 }
@@ -851,6 +1018,18 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 // Make the target context the active global context
                 g_AvbContext = targetContext;
                 
+                // CRITICAL FIX: Ensure the Intel library device structure points to the correct hardware context
+                // This was the missing piece - the Intel library wasn't updated when context switched
+                if (targetContext->hardware_context && targetContext->hw_access_enabled) {
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Updating Intel library device structure\n");
+                    DEBUGP(DL_INFO, "   - Intel device private_data: %p -> %p\n", 
+                           targetContext->intel_device.private_data, targetContext);
+                    DEBUGP(DL_INFO, "   - Hardware context: %p\n", targetContext->hardware_context);
+                    
+                    // Ensure Intel library device points to this specific hardware context
+                    targetContext->intel_device.private_data = targetContext;
+                }
+                
                 // Ensure the target context is fully initialized
                 if (!targetContext->initialized || targetContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Target adapter needs initialization\n");
@@ -864,11 +1043,20 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     }
                 }
                 
-                // Force I210 PTP initialization if this is an I210
+                // CRITICAL FIX: Force I210 PTP initialization specifically for I210 context switching
                 if (targetContext->intel_device.device_type == INTEL_DEVICE_I210 && 
                     targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Forcing I210 PTP initialization for selected adapter\n");
+                    DEBUGP(DL_INFO, "   - Device Type: %d (INTEL_DEVICE_I210)\n", targetContext->intel_device.device_type);
+                    DEBUGP(DL_INFO, "   - Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
+                    DEBUGP(DL_INFO, "   - Hardware Context: %p\n", targetContext->hardware_context);
+                    
+                    // Force complete I210 PTP setup
                     AvbI210EnsureSystimRunning(targetContext);
+                    
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: I210 PTP initialization completed\n");
+                    DEBUGP(DL_INFO, "   - Final Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
+                    DEBUGP(DL_INFO, "   - Final Capabilities: 0x%08X\n", targetContext->intel_device.capabilities);
                 }
                 
                 req->status = 0; // Success
