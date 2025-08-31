@@ -118,28 +118,73 @@ static void ptp_bringup(HANDLE h)
 {
     printf("PTP bring-up: enabling PHC & verifying movement\n");
     unsigned long tsa=0; if(!read_reg(h, REG_TSAUXC, &tsa)){ fprintf(stderr,"TSAUXC read fail\n"); return; }
-    unsigned long desired = (tsa | (1UL<<30)) & ~(1UL<<31); /* keep bit30=1, clear bit31 */
-    if(desired != tsa){ if(!reg_write_checked(h, REG_TSAUXC, desired, "TSAUXC(enable PHC)")) return; }
-    else printf("TSAUXC already 0x%08lX (PHC enabled)\n", tsa);
+    
+    // FIXED: Don't use trigger bits, just configure PHC properly
+    unsigned long desired = (tsa | (1UL<<30)) & ~(1UL<<31); /* enable PHC (bit30), clear DisableSystime (bit31) */
+    if(desired != tsa){ 
+        if(!reg_write_checked(h, REG_TSAUXC, desired, "TSAUXC(enable PHC)")) return; 
+    } else {
+        printf("TSAUXC already 0x%08lX (PHC enabled)\n", tsa);
+    }
 
-    /* Program initial time */
-    if(!reg_write_checked(h, REG_SYSTIML, 0x00000000, "SYSTIML(init)")) return;
-    if(!reg_write_checked(h, REG_SYSTIMH, 0x00000000, "SYSTIMH(init)")) return;
+    /* Set TIMINCA for proper 8ns increment (I210 standard) */
+    if(!reg_write_checked(h, REG_TIMINCA, 0x08000000UL, "TIMINCA(8ns)")) return;
 
+    /* Program initial time to non-zero value */
+    if(!reg_write_checked(h, REG_SYSTIML, 0x10000000UL, "SYSTIML(init)")) return;
+    if(!reg_write_checked(h, REG_SYSTIMH, 0x00000000UL, "SYSTIMH(init)")) return;
+
+    /* Enable timestamp capture using SSOT values */
+    unsigned long rx_en_val = (1U << I210_TSYNCRXCTL_EN_SHIFT) | (I210_TSYNCRXCTL_TYPE_ALL << I210_TSYNCRXCTL_TYPE_SHIFT);
+    unsigned long tx_en_val = (1U << I210_TSYNCTXCTL_EN_SHIFT) | (I210_TSYNCTXCTL_TYPE_ALL << I210_TSYNCTXCTL_TYPE_SHIFT);
+    
+    if(!reg_write_checked(h, REG_TSYNCRXCTL, rx_en_val, "TSYNCRXCTL(EN)")) return;
+    if(!reg_write_checked(h, REG_TSYNCTXCTL, tx_en_val, "TSYNCTXCTL(EN)")) return;
+
+    /* Test movement with longer delay */
     unsigned long t0L=0, t0R=0; read_reg(h, REG_SYSTIML, &t0L); read_reg(h, REG_SYSTIMR, &t0R);
-    Sleep(10);
+    Sleep(50);  // Longer delay for I210 hardware
     unsigned long t1L=0, t1R=0; read_reg(h, REG_SYSTIML, &t1L); read_reg(h, REG_SYSTIMR, &t1R);
     printf("t0L=0x%08lX t0R=0x%08lX  t1L=0x%08lX t1R=0x%08lX movement=%s\n", t0L, t0R, t1L, t1R, ((t1L>t0L)||(t1R!=t0R))?"YES":"NO");
 
-    /* Force capture via SAMP_AUX0 (bit3) */
-    unsigned long tsa2=0; read_reg(h, REG_TSAUXC, &tsa2); unsigned long trigger = tsa2 | (1UL<<3); reg_write_checked(h, REG_TSAUXC, trigger, "TSAUXC(SAMP_AUX0)");
+    /* FIXED: Use direct write for trigger bits without verification (self-clearing) */
+    unsigned long tsa2=0; read_reg(h, REG_TSAUXC, &tsa2); 
+    unsigned long trigger = tsa2 | (1UL<<3);  // SAMP_AUX0 trigger bit
+    
+    // Direct write without verification for self-clearing trigger
+    AVB_REGISTER_REQUEST r; 
+    ZeroMemory(&r, sizeof(r)); 
+    r.offset = REG_TSAUXC; 
+    r.value = trigger; 
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL);
+    
+    if (ok) {
+        printf("SAMP_AUX0 trigger sent (bit will self-clear)\n");
+        
+        // Verify the bit has self-cleared  
+        unsigned long tsa3 = 0;
+        if (read_reg(h, REG_TSAUXC, &tsa3)) {
+            if ((tsa3 & (1UL<<3)) == 0) {
+                printf("? SAMP_AUX0 bit properly self-cleared (0x%08lX)\n", tsa3);
+            } else {
+                printf("? SAMP_AUX0 bit did not self-clear: 0x%08lX\n", tsa3);
+            }
+        }
+    } else {
+        printf("SAMP_AUX0 trigger failed: GLE=%lu\n", GetLastError());
+    }
+
     unsigned long auxL=0, auxH=0; read_reg(h, REG_AUXSTMPL0, &auxL); read_reg(h, REG_AUXSTMPH0, &auxH);
     unsigned long curL=0, curH=0; read_reg(h, REG_SYSTIML, &curL); read_reg(h, REG_SYSTIMH, &curH);
     printf("AUXSTMP0=0x%08lX%08lX  SYSTIM=0x%08lX%08lX\n", auxH, auxL, curH, curL);
 
-    /* Re-read sequence */
-    unsigned long lo1=0, hi1=0, lo2=0, hi2=0; read_reg(h, REG_SYSTIML, &lo1); read_reg(h, REG_SYSTIMH, &hi1); Sleep(5); read_reg(h, REG_SYSTIML, &lo2); read_reg(h, REG_SYSTIMH, &hi2);
-    printf("Confirm: first=0x%08lX%08lX second=0x%08lX%08lX delta=%s\n", hi1, lo1, hi2, lo2, (hi2>hi1)||(lo2>lo1)?"INC":"NO");
+    /* Re-read sequence for final confirmation */
+    unsigned long lo1=0, hi1=0, lo2=0, hi2=0; 
+    read_reg(h, REG_SYSTIML, &lo1); read_reg(h, REG_SYSTIMH, &hi1); 
+    Sleep(20); 
+    read_reg(h, REG_SYSTIML, &lo2); read_reg(h, REG_SYSTIMH, &hi2);
+    printf("Confirm: first=0x%08lX%08lX second=0x%08lX%08lX delta=%s\n", hi1, lo1, hi2, lo2, ((hi2>hi1)||(lo2>lo1))?"INC":"NO");
 }
 
 /* Ensure PTP (SYSTIM) is running; if not, initialize minimal increment and enable RX/TX timestamp capture */
@@ -217,6 +262,56 @@ static int selftest(HANDLE h){ int base_ok=1; int optional_fail=0; int optional_
     if(er.capabilities & INTEL_CAP_PCIe_PTM){ optional_used++; int r=ptm_on(h); if(r==AVB_OPT_FAIL) optional_fail=1; r=ptm_off(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else { printf("PTM: SKIPPED (unsupported)\n"); }
     if(er.capabilities & INTEL_CAP_MDIO){ optional_used++; int r=mdio_read_cmd(h); if(r==AVB_OPT_FAIL) optional_fail=1; } else { printf("MDIO: SKIPPED (unsupported)\n"); }
     printf("\nSummary: base=%s, optional=%s\n", base_ok?"OK":"FAIL", optional_fail?"FAIL":(optional_used?"OK":"NONE")); return base_ok?0:1; }
+
+/* Write with verification, but skip verification for self-clearing trigger bits */
+static int reg_write_trigger(HANDLE h, unsigned long off, unsigned long val, unsigned long self_clear_mask, const char* tag)
+{
+    AVB_REGISTER_REQUEST r; 
+    ZeroMemory(&r, sizeof(r)); 
+    r.offset = off; 
+    r.value = val; 
+    DWORD br = 0;
+    
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL);
+    if (!ok) {
+        fprintf(stderr, "WRITE FAIL off=0x%05lX (%s) GLE=%lu\n", off, tag ? tag : "", GetLastError());
+        return 0;
+    }
+    
+    // For registers with self-clearing bits, adjust verification
+    if (self_clear_mask != 0) {
+        unsigned long rb = 0;
+        int rb_ok = read_reg(h, off, &rb);
+        if (!rb_ok) {
+            fprintf(stderr, "WRITE VERIFY READ FAIL off=0x%05lX (%s)\n", off, tag ? tag : "");
+            return 0;
+        }
+        
+        // Mask out self-clearing bits for comparison
+        unsigned long expected = val & ~self_clear_mask;
+        unsigned long actual = rb & ~self_clear_mask;
+        
+        if (actual != expected) {
+            fprintf(stderr, "WRITE MISMATCH off=0x%05lX (%s) want=0x%08lX got=0x%08lX (after masking self-clear bits)\n", 
+                    off, tag ? tag : "", expected, actual);
+            return 0;
+        }
+        
+        printf("? Write verified with self-clearing mask: want=0x%08lX got=0x%08lX\n", val, rb);
+        
+        // Check if self-clearing bits properly cleared
+        if ((rb & self_clear_mask) == 0) {
+            printf("? Self-clearing bits properly cleared\n");
+        } else {
+            printf("? Self-clearing bits did not clear: 0x%08lX\n", rb & self_clear_mask);
+        }
+    } else {
+        // Standard verification for non-self-clearing registers
+        return reg_write_checked(h, off, val, tag);
+    }
+    
+    return 1;
+}
 
 int main(int argc, char** argv){ HANDLE h=OpenDev(); if(h==INVALID_HANDLE_VALUE) return 1; test_init(h);
     if(argc<2 || _stricmp(argv[1],"selftest")==0){ int rc=selftest(h); CloseHandle(h); return rc; }
