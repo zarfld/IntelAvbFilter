@@ -223,9 +223,9 @@ static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
     
     DEBUGP(DL_INFO, "PTP init: Initial SYSTIM = 0x%08X%08X\n", hi, lo);
     
-    // Step 2: Check if clock is already running
+    // Step 2: Check if clock is already running by testing increment
     if (lo || hi) {
-        DEBUGP(DL_INFO, "PTP init: Clock appears to have values, testing increment...\n");
+        DEBUGP(DL_INFO, "PTP init: Clock has non-zero value, testing increment...\n");
         KeStallExecutionProcessor(10000); // 10ms delay
         
         ULONG lo2=0, hi2=0;
@@ -246,7 +246,7 @@ static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
     
     DEBUGP(DL_INFO, "?? PTP init: Clock not running, performing full initialization...\n");
     
-    // Step 3: Read current TSAUXC configuration
+    // Step 3: Read and configure TSAUXC register
     ULONG aux = 0; 
     if (intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux) != 0) {
         DEBUGP(DL_ERROR, "PTP init: Failed to read TSAUXC register\n");
@@ -254,32 +254,40 @@ static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
     }
     DEBUGP(DL_INFO, "PTP init: TSAUXC before = 0x%08X\n", aux);
     
-    // Step 4: Configure TSAUXC - Clear DisableSystime (bit 31), Enable PHC (bit 30)  
-    ULONG new_aux = (aux & 0x7FFFFFFFUL) | 0x40000000UL; // Clear bit 31, set bit 30
-    if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, new_aux) != 0) {
-        DEBUGP(DL_ERROR, "PTP init: Failed to write TSAUXC register\n");
-        return;
+    // Configure TSAUXC: Clear DisableSystime (bit 31), Ensure PHC enabled (bit 30)
+    // Do NOT set trigger bits (3,4,5) as they are self-clearing and will cause write mismatches
+    ULONG new_aux = (aux & ~0x80000000UL) | 0x40000000UL; // Clear bit 31, set bit 30, preserve others
+    if (new_aux != aux) {
+        if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, new_aux) != 0) {
+            DEBUGP(DL_ERROR, "PTP init: Failed to write TSAUXC register\n");
+            return;
+        }
+        DEBUGP(DL_INFO, "PTP init: TSAUXC updated to 0x%08X (PHC enabled, DisableSystime cleared)\n", new_aux);
+    } else {
+        DEBUGP(DL_INFO, "PTP init: TSAUXC already configured correctly (0x%08X)\n", aux);
     }
-    DEBUGP(DL_INFO, "PTP init: TSAUXC updated to 0x%08X (PHC enabled, DisableSystime cleared)\n", new_aux);
     
-    // Step 5: Configure TIMINCA for 8ns per tick (125MHz clock)
+    // Step 4: Configure TIMINCA for proper clock frequency
+    // I210 uses 8ns per tick for 125MHz system clock (standard configuration)
     if (intel_write_reg(&ctx->intel_device, I210_TIMINCA, 0x08000000UL) != 0) {
         DEBUGP(DL_ERROR, "PTP init: Failed to write TIMINCA register\n");
         return;
     }
-    DEBUGP(DL_INFO, "PTP init: TIMINCA set to 0x08000000 (8ns per tick)\n");
+    DEBUGP(DL_INFO, "PTP init: TIMINCA set to 0x08000000 (8ns per tick, 125MHz clock)\n");
     
-    // Step 6: Reset SYSTIM to known value and start counting
-    if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0x00000000) != 0 ||
+    // Step 5: Program initial time value and start clock
+    // Set to a known non-zero value instead of zero to make it easier to detect if working
+    ULONG initial_time = 0x10000000UL; // Start with non-zero value
+    if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, initial_time) != 0 ||
         intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0x00000000) != 0) {
-        DEBUGP(DL_ERROR, "PTP init: Failed to reset SYSTIM registers\n");
+        DEBUGP(DL_ERROR, "PTP init: Failed to set initial SYSTIM value\n");
         return;
     }
-    DEBUGP(DL_INFO, "PTP init: SYSTIM reset to 0x0000000000000000\n");
+    DEBUGP(DL_INFO, "PTP init: SYSTIM initialized to 0x00000000%08X\n", initial_time);
     
-    // Step 7: Enable timestamp capture for RX/TX
-    ULONG rxctl = (1U << I210_TSYNCRXCTL_EN_SHIFT);
-    ULONG txctl = (1U << I210_TSYNCTXCTL_EN_SHIFT);
+    // Step 6: Enable timestamp capture for RX/TX using SSOT bit definitions
+    ULONG rxctl = (1U << I210_TSYNCRXCTL_EN_SHIFT) | (I210_TSYNCRXCTL_TYPE_ALL << I210_TSYNCRXCTL_TYPE_SHIFT);
+    ULONG txctl = (1U << I210_TSYNCTXCTL_EN_SHIFT) | (I210_TSYNCTXCTL_TYPE_ALL << I210_TSYNCTXCTL_TYPE_SHIFT);
     
     if (intel_write_reg(&ctx->intel_device, I210_TSYNCRXCTL, rxctl) != 0 ||
         intel_write_reg(&ctx->intel_device, I210_TSYNCTXCTL, txctl) != 0) {
@@ -288,23 +296,48 @@ static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
     }
     DEBUGP(DL_INFO, "PTP init: Timestamp capture enabled (RX=0x%08X, TX=0x%08X)\n", rxctl, txctl);
     
-    // Step 8: Wait for clock to start and verify increment
-    DEBUGP(DL_INFO, "PTP init: Waiting 60ms for clock stabilization...\n");
-    KeStallExecutionProcessor(60000); // 60ms delay
+    // Step 7: Verify clock is running with extended timeout
+    DEBUGP(DL_INFO, "PTP init: Waiting for clock stabilization (testing multiple samples)...\n");
     
-    if (intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi) == 0 && 
-        intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo) == 0 && (hi || lo)) {
+    BOOLEAN clockRunning = FALSE;
+    for (int attempt = 0; attempt < 5 && !clockRunning; attempt++) {
+        KeStallExecutionProcessor(20000); // 20ms delay per attempt
         
-        DEBUGP(DL_INFO, "? PTP init: SUCCESS - I210 PTP clock is running (SYSTIM=0x%08X%08X)\n", hi, lo);
+        ULONG lo_check=0, hi_check=0;
+        if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo_check) == 0 && 
+            intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi_check) == 0) {
+            
+            // Check if time has advanced from our initial value
+            if (hi_check > 0 || lo_check > initial_time) {
+                clockRunning = TRUE;
+                DEBUGP(DL_INFO, "? PTP init: SUCCESS - Clock running (attempt %d, SYSTIM=0x%08X%08X)\n", 
+                       attempt + 1, hi_check, lo_check);
+            } else {
+                DEBUGP(DL_WARN, "PTP init: Clock check %d - SYSTIM=0x%08X%08X (not advancing yet)\n", 
+                       attempt + 1, hi_check, lo_check);
+            }
+        }
+    }
+    
+    if (clockRunning) {
+        // Success: add PTP capabilities and promote state
         ctx->intel_device.capabilities |= (INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS);
         if (ctx->hw_state < AVB_HW_PTP_READY) { 
             ctx->hw_state = AVB_HW_PTP_READY; 
-            DEBUGP(DL_INFO, "HW state -> %s (PTP started)\n", AvbHwStateName(ctx->hw_state)); 
+            DEBUGP(DL_INFO, "HW state -> %s (PTP initialization successful)\n", AvbHwStateName(ctx->hw_state)); 
         }
     } else {
-        DEBUGP(DL_ERROR, "? PTP init: FAILED - Clock still not running after initialization\n");
-        DEBUGP(DL_ERROR, "   Final SYSTIM = 0x%08X%08X\n", hi, lo);
-        DEBUGP(DL_ERROR, "   This may indicate hardware access issues or clock configuration problems\n");
+        DEBUGP(DL_ERROR, "? PTP init: FAILED - Clock still not running after extended initialization\n");
+        DEBUGP(DL_ERROR, "   This indicates either:\n");
+        DEBUGP(DL_ERROR, "   1. Hardware access issues (BAR0 mapping problems)\n");
+        DEBUGP(DL_ERROR, "   2. Clock configuration problems (TSAUXC/TIMINCA)\n");
+        DEBUGP(DL_ERROR, "   3. Hardware-specific issues requiring datasheet validation\n");
+        
+        // Read final register state for diagnosis
+        ULONG final_aux=0, final_timinca=0;
+        intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &final_aux);
+        intel_read_reg(&ctx->intel_device, I210_TIMINCA, &final_timinca);
+        DEBUGP(DL_ERROR, "   Final registers: TSAUXC=0x%08X, TIMINCA=0x%08X\n", final_aux, final_timinca);
     }
 }
 
@@ -317,7 +350,7 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
     if (!AvbIsSupportedIntelController(FilterModule, &ven, &dev)) return STATUS_NOT_SUPPORTED;
     NTSTATUS st = AvbCreateMinimalContext(FilterModule, ven, dev, AvbContext);
     if (!NT_SUCCESS(st)) return st;
-    (void)AvbBringUpHardware(*AvbContext); /* deferred; ignore failure */
+    (void)AvbBringUpHardware(*AvbContext); /* deferred, ignore failure */
     return STATUS_SUCCESS;
 }
 
@@ -569,6 +602,27 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X\n", 
                    req->vendor_id, req->device_id);
             
+            // For single-adapter systems, always use the current context if it matches
+            if (AvbContext->intel_device.pci_vendor_id == req->vendor_id && 
+                AvbContext->intel_device.pci_device_id == req->device_id) {
+                
+                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Using current context (exact match)\n");
+                DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X\n", 
+                       AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
+                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(AvbContext->hw_state));
+                
+                // Ensure the context is properly initialized
+                if (!AvbContext->initialized && AvbContext->hw_state == AVB_HW_BOUND) {
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Triggering initialization for matched context\n");
+                    (void)AvbBringUpHardware(AvbContext);
+                }
+                
+                req->status = 0; // Success
+                info = sizeof(*req);
+                status = STATUS_SUCCESS;
+                break;
+            }
+            
             // Search through all filter modules to find the requested adapter
             BOOLEAN bFalse = FALSE;
             PMS_FILTER targetFilter = NULL;
@@ -582,6 +636,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 
                 if (cand && cand->AvbContext) {
                     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Checking candidate VID=0x%04X DID=0x%04X\n",
+                           ctx->intel_device.pci_vendor_id, ctx->intel_device.pci_device_id);
+                    
                     if (ctx->intel_device.pci_vendor_id == req->vendor_id && 
                         ctx->intel_device.pci_device_id == req->device_id) {
                         targetFilter = cand;
@@ -595,6 +652,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (targetFilter == NULL) {
                 DEBUGP(DL_ERROR, "? OPEN_ADAPTER: No adapter found for VID=0x%04X DID=0x%04X\n", 
                        req->vendor_id, req->device_id);
+                DEBUGP(DL_ERROR, "   Available contexts:\n");
+                DEBUGP(DL_ERROR, "   - Current: VID=0x%04X DID=0x%04X\n",
+                       AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
                 req->status = (avb_u32)STATUS_NO_SUCH_DEVICE;
                 info = sizeof(*req);
                 status = STATUS_SUCCESS; // IRP handled, but device not found
@@ -612,14 +672,27 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     }
                 }
                 
-                // Set as active context
-                g_AvbContext = (PAVB_DEVICE_CONTEXT)targetFilter->AvbContext;
+                // Set as active context only if different
+                PAVB_DEVICE_CONTEXT newContext = (PAVB_DEVICE_CONTEXT)targetFilter->AvbContext;
+                if (g_AvbContext != newContext) {
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Switching context\n");
+                    DEBUGP(DL_INFO, "   - From: VID=0x%04X DID=0x%04X\n",
+                           g_AvbContext ? g_AvbContext->intel_device.pci_vendor_id : 0,
+                           g_AvbContext ? g_AvbContext->intel_device.pci_device_id : 0);
+                    DEBUGP(DL_INFO, "   - To:   VID=0x%04X DID=0x%04X\n",
+                           newContext->intel_device.pci_vendor_id,
+                           newContext->intel_device.pci_device_id);
+                    
+                    g_AvbContext = newContext;
+                } else {
+                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context already active (no switch needed)\n");
+                }
                 
                 req->status = 0; // Success
                 info = sizeof(*req);
                 status = STATUS_SUCCESS;
                 
-                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context switch completed\n");
+                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context selection completed\n");
                 DEBUGP(DL_INFO, "   - Active context: VID=0x%04X DID=0x%04X\n",
                        g_AvbContext->intel_device.pci_vendor_id,
                        g_AvbContext->intel_device.pci_device_id);
