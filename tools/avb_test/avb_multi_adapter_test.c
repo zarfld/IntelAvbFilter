@@ -37,6 +37,8 @@ static HANDLE OpenDevice(void) {
 static void TestI210PTPInitialization(HANDLE h) {
     printf("\n?? === I210 PTP INITIALIZATION TEST ===\n");
     
+    // CRITICAL: Force I210 context selection first
+    printf("?? Step 1: Selecting I210 adapter context...\n");
     AVB_OPEN_REQUEST openReq;
     ZeroMemory(&openReq, sizeof(openReq));
     openReq.vendor_id = 0x8086;
@@ -49,17 +51,21 @@ static void TestI210PTPInitialization(HANDLE h) {
         return;
     }
     
-    printf("? I210 adapter opened for PTP testing\n");
+    printf("? I210 adapter opened and set as active context\n");
     
     // Force device initialization to ensure PTP is set up
+    printf("?? Step 2: Triggering I210 device initialization...\n");
     if (DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &br, NULL)) {
         printf("? I210 device initialization triggered\n");
     } else {
         printf("??  I210 device initialization failed: %lu\n", GetLastError());
     }
     
-    // Read PTP registers before and after to check initialization
-    printf("\n?? I210 PTP Register Analysis:\n");
+    // Small delay to allow initialization to complete
+    Sleep(100);
+    
+    // Read PTP registers after context switch and initialization
+    printf("\n?? I210 PTP Register Analysis (after context switch):\n");
     
     AVB_REGISTER_REQUEST regReq;
     ULONG ptpRegisters[] = {0x0B640, 0x0B608, 0x0B600, 0x0B604}; // TSAUXC, TIMINCA, SYSTIML, SYSTIMH
@@ -84,7 +90,7 @@ static void TestI210PTPInitialization(HANDLE h) {
                 else printf(" (? Custom increment: %lu ns)", (regReq.value >> 24) & 0xFF);
             } else if (i >= 2) { // SYSTIM
                 if (regReq.value == 0) printf(" (??  Clock not running)");
-                else printf(" (? Clock active)");
+                else printf(" (? Clock active: 0x%08X)", regReq.value);
             }
             printf("\n");
         } else {
@@ -92,44 +98,56 @@ static void TestI210PTPInitialization(HANDLE h) {
         }
     }
     
-    // Test PTP clock increment over time
-    printf("\n?? I210 PTP Clock Increment Test:\n");
-    ZeroMemory(&regReq, sizeof(regReq));
-    regReq.offset = 0x0B600; // SYSTIML
+    // Test PTP clock increment over time with forced context
+    printf("\n?? I210 PTP Clock Increment Test (with active context):\n");
+    printf("?? Re-selecting I210 context before each sample...\n");
     
-    ULONG systim_samples[3] = {0};
-    for (int i = 0; i < 3; i++) {
-        if (DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &regReq, sizeof(regReq), 
-                           &regReq, sizeof(regReq), &br, NULL)) {
-            systim_samples[i] = regReq.value;
-            printf("   Sample %d: SYSTIML=0x%08X", i+1, systim_samples[i]);
-            if (i > 0) {
-                LONG delta = (LONG)(systim_samples[i] - systim_samples[i-1]);
-                printf(" (delta: %ld)", delta);
-                if (delta > 0) printf(" ? INCREMENTING");
-                else if (delta == 0) printf(" ??  STUCK");
-                else printf(" ??  DECREASING");
+    ULONG systim_samples[5] = {0};
+    for (int i = 0; i < 5; i++) {
+        // Re-select I210 context before each sample to ensure consistency
+        if (DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER, &openReq, sizeof(openReq), 
+                           &openReq, sizeof(openReq), &br, NULL) && openReq.status == 0) {
+            
+            ZeroMemory(&regReq, sizeof(regReq));
+            regReq.offset = 0x0B600; // SYSTIML
+            
+            if (DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &regReq, sizeof(regReq), 
+                               &regReq, sizeof(regReq), &br, NULL)) {
+                systim_samples[i] = regReq.value;
+                printf("   Sample %d: SYSTIML=0x%08X", i+1, systim_samples[i]);
+                if (i > 0) {
+                    LONG delta = (LONG)(systim_samples[i] - systim_samples[i-1]);
+                    printf(" (delta: %ld)", delta);
+                    if (delta > 0) printf(" ? INCREMENTING");
+                    else if (delta == 0) printf(" ??  STUCK");
+                    else printf(" ??  DECREASING");
+                }
+                printf("\n");
+            } else {
+                printf("   ? Failed to read SYSTIML sample %d\n", i+1);
             }
-            printf("\n");
+        } else {
+            printf("   ? Failed to re-select I210 context for sample %d\n", i+1);
         }
         Sleep(10); // 10ms delay between samples
     }
     
     // Analyze increment pattern
-    if (systim_samples[2] > systim_samples[1] && systim_samples[1] > systim_samples[0]) {
-        ULONG rate1 = systim_samples[1] - systim_samples[0];
-        ULONG rate2 = systim_samples[2] - systim_samples[1];
+    if (systim_samples[4] > systim_samples[3] && systim_samples[3] > systim_samples[2] &&
+        systim_samples[2] > systim_samples[1] && systim_samples[1] > systim_samples[0]) {
+        ULONG avgRate = (systim_samples[4] - systim_samples[0]) / 4;
         printf("? I210 PTP CLOCK IS RUNNING CORRECTLY\n");
-        printf("   Average rate: %lu ns per 10ms\n", (rate1 + rate2) / 2);
-    } else if (systim_samples[0] == systim_samples[1] && systim_samples[1] == systim_samples[2]) {
+        printf("   Average rate: %lu ns per 10ms\n", avgRate);
+        printf("   Expected rate: ~10,000,000 ns per 10ms (normal system timing)\n");
+    } else if (systim_samples[0] == systim_samples[4]) {
         printf("? I210 PTP CLOCK IS STUCK (not incrementing)\n");
-        printf("?? Possible solutions:\n");
-        printf("   1. Check TSAUXC bit 31 (DisableSystime) - should be 0\n");
-        printf("   2. Check TSAUXC bit 30 (PHC enable) - should be 1\n");
-        printf("   3. Verify TIMINCA is configured (should be 0x08000000)\n");
-        printf("   4. Check if hardware access is working (CTRL register reads)\n");
+        printf("?? This suggests either:\n");
+        printf("   1. Context switching issue between I210 and I226\n");
+        printf("   2. I210 PTP initialization not being called\n");
+        printf("   3. Hardware access routing to wrong adapter\n");
     } else {
-        printf("??  I210 PTP CLOCK BEHAVIOR INCONSISTENT\n");
+        printf("?? I210 PTP CLOCK BEHAVIOR INCONSISTENT\n");
+        printf("   This suggests context switching issues in multi-adapter mode\n");
     }
 }
 
