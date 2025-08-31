@@ -343,4 +343,9 @@ BOOLEAN AvbIsSupportedIntelController(
     _Out_opt_ USHORT* OutDeviceId
 );
 
+// Enhanced I210 PTP initialization and context management
+NTSTATUS AvbI210EnsureSystimRunning(PAVB_DEVICE_CONTEXT context);
+BOOLEAN AvbVerifyHardwareContext(PAVB_DEVICE_CONTEXT context);
+NTSTATUS AvbForceContextReinitialization(PAVB_DEVICE_CONTEXT context);
+
 #endif // _AVB_INTEGRATION_H_
