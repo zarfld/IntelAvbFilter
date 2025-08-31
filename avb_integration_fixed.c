@@ -206,30 +206,105 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
  */
 static VOID AvbI210EnsureSystimRunning(_In_ PAVB_DEVICE_CONTEXT ctx)
 {
-    if (ctx->hw_state < AVB_HW_BAR_MAPPED) return;
-    ULONG lo=0, hi=0;
-    if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo)!=0 || intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi)!=0)
+    if (ctx->hw_state < AVB_HW_BAR_MAPPED) {
+        DEBUGP(DL_WARN, "AvbI210EnsureSystimRunning: Hardware not ready (state=%s)\n", AvbHwStateName(ctx->hw_state));
         return;
+    }
+    
+    DEBUGP(DL_INFO, "?? AvbI210EnsureSystimRunning: Starting I210 PTP initialization\n");
+    
+    // Step 1: Check current SYSTIM state
+    ULONG lo=0, hi=0;
+    if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo) != 0 || 
+        intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi) != 0) {
+        DEBUGP(DL_ERROR, "AvbI210EnsureSystimRunning: Failed to read SYSTIM registers\n");
+        return;
+    }
+    
+    DEBUGP(DL_INFO, "PTP init: Initial SYSTIM = 0x%08X%08X\n", hi, lo);
+    
+    // Step 2: Check if clock is already running
     if (lo || hi) {
-        KeStallExecutionProcessor(10000);
+        DEBUGP(DL_INFO, "PTP init: Clock appears to have values, testing increment...\n");
+        KeStallExecutionProcessor(10000); // 10ms delay
+        
         ULONG lo2=0, hi2=0;
-        if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo2)==0 && intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi2)==0 && ((hi2>hi) || (hi2==hi && lo2>lo))) {
+        if (intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo2) == 0 && 
+            intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi2) == 0 && 
+            ((hi2 > hi) || (hi2 == hi && lo2 > lo))) {
+            
+            DEBUGP(DL_INFO, "? PTP init: Clock already running (0x%08X%08X -> 0x%08X%08X)\n", 
+                   hi, lo, hi2, lo2);
             ctx->intel_device.capabilities |= (INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS);
-            if (ctx->hw_state < AVB_HW_PTP_READY) { ctx->hw_state = AVB_HW_PTP_READY; DEBUGP(DL_INFO, "HW state -> %s (PTP already running)\n", AvbHwStateName(ctx->hw_state)); }
+            if (ctx->hw_state < AVB_HW_PTP_READY) { 
+                ctx->hw_state = AVB_HW_PTP_READY; 
+                DEBUGP(DL_INFO, "HW state -> %s (PTP already running)\n", AvbHwStateName(ctx->hw_state)); 
+            }
             return;
         }
     }
-    ULONG aux=0; (void)intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux);
-    (void)intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, (aux & 0x7FFFFFFFUL) | 0x40000000UL);
-    (void)intel_write_reg(&ctx->intel_device, I210_TIMINCA, 0x08000000UL);
-    (void)intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0);
-    (void)intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0);
-    (void)intel_write_reg(&ctx->intel_device, I210_TSYNCRXCTL, (1U << I210_TSYNCRXCTL_EN_SHIFT));
-    (void)intel_write_reg(&ctx->intel_device, I210_TSYNCTXCTL, (1U << I210_TSYNCTXCTL_EN_SHIFT));
-    KeStallExecutionProcessor(60000);
-    if (intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi)==0 && intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo)==0 && (hi || lo)) {
+    
+    DEBUGP(DL_INFO, "?? PTP init: Clock not running, performing full initialization...\n");
+    
+    // Step 3: Read current TSAUXC configuration
+    ULONG aux = 0; 
+    if (intel_read_reg(&ctx->intel_device, INTEL_REG_TSAUXC, &aux) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to read TSAUXC register\n");
+        return;
+    }
+    DEBUGP(DL_INFO, "PTP init: TSAUXC before = 0x%08X\n", aux);
+    
+    // Step 4: Configure TSAUXC - Clear DisableSystime (bit 31), Enable PHC (bit 30)  
+    ULONG new_aux = (aux & 0x7FFFFFFFUL) | 0x40000000UL; // Clear bit 31, set bit 30
+    if (intel_write_reg(&ctx->intel_device, INTEL_REG_TSAUXC, new_aux) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to write TSAUXC register\n");
+        return;
+    }
+    DEBUGP(DL_INFO, "PTP init: TSAUXC updated to 0x%08X (PHC enabled, DisableSystime cleared)\n", new_aux);
+    
+    // Step 5: Configure TIMINCA for 8ns per tick (125MHz clock)
+    if (intel_write_reg(&ctx->intel_device, I210_TIMINCA, 0x08000000UL) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to write TIMINCA register\n");
+        return;
+    }
+    DEBUGP(DL_INFO, "PTP init: TIMINCA set to 0x08000000 (8ns per tick)\n");
+    
+    // Step 6: Reset SYSTIM to known value and start counting
+    if (intel_write_reg(&ctx->intel_device, I210_SYSTIML, 0x00000000) != 0 ||
+        intel_write_reg(&ctx->intel_device, I210_SYSTIMH, 0x00000000) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to reset SYSTIM registers\n");
+        return;
+    }
+    DEBUGP(DL_INFO, "PTP init: SYSTIM reset to 0x0000000000000000\n");
+    
+    // Step 7: Enable timestamp capture for RX/TX
+    ULONG rxctl = (1U << I210_TSYNCRXCTL_EN_SHIFT);
+    ULONG txctl = (1U << I210_TSYNCTXCTL_EN_SHIFT);
+    
+    if (intel_write_reg(&ctx->intel_device, I210_TSYNCRXCTL, rxctl) != 0 ||
+        intel_write_reg(&ctx->intel_device, I210_TSYNCTXCTL, txctl) != 0) {
+        DEBUGP(DL_ERROR, "PTP init: Failed to enable timestamp capture\n");
+        return;
+    }
+    DEBUGP(DL_INFO, "PTP init: Timestamp capture enabled (RX=0x%08X, TX=0x%08X)\n", rxctl, txctl);
+    
+    // Step 8: Wait for clock to start and verify increment
+    DEBUGP(DL_INFO, "PTP init: Waiting 60ms for clock stabilization...\n");
+    KeStallExecutionProcessor(60000); // 60ms delay
+    
+    if (intel_read_reg(&ctx->intel_device, I210_SYSTIMH, &hi) == 0 && 
+        intel_read_reg(&ctx->intel_device, I210_SYSTIML, &lo) == 0 && (hi || lo)) {
+        
+        DEBUGP(DL_INFO, "? PTP init: SUCCESS - I210 PTP clock is running (SYSTIM=0x%08X%08X)\n", hi, lo);
         ctx->intel_device.capabilities |= (INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS);
-        if (ctx->hw_state < AVB_HW_PTP_READY) { ctx->hw_state = AVB_HW_PTP_READY; DEBUGP(DL_INFO, "HW state -> %s (PTP started)\n", AvbHwStateName(ctx->hw_state)); }
+        if (ctx->hw_state < AVB_HW_PTP_READY) { 
+            ctx->hw_state = AVB_HW_PTP_READY; 
+            DEBUGP(DL_INFO, "HW state -> %s (PTP started)\n", AvbHwStateName(ctx->hw_state)); 
+        }
+    } else {
+        DEBUGP(DL_ERROR, "? PTP init: FAILED - Clock still not running after initialization\n");
+        DEBUGP(DL_ERROR, "   Final SYSTIM = 0x%08X%08X\n", hi, lo);
+        DEBUGP(DL_ERROR, "   This may indicate hardware access issues or clock configuration problems\n");
     }
 }
 
