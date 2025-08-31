@@ -559,71 +559,51 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         } 
         break;
     case IOCTL_AVB_OPEN_ADAPTER:
-        DEBUGP(DL_INFO, "?? IOCTL_AVB_OPEN_ADAPTER: Multi-adapter context switching\n");
+        DEBUGP(DL_INFO, "?? IOCTL_AVB_OPEN_ADAPTER: Setting adapter as active context\n");
+        DEBUGP(DL_INFO, "   - Current context: %p (VID=0x%04X DID=0x%04X)\n", 
+               AvbContext, AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
+        DEBUGP(DL_INFO, "   - Previous global context: %p\n", g_AvbContext);
         
         if (outLen < sizeof(AVB_OPEN_REQUEST)) { 
             DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Buffer too small (%lu < %lu)\n", outLen, sizeof(AVB_OPEN_REQUEST));
             status = STATUS_BUFFER_TOO_SMALL; 
         } else { 
             PAVB_OPEN_REQUEST req = (PAVB_OPEN_REQUEST)buf; 
-            DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X\n", 
-                   req->vendor_id, req->device_id);
             
-            // Search through all filter modules to find the requested adapter
-            BOOLEAN bFalse = FALSE;
-            PMS_FILTER targetFilter = NULL;
-            
-            FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
-            PLIST_ENTRY Link = FilterModuleList.Flink;
-            
-            while (Link != &FilterModuleList && targetFilter == NULL) {
-                PMS_FILTER cand = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
-                Link = Link->Flink;
+            // Validate the request matches this context's device
+            if (req->vendor_id == AvbContext->intel_device.pci_vendor_id && 
+                req->device_id == AvbContext->intel_device.pci_device_id) {
                 
-                if (cand && cand->AvbContext) {
-                    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
-                    if (ctx->intel_device.pci_vendor_id == req->vendor_id && 
-                        ctx->intel_device.pci_device_id == req->device_id) {
-                        targetFilter = cand;
-                        DEBUGP(DL_INFO, "? Found target adapter: %wZ\n", &cand->MiniportFriendlyName);
-                    }
-                }
-            }
-            
-            FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
-            
-            if (targetFilter == NULL) {
-                DEBUGP(DL_ERROR, "? OPEN_ADAPTER: No adapter found for VID=0x%04X DID=0x%04X\n", 
+                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Device match confirmed (VID=0x%04X DID=0x%04X)\n", 
                        req->vendor_id, req->device_id);
-                req->status = (avb_u32)STATUS_NO_SUCH_DEVICE;
-                info = sizeof(*req);
-                status = STATUS_SUCCESS; // IRP handled, but device not found
-            } else {
-                // Initialize context if needed
-                if (targetFilter->AvbContext == NULL) {
-                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Initializing context for new adapter\n");
-                    NTSTATUS initStatus = AvbInitializeDevice(targetFilter, (PAVB_DEVICE_CONTEXT*)&targetFilter->AvbContext);
+                
+                // Set this context as the global active context
+                g_AvbContext = AvbContext;
+                
+                // Ensure device is properly initialized
+                if (!AvbContext->initialized || AvbContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Forcing hardware initialization...\n");
+                    NTSTATUS initStatus = AvbBringUpHardware(AvbContext);
                     if (!NT_SUCCESS(initStatus)) {
-                        DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Context initialization failed: 0x%08X\n", initStatus);
-                        req->status = (avb_u32)STATUS_DEVICE_NOT_READY;
-                        info = sizeof(*req);
-                        status = STATUS_SUCCESS;
-                        break;
+                        DEBUGP(DL_WARN, "?? OPEN_ADAPTER: Hardware initialization failed: 0x%08X\n", initStatus);
                     }
                 }
                 
-                // Set as active context
-                g_AvbContext = (PAVB_DEVICE_CONTEXT)targetFilter->AvbContext;
-                
-                req->status = 0; // Success
+                req->status = NDIS_STATUS_SUCCESS;
                 info = sizeof(*req);
                 status = STATUS_SUCCESS;
                 
-                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context switch completed\n");
-                DEBUGP(DL_INFO, "   - Active context: VID=0x%04X DID=0x%04X\n",
-                       g_AvbContext->intel_device.pci_vendor_id,
-                       g_AvbContext->intel_device.pci_device_id);
-                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(g_AvbContext->hw_state));
+                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Successfully set as active context\n");
+                DEBUGP(DL_INFO, "   - Global context now: %p\n", g_AvbContext);
+                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(AvbContext->hw_state));
+                DEBUGP(DL_INFO, "   - Capabilities: 0x%08X\n", AvbContext->intel_device.capabilities);
+            } else {
+                DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Device mismatch - req(0x%04X/0x%04X) vs ctx(0x%04X/0x%04X)\n",
+                       req->vendor_id, req->device_id, 
+                       AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
+                req->status = (avb_u32)NDIS_STATUS_INVALID_DATA;
+                info = sizeof(*req);
+                status = STATUS_INVALID_PARAMETER;
             }
         }
         break;
