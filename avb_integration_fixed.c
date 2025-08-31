@@ -543,7 +543,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     if (activeContext->intel_device.device_type == INTEL_DEVICE_I210 && 
                         activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
                         DEBUGP(DL_INFO, "Attempting I210 PTP initialization for timestamp access\n");
-                        AvbI210EnsureSystimRunning(activeContext);
+                        (void)AvbI210EnsureSystimRunning(activeContext);
                     }
                     
                     // Check state again after potential initialization
