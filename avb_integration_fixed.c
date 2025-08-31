@@ -382,67 +382,75 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     switch (code) {
     case IOCTL_AVB_INIT_DEVICE:
-        DEBUGP(DL_INFO, "?? IOCTL_AVB_INIT_DEVICE: Starting hardware bring-up\n");
-        DEBUGP(DL_INFO, "   - Current hw_state: %s (%d)\n", AvbHwStateName(AvbContext->hw_state), AvbContext->hw_state);
-        DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", AvbContext->hw_access_enabled ? "YES" : "NO");
-        DEBUGP(DL_INFO, "   - Initialized flag: %s\n", AvbContext->initialized ? "YES" : "NO");
-        DEBUGP(DL_INFO, "   - Hardware context: %p\n", AvbContext->hardware_context);
-        DEBUGP(DL_INFO, "   - Device type: %d (%s)\n", AvbContext->intel_device.device_type,
-               AvbContext->intel_device.device_type == INTEL_DEVICE_I210 ? "I210" :
-               AvbContext->intel_device.device_type == INTEL_DEVICE_I226 ? "I226" : "OTHER");
-        
-        // Force immediate BAR0 discovery if hardware context is missing
-        if (AvbContext->hardware_context == NULL && AvbContext->hw_state == AVB_HW_BOUND) {
-            DEBUGP(DL_WARN, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
+        {
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_INIT_DEVICE: Starting hardware bring-up\n");
             
-            PHYSICAL_ADDRESS bar0 = {0};
-            ULONG barLen = 0;
-            NTSTATUS ds = AvbDiscoverIntelControllerResources(AvbContext->filter_instance, &bar0, &barLen);
-            if (NT_SUCCESS(ds)) {
-                DEBUGP(DL_WARN, "*** BAR0 DISCOVERY SUCCESS *** PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
-                NTSTATUS ms = AvbMapIntelControllerMemory(AvbContext, bar0, barLen);
-                if (NT_SUCCESS(ms)) {
-                    DEBUGP(DL_WARN, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
-                    
-                    // Complete initialization sequence
-                    AvbContext->intel_device.private_data = AvbContext;
-                    if (intel_init(&AvbContext->intel_device) == 0) {
-                        DEBUGP(DL_WARN, "*** INTEL_INIT SUCCESS ***\n");
+            // Use the active global context (set by IOCTL_AVB_OPEN_ADAPTER) 
+            PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+            
+            DEBUGP(DL_INFO, "   - Using context: VID=0x%04X DID=0x%04X\n",
+                   activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+            DEBUGP(DL_INFO, "   - Current hw_state: %s (%d)\n", AvbHwStateName(activeContext->hw_state), activeContext->hw_state);
+            DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", activeContext->hw_access_enabled ? "YES" : "NO");
+            DEBUGP(DL_INFO, "   - Initialized flag: %s\n", activeContext->initialized ? "YES" : "NO");
+            DEBUGP(DL_INFO, "   - Hardware context: %p\n", activeContext->hardware_context);
+            DEBUGP(DL_INFO, "   - Device type: %d (%s)\n", activeContext->intel_device.device_type,
+                   activeContext->intel_device.device_type == INTEL_DEVICE_I210 ? "I210" :
+                   activeContext->intel_device.device_type == INTEL_DEVICE_I226 ? "I226" : "OTHER");
+            
+            // Force immediate BAR0 discovery if hardware context is missing
+            if (activeContext->hardware_context == NULL && activeContext->hw_state == AVB_HW_BOUND) {
+                DEBUGP(DL_WARN, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
+                
+                PHYSICAL_ADDRESS bar0 = {0};
+                ULONG barLen = 0;
+                NTSTATUS ds = AvbDiscoverIntelControllerResources(activeContext->filter_instance, &bar0, &barLen);
+                if (NT_SUCCESS(ds)) {
+                    DEBUGP(DL_WARN, "*** BAR0 DISCOVERY SUCCESS *** PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
+                    NTSTATUS ms = AvbMapIntelControllerMemory(activeContext, bar0, barLen);
+                    if (NT_SUCCESS(ms)) {
+                        DEBUGP(DL_WARN, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
                         
-                        // Test MMIO sanity
-                        ULONG ctrl = 0xFFFFFFFF;
-                        if (intel_read_reg(&AvbContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
-                            DEBUGP(DL_WARN, "*** MMIO SANITY SUCCESS *** CTRL=0x%08X\n", ctrl);
-                            AvbContext->hw_state = AVB_HW_BAR_MAPPED;
-                            AvbContext->hw_access_enabled = TRUE;
-                            AvbContext->initialized = TRUE;
+                        // Complete initialization sequence
+                        activeContext->intel_device.private_data = activeContext;
+                        if (intel_init(&activeContext->intel_device) == 0) {
+                            DEBUGP(DL_WARN, "*** INTEL_INIT SUCCESS ***\n");
+                            
+                            // Test MMIO sanity
+                            ULONG ctrl = 0xFFFFFFFF;
+                            if (intel_read_reg(&activeContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
+                                DEBUGP(DL_WARN, "*** MMIO SANITY SUCCESS *** CTRL=0x%08X\n", ctrl);
+                                activeContext->hw_state = AVB_HW_BAR_MAPPED;
+                                activeContext->hw_access_enabled = TRUE;
+                                activeContext->initialized = TRUE;
+                            } else {
+                                DEBUGP(DL_ERROR, "*** MMIO SANITY FAILED *** CTRL=0x%08X\n", ctrl);
+                            }
                         } else {
-                            DEBUGP(DL_ERROR, "*** MMIO SANITY FAILED *** CTRL=0x%08X\n", ctrl);
+                            DEBUGP(DL_ERROR, "*** INTEL_INIT FAILED ***\n");
                         }
                     } else {
-                        DEBUGP(DL_ERROR, "*** INTEL_INIT FAILED ***\n");
+                        DEBUGP(DL_ERROR, "*** BAR0 MAPPING FAILED *** Status=0x%08X\n", ms);
                     }
                 } else {
-                    DEBUGP(DL_ERROR, "*** BAR0 MAPPING FAILED *** Status=0x%08X\n", ms);
+                    DEBUGP(DL_ERROR, "*** BAR0 DISCOVERY FAILED *** Status=0x%08X\n", ds);
                 }
-            } else {
-                DEBUGP(DL_ERROR, "*** BAR0 DISCOVERY FAILED *** Status=0x%08X\n", ds);
             }
+            
+            status = AvbBringUpHardware(activeContext);
+            
+            // CRITICAL: Force I210 PTP initialization if this is an I210
+            if (activeContext->intel_device.device_type == INTEL_DEVICE_I210 && 
+                activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                DEBUGP(DL_INFO, "?? INIT_DEVICE: Forcing I210 PTP initialization on active context...\n");
+                AvbI210EnsureSystimRunning(activeContext);
+                DEBUGP(DL_INFO, "?? INIT_DEVICE: I210 PTP initialization completed\n");
+            }
+            
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
+            DEBUGP(DL_INFO, "   - Final hw_state: %s (%d)\n", AvbHwStateName(activeContext->hw_state), activeContext->hw_state);
+            DEBUGP(DL_INFO, "   - Final hardware access: %s\n", activeContext->hw_access_enabled ? "YES" : "NO");
         }
-        
-        status = AvbBringUpHardware(AvbContext);
-        
-        // CRITICAL: Force I210 PTP initialization if this is an I210
-        if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210 && 
-            AvbContext->hw_state >= AVB_HW_BAR_MAPPED) {
-            DEBUGP(DL_INFO, "?? INIT_DEVICE: Forcing I210 PTP initialization...\n");
-            AvbI210EnsureSystimRunning(AvbContext);
-            DEBUGP(DL_INFO, "?? INIT_DEVICE: I210 PTP?????\n");
-        }
-        
-        DEBUGP(DL_INFO, "?? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
-        DEBUGP(DL_INFO, "   - Final hw_state: %s (%d)\n", AvbHwStateName(AvbContext->hw_state), AvbContext->hw_state);
-        DEBUGP(DL_INFO, "   - Final hardware access: %s\n", AvbContext->hw_access_enabled ? "YES" : "NO");
         break;
     case IOCTL_AVB_ENUM_ADAPTERS:
         if (outLen < sizeof(AVB_ENUM_REQUEST)) { status = STATUS_BUFFER_TOO_SMALL; break; }
@@ -450,71 +458,220 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             PAVB_ENUM_REQUEST r = (PAVB_ENUM_REQUEST)buf; 
             RtlZeroMemory(r, sizeof(*r));
             
-            // Use capabilities already set by AvbBringUpHardware
-            r->count=1; 
-            r->index=0; 
-            r->vendor_id=(USHORT)AvbContext->intel_device.pci_vendor_id; 
-            r->device_id=(USHORT)AvbContext->intel_device.pci_device_id; 
-            r->capabilities=AvbContext->intel_device.capabilities; 
-            r->status=NDIS_STATUS_SUCCESS; 
-            info=sizeof(*r);
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_ENUM_ADAPTERS: Starting enumeration\n");
             
-            DEBUGP(DL_INFO, "? ENUM_ADAPTERS: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
-                   r->vendor_id, r->device_id, r->capabilities);
+            // Count all Intel adapters in the system
+            ULONG adapterCount = 0;
+            BOOLEAN bFalse = FALSE;
+            
+            FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+            PLIST_ENTRY Link = FilterModuleList.Flink;
+            
+            // First pass: count Intel adapters
+            while (Link != &FilterModuleList) {
+                PMS_FILTER f = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                Link = Link->Flink;
+                
+                if (f && f->AvbContext) {
+                    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)f->AvbContext;
+                    if (ctx->intel_device.pci_vendor_id == INTEL_VENDOR_ID && 
+                        ctx->intel_device.pci_device_id != 0) {
+                        adapterCount++;
+                    }
+                }
+            }
+            
+            DEBUGP(DL_INFO, "?? ENUM_ADAPTERS: Found %lu Intel adapters\n", adapterCount);
+            
+            // If requesting specific index, find and return that adapter
+            if (r->index < adapterCount) {
+                ULONG currentIndex = 0;
+                Link = FilterModuleList.Flink;
+                
+                while (Link != &FilterModuleList) {
+                    PMS_FILTER f = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                    Link = Link->Flink;
+                    
+                    if (f && f->AvbContext) {
+                        PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)f->AvbContext;
+                        if (ctx->intel_device.pci_vendor_id == INTEL_VENDOR_ID && 
+                            ctx->intel_device.pci_device_id != 0) {
+                        
+                            if (currentIndex == r->index) {
+                                // Return this specific adapter's info
+                                r->count = adapterCount;
+                                r->vendor_id = (USHORT)ctx->intel_device.pci_vendor_id;
+                                r->device_id = (USHORT)ctx->intel_device.pci_device_id;
+                                r->capabilities = ctx->intel_device.capabilities;
+                                r->status = NDIS_STATUS_SUCCESS;
+                                
+                                DEBUGP(DL_INFO, "? ENUM_ADAPTERS[%lu]: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
+                                       r->index, r->vendor_id, r->device_id, r->capabilities);
+                                break;
+                            }
+                            currentIndex++;
+                        }
+                    }
+                }
+            } else {
+                // Return count and first adapter info (for compatibility)
+                r->count = adapterCount;
+                if (adapterCount > 0) {
+                    // Use current context info or first found adapter
+                    r->vendor_id = (USHORT)AvbContext->intel_device.pci_vendor_id;
+                    r->device_id = (USHORT)AvbContext->intel_device.pci_device_id;
+                    r->capabilities = AvbContext->intel_device.capabilities;
+                } else {
+                    r->vendor_id = 0;
+                    r->device_id = 0;
+                    r->capabilities = 0;
+                }
+                r->status = NDIS_STATUS_SUCCESS;
+                
+                DEBUGP(DL_INFO, "? ENUM_ADAPTERS(summary): count=%lu, VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
+                       r->count, r->vendor_id, r->device_id, r->capabilities);
+            }
+            
+            FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+            info = sizeof(*r);
         }
         break;
     case IOCTL_AVB_GET_DEVICE_INFO:
-        DEBUGP(DL_INFO, "?? IOCTL_AVB_GET_DEVICE_INFO: Starting device info request\n");
-        DEBUGP(DL_INFO, "   - Buffer size check: inLen=%lu, outLen=%lu, required=%lu\n", 
-               inLen, outLen, sizeof(AVB_DEVICE_INFO_REQUEST));
-        DEBUGP(DL_INFO, "   - Hardware state: %s (%d)\n", AvbHwStateName(AvbContext->hw_state), AvbContext->hw_state);
-        DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", AvbContext->hw_access_enabled ? "YES" : "NO");
-        DEBUGP(DL_INFO, "   - Hardware context: %p\n", AvbContext->hardware_context);
-        
-        if (outLen < sizeof(AVB_DEVICE_INFO_REQUEST)) { 
-            DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Buffer too small\n");
-            status = STATUS_BUFFER_TOO_SMALL; 
-        } else if (AvbContext->hw_state < AVB_HW_BAR_MAPPED) { 
-            DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Hardware not ready - hw_state=%s, need=%s\n", 
-                   AvbHwStateName(AvbContext->hw_state), AvbHwStateName(AVB_HW_BAR_MAPPED));
-            DEBUGP(DL_ERROR, "   Possible causes:\n");
-            DEBUGP(DL_ERROR, "   - BAR0 discovery failed during initialization\n");
-            DEBUGP(DL_ERROR, "   - MmMapIoSpace failed\n");
-            DEBUGP(DL_ERROR, "   - intel_init failed\n");
-            DEBUGP(DL_ERROR, "   - MMIO sanity check failed\n");
-            status = STATUS_DEVICE_NOT_READY; 
-        } else {
-            DEBUGP(DL_INFO, "? DEVICE_INFO: Hardware state validation passed\n");
+        {
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_GET_DEVICE_INFO: Starting device info request\n");
             
-            PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; 
-            RtlZeroMemory(r->device_info, sizeof(r->device_info)); 
-            
-            DEBUGP(DL_INFO, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
-            int rc = intel_get_device_info(&AvbContext->intel_device, r->device_info, sizeof(r->device_info)); 
-            DEBUGP(DL_INFO, "?? DEVICE_INFO: intel_get_device_info returned %d\n", rc);
-            
-            if (rc == 0) {
-                DEBUGP(DL_INFO, "? DEVICE_INFO: Device info string: %s\n", r->device_info);
+            if (outLen < sizeof(AVB_DEVICE_INFO_REQUEST)) { 
+                DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Buffer too small\n");
+                status = STATUS_BUFFER_TOO_SMALL; 
             } else {
-                DEBUGP(DL_ERROR, "? DEVICE_INFO: intel_get_device_info failed with code %d\n", rc);
+                // Use the active global context (set by IOCTL_AVB_OPEN_ADAPTER)
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                DEBUGP(DL_INFO, "   - Using context: VID=0x%04X DID=0x%04X\n",
+                       activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(activeContext->hw_state));
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) { 
+                    DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Hardware not ready - hw_state=%s\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY; 
+                } else {
+                    DEBUGP(DL_INFO, "? DEVICE_INFO: Hardware state validation passed\n");
+                    
+                    PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; 
+                    RtlZeroMemory(r->device_info, sizeof(r->device_info)); 
+                    
+                    DEBUGP(DL_INFO, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
+                    int rc = intel_get_device_info(&activeContext->intel_device, r->device_info, sizeof(r->device_info)); 
+                    DEBUGP(DL_INFO, "?? DEVICE_INFO: intel_get_device_info returned %d\n", rc);
+                    
+                    if (rc == 0) {
+                        DEBUGP(DL_INFO, "? DEVICE_INFO: Device info string: %s\n", r->device_info);
+                    } else {
+                        DEBUGP(DL_ERROR, "? DEVICE_INFO: intel_get_device_info failed with code %d\n", rc);
+                    }
+                    
+                    size_t used = 0; 
+                    (void)RtlStringCbLengthA(r->device_info, sizeof(r->device_info), &used); 
+                    r->buffer_size = (ULONG)used; 
+                    r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
+                    info = sizeof(*r); 
+                    status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL; 
+                    
+                    DEBUGP(DL_INFO, "?? DEVICE_INFO COMPLETE: status=0x%08X, buffer_size=%lu\n", status, r->buffer_size);
+                }
             }
-            
-            size_t used = 0; 
-            (void)RtlStringCbLengthA(r->device_info, sizeof(r->device_info), &used); 
-            r->buffer_size = (ULONG)used; 
-            r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
-            info = sizeof(*r); 
-            status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL; 
-            
-            DEBUGP(DL_INFO, "?? DEVICE_INFO COMPLETE: status=0x%08X, buffer_size=%lu\n", status, r->buffer_size);
         }
         break;
     case IOCTL_AVB_READ_REGISTER:
     case IOCTL_AVB_WRITE_REGISTER:
-        if (inLen < sizeof(AVB_REGISTER_REQUEST) || outLen < sizeof(AVB_REGISTER_REQUEST)) status = STATUS_BUFFER_TOO_SMALL; else if (AvbContext->hw_state < AVB_HW_BAR_MAPPED) status = STATUS_DEVICE_NOT_READY; else { PAVB_REGISTER_REQUEST r=(PAVB_REGISTER_REQUEST)buf; if (code==IOCTL_AVB_READ_REGISTER){ULONG tmp=0; int rc=intel_read_reg(&AvbContext->intel_device, r->offset, &tmp); r->value=(avb_u32)tmp; r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} else {int rc=intel_write_reg(&AvbContext->intel_device, r->offset, r->value); r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} info=sizeof(*r);} break;
+        {
+            if (inLen < sizeof(AVB_REGISTER_REQUEST) || outLen < sizeof(AVB_REGISTER_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; 
+            } else {
+                // Use the active global context (set by IOCTL_AVB_OPEN_ADAPTER)
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "Register access failed: Hardware not ready (state=%s)\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    PAVB_REGISTER_REQUEST r = (PAVB_REGISTER_REQUEST)buf; 
+                    
+                    DEBUGP(DL_TRACE, "Register %s: offset=0x%05X, context VID=0x%04X DID=0x%04X\n",
+                           (code == IOCTL_AVB_READ_REGISTER) ? "READ" : "WRITE",
+                           r->offset, activeContext->intel_device.pci_vendor_id,
+                           activeContext->intel_device.pci_device_id);
+                    
+                    if (code == IOCTL_AVB_READ_REGISTER) {
+                        ULONG tmp = 0; 
+                        int rc = intel_read_reg(&activeContext->intel_device, r->offset, &tmp); 
+                        r->value = (avb_u32)tmp; 
+                        r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
+                        status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    } else {
+                        int rc = intel_write_reg(&activeContext->intel_device, r->offset, r->value); 
+                        r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
+                        status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    } 
+                    info = sizeof(*r);
+                }
+            }
+        }
+        break;
     case IOCTL_AVB_GET_TIMESTAMP:
     case IOCTL_AVB_SET_TIMESTAMP:
-        if (inLen < sizeof(AVB_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TIMESTAMP_REQUEST)) status = STATUS_BUFFER_TOO_SMALL; else if (AvbContext->hw_state < AVB_HW_PTP_READY) status = STATUS_DEVICE_NOT_READY; else { PAVB_TIMESTAMP_REQUEST r=(PAVB_TIMESTAMP_REQUEST)buf; if (code==IOCTL_AVB_GET_TIMESTAMP){ULONGLONG t=0; struct timespec sys={0}; int rc=intel_gettime(&AvbContext->intel_device,r->clock_id,&t,&sys); if (rc!=0) rc=AvbReadTimestamp(&AvbContext->intel_device,&t); r->timestamp=t; r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} else {int rc=intel_set_systime(&AvbContext->intel_device,r->timestamp); r->status=(rc==0)?NDIS_STATUS_SUCCESS:NDIS_STATUS_FAILURE; status=(rc==0)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;} info=sizeof(*r);} break;
+        {
+            if (inLen < sizeof(AVB_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TIMESTAMP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; 
+            } else {
+                // Use the active global context (set by IOCTL_AVB_OPEN_ADAPTER)
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_WARN, "Timestamp access: Hardware state %s, attempting PTP initialization\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    
+                    // If this is I210 and we have BAR access, try to initialize PTP
+                    if (activeContext->intel_device.device_type == INTEL_DEVICE_I210 && 
+                        activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                        DEBUGP(DL_INFO, "Attempting I210 PTP initialization for timestamp access\n");
+                        AvbI210EnsureSystimRunning(activeContext);
+                    }
+                    
+                    // Check state again after potential initialization
+                    if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                        status = STATUS_DEVICE_NOT_READY;
+                        break;
+                    }
+                }
+                
+                PAVB_TIMESTAMP_REQUEST r = (PAVB_TIMESTAMP_REQUEST)buf; 
+                
+                DEBUGP(DL_TRACE, "Timestamp %s: context VID=0x%04X DID=0x%04X\n",
+                       (code == IOCTL_AVB_GET_TIMESTAMP) ? "GET" : "SET",
+                       activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                
+                if (code == IOCTL_AVB_GET_TIMESTAMP) {
+                    ULONGLONG t = 0; 
+                    struct timespec sys = {0}; 
+                    int rc = intel_gettime(&activeContext->intel_device, r->clock_id, &t, &sys); 
+                    if (rc != 0) {
+                        rc = AvbReadTimestamp(&activeContext->intel_device, &t); 
+                    }
+                    r->timestamp = t; 
+                    r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
+                    status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                } else {
+                    int rc = intel_set_systime(&activeContext->intel_device, r->timestamp); 
+                    r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
+                    status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                } 
+                info = sizeof(*r);
+            }
+        }
+        break;
     case IOCTL_AVB_GET_HW_STATE:
         DEBUGP(DL_INFO, "?? IOCTL_AVB_GET_HW_STATE: Hardware state query\n");
         DEBUGP(DL_INFO, "   - Context: %p\n", AvbContext);
@@ -602,30 +759,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X\n", 
                    req->vendor_id, req->device_id);
             
-            // For single-adapter systems, always use the current context if it matches
-            if (AvbContext->intel_device.pci_vendor_id == req->vendor_id && 
-                AvbContext->intel_device.pci_device_id == req->device_id) {
-                
-                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Using current context (exact match)\n");
-                DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X\n", 
-                       AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
-                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(AvbContext->hw_state));
-                
-                // Ensure the context is properly initialized
-                if (!AvbContext->initialized && AvbContext->hw_state == AVB_HW_BOUND) {
-                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Triggering initialization for matched context\n");
-                    (void)AvbBringUpHardware(AvbContext);
-                }
-                
-                req->status = 0; // Success
-                info = sizeof(*req);
-                status = STATUS_SUCCESS;
-                break;
-            }
-            
-            // Search through all filter modules to find the requested adapter
+            // Search through ALL filter modules to find the requested adapter
             BOOLEAN bFalse = FALSE;
             PMS_FILTER targetFilter = NULL;
+            PAVB_DEVICE_CONTEXT targetContext = NULL;
             
             FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
             PLIST_ENTRY Link = FilterModuleList.Flink;
@@ -636,13 +773,18 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 
                 if (cand && cand->AvbContext) {
                     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
-                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Checking candidate VID=0x%04X DID=0x%04X\n",
-                           ctx->intel_device.pci_vendor_id, ctx->intel_device.pci_device_id);
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Checking filter %wZ - VID=0x%04X DID=0x%04X\n",
+                           &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
+                           ctx->intel_device.pci_device_id);
                     
                     if (ctx->intel_device.pci_vendor_id == req->vendor_id && 
                         ctx->intel_device.pci_device_id == req->device_id) {
                         targetFilter = cand;
-                        DEBUGP(DL_INFO, "? Found target adapter: %wZ\n", &cand->MiniportFriendlyName);
+                        targetContext = ctx;
+                        DEBUGP(DL_INFO, "? Found target adapter: %wZ (VID=0x%04X, DID=0x%04X)\n", 
+                               &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
+                               ctx->intel_device.pci_device_id);
+                        break;
                     }
                 }
             }
@@ -652,51 +794,71 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (targetFilter == NULL) {
                 DEBUGP(DL_ERROR, "? OPEN_ADAPTER: No adapter found for VID=0x%04X DID=0x%04X\n", 
                        req->vendor_id, req->device_id);
-                DEBUGP(DL_ERROR, "   Available contexts:\n");
-                DEBUGP(DL_ERROR, "   - Current: VID=0x%04X DID=0x%04X\n",
-                       AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
+                DEBUGP(DL_ERROR, "   Available adapters:\n");
+                
+                // List all available adapters for debugging
+                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                Link = FilterModuleList.Flink;
+                while (Link != &FilterModuleList) {
+                    PMS_FILTER f = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                    Link = Link->Flink;
+                    if (f && f->AvbContext) {
+                        PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)f->AvbContext;
+                        DEBUGP(DL_ERROR, "     - %wZ: VID=0x%04X DID=0x%04X\n",
+                               &f->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
+                               ctx->intel_device.pci_device_id);
+                    }
+                }
+                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                
                 req->status = (avb_u32)STATUS_NO_SUCH_DEVICE;
                 info = sizeof(*req);
                 status = STATUS_SUCCESS; // IRP handled, but device not found
             } else {
-                // Initialize context if needed
-                if (targetFilter->AvbContext == NULL) {
-                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Initializing context for new adapter\n");
-                    NTSTATUS initStatus = AvbInitializeDevice(targetFilter, (PAVB_DEVICE_CONTEXT*)&targetFilter->AvbContext);
+                // CRITICAL: Switch global context to the requested adapter
+                DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Switching global context\n");
+                DEBUGP(DL_INFO, "   - From: VID=0x%04X DID=0x%04X (filter=%p)\n",
+                       g_AvbContext ? g_AvbContext->intel_device.pci_vendor_id : 0,
+                       g_AvbContext ? g_AvbContext->intel_device.pci_device_id : 0,
+                       g_AvbContext ? g_AvbContext->filter_instance : NULL);
+                DEBUGP(DL_INFO, "   - To:   VID=0x%04X DID=0x%04X (filter=%p)\n",
+                       targetContext->intel_device.pci_vendor_id,
+                       targetContext->intel_device.pci_device_id,
+                       targetFilter);
+                
+                // Make the target context the active global context
+                g_AvbContext = targetContext;
+                
+                // Ensure the target context is fully initialized
+                if (!targetContext->initialized || targetContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Target adapter needs initialization\n");
+                    DEBUGP(DL_INFO, "   - Current state: %s\n", AvbHwStateName(targetContext->hw_state));
+                    DEBUGP(DL_INFO, "   - Initialized: %s\n", targetContext->initialized ? "YES" : "NO");
+                    
+                    NTSTATUS initStatus = AvbBringUpHardware(targetContext);
                     if (!NT_SUCCESS(initStatus)) {
-                        DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Context initialization failed: 0x%08X\n", initStatus);
-                        req->status = (avb_u32)STATUS_DEVICE_NOT_READY;
-                        info = sizeof(*req);
-                        status = STATUS_SUCCESS;
-                        break;
+                        DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Target adapter initialization failed: 0x%08X\n", initStatus);
+                        // Continue anyway - some functionality may still work
                     }
                 }
                 
-                // Set as active context only if different
-                PAVB_DEVICE_CONTEXT newContext = (PAVB_DEVICE_CONTEXT)targetFilter->AvbContext;
-                if (g_AvbContext != newContext) {
-                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Switching context\n");
-                    DEBUGP(DL_INFO, "   - From: VID=0x%04X DID=0x%04X\n",
-                           g_AvbContext ? g_AvbContext->intel_device.pci_vendor_id : 0,
-                           g_AvbContext ? g_AvbContext->intel_device.pci_device_id : 0);
-                    DEBUGP(DL_INFO, "   - To:   VID=0x%04X DID=0x%04X\n",
-                           newContext->intel_device.pci_vendor_id,
-                           newContext->intel_device.pci_device_id);
-                    
-                    g_AvbContext = newContext;
-                } else {
-                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context already active (no switch needed)\n");
+                // Force I210 PTP initialization if this is an I210
+                if (targetContext->intel_device.device_type == INTEL_DEVICE_I210 && 
+                    targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Forcing I210 PTP initialization for selected adapter\n");
+                    AvbI210EnsureSystimRunning(targetContext);
                 }
                 
                 req->status = 0; // Success
                 info = sizeof(*req);
                 status = STATUS_SUCCESS;
                 
-                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context selection completed\n");
+                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context switch completed successfully\n");
                 DEBUGP(DL_INFO, "   - Active context: VID=0x%04X DID=0x%04X\n",
                        g_AvbContext->intel_device.pci_vendor_id,
                        g_AvbContext->intel_device.pci_device_id);
                 DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(g_AvbContext->hw_state));
+                DEBUGP(DL_INFO, "   - Capabilities: 0x%08X\n", g_AvbContext->intel_device.capabilities);
             }
         }
         break;
