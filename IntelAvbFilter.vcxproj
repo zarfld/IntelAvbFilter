@@ -276,7 +276,6 @@
     <None Include="tests\taef\Makefile.mak" />
     <None Include="TODO.md" />
     <None Include="tools\avb_test\avb_diagnostic.mak" />
-    <None Include="tools\avb_test\avb_multi_adapter.mak" />
     <None Include="tools\avb_test\avb_test.mak" />
     <None Include="x64\Debug\IntelAvbFilter.cat" />
   </ItemGroup>

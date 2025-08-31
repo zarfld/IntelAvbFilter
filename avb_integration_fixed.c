@@ -472,6 +472,55 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             }
         } 
         break;
+    case IOCTL_AVB_OPEN_ADAPTER:
+        DEBUGP(DL_INFO, "?? IOCTL_AVB_OPEN_ADAPTER: Setting adapter as active context\n");
+        DEBUGP(DL_INFO, "   - Current context: %p (VID=0x%04X DID=0x%04X)\n", 
+               AvbContext, AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
+        DEBUGP(DL_INFO, "   - Previous global context: %p\n", g_AvbContext);
+        
+        if (outLen < sizeof(AVB_OPEN_REQUEST)) { 
+            DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Buffer too small (%lu < %lu)\n", outLen, sizeof(AVB_OPEN_REQUEST));
+            status = STATUS_BUFFER_TOO_SMALL; 
+        } else { 
+            PAVB_OPEN_REQUEST req = (PAVB_OPEN_REQUEST)buf; 
+            
+            // Validate the request matches this context's device
+            if (req->vendor_id == AvbContext->intel_device.pci_vendor_id && 
+                req->device_id == AvbContext->intel_device.pci_device_id) {
+                
+                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Device match confirmed (VID=0x%04X DID=0x%04X)\n", 
+                       req->vendor_id, req->device_id);
+                
+                // Set this context as the global active context
+                g_AvbContext = AvbContext;
+                
+                // Ensure device is properly initialized
+                if (!AvbContext->initialized || AvbContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Forcing hardware initialization...\n");
+                    NTSTATUS initStatus = AvbBringUpHardware(AvbContext);
+                    if (!NT_SUCCESS(initStatus)) {
+                        DEBUGP(DL_WARN, "?? OPEN_ADAPTER: Hardware initialization failed: 0x%08X\n", initStatus);
+                    }
+                }
+                
+                req->status = NDIS_STATUS_SUCCESS;
+                info = sizeof(*req);
+                status = STATUS_SUCCESS;
+                
+                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Successfully set as active context\n");
+                DEBUGP(DL_INFO, "   - Global context now: %p\n", g_AvbContext);
+                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(AvbContext->hw_state));
+                DEBUGP(DL_INFO, "   - Capabilities: 0x%08X\n", AvbContext->intel_device.capabilities);
+            } else {
+                DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Device mismatch - req(0x%04X/0x%04X) vs ctx(0x%04X/0x%04X)\n",
+                       req->vendor_id, req->device_id, 
+                       AvbContext->intel_device.pci_vendor_id, AvbContext->intel_device.pci_device_id);
+                req->status = (avb_u32)NDIS_STATUS_INVALID_DATA;
+                info = sizeof(*req);
+                status = STATUS_INVALID_PARAMETER;
+            }
+        }
+        break;
     default:
         status = STATUS_INVALID_DEVICE_REQUEST; break;
     }
