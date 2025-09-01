@@ -789,6 +789,156 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             }
         }
         break;
+    case IOCTL_AVB_SETUP_TAS:
+        {
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_TAS: Starting TAS configuration\n");
+            
+            if (inLen < sizeof(AVB_TAS_REQUEST) || outLen < sizeof(AVB_TAS_REQUEST)) {
+                DEBUGP(DL_ERROR, "? TAS SETUP: Buffer too small\n");
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "? TAS SETUP: Hardware not ready (state=%s)\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    PAVB_TAS_REQUEST r = (PAVB_TAS_REQUEST)buf;
+                    
+                    // Ensure Intel library is using the correct hardware context
+                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
+                        activeContext->intel_device.private_data = activeContext;
+                    }
+                    
+                    DEBUGP(DL_INFO, "?? TAS SETUP: Configuring Time-Aware Shaper on VID=0x%04X DID=0x%04X\n",
+                           activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                    
+                    // Check if this device supports TAS
+                    if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
+                        DEBUGP(DL_WARN, "? TAS SETUP: Device does not support TAS (caps=0x%08X)\n", 
+                               activeContext->intel_device.capabilities);
+                        r->status = (avb_u32)STATUS_NOT_SUPPORTED;
+                        status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
+                    } else {
+                        // Call Intel library TAS setup function (correct function name)
+                        int rc = intel_setup_time_aware_shaper(&activeContext->intel_device, &r->config);
+                        r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        
+                        if (rc == 0) {
+                            DEBUGP(DL_INFO, "? TAS SETUP: Successfully configured TAS\n");
+                        } else {
+                            DEBUGP(DL_ERROR, "? TAS SETUP: Intel library setup failed: %d\n", rc);
+                        }
+                    }
+                    
+                    info = sizeof(*r);
+                }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_SETUP_FP:
+        {
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_FP: Starting Frame Preemption configuration\n");
+            
+            if (inLen < sizeof(AVB_FP_REQUEST) || outLen < sizeof(AVB_FP_REQUEST)) {
+                DEBUGP(DL_ERROR, "? FP SETUP: Buffer too small\n");
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "? FP SETUP: Hardware not ready (state=%s)\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    PAVB_FP_REQUEST r = (PAVB_FP_REQUEST)buf;
+                    
+                    // Ensure Intel library is using the correct hardware context
+                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
+                        activeContext->intel_device.private_data = activeContext;
+                    }
+                    
+                    DEBUGP(DL_INFO, "?? FP SETUP: Configuring Frame Preemption on VID=0x%04X DID=0x%04X\n",
+                           activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                    
+                    // Check if this device supports Frame Preemption
+                    if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_FP)) {
+                        DEBUGP(DL_WARN, "? FP SETUP: Device does not support Frame Preemption (caps=0x%08X)\n", 
+                               activeContext->intel_device.capabilities);
+                        r->status = (avb_u32)STATUS_NOT_SUPPORTED;
+                        status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
+                    } else {
+                        // Call Intel library Frame Preemption setup function (correct function name)
+                        int rc = intel_setup_frame_preemption(&activeContext->intel_device, &r->config);
+                        r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        
+                        if (rc == 0) {
+                            DEBUGP(DL_INFO, "? FP SETUP: Successfully configured Frame Preemption\n");
+                        } else {
+                            DEBUGP(DL_ERROR, "? FP SETUP: Intel library setup failed: %d\n", rc);
+                        }
+                    }
+                    
+                    info = sizeof(*r);
+                }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_SETUP_PTM:
+        {
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_PTM: Starting PCIe PTM configuration\n");
+            
+            if (inLen < sizeof(AVB_PTM_REQUEST) || outLen < sizeof(AVB_PTM_REQUEST)) {
+                DEBUGP(DL_ERROR, "? PTM SETUP: Buffer too small\n");
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "? PTM SETUP: Hardware not ready (state=%s)\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    PAVB_PTM_REQUEST r = (PAVB_PTM_REQUEST)buf;
+                    
+                    // Ensure Intel library is using the correct hardware context
+                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
+                        activeContext->intel_device.private_data = activeContext;
+                    }
+                    
+                    DEBUGP(DL_INFO, "?? PTM SETUP: Configuring PCIe PTM on VID=0x%04X DID=0x%04X\n",
+                           activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                    
+                    // Check if this device supports PCIe PTM
+                    if (!(activeContext->intel_device.capabilities & INTEL_CAP_PCIe_PTM)) {
+                        DEBUGP(DL_WARN, "? PTM SETUP: Device does not support PCIe PTM (caps=0x%08X)\n", 
+                               activeContext->intel_device.capabilities);
+                        r->status = (avb_u32)STATUS_NOT_SUPPORTED;
+                        status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
+                    } else {
+                        // Call Intel library PTM setup function (correct function name)
+                        int rc = intel_setup_ptm(&activeContext->intel_device, &r->config);
+                        r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                        
+                        if (rc == 0) {
+                            DEBUGP(DL_INFO, "? PTM SETUP: Successfully configured PCIe PTM\n");
+                        } else {
+                            DEBUGP(DL_ERROR, "? PTM SETUP: Intel library setup failed: %d\n", rc);
+                        }
+                    }
+                    
+                    info = sizeof(*r);
+                }
+            }
+        }
+        break;
+
     default:
         status = STATUS_INVALID_DEVICE_REQUEST; break;
     }
@@ -1099,7 +1249,7 @@ NTSTATUS AvbForceContextReinitialization(PAVB_DEVICE_CONTEXT context)
         ULONG barLen = 0;
         NTSTATUS discovery_status = AvbDiscoverIntelControllerResources(context->filter_instance, &bar0, &barLen);
         if (!NT_SUCCESS(discovery_status)) {
-            DEBUGP(DL_ERROR, "? ForceContextReinitialization: Hardware discovery failed: 0x%08X\n", discovery_status);
+            DEBUGP(DL_ERROR, "? ForceContextReinitialization: Hardware discovery_failed: 0x%08X\n", discovery_status);
             return discovery_status;
         }
         

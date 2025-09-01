@@ -267,6 +267,7 @@
     <None Include="IMPLEMENTATION_COMPLETE.md" />
     <None Include="IMPLEMENTATION_COMPLETE_FINAL.md" />
     <None Include="IMPLEMENTATION_MILESTONE.md" />
+    <None Include="IMPLEMENTATION_STATUS_SUMMARY.md" />
     <None Include="install_driver.cmd" />
     <None Include="INTEGRATION_GUIDE.md" />
     <None Include="IntelAvbFilter-Cleanup.ps1" />

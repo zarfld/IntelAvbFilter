@@ -224,6 +224,7 @@
     <None Include="external\intel_avb\FILTER_DRIVER_REQUIREMENTS.md">
       <Filter>Docs</Filter>
     </None>
+    <None Include="IMPLEMENTATION_STATUS_SUMMARY.md" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />

@@ -1,7 +1,11 @@
 ﻿  Building 'IntelAvbFilter' with toolset 'WindowsKernelModeDriver10.0' and the 'Windows Driver' target platform.
   Stamping x64\Debug\IntelAvbFilter.inf
-  Stamping [Version] section with DriverVer=09/01/2025,13.52.1.381
+  Stamping [Version] section with DriverVer=09/01/2025,16.30.35.496
+  avb_integration_fixed.c
   IntelAvbFilter.vcxproj -> D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter.sys
+  Done Adding Additional Store
+  Successfully signed: D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter.sys
+  
   Driver is 'Windows Driver'.
   Processing directory (D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\) file (intelavbfilter.cat)
   Processing directory (D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\) file (intelavbfilter.inf)
