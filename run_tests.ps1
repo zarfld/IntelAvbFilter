@@ -4,8 +4,12 @@
 Write-Host "Intel AVB Filter Driver - Test Suite Execution" -ForegroundColor Cyan
 Write-Host "=====================================================" -ForegroundColor Cyan
 
-Write-Host "`n?? Phase 1: Basic Hardware Diagnostics" -ForegroundColor Yellow
+Write-Host "`n?? Phase 1: Basic Hardware Diagnostics" -ForegroundColor Green
+Write-Host "Purpose: Comprehensive hardware analysis and troubleshooting" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\avb_diagnostic_test.exe
+
+Write-Host "`n?? Hardware State Management Test" -ForegroundColor Green  
+Write-Host "Purpose: Test hardware state transitions and management" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\avb_hw_state_test.exe
 
 Write-Host "`n?? Phase 2: TSN IOCTL Handler Verification (NEW - Critical Fix Validation)" -ForegroundColor Green

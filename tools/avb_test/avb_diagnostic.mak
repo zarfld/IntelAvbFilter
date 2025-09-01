@@ -10,30 +10,32 @@ PLATFORM=x64
 !ENDIF
 
 !IF "$(CFG)" == "Debug"
-CFLAGS = /nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_DIAGNOSTIC_USERMODE /I../../
+CFLAGS = /nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_DIAGNOSTIC_USERMODE /I.
 LINKFLAGS = /nologo /DEBUG
 !ELSE
-CFLAGS = /nologo /W4 /O2 /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_DIAGNOSTIC_USERMODE /I../../
+CFLAGS = /nologo /W4 /O2 /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_DIAGNOSTIC_USERMODE /I.
 LINKFLAGS = /nologo
 !ENDIF
 
-OUTDIR = ..\..\build\tools\avb_test\$(PLATFORM)\$(CFG)
+OUTDIR = build\tools\avb_test\$(PLATFORM)\$(CFG)
 TARGET = $(OUTDIR)\avb_diagnostic_test.exe
 
-SOURCES = avb_diagnostic_test.c
+SOURCES = tools\avb_test\avb_diagnostic_test_um.c
 
-all: $(TARGET)
+all: dirs $(TARGET)
 
-$(OUTDIR):
-	@if not exist "$(OUTDIR)" mkdir "$(OUTDIR)"
+dirs:
+	@if not exist $(OUTDIR) mkdir $(OUTDIR)
 
-$(TARGET): $(OUTDIR) $(SOURCES)
+OBJS=$(OUTDIR)\avb_diagnostic_test_um.obj
+
+$(OUTDIR)\avb_diagnostic_test_um.obj: $(SOURCES)
 	cl $(CFLAGS) /Fo$(OUTDIR)\ /c $(SOURCES)
-	link $(LINKFLAGS) /OUT:$(TARGET) $(OUTDIR)\avb_diagnostic_test.obj kernel32.lib user32.lib advapi32.lib
+
+$(TARGET): $(OBJS)
+	link $(LINKFLAGS) /OUT:$(TARGET) $(OBJS) kernel32.lib user32.lib advapi32.lib
 
 clean:
-	@if exist "$(OUTDIR)\*.obj" del /Q "$(OUTDIR)\*.obj"
-	@if exist "$(OUTDIR)\*.pdb" del /Q "$(OUTDIR)\*.pdb"
-	@if exist "$(TARGET)" del /Q "$(TARGET)"
+	@if exist build\tools\avb_test\$(PLATFORM)\$(CFG)\avb_diagnostic_test.* del build\tools\avb_test\$(PLATFORM)\$(CFG)\avb_diagnostic_test.*
 
-.PHONY: all clean
+.PHONY: all dirs clean
