@@ -225,6 +225,7 @@
       <Filter>Docs</Filter>
     </None>
     <None Include="IMPLEMENTATION_STATUS_SUMMARY.md" />
+    <None Include="SERVICE_TEAM_RESPONSE.md" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />
