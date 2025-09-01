@@ -49,4 +49,4 @@ Write-Host "`n? Test Suite Complete" -ForegroundColor Green
 Write-Host "Key Success Indicator: TSN IOCTL handlers should no longer return Error 1" -ForegroundColor Gray
 Write-Host "Expected: TAS/FP/PTM IOCTLs return success or hardware-specific errors (not Error 1)" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe
-.\external\intel_avb\run_tests.ps1
+.\external\intel_avb\lib\run_tests.ps1
