@@ -221,6 +221,9 @@
     <None Include="DRIVER_STATUS_REPORT.md" />
     <None Include="tools\avb_test\avb_i226_advanced.mak" />
     <None Include="docs\avb_ioctl.md" />
+    <None Include="external\intel_avb\FILTER_DRIVER_REQUIREMENTS.md">
+      <Filter>Docs</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />
