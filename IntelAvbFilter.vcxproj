@@ -240,6 +240,7 @@
     <None Include="BREAKTHROUGH_SUMMARY.md" />
     <None Include="Build-And-Sign-Driver.ps1" />
     <None Include="CAT-FILE-MANAGEMENT.md" />
+    <None Include="CHANGELOG.md" />
     <None Include="COMPILATION_ERRORS_FIXED.md" />
     <None Include="CURRENT_STATUS_ANALYSIS.md" />
     <None Include="DEVELOPMENT_COMPLETE.md" />
@@ -276,6 +277,7 @@
     <None Include="Manage-Certificate.ps1" />
     <None Include="MICROSOFT_SAMPLES_INTEGRATION.md" />
     <None Include="README.md" />
+    <None Include="run_tests.ps1" />
     <None Include="scripts\build_and_test.ps1" />
     <None Include="SERVICE_TEAM_RESPONSE.md" />
     <None Include="Sign-Driver.ps1" />
