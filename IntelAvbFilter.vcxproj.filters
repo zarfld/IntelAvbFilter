@@ -215,5 +215,14 @@
     <None Include="FIX_STATUS_SUMMARY.md" />
     <None Include="IMPLEMENTATION_COMPLETE_FINAL.md" />
     <None Include="IntelAvbFilter-Cleanup.ps1" />
+    <None Include="docs\COMPREHENSIVE_FIX_SUMMARY.md" />
+    <None Include="docs\I210_PTP_CLOCK_FIX_ANALYSIS.md" />
+    <None Include="docs\I210_PTP_TEST_TOOL_FIX.md" />
+    <None Include="DRIVER_STATUS_REPORT.md" />
+    <None Include="tools\avb_test\avb_i226_advanced.mak" />
+    <None Include="docs\avb_ioctl.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="DAW01.LOG" />
   </ItemGroup>
 </Project>
