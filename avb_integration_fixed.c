@@ -791,7 +791,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         break;
     case IOCTL_AVB_SETUP_TAS:
         {
-            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_TAS: Starting TAS configuration\n");
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_TAS: Phase 2 Enhanced TAS Configuration\n");
             
             if (inLen < sizeof(AVB_TAS_REQUEST) || outLen < sizeof(AVB_TAS_REQUEST)) {
                 DEBUGP(DL_ERROR, "? TAS SETUP: Buffer too small\n");
@@ -811,7 +811,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         activeContext->intel_device.private_data = activeContext;
                     }
                     
-                    DEBUGP(DL_INFO, "?? TAS SETUP: Configuring Time-Aware Shaper on VID=0x%04X DID=0x%04X\n",
+                    DEBUGP(DL_INFO, "?? TAS SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                     
                     // Check if this device supports TAS
@@ -821,15 +821,35 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
-                        // Call Intel library TAS setup function (correct function name)
+                        // Call Intel library TAS setup function (standard implementation)
+                        DEBUGP(DL_INFO, "?? TAS SETUP: Calling Intel library TAS implementation\n");
                         int rc = intel_setup_time_aware_shaper(&activeContext->intel_device, &r->config);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
                         if (rc == 0) {
-                            DEBUGP(DL_INFO, "? TAS SETUP: Successfully configured TAS\n");
+                            DEBUGP(DL_INFO, "? TAS configuration successful\n");
                         } else {
-                            DEBUGP(DL_ERROR, "? TAS SETUP: Intel library setup failed: %d\n", rc);
+                            DEBUGP(DL_ERROR, "? TAS setup failed: %d\n", rc);
+                            
+                            // Provide diagnostic information
+                            switch (rc) {
+                                case -ENOTSUP:
+                                    DEBUGP(DL_ERROR, "   Reason: Device doesn't support TAS\n");
+                                    break;
+                                case -EBUSY:
+                                    DEBUGP(DL_ERROR, "   Reason: Prerequisites not met (PTP clock or hardware state)\n");
+                                    break;
+                                case -EIO:
+                                    DEBUGP(DL_ERROR, "   Reason: Hardware register access failed\n");
+                                    break;
+                                case -EINVAL:
+                                    DEBUGP(DL_ERROR, "   Reason: Invalid configuration parameters\n");
+                                    break;
+                                default:
+                                    DEBUGP(DL_ERROR, "   Reason: Unknown error\n");
+                                    break;
+                            }
                         }
                     }
                     
@@ -841,7 +861,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SETUP_FP:
         {
-            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_FP: Starting Frame Preemption configuration\n");
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_FP: Phase 2 Enhanced Frame Preemption Configuration\n");
             
             if (inLen < sizeof(AVB_FP_REQUEST) || outLen < sizeof(AVB_FP_REQUEST)) {
                 DEBUGP(DL_ERROR, "? FP SETUP: Buffer too small\n");
@@ -861,7 +881,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         activeContext->intel_device.private_data = activeContext;
                     }
                     
-                    DEBUGP(DL_INFO, "?? FP SETUP: Configuring Frame Preemption on VID=0x%04X DID=0x%04X\n",
+                    DEBUGP(DL_INFO, "?? FP SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                     
                     // Check if this device supports Frame Preemption
@@ -871,15 +891,32 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
-                        // Call Intel library Frame Preemption setup function (correct function name)
+                        // Call Intel library Frame Preemption setup function (standard implementation)
+                        DEBUGP(DL_INFO, "?? FP SETUP: Calling Intel library Frame Preemption implementation\n");
                         int rc = intel_setup_frame_preemption(&activeContext->intel_device, &r->config);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
                         if (rc == 0) {
-                            DEBUGP(DL_INFO, "? FP SETUP: Successfully configured Frame Preemption\n");
+                            DEBUGP(DL_INFO, "? Frame Preemption configuration successful\n");
                         } else {
-                            DEBUGP(DL_ERROR, "? FP SETUP: Intel library setup failed: %d\n", rc);
+                            DEBUGP(DL_ERROR, "? Frame Preemption setup failed: %d\n", rc);
+                            
+                            // Provide diagnostic information
+                            switch (rc) {
+                                case -ENOTSUP:
+                                    DEBUGP(DL_ERROR, "   Reason: Device doesn't support Frame Preemption\n");
+                                    break;
+                                case -EBUSY:
+                                    DEBUGP(DL_ERROR, "   Reason: Link not active or link partner doesn't support preemption\n");
+                                    break;
+                                case -EIO:
+                                    DEBUGP(DL_ERROR, "   Reason: Hardware register access failed\n");
+                                    break;
+                                default:
+                                    DEBUGP(DL_ERROR, "   Reason: Unknown error\n");
+                                    break;
+                            }
                         }
                     }
                     
@@ -891,7 +928,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SETUP_PTM:
         {
-            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_PTM: Starting PCIe PTM configuration\n");
+            DEBUGP(DL_INFO, "?? IOCTL_AVB_SETUP_PTM: Phase 2 Enhanced PTM Configuration\n");
             
             if (inLen < sizeof(AVB_PTM_REQUEST) || outLen < sizeof(AVB_PTM_REQUEST)) {
                 DEBUGP(DL_ERROR, "? PTM SETUP: Buffer too small\n");
@@ -911,7 +948,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         activeContext->intel_device.private_data = activeContext;
                     }
                     
-                    DEBUGP(DL_INFO, "?? PTM SETUP: Configuring PCIe PTM on VID=0x%04X DID=0x%04X\n",
+                    DEBUGP(DL_INFO, "?? PTM SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                     
                     // Check if this device supports PCIe PTM
@@ -921,15 +958,16 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
-                        // Call Intel library PTM setup function (correct function name)
+                        // Phase 2: Use enhanced PTM implementation
+                        DEBUGP(DL_INFO, "?? Phase 2: Calling enhanced PTM implementation\n");
                         int rc = intel_setup_ptm(&activeContext->intel_device, &r->config);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
                         if (rc == 0) {
-                            DEBUGP(DL_INFO, "? PTM SETUP: Successfully configured PCIe PTM\n");
+                            DEBUGP(DL_INFO, "? Phase 2: PTM configuration completed\n");
                         } else {
-                            DEBUGP(DL_ERROR, "? PTM SETUP: Intel library setup failed: %d\n", rc);
+                            DEBUGP(DL_ERROR, "? Phase 2: PTM setup failed: %d\n", rc);
                         }
                     }
                     

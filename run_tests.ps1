@@ -41,6 +41,10 @@ Write-Host "`n? Phase 5: I210 PTP Testing (Known Issues)" -ForegroundColor Red
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe ts-get
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe ts-set-now
 
+Write-Host "`n?? TSN Hardware Activation Validation (Enhanced Implementation Verification)" -ForegroundColor Green
+Write-Host "Purpose: Verify TSN features actually activate at hardware level (not just IOCTL success)" -ForegroundColor Gray
+.\build\tools\avb_test\x64\Debug\tsn_hardware_activation_validation.exe
+
 Write-Host "`n? Test Suite Complete" -ForegroundColor Green
 Write-Host "Key Success Indicator: TSN IOCTL handlers should no longer return Error 1" -ForegroundColor Gray
 Write-Host "Expected: TAS/FP/PTM IOCTLs return success or hardware-specific errors (not Error 1)" -ForegroundColor Gray

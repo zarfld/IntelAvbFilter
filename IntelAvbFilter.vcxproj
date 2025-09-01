@@ -239,6 +239,7 @@
     <None Include="BAR0_IMPLEMENTATION_COMPLETE.md" />
     <None Include="BREAKTHROUGH_SUMMARY.md" />
     <None Include="Build-And-Sign-Driver.ps1" />
+    <None Include="build_all_tests.cmd" />
     <None Include="CAT-FILE-MANAGEMENT.md" />
     <None Include="CHANGELOG.md" />
     <None Include="COMPILATION_ERRORS_FIXED.md" />
@@ -288,6 +289,8 @@
     <None Include="tools\avb_test\avb_diagnostic.mak" />
     <None Include="tools\avb_test\avb_i226_advanced.mak" />
     <None Include="tools\avb_test\avb_test.mak" />
+    <None Include="tools\avb_test\phase2_test.mak" />
+    <None Include="tools\avb_test\tsn_hardware_activation_validation.mak" />
     <None Include="tools\avb_test\tsn_ioctl_test.mak" />
     <None Include="x64\Debug\IntelAvbFilter.cat" />
   </ItemGroup>

@@ -229,6 +229,9 @@
     <None Include="tools\avb_test\tsn_ioctl_test.mak" />
     <None Include="run_tests.ps1" />
     <None Include="CHANGELOG.md" />
+    <None Include="tools\avb_test\phase2_test.mak" />
+    <None Include="tools\avb_test\tsn_hardware_activation_validation.mak" />
+    <None Include="build_all_tests.cmd" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />
