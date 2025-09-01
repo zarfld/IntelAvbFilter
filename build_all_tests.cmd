@@ -6,6 +6,22 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 
 echo.
 echo =======================================================
+echo Building AVB Diagnostic Test...
+echo =======================================================
+nmake -f tools\avb_test\avb_diagnostic.mak clean
+nmake -f tools\avb_test\avb_diagnostic.mak
+if errorlevel 1 goto :error
+
+echo.
+echo =======================================================
+echo Building AVB Hardware State Test...
+echo =======================================================
+nmake -f tools\avb_test\avb_hw_state_test.mak clean
+nmake -f tools\avb_test\avb_hw_state_test.mak
+if errorlevel 1 goto :error
+
+echo.
+echo =======================================================
 echo Building TSN IOCTL Handler Test...
 echo =======================================================
 nmake -f tools\avb_test\tsn_ioctl_test.mak clean
@@ -63,6 +79,18 @@ echo =======================================================
 echo Build Summary
 echo =======================================================
 echo Checking built executables:
+if exist "build\tools\avb_test\x64\Debug\avb_diagnostic_test.exe" (
+    echo  ? AVB Diagnostic Test
+) else (
+    echo  ? AVB Diagnostic Test - Missing
+)
+
+if exist "build\tools\avb_test\x64\Debug\avb_hw_state_test.exe" (
+    echo  ? AVB Hardware State Test
+) else (
+    echo  ? AVB Hardware State Test - Missing
+)
+
 if exist "build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe" (
     echo  ? TSN IOCTL Handler Test
 ) else (
