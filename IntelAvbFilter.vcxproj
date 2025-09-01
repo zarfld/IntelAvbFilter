@@ -286,6 +286,7 @@
     <None Include="tools\avb_test\avb_diagnostic.mak" />
     <None Include="tools\avb_test\avb_i226_advanced.mak" />
     <None Include="tools\avb_test\avb_test.mak" />
+    <None Include="tools\avb_test\tsn_ioctl_test.mak" />
     <None Include="x64\Debug\IntelAvbFilter.cat" />
   </ItemGroup>
   <ItemGroup>
