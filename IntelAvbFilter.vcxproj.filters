@@ -226,6 +226,7 @@
     </None>
     <None Include="IMPLEMENTATION_STATUS_SUMMARY.md" />
     <None Include="SERVICE_TEAM_RESPONSE.md" />
+    <None Include="tools\avb_test\tsn_ioctl_test.mak" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />

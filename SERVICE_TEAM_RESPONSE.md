@@ -76,12 +76,70 @@ Testing IOCTL_AVB_SETUP_TAS...
   Status depends on hardware support and configuration validity
 ```
 
-## ?? **NEXT STEPS FOR SERVICE TEAM**
+## ?? **NEXT STEPS FOR SERVICE TEAM VALIDATION**
 
-1. **Rebuild and Test**: Please rebuild the driver with the updated `avb_integration_fixed.c`
-2. **Verify IOCTL Routing**: Confirm that TAS/FP/PTM no longer return Error 1
-3. **Hardware Validation**: Test actual TSN functionality on I225/I226 hardware
-4. **Error 21 Investigation**: Help us debug the enhanced timestamping issues
+### **Critical: We Need Your Hardware Testing to Prove Our Fix Works**
+
+**Important**: Our analysis and fix are **theoretical until hardware-tested**. Following the **Hardware-first policy** from our coding instructions, we need your validation to prove the implementation works.
+
+### **Required Validation Steps**
+
+1. **Rebuild Driver** with updated `avb_integration_fixed.c`
+2. **Install Updated Driver** on test system with I210 + I226-LM hardware
+3. **Run TSN IOCTL Handler Verification Test**:
+   ```cmd
+   # Compile and run our specific TSN handler test
+   cl tools\test_tsn_ioctl_handlers.c include\avb_ioctl.h
+   .\test_tsn_ioctl_handlers.exe
+   ```
+4. **Re-run Original Hardware Tests**:
+   ```powershell
+   .\build\test_tsn_support.exe
+   .\build\test_advanced_ioctls.exe
+   ```
+
+### **Expected Results - Success Criteria**
+
+**?? Primary Success**: IOCTLs no longer return `ERROR_INVALID_FUNCTION` (Error 1)
+
+**BEFORE our fix**:
+```
+Testing IOCTL_AVB_SETUP_TAS...
+  ? IOCTL_AVB_SETUP_TAS: Not implemented (Error: 1)
+```
+
+**AFTER our fix (Expected)**:
+```
+Testing IOCTL_AVB_SETUP_TAS...
+  ? IOCTL_AVB_SETUP_TAS: Handler exists, returned error X (FIX WORKED)
+  (Error is expected - means our handler is being called)
+```
+
+**?? Secondary Success**: Actual TSN functionality works (depends on hardware support)
+
+### **Validation Scenarios**
+
+**Scenario A: Perfect Success** ?
+- IOCTLs return success, hardware programming works
+- TAS/FP/PTM fully functional
+
+**Scenario B: Handler Success, Hardware Issues** ?? *(Still validates our fix)*
+- IOCTLs no longer return Error 1
+- Return other errors (hardware not ready, unsupported, etc.)
+- **This proves our IOCTL handlers are working**
+
+**Scenario C: Fix Failed** ?
+- IOCTLs still return `ERROR_INVALID_FUNCTION` (Error 1)
+- Need to investigate further
+
+### **Why Your Testing Is Critical**
+
+1. **Hardware-First Policy**: Our coding instructions require real hardware validation
+2. **No Simulation in Production**: We can't fake hardware responses
+3. **Service Team Methodology Proven Correct**: Your testing caught the original gap
+4. **Complete Path Validation**: User-mode ? IOCTL ? Intel library ? hardware
+
+**We implemented the fix, but your hardware testing is the proof that it works.**
 
 ## ?? **LESSONS LEARNED**
 
