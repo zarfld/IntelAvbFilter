@@ -39,3 +39,5 @@ selftest
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe ts-set-now
 #.\build\tools\avb_test\x64\Debug\avb_test_i210.exe reg-read <hexOff>
 #.\build\tools\avb_test\x64\Debug\avb_test_i210.exe reg-write <hexOff> <hexVal>
+
+.\build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe
