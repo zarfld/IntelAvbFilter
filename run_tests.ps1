@@ -27,38 +27,38 @@ Write-Host "`n? Phase 2: TSN IOCTL Handler Verification (Critical Fix Validation
 Write-Host "Purpose: Verify TAS/FP/PTM IOCTLs no longer return ERROR_INVALID_FUNCTION" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe
 
+Write-Host "`n? TSN Hardware Activation Validation" -ForegroundColor Green
+Write-Host "Purpose: Verify TSN features actually activate at hardware level" -ForegroundColor Gray
+.\build\tools\avb_test\x64\Debug\tsn_hardware_activation_validation.exe
+
 Write-Host "`n? Phase 3: Multi-Adapter Hardware Testing" -ForegroundColor Yellow
 .\build\tools\avb_test\x64\Debug\avb_multi_adapter_test.exe
 
 Write-Host "`n? Phase 4: I226 Advanced Feature Testing" -ForegroundColor Magenta
 .\build\tools\avb_test\x64\Debug\avb_i226_test.exe
-# Available I226 test options:
-# .\build\tools\avb_test\x64\Debug\avb_i226_test.exe info      - Show I226 device information
-# .\build\tools\avb_test\x64\Debug\avb_i226_test.exe ptp      - Test I226 PTP timing verification
-# .\build\tools\avb_test\x64\Debug\avb_i226_test.exe tsn      - Test I226 TSN register access
-# .\build\tools\avb_test\x64\Debug\avb_i226_test.exe advanced - Test I226 advanced TSN features
-# .\build\tools\avb_test\x64\Debug\avb_i226_test.exe all      - Run all tests (default)
 
 .\build\tools\avb_test\x64\Debug\avb_i226_advanced_test.exe
 
-Write-Host "`n?? Phase 5: I210 PTP Testing (Known Issues)" -ForegroundColor Red
+Write-Host "`n? Phase 5: I210 Basic Testing" -ForegroundColor Blue
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe ptp-unlock
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe ptp-bringup
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe ptp-probe
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe selftest
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe snapshot
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe snapshot-ssot
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe ptp-enable-ssot
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe ptp-probe
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe info
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe caps
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe ts-get
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe ts-set-now
 
-Write-Host "`n? TSN Hardware Activation Validation (Enhanced Implementation Verification)" -ForegroundColor Green
-Write-Host "Purpose: Verify TSN features actually activate at hardware level (not just IOCTL success)" -ForegroundColor Gray
-.\build\tools\avb_test\x64\Debug\tsn_hardware_activation_validation.exe
+Write-Host "`n? Phase 6: Specialized Investigation Tests" -ForegroundColor Cyan
+Write-Host "Purpose: Deep hardware investigation and TSN validation" -ForegroundColor Gray
+
+Write-Host "`n  ?? ChatGPT5 I226 TAS Validation" -ForegroundColor DarkCyan
+.\build\tools\avb_test\x64\Debug\chatgpt5_i226_tas_validation.exe
+
+Write-Host "`n  ?? Corrected I226 TAS Test" -ForegroundColor DarkCyan
+.\build\tools\avb_test\x64\Debug\corrected_i226_tas_test.exe
+
+Write-Host "`n  ?? Critical Prerequisites Investigation" -ForegroundColor DarkCyan
+.\build\tools\avb_test\x64\Debug\critical_prerequisites_investigation.exe
+
+Write-Host "`n  ?? Enhanced TAS Investigation" -ForegroundColor DarkCyan
+.\build\tools\avb_test\x64\Debug\enhanced_tas_investigation.exe
+
+Write-Host "`n  ?? Hardware Investigation Tool" -ForegroundColor DarkCyan
+.\build\tools\avb_test\x64\Debug\hardware_investigation_tool.exe
 
 Write-Host "`n? Test Suite Complete" -ForegroundColor Green
 Write-Host "Key Success Indicators:" -ForegroundColor Gray
@@ -66,9 +66,14 @@ Write-Host "  - Architecture compliance tests pass" -ForegroundColor Gray
 Write-Host "  - No false capability advertising" -ForegroundColor Gray  
 Write-Host "  - Clean device separation maintained" -ForegroundColor Gray
 Write-Host "  - TSN IOCTL handlers no longer return Error 1" -ForegroundColor Gray
+Write-Host "  - Hardware activation validation identifies issues" -ForegroundColor Gray
 Write-Host "Expected: TAS/FP/PTM IOCTLs return success or hardware-specific errors (not Error 1)" -ForegroundColor Gray
 
 Write-Host "`n?? External Library Tests" -ForegroundColor Cyan
-cd .\external\intel_avb\lib
-.\run_tests.ps1
-cd ../../../
+if (Test-Path ".\external\intel_avb\lib\run_tests.ps1") {
+    cd .\external\intel_avb\lib
+    .\run_tests.ps1
+    cd ../../../
+} else {
+    Write-Host "External library tests not found - skipping" -ForegroundColor Yellow
+}

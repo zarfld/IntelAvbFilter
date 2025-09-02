@@ -24,8 +24,8 @@ Abstract:
 #include <string.h>
 #include <stdlib.h>
 
-// Include the shared IOCTL ABI
-#include "../../include/avb_ioctl.h"
+// Use SSOT header for IOCTL definitions
+#include "../../external/intel_avb/include/avb_ioctl.h"
 
 #define LINKNAME "\\\\.\\IntelAvbFilter"
 
@@ -800,7 +800,7 @@ static void TestI226ComprehensiveAdvanced(HANDLE h) {
     printf("\n?? === I226 ADVANCED TEST SUMMARY ===\n");
     printf("? Tested Features:\n");
     printf("   - EEE (Energy Efficient Ethernet) configuration\n");
-    printf("   - PCIe PTM advanced timing measurement\n");
+    printf("   - PCIe PTM advanced timing\n");
     printf("   - Advanced MDIO PHY management\n");
     printf("   - 2.5G speed detection and configuration\n");
     printf("   - Interrupt management (EITR, IVAR, GPIE)\n");

@@ -8,8 +8,8 @@
 #include <vector>
 #include <stdint.h>
 
-// Pull in public IOCTL contract
-#include "include/avb_ioctl.h"
+// Pull in SSOT public IOCTL contract 
+#include "../../external/intel_avb/include/avb_ioctl.h"
 
 namespace AvbTest
 {
@@ -63,31 +63,19 @@ namespace AvbTest
         return ::DeviceIoControl(dev.get(), code, nullptr, 0, nullptr, 0, &bytes, nullptr) != 0;
     }
 
-    inline uint64_t QpcNow() {
-        LARGE_INTEGER c, f; ::QueryPerformanceCounter(&c); ::QueryPerformanceFrequency(&f);
-        // Return nanoseconds
-        return static_cast<uint64_t>((c.QuadPart * 1000000000ULL) / (uint64_t)f.QuadPart);
+    template<typename T>
+    inline bool SimpleIoctl(DWORD code, T& req, DWORD& bytes) {
+        UniqueHandle dev = OpenAvbDevice();
+        if (!dev.valid()) return false;
+        return ::DeviceIoControl(dev.get(), code, &req, (DWORD)sizeof(T), &req, (DWORD)sizeof(T), &bytes, nullptr) != 0;
     }
 
-    inline void SleepMs(DWORD ms) { ::Sleep(ms); }
-
-    // Try to disable/enable an interface by friendly name via netsh; returns true on success.
-    inline bool ToggleInterfaceAdminState(const std::wstring& friendlyName, bool enable) {
-        std::wstring cmd = L"netsh interface set interface \"" + friendlyName + L"\" admin=" + (enable ? L"ENABLED" : L"DISABLED");
-        int rc = _wsystem(cmd.c_str());
-        return (rc == 0);
-    }
-
-    // Attempt to find an Intel adapter friendly name using IP Helper; returns first match or empty.
-    inline std::wstring FindIntelAdapterFriendlyName() {
-        // Fallback: environment AVB_ADAPTER_NAME
-        wchar_t buf[512]; DWORD len = 511;
-        if (GetEnvironmentVariableW(L"AVB_ADAPTER_NAME", buf, len)) {
-            return std::wstring(buf);
+    inline std::string GetLastErrorString() {
+        DWORD error = ::GetLastError();
+        CHAR buffer[512];
+        if (::FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, nullptr, error, 0, buffer, sizeof(buffer), nullptr) == 0) {
+            return "Unknown error";
         }
-        // Minimal: use PowerShell Get-NetAdapter to find Intel; requires admin
-        // Keep it simple to avoid extra deps
-        // This is best-effort and may fail on restricted systems
-        return L"";
+        return std::string(buffer);
     }
 }

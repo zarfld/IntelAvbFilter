@@ -17,7 +17,11 @@ Abstract:
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include "../../include/avb_ioctl.h"
+
+// Use SSOT header for IOCTL definitions
+#include "../../external/intel_avb/include/avb_ioctl.h"
+
+// Use SSOT header for I226 register definitions  
 #include "../../intel-ethernet-regs/gen/i226_regs.h"
 
 #define LINKNAME "\\\\.\\IntelAvbFilter"

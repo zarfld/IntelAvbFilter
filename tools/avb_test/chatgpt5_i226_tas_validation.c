@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "..\\..\\include\\avb_ioctl.h"
+#include "..\\..\\external\\intel_avb\\include\\avb_ioctl.h"
 
 #define DEVICE_NAME L"\\\\.\\IntelAvbFilter"
 
