@@ -60,9 +60,6 @@
     <ClInclude Include="external\intel_avb\lib\intel_private.h">
       <Filter>Intel AVB Library\header</Filter>
     </ClInclude>
-    <ClInclude Include="include\avb_ioctl.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="intel-ethernet-regs\gen\i210_regs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -82,6 +79,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="external\intel_igb\src\e1000_regs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="external\intel_avb\include\avb_ioctl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -233,6 +233,7 @@
     <None Include="tools\avb_test\tsn_hardware_activation_validation.mak" />
     <None Include="build_all_tests.cmd" />
     <None Include="tools\avb_test\avb_hw_state_test.mak" />
+    <None Include="tools\avb_test\hardware_investigation.mak" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />

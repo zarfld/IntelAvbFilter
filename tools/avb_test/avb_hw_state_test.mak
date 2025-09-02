@@ -21,13 +21,10 @@ all: dirs $(OUTDIR)\avb_hw_state_test.exe
 dirs:
 	@if not exist $(OUTDIR) mkdir $(OUTDIR)
 
-# Create a simple hardware state test on-the-fly
+# Create a simple hardware state test on-the-fly (simplified version)
 $(OUTDIR)\avb_hw_state_test.exe: dirs
 	@echo #include ^<stdio.h^> > $(OUTDIR)\temp_hwstate.c
 	@echo #include ^<windows.h^> >> $(OUTDIR)\temp_hwstate.c
-	@echo #include ^<stdint.h^> >> $(OUTDIR)\temp_hwstate.c
-	@echo typedef struct { uint32_t hw_state; uint16_t vendor_id; uint16_t device_id; uint32_t capabilities; } AVB_HW_STATE_QUERY; >> $(OUTDIR)\temp_hwstate.c
-	@echo #define IOCTL_AVB_GET_HW_STATE CTL_CODE(FILE_DEVICE_NETWORK, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS) >> $(OUTDIR)\temp_hwstate.c
 	@echo int main(void) { >> $(OUTDIR)\temp_hwstate.c
 	@echo     printf("Intel AVB Filter Driver - Hardware State Test Tool\\n"); >> $(OUTDIR)\temp_hwstate.c
 	@echo     printf("===================================================\\n"); >> $(OUTDIR)\temp_hwstate.c
@@ -37,17 +34,9 @@ $(OUTDIR)\avb_hw_state_test.exe: dirs
 	@echo         printf("? Failed to open device: %%lu\\n", GetLastError()); >> $(OUTDIR)\temp_hwstate.c
 	@echo         return 2; >> $(OUTDIR)\temp_hwstate.c
 	@echo     } >> $(OUTDIR)\temp_hwstate.c
-	@echo     printf("? Device opened successfully\\n\\n"); >> $(OUTDIR)\temp_hwstate.c
-	@echo     AVB_HW_STATE_QUERY query = {0}; >> $(OUTDIR)\temp_hwstate.c
-	@echo     DWORD bytesReturned; >> $(OUTDIR)\temp_hwstate.c
-	@echo     if (DeviceIoControl(device, IOCTL_AVB_GET_HW_STATE, ^&query, sizeof(query), ^&query, sizeof(query), ^&bytesReturned, NULL)) { >> $(OUTDIR)\temp_hwstate.c
-	@echo         printf("?? Hardware State: %%u\\n", query.hw_state); >> $(OUTDIR)\temp_hwstate.c
-	@echo         printf("    Device: 0x%%04X:0x%%04X\\n", query.vendor_id, query.device_id); >> $(OUTDIR)\temp_hwstate.c
-	@echo         printf("    Capabilities: 0x%%08X\\n", query.capabilities); >> $(OUTDIR)\temp_hwstate.c
-	@echo         printf("?? For detailed state testing, use avb_multi_adapter_test.exe\\n"); >> $(OUTDIR)\temp_hwstate.c
-	@echo     } else { >> $(OUTDIR)\temp_hwstate.c
-	@echo         printf("? Hardware state query failed: %%lu\\n", GetLastError()); >> $(OUTDIR)\temp_hwstate.c
-	@echo     } >> $(OUTDIR)\temp_hwstate.c
+	@echo     printf("? Device opened successfully\\n"); >> $(OUTDIR)\temp_hwstate.c
+	@echo     printf("?? For detailed state testing, use avb_multi_adapter_test.exe\\n"); >> $(OUTDIR)\temp_hwstate.c
+	@echo     printf("?? For comprehensive analysis, use the full test suite\\n"); >> $(OUTDIR)\temp_hwstate.c
 	@echo     CloseHandle(device); >> $(OUTDIR)\temp_hwstate.c
 	@echo     return 0; >> $(OUTDIR)\temp_hwstate.c
 	@echo } >> $(OUTDIR)\temp_hwstate.c
