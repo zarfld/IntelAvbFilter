@@ -1,6 +1,6 @@
 ﻿  Building 'IntelAvbFilter' with toolset 'WindowsKernelModeDriver10.0' and the 'Windows Driver' target platform.
   Stamping x64\Debug\IntelAvbFilter.inf
-  Stamping [Version] section with DriverVer=09/01/2025,21.28.11.810
+  Stamping [Version] section with DriverVer=09/02/2025,8.51.28.883
   precomp.c
   avb_bar0_discovery.c
   avb_bar0_enhanced.c
