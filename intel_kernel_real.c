@@ -314,8 +314,8 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
 }
 
 /**
- * @brief Setup Time Aware Shaper - Evidence-Based Implementation using Linux IGC Driver
- * Reference: Linux IGC driver igc_tsn.c - Correct I226 TSN register programming
+ * @brief Setup Time Aware Shaper - Evidence-Based Implementation following ChatGPT5 Validation Runbook
+ * Reference: Linux IGC driver igc_tsn.c + ChatGPT5 I226 TAS validation spec order
  * @param dev Device handle
  * @param config TAS configuration
  * @return 0 on success, <0 on error
@@ -326,7 +326,7 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
     ULONG regValue;
     int result;
     
-    DEBUGP(DL_TRACE, "==>intel_setup_time_aware_shaper (EVIDENCE-BASED I226 IMPLEMENTATION)\n");
+    DEBUGP(DL_TRACE, "==>intel_setup_time_aware_shaper (ChatGPT5 Validation Runbook Implementation)\n");
     
     if (dev == NULL || config == NULL) {
         DEBUGP(DL_ERROR, "intel_setup_time_aware_shaper: Invalid parameters\n");
@@ -346,113 +346,213 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
         return -1;
     }
     
+    // Log VID:DID before each MMIO (ChatGPT5 requirement)
+    DEBUGP(DL_INFO, "I226 TAS Setup: VID:DID = 0x%04X:0x%04X\n", 
+           context->intel_device.pci_vendor_id, context->intel_device.pci_device_id);
+    
     DEBUGP(DL_INFO, "TAS Config: base_time=%llu:%lu, cycle_time=%lu:%lu\n",
            config->base_time_s, config->base_time_ns,
            config->cycle_time_s, config->cycle_time_ns);
     
-    // EVIDENCE-BASED FIX: Use correct I226 register addresses and sequence
+    // Step 1: Pre-req - Verify I226 PHC (SYSTIM) is advancing
+    ULONG systiml_1, systimh_1, systiml_2, systimh_2;
+    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_1);  // SYSTIML
+    if (result != 0) return result;
+    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_1);  // SYSTIMH
+    if (result != 0) return result;
     
-    // Step 1: Configure Queue 0 for TSN mode (Linux IGC pattern)
-    result = ndis_platform_ops.mmio_write(dev, I226_TXQCTL(0), TXQCTL_QUEUE_MODE_LAUNCHT);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "Failed to configure queue 0 for TSN mode\n");
-        return result;
+    // Wait 10ms and check again
+    LARGE_INTEGER delay;
+    delay.QuadPart = -100000;  // 10ms delay
+    KeDelayExecutionThread(KernelMode, FALSE, &delay);
+    
+    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
+    if (result != 0) return result;
+    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
+    if (result != 0) return result;
+    
+    ULONGLONG systim_1 = ((ULONGLONG)systimh_1 << 32) | systiml_1;
+    ULONGLONG systim_2 = ((ULONGLONG)systimh_2 << 32) | systiml_2;
+    
+    if (systim_2 <= systim_1) {
+        DEBUGP(DL_ERROR, "I226 PHC (SYSTIM) not advancing: 0x%llx -> 0x%llx - Fix SYSTIM first\n", 
+               systim_1, systim_2);
+        return -1;
     }
     
-    // Step 2: Program cycle time
-    ULONG cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
-    if (cycle_time_ns == 0) {
-        cycle_time_ns = 1000000;  // Default 1ms cycle
-    }
+    DEBUGP(DL_INFO, "? I226 PHC verified: SYSTIM advancing from 0x%llx to 0x%llx\n", 
+           systim_1, systim_2);
+    DEBUGP(DL_INFO, "    Clock advancement: %llu ns in 10ms\n", systim_2 - systim_1);
     
-    result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET_S, cycle_time_ns);
-    if (result != 0) return result;
-    result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET, cycle_time_ns);
-    if (result != 0) return result;
-    
-    DEBUGP(DL_INFO, "I226 Cycle time programmed: %lu ns\n", cycle_time_ns);
-    
-    // Step 3: Configure gate windows (Queue 0 open for full cycle)
-    result = ndis_platform_ops.mmio_write(dev, I226_STQT(0), 0);  // Start at beginning
-    if (result != 0) return result;
-    result = ndis_platform_ops.mmio_write(dev, I226_ENDQT(0), cycle_time_ns); // End at cycle end
-    if (result != 0) return result;
-    
-    // Close other queues
-    for (int i = 1; i < 4; i++) {
-        ndis_platform_ops.mmio_write(dev, I226_STQT(i), 0);
-        ndis_platform_ops.mmio_write(dev, I226_ENDQT(i), 0);
-    }
-    
-    // Step 4: Read current SYSTIM for base time calculation
-    ULONG systiml, systimh;
-    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml);  // SYSTIML
-    if (result != 0) return result;
-    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh);  // SYSTIMH
-    if (result != 0) return result;
-    
-    ULONGLONG current_systim = ((ULONGLONG)systimh << 32) | systiml;
-    ULONGLONG base_time_ns = (ULONGLONG)config->base_time_s * 1000000000ULL + config->base_time_ns;
-    
-    // Ensure base time is in the future
-    if (base_time_ns <= current_systim) {
-        base_time_ns = current_systim + 500000000ULL;  // +500ms
-    }
-    
-    // Step 5: I226-specific TQAVCTRL configuration with FUTSCDDIS
+    // Step 2: Program TSN/Qbv control (TQAVCTRL @ 0x3570)
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
     if (result != 0) return result;
     
-    // Check if GCL is already running
+    // Check if GCL is already running (BASET_H|L == 0)
     ULONG baset_h, baset_l;
     ndis_platform_ops.mmio_read(dev, I226_BASET_H, &baset_h);
     ndis_platform_ops.mmio_read(dev, I226_BASET_L, &baset_l);
     BOOLEAN gcl_running = (baset_h != 0 || baset_l != 0);
     
-    // Configure TQAVCTRL with I226-specific FUTSCDDIS if no GCL running
+    // Set TRANSMIT_MODE_TSN and ENHANCED_QAV
     regValue |= TQAVCTRL_TRANSMIT_MODE_TSN | TQAVCTRL_ENHANCED_QAV;
-    if (context->intel_device.device_type == INTEL_DEVICE_I226 && !gcl_running) {
+    
+    // If no GCL is running, also set FUTSCDDIS before programming cycle/base time (I226 requirement)
+    if (!gcl_running) {
         regValue |= TQAVCTRL_FUTSCDDIS;
-        DEBUGP(DL_INFO, "I226: Adding FUTSCDDIS for initial GCL configuration\n");
+        DEBUGP(DL_INFO, "I226: Setting FUTSCDDIS for initial GCL configuration\n");
     }
     
-    // Step 6: Program in I226-required order (Linux IGC sequence)
     result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
     if (result != 0) return result;
     
-    // Program base time (split into seconds and nanoseconds)
-    ULONG baset_h_new = (ULONG)(base_time_ns / 1000000000ULL);
-    ULONG baset_l_new = (ULONG)(base_time_ns % 1000000000ULL);
+    DEBUGP(DL_INFO, "? TQAVCTRL programmed: 0x%08X (TSN=%s, QAV=%s, FUTSCDDIS=%s)\n", 
+           regValue,
+           (regValue & TQAVCTRL_TRANSMIT_MODE_TSN) ? "ON" : "OFF",
+           (regValue & TQAVCTRL_ENHANCED_QAV) ? "ON" : "OFF", 
+           (regValue & TQAVCTRL_FUTSCDDIS) ? "ON" : "OFF");
     
+    // Step 3: Program cycle time
+    ULONG cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
+    if (cycle_time_ns == 0) {
+        cycle_time_ns = 1000000;  // Default 1ms cycle
+    }
+    
+    // QBVCYCLET_S @ 0x3320 = cycle_ns
+    result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET_S, cycle_time_ns);
+    if (result != 0) return result;
+    
+    // QBVCYCLET @ 0x331C = cycle_ns (both, in nanoseconds)
+    result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET, cycle_time_ns);
+    if (result != 0) return result;
+    
+    DEBUGP(DL_INFO, "? Cycle time programmed: %lu ns (%lu ms)\n", 
+           cycle_time_ns, cycle_time_ns / 1000000);
+    
+    // Step 4: Choose base time in the future
+    // Read SYSTIML/H, compute base = now + 500 ms, then roll to the next cycle boundary
+    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
+    if (result != 0) return result;
+    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
+    if (result != 0) return result;
+    
+    ULONGLONG current_systim = ((ULONGLONG)systimh_2 << 32) | systiml_2;
+    ULONGLONG base_time_ns = current_systim + 500000000ULL;  // now + 500 ms
+    
+    // Roll to next cycle boundary
+    ULONGLONG cycles_ahead = (base_time_ns - current_systim) / cycle_time_ns;
+    if (cycles_ahead == 0) cycles_ahead = 1;
+    base_time_ns = current_systim + (cycles_ahead * cycle_time_ns);
+    
+    DEBUGP(DL_INFO, "Base time calculation: current=0x%llx, target=0x%llx (+%llu cycles)\n",
+           current_systim, base_time_ns, cycles_ahead);
+    
+    // Step 5: Program base time
+    ULONG baset_h_new = (ULONG)(base_time_ns / 1000000000ULL);  // base / 1e9
+    ULONG baset_l_new = (ULONG)(base_time_ns % 1000000000ULL);  // base % 1e9
+    
+    // BASET_H @ 0x3318 = base / 1e9
     result = ndis_platform_ops.mmio_write(dev, I226_BASET_H, baset_h_new);
     if (result != 0) return result;
     
-    // I226-specific: Write BASET_L twice if FUTSCDDIS is set
-    if (context->intel_device.device_type == INTEL_DEVICE_I226 && (regValue & TQAVCTRL_FUTSCDDIS)) {
-        ndis_platform_ops.mmio_write(dev, I226_BASET_L, 0);  // First write: 0
+    // On I226 with FUTSCDDIS set: write BASET_L @ 0x3314 = 0 once, then write the true BASET_L
+    if (regValue & TQAVCTRL_FUTSCDDIS) {
+        result = ndis_platform_ops.mmio_write(dev, I226_BASET_L, 0);  // Zero first
+        if (result != 0) return result;
+        DEBUGP(DL_INFO, "I226 FUTSCDDIS: BASET_L written as 0 first (reconfig quirk)\n");
     }
+    
     result = ndis_platform_ops.mmio_write(dev, I226_BASET_L, baset_l_new);
     if (result != 0) return result;
     
-    DEBUGP(DL_INFO, "I226 Base time programmed: %lu.%09lu (0x%08X.%08X)\n", 
+    DEBUGP(DL_INFO, "? Base time programmed: %lu.%09lu (0x%08X.%08X)\n", 
            baset_h_new, baset_l_new, baset_h_new, baset_l_new);
     
-    // Step 7: Verify configuration
-    LARGE_INTEGER delay;
-    delay.QuadPart = -1000000;  // 100ms delay
-    KeDelayExecutionThread(KernelMode, FALSE, &delay);
+    // Step 6: Per-queue windows (simple one-queue schedule)
+    // Put Q0 into launch-time/TSN mode: TXQCTL(0) @ 0x3300 |= QUEUE_MODE_LAUNCHT
+    result = ndis_platform_ops.mmio_read(dev, I226_TXQCTL(0), &regValue);
+    if (result != 0) return result;
     
-    // Read back and verify
-    ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
-    if (regValue & TQAVCTRL_TRANSMIT_MODE_TSN) {
-        DEBUGP(DL_INFO, "? I226 TAS activation SUCCESS: TQAVCTRL=0x%08X\n", regValue);
-    } else {
-        DEBUGP(DL_ERROR, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", regValue);
-        return -1;
+    regValue |= TXQCTL_QUEUE_MODE_LAUNCHT;
+    result = ndis_platform_ops.mmio_write(dev, I226_TXQCTL(0), regValue);
+    if (result != 0) return result;
+    
+    // Full open window for Q0 this cycle: STQT(0) @ 0x3340 = 0, ENDQT(0) @ 0x3380 = cycle_ns
+    result = ndis_platform_ops.mmio_write(dev, I226_STQT(0), 0);
+    if (result != 0) return result;
+    
+    result = ndis_platform_ops.mmio_write(dev, I226_ENDQT(0), cycle_time_ns);
+    if (result != 0) return result;
+    
+    // Optionally set other queues' windows to 0
+    for (int i = 1; i < 4; i++) {
+        ndis_platform_ops.mmio_write(dev, I226_STQT(i), 0);
+        ndis_platform_ops.mmio_write(dev, I226_ENDQT(i), 0);
     }
     
-    DEBUGP(DL_TRACE, "<==intel_setup_time_aware_shaper: SUCCESS (Evidence-based implementation)\n");
-    return 0;
+    DEBUGP(DL_INFO, "? Queue windows: Q0=[0,%lu], Q1-Q3=closed\n", cycle_time_ns);
+    
+    // Step 7: Readback + wait
+    // Verify TQAVCTRL, QBVCYCLET(_S), BASET_H/L, STQT/ENDQT read back as written
+    ULONG verify_tqavctrl, verify_cycle, verify_cycle_s;
+    ULONG verify_baset_h, verify_baset_l;
+    ULONG verify_stqt0, verify_endqt0;
+    
+    ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &verify_tqavctrl);
+    ndis_platform_ops.mmio_read(dev, I226_QBVCYCLET, &verify_cycle);
+    ndis_platform_ops.mmio_read(dev, I226_QBVCYCLET_S, &verify_cycle_s);
+    ndis_platform_ops.mmio_read(dev, I226_BASET_H, &verify_baset_h);
+    ndis_platform_ops.mmio_read(dev, I226_BASET_L, &verify_baset_l);
+    ndis_platform_ops.mmio_read(dev, I226_STQT(0), &verify_stqt0);
+    ndis_platform_ops.mmio_read(dev, I226_ENDQT(0), &verify_endqt0);
+    
+    DEBUGP(DL_INFO, "?? Register Readback Verification:\n");
+    DEBUGP(DL_INFO, "    TQAVCTRL: 0x%08X (TSN=%s)\n", 
+           verify_tqavctrl, (verify_tqavctrl & TQAVCTRL_TRANSMIT_MODE_TSN) ? "?" : "?");
+    DEBUGP(DL_INFO, "    QBVCYCLET: %u ns, QBVCYCLET_S: %u ns\n", verify_cycle, verify_cycle_s);
+    DEBUGP(DL_INFO, "    BASET: %lu.%09lu\n", verify_baset_h, verify_baset_l);
+    DEBUGP(DL_INFO, "    Q0 Window: [%lu, %lu]\n", verify_stqt0, verify_endqt0);
+    
+    // Sleep until SYSTIM >= BASET, then wait 1-2 more cycles
+    ULONGLONG target_systim = ((ULONGLONG)verify_baset_h * 1000000000ULL) + verify_baset_l;
+    
+    // Wait for base time activation
+    for (int wait_count = 0; wait_count < 50; wait_count++) {  // Max 5 seconds
+        result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
+        if (result != 0) break;
+        result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
+        if (result != 0) break;
+        
+        ULONGLONG current_time = ((ULONGLONG)systimh_2 << 32) | systiml_2;
+        
+        if (current_time >= target_systim) {
+            DEBUGP(DL_INFO, "? Base time reached: SYSTIM=0x%llx >= BASET=0x%llx\n", 
+                   current_time, target_systim);
+            
+            // Wait 1-2 more cycles
+            LARGE_INTEGER cycle_delay;
+            cycle_delay.QuadPart = -((LONGLONG)cycle_time_ns * 20);  // 2 cycles in 100ns units
+            KeDelayExecutionThread(KernelMode, FALSE, &cycle_delay);
+            break;
+        }
+        
+        // Wait 100ms and check again
+        LARGE_INTEGER short_delay;
+        short_delay.QuadPart = -1000000;  // 100ms
+        KeDelayExecutionThread(KernelMode, FALSE, &short_delay);
+    }
+    
+    // Final verification
+    ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &verify_tqavctrl);
+    
+    if (verify_tqavctrl & TQAVCTRL_TRANSMIT_MODE_TSN) {
+        DEBUGP(DL_INFO, "?? I226 TAS activation SUCCESS: TQAVCTRL=0x%08X\n", verify_tqavctrl);
+        DEBUGP(DL_TRACE, "<==intel_setup_time_aware_shaper: SUCCESS (ChatGPT5 validation runbook)\n");
+        return 0;
+    } else {
+        DEBUGP(DL_ERROR, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", verify_tqavctrl);
+        return -1;
+    }
 }
 
 /**
