@@ -176,8 +176,6 @@
     <ClCompile Include="devices\intel_82576_impl.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="filter.rc">
@@ -200,7 +198,7 @@
     <None Include="external\intel_avb\spec\335761 - I210_CS_CL_Datasheet_v_1_8.md">
       <Filter>Docs</Filter>
     </None>
-    <None Include="external\intel_avb\spec\621661-Intel® Ethernet Controller I225-Public External Specification Update-v1.2.md">
+    <None Include="external\intel_avb\spec\621661-IntelÂ® Ethernet Controller I225-Public External Specification Update-v1.2.md">
       <Filter>Docs</Filter>
     </None>
     <None Include="external\intel_avb\spec\2407151103_Intel-Altera-KTI226V-S-RKTU_C26159200.md">
