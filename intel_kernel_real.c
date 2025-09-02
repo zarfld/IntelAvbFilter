@@ -51,6 +51,23 @@ extern const struct platform_ops ndis_platform_ops;
 #define TXQCTL_QUEUE_MODE_LAUNCHT   0x00000001
 #define TXQCTL_STRICT_CYCLE         0x00000002
 
+// I226 PTP Registers and Control Bits
+#define I226_TIMINCA                0x0B608  // Time increment attribute register
+#define I226_TSAUXC                 0x0B640  // Auxiliary control register
+#define I226_TSYNCTXCTL             0x0B614  // TX timestamp control
+#define I226_TSYNCRXCTL             0x0B620  // RX timestamp control
+
+// TIMINCA Control Bits
+#define TIMINCA_INCVALUE_SHIFT      16
+#define TIMINCA_INCPERIOD_SHIFT     24
+
+// TSAUXC Control Bits
+#define TSAUXC_EN_TT0               0x00000001  // Enable target time 0
+#define TSAUXC_EN_TT1               0x00000002  // Enable target time 1
+#define TSAUXC_EN_CLK0              0x00000004  // Enable clock 0
+#define TSAUXC_ST0                  0x00000010  // Start clock 0
+#define TSAUXC_EN_TS                0x00000020  // Enable timestamping
+
 /**
  * @brief Initialize Intel device (real hardware access)
  * @param dev Device handle
@@ -255,7 +272,72 @@ int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct ti
 }
 
 /**
- * @brief Set system time (real hardware access) with PHC initialization
+ * @brief Enhanced PHC initialization for I226 - addresses SYSTIML stuck at zero issue
+ * @param dev Device handle
+ * @return 0 on success, <0 on error
+ */
+static int intel_init_i226_phc(device_t *dev)
+{
+    int result;
+    ULONG tsauxc, timinca, tsynctxctl, tsyncrxctl;
+    
+    DEBUGP(DL_INFO, "==>intel_init_i226_phc: Enhanced PHC initialization\n");
+    
+    // Step 1: Read current TSAUXC state
+    result = ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc);
+    if (result != 0) return result;
+    
+    DEBUGP(DL_INFO, "I226 PHC Init: Current TSAUXC=0x%08X\n", tsauxc);
+    
+    // Step 2: Enable all PTP functionality
+    tsauxc |= TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_EN_TS;
+    result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc);
+    if (result != 0) return result;
+    
+    // Step 3: Configure time increment (critical for SYSTIM advancement)
+    // I226 typically uses 8ns increment (125MHz clock)
+    timinca = (8 << TIMINCA_INCVALUE_SHIFT) |    // 8ns increment
+              (1 << TIMINCA_INCPERIOD_SHIFT);     // Every cycle
+    result = ndis_platform_ops.mmio_write(dev, I226_TIMINCA, timinca);
+    if (result != 0) return result;
+    
+    DEBUGP(DL_INFO, "I226 PHC Init: TIMINCA configured=0x%08X\n", timinca);
+    
+    // Step 4: Enable TX/RX timestamping to activate the clock
+    result = ndis_platform_ops.mmio_read(dev, I226_TSYNCTXCTL, &tsynctxctl);
+    if (result != 0) return result;
+    
+    result = ndis_platform_ops.mmio_read(dev, I226_TSYNCRXCTL, &tsyncrxctl);
+    if (result != 0) return result;
+    
+    // Enable timestamping (this activates the PHC)
+    tsynctxctl |= 0x00000010;  // TSYNCTXCTL_ENABLED
+    tsyncrxctl |= 0x00000010;  // TSYNCRXCTL_ENABLED
+    
+    result = ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, tsynctxctl);
+    if (result != 0) return result;
+    
+    result = ndis_platform_ops.mmio_write(dev, I226_TSYNCRXCTL, tsyncrxctl);
+    if (result != 0) return result;
+    
+    // Step 5: Start the clock
+    tsauxc |= TSAUXC_ST0;  // Start clock 0
+    result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc);
+    if (result != 0) return result;
+    
+    DEBUGP(DL_INFO, "I226 PHC Init: Clock started, final TSAUXC=0x%08X\n", tsauxc);
+    
+    // Step 6: Small delay to let the clock start
+    LARGE_INTEGER delay;
+    delay.QuadPart = -10000;  // 1ms delay
+    KeDelayExecutionThread(KernelMode, FALSE, &delay);
+    
+    DEBUGP(DL_INFO, "<==intel_init_i226_phc: Enhanced initialization complete\n");
+    return 0;
+}
+
+/**
+ * @brief Set system time (real hardware access) with enhanced PHC initialization
  * @param dev Device handle
  * @param systime 64-bit time value
  * @return 0 on success, <0 on error
@@ -266,7 +348,7 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     ULONG ts_low, ts_high;
     int result;
     
-    DEBUGP(DL_TRACE, "==>intel_set_systime (real hardware): systime=0x%llx\n", systime);
+    DEBUGP(DL_TRACE, "==>intel_set_systime (enhanced with PHC init): systime=0x%llx\n", systime);
     
     if (dev == NULL) {
         return -1;
@@ -277,23 +359,52 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
         return -1;
     }
     
-    // HARDWARE VALIDATION ISSUE FIX: Initialize PHC if not running
-    // Check if SYSTIM is zero (PHC not initialized)
-    ULONG current_systiml = 0, current_systimh = 0;
-    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &current_systiml);
-    if (result == 0) {
-        result = ndis_platform_ops.mmio_read(dev, 0x0B604, &current_systimh);
+    // Enhanced PHC initialization for I226
+    if (context->intel_device.device_type == INTEL_DEVICE_I226) {
+        // Check if SYSTIM is advancing properly
+        ULONG systiml_1 = 0, systimh_1 = 0, systiml_2 = 0, systimh_2 = 0;
+        result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_1);
+        if (result == 0) {
+            result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_1);
+        }
+        
+        // Wait 10ms and check again
+        if (result == 0) {
+            LARGE_INTEGER delay;
+            delay.QuadPart = -100000;  // 10ms delay
+            KeDelayExecutionThread(KernelMode, FALSE, &delay);
+            
+            result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
+            if (result == 0) {
+                result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
+            }
+        }
+        
+        if (result == 0) {
+            ULONGLONG systim_1 = ((ULONGLONG)systimh_1 << 32) | systiml_1;
+            ULONGLONG systim_2 = ((ULONGLONG)systimh_2 << 32) | systiml_2;
+            
+            DEBUGP(DL_INFO, "I226 PHC Check: 0x%llx -> 0x%llx\n", systim_1, systim_2);
+            
+            // If PHC not advancing properly, initialize it
+            if (systim_2 <= systim_1 || (systiml_1 == 0 && systiml_2 == 0)) {
+                DEBUGP(DL_INFO, "I226 PHC not advancing properly - initializing\n");
+                result = intel_init_i226_phc(dev);
+                if (result != 0) {
+                    DEBUGP(DL_ERROR, "I226 PHC initialization failed\n");
+                    return result;
+                }
+            }
+        }
     }
     
-    if (result == 0 && current_systiml == 0 && current_systimh == 0) {
-        // PHC appears uninitialized - use current system time if systime is 0
-        if (systime == 0) {
-            LARGE_INTEGER currentTime;
-            KeQuerySystemTime(&currentTime);
-            // Convert to nanoseconds (approximate)
-            systime = currentTime.QuadPart * 100; // 100ns units to nanoseconds
-            DEBUGP(DL_INFO, "PHC uninitialized - using system time: 0x%llx\n", systime);
-        }
+    // Use current system time if systime is 0
+    if (systime == 0) {
+        LARGE_INTEGER currentTime;
+        KeQuerySystemTime(&currentTime);
+        // Convert to nanoseconds
+        systime = currentTime.QuadPart * 100; // 100ns units to nanoseconds
+        DEBUGP(DL_INFO, "Using system time for PHC: 0x%llx\n", systime);
     }
     
     // Split timestamp into low and high parts
@@ -302,31 +413,19 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     
     switch (context->intel_device.device_type) {
         case INTEL_DEVICE_I210:
-            result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);  // I210_SYSTIML
+            result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);  // SYSTIML
             if (result != 0) return result;
-            result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high); // I210_SYSTIMH
+            result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high); // SYSTIMH
             if (result != 0) return result;
             break;
         case INTEL_DEVICE_I217:
-            // SSOT marks SYSTIM as read-only on I217
             DEBUGP(DL_ERROR, "intel_set_systime: I217 SYSTIM is RO per SSOT\n");
             return -ENOTSUP;
         case INTEL_DEVICE_I219:
-            // SSOT has no SYSTIM regs for I219; use MDIO/device-specific API instead
             DEBUGP(DL_ERROR, "intel_set_systime: I219 SYSTIM MMIO not defined in SSOT\n");
             return -ENOTSUP;
         case INTEL_DEVICE_I225:
         case INTEL_DEVICE_I226:
-            // HARDWARE FIX: Enable PTP functionality first if not already enabled
-            ULONG tsauxc;
-            result = ndis_platform_ops.mmio_read(dev, 0x0B640, &tsauxc);  // TSAUXC
-            if (result == 0) {
-                // Enable PTP functionality (bit 2 = EN_TT0)
-                tsauxc |= 0x00000004;
-                ndis_platform_ops.mmio_write(dev, 0x0B640, tsauxc);
-                DEBUGP(DL_INFO, "PHC enabled via TSAUXC: 0x%08X\n", tsauxc);
-            }
-            
             result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);  // SYSTIML
             if (result != 0) return result;
             result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high); // SYSTIMH
@@ -407,17 +506,44 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
         DEBUGP(DL_ERROR, "I226 PHC (SYSTIM) not advancing: 0x%llx -> 0x%llx - Fix SYSTIM first\n", 
                systim_1, systim_2);
         
-        // HARDWARE FIX: Try to initialize PHC if it's zero
-        if (systim_1 == 0 && systim_2 == 0) {
-            DEBUGP(DL_INFO, "Attempting to initialize PHC with current time\n");
-            LARGE_INTEGER currentTime;
-            KeQuerySystemTime(&currentTime);
-            ULONGLONG init_time = currentTime.QuadPart * 100; // Convert to nanoseconds
-            
-            result = intel_set_systime(dev, init_time);
+        // Enhanced PHC initialization
+        if (context->intel_device.device_type == INTEL_DEVICE_I226) {
+            DEBUGP(DL_INFO, "Attempting enhanced I226 PHC initialization\n");
+            result = intel_init_i226_phc(dev);
             if (result == 0) {
-                DEBUGP(DL_INFO, "PHC initialized - retrying TAS setup\n");
-                // Don't return error, continue with TAS setup
+                // Re-verify PHC after initialization
+                delay.QuadPart = -100000;  // 10ms delay
+                KeDelayExecutionThread(KernelMode, FALSE, &delay);
+                
+                result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_1);
+                if (result == 0) {
+                    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_1);
+                }
+                
+                delay.QuadPart = -100000;  // 10ms delay
+                KeDelayExecutionThread(KernelMode, FALSE, &delay);
+                
+                if (result == 0) {
+                    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
+                    if (result == 0) {
+                        result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
+                    }
+                }
+                
+                if (result == 0) {
+                    systim_1 = ((ULONGLONG)systimh_1 << 32) | systiml_1;
+                    systim_2 = ((ULONGLONG)systimh_2 << 32) | systiml_2;
+                    
+                    if (systim_2 > systim_1) {
+                        DEBUGP(DL_INFO, "? I226 PHC initialized successfully: 0x%llx -> 0x%llx\n",
+                               systim_1, systim_2);
+                    } else {
+                        DEBUGP(DL_ERROR, "? I226 PHC initialization failed - still not advancing\n");
+                        return -1;
+                    }
+                } else {
+                    return -1;
+                }
             } else {
                 return -1;
             }
