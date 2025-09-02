@@ -207,6 +207,8 @@
     <ClCompile Include="flt_dbg.c" />
     <ClCompile Include="tests\integration\AvbIntegrationTests.c" />
     <ClCompile Include="tests\taef\AvbTaefTests.c" />
+    <ClCompile Include="tools\avb_test\avb_capability_validation_test_um.c" />
+    <ClCompile Include="tools\avb_test\avb_device_separation_test_um.c" />
     <ClCompile Include="tools\avb_test\avb_diagnostic_test.c" />
     <ClCompile Include="tools\avb_test\avb_test_actual.c" />
     <ClCompile Include="tools\avb_test\avb_test_app.c" />
@@ -297,10 +299,13 @@
     <None Include="scripts\build_and_test.ps1" />
     <None Include="SERVICE_TEAM_RESPONSE.md" />
     <None Include="Sign-Driver.ps1" />
+    <None Include="TESTING_STRATEGY_ANALYSIS.md" />
     <None Include="tests\integration\Makefile.mak" />
     <None Include="tests\README.md" />
     <None Include="tests\taef\Makefile.mak" />
     <None Include="TODO.md" />
+    <None Include="tools\avb_test\avb_capability_validation.mak" />
+    <None Include="tools\avb_test\avb_device_separation_validation.mak" />
     <None Include="tools\avb_test\avb_diagnostic.mak" />
     <None Include="tools\avb_test\avb_hw_state_test.mak" />
     <None Include="tools\avb_test\avb_i226_advanced.mak" />

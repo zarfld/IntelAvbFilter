@@ -4,22 +4,33 @@
 Write-Host "Intel AVB Filter Driver - Test Suite Execution" -ForegroundColor Cyan
 Write-Host "=====================================================" -ForegroundColor Cyan
 
-Write-Host "`n?? Phase 1: Basic Hardware Diagnostics" -ForegroundColor Green
+Write-Host "`n? Phase 0: Architecture Compliance Validation" -ForegroundColor Green
+Write-Host "Purpose: Verify core architectural requirements are met" -ForegroundColor Gray
+
+Write-Host "`n  ?? Capability Validation Test" -ForegroundColor Magenta
+Write-Host "  Purpose: Verify realistic hardware capability reporting (no false advertising)" -ForegroundColor Gray
+.\build\tools\avb_test\x64\Debug\avb_capability_validation_test.exe
+
+Write-Host "`n  ?? Device Separation Validation Test" -ForegroundColor Magenta  
+Write-Host "  Purpose: Verify clean device separation architecture compliance" -ForegroundColor Gray
+.\build\tools\avb_test\x64\Debug\avb_device_separation_test.exe
+
+Write-Host "`n? Phase 1: Basic Hardware Diagnostics" -ForegroundColor Green
 Write-Host "Purpose: Comprehensive hardware analysis and troubleshooting" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\avb_diagnostic_test.exe
 
-Write-Host "`n?? Hardware State Management Test" -ForegroundColor Green  
+Write-Host "`n? Hardware State Management Test" -ForegroundColor Green  
 Write-Host "Purpose: Test hardware state transitions and management" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\avb_hw_state_test.exe
 
-Write-Host "`n?? Phase 2: TSN IOCTL Handler Verification (NEW - Critical Fix Validation)" -ForegroundColor Green
+Write-Host "`n? Phase 2: TSN IOCTL Handler Verification (Critical Fix Validation)" -ForegroundColor Green
 Write-Host "Purpose: Verify TAS/FP/PTM IOCTLs no longer return ERROR_INVALID_FUNCTION" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe
 
-Write-Host "`n?? Phase 3: Multi-Adapter Hardware Testing" -ForegroundColor Yellow
+Write-Host "`n? Phase 3: Multi-Adapter Hardware Testing" -ForegroundColor Yellow
 .\build\tools\avb_test\x64\Debug\avb_multi_adapter_test.exe
 
-Write-Host "`n?? Phase 4: I226 Advanced Feature Testing" -ForegroundColor Magenta
+Write-Host "`n? Phase 4: I226 Advanced Feature Testing" -ForegroundColor Magenta
 .\build\tools\avb_test\x64\Debug\avb_i226_test.exe
 # Available I226 test options:
 # .\build\tools\avb_test\x64\Debug\avb_i226_test.exe info      - Show I226 device information
@@ -30,7 +41,7 @@ Write-Host "`n?? Phase 4: I226 Advanced Feature Testing" -ForegroundColor Magent
 
 .\build\tools\avb_test\x64\Debug\avb_i226_advanced_test.exe
 
-Write-Host "`n? Phase 5: I210 PTP Testing (Known Issues)" -ForegroundColor Red
+Write-Host "`n?? Phase 5: I210 PTP Testing (Known Issues)" -ForegroundColor Red
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe ptp-unlock
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe ptp-bringup
@@ -45,14 +56,19 @@ Write-Host "`n? Phase 5: I210 PTP Testing (Known Issues)" -ForegroundColor Red
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe ts-get
 .\build\tools\avb_test\x64\Debug\avb_test_i210.exe ts-set-now
 
-Write-Host "`n?? TSN Hardware Activation Validation (Enhanced Implementation Verification)" -ForegroundColor Green
+Write-Host "`n? TSN Hardware Activation Validation (Enhanced Implementation Verification)" -ForegroundColor Green
 Write-Host "Purpose: Verify TSN features actually activate at hardware level (not just IOCTL success)" -ForegroundColor Gray
 .\build\tools\avb_test\x64\Debug\tsn_hardware_activation_validation.exe
 
 Write-Host "`n? Test Suite Complete" -ForegroundColor Green
-Write-Host "Key Success Indicator: TSN IOCTL handlers should no longer return Error 1" -ForegroundColor Gray
+Write-Host "Key Success Indicators:" -ForegroundColor Gray
+Write-Host "  - Architecture compliance tests pass" -ForegroundColor Gray
+Write-Host "  - No false capability advertising" -ForegroundColor Gray  
+Write-Host "  - Clean device separation maintained" -ForegroundColor Gray
+Write-Host "  - TSN IOCTL handlers no longer return Error 1" -ForegroundColor Gray
 Write-Host "Expected: TAS/FP/PTM IOCTLs return success or hardware-specific errors (not Error 1)" -ForegroundColor Gray
-.\build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe
+
+Write-Host "`n?? External Library Tests" -ForegroundColor Cyan
 cd .\external\intel_avb\lib
 .\run_tests.ps1
 cd ../../../

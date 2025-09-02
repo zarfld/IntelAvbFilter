@@ -14,6 +14,22 @@ if errorlevel 1 goto :error
 
 echo.
 echo =======================================================
+echo Building AVB Capability Validation Test...
+echo =======================================================
+nmake -f tools\avb_test\avb_capability_validation.mak clean
+nmake -f tools\avb_test\avb_capability_validation.mak
+if errorlevel 1 goto :error
+
+echo.
+echo =======================================================
+echo Building AVB Device Separation Validation Test...
+echo =======================================================
+nmake -f tools\avb_test\avb_device_separation_validation.mak clean
+nmake -f tools\avb_test\avb_device_separation_validation.mak
+if errorlevel 1 goto :error
+
+echo.
+echo =======================================================
 echo Building AVB Hardware State Test...
 echo =======================================================
 nmake -f tools\avb_test\avb_hw_state_test.mak clean
@@ -83,6 +99,18 @@ if exist "build\tools\avb_test\x64\Debug\avb_diagnostic_test.exe" (
     echo  ? AVB Diagnostic Test
 ) else (
     echo  ? AVB Diagnostic Test - Missing
+)
+
+if exist "build\tools\avb_test\x64\Debug\avb_capability_validation_test.exe" (
+    echo  ? AVB Capability Validation Test
+) else (
+    echo  ? AVB Capability Validation Test - Missing
+)
+
+if exist "build\tools\avb_test\x64\Debug\avb_device_separation_test.exe" (
+    echo  ? AVB Device Separation Validation Test
+) else (
+    echo  ? AVB Device Separation Validation Test - Missing
 )
 
 if exist "build\tools\avb_test\x64\Debug\avb_hw_state_test.exe" (
