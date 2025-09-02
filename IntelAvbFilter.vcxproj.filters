@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -84,6 +84,12 @@
     <ClInclude Include="external\intel_avb\include\avb_ioctl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="devices\intel_device_interface.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="external\intel_igb\src\igb.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="filter.c">
@@ -143,6 +149,35 @@
     <ClCompile Include="intel_kernel_real.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="devices\intel_i210_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_device_registry.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_i226_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_i217_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_i219_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_i350_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_82575_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_82580_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="devices\intel_82576_impl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="filter.rc">
@@ -165,7 +200,7 @@
     <None Include="external\intel_avb\spec\335761 - I210_CS_CL_Datasheet_v_1_8.md">
       <Filter>Docs</Filter>
     </None>
-    <None Include="external\intel_avb\spec\621661-Intel® Ethernet Controller I225-Public External Specification Update-v1.2.md">
+    <None Include="external\intel_avb\spec\621661-Intel� Ethernet Controller I225-Public External Specification Update-v1.2.md">
       <Filter>Docs</Filter>
     </None>
     <None Include="external\intel_avb\spec\2407151103_Intel-Altera-KTI226V-S-RKTU_C26159200.md">
@@ -239,6 +274,9 @@
     <None Include="tools\avb_test\critical_prerequisites_investigation.mak" />
     <None Include="tools\avb_test\corrected_i226_tas_test.mak" />
     <None Include="tools\avb_test\chatgpt5_i226_tas_validation.mak" />
+    <None Include="docs\IGB_Device_Implementation.md" />
+    <None Include="docs\Hardware_Capability_Reality_Check.md" />
+    <None Include="docs\Hardware_Capability_Corrections_Summary.md" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />

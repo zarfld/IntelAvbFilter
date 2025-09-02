@@ -186,6 +186,15 @@
     <ClCompile Include="avb_hardware_access.c" />
     <ClCompile Include="avb_integration_fixed.c" />
     <ClCompile Include="avb_test_i210.c" />
+    <ClCompile Include="devices\intel_82575_impl.c" />
+    <ClCompile Include="devices\intel_82576_impl.c" />
+    <ClCompile Include="devices\intel_82580_impl.c" />
+    <ClCompile Include="devices\intel_device_registry.c" />
+    <ClCompile Include="devices\intel_i210_impl.c" />
+    <ClCompile Include="devices\intel_i217_impl.c" />
+    <ClCompile Include="devices\intel_i219_impl.c" />
+    <ClCompile Include="devices\intel_i226_impl.c" />
+    <ClCompile Include="devices\intel_i350_impl.c" />
     <ClCompile Include="intel_kernel_real.c" />
     <ClCompile Include="precomp.c">
       <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -206,10 +215,12 @@
     <ClCompile Include="tools\avb_test\avb_test_user_main.c" />
     <ClCompile Include="tsn_config.c" />
     <ResourceCompile Include="filter.rc" />
+    <ClInclude Include="devices\intel_device_interface.h" />
     <ClInclude Include="external\intel_avb\include\avb_ioctl.h" />
     <ClInclude Include="external\intel_avb\lib\intel.h" />
     <ClInclude Include="external\intel_avb\lib\intel_private.h" />
     <ClInclude Include="external\intel_igb\src\e1000_regs.h" />
+    <ClInclude Include="external\intel_igb\src\igb.h" />
     <ClInclude Include="intel-ethernet-regs\gen\i210_regs.h" />
     <ClInclude Include="intel-ethernet-regs\gen\i217_regs.h" />
     <ClInclude Include="intel-ethernet-regs\gen\i219_regs.h" />
@@ -248,8 +259,11 @@
     <None Include="Directory.Build.props" />
     <None Include="docs\avb_ioctl.md" />
     <None Include="docs\COMPREHENSIVE_FIX_SUMMARY.md" />
+    <None Include="docs\Hardware_Capability_Corrections_Summary.md" />
+    <None Include="docs\Hardware_Capability_Reality_Check.md" />
     <None Include="docs\I210_PTP_CLOCK_FIX_ANALYSIS.md" />
     <None Include="docs\I210_PTP_TEST_TOOL_FIX.md" />
+    <None Include="docs\IGB_Device_Implementation.md" />
     <None Include="DRIVER_STATUS_REPORT.md" />
     <None Include="enhanced_investigation_suite.ps1" />
     <None Include="external\intel_avb\FILTER_DRIVER_REQUIREMENTS.md" />
