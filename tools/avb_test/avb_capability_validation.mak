@@ -8,7 +8,8 @@ SRCDIR = .
 CC = cl
 LINK = link
 
-CFLAGS = /I..\..\external\intel_avb\include /D_WIN32_WINNT=0x0A00 /DWIN32 /D_X86_=1 /Zi /Od /MDd
+# Fix: Use x64 platform consistently
+CFLAGS = /I..\..\external\intel_avb\include /D_WIN32_WINNT=0x0A00 /DWIN32 /DWIN64 /D_WIN64 /Zi /Od /MDd
 LINKFLAGS = /DEBUG /SUBSYSTEM:CONSOLE /MACHINE:X64
 
 SOURCES = avb_capability_validation_test_um.c
@@ -24,7 +25,7 @@ $(OUTDIR)\$(TARGET): $(OBJECTS)
 	$(LINK) $(LINKFLAGS) /OUT:$@ $(OBJECTS) kernel32.lib user32.lib
 
 $(OUTDIR)\avb_capability_validation_test_um.obj: avb_capability_validation_test_um.c
-	$(CC) $(CFLAGS) /Fo$@ /c $<
+	$(CC) $(CFLAGS) /Fo$@ /c avb_capability_validation_test_um.c
 
 clean:
 	@if exist "$(OUTDIR)\avb_capability_validation_test_um.obj" del "$(OUTDIR)\avb_capability_validation_test_um.obj"

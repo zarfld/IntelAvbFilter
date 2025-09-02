@@ -9,10 +9,10 @@ CFG=Debug
 PLATFORM=x64
 !ENDIF
 
-OUTDIR=build\tools\avb_test\$(PLATFORM)\$(CFG)
+OUTDIR=..\..\build\tools\avb_test\$(PLATFORM)\$(CFG)
 CC=cl
 LD=link
-CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DHARDWARE_INVESTIGATION_USERMODE /I.
+CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DHARDWARE_INVESTIGATION_USERMODE /I. /I..\..\external\intel_avb\include
 LDFLAGS=/nologo /DEBUG
 LIBS=kernel32.lib user32.lib advapi32.lib
 
@@ -23,8 +23,8 @@ dirs:
 
 OBJS=$(OUTDIR)\hardware_investigation_tool.obj
 
-$(OUTDIR)\hardware_investigation_tool.obj: tools\avb_test\hardware_investigation_tool.c
-	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c tools\avb_test\hardware_investigation_tool.c
+$(OUTDIR)\hardware_investigation_tool.obj: hardware_investigation_tool.c
+	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c hardware_investigation_tool.c
 
 $(OUTDIR)\hardware_investigation_tool.exe: $(OBJS)
 	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\hardware_investigation_tool.exe $(OBJS) $(LIBS)

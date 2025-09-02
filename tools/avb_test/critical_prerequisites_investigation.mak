@@ -9,10 +9,10 @@ CFG=Debug
 PLATFORM=x64
 !ENDIF
 
-OUTDIR=build\tools\avb_test\$(PLATFORM)\$(CFG)
+OUTDIR=..\..\build\tools\avb_test\$(PLATFORM)\$(CFG)
 CC=cl
 LD=link
-CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DCRITICAL_INVESTIGATION /I.
+CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DCRITICAL_INVESTIGATION /I. /I..\..\external\intel_avb\include
 LDFLAGS=/nologo /DEBUG
 LIBS=kernel32.lib user32.lib advapi32.lib
 
@@ -23,8 +23,8 @@ dirs:
 
 OBJS=$(OUTDIR)\critical_prerequisites_investigation.obj
 
-$(OUTDIR)\critical_prerequisites_investigation.obj: tools\avb_test\critical_prerequisites_investigation.c
-	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c tools\avb_test\critical_prerequisites_investigation.c
+$(OUTDIR)\critical_prerequisites_investigation.obj: critical_prerequisites_investigation.c
+	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c critical_prerequisites_investigation.c
 
 $(OUTDIR)\critical_prerequisites_investigation.exe: $(OBJS)
 	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\critical_prerequisites_investigation.exe $(OBJS) $(LIBS)

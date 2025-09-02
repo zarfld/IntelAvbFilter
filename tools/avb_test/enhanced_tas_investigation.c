@@ -18,8 +18,8 @@
 #include <stdint.h>
 #include <time.h>
 
-// Include only the basic IOCTL definitions we need
-#include "..\\..\\include\\avb_ioctl.h"
+// Fixed include path to match project structure
+#include "..\\..\\external\\intel_avb\\include\\avb_ioctl.h"
 
 #define DEVICE_NAME L"\\\\.\\IntelAvbFilter"
 

@@ -9,10 +9,10 @@ CFG=Debug
 PLATFORM=x64
 !ENDIF
 
-OUTDIR=build\tools\avb_test\$(PLATFORM)\$(CFG)
+OUTDIR=..\..\build\tools\avb_test\$(PLATFORM)\$(CFG)
 CC=cl
 LD=link
-CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DCHATGPT5_VALIDATION /I.
+CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DCHATGPT5_VALIDATION /I. /I..\..\external\intel_avb\include
 LDFLAGS=/nologo /DEBUG
 LIBS=kernel32.lib user32.lib advapi32.lib
 
@@ -23,8 +23,8 @@ dirs:
 
 OBJS=$(OUTDIR)\chatgpt5_i226_tas_validation.obj
 
-$(OUTDIR)\chatgpt5_i226_tas_validation.obj: tools\avb_test\chatgpt5_i226_tas_validation.c
-	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c tools\avb_test\chatgpt5_i226_tas_validation.c
+$(OUTDIR)\chatgpt5_i226_tas_validation.obj: chatgpt5_i226_tas_validation.c
+	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c chatgpt5_i226_tas_validation.c
 
 $(OUTDIR)\chatgpt5_i226_tas_validation.exe: $(OBJS)
 	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\chatgpt5_i226_tas_validation.exe $(OBJS) $(LIBS)

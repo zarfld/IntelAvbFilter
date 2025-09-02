@@ -16,8 +16,10 @@ PLATFORM=x64
 OUTDIR=build\tools\avb_test\$(PLATFORM)\$(CFG)
 CC=cl
 LD=link
-CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_TEST_USERMODE /I.
-LDFLAGS=/nologo /DEBUG
+
+# Fix: Add proper x64 flags to ensure x64 compilation
+CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_TEST_USERMODE /I. /DWIN64 /D_WIN64
+LDFLAGS=/nologo /DEBUG /MACHINE:X64
 LIBS=kernel32.lib user32.lib advapi32.lib
 
 all: dirs $(OUTDIR)\tsn_hardware_activation_validation.exe

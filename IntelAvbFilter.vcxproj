@@ -207,8 +207,6 @@
     <ClCompile Include="flt_dbg.c" />
     <ClCompile Include="tests\integration\AvbIntegrationTests.c" />
     <ClCompile Include="tests\taef\AvbTaefTests.c" />
-    <ClCompile Include="tools\avb_test\avb_capability_validation_test_um.c" />
-    <ClCompile Include="tools\avb_test\avb_device_separation_test_um.c" />
     <ClCompile Include="tools\avb_test\avb_diagnostic_test.c" />
     <ClCompile Include="tools\avb_test\avb_test_actual.c" />
     <ClCompile Include="tools\avb_test\avb_test_app.c" />
@@ -251,13 +249,17 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="BAR0_IMPLEMENTATION_COMPLETE.md" />
     <None Include="BREAKTHROUGH_SUMMARY.md" />
+    <None Include="Build-AllTests-Honest.ps1" />
+    <None Include="Build-AllTests-TrulyHonest.ps1" />
     <None Include="Build-And-Sign-Driver.ps1" />
     <None Include="build_all_tests.cmd" />
+    <None Include="build_investigation_tools.cmd" />
     <None Include="CAT-FILE-MANAGEMENT.md" />
     <None Include="CHANGELOG.md" />
     <None Include="COMPILATION_ERRORS_FIXED.md" />
     <None Include="CURRENT_STATUS_ANALYSIS.md" />
     <None Include="DEVELOPMENT_COMPLETE.md" />
+    <None Include="diagnostic_build.cmd" />
     <None Include="Directory.Build.props" />
     <None Include="docs\avb_ioctl.md" />
     <None Include="docs\COMPREHENSIVE_FIX_SUMMARY.md" />
@@ -266,6 +268,7 @@
     <None Include="docs\I210_PTP_CLOCK_FIX_ANALYSIS.md" />
     <None Include="docs\I210_PTP_TEST_TOOL_FIX.md" />
     <None Include="docs\IGB_Device_Implementation.md" />
+    <None Include="docs\SSOT_HEADER_USAGE.md" />
     <None Include="DRIVER_STATUS_REPORT.md" />
     <None Include="enhanced_investigation_suite.ps1" />
     <None Include="external\intel_avb\FILTER_DRIVER_REQUIREMENTS.md" />

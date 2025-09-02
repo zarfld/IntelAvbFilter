@@ -20,34 +20,8 @@ Abstract:
 #include <stdio.h>
 #include <stdlib.h>
 
-// AVB IOCTL definitions
+// AVB IOCTL definitions - Use SSOT header
 #include "..\\..\\external\\intel_avb\\include\\avb_ioctl.h"
-
-// Intel device type definitions (from driver)
-typedef enum {
-    INTEL_DEVICE_UNKNOWN = 0,
-    INTEL_DEVICE_82575,   // 2008 - No PTP
-    INTEL_DEVICE_82576,   // 2009 - No PTP  
-    INTEL_DEVICE_82580,   // 2010 - Basic PTP
-    INTEL_DEVICE_I350,    // 2012 - Standard IEEE 1588
-    INTEL_DEVICE_I354,    // 2012 - Same as I350
-    INTEL_DEVICE_I210,    // 2013 - Enhanced PTP, NO TSN
-    INTEL_DEVICE_I217,    // 2013 - Basic PTP
-    INTEL_DEVICE_I219,    // 2014 - Enhanced PTP, NO TSN
-    INTEL_DEVICE_I225,    // 2019 - First Intel TSN
-    INTEL_DEVICE_I226     // 2020 - Full TSN + EEE
-} intel_device_type_t;
-
-// Intel capability flags (from driver)
-#define INTEL_CAP_MMIO          0x00000001
-#define INTEL_CAP_MDIO          0x00000002
-#define INTEL_CAP_BASIC_1588    0x00000004
-#define INTEL_CAP_ENHANCED_TS   0x00000008
-#define INTEL_CAP_TSN_TAS       0x00000010
-#define INTEL_CAP_TSN_FP        0x00000020
-#define INTEL_CAP_PCIe_PTM      0x00000040
-#define INTEL_CAP_2_5G          0x00000080
-#define INTEL_CAP_EEE           0x00000100
 
 // Device ID to type mapping (from driver)
 intel_device_type_t GetDeviceTypeFromDID(USHORT device_id) {
@@ -174,30 +148,30 @@ void PrintCapabilities(ULONG caps, const char* prefix) {
     if (caps & INTEL_CAP_2_5G) printf("2_5G ");
     if (caps & INTEL_CAP_EEE) printf("EEE ");
     if (caps == 0) printf("<none>");
-    printf("\\n");
+    printf("\n");
 }
 
 int main() {
-    printf("Intel AVB Filter Driver - Capability Validation Test\\n");
-    printf("====================================================\\n");
-    printf("Purpose: Verify realistic hardware capability reporting\\n");
-    printf("Requirement: No false advertising of advanced features\\n\\n");
+    printf("Intel AVB Filter Driver - Capability Validation Test\n");
+    printf("====================================================\n");
+    printf("Purpose: Verify realistic hardware capability reporting\n");
+    printf("Requirement: No false advertising of advanced features\n\n");
     
-    HANDLE hDevice = CreateFile(L"\\\\.\\\\IntelAvbFilter",
-                               GENERIC_READ | GENERIC_WRITE,
-                               0, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE hDevice = CreateFileA("\\\\.\\IntelAvbFilter",
+                                GENERIC_READ | GENERIC_WRITE,
+                                0, NULL, OPEN_EXISTING, 0, NULL);
     
     if (hDevice == INVALID_HANDLE_VALUE) {
-        printf("? Failed to open driver (Error: %lu)\\n", GetLastError());
-        printf("   This is expected if no Intel AVB hardware is present\\n");
+        printf("? Failed to open driver (Error: %lu)\n", GetLastError());
+        printf("   This is expected if no Intel AVB hardware is present\n");
         return 0; // Not a failure - just no hardware
     }
     
-    printf("? Driver connection successful\\n\\n");
+    printf("? Driver connection successful\n\n");
     
     // Test 1: Enumerate adapters and validate capabilities
-    printf("?? Test 1: Capability Validation for All Detected Adapters\\n");
-    printf("=========================================================\\n");
+    printf("?? Test 1: Capability Validation for All Detected Adapters\n");
+    printf("=========================================================\n");
     
     AVB_ENUM_REQUEST enum_req = {0};
     DWORD bytesReturned;
@@ -209,15 +183,15 @@ int main() {
                                  &bytesReturned, NULL);
     
     if (!result) {
-        printf("? ENUM_ADAPTERS failed: %lu\\n", GetLastError());
+        printf("? ENUM_ADAPTERS failed: %lu\n", GetLastError());
         CloseHandle(hDevice);
         return 1;
     }
     
-    printf("Found %lu Intel adapter(s)\\n\\n", enum_req.count);
+    printf("Found %lu Intel adapter(s)\n\n", enum_req.count);
     
     if (enum_req.count == 0) {
-        printf("?? No Intel adapters detected - test complete\\n");
+        printf("?? No Intel adapters detected - test complete\n");
         CloseHandle(hDevice);
         return 0;
     }
@@ -226,7 +200,7 @@ int main() {
     
     // Validate each adapter
     for (ULONG i = 0; i < enum_req.count; i++) {
-        printf("--- Adapter %lu ---\\n", i);
+        printf("--- Adapter %lu ---\n", i);
         
         enum_req.index = i;
         result = DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS,
@@ -235,15 +209,15 @@ int main() {
                                 &bytesReturned, NULL);
         
         if (!result) {
-            printf("? Failed to get adapter %lu info: %lu\\n", i, GetLastError());
+            printf("? Failed to get adapter %lu info: %lu\n", i, GetLastError());
             validation_failures++;
             continue;
         }
         
-        printf("Device: VID=0x%04X DID=0x%04X\\n", enum_req.vendor_id, enum_req.device_id);
+        printf("Device: VID=0x%04X DID=0x%04X\n", enum_req.vendor_id, enum_req.device_id);
         
         intel_device_type_t device_type = GetDeviceTypeFromDID(enum_req.device_id);
-        printf("Type: %s\\n", GetDeviceName(device_type));
+        printf("Type: %s\n", GetDeviceName(device_type));
         
         ULONG expected_caps = GetExpectedCapabilities(device_type);
         ULONG actual_caps = enum_req.capabilities;
@@ -256,7 +230,7 @@ int main() {
         
         // Check for false advertising (reporting capabilities not supported)
         if (actual_caps & ~expected_caps) {
-            printf("? FALSE ADVERTISING: Device reports unsupported capabilities\\n");
+            printf("? FALSE ADVERTISING: Device reports unsupported capabilities\n");
             ULONG false_caps = actual_caps & ~expected_caps;
             PrintCapabilities(false_caps, "False    ");
             validation_passed = FALSE;
@@ -265,43 +239,43 @@ int main() {
         // Critical checks for TSN false advertising
         if (device_type < INTEL_DEVICE_I225) { // Pre-2019 hardware
             if (actual_caps & (INTEL_CAP_TSN_TAS | INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM)) {
-                printf("? CRITICAL: Pre-2019 hardware falsely advertises TSN support!\\n");
-                printf("   TSN Standard: 2015-2016, First Intel TSN: I225 (2019)\\n");
+                printf("? CRITICAL: Pre-2019 hardware falsely advertises TSN support!\n");
+                printf("   TSN Standard: 2015-2016, First Intel TSN: I225 (2019)\n");
                 validation_passed = FALSE;
             }
         }
         
         // Check for missing basic capabilities
         if (!(actual_caps & INTEL_CAP_MMIO)) {
-            printf("? Missing basic MMIO capability\\n");
+            printf("? Missing basic MMIO capability\n");
             validation_passed = FALSE;
         }
         
         if (validation_passed) {
-            printf("? Capability validation PASSED\\n");
+            printf("? Capability validation PASSED\n");
         } else {
-            printf("? Capability validation FAILED\\n");
+            printf("? Capability validation FAILED\n");
             validation_failures++;
         }
         
-        printf("\\n");
+        printf("\n");
     }
     
     // Summary
-    printf("===================\\n");
-    printf("Validation Summary:\\n");
-    printf("===================\\n");
-    printf("Adapters tested: %lu\\n", enum_req.count);
-    printf("Validation failures: %d\\n", validation_failures);
+    printf("===================\n");
+    printf("Validation Summary:\n");
+    printf("===================\n");
+    printf("Adapters tested: %lu\n", enum_req.count);
+    printf("Validation failures: %d\n", validation_failures);
     
     if (validation_failures == 0) {
-        printf("? ALL CAPABILITY VALIDATIONS PASSED\\n");
-        printf("? No false advertising detected\\n");
-        printf("? Hardware capabilities are realistic and honest\\n");
+        printf("? ALL CAPABILITY VALIDATIONS PASSED\n");
+        printf("? No false advertising detected\n");
+        printf("? Hardware capabilities are realistic and honest\n");
     } else {
-        printf("? CAPABILITY VALIDATION FAILED\\n");
-        printf("? Driver is reporting incorrect capabilities\\n");
-        printf("? This violates the 'Hardware Capability Reality' requirement\\n");
+        printf("? CAPABILITY VALIDATION FAILED\n");
+        printf("? Driver is reporting incorrect capabilities\n");
+        printf("? This violates the 'Hardware Capability Reality' requirement\n");
     }
     
     CloseHandle(hDevice);
