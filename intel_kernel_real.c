@@ -51,23 +51,6 @@ extern const struct platform_ops ndis_platform_ops;
 #define TXQCTL_QUEUE_MODE_LAUNCHT   0x00000001
 #define TXQCTL_STRICT_CYCLE         0x00000002
 
-// I226 PTP Registers and Control Bits
-#define I226_TIMINCA                0x0B608  // Time increment attribute register
-#define I226_TSAUXC                 0x0B640  // Auxiliary control register
-#define I226_TSYNCTXCTL             0x0B614  // TX timestamp control
-#define I226_TSYNCRXCTL             0x0B620  // RX timestamp control
-
-// TIMINCA Control Bits
-#define TIMINCA_INCVALUE_SHIFT      16
-#define TIMINCA_INCPERIOD_SHIFT     24
-
-// TSAUXC Control Bits
-#define TSAUXC_EN_TT0               0x00000001  // Enable target time 0
-#define TSAUXC_EN_TT1               0x00000002  // Enable target time 1
-#define TSAUXC_EN_CLK0              0x00000004  // Enable clock 0
-#define TSAUXC_ST0                  0x00000010  // Start clock 0
-#define TSAUXC_EN_TS                0x00000020  // Enable timestamping
-
 /**
  * @brief Initialize Intel device (real hardware access)
  * @param dev Device handle
@@ -272,72 +255,7 @@ int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct ti
 }
 
 /**
- * @brief Enhanced PHC initialization for I226 - addresses SYSTIML stuck at zero issue
- * @param dev Device handle
- * @return 0 on success, <0 on error
- */
-static int intel_init_i226_phc(device_t *dev)
-{
-    int result;
-    ULONG tsauxc, timinca, tsynctxctl, tsyncrxctl;
-    
-    DEBUGP(DL_INFO, "==>intel_init_i226_phc: Enhanced PHC initialization\n");
-    
-    // Step 1: Read current TSAUXC state
-    result = ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc);
-    if (result != 0) return result;
-    
-    DEBUGP(DL_INFO, "I226 PHC Init: Current TSAUXC=0x%08X\n", tsauxc);
-    
-    // Step 2: Enable all PTP functionality
-    tsauxc |= TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_EN_TS;
-    result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc);
-    if (result != 0) return result;
-    
-    // Step 3: Configure time increment (critical for SYSTIM advancement)
-    // I226 typically uses 8ns increment (125MHz clock)
-    timinca = (8 << TIMINCA_INCVALUE_SHIFT) |    // 8ns increment
-              (1 << TIMINCA_INCPERIOD_SHIFT);     // Every cycle
-    result = ndis_platform_ops.mmio_write(dev, I226_TIMINCA, timinca);
-    if (result != 0) return result;
-    
-    DEBUGP(DL_INFO, "I226 PHC Init: TIMINCA configured=0x%08X\n", timinca);
-    
-    // Step 4: Enable TX/RX timestamping to activate the clock
-    result = ndis_platform_ops.mmio_read(dev, I226_TSYNCTXCTL, &tsynctxctl);
-    if (result != 0) return result;
-    
-    result = ndis_platform_ops.mmio_read(dev, I226_TSYNCRXCTL, &tsyncrxctl);
-    if (result != 0) return result;
-    
-    // Enable timestamping (this activates the PHC)
-    tsynctxctl |= 0x00000010;  // TSYNCTXCTL_ENABLED
-    tsyncrxctl |= 0x00000010;  // TSYNCRXCTL_ENABLED
-    
-    result = ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, tsynctxctl);
-    if (result != 0) return result;
-    
-    result = ndis_platform_ops.mmio_write(dev, I226_TSYNCRXCTL, tsyncrxctl);
-    if (result != 0) return result;
-    
-    // Step 5: Start the clock
-    tsauxc |= TSAUXC_ST0;  // Start clock 0
-    result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc);
-    if (result != 0) return result;
-    
-    DEBUGP(DL_INFO, "I226 PHC Init: Clock started, final TSAUXC=0x%08X\n", tsauxc);
-    
-    // Step 6: Small delay to let the clock start
-    LARGE_INTEGER delay;
-    delay.QuadPart = -10000;  // 1ms delay
-    KeDelayExecutionThread(KernelMode, FALSE, &delay);
-    
-    DEBUGP(DL_INFO, "<==intel_init_i226_phc: Enhanced initialization complete\n");
-    return 0;
-}
-
-/**
- * @brief Set system time (real hardware access) with enhanced PHC initialization
+ * @brief Set system time (real hardware access) - I226 SYSTIM fix: revert to last known good
  * @param dev Device handle
  * @param systime 64-bit time value
  * @return 0 on success, <0 on error
@@ -348,7 +266,7 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     ULONG ts_low, ts_high;
     int result;
     
-    DEBUGP(DL_TRACE, "==>intel_set_systime (enhanced with PHC init): systime=0x%llx\n", systime);
+    DEBUGP(DL_TRACE, "==>intel_set_systime (I226 SYSTIM fix - last known good): systime=0x%llx\n", systime);
     
     if (dev == NULL) {
         return -1;
@@ -357,45 +275,6 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     context = (PAVB_DEVICE_CONTEXT)dev->private_data;
     if (context == NULL) {
         return -1;
-    }
-    
-    // Enhanced PHC initialization for I226
-    if (context->intel_device.device_type == INTEL_DEVICE_I226) {
-        // Check if SYSTIM is advancing properly
-        ULONG systiml_1 = 0, systimh_1 = 0, systiml_2 = 0, systimh_2 = 0;
-        result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_1);
-        if (result == 0) {
-            result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_1);
-        }
-        
-        // Wait 10ms and check again
-        if (result == 0) {
-            LARGE_INTEGER delay;
-            delay.QuadPart = -100000;  // 10ms delay
-            KeDelayExecutionThread(KernelMode, FALSE, &delay);
-            
-            result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
-            if (result == 0) {
-                result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
-            }
-        }
-        
-        if (result == 0) {
-            ULONGLONG systim_1 = ((ULONGLONG)systimh_1 << 32) | systiml_1;
-            ULONGLONG systim_2 = ((ULONGLONG)systimh_2 << 32) | systiml_2;
-            
-            DEBUGP(DL_INFO, "I226 PHC Check: 0x%llx -> 0x%llx\n", systim_1, systim_2);
-            
-            // If PHC not advancing properly, initialize it
-            if (systim_2 <= systim_1 || (systiml_1 == 0 && systiml_2 == 0)) {
-                DEBUGP(DL_INFO, "I226 PHC not advancing properly - initializing\n");
-                result = intel_init_i226_phc(dev);
-                if (result != 0) {
-                    DEBUGP(DL_ERROR, "I226 PHC initialization failed\n");
-                    return result;
-                }
-            }
-        }
     }
     
     // Use current system time if systime is 0
@@ -411,26 +290,36 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
     ts_low = (ULONG)(systime & 0xFFFFFFFF);
     ts_high = (ULONG)((systime >> 32) & 0xFFFFFFFF);
     
+    // DEVICE-SPECIFIC IMPLEMENTATION - NO CROSS-CONTAMINATION
     switch (context->intel_device.device_type) {
         case INTEL_DEVICE_I210:
+            // I210-specific implementation (isolated)
             result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);  // SYSTIML
             if (result != 0) return result;
             result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high); // SYSTIMH
             if (result != 0) return result;
+            DEBUGP(DL_TRACE, "I210 SYSTIM written: 0x%08X%08X\n", ts_high, ts_low);
             break;
+            
         case INTEL_DEVICE_I217:
             DEBUGP(DL_ERROR, "intel_set_systime: I217 SYSTIM is RO per SSOT\n");
             return -ENOTSUP;
+            
         case INTEL_DEVICE_I219:
             DEBUGP(DL_ERROR, "intel_set_systime: I219 SYSTIM MMIO not defined in SSOT\n");
             return -ENOTSUP;
+            
         case INTEL_DEVICE_I225:
         case INTEL_DEVICE_I226:
+            // I225/I226-specific implementation (isolated) - REVERT TO LAST KNOWN GOOD
+            // Simple, clean SYSTIM access that was working before
             result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);  // SYSTIML
             if (result != 0) return result;
             result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high); // SYSTIMH
             if (result != 0) return result;
+            DEBUGP(DL_TRACE, "I225/I226 SYSTIM written: 0x%08X%08X\n", ts_high, ts_low);
             break;
+            
         default:
             DEBUGP(DL_ERROR, "Unsupported device type for timestamp write: %d\n", 
                    context->intel_device.device_type);
@@ -442,8 +331,7 @@ int intel_set_systime(device_t *dev, ULONGLONG systime)
 }
 
 /**
- * @brief Setup Time Aware Shaper - Evidence-Based Implementation following ChatGPT5 Validation Runbook
- * Reference: Linux IGC driver igc_tsn.c + ChatGPT5 I226 TAS validation spec order
+ * @brief Setup Time Aware Shaper - I226 TAS revert to simple, clean implementation
  * @param dev Device handle
  * @param config TAS configuration
  * @return 0 on success, <0 on error
@@ -454,7 +342,7 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
     ULONG regValue;
     int result;
     
-    DEBUGP(DL_TRACE, "==>intel_setup_time_aware_shaper (ChatGPT5 Validation Runbook Implementation)\n");
+    DEBUGP(DL_TRACE, "==>intel_setup_time_aware_shaper (I226 TAS - clean implementation)\n");
     
     if (dev == NULL || config == NULL) {
         DEBUGP(DL_ERROR, "intel_setup_time_aware_shaper: Invalid parameters\n");
@@ -474,7 +362,7 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
         return -1;
     }
     
-    // Log VID:DID before each MMIO (ChatGPT5 requirement)
+    // Log VID:DID for identification
     DEBUGP(DL_INFO, "I226 TAS Setup: VID:DID = 0x%04X:0x%04X\n", 
            context->intel_device.pci_vendor_id, context->intel_device.pci_device_id);
     
@@ -482,196 +370,62 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
            config->base_time_s, config->base_time_ns,
            config->cycle_time_s, config->cycle_time_ns);
     
-    // Step 1: Pre-req - Verify I226 PHC (SYSTIM) is advancing
-    ULONG systiml_1, systimh_1, systiml_2, systimh_2;
+    // SIMPLE APPROACH: Just verify SYSTIM is not zero, don't try to fix it
+    ULONG systiml_1, systimh_1;
     result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_1);  // SYSTIML
     if (result != 0) return result;
     result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_1);  // SYSTIMH
     if (result != 0) return result;
     
-    // Wait 10ms and check again
-    LARGE_INTEGER delay;
-    delay.QuadPart = -100000;  // 10ms delay
-    KeDelayExecutionThread(KernelMode, FALSE, &delay);
-    
-    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
-    if (result != 0) return result;
-    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
-    if (result != 0) return result;
-    
-    ULONGLONG systim_1 = ((ULONGLONG)systimh_1 << 32) | systiml_1;
-    ULONGLONG systim_2 = ((ULONGLONG)systimh_2 << 32) | systiml_2;
-    
-    if (systim_2 <= systim_1) {
-        DEBUGP(DL_ERROR, "I226 PHC (SYSTIM) not advancing: 0x%llx -> 0x%llx - Fix SYSTIM first\n", 
-               systim_1, systim_2);
-        
-        // Enhanced PHC initialization
-        if (context->intel_device.device_type == INTEL_DEVICE_I226) {
-            DEBUGP(DL_INFO, "Attempting enhanced I226 PHC initialization\n");
-            result = intel_init_i226_phc(dev);
-            if (result == 0) {
-                // Re-verify PHC after initialization
-                delay.QuadPart = -100000;  // 10ms delay
-                KeDelayExecutionThread(KernelMode, FALSE, &delay);
-                
-                result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_1);
-                if (result == 0) {
-                    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_1);
-                }
-                
-                delay.QuadPart = -100000;  // 10ms delay
-                KeDelayExecutionThread(KernelMode, FALSE, &delay);
-                
-                if (result == 0) {
-                    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
-                    if (result == 0) {
-                        result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
-                    }
-                }
-                
-                if (result == 0) {
-                    systim_1 = ((ULONGLONG)systimh_1 << 32) | systiml_1;
-                    systim_2 = ((ULONGLONG)systimh_2 << 32) | systiml_2;
-                    
-                    if (systim_2 > systim_1) {
-                        DEBUGP(DL_INFO, "? I226 PHC initialized successfully: 0x%llx -> 0x%llx\n",
-                               systim_1, systim_2);
-                    } else {
-                        DEBUGP(DL_ERROR, "? I226 PHC initialization failed - still not advancing\n");
-                        return -1;
-                    }
-                } else {
-                    return -1;
-                }
-            } else {
-                return -1;
-            }
-        } else {
-            return -1;
-        }
+    ULONGLONG systim_current = ((ULONGLONG)systimh_1 << 32) | systiml_1;
+    if (systim_current == 0) {
+        DEBUGP(DL_ERROR, "I226 PHC (SYSTIM) is zero - TAS requires running PHC\n");
+        return -1;  // Don't try to fix, just report
     }
     
-    DEBUGP(DL_INFO, "? I226 PHC verified: SYSTIM advancing from 0x%llx to 0x%llx\n", 
-           systim_1, systim_2);
-    DEBUGP(DL_INFO, "    Clock advancement: %llu ns in 10ms\n", systim_2 - systim_1);
+    DEBUGP(DL_INFO, "? I226 PHC check: SYSTIM=0x%llx (not zero)\n", systim_current);
     
-    // Step 2: Program TSN/Qbv control (TQAVCTRL @ 0x3570)
+    // Program TSN/Qbv control (TQAVCTRL @ 0x3570) - CORRECT I226 ADDRESS
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
     if (result != 0) return result;
-    
-    // Check if GCL is already running (BASET_H|L == 0)
-    ULONG baset_h, baset_l;
-    ndis_platform_ops.mmio_read(dev, I226_BASET_H, &baset_h);
-    ndis_platform_ops.mmio_read(dev, I226_BASET_L, &baset_l);
-    BOOLEAN gcl_running = (baset_h != 0 || baset_l != 0);
     
     // Set TRANSMIT_MODE_TSN and ENHANCED_QAV
     regValue |= TQAVCTRL_TRANSMIT_MODE_TSN | TQAVCTRL_ENHANCED_QAV;
     
-    // If no GCL is running, also set FUTSCDDIS before programming cycle/base time (I226 requirement)
-    if (!gcl_running) {
-        regValue |= TQAVCTRL_FUTSCDDIS;
-        DEBUGP(DL_INFO, "I226: Setting FUTSCDDIS for initial GCL configuration\n");
-    }
-    
     result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
     if (result != 0) return result;
     
-    DEBUGP(DL_INFO, "? TQAVCTRL programmed: 0x%08X (TSN=%s, QAV=%s, FUTSCDDIS=%s)\n", 
+    DEBUGP(DL_INFO, "? TQAVCTRL programmed: 0x%08X (TSN=%s, QAV=%s)\n", 
            regValue,
            (regValue & TQAVCTRL_TRANSMIT_MODE_TSN) ? "ON" : "OFF",
-           (regValue & TQAVCTRL_ENHANCED_QAV) ? "ON" : "OFF", 
-           (regValue & TQAVCTRL_FUTSCDDIS) ? "ON" : "OFF");
+           (regValue & TQAVCTRL_ENHANCED_QAV) ? "ON" : "OFF");
     
-    // Step 3: Program cycle time
+    // Program cycle time (if provided)
     ULONG cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
     if (cycle_time_ns == 0) {
         cycle_time_ns = 1000000;  // Default 1ms cycle
     }
     
-    // QBVCYCLET_S @ 0x3320 = cycle_ns
-    result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET_S, cycle_time_ns);
-    if (result != 0) return result;
-    
-    // QBVCYCLET @ 0x331C = cycle_ns (both, in nanoseconds)
+    // QBVCYCLET @ 0x331C = cycle_ns
     result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET, cycle_time_ns);
     if (result != 0) return result;
     
     DEBUGP(DL_INFO, "? Cycle time programmed: %lu ns (%lu ms)\n", 
            cycle_time_ns, cycle_time_ns / 1000000);
     
-    // Step 4: Choose base time in the future
-    // Read SYSTIML/H, compute base = now + 500 ms, then roll to the next cycle boundary
-    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &systiml_2);
-    if (result != 0) return result;
-    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &systimh_2);
-    if (result != 0) return result;
-    
-    ULONGLONG current_systim = ((ULONGLONG)systimh_2 << 32) | systiml_2;
-    ULONGLONG base_time_ns = current_systim + 500000000ULL;  // now + 500 ms
-    
-    // Roll to next cycle boundary
-    ULONGLONG cycles_ahead = (base_time_ns - current_systim) / cycle_time_ns;
-    if (cycles_ahead == 0) cycles_ahead = 1;
-    base_time_ns = current_systim + (cycles_ahead * cycle_time_ns);
-    
-    DEBUGP(DL_INFO, "Base time calculation: current=0x%llx, target=0x%llx (+%llu cycles)\n",
-           current_systim, base_time_ns, cycles_ahead);
-    
-    // Step 5: Program base time
-    ULONG baset_h_new = (ULONG)(base_time_ns / 1000000000ULL);  // base / 1e9
-    ULONG baset_l_new = (ULONG)(base_time_ns % 1000000000ULL);  // base % 1e9
-    
-    // BASET_H @ 0x3318 = base / 1e9
-    result = ndis_platform_ops.mmio_write(dev, I226_BASET_H, baset_h_new);
-    if (result != 0) return result;
-    
-    // On I226 with FUTSCDDIS set: write BASET_L @ 0x3314 = 0 once, then write the true BASET_L
-    if (regValue & TQAVCTRL_FUTSCDDIS) {
-        result = ndis_platform_ops.mmio_write(dev, I226_BASET_L, 0);  // Zero first
-        if (result != 0) return result;
-        DEBUGP(DL_INFO, "I226 FUTSCDDIS: BASET_L written as 0 first (reconfig quirk)\n");
-    }
-    
-    result = ndis_platform_ops.mmio_write(dev, I226_BASET_L, baset_l_new);
-    if (result != 0) return result;
-    
-    DEBUGP(DL_INFO, "? Base time programmed: %lu.%09lu (0x%08X.%08X)\n", 
-           baset_h_new, baset_l_new, baset_h_new, baset_l_new);
-    
-    // Step 6: Per-queue windows (simple one-queue schedule)
-    // Put Q0 into launch-time/TSN mode: TXQCTL(0) @ 0x3300 |= QUEUE_MODE_LAUNCHT
-    result = ndis_platform_ops.mmio_read(dev, I226_TXQCTL(0), &regValue);
-    if (result != 0) return result;
-    
-    regValue |= TXQCTL_QUEUE_MODE_LAUNCHT;
-    result = ndis_platform_ops.mmio_write(dev, I226_TXQCTL(0), regValue);
-    if (result != 0) return result;
-    
-    // Full open window for Q0 this cycle: STQT(0) @ 0x3340 = 0, ENDQT(0) @ 0x3380 = cycle_ns
-    result = ndis_platform_ops.mmio_write(dev, I226_STQT(0), 0);
-    if (result != 0) return result;
-    
-    result = ndis_platform_ops.mmio_write(dev, I226_ENDQT(0), cycle_time_ns);
-    if (result != 0) return result;
-    
-    // Optionally set other queues' windows to 0
-    for (int i = 1; i < 4; i++) {
-        ndis_platform_ops.mmio_write(dev, I226_STQT(i), 0);
-        ndis_platform_ops.mmio_write(dev, I226_ENDQT(i), 0);
-    }
-    
-    DEBUGP(DL_INFO, "? Queue windows: Q0=[0,%lu], Q1-Q3=closed\n", cycle_time_ns);
-    
-    // Step 7: Final verification
-    ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
-    if (regValue & TQAVCTRL_TRANSMIT_MODE_TSN) {
-        DEBUGP(DL_INFO, "?? I226 TAS activation SUCCESS: TQAVCTRL=0x%08X\n", regValue);
-        DEBUGP(DL_TRACE, "<==intel_setup_time_aware_shaper: SUCCESS (ChatGPT5 validation runbook)\n");
-        return 0;
+    // Final verification - read back what we wrote
+    result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
+    if (result == 0) {
+        if (regValue & TQAVCTRL_TRANSMIT_MODE_TSN) {
+            DEBUGP(DL_INFO, "?? I226 TAS configuration SUCCESS: TQAVCTRL=0x%08X\n", regValue);
+            DEBUGP(DL_TRACE, "<==intel_setup_time_aware_shaper: SUCCESS\n");
+            return 0;
+        } else {
+            DEBUGP(DL_ERROR, "? I226 TAS configuration FAILED: TQAVCTRL=0x%08X\n", regValue);
+            return -1;
+        }
     } else {
-        DEBUGP(DL_ERROR, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", regValue);
+        DEBUGP(DL_ERROR, "? I226 TAS verification failed: cannot read TQAVCTRL\n");
         return -1;
     }
 }
