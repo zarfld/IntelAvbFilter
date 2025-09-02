@@ -101,9 +101,6 @@
     <ClCompile Include="tsn_config.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="intel_kernel_real.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="avb_integration_fixed.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -141,6 +138,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="tools\avb_test\avb_diagnostic_test.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="intel_kernel_real.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -234,6 +234,8 @@
     <None Include="build_all_tests.cmd" />
     <None Include="tools\avb_test\avb_hw_state_test.mak" />
     <None Include="tools\avb_test\hardware_investigation.mak" />
+    <None Include="tools\avb_test\enhanced_tas_investigation.mak" />
+    <None Include="enhanced_investigation_suite.ps1" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />
