@@ -16,7 +16,8 @@
 -- Every function must have a Doxygen comment explaining purpose, parameters, return values, and hardware context.
 -- no duplicate or redundant implementations to avoid inconsistencies and confusion; use centralized, reusable functions instead
 -- no ad-hoc file copies (e.g., *_fixed, *_new, *_correct); refactor in place step-by-step to avoid breakage
--- Clean submit rules:
+-- use descriptive naming patterns consistent with existing codebase for files, functions, variables, and types
+   - -- Clean submit rules:
    - each commit compiles and passes checks
    - small, single-purpose, reviewable diffs (no WIP noise)
    - no dead or commented-out code; remove unused files
