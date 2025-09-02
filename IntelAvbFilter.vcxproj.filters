@@ -238,6 +238,7 @@
     <None Include="enhanced_investigation_suite.ps1" />
     <None Include="tools\avb_test\critical_prerequisites_investigation.mak" />
     <None Include="tools\avb_test\corrected_i226_tas_test.mak" />
+    <None Include="tools\avb_test\chatgpt5_i226_tas_validation.mak" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />
