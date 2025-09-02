@@ -407,7 +407,7 @@ int intel_setup_time_aware_shaper(device_t *dev, struct tsn_tas_config *config)
     ULONG baset_h, baset_l;
     ndis_platform_ops.mmio_read(dev, I226_BASET_H, &baset_h);
     ndis_platform_ops.mmio_read(dev, I226_BASET_L, &baset_l);
-    BOOLEAN gcl_running = (baset_h != 0 || baset_l != 0);  // Use BOOLEAN for kernel mode
+    BOOLEAN gcl_running = (baset_h != 0 || baset_l != 0);
     
     // Configure TQAVCTRL with I226-specific FUTSCDDIS if no GCL running
     regValue |= TQAVCTRL_TRANSMIT_MODE_TSN | TQAVCTRL_ENHANCED_QAV;
