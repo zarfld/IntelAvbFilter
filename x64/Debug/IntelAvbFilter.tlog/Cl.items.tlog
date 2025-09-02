@@ -3,6 +3,15 @@ D:\Repos\IntelAvbFilter\avb_bar0_enhanced.c;D:\Repos\IntelAvbFilter\x64\Debug\av
 D:\Repos\IntelAvbFilter\avb_hardware_access.c;D:\Repos\IntelAvbFilter\x64\Debug\avb_hardware_access.obj
 D:\Repos\IntelAvbFilter\avb_integration_fixed.c;D:\Repos\IntelAvbFilter\x64\Debug\avb_integration_fixed.obj
 D:\Repos\IntelAvbFilter\avb_test_i210.c;D:\Repos\IntelAvbFilter\x64\Debug\avb_test_i210.obj
+D:\Repos\IntelAvbFilter\devices\intel_82575_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_82575_impl.obj
+D:\Repos\IntelAvbFilter\devices\intel_82576_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_82576_impl.obj
+D:\Repos\IntelAvbFilter\devices\intel_82580_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_82580_impl.obj
+D:\Repos\IntelAvbFilter\devices\intel_device_registry.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_device_registry.obj
+D:\Repos\IntelAvbFilter\devices\intel_i210_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_i210_impl.obj
+D:\Repos\IntelAvbFilter\devices\intel_i217_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_i217_impl.obj
+D:\Repos\IntelAvbFilter\devices\intel_i219_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_i219_impl.obj
+D:\Repos\IntelAvbFilter\devices\intel_i226_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_i226_impl.obj
+D:\Repos\IntelAvbFilter\devices\intel_i350_impl.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_i350_impl.obj
 D:\Repos\IntelAvbFilter\intel_kernel_real.c;D:\Repos\IntelAvbFilter\x64\Debug\intel_kernel_real.obj
 D:\Repos\IntelAvbFilter\precomp.c;D:\Repos\IntelAvbFilter\x64\Debug\precomp.obj
 D:\Repos\IntelAvbFilter\filter.c;D:\Repos\IntelAvbFilter\x64\Debug\filter.obj
