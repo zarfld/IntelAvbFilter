@@ -291,6 +291,8 @@
     <None Include="tools\avb_test\avb_hw_state_test.mak" />
     <None Include="tools\avb_test\avb_i226_advanced.mak" />
     <None Include="tools\avb_test\avb_test.mak" />
+    <None Include="tools\avb_test\corrected_i226_tas_test.mak" />
+    <None Include="tools\avb_test\critical_prerequisites_investigation.mak" />
     <None Include="tools\avb_test\enhanced_tas_investigation.mak" />
     <None Include="tools\avb_test\hardware_investigation.mak" />
     <None Include="tools\avb_test\phase2_test.mak" />
