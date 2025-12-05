@@ -251,6 +251,74 @@
 				"Sign-Driver.ps1"
 			],
 			"problemMatcher": []
+		},
+		{
+			"label": "build-tsauxc-toggle-test",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools/build_tsauxc_test.ps1"
+			],
+			"group": "test",
+			"problemMatcher": []
+		},
+		{
+			"label": "run-tsauxc-toggle-test",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"./tsauxc_toggle_test.exe"
+			],
+			"presentation": {
+				"reveal": "always"
+			},
+			"dependsOn": [
+				"build-tsauxc-toggle-test"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "build-ptp-clock-control-test",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools/vs_compile.ps1",
+				"-BuildCmd",
+				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tools/avb_test/ptp_clock_control_test.c /Fe:ptp_clock_control_test.exe"
+			],
+			"group": "test",
+			"problemMatcher": []
+		},
+		{
+			"label": "run-ptp-clock-control-test",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"./ptp_clock_control_test.exe"
+			],
+			"presentation": {
+				"reveal": "always"
+			},
+			"dependsOn": [
+				"build-ptp-clock-control-test"
+			],
+			"problemMatcher": []
 		}
 	]
 }
