@@ -13,6 +13,7 @@ Abstract:
 
 #include "precomp.h"
 #include "intel_device_interface.h"
+#define INTEL_DEVICE_TYPE_MAX 16  // Adjust as needed for maximum device types
 
 // External declarations for all device implementations
 extern const intel_device_ops_t i210_ops;
@@ -47,7 +48,7 @@ static void initialize_device_registry(void)
         
         // Legacy IGB devices (82xxx series)
         device_registry[INTEL_DEVICE_82575] = &e82575_ops;
-        device_registry[INTEL_DEVICE_82576] = &e82576_ops; // 82576 uses dedicated implementation
+        device_registry[INTEL_DEVICE_82576] = &e82576_ops;
         device_registry[INTEL_DEVICE_82580] = &e82580_ops;
         
         // Additional devices can be registered here as needed:
@@ -55,7 +56,7 @@ static void initialize_device_registry(void)
         // device_registry[INTEL_DEVICE_E810] = &e810_ops;
         
         initialized = TRUE;
-        DEBUGP(DL_INFO, "Intel device registry initialized with IGB support:\n");
+        DEBUGP(DL_INFO, "Intel device registry initialized with full IGB support:\n");
         DEBUGP(DL_INFO, "  Modern: I210, I217, I219, I226, I350, I354\n");
         DEBUGP(DL_INFO, "  Legacy: 82575, 82576, 82580\n");
     }

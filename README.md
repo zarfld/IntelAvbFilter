@@ -156,6 +156,42 @@ msbuild IntelAvbFilter.sln /p:Configuration=Debug /p:Platform=x64
 
 ## 🚀 **Installation**
 
+### **Quick Installation Using Automated Scripts** ✅ RECOMMENDED
+
+We provide PowerShell scripts to simplify the installation process:
+
+#### **Step 1: Enable Test Signing and Install Driver**
+```powershell
+# Open PowerShell as Administrator
+cd C:\Users\dzarf\source\repos\IntelAvbFilter
+
+# Check current status
+.\setup_driver.ps1 -CheckStatus
+
+# Enable test signing (requires reboot)
+.\setup_driver.ps1 -EnableTestSigning
+shutdown /r /t 0
+
+# After reboot, install the driver
+.\setup_driver.ps1 -InstallDriver
+```
+
+#### **Step 2: Troubleshoot Certificate Issues (if needed)**
+```powershell
+# Diagnose certificate problems
+.\troubleshoot_certificates.ps1
+
+# Fix certificate installation automatically
+.\troubleshoot_certificates.ps1 -FixCertificates
+
+# Verify certificates are properly installed
+.\troubleshoot_certificates.ps1
+```
+
+### **Manual Installation** (Advanced Users)
+
+For complete manual installation instructions, see [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md)
+
 #### **Driver Installation Requirements:**
 ```cmd
 # Enable test signing (required for development)
@@ -169,191 +205,34 @@ pnputil /add-driver IntelAvbFilter.inf /install
 dir \\.\IntelAvbFilter  # Should succeed if Intel hardware present
 ```
 
-## 🧪 **Testing - HONEST RESULTS**
+### **Common Certificate Errors - SOLVED** ✅
 
-### **Testing Status: COMPREHENSIVE VALIDATION COMPLETE**
+**Problem**: Getting certificate errors even after installing certificate manually
 
-#### **✅ Successfully Tested Features:**
-- **Device Enumeration**: Perfect (Intel I210 + I226 detected)
-- **Multi-Adapter Support**: Context switching working
-- **Register Access**: All MMIO operations functional
-- **TSN IOCTL Handlers**: ✅ All relevant handlers working (TAS/FP/PTM)
-- **I226 PTP Clock**: Running properly (nanosecond precision)
-- **I226 MDIO PHY Management**: Full PHY register access working
-- **I226 Interrupt Management**: EITR throttling programmable
-- **I226 Queue Management**: Priority configuration mostly working
+**Root Cause**: Certificate needs to be in **BOTH** stores:
+- Trusted Root Certification Authorities
+- **Trusted Publishers** ← Most commonly forgotten!
 
-#### **❌ Issues Identified:**
-- **I210 PTP Clock**: Stuck at zero despite proper initialization sequence
-- **I226 TAS activation**: Enable bit won't stick despite complete configuration
-- **I226 Frame Preemption**: Configuration not taking effect
-- **I226 EEE**: Register writes ignored (may need link partner support)
-- **I226 Speed**: Limited to 100 Mbps (may be network infrastructure limit)
-
-#### **📊 Feature Coverage:**
-- **TSN IOCTL Handlers**: ✅ **100% Working** (TAS/FP/PTM handlers functional)
-- **Basic IEEE 1588**: ✅ **75% Working** (I226 working, I210 needs fixes)
-- **Advanced TSN Hardware**: ❌ **50% Working** (IOCTL access works, hardware activation fails)
-- **Hardware Interface**: ✅ **95% Working** (excellent MMIO/MDIO/register access)
-
-### **Test Tools Available**
-```cmd
-# TSN IOCTL Handler verification (NEW - verifies our fix)
-.\build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe
-
-# Comprehensive multi-adapter testing
-.\build\tools\avb_test\x64\Debug\avb_multi_adapter_test.exe
-
-# I210-specific testing (PTP issues)
-.\build\tools\avb_test\x64\Debug\avb_test_i210.exe
-
-# I226 basic features
-.\build\tools\avb_test\x64\Debug\avb_i226_test.exe
-
-# I226 advanced features (comprehensive)
-.\build\tools\avb_test\x64\Debug\avb_i226_advanced_test.exe
+**Solution**: Use our automated script:
+```powershell
+.\troubleshoot_certificates.ps1 -FixCertificates
 ```
 
-**Expected Results**:
-- **Without Intel Hardware**: "Open failed: 2" (FILE_NOT_FOUND) ← **This is correct!**
-- **With Intel Hardware**: 
-  - ✅ Device enumeration working
-  - ✅ I226 features mostly functional
-  - ❌ I210 PTP needs additional work
-  - ❌ Advanced TSN features need investigation
+This will automatically:
+1. Find your IntelAvbFilter certificate
+2. Remove old/stale certificates
+3. Install to **BOTH** required certificate stores
+4. Verify installation success
 
-## 🏗️ **Architecture**
+### **Uninstalling the Driver**
 
-```
-User Application
-    ↓ (DeviceIoControl)
-NDIS Filter Driver (filter.c)
-    ↓ (Platform Operations)  
-AVB Integration (avb_integration_fixed.c)
-    ↓ (Hardware Discovery)
-Hardware Access (avb_hardware_access.c)
-    ↓ (MMIO/PCI)
-Intel Controller Hardware
-```
+```powershell
+# Using setup script
+.\setup_driver.ps1 -UninstallDriver
 
-## 🔍 **Key Files**
+# Manual method
+netcfg -v -u MS_IntelAvbFilter
 
-- `avb_integration_fixed.c` - Main device management and IOCTL handling
-- `avb_hardware_access.c` - Real hardware MMIO/PCI access
-- `avb_bar0_discovery.c` - NDIS hardware resource enumeration
-- `filter.c`, `device.c` - NDIS filter infrastructure
-- `include/avb_ioctl.h` - User-mode API definitions
-
-## 📋 **HONEST Development Status**
-
-| Component | Implementation | Hardware Testing | Production Ready |
-|-----------|----------------|------------------|------------------|
-| **Build System** | ✅ Complete | ✅ Working | ✅ Ready |
-| **NDIS Filter** | ✅ Complete | ✅ Working | ✅ Ready |
-| **IOCTL API** | ✅ Complete | ✅ Working | ✅ Ready |
-| **TSN IOCTL Handlers** | ✅ **Fixed** | ✅ **Working** | ✅ **Ready** |
-| **Hardware Discovery** | ✅ Complete | ✅ Working | ✅ Ready |
-| **Register Access** | ✅ Complete | ✅ Working | ✅ Ready |
-| **I226 Basic Features** | ✅ Complete | ✅ Working | ✅ Ready |
-| **I226 Advanced TSN** | ✅ Complete | ❌ TAS/FP Issues | ❌ Not Ready |
-| **I210 PTP** | ✅ Complete | ❌ Clock Issues | ❌ Not Ready |
-| **Multi-Adapter** | ✅ Complete | ✅ Working | ✅ Ready |
-
-### **Production Readiness Assessment:**
-
-#### **✅ Ready for Production:**
-- **TSN IOCTL Interface**: All TAS/FP/PTM handlers working (Error 1 fix completed)
-- **Basic IEEE 1588 on I226**: Functional PTP clock and timestamps
-- **Device enumeration and management**: Rock solid
-- **IOCTL interface**: Complete and tested
-- **Multi-adapter support**: Working properly
-
-#### **❌ NOT Ready for Production:**
-- **Advanced TSN hardware activation**: TAS/FP configuration not taking effect
-- **I210 PTP functionality**: Clock initialization issues
-- **Power management features**: EEE not working
-
-#### **⚠️ Needs Investigation:**
-- **I226 TAS timing requirements**: May need Intel-specific initialization
-- **I210 hardware sequencing**: PTP clock start sequence
-- **Network infrastructure limits**: 2.5G speed configuration
-
-## ⚠️ **Important Notes**
-
-1. **Hardware Dependency**: This driver requires physical Intel I210/I219/I225/I226 controllers
-2. **No Simulation**: Does not provide fake/simulation modes - real hardware only
-3. **Filter Driver**: Attaches to existing Intel miniport drivers, doesn't replace them
-4. **Mixed Results**: Basic features work well, advanced features have issues
-5. **WDK Version Critical**: Use WDK 10.0.22621 (recommended) or 10.0.19041 (proven) for best compatibility
-
-## 🔍 **Debug Output**
-
-Enable debug tracing to see hardware access attempts:
-```
-[TRACE] ==>AvbInitializeDevice: Transitioning to real hardware access
-[TRACE] ==>AvbDiscoverIntelControllerResources  
-[INFO]  Intel controller resources discovered: BAR0=0xf7a00000, Length=0x20000
-[TRACE] ==>AvbMapIntelControllerMemory: Success, VA=0xfffff8a000f40000
-[INFO]  Real hardware access enabled: BAR0=0xf7a00000, Length=0x20000
-[TRACE] AvbMmioReadReal: offset=0x0B600, value=0x12345678 (REAL HARDWARE)
-```
-
-## 🎯 **Next Steps - REALISTIC PRIORITIES**
-
-### **✅ Phase 1: COMPLETED - TSN IOCTL Handler Fix**
-1. ✅ **Fixed missing IOCTL case handlers** - TAS, FP, PTM no longer return Error 1
-2. ✅ **Hardware validation completed** - All handlers confirmed working with real I210 + I226 hardware
-3. ✅ **Test tools created** - `test_tsn_ioctl_handlers.exe` validates the fix
-
-### **Phase 2: Fix Critical Hardware Issues** (HIGH PRIORITY)
-1. **Investigate I210 PTP clock initialization** - Clock stuck at zero
-2. **Research I226 TAS activation requirements** - May need Intel documentation
-3. **Debug EEE functionality** - Register writes being ignored
-
-### **Phase 3: Hardware Validation** (MEDIUM PRIORITY)
-1. **Test on different Intel hardware** - Validate across controller types
-2. **Network infrastructure testing** - Test 2.5G with compatible switches
-3. **Link partner compatibility** - Test EEE with supporting devices
-
-### **Phase 4: Production Features** (AFTER FIXES)
-1. **Complete I217 integration** - Add missing device identification
-2. **Performance optimization** - After core features stable
-3. **Documentation and deployment** - When functionality confirmed
-
-## 🤝 **Contributing**
-
-**Current Focus**: **Hardware-level TSN activation** and I210 PTP clock fixes
-
-✅ **RECENTLY COMPLETED:**
-- TSN IOCTL handlers (TAS, FP, PTM) - **FIXED and VERIFIED**
-- Multi-adapter hardware testing - **VALIDATED**  
-- Hardware register access - **CONFIRMED WORKING**
-
-⚠️ **CURRENT ISSUES TO FIX:**
-- I210 PTP clock not starting
-- I226 TAS/FP activation failures  
-- EEE power management not working
-
-1. Fork the repository
-2. **Test on real Intel hardware** and report results
-3. **Help investigate TAS/FP activation issues**
-4. **Validate timing accuracy** on working features
-5. Submit pull request with fixes or validation results
-
-## 📄 **License**
-
-This project incorporates the Intel AVB library and follows its licensing terms. See [`LICENSE.txt`](LICENSE.txt) for details.
-
-## 🙏 **Acknowledgments**
-
-- Intel Corporation for the AVB library foundation and comprehensive hardware specifications
-- Microsoft for the NDIS framework documentation and driver samples
-- The TSN and AVB community for specifications and guidance
-
----
-
-**Last Updated**: January 2025  
-**Status**: **TSN IOCTL HANDLERS FIXED ✅ - INFRASTRUCTURE SOLID, SOME HARDWARE ACTIVATION NEEDS WORK** ⚠️  
-**Recent Achievement**: Fixed ERROR_INVALID_FUNCTION issue for TAS/FP/PTM IOCTLs  
-**Next Milestone**: Fix I210 PTP and I226 hardware-level TSN activation  
-**WDK Requirement**: **WDK 10.0.22621** (Windows 11 22H2) or **WDK 10.0.19041** (Windows 10 2004)
+# Disable test signing (optional)
+bcdedit /set testsigning off
+shutdown /r /t 0

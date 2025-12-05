@@ -262,6 +262,7 @@ IntelAvbFilterDeviceIoControl(
                 DEBUGP(DL_WARN, "   - Filter Name: %wZ\n", &pFilter->MiniportFriendlyName);
                 if (pFilter->AvbContext) {
                     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+                    UNREFERENCED_PARAMETER(ctx);
                     DEBUGP(DL_WARN, "   - Context: VID=0x%04X DID=0x%04X state=%s\n",
                            ctx->intel_device.pci_vendor_id, ctx->intel_device.pci_device_id,
                            AvbHwStateName(ctx->hw_state));

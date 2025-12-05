@@ -48,12 +48,13 @@
 		{
 			"label": "build-driver-release",
 			"type": "shell",
-			"command": "msbuild",
+			"command": "powershell",
 			"args": [
-				"IntelAvbFilter.sln",
-				"/t:Build",
-				"/p:Configuration=Release;Platform=x64",
-				"/m"
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath; if(!$vs){ Write-Error 'VS not found'; exit 1 }; $msbuild=Join-Path $vs 'MSBuild\\Current\\Bin\\MSBuild.exe'; if(!(Test-Path $msbuild)){ Write-Error 'MSBuild not found'; exit 1 }; & $msbuild IntelAvbFilter.sln /t:Build /p:Configuration=Release /p:Platform=x64 /m"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -66,12 +67,13 @@
 		{
 			"label": "build-driver-debug",
 			"type": "shell",
-			"command": "msbuild",
+			"command": "powershell",
 			"args": [
-				"IntelAvbFilter.sln",
-				"/t:Build",
-				"/p:Configuration=Debug;Platform=x64",
-				"/m"
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath; if(!$vs){ Write-Error 'VS not found'; exit 1 }; $msbuild=Join-Path $vs 'MSBuild\\Current\\Bin\\MSBuild.exe'; if(!(Test-Path $msbuild)){ Write-Error 'MSBuild not found'; exit 1 }; & $msbuild IntelAvbFilter.sln /t:Build /p:Configuration=Debug /p:Platform=x64 /m"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -80,12 +82,13 @@
 		{
 			"label": "rebuild-driver-release",
 			"type": "shell",
-			"command": "msbuild",
+			"command": "powershell",
 			"args": [
-				"IntelAvbFilter.sln",
-				"/t:Clean;Build",
-				"/p:Configuration=Release;Platform=x64",
-				"/m"
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath; if(!$vs){ Write-Error 'VS not found'; exit 1 }; $msbuild=Join-Path $vs 'MSBuild\\Current\\Bin\\MSBuild.exe'; if(!(Test-Path $msbuild)){ Write-Error 'MSBuild not found'; exit 1 }; & $msbuild IntelAvbFilter.sln /t:Clean /t:Build /p:Configuration=Release /p:Platform=x64 /m"
 			],
 			"problemMatcher": [
 				"$msCompile"
