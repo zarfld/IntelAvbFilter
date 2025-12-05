@@ -195,6 +195,7 @@
     <ClCompile Include="devices\intel_i219_impl.c" />
     <ClCompile Include="devices\intel_i226_impl.c" />
     <ClCompile Include="devices\intel_i350_impl.c" />
+    <ClCompile Include="intel_i225_kernel_wrapper.c" />
     <ClCompile Include="intel_kernel_real.c" />
     <ClCompile Include="precomp.c">
       <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -236,11 +237,11 @@
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
   <ItemGroup>
-    <FilesToPackage Include="D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter.inf">
+    <FilesToPackage Include="x64\Debug\IntelAvbFilter.inf">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="D:\Repos\IntelAvbFilter\x64\Debug\IntelAvbFilter.sys">
+    <FilesToPackage Include="x64\Debug\IntelAvbFilter.sys">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
@@ -255,6 +256,7 @@
     <None Include="build_all_tests.cmd" />
     <None Include="build_investigation_tools.cmd" />
     <None Include="CAT-FILE-MANAGEMENT.md" />
+    <None Include="CERTIFICATE_ERROR_SOLUTION.md" />
     <None Include="CHANGELOG.md" />
     <None Include="COMPILATION_ERRORS_FIXED.md" />
     <None Include="CURRENT_STATUS_ANALYSIS.md" />
@@ -280,6 +282,7 @@
     <None Include="external\intel_avb\spec\ethernet-connection-i219-datasheet.md" />
     <None Include="external\intel_avb\spec\i217-ethernet-controller-datasheet-2.md" />
     <None Include="external\intel_avb\spec\README.md" />
+    <None Include="fix_deployment_config.ps1" />
     <None Include="FIX_STATUS_SUMMARY.md" />
     <None Include="Generate-CATFile.ps1" />
     <None Include="HARDWARE_ACCESS_IMPLEMENTATION.md" />
@@ -290,6 +293,7 @@
     <None Include="IMPLEMENTATION_COMPLETE_FINAL.md" />
     <None Include="IMPLEMENTATION_MILESTONE.md" />
     <None Include="IMPLEMENTATION_STATUS_SUMMARY.md" />
+    <None Include="INSTALLATION_GUIDE.md" />
     <None Include="install_driver.cmd" />
     <None Include="INTEGRATION_GUIDE.md" />
     <None Include="IntelAvbFilter-Cleanup.ps1" />
@@ -297,15 +301,18 @@
     <None Include="Makefile.avb_tests" />
     <None Include="Manage-Certificate.ps1" />
     <None Include="MICROSOFT_SAMPLES_INTEGRATION.md" />
+    <None Include="quick_start.ps1" />
     <None Include="README.md" />
     <None Include="run_tests.ps1" />
     <None Include="scripts\build_and_test.ps1" />
     <None Include="SERVICE_TEAM_RESPONSE.md" />
+    <None Include="setup_driver.ps1" />
     <None Include="Sign-Driver.ps1" />
     <None Include="TESTING_STRATEGY_ANALYSIS.md" />
     <None Include="tests\integration\Makefile.mak" />
     <None Include="tests\README.md" />
     <None Include="tests\taef\Makefile.mak" />
+    <None Include="test_driver.ps1" />
     <None Include="TODO.md" />
     <None Include="tools\avb_test\avb_capability_validation.mak" />
     <None Include="tools\avb_test\avb_device_separation_validation.mak" />
@@ -321,6 +328,7 @@
     <None Include="tools\avb_test\phase2_test.mak" />
     <None Include="tools\avb_test\tsn_hardware_activation_validation.mak" />
     <None Include="tools\avb_test\tsn_ioctl_test.mak" />
+    <None Include="troubleshoot_certificates.ps1" />
     <None Include="x64\Debug\IntelAvbFilter.cat" />
   </ItemGroup>
   <ItemGroup>

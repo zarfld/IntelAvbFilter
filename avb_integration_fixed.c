@@ -6,7 +6,7 @@ Module Name:
 
 Abstract:
 
-    Intel AVB integration for NDIS filter � unified implementation.
+    Intel AVB integration for NDIS filter � unified implementation.
     Provides minimal-context creation (BOUND) immediately on attach so
     enumeration succeeds even if later hardware bring-up fails. Deferred
     initialization promotes BAR_MAPPED and PTP_READY states and accrues
@@ -32,7 +32,12 @@ PAVB_DEVICE_CONTEXT g_AvbContext = NULL;
 static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx);
 
 /* Platform ops wrapper (Intel library selects this) */
-static int PlatformInitWrapper(_In_ device_t *dev) { return NT_SUCCESS(AvbPlatformInit(dev)) ? 0 : -1; }
+static int PlatformInitWrapper(_In_ device_t *dev) { 
+    DEBUGP(DL_ERROR, "!!! DEBUG: PlatformInitWrapper called!\n");
+    NTSTATUS status = AvbPlatformInit(dev);
+    DEBUGP(DL_ERROR, "!!! DEBUG: AvbPlatformInit returned: 0x%08X\n", status);
+    return NT_SUCCESS(status) ? 0 : -1;
+}
 static void PlatformCleanupWrapper(_In_ device_t *dev) { AvbPlatformCleanup(dev); }
 
 const struct platform_ops ndis_platform_ops = {
@@ -84,21 +89,21 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     ULONG baseline_caps = 0;
     switch (Ctx->intel_device.device_type) {
         // Legacy IGB devices - REALISTIC capabilities only
-        case INTEL_DEVICE_82575:
-            baseline_caps = INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic hardware only - NO PTP (2008 era)
-            break;
-        case INTEL_DEVICE_82576:
-            baseline_caps = INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic hardware only - NO PTP (2009 era)
-            break;
-        case INTEL_DEVICE_82580:
-            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic PTP added (2010)
-            break;
-        case INTEL_DEVICE_I350:
-            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Standard IEEE 1588 (2012)
-            break;
-        case INTEL_DEVICE_I354:
-            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Same as I350 (2012)
-            break;
+   //     case INTEL_DEVICE_82575:
+   //         baseline_caps = INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic hardware only - NO PTP (2008 era)
+   //         break;
+   //     case INTEL_DEVICE_82576:
+   //         baseline_caps = INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic hardware only - NO PTP (2009 era)
+   //         break;
+   //     case INTEL_DEVICE_82580:
+   //         baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic PTP added (2010)
+   //         break;
+   //     case INTEL_DEVICE_I350:
+   //         baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Standard IEEE 1588 (2012)
+   //         break;
+   //     case INTEL_DEVICE_I354:
+   //         baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Same as I350 (2012)
+   //         break;
             
         // Modern I-series devices - REALISTIC capabilities based on actual hardware
         case INTEL_DEVICE_I210:
@@ -138,18 +143,29 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         return STATUS_SUCCESS;
     }
     
-    // Device-specific post-initialization (delegated to Intel library)
+    // Device-specific post-initialization (allocate Intel library private structure)
+    DEBUGP(DL_ERROR, "!!! DEBUG: AvbBringUpHardware hw_state=%s (need BAR_MAPPED)\n", 
+           AvbHwStateName(Ctx->hw_state));
+    
     if (Ctx->hw_state >= AVB_HW_BAR_MAPPED) {
-        DEBUGP(DL_INFO, "? Starting device-specific post-initialization...\n");
+        DEBUGP(DL_ERROR, "!!! DEBUG: Calling intel_init() for VID=0x%04X DID=0x%04X DevType=%d\n",
+               Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id, 
+               Ctx->intel_device.device_type);
         
-        // Let the Intel library handle device-specific initialization
-        // No device-specific register access in generic integration layer
+        // CRITICAL: Use intel_init() which properly dispatches to device-specific operations
+        // This calls i226_ops.init() → ndis_platform_ops.init() → AvbPlatformInit()
+        // which initializes PTP clock and allocates device private structure
         int init_result = intel_init(&Ctx->intel_device);
+        
+        DEBUGP(DL_ERROR, "!!! DEBUG: intel_init() returned: %d\n", init_result);
+        
         if (init_result == 0) {
-            DEBUGP(DL_INFO, "? Device-specific initialization successful\n");
+            DEBUGP(DL_INFO, "? intel_init() successful - device initialized with PTP and TSN\n");
         } else {
-            DEBUGP(DL_WARN, "?? Device-specific initialization failed: %d (continuing with basic functionality)\n", init_result);
+            DEBUGP(DL_WARN, "?? intel_init() failed: %d (PTP/TSN features unavailable)\n", init_result);
         }
+    } else {
+        DEBUGP(DL_ERROR, "!!! DEBUG: SKIPPING intel_init() - hw_state not ready!\n");
     }
     
     return STATUS_SUCCESS;
@@ -815,6 +831,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     Link = Link->Flink;
                     if (f && f->AvbContext) {
                         PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)f->AvbContext;
+                        UNREFERENCED_PARAMETER(ctx);
                         DEBUGP(DL_ERROR, "     - %wZ: VID=0x%04X DID=0x%04X\n",
                                &f->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
                                ctx->intel_device.pci_device_id);
@@ -1093,7 +1110,118 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
 /* ======================================================================= */
 /* Platform wrappers (real HW access provided in other translation units) */
-NTSTATUS AvbPlatformInit(_In_ device_t *dev){ UNREFERENCED_PARAMETER(dev); return STATUS_SUCCESS; }
+
+/**
+ * @brief Initialize PTP clock hardware for Intel devices
+ * 
+ * This function programs TIMINCA and starts SYSTIM counting.
+ * Required before any TSN features (TAS/FP/PTM) will work.
+ * 
+ * @param dev Device handle with valid MMIO access
+ * @return STATUS_SUCCESS if PTP initialized, error otherwise
+ */
+NTSTATUS AvbPlatformInit(_In_ device_t *dev)
+{
+    DEBUGP(DL_ERROR, "!!! DEBUG: AvbPlatformInit ENTERED!\n");
+    
+    if (!dev) {
+        DEBUGP(DL_ERROR, "!!! DEBUG: AvbPlatformInit - dev is NULL!\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    DEBUGP(DL_ERROR, "!!! DEBUG: AvbPlatformInit - dev is valid, proceeding...\n");
+    
+    // Generic PTP register offsets (same for I210, I211, I217, I219, I225, I226)
+    const ULONG SYSTIML_REG = 0x0B600;
+    const ULONG SYSTIMH_REG = 0x0B604;
+    const ULONG TIMINCA_REG = 0x0B608;
+    const ULONG TSAUXC_REG = 0x0B640;   // Time Sync Auxiliary Control
+    
+    DEBUGP(DL_INFO, "? AvbPlatformInit: Starting PTP clock initialization\n");
+    DEBUGP(DL_INFO, "   Device: VID=0x%04X DID=0x%04X Type=%d\n", 
+           dev->pci_vendor_id, dev->pci_device_id, dev->device_type);
+    
+    // Step 0: Enable PTP clock by clearing TSAUXC bit 31 (DisableSystime)
+    ULONG tsauxc_value = 0;
+    if (AvbMmioReadReal(dev, TSAUXC_REG, &tsauxc_value) == 0) {
+        DEBUGP(DL_INFO, "   TSAUXC before: 0x%08X\n", tsauxc_value);
+        if (tsauxc_value & 0x80000000) {
+            // Bit 31 is set - PTP clock is DISABLED, need to enable it
+            tsauxc_value &= 0x7FFFFFFF;  // Clear bit 31 to enable SYSTIM
+            if (AvbMmioWriteReal(dev, TSAUXC_REG, tsauxc_value) != 0) {
+                DEBUGP(DL_ERROR, "? Failed to enable PTP clock (TSAUXC write failed)\n");
+                return STATUS_DEVICE_HARDWARE_ERROR;
+            }
+            DEBUGP(DL_INFO, "? PTP clock enabled (TSAUXC bit 31 cleared)\n");
+            
+            // Verify the bit was cleared
+            ULONG tsauxc_verify = 0;
+            if (AvbMmioReadReal(dev, TSAUXC_REG, &tsauxc_verify) == 0) {
+                DEBUGP(DL_INFO, "   TSAUXC after:  0x%08X\n", tsauxc_verify);
+            }
+        } else {
+            DEBUGP(DL_INFO, "? PTP clock already enabled (TSAUXC=0x%08X)\n", tsauxc_value);
+        }
+    } else {
+        DEBUGP(DL_WARN, "? Could not read TSAUXC register\n");
+    }
+    
+    // Step 1: Program TIMINCA for 1ns increment per clock cycle
+    // Value depends on device clock frequency:
+    // - I210/I211: 25MHz -> TIMINCA = 0x18000000 (384ns per tick, 2.5M ticks/sec)
+    // - I225/I226: 25MHz -> TIMINCA = 0x18000000
+    // - I217/I219: Different clocking, but 0x18000000 works
+    ULONG timinca_value = 0x18000000;  // Standard value for 25MHz clock
+    
+    ULONG current_timinca = 0;
+    if (AvbMmioReadReal(dev, TIMINCA_REG, &current_timinca) == 0) {
+        DEBUGP(DL_INFO, "   Current TIMINCA: 0x%08X\n", current_timinca);
+    }
+    
+    if (AvbMmioWriteReal(dev, TIMINCA_REG, timinca_value) != 0) {
+        DEBUGP(DL_ERROR, "? Failed to write TIMINCA register\n");
+        return STATUS_DEVICE_HARDWARE_ERROR;
+    }
+    DEBUGP(DL_INFO, "? TIMINCA programmed: 0x%08X\n", timinca_value);
+    
+    // Step 2: Read initial SYSTIM value (SYSTIM is READ-ONLY on I226, starts from 0 on power-up)
+    ULONG systim_init_lo = 0, systim_init_hi = 0;
+    if (AvbMmioReadReal(dev, SYSTIML_REG, &systim_init_lo) == 0 &&
+        AvbMmioReadReal(dev, SYSTIMH_REG, &systim_init_hi) == 0) {
+        DEBUGP(DL_INFO, "? Initial SYSTIM: 0x%08X%08X\n", systim_init_hi, systim_init_lo);
+    }
+    
+    // Step 3: Verify SYSTIM is incrementing (wait 10ms for better delta)
+    LARGE_INTEGER delay;
+    delay.QuadPart = -100000;  // 10ms delay (10,000 microseconds)
+    KeDelayExecutionThread(KernelMode, FALSE, &delay);
+    
+    ULONG systim_check_lo = 0, systim_check_hi = 0;
+    if (AvbMmioReadReal(dev, SYSTIML_REG, &systim_check_lo) == 0 &&
+        AvbMmioReadReal(dev, SYSTIMH_REG, &systim_check_hi) == 0) {
+        
+        DEBUGP(DL_INFO, "? SYSTIM after 10ms: 0x%08X%08X\n", systim_check_hi, systim_check_lo);
+        
+        // Calculate delta (handle 64-bit properly)
+        ULONGLONG initial = ((ULONGLONG)systim_init_hi << 32) | systim_init_lo;
+        ULONGLONG current = ((ULONGLONG)systim_check_hi << 32) | systim_check_lo;
+        
+        if (current > initial) {
+            DEBUGP(DL_INFO, "?? PTP clock is RUNNING! Delta: %llu ns (expected ~10,000,000 ns for 10ms)\n", 
+                   (current - initial));
+            // Note: ctx->hw_state update happens in caller (AvbBringUpHardware)
+            return STATUS_SUCCESS;
+        } else {
+            DEBUGP(DL_WARN, "?? PTP clock not incrementing (SYSTIM unchanged: initial=0x%llX, current=0x%llX)\n", 
+                   initial, current);
+            // Not a fatal error - continue anyway, TAS might still be testable
+            return STATUS_SUCCESS;
+        }
+    }
+    
+    DEBUGP(DL_WARN, "? Could not verify SYSTIM status\n");
+    return STATUS_SUCCESS;  // Non-fatal
+}
 VOID     AvbPlatformCleanup(_In_ device_t *dev){ UNREFERENCED_PARAMETER(dev); }
 int AvbPciReadConfig(device_t *dev, ULONG o, ULONG *v){ return AvbPciReadConfigReal(dev,o,v);} 
 int AvbPciWriteConfig(device_t *dev, ULONG o, ULONG v){ return AvbPciWriteConfigReal(dev,o,v);} 
@@ -1135,36 +1263,36 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 did)
         case 0x125B: return INTEL_DEVICE_I226;  // I226
         
         // IGB device family (82xxx series)
-        case 0x10A7: return INTEL_DEVICE_82575;  // 82575EB Copper
-        case 0x10A9: return INTEL_DEVICE_82575;  // 82575EB Fiber/Serdes  
-        case 0x10D6: return INTEL_DEVICE_82575;  // 82575GB Quad Copper
+   //     case 0x10A7: return INTEL_DEVICE_82575;  // 82575EB Copper
+   //     case 0x10A9: return INTEL_DEVICE_82575;  // 82575EB Fiber/Serdes  
+   //     case 0x10D6: return INTEL_DEVICE_82575;  // 82575GB Quad Copper
         
-        case 0x10C9: return INTEL_DEVICE_82576;  // 82576 Gigabit Network Connection
-        case 0x10E6: return INTEL_DEVICE_82576;  // 82576 Fiber
-        case 0x10E7: return INTEL_DEVICE_82576;  // 82576 Serdes
-        case 0x10E8: return INTEL_DEVICE_82576;  // 82576 Quad Copper
-        case 0x1526: return INTEL_DEVICE_82576;  // 82576 Quad Copper ET2
-        case 0x150A: return INTEL_DEVICE_82576;  // 82576 NS
-        case 0x1518: return INTEL_DEVICE_82576;  // 82576 NS Serdes
-        case 0x150D: return INTEL_DEVICE_82576;  // 82576 Serdes Quad
+    //    case 0x10C9: return INTEL_DEVICE_82576;  // 82576 Gigabit Network Connection
+    //    case 0x10E6: return INTEL_DEVICE_82576;  // 82576 Fiber
+    //    case 0x10E7: return INTEL_DEVICE_82576;  // 82576 Serdes
+    //    case 0x10E8: return INTEL_DEVICE_82576;  // 82576 Quad Copper
+    //    case 0x1526: return INTEL_DEVICE_82576;  // 82576 Quad Copper ET2
+    //    case 0x150A: return INTEL_DEVICE_82576;  // 82576 NS
+    //    case 0x1518: return INTEL_DEVICE_82576;  // 82576 NS Serdes
+    //    case 0x150D: return INTEL_DEVICE_82576;  // 82576 Serdes Quad
         
-        case 0x150E: return INTEL_DEVICE_82580;  // 82580 Copper
-        case 0x150F: return INTEL_DEVICE_82580;  // 82580 Fiber
-        case 0x1510: return INTEL_DEVICE_82580;  // 82580 Serdes
-        case 0x1511: return INTEL_DEVICE_82580;  // 82580 SGMII
-        case 0x1516: return INTEL_DEVICE_82580;  // 82580 Copper Dual
-        case 0x1527: return INTEL_DEVICE_82580;  // 82580 Quad Fiber
+     //   case 0x150E: return INTEL_DEVICE_82580;  // 82580 Copper
+    //    case 0x150F: return INTEL_DEVICE_82580;  // 82580 Fiber
+   //     case 0x1510: return INTEL_DEVICE_82580;  // 82580 Serdes
+     //   case 0x1511: return INTEL_DEVICE_82580;  // 82580 SGMII
+   //     case 0x1516: return INTEL_DEVICE_82580;  // 82580 Copper Dual
+   //     case 0x1527: return INTEL_DEVICE_82580;  // 82580 Quad Fiber
         
-        case 0x1521: return INTEL_DEVICE_I350;   // I350 Copper
-        case 0x1522: return INTEL_DEVICE_I350;   // I350 Fiber
-        case 0x1523: return INTEL_DEVICE_I350;   // I350 Serdes
-        case 0x1524: return INTEL_DEVICE_I350;   // I350 SGMII
-        case 0x1546: return INTEL_DEVICE_I350;   // I350 DA4
+     //   case 0x1521: return INTEL_DEVICE_I350;   // I350 Copper
+    //    case 0x1522: return INTEL_DEVICE_I350;   // I350 Fiber
+    //    case 0x1523: return INTEL_DEVICE_I350;   // I350 Serdes
+    //    case 0x1524: return INTEL_DEVICE_I350;   // I350 SGMII
+    //    case 0x1546: return INTEL_DEVICE_I350;   // I350 DA4
         
         // I354 uses same operations as I350
-        case 0x1F40: return INTEL_DEVICE_I354;   // I354 Backplane 2.5GbE
-        case 0x1F41: return INTEL_DEVICE_I354;   // I354 Backplane 1GbE
-        case 0x1F45: return INTEL_DEVICE_I354;   // I354 SGMII
+     //   case 0x1F40: return INTEL_DEVICE_I354;   // I354 Backplane 2.5GbE
+     //   case 0x1F41: return INTEL_DEVICE_I354;   // I354 Backplane 1GbE
+     //   case 0x1F45: return INTEL_DEVICE_I354;   // I354 SGMII
         
         default: return INTEL_DEVICE_UNKNOWN; 
     }

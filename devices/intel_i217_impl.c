@@ -149,7 +149,9 @@ static int init_ptp(device_t *dev)
  */
 static int set_systime(device_t *dev, uint64_t systime)
 {
-    DEBUGP(DL_TRACE, "==>i217_set_systime: 0x%llx\n", systime);
+    UNREFERENCED_PARAMETER(systime);
+    
+    DEBUGP(DL_TRACE, "==>i217_set_systime\n");
     
     if (dev == NULL) {
         return -1;

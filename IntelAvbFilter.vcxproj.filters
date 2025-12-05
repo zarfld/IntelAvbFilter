@@ -275,6 +275,21 @@
     <None Include="docs\IGB_Device_Implementation.md" />
     <None Include="docs\Hardware_Capability_Reality_Check.md" />
     <None Include="docs\Hardware_Capability_Corrections_Summary.md" />
+    <None Include="Build-AllTests-Honest.ps1" />
+    <None Include="Build-AllTests-TrulyHonest.ps1" />
+    <None Include="build_investigation_tools.cmd" />
+    <None Include="diagnostic_build.cmd" />
+    <None Include="docs\SSOT_HEADER_USAGE.md" />
+    <None Include="TESTING_STRATEGY_ANALYSIS.md" />
+    <None Include="tools\avb_test\avb_capability_validation.mak" />
+    <None Include="tools\avb_test\avb_device_separation_validation.mak" />
+    <None Include="INSTALLATION_GUIDE.md" />
+    <None Include="setup_driver.ps1" />
+    <None Include="troubleshoot_certificates.ps1" />
+    <None Include="quick_start.ps1" />
+    <None Include="CERTIFICATE_ERROR_SOLUTION.md" />
+    <None Include="test_driver.ps1" />
+    <None Include="fix_deployment_config.ps1" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />

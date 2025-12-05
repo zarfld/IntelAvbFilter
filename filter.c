@@ -15,9 +15,6 @@ Abstract:
 #ifndef FILTER_SERVICE_NAME
 #define FILTER_SERVICE_NAME      L"IntelAvbFilter"
 #endif
-#ifndef FILTER_UNIQUE_NAME
-#define FILTER_UNIQUE_NAME       L"MS_IntelAvbFilter" /* Must match INF ComponentId (HKR,Ndi,ComponentId) */
-#endif
 #ifndef FILTER_FRIENDLY_NAME
 #define FILTER_FRIENDLY_NAME     L"Intel AVB/TSN NDIS Filter Driver" /* Must match INF DisplayName */
 #endif
@@ -151,16 +148,16 @@ Return Value:
         InitializeListHead(&FilterModuleList);
         FilterDriverHandle = NULL;
 
-        // Zero the characteristics structure - use manual size calculation for NDIS 6.0
+        // Zero the characteristics structure
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
         FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;  // Force Revision 1
-        // Manual size calculation for NDIS 6.0 Revision 1 (exclude newer fields)
-        FChars.Header.Size = FIELD_OFFSET(NDIS_FILTER_DRIVER_CHARACTERISTICS, DirectOidRequestHandler);
+        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
+        // Use sizeof for the actual structure size - NDIS will validate
+        FChars.Header.Size = sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS);
         
-        // Use NDIS 6.0 explicitly like August 14th
-        FChars.MajorNdisVersion = 6;
-        FChars.MinorNdisVersion = 0;
+        // Use system-defined NDIS version
+        FChars.MajorNdisVersion = FILTER_MAJOR_NDIS_VERSION;
+        FChars.MinorNdisVersion = FILTER_MINOR_NDIS_VERSION;
         FChars.MajorDriverVersion = 1;
         FChars.MinorDriverVersion = 0;
         FChars.Flags = 0;
@@ -202,6 +199,15 @@ Return Value:
                FChars.Header.Size, FChars.Header.Revision, FChars.Header.Type);
         DEBUGP(DL_INFO, "DriverEntry: DriverObject=%p, FilterDriverObject=%p\n", 
                DriverObject, FilterDriverObject);
+        DEBUGP(DL_INFO, "DriverEntry: ServiceName=%wZ\n", &ServiceName);
+        DEBUGP(DL_INFO, "DriverEntry: UniqueName=%wZ\n", &UniqueName);
+        DEBUGP(DL_INFO, "DriverEntry: FriendlyName=%wZ\n", &FriendlyName);
+        DEBUGP(DL_INFO, "DriverEntry: Handlers - SetOptions=%p, Attach=%p, Detach=%p\n",
+               FChars.SetOptionsHandler, FChars.AttachHandler, FChars.DetachHandler);
+        DEBUGP(DL_INFO, "DriverEntry: Handlers - Restart=%p, Pause=%p, SetModuleOpts=%p\n",
+               FChars.RestartHandler, FChars.PauseHandler, FChars.SetFilterModuleOptionsHandler);
+        DEBUGP(DL_INFO, "DriverEntry: Handlers - OidRequest=%p, SendNBL=%p, ReceiveNBL=%p\n",
+               FChars.OidRequestHandler, FChars.SendNetBufferListsHandler, FChars.ReceiveNetBufferListsHandler);
         
         // First attempt with NDIS 6.0 revision 1
         Status = NdisFRegisterFilterDriver(DriverObject,
@@ -274,14 +280,14 @@ Return Value:
 
 --*/
 {
+    UNREFERENCED_PARAMETER(NdisFilterDriverHandle);
+    
     DEBUGP(DL_TRACE, "===>FilterRegisterOptions\n");
 
-    ASSERT(NdisFilterDriverHandle == FilterDriverHandle);
-    ASSERT(FilterDriverContext == (NDIS_HANDLE)FilterDriverObject);
-
-    if ((NdisFilterDriverHandle != (NDIS_HANDLE)FilterDriverHandle) ||
-        (FilterDriverContext != (NDIS_HANDLE)FilterDriverObject))
+    // Validate the context matches what we passed in
+    if (FilterDriverContext != (NDIS_HANDLE)FilterDriverObject)
     {
+        DEBUGP(DL_ERROR, "FilterRegisterOptions: Invalid FilterDriverContext\n");
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
