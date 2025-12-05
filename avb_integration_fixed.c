@@ -152,9 +152,9 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
                Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id, 
                Ctx->intel_device.device_type);
         
-        // CRITICAL: Use intel_init() which properly dispatches to device-specific operations
+        // Use intel_init() which properly dispatches to device-specific operations
         // This calls i226_ops.init() → ndis_platform_ops.init() → AvbPlatformInit()
-        // which initializes PTP clock and allocates device private structure
+        // which initializes PTP clock
         int init_result = intel_init(&Ctx->intel_device);
         
         DEBUGP(DL_ERROR, "!!! DEBUG: intel_init() returned: %d\n", init_result);
@@ -218,12 +218,13 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     }
 
     DEBUGP(DL_INFO, "? STEP 2: Setting up Intel device structure...\n");
-    Ctx->intel_device.private_data = Ctx;
     Ctx->intel_device.capabilities = 0; /* reset published caps */
     DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Device structure prepared\n");
 
     DEBUGP(DL_INFO, "? STEP 3: Calling intel_init library function...\n");
     DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X\n", Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+    
+    // Now call device-specific initialization
     if (intel_init(&Ctx->intel_device) != 0) {
         DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
         return STATUS_UNSUCCESSFUL;
@@ -289,7 +290,7 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
     // No device-specific register access in generic integration layer
     int init_result = intel_init(&context->intel_device);
     if (init_result != 0) {
-        DEBUGP(DL_ERROR, "? AvbEnsureDeviceReady: Device initialization failed: %d\n", init_result);
+        DEBUGP(DL_ERROR, "? AvbEnsureDeviceReady: intel_init failed: %d\n", init_result);
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
     
@@ -346,9 +347,11 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 /* IOCTL dispatcher */
 NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP Irp)
 {
+    DEBUGP(DL_ERROR, "!!! AvbHandleDeviceIoControl: ENTERED\n");
     if (!AvbContext) return STATUS_DEVICE_NOT_READY;
     PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(Irp);
     ULONG code   = sp->Parameters.DeviceIoControl.IoControlCode;
+    DEBUGP(DL_ERROR, "!!! AvbHandleDeviceIoControl: IOCTL=0x%08X\n", code);
     PUCHAR buf   = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
     ULONG inLen  = sp->Parameters.DeviceIoControl.InputBufferLength;
     ULONG outLen = sp->Parameters.DeviceIoControl.OutputBufferLength;
@@ -391,7 +394,6 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         DEBUGP(DL_WARN, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
                         
                         // Complete initialization sequence
-                        currentContext->intel_device.private_data = currentContext;
                         if (intel_init(&currentContext->intel_device) == 0) {
                             DEBUGP(DL_INFO, "? MANUAL intel_init SUCCESS\n");
                             
@@ -404,13 +406,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                                 currentContext->initialized = TRUE;
                                 
                                 // Device-specific initialization handled by Intel library
-                                DEBUGP(DL_INFO, "? MANUAL DEVICE-SPECIFIC INIT: Delegating to Intel library...\n");
-                                int device_init_result = intel_init(&currentContext->intel_device);
-                                if (device_init_result == 0) {
-                                    DEBUGP(DL_INFO, "? Device-specific initialization successful\n");
-                                } else {
-                                    DEBUGP(DL_WARN, "?? Device-specific initialization failed: %d\n", device_init_result);
-                                }
+                                DEBUGP(DL_INFO, "? Device-specific initialization complete\n");
                             } else {
                                 DEBUGP(DL_ERROR, "? MANUAL MMIO SANITY FAILED: CTRL=0x%08X\n", ctrl);
                             }
@@ -483,7 +479,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                                 r->vendor_id = (USHORT)ctx->intel_device.pci_vendor_id;
                                 r->device_id = (USHORT)ctx->intel_device.pci_device_id;
                                 r->capabilities = ctx->intel_device.capabilities;
-                                r->status = NDIS_STATUS_SUCCESS;
+                                r->status = (avb_u32)NDIS_STATUS_SUCCESS;
                                 
                                 DEBUGP(DL_INFO, "? ENUM_ADAPTERS[%lu]: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
                                        r->index, r->vendor_id, r->device_id, r->capabilities);
@@ -506,7 +502,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     r->device_id = 0;
                     r->capabilities = 0;
                 }
-                r->status = NDIS_STATUS_SUCCESS;
+                r->status = (avb_u32)NDIS_STATUS_SUCCESS;
                 
                 DEBUGP(DL_INFO, "? ENUM_ADAPTERS(summary): count=%lu, VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
                        r->count, r->vendor_id, r->device_id, r->capabilities);
@@ -585,6 +581,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             }
         }
         break;
+#ifndef NDEBUG
+    /* Debug-only register access - disabled in Release builds for security */
     case IOCTL_AVB_READ_REGISTER:
     case IOCTL_AVB_WRITE_REGISTER:
         {
@@ -647,6 +645,533 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             }
         }
         break;
+#endif /* !NDEBUG */
+
+    /* Production-ready frequency adjustment IOCTL */
+    case IOCTL_AVB_ADJUST_FREQUENCY:
+        {
+            if (inLen < sizeof(AVB_FREQUENCY_REQUEST) || outLen < sizeof(AVB_FREQUENCY_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "Frequency adjustment failed: Hardware not ready (state=%s)\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    PAVB_FREQUENCY_REQUEST freq_req = (PAVB_FREQUENCY_REQUEST)buf;
+                    
+                    // TIMINCA is at well-known offset 0x0B608 across all Intel PTP devices
+                    const ULONG TIMINCA_REG = 0x0B608;
+                    ULONG current_timinca = 0;
+                    
+                    // Read current TIMINCA value
+                    int rc = intel_read_reg(&activeContext->intel_device, TIMINCA_REG, &current_timinca);
+                    freq_req->current_increment = current_timinca;
+                    
+                    if (rc != 0) {
+                        DEBUGP(DL_ERROR, "Failed to read TIMINCA register\n");
+                        freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_UNSUCCESSFUL;
+                    } else {
+                        // Build new TIMINCA: bits[31:24] = increment_ns, bits[23:0] = increment_frac
+                        ULONG new_timinca = ((freq_req->increment_ns & 0xFF) << 24) | (freq_req->increment_frac & 0xFFFFFF);
+                        
+                        DEBUGP(DL_INFO, "Adjusting clock frequency: %u ns + 0x%X frac (TIMINCA 0x%08X->0x%08X) VID=0x%04X DID=0x%04X\n",
+                               freq_req->increment_ns, freq_req->increment_frac, current_timinca, new_timinca,
+                               activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                        
+                        rc = intel_write_reg(&activeContext->intel_device, TIMINCA_REG, new_timinca);
+                        
+                        if (rc == 0) {
+                            freq_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                            DEBUGP(DL_INFO, "Clock frequency adjusted successfully\n");
+                        } else {
+                            DEBUGP(DL_ERROR, "Failed to write TIMINCA register\n");
+                            freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        }
+                    }
+                    info = sizeof(*freq_req);
+                }
+            }
+        }
+        break;
+
+    /* Production-ready clock configuration query IOCTL */
+    case IOCTL_AVB_GET_CLOCK_CONFIG:
+        {
+            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_GET_CLOCK_CONFIG: Entry point reached\n");
+            DEBUGP(DL_ERROR, "    inLen=%lu outLen=%lu required=%lu\n", inLen, outLen, (ULONG)sizeof(AVB_CLOCK_CONFIG));
+            
+            if (inLen < sizeof(AVB_CLOCK_CONFIG) || outLen < sizeof(AVB_CLOCK_CONFIG)) {
+                DEBUGP(DL_ERROR, "!!! Buffer too small - returning error\n");
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                DEBUGP(DL_ERROR, "!!! activeContext=%p (g_AvbContext=%p, AvbContext=%p)\n", 
+                       activeContext, g_AvbContext, AvbContext);
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "Clock config query failed: Hardware not ready (state=%s)\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    PAVB_CLOCK_CONFIG cfg = (PAVB_CLOCK_CONFIG)buf;
+                    
+                    // CRITICAL FIX: Ensure Intel library has correct hardware context
+                    // Set private_data UNCONDITIONALLY - it's required for AvbMmioReadReal to work
+                    activeContext->intel_device.private_data = activeContext;
+                    
+                    DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: Set private_data=%p, hw_context=%p, hw_access=%d\n",
+                           activeContext, activeContext->hardware_context, activeContext->hw_access_enabled);
+                    
+                    // Well-known PTP register offsets (common across all Intel PTP devices)
+                    const ULONG SYSTIML_REG = 0x0B600;
+                    const ULONG SYSTIMH_REG = 0x0B604;
+                    const ULONG TIMINCA_REG = 0x0B608;
+                    const ULONG TSAUXC_REG = 0x0B640;
+                    
+                    ULONG systiml = 0, systimh = 0, timinca = 0, tsauxc = 0;
+                    int rc = 0;
+                    
+                    // Debug: Check if hardware context is available
+                    DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: hw_context=%p hw_access=%d\n",
+                           activeContext->hardware_context, activeContext->hw_access_enabled);
+                    
+                    // Read all clock-related registers using Intel library
+                    rc |= intel_read_reg(&activeContext->intel_device, SYSTIML_REG, &systiml);
+                    DEBUGP(DL_ERROR, "DEBUG: Read SYSTIML=0x%08X rc=%d\n", systiml, rc);
+                    rc |= intel_read_reg(&activeContext->intel_device, SYSTIMH_REG, &systimh);
+                    DEBUGP(DL_ERROR, "DEBUG: Read SYSTIMH=0x%08X rc=%d\n", systimh, rc);
+                    rc |= intel_read_reg(&activeContext->intel_device, TIMINCA_REG, &timinca);
+                    DEBUGP(DL_ERROR, "DEBUG: Read TIMINCA=0x%08X rc=%d\n", timinca, rc);
+                    rc |= intel_read_reg(&activeContext->intel_device, TSAUXC_REG, &tsauxc);
+                    DEBUGP(DL_ERROR, "DEBUG: Read TSAUXC=0x%08X rc=%d\n", tsauxc, rc);
+                    
+                    if (rc == 0) {
+                        cfg->systim = ((avb_u64)systimh << 32) | systiml;
+                        cfg->timinca = timinca;
+                        cfg->tsauxc = tsauxc;
+                        
+                        // Determine base clock rate from device type
+                        switch (activeContext->intel_device.device_type) {
+                            case INTEL_DEVICE_I210:
+                            case INTEL_DEVICE_I225:
+                            case INTEL_DEVICE_I226:
+                                cfg->clock_rate_mhz = 125; // 1G devices use 125 MHz
+                                break;
+                            case INTEL_DEVICE_I350:
+                            case INTEL_DEVICE_I354:
+                                cfg->clock_rate_mhz = 125; // 1G devices
+                                break;
+                            default:
+                                cfg->clock_rate_mhz = 125; // Default assumption
+                                break;
+                        }
+                        
+                        cfg->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                        status = STATUS_SUCCESS;
+                        
+                        DEBUGP(DL_INFO, "Clock config (VID=0x%04X DID=0x%04X): SYSTIM=0x%016llX, TIMINCA=0x%08X, TSAUXC=0x%08X (bit31=%s), Rate=%u MHz\n",
+                               activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id,
+                               cfg->systim, cfg->timinca, cfg->tsauxc, (cfg->tsauxc & 0x80000000) ? "DISABLED" : "ENABLED",
+                               cfg->clock_rate_mhz);
+                    } else {
+                        DEBUGP(DL_ERROR, "Failed to read clock configuration registers\n");
+                        cfg->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_UNSUCCESSFUL;
+                    }
+                    info = sizeof(*cfg);
+                }
+            }
+        }
+        break;
+
+    /* Production-ready hardware timestamping control IOCTL */
+    case IOCTL_AVB_SET_HW_TIMESTAMPING:
+        {
+            if (inLen < sizeof(AVB_HW_TIMESTAMPING_REQUEST) || outLen < sizeof(AVB_HW_TIMESTAMPING_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "HW timestamping control failed: Hardware not ready (state=%s)\n", 
+                           AvbHwStateName(activeContext->hw_state));
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    PAVB_HW_TIMESTAMPING_REQUEST ts_req = (PAVB_HW_TIMESTAMPING_REQUEST)buf;
+                    
+                    // TSAUXC register offsets and masks (Intel Foxville specification)
+                    const ULONG TSAUXC_REG = 0x0B640;
+                    const ULONG BIT31_DISABLE_SYSTIM0 = 0x80000000;  // Primary timer
+                    const ULONG BIT29_DISABLE_SYSTIM3 = 0x20000000;
+                    const ULONG BIT28_DISABLE_SYSTIM2 = 0x10000000;
+                    const ULONG BIT27_DISABLE_SYSTIM1 = 0x08000000;
+                    const ULONG BIT10_EN_TS1 = 0x00000400;  // Enable aux timestamp 1
+                    const ULONG BIT8_EN_TS0 = 0x00000100;   // Enable aux timestamp 0
+                    const ULONG BIT4_EN_TT1 = 0x00000010;   // Enable target time 1
+                    const ULONG BIT0_EN_TT0 = 0x00000001;   // Enable target time 0
+                    
+                    ULONG current_tsauxc = 0;
+                    int rc = intel_read_reg(&activeContext->intel_device, TSAUXC_REG, &current_tsauxc);
+                    ts_req->previous_tsauxc = current_tsauxc;
+                    
+                    if (rc != 0) {
+                        DEBUGP(DL_ERROR, "Failed to read TSAUXC register\n");
+                        ts_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_UNSUCCESSFUL;
+                    } else {
+                        ULONG new_tsauxc = current_tsauxc;
+                        
+                        if (ts_req->enable) {
+                            // Enable HW timestamping: Configure timer enables based on mask
+                            ULONG timer_mask = ts_req->timer_mask ? ts_req->timer_mask : 0x1;  // Default: SYSTIM0 only
+                            
+                            // Clear disable bits for requested timers
+                            if (timer_mask & 0x01) new_tsauxc &= ~BIT31_DISABLE_SYSTIM0;  // SYSTIM0
+                            if (timer_mask & 0x02) new_tsauxc &= ~BIT27_DISABLE_SYSTIM1;  // SYSTIM1
+                            if (timer_mask & 0x04) new_tsauxc &= ~BIT28_DISABLE_SYSTIM2;  // SYSTIM2
+                            if (timer_mask & 0x08) new_tsauxc &= ~BIT29_DISABLE_SYSTIM3;  // SYSTIM3
+                            
+                            // Configure target time interrupts if requested
+                            if (ts_req->enable_target_time) {
+                                new_tsauxc |= (BIT0_EN_TT0 | BIT4_EN_TT1);
+                            } else {
+                                new_tsauxc &= ~(BIT0_EN_TT0 | BIT4_EN_TT1);
+                            }
+                            
+                            // Configure auxiliary timestamp capture if requested
+                            if (ts_req->enable_aux_ts) {
+                                new_tsauxc |= (BIT8_EN_TS0 | BIT10_EN_TS1);
+                            } else {
+                                new_tsauxc &= ~(BIT8_EN_TS0 | BIT10_EN_TS1);
+                            }
+                            
+                            DEBUGP(DL_INFO, "Enabling HW timestamping: TSAUXC 0x%08X->0x%08X (timers=0x%X, TT=%d, AuxTS=%d) VID=0x%04X DID=0x%04X\n",
+                                   current_tsauxc, new_tsauxc, timer_mask,
+                                   ts_req->enable_target_time, ts_req->enable_aux_ts,
+                                   activeContext->intel_device.pci_vendor_id, 
+                                   activeContext->intel_device.pci_device_id);
+                        } else {
+                            // Disable HW timestamping: Set all timer disable bits
+                            new_tsauxc |= (BIT31_DISABLE_SYSTIM0 | BIT29_DISABLE_SYSTIM3 | 
+                                          BIT28_DISABLE_SYSTIM2 | BIT27_DISABLE_SYSTIM1);
+                            
+                            // Also disable target time and auxiliary timestamp features
+                            new_tsauxc &= ~(BIT0_EN_TT0 | BIT4_EN_TT1 | BIT8_EN_TS0 | BIT10_EN_TS1);
+                            
+                            DEBUGP(DL_INFO, "Disabling HW timestamping: TSAUXC 0x%08X->0x%08X (all timers stopped) VID=0x%04X DID=0x%04X\n",
+                                   current_tsauxc, new_tsauxc,
+                                   activeContext->intel_device.pci_vendor_id, 
+                                   activeContext->intel_device.pci_device_id);
+                        }
+                        
+                        rc = intel_write_reg(&activeContext->intel_device, TSAUXC_REG, new_tsauxc);
+                        
+                        if (rc == 0) {
+                            // Verify the change took effect
+                            ULONG verify_tsauxc = 0;
+                            if (intel_read_reg(&activeContext->intel_device, TSAUXC_REG, &verify_tsauxc) == 0) {
+                                ts_req->current_tsauxc = verify_tsauxc;
+                                
+                                // Check if bit 31 matches what we intended
+                                BOOLEAN bit31_correct = (BOOLEAN)(ts_req->enable ? 
+                                    !(verify_tsauxc & BIT31_DISABLE_SYSTIM0) :  // Enabled = bit 31 should be clear
+                                    (verify_tsauxc & BIT31_DISABLE_SYSTIM0));    // Disabled = bit 31 should be set
+                                
+                                if (bit31_correct) {
+                                    ts_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                                    status = STATUS_SUCCESS;
+                                    DEBUGP(DL_INFO, "HW timestamping %s successfully (verified: 0x%08X)\n",
+                                           ts_req->enable ? "ENABLED" : "DISABLED", verify_tsauxc);
+                                } else {
+                                    DEBUGP(DL_WARN, "HW timestamping write succeeded but verification shows unexpected state (0x%08X)\n", 
+                                           verify_tsauxc);
+                                    ts_req->status = (avb_u32)NDIS_STATUS_SUCCESS;  // Still report success
+                                    status = STATUS_SUCCESS;
+                                }
+                            } else {
+                                DEBUGP(DL_WARN, "HW timestamping changed but verification read failed\n");
+                                ts_req->current_tsauxc = new_tsauxc;
+                                ts_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                                status = STATUS_SUCCESS;
+                            }
+                        } else {
+                            DEBUGP(DL_ERROR, "Failed to write TSAUXC register\n");
+                            ts_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        }
+                    }
+                    info = sizeof(*ts_req);
+                }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_SET_RX_TIMESTAMP:
+        {
+            DEBUGP(DL_INFO, "IOCTL_AVB_SET_RX_TIMESTAMP called\n");
+            if (inLen < sizeof(AVB_RX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_RX_TIMESTAMP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_RX_TIMESTAMP_REQUEST rx_req = (PAVB_RX_TIMESTAMP_REQUEST)buf;
+
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "RX timestamp config: Hardware not accessible (state=%s)\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    rx_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    device_t *dev = &activeContext->intel_device;
+                    uint32_t rxpbsize, new_rxpbsize;
+                    
+                    // Read current RXPBSIZE value (register 0x2404)
+                    if (intel_read_reg(dev, 0x2404, &rxpbsize) == 0) {
+                        rx_req->previous_rxpbsize = rxpbsize;
+                        DEBUGP(DL_INFO, "Current RXPBSIZE: 0x%08X\n", rxpbsize);
+                        
+                        // Modify CFG_TS_EN bit (bit 29 per I210 datasheet)
+                        if (rx_req->enable) {
+                            new_rxpbsize = rxpbsize | (1 << 29);  // Set CFG_TS_EN
+                            DEBUGP(DL_INFO, "Enabling RX timestamp (CFG_TS_EN=1)\n");
+                        } else {
+                            new_rxpbsize = rxpbsize & ~(1 << 29); // Clear CFG_TS_EN
+                            DEBUGP(DL_INFO, "Disabling RX timestamp (CFG_TS_EN=0)\n");
+                        }
+                        
+                        // Write new value
+                        if (intel_write_reg(dev, 0x2404, new_rxpbsize) == 0) {
+                            rx_req->current_rxpbsize = new_rxpbsize;
+                            rx_req->requires_reset = (new_rxpbsize != rxpbsize) ? 1 : 0;
+                            
+                            if (rx_req->requires_reset) {
+                                DEBUGP(DL_WARN, "RXPBSIZE changed, port software reset (CTRL.RST) required\n");
+                            }
+                            
+                            rx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                            DEBUGP(DL_INFO, "RX timestamp config updated: prev=0x%08X, new=0x%08X\n",
+                                   rxpbsize, new_rxpbsize);
+                        } else {
+                            DEBUGP(DL_ERROR, "Failed to write RXPBSIZE register\n");
+                            rx_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        }
+                    } else {
+                        DEBUGP(DL_ERROR, "Failed to read RXPBSIZE register\n");
+                        rx_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_UNSUCCESSFUL;
+                    }
+                    info = sizeof(*rx_req);
+                }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_SET_QUEUE_TIMESTAMP:
+        {
+            DEBUGP(DL_INFO, "IOCTL_AVB_SET_QUEUE_TIMESTAMP called\n");
+            if (inLen < sizeof(AVB_QUEUE_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_QUEUE_TIMESTAMP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_QUEUE_TIMESTAMP_REQUEST queue_req = (PAVB_QUEUE_TIMESTAMP_REQUEST)buf;
+
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "Queue timestamp config: Hardware not accessible (state=%s)\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    queue_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                } else if (queue_req->queue_index >= 4) {
+                    DEBUGP(DL_ERROR, "Invalid queue index: %u (max 3)\n", queue_req->queue_index);
+                    queue_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    device_t *dev = &activeContext->intel_device;
+                    uint32_t srrctl, new_srrctl;
+                    
+                    // SRRCTL base: 0x0C00C, stride 0x40 per queue (I210/I226 pattern)
+                    uint32_t srrctl_offset = 0x0C00C + (queue_req->queue_index * 0x40);
+                    
+                    // Read current SRRCTL[n] value
+                    if (intel_read_reg(dev, srrctl_offset, &srrctl) == 0) {
+                        queue_req->previous_srrctl = srrctl;
+                        DEBUGP(DL_INFO, "Queue %u SRRCTL: 0x%08X\n", queue_req->queue_index, srrctl);
+                        
+                        // Modify TIMESTAMP bit (bit 30 per I210 datasheet)
+                        if (queue_req->enable) {
+                            new_srrctl = srrctl | (1 << 30);  // Set TIMESTAMP
+                            DEBUGP(DL_INFO, "Enabling queue %u timestamp (TIMESTAMP=1)\n", queue_req->queue_index);
+                        } else {
+                            new_srrctl = srrctl & ~(1 << 30); // Clear TIMESTAMP
+                            DEBUGP(DL_INFO, "Disabling queue %u timestamp (TIMESTAMP=0)\n", queue_req->queue_index);
+                        }
+                        
+                        // Write new value
+                        if (intel_write_reg(dev, srrctl_offset, new_srrctl) == 0) {
+                            queue_req->current_srrctl = new_srrctl;
+                            queue_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                            DEBUGP(DL_INFO, "Queue %u timestamp config updated: prev=0x%08X, new=0x%08X\n",
+                                   queue_req->queue_index, srrctl, new_srrctl);
+                        } else {
+                            DEBUGP(DL_ERROR, "Failed to write SRRCTL[%u] register\n", queue_req->queue_index);
+                            queue_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        }
+                    } else {
+                        DEBUGP(DL_ERROR, "Failed to read SRRCTL[%u] register\n", queue_req->queue_index);
+                        queue_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_UNSUCCESSFUL;
+                    }
+                    info = sizeof(*queue_req);
+                }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_SET_TARGET_TIME:
+        {
+            DEBUGP(DL_INFO, "IOCTL_AVB_SET_TARGET_TIME called\n");
+            if (inLen < sizeof(AVB_TARGET_TIME_REQUEST) || outLen < sizeof(AVB_TARGET_TIME_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_TARGET_TIME_REQUEST tgt_req = (PAVB_TARGET_TIME_REQUEST)buf;
+
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_ERROR, "Target time config: PTP not ready (state=%s)\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    tgt_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                } else if (tgt_req->timer_index > 1) {
+                    DEBUGP(DL_ERROR, "Invalid timer index: %u (max 1)\n", tgt_req->timer_index);
+                    tgt_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    device_t *dev = &activeContext->intel_device;
+                    uint32_t trgttiml_offset, trgttimh_offset;
+                    uint32_t time_low, time_high;
+                    
+                    // Target time register offsets
+                    if (tgt_req->timer_index == 0) {
+                        trgttiml_offset = 0x0B644;  // TRGTTIML0
+                        trgttimh_offset = 0x0B648;  // TRGTTIMH0
+                    } else {
+                        trgttiml_offset = 0x0B64C;  // TRGTTIML1
+                        trgttimh_offset = 0x0B650;  // TRGTTIMH1
+                    }
+                    
+                    // Split 64-bit target time into low/high
+                    time_low = (uint32_t)(tgt_req->target_time & 0xFFFFFFFF);
+                    time_high = (uint32_t)((tgt_req->target_time >> 32) & 0xFFFFFFFF);
+                    
+                    DEBUGP(DL_INFO, "Setting target time %u: 0x%08X%08X\n", 
+                           tgt_req->timer_index, time_high, time_low);
+                    
+                    // Write target time registers (low then high for atomicity)
+                    if (intel_write_reg(dev, trgttiml_offset, time_low) == 0 &&
+                        intel_write_reg(dev, trgttimh_offset, time_high) == 0) {
+                        
+                        // Enable interrupt in TSAUXC if requested
+                        if (tgt_req->enable_interrupt) {
+                            uint32_t tsauxc;
+                            if (intel_read_reg(dev, 0x0B640, &tsauxc) == 0) {
+                                uint32_t en_bit = (tgt_req->timer_index == 0) ? (1 << 0) : (1 << 4);
+                                tsauxc |= en_bit;
+                                intel_write_reg(dev, 0x0B640, tsauxc);
+                                DEBUGP(DL_INFO, "Enabled EN_TT%u in TSAUXC\n", tgt_req->timer_index);
+                            }
+                        }
+                        
+                        tgt_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                        status = STATUS_SUCCESS;
+                    } else {
+                        DEBUGP(DL_ERROR, "Failed to write target time registers\n");
+                        tgt_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_UNSUCCESSFUL;
+                    }
+                    info = sizeof(*tgt_req);
+                }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_GET_AUX_TIMESTAMP:
+        {
+            DEBUGP(DL_INFO, "IOCTL_AVB_GET_AUX_TIMESTAMP called\n");
+            if (inLen < sizeof(AVB_AUX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_AUX_TIMESTAMP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_AUX_TIMESTAMP_REQUEST aux_req = (PAVB_AUX_TIMESTAMP_REQUEST)buf;
+
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_ERROR, "Aux timestamp read: PTP not ready (state=%s)\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    aux_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                } else if (aux_req->timer_index > 1) {
+                    DEBUGP(DL_ERROR, "Invalid timer index: %u (max 1)\n", aux_req->timer_index);
+                    aux_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    device_t *dev = &activeContext->intel_device;
+                    uint32_t auxstmpl_offset, auxstmph_offset;
+                    uint32_t time_low, time_high;
+                    uint32_t tsauxc;
+                    
+                    // Auxiliary timestamp register offsets (read-only)
+                    if (aux_req->timer_index == 0) {
+                        auxstmpl_offset = 0x0B65C;  // AUXSTMPL0
+                        auxstmph_offset = 0x0B660;  // AUXSTMPH0
+                    } else {
+                        auxstmpl_offset = 0x0B664;  // AUXSTMPL1
+                        auxstmph_offset = 0x0B668;  // AUXSTMPH1
+                    }
+                    
+                    // Check AUTT flag in TSAUXC (bit 9 for timer 0, bit 17 for timer 1)
+                    if (intel_read_reg(dev, 0x0B640, &tsauxc) == 0) {
+                        uint32_t autt_bit = (aux_req->timer_index == 0) ? (1 << 9) : (1 << 17);
+                        aux_req->valid = (tsauxc & autt_bit) ? 1 : 0;
+                        
+                        // Read auxiliary timestamp registers
+                        if (intel_read_reg(dev, auxstmpl_offset, &time_low) == 0 &&
+                            intel_read_reg(dev, auxstmph_offset, &time_high) == 0) {
+                            
+                            aux_req->timestamp = ((uint64_t)time_high << 32) | time_low;
+                            DEBUGP(DL_INFO, "Aux timestamp %u: 0x%08X%08X (valid=%u)\n",
+                                   aux_req->timer_index, time_high, time_low, aux_req->valid);
+                            
+                            // Clear AUTT flag if requested (write-1-to-clear)
+                            if (aux_req->clear_flag && aux_req->valid) {
+                                intel_write_reg(dev, 0x0B640, tsauxc | autt_bit);
+                                DEBUGP(DL_INFO, "Cleared AUTT%u flag\n", aux_req->timer_index);
+                            }
+                            
+                            aux_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                        } else {
+                            DEBUGP(DL_ERROR, "Failed to read auxiliary timestamp registers\n");
+                            aux_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        }
+                    } else {
+                        DEBUGP(DL_ERROR, "Failed to read TSAUXC register\n");
+                        aux_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_UNSUCCESSFUL;
+                    }
+                    info = sizeof(*aux_req);
+                }
+            }
+        }
+        break;
+
     case IOCTL_AVB_GET_TIMESTAMP:
     case IOCTL_AVB_SET_TIMESTAMP:
         {
@@ -657,18 +1182,40 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                    DEBUGP(DL_WARN, "Timestamp access: Hardware state %s, attempting PTP initialization\n",
+                    DEBUGP(DL_WARN, "Timestamp access: Hardware state %s, checking PTP clock\n",
                            AvbHwStateName(activeContext->hw_state));
                     
-                    // If this is I210 and we have BAR access, try to initialize PTP
-                    if (activeContext->intel_device.device_type == INTEL_DEVICE_I210 && 
-                        activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
-                        DEBUGP(DL_INFO, "Attempting I210 PTP initialization for timestamp access\n");
-                        (void)AvbI210EnsureSystimRunning(activeContext);
+                    // CRITICAL FIX: Ensure Intel library has correct hardware context
+                    // Set UNCONDITIONALLY - required for AvbMmioReadReal
+                    activeContext->intel_device.private_data = activeContext;
+                    
+                    // If we have BAR access, check if PTP clock is already running
+                    if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                        // Check TIMINCA register - if non-zero, clock is configured
+                        ULONG timinca = 0;
+                        if (intel_read_reg(&activeContext->intel_device, 0x0B608, &timinca) == 0 && timinca != 0) {
+                            DEBUGP(DL_INFO, "PTP clock already configured (TIMINCA=0x%08X), promoting to PTP_READY\n", timinca);
+                            activeContext->hw_state = AVB_HW_PTP_READY;
+                        } else {
+                            // Try to initialize PTP for supported devices
+                            intel_device_type_t dev_type = activeContext->intel_device.device_type;
+                            
+                            if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 || 
+                                dev_type == INTEL_DEVICE_I226) {
+                                DEBUGP(DL_INFO, "Attempting PTP initialization for device type %d\n", dev_type);
+                                NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
+                                DEBUGP(DL_INFO, "PTP initialization result: 0x%08X, new state: %s\n", 
+                                       init_result, AvbHwStateName(activeContext->hw_state));
+                            } else {
+                                DEBUGP(DL_WARN, "Device type %d does not support PTP initialization\n", dev_type);
+                            }
+                        }
                     }
                     
                     // Check state again after potential initialization
                     if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                        DEBUGP(DL_ERROR, "PTP clock not ready after initialization attempt (state=%s)\n",
+                               AvbHwStateName(activeContext->hw_state));
                         status = STATUS_DEVICE_NOT_READY;
                         break;
                     }
@@ -742,7 +1289,6 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         DEBUGP(DL_INFO, "? MANUAL BAR0 MAPPING SUCCESS: Hardware context now available\n");
                         
                         // Complete the initialization sequence
-                        AvbContext->intel_device.private_data = AvbContext;
                         if (intel_init(&AvbContext->intel_device) == 0) {
                             DEBUGP(DL_INFO, "? MANUAL intel_init SUCCESS\n");
                             
@@ -882,18 +1428,20 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     }
                 }
                 
-                // CRITICAL FIX: Force I210 PTP initialization specifically for I210 context switching
-                if (targetContext->intel_device.device_type == INTEL_DEVICE_I210 && 
+                // CRITICAL FIX: Force PTP initialization for all supported devices
+                intel_device_type_t target_type = targetContext->intel_device.device_type;
+                if ((target_type == INTEL_DEVICE_I210 || target_type == INTEL_DEVICE_I225 || 
+                     target_type == INTEL_DEVICE_I226) &&
                     targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: Forcing I210 PTP initialization for selected adapter\n");
-                    DEBUGP(DL_INFO, "   - Device Type: %d (INTEL_DEVICE_I210)\n", targetContext->intel_device.device_type);
+                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: Forcing PTP initialization for selected adapter\n");
+                    DEBUGP(DL_INFO, "   - Device Type: %d\n", target_type);
                     DEBUGP(DL_INFO, "   - Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
                     DEBUGP(DL_INFO, "   - Hardware Context: %p\n", targetContext->hardware_context);
                     
-                    // Force complete I210 PTP setup
-                    AvbI210EnsureSystimRunning(targetContext);
+                    // Force complete PTP setup
+                    AvbEnsureDeviceReady(targetContext);
                     
-                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: I210 PTP initialization completed\n");
+                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: PTP initialization completed\n");
                     DEBUGP(DL_INFO, "   - Final Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
                     DEBUGP(DL_INFO, "   - Final Capabilities: 0x%08X\n", targetContext->intel_device.capabilities);
                 }

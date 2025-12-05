@@ -11,7 +11,7 @@ Signature       = "$Windows NT$"
 Class           = NetService
 ClassGUID       = {4D36E974-E325-11CE-BFC1-08002BE10318}
 Provider        = %IntelCorp%
-DriverVer = 12/05/2025,10.47.20.304
+DriverVer = 12/05/2025,23.11.4.759
 CatalogFile     = IntelAvbFilter.cat
 PnpLockdown     = 1   ; Prevent external modification of installed driver files
 

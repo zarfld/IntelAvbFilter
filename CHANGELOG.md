@@ -1,8 +1,54 @@
 # Intel AVB Filter Driver - Changelog
 
+## Version 1.2 - January 2025
+
+### ✅ New Feature: Complete RX Packet Timestamping API
+
+**Added 4 new production IOCTLs** for comprehensive RX packet timestamping support:
+
+1. **IOCTL_AVB_SET_RX_TIMESTAMP** (Code 41)
+   - Controls RXPBSIZE.CFG_TS_EN bit (register 0x2404)
+   - Enables 16-byte timestamp allocation in RX packet buffer
+   - Warns when port software reset required
+
+2. **IOCTL_AVB_SET_QUEUE_TIMESTAMP** (Code 42)
+   - Controls SRRCTL[n].TIMESTAMP bit (per-queue)
+   - Enables hardware timestamping for specific receive queues
+   - Supports 4 queues (I210/I226) or 2 queues (I211)
+
+3. **IOCTL_AVB_SET_TARGET_TIME** (Code 43)
+   - Configures TRGTTIML/H registers (0x0B644-0x0B650)
+   - Enables time-triggered interrupts when SYSTIM crosses target
+   - Supports 2 independent target time channels
+
+4. **IOCTL_AVB_GET_AUX_TIMESTAMP** (Code 44)
+   - Reads AUXSTMP0/1 registers (0x0B65C-0x0B668)
+   - Captures timestamps on SDP pin events
+   - Supports clearing AUTT flags after reading
+
+**Documentation**:
+- Complete RX timestamping guide: `docs/RX_PACKET_TIMESTAMPING.md`
+- IOCTL API reference: `docs/IOCTL_API_SUMMARY.md`
+- Hardware register reference with bit definitions
+
+**Test Files**:
+- `tools/avb_test/rx_timestamping_test.c` - RX packet timestamping tests
+- `tools/avb_test/target_time_test.c` - Target time and auxiliary timestamp tests
+
+**Intel Specification Compliance**:
+- I210 Datasheet v3.7 Section 7.3.1 (RX Packet Timestamping)
+- I225 Software Manual v1.3 Chapter 5 (Time Synchronization)
+- Accurate bit positions and register addresses from SSOT headers
+
+**Hardware Support**:
+- I210: Basic RX timestamping (1 SYSTIM, 2 target times, 2 aux timestamps)
+- I225/I226: Advanced timestamping (4 SYSTIM timers, full feature set)
+
+---
+
 ## Version 1.1 - January 2025
 
-### ?? Major Fix: TSN IOCTL Handlers Implementation
+### ✅ Major Fix: TSN IOCTL Handlers Implementation
 
 **Issue**: TAS, Frame Preemption, and PTM IOCTLs returned `ERROR_INVALID_FUNCTION` (Error 1)  
 **Root Cause**: Missing case handlers in `AvbDeviceControl` IOCTL switch statement  

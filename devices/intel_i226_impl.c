@@ -17,6 +17,7 @@ Abstract:
 #include "intel_device_interface.h"
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
+#include "intel-ethernet-regs/gen/i226_regs.h"  // SSOT register definitions
 
 // I226 TSN Register Definitions - Evidence-Based from Linux IGC Driver
 #define I226_TQAVCTRL           0x3570  // TSN control register
@@ -40,6 +41,9 @@ Abstract:
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
 
+// Forward declarations
+static int init_ptp(device_t *dev);
+
 /**
  * @brief Initialize I226 device
  * @param dev Device handle
@@ -60,6 +64,14 @@ static int init(device_t *dev)
             DEBUGP(DL_ERROR, "I226 platform init failed: 0x%x\n", result);
             return -1;
         }
+    }
+    
+    // Initialize PTP clock (required for GET_TIMESTAMP to work)
+    DEBUGP(DL_INFO, "I226: Initializing PTP clock\n");
+    int ptp_result = init_ptp(dev);
+    if (ptp_result != 0) {
+        DEBUGP(DL_WARN, "I226: PTP initialization returned: %d\n", ptp_result);
+        // Continue - basic functionality still works
     }
     
     DEBUGP(DL_TRACE, "<==i226_init: Success\n");
@@ -144,11 +156,11 @@ static int set_systime(device_t *dev, uint64_t systime)
     ts_low = (uint32_t)(systime & 0xFFFFFFFF);
     ts_high = (uint32_t)((systime >> 32) & 0xFFFFFFFF);
     
-    // Write SYSTIM registers (I226-specific addresses)
-    result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);   // SYSTIML
+    // Write SYSTIM registers using SSOT definitions
+    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIML, ts_low);
     if (result != 0) return result;
     
-    result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high);  // SYSTIMH
+    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, ts_high);
     if (result != 0) return result;
     
     DEBUGP(DL_TRACE, "<==i226_set_systime: Success\n");
@@ -172,11 +184,11 @@ static int get_systime(device_t *dev, uint64_t *systime)
         return -1;
     }
     
-    // Read SYSTIM registers
-    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &ts_low);   // SYSTIML
+    // Read SYSTIM registers using SSOT definitions
+    result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low);
     if (result != 0) return result;
     
-    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &ts_high);  // SYSTIMH
+    result = ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &ts_high);
     if (result != 0) return result;
     
     *systime = ((uint64_t)ts_high << 32) | ts_low;
@@ -192,16 +204,73 @@ static int get_systime(device_t *dev, uint64_t *systime)
  */
 static int init_ptp(device_t *dev)
 {
-    DEBUGP(DL_TRACE, "==>i226_init_ptp\n");
+    uint32_t tsauxc_val = 0;
+    uint32_t systimh = 0, systiml = 0;
+    uint32_t timinca = 0;
+    
+    DEBUGP(DL_INFO, "==>i226_init_ptp: Starting PTP clock initialization\n");
     
     if (dev == NULL) {
+        DEBUGP(DL_ERROR, "i226_init_ptp: NULL device\n");
         return -1;
     }
     
-    // I226 PTP initialization is handled automatically
-    // PHC starts when SYSTIM is first written
+    // Step 1: Read and configure TIMINCA (clock increment register)
+    if (ndis_platform_ops.mmio_read(dev, I226_TIMINCA, &timinca) == 0) {
+        DEBUGP(DL_INFO, "I226: Current TIMINCA=0x%08X\n", timinca);
+        
+        // If TIMINCA is 0, set default 24ns increment for I226
+        if (timinca == 0) {
+            timinca = 0x18000000;  // 24ns per cycle (I226 default)
+            if (ndis_platform_ops.mmio_write(dev, I226_TIMINCA, timinca) != 0) {
+                DEBUGP(DL_ERROR, "I226: Failed to write TIMINCA\n");
+                return -1;
+            }
+            DEBUGP(DL_INFO, "I226: TIMINCA set to 0x%08X (24ns/cycle)\n", timinca);
+        }
+    } else {
+        DEBUGP(DL_ERROR, "I226: Failed to read TIMINCA\n");
+        return -1;
+    }
     
-    DEBUGP(DL_TRACE, "<==i226_init_ptp: Success\n");
+    // Step 2: Initialize SYSTIM registers to 1 (writing 0 might not trigger clock start)
+    if (ndis_platform_ops.mmio_write(dev, I226_SYSTIML, 1) != 0 ||
+        ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, 0) != 0) {
+        DEBUGP(DL_ERROR, "I226: Failed to initialize SYSTIM\n");
+        return -1;
+    }
+    DEBUGP(DL_INFO, "I226: SYSTIM initialized to 0x0000000000000001\n");
+    
+    // Step 3: Verify SYSTIM is actually written
+    if (ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &systiml) == 0 &&
+        ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &systimh) == 0) {
+        DEBUGP(DL_INFO, "I226: SYSTIM readback: 0x%08X%08X\n", systimh, systiml);
+    }
+    
+    // Step 4: Enable SYSTIM clock via TSAUXC
+    if (ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val) == 0) {
+        DEBUGP(DL_INFO, "I226: Current TSAUXC=0x%08X\n", tsauxc_val);
+        
+        // Clear disable bit (bit 31) if set, and enable auto-adjust (bit 2)
+        tsauxc_val &= ~(1U << 31);  // Clear PLLLOCKED/disable bit
+        tsauxc_val |= (1 << 2);      // Set EN_CLK0 - Enable clock 0
+        
+        if (ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val) != 0) {
+            DEBUGP(DL_ERROR, "I226: Failed to write TSAUXC\n");
+            return -1;
+        }
+        DEBUGP(DL_INFO, "I226: TSAUXC configured: 0x%08X\n", tsauxc_val);
+        
+        // Verify write
+        if (ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val) == 0) {
+            DEBUGP(DL_INFO, "I226: TSAUXC readback: 0x%08X\n", tsauxc_val);
+        }
+    } else {
+        DEBUGP(DL_ERROR, "I226: Failed to read TSAUXC\n");
+        return -1;
+    }
+    
+    DEBUGP(DL_INFO, "<==i226_init_ptp: PTP clock initialized successfully\n");
     return 0;
 }
 

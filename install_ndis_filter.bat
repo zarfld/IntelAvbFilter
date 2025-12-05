@@ -1,6 +1,6 @@
 @echo off
 echo === Intel AVB Filter Driver - NDIS Filter Installation ===
-echo Korrekte Installation für NDIS Lightweight Filter Driver
+echo Korrekte Installation fï¿½r NDIS Lightweight Filter Driver
 echo.
 
 echo Step 1: Checking Administrator privileges...
@@ -8,42 +8,42 @@ net session >nul 2>&1
 if %errorLevel% == 0 (
     echo ? Running as Administrator
 ) else (
-    echo ? FEHLER: Muss als Administrator ausgeführt werden
-    echo    Rechtsklick auf Eingabeaufforderung -> "Als Administrator ausführen"
+    echo ? FEHLER: Muss als Administrator ausgefï¿½hrt werden
+    echo    Rechtsklick auf Eingabeaufforderung -> "Als Administrator ausfï¿½hren"
     pause
     exit /b 1
 )
 
 echo.
-echo Step 2: Prüfung der Treiberdateien...
-if exist "x64\Debug\IntelAvbFilter.sys" (
+echo Step 2: Prï¿½fung der Treiberdateien...
+if exist "x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" (
     echo ? Treiber gefunden: IntelAvbFilter.sys
 ) else (
-    echo ? Treiber nicht gefunden: x64\Debug\IntelAvbFilter.sys
+    echo ? Treiber nicht gefunden: x64\Debug\IntelAvbFilter\IntelAvbFilter.sys
     pause
     exit /b 1
 )
 
-if exist "x64\Debug\IntelAvbFilter.inf" (
+if exist "x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" (
     echo ? INF-Datei gefunden: IntelAvbFilter.inf
 ) else (
-    echo ? INF-Datei nicht gefunden: x64\Debug\IntelAvbFilter.inf
+    echo ? INF-Datei nicht gefunden: x64\Debug\IntelAvbFilter\IntelAvbFilter.inf
     pause
     exit /b 1
 )
 
-if exist "x64\Debug\IntelAvbFilter.cat" (
-    echo ? Katalogdatei gefunden: IntelAvbFilter.cat
+if exist "x64\Debug\IntelAvbFilter\intelavbfilter.cat" (
+    echo ? Katalogdatei gefunden: intelavbfilter.cat
 ) else (
-    echo ? Katalogdatei nicht gefunden: x64\Debug\IntelAvbFilter.cat
-    pause
-    exit /b 1
+    echo ? Katalogdatei nicht gefunden: x64\Debug\IntelAvbFilter\intelavbfilter.cat
+    echo ? WARNUNG: Installation kann ohne Katalog fehlschlagen
+    REM Don't exit - try to continue anyway
 )
 
 echo.
 echo Step 3: Kopieren der Treiberdateien ins System...
 echo Kopiere nach C:\Windows\System32\drivers\
-copy "x64\Debug\IntelAvbFilter.sys" "C:\Windows\System32\drivers\" >nul
+copy "x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" "C:\Windows\System32\drivers\" >nul
 if %errorLevel% == 0 (
     echo ? IntelAvbFilter.sys erfolgreich kopiert
 ) else (
@@ -54,8 +54,8 @@ if %errorLevel% == 0 (
 
 echo.
 echo Step 4: Registrierung des NDIS Filter Driver...
-echo Verwende pnputil für Filter Driver Registration...
-pnputil /add-driver "x64\Debug\IntelAvbFilter.inf" /install
+echo Verwende pnputil fï¿½r Filter Driver Registration...
+pnputil /add-driver "x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" /install
 if %errorLevel% == 0 (
     echo ? Filter Driver erfolgreich registriert
 ) else (
@@ -69,7 +69,7 @@ goto :TEST_INSTALLATION
 echo.
 echo === Alternative Installation: Manueller Service ===
 echo.
-echo Step 5: Erstelle Windows Service für Filter Driver...
+echo Step 5: Erstelle Windows Service fï¿½r Filter Driver...
 sc create IntelAvbFilter binPath= "C:\Windows\System32\drivers\IntelAvbFilter.sys" type= kernel start= auto error= normal
 if %errorLevel% == 0 (
     echo ? Service erfolgreich erstellt
@@ -86,20 +86,20 @@ if %errorLevel% == 0 (
     echo ? Service erfolgreich gestartet
 ) else (
     echo ??  Service-Start fehlgeschlagen (normal bei NDIS Filter)
-    echo    Filter wird automatisch geladen wenn benötigt
+    echo    Filter wird automatisch geladen wenn benï¿½tigt
 )
 
 :TEST_INSTALLATION
 echo.
-echo Step 7: Überprüfung der Installation...
+echo Step 7: ï¿½berprï¿½fung der Installation...
 echo.
-echo Prüfe in Device Manager:
-echo 1. Öffne Device Manager (devmgmt.msc)
-echo 2. Ansicht ? "Ausgeblendete Geräte anzeigen"
+echo Prï¿½fe in Device Manager:
+echo 1. ï¿½ffne Device Manager (devmgmt.msc)
+echo 2. Ansicht ? "Ausgeblendete Gerï¿½te anzeigen"
 echo 3. Suche nach "Intel AVB Filter Driver" unter Netzwerkadapter oder System
 echo.
 
-echo Prüfe Windows Services:
+echo Prï¿½fe Windows Services:
 sc query IntelAvbFilter
 if %errorLevel% == 0 (
     echo ? Service ist registriert
@@ -108,23 +108,36 @@ if %errorLevel% == 0 (
 )
 
 echo.
+echo Step 7b: Neustart der Netzwerkadapter (aktiviert Device Interface)...
+echo Deaktiviere und aktiviere Intel Adapter...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$adapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'Intel.*226' }; foreach ($a in $adapters) { Write-Host \"  Restarting: $($a.Name)\"; Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue }"
+echo ? Adapter neu gestartet
+
+echo.
 echo Step 8: Test der Hardware-Zugriffe...
-if exist "avb_test_i219.exe" (
-    echo Führe Hardware-Test aus...
-    avb_test_i219.exe
-) else (
-    echo ??  Test-Anwendung nicht gefunden
-    echo    Kompiliere sie mit: cl avb_test_i219.c /Fe:avb_test_i219.exe
+if exist "comprehensive_ioctl_test.exe" (
+    echo Fï¿½hre umfassenden Hardware-Test aus ^(device-aware^)...
+    comprehensive_ioctl_test.exe
+    goto :TEST_DONE
 )
+if exist "avb_test_i219.exe" (
+    echo ??  WARNUNG: Verwende Legacy I219 Test ^(nicht empfohlen^)
+    avb_test_i219.exe
+    goto :TEST_DONE
+)
+echo ??  Test-Anwendung nicht gefunden
+echo    Baue comprehensive test mit: cl /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tools/avb_test/comprehensive_ioctl_test.c /Fe:comprehensive_ioctl_test.exe
+
+:TEST_DONE
 
 echo.
 echo === Installation abgeschlossen ===
 echo.
-echo Wenn der Test erfolgreich ist, ist Ihr I219 Filter Driver funktionsfähig!
+echo Wenn der Test erfolgreich ist, ist Ihr Intel AVB Filter Driver funktionsfï¿½hig!
 echo.
-echo Für Debug-Ausgabe:
+echo Fï¿½r Debug-Ausgabe:
 echo 1. Lade DebugView.exe herunter (Microsoft Sysinternals)
-echo 2. Führe als Administrator aus
+echo 2. Fï¿½hre als Administrator aus
 echo 3. Aktiviere "Capture Kernel"
 echo 4. Schaue nach "(REAL HARDWARE)" Meldungen
 echo.

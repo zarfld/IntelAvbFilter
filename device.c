@@ -22,7 +22,7 @@ IntelAvbFilterRegisterDevice(
     PFILTER_DEVICE_EXTENSION        FilterDeviceExtension;
     PDRIVER_OBJECT                  DriverObject;
    
-    DEBUGP(DL_TRACE, "==>IntelAvbFilterRegisterDevice\n");
+    DEBUGP(DL_ERROR, "!!! IntelAvbFilterRegisterDevice: ENTRY - Creating device interface\n");
    
     NdisZeroMemory(DispatchTable, (IRP_MJ_MAXIMUM_FUNCTION+1) * sizeof(PDRIVER_DISPATCH));
     
@@ -68,10 +68,14 @@ IntelAvbFilterRegisterDevice(
         // Workaround NDIS bug
         //
         DriverObject = (PDRIVER_OBJECT)FilterDriverObject;
+        
+        DEBUGP(DL_ERROR, "!!! Device interface created successfully: \\Device\\IntelAvbFilter -> \\\\.\\IntelAvbFilter\n");
+    } else {
+        DEBUGP(DL_ERROR, "!!! NdisRegisterDeviceEx FAILED: Status=0x%08X\n", Status);
     }
               
         
-    DEBUGP(DL_TRACE, "<==IntelAvbFilterRegisterDevice: %x\n", Status);
+    DEBUGP(DL_ERROR, "!!! IntelAvbFilterRegisterDevice: EXIT Status=0x%08X\n", Status);
         
     return (Status);
         
@@ -152,9 +156,15 @@ IntelAvbFilterDeviceIoControl(
 
 
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    
+    // CRITICAL DEBUG: Log EVERY IOCTL that reaches this function
+    DEBUGP(DL_ERROR, "!!! DEVICE.C ENTRY: IOCTL=0x%08X FileObject=%p\n", 
+           IrpSp->Parameters.DeviceIoControl.IoControlCode,
+           IrpSp->FileObject);
 
     if (IrpSp->FileObject == NULL)
     {
+        DEBUGP(DL_ERROR, "!!! DEVICE.C: FileObject is NULL - returning UNSUCCESSFUL\n");
         return(STATUS_UNSUCCESSFUL);
     }
 
@@ -240,8 +250,10 @@ IntelAvbFilterDeviceIoControl(
         // AVB IOCTLs - Handle through AVB integration layer
         case IOCTL_AVB_INIT_DEVICE:
         case IOCTL_AVB_GET_DEVICE_INFO:
+#ifndef NDEBUG
         case IOCTL_AVB_READ_REGISTER:
         case IOCTL_AVB_WRITE_REGISTER:
+#endif
         case IOCTL_AVB_GET_TIMESTAMP:
         case IOCTL_AVB_SET_TIMESTAMP:
         case IOCTL_AVB_SETUP_TAS:
@@ -250,20 +262,27 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_MDIO_READ:
         case IOCTL_AVB_MDIO_WRITE:
         case IOCTL_AVB_GET_HW_STATE:
+        case IOCTL_AVB_ADJUST_FREQUENCY:
+        case IOCTL_AVB_GET_CLOCK_CONFIG:
+        case IOCTL_AVB_SET_HW_TIMESTAMPING:
+        case IOCTL_AVB_SET_RX_TIMESTAMP:
+        case IOCTL_AVB_SET_QUEUE_TIMESTAMP:
+        case IOCTL_AVB_SET_TARGET_TIME:
+        case IOCTL_AVB_GET_AUX_TIMESTAMP:
         {
-            DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: AVB IOCTL=0x%x\n", 
+            DEBUGP(DL_ERROR, "!!! DEVICE.C: AVB IOCTL CASE HIT: IOCTL=0x%08X\n", 
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
             
             // Try to find an Intel filter instance with initialized AVB context
             pFilter = AvbFindIntelFilterModule();
-            DEBUGP(DL_WARN, "*** IOCTL Handler: Found filter=%p\n", pFilter);
+            DEBUGP(DL_ERROR, "!!! DEVICE.C: Found filter=%p\n", pFilter);
             
             if (pFilter) {
-                DEBUGP(DL_WARN, "   - Filter Name: %wZ\n", &pFilter->MiniportFriendlyName);
+                DEBUGP(DL_ERROR, "!!! DEVICE.C: Filter Name: %wZ\n", &pFilter->MiniportFriendlyName);
                 if (pFilter->AvbContext) {
                     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
                     UNREFERENCED_PARAMETER(ctx);
-                    DEBUGP(DL_WARN, "   - Context: VID=0x%04X DID=0x%04X state=%s\n",
+                    DEBUGP(DL_ERROR, "!!! DEVICE.C: Context VID=0x%04X DID=0x%04X state=%s\n",
                            ctx->intel_device.pci_vendor_id, ctx->intel_device.pci_device_id,
                            AvbHwStateName(ctx->hw_state));
                 }
@@ -323,10 +342,10 @@ IntelAvbFilterDeviceIoControl(
             }
 
             if (pFilter != NULL && pFilter->AvbContext != NULL) {
-                DEBUGP(DL_TRACE, "? Using filter %p for IOCTL\n", pFilter);
+                DEBUGP(DL_ERROR, "!!! BEFORE AvbHandleDeviceIoControl: filter=%p IOCTL=0x%08X\n", pFilter, IrpSp->Parameters.DeviceIoControl.IoControlCode);
                 Status = AvbHandleDeviceIoControl((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, Irp);
                 InfoLength = (ULONG)Irp->IoStatus.Information;
-                DEBUGP(DL_TRACE, "?? IOCTL processed: Status=0x%x, InfoLength=%lu\n", 
+                DEBUGP(DL_ERROR, "!!! AFTER AvbHandleDeviceIoControl: Status=0x%x, InfoLength=%lu\n", 
                        Status, InfoLength);
             } else {
                 DEBUGP(DL_ERROR, "? No Intel filter found or AVB context not initialized\n");
