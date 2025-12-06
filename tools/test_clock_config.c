@@ -7,31 +7,10 @@
 #include <stdio.h>
 #include <stdint.h>
 
-// Include IOCTL definitions
-#define IOCTL_AVB_BASE 0x8000
-#define IOCTL_AVB_GET_CLOCK_CONFIG CTL_CODE(IOCTL_AVB_BASE, 0x27, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_OPEN_ADAPTER CTL_CODE(IOCTL_AVB_BASE, 0x20, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_READ_REGISTER CTL_CODE(IOCTL_AVB_BASE, 0x16, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Include proper IOCTL definitions from shared header
+#include "../include/avb_ioctl.h"
 
-typedef struct {
-    uint16_t vendor_id;
-    uint16_t device_id;
-    uint32_t status;
-} AVB_OPEN_REQUEST;
-
-typedef struct {
-    uint64_t systim;
-    uint32_t timinca;
-    uint32_t tsauxc;
-    uint32_t clock_rate_mhz;
-    uint32_t status;
-} AVB_CLOCK_CONFIG;
-
-typedef struct {
-    uint32_t offset;
-    uint32_t value;
-    uint32_t status;
-} AVB_REGISTER_REQUEST;
+// Structures are now defined in avb_ioctl.h
 
 int main(void)
 {
