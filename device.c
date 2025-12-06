@@ -111,18 +111,25 @@ IntelAvbFilterDispatch(
 
     IrpStack = IoGetCurrentIrpStackLocation(Irp);
     
+    DEBUGP(DL_ERROR, "!!! IntelAvbFilterDispatch: MajorFunction=%u FileObject=%p\n",
+           IrpStack->MajorFunction, IrpStack->FileObject);
+    
     switch (IrpStack->MajorFunction)
     {
         case IRP_MJ_CREATE:
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CREATE - Device opened by user-mode application\n");
             break;
 
         case IRP_MJ_CLEANUP:
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLEANUP\n");
             break;
 
         case IRP_MJ_CLOSE:
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLOSE\n");
             break;
 
         default:
+            DEBUGP(DL_ERROR, "!!! Unknown MajorFunction=%u\n", IrpStack->MajorFunction);
             break;
     }
 

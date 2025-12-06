@@ -718,11 +718,18 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     DEBUGP(DL_ERROR, "Clock config query failed: Hardware not ready (state=%s)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
+                } else if (!activeContext->hardware_context || !activeContext->hw_access_enabled) {
+                    // CRITICAL: Hardware state says BAR_MAPPED but context is NULL - initialization failed
+                    DEBUGP(DL_ERROR, "GET_CLOCK_CONFIG: Hardware context not available (hw_context=%p, hw_access=%d)\n",
+                           activeContext->hardware_context, activeContext->hw_access_enabled);
+                    DEBUGP(DL_ERROR, "   This means adapter %d (VID=0x%04X DID=0x%04X) was not fully initialized\n",
+                           0, activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                    DEBUGP(DL_ERROR, "   Only adapter 0 gets full initialization during driver attach\n");
+                    status = STATUS_DEVICE_NOT_READY;
                 } else {
                     PAVB_CLOCK_CONFIG cfg = (PAVB_CLOCK_CONFIG)buf;
                     
                     // CRITICAL FIX: Ensure Intel library has correct hardware context
-                    // Set private_data UNCONDITIONALLY - it's required for AvbMmioReadReal to work
                     activeContext->intel_device.private_data = activeContext;
                     
                     DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: Set private_data=%p, hw_context=%p, hw_access=%d\n",
@@ -1203,9 +1210,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 || 
                                 dev_type == INTEL_DEVICE_I226) {
                                 DEBUGP(DL_INFO, "Attempting PTP initialization for device type %d\n", dev_type);
-                                NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
-                                DEBUGP(DL_INFO, "PTP initialization result: 0x%08X, new state: %s\n", 
-                                       init_result, AvbHwStateName(activeContext->hw_state));
+                                (void)AvbEnsureDeviceReady(activeContext);
+                                DEBUGP(DL_INFO, "PTP initialization completed, new state: %s\n", 
+                                       AvbHwStateName(activeContext->hw_state));
                             } else {
                                 DEBUGP(DL_WARN, "Device type %d does not support PTP initialization\n", dev_type);
                             }
