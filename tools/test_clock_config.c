@@ -42,6 +42,17 @@ int main(void)
     
     DWORD bytesReturned = 0;
 
+    // STEP 0: Initialize device first
+    printf("INIT: Calling INIT_DEVICE to ensure hardware is ready\n");
+    printf("-------------------------------------------------------\n");
+    DWORD dummy = 0;
+    BOOL initSuccess = DeviceIoControl(hDriver, IOCTL_AVB_INIT_DEVICE,
+                                       &dummy, sizeof(dummy),
+                                       &dummy, sizeof(dummy),
+                                       &bytesReturned, NULL);
+    printf("  Result: %s (bytes=%lu)\n\n", 
+           initSuccess ? "SUCCESS" : "FAILED", bytesReturned);
+
     // Test 1: Read registers directly (this works)
     printf("TEST 1: Read PTP registers directly (IOCTL 22)\n");
     printf("-----------------------------------------------\n");
