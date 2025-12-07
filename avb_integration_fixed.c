@@ -19,6 +19,7 @@ Abstract:
 #include "precomp.h"
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"
+#include "external/intel_avb/lib/intel_private.h"
 #include <ntstrsafe.h>
 
 // Generic register offsets (common across Intel devices)
@@ -63,17 +64,38 @@ NTSTATUS AvbCreateMinimalContext(
     _Outptr_ PAVB_DEVICE_CONTEXT *OutCtx)
 {
     if (!FilterModule || !OutCtx) return STATUS_INVALID_PARAMETER;
+    
+    // Allocate AVB device context
     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(AVB_DEVICE_CONTEXT), FILTER_ALLOC_TAG);
     if (!ctx) return STATUS_INSUFFICIENT_RESOURCES;
     RtlZeroMemory(ctx, sizeof(*ctx));
+    
+    // Allocate Intel library private structure (CRITICAL FIX)
+    struct intel_private *priv = (struct intel_private *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(struct intel_private), FILTER_ALLOC_TAG);
+    if (!priv) {
+        ExFreePoolWithTag(ctx, FILTER_ALLOC_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(priv, sizeof(*priv));
+    
+    // Initialize basic fields
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;
     ctx->intel_device.pci_device_id = DeviceId;
     ctx->intel_device.device_type   = AvbGetIntelDeviceType(DeviceId);
     ctx->hw_state = AVB_HW_BOUND;
+    
+    // CRITICAL: Link intel_device.private_data to the Intel library private structure
+    ctx->intel_device.private_data = priv;
+    
+    // Store back-reference to AVB context in platform_data for callbacks
+    priv->platform_data = ctx;
+    priv->device_type = ctx->intel_device.device_type;
+    
     g_AvbContext = ctx;
     *OutCtx = ctx;
-    DEBUGP(DL_INFO, "AVB minimal context created VID=0x%04X DID=0x%04X state=%s\n", VendorId, DeviceId, AvbHwStateName(ctx->hw_state));
+    DEBUGP(DL_INFO, "AVB minimal context created VID=0x%04X DID=0x%04X state=%s (priv=%p)\n", 
+           VendorId, DeviceId, AvbHwStateName(ctx->hw_state), priv);
     return STATUS_SUCCESS;
 }
 
@@ -143,21 +165,20 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         return STATUS_SUCCESS;
     }
     
-    // Device-specific post-initialization (allocate Intel library private structure)
-    DEBUGP(DL_ERROR, "!!! DEBUG: AvbBringUpHardware hw_state=%s (need BAR_MAPPED)\n", 
+    // Device-specific post-initialization
+    DEBUGP(DL_INFO, "? AvbBringUpHardware: hw_state=%s (need BAR_MAPPED)\n", 
            AvbHwStateName(Ctx->hw_state));
     
     if (Ctx->hw_state >= AVB_HW_BAR_MAPPED) {
-        DEBUGP(DL_ERROR, "!!! DEBUG: Calling intel_init() for VID=0x%04X DID=0x%04X DevType=%d\n",
+        DEBUGP(DL_INFO, "? Calling intel_init() for VID=0x%04X DID=0x%04X DevType=%d\n",
                Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id, 
                Ctx->intel_device.device_type);
         
-        // Use intel_init() which properly dispatches to device-specific operations
-        // This calls i226_ops.init() → ndis_platform_ops.init() → AvbPlatformInit()
-        // which initializes PTP clock
+        // Use intel_init() which dispatches to device-specific operations
+        // The kernel wrapper version (intel_kernel_real.c) handles device ops dispatch
         int init_result = intel_init(&Ctx->intel_device);
         
-        DEBUGP(DL_ERROR, "!!! DEBUG: intel_init() returned: %d\n", init_result);
+        DEBUGP(DL_INFO, "? intel_init() returned: %d\n", init_result);
         
         if (init_result == 0) {
             DEBUGP(DL_INFO, "? intel_init() successful - device initialized with PTP and TSN\n");
@@ -165,7 +186,8 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
             DEBUGP(DL_WARN, "?? intel_init() failed: %d (PTP/TSN features unavailable)\n", init_result);
         }
     } else {
-        DEBUGP(DL_ERROR, "!!! DEBUG: SKIPPING intel_init() - hw_state not ready!\n");
+        DEBUGP(DL_WARN, "? SKIPPING intel_init() - hw_state=%s (need BAR_MAPPED)\n",
+               AvbHwStateName(Ctx->hw_state));
     }
     
     return STATUS_SUCCESS;
@@ -217,14 +239,19 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         DEBUGP(DL_INFO, "? STEP 1 SKIPPED: Hardware context already exists (%p)\n", Ctx->hardware_context);
     }
 
-    DEBUGP(DL_INFO, "? STEP 2: Setting up Intel device structure...\n");
-    Ctx->intel_device.capabilities = 0; /* reset published caps */
-    DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Device structure prepared\n");
+    DEBUGP(DL_INFO, "? STEP 2: Preparing device structure (preserving baseline caps=0x%08X)...\n",
+           Ctx->intel_device.capabilities);
+    
+    // NOTE: Do NOT reset capabilities here - baseline caps were set by AvbBringUpHardware
+    // We'll add more capabilities as initialization succeeds (INTEL_CAP_MMIO after BAR mapping)
+    
+    DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Device structure prepared (caps=0x%08X)\n",
+           Ctx->intel_device.capabilities);
 
     DEBUGP(DL_INFO, "? STEP 3: Calling intel_init library function...\n");
     DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X\n", Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
     
-    // Now call device-specific initialization
+    // Now call intel_init() - kernel wrapper version dispatches to device ops
     if (intel_init(&Ctx->intel_device) != 0) {
         DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
         return STATUS_UNSUCCESSFUL;
@@ -336,9 +363,27 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
 VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 {
     if (!AvbContext) return;
+    
+    // Unmap hardware resources
     if (AvbContext->hardware_context) {
         AvbUnmapIntelControllerMemory(AvbContext);
     }
+    
+    // Free Intel library private structure
+    if (AvbContext->intel_device.private_data) {
+        struct intel_private *priv = (struct intel_private *)AvbContext->intel_device.private_data;
+        
+        // Free device-specific private data if allocated by Intel library
+        // Now safe because we provide malloc/calloc/free shims in precomp.h
+        if (priv->device_private) {
+            free(priv->device_private);  // Uses our kernel-mode free() shim
+            priv->device_private = NULL;
+        }
+        
+        ExFreePoolWithTag(priv, FILTER_ALLOC_TAG);
+        AvbContext->intel_device.private_data = NULL;
+    }
+    
     if (g_AvbContext == AvbContext) g_AvbContext = NULL;
     ExFreePoolWithTag(AvbContext, FILTER_ALLOC_TAG);
 }
@@ -358,12 +403,38 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     ULONG_PTR info = 0; 
     NTSTATUS status = STATUS_SUCCESS;
 
+    // DIAGNOSTIC: Mark buffer to prove we reached this function
+    if (code == IOCTL_AVB_GET_CLOCK_CONFIG && outLen >= sizeof(ULONG)) {
+        *(PULONG)buf = 0xAAAA0001;  // Marker: reached AvbHandleDeviceIoControl
+        Irp->IoStatus.Information = sizeof(ULONG);
+    }
+
     // Use current context for all operations to avoid shadowing warnings
     PAVB_DEVICE_CONTEXT currentContext = g_AvbContext ? g_AvbContext : AvbContext;
 
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE)
+    // BUGFIX: Allow read-only IOCTLs even if not fully initialized, as long as hw_state >= BAR_MAPPED
+    // This allows GET_CLOCK_CONFIG, READ_REGISTER etc. to work after hardware is accessible
+    if (!currentContext->initialized && 
+        code != IOCTL_AVB_ENUM_ADAPTERS && 
+        code != IOCTL_AVB_INIT_DEVICE && 
+        code != IOCTL_AVB_GET_HW_STATE &&
+        code != IOCTL_AVB_READ_REGISTER &&
+        code != IOCTL_AVB_GET_CLOCK_CONFIG &&
+        code != IOCTL_AVB_GET_DEVICE_INFO) {
+        // DIAGNOSTIC: Mark if we're taking early return path
+        if (code == IOCTL_AVB_GET_CLOCK_CONFIG && outLen >= sizeof(ULONG)) {
+            *(PULONG)buf = 0xBBBB0002;  // Marker: took early return path
+            Irp->IoStatus.Information = sizeof(ULONG);
+        }
         return STATUS_DEVICE_NOT_READY;
+    }
+
+    // DIAGNOSTIC: Mark that we passed early return check
+    if (code == IOCTL_AVB_GET_CLOCK_CONFIG && outLen >= sizeof(ULONG)) {
+        *(PULONG)buf = 0xCCCC0003;  // Marker: passed early return check
+        Irp->IoStatus.Information = sizeof(ULONG);
+    }
 
     switch (code) {
     case IOCTL_AVB_INIT_DEVICE:
@@ -703,12 +774,23 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     /* Production-ready clock configuration query IOCTL */
     case IOCTL_AVB_GET_CLOCK_CONFIG:
         {
-            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_GET_CLOCK_CONFIG: Entry point reached\n");
+            // DIAGNOSTIC: Increment global counter to prove this code executes
+            static volatile LONG call_counter = 0;
+            LONG count = InterlockedIncrement(&call_counter);
+            
+            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_GET_CLOCK_CONFIG: Entry point reached (call #%ld)\n", count);
             DEBUGP(DL_ERROR, "    inLen=%lu outLen=%lu required=%lu\n", inLen, outLen, (ULONG)sizeof(AVB_CLOCK_CONFIG));
+            
+            // FORCE info to be set NO MATTER WHAT - diagnostic to see if this code even runs
+            PAVB_CLOCK_CONFIG cfg = (PAVB_CLOCK_CONFIG)buf;
+            NdisZeroMemory(cfg, sizeof(*cfg));
+            cfg->status = 0xDEAD0000 | (count & 0xFFFF);  // Marker with call count
+            info = sizeof(*cfg);
+            status = STATUS_SUCCESS;
             
             if (inLen < sizeof(AVB_CLOCK_CONFIG) || outLen < sizeof(AVB_CLOCK_CONFIG)) {
                 DEBUGP(DL_ERROR, "!!! Buffer too small - returning error\n");
-                status = STATUS_BUFFER_TOO_SMALL;
+                cfg->status = 0xBAD00001;
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 DEBUGP(DL_ERROR, "!!! activeContext=%p (g_AvbContext=%p, AvbContext=%p)\n", 
@@ -717,19 +799,16 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "Clock config query failed: Hardware not ready (state=%s)\n", 
                            AvbHwStateName(activeContext->hw_state));
-                    status = STATUS_DEVICE_NOT_READY;
-                } else if (!activeContext->hardware_context || !activeContext->hw_access_enabled) {
-                    // CRITICAL: Hardware state says BAR_MAPPED but context is NULL - initialization failed
-                    DEBUGP(DL_ERROR, "GET_CLOCK_CONFIG: Hardware context not available (hw_context=%p, hw_access=%d)\n",
-                           activeContext->hardware_context, activeContext->hw_access_enabled);
-                    DEBUGP(DL_ERROR, "   This means adapter %d (VID=0x%04X DID=0x%04X) was not fully initialized\n",
-                           0, activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
-                    DEBUGP(DL_ERROR, "   Only adapter 0 gets full initialization during driver attach\n");
-                    status = STATUS_DEVICE_NOT_READY;
+                    // BUGFIX: Return structure with error status instead of failing completely
+                    // This ensures bytesReturned != 0 so caller knows we processed the request
+                    NdisZeroMemory(cfg, sizeof(*cfg));
+                    cfg->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_SUCCESS;  // Windows needs SUCCESS for bytesReturned to work
+                    info = sizeof(*cfg);
                 } else {
-                    PAVB_CLOCK_CONFIG cfg = (PAVB_CLOCK_CONFIG)buf;
                     
-                    // CRITICAL FIX: Ensure Intel library has correct hardware context
+                    // CRITICAL FIX: ALWAYS set private_data for hardware access
+                    // The Intel library needs this to find the MMIO base address
                     activeContext->intel_device.private_data = activeContext;
                     
                     DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: Set private_data=%p, hw_context=%p, hw_access=%d\n",

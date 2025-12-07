@@ -14,6 +14,7 @@ Abstract:
 
 #include "precomp.h"
 #include "avb_integration.h"
+#include "external/intel_avb/lib/intel_private.h"
 
 // Some WDK SDKs do not declare this prototype in headers included by this project.
 // Declare it here; the symbol is exported by ntoskrnl.
@@ -221,7 +222,7 @@ AvbGetIntelBarLengthByDeviceId(USHORT deviceId)
         case 0x157B: // Flash-less variant
             return 0x20000; // 128KB
 
-        // I217/I219 family (PCH integrated MAC/PHY) — e1000e defines 128KB BAR
+        // I217/I219 family (PCH integrated MAC/PHY) ï¿½ e1000e defines 128KB BAR
         case 0x153A: // I217-LM
         case 0x153B: // I217-V
         case 0x15B7: // I219-LM
@@ -542,6 +543,15 @@ AvbMapIntelControllerMemory(
     
     hwContext->mapped = TRUE;
     AvbContext->hardware_context = hwContext;
+    
+    // CRITICAL FIX: Also set mmio_base in intel_private for Intel library
+    if (AvbContext->intel_device.private_data) {
+        struct intel_private *priv = (struct intel_private *)AvbContext->intel_device.private_data;
+        priv->mmio_base = hwContext->mmio_base;
+        priv->mmio_size = Length;
+        DEBUGP(DL_INFO, "AvbMapIntelControllerMemory: Updated intel_private mmio_base=%p size=0x%x\n",
+               priv->mmio_base, priv->mmio_size);
+    }
     
     DEBUGP(DL_INFO, "AvbMapIntelControllerMemory: Success - PA=0x%llx mapped to VA=0x%p\n", 
            PhysicalAddress.QuadPart, hwContext->mmio_base);

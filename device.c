@@ -168,6 +168,25 @@ IntelAvbFilterDeviceIoControl(
     DEBUGP(DL_ERROR, "!!! DEVICE.C ENTRY: IOCTL=0x%08X FileObject=%p\n", 
            IrpSp->Parameters.DeviceIoControl.IoControlCode,
            IrpSp->FileObject);
+    
+    // DIAGNOSTIC: Write to registry to prove IOCTLs are reaching driver
+    // This bypasses DebugView issues
+    #if DBG
+    {
+        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+        OBJECT_ATTRIBUTES keyAttrs;
+        HANDLE hKey = NULL;
+        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        
+        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+        if (NT_SUCCESS(st)) {
+            UNICODE_STRING valueName = RTL_CONSTANT_STRING(L"LastIOCTL");
+            ULONG ioctlCode = IrpSp->Parameters.DeviceIoControl.IoControlCode;
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &ioctlCode, sizeof(ioctlCode));
+            ZwClose(hKey);
+        }
+    }
+    #endif
 
     if (IrpSp->FileObject == NULL)
     {
