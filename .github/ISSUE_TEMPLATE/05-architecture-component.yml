@@ -1,0 +1,212 @@
+name: Architecture Component (ARC-C)
+description: Define a system component with interfaces and responsibilities
+title: "[ARC-C] "
+labels: ["architecture-component", "phase-03"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🔧 Architecture Component Definition
+        
+        Define a system component, service, or module following ISO/IEC/IEEE 42010:2011.
+        Specify responsibilities, interfaces, dependencies, and design constraints.
+
+  - type: input
+    id: req_links
+    attributes:
+      label: "Requirements & ADR Links"
+      description: "Link to requirements and ADRs this component implements (e.g., #123, #ADR-001)"
+      placeholder: "#123, #145, #ADR-001"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component_type
+    attributes:
+      label: "Component Type"
+      description: "Classification of this component"
+      options:
+        - Service / Microservice (CORE)
+        - API Gateway / Edge Service (EDGE)
+        - Data Layer / Repository (DATA)
+        - Integration Adapter (INTG)
+        - UI Component / Module (UI)
+        - Shared Library / Utility (LIB)
+        - Background Worker / Job (WORK)
+        - Infrastructure Component (INFR)
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: responsibility
+    attributes:
+      label: "Responsibility"
+      description: "What is this component responsible for? What is its primary purpose?"
+      placeholder: |
+        This component is responsible for [primary responsibility].
+        
+        Example:
+        The User Service is responsible for:
+        - Managing user accounts (CRUD operations)
+        - Authenticating user credentials
+        - Maintaining user sessions
+        - Enforcing access control policies
+    validations:
+      required: true
+
+  - type: textarea
+    id: interfaces
+    attributes:
+      label: "Interfaces (Provided)"
+      description: "What interfaces does this component provide to other components?"
+      placeholder: |
+        **REST API:**
+        - POST /api/v1/users - Create user
+        - GET /api/v1/users/{id} - Retrieve user
+        - PUT /api/v1/users/{id} - Update user
+        - DELETE /api/v1/users/{id} - Delete user
+        - POST /api/v1/auth/login - Authenticate user
+        
+        **Events Published:**
+        - UserCreated (topic: users.created)
+        - UserUpdated (topic: users.updated)
+        - UserDeleted (topic: users.deleted)
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: "Dependencies (Required)"
+      description: "What external components, services, or systems does this component depend on?"
+      placeholder: |
+        **Internal Components:**
+        - #78 (ARC-C-DATA-001): PostgreSQL Database
+        - #80 (ARC-C-INTG-002): Email Service
+        
+        **External Services:**
+        - Auth0 (OAuth provider)
+        - SendGrid (Email delivery)
+        
+        **Infrastructure:**
+        - Redis (Session storage)
+        - S3 (Profile image storage)
+
+  - type: textarea
+    id: data_owned
+    attributes:
+      label: "Data Ownership"
+      description: "What data does this component own? Database tables, schemas, or entities."
+      placeholder: |
+        **Database Tables:**
+        - users (id, email, password_hash, created_at, ...)
+        - user_sessions (session_id, user_id, expires_at, ...)
+        - user_roles (user_id, role_id)
+        
+        **Data Model:**
+        ```
+        User {
+          id: UUID
+          email: String (unique)
+          passwordHash: String
+          firstName: String
+          lastName: String
+          roles: Role[]
+          createdAt: DateTime
+        }
+        ```
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: "Design Constraints"
+      description: "Technology stack, architectural patterns, or design constraints"
+      placeholder: |
+        - Language: Node.js (TypeScript)
+        - Framework: Express.js
+        - ORM: Prisma
+        - Authentication: JWT tokens
+        - Architecture pattern: Layered (Controller → Service → Repository)
+        - Deployment: Docker container on AWS ECS
+        - Scalability: Stateless design for horizontal scaling
+
+  - type: textarea
+    id: quality_attributes
+    attributes:
+      label: "Quality Attributes"
+      description: "How does this component address non-functional requirements?"
+      placeholder: |
+        **Performance:**
+        - Target latency: < 100ms for CRUD operations
+        - Caching: Redis for user sessions
+        
+        **Security:**
+        - Password hashing: bcrypt with 12 rounds
+        - JWT expiration: 1 hour
+        - Rate limiting: 100 requests/minute per user
+        
+        **Reliability:**
+        - Circuit breaker for external service calls
+        - Graceful degradation if email service unavailable
+        
+        **Observability:**
+        - Structured logging (JSON)
+        - Metrics: Request count, latency, error rate
+        - Distributed tracing: OpenTelemetry
+
+  - type: textarea
+    id: interface_contracts
+    attributes:
+      label: "Interface Contracts (API Specification)"
+      description: "Detailed API contracts or schemas (OpenAPI, GraphQL, protobuf)"
+      placeholder: |
+        ```yaml
+        openapi: 3.0.0
+        paths:
+          /api/v1/users:
+            post:
+              summary: Create a new user
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      type: object
+                      required: [email, password, firstName, lastName]
+                      properties:
+                        email:
+                          type: string
+                          format: email
+                        password:
+                          type: string
+                          minLength: 12
+              responses:
+                '201':
+                  description: User created successfully
+                  content:
+                    application/json:
+                      schema:
+                        $ref: '#/components/schemas/User'
+        ```
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Component Definition Checklist"
+      description: "Confirm component specification completeness"
+      options:
+        - label: "Responsibility is clearly defined"
+          required: true
+        - label: "Provided interfaces are documented"
+          required: true
+        - label: "Dependencies are identified"
+          required: true
+        - label: "Data ownership is clear"
+          required: true
+        - label: "Design constraints are documented"
+          required: true
+        - label: "Quality attributes are addressed"
+          required: false
+        - label: "Links to implementing requirements and ADRs"
+          required: true

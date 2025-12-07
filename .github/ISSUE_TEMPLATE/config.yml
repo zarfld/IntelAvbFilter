@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 Documentation & Guides
+    url: https://github.com/zarfld/copilot-instructions-template/tree/master/docs
+    about: Review lifecycle guides, spec-driven development docs, and XP practices
+  - name: 💬 Discussions
+    url: https://github.com/zarfld/copilot-instructions-template/discussions
+    about: Ask questions, share ideas, or discuss requirements with the team
+  - name: 🐛 Security Vulnerability
+    url: https://github.com/zarfld/copilot-instructions-template/security/advisories/new
+    about: Report security vulnerabilities privately

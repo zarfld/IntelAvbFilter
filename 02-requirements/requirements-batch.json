@@ -1,0 +1,468 @@
+﻿[
+    {
+        "id":  "REQ-F-IOCTL-TS-002",
+        "description":  "Provide IOCTL to retrieve hardware RX timestamps for received PTP packets",
+        "type":  "functional",
+        "traces_to":  28,
+        "priority":  "critical",
+        "title":  "RX Timestamp Retrieval"
+    },
+    {
+        "id":  "REQ-F-IOCTL-PHC-003",
+        "description":  "Provide IOCTL to adjust PHC time by offset (nanoseconds)",
+        "type":  "functional",
+        "traces_to":  28,
+        "priority":  "critical",
+        "title":  "PHC Offset Adjustment"
+    },
+    {
+        "id":  "REQ-F-IOCTL-PHC-004",
+        "description":  "Provide IOCTL to adjust PHC frequency (ppb)",
+        "type":  "functional",
+        "traces_to":  28,
+        "priority":  "critical",
+        "title":  "PHC Frequency Adjustment"
+    },
+    {
+        "id":  "REQ-F-IOCTL-XSTAMP-001",
+        "description":  "Provide IOCTL to query simultaneous PHC and system time (cross-timestamp)",
+        "type":  "functional",
+        "traces_to":  28,
+        "priority":  "high",
+        "title":  "Cross Timestamp Query"
+    },
+    {
+        "id":  "REQ-F-IOCTL-ERROR-001",
+        "description":  "Define enumeration of all IOCTL error codes with descriptions",
+        "type":  "functional",
+        "traces_to":  28,
+        "priority":  "high",
+        "title":  "Error Code Enumeration"
+    },
+    {
+        "id":  "REQ-F-IOCTL-CAP-001",
+        "description":  "Provide IOCTL to query PHC/TAS/CBS capability flags per NIC",
+        "type":  "functional",
+        "traces_to":  28,
+        "priority":  "high",
+        "title":  "Hardware Capability Query"
+    },
+    {
+        "id":  "REQ-F-INTEL-AVB-001",
+        "description":  "Integrate intel_avb library as Git submodule",
+        "type":  "functional",
+        "traces_to":  29,
+        "priority":  "high",
+        "title":  "Submodule Integration"
+    },
+    {
+        "id":  "REQ-F-INTEL-AVB-002",
+        "description":  "Ensure intel_avb API is kernel-mode compatible (IRQL, no malloc)",
+        "type":  "functional",
+        "traces_to":  29,
+        "priority":  "high",
+        "title":  "Kernel-Mode Compatibility"
+    },
+    {
+        "id":  "REQ-F-INTEL-AVB-003",
+        "description":  "All hardware register access must go through intel_avb library",
+        "type":  "functional",
+        "traces_to":  29,
+        "priority":  "critical",
+        "title":  "Register Access Abstraction"
+    },
+    {
+        "id":  "REQ-F-INTEL-AVB-004",
+        "description":  "Map IOCTL structures to intel_avb data types",
+        "type":  "functional",
+        "traces_to":  29,
+        "priority":  "high",
+        "title":  "Type Mapping (IOCTL to intel_avb)"
+    },
+    {
+        "id":  "REQ-F-INTEL-AVB-005",
+        "description":  "Translate intel_avb errors to NTSTATUS codes",
+        "type":  "functional",
+        "traces_to":  29,
+        "priority":  "high",
+        "title":  "Error Propagation"
+    },
+    {
+        "id":  "REQ-F-NAMING-001",
+        "description":  "Use IEEE-compliant names (grandmasterID not gmId)",
+        "type":  "functional",
+        "traces_to":  30,
+        "priority":  "high",
+        "title":  "IEEE Standards Naming"
+    },
+    {
+        "id":  "REQ-F-PTP-EPOCH-001",
+        "description":  "PHC time uses IEEE 1588 epoch (1970-01-01 TAI, not UTC)",
+        "type":  "functional",
+        "traces_to":  30,
+        "priority":  "critical",
+        "title":  "PTP Epoch (TAI)"
+    },
+    {
+        "id":  "REQ-F-PTP-LEAPSEC-001",
+        "description":  "Handle leap seconds per IEEE 1588-2019",
+        "type":  "functional",
+        "traces_to":  30,
+        "priority":  "high",
+        "title":  "Leap Second Handling"
+    },
+    {
+        "id":  "REQ-F-8021AS-STATE-001",
+        "description":  "Implement 802.1AS state machines per Figure 10-1",
+        "type":  "functional",
+        "traces_to":  30,
+        "priority":  "medium",
+        "title":  "802.1AS State Machines"
+    },
+    {
+        "id":  "REQ-F-TSN-SEMANTICS-001",
+        "description":  "TAS/CBS/Qav semantics match IEEE 802.1Q definitions",
+        "type":  "functional",
+        "traces_to":  30,
+        "priority":  "high",
+        "title":  "TSN Feature Semantics"
+    },
+    {
+        "id":  "REQ-F-STANDARDS-REF-001",
+        "description":  "All features cite specific IEEE standard clauses",
+        "type":  "functional",
+        "traces_to":  30,
+        "priority":  "medium",
+        "title":  "IEEE Clause References"
+    },
+    {
+        "id":  "REQ-F-NDIS-ATTACH-001",
+        "description":  "Implement NDIS FilterAttach/FilterDetach callbacks",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "title":  "FilterAttach/FilterDetach"
+    },
+    {
+        "id":  "REQ-F-NDIS-SEND-001",
+        "description":  "Implement NDIS FilterSend callbacks for packet transmission",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "title":  "FilterSend/FilterSendNetBufferLists"
+    },
+    {
+        "id":  "REQ-F-NDIS-RECEIVE-001",
+        "description":  "Implement NDIS FilterReceive callbacks for packet reception",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "title":  "FilterReceive/FilterReceiveNetBufferLists"
+    },
+    {
+        "id":  "REQ-F-NDIS-OID-001",
+        "description":  "Implement FilterOidRequest to query hardware capabilities",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "high",
+        "title":  "FilterOidRequest"
+    },
+    {
+        "id":  "REQ-F-NDIS-STATUS-001",
+        "description":  "Implement FilterStatus to handle miniport status indications",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "high",
+        "title":  "FilterStatus"
+    },
+    {
+        "id":  "REQ-F-HW-DETECT-001",
+        "description":  "Detect PHC/TAS/CBS/timestamp support per NIC model",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "title":  "Hardware Capability Detection"
+    },
+    {
+        "id":  "REQ-F-HW-CONFIG-001",
+        "description":  "Query current TAS/CBS/PHC configuration from hardware",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "high",
+        "title":  "Hardware Configuration Query"
+    },
+    {
+        "id":  "REQ-F-REG-ACCESS-001",
+        "description":  "Coordinate register access with miniport (spin locks, IRQL)",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "title":  "Safe Register Access"
+    },
+    {
+        "id":  "REQ-F-IOCTL-NIC-001",
+        "description":  "Provide IOCTL to query NIC identity (PCI location, friendly name)",
+        "type":  "functional",
+        "traces_to":  31,
+        "priority":  "high",
+        "title":  "NIC Identity Query"
+    },
+    {
+        "id":  "REQ-F-IOCTL-VERSIONING-001",
+        "description":  "Implement IOCTL versioning for API evolution",
+        "type":  "functional",
+        "traces_to":  32,
+        "priority":  "medium",
+        "title":  "IOCTL API Versioning"
+    },
+    {
+        "id":  "REQ-F-CONFIG-ATOMIC-001",
+        "description":  "Rollback configuration changes on partial failure",
+        "type":  "functional",
+        "traces_to":  32,
+        "priority":  "high",
+        "title":  "Configuration Atomicity"
+    },
+    {
+        "id":  "REQ-F-ERROR-ACTIONABLE-001",
+        "description":  "Error messages include clear descriptions and remediation steps",
+        "type":  "functional",
+        "traces_to":  32,
+        "priority":  "high",
+        "title":  "Actionable Error Messages"
+    },
+    {
+        "id":  "REQ-F-NIC-IDENTITY-002",
+        "description":  "NIC identity stable across reboots (PCI location + friendly name)",
+        "type":  "functional",
+        "traces_to":  32,
+        "priority":  "medium",
+        "title":  "Stable NIC Identity"
+    },
+    {
+        "id":  "REQ-F-RELOAD-PREDICTABLE-001",
+        "description":  "Driver reload preserves PHC/TAS/CBS state where possible",
+        "type":  "functional",
+        "traces_to":  32,
+        "priority":  "medium",
+        "title":  "Predictable Reload Behavior"
+    },
+    {
+        "id":  "REQ-F-TAS-001",
+        "description":  "Provide IOCTL to configure TAS (Qbv) gate schedules",
+        "type":  "functional",
+        "traces_to":  33,
+        "priority":  "high",
+        "title":  "TAS Schedule Configuration"
+    },
+    {
+        "id":  "REQ-F-CBS-001",
+        "description":  "Provide IOCTL to configure CBS (Qav) shaper parameters",
+        "type":  "functional",
+        "traces_to":  33,
+        "priority":  "high",
+        "title":  "CBS Parameter Configuration"
+    },
+    {
+        "id":  "REQ-F-VLAN-001",
+        "description":  "Properly handle VLAN Priority Code Point (PCP) for TSN traffic",
+        "type":  "functional",
+        "traces_to":  33,
+        "priority":  "high",
+        "title":  "VLAN Tag Handling"
+    },
+    {
+        "id":  "REQ-F-AVTP-001",
+        "description":  "Support AVTP Class A/B streams with latency guarantees",
+        "type":  "functional",
+        "traces_to":  33,
+        "priority":  "medium",
+        "title":  "AVTP Stream Support"
+    },
+    {
+        "id":  "REQ-F-MILAN-001",
+        "description":  "Support Milan AVDECC device enumeration",
+        "type":  "functional",
+        "traces_to":  33,
+        "priority":  "medium",
+        "title":  "Milan Discovery Support"
+    },
+    {
+        "id":  "REQ-F-PTP-INTEROP-001",
+        "description":  "Interoperate with multi-vendor PTP grandmasters",
+        "type":  "functional",
+        "traces_to":  33,
+        "priority":  "high",
+        "title":  "PTP Interoperability"
+    },
+    {
+        "id":  "REQ-F-QAV-001",
+        "description":  "Implement Qav bandwidth reservation per 802.1Q Annex L",
+        "type":  "functional",
+        "traces_to":  33,
+        "priority":  "high",
+        "title":  "Qav Bandwidth Reservation"
+    },
+    {
+        "id":  "REQ-NF-PERF-PHC-001",
+        "description":  "PHC time queries complete in \u003c500Âµs at 95th percentile",
+        "type":  "non-functional",
+        "traces_to":  28,
+        "priority":  "high",
+        "category":  "performance",
+        "title":  "PHC Query Latency (\u003c500Âµs P95)"
+    },
+    {
+        "id":  "REQ-NF-PERF-TS-001",
+        "description":  "TX/RX timestamp retrieval completes in \u003c1Âµs",
+        "type":  "non-functional",
+        "traces_to":  28,
+        "priority":  "high",
+        "category":  "performance",
+        "title":  "Timestamp Retrieval (\u003c1Âµs)"
+    },
+    {
+        "id":  "REQ-NF-PERF-NDIS-001",
+        "description":  "NDIS filter adds \u003c1Âµs packet forwarding overhead",
+        "type":  "non-functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "category":  "performance",
+        "title":  "Packet Forwarding (\u003c1Âµs overhead)"
+    },
+    {
+        "id":  "REQ-NF-PERF-REG-001",
+        "description":  "Hardware register access completes in \u003c10Âµs",
+        "type":  "non-functional",
+        "traces_to":  31,
+        "priority":  "high",
+        "category":  "performance",
+        "title":  "Register Access (\u003c10Âµs)"
+    },
+    {
+        "id":  "REQ-NF-PERF-IOCTL-001",
+        "description":  "Configuration IOCTLs complete in \u003c10ms, statistics in \u003c1ms",
+        "type":  "non-functional",
+        "traces_to":  32,
+        "priority":  "medium",
+        "category":  "performance",
+        "title":  "IOCTL Latency (\u003c10ms config)"
+    },
+    {
+        "id":  "REQ-NF-PERF-PTP-001",
+        "description":  "PTP sync achieves \u003c100ns offset, \u003c1Âµs convergence",
+        "type":  "non-functional",
+        "traces_to":  33,
+        "priority":  "critical",
+        "category":  "performance",
+        "title":  "PTP Sync Accuracy (\u003c100ns offset)"
+    },
+    {
+        "id":  "REQ-NF-REL-PHC-001",
+        "description":  "PHC time never goes backwards (monotonic)",
+        "type":  "non-functional",
+        "traces_to":  28,
+        "priority":  "critical",
+        "category":  "reliability",
+        "title":  "PHC Monotonicity Guarantee"
+    },
+    {
+        "id":  "REQ-NF-REL-NDIS-001",
+        "description":  "Driver survives 1000 attach/detach cycles without BSOD",
+        "type":  "non-functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "category":  "reliability",
+        "title":  "No BSOD (1000 attach/detach cycles)"
+    },
+    {
+        "id":  "REQ-NF-REL-LIB-001",
+        "description":  "intel_avb integration has \u003e90% test coverage",
+        "type":  "non-functional",
+        "traces_to":  29,
+        "priority":  "high",
+        "category":  "reliability",
+        "title":  "Test Coverage (\u003e90% intel_avb)"
+    },
+    {
+        "id":  "REQ-NF-REL-TS-001",
+        "description":  "Timestamp loss rate \u003c0.01% under load",
+        "type":  "non-functional",
+        "traces_to":  28,
+        "priority":  "high",
+        "category":  "reliability",
+        "title":  "Timestamp Loss (\u003c0.01% under load)"
+    },
+    {
+        "id":  "REQ-NF-STD-NAMING-001",
+        "description":  "100% of PTP/TSN terms match IEEE definitions",
+        "type":  "non-functional",
+        "traces_to":  30,
+        "priority":  "high",
+        "category":  "standards",
+        "title":  "IEEE Naming (100% compliance)"
+    },
+    {
+        "id":  "REQ-NF-STD-MILAN-001",
+        "description":  "Passes AVnu Milan certification tests (long-term goal)",
+        "type":  "non-functional",
+        "traces_to":  33,
+        "priority":  "medium",
+        "category":  "standards",
+        "title":  "AVnu Milan Compliance"
+    },
+    {
+        "id":  "REQ-NF-MAINT-LIB-001",
+        "description":  "Register layouts defined only in intel_avb library",
+        "type":  "non-functional",
+        "traces_to":  29,
+        "priority":  "high",
+        "category":  "maintainability",
+        "title":  "Single Source of Truth (intel_avb)"
+    },
+    {
+        "id":  "REQ-NF-MAINT-API-001",
+        "description":  "Breaking API changes detected at compile time",
+        "type":  "non-functional",
+        "traces_to":  32,
+        "priority":  "medium",
+        "category":  "maintainability",
+        "title":  "API Versioning Strategy"
+    },
+    {
+        "id":  "REQ-NF-INTEROP-MILAN-001",
+        "description":  "Works with 3+ Milan endpoint vendors",
+        "type":  "non-functional",
+        "traces_to":  33,
+        "priority":  "high",
+        "category":  "interoperability",
+        "title":  "Milan Endpoint Compatibility (3+ vendors)"
+    },
+    {
+        "id":  "REQ-NF-INTEROP-TSN-001",
+        "description":  "Works with 2+ TSN switch vendors",
+        "type":  "non-functional",
+        "traces_to":  33,
+        "priority":  "high",
+        "category":  "interoperability",
+        "title":  "TSN Switch Compatibility (2+ vendors)"
+    },
+    {
+        "id":  "REQ-NF-INTEROP-STANDARDS-001",
+        "description":  "Interoperates via IEEE standards compliance",
+        "type":  "non-functional",
+        "traces_to":  30,
+        "priority":  "high",
+        "category":  "interoperability",
+        "title":  "Standards-Based Interoperability"
+    },
+    {
+        "id":  "REQ-NF-COMPAT-NDIS-001",
+        "description":  "Supports Windows 10 1809+ and Intel miniports 2019+",
+        "type":  "non-functional",
+        "traces_to":  31,
+        "priority":  "critical",
+        "category":  "compatibility",
+        "title":  "Windows Compatibility (10 1809+)"
+    }
+]

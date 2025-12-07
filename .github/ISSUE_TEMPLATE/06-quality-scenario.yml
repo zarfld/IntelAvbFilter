@@ -1,0 +1,187 @@
+name: Quality Attribute Scenario (QA-SC)
+description: Define a quality attribute scenario for architecture evaluation (ATAM)
+title: "[QA-SC] "
+labels: ["quality-scenario", "phase-03"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 📐 Quality Attribute Scenario (ATAM)
+        
+        Define a scenario for evaluating architecture quality attributes.
+        Uses the ATAM (Architecture Tradeoff Analysis Method) scenario format:
+        **Source → Stimulus → Environment → Artifact → Response → Response Measure**
+
+  - type: input
+    id: req_links
+    attributes:
+      label: "Related Requirements"
+      description: "Link to non-functional requirements this scenario validates (e.g., #123)"
+      placeholder: "#123 (REQ-NF-PERF-001)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: quality_attribute
+    attributes:
+      label: "Quality Attribute"
+      description: "Which quality attribute does this scenario address?"
+      options:
+        - Performance (PERF)
+        - Security (SECU)
+        - Usability (USAB)
+        - Reliability / Availability (RELI)
+        - Maintainability (MAINT)
+        - Scalability (SCAL)
+        - Modifiability (MODI)
+        - Testability (TEST)
+      default: 0
+    validations:
+      required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: "Source"
+      description: "Who or what generates the stimulus? (User, system, external service, etc.)"
+      placeholder: "End user, Administrator, External API, Load balancer, etc."
+    validations:
+      required: true
+
+  - type: textarea
+    id: stimulus
+    attributes:
+      label: "Stimulus"
+      description: "What event or condition triggers this scenario?"
+      placeholder: |
+        Example:
+        - User submits a search query for products
+        - System detects database server failure
+        - Administrator deploys a new feature
+        - 1000 concurrent users attempt login simultaneously
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: "Environment"
+      description: "Under what conditions does this scenario occur?"
+      options:
+        - Normal operation
+        - Peak load
+        - Overload / Stress
+        - Startup / Shutdown
+        - Degraded mode (partial failure)
+        - Maintenance / Deployment
+        - Development / Testing
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: artifact
+    attributes:
+      label: "Artifact"
+      description: "Which system component(s) are affected by the stimulus?"
+      placeholder: |
+        Example:
+        - Search service (ARC-C-SRCH-001)
+        - Database cluster (ARC-C-DATA-001)
+        - API Gateway (ARC-C-EDGE-001)
+        - Entire system
+    validations:
+      required: true
+
+  - type: textarea
+    id: response
+    attributes:
+      label: "Response"
+      description: "What should the system do in response to the stimulus?"
+      placeholder: |
+        Example:
+        - System processes the search query and returns results
+        - System detects failure and automatically fails over to standby database
+        - System deploys new feature with zero downtime using blue-green deployment
+        - System authenticates users while maintaining acceptable response times
+    validations:
+      required: true
+
+  - type: textarea
+    id: response_measure
+    attributes:
+      label: "Response Measure"
+      description: "How do we measure whether the response is acceptable? (Quantifiable metric)"
+      placeholder: |
+        Example:
+        - Search results returned within 200ms (p95)
+        - Failover completes within 30 seconds with < 5 seconds of downtime
+        - Deployment completes with 0% error rate and no user impact
+        - Login response time remains < 500ms with 0.1% error rate
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: "Rationale"
+      description: "Why is this scenario important? Business or technical justification."
+      placeholder: |
+        This scenario is critical because:
+        - Search is the primary user interaction (80% of sessions)
+        - Fast search is key differentiator vs. competitors
+        - User research shows search delays > 200ms increase bounce rate by 15%
+    validations:
+      required: true
+
+  - type: textarea
+    id: architectural_tactics
+    attributes:
+      label: "Architectural Tactics"
+      description: "What architectural tactics address this scenario?"
+      placeholder: |
+        **Performance Tactics:**
+        - Resource pooling (connection pools)
+        - Caching (Redis for frequent queries)
+        - Load balancing (distribute load across search replicas)
+        - Compression (reduce data transfer size)
+        
+        **Reliability Tactics:**
+        - Redundancy (multiple database replicas)
+        - Health monitoring (automated detection)
+        - Failover (automatic switch to standby)
+
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: "Tradeoffs & Risks"
+      description: "What tradeoffs or risks are associated with the tactics?"
+      placeholder: |
+        **Tradeoffs:**
+        - Caching improves performance but may serve stale data
+        - Redundancy improves reliability but increases infrastructure cost
+        - Load balancing adds complexity to deployment
+        
+        **Risks:**
+        - Cache invalidation complexity
+        - Split-brain scenarios during failover
+        - Increased operational overhead
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Quality Scenario Checklist"
+      description: "Confirm scenario completeness"
+      options:
+        - label: "Scenario has all 6 elements (Source, Stimulus, Environment, Artifact, Response, Response Measure)"
+          required: true
+        - label: "Response measure is quantifiable"
+          required: true
+        - label: "Rationale explains importance"
+          required: true
+        - label: "Architectural tactics are identified"
+          required: true
+        - label: "Tradeoffs and risks are assessed"
+          required: false
+        - label: "Links to related non-functional requirements"
+          required: true

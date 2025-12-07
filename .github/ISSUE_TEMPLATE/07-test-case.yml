@@ -1,0 +1,213 @@
+name: Test Case (TEST)
+description: Define a test case that verifies requirements
+title: "[TEST] "
+labels: ["test-case", "phase-07"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🧪 Test Case Specification
+        
+        Define a test case that verifies one or more requirements.
+        Supports unit, integration, E2E, performance, and security testing.
+
+  - type: input
+    id: req_links
+    attributes:
+      label: "Verified Requirements"
+      description: "Link to requirements this test verifies (e.g., #123, #124)"
+      placeholder: "#123 (REQ-F-AUTH-001), #125 (REQ-NF-PERF-001)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: test_type
+    attributes:
+      label: "Test Type"
+      description: "Level of testing"
+      options:
+        - Unit Test
+        - Integration Test
+        - End-to-End (E2E) Test
+        - Performance / Load Test
+        - Security Test
+        - Acceptance Test (UAT)
+        - Regression Test
+        - Smoke Test
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "Test Priority"
+      description: "Priority for test execution"
+      options:
+        - Critical (P0) - Must pass for release
+        - High (P1) - Should pass for release
+        - Medium (P2) - Can defer if needed
+        - Low (P3) - Nice to have
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_objective
+    attributes:
+      label: "Test Objective"
+      description: "What is being tested? What behavior or quality is being verified?"
+      placeholder: |
+        This test verifies that [specific behavior/quality].
+        
+        Example:
+        This test verifies that the system correctly authenticates users with valid credentials and rejects invalid login attempts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: preconditions
+    attributes:
+      label: "Preconditions"
+      description: "What must be true before the test can run?"
+      placeholder: |
+        - User database is populated with test users
+        - Authentication service is running
+        - Test user credentials: email=test@example.com, password=TestPassword123!
+        - No active sessions for test user
+
+  - type: textarea
+    id: test_steps
+    attributes:
+      label: "Test Steps / Scenario"
+      description: "Detailed test procedure (Given/When/Then or step-by-step)"
+      placeholder: |
+        **Scenario: Successful login with valid credentials**
+        
+        Given the user is on the login page
+        And the user has a registered account
+        When the user enters valid email "test@example.com"
+        And enters valid password "TestPassword123!"
+        And clicks the "Login" button
+        Then the user is redirected to the dashboard
+        And a session token is created
+        And the session token is stored in cookies
+        And the user sees their profile name in the header
+        
+        **Alternative: Failed login with invalid password**
+        
+        Given the user is on the login page
+        When the user enters valid email "test@example.com"
+        And enters invalid password "WrongPassword"
+        And clicks the "Login" button
+        Then an error message is displayed: "Invalid email or password"
+        And no session is created
+        And the user remains on the login page
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_results
+    attributes:
+      label: "Expected Results"
+      description: "What should happen if the test passes?"
+      placeholder: |
+        - HTTP Status: 200 OK
+        - Response body contains: { "success": true, "token": "<jwt-token>" }
+        - Session cookie is set with HttpOnly and Secure flags
+        - Database shows active session for user
+        - Response time < 500ms
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_data
+    attributes:
+      label: "Test Data"
+      description: "Input data, fixtures, or mocks required"
+      placeholder: |
+        **Test Users:**
+        - email: test@example.com, password: TestPassword123!, role: user
+        - email: admin@example.com, password: AdminPass456!, role: admin
+        
+        **Mock Data:**
+        - JWT signing key: test-secret-key-do-not-use-in-production
+        - Session timeout: 3600 seconds
+
+  - type: dropdown
+    id: automation_status
+    attributes:
+      label: "Automation Status"
+      description: "Is this test automated?"
+      options:
+        - Automated (CI/CD)
+        - Partially Automated
+        - Manual Only
+        - To Be Automated
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation_notes
+    attributes:
+      label: "Implementation Notes"
+      description: "Technical details for implementing this test"
+      placeholder: |
+        **Test Framework:** Jest + Supertest
+        **File Location:** `tests/integration/auth/login.test.ts`
+        
+        **Code Sketch:**
+        ```typescript
+        describe('User Login', () => {
+          it('should authenticate user with valid credentials', async () => {
+            const response = await request(app)
+              .post('/api/v1/auth/login')
+              .send({
+                email: 'test@example.com',
+                password: 'TestPassword123!'
+              })
+              .expect(200);
+            
+            expect(response.body.success).toBe(true);
+            expect(response.body.token).toBeDefined();
+            expect(response.headers['set-cookie']).toBeDefined();
+          });
+        });
+        ```
+        
+        **Dependencies:**
+        - Test database with seed data
+        - Redis instance for sessions (testcontainers)
+
+  - type: textarea
+    id: postconditions
+    attributes:
+      label: "Postconditions / Cleanup"
+      description: "What cleanup is needed after the test?"
+      placeholder: |
+        - Delete test user session from database
+        - Clear test cookies
+        - Reset rate limiting counters
+        - Roll back database changes (if using transactions)
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Test Case Checklist"
+      description: "Confirm test case quality"
+      options:
+        - label: "Test verifies specific requirement(s)"
+          required: true
+        - label: "Preconditions are documented"
+          required: true
+        - label: "Test steps are clear and reproducible"
+          required: true
+        - label: "Expected results are specific"
+          required: true
+        - label: "Test data is defined"
+          required: true
+        - label: "Automation status is clear"
+          required: true
+        - label: "Cleanup/postconditions documented"
+          required: false
