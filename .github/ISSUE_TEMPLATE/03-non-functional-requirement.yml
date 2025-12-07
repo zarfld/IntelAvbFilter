@@ -1,0 +1,185 @@
+name: Non-Functional Requirement (REQ-NF)
+description: Define a quality attribute requirement (performance, security, usability, etc.)
+title: "[REQ-NF] "
+labels: ["non-functional", "phase-02"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 📊 ISO/IEC/IEEE 29148:2018 Compliant Non-Functional Requirement
+        
+        Non-functional requirements specify quality attributes: performance, security, usability, reliability, etc.
+        Must include measurable metrics and acceptance thresholds.
+
+  - type: input
+    id: str_link
+    attributes:
+      label: "Stakeholder Requirement Link"
+      description: "Link to parent StR issue (e.g., #123)"
+      placeholder: "#123"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "Priority"
+      description: "Implementation priority"
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+
+  - type: dropdown
+    id: quality_attribute
+    attributes:
+      label: "Quality Attribute Category"
+      description: "Type of non-functional requirement"
+      options:
+        - Performance (PERF) - Response time, throughput, latency
+        - Security (SECU) - Authentication, authorization, encryption
+        - Usability (USAB) - User experience, accessibility, learnability
+        - Reliability (RELI) - Availability, fault tolerance, MTBF
+        - Maintainability (MAINT) - Code quality, modularity, testability
+        - Scalability (SCAL) - Horizontal/vertical scaling, load handling
+        - Compatibility (COMP) - Browser, device, OS support
+        - Portability (PORT) - Deployment flexibility, platform independence
+        - Compliance (CMPL) - Regulatory, legal, standards compliance
+        - Capacity (CAPA) - Data volume, concurrent users, storage
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Requirement Description"
+      description: "Describe the quality attribute requirement"
+      placeholder: |
+        The system shall [quality attribute] [measurable metric] [condition].
+        
+        Example:
+        The system shall respond to user interactions with a p95 latency of less than 200 milliseconds under normal load conditions.
+    validations:
+      required: true
+
+  - type: input
+    id: metric
+    attributes:
+      label: "Metric"
+      description: "Quantifiable measurement (e.g., response time, uptime percentage)"
+      placeholder: "P95 response time"
+    validations:
+      required: true
+
+  - type: input
+    id: target_value
+    attributes:
+      label: "Target Value / Threshold"
+      description: "Acceptable threshold (e.g., < 200ms, > 99.9%, 10,000 concurrent users)"
+      placeholder: "< 200 milliseconds"
+    validations:
+      required: true
+
+  - type: textarea
+    id: measurement_method
+    attributes:
+      label: "Measurement Method"
+      description: "How will this metric be measured and verified?"
+      placeholder: |
+        - Tool: k6 load testing tool
+        - Test scenario: 100 concurrent users, 5-minute duration
+        - Measurement: P50, P95, P99 latency from load test results
+        - Success criteria: P95 < 200ms, P99 < 500ms
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: "Rationale"
+      description: "Why is this quality attribute important? Business or technical justification."
+      placeholder: |
+        Fast response times are critical for user satisfaction. Research shows that 200ms response time is the threshold for "instantaneous" user perception. Delays beyond this increase bounce rates.
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_specification
+    attributes:
+      label: "Test Specification"
+      description: "Detailed test plan for verifying this requirement"
+      placeholder: |
+        Load Test Plan:
+        1. Setup: Deploy to staging environment
+        2. Load profile: Ramp up to 100 users over 2 minutes
+        3. Sustain load: 100 concurrent users for 5 minutes
+        4. Ramp down: 2 minutes
+        5. Collect metrics: P50, P95, P99, error rate
+        6. Acceptance: P95 < 200ms, P99 < 500ms, error rate < 0.1%
+        
+        Tool configuration:
+        ```javascript
+        export let options = {
+          stages: [
+            { duration: '2m', target: 100 },
+            { duration: '5m', target: 100 },
+            { duration: '2m', target: 0 },
+          ],
+          thresholds: {
+            'http_req_duration': ['p(95)<200', 'p(99)<500'],
+            'http_req_failed': ['rate<0.001'],
+          },
+        };
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: "Constraints & Conditions"
+      description: "Under what conditions does this requirement apply?"
+      placeholder: |
+        - Normal load: 100 concurrent users
+        - Peak load: 500 concurrent users (P95 < 500ms acceptable)
+        - Database: < 1 million records
+        - Network: > 10 Mbps connection
+
+  - type: dropdown
+    id: compliance_standard
+    attributes:
+      label: "Related Standard / Compliance"
+      description: "Does this relate to a specific standard or regulation?"
+      options:
+        - None
+        - WCAG 2.1 (Accessibility)
+        - GDPR (Privacy)
+        - HIPAA (Healthcare)
+        - PCI DSS (Payment Card)
+        - ISO 27001 (Security)
+        - SOC 2 (Security, Availability)
+        - NIST (Security Framework)
+        - Other (specify in description)
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Non-Functional Requirement Quality Checklist"
+      description: "Confirm requirement meets quality standards"
+      options:
+        - label: "Metric is quantifiable and measurable"
+          required: true
+        - label: "Target value / threshold is specific"
+          required: true
+        - label: "Measurement method is defined"
+          required: true
+        - label: "Rationale explains business or technical importance"
+          required: true
+        - label: "Test specification is complete"
+          required: true
+        - label: "Conditions and constraints are documented"
+          required: false

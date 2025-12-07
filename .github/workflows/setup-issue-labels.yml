@@ -1,0 +1,393 @@
+name: Setup Issue Labels
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches: [master, main]
+    paths:
+      - '.github/workflows/setup-issue-labels.yml'
+
+jobs:
+  create-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    
+    steps:
+      - name: Create issue type labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = [
+              // === Requirement Labels ===
+              {
+                name: 'type:requirement:stakeholder',
+                color: '0052CC',  // Deep blue - highest level
+                description: 'Stakeholder requirement (StR) - business needs'
+              },
+              {
+                name: 'type:requirement:functional',
+                color: '1D76DB',  // Medium blue - system behavior
+                description: 'Functional requirement (REQ-F) - system functionality'
+              },
+              {
+                name: 'type:requirement:non-functional',
+                color: '5B9BD5',  // Light blue - quality attributes
+                description: 'Non-functional requirement (REQ-NF) - performance, security, usability'
+              },
+              
+              // === Architecture Labels ===
+              {
+                name: 'type:architecture:decision',
+                color: '7B68EE',  // Purple - strategic decisions
+                description: 'Architecture Decision Record (ADR) - architectural choices'
+              },
+              {
+                name: 'type:architecture:component',
+                color: '9370DB',  // Medium purple - components
+                description: 'Architecture Component (ARC-C) - component specifications'
+              },
+              {
+                name: 'type:architecture:quality-scenario',
+                color: 'BA55D3',  // Light purple - quality attributes
+                description: 'Quality Scenario (QA-SC) - ATAM quality attribute scenarios'
+              },
+              
+              // === Test Labels ===
+              {
+                name: 'type:test',
+                color: '0E8A16',  // Green - verification
+                description: 'Test case (TEST) - verification and validation'
+              },
+              {
+                name: 'test-type:unit',
+                color: '26A641',  // Light green
+                description: 'Unit test - tests individual components'
+              },
+              {
+                name: 'test-type:integration',
+                color: '3FB950',  // Lighter green
+                description: 'Integration test - tests component interactions'
+              },
+              {
+                name: 'test-type:e2e',
+                color: '57D467',  // Lightest green
+                description: 'End-to-end test - tests complete workflows'
+              },
+              {
+                name: 'test-type:acceptance',
+                color: '7EE787',  // Very light green
+                description: 'Acceptance test - validates user requirements'
+              },
+              
+              // === Design Labels ===
+              {
+                name: 'type:design',
+                color: 'FF9800',  // Orange - design work
+                description: 'Design specification or pattern'
+              },
+              {
+                name: 'pattern:entity',
+                color: 'FFB74D',  // Light orange
+                description: 'DDD Entity pattern'
+              },
+              {
+                name: 'pattern:value-object',
+                color: 'FFB74D',  // Light orange
+                description: 'DDD Value Object pattern'
+              },
+              {
+                name: 'pattern:aggregate',
+                color: 'FFB74D',  // Light orange
+                description: 'DDD Aggregate pattern'
+              },
+              {
+                name: 'pattern:repository',
+                color: 'FFB74D',  // Light orange
+                description: 'DDD Repository pattern'
+              },
+              
+              // === Implementation Labels ===
+              {
+                name: 'type:implementation',
+                color: 'FBCA04',  // Yellow - in development
+                description: 'Implementation work'
+              },
+              {
+                name: 'type:refactoring',
+                color: 'FEF2C0',  // Light yellow
+                description: 'Code refactoring - improving design without changing behavior'
+              },
+              
+              // === Priority Labels ===
+              {
+                name: 'priority:p0',
+                color: 'B60205',  // Red - critical
+                description: 'Critical priority - must have'
+              },
+              {
+                name: 'priority:p1',
+                color: 'D93F0B',  // Dark orange - high priority
+                description: 'High priority - should have'
+              },
+              {
+                name: 'priority:p2',
+                color: 'FBCA04',  // Yellow - medium priority
+                description: 'Medium priority - could have'
+              },
+              {
+                name: 'priority:p3',
+                color: 'FEF2C0',  // Light yellow - low priority
+                description: 'Low priority - nice to have'
+              },
+              
+              // === Status Labels (from github-issue-workflow.md) ===
+              {
+                name: 'status:backlog',
+                color: 'D4C5F9',  // Light purple - not started
+                description: 'Issue in backlog, not yet prioritized'
+              },
+              {
+                name: 'status:ready',
+                color: '0E8A16',  // Green - ready for work
+                description: 'Ready for development'
+              },
+              {
+                name: 'status:in-progress',
+                color: 'FBCA04',  // Yellow - actively working
+                description: 'Currently being worked on'
+              },
+              {
+                name: 'status:review',
+                color: 'FF9800',  // Orange - awaiting review
+                description: 'In code review'
+              },
+              {
+                name: 'status:testing',
+                color: '1D76DB',  // Blue - testing phase
+                description: 'In testing phase'
+              },
+              {
+                name: 'status:blocked',
+                color: 'B60205',  // Red - blocked
+                description: 'Blocked by dependency or issue'
+              },
+              {
+                name: 'status:completed',
+                color: '0E8A16',  // Green - done
+                description: 'Implementation complete and verified'
+              },
+              {
+                name: 'status:closed',
+                color: '6E7781',  // Gray - closed
+                description: 'Issue closed'
+              },
+              
+              // === Phase Labels ===
+              {
+                name: 'phase:01-stakeholder-requirements',
+                color: 'C5DEF5',  // Very light blue
+                description: 'Phase 01: Stakeholder Requirements Definition'
+              },
+              {
+                name: 'phase:02-requirements',
+                color: 'C5DEF5',  // Very light blue
+                description: 'Phase 02: Requirements Analysis & Specification'
+              },
+              {
+                name: 'phase:03-architecture',
+                color: 'E4C9F5',  // Very light purple
+                description: 'Phase 03: Architecture Design'
+              },
+              {
+                name: 'phase:04-design',
+                color: 'FFDAB9',  // Very light orange
+                description: 'Phase 04: Detailed Design'
+              },
+              {
+                name: 'phase:05-implementation',
+                color: 'FFF9C4',  // Very light yellow
+                description: 'Phase 05: Implementation'
+              },
+              {
+                name: 'phase:06-integration',
+                color: 'FFE5B4',  // Peach
+                description: 'Phase 06: Integration'
+              },
+              {
+                name: 'phase:07-verification-validation',
+                color: 'C8E6C9',  // Very light green
+                description: 'Phase 07: Verification & Validation'
+              },
+              {
+                name: 'phase:08-transition',
+                color: 'B3E5FC',  // Very light cyan
+                description: 'Phase 08: Transition (Deployment)'
+              },
+              {
+                name: 'phase:09-operation-maintenance',
+                color: 'CFD8DC',  // Very light gray
+                description: 'Phase 09: Operation & Maintenance'
+              },
+              
+              // === Bounded Context Labels (DDD) ===
+              {
+                name: 'context:authentication',
+                color: '006B75',  // Teal
+                description: 'Authentication Bounded Context'
+              },
+              {
+                name: 'context:core-domain',
+                color: 'B60205',  // Red - core is critical
+                description: 'Core Domain - competitive advantage'
+              },
+              {
+                name: 'context:supporting',
+                color: 'FBCA04',  // Yellow - supporting
+                description: 'Supporting Subdomain'
+              },
+              {
+                name: 'context:generic',
+                color: 'D4C5F9',  // Light purple - generic
+                description: 'Generic Subdomain - commodity'
+              },
+              
+              // === Standards & Compliance ===
+              {
+                name: 'standard:ISO-29148',
+                color: '0052CC',  // Blue - standards
+                description: 'ISO/IEC/IEEE 29148:2018 Requirements Engineering'
+              },
+              {
+                name: 'standard:IEEE-1016',
+                color: '0052CC',  // Blue
+                description: 'IEEE 1016-2009 Software Design Descriptions'
+              },
+              {
+                name: 'standard:ISO-42010',
+                color: '0052CC',  // Blue
+                description: 'ISO/IEC/IEEE 42010:2011 Architecture Description'
+              },
+              {
+                name: 'standard:IEEE-1012',
+                color: '0052CC',  // Blue
+                description: 'IEEE 1012-2016 Verification & Validation'
+              },
+              
+              // === Issue Management ===
+              {
+                name: 'duplicate',
+                color: 'CFD3D7',  // Gray - duplicate
+                description: 'This issue already exists'
+              },
+              {
+                name: 'invalid',
+                color: 'E4E669',  // Yellow-gray - invalid
+                description: 'This issue is not valid'
+              },
+              {
+                name: 'wontfix',
+                color: 'FFFFFF',  // White - won't fix
+                description: 'This will not be worked on'
+              },
+              {
+                name: 'help-wanted',
+                color: '008672',  // Green - help wanted
+                description: 'Extra attention is needed'
+              },
+              {
+                name: 'good-first-issue',
+                color: '7057FF',  // Purple - beginner friendly
+                description: 'Good for newcomers'
+              },
+              {
+                name: 'question',
+                color: 'D876E3',  // Pink - question
+                description: 'Further information is requested'
+              },
+              {
+                name: 'documentation',
+                color: '0075CA',  // Blue - documentation
+                description: 'Improvements or additions to documentation'
+              },
+              {
+                name: 'bug',
+                color: 'D73A4A',  // Red - bug
+                description: 'Something isn\'t working'
+              },
+              {
+                name: 'enhancement',
+                color: 'A2EEEF',  // Light cyan - enhancement
+                description: 'New feature or request'
+              }
+            ];
+            
+            let created = 0;
+            let updated = 0;
+            let skipped = 0;
+            
+            for (const label of labels) {
+              try {
+                // Try to create the label
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                  color: label.color,
+                  description: label.description
+                });
+                console.log(`✅ Created label: ${label.name}`);
+                created++;
+              } catch (error) {
+                if (error.status === 422) {
+                  // Label exists, try to update it
+                  try {
+                    await github.rest.issues.updateLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      name: label.name,
+                      color: label.color,
+                      description: label.description
+                    });
+                    console.log(`🔄 Updated label: ${label.name}`);
+                    updated++;
+                  } catch (updateError) {
+                    console.log(`⏭️  Label already exists (unchanged): ${label.name}`);
+                    skipped++;
+                  }
+                } else {
+                  console.error(`❌ Failed to create label ${label.name}:`, error.message);
+                }
+              }
+            }
+            
+            console.log(`\n📊 Summary:`);
+            console.log(`   Created: ${created}`);
+            console.log(`   Updated: ${updated}`);
+            console.log(`   Skipped: ${skipped}`);
+            console.log(`   Total: ${labels.length}`);
+            
+            // Create summary comment (optional - for visibility)
+            const summary = `## 🏷️ Issue Labels Setup Complete
+            
+            **Created**: ${created} labels
+            **Updated**: ${updated} labels
+            **Skipped**: ${skipped} labels
+            **Total**: ${labels.length} labels
+            
+            ### Label Categories
+            
+            - **Requirements**: stakeholder, functional, non-functional
+            - **Architecture**: decision (ADR), component (ARC-C), quality-scenario (QA-SC)
+            - **Tests**: unit, integration, e2e, acceptance
+            - **Design**: DDD patterns (entity, value-object, aggregate, repository)
+            - **Status**: backlog → ready → in-progress → review → testing → completed → closed
+            - **Priority**: P0 (critical) → P1 (high) → P2 (medium) → P3 (low)
+            - **Phases**: 01-stakeholder-requirements through 09-operation-maintenance
+            - **Bounded Contexts**: core-domain, supporting, generic
+            - **Standards**: ISO-29148, IEEE-1016, ISO-42010, IEEE-1012
+            
+            See [Label Color Guide](.github/docs/label-color-guide.md) for details.
+            `;
+            
+            console.log(summary);

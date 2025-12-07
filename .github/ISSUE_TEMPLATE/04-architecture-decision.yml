@@ -1,0 +1,190 @@
+name: Architecture Decision Record (ADR)
+description: Document an architecture decision following ADR format and ISO/IEC/IEEE 42010:2011
+title: "[ADR] "
+labels: ["architecture-decision", "phase-03"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🏗️ Architecture Decision Record (ADR)
+        
+        Document significant architecture decisions that impact system structure, behavior, or quality attributes.
+        Follows ISO/IEC/IEEE 42010:2011 and ADR best practices.
+
+  - type: input
+    id: req_links
+    attributes:
+      label: "Requirements Links"
+      description: "Link to requirements this decision addresses (e.g., #123, #124)"
+      placeholder: "#123, #124"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: "Decision Status"
+      description: "Current status of this decision"
+      options:
+        - Proposed
+        - Accepted
+        - Deprecated
+        - Superseded
+      default: 0
+    validations:
+      required: true
+
+  - type: input
+    id: superseded_by
+    attributes:
+      label: "Superseded By (if applicable)"
+      description: "If status is Superseded, link to the replacing ADR (e.g., #456)"
+      placeholder: "#456"
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: "Architecture Category"
+      description: "Area of architecture this decision affects"
+      options:
+        - Infrastructure (INFR) - Deployment, hosting, cloud
+        - Data Architecture (DATA) - Storage, databases, caching
+        - Integration (INTG) - APIs, messaging, external systems
+        - Security (SECU) - Authentication, encryption, authorization
+        - Performance (PERF) - Scaling, optimization, CDN
+        - Development (DEVL) - Frameworks, languages, tools
+        - Operations (OPS) - Monitoring, logging, CI/CD
+        - User Interface (UI) - Frontend architecture, frameworks
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: "Context"
+      description: "What is the issue or problem that motivates this decision?"
+      placeholder: |
+        Describe the architectural context and forces at play:
+        - What problem are we trying to solve?
+        - What constraints exist?
+        - What are the competing concerns?
+        
+        Example:
+        We need to select a database for our user management system. The system must support:
+        - 100,000+ users with complex relationships
+        - Real-time queries for user sessions
+        - ACID transactions for account operations
+        - Horizontal scalability for future growth
+    validations:
+      required: true
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: "Decision"
+      description: "What is the change that we're proposing or have agreed to?"
+      placeholder: |
+        We will [decision statement].
+        
+        Example:
+        We will use PostgreSQL as the primary database for user management because:
+        - Strong ACID guarantees for transactional integrity
+        - Excellent support for complex queries and relationships
+        - Proven scalability with read replicas and partitioning
+        - Rich ecosystem and mature tooling
+    validations:
+      required: true
+
+  - type: textarea
+    id: consequences
+    attributes:
+      label: "Consequences"
+      description: "What becomes easier or harder because of this decision?"
+      placeholder: |
+        **Positive:**
+        - Strong consistency guarantees
+        - Rich query capabilities with SQL
+        - Well-understood technology with large community
+        
+        **Negative:**
+        - More complex horizontal scaling compared to NoSQL
+        - Requires DBA expertise for optimization
+        - Schema migrations require careful planning
+        
+        **Neutral:**
+        - Need to learn PostgreSQL-specific features
+        - Licensing is PostgreSQL License (permissive)
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: "Alternatives Considered"
+      description: "What other options were evaluated?"
+      placeholder: |
+        1. **MongoDB (NoSQL)**
+           - Pros: Easy horizontal scaling, flexible schema
+           - Cons: No ACID transactions across documents, eventual consistency
+           - Rejected because: Transactional integrity is critical
+        
+        2. **MySQL**
+           - Pros: Similar to PostgreSQL, wide adoption
+           - Cons: Less advanced features, weaker JSON support
+           - Rejected because: PostgreSQL offers better advanced features
+        
+        3. **DynamoDB**
+           - Pros: Fully managed, excellent scalability
+           - Cons: Vendor lock-in, complex query limitations
+           - Rejected because: Complex queries are essential
+
+  - type: textarea
+    id: impact_assessment
+    attributes:
+      label: "Impact Assessment"
+      description: "How does this decision impact other components, requirements, or decisions?"
+      placeholder: |
+        **Impacted Requirements:**
+        - #123 (REQ-F-USER-001): User registration - will use PostgreSQL transactions
+        - #125 (REQ-NF-PERF-001): Response time - may need query optimization
+        
+        **Impacted Components:**
+        - ARC-C-001: User service - needs PostgreSQL client library
+        - ARC-C-003: Session service - can leverage PostgreSQL for session storage
+        
+        **Related ADRs:**
+        - Depends on: #45 (ADR-INFR-001: Cloud provider selection)
+        - May affect: Future decision on caching strategy
+
+  - type: textarea
+    id: implementation_notes
+    attributes:
+      label: "Implementation Notes"
+      description: "Guidance for implementing this decision"
+      placeholder: |
+        - Version: PostgreSQL 15+
+        - Deployment: AWS RDS PostgreSQL with Multi-AZ
+        - Connection pooling: PgBouncer
+        - Migrations: Use Flyway or Liquibase
+        - Backup: Automated daily backups with 30-day retention
+        - Monitoring: CloudWatch metrics + pg_stat_statements
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "ADR Quality Checklist"
+      description: "Confirm ADR completeness"
+      options:
+        - label: "Context clearly describes the problem"
+          required: true
+        - label: "Decision is unambiguous"
+          required: true
+        - label: "Consequences (positive and negative) are documented"
+          required: true
+        - label: "Alternatives were considered"
+          required: true
+        - label: "Impact on requirements and components assessed"
+          required: true
+        - label: "Links to related requirements and ADRs"
+          required: true

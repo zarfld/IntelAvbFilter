@@ -1,0 +1,154 @@
+name: Issue Validation
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+jobs:
+  validate-requirement:
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.issue.labels.*.name, 'type:requirement:stakeholder') ||
+      contains(github.event.issue.labels.*.name, 'type:requirement:functional') ||
+      contains(github.event.issue.labels.*.name, 'type:requirement:non-functional') ||
+      contains(github.event.issue.labels.*.name, 'type:architecture:decision') ||
+      contains(github.event.issue.labels.*.name, 'type:architecture:component') ||
+      contains(github.event.issue.labels.*.name, 'type:architecture:quality-scenario') ||
+      contains(github.event.issue.labels.*.name, 'type:test')
+
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Check parent link for requirements
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const labels = issue.labels.map(l => l.name);
+
+            // Stakeholder requirements (StR) don't need parent links
+            if (labels.includes('type:requirement:stakeholder')) {
+              console.log('✅ StR issue - parent link not required');
+              return;
+            }
+
+            // Check for "Traces to: #N" pattern
+            const parentLinkPattern = /[Tt]races?\s+to:?\s*#(\d+)/;
+            const parentLink = body.match(parentLinkPattern);
+
+            if (!parentLink) {
+              const errorMessage = `## ❌ Traceability Link Missing
+
+            This requirement must link to its parent issue.
+
+            ### Required Action
+
+            Add the following to your issue body:
+
+            \`\`\`markdown
+            ## Traceability
+            - **Traces to**: #N (parent issue)
+            \`\`\`
+
+            ### Traceability Rules
+
+            - **REQ-F / REQ-NF** → Link to parent StR issue
+            - **ADR** → Link to requirements it satisfies
+            - **ARC-C** → Link to ADRs and requirements
+            - **TEST** → Link to requirements being verified
+            - **QA-SC** → Link to related requirements
+
+            **Standard**: ISO/IEC/IEEE 29148:2018 (Bidirectional Traceability)
+            `;
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: errorMessage
+              });
+              
+              core.setFailed('❌ Requirement must link to parent issue using "Traces to: #N"');
+            } else {
+              const parentIssueNumber = parentLink[1];
+              console.log(`✅ Requirement traces to #${parentIssueNumber}`);
+              
+              // Optionally verify parent issue exists
+              try {
+                await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: parseInt(parentIssueNumber)
+                });
+                console.log(`✅ Parent issue #${parentIssueNumber} exists`);
+              } catch (error) {
+                const warningMessage = `## ⚠️ Parent Issue Not Found
+                
+                The parent issue #${parentIssueNumber} referenced in "Traces to" does not exist.
+                
+                Please verify the issue number is correct.
+                `;
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: warningMessage
+                });
+                
+                core.warning(`Parent issue #${parentIssueNumber} not found`);
+              }
+            }
+
+      - name: Check test requirement links
+        if: contains(github.event.issue.labels.*.name, 'type:test')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+
+            // Check for "Verifies: #N" or "Verified Requirements: #N" pattern
+            const verifyPattern = /[Vv]erif(?:ies|ied\s+[Rr]equirements?):?\s*#(\d+)/g;
+            const verifiedIssues = [];
+            let match;
+
+            while ((match = verifyPattern.exec(body)) !== null) {
+              verifiedIssues.push(match[1]);
+            }
+
+            if (verifiedIssues.length === 0) {
+              const errorMessage = `## ❌ Test Requirements Missing
+              
+              Test cases must link to the requirements they verify.
+              
+              ### Required Action
+              
+              Add the following to your issue body:
+              
+              \`\`\`markdown
+              ## Verified Requirements
+              - #N (REQ-F or REQ-NF issue)
+              \`\`\`
+              
+              Or in the description:
+              
+              \`\`\`markdown
+              Verifies: #N, #M (requirement issues)
+              \`\`\`
+              `;
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: errorMessage
+              });
+              
+              core.setFailed('❌ Test case must link to verified requirements');
+            } else {
+              console.log(`✅ Test verifies ${verifiedIssues.length} requirement(s): ${verifiedIssues.join(', ')}`);
+            }

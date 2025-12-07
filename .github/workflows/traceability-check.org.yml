@@ -1,0 +1,86 @@
+name: Traceability Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issues:
+    types: [opened, edited]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  validate-traceability:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests pyyaml
+      
+      - name: Check for orphaned requirements
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/github-orphan-check.py
+        continue-on-error: true
+        id: orphan-check
+      
+      - name: Generate traceability report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p reports
+          python scripts/github-traceability-report.py > reports/traceability.md
+      
+      - name: Upload traceability report
+        uses: actions/upload-artifact@v4
+        with:
+          name: traceability-report
+          path: reports/traceability.md
+          retention-days: 30
+      
+      - name: Comment on PR with report summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('reports/traceability.md', 'utf8');
+            
+            // Extract summary section
+            const summaryMatch = report.match(/## Summary\n([\s\S]*?)##/);
+            const summary = summaryMatch ? summaryMatch[1] : 'Summary not available';
+            
+            const comment = `## 📊 Traceability Report
+            
+            ${summary}
+            
+            📎 Full report available in workflow artifacts.
+            
+            [View detailed traceability matrix](../actions/runs/${{ github.run_id }})
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+      
+      - name: Check orphan results
+        if: steps.orphan-check.outcome == 'failure'
+        run: |
+          echo "❌ Orphaned requirements detected!"
+          echo "Please link all requirements to parent issues."
+          exit 1
