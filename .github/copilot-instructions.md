@@ -443,6 +443,7 @@ All documentation must follow:
 
 ```
 applyTo:
+  - "**/*"           # All files
   - "**/*.md"           # All markdown files
   - "**/*.js"           # JavaScript files
   - "**/*.ts"           # TypeScript files
@@ -450,6 +451,8 @@ applyTo:
   - "**/*.java"         # Java files
   - "**/*.cs"           # C# files
   - "**/src/**"         # All source code
+    - "**/*.c"           # C files
+  - "**/*.h"           # C header files
   - "**/tests/**"       # All test files
   - "**/docs/**"        # All documentation
 ```

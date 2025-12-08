@@ -1,3 +1,18 @@
+applyTo:
+ - "**/*" 
+  - "**/*.md"           # All markdown files
+  - "**/*.js"           # JavaScript files
+  - "**/*.ts"           # TypeScript files
+  - "**/*.py"           # Python files
+  - "**/*.java"         # Java files
+  - "**/*.cs"           # C# files
+  - "**/*.c"           # C files
+  - "**/*.h"           # C header files
+  - "**/src/**"         # All source code
+  - "**/tests/**"       # All test files
+  - "**/docs/**"        # All documentation
+```
+
 # Intel AVB Filter Driver - AI Coding Instructions
 
 ## Working principles
