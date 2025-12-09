@@ -217,7 +217,8 @@
     <ClCompile Include="tsn_config.c" />
     <ResourceCompile Include="filter.rc" />
     <ClInclude Include="devices\intel_device_interface.h" />
-    <ClInclude Include="external\intel_avb\include\avb_ioctl.h" />
+    <!-- SSOT: include\avb_ioctl.h (not external copy) -->
+    <ClInclude Include="include\avb_ioctl.h" />
     <ClInclude Include="external\intel_avb\lib\intel.h" />
     <ClInclude Include="external\intel_avb\lib\intel_private.h" />
     <ClInclude Include="external\intel_igb\src\e1000_regs.h" />
