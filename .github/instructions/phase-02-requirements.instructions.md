@@ -107,6 +107,11 @@ Acceptance Criteria:
    
 5. **Submit** → GitHub assigns issue number (e.g., #45)
 
+6. **Set Status in GitHub Project** (see [Status Management Guide](../../docs/github-issue-status-management.md#2️⃣-system-requirements-req)):
+   - **Initial Status**: "Specified"
+   - **Progression**: Specified → Analyzed → Traceable → Approved → Implemented → Verified
+   - **Close When**: Fully implemented and verified (all tests pass)
+
 #### Creating Non-Functional Requirements as GitHub Issues
 
 1. **Navigate to Issues → New Issue**
@@ -125,13 +130,15 @@ Acceptance Criteria:
    - `phase-02`
    - Category-specific labels if available
 
+5. **Set Status in GitHub Project**: Same progression as REQ-F (Specified → Analyzed → Traceable → Approved → Implemented → Verified)
+
 #### Example: Creating REQ-F Issue
 
 **Title**: User can filter product list by multiple categories
 
 **Parent Stakeholder Requirement**:
 ```markdown
-**Traces to**: #1 (StR: Improve product discovery experience)
+Traces to:  #1 (StR: Improve product discovery experience)
 ```
 
 **Requirement Description**:
@@ -183,7 +190,7 @@ After submission → Issue #45 created
 
 **Parent Stakeholder Requirement**:
 ```markdown
-**Traces to**: #2 (StR: Fast, responsive user experience)
+Traces to:  #2 (StR: Fast, responsive user experience)
 ```
 
 **Quality Attribute Category**: Performance
@@ -228,7 +235,7 @@ After submission → Issue #46 created
 Requirements trace to parent stakeholder requirements:
 ```markdown
 ## Traceability
-- **Traces to**: #1, #2 (parent StR issues)
+- Traces to:  #1, #2 (parent StR issues)
 - **Depends on**: #12, #15 (prerequisite requirements)
 - **Refined by**: #78, #79 (child design decisions in Phase 03)
 - **Implemented by**: #PR-25 (pull request)
@@ -272,6 +279,62 @@ python scripts/github-traceability-report.py --type requirements --output SyRS.m
 ```
 
 Produces ISO/IEC/IEEE 29148-compliant specification document from issues.
+
+#### Status Management Workflow
+
+**ISO/IEC/IEEE 29148:2018** requires maintaining requirements attributes including baseline status and verification status. See [GitHub Issue Status Management Guide](../../docs/github-issue-status-management.md#2️⃣-system-requirements-req) for detailed workflow.
+
+**Quick Reference - REQ Status States**:
+
+| Status | Definition | When to Apply |
+|--------|------------|---------------|
+| **Specified** | Requirement written in clear, testable form | Passes EARS template check |
+| **Analyzed** | Checked for ambiguity, consistency, necessity | Criticality assigned, conflicts resolved |
+| **Traceable** | Linked upward (StR) and downward (ADC) | All traceability links present |
+| **Approved** | Formally approved and baselined | Stakeholder/technical approval |
+| **Implemented** | Design and code completed | PR merged with REQ reference |
+| **Verified** | Objective evidence confirms fulfillment | All test cases pass |
+
+**Updating Status** (add comment to issue):
+```markdown
+## Status Update (2025-12-10)
+**Previous Status**: Specified
+**New Status**: Analyzed
+**Analysis Results**:
+- Ambiguity check: PASS (clear EARS format)
+- Consistency check: PASS (no conflicts with #46)
+- Necessity check: PASS (traces to StR #1)
+- **Criticality**: High (security-related, integrity level IL-3)
+- **Risk**: Medium (third-party API dependency)
+
+**Next Steps**: Add traceability links to architecture components (ADR #78, ARC-C #79)
+```
+
+**Verification Evidence** (when moving to "Verified"):
+```markdown
+## Verification Complete (2025-12-18)
+**Status**: Verified → Ready to Close
+**Test Cases**: #120 (PASS), #121 (PASS), #122 (PASS)
+**Coverage**: 94% lines, 89% branches
+**Acceptance Criteria**: All 5 scenarios passed
+**Evidence**: 
+- Unit tests: 15 tests, 100% pass rate
+- Integration tests: 8 tests, 100% pass rate
+- Manual verification: Staging deployment (2025-12-17)
+
+**Verified By**: John Doe (QA Lead)
+**Closure Recommendation**: Close after production deployment
+```
+
+**Best Practices**:
+- ✅ Set status to "Specified" upon creation (after template validation)
+- ✅ Update status with evidence at each transition
+- ✅ Don't skip "Analyzed" or "Traceable" states (required for compliance)
+- ✅ Close only when fully verified (tests pass with objective evidence)
+- ✅ Link PRs and test results in status update comments
+- ❌ Never move to "Approved" without criticality analysis
+- ❌ Don't move to "Implemented" without PR link
+- ❌ Don't move to "Verified" without test evidence
 
 ### 📝 Supplementary Documentation Files
 

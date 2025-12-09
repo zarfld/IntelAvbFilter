@@ -668,7 +668,7 @@ Implements user authentication functionality using email and password.
 - **Implements**: #26 (REQ-NF-SECU-001: Rate limiting)
 - **Implements**: #27 (REQ-NF-SECU-002: Authentication logging)
 - **TEST Issue**: #50 (TEST-AUTH-001)
-- **Traces to**: #20 (StR-003: Security Requirements)
+- Traces to:  #20 (StR-003: Security Requirements)
 
 ## TDD Workflow
 ✅ RED: Tests written first (9 scenarios)

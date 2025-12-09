@@ -1455,7 +1455,7 @@ Example: Edit #25 (REQ-F-AUTH-001: User Login) to add:
 
 ```markdown
 ## Traceability
-- **Traces to**: #10 (StR: User Authentication)
+- Traces to:  #10 (StR: User Authentication)
 - **Architectural Decisions**: #100 (ADR-ARCH-001), #102 (ADR-SECU-001)
 - **Implemented by**: #110 (ARC-C-001: Auth Service)
 - **Verified by**: #45 (TEST: Login Flow)

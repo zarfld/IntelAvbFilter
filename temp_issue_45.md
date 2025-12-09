@@ -119,7 +119,7 @@ Then no deadlocks occur
 
 ## Traceability
 
-- **Traces to**: #31 (StR-004: NDIS Miniport Integration - concurrent callback safety)
+- Traces to:  #31 (StR-004: NDIS Miniport Integration - concurrent callback safety)
 - **Depends on**: #40 (REQ-F-INTEL-AVB-003: register access via intel_avb), #36 (FilterAttach allocates locks)
 - **Related**: All IOCTL requirements (#34-#39: register access), #42-#43 (concurrent NDIS callbacks)
 - **Verified by**: TEST-REG-ACCESS-001 (Phase 07: race condition testing)

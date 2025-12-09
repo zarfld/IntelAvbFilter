@@ -73,7 +73,7 @@ Validate GitHub Issues (StR, REQ-F, REQ-NF) for compliance with ISO 29148:2018 s
 **Example Fix**:
 ```markdown
 ## Traceability
-- **Traces to**: #[parent-issue]
+- Traces to:  #[parent-issue]
 - **Depends on**: #[prereq-issue]
 ```
 
@@ -222,7 +222,7 @@ Validate GitHub Issues (StR, REQ-F, REQ-NF) for compliance with ISO 29148:2018 s
 #### Missing Parent Links
 - 🔴 #[N]: REQ-F issue missing "Traces to: #X" link
   - **Impact**: Orphaned requirement, unclear business justification
-  - **Fix**: Add `**Traces to**: #[StR-number]` in Traceability section
+  - **Fix**: Add `Traces to:  #[StR-number]` in Traceability section
 
 #### Broken Links
 - 🔴 #[N]: References non-existent issue #[X]

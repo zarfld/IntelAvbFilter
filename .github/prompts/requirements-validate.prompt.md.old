@@ -350,7 +350,7 @@ When user requests validation, you will:
 
 ## REQ-F-001: User Authentication
 
-**Traces to**: StR-003 (User Security Requirements)
+Traces to:  StR-003 (User Security Requirements)
 **Priority**: Critical
 **Rationale**: Users need secure access to protect their data
 
@@ -621,7 +621,7 @@ And [user notified]
 ```markdown
 ## REQ-[Category]-XXX: [Title]
 
-**Traces to**: StR-XXX
+Traces to:  StR-XXX
 **Priority**: [Critical|High|Medium|Low]
 **Category**: [Performance|Security|Reliability|Usability|Maintainability]
 

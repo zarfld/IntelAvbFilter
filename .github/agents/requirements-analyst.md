@@ -95,7 +95,7 @@ P0 (Critical)
 - E2E tests: Login page flow
 
 ## Traceability
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Depends on**: None
 - **Verified by**: #15 (TEST-AUTH-LOGIN-001)
 
@@ -124,7 +124,7 @@ User login must respond within 500ms for 95% of requests.
 - Performance monitoring in production
 
 ## Traceability
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Refines**: #2 (REQ-F-AUTH-001: User Login)
 - **Verified by**: #16 (TEST-PERF-LOGIN-001)
 ```
@@ -163,7 +163,7 @@ Use XP-style user stories with Given-When-Then acceptance criteria:
 
 ## Traceability
 - **Implements**: #2 (REQ-F-AUTH-001: User Login)
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 ```
 
 ## Workflow: Creating Requirements from Stakeholder Needs

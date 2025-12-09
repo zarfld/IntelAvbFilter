@@ -43,6 +43,11 @@ applyTo: "03-architecture/**"
    
 5. **Submit** → GitHub assigns issue number (e.g., #78)
 
+6. **Set Status in GitHub Project** (see [Status Management Guide](../../docs/github-issue-status-management.md#3️⃣-architecture-decision-records-adr)):
+   - **Initial Status**: "Proposed"
+   - **Progression**: Proposed → Under Review → Accepted/Rejected → Close
+   - **Close When**: Decision finalized with rationale documented
+
 #### Creating Architecture Components as GitHub Issues
 
 1. **Navigate to Issues → New Issue**
@@ -61,13 +66,18 @@ applyTo: "03-architecture/**"
    
 5. **Submit** → GitHub assigns issue number (e.g., #79)
 
+6. **Set Status in GitHub Project** (see [Status Management Guide](../../docs/github-issue-status-management.md#4️⃣-architecture-design-components-adc)):
+   - **Initial Status**: "Specified"
+   - **Progression**: Specified → Designed → Implemented → Verified → Integrated
+   - **Close When**: Component fully integrated and tested
+
 #### Example: Creating ADR Issue
 
 **Title**: ADR-SECU-001: Use JWT for Stateless Authentication
 
 **Requirements Addressed**:
 ```markdown
-**Traces to**:
+Traces to: 
 - #45 (REQ-F-AUTH-001: User Login)
 - #46 (REQ-NF-SECU-002: Session Security)
 - #2 (StR: Secure, scalable authentication)
@@ -238,7 +248,7 @@ After submission → Issue #79 created
 Architecture artifacts trace to requirements:
 ```markdown
 ## Traceability
-- **Traces to**: #45, #46, #2 (requirements)
+- Traces to:  #45, #46, #2 (requirements)
 - **Depends on**: #80 (other ADRs)
 - **Implemented by**: #PR-30 (pull request)
 - **Components**: #79, #81 (architecture components using this decision)
@@ -256,6 +266,82 @@ is:issue label:architecture-decision label:security
 # Architecture components
 is:issue label:architecture-component
 ```
+
+#### Status Management Workflows
+
+**ISO/IEC/IEEE 42010:2011** requires documenting decision rationale and status. See [GitHub Issue Status Management Guide](../../docs/github-issue-status-management.md) for detailed workflows.
+
+##### ADR Status Workflow
+
+**Quick Reference - ADR Status States**:
+
+| Status | Definition | When to Apply |
+|--------|------------|---------------|
+| **Proposed** | Decision under consideration | Issue created, alternatives identified |
+| **Under Review** | Evaluating against quality attributes | Trade-off analysis in progress |
+| **Accepted** | Decision approved for implementation | Stakeholder approval, rationale documented |
+| **Rejected** | Decision discarded | Reason documented, alternative chosen |
+| **Deprecated** | Previous decision no longer valid | System evolution, replacement identified |
+
+**Decision Review Example**:
+```markdown
+## Trade-off Analysis (2025-12-11)
+**Status**: Under Review
+**Quality Attribute Scenarios Evaluated**:
+- QA-SC-001: Horizontal scalability → JWT: +5 points (stateless)
+- QA-SC-002: Offline capability → JWT: +3 points (cached tokens work)
+- QA-SC-003: Immediate revocation → JWT: -2 points (must wait for expiry)
+
+**Recommendation**: Accept JWT with short-lived tokens + blacklist mitigation
+```
+
+**Acceptance Example**:
+```markdown
+## Decision Accepted (2025-12-12)
+**Status**: Accepted → Close
+**Approval**: Technical Review Board (2025-12-12)
+**Implementation Issues Created**: #79 (ARC-C-AUTH), #85 (JWT generation)
+**Configuration Control**: ARB-2025-003
+```
+
+##### ADC Status Workflow
+
+**Quick Reference - ADC Status States**:
+
+| Status | Definition | When to Apply |
+|--------|------------|---------------|
+| **Specified** | Interfaces and responsibilities defined | Interface contracts documented |
+| **Designed** | Internal structure defined | Detailed design complete |
+| **Implemented** | Code created | PR merged, references ADC issue |
+| **Verified** | Unit tests passed | White-box coverage >80% |
+| **Integrated** | Combined with other components | Integration tests pass |
+
+**Design Complete Example**:
+```markdown
+## Design Complete (2025-12-13)
+**Status**: Designed
+**Artifacts**: Class diagrams, sequence diagrams, interface contracts
+**Design Review**: Approved by @tech-lead
+**Next Steps**: Begin TDD implementation
+```
+
+**Integration Complete Example**:
+```markdown
+## Integration Verified (2025-12-17)
+**Status**: Integrated → Close
+**Integration Points**: Database, TokenService, API Gateway (all verified)
+**Integration Tests**: 8/8 passing (100%)
+**Deployment**: Merged to develop, deployed to staging
+```
+
+**Best Practices**:
+- ✅ ADR: Close only when decision finalized (Accepted or Rejected with rationale)
+- ✅ ADR: Document trade-off analysis before moving to "Under Review"
+- ✅ ADC: Don't skip "Designed" state (required for IEEE 1016 compliance)
+- ✅ ADC: Link PRs and test results when updating status
+- ❌ ADR: Never accept without documenting alternatives considered
+- ❌ ADC: Don't move to "Implemented" without PR link
+- ❌ ADC: Don't close before integration testing complete
 
 ### 📝 Supplementary Documentation (Optional)
 

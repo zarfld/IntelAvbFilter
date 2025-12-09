@@ -58,7 +58,7 @@ GitHub Issues use these linking patterns:
 **In Issue Bodies (Markdown)**:
 ```markdown
 ## Traceability
-- **Traces to**: #123 (parent stakeholder requirement)
+- Traces to:  #123 (parent stakeholder requirement)
 - **Depends on**: #45, #67 (prerequisite requirements)
 - **Verified by**: #89, #90 (test issues)
 - **Implemented by**: PR #15 (pull request)
@@ -910,7 +910,7 @@ Provide risk assessment and change checklist.
 **In Issue Bodies**:
 ```markdown
 ## Traceability
-- **Traces to**: #1, #2 (parent issues)
+- Traces to:  #1, #2 (parent issues)
 - **Depends on**: #5 (prerequisites)
 - **Verified by**: #40, #41 (test issues)
 - **Implemented by**: PR #100

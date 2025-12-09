@@ -11,12 +11,35 @@ body:
         Define a test case that verifies one or more requirements.
         Supports unit, integration, E2E, performance, and security testing.
 
-  - type: input
-    id: req_links
+  - type: markdown
+    attributes:
+      value: |
+        ## 🔗 Traceability (REQUIRED)
+        
+        ⚠️ **CI Validation**: Use exact syntax `- **Verifies**: #N` (NOT "Traces to") or CI will fail.
+        
+        **Accepted formats**:
+        - ✅ `- **Verifies**: #123` (preferred)
+        - ✅ `- **Verified Requirements**: #123`
+        - ✅ `Verifies #123, #124` (multiple requirements)
+        
+        **Common mistakes (will fail CI)**:
+        - ❌ `Tests: #123` (wrong verb)
+        - ❌ `Validates: #123` (wrong verb)
+        - ❌ `Traces to: #123` (wrong relationship - use "Verifies" for tests)
+
+  - type: textarea
+    id: traceability
     attributes:
       label: "Verified Requirements"
-      description: "Link to requirements this test verifies (e.g., #123, #124)"
-      placeholder: "#123 (REQ-F-AUTH-001), #125 (REQ-NF-PERF-001)"
+      description: "Link to requirements this test verifies"
+      placeholder: |
+        ## Traceability
+        - **Verifies**: #123 (REQ-F-AUTH-001: User Login)
+        - **Verifies**: #125 (REQ-NF-PERF-001: Login <100ms)
+      value: |
+        ## Traceability
+        - **Verifies**: #
     validations:
       required: true
 

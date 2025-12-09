@@ -107,7 +107,7 @@ For each requirement:
 1. Navigate to: https://github.com/zarfld/IntelAvbFilter/issues/new/choose
 2. Select template: **Functional Requirement (REQ-F)** or **Non-Functional Requirement (REQ-NF)**
 3. Copy issue body from `02-requirements/requirements-elicitation-report-phase02.md`
-4. Update **Traces to**: Replace `#28` with actual parent StR issue number
+4. Update Traces to:  Replace `#28` with actual parent StR issue number
 5. Add labels:
    - `type:requirement:functional` or `type:requirement:non-functional`
    - `phase:02-requirements`
@@ -154,7 +154,7 @@ foreach ($req in $json) {
 
 ## Traceability
 
-- **Traces to**: #$($req.traces_to) (StR parent issue)
+- Traces to:  #$($req.traces_to) (StR parent issue)
 - **Verified by**: TEST-$($req.id.Replace('REQ-', '')) (Phase 07)
 
 ## Priority Justification

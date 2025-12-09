@@ -408,7 +408,7 @@ Scenario: Successful login
 ```
 
 ## Traceability
-- **Traces to**: #10 (StR: User Authentication)
+- Traces to:  #10 (StR: User Authentication)
 - **Verified by**: #45 (TEST: Login Flow)
 """
 
@@ -764,7 +764,7 @@ Scenario: Login with unverified email
 **Example**:
 ```markdown
 ## Traceability
-- **Traces to**: #10 (StR: User Authentication System)
+- Traces to:  #10 (StR: User Authentication System)
 - **Depends on**: #15 (REQ-F: Email Verification)
 - **Verified by**: #45 (TEST: Login Flow), #46 (TEST: Account Lockout)
 - **Implemented in**: PR #78

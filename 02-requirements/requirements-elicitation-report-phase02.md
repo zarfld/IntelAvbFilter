@@ -336,7 +336,7 @@ Then 95% of queries complete in <500µs
 
 ## Traceability
 
-- **Traces to**: #28 (StR-001: gPTP Stack Integration)
+- Traces to:  #28 (StR-001: gPTP Stack Integration)
 - **Depends on**: #29 (StR-002: Intel AVB Library - for register access)
 - **Verified by**: TEST-PHC-QUERY-001 (to be created in Phase 07)
 - **Implemented by**: (PR number to be added in Phase 05)
@@ -526,7 +526,7 @@ Then the IOCTL completes in <1µs
 
 ## Traceability
 
-- **Traces to**: #28 (StR-001: gPTP Stack Integration)
+- Traces to:  #28 (StR-001: gPTP Stack Integration)
 - **Depends on**: #29 (StR-002: Intel AVB Library)
 - **Verified by**: TEST-TX-TIMESTAMP-001 (Phase 07)
 - **Satisfies**: Success Criteria #1 in StR-001 (Hardware timestamp access)
@@ -725,7 +725,7 @@ Then all pending IOCTLs are cancelled with STATUS_CANCELLED
 
 ## Traceability
 
-- **Traces to**: #31 (StR-004: NDIS Miniport Integration)
+- Traces to:  #31 (StR-004: NDIS Miniport Integration)
 - **Depends on**: #29 (StR-002: Intel AVB Library - for hardware detection)
 - **Verified by**: TEST-NDIS-ATTACH-001, TEST-NDIS-STRESS-001 (Phase 07)
 - **Satisfies**: Success Criteria #1 in StR-004 (NDIS LWF compliance)
@@ -878,7 +878,7 @@ Then P95 latency shall be less than 500 microseconds
 
 ## Traceability
 
-- **Traces to**: #28 (StR-001: gPTP Stack Integration)
+- Traces to:  #28 (StR-001: gPTP Stack Integration)
 - **Depends on**: REQ-F-IOCTL-PHC-001 (PHC Time Query functionality)
 - **Verified by**: TEST-PERF-PHC-001 (Performance test), TEST-STRESS-PHC-001 (Stress test)
 - **Satisfies**: Non-Functional Requirement in StR-001 (PHC query <500µs P95)
@@ -1123,7 +1123,7 @@ StR-006 (#33: Endpoints)
 ### During Issue Creation (Per Requirement)
 - [ ] Navigate to appropriate template (REQ-F or REQ-NF)
 - [ ] Copy issue body from this report
-- [ ] Update `**Traces to**:` with actual parent StR issue number
+- [ ] Update `Traces to: ` with actual parent StR issue number
 - [ ] Add appropriate labels (phase:02-requirements, priority, nfr category)
 - [ ] Submit and record issue number
 

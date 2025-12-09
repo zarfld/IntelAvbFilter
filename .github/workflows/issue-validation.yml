@@ -50,7 +50,7 @@ jobs:
 
             \`\`\`markdown
             ## Traceability
-            - **Traces to**: #N (parent issue)
+            - Traces to:  #N (parent issue)
             \`\`\`
 
             ### Traceability Rules

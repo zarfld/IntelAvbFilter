@@ -273,7 +273,7 @@ $($dependsOn | ForEach-Object { "- $_" } | Out-String)
 
 ## Traceability
 
-**Traces to**: $traceabilityParent
+Traces to:  $traceabilityParent
 
 **Verified by**: $($verifiedBy -join ', ')
 

@@ -11,12 +11,36 @@ body:
         Define a system component, service, or module following ISO/IEC/IEEE 42010:2011.
         Specify responsibilities, interfaces, dependencies, and design constraints.
 
-  - type: input
-    id: req_links
+  - type: markdown
     attributes:
-      label: "Requirements & ADR Links"
-      description: "Link to requirements and ADRs this component implements (e.g., #123, #ADR-001)"
-      placeholder: "#123, #145, #ADR-001"
+      value: |
+        ## 🔗 Traceability (REQUIRED)
+        
+        ⚠️ **CI Validation**: Use exact syntax `- Traces to:  #N` or CI will fail.
+        
+        **Accepted formats**:
+        - ✅ `- Traces to:  #123` (preferred)
+        - ✅ `- **Trace to**: #123`
+        - ✅ `Traces to #123`
+        
+        **Common mistakes (will fail CI)**:
+        - ❌ `Links to: #123` (wrong verb)
+        - ❌ `Implements: #123` (wrong relationship type)
+        - ❌ Missing `#` symbol
+
+  - type: textarea
+    id: traceability
+    attributes:
+      label: "Parent Links (Architecture Decisions & Requirements)"
+      description: "Link to parent ADRs and requirements this component implements"
+      placeholder: |
+        ## Traceability
+        - Traces to:  #15 (ADR-AUTH-001: JWT Authentication)
+        - Traces to:  #23 (REQ-F-AUTH-002: User Login)
+        - **Depends on**: #45 (ARC-C-DATA-001: PostgreSQL Database)
+      value: |
+        ## Traceability
+        - Traces to:  #
     validations:
       required: true
 

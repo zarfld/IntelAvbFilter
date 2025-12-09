@@ -64,7 +64,7 @@ Scenario: Invalid credentials
 
 ```markdown
 ## Traceability
-- **Traces to**: #123 (parent StR issue)
+- Traces to:  #123 (parent StR issue)
 ```
 
 **Linking Rules**:
@@ -86,7 +86,7 @@ Use markdown syntax to create traceability links:
 
 ```markdown
 ## Traceability
-- **Traces to**: #123 (parent requirement)
+- Traces to:  #123 (parent requirement)
 - **Depends on**: #45, #67 (prerequisite requirements)
 - **Verified by**: #89 (test issue)
 - **Implemented by**: #PR-15 (pull request)
@@ -343,7 +343,7 @@ Acceptance Criteria:
   Then user is authenticated with JWT token
   
 ## Traceability
-- **Traces to**: #123 (StR: Secure Authentication)
+- Traces to:  #123 (StR: Secure Authentication)
 ```
 
 Submit → Assigned **#145**
@@ -498,7 +498,7 @@ Traceability reports are generated automatically:
 **Problem**: Validation fails but link exists
 
 **Solution**:
-1. Use exact syntax: `**Traces to**: #N`
+1. Use exact syntax: `Traces to:  #N`
 2. Ensure `#N` is actual issue number, not placeholder
 3. Check parent issue exists and is not closed
 4. Re-edit issue to trigger validation
