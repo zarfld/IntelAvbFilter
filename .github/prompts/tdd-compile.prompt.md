@@ -288,7 +288,7 @@ gh issue comment 50 --body "## Test Implementation
  * TEST Issue: #50 (TEST-AUTH-001)
  * Traces to: #20 (StR-003: Security Requirements)
  * 
- * See: https://github.com/zarfld/copilot-instructions-template/issues/25
+ * See: https://github.com/zarfld/IntelAvbFilter/issues/25
  */
 
 import bcrypt from 'bcrypt';

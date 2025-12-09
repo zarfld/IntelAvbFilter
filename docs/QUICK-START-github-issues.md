@@ -158,7 +158,7 @@ class AuthenticationService:
  * User login API endpoint
  * 
  * @implements #145 REQ-F-AUTH-001: User Login
- * @see https://github.com/zarfld/copilot-instructions-template/issues/145
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/145
  */
 export async function POST(request: Request) {
   // Implementation

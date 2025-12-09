@@ -649,7 +649,7 @@ Implements: #123 (REQ-F-AUTH-001: User Login)
 Architecture: #45 (ADR-SECU-001: JWT Authentication)
 Verified by: #89 (TEST-AUTH-LOGIN-001)
 
-See: https://github.com/zarfld/copilot-instructions-template/issues/123
+See: https://github.com/zarfld/IntelAvbFilter/issues/123
 """
 class AuthenticationService:
     pass
@@ -660,7 +660,7 @@ class AuthenticationService:
  * User login endpoint
  * 
  * @implements #123 REQ-F-AUTH-001: User Login
- * @see https://github.com/zarfld/copilot-instructions-template/issues/123
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/123
  */
 export async function loginUser(credentials: Credentials): Promise<User> {
   // Implementation

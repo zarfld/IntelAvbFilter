@@ -640,7 +640,7 @@ gh project item-list 1 --owner zarfld  # Replace 1 with your project number
 
 # Bulk add all open issues (requires project URL)
 gh issue list --repo zarfld/copilot-instructions-template --state open --limit 1000 --json number --jq '.[].number' | while read issue; do
-  gh project item-add 1 --owner zarfld --url "https://github.com/zarfld/copilot-instructions-template/issues/$issue"
+  gh project item-add 1 --owner zarfld --url "https://github.com/zarfld/IntelAvbFilter/issues/$issue"
 done
 ```
 

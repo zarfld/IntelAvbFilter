@@ -395,11 +395,11 @@ Found 25 Markdown files to migrate
 
 Processing: REQ-F-001-user-authentication.md
   ✅ Created issue #12
-     URL: https://github.com/zarfld/copilot-instructions-template/issues/12
+     URL: https://github.com/zarfld/IntelAvbFilter/issues/12
 
 Processing: REQ-F-002-data-validation.md
   ✅ Created issue #13
-     URL: https://github.com/zarfld/copilot-instructions-template/issues/13
+     URL: https://github.com/zarfld/IntelAvbFilter/issues/13
 
 ...
 
@@ -593,7 +593,7 @@ This repository has migrated from local Markdown requirements to **GitHub Issues
 - **After**: Requirements tracked as GitHub Issues with proper traceability
 
 ### Finding Old Requirements
-- **GitHub Issues**: All requirements now tracked at https://github.com/zarfld/copilot-instructions-template/issues
+- **GitHub Issues**: All requirements now tracked at https://github.com/zarfld/IntelAvbFilter/issues
 - **Original files**: Archived in `archive/pre-migration-20251202/` (read-only)
 - **Git history**: Run `git log --follow -- 02-requirements/functional/REQ-F-001-*.md`
 

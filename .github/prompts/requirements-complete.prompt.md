@@ -824,7 +824,7 @@ Scenario: Login with unverified email
 ### Issue #25: User Login (REQ-F-AUTH-001)
 **Score**: 45/100 🔴 Severely Incomplete
 **Priority**: P0
-**Link**: https://github.com/zarfld/copilot-instructions-template/issues/25
+**Link**: https://github.com/zarfld/IntelAvbFilter/issues/25
 
 **Dimension Scores**:
 | Dimension | Score | Status |
@@ -907,7 +907,7 @@ Scenario: Account lockout
 
 ### Issue #30: Password Reset (REQ-F-AUTH-003)
 **Score**: 82/100 ⚠️ Nearly Complete
-**Link**: https://github.com/zarfld/copilot-instructions-template/issues/30
+**Link**: https://github.com/zarfld/IntelAvbFilter/issues/30
 
 **Minor Gaps**:
 - Missing boundary condition: Max password reset requests per hour
