@@ -223,7 +223,7 @@ case {ioctl_code}:
 - [ ] Review with stakeholders
 
 ## Traceability
-- **Traces to**: StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
+- Traces to:  StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
 - **Depends on**: (TBD - device initialization requirements)
 - **Verified by**: (TBD - create TEST issue for this IOCTL)
 
@@ -300,7 +300,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for {controller} hardware validation)
 

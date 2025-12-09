@@ -100,7 +100,7 @@ case IOCTL_AVB_GET_AUX_TIMESTAMP:
 - [ ] Review with stakeholders
 
 ## Traceability
-- **Traces to**: StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
+- Traces to:  StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
 - **Depends on**: (TBD - device initialization requirements)
 - **Verified by**: (TBD - create TEST issue for this IOCTL)
 
@@ -198,7 +198,7 @@ case IOCTL_AVB_ENUM_ADAPTERS:
 - [ ] Review with stakeholders
 
 ## Traceability
-- **Traces to**: StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
+- Traces to:  StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
 - **Depends on**: (TBD - device initialization requirements)
 - **Verified by**: (TBD - create TEST issue for this IOCTL)
 
@@ -296,7 +296,7 @@ case IOCTL_AVB_OPEN_ADAPTER:
 - [ ] Review with stakeholders
 
 ## Traceability
-- **Traces to**: StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
+- Traces to:  StR-HWAC-001 (Intel NIC AVB/TSN Feature Access)
 - **Depends on**: (TBD - device initialization requirements)
 - **Verified by**: (TBD - create TEST issue for this IOCTL)
 
@@ -387,7 +387,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for 82575 hardware validation)
 
@@ -475,7 +475,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for 82576 hardware validation)
 
@@ -563,7 +563,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for 82580 hardware validation)
 
@@ -651,7 +651,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for I210 hardware validation)
 
@@ -739,7 +739,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for I217 hardware validation)
 
@@ -827,7 +827,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for I219 hardware validation)
 
@@ -915,7 +915,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for I226 hardware validation)
 
@@ -1003,7 +1003,7 @@ Scenario: Feature availability reporting
 - [ ] Document any hardware-specific quirks discovered
 
 ## Traceability
-- **Traces to**: StR-HWAC-002 (Reliable Hardware Detection)
+- Traces to:  StR-HWAC-002 (Reliable Hardware Detection)
 - **Depends on**: REQ-F-DEV-001 (Generic Device Discovery)
 - **Verified by**: (TBD - create TEST issue for I350 hardware validation)
 

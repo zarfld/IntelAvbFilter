@@ -63,7 +63,7 @@ Every artifact includes traceability:
 
 ```markdown
 ## Traceability
-- **Traces to**: #1 (parent StR issue)
+- Traces to:  #1 (parent StR issue)
 - **Depends on**: #3, #4 (prerequisite issues)
 - **Verified by**: #7, #8 (test issues)
 - **Implemented by**: #PR-10 (pull request)
@@ -185,7 +185,7 @@ System shall allow users to log in with username and password.
 - [ ] Session token generated (JWT)
 
 ## Traceability
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Depends on**: (none)
 - **Verified by**: (to be linked in Phase 07)
 - **Implemented by**: (to be linked in Phase 05)
@@ -212,7 +212,7 @@ Login operations shall complete within 200ms at 95th percentile.
 Load testing with JMeter/k6
 
 ## Traceability
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Related**: #2 (REQ-F-AUTH-001: User Login)
 - **Verified by**: (performance test issue to be created)"
 

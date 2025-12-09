@@ -294,7 +294,7 @@ Then [expected boundary behavior]
 
 ## Traceability
 
-- **Traces to**: [Parent StR issue: #N]
+- Traces to:  [Parent StR issue: #N]
 - **Depends on**: [Prerequisite REQ issues: #X, #Y]
 - **Verified by**: [TEST issues that will verify this: #Z] (to be created)
 - **Implemented by**: [PR numbers: #PR-N] (to be added when implemented)
@@ -459,7 +459,7 @@ Then 95th percentile response time shall be less than 200ms
 
 ## Traceability
 
-- **Traces to**: [Parent StR issue: #N]
+- Traces to:  [Parent StR issue: #N]
 - **Depends on**: [Other REQ issues: #X, #Y]
 - **Verified by**: [TEST issues: #Z] (performance tests, security tests, etc.)
 - **Satisfies**: [Quality scenarios: #QA-N]
@@ -519,7 +519,7 @@ For each requirement type, generate complete issue body using the appropriate te
 ### Step 5: Establish Traceability
 
 **Link issues together**:
-- REQ-F/REQ-NF issues must link to parent StR: `**Traces to**: #N`
+- REQ-F/REQ-NF issues must link to parent StR: `Traces to:  #N`
 - Related requirements link: `**Depends on**: #X, #Y`
 - Tests link back: `**Verified by**: #Z` (created later)
 
@@ -544,7 +544,7 @@ Navigate to: **Issues → New Issue → Functional Requirement (REQ-F)**
 Copy the following body:
 [Paste generated REQ-F body]
 
-**Important**: Update `**Traces to**: #1` with actual StR issue number from step 1.
+**Important**: Update `Traces to:  #1` with actual StR issue number from step 1.
 
 **Submit** → GitHub will assign issue number (e.g., #10)
 

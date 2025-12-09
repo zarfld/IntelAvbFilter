@@ -227,7 +227,7 @@ Critical (P0)
 `type:requirement:functional`, `phase:02-requirements`, `priority:critical`
 
 ## Traceability
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Depends on**: None
 - **Verified by**: (to be linked when TEST issue created)
 - **Implemented by**: (to be linked when PR created)
@@ -583,7 +583,7 @@ Critical (P0)
 
 ## Traceability
 - **Verifies**: #2 (REQ-F-AUTH-001: User Login)
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Implemented by**: tests/integration/auth-login.test.ts
 ```
 

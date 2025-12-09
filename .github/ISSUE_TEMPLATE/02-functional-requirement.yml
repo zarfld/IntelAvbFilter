@@ -11,12 +11,33 @@ body:
         Functional requirements describe what the system shall do.
         Use precise language: "The system shall..." Complete all required fields for traceability.
 
-  - type: input
-    id: str_link
+  - type: markdown
     attributes:
-      label: "Stakeholder Requirement Link"
-      description: "Link to parent StR issue (e.g., #123)"
-      placeholder: "#123"
+      value: |
+        ## 🔗 Traceability (REQUIRED)
+        
+        ⚠️ **CI Validation**: Use exact syntax `- Traces to:  #N` or CI will fail.
+        
+        **Accepted formats**:
+        - ✅ `- Traces to:  #123` (preferred)
+        - ✅ `- **Trace to**: #123`
+        - ✅ `Traces to #123`
+        
+        **Common mistakes (will fail CI)**:
+        - ❌ `Links to: #123` (wrong verb)
+        - ❌ `Parent: #123` (missing "Traces to")
+
+  - type: textarea
+    id: traceability
+    attributes:
+      label: "Parent Stakeholder Requirement"
+      description: "Link to parent StR issue this requirement traces to"
+      placeholder: |
+        ## Traceability
+        - Traces to:  #123 (StR-BUS-001: User Authentication)
+      value: |
+        ## Traceability
+        - Traces to:  #
     validations:
       required: true
 

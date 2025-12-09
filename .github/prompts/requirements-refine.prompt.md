@@ -120,7 +120,7 @@ Refine GitHub Issues (StR, REQ-F, REQ-NF) by:
   **Then** [specific outcome]
 
 ## Traceability
-- **Traces to**: #[parent-issue-number]
+- Traces to:  #[parent-issue-number]
 - **Depends on**: [if applicable]
 
 ## Notes
@@ -151,7 +151,7 @@ This is a decomposition of #[parent-issue]. See also #[sibling1], #[sibling2].
 **Add to issue body**:
 ```markdown
 ## Traceability
-- **Traces to**: #[parent-StR-number]
+- Traces to:  #[parent-StR-number]
 ```
 
 ### Suggested Dependencies
@@ -293,7 +293,7 @@ The NFR is not quantifiable: "[vague statement]"
 **Then** [outcome]
 
 ## Traceability
-- **Traces to**: #[parent-StR]
+- Traces to:  #[parent-StR]
 - **Depends on**: #[prereq-1], #[prereq-2]
 - **Verified by**: #[TEST-issue] (when test created)
 
@@ -433,7 +433,7 @@ The system shall display the shopping cart contents for review during checkout.
   **And** subtotal is correctly calculated
 
 ## Traceability
-- **Traces to**: #[parent-StR]
+- Traces to:  #[parent-StR]
 - **Part of**: #20 (checkout flow)
 ```
 

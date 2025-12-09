@@ -1,53 +1,53 @@
-# Ubiquitous Language Glossary
+# Ubiquitous Language - AVB/TSN Domain Terminology
 
 **Phase**: 02-Requirements  
-**Standards**: ISO/IEC/IEEE 29148:2018  
-**Purpose**: Single source of truth for domain terminology used consistently across requirements, design, code, and communication.
+**Standards**: ISO/IEC/IEEE 29148:2018, IEEE 802.1AS-2020, IEEE 1588-2019, IEEE 802.1Q-2018  
+**Purpose**: Single source of truth for AVB/TSN domain terminology used consistently across requirements, design, code, and communication.
+
+**Last Updated**: 2025-12-08  
+**Derived From**: Requirements Consistency Analysis (Section 3 - Terminology Consistency)
+
+---
 
 ## 🎯 Purpose
 
 The Ubiquitous Language is a shared vocabulary used by all team members (developers, domain experts, stakeholders) to ensure consistent understanding. Terms defined here MUST be used in:
 
-- ✅ Requirements specifications
+- ✅ Requirements specifications (REQ-F, REQ-NF, StR issues)
 - ✅ Architecture decisions (ADRs)
-- ✅ Code (class names, method names, variables)
-- ✅ Tests
-- ✅ Documentation
-- ✅ Conversations with domain experts
+- ✅ Code (class names, method names, variables, comments)
+- ✅ Tests (test names, acceptance criteria)
+- ✅ Documentation (README, API docs)
+- ✅ Conversations with domain experts (IEEE 802.1 standards authors, AVB engineers)
 
 **DDD Integration**: This glossary drives Model-Driven Design - when terms change here, code must be refactored to match. The domain model in code should be a direct reflection of the language captured here.
 
-## 📚 Glossary Format
-
-Each term entry must include:
-
-| Field | Description |
-|-------|-----------|
-| **Term** | The canonical name used everywhere |
-| **Context** | Bounded Context(s) where term applies |
-| **Definition** | Clear, concise meaning from domain expert perspective |
-| **Type** | DDD Pattern: Entity, Value Object, Aggregate, Service, Event |
-| **Synonyms** | Alternative names (avoid using these) |
-| **Relationships** | Related terms, parent concepts |
-| **Examples** | Real-world usage examples |
-| **Rules** | Business rules or constraints |
-| **Code Mapping** | Class/interface names in implementation |
-| **Traceability** | Link to requirements/issues |
+**Terminology Consistency**: Per Requirements Consistency Analysis finding, 6 requirements (#2, #3, #5, #6, #7) incorrectly use "PTP" instead of "gPTP". This glossary establishes correct usage.
 
 ---
 
-## 📖 Domain Terms
+## 📚 Time Synchronization (gPTP Bounded Context)
 
-### Account
+### gPTP (generalized Precision Time Protocol)
 
-**Context**: Banking, Finance  
-**Definition**: A record of financial transactions for a customer, including balance and transaction history.  
-**Type**: Entity (has identity and lifecycle)  
-**Synonyms**: Bank Account, Financial Account (avoid using)  
+**Context**: Time Synchronization, AVB/TSN Networking  
+**Definition**: IEEE 802.1AS-2020 profile of IEEE 1588 PTP, specific to AVB/TSN applications, requiring <1µs synchronization accuracy.  
+**Type**: Domain Service (protocol implementation)  
+**Standard**: IEEE 802.1AS-2020  
+**Synonyms**: IEEE 802.1AS, PTP for AVB (avoid using generic "PTP")  
 **Relationships**:
-- Parent: Customer (Entity)
-- Composed of: AccountNumber (Value Object), Balance (Value Object)
-- Related: Transaction (Entity), OverdraftLimit (Value Object)
+- Specialization of: PTP (IEEE 1588)
+- Uses: PHC (Precision Hardware Clock), BMCA (Best Master Clock Algorithm)
+- Related: Grandmaster Clock, Slave Clock, Peer Delay  
+**Examples**:
+- ✅ Correct: "The driver provides gPTP hardware abstraction per IEEE 802.1AS-2020"
+- ❌ Incorrect: "The driver implements PTP synchronization" (too generic)  
+**Rules**:
+- MUST use peer-to-peer delay mechanism (not end-to-end)
+- MUST achieve <1µs synchronization accuracy
+- MUST run on 802.1AS-capable network infrastructure  
+**Code Mapping**: `GPTP_CONTEXT`, `gptp_domain`, `is_gptp_capable`  
+**Traceability**: #28 (StR-GPTP-001), #51 (REQ-F-NAMING-001), #119 (REQ-F-GPTP-COMPAT-001)
 **Examples**:
 - Checking account with $1,500 balance
 - Savings account with 2.5% interest rate

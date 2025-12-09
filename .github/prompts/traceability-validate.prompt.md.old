@@ -172,12 +172,12 @@ Generate complete traceability matrix:
 🔴 **Unimplemented Designs**:
 
 - **DES-USER-002** (Email Verification)
-  - **Traces to**: REQ-F-007, StR-002
+  - Traces to:  REQ-F-007, StR-002
   - **Impact**: Design complete but code not written
   - **Action**: Implement src/user/email-verify.ts
 
 - **DES-PAY-002** (Refund Processing)
-  - **Traces to**: REQ-F-012, StR-003
+  - Traces to:  REQ-F-012, StR-003
   - **Impact**: Critical payment feature missing
   - **Action**: Implement src/payment/refund.ts (HIGH PRIORITY)
 
@@ -211,13 +211,13 @@ Generate complete traceability matrix:
 🔴 **Untested Code**:
 
 - **src/auth/password-reset.ts**
-  - **Traces to**: DES-AUTH-003, REQ-F-003, StR-001
+  - Traces to:  DES-AUTH-003, REQ-F-003, StR-001
   - **Impact**: Security-critical code untested
   - **Lines**: 215 lines
   - **Action**: Create tests/auth/password-reset.test.ts (CRITICAL)
 
 - **src/payment/refund.ts**
-  - **Traces to**: DES-PAY-002, REQ-F-012, StR-003
+  - Traces to:  DES-PAY-002, REQ-F-012, StR-003
   - **Impact**: Financial code untested
   - **Lines**: 178 lines
   - **Action**: Create tests/payment/refund.test.ts (CRITICAL)
