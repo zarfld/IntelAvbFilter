@@ -54,10 +54,10 @@ def extract_issue_links_OLD_COMPLEX(body: str) -> dict:
     links = defaultdict(list)
     
     # Pattern 1: Bold inline format (with or without markdown **)
-    # Matches: **Traces to**: #123 or Traces to: #123 or **Parent**: #1 (Description)
+    # Matches: Traces to:  #123 or Traces to: #123 or **Parent**: #1 (Description)
     patterns_OLD = {
         'traces_to': [
-            r'\*\*(?:Traces?\s+to|Parent|Traces-to)\*\*:\s*#(\d+)',  # **Traces to**: #N
+            r'\*\*(?:Traces?\s+to|Parent|Traces-to)\*\*:\s*#(\d+)',  # Traces to:  #N
             r'(?:^|\n)(?:Traces?\s+to|Parent|Traces-to):\s*#(\d+)',  # Traces to: #N (no bold)
         ],
         'depends_on': [
