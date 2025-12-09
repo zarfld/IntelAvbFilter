@@ -319,7 +319,7 @@ System shall allow users to log in with email and password.
 See: `02-requirements/functional/auth-spec.md`
 
 ## Traceability
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Verified by**: #10 (TEST-AUTH-LOGIN-001)
 - **Implemented by**: #PR-15
 ```
@@ -374,7 +374,7 @@ Scenario: Valid login
 
 ### Traceability
 - **Implements**: #2 (REQ-F-AUTH-001)
-- **Traces to**: #1 (StR-001: User Authentication)
+- Traces to:  #1 (StR-001: User Authentication)
 - **Verified by**: #10 (TEST-AUTH-LOGIN-001)
 ```
 

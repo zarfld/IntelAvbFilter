@@ -140,7 +140,7 @@ def find_orphans():
     print("Each requirement MUST link to its parent using:\n")
     print("```markdown")
     print("## Traceability")
-    print("- **Traces to**: #N (parent issue)")
+    print("- Traces to:  #N (parent issue)")
     print("```\n")
     print("**Traceability Rules**:")
     print("- REQ-F/REQ-NF → Link to parent StR issue")
