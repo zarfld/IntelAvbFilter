@@ -1,0 +1,122 @@
+name: Stakeholder Requirement (StR)
+description: Define a business need or stakeholder requirement following ISO/IEC/IEEE 29148:2018
+title: "[StR] "
+labels: ["stakeholder-requirement", "phase-01"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 📋 ISO/IEC/IEEE 29148:2018 Compliant Stakeholder Requirement
+        
+        Stakeholder requirements capture business needs, user needs, and operational concepts.
+        Complete all required fields to ensure proper traceability.
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "Priority"
+      description: "Business priority of this stakeholder need"
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+
+  - type: dropdown
+    id: integrity_level
+    attributes:
+      label: "Integrity Level (IEEE 1633)"
+      description: "Criticality level for verification rigor"
+      options:
+        - "Level 1 - Highest rigor (safety-critical)"
+        - "Level 2 - High rigor (mission-critical)"
+        - "Level 3 - Moderate rigor (important)"
+        - "Level 4 - Basic rigor (nice-to-have)"
+      default: 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: stakeholder_need
+    attributes:
+      label: "Stakeholder Need / Business Context"
+      description: "Why does this need exist? What business problem does it solve?"
+      placeholder: |
+        Describe the business context and stakeholder interests.
+        Example: "Marketing team needs to track campaign performance to optimize ROI and justify budget allocation."
+    validations:
+      required: true
+
+  - type: textarea
+    id: stakeholder_interests
+    attributes:
+      label: "Stakeholder Interests"
+      description: "Who are the stakeholders and what are their specific interests?"
+      placeholder: |
+        List stakeholders and their interests:
+        - Marketing Manager: Needs dashboard for real-time campaign metrics
+        - CFO: Requires ROI reporting for budget decisions
+        - Sales Team: Wants lead quality metrics
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: "Constraints & Assumptions"
+      description: "Business, regulatory, technical, or resource constraints"
+      placeholder: |
+        - Budget: $50K maximum
+        - Timeline: Must launch before Q4
+        - Compliance: Must meet GDPR requirements
+        - Technology: Must integrate with existing Salesforce instance
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: "Validation Criteria"
+      description: "How will we know this stakeholder need is satisfied?"
+      placeholder: |
+        - Stakeholder approval obtained
+        - Business case demonstrates positive ROI
+        - Regulatory compliance confirmed
+        - User acceptance testing passed
+    validations:
+      required: true
+
+  - type: textarea
+    id: success_metrics
+    attributes:
+      label: "Success Metrics"
+      description: "Measurable outcomes that indicate success"
+      placeholder: |
+        - 20% increase in campaign conversion rate
+        - 50% reduction in reporting time
+        - 90% user satisfaction score
+        - ROI > 200% within 6 months
+
+  - type: input
+    id: related_docs
+    attributes:
+      label: "Related Documents"
+      description: "Links to business case, market research, or other supporting documents"
+      placeholder: "https://company.sharepoint.com/business-case-2025"
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Stakeholder Requirement Checklist"
+      description: "Confirm requirement quality"
+      options:
+        - label: "Business need is clearly stated"
+          required: true
+        - label: "Stakeholders are identified"
+          required: true
+        - label: "Constraints are documented"
+          required: false
+        - label: "Validation criteria are defined"
+          required: true
+        - label: "Success metrics are measurable"
+          required: false

@@ -1,0 +1,40 @@
+# Pre-commit Configuration for Spec Validation
+# Install: pip install pre-commit
+# Setup: pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      # Validate specification files
+      - id: validate-specs
+        name: Validate Specification Files
+        entry: python scripts/pre-commit-hook.py
+        language: python
+        files: \.(md)$
+        exclude: (README|template|TEMPLATE|MIGRATION-SUMMARY)
+        additional_dependencies: ['pyyaml', 'jsonschema']
+        
+      # Ensure spec numbering is sequential (future enhancement)
+      - id: check-spec-numbering
+        name: Check Spec ID Numbering
+        entry: python scripts/check-spec-numbering.py
+        language: python
+        files: \.(md)$
+        exclude: (README|template|TEMPLATE)
+        pass_filenames: false
+        additional_dependencies: ['pyyaml']
+        
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--unsafe']  # Allow custom YAML tags
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: mixed-line-ending
+        args: ['--fix=lf']

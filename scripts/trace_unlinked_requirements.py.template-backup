@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Trace Unlinked Requirements Helper (GitHub Issues)
+
+Purpose:
+  Identify requirement issues (REQ-F-*, REQ-NF-*) that currently have NO linkage to any
+  test issues (TEST-*) according to the GitHub Issues traceability model.
+
+Usage:
+  export GITHUB_TOKEN=ghp_xxx
+  python scripts/trace_unlinked_requirements.py [--json | --markdown]
+
+Behavior:
+  - Queries GitHub Issues API for requirements and tests
+  - Checks for "Verifies: #N" or "Traces to: #N" bidirectional links
+  - Emits a human readable summary by default
+  - With --json outputs machine readable JSON list of unlinked requirement IDs
+  - With --markdown outputs a markdown table (Issue | Title | Labels)
+
+Exit Codes:
+  0 success (will still be 0 even if all requirements are linked)
+  1 missing GITHUB_TOKEN or API error
+
+Standards: ISO/IEC/IEEE 29148:2018 (Requirements Traceability)
+"""
+from __future__ import annotations
+import json, argparse, sys, os, re
+from pathlib import Path
+from typing import Dict, List
+import requests
+
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
+REPO_OWNER = os.environ.get('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template').split('/')[0]
+REPO_NAME = os.environ.get('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template').split('/')[1]
+API_BASE = f'https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}'
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def get_headers() -> Dict[str, str]:
+    """Get API request headers with authentication."""
+    headers = {
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+    }
+    if GITHUB_TOKEN:
+        headers['Authorization'] = f'Bearer {GITHUB_TOKEN}'
+    return headers
+
+
+def fetch_issues_by_label(label: str) -> List[Dict]:
+    """Fetch all issues with given label."""
+    issues = []
+    page = 1
+    
+    while True:
+        response = requests.get(
+            f'{API_BASE}/issues',
+            headers=get_headers(),
+            params={
+                'state': 'all',
+                'labels': label,
+                'per_page': 100,
+                'page': page
+            }
+        )
+        
+        if response.status_code != 200:
+            print(f"Error fetching issues: {response.status_code}", file=sys.stderr)
+            return issues
+        
+        page_issues = response.json()
+        if not page_issues:
+            break
+        
+        issues.extend(page_issues)
+        page += 1
+    
+    return issues
+
+
+def extract_test_links(issue_body: str) -> List[int]:
+    """Extract test issue links (Verifies: #N or Verified by: #N)."""
+    if not issue_body:
+        return []
+    
+    verifies = re.findall(r'[Vv]erifies?:?\s*#(\d+)', issue_body)
+    verified_by = re.findall(r'[Vv]erified\s+by:?\s*#(\d+)', issue_body)
+    
+    return [int(n) for n in verifies + verified_by]
+
+
+def load_trace_details() -> Dict[int, dict]:
+    """Load requirement and test issues from GitHub API."""
+    if not GITHUB_TOKEN:
+        raise ValueError("GITHUB_TOKEN environment variable required")
+    
+    print(f"Fetching requirements from {REPO_OWNER}/{REPO_NAME}...", file=sys.stderr)
+    
+    # Fetch requirement issues
+    req_issues = []
+    for label in ['type:requirement:functional', 'type:requirement:non-functional']:
+        req_issues.extend(fetch_issues_by_label(label))
+    
+    # Fetch test issues
+    test_issues = fetch_issues_by_label('type:test-case')
+    
+    # Build mapping: test_issue_number -> list of requirement numbers it verifies
+    test_to_reqs = {}
+    for test in test_issues:
+        test_links = extract_test_links(test.get('body', ''))
+        test_to_reqs[test['number']] = test_links
+    
+    # Build details: req_number -> {forward_refs: tests it links to, reverse_refs: tests that link to it}
+    details: Dict[int, dict] = {}
+    for req in req_issues:
+        req_num = req['number']
+        
+        # Forward: requirements linking to tests (via "Verified by: #N")
+        fwd_tests = extract_test_links(req.get('body', ''))
+        
+        # Reverse: tests linking to this requirement (via "Verifies: #N")
+        rev_tests = [test_num for test_num, reqs in test_to_reqs.items() if req_num in reqs]
+        
+        details[req_num] = {
+            'forward_refs': fwd_tests,
+            'reverse_refs': rev_tests,
+            'title': req['title'],
+            'url': req['html_url'],
+            'labels': [l['name'] for l in req['labels']]
+        }
+    
+    print(f"Found {len(req_issues)} requirements, {len(test_issues)} tests", file=sys.stderr)
+    
+    return details
+
+
+def main(argv: List[str]) -> int:
+    ap = argparse.ArgumentParser()
+    fmt = ap.add_mutually_exclusive_group()
+    fmt.add_argument('--json', action='store_true', help='Emit raw JSON list of unlinked requirements with metadata')
+    fmt.add_argument('--markdown', action='store_true', help='Emit markdown table output')
+    args = ap.parse_args(argv)
+
+    try:
+        details = load_trace_details()
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    unlinked = [rid for rid, d in details.items() if not d['forward_refs'] and not d['reverse_refs']]
+    unlinked.sort()
+
+    if args.json:
+        payload = []
+        for rid in unlinked:
+            info = details[rid]
+            payload.append({
+                'issue': rid,
+                'title': info['title'],
+                'url': info['url'],
+                'labels': info['labels']
+            })
+        print(json.dumps({'unlinked_requirements': payload, 'count': len(unlinked)}, indent=2))
+        return 0
+
+    if args.markdown:
+        print('| Issue # | Title | Labels |')
+        print('|---------|-------|--------|')
+        for rid in unlinked:
+            info = details[rid]
+            title = info['title'].replace('|','\\|')
+            labels_str = ', '.join(info['labels'][:2])
+            if len(info['labels']) > 2:
+                labels_str += f" +{len(info['labels']) - 2}"
+            print(f'| [#{rid}]({info["url"]}) | {title} | {labels_str} |')
+        print(f"\nTotal unlinked requirements: {len(unlinked)}")
+        return 0
+
+    # Default human readable summary
+    print('Unlinked Requirements (no TEST issue forward or backward references found):')
+    if not unlinked:
+        print('  ✅ All requirements have test coverage links')
+    else:
+        for rid in unlinked:
+            info = details[rid]
+            print(f"  ❌ Issue #{rid}: {info['title']}")
+            print(f"     URL: {info['url']}")
+    print(f"\nTotal: {len(unlinked)} requirement(s) without test links")
+    print(f"\n💡 Add traceability links using:")
+    print(f"   In requirement issue: '**Verified by**: #TEST_ISSUE_NUMBER'")
+    print(f"   In test issue: '**Verifies**: #REQUIREMENT_ISSUE_NUMBER'")
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))
