@@ -1,0 +1,408 @@
+name: Label Validation
+
+on:
+  workflow_dispatch:  # Allow manual trigger
+  schedule:
+    - cron: '0 2 * * 1'  # Run every Monday at 2 AM UTC to audit all issues
+  issues:
+    types: [opened, edited, reopened, labeled, unlabeled]
+
+jobs:
+  # Real-time validation on issue events
+  validate-labels:
+    if: github.event_name != 'schedule'  # Skip on scheduled runs
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    
+    steps:
+      - name: Validate label presence and correctness
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Get issue from payload or fetch if not available
+            let issue = context.payload.issue;
+            
+            if (!issue) {
+              console.log('⚠️  Issue not in payload, fetching from API...');
+              const result = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number
+              });
+              issue = result.data;
+            }
+            
+            const labels = issue.labels.map(l => l.name);
+            const body = issue.body || '';
+            const title = issue.title || '';
+            
+            console.log(`🔍 Validating issue #${issue.number}: "${title}"`);
+            console.log(`Current labels: ${labels.join(', ') || '(none)'}`);
+            
+            const errors = [];
+            const warnings = [];
+            const suggestions = [];
+            
+            // ============================================
+            // RULE 1: Issue MUST have at least one type label
+            // ============================================
+            const typeLabels = labels.filter(l => l.startsWith('type:'));
+            
+            if (typeLabels.length === 0) {
+              errors.push({
+                rule: 'Missing Type Label',
+                message: 'Every issue must have at least one `type:*` label',
+                action: 'Add one of: `type:requirement:stakeholder`, `type:requirement:functional`, `type:requirement:non-functional`, `type:architecture:decision`, `type:architecture:component`, `type:architecture:quality-scenario`, `type:test`, `type:design`, `type:implementation`, `type:refactoring`'
+              });
+            } else {
+              console.log(`✅ Has type label: ${typeLabels.join(', ')}`);
+            }
+            
+            // ============================================
+            // RULE 2: Issue MUST have exactly one priority label (except bugs/questions)
+            // ============================================
+            const priorityLabels = labels.filter(l => l.startsWith('priority:'));
+            const isBugOrQuestion = labels.includes('bug') || labels.includes('question') || labels.includes('documentation');
+            
+            if (!isBugOrQuestion) {
+              if (priorityLabels.length === 0) {
+                warnings.push({
+                  rule: 'Missing Priority Label',
+                  message: 'Issues should have a priority assigned',
+                  action: 'Add one of: `priority:p0` (critical), `priority:p1` (high), `priority:p2` (medium), `priority:p3` (low)'
+                });
+              } else if (priorityLabels.length > 1) {
+                errors.push({
+                  rule: 'Multiple Priority Labels',
+                  message: `Issue has ${priorityLabels.length} priority labels: ${priorityLabels.join(', ')}`,
+                  action: 'Keep only one priority label'
+                });
+              } else {
+                console.log(`✅ Has priority: ${priorityLabels[0]}`);
+              }
+            }
+            
+            // ============================================
+            // RULE 3: Issue MUST have exactly one status label
+            // ============================================
+            const statusLabels = labels.filter(l => l.startsWith('status:'));
+            
+            if (statusLabels.length === 0) {
+              // Auto-assign status:backlog for new issues without status
+              if (issue.state === 'open') {
+                suggestions.push({
+                  rule: 'Auto-assign Status',
+                  message: 'New issue without status will be assigned `status:backlog`',
+                  action: 'Status label will be added automatically'
+                });
+                
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['status:backlog']
+                });
+                
+                console.log('✅ Auto-assigned status:backlog');
+              }
+            } else if (statusLabels.length > 1) {
+              errors.push({
+                rule: 'Multiple Status Labels',
+                message: `Issue has ${statusLabels.length} status labels: ${statusLabels.join(', ')}`,
+                action: 'Keep only the current status label (remove old ones)'
+              });
+            } else {
+              console.log(`✅ Has status: ${statusLabels[0]}`);
+            }
+            
+            // ============================================
+            // RULE 4: Test issues MUST have test-type label
+            // ============================================
+            if (labels.includes('type:test')) {
+              const testTypeLabels = labels.filter(l => l.startsWith('test-type:'));
+              
+              if (testTypeLabels.length === 0) {
+                warnings.push({
+                  rule: 'Missing Test Type',
+                  message: 'Test issues should specify test type',
+                  action: 'Add one of: `test-type:unit`, `test-type:integration`, `test-type:e2e`, `test-type:acceptance`'
+                });
+              } else {
+                console.log(`✅ Has test type: ${testTypeLabels.join(', ')}`);
+              }
+            }
+            
+            // ============================================
+            // RULE 5: Phase label should match content
+            // ============================================
+            const phaseLabels = labels.filter(l => l.startsWith('phase:'));
+            
+            if (phaseLabels.length === 0) {
+              // Try to infer phase from type label
+              const inferredPhase = inferPhaseFromType(typeLabels[0]);
+              if (inferredPhase) {
+                suggestions.push({
+                  rule: 'Suggested Phase Label',
+                  message: `Based on type label, consider adding: \`${inferredPhase}\``,
+                  action: 'Add phase label to track lifecycle stage'
+                });
+              }
+            } else if (phaseLabels.length > 1) {
+              warnings.push({
+                rule: 'Multiple Phase Labels',
+                message: `Issue has ${phaseLabels.length} phase labels: ${phaseLabels.join(', ')}`,
+                action: 'Keep only the current phase (issues can move between phases)'
+              });
+            } else {
+              console.log(`✅ Has phase: ${phaseLabels[0]}`);
+            }
+            
+            // ============================================
+            // RULE 6: Requirements should have parent traceability (checked by other workflow)
+            // ============================================
+            const reqTypes = ['type:requirement:functional', 'type:requirement:non-functional'];
+            if (reqTypes.some(t => labels.includes(t))) {
+              const hasTraceability = /[Tt]races?\s+to:?\s*#(\d+)/.test(body);
+              if (!hasTraceability) {
+                // Don't duplicate error - issue-validation.yml handles this
+                console.log('ℹ️  Traceability will be validated by issue-validation.yml');
+              }
+            }
+            
+            // ============================================
+            // RULE 7: Closed issues should have status:closed
+            // ============================================
+            if (issue.state === 'closed') {
+              if (!labels.includes('status:closed')) {
+                suggestions.push({
+                  rule: 'Update Status to Closed',
+                  message: 'Closed issues should have `status:closed` label',
+                  action: 'Label will be updated automatically'
+                });
+                
+                // Remove other status labels
+                const oldStatusLabels = labels.filter(l => l.startsWith('status:') && l !== 'status:closed');
+                if (oldStatusLabels.length > 0) {
+                  for (const label of oldStatusLabels) {
+                    await github.rest.issues.removeLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: issue.number,
+                      name: label
+                    }).catch(() => {}); // Ignore if label doesn't exist
+                  }
+                }
+                
+                // Add status:closed
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['status:closed']
+                });
+                
+                console.log('✅ Auto-assigned status:closed');
+              }
+            }
+            
+            // ============================================
+            // RULE 8: DDD pattern labels should only be on design/implementation issues
+            // ============================================
+            const patternLabels = labels.filter(l => l.startsWith('pattern:'));
+            if (patternLabels.length > 0) {
+              const validTypes = ['type:design', 'type:implementation', 'type:test'];
+              const hasValidType = validTypes.some(t => labels.includes(t));
+              
+              if (!hasValidType) {
+                warnings.push({
+                  rule: 'Pattern Label on Wrong Type',
+                  message: `Pattern labels (${patternLabels.join(', ')}) should only be used with design, implementation, or test issues`,
+                  action: 'Remove pattern labels or add appropriate type label'
+                });
+              }
+            }
+            
+            // ============================================
+            // RULE 9: Bounded context labels for architecture issues
+            // ============================================
+            const contextLabels = labels.filter(l => l.startsWith('context:'));
+            if (contextLabels.length > 1) {
+              warnings.push({
+                rule: 'Multiple Context Labels',
+                message: `Issue has ${contextLabels.length} context labels: ${contextLabels.join(', ')}`,
+                action: 'An issue should typically belong to one bounded context'
+              });
+            }
+            
+            // ============================================
+            // RULE 10: Standards labels for requirements/architecture
+            // ============================================
+            const standardLabels = labels.filter(l => l.startsWith('standard:'));
+            if (standardLabels.length > 0) {
+              const relevantTypes = [
+                'type:requirement:stakeholder',
+                'type:requirement:functional', 
+                'type:requirement:non-functional',
+                'type:architecture:decision',
+                'type:architecture:component',
+                'type:test'
+              ];
+              const hasRelevantType = relevantTypes.some(t => labels.includes(t));
+              
+              if (!hasRelevantType) {
+                warnings.push({
+                  rule: 'Standard Label on Irrelevant Issue',
+                  message: `Standard labels (${standardLabels.join(', ')}) are most relevant for requirements, architecture, or tests`,
+                  action: 'Consider if this standard label is necessary'
+                });
+              }
+            }
+            
+            // ============================================
+            // Helper function: Infer phase from type
+            // ============================================
+            function inferPhaseFromType(typeLabel) {
+              if (!typeLabel) return null;
+              
+              const phaseMap = {
+                'type:requirement:stakeholder': 'phase:01-stakeholder-requirements',
+                'type:requirement:functional': 'phase:02-requirements',
+                'type:requirement:non-functional': 'phase:02-requirements',
+                'type:architecture:decision': 'phase:03-architecture',
+                'type:architecture:component': 'phase:03-architecture',
+                'type:architecture:quality-scenario': 'phase:03-architecture',
+                'type:design': 'phase:04-design',
+                'type:implementation': 'phase:05-implementation',
+                'type:refactoring': 'phase:05-implementation',
+                'type:test': 'phase:07-verification-validation'
+              };
+              
+              return phaseMap[typeLabel] || null;
+            }
+            
+            // ============================================
+            // Generate Report
+            // ============================================
+            if (errors.length === 0 && warnings.length === 0 && suggestions.length === 0) {
+              console.log('✅ All label validation rules passed');
+              return;
+            }
+            
+            let reportMessage = '## 🏷️ Label Validation Report\n\n';
+            
+            if (errors.length > 0) {
+              reportMessage += '### ❌ Errors (Must Fix)\n\n';
+              for (const error of errors) {
+                reportMessage += `**${error.rule}**\n`;
+                reportMessage += `- ${error.message}\n`;
+                reportMessage += `- **Action**: ${error.action}\n\n`;
+              }
+            }
+            
+            if (warnings.length > 0) {
+              reportMessage += '### ⚠️ Warnings (Should Fix)\n\n';
+              for (const warning of warnings) {
+                reportMessage += `**${warning.rule}**\n`;
+                reportMessage += `- ${warning.message}\n`;
+                reportMessage += `- **Recommended**: ${warning.action}\n\n`;
+              }
+            }
+            
+            if (suggestions.length > 0) {
+              reportMessage += '### 💡 Suggestions (Auto-Applied or Optional)\n\n';
+              for (const suggestion of suggestions) {
+                reportMessage += `**${suggestion.rule}**\n`;
+                reportMessage += `- ${suggestion.message}\n`;
+                reportMessage += `- ${suggestion.action}\n\n`;
+              }
+            }
+            
+            reportMessage += '\n---\n\n';
+            reportMessage += '### 📚 Label Guidelines\n\n';
+            reportMessage += '**Required Labels**:\n';
+            reportMessage += '- `type:*` - Issue type (requirement, architecture, test, etc.)\n';
+            reportMessage += '- `priority:*` - Priority level (p0-p3)\n';
+            reportMessage += '- `status:*` - Current status (backlog, ready, in-progress, etc.)\n\n';
+            reportMessage += '**Optional Labels**:\n';
+            reportMessage += '- `phase:*` - Lifecycle phase (01-09)\n';
+            reportMessage += '- `test-type:*` - For test issues (unit, integration, e2e, acceptance)\n';
+            reportMessage += '- `pattern:*` - DDD patterns (entity, aggregate, etc.)\n';
+            reportMessage += '- `context:*` - Bounded context (core-domain, supporting, generic)\n';
+            reportMessage += '- `standard:*` - Applicable standards (ISO-29148, IEEE-1016, etc.)\n\n';
+            reportMessage += 'See [Label Color Guide](.github/docs/label-color-guide.md) for complete reference.\n';
+            
+            // Only post comment if there are errors or warnings
+            if (errors.length > 0 || warnings.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: reportMessage
+              });
+              
+              console.log('📝 Posted validation report as comment');
+              
+              if (errors.length > 0) {
+                core.setFailed(`❌ ${errors.length} label validation error(s) found`);
+              }
+            } else if (suggestions.length > 0) {
+              console.log('💡 Applied suggestions automatically');
+            }
+  
+  # Scheduled audit of all existing issues
+  audit-all-issues:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: |
+          pip install requests
+      
+      - name: Audit and auto-fix issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # First run audit to see what needs fixing
+          echo "📊 Running audit to identify issues..."
+          python scripts/audit-issue-labels.py \
+            --owner "${{ github.repository_owner }}" \
+            --repo "${{ github.event.repository.name }}" \
+            --verbose || true  # Don't fail on errors, just report them
+          
+          echo ""
+          echo "🔧 Applying automatic fixes..."
+          # Then apply fixes
+          python scripts/audit-issue-labels.py \
+            --owner "${{ github.repository_owner }}" \
+            --repo "${{ github.event.repository.name }}" \
+            --fix-auto
+      
+      - name: Create summary report
+        if: always()
+        run: |
+          echo "## 📊 Weekly Label Audit Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Completed scheduled audit of all repository issues." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Audit Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Actions Taken" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Validated all open issues" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔧 Auto-fixed safe labeling issues" >> $GITHUB_STEP_SUMMARY
+          echo "- 📝 Posted validation reports on issues with errors/warnings" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next scheduled audit**: Next Monday at 2 AM UTC" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,187 @@
+name: Functional Requirement (REQ-F)
+description: Define a system functional requirement following ISO/IEC/IEEE 29148:2018
+title: "[REQ-F] "
+labels: ["functional-requirement", "phase-02"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ⚙️ ISO/IEC/IEEE 29148:2018 Compliant Functional Requirement
+        
+        Functional requirements describe what the system shall do.
+        Use precise language: "The system shall..." Complete all required fields for traceability.
+
+  - type: markdown
+    attributes:
+      value: |
+        ## 🔗 Traceability (REQUIRED)
+        
+        ⚠️ **CI Validation**: Use exact syntax `- Traces to:  #N` or CI will fail.
+        
+        **Accepted formats**:
+        - ✅ `- Traces to:  #123` (preferred)
+        - ✅ `- **Trace to**: #123`
+        - ✅ `Traces to #123`
+        
+        **Common mistakes (will fail CI)**:
+        - ❌ `Links to: #123` (wrong verb)
+        - ❌ `Parent: #123` (missing "Traces to")
+
+  - type: textarea
+    id: traceability
+    attributes:
+      label: "Parent Stakeholder Requirement"
+      description: "Link to parent StR issue this requirement traces to"
+      placeholder: |
+        ## Traceability
+        - Traces to:  #123 (StR-BUS-001: User Authentication)
+      value: |
+        ## Traceability
+        - Traces to:  #
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "Priority"
+      description: "Implementation priority"
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: "Functional Category"
+      description: "Type of functional requirement"
+      options:
+        - Authentication & Authorization (AUTH)
+        - Data Management (DATA)
+        - User Interface (UI)
+        - Business Logic (CORE)
+        - Integration (INTG)
+        - Reporting & Analytics (REPT)
+        - Notifications (NOTIF)
+        - Payment Processing (PAYMT)
+        - Search & Discovery (SRCH)
+        - Workflow & Automation (FLOW)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Requirement Description (SHALL Statement)"
+      description: "What shall the system do? Use precise, unambiguous language."
+      placeholder: |
+        The system shall [action] [object] [qualifier].
+        
+        Example:
+        The system shall authenticate users using email and password with multi-factor authentication support.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: "Rationale"
+      description: "Why does this requirement exist? How does it support the stakeholder need?"
+      placeholder: |
+        This requirement exists to ensure secure user authentication and protect user accounts from unauthorized access, supporting StR-XXX (User Data Security).
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: "Acceptance Criteria (Given/When/Then)"
+      description: "BDD-style acceptance criteria for verification"
+      placeholder: |
+        Scenario: Successful user login
+          Given a registered user with valid credentials
+          And multi-factor authentication is enabled
+          When the user enters correct email and password
+          And provides valid MFA code
+          Then the user is authenticated
+          And redirected to the dashboard
+        
+        Scenario: Failed login with invalid credentials
+          Given a registered user
+          When the user enters incorrect password
+          Then authentication fails
+          And error message is displayed
+          And login attempt is logged
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: "Dependencies"
+      description: "Links to other requirements that must be implemented first"
+      placeholder: |
+        - #45 (REQ-F-USER-001: User registration)
+        - #67 (REQ-NF-SECU-001: Password encryption)
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: "Technical Constraints"
+      description: "Implementation constraints or design considerations"
+      placeholder: |
+        - Must use OAuth 2.0 standard
+        - Session timeout: 30 minutes
+        - Password minimum 12 characters
+        - Support TOTP-based MFA (Google Authenticator compatible)
+
+  - type: dropdown
+    id: verification_method
+    attributes:
+      label: "Verification Method"
+      description: "How will this requirement be verified?"
+      options:
+        - Automated Test (Unit/Integration)
+        - Manual Test / QA
+        - Code Review
+        - Demonstration
+        - Analysis / Inspection
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_strategy
+    attributes:
+      label: "Test Strategy"
+      description: "Outline how tests will verify this requirement"
+      placeholder: |
+        - Unit tests: Test authentication logic in isolation
+        - Integration tests: Test with database and MFA provider
+        - E2E tests: Full login flow with UI
+        - Security tests: Test password hashing, session management
+        - Performance tests: Login response time < 500ms
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Requirement Quality Checklist"
+      description: "Confirm requirement meets quality standards"
+      options:
+        - label: "Uses 'shall' language (mandatory) or 'should' (recommended)"
+          required: true
+        - label: "Is testable and verifiable"
+          required: true
+        - label: "Has clear acceptance criteria"
+          required: true
+        - label: "Traces to stakeholder requirement"
+          required: true
+        - label: "Dependencies identified"
+          required: false
+        - label: "No ambiguous terms (e.g., 'fast', 'user-friendly')"
+          required: true

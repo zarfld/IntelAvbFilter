@@ -1,0 +1,190 @@
+name: Documentation
+
+# TEMPLATE: Customize for your project's documentation needs
+# This workflow supports Doxygen (C/C++), but can be adapted for:
+# - MkDocs (Python/Markdown)
+# - Sphinx (Python)
+# - JSDoc (JavaScript/TypeScript)
+# - Javadoc (Java)
+# - GoDoc (Go)
+
+on:
+    push:
+        branches:
+            - main
+            - master  # TEMPLATE: Adjust to your default branch
+            - develop
+        paths:
+            # TEMPLATE: Customize paths for your project structure
+            - "include/**"           # C/C++ headers
+            - "src/**"               # Source code
+            - "05-implementation/**" # Implementation documentation
+            - "08-transition/**"     # User documentation
+            - "docs/**"              # Documentation source files
+            - "Doxyfile"             # Doxygen configuration
+            - "mkdocs.yml"           # MkDocs configuration (if used)
+            - "scripts/generate-*.py"
+            - ".github/workflows/documentation.yml"
+    pull_request:
+        branches:
+            - main
+            - master
+            - develop
+        paths:
+            - "include/**"
+            - "src/**"
+            - "docs/**"
+            - "Doxyfile"
+    workflow_dispatch: # Allow manual trigger
+
+# Cancel in-progress runs when a new workflow with the same group name is triggered
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build-and-deploy:
+        name: Build and Deploy Documentation
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write # Required for pushing to gh-pages branch
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0 # Full history for better diagrams
+
+            - name: Install Doxygen
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y doxygen graphviz
+
+            - name: Verify Doxygen installation
+              run: |
+                  doxygen --version
+                  dot -V
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+
+            - name: Check prerequisites
+              run: |
+                  python scripts/generate-doxygen.py --check
+
+            - name: Generate documentation
+              run: |
+                  python scripts/generate-doxygen.py --clean
+
+            - name: Check for warnings
+              run: |
+                  if [ -f docs/doxygen/warnings.log ]; then
+                    echo "### Doxygen Warnings" >> $GITHUB_STEP_SUMMARY
+                    echo '```' >> $GITHUB_STEP_SUMMARY
+                    cat docs/doxygen/warnings.log >> $GITHUB_STEP_SUMMARY
+                    echo '```' >> $GITHUB_STEP_SUMMARY
+                    
+                    WARNING_COUNT=$(wc -l < docs/doxygen/warnings.log)
+                    echo "Found $WARNING_COUNT warnings"
+                    
+                    # Fail if there are warnings (can be adjusted)
+                    # if [ $WARNING_COUNT -gt 0 ]; then
+                    #   echo "::error::Documentation has $WARNING_COUNT warnings"
+                    #   exit 1
+                    # fi
+                  else
+                    echo "No warnings found!" >> $GITHUB_STEP_SUMMARY
+                  fi
+
+            - name: Generate coverage report
+              run: |
+                  python scripts/generate-doxygen.py --coverage | tee coverage.txt
+                  echo "### Documentation Coverage" >> $GITHUB_STEP_SUMMARY
+                  echo '```' >> $GITHUB_STEP_SUMMARY
+                  cat coverage.txt >> $GITHUB_STEP_SUMMARY
+                  echo '```' >> $GITHUB_STEP_SUMMARY
+
+            - name: Create .nojekyll file
+              run: |
+                  # Prevent GitHub Pages from processing with Jekyll
+                  touch docs/doxygen/html/.nojekyll
+
+            - name: Create custom index redirect
+              run: |
+                  # Create root index.html that redirects to Doxygen index
+                  # TEMPLATE: Customize title and description for your project
+                  cat > docs/doxygen/html/redirect.html << 'EOF'
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                    <meta charset="utf-8">
+                    <title>Project Documentation</title>
+                    <meta http-equiv="refresh" content="0; url=./index.html">
+                    <link rel="canonical" href="./index.html">
+                  </head>
+                  <body>
+                    <p>Redirecting to <a href="./index.html">Project API Documentation</a>...</p>
+                  </body>
+                  </html>
+                  EOF
+
+            - name: Deploy to GitHub Pages
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+              uses: peaceiris/actions-gh-pages@v3
+              with:
+                  github_token: ${{ secrets.GITHUB_TOKEN }}
+                  publish_dir: ./docs/doxygen/html
+                  publish_branch: gh-pages
+                  force_orphan: true # Keep gh-pages branch clean
+                  user_name: "github-actions[bot]"
+                  user_email: "github-actions[bot]@users.noreply.github.com"
+                  commit_message: "docs: update API documentation for ${{ github.sha }}"
+
+            - name: Upload documentation artifact
+              if: github.event_name == 'pull_request'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: documentation-pr-${{ github.event.pull_request.number }}
+                  path: docs/doxygen/html/
+                  retention-days: 30
+
+            - name: Comment on PR with documentation link
+              if: github.event_name == 'pull_request'
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const artifactUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+                      const comment = `## 📚 Documentation Preview
+
+                      Documentation has been generated for this PR.
+
+                      **Download**: [Documentation Artifact](${artifactUrl})
+
+                      To view locally:
+                      1. Download the artifact from the workflow run
+                      2. Extract the ZIP file
+                      3. Open \`index.html\` in your browser
+
+                      ---
+                      *Documentation will be automatically deployed to GitHub Pages when this PR is merged to main.*`;
+
+                      github.rest.issues.createComment({
+                        issue_number: context.issue.number,
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        body: comment
+                      });
+
+            - name: Add deployment info to summary
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+              run: |
+                  echo "### 🚀 Deployment Status" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "Documentation successfully deployed to GitHub Pages!" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "📖 **View Documentation**: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "🔗 **Direct Link**: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/index.html" >> $GITHUB_STEP_SUMMARY
