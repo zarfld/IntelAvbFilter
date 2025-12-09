@@ -285,7 +285,7 @@ class TraceabilityBuilder:
         metrics = self.calculate_metrics()
         
         # Auto-detect project name from environment
-        project_name = os.environ.get('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template').split('/')[-1]
+        project_name = os.environ.get('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter').split('/')[-1]
         
         return {
             'version': '1.0',

@@ -647,7 +647,7 @@ if ($mdCount -eq $issueCount) {
 ```bash
 # Create a new test requirement
 gh issue create \
-  --repo zarfld/copilot-instructions-template \
+  --repo zarfld/IntelAvbFilter \
   --title "TEST: Verify GitHub Issues workflow" \
   --body "This is a test issue to verify the migration was successful." \
   --label "type:test,phase:07"
