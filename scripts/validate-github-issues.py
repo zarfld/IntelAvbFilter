@@ -21,7 +21,7 @@ def main():
         print('ERROR: GITHUB_TOKEN required', file=sys.stderr)
         return 1
     
-    repo_name = os.environ.get('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template')
+    repo_name = os.environ.get('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter')
     g = Github(token)
     repo = g.get_repo(repo_name)
     

@@ -287,7 +287,7 @@ import requests
 import re
 
 GITHUB_TOKEN = "ghp_..."
-REPO = "zarfld/copilot-instructions-template"
+REPO = "zarfld/IntelAvbFilter"
 
 def get_requirements_issues():
     """Fetch all requirements issues from GitHub"""
@@ -785,7 +785,7 @@ Scenario: Login with unverified email
 ```markdown
 # Requirements Completeness Audit Report
 
-**Repository**: zarfld/copilot-instructions-template
+**Repository**: zarfld/IntelAvbFilter
 **Date**: 2024-11-13
 **Auditor**: GitHub Copilot (ISO/IEC/IEEE 29148:2018)
 **Scope**: All Phase 02 Requirements
@@ -1137,7 +1137,7 @@ from github import Github
 
 def main():
     token = os.getenv('GITHUB_TOKEN')
-    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template')
+    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter')
     
     g = Github(token)
     repo = g.get_repo(repo_name)

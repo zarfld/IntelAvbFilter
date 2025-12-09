@@ -374,7 +374,7 @@ cp D:\Repos\ESP_ClapMetronome\.github\workflows\traceability-check.yml \
 ```powershell
 # Set up environment
 $env:GITHUB_TOKEN = "your-token-here"
-$env:GITHUB_REPOSITORY = "zarfld/copilot-instructions-template"
+$env:GITHUB_REPOSITORY = "zarfld/IntelAvbFilter"
 
 # Test github-issues-to-traceability-json.py
 python scripts/github-issues-to-traceability-json.py
