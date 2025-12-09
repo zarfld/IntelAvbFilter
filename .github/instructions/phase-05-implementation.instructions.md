@@ -39,8 +39,8 @@ Each source file MUST include a top-of-file comment block with GitHub Issue link
  * @architecture #79 ARC-C-AUTH: User Authentication Service
  * @verifiedBy #120 TEST-AUTH-LOGIN
  * 
- * @see https://github.com/zarfld/copilot-instructions-template/issues/45
- * @see https://github.com/zarfld/copilot-instructions-template/issues/78
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/45
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/78
  */
 export class UserService {
   // Implementation
@@ -58,8 +58,8 @@ Architecture: #78 ADR-SECU-001: JWT Authentication
 Architecture: #79 ARC-C-AUTH: User Authentication Service
 Verified by: #120 TEST-AUTH-LOGIN
 
-See: https://github.com/zarfld/copilot-instructions-template/issues/45
-See: https://github.com/zarfld/copilot-instructions-template/issues/78
+See: https://github.com/zarfld/IntelAvbFilter/issues/45
+See: https://github.com/zarfld/IntelAvbFilter/issues/78
 """
 
 class UserService:

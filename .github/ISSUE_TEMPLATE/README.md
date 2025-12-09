@@ -258,7 +258,7 @@ git commit -m "feat: Add GitHub issue templates for requirements traceability"
 git push
 
 # Test in browser:
-# Go to: https://github.com/zarfld/copilot-instructions-template/issues/new/choose
+# Go to: https://github.com/zarfld/IntelAvbFilter/issues/new/choose
 ```
 
 ### Integration with Copilot

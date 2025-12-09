@@ -548,7 +548,7 @@ Scenario: Registration with weak password
  * 
  * Implements: #N (REQ-F-USER-001: User Registration)
  * 
- * See: https://github.com/zarfld/copilot-instructions-template/issues/N
+ * See: https://github.com/zarfld/IntelAvbFilter/issues/N
  */
 app.post('/api/users', async (req, res) => {
   // ... implementation
@@ -671,7 +671,7 @@ After creating issues, update code files:
  * Implements: #45 (REQ-F-USER-001: User Registration)
  * TEST Issue: #50 (TEST-USER-001)
  * 
- * See: https://github.com/zarfld/copilot-instructions-template/issues/45
+ * See: https://github.com/zarfld/IntelAvbFilter/issues/45
  */
 app.post('/api/users', async (req, res) => {
   // ... implementation
