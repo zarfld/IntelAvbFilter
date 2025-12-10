@@ -100,7 +100,7 @@ python scripts/github-orphan-check.py
 **Repository Auto-Detection**:
 - **In GitHub Actions**: `GITHUB_REPOSITORY` is automatically set to `owner/repo`
 - **Local testing**: Set `GITHUB_REPOSITORY=owner/repo` or `REPO_OWNER` and `REPO_NAME` separately
-- **Fallback**: Defaults to `zarfld/copilot-instructions-template` if not set
+- **Fallback**: Defaults to `zarfld/IntelAvbFilter` if not set
 
 **GitHub Actions** (automatic):
 - `.github/workflows/traceability-check.yml` - Runs on PR/issue changes

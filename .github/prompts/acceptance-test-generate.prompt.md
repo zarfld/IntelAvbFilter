@@ -316,7 +316,7 @@ if __name__ == '__main__':
     from datetime import datetime
     
     token = os.getenv('GITHUB_TOKEN')
-    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template')
+    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter')
     
     g = Github(token)
     repo = g.get_repo(repo_name)
