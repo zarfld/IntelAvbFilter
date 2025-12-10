@@ -244,9 +244,16 @@ def main() -> int:
     token = os.environ.get('GITHUB_TOKEN')
     if not token:
         print('ERROR: GITHUB_TOKEN environment variable required', file=sys.stderr)
+        print('', file=sys.stderr)
+        print('To fix this:', file=sys.stderr)
+        print('1. Go to https://github.com/settings/tokens', file=sys.stderr)
+        print('2. Generate a Personal Access Token with "repo" scope', file=sys.stderr)
+        print('3. Set the token in PowerShell:', file=sys.stderr)
+        print('   $env:GITHUB_TOKEN = "your_token_here"', file=sys.stderr)
+        print('4. Run the script again', file=sys.stderr)
         return 1
     
-    repo_name = os.environ.get('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template')
+    repo_name = os.environ.get('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter')
     
     try:
         g = Github(token)

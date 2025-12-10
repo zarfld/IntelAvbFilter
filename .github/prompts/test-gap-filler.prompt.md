@@ -64,7 +64,7 @@ from github import Github
 def load_requirements():
     """Load all requirement issues from GitHub"""
     token = os.getenv('GITHUB_TOKEN')
-    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template')
+    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter')
     
     g = Github(token)
     repo = g.get_repo(repo_name)
@@ -86,7 +86,7 @@ def load_requirements():
 def load_test_issues():
     """Load all TEST issues and extract 'Verifies: #N' links"""
     token = os.getenv('GITHUB_TOKEN')
-    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template')
+    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter')
     
     g = Github(token)
     repo = g.get_repo(repo_name)

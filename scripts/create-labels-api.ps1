@@ -10,7 +10,7 @@ if (-not $token) {
     exit 1
 }
 
-$repo = "zarfld/copilot-instructions-template"  # Update if different
+$repo = "zarfld/IntelAvbFilter"  # Update if different
 $apiUrl = "https://api.github.com/repos/$repo/labels"
 
 $headers = @{

@@ -690,7 +690,7 @@ if __name__ == '__main__':
     import sys
     from datetime import datetime
     
-    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template')
+    repo_name = os.getenv('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter')
     sys.exit(validate_traceability(repo_name))
 \`\`\`
 

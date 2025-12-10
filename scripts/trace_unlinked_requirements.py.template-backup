@@ -29,8 +29,8 @@ from typing import Dict, List
 import requests
 
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
-REPO_OWNER = os.environ.get('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template').split('/')[0]
-REPO_NAME = os.environ.get('GITHUB_REPOSITORY', 'zarfld/copilot-instructions-template').split('/')[1]
+REPO_OWNER = os.environ.get('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter').split('/')[0]
+REPO_NAME = os.environ.get('GITHUB_REPOSITORY', 'zarfld/IntelAvbFilter').split('/')[1]
 API_BASE = f'https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}'
 
 ROOT = Path(__file__).resolve().parents[1]
