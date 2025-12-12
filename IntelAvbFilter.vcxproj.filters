@@ -81,7 +81,7 @@
     <ClInclude Include="external\intel_igb\src\e1000_regs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="external\intel_avb\include\avb_ioctl.h">
+    <ClInclude Include="include\avb_ioctl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="devices\intel_device_interface.h">
