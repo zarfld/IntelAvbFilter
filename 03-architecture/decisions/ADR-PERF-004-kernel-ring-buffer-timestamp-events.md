@@ -198,6 +198,60 @@ BOOLEAN RingBufferRead(ring_buffer_t *rb, event_entry_t *event) {
     // Check if buffer empty
     if (tail == head) {
         return FALSE;  // No events available
+
+---
+
+## Architecture Diagrams
+
+The kernel ring buffer timestamp event architecture is visualized in the following C4 diagram:
+
+### Sequence Diagram - Timestamp Event Subscription & Delivery
+**[Sequence Diagram - Timestamp Event Subscription & Delivery](../C4-DIAGRAMS-MERMAID.md#sequence-timestamp-event-subscription)**
+
+Illustrates the complete flow of high-frequency timestamp event delivery:
+
+**Phase 1: Subscription Setup**
+1. **User Application** → Subscribe request (IOCTL_AVB_SUBSCRIBE_EVENTS)
+2. **IOCTL Dispatcher** → Route to Event Manager (<5µs)
+3. **Event Manager** → Allocate shared memory ring buffer (4096 entries)
+4. **Event Manager** → Map into user-mode virtual address space
+5. **Response** → Return MDL handle to application
+
+**Phase 2: Event Production (Kernel, 100-1000 Hz)**
+1. **Hardware Interrupt** → TX/RX timestamp capture
+2. **Event Manager** → Lock-free ring buffer write (SPSC pattern)
+   - **Producer (Kernel)**: Atomic head increment
+   - **Consumer (User-Mode)**: Atomic tail increment
+   - **No Locks**: Zero contention, deterministic latency
+3. **Memory Barriers** → Ensure visibility across CPU cores
+
+**Phase 3: Event Consumption (User-Mode)**
+1. **User Application** → Poll shared memory ring buffer (no IOCTL overhead)
+2. **Ring Buffer Read** → Check `head != tail`, read event, increment tail
+3. **Processing** → Application-level timestamp event handling
+
+**Performance Characteristics**:
+- **Write Latency**: <2µs (kernel producer)
+- **Read Latency**: <500ns (user consumer, no syscall)
+- **Throughput**: 100-1000 events/sec sustained
+- **Overflow Handling**: Dropped event counter (no blocking)
+
+### Container Diagram - Event Manager Integration
+**[C4 Container Diagram - Event Manager](../C4-DIAGRAMS-MERMAID.md#l2-container-diagram)**
+
+Shows how the Event Manager integrates with:
+- **IOCTL Dispatcher**: Subscription request routing
+- **Hardware Access Layer**: Timestamp capture callbacks
+- **Shared Memory**: MDL-backed ring buffer (kernel/user-mode)
+
+**Key Insights**:
+- **Lock-Free SPSC**: Single-Producer Single-Consumer eliminates lock overhead
+- **Shared Memory**: Bypasses IOCTL path for reads (no context switch)
+- **Memory Barriers**: `READ_ACQUIRE` / `WRITE_RELEASE` ensure correct ordering
+- **Overflow Strategy**: Drop events (increment counter) vs. blocking producer
+- **Power-of-2 Capacity**: Fast modulo via bitmask (`head & (capacity - 1)`)
+
+For complete architecture documentation, see [C4-DIAGRAMS-MERMAID.md](../C4-DIAGRAMS-MERMAID.md).
     }
     
     // Read event from ring buffer
