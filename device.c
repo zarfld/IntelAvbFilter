@@ -273,77 +273,90 @@ IntelAvbFilterDeviceIoControl(
             DEBUGP(DL_ERROR, "!!! DEVICE.C: AVB IOCTL CASE HIT: IOCTL=0x%08X\n", 
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
             
-            // Try to find an Intel filter instance with initialized AVB context
-            pFilter = AvbFindIntelFilterModule();
-            DEBUGP(DL_ERROR, "!!! DEVICE.C: Found filter=%p\n", pFilter);
+            // CRITICAL FIX: If g_AvbContext is set (from OPEN_ADAPTER), use it directly
+            // This ensures multi-adapter scenarios work correctly
+            PAVB_DEVICE_CONTEXT targetContext = g_AvbContext;
             
-            if (pFilter) {
-                DEBUGP(DL_ERROR, "!!! DEVICE.C: Filter Name: %wZ\n", &pFilter->MiniportFriendlyName);
-                if (pFilter->AvbContext) {
-                    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
-                    UNREFERENCED_PARAMETER(ctx);
-                    DEBUGP(DL_ERROR, "!!! DEVICE.C: Context VID=0x%04X DID=0x%04X state=%s\n",
-                           ctx->intel_device.pci_vendor_id, ctx->intel_device.pci_device_id,
-                           AvbHwStateName(ctx->hw_state));
-                }
-            }
-
-            // If not found, iterate all filter instances and lazily initialize until one succeeds
-            if (pFilter == NULL)
-            {
-                DEBUGP(DL_INFO, "?? No initialized Intel filter found, attempting lazy initialization\n");
+            if (targetContext != NULL) {
+                DEBUGP(DL_ERROR, "!!! DEVICE.C: Using global context VID=0x%04X DID=0x%04X state=%s\n",
+                       targetContext->intel_device.pci_vendor_id, targetContext->intel_device.pci_device_id,
+                       AvbHwStateName(targetContext->hw_state));
+                pFilter = targetContext->filter_instance;
+            } else {
+                // Fall back to searching for any Intel filter (single-adapter mode)
+                DEBUGP(DL_INFO, "!!! DEVICE.C: No global context, searching for Intel filter\n");
+                pFilter = AvbFindIntelFilterModule();
+                DEBUGP(DL_ERROR, "!!! DEVICE.C: Found filter=%p\n", pFilter);
                 
-                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
-                Link = FilterModuleList.Flink;
-                
-                while (Link != &FilterModuleList)
-                {
-                    PMS_FILTER cand = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
-                    Link = Link->Flink; // Move to next before releasing lock
-                    
-                    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
-                    
-                    DEBUGP(DL_INFO, "?? Checking candidate filter: %wZ\n", &cand->MiniportFriendlyName);
-                    
-                    // Check if this filter might be an Intel adapter
-                    if (cand->AvbContext == NULL)
-                    {
-                        USHORT ven = 0, dev = 0;
-                        if (AvbIsSupportedIntelController(cand, &ven, &dev))
-                        {
-                            DEBUGP(DL_INFO, "? Found uninitialized Intel adapter %wZ (VID=0x%04X DID=0x%04X), initializing AVB context\n",
-                                   &cand->MiniportFriendlyName, ven, dev);
-                            
-
-                            NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
-                            if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
-                            {
-                                DEBUGP(DL_INFO, "? Successfully initialized AVB context for %wZ\n", 
-                                       &cand->MiniportFriendlyName);
-                                pFilter = cand;
-                                break;
-                            }
-                            else
-                            {
-                                DEBUGP(DL_WARN, "? Failed to initialize AVB context for %wZ: 0x%x\n", 
-                                       &cand->MiniportFriendlyName, initSt);
-                            }
-                        } else {
-                            DEBUGP(DL_INFO, "   - Not supported Intel controller\n");
-                        }
-                    } else {
-                        DEBUGP(DL_INFO, "   - Already has AVB context\n");
+                if (pFilter) {
+                    DEBUGP(DL_ERROR, "!!! DEVICE.C: Filter Name: %wZ\n", &pFilter->MiniportFriendlyName);
+                    if (pFilter->AvbContext) {
+                        targetContext = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+                        DEBUGP(DL_ERROR, "!!! DEVICE.C: Context VID=0x%04X DID=0x%04X state=%s\n",
+                               targetContext->intel_device.pci_vendor_id, targetContext->intel_device.pci_device_id,
+                               AvbHwStateName(targetContext->hw_state));
                     }
+                }
+
+                // If not found, iterate all filter instances and lazily initialize until one succeeds
+                if (pFilter == NULL)
+                {
+                    DEBUGP(DL_INFO, "?? No initialized Intel filter found, attempting lazy initialization\n");
                     
                     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                    Link = FilterModuleList.Flink;
+                    
+                    while (Link != &FilterModuleList)
+                    {
+                        PMS_FILTER cand = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                        Link = Link->Flink; // Move to next before releasing lock
+                        
+                        FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                        
+                        DEBUGP(DL_INFO, "?? Checking candidate filter: %wZ\n", &cand->MiniportFriendlyName);
+                        
+                        // Check if this filter might be an Intel adapter
+                        if (cand->AvbContext == NULL)
+                        {
+                            USHORT ven = 0, dev = 0;
+                            if (AvbIsSupportedIntelController(cand, &ven, &dev))
+                            {
+                                DEBUGP(DL_INFO, "? Found uninitialized Intel adapter %wZ (VID=0x%04X DID=0x%04X), initializing AVB context\n",
+                                       &cand->MiniportFriendlyName, ven, dev);
+                                
+
+                                NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                                if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
+                                {
+                                    DEBUGP(DL_INFO, "? Successfully initialized AVB context for %wZ\n", 
+                                           &cand->MiniportFriendlyName);
+                                    pFilter = cand;
+                                    targetContext = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                                    break;
+                                }
+                                else
+                                {
+                                    DEBUGP(DL_WARN, "? Failed to initialize AVB context for %wZ: 0x%x\n", 
+                                           &cand->MiniportFriendlyName, initSt);
+                                }
+                            } else {
+                                DEBUGP(DL_INFO, "   - Not supported Intel controller\n");
+                            }
+                        } else {
+                            DEBUGP(DL_INFO, "   - Already has AVB context\n");
+                        }
+                        
+                        FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                    }
+                    
+                    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
                 }
-                
-                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
             }
 
-            if (pFilter != NULL && pFilter->AvbContext != NULL) {
-                DEBUGP(DL_ERROR, "!!! BEFORE AvbHandleDeviceIoControl: filter=%p IOCTL=0x%08X\n", pFilter, IrpSp->Parameters.DeviceIoControl.IoControlCode);
-                Status = AvbHandleDeviceIoControl((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, Irp);
+            if (targetContext != NULL) {
+                DEBUGP(DL_ERROR, "!!! BEFORE AvbHandleDeviceIoControl: filter=%p context=%p IOCTL=0x%08X\n", 
+                       pFilter, targetContext, IrpSp->Parameters.DeviceIoControl.IoControlCode);
+                Status = AvbHandleDeviceIoControl(targetContext, Irp);
                 InfoLength = (ULONG)Irp->IoStatus.Information;
                 DEBUGP(DL_ERROR, "!!! AFTER AvbHandleDeviceIoControl: Status=0x%x, InfoLength=%lu\n", 
                        Status, InfoLength);
@@ -429,26 +442,33 @@ IntelAvbFilterDeviceIoControl(
                             }
                         }
                         
-                        // Get capabilities from Intel library
+                        // Get capabilities from already-initialized context
                         if (cand->AvbContext != NULL)
                         {
                             PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
                             
-                            // Call Intel library initialization to get capabilities
-                            int result = intel_init(&ctx->intel_device);
-                            ctx->hw_access_enabled = (result == 0);
+                            DEBUGP(DL_FATAL, "!!! DIAG: ENUM_ADAPTERS - Reading from context %p:\n", ctx);
+                            DEBUGP(DL_FATAL, "    ctx->intel_device.pci_vendor_id=0x%04X\n", ctx->intel_device.pci_vendor_id);
+                            DEBUGP(DL_FATAL, "    ctx->intel_device.pci_device_id=0x%04X\n", ctx->intel_device.pci_device_id);
+                            DEBUGP(DL_FATAL, "    ctx->intel_device.device_type=%d\n", ctx->intel_device.device_type);
+                            DEBUGP(DL_FATAL, "    ctx->intel_device.capabilities=0x%08X\n", ctx->intel_device.capabilities);
+                            DEBUGP(DL_FATAL, "    ctx->hw_state=%d (%s)\n", ctx->hw_state, AvbHwStateName(ctx->hw_state));
                             
-                            if (result == 0)
-                            {
-                                req->capabilities = intel_get_capabilities(&ctx->intel_device);
-                                DEBUGP(DL_INFO, "ENUM_ADAPTERS: Adapter #%lu capabilities=0x%08X\n", 
-                                       adapterCount, req->capabilities);
-                            }
-                            else
-                            {
-                                DEBUGP(DL_WARN, "ENUM_ADAPTERS: Intel init failed for adapter #%lu\n", adapterCount);
-                                req->capabilities = 0;
-                            }
+                            // CRITICAL FIX: Don't call intel_init() here - it was already called during
+                            // AvbBringUpHardware from IOCTL_AVB_INIT_DEVICE. Just read the cached capabilities.
+                            // Calling intel_init() repeatedly resets capabilities to 0 when it fails.
+                            req->capabilities = ctx->intel_device.capabilities;
+                            ctx->hw_access_enabled = (ctx->hw_state >= AVB_HW_BAR_MAPPED);
+                            
+                            DEBUGP(DL_INFO, "ENUM_ADAPTERS: Adapter #%lu capabilities=0x%08X (hw_state=%d)\n", 
+                                   adapterCount, req->capabilities, ctx->hw_state);
+                            DEBUGP(DL_FATAL, "!!! DIAG: ENUM_ADAPTERS - Writing to response buffer: req->capabilities=0x%08X\n", 
+                                   req->capabilities);
+                        }
+                        else
+                        {
+                            DEBUGP(DL_WARN, "ENUM_ADAPTERS: Adapter #%lu has no AVB context\n", adapterCount);
+                            req->capabilities = 0;
                         }
                         
                         foundRequestedAdapter = TRUE;
@@ -480,6 +500,12 @@ IntelAvbFilterDeviceIoControl(
             {
                 DEBUGP(DL_INFO, "ENUM_ADAPTERS: Success - Total adapters=%lu, returned adapter #%lu (VID=0x%04X, DID=0x%04X, caps=0x%08X)\n",
                        adapterCount, requestedIndex, req->vendor_id, req->device_id, req->capabilities);
+                DEBUGP(DL_FATAL, "!!! DIAG: ENUM_ADAPTERS - FINAL response buffer before IRP completion:\n");
+                DEBUGP(DL_FATAL, "    req=%p, req->count=%u, req->index=%u\n", req, req->count, req->index);
+                DEBUGP(DL_FATAL, "    req->vendor_id=0x%04X, req->device_id=0x%04X\n", req->vendor_id, req->device_id);
+                DEBUGP(DL_FATAL, "    req->capabilities=0x%08X\n", req->capabilities);
+                DEBUGP(DL_FATAL, "    InfoLength=%lu, sizeof(AVB_ENUM_REQUEST)=%lu\n", 
+                       InfoLength, (ULONG)sizeof(AVB_ENUM_REQUEST));
                 Status = NDIS_STATUS_SUCCESS;
                 InfoLength = sizeof(AVB_ENUM_REQUEST);
             }
