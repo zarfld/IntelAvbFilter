@@ -199,6 +199,49 @@ VOID AvbWriteRegister32(
 | PTP register write | <1µs | 480ns | ✅ PASS |
 | SYSTIM query (64-bit) | <1µs | 680ns | ✅ PASS |
 
+---
+
+## Architecture Diagrams
+
+The BAR0 MMIO access architecture is visualized in the following C4 diagrams:
+
+### Component Diagram - Hardware Access Layer (L3)
+**[C4 Component Diagram - Hardware Access Layer](../C4-DIAGRAMS-MERMAID.md#l3-component-hardware-access-layer)**
+
+Shows the internal structure of the Hardware Access Layer:
+- **BAR0 Manager**: Maps BAR0 into kernel virtual address space (MmMapIoSpace)
+- **Register Access**: Direct MMIO read/write operations (<500ns latency)
+- **PTP Register Bank**: Isolated access to PTP-safe registers (0x0B600-0x0B700)
+- **Safety Validator**: Bounds checking to prevent conflicting miniport access
+
+### Sequence Diagram - Get PTP System Time
+**[Sequence Diagram - Get PTP System Time Flow](../C4-DIAGRAMS-MERMAID.md#sequence-get-ptp-system-time)**
+
+Illustrates the complete flow from user-mode application to hardware:
+1. **User Application** → IOCTL request (DeviceIoControl)
+2. **IOCTL Dispatcher** → Route to PTP handler (<5µs validation)
+3. **PTP Operations** → Call HAL get_systime
+4. **Hardware Access Layer** → Direct MMIO read from BAR0 (320ns measured)
+5. **Response Path** → 64-bit timestamp returned to user-mode
+
+**Total Latency**: <50µs (meets <1µs hardware access requirement)
+
+### Container Diagram - Hardware Abstraction Layer
+**[C4 Container Diagram - HAL Integration](../C4-DIAGRAMS-MERMAID.md#l2-container-diagram)**
+
+Shows how the Hardware Access Layer integrates with:
+- Device Abstraction Layer (strategy pattern dispatch)
+- IOCTL Dispatcher (request routing)
+- Error Handler (MMIO access failures)
+
+**Key Insights**:
+- Direct BAR0 MMIO bypasses NDIS stack overhead (>10µs savings)
+- Measured 320ns read latency meets <1µs IEEE 1588 PTP requirement
+- Isolated PTP register access (0x0B600-0x0B700) prevents miniport conflicts
+- Safety validator ensures bounds checking on all MMIO operations
+
+For complete architecture documentation, see [C4-DIAGRAMS-MERMAID.md](../C4-DIAGRAMS-MERMAID.md).
+
 ### Stress Test Results
 
 - **10M register reads** (10 threads × 1M each)

@@ -198,6 +198,55 @@ typedef struct intel_device_ops {
     NTSTATUS (*reset_tas)(device_t *device);
     NTSTATUS (*reset_cbs)(device_t *device, u8 queue);
     
+---
+
+## Architecture Diagrams
+
+The device abstraction strategy pattern is visualized in the following C4 diagrams:
+
+### Component Diagram - Device Abstraction Layer (L3)
+**[C4 Component Diagram - Device Abstraction Layer](../C4-DIAGRAMS-MERMAID.md#l3-component-device-abstraction-layer)**
+
+Shows the internal structure of the device abstraction layer:
+- **Device Registry**: Maps PCI Device ID → `intel_device_ops_t*` function pointer table
+- **Strategy Dispatcher**: Runtime dispatch to device-specific implementations
+- **8 Device Implementations**: i210, i219, i225, i226, i350, 82574L, 82599ES, I340 (each ~500 lines)
+- **Operations Table Interface**: 28 function pointers (lifecycle, PTP, TSN)
+
+### Container Diagram - Overall Architecture
+**[C4 Container Diagram - Device Abstraction Integration](../C4-DIAGRAMS-MERMAID.md#l2-container-diagram)**
+
+Demonstrates how Device Abstraction Layer integrates with:
+- **AVB Integration Layer**: Device-agnostic interface (calls `device_ops->get_systime()`)
+- **Hardware Access Layer**: BAR0 MMIO access abstraction
+- **Configuration Manager**: Device capability reporting
+
+### Key Insights from Diagrams
+
+**Strategy Pattern Implementation**:
+```
+AVB Integration (device-agnostic)
+       ↓ Function pointer dispatch (<10ns overhead)
+Device Registry (runtime selection)
+       ↓ Selects implementation based on PCI ID
+Device-Specific Ops Table (i210_ops, i219_ops, ...)
+       ↓ 28 operations per device
+Hardware Implementation (register layouts, quirks)
+```
+
+**Extensibility**:
+- Adding new device: Implement 28 operations + register in table (~500 lines)
+- No core code changes required
+- Clear device capability documentation (ops table = contract)
+
+**Performance**:
+- Function pointer dispatch: <10ns overhead
+- Negligible vs. register I/O (~300-500ns)
+- Modern CPU branch prediction handles indirect calls well
+
+For complete architecture documentation, see [C4-DIAGRAMS-MERMAID.md](../C4-DIAGRAMS-MERMAID.md).
+
+
     // Diagnostics (6 ops)
     NTSTATUS (*read_register)(device_t *device, u32 offset, u32 *value);
     NTSTATUS (*write_register)(device_t *device, u32 offset, u32 value);
