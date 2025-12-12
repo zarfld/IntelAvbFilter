@@ -428,48 +428,95 @@ AvbInitializeDeviceWithBar0Discovery(
     ctx->intel_device.pci_vendor_id = 0;
     ctx->intel_device.pci_device_id = 0;
     ctx->intel_device.device_type = INTEL_DEVICE_UNKNOWN;
+    ctx->intel_device.capabilities = 0; // Will be set based on device type
+    ctx->hw_state = AVB_HW_BOUND; // Initial state
 
-    // Discover BAR0 and classify device
+    // Try to discover PCI IDs first (needed for capability assignment)
+    USHORT vendorId = 0, deviceId = 0;
+    BOOLEAN gotPciIds = FALSE;
+    
+    // Attempt to get PCI IDs via PDO query
+    do {
+        PDEVICE_OBJECT pdo = NULL;
+        ULONG busNumber = 0, address = 0, len = 0;
+        AVB_PCI_SLOT_NUMBER slot = { 0 };
+        ULONG id = 0;
+        NTSTATUS st;
+
+        st = AvbGetPdoFromFilter(FilterModule, &pdo);
+        if (!NT_SUCCESS(st)) break;
+        st = IoGetDeviceProperty(pdo, DevicePropertyBusNumber, sizeof(busNumber), &busNumber, &len);
+        if (NT_SUCCESS(st)) {
+            len = 0;
+            st = IoGetDeviceProperty(pdo, DevicePropertyAddress, sizeof(address), &address, &len);
+        }
+        ObDereferenceObject(pdo);
+        if (!NT_SUCCESS(st)) break;
+
+        slot.bits.DeviceNumber = (address >> 16) & 0xFFFF;
+        slot.bits.FunctionNumber = (address & 0xFFFF) & 0x7;
+        st = AvbReadPciConfigDword(busNumber, slot, 0x00, &id);
+        if (!NT_SUCCESS(st)) break;
+        
+        vendorId = (USHORT)(id & 0xFFFF);
+        deviceId = (USHORT)((id >> 16) & 0xFFFF);
+        gotPciIds = TRUE;
+        
+        ctx->intel_device.pci_vendor_id = vendorId;
+        ctx->intel_device.pci_device_id = deviceId;
+        ctx->intel_device.device_type = AvbGetIntelDeviceType(deviceId);
+        
+        DEBUGP(DL_INFO, "PCI IDs: VEN=0x%04x DEV=0x%04x Type=%d\n", 
+               vendorId, deviceId, ctx->intel_device.device_type);
+    } while (0);
+    
+    // CRITICAL FIX: Always set realistic baseline capabilities based on device type
+    // This must happen even if BAR0 discovery fails to ensure enumeration works
+    if (gotPciIds) {
+        ULONG baseline_caps = 0;
+        switch (ctx->intel_device.device_type) {
+            case INTEL_DEVICE_I210:
+                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
+                break;
+            case INTEL_DEVICE_I217:
+                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
+                break;
+            case INTEL_DEVICE_I219:
+                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
+                break;
+            case INTEL_DEVICE_I225:
+                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO;
+                break;
+            case INTEL_DEVICE_I226:
+                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
+                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
+                break;
+            default:
+                baseline_caps = INTEL_CAP_MMIO;
+                break;
+        }
+        ctx->intel_device.capabilities = baseline_caps;
+        DEBUGP(DL_INFO, "? Set baseline capabilities 0x%08X for device type %d\n", 
+               baseline_caps, ctx->intel_device.device_type);
+    } else {
+        DEBUGP(DL_WARN, "? Could not determine PCI IDs - capabilities will remain 0\n");
+    }
+
+    // Discover BAR0 and map MMIO (optional - not required for enumeration)
     status = AvbDiscoverIntelControllerResources(FilterModule, &bar0, &barLen);
     if (NT_SUCCESS(status)) {
-        // Also read PCI IDs to populate intel_device fields using PDO
-        do {
-            PDEVICE_OBJECT pdo2 = NULL;
-            ULONG busNumber = 0, address = 0, len = 0;
-            AVB_PCI_SLOT_NUMBER slot = { 0 };
-            ULONG id = 0;
-            NTSTATUS st;
-
-            st = AvbGetPdoFromFilter(FilterModule, &pdo2);
-            if (!NT_SUCCESS(st)) break;
-            st = IoGetDeviceProperty(pdo2, DevicePropertyBusNumber, sizeof(busNumber), &busNumber, &len);
-            if (NT_SUCCESS(st)) {
-                len = 0;
-                st = IoGetDeviceProperty(pdo2, DevicePropertyAddress, sizeof(address), &address, &len);
-            }
-            ObDereferenceObject(pdo2);
-            if (!NT_SUCCESS(st)) break;
-
-            slot.bits.DeviceNumber = (address >> 16) & 0xFFFF;
-            slot.bits.FunctionNumber = (address & 0xFFFF) & 0x7;
-            st = AvbReadPciConfigDword(busNumber, slot, 0x00, &id);
-            if (!NT_SUCCESS(st)) break;
-            ctx->intel_device.pci_vendor_id = (USHORT)(id & 0xFFFF);
-            ctx->intel_device.pci_device_id = (USHORT)((id >> 16) & 0xFFFF);
-            ctx->intel_device.device_type = AvbGetIntelDeviceType(ctx->intel_device.pci_device_id);
-            DEBUGP(DL_INFO, "PCI IDs: VEN=0x%04x DEV=0x%04x Type=%d\n", ctx->intel_device.pci_vendor_id, ctx->intel_device.pci_device_id, ctx->intel_device.device_type);
-        } while (0);
-
         NTSTATUS m = AvbMapIntelControllerMemory(ctx, bar0, barLen);
         if (NT_SUCCESS(m)) {
             ctx->hw_access_enabled = TRUE;
-            DEBUGP(DL_INFO, "MMIO mapped: BAR0=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
+            ctx->hw_state = AVB_HW_BAR_MAPPED;
+            DEBUGP(DL_INFO, "MMIO mapped: BAR0=0x%llx, Len=0x%x, hw_state=%s\n", 
+                   bar0.QuadPart, barLen, AvbHwStateName(ctx->hw_state));
         } else {
-            DEBUGP(DL_ERROR, "MmMapIoSpace failed: 0x%x\n", m);
+            DEBUGP(DL_WARN, "MmMapIoSpace failed: 0x%x (capabilities still valid for enumeration)\n", m);
         }
     } else {
-        DEBUGP(DL_ERROR, "BAR0 discovery failed: 0x%x\n", status);
-        // Continue; device fields might still be filled below if needed
+        DEBUGP(DL_WARN, "BAR0 discovery failed: 0x%x (capabilities still valid for enumeration)\n", status);
     }
 
     ctx->initialized = TRUE;
