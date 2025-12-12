@@ -156,6 +156,36 @@ DriverEntry(
 
 ---
 
+## Architecture Diagrams
+
+The NDIS 6.0 architecture is visualized in the following C4 diagrams:
+
+### Container Diagram (L2)
+**[C4 Container Diagram - NDIS Filter Core Layer](../C4-DIAGRAMS-MERMAID.md#l2-container-diagram)**
+
+Shows the NDIS Filter Core component within the Overall Architecture layer, demonstrating:
+- NDIS 6.0 interface implementation
+- Integration with Filter Manager (FWPM)
+- Packet interception and IOCTL handling pathways
+- Component boundaries within the kernel-mode driver
+
+### Deployment Diagram
+**[C4 Deployment Diagram - Kernel-Mode Placement](../C4-DIAGRAMS-MERMAID.md#deployment-diagram)**
+
+Illustrates the runtime deployment model:
+- NDIS 6.0 filter driver in kernel-mode space
+- Integration with NDIS.sys and Windows network stack
+- Component placement across user-mode/kernel-mode boundary
+
+**Key Insights**:
+- NDIS Filter Core layer provides NDIS 6.0 compatibility abstraction
+- All network packet processing flows through this layer
+- IOCTL communication bridge between user-mode applications and kernel-mode hardware access
+
+For complete architecture documentation, see [C4-DIAGRAMS-MERMAID.md](../C4-DIAGRAMS-MERMAID.md).
+
+---
+
 ## Traceability
 
 Traces to: 
