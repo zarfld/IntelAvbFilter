@@ -16,6 +16,7 @@ applyTo: "04-design/**"
 3. Specify data models and database schemas respecting domain model
 4. Document design patterns and implementation approaches
 5. Create design specifications enabling implementation
+6. **Generate Test Cases (detailed test scenarios with inputs, expected outputs, execution conditions)** (IEEE 1012-2016)
 
 ## 📋 Design Documentation Approach
 
