@@ -34,6 +34,10 @@ extern const struct platform_ops ndis_platform_ops;
 
 /**
  * @brief Get device context and validate
+ * 
+ * CRITICAL FIX: dev->private_data points to struct intel_private, NOT AVB_DEVICE_CONTEXT
+ * The AVB context is stored in priv->platform_data (see avb_integration.c line 251)
+ * 
  * @param dev Device handle
  * @param context_out Output context
  * @param device_type_out Output device type
@@ -41,13 +45,21 @@ extern const struct platform_ops ndis_platform_ops;
  */
 static int get_device_context(device_t *dev, PAVB_DEVICE_CONTEXT *context_out, intel_device_type_t *device_type_out)
 {
+    struct intel_private *priv;
     PAVB_DEVICE_CONTEXT context;
     
     if (dev == NULL) {
         return -1;
     }
     
-    context = (PAVB_DEVICE_CONTEXT)dev->private_data;
+    // CRITICAL: dev->private_data is struct intel_private, not AVB context
+    priv = (struct intel_private *)dev->private_data;
+    if (priv == NULL) {
+        return -1;
+    }
+    
+    // AVB context is stored in priv->platform_data (set in avb_integration.c)
+    context = (PAVB_DEVICE_CONTEXT)priv->platform_data;
     if (context == NULL) {
         return -1;
     }
@@ -57,7 +69,7 @@ static int get_device_context(device_t *dev, PAVB_DEVICE_CONTEXT *context_out, i
     }
     
     if (device_type_out) {
-        *device_type_out = context->intel_device.device_type;
+        *device_type_out = priv->device_type;  // Use device_type from priv, not context
     }
     
     return 0;

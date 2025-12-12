@@ -1499,8 +1499,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
-                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_ERROR, "? TAS SETUP: Hardware not ready (state=%s)\n", 
+                // TAS requires PTP clock running for time-synchronized gate scheduling
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_ERROR, "? TAS SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
                 } else {
@@ -1573,8 +1574,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
-                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_ERROR, "? FP SETUP: Hardware not ready (state=%s)\n", 
+                // Frame Preemption is time-synchronized - requires PTP clock running
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_ERROR, "? FP SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
                 } else {
