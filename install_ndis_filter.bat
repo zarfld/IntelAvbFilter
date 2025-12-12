@@ -54,13 +54,22 @@ if %errorLevel% == 0 (
 
 echo.
 echo Step 4: Registrierung des NDIS Filter Driver...
-echo Verwende pnputil f�r Filter Driver Registration...
-pnputil /add-driver "x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" /install
+echo CRITICAL: NDIS Lightweight Filters require netcfg.exe, not pnputil!
+echo Verwende netcfg.exe f�r korrekte NDIS Filter Registration...
+netcfg.exe -v -l "x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
 if %errorLevel% == 0 (
-    echo ? Filter Driver erfolgreich registriert
+    echo ? Filter Driver erfolgreich mit netcfg registriert
+    goto :TEST_INSTALLATION
 ) else (
-    echo ??  pnputil Registrierung fehlgeschlagen, versuche alternative Methode...
-    goto :ALTERNATIVE_INSTALL
+    echo ??  netcfg Registrierung fehlgeschlagen (Error: %errorLevel%)
+    echo    Versuche pnputil als Fallback...
+    pnputil /add-driver "x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" /install
+    if %errorLevel% == 0 (
+        echo ? pnputil Installation erfolgreich (aber Filter m�glicherweise nicht aktiv)
+    ) else (
+        echo ??  Beide Methoden fehlgeschlagen, versuche manuelle Installation...
+        goto :ALTERNATIVE_INSTALL
+    )
 )
 
 goto :TEST_INSTALLATION

@@ -87,6 +87,11 @@ typedef struct _AVB_DEVICE_CONTEXT {
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
 /*========================================================================
+ * Global active context (set by IOCTL_AVB_OPEN_ADAPTER)
+ *=======================================================================*/
+extern PAVB_DEVICE_CONTEXT g_AvbContext;
+
+/*========================================================================
  * Device lifecycle & IOCTL handling
  *=======================================================================*/
 /**
