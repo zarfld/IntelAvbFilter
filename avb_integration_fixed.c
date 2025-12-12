@@ -64,38 +64,19 @@ NTSTATUS AvbCreateMinimalContext(
     _Outptr_ PAVB_DEVICE_CONTEXT *OutCtx)
 {
     if (!FilterModule || !OutCtx) return STATUS_INVALID_PARAMETER;
-    
-    // Allocate AVB device context
     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(AVB_DEVICE_CONTEXT), FILTER_ALLOC_TAG);
     if (!ctx) return STATUS_INSUFFICIENT_RESOURCES;
     RtlZeroMemory(ctx, sizeof(*ctx));
-    
-    // Allocate Intel library private structure (CRITICAL FIX)
-    struct intel_private *priv = (struct intel_private *)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(struct intel_private), FILTER_ALLOC_TAG);
-    if (!priv) {
-        ExFreePoolWithTag(ctx, FILTER_ALLOC_TAG);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    RtlZeroMemory(priv, sizeof(*priv));
-    
-    // Initialize basic fields
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;
     ctx->intel_device.pci_device_id = DeviceId;
     ctx->intel_device.device_type   = AvbGetIntelDeviceType(DeviceId);
     ctx->hw_state = AVB_HW_BOUND;
-    
-    // CRITICAL: Link intel_device.private_data to the Intel library private structure
-    ctx->intel_device.private_data = priv;
-    
-    // Store back-reference to AVB context in platform_data for callbacks
-    priv->platform_data = ctx;
-    priv->device_type = ctx->intel_device.device_type;
-    
     g_AvbContext = ctx;
     *OutCtx = ctx;
-    DEBUGP(DL_INFO, "AVB minimal context created VID=0x%04X DID=0x%04X state=%s (priv=%p)\n", 
-           VendorId, DeviceId, AvbHwStateName(ctx->hw_state), priv);
+    DEBUGP(DL_INFO, "AVB minimal context created VID=0x%04X DID=0x%04X state=%s\n", VendorId, DeviceId, AvbHwStateName(ctx->hw_state));
+    DEBUGP(DL_ERROR, "!!! DIAG: AvbCreateMinimalContext - DeviceId=0x%04X -> device_type=%d, capabilities=0x%08X\n", 
+           DeviceId, ctx->intel_device.device_type, ctx->intel_device.capabilities);
     return STATUS_SUCCESS;
 }
 
@@ -153,9 +134,13 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     }
     
     // Set baseline capabilities even if hardware init fails
+    DEBUGP(DL_FATAL, "!!! DIAG: AvbBringUpHardware - BEFORE assignment: device_type=%d, old_caps=0x%08X, baseline_caps=0x%08X\n",
+           Ctx->intel_device.device_type, Ctx->intel_device.capabilities, baseline_caps);
     Ctx->intel_device.capabilities = baseline_caps;
     DEBUGP(DL_INFO, "? AvbBringUpHardware: Set baseline capabilities 0x%08X for device type %d\n", 
            baseline_caps, Ctx->intel_device.device_type);
+    DEBUGP(DL_FATAL, "!!! DIAG: AvbBringUpHardware - AFTER assignment: capabilities=0x%08X\n", 
+           Ctx->intel_device.capabilities);
     
     NTSTATUS status = AvbPerformBasicInitialization(Ctx);
     if (!NT_SUCCESS(status)) {
@@ -165,20 +150,21 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         return STATUS_SUCCESS;
     }
     
-    // Device-specific post-initialization
-    DEBUGP(DL_INFO, "? AvbBringUpHardware: hw_state=%s (need BAR_MAPPED)\n", 
+    // Device-specific post-initialization (allocate Intel library private structure)
+    DEBUGP(DL_ERROR, "!!! DEBUG: AvbBringUpHardware hw_state=%s (need BAR_MAPPED)\n", 
            AvbHwStateName(Ctx->hw_state));
     
     if (Ctx->hw_state >= AVB_HW_BAR_MAPPED) {
-        DEBUGP(DL_INFO, "? Calling intel_init() for VID=0x%04X DID=0x%04X DevType=%d\n",
+        DEBUGP(DL_ERROR, "!!! DEBUG: Calling intel_init() for VID=0x%04X DID=0x%04X DevType=%d\n",
                Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id, 
                Ctx->intel_device.device_type);
         
-        // Use intel_init() which dispatches to device-specific operations
-        // The kernel wrapper version (intel_kernel_real.c) handles device ops dispatch
+        // Use intel_init() which properly dispatches to device-specific operations
+        // This calls i226_ops.init() → ndis_platform_ops.init() → AvbPlatformInit()
+        // which initializes PTP clock
         int init_result = intel_init(&Ctx->intel_device);
         
-        DEBUGP(DL_INFO, "? intel_init() returned: %d\n", init_result);
+        DEBUGP(DL_ERROR, "!!! DEBUG: intel_init() returned: %d\n", init_result);
         
         if (init_result == 0) {
             DEBUGP(DL_INFO, "? intel_init() successful - device initialized with PTP and TSN\n");
@@ -186,8 +172,7 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
             DEBUGP(DL_WARN, "?? intel_init() failed: %d (PTP/TSN features unavailable)\n", init_result);
         }
     } else {
-        DEBUGP(DL_WARN, "? SKIPPING intel_init() - hw_state=%s (need BAR_MAPPED)\n",
-               AvbHwStateName(Ctx->hw_state));
+        DEBUGP(DL_ERROR, "!!! DEBUG: SKIPPING intel_init() - hw_state not ready!\n");
     }
     
     return STATUS_SUCCESS;
@@ -239,19 +224,57 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         DEBUGP(DL_INFO, "? STEP 1 SKIPPED: Hardware context already exists (%p)\n", Ctx->hardware_context);
     }
 
-    DEBUGP(DL_INFO, "? STEP 2: Preparing device structure (preserving baseline caps=0x%08X)...\n",
-           Ctx->intel_device.capabilities);
+    DEBUGP(DL_INFO, "? STEP 2: Setting up Intel device structure and private data...\n");
+    // CRITICAL FIX: Do NOT reset capabilities that were set by AvbBringUpHardware
+    // Capabilities are device-specific and set based on hardware specs
+    // This function only adds INTEL_CAP_MMIO after successful BAR0 mapping
     
-    // NOTE: Do NOT reset capabilities here - baseline caps were set by AvbBringUpHardware
-    // We'll add more capabilities as initialization succeeds (INTEL_CAP_MMIO after BAR mapping)
-    
-    DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Device structure prepared (caps=0x%08X)\n",
-           Ctx->intel_device.capabilities);
+    // CRITICAL FIX: Initialize private_data before calling intel_init
+    // The Intel library requires private_data to be allocated and initialized
+    if (Ctx->intel_device.private_data == NULL) {
+        struct intel_private *priv = (struct intel_private *)ExAllocatePool2(
+            POOL_FLAG_NON_PAGED,
+            sizeof(struct intel_private),
+            'IAvb'
+        );
+        if (!priv) {
+            DEBUGP(DL_ERROR, "? STEP 2 FAILED: Cannot allocate private_data\n");
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(priv, sizeof(struct intel_private));
+        
+        // Initialize critical fields
+        priv->device_type = Ctx->intel_device.device_type;
+        
+        // **CRITICAL FIX**: Connect platform_data to Windows hardware context
+        // This allows intel_avb library to access AVB_DEVICE_CONTEXT for platform operations
+        priv->platform_data = (void*)Ctx;
+        DEBUGP(DL_FATAL, "!!! DIAG: STEP 2a: platform_data -> Ctx=%p (enables AvbMmioReadReal access)\n", Ctx);
+        
+        // CRITICAL: hardware_context might be NULL or uninitialized at this point
+        // Only access it if we've already mapped hardware (Step 1 succeeded)
+        if (Ctx->hardware_context != NULL && Ctx->hw_state >= AVB_HW_BAR_MAPPED) {
+            PINTEL_HARDWARE_CONTEXT hwCtx = (PINTEL_HARDWARE_CONTEXT)Ctx->hardware_context;
+            priv->mmio_base = hwCtx->mmio_base;
+            DEBUGP(DL_FATAL, "!!! DIAG: STEP 2b: mmio_base=%p from hardware_context\n", priv->mmio_base);
+        } else {
+            priv->mmio_base = NULL; // Will be set later when hardware is mapped
+            DEBUGP(DL_FATAL, "!!! DIAG: STEP 2b: MMIO not yet mapped, deferring\n");
+        }
+        priv->initialized = 0;
+        
+        Ctx->intel_device.private_data = priv;
+        DEBUGP(DL_INFO, "? STEP 2b: Allocated private_data (size=%u, ptr=%p)\n", 
+               sizeof(struct intel_private), priv);
+    }
+    DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Device structure prepared with private_data\n");
 
     DEBUGP(DL_INFO, "? STEP 3: Calling intel_init library function...\n");
-    DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X\n", Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+    DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X private_data=%p\n", 
+           Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id, 
+           Ctx->intel_device.private_data);
     
-    // Now call intel_init() - kernel wrapper version dispatches to device ops
+    // Now call device-specific initialization
     if (intel_init(&Ctx->intel_device) != 0) {
         DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
         return STATUS_UNSUCCESSFUL;
@@ -363,27 +386,9 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
 VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 {
     if (!AvbContext) return;
-    
-    // Unmap hardware resources
     if (AvbContext->hardware_context) {
         AvbUnmapIntelControllerMemory(AvbContext);
     }
-    
-    // Free Intel library private structure
-    if (AvbContext->intel_device.private_data) {
-        struct intel_private *priv = (struct intel_private *)AvbContext->intel_device.private_data;
-        
-        // Free device-specific private data if allocated by Intel library
-        // Now safe because we provide malloc/calloc/free shims in precomp.h
-        if (priv->device_private) {
-            free(priv->device_private);  // Uses our kernel-mode free() shim
-            priv->device_private = NULL;
-        }
-        
-        ExFreePoolWithTag(priv, FILTER_ALLOC_TAG);
-        AvbContext->intel_device.private_data = NULL;
-    }
-    
     if (g_AvbContext == AvbContext) g_AvbContext = NULL;
     ExFreePoolWithTag(AvbContext, FILTER_ALLOC_TAG);
 }
@@ -403,38 +408,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     ULONG_PTR info = 0; 
     NTSTATUS status = STATUS_SUCCESS;
 
-    // DIAGNOSTIC: Mark buffer to prove we reached this function
-    if (code == IOCTL_AVB_GET_CLOCK_CONFIG && outLen >= sizeof(ULONG)) {
-        *(PULONG)buf = 0xAAAA0001;  // Marker: reached AvbHandleDeviceIoControl
-        Irp->IoStatus.Information = sizeof(ULONG);
-    }
-
     // Use current context for all operations to avoid shadowing warnings
     PAVB_DEVICE_CONTEXT currentContext = g_AvbContext ? g_AvbContext : AvbContext;
 
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    // BUGFIX: Allow read-only IOCTLs even if not fully initialized, as long as hw_state >= BAR_MAPPED
-    // This allows GET_CLOCK_CONFIG, READ_REGISTER etc. to work after hardware is accessible
-    if (!currentContext->initialized && 
-        code != IOCTL_AVB_ENUM_ADAPTERS && 
-        code != IOCTL_AVB_INIT_DEVICE && 
-        code != IOCTL_AVB_GET_HW_STATE &&
-        code != IOCTL_AVB_READ_REGISTER &&
-        code != IOCTL_AVB_GET_CLOCK_CONFIG &&
-        code != IOCTL_AVB_GET_DEVICE_INFO) {
-        // DIAGNOSTIC: Mark if we're taking early return path
-        if (code == IOCTL_AVB_GET_CLOCK_CONFIG && outLen >= sizeof(ULONG)) {
-            *(PULONG)buf = 0xBBBB0002;  // Marker: took early return path
-            Irp->IoStatus.Information = sizeof(ULONG);
-        }
+    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE)
         return STATUS_DEVICE_NOT_READY;
-    }
-
-    // DIAGNOSTIC: Mark that we passed early return check
-    if (code == IOCTL_AVB_GET_CLOCK_CONFIG && outLen >= sizeof(ULONG)) {
-        *(PULONG)buf = 0xCCCC0003;  // Marker: passed early return check
-        Irp->IoStatus.Information = sizeof(ULONG);
-    }
 
     switch (code) {
     case IOCTL_AVB_INIT_DEVICE:
@@ -610,12 +589,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; 
                     RtlZeroMemory(r->device_info, sizeof(r->device_info)); 
                     
-                    // CRITICAL FIX: Ensure the intel device structure points to the correct adapter
-                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
-                        activeContext->intel_device.private_data = activeContext;
-                        DEBUGP(DL_INFO, "?? DEVICE_INFO: Intel device structure updated for VID=0x%04X DID=0x%04X\n",
-                               activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
-                    }
+// Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_INFO, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
                     int rc = intel_get_device_info(&activeContext->intel_device, r->device_info, sizeof(r->device_info)); 
@@ -670,10 +644,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 } else {
                     PAVB_REGISTER_REQUEST r = (PAVB_REGISTER_REQUEST)buf; 
                     
-                    // CRITICAL FIX: Ensure the Intel library is using the correct hardware context
-                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
-                        activeContext->intel_device.private_data = activeContext;
-                    }
+                    // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_TRACE, "Register %s: offset=0x%05X, context VID=0x%04X DID=0x%04X (type=%d)\n",
                            (code == IOCTL_AVB_READ_REGISTER) ? "READ" : "WRITE",
@@ -774,23 +745,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     /* Production-ready clock configuration query IOCTL */
     case IOCTL_AVB_GET_CLOCK_CONFIG:
         {
-            // DIAGNOSTIC: Increment global counter to prove this code executes
-            static volatile LONG call_counter = 0;
-            LONG count = InterlockedIncrement(&call_counter);
-            
-            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_GET_CLOCK_CONFIG: Entry point reached (call #%ld)\n", count);
+            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_GET_CLOCK_CONFIG: Entry point reached\n");
             DEBUGP(DL_ERROR, "    inLen=%lu outLen=%lu required=%lu\n", inLen, outLen, (ULONG)sizeof(AVB_CLOCK_CONFIG));
-            
-            // FORCE info to be set NO MATTER WHAT - diagnostic to see if this code even runs
-            PAVB_CLOCK_CONFIG cfg = (PAVB_CLOCK_CONFIG)buf;
-            NdisZeroMemory(cfg, sizeof(*cfg));
-            cfg->status = 0xDEAD0000 | (count & 0xFFFF);  // Marker with call count
-            info = sizeof(*cfg);
-            status = STATUS_SUCCESS;
             
             if (inLen < sizeof(AVB_CLOCK_CONFIG) || outLen < sizeof(AVB_CLOCK_CONFIG)) {
                 DEBUGP(DL_ERROR, "!!! Buffer too small - returning error\n");
-                cfg->status = 0xBAD00001;
+                status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 DEBUGP(DL_ERROR, "!!! activeContext=%p (g_AvbContext=%p, AvbContext=%p)\n", 
@@ -799,20 +759,13 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "Clock config query failed: Hardware not ready (state=%s)\n", 
                            AvbHwStateName(activeContext->hw_state));
-                    // BUGFIX: Return structure with error status instead of failing completely
-                    // This ensures bytesReturned != 0 so caller knows we processed the request
-                    NdisZeroMemory(cfg, sizeof(*cfg));
-                    cfg->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
-                    status = STATUS_SUCCESS;  // Windows needs SUCCESS for bytesReturned to work
-                    info = sizeof(*cfg);
+                    status = STATUS_DEVICE_NOT_READY;
                 } else {
+                    PAVB_CLOCK_CONFIG cfg = (PAVB_CLOCK_CONFIG)buf;
                     
-                    // CRITICAL FIX: ALWAYS set private_data for hardware access
-                    // The Intel library needs this to find the MMIO base address
-                    activeContext->intel_device.private_data = activeContext;
-                    
-                    DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: Set private_data=%p, hw_context=%p, hw_access=%d\n",
-                           activeContext, activeContext->hardware_context, activeContext->hw_access_enabled);
+                    // Note: private_data already points to struct intel_private with platform_data set during initialization
+                    DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: hw_context=%p, hw_access=%d\n",
+                           activeContext->hardware_context, activeContext->hw_access_enabled);
                     
                     // Well-known PTP register offsets (common across all Intel PTP devices)
                     const ULONG SYSTIML_REG = 0x0B600;
@@ -1271,9 +1224,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     DEBUGP(DL_WARN, "Timestamp access: Hardware state %s, checking PTP clock\n",
                            AvbHwStateName(activeContext->hw_state));
                     
-                    // CRITICAL FIX: Ensure Intel library has correct hardware context
-                    // Set UNCONDITIONALLY - required for AvbMmioReadReal
-                    activeContext->intel_device.private_data = activeContext;
+                    // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     // If we have BAR access, check if PTP clock is already running
                     if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
@@ -1289,9 +1240,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 || 
                                 dev_type == INTEL_DEVICE_I226) {
                                 DEBUGP(DL_INFO, "Attempting PTP initialization for device type %d\n", dev_type);
-                                (void)AvbEnsureDeviceReady(activeContext);
-                                DEBUGP(DL_INFO, "PTP initialization completed, new state: %s\n", 
-                                       AvbHwStateName(activeContext->hw_state));
+                                NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
+                                DEBUGP(DL_INFO, "PTP initialization result: 0x%08X, new state: %s\n", 
+                                       init_result, AvbHwStateName(activeContext->hw_state));
                             } else {
                                 DEBUGP(DL_WARN, "Device type %d does not support PTP initialization\n", dev_type);
                             }
@@ -1489,17 +1440,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 // Make the target context the active global context
                 g_AvbContext = targetContext;
                 
-                // CRITICAL FIX: Ensure the Intel library device structure points to the correct hardware context
-                // This was the missing piece - the Intel library wasn't updated when context switched
-                if (targetContext->hardware_context && targetContext->hw_access_enabled) {
-                    DEBUGP(DL_INFO, "?? OPEN_ADAPTER: Updating Intel library device structure\n");
-                    DEBUGP(DL_INFO, "   - Intel device private_data: %p -> %p\n", 
-                           targetContext->intel_device.private_data, targetContext);
-                    DEBUGP(DL_INFO, "   - Hardware context: %p\n", targetContext->hardware_context);
-                    
-                    // Ensure Intel library device points to this specific hardware context
-                    targetContext->intel_device.private_data = targetContext;
-                }
+                // Note: private_data already points to struct intel_private with platform_data set during initialization
                 
                 // Ensure the target context is fully initialized
                 if (!targetContext->initialized || targetContext->hw_state < AVB_HW_BAR_MAPPED) {
@@ -1547,39 +1488,44 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         break;
     case IOCTL_AVB_SETUP_TAS:
         {
+            DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_TAS ENTERED - inLen=%lu outLen=%lu required=%lu\n",
+                   inLen, outLen, (ULONG)sizeof(AVB_TAS_REQUEST));
             DEBUGP(DL_INFO, "? IOCTL_AVB_SETUP_TAS: Phase 2 Enhanced TAS Configuration\n");
             
             if (inLen < sizeof(AVB_TAS_REQUEST) || outLen < sizeof(AVB_TAS_REQUEST)) {
+                DEBUGP(DL_FATAL, "!!! DIAG: TAS SETUP FAILED - Buffer too small\n");
                 DEBUGP(DL_ERROR, "? TAS SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
-                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_ERROR, "? TAS SETUP: Hardware not ready (state=%s)\n", 
+                // TAS requires PTP clock running for time-synchronized gate scheduling
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_ERROR, "? TAS SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
                 } else {
                     PAVB_TAS_REQUEST r = (PAVB_TAS_REQUEST)buf;
                     
-                    // Ensure Intel library is using the correct hardware context
-                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
-                        activeContext->intel_device.private_data = activeContext;
-                    }
+                    // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_INFO, "?? TAS SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                     
                     // Check if this device supports TAS
                     if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
+                        DEBUGP(DL_FATAL, "!!! DIAG: TAS NOT SUPPORTED - caps=0x%08X (need INTEL_CAP_TSN_TAS=0x%08X)\n",
+                               activeContext->intel_device.capabilities, INTEL_CAP_TSN_TAS);
                         DEBUGP(DL_WARN, "? TAS SETUP: Device does not support TAS (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
                         // Call Intel library TAS setup function (standard implementation)
+                        DEBUGP(DL_FATAL, "!!! DIAG: Calling intel_setup_time_aware_shaper...\n");
                         DEBUGP(DL_INFO, "? TAS SETUP: Calling Intel library TAS implementation\n");
                         int rc = intel_setup_time_aware_shaper(&activeContext->intel_device, &r->config);
+                        DEBUGP(DL_FATAL, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
@@ -1617,25 +1563,26 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SETUP_FP:
         {
+            DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_FP ENTERED - inLen=%lu outLen=%lu required=%lu\n",
+                   inLen, outLen, (ULONG)sizeof(AVB_FP_REQUEST));
             DEBUGP(DL_INFO, "? IOCTL_AVB_SETUP_FP: Phase 2 Enhanced Frame Preemption Configuration\n");
             
             if (inLen < sizeof(AVB_FP_REQUEST) || outLen < sizeof(AVB_FP_REQUEST)) {
+                DEBUGP(DL_FATAL, "!!! DIAG: FP SETUP FAILED - Buffer too small\n");
                 DEBUGP(DL_ERROR, "? FP SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
-                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_ERROR, "? FP SETUP: Hardware not ready (state=%s)\n", 
+                // Frame Preemption is time-synchronized - requires PTP clock running
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_ERROR, "? FP SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
                 } else {
                     PAVB_FP_REQUEST r = (PAVB_FP_REQUEST)buf;
                     
-                    // Ensure Intel library is using the correct hardware context
-                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
-                        activeContext->intel_device.private_data = activeContext;
-                    }
+                    // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_INFO, "?? FP SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
@@ -1684,9 +1631,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SETUP_PTM:
         {
+            DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_PTM ENTERED - inLen=%lu outLen=%lu required=%lu\n",
+                   inLen, outLen, (ULONG)sizeof(AVB_PTM_REQUEST));
             DEBUGP(DL_INFO, "? IOCTL_AVB_SETUP_PTM: Phase 2 Enhanced PTM Configuration\n");
             
             if (inLen < sizeof(AVB_PTM_REQUEST) || outLen < sizeof(AVB_PTM_REQUEST)) {
+                DEBUGP(DL_FATAL, "!!! DIAG: PTM SETUP FAILED - Buffer too small\n");
                 DEBUGP(DL_ERROR, "? PTM SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -1699,10 +1649,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 } else {
                     PAVB_PTM_REQUEST r = (PAVB_PTM_REQUEST)buf;
                     
-                    // Ensure Intel library is using the correct hardware context
-                    if (activeContext->hardware_context && activeContext->hw_access_enabled) {
-                        activeContext->intel_device.private_data = activeContext;
-                    }
+                    // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_INFO, "?? PTM SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);

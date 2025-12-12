@@ -692,9 +692,17 @@ int main(int argc, char* argv[]) {
     
     printf("✓ Driver opened successfully\n\n");
     
-    // Initialize device
+    // Initialize device - CRITICAL for hardware access
+    printf("[INIT] Calling IOCTL_AVB_INIT_DEVICE...\n");
     DWORD bytesReturned = 0;
-    DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &bytesReturned, NULL);
+    BOOL initResult = DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &bytesReturned, NULL);
+    if (!initResult) {
+        printf("⚠️  IOCTL_AVB_INIT_DEVICE FAILED (Error: %lu)\n", GetLastError());
+        printf("    Hardware will NOT be initialized - capabilities will be 0!\n");
+        printf("    Continuing anyway to show failure pattern...\n\n");
+    } else {
+        printf("✓ IOCTL_AVB_INIT_DEVICE succeeded\n\n");
+    }
     
     // Run all tests
     Test_01_EnumAdapters(h);
