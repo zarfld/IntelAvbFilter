@@ -16,6 +16,7 @@ applyTo: "03-architecture/**"
 4. Identify architectural patterns and styles
 5. Define component boundaries and interfaces
 6. Establish technical foundation for detailed design
+7. **Generate System Integration Test Design and System Qualification Test Design** (IEEE 1012-2016)
 
 ## 📋 Architecture Documentation Approach
 

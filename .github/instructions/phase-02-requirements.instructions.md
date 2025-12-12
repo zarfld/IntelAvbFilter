@@ -15,6 +15,7 @@ applyTo: "02-requirements/**"
 3. Create detailed use cases and user stories
 4. Establish requirements traceability
 5. Define testable acceptance criteria
+6. **Generate System Acceptance Test Plan and System Qualification Test Plan** (IEEE 1012-2016)
 
 ## 📋 Requirements Capture Method
 
@@ -79,6 +80,407 @@ Acceptance Criteria:
 - Define acceptance tests BEFORE implementation
 - Make acceptance criteria executable
 - Customer defines acceptance tests
+
+## 🧪 Testing Artifacts in Phase 02 (IEEE 1012-2016 V&V)
+
+### Critical Distinction: Testing Is Not Just Execution
+
+**Testing is a lifecycle-parallel process of planning, design, and execution.** Testing artifacts are created throughout the development lifecycle, not just during implementation or validation phases.
+
+### IEEE 1012-2016 Requirements Phase V&V Tasks
+
+During the **System Requirements Definition** phase, V&V requires generating:
+
+1. **System Acceptance Test Plan**
+   - **Purpose**: Define how the system will be validated against stakeholder needs
+   - **Content**: Test strategy, scope, resources, schedule, acceptance criteria
+   - **Traceability**: Each stakeholder requirement → Acceptance test approach
+   - **XP Equivalent**: Customer acceptance tests written as user stories
+
+2. **System Qualification Test Plan**
+   - **Purpose**: Define how system requirements will be verified
+   - **Content**: Test approach for functional and non-functional requirements
+   - **Traceability**: Each system requirement → Qualification test method
+   - **XP Equivalent**: Executable acceptance tests (specification by example)
+
+### Test Artifacts Across Lifecycle Phases
+
+| Lifecycle Phase | IEEE 1012 Artifact | TDD/Agile Equivalent | Purpose |
+|-----------------|-------------------|---------------------|---------|
+| **Requirements (Phase 02)** | Test **Plan** (Acceptance/Qualification) | Acceptance Tests (User Stories) | Define WHAT to test and HOW to measure success |
+| **Architecture (Phase 03)** | Test **Design** (Integration/System) | System Metaphor / Spike Solutions | Design test approach for components and integration |
+| **Design (Phase 04)** | Test **Cases** (detailed scenarios) | Unit Tests (TDD - written BEFORE code) | Specify inputs, expected outputs, execution conditions |
+| **Implementation (Phase 05)** | Test **Procedures** & Execution | Code Implementation & Refactoring | Execute tests, implement code to pass tests |
+
+### Why Test Planning Happens in Phase 02
+
+**Objective Acceptance Criteria**: By defining test plans during requirements, you ensure:
+- ✅ Requirements are testable (if you can't define how to test it, it's not verifiable)
+- ✅ Stakeholders agree on success criteria before implementation begins
+- ✅ Ambiguous requirements are exposed early (clarification before coding)
+- ✅ Traceability established from requirement → test → implementation
+- ✅ Cost of defect detection reduced (cheaper to fix requirements than code)
+
+### TDD/Agile Perspective: Tests Drive Requirements Clarity
+
+**In TDD, writing the test IS the requirements clarification activity:**
+- Writing acceptance tests forces you to clarify vague requirements
+- If a test is difficult to write, the requirement is incomplete or ambiguous
+- Executable tests become living documentation of expected behavior
+- Stakeholders validate requirements by reviewing/approving tests
+
+### Phase 02 Test Deliverables
+
+#### 1. System Acceptance Test Plan Template
+
+**Location**: `02-requirements/test-plans/system-acceptance-test-plan.md`
+
+```markdown
+# System Acceptance Test Plan
+
+**Standard**: IEEE 1012-2016, IEEE 829-2008  
+**Project**: [Project Name]  
+**Version**: 1.0  
+**Date**: [Date]
+
+## 1. Introduction
+
+### 1.1 Purpose
+Define how the system will be validated against stakeholder requirements to ensure it solves the right problem for stakeholders.
+
+### 1.2 Scope
+This plan covers acceptance testing for all stakeholder requirements (StR) documented in Phase 01.
+
+### 1.3 References
+- Stakeholder Requirements Specification (StRS) - GitHub Issues labeled `type:stakeholder-requirement`
+- ISO/IEC/IEEE 29148:2018 - Requirements Engineering
+- IEEE 1012-2016 - Verification and Validation
+
+## 2. Test Strategy
+
+### 2.1 Test Approach
+- **Customer-Driven**: Stakeholders define acceptance criteria
+- **Scenario-Based**: Real-world usage scenarios
+- **Executable**: Automated where possible (Gherkin/Cucumber)
+- **Early Validation**: Acceptance tests written during requirements phase
+
+### 2.2 Test Levels
+- **Alpha Testing**: Internal validation with simulated stakeholder scenarios
+- **Beta Testing**: External validation with actual stakeholders
+- **User Acceptance Testing (UAT)**: Final stakeholder sign-off
+
+### 2.3 Test Types
+- Functional acceptance (business processes work correctly)
+- Operational acceptance (system meets operational needs)
+- Contractual acceptance (meets contractual obligations)
+- Regulatory acceptance (compliance requirements)
+
+## 3. Traceability Matrix: StR → Acceptance Tests
+
+| Stakeholder Requirement | Acceptance Test ID | Test Method | Priority | Stakeholder |
+|------------------------|-------------------|-------------|----------|-------------|
+| StR-001: [Requirement] | AT-001 | Scenario-based | P0 | [Name] |
+| StR-002: [Requirement] | AT-002 | Demonstration | P1 | [Name] |
+
+## 4. Acceptance Criteria
+
+For each stakeholder requirement, define:
+- **Given**: Initial context/preconditions
+- **When**: Action or event
+- **Then**: Expected outcome (measurable)
+
+### Example: StR-001 Acceptance Criteria
+```gherkin
+Feature: User Authentication
+  As a system administrator
+  I want secure user authentication
+  So that only authorized users access the system
+
+Scenario: Successful login with valid credentials
+  Given a registered user with username "testuser" and password "SecurePass123!"
+  And the system is operational
+  When the user submits valid credentials
+  Then the user is authenticated within 2 seconds
+  And the user session is created
+  And the user is redirected to the dashboard
+
+Scenario: Failed login with invalid password
+  Given a registered user with username "testuser"
+  When the user submits an incorrect password
+  Then the system displays "Invalid credentials" error
+  And the login attempt is logged
+  And the user is NOT authenticated
+
+Scenario: Account lockout after 3 failed attempts
+  Given a registered user with username "testuser"
+  When the user submits incorrect password 3 times
+  Then the account is locked for 15 minutes
+  And the user receives "Account locked" message
+  And an email is sent to the user's registered email
+```
+
+## 5. Test Resources
+
+### 5.1 Stakeholder Availability
+- [Stakeholder Name]: [Availability schedule]
+- Test participants needed: [Number and roles]
+
+### 5.2 Test Environment
+- Production-like environment required
+- Test data: [Description]
+- Tools: [Cucumber, Selenium, etc.]
+
+## 6. Schedule
+
+| Milestone | Date | Responsible |
+|-----------|------|-------------|
+| Test plan approval | [Date] | [Name] |
+| Test scenarios written | [Date] | [Name] |
+| Alpha testing | [Date] | [Team] |
+| Beta testing | [Date] | [Stakeholders] |
+| UAT sign-off | [Date] | [Stakeholder] |
+
+## 7. Success Criteria
+
+System acceptance testing is complete when:
+- ✅ All P0 (critical) stakeholder requirements validated
+- ✅ 95% of P1 (high) stakeholder requirements validated
+- ✅ No critical defects open
+- ✅ Stakeholder formal sign-off obtained
+
+## 8. Risks and Mitigation
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Stakeholder unavailable | High | Identify backup stakeholders |
+| Test environment delays | Medium | Prepare staging environment early |
+```
+
+#### 2. System Qualification Test Plan Template
+
+**Location**: `02-requirements/test-plans/system-qualification-test-plan.md`
+
+```markdown
+# System Qualification Test Plan
+
+**Standard**: IEEE 1012-2016, IEEE 829-2008  
+**Project**: [Project Name]  
+**Version**: 1.0  
+**Date**: [Date]
+
+## 1. Introduction
+
+### 1.1 Purpose
+Define how system requirements (functional and non-functional) will be verified to ensure the system is built correctly according to specifications.
+
+### 1.2 Scope
+This plan covers qualification testing for all system requirements (REQ-F, REQ-NF) documented in Phase 02.
+
+## 2. Test Strategy
+
+### 2.1 Test Approach
+- **Requirements-Based**: Every requirement has verification method
+- **Multi-Level**: Unit → Integration → System → Acceptance
+- **TDD-Driven**: Tests written before implementation (Phase 05)
+- **Automated**: Continuous integration with automated test execution
+
+### 2.2 Verification Methods (per IEEE 1012)
+
+For each requirement, specify verification method:
+
+| Method | Description | When to Use | Example |
+|--------|-------------|-------------|---------|
+| **Test** | Execute with defined inputs, verify outputs | Most functional requirements | Login function test |
+| **Analysis** | Mathematical/logical proof | Algorithms, performance models | Throughput calculation |
+| **Inspection** | Visual examination | UI requirements, documentation | Screen layout review |
+| **Demonstration** | Operational verification | User workflows | End-to-end scenario demo |
+
+## 3. Traceability Matrix: REQ → Qualification Tests
+
+| System Requirement | Verification Method | Test Case IDs | Test Design Phase | Test Execution Phase |
+|-------------------|---------------------|---------------|------------------|---------------------|
+| REQ-F-001: User login | Test | TC-F-001 to TC-F-005 | Phase 04 | Phase 05 |
+| REQ-NF-001: Response time <200ms | Test + Analysis | TC-NF-001, TC-NF-002 | Phase 04 | Phase 05 |
+| REQ-F-002: Password reset | Test | TC-F-010 to TC-F-012 | Phase 04 | Phase 05 |
+
+**Critical**: Every REQ-F and REQ-NF MUST have at least one verification method defined.
+
+## 4. Test Design Approach (Detailed in Phase 04)
+
+While test **plans** are created in Phase 02, test **cases** are designed in Phase 04 (Design phase).
+
+### 4.1 Functional Test Cases (REQ-F)
+For each functional requirement, design test cases covering:
+- **Happy path**: Normal expected operation
+- **Alternative paths**: Valid variations
+- **Error paths**: Invalid inputs, error conditions
+- **Boundary conditions**: Min/max values, edge cases
+
+### 4.2 Non-Functional Test Cases (REQ-NF)
+
+#### Performance Tests
+- **Load testing**: System behavior under expected load
+- **Stress testing**: Behavior beyond normal capacity
+- **Endurance testing**: Sustained operation over time
+- **Spike testing**: Sudden load increases
+
+#### Security Tests
+- **Authentication tests**: Valid/invalid credentials
+- **Authorization tests**: Access control verification
+- **Injection tests**: SQL injection, XSS prevention
+- **Encryption tests**: Data protection verification
+
+#### Usability Tests
+- **Task completion**: Time to complete core tasks
+- **Error recovery**: User can recover from mistakes
+- **Learnability**: New user productivity metrics
+
+## 5. Test Environment Requirements
+
+### 5.1 Hardware
+- [Specification of test hardware]
+
+### 5.2 Software
+- Operating systems: [List]
+- Databases: [List]
+- Browsers: [List for web applications]
+
+### 5.3 Test Data
+- Production-like data (anonymized)
+- Boundary condition data sets
+- Invalid/malicious data for security tests
+
+## 6. Test Execution Schedule (Phase 05)
+
+| Test Level | Phase | Responsible | Duration |
+|-----------|-------|-------------|----------|
+| Unit Tests (TDD) | Phase 05 | Developers | Continuous |
+| Integration Tests | Phase 06 | Dev + QA | 2 weeks |
+| System Tests | Phase 07 | QA Team | 3 weeks |
+| Acceptance Tests | Phase 07 | Stakeholders | 1 week |
+
+## 7. Success Criteria
+
+System qualification testing is complete when:
+- ✅ 100% of REQ-F requirements verified (all test cases pass)
+- ✅ 100% of REQ-NF requirements verified (metrics met)
+- ✅ Test coverage ≥ 80% (code coverage)
+- ✅ No critical or high-severity defects open
+- ✅ All verification evidence documented and traceable
+
+## 8. Defect Management
+
+### 8.1 Severity Levels
+- **Critical**: System unusable, data loss, security breach
+- **High**: Major functionality broken, no workaround
+- **Medium**: Functionality impaired, workaround exists
+- **Low**: Minor issue, cosmetic defect
+
+### 8.2 Defect Workflow
+1. Defect identified during testing
+2. Logged as GitHub Issue with label `type:defect`
+3. Linked to failing requirement (e.g., "Breaks REQ-F-042")
+4. Prioritized and assigned
+5. Fixed with PR linking defect issue
+6. Verified with regression test
+7. Defect issue closed
+
+## 9. Test Deliverables
+
+- [ ] System Qualification Test Plan (this document) - **Phase 02**
+- [ ] Test Design Specification - **Phase 03** (Architecture)
+- [ ] Test Case Specifications - **Phase 04** (Design)
+- [ ] Test Procedures - **Phase 05** (Implementation)
+- [ ] Test Results and Reports - **Phase 07** (V&V)
+- [ ] Verification and Validation Report - **Phase 07**
+```
+
+### Integration with GitHub Issues
+
+**Link test plans to requirements**:
+
+When creating REQ-F or REQ-NF issue:
+
+```markdown
+## Verification Method
+**Primary Method**: Test  
+**Test Plan**: System Qualification Test Plan (Section 3.5)  
+**Test Case IDs**: TC-F-042-001 to TC-F-042-005 (to be created in Phase 04)
+
+**Acceptance Criteria** (testable):
+Given [context]
+When [action]
+Then [measurable outcome]
+
+**Metrics** (for REQ-NF):
+- Response time: <200ms (p95)
+- Throughput: >10,000 TPS
+- Error rate: <0.01%
+
+## Test Strategy Notes
+- Unit tests: Verify function-level behavior
+- Integration tests: Verify component interaction
+- System tests: Verify end-to-end workflow
+- Performance tests: Load test with 1000 concurrent users
+```
+
+### XP Perspective: Tests as Specifications
+
+**In XP/TDD, acceptance tests ARE the detailed requirements:**
+
+```gherkin
+# File: 02-requirements/acceptance-tests/login-authentication.feature
+
+Feature: User Authentication (REQ-F-042)
+  As a registered user
+  I want to securely log in to the system
+  So that I can access my personalized dashboard
+
+  Background:
+    Given the system is operational
+    And the following users exist:
+      | username | password | role |
+      | alice | SecurePass1! | admin |
+      | bob | SecurePass2! | user |
+
+  @critical @req-f-042
+  Scenario: Successful login with valid credentials
+    Given I am on the login page
+    When I enter username "alice"
+    And I enter password "SecurePass1!"
+    And I click "Login"
+    Then I should be redirected to "/dashboard" within 2 seconds
+    And I should see "Welcome, alice"
+    And my session should be active
+
+  @critical @req-f-042
+  Scenario: Failed login with invalid password
+    Given I am on the login page
+    When I enter username "alice"
+    And I enter password "WrongPassword"
+    And I click "Login"
+    Then I should remain on the login page
+    And I should see error "Invalid username or password"
+    And my failed attempt should be logged
+    And no session should be created
+
+  @security @req-f-042 @req-nf-sec-003
+  Scenario: Account lockout after 3 failed attempts
+    Given I am on the login page
+    When I attempt login with username "alice" and wrong password 3 times
+    Then I should see error "Account locked due to multiple failed attempts"
+    And the account "alice" should be locked for 15 minutes
+    And an email should be sent to alice's registered email address
+    And I should not be able to login even with correct password for 15 minutes
+```
+
+These Gherkin scenarios serve as:
+1. **Executable specifications** (run with Cucumber/SpecFlow)
+2. **Living documentation** (always up-to-date)
+3. **Acceptance tests** (stakeholder validates by reviewing scenarios)
+4. **Detailed requirements** (Given-When-Then clarifies expected behavior)
+
+
 
 ## 📝 Requirements Documentation Approach
 
@@ -669,10 +1071,13 @@ Each requirement must be:
 ✅ All non-functional requirements documented with metrics  
 ✅ Use cases written for key scenarios  
 ✅ User stories created with acceptance tests  
-✅ Traceability matrix complete (REQ → StR)  
+✅ **System Acceptance Test Plan complete** (IEEE 1012-2016)  
+✅ **System Qualification Test Plan complete** (IEEE 1012-2016)  
+✅ Traceability matrix complete (REQ → StR, REQ → Test Plan)  
 ✅ Requirements reviewed and approved by stakeholders  
 ✅ Requirements baseline established  
 ✅ No unresolved conflicts or ambiguities  
+✅ **Every requirement has defined verification method** (Test/Analysis/Inspection/Demonstration)  
 
 ## 🔗 Traceability
 
