@@ -410,6 +410,53 @@ Traces to:
 
 ---
 
+## Status
+
+**Current Status**: Accepted (2025-12-09)
+
+**Decision Made By**: Architecture Team, Security Team
+
+**Stakeholder Approval**:
+- [x] Security Review Team - Approved (compile-time security boundaries meet CWE-749 mitigation)
+- [x] Driver Implementation Team - Approved (NDEBUG guards implemented in filter.c)
+- [x] Testing Team - Approved (debug builds verified with diagnostic IOCTLs)
+- [x] Release Management - Approved (release builds verified without raw register access)
+
+**Rationale for Acceptance**:
+- Eliminates dangerous IOCTL attack surface in production (principle of least privilege)
+- Compile-time enforcement prevents accidental exposure (no runtime overhead)
+- Preserves diagnostic flexibility in development builds
+- Aligns with industry standard NDEBUG convention
+- Zero performance impact (removed code doesn't execute)
+
+**Implementation Status**: Complete
+- NDEBUG guards implemented in `filter.c` (DeviceControl dispatch)
+- Debug builds tested with `IOCTL_AVB_READ_REGISTER` and `IOCTL_AVB_WRITE_REGISTER`
+- Release builds verified to return STATUS_INVALID_DEVICE_REQUEST
+- Build system configured (Debug: NDEBUG undefined, Release: NDEBUG defined)
+- Documentation updated (SECURITY_IOCTL_RESTRICTION.md)
+
+---
+
+## Approval
+
+**Approval Criteria Met**:
+- [x] Security vulnerability (CWE-749) mitigated via compile-time removal
+- [x] Development workflow preserved (debug builds retain diagnostic capabilities)
+- [x] Zero runtime performance impact (removed code doesn't execute)
+- [x] Industry-standard NDEBUG convention followed
+- [x] Build system integration verified (Debug/Release configurations)
+- [x] Test coverage complete (debug and release builds validated)
+
+**Review History**:
+- 2025-12-09: Architecture Team reviewed and approved NDEBUG guard strategy
+- 2025-12-09: Security Team validated CWE-749 mitigation approach
+- 2025-12-09: Implementation verified in filter.c
+
+**Next Review Date**: On security audit or when adding new diagnostic IOCTLs
+
+---
+
 ## Notes
 
 - NDEBUG guards implement "No Shortcuts" principle (security cannot be optional)

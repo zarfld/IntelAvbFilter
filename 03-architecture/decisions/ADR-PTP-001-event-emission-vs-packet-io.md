@@ -453,6 +453,46 @@ def consume_packets():
 
 ---
 
+## Status
+
+**Current Status**: Proposed (2025-12-12)
+
+**Decision Made By**: Architecture Team
+
+**Stakeholder Approval**:
+- [ ] Driver Implementation Team (pending prototype)
+- [ ] Security Review Team (pending security analysis)
+- [ ] Performance Testing Team (pending latency validation)
+- [ ] User-Mode Integration Team (pending API validation)
+
+**Rationale for Proposal**:
+- Addresses critical gap in PTP timestamp correlation (#149)
+- Enables gPTP L2 protocol analysis and TSN validation
+- Provides foundation for Wireshark integration
+- Balances performance (<1µs) with security (kernel ring buffer isolation)
+
+**Implementation Status**: Proposed - pending spike solution
+- Ring buffer infrastructure exists (ADR-PERF-004)
+- PTP timestamp extraction implemented (REQ-F-PTP-001)
+- Event correlation logic needs implementation
+- User-mode consumer API needs design
+- Security validation pending
+
+**Path to Acceptance**:
+1. Spike solution demonstrating <1µs event emission latency
+2. Security review of shared memory ring buffer (kernel ↔ user-mode)
+3. Prototype integration with Wireshark/pcap consumer
+4. Performance validation under load (1000+ events/sec)
+5. Stakeholder approval from all teams
+
+**Risks**:
+- Ring buffer overflow during high event rate (needs backpressure design)
+- Security concerns with kernel-to-user-mode shared memory
+- User-mode consumer complexity (multiple readers)
+- Timestamp precision loss during event buffering
+
+---
+
 ## Approval
 
 **Status**: **Proposed** (awaiting stakeholder review)
