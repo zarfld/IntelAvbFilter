@@ -11,8 +11,8 @@
 
 The IntelAvbFilter project has **two separate copies** of the critical `avb_ioctl.h` header file:
 
-1. **SSOT (Authoritative)**: `external/intel_avb/include/avb_ioctl.h`
-2. **Legacy (Duplicate)**: `include/avb_ioctl.h`
+1. **SSOT (Authoritative)**: `include/avb_ioctl.h`
+2. **DEPRECATED (Obsolete)**: `external/intel_avb/include/avb_ioctl.h`
 
 This duplication creates multiple problems:
 
@@ -66,17 +66,17 @@ grep -r "include/avb_ioctl.h" --include="*.c" --include="*.h"
 
 ```
 Repository Structure:
+├── include/
+│   └── avb_ioctl.h          ← ✅ SSOT (SINGLE SOURCE OF TRUTH)
+│
 ├── external/
 │   └── intel_avb/
 │       └── include/
-│           └── avb_ioctl.h  ← SSOT (ONE TRUE SOURCE)
-│
-├── include/
-│   └── avb_ioctl.h          ← DEPRECATED (to be removed or redirected)
+│           └── avb_ioctl.h  ← ❌ DEPRECATED (DO NOT USE)
 │
 └── tools/
     └── avb_test/
-        └── *.c              ← All must reference SSOT path
+        └── *.c              ← All must use include/avb_ioctl.h
 ```
 
 ### Standard Include Pattern
@@ -105,12 +105,12 @@ Repository Structure:
 
 **All makefiles MUST use**:
 ```makefile
-CFLAGS = /I../../external/intel_avb/include
+CFLAGS = /I../../include
 ```
 
 **NEVER use**:
 ```makefile
-CFLAGS = /I../../include  # ❌ WRONG
+CFLAGS = /I../../external/intel_avb/include  # ❌ WRONG (deprecated path)
 ```
 
 ---
@@ -119,21 +119,29 @@ CFLAGS = /I../../include  # ❌ WRONG
 
 ### 1. Single Source of Truth (SSOT) Pattern
 - **Eliminates Drift**: Only one file to update → impossible to get out of sync
-- **Clear Ownership**: `external/intel_avb/` clearly indicates external shared definitions
+- **Clear Ownership**: `include/` directory is project-owned and directly maintained
 - **Predictable Behavior**: All code compiles against identical definitions
 
-### 2. Alignment with Submodule Strategy
-- **Consistent Pattern**: Matches `intel-ethernet-regs` submodule strategy
-- **External Dependencies**: All shared definitions under `external/`
-- **Future-Proof**: Easier to convert to Git submodule if needed
+### 2. Project Ownership and Control
+- **include/** directory contains project-owned, directly maintained headers
+- **external/** directory contains external dependencies (submodules, vendored code)
+- **SSOT should be project-owned**: `include/avb_ioctl.h` is under direct control
+- **Avoid external dependency drift**: External repos can change structure unexpectedly
+- **Clear separation**: Project code (include/) vs external code (external/)
 
-### 3. Maintainability
+### 3. Active Development Reality
+- **Current State**: `include/avb_ioctl.h` is 13,059 bytes (Dec 7, 2025) - actively maintained
+- **Obsolete State**: `external/intel_avb/include/avb_ioctl.h` is 6,820 bytes (Sep 1, 2025) - stale
+- **Active References**: 20+ files already use `include/avb_ioctl.h`
+- **Proven Usage**: `docs/SSOT_HEADER_USAGE.md` documents `include/` as authoritative
+
+### 4. Maintainability
 - **Single Update Point**: Add IOCTL → edit one file → all code sees change
 - **Reduced Errors**: Cannot forget to update second copy
 - **Faster Development**: No synchronization overhead
 
-### 4. Developer Experience
-- **Clear Convention**: "external/" prefix signals shared dependency
+### 5. Developer Experience
+- **Clear Convention**: `include/` is standard location for project headers
 - **Easy to Find**: One authoritative location to check
 - **Compile-Time Enforcement**: Wrong path = build error (forces migration)
 
@@ -166,17 +174,16 @@ CFLAGS = /I../../include  # ❌ WRONG
 
 **Why Maybe Later**: Could be used as **transition strategy** if breaking all existing code is too disruptive
 
-### Alternative 3: Reverse Decision (Make include/ the SSOT)
+### Alternative 3: Delete external/intel_avb/include/avb_ioctl.h (Do Nothing to Legacy)
 **Rejected**:
-- `external/` naming clearly indicates shared dependency
-- Aligns with existing submodule strategy (`intel-ethernet-regs`)
-- Already have documentation (`docs/SSOT_HEADER_USAGE.md`) choosing `external/`
-- 8 files already migrated to `external/` path
+- Aggressive deletion could break build if any forgotten references exist
+- No gradual migration path
+- Higher risk approach
 
 **Why Not This**:
-- Would require reversing existing migrations
-- Contradicts established conventions
-- `external/` is better semantic fit for shared definitions
+- Redirect wrapper (Alternative 2) provides safer transition
+- Want to preserve backward compatibility during migration
+- Better to deprecate gradually than break abruptly
 
 ---
 
@@ -212,18 +219,19 @@ CFLAGS = /I../../include  # ❌ WRONG
 
 **PowerShell Migration Script** (`scripts/migrate-to-ssot.ps1`):
 ```powershell
-# Migrate all source files to SSOT path
+# Migrate all source files FROM external/ TO include/ SSOT path
 Get-ChildItem -Recurse -Include *.c,*.h | ForEach-Object {
     $content = Get-Content $_.FullName -Raw
     
-    if ($content -match '#include\s+"[./]*include/avb_ioctl\.h"') {
-        # Calculate correct relative path based on directory depth
-        $relPath = Get-RelativePath $_.DirectoryName "external/intel_avb/include/avb_ioctl.h"
+    # Fix files using WRONG external/ path
+    if ($content -match '#include\s+"[./]*external/intel_avb/include/avb_ioctl\.h"') {
+        # Calculate correct relative path to include/avb_ioctl.h
+        $relPath = Get-RelativePath $_.DirectoryName "include/avb_ioctl.h"
         
-        $newContent = $content -replace '#include\s+"[./]*include/avb_ioctl\.h"', "#include `"$relPath`""
+        $newContent = $content -replace '#include\s+"[./]*external/intel_avb/include/avb_ioctl\.h"', "#include `"$relPath`""
         Set-Content $_.FullName $newContent -NoNewline
         
-        Write-Host "✅ Migrated: $($_.FullName)"
+        Write-Host "✅ Migrated FROM external/ TO include/: $($_.FullName)"
     }
 }
 ```
@@ -274,22 +282,21 @@ nmake -f avb_test.mak
 
 ### Phase 4: Legacy Header Cleanup (30 minutes)
 
-**Decision**: Choose one approach for `include/avb_ioctl.h`:
+**Decision**: Choose one approach for `external/intel_avb/include/avb_ioctl.h`:
 
 **Option A - Delete** (Recommended for production):
 ```powershell
-Remove-Item include/avb_ioctl.h
+Remove-Item external/intel_avb/include/avb_ioctl.h
 # Forces all code to use SSOT path
 # Compile errors guide developers to correct path
 ```
 
 **Option B - Redirect Wrapper** (Recommended for transition):
 ```c
-// include/avb_ioctl.h
+// external/intel_avb/include/avb_ioctl.h (redirect to SSOT)
 #pragma once
 #pragma message("WARNING: external/intel_avb/include/avb_ioctl.h is DEPRECATED. Use include/avb_ioctl.h")
-#include "../include/avb_ioctl.h"
-#include "../include/avb_ioctl.h"
+#include "../../../include/avb_ioctl.h"
 ```
 
 ### Phase 5: CI Validation (1 hour)
@@ -299,17 +306,17 @@ Remove-Item include/avb_ioctl.h
 - name: Verify SSOT Header Usage
   shell: powershell
   run: |
-    $wrongIncludes = Select-String -Path "*.c","*.h" -Pattern '#include.*"external/intel_avb/include/avb_ioctl.h"' -Recurse
+    $wrongIncludes = Select-String -Path "*.c","*.h" -Pattern '#include.*"[./]*external/intel_avb/include/avb_ioctl.h"' -Recurse
     
     if ($wrongIncludes) {
-        Write-Error "❌ Files using wrong header path (must use include/avb_ioctl.h):"
+        Write-Error "❌ Files using deprecated external/ header path (must use include/avb_ioctl.h):"
         $wrongIncludes | ForEach-Object { 
             Write-Error "  $($_.Path):$($_.LineNumber): $($_.Line.Trim())" 
         }
         exit 1
     }
     
-    Write-Host "✅ All files use SSOT header path"
+    Write-Host "✅ All files use correct SSOT path (include/avb_ioctl.h)"
 ```
 
 ---
@@ -318,11 +325,11 @@ Remove-Item include/avb_ioctl.h
 
 ### Test-1: Verify No Legacy Includes
 ```bash
-# Should return ZERO matches:
-grep -r "include.*avb_ioctl.h" --include="*.c" --include="*.h" . | grep -v "external/intel_avb"
+# Should return ZERO matches (no files using deprecated external/ path):
+grep -r "external/intel_avb/include/avb_ioctl.h" --include="*.c" --include="*.h" .
 ```
 
-**Expected Output**: (empty) or only comments/documentation
+**Expected Output**: (empty) or only redirect wrapper comment
 
 ### Test-2: Verify All Use SSOT
 ```bash
