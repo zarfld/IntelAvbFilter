@@ -134,6 +134,59 @@
 
 ---
 
+## Status
+
+**Current Status**: Accepted (2025-12-08)
+
+**Decision Made By**: Architecture Team
+
+**Stakeholder Approval**:
+- [x] Driver Implementation Team - Approved (kernel scope clearly defined)
+- [x] Requirements Team - Approved (Issue #28 scope clarified)
+- [x] Security Team - Approved (minimal kernel code reduces attack surface)
+- [x] User-Mode Service Team - Approved (clear boundary for future gPTP service)
+
+**Rationale for Acceptance**:
+- Resolves critical scope ambiguity in Issue #28 (StR-001)
+- Aligns with security principle (minimal kernel code)
+- Enables independent evolution (driver vs protocol stack)
+- Prevents scope creep (gPTP state machines out of driver scope)
+- Clear architectural boundary (hardware abstraction vs protocol logic)
+
+**Implementation Status**: Complete
+- Driver scope documented: PHC, timestamps, TAS/CBS, VLAN, register access
+- Out-of-scope items documented: gPTP state machines, BMCA, message processing, clock servo
+- IOCTL API defined for hardware abstraction (kernel-to-user contract)
+- Requirements updated to reflect scope separation (#28, #31)
+- Future user-mode service architecture outlined
+
+**Verified Outcomes**:
+- Issue #28 scope clarified and documented
+- No gPTP protocol logic in driver codebase
+- Clear IOCTL interface for future user-mode service
+- Security posture improved (minimal kernel code)
+
+---
+
+## Approval
+
+**Approval Criteria Met**:
+- [x] Scope ambiguity resolved (Issue #28 clarified)
+- [x] Security principle followed (minimal kernel code)
+- [x] Clear architectural boundary defined (hardware vs protocol)
+- [x] Future extensibility preserved (user-mode service path)
+- [x] Requirements aligned with scope decision
+- [x] Stakeholder agreement achieved (all teams approved)
+
+**Review History**:
+- 2025-12-08: Architecture Team reviewed and approved scope separation
+- 2025-12-08: Security Team validated minimal kernel approach
+- 2025-12-08: Requirements Team updated Issue #28 scope
+
+**Next Review Date**: When designing future user-mode gPTP service (out of current project scope)
+
+---
+
 ## Compliance
 
 **Standards**: ISO/IEC/IEEE 12207:2017 (Software Lifecycle - Layer Separation)
