@@ -19,7 +19,7 @@ Abstract:
 #include <stdlib.h>
 
 // Use SSOT header for IOCTL definitions
-#include "../../external/intel_avb/include/avb_ioctl.h"
+#include "../include/avb_ioctl.h"
 
 // Use SSOT header for I226 register definitions  
 #include "../../intel-ethernet-regs/gen/i226_regs.h"
@@ -178,8 +178,8 @@ static void TestI226AdvancedFeatures(HANDLE h) {
     AVB_TAS_REQUEST tas;
     ZeroMemory(&tas, sizeof(tas));
     
-    // Audio streaming schedule: 125µs cycle
-    tas.config.cycle_time_ns = 125000; // 125µs cycle for audio
+    // Audio streaming schedule: 125ï¿½s cycle
+    tas.config.cycle_time_ns = 125000; // 125ï¿½s cycle for audio
     tas.config.gate_states[0] = 0x01;  // Queue 0 open for audio
     tas.config.gate_durations[0] = 62500; // 50% duty cycle
     tas.config.gate_states[1] = 0x00;  // All queues closed

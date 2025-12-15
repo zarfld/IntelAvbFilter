@@ -25,7 +25,7 @@ Abstract:
 #include <stdlib.h>
 
 // Use SSOT header for IOCTL definitions
-#include "../../external/intel_avb/include/avb_ioctl.h"
+#include "../../include/avb_ioctl.h"
 
 #define LINKNAME "\\\\.\\IntelAvbFilter"
 
