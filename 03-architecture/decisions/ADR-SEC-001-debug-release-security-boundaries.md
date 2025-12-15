@@ -156,7 +156,7 @@ if (!IsUserAdmin()) {
 
 ### Files Requiring NDEBUG Guards
 
-**1. IOCTL Definitions** (`include/avb_ioctl.h` or `external/intel_avb/include/avb_ioctl.h`):
+**1. IOCTL Definitions** (`include/avb_ioctl.h` only! duplicate `external/intel_avb/include/avb_ioctl.h` is depricated!):
 
 ```c
 /* Production IOCTLs - ALWAYS available */

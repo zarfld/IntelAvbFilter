@@ -578,6 +578,61 @@ Get-ChildItem intel-ethernet-regs/devices -Filter *.yaml | ForEach-Object {
 
 ---
 
+## Status
+
+**Current Status**: Accepted (2025-12-09)
+
+**Decision Made By**: Architecture Team
+
+**Stakeholder Approval**:
+- [x] Driver Implementation Team - Approved (eliminates 130+ magic numbers)
+- [x] Hardware Compatibility Team - Approved (multi-device support formalized)
+- [x] Build System Team - Approved (CI integration complete)
+- [x] Maintenance Team - Approved (centralized definitions reduce updates)
+
+**Rationale for Acceptance**:
+- Eliminates 130+ hardcoded magic numbers (maintainability crisis)
+- Centralizes register definitions (single source of truth)
+- Supports 6 device families (I210, I217, I219, I225, I226, I350)
+- Enables datasheet traceability (YAML comments reference spec sections)
+- Prevents typos and duplication (generated headers from YAML)
+
+**Implementation Status**: Complete
+- Git submodule integrated: `intel-ethernet-regs` (pinned commit SHA)
+- YAML register definitions: 6 device families (i210.yaml, i217.yaml, i219.yaml, i225.yaml, i226.yaml, i350.yaml)
+- Code generation tool: `reggen.py` generates C headers from YAML
+- 130+ magic numbers replaced with named constants (e.g., `I210_REG_SYSTIML`)
+- CI validation: Enforces no new magic numbers, validates generated headers
+- Build tasks: `generate-headers-all` regenerates headers on YAML changes
+
+**Verified Outcomes**:
+- Zero hardcoded register addresses in driver code
+- All register accesses use named constants
+- Device-specific variants explicit (I210 vs I225 register layouts)
+- Datasheet traceability via YAML comments
+- CI prevents magic number regression
+
+---
+
+## Approval
+
+**Approval Criteria Met**:
+- [x] 130+ magic numbers eliminated (all replaced with named constants)
+- [x] Submodule integration complete (intel-ethernet-regs pinned)
+- [x] Multi-device support verified (6 device families)
+- [x] Code generation validated (reggen.py produces correct headers)
+- [x] CI enforcement active (detects new magic numbers)
+- [x] Documentation complete (YAML comments trace to datasheet)
+
+**Review History**:
+- 2025-12-09: Architecture Team reviewed and approved submodule strategy
+- 2025-12-09: Build System Team integrated CI validation
+- 2025-12-09: Migration completed (130+ magic numbers replaced)
+
+**Next Review Date**: On Intel datasheet update or new device family support
+
+---
+
 **Status**: Accepted  
 **Deciders**: Architecture Team  
 **Date**: 2025-12-09

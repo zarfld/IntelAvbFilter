@@ -6,21 +6,21 @@
 
 ```c
 // ? CORRECT - SSOT path (ALWAYS use this)
-#include "external/intel_avb/include/avb_ioctl.h"
+#include "include/avb_ioctl.h"
 
 // ? WRONG - Legacy/duplicate path (NEVER use this)  
-#include "include/avb_ioctl.h"
+#include "external/intel_avb/include/avb_ioctl.h"
 ```
 
 ## ?? **File Structure**
 
 ```
 Intel AVB Filter Driver/
-??? external/intel_avb/include/avb_ioctl.h  ? ?? SSOT (Single Source of Truth)
+??? include/avb_ioctl.h  ? ?? SSOT (Single Source of Truth)
 ?   ??? Purpose: Authoritative IOCTL definitions
 ?   ??? Status: ? MAINTAINED and SYNCHRONIZED
 ?
-??? include/avb_ioctl.h                     ? ? LEGACY (should not be used)
+??? external/intel_avb/include/avb_ioctl.h                     ? ? LEGACY (should not be used)
     ??? Purpose: Historical duplicate
     ??? Status: ?? MAY BE OUT OF SYNC
 ```
@@ -47,18 +47,18 @@ According to copilot instructions:
 ### **In User-Mode Test Files**:
 ```c
 // From tools/avb_test/ directory:
-#include "../../external/intel_avb/include/avb_ioctl.h"
+#include "../../include/avb_ioctl.h"
 
 // From tests/taef/ directory:  
-#include "../../external/intel_avb/include/avb_ioctl.h"
+#include "../../include/avb_ioctl.h"
 
 // From root directory:
-#include "external/intel_avb/include/avb_ioctl.h"
+#include "include/avb_ioctl.h"
 ```
 
 ### **In Makefiles**:
 ```makefile
-CFLAGS = /I../../external/intel_avb/include
+CFLAGS = /I../../include
 ```
 
 ## ?? **Files Fixed for SSOT Compliance**
@@ -100,6 +100,6 @@ This ensures:
 
 ---
 
-**Remember**: **ALWAYS use `external/intel_avb/include/avb_ioctl.h`** ?
+**Remember**: **ALWAYS use `include/avb_ioctl.h`** ?
 
 This is a **mandatory architectural requirement** per copilot instructions.

@@ -99,7 +99,7 @@ Based on vcxproj analysis, the system consists of:
 | **Intel AVB Library** | `external/intel_avb/lib/` | PTP/gPTP protocol stack |
 | **Intel IGB Sources** | `external/intel_igb/src/` | Intel reference implementations |
 | **Register Definitions** | `intel-ethernet-regs/gen/*.h` | Auto-generated register headers (i210, i217, i219, i225, i226) |
-| **IOCTL ABI** | `external/intel_avb/include/avb_ioctl.h` | Shared kernel/user IOCTL definitions |
+| **IOCTL ABI** | `include/avb_ioctl.h` | Shared kernel/user IOCTL definitions |
 
 ---
 

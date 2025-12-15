@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 // Pull in SSOT public IOCTL contract 
-#include "../../external/intel_avb/include/avb_ioctl.h"
+#include "../../include/avb_ioctl.h"
 
 namespace AvbTest
 {
