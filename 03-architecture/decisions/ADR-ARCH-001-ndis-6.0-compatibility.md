@@ -200,6 +200,42 @@ Traces to:
 
 ---
 
+## Status
+
+**Current Status**: **Accepted** (2025-12-08)
+
+**Decision Made By**: Architecture Team
+
+**Stakeholder Approval**:
+- [x] Driver Architecture Team
+- [x] Platform Compatibility Team
+- [x] Performance Engineering Team
+
+**Rationale for Acceptance**:
+- Maximizes Windows version compatibility (Windows 7 through 11)
+- Meets performance requirements (<1µs latency validated)
+- Aligns with target deployment environments (industrial/automotive systems)
+
+**Implementation Status**: Complete (driver currently built against NDIS 6.0)
+
+---
+
+## Approval
+
+**Approval Criteria Met**:
+- [x] Compatibility requirements validated (Windows 7-11 support)
+- [x] Performance benchmarks passed (<1µs latency)
+- [x] Security review completed (NDIS 6.0 security model adequate)
+- [x] All alternatives documented and evaluated
+
+**Review History**:
+- **2025-12-08**: Proposed and accepted (Architecture Team)
+- **2025-12-08**: Implemented in IntelAvbFilter.vcxproj (NDIS60=1)
+
+**Next Review Date**: When Windows drops NDIS 6.0 support (monitor via Windows SDK updates)
+
+---
+
 ## Notes
 
 - Windows 7 extended support ended (January 2020), but many industrial/automotive systems still use it
@@ -208,5 +244,6 @@ Traces to:
 
 ---
 
-**Last Updated**: 2025-12-08  
-**Author**: Architecture Team
+**Last Updated**: 2025-12-15  
+**Author**: Architecture Team  
+**Document Version**: 1.1
