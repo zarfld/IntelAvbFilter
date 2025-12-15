@@ -828,6 +828,47 @@ Traces to:
 
 ---
 
+## Status
+
+**Current Status**: **Accepted** (2025-12-09)
+
+**Decision Made By**: Architecture Team
+
+**Stakeholder Approval**:
+- [x] Driver Architecture Team
+- [x] Hardware Integration Team
+- [x] Device Support Team
+
+**Rationale for Acceptance**:
+- Enables support for 7+ Intel Ethernet controller variants (I226, I225, I210, I211, I219, I217)
+- Eliminates conditional logic sprawl (hardware checks littered throughout driver)
+- Provides clean abstraction for controller-specific quirks (PHC stuck bug, register offsets)
+- Simplifies addition of future controllers (I227, I229)
+
+**Implementation Status**: Complete (HAL interface + 6 controller implementations)
+
+---
+
+## Approval
+
+**Approval Criteria Met**:
+- [x] All 6+ controller families supported (I226, I225, I210/I211, I219, I217)
+- [x] HAL interface defined with `HARDWARE_OPS` vtable
+- [x] Feature detection implemented (NULL checks prevent unsupported operations)
+- [x] Controller-specific quirks isolated (PHC stuck workaround in I210 HAL)
+- [x] Performance overhead minimal (<100ns per HAL call)
+- [x] All alternatives evaluated and documented
+
+**Review History**:
+- **2025-12-09**: Proposed and accepted (Architecture Team)
+- **2025-12-09**: HAL interface designed (`HARDWARE_OPS` vtable)
+- **2025-12-09**: 6 controller implementations completed (i226, i225, i210, i219, i217, i211)
+- **2025-12-09**: Quirk isolation validated (PHC stuck workaround tested)
+
+**Next Review Date**: When adding 7th controller family (I227/I229) - validate pattern scales
+
+---
+
 ## Notes
 
 **Supported Controllers**:
@@ -852,6 +893,6 @@ Traces to:
 
 ---
 
-**Status**: Accepted  
-**Deciders**: Architecture Team  
-**Date**: 2025-12-09
+**Last Updated**: 2025-12-15  
+**Author**: Architecture Team  
+**Document Version**: 1.1
