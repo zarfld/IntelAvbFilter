@@ -72,23 +72,54 @@ jobs:
                         
                         console.log(`📌 Adding issue #${issue.number} to Project ${projectNumber}...`);
                         
-                        // Get project ID
-                        const projectQuery = `
-                          query($owner: String!, $number: Int!) {
-                            user(login: $owner) {
-                              projectV2(number: $number) {
-                                id
+                        // Get project ID - try both user and organization
+                        let projectId = null;
+                        
+                        // Try user projects first
+                        try {
+                          const userProjectQuery = `
+                            query($owner: String!, $number: Int!) {
+                              user(login: $owner) {
+                                projectV2(number: $number) {
+                                  id
+                                }
                               }
                             }
-                          }
-                        `;
+                          `;
+                          
+                          const userResult = await github.graphql(userProjectQuery, {
+                            owner: owner,
+                            number: projectNumber
+                          });
+                          
+                          projectId = userResult.user.projectV2.id;
+                          console.log(`  Found user project: ${projectId}`);
+                        } catch (userError) {
+                          console.log(`  User project not found, trying organization...`);
+                          
+                          // Try organization projects
+                          const orgProjectQuery = `
+                            query($owner: String!, $number: Int!) {
+                              organization(login: $owner) {
+                                projectV2(number: $number) {
+                                  id
+                                }
+                              }
+                            }
+                          `;
+                          
+                          const orgResult = await github.graphql(orgProjectQuery, {
+                            owner: owner,
+                            number: projectNumber
+                          });
+                          
+                          projectId = orgResult.organization.projectV2.id;
+                          console.log(`  Found organization project: ${projectId}`);
+                        }
                         
-                        const projectResult = await github.graphql(projectQuery, {
-                          owner: owner,
-                          number: projectNumber
-                        });
-                        
-                        const projectId = projectResult.user.projectV2.id;
+                        if (!projectId) {
+                          throw new Error(`Project ${projectNumber} not found for ${owner}`);
+                        }
                         
                         // Add issue to project
                         const addMutation = `
@@ -408,23 +439,46 @@ jobs:
                               continue;
                             }
                             
-                            // Get project ID
-                            const projectQuery = `
-                              query($owner: String!, $number: Int!) {
-                                user(login: $owner) {
-                                  projectV2(number: $number) {
-                                    id
+                            // Get project ID - try both user and organization
+                            let projectId = null;
+                            
+                            try {
+                              const userProjectQuery = `
+                                query($owner: String!, $number: Int!) {
+                                  user(login: $owner) {
+                                    projectV2(number: $number) {
+                                      id
+                                    }
                                   }
                                 }
-                              }
-                            `;
-                            
-                            const projectResult = await github.graphql(projectQuery, {
-                              owner: owner,
-                              number: projectNumber
-                            });
-                            
-                            const projectId = projectResult.user.projectV2.id;
+                              `;
+                              
+                              const userResult = await github.graphql(userProjectQuery, {
+                                owner: owner,
+                                number: projectNumber
+                              });
+                              
+                              projectId = userResult.user.projectV2.id;
+                            } catch (userError) {
+                              console.log(`  Trying organization projects...`);
+                              
+                              const orgProjectQuery = `
+                                query($owner: String!, $number: Int!) {
+                                  organization(login: $owner) {
+                                    projectV2(number: $number) {
+                                      id
+                                    }
+                                  }
+                                }
+                              `;
+                              
+                              const orgResult = await github.graphql(orgProjectQuery, {
+                                owner: owner,
+                                number: projectNumber
+                              });
+                              
+                              projectId = orgResult.organization.projectV2.id;
+                            }
                             
                             // Add to project
                             const addMutation = `
