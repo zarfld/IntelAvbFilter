@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Add issue to Project 4 using GitHub CLI
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_USER_PROJECT_TOKEN }}
         run: |
           issue_number="${{ github.event.issue.number }}"
           echo "🔍 Processing issue #$issue_number"
@@ -255,9 +255,20 @@ jobs:
           type -p gh >/dev/null || (echo "GitHub CLI not found" && exit 1)
           gh --version
 
+      - name: Verify auth scopes and project visibility
+        env:
+          GH_TOKEN: ${{ secrets.GH_USER_PROJECT_TOKEN }}
+        run: |
+          echo "🔐 gh auth status (token scopes)"
+          gh auth status -t || true
+          echo "\n📋 Listing user projects for owner: ${{ github.repository_owner }}"
+          gh project list --owner ${{ github.repository_owner }} --limit 20 || true
+          echo "\n🔎 Viewing Project 4 details"
+          gh project view 4 --owner ${{ github.repository_owner }} --format json || true
+
       - name: Sync all open issues to project using gh CLI
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_USER_PROJECT_TOKEN }}
         run: |
           echo "🔄 Starting bulk sync of all open issues to Project 4"
           echo "Repository: ${{ github.repository }}"
