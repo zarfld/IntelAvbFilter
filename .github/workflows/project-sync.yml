@@ -331,14 +331,69 @@ jobs:
           echo "Errors: $errors"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-      - name: Sync status labels for all issues
+      - name: Sync status labels and Project Status field
         uses: actions/github-script@v7
         with:
           script: |
-            console.log('🔄 Starting status label sync for all issues...');
+            console.log('🔄 Starting status label and Project Status field sync...');
             
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            
+            // Get Project ID and Status field ID
+            const projectQuery = `
+              query {
+                viewer {
+                  projectsV2(first: 20) {
+                    nodes {
+                      id
+                      number
+                      title
+                      fields(first: 20) {
+                        nodes {
+                          ... on ProjectV2SingleSelectField {
+                            id
+                            name
+                            options {
+                              id
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+            
+            const projectData = await github.graphql(projectQuery);
+            const project = projectData.viewer.projectsV2.nodes.find(p => p.number === 4);
+            
+            if (!project) {
+              console.error('❌ Project #4 not found');
+              return;
+            }
+            
+            const statusField = project.fields.nodes.find(f => f.name === 'Status');
+            if (!statusField) {
+              console.error('⚠️  Project does not have a Status field');
+            }
+            
+            console.log(`📋 Project: ${project.title} (${project.id})`);
+            console.log(`📊 Status field: ${statusField ? statusField.id : 'N/A'}`);
+            
+            // Map label statuses to Project Status field values
+            const labelToProjectStatus = {
+              'status:backlog': 'backlog',
+              'status:ready': 'ready',
+              'status:in-progress': 'in-progress',
+              'status:review': 'review',
+              'status:testing': 'testing',
+              'status:blocked': 'blocked',
+              'status:completed': 'completed',
+              'status:closed': 'closed'
+            };
             
             // Get all open issues
             const issuesIterator = github.paginate.iterator(
@@ -351,14 +406,14 @@ jobs:
               }
             );
             
-            let syncedCount = 0;
+            let labelsSynced = 0;
+            let projectStatusSynced = 0;
             let unchangedCount = 0;
             
             for await (const { data: issues } of issuesIterator) {
               for (const issue of issues) {
                 const labels = issue.labels.map(l => l.name);
                 const body = issue.body || '';
-                const state = issue.state;
                 
                 // Extract status from body
                 const statusPattern = /(?:^|\n)(?:\*\*)?Status(?:\*\*)?:\s*(.+?)(?:\n|$)/i;
@@ -385,6 +440,12 @@ jobs:
                            statusLower.includes('analyzed') || statusLower.includes('in progress') ||
                            statusLower.includes('in-progress')) {
                   correctStatusLabel = 'status:in-progress';
+                } else if (statusLower.includes('review')) {
+                  correctStatusLabel = 'status:review';
+                } else if (statusLower.includes('testing')) {
+                  correctStatusLabel = 'status:testing';
+                } else if (statusLower.includes('blocked')) {
+                  correctStatusLabel = 'status:blocked';
                 } else if (statusLower.includes('planned') || statusLower.includes('backlog') ||
                            statusLower.includes('open')) {
                   correctStatusLabel = 'status:backlog';
@@ -395,45 +456,112 @@ jobs:
                   continue;
                 }
                 
-                // Check if sync needed
+                // Check if label sync needed
                 const currentStatusLabels = labels.filter(l => l.startsWith('status:'));
-                const hasCorrectStatus = currentStatusLabels.includes(correctStatusLabel);
+                const hasCorrectLabel = currentStatusLabels.includes(correctStatusLabel);
                 
-                if (hasCorrectStatus && currentStatusLabels.length === 1) {
-                  unchangedCount++;
-                  continue;
+                if (!hasCorrectLabel || currentStatusLabels.length > 1) {
+                  console.log(`Syncing issue #${issue.number}: ${bodyStatus} → ${correctStatusLabel}`);
+                  
+                  // Remove old status labels
+                  for (const label of currentStatusLabels) {
+                    try {
+                      await github.rest.issues.removeLabel({
+                        owner: owner,
+                        repo: repo,
+                        issue_number: issue.number,
+                        name: label
+                      });
+                    } catch (error) {
+                      // Ignore if label doesn't exist
+                    }
+                  }
+                  
+                  // Add correct status label
+                  await github.rest.issues.addLabels({
+                    owner: owner,
+                    repo: repo,
+                    issue_number: issue.number,
+                    labels: [correctStatusLabel]
+                  });
+                  
+                  labelsSynced++;
                 }
                 
-                // Sync status
-                console.log(`Syncing issue #${issue.number}: ${bodyStatus} → ${correctStatusLabel}`);
-                
-                // Remove old status labels
-                for (const label of currentStatusLabels) {
-                  try {
-                    await github.rest.issues.removeLabel({
-                      owner: owner,
-                      repo: repo,
-                      issue_number: issue.number,
-                      name: label
+                // Update Project Status field if field exists
+                if (statusField) {
+                  const projectStatusValue = labelToProjectStatus[correctStatusLabel];
+                  const statusOption = statusField.options.find(opt => 
+                    opt.name.toLowerCase() === projectStatusValue
+                  );
+                  
+                  if (statusOption) {
+                    // Get project item ID for this issue
+                    const itemQuery = `
+                      query($owner: String!, $repo: String!, $issueNumber: Int!) {
+                        repository(owner: $owner, name: $repo) {
+                          issue(number: $issueNumber) {
+                            projectItems(first: 10) {
+                              nodes {
+                                id
+                                project {
+                                  number
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    `;
+                    
+                    const itemData = await github.graphql(itemQuery, {
+                      owner,
+                      repo,
+                      issueNumber: issue.number
                     });
-                  } catch (error) {
-                    // Ignore if label doesn't exist
+                    
+                    const projectItem = itemData.repository.issue.projectItems.nodes.find(
+                      item => item.project.number === 4
+                    );
+                    
+                    if (projectItem) {
+                      // Update Status field
+                      const updateMutation = `
+                        mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                          updateProjectV2ItemFieldValue(input: {
+                            projectId: $projectId
+                            itemId: $itemId
+                            fieldId: $fieldId
+                            value: {singleSelectOptionId: $optionId}
+                          }) {
+                            projectV2Item {
+                              id
+                            }
+                          }
+                        }
+                      `;
+                      
+                      try {
+                        await github.graphql(updateMutation, {
+                          projectId: project.id,
+                          itemId: projectItem.id,
+                          fieldId: statusField.id,
+                          optionId: statusOption.id
+                        });
+                        projectStatusSynced++;
+                      } catch (error) {
+                        console.error(`Failed to update Project Status for #${issue.number}: ${error.message}`);
+                      }
+                    }
                   }
                 }
                 
-                // Add correct status label
-                await github.rest.issues.addLabels({
-                  owner: owner,
-                  repo: repo,
-                  issue_number: issue.number,
-                  labels: [correctStatusLabel]
-                });
-                
-                syncedCount++;
-                
                 // Rate limiting
-                await new Promise(resolve => setTimeout(resolve, 100));
+                await new Promise(resolve => setTimeout(resolve, 150));
               }
             }
             
-            console.log(`✅ Status sync complete: ${syncedCount} synced, ${unchangedCount} unchanged`);
+            console.log(`✅ Sync complete:`);
+            console.log(`   Labels synced: ${labelsSynced}`);
+            console.log(`   Project Status synced: ${projectStatusSynced}`);
+            console.log(`   Unchanged: ${unchangedCount}`);
