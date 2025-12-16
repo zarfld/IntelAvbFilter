@@ -72,53 +72,37 @@ jobs:
                         
                         console.log(`📌 Adding issue #${issue.number} to Project ${projectNumber}...`);
                         
-                        // Get project ID - try both user and organization
+                        // Get project ID via viewer's projects (works for authenticated user)
                         let projectId = null;
                         
-                        // Try user projects first
                         try {
-                          const userProjectQuery = `
-                            query($owner: String!, $number: Int!) {
-                              user(login: $owner) {
-                                projectV2(number: $number) {
-                                  id
+                          const viewerProjectsQuery = `
+                            query {
+                              viewer {
+                                projectsV2(first: 20) {
+                                  nodes {
+                                    id
+                                    number
+                                    title
+                                  }
                                 }
                               }
                             }
                           `;
                           
-                          const userResult = await github.graphql(userProjectQuery, {
-                            owner: owner,
-                            number: projectNumber
-                          });
+                          const projectsResult = await github.graphql(viewerProjectsQuery);
+                          const projects = projectsResult.viewer.projectsV2.nodes;
+                          const targetProject = projects.find(p => p.number === projectNumber);
                           
-                          projectId = userResult.user.projectV2.id;
-                          console.log(`  Found user project: ${projectId}`);
-                        } catch (userError) {
-                          console.log(`  User project not found, trying organization...`);
-                          
-                          // Try organization projects
-                          const orgProjectQuery = `
-                            query($owner: String!, $number: Int!) {
-                              organization(login: $owner) {
-                                projectV2(number: $number) {
-                                  id
-                                }
-                              }
-                            }
-                          `;
-                          
-                          const orgResult = await github.graphql(orgProjectQuery, {
-                            owner: owner,
-                            number: projectNumber
-                          });
-                          
-                          projectId = orgResult.organization.projectV2.id;
-                          console.log(`  Found organization project: ${projectId}`);
-                        }
-                        
-                        if (!projectId) {
-                          throw new Error(`Project ${projectNumber} not found for ${owner}`);
+                          if (targetProject) {
+                            projectId = targetProject.id;
+                            console.log(`  Found project: ${targetProject.title} (${projectId})`);
+                          } else {
+                            throw new Error(`Project #${projectNumber} not found in viewer's projects`);
+                          }
+                        } catch (projectError) {
+                          console.error(`  ❌ Could not find project: ${projectError.message}`);
+                          throw new Error(`Project ${projectNumber} not accessible`);
                         }
                         
                         // Add issue to project
@@ -383,6 +367,47 @@ jobs:
                       const repo = context.repo.repo;
 
                       console.log(`🔄 Starting bulk sync of all open issues to Project ${projectNumber}`);
+                      console.log(`Owner: ${owner}, Repo: ${repo}`);
+
+                      // First, find the project ID by searching all projects
+                      let projectId = null;
+                      
+                      try {
+                        // Query viewer's (authenticated user's) projects
+                        const viewerProjectsQuery = `
+                          query {
+                            viewer {
+                              projectsV2(first: 20) {
+                                nodes {
+                                  id
+                                  number
+                                  title
+                                }
+                              }
+                            }
+                          }
+                        `;
+                        
+                        const projectsResult = await github.graphql(viewerProjectsQuery);
+                        const projects = projectsResult.viewer.projectsV2.nodes;
+                        
+                        console.log(`Found ${projects.length} projects for authenticated user`);
+                        projects.forEach(p => console.log(`  - Project #${p.number}: ${p.title}`));
+                        
+                        const targetProject = projects.find(p => p.number === projectNumber);
+                        
+                        if (targetProject) {
+                          projectId = targetProject.id;
+                          console.log(`✅ Found Project #${projectNumber}: ${targetProject.title}`);
+                          console.log(`   Project ID: ${projectId}`);
+                        } else {
+                          throw new Error(`Project #${projectNumber} not found in authenticated user's projects`);
+                        }
+                      } catch (error) {
+                        console.error(`❌ Failed to find project: ${error.message}`);
+                        core.setFailed(`Cannot find Project #${projectNumber}`);
+                        return;
+                      }
 
                       // Get all open issues
                       const issuesIterator = github.paginate.iterator(
@@ -405,7 +430,7 @@ jobs:
                           processedCount++;
                           
                           try {
-                            console.log(`\n[${processedCount}] Processing issue #${issue.number}...`);
+                            console.log(`\n[${processedCount}] Processing issue #${issue.number}: ${issue.title}`);
                             
                             // Check if already in project
                             const checkQuery = `
@@ -437,47 +462,6 @@ jobs:
                               console.log(`  ✅ Already in project`);
                               skippedCount++;
                               continue;
-                            }
-                            
-                            // Get project ID - try both user and organization
-                            let projectId = null;
-                            
-                            try {
-                              const userProjectQuery = `
-                                query($owner: String!, $number: Int!) {
-                                  user(login: $owner) {
-                                    projectV2(number: $number) {
-                                      id
-                                    }
-                                  }
-                                }
-                              `;
-                              
-                              const userResult = await github.graphql(userProjectQuery, {
-                                owner: owner,
-                                number: projectNumber
-                              });
-                              
-                              projectId = userResult.user.projectV2.id;
-                            } catch (userError) {
-                              console.log(`  Trying organization projects...`);
-                              
-                              const orgProjectQuery = `
-                                query($owner: String!, $number: Int!) {
-                                  organization(login: $owner) {
-                                    projectV2(number: $number) {
-                                      id
-                                    }
-                                  }
-                                }
-                              `;
-                              
-                              const orgResult = await github.graphql(orgProjectQuery, {
-                                owner: owner,
-                                number: projectNumber
-                              });
-                              
-                              projectId = orgResult.organization.projectV2.id;
                             }
                             
                             // Add to project
