@@ -28,7 +28,7 @@ jobs:
           
           # Try to add issue to project using gh CLI
           if gh project item-add 4 \
-            --user ${{ github.repository_owner }} \
+            --owner "@me" \
             --url "https://github.com/${{ github.repository }}/issues/$issue_number" 2>&1; then
             echo "✅ Added issue #$issue_number to Project 4"
           else
@@ -261,10 +261,10 @@ jobs:
         run: |
           echo "🔐 gh auth status (token scopes)"
           gh auth status -t || true
-          echo "\n📋 Listing user projects for owner: ${{ github.repository_owner }}"
-          gh project list --user ${{ github.repository_owner }} --limit 20 || true
+          echo "\n📋 Listing user projects for owner: @me"
+          gh project list --owner "@me" --limit 20 || true
           echo "\n🔎 Viewing Project 4 details"
-          gh project view 4 --user ${{ github.repository_owner }} --format json || true
+          gh project view 4 --owner "@me" --format json || true
 
       - name: Sync all open issues to project using gh CLI
         env:
@@ -296,7 +296,7 @@ jobs:
             
             # Try to add issue to project
             if gh project item-add 4 \
-              --user ${{ github.repository_owner }} \
+              --owner "@me" \
               --url "https://github.com/${{ github.repository }}/issues/$issue_num" 2>&1; then
               echo "  ✅ Added issue #$issue_num"
               added=$((added + 1))
