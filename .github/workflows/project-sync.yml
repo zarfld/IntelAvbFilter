@@ -1,514 +1,514 @@
 name: Project and Status Sync
 
 on:
-    issues:
-        types: [opened, edited, reopened, labeled, unlabeled, closed, reopened]
-    workflow_dispatch: # Manual trigger for bulk sync
-        inputs:
-            sync_all:
-                description: "Sync all open issues to project"
-                required: false
-                default: "false"
+  issues:
+    types: [opened, edited, reopened, labeled, unlabeled, closed, reopened]
+  workflow_dispatch: # Manual trigger for bulk sync
+    inputs:
+      sync_all:
+        description: "Sync all open issues to project"
+        required: false
+        default: "false"
 
 jobs:
-    sync-to-project:
-        runs-on: ubuntu-latest
-        permissions:
-            issues: write
-            contents: read
-            repository-projects: write
+  sync-to-project:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      repository-projects: write
 
-        steps:
-            - name: Add issue to Project 4
-              uses: actions/github-script@v7
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  script: |
-                      const issue = context.payload.issue;
+    steps:
+      - name: Add issue to Project 4
+        uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          script: |
+            const issue = context.payload.issue;
 
-                      if (!issue) {
-                        console.log('ℹ️  No issue in payload (manual trigger or bulk sync)');
-                        return;
+            if (!issue) {
+              console.log('ℹ️  No issue in payload (manual trigger or bulk sync)');
+              return;
+            }
+
+            const projectNumber = 4;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            console.log(`🔍 Processing issue #${issue.number}`);
+
+            // Query to check if issue is already in project
+            const checkQuery = `
+              query($owner: String!, $repo: String!, $issueNumber: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $issueNumber) {
+                    projectItems(first: 10) {
+                      nodes {
+                        project {
+                          number
+                        }
                       }
+                    }
+                  }
+                }
+              }
+            `;
 
-                      const projectNumber = 4;
-                      const owner = context.repo.owner;
-                      const repo = context.repo.repo;
+            try {
+              const checkResult = await github.graphql(checkQuery, {
+                owner: owner,
+                repo: repo,
+                issueNumber: issue.number
+              });
+              
+              const projectItems = checkResult.repository.issue.projectItems.nodes;
+              const isInProject = projectItems.some(item => item.project.number === projectNumber);
+              
+              if (isInProject) {
+                console.log(`✅ Issue #${issue.number} already in Project ${projectNumber}`);
+                return;
+              }
+              
+              console.log(`📌 Adding issue #${issue.number} to Project ${projectNumber}...`);
+              
+              // Get project ID via viewer's projects (works for authenticated user)
+              let projectId = null;
+              
+              try {
+                const viewerProjectsQuery = `
+                  query {
+                    viewer {
+                      projectsV2(first: 20) {
+                        nodes {
+                          id
+                          number
+                          title
+                        }
+                      }
+                    }
+                  }
+                `;
+                
+                const projectsResult = await github.graphql(viewerProjectsQuery);
+                const projects = projectsResult.viewer.projectsV2.nodes;
+                const targetProject = projects.find(p => p.number === projectNumber);
+                
+                if (targetProject) {
+                  projectId = targetProject.id;
+                  console.log(`  Found project: ${targetProject.title} (${projectId})`);
+                } else {
+                  throw new Error(`Project #${projectNumber} not found in viewer's projects`);
+                }
+              } catch (projectError) {
+                console.error(`  ❌ Could not find project: ${projectError.message}`);
+                throw new Error(`Project ${projectNumber} not accessible`);
+              }
+              
+              // Add issue to project
+              const addMutation = `
+                mutation($projectId: ID!, $contentId: ID!) {
+                  addProjectV2ItemById(input: {
+                    projectId: $projectId
+                    contentId: $contentId
+                  }) {
+                    item {
+                      id
+                    }
+                  }
+                }
+              `;
+              
+              await github.graphql(addMutation, {
+                projectId: projectId,
+                contentId: issue.node_id
+              });
+              
+              console.log(`✅ Added issue #${issue.number} to Project ${projectNumber}`);
+              
+            } catch (error) {
+              console.error(`❌ Failed to add issue to project: ${error.message}`);
+              
+              // Don't fail the workflow, just log
+              if (error.message.includes('already exists')) {
+                console.log(`ℹ️  Issue #${issue.number} already in project`);
+              } else {
+                console.error('Full error:', error);
+              }
+            }
 
-                      console.log(`🔍 Processing issue #${issue.number}`);
+  sync-status-labels:
+    runs-on: ubuntu-latest
+    needs: sync-to-project
+    permissions:
+      issues: write
+      contents: read
 
-                      // Query to check if issue is already in project
-                      const checkQuery = `
-                        query($owner: String!, $repo: String!, $issueNumber: Int!) {
-                          repository(owner: $owner, name: $repo) {
-                            issue(number: $issueNumber) {
-                              projectItems(first: 10) {
-                                nodes {
-                                  project {
-                                    number
-                                  }
-                                }
+    steps:
+      - name: Validate and sync status labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+
+            if (!issue) {
+              console.log('ℹ️  No issue in payload');
+              return;
+            }
+
+            const labels = issue.labels.map(l => l.name);
+            const body = issue.body || '';
+            const state = issue.state;
+
+            console.log(`🔍 Validating status for issue #${issue.number}`);
+            console.log(`Current labels: ${labels.join(', ')}`);
+            console.log(`Issue state: ${state}`);
+
+            // ============================================
+            // RULE 1: Extract status from issue body
+            // ============================================
+            const statusPattern = /(?:^|\n)(?:\*\*)?Status(?:\*\*)?:\s*(.+?)(?:\n|$)/i;
+            const statusMatch = body.match(statusPattern);
+            const bodyStatus = statusMatch ? statusMatch[1].trim() : null;
+
+            console.log(`Body status: ${bodyStatus || '(not found)'}`);
+
+            // ============================================
+            // RULE 2: Determine correct status label based on body and state
+            // ============================================
+            let correctStatusLabel = null;
+
+            // Closed issues should always have status:closed
+            if (state === 'closed') {
+              correctStatusLabel = 'status:closed';
+            } 
+            // Parse body status
+            else if (bodyStatus) {
+              const statusLower = bodyStatus.toLowerCase();
+              
+              // ADR statuses
+              if (statusLower.includes('accepted')) {
+                correctStatusLabel = 'status:completed';
+              } else if (statusLower.includes('proposed') || statusLower.includes('under review')) {
+                correctStatusLabel = 'status:in-progress';
+              } else if (statusLower.includes('rejected') || statusLower.includes('deprecated')) {
+                correctStatusLabel = 'status:completed';
+              }
+              // Component/Implementation statuses
+              else if (statusLower.includes('implemented') || statusLower.includes('production')) {
+                correctStatusLabel = 'status:completed';
+              } else if (statusLower.includes('partially implemented')) {
+                correctStatusLabel = 'status:in-progress';
+              } else if (statusLower.includes('planned')) {
+                correctStatusLabel = 'status:backlog';
+              }
+              // Requirement statuses
+              else if (statusLower.includes('complete') || statusLower.includes('✅')) {
+                correctStatusLabel = 'status:completed';
+              } else if (statusLower.includes('verified') || statusLower.includes('validated')) {
+                correctStatusLabel = 'status:completed';
+              } else if (statusLower.includes('draft') || statusLower.includes('analyzed')) {
+                correctStatusLabel = 'status:in-progress';
+              } else if (statusLower.includes('baselined') || statusLower.includes('approved')) {
+                correctStatusLabel = 'status:completed';
+              }
+              // Generic workflow statuses
+              else if (statusLower.includes('in progress') || statusLower.includes('in-progress')) {
+                correctStatusLabel = 'status:in-progress';
+              } else if (statusLower.includes('review')) {
+                correctStatusLabel = 'status:review';
+              } else if (statusLower.includes('testing')) {
+                correctStatusLabel = 'status:testing';
+              } else if (statusLower.includes('blocked')) {
+                correctStatusLabel = 'status:blocked';
+              } else if (statusLower.includes('backlog') || statusLower.includes('open')) {
+                correctStatusLabel = 'status:backlog';
+              }
+            }
+
+            // Default to backlog for open issues without clear status
+            if (!correctStatusLabel && state === 'open') {
+              correctStatusLabel = 'status:backlog';
+            }
+
+            console.log(`Correct status label: ${correctStatusLabel}`);
+
+            // ============================================
+            // RULE 3: Check current status labels
+            // ============================================
+            const currentStatusLabels = labels.filter(l => l.startsWith('status:'));
+
+            console.log(`Current status labels: ${currentStatusLabels.join(', ') || '(none)'}`);
+
+            // ============================================
+            // RULE 4: Sync if mismatch detected
+            // ============================================
+            const hasCorrectStatus = currentStatusLabels.includes(correctStatusLabel);
+            const hasIncorrectStatus = currentStatusLabels.length === 0 || 
+                                       currentStatusLabels.some(l => l !== correctStatusLabel);
+
+            if (!hasCorrectStatus || hasIncorrectStatus) {
+              console.log(`🔧 Status mismatch detected - syncing...`);
+              
+              // Remove all existing status labels
+              for (const label of currentStatusLabels) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    name: label
+                  });
+                  console.log(`  Removed: ${label}`);
+                } catch (error) {
+                  console.log(`  Could not remove ${label}: ${error.message}`);
+                }
+              }
+              
+              // Add correct status label
+              if (correctStatusLabel) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: [correctStatusLabel]
+                });
+                console.log(`  Added: ${correctStatusLabel}`);
+                
+                // Post comment about status change
+                const changeMessage = `## 🤖 Status Sync
+                
+                **Automatic status update** based on issue body:
+                - **Body status**: ${bodyStatus || 'Not specified'}
+                - **Previous label(s)**: ${currentStatusLabels.join(', ') || '(none)'}
+                - **New label**: \`${correctStatusLabel}\`
+                
+                This sync ensures consistency between issue status and labels for tracking purposes.
+                
+                ---
+                *Automated by [project-sync.yml](.github/workflows/project-sync.yml)*
+                `;
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: changeMessage
+                });
+                
+                console.log(`✅ Status synced: ${correctStatusLabel}`);
+              }
+            } else {
+              console.log(`✅ Status label already correct`);
+            }
+
+            // ============================================
+            // RULE 5: Warn about missing status in body
+            // ============================================
+            if (!bodyStatus && state === 'open') {
+              const warningMessage = `## ⚠️ Missing Status Field
+              
+              This issue does not have a clear status field in its body.
+              
+              **Recommendation**: Add a status field to track progress:
+              
+              \`\`\`markdown
+              **Status**: Draft | In Progress | Under Review | Completed | etc.
+              \`\`\`
+              
+              **Current label**: \`${correctStatusLabel || 'status:backlog'}\` (auto-assigned)
+              
+              See [Status Management Guide](docs/github-issue-status-management.md) for lifecycle-specific states.
+              `;
+              
+              // Only warn once (check if warning already posted)
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number
+              });
+              
+              const alreadyWarned = comments.data.some(c => 
+                c.body.includes('Missing Status Field') && 
+                c.user.type === 'Bot'
+              );
+              
+              if (!alreadyWarned) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: warningMessage
+                });
+                console.log(`⚠️  Posted warning about missing status`);
+              }
+            }
+
+  bulk-sync-all:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.sync_all == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      repository-projects: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync all open issues
+        uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          script: |
+            const projectNumber = 4;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            console.log(`🔄 Starting bulk sync of all open issues to Project ${projectNumber}`);
+            console.log(`Owner: ${owner}, Repo: ${repo}`);
+
+            // First, find the project ID by searching all projects
+            let projectId = null;
+
+            try {
+              // Query viewer's (authenticated user's) projects
+              const viewerProjectsQuery = `
+                query {
+                  viewer {
+                    projectsV2(first: 20) {
+                      nodes {
+                        id
+                        number
+                        title
+                      }
+                    }
+                  }
+                }
+              `;
+              
+              const projectsResult = await github.graphql(viewerProjectsQuery);
+              const projects = projectsResult.viewer.projectsV2.nodes;
+              
+              console.log(`Found ${projects.length} projects for authenticated user`);
+              projects.forEach(p => console.log(`  - Project #${p.number}: ${p.title}`));
+              
+              const targetProject = projects.find(p => p.number === projectNumber);
+              
+              if (targetProject) {
+                projectId = targetProject.id;
+                console.log(`✅ Found Project #${projectNumber}: ${targetProject.title}`);
+                console.log(`   Project ID: ${projectId}`);
+              } else {
+                throw new Error(`Project #${projectNumber} not found in authenticated user's projects`);
+              }
+            } catch (error) {
+              console.error(`❌ Failed to find project: ${error.message}`);
+              core.setFailed(`Cannot find Project #${projectNumber}`);
+              return;
+            }
+
+            // Get all open issues
+            const issuesIterator = github.paginate.iterator(
+              github.rest.issues.listForRepo,
+              {
+                owner: owner,
+                repo: repo,
+                state: 'open',
+                per_page: 100
+              }
+            );
+
+            let processedCount = 0;
+            let addedCount = 0;
+            let skippedCount = 0;
+            let errorCount = 0;
+
+            for await (const { data: issues } of issuesIterator) {
+              for (const issue of issues) {
+                processedCount++;
+                
+                try {
+                  console.log(`\n[${processedCount}] Processing issue #${issue.number}: ${issue.title}`);
+                  
+                  // Check if already in project
+                  const checkQuery = `
+                    query($owner: String!, $repo: String!, $issueNumber: Int!) {
+                      repository(owner: $owner, name: $repo) {
+                        issue(number: $issueNumber) {
+                          projectItems(first: 10) {
+                            nodes {
+                              project {
+                                number
                               }
                             }
                           }
                         }
-                      `;
-
-                      try {
-                        const checkResult = await github.graphql(checkQuery, {
-                          owner: owner,
-                          repo: repo,
-                          issueNumber: issue.number
-                        });
-                        
-                        const projectItems = checkResult.repository.issue.projectItems.nodes;
-                        const isInProject = projectItems.some(item => item.project.number === projectNumber);
-                        
-                        if (isInProject) {
-                          console.log(`✅ Issue #${issue.number} already in Project ${projectNumber}`);
-                          return;
-                        }
-                        
-                        console.log(`📌 Adding issue #${issue.number} to Project ${projectNumber}...`);
-                        
-                        // Get project ID via viewer's projects (works for authenticated user)
-                        let projectId = null;
-                        
-                        try {
-                          const viewerProjectsQuery = `
-                            query {
-                              viewer {
-                                projectsV2(first: 20) {
-                                  nodes {
-                                    id
-                                    number
-                                    title
-                                  }
-                                }
-                              }
-                            }
-                          `;
-                          
-                          const projectsResult = await github.graphql(viewerProjectsQuery);
-                          const projects = projectsResult.viewer.projectsV2.nodes;
-                          const targetProject = projects.find(p => p.number === projectNumber);
-                          
-                          if (targetProject) {
-                            projectId = targetProject.id;
-                            console.log(`  Found project: ${targetProject.title} (${projectId})`);
-                          } else {
-                            throw new Error(`Project #${projectNumber} not found in viewer's projects`);
-                          }
-                        } catch (projectError) {
-                          console.error(`  ❌ Could not find project: ${projectError.message}`);
-                          throw new Error(`Project ${projectNumber} not accessible`);
-                        }
-                        
-                        // Add issue to project
-                        const addMutation = `
-                          mutation($projectId: ID!, $contentId: ID!) {
-                            addProjectV2ItemById(input: {
-                              projectId: $projectId
-                              contentId: $contentId
-                            }) {
-                              item {
-                                id
-                              }
-                            }
-                          }
-                        `;
-                        
-                        await github.graphql(addMutation, {
-                          projectId: projectId,
-                          contentId: issue.node_id
-                        });
-                        
-                        console.log(`✅ Added issue #${issue.number} to Project ${projectNumber}`);
-                        
-                      } catch (error) {
-                        console.error(`❌ Failed to add issue to project: ${error.message}`);
-                        
-                        // Don't fail the workflow, just log
-                        if (error.message.includes('already exists')) {
-                          console.log(`ℹ️  Issue #${issue.number} already in project`);
-                        } else {
-                          console.error('Full error:', error);
+                      }
+                    }
+                  `;
+                  
+                  const checkResult = await github.graphql(checkQuery, {
+                    owner: owner,
+                    repo: repo,
+                    issueNumber: issue.number
+                  });
+                  
+                  const projectItems = checkResult.repository.issue.projectItems.nodes;
+                  const isInProject = projectItems.some(item => item.project.number === projectNumber);
+                  
+                  if (isInProject) {
+                    console.log(`  ✅ Already in project`);
+                    skippedCount++;
+                    continue;
+                  }
+                  
+                  // Add to project
+                  const addMutation = `
+                    mutation($projectId: ID!, $contentId: ID!) {
+                      addProjectV2ItemById(input: {
+                        projectId: $projectId
+                        contentId: $contentId
+                      }) {
+                        item {
+                          id
                         }
                       }
+                    }
+                  `;
+                  
+                  await github.graphql(addMutation, {
+                    projectId: projectId,
+                    contentId: issue.node_id
+                  });
+                  
+                  console.log(`  ✅ Added to project`);
+                  addedCount++;
+                  
+                  // Rate limiting delay
+                  await new Promise(resolve => setTimeout(resolve, 200));
+                  
+                } catch (error) {
+                  console.error(`  ❌ Error: ${error.message}`);
+                  errorCount++;
+                }
+              }
+            }
 
-    sync-status-labels:
-        runs-on: ubuntu-latest
-        needs: sync-to-project
-        permissions:
-            issues: write
-            contents: read
+            // Summary
+            const summary = `
+            ## 📊 Bulk Sync Complete
 
-        steps:
-            - name: Validate and sync status labels
-              uses: actions/github-script@v7
-              with:
-                  script: |
-                      const issue = context.payload.issue;
+            **Results**:
+            - Total processed: ${processedCount}
+            - Added to project: ${addedCount}
+            - Already in project: ${skippedCount}
+            - Errors: ${errorCount}
 
-                      if (!issue) {
-                        console.log('ℹ️  No issue in payload');
-                        return;
-                      }
+            **Project**: #${projectNumber}
+            **Repository**: ${owner}/${repo}
+            `;
 
-                      const labels = issue.labels.map(l => l.name);
-                      const body = issue.body || '';
-                      const state = issue.state;
-
-                      console.log(`🔍 Validating status for issue #${issue.number}`);
-                      console.log(`Current labels: ${labels.join(', ')}`);
-                      console.log(`Issue state: ${state}`);
-
-                      // ============================================
-                      // RULE 1: Extract status from issue body
-                      // ============================================
-                      const statusPattern = /(?:^|\n)(?:\*\*)?Status(?:\*\*)?:\s*(.+?)(?:\n|$)/i;
-                      const statusMatch = body.match(statusPattern);
-                      const bodyStatus = statusMatch ? statusMatch[1].trim() : null;
-
-                      console.log(`Body status: ${bodyStatus || '(not found)'}`);
-
-                      // ============================================
-                      // RULE 2: Determine correct status label based on body and state
-                      // ============================================
-                      let correctStatusLabel = null;
-
-                      // Closed issues should always have status:closed
-                      if (state === 'closed') {
-                        correctStatusLabel = 'status:closed';
-                      } 
-                      // Parse body status
-                      else if (bodyStatus) {
-                        const statusLower = bodyStatus.toLowerCase();
-                        
-                        // ADR statuses
-                        if (statusLower.includes('accepted')) {
-                          correctStatusLabel = 'status:completed';
-                        } else if (statusLower.includes('proposed') || statusLower.includes('under review')) {
-                          correctStatusLabel = 'status:in-progress';
-                        } else if (statusLower.includes('rejected') || statusLower.includes('deprecated')) {
-                          correctStatusLabel = 'status:completed';
-                        }
-                        // Component/Implementation statuses
-                        else if (statusLower.includes('implemented') || statusLower.includes('production')) {
-                          correctStatusLabel = 'status:completed';
-                        } else if (statusLower.includes('partially implemented')) {
-                          correctStatusLabel = 'status:in-progress';
-                        } else if (statusLower.includes('planned')) {
-                          correctStatusLabel = 'status:backlog';
-                        }
-                        // Requirement statuses
-                        else if (statusLower.includes('complete') || statusLower.includes('✅')) {
-                          correctStatusLabel = 'status:completed';
-                        } else if (statusLower.includes('verified') || statusLower.includes('validated')) {
-                          correctStatusLabel = 'status:completed';
-                        } else if (statusLower.includes('draft') || statusLower.includes('analyzed')) {
-                          correctStatusLabel = 'status:in-progress';
-                        } else if (statusLower.includes('baselined') || statusLower.includes('approved')) {
-                          correctStatusLabel = 'status:completed';
-                        }
-                        // Generic workflow statuses
-                        else if (statusLower.includes('in progress') || statusLower.includes('in-progress')) {
-                          correctStatusLabel = 'status:in-progress';
-                        } else if (statusLower.includes('review')) {
-                          correctStatusLabel = 'status:review';
-                        } else if (statusLower.includes('testing')) {
-                          correctStatusLabel = 'status:testing';
-                        } else if (statusLower.includes('blocked')) {
-                          correctStatusLabel = 'status:blocked';
-                        } else if (statusLower.includes('backlog') || statusLower.includes('open')) {
-                          correctStatusLabel = 'status:backlog';
-                        }
-                      }
-
-                      // Default to backlog for open issues without clear status
-                      if (!correctStatusLabel && state === 'open') {
-                        correctStatusLabel = 'status:backlog';
-                      }
-
-                      console.log(`Correct status label: ${correctStatusLabel}`);
-
-                      // ============================================
-                      // RULE 3: Check current status labels
-                      // ============================================
-                      const currentStatusLabels = labels.filter(l => l.startsWith('status:'));
-
-                      console.log(`Current status labels: ${currentStatusLabels.join(', ') || '(none)'}`);
-
-                      // ============================================
-                      // RULE 4: Sync if mismatch detected
-                      // ============================================
-                      const hasCorrectStatus = currentStatusLabels.includes(correctStatusLabel);
-                      const hasIncorrectStatus = currentStatusLabels.length === 0 || 
-                                                 currentStatusLabels.some(l => l !== correctStatusLabel);
-
-                      if (!hasCorrectStatus || hasIncorrectStatus) {
-                        console.log(`🔧 Status mismatch detected - syncing...`);
-                        
-                        // Remove all existing status labels
-                        for (const label of currentStatusLabels) {
-                          try {
-                            await github.rest.issues.removeLabel({
-                              owner: context.repo.owner,
-                              repo: context.repo.repo,
-                              issue_number: issue.number,
-                              name: label
-                            });
-                            console.log(`  Removed: ${label}`);
-                          } catch (error) {
-                            console.log(`  Could not remove ${label}: ${error.message}`);
-                          }
-                        }
-                        
-                        // Add correct status label
-                        if (correctStatusLabel) {
-                          await github.rest.issues.addLabels({
-                            owner: context.repo.owner,
-                            repo: context.repo.repo,
-                            issue_number: issue.number,
-                            labels: [correctStatusLabel]
-                          });
-                          console.log(`  Added: ${correctStatusLabel}`);
-                          
-                          // Post comment about status change
-                          const changeMessage = `## 🤖 Status Sync
-                          
-                          **Automatic status update** based on issue body:
-                          - **Body status**: ${bodyStatus || 'Not specified'}
-                          - **Previous label(s)**: ${currentStatusLabels.join(', ') || '(none)'}
-                          - **New label**: \`${correctStatusLabel}\`
-                          
-                          This sync ensures consistency between issue status and labels for tracking purposes.
-                          
-                          ---
-                          *Automated by [project-sync.yml](.github/workflows/project-sync.yml)*
-                          `;
-                          
-                          await github.rest.issues.createComment({
-                            owner: context.repo.owner,
-                            repo: context.repo.repo,
-                            issue_number: issue.number,
-                            body: changeMessage
-                          });
-                          
-                          console.log(`✅ Status synced: ${correctStatusLabel}`);
-                        }
-                      } else {
-                        console.log(`✅ Status label already correct`);
-                      }
-
-                      // ============================================
-                      // RULE 5: Warn about missing status in body
-                      // ============================================
-                      if (!bodyStatus && state === 'open') {
-                        const warningMessage = `## ⚠️ Missing Status Field
-                        
-                        This issue does not have a clear status field in its body.
-                        
-                        **Recommendation**: Add a status field to track progress:
-                        
-                        \`\`\`markdown
-                        **Status**: Draft | In Progress | Under Review | Completed | etc.
-                        \`\`\`
-                        
-                        **Current label**: \`${correctStatusLabel || 'status:backlog'}\` (auto-assigned)
-                        
-                        See [Status Management Guide](docs/github-issue-status-management.md) for lifecycle-specific states.
-                        `;
-                        
-                        // Only warn once (check if warning already posted)
-                        const comments = await github.rest.issues.listComments({
-                          owner: context.repo.owner,
-                          repo: context.repo.repo,
-                          issue_number: issue.number
-                        });
-                        
-                        const alreadyWarned = comments.data.some(c => 
-                          c.body.includes('Missing Status Field') && 
-                          c.user.type === 'Bot'
-                        );
-                        
-                        if (!alreadyWarned) {
-                          await github.rest.issues.createComment({
-                            owner: context.repo.owner,
-                            repo: context.repo.repo,
-                            issue_number: issue.number,
-                            body: warningMessage
-                          });
-                          console.log(`⚠️  Posted warning about missing status`);
-                        }
-                      }
-
-    bulk-sync-all:
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.sync_all == 'true'
-        runs-on: ubuntu-latest
-        permissions:
-            issues: write
-            contents: read
-            repository-projects: write
-
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v4
-
-            - name: Sync all open issues
-              uses: actions/github-script@v7
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  script: |
-                      const projectNumber = 4;
-                      const owner = context.repo.owner;
-                      const repo = context.repo.repo;
-
-                      console.log(`🔄 Starting bulk sync of all open issues to Project ${projectNumber}`);
-                      console.log(`Owner: ${owner}, Repo: ${repo}`);
-
-                      // First, find the project ID by searching all projects
-                      let projectId = null;
-                      
-                      try {
-                        // Query viewer's (authenticated user's) projects
-                        const viewerProjectsQuery = `
-                          query {
-                            viewer {
-                              projectsV2(first: 20) {
-                                nodes {
-                                  id
-                                  number
-                                  title
-                                }
-                              }
-                            }
-                          }
-                        `;
-                        
-                        const projectsResult = await github.graphql(viewerProjectsQuery);
-                        const projects = projectsResult.viewer.projectsV2.nodes;
-                        
-                        console.log(`Found ${projects.length} projects for authenticated user`);
-                        projects.forEach(p => console.log(`  - Project #${p.number}: ${p.title}`));
-                        
-                        const targetProject = projects.find(p => p.number === projectNumber);
-                        
-                        if (targetProject) {
-                          projectId = targetProject.id;
-                          console.log(`✅ Found Project #${projectNumber}: ${targetProject.title}`);
-                          console.log(`   Project ID: ${projectId}`);
-                        } else {
-                          throw new Error(`Project #${projectNumber} not found in authenticated user's projects`);
-                        }
-                      } catch (error) {
-                        console.error(`❌ Failed to find project: ${error.message}`);
-                        core.setFailed(`Cannot find Project #${projectNumber}`);
-                        return;
-                      }
-
-                      // Get all open issues
-                      const issuesIterator = github.paginate.iterator(
-                        github.rest.issues.listForRepo,
-                        {
-                          owner: owner,
-                          repo: repo,
-                          state: 'open',
-                          per_page: 100
-                        }
-                      );
-
-                      let processedCount = 0;
-                      let addedCount = 0;
-                      let skippedCount = 0;
-                      let errorCount = 0;
-
-                      for await (const { data: issues } of issuesIterator) {
-                        for (const issue of issues) {
-                          processedCount++;
-                          
-                          try {
-                            console.log(`\n[${processedCount}] Processing issue #${issue.number}: ${issue.title}`);
-                            
-                            // Check if already in project
-                            const checkQuery = `
-                              query($owner: String!, $repo: String!, $issueNumber: Int!) {
-                                repository(owner: $owner, name: $repo) {
-                                  issue(number: $issueNumber) {
-                                    projectItems(first: 10) {
-                                      nodes {
-                                        project {
-                                          number
-                                        }
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            `;
-                            
-                            const checkResult = await github.graphql(checkQuery, {
-                              owner: owner,
-                              repo: repo,
-                              issueNumber: issue.number
-                            });
-                            
-                            const projectItems = checkResult.repository.issue.projectItems.nodes;
-                            const isInProject = projectItems.some(item => item.project.number === projectNumber);
-                            
-                            if (isInProject) {
-                              console.log(`  ✅ Already in project`);
-                              skippedCount++;
-                              continue;
-                            }
-                            
-                            // Add to project
-                            const addMutation = `
-                              mutation($projectId: ID!, $contentId: ID!) {
-                                addProjectV2ItemById(input: {
-                                  projectId: $projectId
-                                  contentId: $contentId
-                                }) {
-                                  item {
-                                    id
-                                  }
-                                }
-                              }
-                            `;
-                            
-                            await github.graphql(addMutation, {
-                              projectId: projectId,
-                              contentId: issue.node_id
-                            });
-                            
-                            console.log(`  ✅ Added to project`);
-                            addedCount++;
-                            
-                            // Rate limiting delay
-                            await new Promise(resolve => setTimeout(resolve, 200));
-                            
-                          } catch (error) {
-                            console.error(`  ❌ Error: ${error.message}`);
-                            errorCount++;
-                          }
-                        }
-                      }
-
-                      // Summary
-                      const summary = `
-                      ## 📊 Bulk Sync Complete
-
-                      **Results**:
-                      - Total processed: ${processedCount}
-                      - Added to project: ${addedCount}
-                      - Already in project: ${skippedCount}
-                      - Errors: ${errorCount}
-
-                      **Project**: #${projectNumber}
-                      **Repository**: ${owner}/${repo}
-                      `;
-
-                      console.log(summary);
-                      core.summary.addRaw(summary).write();
+            console.log(summary);
+            core.summary.addRaw(summary).write();
