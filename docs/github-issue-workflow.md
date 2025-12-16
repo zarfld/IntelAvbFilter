@@ -39,7 +39,15 @@
 
 ## 📋 Issue Status Workflow
 
-### Issue States and Lifecycle
+### Overview: Generic vs. Artifact-Specific Status
+
+This guide covers **generic workflow states** for general development tasks. For **systems engineering artifacts** (StR, REQ, ADR, ADC) that require ISO/IEC/IEEE standards compliance, see the comprehensive [GitHub Issue Status Management Guide](github-issue-status-management.md).
+
+**When to use which guide**:
+- **This guide (github-issue-workflow.md)**: General development tasks, bugs, features, spikes
+- **[Status Management Guide](github-issue-status-management.md)**: Stakeholder Requirements (StR), System Requirements (REQ), Architecture Decisions (ADR), Architecture Components (ADC)
+
+### Issue States and Lifecycle (Generic Workflow)
 
 GitHub provides two primary states: **Open** and **Closed**. We extend these with labels to track detailed status:
 
@@ -53,6 +61,8 @@ GitHub provides two primary states: **Open** and **Closed**. We extend these wit
 | `status:blocked` | Work stopped due to dependency or issue | When blocker identified |
 | `status:completed` | Fully implemented and verified | When PR merged and verified |
 | `status:closed` | Issue closed (completed, duplicate, or won't fix) | Final closure |
+
+**Note**: For systems engineering artifacts (StR, REQ, ADR, ADC), use **GitHub Projects Custom Fields** with artifact-specific states instead of these generic labels. See [Status Management Guide](github-issue-status-management.md) for details.
 
 ### State Transitions
 
@@ -685,6 +695,15 @@ Status updates should trigger traceability checks:
 
 ## 📚 Related Documentation
 
+### Core Status Management
+- **[GitHub Issue Status Management Guide](github-issue-status-management.md)** - Comprehensive ISO/IEC/IEEE-compliant status workflows for StR, REQ, ADR, ADC artifacts
+
+### Phase-Specific Workflows
+- [Phase 01 Instructions](../.github/instructions/phase-01-stakeholder-requirements.instructions.md) - StR status workflow
+- [Phase 02 Instructions](../.github/instructions/phase-02-requirements.instructions.md) - REQ status workflow  
+- [Phase 03 Instructions](../.github/instructions/phase-03-architecture.instructions.md) - ADR/ADC status workflow
+
+### General Documentation
 - [CI/CD Workflows](ci-cd-workflows.md) - Automated traceability checks
 - [Root Copilot Instructions](../.github/copilot-instructions.md) - Issue-driven development
 - [Lifecycle Guide](lifecycle-guide.md) - Phase-specific issue workflows
@@ -692,6 +711,6 @@ Status updates should trigger traceability checks:
 
 ---
 
-**Version**: 1.0  
-**Last Updated**: 2025-11-26  
+**Version**: 1.1  
+**Last Updated**: 2025-12-09  
 **Maintained By**: Standards Compliance Team

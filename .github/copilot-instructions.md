@@ -533,13 +533,14 @@ Before any implementation, design, or testing work:
 
 **Accepted Variations** (case-insensitive, flexible spacing):
 - ✅ `- Traces to:  #123` (preferred)
-- ✅ `- **Trace to**: #123`
 - ✅ `Traces to #123`
 - ✅ `Trace to: #123`
 
 **Common MISTAKES (will FAIL CI)**:
 - ❌ `Links to: #123` (wrong verb)
 - ❌ `Traced to: #123` (wrong tense)
+- ❌ `- **Trace to**: #123` (bullets & bolding incorrect)
+- ❌ `**Traces to**: #123` (bolding incorrect)
 - ❌ `Parent: #123` (missing "Traces to")
 - ❌ `Implements: #123` (wrong relationship type)
 - ❌ Missing `#` before number
@@ -548,19 +549,21 @@ Before any implementation, design, or testing work:
 **Test Verification Syntax** (REQUIRED for TEST issues):
 ```markdown
 ## Traceability
-- **Verifies**: #45 (requirement being tested)
+- Verifies: #45 (requirement being tested)
 ```
 
 **Regex Pattern (CI)**: `/[Vv]erif(?:ies|ied\s+[Rr]equirements?):?\s*#(\d+)/g`
 
 **Accepted Variations**:
-- ✅ `- **Verifies**: #45, #67` (multiple requirements)
-- ✅ `- **Verified Requirements**: #45`
+- ✅ `- Verifies: #45, #67` (multiple requirements)
+- ✅ `- Verified Requirements: #45`
 
 **Common MISTAKES (will FAIL CI)**:
 - ❌ `Tests: #45` (wrong verb)
 - ❌ `Validates: #45` (wrong verb)
 - ❌ `Covers: #45` (wrong verb)
+- ❌ `- **Verifies**: #45` (bolding incorrect)
+- ❌ `**Verifies**: #45` (bolding incorrect)
 
 ---
 
@@ -568,15 +571,15 @@ Before any implementation, design, or testing work:
 ```markdown
 ## Traceability
 - Traces to:  #123 (parent StR issue)
-- **Depends on**: #45, #67 (prerequisite requirements)
+- Depends on: #45, #67 (prerequisite requirements)
 ```
 
 **Downward Traceability** (Parent → Children):
 ```markdown
 ## Traceability
-- **Verified by**: #89, #90 (test issues)
-- **Implemented by**: #PR-15 (pull request)
-- **Refined by**: #234, #235 (child requirements)
+- Verified by: #89, #90 (test issues)
+- Implemented by: #PR-15 (pull request)
+- Refined by: #234, #235 (child requirements)
 ```
 
 **Required Links**:

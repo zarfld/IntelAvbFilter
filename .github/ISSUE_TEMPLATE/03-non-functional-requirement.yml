@@ -20,12 +20,14 @@ body:
         
         **Accepted formats**:
         - ✅ `- Traces to:  #123` (preferred)
-        - ✅ `- **Trace to**: #123`
+
         
         **Common mistakes (will fail CI)**:
         - ❌ `Links to: #123` (wrong verb)
         - ❌ `Parent: #123` (missing "Traces to")
-
+        - ❌ `- **Trace to**: #123`
+        - ❌ `**Trace to**: #123`
+        
   - type: textarea
     id: traceability
     attributes:
