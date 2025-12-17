@@ -204,6 +204,7 @@ def get_requirement_type(title: str, labels: list) -> str:
         'type:architecture:quality-scenario': 'QA-SC',
         'type:test-case': 'TEST',
         'type:test-plan': 'TEST',
+        'type:test': 'TEST',  # FIX: Added 'type:test' label (used by TEST issues)
         
         # Hyphen-separated (legacy/alternative)
         'stakeholder-requirement': 'StR',
@@ -275,6 +276,7 @@ def main() -> int:
         'type:architecture:quality-scenario',
         'type:test-case',
         'type:test-plan',
+        'type:test',  # FIX: Added 'type:test' label (used by TEST issues #174-#179)
         
         # Phase labels (to catch issues tagged by phase)
         'phase:01-stakeholder-requirements',
