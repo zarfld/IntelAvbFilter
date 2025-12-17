@@ -338,7 +338,20 @@ def main() -> int:
         labels = [l.name for l in issue.labels]
         req_type = get_requirement_type(issue.title, labels)
         
+        # Extract links from issue body
         links = extract_issue_links(issue.body or "")
+        
+        # Also extract links from all issue comments (for "Relates to:" ADR references)
+        try:
+            for comment in issue.get_comments():
+                comment_links = extract_issue_links(comment.body or "")
+                # Merge comment links into main links dict
+                for link_type, refs in comment_links.items():
+                    for ref in refs:
+                        if ref not in links[link_type]:
+                            links[link_type].append(ref)
+        except Exception as e:
+            print(f"Warning: Could not fetch comments for issue #{issue.number}: {e}", file=sys.stderr)
         
         # Build item entry
         item = {
