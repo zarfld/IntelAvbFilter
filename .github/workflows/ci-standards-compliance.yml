@@ -13,7 +13,7 @@ name: CI - Standards Compliance & Quality Gates
 # 🔄 Workflow Strategy:
 #   1. traceability-check.yml: Fast traceability validation (2-3 min)
 #   2. This workflow: Complete CI/CD pipeline (10-15 min)
-#   
+#
 #   On PRs, both workflows run in parallel:
 #   - Traceability check: Quick feedback with PR comment
 #   - This workflow: Full validation before merge
@@ -60,7 +60,7 @@ jobs:
         run: |
           echo "🔍 Validating GitHub Issues-based requirements structure..."
           python scripts/github-traceability-report.py > /tmp/traceability-check.md
-          
+
           # Check if any requirements were found
           if grep -q "Total requirements: \*\*0\*\*" /tmp/traceability-check.md; then
             echo "❌ No requirements found in GitHub Issues!"
@@ -69,7 +69,7 @@ jobs:
             cat /tmp/traceability-check.md
             exit 1
           fi
-          
+
           echo "✅ GitHub Issues requirements structure validated"
           grep "Total requirements:" /tmp/traceability-check.md || echo "Summary not found in report"
   github-issues-generation:
@@ -164,7 +164,7 @@ jobs:
         # exclude:
         #   - os: macos-latest
         #     config: Debug
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -193,7 +193,7 @@ jobs:
         shell: bash
         run: |
           echo "🔍 Detecting build system..."
-          
+
           # Check for different project types
           if [ -f "CMakeLists.txt" ]; then
             echo "BUILD_SYSTEM=cmake" >> $GITHUB_ENV
@@ -220,11 +220,11 @@ jobs:
           if [ -n "${{ env.TEST_DIR }}" ]; then
             cd "${{ env.TEST_DIR }}"
           fi
-          
+
           echo "🏗️ Building tests (${{ matrix.config }})..."
           cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} -G Ninja
           cmake --build build --config ${{ matrix.config }}
-          
+
           echo "🧪 Running tests..."
           ctest --test-dir build -C ${{ matrix.config }} --output-on-failure || {
             echo "⚠️ Some tests failed (may require hardware or additional setup)"
@@ -237,7 +237,7 @@ jobs:
         run: |
           pip install --upgrade platformio
           pio upgrade --dev
-          
+
           echo "🧪 Running native unit tests..."
           pio test -e native || {
             echo "⚠️ Some tests failed (may require hardware)"
@@ -312,9 +312,9 @@ jobs:
             python - <<'PYTHON_SCRIPT'
           import json
           from pathlib import Path
-          
+
           data = json.loads(Path('build/integrity-scan.json').read_text())
-          
+
           if data.get('highIntegrity'):
               print(f"\n⚠️ High-integrity requirements found: {len(data.get('files', []))}")
               print("These require additional scrutiny:")
@@ -372,7 +372,7 @@ jobs:
         shell: bash
         run: |
           echo "🔍 Detecting integration test setup..."
-          
+
           if [ -d "test/integration" ] || [ -d "tests/integration" ]; then
             echo "INTEGRATION_DIR=$(find . -type d -name integration | head -1)" >> $GITHUB_ENV
             echo "✅ Integration test directory found"
@@ -411,7 +411,7 @@ jobs:
           echo "   Configuration: ${{ matrix.config }}"
           echo "   Test Directory: ${{ env.INTEGRATION_DIR }}"
           echo ""
-          
+
           if [ "${{ env.INTEGRATION_DIR }}" = "none" ]; then
             echo "⚠️ No integration tests detected"
             echo "   Standard location: test/integration/ or tests/integration/"
@@ -527,25 +527,25 @@ jobs:
           python - <<'PYTHON_SCRIPT'
           import os
           from github import Github
-          
+
           g = Github(os.environ['GITHUB_TOKEN'])
           repo = g.get_repo("${{ github.repository }}")
-          
+
           print("🎭 Acceptance Criteria Validation Status\n")
-          
+
           # Query all issues with test-case label
           test_issues = repo.get_issues(labels=["test-case"], state="all")
           test_count = sum(1 for _ in test_issues)
-          
+
           # Query all functional/non-functional requirements
           req_issues = list(repo.get_issues(labels=["functional-requirement"], state="all"))
           req_issues.extend(repo.get_issues(labels=["non-functional"], state="all"))
-          
+
           print(f"📊 Requirements Status:")
           print(f"   - Total Requirements: {len(req_issues)}")
           print(f"   - Test Cases: {test_count}")
           print(f"   - Traceability: {'✅ Complete' if test_count > 0 else '⚠️ Needs setup'}\n")
-          
+
           # Validate traceability
           validated_count = 0
           for issue in req_issues:
@@ -554,7 +554,7 @@ jobs:
                   print(f"✅ #{issue.number}: {issue.title}")
               else:
                   print(f"⚠️ #{issue.number}: {issue.title} (no test link)")
-          
+
           if len(req_issues) == 0:
               print("\n⚠️ No GitHub Issues found. Please create issues using:")
               print("   .github/ISSUE_TEMPLATE/ templates")
