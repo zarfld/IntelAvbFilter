@@ -138,12 +138,13 @@ def extract_links(issue_body: str) -> Dict[str, List[int]]:
             'refined_by': []
         }
     
-    # Extract different link types
-    traces_to = re.findall(r'[Tt]races?\s+to:?\s*#(\d+)', issue_body)
-    depends_on = re.findall(r'[Dd]epends?\s+on:?\s*#(\d+)', issue_body)
-    verified_by = re.findall(r'[Vv]erified\s+by:?\s*#(\d+)', issue_body)
-    implemented_by = re.findall(r'[Ii]mplemented\s+by:?\s*#(\d+)', issue_body)
-    refined_by = re.findall(r'[Rr]efined\s+by:?\s*#(\d+)', issue_body)
+    # Extract different link types (handle Markdown formatting: - **Traces to**: #123)
+    # Regex now matches: "Traces to: #123", "- **Traces to**: #123", "**Traces to**: #123"
+    traces_to = re.findall(r'(?:-\s+)?\*?\*?[Tt]races?\s+to\*?\*?:?\s*#(\d+)', issue_body)
+    depends_on = re.findall(r'(?:-\s+)?\*?\*?[Dd]epends?\s+on\*?\*?:?\s*#(\d+)', issue_body)
+    verified_by = re.findall(r'(?:-\s+)?\*?\*?[Vv]erified\s+by\*?\*?:?\s*#(\d+)', issue_body)
+    implemented_by = re.findall(r'(?:-\s+)?\*?\*?[Ii]mplemented\s+by\*?\*?:?\s*#(\d+)', issue_body)
+    refined_by = re.findall(r'(?:-\s+)?\*?\*?[Rr]efined\s+by\*?\*?:?\s*#(\d+)', issue_body)
     
     return {
         'traces_to': [int(n) for n in traces_to],
