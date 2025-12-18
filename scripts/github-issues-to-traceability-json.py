@@ -275,6 +275,7 @@ def main() -> int:
         'type:architecture:decision',
         'type:architecture:component',
         'type:architecture:quality-scenario',
+        'type:quality-scenario',  # FIX: Added 'type:quality-scenario' label (used by QA-SC issues #184-#190)
         'type:test-case',
         'type:test-plan',
         'type:test',  # FIX: Added 'type:test' label (used by TEST issues #174-#179)
