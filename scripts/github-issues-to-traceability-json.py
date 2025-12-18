@@ -202,6 +202,7 @@ def get_requirement_type(title: str, labels: list) -> str:
         'type:architecture:decision': 'ADR',
         'type:architecture:component': 'ARC-C',
         'type:architecture:quality-scenario': 'QA-SC',
+        'type:quality-scenario': 'QA-SC',  # FIX: Added 'type:quality-scenario' label (actual label used)
         'type:test-case': 'TEST',
         'type:test-plan': 'TEST',
         'type:test': 'TEST',  # FIX: Added 'type:test' label (used by TEST issues)
