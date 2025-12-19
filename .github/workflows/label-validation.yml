@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: '0 2 * * 1'  # Run every Monday at 2 AM UTC to audit all issues
   issues:
-    types: [opened, edited, reopened, labeled, unlabeled]
+    types: [opened, reopened, labeled, unlabeled]
 
 jobs:
   # Real-time validation on issue events
