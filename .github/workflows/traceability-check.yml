@@ -29,7 +29,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   issues:
-    types: [opened, edited]
+    types: [opened]
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
