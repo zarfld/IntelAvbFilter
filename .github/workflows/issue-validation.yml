@@ -14,7 +14,7 @@ jobs:
       contains(github.event.issue.labels.*.name, 'type:architecture:decision') ||
       contains(github.event.issue.labels.*.name, 'type:architecture:component') ||
       contains(github.event.issue.labels.*.name, 'type:architecture:quality-scenario') ||
-      contains(github.event.issue.labels.*.name, 'type:test')
+      contains(github.event.issue.labels.*.name, 'type:test-case')
 
     permissions:
       issues: write
@@ -103,8 +103,37 @@ jobs:
               }
             }
 
+      - name: Correct label 'type:test' to 'type:test-case'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+
+            if (labels.includes('type:test')) {
+              // Remove incorrect label
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                name: 'type:test'
+              });
+
+              // Add correct label
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['type:test-case']
+              });
+
+              console.log('✅ Corrected label from type:test to type:test-case');
+            } else {
+              console.log('✅ No incorrect type:test label found');
+            }
+
       - name: Check test requirement links
-        if: contains(github.event.issue.labels.*.name, 'type:test')
+        if: contains(github.event.issue.labels.*.name, 'type:test-case')
         uses: actions/github-script@v7
         with:
           script: |
