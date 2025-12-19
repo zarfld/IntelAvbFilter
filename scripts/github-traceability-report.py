@@ -287,7 +287,8 @@ def generate_matrix():
     verified_reqs = set()
     for issue in issues:
         labels = [label['name'] for label in issue['labels']]
-        if 'test-case' in labels:
+        # FIX: Check for 'type:test-case' label (full label name, not substring)
+        if 'type:test-case' in labels or any('test-case' in label for label in labels):
             links = extract_links(issue.get('body', ''))
             verified_reqs.update(links['traces_to'])
     
