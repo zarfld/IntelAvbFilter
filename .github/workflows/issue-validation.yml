@@ -2,7 +2,7 @@ name: Issue Validation
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [opened, reopened]
 
 jobs:
   validate-requirement:
