@@ -549,14 +549,14 @@ Before any implementation, design, or testing work:
 **Test Verification Syntax** (REQUIRED for TEST issues):
 ```markdown
 ## Traceability
-- Verifies: #45 (requirement being tested)
+- Traces to: #45 (requirement being tested)
 ```
 
 **Regex Pattern (CI)**: `/[Vv]erif(?:ies|ied\s+[Rr]equirements?):?\s*#(\d+)/g`
 
 **Accepted Variations**:
-- ✅ `- Verifies: #45, #67` (multiple requirements)
-- ✅ `- Verified Requirements: #45`
+- ✅ `- Traces to: #45, #67` (multiple requirements)
+- ✅ `- Traces to: #45`
 
 **Common MISTAKES (will FAIL CI)**:
 - ❌ `Tests: #45` (wrong verb)
@@ -564,6 +564,8 @@ Before any implementation, design, or testing work:
 - ❌ `Covers: #45` (wrong verb)
 - ❌ `- **Verifies**: #45` (bolding incorrect)
 - ❌ `**Verifies**: #45` (bolding incorrect)
+- ❌ `**Traces to**: #45` (bolding incorrect)
+- ❌ `Verifies: #45` (incorrect wording)
 
 ---
 

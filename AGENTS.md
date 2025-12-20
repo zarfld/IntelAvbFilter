@@ -113,19 +113,22 @@ Traces to**: #123 (parent StR issue)
 
 ```markdown
 ## Traceability
-- **Verifies**: #45 (requirement being tested)
+- Traces to: #45 (requirement being tested)
 ```
 
 **Regex Pattern (CI)**: `/[Vv]erif(?:ies|ied\s+[Rr]equirements?):?\s*#(\d+)/g`
 
 **Accepted Variations**:
-- ✅ `- **Verifies**: #45, #67` (multiple requirements)
-- ✅ `- **Verified Requirements**: #45`
+- ✅ `- Traces to: #45, #67` (multiple requirements)
+- ✅ `- Traces to: #45
 
 **Common MISTAKES (will FAIL CI)**:
 - ❌ `Tests: #45` (wrong verb)
 - ❌ `Validates: #45` (wrong verb)
 - ❌ `Covers: #45` (wrong verb)
+- ❌ `- **Verifies**: #45, #67` 
+- ❌ `- **Verified Requirements**: #45`
+- ❌ `- **Traces to**: #45` (bolding incorrect)
 
 ### Required Issue Links
 
