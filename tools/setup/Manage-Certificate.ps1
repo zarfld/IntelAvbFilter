@@ -1,4 +1,4 @@
-# Automatisches Zertifikatsmanagement für Intel AVB Filter
+# Automatisches Zertifikatsmanagement fï¿½r Intel AVB Filter
 # Exportiert und installiert das Testzertifikat automatisch
 
 Write-Host "Managing Intel AVB Filter test certificate..." -ForegroundColor Green
@@ -13,7 +13,8 @@ if ($certs.Count -eq 0) {
 
 # Neuestes Zertifikat verwenden
 $cert = $certs | Sort-Object NotAfter -Descending | Select-Object -First 1
-$certPath = "IntelAvbTestCert.cer"
+$repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$certPath = Join-Path $repoRoot "IntelAvbTestCert.cer"
 
 Write-Host "Exporting certificate:" -ForegroundColor Yellow
 Write-Host "  Subject: $($cert.Subject)" -ForegroundColor Cyan
@@ -24,7 +25,7 @@ Write-Host "  Expires: $($cert.NotAfter)" -ForegroundColor Cyan
 $cert | Export-Certificate -FilePath $certPath -Force
 Write-Host "Certificate exported to: $certPath" -ForegroundColor Green
 
-# Prüfen ob als Admin ausgeführt wird
+# Prï¿½fen ob als Admin ausgefï¿½hrt wird
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
 
 if ($isAdmin) {
@@ -52,7 +53,7 @@ if ($isAdmin) {
     Write-Host "Or use GUI: certmgr.msc" -ForegroundColor Cyan
 }
 
-# Zertifikat-Info für Debugging
+# Zertifikat-Info fï¿½r Debugging
 Write-Host "`nCertificate Details:" -ForegroundColor Green
 Write-Host "Location: Cert:\CurrentUser\PrivateCertStore" -ForegroundColor Cyan
 Write-Host "File: $certPath" -ForegroundColor Cyan
