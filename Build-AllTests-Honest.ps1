@@ -7,6 +7,19 @@ Write-Host "=======================================" -ForegroundColor Cyan
 $ErrorActionPreference = "Continue"
 $VerbosePreference = "Continue"
 
+# Calculate repository root from script location
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+if ($ScriptDir -match '\\tools\\build$') {
+    # Script is in tools/build/ subdirectory
+    $RepoRoot = Split-Path (Split-Path $ScriptDir -Parent) -Parent
+} else {
+    # Script is in repository root
+    $RepoRoot = $ScriptDir
+}
+
+# Change to repository root for build commands
+Push-Location $RepoRoot
+
 # Build tracking
 $TotalTests = 10
 $SuccessfulBuilds = @()
@@ -117,6 +130,9 @@ Write-Host "FINAL STATUS - ABSOLUTE HONESTY" -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
 Write-Host "Files that actually exist: $ActuallyExist/$TotalTests" -ForegroundColor White
+
+# Restore original directory
+Pop-Location
 
 if ($ActuallyMissing -eq 0) {
     Write-Host "? ALL TESTS BUILT SUCCESSFULLY" -ForegroundColor Green
