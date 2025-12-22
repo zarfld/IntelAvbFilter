@@ -1,0 +1,1141 @@
+
+Install the latest PowerShell for new features and improvements! https://aka.ms/PSWindows
+
+PS C:\WINDOWS\system32> Get-Content "C:\Users\dzarf\Documents\dbgview.log" | Select-String -Pattern "DriverEntry|FilterDriverEntry" | Select-Object -Last 5
+PS C:\WINDOWS\system32> cd C:\Users\dzarf\source\repos\IntelAvbFilter
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\enhanced_investigation_suite.ps1
+Enhanced Intel AVB Hardware Investigation Suite - FINAL
+==========================================================
+PURPOSE: Complete evidence chain with ChatGPT5 I226 TAS validation runbook
+BREAKTHROUGH: Correct register addresses + ChatGPT5 specification order
+
+?? Phase 1: Basic Hardware Investigation
+Purpose: Validate register access and basic hardware behavior
+? Phase 1 completed successfully
+
+??  Phase 2: Enhanced TAS Investigation (SKIPPED - used wrong registers)
+Evidence: ALL tests failed because used 0x08600 instead of 0x3570
+Result: Root cause identified - wrong register block entirely
+? Phase 2 purpose achieved - proved register address issue
+
+?? Phase 3: Critical Prerequisites Investigation
+Purpose: PTP clock verification + missing register discovery
+? Phase 3 completed successfully
+
+?? Phase 4: CORRECTED I226 TAS Test (Evidence-based fix)
+Purpose: Test TAS activation with CORRECT register addresses
+Registers: TQAVCTRL=0x3570, BASET_L/H=0x3314/0x3318, QBVCYCLET=0x331C
+? Phase 4 completed successfully
+
+?? Phase 5: ChatGPT5 I226 TAS Validation Runbook (NEW - FINAL VALIDATION)
+Purpose: Complete I226 TAS validation following ChatGPT5 specification order
+Method: Linux IGC driver sequence + ChatGPT5 validation runbook
+Steps: PHC?TSN Control?Cycle Time?Base Time?Queue Windows?Verification?Traffic Proof
+? Phase 5 completed successfully
+
+?? Phase 6: Multi-Adapter Comprehensive Validation
+Purpose: Validate complete system behavior
+? Phase 6 completed successfully
+
+??? Phase 7: TSN IOCTL Handler Verification
+Purpose: Confirm corrected implementation works through IOCTL interface
+? Phase 7 completed successfully
+
+?? === COMPLETE INVESTIGATION CHAIN WITH CHATGPT5 VALIDATION ===
+
+Evidence Chain Summary:
+  ? Phase 1: Register access patterns validated
+  ? Phase 2: Wrong register addresses identified (0x08600 vs 0x3570)
+  ? Phase 3: PTP clock status and prerequisites analyzed
+  ? Phase 4: CORRECTED register addresses tested
+  ?? Phase 5: CHATGPT5 SPECIFICATION VALIDATION completed
+  ? Phase 6: Multi-adapter functionality confirmed
+  ? Phase 7: IOCTL handlers with corrected implementation
+
+?? BREAKTHROUGH ACHIEVEMENTS:
+  ?? ROOT CAUSE FIXED: Correct I226 TSN register block implemented!
+  ? Previous: TAS_CTRL @ 0x08600 (doesn't exist on I226)
+  ? Corrected: TQAVCTRL @ 0x3570 (real I226 TSN control)
+  ? Previous: TAS_CONFIG0/1 @ 0x08604/0x08608
+  ? Corrected: BASET_L/H @ 0x3314/0x3318
+  ? Added: QBVCYCLET @ 0x331C (cycle time register)
+  ?? NEW: ChatGPT5 validation runbook implementation
+
+?? Implementation Status:
+  ? Driver completely fixed with CORRECT register addresses
+  ? Evidence-based I226 TAS implementation complete
+  ? Linux IGC driver sequence implemented perfectly
+  ? I226-specific FUTSCDDIS handling implemented
+  ? ChatGPT5 validation runbook integrated
+  ? Complete test suite with all phases
+
+?? CHATGPT5 VALIDATION FEATURES:
+  ?? Step 1: Pre-req - I226 PHC (SYSTIM) advancement verification
+  ?? Step 2: I226 context selection with VID:DID logging
+  ?? Step 3: TSN/Qbv control programming (TQAVCTRL)
+  ?? Step 4: Cycle time programming (QBVCYCLET_S/QBVCYCLET)
+  ?? Step 5: Base time calculation (future + cycle boundary)
+  ?? Step 6: Base time programming with I226 FUTSCDDIS quirk
+  ?? Step 7: Queue windows (launch-time mode + full cycle)
+  ?? Step 8: Register readback + activation wait
+  ?? Step 9: Traffic-side proof validation
+
+?? READY FOR PRODUCTION HARDWARE VALIDATION!
+The complete implementation with ChatGPT5 runbook should successfully activate I226 TAS!
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\Check-Driver-Status.ps1
+=== Intel AVB Driver Debug Analysis ===
+
+[1] Currently Installed Driver:
+  Path: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_d502967860baa974\IntelAvbFilter.sys
+  Size: 133424 bytes
+  Modified: 12/10/2025 21:48:41
+  Build Time: 21:48:41
+
+[2] Local Release Build:
+  Size: 33744 bytes
+  Modified: 12/05/2025 10:55:16
+  Build Time: 10:55:16
+
+[?] Installed driver is NEWER than local build
+
+[3] Service Status:
+  Status: Running
+  [OK] Driver is loaded
+
+[4] Device Interface Test:
+  [OK] Device interface working
+  Capabilities (0x00000000): <none>
+
+[5] Debug Output Monitoring:
+  [OK] DebugView is running (PID: 8968)
+
+=== Analysis Summary ===
+
+System appears configured correctly.
+Check DebugView output for PTP initialization messages
+
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\Force-Driver-Reload.ps1
+========================================
+Intel AVB Filter - Force Reload
+========================================
+
+[1] Unbinding filter from network adapters...
+    Filter unbound
+[2] Stopping service (forced)...
+[3] Removing old driver files...
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_0313f5c06ae23fc7
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_03fcbcad5d18d086
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_0a890fd325d56f63
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_0c3a0eee32054547
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_104a8ae53031f3d0
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_15dd18994d9f9d4c
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_193cae48e479cef7
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_1a3f2a848131af3b
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_1ce2e318302e45d1
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_1f4e892c8d290563
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_20c6239d7f5c8e37
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_240583b51e37cc63
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_2418c14934b0cbde
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_268f62bcdb27fab5
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_2b8eb53f3aca6882
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_2ef1de476786764f
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_321fec50360ed2d2
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_34e1ca36eb21778a
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_3b4fed8c4dbb142d
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_3d9c8cf4143d9788
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_4186f74a11ab9aed
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_4a1271bebf0fa18a
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_4c10eae88f69fe76
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_4dd7d0364b2aba2d
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_4f975a9cc489569c
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_533e6e4b058b2960
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_53ab2f588d344ab7
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_6282d79107a8280a
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_63785eb511f8b2bd
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_660e97b574dbddf5
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_6a766d8256192856
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_6b14ab64e167112c
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_6c7b5ceaa2e3d058
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_6cccb01ff21107d8
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_6d74ffc2f8ea4833
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_7937a298f8d48c5d
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_7a7234bbe54153c9
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_828d8d3fe81d1f16
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_869afc6e0ab6c1d0
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_880be637f394239f
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_8b92363d13e53aa6
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_8fb7182426498036
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_91daa6408f601078
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_99f4db0dce0f2c6e
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_9b81752c24d6870e
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_9e905a3ffe06423b
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_a157f4dcf2ce4059
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_a5cca4c132283118
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_a6a5b43d76775d8d
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_a95acc81a1164282
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_aacdc8da580d00b5
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_adc3c9983d4fecd5
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_ae884e0badf80e51
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_b4441e71f6aec461
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_b5f5c0d721196434
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_b84f58cfb56254e5
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_c6377764f77befb0
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_cf0a9be3f6016aff
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_d0338e42d22a2f99
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_d172a0a153aae71b
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_d502967860baa974
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_d849addea90b163e
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_da3525fc71ceca74
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_dc873d2038055ee8
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_e23e0eea8a4df236
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_e275c2f196162962
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_e39d1f4d34a3d85b
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_e55eb6358f19543e
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_ea264d96c941fa9e
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_ed3dea06c223f48c
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_ee9adce1568b10f5
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_eedbb93a0d8f9d4d
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_eee024c9e58d9e17
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_f4763c6a11bef76a
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_f48f9a90199aacf1
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_f52e98aa01ce24ed
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_f630a3b5b83308ae
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_f9cd9cc589b8a5f3
+    Removing: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_fbb78c72a70fe5b8
+    Old drivers removed
+[4] Installing new driver (10:25:32)...
+    Driver: 12/05/2025 10:55:16 (33744 bytes)
+    SUCCESS: Driver installed and bound
+[5] Verifying service status...
+    ? Service RUNNING
+[6] Testing device interface...
+    Test output:
+    PTP: base read failed
+    Capabilities (0x00000000): <none>
+
+    --- Basic I210 register snapshot (legacy offsets) ---
+
+    ? Device interface working!
+
+========================================
+Driver reload complete!
+========================================
+
+Check DebugView for initialization messages:
+  ? AvbPlatformInit: Starting PTP clock initialization
+  ? TSAUXC before: 0x...
+  ? PTP clock enabled
+  ? TIMINCA programmed: 0x18000000
+  ?? PTP clock is RUNNING!
+
+Run full test:
+  .\avb_test_i226.exe selftest
+
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\Check-Driver-Status.ps1
+=== Intel AVB Driver Debug Analysis ===
+
+[1] Currently Installed Driver:
+  Path: C:\Windows\System32\DriverStore\FileRepository\intelavbfilter.inf_amd64_d502967860baa974\IntelAvbFilter.sys
+  Size: 133424 bytes
+  Modified: 12/10/2025 21:48:41
+  Build Time: 21:48:41
+
+[2] Local Release Build:
+  Size: 33744 bytes
+  Modified: 12/05/2025 10:55:16
+  Build Time: 10:55:16
+
+[?] Installed driver is NEWER than local build
+
+[3] Service Status:
+  Status: Running
+  [OK] Driver is loaded
+
+[4] Device Interface Test:
+  [OK] Device interface working
+  Capabilities (0x00000000): <none>
+
+[5] Debug Output Monitoring:
+  [OK] DebugView is running (PID: 8968)
+
+=== Analysis Summary ===
+
+System appears configured correctly.
+Check DebugView output for PTP initialization messages
+
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\enhanced_investigation_suite.ps1
+Enhanced Intel AVB Hardware Investigation Suite - FINAL
+==========================================================
+PURPOSE: Complete evidence chain with ChatGPT5 I226 TAS validation runbook
+BREAKTHROUGH: Correct register addresses + ChatGPT5 specification order
+
+?? Phase 1: Basic Hardware Investigation
+Purpose: Validate register access and basic hardware behavior
+? Phase 1 completed successfully
+
+??  Phase 2: Enhanced TAS Investigation (SKIPPED - used wrong registers)
+Evidence: ALL tests failed because used 0x08600 instead of 0x3570
+Result: Root cause identified - wrong register block entirely
+? Phase 2 purpose achieved - proved register address issue
+
+?? Phase 3: Critical Prerequisites Investigation
+Purpose: PTP clock verification + missing register discovery
+? Phase 3 completed successfully
+
+?? Phase 4: CORRECTED I226 TAS Test (Evidence-based fix)
+Purpose: Test TAS activation with CORRECT register addresses
+Registers: TQAVCTRL=0x3570, BASET_L/H=0x3314/0x3318, QBVCYCLET=0x331C
+? Phase 4 completed successfully
+
+?? Phase 5: ChatGPT5 I226 TAS Validation Runbook (NEW - FINAL VALIDATION)
+Purpose: Complete I226 TAS validation following ChatGPT5 specification order
+Method: Linux IGC driver sequence + ChatGPT5 validation runbook
+Steps: PHC?TSN Control?Cycle Time?Base Time?Queue Windows?Verification?Traffic Proof
+? Phase 5 completed successfully
+
+?? Phase 6: Multi-Adapter Comprehensive Validation
+Purpose: Validate complete system behavior
+? Phase 6 completed successfully
+
+??? Phase 7: TSN IOCTL Handler Verification
+Purpose: Confirm corrected implementation works through IOCTL interface
+? Phase 7 completed successfully
+
+?? === COMPLETE INVESTIGATION CHAIN WITH CHATGPT5 VALIDATION ===
+                                                                                                                     Evidence Chain Summary:                                                                                                ? Phase 1: Register access patterns validated                                                                        ? Phase 2: Wrong register addresses identified (0x08600 vs 0x3570)                                                   ? Phase 3: PTP clock status and prerequisites analyzed                                                               ? Phase 4: CORRECTED register addresses tested                                                                       ?? Phase 5: CHATGPT5 SPECIFICATION VALIDATION completed                                                              ? Phase 6: Multi-adapter functionality confirmed                                                                     ? Phase 7: IOCTL handlers with corrected implementation                                                                                                                                                                                 ?? BREAKTHROUGH ACHIEVEMENTS:                                                                                          ?? ROOT CAUSE FIXED: Correct I226 TSN register block implemented!                                                    ? Previous: TAS_CTRL @ 0x08600 (doesn't exist on I226)                                                               ? Corrected: TQAVCTRL @ 0x3570 (real I226 TSN control)                                                               ? Previous: TAS_CONFIG0/1 @ 0x08604/0x08608                                                                          ? Corrected: BASET_L/H @ 0x3314/0x3318                                                                               ? Added: QBVCYCLET @ 0x331C (cycle time register)                                                                    ?? NEW: ChatGPT5 validation runbook implementation                                                                                                                                                                                      ?? Implementation Status:                                                                                              ? Driver completely fixed with CORRECT register addresses                                                            ? Evidence-based I226 TAS implementation complete                                                                    ? Linux IGC driver sequence implemented perfectly                                                                    ? I226-specific FUTSCDDIS handling implemented                                                                       ? ChatGPT5 validation runbook integrated                                                                             ? Complete test suite with all phases                                                                                                                                                                                                   ?? CHATGPT5 VALIDATION FEATURES:                                                                                       ?? Step 1: Pre-req - I226 PHC (SYSTIM) advancement verification                                                      ?? Step 2: I226 context selection with VID:DID logging                                                               ?? Step 3: TSN/Qbv control programming (TQAVCTRL)                                                                    ?? Step 4: Cycle time programming (QBVCYCLET_S/QBVCYCLET)                                                            ?? Step 5: Base time calculation (future + cycle boundary)                                                           ?? Step 6: Base time programming with I226 FUTSCDDIS quirk                                                           ?? Step 7: Queue windows (launch-time mode + full cycle)                                                             ?? Step 8: Register readback + activation wait                                                                       ?? Step 9: Traffic-side proof validation                                                                                                                                                                                                ?? READY FOR PRODUCTION HARDWARE VALIDATION!                                                                         The complete implementation with ChatGPT5 runbook should successfully activate I226 TAS!                             PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\IntelAvbFilter-Cleanup.ps1                                                                                                                                                               cmdlet IntelAvbFilter-Cleanup.ps1 at command pipeline position 1                                                     Supply values for the following parameters:                                                                          InfPath: "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf"                    === IntelAvbFilter Cleanup & Reinstall ===                                                                           ComponentId=INTEL_AvbFilter  AllAdapters=False  Timeout=180s                                                         [-] Binding deaktivieren: Ethernet 2 (intel_avbfilter)                                                               [pnputil] lÃ¤uft 59.9s \WARNING: pnputil Enumeration fehlgeschlagen/Timeout -> Fallback FS: Timeout (60s) bei pnputil /enum-drivers                                                                                                       [-] Zu entfernende Pakete: oem100.inf, oem101.inf, oem102.inf, oem103.inf, oem104.inf, oem105.inf, oem106.inf, oem107.inf, oem109.inf, oem110.inf, oem111.inf, oem112.inf, oem113.inf, oem114.inf, oem115.inf, oem116.inf, oem117.inf, oem118.inf, oem119.inf, oem120.inf, oem121.inf, oem122.inf, oem123.inf, oem124.inf, oem125.inf, oem126.inf, oem46.inf, oem47.inf, oem48.inf, oem49.inf, oem50.inf, oem51.inf, oem52.inf, oem53.inf, oem54.inf, oem55.inf, oem56.inf, oem57.inf, oem58.inf, oem59.inf, oem60.inf, oem61.inf, oem62.inf, oem63.inf, oem64.inf, oem65.inf, oem66.inf, oem67.inf, oem68.inf, oem69.inf, oem70.inf, oem71.inf, oem72.inf, oem73.inf, oem74.inf, oem75.inf, oem76.inf, oem77.inf, oem78.inf, oem79.inf, oem80.inf, oem81.inf, oem82.inf, oem83.inf, oem84.inf, oem85.inf, oem86.inf, oem87.inf, oem88.inf, oem89.inf, oem90.inf, oem91.inf, oem92.inf, oem93.inf, oem94.inf, oem95.inf, oem96.inf, oem97.inf, oem98.inf, oem99.inf     [remove] (1/80) oem100.inf                                                                                           [-] Entferne Paket: oem100.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (2/80) oem101.inf                                                                                           [-] Entferne Paket: oem101.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (3/80) oem102.inf                                                                                           [-] Entferne Paket: oem102.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (4/80) oem103.inf                                                                                           [-] Entferne Paket: oem103.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (5/80) oem104.inf                                                                                           [-] Entferne Paket: oem104.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (6/80) oem105.inf                                                                                           [-] Entferne Paket: oem105.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (7/80) oem106.inf                                                                                           [-] Entferne Paket: oem106.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (8/80) oem107.inf                                                                                           [-] Entferne Paket: oem107.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (9/80) oem109.inf                                                                                           [-] Entferne Paket: oem109.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (10/80) oem110.inf                                                                                          [-] Entferne Paket: oem110.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (11/80) oem111.inf                                                                                          [-] Entferne Paket: oem111.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (12/80) oem112.inf                                                                                          [-] Entferne Paket: oem112.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (13/80) oem113.inf                                                                                          [-] Entferne Paket: oem113.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (14/80) oem114.inf                                                                                          [-] Entferne Paket: oem114.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (15/80) oem115.inf                                                                                          [-] Entferne Paket: oem115.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (16/80) oem116.inf                                                                                          [-] Entferne Paket: oem116.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (17/80) oem117.inf                                                                                          [-] Entferne Paket: oem117.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (18/80) oem118.inf                                                                                          [-] Entferne Paket: oem118.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (19/80) oem119.inf                                                                                          [-] Entferne Paket: oem119.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (20/80) oem120.inf                                                                                          [-] Entferne Paket: oem120.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (21/80) oem121.inf                                                                                          [-] Entferne Paket: oem121.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (22/80) oem122.inf                                                                                          [-] Entferne Paket: oem122.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (23/80) oem123.inf                                                                                          [-] Entferne Paket: oem123.inf                                                                                       [pnputil] fertig in 0.4s                                                                                                 OK                                                                                                               [remove] (24/80) oem124.inf                                                                                          [-] Entferne Paket: oem124.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (25/80) oem125.inf                                                                                          [-] Entferne Paket: oem125.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (26/80) oem126.inf                                                                                          [-] Entferne Paket: oem126.inf                                                                                       [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (27/80) oem46.inf                                                                                           [-] Entferne Paket: oem46.inf                                                                                        [pnputil] fertig in 0.4s                                                                                                 OK                                                                                                               [remove] (28/80) oem47.inf                                                                                           [-] Entferne Paket: oem47.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (29/80) oem48.inf                                                                                           [-] Entferne Paket: oem48.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (30/80) oem49.inf                                                                                           [-] Entferne Paket: oem49.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (31/80) oem50.inf                                                                                           [-] Entferne Paket: oem50.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (32/80) oem51.inf                                                                                           [-] Entferne Paket: oem51.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (33/80) oem52.inf                                                                                           [-] Entferne Paket: oem52.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (34/80) oem53.inf                                                                                           [-] Entferne Paket: oem53.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (35/80) oem54.inf                                                                                           [-] Entferne Paket: oem54.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (36/80) oem55.inf                                                                                           [-] Entferne Paket: oem55.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (37/80) oem56.inf                                                                                           [-] Entferne Paket: oem56.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (38/80) oem57.inf                                                                                           [-] Entferne Paket: oem57.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (39/80) oem58.inf                                                                                           [-] Entferne Paket: oem58.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (40/80) oem59.inf                                                                                           [-] Entferne Paket: oem59.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (41/80) oem60.inf                                                                                           [-] Entferne Paket: oem60.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (42/80) oem61.inf                                                                                           [-] Entferne Paket: oem61.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (43/80) oem62.inf                                                                                           [-] Entferne Paket: oem62.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (44/80) oem63.inf                                                                                           [-] Entferne Paket: oem63.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (45/80) oem64.inf                                                                                           [-] Entferne Paket: oem64.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (46/80) oem65.inf                                                                                           [-] Entferne Paket: oem65.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (47/80) oem66.inf                                                                                           [-] Entferne Paket: oem66.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (48/80) oem67.inf                                                                                           [-] Entferne Paket: oem67.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (49/80) oem68.inf                                                                                           [-] Entferne Paket: oem68.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (50/80) oem69.inf                                                                                           [-] Entferne Paket: oem69.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (51/80) oem70.inf                                                                                           [-] Entferne Paket: oem70.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (52/80) oem71.inf                                                                                           [-] Entferne Paket: oem71.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (53/80) oem72.inf                                                                                           [-] Entferne Paket: oem72.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (54/80) oem73.inf                                                                                           [-] Entferne Paket: oem73.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (55/80) oem74.inf                                                                                           [-] Entferne Paket: oem74.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (56/80) oem75.inf                                                                                           [-] Entferne Paket: oem75.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (57/80) oem76.inf                                                                                           [-] Entferne Paket: oem76.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (58/80) oem77.inf                                                                                           [-] Entferne Paket: oem77.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (59/80) oem78.inf                                                                                           [-] Entferne Paket: oem78.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (60/80) oem79.inf                                                                                           [-] Entferne Paket: oem79.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (61/80) oem80.inf                                                                                           [-] Entferne Paket: oem80.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (62/80) oem81.inf                                                                                           [-] Entferne Paket: oem81.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (63/80) oem82.inf                                                                                           [-] Entferne Paket: oem82.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (64/80) oem83.inf                                                                                           [-] Entferne Paket: oem83.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (65/80) oem84.inf                                                                                           [-] Entferne Paket: oem84.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (66/80) oem85.inf                                                                                           [-] Entferne Paket: oem85.inf                                                                                        [pnputil] fertig in 0.2s                                                                                                 OK                                                                                                               [remove] (67/80) oem86.inf                                                                                           [-] Entferne Paket: oem86.inf                                                                                        [pnputil] fertig in 0.2s
+    OK
+[remove] (68/80) oem87.inf
+[-] Entferne Paket: oem87.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (69/80) oem88.inf
+[-] Entferne Paket: oem88.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (70/80) oem89.inf
+[-] Entferne Paket: oem89.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (71/80) oem90.inf
+[-] Entferne Paket: oem90.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (72/80) oem91.inf
+[-] Entferne Paket: oem91.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (73/80) oem92.inf
+[-] Entferne Paket: oem92.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (74/80) oem93.inf
+[-] Entferne Paket: oem93.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (75/80) oem94.inf
+[-] Entferne Paket: oem94.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (76/80) oem95.inf
+[-] Entferne Paket: oem95.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (77/80) oem96.inf
+[-] Entferne Paket: oem96.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (78/80) oem97.inf
+[-] Entferne Paket: oem97.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (79/80) oem98.inf
+[-] Entferne Paket: oem98.inf
+[pnputil] fertig in 0.2s
+    OK
+[remove] (80/80) oem99.inf
+[-] Entferne Paket: oem99.inf
+[pnputil] fertig in 0.2s
+    OK
+C:\Users\dzarf\source\repos\IntelAvbFilter\IntelAvbFilter-Cleanup.ps1 : INF nicht gefunden:
+"C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf"
+At line:1 char:1
++ .\IntelAvbFilter-Cleanup.ps1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,IntelAvbFilter-Cleanup.ps1
+
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\test_driver.ps1
+??????????????????????????????????????????????????????????????????
+?                                                                ?
+?      Intel AVB Filter Driver - Comprehensive Test Suite       ?
+?                                                                ?
+??????????????????????????????????????????????????????????????????
+
+
+==> Test 1: Checking Driver Service Status
+? Driver service is RUNNING
+  Display Name: Intel AVB/TSN NDIS Filter Driver
+  Start Type: Manual
+
+==> Test 2: Enumerating Intel Network Adapters
+? Found 6 Intel network adapter(s)
+
+  Adapter: Intel(R) Ethernet Controller I226-V #3
+    Name: Ethernet 3
+    Status: Up
+    MAC: A8-B8-E0-0A-1E-8C
+    Speed: 1 Gbps
+    Hardware ID: PCI\VEN_8086&DEV_125C&SUBSYS_00008086&REV_04
+    VID: 0x8086, DID: 0x125C
+    Device: Intel I226-LM 2.5GbE Network Connection
+?     ? This device is SUPPORTED by the driver
+
+  Adapter: Intel(R) Ethernet Controller I226-V #5
+    Name: Ethernet 5
+    Status: Disconnected
+    MAC: A8-B8-E0-0A-1E-8E
+    Speed: 0 bps
+    Hardware ID: PCI\VEN_8086&DEV_125C&SUBSYS_00008086&REV_04
+    VID: 0x8086, DID: 0x125C
+    Device: Intel I226-LM 2.5GbE Network Connection
+?     ? This device is SUPPORTED by the driver
+
+  Adapter: Intel(R) Ethernet Controller I226-V #4
+    Name: Ethernet 4
+    Status: Up
+    MAC: A8-B8-E0-0A-1E-8D
+    Speed: 1 Gbps
+    Hardware ID: PCI\VEN_8086&DEV_125C&SUBSYS_00008086&REV_04
+    VID: 0x8086, DID: 0x125C
+    Device: Intel I226-LM 2.5GbE Network Connection
+?     ? This device is SUPPORTED by the driver
+
+  Adapter: Intel(R) Ethernet Controller I226-V #6
+    Name: Ethernet 6
+    Status: Up
+    MAC: A8-B8-E0-0A-1E-8B
+    Speed: 1 Gbps
+    Hardware ID: PCI\VEN_8086&DEV_125C&SUBSYS_00008086&REV_04
+    VID: 0x8086, DID: 0x125C
+    Device: Intel I226-LM 2.5GbE Network Connection
+?     ? This device is SUPPORTED by the driver
+
+  Adapter: Intel(R) Ethernet Controller I226-V
+    Name: Ethernet
+    Status: Disconnected
+    MAC: A8-B8-E0-0A-1E-8F
+    Speed: 0 bps
+    Hardware ID: PCI\VEN_8086&DEV_125C&SUBSYS_00008086&REV_04
+    VID: 0x8086, DID: 0x125C
+    Device: Intel I226-LM 2.5GbE Network Connection
+?     ? This device is SUPPORTED by the driver
+
+  Adapter: Intel(R) Ethernet Controller I226-V #2
+    Name: Ethernet 2
+    Status: Disconnected
+    MAC: A8-B8-E0-0A-1E-90
+    Speed: 0 bps
+    Hardware ID: PCI\VEN_8086&DEV_125C&SUBSYS_00008086&REV_04
+    VID: 0x8086, DID: 0x125C
+    Device: Intel I226-LM 2.5GbE Network Connection
+?     ? This device is SUPPORTED by the driver
+
+==> Test 3: Checking Device Node Creation
+? Device node \\.\IntelAvbFilter does NOT exist
+? This is normal if:
+?   • No supported Intel hardware is present
+?   • Intel hardware is present but driver didn't load
+?   • Driver service is stopped
+
+==> Test 4: Checking Test Applications
+? Test directory found: C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug
+?   ? avb_test.exe (not built)
+?   ? avb_multi_adapter_test.exe (not built)
+?   ? test_tsn_ioctl_handlers.exe (not built)
+?   ? avb_test_i210.exe (not built)
+?   ? avb_i226_advanced_test.exe (not built)
+
+????????????????????????????????????????????????????????????????
+                         TEST SUMMARY
+????????????????????????????????????????????????????????????????
+
+Driver Status:
+  ? Driver service installed
+
+Hardware Status:
+  ? Intel network adapter(s) detected: 6
+
+Device Interface Status:
+  ? Device node not created
+
+Test Tools Status:
+  ? Test applications not built
+
+Overall Assessment:
+  ? PARTIAL INSTALLATION
+     The driver is installed but not fully functional.
+
+
+For detailed kernel debug output, use DebugView:
+  https://docs.microsoft.com/en-us/sysinternals/downloads/debugview
+
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\enhanced_investigation_suite.ps1
+Enhanced Intel AVB Hardware Investigation Suite - FINAL
+==========================================================
+PURPOSE: Complete evidence chain with ChatGPT5 I226 TAS validation runbook
+BREAKTHROUGH: Correct register addresses + ChatGPT5 specification order
+
+?? Phase 1: Basic Hardware Investigation
+Purpose: Validate register access and basic hardware behavior
+? Phase 1 completed successfully
+
+??  Phase 2: Enhanced TAS Investigation (SKIPPED - used wrong registers)
+Evidence: ALL tests failed because used 0x08600 instead of 0x3570
+Result: Root cause identified - wrong register block entirely
+? Phase 2 purpose achieved - proved register address issue
+
+?? Phase 3: Critical Prerequisites Investigation
+Purpose: PTP clock verification + missing register discovery
+? Phase 3 completed successfully
+
+?? Phase 4: CORRECTED I226 TAS Test (Evidence-based fix)
+Purpose: Test TAS activation with CORRECT register addresses
+Registers: TQAVCTRL=0x3570, BASET_L/H=0x3314/0x3318, QBVCYCLET=0x331C
+? Phase 4 completed successfully
+
+?? Phase 5: ChatGPT5 I226 TAS Validation Runbook (NEW - FINAL VALIDATION)
+Purpose: Complete I226 TAS validation following ChatGPT5 specification order
+Method: Linux IGC driver sequence + ChatGPT5 validation runbook
+Steps: PHC?TSN Control?Cycle Time?Base Time?Queue Windows?Verification?Traffic Proof
+? Phase 5 completed successfully
+
+?? Phase 6: Multi-Adapter Comprehensive Validation
+Purpose: Validate complete system behavior
+? Phase 6 completed successfully
+
+??? Phase 7: TSN IOCTL Handler Verification
+Purpose: Confirm corrected implementation works through IOCTL interface
+? Phase 7 completed successfully
+
+?? === COMPLETE INVESTIGATION CHAIN WITH CHATGPT5 VALIDATION ===
+
+Evidence Chain Summary:
+  ? Phase 1: Register access patterns validated
+  ? Phase 2: Wrong register addresses identified (0x08600 vs 0x3570)
+  ? Phase 3: PTP clock status and prerequisites analyzed
+  ? Phase 4: CORRECTED register addresses tested
+  ?? Phase 5: CHATGPT5 SPECIFICATION VALIDATION completed
+  ? Phase 6: Multi-adapter functionality confirmed
+  ? Phase 7: IOCTL handlers with corrected implementation
+
+?? BREAKTHROUGH ACHIEVEMENTS:
+  ?? ROOT CAUSE FIXED: Correct I226 TSN register block implemented!
+  ? Previous: TAS_CTRL @ 0x08600 (doesn't exist on I226)
+  ? Corrected: TQAVCTRL @ 0x3570 (real I226 TSN control)
+  ? Previous: TAS_CONFIG0/1 @ 0x08604/0x08608
+  ? Corrected: BASET_L/H @ 0x3314/0x3318
+  ? Added: QBVCYCLET @ 0x331C (cycle time register)
+  ?? NEW: ChatGPT5 validation runbook implementation
+
+?? Implementation Status:
+  ? Driver completely fixed with CORRECT register addresses
+  ? Evidence-based I226 TAS implementation complete
+  ? Linux IGC driver sequence implemented perfectly
+  ? I226-specific FUTSCDDIS handling implemented
+  ? ChatGPT5 validation runbook integrated
+  ? Complete test suite with all phases
+
+?? CHATGPT5 VALIDATION FEATURES:
+  ?? Step 1: Pre-req - I226 PHC (SYSTIM) advancement verification
+  ?? Step 2: I226 context selection with VID:DID logging
+  ?? Step 3: TSN/Qbv control programming (TQAVCTRL)
+  ?? Step 4: Cycle time programming (QBVCYCLET_S/QBVCYCLET)
+  ?? Step 5: Base time calculation (future + cycle boundary)
+  ?? Step 6: Base time programming with I226 FUTSCDDIS quirk
+  ?? Step 7: Queue windows (launch-time mode + full cycle)
+  ?? Step 8: Register readback + activation wait
+  ?? Step 9: Traffic-side proof validation
+
+?? READY FOR PRODUCTION HARDWARE VALIDATION!
+The complete implementation with ChatGPT5 runbook should successfully activate I226 TAS!
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\Start-AvbDriver.ps1
+=== Starting Intel AVB Filter Driver ===
+
+Attempting to start IntelAvbFilter service...
+? Service is already running
+
+Checking service status...
+
+SERVICE_NAME: IntelAvbFilter
+        TYPE               : 1  KERNEL_DRIVER
+        STATE              : 4  RUNNING
+                                (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)
+        WIN32_EXIT_CODE    : 0  (0x0)
+        SERVICE_EXIT_CODE  : 0  (0x0)
+        CHECKPOINT         : 0x0
+        WAIT_HINT          : 0x0
+
+Triggering filter activation via network adapter...
+Found active adapter: Ethernet 3 - Intel(R) Ethernet Controller I226-V #3
+Restarting adapter to trigger filter attachment...
+? Adapter restarted
+
+Testing device interface...
+Running test application...
+Capabilities (0x00000000): <none>
+
+? Driver is working! Running full selftest...
+Capabilities (0x00000000): <none>
+PTP: base read failed
+
+--- Basic I210 register snapshot (legacy offsets) ---
+
+--- SSOT I210 PTP decode ---
+  TSYNCTXCTL raw=0x00000000 EN=0 TYPE=0
+  TSYNCRXCTL raw=0x00000000 EN=0 TYPE=0
+  RXSTMP = 0x0000000000000000  TXSTMP = 0x0000000000000000
+TS=read-failed
+TAS: SKIPPED (unsupported)
+FP: SKIPPED (unsupported)
+PTM: SKIPPED (unsupported)
+MDIO: SKIPPED (unsupported)
+
+Summary: base=OK, optional=NONE
+
+=== Done ===
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\comprehensive_ioctl_test.exe
+============================================================
+COMPREHENSIVE IOCTL TEST SUITE
+Tests all 44 IntelAvbFilter IOCTLs (20-44)
+Device-aware with capability-based testing
+============================================================
+
+Ô£ô Driver opened successfully
+
+
+[TEST 1] IOCTL_AVB_ENUM_ADAPTERS (IOCTL 31)
+  Found 6 adapter(s)
+  [0] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [1] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [2] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [3] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [4] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [5] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  Ô£ô PASSED
+
+[TEST 2] IOCTL_AVB_OPEN_ADAPTER (IOCTL 32)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 3] IOCTL_AVB_GET_DEVICE_INFO (IOCTL 21)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 4] IOCTL_AVB_GET_HW_STATE (IOCTL 37)
+  HW State: 1 (BOUND)
+  VID=0x8086 DID=0x125B
+  Capabilities: 0x00000000
+  ÔÜá´©Å  WARNING: PTP operations require state >= PTP_READY (3)
+      Current state (1) may cause timestamp IOCTLs to fail
+  Ô£ô PASSED
+
+[TEST 5] IOCTL_AVB_READ_REGISTER (IOCTL 22, Debug Only)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 6] IOCTL_AVB_WRITE_REGISTER (IOCTL 23, Debug Only)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 7] IOCTL_AVB_GET_TIMESTAMP (IOCTL 24)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 8] IOCTL_AVB_SET_TIMESTAMP (IOCTL 25)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 9] IOCTL_AVB_ADJUST_FREQUENCY (IOCTL 38)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 10] IOCTL_AVB_GET_CLOCK_CONFIG (IOCTL 39)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 11] IOCTL_AVB_SET_HW_TIMESTAMPING (IOCTL 40)
+  Ôèÿ SKIPPED: Device does not support hardware timestamps
+
+[TEST 12] IOCTL_AVB_SET_RX_TIMESTAMP (IOCTL 41)
+  Ôèÿ SKIPPED: Device does not support hardware timestamps
+
+[TEST 13] IOCTL_AVB_SETUP_TAS (IOCTL 26)
+  Ôèÿ SKIPPED: Device does not support Time-Aware Shaper
+
+[TEST 14] IOCTL_AVB_SETUP_FP (IOCTL 27)
+  Ôèÿ SKIPPED: Device does not support Frame Preemption
+
+[TEST 15] IOCTL_AVB_SETUP_PTM (IOCTL 28)
+  Ôèÿ SKIPPED: Device does not support PCIe PTM
+
+[TEST 16] IOCTL_AVB_SET_QUEUE_TIMESTAMP (IOCTL 42)
+  Ôèÿ SKIPPED: Device does not support queue timestamps
+
+[TEST 17] IOCTL_AVB_SET_TARGET_TIME (IOCTL 43)
+  Ôèÿ SKIPPED: Device does not support target time
+
+[TEST 18] IOCTL_AVB_GET_AUX_TIMESTAMP (IOCTL 44)
+  Ôèÿ SKIPPED: Device does not support auxiliary timestamps
+
+============================================================
+TEST SUMMARY
+============================================================
+Device: Intel I226-LM (VID=0x8086 DID=0x125B)
+Capabilities: 0x00000000
+
+
+Ô£ô Passed:  2
+Ô£ù Failed:  4
+Ôèÿ Skipped: 12 (capability-dependent)
+============================================================
+
+ÔÜá´©Å  4 TEST(S) FAILED - Review output above
+
+Press Enter to exit...
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\comprehensive_ioctl_test_7624.exe
+============================================================
+COMPREHENSIVE IOCTL TEST SUITE
+Tests all 44 IntelAvbFilter IOCTLs (20-44)
+Device-aware with capability-based testing
+============================================================
+
+Ô£ô Driver opened successfully
+
+
+[TEST 1] IOCTL_AVB_ENUM_ADAPTERS (IOCTL 31)
+  Found 6 adapter(s)
+  [0] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [1] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [2] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [3] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [4] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  [5] VID=0x8086 DID=0x125B Caps=0x00000000 - Intel I226-LM
+  Ô£ô PASSED
+
+[TEST 2] IOCTL_AVB_OPEN_ADAPTER (IOCTL 32)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 3] IOCTL_AVB_GET_DEVICE_INFO (IOCTL 21)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 4] IOCTL_AVB_GET_HW_STATE (IOCTL 37)
+  HW State: 1 (BOUND)
+  VID=0x8086 DID=0x125B
+  Capabilities: 0x00000000
+  ÔÜá´©Å  WARNING: PTP operations require state >= PTP_READY (3)
+      Current state (1) may cause timestamp IOCTLs to fail
+  Ô£ô PASSED
+
+[TEST 5] IOCTL_AVB_READ_REGISTER (IOCTL 22, Debug Only)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 6] IOCTL_AVB_WRITE_REGISTER (IOCTL 23, Debug Only)
+  Ô£ù FAILED: DeviceIoControl failed
+
+[TEST 7] IOCTL_AVB_GET_TIMESTAMP (IOCTL 24)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 8] IOCTL_AVB_SET_TIMESTAMP (IOCTL 25)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 9] IOCTL_AVB_ADJUST_FREQUENCY (IOCTL 38)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 10] IOCTL_AVB_GET_CLOCK_CONFIG (IOCTL 39)
+  Ôèÿ SKIPPED: Device does not support PTP
+
+[TEST 11] IOCTL_AVB_SET_HW_TIMESTAMPING (IOCTL 40)
+  Ôèÿ SKIPPED: Device does not support hardware timestamps
+
+[TEST 12] IOCTL_AVB_SET_RX_TIMESTAMP (IOCTL 41)
+  Ôèÿ SKIPPED: Device does not support hardware timestamps
+
+[TEST 13] IOCTL_AVB_SETUP_TAS (IOCTL 26)
+  Ôèÿ SKIPPED: Device does not support Time-Aware Shaper
+
+[TEST 14] IOCTL_AVB_SETUP_FP (IOCTL 27)
+  Ôèÿ SKIPPED: Device does not support Frame Preemption
+
+[TEST 15] IOCTL_AVB_SETUP_PTM (IOCTL 28)
+  Ôèÿ SKIPPED: Device does not support PCIe PTM
+
+[TEST 16] IOCTL_AVB_SET_QUEUE_TIMESTAMP (IOCTL 42)
+  Ôèÿ SKIPPED: Device does not support queue timestamps
+
+[TEST 17] IOCTL_AVB_SET_TARGET_TIME (IOCTL 43)
+  Ôèÿ SKIPPED: Device does not support target time
+
+[TEST 18] IOCTL_AVB_GET_AUX_TIMESTAMP (IOCTL 44)
+  Ôèÿ SKIPPED: Device does not support auxiliary timestamps
+
+============================================================
+TEST SUMMARY
+============================================================
+Device: Intel I226-LM (VID=0x8086 DID=0x125B)
+Capabilities: 0x00000000
+
+
+Ô£ô Passed:  2
+Ô£ù Failed:  4
+Ôèÿ Skipped: 12 (capability-dependent)
+============================================================
+
+ÔÜá´©Å  4 TEST(S) FAILED - Review output above
+
+Press Enter to exit...
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\device_open_test.exe
+========================================
+INTEL AVB FILTER DEVICE OPEN TEST
+========================================
+
+Attempting to open device: \\.\IntelAvbFilter
+
+? SUCCESS: Device opened!
+   Handle: 0x00000000000000CC
+
+Testing basic IOCTL communication...
+
+========================================
+DEVICE ACCESS WORKING - Driver Ready!
+========================================
+
+You can now run hardware tests:
+  - ptp_clock_control_test.exe
+  - avb_test_i210_um.exe
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\intel_avb_diagnostics.exe
+=============================================================================
+  Intel AVB Filter Driver - Hardware Only Diagnostics v2.0
+  NO SIMULATION - Real hardware problems are immediately visible
+=============================================================================
+
+System Information:
+  OS Version: 6.2.9200
+  Administrator: ? Yes
+  Secure Boot: ? Disabled
+  Test Signing: ? Disabled (required for development drivers)
+
+Phase 1: Hardware Detection
+==========================
+Scanning for Intel Ethernet Controllers...
+
+?? Intel Device Found:
+   Device ID: 0x125C
+   Description: Intel(R) Ethernet Controller I226-V
+   Official Name: Intel Ethernet Controller I226-V
+   Generation: I226
+   AVB Capable: ? Yes
+   Advanced TSN: ? Yes
+   Capabilities: IEEE 1588, AVB, TSN, TAS, Frame Preemption
+
+?? Intel Device Found:
+   Device ID: 0x125C
+   Description: Intel(R) Ethernet Controller I226-V
+   Official Name: Intel Ethernet Controller I226-V
+   Generation: I226
+   AVB Capable: ? Yes
+   Advanced TSN: ? Yes
+   Capabilities: IEEE 1588, AVB, TSN, TAS, Frame Preemption
+
+?? Intel Device Found:
+   Device ID: 0x125C
+   Description: Intel(R) Ethernet Controller I226-V
+   Official Name: Intel Ethernet Controller I226-V
+   Generation: I226
+   AVB Capable: ? Yes
+   Advanced TSN: ? Yes
+   Capabilities: IEEE 1588, AVB, TSN, TAS, Frame Preemption
+
+?? Intel Device Found:
+   Device ID: 0x125C
+   Description: Intel(R) Ethernet Controller I226-V
+   Official Name: Intel Ethernet Controller I226-V
+   Generation: I226
+   AVB Capable: ? Yes
+   Advanced TSN: ? Yes
+   Capabilities: IEEE 1588, AVB, TSN, TAS, Frame Preemption
+
+?? Intel Device Found:
+   Device ID: 0x125C
+   Description: Intel(R) Ethernet Controller I226-V
+   Official Name: Intel Ethernet Controller I226-V
+   Generation: I226
+   AVB Capable: ? Yes
+   Advanced TSN: ? Yes
+   Capabilities: IEEE 1588, AVB, TSN, TAS, Frame Preemption
+
+?? Intel Device Found:
+   Device ID: 0x125C
+   Description: Intel(R) Ethernet Controller I226-V
+   Official Name: Intel Ethernet Controller I226-V
+   Generation: I226
+   AVB Capable: ? Yes
+   Advanced TSN: ? Yes
+   Capabilities: IEEE 1588, AVB, TSN, TAS, Frame Preemption
+
+? Found 6 Intel Ethernet Controller(s)
+
+Phase 2: Driver Installation Analysis
+====================================
+Checking Intel AVB Filter Driver installation...
+
+? IntelAvbFilter service found
+   Service State: ? RUNNING
+
+Checking driver files...
+   ? x64\Debug\IntelAvbFilter.sys (133424 bytes)
+   ? x64\Debug\IntelAvbFilter.inf (3770 bytes)
+   ? x64\Debug\IntelAvbFilter.cat - File not found
+   ? x64\Debug\IntelAvbFilter.cer (784 bytes)
+
+Phase 3: Device Interface Analysis
+=================================
+Testing device interface accessibility...
+
+Trying: \\.\IntelAvbFilter
+  ? SUCCESS! Device interface accessible
+
+Phase 4: Network Configuration Analysis
+======================================
+Analyzing network adapter configuration...
+
+Network Connectivity Test:
+  ? No internet connectivity
+  ??  May indicate network adapter issues
+
+NDIS Filter Binding Analysis:
+  Device: Intel(R) Ethernet Controller I226-V
+  Filter Bound: ??  Cannot determine without registry access
+  Recommendation: Check Network Adapter Properties manually
+  Device: Intel(R) Ethernet Controller I226-V
+  Filter Bound: ??  Cannot determine without registry access
+  Recommendation: Check Network Adapter Properties manually
+  Device: Intel(R) Ethernet Controller I226-V
+  Filter Bound: ??  Cannot determine without registry access
+  Recommendation: Check Network Adapter Properties manually
+  Device: Intel(R) Ethernet Controller I226-V
+  Filter Bound: ??  Cannot determine without registry access
+  Recommendation: Check Network Adapter Properties manually
+  Device: Intel(R) Ethernet Controller I226-V
+  Filter Bound: ??  Cannot determine without registry access
+  Recommendation: Check Network Adapter Properties manually
+  Device: Intel(R) Ethernet Controller I226-V
+  Filter Bound: ??  Cannot determine without registry access
+  Recommendation: Check Network Adapter Properties manually
+
+Phase 5: Hardware Access Analysis
+================================
+Hardware Access Analysis (Diagnostic Mode)...
+
+??  HARDWARE ACCESS TESTING LIMITATIONS:
+   - Cannot test real MMIO access without driver loaded
+   - Cannot test PCI configuration access without driver
+   - Cannot test register reads/writes without kernel mode
+   - Hardware-Only policy prevents simulation testing
+
+?? WHAT WE CAN DETERMINE:
+? Hardware Present: 6 Intel controller(s) detected
+? Device 1: Intel(R) Ethernet Controller I226-V (ID: 0x125C)
+   - AVB Capable: ? Yes
+? Device 2: Intel(R) Ethernet Controller I226-V (ID: 0x125C)
+   - AVB Capable: ? Yes
+? Device 3: Intel(R) Ethernet Controller I226-V (ID: 0x125C)
+   - AVB Capable: ? Yes
+? Device 4: Intel(R) Ethernet Controller I226-V (ID: 0x125C)
+   - AVB Capable: ? Yes
+? Device 5: Intel(R) Ethernet Controller I226-V (ID: 0x125C)
+   - AVB Capable: ? Yes
+? Device 6: Intel(R) Ethernet Controller I226-V (ID: 0x125C)
+   - AVB Capable: ? Yes
+
+?? HARDWARE ACCESS VALIDATION PLAN:
+1. Install driver using appropriate method for your environment
+2. Run hardware-only test application: avb_test_hardware_only.exe
+3. Monitor debug output with DebugView.exe
+4. Look for these SUCCESS patterns:
+   ? 'REAL HARDWARE DISCOVERED: Intel I219'
+   ? 'AvbMmioReadHardwareOnly: (REAL HARDWARE)'
+   ? 'BAR0=0xf7a00000, Length=0x20000'
+5. Look for these FAILURE patterns (good - problems visible!):
+   ? 'HARDWARE DISCOVERY FAILED'
+   ? 'Hardware not mapped'
+   ? 'PCI config read FAILED'
+
+Final Analysis & Recommendations
+===============================
+=== DIAGNOSTIC SUMMARY ===
+
+? HARDWARE STATUS: 6 Intel controller(s) detected
+??  TARGET HARDWARE: I219-LM not found, but other Intel devices available
+
+=== RECOMMENDATIONS ===
+
+?? NEXT STEPS for Intel AVB Filter Driver Testing:
+
+?? INSTALLATION OPTIONS (choose based on your environment):
+   A) EV Code Signing Certificate (Corporate/Production):
+      - Cost: ~Ç300/year
+      - Works with Secure Boot immediately
+      - No IT policy violations
+      - Recommended for production deployment
+
+   B) Hyper-V Development VM (Corporate/Development):
+      - Cost: Free
+      - Host system unchanged (IT compliant)
+      - Secure Boot can be disabled in VM
+      - Full development freedom
+
+   C) Network Control Panel Installation (Limited):
+      - Try manual installation via Network Adapter Properties
+      - May work if certificate is trusted
+      - Limited success with Secure Boot
+
+?? TESTING PROCEDURE (after installation):
+   1. Compile: cl avb_test_i219.c /DHARDWARE_ONLY=1 /Fe:test.exe
+   2. Install driver using chosen method above
+   3. Run: test.exe
+   4. Enable DebugView.exe (as Administrator)
+   5. Look for 'REAL HARDWARE' vs error messages
+
+? EXPECTED SUCCESS INDICATORS:
+   - 'Intel controller resources discovered: BAR0=0x...'
+   - 'AvbMmioReadHardwareOnly: (REAL HARDWARE)'
+   - 'Control Register: 0x48100248'
+   - Network connectivity maintained
+
+? EXPECTED FAILURE INDICATORS (Hardware-Only - No Hidden Problems!):
+   - 'HARDWARE DISCOVERY FAILED' ? Fix PCI access
+   - 'Hardware not mapped' ? Fix BAR0 discovery
+   - 'Cannot open device' ? Fix driver loading
+   - Network connection lost ? Fix filter packet processing
+
+?? BOTTOM LINE:
+Your Intel AVB Filter Driver implementation is COMPLETE and ready.
+Hardware-Only approach ensures all problems are immediately visible.
+Choose appropriate installation method for your corporate environment!
+
+=============================================================================
+  Hardware Only Diagnostics Complete - All problems are now visible!
+=============================================================================
+Press any key to continue . . .
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\ptp_clock_control_test.exe
+========================================
+PTP CLOCK CONTROL COMPREHENSIVE TEST
+========================================
+Tests: Timestamp Setting, Clock Adjustment, Frequency Tuning, Drift
+Target: Intel I210/I226 Ethernet Controllers
+
+? Driver handle opened successfully
+? Device initialized successfully
+
+========================================
+TEST 1: TIMESTAMP SETTING
+========================================
+
+Test 1a: Set SYSTIM to 0
+  ?? FAILED: Could not write SYSTIM
+
+Test 1b: Set SYSTIM to 0x0000000100000000 (4.3 seconds)
+  ?? FAILED: Could not write SYSTIM
+
+Test 1c: Set SYSTIM via IOCTL_AVB_SET_TIMESTAMP
+  ?? WARNING: IOCTL_AVB_SET_TIMESTAMP not supported or failed (GLE=21)
+
+--- Test 1 Summary ---
+Passed: 0, Failed: 2
+
+========================================
+TEST 2: CLOCK ADJUSTMENT (TIMINCA)
+========================================
+
+?? FAILED: Could not read TIMINCA
+
+========================================
+TEST 3: FREQUENCY TUNING ACCURACY
+========================================
+
+Test: Measure clock stability with standard TIMINCA
+?? FAILED: Could not write TIMINCA
+
+========================================
+TEST 4: CLOCK DRIFT vs WINDOWS TIME
+========================================
+
+Synchronizing PTP clock to Windows system time...
+?? FAILED: Could not set SYSTIM
+
+========================================
+FINAL SUMMARY
+========================================
+? 5 TEST(S) FAILED
+Review test output for details.
+
+Press Enter to exit...
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\test_clock_config.exe
+========================================
+GET_CLOCK_CONFIG DIAGNOSTIC TEST
+========================================
+
+Ô£ô Driver opened
+  Using default context (adapter 0 - the one with full initialization)
+
+TEST 1: Read PTP registers directly (IOCTL 22)
+-----------------------------------------------
+SYSTIML (0x0B600) = 0x00000000 (status=0x00000000)
+SYSTIMH (0x0B604) = 0x00000000 (status=0x00000000)
+TIMINCA (0x0B608) = 0x00000000 (status=0x00000000)
+TSAUXC  (0x0B640) = 0x00000000 (status=0x00000000)
+
+TEST 2: Get clock config (IOCTL 39)
+------------------------------------
+SUCCESS: DeviceIoControl returned
+  Bytes returned: 0 (expected 24)
+
+Clock Config Results:
+  SYSTIM:    0x0000000000000000
+  TIMINCA:   0x00000000
+  TSAUXC:    0x00000000
+  Clock Rate: 0 MHz
+  Status:    0x00000000
+
+ANALYSIS:
+---------
+ÔØî GET_CLOCK_CONFIG is returning all zeros
+   This indicates intel_read_reg() is failing inside the driver
+   Even though direct register reads (IOCTL 22) work fine
+
+LIKELY CAUSE:
+  - Hardware context not properly set up for intel_read_reg()
+  - private_data not initialized for Intel library
+  - Platform operations not properly registered
+
+WORKAROUND:
+  Use IOCTL_AVB_READ_REGISTER (IOCTL 22) to read PTP registers
+
+========================================
+Press Enter to exit...
+
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\avb_test_i226.exe
+Capabilities (0x00000000): <none>
+PTP: base read failed
+
+--- Basic I210 register snapshot (legacy offsets) ---
+
+--- SSOT I210 PTP decode ---
+  TSYNCTXCTL raw=0x00000000 EN=0 TYPE=0
+  TSYNCRXCTL raw=0x00000000 EN=0 TYPE=0
+  RXSTMP = 0x0000000000000000  TXSTMP = 0x0000000000000000
+TS=read-failed
+TAS: SKIPPED (unsupported)
+FP: SKIPPED (unsupported)
+PTM: SKIPPED (unsupported)
+MDIO: SKIPPED (unsupported)
+
+Summary: base=OK, optional=NONE
+PS C:\Users\dzarf\source\repos\IntelAvbFilter> .\avb_test_hardware_only.exe
+=== Intel AVB Filter Driver I219 Test ===
+
+ERROR: Cannot open IntelAvbFilter device (Error: 3)
+Make sure the driver is installed and loaded.
+PS C:\Users\dzarf\source\repos\IntelAvbFilter>

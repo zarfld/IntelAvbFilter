@@ -1,0 +1,402 @@
+Opened log file 'crash_analysis.log'
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.062 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.438 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 29
+
+Microsoft (R) Windows Debugger Version 10.0.26100.6584 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\Windows\Minidump\121225-9984-01.dmp]
+Mini Kernel Dump File: Only registers and stack trace are available
+
+Symbol search path is: srv*
+Executable search path is: 
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Kernel.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'
+NatVis script successfully loaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Usb4Kd.natvis'
+Windows 10 Kernel Version 26100 MP (4 procs) Free x64
+Product: WinNt, suite: TerminalServer SingleUserTS
+Kernel base = 0xfffff807`bb200000 PsLoadedModuleList = 0xfffff807`bc0f5010
+Debug session time: Fri Dec 12 11:59:50.086 2025 (UTC + 1:00)
+System Uptime: 0 days 1:53:59.292
+Loading Kernel Symbols
+...............................................................
+................................................................
+..............................................................
+Loading User Symbols
+PEB is paged out (Peb.Ldr = 000000f0`46201018).  Type ".hh dbgerr001" for details
+Loading unloaded module list
+...............
+For analysis of this file, run !analyze -v
+3: kd> -AutoSize>a<temp_windbg_commands.txt
+       ^ Syntax error in '-AutoSize>a<temp_windbg_commands.txt'
+3: kd> !analyze -v
+*******************************************************************************
+*                                                                             *
+*                        Bugcheck Analysis                                    *
+*                                                                             *
+*******************************************************************************
+
+SYSTEM_SERVICE_EXCEPTION (3b)
+An exception happened while executing a system service routine.
+Arguments:
+Arg1: 00000000c0000005, Exception code that caused the BugCheck
+Arg2: fffff807635ef460, Address of the instruction which caused the BugCheck
+Arg3: ffffb985f1388ef0, Address of the context record for the exception that caused the BugCheck
+Arg4: 0000000000000000, zero.
+
+Debugging Details:
+------------------
+
+*** WARNING: Unable to verify timestamp for IntelAvbFilter.sys
+
+KEY_VALUES_STRING: 1
+
+    Key  : Analysis.CPU.mSec
+    Value: 3827
+
+    Key  : Analysis.Elapsed.mSec
+    Value: 11698
+
+    Key  : Analysis.IO.Other.Mb
+    Value: 1
+
+    Key  : Analysis.IO.Read.Mb
+    Value: 0
+
+    Key  : Analysis.IO.Write.Mb
+    Value: 2
+
+    Key  : Analysis.Init.CPU.mSec
+    Value: 1718
+
+    Key  : Analysis.Init.Elapsed.mSec
+    Value: 31047
+
+    Key  : Analysis.Memory.CommitPeak.Mb
+    Value: 99
+
+    Key  : Bugcheck.Code.LegacyAPI
+    Value: 0x3b
+
+    Key  : Dump.Attributes.AsUlong
+    Value: 21808
+
+    Key  : Dump.Attributes.DiagDataWrittenToHeader
+    Value: 1
+
+    Key  : Dump.Attributes.ErrorCode
+    Value: 0
+
+    Key  : Dump.Attributes.KernelGeneratedTriageDump
+    Value: 1
+
+    Key  : Dump.Attributes.LastLine
+    Value: Dump completed successfully.
+
+    Key  : Dump.Attributes.ProgressPercentage
+    Value: 0
+
+    Key  : Failure.Bucket
+    Value: AV_IntelAvbFilter!unknown_function
+
+    Key  : Failure.Hash
+    Value: {33bb0e05-90f0-1e37-b061-b59f2a39da03}
+
+    Key  : Hypervisor.Enlightenments.ValueHex
+    Value: 7417df84
+
+    Key  : Hypervisor.Flags.AnyHypervisorPresent
+    Value: 1
+
+    Key  : Hypervisor.Flags.ApicEnlightened
+    Value: 0
+
+    Key  : Hypervisor.Flags.ApicVirtualizationAvailable
+    Value: 1
+
+    Key  : Hypervisor.Flags.AsyncMemoryHint
+    Value: 0
+
+    Key  : Hypervisor.Flags.CoreSchedulerRequested
+    Value: 0
+
+    Key  : Hypervisor.Flags.CpuManager
+    Value: 1
+
+    Key  : Hypervisor.Flags.DeprecateAutoEoi
+    Value: 1
+
+    Key  : Hypervisor.Flags.DynamicCpuDisabled
+    Value: 1
+
+    Key  : Hypervisor.Flags.Epf
+    Value: 0
+
+    Key  : Hypervisor.Flags.ExtendedProcessorMasks
+    Value: 1
+
+    Key  : Hypervisor.Flags.HardwareMbecAvailable
+    Value: 1
+
+    Key  : Hypervisor.Flags.MaxBankNumber
+    Value: 0
+
+    Key  : Hypervisor.Flags.MemoryZeroingControl
+    Value: 0
+
+    Key  : Hypervisor.Flags.NoExtendedRangeFlush
+    Value: 0
+
+    Key  : Hypervisor.Flags.NoNonArchCoreSharing
+    Value: 1
+
+    Key  : Hypervisor.Flags.Phase0InitDone
+    Value: 1
+
+    Key  : Hypervisor.Flags.PowerSchedulerQos
+    Value: 0
+
+    Key  : Hypervisor.Flags.RootScheduler
+    Value: 0
+
+    Key  : Hypervisor.Flags.SynicAvailable
+    Value: 1
+
+    Key  : Hypervisor.Flags.UseQpcBias
+    Value: 0
+
+    Key  : Hypervisor.Flags.Value
+    Value: 55185662
+
+    Key  : Hypervisor.Flags.ValueHex
+    Value: 34a10fe
+
+    Key  : Hypervisor.Flags.VpAssistPage
+    Value: 1
+
+    Key  : Hypervisor.Flags.VsmAvailable
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.AccessStats
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.CrashdumpEnlightened
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.CreateVirtualProcessor
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.DisableHyperthreading
+    Value: 0
+
+    Key  : Hypervisor.RootFlags.HostTimelineSync
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.HypervisorDebuggingEnabled
+    Value: 0
+
+    Key  : Hypervisor.RootFlags.IsHyperV
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.LivedumpEnlightened
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.MapDeviceInterrupt
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.MceEnlightened
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.Nested
+    Value: 0
+
+    Key  : Hypervisor.RootFlags.StartLogicalProcessor
+    Value: 1
+
+    Key  : Hypervisor.RootFlags.Value
+    Value: 1015
+
+    Key  : Hypervisor.RootFlags.ValueHex
+    Value: 3f7
+
+
+BUGCHECK_CODE:  3b
+
+BUGCHECK_P1: c0000005
+
+BUGCHECK_P2: fffff807635ef460
+
+BUGCHECK_P3: ffffb985f1388ef0
+
+BUGCHECK_P4: 0
+
+FILE_IN_CAB:  121225-9984-01.dmp
+
+TAG_NOT_DEFINED_202b:  *** Unknown TAG in analysis list 202b
+
+
+DUMP_FILE_ATTRIBUTES: 0x21808
+  Kernel Generated Triage Dump
+
+CONTEXT:  ffffb985f1388ef0 -- (.cxr 0xffffb985f1388ef0)
+.cxr 0xffffb985f1388ef0
+rax=803074cf3b493075 rbx=ffff860a393599a0 rcx=fffff80763600060
+rdx=fffff807bb8b7f00 rsi=ffff860a2c0b8874 rdi=ffff860a3ac27168
+rip=fffff807635ef460 rsp=ffffb985f1389920 rbp=fffff8074eb3e198
+ r8=0000000000000003  r9=fffff807635f9bc0 r10=0000000000000008
+r11=0000000000000065 r12=0000000000000001 r13=ffff860a2d4d69e0
+r14=fffff8074eb19540 r15=ffff860a37aac010
+iopl=0         nv up ei ng nz na pe nc
+cs=0010  ss=0018  ds=002b  es=002b  fs=0053  gs=002b             efl=00050282
+IntelAvbFilter+0xf460:
+fffff807`635ef460 4883781000      cmp     qword ptr [rax+10h],0 ds:002b:803074cf`3b493085=????????????????
+.cxr
+Resetting default scope
+
+BLACKBOXBSD: 1 (!blackboxbsd)
+
+
+BLACKBOXNTFS: 1 (!blackboxntfs)
+
+
+BLACKBOXPNP: 1 (!blackboxpnp)
+
+
+BLACKBOXWINLOGON: 1
+
+CUSTOMER_CRASH_COUNT:  1
+
+PROCESS_NAME:  svchost.exe
+
+STACK_TEXT:  
+ffffb985`f1389920 ffff860a`ffff8206     : ffffb985`f1389968 ffffb985`f1389948 fffff807`635f40b0 ffff860a`00000000 : IntelAvbFilter+0xf460
+ffffb985`f1389928 ffffb985`f1389968     : ffffb985`f1389948 fffff807`635f40b0 ffff860a`00000000 fffff807`ffff8206 : 0xffff860a`ffff8206
+ffffb985`f1389930 ffffb985`f1389948     : fffff807`635f40b0 ffff860a`00000000 fffff807`ffff8206 803074cf`3b493075 : 0xffffb985`f1389968
+ffffb985`f1389938 fffff807`635f40b0     : ffff860a`00000000 fffff807`ffff8206 803074cf`3b493075 00000000`00000001 : 0xffffb985`f1389948
+ffffb985`f1389940 ffff860a`00000000     : fffff807`ffff8206 803074cf`3b493075 00000000`00000001 fffff807`4eb19540 : IntelAvbFilter+0x140b0
+ffffb985`f1389948 fffff807`ffff8206     : 803074cf`3b493075 00000000`00000001 fffff807`4eb19540 ffff860a`3ac270e0 : 0xffff860a`00000000
+ffffb985`f1389950 803074cf`3b493075     : 00000000`00000001 fffff807`4eb19540 ffff860a`3ac270e0 ffff860a`393599a0 : 0xfffff807`ffff8206
+ffffb985`f1389958 00000000`00000001     : fffff807`4eb19540 ffff860a`3ac270e0 ffff860a`393599a0 fffff807`635e9305 : 0x803074cf`3b493075
+ffffb985`f1389960 fffff807`4eb19540     : ffff860a`3ac270e0 ffff860a`393599a0 fffff807`635e9305 ffff860a`3a5c77a0 : 0x1
+ffffb985`f1389968 ffff860a`3ac270e0     : ffff860a`393599a0 fffff807`635e9305 ffff860a`3a5c77a0 00000000`00008086 : ndis!WPP_e0d861f0bf3937ec9935a7153c1d15e8_Traceguids
+ffffb985`f1389970 ffff860a`393599a0     : fffff807`635e9305 ffff860a`3a5c77a0 00000000`00008086 00000000`0000125b : 0xffff860a`3ac270e0
+ffffb985`f1389978 fffff807`635e9305     : ffff860a`3a5c77a0 00000000`00008086 00000000`0000125b ffff860a`3ac270e0 : 0xffff860a`393599a0
+ffffb985`f1389980 ffff860a`3a5c77a0     : 00000000`00008086 00000000`0000125b ffff860a`3ac270e0 00000000`00000080 : IntelAvbFilter+0x9305
+ffffb985`f1389988 00000000`00008086     : 00000000`0000125b ffff860a`3ac270e0 00000000`00000080 00000000`00020000 : 0xffff860a`3a5c77a0
+ffffb985`f1389990 00000000`0000125b     : ffff860a`3ac270e0 00000000`00000080 00000000`00020000 ffff860a`3ac270e0 : 0x8086
+ffffb985`f1389998 ffff860a`3ac270e0     : 00000000`00000080 00000000`00020000 ffff860a`3ac270e0 00000000`80500000 : 0x125b
+ffffb985`f13899a0 00000000`00000080     : 00000000`00020000 ffff860a`3ac270e0 00000000`80500000 ffff860a`3679fa60 : 0xffff860a`3ac270e0
+ffffb985`f13899a8 00000000`00020000     : ffff860a`3ac270e0 00000000`80500000 ffff860a`3679fa60 ffffb985`f1389ab8 : 0x80
+ffffb985`f13899b0 ffff860a`3ac270e0     : 00000000`80500000 ffff860a`3679fa60 ffffb985`f1389ab8 ffffb985`f1389ab8 : 0x20000
+ffffb985`f13899b8 00000000`80500000     : ffff860a`3679fa60 ffffb985`f1389ab8 ffffb985`f1389ab8 fffff807`635e3433 : 0xffff860a`3ac270e0
+ffffb985`f13899c0 ffff860a`3679fa60     : ffffb985`f1389ab8 ffffb985`f1389ab8 fffff807`635e3433 ffff860a`3a5c77a0 : 0x80500000
+ffffb985`f13899c8 ffffb985`f1389ab8     : ffffb985`f1389ab8 fffff807`635e3433 ffff860a`3a5c77a0 00000000`000001bf : 0xffff860a`3679fa60
+ffffb985`f13899d0 ffffb985`f1389ab8     : fffff807`635e3433 ffff860a`3a5c77a0 00000000`000001bf 00000000`00000004 : 0xffffb985`f1389ab8
+ffffb985`f13899d8 fffff807`635e3433     : ffff860a`3a5c77a0 00000000`000001bf 00000000`00000004 fffff807`635f40b0 : 0xffffb985`f1389ab8
+ffffb985`f13899e0 ffff860a`3a5c77a0     : 00000000`000001bf 00000000`00000004 fffff807`635f40b0 00000004`000001bf : IntelAvbFilter+0x3433
+ffffb985`f13899e8 00000000`000001bf     : 00000000`00000004 fffff807`635f40b0 00000004`000001bf ffff860a`364d6824 : 0xffff860a`3a5c77a0
+ffffb985`f13899f0 00000000`00000004     : fffff807`635f40b0 00000004`000001bf ffff860a`364d6824 ffffb985`f1389ab8 : 0x1bf
+ffffb985`f13899f8 fffff807`635f40b0     : 00000004`000001bf ffff860a`364d6824 ffffb985`f1389ab8 fffff807`635e8f0b : 0x4
+ffffb985`f1389a00 00000004`000001bf     : ffff860a`364d6824 ffffb985`f1389ab8 fffff807`635e8f0b ffff860a`3a5c77a0 : IntelAvbFilter+0x140b0
+ffffb985`f1389a08 ffff860a`364d6824     : ffffb985`f1389ab8 fffff807`635e8f0b ffff860a`3a5c77a0 ffffb985`f1388086 : 0x00000004`000001bf
+ffffb985`f1389a10 ffffb985`f1389ab8     : fffff807`635e8f0b ffff860a`3a5c77a0 ffffb985`f1388086 ffffb985`f138125b : 0xffff860a`364d6824
+ffffb985`f1389a18 fffff807`635e8f0b     : ffff860a`3a5c77a0 ffffb985`f1388086 ffffb985`f138125b ffff860a`364d6778 : 0xffffb985`f1389ab8
+ffffb985`f1389a20 ffff860a`3a5c77a0     : ffffb985`f1388086 ffffb985`f138125b ffff860a`364d6778 ffff8086`4eb1125b : IntelAvbFilter+0x8f0b
+ffffb985`f1389a28 ffffb985`f1388086     : ffffb985`f138125b ffff860a`364d6778 ffff8086`4eb1125b ffffb985`00000000 : 0xffff860a`3a5c77a0
+ffffb985`f1389a30 ffffb985`f138125b     : ffff860a`364d6778 ffff8086`4eb1125b ffffb985`00000000 ffff860a`393599a0 : 0xffffb985`f1388086
+ffffb985`f1389a38 ffff860a`364d6778     : ffff8086`4eb1125b ffffb985`00000000 ffff860a`393599a0 fffff807`635f0d02 : 0xffffb985`f138125b
+ffffb985`f1389a40 ffff8086`4eb1125b     : ffffb985`00000000 ffff860a`393599a0 fffff807`635f0d02 ffff860a`364d6680 : 0xffff860a`364d6778
+ffffb985`f1389a48 ffffb985`00000000     : ffff860a`393599a0 fffff807`635f0d02 ffff860a`364d6680 ffff860a`364d6778 : 0xffff8086`4eb1125b
+ffffb985`f1389a50 ffff860a`393599a0     : fffff807`635f0d02 ffff860a`364d6680 ffff860a`364d6778 00000000`00000003 : 0xffffb985`00000000
+ffffb985`f1389a58 fffff807`635f0d02     : ffff860a`364d6680 ffff860a`364d6778 00000000`00000003 fffff807`635f40b0 : 0xffff860a`393599a0
+ffffb985`f1389a60 ffff860a`364d6680     : ffff860a`364d6778 00000000`00000003 fffff807`635f40b0 00000000`00000006 : IntelAvbFilter+0x10d02
+ffffb985`f1389a68 ffff860a`364d6778     : 00000000`00000003 fffff807`635f40b0 00000000`00000006 00000000`00000004 : 0xffff860a`364d6680
+ffffb985`f1389a70 00000000`00000003     : fffff807`635f40b0 00000000`00000006 00000000`00000004 ffff860a`364d6680 : 0xffff860a`364d6778
+ffffb985`f1389a78 fffff807`635f40b0     : 00000000`00000006 00000000`00000004 ffff860a`364d6680 fffff800`00000000 : 0x3
+ffffb985`f1389a80 00000000`00000006     : 00000000`00000004 ffff860a`364d6680 fffff800`00000000 ffff8086`37aa125b : IntelAvbFilter+0x140b0
+ffffb985`f1389a88 00000000`00000004     : ffff860a`364d6680 fffff800`00000000 ffff8086`37aa125b fffff807`00000000 : 0x6
+ffffb985`f1389a90 ffff860a`364d6680     : fffff800`00000000 ffff8086`37aa125b fffff807`00000000 00000000`0008018d : 0x4
+ffffb985`f1389a98 fffff800`00000000     : ffff8086`37aa125b fffff807`00000000 00000000`0008018d 0000024c`00000001 : 0xffff860a`364d6680
+ffffb985`f1389aa0 ffff8086`37aa125b     : fffff807`00000000 00000000`0008018d 0000024c`00000001 00000000`0000006c : 0xfffff800`00000000
+ffffb985`f1389aa8 fffff807`00000000     : 00000000`0008018d 0000024c`00000001 00000000`0000006c ffffb985`f1389b18 : 0xffff8086`37aa125b
+ffffb985`f1389ab0 00000000`0008018d     : 0000024c`00000001 00000000`0000006c ffffb985`f1389b18 00000000`00000008 : 0xfffff807`00000000
+ffffb985`f1389ab8 0000024c`00000001     : 00000000`0000006c ffffb985`f1389b18 00000000`00000008 ffff860a`37aac010 : 0x8018d
+ffffb985`f1389ac0 00000000`0000006c     : ffffb985`f1389b18 00000000`00000008 ffff860a`37aac010 ffffb985`f1389c80 : 0x0000024c`00000001
+ffffb985`f1389ac8 ffffb985`f1389b18     : 00000000`00000008 ffff860a`37aac010 ffffb985`f1389c80 fffff807`4eb88961 : 0x6c
+ffffb985`f1389ad0 00000000`00000008     : ffff860a`37aac010 ffffb985`f1389c80 fffff807`4eb88961 ffff860a`393599a0 : 0xffffb985`f1389b18
+ffffb985`f1389ad8 ffff860a`37aac010     : ffffb985`f1389c80 fffff807`4eb88961 ffff860a`393599a0 ffff860a`3ad26e10 : 0x8
+ffffb985`f1389ae0 ffffb985`f1389c80     : fffff807`4eb88961 ffff860a`393599a0 ffff860a`3ad26e10 ffffb985`f1389c80 : 0xffff860a`37aac010
+ffffb985`f1389ae8 fffff807`4eb88961     : ffff860a`393599a0 ffff860a`3ad26e10 ffffb985`f1389c80 ffff860a`393599a0 : 0xffffb985`f1389c80
+ffffb985`f1389af0 fffff807`4eb9eb07     : ffff860a`393599a0 ffffb985`f1389c90 ffff860a`393599a0 ffff860a`2c0b7030 : ndis!ndisFInvokeAttach+0x51
+ffffb985`f1389b40 fffff807`4eb846d3     : ffff860a`2c0b7030 ffff860a`2c0b7030 ffff860a`2c0b83c8 fffff807`bb4d9ece : ndis!ndisAttachFilterInner+0x10b7
+ffffb985`f1389f40 fffff807`4eb79485     : 00000000`00000003 ffffb985`f138a170 00000000`00000003 ffff860a`2c0b8430 : ndis!ndisAttachFilter+0x83
+ffffb985`f138a070 fffff807`4eb83c5b     : ffff860a`2c0b8430 00000000`00000001 fffff807`4eb1ab50 00000000`00000000 : ndis!Ndis::BindEngine::Iterate+0xa85
+ffffb985`f138a230 fffff807`4eb83b6b     : 00000000`00000010 ffff860a`2c0b8430 ffff860a`2c0b8430 00000000`00000000 : ndis!Ndis::BindEngine::UpdateBindings+0xab
+ffffb985`f138a2e0 fffff807`4eb839d3     : ffff860a`2c0b8430 00000000`00000000 00000000`00000000 fffff807`4eb79e7c : ndis!Ndis::BindEngine::DispatchPendingWork+0x5b
+ffffb985`f138a310 fffff807`4eb93876     : ffff860a`2c0b7030 ffffb985`f138a4a9 00000000`00000000 00000000`00000000 : ndis!Ndis::BindEngine::ApplyBindChanges+0x73
+ffffb985`f138a360 fffff807`4eb8bbb7     : ffff860a`2c0b7030 ffff860a`3a35c760 ffffb985`f138a4a9 fffff807`bb5bf5a8 : ndis!Ndis::BindRegistry::Reload+0xe736
+ffffb985`f138a400 fffff807`4eba5944     : ffff860a`3adcfc30 ffff8442`21108f80 ffff860a`3a35c830 fffff807`bbc39466 : ndis!ndisPnpRefresh+0x37
+ffffb985`f138a430 fffff807`4ea64923     : ffffb985`00000000 ffffb985`00000000 ffff860a`00000000 ffff83a6`00000000 : ndis!ndisHandlePnPRequest+0xa94
+ffffb985`f138a510 fffff807`4ea6501e     : ffff860a`3a35c760 ffff860a`3a35c830 ffffb985`f138a690 ffff860a`3adcfc30 : ndis!ndisDispatchRequest+0x8a3
+ffffb985`f138a580 fffff807`bb48da6b     : ffff860a`3a35c760 00000000`00000000 00000000`42536f49 00000000`00000010 : ndis!ndisDriverDispatch+0x9e
+ffffb985`f138a5b0 fffff807`bb48d9e3     : 00000000`42536f49 00000000`00000000 ffff860a`36330080 00000000`00000069 : nt!IopfCallDriver+0x5b
+ffffb985`f138a5f0 fffff807`bbab9e55     : ffff860a`3adcfc30 ffffb985`f138a690 ffff860a`2ac86b10 00000000`00000000 : nt!IofCallDriver+0x13
+ffffb985`f138a620 fffff807`bbab8c9c     : 00000000`00000005 00000000`00000001 00000000`00000001 00000000`00000001 : nt!IopSynchronousServiceTail+0x1c5
+ffffb985`f138a6d0 fffff807`bbab82ee     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : nt!IopXxxControlFile+0x99c
+ffffb985`f138a940 fffff807`bb8b5655     : 00000000`00000000 000000f0`469fc950 ffffb985`f138aaa0 00000000`00000000 : nt!NtDeviceIoControlFile+0x5e
+ffffb985`f138a9b0 00007ffd`d6881ca4     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : nt!KiSystemServiceCopyEnd+0x25
+000000f0`469fc9e8 00000000`00000000     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : 0x00007ffd`d6881ca4
+
+
+SYMBOL_NAME:  IntelAvbFilter+f460
+
+MODULE_NAME: IntelAvbFilter
+
+IMAGE_NAME:  IntelAvbFilter.sys
+
+STACK_COMMAND:  .cxr 0xffffb985f1388ef0 ; kb
+
+BUCKET_ID_FUNC_OFFSET:  f460
+
+FAILURE_BUCKET_ID:  AV_IntelAvbFilter!unknown_function
+
+OSPLATFORM_TYPE:  x64
+
+OSNAME:  Windows 10
+
+FAILURE_ID_HASH:  {33bb0e05-90f0-1e37-b061-b59f2a39da03}
+
+Followup:     MachineOwner
+---------
+
