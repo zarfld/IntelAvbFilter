@@ -4,6 +4,13 @@ echo Complete Driver Setup with Certificate
 echo ============================================
 echo.
 
+:: Navigate to repository root
+if exist "tools\setup" (
+    cd /d "%~dp0..\.."
+) else (
+    cd /d "%~dp0"
+)
+
 :: Check for admin
 net session >nul 2>&1
 if %errorLevel% NEQ 0 (

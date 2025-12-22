@@ -1,6 +1,13 @@
 @echo off
 REM Quick reinstall and test script for Intel AVB Filter Driver
 
+:: Navigate to repository root
+if exist "tools\development" (
+    cd /d "%~dp0..\.."
+) else (
+    cd /d "%~dp0"
+)
+
 echo ============================================================================
 echo Intel AVB Filter Driver - Reinstall and Test
 echo ============================================================================

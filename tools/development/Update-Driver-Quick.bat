@@ -1,5 +1,13 @@
 @echo off
 REM Quick driver update - handles stuck services
+
+:: Navigate to repository root
+if exist "tools\development" (
+    cd /d "%~dp0..\.."
+) else (
+    cd /d "%~dp0"
+)
+
 echo Updating Intel AVB Filter Driver...
 echo.
 
