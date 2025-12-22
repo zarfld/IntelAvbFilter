@@ -600,6 +600,7 @@ Refactor → Improve design while keeping tests green (go slow: clean now, fast 
 ## Boundaries and Constraints
 
 ### Always Do (Embrace "Slow is Fast" + "No Excuses" + "No Shortcuts" + "Clarify First")
+- ✅ **⚠️ CRITICAL RULE - When adding backward "Verified by:" links to existing GitHub issues**: ONLY add the single line `- Verified by: #XXX (TEST-...: description)`. PRESERVE ALL existing content (traceability links, description text, IOCTL details, error handling, performance requirements). NEVER modify existing "Traces to:" links or any other content. NEVER rewrite description text or technical details. Before updating, read current issue content and confirm you are ONLY adding the backward link. VIOLATION CONSEQUENCE: User loses trust in all AI changes. This rule persists across ALL sessions via these instructions - "I won't remember" is NOT an excuse.
 - ✅ Ask clarifying questions when requirements are unclear (go slow: understand first; no excuses: communication over assumptions; no shortcuts: clarity over speed; clarify first: vague requirements are bugs; explicit over implicit)
 - ✅ Write tests before implementation (TDD) (go slow: define behavior, save debugging time; no excuses: quality is your responsibility; no shortcuts: cover critical paths; make it work, make it right, make it fast)
 - ✅ Handle errors defensively (no excuses: check files exist, handle network failures, validate inputs; no shortcuts: handle failures as normal cases; explicit over implicit)
@@ -642,6 +643,7 @@ Refactor → Improve design while keeping tests green (go slow: clean now, fast 
 - ⚠️ Before introducing new dependencies or technologies
 
 ### Never Do (False Speed = Real Slowness; Excuses = Avoided Responsibility; Shortcuts = Long-Term Pain; Guesses = Hidden Bugs)
+- ❌ **🔥 ABSOLUTE PROHIBITION - NEVER modify existing GitHub issue content when adding backward links**: FORBIDDEN to change "Traces to:" links (even if they look wrong), rewrite description text, modify IOCTL details, change error handling/performance requirements, delete ANY content, or "clean up" issue sections. ONLY ALLOWED: Adding backward link `- Verified by: #XXX` to Traceability section. IF YOU SEE PROBLEMS: Ask user to confirm before making ANY changes beyond backward link. THIS RULE OVERRIDES ALL OTHER CONSIDERATIONS.
 - ❌ Proceed with ambiguous requirements (rushing = massive rework later; clarify first: vague requirements are defects; implicit assumptions = chaos)
 - ❌ Assume files exist / network is fine / inputs are valid (no excuses: check and handle failures; no shortcuts: handle as normal cases; explicit validation)
 - ❌ Blame tools when behavior fails (no excuses: wrap it, retry it, replace it; you build it, you run it)

@@ -810,6 +810,16 @@ applyTo:
 ## 🚨 Critical Rules
 
 ### Always Do (Embrace "Slow is Fast" + "No Excuses" + "No Shortcuts" + "Clarify First")
+
+✅ **When adding backward "Verified by:" links to existing GitHub issues**:
+   - **ONLY add the single line**: `- Verified by: #XXX (TEST-...: description)`
+   - **PRESERVE ALL existing content**: traceability links, description text, IOCTL details, error handling, performance requirements, ALL sections
+   - **NEVER modify**: existing "Traces to:" links, "Related to:" links, "Depends on:" links, or any other content
+   - **NEVER rewrite**: description text, technical details, requirements text, or any prose
+   - **VERIFICATION**: Before updating, read current issue content and confirm you are ONLY adding the backward link
+   - **VIOLATION CONSEQUENCE**: User loses trust in all AI changes, must manually restore from GitHub edit history
+   - **REMEMBER**: This rule persists across ALL sessions via these instructions - "I won't remember" is NOT an excuse
+
 ✅ Ask clarifying questions when requirements are unclear (go slow: understand first; no excuses: communication over assumptions; no shortcuts: clarity over speed; clarify first: vague requirements are bugs; explicit over implicit)  
 ✅ Write tests BEFORE implementation (TDD) - absolute rule, no exceptions (go slow: define behavior, save debugging time; no excuses: quality is your responsibility; no shortcuts: cover critical paths; make it work, make it right, make it fast)  
 ✅ Handle errors defensively (no excuses: check files exist, handle network failures, validate inputs; no shortcuts: handle failures as normal cases; explicit over implicit)  
@@ -859,6 +869,18 @@ applyTo:
 ✅ Design for operability (you build it, you run it; no excuses: operational concerns upfront)    
 
 ### Never Do (False Speed = Real Slowness; Excuses = Avoided Responsibility; Shortcuts = Long-Term Pain; Guesses = Hidden Bugs)
+
+❌ **NEVER modify existing GitHub issue content when adding backward links**:
+   - ❌ **FORBIDDEN**: Changing "Traces to:" links (even if they look wrong - ask user first)
+   - ❌ **FORBIDDEN**: Rewriting description text, even to "improve" it
+   - ❌ **FORBIDDEN**: Modifying IOCTL details, error handling, technical specifications
+   - ❌ **FORBIDDEN**: Changing performance requirements, acceptance criteria, or any prose
+   - ❌ **FORBIDDEN**: Deleting ANY content from existing issues
+   - ❌ **FORBIDDEN**: "Cleaning up" or "reorganizing" issue sections
+   - **ONLY ALLOWED**: Adding backward link `- Verified by: #XXX` to Traceability section
+   - **IF YOU SEE PROBLEMS**: Ask user to confirm before making ANY changes beyond backward link
+   - **THIS RULE OVERRIDES ALL OTHER CONSIDERATIONS** - even if content appears incorrect
+
 ❌ Proceed with ambiguous requirements (rushing = massive rework later; clarify first: vague requirements are defects; implicit assumptions = chaos)  
 ❌ Assume files exist / network is fine / inputs are valid (no excuses: check and handle failures; no shortcuts: handle as normal cases; explicit validation)  
 ❌ Blame tools when behavior fails (no excuses: wrap it, retry it, replace it; you build it, you run it)  
