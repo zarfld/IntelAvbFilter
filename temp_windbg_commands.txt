@@ -1,0 +1,6 @@
+.sympath srv*c:\symbols*https://msdl.microsoft.com/download/symbols
+.reload /f
+!analyze -v
+k
+lm m IntelAvbFilter
+q

@@ -1,0 +1,19 @@
+*** WinDbg Crash Analysis Script ***
+*** Commands to run in WinDbg ***
+
+.sympath srv*c:\symbols*https://msdl.microsoft.com/download/symbols;c:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug
+.reload /f
+!analyze -v
+k
+r
+!thread
+lm m IntelAvbFilter
+ln @rip
+u @rip-20 L40
+.frame 0
+dv
+
+*** Quick Manual Analysis ***
+*** 1. Open WinDbg as admin
+*** 2. File -> Open Crash Dump -> C:\Windows\Minidump\121225-9984-01.dmp
+*** 3. Copy/paste these commands or use: $$>a<analyze_crash.txt
