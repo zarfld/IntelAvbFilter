@@ -15,6 +15,13 @@ if %errorLevel% NEQ 0 (
 
 cd /d "%~dp0"
 
+:: Navigate to repository root
+if exist "tools\development" (
+    cd /d "%~dp0..\.."
+) else (
+    cd /d "%~dp0"
+)
+
 echo [1/4] Unbinding from adapters...
 pnputil /disable-device "PCI\VEN_8086&DEV_125B" >nul 2>&1
 

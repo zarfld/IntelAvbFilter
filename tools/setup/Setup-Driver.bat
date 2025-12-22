@@ -4,6 +4,13 @@ echo Intel AVB Filter Driver - Quick Setup
 echo ========================================
 echo.
 
+:: Navigate to repository root
+if exist "tools\setup" (
+    cd /d "%~dp0..\.."
+) else (
+    cd /d "%~dp0"
+)
+
 net session >nul 2>&1
 if %errorLevel% NEQ 0 (
     echo ERROR: Administrator privileges required

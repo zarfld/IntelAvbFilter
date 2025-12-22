@@ -1,5 +1,13 @@
 @echo off
 REM Driver Update with Stuck Service Detection
+
+:: Navigate to repository root
+if exist "tools\development" (
+    cd /d "%~dp0..\.."
+) else (
+    cd /d "%~dp0"
+)
+
 echo Intel AVB Filter - Smart Update
 echo ================================
 echo.

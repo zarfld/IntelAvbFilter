@@ -29,6 +29,15 @@ param(
   [switch]$FsEnum              # neue Option: nur Dateisystem-Abfrage statt pnputil
 )
 
+# Navigate to repository root
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+if ($ScriptDir -match '\\tools\\development$') {
+    $RepoRoot = Split-Path (Split-Path $ScriptDir -Parent) -Parent
+    Set-Location $RepoRoot
+} else {
+    $RepoRoot = $ScriptDir
+}
+
 Set-StrictMode -Version Latest
 
 #region Helper Functions
