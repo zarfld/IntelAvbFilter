@@ -18,10 +18,10 @@ LDFLAGS=$(LDFLAGS) /DEBUG
 
 all: avb_test_i219.exe avb_test_i210.exe
 
-avb_test_i219.exe: avb_test_i219.c
+avb_test_i219.exe: tests\\device_specific\\i219\\avb_test_i219.c
 	$(CC) $(CFLAGS) $** /link $(LDFLAGS) $(LIBS) /out:$@
 
-avb_test_i210.exe: avb_test_i210.c
+avb_test_i210.exe: tests\\device_specific\\i210\\avb_test_i210.c
 	$(CC) $(CFLAGS) $** /link $(LDFLAGS) $(LIBS) /out:$@
 
 clean:

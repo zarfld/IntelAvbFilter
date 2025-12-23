@@ -9,10 +9,11 @@ CFG=Debug
 PLATFORM=x64
 !ENDIF
 
-OUTDIR=build\tests\integration\$(PLATFORM)\$(CFG)
+ROOT=..\..
+OUTDIR=..\..\build\tests\integration\$(PLATFORM)\$(CFG)
 CC=cl
 LD=link
-CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /I.
+CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /I..\.. /I.
 !IF "$(CFG)" == "Release"
 CFLAGS=$(CFLAGS) /O2 /MD
 !ELSE
@@ -23,7 +24,7 @@ LIBS=kernel32.lib user32.lib advapi32.lib
 
 all: dirs $(OUTDIR)\AvbIntegrationTests.exe
 
-SRC=tests\integration\AvbIntegrationTests.cpp
+SRC=AvbIntegrationTests.cpp
 OBJS=$(OUTDIR)\AvbIntegrationTests.obj
 
 $(OUTDIR)\AvbIntegrationTests.obj: $(SRC)
@@ -33,7 +34,7 @@ $(OUTDIR)\AvbIntegrationTests.exe: $(OBJS)
 	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\AvbIntegrationTests.exe $(OBJS) $(LIBS)
 
 clean:
-	@if exist build\tests\integration rmdir /s /q build\tests\integration
+	@if exist ..\..\build\tests\integration rmdir /s /q ..\..\build\tests\integration
 
 .PHONY: all dirs clean
 

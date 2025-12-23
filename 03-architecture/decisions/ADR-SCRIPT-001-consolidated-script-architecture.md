@@ -35,7 +35,7 @@ The IntelAvbFilter repository has accumulated **80+ batch (.bat) and PowerShell 
 |----------|-------|----------|---------|
 | **Driver Setup/Install** | 14+ | `setup_driver.ps1`, `Setup-Driver.ps1`, `Install-AvbFilter.ps1`, `Complete-Driver-Setup.bat` | Naming chaos |
 | **Test Execution** | 10+ | `Quick-Test-Debug.bat`, `Test-Release.bat`, `test_hardware_only.bat` | Unclear hierarchy |
-| **Driver Build** | 6+ | `Build-And-Sign-Driver.ps1`, `build_all_tests.cmd` | Mixed styles |
+| **Driver Build** | 6+ | `Build-And-Sign-Driver.ps1`, `tools/build/build_all_tests.cmd` | Mixed styles |
 | **Certificate Management** | 4+ | `troubleshoot_certificates.ps1`, `Manage-Certificate.ps1`, `Generate-CATFile.ps1` | Overlapping |
 | **Test Signing** | 5+ | `Enable-TestSigning.bat`, `fix_test_signing.bat` | Redundant |
 | **Driver Update** | 5+ | `Update-Driver-Quick.bat`, `Smart-Update-Driver.bat`, `reinstall_debug_quick.bat` | Similar purposes |
@@ -269,6 +269,7 @@ Each function has ONE authoritative script:
 - ✅ **Keep**: `Build-And-Sign-Driver.ps1` (rename to `Build-Driver.ps1`)
 - ✅ **Keep**: `Sign-Driver.ps1` (separate signing step)
 - ❌ **Move**: `build_all_tests.cmd`, `build_i226_test.bat`, `build_investigation_tools.cmd` → `tools/`
+- ✅ **Moved**: `build_all_tests.cmd` → `tools/build/build_all_tests.cmd`
 
 **Certificate Management** (4 scripts → 1):
 - ✅ **Keep**: `Manage-Certificate.ps1`

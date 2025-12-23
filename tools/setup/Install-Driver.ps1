@@ -59,6 +59,10 @@ param(
     [string]$Configuration = "Debug",
     
     [Parameter(Mandatory=$false)]
+    [ValidateSet("netcfg", "pnputil")]
+    [string]$Method = "netcfg",
+    
+    [Parameter(Mandatory=$false)]
     [switch]$EnableTestSigning,
     
     [Parameter(Mandatory=$false)]
@@ -194,7 +198,7 @@ function Check-DriverStatus {
 
 # Function: Uninstall Driver
 function Uninstall-Driver {
-    Write-Step "Uninstalling Driver"
+    Write-Step "Uninstalling Driver (Method: $Method)"
     
     # Stop service
     Write-Host "Stopping service..." -ForegroundColor Gray
@@ -205,22 +209,36 @@ function Uninstall-Driver {
     Write-Host "Deleting service..." -ForegroundColor Gray
     sc delete IntelAvbFilter 2>&1 | Out-Null
     
-    # Uninstall via netcfg (THE correct method for NDIS filters)
-    Write-Host "Removing NDIS filter component..." -ForegroundColor Gray
-    netcfg.exe -u MS_IntelAvbFilter 2>&1
-    
-    if ($LASTEXITCODE -eq 0) {
-        Write-Success "Driver uninstalled successfully"
-        return $true
+    if ($Method -eq "netcfg") {
+        # Uninstall via netcfg (THE correct method for NDIS filters)
+        Write-Host "Removing NDIS filter component (netcfg)..." -ForegroundColor Gray
+        netcfg.exe -u MS_IntelAvbFilter 2>&1
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Driver uninstalled successfully (netcfg)"
+            return $true
+        } else {
+            Write-Info "netcfg returned exit code $LASTEXITCODE (may indicate component not found)"
+            return $true  # Not necessarily an error
+        }
     } else {
-        Write-Info "netcfg returned exit code $LASTEXITCODE (may indicate component not found)"
-        return $true  # Not necessarily an error
+        # Uninstall via pnputil (for device driver method)
+        Write-Host "Removing driver package (pnputil)..." -ForegroundColor Gray
+        pnputil /delete-driver intelavbfilter.inf /uninstall /force 2>&1 | Out-Null
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Driver uninstalled successfully (pnputil)"
+            return $true
+        } else {
+            Write-Info "pnputil returned exit code $LASTEXITCODE"
+            return $true  # Continue even if not found
+        }
     }
 }
 
 # Function: Install Driver
 function Install-Driver {
-    Write-Step "Installing Driver (NDIS Filter Method)"
+    Write-Step "Installing Driver (Method: $Method)"
     
     # Verify files exist
     $infPath = Join-Path $DriverPath "IntelAvbFilter.inf"
@@ -246,30 +264,57 @@ function Install-Driver {
     Write-Host "`nStep 1: Stopping service if running..." -ForegroundColor Gray
     sc stop IntelAvbFilter 2>&1 | Out-Null
     
-    # Step 2: Remove old installation
-    Write-Host "Step 2: Removing old installations..." -ForegroundColor Gray
-    netcfg.exe -u MS_IntelAvbFilter 2>&1 | Out-Null
-    
-    # Step 3: Install filter component via netcfg
-    # CRITICAL: NDIS Lightweight Filters REQUIRE netcfg.exe, not pnputil!
-    # -c s = component class "service"
-    # -i MS_IntelAvbFilter = component ID from INF
-    Write-Host "Step 3: Installing filter component via netcfg..." -ForegroundColor Gray
-    Write-Host "  Command: netcfg.exe -l `"$infPath`" -c s -i MS_IntelAvbFilter" -ForegroundColor DarkGray
-    
-    netcfg.exe -l "$infPath" -c s -i MS_IntelAvbFilter
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Failure "netcfg installation failed! Error code: $LASTEXITCODE"
-        Write-Host "`nCommon causes:" -ForegroundColor Yellow
-        Write-Host "  1. Driver not signed and test signing disabled" -ForegroundColor Yellow
-        Write-Host "  2. INF file syntax errors" -ForegroundColor Yellow
-        Write-Host "  3. Conflicting driver already installed" -ForegroundColor Yellow
-        Write-Host "`nTroubleshooting steps:" -ForegroundColor Cyan
-        Write-Host "  - Run: .\Setup-Driver.ps1 -CheckStatus" -ForegroundColor Cyan
-        Write-Host "  - Check Windows Event Log: Event Viewer → Windows Logs → System" -ForegroundColor Cyan
-        Write-Host "  - Enable test signing: .\Setup-Driver.ps1 -EnableTestSigning" -ForegroundColor Cyan
-        return $false
+    if ($Method -eq "netcfg") {
+        # NDIS Filter method (THE CORRECT method for NDIS Lightweight Filters)
+        
+        # Step 2: Remove old installation
+        Write-Host "Step 2: Removing old installations (netcfg)..." -ForegroundColor Gray
+        netcfg.exe -u MS_IntelAvbFilter 2>&1 | Out-Null
+        
+        # Step 3: Install filter component via netcfg
+        # CRITICAL: NDIS Lightweight Filters REQUIRE netcfg.exe, not pnputil!
+        # -c s = component class "service"
+        # -i MS_IntelAvbFilter = component ID from INF
+        Write-Host "Step 3: Installing filter component via netcfg..." -ForegroundColor Gray
+        Write-Host "  Command: netcfg.exe -l `"$infPath`" -c s -i MS_IntelAvbFilter" -ForegroundColor DarkGray
+        
+        netcfg.exe -l "$infPath" -c s -i MS_IntelAvbFilter
+        
+        if ($LASTEXITCODE -ne 0) {
+            Write-Failure "netcfg installation failed! Error code: $LASTEXITCODE"
+            Write-Host "`nCommon causes:" -ForegroundColor Yellow
+            Write-Host "  1. Driver not signed and test signing disabled" -ForegroundColor Yellow
+            Write-Host "  2. INF file syntax errors" -ForegroundColor Yellow
+            Write-Host "  3. Conflicting driver already installed" -ForegroundColor Yellow
+            Write-Host "`nTroubleshooting steps:" -ForegroundColor Cyan
+            Write-Host "  - Run: .\Setup-Driver.ps1 -CheckStatus" -ForegroundColor Cyan
+            Write-Host "  - Check Windows Event Log: Event Viewer → Windows Logs → System" -ForegroundColor Cyan
+            Write-Host "  - Enable test signing: .\Setup-Driver.ps1 -EnableTestSigning" -ForegroundColor Cyan
+            return $false
+        }
+        
+    } else {
+        # pnputil method (for device driver compatibility testing)
+        
+        # Step 2: Remove old installation
+        Write-Host "Step 2: Removing old installations (pnputil)..." -ForegroundColor Gray
+        pnputil /delete-driver intelavbfilter.inf /uninstall /force 2>&1 | Out-Null
+        
+        # Step 3: Install driver package via pnputil
+        Write-Host "Step 3: Installing driver package via pnputil..." -ForegroundColor Gray
+        Write-Host "  Command: pnputil /add-driver `"$infPath`" /install" -ForegroundColor DarkGray
+        
+        pnputil /add-driver "$infPath" /install
+        
+        if ($LASTEXITCODE -ne 0) {
+            Write-Failure "pnputil installation failed! Error code: $LASTEXITCODE"
+            Write-Host "`nCommon causes:" -ForegroundColor Yellow
+            Write-Host "  1. Driver not signed and test signing disabled" -ForegroundColor Yellow
+            Write-Host "  2. INF file syntax errors" -ForegroundColor Yellow
+            Write-Host "  3. Device not found or incompatible" -ForegroundColor Yellow
+            Write-Host "`nNote: For NDIS Filters, use -Method netcfg instead!" -ForegroundColor Cyan
+            return $false
+        }
     }
     
     Write-Success "netcfg installation completed"

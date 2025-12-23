@@ -2,7 +2,7 @@
 # Uses Visual Studio C++ compiler
 
 param(
-    [string]$BuildCmd = "cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tools/avb_test/tsauxc_toggle_test.c /Fe:tsauxc_toggle_test.exe"
+    [string]$BuildCmd = "cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tests/integration/tsn/tsauxc_toggle_test.c /Fe:tsauxc_toggle_test.exe"
 )
 
 Write-Host "TSAUXC Toggle Test Build Script" -ForegroundColor Cyan

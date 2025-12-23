@@ -278,11 +278,11 @@ if ($BuildTests) {
     
     # Build test executables
     $testMakefiles = @(
-        "tools\avb_test\avb_diagnostic.mak",
-        "tools\avb_test\avb_hw_state_test.mak",
-        "tools\avb_test\tsn_ioctl_test.mak",
-        "tools\avb_test\avb_test.mak",
-        "tools\avb_test\avb_i226_test.mak"
+        "tests\diagnostic\avb_diagnostic.mak",
+        "tests\diagnostic\avb_hw_state_test.mak",
+        "tests\integration\tsn\tsn_ioctl_test.mak",
+        "tests\integration\avb\avb_test.mak",
+        "tests\device_specific\i226\avb_i226_test.mak"
     )
     
     $successCount = 0
@@ -292,7 +292,9 @@ if ($BuildTests) {
         $testName = [System.IO.Path]::GetFileNameWithoutExtension($makefile)
         Write-Host "`nBuilding $testName..." -ForegroundColor Yellow
         
-        $buildCmd = "cmd /c `"`"$vcvarsPath`" && nmake -f $makefile`""
+        $makefileDir = Split-Path $makefile -Parent
+        $makefileLeaf = Split-Path $makefile -Leaf
+        $buildCmd = "cmd /c `"`"$vcvarsPath`" && pushd `"$makefileDir`" && nmake -f `"$makefileLeaf`" && popd`""
         
         try {
             Invoke-Expression $buildCmd | Out-Null
