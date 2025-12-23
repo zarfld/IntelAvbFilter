@@ -102,8 +102,10 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath; if(!$vs){ Write-Error 'VS C++ tools not found'; exit 1 }; $vcvars=Join-Path $vs 'VC/ Auxiliary/Build/vcvars64.bat'.Replace(' /','/'); if(!(Test-Path $vcvars)){ Write-Error 'vcvars64.bat not found'; exit 1 }; cmd /c \"call \"$vcvars\" && nmake -f avb_test.mak\""
+				"-File",
+				"tools/vs_compile.ps1",
+				"-BuildCmd",
+				"pushd tests\\integration\\avb; nmake -f avb_test.mak; popd"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -121,7 +123,7 @@
 				"-File",
 				"tools/vs_compile.ps1",
 				"-BuildCmd",
-				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tools/avb_test/avb_test_um.c /Fe:avb_test_i210_um.exe"
+				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tests/integration/avb/avb_test_um.c /Fe:avb_test_i210_um.exe"
 			],
 			"presentation": {
 				"reveal": "always",
@@ -144,7 +146,7 @@
 				"-File",
 				"tools/vs_compile.ps1",
 				"-BuildCmd",
-				"cl /nologo /W4 /Zi avb_test_i219.c /Fe:avb_test_i219.exe"
+				"cl /nologo /W4 /Zi tests/device_specific/i219/avb_test_i219.c /Fe:avb_test_i219.exe"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -162,7 +164,7 @@
 				"-File",
 				"tools/vs_compile.ps1",
 				"-BuildCmd",
-				"cl /nologo /W4 /Zi quick_diagnostics.c /Fe:quick_diagnostics.exe"
+				"cl /nologo /W4 /Zi tests/diagnostic/quick_diagnostics.c /Fe:quick_diagnostics.exe"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -232,7 +234,7 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-Command",
-				"./run_complete_diagnostics.bat"
+				"./tools/test/run_complete_diagnostics.bat"
 			],
 			"presentation": {
 				"reveal": "always"
@@ -296,7 +298,7 @@
 				"-File",
 				"tools/vs_compile.ps1",
 				"-BuildCmd",
-				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tools/avb_test/ptp_clock_control_test.c /Fe:ptp_clock_control_test.exe"
+				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tests/integration/ptp/ptp_clock_control_test.c /Fe:ptp_clock_control_test.exe"
 			],
 			"group": "test",
 			"problemMatcher": []

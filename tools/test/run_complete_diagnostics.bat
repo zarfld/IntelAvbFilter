@@ -7,13 +7,13 @@ echo Step 1: Compiling diagnostic tools...
 echo.
 
 echo Compiling main diagnostics tool...
-cl intel_avb_diagnostics.c /Fe:intel_avb_diagnostics.exe /TC
+cl tests\diagnostic\intel_avb_diagnostics.c /Fe:intel_avb_diagnostics.exe /TC
 if exist "intel_avb_diagnostics.exe" (
     echo ? Main diagnostics tool compiled successfully
 ) else (
     echo ? Main diagnostics compilation failed
     echo Trying with explicit libraries...
-    cl intel_avb_diagnostics.c /Fe:intel_avb_diagnostics.exe advapi32.lib setupapi.lib cfgmgr32.lib iphlpapi.lib
+    cl tests\diagnostic\intel_avb_diagnostics.c /Fe:intel_avb_diagnostics.exe advapi32.lib setupapi.lib cfgmgr32.lib iphlpapi.lib
     if exist "intel_avb_diagnostics.exe" (
         echo ? Main diagnostics tool compiled with explicit libraries
     ) else (
@@ -36,8 +36,8 @@ if exist "debug_device_interface.c" (
 
 echo.
 echo Compiling hardware-only test application...
-if exist "avb_test_i219.c" (
-    cl avb_test_i219.c /DHARDWARE_ONLY=1 /Fe:hardware_test.exe
+if exist "tests\device_specific\i219\avb_test_i219.c" (
+    cl tests\device_specific\i219\avb_test_i219.c /DHARDWARE_ONLY=1 /Fe:hardware_test.exe
     if exist "hardware_test.exe" (
         echo ? Hardware test application compiled
     ) else (
@@ -153,7 +153,7 @@ echo.
 echo ?? DEVELOPMENT PATHS:
 echo.
 echo Corporate Environment (Secure Boot):
-echo    1. EV Code Signing Certificate (~€300/year)
+echo    1. EV Code Signing Certificate (~ï¿½300/year)
 echo       ? Immediate deployment capability
 echo       ? Production-ready solution
 echo.

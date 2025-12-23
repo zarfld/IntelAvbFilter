@@ -152,9 +152,9 @@ try {
     } else {
         Write-Failure "Device node \\.\IntelAvbFilter does NOT exist"
         Write-Info "This is normal if:"
-        Write-Info "  • No supported Intel hardware is present"
-        Write-Info "  • Intel hardware is present but driver didn't load"
-        Write-Info "  • Driver service is stopped"
+        Write-Info "  ï¿½ No supported Intel hardware is present"
+        Write-Info "  ï¿½ Intel hardware is present but driver didn't load"
+        Write-Info "  ï¿½ Driver service is stopped"
     }
 } catch {
     Write-Failure "Error checking device node: $($_.Exception.Message)"
@@ -163,7 +163,8 @@ try {
 # Test 4: Check Test Application Availability
 Write-Step "Test 4: Checking Test Applications"
 
-$testDir = "$PSScriptRoot\tools\avb_test\x64\Debug"
+$repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$testDir = Join-Path $repoRoot "build\tools\avb_test\x64\Debug"
 if (-not (Test-Path $testDir)) {
     $testDir = "$PSScriptRoot\x64\Debug"
 }
@@ -310,9 +311,9 @@ if ($hasService -and $hasIntelHw -and $hasDeviceNode) {
     Write-Host "     The driver is installed, Intel hardware is detected," -ForegroundColor Green
     Write-Host "     and the device interface is accessible." -ForegroundColor Green
     Write-Host "`n  Next steps:" -ForegroundColor Cyan
-    Write-Host "    • Run test applications to verify functionality" -ForegroundColor White
-    Write-Host "    • Use DebugView to monitor kernel debug output" -ForegroundColor White
-    Write-Host "    • Test AVB/TSN features with your application" -ForegroundColor White
+    Write-Host "    ï¿½ Run test applications to verify functionality" -ForegroundColor White
+    Write-Host "    ï¿½ Use DebugView to monitor kernel debug output" -ForegroundColor White
+    Write-Host "    ï¿½ Test AVB/TSN features with your application" -ForegroundColor White
 } elseif ($hasService -and -not $hasIntelHw) {
     Write-Host "  ? DRIVER INSTALLED BUT NO INTEL HARDWARE" -ForegroundColor Yellow
     Write-Host "     The driver is installed correctly but requires" -ForegroundColor Yellow

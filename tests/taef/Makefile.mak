@@ -17,31 +17,32 @@ PLATFORM=x64
 !ERROR Specify TAEF_LIB (path to Wex libs for selected platform)
 !ENDIF
 
-OUTDIR=build\tests\taef\$(PLATFORM)\$(CFG)
+ROOT=..\..
+OUTDIR=$(ROOT)\build\tests\taef\$(PLATFORM)\$(CFG)
 CC=cl
 LD=link
-CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /I$(TAEF_INCLUDE) /I.
+CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /I"$(TAEF_INCLUDE)" /I. /I$(ROOT)
 !IF "$(CFG)" == "Release"
 CFLAGS=$(CFLAGS) /O2 /MD
 !ELSE
 CFLAGS=$(CFLAGS) /MDd
 !ENDIF
 LDFLAGS=/nologo /DEBUG /DLL
-LIBS=kernel32.lib user32.lib advapi32.lib WexCommon.lib WexLogger.lib WexTestExecution.lib
+LIBS=kernel32.lib user32.lib advapi32.lib Wex.Common.lib Wex.Logger.lib TE.Common.lib
 
 all: dirs $(OUTDIR)\AvbTaefTests.dll
 
-SRC=tests\taef\AvbTaefTests.cpp
+SRC=AvbTaefTests.cpp
 OBJS=$(OUTDIR)\AvbTaefTests.obj
 
 $(OUTDIR)\AvbTaefTests.obj: $(SRC)
 	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c $(SRC)
 
 $(OUTDIR)\AvbTaefTests.dll: $(OBJS)
-	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\AvbTaefTests.dll $(OBJS) /LIBPATH:$(TAEF_LIB) $(LIBS)
+	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\AvbTaefTests.dll $(OBJS) /LIBPATH:"$(TAEF_LIB)" $(LIBS)
 
 clean:
-	@if exist build\tests\taef rmdir /s /q build\tests\taef
+	@if exist $(ROOT)\build\tests\taef rmdir /s /q $(ROOT)\build\tests\taef
 
 .PHONY: all dirs clean
 

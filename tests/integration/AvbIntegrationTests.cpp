@@ -2,20 +2,20 @@
 // C++14, no external deps; uses Windows + IOCTL ABI only.
 // This complements TAEF by enabling quick runs on dev machines.
 
-// If this file is compiled inside the driver project, the toolchain expects precompiled headers.
-#if defined(_MSC_VER)
-#  if defined(__has_include)
-#    if __has_include("precomp.h")
-#      include "precomp.h"
-#      define AVB_HAS_PCH 1
-#    endif
-#  endif
+// Only include the driver PCH when actually building in kernel-mode.
+// User-mode integration builds must not pull in WDK-only headers like ndis.h.
+#if defined(_KERNEL_MODE)
+#  include "precomp.h"
+#  define AVB_HAS_PCH 1
 #endif
 
 #if defined(_KERNEL_MODE)
 VOID AvbIntegrationTests_KmBuildPlaceHolder(void) { /* not built in KM */ }
 #else
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -64,7 +64,8 @@ static int TestInitAndInfo()
     bool infoOk = IoctlInOut(IOCTL_AVB_GET_DEVICE_INFO, &info, sizeof(info), &info, sizeof(info), bytes);
     printf("[Init] Get device info... %s (bytes=%lu)\n", infoOk ? "OK" : "FAIL", bytes);
     if (infoOk) {
-        printf("        Info: %.*s\n", (int)min((DWORD)info.buffer_size, bytes), info.device_info);
+        int n = (int)std::min<DWORD>((DWORD)info.buffer_size, bytes);
+        printf("        Info: %.*s\n", n, info.device_info);
     }
     return (initOk && infoOk) ? 0 : 1;
 }

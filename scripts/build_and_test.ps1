@@ -74,7 +74,7 @@ function Build-Driver {
 
 function Build-UserTool {
   if($SkipUserTool){ Write-Info 'SkipUserTool set - skipping user tool build.'; return }
-  $mk = 'tools\avb_test\avb_test.mak'
+  $mk = 'tests\integration\avb\avb_test.mak'
   if(!(Test-Path $mk)){ throw "Makefile not found: $mk" }
   Write-Info "Building user tool via nmake ($Configuration|$Platform)"
   & nmake /nologo -f $mk CFG=$Configuration PLATFORM=$Platform | Write-Host
