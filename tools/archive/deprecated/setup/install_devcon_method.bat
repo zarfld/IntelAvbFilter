@@ -32,15 +32,15 @@ if exist "C:\Program Files (x86)\Windows Kits\10\Tools\x64\devcon.exe" (
 
 echo.
 echo Preparing driver files...
-if not exist "..\..\x64\Debug\IntelAvbFilter.sys" (
-    echo ? Driver binary not found: x64\Debug\IntelAvbFilter.sys
+if not exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys" (
+    echo ? Driver binary not found: build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys
     echo Build the project first
     pause
     exit /b 1
 )
 
-if not exist "..\..\x64\Debug\IntelAvbFilter.inf" (
-    echo ? Driver INF not found: x64\Debug\IntelAvbFilter.inf
+if not exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" (
+    echo ? Driver INF not found: build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf
     echo Build the project first
     pause
     exit /b 1
@@ -50,16 +50,16 @@ echo ? Driver files ready
 echo.
 
 echo Installing certificate first...
-if exist "build\x64\Debug\IntelAvbFilter.cer" (
-    certutil -addstore root "build\x64\Debug\IntelAvbFilter.cer" >nul 2>&1
+if exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter.cer" (
+    certutil -addstore root "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter.cer" >nul 2>&1
     echo ? Certificate installation attempted
 )
 
 echo.
 echo Using DevCon to install driver...
-echo Command: %DEVCON_PATH% install "build\x64\Debug\IntelAvbFilter.inf" Root\IntelAvbFilter
+echo Command: %DEVCON_PATH% install "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" Root\IntelAvbFilter
 
-%DEVCON_PATH% install "build\x64\Debug\IntelAvbFilter.inf" Root\IntelAvbFilter
+%DEVCON_PATH% install "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" Root\IntelAvbFilter
 
 if %errorLevel% == 0 (
     echo ? DevCon installation successful!

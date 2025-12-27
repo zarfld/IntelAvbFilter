@@ -22,7 +22,7 @@ if %errorLevel% NEQ 0 (
 )
 
 echo [1] Extracting and installing certificate...
-powershell -Command "$cert = (Get-AuthenticodeSignature x64\Release\IntelAvbFilter\IntelAvbFilter.sys).SignerCertificate; $cert | Export-Certificate -FilePath '%TEMP%\WDKTestCert.cer' -Force | Out-Null"
+powershell -Command "$cert = (Get-AuthenticodeSignature build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys).SignerCertificate; $cert | Export-Certificate -FilePath '%TEMP%\WDKTestCert.cer' -Force | Out-Null"
 if exist "%TEMP%\WDKTestCert.cer" (
     certutil -addstore Root "%TEMP%\WDKTestCert.cer" >nul 2>&1
     certutil -addstore TrustedPublisher "%TEMP%\WDKTestCert.cer" >nul 2>&1
@@ -41,10 +41,10 @@ echo     Cleanup complete.
 echo.
 
 echo [3] Installing NDIS filter driver...
-echo     Using: x64\Release\IntelAvbFilter\IntelAvbFilter.inf
-cd /d x64\Release\IntelAvbFilter
+echo     Using: build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf
+cd /d build\x64\Debug\IntelAvbFilter\IntelAvbFilter
 netcfg -v -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
-cd /d ..\..\..
+cd /d ..\..\..\..\...
 
 if %errorLevel% EQU 0 (
     echo.
