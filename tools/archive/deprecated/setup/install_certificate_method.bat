@@ -15,9 +15,9 @@ if %errorLevel% == 0 (
 
 echo.
 echo Step 2: Installing test certificate to system trust store...
-if exist "..\..\x64\Debug\IntelAvbFilter.cer" (
+if exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter.cer" (
     echo Installing certificate: IntelAvbFilter.cer
-    certutil -addstore root "..\..\x64\Debug\IntelAvbFilter.cer"
+    certutil -addstore root "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter.cer"
     if %errorLevel% == 0 (
         echo ? Certificate installed successfully
     ) else (
@@ -25,7 +25,7 @@ if exist "..\..\x64\Debug\IntelAvbFilter.cer" (
         echo This might still work - continuing...
     )
 ) else (
-    echo ? Certificate file not found: x64\Debug\IntelAvbFilter.cer
+    echo ? Certificate file not found: build\x64\Debug\IntelAvbFilter\IntelAvbFilter.cer
     echo Make sure the project is built first
     pause
     exit /b 1
@@ -33,9 +33,9 @@ if exist "..\..\x64\Debug\IntelAvbFilter.cer" (
 
 echo.
 echo Step 3: Installing driver via INF (Certificate-based method)...
-if exist "..\..\x64\Debug\IntelAvbFilter.inf" (
+if exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" (
     echo Attempting driver installation without test signing...
-    pnputil /add-driver "..\..\x64\Debug\IntelAvbFilter.inf" /install
+    pnputil /add-driver "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" /install
     if %errorLevel% == 0 (
         echo ? Driver installation successful!
         echo The driver should now be loaded and ready for testing.
@@ -51,7 +51,7 @@ if exist "..\..\x64\Debug\IntelAvbFilter.inf" (
         goto :DEVCON_METHOD
     )
 ) else (
-    echo ? Driver INF not found: x64\Debug\IntelAvbFilter.inf
+    echo ? Driver INF not found: build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf
     pause
     exit /b 1
 )
@@ -78,12 +78,12 @@ REM Check if DevCon is available
 where devcon.exe >nul 2>&1
 if %errorLevel% == 0 (
     echo ? DevCon found in PATH
-    devcon install "build\x64\Debug\IntelAvbFilter.inf" "*"
+    devcon install "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" "*"
 ) else (
     echo Looking for DevCon in WDK installation...
     if exist "C:\Program Files (x86)\Windows Kits\10\Tools\x64\devcon.exe" (
         echo ? DevCon found in WDK
-        "C:\Program Files (x86)\Windows Kits\10\Tools\x64\devcon.exe" install "build\x64\Debug\IntelAvbFilter.inf" "*"
+        "C:\Program Files (x86)\Windows Kits\10\Tools\x64\devcon.exe" install "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" "*"
     ) else (
         echo ? DevCon not found
         echo Download DevCon from Microsoft or use WDK installation

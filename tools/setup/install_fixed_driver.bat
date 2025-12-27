@@ -8,7 +8,6 @@ echo.
 
 echo [1/5] Stopping service and unloading driver...
 sc stop IntelAvbFilter >nul 2>&1
-sc delete IntelAvbFilter >nul 2>&1
 timeout /t 3 /nobreak >nul
 
 echo [2/5] Removing ALL old driver packages...
@@ -23,12 +22,12 @@ del /q %SystemRoot%\System32\DriverStore\FileRepository\intelavbfilter*\* /s 2>n
 timeout /t 2 /nobreak >nul
 
 echo [4/5] Installing new driver with NetCfgInstanceId fix...
-netcfg -v -l ..\..\x64\Release\IntelAvbFilter\IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
+netcfg -v -l ..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo ERROR: netcfg failed! Trying pnputil method...
-    pnputil /add-driver x64\Release\IntelAvbFilter\IntelAvbFilter.inf /install
+    pnputil /add-driver ..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf /install
     if %ERRORLEVEL% NEQ 0 (
         echo ERROR: Both installation methods failed!
         echo Make sure you run this script as Administrator.
@@ -38,7 +37,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [5/5] Starting service...
-net start IntelAvbFilter
+sc start IntelAvbFilter
 
 if %ERRORLEVEL% EQU 0 (
     echo.

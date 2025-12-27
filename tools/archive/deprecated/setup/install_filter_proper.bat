@@ -19,7 +19,7 @@ echo Step 2: Removing old installations...
 netcfg.exe -u MS_IntelAvbFilter
 
 echo Step 3: Installing filter component via netcfg...
-netcfg.exe -l "..\..\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
+netcfg.exe -l "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
 
 if %errorLevel% NEQ 0 (
     echo.
