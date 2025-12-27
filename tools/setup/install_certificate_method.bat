@@ -78,12 +78,12 @@ REM Check if DevCon is available
 where devcon.exe >nul 2>&1
 if %errorLevel% == 0 (
     echo ? DevCon found in PATH
-    devcon install "x64\Debug\IntelAvbFilter.inf" "*"
+    devcon install "build\x64\Debug\IntelAvbFilter.inf" "*"
 ) else (
     echo Looking for DevCon in WDK installation...
     if exist "C:\Program Files (x86)\Windows Kits\10\Tools\x64\devcon.exe" (
         echo ? DevCon found in WDK
-        "C:\Program Files (x86)\Windows Kits\10\Tools\x64\devcon.exe" install "x64\Debug\IntelAvbFilter.inf" "*"
+        "C:\Program Files (x86)\Windows Kits\10\Tools\x64\devcon.exe" install "build\x64\Debug\IntelAvbFilter.inf" "*"
     ) else (
         echo ? DevCon not found
         echo Download DevCon from Microsoft or use WDK installation

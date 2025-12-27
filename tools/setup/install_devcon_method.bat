@@ -50,16 +50,16 @@ echo ? Driver files ready
 echo.
 
 echo Installing certificate first...
-if exist "x64\Debug\IntelAvbFilter.cer" (
-    certutil -addstore root "x64\Debug\IntelAvbFilter.cer" >nul 2>&1
+if exist "build\x64\Debug\IntelAvbFilter.cer" (
+    certutil -addstore root "build\x64\Debug\IntelAvbFilter.cer" >nul 2>&1
     echo ? Certificate installation attempted
 )
 
 echo.
 echo Using DevCon to install driver...
-echo Command: %DEVCON_PATH% install "x64\Debug\IntelAvbFilter.inf" Root\IntelAvbFilter
+echo Command: %DEVCON_PATH% install "build\x64\Debug\IntelAvbFilter.inf" Root\IntelAvbFilter
 
-%DEVCON_PATH% install "x64\Debug\IntelAvbFilter.inf" Root\IntelAvbFilter
+%DEVCON_PATH% install "build\x64\Debug\IntelAvbFilter.inf" Root\IntelAvbFilter
 
 if %errorLevel% == 0 (
     echo ? DevCon installation successful!

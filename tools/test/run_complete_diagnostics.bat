@@ -65,26 +65,26 @@ if exist "device_interface_test.exe" (
 echo.
 echo Step 4: Checking build artifacts...
 echo.
-if exist "x64\Debug\IntelAvbFilter.sys" (
+if exist "build\x64\Debug\IntelAvbFilter.sys" (
     echo ? Driver binary: x64\Debug\IntelAvbFilter.sys
-    dir "x64\Debug\IntelAvbFilter.sys" | findstr "IntelAvbFilter.sys"
+    dir "build\x64\Debug\IntelAvbFilter.sys" | findstr "IntelAvbFilter.sys"
 ) else (
     echo ? Driver binary not found
 )
 
-if exist "x64\Debug\IntelAvbFilter.inf" (
+if exist "build\x64\Debug\IntelAvbFilter.inf" (
     echo ? Driver INF: x64\Debug\IntelAvbFilter.inf
 ) else (
     echo ? Driver INF not found
 )
 
-if exist "x64\Debug\IntelAvbFilter.cat" (
+if exist "build\x64\Debug\IntelAvbFilter.cat" (
     echo ? Driver catalog: x64\Debug\IntelAvbFilter.cat
 ) else (
     echo ? Driver catalog not found
 )
 
-if exist "x64\Debug\IntelAvbFilter.cer" (
+if exist "build\x64\Debug\IntelAvbFilter.cer" (
     echo ? Driver certificate: x64\Debug\IntelAvbFilter.cer
 ) else (
     echo ? Driver certificate not found

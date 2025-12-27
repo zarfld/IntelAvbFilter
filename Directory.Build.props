@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
+  <!-- Redirect build output to build\ directory instead of x64\ -->
+  <PropertyGroup>
+    <OutDir>$(MSBuildProjectDirectory)\build\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\build\$(Platform)\$(Configuration)\$(ProjectName)\obj\</IntDir>
+  </PropertyGroup>
+  
   <!-- Exclude user-mode test C++ sources from kernel driver builds -->
   <ItemGroup>
     <ClCompile Update="tests\integration\AvbIntegrationTests.cpp">

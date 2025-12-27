@@ -233,7 +233,7 @@
     <None Include="Build-And-Sign-Driver.ps1" />
     <None Include="Makefile.avb_tests" />
     <None Include="tests\integration\avb\avb_test.mak" />
-    <None Include="x64\Debug\IntelAvbFilter.cat" />
+    <None Include="build\x64\Debug\IntelAvbFilter.cat" />
     <None Include="tests\integration\Makefile.mak" />
     <None Include="tests\README.md" />
     <None Include="tests\taef\Makefile.mak" />

@@ -53,8 +53,10 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath; if(!$vs){ Write-Error 'VS not found'; exit 1 }; $msbuild=Join-Path $vs 'MSBuild\\Current\\Bin\\MSBuild.exe'; if(!(Test-Path $msbuild)){ Write-Error 'MSBuild not found'; exit 1 }; & $msbuild IntelAvbFilter.sln /t:Build /p:Configuration=Release /p:Platform=x64 /m"
+				"-File",
+				"tools/build/Build-Driver.ps1",
+				"-Configuration",
+				"Release"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -72,8 +74,10 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath; if(!$vs){ Write-Error 'VS not found'; exit 1 }; $msbuild=Join-Path $vs 'MSBuild\\Current\\Bin\\MSBuild.exe'; if(!(Test-Path $msbuild)){ Write-Error 'MSBuild not found'; exit 1 }; & $msbuild IntelAvbFilter.sln /t:Build /p:Configuration=Debug /p:Platform=x64 /m"
+				"-File",
+				"tools/build/Build-Driver.ps1",
+				"-Configuration",
+				"Debug"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -87,13 +91,53 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"$vswhere=\"${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe\"; if(!(Test-Path $vswhere)){ Write-Error 'vswhere.exe not found'; exit 1 }; $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath; if(!$vs){ Write-Error 'VS not found'; exit 1 }; $msbuild=Join-Path $vs 'MSBuild\\Current\\Bin\\MSBuild.exe'; if(!(Test-Path $msbuild)){ Write-Error 'MSBuild not found'; exit 1 }; & $msbuild IntelAvbFilter.sln /t:Clean /t:Build /p:Configuration=Release /p:Platform=x64 /m"
+				"-File",
+				"tools/build/Build-Driver.ps1",
+				"-Configuration",
+				"Release",
+				"-Clean"
 			],
 			"problemMatcher": [
 				"$msCompile"
 			]
 		},
+		{
+			"label": "build-and-sign-driver",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools/build/Build-Driver.ps1",
+				"-Configuration",
+				"Release",
+				"-Sign"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			]
+		},
+		{
+			"label": "build-driver-and-tests",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools/build/Build-Driver.ps1",
+				"-Configuration",
+				"Debug",
+				"-BuildTests"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			]
+		},
+		// REMOVED: rebuild-driver-release - use canonical rebuild-driver-release above instead
 		{
 			"label": "build-tests-nmake",
 			"type": "shell",
@@ -103,9 +147,9 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"tools/vs_compile.ps1",
-				"-BuildCmd",
-				"pushd tests\\integration\\avb; nmake -f avb_test.mak; popd"
+				"tools/build/Build-Tests.ps1",
+				"-Configuration",
+				"Debug"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -121,9 +165,9 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"tools/vs_compile.ps1",
-				"-BuildCmd",
-				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tests/integration/avb/avb_test_um.c /Fe:avb_test_i210_um.exe"
+				"tools/build/Build-Tests.ps1",
+				"-TestName",
+				"avb_test_i210_um"
 			],
 			"presentation": {
 				"reveal": "always",
@@ -144,9 +188,9 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"tools/vs_compile.ps1",
-				"-BuildCmd",
-				"cl /nologo /W4 /Zi tests/device_specific/i219/avb_test_i219.c /Fe:avb_test_i219.exe"
+				"tools/build/Build-Tests.ps1",
+				"-TestName",
+				"avb_test_i219"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -162,9 +206,9 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"tools/vs_compile.ps1",
-				"-BuildCmd",
-				"cl /nologo /W4 /Zi tests/diagnostic/quick_diagnostics.c /Fe:quick_diagnostics.exe"
+				"tools/build/Build-Tests.ps1",
+				"-TestName",
+				"quick_diagnostics"
 			],
 			"problemMatcher": [
 				"$msCompile"
@@ -250,7 +294,9 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"Sign-Driver.ps1"
+				"tools/build/Build-And-Sign.ps1",
+				"-Configuration",
+				"Debug"
 			],
 			"problemMatcher": []
 		},
@@ -263,7 +309,9 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"tools/build_tsauxc_test.ps1"
+				"tools/build/Build-Tests.ps1",
+				"-TestName",
+				"tsauxc_toggle_test"
 			],
 			"group": "test",
 			"problemMatcher": []
@@ -296,9 +344,9 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"tools/vs_compile.ps1",
-				"-BuildCmd",
-				"cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tests/integration/ptp/ptp_clock_control_test.c /Fe:ptp_clock_control_test.exe"
+				"tools/build/Build-Tests.ps1",
+				"-TestName",
+				"ptp_clock_control_test"
 			],
 			"group": "test",
 			"problemMatcher": []
