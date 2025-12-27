@@ -105,7 +105,7 @@ Write-Host @"
 $scriptDir = $PSScriptRoot  # tools/build
 $toolsDir = Split-Path $scriptDir -Parent  # tools
 $repoRoot = Split-Path $toolsDir -Parent  # repository root
-$outputDir = Join-Path $repoRoot "$Platform\$Configuration\IntelAvbFilter"
+$outputDir = Join-Path $repoRoot "build\$Platform\$Configuration\IntelAvbFilter"
 $solutionFile = Join-Path $repoRoot "IntelAvbFilter.sln"
 
 # ===========================

@@ -1,5 +1,13 @@
-# Intel AVB Filter - Umfassendes Build- und Signierungsskript
-# Dieses Skript generiert die CAT-Datei und signiert sie in einem Durchgang
+<#
+.SYNOPSIS
+  Legacy build+sign script kept for compatibility.
+
+.DESCRIPTION
+  Thin wrapper around the canonical build+sign script:
+    tools/build/Build-And-Sign.ps1
+
+  Issue: #27
+#>
 
 param(
     [Parameter(Mandatory=$false)]
@@ -15,11 +23,15 @@ param(
     [switch]$SkipSigning = $false
 )
 
-Write-Host "=== Intel AVB Filter - Build & Sign Script ===" -ForegroundColor Green
-Write-Host "Configuration: $Configuration" -ForegroundColor Cyan
-Write-Host "Platform: $Platform" -ForegroundColor Cyan
-Write-Host "Skip Signing: $SkipSigning" -ForegroundColor Cyan
-Write-Host ""
+$ErrorActionPreference = "Stop"
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$canonical = Join-Path $scriptDir "Build-And-Sign.ps1"
+
+Write-Host "Build-And-Sign-Driver.ps1 -> Build-And-Sign.ps1" -ForegroundColor DarkGray
+
+& $canonical -Configuration $Configuration -Platform $Platform -CertificateName $CertificateName -SkipSigning:$SkipSigning
+exit $LASTEXITCODE
 
 # ===========================
 # STEP 1: Find WDK Tools
