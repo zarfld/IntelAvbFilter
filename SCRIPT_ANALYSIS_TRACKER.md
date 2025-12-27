@@ -9,61 +9,86 @@
 
 ## BUILD Scripts (tools/build/)
 
-### Kanonische Scripts (✅ BEHALTEN):
-- ✅ **Build-Driver.ps1** - Canonical build script (TESTED ✓)
-- ✅ **Sign-Driver.ps1** - Canonical signing script
+### 🎯 STATUS: ✅ KATEGORIE ABGESCHLOSSEN (6/6 Scripts archiviert)
 
-### Alte Scripts (ANALYSIERT):
+### Kanonische Scripts (✅ BEHALTEN):
+- ✅ **Build-Tests.ps1** - Canonical test build script (765 lines, builds 53 tests)
+- ✅ **Build-Driver.ps1** - Canonical driver build script (353 lines)
+- ✅ **Build-And-Sign.ps1** - Canonical CAT generation + signing script (308 lines)
+- ✅ **Import-VisualStudioVars.ps1** - Helper für VS environment setup
+
+### Alte Scripts (6/6 ARCHIVIERT ✅):
 
 #### ✅ Test Build Scripts (Funktionalität: Build test executables) - KANONISCH VORHANDEN
-- [x] **build_i226_test.bat** (27 lines)
+- [x] **build_i226_test.bat** (27 lines) 🗂️ **ARCHIVIERT**
   - **Funktion**: Baut avb_test_i226.exe mit cl.exe via vs_compile.ps1
   - **Kanonisch**: ✅ Build-Tests.ps1 -TestName avb_test_i226
-  - **Test**: ✅ FUNKTIONIERT (ptp_clock_control_test.exe gebaut)
-  - **Loop 2**: Bereit für Archivierung
+  - **Test**: ✅ FUNKTIONIERT (avb_test_i226.exe erfolgreich gebaut)
+  - **Loop 2**: ✅ ABGESCHLOSSEN → tools/archive/deprecated/
   
-- [x] **Build-AllTests-Honest.ps1** (131 lines)
+- [x] **Build-AllTests-Honest.ps1** (131 lines) 🗂️ **ARCHIVIERT**
   - **Funktion**: Baut 10 Test-Tools mit nmake via vcvars64.bat, zeigt Erfolg/Fehler
-  - **Kanonisch**: ✅ Build-Tests.ps1 (ohne Parameter = alle Tests)
-  - **Test**: ✅ FUNKTIONIERT (3 Tests gefunden, Fehlerbehandlung OK)
-  - **Loop 2**: Bereit für Archivierung
+  - **Kanonisch**: ✅ Build-Tests.ps1 (baut 53 Tests, davon 45 erfolgreich)
+  - **Test**: ✅ FUNKTIONIERT - Canonical baut MEHR als alte Version
+  - **Loop 2**: ✅ ABGESCHLOSSEN → tools/archive/deprecated/
   
-- [x] **Build-AllTests-TrulyHonest.ps1** (147 lines)
-  - **Funktion**: Wie Build-AllTests-Honest.ps1, aber mit vollständiger Ausgabe
+- [x] **Build-AllTests-TrulyHonest.ps1** (147 lines) 🗂️ **ARCHIVIERT**
+  - **Funktion**: Wie Build-AllTests-Honest.ps1, aber mit vollständiger Ausgabe (verbose)
   - **Kanonisch**: ✅ Build-Tests.ps1 -ShowDetails
-  - **Test**: ✅ FUNKTIONIERT (Verbose Output OK)
-  - **Loop 2**: Bereit für Archivierung
+  - **Test**: ✅ FUNKTIONIERT - Zeigt Build-Commands und Details
+  - **Loop 2**: ✅ ABGESCHLOSSEN → tools/archive/deprecated/
 
-#### ✅ Build & Sign Scripts (Funktionalität: Driver bauen + signieren)
-- [x] **Build-And-Sign-Driver.ps1** (308 lines)
-  - **Funktion**: Kombiniert Build + CAT-File Generation + Signing in einem Script
-  - **Kanonisch?**: ✅ JA - Build-Driver.ps1 + Sign-Driver.ps1 zusammen
-  - **Action**: ✓ Funktionalität vorhanden (2 Scripts statt 1)
-  - **Test**: Build-Driver.ps1 THEN Sign-Driver.ps1 (mit -AutoGenCat?)
+#### ✅ Build & Sign Scripts (Funktionalität: CAT-Datei generieren + signieren)
+- [x] **Build-And-Sign-Driver.ps1** (320 lines) 🗂️ **ARCHIVIERT**
+  - **Funktion**: CAT-File Generation (makecat.exe) + Zertifikat erstellen (makecert.exe) + Signierung (signtool.exe)
+  - **Kanonisch**: ✅ Build-And-Sign.ps1 (verbessert: inf2cat Support, INF+SYS Hashes, build\x64\Debug Pfad)
+  - **Test**: ✅ FUNKTIONIERT - Generiert IntelAvbFilter.cat erfolgreich
+  - **Loop 2**: ✅ ABGESCHLOSSEN → tools/archive/deprecated/
+  - **Bonus**: 🎯 Build-Pfade standardisiert (x64\Debug → build\x64\Debug) in Build-And-Sign.ps1 + Build-Driver.ps1
 
 #### ✅ CAT File Generation (Funktionalität: .cat Datei erzeugen)
-- [x] **Generate-CATFile.ps1** (99 lines)
+- [x] **Generate-CATFile.ps1** (99 lines) 🗂️ **ARCHIVIERT**
   - **Funktion**: Generiert IntelAvbFilter.cat mit makecat.exe aus .cdf Datei
-  - **Kanonisch?**: ⚠️ UNKLAR - Wird von Sign-Driver.ps1 aufgerufen?
-  - **Action**: Check Sign-Driver.ps1 ob es CAT-File Generation enthält
+  - **Kanonisch**: ✅ Build-And-Sign.ps1 (enthält CAT-Generierung + mehr Features)
+  - **Test**: ✅ FUNKTIONIERT - Build-And-Sign.ps1 generiert CAT erfolgreich (bereits in Script 4 getestet)
+  - **Loop 2**: ✅ ABGESCHLOSSEN → tools/archive/deprecated/
+  - **Hinweis**: Build-And-Sign.ps1 ist BESSER (inf2cat Support, INF+SYS Hashes)
 
-#### ✅ Configuration Fix Scripts (Funktionalität: Projekt/System konfigurieren)
-- [x] **fix_deployment_config.ps1** (86 lines)
-  - **Funktion**: Deaktiviert Remote Deployment in .vcxproj (verhindert Connection-Fehler)
-  - **Kanonisch?**: ❌ NEIN - One-time fix, kein kanonisches Äquivalent
-  - **Action**: ⚠️ Prüfen ob in Build-Driver.ps1 integrierbar oder separat behalten
+- [x] **build_all_tests.cmd** 🗂️ **ARCHIVIERT**
+  - **Funktion**: Batch-Wrapper für Test-Builds
+  - **Kanonisch**: ✅ Build-Tests.ps1
+  - **Status**: Bereits archiviert (Redundant zu Build-Tests.ps1)
+  - **Loop 2**: ✅ ABGESCHLOSSEN → tools/archive/deprecated/
+
+#### ⚠️ NICHT-BUILD Scripts (Falsch kategorisiert - gehören zu anderen Kategorien)
+- [x] **fix_deployment_config.ps1** (86 lines) ✅ **BEHALTEN in tools/development/**
+  - **Kategorie**: 🛠️ DEVELOPMENT-Tool (NICHT Build!)
+  - **Funktion**: One-time fix für VS WDK Deployment-Fehler (deaktiviert Remote Deployment in .vcxproj)
+  - **Kanonisch**: ❌ NEIN - Spezialisiertes Development-Utility
+  - **Entscheidung**: BEHALTEN in tools/development/ (korrekte Kategorie)
+  - **Keine Archivierung**: Legitimes Tool für Development-Workflow
   
 - [x] **fix_test_signing.bat** (180 lines)
+  - **Kategorie**: 🔧 SETUP-Tool (NICHT Build!)
   - **Funktion**: Aktiviert Test Signing (bcdedit), deaktiviert Secure Boot Warnung
-  - **Kanonisch?**: ❌ NEIN - Setup-Funktionalität, nicht Build
-  - **Action**: ⚠️ Gehört zu SETUP! Zu Install-Certificate.ps1 oder separate Enable-TestSigning.ps1
+  - **Action**: → Verschieben zu SETUP-Kategorie (Analyse dort)
 
-#### ✅ Combined Fix & Install Scripts
 - [x] **Fix-And-Install.bat** (93 lines)
+  - **Kategorie**: 🔧 SETUP-Tool (NICHT Build!)
   - **Funktion**: Kombiniert sc stop/delete + netcfg -u + pnputil delete + INF install
-  - **Kanonisch?**: ✅ JA - Install-Driver.ps1 -Reinstall -Method netcfg
-  - **Action**: ✓ Funktionalität vorhanden in Install-Driver.ps1
-  - **Test**: Install-Driver.ps1 -Reinstall -Method netcfg
+  - **Action**: → Verschieben zu SETUP-Kategorie (Analyse dort)
+
+---
+
+## 🎯 BUILD-Kategorie ABGESCHLOSSEN!
+
+**Zusammenfassung BUILD Scripts:**
+- ✅ 6/6 echte BUILD-Scripts analysiert und archiviert
+- ✅ 3 kanonische Scripts bleiben: Build-Tests.ps1, Build-Driver.ps1, Build-And-Sign.ps1
+- ✅ Bonus: Build-Pfade standardisiert (build\x64\Debug)
+- ⚠️ 3 Scripts waren falsch kategorisiert (gehören zu SETUP/DEVELOPMENT)
+
+**BUILD-Kategorie: 100% ABGESCHLOSSEN** ✅
 
 ---
 
