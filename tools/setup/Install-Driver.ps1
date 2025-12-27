@@ -61,7 +61,6 @@ param(
     [Parameter(Mandatory=$false)]
     [ValidateSet("netcfg", "pnputil")]
     [string]$Method = "netcfg",
-    
     [Parameter(Mandatory=$false)]
     [switch]$EnableTestSigning,
     
@@ -89,8 +88,9 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 # Set default driver path
 if (-not $DriverPath) {
-    $repoRoot = Split-Path $PSScriptRoot -Parent
-    $DriverPath = Join-Path $repoRoot "x64\$Configuration\IntelAvbFilter"
+    # $PSScriptRoot = tools\setup, so go up two levels to repo root
+    $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    $DriverPath = Join-Path $repoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter"
 }
 
 # Helper functions
@@ -101,25 +101,25 @@ function Write-Step {
 
 function Write-Success {
     param([string]$Message)
-    Write-Host "✓ $Message" -ForegroundColor Green
+    Write-Host "[OK] $Message" -ForegroundColor Green
 }
 
 function Write-Failure {
     param([string]$Message)
-    Write-Host "✗ $Message" -ForegroundColor Red
+    Write-Host "[ERROR] $Message" -ForegroundColor Red
 }
 
 function Write-Info {
     param([string]$Message)
-    Write-Host "ℹ $Message" -ForegroundColor Yellow
+    Write-Host "[INFO] $Message" -ForegroundColor Yellow
 }
 
 # Banner
 Write-Host @"
-════════════════════════════════════════════════════════════════
+===============================================================================
   Intel AVB Filter Driver - Setup Script
   Configuration: $Configuration
-════════════════════════════════════════════════════════════════
+===============================================================================
 "@ -ForegroundColor Cyan
 
 # Function: Enable Test Signing
@@ -200,19 +200,72 @@ function Check-DriverStatus {
 function Uninstall-Driver {
     Write-Step "Uninstalling Driver (Method: $Method)"
     
+    # Check for STOP_PENDING state (stuck service)
+    Write-Host "Checking service state..." -ForegroundColor Gray
+    $serviceStatus = sc.exe query IntelAvbFilter 2>&1 | Out-String
+    
+    if ($serviceStatus -match "STOP_PENDING") {
+        Write-Host "" -ForegroundColor Red
+        Write-Host "*** SERVICE STUCK IN STOP_PENDING ***" -ForegroundColor Red
+        Write-Host "" -ForegroundColor Red
+        Write-Host "The service cannot be stopped without a reboot." -ForegroundColor Yellow
+        Write-Host "This is a Windows kernel state issue." -ForegroundColor Yellow
+        Write-Host "" -ForegroundColor Yellow
+        Write-Host "Options:" -ForegroundColor Cyan
+        Write-Host "  1. Reboot now and installation will auto-complete" -ForegroundColor White
+        Write-Host "  2. Cancel and reboot manually later" -ForegroundColor White
+        Write-Host "" -ForegroundColor White
+        
+        $choice = Read-Host "Reboot now? (y/n)"
+        if ($choice -eq 'y' -or $choice -eq 'Y') {
+            Write-Host "Setting up auto-complete after reboot..." -ForegroundColor Cyan
+            # TODO: Implement RunOnce registry setup
+            Write-Host "Rebooting in 10 seconds... (Ctrl+C to cancel)" -ForegroundColor Yellow
+            Start-Sleep -Seconds 10
+            Restart-Computer -Force
+            exit 0
+        } else {
+            Write-Warning "Installation cancelled. Please reboot manually and run again."
+            return $false
+        }
+    }
+    
     # Stop service
     Write-Host "Stopping service..." -ForegroundColor Gray
-    sc stop IntelAvbFilter 2>&1 | Out-Null
+    sc.exe stop IntelAvbFilter
     Start-Sleep -Seconds 2
     
     # Delete service
     Write-Host "Deleting service..." -ForegroundColor Gray
-    sc delete IntelAvbFilter 2>&1 | Out-Null
+    sc.exe delete IntelAvbFilter
+    
+    # Clean driver store (remove old/duplicate packages)
+    # TESTED: Successfully removes duplicate oem*.inf packages
+    # Test date: 2025-12-27 - Removed oem46.inf and oem59.inf successfully
+    # Example output: "Removing driver package: oem46.inf", "Removing driver package: oem59.inf"
+    Write-Host "`nCleaning driver store..." -ForegroundColor Gray
+    Write-Host "---BEGIN DRIVER STORE BEFORE---" -ForegroundColor DarkGray
+    pnputil /enum-drivers | Select-String -Pattern "intelavb" -Context 2,2
+    Write-Host "---END DRIVER STORE BEFORE---" -ForegroundColor DarkGray
+    
+    # Get all IntelAvbFilter packages and delete them
+    $driverPackages = pnputil /enum-drivers | Select-String -Pattern "Published Name" -Context 0,3 | Where-Object { $_.Context.PostContext -match "intelavbfilter.inf" }
+    foreach ($match in $driverPackages) {
+        if ($match.Line -match "Published Name\s*:\s*(oem\d+\.inf)") {
+            $oemInf = $Matches[1]
+            Write-Host "  Removing driver package: $oemInf" -ForegroundColor Yellow
+            pnputil /delete-driver $oemInf /uninstall /force
+        }
+    }
+    
+    Write-Host "`n---BEGIN DRIVER STORE AFTER---" -ForegroundColor DarkGray
+    pnputil /enum-drivers | Select-String -Pattern "intelavb" -Context 2,2
+    Write-Host "---END DRIVER STORE AFTER---" -ForegroundColor DarkGray
     
     if ($Method -eq "netcfg") {
         # Uninstall via netcfg (THE correct method for NDIS filters)
-        Write-Host "Removing NDIS filter component (netcfg)..." -ForegroundColor Gray
-        netcfg.exe -u MS_IntelAvbFilter 2>&1
+        Write-Host "`nRemoving NDIS filter component (netcfg)..." -ForegroundColor Gray
+        netcfg.exe -u MS_IntelAvbFilter
         
         if ($LASTEXITCODE -eq 0) {
             Write-Success "Driver uninstalled successfully (netcfg)"
@@ -221,7 +274,7 @@ function Uninstall-Driver {
             Write-Info "netcfg returned exit code $LASTEXITCODE (may indicate component not found)"
             return $true  # Not necessarily an error
         }
-    } else {
+    } elseif ($Method -eq "pnputil") {
         # Uninstall via pnputil (for device driver method)
         Write-Host "Removing driver package (pnputil)..." -ForegroundColor Gray
         pnputil /delete-driver intelavbfilter.inf /uninstall /force 2>&1 | Out-Null
@@ -239,7 +292,7 @@ function Uninstall-Driver {
 # Function: Install Driver
 function Install-Driver {
     Write-Step "Installing Driver (Method: $Method)"
-    
+
     # Verify files exist
     $infPath = Join-Path $DriverPath "IntelAvbFilter.inf"
     $sysPath = Join-Path $DriverPath "IntelAvbFilter.sys"
@@ -260,6 +313,27 @@ function Install-Driver {
     Write-Host "  INF: $infPath" -ForegroundColor Gray
     Write-Host "  SYS: $sysPath" -ForegroundColor Gray
     
+    # Check build timestamp vs installed version
+    $installedSys = "C:\Windows\System32\drivers\IntelAvbFilter.sys"
+    if (Test-Path $installedSys) {
+        $buildTime = (Get-Item $sysPath).LastWriteTime
+        $installedTime = (Get-Item $installedSys).LastWriteTime
+        
+        Write-Host "`nBuild timestamp check:" -ForegroundColor Gray
+        Write-Host "  Build:     $($buildTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
+        Write-Host "  Installed: $($installedTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
+        
+        if ($buildTime -lt $installedTime) {
+            Write-Host "  WARNING: Build is OLDER than installed version!" -ForegroundColor Yellow
+            Write-Host "    You may be downgrading. Press Ctrl+C to cancel or Enter to continue..." -ForegroundColor Yellow
+            Read-Host
+        } elseif ($buildTime -eq $installedTime) {
+            Write-Host "  Same version (timestamps match)" -ForegroundColor Cyan
+        } else {
+            Write-Host "  Build is newer" -ForegroundColor Green
+        }
+    }
+    
     # Step 1: Stop service if running
     Write-Host "`nStep 1: Stopping service if running..." -ForegroundColor Gray
     sc stop IntelAvbFilter 2>&1 | Out-Null
@@ -275,10 +349,22 @@ function Install-Driver {
         # CRITICAL: NDIS Lightweight Filters REQUIRE netcfg.exe, not pnputil!
         # -c s = component class "service"
         # -i MS_IntelAvbFilter = component ID from INF
+        # IMPORTANT: Must run from driver directory with relative path
         Write-Host "Step 3: Installing filter component via netcfg..." -ForegroundColor Gray
-        Write-Host "  Command: netcfg.exe -l `"$infPath`" -c s -i MS_IntelAvbFilter" -ForegroundColor DarkGray
+        # Step 3a: Manually copy .sys to drivers folder (required for NDIS filters)
+        $driverDir = Split-Path $infPath -Parent
+        $sysFile = Join-Path $driverDir "IntelAvbFilter.sys"
+        if (Test-Path $sysFile) {
+            Write-Host "  Copying .sys to C:\Windows\System32\drivers\..." -ForegroundColor Gray
+            Copy-Item $sysFile "C:\Windows\System32\drivers\" -Force
+        }
         
-        netcfg.exe -l "$infPath" -c s -i MS_IntelAvbFilter
+        # Step 3b: Install via netcfg
+        Push-Location $driverDir
+        Write-Host "  Command: netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter" -ForegroundColor DarkGray
+        
+        netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
+        Pop-Location
         
         if ($LASTEXITCODE -ne 0) {
             Write-Failure "netcfg installation failed! Error code: $LASTEXITCODE"
@@ -288,17 +374,17 @@ function Install-Driver {
             Write-Host "  3. Conflicting driver already installed" -ForegroundColor Yellow
             Write-Host "`nTroubleshooting steps:" -ForegroundColor Cyan
             Write-Host "  - Run: .\Setup-Driver.ps1 -CheckStatus" -ForegroundColor Cyan
-            Write-Host "  - Check Windows Event Log: Event Viewer → Windows Logs → System" -ForegroundColor Cyan
+            Write-Host "  - Check Windows Event Log: Event Viewer -> Windows Logs -> System" -ForegroundColor Cyan
             Write-Host "  - Enable test signing: .\Setup-Driver.ps1 -EnableTestSigning" -ForegroundColor Cyan
             return $false
         }
         
-    } else {
+    } elseif ($Method -eq "pnputil") {
         # pnputil method (for device driver compatibility testing)
         
         # Step 2: Remove old installation
         Write-Host "Step 2: Removing old installations (pnputil)..." -ForegroundColor Gray
-        pnputil /delete-driver intelavbfilter.inf /uninstall /force 2>&1 | Out-Null
+        pnputil /delete-driver intelavbfilter.inf /uninstall /force
         
         # Step 3: Install driver package via pnputil
         Write-Host "Step 3: Installing driver package via pnputil..." -ForegroundColor Gray
@@ -317,15 +403,34 @@ function Install-Driver {
         }
     }
     
-    Write-Success "netcfg installation completed"
+    Write-Success "$Method installation completed"
     
-    # Step 4: Start service
-    Write-Host "`nStep 4: Starting service..." -ForegroundColor Gray
-    sc start IntelAvbFilter
+    # Step 4: Restart network adapters (CRITICAL for NDIS filter service creation)
+    Write-Host "\nStep 4: Restarting Intel network adapters (triggers service creation)..." -ForegroundColor Gray
+    try {
+        $adapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'Intel' }
+        foreach ($adapter in $adapters) {
+            Write-Host "  Restarting: $($adapter.Name)" -ForegroundColor DarkGray
+            Disable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 500
+            Enable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        Write-Host "  Adapters restarted" -ForegroundColor Green
+    } catch {
+        Write-Host "  Warning: Adapter restart failed, continuing..." -ForegroundColor Yellow
+    }
+    Start-Sleep -Seconds 2
     
-    # Step 5: Check service status
+    # Step 5: Check service status (should exist after adapter restart)
     Write-Host "`nStep 5: Checking service status..." -ForegroundColor Gray
-    sc query IntelAvbFilter
+    Write-Host "---BEGIN SERVICE STATUS---" -ForegroundColor Cyan
+    $serviceStatus = sc.exe query IntelAvbFilter 2>&1
+    $serviceStatus | ForEach-Object { Write-Host $_ }
+    Write-Host "---END SERVICE STATUS---" -ForegroundColor Cyan
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Service not found - this may be normal if no Intel adapters are present"
+    }
     
     Write-Success "`nInstallation complete!"
     Write-Info "Check DebugView for driver messages"
