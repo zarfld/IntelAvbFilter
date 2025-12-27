@@ -36,7 +36,7 @@ pnputil /enable-device "PCI\VEN_8086&DEV_125B" >nul 2>&1
 
 echo.
 echo Done! Driver timestamp should now be:
-dir /TW "x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" | findstr IntelAvbFilter.sys
+dir /TW "build\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" | findstr IntelAvbFilter.sys
 echo.
 echo Verify with: sc query IntelAvbFilter
 echo.

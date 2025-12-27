@@ -78,6 +78,8 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>build\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
+    <IntDir>build\$(Platform)\$(Configuration)\$(ProjectName)\obj\</IntDir>
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <OutputName>ndislwf</OutputName>
     <PublicIncludeDirectories>$(PublicIncludeDirectories)</PublicIncludeDirectories>
@@ -87,14 +89,20 @@
     <TimeStampServer>http://timestamp.globalsign.com/scripts/timstamp.dll</TimeStampServer>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>build\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
+    <IntDir>build\$(Platform)\$(Configuration)\$(ProjectName)\obj\</IntDir>
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <OutputName>ndislwf</OutputName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <OutDir>build\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
+    <IntDir>build\$(Platform)\$(Configuration)\$(ProjectName)\obj\</IntDir>
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <OutputName>ndislwf</OutputName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+    <OutDir>build\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
+    <IntDir>build\$(Platform)\$(Configuration)\$(ProjectName)\obj\</IntDir>
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <OutputName>ndislwf</OutputName>
   </PropertyGroup>
@@ -206,8 +214,14 @@
     <ClCompile Include="filter.c" />
     <ClCompile Include="device.c" />
     <ClCompile Include="flt_dbg.c" />
-    <ClCompile Include="tests\integration\AvbIntegrationTests.cpp" />
-    <ClCompile Include="tests\taef\AvbTaefTests.cpp" />
+    <ClCompile Include="tests\integration\AvbIntegrationTests.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="tests\taef\AvbTaefTests.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="tests\diagnostic\avb_diagnostic_test.c" />
     <ClCompile Include="tests\integration\avb\avb_test_actual.c" />
     <ClCompile Include="tests\integration\avb\avb_test_app.c" />
@@ -238,11 +252,11 @@
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
   <ItemGroup>
-    <FilesToPackage Include="x64\Debug\IntelAvbFilter.inf">
+    <FilesToPackage Include="build\x64\Debug\IntelAvbFilter.inf">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="x64\Debug\IntelAvbFilter.sys">
+    <FilesToPackage Include="build\x64\Debug\IntelAvbFilter.sys">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
@@ -329,7 +343,7 @@
     <None Include="tests\integration\tsn\tsn_hardware_activation_validation.mak" />
     <None Include="tests\integration\tsn\tsn_ioctl_test.mak" />
     <None Include="troubleshoot_certificates.ps1" />
-    <None Include="x64\Debug\IntelAvbFilter.cat" />
+    <None Include="build\x64\Debug\IntelAvbFilter.cat" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="DAW01.LOG" />

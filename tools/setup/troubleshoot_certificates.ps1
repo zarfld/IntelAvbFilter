@@ -15,7 +15,7 @@ param(
 # Calculate repository root from nested location (tools/setup/)
 if (-not $DriverPath) {
     $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    $DriverPath = Join-Path $repoRoot "x64\Debug\IntelAvbFilter"
+    $DriverPath = Join-Path $repoRoot "build\x64\Debug\IntelAvbFilter"
 }
 
 # Require Administrator

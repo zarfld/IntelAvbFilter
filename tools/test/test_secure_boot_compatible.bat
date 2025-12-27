@@ -29,8 +29,8 @@ if %errorLevel% == 0 (
 
 echo.
 echo Step 3: Installing test certificate...
-if exist "x64\Debug\IntelAvbFilter.cer" (
-    certutil -addstore root "x64\Debug\IntelAvbFilter.cer" >nul 2>&1
+if exist "build\x64\Debug\IntelAvbFilter.cer" (
+    certutil -addstore root "build\x64\Debug\IntelAvbFilter.cer" >nul 2>&1
     if %errorLevel% == 0 (
         echo ? Test certificate installed successfully
     ) else (
@@ -43,9 +43,9 @@ if exist "x64\Debug\IntelAvbFilter.cer" (
 
 echo.
 echo Step 4: Attempting driver installation with certificate...
-if exist "x64\Debug\IntelAvbFilter.inf" (
+if exist "build\x64\Debug\IntelAvbFilter.inf" (
     echo Trying driver installation...
-    pnputil /add-driver "x64\Debug\IntelAvbFilter.inf" /install
+    pnputil /add-driver "build\x64\Debug\IntelAvbFilter.inf" /install
     if %errorLevel% == 0 (
         echo ? Driver installation successful
         echo.

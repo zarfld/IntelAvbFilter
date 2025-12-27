@@ -70,7 +70,7 @@ if (-not $SigntoolPath) {
 }
 
 Write-Host "Signing CAT file..." -ForegroundColor Yellow
-$CATFile = Join-Path $RepoRoot "x64\Debug\IntelAvbFilter.cat"
+$CATFile = Join-Path $RepoRoot "build\x64\Debug\IntelAvbFilter.cat"
 
 & $SigntoolPath sign /a /s PrivateCertStore /n "Intel AVB Filter Test Certificate" /fd SHA256 /t http://timestamp.verisign.com/scripts/timstamp.dll $CATFile
 

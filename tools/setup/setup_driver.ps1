@@ -24,7 +24,7 @@ param(
 # Set default driver path relative to repository root
 if (-not $DriverPath) {
     $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    $DriverPath = Join-Path $repoRoot "x64\Debug\IntelAvbFilter"
+    $DriverPath = Join-Path $repoRoot "build\x64\Debug\IntelAvbFilter"
 }
 
 # Require Administrator privileges

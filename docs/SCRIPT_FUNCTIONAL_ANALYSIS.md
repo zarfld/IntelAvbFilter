@@ -92,7 +92,7 @@ This document analyzes scripts by:
 - Can install driver via netcfg
 - Can uninstall driver (sc stop/delete + netcfg -u)
 - Can check status
-- Default $DriverPath = "x64\Debug\IntelAvbFilter"
+- Default $DriverPath = "build\x64\Debug\IntelAvbFilter"
 - Clean modular design
 
 **Unique features**: Multi-function with parameters, can do everything

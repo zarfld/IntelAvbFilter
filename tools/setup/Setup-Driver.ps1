@@ -61,7 +61,7 @@ Write-Host ""
 # Step 2: Install driver
 Write-Host "[Step 2] Installing driver package..." -ForegroundColor Yellow
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$driverPath = Join-Path $repoRoot "x64\Debug\IntelAvbFilter"
+$driverPath = Join-Path $repoRoot "build\x64\Debug\IntelAvbFilter"
 
 if (-not (Test-Path "$driverPath\IntelAvbFilter.sys")) {
     Write-Host "? Driver not found at $driverPath" -ForegroundColor Red
