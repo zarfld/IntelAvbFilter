@@ -6,24 +6,30 @@ Write-Host ""
 
 Write-Host "[1] Uninstalling old driver..." -ForegroundColor Yellow
 netcfg.exe -u MS_IntelAvbFilter
+Write-Host "Exit Code: $LASTEXITCODE"
 
 Start-Sleep -Seconds 2
 
-Write-Host "[2] Installing new driver with diagnostic logging..." -ForegroundColor Yellow
-.\install_ndis_filter.bat
 Write-Host ""
-Write-Host "    start driver with diagnostic logging..." -ForegroundColor Yellow
-sc.exe start IntelAvbFilter
+Write-Host "[2] Installing new driver..." -ForegroundColor Yellow
+Set-Location "$PSScriptRoot\..\setup"
+& ".\install_ndis_filter.bat"
 
 Write-Host ""
 Write-Host "[3] Verify driver is loaded and running..." -ForegroundColor Yellow
-$status = sc.exe query IntelAvbFilter
-Write-Host $status
+sc.exe query IntelAvbFilter
+
+Write-Host ""
+Write-Host "[4] Check driver device interface..." -ForegroundColor Yellow
+$testExe = "..\..\avb_test_i226.exe"
+if (Test-Path $testExe) {
+    Write-Host "Running quick test..." -ForegroundColor Gray
+    & $testExe
+} else {
+    Write-Host "Test executable not found: $testExe" -ForegroundColor Yellow
+}
 
 Write-Host ""
 Write-Host "=== Driver Reload Complete ===" -ForegroundColor Green
-Write-Host "Now run: .\comprehensive_ioctl_test.exe" -ForegroundColor Yellow
-.\comprehensive_ioctl_test.exe
-
-Write-Host "And check DebugView for '!!! DIAG:' messages" -ForegroundColor Cyan
+Write-Host "Check DebugView for driver messages" -ForegroundColor Cyan
 Write-Host ""

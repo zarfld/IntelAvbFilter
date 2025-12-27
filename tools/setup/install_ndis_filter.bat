@@ -16,7 +16,7 @@ if %errorLevel% == 0 (
 
 echo.
 echo Step 2: Pr�fung der Treiberdateien...
-if exist "..\..\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" (
+if exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys" (
     echo ? Treiber gefunden: IntelAvbFilter.sys
 ) else (
     echo ? Treiber nicht gefunden: x64\Debug\IntelAvbFilter\IntelAvbFilter.sys
@@ -24,7 +24,7 @@ if exist "..\..\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" (
     exit /b 1
 )
 
-if exist "..\..\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" (
+if exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" (
     echo ? INF-Datei gefunden: IntelAvbFilter.inf
 ) else (
     echo ? INF-Datei nicht gefunden: x64\Debug\IntelAvbFilter\IntelAvbFilter.inf
@@ -32,7 +32,7 @@ if exist "..\..\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" (
     exit /b 1
 )
 
-if exist "build\x64\Debug\IntelAvbFilter\intelavbfilter.cat" (
+if exist "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\intelavbfilter.cat" (
     echo ? Katalogdatei gefunden: intelavbfilter.cat
 ) else (
     echo ? Katalogdatei nicht gefunden: x64\Debug\IntelAvbFilter\intelavbfilter.cat
@@ -43,7 +43,7 @@ if exist "build\x64\Debug\IntelAvbFilter\intelavbfilter.cat" (
 echo.
 echo Step 3: Kopieren der Treiberdateien ins System...
 echo Kopiere nach C:\Windows\System32\drivers\
-copy "build\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" "C:\Windows\System32\drivers\" >nul
+copy "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys" "C:\Windows\System32\drivers\" >nul
 if %errorLevel% == 0 (
     echo ? IntelAvbFilter.sys erfolgreich kopiert
 ) else (
@@ -56,14 +56,14 @@ echo.
 echo Step 4: Registrierung des NDIS Filter Driver...
 echo CRITICAL: NDIS Lightweight Filters require netcfg.exe, not pnputil!
 echo Verwende netcfg.exe f�r korrekte NDIS Filter Registration...
-netcfg.exe -v -l "build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
+netcfg.exe -v -l "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
 if %errorLevel% == 0 (
     echo ? Filter Driver erfolgreich mit netcfg registriert
     goto :TEST_INSTALLATION
 ) else (
     echo ??  netcfg Registrierung fehlgeschlagen (Error: %errorLevel%)
     echo    Versuche pnputil als Fallback...
-    pnputil /add-driver "build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" /install
+    pnputil /add-driver "..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.inf" /install
     if %errorLevel% == 0 (
         echo ? pnputil Installation erfolgreich (aber Filter m�glicherweise nicht aktiv)
     ) else (
