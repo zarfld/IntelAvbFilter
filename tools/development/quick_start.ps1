@@ -1,6 +1,8 @@
 # Intel AVB Filter Driver - Quick Start Guide
 # Run this script to get step-by-step installation instructions
 
+$ErrorActionPreference = 'Continue'  # Allow controlled exits, catch only real errors
+
 Write-Host @"
 ================================================================
 |                                                              |
@@ -28,6 +30,8 @@ if (-not $isAdmin) {
     Read-Host "Press Enter to exit"
     exit 1
 }
+
+try {
 
 Write-Host "? Running as Administrator" -ForegroundColor Green
 Write-Host ""
@@ -196,3 +200,10 @@ Write-Host "  - GitHub: https://github.com/zarfld/IntelAvbFilter/issues" -Foregr
 Write-Host ""
 
 Read-Host "Press Enter to exit"
+
+} catch {
+    Write-Host "ERROR: An unexpected error occurred" -ForegroundColor Red
+    Write-Host "  $_" -ForegroundColor Yellow
+    Read-Host "Press Enter to exit"
+    exit 1
+}
