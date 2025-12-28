@@ -184,15 +184,15 @@ if ($driverInstalled) {
 }
 
 Write-Host ""
-Write-Host "????????????????????????????????????????????????????????????????" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "For detailed documentation:" -ForegroundColor Cyan
-Write-Host "  � Installation Guide: INSTALLATION_GUIDE.md" -ForegroundColor White
-Write-Host "  � Main README: README.md" -ForegroundColor White
-Write-Host "  � Troubleshooting: .\troubleshoot_certificates.ps1" -ForegroundColor White
+Write-Host "  - Installation Guide: INSTALLATION_GUIDE.md" -ForegroundColor White
+Write-Host "  - Main README: README.md" -ForegroundColor White
+Write-Host "  - Troubleshooting: .\troubleshoot_certificates.ps1" -ForegroundColor White
 Write-Host ""
 Write-Host "For help and issues:" -ForegroundColor Cyan
-Write-Host "  � GitHub: https://github.com/zarfld/IntelAvbFilter/issues" -ForegroundColor White
+Write-Host "  - GitHub: https://github.com/zarfld/IntelAvbFilter/issues" -ForegroundColor White
 Write-Host ""
 
 Read-Host "Press Enter to exit"
