@@ -2,37 +2,61 @@
 
 **Which script should I use?**
 
-## Quick Start (Most Common)
+## Primary Scripts (Production Use)
 
-```batch
-Build-Debug.bat              # Build debug configuration
-Build-Release.bat            # Build release configuration
-Build-And-Sign.bat           # Build + sign with test certificate
-```
-
-## Advanced Build
-
+### Build-Driver.ps1 (Canonical)
 ```powershell
-Build-Driver.ps1             # Full-featured (accepts parameters)
-  -Configuration Debug|Release
-  -Platform x64
-  -Sign
-  -BuildTests
+# Build debug configuration
+.\Build-Driver.ps1 -Configuration Debug
+
+# Build release configuration
+.\Build-Driver.ps1 -Configuration Release
+
+# Clean rebuild
+.\Build-Driver.ps1 -Configuration Debug -Clean
+
+# Build and sign
+.\Build-Driver.ps1 -Configuration Debug -Sign
 ```
 
-## Special Cases
+**Features**:
+- Locates MSBuild automatically (Visual Studio 2022)
+- Platform: x64 (hardcoded)
+- Output: `build\x64\{Configuration}\IntelAvbFilter\`
+- Timestamp stamping in .inf DriverVer field
+- Catalog generation (.cat file)
 
-- **Sign-Driver.ps1** - Separate signing tool (German)
-  - Creates test certificate
-  - Signs CAT file
-  - Searches multiple WDK SDK versions
+## VS Code Tasks (Recommended)
 
-- **Build-AllTests-Honest.ps1** - Build all 10 test executables
-  - Tracks success/failure
-  - Verifies .exe exists after build
+Run from VS Code Command Palette (Ctrl+Shift+P → "Tasks: Run Task"):
+- **build-driver-debug** - Build debug (incremental)
+- **build-driver-release** - Build release (incremental)
+- **rebuild-driver-release** - Clean + rebuild release
 
-## Deprecated (Don't Use)
+**Benefits**: Integrated terminal output, error parsing, default build task (Ctrl+Shift+B)
+
+**Note**: Debug builds use incremental compilation - .sys only recompiled when source changes. Use clean rebuild to force .sys regeneration.
+
+## Supporting Scripts
+
+- **Build-Tests.ps1** - Build individual test executables
+- **Build-And-Sign.ps1** - Build + sign workflow
+
+## Archived Scripts (Historical Reference)
 
 Moved to `tools/archive/deprecated/`:
-- Build-AllTests-TrulyHonest.ps1 (duplicate of Build-AllTests-Honest)
-- build_i226_test.bat (use Build-Driver.ps1 -BuildTests)
+- Build-AllTests-TrulyHonest.ps1 (duplicate functionality)
+- build_i226_test.bat (replaced by Build-Tests.ps1)
+
+## Build Output Structure
+
+```
+build/x64/{Configuration}/IntelAvbFilter/IntelAvbFilter/
+├── IntelAvbFilter.sys      # Driver binary
+├── IntelAvbFilter.inf      # Installation manifest (DriverVer stamped)
+└── intelavbfilter.cat      # Catalog signature file
+```
+
+**Timestamp Behavior**:
+- `.inf` and `.cat` - Updated every build (DriverVer stamping)
+- `.sys` - Only updated when source code changes (incremental build)

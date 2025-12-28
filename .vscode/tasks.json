@@ -270,6 +270,23 @@
 			]
 		},
 		{
+			"label": "build-diagnostic-tools",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools/build/Build-Tests.ps1",
+				"-BuildDiagnosticTools"
+			],
+			"presentation": {
+				"reveal": "always"
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "run-full-diagnostics",
 			"type": "shell",
 			"command": "powershell",
@@ -277,12 +294,20 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"./tools/test/run_complete_diagnostics.bat"
+				"-File",
+				"tools/test/Run-Tests-Elevated.ps1",
+				"-Configuration",
+				"Debug",
+				"-Full"
 			],
 			"presentation": {
 				"reveal": "always"
 			},
+			"dependsOn": [
+				"build-diagnostic-tools",
+				"install-driver-debug"
+			],
+			"dependsOrder": "sequence",
 			"problemMatcher": []
 		},
 		{
