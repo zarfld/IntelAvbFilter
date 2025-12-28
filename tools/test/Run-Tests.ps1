@@ -29,7 +29,13 @@ param(
     [switch]$CollectLogs,
     
     [Parameter(Mandatory=$false)]
-    [string]$TestExecutable
+    [string]$TestExecutable,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$HardwareOnly,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$SecureBootCheck
 )
 
 # Require Administrator
@@ -74,6 +80,81 @@ $scriptDir = $PSScriptRoot  # tools/test
 $toolsDir = Split-Path $scriptDir -Parent  # tools
 $repoRoot = Split-Path $toolsDir -Parent  # repository root
 $testExeDir = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
+
+# ===========================
+# Feature: Secure Boot Check (from test_secure_boot_compatible.bat)
+# ===========================
+if ($SecureBootCheck) {
+    Write-Step "Checking Secure Boot Status"
+    
+    try {
+        $secureBootEnabled = Confirm-SecureBootUEFI
+        if ($secureBootEnabled) {
+            Write-Info "Secure Boot is ENABLED - test signing may be blocked"
+            Write-Host "  Alternative testing methods:" -ForegroundColor Yellow
+            Write-Host "    1. Disable Secure Boot in BIOS/UEFI (recommended for development)" -ForegroundColor Gray
+            Write-Host "    2. Use EV code signing certificate" -ForegroundColor Gray
+            Write-Host "    3. Test in VM without Secure Boot" -ForegroundColor Gray
+        } else {
+            Write-Success "Secure Boot is disabled or not supported"
+        }
+    } catch {
+        Write-Info "Could not determine Secure Boot status (may not be supported)"
+    }
+    
+    # Check for test certificate
+    $certPath = Join-Path $repoRoot "build\x64\$Configuration\IntelAvbFilter.cer"
+    if (Test-Path $certPath) {
+        Write-Host "`n  Installing test certificate to Trusted Root..." -ForegroundColor Gray
+        try {
+            certutil -addstore root $certPath | Out-Null
+            Write-Success "Test certificate installed"
+        } catch {
+            Write-Info "Certificate installation failed (may require manual installation)"
+        }
+    }
+}
+
+# ===========================
+# NOTE: -CompileDiagnostics MOVED to Build-Tests.ps1 -BuildDiagnosticTools
+# Separation of Concerns: BUILD logic belongs in Build-Tests.ps1, not Run-Tests.ps1
+# To compile diagnostic tools, use: .\tools\build\Build-Tests.ps1 -BuildDiagnosticTools
+# ===========================
+
+# ===========================
+# Feature: Hardware-Only Mode (from test_hardware_only.bat)
+# ===========================
+if ($HardwareOnly) {
+    Write-Step "Compiling Hardware-Only Test Application"
+    
+    # Check for Visual Studio compiler
+    $clPath = Get-Command cl.exe -ErrorAction SilentlyContinue
+    if (-not $clPath) {
+        Write-Failure "Visual Studio compiler (cl.exe) not found in PATH"
+        Write-Info "Run this from 'Developer Command Prompt for VS' or add VS tools to PATH"
+        exit 1
+    }
+    
+    # Compile with HARDWARE_ONLY=1 flag
+    $testSource = Join-Path $repoRoot "tests\device_specific\i219\avb_test_i219.c"
+    if (Test-Path $testSource) {
+        Write-Host "  Compiling with /DHARDWARE_ONLY=1 flag..." -ForegroundColor Gray
+        $hwOutput = Join-Path $repoRoot "avb_test_hardware_only.exe"
+        & cl.exe $testSource /DHARDWARE_ONLY=1 /Fe:$hwOutput 2>&1 | Out-Null
+        if (Test-Path $hwOutput) {
+            Write-Success "Hardware-Only test application compiled: avb_test_hardware_only.exe"
+            Write-Host "  NO SIMULATION - Real hardware or explicit failure" -ForegroundColor Yellow
+            
+            # Run the hardware-only test
+            Write-Host "`n  Running Hardware-Only test..." -ForegroundColor Cyan
+            & $hwOutput
+        } else {
+            Write-Failure "Compilation failed"
+        }
+    } else {
+        Write-Failure "Test source not found: $testSource"
+    }
+}
 
 # ===========================
 # Test 1: Check Driver Service Status
@@ -208,7 +289,7 @@ if ($TestExecutable) {
     Write-Host ""
     & $testPath
     
-} elseif ($Full) {
+} elseif ($Quick) {
     # Quick tests only
     Write-Step "Running Quick Verification Tests"
     
@@ -371,6 +452,102 @@ if ($CollectLogs) {
     Write-Success "Logs saved to: $logFile"
 }
 
-Write-Host "`n================================================================" -ForegroundColor Cyan
+# ===========================
+# Test Summary
+# ===========================
+Write-Host "`n" -NoNewline
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "                       TEST SUMMARY" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+
+# Determine overall status
+$hasService = (Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue) -ne $null
+$intelAdapters = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "*Intel*"} -ErrorAction SilentlyContinue
+$hasIntelHw = $intelAdapters.Count -gt 0
+$hasDeviceNode = try { [System.IO.File]::Exists("\\.\IntelAvbFilter") } catch { $false }
+$hasTests = (Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue).Count -gt 0
+
+Write-Host "`nDriver Status:" -ForegroundColor Yellow
+if ($hasService) {
+    $svc = Get-Service -Name "IntelAvbFilter"
+    Write-Host "  [OK] Driver service installed ($($svc.Status))" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] Driver service not found" -ForegroundColor Red
+}
+
+Write-Host "`nHardware Status:" -ForegroundColor Yellow
+if ($hasIntelHw) {
+    Write-Host "  [OK] Intel network adapter(s) detected: $($intelAdapters.Count)" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] No Intel network adapters detected" -ForegroundColor Red
+}
+
+Write-Host "`nDevice Interface Status:" -ForegroundColor Yellow
+if ($hasDeviceNode) {
+    Write-Host "  [OK] Device node created and accessible" -ForegroundColor Green
+} else {
+    Write-Host "  [FAIL] Device node not created" -ForegroundColor Red
+    if (-not $hasIntelHw) {
+        Write-Host "         (Expected - no Intel hardware)" -ForegroundColor Gray
+    }
+}
+
+Write-Host "`nTest Tools Status:" -ForegroundColor Yellow
+if ($hasTests) {
+    $testCount = (Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue).Count
+    Write-Host "  [OK] Test applications available: $testCount" -ForegroundColor Green
+} else {
+    Write-Host "  [WARN] Test applications not built" -ForegroundColor Yellow
+}
+
+# ===========================
+# Overall Assessment
+# ===========================
+Write-Host "`nOverall Assessment:" -ForegroundColor Yellow
+if ($hasService -and $hasIntelHw -and $hasDeviceNode) {
+    Write-Host "  => DRIVER IS FULLY OPERATIONAL!" -ForegroundColor Green
+    Write-Host "     The driver is installed, Intel hardware is detected," -ForegroundColor Green
+    Write-Host "     and the device interface is accessible." -ForegroundColor Green
+    Write-Host "`n  Next steps:" -ForegroundColor Cyan
+    Write-Host "    - Run test applications to verify functionality" -ForegroundColor White
+    Write-Host "    - Use DebugView to monitor kernel debug output" -ForegroundColor White
+    Write-Host "    - Test AVB/TSN features with your application" -ForegroundColor White
+} elseif ($hasService -and -not $hasIntelHw) {
+    Write-Host "  => DRIVER INSTALLED BUT NO INTEL HARDWARE" -ForegroundColor Yellow
+    Write-Host "     The driver is installed correctly but requires" -ForegroundColor Yellow
+    Write-Host "     Intel Ethernet hardware to function." -ForegroundColor Yellow
+} elseif (-not $hasService) {
+    Write-Host "  => DRIVER NOT PROPERLY INSTALLED" -ForegroundColor Red
+    Write-Host "     The driver service is not installed or registered." -ForegroundColor Red
+    Write-Host "`n  Try:" -ForegroundColor Cyan
+    Write-Host "    .\tools\setup\Install-Driver.ps1 -Configuration $Configuration -InstallDriver" -ForegroundColor White
+} else {
+    Write-Host "  => PARTIAL INSTALLATION" -ForegroundColor Yellow
+    Write-Host "     The driver is installed but not fully functional." -ForegroundColor Yellow
+}
+
+Write-Host "`n"
+
+# ===========================
+# Interactive Test Prompt
+# ===========================
+if ($hasDeviceNode -and $hasTests -and -not $Quick -and -not $Full -and -not $TestExecutable) {
+    $response = Read-Host "Would you like to run all available tests? (y/n)"
+    if ($response -eq 'y' -or $response -eq 'Y') {
+        Write-Host "`nRunning all available tests..." -ForegroundColor Cyan
+        $allTests = Get-ChildItem -Path $testExeDir -Filter "*.exe"
+        foreach ($test in $allTests) {
+            Write-Host "`n--- Running: $($test.Name) ---" -ForegroundColor Cyan
+            & $test.FullName
+            Write-Host ""
+        }
+    }
+}
+
+Write-Host "For detailed kernel debug output, use DebugView:" -ForegroundColor Cyan
+Write-Host "  https://docs.microsoft.com/en-us/sysinternals/downloads/debugview" -ForegroundColor White
+Write-Host ""
+
+Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "  Test Suite Complete!" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Cyan

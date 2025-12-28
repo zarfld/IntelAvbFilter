@@ -37,7 +37,10 @@ param(
     [string]$TestName,
     
     [Parameter(Mandatory=$false)]
-    [switch]$ShowDetails
+    [switch]$ShowDetails,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$BuildDiagnosticTools  # Moved from Run-Tests.ps1 -CompileDiagnostics (separation of concerns)
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,6 +62,114 @@ if ($TestName) {
     Write-Host "Test: ALL tests" -ForegroundColor Yellow
 }
 Write-Host ""
+
+# =============================================================================
+# Build Diagnostic Tools (Moved from Run-Tests.ps1 -CompileDiagnostics)
+# Separation of Concerns: BUILD logic belongs in Build-Tests.ps1
+# =============================================================================
+if ($BuildDiagnosticTools) {
+    Write-Host "=> Compiling Diagnostic Tools" -ForegroundColor Cyan
+    
+    # Check for Visual Studio compiler
+    $ClPath = (Get-Command cl.exe -ErrorAction SilentlyContinue)
+    if (-not $ClPath) {
+        Write-Host "   [INFO] Visual Studio compiler (cl.exe) not found in PATH" -ForegroundColor Yellow
+        Write-Host "   Attempting to load Visual Studio environment..." -ForegroundColor Yellow
+        
+        # Try to load VS environment
+        $VsPath = 'C:\Program Files\Microsoft Visual Studio\2022\Community'
+        $DevShellDll = Join-Path $VsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+        
+        if (Test-Path $DevShellDll) {
+            try {
+                Import-Module $DevShellDll -ErrorAction Stop
+                Enter-VsDevShell -VsInstallPath $VsPath -SkipAutomaticLocation -ErrorAction Stop
+                Write-Host "   [OK] Visual Studio environment loaded" -ForegroundColor Green
+            } catch {
+                Write-Host "   [FAIL] Failed to load Visual Studio environment: $_" -ForegroundColor Red
+                exit 1
+            }
+        } else {
+            Write-Host "   [FAIL] Visual Studio not found at: $VsPath" -ForegroundColor Red
+            Write-Host "   Please install Visual Studio 2022 Community or update the path in this script." -ForegroundColor Yellow
+            exit 1
+        }
+        
+        # Verify cl.exe is now available
+        $ClPath = (Get-Command cl.exe -ErrorAction SilentlyContinue)
+        if (-not $ClPath) {
+            Write-Host "   [FAIL] cl.exe still not found after loading VS environment" -ForegroundColor Red
+            exit 1
+        }
+    }
+    
+    # Compile intel_avb_diagnostics.c
+    $DiagSource = Join-Path $RepoRoot "tests\diagnostic\intel_avb_diagnostics.c"
+    if (Test-Path $DiagSource) {
+        Write-Host "   Building intel_avb_diagnostics.exe..." -ForegroundColor Yellow
+        $DiagExe = Join-Path $RepoRoot "intel_avb_diagnostics.exe"
+        & cl.exe $DiagSource /Fe:$DiagExe /TC /link advapi32.lib setupapi.lib cfgmgr32.lib iphlpapi.lib
+        if (Test-Path $DiagExe) {
+            Write-Host "   [OK] intel_avb_diagnostics.exe compiled" -ForegroundColor Green
+        } else {
+            Write-Host "   [FAIL] intel_avb_diagnostics.exe compilation failed" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "   [SKIP] intel_avb_diagnostics.c not found at $DiagSource" -ForegroundColor Yellow
+    }
+    
+    # Compile debug_device_interface.c
+    $DevSource = Join-Path $RepoRoot "debug_device_interface.c"
+    if (Test-Path $DevSource) {
+        Write-Host "   Building debug_device_interface.exe..." -ForegroundColor Yellow
+        $DevExe = Join-Path $RepoRoot "device_interface_test.exe"
+        & cl.exe $DevSource /Fe:$DevExe /link advapi32.lib
+        if (Test-Path $DevExe) {
+            Write-Host "   [OK] device_interface_test.exe compiled" -ForegroundColor Green
+        } else {
+            Write-Host "   [FAIL] device_interface_test.exe compilation failed" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "   [SKIP] debug_device_interface.c not found at $DevSource" -ForegroundColor Yellow
+    }
+    
+    # Check system capabilities
+    Write-Host ""
+    Write-Host "=> Checking System Capabilities" -ForegroundColor Cyan
+    
+    # Check Hyper-V
+    Write-Host "   Checking Hyper-V status..." -ForegroundColor Yellow
+    try {
+        $HyperVFeature = dism /online /get-featureinfo /featurename:Microsoft-Hyper-V 2>&1 | Select-String "State : Enabled"
+        if ($HyperVFeature) {
+            Write-Host "   [OK] Hyper-V is enabled" -ForegroundColor Green
+        } else {
+            Write-Host "   [INFO] Hyper-V is not enabled" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "   [INFO] Could not check Hyper-V status" -ForegroundColor Yellow
+    }
+    
+    # Check for SignTool (WDK)
+    $SignTool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($SignTool) {
+        Write-Host "   [OK] SignTool found: $($SignTool.Source)" -ForegroundColor Green
+    } else {
+        Write-Host "   [INFO] SignTool (WDK) not found in PATH" -ForegroundColor Yellow
+    }
+    
+    # Check for Inf2Cat (WDK)
+    $Inf2Cat = Get-Command inf2cat.exe -ErrorAction SilentlyContinue
+    if ($Inf2Cat) {
+        Write-Host "   [OK] Inf2Cat found: $($Inf2Cat.Source)" -ForegroundColor Green
+    } else {
+        Write-Host "   [INFO] Inf2Cat (WDK) not found in PATH" -ForegroundColor Yellow
+    }
+    
+    Write-Host ""
+    Write-Host "Diagnostic tools build complete." -ForegroundColor Cyan
+    Write-Host ""
+}
 
 # Change to repository root
 Push-Location $RepoRoot
@@ -567,6 +678,15 @@ if (-not $VsDevShellInitialized) {
     Write-Host ""
 }
 
+# Set up output directory (matching Build-Driver.ps1 structure)
+$Platform = "x64"
+$OutputDir = Join-Path $RepoRoot "build\tools\avb_test\$Platform\$Configuration"
+if (-not (Test-Path $OutputDir)) {
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+    Write-Host "Created output directory: $OutputDir" -ForegroundColor Gray
+    Write-Host ""
+}
+
 # Build each test
 foreach ($Test in $TestsToBuild) {
     Write-Host "Building: $($Test.Name)" -ForegroundColor Yellow
@@ -584,7 +704,10 @@ foreach ($Test in $TestsToBuild) {
         # cl.exe build
         Write-Host "  Type: cl.exe" -ForegroundColor Gray
         Write-Host "  Source: $($Test.Source)" -ForegroundColor Gray
-        Write-Host "  Output: $($Test.Output)" -ForegroundColor Gray
+        
+        # Set full output path
+        $OutputPath = Join-Path $OutputDir $Test.Output
+        Write-Host "  Output: $OutputPath" -ForegroundColor Gray
         Write-Host ""
         
         # Verify source file exists
@@ -595,8 +718,8 @@ foreach ($Test in $TestsToBuild) {
             continue
         }
         
-        # Build command
-        $BuildCmd = "cl /nologo /W4 /Zi $($Test.Includes) $($Test.Source) /Fe:$($Test.Output)"
+        # Build command with full output path
+        $BuildCmd = "cl /nologo /W4 /Zi $($Test.Includes) $($Test.Source) /Fe:`"$OutputPath`""
         if ($Test.Libs) {
             $BuildCmd += " /link $($Test.Libs)"
         }
@@ -618,8 +741,8 @@ foreach ($Test in $TestsToBuild) {
         # Execute build
         $result = & $BuildScript -BuildCmd $BuildCmd 2>&1
         
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $Test.Output)) {
-            Write-Host "  SUCCESS: $($Test.Output) created" -ForegroundColor Green
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $OutputPath)) {
+            Write-Host "  SUCCESS: $OutputPath created" -ForegroundColor Green
             $SucceededTests += $Test.Name
         } else {
             Write-Host "  FAILED: Compiler returned error code $LASTEXITCODE" -ForegroundColor Red

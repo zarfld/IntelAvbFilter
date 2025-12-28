@@ -5,9 +5,24 @@ echo Intel AVB Filter - Release Build Test
 echo ========================================
 echo.
 
+REM Detect if running from repo root or tools\test
+if exist "tools\test\Quick-Test-Release.bat" (
+    REM Running from repo root
+    set SYS_SRC=build\x64\Release\IntelAvbFilter.sys
+    set SYS_DST=build\x64\Release\IntelAvbFilter\IntelAvbFilter.sys
+    set INF_PATH=build\x64\Release\IntelAvbFilter\IntelAvbFilter.inf
+    set TEST_EXE=build\tools\avb_test\x64\Release\avb_test_i226.exe
+) else (
+    REM Running from tools\test
+    set SYS_SRC=..\..\build\x64\Release\IntelAvbFilter.sys
+    set SYS_DST=..\..\build\x64\Release\IntelAvbFilter\IntelAvbFilter.sys
+    set INF_PATH=..\..\build\x64\Release\IntelAvbFilter\IntelAvbFilter.inf
+    set TEST_EXE=..\..\build\tools\avb_test\x64\Release\avb_test_i226.exe
+)
+
 REM Step 0: Copy actual build to package directory
 echo [0] Updating package with latest Release build...
-copy /Y x64\Release\IntelAvbFilter.sys x64\Release\IntelAvbFilter\IntelAvbFilter.sys >nul
+copy /Y "%SYS_SRC%" "%SYS_DST%" >nul
 if errorlevel 1 (
     echo ERROR: Failed to copy Release build!
     pause
@@ -28,7 +43,7 @@ timeout /t 2 /nobreak >nul
 
 REM Step 3: Install filter
 echo [3] Installing Release build...
-netcfg -v -l x64\Release\IntelAvbFilter\IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
+netcfg -v -l "%INF_PATH%" -c s -i MS_IntelAvbFilter
 if errorlevel 1 (
     echo ERROR: Installation failed!
     pause
@@ -42,7 +57,12 @@ echo.
 echo ========================================
 echo [4] Running AVB Tests...
 echo ========================================
-avb_test_i226.exe
+if exist "%TEST_EXE%" (
+    "%TEST_EXE%"
+) else (
+    echo ERROR: Test executable not found - build tests first
+    echo Expected: %TEST_EXE%
+)
 echo.
 
 echo ========================================

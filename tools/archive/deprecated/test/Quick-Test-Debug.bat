@@ -14,6 +14,18 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
+REM Detect if running from repo root or tools\test
+set REPO_ROOT=.
+if exist "tools\test\Quick-Test-Debug.bat" (
+    REM Running from repo root
+    set INF_PATH=build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf
+    set TEST_EXE=build\tools\avb_test\x64\Debug\avb_test_i226.exe
+) else (
+    REM Running from tools\test
+    set INF_PATH=..\..\build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf
+    set TEST_EXE=..\..\build\tools\avb_test\x64\Debug\avb_test_i226.exe
+)
+
 echo [1] Unbinding filter from adapters...
 netcfg -u MS_IntelAvbFilter >nul 2>&1
 timeout /t 2 /nobreak >nul
@@ -23,7 +35,7 @@ net stop IntelAvbFilter >nul 2>&1
 timeout /t 2 /nobreak >nul
 
 echo [3] Installing new driver (DEBUG BUILD)...
-netcfg -v -l x64\Debug\IntelAvbFilter\IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
+netcfg -v -l "%INF_PATH%" -c s -i MS_IntelAvbFilter
 if %errorLevel% neq 0 (
     echo ERROR: Installation failed
     pause
@@ -35,7 +47,12 @@ timeout /t 3 /nobreak >nul
 
 echo [5] Running test...
 echo.
-avb_test_i226.exe selftest
+if exist "%TEST_EXE%" (
+    "%TEST_EXE%" selftest
+) else (
+    echo ERROR: Test executable not found - build tests first
+    echo Expected: %TEST_EXE%
+)
 
 echo.
 echo ========================================
