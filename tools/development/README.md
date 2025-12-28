@@ -1,49 +1,144 @@
 # Development Scripts
 
-**Purpose**: Scripts for active driver development (build-test-debug cycles)
+**Purpose**: Developer utilities for driver development workflow
 
-## 🎯 CANONICAL SCRIPTS (Use These)
+## 🎯 Active Development Scripts
 
-### Force-Driver-Reload.ps1 ✅
-**THE** correct way to reload driver binary after rebuild.
-
-**Why**: `sc stop/start` does NOT reload the .sys file from disk!
+### Check-System.ps1
+**Status diagnostic tool** - Compares installed vs local driver timestamps
 
 **Usage**:
 ```powershell
-.\Force-Driver-Reload.ps1                            # Reload Release driver
-.\Force-Driver-Reload.ps1 -Configuration Debug       # Reload Debug driver
-.\Force-Driver-Reload.ps1 -TestAfterReload           # Run quick test after reload
-.\Force-Driver-Reload.ps1 -QuickMode                 # Skip stuck service checks
+.\Check-System.ps1
 ```
 
-**Consolidated from**:
-- force_driver_reload.ps1 (simple reload)
-- Smart-Update-Driver.bat (stuck service detection)
-- Update-Driver-Quick.bat (quick update)
+**What it checks**:
+- Currently installed driver (location, size, timestamp)
+- Local Release build (timestamp comparison)
+- Service status (Running/Stopped)
+- Device interface test (via avb_test_i226.exe)
+- DebugView status (for kernel debug output)
 
-**Workflow**: Unbind → Stop → Remove → Install → Verify → Test
+**When to use**: Before starting development session to verify system state
 
-## Status and Diagnostics
+---
 
-- **Check-Driver-Status.ps1** (107 lines)
-  - Compares installed driver timestamp vs local build
-  - Shows service status
-  - Warns if installed is older than local build
+### quick_start.ps1
+**Interactive installation wizard** - Step-by-step driver setup guide
 
-- **diagnose_capabilities.ps1** - Hardware capability diagnostics
-- **enhanced_investigation_suite.ps1** - Deep investigation tools
+**Usage**:
+```powershell
+.\quick_start.ps1
+```
 
-## Quick Workflows
+**What it does**:
+- Detects current system status (test signing, certificates, driver installation)
+- Provides guided installation steps based on status
+- Interactive prompts for each action
+- Links to troubleshooting scripts
 
-- **reinstall-and-test.bat** - Orchestrator script
-  - Calls Install-Debug-Driver.bat
-  - Runs 3 tests: test_minimal.exe, test_direct_clock.exe, test_clock_config.exe
+**When to use**: First-time setup or when helping new developers
 
-- **Smart-Update-Driver.bat** - Auto-detects changes and updates
-- **IntelAvbFilter-Cleanup.ps1** - Clean uninstall + registry cleanup
+---
 
-## Deprecated (Don't Use)
+## 📋 Separation of Concerns
 
-Moved to `tools/archive/deprecated/`:
-- Update-Driver-Quick.bat (use Quick-Reinstall-Debug.bat)
+Development scripts have been reorganized by **concern**:
+
+### SETUP Concern → `tools/setup/`
+
+**For driver installation, reinstallation, and configuration:**
+
+| Old Script (archived) | Canonical Replacement | Example Command |
+|-----------------------|----------------------|-----------------|
+| force_driver_reload.ps1 | Install-Driver.ps1 -Reinstall | `.\tools\setup\Install-Driver.ps1 -Reinstall` |
+| Force-Driver-Reload.ps1 | Install-Driver.ps1 -Reinstall | `.\tools\setup\Install-Driver.ps1 -Reinstall` |
+| Smart-Update-Driver.bat | Install-Driver.ps1 -Reinstall | `.\tools\setup\Install-Driver.ps1 -Reinstall` |
+| Update-Driver-Quick.bat | Install-Driver.ps1 -Reinstall | `.\tools\setup\Install-Driver.ps1 -Reinstall` |
+| reinstall_debug_quick.bat | Install-Driver.ps1 -Reinstall -Configuration Debug | `.\tools\setup\Install-Driver.ps1 -Reinstall -Configuration Debug` |
+| IntelAvbFilter-Cleanup.ps1 | Clean-Install-Driver.ps1 | `.\tools\setup\Clean-Install-Driver.ps1 -Configuration Debug` |
+| fix_deployment_config.ps1 | Fix-Deployment-Config.ps1 | `.\tools\setup\Fix-Deployment-Config.ps1` |
+| reinstall-and-test.bat | Install-Driver.ps1 + Run-Tests.ps1 | See below ↓ |
+
+**Key canonical scripts**:
+- **Install-Driver.ps1** - Main driver installation script
+  - Parameters: `-Configuration {Debug|Release}`, `-Reinstall`, `-InstallDriver`, `-UninstallDriver`, `-CheckStatus`
+  - Location: `tools/setup/Install-Driver.ps1`
+- **Clean-Install-Driver.ps1** - Comprehensive clean install (removes ALL OEM packages)
+  - Location: `tools/setup/Clean-Install-Driver.ps1`
+- **Fix-Deployment-Config.ps1** - One-time VS deployment config fix
+  - Location: `tools/setup/Fix-Deployment-Config.ps1`
+
+---
+
+### TEST Concern → `tools/test/`
+
+**For test execution and orchestration:**
+
+| Old Script (archived) | Canonical Replacement | Example Command |
+|-----------------------|----------------------|-----------------|
+| diagnose_capabilities.ps1 | Run-Tests.ps1 -Full | `.\tools\test\Run-Tests.ps1 -Configuration Debug -Full` |
+| enhanced_investigation_suite.ps1 | Run-Tests.ps1 -Full | `.\tools\test\Run-Tests.ps1 -Configuration Debug -Full` |
+
+**Key canonical script**:
+- **Run-Tests.ps1** - Complete test orchestration
+  - Parameters: `-Configuration {Debug|Release}`, `-Quick`, `-Full`, `-TestPattern`
+  - Location: `tools/test/Run-Tests.ps1`
+
+---
+
+### REDUNDANT Scripts (archived)
+
+These provided no unique functionality:
+
+| Script | Why Redundant | Replacement |
+|--------|---------------|-------------|
+| Force-StartDriver.ps1 | Just `sc start IntelAvbFilter` | `sc start IntelAvbFilter` |
+| Start-AvbDriver.ps1 | Just `sc start IntelAvbFilter` | `sc start IntelAvbFilter` |
+
+---
+
+## 📦 Archived Scripts
+
+All deprecated scripts moved to concern-based archive:
+- **tools/archive/deprecated/setup/** - 8 SETUP-concern scripts
+- **tools/archive/deprecated/test/** - 2 TEST-concern scripts
+- **tools/archive/deprecated/development/** - 2 REDUNDANT scripts
+
+**Why archived**: Functionality consolidated into canonical scripts with better separation of concerns
+
+---
+
+## 🚀 Common Workflows
+
+### Reload driver after rebuild
+```powershell
+# Clean reinstall (recommended)
+.\tools\setup\Install-Driver.ps1 -Reinstall -Configuration Debug
+
+# Comprehensive clean install (removes ALL OEM packages)
+.\tools\setup\Clean-Install-Driver.ps1 -Configuration Debug
+```
+
+### Run full test suite
+```powershell
+.\tools\test\Run-Tests.ps1 -Configuration Debug -Full
+```
+
+### Check system status before work
+```powershell
+.\tools\development\Check-System.ps1
+```
+
+### First-time setup
+```powershell
+.\tools\development\quick_start.ps1
+```
+
+---
+
+## 📚 Related Documentation
+
+- **Setup Scripts**: `tools/setup/README.md`
+- **Test Scripts**: `tools/test/README.md`
+- **Build Scripts**: `tools/build/README.md`
