@@ -368,6 +368,74 @@
 			"dependsOn": [
 				"build-ptp-clock-control-test"
 			],
+			"problemMatcher": []		},
+		{
+			"label": "install-driver-debug",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools\\setup\\Install-Driver-Elevated.ps1",
+				"-Configuration",
+				"Debug",
+				"-Action",
+				"InstallDriver"
+			],
+			"presentation": {
+				"reveal": "always",
+				"focus": true
+			},
+			"dependsOn": [
+				"build-driver-debug"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "reinstall-driver-debug",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools\\setup\\Install-Driver-Elevated.ps1",
+				"-Configuration",
+				"Debug",
+				"-Action",
+				"Reinstall"
+			],
+			"presentation": {
+				"reveal": "always",
+				"focus": true
+			},
+			"dependsOn": [
+				"build-driver-debug"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "uninstall-driver",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools\\setup\\Install-Driver-Elevated.ps1",
+				"-Configuration",
+				"Debug",
+				"-Action",
+				"UninstallDriver"
+			],
+			"presentation": {
+				"reveal": "always",
+				"focus": true
+			},
 			"problemMatcher": []
 		}
 	]

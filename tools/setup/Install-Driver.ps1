@@ -313,24 +313,39 @@ function Install-Driver {
     Write-Host "  INF: $infPath" -ForegroundColor Gray
     Write-Host "  SYS: $sysPath" -ForegroundColor Gray
     
-    # Check build timestamp vs installed version
+    # Check build timestamp vs installed version (show all files)
     $installedSys = "C:\Windows\System32\drivers\IntelAvbFilter.sys"
     if (Test-Path $installedSys) {
-        $buildTime = (Get-Item $sysPath).LastWriteTime
+        Write-Host "`nBuild timestamp check:" -ForegroundColor Gray
+        
+        # Show all build file timestamps
+        $sysFile = Get-Item $sysPath -ErrorAction SilentlyContinue
+        $infFile = Get-Item $infPath -ErrorAction SilentlyContinue
+        $catPath = $infPath -replace '\.inf$', '.cat'
+        $catFile = Get-Item $catPath -ErrorAction SilentlyContinue
+        
+        Write-Host "  Build outputs:" -ForegroundColor DarkGray
+        if ($sysFile) { Write-Host "    .sys: $($sysFile.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray }
+        if ($infFile) { Write-Host "    .inf: $($infFile.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray }
+        if ($catFile) { Write-Host "    .cat: $($catFile.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray }
+        
+        # Get newest build file
+        $buildFiles = @($sysFile, $infFile, $catFile) | Where-Object { $_ -ne $null }
+        $newestBuildFile = $buildFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $buildTime = $newestBuildFile.LastWriteTime
         $installedTime = (Get-Item $installedSys).LastWriteTime
         
-        Write-Host "`nBuild timestamp check:" -ForegroundColor Gray
-        Write-Host "  Build:     $($buildTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
         Write-Host "  Installed: $($installedTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
+        Write-Host "  Comparison (using newest: $($newestBuildFile.Name)):" -ForegroundColor DarkGray
         
         if ($buildTime -lt $installedTime) {
-            Write-Host "  WARNING: Build is OLDER than installed version!" -ForegroundColor Yellow
+            Write-Host "    WARNING: Build is OLDER than installed version!" -ForegroundColor Yellow
             Write-Host "    You may be downgrading. Press Ctrl+C to cancel or Enter to continue..." -ForegroundColor Yellow
             Read-Host
         } elseif ($buildTime -eq $installedTime) {
-            Write-Host "  Same version (timestamps match)" -ForegroundColor Cyan
+            Write-Host "    Same version (timestamps match)" -ForegroundColor Cyan
         } else {
-            Write-Host "  Build is newer" -ForegroundColor Green
+            Write-Host "    Build is newer" -ForegroundColor Green
         }
     }
     
