@@ -1,19 +1,40 @@
 # Import-VisualStudioVars.ps1
 # Imports Visual Studio environment variables into current PowerShell session
-# Avoids cmd.exe line length limitations
+# Auto-detects Visual Studio installation using vswhere
 
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$VcVarsPath
+    [Parameter(Mandatory=$false)]
+    [ValidateSet('x64', 'x86')]
+    [string]$Architecture = 'x64'
 )
 
-if (-not (Test-Path $VcVarsPath)) {
-    throw "vcvars64.bat not found at: $VcVarsPath"
-}
+$ErrorActionPreference = 'Stop'
 
-# Create temp batch file that outputs environment variables
-$tempBat = [System.IO.Path]::GetTempFileName() + ".bat"
-$tempTxt = [System.IO.Path]::GetTempFileName()
+try {
+    # Auto-detect Visual Studio using vswhere
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    
+    if (-not (Test-Path $vswhere)) {
+        throw "Visual Studio not found. Install Visual Studio 2019 or later with C++ workload."
+    }
+    
+    $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    
+    if (-not $vsPath) {
+        throw "Visual Studio C++ tools not found. Install Visual Studio with C++ workload."
+    }
+    
+    $VcVarsPath = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+    
+    if (-not (Test-Path $VcVarsPath)) {
+        throw "vcvars64.bat not found at: $VcVarsPath"
+    }
+    
+    Write-Host "Detected Visual Studio at: $vsPath" -ForegroundColor Cyan
+
+    # Create temp batch file that outputs environment variables
+    $tempBat = [System.IO.Path]::GetTempFileName() + ".bat"
+    $tempTxt = [System.IO.Path]::GetTempFileName()
 
 @"
 @echo off
@@ -49,3 +70,9 @@ if (Test-Path $tempTxt) {
 }
 
 Write-Host "Visual Studio environment variables imported successfully" -ForegroundColor Green
+
+} catch {
+    Write-Host "ERROR: Failed to import Visual Studio environment" -ForegroundColor Red
+    Write-Host "  $_" -ForegroundColor Yellow
+    exit 1
+}

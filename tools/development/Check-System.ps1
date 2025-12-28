@@ -1,9 +1,13 @@
 Write-Host "=== Intel AVB Driver Debug Analysis ===" -ForegroundColor Cyan
 Write-Host ""
 
-# Check which driver is currently loaded
-Write-Host "[1] Currently Installed Driver:" -ForegroundColor Yellow
-$driverFiles = Get-ChildItem "C:\Windows\System32\DriverStore\FileRepository\intelavbfilter*\IntelAvbFilter.sys" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+$ErrorActionPreference = 'Continue'  # Allow script to continue on errors for diagnostics
+
+try {
+
+    # Check which driver is currently loaded
+    Write-Host "[1] Currently Installed Driver:" -ForegroundColor Yellow
+    $driverFiles = Get-ChildItem "C:\Windows\System32\DriverStore\FileRepository\intelavbfilter*\IntelAvbFilter.sys" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
 if ($driverFiles) {
     $latest = $driverFiles[0]
     Write-Host "  Path: $($latest.FullName)"
@@ -163,3 +167,9 @@ if ($driverFiles -and $localBuild -and $latest.LastWriteTime -lt $localBuild.Las
 }
 
 Write-Host ""
+
+} catch {
+    Write-Host "ERROR: An error occurred during system check" -ForegroundColor Red
+    Write-Host "  $_" -ForegroundColor Yellow
+    exit 1
+}

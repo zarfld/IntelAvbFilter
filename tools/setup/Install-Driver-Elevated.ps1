@@ -8,7 +8,10 @@ param(
     [string]$Action
 )
 
-$scriptPath = Join-Path $PSScriptRoot 'Install-Driver.ps1'
+$ErrorActionPreference = 'Stop'
+
+try {
+    $scriptPath = Join-Path $PSScriptRoot 'Install-Driver.ps1'
 
 $arguments = @(
     '-NoProfile'
@@ -21,4 +24,10 @@ $arguments = @(
     "-$Action"
 )
 
-Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait
+    Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait
+
+} catch {
+    Write-Host "ERROR: Failed to launch elevated script" -ForegroundColor Red
+    Write-Host "  $_" -ForegroundColor Yellow
+    exit 1
+}
