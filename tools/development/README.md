@@ -1,28 +1,28 @@
 # Development Scripts
 
-**Which script should I use?**
+**Purpose**: Scripts for active driver development (build-test-debug cycles)
 
-## Quick Start (Most Common)
+## 🎯 CANONICAL SCRIPTS (Use These)
 
-```batch
-Reload-Driver-Binary.bat     # Reload driver binary after rebuild
-Quick-Reinstall-Debug.bat    # Fast reinstall debug build
-Check-Driver-Status.bat      # Check if installed driver is up-to-date
+### Force-Driver-Reload.ps1 ✅
+**THE** correct way to reload driver binary after rebuild.
+
+**Why**: `sc stop/start` does NOT reload the .sys file from disk!
+
+**Usage**:
+```powershell
+.\Force-Driver-Reload.ps1                            # Reload Release driver
+.\Force-Driver-Reload.ps1 -Configuration Debug       # Reload Debug driver
+.\Force-Driver-Reload.ps1 -TestAfterReload           # Run quick test after reload
+.\Force-Driver-Reload.ps1 -QuickMode                 # Skip stuck service checks
 ```
 
-## Driver Reload (Critical for Development)
+**Consolidated from**:
+- force_driver_reload.ps1 (simple reload)
+- Smart-Update-Driver.bat (stuck service detection)
+- Update-Driver-Quick.bat (quick update)
 
-**⚠️ Important**: `sc stop/start` does NOT reload the driver binary!
-
-- **force_driver_reload.ps1** (30 lines) - THE correct binary reload
-  - Comment: "This is required because sc.exe start/stop doesn't reload the driver binary"
-  - Workflow: netcfg -u → install → sc start → test
-  - Use this after every rebuild to test NEW code
-
-- **Force-Driver-Reload.ps1** (148 lines) - Handles stuck driver states
-  - Unbinds stuck network adapters
-  - Clears service dependency locks
-  - Use when driver won't unload normally
+**Workflow**: Unbind → Stop → Remove → Install → Verify → Test
 
 ## Status and Diagnostics
 
