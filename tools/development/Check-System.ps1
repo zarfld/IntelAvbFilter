@@ -16,14 +16,29 @@ if ($driverFiles) {
 
 # Check our local build
 Write-Host ""
-Write-Host "[2] Local Release Build:" -ForegroundColor Yellow
-$localBuild = Get-Item "x64\Release\IntelAvbFilter\IntelAvbFilter.sys" -ErrorAction SilentlyContinue
+Write-Host "[2] Local Build:" -ForegroundColor Yellow
+# Try multiple possible build locations (Debug first, then Release)
+$buildPaths = @(
+    "build\x64\Debug\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys",
+    "build\x64\Release\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys"
+)
+$localBuild = $null
+$buildConfig = "Unknown"
+foreach ($path in $buildPaths) {
+    $localBuild = Get-Item $path -ErrorAction SilentlyContinue
+    if ($localBuild) {
+        if ($path -match "Debug") { $buildConfig = "Debug" }
+        elseif ($path -match "Release") { $buildConfig = "Release" }
+        break
+    }
+}
 if ($localBuild) {
+    Write-Host "  Configuration: $buildConfig"
     Write-Host "  Size: $($localBuild.Length) bytes"
     Write-Host "  Modified: $($localBuild.LastWriteTime)"
     Write-Host "  Build Time: $(($localBuild.LastWriteTime).ToString('HH:mm:ss'))"
 } else {
-    Write-Host "  ERROR: Local build not found" -ForegroundColor Red
+    Write-Host "  WARNING: Local build not found (build driver first)" -ForegroundColor Yellow
 }
 
 # Compare
@@ -59,13 +74,43 @@ if ($service) {
 # Test device interface
 Write-Host ""
 Write-Host "[4] Device Interface Test:" -ForegroundColor Yellow
-$testResult = & ".\avb_test_i226.exe" 2>&1 | Select-String -Pattern "Open.*failed|Capabilities"
-if ($testResult -match "Capabilities") {
-    Write-Host "  [OK] Device interface working" -ForegroundColor Green
-    Write-Host "  $testResult"
+# Check if running as administrator (required for device access)
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "  [SKIP] Not running as Administrator" -ForegroundColor Yellow
+    Write-Host "         Device interface test requires admin rights" -ForegroundColor Gray
+    Write-Host "         Rerun this script as Administrator to test device access" -ForegroundColor Gray
 } else {
-    Write-Host "  [!] Device interface failed" -ForegroundColor Red
-    Write-Host "  $testResult"
+    # Try to find test executable in common locations
+    $testPaths = @(
+        "build\tools\avb_test\x64\Debug\avb_test_i226.exe",
+        "build\tools\avb_test\x64\Release\avb_test_i226.exe",
+        "tools\avb_test\x64\Debug\avb_test.exe",
+        ".\avb_test_i226.exe"
+    )
+    $testExe = $null
+    foreach ($path in $testPaths) {
+        if (Test-Path $path) { $testExe = $path; break }
+    }
+    if ($testExe) {
+        $testResult = & $testExe 2>&1
+        if ($testResult -match "Capabilities") {
+            Write-Host "  [OK] Device interface working" -ForegroundColor Green
+            $testResult | Select-String -Pattern "Capabilities" | ForEach-Object { Write-Host "  $_" }
+        } elseif ($testResult -match "Open.*failed.*5") {
+            Write-Host "  [!] Access Denied (Error 5)" -ForegroundColor Red
+            Write-Host "      This script must run as Administrator" -ForegroundColor Yellow
+        } elseif ($testResult -match "Open.*failed") {
+            Write-Host "  [!] Device interface test failed" -ForegroundColor Red
+            $testResult | Select-String -Pattern "Open.*failed" | ForEach-Object { Write-Host "  $_" }
+        } else {
+            Write-Host "  [?] Test result unclear" -ForegroundColor Yellow
+            Write-Host "  $($testResult | Select-Object -First 3)"
+        }
+    } else {
+        Write-Host "  [SKIP] Test executable not found" -ForegroundColor Yellow
+        Write-Host "         Build tests with: .\tools\build\Build-Tests.ps1 -TestName avb_test_i226" -ForegroundColor Gray
+    }
 }
 
 # Check for DebugView
@@ -83,12 +128,26 @@ if ($dbgview) {
 Write-Host ""
 Write-Host "=== Analysis Summary ===" -ForegroundColor Cyan
 
+# Check device test status
+$deviceTestPassed = $false
+if ($isAdmin -and $testExe -and $testResult) {
+    $deviceTestPassed = $testResult -match "Capabilities"
+}
+
 # Determine the issue
 if ($driverFiles -and $localBuild -and $latest.LastWriteTime -lt $localBuild.LastWriteTime) {
     Write-Host ""
     Write-Host "ACTION REQUIRED: Your installed driver is outdated!" -ForegroundColor Red
     Write-Host "1. Run: .\Smart-Update-Driver.bat (as Administrator)"
     Write-Host "2. This will handle the stuck service and install the new driver"
+} elseif (-not $isAdmin) {
+    Write-Host ""
+    Write-Host "RECOMMENDATION: Rerun as Administrator for full diagnostics" -ForegroundColor Yellow
+    Write-Host "Device interface test was skipped (requires admin rights)"
+} elseif (-not $deviceTestPassed -and $testExe) {
+    Write-Host ""
+    Write-Host "ACTION REQUIRED: Device interface test failed!" -ForegroundColor Red
+    Write-Host "Check that the driver is properly installed and bound to your network adapter"
 } elseif (-not $dbgview) {
     Write-Host ""
     Write-Host "ACTION REQUIRED: Start DebugView to see what's happening!" -ForegroundColor Yellow
