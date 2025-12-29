@@ -411,6 +411,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // Use current context for all operations to avoid shadowing warnings
     PAVB_DEVICE_CONTEXT currentContext = g_AvbContext ? g_AvbContext : AvbContext;
 
+    // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
+    // On-demand initialization: only initialize on first IOCTL, not at driver load
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
     if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE)
         return STATUS_DEVICE_NOT_READY;
@@ -478,6 +480,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             DEBUGP(DL_INFO, "   - Final hardware access: %s\n", currentContext->hw_access_enabled ? "YES" : "NO");
         }
         break;
+    
+    // Implements #15 (REQ-F-MULTIDEV-001: Multi-Adapter Management and Selection)
     case IOCTL_AVB_ENUM_ADAPTERS:
         if (outLen < sizeof(AVB_ENUM_REQUEST)) { 
             status = STATUS_BUFFER_TOO_SMALL; 
@@ -742,7 +746,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         }
         break;
 
-    /* Production-ready clock configuration query IOCTL */
+    /* Production-ready clock configuration query IOCTL
+     * Implements #4 (BUG: IOCTL_AVB_GET_CLOCK_CONFIG Not Working)
+     * Returns: SYSTIM, TIMINCA, TSAUXC register values and clock rate
+     */
     case IOCTL_AVB_GET_CLOCK_CONFIG:
         {
             DEBUGP(DL_ERROR, "!!! IOCTL_AVB_GET_CLOCK_CONFIG: Entry point reached\n");
@@ -1283,6 +1290,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             }
         }
         break;
+    
+    // Implements #18 (REQ-F-HWCTX-001: Hardware State Machine)
     case IOCTL_AVB_GET_HW_STATE:
         DEBUGP(DL_INFO, "? IOCTL_AVB_GET_HW_STATE: Hardware state query\n");
         DEBUGP(DL_INFO, "   - Context: %p\n", AvbContext);

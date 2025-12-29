@@ -1,6 +1,8 @@
 /**
  * PTP Clock Control Test - Production Version
  * 
+ * Verifies #4 (BUG: IOCTL_AVB_GET_CLOCK_CONFIG Not Working - P0 CRITICAL)
+ * 
  * Uses proper IOCTL abstractions instead of raw register access:
  * - IOCTL_AVB_GET_CLOCK_CONFIG (replaces raw SYSTIM/TIMINCA/TSAUXC reads)
  * - IOCTL_AVB_ADJUST_FREQUENCY (replaces raw TIMINCA writes)
@@ -12,6 +14,8 @@
  * 2. Frequency adjustment (5 different values)
  * 3. Timestamp setting and retrieval
  * 4. Clock stability measurement
+ * 
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/4
  */
 
 #include <windows.h>
