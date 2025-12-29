@@ -110,7 +110,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>..;.;C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km;external\intel_avb\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;.;src;C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km;external\intel_avb\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1;DBG=1</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
       <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
@@ -131,10 +131,10 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;.;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
-      <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
+      <PreCompiledHeaderFile>src\precomp.h</PreCompiledHeaderFile>
       <PreCompiledHeader>Use</PreCompiledHeader>
     </ClCompile>
     <ResourceCompile>
@@ -151,10 +151,10 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;.;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
-      <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
+      <PreCompiledHeaderFile>src\precomp.h</PreCompiledHeaderFile>
       <PreCompiledHeader>Use</PreCompiledHeader>
     </ClCompile>
     <ResourceCompile>
@@ -171,10 +171,10 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;.;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
-      <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
+      <PreCompiledHeaderFile>src\precomp.h</PreCompiledHeaderFile>
       <PreCompiledHeader>Use</PreCompiledHeader>
     </ClCompile>
     <ResourceCompile>
@@ -189,10 +189,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <!--Leaf Item elements-->
-    <ClCompile Include="avb_bar0_discovery.c" />
-    <ClCompile Include="avb_bar0_enhanced.c" />
-    <ClCompile Include="avb_hardware_access.c" />
-    <ClCompile Include="avb_integration_fixed.c" />
+    <ClCompile Include="src\avb_bar0_discovery.c" />
+    <ClCompile Include="src\avb_bar0_enhanced.c" />
+    <ClCompile Include="src\avb_hardware_access.c" />
+    <ClCompile Include="src\avb_integration_fixed.c" />
     <ClCompile Include="tests\device_specific\i210\avb_test_i210.c" />
     <ClCompile Include="devices\intel_82575_impl.c" />
     <ClCompile Include="devices\intel_82576_impl.c" />
@@ -203,17 +203,17 @@
     <ClCompile Include="devices\intel_i219_impl.c" />
     <ClCompile Include="devices\intel_i226_impl.c" />
     <ClCompile Include="devices\intel_i350_impl.c" />
-    <ClCompile Include="intel_i225_kernel_wrapper.c" />
-    <ClCompile Include="intel_kernel_real.c" />
-    <ClCompile Include="precomp.c">
-      <AdditionalIncludeDirectories>..;.;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    <ClCompile Include="src\intel_i225_kernel_wrapper.c" />
+    <ClCompile Include="src\intel_kernel_real.c" />
+    <ClCompile Include="src\precomp.c">
+      <AdditionalIncludeDirectories>..;.;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1</PreProcessorDefinitions>
       <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
       <PreCompiledHeader>Create</PreCompiledHeader>
     </ClCompile>
-    <ClCompile Include="filter.c" />
-    <ClCompile Include="device.c" />
-    <ClCompile Include="flt_dbg.c" />
+    <ClCompile Include="src\filter.c" />
+    <ClCompile Include="src\device.c" />
+    <ClCompile Include="src\flt_dbg.c" />
     <ClCompile Include="tests\integration\AvbIntegrationTests.cpp">
       <ExcludedFromBuild>true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -228,7 +228,7 @@
     <ClCompile Include="tests\integration\avb\avb_test_standalone.c" />
     <ClCompile Include="tests\integration\avb\avb_test_user.c" />
     <ClCompile Include="tests\integration\avb\avb_test_user_main.c" />
-    <ClCompile Include="tsn_config.c" />
+    <ClCompile Include="src\tsn_config.c" />
     <ResourceCompile Include="filter.rc" />
     <ClInclude Include="devices\intel_device_interface.h" />
     <!-- SSOT: include\avb_ioctl.h (not external copy) -->
@@ -242,13 +242,13 @@
     <ClInclude Include="intel-ethernet-regs\gen\i219_regs.h" />
     <ClInclude Include="intel-ethernet-regs\gen\i225_regs.h" />
     <ClInclude Include="intel-ethernet-regs\gen\i226_regs.h" />
-    <ClInclude Include="precomp.h" />
-    <ClInclude Include="filter.h" />
-    <ClInclude Include="filteruser.h" />
-    <ClInclude Include="flt_dbg.h" />
-    <ClInclude Include="avb_integration.h" />
+    <ClInclude Include="src\precomp.h" />
+    <ClInclude Include="src\filter.h" />
+    <ClInclude Include="src\filteruser.h" />
+    <ClInclude Include="src\flt_dbg.h" />
+    <ClInclude Include="src\avb_integration.h" />
     <ClInclude Include="tests\taef\AvbTestCommon.h" />
-    <ClInclude Include="tsn_config.h" />
+    <ClInclude Include="src\tsn_config.h" />
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
   <ItemGroup>
