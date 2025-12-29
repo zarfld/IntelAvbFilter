@@ -13,7 +13,6 @@
  * 
  * Validates Intel I210/I226 PTP clock control implementation
  * 
- * @see https://github.com/zarfld/IntelAvbFilter/issues/4
  */
 
 #include <windows.h>

@@ -15,7 +15,6 @@
  * 3. Timestamp setting and retrieval
  * 4. Clock stability measurement
  * 
- * @see https://github.com/zarfld/IntelAvbFilter/issues/4
  */
 
 #include <windows.h>
