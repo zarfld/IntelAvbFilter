@@ -610,6 +610,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: TX Timestamp Retrieval IOCTL (Verifies #35 REQ-F-IOCTL-TS-001)"
     },
+    @{
+        Name = "test_hw_state_machine"
+        Type = "cl"
+        Source = "tests/integration/hw_state/test_hw_state_machine.c"
+        Output = "test_hw_state_machine.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: Hardware State Machine IOCTL (Verifies #18 REQ-F-HWCTX-001)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{

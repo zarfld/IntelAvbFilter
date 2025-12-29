@@ -21,7 +21,9 @@ if ($Full) {
     $command += " -Full"
 }
 if ($TestName) {
-    $command += " -TestExecutable '$TestName'"
+    # Ensure .exe extension for test name
+    $testExe = if ($TestName -notmatch '\.exe$') { "$TestName.exe" } else { $TestName }
+    $command += " -TestExecutable '$testExe'"
 }
 if ($TestExecutable) {
     $command += " -TestExecutable '$TestExecutable'"

@@ -398,6 +398,7 @@ if ($TestExecutable) {
         "test_ndis_send_path.exe",
         "test_ndis_receive_path.exe",
         "test_tx_timestamp_retrieval.exe",
+        "test_hw_state_machine.exe",
         "avb_capability_validation_test.exe",
         "avb_diagnostic_test.exe"
     )
@@ -427,6 +428,7 @@ if ($TestExecutable) {
         @{Name="test_ndis_send_path.exe"; Desc="Verify NDIS FilterSend packet processing (#42 REQ-F-NDIS-SEND-001)"},
         @{Name="test_ndis_receive_path.exe"; Desc="Verify NDIS FilterReceive packet processing (#43 REQ-F-NDIS-RECEIVE-001)"},
         @{Name="test_tx_timestamp_retrieval.exe"; Desc="Verify TX Timestamp Retrieval IOCTL (#35 REQ-F-IOCTL-TS-001)"},
+        @{Name="test_hw_state_machine.exe"; Desc="Verify Hardware State Machine IOCTL (#18 REQ-F-HWCTX-001)"},
         @{Name="avb_capability_validation_test.exe"; Desc="Verify realistic hardware capability reporting (no false advertising)"},
         @{Name="avb_device_separation_test.exe"; Desc="Verify clean device separation architecture compliance"}
     )
