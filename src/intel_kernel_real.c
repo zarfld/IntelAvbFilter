@@ -79,8 +79,8 @@ static int get_device_context(device_t *dev, PAVB_DEVICE_CONTEXT *context_out, i
  * @brief Initialize Intel device using device-specific implementation
  * CLEAN HAL: Pure dispatch to device-specific init
  * @param dev Device handle
- * @return 0 on success, <0 on error
- */
+ * @return 0 on success, <0 on error * 
+ * Implements: #40 (REQ-F-DEVICE-ABS-003: Register Access via Device Abstraction Layer) */
 int intel_init(device_t *dev)
 {
     PAVB_DEVICE_CONTEXT context;

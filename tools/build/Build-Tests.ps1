@@ -578,6 +578,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: Multi-Adapter Enumeration (Verifies #15 REQ-F-MULTIDEV-001)"
     },
+    @{
+        Name = "test_device_register_access"
+        Type = "cl"
+        Source = "tests/integration/device_abstraction/test_device_register_access.c"
+        Output = "test_device_register_access.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: Device Register Access via Abstraction Layer (Verifies #40 REQ-F-DEVICE-ABS-003)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
