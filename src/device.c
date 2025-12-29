@@ -393,6 +393,7 @@ IntelAvbFilterDeviceIoControl(
             break;
         }
 
+        // Implements: #15 (REQ-F-MULTIDEV-001.1: Adapter Enumeration)
         case IOCTL_AVB_ENUM_ADAPTERS:
         {
             DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: ENUM_ADAPTERS (multi-adapter mode)\n");
@@ -539,6 +540,7 @@ IntelAvbFilterDeviceIoControl(
             break;
         }
              
+        // Implements: #15 (REQ-F-MULTIDEV-001.2: Adapter Selection)
         case IOCTL_AVB_OPEN_ADAPTER:
         {
             DEBUGP(DL_TRACE, "IntelAvbFilterDeviceIoControl: OPEN_ADAPTER (multi-adapter mode)\n");

@@ -21,7 +21,10 @@
 #include <windows.h>
 #include <stdio.h>
 #include <assert.h>
-#include "../include/avb_ioctl.h"
+#include "../../../include/avb_ioctl.h"
+
+// Status codes (from NDIS but redefined for user-mode)
+#define AVB_STATUS_SUCCESS 0x00000000
 
 // Test framework macros
 #define TEST_ASSERT(condition, message) \
@@ -99,8 +102,10 @@ BOOLEAN Test_EnumerateAdapters_FirstAdapter()
     TEST_ASSERT(req.count >= 1, "At least one Intel adapter found");
     TEST_ASSERT_EQUAL(0x8086, req.vendor_id, "Vendor ID is Intel (0x8086)");
     
-    // Valid Intel I210/I225/I226 device IDs
+    // Valid Intel I210/I225/I226/I350 device IDs
     BOOLEAN validDeviceId = 
+        (req.device_id == 0x125B) || // I350
+        (req.device_id == 0x1521) || // I350
         (req.device_id == 0x15B7) || // I210
         (req.device_id == 0x15B8) || // I210
         (req.device_id == 0x15F2) || // I225
@@ -111,7 +116,7 @@ BOOLEAN Test_EnumerateAdapters_FirstAdapter()
         (req.device_id == 0x15B9);   // I219
     
     TEST_ASSERT(validDeviceId, "Device ID is valid Intel NIC");
-    TEST_ASSERT_EQUAL(NDIS_STATUS_SUCCESS, req.status, "Status is success");
+    TEST_ASSERT_EQUAL(AVB_STATUS_SUCCESS, req.status, "Status is success");
     
     CloseHandle(hDevice);
     return TRUE;
@@ -325,7 +330,7 @@ BOOLEAN Test_OpenAdapter_ByVidDid()
     );
     
     TEST_ASSERT(result != FALSE, "IOCTL_AVB_OPEN_ADAPTER succeeds");
-    TEST_ASSERT_EQUAL(NDIS_STATUS_SUCCESS, openReq.status, 
+    TEST_ASSERT_EQUAL(AVB_STATUS_SUCCESS, openReq.status, 
                      "Adapter opened successfully");
     
     CloseHandle(hDevice);
