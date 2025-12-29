@@ -570,6 +570,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: Test All Adapters"
     },
+    @{
+        Name = "test_multidev_adapter_enum"
+        Type = "cl"
+        Source = "tests/integration/multi_adapter/test_multidev_adapter_enum.c"
+        Output = "test_multidev_adapter_enum.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: Multi-Adapter Enumeration (Verifies #15 REQ-F-MULTIDEV-001)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
