@@ -586,6 +586,22 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: Device Register Access via Abstraction Layer (Verifies #40 REQ-F-DEVICE-ABS-003)"
     },
+    @{
+        Name = "test_ndis_send_path"
+        Type = "cl"
+        Source = "tests/integration/ndis_send/test_ndis_send_path.c"
+        Output = "test_ndis_send_path.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: NDIS FilterSend Packet Processing (Verifies #42 REQ-F-NDIS-SEND-001, #291 TEST-NDIS-SEND-PATH-001)"
+    },
+    @{
+        Name = "test_ndis_receive_path"
+        Type = "cl"
+        Source = "tests/integration/ndis_receive/test_ndis_receive_path.c"
+        Output = "test_ndis_receive_path.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: NDIS FilterReceive Packet Processing (Verifies #43 REQ-F-NDIS-RECEIVE-001, #290 TEST-NDIS-RECEIVE-PATH-001)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
