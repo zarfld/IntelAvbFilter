@@ -602,6 +602,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: NDIS FilterReceive Packet Processing (Verifies #43 REQ-F-NDIS-RECEIVE-001, #290 TEST-NDIS-RECEIVE-PATH-001)"
     },
+    @{
+        Name = "test_tx_timestamp_retrieval"
+        Type = "cl"
+        Source = "tests/integration/tx_timestamp/test_tx_timestamp_retrieval.c"
+        Output = "test_tx_timestamp_retrieval.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: TX Timestamp Retrieval IOCTL (Verifies #35 REQ-F-IOCTL-TS-001)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
