@@ -103,12 +103,29 @@ int Test_RegisterRead_ViaAbstraction(HANDLE hDevice)
 {
     printf("\n[Test 2] RegisterRead_ViaAbstraction\n");
     
-    // Open first adapter
-    AVB_OPEN_REQUEST openReq = {0};
-    openReq.vendor_id = 0x8086; // Intel
-    openReq.device_id = 0xFFFF; // Match any Intel device
-    
+    // First enumerate to get actual device ID
+    AVB_ENUM_REQUEST enumReq = {0};
+    enumReq.index = 0;
     DWORD bytesReturned = 0;
+    
+    BOOL enumSuccess = DeviceIoControl(
+        hDevice,
+        IOCTL_AVB_ENUM_ADAPTERS,
+        &enumReq,
+        sizeof(enumReq),
+        &enumReq,
+        sizeof(enumReq),
+        &bytesReturned,
+        NULL
+    );
+    
+    TEST_ASSERT(enumSuccess, "Enumerate adapter to get device ID");
+    printf("  Using adapter: VID=0x%04X DID=0x%04X\n", enumReq.vendor_id, enumReq.device_id);
+    
+    // Open adapter using real device ID (not wildcard)
+    AVB_OPEN_REQUEST openReq = {0};
+    openReq.vendor_id = enumReq.vendor_id;
+    openReq.device_id = enumReq.device_id;
     
     BOOL success = DeviceIoControl(
         hDevice,
@@ -145,12 +162,18 @@ int Test_RegisterWrite_ViaAbstraction(HANDLE hDevice)
 {
     printf("\n[Test 3] RegisterWrite_ViaAbstraction\n");
     
+    // Enumerate to get device ID
+    AVB_ENUM_REQUEST enumReq = {0};
+    enumReq.index = 0;
+    DWORD bytesReturned = 0;
+    
+    DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS, &enumReq, sizeof(enumReq),
+                    &enumReq, sizeof(enumReq), &bytesReturned, NULL);
+    
     // Open adapter
     AVB_OPEN_REQUEST openReq = {0};
-    openReq.vendor_id = 0x8086;
-    openReq.device_id = 0xFFFF;
-    
-    DWORD bytesReturned = 0;
+    openReq.vendor_id = enumReq.vendor_id;
+    openReq.device_id = enumReq.device_id;
     
     BOOL success = DeviceIoControl(
         hDevice,
@@ -186,12 +209,18 @@ int Test_PtpSystemTime_ViaAbstraction(HANDLE hDevice)
 {
     printf("\n[Test 4] PtpSystemTime_ViaAbstraction\n");
     
+    // Enumerate to get device ID
+    AVB_ENUM_REQUEST enumReq = {0};
+    enumReq.index = 0;
+    DWORD bytesReturned = 0;
+    
+    DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS, &enumReq, sizeof(enumReq),
+                    &enumReq, sizeof(enumReq), &bytesReturned, NULL);
+    
     // Open adapter
     AVB_OPEN_REQUEST openReq = {0};
-    openReq.vendor_id = 0x8086;
-    openReq.device_id = 0xFFFF;
-    
-    DWORD bytesReturned = 0;
+    openReq.vendor_id = enumReq.vendor_id;
+    openReq.device_id = enumReq.device_id;
     
     BOOL success = DeviceIoControl(
         hDevice,
