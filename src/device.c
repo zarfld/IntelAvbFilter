@@ -169,6 +169,7 @@ IntelAvbFilterDeviceIoControl(
            IrpSp->Parameters.DeviceIoControl.IoControlCode,
            IrpSp->FileObject);
     
+    // Implements #17 (REQ-NF-DIAG-REG-001: Registry Diagnostics)
     // DIAGNOSTIC: Write to registry to prove IOCTLs are reaching driver
     // This bypasses DebugView issues
     #if DBG
@@ -289,7 +290,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_MDIO_WRITE:
         case IOCTL_AVB_GET_HW_STATE:
         case IOCTL_AVB_ADJUST_FREQUENCY:
-        case IOCTL_AVB_GET_CLOCK_CONFIG:
+        case IOCTL_AVB_GET_CLOCK_CONFIG:  // Implements #4 (BUG: IOCTL_AVB_GET_CLOCK_CONFIG Not Working)
         case IOCTL_AVB_SET_HW_TIMESTAMPING:
         case IOCTL_AVB_SET_RX_TIMESTAMP:
         case IOCTL_AVB_SET_QUEUE_TIMESTAMP:

@@ -394,6 +394,7 @@ if ($TestExecutable) {
     Write-Step "Running Quick Verification Tests"
     
     $quickTests = @(
+        "test_multidev_adapter_enum.exe",
         "test_device_register_access.exe",
         "test_ndis_send_path.exe",
         "test_ndis_receive_path.exe",
@@ -401,6 +402,8 @@ if ($TestExecutable) {
         "test_hw_state_machine.exe",
         "test_lazy_initialization.exe",
         "test_registry_diagnostics.exe",
+        "ptp_clock_control_test.exe",
+        "ptp_clock_control_production_test.exe",
         "avb_capability_validation_test.exe",
         "avb_diagnostic_test.exe"
     )
@@ -426,6 +429,7 @@ if ($TestExecutable) {
     Write-Host "Purpose: Verify core architectural requirements are met" -ForegroundColor Gray
     
     $phase0Tests = @(
+        @{Name="test_multidev_adapter_enum.exe"; Desc="Verify Multi-Adapter Enumeration (#15 REQ-F-MULTIDEV-001)"},
         @{Name="test_device_register_access.exe"; Desc="Verify device abstraction layer register access (#40 REQ-F-DEVICE-ABS-003)"},
         @{Name="test_ndis_send_path.exe"; Desc="Verify NDIS FilterSend packet processing (#42 REQ-F-NDIS-SEND-001)"},
         @{Name="test_ndis_receive_path.exe"; Desc="Verify NDIS FilterReceive packet processing (#43 REQ-F-NDIS-RECEIVE-001)"},
@@ -433,6 +437,8 @@ if ($TestExecutable) {
         @{Name="test_hw_state_machine.exe"; Desc="Verify Hardware State Machine IOCTL (#18 REQ-F-HWCTX-001)"},
         @{Name="test_lazy_initialization.exe"; Desc="Verify Lazy Initialization (#16 REQ-F-LAZY-INIT-001)"},
         @{Name="test_registry_diagnostics.exe"; Desc="Verify Registry Diagnostics (#17 REQ-NF-DIAG-REG-001)"},
+        @{Name="ptp_clock_control_test.exe"; Desc="Verify PTP Clock Control including GET_CLOCK_CONFIG (#4)"},
+        @{Name="ptp_clock_control_production_test.exe"; Desc="Verify PTP Clock Production IOCTLs (#4 P0 CRITICAL)"},
         @{Name="avb_capability_validation_test.exe"; Desc="Verify realistic hardware capability reporting (no false advertising)"},
         @{Name="avb_device_separation_test.exe"; Desc="Verify clean device separation architecture compliance"}
     )

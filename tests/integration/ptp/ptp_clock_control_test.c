@@ -2,13 +2,18 @@
  * @file ptp_clock_control_test.c
  * @brief Comprehensive test for PTP clock control: timestamp setting, clock adjustments, and frequency tuning
  * 
+ * Verifies #4 (BUG: IOCTL_AVB_GET_CLOCK_CONFIG Not Working)
+ * 
  * Tests:
  * 1. Timestamp Setting - Write SYSTIML/SYSTIMH and verify
  * 2. Clock Adjustment - Modify TIMINCA and measure frequency change
  * 3. Frequency Tuning - Test different increment values and validate accuracy
  * 4. Clock Drift - Compare PTP clock against Windows system time
+ * 5. Clock Config Query - SYSTIM, TIMINCA, TSAUXC register reads
  * 
  * Validates Intel I210/I226 PTP clock control implementation
+ * 
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/4
  */
 
 #include <windows.h>
