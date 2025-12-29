@@ -4,7 +4,13 @@ param(
     [string]$Configuration = 'Debug',
     
     [Parameter(Mandatory=$false)]
-    [switch]$Full
+    [switch]$Full,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$TestName,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$TestExecutable
 )
 
 $scriptPath = Join-Path $PSScriptRoot 'Run-Tests.ps1'
@@ -13,6 +19,12 @@ $scriptPath = Join-Path $PSScriptRoot 'Run-Tests.ps1'
 $command = "& '$scriptPath' -Configuration $Configuration"
 if ($Full) {
     $command += " -Full"
+}
+if ($TestName) {
+    $command += " -TestExecutable '$TestName'"
+}
+if ($TestExecutable) {
+    $command += " -TestExecutable '$TestExecutable'"
 }
 $command += "; Write-Host ''; Write-Host 'Press any key to close...' -ForegroundColor Yellow; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')"
 

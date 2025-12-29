@@ -67,6 +67,57 @@ function Write-Info {
     Write-Host "[INFO] $Message" -ForegroundColor Yellow
 }
 
+# Helper function to run tests and track results
+function Invoke-Test {
+    param(
+        [string]$TestName,
+        [string]$Description = ""
+    )
+    
+    $testPath = Join-Path $testExeDir $TestName
+    if (-not (Test-Path $testPath)) {
+        Write-Host "`n  => $TestName" -ForegroundColor Cyan
+        if ($Description) {
+            Write-Host "     $Description" -ForegroundColor Gray
+        }
+        Write-Failure "Test not found: $testPath"
+        $script:totalTests++
+        $script:failedTests++
+        $script:testResults += [PSCustomObject]@{
+            Name = $TestName
+            Status = "NOT_FOUND"
+            ExitCode = -1
+        }
+        return
+    }
+    
+    Write-Host "`n  => $TestName" -ForegroundColor Cyan
+    if ($Description) {
+        Write-Host "     $Description" -ForegroundColor Gray
+    }
+    
+    $script:totalTests++
+    & $testPath
+    $exitCode = $LASTEXITCODE
+    
+    if ($exitCode -eq 0 -or $null -eq $exitCode) {
+        $script:passedTests++
+        $script:testResults += [PSCustomObject]@{
+            Name = $TestName
+            Status = "PASSED"
+            ExitCode = if ($exitCode) { $exitCode } else { 0 }
+        }
+    } else {
+        Write-Host "  [WARN] Test exited with code $exitCode" -ForegroundColor Yellow
+        $script:failedTests++
+        $script:testResults += [PSCustomObject]@{
+            Name = $TestName
+            Status = "FAILED"
+            ExitCode = $exitCode
+        }
+    }
+}
+
 # Banner
 Write-Host @"
 ================================================================
@@ -80,6 +131,12 @@ $scriptDir = $PSScriptRoot  # tools/test
 $toolsDir = Split-Path $scriptDir -Parent  # tools
 $repoRoot = Split-Path $toolsDir -Parent  # repository root
 $testExeDir = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
+
+# Test execution tracking
+$script:totalTests = 0
+$script:passedTests = 0
+$script:failedTests = 0
+$script:testResults = @()
 
 # ===========================
 # Feature: Secure Boot Check (from test_secure_boot_compatible.bat)
@@ -240,10 +297,53 @@ if (-not $SkipHardwareCheck) {
 Write-Step "Testing Device Node Access"
 
 $devicePath = "\\.\IntelAvbFilter"
+
+# Use Win32 CreateFile API (device nodes don't work with FileStream)
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class DeviceAccess {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+        
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+    
+    public const uint GENERIC_READ = 0x80000000;
+    public const uint GENERIC_WRITE = 0x40000000;
+    public const uint OPEN_EXISTING = 3;
+    public const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+    public static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
+}
+"@
+
 try {
-    $handle = [System.IO.File]::Open($devicePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-    $handle.Close()
-    Write-Success "Device node accessible: $devicePath"
+    $handle = [DeviceAccess]::CreateFile(
+        $devicePath,
+        [DeviceAccess]::GENERIC_READ -bor [DeviceAccess]::GENERIC_WRITE,
+        0,
+        [IntPtr]::Zero,
+        [DeviceAccess]::OPEN_EXISTING,
+        [DeviceAccess]::FILE_ATTRIBUTE_NORMAL,
+        [IntPtr]::Zero
+    )
+    
+    if ($handle -ne [DeviceAccess]::INVALID_HANDLE_VALUE) {
+        [DeviceAccess]::CloseHandle($handle) | Out-Null
+        Write-Success "Device node accessible: $devicePath"
+    } else {
+        $lastError = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-Failure "Cannot access device node: $devicePath"
+        Write-Info "Win32 Error Code: $lastError"
+        Write-Info "Driver may not be loaded or device not created"
+    }
 } catch {
     Write-Failure "Cannot access device node: $devicePath"
     Write-Info "Error: $($_.Exception.Message)"
@@ -294,6 +394,9 @@ if ($TestExecutable) {
     Write-Step "Running Quick Verification Tests"
     
     $quickTests = @(
+        "test_device_register_access.exe",
+        "test_ndis_send_path.exe",
+        "test_ndis_receive_path.exe",
         "avb_capability_validation_test.exe",
         "avb_diagnostic_test.exe"
     )
@@ -319,16 +422,14 @@ if ($TestExecutable) {
     Write-Host "Purpose: Verify core architectural requirements are met" -ForegroundColor Gray
     
     $phase0Tests = @(
+        @{Name="test_device_register_access.exe"; Desc="Verify device abstraction layer register access (#40 REQ-F-DEVICE-ABS-003)"},
+        @{Name="test_ndis_send_path.exe"; Desc="Verify NDIS FilterSend packet processing (#42 REQ-F-NDIS-SEND-001)"},
+        @{Name="test_ndis_receive_path.exe"; Desc="Verify NDIS FilterReceive packet processing (#43 REQ-F-NDIS-RECEIVE-001)"},
         @{Name="avb_capability_validation_test.exe"; Desc="Verify realistic hardware capability reporting (no false advertising)"},
         @{Name="avb_device_separation_test.exe"; Desc="Verify clean device separation architecture compliance"}
     )
     foreach ($test in $phase0Tests) {
-        $testPath = Join-Path $testExeDir $test.Name
-        if (Test-Path $testPath) {
-            Write-Host "`n  => $($test.Name)" -ForegroundColor Magenta
-            Write-Host "     $($test.Desc)" -ForegroundColor Gray
-            & $testPath
-        }
+        Invoke-Test -TestName $test.Name -Description $test.Desc
     }
     
     # Phase 1: Basic Hardware Diagnostics
@@ -340,11 +441,7 @@ if ($TestExecutable) {
         @{Name="avb_hw_state_test.exe"; Desc="Hardware state transitions and management"}
     )
     foreach ($test in $phase1Tests) {
-        $testPath = Join-Path $testExeDir $test.Name
-        if (Test-Path $testPath) {
-            Write-Host "`n  => $($test.Name)" -ForegroundColor Cyan
-            & $testPath
-        }
+        Invoke-Test -TestName $test.Name -Description $test.Desc
     }
     
     # Phase 2: TSN IOCTL Handler Verification
@@ -356,42 +453,26 @@ if ($TestExecutable) {
         @{Name="tsn_hardware_activation_validation.exe"; Desc="TSN features activate at hardware level"}
     )
     foreach ($test in $phase2Tests) {
-        $testPath = Join-Path $testExeDir $test.Name
-        if (Test-Path $testPath) {
-            Write-Host "`n  => $($test.Name)" -ForegroundColor Yellow
-            & $testPath
-        }
+        Invoke-Test -TestName $test.Name -Description $test.Desc
     }
     
     # Phase 3: Multi-Adapter Hardware Testing
     Write-Host "`n=== PHASE 3: Multi-Adapter Hardware Testing ===" -ForegroundColor Green
     
-    $testPath = Join-Path $testExeDir "avb_multi_adapter_test.exe"
-    if (Test-Path $testPath) {
-        Write-Host "`n  => avb_multi_adapter_test.exe" -ForegroundColor Yellow
-        & $testPath
-    }
+    Invoke-Test -TestName "avb_multi_adapter_test.exe"
     
     # Phase 4: I226 Advanced Feature Testing
     Write-Host "`n=== PHASE 4: I226 Advanced Feature Testing ===" -ForegroundColor Green
     
     $phase4Tests = @("avb_i226_test.exe", "avb_i226_advanced_test.exe")
     foreach ($testName in $phase4Tests) {
-        $testPath = Join-Path $testExeDir $testName
-        if (Test-Path $testPath) {
-            Write-Host "`n  => $testName" -ForegroundColor Magenta
-            & $testPath
-        }
+        Invoke-Test -TestName $testName
     }
     
     # Phase 5: I210 Basic Testing
     Write-Host "`n=== PHASE 5: I210 Basic Testing ===" -ForegroundColor Green
     
-    $testPath = Join-Path $testExeDir "avb_test_i210.exe"
-    if (Test-Path $testPath) {
-        Write-Host "`n  => avb_test_i210.exe" -ForegroundColor Blue
-        & $testPath
-    }
+    Invoke-Test -TestName "avb_test_i210.exe"
     
     # Phase 6: Specialized Investigation Tests
     Write-Host "`n=== PHASE 6: Specialized Investigation Tests ===" -ForegroundColor Green
@@ -405,11 +486,7 @@ if ($TestExecutable) {
         "hardware_investigation_tool.exe"
     )
     foreach ($testName in $phase6Tests) {
-        $testPath = Join-Path $testExeDir $testName
-        if (Test-Path $testPath) {
-            Write-Host "`n  => $testName" -ForegroundColor Cyan
-            & $testPath
-        }
+        Invoke-Test -TestName $testName
     }
     
 } else {
@@ -464,66 +541,126 @@ Write-Host "================================================================" -F
 $hasService = (Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue) -ne $null
 $intelAdapters = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "*Intel*"} -ErrorAction SilentlyContinue
 $hasIntelHw = $intelAdapters.Count -gt 0
-$hasDeviceNode = try { [System.IO.File]::Exists("\\.\IntelAvbFilter") } catch { $false }
+
+# Check device node using same Win32 API as the test above
+$hasDeviceNode = $false
+try {
+    $handle = [DeviceAccess]::CreateFile(
+        "\\.\IntelAvbFilter",
+        [DeviceAccess]::GENERIC_READ -bor [DeviceAccess]::GENERIC_WRITE,
+        0,
+        [IntPtr]::Zero,
+        [DeviceAccess]::OPEN_EXISTING,
+        [DeviceAccess]::FILE_ATTRIBUTE_NORMAL,
+        [IntPtr]::Zero
+    )
+    
+    if ($handle -ne [DeviceAccess]::INVALID_HANDLE_VALUE) {
+        [DeviceAccess]::CloseHandle($handle) | Out-Null
+        $hasDeviceNode = $true
+    }
+} catch {
+    $hasDeviceNode = $false
+}
+
 $hasTests = (Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue).Count -gt 0
 
-Write-Host "`nDriver Status:" -ForegroundColor Yellow
+# ===========================
+# Infrastructure Status
+# ===========================
+Write-Host "`nInfrastructure Status:" -ForegroundColor Yellow
 if ($hasService) {
     $svc = Get-Service -Name "IntelAvbFilter"
-    Write-Host "  [OK] Driver service installed ($($svc.Status))" -ForegroundColor Green
+    Write-Host "  [OK] Driver service: $($svc.Status)" -ForegroundColor Green
 } else {
     Write-Host "  [FAIL] Driver service not found" -ForegroundColor Red
 }
 
-Write-Host "`nHardware Status:" -ForegroundColor Yellow
 if ($hasIntelHw) {
-    Write-Host "  [OK] Intel network adapter(s) detected: $($intelAdapters.Count)" -ForegroundColor Green
+    Write-Host "  [OK] Intel adapters: $($intelAdapters.Count) detected" -ForegroundColor Green
 } else {
     Write-Host "  [FAIL] No Intel network adapters detected" -ForegroundColor Red
 }
 
-Write-Host "`nDevice Interface Status:" -ForegroundColor Yellow
 if ($hasDeviceNode) {
-    Write-Host "  [OK] Device node created and accessible" -ForegroundColor Green
+    Write-Host "  [OK] Device node: Accessible" -ForegroundColor Green
 } else {
-    Write-Host "  [FAIL] Device node not created" -ForegroundColor Red
-    if (-not $hasIntelHw) {
-        Write-Host "         (Expected - no Intel hardware)" -ForegroundColor Gray
-    }
+    Write-Host "  [FAIL] Device node: Not created" -ForegroundColor Red
 }
 
-Write-Host "`nTest Tools Status:" -ForegroundColor Yellow
 if ($hasTests) {
     $testCount = (Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue).Count
-    Write-Host "  [OK] Test applications available: $testCount" -ForegroundColor Green
+    Write-Host "  [OK] Test executables: $testCount available" -ForegroundColor Green
 } else {
-    Write-Host "  [WARN] Test applications not built" -ForegroundColor Yellow
+    Write-Host "  [WARN] Test executables: Not built" -ForegroundColor Yellow
+}
+
+# ===========================
+# Test Execution Results
+# ===========================
+if ($script:totalTests -gt 0) {
+    Write-Host "`nTest Execution Results:" -ForegroundColor Yellow
+    Write-Host "  Total Tests Run:    $($script:totalTests)" -ForegroundColor Cyan
+    
+    if ($script:passedTests -gt 0) {
+        Write-Host "  ✓ Passed:          $($script:passedTests)" -ForegroundColor Green
+    }
+    if ($script:failedTests -gt 0) {
+        Write-Host "  ✗ Failed:          $($script:failedTests)" -ForegroundColor Red
+    }
+    if ($script:skippedTests -gt 0) {
+        Write-Host "  ○ Skipped:         $($script:skippedTests)" -ForegroundColor Yellow
+    }
+    
+    # Calculate success rate
+    $successRate = [math]::Round(($script:passedTests / $script:totalTests) * 100, 1)
+    Write-Host "  Success Rate:       $successRate%" -ForegroundColor $(if ($successRate -eq 100) { "Green" } elseif ($successRate -ge 80) { "Yellow" } else { "Red" })
+    
+    # Show failed tests details if any
+    if ($script:failedTests -gt 0) {
+        Write-Host "`n  Failed Tests:" -ForegroundColor Red
+        $script:testResults | Where-Object { $_.Status -ne "PASSED" } | ForEach-Object {
+            Write-Host "    - $($_.Name) (Exit code: $($_.ExitCode))" -ForegroundColor Red
+        }
+    }
 }
 
 # ===========================
 # Overall Assessment
 # ===========================
 Write-Host "`nOverall Assessment:" -ForegroundColor Yellow
-if ($hasService -and $hasIntelHw -and $hasDeviceNode) {
-    Write-Host "  => DRIVER IS FULLY OPERATIONAL!" -ForegroundColor Green
-    Write-Host "     The driver is installed, Intel hardware is detected," -ForegroundColor Green
-    Write-Host "     and the device interface is accessible." -ForegroundColor Green
-    Write-Host "`n  Next steps:" -ForegroundColor Cyan
-    Write-Host "    - Run test applications to verify functionality" -ForegroundColor White
-    Write-Host "    - Use DebugView to monitor kernel debug output" -ForegroundColor White
-    Write-Host "    - Test AVB/TSN features with your application" -ForegroundColor White
-} elseif ($hasService -and -not $hasIntelHw) {
-    Write-Host "  => DRIVER INSTALLED BUT NO INTEL HARDWARE" -ForegroundColor Yellow
-    Write-Host "     The driver is installed correctly but requires" -ForegroundColor Yellow
-    Write-Host "     Intel Ethernet hardware to function." -ForegroundColor Yellow
-} elseif (-not $hasService) {
-    Write-Host "  => DRIVER NOT PROPERLY INSTALLED" -ForegroundColor Red
-    Write-Host "     The driver service is not installed or registered." -ForegroundColor Red
-    Write-Host "`n  Try:" -ForegroundColor Cyan
-    Write-Host "    .\tools\setup\Install-Driver.ps1 -Configuration $Configuration -InstallDriver" -ForegroundColor White
+
+# Determine overall status
+$infraOK = $hasService -and $hasIntelHw -and $hasDeviceNode
+$testsOK = $script:totalTests -eq 0 -or ($script:failedTests -eq 0 -and $script:totalTests -gt 0)
+
+if ($infraOK -and $testsOK) {
+    Write-Host "  => ALL SYSTEMS OPERATIONAL!" -ForegroundColor Green
+    if ($script:totalTests -gt 0) {
+        Write-Host "     Infrastructure validated, $($script:totalTests) tests passed." -ForegroundColor Green
+    } else {
+        Write-Host "     Infrastructure validated, ready for testing." -ForegroundColor Green
+    }
+} elseif ($infraOK -and -not $testsOK) {
+    Write-Host "  => INFRASTRUCTURE OK, BUT TESTS FAILED" -ForegroundColor Yellow
+    Write-Host "     Driver installed, but $($script:failedTests) test(s) failed." -ForegroundColor Yellow
+    Write-Host "     Review test output above for details." -ForegroundColor Yellow
+} elseif (-not $infraOK -and $testsOK) {
+    if ($hasService -and -not $hasIntelHw) {
+        Write-Host "  => DRIVER INSTALLED BUT NO INTEL HARDWARE" -ForegroundColor Yellow
+        Write-Host "     The driver requires Intel Ethernet hardware." -ForegroundColor Yellow
+    } elseif (-not $hasService) {
+        Write-Host "  => DRIVER NOT PROPERLY INSTALLED" -ForegroundColor Red
+        Write-Host "     The driver service is not installed or registered." -ForegroundColor Red
+        Write-Host "`n  Try:" -ForegroundColor Cyan
+        Write-Host "    .\tools\setup\Install-Driver.ps1 -Configuration $Configuration -InstallDriver" -ForegroundColor White
+    } else {
+        Write-Host "  => PARTIAL INSTALLATION" -ForegroundColor Yellow
+        Write-Host "     The driver is installed but not fully functional." -ForegroundColor Yellow
+    }
 } else {
-    Write-Host "  => PARTIAL INSTALLATION" -ForegroundColor Yellow
-    Write-Host "     The driver is installed but not fully functional." -ForegroundColor Yellow
+    Write-Host "  => INFRASTRUCTURE AND TESTS FAILED" -ForegroundColor Red
+    Write-Host "     Both infrastructure and test execution have issues." -ForegroundColor Red
 }
 
 Write-Host "`n"
