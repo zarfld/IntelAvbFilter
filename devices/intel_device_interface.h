@@ -30,6 +30,8 @@ struct ptm_config;
  * 
  * This design prevents cross-contamination between device implementations
  * and allows easy addition of new Intel adapter families.
+ * 
+ * Implements: #40 (REQ-F-DEVICE-ABS-003: Register Access via Device Abstraction Layer)
  */
 typedef struct _intel_device_ops {
     // Device identification and capabilities

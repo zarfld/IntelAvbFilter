@@ -66,6 +66,8 @@ static void initialize_device_registry(void)
  * @brief Get device-specific operations for an Intel device
  * @param device_type Intel device type identifier
  * @return Pointer to device operations structure, or NULL if unsupported
+ * 
+ * Implements: #40 (REQ-F-DEVICE-ABS-003: Register Access via Device Abstraction Layer)
  */
 const intel_device_ops_t* intel_get_device_ops(intel_device_type_t device_type)
 {
