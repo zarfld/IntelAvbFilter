@@ -543,6 +543,7 @@ Before any implementation, design, or testing work:
 - ❌ `**Traces to**: #123` (bolding incorrect)
 - ❌ `Parent: #123` (missing "Traces to")
 - ❌ `Implements: #123` (wrong relationship type)
+- ❌ `Trace to: Issue #123` (extra word "Issue")
 - ❌ Missing `#` before number
 - ❌ Missing issue number entirely
 

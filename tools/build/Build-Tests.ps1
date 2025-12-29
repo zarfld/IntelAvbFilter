@@ -618,6 +618,23 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: Hardware State Machine IOCTL (Verifies #18 REQ-F-HWCTX-001)"
     },
+    @{
+        Name = "test_lazy_initialization"
+        Type = "cl"
+        Source = "tests/integration/lazy_init/test_lazy_initialization.c"
+        Output = "test_lazy_initialization.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: Lazy Initialization (Verifies #16 REQ-F-LAZY-INIT-001)"
+    },
+    @{
+        Name = "test_registry_diagnostics"
+        Type = "cl"
+        Source = "tests/integration/registry_diag/test_registry_diagnostics.c"
+        Output = "test_registry_diagnostics.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "advapi32.lib"
+        Description = "Integration: Registry Diagnostics (Verifies #17 REQ-NF-DIAG-REG-001)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
