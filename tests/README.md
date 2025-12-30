@@ -1,6 +1,7 @@
 Intel AVB Filter Driver - Test and Debug Suite
 
 Overview
+- **Verification tests** (PowerShell): Standards compliance and code quality checks (SSOT, traceability).
 - Integration tests (standalone EXE): fast smoke and stress checks using the public IOCTL ABI.
 - TAEF tests (optional): Windows Test Authoring and Execution Framework tests for HLK-like automation.
 - Error-path scenarios: basic link toggle and resilience checks.
@@ -42,6 +43,18 @@ WHQL/HLK Readiness
 - Run Static Driver Verifier (SDV) on the project (Visual Studio Driver menu).
 - Clean WPP/trace usage; avoid deprecated APIs. Ensure PASS for NDIS and KM tests in HLK.
 
+Verification Tests (Standards Compliance)
+- Location: `tests\verification\ssot\`
+- Purpose: Verify ISO/IEC/IEEE standards compliance and architectural decisions
+- **TEST-SSOT-001** (#301): Verify no duplicate IOCTL definitions (Issue #24)
+- **TEST-SSOT-002** (#300): Verify CI workflow catches SSOT violations
+- **TEST-SSOT-003** (#302): Verify all files use SSOT header include
+- **TEST-SSOT-004** (#303): Verify SSOT header completeness
+- Run all: `.\tests\verification\ssot\Run-All-SSOT-Tests.ps1`
+- Integrated: Runs automatically in `Quick` and `Full` test modes
+- See: `tests\verification\ssot\README.md` for detailed documentation
+
 Notes
 - All tests use the public IOCTL contract in include/avb_ioctl.h.
 - Hardware-first: tests exercise real paths; no simulation toggles are used.
+- **SSOT tests run first** in Full mode to ensure code quality before hardware tests.

@@ -1,14 +1,11 @@
 /**
  * Print IOCTL codes to verify they match
+ *
+ * Implements REQ-NF-SSOT-001: Uses Single Source of Truth (include/avb_ioctl.h)
  */
 #include <windows.h>
 #include <stdio.h>
-
-#define _NDIS_CONTROL_CODE(Request,Method) \
-        CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, (Request), (Method), FILE_ANY_ACCESS)
-
-#define IOCTL_AVB_GET_CLOCK_CONFIG _NDIS_CONTROL_CODE(39, METHOD_BUFFERED)
-#define IOCTL_AVB_READ_REGISTER _NDIS_CONTROL_CODE(22, METHOD_BUFFERED)
+#include "../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
 int main() {
     printf("IOCTL Code Verification:\n");
