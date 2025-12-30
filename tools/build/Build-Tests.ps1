@@ -107,10 +107,15 @@ if ($BuildDiagnosticTools) {
     $DiagSource = Join-Path $RepoRoot "tests\diagnostic\intel_avb_diagnostics.c"
     if (Test-Path $DiagSource) {
         Write-Host "   Building intel_avb_diagnostics.exe..." -ForegroundColor Yellow
-        $DiagExe = Join-Path $RepoRoot "intel_avb_diagnostics.exe"
+        $Platform = "x64"
+        $DiagOutputDir = Join-Path $RepoRoot "build\tools\avb_test\$Platform\$Configuration"
+        if (-not (Test-Path $DiagOutputDir)) {
+            New-Item -ItemType Directory -Path $DiagOutputDir -Force | Out-Null
+        }
+        $DiagExe = Join-Path $DiagOutputDir "intel_avb_diagnostics.exe"
         & cl.exe $DiagSource /Fe:$DiagExe /TC /link advapi32.lib setupapi.lib cfgmgr32.lib iphlpapi.lib
         if (Test-Path $DiagExe) {
-            Write-Host "   [OK] intel_avb_diagnostics.exe compiled" -ForegroundColor Green
+            Write-Host "   [OK] intel_avb_diagnostics.exe compiled to $DiagOutputDir" -ForegroundColor Green
         } else {
             Write-Host "   [FAIL] intel_avb_diagnostics.exe compilation failed" -ForegroundColor Red
         }
@@ -122,10 +127,15 @@ if ($BuildDiagnosticTools) {
     $DevSource = Join-Path $RepoRoot "debug_device_interface.c"
     if (Test-Path $DevSource) {
         Write-Host "   Building debug_device_interface.exe..." -ForegroundColor Yellow
-        $DevExe = Join-Path $RepoRoot "device_interface_test.exe"
+        $Platform = "x64"
+        $DevOutputDir = Join-Path $RepoRoot "build\tools\avb_test\$Platform\$Configuration"
+        if (-not (Test-Path $DevOutputDir)) {
+            New-Item -ItemType Directory -Path $DevOutputDir -Force | Out-Null
+        }
+        $DevExe = Join-Path $DevOutputDir "device_interface_test.exe"
         & cl.exe $DevSource /Fe:$DevExe /link advapi32.lib
         if (Test-Path $DevExe) {
-            Write-Host "   [OK] device_interface_test.exe compiled" -ForegroundColor Green
+            Write-Host "   [OK] device_interface_test.exe compiled to $DevOutputDir" -ForegroundColor Green
         } else {
             Write-Host "   [FAIL] device_interface_test.exe compilation failed" -ForegroundColor Red
         }

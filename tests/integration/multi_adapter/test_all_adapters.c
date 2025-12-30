@@ -10,10 +10,7 @@
 #include <stdint.h>
 #include "../../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
-typedef uint8_t  avb_u8;
-typedef uint16_t avb_u16;
-typedef uint32_t avb_u32;
-typedef uint64_t avb_u64;
+// Type definitions are in include/avb_ioctl.h (SSOT)
 
 #pragma pack(push, 1)
 
@@ -36,13 +33,7 @@ typedef struct AVB_OPEN_ADAPTER_REQUEST {
     avb_u32 status;
 } AVB_OPEN_ADAPTER_REQUEST;
 
-typedef struct AVB_CLOCK_CONFIG {
-    avb_u64 systim;
-    avb_u32 timinca;
-    avb_u32 tsauxc;
-    avb_u32 clock_rate_mhz;
-    avb_u32 status;
-} AVB_CLOCK_CONFIG;
+// AVB_CLOCK_CONFIG is defined in include/avb_ioctl.h (SSOT)
 
 #pragma pack(pop)
 

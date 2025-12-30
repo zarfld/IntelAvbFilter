@@ -9,19 +9,12 @@
 #include <stdio.h>
 #include "../../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
+// Test-specific struct (not in SSOT - only used for testing register access)
 typedef struct {
     unsigned int offset;
     unsigned int value;
     unsigned int status;
 } AVB_REGISTER_ACCESS;
-
-typedef struct {
-    unsigned long long systim;
-    unsigned int timinca;
-    unsigned int tsauxc;
-    unsigned int clock_rate_mhz;
-    unsigned int status;
-} AVB_CLOCK_CONFIG;
 
 int main(void) {
     HANDLE hDriver;

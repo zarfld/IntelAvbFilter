@@ -9,36 +9,11 @@
 #include <string.h>
 #include "../../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
-typedef unsigned char avb_u8;
-typedef unsigned short avb_u16;
-typedef unsigned int avb_u32;
-typedef unsigned long long avb_u64;
+// Type definitions and structures are in include/avb_ioctl.h (SSOT)
 
 #pragma pack(push, 1)
 
-typedef struct AVB_ENUM_REQUEST {
-    avb_u32 index;        /* in: adapter index to query (0..N-1) */
-    avb_u32 count;        /* out: total adapter count */
-    avb_u16 vendor_id;    /* out */
-    avb_u16 device_id;    /* out */
-    avb_u32 capabilities; /* out: INTEL_CAP_* bitmask */
-    avb_u32 status;       /* out: NDIS_STATUS */
-} AVB_ENUM_REQUEST;
-
-typedef struct AVB_OPEN_REQUEST {
-    avb_u16 vendor_id;    /* in */
-    avb_u16 device_id;    /* in */
-    avb_u32 reserved;     /* align */
-    avb_u32 status;       /* out: NDIS_STATUS */
-} AVB_OPEN_REQUEST;
-
-typedef struct AVB_CLOCK_CONFIG {
-    avb_u64 systim;           
-    avb_u32 timinca;          
-    avb_u32 tsauxc;           
-    avb_u32 clock_rate_mhz;   
-    avb_u32 status;           
-} AVB_CLOCK_CONFIG;
+// AVB_ENUM_REQUEST, AVB_OPEN_REQUEST, AVB_CLOCK_CONFIG all defined in SSOT header
 
 #pragma pack(pop)
 
