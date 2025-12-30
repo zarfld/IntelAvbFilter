@@ -464,9 +464,11 @@ if ($TestExecutable) {
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Success "TEST-SSOT-001 PASSED"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-001"; Status = "PASSED"; ExitCode = 0 }
         } else {
             $script:failedTests++
             Write-Failure "TEST-SSOT-001 FAILED - SSOT violations detected!"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-001"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
         }
     } else {
         Write-Info "TEST-SSOT-001 script not found (skipping)"
@@ -481,9 +483,11 @@ if ($TestExecutable) {
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Success "TEST-SSOT-003 PASSED"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-003"; Status = "PASSED"; ExitCode = 0 }
         } else {
             $script:failedTests++
             Write-Failure "TEST-SSOT-003 FAILED - Include pattern violations detected!"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-003"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
         }
     } else {
         Write-Info "TEST-SSOT-003 script not found (skipping)"
@@ -498,9 +502,11 @@ if ($TestExecutable) {
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Success "TEST-SSOT-004 PASSED"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-004"; Status = "PASSED"; ExitCode = 0 }
         } else {
             $script:failedTests++
             Write-Failure "TEST-SSOT-004 FAILED - SSOT header incomplete!"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-004"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
         }
     } else {
         Write-Info "TEST-SSOT-004 script not found (skipping)"
@@ -508,6 +514,70 @@ if ($TestExecutable) {
     
     Write-Host "`n  Note: TEST-SSOT-002 (CI Workflow Validation) requires manual negative testing" -ForegroundColor Gray
     Write-Host "        See tests/verification/ssot/README.md for procedure" -ForegroundColor Gray
+    
+    # REGS Verification Tests (Issue #21, TEST #304-306)
+    Write-Host "`n  [REGS Tests] Register Magic Number Elimination Verification" -ForegroundColor Cyan
+    Write-Host "  Verifies: Issue #21 (REQ-NF-REGS-001: Eliminate Magic Numbers)" -ForegroundColor Gray
+    
+    $regsTestDir = Join-Path $repoRoot "tests\verification\regs"
+    
+    # TEST-REGS-001: Build Verification with Submodule Headers
+    $regsTest1 = Join-Path $regsTestDir "Test-REGS-001-BuildVerification.ps1"
+    if (Test-Path $regsTest1) {
+        Write-Host "`n    => TEST-REGS-001: Build Verification (#304)" -ForegroundColor Yellow
+        $script:totalTests++
+        & $regsTest1 -Configuration $Configuration
+        if ($LASTEXITCODE -eq 0) {
+            $script:passedTests++
+            Write-Success "TEST-REGS-001 PASSED"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-001"; Status = "PASSED"; ExitCode = 0 }
+        } else {
+            $script:failedTests++
+            Write-Failure "TEST-REGS-001 FAILED - Build verification failed!"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-001"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
+        }
+    } else {
+        Write-Info "TEST-REGS-001 script not found (skipping)"
+    }
+    
+    # TEST-REGS-002: Magic Number Detection (Static Analysis)
+    $regsTest2 = Join-Path $regsTestDir "Test-REGS-002-MagicNumberDetection.ps1"
+    if (Test-Path $regsTest2) {
+        Write-Host "`n    => TEST-REGS-002: Magic Number Detection (#305)" -ForegroundColor Yellow
+        $script:totalTests++
+        & $regsTest2
+        if ($LASTEXITCODE -eq 0) {
+            $script:passedTests++
+            Write-Success "TEST-REGS-002 PASSED - No magic numbers detected"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-002"; Status = "PASSED"; ExitCode = 0 }
+        } else {
+            $script:failedTests++
+            Write-Failure "TEST-REGS-002 FAILED - Magic numbers still present!"
+            Write-Info "This is expected until Issue #21 implementation is complete"
+            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-002"; Status = "FAILED (Expected)"; ExitCode = $LASTEXITCODE }
+        }
+    } else {
+        Write-Info "TEST-REGS-002 script not found (skipping)"
+    }
+    
+    # TEST-REGS-003: Register Constant Verification (C_ASSERT)
+$regsTest3 = Join-Path $regsTestDir "Test-REGS-003-RegisterConstantVerification.ps1"
+if (Test-Path $regsTest3) {
+    Write-Host "`n    => TEST-REGS-003: Register Constant Verification (#306)" -ForegroundColor Yellow
+    $script:totalTests++
+    & $regsTest3 -Configuration $Configuration
+    if ($LASTEXITCODE -eq 0) {
+        $script:passedTests++
+        Write-Success "TEST-REGS-003 PASSED"
+        $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-003"; Status = "PASSED"; ExitCode = 0 }
+    } else {
+        $script:failedTests++
+        Write-Failure "TEST-REGS-003 FAILED - Build not found or verification failed!"
+        Write-Info "Run Build-Tests.ps1 -TestName test_register_constants to build first"
+        }
+    } else {
+        Write-Info "TEST-REGS-003 script not found (skipping)"
+    }
     
     # Phase 0: Architecture Compliance Validation
     Write-Host "`n=== PHASE 0: Architecture Compliance Validation ===" -ForegroundColor Green

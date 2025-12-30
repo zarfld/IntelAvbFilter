@@ -245,6 +245,19 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "TSAUXC Register Toggle Test"
     },
+    
+    # Verification Tests - Register Constants (compile-time C_ASSERT)
+    @{
+        Name = "test_register_constants"
+        Type = "cl"
+        Source = "tests/verification/regs/test_register_constants.c"
+        Output = "test_register_constants.obj"
+        CompileOnly = $true
+        Includes = "-I intel-ethernet-regs/gen -I C:\PROGRA~2\WI3CF2~1\10\Include\100226~1.0\km"
+        CompilerFlags = "/c /kernel /WX /D_AMD64_ /DAMD64"  # Kernel mode requires architecture defines
+        Description = "Verification: Register Constants (TEST-REGS-003)"
+    },
+    
     # TSN Integration Tests (nmake)
     @{
         Name = "tsn_ioctl_test"
@@ -794,9 +807,17 @@ foreach ($Test in $TestsToBuild) {
         }
         
         # Build command with full output path
-        $BuildCmd = "cl /nologo /W4 /Zi $($Test.Includes) $($Test.Source) /Fe:`"$OutputPath`""
-        if ($Test.Libs) {
-            $BuildCmd += " /link $($Test.Libs)"
+        # Check if compile-only (produces .obj) or executable (produces .exe)
+        if ($Test.CompileOnly) {
+            # Compile-only: use /Fo for object file output
+            $CompilerFlags = if ($Test.CompilerFlags) { $Test.CompilerFlags } else { "/c" }
+            $BuildCmd = "cl /nologo /W4 /Zi $CompilerFlags $($Test.Includes) $($Test.Source) /Fo:`"$OutputPath`""
+        } else {
+            # Executable: use /Fe for executable output
+            $BuildCmd = "cl /nologo /W4 /Zi $($Test.Includes) $($Test.Source) /Fe:`"$OutputPath`""
+            if ($Test.Libs) {
+                $BuildCmd += " /link $($Test.Libs)"
+            }
         }
         
         if ($ShowDetails) {
