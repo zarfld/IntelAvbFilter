@@ -2,7 +2,9 @@
  * Multi-Adapter GET_CLOCK_CONFIG Test
  * Tests all 6 Intel I226-V adapters with diagnostic markers
  *
- * Implements REQ-NF-SSOT-001: Uses Single Source of Truth (include/avb_ioctl.h)
+ * Implements: #303 (TEST-SSOT-004: Verify SSOT Header Completeness)
+ * Verifies: #24 (REQ-NF-SSOT-001: Single Source of Truth for IOCTL Interface)
+ * Uses Single Source of Truth (include/avb_ioctl.h)
  */
 
 #include <windows.h>

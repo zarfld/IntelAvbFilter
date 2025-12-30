@@ -2,7 +2,9 @@
  * @file test_ioctl_trace.c
  * @brief Minimal test to trace IOCTL codes sent to driver
  *
- * Implements REQ-NF-SSOT-001: Uses Single Source of Truth (include/avb_ioctl.h)
+ * Implements: #301 (TEST-SSOT-001: Verify No Duplicate IOCTL Definitions)
+ * Verifies: #24 (REQ-NF-SSOT-001: Single Source of Truth for IOCTL Interface)
+ * Uses Single Source of Truth (include/avb_ioctl.h)
  */
 
 #include <windows.h>
