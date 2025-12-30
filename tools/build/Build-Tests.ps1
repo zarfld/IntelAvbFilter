@@ -480,6 +480,32 @@ $AllTests = @(
         Description = "Unit: Direct Clock Access Test"
     },
     
+    # Unit Tests - Hardware Abstraction Layer (HAL) (cl.exe)
+    @{
+        Name = "test_hal_unit"
+        Type = "cl"
+        Source = "tests/unit/hal/test_hal_unit.c"
+        Output = "test_hal_unit.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Unit: HAL Unit Tests (TEST-PORTABILITY-HAL-001, Issue #308)"
+    },
+    @{
+        Name = "test_hal_errors"
+        Type = "cl"
+        Source = "tests/unit/hal/test_hal_errors.c"
+        Output = "test_hal_errors.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Unit: HAL Error Scenario Tests (TEST-PORTABILITY-HAL-002, Issue #309)"
+    },
+    @{
+        Name = "test_hal_performance"
+        Type = "cl"
+        Source = "tests/unit/hal/test_hal_performance.c"
+        Output = "test_hal_performance.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Unit: HAL Performance Metrics Tests (TEST-PORTABILITY-HAL-003, Issue #310)"
+    },
+    
     # Integration Tests - PTP (additional, cl.exe)
     @{
         Name = "hw_timestamping_control"
