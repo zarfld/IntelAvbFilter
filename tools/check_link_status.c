@@ -1,16 +1,13 @@
 /**
  * Check link status for all Intel I226 adapters
+ *
+ * Implements REQ-NF-SSOT-001: Uses Single Source of Truth (include/avb_ioctl.h)
  */
 
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
-
-// IOCTL definitions
-#define IOCTL_AVB_BASE 0x8000
-#define IOCTL_AVB_ENUM_ADAPTERS CTL_CODE(IOCTL_AVB_BASE, 0x1F, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_OPEN_ADAPTER CTL_CODE(IOCTL_AVB_BASE, 0x20, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_READ_REGISTER CTL_CODE(IOCTL_AVB_BASE, 0x16, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#include "../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
 typedef struct {
     uint16_t vendor_id;

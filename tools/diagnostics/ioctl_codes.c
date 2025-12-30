@@ -1,8 +1,8 @@
 #include <windows.h>
 #include <stdio.h>
+#include "include/avb_ioctl.h"  // SSOT for IOCTL definitions and _NDIS_CONTROL_CODE macro
 
 #define FILE_DEVICE_PHYSICAL_NETCARD 0x00000017
-#define _NDIS_CONTROL_CODE(Request,Method) CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, (Request), (Method), FILE_ANY_ACCESS)
 
 int main() {
     printf("IOCTL_AVB_ENUM_ADAPTERS (31): 0x%08X\n", _NDIS_CONTROL_CODE(31, METHOD_BUFFERED));

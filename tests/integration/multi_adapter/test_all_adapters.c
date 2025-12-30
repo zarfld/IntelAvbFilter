@@ -1,20 +1,14 @@
 /**
  * Multi-Adapter GET_CLOCK_CONFIG Test
  * Tests all 6 Intel I226-V adapters with diagnostic markers
+ *
+ * Implements REQ-NF-SSOT-001: Uses Single Source of Truth (include/avb_ioctl.h)
  */
 
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
-
-// Copy IOCTL definitions
-#define FILE_DEVICE_PHYSICAL_NETCARD 0x00000017
-#define _NDIS_CONTROL_CODE(Request,Method) \
-    CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, (Request), (Method), FILE_ANY_ACCESS)
-
-#define IOCTL_AVB_ENUM_ADAPTERS     _NDIS_CONTROL_CODE(31, METHOD_BUFFERED)
-#define IOCTL_AVB_OPEN_ADAPTER      _NDIS_CONTROL_CODE(32, METHOD_BUFFERED)
-#define IOCTL_AVB_GET_CLOCK_CONFIG  _NDIS_CONTROL_CODE(39, METHOD_BUFFERED)
+#include "../../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
 typedef uint8_t  avb_u8;
 typedef uint16_t avb_u16;

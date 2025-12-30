@@ -1,21 +1,13 @@
 /**
  * @file test_ioctl_trace.c
  * @brief Minimal test to trace IOCTL codes sent to driver
+ *
+ * Implements REQ-NF-SSOT-001: Uses Single Source of Truth (include/avb_ioctl.h)
  */
 
 #include <windows.h>
 #include <stdio.h>
-
-// Calculate IOCTL codes manually
-#define FILE_DEVICE_PHYSICAL_NETCARD 0x17
-#define METHOD_BUFFERED 0
-#define FILE_ANY_ACCESS 0
-
-#define CTL_CODE_CALC(DeviceType, Function, Method, Access) \
-    (((DeviceType) << 16) | ((Access) << 14) | ((Function) << 2) | (Method))
-
-#define IOCTL_AVB_READ_REGISTER    CTL_CODE_CALC(FILE_DEVICE_PHYSICAL_NETCARD, 22, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_GET_CLOCK_CONFIG CTL_CODE_CALC(FILE_DEVICE_PHYSICAL_NETCARD, 39, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#include "../../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
 typedef struct {
     unsigned int offset;

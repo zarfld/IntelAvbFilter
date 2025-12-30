@@ -393,6 +393,27 @@ if ($TestExecutable) {
     # Quick tests only
     Write-Step "Running Quick Verification Tests"
     
+    # SSOT Quick Check (critical for code quality)
+    Write-Host "`n[Quick SSOT Check] Verifying Single Source of Truth Compliance..." -ForegroundColor Cyan
+    $ssotTestDir = Join-Path $repoRoot "tests\verification\ssot"
+    $ssotTest1 = Join-Path $ssotTestDir "Test-SSOT-001-NoDuplicates.ps1"
+    
+    if (Test-Path $ssotTest1) {
+        $script:totalTests++
+        & $ssotTest1
+        if ($LASTEXITCODE -eq 0) {
+            $script:passedTests++
+            Write-Host "[OK] SSOT validation passed - no duplicate IOCTLs" -ForegroundColor Green
+        } else {
+            $script:failedTests++
+            Write-Host "[FAIL] SSOT validation failed - duplicate IOCTLs detected!" -ForegroundColor Red
+            Write-Host "       Run full SSOT tests: .\tests\verification\ssot\Run-All-SSOT-Tests.ps1" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Info "SSOT tests not found (install from tests/verification/ssot/)"
+    }
+    Write-Host ""
+    
     $quickTests = @(
         "test_multidev_adapter_enum.exe",
         "test_device_register_access.exe",
@@ -423,6 +444,70 @@ if ($TestExecutable) {
 } elseif ($Full) {
     # Full comprehensive test suite (phased execution from run_tests.ps1)
     Write-Step "Running Full Comprehensive Test Suite"
+    
+    # Phase -1: Standards Compliance & Code Quality Verification
+    Write-Host "`n=== PHASE -1: Standards Compliance & Code Quality Verification ===" -ForegroundColor Green
+    Write-Host "Purpose: Verify ISO/IEC/IEEE standards compliance and architecture decisions" -ForegroundColor Gray
+    
+    # SSOT Verification Tests (Issue #24, ADR #123, TEST #301-303)
+    Write-Host "`n  [SSOT Tests] Single Source of Truth Verification" -ForegroundColor Cyan
+    Write-Host "  Verifies: Issue #24 (REQ-NF-SSOT-001), ADR #123 (ADR-SSOT-001)" -ForegroundColor Gray
+    
+    $ssotTestDir = Join-Path $repoRoot "tests\verification\ssot"
+    
+    # TEST-SSOT-001: No Duplicate IOCTL Definitions
+    $ssotTest1 = Join-Path $ssotTestDir "Test-SSOT-001-NoDuplicates.ps1"
+    if (Test-Path $ssotTest1) {
+        Write-Host "`n    => TEST-SSOT-001: Verify No Duplicate IOCTL Definitions (#301)" -ForegroundColor Yellow
+        $script:totalTests++
+        & $ssotTest1
+        if ($LASTEXITCODE -eq 0) {
+            $script:passedTests++
+            Write-Success "TEST-SSOT-001 PASSED"
+        } else {
+            $script:failedTests++
+            Write-Failure "TEST-SSOT-001 FAILED - SSOT violations detected!"
+        }
+    } else {
+        Write-Info "TEST-SSOT-001 script not found (skipping)"
+    }
+    
+    # TEST-SSOT-003: All Files Use SSOT Header Include
+    $ssotTest3 = Join-Path $ssotTestDir "Test-SSOT-003-IncludePattern.ps1"
+    if (Test-Path $ssotTest3) {
+        Write-Host "`n    => TEST-SSOT-003: Verify All Files Use SSOT Header (#302)" -ForegroundColor Yellow
+        $script:totalTests++
+        & $ssotTest3
+        if ($LASTEXITCODE -eq 0) {
+            $script:passedTests++
+            Write-Success "TEST-SSOT-003 PASSED"
+        } else {
+            $script:failedTests++
+            Write-Failure "TEST-SSOT-003 FAILED - Include pattern violations detected!"
+        }
+    } else {
+        Write-Info "TEST-SSOT-003 script not found (skipping)"
+    }
+    
+    # TEST-SSOT-004: SSOT Header Completeness
+    $ssotTest4 = Join-Path $ssotTestDir "Test-SSOT-004-Completeness.ps1"
+    if (Test-Path $ssotTest4) {
+        Write-Host "`n    => TEST-SSOT-004: Verify SSOT Header Completeness (#303)" -ForegroundColor Yellow
+        $script:totalTests++
+        & $ssotTest4
+        if ($LASTEXITCODE -eq 0) {
+            $script:passedTests++
+            Write-Success "TEST-SSOT-004 PASSED"
+        } else {
+            $script:failedTests++
+            Write-Failure "TEST-SSOT-004 FAILED - SSOT header incomplete!"
+        }
+    } else {
+        Write-Info "TEST-SSOT-004 script not found (skipping)"
+    }
+    
+    Write-Host "`n  Note: TEST-SSOT-002 (CI Workflow Validation) requires manual negative testing" -ForegroundColor Gray
+    Write-Host "        See tests/verification/ssot/README.md for procedure" -ForegroundColor Gray
     
     # Phase 0: Architecture Compliance Validation
     Write-Host "`n=== PHASE 0: Architecture Compliance Validation ===" -ForegroundColor Green
