@@ -9,8 +9,8 @@
  * @see https://github.com/zarfld/IntelAvbFilter/issues/6
  *
  * IOCTLs Tested:
- *   - 41 (IOCTL_AVB_GET_RX_TIMESTAMP): Retrieve RX timestamp for packet
- *   - 42 (IOCTL_AVB_ENABLE_RX_TIMESTAMP_FILTER): Configure RX timestamp filters
+ *   - 41 (IOCTL_AVB_SET_RX_TIMESTAMP): Enable/disable global RX timestamping
+ *   - 42 (IOCTL_AVB_SET_QUEUE_TIMESTAMP): Configure per-queue timestamp enable
  *
  * Test Cases: 16
  * Priority: P0 (Critical)
@@ -176,7 +176,7 @@ static void Test_GetRxTimestampNullPointer(void) {
     DWORD bytesReturned = 0;
     BOOL result = DeviceIoControl(
         g_hDevice,
-        IOCTL_AVB_GET_RX_TIMESTAMP,
+        IOCTL_AVB_SET_RX_TIMESTAMP,
         NULL,
         0,
         NULL,
@@ -274,7 +274,7 @@ static void Test_EnableFilterNullPointer(void) {
     DWORD bytesReturned = 0;
     BOOL result = DeviceIoControl(
         g_hDevice,
-        IOCTL_AVB_ENABLE_RX_TIMESTAMP_FILTER,
+        IOCTL_AVB_SET_QUEUE_TIMESTAMP,
         NULL,
         0,
         NULL,

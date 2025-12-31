@@ -1019,4 +1019,18 @@ A well-executed task should:
 
 ---
 
+## issue corupption recovery workflow
+When an issue is found to have corrupted content (e.g., wrong traceability, missing sections), follow these steps to recover (to be done manually step by step - each step seperately):
+
+1. ask user to provide last edit of the issue which seemed to cause corruption
+2. backup current corrupted issue content to a separate markdown file
+3. create markdownfile based on recovery information provided by user (step 1)
+4. restore issue content from last known good edit using GitHub edit history
+5. verify restored content matches recovery information
+6. check corrupted issue content (of step 2) to see if a new issue needs to be created for any lost information
+
+note: this workflow is to be done manually step by step - each step seperately
+alwas restore exactly from GitHub edit history - never try to "fix" content manually, or modify existing conten based on assumtion!
+
+
 **Remember**: Quality over speed. Standards compliance ensures maintainable, reliable software. XP practices ensure working software delivered iteratively. Always ask when in doubt! 🚀
