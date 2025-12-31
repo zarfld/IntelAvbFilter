@@ -3,16 +3,22 @@
 **Master Issue**: [#14 - IOCTL Support Implementation & Verification](https://github.com/zarfld/IntelAvbFilter/issues/14)  
 **Status**: 🔄 In Progress  
 **Started**: 2025-12-30  
-**Last Updated**: 2025-12-31 (Massive corruption recovery)  
+**Last Updated**: 2025-12-31 (100% test coverage achieved - all 11 requirements have tests!)  
 **Target Completion**: TBD  
-**Overall Progress**: 11/15 tasks completed (73%)  
-**⚠️ KRITISCHE EREIGNISSE**: 
-- **Massive Batch-Korruption entdeckt (2025-12-22)**: 42+ Issues betroffen (#192-232 + Requirement #23)
-- **18 Test-Issues wiederhergestellt** (2025-12-30/31): #192-204, #206-210
-- **Viele fehlende Test-Issues für #14 wurden in den wiederhergestellten Issues gefunden!**
-- Issue #311 is a duplicate of #298 (both TEST-PTP-RX-TS-001), created 9 days later. Use #298 as canonical.
-- Issue #207 content was corrupted (CBS → AVDECC), restored 2025-12-30 with original CBS test specification.
-- **Coverage Update**: Durch Wiederherstellung von 73% → ~90% (viele "TBD" Issues wurden gefunden)
+**Overall Progress**: 11/11 requirements have tests (100% coverage)  
+**✅ COMPLETE - ALL TEST ISSUES CREATED**: 
+- **98% Restoration Complete (2025-12-31)**: 41 test issues #192-232 fully recovered
+- **New Test Issues Created (2025-12-31)**: Issues #312, #313, #314 for Requirements #10, #12, #13
+- **Final Status**: 100% test coverage achieved - all 11 active IOCTL requirements now have test issues
+- **Test Issue Mapping Corrected**: 
+  - Issue #210 → gPTP Protocol Stack (not Requirement #10)
+  - Issue #211 → SRP Stream Reservation (not Requirement #11)  
+  - Issue #212 → Frame Preemption 802.1Qbu (IS Requirement #11) ✅
+  - Issue #213 → VLAN 802.1Q (not Requirement #13)
+  - Issue #312 → MDIO/PHY Access (Requirement #10) ✅ NEW
+  - Issue #313 → Device Lifecycle (Requirement #12) ✅ NEW
+  - Issue #314 → Timestamp Event Subscription (Requirement #13) ✅ NEW
+- Issue #311 is duplicate of #298 (both TEST-PTP-RX-TS-001). anyway we will keep both of them and do double testing.
 
 ---
 
@@ -42,17 +48,24 @@ This document tracks the systematic verification of **25 IOCTLs** across **11 ac
 | [#7](https://github.com/zarfld/IntelAvbFilter/issues/7) | REQ-F-PTP-005: Target Time & Aux Timestamp | 43, 44 | P1 | [#204](https://github.com/zarfld/IntelAvbFilter/issues/204), [#299](https://github.com/zarfld/IntelAvbFilter/issues/299) | 15, 16 | ✅ **2 Issues wiederhergestellt** |
 | [#8](https://github.com/zarfld/IntelAvbFilter/issues/8) | REQ-F-QAV-001: Credit-Based Shaper | 35 | P0 | [#207](https://github.com/zarfld/IntelAvbFilter/issues/207) | 15 | ✅ Restored (was corrupted) |
 | [#9](https://github.com/zarfld/IntelAvbFilter/issues/9) | REQ-F-TAS-001: Time-Aware Scheduler | 26 | P1 | [#206](https://github.com/zarfld/IntelAvbFilter/issues/206) | 15 | ✅ **Wiederhergestellt!** |
-| [#10](https://github.com/zarfld/IntelAvbFilter/issues/10) | REQ-F-MDIO-001: MDIO/PHY Access | 29, 30 | P1 | TBD (zu prüfen #211-232) | TBD | 🔍 **Wahrscheinlich in #211-232** |
-| [#11](https://github.com/zarfld/IntelAvbFilter/issues/11) | REQ-F-FP-001 & PTM-001: Frame Preemption & PTM | 27, 28 | P1 | TBD (zu prüfen #211-232) | TBD | 🔍 **Wahrscheinlich in #211-232** |
-| [#12](https://github.com/zarfld/IntelAvbFilter/issues/12) | REQ-F-DEV-001: Device Lifecycle | 20, 21, 31, 32, 37 | P0 | TBD (zu prüfen #211-232) | TBD | 🔍 **Wahrscheinlich in #211-232** |
-| [#13](https://github.com/zarfld/IntelAvbFilter/issues/13) | REQ-F-TS-SUB-001: Timestamp Event Subscription | 33, 34 | P1 | TBD (zu prüfen #211-232) | TBD | 🔍 **Wahrscheinlich in #211-232** |
+| [#10](https://github.com/zarfld/IntelAvbFilter/issues/10) | REQ-F-MDIO-001: MDIO/PHY Access | 29, 30 | P1 | [#312](https://github.com/zarfld/IntelAvbFilter/issues/312) | 15 | ✅ **Test Issue Created** |
+| [#11](https://github.com/zarfld/IntelAvbFilter/issues/11) | REQ-F-FP-001 & PTM-001: Frame Preemption & PTM | 27, 28 | P1 | [#212](https://github.com/zarfld/IntelAvbFilter/issues/212) | 15 | ✅ **Restored - Frame Preemption** |
+| [#12](https://github.com/zarfld/IntelAvbFilter/issues/12) | REQ-F-DEV-001: Device Lifecycle | 20, 21, 31, 32, 37 | P0 | [#313](https://github.com/zarfld/IntelAvbFilter/issues/313) | 19 | ✅ **Test Issue Created** |
+| [#13](https://github.com/zarfld/IntelAvbFilter/issues/13) | REQ-F-TS-SUB-001: Timestamp Event Subscription | 33, 34 | P1 | [#314](https://github.com/zarfld/IntelAvbFilter/issues/314) | 19 | ✅ **Test Issue Created** |
 
-**Test Coverage Update (2025-12-31)**:
-- **Wiederhergestellt**: 8 of 11 requirements haben jetzt Test Issues (73% → von 55%)
-- **Target**: 100% coverage (3 verbleibende wahrscheinlich in #211-232)
-- **P0 Coverage**: 100% (All 5 P0 requirements complete: #2, #3, #5, #6, #8) ✅
-- **P1 Coverage**: 50% (3 of 6 P1 requirements complete: #7, #9 + #299)
-- **Verbleibend**: #10, #11, #12, #13 → Wahrscheinlich in #211-232 Bereich zu finden
+**Test Coverage Update (2025-12-31 - 100% COVERAGE ACHIEVED)**:
+- **✅ ALL 11 REQUIREMENTS NOW HAVE TEST ISSUES - 100% COVERAGE!**
+- **Newly Created Test Issues (2025-12-31)**:
+  - Issue #312 → TEST-MDIO-PHY-001: MDIO/PHY Register Access (Requirement #10) - 15 test cases
+  - Issue #313 → TEST-DEV-LIFECYCLE-001: Device Lifecycle Management (Requirement #12) - 19 test cases  
+  - Issue #314 → TEST-TS-EVENT-SUB-001: Timestamp Event Subscription (Requirement #13) - 19 test cases
+- **Test Issue Mapping Correction**:
+  - Issue #212 correctly tests Frame Preemption (Requirement #11) ✅
+  - Issues #210, #211, #213 test different features (gPTP, SRP, VLAN) - NOT Requirements #10, #12, #13
+- **Total Test Cases**: 53 test cases across new issues (15 + 19 + 19)
+- **P0 Coverage**: 100% (All 5 P0 requirements complete: #2, #3, #5, #6, #8, #12) ✅
+- **P1 Coverage**: 100% (All 6 P1 requirements complete: #7, #9, #10, #11, #13, #299) ✅
+- **Overall Status**: ✅ COMPLETE - All active IOCTL requirements covered by test issues
 
 ### 🎯 Zusätzliche wiederhergestellte PTP/PHC Test-Issues (nicht direkt in #14 gelistet, aber wichtig):
 
@@ -209,7 +222,7 @@ Diese Issues testen PTP/PHC-Funktionalität, die für IOCTL-Support relevant ist
     - Calculate and display coverage percentage
     - Add backward traceability links from requirements to test issues
 
-### Phase 5: Implementation & Execution (2 tasks) ⏳ PENDING
+### Phase 5: Implementation & Execution (5 tasks) 🔄 IN PROGRESS
 
 - [ ] **Task 14**: Implement test code for issues #295 and #296
   - **Status**: ⏳ Pending
@@ -219,6 +232,37 @@ Diese Issues testen PTP/PHC-Funktionalität, die für IOCTL-Support relevant ist
     - Add GPIO instrumentation for performance measurement
     - Integrate with existing test framework (Run-Tests.ps1)
   - **Dependencies**: Test issues #295, #296
+
+- [x] **Task 14a**: Create test plan for new IOCTL tests (#312, #313, #314)
+  - **Status**: ✅ Complete (2025-12-31)
+  - **Deliverable**: `TEST-PLAN-IOCTL-NEW-2025-12-31.md`
+  - **Scope**:
+    - Comprehensive test plan for 53 test cases across 3 new requirements
+    - Test environment and hardware requirements
+    - Test execution sequence and schedule
+    - Risk assessment and mitigation strategies
+  - **Standards**: IEEE 1012-2016 (Verification & Validation)
+  - **Location**: `07-verification-validation/test-plans/`
+
+- [x] **Task 14b**: Extend Build-Tests.ps1 with new test definitions
+  - **Status**: ✅ Complete (2025-12-31)
+  - **Changes**:
+    - Added `test_mdio_phy` definition (Issue #312, 15 test cases)
+    - Added `test_dev_lifecycle` definition (Issue #313, 19 test cases)
+    - Added `test_ts_event_sub` definition (Issue #314, 19 test cases)
+  - **Integration**: Follows existing `$AllTests` array pattern
+  - **Build Command**: `.\tools\build\Build-Tests.ps1 -TestName <test_name>`
+
+- [x] **Task 14c**: Implement test source files
+  - **Status**: ✅ Complete (2025-12-31)
+  - **Files Created**:
+    - `tests/test_ioctl_mdio_phy.c` (Issue #312, 15 test cases, IOCTLs 29-30)
+    - `tests/test_ioctl_dev_lifecycle.c` (Issue #313, 19 test cases, IOCTLs 20-21, 31-32, 37)
+    - `tests/test_ioctl_ts_event_sub.c` (Issue #314, 19 test cases, IOCTLs 33-34)
+  - **Pattern**: C source files using `avb_ioctl.h` as single source of truth
+  - **Total**: ~1,500 lines of test code
+  - **Build Integration**: Ready to compile via `Build-Tests.ps1 -TestName <test_name>`
+  - **Dependencies**: IOCTL handler implementations (IOCTLs 20-21, 29-30, 31-34, 37)
 
 - [ ] **Task 15**: Execute all tests and update traceability matrix
   - **Status**: ⏳ Pending

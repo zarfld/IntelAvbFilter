@@ -9,7 +9,7 @@
  * @see https://github.com/zarfld/IntelAvbFilter/issues/8
  *
  * IOCTLs Tested:
- *   - 35 (IOCTL_AVB_CONFIGURE_CBS): Configure Credit-Based Shaper parameters
+ *   - 35 (IOCTL_AVB_SETUP_QAV): Configure Credit-Based Shaper (QAV) parameters
  *
  * Test Cases: 14
  * Priority: P0 (Critical)
@@ -293,7 +293,7 @@ static void Test_NullPointerHandling(void) {
     DWORD bytesReturned = 0;
     BOOL result = DeviceIoControl(
         g_hDevice,
-        IOCTL_AVB_CONFIGURE_CBS,
+        IOCTL_AVB_SETUP_QAV,
         NULL,
         0,
         NULL,
