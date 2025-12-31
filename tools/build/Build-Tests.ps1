@@ -744,6 +744,53 @@ $AllTests = @(
         Makefile = "tests/integration/Makefile.mak"
         Description = "Integration Test Suite (nmake)"
     }
+
+    # =========================================================================
+    # New IOCTL Tests (Issues #312, #313, #314) - 2025-12-31
+    # Test Plan: TEST-PLAN-IOCTL-NEW-2025-12-31
+    # =========================================================================
+    
+    @{
+        Name = "test_mdio_phy"
+        Type = "cl"
+        Source = "tests\test_ioctl_mdio_phy.c"
+        Output = "test_mdio_phy.exe"
+        Enabled = $true
+        Priority = "P1"
+        Description = "MDIO/PHY Register Access Tests (Issue #312)"
+        Issue = "#312"
+        TestCases = 15
+        IOCTLs = "29, 30"
+        Requirement = "#10"
+    }
+
+    @{
+        Name = "test_dev_lifecycle"
+        Type = "cl"
+        Source = "tests\test_ioctl_dev_lifecycle.c"
+        Output = "test_dev_lifecycle.exe"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Device Lifecycle Management Tests (Issue #313)"
+        Issue = "#313"
+        TestCases = 19
+        IOCTLs = "20, 21, 31, 32, 37"
+        Requirement = "#12"
+    }
+
+    @{
+        Name = "test_ts_event_sub"
+        Type = "cl"
+        Source = "tests\test_ioctl_ts_event_sub.c"
+        Output = "test_ts_event_sub.exe"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Timestamp Event Subscription Tests (Issue #314)"
+        Issue = "#314"
+        TestCases = 19
+        IOCTLs = "33, 34"
+        Requirement = "#13"
+    }
 )
 
 # Filter tests if specific test requested
