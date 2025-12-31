@@ -838,6 +838,39 @@ $AllTests = @(
         IOCTLs = "40"
         Requirement = "#5"
     }
+
+    # =========================================================================
+    # Additional PTP and QAV IOCTL Tests (Issues #298, #207) - 2025-12-31
+    # Test Plan: TEST-PLAN-IOCTL-EXTENDED (P0 Requirements #6, #8)
+    # =========================================================================
+    
+    @{
+        Name = "test_rx_timestamp"
+        Type = "cl"
+        Source = "tests\test_ioctl_rx_timestamp.c"
+        Output = "test_rx_timestamp.exe"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PTP RX Timestamping Tests (Issue #298)"
+        Issue = "#298"
+        TestCases = 16
+        IOCTLs = "41, 42"
+        Requirement = "#6"
+    }
+
+    @{
+        Name = "test_qav_cbs"
+        Type = "cl"
+        Source = "tests\test_ioctl_qav_cbs.c"
+        Output = "test_qav_cbs.exe"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Credit-Based Shaper Configuration Tests (Issue #207)"
+        Issue = "#207"
+        TestCases = 14
+        IOCTLs = "35"
+        Requirement = "#8"
+    }
 )
 
 # Filter tests if specific test requested
