@@ -791,6 +791,53 @@ $AllTests = @(
         IOCTLs = "33, 34"
         Requirement = "#13"
     }
+
+    # =========================================================================
+    # PTP IOCTL Tests (Issues #295, #296, #297) - 2025-12-31
+    # Test Plan: TEST-PLAN-IOCTL-PTP-2025-12-31 (P0 Critical)
+    # =========================================================================
+    
+    @{
+        Name = "test_ptp_getset"
+        Type = "cl"
+        Source = "tests\test_ioctl_ptp_getset.c"
+        Output = "test_ptp_getset.exe"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PTP Get/Set Timestamp Tests (Issue #295)"
+        Issue = "#295"
+        TestCases = 12
+        IOCTLs = "24, 25"
+        Requirement = "#2"
+    }
+
+    @{
+        Name = "test_ptp_freq"
+        Type = "cl"
+        Source = "tests\test_ioctl_ptp_freq.c"
+        Output = "test_ptp_freq.exe"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PTP Frequency Adjustment Tests (Issue #296)"
+        Issue = "#296"
+        TestCases = 15
+        IOCTLs = "38"
+        Requirement = "#3"
+    }
+
+    @{
+        Name = "test_hw_ts_ctrl"
+        Type = "cl"
+        Source = "tests\test_ioctl_hw_ts_ctrl.c"
+        Output = "test_hw_ts_ctrl.exe"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Hardware Timestamping Control Tests (Issue #297)"
+        Issue = "#297"
+        TestCases = 13
+        IOCTLs = "40"
+        Requirement = "#5"
+    }
 )
 
 # Filter tests if specific test requested
