@@ -800,7 +800,7 @@ $AllTests = @(
     @{
         Name = "test_ptp_getset"
         Type = "cl"
-        Source = "tests\test_ioctl_ptp_getset.c"
+        Source = "tests\ioctl\test_ioctl_ptp_getset.c"
         Output = "test_ptp_getset.exe"
         Enabled = $true
         Priority = "P0"
@@ -814,7 +814,7 @@ $AllTests = @(
     @{
         Name = "test_ptp_freq"
         Type = "cl"
-        Source = "tests\test_ioctl_ptp_freq.c"
+        Source = "tests\ioctl\test_ioctl_ptp_freq.c"
         Output = "test_ptp_freq.exe"
         Enabled = $true
         Priority = "P0"
@@ -828,7 +828,7 @@ $AllTests = @(
     @{
         Name = "test_hw_ts_ctrl"
         Type = "cl"
-        Source = "tests\test_ioctl_hw_ts_ctrl.c"
+        Source = "tests\ioctl\test_ioctl_hw_ts_ctrl.c"
         Output = "test_hw_ts_ctrl.exe"
         Enabled = $true
         Priority = "P0"
@@ -847,7 +847,7 @@ $AllTests = @(
     @{
         Name = "test_rx_timestamp"
         Type = "cl"
-        Source = "tests\test_ioctl_rx_timestamp.c"
+        Source = "tests\ioctl\test_ioctl_rx_timestamp.c"
         Output = "test_rx_timestamp.exe"
         Enabled = $true
         Priority = "P0"
@@ -861,7 +861,7 @@ $AllTests = @(
     @{
         Name = "test_qav_cbs"
         Type = "cl"
-        Source = "tests\test_ioctl_qav_cbs.c"
+        Source = "tests\ioctl\test_ioctl_qav_cbs.c"
         Output = "test_qav_cbs.exe"
         Enabled = $true
         Priority = "P0"
