@@ -61,6 +61,36 @@ typedef struct {
     UINT32 status;
 } SET_TIMESTAMP_REQUEST, *PSET_TIMESTAMP_REQUEST;
 
+/* Helper: Enable hardware timestamping (required for GET_TIMESTAMP to work) */
+static BOOL EnableHWTimestamping(HANDLE adapter)
+{
+    AVB_HW_TIMESTAMPING_REQUEST req = {0};
+    DWORD bytesReturned = 0;
+    
+    /* Enable hardware timestamping (clear bit 31 of TSAUXC) */
+    req.enable = 1;            /* 1=enable HW timestamping */
+    req.timer_mask = 1;        /* Enable SYSTIM0 */
+    req.enable_target_time = 0;
+    req.enable_aux_ts = 0;
+    
+    BOOL result = DeviceIoControl(
+        adapter,
+        IOCTL_AVB_SET_HW_TIMESTAMPING,
+        &req, sizeof(req),
+        &req, sizeof(req),
+        &bytesReturned,
+        NULL
+    );
+    
+    if (result) {
+        printf("  [INFO] Hardware timestamping enabled (TSAUXC: 0x%08X)\n", req.current_tsauxc);
+    } else {
+        printf("  [WARN] Failed to enable hardware timestamping (error %lu)\n", GetLastError());
+    }
+    
+    return result;
+}
+
 /* Helper: Open device */
 static HANDLE OpenAdapter(void)
 {
@@ -478,15 +508,90 @@ static int Test_NullPointerHandling(TestContext *ctx)
     return TEST_PASS;
 }
 
+/* Thread context for concurrent test */
+typedef struct {
+    HANDLE adapter;
+    int iterations;
+    volatile LONG* success_count;
+    volatile LONG* fail_count;
+} TimestampThreadContext;
+
+/* Worker thread for concurrent timestamp reads */
+static DWORD WINAPI TimestampReadWorker(LPVOID param)
+{
+    TimestampThreadContext* tc = (TimestampThreadContext*)param;
+    PTP_TIMESTAMP ts;
+    int i;
+    
+    for (i = 0; i < tc->iterations; i++) {
+        if (GetPTPTimestamp(tc->adapter, &ts)) {
+            InterlockedIncrement(tc->success_count);
+        } else {
+            InterlockedIncrement(tc->fail_count);
+        }
+        Sleep(1);  /* Small delay to allow interleaving */
+    }
+    
+    return 0;
+}
+
 /*
  * Test UT-PTP-GETSET-012: Concurrent Access Serialization
  * Verifies: Multiple threads can safely access timestamp
  */
 static int Test_ConcurrentAccessSerialization(TestContext *ctx)
 {
-    /* Note: Full multi-threaded test requires threading framework */
-    printf("  [SKIP] UT-PTP-GETSET-012: Concurrent Access Serialization: Requires multi-threaded framework\n");
-    return TEST_SKIP;
+    HANDLE threads[4];
+    TimestampThreadContext thread_ctx[4];
+    volatile LONG success_count = 0;
+    volatile LONG fail_count = 0;
+    int i;
+    
+    /* Create 4 threads, each performing 10 timestamp reads */
+    for (i = 0; i < 4; i++) {
+        thread_ctx[i].adapter = ctx->adapter;
+        thread_ctx[i].iterations = 10;
+        thread_ctx[i].success_count = &success_count;
+        thread_ctx[i].fail_count = &fail_count;
+        
+        threads[i] = CreateThread(
+            NULL,
+            0,
+            TimestampReadWorker,
+            &thread_ctx[i],
+            0,
+            NULL
+        );
+        
+        if (threads[i] == NULL) {
+            printf("  [FAIL] UT-PTP-GETSET-012: Concurrent Access: CreateThread failed\n");
+            /* Clean up already created threads */
+            while (--i >= 0) {
+                WaitForSingleObject(threads[i], INFINITE);
+                CloseHandle(threads[i]);
+            }
+            return TEST_FAIL;
+        }
+    }
+    
+    /* Wait for all threads to complete (max 5 seconds) */
+    WaitForMultipleObjects(4, threads, TRUE, 5000);
+    
+    /* Clean up threads */
+    for (i = 0; i < 4; i++) {
+        CloseHandle(threads[i]);
+    }
+    
+    /* Verify all operations succeeded */
+    if (success_count == 40 && fail_count == 0) {
+        printf("  [PASS] UT-PTP-GETSET-012: Concurrent Access (%ld succeeded, %ld failed)\n",
+               success_count, fail_count);
+        return TEST_PASS;
+    } else {
+        printf("  [FAIL] UT-PTP-GETSET-012: Concurrent Access: %ld succeeded, %ld failed (expected 40/0)\n",
+               success_count, fail_count);
+        return TEST_FAIL;
+    }
 }
 
 /* Main test runner */
@@ -511,6 +616,11 @@ int main(void)
     if (ctx.adapter == INVALID_HANDLE_VALUE) {
         printf("[ERROR] Failed to open AVB adapter. Skipping all tests.\n");
         return TEST_FAIL;
+    }
+    
+    /* CRITICAL: Enable hardware timestamping BEFORE running tests */
+    if (!EnableHWTimestamping(ctx.adapter)) {
+        printf("[ERROR] Failed to enable hardware timestamping. Tests may fail.\n");
     }
     
     printf("Running PTP Get/Set Timestamp tests...\n\n");
