@@ -628,6 +628,21 @@ if (Test-Path $regsTest3) {
         Invoke-Test -TestName $test.Name -Description $test.Desc
     }
     
+    # Phase 2.5: SSOT IOCTL Batch 3 - User-Mode Integration Tests
+    Write-Host "`n  [Batch 3 IOCTL Tests] SSOT-Aligned User-Mode Integration" -ForegroundColor Cyan
+    Write-Host "  Verifies: Issues #207, #295, #296, #297, #298 (Batch 3 IOCTL coverage)" -ForegroundColor Gray
+    
+    $batch3IoctlTests = @(
+        @{Name="test_qav_cbs.exe"; Desc="QAV/CBS Configuration (IOCTL 35) - Issue #207"},
+        @{Name="test_ptp_getset.exe"; Desc="PTP Timestamp Get/Set (IOCTLs 24-25) - Issue #295"},
+        @{Name="test_ptp_freq.exe"; Desc="PTP Frequency Adjustment (IOCTL 38) - Issue #296"},
+        @{Name="test_hw_ts_ctrl.exe"; Desc="Hardware Timestamping Control (IOCTL 40) - Issue #297"},
+        @{Name="test_rx_timestamp.exe"; Desc="RX Timestamp Control (IOCTLs 41-42) - Issue #298"}
+    )
+    foreach ($test in $batch3IoctlTests) {
+        Invoke-Test -TestName $test.Name -Description $test.Desc
+    }
+    
     # Phase 3: Multi-Adapter Hardware Testing
     Write-Host "`n=== PHASE 3: Multi-Adapter Hardware Testing ===" -ForegroundColor Green
     
