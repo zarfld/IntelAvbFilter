@@ -40,7 +40,7 @@ This document tracks the systematic verification of **25 IOCTLs** across **11 ac
 
 | Req # | Requirement | IOCTLs | Priority | Test Issue | Test Cases | Status |
 |-------|-------------|--------|----------|------------|------------|--------|
-| [#2](https://github.com/zarfld/IntelAvbFilter/issues/2) | REQ-F-PTP-001: PTP Get/Set Timestamp | 24, 25 | P0 | [#295](https://github.com/zarfld/IntelAvbFilter/issues/295) | 12 | ✅ **Tested: 7/12 Passed (58%) - Timestamp bugs** |
+| [#2](https://github.com/zarfld/IntelAvbFilter/issues/2) | REQ-F-PTP-001: PTP Get/Set Timestamp | 24, 25 | P0 | [#295](https://github.com/zarfld/IntelAvbFilter/issues/295) | 12 | ✅ **Tested: 8/12 Passed (67%) - Improved! Concurrent test + HW timestamping fix** |
 | [#3](https://github.com/zarfld/IntelAvbFilter/issues/3) | REQ-F-PTP-002: PTP Frequency Adjustment | 38 | P0 | [#205](https://github.com/zarfld/IntelAvbFilter/issues/205), [#296](https://github.com/zarfld/IntelAvbFilter/issues/296) | 15, 17 | ✅ **Tested: 12/15 Passed (80%) - Production Ready! Fixed HW timestamping** |
 | [#4](https://github.com/zarfld/IntelAvbFilter/issues/4) | BUG: GET_CLOCK_CONFIG | 45 | N/A | N/A | N/A | ✅ Closed (Tested) |
 | [#5](https://github.com/zarfld/IntelAvbFilter/issues/5) | REQ-F-PTP-003: Hardware Timestamping Control | 40 | P0 | [#297](https://github.com/zarfld/IntelAvbFilter/issues/297) | 13 | ✅ **Tested: 10/13 Passed (77%) - Production Ready! 4 tests implemented!** |
