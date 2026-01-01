@@ -59,13 +59,13 @@ static bool SetRxTimestampEnable(avb_u32 enable, const char* context) {
     );
     
     if (!result) {
-        printf("  [FAIL] %s: IOCTL_AVB_SET_RX_TIMESTAMP failed (enable=%u, error=%lu)\\n\",
+        printf("  [FAIL] %s: IOCTL_AVB_SET_RX_TIMESTAMP failed (enable=%u, error=%lu)\n",
                context, enable, GetLastError());
         return false;
     }
     
-    printf("  [INFO] %s: RX timestamp %s (requires_reset=%u)\\n\",
-           context, enable ? \"enabled\" : \"disabled\", request.requires_reset);
+    printf("  [INFO] %s: RX timestamp %s (requires_reset=%u)\n",
+           context, enable ? "enabled" : "disabled", request.requires_reset);
     return true;
 }
 
@@ -88,13 +88,13 @@ static bool SetQueueTimestampEnable(avb_u32 queue_index, avb_u32 enable, const c
     );
     
     if (!result) {
-        printf("  [FAIL] %s: IOCTL_AVB_SET_QUEUE_TIMESTAMP failed (queue=%u, error=%lu)\\n\",
+        printf("  [FAIL] %s: IOCTL_AVB_SET_QUEUE_TIMESTAMP failed (queue=%u, error=%lu)\n",
                context, queue_index, GetLastError());
         return false;
     }
     
-    printf("  [INFO] %s: Queue %u timestamp %s\\n\",
-           context, queue_index, enable ? \"enabled\" : \"disabled\");
+    printf("  [INFO] %s: Queue %u timestamp %s\n",
+           context, queue_index, enable ? "enabled" : "disabled");
     return true;
 }
 
@@ -102,77 +102,53 @@ static bool SetQueueTimestampEnable(avb_u32 queue_index, avb_u32 enable, const c
 // Test Cases
 //=============================================================================
 
-// Test 1: Get RX Timestamp - Valid Packet ID
-static void Test_GetRxTimestampValidPacket(void) {
-    UINT64 seconds = 0;
-    UINT32 nanoseconds = 0;
-    UINT64 test_packet_id = 12345;
-    
-    if (GetRxTimestamp(test_packet_id, &seconds, &nanoseconds, "valid packet")) {
-        // Success case - verify timestamp structure
-        if (nanoseconds < 1000000000) {
-            printf("  [PASS] UT-RX-TS-001: Get RX Timestamp (Valid Packet)\n");
-            g_passCount++;
-        } else {
-            printf("  [FAIL] UT-RX-TS-001: Get RX Timestamp: Invalid nanoseconds (%u)\n", nanoseconds);
-            g_failCount++;
-        }
-    } else {
-        printf("  [FAIL] UT-RX-TS-001: Get RX Timestamp: IOCTL failed\n");
-        g_failCount++;
-    }
-}
-
-// Test 2: Get RX Timestamp - Zero Packet ID
-static void Test_GetRxTimestampZeroPacketId(void) {
-    UINT64 seconds = 0;
-    UINT32 nanoseconds = 0;
-    
-    if (GetRxTimestamp(0, &seconds, &nanoseconds, "zero packet ID")) {
-        printf("  [PASS] UT-RX-TS-002: Get RX Timestamp (Zero Packet ID)\n");
+// Test 1: Enable Global RX Timestamping
+static void Test_EnableGlobalRxTimestamp(void) {
+    if (SetRxTimestampEnable(1, "enable global RX timestamp")) {
+        printf("  [PASS] UT-RX-TS-001: Enable Global RX Timestamping\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-002: Get RX Timestamp: Zero packet ID rejected\n");
+        printf("  [FAIL] UT-RX-TS-001: Failed to enable global RX timestamping\n");
         g_failCount++;
     }
 }
 
-// Test 3: Get RX Timestamp - Maximum Packet ID
-static void Test_GetRxTimestampMaxPacketId(void) {
-    UINT64 seconds = 0;
-    UINT32 nanoseconds = 0;
-    UINT64 max_packet_id = 0xFFFFFFFFFFFFFFFF;
-    
-    if (GetRxTimestamp(max_packet_id, &seconds, &nanoseconds, "max packet ID")) {
-        printf("  [PASS] UT-RX-TS-003: Get RX Timestamp (Maximum Packet ID)\n");
+// Test 2: Disable Global RX Timestamping
+static void Test_DisableGlobalRxTimestamp(void) {
+    if (SetRxTimestampEnable(0, "disable global RX timestamp")) {
+        printf("  [PASS] UT-RX-TS-002: Disable Global RX Timestamping\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-003: Get RX Timestamp: Max packet ID failed\n");
+        printf("  [FAIL] UT-RX-TS-002: Failed to disable global RX timestamping\n");
         g_failCount++;
     }
 }
 
-// Test 4: Get RX Timestamp - Non-existent Packet
-static void Test_GetRxTimestampNonExistent(void) {
-    UINT64 seconds = 0;
-    UINT32 nanoseconds = 0;
-    UINT64 fake_packet_id = 0xDEADBEEFDEADBEEF;
+// Test 3: Toggle Global RX Timestamping
+static void Test_ToggleGlobalRxTimestamp(void) {
+    bool success = true;
     
-    // Should fail or return zero timestamp for non-existent packet
-    bool result = GetRxTimestamp(fake_packet_id, &seconds, &nanoseconds, "non-existent packet");
+    if (!SetRxTimestampEnable(1, "toggle enable")) {
+        success = false;
+    }
+    if (!SetRxTimestampEnable(0, "toggle disable")) {
+        success = false;
+    }
+    if (!SetRxTimestampEnable(1, "toggle re-enable")) {
+        success = false;
+    }
     
-    if (!result || (seconds == 0 && nanoseconds == 0)) {
-        printf("  [PASS] UT-RX-TS-004: Get RX Timestamp (Non-existent Packet)\n");
+    if (success) {
+        printf("  [PASS] UT-RX-TS-003: Toggle Global RX Timestamping\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-004: Non-existent packet returned timestamp (%llu.%u)\n", 
-               seconds, nanoseconds);
+        printf("  [FAIL] UT-RX-TS-003: Toggle operation failed\n");
         g_failCount++;
     }
 }
 
-// Test 5: Get RX Timestamp - NULL Pointer Handling
-static void Test_GetRxTimestampNullPointer(void) {
+// Test 4: NULL Pointer Handling (Global Enable)
+static void Test_GlobalEnableNullPointer(void) {
     DWORD bytesReturned = 0;
     BOOL result = DeviceIoControl(
         g_hDevice,
@@ -186,91 +162,126 @@ static void Test_GetRxTimestampNullPointer(void) {
     );
     
     if (!result && GetLastError() == ERROR_INVALID_PARAMETER) {
-        printf("  [PASS] UT-RX-TS-005: NULL Pointer Handling\n");
+        printf("  [PASS] UT-RX-TS-004: NULL Pointer Handling (Global)\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-005: NULL pointer not rejected\n");
+        printf("  [FAIL] UT-RX-TS-004: NULL pointer not rejected (global)\n");
         g_failCount++;
     }
 }
 
-// Test 6: Enable Filter - No Filtering (Disable)
-static void Test_EnableFilterNone(void) {
-    if (SetRxTimestampFilter(RX_TS_FILTER_NONE, 0, NULL, "disable filtering")) {
-        printf("  [PASS] UT-RX-TS-006: Disable RX Timestamp Filtering\n");
-        g_passCount++;
-    } else {
-        printf("  [FAIL] UT-RX-TS-006: Failed to disable filtering\n");
-        g_failCount++;
-    }
-}
-
-// Test 7: Enable Filter - PTPv2 Only
-static void Test_EnableFilterPTPv2(void) {
-    if (SetRxTimestampFilter(RX_TS_FILTER_PTP_V2, 0, NULL, "PTPv2 filter")) {
-        printf("  [PASS] UT-RX-TS-007: Enable PTPv2 Filter\n");
-        g_passCount++;
-    } else {
-        printf("  [FAIL] UT-RX-TS-007: Failed to enable PTPv2 filter\n");
-        g_failCount++;
-    }
-}
-
-// Test 8: Enable Filter - UDP Port (PTP Event: 319)
-static void Test_EnableFilterUdpPort(void) {
-    const USHORT PTP_EVENT_PORT = 319;
+// Test 5: Enable Queue 0 Timestamp
+static void Test_EnableQueue0Timestamp(void) {
+    // First enable global RX timestamping (prerequisite)
+    SetRxTimestampEnable(1, "prerequisite for queue 0");
     
-    if (SetRxTimestampFilter(RX_TS_FILTER_UDP_PORT, PTP_EVENT_PORT, NULL, "UDP port filter")) {
-        printf("  [PASS] UT-RX-TS-008: Enable UDP Port Filter (319)\n");
+    if (SetQueueTimestampEnable(0, 1, "enable queue 0")) {
+        printf("  [PASS] UT-RX-TS-005: Enable Queue 0 Timestamping\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-008: Failed to enable UDP port filter\n");
+        printf("  [FAIL] UT-RX-TS-005: Failed to enable queue 0\n");
         g_failCount++;
     }
 }
 
-// Test 9: Enable Filter - MAC Address
-static void Test_EnableFilterMacAddress(void) {
-    UCHAR ptp_multicast_mac[6] = { 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00 };
+// Test 6: Enable Queue 1 Timestamp
+static void Test_EnableQueue1Timestamp(void) {
+    if (SetQueueTimestampEnable(1, 1, "enable queue 1")) {
+        printf("  [PASS] UT-RX-TS-006: Enable Queue 1 Timestamping\n");
+        g_passCount++;
+    } else {
+        printf("  [FAIL] UT-RX-TS-006: Failed to enable queue 1\n");
+        g_failCount++;
+    }
+}
+
+// Test 7: Enable Queue 2 Timestamp
+static void Test_EnableQueue2Timestamp(void) {
+    if (SetQueueTimestampEnable(2, 1, "enable queue 2")) {
+        printf("  [PASS] UT-RX-TS-007: Enable Queue 2 Timestamping\n");
+        g_passCount++;
+    } else {
+        printf("  [FAIL] UT-RX-TS-007: Failed to enable queue 2\n");
+        g_failCount++;
+    }
+}
+
+// Test 8: Enable Queue 3 Timestamp
+static void Test_EnableQueue3Timestamp(void) {
+    if (SetQueueTimestampEnable(3, 1, "enable queue 3")) {
+        printf("  [PASS] UT-RX-TS-008: Enable Queue 3 Timestamping\n");
+        g_passCount++;
+    } else {
+        printf("  [FAIL] UT-RX-TS-008: Failed to enable queue 3\n");
+        g_failCount++;
+    }
+}
+
+// Test 9: Disable Queue 0 Timestamp
+static void Test_DisableQueue0Timestamp(void) {
+    if (SetQueueTimestampEnable(0, 0, "disable queue 0")) {
+        printf("  [PASS] UT-RX-TS-009: Disable Queue 0 Timestamping\n");
+        g_passCount++;
+    } else {
+        printf("  [FAIL] UT-RX-TS-009: Failed to disable queue 0\n");
+        g_failCount++;
+    }
+}
+
+// Test 10: Enable All Queues
+static void Test_EnableAllQueues(void) {
+    bool success = true;
     
-    if (SetRxTimestampFilter(RX_TS_FILTER_MAC_ADDR, 0, ptp_multicast_mac, "MAC filter")) {
-        printf("  [PASS] UT-RX-TS-009: Enable MAC Address Filter\n");
-        g_passCount++;
-    } else {
-        printf("  [FAIL] UT-RX-TS-009: Failed to enable MAC address filter\n");
-        g_failCount++;
+    for (avb_u32 q = 0; q < 4; q++) {
+        if (!SetQueueTimestampEnable(q, 1, "enable all queues")) {
+            success = false;
+            break;
+        }
     }
-}
-
-// Test 10: Enable Filter - Combined Filters
-static void Test_EnableFilterCombined(void) {
-    UCHAR ptp_multicast_mac[6] = { 0x01, 0x1B, 0x19, 0x00, 0x00, 0x00 };
-    UCHAR combined_flags = RX_TS_FILTER_PTP_V2 | RX_TS_FILTER_UDP_PORT | RX_TS_FILTER_MAC_ADDR;
     
-    if (SetRxTimestampFilter(combined_flags, 319, ptp_multicast_mac, "combined filters")) {
-        printf("  [PASS] UT-RX-TS-010: Enable Combined Filters\n");
+    if (success) {
+        printf("  [PASS] UT-RX-TS-010: Enable All Queues (0-3)\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-010: Failed to enable combined filters\n");
+        printf("  [FAIL] UT-RX-TS-010: Failed to enable all queues\n");
         g_failCount++;
     }
 }
 
-// Test 11: Enable Filter - Invalid Flags
-static void Test_EnableFilterInvalidFlags(void) {
-    UCHAR invalid_flags = 0xFF;
+// Test 11: Disable All Queues
+static void Test_DisableAllQueues(void) {
+    bool success = true;
     
-    if (!SetRxTimestampFilter(invalid_flags, 0, NULL, "invalid flags")) {
-        printf("  [PASS] UT-RX-TS-011: Invalid Filter Flags Rejected\n");
+    for (avb_u32 q = 0; q < 4; q++) {
+        if (!SetQueueTimestampEnable(q, 0, "disable all queues")) {
+            success = false;
+            break;
+        }
+    }
+    
+    if (success) {
+        printf("  [PASS] UT-RX-TS-011: Disable All Queues (0-3)\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-011: Invalid flags accepted\n");
+        printf("  [FAIL] UT-RX-TS-011: Failed to disable all queues\n");
         g_failCount++;
     }
 }
 
-// Test 12: Enable Filter - NULL Pointer Handling
-static void Test_EnableFilterNullPointer(void) {
+// Test 12: Invalid Queue Index
+static void Test_InvalidQueueIndex(void) {
+    // Queue index 99 should be invalid (I210/I226 only have 4 queues: 0-3)
+    if (!SetQueueTimestampEnable(99, 1, "invalid queue")) {
+        printf("  [PASS] UT-RX-TS-012: Invalid Queue Index Rejected\n");
+        g_passCount++;
+    } else {
+        printf("  [FAIL] UT-RX-TS-012: Invalid queue index accepted\n");
+        g_failCount++;
+    }
+}
+
+// Test 13: NULL Pointer Handling (Queue Enable)
+static void Test_QueueEnableNullPointer(void) {
     DWORD bytesReturned = 0;
     BOOL result = DeviceIoControl(
         g_hDevice,
@@ -284,50 +295,44 @@ static void Test_EnableFilterNullPointer(void) {
     );
     
     if (!result && GetLastError() == ERROR_INVALID_PARAMETER) {
-        printf("  [PASS] UT-RX-TS-012: NULL Pointer Handling (Filter)\n");
+        printf("  [PASS] UT-RX-TS-013: NULL Pointer Handling (Queue)\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-012: NULL pointer not rejected (filter)\n");
+        printf("  [FAIL] UT-RX-TS-013: NULL pointer not rejected (queue)\n");
         g_failCount++;
     }
 }
 
-// Test 13: Rapid Filter Switching
-static void Test_RapidFilterSwitching(void) {
+// Test 14: Rapid Queue Toggle
+static void Test_RapidQueueToggle(void) {
     bool success = true;
     
-    for (int i = 0; i < 100; i++) {
-        UCHAR flags = (i % 4);  // Cycle through 0x00, 0x01, 0x02, 0x03
-        if (!SetRxTimestampFilter(flags, 0, NULL, "rapid switching")) {
+    // Rapidly toggle queue 0
+    for (int i = 0; i < 50; i++) {
+        if (!SetQueueTimestampEnable(0, i % 2, "rapid toggle")) {
             success = false;
             break;
         }
     }
     
     if (success) {
-        printf("  [PASS] UT-RX-TS-013: Rapid Filter Switching\n");
+        printf("  [PASS] UT-RX-TS-014: Rapid Queue Toggle\n");
         g_passCount++;
     } else {
-        printf("  [FAIL] UT-RX-TS-013: Rapid filter switching failed\n");
+        printf("  [FAIL] UT-RX-TS-014: Rapid queue toggle failed\n");
         g_failCount++;
     }
 }
 
-// Test 14: Timestamp Queue Overflow Handling (SKIP - requires packet injection)
-static void Test_TimestampQueueOverflow(void) {
-    printf("  [SKIP] UT-RX-TS-014: Timestamp Queue Overflow: Requires packet injection framework\n");
+// Test 15: Enable Without Global Enable (SKIP - driver behavior undefined)
+static void Test_QueueWithoutGlobalEnable(void) {
+    printf("  [SKIP] UT-RX-TS-015: Queue Enable Without Global: Driver behavior undefined\n");
     g_skipCount++;
 }
 
-// Test 15: Filter Persistence After Disable/Re-enable (SKIP - requires state verification)
-static void Test_FilterPersistence(void) {
-    printf("  [SKIP] UT-RX-TS-015: Filter Persistence: Requires state verification mechanism\n");
-    g_skipCount++;
-}
-
-// Test 16: Concurrent Timestamp Retrieval (SKIP - requires multi-threading)
-static void Test_ConcurrentTimestampRetrieval(void) {
-    printf("  [SKIP] UT-RX-TS-016: Concurrent Timestamp Retrieval: Requires multi-threaded framework\n");
+// Test 16: Register State Verification (SKIP - requires register read access)
+static void Test_RegisterStateVerification(void) {
+    printf("  [SKIP] UT-RX-TS-016: Register State Verification: Requires direct register access\n");
     g_skipCount++;
 }
 
@@ -342,7 +347,7 @@ int main(void) {
     printf("====================================================================\n");
     printf(" Implements: #298 (TEST-RX-TS-001)\n");
     printf(" Verifies: #6 (REQ-F-PTP-004)\n");
-    printf(" IOCTLs: GET_RX_TIMESTAMP (41), ENABLE_RX_TIMESTAMP_FILTER (42)\n");
+    printf(" IOCTLs: SET_RX_TIMESTAMP (41), SET_QUEUE_TIMESTAMP (42)\n");
     printf(" Total Tests: 16\n");
     printf(" Priority: P0 (Critical)\n");
     printf("====================================================================\n\n");
@@ -367,22 +372,22 @@ int main(void) {
     printf("Running PTP RX Timestamping tests...\n\n");
     
     // Run all tests
-    Test_GetRxTimestampValidPacket();
-    Test_GetRxTimestampZeroPacketId();
-    Test_GetRxTimestampMaxPacketId();
-    Test_GetRxTimestampNonExistent();
-    Test_GetRxTimestampNullPointer();
-    Test_EnableFilterNone();
-    Test_EnableFilterPTPv2();
-    Test_EnableFilterUdpPort();
-    Test_EnableFilterMacAddress();
-    Test_EnableFilterCombined();
-    Test_EnableFilterInvalidFlags();
-    Test_EnableFilterNullPointer();
-    Test_RapidFilterSwitching();
-    Test_TimestampQueueOverflow();
-    Test_FilterPersistence();
-    Test_ConcurrentTimestampRetrieval();
+    Test_EnableGlobalRxTimestamp();
+    Test_DisableGlobalRxTimestamp();
+    Test_ToggleGlobalRxTimestamp();
+    Test_GlobalEnableNullPointer();
+    Test_EnableQueue0Timestamp();
+    Test_EnableQueue1Timestamp();
+    Test_EnableQueue2Timestamp();
+    Test_EnableQueue3Timestamp();
+    Test_DisableQueue0Timestamp();
+    Test_EnableAllQueues();
+    Test_DisableAllQueues();
+    Test_InvalidQueueIndex();
+    Test_QueueEnableNullPointer();
+    Test_RapidQueueToggle();
+    Test_QueueWithoutGlobalEnable();
+    Test_RegisterStateVerification();
     
     // Cleanup
     CloseHandle(g_hDevice);
