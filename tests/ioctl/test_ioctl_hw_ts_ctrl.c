@@ -45,12 +45,6 @@ typedef struct {
     int skip_count;
 } TestContext;
 
-/* IOCTL request structure */
-typedef struct {
-    UINT32 mode;      /* Bitmask: RX|TX enable */
-    UINT32 status;
-} HW_TIMESTAMPING_REQUEST, *PHW_TIMESTAMPING_REQUEST;
-
 /* Helper: Open device */
 static HANDLE OpenAdapter(void)
 {
@@ -75,10 +69,27 @@ static HANDLE OpenAdapter(void)
 /* Helper: Set hardware timestamping mode */
 static BOOL SetHWTimestamping(HANDLE adapter, UINT32 mode)
 {
-    HW_TIMESTAMPING_REQUEST req = {0};
+    AVB_HW_TIMESTAMPING_REQUEST req;
     DWORD bytesReturned = 0;
     
-    req.mode = mode;
+    ZeroMemory(&req, sizeof(req));
+    
+    /* Convert mode bitmask to proper structure fields */
+    if (mode == HW_TS_DISABLED) {
+        req.enable = 0;  /* Disable all timestamping */
+        req.timer_mask = 0;
+        req.enable_target_time = 0;
+        req.enable_aux_ts = 0;
+    } else {
+        req.enable = 1;  /* Enable timestamping */
+        req.timer_mask = 0x1;  /* SYSTIM0 only */
+        req.enable_target_time = 0;  /* No target time interrupts */
+        req.enable_aux_ts = 0;  /* No auxiliary timestamps */
+        
+        /* Note: mode parameter (RX/TX bits) is NOT used by IOCTL 40 */
+        /* IOCTL 40 only controls TSAUXC register (global enable/disable) */
+        /* RX/TX packet timestamping is controlled by IOCTLs 41/42 */
+    }
     
     BOOL result = DeviceIoControl(
         adapter,
@@ -88,6 +99,11 @@ static BOOL SetHWTimestamping(HANDLE adapter, UINT32 mode)
         &bytesReturned,
         NULL
     );
+    
+    if (result && req.status != 0) {
+        /* IOCTL succeeded but driver returned error status */
+        return FALSE;
+    }
     
     return result;
 }
