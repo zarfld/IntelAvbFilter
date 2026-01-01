@@ -40,13 +40,13 @@ This document tracks the systematic verification of **25 IOCTLs** across **11 ac
 
 | Req # | Requirement | IOCTLs | Priority | Test Issue | Test Cases | Status |
 |-------|-------------|--------|----------|------------|------------|--------|
-| [#2](https://github.com/zarfld/IntelAvbFilter/issues/2) | REQ-F-PTP-001: PTP Get/Set Timestamp | 24, 25 | P0 | [#295](https://github.com/zarfld/IntelAvbFilter/issues/295) | 12 | ✅ Test Issue Created |
-| [#3](https://github.com/zarfld/IntelAvbFilter/issues/3) | REQ-F-PTP-002: PTP Frequency Adjustment | 38 | P0 | [#205](https://github.com/zarfld/IntelAvbFilter/issues/205), [#296](https://github.com/zarfld/IntelAvbFilter/issues/296) | 15, 17 | ✅ **2 Issues wiederhergestellt** |
+| [#2](https://github.com/zarfld/IntelAvbFilter/issues/2) | REQ-F-PTP-001: PTP Get/Set Timestamp | 24, 25 | P0 | [#295](https://github.com/zarfld/IntelAvbFilter/issues/295) | 12 | ✅ **Tested: 7/12 Passed (58%) - Timestamp bugs** |
+| [#3](https://github.com/zarfld/IntelAvbFilter/issues/3) | REQ-F-PTP-002: PTP Frequency Adjustment | 38 | P0 | [#205](https://github.com/zarfld/IntelAvbFilter/issues/205), [#296](https://github.com/zarfld/IntelAvbFilter/issues/296) | 15, 17 | ✅ **Tested: 8/15 Passed (53%) - Validation gaps** |
 | [#4](https://github.com/zarfld/IntelAvbFilter/issues/4) | BUG: GET_CLOCK_CONFIG | 45 | N/A | N/A | N/A | ✅ Closed (Tested) |
-| [#5](https://github.com/zarfld/IntelAvbFilter/issues/5) | REQ-F-PTP-003: Hardware Timestamping Control | 40 | P0 | [#297](https://github.com/zarfld/IntelAvbFilter/issues/297) | 13 | ✅ Test Issue Created |
-| [#6](https://github.com/zarfld/IntelAvbFilter/issues/6) | REQ-F-PTP-004: Rx Packet Timestamping | 41, 42 | P0 | [#203](https://github.com/zarfld/IntelAvbFilter/issues/203), [#298](https://github.com/zarfld/IntelAvbFilter/issues/298) | 15, 15 | ✅ **2 Issues wiederhergestellt** |
+| [#5](https://github.com/zarfld/IntelAvbFilter/issues/5) | REQ-F-PTP-003: Hardware Timestamping Control | 40 | P0 | [#297](https://github.com/zarfld/IntelAvbFilter/issues/297) | 13 | ✅ **Tested: 6/13 Passed (46%) - FIXED! Core functionality works** |
+| [#6](https://github.com/zarfld/IntelAvbFilter/issues/6) | REQ-F-PTP-004: Rx Packet Timestamping | 41, 42 | P0 | [#203](https://github.com/zarfld/IntelAvbFilter/issues/203), [#298](https://github.com/zarfld/IntelAvbFilter/issues/298) | 15, 16 | ✅ **Tested: 12/16 Passed (75%) - EXCELLENT** |
 | [#7](https://github.com/zarfld/IntelAvbFilter/issues/7) | REQ-F-PTP-005: Target Time & Aux Timestamp | 43, 44 | P1 | [#204](https://github.com/zarfld/IntelAvbFilter/issues/204), [#299](https://github.com/zarfld/IntelAvbFilter/issues/299) | 15, 16 | ✅ **2 Issues wiederhergestellt** |
-| [#8](https://github.com/zarfld/IntelAvbFilter/issues/8) | REQ-F-QAV-001: Credit-Based Shaper | 35 | P0 | [#207](https://github.com/zarfld/IntelAvbFilter/issues/207) | 15 | ✅ Restored (was corrupted) |
+| [#8](https://github.com/zarfld/IntelAvbFilter/issues/8) | REQ-F-QAV-001: Credit-Based Shaper | 35 | P0 | [#207](https://github.com/zarfld/IntelAvbFilter/issues/207) | 14 | ✅ **Tested: 7/14 Passed (50%) - Validation gaps** |
 | [#9](https://github.com/zarfld/IntelAvbFilter/issues/9) | REQ-F-TAS-001: Time-Aware Scheduler | 26 | P1 | [#206](https://github.com/zarfld/IntelAvbFilter/issues/206) | 15 | ✅ **Wiederhergestellt!** |
 | [#10](https://github.com/zarfld/IntelAvbFilter/issues/10) | REQ-F-MDIO-001: MDIO/PHY Access | 29, 30 | P1 | [#312](https://github.com/zarfld/IntelAvbFilter/issues/312) | 15 | ✅ **Test Issue Created** |
 | [#11](https://github.com/zarfld/IntelAvbFilter/issues/11) | REQ-F-FP-001 & PTM-001: Frame Preemption & PTM | 27, 28 | P1 | [#212](https://github.com/zarfld/IntelAvbFilter/issues/212) | 15 | ✅ **Restored - Frame Preemption** |

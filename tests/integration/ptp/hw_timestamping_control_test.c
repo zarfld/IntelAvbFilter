@@ -2,11 +2,15 @@
  * @file hw_timestamping_control_test.c
  * @brief Production test for hardware timestamping enable/disable control
  * 
+ * Verifies: #5 (REQ-F-PTP-003: Hardware Timestamping Control)
+ * 
  * Tests the IOCTL_AVB_SET_HW_TIMESTAMPING IOCTL which controls:
  * - TSAUXC bit 31 (DisableSystime): Primary enable/disable for HW timestamping
  * - TSAUXC bit 30 (PHC Enable): Optional PTP Hardware Clock enable
  * 
  * This replaces raw TSAUXC register manipulation with a proper production API.
+ * 
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/5
  */
 
 #include <windows.h>
