@@ -52,13 +52,14 @@ typedef struct {
     int skip_count;
 } TestContext;
 
-/* MDIO request/response structures */
-typedef struct {
-    UINT8  phy_addr;
-    UINT8  reg_addr;
-    UINT16 value;
-    UINT32 status;
-} MDIO_REQUEST, *PMDIO_REQUEST;
+/* Use SSOT structure from avb_ioctl.h:
+ * typedef struct AVB_MDIO_REQUEST {
+ *     avb_u32 page;
+ *     avb_u32 reg;
+ *     avb_u16 value;
+ *     avb_u32 status;
+ * } AVB_MDIO_REQUEST;
+ */
 
 /*==============================================================================
  * Helper Functions
@@ -90,12 +91,13 @@ HANDLE OpenAdapter(void) {
  * @brief Read PHY register via IOCTL 29
  */
 BOOL ReadPHYReg(HANDLE adapter, UINT8 phy_addr, UINT8 reg_addr, UINT16 *value) {
-    MDIO_REQUEST request = {0};
+    AVB_MDIO_REQUEST request = {0};  /* SSOT structure from avb_ioctl.h line 213 */
     DWORD bytes_returned = 0;
     BOOL result;
     
-    request.phy_addr = phy_addr;
-    request.reg_addr = reg_addr;
+    /* AVB_MDIO_REQUEST uses page/reg, not phy_addr/reg_addr */
+    request.page = phy_addr;  /* PHY address maps to page */
+    request.reg = reg_addr;   /* Register address */
     
     result = DeviceIoControl(
         adapter,
@@ -120,13 +122,14 @@ BOOL ReadPHYReg(HANDLE adapter, UINT8 phy_addr, UINT8 reg_addr, UINT16 *value) {
  * @brief Write PHY register via IOCTL 30
  */
 BOOL WritePHYReg(HANDLE adapter, UINT8 phy_addr, UINT8 reg_addr, UINT16 value) {
-    MDIO_REQUEST request = {0};
+    AVB_MDIO_REQUEST request = {0};  /* SSOT structure from avb_ioctl.h line 213 */
     DWORD bytes_returned = 0;
     BOOL result;
     
-    request.phy_addr = phy_addr;
-    request.reg_addr = reg_addr;
-    request.value = value;
+    /* AVB_MDIO_REQUEST uses page/reg, not phy_addr/reg_addr */
+    request.page = phy_addr;  /* PHY address maps to page */
+    request.reg = reg_addr;   /* Register address */
+    request.value = value;    /* Value to write */
     
     result = DeviceIoControl(
         adapter,
