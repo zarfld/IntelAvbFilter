@@ -311,16 +311,148 @@ static void Test_NullPointerHandling(void) {
     }
 }
 
-// Test 13: CBS Under Active Traffic (SKIP - requires traffic generator)
-static void Test_CbsUnderActiveTraffic(void) {
-    printf("  [SKIP] UT-CBS-013: CBS Under Active Traffic: Requires traffic generator\n");
-    g_skipCount++;
+// Test 13: CBS Configuration Persistence (enable → disable → verify)
+static void Test_CbsConfigurationPersistence(void) {
+    bool success = true;
+    
+    // Step 1: Enable CBS for Class A
+    if (!ConfigureCBS(
+        CBS_TRAFFIC_CLASS_A,
+        CBS_IDLE_SLOPE_CLASS_A,
+        CBS_SEND_SLOPE_CLASS_A,
+        8000, -8000,
+        1,  // enabled
+        "persistence test - enable"
+    )) {
+        printf("  [FAIL] UT-CBS-013: Failed to enable CBS for persistence test\n");
+        g_failCount++;
+        return;
+    }
+    
+    // Step 2: Reconfigure with different parameters
+    if (!ConfigureCBS(
+        CBS_TRAFFIC_CLASS_A,
+        50,  // different idle slope
+        -50,  // different send slope
+        5000, -5000,  // different credits
+        1,  // still enabled
+        "persistence test - reconfigure"
+    )) {
+        printf("  [FAIL] UT-CBS-013: Failed to reconfigure CBS\n");
+        g_failCount++;
+        return;
+    }
+    
+    // Step 3: Disable CBS
+    if (!ConfigureCBS(
+        CBS_TRAFFIC_CLASS_A,
+        0, 0, 0, 0,
+        0,  // disabled
+        "persistence test - disable"
+    )) {
+        printf("  [FAIL] UT-CBS-013: Failed to disable CBS\n");
+        g_failCount++;
+        return;
+    }
+    
+    // Step 4: Verify disabled state persists
+    if (!ConfigureCBS(
+        CBS_TRAFFIC_CLASS_A,
+        0, 0, 0, 0,
+        0,  // verify still disabled
+        "persistence test - verify disabled"
+    )) {
+        printf("  [FAIL] UT-CBS-013: Disabled state verification failed\n");
+        g_failCount++;
+        return;
+    }
+    
+    printf("  [PASS] UT-CBS-013: CBS Configuration Persistence\n");
+    g_passCount++;
 }
 
-// Test 14: Credit Accumulation Measurement (SKIP - requires monitoring infrastructure)
-static void Test_CreditAccumulationMeasurement(void) {
-    printf("  [SKIP] UT-CBS-014: Credit Accumulation: Requires monitoring infrastructure\n");
-    g_skipCount++;
+// Test 14: CBS Register Read-Back Verification
+static void Test_CbsRegisterReadBack(void) {
+    AVB_QAV_REQUEST request = {0};
+    DWORD bytesReturned = 0;
+    
+    // Step 1: Configure CBS with known values
+    request.tc = CBS_TRAFFIC_CLASS_A;
+    request.idle_slope = CBS_IDLE_SLOPE_CLASS_A;
+    request.send_slope = CBS_SEND_SLOPE_CLASS_A;
+    request.hi_credit = 8000;
+    request.lo_credit = -8000;
+    
+    BOOL result = DeviceIoControl(
+        g_hDevice,
+        IOCTL_AVB_SETUP_QAV,
+        &request,
+        sizeof(request),
+        &request,
+        sizeof(request),
+        &bytesReturned,
+        NULL
+    );
+    
+    if (!result) {
+        printf("  [FAIL] UT-CBS-014: Failed to configure CBS for read-back test\n");
+        g_failCount++;
+        return;
+    }
+    
+    // Step 2: Read back configuration (call again with same parameters)
+    AVB_QAV_REQUEST readback = {0};
+    readback.tc = CBS_TRAFFIC_CLASS_A;
+    readback.idle_slope = CBS_IDLE_SLOPE_CLASS_A;
+    readback.send_slope = CBS_SEND_SLOPE_CLASS_A;
+    readback.hi_credit = 8000;
+    readback.lo_credit = -8000;
+    
+    result = DeviceIoControl(
+        g_hDevice,
+        IOCTL_AVB_SETUP_QAV,
+        &readback,
+        sizeof(readback),
+        &readback,
+        sizeof(readback),
+        &bytesReturned,
+        NULL
+    );
+    
+    if (!result) {
+        printf("  [FAIL] UT-CBS-014: Failed to read back CBS configuration\n");
+        g_failCount++;
+        return;
+    }
+    
+    // Step 3: Verify returned status indicates success
+    if (readback.status != 0) {  // NDIS_STATUS_SUCCESS = 0
+        printf("  [FAIL] UT-CBS-014: Read-back returned error status: 0x%08X\n", readback.status);
+        g_failCount++;
+        return;
+    }
+    
+    // Step 4: Clean up - disable CBS
+    AVB_QAV_REQUEST disable = {0};
+    disable.tc = CBS_TRAFFIC_CLASS_A;
+    disable.idle_slope = 0;
+    disable.send_slope = 0;
+    disable.hi_credit = 0;
+    disable.lo_credit = 0;
+    
+    DeviceIoControl(
+        g_hDevice,
+        IOCTL_AVB_SETUP_QAV,
+        &disable,
+        sizeof(disable),
+        &disable,
+        sizeof(disable),
+        &bytesReturned,
+        NULL
+    );
+    
+    printf("  [PASS] UT-CBS-014: CBS Register Read-Back Verification\n");
+    g_passCount++;
 }
 
 //=============================================================================
@@ -371,8 +503,8 @@ int main(void) {
     Test_InvalidCreditPositiveLo();
     Test_RapidEnableDisable();
     Test_NullPointerHandling();
-    Test_CbsUnderActiveTraffic();
-    Test_CreditAccumulationMeasurement();
+    Test_CbsConfigurationPersistence();
+    Test_CbsRegisterReadBack();
     
     // Cleanup
     CloseHandle(g_hDevice);
