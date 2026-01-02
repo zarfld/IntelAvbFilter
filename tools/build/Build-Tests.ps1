@@ -753,7 +753,7 @@ $AllTests = @(
     @{
         Name = "test_mdio_phy"
         Type = "cl"
-        Source = "tests\test_ioctl_mdio_phy.c"
+        Source = "tests\ioctl\test_ioctl_mdio_phy.c"
         Output = "test_mdio_phy.exe"
         Enabled = $true
         Priority = "P1"
@@ -767,7 +767,7 @@ $AllTests = @(
     @{
         Name = "test_dev_lifecycle"
         Type = "cl"
-        Source = "tests\test_ioctl_dev_lifecycle.c"
+        Source = "tests\ioctl\test_ioctl_dev_lifecycle.c"
         Output = "test_dev_lifecycle.exe"
         Enabled = $true
         Priority = "P0"
@@ -781,7 +781,7 @@ $AllTests = @(
     @{
         Name = "test_ts_event_sub"
         Type = "cl"
-        Source = "tests\test_ioctl_ts_event_sub.c"
+        Source = "tests\ioctl\test_ioctl_ts_event_sub.c"
         Output = "test_ts_event_sub.exe"
         Enabled = $true
         Priority = "P1"
