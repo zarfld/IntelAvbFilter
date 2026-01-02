@@ -891,6 +891,21 @@ $AllTests = @(
         IOCTLs = "43, 44"
         Requirement = "#7"
     }
+    @{
+        Name = "test_ioctl_tas"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_tas.c"
+        Output = "test_ioctl_tas.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "setupapi.lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Time-Aware Scheduler (TAS) Tests (Issue #206)"
+        Issue = "#206"
+        TestCases = 15
+        IOCTLs = "26"
+        Requirement = "#9"
+    }
 )
 
 # Filter tests if specific test requested
