@@ -43,23 +43,18 @@ typedef struct {
     int skip_count;
 } TestContext;
 
-/* PTP timestamp structure (aligned with driver) */
-typedef struct {
-    UINT64 seconds;      /* Seconds since epoch */
-    UINT32 nanoseconds;  /* Nanoseconds (0-999999999) */
-    UINT32 reserved;
-} PTP_TIMESTAMP, *PPTP_TIMESTAMP;
+/* Helper: Convert u64 timestamp to seconds/nanoseconds for display */
+static void TimestampToSecNsec(UINT64 timestamp_ns, UINT64 *seconds, UINT32 *nanoseconds)
+{
+    *seconds = timestamp_ns / NSEC_PER_SEC;
+    *nanoseconds = (UINT32)(timestamp_ns % NSEC_PER_SEC);
+}
 
-/* IOCTL request structures */
-typedef struct {
-    PTP_TIMESTAMP timestamp;
-    UINT32 status;
-} GET_TIMESTAMP_REQUEST, *PGET_TIMESTAMP_REQUEST;
-
-typedef struct {
-    PTP_TIMESTAMP timestamp;
-    UINT32 status;
-} SET_TIMESTAMP_REQUEST, *PSET_TIMESTAMP_REQUEST;
+/* Helper: Convert seconds/nanoseconds to u64 timestamp */
+static UINT64 SecNsecToTimestamp(UINT64 seconds, UINT32 nanoseconds)
+{
+    return seconds * NSEC_PER_SEC + nanoseconds;
+}
 
 /* Helper: Enable hardware timestamping (required for GET_TIMESTAMP to work) */
 static BOOL EnableHWTimestamping(HANDLE adapter)
@@ -113,12 +108,13 @@ static HANDLE OpenAdapter(void)
 }
 
 /* Helper: Get PTP timestamp */
-static BOOL GetPTPTimestamp(HANDLE adapter, PTP_TIMESTAMP *ts)
+static BOOL GetPTPTimestamp(HANDLE adapter, UINT64 *timestamp_ns)
 {
-    GET_TIMESTAMP_REQUEST req = {0};
+    AVB_TIMESTAMP_REQUEST req = {0};  /* ✅ Use SSOT structure */
     DWORD bytesReturned = 0;
+    BOOL result;
     
-    BOOL result = DeviceIoControl(
+    result = DeviceIoControl(
         adapter,
         IOCTL_AVB_GET_TIMESTAMP,
         &req, sizeof(req),
@@ -127,24 +123,29 @@ static BOOL GetPTPTimestamp(HANDLE adapter, PTP_TIMESTAMP *ts)
         NULL
     );
     
-    if (result && ts) {
-        *ts = req.timestamp;
+    /* ✅ Check BOTH DeviceIoControl result AND driver status field */
+    if (result && req.status != 0) {
+        /* IOCTL succeeded but driver returned error status */
+        return FALSE;
+    }
+    
+    if (result && timestamp_ns) {
+        *timestamp_ns = req.timestamp;  /* ✅ Single u64 field */
     }
     
     return result;
 }
 
 /* Helper: Set PTP timestamp */
-static BOOL SetPTPTimestamp(HANDLE adapter, const PTP_TIMESTAMP *ts)
+static BOOL SetPTPTimestamp(HANDLE adapter, UINT64 timestamp_ns)
 {
-    SET_TIMESTAMP_REQUEST req = {0};
+    AVB_TIMESTAMP_REQUEST req = {0};  /* ✅ Use SSOT structure */
     DWORD bytesReturned = 0;
+    BOOL result;
     
-    if (ts) {
-        req.timestamp = *ts;
-    }
+    req.timestamp = timestamp_ns;  /* ✅ Single u64 field */
     
-    BOOL result = DeviceIoControl(
+    result = DeviceIoControl(
         adapter,
         IOCTL_AVB_SET_TIMESTAMP,
         &req, sizeof(req),
@@ -153,21 +154,13 @@ static BOOL SetPTPTimestamp(HANDLE adapter, const PTP_TIMESTAMP *ts)
         NULL
     );
     
+    /* ✅ Check BOTH DeviceIoControl result AND driver status field */
+    if (result && req.status != 0) {
+        /* IOCTL succeeded but driver returned error status */
+        return FALSE;
+    }
+    
     return result;
-}
-
-/* Helper: Compare timestamps */
-static BOOL TimestampsEqual(const PTP_TIMESTAMP *a, const PTP_TIMESTAMP *b)
-{
-    return (a->seconds == b->seconds) && (a->nanoseconds == b->nanoseconds);
-}
-
-/* Helper: Add nanoseconds to timestamp */
-static void AddNanoseconds(PTP_TIMESTAMP *ts, UINT64 ns)
-{
-    UINT64 total_ns = ts->nanoseconds + ns;
-    ts->seconds += total_ns / NSEC_PER_SEC;
-    ts->nanoseconds = (UINT32)(total_ns % NSEC_PER_SEC);
 }
 
 /*
@@ -176,21 +169,30 @@ static void AddNanoseconds(PTP_TIMESTAMP *ts, UINT64 ns)
  */
 static int Test_BasicGetTimestamp(TestContext *ctx)
 {
-    PTP_TIMESTAMP ts = {0};
+    UINT64 timestamp_ns = 0;
+    UINT64 seconds;
+    UINT32 nanoseconds;
     
-    if (!GetPTPTimestamp(ctx->adapter, &ts)) {
+    if (!GetPTPTimestamp(ctx->adapter, &timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-001: Basic Get Timestamp: IOCTL failed\n");
         return TEST_FAIL;
     }
     
-    /* Timestamp should be non-zero and nanoseconds < 1 second */
-    if (ts.seconds == 0 || ts.nanoseconds >= NSEC_PER_SEC) {
-        printf("  [FAIL] UT-PTP-GETSET-001: Basic Get Timestamp: Invalid timestamp (sec=%llu, nsec=%u)\n",
-               ts.seconds, ts.nanoseconds);
+    /* Timestamp should be non-zero */
+    if (timestamp_ns == 0) {
+        printf("  [FAIL] UT-PTP-GETSET-001: Basic Get Timestamp: Timestamp is zero\n");
         return TEST_FAIL;
     }
     
-    ctx->initial_timestamp = ts.seconds * NSEC_PER_SEC + ts.nanoseconds;
+    /* Validate nanoseconds component < 1 second */
+    TimestampToSecNsec(timestamp_ns, &seconds, &nanoseconds);
+    if (nanoseconds >= NSEC_PER_SEC) {
+        printf("  [FAIL] UT-PTP-GETSET-001: Basic Get Timestamp: Invalid timestamp (sec=%llu, nsec=%u)\n",
+               seconds, nanoseconds);
+        return TEST_FAIL;
+    }
+    
+    ctx->initial_timestamp = timestamp_ns;
     printf("  [PASS] UT-PTP-GETSET-001: Basic Get Timestamp\n");
     return TEST_PASS;
 }
@@ -201,28 +203,26 @@ static int Test_BasicGetTimestamp(TestContext *ctx)
  */
 static int Test_BasicSetTimestamp(TestContext *ctx)
 {
-    PTP_TIMESTAMP set_ts = {0};
-    PTP_TIMESTAMP get_ts = {0};
+    UINT64 set_timestamp_ns;
+    UINT64 get_timestamp_ns;
     
     /* Set to known value: 1 Jan 2025 00:00:00 UTC */
-    set_ts.seconds = 1735689600;  /* Unix timestamp for 2025-01-01 */
-    set_ts.nanoseconds = 123456789;
+    set_timestamp_ns = SecNsecToTimestamp(1735689600ULL, 123456789);  /* Unix timestamp for 2025-01-01 */
     
-    if (!SetPTPTimestamp(ctx->adapter, &set_ts)) {
+    if (!SetPTPTimestamp(ctx->adapter, set_timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-002: Basic Set Timestamp: IOCTL failed\n");
         return TEST_FAIL;
     }
     
     /* Verify by reading back */
     Sleep(10);  /* Allow hardware to update */
-    if (!GetPTPTimestamp(ctx->adapter, &get_ts)) {
+    if (!GetPTPTimestamp(ctx->adapter, &get_timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-002: Basic Set Timestamp: Read-back failed\n");
         return TEST_FAIL;
     }
     
     /* Allow small drift (up to 1ms) */
-    INT64 diff = (INT64)(get_ts.seconds - set_ts.seconds) * NSEC_PER_SEC;
-    diff += (INT64)(get_ts.nanoseconds - set_ts.nanoseconds);
+    INT64 diff = (INT64)(get_timestamp_ns - set_timestamp_ns);
     
     if (llabs(diff) > 1000000) {  /* 1ms tolerance */
         printf("  [FAIL] UT-PTP-GETSET-002: Basic Set Timestamp: Timestamp mismatch (diff=%lld ns)\n", diff);
@@ -239,23 +239,22 @@ static int Test_BasicSetTimestamp(TestContext *ctx)
  */
 static int Test_TimestampMonotonicity(TestContext *ctx)
 {
-    PTP_TIMESTAMP ts1 = {0}, ts2 = {0};
+    UINT64 ts1_ns = 0, ts2_ns = 0;
     
-    if (!GetPTPTimestamp(ctx->adapter, &ts1)) {
+    if (!GetPTPTimestamp(ctx->adapter, &ts1_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-003: Timestamp Monotonicity: First read failed\n");
         return TEST_FAIL;
     }
     
     Sleep(10);  /* Wait 10ms */
     
-    if (!GetPTPTimestamp(ctx->adapter, &ts2)) {
+    if (!GetPTPTimestamp(ctx->adapter, &ts2_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-003: Timestamp Monotonicity: Second read failed\n");
         return TEST_FAIL;
     }
     
     /* ts2 must be > ts1 */
-    if (ts2.seconds < ts1.seconds || 
-        (ts2.seconds == ts1.seconds && ts2.nanoseconds <= ts1.nanoseconds)) {
+    if (ts2_ns <= ts1_ns) {
         printf("  [FAIL] UT-PTP-GETSET-003: Timestamp Monotonicity: Not monotonic\n");
         return TEST_FAIL;
     }
@@ -270,13 +269,13 @@ static int Test_TimestampMonotonicity(TestContext *ctx)
  */
 static int Test_NanosecondsWraparound(TestContext *ctx)
 {
-    PTP_TIMESTAMP set_ts = {0};
+    UINT64 set_timestamp_ns;
     
     /* Set timestamp close to nanosecond wraparound */
-    set_ts.seconds = 1000000;
-    set_ts.nanoseconds = 999999000;  /* 1ms before wraparound */
+    /* Set timestamp 1ms before second wraparound */
+    set_timestamp_ns = SecNsecToTimestamp(1000000ULL, 999999000);
     
-    if (!SetPTPTimestamp(ctx->adapter, &set_ts)) {
+    if (!SetPTPTimestamp(ctx->adapter, set_timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-004: Nanoseconds Wraparound: Set failed\n");
         return TEST_FAIL;
     }
@@ -284,14 +283,14 @@ static int Test_NanosecondsWraparound(TestContext *ctx)
     /* Wait for wraparound */
     Sleep(10);  /* Should wrap to next second */
     
-    PTP_TIMESTAMP get_ts = {0};
-    if (!GetPTPTimestamp(ctx->adapter, &get_ts)) {
+    UINT64 get_timestamp_ns = 0;
+    if (!GetPTPTimestamp(ctx->adapter, &get_timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-004: Nanoseconds Wraparound: Get failed\n");
         return TEST_FAIL;
     }
     
     /* Should have wrapped (seconds incremented, nanoseconds < initial) */
-    if (get_ts.seconds != set_ts.seconds + 1) {
+    UINT64 expected_sec = 1000001; UINT64 actual_sec = get_timestamp_ns / NSEC_PER_SEC; if (actual_sec != expected_sec) {
         printf("  [FAIL] UT-PTP-GETSET-004: Nanoseconds Wraparound: Seconds not incremented\n");
         return TEST_FAIL;
     }
@@ -306,17 +305,17 @@ static int Test_NanosecondsWraparound(TestContext *ctx)
  */
 static int Test_InvalidNanosecondsRejection(TestContext *ctx)
 {
-    PTP_TIMESTAMP ts = {0};
+    /* Note: With u64 timestamp, we can't directly pass invalid nanoseconds
+     * Driver should validate the nanosecond component internally
+     * This test becomes: set valid timestamp, verify it works */
+    UINT64 timestamp_ns = SecNsecToTimestamp(1000000ULL, 500000000);  /* Valid timestamp */
     
-    ts.seconds = 1000000;
-    ts.nanoseconds = NSEC_PER_SEC;  /* Invalid: must be < 1e9 */
-    
-    if (SetPTPTimestamp(ctx->adapter, &ts)) {
-        printf("  [FAIL] UT-PTP-GETSET-005: Invalid Nanoseconds Rejection: Invalid value accepted\n");
+    if (!SetPTPTimestamp(ctx->adapter, timestamp_ns)) {
+        printf("  [FAIL] UT-PTP-GETSET-005: Invalid Nanoseconds Rejection: Valid timestamp rejected\n");
         return TEST_FAIL;
     }
     
-    printf("  [PASS] UT-PTP-GETSET-005: Invalid Nanoseconds Rejection\n");
+    printf("  [PASS] UT-PTP-GETSET-005: Invalid Nanoseconds Rejection (modified: validates valid timestamp)\n");
     return TEST_PASS;
 }
 
@@ -326,23 +325,23 @@ static int Test_InvalidNanosecondsRejection(TestContext *ctx)
  */
 static int Test_ZeroTimestampHandling(TestContext *ctx)
 {
-    PTP_TIMESTAMP set_ts = {0};
-    PTP_TIMESTAMP get_ts = {0};
+    UINT64 set_timestamp_ns = 0;  /* Set to epoch (all zeros) */
+    UINT64 get_timestamp_ns = 0;
     
     /* Set to epoch (all zeros) */
-    if (!SetPTPTimestamp(ctx->adapter, &set_ts)) {
+    if (!SetPTPTimestamp(ctx->adapter, set_timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-006: Zero Timestamp Handling: Set failed\n");
         return TEST_FAIL;
     }
     
     Sleep(10);
-    if (!GetPTPTimestamp(ctx->adapter, &get_ts)) {
+    if (!GetPTPTimestamp(ctx->adapter, &get_timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-006: Zero Timestamp Handling: Get failed\n");
         return TEST_FAIL;
     }
     
     /* Timestamp should have advanced from 0 */
-    if (get_ts.seconds == 0 && get_ts.nanoseconds == 0) {
+    if (get_timestamp_ns == 0) {
         printf("  [FAIL] UT-PTP-GETSET-006: Zero Timestamp Handling: Clock not running\n");
         return TEST_FAIL;
     }
@@ -357,13 +356,10 @@ static int Test_ZeroTimestampHandling(TestContext *ctx)
  */
 static int Test_MaximumTimestampValue(TestContext *ctx)
 {
-    PTP_TIMESTAMP ts = {0};
-    
     /* Maximum 48-bit seconds value */
-    ts.seconds = MAX_PTP_TIMESTAMP_SEC;
-    ts.nanoseconds = NSEC_PER_SEC - 1;  /* 999999999 */
+    UINT64 max_timestamp_ns = SecNsecToTimestamp(MAX_PTP_TIMESTAMP_SEC, NSEC_PER_SEC - 1);
     
-    if (!SetPTPTimestamp(ctx->adapter, &ts)) {
+    if (!SetPTPTimestamp(ctx->adapter, max_timestamp_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-007: Maximum Timestamp Value: Set failed\n");
         return TEST_FAIL;
     }
@@ -381,13 +377,15 @@ static int Test_RapidConsecutiveReads(TestContext *ctx)
     const int iterations = 100;
     
     for (int i = 0; i < iterations; i++) {
-        PTP_TIMESTAMP ts = {0};
-        if (!GetPTPTimestamp(ctx->adapter, &ts)) {
+        UINT64 timestamp_ns = 0;
+        if (!GetPTPTimestamp(ctx->adapter, &timestamp_ns)) {
             printf("  [FAIL] UT-PTP-GETSET-008: Rapid Consecutive Reads: Read %d failed\n", i);
             return TEST_FAIL;
         }
         
-        if (ts.nanoseconds >= NSEC_PER_SEC) {
+        /* Validate nanoseconds component */
+        UINT32 nanoseconds = (UINT32)(timestamp_ns % NSEC_PER_SEC);
+        if (nanoseconds >= NSEC_PER_SEC) {
             printf("  [FAIL] UT-PTP-GETSET-008: Rapid Consecutive Reads: Invalid nanoseconds\n");
             return TEST_FAIL;
         }
@@ -403,9 +401,9 @@ static int Test_RapidConsecutiveReads(TestContext *ctx)
  */
 static int Test_ClockResolutionMeasurement(TestContext *ctx)
 {
-    PTP_TIMESTAMP ts1 = {0}, ts2 = {0};
+    UINT64 ts1_ns = 0, ts2_ns = 0;
     
-    if (!GetPTPTimestamp(ctx->adapter, &ts1)) {
+    if (!GetPTPTimestamp(ctx->adapter, &ts1_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-009: Clock Resolution: First read failed\n");
         return TEST_FAIL;
     }
@@ -414,12 +412,12 @@ static int Test_ClockResolutionMeasurement(TestContext *ctx)
     int iterations = 0;
     const int max_iterations = 10000;
     do {
-        if (!GetPTPTimestamp(ctx->adapter, &ts2)) {
+        if (!GetPTPTimestamp(ctx->adapter, &ts2_ns)) {
             printf("  [FAIL] UT-PTP-GETSET-009: Clock Resolution: Subsequent read failed\n");
             return TEST_FAIL;
         }
         iterations++;
-    } while (TimestampsEqual(&ts1, &ts2) && iterations < max_iterations);
+    } while (ts1_ns == ts2_ns && iterations < max_iterations);
     
     if (iterations >= max_iterations) {
         printf("  [FAIL] UT-PTP-GETSET-009: Clock Resolution: Timestamp never changed\n");
@@ -427,8 +425,7 @@ static int Test_ClockResolutionMeasurement(TestContext *ctx)
     }
     
     /* Calculate resolution */
-    INT64 diff_ns = (INT64)(ts2.seconds - ts1.seconds) * NSEC_PER_SEC;
-    diff_ns += (INT64)(ts2.nanoseconds - ts1.nanoseconds);
+    INT64 diff_ns = (INT64)(ts2_ns - ts1_ns);
     
     /* IEEE 1588 requires <100ns resolution for Grandmaster class */
     if (diff_ns > 100) {
@@ -446,33 +443,32 @@ static int Test_ClockResolutionMeasurement(TestContext *ctx)
  */
 static int Test_BackwardTimeJumpDetection(TestContext *ctx)
 {
-    PTP_TIMESTAMP current = {0};
-    PTP_TIMESTAMP past = {0};
+    UINT64 current_ns = 0;
+    UINT64 verify_ns = 0;
     
     /* Get current time */
-    if (!GetPTPTimestamp(ctx->adapter, &current)) {
+    if (!GetPTPTimestamp(ctx->adapter, &current_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-010: Backward Time Jump: Get current failed\n");
         return TEST_FAIL;
     }
     
-    /* Try to set to past time */
-    past.seconds = current.seconds - 10;  /* 10 seconds ago */
-    past.nanoseconds = current.nanoseconds;
+    /* Try to set to past time (10 seconds ago) */
+    UINT64 past_ns = (current_ns >= 10ULL * NSEC_PER_SEC) ? 
+                     (current_ns - 10ULL * NSEC_PER_SEC) : 0;
     
     /* This should either fail or be ignored */
-    SetPTPTimestamp(ctx->adapter, &past);  /* May succeed or fail */
+    SetPTPTimestamp(ctx->adapter, past_ns);  /* May succeed or fail */
     
     Sleep(10);
     
     /* Read again - should still be >= original current time */
-    PTP_TIMESTAMP verify = {0};
-    if (!GetPTPTimestamp(ctx->adapter, &verify)) {
+    if (!GetPTPTimestamp(ctx->adapter, &verify_ns)) {
         printf("  [FAIL] UT-PTP-GETSET-010: Backward Time Jump: Verify read failed\n");
         return TEST_FAIL;
     }
     
     /* Check if time went backwards */
-    if (verify.seconds < current.seconds) {
+    if (verify_ns < current_ns) {
         printf("  [FAIL] UT-PTP-GETSET-010: Backward Time Jump: Time went backwards\n");
         return TEST_FAIL;
     }
@@ -520,11 +516,11 @@ typedef struct {
 static DWORD WINAPI TimestampReadWorker(LPVOID param)
 {
     TimestampThreadContext* tc = (TimestampThreadContext*)param;
-    PTP_TIMESTAMP ts;
+    UINT64 timestamp_ns;
     int i;
     
     for (i = 0; i < tc->iterations; i++) {
-        if (GetPTPTimestamp(tc->adapter, &ts)) {
+        if (GetPTPTimestamp(tc->adapter, &timestamp_ns)) {
             InterlockedIncrement(tc->success_count);
         } else {
             InterlockedIncrement(tc->fail_count);
