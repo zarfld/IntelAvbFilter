@@ -42,26 +42,6 @@ typedef struct {
     int skip_count;
 } TestContext;
 
-/* Adapter enumeration structures */
-typedef struct {
-    UINT32 adapter_count;
-    UINT32 buffer_size;
-    UINT32 status;
-} ENUM_ADAPTERS_REQUEST, *PENUM_ADAPTERS_REQUEST;
-
-typedef struct {
-    UINT32 adapter_index;
-    WCHAR  device_path[260];
-    UINT32 status;
-} OPEN_ADAPTER_REQUEST, *POPEN_ADAPTER_REQUEST;
-
-typedef struct {
-    UINT32 power_state;      /* D0-D3 */
-    UINT32 link_status;      /* Up/Down */
-    UINT32 resources_allocated;
-    UINT32 status;
-} HW_STATE_REQUEST, *PHW_STATE_REQUEST;
-
 /*==============================================================================
  * Helper Functions
  *============================================================================*/
@@ -142,9 +122,11 @@ BOOL GetDeviceInfo(HANDLE device, char *info_buffer, UINT32 buffer_size) {
  * @brief Enumerate adapters via IOCTL 31
  */
 BOOL EnumerateAdapters(HANDLE device, UINT32 *adapter_count) {
-    ENUM_ADAPTERS_REQUEST request = {0};
+    AVB_ENUM_REQUEST request = {0};  /* SSOT structure from avb_ioctl.h line 221 */
     DWORD bytes_returned = 0;
     BOOL result;
+    
+    request.index = 0;  /* Query first adapter */
     
     result = DeviceIoControl(
         device,
@@ -157,8 +139,8 @@ BOOL EnumerateAdapters(HANDLE device, UINT32 *adapter_count) {
         NULL
     );
     
-    if (result && request.status == 0) {
-        *adapter_count = request.adapter_count;
+    if (result) {
+        *adapter_count = request.count;  /* Total adapter count */
         return TRUE;
     }
     
@@ -169,24 +151,44 @@ BOOL EnumerateAdapters(HANDLE device, UINT32 *adapter_count) {
  * @brief Open adapter via IOCTL 32
  */
 HANDLE OpenAdapterByIndex(HANDLE device, UINT32 index) {
-    OPEN_ADAPTER_REQUEST request = {0};
+    AVB_ENUM_REQUEST enum_req = {0};
+    AVB_OPEN_REQUEST open_req = {0};  /* SSOT structure from avb_ioctl.h line 230 */
     DWORD bytes_returned = 0;
     BOOL result;
     
-    request.adapter_index = index;
-    
+    /* First enumerate to get vendor_id and device_id */
+    enum_req.index = index;
     result = DeviceIoControl(
         device,
-        IOCTL_AVB_OPEN_ADAPTER,  /* From avb_ioctl.h */
-        &request,
-        sizeof(request),
-        &request,
-        sizeof(request),
+        IOCTL_AVB_ENUM_ADAPTERS,
+        &enum_req,
+        sizeof(enum_req),
+        &enum_req,
+        sizeof(enum_req),
         &bytes_returned,
         NULL
     );
     
-    if (result && request.status == 0) {
+    if (!result || enum_req.count == 0) {
+        return INVALID_HANDLE_VALUE;
+    }
+    
+    /* Now open adapter using vendor_id and device_id */
+    open_req.vendor_id = enum_req.vendor_id;
+    open_req.device_id = enum_req.device_id;
+    
+    result = DeviceIoControl(
+        device,
+        IOCTL_AVB_OPEN_ADAPTER,  /* From avb_ioctl.h */
+        &open_req,
+        sizeof(open_req),
+        &open_req,
+        sizeof(open_req),
+        &bytes_returned,
+        NULL
+    );
+    
+    if (result) {
         /* In real implementation, would return adapter handle from response */
         return device;  /* Placeholder */
     }
@@ -197,7 +199,7 @@ HANDLE OpenAdapterByIndex(HANDLE device, UINT32 index) {
 /**
  * @brief Get hardware state via IOCTL 37
  */
-BOOL GetHardwareState(HANDLE device, HW_STATE_REQUEST *state) {
+BOOL GetHardwareState(HANDLE device, AVB_HW_STATE_QUERY *state) {
     DWORD bytes_returned = 0;
     BOOL result;
     
@@ -212,7 +214,7 @@ BOOL GetHardwareState(HANDLE device, HW_STATE_REQUEST *state) {
         NULL
     );
     
-    return (result && state->status == 0);
+    return result;  /* AVB_HW_STATE_QUERY has no status field, check DeviceIoControl result */
 }
 
 /**
@@ -455,7 +457,7 @@ void Test_ConcurrentOpenRequests(TestContext *ctx) {
  */
 void Test_HardwareStateRetrievalD0(TestContext *ctx) {
     HANDLE device;
-    HW_STATE_REQUEST state = {0};
+    AVB_HW_STATE_QUERY state = {0};  /* SSOT structure from avb_ioctl.h line 265 */
     BOOL result;
     
     device = OpenDevice(DEVICE_PATH_PRIMARY);
@@ -468,9 +470,10 @@ void Test_HardwareStateRetrievalD0(TestContext *ctx) {
     result = GetHardwareState(device, &state);
     
     if (result) {
-        printf("    Power state: D%u\n", state.power_state);
-        printf("    Link status: %s\n", state.link_status ? "Up" : "Down");
-        printf("    Resources allocated: %u\n", state.resources_allocated);
+        printf("    HW State: %u\n", state.hw_state);
+        printf("    Vendor ID: 0x%04X\n", state.vendor_id);
+        printf("    Device ID: 0x%04X\n", state.device_id);
+        printf("    Capabilities: 0x%08X\n", state.capabilities);
     }
     
     CloseHandle(device);
@@ -501,7 +504,7 @@ void Test_LinkStateDetection(TestContext *ctx) {
  */
 void Test_ResourceAllocationStatus(TestContext *ctx) {
     HANDLE device;
-    HW_STATE_REQUEST state = {0};
+    AVB_HW_STATE_QUERY state = {0};  /* SSOT structure from avb_ioctl.h line 265 */
     BOOL init_result, state_result;
     
     device = OpenDevice(DEVICE_PATH_PRIMARY);
@@ -517,9 +520,9 @@ void Test_ResourceAllocationStatus(TestContext *ctx) {
     CloseHandle(device);
     
     PrintTestResult(ctx, "UT-DEV-HW-STATE-004: Resource Allocation Status", 
-                    (init_result && state_result && state.resources_allocated) ? TEST_PASS : TEST_FAIL,
-                    (init_result && state_result && state.resources_allocated) ? NULL : 
-                    "Resources not allocated after init");
+                    (init_result && state_result && state.hw_state != 0) ? TEST_PASS : TEST_FAIL,
+                    (init_result && state_result && state.hw_state != 0) ? NULL : 
+                    "Hardware state check failed after init");
 }
 
 /**
