@@ -876,6 +876,21 @@ $AllTests = @(
         IOCTLs = "35"
         Requirement = "#8"
     }
+
+    @{
+        Name = "test_ioctl_target_time"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_target_time.c"
+        Output = "test_ioctl_target_time.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Target Time & Aux Timestamp Tests (Issues #204, #299)"
+        Issue = "#204, #299"
+        TestCases = 31
+        IOCTLs = "43, 44"
+        Requirement = "#7"
+    }
 )
 
 # Filter tests if specific test requested
