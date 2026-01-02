@@ -42,8 +42,8 @@
 /* Test state */
 typedef struct {
     HANDLE adapter;
-    HANDLE subscription;
-    void  *ring_buffer;
+    UINT32 ring_id;          /* Ring identifier (replaces subscription_handle) */
+    HANDLE ring_buffer_handle; /* Shared memory handle */
     SIZE_T ring_buffer_size;
     int test_count;
     int pass_count;
@@ -51,22 +51,10 @@ typedef struct {
     int skip_count;
 } TestContext;
 
-/* Event subscription structures */
-typedef struct {
-    UINT32 event_flags;      /* Bitmask of events to subscribe to */
-    UINT32 queue_filter;     /* Optional queue-specific filter */
-    HANDLE subscription_handle;
-    UINT32 status;
-} SUBSCRIBE_REQUEST, *PSUBSCRIBE_REQUEST;
+/* SSOT structures used - no custom definitions needed */
+/* AVB_TS_SUBSCRIBE_REQUEST and AVB_TS_RING_MAP_REQUEST from avb_ioctl.h */
 
-typedef struct {
-    HANDLE subscription_handle;
-    SIZE_T requested_size;
-    SIZE_T actual_size;
-    void  *user_address;
-    UINT32 status;
-} MAP_RING_BUFFER_REQUEST, *PMAP_RING_BUFFER_REQUEST;
-
+/* Timestamp event structure (not yet defined in SSOT - keep for now) */
 typedef struct {
     UINT64 timestamp;
     UINT32 event_type;
@@ -104,14 +92,24 @@ HANDLE OpenAdapter(void) {
 
 /**
  * @brief Subscribe to timestamp events via IOCTL 33
+ * @param event_flags Bitmask of TS_EVENT_* constants
+ * @param queue_filter Ignored (SSOT uses VLAN/PCP filtering)
+ * @return ring_id on success, 0 on failure
  */
-HANDLE SubscribeToEvents(HANDLE adapter, UINT32 event_flags, UINT32 queue_filter) {
-    SUBSCRIBE_REQUEST request = {0};
+UINT32 SubscribeToEvents(HANDLE adapter, UINT32 event_flags, UINT32 queue_filter) {
+    AVB_TS_SUBSCRIBE_REQUEST request = {0};
     DWORD bytes_returned = 0;
     BOOL result;
     
-    request.event_flags = event_flags;
-    request.queue_filter = queue_filter;
+    /* Map custom event_flags to SSOT types_mask (same values) */
+    request.types_mask = event_flags;
+    
+    /* SSOT uses VLAN/PCP filtering, not queue_filter
+     * For initial implementation, disable VLAN filtering (vlan=0, pcp=0) */
+    request.vlan = 0;
+    request.pcp = 0;
+    request.reserved0 = 0;
+    request.ring_id = 0;  /* Driver assigns ring_id */
     
     result = DeviceIoControl(
         adapter,
@@ -125,22 +123,26 @@ HANDLE SubscribeToEvents(HANDLE adapter, UINT32 event_flags, UINT32 queue_filter
     );
     
     if (result && request.status == 0) {
-        return request.subscription_handle;
+        return request.ring_id;  /* Return ring_id, not HANDLE */
     }
     
-    return INVALID_HANDLE_VALUE;
+    return 0;  /* 0 indicates failure */
 }
 
 /**
  * @brief Map ring buffer via IOCTL 34
+ * @param ring_id Ring identifier from subscribe operation
+ * @return HANDLE (from shm_token) on success, INVALID_HANDLE_VALUE on failure
  */
-void* MapRingBuffer(HANDLE adapter, HANDLE subscription, SIZE_T requested_size, SIZE_T *actual_size) {
-    MAP_RING_BUFFER_REQUEST request = {0};
+HANDLE MapRingBuffer(HANDLE adapter, UINT32 ring_id, SIZE_T requested_size, SIZE_T *actual_size) {
+    AVB_TS_RING_MAP_REQUEST request = {0};
     DWORD bytes_returned = 0;
     BOOL result;
     
-    request.subscription_handle = subscription;
-    request.requested_size = requested_size;
+    request.ring_id = ring_id;
+    request.length = (UINT32)requested_size;  /* in/out field */
+    request.user_cookie = 0;  /* Optional user context */
+    request.shm_token = 0;    /* Driver populates */
     
     result = DeviceIoControl(
         adapter,
@@ -155,30 +157,35 @@ void* MapRingBuffer(HANDLE adapter, HANDLE subscription, SIZE_T requested_size, 
     
     if (result && request.status == 0) {
         if (actual_size) {
-            *actual_size = request.actual_size;
+            *actual_size = (SIZE_T)request.length;  /* Driver sets actual length */
         }
-        return request.user_address;
+        /* shm_token is HANDLE value on user-mode */
+        return (HANDLE)(UINT_PTR)request.shm_token;
     }
     
-    return NULL;
+    return INVALID_HANDLE_VALUE;
 }
 
 /**
  * @brief Unsubscribe from events
+ * @param ring_id Ring identifier to unsubscribe
  */
-void Unsubscribe(HANDLE subscription) {
-    if (subscription != INVALID_HANDLE_VALUE) {
-        CloseHandle(subscription);
+void Unsubscribe(UINT32 ring_id) {
+    /* SSOT: Unsubscribe logic would use ring_id
+     * Implementation depends on driver API (not yet defined)
+     * Placeholder for now */
+    if (ring_id != 0) {
+        /* TODO: Add unsubscribe IOCTL when driver implements it */
     }
 }
 
 /**
  * @brief Unmap ring buffer
+ * @param buffer_handle Shared memory handle from MapRingBuffer
  */
-void UnmapRingBuffer(void *buffer) {
-    if (buffer) {
-        /* In real implementation, would use UnmapViewOfFile or equivalent */
-        /* Placeholder for now */
+void UnmapRingBuffer(HANDLE buffer_handle) {
+    if (buffer_handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(buffer_handle);
     }
 }
 
