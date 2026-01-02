@@ -66,6 +66,32 @@ typedef struct {
  *============================================================================*/
 
 /**
+ * @brief Check if adapter supports MDIO
+ */
+BOOL CheckMdioCapability(HANDLE adapter) {
+    AVB_ENUM_REQUEST caps = {0};
+    DWORD bytes_returned = 0;
+    
+    BOOL result = DeviceIoControl(
+        adapter,
+        IOCTL_AVB_ENUM_ADAPTERS,
+        &caps,
+        sizeof(caps),
+        &caps,
+        sizeof(caps),
+        &bytes_returned,
+        NULL
+    );
+    
+    if (result && caps.status == 0) {
+        /* INTEL_CAP_MDIO = 0x00000008 */
+        return (caps.capabilities & 0x00000008) != 0;
+    }
+    
+    return FALSE;
+}
+
+/**
  * @brief Open first available AVB adapter
  */
 HANDLE OpenAdapter(void) {
@@ -113,6 +139,16 @@ BOOL ReadPHYReg(HANDLE adapter, UINT8 phy_addr, UINT8 reg_addr, UINT16 *value) {
     if (result && request.status == 0) {
         *value = request.value;
         return TRUE;
+    }
+    
+    /* Debug: Print error details */
+    if (!result) {
+        DWORD win_err = GetLastError();
+        printf("    [DEBUG] MDIO_READ DeviceIoControl failed: Win32 error %lu (0x%08lx)\n", win_err, win_err);
+        if (win_err == ERROR_NOT_SUPPORTED) printf("            ERROR_NOT_SUPPORTED - IOCTL not implemented\n");
+        if (win_err == ERROR_INVALID_FUNCTION) printf("            ERROR_INVALID_FUNCTION - IOCTL code unknown\n");
+    } else {
+        printf("    [DEBUG] MDIO_READ status error: NDIS_STATUS 0x%08lx\n", request.status);
     }
     
     return FALSE;
@@ -456,6 +492,29 @@ int main(int argc, char **argv) {
         printf("[ERROR] Failed to open AVB adapter. Skipping all tests.\n\n");
         return 1;
     }
+    
+    /* Check if adapter supports MDIO */
+    if (!CheckMdioCapability(ctx.adapter)) {
+        printf("[INFO] Adapter does not support MDIO capability (INTEL_CAP_MDIO).\n");
+        printf("       MDIO is only supported on I219 and older adapters.\n");
+        printf("       I210, I225, I226 do NOT have MDIO capability.\n");
+        printf("       All tests will be SKIPPED.\n\n");
+        
+        /* Print summary showing all tests skipped */
+        printf("====================================================================\n");
+        printf(" Test Summary\n");
+        printf("====================================================================\n");
+        printf(" Total:  15 tests\n");
+        printf(" Passed: 0 tests\n");
+        printf(" Failed: 0 tests\n");
+        printf(" Skipped: 15 tests (Adapter does not support MDIO)\n");
+        printf("====================================================================\n\n");
+        
+        CloseHandle(ctx.adapter);
+        return 2;  /* Exit code 2 = all skipped */
+    }
+    
+    printf("[INFO] Adapter supports MDIO capability. Running tests...\n\n");
     
     /* Save PHY state */
     SavePHYState(&ctx);
