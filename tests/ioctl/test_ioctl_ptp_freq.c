@@ -35,6 +35,11 @@
 #define TYPICAL_FREQ_ADJ_PPB  100000   /* ±100 ppm = ±100000 ppb */
 #define NSEC_PER_SEC 1000000000ULL
 
+/* Clock constants for frequency conversion */
+#define BASE_CLOCK_HZ    125000000ULL  /* 125 MHz base clock */
+#define NOMINAL_INCR_NS  8             /* 8ns nominal increment (125MHz = 8ns period) */
+#define FRAC_SCALE       4294967296.0  /* 2^32 for fractional part */
+
 /* Test state */
 typedef struct {
     HANDLE adapter;
@@ -44,12 +49,6 @@ typedef struct {
     int fail_count;
     int skip_count;
 } TestContext;
-
-/* IOCTL request structure */
-typedef struct {
-    INT64 frequency_ppb;  /* Frequency adjustment in ppb */
-    UINT32 status;
-} ADJUST_FREQUENCY_REQUEST, *PADJUST_FREQUENCY_REQUEST;
 
 /* Helper: Open device */
 static HANDLE OpenAdapter(void)
@@ -72,15 +71,37 @@ static HANDLE OpenAdapter(void)
     return h;
 }
 
+/* Helper: Convert ppb to increment_ns/increment_frac */
+static void ConvertPpbToIncrement(INT64 ppb, UINT32 *increment_ns, UINT32 *increment_frac)
+{
+    /* Calculate adjusted increment:
+     * new_increment = nominal_increment * (1 + ppb/1e9)
+     * For 125MHz base clock: nominal = 8ns
+     * 
+     * Example: ppb = +50000 (50 ppm faster)
+     *   new_increment = 8.0 * (1 + 50000/1e9) = 8.0 * 1.00005 = 8.0004 ns
+     *   increment_ns = 8
+     *   increment_frac = 0.0004 * 2^32 = 1717986918
+     */
+    double adjustment_factor = 1.0 + ((double)ppb / 1000000000.0);
+    double new_increment = (double)NOMINAL_INCR_NS * adjustment_factor;
+    
+    *increment_ns = (UINT32)new_increment;  /* Integer part */
+    double frac_part = new_increment - (double)(*increment_ns);
+    *increment_frac = (UINT32)(frac_part * FRAC_SCALE);
+}
+
 /* Helper: Adjust frequency */
 static BOOL AdjustFrequency(HANDLE adapter, INT64 ppb)
 {
-    ADJUST_FREQUENCY_REQUEST req = {0};
+    AVB_FREQUENCY_REQUEST req = {0};  /* ✅ Use SSOT structure */
     DWORD bytesReturned = 0;
+    BOOL result;
     
-    req.frequency_ppb = ppb;
+    /* Convert ppb to increment_ns/increment_frac */
+    ConvertPpbToIncrement(ppb, &req.increment_ns, &req.increment_frac);
     
-    BOOL result = DeviceIoControl(
+    result = DeviceIoControl(
         adapter,
         IOCTL_AVB_ADJUST_FREQUENCY,
         &req, sizeof(req),
@@ -88,6 +109,12 @@ static BOOL AdjustFrequency(HANDLE adapter, INT64 ppb)
         &bytesReturned,
         NULL
     );
+    
+    /* ✅ Check BOTH DeviceIoControl result AND driver status field */
+    if (result && req.status != 0) {
+        /* IOCTL succeeded but driver returned error status */
+        return FALSE;
+    }
     
     return result;
 }
@@ -544,8 +571,8 @@ static int Test_NullPointerHandling(TestContext *ctx)
 static int Test_AdjustmentResetOnRestart(TestContext *ctx)
 {
     HANDLE adapter2 = INVALID_HANDLE_VALUE;
-    ADJUST_FREQUENCY_REQUEST req1 = {0};
-    ADJUST_FREQUENCY_REQUEST req2 = {0};
+    AVB_FREQUENCY_REQUEST req1 = {0};  /* ✅ Use SSOT structure */
+    AVB_FREQUENCY_REQUEST req2 = {0};  /* ✅ Use SSOT structure */
     DWORD br;
     
     /* Step 1: Apply non-zero frequency adjustment (+100 ppm) */
@@ -555,9 +582,11 @@ static int Test_AdjustmentResetOnRestart(TestContext *ctx)
     }
     
     /* Step 2: Verify adjustment was applied by reading back (if supported) */
-    req1.frequency_ppb = 0;
+    req1.increment_ns = 0;
+    req1.increment_frac = 0;
     if (DeviceIoControl(ctx->adapter, IOCTL_AVB_ADJUST_FREQUENCY, &req1, sizeof(req1), &req1, sizeof(req1), &br, NULL)) {
-        printf("  DEBUG: Current adjustment before handle close: %lld ppb\n", req1.frequency_ppb);
+        printf("  DEBUG: Current adjustment before handle close: increment_ns=%u, increment_frac=%u\n", 
+               req1.increment_ns, req1.increment_frac);
     }
     
     /* Step 3: Close adapter handle (simulates driver unload/cleanup) */
@@ -578,7 +607,8 @@ static int Test_AdjustmentResetOnRestart(TestContext *ctx)
     
     /* Step 5: Check if frequency adjustment reset to 0 (driver behavior on init) */
     /* Apply zero adjustment and verify it succeeds */
-    req2.frequency_ppb = 0;
+    req2.increment_ns = NOMINAL_INCR_NS;  /* Reset to nominal 8ns */
+    req2.increment_frac = 0;
     if (!DeviceIoControl(adapter2, IOCTL_AVB_ADJUST_FREQUENCY, &req2, sizeof(req2), &req2, sizeof(req2), &br, NULL)) {
         printf("  [FAIL] UT-PTP-FREQ-015: Reset on Restart: Cannot verify adjustment after reopen\n");
         CloseHandle(adapter2);
