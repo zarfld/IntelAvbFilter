@@ -906,6 +906,21 @@ $AllTests = @(
         IOCTLs = "26"
         Requirement = "#9"
     }
+    @{
+        Name = "test_ioctl_fp_ptm"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_fp_ptm.c"
+        Output = "test_ioctl_fp_ptm.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "setupapi.lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Frame Preemption & PTM Tests (Issue #212)"
+        Issue = "#212"
+        TestCases = 15
+        IOCTLs = "27, 28"
+        Requirement = "#11"
+    }
 )
 
 # Filter tests if specific test requested
