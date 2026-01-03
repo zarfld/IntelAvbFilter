@@ -930,6 +930,26 @@ $AllTests = @(
         Requirement = "PHC Time Offset Adjustment"
     }
 
+    # AVTP Timestamp Uncertain Bit Change Events Test (Issue #175) - 2026-01-03
+    # Test Plan: TEST-EVENT-002 (P0 Critical)
+    # =========================================================================
+    
+    @{
+        Name = "test_avtp_tu_bit_events"
+        Type = "cl"
+        Source = "tests\event\test_avtp_tu_bit_events.c"
+        Output = "test_avtp_tu_bit_events.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "AVTP Timestamp Uncertain Bit Change Events (Issue #175)"
+        Issue = "#175"
+        TestCases = 15
+        Component = "avtp, events"
+        Requirement = "#169"
+        Standard = "AVNU Milan"
+    }
+
     @{
         Name = "test_ioctl_tas"
         Type = "cl"
