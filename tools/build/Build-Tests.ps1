@@ -891,6 +891,45 @@ $AllTests = @(
         IOCTLs = "43, 44"
         Requirement = "#7"
     }
+    # =========================================================================
+    # PHC Query IOCTL Test (Issue #193) - 2025-12-09
+    # Test Plan: TEST-IOCTL-PHC-QUERY-001 (P0 Critical)
+    # =========================================================================
+    
+    @{
+        Name = "test_ioctl_phc_query"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_phc_query.c"
+        Output = "test_ioctl_phc_query.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PHC Query IOCTL Tests (Issue #193)"
+        Issue = "#193"
+        TestCases = 17
+        IOCTLs = "0x800"
+        Requirement = "PHC Query Interface"
+    }
+
+    # PHC Offset Adjustment IOCTL Test (Issue #194) - 2025-12-09
+    # Test Plan: TEST-IOCTL-OFFSET-001 (P0 Critical)
+    # =========================================================================
+    
+    @{
+        Name = "test_ioctl_offset"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_offset.c"
+        Output = "test_ioctl_offset.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PHC Offset Adjustment IOCTL Tests (Issue #194)"
+        Issue = "#194"
+        TestCases = 15
+        IOCTLs = "46"
+        Requirement = "PHC Time Offset Adjustment"
+    }
+
     @{
         Name = "test_ioctl_tas"
         Type = "cl"
