@@ -914,6 +914,22 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_timestamp_latency"
+        Type = "cl"
+        Source = "tests\performance\test_timestamp_latency.c"
+        Output = "test_timestamp_latency.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "setupapi.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "TX/RX Timestamp Retrieval Latency <1us Performance Test (Issue #272)"
+        Issue = "#272"
+        TestCases = 8
+        IOCTLs = "0x9C40A024, 0x9C40A02C"
+        Requirement = "#65"
+    }
+
+    @{
         Name = "test_qav_cbs"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_qav_cbs.c"
