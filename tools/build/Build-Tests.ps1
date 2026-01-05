@@ -946,6 +946,22 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_security_validation"
+        Type = "cl"
+        Source = "tests\security\test_security_validation.c"
+        Output = "test_security_validation.exe"
+        Includes = "-I include"
+        Libs = "advapi32.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Security Validation and Vulnerability Testing (Issue #226)"
+        Issue = "#226"
+        TestCases = 15
+        IOCTLs = "0x9C40A000, 0x9C40A004, 0x9C40A008, 0x9C40A00C"
+        Requirement = "#63"
+    }
+
+    @{
         Name = "test_qav_cbs"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_qav_cbs.c"
