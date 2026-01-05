@@ -899,6 +899,21 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_statistics_counters"
+        Type = "cl"
+        Source = "tests\ioctl\test_statistics_counters.c"
+        Output = "test_statistics_counters.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Driver Statistics Counters and Query Performance Tests (Issue #270)"
+        Issue = "#270"
+        TestCases = 10
+        IOCTLs = "0x9C40A020, 0x9C40A010"
+        Requirement = "#67"
+    }
+
+    @{
         Name = "test_qav_cbs"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_qav_cbs.c"
