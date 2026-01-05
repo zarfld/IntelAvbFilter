@@ -930,6 +930,22 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_event_log"
+        Type = "cl"
+        Source = "tests\event-logging\test_event_log.c"
+        Output = "test_event_log.exe"
+        Includes = "-I include"
+        Libs = "wevtapi.lib advapi32.lib setupapi.lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Windows Event Log Integration Test (Issue #269)"
+        Issue = "#269"
+        TestCases = 10
+        IOCTLs = "0x9C40A000, 0x9C40A010"
+        Requirement = "#65"
+    }
+
+    @{
         Name = "test_qav_cbs"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_qav_cbs.c"
