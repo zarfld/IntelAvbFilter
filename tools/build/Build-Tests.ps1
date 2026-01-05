@@ -828,6 +828,22 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_ptp_freq_complete"
+        Type = "cl"
+        Source = "tests\ioctl\test_ptp_freq_complete.c"
+        Output = "test_ptp_freq_complete.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PTP Frequency Adjustment Complete Suite (Issue #192) - 14 tests (8 Unit + 3 Integration + 3 V&V)"
+        Issue = "#192"
+        TestCases = 14
+        IOCTLs = "38"
+        Requirement = "#3"
+        Standard = "IEEE 1588-2019, IEEE 802.1AS-2020"
+    }
+
+    @{
         Name = "test_hw_ts_ctrl"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_hw_ts_ctrl.c"
