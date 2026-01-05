@@ -878,6 +878,26 @@ $AllTests = @(
         Requirement = "#6"
     }
 
+    # =========================================================================
+    # Comprehensive RX Timestamping Test (Issue #311) - 2025-01-05
+    # Test Plan: TEST-PTP-RX-TS-001 (P0 Critical - IEEE 802.1AS compliance)
+    # =========================================================================
+    
+    @{
+        Name = "test_rx_timestamp_complete"
+        Type = "cl"
+        Source = "tests\ioctl\test_rx_timestamp_complete.c"
+        Output = "test_rx_timestamp_complete.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Complete PTP RX Timestamping Configuration Tests (Issue #311)"
+        Issue = "#311"
+        TestCases = 15
+        IOCTLs = "41, 42"
+        Requirement = "#6"
+    }
+
     @{
         Name = "test_qav_cbs"
         Type = "cl"
