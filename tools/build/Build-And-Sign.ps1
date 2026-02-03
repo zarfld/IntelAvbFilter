@@ -105,7 +105,8 @@ if ($ScriptDir -match '\\tools\\build$') {
     # Script is in repository root
     $ProjectRoot = $ScriptDir
 }
-$OutputDir = Join-Path $ProjectRoot "build\$Platform\$Configuration"
+# MSBuild outputs to: build\x64\Debug\IntelAvbFilter\
+$OutputDir = Join-Path $ProjectRoot "build\$Platform\$Configuration\IntelAvbFilter"
 $CDFFile = Join-Path $OutputDir "IntelAvbFilter.cdf"   # Place CDF in output dir so member files resolve
 $CATFile = Join-Path $OutputDir "IntelAvbFilter.cat"
 $INFFile = Join-Path $OutputDir "IntelAvbFilter.inf"
@@ -273,7 +274,39 @@ if (-not $SkipSigning) {
 }
 
 # ===========================
-# STEP 7: Summary & Next Steps
+# STEP 7: Copy to Installation Directory
+# ===========================
+Write-Host ""
+Write-Host "STEP 7: Copying signed files to installation directory..." -ForegroundColor Yellow
+
+# Install-Driver.ps1 expects files in: build\x64\Debug\IntelAvbFilter\IntelAvbFilter\
+$InstallDir = Join-Path $OutputDir "IntelAvbFilter"
+if (!(Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    Write-Host "? Created installation directory: $InstallDir" -ForegroundColor Green
+}
+
+# Copy signed files to installation directory
+try {
+    Copy-Item -Path $SYSFile -Destination $InstallDir -Force
+    Copy-Item -Path $INFFile -Destination $InstallDir -Force
+    Copy-Item -Path $CATFile -Destination $InstallDir -Force
+    
+    Write-Host "? Copied signed files to installation directory:" -ForegroundColor Green
+    Write-Host "  ?? $InstallDir\IntelAvbFilter.sys" -ForegroundColor Cyan
+    Write-Host "  ?? $InstallDir\IntelAvbFilter.inf" -ForegroundColor Cyan
+    Write-Host "  ?? $InstallDir\intelavbfilter.cat" -ForegroundColor Cyan
+    
+    # Verify copied files
+    $installedSys = Get-Item (Join-Path $InstallDir "IntelAvbFilter.sys")
+    Write-Host "  ?? Installed .sys: $($installedSys.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')) ($($installedSys.Length) bytes)" -ForegroundColor Cyan
+} catch {
+    Write-Error "Failed to copy files to installation directory: $($_.Exception.Message)"
+    exit 1
+}
+
+# ===========================
+# STEP 8: Summary & Next Steps
 # ===========================
 Write-Host ""
 Write-Host "=== BUILD & SIGN COMPLETED SUCCESSFULLY! ===" -ForegroundColor Green
@@ -286,6 +319,7 @@ if (-not $SkipSigning) {
 } else {
     Write-Host "  ?? CAT file NOT signed (SkipSigning enabled)" -ForegroundColor Yellow
 }
+Write-Host "  ? Files copied to installation directory" -ForegroundColor White
 Write-Host "  ? Ready for driver installation" -ForegroundColor White
 
 Write-Host ""

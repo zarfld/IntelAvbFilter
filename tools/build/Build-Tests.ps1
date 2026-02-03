@@ -797,6 +797,26 @@ $AllTests = @(
     # Test Plan: TEST-PLAN-IOCTL-PTP-2025-12-31 (P0 Critical)
     # =========================================================================
     
+    # =========================================================================
+    # Driver Version/Build Verification (Issue #273) - 2026-02-03
+    # PREREQUISITE: Verify which driver build is active before testing
+    # =========================================================================
+    
+    @{
+        Name = "test_ioctl_version"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_version.c"
+        Output = "test_ioctl_version.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Driver Version/Build Info IOCTL (Issue #273)"
+        Issue = "#273"
+        TestCases = 3
+        IOCTLs = "0 (0x9C40A000 - GET_VERSION)"
+        Requirement = "#64"
+    }
+
     @{
         Name = "test_ptp_getset"
         Type = "cl"

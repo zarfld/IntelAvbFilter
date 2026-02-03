@@ -21,6 +21,9 @@
 # Full test (6 phases - comprehensive)
 .\Run-Tests.ps1 -Configuration Debug -Full
 
+# Full test with logs (6 phases - comprehensive)
+.\Run-Tests.ps1 -Configuration Debug -Full -CollectLogs
+
 # Run specific test
 .\Run-Tests.ps1 -Configuration Debug -TestExecutable avb_test_i226.exe
 
