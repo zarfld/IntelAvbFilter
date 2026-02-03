@@ -1353,8 +1353,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // Task 3: Ring buffer allocation with power-of-2 validation
     case IOCTL_AVB_TS_SUBSCRIBE:
         {
-            DEBUGP(DL_INFO, "IOCTL_AVB_TS_SUBSCRIBE called\n");
+            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_TS_SUBSCRIBE called: inLen=%lu, outLen=%lu, sizeof(req)=%lu\n", 
+                   inLen, outLen, (ULONG)sizeof(AVB_TS_SUBSCRIBE_REQUEST));
             if (inLen < sizeof(AVB_TS_SUBSCRIBE_REQUEST) || outLen < sizeof(AVB_TS_SUBSCRIBE_REQUEST)) {
+                DEBUGP(DL_ERROR, "!!! BUFFER_TOO_SMALL: inLen=%lu, outLen=%lu\n", inLen, outLen);
                 status = STATUS_BUFFER_TOO_SMALL;
                 info = 0;
             } else {
