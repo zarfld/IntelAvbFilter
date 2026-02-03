@@ -100,7 +100,587 @@
 
 ---
 
-## 🔄 Dependency Graph & Sequencing (Validated from 34 Issues)
+## � Issue #13 Detailed Implementation Plan
+
+**Issue**: REQ-F-TS-SUB-001 - Timestamp Event Subscription  
+**Status**: 🚧 **ACTIVE** (Sprint 0 - Foundation)  
+**Progress**: Tasks 1-2/12 completed (17%)  
+**Commit**: 4a2fb1e (2026-02-03)  
+**Test Status**: 9/9 basic IOCTLs passing, 10/19 tests skipped (require event generation)
+
+### Implementation Tasks (12 Total)
+
+#### ✅ Task 1: Define Ring Buffer Structures (COMPLETED)
+**File**: `include/avb_ioctl.h` (+60 lines)  
+**Deliverables**:
+- ✅ `AVB_TIMESTAMP_EVENT` structure (32 bytes, cache-line aligned)
+  - timestamp_ns (64-bit), event_type, sequence_num
+  - vlan_id, pcp, queue, packet_length, trigger_source
+- ✅ `AVB_TIMESTAMP_RING_HEADER` structure (64 bytes)
+  - Lock-free producer/consumer indices (volatile)
+  - Ring mask, count (power of 2: 64-4096)
+  - Overflow counter, event/vlan/pcp filters
+- ✅ Event type constants: TS_EVENT_RX_TIMESTAMP (0x01), TX (0x02), TARGET_TIME (0x04), AUX (0x08), ERROR (0x10)
+- ✅ Lock-free protocol documented (memory barriers, overflow handling)
+
+**Code**:
+```c
+typedef struct AVB_TIMESTAMP_EVENT {
+    avb_u64 timestamp_ns;
+    avb_u32 event_type;
+    avb_u32 sequence_num;
+    avb_u16 vlan_id;
+    avb_u8  pcp;
+    avb_u8  queue;
+    avb_u16 packet_length;
+    avb_u8  trigger_source;
+    avb_u8  reserved[5];  // Pad to 32 bytes
+} AVB_TIMESTAMP_EVENT;
+
+typedef struct AVB_TIMESTAMP_RING_HEADER {
+    volatile avb_u32 producer_index;  // Driver writes
+    volatile avb_u32 consumer_index;  // User writes
+    avb_u32 mask;                     // (count-1) for wraparound
+    avb_u32 count;                    // Power of 2: 64-4096
+    volatile avb_u32 overflow_count;
+    // ... event_mask, vlan_filter, pcp_filter, etc.
+} AVB_TIMESTAMP_RING_HEADER;
+```
+
+---
+
+#### ✅ Task 2: Add Subscription Management (COMPLETED)
+**Files**: 
+- `src/avb_integration.h` (+30 lines)
+- `src/avb_integration_fixed.c` (+40 lines init/cleanup)
+
+**Deliverables**:
+- ✅ `TS_SUBSCRIPTION` nested struct in `AVB_DEVICE_CONTEXT`
+  - ring_id (1-based, 0=unused), event_mask, vlan_filter, pcp_filter
+  - ring_buffer pointer (NonPagedPool), ring_count, ring_mdl, user_va
+  - sequence_num (atomic increment)
+- ✅ Subscription table: `subscriptions[MAX_TS_SUBSCRIPTIONS]` (8 slots)
+- ✅ Synchronization: `subscription_lock` (NDIS_SPIN_LOCK)
+- ✅ Allocator: `next_ring_id` (volatile LONG, InterlockedIncrement)
+- ✅ Initialization in `AvbCreateMinimalContext`:
+  - NdisAllocateSpinLock(&ctx->subscription_lock)
+  - Loop: Zero all 8 subscription slots (ring_id=0, active=0, NULL pointers)
+  - ctx->next_ring_id = 1
+- ✅ Cleanup in `AvbCleanupDevice`:
+  - Loop through subscriptions: MmUnmapLockedPages, IoFreeMdl, ExFreePoolWithTag
+  - NdisFreeSpinLock(&ctx->subscription_lock)
+
+**Code**:
+```c
+typedef struct _TS_SUBSCRIPTION {
+    avb_u32 ring_id;         // 1-based, 0=unused
+    avb_u32 event_mask;
+    avb_u16 vlan_filter;
+    avb_u8  pcp_filter;
+    avb_u8  active;
+    PVOID ring_buffer;       // NonPagedPool
+    ULONG ring_count;
+    PMDL  ring_mdl;
+    PVOID user_va;
+    volatile LONG sequence_num;
+} TS_SUBSCRIPTION;
+
+typedef struct _AVB_DEVICE_CONTEXT {
+    // ... existing fields
+    TS_SUBSCRIPTION subscriptions[MAX_TS_SUBSCRIPTIONS];
+    NDIS_SPIN_LOCK subscription_lock;
+    volatile LONG next_ring_id;
+} AVB_DEVICE_CONTEXT;
+```
+
+---
+
+#### 🚧 Task 3: Implement Ring Buffer Allocation (IN PROGRESS - NEXT)
+**File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_SUBSCRIBE handler)  
+**Estimated**: ~60-80 lines of code  
+**Priority**: P0 (Foundation for zero-copy event delivery)
+
+**Deliverables**:
+- [ ] Validate ring size is power of 2 (64, 128, 256, ..., 4096)
+- [ ] Calculate total size: `sizeof(AVB_TIMESTAMP_RING_HEADER) + (count * sizeof(AVB_TIMESTAMP_EVENT))`
+- [ ] Allocate NonPagedPool: `ExAllocatePool2(POOL_FLAG_NON_PAGED, size, FILTER_ALLOC_TAG)`
+- [ ] Initialize header:
+  - producer_index = 0, consumer_index = 0
+  - mask = (count - 1), count = ring_count
+  - overflow_count = 0, total_events = 0
+  - Copy event_mask, vlan_filter, pcp_filter from request
+- [ ] Find free subscription slot (acquire spin lock)
+- [ ] Store ring_buffer pointer, ring_count
+- [ ] Allocate ring_id: `InterlockedIncrement(&ctx->next_ring_id)`
+- [ ] Mark subscription active
+- [ ] Release spin lock
+- [ ] Return ring_id in response (`Irp->IoStatus.Information = sizeof(*response)`)
+
+**Validation**:
+- Ring count validation: `if (count < 64 || count > 4096 || (count & (count - 1)) != 0)`
+- Allocation failure: `if (!ring_buffer) return STATUS_INSUFFICIENT_RESOURCES`
+- No free slots: `if (free_slot == MAX_TS_SUBSCRIPTIONS) return STATUS_TOO_MANY_SESSIONS`
+
+**Expected Outcome**: User can subscribe, get ring_id, but no events yet (mapping in Task 4)
+
+**Code Pattern**:
+```c
+case IOCTL_AVB_TS_SUBSCRIBE: {
+    AVB_TS_SUBSCRIBE_REQUEST *req = (AVB_TS_SUBSCRIBE_REQUEST*)Irp->AssociatedIrp.SystemBuffer;
+    AVB_TS_SUBSCRIBE_RESPONSE *resp = (AVB_TS_SUBSCRIBE_RESPONSE*)Irp->AssociatedIrp.SystemBuffer;
+    
+    // 1. Validate power-of-2
+    if (req->ring_count < 64 || req->ring_count > 4096 || 
+        (req->ring_count & (req->ring_count - 1)) != 0) {
+        status = STATUS_INVALID_PARAMETER;
+        break;
+    }
+    
+    // 2. Calculate size
+    SIZE_T total_size = sizeof(AVB_TIMESTAMP_RING_HEADER) + 
+                        (req->ring_count * sizeof(AVB_TIMESTAMP_EVENT));
+    
+    // 3. Allocate NonPagedPool
+    PVOID ring_buffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, total_size, FILTER_ALLOC_TAG);
+    if (!ring_buffer) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        break;
+    }
+    
+    // 4. Initialize header
+    AVB_TIMESTAMP_RING_HEADER *header = (AVB_TIMESTAMP_RING_HEADER*)ring_buffer;
+    header->producer_index = 0;
+    header->consumer_index = 0;
+    header->mask = req->ring_count - 1;
+    header->count = req->ring_count;
+    header->overflow_count = 0;
+    header->total_events = 0;
+    header->event_mask = req->event_mask;
+    header->vlan_filter = req->vlan_filter;
+    header->pcp_filter = req->pcp_filter;
+    
+    // 5. Find free subscription slot
+    NdisAcquireSpinLock(&AvbContext->subscription_lock);
+    int free_slot = -1;
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        if (AvbContext->subscriptions[i].ring_id == 0) {
+            free_slot = i;
+            break;
+        }
+    }
+    
+    if (free_slot == -1) {
+        NdisReleaseSpinLock(&AvbContext->subscription_lock);
+        ExFreePoolWithTag(ring_buffer, FILTER_ALLOC_TAG);
+        status = STATUS_TOO_MANY_SESSIONS;
+        break;
+    }
+    
+    // 6. Store in subscription table
+    TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[free_slot];
+    sub->ring_buffer = ring_buffer;
+    sub->ring_count = req->ring_count;
+    sub->event_mask = req->event_mask;
+    sub->vlan_filter = req->vlan_filter;
+    sub->pcp_filter = req->pcp_filter;
+    sub->active = 1;
+    sub->sequence_num = 0;
+    
+    // 7. Allocate ring_id
+    sub->ring_id = (avb_u32)InterlockedIncrement(&AvbContext->next_ring_id);
+    
+    NdisReleaseSpinLock(&AvbContext->subscription_lock);
+    
+    // 8. Return ring_id
+    resp->ring_id = sub->ring_id;
+    Irp->IoStatus.Information = sizeof(*resp);
+    status = STATUS_SUCCESS;
+    break;
+}
+```
+
+---
+
+#### ⏳ Task 4: Implement MDL Creation and User Mapping (PENDING)
+**File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_RING_MAP handler)  
+**Estimated**: ~50-70 lines of code  
+**Priority**: P0 (Zero-copy requires user-space access)
+
+**Deliverables**:
+- [ ] Validate ring_id exists in subscription table
+- [ ] IoAllocateMdl for ring_buffer
+- [ ] MmBuildMdlForNonPagedPool
+- [ ] MmMapLockedPagesSpecifyCache(mdl, UserMode, MmCached, NULL, FALSE, NormalPagePriority)
+- [ ] Store user_va in subscription (for cleanup)
+- [ ] Return shm_token = (avb_u64)user_va in response
+
+**Validation**:
+- Invalid ring_id: Check subscription table, return STATUS_INVALID_PARAMETER
+- MDL allocation failure: Return STATUS_INSUFFICIENT_RESOURCES
+- Mapping failure: IoFreeMdl, return STATUS_INSUFFICIENT_RESOURCES
+- Already mapped: Return STATUS_ALREADY_INITIALIZED
+
+**Expected Outcome**: User can read ring buffer header (producer_index, consumer_index) from user mode
+
+**Code Pattern**:
+```c
+case IOCTL_AVB_TS_RING_MAP: {
+    AVB_TS_RING_MAP_REQUEST *req = (AVB_TS_RING_MAP_REQUEST*)Irp->AssociatedIrp.SystemBuffer;
+    AVB_TS_RING_MAP_RESPONSE *resp = (AVB_TS_RING_MAP_RESPONSE*)Irp->AssociatedIrp.SystemBuffer;
+    
+    // 1. Find subscription
+    NdisAcquireSpinLock(&AvbContext->subscription_lock);
+    TS_SUBSCRIPTION *sub = NULL;
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        if (AvbContext->subscriptions[i].ring_id == req->ring_id) {
+            sub = &AvbContext->subscriptions[i];
+            break;
+        }
+    }
+    
+    if (!sub || !sub->active) {
+        NdisReleaseSpinLock(&AvbContext->subscription_lock);
+        status = STATUS_INVALID_PARAMETER;
+        break;
+    }
+    
+    if (sub->user_va) {  // Already mapped
+        NdisReleaseSpinLock(&AvbContext->subscription_lock);
+        status = STATUS_ALREADY_INITIALIZED;
+        break;
+    }
+    
+    // 2. Calculate total size
+    SIZE_T total_size = sizeof(AVB_TIMESTAMP_RING_HEADER) + 
+                        (sub->ring_count * sizeof(AVB_TIMESTAMP_EVENT));
+    
+    // 3. IoAllocateMdl
+    PMDL mdl = IoAllocateMdl(sub->ring_buffer, (ULONG)total_size, FALSE, FALSE, NULL);
+    if (!mdl) {
+        NdisReleaseSpinLock(&AvbContext->subscription_lock);
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        break;
+    }
+    
+    // 4. MmBuildMdlForNonPagedPool
+    MmBuildMdlForNonPagedPool(mdl);
+    
+    // 5. MmMapLockedPagesSpecifyCache
+    __try {
+        PVOID user_va = MmMapLockedPagesSpecifyCache(
+            mdl, UserMode, MmCached, NULL, FALSE, NormalPagePriority);
+        
+        if (!user_va) {
+            IoFreeMdl(mdl);
+            NdisReleaseSpinLock(&AvbContext->subscription_lock);
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+        
+        // 6. Store in subscription
+        sub->ring_mdl = mdl;
+        sub->user_va = user_va;
+        
+        // 7. Return shm_token
+        resp->shm_token = (avb_u64)user_va;
+        Irp->IoStatus.Information = sizeof(*resp);
+        status = STATUS_SUCCESS;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        IoFreeMdl(mdl);
+        status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    NdisReleaseSpinLock(&AvbContext->subscription_lock);
+    break;
+}
+```
+
+---
+
+#### ⏳ Task 5: Add Event Generation Infrastructure (PENDING)
+**File**: `src/avb_integration_fixed.c` (new function)  
+**Estimated**: ~80-100 lines of code  
+**Priority**: P0 (Core event delivery mechanism)
+
+**Deliverables**:
+- [ ] Create `AvbPostTimestampEvent()` function
+- [ ] Acquire subscription_lock (NdisAcquireSpinLock)
+- [ ] Loop through subscriptions: check active, event_mask, vlan_filter, pcp_filter
+- [ ] For each matching subscription:
+  - Check ring not full: `(producer + 1) & mask != consumer`
+  - If full: `InterlockedIncrement(&header->overflow_count)`, continue
+  - Write event to `events[producer & mask]`
+  - MemoryBarrier()
+  - `InterlockedIncrement(&header->producer_index)`
+- [ ] Release subscription_lock
+
+**Expected Outcome**: Events can be posted to ring buffers
+
+**Function Signature**:
+```c
+VOID AvbPostTimestampEvent(
+    AVB_DEVICE_CONTEXT *ctx,
+    avb_u32 event_type,      // TS_EVENT_RX_TIMESTAMP, etc.
+    avb_u64 timestamp_ns,
+    avb_u16 vlan_id,         // 0xFFFF if no VLAN
+    avb_u8  pcp,             // 0xFF if no PCP
+    avb_u8  queue,
+    avb_u16 packet_length,
+    avb_u8  trigger_source   // 0=RX, 1=TX, 2=Target, 3=Aux, 4=Error
+);
+```
+
+**Code Pattern**:
+```c
+VOID AvbPostTimestampEvent(
+    AVB_DEVICE_CONTEXT *ctx,
+    avb_u32 event_type,
+    avb_u64 timestamp_ns,
+    avb_u16 vlan_id,
+    avb_u8  pcp,
+    avb_u8  queue,
+    avb_u16 packet_length,
+    avb_u8  trigger_source)
+{
+    NdisAcquireSpinLock(&ctx->subscription_lock);
+    
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        TS_SUBSCRIPTION *sub = &ctx->subscriptions[i];
+        if (!sub->active || sub->ring_id == 0) continue;
+        
+        // Check event mask
+        if ((sub->event_mask & event_type) == 0) continue;
+        
+        // Apply VLAN filter (0xFFFF = accept all)
+        if (sub->vlan_filter != 0xFFFF && sub->vlan_filter != vlan_id) continue;
+        
+        // Apply PCP filter (0xFF = accept all)
+        if (sub->pcp_filter != 0xFF && sub->pcp_filter != pcp) continue;
+        
+        // Get ring buffer header
+        AVB_TIMESTAMP_RING_HEADER *header = (AVB_TIMESTAMP_RING_HEADER*)sub->ring_buffer;
+        AVB_TIMESTAMP_EVENT *events = (AVB_TIMESTAMP_EVENT*)((PUCHAR)sub->ring_buffer + sizeof(AVB_TIMESTAMP_RING_HEADER));
+        
+        // Check ring not full
+        avb_u32 producer = header->producer_index;
+        avb_u32 consumer = header->consumer_index;
+        if (((producer + 1) & header->mask) == (consumer & header->mask)) {
+            // Ring full, drop event
+            InterlockedIncrement((LONG*)&header->overflow_count);
+            continue;
+        }
+        
+        // Write event
+        AVB_TIMESTAMP_EVENT *event = &events[producer & header->mask];
+        event->timestamp_ns = timestamp_ns;
+        event->event_type = event_type;
+        event->sequence_num = (avb_u32)InterlockedIncrement(&sub->sequence_num);
+        event->vlan_id = vlan_id;
+        event->pcp = pcp;
+        event->queue = queue;
+        event->packet_length = packet_length;
+        event->trigger_source = trigger_source;
+        
+        // Memory barrier (ensure event written before index update)
+        MemoryBarrier();
+        
+        // Increment producer index
+        InterlockedIncrement((LONG*)&header->producer_index);
+        InterlockedIncrement((LONG*)&header->total_events);
+    }
+    
+    NdisReleaseSpinLock(&ctx->subscription_lock);
+}
+```
+
+---
+
+#### ⏳ Task 6: Hook RX Timestamp Events (PENDING)
+**File**: `src/avb_integration_fixed.c` (AvbReceive or receive indication path)  
+**Estimated**: ~30-50 lines of code  
+**Priority**: P1 (Needed for UT-TS-EVENT-001)
+
+**Deliverables**:
+- [ ] In AvbReceive or receive indication callback:
+  - Extract timestamp from advanced RX descriptor (if present)
+  - Extract VLAN tag and PCP (if present)
+  - Call `AvbPostTimestampEvent(ctx, TS_EVENT_RX_TIMESTAMP, timestamp, vlan, pcp, queue=0, length, trigger=0)`
+
+**Expected Outcome**: RX packet timestamps appear in ring buffer
+
+**Code Pattern**:
+```c
+// In AvbReceive or FilterReceiveNetBufferLists:
+if (timestamp_available) {  // Check descriptor flags
+    avb_u64 timestamp_ns = /* extract from descriptor */;
+    avb_u16 vlan_id = /* extract from NET_BUFFER_LIST metadata or 0xFFFF */;
+    avb_u8  pcp = /* extract from VLAN tag or 0xFF */;
+    
+    AvbPostTimestampEvent(
+        AvbContext,
+        TS_EVENT_RX_TIMESTAMP,
+        timestamp_ns,
+        vlan_id,
+        pcp,
+        0,  // queue
+        packet_length,
+        0   // trigger_source = RX
+    );
+}
+```
+
+---
+
+#### ⏳ Task 7: Hook TX Timestamp Events (PENDING)
+**File**: `src/avb_integration_fixed.c` (AvbSendNetBufferLists completion path)  
+**Estimated**: ~30-50 lines of code  
+**Priority**: P1 (Needed for UT-TS-EVENT-002)
+
+**Deliverables**:
+- [ ] In AvbSendNetBufferLists completion callback:
+  - Extract timestamp from TX completion descriptor (if present)
+  - Call `AvbPostTimestampEvent(ctx, TS_EVENT_TX_TIMESTAMP, timestamp, vlan, pcp, queue, length, trigger=1)`
+
+**Expected Outcome**: TX packet timestamps appear in ring buffer
+
+**Code Pattern**:
+```c
+// In send completion callback:
+if (timestamp_available) {  // Check descriptor flags
+    avb_u64 timestamp_ns = /* extract from completion descriptor */;
+    
+    AvbPostTimestampEvent(
+        AvbContext,
+        TS_EVENT_TX_TIMESTAMP,
+        timestamp_ns,
+        vlan_id,
+        pcp,
+        queue_index,
+        packet_length,
+        1   // trigger_source = TX
+    );
+}
+```
+
+---
+
+#### ⏳ Task 8: Implement Target Time Monitoring (PENDING)
+**File**: `src/avb_integration_fixed.c` (new DPC/timer)  
+**Estimated**: ~70-100 lines of code  
+**Priority**: P2 (Advanced feature)
+
+**Deliverables**:
+- [ ] Add target time field to AVB_DEVICE_CONTEXT (avb_u64 target_time_ns, BOOLEAN target_time_armed)
+- [ ] Implement IOCTL 43 (SET_TARGET_TIME): Store target_time_ns, arm flag, start timer/DPC
+- [ ] Add DPC/timer callback:
+  - Read SYSTIML/SYSTIMH
+  - Compare against target_time_ns
+  - If reached: Call `AvbPostTimestampEvent(ctx, TS_EVENT_TARGET_TIME, ...)`
+  - Disarm flag
+
+**Expected Outcome**: Target time events fire when SYSTIM reaches target
+
+---
+
+#### ⏳ Task 9: Implement Aux Timestamp Support (PENDING)
+**File**: `src/avb_integration_fixed.c` (ISR handler)  
+**Estimated**: ~50-70 lines of code  
+**Priority**: P2 (Advanced feature)
+
+**Deliverables**:
+- [ ] Add ISR handler for TSICR aux timestamp interrupt
+- [ ] Read AUXSTMPL/AUXSTMPH registers
+- [ ] Call `AvbPostTimestampEvent(ctx, TS_EVENT_AUX_TIMESTAMP, aux_timestamp, ...)`
+- [ ] Clear interrupt
+- [ ] Implement IOCTL for GPIO configuration (enable SDP pins)
+
+**Expected Outcome**: External GPIO triggers generate aux timestamp events
+
+---
+
+#### ⏳ Task 10: Implement Overflow Handling (PENDING)
+**File**: `src/avb_integration_fixed.c` (already in AvbPostTimestampEvent)  
+**Estimated**: ~10-20 lines of code (already partially implemented)  
+**Priority**: P1 (Reliability)
+
+**Deliverables**:
+- ✅ Already implemented in Task 5: `InterlockedIncrement(&header->overflow_count)` when ring full
+- [ ] Optional: Add backpressure signal to userspace (overflow threshold IOCTL)
+- [ ] Optional: Implement drop-oldest policy (overwrite oldest event instead of skipping)
+
+**Expected Outcome**: High-rate events don't crash driver, overflow counter tracks drops
+
+---
+
+#### ⏳ Task 11: Update Test Cases (Enable Skipped Tests) (PENDING)
+**File**: `tests/ioctl/test_ioctl_ts_event_sub.c`  
+**Estimated**: ~150-200 lines of code  
+**Priority**: P1 (Validation)
+
+**Deliverables**:
+- [ ] UT-TS-EVENT-001: RX packet generates event (send packet, poll ring, validate timestamp)
+- [ ] UT-TS-EVENT-002: TX packet generates event
+- [ ] UT-TS-EVENT-003: Target time event fires
+- [ ] UT-TS-EVENT-004: VLAN/PCP filtering works (subscribe with filter, send packets, validate)
+- [ ] UT-TS-EVENT-005: Multi-subscriber (2 subscriptions, both receive same event)
+- [ ] UT-TS-EVENT-006: Event filtering (already implemented)
+- [ ] UT-TS-RING-003: Ring full (overflow_count increments)
+- [ ] UT-TS-RING-004: Unmap (MmUnmapLockedPages, validate user_va cleared)
+- [ ] UT-TS-PERF-001: Performance (10K events/sec latency)
+- [ ] UT-TS-PERF-002: Ring concurrency (consumer/producer simultaneous)
+
+**Expected Outcome**: All 19/19 tests passing (0 skipped)
+
+---
+
+#### ⏳ Task 12: Performance Testing (PENDING)
+**File**: `tests/ioctl/test_ioctl_ts_event_sub.c` (UT-TS-PERF-001)  
+**Estimated**: ~50-80 lines of code  
+**Priority**: P1 (Validation)
+
+**Deliverables**:
+- [ ] Generate 10K events/sec (100µs interval)
+- [ ] Measure latency: time between AvbPostTimestampEvent call and user poll read
+- [ ] Verify zero-copy advantage: Compare ring buffer vs IOCTL polling (expect 10-100× speedup)
+- [ ] Stress test: 100K events/sec for 60 seconds, validate no drops (overflow_count=0)
+
+**Expected Outcome**: 
+- <1µs median latency (99th percentile <2µs)
+- 10K events/sec sustained with <1% CPU overhead
+- Zero-copy 10-100× faster than IOCTL polling
+
+---
+
+### Summary: Task Dependencies and Priority
+
+**Critical Path (P0 - Foundation)**:
+1. ✅ Task 1: Ring buffer structures (DONE)
+2. ✅ Task 2: Subscription management (DONE)
+3. 🚧 Task 3: Ring buffer allocation (NEXT - IN PROGRESS)
+4. ⏳ Task 4: MDL mapping (BLOCKED by Task 3)
+5. ⏳ Task 5: Event generation infrastructure (BLOCKED by Task 4)
+
+**High Priority (P1 - Event Delivery)**:
+6. ⏳ Task 6: RX hooks (BLOCKED by Task 5)
+7. ⏳ Task 7: TX hooks (BLOCKED by Task 5)
+10. ⏳ Task 10: Overflow handling (PARALLEL with Task 5)
+11. ⏳ Task 11: Test cases (BLOCKED by Tasks 6-7)
+12. ⏳ Task 12: Performance testing (BLOCKED by Task 11)
+
+**Medium Priority (P2 - Advanced Features)**:
+8. ⏳ Task 8: Target time monitoring (PARALLEL after Task 5)
+9. ⏳ Task 9: Aux timestamp support (PARALLEL after Task 5)
+
+**Estimated Completion**:
+- Foundation (Tasks 3-5): 2-3 days
+- Event Delivery (Tasks 6-7, 10-12): 3-4 days
+- Advanced Features (Tasks 8-9): 2-3 days
+- **Total**: 7-10 days (Sprint 0 + Sprint 1)
+
+---
+
+## �🔄 Dependency Graph & Sequencing (Validated from 34 Issues)
 
 ### Complete 7-Layer Dependency Structure
 
@@ -195,21 +775,30 @@ Layer 7: Test Cases
 ## 📅 Execution Plan (5 Sprints, 10 Weeks)
 
 **Scope**: 34 total issues (15 batch + 19 prerequisites)  
-**Completed**: 5 issues (15%) - #1 ✅, #16 ✅, #17 ✅, #18 ✅, #31 ✅, #89 ✅  
-**Remaining**: 29 issues (85%)  
+**Completed**: 6 issues (18%) - #1 ✅, #16 ✅, #17 ✅, #18 ✅, #31 ✅, #89 ✅  
+**In Progress**: 1 issue (3%) - #13 🚧 (Tasks 1-2/12 completed, 17%)  
+**Remaining**: 27 issues (79%)  
 **Timeline**: Feb 2026 - Apr 2026 (5 sprints × 2 weeks)
 
 ---
 
-### Sprint 0: Prerequisite Foundation (Week 1-2)
+### Sprint 0: Prerequisite Foundation (Week 1-2) - **ACTIVE**
 
-**Goal**: Complete foundational infrastructure (mostly already done)
+**Goal**: Complete foundational infrastructure (partially done, #13 in progress)
+
+**Status**: 🚧 **IN PROGRESS** (Tasks 1-2/12 completed on Issue #13)  
+**Progress**: 6/11 issues completed (55%)  
+**Commit**: 4a2fb1e (2026-02-03) - Ring buffer structures + subscription management
 
 **Exit Criteria**: 
-- PTP clock IOCTLs 24/25 functional
-- TSAUXC control IOCTL 40 functional  
-- Subscription IOCTLs 33/34 functional
-- Hardware context lifecycle validated
+- ✅ Stakeholder requirements documented (#1, #31)
+- ✅ Lifecycle infrastructure complete (#16, #17, #18)
+- ✅ Buffer overflow protection validated (#89)
+- 🚧 **Issue #13 (IN PROGRESS)**: Ring buffer structures ✅, Subscription management ✅, Next: Allocation
+- ⏳ PTP clock IOCTLs 24/25 functional (#2)
+- ⏳ TSAUXC control IOCTL 40 functional (#5)
+- ⏳ Subscription IOCTLs 33/34 functional (#13 - Tasks 3-4)
+- ⏳ Hardware context lifecycle validated (#18 - extend for subscription cleanup)
 
 | Issue | Type | Owner | Priority | Dependencies | Status |
 |-------|------|-------|----------|--------------|--------|
@@ -222,16 +811,23 @@ Layer 7: Test Cases
 | #2 | REQ-F | TBD | P0 | #1 | `status:backlog` |
 | #5 | REQ-F | TBD | P0 | #1 | `status:backlog` |
 | #6 | REQ-F | TBD | P1 | #1 | `status:backlog` |
-| #13 | REQ-F | TBD | P0 | #117, #30 | `status:backlog` |
+| #13 | REQ-F | **Active** | P0 | #117, #30 | 🚧 `status:in-progress` (Tasks 1-2/12: 17%) |
 | #149 | REQ-F | TBD | P1 | #1, #18, #40 | `status:backlog` |
 
 **Deliverables**:
 - ✅ Stakeholder requirements documented (#1, #31)
 - ✅ Lifecycle infrastructure complete (#16, #17, #18)
-- PTP clock IOCTLs 24/25 (GET <500ns, SET <1µs)
-- TSAUXC control IOCTL 40 (enable/disable SYSTIM0)
-- Subscription IOCTLs 33/34 (lock-free SPSC, zero-copy MDL)
-- Timestamp correlation (<5µs operations, frequency ±100K ppb)
+- ✅ Buffer overflow protection validated (#89)
+- 🚧 **Issue #13 Progress (17% - 2/12 tasks)**:
+  - ✅ Task 1: Ring buffer structures (AVB_TIMESTAMP_EVENT, AVB_TIMESTAMP_RING_HEADER)
+  - ✅ Task 2: Subscription management (TS_SUBSCRIPTION[8], spin lock, init/cleanup)
+  - 🚧 Task 3: Ring buffer allocation (NEXT - IN PROGRESS)
+  - ⏳ Task 4: MDL mapping (zero-copy user access)
+  - ⏳ Task 5: Event generation infrastructure (AvbPostTimestampEvent)
+  - ⏳ Task 6-12: RX/TX hooks, target time, aux, overflow, testing
+- ⏳ PTP clock IOCTLs 24/25 (GET <500ns, SET <1µs) - Issue #2
+- ⏳ TSAUXC control IOCTL 40 (enable/disable SYSTIM0) - Issue #5
+- ⏳ Timestamp correlation (<5µs operations, frequency ±100K ppb) - Issue #149
 
 ---
 
@@ -421,22 +1017,39 @@ Layer 7: Test Cases
 
 ## 🔄 Next Actions
 
-1. **Immediate** (This Week):
-   - [ ] Assign owners to P0 issues (#168, #19, #89, #147, #166, #171, #180)
-   - [ ] Schedule architecture review session for ADRs (#147, #166, #93)
-   - [ ] Create spike solution for interrupt latency measurement (#166)
+1. **Immediate** (This Week - Issue #13 Task 3):
+   - [x] Commit foundation work (Tasks 1-2) - ✅ Commit 4a2fb1e
+   - [ ] **Implement ring buffer allocation in IOCTL_AVB_TS_SUBSCRIBE** (Task 3)
+     - Validate power-of-2 ring size (64-4096)
+     - Allocate NonPagedPool (header + events array)
+     - Initialize producer/consumer indices, overflow counter
+     - Find free subscription slot, allocate ring_id
+   - [ ] Test: Verify subscription IOCTL returns valid ring_id
+   - [ ] Implement MDL mapping in IOCTL_AVB_TS_RING_MAP (Task 4)
+     - IoAllocateMdl, MmBuildMdlForNonPagedPool
+     - MmMapLockedPagesSpecifyCache to user VA
+     - Return shm_token to user
+   - [ ] Test: Verify user can read ring header (producer/consumer indices)
 
-2. **Sprint 1 Prep** (Week 1):
-   - [ ] Move P0 requirement issues to `status:ready`
+2. **Sprint 0 Week 2** (Issue #13 Tasks 5-7):
+   - [ ] Implement AvbPostTimestampEvent() function (Task 5)
+   - [ ] Hook RX timestamp events in AvbReceive (Task 6)
+   - [ ] Hook TX timestamp events in send completion (Task 7)
+   - [ ] Test: Verify RX/TX events appear in ring buffer
+
+3. **Sprint 1 Prep** (Week 3):
+   - [ ] Move P0 requirement issues to `status:ready` (#168, #19, #147, #166)
    - [ ] Validate all requirement issues have acceptance criteria
    - [ ] Set up GitHub Project board for batch tracking
+   - [ ] Schedule architecture review session for ADRs (#147, #166, #93)
 
-3. **Ongoing**:
+4. **Ongoing**:
    - [ ] Daily standups - blockers, dependencies
    - [ ] Weekly demos - working software (TDD increments)
    - [ ] Bi-weekly retrospectives - process improvements
 
 ---
 
-**Last Updated**: 2026-02-02  
-**Next Review**: Sprint Planning (TBD)
+**Last Updated**: 2026-02-03 (Issue #13 Tasks 1-2 completed, Task 3 next)  
+**Commit**: 4a2fb1e - Ring buffer structures + subscription management  
+**Next Review**: Sprint Planning (Week 3 - TBD)
