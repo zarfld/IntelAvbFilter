@@ -97,33 +97,44 @@ HANDLE OpenAdapter(void) {
  * @return ring_id on success, 0 on failure
  */
 UINT32 SubscribeToEvents(HANDLE adapter, UINT32 event_flags, UINT32 queue_filter) {
-    AVB_TS_SUBSCRIBE_REQUEST request = {0};
+    AVB_TS_SUBSCRIBE_REQUEST request_in = {0};
+    AVB_TS_SUBSCRIBE_REQUEST request_out = {0};  /* Separate output buffer */
     DWORD bytes_returned = 0;
     BOOL result;
     
     /* Map custom event_flags to SSOT types_mask (same values) */
-    request.types_mask = event_flags;
+    request_in.types_mask = event_flags;
     
     /* SSOT uses VLAN/PCP filtering, not queue_filter
      * For initial implementation, disable VLAN filtering (vlan=0, pcp=0) */
-    request.vlan = 0;
-    request.pcp = 0;
-    request.reserved0 = 0;
-    request.ring_id = 0;  /* Driver assigns ring_id */
+    request_in.vlan = 0;
+    request_in.pcp = 0;
+    request_in.reserved0 = 0;
+    request_in.ring_id = 0;  /* Driver assigns ring_id */
+    
+    printf("    DEBUG: Calling IOCTL_AVB_TS_SUBSCRIBE with types_mask=0x%08X\n", request_in.types_mask);
     
     result = DeviceIoControl(
         adapter,
         IOCTL_AVB_TS_SUBSCRIBE,  /* From avb_ioctl.h */
-        &request,
-        sizeof(request),
-        &request,
-        sizeof(request),
+        &request_in,              /* SEPARATE input buffer */
+        sizeof(request_in),
+        &request_out,             /* SEPARATE output buffer */
+        sizeof(request_out),
         &bytes_returned,
         NULL
     );
     
-    if (result && request.status == 0) {
-        return request.ring_id;  /* Return ring_id, not HANDLE */
+    printf("    DEBUG: DeviceIoControl result=%d, bytes_returned=%lu, status=0x%08X, ring_id=%u\n",
+           result, bytes_returned, request_out.status, request_out.ring_id);
+    
+    if (!result) {
+        DWORD error = GetLastError();
+        printf("    DEBUG: DeviceIoControl failed with error %lu (0x%08lX)\n", error, error);
+    }
+    
+    if (result && request_out.status == 0) {
+        return request_out.ring_id;  /* Return ring_id, not HANDLE */
     }
     
     return 0;  /* 0 indicates failure */
@@ -144,6 +155,9 @@ HANDLE MapRingBuffer(HANDLE adapter, UINT32 ring_id, SIZE_T requested_size, SIZE
     request.user_cookie = 0;  /* Optional user context */
     request.shm_token = 0;    /* Driver populates */
     
+    printf("    DEBUG: Calling IOCTL_AVB_TS_RING_MAP with ring_id=%u, length=%u\n", 
+           request.ring_id, request.length);
+    
     result = DeviceIoControl(
         adapter,
         IOCTL_AVB_TS_RING_MAP,  /* From avb_ioctl.h */
@@ -154,6 +168,14 @@ HANDLE MapRingBuffer(HANDLE adapter, UINT32 ring_id, SIZE_T requested_size, SIZE
         &bytes_returned,
         NULL
     );
+    
+    printf("    DEBUG: DeviceIoControl result=%d, bytes_returned=%lu, status=0x%08X, shm_token=0x%I64X\n",
+           result, bytes_returned, request.status, request.shm_token);
+    
+    if (!result) {
+        DWORD error = GetLastError();
+        printf("    DEBUG: DeviceIoControl failed with error %lu (0x%08lX)\n", error, error);
+    }
     
     if (result && request.status == 0) {
         if (actual_size) {
@@ -450,28 +472,28 @@ void Test_HighEventRatePerformance(TestContext *ctx) {
  * UT-TS-ERROR-001: Invalid Subscription Handle
  */
 void Test_InvalidSubscriptionHandle(TestContext *ctx) {
-    void *buffer;
+    HANDLE buffer;
     SIZE_T actual_size = 0;
     
     /* Try to map with invalid handle */
     buffer = MapRingBuffer(ctx->adapter, INVALID_HANDLE_VALUE, DEFAULT_RING_BUFFER_SIZE, &actual_size);
     
     PrintTestResult(ctx, "UT-TS-ERROR-001: Invalid Subscription Handle", 
-                    (buffer == NULL) ? TEST_PASS : TEST_FAIL,
-                    (buffer == NULL) ? NULL : "Invalid handle accepted");
+                    (buffer == INVALID_HANDLE_VALUE) ? TEST_PASS : TEST_FAIL,
+                    (buffer == INVALID_HANDLE_VALUE) ? NULL : "Invalid handle accepted");
 }
 
 /**
  * UT-TS-ERROR-002: Ring Buffer Mapping Failure
  */
 void Test_RingBufferMappingFailure(TestContext *ctx) {
-    HANDLE subscription;
-    void *buffer;
+    UINT32 subscription;
+    HANDLE buffer;
     SIZE_T huge_size = MAX_RING_BUFFER_SIZE * 10;  /* Unreasonably large */
     SIZE_T actual_size = 0;
     
     subscription = SubscribeToEvents(ctx->adapter, TS_EVENT_RX_TIMESTAMP, 0);
-    if (subscription == INVALID_HANDLE_VALUE) {
+    if (subscription == 0) {
         PrintTestResult(ctx, "UT-TS-ERROR-002: Ring Buffer Mapping Failure", TEST_SKIP, 
                         "Subscription failed");
         return;
@@ -480,7 +502,7 @@ void Test_RingBufferMappingFailure(TestContext *ctx) {
     buffer = MapRingBuffer(ctx->adapter, subscription, huge_size, &actual_size);
     
     /* Should fail gracefully */
-    if (buffer == NULL) {
+    if (buffer == INVALID_HANDLE_VALUE) {
         PrintTestResult(ctx, "UT-TS-ERROR-002: Ring Buffer Mapping Failure", TEST_PASS, NULL);
     } else {
         UnmapRingBuffer(buffer);
