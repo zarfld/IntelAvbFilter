@@ -37,12 +37,13 @@
 
 ### 🚧 In Progress Issues (1/34 = 3%)
 - **#13** 🚧 - REQ-F-TS-SUB-001: Timestamp Event Subscription (IOCTLs 33/34, lock-free SPSC, zero-copy mapping)
-  - **Status**: Tasks 1-2/12 completed (17%)
+  - **Status**: Tasks 1-3/12 completed (25%)
   - **Completed**: Ring buffer structures (AVB_TIMESTAMP_EVENT, AVB_TIMESTAMP_RING_HEADER) ✅
   - **Completed**: Subscription management (AVB_DEVICE_CONTEXT with 8 subscription slots) ✅
   - **Completed**: Initialization/cleanup (AvbCreateMinimalContext, AvbCleanupDevice) ✅
-  - **Next**: Task 3 - Ring buffer allocation in IOCTL_AVB_TS_SUBSCRIBE
-  - **Commit**: 4a2fb1e (2026-02-03)
+  - **Completed**: Ring buffer allocation in IOCTL_AVB_TS_SUBSCRIBE ✅
+  - **Next**: Task 4 - MDL creation and user-space mapping in IOCTL_AVB_TS_RING_MAP
+  - **Commits**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3) - 2026-02-03
   - **Test Status**: 9/9 basic IOCTL tests passing, 10/19 tests skipped (require event generation)
 
 ### Stakeholder Requirements (Phase 01)
