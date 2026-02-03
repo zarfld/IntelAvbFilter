@@ -275,6 +275,7 @@ IntelAvbFilterDeviceIoControl(
             break;
 
         // AVB IOCTLs - Handle through AVB integration layer
+        case IOCTL_AVB_GET_VERSION:       // Implements #64 (REQ-F-IOCTL-VERSIONING-001) - MUST be first!
         case IOCTL_AVB_INIT_DEVICE:
         case IOCTL_AVB_GET_DEVICE_INFO:
 #ifndef NDEBUG
@@ -296,6 +297,8 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SET_QUEUE_TIMESTAMP:
         case IOCTL_AVB_SET_TARGET_TIME:
         case IOCTL_AVB_GET_AUX_TIMESTAMP:
+        case IOCTL_AVB_TS_SUBSCRIBE:      // Implements #13 (REQ-F-TS-SUB-001)
+        case IOCTL_AVB_TS_RING_MAP:       // Implements #13 (REQ-F-TS-SUB-001)
         {
             DEBUGP(DL_ERROR, "!!! DEVICE.C: AVB IOCTL CASE HIT: IOCTL=0x%08X\n", 
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
@@ -380,11 +383,91 @@ IntelAvbFilterDeviceIoControl(
                 }
             }
 
+            // DIAGNOSTIC: Write context status BEFORE the NULL check
+            #if DBG
+            {
+                OBJECT_ATTRIBUTES keyAttrs2;
+                HANDLE hKey2;
+                NTSTATUS st2;
+                ULONG contextStatus;
+                UNICODE_STRING keyPath2;
+                UNICODE_STRING valueName2;
+                
+                RtlInitUnicodeString(&keyPath2, L"\\Registry\\Machine\\Software\\IntelAvb");
+                hKey2 = NULL;
+                InitializeObjectAttributes(&keyAttrs2, &keyPath2, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                
+                st2 = ZwCreateKey(&hKey2, KEY_WRITE, &keyAttrs2, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+                if (NT_SUCCESS(st2)) {
+                    RtlInitUnicodeString(&valueName2, L"TargetContextNullCheck");
+                    contextStatus = (targetContext == NULL) ? 0 : 1;
+                    ZwSetValueKey(hKey2, &valueName2, 0, REG_DWORD, &contextStatus, sizeof(contextStatus));
+                    ZwClose(hKey2);
+                }
+            }
+            #endif
+
             if (targetContext != NULL) {
                 DEBUGP(DL_ERROR, "!!! BEFORE AvbHandleDeviceIoControl: filter=%p context=%p IOCTL=0x%08X\n", 
                        pFilter, targetContext, IrpSp->Parameters.DeviceIoControl.IoControlCode);
+                
+                // DIAGNOSTIC: Write pre-handler state to registry
+                #if DBG
+                {
+                    UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+                    OBJECT_ATTRIBUTES keyAttrs;
+                    HANDLE hKey = NULL;
+                    InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                    
+                    NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+                    if (NT_SUCCESS(st)) {
+                        UNICODE_STRING valueName = RTL_CONSTANT_STRING(L"StepReached");
+                        ULONG value = 1; // Step 1: Before handler
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &value, sizeof(value));
+                        ZwClose(hKey);
+                    }
+                }
+                #endif
+                
                 Status = AvbHandleDeviceIoControl(targetContext, Irp);
                 InfoLength = (ULONG)Irp->IoStatus.Information;
+                
+                // DIAGNOSTIC: Write post-handler state to registry
+                #if DBG
+                {
+                    OBJECT_ATTRIBUTES keyAttrs;
+                    HANDLE hKey;
+                    NTSTATUS st;
+                    ULONG value;
+                    ULONG irpInfo;
+                    UNICODE_STRING keyPath;
+                    UNICODE_STRING valueName;
+                    
+                    RtlInitUnicodeString(&keyPath, L"\\Registry\\Machine\\Software\\IntelAvb");
+                    hKey = NULL;
+                    InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                    
+                    st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+                    if (NT_SUCCESS(st)) {
+                        RtlInitUnicodeString(&valueName, L"StepReached");
+                        value = 2;
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &value, sizeof(value));
+                        
+                        RtlInitUnicodeString(&valueName, L"PostHandlerStatus");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &Status, sizeof(Status));
+                        
+                        RtlInitUnicodeString(&valueName, L"PostHandlerInfoLength");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &InfoLength, sizeof(InfoLength));
+                        
+                        irpInfo = (ULONG)Irp->IoStatus.Information;
+                        RtlInitUnicodeString(&valueName, L"PostHandlerIrpInfo");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &irpInfo, sizeof(irpInfo));
+                        
+                        ZwClose(hKey);
+                    }
+                }
+                #endif
+                
                 DEBUGP(DL_ERROR, "!!! AFTER AvbHandleDeviceIoControl: Status=0x%x, InfoLength=%lu\n", 
                        Status, InfoLength);
             } else {
@@ -611,6 +694,32 @@ IntelAvbFilterDeviceIoControl(
 
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = InfoLength;
+    
+    // DIAGNOSTIC: Write final IRP completion values to registry
+    #if DBG
+    {
+        OBJECT_ATTRIBUTES keyAttrs3;
+        HANDLE hKey3;
+        NTSTATUS st3;
+        UNICODE_STRING keyPath3;
+        UNICODE_STRING valueName3;
+        
+        RtlInitUnicodeString(&keyPath3, L"\\Registry\\Machine\\Software\\IntelAvb");
+        hKey3 = NULL;
+        InitializeObjectAttributes(&keyAttrs3, &keyPath3, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        
+        st3 = ZwCreateKey(&hKey3, KEY_WRITE, &keyAttrs3, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+        if (NT_SUCCESS(st3)) {
+            RtlInitUnicodeString(&valueName3, L"FinalIrpStatus");
+            ZwSetValueKey(hKey3, &valueName3, 0, REG_DWORD, &Status, sizeof(Status));
+            
+            RtlInitUnicodeString(&valueName3, L"FinalInfoLength");
+            ZwSetValueKey(hKey3, &valueName3, 0, REG_DWORD, &InfoLength, sizeof(InfoLength));
+            
+            ZwClose(hKey3);
+        }
+    }
+    #endif
 
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
