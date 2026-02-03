@@ -396,6 +396,67 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
     return STATUS_SUCCESS;
 }
 
+/* Task 5: Cleanup subscriptions for a specific file object (implicit unsubscribe on handle close)
+ * Called from IRP_MJ_CLEANUP handler when application closes device handle
+ * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 5 - Option B (implicit cleanup)
+ */
+VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject)
+{
+    PAVB_DEVICE_CONTEXT AvbContext = g_AvbContext;
+    if (!AvbContext || !FileObject) return;
+    
+    int cleaned = 0;
+    NdisAcquireSpinLock(&AvbContext->subscription_lock);
+    
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[i];
+        
+        // Check if this subscription belongs to the closing file object
+        if (sub->active && sub->file_object == FileObject) {
+            DEBUGP(DL_WARN, "Cleaning up subscription ring_id=%u for FileObject=%p\n", 
+                   sub->ring_id, FileObject);
+            
+            // Unmap from user space if mapped (Task 4)
+            if (sub->user_va && sub->ring_mdl) {
+                __try {
+                    MmUnmapLockedPages(sub->user_va, sub->ring_mdl);
+                    DEBUGP(DL_INFO, "  Unmapped user VA %p\n", sub->user_va);
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                    DEBUGP(DL_ERROR, "  Exception during MmUnmapLockedPages: 0x%08X\n", GetExceptionCode());
+                }
+                sub->user_va = NULL;
+            }
+            
+            // Free MDL (Task 4)
+            if (sub->ring_mdl) {
+                IoFreeMdl(sub->ring_mdl);
+                DEBUGP(DL_INFO, "  Freed MDL\n");
+                sub->ring_mdl = NULL;
+            }
+            
+            // Free ring buffer (Task 3)
+            if (sub->ring_buffer) {
+                ExFreePoolWithTag(sub->ring_buffer, FILTER_ALLOC_TAG);
+                DEBUGP(DL_INFO, "  Freed ring buffer (%lu bytes)\n", 
+                       (ULONG)(sizeof(AVB_TIMESTAMP_RING_HEADER) + sub->ring_count * sizeof(AVB_TIMESTAMP_EVENT)));
+                sub->ring_buffer = NULL;
+            }
+            
+            // Mark subscription slot as free
+            sub->active = 0;
+            sub->ring_id = 0;
+            sub->file_object = NULL;
+            cleaned++;
+        }
+    }
+    
+    NdisReleaseSpinLock(&AvbContext->subscription_lock);
+    
+    if (cleaned > 0) {
+        DEBUGP(DL_WARN, "Cleaned up %d subscription(s) for FileObject=%p\n", cleaned, FileObject);
+    }
+}
+
 VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 {
     if (!AvbContext) return;
@@ -1435,6 +1496,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 sub->sequence_num = 0;
                 sub->ring_mdl = NULL;      // Will be set in IOCTL_AVB_TS_RING_MAP (Task 4)
                 sub->user_va = NULL;
+                sub->file_object = IoGetCurrentIrpStackLocation(Irp)->FileObject;  // Track owning handle
                 
                 // Allocate ring_id (InterlockedIncrement ensures atomicity)
                 sub->ring_id = (avb_u32)InterlockedIncrement(&AvbContext->next_ring_id);
