@@ -37,6 +37,14 @@ typedef struct AVB_REQUEST_HEADER {
     avb_u32 header_size;   /* sizeof(AVB_REQUEST_HEADER) when present */
 } AVB_REQUEST_HEADER, *PAVB_REQUEST_HEADER;
 
+/* Driver version query response (Issue #64, #273)
+ * Used by IOCTL_AVB_GET_VERSION (0x9C40A000)
+ * No input buffer required. */
+typedef struct _IOCTL_VERSION {
+    avb_u16 Major;  /* Incremented on breaking changes */
+    avb_u16 Minor;  /* Incremented on backward-compatible additions */
+} IOCTL_VERSION, *PIOCTL_VERSION;
+
 /* IOCTL macro (METHOD_BUFFERED) */
 #ifndef _NDIS_CONTROL_CODE
   #include <winioctl.h>
@@ -45,6 +53,8 @@ typedef struct AVB_REQUEST_HEADER {
 #endif
 
 /* AVB-specific IOCTLs (must match kernel) */
+/* Version query IOCTL - MUST be first (Issue #64, #273) */
+#define IOCTL_AVB_GET_VERSION           _NDIS_CONTROL_CODE(0x800, METHOD_BUFFERED)  /* 0x9C40A000 */
 #define IOCTL_AVB_INIT_DEVICE           _NDIS_CONTROL_CODE(20, METHOD_BUFFERED)
 #define IOCTL_AVB_GET_DEVICE_INFO       _NDIS_CONTROL_CODE(21, METHOD_BUFFERED)
 #ifndef NDEBUG
@@ -269,6 +279,69 @@ typedef struct AVB_HW_STATE_QUERY {
     avb_u32 capabilities; /* current published caps */
     avb_u32 reserved;     /* future use */
 } AVB_HW_STATE_QUERY, *PAVB_HW_STATE_QUERY;
+
+/*==============================================================================
+ * Ring Buffer Structures (Issue #13 - Timestamp Event Subscription)
+ *============================================================================*/
+
+/* Timestamp event types (bitmask for types_mask) */
+#define TS_EVENT_RX_TIMESTAMP      0x00000001  /* RX packet timestamped */
+#define TS_EVENT_TX_TIMESTAMP      0x00000002  /* TX packet complete + timestamped */
+#define TS_EVENT_TARGET_TIME       0x00000004  /* Target time reached (SDP0) */
+#define TS_EVENT_AUX_TIMESTAMP     0x00000008  /* Aux timestamp captured (GPIO) */
+#define TS_EVENT_ERROR             0x00000010  /* Timestamp error (overflow, invalid) */
+
+/* Timestamp event entry (written to ring buffer by driver ISR) */
+typedef struct AVB_TIMESTAMP_EVENT {
+    avb_u64 timestamp_ns;   /* Hardware timestamp (System Time Register in ns) */
+    avb_u32 event_type;     /* One of TS_EVENT_* constants */
+    avb_u32 sequence_num;   /* Monotonically increasing sequence number */
+    avb_u16 vlan_id;        /* VLAN tag (if present, else 0xFFFF) */
+    avb_u8  pcp;            /* Priority Code Point (802.1Q) */
+    avb_u8  queue;          /* Tx/Rx queue number */
+    avb_u16 packet_length;  /* Packet length (bytes) */
+    avb_u8  trigger_source; /* Target time source or GPIO pin (if aux event) */
+    avb_u8  reserved[5];    /* Pad to 32 bytes (cache-line friendly) */
+} AVB_TIMESTAMP_EVENT, *PAVB_TIMESTAMP_EVENT;
+
+/* Ring buffer header (lock-free producer/consumer) 
+ * 
+ * Layout in memory:
+ *   [AVB_TIMESTAMP_RING_HEADER] (64 bytes)
+ *   [AVB_TIMESTAMP_EVENT[0]]
+ *   [AVB_TIMESTAMP_EVENT[1]]
+ *   ...
+ *   [AVB_TIMESTAMP_EVENT[count-1]]
+ * 
+ * Lock-free protocol:
+ *   Producer (Driver ISR):
+ *     1. local_prod = producer_index (atomic read)
+ *     2. if ((local_prod + 1) & mask) == consumer_index: ring full, drop event
+ *     3. events[local_prod & mask] = new_event
+ *     4. MemoryBarrier() - ensure event written before index update
+ *     5. producer_index++ (atomic write)
+ * 
+ *   Consumer (User Mode):
+ *     1. local_cons = consumer_index (atomic read)
+ *     2. if (local_cons == producer_index): ring empty, no events
+ *     3. event = events[local_cons & mask]
+ *     4. MemoryBarrier() - ensure event read before index update
+ *     5. consumer_index++ (atomic write)
+ */
+typedef struct AVB_TIMESTAMP_RING_HEADER {
+    volatile avb_u32 producer_index;  /* Written by driver (ISR context) */
+    volatile avb_u32 consumer_index;  /* Written by user (any context) */
+    avb_u32 mask;                     /* (count - 1) for wrap-around (count is power of 2) */
+    avb_u32 count;                    /* Ring size (power of 2: 64, 128, 256, ..., 4096) */
+    volatile avb_u32 overflow_count;  /* Number of events dropped due to full ring */
+    avb_u32 event_mask;               /* Copy of subscription event_mask for diagnostics */
+    avb_u16 vlan_filter;              /* Copy of VLAN filter (0xFFFF = no filter) */
+    avb_u8  pcp_filter;               /* Copy of PCP filter (0xFF = no filter) */
+    avb_u8  reserved0;                /* Align */
+    avb_u64 total_events;             /* Total events posted (including dropped) */
+    avb_u8  reserved[32];             /* Pad to 64 bytes (cache-line boundary) */
+    /* AVB_TIMESTAMP_EVENT events[count]; // Follows immediately in memory */
+} AVB_TIMESTAMP_RING_HEADER, *PAVB_TIMESTAMP_RING_HEADER;
 
 #ifdef __cplusplus
 }
