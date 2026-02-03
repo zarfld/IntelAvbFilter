@@ -1350,12 +1350,13 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         break;
 
     // Implements #13 (REQ-F-TS-SUB-001: Timestamp Event Subscription)
+    // Task 3: Ring buffer allocation with power-of-2 validation
     case IOCTL_AVB_TS_SUBSCRIBE:
         {
             DEBUGP(DL_INFO, "IOCTL_AVB_TS_SUBSCRIBE called\n");
             if (inLen < sizeof(AVB_TS_SUBSCRIBE_REQUEST) || outLen < sizeof(AVB_TS_SUBSCRIBE_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
-                info = 0;  // Critical: Set info even on error to ensure correct bytes_returned
+                info = 0;
             } else {
                 PAVB_TS_SUBSCRIBE_REQUEST sub_req = (PAVB_TS_SUBSCRIBE_REQUEST)buf;
                 
@@ -1368,25 +1369,88 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     break;
                 }
                 
-                // TODO: Allocate ring buffer and store ring_id
-                // For now, return a dummy ring_id to make tests pass (TDD GREEN phase)
-                // Real implementation will allocate NonPagedPool ring buffer
-                static ULONG next_ring_id = 1;
-                sub_req->ring_id = next_ring_id++;
+                // Task 3: Use default ring count (user specifies size in MAP request)
+                // Default to 1024 events (configurable in MAP IOCTL via length parameter)
+                avb_u32 ring_count = 1024;  // Default: 1024 events
                 
-                DEBUGP(DL_INFO, "Event subscription: types_mask=0x%08X, vlan=%u, pcp=%u, ring_id=%u\n",
-                       sub_req->types_mask, sub_req->vlan, sub_req->pcp, sub_req->ring_id);
+                // Calculate total buffer size (header + events array)
+                SIZE_T header_size = sizeof(AVB_TIMESTAMP_RING_HEADER);
+                SIZE_T events_size = ring_count * sizeof(AVB_TIMESTAMP_EVENT);
+                SIZE_T total_size = header_size + events_size;
+                
+                // Allocate NonPagedPool for ring buffer
+                PVOID ring_buffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, total_size, FILTER_ALLOC_TAG);
+                if (!ring_buffer) {
+                    DEBUGP(DL_ERROR, "Failed to allocate ring buffer (%lu bytes)\n", (ULONG)total_size);
+                    sub_req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    info = sizeof(*sub_req);
+                    break;
+                }
+                
+                // Initialize ring buffer header
+                AVB_TIMESTAMP_RING_HEADER *header = (AVB_TIMESTAMP_RING_HEADER*)ring_buffer;
+                RtlZeroMemory(header, total_size);
+                header->producer_index = 0;
+                header->consumer_index = 0;
+                header->mask = ring_count - 1;
+                header->count = ring_count;
+                header->overflow_count = 0;
+                header->total_events = 0;
+                header->event_mask = sub_req->types_mask;
+                header->vlan_filter = sub_req->vlan;
+                header->pcp_filter = (avb_u8)sub_req->pcp;
+                
+                // Find free subscription slot (acquire spin lock)
+                NdisAcquireSpinLock(&AvbContext->subscription_lock);
+                
+                int free_slot = -1;
+                for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+                    if (AvbContext->subscriptions[i].ring_id == 0) {
+                        free_slot = i;
+                        break;
+                    }
+                }
+                
+                if (free_slot == -1) {
+                    NdisReleaseSpinLock(&AvbContext->subscription_lock);
+                    ExFreePoolWithTag(ring_buffer, FILTER_ALLOC_TAG);
+                    DEBUGP(DL_ERROR, "No free subscription slots (max %d)\n", MAX_TS_SUBSCRIPTIONS);
+                    sub_req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+                    status = STATUS_TOO_MANY_SESSIONS;
+                    info = sizeof(*sub_req);
+                    break;
+                }
+                
+                // Store ring buffer in subscription table
+                TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[free_slot];
+                sub->ring_buffer = ring_buffer;
+                sub->ring_count = ring_count;
+                sub->event_mask = sub_req->types_mask;
+                sub->vlan_filter = sub_req->vlan;
+                sub->pcp_filter = (avb_u8)sub_req->pcp;
+                sub->active = 1;
+                sub->sequence_num = 0;
+                sub->ring_mdl = NULL;      // Will be set in IOCTL_AVB_TS_RING_MAP (Task 4)
+                sub->user_va = NULL;
+                
+                // Allocate ring_id (InterlockedIncrement ensures atomicity)
+                sub->ring_id = (avb_u32)InterlockedIncrement(&AvbContext->next_ring_id);
+                
+                NdisReleaseSpinLock(&AvbContext->subscription_lock);
+                
+                // Return ring_id to user
+                sub_req->ring_id = sub->ring_id;
+                
+                DEBUGP(DL_INFO, "Ring buffer allocated: ring_id=%u, count=%u, size=%lu bytes, slot=%d\n",
+                       sub_req->ring_id, ring_count, (ULONG)total_size, free_slot);
+                DEBUGP(DL_INFO, "Subscription: types_mask=0x%08X, vlan=%u, pcp=%u\n",
+                       sub_req->types_mask, sub_req->vlan, sub_req->pcp);
                 
                 sub_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                 status = STATUS_SUCCESS;
                 info = sizeof(*sub_req);
-                
-                // Set Irp->IoStatus.Information to actual buffer size
-                // Windows I/O Manager validates this against OutputBufferLength
                 Irp->IoStatus.Information = sizeof(*sub_req);
-                
-                DEBUGP(DL_ERROR, "!!! IOCTL 33: Setting info=%lu, ring_id=%u, Irp->IoStatus.Information=%lu\n", 
-                       info, sub_req->ring_id, (ULONG)Irp->IoStatus.Information);
             }
         }
         break;
