@@ -37,15 +37,16 @@
 
 ### 🚧 In Progress Issues (1/34 = 3%)
 - **#13** 🚧 - REQ-F-TS-SUB-001: Timestamp Event Subscription (IOCTLs 33/34, lock-free SPSC, zero-copy mapping)
-  - **Status**: Tasks 1-3/12 ✅ COMPLETE (25%), Task 4 stubbed (partial), Tasks 6-12 BLOCKED
+  - **Status**: Tasks 1-4/12 ✅ COMPLETE (33%), Task 5 next (unsubscribe/unmap), Tasks 6-12 BLOCKED
   - **Completed**: Ring buffer structures (AVB_TIMESTAMP_EVENT, AVB_TIMESTAMP_RING_HEADER) ✅
   - **Completed**: Subscription management (AVB_DEVICE_CONTEXT with 8 subscription slots) ✅
   - **Completed**: Initialization/cleanup (AvbCreateMinimalContext, AvbCleanupDevice) ✅
   - **Completed**: Ring buffer allocation in IOCTL_AVB_TS_SUBSCRIBE ✅
-  - **Partial**: Task 4 - MDL mapping returns stub shm_token (0x12345678, not real handle)
+  - **Completed**: Real MDL mapping (IoAllocateMdl + MmMapLockedPagesSpecifyCache) ✅
+  - **Next**: Task 5 - Unsubscribe/unmap implementation (IOCTL_AVB_TS_UNSUBSCRIBE)
   - **Blocked**: Tasks 6-12 - Event generation (ISR/DPC/posting) needed for 10 skipped tests
-  - **Commits**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3) - 2026-02-03
-  - **Test Status**: ✅ **9/19 PASSING** (0 failures), 10 skipped (need event infrastructure)
+  - **Commits**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4) - 2026-02-03
+  - **Test Status**: ✅ **9/19 PASSING** (0 failures), real user VAs (0x201B28B0000, etc.)
 
 ### Stakeholder Requirements (Phase 01)
 - **#167** - StR-EVENT-001: Event-Driven Time-Sensitive Networking Monitoring (Milan/IEC 60802, <1µs notification, zero polling)
@@ -106,8 +107,8 @@
 
 **Issue**: REQ-F-TS-SUB-001 - Timestamp Event Subscription  
 **Status**: 🚧 **ACTIVE** (Sprint 0 - Foundation)  
-**Progress**: Tasks 1-3/12 completed (25%), Task 4 stubbed (partial)  
-**Commit**: 4a2fb1e (2026-02-03)  
+**Progress**: Tasks 1-4/12 completed (33%), Tasks 6-12 BLOCKED  
+**Commit**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4) - 2026-02-03  
 **Test Status**: ✅ **9/19 PASSING** (0 failures!), 10 skipped (need event generation - Tasks 6-12)  
 **Blocker**: Event generation infrastructure (ISR/DPC/posting) required for remaining tests
 
@@ -197,7 +198,42 @@ typedef struct _AVB_DEVICE_CONTEXT {
 ```
 
 ---
+4: MDL User-Space Mapping (COMPLETED)
+**File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_RING_MAP handler)  
+**Lines**: ~120 LOC  
+**Priority**: P0 (Zero-copy memory sharing)  
+**Commit**: 24e5571 (2026-02-03)  
+**Verified**: ✅ Real user VAs (0x201B28B0000, 0x201B28C0000, 0x201B28D0000)
 
+**Deliverables**:
+- ✅ Find subscription by ring_id with spin lock
+- ✅ Prevent double-mapping (check ring_mdl != NULL)
+- ✅ Calculate ring_size: sizeof(header) + ring_count * sizeof(event) = 32,840 bytes
+- ✅ IoAllocateMdl(ring_buffer, ring_size, FALSE, FALSE, NULL)
+- ✅ MmBuildMdlForNonPagedPool(mdl) with __try/__except
+- ✅ MmMapLockedPagesSpecifyCache(mdl, UserMode, MmCached, NULL, FALSE, NormalPagePriority)
+- ✅ Store MDL and user_va in subscription for cleanup
+- ✅ Return user_va as shm_token (64-bit pointer cast)
+- ✅ Error handling: invalid ring_id, excessive size (>1MB), double-mapping
+
+**Code**:
+```c
+// Real user-space mapping (not stub!)
+PMDL mdl = IoAllocateMdl(ring_kernel_va, ring_size, FALSE, FALSE, NULL);
+MmBuildMdlForNonPagedPool(mdl);
+PVOID user_va = MmMapLockedPagesSpecifyCache(mdl, UserMode, MmCached, ...);
+
+found_sub->ring_mdl = mdl;
+found_sub->user_va = user_va;
+map_req->shm_token = (avb_u64)(ULONG_PTR)user_va;  // 0x201B28B0000!
+```
+
+---
+
+#### 🚧 Task 5: Unsubscribe and Unmap (NEXT)
+**File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_UNSUBSCRIBE handler)  
+**Estimated**: ~40-60 lines of code  
+**Priority**: P1 (Resource cleanup
 #### ✅ Task 3: Implement Ring Buffer Allocation (COMPLETED)
 **File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_SUBSCRIBE handler)  
 **Lines**: ~60 LOC  
