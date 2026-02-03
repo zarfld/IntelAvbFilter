@@ -68,6 +68,7 @@ typedef struct _TS_SUBSCRIPTION {
     PMDL  ring_mdl;                       // MDL for user-space mapping
     PVOID user_va;                        // User virtual address (after mapping)
     volatile LONG sequence_num;           // Next event sequence number
+    PFILE_OBJECT file_object;             // Owning handle (for cleanup on close)
 } TS_SUBSCRIPTION;
 
 // AVB device context structure
@@ -137,8 +138,15 @@ VOID AvbCleanupDevice(
     _In_opt_ PAVB_DEVICE_CONTEXT AvbContext
 );
 
-/**
- * @brief Handle an incoming DeviceIoControl IRP targeting the AVB filter device.
+/** * @brief Cleanup timestamp subscriptions for a file object (implicit unsubscribe on handle close).
+ * @param FileObject File object being closed (from IRP_MJ_CLEANUP).
+ * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 5 - Option B
+ */
+VOID AvbCleanupFileSubscriptions(
+    _In_ PFILE_OBJECT FileObject
+);
+
+/** * @brief Handle an incoming DeviceIoControl IRP targeting the AVB filter device.
  * @param AvbContext Device context.
  * @param Irp Pointer to IRP from I/O manager.
  * @return NTSTATUS from processing.

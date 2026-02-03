@@ -121,7 +121,8 @@ IntelAvbFilterDispatch(
             break;
 
         case IRP_MJ_CLEANUP:
-            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLEANUP\n");
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLEANUP - Handle being closed, cleaning up subscriptions for FileObject=%p\n", IrpStack->FileObject);
+            AvbCleanupFileSubscriptions(IrpStack->FileObject);
             break;
 
         case IRP_MJ_CLOSE:
