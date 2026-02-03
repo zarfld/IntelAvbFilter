@@ -187,6 +187,11 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
   </ItemDefinitionGroup>
+  <!-- Fix WDK catalog generation: Copy .sys to parent directory for Inf2Cat -->
+  <Target Name="CopySysForInf2Cat" AfterTargets="Link">
+    <Message Text="Copying $(TargetPath) to $(OutDir)..\$(TargetFileName) for WDK Inf2Cat processing" Importance="high" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(OutDir)..\$(TargetFileName)" />
+  </Target>
   <ItemGroup>
     <!--Leaf Item elements-->
     <ClCompile Include="src\avb_bar0_discovery.c" />
