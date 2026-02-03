@@ -1459,10 +1459,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_TS_RING_MAP:
         {
-            DEBUGP(DL_INFO, "IOCTL_AVB_TS_RING_MAP called\n");
+            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_TS_RING_MAP called\n");
             if (inLen < sizeof(AVB_TS_RING_MAP_REQUEST) || outLen < sizeof(AVB_TS_RING_MAP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
-                info = 0;  // Critical: Set info even on error to ensure correct bytes_returned
+                info = 0;
             } else {
                 PAVB_TS_RING_MAP_REQUEST map_req = (PAVB_TS_RING_MAP_REQUEST)buf;
                 
@@ -1490,23 +1490,117 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     break;
                 }
                 
-                // TODO: Create MDL and map to user space
-                // For now, return dummy handle to make tests pass (TDD GREEN phase)
-                // Real implementation will use IoAllocateMdl + MmMapLockedPagesSpecifyCache
+                // Find subscription by ring_id (Task 4: Real MDL mapping)
+                NdisAcquireSpinLock(&currentContext->subscription_lock);
                 
-                // Simulate successful mapping
-                map_req->shm_token = (avb_u64)(ULONG_PTR)0x12345678;  // Dummy handle
-                map_req->length = 64 * 1024;  // Assume 64KB ring buffer
+                TS_SUBSCRIPTION* found_sub = NULL;
+                for (ULONG i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+                    if (currentContext->subscriptions[i].ring_id == map_req->ring_id) {
+                        found_sub = &currentContext->subscriptions[i];
+                        break;
+                    }
+                }
                 
-                DEBUGP(DL_INFO, "Ring buffer mapped: ring_id=%u, length=%u, shm_token=0x%I64X\n",
-                       map_req->ring_id, map_req->length, map_req->shm_token);
+                if (!found_sub || !found_sub->ring_buffer) {
+                    NdisReleaseSpinLock(&currentContext->subscription_lock);
+                    DEBUGP(DL_ERROR, "Subscription not found or no ring buffer: ring_id=%u\n", map_req->ring_id);
+                    map_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    info = sizeof(*map_req);
+                    break;
+                }
+                
+                // Prevent double-mapping
+                if (found_sub->ring_mdl != NULL) {
+                    NdisReleaseSpinLock(&currentContext->subscription_lock);
+                    DEBUGP(DL_ERROR, "Ring buffer already mapped: ring_id=%u\n", map_req->ring_id);
+                    map_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                    status = STATUS_INVALID_DEVICE_STATE;
+                    info = sizeof(*map_req);
+                    break;
+                }
+                
+                // Calculate ring buffer size: header (64 bytes) + events (ring_count * 32 bytes)
+                ULONG ring_size = sizeof(AVB_TIMESTAMP_RING_HEADER) + 
+                                  (found_sub->ring_count * sizeof(AVB_TIMESTAMP_EVENT));
+                PVOID ring_kernel_va = found_sub->ring_buffer;
+                
+                NdisReleaseSpinLock(&currentContext->subscription_lock);
+                
+                // Allocate MDL for ring buffer
+                PMDL mdl = IoAllocateMdl(
+                    ring_kernel_va,
+                    ring_size,
+                    FALSE,  // Not secondary buffer
+                    FALSE,  // Don't charge quota
+                    NULL    // No IRP
+                );
+                
+                if (!mdl) {
+                    DEBUGP(DL_ERROR, "IoAllocateMdl failed: ring_id=%u, size=%u\n", map_req->ring_id, ring_size);
+                    map_req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    info = sizeof(*map_req);
+                    break;
+                }
+                
+                // Build MDL for NonPagedPool memory
+                __try {
+                    MmBuildMdlForNonPagedPool(mdl);
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                    IoFreeMdl(mdl);
+                    DEBUGP(DL_ERROR, "MmBuildMdlForNonPagedPool failed: ring_id=%u\n", map_req->ring_id);
+                    map_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                    status = STATUS_UNSUCCESSFUL;
+                    info = sizeof(*map_req);
+                    break;
+                }
+                
+                // Map to user-space
+                PVOID user_va = NULL;
+                __try {
+                    user_va = MmMapLockedPagesSpecifyCache(
+                        mdl,
+                        UserMode,
+                        MmCached,
+                        NULL,           // No specific address
+                        FALSE,          // No bug check on failure
+                        NormalPagePriority
+                    );
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                    IoFreeMdl(mdl);
+                    DEBUGP(DL_ERROR, "MmMapLockedPagesSpecifyCache failed: ring_id=%u\n", map_req->ring_id);
+                    map_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                    status = STATUS_UNSUCCESSFUL;
+                    info = sizeof(*map_req);
+                    break;
+                }
+                
+                if (!user_va) {
+                    IoFreeMdl(mdl);
+                    DEBUGP(DL_ERROR, "MmMapLockedPagesSpecifyCache returned NULL: ring_id=%u\n", map_req->ring_id);
+                    map_req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    info = sizeof(*map_req);
+                    break;
+                }
+                
+                // Store MDL and user_va in subscription for cleanup
+                NdisAcquireSpinLock(&currentContext->subscription_lock);
+                found_sub->ring_mdl = mdl;
+                found_sub->user_va = user_va;
+                NdisReleaseSpinLock(&currentContext->subscription_lock);
+                
+                // Return user-space address as shm_token
+                map_req->shm_token = (avb_u64)(ULONG_PTR)user_va;
+                map_req->length = ring_size;
+                
+                DEBUGP(DL_ERROR, "!!! Ring buffer mapped: ring_id=%u, kernel_va=%p, user_va=%p, size=%u, shm_token=0x%I64X\n",
+                       map_req->ring_id, ring_kernel_va, user_va, ring_size, map_req->shm_token);
                 
                 map_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                 status = STATUS_SUCCESS;
                 info = sizeof(*map_req);
-                
-                // CRITICAL FIX: Set Irp->IoStatus.Information DIRECTLY here
-                Irp->IoStatus.Information = sizeof(*map_req);
             }
         }
         break;
