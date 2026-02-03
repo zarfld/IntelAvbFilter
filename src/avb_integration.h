@@ -52,6 +52,24 @@ __forceinline const char* AvbHwStateName(AVB_HW_STATE s) {
 /* Forward decl */
 typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
 
+/* Timestamp Event Subscription Management (Issue #13)
+ * Supports up to 8 concurrent subscriptions per adapter
+ */
+#define MAX_TS_SUBSCRIPTIONS 8
+
+typedef struct _TS_SUBSCRIPTION {
+    avb_u32 ring_id;                      // Subscription ID (1-based, 0=unused)
+    avb_u32 event_mask;                   // TS_EVENT_* bitmask
+    avb_u16 vlan_filter;                  // VLAN ID filter (0xFFFF=no filter)
+    avb_u8  pcp_filter;                   // PCP filter (0xFF=no filter)
+    avb_u8  active;                       // 1=active, 0=unused slot
+    PVOID ring_buffer;                    // NonPagedPool allocation (header + events)
+    ULONG ring_count;                     // Number of event slots (power of 2)
+    PMDL  ring_mdl;                       // MDL for user-space mapping
+    PVOID user_va;                        // User virtual address (after mapping)
+    volatile LONG sequence_num;           // Next event sequence number
+} TS_SUBSCRIPTION;
+
 // AVB device context structure
 typedef struct _AVB_DEVICE_CONTEXT {
     device_t intel_device;
@@ -68,23 +86,7 @@ typedef struct _AVB_DEVICE_CONTEXT {
     // ABI and capabilities tracking
     ULONG last_seen_abi_version;
 
-    /* Timestamp Event Subscription Management (Issue #13)
-     * Supports up to 8 concurrent subscriptions per adapter
-     */
-    #define MAX_TS_SUBSCRIPTIONS 8
-    typedef struct _TS_SUBSCRIPTION {
-        avb_u32 ring_id;                      // Subscription ID (1-based, 0=unused)
-        avb_u32 event_mask;                   // TS_EVENT_* bitmask
-        avb_u16 vlan_filter;                  // VLAN ID filter (0xFFFF=no filter)
-        avb_u8  pcp_filter;                   // PCP filter (0xFF=no filter)
-        avb_u8  active;                       // 1=active, 0=unused slot
-        PVOID ring_buffer;                    // NonPagedPool allocation (header + events)
-        ULONG ring_count;                     // Number of event slots (power of 2)
-        PMDL  ring_mdl;                       // MDL for user-space mapping
-        PVOID user_va;                        // User virtual address (after mapping)
-        volatile LONG sequence_num;           // Next event sequence number
-    } TS_SUBSCRIPTION;
-
+    // Timestamp Event Subscriptions (Issue #13)
     TS_SUBSCRIPTION subscriptions[MAX_TS_SUBSCRIPTIONS];  // Subscription table
     NDIS_SPIN_LOCK subscription_lock;                     // Protects subscription table
     volatile LONG next_ring_id;                           // Monotonic ring_id allocator (1, 2, 3, ...)
