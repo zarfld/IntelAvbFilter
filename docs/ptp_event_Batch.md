@@ -37,16 +37,17 @@
 
 ### 🚧 In Progress Issues (1/34 = 3%)
 - **#13** 🚧 - REQ-F-TS-SUB-001: Timestamp Event Subscription (IOCTLs 33/34, lock-free SPSC, zero-copy mapping)
-  - **Status**: Tasks 1-4/12 ✅ COMPLETE (33%), Task 5 next (unsubscribe/unmap), Tasks 6-12 BLOCKED
+  - **Status**: Tasks 1-5/12 ✅ COMPLETE (42%), Task 6 next (ISR/DPC), Tasks 6-12 BLOCKED
   - **Completed**: Ring buffer structures (AVB_TIMESTAMP_EVENT, AVB_TIMESTAMP_RING_HEADER) ✅
   - **Completed**: Subscription management (AVB_DEVICE_CONTEXT with 8 subscription slots) ✅
   - **Completed**: Initialization/cleanup (AvbCreateMinimalContext, AvbCleanupDevice) ✅
   - **Completed**: Ring buffer allocation in IOCTL_AVB_TS_SUBSCRIBE ✅
   - **Completed**: Real MDL mapping (IoAllocateMdl + MmMapLockedPagesSpecifyCache) ✅
-  - **Next**: Task 5 - Unsubscribe/unmap implementation (IOCTL_AVB_TS_UNSUBSCRIBE)
+  - **Completed**: Implicit cleanup on handle close (IRP_MJ_CLEANUP → AvbCleanupFileSubscriptions) ✅
+  - **Next**: Task 6 - ISR (Interrupt Service Routine) for hardware timestamp events
   - **Blocked**: Tasks 6-12 - Event generation (ISR/DPC/posting) needed for 10 skipped tests
-  - **Commits**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4) - 2026-02-03
-  - **Test Status**: ✅ **9/19 PASSING** (0 failures), real user VAs (0x201B28B0000, etc.)
+  - **Commits**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4), 00452c2 (Task 5) - 2026-02-03
+  - **Test Status**: ✅ **9/19 PASSING** (0 failures), real user VAs (0x244A6590000, etc.)
 
 ### Stakeholder Requirements (Phase 01)
 - **#167** - StR-EVENT-001: Event-Driven Time-Sensitive Networking Monitoring (Milan/IEC 60802, <1µs notification, zero polling)
@@ -107,8 +108,8 @@
 
 **Issue**: REQ-F-TS-SUB-001 - Timestamp Event Subscription  
 **Status**: 🚧 **ACTIVE** (Sprint 0 - Foundation)  
-**Progress**: Tasks 1-4/12 completed (33%), Tasks 6-12 BLOCKED  
-**Commit**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4) - 2026-02-03  
+**Progress**: Tasks 1-5/12 completed (42%), Tasks 6-12 BLOCKED  
+**Commit**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4), 00452c2 (Task 5) - 2026-02-03  
 **Test Status**: ✅ **9/19 PASSING** (0 failures!), 10 skipped (need event generation - Tasks 6-12)  
 **Blocker**: Event generation infrastructure (ISR/DPC/posting) required for remaining tests
 
@@ -230,10 +231,81 @@ map_req->shm_token = (avb_u64)(ULONG_PTR)user_va;  // 0x201B28B0000!
 
 ---
 
-#### 🚧 Task 5: Unsubscribe and Unmap (NEXT)
-**File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_UNSUBSCRIBE handler)  
-**Estimated**: ~40-60 lines of code  
-**Priority**: P1 (Resource cleanup
+#### ✅ Task 5: Implicit Cleanup on Handle Close (COMPLETED)
+**Files**:  
+- `src/avb_integration.h` (TS_SUBSCRIPTION: +1 field `file_object`)  
+- `src/avb_integration_fixed.c` (AvbCleanupFileSubscriptions: +60 LOC)  
+- `src/device.c` (IRP_MJ_CLEANUP handler: +1 call)  
+**Priority**: P1 (Resource cleanup)  
+**Commit**: 00452c2 (2026-02-03)  
+**Approach**: **Option B** - Implicit cleanup when application closes device handle (Windows-standard pattern)  
+**Verified**: ✅ UT-TS-SUB-004 passing (cleanup on CloseHandle)
+
+**Design Decision**: No IOCTL_AVB_TS_UNSUBSCRIBE needed!  
+- User calls `CloseHandle()` → Windows sends IRP_MJ_CLEANUP  
+- Driver calls `AvbCleanupFileSubscriptions(FileObject)`  
+- Automatically cleans up all subscriptions for that handle  
+- No test changes required (Unsubscribe() stub works via implicit cleanup)
+
+**Deliverables**:
+- ✅ Add `file_object` field to TS_SUBSCRIPTION (track owning handle)
+- ✅ Store `FileObject` when subscribing (IOCTL_AVB_TS_SUBSCRIBE)
+- ✅ Implement `AvbCleanupFileSubscriptions()` helper:
+  - Loop through subscriptions, match by file_object
+  - MmUnmapLockedPages (if user_va mapped)
+  - IoFreeMdl (if MDL exists)
+  - ExFreePoolWithTag (free ring buffer)
+  - Mark subscription inactive (ring_id=0, active=0)
+- ✅ Register IRP_MJ_CLEANUP handler in device.c
+- ✅ Call cleanup from `IntelAvbFilterDispatch`
+
+**Code**:
+```c
+// TS_SUBSCRIPTION structure (added field)
+typedef struct _TS_SUBSCRIPTION {
+    avb_u32 ring_id;
+    avb_u32 event_mask;
+    // ... other fields ...
+    PFILE_OBJECT file_object;  // Owning handle (for cleanup on close)
+} TS_SUBSCRIPTION;
+
+// IOCTL_AVB_TS_SUBSCRIBE handler (store file object)
+sub->file_object = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+
+// IRP_MJ_CLEANUP handler (device.c)
+case IRP_MJ_CLEANUP:
+    AvbCleanupFileSubscriptions(IrpStack->FileObject);
+    break;
+
+// AvbCleanupFileSubscriptions() implementation
+VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject) {
+    NdisAcquireSpinLock(&AvbContext->subscription_lock);
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        if (sub->active && sub->file_object == FileObject) {
+            if (sub->user_va && sub->ring_mdl) {
+                MmUnmapLockedPages(sub->user_va, sub->ring_mdl);
+            }
+            if (sub->ring_mdl) {
+                IoFreeMdl(sub->ring_mdl);
+            }
+            if (sub->ring_buffer) {
+                ExFreePoolWithTag(sub->ring_buffer, FILTER_ALLOC_TAG);
+            }
+            sub->active = 0;
+            sub->ring_id = 0;
+            sub->file_object = NULL;
+        }
+    }
+    NdisReleaseSpinLock(&AvbContext->subscription_lock);
+}
+```
+
+---
+
+#### ⏳ Task 6: ISR (Interrupt Service Routine) Implementation (NEXT)
+**File**: `src/avb_integration_fixed.c` (new ISR function)  
+**Estimated**: ~80-100 lines of code  
+**Priority**: P0 (Core event generation mechanism
 #### ✅ Task 3: Implement Ring Buffer Allocation (COMPLETED)
 **File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_SUBSCRIBE handler)  
 **Lines**: ~60 LOC  
