@@ -2,5 +2,11 @@
     "files.associations": {
         "errno.h": "c"
     },
-    "cmake.ignoreCMakeListsMissing": true
+    "cmake.ignoreCMakeListsMissing": true,
+    "chat.tools.terminal.autoApprove": {
+        "/^powershell -File tools\\\\test\\\\Run-Tests-Elevated\\.ps1 -TestName test_ts_event_sub$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
 }
