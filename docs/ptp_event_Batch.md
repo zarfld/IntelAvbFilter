@@ -302,10 +302,291 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject) {
 
 ---
 
-#### ⏳ Task 6: ISR (Interrupt Service Routine) Implementation (NEXT)
-**File**: `src/avb_integration_fixed.c` (new ISR function)  
-**Estimated**: ~80-100 lines of code  
-**Priority**: P0 (Core event generation mechanism
+#### 🚧 Task 6: Event Generation - Protocol-Aware Packet Detection (NEXT)
+**Files**: 
+- `src/filter.c` (FilterReceiveNetBufferLists hook) - Task 6a
+- `src/avb_integration_fixed.c` (AvbPostTimestampEvent helper + TX polling) - Task 6b/6c
+**Estimated**: ~150-200 lines total (split across 3 sub-tasks)
+**Priority**: P0 (Unblocks 10 skipped tests)
+**Approach**: **Hybrid (Packet-driven RX + Polling TX)** due to filter driver constraints
+
+**⚠️ ARCHITECTURAL CONSTRAINT: Filter Driver Reality**
+
+**Original Plan (ADR-EVENT-002)**: Hardware interrupt-driven (ISR→DPC→ring buffer)
+- ❌ **Assumes**: NDIS Miniport Driver with MSI-X interrupt access
+- ❌ **Reality**: We are NDIS **Lightweight Filter Driver** (filter.c)
+- ❌ **Cannot**: Register hardware interrupts (only miniport drivers can)
+- ❌ **Cannot**: Access TSICR interrupt status in ISR (no interrupt handle)
+
+**Revised Approach**: Protocol-aware packet-driven events + lightweight polling
+- ✅ **RX Path**: Hook `FilterReceiveNetBufferLists()` to detect PTP messages
+- ✅ **TX Path**: Lightweight polling (1ms) for TX timestamp FIFO
+- ✅ **PTP-aware**: Filter Sync/Pdelay_Req/Pdelay_Resp/Follow_Up/Announce messages
+- ✅ **Realistic latency**: 3-5µs for RX events, ~1ms for TX events
+
+---
+
+#### Task 6a: RX Path - PTP Message Detection (P0)
+**File**: `src/filter.c` - FilterReceiveNetBufferLists()
+**Lines**: ~80-100 LOC
+**Priority**: P0 (High value, low latency, unblocks most tests)
+
+**Deliverables**:
+- [ ] Hook existing `FilterReceiveNetBufferLists()` function
+- [ ] Parse Ethernet header: Check EtherType == 0x88F7 (PTP over Ethernet)
+- [ ] Parse PTP header (first 34 bytes):
+  - Byte 0: messageType (low 4 bits) + transportSpecific (high 4 bits)
+  - Bytes 30-31: sequenceId (big-endian uint16)
+  - Bytes 20-29: sourcePortIdentity (clockIdentity + portNumber)
+- [ ] Filter PTP message types:
+  - **High Priority** (always): 0x0 (Sync), 0x2 (Pdelay_Req), 0x3 (Pdelay_Resp)
+  - **Medium Priority**: 0x8 (Follow_Up), 0xB (Announce)
+  - **Skip**: 0x1 (Delay_Req), 0x9 (Delay_Resp), 0xC (Signaling), 0xD (Management)
+- [ ] Extract VLAN tag (if present): VLAN ID, PCP
+- [ ] Read RX hardware timestamp:
+  - Access hardware context (AvbContext from global or filter context)
+  - Read RXSTMPL/H registers (64-bit nanosecond timestamp)
+- [ ] Call `AvbPostTimestampEvent()`:
+  - event_type = TS_EVENT_RX_TIMESTAMP
+  - timestamp_ns = HW timestamp
+  - ptp_message_type = messageType field
+  - sequence_num = PTP sequenceId
+  - vlan_id, pcp (from packet)
+- [ ] Forward packet normally (don't block NDIS datapath)
+
+**PTP Message Types** (IEEE 1588-2019 Table 19):
+```c
+#define PTP_MSGTYPE_SYNC           0x0  // ✅ Always emit
+#define PTP_MSGTYPE_DELAY_REQ      0x1  // Skip (not needed for gPTP)
+#define PTP_MSGTYPE_PDELAY_REQ     0x2  // ✅ Always emit
+#define PTP_MSGTYPE_PDELAY_RESP    0x3  // ✅ Always emit
+#define PTP_MSGTYPE_FOLLOW_UP      0x8  // ✅ Emit (contains t1)
+#define PTP_MSGTYPE_DELAY_RESP     0x9  // Skip (not needed for gPTP)
+#define PTP_MSGTYPE_PDELAY_RESP_FU 0xA  // ✅ Emit (contains t2)
+#define PTP_MSGTYPE_ANNOUNCE       0xB  // ✅ Emit (BMCA)
+#define PTP_MSGTYPE_SIGNALING      0xC  // Skip
+#define PTP_MSGTYPE_MANAGEMENT     0xD  // Skip
+```
+
+**Latency Budget** (RX Path):
+- Packet arrives → FilterReceiveNetBufferLists: **~2µs** (NDIS overhead)
+- Parse Ethernet header (14 bytes): **~100ns**
+- Parse PTP header (34 bytes): **~400ns**
+- Read RX timestamp (MMIO read): **~200ns**
+- Post to ring buffer (lock-free write): **~500ns**
+- **Total: ~3-5µs** ✅ (much better than ADR's <1µs via interrupt, but achievable!)
+
+**Expected Outcome**: RX timestamp events posted when Sync/Pdelay/Follow_Up/Announce packets received
+
+**Code Pattern**:
+```c
+VOID FilterReceiveNetBufferLists(
+    NDIS_HANDLE FilterModuleContext,
+    PNET_BUFFER_LIST NetBufferLists,
+    ...
+) {
+    PMS_FILTER filter = (PMS_FILTER)FilterModuleContext;
+    PNET_BUFFER_LIST currentNbl = NetBufferLists;
+    
+    while (currentNbl) {
+        // 1. Parse Ethernet header
+        PUCHAR ethHeader = NdisGetDataBuffer(currentNbl->FirstNetBuffer, 14, ...);
+        USHORT etherType = (ethHeader[12] << 8) | ethHeader[13];
+        
+        if (etherType == 0x88F7) {  // PTP over Ethernet
+            // 2. Parse PTP header
+            PUCHAR ptpHeader = NdisGetDataBuffer(..., 34, ...);
+            UCHAR messageType = ptpHeader[0] & 0x0F;
+            
+            // 3. Filter: Is it Sync/Pdelay/Follow_Up/Announce?
+            if (messageType == 0x0 || messageType == 0x2 || messageType == 0x3 ||
+                messageType == 0x8 || messageType == 0xA || messageType == 0xB) {
+                
+                // 4. Read RX timestamp from hardware
+                ULONG64 timestamp_ns = AvbReadRxTimestamp(filter->AvbContext);
+                
+                // 5. Extract PTP fields
+                USHORT sequenceId = (ptpHeader[30] << 8) | ptpHeader[31];
+                
+                // 6. Post event to ring buffer
+                AvbPostTimestampEvent(
+                    filter->AvbContext,
+                    TS_EVENT_RX_TIMESTAMP,
+                    timestamp_ns,
+                    messageType,
+                    sequenceId,
+                    vlan_id,
+                    pcp
+                );
+            }
+        }
+        
+        currentNbl = currentNbl->Next;
+    }
+    
+    // 7. Forward packets normally (don't block datapath!)
+    NdisFSendNetBufferLists(filter->FilterHandle, NetBufferLists, ...);
+}
+```
+
+---
+
+#### Task 6b: TX Path - Polling for TX Timestamps (P1)
+**File**: `src/avb_integration_fixed.c` (new timer + DPC)
+**Lines**: ~40-50 LOC
+**Priority**: P1 (Lower priority than RX, acceptable latency via polling)
+
+**Deliverables**:
+- [ ] Add TX timestamp polling timer to AVB_DEVICE_CONTEXT:
+  - `NDIS_TIMER tx_poll_timer`
+  - `NDIS_HANDLE tx_poll_timer_handle`
+- [ ] Initialize timer in `AvbCreateMinimalContext()`:
+  - `NdisInitializeTimer(&ctx->tx_poll_timer, AvbTxTimestampPollDpc, ctx)`
+  - `NdisSetPeriodicTimer(&ctx->tx_poll_timer_handle, 1000)` (1ms period)
+- [ ] Implement `AvbTxTimestampPollDpc()`:
+  - Read TX timestamp FIFO: `TXSTMPL/H` registers
+  - Check valid bit (bit 31 of TXSTMPH)
+  - Extract queue number, timestamp
+  - Call `AvbPostTimestampEvent()`:
+    - event_type = TS_EVENT_TX_TIMESTAMP
+    - timestamp_ns = HW timestamp
+- [ ] Cancel timer in `AvbCleanupDevice()`
+
+**Latency Budget** (TX Path):
+- Packet sent → TX timestamp ready: **~10µs** (hardware FIFO delay)
+- Poll detects timestamp: **~0-1ms** (polling period jitter)
+- **Total: ~10µs - 1ms** (acceptable for TX completions)
+
+**Polling Frequency Rationale**:
+- Typical PTP rate: 1-128 packets/sec (gPTP: 8 Sync/sec, 1 Pdelay/sec)
+- 1ms polling = 1000 Hz >> 128 Hz traffic rate
+- Minimal CPU overhead: ~0.1% at 1ms polling
+
+**Expected Outcome**: TX timestamp events posted when Pdelay_Req/Sync transmitted
+
+**Code Pattern**:
+```c
+VOID AvbTxTimestampPollDpc(
+    PVOID SystemSpecific1,
+    PVOID FunctionContext,
+    PVOID SystemSpecific2,
+    PVOID SystemSpecific3
+) {
+    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)FunctionContext;
+    
+    // Read TX timestamp FIFO
+    ULONG txstmpl = intel_read32(ctx, I210_TXSTMPL);
+    ULONG txstmph = intel_read32(ctx, I210_TXSTMPH);
+    
+    if (txstmph & 0x80000000) {  // Valid bit set
+        ULONG64 timestamp_ns = ((ULONG64)(txstmph & 0x7FFFFFFF) << 32) | txstmpl;
+        
+        // Post TX timestamp event
+        AvbPostTimestampEvent(
+            ctx,
+            TS_EVENT_TX_TIMESTAMP,
+            timestamp_ns,
+            0,  // messageType unknown (not in HW FIFO)
+            0,  // sequenceId unknown
+            0,  // vlan_id unknown
+            0   // pcp unknown
+        );
+    }
+}
+```
+
+---
+
+#### Task 6c: Event Posting Helper (P0 - Required by 6a and 6b)
+**File**: `src/avb_integration_fixed.c` (new function)
+**Lines**: ~60-80 LOC
+**Priority**: P0 (Core lock-free ring buffer write logic)
+
+**Deliverables**:
+- [ ] Implement `AvbPostTimestampEvent()`:
+  - Acquire `subscription_lock` (spin lock)
+  - Loop through subscriptions (MAX_TS_SUBSCRIPTIONS = 8):
+    - Check `active == 1`
+    - Check `event_mask & event_type` (filter by event type)
+    - Check `vlan_filter` (0xFFFF = no filter, else match vlan_id)
+    - Check `pcp_filter` (0xFF = no filter, else match pcp)
+  - For each matching subscription:
+    - Get ring_buffer pointer
+    - Read current `producer_index` (atomic)
+    - Calculate next index: `(producer_index + 1) & mask`
+    - Check for overflow: `next == consumer_index`?
+      - If YES: Increment `overflow_count`, drop event
+      - If NO: Write event to `ring_buffer[producer_index]`
+    - Increment `sequence_num` (InterlockedIncrement)
+    - Update `producer_index` (atomic write with memory barrier)
+  - Release `subscription_lock`
+
+**Lock-Free Protocol** (Producer-only perspective):
+```c
+// Read current indices
+ULONG producer = header->producer_index;
+ULONG consumer = header->consumer_index;
+
+// Calculate next producer position
+ULONG next_producer = (producer + 1) & header->mask;
+
+// Check for overflow (ring full)
+if (next_producer == consumer) {
+    InterlockedIncrement(&header->overflow_count);
+    return;  // Drop event
+}
+
+// Write event to ring
+AVB_TIMESTAMP_EVENT *event_slot = &events_array[producer];
+event_slot->timestamp_ns = timestamp_ns;
+event_slot->event_type = event_type;
+event_slot->sequence_num = InterlockedIncrement(&subscription->sequence_num);
+event_slot->vlan_id = vlan_id;
+event_slot->pcp = pcp;
+// ... fill other fields
+
+// Memory barrier (ensure event written before index update)
+MemoryBarrier();
+
+// Advance producer index (consumer reads this atomically)
+header->producer_index = next_producer;
+```
+
+**Expected Outcome**: Events posted to all matching subscriptions, overflow handled gracefully
+
+---
+
+### Task 6 Summary
+
+**Sub-tasks**:
+1. **Task 6a** (RX Path - PTP message detection): ~100 LOC, P0, 3-5µs latency
+2. **Task 6b** (TX Path - Polling TX timestamps): ~50 LOC, P1, ~1ms latency
+3. **Task 6c** (Event posting helper): ~70 LOC, P0, <500ns posting time
+
+**Total Effort**: ~220 LOC, 2-3 days implementation + testing
+
+**Tests Unblocked**:
+- ✅ UT-TS-EVENT-001: RX Timestamp Event Delivery
+- ✅ UT-TS-EVENT-002: TX Timestamp Event Delivery (via polling)
+- ✅ UT-TS-EVENT-006: Event Filtering by Criteria
+- ✅ UT-TS-RING-003: Ring Buffer Wraparound (with generated events)
+- ✅ UT-TS-RING-004: Ring Buffer Read Synchronization
+
+**Blocked Tests** (still need Tasks 7-12):
+- UT-TS-EVENT-003: Target Time Reached Event (requires Task 11)
+- UT-TS-EVENT-004: Aux Timestamp Event (requires Task 12)
+- UT-TS-EVENT-005: Event Sequence Numbering (requires sustained event generation)
+- UT-TS-PERF-001: High Event Rate Performance (requires all event types)
+- UT-TS-ERROR-003: Event Overflow Notification (Task 6c implements overflow_count)
+
+**ADR Conflict Resolution**:
+- **Action Required**: Update ADR-EVENT-002 (Issue #166) to document filter driver constraints
+- **Revised Latency**: Accept 3-5µs for RX events (vs. <1µs interrupt-driven goal)
+- **Trade-off**: Protocol-aware filtering provides better signal-to-noise vs. raw interrupt rate
+
+---
+
+#### ⏳ Task 7: DPC for Batched Event Processing (PENDING)
 #### ✅ Task 3: Implement Ring Buffer Allocation (COMPLETED)
 **File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_SUBSCRIBE handler)  
 **Lines**: ~60 LOC  
