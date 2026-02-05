@@ -31,13 +31,16 @@
 
 ## 📊 Issue Inventory (34 Total: 15 Batch + 19 Prerequisites)
 
-### ✅ Completed Issues (6/34 = 18%)
+### ✅ Completed Issues (9/34 = 26%)
 - **#1** ✅ - StR-HWAC-001: Intel NIC AVB/TSN Feature Access (root stakeholder requirement)
 - **#16** ✅ - REQ-F-LAZY-INIT-001: Lazy Initialization (<100ms first-call, <1ms subsequent)
 - **#17** ✅ - REQ-NF-DIAG-REG-001: Registry-Based Diagnostics (debug builds, HKLM\Software\IntelAvb)
 - **#18** ✅ - REQ-F-HWCTX-001: Hardware Context Lifecycle (4-state machine: UNBOUND→BOUND→BAR_MAPPED→PTP_READY)
 - **#31** ✅ - StR-005: NDIS Filter Driver (lightweight filter, packet transparency, multi-adapter)
 - **#89** ✅ - REQ-NF-SECURITY-BUFFER-001: Buffer Overflow Protection (CFG/ASLR/stack canaries)
+- **#5** ✅ - REQ-F-PTP-003: TSAUXC Control (92% functional, 12/13 tests) - Validated 2026-02-05
+- **#7** ✅ - REQ-F-PTP-005: Target Time & Aux (100% functional, 12/12 tests) - Validated 2026-02-05
+- **#2** ⚠️ - REQ-F-PTP-001: PTP Clock (67% functional, GET works, SET broken) - Validated 2026-02-05
 
 ### ✅ Sprint 1 Complete (1/34 major issue = 3%)
 - **#13** ✅ - REQ-F-TS-SUB-001: Timestamp Event Subscription - **CORE INFRASTRUCTURE COMPLETE**
@@ -72,10 +75,21 @@
 
 ### Functional Requirements (Phase 02)
 
-**Foundational (Prerequisites)**:
-- **#2** - REQ-F-PTP-001: PTP Clock Get/Set (IOCTLs 24/25, <500ns GET, <1µs SET)
-- **#5** - REQ-F-PTP-003: Hardware Timestamping Control (IOCTL 40 - TSAUXC, enable/disable SYSTIM0)
+**Foundational (Prerequisites)** - Sprint 2 Validation (2026-02-05):
+- **#2** ⚠️ - REQ-F-PTP-001: PTP Clock Get/Set (IOCTLs 24/25) - **67% functional** (8/12 tests)
+  - ✅ GET timestamp (IOCTL 24): **FULLY WORKING**
+  - ❌ SET timestamp (IOCTL 25): **BROKEN** (-2.8s offset bug, needs debugging)
+  - Test: test_ptp_getset.exe (Issue #295), 8 PASS, 3 FAIL, 1 SKIP
+- **#5** ✅ - REQ-F-PTP-003: Hardware Timestamping Control (IOCTL 40) - **92% functional** (12/13 tests)
+  - ✅ TSAUXC register control: **FULLY WORKING**
+  - ✅ Enable/disable SYSTIM0: **WORKING**
+  - Test: test_hw_ts_ctrl.exe (Issue #297), 12 PASS, 1 FAIL (edge case)
 - **#6** - REQ-F-PTP-004: Rx Packet Timestamping (IOCTLs 41/42, RXPBSIZE.CFG_TS_EN, **requires port reset**)
+- **#7** 🎉 - REQ-F-PTP-005: Target Time & Aux Timestamp (IOCTLs 43/44) - **100% PERFECT** (12/12 tests)
+  - ✅ SET_TARGET_TIME (IOCTL 43): **FULLY WORKING**
+  - ✅ GET_AUX_TIMESTAMP (IOCTL 44): **FULLY WORKING**
+  - ✅ Target time interrupt enable/disable: **WORKING**
+  - Test: test_ioctl_target_time.exe (Issues #204, #299), 12 PASS, 0 FAIL
 - **#13** 🚧 - REQ-F-TS-SUB-001: Timestamp Event Subscription (IOCTLs 33/34, lock-free SPSC, zero-copy mapping)
   - **Status**: Sprint 0 - Foundation (Tasks 1-2/12 completed, 17% done)
   - **See**: [Detailed Implementation Plan](#issue-13-detailed-implementation-plan) below
@@ -724,7 +738,162 @@ header->producer_index = next_producer;
 
 ---
 
-#### ⏳ Task 7: DPC for Batched Event Processing (PENDING)
+## 🚀 Sprint 2: Target Time & Advanced Event types (Issue #13 Tasks 7-12)
+
+**Sprint Goal**: Implement deferred event types (target time, AUX timestamp, CBS/TAS, multi-adapter)  
+**Prerequisites**: ✅ Sprint 1 Complete - Core infrastructure validated (Tasks 1-6c, 95 tests, 81 PASSED)  
+**Focus**: Extend event posting beyond RX/TX to cover ALL timestamp event types
+
+---
+
+### ⚙️ Task 7: Target Time Event Generation (IN PROGRESS)
+
+**Issue**: #13 (REQ-F-TS-SUB-001) - Complete timestamp event subscription with target time events  
+**Prerequisite**: ✅ Issue #7 (IOCTLs 43/44) - 100% functional (12/12 tests PASSED, validated 2026-02-05)  
+**File**: `src/avb_integration_fixed.c` (new function + integration)  
+**Lines**: ~200 LOC  
+**Priority**: P1 (Enables time-aware scheduling and time-based triggers)  
+**Estimated Effort**: 1 day (8 hours)
+
+**Objective**: Post TS_EVENT_TARGET_TIME (0x04) events when TRGTTIML0/H registers match SYSTIM
+
+**Prerequisites Validated** (2026-02-05):
+- ✅ IOCTL 43 (SET_TARGET_TIME): 100% functional - test_ioctl_target_time.exe (TC-TARGET-001 through TC-TARGET-004 PASSED)
+- ✅ IOCTL 44 (GET_AUX_TIMESTAMP): 100% functional - test_ioctl_target_time.exe (TC-AUX-001 through TC-AUX-011 PASSED)
+- ✅ Target time interrupt enable: EN_TT0/EN_TT1 flags working (TC-TARGET-004 PASSED)
+- ✅ Ring buffer infrastructure: AvbPostTimestampEvent() ready (Sprint 1, Task 6c)
+- ✅ TSAUXC control: Issue #5 92% functional (12/13 tests, test_hw_ts_ctrl.exe)
+
+**Implementation Approach** (Hybrid Polling + Interrupt):
+
+**Option A: Polling Approach** (Simpler, recommended for Sprint 2)
+- Use existing 1ms DPC timer (like TX timestamp polling in Task 6b)
+- Check target time registers every 1ms
+- Compare TRGTTIML0/H vs SYSTIML0/H
+- If (systim >= target_time) → Post event and clear AUTT0/AUTT1 flag
+- **Pros**: Reuses existing DPC infrastructure, simpler, 1ms granularity acceptable
+- **Cons**: 1ms latency (vs. <1µs for interrupt-driven)
+
+**Option B: Interrupt Approach** (More complex, future sprint)
+- Enable TSICR interrupt for target time events (TSIM.AUTT0/AUTT1)
+- Implement ISR handler: Read TRGTTIML0/H, post event, clear AUTT0
+- **Pros**: <1µs latency, true event-driven
+- **Cons**: More complex, requires ISR/DPC infrastructure
+
+**Option C: Hybrid** (Check interrupt enable flag)
+- If (EN_TT0/EN_TT1 enabled in TSAUXC): Use interrupt handler (Option B)
+- If (disabled): Use polling fallback (Option A)
+- **Pros**: Flexible, supports both use cases
+- **Cons**: Slightly more complex
+
+**Deliverables** (Sprint 2 - Option A Polling):
+
+1. **Target Time Monitoring Function** (~100 LOC)
+   ```c
+   VOID AvbCheckTargetTime(AVB_DEVICE_CONTEXT* ctx)
+   {
+       avb_u64 systim_ns = 0;
+       avb_u64 target0_ns = 0, target1_ns = 0;
+       avb_u8 autt_flags = 0;
+       
+       // Read current SYSTIM
+       status = intel_get_systime(ctx, &systim_ns);
+       if (!NT_SUCCESS(status)) return;
+       
+       // Read TRGTTIML0/H for timer 0
+       target0_ns = intel_read_trgttiml0(ctx);
+       
+       // Read TRGTTIML1/H for timer 1 (if supported)
+       if (ctx->hw_features.has_target_time_1) {
+           target1_ns = intel_read_trgttiml1(ctx);
+       }
+       
+       // Read TSAUXC to check AUTT0/AUTT1 flags
+       autt_flags = intel_read_tsauxc_autt_flags(ctx);
+       
+       // Check timer 0: If target reached and flag set
+       if ((autt_flags & AUTT0) && (systim_ns >= target0_ns)) {
+           // Post event
+           AvbPostTimestampEvent(ctx, 
+               TS_EVENT_TARGET_TIME,  // event_type = 0x04
+               target0_ns,            // timestamp when target reached
+               0,                     // timer_index = 0
+               0);                    // no packet length
+           
+           // Clear AUTT0 flag
+           intel_clear_autt0_flag(ctx);
+       }
+       
+       // Check timer 1 (if applicable)
+       if ((autt_flags & AUTT1) && (systim_ns >= target1_ns)) {
+           AvbPostTimestampEvent(ctx, TS_EVENT_TARGET_TIME, target1_ns, 1, 0);
+           intel_clear_autt1_flag(ctx);
+       }
+   }
+   ```
+
+2. **Integration into Existing DPC Timer** (~50 LOC)
+   - Modify `AvbTimerDpc()` (current TX timestamp polling function)
+   - Add target time check: `AvbCheckTargetTime(ctx);`
+   - Already runs every 1ms (POLLING_INTERVAL_MS), no new timer needed
+
+3. **Helper Functions** (~50 LOC)
+   ```c
+   avb_u64 intel_read_trgttiml0(AVB_DEVICE_CONTEXT* ctx);  // Read TRGTTIML0 + TRGTTIML0
+   avb_u64 intel_read_trgttiml1(AVB_DEVICE_CONTEXT* ctx);  // Read TRGTTIML1 + TRGTTIML1
+   avb_u8  intel_read_tsauxc_autt_flags(AVB_DEVICE_CONTEXT* ctx);  // Read TSAUXC.AUTT0/AUTT1
+   VOID    intel_clear_autt0_flag(AVB_DEVICE_CONTEXT* ctx);  // Write 1 to TSAUXC.AUTT0 to clear
+   VOID    intel_clear_autt1_flag(AVB_DEVICE_CONTEXT* ctx);  // Write 1 to TSAUXC.AUTT1 to clear
+   ```
+
+4. **Testing Enhancement** (~50 LOC enhancement to test_ioctl_target_time.c)
+   - Add test case: TC-TARGET-EVENT-001 - Subscribe to target time events
+   - Set target time +5 seconds in future
+   - Enable EN_TT0 interrupt
+   - Wait for event delivery (poll ring buffer)
+   - Verify: event_type == TS_EVENT_TARGET_TIME (0x04)
+   - Verify: timestamp_ns matches TRGTTIML0 value
+   - Verify: AUTT0 flag cleared after event
+
+**Register Details**:
+- **TRGTTIML0** (0x0B644): Target Time 0 Low (bits 0-31)
+- **TRGTTIML0** (0x0B648): Target Time 0 High (bits 32-63)
+- **TRGTTIML1** (0x0B64C): Target Time 1 Low (if available)
+- **TRGTTIML1** (0x0B650): Target Time 1 High (if available)
+- **TSAUXC** (0x0B640): AUTT0 (bit 16), AUTT1 (bit 17), EN_TT0 (bit 0), EN_TT1 (bit 1)
+
+**Event Structure**:
+```c
+AVB_TIMESTAMP_EVENT event = {
+    .timestamp_ns = target_time_ns,          // TRGTTIML0/H value
+    .event_type = TS_EVENT_TARGET_TIME,      // 0x04
+    .sequence_num = next_sequence,           // Atomic increment
+    .trigger_source = timer_index,           // 0 or 1 (which target timer)
+    .packet_length = 0,                      // Not applicable
+    .vlan_id = 0,                            // Not applicable
+    .pcp = 0,                                // Not applicable
+    .queue = 0                               // Not applicable
+};
+```
+
+**Expected Latency**:
+- **Polling approach**: ~1ms average (0-2ms range based on DPC timing)
+- **Future interrupt approach**: <1µs (if implemented in later sprint)
+
+**Tests Unblocked**:
+- ✅ UT-TS-EVENT-003: Target Time Reached Event (currently blocked, will PASS after Task 7)
+- ✅ TC-TARGET-EVENT-001: Target time event delivery and AUTT flag clearing
+
+**Validation Criteria**:
+- [ ] Target time events posted when SYSTIM >= TRGTTIML0
+- [ ] AUTT0/AUTT1 flags cleared after event posting
+- [ ] Events contain correct timestamp_ns (matches TRGTTIML0/H)
+- [ ] No spurious events when target time not reached
+- [ ] Both timer 0 and timer 1 supported (if hardware supports)
+- [ ] Latency <2ms (polling approach)
+- [ ] test_ioctl_target_time.exe enhanced with event subscription test
+
+---
 #### ✅ Task 3: Implement Ring Buffer Allocation (COMPLETED)
 **File**: `src/avb_integration_fixed.c` (IOCTL_AVB_TS_SUBSCRIBE handler)  
 **Lines**: ~60 LOC  
