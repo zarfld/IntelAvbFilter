@@ -123,6 +123,13 @@ IntelAvbFilterDispatch(
         case IRP_MJ_CLEANUP:
             DEBUGP(DL_ERROR, "!!! IRP_MJ_CLEANUP - Handle being closed, cleaning up subscriptions for FileObject=%p\n", IrpStack->FileObject);
             AvbCleanupFileSubscriptions(IrpStack->FileObject);
+            
+            // MULTI-ADAPTER FIX: Clear the per-handle adapter context to prevent use-after-close
+            if (IrpStack->FileObject->FsContext != NULL) {
+                DEBUGP(DL_INFO, "!!! IRP_MJ_CLEANUP: Clearing FsContext %p from FileObject %p\n",
+                       IrpStack->FileObject->FsContext, IrpStack->FileObject);
+                IrpStack->FileObject->FsContext = NULL;
+            }
             break;
 
         case IRP_MJ_CLOSE:
@@ -300,24 +307,28 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_GET_AUX_TIMESTAMP:
         case IOCTL_AVB_TS_SUBSCRIBE:      // Implements #13 (REQ-F-TS-SUB-001)
         case IOCTL_AVB_TS_RING_MAP:       // Implements #13 (REQ-F-TS-SUB-001)
+        case IOCTL_AVB_TS_UNSUBSCRIBE:    // Implements #13 (REQ-F-TS-SUB-001) - Cleanup
         {
             DEBUGP(DL_ERROR, "!!! DEVICE.C: AVB IOCTL CASE HIT: IOCTL=0x%08X\n", 
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
             
-            // CRITICAL FIX: If g_AvbContext is set (from OPEN_ADAPTER), use it directly
-            // This ensures multi-adapter scenarios work correctly
-            PAVB_DEVICE_CONTEXT targetContext = g_AvbContext;
+            // MULTI-ADAPTER FIX: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
+            // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
+            DEBUGP(DL_ERROR, "!!! DEVICE.C: FileObject=%p, FileObject->FsContext=%p\n",
+                   IrpSp->FileObject, IrpSp->FileObject ? IrpSp->FileObject->FsContext : NULL);
+            
+            PAVB_DEVICE_CONTEXT targetContext = (PAVB_DEVICE_CONTEXT)IrpSp->FileObject->FsContext;
             
             if (targetContext != NULL) {
-                DEBUGP(DL_ERROR, "!!! DEVICE.C: Using global context VID=0x%04X DID=0x%04X state=%s\n",
-                       targetContext->intel_device.pci_vendor_id, targetContext->intel_device.pci_device_id,
+                DEBUGP(DL_ERROR, "!!! DEVICE.C: Using per-handle context %p VID=0x%04X DID=0x%04X state=%s\n",
+                       targetContext, targetContext->intel_device.pci_vendor_id, targetContext->intel_device.pci_device_id,
                        AvbHwStateName(targetContext->hw_state));
                 pFilter = targetContext->filter_instance;
             } else {
                 // Fall back to searching for any Intel filter (single-adapter mode)
-                DEBUGP(DL_INFO, "!!! DEVICE.C: No global context, searching for Intel filter\n");
+                DEBUGP(DL_WARN, "!!! DEVICE.C: FileObject->FsContext is NULL! Falling back to AvbFindIntelFilterModule()\n");
                 pFilter = AvbFindIntelFilterModule();
-                DEBUGP(DL_ERROR, "!!! DEVICE.C: Found filter=%p\n", pFilter);
+                DEBUGP(DL_ERROR, "!!! DEVICE.C: Fallback found filter=%p\n", pFilter);
                 
                 if (pFilter) {
                     DEBUGP(DL_ERROR, "!!! DEVICE.C: Filter Name: %wZ\n", &pFilter->MiniportFriendlyName);
@@ -641,6 +652,10 @@ IntelAvbFilterDeviceIoControl(
             
             PAVB_OPEN_REQUEST req = (PAVB_OPEN_REQUEST)OutputBuffer;
             PMS_FILTER targetFilter = NULL;
+            UINT32 currentIndex = 0;  /* Track adapter instance index */
+            
+            DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X Index=%u\n",
+                   req->vendor_id, req->device_id, req->index);
             
             FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
             Link = FilterModuleList.Flink;
@@ -656,14 +671,27 @@ IntelAvbFilterDeviceIoControl(
                 if (AvbIsSupportedIntelController(cand, &ven, &dev) && 
                     ven == req->vendor_id && dev == req->device_id)
                 {
-                    targetFilter = cand;
-                    break;
+                    /* Multi-adapter fix: Check if this is the requested instance */
+                    DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Found matching adapter currentIndex=%u (want %u) Name=%wZ\n",
+                           currentIndex, req->index, &cand->MiniportFriendlyName);
+                    
+                    if (currentIndex == req->index) {
+                        targetFilter = cand;
+                        DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: MATCH! Using adapter at index %u\n", currentIndex);
+                        break;
+                    }
+                    currentIndex++;  /* This VID/DID matches, increment instance counter */
                 }
                 
                 FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
             }
             
             FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+            
+            if (targetFilter == NULL) {
+                DEBUGP(DL_WARN, "!!! OPEN_ADAPTER: No adapter found for Index=%u (found %u matching adapters)\n",
+                       req->index, currentIndex);
+            }
             
             if (targetFilter == NULL) {
                 req->status = (avb_u32)NDIS_STATUS_FAILURE;
@@ -674,6 +702,13 @@ IntelAvbFilterDeviceIoControl(
                 }
                 
                 if (targetFilter->AvbContext != NULL) {
+                    // MULTI-ADAPTER FIX: Store the opened adapter context in the file object
+                    // This allows subsequent IOCTLs on this handle to be routed to the correct adapter
+                    IrpSp->FileObject->FsContext = targetFilter->AvbContext;
+                    
+                    DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Storing context %p in FileObject %p for VID=0x%04X DID=0x%04X Index=%u\n",
+                           targetFilter->AvbContext, IrpSp->FileObject, req->vendor_id, req->device_id, req->index);
+                    
                     Status = AvbHandleDeviceIoControl((PAVB_DEVICE_CONTEXT)targetFilter->AvbContext, Irp);
                     InfoLength = (ULONG)Irp->IoStatus.Information;
                 } else {

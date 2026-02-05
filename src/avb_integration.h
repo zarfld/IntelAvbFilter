@@ -53,9 +53,11 @@ __forceinline const char* AvbHwStateName(AVB_HW_STATE s) {
 typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
 
 /* Timestamp Event Subscription Management (Issue #13)
- * Supports up to 8 concurrent subscriptions per adapter
+ * Supports up to 32 concurrent subscriptions per adapter
+ * NOTE: Increased from 8 to support full test suite execution
+ *       (19 tests × 5 adapters with no implicit cleanup until handle close)
  */
-#define MAX_TS_SUBSCRIPTIONS 8
+#define MAX_TS_SUBSCRIPTIONS 32
 
 typedef struct _TS_SUBSCRIPTION {
     avb_u32 ring_id;                      // Subscription ID (1-based, 0=unused)
@@ -91,6 +93,10 @@ typedef struct _AVB_DEVICE_CONTEXT {
     TS_SUBSCRIPTION subscriptions[MAX_TS_SUBSCRIPTIONS];  // Subscription table
     NDIS_SPIN_LOCK subscription_lock;                     // Protects subscription table
     volatile LONG next_ring_id;                           // Monotonic ring_id allocator (1, 2, 3, ...)
+
+    // TX Timestamp Polling (Task 6c)
+    NDIS_TIMER tx_poll_timer;                             // Periodic timer for TX timestamp FIFO polling
+    BOOLEAN tx_poll_active;                               // Timer running flag
 
     // Legacy ring (deprecated - kept for compatibility)
     // Timestamp event ring (section-based mapping)
@@ -144,6 +150,26 @@ VOID AvbCleanupDevice(
  */
 VOID AvbCleanupFileSubscriptions(
     _In_ PFILE_OBJECT FileObject
+);
+
+/**
+ * @brief Post timestamp event to all matching subscriptions (Task 6c).
+ * @param event_type One of TS_EVENT_* constants (RX_TIMESTAMP, TX_TIMESTAMP, etc.)
+ * @param timestamp_ns Hardware timestamp in nanoseconds
+ * @param vlan_id VLAN ID (0xFFFF if no VLAN tag)
+ * @param pcp Priority Code Point (0xFF if not applicable)
+ * @param queue RX/TX queue number
+ * @param packet_length Packet length in bytes
+ * @param trigger_source Timer index or GPIO pin (for target time/aux events)
+ * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 6c - Event posting helper
+ */
+VOID AvbPostTimestampEvent(    _In_ PVOID AvbContextParam,    _In_ avb_u32 event_type,
+    _In_ avb_u64 timestamp_ns,
+    _In_ avb_u16 vlan_id,
+    _In_ avb_u8 pcp,
+    _In_ avb_u8 queue,
+    _In_ avb_u16 packet_length,
+    _In_ avb_u8 trigger_source
 );
 
 /** * @brief Handle an incoming DeviceIoControl IRP targeting the AVB filter device.

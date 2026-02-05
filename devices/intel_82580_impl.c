@@ -402,6 +402,63 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
 }
 
 /**
+ * @brief Enable/disable packet timestamping (82580-specific)
+ * @param dev Device handle
+ * @param enable 1 = enable, 0 = disable
+ * @return 0 on success, <0 on error
+ * 
+ * Configures TSYNCRXCTL and TSYNCTXCTL registers for 82580 (IGB family).
+ */
+static int enable_packet_timestamping(device_t *dev, int enable)
+{
+    // 82580 PTP registers (IGB family)
+    const uint32_t TSYNCRXCTL = 0x0B344;
+    const uint32_t TSYNCTXCTL = 0x0B348;
+    const uint32_t RXTT_ENABLE = 0x80000000;  // Bit 31
+    const uint32_t TXTT_ENABLE = 0x80000000;  // Bit 31
+    const uint32_t TYPE_ALL = 0x0E000000;     // Bits 27-25
+    
+    if (!dev || !ndis_platform_ops.mmio_write || !ndis_platform_ops.mmio_read) {
+        return -1;
+    }
+    
+    if (enable) {
+        // Enable RX packet timestamping
+        uint32_t rx_ctl = RXTT_ENABLE | TYPE_ALL;
+        if (ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, rx_ctl) != 0) {
+            DEBUGP(DL_ERROR, "82580: Failed to write TSYNCRXCTL\n");
+            return -1;
+        }
+        DEBUGP(DL_INFO, "82580: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
+        
+        // Enable TX packet timestamping
+        uint32_t tx_ctl = TXTT_ENABLE;
+        if (ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, tx_ctl) != 0) {
+            DEBUGP(DL_ERROR, "82580: Failed to write TSYNCTXCTL\n");
+            return -1;
+        }
+        DEBUGP(DL_INFO, "82580: Enabled TX packet timestamping (TSYNCTXCTL=0x%08X)\n", tx_ctl);
+    } else {
+        // Disable packet timestamping
+        uint32_t regval = 0;
+        const uint32_t TYPE_MASK = 0x0E000000;
+        
+        if (ndis_platform_ops.mmio_read(dev, TSYNCRXCTL, &regval) == 0) {
+            regval &= ~(RXTT_ENABLE | TYPE_MASK);
+            ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, regval);
+        }
+        
+        if (ndis_platform_ops.mmio_read(dev, TSYNCTXCTL, &regval) == 0) {
+            regval &= ~TXTT_ENABLE;
+            ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, regval);
+        }
+        DEBUGP(DL_INFO, "82580: Disabled packet timestamping\n");
+    }
+    
+    return 0;
+}
+
+/**
  * @brief 82580 device operations structure using clean generic function names
  */
 const intel_device_ops_t e82580_ops = {
@@ -417,6 +474,7 @@ const intel_device_ops_t e82580_ops = {
     .set_systime = set_systime,
     .get_systime = get_systime,
     .init_ptp = init_ptp,
+    .enable_packet_timestamping = enable_packet_timestamping,
     
     // TSN operations - 82580 doesn't support advanced TSN
     .setup_tas = NULL,

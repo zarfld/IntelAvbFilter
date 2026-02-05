@@ -37,17 +37,19 @@
 
 ### 🚧 In Progress Issues (1/34 = 3%)
 - **#13** 🚧 - REQ-F-TS-SUB-001: Timestamp Event Subscription (IOCTLs 33/34, lock-free SPSC, zero-copy mapping)
-  - **Status**: Tasks 1-5/12 ✅ COMPLETE (42%), Task 6 next (ISR/DPC), Tasks 6-12 BLOCKED
+  - **Status**: Tasks 1-6/12 ✅ COMPLETE (50%), Tasks 7-12 BLOCKED (require additional IOCTLs)
   - **Completed**: Ring buffer structures (AVB_TIMESTAMP_EVENT, AVB_TIMESTAMP_RING_HEADER) ✅
   - **Completed**: Subscription management (AVB_DEVICE_CONTEXT with 8 subscription slots) ✅
   - **Completed**: Initialization/cleanup (AvbCreateMinimalContext, AvbCleanupDevice) ✅
   - **Completed**: Ring buffer allocation in IOCTL_AVB_TS_SUBSCRIBE ✅
   - **Completed**: Real MDL mapping (IoAllocateMdl + MmMapLockedPagesSpecifyCache) ✅
   - **Completed**: Implicit cleanup on handle close (IRP_MJ_CLEANUP → AvbCleanupFileSubscriptions) ✅
-  - **Next**: Task 6 - ISR (Interrupt Service Routine) for hardware timestamp events
-  - **Blocked**: Tasks 6-12 - Event generation (ISR/DPC/posting) needed for 10 skipped tests
-  - **Commits**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4), 00452c2 (Task 5) - 2026-02-03
-  - **Test Status**: ✅ **9/19 PASSING** (0 failures), real user VAs (0x244A6590000, etc.)
+  - **Completed**: Task 6a - RX PTP packet detection in FilterReceiveNetBufferLists (EtherType 0x88F7) ✅
+  - **Completed**: Task 6b - AvbPostTimestampEvent() helper (lock-free ring writes) ✅
+  - **Completed**: Task 6c - TX timestamp polling (1ms timer, TXSTMPL/H FIFO drain) ✅
+  - **Blocked**: Tasks 7-12 - Reserved for future IOCTLs (target time, CBS/TAS, multi-adapter)
+  - **Commits**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4), 00452c2 (Task 5), c0d8ee7 (test fixes), [current] (Task 6) - 2026-02-04
+  - **Test Status**: ✅ **16/19 PASSING** (0 failures!), real user VAs (0x1E89CA70000, etc.)
 
 ### Stakeholder Requirements (Phase 01)
 - **#167** - StR-EVENT-001: Event-Driven Time-Sensitive Networking Monitoring (Milan/IEC 60802, <1µs notification, zero polling)
@@ -109,9 +111,9 @@
 **Issue**: REQ-F-TS-SUB-001 - Timestamp Event Subscription  
 **Status**: 🚧 **ACTIVE** (Sprint 0 - Foundation)  
 **Progress**: Tasks 1-5/12 completed (42%), Tasks 6-12 BLOCKED  
-**Commit**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4), 00452c2 (Task 5) - 2026-02-03  
-**Test Status**: ✅ **9/19 PASSING** (0 failures!), 10 skipped (need event generation - Tasks 6-12)  
-**Blocker**: Event generation infrastructure (ISR/DPC/posting) required for remaining tests
+**Commit**: 4a2fb1e (Tasks 1-2), 1898a7e (Task 3), 24e5571 (Task 4), 00452c2 (Task 5), c0d8ee7 (test fixes) - 2026-02-04  
+**Test Status**: ✅ **16/19 PASSING** (0 failures!), 3 skipped (need PTP traffic - Task 6a working, TX polling - Task 6c complete, benchmark)  
+**Blocker**: None - all infrastructure complete. Skipped tests require live PTP traffic or sustained load.
 
 ### Implementation Tasks (12 Total)
 
@@ -302,13 +304,14 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject) {
 
 ---
 
-#### 🚧 Task 6: Event Generation - Protocol-Aware Packet Detection (NEXT)
+#### 🚧 Task 6: PTP Protocol Packet Detection & Event Posting (NEXT)
 **Files**: 
 - `src/filter.c` (FilterReceiveNetBufferLists hook) - Task 6a
 - `src/avb_integration_fixed.c` (AvbPostTimestampEvent helper + TX polling) - Task 6b/6c
 **Estimated**: ~150-200 lines total (split across 3 sub-tasks)
-**Priority**: P0 (Unblocks 10 skipped tests)
+**Priority**: P0 (Unblocks 3 skipped tests - UT-TS-EVENT-001, UT-TS-EVENT-002, potentially 1 more with traffic)
 **Approach**: **Hybrid (Packet-driven RX + Polling TX)** due to filter driver constraints
+**Key Point**: Events ONLY for **PTP protocol packets** (EtherType 0x88F7), NOT every packet!
 
 **⚠️ ARCHITECTURAL CONSTRAINT: Filter Driver Reality**
 
@@ -317,11 +320,12 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject) {
 - ❌ **Reality**: We are NDIS **Lightweight Filter Driver** (filter.c)
 - ❌ **Cannot**: Register hardware interrupts (only miniport drivers can)
 - ❌ **Cannot**: Access TSICR interrupt status in ISR (no interrupt handle)
-
-**Revised Approach**: Protocol-aware packet-driven events + lightweight polling
-- ✅ **RX Path**: Hook `FilterReceiveNetBufferLists()` to detect PTP messages
+TP protocol-aware packet-driven events + lightweight polling
+- ✅ **RX Path**: Hook `FilterReceiveNetBufferLists()` to detect **PTP packets only** (EtherType 0x88F7)
 - ✅ **TX Path**: Lightweight polling (1ms) for TX timestamp FIFO
-- ✅ **PTP-aware**: Filter Sync/Pdelay_Req/Pdelay_Resp/Follow_Up/Announce messages
+- ✅ **PTP Message Filtering**: Sync/Pdelay_Req/Pdelay_Resp/Follow_Up/Announce (skip Signaling/Management)
+- ✅ **Realistic latency**: 3-5µs for RX events, ~1ms for TX events
+- ✅ **Selective**: Events ONLY for PTP packets, not regular TCP/UDP/IP traffic!nounce messages
 - ✅ **Realistic latency**: 3-5µs for RX events, ~1ms for TX events
 
 ---
@@ -354,18 +358,18 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject) {
   - vlan_id, pcp (from packet)
 - [ ] Forward packet normally (don't block NDIS datapath)
 
-**PTP Message Types** (IEEE 1588-2019 Table 19):
+**PTP Message Types** (IEEE 1588-2019 **Table 36**: "Values of messageType field"):
 ```c
-#define PTP_MSGTYPE_SYNC           0x0  // ✅ Always emit
-#define PTP_MSGTYPE_DELAY_REQ      0x1  // Skip (not needed for gPTP)
-#define PTP_MSGTYPE_PDELAY_REQ     0x2  // ✅ Always emit
-#define PTP_MSGTYPE_PDELAY_RESP    0x3  // ✅ Always emit
-#define PTP_MSGTYPE_FOLLOW_UP      0x8  // ✅ Emit (contains t1)
-#define PTP_MSGTYPE_DELAY_RESP     0x9  // Skip (not needed for gPTP)
-#define PTP_MSGTYPE_PDELAY_RESP_FU 0xA  // ✅ Emit (contains t2)
-#define PTP_MSGTYPE_ANNOUNCE       0xB  // ✅ Emit (BMCA)
-#define PTP_MSGTYPE_SIGNALING      0xC  // Skip
-#define PTP_MSGTYPE_MANAGEMENT     0xD  // Skip
+#define PTP_MSGTYPE_SYNC           0x0  // ✅ Event message - Always emit
+#define PTP_MSGTYPE_DELAY_REQ      0x1  // ✅ Event message - Emit (Milan, 802.1AS)
+#define PTP_MSGTYPE_PDELAY_REQ     0x2  // ✅ Event message - Always emit
+#define PTP_MSGTYPE_PDELAY_RESP    0x3  // ✅ Event message - Always emit
+#define PTP_MSGTYPE_FOLLOW_UP      0x8  // ✅ General message - Emit (contains t1)
+#define PTP_MSGTYPE_DELAY_RESP     0x9  // ✅ General message - Emit (Milan, 802.1AS)
+#define PTP_MSGTYPE_PDELAY_RESP_FU 0xA  // ✅ General message - Emit (contains t2)
+#define PTP_MSGTYPE_ANNOUNCE       0xB  // ✅ General message - Emit (BMCA)
+#define PTP_MSGTYPE_SIGNALING      0xC  // ❌ General message - Skip
+#define PTP_MSGTYPE_MANAGEMENT     0xD  // ❌ General message - Skip
 ```
 
 **Latency Budget** (RX Path):

@@ -75,6 +75,7 @@ typedef struct _IOCTL_VERSION {
 #define IOCTL_AVB_OPEN_ADAPTER          _NDIS_CONTROL_CODE(32, METHOD_BUFFERED)
 #define IOCTL_AVB_TS_SUBSCRIBE          _NDIS_CONTROL_CODE(33, METHOD_BUFFERED)
 #define IOCTL_AVB_TS_RING_MAP           _NDIS_CONTROL_CODE(34, METHOD_BUFFERED)
+#define IOCTL_AVB_TS_UNSUBSCRIBE        _NDIS_CONTROL_CODE(46, METHOD_BUFFERED)  /* Cleanup subscription slot */
 #define IOCTL_AVB_SETUP_QAV             _NDIS_CONTROL_CODE(35, METHOD_BUFFERED)
 #ifdef AVB_DEV_SIMULATION
 #define IOCTL_AVB_REG_READ_UBER         _NDIS_CONTROL_CODE(36, METHOD_BUFFERED)
@@ -240,7 +241,7 @@ typedef struct AVB_ENUM_REQUEST {
 typedef struct AVB_OPEN_REQUEST {
     avb_u16 vendor_id;    /* in */
     avb_u16 device_id;    /* in */
-    avb_u32 reserved;     /* align */
+    avb_u32 index;        /* in: adapter instance index (0-based) for multi-adapter */
     avb_u32 status;       /* out: NDIS_STATUS */
 } AVB_OPEN_REQUEST, *PAVB_OPEN_REQUEST;
 
@@ -260,6 +261,11 @@ typedef struct AVB_TS_RING_MAP_REQUEST {
     avb_u64 shm_token;    /* out: opaque token to map shared buffer (HANDLE value on UM) */
     avb_u32 status;       /* out: NDIS_STATUS */
 } AVB_TS_RING_MAP_REQUEST, *PAVB_TS_RING_MAP_REQUEST;
+
+typedef struct AVB_TS_UNSUBSCRIBE_REQUEST {
+    avb_u32 ring_id;      /* in: Subscription ID to clean up */
+    avb_u32 status;       /* out: NDIS_STATUS */
+} AVB_TS_UNSUBSCRIBE_REQUEST, *PAVB_TS_UNSUBSCRIBE_REQUEST;
 
 typedef struct AVB_QAV_REQUEST {
     avb_u8  tc;           /* traffic class */
