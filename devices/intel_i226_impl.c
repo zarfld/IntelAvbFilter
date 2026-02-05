@@ -270,6 +270,26 @@ static int init_ptp(device_t *dev)
         return -1;
     }
     
+    // Enable RX/TX hardware timestamping (REQUIRED for RXSTMPL/H and TXSTMPL/H to capture timestamps)
+    uint32_t tsyncrxctl = 0, tsynctxctl = 0;
+    
+    // TSYNCRXCTL: Enable RX timestamping for all packets
+    if (ndis_platform_ops.mmio_read(dev, I226_TSYNCRXCTL, &tsyncrxctl) == 0) {
+        // Set EN bit (bit 4) and TYPE field (bits 3-1) to TYPE_ALL (0x4 = 0b100)
+        tsyncrxctl = (uint32_t)I226_TSYNCRXCTL_SET(0, I226_TSYNCRXCTL_EN_MASK, I226_TSYNCRXCTL_EN_SHIFT, 1);
+        tsyncrxctl = (uint32_t)I226_TSYNCRXCTL_SET(tsyncrxctl, I226_TSYNCRXCTL_TYPE_MASK, I226_TSYNCRXCTL_TYPE_SHIFT, 0x4);
+        ndis_platform_ops.mmio_write(dev, I226_TSYNCRXCTL, tsyncrxctl);
+        DEBUGP(DL_WARN, "I226: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", tsyncrxctl);
+    }
+    
+    // TSYNCTXCTL: Enable TX timestamping
+    if (ndis_platform_ops.mmio_read(dev, I226_TSYNCTXCTL, &tsynctxctl) == 0) {
+        // Set EN bit (bit 4)
+        tsynctxctl = (uint32_t)I226_TSYNCTXCTL_SET(0, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 1);
+        ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, tsynctxctl);
+        DEBUGP(DL_WARN, "I226: TX timestamping enabled (TSYNCTXCTL=0x%08X)\n", tsynctxctl);
+    }
+    
     DEBUGP(DL_INFO, "<==i226_init_ptp: PTP clock initialized successfully\n");
     return 0;
 }
@@ -420,6 +440,62 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
     return -1;
 }
 
+/**
+ * @brief Enable/disable packet timestamping (I226-specific)
+ * @param dev Device handle
+ * @param enable 1 = enable, 0 = disable
+ * @return 0 on success, <0 on error
+ * 
+ * Configures TSYNCRXCTL and TSYNCTXCTL registers for I226 (IGC family).
+ * Uses SSOT register definitions from i226_regs.h.
+ */
+static int enable_packet_timestamping(device_t *dev, int enable)
+{
+    if (!dev || !ndis_platform_ops.mmio_write || !ndis_platform_ops.mmio_read) {
+        return -1;
+    }
+    
+    if (enable) {
+        // Enable RX packet timestamping using SSOT definitions
+        uint32_t rx_ctl = 0;
+        rx_ctl = (uint32_t)I226_TSYNCRXCTL_SET(0, I226_TSYNCRXCTL_EN_MASK, I226_TSYNCRXCTL_EN_SHIFT, 1);  // Enable
+        rx_ctl = (uint32_t)I226_TSYNCRXCTL_SET(rx_ctl, I226_TSYNCRXCTL_TYPE_MASK, I226_TSYNCRXCTL_TYPE_SHIFT, 0x4);  // All packets
+        
+        if (ndis_platform_ops.mmio_write(dev, I226_TSYNCRXCTL, rx_ctl) != 0) {
+            DEBUGP(DL_ERROR, "I226: Failed to write TSYNCRXCTL\n");
+            return -1;
+        }
+        DEBUGP(DL_INFO, "I226: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
+        
+        // Enable TX packet timestamping using SSOT definitions
+        uint32_t tx_ctl = 0;
+        tx_ctl = (uint32_t)I226_TSYNCTXCTL_SET(0, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 1);  // Enable
+        
+        if (ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, tx_ctl) != 0) {
+            DEBUGP(DL_ERROR, "I226: Failed to write TSYNCTXCTL\n");
+            return -1;
+        }
+        DEBUGP(DL_INFO, "I226: Enabled TX packet timestamping (TSYNCTXCTL=0x%08X)\n", tx_ctl);
+    } else {
+        // Disable packet timestamping
+        uint32_t regval = 0;
+        
+        if (ndis_platform_ops.mmio_read(dev, I226_TSYNCRXCTL, &regval) == 0) {
+            regval = (uint32_t)I226_TSYNCRXCTL_SET(regval, I226_TSYNCRXCTL_EN_MASK, I226_TSYNCRXCTL_EN_SHIFT, 0);
+            regval = (uint32_t)I226_TSYNCRXCTL_SET(regval, I226_TSYNCRXCTL_TYPE_MASK, I226_TSYNCRXCTL_TYPE_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I226_TSYNCRXCTL, regval);
+        }
+        
+        if (ndis_platform_ops.mmio_read(dev, I226_TSYNCTXCTL, &regval) == 0) {
+            regval = (uint32_t)I226_TSYNCTXCTL_SET(regval, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, regval);
+        }
+        DEBUGP(DL_INFO, "I226: Disabled packet timestamping\n");
+    }
+    
+    return 0;
+}
+
 // I226 device operations structure - using generic function names
 const intel_device_ops_t i226_ops = {
     .device_name = "Intel I226 2.5G Ethernet - Advanced TSN",
@@ -436,6 +512,7 @@ const intel_device_ops_t i226_ops = {
     .set_systime = set_systime,
     .get_systime = get_systime,
     .init_ptp = init_ptp,
+    .enable_packet_timestamping = enable_packet_timestamping,
     
     // TSN operations - clean generic names
     .setup_tas = setup_tas,

@@ -20,6 +20,7 @@ Abstract:
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"
 #include "external/intel_avb/lib/intel_private.h"
+#include "devices/intel_device_interface.h"  // For intel_device_ops_t and intel_get_device_ops()
 #include <ntstrsafe.h>
 
 // Generic register offsets (common across Intel devices)
@@ -396,6 +397,171 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
     return STATUS_SUCCESS;
 }
 
+/* Task 6c: TX Timestamp Polling Timer DPC
+ * Polls TX timestamp FIFO at 1ms intervals and posts TS_EVENT_TX_TIMESTAMP events
+ * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 6c - TX path polling
+ * 
+ * Hardware: TXSTMPL (0x0B618), TXSTMPH (0x0B61C)
+ *   - Bit 31 of TXSTMPH indicates valid timestamp in FIFO
+ *   - Reading TXSTMPL advances FIFO to next entry
+ *   - FIFO depth varies by device (typically 4-8 entries)
+ */
+VOID AvbTxTimestampPollDpc(
+    _In_ PVOID SystemSpecific1,
+    _In_ PVOID FunctionContext,
+    _In_ PVOID SystemSpecific2,
+    _In_ PVOID SystemSpecific3)
+{
+    UNREFERENCED_PARAMETER(SystemSpecific1);
+    UNREFERENCED_PARAMETER(SystemSpecific2);
+    UNREFERENCED_PARAMETER(SystemSpecific3);
+    
+    PAVB_DEVICE_CONTEXT AvbContext = (PAVB_DEVICE_CONTEXT)FunctionContext;
+    
+    // CRITICAL: Verify context is still valid (global might be cleared during cleanup)
+    if (!AvbContext || AvbContext != g_AvbContext) {
+        return;  // Context being cleaned up, do NOT re-arm timer
+    }
+    
+    if (!AvbContext->tx_poll_active || AvbContext->hw_state < AVB_HW_BAR_MAPPED) {
+        return;  // Timer stopped or hardware not ready
+    }
+    
+    device_t *dev = &AvbContext->intel_device;
+    
+    // Poll TX timestamp FIFO (read up to 8 entries to drain FIFO)
+    for (int i = 0; i < 8; i++) {
+        ULONG txstmph_val = 0;
+        
+        // Read TXSTMPH first to check valid bit (bit 31)
+        if (AvbMmioRead(dev, 0x0B61C, &txstmph_val) != 0) {
+            break;  // Read failed
+        }
+        
+        // Check valid bit (bit 31)
+        if (!(txstmph_val & 0x80000000)) {
+            break;  // No more timestamps in FIFO
+        }
+        
+        // Read TXSTMPL (this advances FIFO to next entry)
+        ULONG txstmpl_val = 0;
+        if (AvbMmioRead(dev, 0x0B618, &txstmpl_val) != 0) {
+            break;  // Read failed
+        }
+        
+        // Construct 64-bit timestamp (clear valid bit from high word)
+        avb_u64 timestamp_ns = ((avb_u64)(txstmph_val & 0x7FFFFFFF) << 32) | (avb_u64)txstmpl_val;
+        
+        // Post TX timestamp event to matching subscriptions
+        // FIXED: Pass per-adapter context for multi-adapter support
+        AvbPostTimestampEvent(
+            AvbContext,  /* Pass THIS adapter's context */
+            TS_EVENT_TX_TIMESTAMP,
+            timestamp_ns,
+            0xFFFF,  // No VLAN (TX timestamps don't include packet metadata)
+            0xFF,    // No PCP
+            0,       // Unknown queue
+            0,       // Unknown packet length
+            0        // No trigger source
+        );
+    }
+    
+    // Re-arm timer for next poll (1ms periodic)
+    if (AvbContext->tx_poll_active) {
+        NdisSetTimer(&AvbContext->tx_poll_timer, 1);
+    }
+}
+
+/* Task 6b: Post timestamp event to all matching subscriptions (lock-free ring buffer write)
+ * Called from RX path (Task 6a), TX polling (Task 6c), or other event sources
+ * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 6b - Event posting helper
+ * FIXED: Accept context parameter for multi-adapter support
+ */
+VOID AvbPostTimestampEvent(
+    _In_ PVOID AvbContextParam,
+    _In_ avb_u32 event_type,
+    _In_ avb_u64 timestamp_ns,
+    _In_ avb_u16 vlan_id,
+    _In_ avb_u8 pcp,
+    _In_ avb_u8 queue,
+    _In_ avb_u16 packet_length,
+    _In_ avb_u8 trigger_source)
+{
+    PAVB_DEVICE_CONTEXT AvbContext = (PAVB_DEVICE_CONTEXT)AvbContextParam;
+    if (!AvbContext) {
+        DEBUGP(DL_WARN, "!!! AvbPostTimestampEvent: NULL context\n");
+        return;
+    }
+    
+    DEBUGP(DL_WARN, "!!! AvbPostTimestampEvent [Adapter 0x%04X]: event_type=0x%x, ts=0x%llx\n", 
+           AvbContext->intel_device.pci_device_id, event_type, timestamp_ns);
+    
+    /* Acquire spin lock to protect subscription table iteration */
+    NdisAcquireSpinLock(&AvbContext->subscription_lock);
+    
+    DEBUGP(DL_WARN, "!!! Checking %d subscriptions for adapter context %p\n", MAX_TS_SUBSCRIPTIONS, AvbContext);
+    
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[i];
+        
+        DEBUGP(DL_WARN, "!!! Sub[%d]: active=%d, ring_id=%u, mask=0x%x, ring=%p\n", 
+               i, sub->active, sub->ring_id, sub->event_mask, sub->ring_buffer);
+        
+        /* Skip inactive subscriptions */
+        if (!sub->active || !sub->ring_buffer) continue;
+        
+        /* Filter by event type mask */
+        if (!(sub->event_mask & event_type)) {
+            DEBUGP(DL_WARN, "!!! Sub[%d]: Type mismatch (want 0x%x, got 0x%x)\n", i, sub->event_mask, event_type);
+            continue;
+        }
+        
+        /* Filter by VLAN ID (0xFFFF = no filter) */
+        if (sub->vlan_filter != 0xFFFF && sub->vlan_filter != vlan_id) continue;
+        
+        /* Filter by PCP (0xFF = no filter) */
+        if (sub->pcp_filter != 0xFF && sub->pcp_filter != pcp) continue;
+        
+        /* Lock-free ring buffer write */
+        AVB_TIMESTAMP_RING_HEADER *hdr = (AVB_TIMESTAMP_RING_HEADER *)sub->ring_buffer;
+        AVB_TIMESTAMP_EVENT *events = (AVB_TIMESTAMP_EVENT *)(hdr + 1);
+        
+        avb_u32 local_prod = hdr->producer_index;  /* Atomic read */
+        avb_u32 local_cons = hdr->consumer_index;  /* Atomic read */
+        avb_u32 next_prod = (local_prod + 1) & hdr->mask;
+        
+        /* Check if ring is full */
+        if (next_prod == local_cons) {
+            /* Ring full - drop event and increment overflow counter */
+            InterlockedIncrement((volatile LONG *)&hdr->overflow_count);
+            continue;
+        }
+        
+        /* Write event to ring buffer */
+        AVB_TIMESTAMP_EVENT *evt = &events[local_prod & hdr->mask];
+        evt->timestamp_ns = timestamp_ns;
+        evt->event_type = event_type;
+        evt->sequence_num = (avb_u32)InterlockedIncrement(&sub->sequence_num);
+        evt->vlan_id = vlan_id;
+        evt->pcp = pcp;
+        evt->queue = queue;
+        evt->packet_length = packet_length;
+        evt->trigger_source = trigger_source;
+        RtlZeroMemory(evt->reserved, sizeof(evt->reserved));
+        
+        /* Memory barrier - ensure event written before index update */
+        KeMemoryBarrier();
+        
+        /* Update producer index (atomic write) */
+        hdr->producer_index = next_prod;
+        
+        /* Increment total events counter */
+        InterlockedIncrement64((volatile LONG64 *)&hdr->total_events);
+    }
+    
+    NdisReleaseSpinLock(&AvbContext->subscription_lock);
+}
+
 /* Task 5: Cleanup subscriptions for a specific file object (implicit unsubscribe on handle close)
  * Called from IRP_MJ_CLEANUP handler when application closes device handle
  * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 5 - Option B (implicit cleanup)
@@ -450,6 +616,20 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject)
         }
     }
     
+    // Check if all subscriptions are now inactive - stop timer to save CPU
+    BOOLEAN any_active = FALSE;
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        if (AvbContext->subscriptions[i].active) {
+            any_active = TRUE;
+            break;
+        }
+    }
+    
+    if (!any_active && AvbContext->tx_poll_active) {
+        AvbContext->tx_poll_active = FALSE;  // Signal DPC to stop re-arming
+        DEBUGP(DL_INFO, "All subscriptions removed - TX polling will stop\n");
+    }
+    
     NdisReleaseSpinLock(&AvbContext->subscription_lock);
     
     if (cleaned > 0) {
@@ -460,6 +640,25 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject)
 VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 {
     if (!AvbContext) return;
+    
+    /* CRITICAL: Cancel TX timestamp polling timer FIRST (Task 6c) */
+    if (AvbContext->tx_poll_active) {
+        BOOLEAN cancelled = FALSE;
+        AvbContext->tx_poll_active = FALSE;  // Signal DPC to stop re-arming
+        NdisCancelTimer(&AvbContext->tx_poll_timer, &cancelled);
+        
+        // If timer was pending (not cancelled), wait briefly for DPC to complete
+        if (!cancelled) {
+            DEBUGP(DL_WARN, "TX polling timer was pending, waiting for DPC to complete...\n");
+            NdisMSleep(5000);  // 5ms should be enough for DPC to see tx_poll_active=FALSE
+        }
+        DEBUGP(DL_INFO, "TX polling timer stopped (was_pending=%d)\n", !cancelled);
+    }
+    
+    // Clear global context pointer to prevent stale timer DPC access
+    if (g_AvbContext == AvbContext) {
+        g_AvbContext = NULL;
+    }
     
     /* Cleanup all timestamp event subscriptions (Issue #13) */
     for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
@@ -500,8 +699,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     ULONG_PTR info = 0; 
     NTSTATUS status = STATUS_SUCCESS;
 
-    // Use current context for all operations to avoid shadowing warnings
-    PAVB_DEVICE_CONTEXT currentContext = g_AvbContext ? g_AvbContext : AvbContext;
+    // MULTI-ADAPTER FIX: Use the context passed from device.c (routed via FileObject->FsContext)
+    // This ensures each handle operates on its own adapter context
+    PAVB_DEVICE_CONTEXT currentContext = AvbContext;
 
     // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
     // On-demand initialization: only initialize on first IOCTL, not at driver load
@@ -962,6 +1162,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                const intel_device_ops_t *ops = NULL;  // Declare at beginning of block
                 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "HW timestamping control failed: Hardware not ready (state=%s)\n", 
@@ -1021,6 +1222,17 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                                    ts_req->enable_target_time, ts_req->enable_aux_ts,
                                    activeContext->intel_device.pci_vendor_id, 
                                    activeContext->intel_device.pci_device_id);
+                            
+                            // Enable packet timestamping via device-specific implementation
+                            ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                            if (ops && ops->enable_packet_timestamping) {
+                                int pkt_ts_result = ops->enable_packet_timestamping(&activeContext->intel_device, 1);
+                                if (pkt_ts_result != 0) {
+                                    DEBUGP(DL_WARN, "Device-specific packet timestamping enable failed: %d\n", pkt_ts_result);
+                                }
+                            } else {
+                                DEBUGP(DL_WARN, "Device does not support packet timestamping or ops not implemented\n");
+                            }
                         } else {
                             // Disable HW timestamping: Set all timer disable bits
                             new_tsauxc |= (BIT31_DISABLE_SYSTIM0 | BIT29_DISABLE_SYSTIM3 | 
@@ -1501,15 +1713,25 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 // Allocate ring_id (InterlockedIncrement ensures atomicity)
                 sub->ring_id = (avb_u32)InterlockedIncrement(&AvbContext->next_ring_id);
                 
+                // DISABLED: TX timestamp polling timer start (Task 6c) - causes BSOD 0x0A
+                // TODO: Fix NULL pointer dereference before re-enabling
+                // if (!AvbContext->tx_poll_active && AvbContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                //     NdisSetTimer(&AvbContext->tx_poll_timer, 1);
+                //     AvbContext->tx_poll_active = TRUE;
+                //     DEBUGP(DL_INFO, "TX polling timer started (1ms period)\n");
+                // }
+                
                 NdisReleaseSpinLock(&AvbContext->subscription_lock);
                 
                 // Return ring_id to user
                 sub_req->ring_id = sub->ring_id;
                 
-                DEBUGP(DL_INFO, "Ring buffer allocated: ring_id=%u, count=%u, size=%lu bytes, slot=%d\n",
-                       sub_req->ring_id, ring_count, (ULONG)total_size, free_slot);
-                DEBUGP(DL_INFO, "Subscription: types_mask=0x%08X, vlan=%u, pcp=%u\n",
-                       sub_req->types_mask, sub_req->vlan, sub_req->pcp);
+                DEBUGP(DL_WARN, "!!! SUBSCRIPTION CREATED [Adapter 0x%04X]: ring_id=%u, slot=%d, active=%d, event_mask=0x%08X\n",
+                       AvbContext->intel_device.pci_device_id, sub_req->ring_id, free_slot, sub->active, sub->event_mask);
+                DEBUGP(DL_WARN, "!!! Sub details: count=%u, size=%lu bytes, ring_buffer=%p, context=%p\n",
+                       ring_count, (ULONG)total_size, sub->ring_buffer, AvbContext);
+                DEBUGP(DL_WARN, "!!! Sub filters: vlan=%u, pcp=%u\n",
+                       sub_req->vlan, sub_req->pcp);
                 
                 sub_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                 status = STATUS_SUCCESS;
@@ -1663,6 +1885,77 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 map_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                 status = STATUS_SUCCESS;
                 info = sizeof(*map_req);
+            }
+        }
+        break;
+    
+    // Implements #13 (REQ-F-TS-SUB-001: Timestamp Event Subscription) - Cleanup
+    case IOCTL_AVB_TS_UNSUBSCRIBE:
+        {
+            DEBUGP(DL_ERROR, "!!! IOCTL_AVB_TS_UNSUBSCRIBE called\n");
+            if (inLen < sizeof(AVB_TS_UNSUBSCRIBE_REQUEST) || outLen < sizeof(AVB_TS_UNSUBSCRIBE_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                info = 0;
+            } else {
+                PAVB_TS_UNSUBSCRIBE_REQUEST unsub_req = (PAVB_TS_UNSUBSCRIBE_REQUEST)buf;
+                
+                DEBUGP(DL_WARN, "!!! UNSUBSCRIBE: ring_id=%u\n", unsub_req->ring_id);
+                
+                // Find subscription by ring_id and free it
+                NdisAcquireSpinLock(&AvbContext->subscription_lock);
+                
+                int found_slot = -1;
+                for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+                    if (AvbContext->subscriptions[i].ring_id == unsub_req->ring_id && 
+                        AvbContext->subscriptions[i].active) {
+                        found_slot = i;
+                        break;
+                    }
+                }
+                
+                if (found_slot >= 0) {
+                    TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[found_slot];
+                    
+                    DEBUGP(DL_WARN, "!!! FREEING SUBSCRIPTION: slot=%d, ring_id=%u, ring_buffer=%p\n",
+                           found_slot, sub->ring_id, sub->ring_buffer);
+                    
+                    // Unmap user VA if mapped
+                    if (sub->user_va && sub->ring_mdl) {
+                        MmUnmapLockedPages(sub->user_va, sub->ring_mdl);
+                        sub->user_va = NULL;
+                    }
+                    
+                    // Free MDL
+                    if (sub->ring_mdl) {
+                        IoFreeMdl(sub->ring_mdl);
+                        sub->ring_mdl = NULL;
+                    }
+                    
+                    // Free ring buffer
+                    if (sub->ring_buffer) {
+                        ExFreePoolWithTag(sub->ring_buffer, FILTER_ALLOC_TAG);
+                        sub->ring_buffer = NULL;
+                    }
+                    
+                    // Mark slot as free
+                    sub->ring_id = 0;
+                    sub->active = 0;
+                    sub->event_mask = 0;
+                    sub->file_object = NULL;
+                    
+                    DEBUGP(DL_WARN, "!!! SUBSCRIPTION FREED: slot=%d is now available\n", found_slot);
+                    
+                    unsub_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                    status = STATUS_SUCCESS;
+                } else {
+                    DEBUGP(DL_ERROR, "!!! UNSUBSCRIBE: ring_id=%u not found\n", unsub_req->ring_id);
+                    unsub_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                }
+                
+                NdisReleaseSpinLock(&AvbContext->subscription_lock);
+                
+                info = sizeof(*unsub_req);
             }
         }
         break;

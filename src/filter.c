@@ -1649,6 +1649,125 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
         ASSERT(NumberOfNetBufferLists >= 1);
 
         //
+        // Task 6a: PTP message detection for timestamp event generation
+        // Implements: Issue #13 (REQ-F-TS-SUB-001) Task 6a - RX path
+        //
+        // Protocol-aware filtering (IEEE 1588-2019):
+        //   - EtherType: 0x88F7 (PTP over Ethernet)
+        //   - Message Types: Sync (0x0), Pdelay_Req (0x2), Pdelay_Resp (0x3),
+        //                    Follow_Up (0x8), Pdelay_Resp_FU (0xA), Announce (0xB)
+        //   - Read RX timestamp from RXSTMPL/H hardware registers
+        //   - Post event via AvbPostTimestampEvent() (Task 6c)
+        //
+        // FIXED: Use per-adapter context instead of global g_AvbContext
+        // This fixes multi-adapter support - each adapter has its own hardware context
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        if (avbCtx && avbCtx->hw_state >= AVB_HW_BAR_MAPPED) {
+            PNET_BUFFER_LIST nbl = NetBufferLists;
+            while (nbl) {
+                PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(nbl);
+                if (nb) {
+                    ULONG dataLength = NET_BUFFER_DATA_LENGTH(nb);
+                    if (dataLength >= 14 + 34) {  /* Ethernet (14) + PTP header (34) minimum */
+                        PUCHAR pData = NULL;
+                        __try {
+                            pData = (PUCHAR)NdisGetDataBuffer(nb, 14 + 34, NULL, 1, 0);
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {
+                            pData = NULL;
+                        }
+                        
+                        if (pData) {
+                            /* Parse Ethernet header */
+                            USHORT etherType = ((USHORT)pData[12] << 8) | pData[13];
+                            USHORT vlan_id = 0xFFFF;  /* No VLAN by default */
+                            UCHAR pcp = 0xFF;         /* No PCP by default */
+                            ULONG ptp_offset = 14;    /* PTP header offset after Ethernet */
+                            
+                            /* Debug: Show first few EtherTypes to verify packet parsing */
+                            static int ethertype_count = 0;
+                            if (ethertype_count < 30) {
+                                DEBUGP(DL_WARN, "!!! PKT #%d: EtherType=0x%04X, len=%u\n", 
+                                       ethertype_count, etherType, dataLength);
+                                ethertype_count++;
+                            }
+                            
+                            /* Check for VLAN tag (0x8100) */
+                            if (etherType == 0x8100 && dataLength >= 18 + 34) {
+                                vlan_id = ((USHORT)pData[14] << 8) | pData[15];
+                                pcp = (pData[14] >> 5) & 0x07;
+                                vlan_id &= 0x0FFF;  /* Mask to 12 bits */
+                                etherType = ((USHORT)pData[16] << 8) | pData[17];
+                                ptp_offset = 18;  /* PTP after VLAN tag */
+                                
+                                if (ethertype_count <= 30) {
+                                    DEBUGP(DL_WARN, "!!! VLAN FOUND: ID=%u, PCP=%u, RealEtherType=0x%04X\n", 
+                                           vlan_id, pcp, etherType);
+                                }
+                            }
+                            
+                            /* Check for PTP EtherType (0x88F7) */
+                            if (etherType == 0x88F7) {
+                                UCHAR messageType = pData[ptp_offset] & 0x0F;  /* Low 4 bits of transportSpecific/messageType */
+                                
+                                DEBUGP(DL_WARN, "!!! PTP DETECTED: EtherType=0x%04X, msgType=0x%X, VLAN=%u, PCP=%u\n",
+                                       etherType, messageType, vlan_id, pcp);
+                                
+                                /* Filter PTP message types (protocol-aware detection) */
+                                /* IEEE 1588-2019 Table 36: "Values of messageType field" */
+                                BOOLEAN should_post = FALSE;
+                                switch (messageType) {
+                                    case 0x0:  /* Sync (Event) */
+                                    case 0x1:  /* Delay_Req (Event) - Milan, 802.1AS */
+                                    case 0x2:  /* Pdelay_Req (Event) */
+                                    case 0x3:  /* Pdelay_Resp (Event) */
+                                    case 0x8:  /* Follow_Up (General) */
+                                    case 0x9:  /* Delay_Resp (General) - Milan, 802.1AS */
+                                    case 0xA:  /* Pdelay_Resp_Follow_Up (General) */
+                                    case 0xB:  /* Announce (General) - BMCA */
+                                        should_post = TRUE;
+                                        DEBUGP(DL_WARN, "!!! PTP MATCHED: msgType=0x%X will post event\n", messageType);
+                                        break;
+                                    default:
+                                        DEBUGP(DL_INFO, "PTP SKIP: msgType=0x%X (Signaling/Management)\n", messageType);
+                                        break;
+                                }
+                                
+                                if (should_post) {
+                                    /* Read RX timestamp from hardware (RXSTMPL/H registers) */
+                                    avb_u64 timestamp_ns = 0;
+                                    device_t *dev = &avbCtx->intel_device;
+                                    ULONG rxstmpl_val = 0, rxstmph_val = 0;
+                                    
+                                    /* Use E1000 generic register offsets (0x0B624, 0x0B628 common across Intel devices) */
+                                    if (AvbMmioRead(dev, 0x0B624, &rxstmpl_val) == 0 &&
+                                        AvbMmioRead(dev, 0x0B628, &rxstmph_val) == 0) {
+                                        timestamp_ns = ((avb_u64)rxstmph_val << 32) | (avb_u64)rxstmpl_val;
+                                        
+                                        DEBUGP(DL_WARN, "!!! CALLING AvbPostTimestampEvent: ts=0x%llx, msgType=0x%x\n", timestamp_ns, messageType);
+                                        
+                                        /* Post event to matching subscriptions */
+                                        /* FIXED: Pass per-adapter context for multi-adapter support */
+                                        AvbPostTimestampEvent(
+                                            avbCtx,  /* Pass THIS adapter's context */
+                                            TS_EVENT_RX_TIMESTAMP,
+                                            timestamp_ns,
+                                            vlan_id,
+                                            pcp,
+                                            0,  /* queue - not easily available in filter driver */
+                                            (avb_u16)dataLength,
+                                            messageType  /* Store PTP message type in trigger_source */
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                nbl = NET_BUFFER_LIST_NEXT_NBL(nbl);
+            }
+        }
+
+        //
         // If you would like to drop a received packet, you must carefully
         // modify the NBL chain as follows:
         //

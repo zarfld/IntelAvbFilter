@@ -47,6 +47,7 @@ typedef struct _intel_device_ops {
     int (*set_systime)(device_t *dev, uint64_t systime);
     int (*get_systime)(device_t *dev, uint64_t *systime);
     int (*init_ptp)(device_t *dev);
+    int (*enable_packet_timestamping)(device_t *dev, int enable);  // Enable TSYNCRXCTL/TSYNCTXCTL
     
     // TSN operations (optional - can be NULL for basic devices)
     int (*setup_tas)(device_t *dev, struct tsn_tas_config *config);
