@@ -496,6 +496,257 @@ static int enable_packet_timestamping(device_t *dev, int enable)
     return 0;
 }
 
+/**
+ * @brief Set target time for specified timer (Issue #13 Task 7)
+ * @param dev Device context
+ * @param timer_index Timer index (0 or 1)
+ * @param target_time_ns Target time in nanoseconds
+ * @param enable_interrupt Enable interrupt for this timer
+ * @return 0 on success, <0 on error
+ * 
+ * I226 Register Details:
+ * - TRGTTIML0 (0x0B644): Target Time 0 Low (bits 0-31)
+ * - TRGTTIMH0 (0x0B648): Target Time 0 High (bits 32-63)
+ * - TRGTTIML1 (0x0B64C): Target Time 1 Low (bits 0-31)
+ * - TRGTTIMH1 (0x0B650): Target Time 1 High (bits 32-63)
+ * - TSAUXC (0x0B640): EN_TT0 (bit 0), EN_TT1 (bit 4)
+ */
+static int i226_set_target_time(device_t *dev, uint8_t timer_index, 
+                                uint64_t target_time_ns, int enable_interrupt)
+{
+    if (timer_index > 1) {
+        DEBUGP(DL_ERROR, "I226: Invalid timer index %u (max 1)\n", timer_index);
+        return -EINVAL;
+    }
+    
+    // I226-specific register offsets
+    uint32_t trgttiml_offset = (timer_index == 0) ? 0x0B644 : 0x0B64C;
+    uint32_t trgttimh_offset = (timer_index == 0) ? 0x0B648 : 0x0B650;
+    
+    uint32_t time_low = (uint32_t)(target_time_ns & 0xFFFFFFFF);
+    uint32_t time_high = (uint32_t)(target_time_ns >> 32);
+    
+    // Read current SYSTIM before setting target to show delta
+    uint64_t current_systim = 0;
+    uint32_t systim_low = 0, systim_high = 0;
+    ndis_platform_ops.mmio_read(dev, 0x0C0C8, &systim_low);  // SYSTIML
+    ndis_platform_ops.mmio_read(dev, 0x0C0CC, &systim_high); // SYSTIMH
+    current_systim = ((uint64_t)systim_high << 32) | systim_low;
+    int64_t delta_ns = (int64_t)(target_time_ns - current_systim);
+    
+    DEBUGP(DL_WARN, "!!! I226: Setting target time %u: 0x%08X%08X (%llu ns)\n", 
+           timer_index, time_high, time_low, (unsigned long long)target_time_ns);
+    DEBUGP(DL_WARN, "!!! I226:   Current SYSTIM:  0x%016llX (%llu ns)\n",
+           (unsigned long long)current_systim, (unsigned long long)current_systim);
+    DEBUGP(DL_WARN, "!!! I226:   Delta (target - current): %s%lld ns (%lld ms)\n",
+           (delta_ns < 0) ? "-" : "+", (long long)(delta_ns < 0 ? -delta_ns : delta_ns), 
+           (long long)(delta_ns < 0 ? -delta_ns : delta_ns) / 1000000);
+    if (delta_ns < 0) {
+        DEBUGP(DL_ERROR, "!!! I226: WARNING - Target time is in the PAST by %lld ns!\n", (long long)(-delta_ns));
+    }
+    
+    // Write target time registers (low then high for atomicity)
+    if (ndis_platform_ops.mmio_write(dev, trgttiml_offset, time_low) != 0) {
+        DEBUGP(DL_ERROR, "I226: Failed to write TRGTTIML%u\n", timer_index);
+        return -EIO;
+    }
+    if (ndis_platform_ops.mmio_write(dev, trgttimh_offset, time_high) != 0) {
+        DEBUGP(DL_ERROR, "I226: Failed to write TRGTTIMH%u\n", timer_index);
+        return -EIO;
+    }
+    
+    // Verify write by reading back
+    uint32_t verify_low = 0, verify_high = 0;
+    ndis_platform_ops.mmio_read(dev, trgttiml_offset, &verify_low);
+    ndis_platform_ops.mmio_read(dev, trgttimh_offset, &verify_high);
+    uint64_t verified_target = ((uint64_t)verify_high << 32) | verify_low;
+    
+    DEBUGP(DL_WARN, "!!! I226:   VERIFY: wrote=0x%08X%08X, read=0x%08X%08X %s\n",
+           time_high, time_low, verify_high, verify_low,
+           (verified_target == target_time_ns) ? "OK" : "MISMATCH!");
+    
+    // Enable interrupt in TSAUXC if requested
+    if (enable_interrupt) {
+        uint32_t tsauxc;
+        if (ndis_platform_ops.mmio_read(dev, 0x0B640, &tsauxc) != 0) {
+            DEBUGP(DL_ERROR, "I226: Failed to read TSAUXC\n");
+            return -EIO;
+        }
+        
+        DEBUGP(DL_WARN, "!!! I226:   TSAUXC BEFORE: 0x%08X (EN_TT0=%d, EN_TT1=%d, AUTT0=%d, AUTT1=%d)\n",
+               tsauxc,
+               (tsauxc & (1 << 0)) ? 1 : 0,
+               (tsauxc & (1 << 4)) ? 1 : 0,
+               (tsauxc & (1 << 16)) ? 1 : 0,
+               (tsauxc & (1 << 17)) ? 1 : 0);
+        
+        // EN_TT0 = bit 0, EN_TT1 = bit 4
+        uint32_t en_bit = (timer_index == 0) ? (1 << 0) : (1 << 4);
+        tsauxc |= en_bit;
+        
+        if (ndis_platform_ops.mmio_write(dev, 0x0B640, tsauxc) != 0) {
+            DEBUGP(DL_ERROR, "I226: Failed to write TSAUXC\n");
+            return -EIO;
+        }
+        
+        // Verify interrupt enable by reading back
+        uint32_t tsauxc_after = 0;
+        ndis_platform_ops.mmio_read(dev, 0x0B640, &tsauxc_after);
+        
+        DEBUGP(DL_WARN, "!!! I226:   TSAUXC AFTER:  0x%08X (EN_TT0=%d, EN_TT1=%d, AUTT0=%d, AUTT1=%d) %s\n",
+               tsauxc_after,
+               (tsauxc_after & (1 << 0)) ? 1 : 0,
+               (tsauxc_after & (1 << 4)) ? 1 : 0,
+               (tsauxc_after & (1 << 16)) ? 1 : 0,
+               (tsauxc_after & (1 << 17)) ? 1 : 0,
+               (tsauxc_after & en_bit) ? "OK" : "FAILED TO SET!");
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief Get target time for specified timer
+ * @param dev Device context
+ * @param timer_index Timer index (0 or 1)
+ * @param target_time_ns Pointer to receive target time in nanoseconds
+ * @return 0 on success, <0 on error
+ */
+static int i226_get_target_time(device_t *dev, uint8_t timer_index, uint64_t *target_time_ns)
+{
+    if (timer_index > 1 || !target_time_ns) {
+        return -EINVAL;
+    }
+    
+    uint32_t trgttiml_offset = (timer_index == 0) ? 0x0B644 : 0x0B64C;
+    uint32_t trgttimh_offset = (timer_index == 0) ? 0x0B648 : 0x0B650;
+    
+    uint32_t time_low, time_high;
+    
+    if (ndis_platform_ops.mmio_read(dev, trgttiml_offset, &time_low) != 0) {
+        return -EIO;
+    }
+    if (ndis_platform_ops.mmio_read(dev, trgttimh_offset, &time_high) != 0) {
+        return -EIO;
+    }
+    
+    *target_time_ns = ((uint64_t)time_high << 32) | time_low;
+    return 0;
+}
+
+/**
+ * @brief Check AUTT flags (auxiliary timestamp valid flags)
+ * @param dev Device context
+ * @param autt_flags Pointer to receive AUTT flags (bit 0 = AUTT0, bit 1 = AUTT1)
+ * @return 0 on success, <0 on error
+ * 
+ * I226 TSAUXC Register:
+ * - AUTT0 (bit 16): Auxiliary Timestamp 0 Valid
+ * - AUTT1 (bit 17): Auxiliary Timestamp 1 Valid
+ */
+static int i226_check_autt_flags(device_t *dev, uint8_t *autt_flags)
+{
+    if (!autt_flags) {
+        return -EINVAL;
+    }
+    
+    uint32_t tsauxc;
+    if (ndis_platform_ops.mmio_read(dev, 0x0B640, &tsauxc) != 0) {
+        return -EIO;
+    }
+    
+    // Extract AUTT0 (bit 16) and AUTT1 (bit 17)
+    *autt_flags = 0;
+    if (tsauxc & (1 << 16)) {
+        *autt_flags |= 0x01;  // AUTT0 set
+    }
+    if (tsauxc & (1 << 17)) {
+        *autt_flags |= 0x02;  // AUTT1 set
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief Clear AUTT flag for specified timer
+ * @param dev Device context
+ * @param timer_index Timer index (0 or 1)
+ * @return 0 on success, <0 on error
+ * 
+ * Write-1-to-clear: Writing 1 to AUTT0/AUTT1 bit clears the flag
+ */
+static int i226_clear_autt_flag(device_t *dev, uint8_t timer_index)
+{
+    if (timer_index > 1) {
+        return -EINVAL;
+    }
+    
+    uint32_t tsauxc;
+    if (ndis_platform_ops.mmio_read(dev, 0x0B640, &tsauxc) != 0) {
+        return -EIO;
+    }
+    
+    // AUTT0 = bit 16, AUTT1 = bit 17 (write-1-to-clear)
+    uint32_t autt_bit = (timer_index == 0) ? (1 << 16) : (1 << 17);
+    tsauxc |= autt_bit;  // Set bit to clear flag
+    
+    if (ndis_platform_ops.mmio_write(dev, 0x0B640, tsauxc) != 0) {
+        return -EIO;
+    }
+    
+    DEBUGP(DL_TRACE, "I226: Cleared AUTT%u flag\n", timer_index);
+    return 0;
+}
+
+/**
+ * @brief Get auxiliary timestamp value
+ * @param dev Device context
+ * @param aux_index Auxiliary timestamp index (0 or 1)
+ * @param aux_timestamp_ns Pointer to receive timestamp in nanoseconds
+ * @return 0 on success, <0 on error
+ * 
+ * I226 Register Offsets:
+ * - AUXSTMPL0 (0x0B65C): Auxiliary Timestamp 0 Low
+ * - AUXSTMPH0 (0x0B660): Auxiliary Timestamp 0 High
+ * - AUXSTMPL1 (0x0B664): Auxiliary Timestamp 1 Low
+ * - AUXSTMPH1 (0x0B668): Auxiliary Timestamp 1 High
+ */
+static int i226_get_aux_timestamp(device_t *dev, uint8_t aux_index, uint64_t *aux_timestamp_ns)
+{
+    if (aux_index > 1 || !aux_timestamp_ns) {
+        return -EINVAL;
+    }
+    
+    uint32_t auxstmpl_offset = (aux_index == 0) ? 0x0B65C : 0x0B664;
+    uint32_t auxstmph_offset = (aux_index == 0) ? 0x0B660 : 0x0B668;
+    
+    uint32_t time_low, time_high;
+    
+    if (ndis_platform_ops.mmio_read(dev, auxstmpl_offset, &time_low) != 0) {
+        return -EIO;
+    }
+    if (ndis_platform_ops.mmio_read(dev, auxstmph_offset, &time_high) != 0) {
+        return -EIO;
+    }
+    
+    *aux_timestamp_ns = ((uint64_t)time_high << 32) | time_low;
+    return 0;
+}
+
+/**
+ * @brief Clear auxiliary timestamp flag
+ * @param dev Device context
+ * @param aux_index Auxiliary timestamp index (0 or 1)
+ * @return 0 on success, <0 on error
+ * 
+ * Note: On I226, aux timestamp flags are the same as AUTT flags
+ */
+static int i226_clear_aux_timestamp_flag(device_t *dev, uint8_t aux_index)
+{
+    // Reuse AUTT flag clearing (same flags)
+    return i226_clear_autt_flag(dev, aux_index);
+}
+
 // I226 device operations structure - using generic function names
 const intel_device_ops_t i226_ops = {
     .device_name = "Intel I226 2.5G Ethernet - Advanced TSN",
@@ -513,6 +764,14 @@ const intel_device_ops_t i226_ops = {
     .get_systime = get_systime,
     .init_ptp = init_ptp,
     .enable_packet_timestamping = enable_packet_timestamping,
+    
+    // Target time and auxiliary timestamp operations (Issue #13 Task 7, Issue #7)
+    .set_target_time = i226_set_target_time,
+    .get_target_time = i226_get_target_time,
+    .check_autt_flags = i226_check_autt_flags,
+    .clear_autt_flag = i226_clear_autt_flag,
+    .get_aux_timestamp = i226_get_aux_timestamp,
+    .clear_aux_timestamp_flag = i226_clear_aux_timestamp_flag,
     
     // TSN operations - clean generic names
     .setup_tas = setup_tas,

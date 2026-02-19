@@ -187,10 +187,10 @@
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
   </ItemDefinitionGroup>
-  <!-- Fix WDK catalog generation: Copy .sys to parent directory for Inf2Cat -->
-  <Target Name="CopySysForInf2Cat" AfterTargets="Link">
-    <Message Text="Copying $(TargetPath) to $(OutDir)..\$(TargetFileName) for WDK Inf2Cat processing" Importance="high" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(OutDir)..\$(TargetFileName)" />
+  <!-- Copy SIGNED .sys to package directory BEFORE Inf2Cat runs -->
+  <Target Name="CopySysForInf2Cat" BeforeTargets="Inf2Cat">
+    <Message Text="Copying signed $(TargetPath) to $(OutDir)$(ProjectName)\$(TargetFileName) for WDK Inf2Cat processing" Importance="high" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(OutDir)$(ProjectName)\$(TargetFileName)" />
   </Target>
   <ItemGroup>
     <!--Leaf Item elements-->
@@ -257,11 +257,11 @@
     <Inf Include="IntelAvbFilter.inf" />
   </ItemGroup>
   <ItemGroup>
-    <FilesToPackage Include="build\x64\Debug\IntelAvbFilter.inf">
+    <FilesToPackage Include="build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="build\x64\Debug\IntelAvbFilter.sys">
+    <FilesToPackage Include="build\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
