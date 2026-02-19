@@ -31,6 +31,8 @@ IntelAvbFilterRegisterDevice(
     DispatchTable[IRP_MJ_CLOSE] = IntelAvbFilterDispatch;
     DispatchTable[IRP_MJ_DEVICE_CONTROL] = IntelAvbFilterDeviceIoControl;
     
+    DEBUGP(DL_ERROR, "!!! REGISTERED IRP_MJ_DEVICE_CONTROL handler: %p\n", IntelAvbFilterDeviceIoControl);
+    
     
     NdisInitUnicodeString(&DeviceName, NTDEVICE_STRING);
     NdisInitUnicodeString(&DeviceLinkUnicodeString, LINKNAME_STRING);
@@ -169,8 +171,30 @@ IntelAvbFilterDeviceIoControl(
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
-
+    // ============================================================================
+    // IRP-LEVEL LOGGING: This executes BEFORE any other code in this function
+    // If Windows I/O Manager intercepts IOCTLs, this log won't appear
+    // ============================================================================
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    ULONG ioctlCodeAtEntry = IrpSp->Parameters.DeviceIoControl.IoControlCode;
+    
+    DEBUGP(DL_ERROR, "############################################################\n");
+    DEBUGP(DL_ERROR, "!!! IRP_MJ_DEVICE_CONTROL ARRIVED AT DRIVER\n");
+    DEBUGP(DL_ERROR, "!!! IRP=%p DeviceObject=%p\n", Irp, DeviceObject);
+    DEBUGP(DL_ERROR, "!!! IOCTL CODE: 0x%08X (decimal: %u)\n", ioctlCodeAtEntry, ioctlCodeAtEntry);
+    DEBUGP(DL_ERROR, "!!! FileObject: %p\n", IrpSp->FileObject);
+    DEBUGP(DL_ERROR, "!!! InputBufferLength: %u bytes\n", IrpSp->Parameters.DeviceIoControl.InputBufferLength);
+    DEBUGP(DL_ERROR, "!!! OutputBufferLength: %u bytes\n", IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
+    DEBUGP(DL_ERROR, "############################################################\n");
+    
+    // Check specific codes we're interested in
+    if (ioctlCodeAtEntry == 0x001700AC) {
+        DEBUGP(DL_ERROR, "!!! *** THIS IS SET_TARGET_TIME (code 43) ***\n");
+    } else if (ioctlCodeAtEntry == 0x00170084) {
+        DEBUGP(DL_ERROR, "!!! *** THIS IS TS_SUBSCRIBE (code 33) ***\n");
+    } else if (ioctlCodeAtEntry == 0x00170088) {
+        DEBUGP(DL_ERROR, "!!! *** THIS IS TS_RING_MAP (code 34) ***\n");
+    }
     
     // CRITICAL DEBUG: Log EVERY IOCTL that reaches this function
     DEBUGP(DL_ERROR, "!!! DEVICE.C ENTRY: IOCTL=0x%08X FileObject=%p\n", 
@@ -209,8 +233,15 @@ IntelAvbFilterDeviceIoControl(
     ASSERT(FilterDeviceExtension->Signature == 'FTDR');
     
     Irp->IoStatus.Information = 0;
+    
+    // CRITICAL DIAGNOSTIC: Log IOCTL code BEFORE switch to catch all paths
+    ULONG ioctlCode = IrpSp->Parameters.DeviceIoControl.IoControlCode;
+    DEBUGP(DL_ERROR, "!!! DEVICE.C: BEFORE SWITCH: IOCTL=0x%08X InputLen=%lu OutputLen=%lu\n",
+           ioctlCode,
+           IrpSp->Parameters.DeviceIoControl.InputBufferLength,
+           IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
 
-    switch (IrpSp->Parameters.DeviceIoControl.IoControlCode)
+    switch (ioctlCode)
     {
 
         case IOCTL_FILTER_RESTART_ALL:
@@ -725,8 +756,17 @@ IntelAvbFilterDeviceIoControl(
         }
 
         default:
+            // CRITICAL: Log unhandled IOCTLs
+            DEBUGP(DL_ERROR, "!!! DEVICE.C: UNHANDLED IOCTL IN DEFAULT CASE: IOCTL=0x%08X\n",
+                   IrpSp->Parameters.DeviceIoControl.IoControlCode);
+            DEBUGP(DL_ERROR, "!!!   Expected IOCTLs: OPEN_ADAPTER=0x%08X SUBSCRIBE=0x%08X RING_MAP=0x%08X SET_TARGET_TIME=0x%08X\n",
+                   IOCTL_AVB_OPEN_ADAPTER, IOCTL_AVB_TS_SUBSCRIBE, IOCTL_AVB_TS_RING_MAP, IOCTL_AVB_SET_TARGET_TIME);
+            Status = STATUS_INVALID_DEVICE_REQUEST;
             break;
     }
+
+    DEBUGP(DL_ERROR, "!!! DEVICE.C: AFTER SWITCH: IOCTL=0x%08X Status=0x%08X InfoLength=%lu\n",
+           IrpSp->Parameters.DeviceIoControl.IoControlCode, Status, InfoLength);
 
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = InfoLength;

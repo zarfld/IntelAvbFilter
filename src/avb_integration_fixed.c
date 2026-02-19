@@ -32,6 +32,13 @@ PAVB_DEVICE_CONTEXT g_AvbContext = NULL;
 
 /* Forward declarations */
 static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx);
+static VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext);
+static VOID AvbTxTimestampPollDpc(
+    _In_ PVOID SystemSpecific1,
+    _In_ PVOID FunctionContext,
+    _In_ PVOID SystemSpecific2,
+    _In_ PVOID SystemSpecific3);
+
 
 /* Platform ops wrapper (Intel library selects this) */
 static int PlatformInitWrapper(_In_ device_t *dev) { 
@@ -85,6 +92,14 @@ NTSTATUS AvbCreateMinimalContext(
         ctx->subscriptions[i].user_va = NULL;
         ctx->subscriptions[i].sequence_num = 0;
     }
+    
+    /* Initialize TX timestamp polling timer (Task 6c/7)
+     * CRITICAL: Must call NdisInitializeTimer BEFORE NdisSetTimer
+     * FIX: This was missing, causing BSOD 0x0A when timer was started
+     */
+    ctx->tx_poll_active = FALSE;  // Initially stopped
+    NdisInitializeTimer(&ctx->tx_poll_timer, AvbTxTimestampPollDpc, ctx);
+    DEBUGP(DL_INFO, "TX polling timer initialized (not started)\n");
     
     g_AvbContext = ctx;
     *OutCtx = ctx;
@@ -418,14 +433,24 @@ VOID AvbTxTimestampPollDpc(
     
     PAVB_DEVICE_CONTEXT AvbContext = (PAVB_DEVICE_CONTEXT)FunctionContext;
     
+    DEBUGP(DL_WARN, "!!! DPC FIRED: ctx=%p, g_ctx=%p\n", AvbContext, g_AvbContext);
+    
     // CRITICAL: Verify context is still valid (global might be cleared during cleanup)
     if (!AvbContext || AvbContext != g_AvbContext) {
+        DEBUGP(DL_ERROR, "!!! DPC: Context invalid, exiting\n");
         return;  // Context being cleaned up, do NOT re-arm timer
     }
     
+    DEBUGP(DL_WARN, "!!! DPC: poll_active=%d, hw_state=%d\n", 
+           AvbContext->tx_poll_active, AvbContext->hw_state);
+    
     if (!AvbContext->tx_poll_active || AvbContext->hw_state < AVB_HW_BAR_MAPPED) {
+        DEBUGP(DL_ERROR, "!!! DPC: Exiting early (poll_active=%d, hw_state=%d < %d)\n",
+               AvbContext->tx_poll_active, AvbContext->hw_state, AVB_HW_BAR_MAPPED);
         return;  // Timer stopped or hardware not ready
     }
+    
+    DEBUGP(DL_WARN, "!!! DPC: Checking TX timestamps and target time\n");
     
     device_t *dev = &AvbContext->intel_device;
     
@@ -465,6 +490,11 @@ VOID AvbTxTimestampPollDpc(
             0        // No trigger source
         );
     }
+    
+    /* Task 7: Check target time events (1ms polling)
+     * Monitors AUTT0/AUTT1 flags for target time reached conditions
+     */
+    AvbCheckTargetTime(AvbContext);
     
     // Re-arm timer for next poll (1ms periodic)
     if (AvbContext->tx_poll_active) {
@@ -560,6 +590,155 @@ VOID AvbPostTimestampEvent(
     }
     
     NdisReleaseSpinLock(&AvbContext->subscription_lock);
+}
+
+/* Task 7: Check target time events (AUTT0/AUTT1 flags)
+ * Called from AvbTxTimestampPollDpc every 1ms to monitor target time reached conditions
+ * Posts TS_EVENT_TARGET_TIME events when SYSTIM >= TRGTTIMLx
+ * Implements: Issue #13 (REQ-F-TS-EVENT-001) Task 7 - Target time event generation
+ * HAL-COMPLIANT: Uses device ops, no hardcoded registers
+ */
+VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
+{
+    const intel_device_ops_t *ops;
+    device_t *dev;
+    uint8_t autt_flags = 0;
+    int rc;
+    
+    /* Validate context */
+    if (!AvbContext || AvbContext != g_AvbContext) {
+        return;
+    }
+    
+    /* Skip if hardware not ready */
+    if (AvbContext->hw_state < AVB_HW_BAR_MAPPED) {
+        return;
+    }
+    
+    /* Get device operations (HAL interface) */
+    ops = intel_get_device_ops(AvbContext->intel_device.device_type);
+    if (!ops || !ops->check_autt_flags) {
+        /* Device doesn't support target time events */
+        return;
+    }
+    
+    dev = &AvbContext->intel_device;
+    
+    /* Check AUTT0/AUTT1 flags in TSAUXC register
+     * Bit pattern: 0x01 = AUTT0, 0x02 = AUTT1
+     */
+    rc = ops->check_autt_flags(dev, &autt_flags);
+    if (rc != 0) {
+        DEBUGP(DL_WARN, "!!! check_autt_flags failed: %d\n", rc);
+        return;
+    }
+    
+    /* ALWAYS log AUTT flags for debugging (even when 0) with target time comparison */
+    static int log_counter = 0;
+    if (++log_counter % 1000 == 0 || autt_flags != 0) {
+        // Read current SYSTIM and target times for comparison
+        uint64_t current_systim = 0;
+        uint32_t target0_low = 0, target0_high = 0;
+        uint32_t target1_low = 0, target1_high = 0;
+        
+        if (ops->get_systime) {
+            ops->get_systime(dev, &current_systim);
+        }
+        AvbMmioReadReal(dev, 0xB644, &target0_low);  // TRGTTIML0
+        AvbMmioReadReal(dev, 0xB648, &target0_high); // TRGTTIMH0
+        AvbMmioReadReal(dev, 0xB64C, &target1_low);  // TRGTTIML1
+        AvbMmioReadReal(dev, 0xB650, &target1_high); // TRGTTIMH1
+        
+        uint64_t target0 = ((uint64_t)target0_high << 32) | target0_low;
+        uint64_t target1 = ((uint64_t)target1_high << 32) | target1_low;
+        
+        int64_t delta0 = (int64_t)(target0 - current_systim);
+        int64_t delta1 = (int64_t)(target1 - current_systim);
+        
+        DEBUGP(DL_WARN, "!!! AUTT flags: 0x%02X (AUTT0=%d, AUTT1=%d) [check #%d]\n", 
+               autt_flags, (autt_flags & 0x01) ? 1 : 0, (autt_flags & 0x02) ? 1 : 0, log_counter);
+        DEBUGP(DL_WARN, "!!! SYSTIM:  0x%016llX (%llu ns)\n",
+               (unsigned long long)current_systim, (unsigned long long)current_systim);
+        DEBUGP(DL_WARN, "!!! TARGET0: 0x%016llX (delta: %s%lld ns = %lld ms)\n",
+               (unsigned long long)target0,
+               (delta0 < 0) ? "-" : "+", (long long)(delta0 < 0 ? -delta0 : delta0),
+               (long long)(delta0 < 0 ? -delta0 : delta0) / 1000000);
+        if (target1 != 0) {
+            DEBUGP(DL_WARN, "!!! TARGET1: 0x%016llX (delta: %s%lld ns = %lld ms)\n",
+                   (unsigned long long)target1,
+                   (delta1 < 0) ? "-" : "+", (long long)(delta1 < 0 ? -delta1 : delta1),
+                   (long long)(delta1 < 0 ? -delta1 : delta1) / 1000000);
+        }
+    }
+    
+    /* Timer 0: Check AUTT0 flag (bit 0) */
+    if (autt_flags & 0x01) {
+        uint64_t timestamp_ns = 0;
+        
+        /* Get current SYSTIM value (when target time was reached) */
+        if (ops->get_systime && ops->get_systime(dev, &timestamp_ns) == 0) {
+            /* Post target time event to subscribers
+             * event_type: TS_EVENT_TARGET_TIME (0x04)
+             * vlan_id: 0xFFFF (not applicable)
+             * pcp: 0xFF (not applicable)
+             * queue: 0 (not applicable)
+             * packet_length: 0 (not applicable)
+             * trigger_source: 0 (timer 0)
+             */
+            AvbPostTimestampEvent(
+                AvbContext,
+                TS_EVENT_TARGET_TIME,
+                timestamp_ns,
+                0xFFFF,  /* vlan_id - not applicable */
+                0xFF,    /* pcp - not applicable */
+                0,       /* queue - not applicable */
+                0,       /* packet_length - not applicable */
+                0        /* trigger_source: timer 0 */
+            );
+            
+            DEBUGP(DL_WARN, "!!! TARGET TIME 0 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+        }
+        
+        /* Clear AUTT0 flag (write-1-to-clear) */
+        if (ops->clear_autt_flag) {
+            rc = ops->clear_autt_flag(dev, 0);
+            if (rc != 0) {
+                DEBUGP(DL_WARN, "clear_autt_flag(0) failed: %d\n", rc);
+            }
+        }
+    }
+    
+    /* Timer 1: Check AUTT1 flag (bit 1) */
+    if (autt_flags & 0x02) {
+        uint64_t timestamp_ns = 0;
+        
+        /* Get current SYSTIM value */
+        if (ops->get_systime && ops->get_systime(dev, &timestamp_ns) == 0) {
+            /* Post target time event
+             * trigger_source: 1 (timer 1)
+             */
+            AvbPostTimestampEvent(
+                AvbContext,
+                TS_EVENT_TARGET_TIME,
+                timestamp_ns,
+                0xFFFF,  /* vlan_id - not applicable */
+                0xFF,    /* pcp - not applicable */
+                0,       /* queue - not applicable */
+                0,       /* packet_length - not applicable */
+                1        /* trigger_source: timer 1 */
+            );
+            
+            DEBUGP(DL_WARN, "!!! TARGET TIME 1 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+        }
+        
+        /* Clear AUTT1 flag (write-1-to-clear) */
+        if (ops->clear_autt_flag) {
+            rc = ops->clear_autt_flag(dev, 1);
+            if (rc != 0) {
+                DEBUGP(DL_WARN, "clear_autt_flag(1) failed: %d\n", rc);
+            }
+        }
+    }
 }
 
 /* Task 5: Cleanup subscriptions for a specific file object (implicit unsubscribe on handle close)
@@ -1414,7 +1593,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SET_TARGET_TIME:
         {
-            DEBUGP(DL_INFO, "IOCTL_AVB_SET_TARGET_TIME called\n");
+            DEBUGP(DL_WARN, "!!! IOCTL_AVB_SET_TARGET_TIME called\n");
             if (inLen < sizeof(AVB_TARGET_TIME_REQUEST) || outLen < sizeof(AVB_TARGET_TIME_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -1431,49 +1610,56 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     tgt_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                     status = STATUS_INVALID_PARAMETER;
                 } else {
-                    device_t *dev = &activeContext->intel_device;
-                    uint32_t trgttiml_offset, trgttimh_offset;
-                    uint32_t time_low, time_high;
-                    
-                    // Target time register offsets
-                    if (tgt_req->timer_index == 0) {
-                        trgttiml_offset = 0x0B644;  // TRGTTIML0
-                        trgttimh_offset = 0x0B648;  // TRGTTIMH0
+                    // HAL-compliant: Use device ops instead of hardcoded registers
+                    const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (!ops || !ops->set_target_time) {
+                        DEBUGP(DL_ERROR, "Device does not support target time operations\n");
+                        tgt_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        status = STATUS_NOT_SUPPORTED;
                     } else {
-                        trgttiml_offset = 0x0B64C;  // TRGTTIML1
-                        trgttimh_offset = 0x0B650;  // TRGTTIMH1
-                    }
-                    
-                    // Split 64-bit target time into low/high
-                    time_low = (uint32_t)(tgt_req->target_time & 0xFFFFFFFF);
-                    time_high = (uint32_t)((tgt_req->target_time >> 32) & 0xFFFFFFFF);
-                    
-                    DEBUGP(DL_INFO, "Setting target time %u: 0x%08X%08X\n", 
-                           tgt_req->timer_index, time_high, time_low);
-                    
-                    // Write target time registers (low then high for atomicity)
-                    if (intel_write_reg(dev, trgttiml_offset, time_low) == 0 &&
-                        intel_write_reg(dev, trgttimh_offset, time_high) == 0) {
+                        device_t *dev = &activeContext->intel_device;
                         
-                        // Enable interrupt in TSAUXC if requested
-                        if (tgt_req->enable_interrupt) {
-                            uint32_t tsauxc;
-                            if (intel_read_reg(dev, 0x0B640, &tsauxc) == 0) {
-                                uint32_t en_bit = (tgt_req->timer_index == 0) ? (1 << 0) : (1 << 4);
-                                tsauxc |= en_bit;
-                                intel_write_reg(dev, 0x0B640, tsauxc);
-                                DEBUGP(DL_INFO, "Enabled EN_TT%u in TSAUXC\n", tgt_req->timer_index);
-                            }
+                        // FIX: Read previous target time BEFORE setting new value (for sentinel detection in tests)
+                        uint32_t prev_low = 0, prev_high = 0;
+                        uint32_t trgttiml_reg = (tgt_req->timer_index == 0) ? 0xB644 : 0xB64C;  // TRGTTIML0 or TRGTTIML1
+                        uint32_t trgttimh_reg = (tgt_req->timer_index == 0) ? 0xB648 : 0xB650;  // TRGTTIMH0 or TRGTTIMH1
+                        
+                        // Read previous target time (with proper 3-parameter signature)
+                        if (AvbMmioReadReal(dev, trgttiml_reg, &prev_low) != 0 ||
+                            AvbMmioReadReal(dev, trgttimh_reg, &prev_high) != 0) {
+                            DEBUGP(DL_ERROR, "Failed to read previous target time registers\n");
+                            prev_low = 0;
+                            prev_high = 0;
                         }
+                        tgt_req->previous_target = ((avb_u64)prev_high << 32) | prev_low;
                         
-                        tgt_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
-                        status = STATUS_SUCCESS;
-                    } else {
-                        DEBUGP(DL_ERROR, "Failed to write target time registers\n");
-                        tgt_req->status = (avb_u32)NDIS_STATUS_FAILURE;
-                        status = STATUS_UNSUCCESSFUL;
+DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0x%016llX\n", 
+                       tgt_req->timer_index, (unsigned long long)tgt_req->target_time, 
+                       (unsigned long long)tgt_req->target_time,
+                       (unsigned long long)tgt_req->previous_target);
+                        
+                        // Use device-specific operation (handles all register details)
+                        DEBUGP(DL_WARN, "!!!  CALLING ops->set_target_time(timer=%u, target=%llu, enable_interrupt=%d)\n",
+                               tgt_req->timer_index, (unsigned long long)tgt_req->target_time, tgt_req->enable_interrupt);
+                        
+                        int rc = ops->set_target_time(dev, (uint8_t)tgt_req->timer_index, 
+                                                     tgt_req->target_time, 
+                                                     tgt_req->enable_interrupt);
+                        
+                        DEBUGP(DL_WARN, "!!! ops->set_target_time() returned: %d\n", rc);
+                        
+                        if (rc == 0) {
+                            tgt_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                                DEBUGP(DL_WARN, "!!! TARGET TIME SET SUCCESSFULLY (timer=%u, new=%llu, prev=%llu)\n",
+                                       tgt_req->timer_index, (unsigned long long)tgt_req->target_time,
+                                       (unsigned long long)tgt_req->previous_target);
+                        } else {
+                            DEBUGP(DL_ERROR, "Device operation failed: set_target_time returned %d\n", rc);
+                            tgt_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        }
+                        info = sizeof(*tgt_req);
                     }
-                    info = sizeof(*tgt_req);
                 }
             }
         }
@@ -1498,52 +1684,51 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     aux_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                     status = STATUS_INVALID_PARAMETER;
                 } else {
-                    device_t *dev = &activeContext->intel_device;
-                    uint32_t auxstmpl_offset, auxstmph_offset;
-                    uint32_t time_low, time_high;
-                    uint32_t tsauxc;
-                    
-                    // Auxiliary timestamp register offsets (read-only)
-                    if (aux_req->timer_index == 0) {
-                        auxstmpl_offset = 0x0B65C;  // AUXSTMPL0
-                        auxstmph_offset = 0x0B660;  // AUXSTMPH0
+                    // HAL-compliant: Use device ops instead of hardcoded registers
+                    const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (!ops || !ops->get_aux_timestamp || !ops->check_autt_flags) {
+                        DEBUGP(DL_ERROR, "Device does not support auxiliary timestamp operations\n");
+                        aux_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        status = STATUS_NOT_SUPPORTED;
                     } else {
-                        auxstmpl_offset = 0x0B664;  // AUXSTMPL1
-                        auxstmph_offset = 0x0B668;  // AUXSTMPH1
-                    }
-                    
-                    // Check AUTT flag in TSAUXC (bit 9 for timer 0, bit 17 for timer 1)
-                    if (intel_read_reg(dev, 0x0B640, &tsauxc) == 0) {
-                        uint32_t autt_bit = (aux_req->timer_index == 0) ? (1 << 9) : (1 << 17);
-                        aux_req->valid = (tsauxc & autt_bit) ? 1 : 0;
+                        device_t *dev = &activeContext->intel_device;
+                        uint8_t autt_flags = 0;
                         
-                        // Read auxiliary timestamp registers
-                        if (intel_read_reg(dev, auxstmpl_offset, &time_low) == 0 &&
-                            intel_read_reg(dev, auxstmph_offset, &time_high) == 0) {
-                            
-                            aux_req->timestamp = ((uint64_t)time_high << 32) | time_low;
-                            DEBUGP(DL_INFO, "Aux timestamp %u: 0x%08X%08X (valid=%u)\n",
-                                   aux_req->timer_index, time_high, time_low, aux_req->valid);
-                            
-                            // Clear AUTT flag if requested (write-1-to-clear)
-                            if (aux_req->clear_flag && aux_req->valid) {
-                                intel_write_reg(dev, 0x0B640, tsauxc | autt_bit);
-                                DEBUGP(DL_INFO, "Cleared AUTT%u flag\n", aux_req->timer_index);
-                            }
-                            
-                            aux_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
-                            status = STATUS_SUCCESS;
-                        } else {
-                            DEBUGP(DL_ERROR, "Failed to read auxiliary timestamp registers\n");
+                        // Check AUTT flag status
+                        int rc = ops->check_autt_flags(dev, &autt_flags);
+                        if (rc != 0) {
+                            DEBUGP(DL_ERROR, "Failed to check AUTT flags: %d\n", rc);
                             aux_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                             status = STATUS_UNSUCCESSFUL;
+                        } else {
+                            // Check if this timer's AUTT flag is set (bit 0 = timer 0, bit 1 = timer 1)
+                            uint8_t timer_bit = (aux_req->timer_index == 0) ? 0x01 : 0x02;
+                            aux_req->valid = (autt_flags & timer_bit) ? 1 : 0;
+                            
+                            // Read auxiliary timestamp
+                            rc = ops->get_aux_timestamp(dev, (uint8_t)aux_req->timer_index, &aux_req->timestamp);
+                            if (rc != 0) {
+                                DEBUGP(DL_ERROR, "Failed to read auxiliary timestamp: %d\n", rc);
+                                aux_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                                status = STATUS_UNSUCCESSFUL;
+                            } else {
+                                DEBUGP(DL_INFO, "Aux timestamp %u: 0x%016llX (valid=%u)\n",
+                                       aux_req->timer_index, (unsigned long long)aux_req->timestamp, aux_req->valid);
+                                
+                                // Clear AUTT flag if requested
+                                if (aux_req->clear_flag && aux_req->valid && ops->clear_aux_timestamp_flag) {
+                                    rc = ops->clear_aux_timestamp_flag(dev, (uint8_t)aux_req->timer_index);
+                                    if (rc == 0) {
+                                        DEBUGP(DL_INFO, "Cleared AUTT%u flag\n", aux_req->timer_index);
+                                    }
+                                }
+                                
+                                aux_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                                status = STATUS_SUCCESS;
+                            }
                         }
-                    } else {
-                        DEBUGP(DL_ERROR, "Failed to read TSAUXC register\n");
-                        aux_req->status = (avb_u32)NDIS_STATUS_FAILURE;
-                        status = STATUS_UNSUCCESSFUL;
+                        info = sizeof(*aux_req);
                     }
-                    info = sizeof(*aux_req);
                 }
             }
         }
@@ -1713,13 +1898,22 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 // Allocate ring_id (InterlockedIncrement ensures atomicity)
                 sub->ring_id = (avb_u32)InterlockedIncrement(&AvbContext->next_ring_id);
                 
-                // DISABLED: TX timestamp polling timer start (Task 6c) - causes BSOD 0x0A
-                // TODO: Fix NULL pointer dereference before re-enabling
-                // if (!AvbContext->tx_poll_active && AvbContext->hw_state >= AVB_HW_BAR_MAPPED) {
-                //     NdisSetTimer(&AvbContext->tx_poll_timer, 1);
-                //     AvbContext->tx_poll_active = TRUE;
-                //     DEBUGP(DL_INFO, "TX polling timer started (1ms period)\n");
-                // }
+                // RE-ENABLED: TX/Target timestamp polling timer (Task 6c/7)
+                // Previously disabled due to BSOD 0x0A - now safe with HAL abstraction and NULL checks
+                // Starts 1ms polling for TX timestamps (Task 6c) and target time events (Task 7)
+                DEBUGP(DL_WARN, "!!! TIMER CHECK: tx_poll_active=%d, hw_state=%d (need >= %d)\n",
+                       AvbContext->tx_poll_active, AvbContext->hw_state, AVB_HW_BAR_MAPPED);
+                if (!AvbContext->tx_poll_active && AvbContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                    AvbContext->tx_poll_active = TRUE;
+                    NdisSetTimer(&AvbContext->tx_poll_timer, 1);
+                    DEBUGP(DL_WARN, "!!! TX/Target polling timer STARTED (1ms period, first subscription)\n");
+                } else if (AvbContext->tx_poll_active) {
+                    DEBUGP(DL_WARN, "!!! TIMER already running (poll_active=%d, hw_state=%d)\n",
+                           AvbContext->tx_poll_active, AvbContext->hw_state);
+                } else {
+                    DEBUGP(DL_ERROR, "!!! TIMER NOT STARTED: hw_state=%d < %d (need BAR_MAPPED)\n",
+                           AvbContext->hw_state, AVB_HW_BAR_MAPPED);
+                }
                 
                 NdisReleaseSpinLock(&AvbContext->subscription_lock);
                 

@@ -49,6 +49,16 @@ typedef struct _intel_device_ops {
     int (*init_ptp)(device_t *dev);
     int (*enable_packet_timestamping)(device_t *dev, int enable);  // Enable TSYNCRXCTL/TSYNCTXCTL
     
+    // Target time operations (Issue #13 Task 7, IOCTLs 43/44)
+    int (*set_target_time)(device_t *dev, uint8_t timer_index, uint64_t target_time_ns, int enable_interrupt);
+    int (*get_target_time)(device_t *dev, uint8_t timer_index, uint64_t *target_time_ns);
+    int (*check_autt_flags)(device_t *dev, uint8_t *autt_flags);  // Returns AUTT0/AUTT1 status bits
+    int (*clear_autt_flag)(device_t *dev, uint8_t timer_index);   // Clear AUTT0 or AUTT1 flag
+    
+    // Auxiliary timestamp operations (Issue #7, IOCTL 44)
+    int (*get_aux_timestamp)(device_t *dev, uint8_t aux_index, uint64_t *aux_timestamp_ns);
+    int (*clear_aux_timestamp_flag)(device_t *dev, uint8_t aux_index);  // Clear AUTT flag for aux timestamp
+    
     // TSN operations (optional - can be NULL for basic devices)
     int (*setup_tas)(device_t *dev, struct tsn_tas_config *config);
     int (*setup_frame_preemption)(device_t *dev, struct tsn_fp_config *config);

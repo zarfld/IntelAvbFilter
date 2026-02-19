@@ -992,22 +992,188 @@ void Test_TXTimestampEventDelivery(TestContext *ctx) {
 }
 
 /**
- * UT-TS-EVENT-003: Target Time Reached Event
+ * UT-TS-EVENT-003: Target Time Reached Event (Task 7 Validation)
+ * Verifies: Target time events are posted when SYSTIM >= TRGTTIML0
  */
 void Test_TargetTimeReachedEvent(TestContext *ctx) {
     UINT32 subscription;
+    PVOID mapped_buffer = NULL;
+    SIZE_T actual_size = 0;
+    AVB_TARGET_TIME_REQUEST targetReq = {0};
+    AVB_CLOCK_CONFIG clockCfg = {0};
+    DWORD bytesReturned;
+    BOOL result;
     
-    /* Subscribe to target time events */
+    printf("\n=== UT-TS-EVENT-003: Target Time Reached Event (Task 7) ===\n");
+    
+    /* Step 1: Subscribe to target time events */
     subscription = SubscribeToEvents(ctx->adapter, TS_EVENT_TARGET_TIME, 0);
-    
-    if (subscription != 0) {
-        printf("    Target time event subscription created (ring_id=%u)\n", subscription);
-        printf("    NOTE: Requires IOCTL 43 (Set Target Time) to trigger events\n");
-        Unsubscribe(subscription);
-        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_PASS, NULL);
-    } else {
+    if (subscription == 0) {
         PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL, 
                         "Subscription failed");
+        return;
+    }
+    printf("✓ Subscribed (ring_id=%u)\n", subscription);
+    
+    /* Step 2: Map ring buffer */
+    mapped_buffer = MapRingBuffer(ctx->adapter, subscription, DEFAULT_RING_BUFFER_SIZE, &actual_size);
+    if (!mapped_buffer) {
+        Unsubscribe(subscription);
+        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
+                        "Failed to map ring buffer");
+        return;
+    }
+    printf("✓ Ring buffer mapped (%zu bytes)\n", actual_size);
+    
+    /* Cast ring buffer */
+    AVB_TIMESTAMP_RING_HEADER *hdr = (AVB_TIMESTAMP_RING_HEADER *)mapped_buffer;
+    AVB_TIMESTAMP_EVENT *events = (AVB_TIMESTAMP_EVENT *)(hdr + 1);
+    
+    /* Step 3: Get current SYSTIM */
+    result = DeviceIoControl(ctx->adapter, IOCTL_AVB_GET_CLOCK_CONFIG,
+                            &clockCfg, sizeof(clockCfg),
+                            &clockCfg, sizeof(clockCfg),
+                            &bytesReturned, NULL);
+    
+    if (!result || clockCfg.status != 0 || clockCfg.systim == 0) {
+        UnmapRingBuffer(mapped_buffer);
+        Unsubscribe(subscription);
+        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_SKIP,
+                        "Cannot read SYSTIM");
+        return;
+    }
+    
+    UINT64 current_systim = clockCfg.systim;
+    printf("Current SYSTIM: %llu ns\n", current_systim);
+    
+    /* Step 4: Set target time +2 seconds in future */
+    UINT64 target_time_ns = current_systim + 2000000000ULL;
+    targetReq.timer_index = 0;
+    targetReq.target_time = target_time_ns;
+    targetReq.enable_interrupt = 1;
+    targetReq.enable_sdp_output = 0;
+    targetReq.sdp_mode = 0;
+    targetReq.previous_target = 0xDEADBEEF;  /* Another sentinel */
+    targetReq.status = 0xFFFFFFFF;  /* Sentinel: driver MUST overwrite this */
+    
+    printf("    DEBUG: Before DeviceIoControl:\n");
+    fflush(stdout);
+    printf("      Structure size: %zu bytes\n", sizeof(targetReq));
+    fflush(stdout);
+    printf("      IOCTL code: 0x%08X (vendor-defined range 0x800+)\n", IOCTL_AVB_SET_TARGET_TIME);
+    fflush(stdout);
+    printf("      Handle: %p (same as subscription: %p)\n", ctx->adapter, ctx->adapter);
+    fflush(stdout);
+    printf("      timer_index: %u\n", targetReq.timer_index);
+    printf("      target_time: %llu ns\n", targetReq.target_time);
+    printf("      enable_interrupt: %u\n", targetReq.enable_interrupt);
+    printf("      status (sentinel): 0x%08X\n", targetReq.status);
+    printf("      previous_target (sentinel): 0x%08X\n", targetReq.previous_target);
+    fflush(stdout);
+    
+    printf("    DEBUG: About to call DeviceIoControl...\n");
+    fflush(stdout);
+    
+    result = DeviceIoControl(ctx->adapter, IOCTL_AVB_SET_TARGET_TIME,
+                            &targetReq, sizeof(targetReq),
+                            &targetReq, sizeof(targetReq),
+                            &bytesReturned, NULL);
+    
+    DWORD lastError = GetLastError();
+    printf("    DEBUG: DeviceIoControl RETURNED\n");
+    fflush(stdout);
+    printf("      API result: %d\n", result);
+    fflush(stdout);
+    printf("      GetLastError(): %lu (0x%08X)\n", lastError, lastError);
+    fflush(stdout);
+    printf("      bytes_returned: %lu (expected ~36-40)\n", bytesReturned);
+    fflush(stdout);
+    printf("      status: 0x%08X %s\n", targetReq.status,
+           targetReq.status == 0xFFFFFFFF ? "<-- SENTINEL UNCHANGED - IOCTL NEVER REACHED DRIVER!" : 
+           targetReq.status == 0 ? "<-- ZERO (success or Windows zeroed it?)" : "<-- ERROR CODE");
+    fflush(stdout);
+    printf("      previous_target: 0x%08X %s\n", targetReq.previous_target,
+           targetReq.previous_target == 0xDEADBEEF ? "<-- SENTINEL UNCHANGED!" : "<-- Modified by driver");
+    fflush(stdout);
+    
+    if (!result) {
+        UnmapRingBuffer(mapped_buffer);
+        Unsubscribe(subscription);
+        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
+                        "DeviceIoControl failed");
+        return;
+    }
+    
+    if (targetReq.status == 0xFFFFFFFF) {
+        UnmapRingBuffer(mapped_buffer);
+        Unsubscribe(subscription);
+        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
+                        "CRITICAL: IOCTL never reached driver (status not modified)");
+        return;
+    }
+    
+    if (targetReq.status != 0) {
+        UnmapRingBuffer(mapped_buffer);
+        Unsubscribe(subscription);
+        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
+                        "Failed to set target time");
+        return;
+    }
+    
+    printf("✓ Target time set to %llu ns (+ 2.0s)\n", target_time_ns);
+    printf("  Polling ring buffer for 3 seconds...\n");
+    
+    /* Step 5: Poll ring buffer for 3 seconds */
+    BOOL event_received = FALSE;
+    DWORD start_tick = GetTickCount();
+    UINT32 consumer_idx = hdr->consumer_index;
+    
+    while ((GetTickCount() - start_tick) < 3000) {
+        UINT32 producer_idx = hdr->producer_index;
+        
+        if (consumer_idx != producer_idx) {
+            /* Event available */
+            UINT32 idx = consumer_idx & hdr->mask;
+            AVB_TIMESTAMP_EVENT *evt = &events[idx];
+            
+            printf("  Event: type=0x%02X, timestamp=%llu ns, trigger=%u\n",
+                   evt->event_type, evt->timestamp_ns, evt->trigger_source);
+            
+            if (evt->event_type == TS_EVENT_TARGET_TIME) {
+                event_received = TRUE;
+                
+                /* Verify timestamp is close to target */
+                INT64 delta = (INT64)(evt->timestamp_ns - target_time_ns);
+                if (delta < 0) delta = -delta;
+                
+                if (delta > 5000000) {  /* 5ms tolerance */
+                    printf("  WARNING: timestamp delta = %lld ns (%lld ms)\n", 
+                           delta, delta / 1000000);
+                }
+                
+                if (evt->trigger_source != 0) {
+                    printf("  WARNING: Expected trigger_source=0, got %u\n", 
+                           evt->trigger_source);
+                }
+                
+                printf("✓ Target time event received!\n");
+                break;
+            }
+            
+            consumer_idx++;
+        }
+        
+        Sleep(10);
+    }
+    
+    UnmapRingBuffer(mapped_buffer);
+    Unsubscribe(subscription);
+    
+    if (event_received) {
+        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_PASS, NULL);
+    } else {
+        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
+                        "No event received within 3 seconds - Task 7 not working!");
     }
 }
 

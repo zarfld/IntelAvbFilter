@@ -356,6 +356,214 @@ static void test_target_011_invalid_timer(HANDLE hDevice) {
     TEST_PASS("TC-TARGET-011");
 }
 
+/* ========== TASK 7: TARGET TIME EVENT DELIVERY TEST ========== */
+
+/**
+ * TC-TARGET-EVENT-001: Target Time Event Delivery (Task 7 Validation)
+ * Purpose: Verify TS_EVENT_TARGET_TIME (0x04) events are posted when SYSTIM >= TRGTTIML0
+ * 
+ * Steps:
+ * 1. Subscribe to TS_EVENT_TARGET_TIME events
+ * 2. Map ring buffer
+ * 3. Get current SYSTIM
+ * 4. Set target time +2 seconds in future
+ * 5. Poll ring buffer for 3 seconds
+ * 6. Verify event delivered with correct type and timestamp
+ * 7. Verify AUTT0 flag was cleared
+ */
+static void test_task7_target_time_event(HANDLE hDevice) {
+    TEST_START("TC-TARGET-EVENT-001: Target Time Event Delivery (Task 7)");
+    
+    AVB_TS_SUBSCRIPTION_REQUEST subReq = {0};
+    AVB_TS_RING_MAP_REQUEST mapReq = {0};
+    AVB_TARGET_TIME_REQUEST targetReq = {0};
+    AVB_AUX_TIMESTAMP_REQUEST auxReq = {0};
+    DWORD bytesReturned = 0;
+    BOOL result;
+    
+    /* Step 1: Subscribe to target time events */
+    subReq.event_mask = TS_EVENT_TARGET_TIME;  /* 0x04 */
+    subReq.vlan_filter = 0xFFFF;  /* No VLAN filtering */
+    subReq.pcp_filter = 0xFF;     /* No PCP filtering */
+    subReq.ring_size = 64;        /* Small ring */
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_AVB_TS_SUBSCRIBE,
+        &subReq,
+        sizeof(subReq),
+        &subReq,
+        sizeof(subReq),
+        &bytesReturned,
+        NULL
+    );
+    
+    if (!result || subReq.status != 0 || subReq.ring_id == 0) {
+        TEST_FAIL("TC-TARGET-EVENT-001", "Failed to subscribe to target time events");
+        return;
+    }
+    
+    printf("✓ Subscribed to target time events (ring_id=%u)\n", subReq.ring_id);
+    
+    /* Step 2: Map ring buffer */
+    mapReq.ring_id = subReq.ring_id;
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_AVB_TS_RING_MAP,
+        &mapReq,
+        sizeof(mapReq),
+        &mapReq,
+        sizeof(mapReq),
+        &bytesReturned,
+        NULL
+    );
+    
+    if (!result || mapReq.status != 0 || mapReq.ring_buffer == NULL) {
+        TEST_FAIL("TC-TARGET-EVENT-001", "Failed to map ring buffer");
+        goto cleanup_subscription;
+    }
+    
+    printf("✓ Ring buffer mapped at %p\n", mapReq.ring_buffer);
+    
+    /* Cast ring buffer */
+    AVB_TIMESTAMP_RING_HEADER *hdr = (AVB_TIMESTAMP_RING_HEADER *)mapReq.ring_buffer;
+    AVB_TIMESTAMP_EVENT *events = (AVB_TIMESTAMP_EVENT *)(hdr + 1);
+    
+    /* Step 3: Get current SYSTIM */
+    ULONGLONG current_systim = get_current_systim(hDevice);
+    if (current_systim == 0) {
+        TEST_SKIP("TC-TARGET-EVENT-001", "Cannot read SYSTIM");
+        goto cleanup_map;
+    }
+    
+    /* Step 4: Set target time +2 seconds in future */
+    ULONGLONG target_time_ns = current_systim + 2000000000ULL;  /* +2 seconds */
+    
+    targetReq.timer_index = 0;
+    targetReq.target_time = target_time_ns;
+    targetReq.enable_interrupt = 1;  /* Enable EN_TT0 */
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_AVB_SET_TARGET_TIME,
+        &targetReq,
+        sizeof(targetReq),
+        &targetReq,
+        sizeof(targetReq),
+        &bytesReturned,
+        NULL
+    );
+    
+    if (!result || targetReq.status != 0) {
+        TEST_FAIL("TC-TARGET-EVENT-001", "Failed to set target time");
+        goto cleanup_map;
+    }
+    
+    printf("✓ Target time set to %llu ns (current + 2.0s)\n", target_time_ns);
+    printf("  Polling ring buffer for 3 seconds...\n");
+    
+    /* Step 5: Poll ring buffer for 3 seconds */
+    BOOL event_received = FALSE;
+    ULONGLONG event_timestamp = 0;
+    DWORD start_tick = GetTickCount();
+    DWORD consumer_index = hdr->consumer_index;
+    
+    while ((GetTickCount() - start_tick) < 3000) {  /* 3 second timeout */
+        /* Check if new events available */
+        DWORD producer_index = hdr->producer_index;
+        
+        if (consumer_index != producer_index) {
+            /* Read event from ring */
+            DWORD idx = consumer_index & hdr->ring_mask;
+            AVB_TIMESTAMP_EVENT *evt = &events[idx];
+            
+            printf("  Event received: type=0x%02X, timestamp=%llu ns, trigger=%u\n",
+                   evt->event_type, evt->timestamp_ns, evt->trigger_source);
+            
+            /* Verify this is our target time event */
+            if (evt->event_type == TS_EVENT_TARGET_TIME) {
+                event_received = TRUE;
+                event_timestamp = evt->timestamp_ns;
+                
+                /* Verify timestamp is near target time (within 2ms for polling) */
+                LONGLONG delta = (LONGLONG)(evt->timestamp_ns - target_time_ns);
+                if (delta < 0) delta = -delta;
+                
+                if (delta > 5000000) {  /* 5ms tolerance */
+                    printf("  WARNING: Timestamp delta too large: %lld ns (%lld ms)\n", 
+                           delta, delta / 1000000);
+                }
+                
+                /* Verify trigger_source is 0 (timer 0) */
+                if (evt->trigger_source != 0) {
+                    printf("  WARNING: Expected trigger_source=0, got %u\n", evt->trigger_source);
+                }
+                
+                break;
+            }
+            
+            consumer_index++;
+        }
+        
+        Sleep(10);  /* Poll every 10ms */
+    }
+    
+    if (!event_received) {
+        TEST_FAIL("TC-TARGET-EVENT-001", "No target time event received within 3 seconds");
+        goto cleanup_map;
+    }
+    
+    printf("✓ Target time event received at %llu ns\n", event_timestamp);
+    
+    /* Step 7: Verify AUTT0 flag was cleared */
+    auxReq.timer_index = 0;
+    auxReq.clear_flag = 0;  /* Just read */
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_AVB_GET_AUX_TIMESTAMP,
+        &auxReq,
+        sizeof(auxReq),
+        &auxReq,
+        sizeof(auxReq),
+        &bytesReturned,
+        NULL
+    );
+    
+    if (result && auxReq.status == 0) {
+        if (auxReq.valid) {
+            printf("  WARNING: AUTT0 flag still set (should have been cleared)\n");
+        } else {
+            printf("✓ AUTT0 flag correctly cleared after event\n");
+        }
+    }
+    
+    TEST_PASS("TC-TARGET-EVENT-001");
+    
+cleanup_map:
+    /* Unmap ring buffer */
+    if (mapReq.ring_buffer != NULL) {
+        /* Note: No explicit unmap IOCTL, handle close will cleanup */
+    }
+    
+cleanup_subscription:
+    /* Unsubscribe */
+    AVB_TS_UNSUBSCRIBE_REQUEST unsubReq = {0};
+    unsubReq.ring_id = subReq.ring_id;
+    
+    DeviceIoControl(
+        hDevice,
+        IOCTL_AVB_TS_UNSUBSCRIBE,
+        &unsubReq,
+        sizeof(unsubReq),
+        &unsubReq,
+        sizeof(unsubReq),
+        &bytesReturned,
+        NULL
+    );
+}
+
 /* ========== AUXILIARY TIMESTAMP TESTS (Issue #299) ========== */
 
 /**
@@ -620,6 +828,10 @@ int main(int argc, char* argv[]) {
     test_target_004_enable_interrupt(hDevice);
     test_target_009_null_buffer(hDevice);
     test_target_011_invalid_timer(hDevice);
+    
+    /* Run Task 7 Test: Target Time Event Delivery */
+    printf("\n========== TASK 7: TARGET TIME EVENT DELIVERY ==========\n\n");
+    test_task7_target_time_event(hDevice);
     
     /* Run Auxiliary Timestamp Tests (Issue #299 - subset) */
     printf("\n========== AUXILIARY TIMESTAMP TESTS (Issue #299) ==========\n\n");

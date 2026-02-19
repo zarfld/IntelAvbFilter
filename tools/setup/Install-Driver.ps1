@@ -90,6 +90,7 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not $DriverPath) {
     # $PSScriptRoot = tools\setup, so go up two levels to repo root
     $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    # Package directory created by WDK with signed driver and catalog
     $DriverPath = Join-Path $repoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter"
 }
 
@@ -266,6 +267,27 @@ function Uninstall-Driver {
         # Uninstall via netcfg (THE correct method for NDIS filters)
         Write-Host "`nRemoving NDIS filter component (netcfg)..." -ForegroundColor Gray
         netcfg.exe -u MS_IntelAvbFilter
+        
+        # CRITICAL: Manually clean DriverStore FileRepository cache
+        # pnputil doesn't properly delete cached NDIS filter drivers
+        # This is THE fix for "old driver stuck in memory" (#192-211 issues)
+        Write-Host "`nCleaning DriverStore FileRepository cache..." -ForegroundColor Gray
+        $driverStoreBase = "C:\Windows\System32\DriverStore\FileRepository"
+        $cachedDrivers = Get-ChildItem $driverStoreBase -Filter "intelavbfilter.inf_*" -ErrorAction SilentlyContinue
+        
+        if ($cachedDrivers) {
+            foreach ($folder in $cachedDrivers) {
+                $sysFile = Join-Path $folder.FullName "IntelAvbFilter.sys"
+                if (Test-Path $sysFile) {
+                    $info = Get-Item $sysFile
+                    Write-Host "  Deleting cached driver: $($folder.Name) ($($info.Length) bytes)" -ForegroundColor Yellow
+                }
+                Remove-Item $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Write-Success "DriverStore cache cleaned"
+        } else {
+            Write-Host "  No cached drivers found (already clean)" -ForegroundColor Gray
+        }
         
         if ($LASTEXITCODE -eq 0) {
             Write-Success "Driver uninstalled successfully (netcfg)"
