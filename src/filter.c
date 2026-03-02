@@ -573,6 +573,14 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
 
     UNREFERENCED_PARAMETER(PauseParameters);
 
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterPause: INVALID FilterModuleContext=%p!\n", pFilter);
+        // Return success anyway - NDIS will handle cleanup
+        return NDIS_STATUS_SUCCESS;
+    }
+
     DEBUGP(DL_TRACE, "===>IntelAvbFilter FilterPause: FilterInstance %p\n", FilterModuleContext);
 
     //
@@ -615,6 +623,14 @@ FilterRestart(
     PNDIS_RESTART_GENERAL_ATTRIBUTES NdisGeneralAttributes;
     PNDIS_RESTART_ATTRIBUTES         NdisRestartAttributes;
     NDIS_CONFIGURATION_OBJECT        ConfigObject;
+
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterRestart: INVALID FilterModuleContext=%p!\n", pFilter);
+        // Return failure - cannot restart without valid filter context
+        return NDIS_STATUS_FAILURE;
+    }
 
     DEBUGP(DL_TRACE, "===>FilterRestart:   FilterModuleContext %p\n", FilterModuleContext);
 
@@ -775,6 +791,13 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     PMS_FILTER                  pFilter = (PMS_FILTER)FilterModuleContext;
     BOOLEAN                      bFalse = FALSE;
 
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterDetach: INVALID FilterModuleContext=%p! Cannot detach.\n", pFilter);
+        // Cannot fail detach, but can't proceed either - just return
+        return;
+    }
 
     DEBUGP(DL_TRACE, "===>FilterDetach:    FilterInstance %p\n", FilterModuleContext);
 
@@ -905,6 +928,12 @@ NOTE: Called at <= DISPATCH_LEVEL  (unlike a miniport's MiniportOidRequest)
     PFILTER_REQUEST_CONTEXT Context;
     BOOLEAN                 bFalse = FALSE;
 
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
+        return NDIS_STATUS_INVALID_PARAMETER;
+    }
 
     DEBUGP(DL_TRACE, "===>FilterOidRequest: Request %p.\n", Request);
 
@@ -1027,6 +1056,13 @@ Arguments:
     PNDIS_OID_REQUEST                   OriginalRequest = NULL;
     BOOLEAN                             bFalse = FALSE;
 
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterCancelOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
+        return;
+    }
+
     FILTER_ACQUIRE_LOCK(&pFilter->Lock, bFalse);
 
     Request = pFilter->PendingOidRequest;
@@ -1086,6 +1122,13 @@ Arguments:
     PNDIS_OID_REQUEST                   OriginalRequest;
     PFILTER_REQUEST_CONTEXT             Context;
     BOOLEAN                             bFalse = FALSE;
+
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterOidRequestComplete: INVALID FilterModuleContext=%p!\n", pFilter);
+        return;
+    }
 
     DEBUGP(DL_TRACE, "===>FilterOidRequestComplete, Request %p.\n", Request);
 
@@ -1176,6 +1219,13 @@ NOTE: called at <= DISPATCH_LEVEL
     BOOLEAN                  bFalse = FALSE;
 #endif
 
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterStatus: INVALID FilterModuleContext=%p!\n", pFilter);
+        return;
+    }
+
     DEBUGP(DL_TRACE, "===>FilterStatus, IndicateStatus = %8x.\n", StatusIndication->StatusCode);
 
 
@@ -1233,6 +1283,13 @@ NOTE: called at PASSIVE_LEVEL
 #if DBG
     BOOLEAN                bFalse = FALSE;
 #endif
+
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterDevicePnPEventNotify: INVALID FilterModuleContext=%p!\n", pFilter);
+        return;
+    }
 
     DEBUGP(DL_TRACE, "===>FilterDevicePnPEventNotify: NetPnPEvent = %p.\n", NetDevicePnPEvent);
 
@@ -1298,6 +1355,13 @@ NOTE: called at PASSIVE_LEVEL
     PMS_FILTER                pFilter = (PMS_FILTER)FilterModuleContext;
     NDIS_STATUS               Status = NDIS_STATUS_SUCCESS;
 
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterNetPnPEvent: INVALID FilterModuleContext=%p!\n", pFilter);
+        return NDIS_STATUS_INVALID_PARAMETER;
+    }
+
     //
     // The filter may do processing on the event here, including intercepting
     // and dropping it entirely.  However, the sample does nothing with Net PNP
@@ -1346,6 +1410,14 @@ Return Value:
     ULONG              NumOfSendCompletes = 0;
     BOOLEAN            DispatchLevel;
     PNET_BUFFER_LIST   CurrNbl;
+
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterSendNetBufferListsComplete: INVALID FilterModuleContext=%p! Passing NBLs up anyway.\n", pFilter);
+        NdisFSendNetBufferListsComplete(FilterDriverHandle, NetBufferLists, SendCompleteFlags);
+        return;
+    }
 
     DEBUGP(DL_TRACE, "===>SendNBLComplete, NetBufferList: %p.\n", NetBufferLists);
 
@@ -1422,6 +1494,25 @@ Arguments:
     PNET_BUFFER_LIST    CurrNbl;
     BOOLEAN             DispatchLevel;
     BOOLEAN             bFalse = FALSE;
+
+    // BUGFIX: GitHub Issue #315 - NULL/invalid pointer check to prevent DRIVER_IRQL_NOT_LESS_OR_EQUAL (0xD1)
+    // Race condition: NDIS may call this after FilterDetach if packets are in flight
+    // Check for NULL OR invalid kernel pointers (e.g., 0x4 seen in crash dumps)
+    // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterSendNetBufferLists: INVALID FilterModuleContext=%p! Completing NBLs with error.\n", pFilter);
+        CurrNbl = NetBufferLists;
+        while (CurrNbl)
+        {
+            PNET_BUFFER_LIST NextNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
+            NET_BUFFER_LIST_STATUS(CurrNbl) = NDIS_STATUS_PAUSED;
+            CurrNbl = NextNbl;
+        }
+        NdisFSendNetBufferListsComplete(NULL, NetBufferLists, 
+            NDIS_TEST_SEND_AT_DISPATCH_LEVEL(SendFlags) ? NDIS_SEND_COMPLETE_FLAGS_DISPATCH_LEVEL : 0);
+        return;
+    }
 
     DEBUGP(DL_TRACE, "===>SendNetBufferList: NBL = %p.\n", NetBufferLists);
 
@@ -1523,6 +1614,15 @@ Arguments:
     BOOLEAN             DispatchLevel;
     ULONG               Ref;
 
+    // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterReturnNetBufferLists: INVALID FilterModuleContext=%p! Cannot return NBLs.\n", pFilter);
+        // Cannot call NdisFReturnNetBufferLists without valid filter handle
+        // This should not happen in normal operation
+        return;
+    }
+
     DEBUGP(DL_TRACE, "===>ReturnNetBufferLists, NetBufferLists is %p.\n", NetBufferLists);
 
 
@@ -1618,6 +1718,25 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
 #if DBG
     ULONG               ReturnFlags;
 #endif
+
+    // BUGFIX: GitHub Issue #315 - NULL/invalid pointer check to prevent DRIVER_IRQL_NOT_LESS_OR_EQUAL (0xD1)
+    // Race condition: NDIS may call this after FilterDetach if packets are in flight
+    // Check for NULL OR invalid kernel pointers (e.g., 0x4 seen in crash dumps)
+    // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    {
+        DEBUGP(DL_ERROR, "FilterReceiveNetBufferLists: INVALID FilterModuleContext=%p! Returning NBLs immediately.\n", pFilter);
+        if (NDIS_TEST_RECEIVE_CAN_PEND(ReceiveFlags))
+        {
+            ULONG NblReturnFlags = 0;
+            if (NDIS_TEST_RECEIVE_AT_DISPATCH_LEVEL(ReceiveFlags))
+            {
+                NDIS_SET_RETURN_FLAG(NblReturnFlags, NDIS_RETURN_FLAGS_DISPATCH_LEVEL);
+            }
+            NdisFReturnNetBufferLists(NULL, NetBufferLists, NblReturnFlags);
+        }
+        return;
+    }
 
     DEBUGP(DL_TRACE, "===>ReceiveNetBufferList: NetBufferLists = %p.\n", NetBufferLists);
     do

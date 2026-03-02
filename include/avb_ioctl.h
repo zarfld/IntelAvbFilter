@@ -39,10 +39,21 @@ typedef struct AVB_REQUEST_HEADER {
 
 /* Driver version query response (Issue #64, #273)
  * Used by IOCTL_AVB_GET_VERSION (0x9C40A000)
- * No input buffer required. */
+ * No input buffer required.
+ * 
+ * Version format: Major.Minor.Build.Revision
+ *   Major.Minor = API version (manually set when API changes)
+ *   Build       = Incrementing build counter (set by CI/CD or build infrastructure)
+ *   Revision    = Source control commit count or patch number (set by CI/CD)
+ * 
+ * Build and Revision default to 0 if not set by build infrastructure.
+ * See src/avb_version.h for infrastructure integration.
+ */
 typedef struct _IOCTL_VERSION {
-    avb_u16 Major;  /* Incremented on breaking changes */
-    avb_u16 Minor;  /* Incremented on backward-compatible additions */
+    avb_u16 Major;     /* API version - breaking changes (manually set) */
+    avb_u16 Minor;     /* API version - compatible additions (manually set) */
+    avb_u16 Build;     /* Incrementing build counter (default: 0) */
+    avb_u16 Revision;  /* Source control commit count or patch number (default: 0) */
 } IOCTL_VERSION, *PIOCTL_VERSION;
 
 /* IOCTL macro (METHOD_BUFFERED) */

@@ -98,6 +98,13 @@ typedef struct _AVB_DEVICE_CONTEXT {
     NDIS_TIMER tx_poll_timer;                             // Periodic timer for TX timestamp FIFO polling
     BOOLEAN tx_poll_active;                               // Timer running flag
 
+    // Target Time DPC Timer (Task 7 - Issue #13)
+    KTIMER target_time_timer;                             // Windows kernel timer object
+    KDPC target_time_dpc;                                 // Deferred Procedure Call object
+    BOOLEAN target_time_poll_active;                      // Flag: Timer is running
+    ULONG target_time_poll_interval_ms;                   // Poll interval (default: 10ms)
+    volatile LONG target_time_dpc_call_count;             // Diagnostic: DPC invocation counter
+
     // Legacy ring (deprecated - kept for compatibility)
     // Timestamp event ring (section-based mapping)
     BOOLEAN ts_ring_allocated;
