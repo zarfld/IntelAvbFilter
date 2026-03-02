@@ -54,23 +54,32 @@ static BOOL TestQueryDriverVersion(HANDLE hDevice)
         return FALSE;
     }
     
-    printf("    DEBUG: version.Major=%u, version.Minor=%u\n", version.Major, version.Minor);
+    printf("    DEBUG: version.Major=%u, version.Minor=%u, version.Build=%u, version.Revision=%u\n", 
+           version.Major, version.Minor, version.Build, version.Revision);
     
-    // Verify output buffer size
+    // Verify output buffer size (now 8 bytes: 4 x uint16)
     if (bytesReturned != sizeof(IOCTL_VERSION)) {
         printf("  [FAIL] UT-VERSION-001: bytes_returned=%lu, expected=%zu\n", 
                bytesReturned, sizeof(IOCTL_VERSION));
         return FALSE;
     }
     
-    // Verify version values
+    // Verify API version values (Major.Minor)
     if (version.Major != EXPECTED_MAJOR_VERSION || version.Minor != EXPECTED_MINOR_VERSION) {
         printf("  [FAIL] UT-VERSION-001: Version mismatch (got %u.%u, expected %u.%u)\n",
                version.Major, version.Minor, EXPECTED_MAJOR_VERSION, EXPECTED_MINOR_VERSION);
         return FALSE;
     }
     
-    printf("  [PASS] UT-VERSION-001: Driver version = %u.%u ✓\n", version.Major, version.Minor);
+    // Build and Revision can be 0 (if not set by CI/CD) or actual build numbers
+    printf("  [PASS] UT-VERSION-001: Driver version = %u.%u.%u.%u ✓\n", 
+           version.Major, version.Minor, version.Build, version.Revision);
+    if (version.Build == 0 && version.Revision == 0) {
+        printf("    INFO: Build/Revision not set by build infrastructure (using defaults)\n");
+    } else {
+        printf("    INFO: Build=%u (incrementing counter), Revision=%u (commit/patch number)\n",
+               version.Build, version.Revision);
+    }
     return TRUE;
 }
 
@@ -79,7 +88,7 @@ static BOOL TestQueryDriverVersion(HANDLE hDevice)
  * 
  * Given: Driver supports IOCTL_GET_VERSION
  * When: Buffer size checked
- * Then: Returns exactly sizeof(IOCTL_VERSION) = 4 bytes
+ * Then: Returns exactly sizeof(IOCTL_VERSION) = 8 bytes (4 x uint16)
  */
 static BOOL TestVersionBufferSize(HANDLE hDevice)
 {
@@ -103,12 +112,16 @@ static BOOL TestVersionBufferSize(HANDLE hDevice)
         return FALSE;
     }
     
-    if (bytesReturned != 4) {
-        printf("  [FAIL] UT-VERSION-002: bytes_returned=%lu, expected=4\n", bytesReturned);
+    const DWORD EXPECTED_SIZE = 8;  // 4 fields x 2 bytes each = 8 bytes
+    if (bytesReturned != EXPECTED_SIZE) {
+        printf("  [FAIL] UT-VERSION-002: bytes_returned=%lu, expected=%lu\n", 
+               bytesReturned, EXPECTED_SIZE);
         return FALSE;
     }
     
-    printf("  [PASS] UT-VERSION-002: Buffer size correct (4 bytes) ✓\n");
+    printf("  [PASS] UT-VERSION-002: Buffer size correct (%lu bytes = 4 fields) ✓\n", EXPECTED_SIZE);
+    printf("    INFO: Structure: Major=%u, Minor=%u, Build=%u, Revision=%u\n",
+           version.Major, version.Minor, version.Build, version.Revision);
     return TRUE;
 }
 
@@ -117,11 +130,14 @@ static BOOL TestVersionBufferSize(HANDLE hDevice)
  * 
  * Given: Driver supports IOCTL_GET_VERSION
  * When: Called 100 times in sequence
- * Then: All return consistent version (Major=1, Minor=0)
+ * Then: All return consistent version (Major.Minor.Build.Revision identical)
  */
 static BOOL TestMultipleVersionQueries(HANDLE hDevice)
 {
     printf("  [TEST] UT-VERSION-003: Multiple Concurrent Queries\n");
+    
+    IOCTL_VERSION firstVersion = {0};
+    BOOL firstQueryDone = FALSE;
     
     for (int i = 0; i < 100; i++) {
         IOCTL_VERSION version = {0};
@@ -141,15 +157,28 @@ static BOOL TestMultipleVersionQueries(HANDLE hDevice)
             return FALSE;
         }
         
-        if (version.Major != EXPECTED_MAJOR_VERSION || version.Minor != EXPECTED_MINOR_VERSION) {
-            printf("  [FAIL] UT-VERSION-003: Iteration %d version mismatch (got %u.%u)\n",
-                   i, version.Major, version.Minor);
+        // Store first version as reference
+        if (!firstQueryDone) {
+            firstVersion = version;
+            firstQueryDone = TRUE;
+        }
+        
+        // Verify all 4 fields match the first query
+        if (version.Major != firstVersion.Major || 
+            version.Minor != firstVersion.Minor ||
+            version.Build != firstVersion.Build ||
+            version.Revision != firstVersion.Revision) {
+            printf("  [FAIL] UT-VERSION-003: Iteration %d version mismatch\n", i);
+            printf("    Expected: %u.%u.%u.%u\n", 
+                   firstVersion.Major, firstVersion.Minor, firstVersion.Build, firstVersion.Revision);
+            printf("    Got:      %u.%u.%u.%u\n",
+                   version.Major, version.Minor, version.Build, version.Revision);
             return FALSE;
         }
     }
     
-    printf("  [PASS] UT-VERSION-003: 100 queries consistent (all return %u.%u) ✓\n",
-           EXPECTED_MAJOR_VERSION, EXPECTED_MINOR_VERSION);
+    printf("  [PASS] UT-VERSION-003: 100 queries consistent (all return %u.%u.%u.%u) ✓\n",
+           firstVersion.Major, firstVersion.Minor, firstVersion.Build, firstVersion.Revision);
     return TRUE;
 }
 

@@ -18,6 +18,7 @@ Abstract:
 
 #include "precomp.h"
 #include "avb_integration.h"
+#include "avb_version.h"  // Auto-generated version numbers
 #include "external/intel_avb/lib/intel_windows.h"
 #include "external/intel_avb/lib/intel_private.h"
 #include "devices/intel_device_interface.h"  // For intel_device_ops_t and intel_get_device_ops()
@@ -74,7 +75,88 @@ NTSTATUS AvbCreateMinimalContext(
     if (!FilterModule || !OutCtx) return STATUS_INVALID_PARAMETER;
     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(AVB_DEVICE_CONTEXT), FILTER_ALLOC_TAG);
     if (!ctx) return STATUS_INSUFFICIENT_RESOURCES;
+    
+    // UNCONDITIONAL TRACE: Log context allocation (MUST appear in DebugView)
+    DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Allocated context at %p (size=%zu bytes)\n", ctx, sizeof(*ctx));
+    
+    // TRACE: Validate pool memory state before zeroing (detect uninitialized memory issues)
+    #if DBG
+    {
+        BOOLEAN before_target = ctx->target_time_poll_active;
+        BOOLEAN before_tx = ctx->tx_poll_active;
+        ULONG_PTR ctx_addr = (ULONG_PTR)ctx;
+        SIZE_T ctx_size = sizeof(*ctx);
+        
+        DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Pool memory before zero (ctx=%p, size=%zu, target_flag=%d, tx_flag=%d)\n",
+               ctx, ctx_size, (ULONG)before_target, (ULONG)before_tx);
+        
+        // Write to registry (use ZwCreateKey to create if missing!)
+        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+        OBJECT_ATTRIBUTES objAttr;
+        HANDLE hKey = NULL;
+        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        NTSTATUS regStatus = ZwCreateKey(&hKey, KEY_WRITE, &objAttr, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+        if (NT_SUCCESS(regStatus)) {
+            UNICODE_STRING valueName;
+            
+            RtlInitUnicodeString(&valueName, L"ContextAlloc_Address");
+            ULONG addr_val = (ULONG)ctx_addr;
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &addr_val, sizeof(addr_val));
+            
+            RtlInitUnicodeString(&valueName, L"ContextAlloc_Size");
+            ULONG size_val = (ULONG)ctx_size;
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &size_val, sizeof(size_val));
+            
+            RtlInitUnicodeString(&valueName, L"Flags_BeforeZero_Target");
+            ULONG target_val = (ULONG)before_target;
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target_val, sizeof(target_val));
+            
+            RtlInitUnicodeString(&valueName, L"Flags_BeforeZero_TX");
+            ULONG tx_val = (ULONG)before_tx;
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tx_val, sizeof(tx_val));
+            
+            ZwClose(hKey);
+        }
+    }
+    #endif
+    
     RtlZeroMemory(ctx, sizeof(*ctx));
+    
+    // UNCONDITIONAL TRACE: Verify zeroing completed (MUST appear in DebugView)
+    DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: RtlZeroMemory completed (target_flag=%d, tx_flag=%d)\n",
+           ctx->target_time_poll_active ? 1 : 0, ctx->tx_poll_active ? 1 : 0);
+    
+    // TRACE: Verify RtlZeroMemory correctly initialized flags (should be 0)
+    #if DBG
+    {
+        BOOLEAN after_target = ctx->target_time_poll_active;
+        BOOLEAN after_tx = ctx->tx_poll_active;
+        
+        DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Memory after zero (ctx=%p, target_flag=%d, tx_flag=%d)\n",
+               ctx, (ULONG)after_target, (ULONG)after_tx);
+        
+        // Write to registry (use ZwCreateKey to create if missing!)
+        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+        OBJECT_ATTRIBUTES objAttr;
+        HANDLE hKey = NULL;
+        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        NTSTATUS regStatus = ZwCreateKey(&hKey, KEY_WRITE, &objAttr, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+        if (NT_SUCCESS(regStatus)) {
+            UNICODE_STRING valueName;
+            
+            RtlInitUnicodeString(&valueName, L"Flags_AfterZero_Target");
+            ULONG target_val = (ULONG)after_target;
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target_val, sizeof(target_val));
+            
+            RtlInitUnicodeString(&valueName, L"Flags_AfterZero_TX");
+            ULONG tx_val = (ULONG)after_tx;
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tx_val, sizeof(tx_val));
+            
+            ZwClose(hKey);
+        }
+    }
+    #endif
+    
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;
     ctx->intel_device.pci_device_id = DeviceId;
@@ -433,7 +515,63 @@ VOID AvbTxTimestampPollDpc(
     
     PAVB_DEVICE_CONTEXT AvbContext = (PAVB_DEVICE_CONTEXT)FunctionContext;
     
-    DEBUGP(DL_WARN, "!!! DPC FIRED: ctx=%p, g_ctx=%p\n", AvbContext, g_AvbContext);
+    // Build version marker for verification
+    static ULONG dpc_call_count = 0;
+    static BOOLEAN version_logged = FALSE;
+    
+    // Log DPC entry to DebugView (critical diagnostic)
+    DEBUGP(DL_ERROR, "!!! DPC: Timer callback fired! Call=%d, Context=%p\n", dpc_call_count + 1, AvbContext);
+    
+    // DIAGNOSTIC: UNCONDITIONAL registry write to prove DPC executes
+    #if DBG
+    {
+        dpc_call_count++;
+        
+        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+        OBJECT_ATTRIBUTES keyAttrs;
+        HANDLE hKey = NULL;
+        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        
+        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+        if (NT_SUCCESS(st)) {
+            UNICODE_STRING valueName;
+            
+            // Write call count
+            RtlInitUnicodeString(&valueName, L"DPC_CallCount_Unconditional");
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &dpc_call_count, sizeof(dpc_call_count));
+            
+            // Validate context pointers
+            ULONG ctx_valid = (AvbContext && AvbContext == g_AvbContext) ? 1 : 0;
+            RtlInitUnicodeString(&valueName, L"DPC_ContextValid");
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &ctx_valid, sizeof(ctx_valid));
+            
+            // Store actual context pointers for debugging
+            ULONG_PTR ctx_addr = (ULONG_PTR)AvbContext;
+            RtlInitUnicodeString(&valueName, L"DPC_ContextAddress");
+            ZwSetValueKey(hKey, &valueName, 0, REG_QWORD, &ctx_addr, sizeof(ctx_addr));
+            
+            ULONG_PTR g_ctx_addr = (ULONG_PTR)g_AvbContext;
+            RtlInitUnicodeString(&valueName, L"DPC_GlobalContextAddress");
+            ZwSetValueKey(hKey, &valueName, 0, REG_QWORD, &g_ctx_addr, sizeof(g_ctx_addr));
+            
+            ZwClose(hKey);
+        }
+        DEBUGP(DL_ERROR, "!!! DPC: Diagnostic written (call=%d, ctx_valid=%d)\n", 
+               dpc_call_count, (AvbContext && AvbContext == g_AvbContext) ? 1 : 0);
+    }
+    #endif
+    
+    if (!version_logged) {
+        DEBUGP(DL_WARN, "!!! ======================================\n");
+        DEBUGP(DL_WARN, "!!! DRIVER VERSION: %u.%u.%u.%u\n", 
+               AVB_VERSION_MAJOR, AVB_VERSION_MINOR, AVB_VERSION_BUILD, AVB_VERSION_REVISION);
+        DEBUGP(DL_WARN, "!!! BUILD TIMESTAMP: " __DATE__ " " __TIME__ "\n");
+        DEBUGP(DL_WARN, "!!! ======================================\n");
+        version_logged = TRUE;
+    }
+    
+    dpc_call_count++;
+    DEBUGP(DL_WARN, "!!! DPC FIRED [#%u]: ctx=%p, g_ctx=%p\n", dpc_call_count, AvbContext, g_AvbContext);
     
     // CRITICAL: Verify context is still valid (global might be cleared during cleanup)
     if (!AvbContext || AvbContext != g_AvbContext) {
@@ -492,7 +630,7 @@ VOID AvbTxTimestampPollDpc(
     }
     
     /* Task 7: Check target time events (1ms polling)
-     * Monitors AUTT0/AUTT1 flags for target time reached conditions
+     * Monitors TT0/TT1 flags (TSICR bits 3-4) for target time reached conditions
      */
     AvbCheckTargetTime(AvbContext);
     
@@ -519,32 +657,43 @@ VOID AvbPostTimestampEvent(
 {
     PAVB_DEVICE_CONTEXT AvbContext = (PAVB_DEVICE_CONTEXT)AvbContextParam;
     if (!AvbContext) {
-        DEBUGP(DL_WARN, "!!! AvbPostTimestampEvent: NULL context\n");
+        DEBUGP(DL_ERROR, "!!! AvbPostTimestampEvent: NULL context\n");
         return;
     }
     
-    DEBUGP(DL_WARN, "!!! AvbPostTimestampEvent [Adapter 0x%04X]: event_type=0x%x, ts=0x%llx\n", 
+    DEBUGP(DL_ERROR, "!!! AvbPostTimestampEvent [Adapter 0x%04X]: ENTRY - event_type=0x%x, ts=0x%llx\n", 
            AvbContext->intel_device.pci_device_id, event_type, timestamp_ns);
     
     /* Acquire spin lock to protect subscription table iteration */
     NdisAcquireSpinLock(&AvbContext->subscription_lock);
     
-    DEBUGP(DL_WARN, "!!! Checking %d subscriptions for adapter context %p\n", MAX_TS_SUBSCRIPTIONS, AvbContext);
+    DEBUGP(DL_ERROR, "!!! Checking %d subscriptions for adapter context %p\n", MAX_TS_SUBSCRIPTIONS, AvbContext);
+    
+    int active_count = 0;
+    int matched_count = 0;
     
     for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
         TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[i];
         
-        DEBUGP(DL_WARN, "!!! Sub[%d]: active=%d, ring_id=%u, mask=0x%x, ring=%p\n", 
-               i, sub->active, sub->ring_id, sub->event_mask, sub->ring_buffer);
+        if (sub->active && sub->ring_buffer) {
+            active_count++;
+            DEBUGP(DL_ERROR, "!!! Sub[%d]: active=%d, ring_id=%u, mask=0x%x (want 0x%x), ring=%p\n", 
+                   i, sub->active, sub->ring_id, sub->event_mask, event_type, sub->ring_buffer);
+        }
         
         /* Skip inactive subscriptions */
         if (!sub->active || !sub->ring_buffer) continue;
         
         /* Filter by event type mask */
         if (!(sub->event_mask & event_type)) {
-            DEBUGP(DL_WARN, "!!! Sub[%d]: Type mismatch (want 0x%x, got 0x%x)\n", i, sub->event_mask, event_type);
+            DEBUGP(DL_ERROR, "!!! Sub[%d]: Type MISMATCH (sub wants 0x%x, event is 0x%x) - SKIPPING\n", 
+                   i, sub->event_mask, event_type);
             continue;
         }
+        
+        matched_count++;
+        DEBUGP(DL_ERROR, "!!! Sub[%d]: Type MATCHED (mask 0x%x & event 0x%x) - will post event\n",
+               i, sub->event_mask, event_type);
         
         /* Filter by VLAN ID (0xFFFF = no filter) */
         if (sub->vlan_filter != 0xFFFF && sub->vlan_filter != vlan_id) continue;
@@ -587,22 +736,33 @@ VOID AvbPostTimestampEvent(
         
         /* Increment total events counter */
         InterlockedIncrement64((volatile LONG64 *)&hdr->total_events);
+        
+        DEBUGP(DL_ERROR, "!!! Sub[%d]: EVENT POSTED - prod=%u->%u, cons=%u, seq=%u, ts=0x%llx\n",
+               i, local_prod, next_prod, local_cons, evt->sequence_num, evt->timestamp_ns);
     }
+    
+    DEBUGP(DL_ERROR, "!!! AvbPostTimestampEvent: EXIT - active=%d, matched=%d, posted to matched subs\n",
+           active_count, matched_count);
     
     NdisReleaseSpinLock(&AvbContext->subscription_lock);
 }
 
-/* Task 7: Check target time events (AUTT0/AUTT1 flags)
+/* Task 7: Check target time events (TT0/TT1 interrupt flags)
  * Called from AvbTxTimestampPollDpc every 1ms to monitor target time reached conditions
  * Posts TS_EVENT_TARGET_TIME events when SYSTIM >= TRGTTIMLx
  * Implements: Issue #13 (REQ-F-TS-EVENT-001) Task 7 - Target time event generation
  * HAL-COMPLIANT: Uses device ops, no hardcoded registers
+ * 
+ * CORRECTED per I225 datasheet:
+ * - Checks TSICR (0xB66C) register bits 3-4 (TT0/TT1)
+ * - NOT AUTT0/AUTT1 which are for SDP input sampling
+ * - Variable name "autt_flags" kept for backwards compatibility but actually holds TT flags
  */
 VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 {
     const intel_device_ops_t *ops;
     device_t *dev;
-    uint8_t autt_flags = 0;
+    uint8_t autt_flags = 0;  // Actually TT0/TT1 flags (name kept for compatibility)
     int rc;
     
     /* Validate context */
@@ -624,8 +784,9 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
     
     dev = &AvbContext->intel_device;
     
-    /* Check AUTT0/AUTT1 flags in TSAUXC register
-     * Bit pattern: 0x01 = AUTT0, 0x02 = AUTT1
+    /* Check TT0/TT1 flags in TSICR register (0xB66C) via device HAL
+     * Bit pattern: 0x01 = TT0 (Target Time 0), 0x02 = TT1 (Target Time 1)
+     * Per I225 datasheet Section 8.16.1: TSICR bits 3-4 are TT0/TT1 interrupt causes
      */
     rc = ops->check_autt_flags(dev, &autt_flags);
     if (rc != 0) {
@@ -633,13 +794,45 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         return;
     }
     
+    // DIAGNOSTIC: ALWAYS write to prove function is called
+    #if DBG
+    {
+        static ULONG call_count = 0;
+        call_count++;
+        
+        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+        OBJECT_ATTRIBUTES keyAttrs;
+        HANDLE hKey = NULL;
+        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+        
+        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+        if (NT_SUCCESS(st)) {
+            UNICODE_STRING valueName;
+            
+            RtlInitUnicodeString(&valueName, L"AvbCheckTargetTime_CallCount");
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &call_count, sizeof(call_count));
+            
+            ULONG autt_val = (ULONG)autt_flags;
+            RtlInitUnicodeString(&valueName, L"AvbCheckTargetTime_TT_Flags");
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &autt_val, sizeof(autt_val));
+            
+            ULONG rc_val = (ULONG)rc;
+            RtlInitUnicodeString(&valueName, L"AvbCheckTargetTime_RC");
+            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &rc_val, sizeof(rc_val));
+            
+            ZwClose(hKey);
+        }
+    }
+    #endif
+    
     /* ALWAYS log AUTT flags for debugging (even when 0) with target time comparison */
     static int log_counter = 0;
-    if (++log_counter % 1000 == 0 || autt_flags != 0) {
+    if (++log_counter % 10 == 0 || autt_flags != 0) {
         // Read current SYSTIM and target times for comparison
         uint64_t current_systim = 0;
         uint32_t target0_low = 0, target0_high = 0;
         uint32_t target1_low = 0, target1_high = 0;
+        uint32_t tsicr_raw = 0, tsauxc_raw = 0, tsim_raw = 0;
         
         if (ops->get_systime) {
             ops->get_systime(dev, &current_systim);
@@ -648,6 +841,9 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         AvbMmioReadReal(dev, 0xB648, &target0_high); // TRGTTIMH0
         AvbMmioReadReal(dev, 0xB64C, &target1_low);  // TRGTTIML1
         AvbMmioReadReal(dev, 0xB650, &target1_high); // TRGTTIMH1
+        AvbMmioReadReal(dev, 0xB66C, &tsicr_raw);    // TSICR (Interrupt Cause)
+        AvbMmioReadReal(dev, 0xB640, &tsauxc_raw);   // TSAUXC (Auxiliary Control)
+        AvbMmioReadReal(dev, 0xB674, &tsim_raw);     // TSIM (Interrupt Mask)
         
         uint64_t target0 = ((uint64_t)target0_high << 32) | target0_low;
         uint64_t target1 = ((uint64_t)target1_high << 32) | target1_low;
@@ -655,10 +851,16 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         int64_t delta0 = (int64_t)(target0 - current_systim);
         int64_t delta1 = (int64_t)(target1 - current_systim);
         
-        DEBUGP(DL_WARN, "!!! AUTT flags: 0x%02X (AUTT0=%d, AUTT1=%d) [check #%d]\n", 
+        DEBUGP(DL_WARN, "!!! TT flags: 0x%02X (TT0=%d, TT1=%d) [check #%d]\n", 
                autt_flags, (autt_flags & 0x01) ? 1 : 0, (autt_flags & 0x02) ? 1 : 0, log_counter);
         DEBUGP(DL_WARN, "!!! SYSTIM:  0x%016llX (%llu ns)\n",
                (unsigned long long)current_systim, (unsigned long long)current_systim);
+        DEBUGP(DL_WARN, "!!! TSICR:   0x%08X (TT0=%d, TT1=%d, AUTT0=%d)\n",
+               tsicr_raw, (tsicr_raw >> 3) & 1, (tsicr_raw >> 4) & 1, (tsicr_raw >> 5) & 1);
+        DEBUGP(DL_WARN, "!!! TSAUXC:  0x%08X (EN_TT0=%d, EN_TT1=%d)\n",
+               tsauxc_raw, tsauxc_raw & 1, (tsauxc_raw >> 4) & 1);
+        DEBUGP(DL_WARN, "!!! TSIM:    0x%08X (TT0_mask=%d, TT1_mask=%d)\n",
+               tsim_raw, (tsim_raw >> 3) & 1, (tsim_raw >> 4) & 1);
         DEBUGP(DL_WARN, "!!! TARGET0: 0x%016llX (delta: %s%lld ns = %lld ms)\n",
                (unsigned long long)target0,
                (delta0 < 0) ? "-" : "+", (long long)(delta0 < 0 ? -delta0 : delta0),
@@ -669,9 +871,61 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
                    (delta1 < 0) ? "-" : "+", (long long)(delta1 < 0 ? -delta1 : delta1),
                    (long long)(delta1 < 0 ? -delta1 : delta1) / 1000000);
         }
+        
+        // DIAGNOSTIC: Write DPC polling state to registry
+        #if DBG
+        {
+            UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+            OBJECT_ATTRIBUTES keyAttrs;
+            HANDLE hKey = NULL;
+            InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+            
+            NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+            if (NT_SUCCESS(st)) {
+                UNICODE_STRING valueName;
+                
+                RtlInitUnicodeString(&valueName, L"DPC_PollCount");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &log_counter, sizeof(log_counter));
+                
+                ULONG autt0 = (autt_flags & 0x01) ? 1 : 0;
+                RtlInitUnicodeString(&valueName, L"DPC_TT0");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &autt0, sizeof(autt0));
+                
+                ULONG autt1 = (autt_flags & 0x02) ? 1 : 0;
+                RtlInitUnicodeString(&valueName, L"DPC_TT1");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &autt1, sizeof(autt1));
+                
+                ULONG systim_low = (ULONG)(current_systim & 0xFFFFFFFF);
+                RtlInitUnicodeString(&valueName, L"DPC_SYSTIM_Low");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_low, sizeof(systim_low));
+                
+                ULONG systim_high = (ULONG)(current_systim >> 32);
+                RtlInitUnicodeString(&valueName, L"DPC_SYSTIM_High");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_high, sizeof(systim_high));
+                
+                ULONG target0_l = (ULONG)(target0 & 0xFFFFFFFF);
+                RtlInitUnicodeString(&valueName, L"DPC_TARGET0_Low");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target0_l, sizeof(target0_l));
+                
+                ULONG target0_h = (ULONG)(target0 >> 32);
+                RtlInitUnicodeString(&valueName, L"DPC_TARGET0_High");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target0_h, sizeof(target0_h));
+                
+                LONG delta_ms = (LONG)(delta0 / 1000000);
+                RtlInitUnicodeString(&valueName, L"DPC_Delta0_Milliseconds");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &delta_ms, sizeof(delta_ms));
+                
+                ULONG reached = (delta0 <= 0) ? 1 : 0;
+                RtlInitUnicodeString(&valueName, L"DPC_TARGET0_Reached");
+                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &reached, sizeof(reached));
+                
+                ZwClose(hKey);
+            }
+        }
+        #endif
     }
     
-    /* Timer 0: Check AUTT0 flag (bit 0) */
+    /* Timer 0: Check TT0 flag (bit 0 in autt_flags) */
     if (autt_flags & 0x01) {
         uint64_t timestamp_ns = 0;
         
@@ -699,7 +953,7 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
             DEBUGP(DL_WARN, "!!! TARGET TIME 0 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
         }
         
-        /* Clear AUTT0 flag (write-1-to-clear) */
+        /* Clear TT0 flag in TSICR (write-1-to-clear) */
         if (ops->clear_autt_flag) {
             rc = ops->clear_autt_flag(dev, 0);
             if (rc != 0) {
@@ -708,7 +962,7 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         }
     }
     
-    /* Timer 1: Check AUTT1 flag (bit 1) */
+    /* Timer 1: Check TT1 flag (bit 1 in autt_flags) */
     if (autt_flags & 0x02) {
         uint64_t timestamp_ns = 0;
         
@@ -731,7 +985,7 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
             DEBUGP(DL_WARN, "!!! TARGET TIME 1 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
         }
         
-        /* Clear AUTT1 flag (write-1-to-clear) */
+        /* Clear TT1 flag in TSICR (write-1-to-clear) */
         if (ops->clear_autt_flag) {
             rc = ops->clear_autt_flag(dev, 1);
             if (rc != 0) {
@@ -834,6 +1088,27 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         DEBUGP(DL_INFO, "TX polling timer stopped (was_pending=%d)\n", !cancelled);
     }
     
+    /* CRITICAL: Cancel Target Time polling timer (Task 7) */
+    if (AvbContext->target_time_poll_active) {
+        // TRACE: Deactivating target time polling (diagnostic for flag state changes)
+        DEBUGP(DL_WARN, "!!! TARGET_TIMER_CLEANUP: Deactivating flag (ctx=%p, before=%d)\n",
+               AvbContext, AvbContext->target_time_poll_active ? 1 : 0);
+        
+        AvbContext->target_time_poll_active = FALSE;  // Signal DPC to stop
+        
+        // TRACE: Confirm flag deactivation completed
+        DEBUGP(DL_WARN, "!!! TARGET_TIMER_CLEANUP: Flag deactivated (ctx=%p, after=%d)\n",
+               AvbContext, AvbContext->target_time_poll_active ? 1 : 0);
+        
+        BOOLEAN cancelled = KeCancelTimer(&AvbContext->target_time_timer);  // Cancel timer (returns TRUE if was in queue)
+        
+        // Wait for any pending DPC to complete
+        KeFlushQueuedDpcs();
+        
+        DEBUGP(DL_WARN, "!!! TIMER STOPPED: Target Time DPC was called %d times (was_pending=%d)\n", 
+               AvbContext->target_time_dpc_call_count, !cancelled);
+    }
+    
     // Clear global context pointer to prevent stale timer DPC access
     if (g_AvbContext == AvbContext) {
         g_AvbContext = NULL;
@@ -905,11 +1180,13 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             }
             
             PIOCTL_VERSION version = (PIOCTL_VERSION)buf;
-            version->Major = 1;
-            version->Minor = 0;
+            version->Major = AVB_VERSION_MAJOR;
+            version->Minor = AVB_VERSION_MINOR;
+            version->Build = AVB_VERSION_BUILD;
+            version->Revision = AVB_VERSION_REVISION;
             
-            DEBUGP(DL_INFO, "IOCTL_AVB_GET_VERSION: Returning version %u.%u\n", 
-                   version->Major, version->Minor);
+            DEBUGP(DL_INFO, "IOCTL_AVB_GET_VERSION: Returning version %u.%u.%u.%u\n", 
+                   version->Major, version->Minor, version->Build, version->Revision);
             
             status = STATUS_SUCCESS;
             info = sizeof(IOCTL_VERSION);
@@ -1597,7 +1874,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (inLen < sizeof(AVB_TARGET_TIME_REQUEST) || outLen < sizeof(AVB_TARGET_TIME_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                /* MULTI-ADAPTER FIX: Use per-handle context from FileObject->FsContext
+                 * Each file handle has its own adapter context set by IOCTL_AVB_OPEN_ADAPTER.
+                 * g_AvbContext is a global that gets overwritten, causing wrong adapter access! */
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext;
                 PAVB_TARGET_TIME_REQUEST tgt_req = (PAVB_TARGET_TIME_REQUEST)buf;
 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
@@ -1898,24 +2178,192 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 // Allocate ring_id (InterlockedIncrement ensures atomicity)
                 sub->ring_id = (avb_u32)InterlockedIncrement(&AvbContext->next_ring_id);
                 
+                // Capture timer state while holding lock (fast, no blocking)
+                // Registry writes moved after spin lock release to avoid BSOD/deadlock
+                BOOLEAN timer_was_active = AvbContext->tx_poll_active;
+                AVB_HW_STATE captured_hw_state = AvbContext->hw_state;
+                
                 // RE-ENABLED: TX/Target timestamp polling timer (Task 6c/7)
                 // Previously disabled due to BSOD 0x0A - now safe with HAL abstraction and NULL checks
                 // Starts 1ms polling for TX timestamps (Task 6c) and target time events (Task 7)
-                DEBUGP(DL_WARN, "!!! TIMER CHECK: tx_poll_active=%d, hw_state=%d (need >= %d)\n",
-                       AvbContext->tx_poll_active, AvbContext->hw_state, AVB_HW_BAR_MAPPED);
                 if (!AvbContext->tx_poll_active && AvbContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "!!! TIMER: Starting TX timestamp poll timer (1ms interval)\n");
+                    DEBUGP(DL_ERROR, "!!! TIMER: Timer object=%p, Context=%p\n", 
+                           &AvbContext->tx_poll_timer, AvbContext);
+                    
                     AvbContext->tx_poll_active = TRUE;
-                    NdisSetTimer(&AvbContext->tx_poll_timer, 1);
-                    DEBUGP(DL_WARN, "!!! TX/Target polling timer STARTED (1ms period, first subscription)\n");
+                    
+                    // NdisSetTimer has no return value, but we can detect failure via DPC not firing
+                    NdisSetTimer(&AvbContext->tx_poll_timer, 1);  // 1 millisecond
+                    
+                    DEBUGP(DL_ERROR, "!!! TIMER: NdisSetTimer called (check registry for DPC_CallCount_Unconditional)\n");
+                    
+                    // Registry diagnostics: Timer started
+                    #if DBG
+                    {
+                        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+                        UNICODE_STRING valueName;
+                        OBJECT_ATTRIBUTES objAttr;
+                        HANDLE hKey = NULL;
+                        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                        NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
+                        if (NT_SUCCESS(regStatus)) {
+                            ULONG timer_started = 1;
+                            RtlInitUnicodeString(&valueName, L"Timer_Started");
+                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_started, sizeof(timer_started));
+                            
+                            ULONG poll_active_after = 1;
+                            RtlInitUnicodeString(&valueName, L"Timer_PollActive_After");
+                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &poll_active_after, sizeof(poll_active_after));
+                            
+                            ZwClose(hKey);
+                        }
+                    }
+                    #endif
                 } else if (AvbContext->tx_poll_active) {
                     DEBUGP(DL_WARN, "!!! TIMER already running (poll_active=%d, hw_state=%d)\n",
                            AvbContext->tx_poll_active, AvbContext->hw_state);
+                    
+                    // Registry diagnostics: Timer already running
+                    #if DBG
+                    {
+                        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+                        UNICODE_STRING valueName;
+                        OBJECT_ATTRIBUTES objAttr;
+                        HANDLE hKey = NULL;
+                        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                        NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
+                        if (NT_SUCCESS(regStatus)) {
+                            ULONG timer_already_running = 1;
+                            RtlInitUnicodeString(&valueName, L"Timer_AlreadyRunning");
+                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_already_running, sizeof(timer_already_running));
+                            
+                            ZwClose(hKey);
+                        }
+                    }
+                    #endif
                 } else {
                     DEBUGP(DL_ERROR, "!!! TIMER NOT STARTED: hw_state=%d < %d (need BAR_MAPPED)\n",
                            AvbContext->hw_state, AVB_HW_BAR_MAPPED);
+                    
+                    // Registry diagnostics: Timer NOT started (hw_state insufficient)
+                    #if DBG
+                    {
+                        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+                        UNICODE_STRING valueName;
+                        OBJECT_ATTRIBUTES objAttr;
+                        HANDLE hKey = NULL;
+                        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                        NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
+                        if (NT_SUCCESS(regStatus)) {
+                            ULONG timer_not_started = 1;
+                            RtlInitUnicodeString(&valueName, L"Timer_NotStarted_HwState");
+                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_not_started, sizeof(timer_not_started));
+                            
+                            ZwClose(hKey);
+                        }
+                    }
+                    #endif
                 }
                 
                 NdisReleaseSpinLock(&AvbContext->subscription_lock);
+                
+                // Timer diagnostic - check captured state (safe after spin lock release)
+                DEBUGP(DL_ERROR, "!!! TIMER CHECK (captured while locked): tx_poll_active=%d, hw_state=%d (need >= %d)\n",
+                       timer_was_active, captured_hw_state, AVB_HW_BAR_MAPPED);
+                
+                // ===================================================================
+                // DIAGNOSTIC: Where does timer_poll_active come from?
+                // ===================================================================
+                // Registry shows: Timer_PollActive_Before=1 (already TRUE!)
+                // This explains why timer init code might be skipped.
+                // Question: Where is timer_poll_active being set to TRUE initially?
+                // Search: Need to trace timer_poll_active assignments in codebase
+                //
+                #if DBG
+                {
+                    UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+                    UNICODE_STRING valueName;
+                    OBJECT_ATTRIBUTES objAttr;
+                    HANDLE hKey = NULL;
+                    InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                    NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
+                    
+                    DEBUGP(DL_ERROR, "!!! TIMER DIAGNOSTIC: About to write Timer_PollActive_Before (value=%d)\n", timer_was_active);
+                    
+                    if (NT_SUCCESS(regStatus)) {
+                        // Log where this diagnostic is being written from
+                        ULONG diag_location = 0x00020179;  // Line number where this code exists
+                        RtlInitUnicodeString(&valueName, L"Timer_Diagnostic_Location");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &diag_location, sizeof(diag_location));
+                        
+                        // Log function context
+                        ULONG in_subscription_ioctl = 1;
+                        RtlInitUnicodeString(&valueName, L"Timer_Context_InSubscriptionIOCTL");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &in_subscription_ioctl, sizeof(in_subscription_ioctl));
+                        
+                        // *** THIS IS NOT THE RIGHT PLACE FOR TIMER INIT! ***
+                        // Timer should be initialized in set_target_time(), not here in subscription!
+                        ULONG wrong_location_warning = 1;
+                        RtlInitUnicodeString(&valueName, L"Timer_WrongLocationWarning");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &wrong_location_warning, sizeof(wrong_location_warning));
+                        
+                        ZwClose(hKey);
+                    }
+                }
+                #endif
+                
+                // Registry diagnostics: UNCONDITIONAL write (safe now - no spin lock)
+                {
+                    UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
+                    UNICODE_STRING valueName;
+                    OBJECT_ATTRIBUTES objAttr;
+                    HANDLE hKey = NULL;
+                    InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                    NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
+                    
+                    DEBUGP(DL_ERROR, "!!! TIMER: Registry open status = 0x%08X\n", regStatus);
+                    
+                    if (NT_SUCCESS(regStatus)) {
+                        ULONG poll_active_before = timer_was_active ? 1 : 0;
+                        ULONG hw_state_val = (ULONG)captured_hw_state;
+                        ULONG bar_mapped_val = AVB_HW_BAR_MAPPED;  // Should be 2
+                        ULONG timer_check_pass = 0;
+                        
+                        // TRACE: Record context pointer during subscription for multi-adapter debugging
+                        ULONG subscription_context_ptr = (ULONG)(ULONG_PTR)AvbContext;
+                        
+                        // Calculate why timer didn't start (using captured values)
+                        if (timer_was_active) {
+                            timer_check_pass = 10;  // Already running
+                        } else if (captured_hw_state < AVB_HW_BAR_MAPPED) {
+                            timer_check_pass = 20;  // HW not ready (SUSPECTED ROOT CAUSE!)
+                        } else {
+                            timer_check_pass = 100;  // Should start!
+                        }
+                        
+                        RtlInitUnicodeString(&valueName, L"Subscription_ContextPointer");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &subscription_context_ptr, sizeof(subscription_context_ptr));
+                        
+                        RtlInitUnicodeString(&valueName, L"Timer_PollActive_Before");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &poll_active_before, sizeof(poll_active_before));
+                        
+                        RtlInitUnicodeString(&valueName, L"Timer_HwState");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &hw_state_val, sizeof(hw_state_val));
+                        
+                        RtlInitUnicodeString(&valueName, L"Timer_BarMapped_Threshold");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &bar_mapped_val, sizeof(bar_mapped_val));
+                        
+                        RtlInitUnicodeString(&valueName, L"Timer_CheckResult");
+                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_check_pass, sizeof(timer_check_pass));
+                        
+                        DEBUGP(DL_ERROR, "!!! TIMER: Registry keys written (result=%d: 100=should_start, 20=hw_not_ready, 10=already_running)\n", timer_check_pass);
+                        
+                        ZwClose(hKey);
+                    } else {
+                        DEBUGP(DL_ERROR, "!!! TIMER: REGISTRY OPEN FAILED! Status=0x%08X\n", regStatus);
+                    }
+                }
                 
                 // Return ring_id to user
                 sub_req->ring_id = sub->ring_id;
@@ -2242,9 +2690,11 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                    req->vendor_id, req->device_id);
             
             // Search through ALL filter modules to find the requested adapter
+            // CRITICAL FIX: Use index to select N-th adapter with matching VID/DID (multi-adapter support)
             BOOLEAN bFalse = FALSE;
             PMS_FILTER targetFilter = NULL;
             PAVB_DEVICE_CONTEXT targetContext = NULL;
+            ULONG matchCount = 0;  // Count adapters matching VID/DID
             
             FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
             PLIST_ENTRY Link = FilterModuleList.Flink;
@@ -2261,12 +2711,19 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     
                     if (ctx->intel_device.pci_vendor_id == req->vendor_id && 
                         ctx->intel_device.pci_device_id == req->device_id) {
-                        targetFilter = cand;
-                        targetContext = ctx;
-                        DEBUGP(DL_INFO, "? Found target adapter: %wZ (VID=0x%04X, DID=0x%04X)\n", 
-                               &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
-                               ctx->intel_device.pci_device_id);
-                        break;
+                        // FIX: Check if this is the N-th matching adapter
+                        if (matchCount == req->index) {
+                            targetFilter = cand;
+                            targetContext = ctx;
+                            DEBUGP(DL_INFO, "? Found target adapter: %wZ (VID=0x%04X, DID=0x%04X, index=%u, match=%u)\n", 
+                                   &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
+                                   ctx->intel_device.pci_device_id, req->index, matchCount);
+                            break;
+                        } else {
+                            DEBUGP(DL_INFO, "? Skipping adapter %wZ (match %u, need index %u)\n",
+                                   &cand->MiniportFriendlyName, matchCount, req->index);
+                            matchCount++;
+                        }
                     }
                 }
             }

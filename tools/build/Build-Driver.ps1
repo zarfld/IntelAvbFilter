@@ -171,15 +171,37 @@ if ($Sign) {
 if (-not $SkipDriver) {
     Write-Step "Building Driver"
     
+    # === VERSION AUTOMATION ===
+    # Automatic build number generation for local builds
+    $buildNumberFile = Join-Path $repoRoot "build_number.txt"
+    
+    if (-not (Test-Path $buildNumberFile)) {
+        Write-Host "  Creating build_number.txt (starting at 1)" -ForegroundColor Yellow
+        Set-Content -Path $buildNumberFile -Value "1"
+        $buildNumber = 1
+    } else {
+        $buildNumber = [int](Get-Content $buildNumberFile)
+        $buildNumber++
+        Set-Content -Path $buildNumberFile -Value $buildNumber.ToString()
+    }
+    
+    Write-Host "  Build Number: $buildNumber (auto-incremented)" -ForegroundColor Green
+    
+    # Revision: Use 0 for now (can be set by CI/CD or manual script)
+    $revisionNumber = 0
+    
     $buildCmd = if ($Clean) { "Clean;Build" } else { "Build" }
     
     Write-Host "  Solution: $solutionFile" -ForegroundColor Gray
     Write-Host "  Output: $outputDir" -ForegroundColor Gray
+    Write-Host "  Version: 1.0.$buildNumber.$revisionNumber" -ForegroundColor Gray
     
     & $msbuildPath $solutionFile `
         /t:$buildCmd `
         /p:Configuration=$Configuration `
         /p:Platform=$Platform `
+        /p:AvbVersionBuild=$buildNumber `
+        /p:AvbVersionRevision=$revisionNumber `
         /m `
         /verbosity:minimal
     
