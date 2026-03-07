@@ -52,6 +52,15 @@ Abstract:
 #define I226_TXQCTL_QUEUE_MODE_LAUNCHT   0x00000001  // Launch time mode
 #define I226_TXQCTL_STRICT_CYCLE         0x00000002  // Strict cycle mode
 
+// I226 EtherType Queue Filter (ETQF) - Evidence from Linux IGB driver (igb_ptp.c:806-811)
+// Required for hardware PTP packet timestamping in continuous operation
+// TODO: Add these to i226.yaml and regenerate SSOT header
+#define I226_ETQF(n)            (0x05CB0 + (4 * (n)))  // EtherType Queue Filter array
+#define I226_ETQF_FILTER_ENABLE (1 << 26)              // Enable filter
+#define I226_ETQF_1588          (1 << 30)              // Enable timestamping for 1588 packets
+#define I226_ETQF_ETYPE_MASK    0x0000FFFF             // EtherType mask (lower 16 bits)
+#define ETH_P_1588              0x88F7                 // PTP/IEEE 1588 EtherType
+
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
 
@@ -69,11 +78,14 @@ static int init_ptp(device_t *dev);
  * On I226, target time interrupts may not generate MSI-X interrupts reliably,
  * so polling TSICR is required to detect AUTT0/AUTT1 flags.
  */
+#pragma warning(push)
+#pragma warning(disable: 4505)  // Unreferenced function - used as DPC callback (function pointer)
 static VOID AvbTimerDpcRoutine(
     PKDPC Dpc,
     PVOID DeferredContext,
     PVOID SystemArgument1,
     PVOID SystemArgument2)
+#pragma warning(pop)
 {
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
@@ -81,7 +93,7 @@ static VOID AvbTimerDpcRoutine(
     
     PAVB_DEVICE_CONTEXT context = (PAVB_DEVICE_CONTEXT)DeferredContext;
     if (!context) {
-        DEBUGP(DL_ERROR, "!!! DPC: NULL context!\n");
+        DEBUGP(DL_TRACE, "!!! DPC: NULL context!\n");
         return;
     }
     
@@ -92,45 +104,19 @@ static VOID AvbTimerDpcRoutine(
     BOOLEAN should_log = (call_count <= 10) || (call_count % 100 == 0);
     
     if (should_log) {
-        DEBUGP(DL_ERROR, "!!! DPC[%d]: Target Time DPC executing (context=%p, active=%d)\n", 
+        DEBUGP(DL_TRACE, "!!! DPC[%d]: Target Time DPC executing (context=%p, active=%d)\n", 
                call_count, context, context->target_time_poll_active);
     }
     
     // Check if polling should stop (flag cleared by cleanup)
     if (!context->target_time_poll_active) {
-        DEBUGP(DL_WARN, "!!! DPC[%d]: Poll flag deactivated, exiting\n", call_count);
+        DEBUGP(DL_TRACE, "!!! DPC[%d]: Poll flag deactivated, exiting\n", call_count);
         return;
     }
     
     // Write diagnostic every 100 calls (every 1 second at 10ms interval)
     if (call_count % 100 == 0) {
-        #if DBG
-        {
-            UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-            OBJECT_ATTRIBUTES keyAttrs;
-            HANDLE hKey = NULL;
-            InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-            
-            NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-            if (NT_SUCCESS(st)) {
-                UNICODE_STRING valueName;
-                
-                ULONG count_val = (ULONG)call_count;
-                RtlInitUnicodeString(&valueName, L"DPC_CallCount_Total");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &count_val, sizeof(count_val));
-                
-                // Log last IRQL for diagnostics
-                KIRQL current_irql = KeGetCurrentIrql();
-                ULONG irql_val = (ULONG)current_irql;
-                RtlInitUnicodeString(&valueName, L"DPC_Last_IRQL");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &irql_val, sizeof(irql_val));
-                
-                ZwClose(hKey);
-            }
-        }
-        #endif
-        
-        DEBUGP(DL_ERROR, "!!! DPC: Polled %d times (every 10ms)\n", call_count);
+        DEBUGP(DL_TRACE, "!!! DPC: Polled %d times (every 10ms)\n", call_count);
     }
     
     // Read TSICR to check for timer events
@@ -138,7 +124,7 @@ static VOID AvbTimerDpcRoutine(
     uint32_t tsicr = 0;
     
     if (ndis_platform_ops.mmio_read(dev, I226_TSICR, &tsicr) != 0) {
-        DEBUGP(DL_ERROR, "!!! DPC: Failed to read TSICR\n");
+        DEBUGP(DL_TRACE, "!!! DPC: Failed to read TSICR\n");
         return;
     }
     
@@ -160,11 +146,11 @@ static VOID AvbTimerDpcRoutine(
     
     // DIAGNOSTIC: Always log on first 10 calls to show DPC is working
     if (should_log) {
-        DEBUGP(DL_ERROR, "!!! DPC[%d]: TSICR=0x%08X (TT0=%d, TT1=%d)\n",
+        DEBUGP(DL_TRACE, "!!! DPC[%d]: TSICR=0x%08X (TT0=%d, TT1=%d)\n",
                call_count, tsicr,
                (tsicr & I226_TSICR_TT0_MASK) ? 1 : 0,
                (tsicr & I226_TSICR_TT1_MASK) ? 1 : 0);
-        DEBUGP(DL_ERROR, "!!! DPC[%d]: SYSTIM=0x%016llX, TARGET=0x%016llX, delta=%s%lld ns\n",
+        DEBUGP(DL_TRACE, "!!! DPC[%d]: SYSTIM=0x%016llX, TARGET=0x%016llX, delta=%s%lld ns\n",
                call_count, current_systim, target_time,
                (current_systim >= target_time) ? "+" : "-",
                (current_systim >= target_time) ? 
@@ -172,86 +158,15 @@ static VOID AvbTimerDpcRoutine(
                    (long long)(target_time - current_systim));
     }
     
-    // Write to registry every 10 calls for first 100 calls, then every 100
-    BOOLEAN should_log_registry = (call_count <= 100 && call_count % 10 == 0) || (call_count % 100 == 0);
-    if (should_log_registry) {
-        #if DBG
-        {
-            UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-            OBJECT_ATTRIBUTES keyAttrs;
-            HANDLE hKey = NULL;
-            InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-            
-            NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-            if (NT_SUCCESS(st)) {
-                UNICODE_STRING valueName;
-                
-                RtlInitUnicodeString(&valueName, L"DPC_Last_TSICR");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsicr, sizeof(tsicr));
-                
-                ULONG tt0_bit = (tsicr & I226_TSICR_TT0_MASK) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"DPC_Last_TT0_Bit");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tt0_bit, sizeof(tt0_bit));
-                
-                ULONG systim_l = (ULONG)(current_systim & 0xFFFFFFFF);
-                ULONG systim_h = (ULONG)(current_systim >> 32);
-                RtlInitUnicodeString(&valueName, L"DPC_Last_SYSTIM_Low");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_l, sizeof(systim_l));
-                RtlInitUnicodeString(&valueName, L"DPC_Last_SYSTIM_High");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_h, sizeof(systim_h));
-                
-                ULONG target_l = (ULONG)(target_time & 0xFFFFFFFF);
-                ULONG target_h = (ULONG)(target_time >> 32);
-                RtlInitUnicodeString(&valueName, L"DPC_Last_TARGET_Low");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target_l, sizeof(target_l));
-                RtlInitUnicodeString(&valueName, L"DPC_Last_TARGET_High");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target_h, sizeof(target_h));
-                
-                // Check if target time has been reached
-                ULONG target_reached = (current_systim >= target_time) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"DPC_Target_Reached");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target_reached, sizeof(target_reached));
-                
-                // DIAGNOSTIC: Verify interrupt enable registers are still configured
-                uint32_t tsauxc_check = 0, tsim_check = 0, eims_check = 0, freqout0_check = 0;
-                ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_check);
-                ndis_platform_ops.mmio_read(dev, I226_TSIM, &tsim_check);
-                ndis_platform_ops.mmio_read(dev, I226_EIMS, &eims_check);
-                ndis_platform_ops.mmio_read(dev, I226_FREQOUT0, &freqout0_check);
-                
-                RtlInitUnicodeString(&valueName, L"DPC_TSAUXC_Check");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsauxc_check, sizeof(tsauxc_check));
-                
-                RtlInitUnicodeString(&valueName, L"DPC_TSIM_Check");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsim_check, sizeof(tsim_check));
-                
-                RtlInitUnicodeString(&valueName, L"DPC_EIMS_Check");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &eims_check, sizeof(eims_check));
-                
-                RtlInitUnicodeString(&valueName, L"DPC_FREQOUT0_Check");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &freqout0_check, sizeof(freqout0_check));
-                
-                // Check if any critical bits got cleared
-                ULONG en_tt0_set = (tsauxc_check & I226_TSAUXC_EN_TT0_MASK) ? 1 : 0;
-                ULONG tt0_mask_set = (tsim_check & I226_TSIM_TT0_MASK) ? 1 : 0;
-                ULONG other_mask_set = (eims_check & I226_EIMS_OTHER_MASK) ? 1 : 0;
-                
-                RtlInitUnicodeString(&valueName, L"DPC_EN_TT0_StillSet");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &en_tt0_set, sizeof(en_tt0_set));
-                RtlInitUnicodeString(&valueName, L"DPC_TT0_Mask_StillSet");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tt0_mask_set, sizeof(tt0_mask_set));
-                RtlInitUnicodeString(&valueName, L"DPC_OTHER_Mask_StillSet");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &other_mask_set, sizeof(other_mask_set));
-                
-                ZwClose(hKey);
-            }
-        }
-        #endif
+    // Periodic status log via DEBUGP (replaces registry diagnostics)
+    if ((call_count <= 100 && call_count % 10 == 0) || (call_count % 100 == 0)) {
+        DEBUGP(DL_TRACE, "!!! DPC[%d]: TSICR=0x%08X SYSTIM=0x%016llX TARGET=0x%016llX\n",
+               call_count, tsicr, (unsigned long long)current_systim, (unsigned long long)target_time);
     }
     
     // Only log when interrupt bits are set (avoid spam in normal operation)
     if (tsicr & (I226_TSICR_TT0_MASK | I226_TSICR_TT1_MASK)) {
-        DEBUGP(DL_ERROR, "!!! DPC: *** INTERRUPT DETECTED *** TSICR=0x%08X (TT0=%d, TT1=%d)\n",
+        DEBUGP(DL_TRACE, "!!! DPC: *** INTERRUPT DETECTED *** TSICR=0x%08X (TT0=%d, TT1=%d)\n",
                tsicr,
                (tsicr & I226_TSICR_TT0_MASK) ? 1 : 0,
                (tsicr & I226_TSICR_TT1_MASK) ? 1 : 0);
@@ -259,94 +174,64 @@ static VOID AvbTimerDpcRoutine(
     
     // Check TT0 interrupt
     if (tsicr & I226_TSICR_TT0_MASK) {
-        DEBUGP(DL_ERROR, "!!! DPC DETECTED: TT0 interrupt fired! (TSICR=0x%08X)\n", tsicr);
+        DEBUGP(DL_TRACE, "!!! DPC DETECTED: TT0 interrupt fired! (TSICR=0x%08X)\n", tsicr);
         
-        // Get device operations
-        const intel_device_ops_t *ops = intel_get_device_ops(dev->device_type);
-        if (ops && ops->get_aux_timestamp) {
-            uint64_t aux_timestamp = 0;
+        // BUG FIX: AUXSTMP registers are NOT automatically updated when target time reached
+        // Per I226 datasheet: AUXSTMP only written when TSYNCRXCTL.TSIP latches an event
+        // For target time events, we should use the TARGET time itself (TRGTTIML0/TRGTTIMH0)
+        // This is the time that was configured and reached, not the auxiliary timestamp
+        
+        uint32_t tt0_target_low = 0, tt0_target_high = 0;
+        if (ndis_platform_ops.mmio_read(dev, I226_TRGTTIML0, &tt0_target_low) == 0 &&
+            ndis_platform_ops.mmio_read(dev, I226_TRGTTIMH0, &tt0_target_high) == 0) {
+            uint64_t target_timestamp = ((uint64_t)tt0_target_high << 32) | tt0_target_low;
             
-            // Read auxiliary timestamp for timer 0
-            if (ops->get_aux_timestamp(dev, 0, &aux_timestamp) == 0) {
-                DEBUGP(DL_ERROR, "!!! DPC: AUX TIMESTAMP 0 = 0x%016llX (%llu ns)\n",
-                       (unsigned long long)aux_timestamp,
-                       (unsigned long long)aux_timestamp);
-                
-                // Write diagnostic to registry
-                #if DBG
-                {
-                    UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-                    OBJECT_ATTRIBUTES keyAttrs;
-                    HANDLE hKey = NULL;
-                    InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                    
-                    NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-                    if (NT_SUCCESS(st)) {
-                        UNICODE_STRING valueName;
-                        
-                        ULONG ts_low = (ULONG)(aux_timestamp & 0xFFFFFFFF);
-                        ULONG ts_high = (ULONG)(aux_timestamp >> 32);
-                        
-                        RtlInitUnicodeString(&valueName, L"DPC_AuxTS0_Low");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &ts_low, sizeof(ts_low));
-                        
-                        RtlInitUnicodeString(&valueName, L"DPC_AuxTS0_High");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &ts_high, sizeof(ts_high));
-                        
-                        ULONG detected_count = (ULONG)call_count;
-                        RtlInitUnicodeString(&valueName, L"DPC_TT0_DetectedAt");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &detected_count, sizeof(detected_count));
-                        
-                        ZwClose(hKey);
-                    }
-                }
-                #endif
-                
-                // Post timestamp event to subscribers (AVB_TS_EVENT_TARGET_TIME = 0x04)
-                // NOTE: Event type mask bit values: RX=0x01, TX=0x02, TARGET_TIME=0x04, AUX=0x08
-                // Parameters: context, event_type, timestamp_ns, vlan_id, pcp, queue (timer_idx), packet_length, trigger_source
-                DEBUGP(DL_ERROR, "!!! DPC: POSTING TARGET_TIME EVENT (type=0x04, ts=0x%016llX)\n",
-                       (unsigned long long)aux_timestamp);
-                AvbPostTimestampEvent(context, 0x04, aux_timestamp, 0, 0, 0, 0, 0);
-                DEBUGP(DL_ERROR, "!!! DPC: Posted target time event to subscribers (RETURNED FROM AvbPostTimestampEvent)\n");
-            } else {
-                DEBUGP(DL_ERROR, "!!! DPC: Failed to read auxiliary timestamp 0\n");
-            }
+            DEBUGP(DL_TRACE, "!!! DPC: TARGET TIME 0 = 0x%016llX (%llu ns)\n",
+                   (unsigned long long)target_timestamp,
+                   (unsigned long long)target_timestamp);
+            
+            // Post timestamp event to subscribers (AVB_TS_EVENT_TARGET_TIME = 0x04)
+            // NOTE: Event type mask bit values: RX=0x01, TX=0x02, TARGET_TIME=0x04, AUX=0x08
+            // Parameters: context, event_type, timestamp_ns, vlan_id, pcp, queue (timer_idx), packet_length, trigger_source
+            DEBUGP(DL_TRACE, "!!! DPC: POSTING TARGET_TIME EVENT (type=0x04, ts=0x%016llX)\n",
+                   (unsigned long long)target_timestamp);
+            AvbPostTimestampEvent(context, 0x04, target_timestamp, 0, 0, 0, 0, 0, 0);
+            DEBUGP(DL_TRACE, "!!! DPC: Posted target time event to subscribers (RETURNED FROM AvbPostTimestampEvent)\n");
+        } else {
+            DEBUGP(DL_TRACE, "!!! DPC: Failed to read target time registers\n");
         }
         
         // Clear TT0 interrupt (RW1C - write 1 to clear)
         uint32_t clear_val = I226_TSICR_TT0_MASK;
         if (ndis_platform_ops.mmio_write(dev, I226_TSICR, clear_val) != 0) {
-            DEBUGP(DL_ERROR, "!!! DPC: Failed to clear TSICR.TT0\n");
+            DEBUGP(DL_TRACE, "!!! DPC: Failed to clear TSICR.TT0\n");
         } else {
-            DEBUGP(DL_WARN, "!!! DPC: Cleared TSICR.TT0 interrupt\n");
+            DEBUGP(DL_TRACE, "!!! DPC: Cleared TSICR.TT0 interrupt\n");
         }
     }
     
     // Check TT1 interrupt (similar handling)
     if (tsicr & I226_TSICR_TT1_MASK) {
-        DEBUGP(DL_ERROR, "!!! DPC DETECTED: TT1 interrupt fired! (TSICR=0x%08X)\n", tsicr);
+        DEBUGP(DL_TRACE, "!!! DPC DETECTED: TT1 interrupt fired! (TSICR=0x%08X)\n", tsicr);
         
-        // Get device operations
-        const intel_device_ops_t *ops = intel_get_device_ops(dev->device_type);
-        if (ops && ops->get_aux_timestamp) {
-            uint64_t aux_timestamp = 0;
+        // BUG FIX: Read TARGET time (not AUXSTMP) for timer 1
+        uint32_t tt1_target_low = 0, tt1_target_high = 0;
+        if (ndis_platform_ops.mmio_read(dev, I226_TRGTTIML1, &tt1_target_low) == 0 &&
+            ndis_platform_ops.mmio_read(dev, I226_TRGTTIMH1, &tt1_target_high) == 0) {
+            uint64_t target_timestamp = ((uint64_t)tt1_target_high << 32) | tt1_target_low;
             
-            // Read auxiliary timestamp for timer 1
-            if (ops->get_aux_timestamp(dev, 1, &aux_timestamp) == 0) {
-                DEBUGP(DL_ERROR, "!!! DPC: AUX TIMESTAMP 1 = 0x%016llX\n", (unsigned long long)aux_timestamp);
-                
-                // Post timestamp event to subscribers
-                // Parameters: context, event_type, timestamp_ns, vlan_id, pcp, queue (timer_idx=1), packet_length, trigger_source
-                AvbPostTimestampEvent(context, 0x1, aux_timestamp, 0, 0, 1, 0, 0);
-                DEBUGP(DL_ERROR, "!!! DPC: Posted target time event (TT1) to subscribers\n");
-            }
+            DEBUGP(DL_TRACE, "!!! DPC: TARGET TIME 1 = 0x%016llX\n", (unsigned long long)target_timestamp);
+            
+            // Post timestamp event to subscribers
+            // Parameters: context, event_type, timestamp_ns, vlan_id, pcp, queue (timer_idx=1), packet_length, trigger_source
+            AvbPostTimestampEvent(context, 0x04, target_timestamp, 0, 0, 1, 0, 0, 0);
+            DEBUGP(DL_TRACE, "!!! DPC: Posted target time event (TT1) to subscribers\n");
         }
         
         // Clear TT1 interrupt
         uint32_t clear_val = I226_TSICR_TT1_MASK;
         ndis_platform_ops.mmio_write(dev, I226_TSICR, clear_val);
-        DEBUGP(DL_WARN, "!!! DPC: Cleared TSICR.TT1 interrupt\n");
+        DEBUGP(DL_TRACE, "!!! DPC: Cleared TSICR.TT1 interrupt\n");
     }
 }
 
@@ -367,16 +252,16 @@ static int init(device_t *dev)
     if (ndis_platform_ops.init) {
         NTSTATUS result = ndis_platform_ops.init(dev);
         if (!NT_SUCCESS(result)) {
-            DEBUGP(DL_ERROR, "I226 platform init failed: 0x%x\n", result);
+            DEBUGP(DL_TRACE, "I226 platform init failed: 0x%x\n", result);
             return -1;
         }
     }
     
     // Initialize PTP clock (required for GET_TIMESTAMP to work)
-    DEBUGP(DL_INFO, "I226: Initializing PTP clock\n");
+    DEBUGP(DL_TRACE, "I226: Initializing PTP clock\n");
     int ptp_result = init_ptp(dev);
     if (ptp_result != 0) {
-        DEBUGP(DL_WARN, "I226: PTP initialization returned: %d\n", ptp_result);
+        DEBUGP(DL_TRACE, "I226: PTP initialization returned: %d\n", ptp_result);
         // Continue - basic functionality still works
     }
     
@@ -441,7 +326,8 @@ static int get_info(device_t *dev, char *buffer, ULONG size)
  */
 static int set_systime(device_t *dev, uint64_t systime)
 {
-    uint32_t ts_low, ts_high;
+    uint32_t sec, nsec;
+    uint32_t tsauxc_val = 0;
     int result;
     
     DEBUGP(DL_TRACE, "==>i226_set_systime: 0x%llx\n", systime);
@@ -454,22 +340,43 @@ static int set_systime(device_t *dev, uint64_t systime)
     if (systime == 0) {
         LARGE_INTEGER currentTime;
         KeQuerySystemTime(&currentTime);
-        systime = currentTime.QuadPart * 100; // Convert to nanoseconds
-        DEBUGP(DL_INFO, "I226 using system time: 0x%llx\n", systime);
+        systime = currentTime.QuadPart * 100; // Convert 100ns units to nanoseconds
+        DEBUGP(DL_TRACE, "I226 using system time: 0x%llx\n", systime);
     }
     
-    // Split timestamp
-    ts_low = (uint32_t)(systime & 0xFFFFFFFF);
-    ts_high = (uint32_t)((systime >> 32) & 0xFFFFFFFF);
+    // I226/I225: split format — SYSTIMH=seconds, SYSTIML=nanoseconds (0-999,999,999)
+    // Do NOT use (systime >> 32) / (systime & 0xFFFFFFFF) — that is the I210 flat format
+    sec  = (uint32_t)(systime / 1000000000ULL);
+    nsec = (uint32_t)(systime % 1000000000ULL);
     
-    // Write SYSTIM registers using SSOT definitions
-    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIML, ts_low);
-    if (result != 0) return result;
+    // Step 1: Disable SYSTIM counter for an atomic write sequence.
+    // TSAUXC (0xB640) bit 31 halts the SYSTIM increment logic.
+    // Note: The SSOT header labels this bit PLLLOCKED but the hardware spec defines it
+    // as "Disable systime" — confirmed via IEEE 1588 I226 hardware manual.
+    ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val);
+    result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val | (1UL << 31));
+    if (result != 0) {
+        DEBUGP(DL_WARN, "i226_set_systime: failed to disable SYSTIM via TSAUXC, proceeding\n");
+    }
     
-    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, ts_high);
-    if (result != 0) return result;
+    // Step 2: Write nanoseconds to SYSTIML
+    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIML, nsec);
+    if (result != 0) {
+        ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val); // restore
+        return result;
+    }
     
-    DEBUGP(DL_TRACE, "<==i226_set_systime: Success\n");
+    // Step 3: Write seconds to SYSTIMH
+    result = ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, sec);
+    if (result != 0) {
+        ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val); // restore
+        return result;
+    }
+    
+    // Step 4: Re-enable SYSTIM counter
+    ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val & ~(1UL << 31));
+    
+    DEBUGP(DL_TRACE, "<==i226_set_systime: sec=%u nsec=%u Success\n", sec, nsec);
     return 0;
 }
 
@@ -490,16 +397,20 @@ static int get_systime(device_t *dev, uint64_t *systime)
         return -1;
     }
     
-    // Read SYSTIM registers using SSOT definitions
+    // I226/I225: SYSTIMH=seconds, SYSTIML=nanoseconds (split format, NOT flat 64-bit)
+    // Read order: SYSTIML first — reading SYSTIML latches SYSTIMH into a shadow register,
+    // ensuring both values correspond to the same instant (hardware-guaranteed atomic snapshot).
     result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low);
     if (result != 0) return result;
     
     result = ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &ts_high);
     if (result != 0) return result;
     
-    *systime = ((uint64_t)ts_high << 32) | ts_low;
+    // Reconstruct 64-bit nanosecond timestamp: seconds * 1e9 + nanoseconds
+    // NOT ((high << 32) | low) — that would be the I210 flat format
+    *systime = (uint64_t)ts_high * 1000000000ULL + (uint64_t)ts_low;
     
-    DEBUGP(DL_TRACE, "<==i226_get_systime: 0x%llx\n", *systime);
+    DEBUGP(DL_TRACE, "<==i226_get_systime: sec=%u nsec=%u total=0x%llx\n", ts_high, ts_low, *systime);
     return 0;
 }
 
@@ -514,65 +425,65 @@ static int init_ptp(device_t *dev)
     uint32_t systimh = 0, systiml = 0;
     uint32_t timinca = 0;
     
-    DEBUGP(DL_INFO, "==>i226_init_ptp: Starting PTP clock initialization\n");
+    DEBUGP(DL_TRACE, "==>i226_init_ptp: Starting PTP clock initialization\n");
     
     if (dev == NULL) {
-        DEBUGP(DL_ERROR, "i226_init_ptp: NULL device\n");
+        DEBUGP(DL_TRACE, "i226_init_ptp: NULL device\n");
         return -1;
     }
     
     // Step 1: Read and configure TIMINCA (clock increment register)
     if (ndis_platform_ops.mmio_read(dev, I226_TIMINCA, &timinca) == 0) {
-        DEBUGP(DL_INFO, "I226: Current TIMINCA=0x%08X\n", timinca);
+        DEBUGP(DL_TRACE, "I226: Current TIMINCA=0x%08X\n", timinca);
         
         // If TIMINCA is 0, set default 24ns increment for I226
         if (timinca == 0) {
             timinca = 0x18000000;  // 24ns per cycle (I226 default)
             if (ndis_platform_ops.mmio_write(dev, I226_TIMINCA, timinca) != 0) {
-                DEBUGP(DL_ERROR, "I226: Failed to write TIMINCA\n");
+                DEBUGP(DL_TRACE, "I226: Failed to write TIMINCA\n");
                 return -1;
             }
-            DEBUGP(DL_INFO, "I226: TIMINCA set to 0x%08X (24ns/cycle)\n", timinca);
+            DEBUGP(DL_TRACE, "I226: TIMINCA set to 0x%08X (24ns/cycle)\n", timinca);
         }
     } else {
-        DEBUGP(DL_ERROR, "I226: Failed to read TIMINCA\n");
+        DEBUGP(DL_TRACE, "I226: Failed to read TIMINCA\n");
         return -1;
     }
     
     // Step 2: Initialize SYSTIM registers to 1 (writing 0 might not trigger clock start)
     if (ndis_platform_ops.mmio_write(dev, I226_SYSTIML, 1) != 0 ||
         ndis_platform_ops.mmio_write(dev, I226_SYSTIMH, 0) != 0) {
-        DEBUGP(DL_ERROR, "I226: Failed to initialize SYSTIM\n");
+        DEBUGP(DL_TRACE, "I226: Failed to initialize SYSTIM\n");
         return -1;
     }
-    DEBUGP(DL_INFO, "I226: SYSTIM initialized to 0x0000000000000001\n");
+    DEBUGP(DL_TRACE, "I226: SYSTIM initialized to 0x0000000000000001\n");
     
     // Step 3: Verify SYSTIM is actually written
     if (ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &systiml) == 0 &&
         ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &systimh) == 0) {
-        DEBUGP(DL_INFO, "I226: SYSTIM readback: 0x%08X%08X\n", systimh, systiml);
+        DEBUGP(DL_TRACE, "I226: SYSTIM readback: 0x%08X%08X\n", systimh, systiml);
     }
     
     // Step 4: Enable SYSTIM clock via TSAUXC
     if (ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val) == 0) {
-        DEBUGP(DL_INFO, "I226: Current TSAUXC=0x%08X\n", tsauxc_val);
+        DEBUGP(DL_TRACE, "I226: Current TSAUXC=0x%08X\n", tsauxc_val);
         
         // Clear disable bit (bit 31) if set, and enable auto-adjust (bit 2)
         tsauxc_val &= ~I226_TSAUXC_PLLLOCKED_MASK;  // Clear PLLLOCKED/disable bit
         tsauxc_val |= I226_TSAUXC_EN_CLK0_MASK;     // Set EN_CLK0 - Enable clock 0
         
         if (ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to write TSAUXC\n");
+            DEBUGP(DL_TRACE, "I226: Failed to write TSAUXC\n");
             return -1;
         }
-        DEBUGP(DL_INFO, "I226: TSAUXC configured: 0x%08X\n", tsauxc_val);
+        DEBUGP(DL_TRACE, "I226: TSAUXC configured: 0x%08X\n", tsauxc_val);
         
         // Verify write
         if (ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val) == 0) {
-            DEBUGP(DL_INFO, "I226: TSAUXC readback: 0x%08X\n", tsauxc_val);
+            DEBUGP(DL_TRACE, "I226: TSAUXC readback: 0x%08X\n", tsauxc_val);
         }
     } else {
-        DEBUGP(DL_ERROR, "I226: Failed to read TSAUXC\n");
+        DEBUGP(DL_TRACE, "I226: Failed to read TSAUXC\n");
         return -1;
     }
     
@@ -585,18 +496,34 @@ static int init_ptp(device_t *dev)
         tsyncrxctl = (uint32_t)I226_TSYNCRXCTL_SET(0, I226_TSYNCRXCTL_EN_MASK, I226_TSYNCRXCTL_EN_SHIFT, 1);
         tsyncrxctl = (uint32_t)I226_TSYNCRXCTL_SET(tsyncrxctl, I226_TSYNCRXCTL_TYPE_MASK, I226_TSYNCRXCTL_TYPE_SHIFT, 0x4);
         ndis_platform_ops.mmio_write(dev, I226_TSYNCRXCTL, tsyncrxctl);
-        DEBUGP(DL_WARN, "I226: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", tsyncrxctl);
+        DEBUGP(DL_TRACE, "I226: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", tsyncrxctl);
     }
     
-    // TSYNCTXCTL: Enable TX timestamping
+    // TSYNCTXCTL: Enable TX timestamping (Foxville architecture requires Bit 5 = 1)
     if (ndis_platform_ops.mmio_read(dev, I226_TSYNCTXCTL, &tsynctxctl) == 0) {
-        // Set EN bit (bit 4)
+        // Set EN bit (bit 4) AND RSVD High bit (bit 5) - mandatory for I225/I226 (Foxville)
         tsynctxctl = (uint32_t)I226_TSYNCTXCTL_SET(0, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 1);
+        tsynctxctl = (uint32_t)I226_TSYNCTXCTL_SET(tsynctxctl, I226_TSYNCTXCTL_RSVD_MASK, I226_TSYNCTXCTL_RSVD_SHIFT, 1);
         ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, tsynctxctl);
-        DEBUGP(DL_WARN, "I226: TX timestamping enabled (TSYNCTXCTL=0x%08X)\n", tsynctxctl);
+        DEBUGP(DL_TRACE, "I226: TX timestamping enabled (TSYNCTXCTL=0x%08X, EN=1, RSVD=1)\n", tsynctxctl);
     }
     
-    DEBUGP(DL_INFO, "<==i226_init_ptp: PTP clock initialized successfully\n");
+    // ETQF(3): Configure EtherType filter for PTP packets (0x88F7)
+    // Evidence: Linux igb_ptp.c lines 806-811 shows this is REQUIRED for continuous timestamping
+    // Without this filter, hardware may not timestamp packets during high-frequency polling
+    uint32_t etqf_value = I226_ETQF_FILTER_ENABLE | I226_ETQF_1588 | ETH_P_1588;
+    ndis_platform_ops.mmio_write(dev, I226_ETQF(3), etqf_value);
+    DEBUGP(DL_TRACE, "I226: EtherType filter configured (ETQF[3]=0x%08X, PTP EtherType=0x88F7)\n", etqf_value);
+    
+    // Clear TX timestamp FIFO registers to remove any stale data (Linux igb_ptp.c:861-864)
+    // CRITICAL: Without this, first timestamp retrieval in rapid polling may get stale data
+    // Read operations clear the registers (side effect of MMIO read)
+    uint32_t dummy;
+    ndis_platform_ops.mmio_read(dev, I226_TXSTMPL, &dummy);
+    ndis_platform_ops.mmio_read(dev, I226_TXSTMPH, &dummy);
+    DEBUGP(DL_TRACE, "I226: FIFO cleared (TXSTMPL/H read to remove stale timestamps)\n");
+    
+    DEBUGP(DL_TRACE, "<==i226_init_ptp: PTP clock initialized successfully (Build 78: +ETQF filter +FIFO clear)\n");
     return 0;
 }
 
@@ -616,29 +543,29 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     DEBUGP(DL_TRACE, "==>i226_setup_tas (I226-specific implementation)\n");
     
     if (dev == NULL || config == NULL) {
-        DEBUGP(DL_ERROR, "i226_setup_tas: Invalid parameters\n");
+        DEBUGP(DL_TRACE, "i226_setup_tas: Invalid parameters\n");
         return -1;
     }
     
     context = (PAVB_DEVICE_CONTEXT)dev->private_data;
     if (context == NULL) {
-        DEBUGP(DL_ERROR, "i226_setup_tas: No device context\n");
+        DEBUGP(DL_TRACE, "i226_setup_tas: No device context\n");
         return -1;
     }
     
     // Log device identification
-    DEBUGP(DL_INFO, "I226 TAS Setup: VID:DID = 0x%04X:0x%04X\n", 
+    DEBUGP(DL_TRACE, "I226 TAS Setup: VID:DID = 0x%04X:0x%04X\n", 
            context->intel_device.pci_vendor_id, context->intel_device.pci_device_id);
     
     // Verify PHC is running
     uint64_t systim_current;
     result = get_systime(dev, &systim_current);
     if (result != 0 || systim_current == 0) {
-        DEBUGP(DL_ERROR, "I226 PHC not running - TAS requires active PTP clock\n");
+        DEBUGP(DL_TRACE, "I226 PHC not running - TAS requires active PTP clock\n");
         return -1;
     }
     
-    DEBUGP(DL_INFO, "? I226 PHC verified: SYSTIM=0x%llx\n", systim_current);
+    DEBUGP(DL_TRACE, "? I226 PHC verified: SYSTIM=0x%llx\n", systim_current);
     
     // Program TQAVCTRL register (I226-specific address)
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
@@ -650,7 +577,7 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
     if (result != 0) return result;
     
-    DEBUGP(DL_INFO, "? I226 TQAVCTRL programmed: 0x%08X\n", regValue);
+    DEBUGP(DL_TRACE, "? I226 TQAVCTRL programmed: 0x%08X\n", regValue);
     
     // Program cycle time
     uint32_t cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
@@ -661,15 +588,15 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET, cycle_time_ns);
     if (result != 0) return result;
     
-    DEBUGP(DL_INFO, "? I226 cycle time programmed: %lu ns\n", cycle_time_ns);
+    DEBUGP(DL_TRACE, "? I226 cycle time programmed: %lu ns\n", cycle_time_ns);
     
     // Final verification
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
     if (result == 0 && (regValue & I226_TQAVCTRL_TRANSMIT_MODE_TSN)) {
-        DEBUGP(DL_INFO, "?? I226 TAS activation SUCCESS: TQAVCTRL=0x%08X\n", regValue);
+        DEBUGP(DL_TRACE, "?? I226 TAS activation SUCCESS: TQAVCTRL=0x%08X\n", regValue);
         return 0;
     } else {
-        DEBUGP(DL_ERROR, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", regValue);
+        DEBUGP(DL_TRACE, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", regValue);
         return -1;
     }
 }
@@ -689,7 +616,7 @@ static int setup_frame_preemption(device_t *dev, struct tsn_fp_config *config)
     }
     
     // I226 Frame Preemption implementation to be added
-    DEBUGP(DL_INFO, "I226 Frame Preemption: Implementation pending\n");
+    DEBUGP(DL_TRACE, "I226 Frame Preemption: Implementation pending\n");
     
     return 0;
 }
@@ -709,7 +636,7 @@ static int setup_ptm(device_t *dev, struct ptm_config *config)
     }
     
     // I226 PTM implementation to be added
-    DEBUGP(DL_INFO, "I226 PTM: Implementation pending\n");
+    DEBUGP(DL_TRACE, "I226 PTM: Implementation pending\n");
     
     return 0;
 }
@@ -768,20 +695,22 @@ static int enable_packet_timestamping(device_t *dev, int enable)
         rx_ctl = (uint32_t)I226_TSYNCRXCTL_SET(rx_ctl, I226_TSYNCRXCTL_TYPE_MASK, I226_TSYNCRXCTL_TYPE_SHIFT, 0x4);  // All packets
         
         if (ndis_platform_ops.mmio_write(dev, I226_TSYNCRXCTL, rx_ctl) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to write TSYNCRXCTL\n");
+            DEBUGP(DL_TRACE, "I226: Failed to write TSYNCRXCTL\n");
             return -1;
         }
-        DEBUGP(DL_INFO, "I226: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
+        DEBUGP(DL_TRACE, "I226: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
         
         // Enable TX packet timestamping using SSOT definitions
+        // Per i226 datasheet: bit 4 (EN) + bit 5 (RSVD, must be set) → 0x30
         uint32_t tx_ctl = 0;
-        tx_ctl = (uint32_t)I226_TSYNCTXCTL_SET(0, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 1);  // Enable
+        tx_ctl = (uint32_t)I226_TSYNCTXCTL_SET(0, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 1);      // bit 4: Enable
+        tx_ctl = (uint32_t)I226_TSYNCTXCTL_SET(tx_ctl, I226_TSYNCTXCTL_RSVD_MASK, I226_TSYNCTXCTL_RSVD_SHIFT, 1); // bit 5: RSVD (required)
         
         if (ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, tx_ctl) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to write TSYNCTXCTL\n");
+            DEBUGP(DL_TRACE, "I226: Failed to write TSYNCTXCTL\n");
             return -1;
         }
-        DEBUGP(DL_INFO, "I226: Enabled TX packet timestamping (TSYNCTXCTL=0x%08X)\n", tx_ctl);
+        DEBUGP(DL_TRACE, "I226: Enabled TX packet timestamping (TSYNCTXCTL=0x%08X)\n", tx_ctl);
     } else {
         // Disable packet timestamping
         uint32_t regval = 0;
@@ -796,7 +725,7 @@ static int enable_packet_timestamping(device_t *dev, int enable)
             regval = (uint32_t)I226_TSYNCTXCTL_SET(regval, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 0);
             ndis_platform_ops.mmio_write(dev, I226_TSYNCTXCTL, regval);
         }
-        DEBUGP(DL_INFO, "I226: Disabled packet timestamping\n");
+        DEBUGP(DL_TRACE, "I226: Disabled packet timestamping\n");
     }
     
     return 0;
@@ -820,51 +749,11 @@ static int enable_packet_timestamping(device_t *dev, int enable)
 static int i226_set_target_time(device_t *dev, uint8_t timer_index, 
                                 uint64_t target_time_ns, int enable_interrupt)
 {
-    // ===================================================================
-    // DIAGNOSTIC ENTRY POINT: Trace every call to set_target_time
-    // ===================================================================
-    #if DBG
-    {
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName;
-            
-            // Log function entry
-            ULONG entry_marker = 0xDEAD0001;  // Entry marker
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_EntryMarker");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &entry_marker, sizeof(entry_marker));
-            
-            // Log parameters
-            ULONG param_timer_idx = (ULONG)timer_index;
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_TimerIndex");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &param_timer_idx, sizeof(param_timer_idx));
-            
-            ULONG param_enable_int = (ULONG)enable_interrupt;
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_EnableInterrupt");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &param_enable_int, sizeof(param_enable_int));
-            
-            ULONG param_target_low = (ULONG)(target_time_ns & 0xFFFFFFFF);
-            ULONG param_target_high = (ULONG)(target_time_ns >> 32);
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_Target_Low");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &param_target_low, sizeof(param_target_low));
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_Target_High");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &param_target_high, sizeof(param_target_high));
-            
-            ZwClose(hKey);
-        }
-    }
-    #endif
-    
-    DEBUGP(DL_ERROR, "!!! ENTRY: i226_set_target_time(timer=%u, target=0x%016llX, enable_int=%d)\n",
+    DEBUGP(DL_TRACE, "!!! ENTRY: i226_set_target_time(timer=%u, target=0x%016llX, enable_int=%d)\n",
            timer_index, (unsigned long long)target_time_ns, enable_interrupt);
     
     if (timer_index > I226_MAX_TIMER_INDEX) {
-        DEBUGP(DL_ERROR, "I226: Invalid timer index %u (max %u)\n", timer_index, I226_MAX_TIMER_INDEX);
+        DEBUGP(DL_TRACE, "I226: Invalid timer index %u (max %u)\n", timer_index, I226_MAX_TIMER_INDEX);
         return -EINVAL;
     }
     
@@ -883,62 +772,24 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
     current_systim = ((uint64_t)systim_high << 32) | systim_low;
     int64_t delta_ns = (int64_t)(target_time_ns - current_systim);
     
-    DEBUGP(DL_WARN, "!!! I226: Setting target time %u: 0x%08X%08X (%llu ns)\n", 
+    DEBUGP(DL_TRACE, "!!! I226: Setting target time %u: 0x%08X%08X (%llu ns)\n", 
            timer_index, time_high, time_low, (unsigned long long)target_time_ns);
-    DEBUGP(DL_WARN, "!!! I226:   Current SYSTIM:  0x%016llX (%llu ns)\n",
+    DEBUGP(DL_TRACE, "!!! I226:   Current SYSTIM:  0x%016llX (%llu ns)\n",
            (unsigned long long)current_systim, (unsigned long long)current_systim);
-    DEBUGP(DL_WARN, "!!! I226:   Delta (target - current): %s%lld ns (%lld ms)\n",
+    DEBUGP(DL_TRACE, "!!! I226:   Delta (target - current): %s%lld ns (%lld ms)\n",
            (delta_ns < 0) ? "-" : "+", (long long)(delta_ns < 0 ? -delta_ns : delta_ns), 
            (long long)(delta_ns < 0 ? -delta_ns : delta_ns) / 1000000);
     if (delta_ns < 0) {
-        DEBUGP(DL_ERROR, "!!! I226: WARNING - Target time is in the PAST by %lld ns!\n", (long long)(-delta_ns));
+        DEBUGP(DL_TRACE, "!!! I226: WARNING - Target time is in the PAST by %lld ns!\n", (long long)(-delta_ns));
     }
-    
-    // DIAGNOSTIC: Write timing info to registry (bypasses DbgPrint filtering)
-    #if DBG
-    {
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName;
-            
-            RtlInitUnicodeString(&valueName, L"i226_CurrentSYSTIM_Low");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_low, sizeof(systim_low));
-            
-            RtlInitUnicodeString(&valueName, L"i226_CurrentSYSTIM_High");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_high, sizeof(systim_high));
-            
-            RtlInitUnicodeString(&valueName, L"i226_TargetTime_Low");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &time_low, sizeof(time_low));
-            
-            RtlInitUnicodeString(&valueName, L"i226_TargetTime_High");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &time_high, sizeof(time_high));
-            
-            // Store delta as signed 32-bit (will wrap for large values, but shows sign)
-            LONG delta_ms = (LONG)(delta_ns / 1000000);
-            RtlInitUnicodeString(&valueName, L"i226_Delta_Milliseconds");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &delta_ms, sizeof(delta_ms));
-            
-            ULONG timer_idx = (ULONG)timer_index;
-            RtlInitUnicodeString(&valueName, L"i226_TimerIndex");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_idx, sizeof(timer_idx));
-            
-            ZwClose(hKey);
-        }
-    }
-    #endif
     
     // Write target time registers (low then high for atomicity)
     if (ndis_platform_ops.mmio_write(dev, trgttiml_offset, time_low) != 0) {
-        DEBUGP(DL_ERROR, "I226: Failed to write TRGTTIML%u\n", timer_index);
+        DEBUGP(DL_TRACE, "I226: Failed to write TRGTTIML%u\n", timer_index);
         return -EIO;
     }
     if (ndis_platform_ops.mmio_write(dev, trgttimh_offset, time_high) != 0) {
-        DEBUGP(DL_ERROR, "I226: Failed to write TRGTTIMH%u\n", timer_index);
+        DEBUGP(DL_TRACE, "I226: Failed to write TRGTTIMH%u\n", timer_index);
         return -EIO;
     }
     
@@ -947,178 +798,56 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
     ndis_platform_ops.mmio_read(dev, trgttiml_offset, &verify_low);
     ndis_platform_ops.mmio_read(dev, trgttimh_offset, &verify_high);
     uint64_t verified_target = ((uint64_t)verify_high << 32) | verify_low;
+    UNREFERENCED_PARAMETER(verified_target);  // Used only in DEBUGP
     
-    DEBUGP(DL_WARN, "!!! I226:   VERIFY: wrote=0x%08X%08X, read=0x%08X%08X %s\n",
+    DEBUGP(DL_TRACE, "!!! I226:   VERIFY: wrote=0x%08X%08X, read=0x%08X%08X %s\n",
            time_high, time_low, verify_high, verify_low,
            (verified_target == target_time_ns) ? "OK" : "MISMATCH!");
-    
-    // DIAGNOSTIC: Write TARGET readback verification to registry
-    #if DBG
-    {
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName;
-            
-            RtlInitUnicodeString(&valueName, L"i226_TARGET_Verify_Low");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &verify_low, sizeof(verify_low));
-            
-            RtlInitUnicodeString(&valueName, L"i226_TARGET_Verify_High");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &verify_high, sizeof(verify_high));
-            
-            ULONG write_ok = (verified_target == target_time_ns) ? 1 : 0;
-            RtlInitUnicodeString(&valueName, L"i226_TARGET_WriteOK");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &write_ok, sizeof(write_ok));
-            
-            ZwClose(hKey);
-        }
-    }
-    #endif
+    // NOTE: TRGTTIML0 is shadow-latched — the register value isn't visible on readback
+    // until the timer is armed (TSAUXC.EN_TT0 set). Checking the readback here would
+    // incorrectly flag working adapters as failing. Hardware responsiveness is instead
+    // inferred in userspace from the previous_target sentinel value (see test skip logic).
     
     // ===================================================================
-    // CRITICAL SECTION: Timer/DPC Initialization Check
+    // Timer/DPC Initialization for Target Time Polling
     // ===================================================================
-    // 
-    // Question: WHERE is the Windows kernel timer (KTIMER) initialized?
-    // Question: WHERE is the DPC (KDPC) initialized for polling TSICR?
-    //
-    // Expected: KeInitializeTimer(), KeInitializeDpc(), KeSetTimerEx()
-    // Reality:  Code not found in this function!
-    //
-    // Registry evidence shows Timer_PollActive_Before=1 but no DPC diagnostics.
-    // This suggests timer_poll_active flag exists but actual timer code is missing.
-    //
-    #if DBG
+    // Access AVB context via two-step pattern:
+    //   dev->private_data -> struct intel_private -> platform_data -> AVB_DEVICE_CONTEXT
     {
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName;
-            
-            // Log that we reached interrupt enable section
-            ULONG reached_interrupt_section = 1;
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_ReachedInterruptSection");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &reached_interrupt_section, sizeof(reached_interrupt_section));
-            
-            // Log where timer init SHOULD be called
-            ULONG timer_init_should_be_here = 0xCAFEBABE;  // Marker
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_TimerInitExpectedHere");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_init_should_be_here, sizeof(timer_init_should_be_here));
-            
-            // ===================================================================
-            // IMPLEMENTATION: Timer/DPC Initialization for Target Time Polling
-            // ===================================================================
-            // Initialize Windows kernel timer and DPC to poll TSICR register
-            // every 10ms for target time interrupt detection.
-            //
-            // CRITICAL FIX: Access AVB context via correct two-step pattern:
-            //   dev->private_data -> struct intel_private -> platform_data -> AVB_DEVICE_CONTEXT
-            // (NOT direct cast - that reads garbage!)
-            struct intel_private *priv = (struct intel_private *)dev->private_data;
-            PAVB_DEVICE_CONTEXT avb_context = priv ? (PAVB_DEVICE_CONTEXT)priv->platform_data : NULL;
-            
-            // UNCONDITIONAL TRACE: Log context validity BEFORE any checks (MUST appear in DebugView)
-            if (avb_context) {
-                DEBUGP(DL_ERROR, "!!! SET_TARGET_TIME: Context valid (ctx=%p, via priv=%p)\n", avb_context, priv);
-            } else {
-                DEBUGP(DL_ERROR, "!!! SET_TARGET_TIME: Context is NULL! (priv=%p)\n", priv);
-            }
-            
-            // DIAGNOSTIC: Log context pointer and flag values BEFORE checking
-            if (avb_context) {
-                ULONG context_ptr = (ULONG)(ULONG_PTR)avb_context;
-                ULONG flag_value = avb_context->target_time_poll_active ? 1 : 0;
-                ULONG tx_flag_value = avb_context->tx_poll_active ? 1 : 0;
-                
-                // UNCONDITIONAL TRACE: Log flag values BEFORE conditional check (MUST appear)
-                DEBUGP(DL_ERROR, "!!! SET_TARGET_TIME: Flags before init check (ctx=%p, target_active=%d, tx_active=%d)\n",
-                       avb_context, flag_value, tx_flag_value);
-                
-                RtlInitUnicodeString(&valueName, L"Timer_ContextPointer");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &context_ptr, sizeof(context_ptr));
-                
-                RtlInitUnicodeString(&valueName, L"Timer_TargetTimeFlag_RawValue");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &flag_value, sizeof(flag_value));
-                
-                RtlInitUnicodeString(&valueName, L"Timer_TxPollFlag_ForComparison");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tx_flag_value, sizeof(tx_flag_value));
-                
-                DEBUGP(DL_ERROR, "!!! TIMER INIT CHECK: context=%p, target_time_poll_active=%d, tx_poll_active=%d\n",
-                       avb_context, flag_value, tx_flag_value);
-            }
-            
-            // UNCONDITIONAL TRACE: Log which branch we're taking (MUST appear)
-            if (avb_context && !avb_context->target_time_poll_active) {
-                DEBUGP(DL_ERROR, "!!! SET_TARGET_TIME: Entering timer init block (flag was FALSE)\n");
-                // Initialize kernel timer
-                KeInitializeTimer(&avb_context->target_time_timer);
-                
-                // Initialize DPC
-                KeInitializeDpc(&avb_context->target_time_dpc, AvbTimerDpcRoutine, avb_context);
-                
-                // Set periodic timer (10ms interval)
-                LARGE_INTEGER dueTime;
-                dueTime.QuadPart = -100000LL;  // 10ms (negative = relative time)
-                KeSetTimerEx(&avb_context->target_time_timer, dueTime, 10, &avb_context->target_time_dpc);
-                
-                // TRACE: Activating target time polling (diagnostic for flag state changes)
-                DEBUGP(DL_ERROR, "!!! TARGET_TIMER_INIT: Activating flag (ctx=%p, before=%d)\n",
-                       avb_context, avb_context->target_time_poll_active ? 1 : 0);
-                
-                avb_context->target_time_poll_active = TRUE;
-                
-                // TRACE: Confirm flag activation completed
-                DEBUGP(DL_ERROR, "!!! TARGET_TIMER_INIT: Flag activated (ctx=%p, after=%d)\n",
-                       avb_context, avb_context->target_time_poll_active ? 1 : 0);
-                
-                avb_context->target_time_poll_interval_ms = 10;
-                avb_context->target_time_dpc_call_count = 0;
-                
-                // Diagnostic: Log timer initialization SUCCESS
-                ULONG timer_init_success = 1;
-                RtlInitUnicodeString(&valueName, L"Timer_Init_Called");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_init_success, sizeof(timer_init_success));
-                
-                ULONG timer_obj_addr = (ULONG)(ULONG_PTR)&avb_context->target_time_timer;
-                RtlInitUnicodeString(&valueName, L"Timer_ObjectAddress");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_obj_addr, sizeof(timer_obj_addr));
-                
-                ULONG context_addr = (ULONG)(ULONG_PTR)avb_context;
-                RtlInitUnicodeString(&valueName, L"Timer_ContextAddress");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &context_addr, sizeof(context_addr));
-                
-                DEBUGP(DL_ERROR, "!!! TIMER INITIALIZED: 10ms periodic DPC started (context=%p)\n", avb_context);
-            } else if (avb_context && avb_context->target_time_poll_active) {
-                // UNCONDITIONAL TRACE: Log when timer init SKIPPED (MUST appear in DebugView)
-                DEBUGP(DL_ERROR, "!!! SET_TARGET_TIME: SKIPPING timer init -already_active flag is TRUE (ctx=%p)\n", avb_context);
-                DEBUGP(DL_WARN, "!!! TIMER ALREADY ACTIVE: Skipping re-initialization\n");
-                
-                ULONG timer_already_active = 1;
-                RtlInitUnicodeString(&valueName, L"Timer_AlreadyActive");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_already_active, sizeof(timer_already_active));
-            } else {
-                // UNCONDITIONAL TRACE: Log NULL context error (MUST appear)
-                DEBUGP(DL_ERROR, "!!! SET_TARGET_TIME: SKIPPING timer init - context is NULL!\n");
-                DEBUGP(DL_ERROR, "!!! TIMER INIT FAILED: NULL context!\n");
-                
-                ULONG timer_null_context = 1;
-                RtlInitUnicodeString(&valueName, L"Timer_NullContext");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_null_context, sizeof(timer_null_context));
-            }
-            
-            ZwClose(hKey);
+        struct intel_private *priv = (struct intel_private *)dev->private_data;
+        PAVB_DEVICE_CONTEXT avb_context = priv ? (PAVB_DEVICE_CONTEXT)priv->platform_data : NULL;
+
+        if (avb_context) {
+            DEBUGP(DL_TRACE, "!!! SET_TARGET_TIME: Context valid (ctx=%p, via priv=%p)\n", avb_context, priv);
+        } else {
+            DEBUGP(DL_TRACE, "!!! SET_TARGET_TIME: Context is NULL! (priv=%p)\n", priv);
+        }
+
+        if (avb_context && !avb_context->target_time_poll_active) {
+            DEBUGP(DL_TRACE, "!!! SET_TARGET_TIME: Entering timer init block (flag was FALSE)\n");
+
+            KeInitializeTimer(&avb_context->target_time_timer);
+            KeInitializeDpc(&avb_context->target_time_dpc, AvbTimerDpcRoutine, avb_context);
+
+            LARGE_INTEGER dueTime;
+            dueTime.QuadPart = -100000LL;  // 10ms (negative = relative time)
+            KeSetTimerEx(&avb_context->target_time_timer, dueTime, 10, &avb_context->target_time_dpc);
+
+            DEBUGP(DL_TRACE, "!!! TARGET_TIMER_INIT: Activating flag (ctx=%p, before=%d)\n",
+                   avb_context, avb_context->target_time_poll_active ? 1 : 0);
+
+            avb_context->target_time_poll_active = TRUE;
+            avb_context->target_time_poll_interval_ms = 10;
+            avb_context->target_time_dpc_call_count = 0;
+
+            DEBUGP(DL_TRACE, "!!! TIMER INITIALIZED: 10ms periodic DPC started (context=%p)\n", avb_context);
+        } else if (avb_context && avb_context->target_time_poll_active) {
+            DEBUGP(DL_TRACE, "!!! SET_TARGET_TIME: SKIPPING timer init - already_active flag is TRUE (ctx=%p)\n", avb_context);
+        } else {
+            DEBUGP(DL_TRACE, "!!! SET_TARGET_TIME: SKIPPING timer init - context is NULL!\n");
         }
     }
-    #endif
-    
+
     // Enable interrupt in TSAUXC if requested
     if (enable_interrupt) {
         uint32_t tsauxc;
@@ -1136,14 +865,14 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         uint32_t eims_new;
         uint32_t eims_after = 0;
         
-        DEBUGP(DL_ERROR, "!!! INTERRUPT ENABLE: enable_interrupt=%d (entering TSAUXC config)\n", enable_interrupt);
+        DEBUGP(DL_TRACE, "!!! INTERRUPT ENABLE: enable_interrupt=%d (entering TSAUXC config)\n", enable_interrupt);
         
         if (ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to read TSAUXC\n");
+            DEBUGP(DL_TRACE, "I226: Failed to read TSAUXC\n");
             return -EIO;
         }
         
-        DEBUGP(DL_WARN, "!!! I226:   TSAUXC BEFORE: 0x%08X (EN_TT0=%d, EN_TT1=%d, AUTT0=%d, AUTT1=%d)\n",
+        DEBUGP(DL_TRACE, "!!! I226:   TSAUXC BEFORE: 0x%08X (EN_TT0=%d, EN_TT1=%d, AUTT0=%d, AUTT1=%d)\n",
                tsauxc,
                (tsauxc & I226_TSAUXC_EN_TT0_MASK) ? 1 : 0,
                (tsauxc & I226_TSAUXC_EN_TT1_MASK) ? 1 : 0,
@@ -1155,14 +884,14 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         tsauxc |= en_bit;
         
         if (ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to write TSAUXC\n");
+            DEBUGP(DL_TRACE, "I226: Failed to write TSAUXC\n");
             return -EIO;
         }
         
         // Verify interrupt enable by reading back
         ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_after);
         
-        DEBUGP(DL_WARN, "!!! I226:   TSAUXC AFTER:  0x%08X (EN_TT0=%d, EN_TT1=%d, AUTT0=%d, AUTT1=%d) %s\n",
+        DEBUGP(DL_TRACE, "!!! I226:   TSAUXC AFTER:  0x%08X (EN_TT0=%d, EN_TT1=%d, AUTT0=%d, AUTT1=%d) %s\n",
                tsauxc_after,
                (tsauxc_after & I226_TSAUXC_EN_TT0_MASK) ? 1 : 0,
                (tsauxc_after & I226_TSAUXC_EN_TT1_MASK) ? 1 : 0,
@@ -1173,7 +902,7 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         // Enable TT0/TT1 interrupt in TSIM (0xB674) - CRITICAL for interrupt delivery!
         // Per I225 datasheet Section 8.16.2: TSIM bit 3 = TT0 interrupt mask, bit 4 = TT1
         if (ndis_platform_ops.mmio_read(dev, I226_TSIM, &tsim) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to read TSIM\n");
+            DEBUGP(DL_TRACE, "I226: Failed to read TSIM\n");
             return -EIO;
         }
         
@@ -1182,13 +911,13 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         tsim |= tt_int_bit;  // Enable TT interrupt mask
         
         if (ndis_platform_ops.mmio_write(dev, I226_TSIM, tsim) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to write TSIM\n");
+            DEBUGP(DL_TRACE, "I226: Failed to write TSIM\n");
             return -EIO;
         }
         
         // Verify TSIM write
         ndis_platform_ops.mmio_read(dev, I226_TSIM, &tsim_after);
-        DEBUGP(DL_WARN, "!!! I226:   TSIM: 0x%08X -> 0x%08X (TT0_mask=%d, TT1_mask=%d)\n",
+        DEBUGP(DL_TRACE, "!!! I226:   TSIM: 0x%08X -> 0x%08X (TT0_mask=%d, TT1_mask=%d)\n",
                tsim_before, tsim_after,
                (tsim_after & I226_TSIM_TT0_MASK) ? 1 : 0,
                (tsim_after & I226_TSIM_TT1_MASK) ? 1 : 0);
@@ -1217,17 +946,17 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         //
         // Read current value for diagnostics
         if (ndis_platform_ops.mmio_read(dev, I226_FREQOUT0, &freqout0) == 0) {
-            DEBUGP(DL_WARN, "!!! I226:   FREQOUT0 before: 0x%08X (%u ns)\n", 
+            DEBUGP(DL_TRACE, "!!! I226:   FREQOUT0 before: 0x%08X (%u ns)\n", 
                    freqout0, freqout0);
         }
         
         // Write FREQOUT0 to activate hardware compare logic
         if (ndis_platform_ops.mmio_write(dev, I226_FREQOUT0, I226_FREQOUT0_1MHZ) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to write FREQOUT0\n");
+            DEBUGP(DL_TRACE, "I226: Failed to write FREQOUT0\n");
             return -EIO;
         }
         
-        DEBUGP(DL_WARN, "!!! I226:   FREQOUT0 set to %u ns (activating TT compare logic)\n", 
+        DEBUGP(DL_TRACE, "!!! I226:   FREQOUT0 set to %u ns (activating TT compare logic)\n", 
                I226_FREQOUT0_1MHZ);
         
         // ========================================================================
@@ -1258,139 +987,36 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         // require both TSIM (specific mask) and IMS/EIMS (category mask).
         //
         if (ndis_platform_ops.mmio_read(dev, I226_EIMS, &eims_before) == 0) {
-            DEBUGP(DL_WARN, "!!! I226:   EIMS before: 0x%08X (OTHER=%d)\n",
+            DEBUGP(DL_TRACE, "!!! I226:   EIMS before: 0x%08X (OTHER=%d)\n",
                    eims_before,
                    (eims_before & I226_EIMS_OTHER_MASK) ? 1 : 0);
         }
         
         eims_new = eims_before | I226_EIMS_OTHER_MASK;
         if (ndis_platform_ops.mmio_write(dev, I226_EIMS, eims_new) != 0) {
-            DEBUGP(DL_ERROR, "I226: Failed to write EIMS\n");
+            DEBUGP(DL_TRACE, "I226: Failed to write EIMS\n");
             return -EIO;
         }
         
         // Verify EIMS write
         ndis_platform_ops.mmio_read(dev, I226_EIMS, &eims_after);
-        DEBUGP(DL_WARN, "!!! I226:   EIMS after: 0x%08X (OTHER=%d) %s\n",
+        DEBUGP(DL_TRACE, "!!! I226:   EIMS after: 0x%08X (OTHER=%d) %s\n",
                eims_after,
                (eims_after & I226_EIMS_OTHER_MASK) ? 1 : 0,
                (eims_after & I226_EIMS_OTHER_MASK) ? "ENABLED ✓" : "FAILED!");
         
         // Read TSYNCRXCTL to verify timestamp system status
         if (ndis_platform_ops.mmio_read(dev, I226_TSYNCRXCTL, &tsyncrxctl) == 0) {
-            DEBUGP(DL_WARN, "!!! I226:   TSYNCRXCTL: 0x%08X (VALID=%d, TYPE=%d, ENABLED=%d)\n",
+            DEBUGP(DL_TRACE, "!!! I226:   TSYNCRXCTL: 0x%08X (VALID=%d, TYPE=%d, ENABLED=%d)\n",
                    tsyncrxctl,
                    (tsyncrxctl & I226_TSYNCRXCTL_RXTT_MASK) ? 1 : 0,
                    (tsyncrxctl & I226_TSYNCRXCTL_TYPE_MASK) >> I226_TSYNCRXCTL_TYPE_SHIFT,
                    (tsyncrxctl & I226_TSYNCRXCTL_EN_MASK) ? 1 : 0);
         }
         
-        // DIAGNOSTIC: Write TSAUXC and TSIM values to registry
-        #if DBG
-        {
-            UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-            OBJECT_ATTRIBUTES keyAttrs;
-            HANDLE hKey = NULL;
-            InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-            
-            NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-            if (NT_SUCCESS(st)) {
-                UNICODE_STRING valueName;
-                
-                RtlInitUnicodeString(&valueName, L"i226_TSAUXC_Before");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsauxc, sizeof(tsauxc));
-                
-                RtlInitUnicodeString(&valueName, L"i226_TSAUXC_After");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsauxc_after, sizeof(tsauxc_after));
-                
-                ULONG en_tt0 = (tsauxc_after & I226_TSAUXC_EN_TT0_MASK) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"i226_EN_TT0");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &en_tt0, sizeof(en_tt0));
-                
-                RtlInitUnicodeString(&valueName, L"i226_TSIM_Before");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsim_before, sizeof(tsim_before));
-                
-                RtlInitUnicodeString(&valueName, L"i226_TSIM_After");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsim_after, sizeof(tsim_after));
-                
-                ULONG tt0_mask = (tsim_after & I226_TSIM_TT0_MASK) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"i226_TT0_InterruptMask");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tt0_mask, sizeof(tt0_mask));
-                
-                // Write FREQOUT0 values to registry (before and after)
-                RtlInitUnicodeString(&valueName, L"i226_FREQOUT0_Before");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &freqout0, sizeof(freqout0));
-                
-                uint32_t freqout0_after = I226_FREQOUT0_1MHZ;
-                RtlInitUnicodeString(&valueName, L"i226_FREQOUT0_After");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &freqout0_after, sizeof(freqout0_after));
-                
-                // Write TSYNCRXCTL value to registry
-                RtlInitUnicodeString(&valueName, L"i226_TSYNCRXCTL");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsyncrxctl, sizeof(tsyncrxctl));
-                
-                // Write EIMS values to registry for diagnostic
-                RtlInitUnicodeString(&valueName, L"i226_EIMS_Before");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &eims_before, sizeof(eims_before));
-                
-                RtlInitUnicodeString(&valueName, L"i226_EIMS_After");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &eims_after, sizeof(eims_after));
-                
-                ULONG eims_other = (eims_after & I226_EIMS_OTHER_MASK) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"i226_EIMS_OTHER_Enabled");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &eims_other, sizeof(eims_other));
-                
-                // DIAGNOSTIC: Write TSYNCRXCTL value
-                RtlInitUnicodeString(&valueName, L"i226_TSYNCRXCTL_Value");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsyncrxctl, sizeof(tsyncrxctl));
-                
-                // DIAGNOSTIC: Extract and write individual TSYNCRXCTL bits
-                ULONG tsyncrxctl_valid = (tsyncrxctl & I226_TSYNCRXCTL_RXTT_MASK) ? 1 : 0;
-                ULONG tsyncrxctl_type = (tsyncrxctl & I226_TSYNCRXCTL_TYPE_MASK) >> I226_TSYNCRXCTL_TYPE_SHIFT;
-                ULONG tsyncrxctl_enabled = (tsyncrxctl & I226_TSYNCRXCTL_EN_MASK) ? 1 : 0;
-                
-                RtlInitUnicodeString(&valueName, L"i226_TSYNCRXCTL_Valid");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsyncrxctl_valid, sizeof(tsyncrxctl_valid));
-                RtlInitUnicodeString(&valueName, L"i226_TSYNCRXCTL_Type");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsyncrxctl_type, sizeof(tsyncrxctl_type));
-                RtlInitUnicodeString(&valueName, L"i226_TSYNCRXCTL_Enabled");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tsyncrxctl_enabled, sizeof(tsyncrxctl_enabled));
-                
-                ZwClose(hKey);
-            }
-        }
-        #endif
     }
     
-    // ===================================================================
-    // DIAGNOSTIC EXIT POINT: Log function exit and final state
-    // ===================================================================
-    #if DBG
-    {
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName;
-            
-            // Log function exit success
-            ULONG exit_marker = 0xDEAD0002;  // Exit marker
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_ExitMarker");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &exit_marker, sizeof(exit_marker));
-            
-            ULONG exit_status = 0;  // Success
-            RtlInitUnicodeString(&valueName, L"SetTargetTime_ExitStatus");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &exit_status, sizeof(exit_status));
-            
-            ZwClose(hKey);
-        }
-    }
-    #endif
-    
-    DEBUGP(DL_INFO, "i226_set_target_time: Configured timer %u, target=0x%016llX\n",
+    DEBUGP(DL_TRACE, "i226_set_target_time: Configured timer %u, target=0x%016llX\n",
            timer_index, (unsigned long long)target_time_ns);
     
     return 0;
@@ -1542,6 +1168,184 @@ static int i226_clear_aux_timestamp_flag(device_t *dev, uint8_t aux_index)
     return i226_clear_autt_flag(dev, aux_index);
 }
 
+/**
+ * @brief Read TX timestamp registers (TXSTMPL/H)
+ * @param dev Device context
+ * @param timestamp_ns Output: 64-bit timestamp in nanoseconds
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B618/0x0B61C
+ */
+static int i226_read_tx_timestamp(device_t *dev, uint64_t *timestamp_ns)
+{
+    uint32_t time_low, time_high;
+    int result;
+    
+    if (dev == NULL || timestamp_ns == NULL) {
+        return -EINVAL;
+    }
+    
+    result = ndis_platform_ops.mmio_read(dev, I226_TXSTMPL, &time_low);
+    if (result != 0) return result;
+    
+    result = ndis_platform_ops.mmio_read(dev, I226_TXSTMPH, &time_high);
+    if (result != 0) return result;
+    
+    *timestamp_ns = ((uint64_t)time_high << 32) | time_low;
+    return 0;
+}
+
+/**
+ * @brief Read RX timestamp registers (RXSTMPL/H)
+ * @param dev Device context
+ * @param timestamp_ns Output: 64-bit timestamp in nanoseconds
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B624/0x0B628
+ */
+static int i226_read_rx_timestamp(device_t *dev, uint64_t *timestamp_ns)
+{
+    uint32_t time_low, time_high;
+    int result;
+    
+    if (dev == NULL || timestamp_ns == NULL) {
+        return -EINVAL;
+    }
+    
+    result = ndis_platform_ops.mmio_read(dev, I226_RXSTMPL, &time_low);
+    if (result != 0) return result;
+    
+    result = ndis_platform_ops.mmio_read(dev, I226_RXSTMPH, &time_high);
+    if (result != 0) return result;
+    
+    *timestamp_ns = ((uint64_t)time_high << 32) | time_low;
+    return 0;
+}
+
+/**
+ * @brief Poll TX timestamp FIFO for next entry
+ * @param dev Device context
+ * @param timestamp_ns Output: 64-bit timestamp in nanoseconds (if return==1)
+ * @return 1 if valid timestamp retrieved, 0 if FIFO empty, <0 on error
+ * 
+ * Implements: HAL compliance - encapsulates device-specific FIFO polling
+ * Replaces: Direct register access with proper FIFO semantics
+ * 
+ * Critical: Follows Intel reference implementation (igb_ptp.c):
+ *   1. Check TSYNCTXCTL.TXTT (bit 0) for valid timestamp
+ *   2. Read TXSTMPL first, then TXSTMPH (atomic read)
+ *   3. Reading TXSTMPH clears TXTT bit and unlocks for next capture
+ * 
+ * Hardware: TSYNCTXCTL.TXTT (Transmit Timestamp) indicates valid data
+ *   - Bit 0 of TSYNCTXCTL @ 0x0B614
+ *   - Set by hardware when packet with 2STEP_1588 flag is transmitted
+ *   - Cleared by reading TXSTMPH register
+ */
+static int i226_poll_tx_timestamp_fifo(device_t *dev, uint64_t *timestamp_ns)
+{
+    uint32_t tsynctxctl_val = 0, txstmpl_val = 0, txstmph_val = 0;
+    int result;
+    
+    if (dev == NULL || timestamp_ns == NULL) {
+        return -EINVAL;
+    }
+    
+    // Step 1: Read TSYNCTXCTL and check TXTT bit (bit 0) for valid timestamp
+    result = ndis_platform_ops.mmio_read(dev, I226_TSYNCTXCTL, &tsynctxctl_val);
+    if (result != 0) return result;
+    
+    // Check TXTT bit (bit 0) - indicates timestamp valid in FIFO
+    if (!(tsynctxctl_val & I226_TSYNCTXCTL_TXTT_MASK)) {
+        return 0;  // FIFO empty, no timestamp available
+    }
+    
+    // Step 2: Read TXSTMPL first (low 32 bits)
+    result = ndis_platform_ops.mmio_read(dev, I226_TXSTMPL, &txstmpl_val);
+    if (result != 0) return result;
+    
+    // Step 3: Read TXSTMPH (high 32 bits) - this clears TXTT bit and unlocks for next capture
+    result = ndis_platform_ops.mmio_read(dev, I226_TXSTMPH, &txstmph_val);
+    if (result != 0) return result;
+    
+    // Construct 64-bit timestamp (nanoseconds since epoch)
+    *timestamp_ns = ((uint64_t)txstmph_val << 32) | txstmpl_val;
+    return 1;  // Valid timestamp retrieved
+}
+
+/**
+ * @brief Read TIMINCA register (clock increment configuration)
+ * @param dev Device context
+ * @param timinca_value Output: TIMINCA register value
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B608
+ */
+static int i226_read_timinca(device_t *dev, uint32_t *timinca_value)
+{
+    if (dev == NULL || timinca_value == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_read(dev, I226_TIMINCA, timinca_value);
+}
+
+/**
+ * @brief Write TIMINCA register (clock increment configuration)
+ * @param dev Device context
+ * @param timinca_value TIMINCA register value to write
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B608
+ */
+static int i226_write_timinca(device_t *dev, uint32_t timinca_value)
+{
+    if (dev == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_write(dev, I226_TIMINCA, timinca_value);
+}
+
+/**
+ * @brief Read TSAUXC register (Time Sync Auxiliary Control)
+ * @param dev Device context
+ * @param tsauxc_value Output: TSAUXC register value
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B640
+ */
+static int i226_read_tsauxc(device_t *dev, uint32_t *tsauxc_value)
+{
+    if (dev == NULL || tsauxc_value == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_read(dev, I226_TSAUXC, tsauxc_value);
+}
+
+/**
+ * @brief Write TSAUXC register (Time Sync Auxiliary Control)
+ * @param dev Device context
+ * @param tsauxc_value TSAUXC register value to write
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B640 and hardcoded bit masks
+ */
+static int i226_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
+{
+    if (dev == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_value);
+}
+
 // I226 device operations structure - using generic function names
 const intel_device_ops_t i226_ops = {
     .device_name = "Intel I226 2.5G Ethernet - Advanced TSN",
@@ -1559,6 +1363,15 @@ const intel_device_ops_t i226_ops = {
     .get_systime = get_systime,
     .init_ptp = init_ptp,
     .enable_packet_timestamping = enable_packet_timestamping,
+    
+    // PTP register access operations (HAL compliance - no magic numbers in src/)
+    .read_tx_timestamp = i226_read_tx_timestamp,
+    .read_rx_timestamp = i226_read_rx_timestamp,
+    .poll_tx_timestamp_fifo = i226_poll_tx_timestamp_fifo,
+    .read_timinca = i226_read_timinca,
+    .write_timinca = i226_write_timinca,
+    .read_tsauxc = i226_read_tsauxc,
+    .write_tsauxc = i226_write_tsauxc,
     
     // Target time and auxiliary timestamp operations (Issue #13 Task 7, Issue #7)
     .set_target_time = i226_set_target_time,
