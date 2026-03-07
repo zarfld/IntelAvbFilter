@@ -40,14 +40,23 @@ typedef enum _AVB_HW_STATE {
 } AVB_HW_STATE;
 
 /* Utility: readable name for state (for debug prints) */
-__forceinline const char* AvbHwStateName(AVB_HW_STATE s) {
-    switch (s) {
+__forceinline const char* AvbHwStateName(LONG s) {
+    switch ((AVB_HW_STATE)s) {
     case AVB_HW_UNBOUND: return "UNBOUND"; 
     case AVB_HW_BOUND: return "BOUND"; 
     case AVB_HW_BAR_MAPPED: return "BAR_MAPPED"; 
     case AVB_HW_PTP_READY: return "PTP_READY"; 
     default: return "?"; }
 }
+
+/*
+ * Thread-safe hw_state accessors.
+ *
+ * AVB_READ_HW_STATE(ctx):   volatile 32-bit load — sufficient for reads at any IRQL on x86/x64.
+ * AVB_SET_HW_STATE(ctx, s): InterlockedExchange — full memory fence, safe from any IRQL.
+ */
+#define AVB_READ_HW_STATE(ctx)    ((AVB_HW_STATE)((ctx)->hw_state))
+#define AVB_SET_HW_STATE(ctx, s)  ((void)InterlockedExchange(&(ctx)->hw_state, (LONG)(s)))
 
 /* Forward decl */
 typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
@@ -74,6 +83,23 @@ typedef struct _TS_SUBSCRIPTION {
 } TS_SUBSCRIPTION;
 
 // AVB device context structure
+/* Pre-allocated NBL ring for fast SEND_PTP path.
+ * Each slot owns its own packet buffer, MDL, NET_BUFFER, and NET_BUFFER_LIST.
+ * Eliminates per-call NdisAllocateNetBuffer/NdisAllocateNetBufferList overhead (~10µs).
+ * in_use: 0=free, 1=acquired by IOCTL_AVB_TEST_SEND_PTP handler,
+ *         cleared by FilterSendNetBufferListsComplete when the NBL completes.
+ * Ring size of 8 supports bursts of up to 8 in-flight test packets simultaneously.
+ * Implements: Issue #35 (REQ-F-IOCTL-TS-001) - throughput optimization.   */
+#define AVB_TEST_NBL_RING_SIZE  32   /* large enough to absorb ~100µs NIC completion jitter at 150K ops/sec */
+typedef struct _AVB_TEST_NBL_SLOT {
+    PNET_BUFFER_LIST nbl;     /* pre-allocated NBL, never freed until context teardown */
+    PNET_BUFFER      nb;      /* pre-allocated NB, linked to this slot's MDL */
+    PVOID            buffer;  /* per-slot packet buffer (TEST_PACKET_SIZE bytes, NonPaged) */
+    PMDL             mdl;     /* per-slot MDL describing buffer */
+    volatile LONG    in_use;  /* 0=free, 1=in-flight; CAS'd on acquire, Exchange'd on complete */
+    LONG             _pad;    /* ensure 8-byte alignment */
+} AVB_TEST_NBL_SLOT, *PAVB_TEST_NBL_SLOT;
+
 typedef struct _AVB_DEVICE_CONTEXT {
     device_t intel_device;
     BOOLEAN initialized;
@@ -84,7 +110,10 @@ typedef struct _AVB_DEVICE_CONTEXT {
     PINTEL_HARDWARE_CONTEXT hardware_context;  // Real hardware access context
 
     // Hardware lifecycle state
-    AVB_HW_STATE hw_state;
+    // Accessed from both PASSIVE_LEVEL (IOCTL) and DISPATCH_LEVEL (DPC).
+    // All writes use InterlockedExchange for a full memory barrier.
+    // All reads see the volatile field directly (x86/x64 aligned 32-bit load is atomic).
+    volatile LONG hw_state;
 
     // ABI and capabilities tracking
     ULONG last_seen_abi_version;
@@ -105,6 +134,14 @@ typedef struct _AVB_DEVICE_CONTEXT {
     ULONG target_time_poll_interval_ms;                   // Poll interval (default: 10ms)
     volatile LONG target_time_dpc_call_count;             // Diagnostic: DPC invocation counter
 
+    // NDIS Packet Injection Pools (Step 8b - Test IOCTL for TX timestamp validation)
+    NDIS_HANDLE nbl_pool_handle;                          // NET_BUFFER_LIST pool for test packets
+    NDIS_HANDLE nb_pool_handle;                           // NET_BUFFER pool for test packets
+    PVOID test_packet_buffer;                             // Pre-allocated PTP Sync frame (64 bytes, Non-Paged Pool)
+    PMDL test_packet_mdl;                                 // MDL describing test_packet_buffer
+    NDIS_SPIN_LOCK test_send_lock;                        // Protects test packet send operations
+    volatile LONG test_packets_pending;                   // Count of outstanding test NBLs (for completion tracking)
+
     // Legacy ring (deprecated - kept for compatibility)
     // Timestamp event ring (section-based mapping)
     BOOLEAN ts_ring_allocated;
@@ -122,12 +159,75 @@ typedef struct _AVB_DEVICE_CONTEXT {
     ULONG   qav_send_slope;
     ULONG   qav_hi_credit;
     ULONG   qav_lo_credit;
+
+    /* IEEE 802.1AS-2020 §11.3 timestampCorrectionPortDS latency calibration.
+     * Set via IOCTL_AVB_SET_PORT_LATENCY.  Both default to 0 (no correction). */
+    volatile LONG64 ingress_latency_ns;   /* Added to RX hardware timestamps (signed, ns) */
+    volatile LONG64 egress_latency_ns;    /* Added to TX hardware timestamps (signed, ns) */
+
+    /* Adapter's current unicast MAC address — captured at FilterRestart from
+     * OID_802_3_CURRENT_ADDRESS.  Used as source MAC bytes [6-11] in injected
+     * test packets.  Zero until the first successful FilterRestart. */
+    UCHAR source_mac[ETH_LENGTH_OF_ADDRESS];   /* 6 bytes */
+    UCHAR source_mac_pad[2];                   /* pad to 8-byte alignment */
+
+    /* NDIS 6.82 TaggedTransmitHw TX timestamp
+     * Populated by FilterSendNetBufferListsComplete when igc.sys completes a
+     * test packet that had NDIS_NBL_FLAGS_CAPTURE_TIMESTAMP_ON_TRANSMIT set.
+     * Consumed (read-then-zero) by IOCTL_AVB_GET_TX_TIMESTAMP.
+     * Zero means "no timestamp available yet".
+     * Access protocol: InterlockedExchange64 for both store and load-then-zero.
+     * Reinterpreted as ULONG64; LONGLONG declaration satisfies Interlocked ABI. */
+    volatile LONGLONG last_ndis_tx_timestamp;
+
+    /* Pre-allocated NBL ring for fast IOCTL_AVB_TEST_SEND_PTP path.
+     * Slots are allocated at context creation (AvbCreateMinimalContext) and
+     * freed at context teardown.  Each slot is independently recycled on
+     * FilterSendNetBufferListsComplete without touching the NDIS pool allocator. */
+    AVB_TEST_NBL_SLOT test_nbl_ring[AVB_TEST_NBL_RING_SIZE];
+
+    /*
+     * Runtime statistics — queried via IOCTL_AVB_GET_STATISTICS (0x9C40A020).
+     * Implements #270 (TEST-STATISTICS-001).
+     * Fields are incremented with InterlockedIncrement64 so they are safe
+     * from concurrent IOCTL dispatch and NDIS send/receive paths.
+     * Layout MUST match AVB_DRIVER_STATISTICS in avb_ioctl.h (104 bytes).
+     */
+    volatile LONGLONG stats_tx_packets;
+    volatile LONGLONG stats_rx_packets;
+    volatile LONGLONG stats_tx_bytes;
+    volatile LONGLONG stats_rx_bytes;
+    volatile LONGLONG stats_phc_query_count;
+    volatile LONGLONG stats_phc_adjust_count;
+    volatile LONGLONG stats_phc_set_count;
+    volatile LONGLONG stats_timestamp_count;
+    volatile LONGLONG stats_ioctl_count;
+    volatile LONGLONG stats_error_count;
+    volatile LONGLONG stats_memory_alloc_failures;
+    volatile LONGLONG stats_hardware_faults;
+    volatile LONGLONG stats_filter_attach_count;
+
+    // Per-adapter list linkage — protected by g_AvbContextListLock
+    struct _AVB_DEVICE_CONTEXT *next_context;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
 /*========================================================================
- * Global active context (set by IOCTL_AVB_OPEN_ADAPTER)
+ * Global context registry
+ *
+ * g_AvbContext        – the currently *selected* adapter (used by IOCTLs that
+ *                       do not carry a per-adapter handle).  Writable only under
+ *                       g_AvbContextListLock.
+ *
+ * g_AvbContextList    – head of a singly-linked list of ALL attached adapter
+ *                       contexts (linked via AVB_DEVICE_CONTEXT::next_context).
+ *                       Protected by g_AvbContextListLock.
+ *
+ * g_AvbContextListLock – NDIS spin lock protecting both g_AvbContext and
+ *                        g_AvbContextList.  Acquired at DISPATCH_LEVEL.
  *=======================================================================*/
 extern PAVB_DEVICE_CONTEXT g_AvbContext;
+extern PAVB_DEVICE_CONTEXT g_AvbContextList;
+extern NDIS_SPIN_LOCK      g_AvbContextListLock;
 
 /*========================================================================
  * Device lifecycle & IOCTL handling
@@ -176,7 +276,8 @@ VOID AvbPostTimestampEvent(    _In_ PVOID AvbContextParam,    _In_ avb_u32 event
     _In_ avb_u8 pcp,
     _In_ avb_u8 queue,
     _In_ avb_u16 packet_length,
-    _In_ avb_u8 trigger_source
+    _In_ avb_u8 trigger_source,
+    _In_ avb_i64 correction_field
 );
 
 /** * @brief Handle an incoming DeviceIoControl IRP targeting the AVB filter device.
@@ -184,6 +285,14 @@ VOID AvbPostTimestampEvent(    _In_ PVOID AvbContextParam,    _In_ avb_u32 event
  * @param Irp Pointer to IRP from I/O manager.
  * @return NTSTATUS from processing.
  */
+/* Fast-path SEND_PTP core — called by both the IRP handler and FastIoDeviceControl.
+ * Caller must have validated activeContext != NULL and test_req != NULL / accessible.
+ * On success: test_req->timestamp_ns, ->packets_sent, ->status are written. */
+NTSTATUS AvbSendPtpCore(
+    _In_ PAVB_DEVICE_CONTEXT activeContext,
+    _Inout_ PAVB_TEST_SEND_PTP_REQUEST test_req
+);
+
 NTSTATUS AvbHandleDeviceIoControl(
     _In_ PAVB_DEVICE_CONTEXT AvbContext,
     _In_ PIRP Irp

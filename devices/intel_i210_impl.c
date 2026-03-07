@@ -256,6 +256,166 @@ static int enable_packet_timestamping(device_t *dev, int enable)
 }
 
 /**
+ * @brief Read TX timestamp registers (TXSTMPL/H)
+ * @param dev Device context
+ * @param timestamp_ns Output: 64-bit timestamp in nanoseconds
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B618/0x0B61C
+ */
+static int i210_read_tx_timestamp(device_t *dev, uint64_t *timestamp_ns)
+{
+    uint32_t time_low, time_high;
+    int result;
+    
+    if (dev == NULL || timestamp_ns == NULL) {
+        return -EINVAL;
+    }
+    
+    result = ndis_platform_ops.mmio_read(dev, I210_TXSTMPL, &time_low);
+    if (result != 0) return result;
+    
+    result = ndis_platform_ops.mmio_read(dev, I210_TXSTMPH, &time_high);
+    if (result != 0) return result;
+    
+    *timestamp_ns = ((uint64_t)time_high << 32) | time_low;
+    return 0;
+}
+
+/**
+ * @brief Read RX timestamp registers (RXSTMPL/H)
+ * @param dev Device context
+ * @param timestamp_ns Output: 64-bit timestamp in nanoseconds
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B624/0x0B628
+ */
+static int i210_read_rx_timestamp(device_t *dev, uint64_t *timestamp_ns)
+{
+    uint32_t time_low, time_high;
+    int result;
+    
+    if (dev == NULL || timestamp_ns == NULL) {
+        return -EINVAL;
+    }
+    
+    result = ndis_platform_ops.mmio_read(dev, I210_RXSTMPL, &time_low);
+    if (result != 0) return result;
+    
+    result = ndis_platform_ops.mmio_read(dev, I210_RXSTMPH, &time_high);
+    if (result != 0) return result;
+    
+    *timestamp_ns = ((uint64_t)time_high << 32) | time_low;
+    return 0;
+}
+
+/**
+ * @brief Poll TX timestamp FIFO for next entry
+ * @param dev Device context
+ * @param timestamp_ns Output: 64-bit timestamp in nanoseconds (if return==1)
+ * @return 1 if valid timestamp retrieved, 0 if FIFO empty, <0 on error
+ * 
+ * Implements: HAL compliance - encapsulates device-specific FIFO polling
+ * Note: Reads TXSTMPH first (check valid bit), then TXSTMPL (advances FIFO)
+ */
+static int i210_poll_tx_timestamp_fifo(device_t *dev, uint64_t *timestamp_ns)
+{
+    uint32_t txstmph_val = 0, txstmpl_val = 0;
+    int result;
+    
+    if (dev == NULL || timestamp_ns == NULL) {
+        return -EINVAL;
+    }
+    
+    result = ndis_platform_ops.mmio_read(dev, I210_TXSTMPH, &txstmph_val);
+    if (result != 0) return result;
+    
+    if (!(txstmph_val & 0x80000000)) {
+        return 0;  // FIFO empty
+    }
+    
+    result = ndis_platform_ops.mmio_read(dev, I210_TXSTMPL, &txstmpl_val);
+    if (result != 0) return result;
+    
+    *timestamp_ns = ((uint64_t)(txstmph_val & 0x7FFFFFFF) << 32) | txstmpl_val;
+    return 1;  // Valid timestamp retrieved
+}
+
+/**
+ * @brief Read TIMINCA register (clock increment configuration)
+ * @param dev Device context
+ * @param timinca_value Output: TIMINCA register value
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B608
+ */
+static int i210_read_timinca(device_t *dev, uint32_t *timinca_value)
+{
+    if (dev == NULL || timinca_value == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_read(dev, I210_TIMINCA, timinca_value);
+}
+
+/**
+ * @brief Write TIMINCA register (clock increment configuration)
+ * @param dev Device context
+ * @param timinca_value TIMINCA register value to write
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B608
+ */
+static int i210_write_timinca(device_t *dev, uint32_t timinca_value)
+{
+    if (dev == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_write(dev, I210_TIMINCA, timinca_value);
+}
+
+/**
+ * @brief Read TSAUXC register (Time Sync Auxiliary Control)
+ * @param dev Device context
+ * @param tsauxc_value Output: TSAUXC register value
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B640
+ */
+static int i210_read_tsauxc(device_t *dev, uint32_t *tsauxc_value)
+{
+    if (dev == NULL || tsauxc_value == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_read(dev, I210_TSAUXC, tsauxc_value);
+}
+
+/**
+ * @brief Write TSAUXC register (Time Sync Auxiliary Control)
+ * @param dev Device context
+ * @param tsauxc_value TSAUXC register value to write
+ * @return 0 on success, <0 on error
+ * 
+ * Implements: HAL compliance - eliminates magic numbers in src/
+ * Replaces: Direct register access at 0x0B640 and hardcoded bit masks
+ */
+static int i210_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
+{
+    if (dev == NULL) {
+        return -EINVAL;
+    }
+    
+    return ndis_platform_ops.mmio_write(dev, I210_TSAUXC, tsauxc_value);
+}
+
+/**
  * @brief I210 device operations structure - CORRECTED: No TSN support
  * I210 (2013) has excellent IEEE 1588 PTP but NO TSN features (TSN standard finalized 2015-2016)
  */
@@ -273,6 +433,15 @@ const intel_device_ops_t i210_ops = {
     .get_systime = get_systime,
     .init_ptp = init_ptp,
     .enable_packet_timestamping = enable_packet_timestamping,
+    
+    // PTP register access operations (HAL compliance - no magic numbers in src/)
+    .read_tx_timestamp = i210_read_tx_timestamp,
+    .read_rx_timestamp = i210_read_rx_timestamp,
+    .poll_tx_timestamp_fifo = i210_poll_tx_timestamp_fifo,
+    .read_timinca = i210_read_timinca,
+    .write_timinca = i210_write_timinca,
+    .read_tsauxc = i210_read_tsauxc,
+    .write_tsauxc = i210_write_tsauxc,
     
     // TSN operations - NOT SUPPORTED (I210 predates TSN hardware implementation)
     .setup_tas = NULL,                    // No TSN hardware

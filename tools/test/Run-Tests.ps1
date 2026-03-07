@@ -637,7 +637,8 @@ if (Test-Path $regsTest3) {
         @{Name="test_ptp_getset.exe"; Desc="PTP Timestamp Get/Set (IOCTLs 24-25) - Issue #295"},
         @{Name="test_ptp_freq.exe"; Desc="PTP Frequency Adjustment (IOCTL 38) - Issue #296"},
         @{Name="test_hw_ts_ctrl.exe"; Desc="Hardware Timestamping Control (IOCTL 40) - Issue #297"},
-        @{Name="test_rx_timestamp.exe"; Desc="RX Timestamp Control (IOCTLs 41-42) - Issue #298"}
+        @{Name="test_rx_timestamp.exe"; Desc="RX Timestamp Control (IOCTLs 41-42) - Issue #298"},
+        @{Name="test_ts_event_sub.exe"; Desc="Timestamp Event Subscription (IOCTLs 33-34) - Issue #314"}
     )
     foreach ($test in $batch3IoctlTests) {
         Invoke-Test -TestName $test.Name -Description $test.Desc
@@ -675,7 +676,52 @@ if (Test-Path $regsTest3) {
     foreach ($testName in $phase6Tests) {
         Invoke-Test -TestName $testName
     }
-    
+
+    # Phase 7: All Remaining Tests (catch-all)
+    # Run every discovered .exe that was not explicitly listed in Phases 0-6 above,
+    # so that -Full always equals or exceeds the default (no-flag) run.
+    Write-Host "`n=== PHASE 7: All Remaining Tests ===" -ForegroundColor Green
+    Write-Host "Purpose: Run every test executable not already covered by Phases 0-6" -ForegroundColor Gray
+
+    $coveredTests = @(
+        # Phase 0
+        "test_multidev_adapter_enum.exe", "test_device_register_access.exe",
+        "test_ndis_send_path.exe", "test_ndis_receive_path.exe",
+        "test_tx_timestamp_retrieval.exe", "test_hw_state_machine.exe",
+        "test_lazy_initialization.exe", "test_registry_diagnostics.exe",
+        "test_hal_unit.exe", "test_hal_errors.exe", "test_hal_performance.exe",
+        "ptp_clock_control_test.exe", "ptp_clock_control_production_test.exe",
+        "avb_capability_validation_test.exe", "avb_device_separation_test.exe",
+        # Phase 1
+        "avb_diagnostic_test.exe", "avb_hw_state_test.exe",
+        # Phase 2
+        "test_tsn_ioctl_handlers.exe", "tsn_hardware_activation_validation.exe",
+        # Phase 2.5
+        "test_qav_cbs.exe", "test_ptp_getset.exe", "test_ptp_freq.exe",
+        "test_hw_ts_ctrl.exe", "test_rx_timestamp.exe", "test_ts_event_sub.exe",
+        # Phase 3
+        "avb_multi_adapter_test.exe",
+        # Phase 4
+        "avb_i226_test.exe", "avb_i226_advanced_test.exe",
+        # Phase 5
+        "avb_test_i210.exe",
+        # Phase 6
+        "chatgpt5_i226_tas_validation.exe", "corrected_i226_tas_test.exe",
+        "critical_prerequisites_investigation.exe", "enhanced_tas_investigation.exe",
+        "hardware_investigation_tool.exe"
+    ) | ForEach-Object { $_.ToLower() }
+
+    $remainingTests = $availableTests | Where-Object { $coveredTests -notcontains $_.Name.ToLower() }
+
+    if ($remainingTests.Count -eq 0) {
+        Write-Host "  (no additional tests — all executables already covered above)" -ForegroundColor Gray
+    } else {
+        Write-Info "Found $($remainingTests.Count) additional test(s) not in explicit phases"
+        foreach ($test in $remainingTests) {
+            Invoke-Test -TestName $test.Name -Description "Additional test (Phase 7)"
+        }
+    }
+
 } else {
     # Default: Run ALL available tests
     Write-Step "Running All Available Tests"

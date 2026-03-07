@@ -34,13 +34,11 @@
 #include <string.h>
 #include <math.h>
 #include <process.h>
+#include "../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
-// IOCTL Definitions (from include/avb_filter_public.h)
-#define IOCTL_AVB_BASE 0x9C40
-#define IOCTL_TYPE_DEVICE 0xA000
-
-#define IOCTL_GET_TX_TIMESTAMP    CTL_CODE(IOCTL_AVB_BASE, IOCTL_TYPE_DEVICE + 0x24, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_GET_RX_TIMESTAMP    CTL_CODE(IOCTL_AVB_BASE, IOCTL_TYPE_DEVICE + 0x2C, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Aliases for readability (use SSOT definitions)
+#define IOCTL_GET_TX_TIMESTAMP IOCTL_AVB_GET_TX_TIMESTAMP
+#define IOCTL_GET_RX_TIMESTAMP IOCTL_AVB_GET_RX_TIMESTAMP
 
 // Timestamp Query Structures
 typedef struct _TX_TIMESTAMP_QUERY {

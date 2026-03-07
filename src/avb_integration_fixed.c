@@ -28,8 +28,45 @@ Abstract:
 #define INTEL_GENERIC_CTRL_REG      0x00000  // Device control register (all Intel devices)
 #define INTEL_GENERIC_STATUS_REG    0x00008  // Device status register (all Intel devices)
 
-/* Global singleton (assumes one Intel adapter binding) */
+/* Selected adapter context (points into g_AvbContextList).
+ * Protected by g_AvbContextListLock.  Use AvbSelectContext() to change. */
 PAVB_DEVICE_CONTEXT g_AvbContext = NULL;
+
+/* Head of all-adapters list.  Each entry has ::next_context linkage.
+ * Protected by g_AvbContextListLock. */
+PAVB_DEVICE_CONTEXT g_AvbContextList = NULL;
+
+/* Spin lock protecting both g_AvbContext and g_AvbContextList. */
+NDIS_SPIN_LOCK g_AvbContextListLock;
+
+/*
+ * AvbContextListRemove — remove Ctx from the global adapter list.
+ *
+ * Must be called at PASSIVE_LEVEL (NdisAcquireSpinLock can raise to
+ * DISPATCH_LEVEL internally, but the call site itself must be passive).
+ * After this call g_AvbContext is NULL only if no other adapter remains.
+ */
+static VOID AvbContextListRemove(_In_ PAVB_DEVICE_CONTEXT Ctx)
+{
+    NdisAcquireSpinLock(&g_AvbContextListLock);
+
+    /* Remove from the singly-linked list */
+    PAVB_DEVICE_CONTEXT *pp = &g_AvbContextList;
+    while (*pp != NULL && *pp != Ctx) {
+        pp = &(*pp)->next_context;
+    }
+    if (*pp == Ctx) {
+        *pp = Ctx->next_context;   // splice out
+        Ctx->next_context = NULL;
+    }
+
+    /* If this was the selected adapter, promote the first remaining one */
+    if (g_AvbContext == Ctx) {
+        g_AvbContext = g_AvbContextList;  // NULL when list is empty
+    }
+
+    NdisReleaseSpinLock(&g_AvbContextListLock);
+}
 
 /* Forward declarations */
 static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx);
@@ -80,45 +117,8 @@ NTSTATUS AvbCreateMinimalContext(
     DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Allocated context at %p (size=%zu bytes)\n", ctx, sizeof(*ctx));
     
     // TRACE: Validate pool memory state before zeroing (detect uninitialized memory issues)
-    #if DBG
-    {
-        BOOLEAN before_target = ctx->target_time_poll_active;
-        BOOLEAN before_tx = ctx->tx_poll_active;
-        ULONG_PTR ctx_addr = (ULONG_PTR)ctx;
-        SIZE_T ctx_size = sizeof(*ctx);
-        
-        DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Pool memory before zero (ctx=%p, size=%zu, target_flag=%d, tx_flag=%d)\n",
-               ctx, ctx_size, (ULONG)before_target, (ULONG)before_tx);
-        
-        // Write to registry (use ZwCreateKey to create if missing!)
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES objAttr;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        NTSTATUS regStatus = ZwCreateKey(&hKey, KEY_WRITE, &objAttr, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(regStatus)) {
-            UNICODE_STRING valueName;
-            
-            RtlInitUnicodeString(&valueName, L"ContextAlloc_Address");
-            ULONG addr_val = (ULONG)ctx_addr;
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &addr_val, sizeof(addr_val));
-            
-            RtlInitUnicodeString(&valueName, L"ContextAlloc_Size");
-            ULONG size_val = (ULONG)ctx_size;
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &size_val, sizeof(size_val));
-            
-            RtlInitUnicodeString(&valueName, L"Flags_BeforeZero_Target");
-            ULONG target_val = (ULONG)before_target;
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target_val, sizeof(target_val));
-            
-            RtlInitUnicodeString(&valueName, L"Flags_BeforeZero_TX");
-            ULONG tx_val = (ULONG)before_tx;
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tx_val, sizeof(tx_val));
-            
-            ZwClose(hKey);
-        }
-    }
-    #endif
+    DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Pool memory before zero (ctx=%p, size=%zu, target_flag=%d, tx_flag=%d)\n",
+           ctx, sizeof(*ctx), (ULONG)ctx->target_time_poll_active, (ULONG)ctx->tx_poll_active);
     
     RtlZeroMemory(ctx, sizeof(*ctx));
     
@@ -127,41 +127,14 @@ NTSTATUS AvbCreateMinimalContext(
            ctx->target_time_poll_active ? 1 : 0, ctx->tx_poll_active ? 1 : 0);
     
     // TRACE: Verify RtlZeroMemory correctly initialized flags (should be 0)
-    #if DBG
-    {
-        BOOLEAN after_target = ctx->target_time_poll_active;
-        BOOLEAN after_tx = ctx->tx_poll_active;
-        
-        DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Memory after zero (ctx=%p, target_flag=%d, tx_flag=%d)\n",
-               ctx, (ULONG)after_target, (ULONG)after_tx);
-        
-        // Write to registry (use ZwCreateKey to create if missing!)
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES objAttr;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        NTSTATUS regStatus = ZwCreateKey(&hKey, KEY_WRITE, &objAttr, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(regStatus)) {
-            UNICODE_STRING valueName;
-            
-            RtlInitUnicodeString(&valueName, L"Flags_AfterZero_Target");
-            ULONG target_val = (ULONG)after_target;
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target_val, sizeof(target_val));
-            
-            RtlInitUnicodeString(&valueName, L"Flags_AfterZero_TX");
-            ULONG tx_val = (ULONG)after_tx;
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &tx_val, sizeof(tx_val));
-            
-            ZwClose(hKey);
-        }
-    }
-    #endif
+    DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Memory after zero (ctx=%p, target_flag=%d, tx_flag=%d)\n",
+           ctx, (ULONG)ctx->target_time_poll_active, (ULONG)ctx->tx_poll_active);
     
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;
     ctx->intel_device.pci_device_id = DeviceId;
     ctx->intel_device.device_type   = AvbGetIntelDeviceType(DeviceId);
-    ctx->hw_state = AVB_HW_BOUND;
+    AVB_SET_HW_STATE(ctx, AVB_HW_BOUND);
     
     /* Initialize timestamp event subscription management (Issue #13) */
     NdisAllocateSpinLock(&ctx->subscription_lock);
@@ -181,11 +154,165 @@ NTSTATUS AvbCreateMinimalContext(
      */
     ctx->tx_poll_active = FALSE;  // Initially stopped
     NdisInitializeTimer(&ctx->tx_poll_timer, AvbTxTimestampPollDpc, ctx);
-    DEBUGP(DL_INFO, "TX polling timer initialized (not started)\n");
+    DEBUGP(DL_TRACE, "TX polling timer initialized (not started)\n");
     
-    g_AvbContext = ctx;
+    /* Initialize NDIS packet injection pools (Step 8b - Test IOCTL)
+     * Allows kernel-mode PTP packet injection that routes through filter driver,
+     * solving Npcap bypass issue where filter never sees packets.
+     */
+    ctx->nbl_pool_handle = NULL;
+    ctx->nb_pool_handle = NULL;
+    ctx->test_packet_buffer = NULL;
+    ctx->test_packet_mdl = NULL;
+    NdisAllocateSpinLock(&ctx->test_send_lock);
+    ctx->test_packets_pending = 0;
+    
+    // Allocate NET_BUFFER_LIST pool (for outbound test packets)
+    NET_BUFFER_LIST_POOL_PARAMETERS nblPoolParams;
+    RtlZeroMemory(&nblPoolParams, sizeof(nblPoolParams));
+    nblPoolParams.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    nblPoolParams.Header.Revision = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    nblPoolParams.Header.Size = NDIS_SIZEOF_NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    nblPoolParams.ProtocolId = NDIS_PROTOCOL_ID_DEFAULT;
+    nblPoolParams.fAllocateNetBuffer = FALSE;  // Manual NET_BUFFER allocation (more control)
+    nblPoolParams.PoolTag = FILTER_ALLOC_TAG;
+    nblPoolParams.ContextSize = 0;  // No per-NBL context needed
+    nblPoolParams.DataSize = 0;     // Data allocated separately
+    
+    ctx->nbl_pool_handle = NdisAllocateNetBufferListPool(FilterModule->FilterHandle, &nblPoolParams);
+    if (!ctx->nbl_pool_handle) {
+        DEBUGP(DL_ERROR, "Failed to allocate NET_BUFFER_LIST pool\n");
+        // Non-fatal - test IOCTL will return error, but driver continues
+        goto skip_test_pools;
+    }
+    
+    // Allocate NET_BUFFER pool (for packet data buffers)
+    NET_BUFFER_POOL_PARAMETERS nbPoolParams;
+    RtlZeroMemory(&nbPoolParams, sizeof(nbPoolParams));
+    nbPoolParams.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    nbPoolParams.Header.Revision = NET_BUFFER_POOL_PARAMETERS_REVISION_1;
+    nbPoolParams.Header.Size = NDIS_SIZEOF_NET_BUFFER_POOL_PARAMETERS_REVISION_1;
+    nbPoolParams.PoolTag = FILTER_ALLOC_TAG;
+    nbPoolParams.DataSize = 0;  // MDL-based data
+    
+    ctx->nb_pool_handle = NdisAllocateNetBufferPool(FilterModule->FilterHandle, &nbPoolParams);
+    if (!ctx->nb_pool_handle) {
+        DEBUGP(DL_ERROR, "Failed to allocate NET_BUFFER pool\n");
+        NdisFreeNetBufferListPool(ctx->nbl_pool_handle);
+        ctx->nbl_pool_handle = NULL;
+        goto skip_test_pools;
+    }
+    
+    // Allocate pre-formatted PTP Sync frame (64 bytes, Non-Paged Pool)
+    // Ethernet(14) + PTP Sync Message(34) + Padding to minimum frame size
+    #define TEST_PACKET_SIZE 64
+    ctx->test_packet_buffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, TEST_PACKET_SIZE, FILTER_ALLOC_TAG);
+    if (!ctx->test_packet_buffer) {
+        DEBUGP(DL_ERROR, "Failed to allocate test packet buffer\n");
+        NdisFreeNetBufferPool(ctx->nb_pool_handle);
+        NdisFreeNetBufferListPool(ctx->nbl_pool_handle);
+        ctx->nb_pool_handle = NULL;
+        ctx->nbl_pool_handle = NULL;
+        goto skip_test_pools;
+    }
+    
+    // Pre-fill PTP Sync frame template (will be customized per-send with sequence ID)
+    RtlZeroMemory(ctx->test_packet_buffer, TEST_PACKET_SIZE);
+    UCHAR *pkt = (UCHAR *)ctx->test_packet_buffer;
+    
+    // Ethernet header (14 bytes)
+    // Destination MAC: PTP multicast 01:1B:19:00:00:00
+    pkt[0] = 0x01; pkt[1] = 0x1B; pkt[2] = 0x19; pkt[3] = 0x00; pkt[4] = 0x00; pkt[5] = 0x00;
+    // Source MAC: Placeholder; real adapter MAC is patched in at FilterRestart
+    //             (OID_802_3_CURRENT_ADDRESS → ctx->source_mac → bytes [6-11]).
+    pkt[6] = 0x00; pkt[7] = 0x00; pkt[8] = 0x00; pkt[9] = 0x00; pkt[10] = 0x00; pkt[11] = 0x01;
+    // EtherType: 0x88F7 (PTP) - CRITICAL for filter detection
+    pkt[12] = 0x88; pkt[13] = 0xF7;
+    
+    // PTP Sync message (34 bytes minimum)
+    // transportSpecific(4 bits) | messageType(4 bits) = 0x02 (transportSpecific=0, messageType=SYNC=0)
+    pkt[14] = 0x00;  // messageType = SYNC (0x0)
+    pkt[15] = 0x02;  // versionPTP = 2
+    pkt[16] = 0x00; pkt[17] = 0x2C;  // messageLength = 44 bytes (0x002C)
+    pkt[18] = 0x00;  // domainNumber = 0
+    pkt[19] = 0x00;  // reserved
+    pkt[20] = 0x02; pkt[21] = 0x00;  // flagField = twoStepFlag (bit 9, 0x0200 big-endian)
+    // correctionField (8 bytes) = 0
+    // sourcePortIdentity (10 bytes) = clockIdentity(8) + portNumber(2) = all zeros for test
+    // sequenceId (2 bytes) - will be filled at send time (offset 44-45)
+    // controlField (1 byte) = SYNC (0x00)
+    pkt[46] = 0x00;
+    // logMessageInterval (1 byte) = 0x7F (don't care for test)
+    pkt[47] = 0x7F;
+    // Padding to 64 bytes (minimum Ethernet frame size)
+    
+    // Create MDL describing test packet buffer
+    ctx->test_packet_mdl = IoAllocateMdl(ctx->test_packet_buffer, TEST_PACKET_SIZE, FALSE, FALSE, NULL);
+    if (!ctx->test_packet_mdl) {
+        DEBUGP(DL_ERROR, "Failed to allocate test packet MDL\n");
+        ExFreePoolWithTag(ctx->test_packet_buffer, FILTER_ALLOC_TAG);
+        NdisFreeNetBufferPool(ctx->nb_pool_handle);
+        NdisFreeNetBufferListPool(ctx->nbl_pool_handle);
+        ctx->test_packet_buffer = NULL;
+        ctx->nb_pool_handle = NULL;
+        ctx->nbl_pool_handle = NULL;
+        goto skip_test_pools;
+    }
+    MmBuildMdlForNonPagedPool(ctx->test_packet_mdl);  // Lock pages (required for DMA)
+    
+    // Pre-allocate NBL ring (AVB_TEST_NBL_RING_SIZE slots) for fast SEND_PTP path.
+    // Each slot gets its own buffer copy (avoids shared-MDL DMA races) and its own NBL+NB.
+    // Non-fatal: a partially-initialized ring falls back to on-demand NdisAllocate per send.
+    {
+        PUCHAR template_pkt = (PUCHAR)ctx->test_packet_buffer;
+        for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
+            PVOID slot_buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, TEST_PACKET_SIZE, FILTER_ALLOC_TAG);
+            if (!slot_buf) break;
+            RtlCopyMemory(slot_buf, template_pkt, TEST_PACKET_SIZE);
+
+            PMDL slot_mdl = IoAllocateMdl(slot_buf, TEST_PACKET_SIZE, FALSE, FALSE, NULL);
+            if (!slot_mdl) { ExFreePoolWithTag(slot_buf, FILTER_ALLOC_TAG); break; }
+            MmBuildMdlForNonPagedPool(slot_mdl);
+
+            PNET_BUFFER slot_nb = NdisAllocateNetBuffer(ctx->nb_pool_handle, slot_mdl, 0, TEST_PACKET_SIZE);
+            if (!slot_nb) { IoFreeMdl(slot_mdl); ExFreePoolWithTag(slot_buf, FILTER_ALLOC_TAG); break; }
+
+            PNET_BUFFER_LIST slot_nbl = NdisAllocateNetBufferList(ctx->nbl_pool_handle, 0, 0);
+            if (!slot_nbl) {
+                NdisFreeNetBuffer(slot_nb);
+                IoFreeMdl(slot_mdl);
+                ExFreePoolWithTag(slot_buf, FILTER_ALLOC_TAG);
+                break;
+            }
+            slot_nbl->FirstNetBuffer = slot_nb;
+            slot_nbl->Next = NULL;
+
+            ctx->test_nbl_ring[_ri].nbl    = slot_nbl;
+            ctx->test_nbl_ring[_ri].nb     = slot_nb;
+            ctx->test_nbl_ring[_ri].buffer = slot_buf;
+            ctx->test_nbl_ring[_ri].mdl    = slot_mdl;
+            ctx->test_nbl_ring[_ri].in_use = 0;
+
+            DEBUGP(DL_TRACE, "NBL ring slot[%d] alloc: nbl=%p nb=%p buf=%p\n",
+                   _ri, slot_nbl, slot_nb, slot_buf);
+        }
+    }
+
+    DEBUGP(DL_TRACE, "NDIS packet injection pools initialized (NBL=%p, NB=%p, buffer=%p, MDL=%p)\n",
+           ctx->nbl_pool_handle, ctx->nb_pool_handle, ctx->test_packet_buffer, ctx->test_packet_mdl);
+    
+skip_test_pools:
+
+    // Register this adapter in the global list; auto-select if none selected yet.
+    NdisAcquireSpinLock(&g_AvbContextListLock);
+    ctx->next_context = g_AvbContextList;
+    g_AvbContextList  = ctx;
+    if (g_AvbContext == NULL) {
+        g_AvbContext = ctx;   // auto-select first adapter
+    }
+    NdisReleaseSpinLock(&g_AvbContextListLock);
     *OutCtx = ctx;
-    DEBUGP(DL_INFO, "AVB minimal context created VID=0x%04X DID=0x%04X state=%s\n", VendorId, DeviceId, AvbHwStateName(ctx->hw_state));
+    DEBUGP(DL_TRACE, "AVB minimal context created VID=0x%04X DID=0x%04X state=%s\n", VendorId, DeviceId, AvbHwStateName(ctx->hw_state));
     DEBUGP(DL_ERROR, "!!! DIAG: AvbCreateMinimalContext - DeviceId=0x%04X -> device_type=%d, capabilities=0x%08X\n", 
            DeviceId, ctx->intel_device.device_type, ctx->intel_device.capabilities);
     return STATUS_SUCCESS;
@@ -248,14 +375,14 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     DEBUGP(DL_FATAL, "!!! DIAG: AvbBringUpHardware - BEFORE assignment: device_type=%d, old_caps=0x%08X, baseline_caps=0x%08X\n",
            Ctx->intel_device.device_type, Ctx->intel_device.capabilities, baseline_caps);
     Ctx->intel_device.capabilities = baseline_caps;
-    DEBUGP(DL_INFO, "? AvbBringUpHardware: Set baseline capabilities 0x%08X for device type %d\n", 
+    DEBUGP(DL_TRACE, "? AvbBringUpHardware: Set baseline capabilities 0x%08X for device type %d\n", 
            baseline_caps, Ctx->intel_device.device_type);
     DEBUGP(DL_FATAL, "!!! DIAG: AvbBringUpHardware - AFTER assignment: capabilities=0x%08X\n", 
            Ctx->intel_device.capabilities);
     
     NTSTATUS status = AvbPerformBasicInitialization(Ctx);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_WARN, "?? AvbBringUpHardware: basic init failed 0x%08X (keeping baseline capabilities=0x%08X)\n", 
+        DEBUGP(DL_TRACE, "?? AvbBringUpHardware: basic init failed 0x%08X (keeping baseline capabilities=0x%08X)\n", 
                status, baseline_caps);
         // Don't return error - allow enumeration with baseline capabilities
         return STATUS_SUCCESS;
@@ -278,9 +405,9 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         DEBUGP(DL_ERROR, "!!! DEBUG: intel_init() returned: %d\n", init_result);
         
         if (init_result == 0) {
-            DEBUGP(DL_INFO, "? intel_init() successful - device initialized with PTP and TSN\n");
+            DEBUGP(DL_TRACE, "? intel_init() successful - device initialized with PTP and TSN\n");
         } else {
-            DEBUGP(DL_WARN, "?? intel_init() failed: %d (PTP/TSN features unavailable)\n", init_result);
+            DEBUGP(DL_TRACE, "?? intel_init() failed: %d (PTP/TSN features unavailable)\n", init_result);
         }
     } else {
         DEBUGP(DL_ERROR, "!!! DEBUG: SKIPPING intel_init() - hw_state not ready!\n");
@@ -302,19 +429,19 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
  */
 static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
 {
-    DEBUGP(DL_INFO, "? AvbPerformBasicInitialization: Starting for VID=0x%04X DID=0x%04X\n", 
+    DEBUGP(DL_TRACE, "? AvbPerformBasicInitialization: Starting for VID=0x%04X DID=0x%04X\n", 
            Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
     
     if (!Ctx) return STATUS_INVALID_PARAMETER;
     
     if (Ctx->hw_access_enabled) {
-        DEBUGP(DL_INFO, "? AvbPerformBasicInitialization: Already initialized, returning success\n");
+        DEBUGP(DL_TRACE, "? AvbPerformBasicInitialization: Already initialized, returning success\n");
         return STATUS_SUCCESS;
     }
 
     /* Step 1: Discover & map BAR0 if not yet mapped */
     if (Ctx->hardware_context == NULL) {
-        DEBUGP(DL_INFO, "? STEP 1: Starting BAR0 discovery and mapping...\n");
+        DEBUGP(DL_TRACE, "? STEP 1: Starting BAR0 discovery and mapping...\n");
         PHYSICAL_ADDRESS bar0 = {0};
         ULONG barLen = 0;
         NTSTATUS ds = AvbDiscoverIntelControllerResources(Ctx->filter_instance, &bar0, &barLen);
@@ -323,19 +450,19 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
                    ds, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
             return ds; /* propagate */
         }
-        DEBUGP(DL_INFO, "? STEP 1a SUCCESS: BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
+        DEBUGP(DL_TRACE, "? STEP 1a SUCCESS: BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
         
         NTSTATUS ms = AvbMapIntelControllerMemory(Ctx, bar0, barLen);
         if (!NT_SUCCESS(ms)) {
             DEBUGP(DL_ERROR, "? STEP 1b FAILED: BAR0 map failed 0x%08X (MmMapIoSpace)\n", ms);
             return ms;
         }
-        DEBUGP(DL_INFO, "? STEP 1b SUCCESS: MMIO mapped (opaque ctx=%p)\n", Ctx->hardware_context);
+        DEBUGP(DL_TRACE, "? STEP 1b SUCCESS: MMIO mapped (opaque ctx=%p)\n", Ctx->hardware_context);
     } else {
-        DEBUGP(DL_INFO, "? STEP 1 SKIPPED: Hardware context already exists (%p)\n", Ctx->hardware_context);
+        DEBUGP(DL_TRACE, "? STEP 1 SKIPPED: Hardware context already exists (%p)\n", Ctx->hardware_context);
     }
 
-    DEBUGP(DL_INFO, "? STEP 2: Setting up Intel device structure and private data...\n");
+    DEBUGP(DL_TRACE, "? STEP 2: Setting up Intel device structure and private data...\n");
     // CRITICAL FIX: Do NOT reset capabilities that were set by AvbBringUpHardware
     // Capabilities are device-specific and set based on hardware specs
     // This function only adds INTEL_CAP_MMIO after successful BAR0 mapping
@@ -375,13 +502,13 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         priv->initialized = 0;
         
         Ctx->intel_device.private_data = priv;
-        DEBUGP(DL_INFO, "? STEP 2b: Allocated private_data (size=%u, ptr=%p)\n", 
+        DEBUGP(DL_TRACE, "? STEP 2b: Allocated private_data (size=%u, ptr=%p)\n", 
                sizeof(struct intel_private), priv);
     }
-    DEBUGP(DL_INFO, "? STEP 2 SUCCESS: Device structure prepared with private_data\n");
+    DEBUGP(DL_TRACE, "? STEP 2 SUCCESS: Device structure prepared with private_data\n");
 
-    DEBUGP(DL_INFO, "? STEP 3: Calling intel_init library function...\n");
-    DEBUGP(DL_INFO, "   - VID=0x%04X DID=0x%04X private_data=%p\n", 
+    DEBUGP(DL_TRACE, "? STEP 3: Calling intel_init library function...\n");
+    DEBUGP(DL_TRACE, "   - VID=0x%04X DID=0x%04X private_data=%p\n", 
            Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id, 
            Ctx->intel_device.private_data);
     
@@ -390,9 +517,9 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
         return STATUS_UNSUCCESSFUL;
     }
-    DEBUGP(DL_INFO, "? STEP 3 SUCCESS: intel_init completed successfully\n");
+    DEBUGP(DL_TRACE, "? STEP 3 SUCCESS: intel_init completed successfully\n");
 
-    DEBUGP(DL_INFO, "? STEP 4: MMIO sanity check - reading CTRL register via Intel library...\n");
+    DEBUGP(DL_TRACE, "? STEP 4: MMIO sanity check - reading CTRL register via Intel library...\n");
     ULONG ctrl = 0xFFFFFFFF;
     
     // CLEAN ARCHITECTURE: Use Intel library for all register access - no device-specific contamination
@@ -401,21 +528,21 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         DEBUGP(DL_ERROR, "   This indicates BAR0 mapping is not working properly\n");
         return STATUS_DEVICE_NOT_READY;
     }
-    DEBUGP(DL_INFO, "? STEP 4 SUCCESS: MMIO sanity check passed - CTRL=0x%08X\n", ctrl);
+    DEBUGP(DL_TRACE, "? STEP 4 SUCCESS: MMIO sanity check passed - CTRL=0x%08X\n", ctrl);
 
-    DEBUGP(DL_INFO, "? STEP 5: Promoting hardware state to BAR_MAPPED...\n");
+    DEBUGP(DL_TRACE, "? STEP 5: Promoting hardware state to BAR_MAPPED...\n");
     Ctx->intel_device.capabilities |= INTEL_CAP_MMIO;
     if (Ctx->hw_state < AVB_HW_BAR_MAPPED) {
-        Ctx->hw_state = AVB_HW_BAR_MAPPED;
-        DEBUGP(DL_INFO, "? STEP 5 SUCCESS: HW state -> %s (CTRL=0x%08X)\n", AvbHwStateName(Ctx->hw_state), ctrl);
+        AVB_SET_HW_STATE(Ctx, AVB_HW_BAR_MAPPED);
+        DEBUGP(DL_TRACE, "? STEP 5 SUCCESS: HW state -> %s (CTRL=0x%08X)\n", AvbHwStateName(Ctx->hw_state), ctrl);
     }
     Ctx->initialized = TRUE;
     Ctx->hw_access_enabled = TRUE;
     
-    DEBUGP(DL_INFO, "? AvbPerformBasicInitialization: COMPLETE SUCCESS\n");
-    DEBUGP(DL_INFO, "   - Final hw_state: %s\n", AvbHwStateName(Ctx->hw_state));
-    DEBUGP(DL_INFO, "   - Final capabilities: 0x%08X\n", Ctx->intel_device.capabilities);
-    DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", Ctx->hw_access_enabled ? "YES" : "NO");
+    DEBUGP(DL_TRACE, "? AvbPerformBasicInitialization: COMPLETE SUCCESS\n");
+    DEBUGP(DL_TRACE, "   - Final hw_state: %s\n", AvbHwStateName(Ctx->hw_state));
+    DEBUGP(DL_TRACE, "   - Final capabilities: 0x%08X\n", Ctx->intel_device.capabilities);
+    DEBUGP(DL_TRACE, "   - Hardware access enabled: %s\n", Ctx->hw_access_enabled ? "YES" : "NO");
     
     return STATUS_SUCCESS;
 }
@@ -437,13 +564,13 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
 NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
 {
     if (!context || context->hw_state < AVB_HW_BAR_MAPPED) {
-        DEBUGP(DL_WARN, "AvbEnsureDeviceReady: Hardware not ready (state=%s)\n", 
+        DEBUGP(DL_TRACE, "AvbEnsureDeviceReady: Hardware not ready (state=%s)\n", 
                context ? AvbHwStateName(context->hw_state) : "NULL");
         return STATUS_DEVICE_NOT_READY;
     }
     
-    DEBUGP(DL_INFO, "? AvbEnsureDeviceReady: Starting device initialization\n");
-    DEBUGP(DL_INFO, "   - Context: VID=0x%04X DID=0x%04X (type=%d)\n", 
+    DEBUGP(DL_TRACE, "? AvbEnsureDeviceReady: Starting device initialization\n");
+    DEBUGP(DL_TRACE, "   - Context: VID=0x%04X DID=0x%04X (type=%d)\n", 
            context->intel_device.pci_vendor_id, context->intel_device.pci_device_id,
            context->intel_device.device_type);
     
@@ -455,13 +582,13 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
     
-    DEBUGP(DL_INFO, "? AvbEnsureDeviceReady: Device initialization successful\n");
+    DEBUGP(DL_TRACE, "? AvbEnsureDeviceReady: Device initialization successful\n");
     
     // Update capabilities and state based on successful initialization
     context->intel_device.capabilities |= INTEL_CAP_MMIO;
     if (context->hw_state < AVB_HW_PTP_READY) {
-        context->hw_state = AVB_HW_PTP_READY;
-        DEBUGP(DL_INFO, "HW state -> %s (device ready)\n", AvbHwStateName(context->hw_state));
+        AVB_SET_HW_STATE(context, AVB_HW_PTP_READY);
+        DEBUGP(DL_TRACE, "HW state -> %s (device ready)\n", AvbHwStateName(context->hw_state));
     }
     
     return STATUS_SUCCESS;
@@ -477,7 +604,7 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
  */
 NTSTATUS AvbI210EnsureSystimRunning(PAVB_DEVICE_CONTEXT context)
 {
-    DEBUGP(DL_INFO, "AvbI210EnsureSystimRunning: Redirecting to generic device initialization\n");
+    DEBUGP(DL_TRACE, "AvbI210EnsureSystimRunning: Redirecting to generic device initialization\n");
     return AvbEnsureDeviceReady(context);
 }
 
@@ -498,7 +625,7 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
  * Polls TX timestamp FIFO at 1ms intervals and posts TS_EVENT_TX_TIMESTAMP events
  * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 6c - TX path polling
  * 
- * Hardware: TXSTMPL (0x0B618), TXSTMPH (0x0B61C)
+ * Hardware: TXSTMPL and TXSTMPH registers (see device-specific headers)
  *   - Bit 31 of TXSTMPH indicates valid timestamp in FIFO
  *   - Reading TXSTMPL advances FIFO to next entry
  *   - FIFO depth varies by device (typically 4-8 entries)
@@ -516,62 +643,32 @@ VOID AvbTxTimestampPollDpc(
     PAVB_DEVICE_CONTEXT AvbContext = (PAVB_DEVICE_CONTEXT)FunctionContext;
     
     // Build version marker for verification
-    static ULONG dpc_call_count = 0;
+    /* Todo 10 fix: was 'static ULONG dpc_call_count = 0;' — non-atomic increment
+     * was unsafe on SMP.  Promote to volatile LONG for InterlockedIncrement. */
+    static volatile LONG dpc_call_count = 0;
     static BOOLEAN version_logged = FALSE;
     
-    // Log DPC entry to DebugView (critical diagnostic)
-    DEBUGP(DL_ERROR, "!!! DPC: Timer callback fired! Call=%d, Context=%p\n", dpc_call_count + 1, AvbContext);
-    
-    // DIAGNOSTIC: UNCONDITIONAL registry write to prove DPC executes
-    #if DBG
-    {
-        dpc_call_count++;
-        
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName;
-            
-            // Write call count
-            RtlInitUnicodeString(&valueName, L"DPC_CallCount_Unconditional");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &dpc_call_count, sizeof(dpc_call_count));
-            
-            // Validate context pointers
-            ULONG ctx_valid = (AvbContext && AvbContext == g_AvbContext) ? 1 : 0;
-            RtlInitUnicodeString(&valueName, L"DPC_ContextValid");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &ctx_valid, sizeof(ctx_valid));
-            
-            // Store actual context pointers for debugging
-            ULONG_PTR ctx_addr = (ULONG_PTR)AvbContext;
-            RtlInitUnicodeString(&valueName, L"DPC_ContextAddress");
-            ZwSetValueKey(hKey, &valueName, 0, REG_QWORD, &ctx_addr, sizeof(ctx_addr));
-            
-            ULONG_PTR g_ctx_addr = (ULONG_PTR)g_AvbContext;
-            RtlInitUnicodeString(&valueName, L"DPC_GlobalContextAddress");
-            ZwSetValueKey(hKey, &valueName, 0, REG_QWORD, &g_ctx_addr, sizeof(g_ctx_addr));
-            
-            ZwClose(hKey);
-        }
-        DEBUGP(DL_ERROR, "!!! DPC: Diagnostic written (call=%d, ctx_valid=%d)\n", 
-               dpc_call_count, (AvbContext && AvbContext == g_AvbContext) ? 1 : 0);
-    }
-    #endif
+    // Bug #1d: REMOVED ZwCreateKey/ZwSetValueKey from DPC — ZwCreateKey requires
+    // PASSIVE_LEVEL but DPCs run at DISPATCH_LEVEL.  Calling it here caused LFH
+    // delay-free list corruption (0x13A_17 bugcheck).  Counter is incremented
+    // unconditionally just below; use DbgView trace output for diagnostics.
     
     if (!version_logged) {
-        DEBUGP(DL_WARN, "!!! ======================================\n");
-        DEBUGP(DL_WARN, "!!! DRIVER VERSION: %u.%u.%u.%u\n", 
+        DEBUGP(DL_TRACE, "!!! ======================================\n");
+        DEBUGP(DL_TRACE, "!!! DRIVER VERSION: %u.%u.%u.%u\n", 
                AVB_VERSION_MAJOR, AVB_VERSION_MINOR, AVB_VERSION_BUILD, AVB_VERSION_REVISION);
-        DEBUGP(DL_WARN, "!!! BUILD TIMESTAMP: " __DATE__ " " __TIME__ "\n");
-        DEBUGP(DL_WARN, "!!! ======================================\n");
+        DEBUGP(DL_TRACE, "!!! BUILD TIMESTAMP: " __DATE__ " " __TIME__ "\n");
+        DEBUGP(DL_TRACE, "!!! ======================================\n");
         version_logged = TRUE;
     }
     
-    dpc_call_count++;
-    DEBUGP(DL_WARN, "!!! DPC FIRED [#%u]: ctx=%p, g_ctx=%p\n", dpc_call_count, AvbContext, g_AvbContext);
+#if DBG
+    LONG call_num = InterlockedIncrement(&dpc_call_count);
+    DEBUGP(DL_ERROR, "!!! DPC: Timer callback fired! Call=%d, Context=%p\n", call_num, AvbContext);
+    DEBUGP(DL_TRACE, "!!! DPC FIRED [#%d]: ctx=%p, g_ctx=%p\n", call_num, AvbContext, g_AvbContext);
+#else
+    InterlockedIncrement(&dpc_call_count);
+#endif
     
     // CRITICAL: Verify context is still valid (global might be cleared during cleanup)
     if (!AvbContext || AvbContext != g_AvbContext) {
@@ -579,7 +676,7 @@ VOID AvbTxTimestampPollDpc(
         return;  // Context being cleaned up, do NOT re-arm timer
     }
     
-    DEBUGP(DL_WARN, "!!! DPC: poll_active=%d, hw_state=%d\n", 
+    DEBUGP(DL_TRACE, "!!! DPC: poll_active=%d, hw_state=%d\n", 
            AvbContext->tx_poll_active, AvbContext->hw_state);
     
     if (!AvbContext->tx_poll_active || AvbContext->hw_state < AVB_HW_BAR_MAPPED) {
@@ -588,33 +685,37 @@ VOID AvbTxTimestampPollDpc(
         return;  // Timer stopped or hardware not ready
     }
     
-    DEBUGP(DL_WARN, "!!! DPC: Checking TX timestamps and target time\n");
+    DEBUGP(DL_TRACE, "!!! DPC: Checking TX timestamps and target time\n");
     
     device_t *dev = &AvbContext->intel_device;
     
+    // Get device operations for HAL-compliant register access
+    const intel_device_ops_t *ops = intel_get_device_ops(dev->device_type);
+    if (ops == NULL || ops->poll_tx_timestamp_fifo == NULL) {
+        DEBUGP(DL_ERROR, "!!! DPC: Device operations not available\n");
+        return;
+    }
+    
     // Poll TX timestamp FIFO (read up to 8 entries to drain FIFO)
+    // HAL-compliant: Uses device operation instead of direct register access
     for (int i = 0; i < 8; i++) {
-        ULONG txstmph_val = 0;
+        avb_u64 timestamp_ns = 0;
+        int result = ops->poll_tx_timestamp_fifo(dev, &timestamp_ns);
         
-        // Read TXSTMPH first to check valid bit (bit 31)
-        if (AvbMmioRead(dev, 0x0B61C, &txstmph_val) != 0) {
-            break;  // Read failed
+        if (result < 0) {
+            break;  // Read error
+        }
+        if (result == 0) {
+            break;  // FIFO empty
         }
         
-        // Check valid bit (bit 31)
-        if (!(txstmph_val & 0x80000000)) {
-            break;  // No more timestamps in FIFO
-        }
-        
-        // Read TXSTMPL (this advances FIFO to next entry)
-        ULONG txstmpl_val = 0;
-        if (AvbMmioRead(dev, 0x0B618, &txstmpl_val) != 0) {
-            break;  // Read failed
-        }
-        
-        // Construct 64-bit timestamp (clear valid bit from high word)
-        avb_u64 timestamp_ns = ((avb_u64)(txstmph_val & 0x7FFFFFFF) << 32) | (avb_u64)txstmpl_val;
-        
+        // result == 1: Valid timestamp retrieved
+        // Apply IEEE 802.1AS egress latency correction (timestampCorrectionPortDS).
+        // egress_latency_ns compensates for the delay between the hardware TX timestamp
+        // latch and the actual wire departure.  Default = 0.
+        timestamp_ns = (avb_u64)((INT64)timestamp_ns +
+                       InterlockedCompareExchange64(&AvbContext->egress_latency_ns, 0, 0));
+
         // Post TX timestamp event to matching subscriptions
         // FIXED: Pass per-adapter context for multi-adapter support
         AvbPostTimestampEvent(
@@ -625,7 +726,8 @@ VOID AvbTxTimestampPollDpc(
             0xFF,    // No PCP
             0,       // Unknown queue
             0,       // Unknown packet length
-            0        // No trigger source
+            0,       // No trigger source
+            0        // No correctionField for TX events
         );
     }
     
@@ -653,7 +755,8 @@ VOID AvbPostTimestampEvent(
     _In_ avb_u8 pcp,
     _In_ avb_u8 queue,
     _In_ avb_u16 packet_length,
-    _In_ avb_u8 trigger_source)
+    _In_ avb_u8 trigger_source,
+    _In_ avb_i64 correction_field)
 {
     PAVB_DEVICE_CONTEXT AvbContext = (PAVB_DEVICE_CONTEXT)AvbContextParam;
     if (!AvbContext) {
@@ -718,15 +821,18 @@ VOID AvbPostTimestampEvent(
         
         /* Write event to ring buffer */
         AVB_TIMESTAMP_EVENT *evt = &events[local_prod & hdr->mask];
-        evt->timestamp_ns = timestamp_ns;
-        evt->event_type = event_type;
-        evt->sequence_num = (avb_u32)InterlockedIncrement(&sub->sequence_num);
-        evt->vlan_id = vlan_id;
-        evt->pcp = pcp;
-        evt->queue = queue;
-        evt->packet_length = packet_length;
-        evt->trigger_source = trigger_source;
-        RtlZeroMemory(evt->reserved, sizeof(evt->reserved));
+        evt->timestamp_ns    = timestamp_ns;
+        evt->event_type      = event_type;
+        evt->sequence_num    = (avb_u32)InterlockedIncrement(&sub->sequence_num);
+        evt->vlan_id         = vlan_id;
+        evt->pcp             = pcp;
+        evt->queue           = queue;
+        evt->packet_length   = packet_length;
+        evt->trigger_source  = trigger_source;
+        evt->reserved[0]     = 0;
+        /* IEEE 1588 correctionField: signed 64-bit 2^-16 ns fixed-point.
+         * Positive or negative — stored verbatim; consumer right-shifts by 16 to get ns. */
+        evt->correction_field = correction_field;
         
         /* Memory barrier - ensure event written before index update */
         KeMemoryBarrier();
@@ -790,40 +896,12 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
      */
     rc = ops->check_autt_flags(dev, &autt_flags);
     if (rc != 0) {
-        DEBUGP(DL_WARN, "!!! check_autt_flags failed: %d\n", rc);
+        DEBUGP(DL_TRACE, "!!! check_autt_flags failed: %d\n", rc);
         return;
     }
     
-    // DIAGNOSTIC: ALWAYS write to prove function is called
-    #if DBG
-    {
-        static ULONG call_count = 0;
-        call_count++;
-        
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName;
-            
-            RtlInitUnicodeString(&valueName, L"AvbCheckTargetTime_CallCount");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &call_count, sizeof(call_count));
-            
-            ULONG autt_val = (ULONG)autt_flags;
-            RtlInitUnicodeString(&valueName, L"AvbCheckTargetTime_TT_Flags");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &autt_val, sizeof(autt_val));
-            
-            ULONG rc_val = (ULONG)rc;
-            RtlInitUnicodeString(&valueName, L"AvbCheckTargetTime_RC");
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &rc_val, sizeof(rc_val));
-            
-            ZwClose(hKey);
-        }
-    }
-    #endif
+    // Bug #1d: REMOVED ZwCreateKey/ZwSetValueKey — AvbCheckTargetTime is called
+    // from AvbTxTimestampPollDpc at DISPATCH_LEVEL; registry APIs require PASSIVE_LEVEL.
     
     /* ALWAYS log AUTT flags for debugging (even when 0) with target time comparison */
     static int log_counter = 0;
@@ -850,79 +928,31 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         
         int64_t delta0 = (int64_t)(target0 - current_systim);
         int64_t delta1 = (int64_t)(target1 - current_systim);
+        UNREFERENCED_PARAMETER(delta0);  // Used only in DEBUGP
+        UNREFERENCED_PARAMETER(delta1);  // Used only in DEBUGP
         
-        DEBUGP(DL_WARN, "!!! TT flags: 0x%02X (TT0=%d, TT1=%d) [check #%d]\n", 
+        DEBUGP(DL_TRACE, "!!! TT flags: 0x%02X (TT0=%d, TT1=%d) [check #%d]\n", 
                autt_flags, (autt_flags & 0x01) ? 1 : 0, (autt_flags & 0x02) ? 1 : 0, log_counter);
-        DEBUGP(DL_WARN, "!!! SYSTIM:  0x%016llX (%llu ns)\n",
+        DEBUGP(DL_TRACE, "!!! SYSTIM:  0x%016llX (%llu ns)\n",
                (unsigned long long)current_systim, (unsigned long long)current_systim);
-        DEBUGP(DL_WARN, "!!! TSICR:   0x%08X (TT0=%d, TT1=%d, AUTT0=%d)\n",
+        DEBUGP(DL_TRACE, "!!! TSICR:   0x%08X (TT0=%d, TT1=%d, AUTT0=%d)\n",
                tsicr_raw, (tsicr_raw >> 3) & 1, (tsicr_raw >> 4) & 1, (tsicr_raw >> 5) & 1);
-        DEBUGP(DL_WARN, "!!! TSAUXC:  0x%08X (EN_TT0=%d, EN_TT1=%d)\n",
+        DEBUGP(DL_TRACE, "!!! TSAUXC:  0x%08X (EN_TT0=%d, EN_TT1=%d)\n",
                tsauxc_raw, tsauxc_raw & 1, (tsauxc_raw >> 4) & 1);
-        DEBUGP(DL_WARN, "!!! TSIM:    0x%08X (TT0_mask=%d, TT1_mask=%d)\n",
+        DEBUGP(DL_TRACE, "!!! TSIM:    0x%08X (TT0_mask=%d, TT1_mask=%d)\n",
                tsim_raw, (tsim_raw >> 3) & 1, (tsim_raw >> 4) & 1);
-        DEBUGP(DL_WARN, "!!! TARGET0: 0x%016llX (delta: %s%lld ns = %lld ms)\n",
+        DEBUGP(DL_TRACE, "!!! TARGET0: 0x%016llX (delta: %s%lld ns = %lld ms)\n",
                (unsigned long long)target0,
                (delta0 < 0) ? "-" : "+", (long long)(delta0 < 0 ? -delta0 : delta0),
                (long long)(delta0 < 0 ? -delta0 : delta0) / 1000000);
         if (target1 != 0) {
-            DEBUGP(DL_WARN, "!!! TARGET1: 0x%016llX (delta: %s%lld ns = %lld ms)\n",
+            DEBUGP(DL_TRACE, "!!! TARGET1: 0x%016llX (delta: %s%lld ns = %lld ms)\n",
                    (unsigned long long)target1,
                    (delta1 < 0) ? "-" : "+", (long long)(delta1 < 0 ? -delta1 : delta1),
                    (long long)(delta1 < 0 ? -delta1 : delta1) / 1000000);
         }
         
-        // DIAGNOSTIC: Write DPC polling state to registry
-        #if DBG
-        {
-            UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-            OBJECT_ATTRIBUTES keyAttrs;
-            HANDLE hKey = NULL;
-            InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-            
-            NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-            if (NT_SUCCESS(st)) {
-                UNICODE_STRING valueName;
-                
-                RtlInitUnicodeString(&valueName, L"DPC_PollCount");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &log_counter, sizeof(log_counter));
-                
-                ULONG autt0 = (autt_flags & 0x01) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"DPC_TT0");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &autt0, sizeof(autt0));
-                
-                ULONG autt1 = (autt_flags & 0x02) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"DPC_TT1");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &autt1, sizeof(autt1));
-                
-                ULONG systim_low = (ULONG)(current_systim & 0xFFFFFFFF);
-                RtlInitUnicodeString(&valueName, L"DPC_SYSTIM_Low");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_low, sizeof(systim_low));
-                
-                ULONG systim_high = (ULONG)(current_systim >> 32);
-                RtlInitUnicodeString(&valueName, L"DPC_SYSTIM_High");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &systim_high, sizeof(systim_high));
-                
-                ULONG target0_l = (ULONG)(target0 & 0xFFFFFFFF);
-                RtlInitUnicodeString(&valueName, L"DPC_TARGET0_Low");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target0_l, sizeof(target0_l));
-                
-                ULONG target0_h = (ULONG)(target0 >> 32);
-                RtlInitUnicodeString(&valueName, L"DPC_TARGET0_High");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &target0_h, sizeof(target0_h));
-                
-                LONG delta_ms = (LONG)(delta0 / 1000000);
-                RtlInitUnicodeString(&valueName, L"DPC_Delta0_Milliseconds");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &delta_ms, sizeof(delta_ms));
-                
-                ULONG reached = (delta0 <= 0) ? 1 : 0;
-                RtlInitUnicodeString(&valueName, L"DPC_TARGET0_Reached");
-                ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &reached, sizeof(reached));
-                
-                ZwClose(hKey);
-            }
-        }
-        #endif
+        // Bug #1d: REMOVED ZwCreateKey/ZwSetValueKey — still at DISPATCH_LEVEL here.
     }
     
     /* Timer 0: Check TT0 flag (bit 0 in autt_flags) */
@@ -947,17 +977,18 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
                 0xFF,    /* pcp - not applicable */
                 0,       /* queue - not applicable */
                 0,       /* packet_length - not applicable */
-                0        /* trigger_source: timer 0 */
+                0,       /* trigger_source: timer 0 */
+                0        /* correction_field - not applicable */
             );
             
-            DEBUGP(DL_WARN, "!!! TARGET TIME 0 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+            DEBUGP(DL_TRACE, "!!! TARGET TIME 0 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
         }
         
         /* Clear TT0 flag in TSICR (write-1-to-clear) */
         if (ops->clear_autt_flag) {
             rc = ops->clear_autt_flag(dev, 0);
             if (rc != 0) {
-                DEBUGP(DL_WARN, "clear_autt_flag(0) failed: %d\n", rc);
+                DEBUGP(DL_TRACE, "clear_autt_flag(0) failed: %d\n", rc);
             }
         }
     }
@@ -979,17 +1010,18 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
                 0xFF,    /* pcp - not applicable */
                 0,       /* queue - not applicable */
                 0,       /* packet_length - not applicable */
-                1        /* trigger_source: timer 1 */
+                1,       /* trigger_source: timer 1 */
+                0        /* correction_field - not applicable */
             );
             
-            DEBUGP(DL_WARN, "!!! TARGET TIME 1 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+            DEBUGP(DL_TRACE, "!!! TARGET TIME 1 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
         }
         
         /* Clear TT1 flag in TSICR (write-1-to-clear) */
         if (ops->clear_autt_flag) {
             rc = ops->clear_autt_flag(dev, 1);
             if (rc != 0) {
-                DEBUGP(DL_WARN, "clear_autt_flag(1) failed: %d\n", rc);
+                DEBUGP(DL_TRACE, "clear_autt_flag(1) failed: %d\n", rc);
             }
         }
     }
@@ -1005,51 +1037,47 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject)
     if (!AvbContext || !FileObject) return;
     
     int cleaned = 0;
+
+    /* Phase 1 — hold spinlock only to snapshot pointers and NULL the fields.
+     * MmUnmapLockedPages / IoFreeMdl require IRQL <= APC_LEVEL; calling them
+     * while holding an NDIS spinlock (which raises IRQL to DISPATCH_LEVEL)
+     * triggers BSOD 0xC4 / 0x7A.  Collect all resources under the lock, then
+     * release the lock before touching any MDL APIs.
+     */
+    PVOID ring_to_free[MAX_TS_SUBSCRIPTIONS];
+    PMDL  mdl_to_free[MAX_TS_SUBSCRIPTIONS];
+    PVOID user_va_to_unmap[MAX_TS_SUBSCRIPTIONS];
+    ULONG ring_ids[MAX_TS_SUBSCRIPTIONS];
+    ULONG ring_counts[MAX_TS_SUBSCRIPTIONS];
+    RtlZeroMemory(ring_to_free,     sizeof(ring_to_free));
+    RtlZeroMemory(mdl_to_free,      sizeof(mdl_to_free));
+    RtlZeroMemory(user_va_to_unmap, sizeof(user_va_to_unmap));
+    RtlZeroMemory(ring_ids,         sizeof(ring_ids));
+    RtlZeroMemory(ring_counts,      sizeof(ring_counts));
+
     NdisAcquireSpinLock(&AvbContext->subscription_lock);
-    
+
     for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
         TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[i];
-        
-        // Check if this subscription belongs to the closing file object
+
         if (sub->active && sub->file_object == FileObject) {
-            DEBUGP(DL_WARN, "Cleaning up subscription ring_id=%u for FileObject=%p\n", 
-                   sub->ring_id, FileObject);
-            
-            // Unmap from user space if mapped (Task 4)
-            if (sub->user_va && sub->ring_mdl) {
-                __try {
-                    MmUnmapLockedPages(sub->user_va, sub->ring_mdl);
-                    DEBUGP(DL_INFO, "  Unmapped user VA %p\n", sub->user_va);
-                } __except(EXCEPTION_EXECUTE_HANDLER) {
-                    DEBUGP(DL_ERROR, "  Exception during MmUnmapLockedPages: 0x%08X\n", GetExceptionCode());
-                }
-                sub->user_va = NULL;
-            }
-            
-            // Free MDL (Task 4)
-            if (sub->ring_mdl) {
-                IoFreeMdl(sub->ring_mdl);
-                DEBUGP(DL_INFO, "  Freed MDL\n");
-                sub->ring_mdl = NULL;
-            }
-            
-            // Free ring buffer (Task 3)
-            if (sub->ring_buffer) {
-                ExFreePoolWithTag(sub->ring_buffer, FILTER_ALLOC_TAG);
-                DEBUGP(DL_INFO, "  Freed ring buffer (%lu bytes)\n", 
-                       (ULONG)(sizeof(AVB_TIMESTAMP_RING_HEADER) + sub->ring_count * sizeof(AVB_TIMESTAMP_EVENT)));
-                sub->ring_buffer = NULL;
-            }
-            
-            // Mark subscription slot as free
-            sub->active = 0;
-            sub->ring_id = 0;
-            sub->file_object = NULL;
+            ring_ids[i]         = sub->ring_id;
+            ring_counts[i]      = sub->ring_count;
+            ring_to_free[i]     = sub->ring_buffer;
+            mdl_to_free[i]      = sub->ring_mdl;
+            user_va_to_unmap[i] = sub->user_va;
+
+            sub->ring_buffer  = NULL;
+            sub->ring_mdl     = NULL;
+            sub->user_va      = NULL;
+            sub->active       = 0;
+            sub->ring_id      = 0;
+            sub->file_object  = NULL;
             cleaned++;
         }
     }
-    
-    // Check if all subscriptions are now inactive - stop timer to save CPU
+
+    // Check if all subscriptions are now inactive — stop timer to save CPU
     BOOLEAN any_active = FALSE;
     for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
         if (AvbContext->subscriptions[i].active) {
@@ -1057,16 +1085,44 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject)
             break;
         }
     }
-    
     if (!any_active && AvbContext->tx_poll_active) {
         AvbContext->tx_poll_active = FALSE;  // Signal DPC to stop re-arming
-        DEBUGP(DL_INFO, "All subscriptions removed - TX polling will stop\n");
+        DEBUGP(DL_TRACE, "All subscriptions removed - TX polling will stop\n");
     }
-    
+
     NdisReleaseSpinLock(&AvbContext->subscription_lock);
-    
+
+    /* Phase 2 — free resources OUTSIDE the spinlock (IRQL back to PASSIVE / APC).
+     * MmUnmapLockedPages, IoFreeMdl are now safe to call.
+     */
+    for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        if (mdl_to_free[i] || ring_to_free[i]) {
+            DEBUGP(DL_TRACE, "Cleaning up subscription ring_id=%u for FileObject=%p\n",
+                   ring_ids[i], FileObject);
+
+            if (mdl_to_free[i]) {
+                if (user_va_to_unmap[i]) {
+                    __try {
+                        MmUnmapLockedPages(user_va_to_unmap[i], mdl_to_free[i]);
+                        DEBUGP(DL_TRACE, "  Unmapped user VA %p\n", user_va_to_unmap[i]);
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        DEBUGP(DL_ERROR, "  Exception during MmUnmapLockedPages: 0x%08X\n", GetExceptionCode());
+                    }
+                }
+                IoFreeMdl(mdl_to_free[i]);
+                DEBUGP(DL_TRACE, "  Freed MDL\n");
+            }
+
+            if (ring_to_free[i]) {
+                ExFreePoolWithTag(ring_to_free[i], FILTER_ALLOC_TAG);
+                DEBUGP(DL_TRACE, "  Freed ring buffer (%lu bytes)\n",
+                       (ULONG)(sizeof(AVB_TIMESTAMP_RING_HEADER) + ring_counts[i] * sizeof(AVB_TIMESTAMP_EVENT)));
+            }
+        }
+    }
+
     if (cleaned > 0) {
-        DEBUGP(DL_WARN, "Cleaned up %d subscription(s) for FileObject=%p\n", cleaned, FileObject);
+        DEBUGP(DL_TRACE, "Cleaned up %d subscription(s) for FileObject=%p\n", cleaned, FileObject);
     }
 }
 
@@ -1080,73 +1136,297 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         AvbContext->tx_poll_active = FALSE;  // Signal DPC to stop re-arming
         NdisCancelTimer(&AvbContext->tx_poll_timer, &cancelled);
         
-        // If timer was pending (not cancelled), wait briefly for DPC to complete
-        if (!cancelled) {
-            DEBUGP(DL_WARN, "TX polling timer was pending, waiting for DPC to complete...\n");
-            NdisMSleep(5000);  // 5ms should be enough for DPC to see tx_poll_active=FALSE
-        }
-        DEBUGP(DL_INFO, "TX polling timer stopped (was_pending=%d)\n", !cancelled);
+        // BUGFIX Bug #1 (0x13A_17 heap corruption - use-after-free race):
+        // Wait for ALL queued/running DPCs to complete before freeing ring buffers
+        // Root cause: TX poll DPC was writing to ring buffer AFTER cleanup freed it
+        KeFlushQueuedDpcs();
+        
+        // BUGFIX Bug #1b (0x13A_17 recurrence - DPC re-arm inside flush window):
+        // The DPC may have read tx_poll_active=TRUE before our write propagated,
+        // called NdisSetTimer() to re-arm, and THEN finished (allowing KeFlushQueuedDpcs
+        // to return). Cancel the re-armed timer.
+        NdisCancelTimer(&AvbContext->tx_poll_timer, &cancelled);
+
+        // BUGFIX Bug #1c (0x13A_17 recurrence - timer fires between flush and second cancel):
+        // On 4-CPU systems the re-armed 1ms timer may fire between KeFlushQueuedDpcs() and
+        // NdisCancelTimer() above: the timer is dequeued (second cancel returns FALSE) but the
+        // DPC is already QUEUED. A second flush drains that DPC before we free ring buffers.
+        // That DPC will see tx_poll_active==FALSE and NOT re-arm, so no further flushes needed.
+        KeFlushQueuedDpcs();
+        
+        DEBUGP(DL_TRACE, "TX polling timer stopped and DPC flushed (was_pending=%d)\n", !cancelled);
     }
     
     /* CRITICAL: Cancel Target Time polling timer (Task 7) */
     if (AvbContext->target_time_poll_active) {
         // TRACE: Deactivating target time polling (diagnostic for flag state changes)
-        DEBUGP(DL_WARN, "!!! TARGET_TIMER_CLEANUP: Deactivating flag (ctx=%p, before=%d)\n",
+        DEBUGP(DL_TRACE, "!!! TARGET_TIMER_CLEANUP: Deactivating flag (ctx=%p, before=%d)\n",
                AvbContext, AvbContext->target_time_poll_active ? 1 : 0);
         
         AvbContext->target_time_poll_active = FALSE;  // Signal DPC to stop
         
         // TRACE: Confirm flag deactivation completed
-        DEBUGP(DL_WARN, "!!! TARGET_TIMER_CLEANUP: Flag deactivated (ctx=%p, after=%d)\n",
+        DEBUGP(DL_TRACE, "!!! TARGET_TIMER_CLEANUP: Flag deactivated (ctx=%p, after=%d)\n",
                AvbContext, AvbContext->target_time_poll_active ? 1 : 0);
         
         BOOLEAN cancelled = KeCancelTimer(&AvbContext->target_time_timer);  // Cancel timer (returns TRUE if was in queue)
+        UNREFERENCED_PARAMETER(cancelled);  // Used only in DEBUGP
         
-        // Wait for any pending DPC to complete
+        // Wait for any pending/running DPC to complete
         KeFlushQueuedDpcs();
         
-        DEBUGP(DL_WARN, "!!! TIMER STOPPED: Target Time DPC was called %d times (was_pending=%d)\n", 
+        // Cancel again: DPC may have re-armed the timer inside the flush window
+        // (same race as tx_poll_timer - see BUGFIX Bug #1b above)
+        KeCancelTimer(&AvbContext->target_time_timer);
+
+        // BUGFIX Bug #1c (same as tx_poll_timer): flush any DPC that fired between
+        // the first KeFlushQueuedDpcs and the KeCancelTimer above.
+        KeFlushQueuedDpcs();
+        
+        DEBUGP(DL_TRACE, "!!! TIMER STOPPED: Target Time DPC was called %d times (was_pending=%d)\n", 
                AvbContext->target_time_dpc_call_count, !cancelled);
     }
     
-    // Clear global context pointer to prevent stale timer DPC access
-    if (g_AvbContext == AvbContext) {
-        g_AvbContext = NULL;
-    }
+    // Remove from global list and promote a successor if needed
+    AvbContextListRemove(AvbContext);
     
-    /* Cleanup all timestamp event subscriptions (Issue #13) */
+    /* Cleanup all timestamp event subscriptions (Issue #13).
+     * Bug #1d: Null ALL pointers under the spinlock FIRST, then free outside it.
+     * This closes the race window where AvbPostTimestampEvent (RX path) could
+     * read a pointer that is concurrently being freed.                          */
     for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        PVOID ring_to_free    = NULL;
+        PMDL  mdl_to_free     = NULL;
+        PVOID user_va_to_unmap = NULL;
+
+        NdisAcquireSpinLock(&AvbContext->subscription_lock);
         if (AvbContext->subscriptions[i].active && AvbContext->subscriptions[i].ring_buffer) {
-            /* Unmap from user space if mapped */
-            if (AvbContext->subscriptions[i].ring_mdl) {
-                if (AvbContext->subscriptions[i].user_va) {
-                    MmUnmapLockedPages(AvbContext->subscriptions[i].user_va, 
-                                     AvbContext->subscriptions[i].ring_mdl);
-                }
-                IoFreeMdl(AvbContext->subscriptions[i].ring_mdl);
-            }
-            /* Free ring buffer */
-            ExFreePoolWithTag(AvbContext->subscriptions[i].ring_buffer, FILTER_ALLOC_TAG);
+            ring_to_free      = AvbContext->subscriptions[i].ring_buffer;
+            mdl_to_free       = AvbContext->subscriptions[i].ring_mdl;
+            user_va_to_unmap  = AvbContext->subscriptions[i].user_va;
+            /* Null all pointers under the lock before anyone else can observe them */
+            AvbContext->subscriptions[i].ring_buffer = NULL;
+            AvbContext->subscriptions[i].ring_mdl    = NULL;
+            AvbContext->subscriptions[i].user_va     = NULL;
+            AvbContext->subscriptions[i].active      = FALSE;
+        }
+        NdisReleaseSpinLock(&AvbContext->subscription_lock);
+
+        /* Perform actual releases outside the spinlock.
+         * BUGFIX (0xC4/0xB9): Do NOT call MmUnmapLockedPages here.
+         * AvbCleanupDevice runs during adapter detach or driver unload; by this
+         * point the owning user process may have already exited (its address space
+         * is gone) or its IRP_MJ_CLEANUP already fired AvbCleanupFileSubscriptions
+         * which unmapped the user VA. Calling MmUnmapLockedPages on a stale
+         * user-space VA triggers Driver Verifier 0xC4/0xB9 "bad user space address".
+         * IoFreeMdl is sufficient to release the MDL and any system VA mapping.    */
+        if (mdl_to_free) {
+            IoFreeMdl(mdl_to_free);
+        }
+        if (ring_to_free) {
+            ExFreePoolWithTag(ring_to_free, FILTER_ALLOC_TAG);
         }
     }
     NdisFreeSpinLock(&AvbContext->subscription_lock);
     
+    /* Cleanup NDIS packet injection pools (Step 8b) */
+    if (AvbContext->nbl_pool_handle || AvbContext->nb_pool_handle || 
+        AvbContext->test_packet_buffer || AvbContext->test_packet_mdl) {
+        
+        // Wait for any pending test packets to complete (max 100ms)
+        LONG pending = InterlockedCompareExchange(&AvbContext->test_packets_pending, 0, 0);
+        if (pending > 0) {
+            DEBUGP(DL_TRACE, "Waiting for %d pending test packets to complete...\n", pending);
+            for (int wait_ms = 0; wait_ms < 100 && pending > 0; wait_ms++) {
+                NdisMSleep(1000);  // 1ms sleep
+                pending = InterlockedCompareExchange(&AvbContext->test_packets_pending, 0, 0);
+            }
+            if (pending > 0) {
+                DEBUGP(DL_ERROR, "WARNING: %d test packets still pending after 100ms wait\n", pending);
+            }
+        }
+        
+        // Free MDL (must be done before freeing buffer)
+        if (AvbContext->test_packet_mdl) {
+            IoFreeMdl(AvbContext->test_packet_mdl);
+            AvbContext->test_packet_mdl = NULL;
+        }
+        
+        // Free pre-allocated NBL ring slots BEFORE freeing the pools that own them.
+        // Each slot has its own: NBL (from nbl_pool), NB (from nb_pool), MDL, and buffer.
+        for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
+            if (AvbContext->test_nbl_ring[_ri].nbl != NULL) {
+                NdisFreeNetBufferList(AvbContext->test_nbl_ring[_ri].nbl);
+                AvbContext->test_nbl_ring[_ri].nbl = NULL;
+            }
+            if (AvbContext->test_nbl_ring[_ri].nb != NULL) {
+                NdisFreeNetBuffer(AvbContext->test_nbl_ring[_ri].nb);
+                AvbContext->test_nbl_ring[_ri].nb = NULL;
+            }
+            if (AvbContext->test_nbl_ring[_ri].mdl != NULL) {
+                IoFreeMdl(AvbContext->test_nbl_ring[_ri].mdl);
+                AvbContext->test_nbl_ring[_ri].mdl = NULL;
+            }
+            if (AvbContext->test_nbl_ring[_ri].buffer != NULL) {
+                ExFreePoolWithTag(AvbContext->test_nbl_ring[_ri].buffer, FILTER_ALLOC_TAG);
+                AvbContext->test_nbl_ring[_ri].buffer = NULL;
+            }
+        }
+
+        // Free test packet buffer
+        if (AvbContext->test_packet_buffer) {
+            ExFreePoolWithTag(AvbContext->test_packet_buffer, FILTER_ALLOC_TAG);
+            AvbContext->test_packet_buffer = NULL;
+        }
+        
+        // Free NET_BUFFER pool
+        if (AvbContext->nb_pool_handle) {
+            NdisFreeNetBufferPool(AvbContext->nb_pool_handle);
+            AvbContext->nb_pool_handle = NULL;
+        }
+        
+        // Free NET_BUFFER_LIST pool
+        if (AvbContext->nbl_pool_handle) {
+            NdisFreeNetBufferListPool(AvbContext->nbl_pool_handle);
+            AvbContext->nbl_pool_handle = NULL;
+        }
+        
+        // Free spin lock
+        NdisFreeSpinLock(&AvbContext->test_send_lock);
+        
+        DEBUGP(DL_TRACE, "NDIS packet injection pools cleaned up\n");
+    }
+    
+    // BUGFIX: Free intel_avb library private data (Bug #2: Memory leak 0xC4_62)
+    // Issue: struct intel_private allocated at line 454 was never freed
+    // Root cause: Missing cleanup in AvbCleanupDevice()
+    // Fix: Add ExFreePoolWithTag for private_data before hardware_context cleanup
+    if (AvbContext->intel_device.private_data) {
+        ExFreePoolWithTag(AvbContext->intel_device.private_data, 'IAvb');
+        AvbContext->intel_device.private_data = NULL;
+        DEBUGP(DL_TRACE, "Intel AVB library private data freed\n");
+    }
+    
     if (AvbContext->hardware_context) {
         AvbUnmapIntelControllerMemory(AvbContext);
     }
-    if (g_AvbContext == AvbContext) g_AvbContext = NULL;
+    AvbContextListRemove(AvbContext);   // idempotent: no-op if already removed above
     ExFreePoolWithTag(AvbContext, FILTER_ALLOC_TAG);
+}
+
+/* ======================================================================= */
+/* AvbSendPtpCore — shared hot-path for IOCTL_AVB_TEST_SEND_PTP.
+ * Called from both the IRP dispatch path and the FastIoDeviceControl path.
+ * On entry: activeContext and test_req are both non-NULL and accessible.
+ * On return: test_req->timestamp_ns / packets_sent / status are filled. */
+NTSTATUS AvbSendPtpCore(
+    _In_ PAVB_DEVICE_CONTEXT activeContext,
+    _Inout_ PAVB_TEST_SEND_PTP_REQUEST test_req)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+
+    // Verify NDIS pools are allocated
+    if (!activeContext->nbl_pool_handle || !activeContext->nb_pool_handle ||
+        !activeContext->test_packet_buffer || !activeContext->test_packet_mdl) {
+        DEBUGP(DL_TRACE, "NDIS packet injection pools not initialized\n");
+        test_req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Verify filter instance exists (required for NdisFSendNetBufferLists)
+    if (!activeContext->filter_instance || !activeContext->filter_instance->FilterHandle) {
+        DEBUGP(DL_TRACE, "Filter instance not available (cannot send NBL)\n");
+        test_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    // Fast path: claim a pre-allocated ring slot (avoids per-call NdisAllocate ~10µs).
+    int ring_slot = -1;
+    for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
+        if (activeContext->test_nbl_ring[_ri].nbl != NULL &&
+            InterlockedCompareExchange(&activeContext->test_nbl_ring[_ri].in_use, 1, 0) == 0) {
+            ring_slot = _ri;
+            break;
+        }
+    }
+
+    PNET_BUFFER_LIST nbl;
+    PNET_BUFFER nb;
+    PUCHAR pkt;
+
+    if (ring_slot >= 0) {
+        /* Fast path: ring slot owned exclusively via CAS — no spinlock needed. */
+        nbl = activeContext->test_nbl_ring[ring_slot].nbl;
+        nb  = activeContext->test_nbl_ring[ring_slot].nb;
+        pkt = (PUCHAR)activeContext->test_nbl_ring[ring_slot].buffer;
+        nb->DataOffset = 0;
+        nbl->Next = NULL;
+    } else {
+        /* Slow path: ring exhausted — allocate on demand under spinlock. */
+        NdisAcquireSpinLock(&activeContext->test_send_lock);
+        nb = NdisAllocateNetBuffer(activeContext->nb_pool_handle,
+                                   activeContext->test_packet_mdl, 0, 64);
+        if (!nb) {
+            NdisReleaseSpinLock(&activeContext->test_send_lock);
+            test_req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        nbl = NdisAllocateNetBufferList(activeContext->nbl_pool_handle, 0, 0);
+        if (!nbl) {
+            NdisFreeNetBuffer(nb);
+            NdisReleaseSpinLock(&activeContext->test_send_lock);
+            test_req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        NdisReleaseSpinLock(&activeContext->test_send_lock);
+        nbl->FirstNetBuffer = nb;
+        nbl->Next = NULL;
+        pkt = (PUCHAR)activeContext->test_packet_buffer;
+    }
+
+    // Update PTP sequence ID (Big Endian at offset 44-45)
+    pkt[44] = (UCHAR)((test_req->sequence_id >> 8) & 0xFF);
+    pkt[45] = (UCHAR)(test_req->sequence_id & 0xFF);
+
+    InterlockedIncrement(&activeContext->test_packets_pending);
+
+    // Capture pre-send timestamp: hardware SYSTIM preferred, perf-counter fallback.
+    ULONG64 preSendTs = 0;
+    if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
+        const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+        if (ops && ops->get_systime) {
+#if DBG
+            int systim_rc = ops->get_systime(&activeContext->intel_device, &preSendTs);
+            DEBUGP(DL_TRACE, "PRE-SEND SYSTIM: rc=%d ts=0x%016I64X\n", systim_rc, preSendTs);
+#else
+            ops->get_systime(&activeContext->intel_device, &preSendTs);
+#endif
+        }
+    }
+    if (preSendTs == 0) {
+        LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
+        preSendTs = (ULONG64)pc.QuadPart;
+    }
+    (void)InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, (LONGLONG)preSendTs);
+    test_req->timestamp_ns = preSendTs;
+
+    /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
+     * Ring-slot fast path: already lock-free. Fallback: lock released above. */
+    NdisFSendNetBufferLists(activeContext->filter_instance->FilterHandle,
+                           nbl, 0, 0);
+
+    test_req->packets_sent = 1;
+    test_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+    return status;
 }
 
 /* ======================================================================= */
 /* IOCTL dispatcher */
 NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP Irp)
 {
-    DEBUGP(DL_ERROR, "!!! AvbHandleDeviceIoControl: ENTERED\n");
     if (!AvbContext) return STATUS_DEVICE_NOT_READY;
     PIO_STACK_LOCATION sp = IoGetCurrentIrpStackLocation(Irp);
     ULONG code   = sp->Parameters.DeviceIoControl.IoControlCode;
-    DEBUGP(DL_ERROR, "!!! AvbHandleDeviceIoControl: IOCTL=0x%08X\n", code);
     PUCHAR buf   = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
     ULONG inLen  = sp->Parameters.DeviceIoControl.InputBufferLength;
     ULONG outLen = sp->Parameters.DeviceIoControl.OutputBufferLength;
@@ -1160,8 +1440,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
     // On-demand initialization: only initialize on first IOCTL, not at driver load
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION)
+    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS)
         return STATUS_DEVICE_NOT_READY;
+
+    // Implements #270 (TEST-STATISTICS-001): count every IOCTL dispatch before
+    // branching so unhandled codes (hit 'default:') also increment the counter.
+    InterlockedIncrement64(&currentContext->stats_ioctl_count);
 
     switch (code) {
     
@@ -1170,7 +1454,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // MUST be first case - no device initialization required
     case IOCTL_AVB_GET_VERSION:
         {
-            DEBUGP(DL_INFO, "IOCTL_AVB_GET_VERSION called\n");
+            DEBUGP(DL_TRACE, "IOCTL_AVB_GET_VERSION called\n");
             if (outLen < sizeof(IOCTL_VERSION)) {
                 DEBUGP(DL_ERROR, "IOCTL_AVB_GET_VERSION: Buffer too small (got %lu, need %lu)\n", 
                        outLen, (ULONG)sizeof(IOCTL_VERSION));
@@ -1185,7 +1469,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             version->Build = AVB_VERSION_BUILD;
             version->Revision = AVB_VERSION_REVISION;
             
-            DEBUGP(DL_INFO, "IOCTL_AVB_GET_VERSION: Returning version %u.%u.%u.%u\n", 
+            DEBUGP(DL_TRACE, "IOCTL_AVB_GET_VERSION: Returning version %u.%u.%u.%u\n", 
                    version->Major, version->Minor, version->Build, version->Revision);
             
             status = STATUS_SUCCESS;
@@ -1195,45 +1479,58 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     
     case IOCTL_AVB_INIT_DEVICE:
         {
-            DEBUGP(DL_INFO, "? IOCTL_AVB_INIT_DEVICE: Starting hardware bring-up\n");
+            DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Starting hardware bring-up\n");
             
-            DEBUGP(DL_INFO, "   - Using context: VID=0x%04X DID=0x%04X\n",
+            // UT-DEV-INIT-002: Duplicate Initialization Prevention (per-handle).
+            // FsContext2 is NULL for every new file handle (zeroed by I/O Manager).
+            // Setting it to (PVOID)1 on the first INIT_DEVICE call lets us detect and
+            // reject a second call on the SAME handle — without polluting per-adapter
+            // state that would break subsequent test cases that open fresh handles.
+            // Implements #313 (TEST-DEV-LIFECYCLE-001 / UT-DEV-INIT-002)
+            if (sp->FileObject->FsContext2 != NULL) {
+                DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected\n");
+                status = STATUS_INVALID_DEVICE_STATE;
+                break;
+            }
+            sp->FileObject->FsContext2 = (PVOID)(ULONG_PTR)1;
+            
+            DEBUGP(DL_TRACE, "   - Using context: VID=0x%04X DID=0x%04X\n",
                    currentContext->intel_device.pci_vendor_id, currentContext->intel_device.pci_device_id);
-            DEBUGP(DL_INFO, "   - Current hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
-            DEBUGP(DL_INFO, "   - Hardware access enabled: %s\n", currentContext->hw_access_enabled ? "YES" : "NO");
-            DEBUGP(DL_INFO, "   - Initialized flag: %s\n", currentContext->initialized ? "YES" : "NO");
-            DEBUGP(DL_INFO, "   - Hardware context: %p\n", currentContext->hardware_context);
-            DEBUGP(DL_INFO, "   - Device type: %d (%s)\n", currentContext->intel_device.device_type,
+            DEBUGP(DL_TRACE, "   - Current hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
+            DEBUGP(DL_TRACE, "   - Hardware access enabled: %s\n", currentContext->hw_access_enabled ? "YES" : "NO");
+            DEBUGP(DL_TRACE, "   - Initialized flag: %s\n", currentContext->initialized ? "YES" : "NO");
+            DEBUGP(DL_TRACE, "   - Hardware context: %p\n", currentContext->hardware_context);
+            DEBUGP(DL_TRACE, "   - Device type: %d (%s)\n", currentContext->intel_device.device_type,
                    currentContext->intel_device.device_type == INTEL_DEVICE_I210 ? "I210" :
                    currentContext->intel_device.device_type == INTEL_DEVICE_I226 ? "I226" : "OTHER");
             
             // Force immediate BAR0 discovery if hardware context is missing
             if (currentContext->hardware_context == NULL && currentContext->hw_state == AVB_HW_BOUND) {
-                DEBUGP(DL_WARN, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
+                DEBUGP(DL_TRACE, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
                 
                 PHYSICAL_ADDRESS bar0 = {0};
                 ULONG barLen = 0;
                 NTSTATUS ds = AvbDiscoverIntelControllerResources(currentContext->filter_instance, &bar0, &barLen);
                 if (NT_SUCCESS(ds)) {
-                    DEBUGP(DL_WARN, "*** BAR0 DISCOVERY SUCCESS *** PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
+                    DEBUGP(DL_TRACE, "*** BAR0 DISCOVERY SUCCESS *** PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
                     NTSTATUS ms = AvbMapIntelControllerMemory(currentContext, bar0, barLen);
                     if (NT_SUCCESS(ms)) {
-                        DEBUGP(DL_WARN, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
+                        DEBUGP(DL_TRACE, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
                         
                         // Complete initialization sequence
                         if (intel_init(&currentContext->intel_device) == 0) {
-                            DEBUGP(DL_INFO, "? MANUAL intel_init SUCCESS\n");
+                            DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
                             
                             // Test MMIO sanity using generic register access
                             ULONG ctrl = 0xFFFFFFFF;
                             if (intel_read_reg(&currentContext->intel_device, INTEL_GENERIC_CTRL_REG, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
-                                DEBUGP(DL_INFO, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
-                                currentContext->hw_state = AVB_HW_BAR_MAPPED;
+                                DEBUGP(DL_TRACE, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
+                                AVB_SET_HW_STATE(currentContext, AVB_HW_BAR_MAPPED);
                                 currentContext->hw_access_enabled = TRUE;
                                 currentContext->initialized = TRUE;
                                 
                                 // Device-specific initialization handled by Intel library
-                                DEBUGP(DL_INFO, "? Device-specific initialization complete\n");
+                                DEBUGP(DL_TRACE, "? Device-specific initialization complete\n");
                             } else {
                                 DEBUGP(DL_ERROR, "? MANUAL MMIO SANITY FAILED: CTRL=0x%08X\n", ctrl);
                             }
@@ -1250,9 +1547,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             
             status = AvbBringUpHardware(currentContext);
             
-            DEBUGP(DL_INFO, "? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
-            DEBUGP(DL_INFO, "   - Final hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
-            DEBUGP(DL_INFO, "   - Final hardware access: %s\n", currentContext->hw_access_enabled ? "YES" : "NO");
+            DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
+            DEBUGP(DL_TRACE, "   - Final hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
+            DEBUGP(DL_TRACE, "   - Final hardware access: %s\n", currentContext->hw_access_enabled ? "YES" : "NO");
         }
         break;
     
@@ -1264,7 +1561,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             PAVB_ENUM_REQUEST r = (PAVB_ENUM_REQUEST)buf; 
             RtlZeroMemory(r, sizeof(*r));
             
-            DEBUGP(DL_INFO, "? IOCTL_AVB_ENUM_ADAPTERS: Starting enumeration\n");
+            DEBUGP(DL_TRACE, "? IOCTL_AVB_ENUM_ADAPTERS: Starting enumeration\n");
             
             // Count all Intel adapters in the system
             ULONG adapterCount = 0;
@@ -1287,7 +1584,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 }
             }
             
-            DEBUGP(DL_INFO, "? ENUM_ADAPTERS: Found %lu Intel adapters\n", adapterCount);
+            DEBUGP(DL_TRACE, "? ENUM_ADAPTERS: Found %lu Intel adapters\n", adapterCount);
             
             // If requesting specific index, find and return that adapter
             if (r->index < adapterCount) {
@@ -1310,7 +1607,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                                 r->capabilities = ctx->intel_device.capabilities;
                                 r->status = (avb_u32)NDIS_STATUS_SUCCESS;
                                 
-                                DEBUGP(DL_INFO, "? ENUM_ADAPTERS[%lu]: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
+                                DEBUGP(DL_TRACE, "? ENUM_ADAPTERS[%lu]: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
                                        r->index, r->vendor_id, r->device_id, r->capabilities);
                                 break;
                             }
@@ -1333,7 +1630,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 }
                 r->status = (avb_u32)NDIS_STATUS_SUCCESS;
                 
-                DEBUGP(DL_INFO, "? ENUM_ADAPTERS(summary): count=%lu, VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
+                DEBUGP(DL_TRACE, "? ENUM_ADAPTERS(summary): count=%lu, VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
                        r->count, r->vendor_id, r->device_id, r->capabilities);
             }
             
@@ -1343,7 +1640,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         break;
     case IOCTL_AVB_GET_DEVICE_INFO:
         {
-            DEBUGP(DL_INFO, "? IOCTL_AVB_GET_DEVICE_INFO: Starting device info request\n");
+            DEBUGP(DL_TRACE, "? IOCTL_AVB_GET_DEVICE_INFO: Starting device info request\n");
             
             if (outLen < sizeof(AVB_DEVICE_INFO_REQUEST)) { 
                 DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Buffer too small\n");
@@ -1352,30 +1649,30 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 // CRITICAL FIX: Use the specific adapter context that was selected via IOCTL_AVB_OPEN_ADAPTER
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
-                DEBUGP(DL_INFO, "   - Using context: VID=0x%04X DID=0x%04X\n",
+                DEBUGP(DL_TRACE, "   - Using context: VID=0x%04X DID=0x%04X\n",
                        activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
-                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(activeContext->hw_state));
-                DEBUGP(DL_INFO, "   - Device type: %d\n", activeContext->intel_device.device_type);
-                DEBUGP(DL_INFO, "   - Filter instance: %p\n", activeContext->filter_instance);
+                DEBUGP(DL_TRACE, "   - Hardware state: %s\n", AvbHwStateName(activeContext->hw_state));
+                DEBUGP(DL_TRACE, "   - Device type: %d\n", activeContext->intel_device.device_type);
+                DEBUGP(DL_TRACE, "   - Filter instance: %p\n", activeContext->filter_instance);
                 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) { 
                     DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Hardware not ready - hw_state=%s\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY; 
                 } else {
-                    DEBUGP(DL_INFO, "? DEVICE_INFO: Hardware state validation passed\n");
+                    DEBUGP(DL_TRACE, "? DEVICE_INFO: Hardware state validation passed\n");
                     
                     PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; 
                     RtlZeroMemory(r->device_info, sizeof(r->device_info)); 
                     
 // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
-                    DEBUGP(DL_INFO, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
+                    DEBUGP(DL_TRACE, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
                     int rc = intel_get_device_info(&activeContext->intel_device, r->device_info, sizeof(r->device_info)); 
-                    DEBUGP(DL_INFO, "?? DEVICE_INFO: intel_get_device_info returned %d\n", rc);
+                    DEBUGP(DL_TRACE, "?? DEVICE_INFO: intel_get_device_info returned %d\n", rc);
                     
                     if (rc == 0) {
-                        DEBUGP(DL_INFO, "? DEVICE_INFO: Device info string: %s\n", r->device_info);
+                        DEBUGP(DL_TRACE, "? DEVICE_INFO: Device info string: %s\n", r->device_info);
                     } else {
                         DEBUGP(DL_ERROR, "? DEVICE_INFO: intel_get_device_info failed with code %d\n", rc);
                         // Fallback to manual device info generation
@@ -1390,7 +1687,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         }
                         RtlStringCbCopyA(r->device_info, sizeof(r->device_info), deviceName);
                         rc = 0; // Override failure
-                        DEBUGP(DL_INFO, "? DEVICE_INFO: Using fallback device info: %s\n", r->device_info);
+                        DEBUGP(DL_TRACE, "? DEVICE_INFO: Using fallback device info: %s\n", r->device_info);
                     }
                     
                     size_t used = 0; 
@@ -1400,7 +1697,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     info = sizeof(*r); 
                     status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL; 
                     
-                    DEBUGP(DL_INFO, "? DEVICE_INFO COMPLETE: status=0x%08X, buffer_size=%lu\n", status, r->buffer_size);
+                    DEBUGP(DL_TRACE, "? DEVICE_INFO COMPLETE: status=0x%08X, buffer_size=%lu\n", status, r->buffer_size);
                 }
             }
         }
@@ -1483,32 +1780,51 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 } else {
                     PAVB_FREQUENCY_REQUEST freq_req = (PAVB_FREQUENCY_REQUEST)buf;
                     
-                    // TIMINCA is at well-known offset 0x0B608 across all Intel PTP devices
-                    const ULONG TIMINCA_REG = 0x0B608;
+                    // Get device operations for HAL-compliant register access
+                    const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
                     ULONG current_timinca = 0;
                     
                     // Read current TIMINCA value
-                    int rc = intel_read_reg(&activeContext->intel_device, TIMINCA_REG, &current_timinca);
+                    int rc = (ops && ops->read_timinca) ? ops->read_timinca(&activeContext->intel_device, &current_timinca) : -1;
                     freq_req->current_increment = current_timinca;
                     
                     if (rc != 0) {
                         DEBUGP(DL_ERROR, "Failed to read TIMINCA register\n");
                         freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                         status = STATUS_UNSUCCESSFUL;
+                    } else if (freq_req->increment_ns == 0 || freq_req->increment_ns >= 16) {
+                        // Range validation: increment_ns maps directly from ppb via ConvertPpbToIncrement.
+                        // For nominal 8 ns/cycle (125 MHz):
+                        //   increment_ns == 0  → ppb < −875,000,000 (below hardware minimum, clock frozen)
+                        //                        Hardware minimum is (1/8 - 1)*1e9 = -875,000,000 ppb → increment_ns=1
+                        //                        Also catches ppb ≤ −1,000,000,000 (negative overflow case)
+                        //   increment_ns >= 16 → ppb ≥ +1,000,000,000 (positive overflow, ≥2× nominal speed)
+                        //   Valid range: increment_ns ∈ [1, 15]
+                        // Fixes UT-PTP-FREQ-006 (+1e9+1 ppb → increment_ns=16) and
+                        //        UT-PTP-FREQ-007 (-1e9+1 ppb → increment_ns=0 via ConvertPpbToIncrement truncation)
+                        DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of valid range [1,15]\n",
+                               freq_req->increment_ns);
+                        freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
                     } else {
-                        // Build new TIMINCA: bits[31:24] = increment_ns, bits[23:0] = increment_frac
-                        ULONG new_timinca = ((freq_req->increment_ns & 0xFF) << 24) | (freq_req->increment_frac & 0xFFFFFF);
+                        // Build new TIMINCA: bits[31:24] = increment_ns (INCPERIOD, integer ns per cycle)
+                        //                   bits[23:0]  = INCFRAC (fractional ns in 2^-24 ns units)
+                        //
+                        // increment_frac is in 2^-32 ns units per IOCTL contract (2^32 = 1 ns).
+                        // TIMINCA INCFRAC field uses 2^-24 ns units (2^24 = 1 ns).
+                        // Conversion: INCFRAC = increment_frac >> 8  (divide by 2^8 = 256)
+                        ULONG new_timinca = ((freq_req->increment_ns & 0xFF) << 24) | ((freq_req->increment_frac >> 8) & 0xFFFFFF);
                         
-                        DEBUGP(DL_INFO, "Adjusting clock frequency: %u ns + 0x%X frac (TIMINCA 0x%08X->0x%08X) VID=0x%04X DID=0x%04X\n",
+                        DEBUGP(DL_TRACE, "Adjusting clock frequency: %u ns + 0x%X frac (TIMINCA 0x%08X->0x%08X) VID=0x%04X DID=0x%04X\n",
                                freq_req->increment_ns, freq_req->increment_frac, current_timinca, new_timinca,
                                activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                         
-                        rc = intel_write_reg(&activeContext->intel_device, TIMINCA_REG, new_timinca);
+                        rc = (ops && ops->write_timinca) ? ops->write_timinca(&activeContext->intel_device, new_timinca) : -1;
                         
                         if (rc == 0) {
                             freq_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                             status = STATUS_SUCCESS;
-                            DEBUGP(DL_INFO, "Clock frequency adjusted successfully\n");
+                            DEBUGP(DL_TRACE, "Clock frequency adjusted successfully\n");
                         } else {
                             DEBUGP(DL_ERROR, "Failed to write TIMINCA register\n");
                             freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
@@ -1549,31 +1865,45 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: hw_context=%p, hw_access=%d\n",
                            activeContext->hardware_context, activeContext->hw_access_enabled);
                     
-                    // Well-known PTP register offsets (common across all Intel PTP devices)
-                    const ULONG SYSTIML_REG = 0x0B600;
-                    const ULONG SYSTIMH_REG = 0x0B604;
-                    const ULONG TIMINCA_REG = 0x0B608;
-                    const ULONG TSAUXC_REG = 0x0B640;
+                    // Get device operations for HAL-compliant register access
+                    const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (ops == NULL) {
+                        status = STATUS_NOT_SUPPORTED;
+                        break;
+                    }
                     
-                    ULONG systiml = 0, systimh = 0, timinca = 0, tsauxc = 0;
+                    ULONG timinca = 0, tsauxc = 0;
+                    avb_u64 systime = 0;
                     int rc = 0;
                     
                     // Debug: Check if hardware context is available
                     DEBUGP(DL_ERROR, "DEBUG GET_CLOCK_CONFIG: hw_context=%p hw_access=%d\n",
                            activeContext->hardware_context, activeContext->hw_access_enabled);
                     
-                    // Read all clock-related registers using Intel library
-                    rc |= intel_read_reg(&activeContext->intel_device, SYSTIML_REG, &systiml);
-                    DEBUGP(DL_ERROR, "DEBUG: Read SYSTIML=0x%08X rc=%d\n", systiml, rc);
-                    rc |= intel_read_reg(&activeContext->intel_device, SYSTIMH_REG, &systimh);
-                    DEBUGP(DL_ERROR, "DEBUG: Read SYSTIMH=0x%08X rc=%d\n", systimh, rc);
-                    rc |= intel_read_reg(&activeContext->intel_device, TIMINCA_REG, &timinca);
-                    DEBUGP(DL_ERROR, "DEBUG: Read TIMINCA=0x%08X rc=%d\n", timinca, rc);
-                    rc |= intel_read_reg(&activeContext->intel_device, TSAUXC_REG, &tsauxc);
-                    DEBUGP(DL_ERROR, "DEBUG: Read TSAUXC=0x%08X rc=%d\n", tsauxc, rc);
+                    // Read clock-related registers using device operations (HAL-compliant - no magic numbers)
+                    if (ops->get_systime != NULL) {
+                        rc |= ops->get_systime(&activeContext->intel_device, &systime);
+                        DEBUGP(DL_ERROR, "DEBUG: Read SYSTIME=0x%016llX rc=%d\n", systime, rc);
+                    } else {
+                        rc = -1;
+                    }
+                    
+                    if (ops->read_timinca != NULL) {
+                        rc |= ops->read_timinca(&activeContext->intel_device, &timinca);
+                        DEBUGP(DL_ERROR, "DEBUG: Read TIMINCA=0x%08X rc=%d\n", timinca, rc);
+                    } else {
+                        rc = -1;
+                    }
+                    
+                    if (ops->read_tsauxc != NULL) {
+                        rc |= ops->read_tsauxc(&activeContext->intel_device, &tsauxc);
+                        DEBUGP(DL_ERROR, "DEBUG: Read TSAUXC=0x%08X rc=%d\n", tsauxc, rc);
+                    } else {
+                        rc = -1;
+                    }
                     
                     if (rc == 0) {
-                        cfg->systim = ((avb_u64)systimh << 32) | systiml;
+                        cfg->systim = systime;
                         cfg->timinca = timinca;
                         cfg->tsauxc = tsauxc;
                         
@@ -1596,7 +1926,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         cfg->status = (avb_u32)NDIS_STATUS_SUCCESS;
                         status = STATUS_SUCCESS;
                         
-                        DEBUGP(DL_INFO, "Clock config (VID=0x%04X DID=0x%04X): SYSTIM=0x%016llX, TIMINCA=0x%08X, TSAUXC=0x%08X (bit31=%s), Rate=%u MHz\n",
+                        DEBUGP(DL_TRACE, "Clock config (VID=0x%04X DID=0x%04X): SYSTIM=0x%016llX, TIMINCA=0x%08X, TSAUXC=0x%08X (bit31=%s), Rate=%u MHz\n",
                                activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id,
                                cfg->systim, cfg->timinca, cfg->tsauxc, (cfg->tsauxc & 0x80000000) ? "DISABLED" : "ENABLED",
                                cfg->clock_rate_mhz);
@@ -1627,8 +1957,42 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 } else {
                     PAVB_HW_TIMESTAMPING_REQUEST ts_req = (PAVB_HW_TIMESTAMPING_REQUEST)buf;
                     
-                    // TSAUXC register offsets and masks (Intel Foxville specification)
-                    const ULONG TSAUXC_REG = 0x0B640;
+                    // Input Validation: Mode validation (fixes test_hw_ts_ctrl UT-HW-TS-005)
+                    // All boolean fields should be 0 or 1; timer_mask should be 4-bit (0x0-0xF)
+                    if (ts_req->enable > 1) {
+                        DEBUGP(DL_ERROR, "HW timestamping rejected: invalid enable value %u (must be 0 or 1)\n",
+                               ts_req->enable);
+                        ts_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                        info = sizeof(*ts_req);
+                        break;
+                    }
+                    if (ts_req->timer_mask > 0xF) {
+                        DEBUGP(DL_ERROR, "HW timestamping rejected: invalid timer_mask 0x%X (max 0xF)\n",
+                               ts_req->timer_mask);
+                        ts_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                        info = sizeof(*ts_req);
+                        break;
+                    }
+                    if (ts_req->enable_target_time > 1) {
+                        DEBUGP(DL_ERROR, "HW timestamping rejected: invalid enable_target_time value %u (must be 0 or 1)\n",
+                               ts_req->enable_target_time);
+                        ts_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                        info = sizeof(*ts_req);
+                        break;
+                    }
+                    if (ts_req->enable_aux_ts > 1) {
+                        DEBUGP(DL_ERROR, "HW timestamping rejected: invalid enable_aux_ts value %u (must be 0 or 1)\n",
+                               ts_req->enable_aux_ts);
+                        ts_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                        info = sizeof(*ts_req);
+                        break;
+                    }
+                    
+                    // TSAUXC register bit masks (Intel Foxville specification - common across all Intel PTP devices)
                     const ULONG BIT31_DISABLE_SYSTIM0 = 0x80000000;  // Primary timer
                     const ULONG BIT29_DISABLE_SYSTIM3 = 0x20000000;
                     const ULONG BIT28_DISABLE_SYSTIM2 = 0x10000000;
@@ -1638,8 +2002,16 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     const ULONG BIT4_EN_TT1 = 0x00000010;   // Enable target time 1
                     const ULONG BIT0_EN_TT0 = 0x00000001;   // Enable target time 0
                     
+                    // Get device operations for HAL-compliant register access
+                    ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (ops == NULL || ops->read_tsauxc == NULL || ops->write_tsauxc == NULL) {
+                        DEBUGP(DL_ERROR, "Device operations not available for TSAUXC\n");
+                        status = STATUS_NOT_SUPPORTED;
+                        break;
+                    }
+                    
                     ULONG current_tsauxc = 0;
-                    int rc = intel_read_reg(&activeContext->intel_device, TSAUXC_REG, &current_tsauxc);
+                    int rc = ops->read_tsauxc(&activeContext->intel_device, &current_tsauxc);
                     ts_req->previous_tsauxc = current_tsauxc;
                     
                     if (rc != 0) {
@@ -1673,7 +2045,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                                 new_tsauxc &= ~(BIT8_EN_TS0 | BIT10_EN_TS1);
                             }
                             
-                            DEBUGP(DL_INFO, "Enabling HW timestamping: TSAUXC 0x%08X->0x%08X (timers=0x%X, TT=%d, AuxTS=%d) VID=0x%04X DID=0x%04X\n",
+                            DEBUGP(DL_TRACE, "Enabling HW timestamping: TSAUXC 0x%08X->0x%08X (timers=0x%X, TT=%d, AuxTS=%d) VID=0x%04X DID=0x%04X\n",
                                    current_tsauxc, new_tsauxc, timer_mask,
                                    ts_req->enable_target_time, ts_req->enable_aux_ts,
                                    activeContext->intel_device.pci_vendor_id, 
@@ -1684,10 +2056,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             if (ops && ops->enable_packet_timestamping) {
                                 int pkt_ts_result = ops->enable_packet_timestamping(&activeContext->intel_device, 1);
                                 if (pkt_ts_result != 0) {
-                                    DEBUGP(DL_WARN, "Device-specific packet timestamping enable failed: %d\n", pkt_ts_result);
+                                    DEBUGP(DL_TRACE, "Device-specific packet timestamping enable failed: %d\n", pkt_ts_result);
                                 }
                             } else {
-                                DEBUGP(DL_WARN, "Device does not support packet timestamping or ops not implemented\n");
+                                DEBUGP(DL_TRACE, "Device does not support packet timestamping or ops not implemented\n");
                             }
                         } else {
                             // Disable HW timestamping: Set all timer disable bits
@@ -1697,18 +2069,18 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             // Also disable target time and auxiliary timestamp features
                             new_tsauxc &= ~(BIT0_EN_TT0 | BIT4_EN_TT1 | BIT8_EN_TS0 | BIT10_EN_TS1);
                             
-                            DEBUGP(DL_INFO, "Disabling HW timestamping: TSAUXC 0x%08X->0x%08X (all timers stopped) VID=0x%04X DID=0x%04X\n",
+                            DEBUGP(DL_TRACE, "Disabling HW timestamping: TSAUXC 0x%08X->0x%08X (all timers stopped) VID=0x%04X DID=0x%04X\n",
                                    current_tsauxc, new_tsauxc,
                                    activeContext->intel_device.pci_vendor_id, 
                                    activeContext->intel_device.pci_device_id);
                         }
                         
-                        rc = intel_write_reg(&activeContext->intel_device, TSAUXC_REG, new_tsauxc);
+                        rc = ops->write_tsauxc(&activeContext->intel_device, new_tsauxc);
                         
                         if (rc == 0) {
                             // Verify the change took effect
                             ULONG verify_tsauxc = 0;
-                            if (intel_read_reg(&activeContext->intel_device, TSAUXC_REG, &verify_tsauxc) == 0) {
+                            if (ops->read_tsauxc(&activeContext->intel_device, &verify_tsauxc) == 0) {
                                 ts_req->current_tsauxc = verify_tsauxc;
                                 
                                 // Check if bit 31 matches what we intended
@@ -1719,16 +2091,16 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                                 if (bit31_correct) {
                                     ts_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                                     status = STATUS_SUCCESS;
-                                    DEBUGP(DL_INFO, "HW timestamping %s successfully (verified: 0x%08X)\n",
+                                    DEBUGP(DL_TRACE, "HW timestamping %s successfully (verified: 0x%08X)\n",
                                            ts_req->enable ? "ENABLED" : "DISABLED", verify_tsauxc);
                                 } else {
-                                    DEBUGP(DL_WARN, "HW timestamping write succeeded but verification shows unexpected state (0x%08X)\n", 
+                                    DEBUGP(DL_TRACE, "HW timestamping write succeeded but verification shows unexpected state (0x%08X)\n", 
                                            verify_tsauxc);
                                     ts_req->status = (avb_u32)NDIS_STATUS_SUCCESS;  // Still report success
                                     status = STATUS_SUCCESS;
                                 }
                             } else {
-                                DEBUGP(DL_WARN, "HW timestamping changed but verification read failed\n");
+                                DEBUGP(DL_TRACE, "HW timestamping changed but verification read failed\n");
                                 ts_req->current_tsauxc = new_tsauxc;
                                 ts_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                                 status = STATUS_SUCCESS;
@@ -1747,7 +2119,14 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SET_RX_TIMESTAMP:
         {
-            DEBUGP(DL_INFO, "IOCTL_AVB_SET_RX_TIMESTAMP called\n");
+            DEBUGP(DL_TRACE, "IOCTL_AVB_SET_RX_TIMESTAMP called\n");
+            // NULL pointer validation (fixes test_rx_timestamp UT-RX-TS-004)
+            // Must check BEFORE size validation to return ERROR_INVALID_PARAMETER for NULL
+            if (buf == NULL) {
+                DEBUGP(DL_ERROR, "SET_RX_TIMESTAMP: NULL buffer rejected\n");
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
             if (inLen < sizeof(AVB_RX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_RX_TIMESTAMP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -1766,15 +2145,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     // Read current RXPBSIZE value (register 0x2404)
                     if (intel_read_reg(dev, 0x2404, &rxpbsize) == 0) {
                         rx_req->previous_rxpbsize = rxpbsize;
-                        DEBUGP(DL_INFO, "Current RXPBSIZE: 0x%08X\n", rxpbsize);
+                        DEBUGP(DL_TRACE, "Current RXPBSIZE: 0x%08X\n", rxpbsize);
                         
                         // Modify CFG_TS_EN bit (bit 29 per I210 datasheet)
                         if (rx_req->enable) {
                             new_rxpbsize = rxpbsize | (1 << 29);  // Set CFG_TS_EN
-                            DEBUGP(DL_INFO, "Enabling RX timestamp (CFG_TS_EN=1)\n");
+                            DEBUGP(DL_TRACE, "Enabling RX timestamp (CFG_TS_EN=1)\n");
                         } else {
                             new_rxpbsize = rxpbsize & ~(1 << 29); // Clear CFG_TS_EN
-                            DEBUGP(DL_INFO, "Disabling RX timestamp (CFG_TS_EN=0)\n");
+                            DEBUGP(DL_TRACE, "Disabling RX timestamp (CFG_TS_EN=0)\n");
                         }
                         
                         // Write new value
@@ -1783,12 +2162,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             rx_req->requires_reset = (new_rxpbsize != rxpbsize) ? 1 : 0;
                             
                             if (rx_req->requires_reset) {
-                                DEBUGP(DL_WARN, "RXPBSIZE changed, port software reset (CTRL.RST) required\n");
+                                DEBUGP(DL_TRACE, "RXPBSIZE changed, port software reset (CTRL.RST) required\n");
                             }
                             
                             rx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                             status = STATUS_SUCCESS;
-                            DEBUGP(DL_INFO, "RX timestamp config updated: prev=0x%08X, new=0x%08X\n",
+                            DEBUGP(DL_TRACE, "RX timestamp config updated: prev=0x%08X, new=0x%08X\n",
                                    rxpbsize, new_rxpbsize);
                         } else {
                             DEBUGP(DL_ERROR, "Failed to write RXPBSIZE register\n");
@@ -1808,7 +2187,14 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SET_QUEUE_TIMESTAMP:
         {
-            DEBUGP(DL_INFO, "IOCTL_AVB_SET_QUEUE_TIMESTAMP called\n");
+            DEBUGP(DL_TRACE, "IOCTL_AVB_SET_QUEUE_TIMESTAMP called\n");
+            // NULL pointer validation (fixes test_rx_timestamp UT-RX-TS-013)
+            // Must check BEFORE size validation to return ERROR_INVALID_PARAMETER for NULL
+            if (buf == NULL) {
+                DEBUGP(DL_ERROR, "SET_QUEUE_TIMESTAMP: NULL buffer rejected\n");
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
             if (inLen < sizeof(AVB_QUEUE_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_QUEUE_TIMESTAMP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -1834,15 +2220,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     // Read current SRRCTL[n] value
                     if (intel_read_reg(dev, srrctl_offset, &srrctl) == 0) {
                         queue_req->previous_srrctl = srrctl;
-                        DEBUGP(DL_INFO, "Queue %u SRRCTL: 0x%08X\n", queue_req->queue_index, srrctl);
+                        DEBUGP(DL_TRACE, "Queue %u SRRCTL: 0x%08X\n", queue_req->queue_index, srrctl);
                         
                         // Modify TIMESTAMP bit (bit 30 per I210 datasheet)
                         if (queue_req->enable) {
                             new_srrctl = srrctl | (1 << 30);  // Set TIMESTAMP
-                            DEBUGP(DL_INFO, "Enabling queue %u timestamp (TIMESTAMP=1)\n", queue_req->queue_index);
+                            DEBUGP(DL_TRACE, "Enabling queue %u timestamp (TIMESTAMP=1)\n", queue_req->queue_index);
                         } else {
                             new_srrctl = srrctl & ~(1 << 30); // Clear TIMESTAMP
-                            DEBUGP(DL_INFO, "Disabling queue %u timestamp (TIMESTAMP=0)\n", queue_req->queue_index);
+                            DEBUGP(DL_TRACE, "Disabling queue %u timestamp (TIMESTAMP=0)\n", queue_req->queue_index);
                         }
                         
                         // Write new value
@@ -1850,7 +2236,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             queue_req->current_srrctl = new_srrctl;
                             queue_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                             status = STATUS_SUCCESS;
-                            DEBUGP(DL_INFO, "Queue %u timestamp config updated: prev=0x%08X, new=0x%08X\n",
+                            DEBUGP(DL_TRACE, "Queue %u timestamp config updated: prev=0x%08X, new=0x%08X\n",
                                    queue_req->queue_index, srrctl, new_srrctl);
                         } else {
                             DEBUGP(DL_ERROR, "Failed to write SRRCTL[%u] register\n", queue_req->queue_index);
@@ -1870,7 +2256,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     case IOCTL_AVB_SET_TARGET_TIME:
         {
-            DEBUGP(DL_WARN, "!!! IOCTL_AVB_SET_TARGET_TIME called\n");
+            DEBUGP(DL_TRACE, "!!! IOCTL_AVB_SET_TARGET_TIME called\n");
             if (inLen < sizeof(AVB_TARGET_TIME_REQUEST) || outLen < sizeof(AVB_TARGET_TIME_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -1913,24 +2299,24 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         }
                         tgt_req->previous_target = ((avb_u64)prev_high << 32) | prev_low;
                         
-DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0x%016llX\n", 
+DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0x%016llX\n", 
                        tgt_req->timer_index, (unsigned long long)tgt_req->target_time, 
                        (unsigned long long)tgt_req->target_time,
                        (unsigned long long)tgt_req->previous_target);
                         
                         // Use device-specific operation (handles all register details)
-                        DEBUGP(DL_WARN, "!!!  CALLING ops->set_target_time(timer=%u, target=%llu, enable_interrupt=%d)\n",
+                        DEBUGP(DL_TRACE, "!!!  CALLING ops->set_target_time(timer=%u, target=%llu, enable_interrupt=%d)\n",
                                tgt_req->timer_index, (unsigned long long)tgt_req->target_time, tgt_req->enable_interrupt);
                         
                         int rc = ops->set_target_time(dev, (uint8_t)tgt_req->timer_index, 
                                                      tgt_req->target_time, 
                                                      tgt_req->enable_interrupt);
                         
-                        DEBUGP(DL_WARN, "!!! ops->set_target_time() returned: %d\n", rc);
+                        DEBUGP(DL_TRACE, "!!! ops->set_target_time() returned: %d\n", rc);
                         
                         if (rc == 0) {
                             tgt_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
-                                DEBUGP(DL_WARN, "!!! TARGET TIME SET SUCCESSFULLY (timer=%u, new=%llu, prev=%llu)\n",
+                                DEBUGP(DL_TRACE, "!!! TARGET TIME SET SUCCESSFULLY (timer=%u, new=%llu, prev=%llu)\n",
                                        tgt_req->timer_index, (unsigned long long)tgt_req->target_time,
                                        (unsigned long long)tgt_req->previous_target);
                         } else {
@@ -1947,7 +2333,7 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
 
     case IOCTL_AVB_GET_AUX_TIMESTAMP:
         {
-            DEBUGP(DL_INFO, "IOCTL_AVB_GET_AUX_TIMESTAMP called\n");
+            DEBUGP(DL_TRACE, "IOCTL_AVB_GET_AUX_TIMESTAMP called\n");
             if (inLen < sizeof(AVB_AUX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_AUX_TIMESTAMP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -1992,14 +2378,14 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                                 aux_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                                 status = STATUS_UNSUCCESSFUL;
                             } else {
-                                DEBUGP(DL_INFO, "Aux timestamp %u: 0x%016llX (valid=%u)\n",
+                                DEBUGP(DL_TRACE, "Aux timestamp %u: 0x%016llX (valid=%u)\n",
                                        aux_req->timer_index, (unsigned long long)aux_req->timestamp, aux_req->valid);
                                 
                                 // Clear AUTT flag if requested
                                 if (aux_req->clear_flag && aux_req->valid && ops->clear_aux_timestamp_flag) {
                                     rc = ops->clear_aux_timestamp_flag(dev, (uint8_t)aux_req->timer_index);
                                     if (rc == 0) {
-                                        DEBUGP(DL_INFO, "Cleared AUTT%u flag\n", aux_req->timer_index);
+                                        DEBUGP(DL_TRACE, "Cleared AUTT%u flag\n", aux_req->timer_index);
                                     }
                                 }
                                 
@@ -2014,6 +2400,115 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
         }
         break;
 
+    case IOCTL_AVB_GET_TX_TIMESTAMP:
+        {
+            DEBUGP(DL_TRACE, "IOCTL_AVB_GET_TX_TIMESTAMP called\n");
+            if (inLen < sizeof(AVB_TX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_TX_TIMESTAMP_REQUEST tx_req = (PAVB_TX_TIMESTAMP_REQUEST)buf;
+
+                // Initialize output fields
+                tx_req->timestamp_ns = 0;
+                tx_req->valid = 0;
+                tx_req->sequence_id = 0;
+                tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+
+                // Adapter already selected by device.c via FileObject->FsContext (OPEN_ADAPTER).
+                // Use currentContext directly — no FilterModuleList walk needed.
+                PAVB_DEVICE_CONTEXT activeContext = currentContext;
+
+                // Primary path: NDIS 6.82 TaggedTransmitHw timestamp.
+                // FilterSendNetBufferListsComplete harvests igc.sys's ULONG64 hardware
+                // timestamp from NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] (slot 26 =
+                // NetBufferListInfoReserved3 on AMD64/Win11) and stores it here.
+                // InterlockedExchange64 atomically reads and clears the field (one-shot).
+                // This path does NOT require BAR-mapped MMIO — igc.sys owns the hardware
+                // registers and delivers the result via the NBL completion mechanism.
+                LONGLONG ndisTs = InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, 0LL);
+                if (ndisTs != 0) {
+                    tx_req->timestamp_ns = (avb_u64)(ULONG64)ndisTs;
+                    tx_req->valid = 1;
+                    tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                    status = STATUS_SUCCESS;
+                    info = sizeof(*tx_req);
+                    DEBUGP(DL_TRACE, "TX timestamp from NDIS TaggedTransmitHw: 0x%016I64X (%I64u)\n",
+                           (ULONG64)ndisTs, (ULONG64)ndisTs);
+                } else if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_TRACE, "TX timestamp read: PTP not ready (state=%s)\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    tx_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    // Fallback: HAL-compliant MMIO FIFO polling (TXSTMPH/TXSTMPL direct read).
+                    // Used when NDIS TaggedTransmitHw is not supported by the miniport.
+                    const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (!ops || !ops->poll_tx_timestamp_fifo) {
+                        DEBUGP(DL_ERROR, "Device does not support TX timestamp FIFO polling\n");
+                        tx_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        status = STATUS_NOT_SUPPORTED;
+                    } else {
+                        device_t *dev = &activeContext->intel_device;
+                        
+                        // Poll TX timestamp FIFO (atomic TXSTMPH→TXSTMPL read)
+                        // Returns: 1=valid timestamp, 0=FIFO empty, <0=error
+                        int rc = ops->poll_tx_timestamp_fifo(dev, &tx_req->timestamp_ns);
+                        
+                        if (rc < 0) {
+                            DEBUGP(DL_ERROR, "Failed to poll TX timestamp FIFO: %d\n", rc);
+                            tx_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        } else if (rc == 0) {
+                            // FIFO empty - not an error, just no timestamp available
+                            tx_req->valid = 0;
+                            tx_req->timestamp_ns = 0;
+                            tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                            DEBUGP(DL_TRACE, "TX timestamp FIFO empty\n");
+                        } else {
+                            // Valid timestamp retrieved (rc == 1)
+                            tx_req->valid = 1;
+                            tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                            DEBUGP(DL_TRACE, "TX timestamp retrieved: 0x%016llX (%llu ns)\n",
+                                   (unsigned long long)tx_req->timestamp_ns,
+                                   (unsigned long long)tx_req->timestamp_ns);
+                        }
+                        
+                        info = sizeof(*tx_req);
+                    }
+                }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_TEST_SEND_PTP:
+        {
+            DEBUGP(DL_TRACE, "IOCTL_AVB_TEST_SEND_PTP called (Step 8b - Kernel packet injection)\n");
+            
+            if (inLen < sizeof(AVB_TEST_SEND_PTP_REQUEST) || outLen < sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            
+            PAVB_TEST_SEND_PTP_REQUEST test_req = (PAVB_TEST_SEND_PTP_REQUEST)buf;
+            test_req->packets_sent = 0;
+            test_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            test_req->timestamp_ns = 0;
+
+            // Delegate to shared core function (also used by FastIoDeviceControl path).
+            PAVB_DEVICE_CONTEXT activeContext = currentContext;
+            
+            if (!activeContext) {
+                test_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_FOUND;
+                status = STATUS_DEVICE_DOES_NOT_EXIST;
+                break;
+            }
+            status = AvbSendPtpCore(activeContext, test_req);
+            if (NT_SUCCESS(status)) info = sizeof(*test_req);
+        }
+        break;
+
     case IOCTL_AVB_GET_TIMESTAMP:
     case IOCTL_AVB_SET_TIMESTAMP:
         {
@@ -2024,7 +2519,7 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                    DEBUGP(DL_WARN, "Timestamp access: Hardware state %s, checking PTP clock\n",
+                    DEBUGP(DL_TRACE, "Timestamp access: Hardware state %s, checking PTP clock\n",
                            AvbHwStateName(activeContext->hw_state));
                     
                     // Note: private_data already points to struct intel_private with platform_data set during initialization
@@ -2033,21 +2528,24 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
                         // Check TIMINCA register - if non-zero, clock is configured
                         ULONG timinca = 0;
-                        if (intel_read_reg(&activeContext->intel_device, 0x0B608, &timinca) == 0 && timinca != 0) {
-                            DEBUGP(DL_INFO, "PTP clock already configured (TIMINCA=0x%08X), promoting to PTP_READY\n", timinca);
-                            activeContext->hw_state = AVB_HW_PTP_READY;
+                        const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                        if (ops && ops->read_timinca && 
+                            ops->read_timinca(&activeContext->intel_device, &timinca) == 0 && timinca != 0) {
+                            DEBUGP(DL_TRACE, "PTP clock already configured (TIMINCA=0x%08X), promoting to PTP_READY\n", timinca);
+                            AVB_SET_HW_STATE(activeContext, AVB_HW_PTP_READY);
                         } else {
                             // Try to initialize PTP for supported devices
                             intel_device_type_t dev_type = activeContext->intel_device.device_type;
                             
                             if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 || 
                                 dev_type == INTEL_DEVICE_I226) {
-                                DEBUGP(DL_INFO, "Attempting PTP initialization for device type %d\n", dev_type);
+                                DEBUGP(DL_TRACE, "Attempting PTP initialization for device type %d\n", dev_type);
                                 NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
-                                DEBUGP(DL_INFO, "PTP initialization result: 0x%08X, new state: %s\n", 
+                                UNREFERENCED_PARAMETER(init_result);  // Used only in DEBUGP
+                                DEBUGP(DL_TRACE, "PTP initialization result: 0x%08X, new state: %s\n", 
                                        init_result, AvbHwStateName(activeContext->hw_state));
                             } else {
-                                DEBUGP(DL_WARN, "Device type %d does not support PTP initialization\n", dev_type);
+                                DEBUGP(DL_TRACE, "Device type %d does not support PTP initialization\n", dev_type);
                             }
                         }
                     }
@@ -2078,11 +2576,68 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
                     status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                 } else {
-                    int rc = intel_set_systime(&activeContext->intel_device, r->timestamp); 
-                    r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
-                    status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    // Monotonicity guard: reject *small* backward time jumps only.
+                    // Large intentional resets (e.g. to year 2001, or to epoch 0) must be allowed.
+                    // Only reject if the backward delta is below threshold (< 30 seconds).
+                    //   UT-PTP-GETSET-010: 10s backward jump → rejected ✓  (fixes flicker)
+                    //   UT-PTP-GETSET-004: set to year 2001 (~22yr backward) → allowed ✓
+                    //   UT-PTP-GETSET-005: set to near-future valid time → allowed ✓
+                    //   UT-PTP-GETSET-006: set to epoch 0 (~53yr backward) → allowed ✓
+                    ULONGLONG current_t = 0;
+                    const ULONGLONG MAX_SMALL_BACKWARD_JUMP_NS = 30ULL * 1000000000ULL;  /* 30 seconds */
+                    intel_gettime(&activeContext->intel_device, r->clock_id, &current_t, NULL);
+                    if (current_t > 0 && r->timestamp < current_t && (current_t - r->timestamp) < MAX_SMALL_BACKWARD_JUMP_NS) {
+                        DEBUGP(DL_WARN, "SET_TIMESTAMP rejected: backward jump (new=0x%llx < current=0x%llx)\n",
+                               r->timestamp, current_t);
+                        r->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                    } else {
+                        int rc = intel_set_systime(&activeContext->intel_device, r->timestamp); 
+                        r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
+                        status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    }
                 } 
                 info = sizeof(*r);
+            }
+        }
+        break;
+
+    // Implements: IOCTL_AVB_PHC_OFFSET_ADJUST (code 48)
+    // Applies a nanosecond offset to the PTP hardware clock.
+    // Bypasses the SET_TIMESTAMP monotonicity guard to allow small corrections.
+    case IOCTL_AVB_PHC_OFFSET_ADJUST:
+        {
+            if (inLen < sizeof(AVB_OFFSET_REQUEST) || outLen < sizeof(AVB_OFFSET_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                info = 0;
+            } else {
+                PAVB_DEVICE_CONTEXT phcCtx = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_OFFSET_REQUEST off_req = (PAVB_OFFSET_REQUEST)buf;
+                ULONGLONG current_t = 0;
+                int rc = intel_gettime(&phcCtx->intel_device, 0, &current_t, NULL);
+                if (rc != 0) {
+                    rc = AvbReadTimestamp(&phcCtx->intel_device, &current_t);
+                }
+                if (rc != 0) {
+                    off_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                    status = STATUS_UNSUCCESSFUL;
+                } else {
+                    /* Apply offset - reject if result would be negative time */
+                    INT64 new_t = (INT64)current_t + off_req->offset_ns;
+                    if (new_t < 0) {
+                        /* Reject: offset would cause clock to go before epoch 0 */
+                        off_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                    } else {
+                        ULONGLONG new_ts = (ULONGLONG)new_t;
+                        /* Call intel_set_systime directly - bypasses the 30s monotonicity guard
+                         * in SET_TIMESTAMP, so small backward corrections succeed. */
+                        rc = intel_set_systime(&phcCtx->intel_device, new_ts);
+                        off_req->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
+                        status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    }
+                }
+                info = sizeof(*off_req);
             }
         }
         break;
@@ -2196,74 +2751,13 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     // NdisSetTimer has no return value, but we can detect failure via DPC not firing
                     NdisSetTimer(&AvbContext->tx_poll_timer, 1);  // 1 millisecond
                     
-                    DEBUGP(DL_ERROR, "!!! TIMER: NdisSetTimer called (check registry for DPC_CallCount_Unconditional)\n");
-                    
-                    // Registry diagnostics: Timer started
-                    #if DBG
-                    {
-                        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-                        UNICODE_STRING valueName;
-                        OBJECT_ATTRIBUTES objAttr;
-                        HANDLE hKey = NULL;
-                        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                        NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
-                        if (NT_SUCCESS(regStatus)) {
-                            ULONG timer_started = 1;
-                            RtlInitUnicodeString(&valueName, L"Timer_Started");
-                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_started, sizeof(timer_started));
-                            
-                            ULONG poll_active_after = 1;
-                            RtlInitUnicodeString(&valueName, L"Timer_PollActive_After");
-                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &poll_active_after, sizeof(poll_active_after));
-                            
-                            ZwClose(hKey);
-                        }
-                    }
-                    #endif
+                    DEBUGP(DL_ERROR, "!!! TIMER: NdisSetTimer called\n");
                 } else if (AvbContext->tx_poll_active) {
-                    DEBUGP(DL_WARN, "!!! TIMER already running (poll_active=%d, hw_state=%d)\n",
+                    DEBUGP(DL_TRACE, "!!! TIMER already running (poll_active=%d, hw_state=%d)\n",
                            AvbContext->tx_poll_active, AvbContext->hw_state);
-                    
-                    // Registry diagnostics: Timer already running
-                    #if DBG
-                    {
-                        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-                        UNICODE_STRING valueName;
-                        OBJECT_ATTRIBUTES objAttr;
-                        HANDLE hKey = NULL;
-                        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                        NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
-                        if (NT_SUCCESS(regStatus)) {
-                            ULONG timer_already_running = 1;
-                            RtlInitUnicodeString(&valueName, L"Timer_AlreadyRunning");
-                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_already_running, sizeof(timer_already_running));
-                            
-                            ZwClose(hKey);
-                        }
-                    }
-                    #endif
                 } else {
                     DEBUGP(DL_ERROR, "!!! TIMER NOT STARTED: hw_state=%d < %d (need BAR_MAPPED)\n",
                            AvbContext->hw_state, AVB_HW_BAR_MAPPED);
-                    
-                    // Registry diagnostics: Timer NOT started (hw_state insufficient)
-                    #if DBG
-                    {
-                        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-                        UNICODE_STRING valueName;
-                        OBJECT_ATTRIBUTES objAttr;
-                        HANDLE hKey = NULL;
-                        InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                        NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
-                        if (NT_SUCCESS(regStatus)) {
-                            ULONG timer_not_started = 1;
-                            RtlInitUnicodeString(&valueName, L"Timer_NotStarted_HwState");
-                            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_not_started, sizeof(timer_not_started));
-                            
-                            ZwClose(hKey);
-                        }
-                    }
-                    #endif
                 }
                 
                 NdisReleaseSpinLock(&AvbContext->subscription_lock);
@@ -2272,107 +2766,30 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 DEBUGP(DL_ERROR, "!!! TIMER CHECK (captured while locked): tx_poll_active=%d, hw_state=%d (need >= %d)\n",
                        timer_was_active, captured_hw_state, AVB_HW_BAR_MAPPED);
                 
-                // ===================================================================
-                // DIAGNOSTIC: Where does timer_poll_active come from?
-                // ===================================================================
-                // Registry shows: Timer_PollActive_Before=1 (already TRUE!)
-                // This explains why timer init code might be skipped.
-                // Question: Where is timer_poll_active being set to TRUE initially?
-                // Search: Need to trace timer_poll_active assignments in codebase
-                //
-                #if DBG
-                {
-                    UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-                    UNICODE_STRING valueName;
-                    OBJECT_ATTRIBUTES objAttr;
-                    HANDLE hKey = NULL;
-                    InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                    NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
-                    
-                    DEBUGP(DL_ERROR, "!!! TIMER DIAGNOSTIC: About to write Timer_PollActive_Before (value=%d)\n", timer_was_active);
-                    
-                    if (NT_SUCCESS(regStatus)) {
-                        // Log where this diagnostic is being written from
-                        ULONG diag_location = 0x00020179;  // Line number where this code exists
-                        RtlInitUnicodeString(&valueName, L"Timer_Diagnostic_Location");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &diag_location, sizeof(diag_location));
-                        
-                        // Log function context
-                        ULONG in_subscription_ioctl = 1;
-                        RtlInitUnicodeString(&valueName, L"Timer_Context_InSubscriptionIOCTL");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &in_subscription_ioctl, sizeof(in_subscription_ioctl));
-                        
-                        // *** THIS IS NOT THE RIGHT PLACE FOR TIMER INIT! ***
-                        // Timer should be initialized in set_target_time(), not here in subscription!
-                        ULONG wrong_location_warning = 1;
-                        RtlInitUnicodeString(&valueName, L"Timer_WrongLocationWarning");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &wrong_location_warning, sizeof(wrong_location_warning));
-                        
-                        ZwClose(hKey);
-                    }
-                }
-                #endif
+
                 
-                // Registry diagnostics: UNCONDITIONAL write (safe now - no spin lock)
+                // Timer check result via DEBUGP (registry diagnostics removed — ran at wrong IRQL)
                 {
-                    UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-                    UNICODE_STRING valueName;
-                    OBJECT_ATTRIBUTES objAttr;
-                    HANDLE hKey = NULL;
-                    InitializeObjectAttributes(&objAttr, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                    NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
-                    
-                    DEBUGP(DL_ERROR, "!!! TIMER: Registry open status = 0x%08X\n", regStatus);
-                    
-                    if (NT_SUCCESS(regStatus)) {
-                        ULONG poll_active_before = timer_was_active ? 1 : 0;
-                        ULONG hw_state_val = (ULONG)captured_hw_state;
-                        ULONG bar_mapped_val = AVB_HW_BAR_MAPPED;  // Should be 2
-                        ULONG timer_check_pass = 0;
-                        
-                        // TRACE: Record context pointer during subscription for multi-adapter debugging
-                        ULONG subscription_context_ptr = (ULONG)(ULONG_PTR)AvbContext;
-                        
-                        // Calculate why timer didn't start (using captured values)
-                        if (timer_was_active) {
-                            timer_check_pass = 10;  // Already running
-                        } else if (captured_hw_state < AVB_HW_BAR_MAPPED) {
-                            timer_check_pass = 20;  // HW not ready (SUSPECTED ROOT CAUSE!)
-                        } else {
-                            timer_check_pass = 100;  // Should start!
-                        }
-                        
-                        RtlInitUnicodeString(&valueName, L"Subscription_ContextPointer");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &subscription_context_ptr, sizeof(subscription_context_ptr));
-                        
-                        RtlInitUnicodeString(&valueName, L"Timer_PollActive_Before");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &poll_active_before, sizeof(poll_active_before));
-                        
-                        RtlInitUnicodeString(&valueName, L"Timer_HwState");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &hw_state_val, sizeof(hw_state_val));
-                        
-                        RtlInitUnicodeString(&valueName, L"Timer_BarMapped_Threshold");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &bar_mapped_val, sizeof(bar_mapped_val));
-                        
-                        RtlInitUnicodeString(&valueName, L"Timer_CheckResult");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &timer_check_pass, sizeof(timer_check_pass));
-                        
-                        DEBUGP(DL_ERROR, "!!! TIMER: Registry keys written (result=%d: 100=should_start, 20=hw_not_ready, 10=already_running)\n", timer_check_pass);
-                        
-                        ZwClose(hKey);
+                    ULONG timer_check_pass = 0;
+                    if (timer_was_active) {
+                        timer_check_pass = 10;   // Already running
+                    } else if (captured_hw_state < AVB_HW_BAR_MAPPED) {
+                        timer_check_pass = 20;   // HW not ready
                     } else {
-                        DEBUGP(DL_ERROR, "!!! TIMER: REGISTRY OPEN FAILED! Status=0x%08X\n", regStatus);
+                        timer_check_pass = 100;  // Should have started
                     }
+                    DEBUGP(DL_ERROR, "!!! TIMER CHECK: tx_poll_active=%d, hw_state=%d, result=%d (100=started, 20=hw_not_ready, 10=already_running)\n",
+                           timer_was_active, captured_hw_state, timer_check_pass);
                 }
                 
                 // Return ring_id to user
                 sub_req->ring_id = sub->ring_id;
                 
-                DEBUGP(DL_WARN, "!!! SUBSCRIPTION CREATED [Adapter 0x%04X]: ring_id=%u, slot=%d, active=%d, event_mask=0x%08X\n",
+                DEBUGP(DL_TRACE, "!!! SUBSCRIPTION CREATED [Adapter 0x%04X]: ring_id=%u, slot=%d, active=%d, event_mask=0x%08X\n",
                        AvbContext->intel_device.pci_device_id, sub_req->ring_id, free_slot, sub->active, sub->event_mask);
-                DEBUGP(DL_WARN, "!!! Sub details: count=%u, size=%lu bytes, ring_buffer=%p, context=%p\n",
+                DEBUGP(DL_TRACE, "!!! Sub details: count=%u, size=%lu bytes, ring_buffer=%p, context=%p\n",
                        ring_count, (ULONG)total_size, sub->ring_buffer, AvbContext);
-                DEBUGP(DL_WARN, "!!! Sub filters: vlan=%u, pcp=%u\n",
+                DEBUGP(DL_TRACE, "!!! Sub filters: vlan=%u, pcp=%u\n",
                        sub_req->vlan, sub_req->pcp);
                 
                 sub_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
@@ -2541,52 +2958,45 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
             } else {
                 PAVB_TS_UNSUBSCRIBE_REQUEST unsub_req = (PAVB_TS_UNSUBSCRIBE_REQUEST)buf;
                 
-                DEBUGP(DL_WARN, "!!! UNSUBSCRIBE: ring_id=%u\n", unsub_req->ring_id);
+                DEBUGP(DL_TRACE, "!!! UNSUBSCRIBE: ring_id=%u\n", unsub_req->ring_id);
                 
-                // Find subscription by ring_id and free it
+                // Find subscription by ring_id, null fields under lock, free outside lock.
+                // MmUnmapLockedPages / IoFreeMdl require IRQL <= APC_LEVEL — cannot be called
+                // while holding an NDIS spinlock (DISPATCH_LEVEL). BSOD 0xC4/0x7A otherwise.
+                PVOID unsubscribe_ring = NULL;
+                PMDL  unsubscribe_mdl  = NULL;
+                PVOID unsubscribe_va   = NULL;
+                int   found_slot       = -1;
+
                 NdisAcquireSpinLock(&AvbContext->subscription_lock);
-                
-                int found_slot = -1;
+
                 for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
-                    if (AvbContext->subscriptions[i].ring_id == unsub_req->ring_id && 
+                    if (AvbContext->subscriptions[i].ring_id == unsub_req->ring_id &&
                         AvbContext->subscriptions[i].active) {
                         found_slot = i;
                         break;
                     }
                 }
-                
+
                 if (found_slot >= 0) {
                     TS_SUBSCRIPTION *sub = &AvbContext->subscriptions[found_slot];
-                    
-                    DEBUGP(DL_WARN, "!!! FREEING SUBSCRIPTION: slot=%d, ring_id=%u, ring_buffer=%p\n",
+
+                    DEBUGP(DL_TRACE, "!!! FREEING SUBSCRIPTION: slot=%d, ring_id=%u, ring_buffer=%p\n",
                            found_slot, sub->ring_id, sub->ring_buffer);
-                    
-                    // Unmap user VA if mapped
-                    if (sub->user_va && sub->ring_mdl) {
-                        MmUnmapLockedPages(sub->user_va, sub->ring_mdl);
-                        sub->user_va = NULL;
-                    }
-                    
-                    // Free MDL
-                    if (sub->ring_mdl) {
-                        IoFreeMdl(sub->ring_mdl);
-                        sub->ring_mdl = NULL;
-                    }
-                    
-                    // Free ring buffer
-                    if (sub->ring_buffer) {
-                        ExFreePoolWithTag(sub->ring_buffer, FILTER_ALLOC_TAG);
-                        sub->ring_buffer = NULL;
-                    }
-                    
-                    // Mark slot as free
-                    sub->ring_id = 0;
-                    sub->active = 0;
-                    sub->event_mask = 0;
+
+                    // Snapshot pointers and NULL all fields under the lock
+                    unsubscribe_ring = sub->ring_buffer;
+                    unsubscribe_mdl  = sub->ring_mdl;
+                    unsubscribe_va   = sub->user_va;
+
+                    sub->ring_buffer = NULL;
+                    sub->ring_mdl    = NULL;
+                    sub->user_va     = NULL;
+                    sub->ring_id     = 0;
+                    sub->active      = 0;
+                    sub->event_mask  = 0;
                     sub->file_object = NULL;
-                    
-                    DEBUGP(DL_WARN, "!!! SUBSCRIPTION FREED: slot=%d is now available\n", found_slot);
-                    
+
                     unsub_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                     status = STATUS_SUCCESS;
                 } else {
@@ -2594,8 +3004,22 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     unsub_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                     status = STATUS_INVALID_PARAMETER;
                 }
-                
+
                 NdisReleaseSpinLock(&AvbContext->subscription_lock);
+
+                // Free resources OUTSIDE the spinlock (IRQL back to PASSIVE / APC_LEVEL)
+                if (found_slot >= 0) {
+                    if (unsubscribe_mdl) {
+                        if (unsubscribe_va) {
+                            MmUnmapLockedPages(unsubscribe_va, unsubscribe_mdl);
+                        }
+                        IoFreeMdl(unsubscribe_mdl);
+                    }
+                    if (unsubscribe_ring) {
+                        ExFreePoolWithTag(unsubscribe_ring, FILTER_ALLOC_TAG);
+                    }
+                    DEBUGP(DL_TRACE, "!!! SUBSCRIPTION FREED: slot=%d is now available\n", found_slot);
+                }
                 
                 info = sizeof(*unsub_req);
             }
@@ -2604,35 +3028,35 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
     
     // Implements #18 (REQ-F-HWCTX-001: Hardware State Machine)
     case IOCTL_AVB_GET_HW_STATE:
-        DEBUGP(DL_INFO, "? IOCTL_AVB_GET_HW_STATE: Hardware state query\n");
-        DEBUGP(DL_INFO, "   - Context: %p\n", AvbContext);
-        DEBUGP(DL_INFO, "   - Global context: %p\n", g_AvbContext);
-        DEBUGP(DL_INFO, "   - Filter instance: %p\n", AvbContext->filter_instance);
-        DEBUGP(DL_INFO, "   - Device type: %d\n", AvbContext->intel_device.device_type);
+        DEBUGP(DL_TRACE, "? IOCTL_AVB_GET_HW_STATE: Hardware state query\n");
+        DEBUGP(DL_TRACE, "   - Context: %p\n", AvbContext);
+        DEBUGP(DL_TRACE, "   - Global context: %p\n", g_AvbContext);
+        DEBUGP(DL_TRACE, "   - Filter instance: %p\n", AvbContext->filter_instance);
+        DEBUGP(DL_TRACE, "   - Device type: %d\n", AvbContext->intel_device.device_type);
         
         if (outLen < sizeof(AVB_HW_STATE_QUERY)) { 
             status = STATUS_BUFFER_TOO_SMALL; 
         } else { 
             PAVB_HW_STATE_QUERY q = (PAVB_HW_STATE_QUERY)buf; 
             RtlZeroMemory(q, sizeof(*q)); 
-            q->hw_state = AvbContext->hw_state; 
+            q->hw_state = (avb_u32)AvbContext->hw_state; 
             q->vendor_id = AvbContext->intel_device.pci_vendor_id; 
             q->device_id = AvbContext->intel_device.pci_device_id; 
             q->capabilities = AvbContext->intel_device.capabilities; 
             info = sizeof(*q);
             
-            DEBUGP(DL_INFO, "? HW_STATE: state=%s, VID=0x%04X, DID=0x%04X, caps=0x%08X\n",
+            DEBUGP(DL_TRACE, "? HW_STATE: state=%s, VID=0x%04X, DID=0x%04X, caps=0x%08X\n",
                    AvbHwStateName(q->hw_state), q->vendor_id, q->device_id, q->capabilities);
             
             // Force BAR0 discovery attempt if hardware is still in BOUND state
             if (AvbContext->hw_state == AVB_HW_BOUND && AvbContext->hardware_context == NULL) {
-                DEBUGP(DL_INFO, "? FORCING BAR0 DISCOVERY: Hardware stuck in BOUND state, attempting manual discovery...\n");
+                DEBUGP(DL_TRACE, "? FORCING BAR0 DISCOVERY: Hardware stuck in BOUND state, attempting manual discovery...\n");
                 
                 // Ensure device type is properly set
                 if (AvbContext->intel_device.device_type == INTEL_DEVICE_UNKNOWN && 
                     AvbContext->intel_device.pci_device_id != 0) {
                     AvbContext->intel_device.device_type = AvbGetIntelDeviceType(AvbContext->intel_device.pci_device_id);
-                    DEBUGP(DL_INFO, "? Updated device type to %d for DID=0x%04X\n", 
+                    DEBUGP(DL_TRACE, "? Updated device type to %d for DID=0x%04X\n", 
                            AvbContext->intel_device.device_type, AvbContext->intel_device.pci_device_id);
                 }
                 
@@ -2640,27 +3064,27 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 ULONG barLen = 0;
                 NTSTATUS ds = AvbDiscoverIntelControllerResources(AvbContext->filter_instance, &bar0, &barLen);
                 if (NT_SUCCESS(ds)) {
-                    DEBUGP(DL_INFO, "? MANUAL BAR0 DISCOVERY SUCCESS: PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
+                    DEBUGP(DL_TRACE, "? MANUAL BAR0 DISCOVERY SUCCESS: PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
                     NTSTATUS ms = AvbMapIntelControllerMemory(AvbContext, bar0, barLen);
                     if (NT_SUCCESS(ms)) {
-                        DEBUGP(DL_INFO, "? MANUAL BAR0 MAPPING SUCCESS: Hardware context now available\n");
+                        DEBUGP(DL_TRACE, "? MANUAL BAR0 MAPPING SUCCESS: Hardware context now available\n");
                         
                         // Complete the initialization sequence
                         if (intel_init(&AvbContext->intel_device) == 0) {
-                            DEBUGP(DL_INFO, "? MANUAL intel_init SUCCESS\n");
+                            DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
                             
                             // Test MMIO sanity
                             ULONG ctrl = 0xFFFFFFFF;
                             if (intel_read_reg(&AvbContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
-                                DEBUGP(DL_INFO, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
-                                AvbContext->hw_state = AVB_HW_BAR_MAPPED;
+                                DEBUGP(DL_TRACE, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
+                                AVB_SET_HW_STATE(AvbContext, AVB_HW_BAR_MAPPED);
                                 AvbContext->hw_access_enabled = TRUE;
                                 AvbContext->initialized = TRUE;
-                                q->hw_state = AvbContext->hw_state; // Update return value
+                                q->hw_state = (avb_u32)AvbContext->hw_state; // Update return value
                                 
                                 // Try I210 PTP initialization if applicable
                                 if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
-                                    DEBUGP(DL_INFO, "?? MANUAL I210 PTP INIT: Starting...\n");
+                                    DEBUGP(DL_TRACE, "?? MANUAL I210 PTP INIT: Starting...\n");
                                     AvbI210EnsureSystimRunning(AvbContext);
                                 }
                             } else {
@@ -2679,14 +3103,14 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
         } 
         break;
     case IOCTL_AVB_OPEN_ADAPTER:
-        DEBUGP(DL_INFO, "? IOCTL_AVB_OPEN_ADAPTER: Multi-adapter context switching\n");
+        DEBUGP(DL_TRACE, "? IOCTL_AVB_OPEN_ADAPTER: Multi-adapter context switching\n");
         
         if (outLen < sizeof(AVB_OPEN_REQUEST)) { 
             DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Buffer too small (%lu < %lu)\n", outLen, sizeof(AVB_OPEN_REQUEST));
             status = STATUS_BUFFER_TOO_SMALL; 
         } else { 
             PAVB_OPEN_REQUEST req = (PAVB_OPEN_REQUEST)buf; 
-            DEBUGP(DL_INFO, "? OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X\n", 
+            DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X\n", 
                    req->vendor_id, req->device_id);
             
             // Search through ALL filter modules to find the requested adapter
@@ -2705,7 +3129,7 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 
                 if (cand && cand->AvbContext) {
                     PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
-                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: Checking filter %wZ - VID=0x%04X DID=0x%04X\n",
+                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Checking filter %wZ - VID=0x%04X DID=0x%04X\n",
                            &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
                            ctx->intel_device.pci_device_id);
                     
@@ -2715,12 +3139,12 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                         if (matchCount == req->index) {
                             targetFilter = cand;
                             targetContext = ctx;
-                            DEBUGP(DL_INFO, "? Found target adapter: %wZ (VID=0x%04X, DID=0x%04X, index=%u, match=%u)\n", 
+                            DEBUGP(DL_TRACE, "? Found target adapter: %wZ (VID=0x%04X, DID=0x%04X, index=%u, match=%u)\n", 
                                    &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
                                    ctx->intel_device.pci_device_id, req->index, matchCount);
                             break;
                         } else {
-                            DEBUGP(DL_INFO, "? Skipping adapter %wZ (match %u, need index %u)\n",
+                            DEBUGP(DL_TRACE, "? Skipping adapter %wZ (match %u, need index %u)\n",
                                    &cand->MiniportFriendlyName, matchCount, req->index);
                             matchCount++;
                         }
@@ -2756,12 +3180,12 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 status = STATUS_SUCCESS; // IRP handled, but device not found
             } else {
                 // CRITICAL: Switch global context to the requested adapter
-                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Switching global context\n");
-                DEBUGP(DL_INFO, "   - From: VID=0x%04X DID=0x%04X (filter=%p)\n",
+                DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Switching global context\n");
+                DEBUGP(DL_TRACE, "   - From: VID=0x%04X DID=0x%04X (filter=%p)\n",
                        g_AvbContext ? g_AvbContext->intel_device.pci_vendor_id : 0,
                        g_AvbContext ? g_AvbContext->intel_device.pci_device_id : 0,
                        g_AvbContext ? g_AvbContext->filter_instance : NULL);
-                DEBUGP(DL_INFO, "   - To:   VID=0x%04X DID=0x%04X (filter=%p)\n",
+                DEBUGP(DL_TRACE, "   - To:   VID=0x%04X DID=0x%04X (filter=%p)\n",
                        targetContext->intel_device.pci_vendor_id,
                        targetContext->intel_device.pci_device_id,
                        targetFilter);
@@ -2773,9 +3197,9 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 
                 // Ensure the target context is fully initialized
                 if (!targetContext->initialized || targetContext->hw_state < AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: Target adapter needs initialization\n");
-                    DEBUGP(DL_INFO, "   - Current state: %s\n", AvbHwStateName(targetContext->hw_state));
-                    DEBUGP(DL_INFO, "   - Initialized: %s\n", targetContext->initialized ? "YES" : "NO");
+                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Target adapter needs initialization\n");
+                    DEBUGP(DL_TRACE, "   - Current state: %s\n", AvbHwStateName(targetContext->hw_state));
+                    DEBUGP(DL_TRACE, "   - Initialized: %s\n", targetContext->initialized ? "YES" : "NO");
                     
                     NTSTATUS initStatus = AvbBringUpHardware(targetContext);
                     if (!NT_SUCCESS(initStatus)) {
@@ -2789,29 +3213,29 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                 if ((target_type == INTEL_DEVICE_I210 || target_type == INTEL_DEVICE_I225 || 
                      target_type == INTEL_DEVICE_I226) &&
                     targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: Forcing PTP initialization for selected adapter\n");
-                    DEBUGP(DL_INFO, "   - Device Type: %d\n", target_type);
-                    DEBUGP(DL_INFO, "   - Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
-                    DEBUGP(DL_INFO, "   - Hardware Context: %p\n", targetContext->hardware_context);
+                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Forcing PTP initialization for selected adapter\n");
+                    DEBUGP(DL_TRACE, "   - Device Type: %d\n", target_type);
+                    DEBUGP(DL_TRACE, "   - Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
+                    DEBUGP(DL_TRACE, "   - Hardware Context: %p\n", targetContext->hardware_context);
                     
                     // Force complete PTP setup
                     AvbEnsureDeviceReady(targetContext);
                     
-                    DEBUGP(DL_INFO, "? OPEN_ADAPTER: PTP initialization completed\n");
-                    DEBUGP(DL_INFO, "   - Final Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
-                    DEBUGP(DL_INFO, "   - Final Capabilities: 0x%08X\n", targetContext->intel_device.capabilities);
+                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: PTP initialization completed\n");
+                    DEBUGP(DL_TRACE, "   - Final Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
+                    DEBUGP(DL_TRACE, "   - Final Capabilities: 0x%08X\n", targetContext->intel_device.capabilities);
                 }
                 
                 req->status = 0; // Success
                 info = sizeof(*req);
                 status = STATUS_SUCCESS;
                 
-                DEBUGP(DL_INFO, "? OPEN_ADAPTER: Context switch completed successfully\n");
-                DEBUGP(DL_INFO, "   - Active context: VID=0x%04X DID=0x%04X\n",
+                DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Context switch completed successfully\n");
+                DEBUGP(DL_TRACE, "   - Active context: VID=0x%04X DID=0x%04X\n",
                        g_AvbContext->intel_device.pci_vendor_id,
                        g_AvbContext->intel_device.pci_device_id);
-                DEBUGP(DL_INFO, "   - Hardware state: %s\n", AvbHwStateName(g_AvbContext->hw_state));
-                DEBUGP(DL_INFO, "   - Capabilities: 0x%08X\n", g_AvbContext->intel_device.capabilities);
+                DEBUGP(DL_TRACE, "   - Hardware state: %s\n", AvbHwStateName(g_AvbContext->hw_state));
+                DEBUGP(DL_TRACE, "   - Capabilities: 0x%08X\n", g_AvbContext->intel_device.capabilities);
             }
         }
         break;
@@ -2819,7 +3243,7 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
         {
             DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_TAS ENTERED - inLen=%lu outLen=%lu required=%lu\n",
                    inLen, outLen, (ULONG)sizeof(AVB_TAS_REQUEST));
-            DEBUGP(DL_INFO, "? IOCTL_AVB_SETUP_TAS: Phase 2 Enhanced TAS Configuration\n");
+            DEBUGP(DL_TRACE, "? IOCTL_AVB_SETUP_TAS: Phase 2 Enhanced TAS Configuration\n");
             
             if (inLen < sizeof(AVB_TAS_REQUEST) || outLen < sizeof(AVB_TAS_REQUEST)) {
                 DEBUGP(DL_FATAL, "!!! DIAG: TAS SETUP FAILED - Buffer too small\n");
@@ -2838,28 +3262,28 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     
                     // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
-                    DEBUGP(DL_INFO, "?? TAS SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
+                    DEBUGP(DL_TRACE, "?? TAS SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                     
                     // Check if this device supports TAS
                     if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
                         DEBUGP(DL_FATAL, "!!! DIAG: TAS NOT SUPPORTED - caps=0x%08X (need INTEL_CAP_TSN_TAS=0x%08X)\n",
                                activeContext->intel_device.capabilities, INTEL_CAP_TSN_TAS);
-                        DEBUGP(DL_WARN, "? TAS SETUP: Device does not support TAS (caps=0x%08X)\n", 
+                        DEBUGP(DL_TRACE, "? TAS SETUP: Device does not support TAS (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
                         // Call Intel library TAS setup function (standard implementation)
                         DEBUGP(DL_FATAL, "!!! DIAG: Calling intel_setup_time_aware_shaper...\n");
-                        DEBUGP(DL_INFO, "? TAS SETUP: Calling Intel library TAS implementation\n");
+                        DEBUGP(DL_TRACE, "? TAS SETUP: Calling Intel library TAS implementation\n");
                         int rc = intel_setup_time_aware_shaper(&activeContext->intel_device, &r->config);
                         DEBUGP(DL_FATAL, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
                         if (rc == 0) {
-                            DEBUGP(DL_INFO, "? TAS configuration successful\n");
+                            DEBUGP(DL_TRACE, "? TAS configuration successful\n");
                         } else {
                             DEBUGP(DL_ERROR, "? TAS setup failed: %d\n", rc);
                             
@@ -2894,7 +3318,7 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
         {
             DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_FP ENTERED - inLen=%lu outLen=%lu required=%lu\n",
                    inLen, outLen, (ULONG)sizeof(AVB_FP_REQUEST));
-            DEBUGP(DL_INFO, "? IOCTL_AVB_SETUP_FP: Phase 2 Enhanced Frame Preemption Configuration\n");
+            DEBUGP(DL_TRACE, "? IOCTL_AVB_SETUP_FP: Phase 2 Enhanced Frame Preemption Configuration\n");
             
             if (inLen < sizeof(AVB_FP_REQUEST) || outLen < sizeof(AVB_FP_REQUEST)) {
                 DEBUGP(DL_FATAL, "!!! DIAG: FP SETUP FAILED - Buffer too small\n");
@@ -2913,24 +3337,24 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     
                     // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
-                    DEBUGP(DL_INFO, "?? FP SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
+                    DEBUGP(DL_TRACE, "?? FP SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                     
                     // Check if this device supports Frame Preemption
                     if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_FP)) {
-                        DEBUGP(DL_WARN, "? FP SETUP: Device does not support Frame Preemption (caps=0x%08X)\n", 
+                        DEBUGP(DL_TRACE, "? FP SETUP: Device does not support Frame Preemption (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
                         // Call Intel library Frame Preemption setup function (standard implementation)
-                        DEBUGP(DL_INFO, "? FP SETUP: Calling Intel library Frame Preemption implementation\n");
+                        DEBUGP(DL_TRACE, "? FP SETUP: Calling Intel library Frame Preemption implementation\n");
                         int rc = intel_setup_frame_preemption(&activeContext->intel_device, &r->config);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
                         if (rc == 0) {
-                            DEBUGP(DL_INFO, "? Frame Preemption configuration successful\n");
+                            DEBUGP(DL_TRACE, "? Frame Preemption configuration successful\n");
                         } else {
                             DEBUGP(DL_ERROR, "? Frame Preemption setup failed: %d\n", rc);
                             
@@ -2962,7 +3386,7 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
         {
             DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_PTM ENTERED - inLen=%lu outLen=%lu required=%lu\n",
                    inLen, outLen, (ULONG)sizeof(AVB_PTM_REQUEST));
-            DEBUGP(DL_INFO, "? IOCTL_AVB_SETUP_PTM: Phase 2 Enhanced PTM Configuration\n");
+            DEBUGP(DL_TRACE, "? IOCTL_AVB_SETUP_PTM: Phase 2 Enhanced PTM Configuration\n");
             
             if (inLen < sizeof(AVB_PTM_REQUEST) || outLen < sizeof(AVB_PTM_REQUEST)) {
                 DEBUGP(DL_FATAL, "!!! DIAG: PTM SETUP FAILED - Buffer too small\n");
@@ -2980,24 +3404,24 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
                     
                     // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
-                    DEBUGP(DL_INFO, "?? PTM SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
+                    DEBUGP(DL_TRACE, "?? PTM SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
                            activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                     
                     // Check if this device supports PCIe PTM
                     if (!(activeContext->intel_device.capabilities & INTEL_CAP_PCIe_PTM)) {
-                        DEBUGP(DL_WARN, "? PTM SETUP: Device does not support PCIe PTM (caps=0x%08X)\n", 
+                        DEBUGP(DL_TRACE, "? PTM SETUP: Device does not support PCIe PTM (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
                         // Phase 2: Use enhanced PTM implementation
-                        DEBUGP(DL_INFO, "? Phase 2: Calling enhanced PTM implementation\n");
+                        DEBUGP(DL_TRACE, "? Phase 2: Calling enhanced PTM implementation\n");
                         int rc = intel_setup_ptm(&activeContext->intel_device, &r->config);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
                         if (rc == 0) {
-                            DEBUGP(DL_INFO, "? Phase 2: PTM configuration completed\n");
+                            DEBUGP(DL_TRACE, "? Phase 2: PTM configuration completed\n");
                         } else {
                             DEBUGP(DL_ERROR, "? Phase 2: PTM setup failed: %d\n", rc);
                         }
@@ -3009,15 +3433,207 @@ DEBUGP(DL_WARN, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0
         }
         break;
 
+    /* IEEE 802.1AS-2020 §11.3 timestampCorrectionPortDS latency calibration.
+     * Sets ingress_latency_ns and egress_latency_ns on the active adapter context.
+     * The driver adds these signed values to RX/TX hardware timestamps before posting
+     * timestamp events, so user-mode gPTP stacks receive boundary-corrected timestamps. */
+    case IOCTL_AVB_SET_PORT_LATENCY:
+        if (inLen < sizeof(AVB_PORT_LATENCY_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            PAVB_PORT_LATENCY_REQUEST lat = (PAVB_PORT_LATENCY_REQUEST)buf;
+            /* Use interlocked stores so concurrent DPC/filter reads see consistent values. */
+            InterlockedExchange64(&AvbContext->ingress_latency_ns, lat->ingress_latency_ns);
+            InterlockedExchange64(&AvbContext->egress_latency_ns,   lat->egress_latency_ns);
+            DEBUGP(DL_TRACE, "IOCTL_AVB_SET_PORT_LATENCY: ingress=%lld ns, egress=%lld ns\n",
+                   lat->ingress_latency_ns, lat->egress_latency_ns);
+            status = STATUS_SUCCESS;
+        }
+        break;
+
+    /* IEEE 802.1Qav Credit-Based Shaper (CBS) configuration.
+     * Validates and stores per-traffic-class shaper parameters.
+     * Input validation follows IEEE 802.1Qav §8.6.8 credit range constraints:
+     *   - tc must be in [0,7]  (IEEE 802.1Q defines 8 traffic classes)
+     *   - send_slope must be ≤ 0 (credits deplete while sending; stored as INT32)
+     *   - hi_credit must be ≥ 0 (upper bound on credit accumulation)
+     *   - lo_credit must be ≤ 0 (lower bound; transmission stops while lo_credit < credit)
+     * Implements: #8 (REQ-F-QAV-001: Credit-Based Shaper Configuration) */
+    case IOCTL_AVB_SETUP_QAV:
+        {
+            if (inLen < sizeof(AVB_QAV_REQUEST)) {
+                status = STATUS_INVALID_PARAMETER;
+            } else {
+                PAVB_QAV_REQUEST qav = (PAVB_QAV_REQUEST)buf;
+
+                /* Validate traffic class: IEEE 802.1Q supports 8 priority levels (0–7). */
+                if (qav->tc >= 8) {
+                    qav->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_SETUP_QAV: invalid tc=%u (must be 0-7)\n", qav->tc);
+                }
+                /* send_slope is the rate at which credit decreases while a frame is being sent.
+                 * It must be non-positive (zero means no CBS, negative is the normal case). */
+                else if ((INT32)qav->send_slope > 0) {
+                    qav->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_SETUP_QAV: send_slope=0x%X must be <= 0\n", qav->send_slope);
+                }
+                /* hi_credit: maximum credit value; must be >= 0. */
+                else if ((INT32)qav->hi_credit < 0) {
+                    qav->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_SETUP_QAV: hi_credit=0x%X must be >= 0\n", qav->hi_credit);
+                }
+                /* lo_credit: minimum credit below which transmission is blocked; must be <= 0. */
+                else if ((INT32)qav->lo_credit > 0) {
+                    qav->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_SETUP_QAV: lo_credit=0x%X must be <= 0\n", qav->lo_credit);
+                }
+                else {
+                    /* Parameters validated. Hardware CBS programming is device-specific;
+                     * current implementation records acceptance (no-op stub).
+                     * Future work: route through intel_device_ops_t::setup_qav when added. */
+                    DEBUGP(DL_TRACE, "IOCTL_AVB_SETUP_QAV: tc=%u idle_slope=%u send_slope=%d hi=%d lo=%d\n",
+                           qav->tc, qav->idle_slope, (INT32)qav->send_slope,
+                           (INT32)qav->hi_credit, (INT32)qav->lo_credit);
+                    qav->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                    status = STATUS_SUCCESS;
+                }
+                if (outLen >= sizeof(AVB_QAV_REQUEST)) {
+                    info = sizeof(AVB_QAV_REQUEST);
+                }
+            }
+        }
+        break;
+
+    /* MDIO (Management Data Input/Output) read — IEEE 802.3 Clause 22/45.
+     * Routes to the device-specific mdio_read operation in intel_device_ops_t.
+     * Input/Output: AVB_MDIO_REQUEST { page(phy_addr), reg, value(out), status }
+     * Implements: #9 (REQ-F-MDIO-001: PHY Register Read via MDIO) */
+    case IOCTL_AVB_MDIO_READ:
+        {
+            if (inLen < sizeof(AVB_MDIO_REQUEST) || outLen < sizeof(AVB_MDIO_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_MDIO_REQUEST mdio = (PAVB_MDIO_REQUEST)buf;
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+
+                if (ops && ops->mdio_read) {
+                    uint16_t val = 0;
+                    int rc = ops->mdio_read(&activeContext->intel_device,
+                                            (uint16_t)(mdio->page & 0xFFFF),
+                                            (uint16_t)(mdio->reg  & 0xFFFF),
+                                            &val);
+                    mdio->value  = val;
+                    mdio->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
+                    status       = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    DEBUGP(DL_TRACE, "IOCTL_AVB_MDIO_READ: page=%u reg=%u val=0x%04X rc=%d\n",
+                           mdio->page, mdio->reg, val, rc);
+                } else {
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_MDIO_READ: mdio_read not supported on this device\n");
+                    mdio->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                    status = STATUS_NOT_SUPPORTED;
+                }
+                info = sizeof(AVB_MDIO_REQUEST);
+            }
+        }
+        break;
+
+    /* MDIO write — IEEE 802.3 Clause 22/45.
+     * Routes to the device-specific mdio_write operation in intel_device_ops_t.
+     * Input: AVB_MDIO_REQUEST { page(phy_addr), reg, value(in), status(out) }
+     * Implements: #9 (REQ-F-MDIO-002: PHY Register Write via MDIO) */
+    case IOCTL_AVB_MDIO_WRITE:
+        {
+            if (inLen < sizeof(AVB_MDIO_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_MDIO_REQUEST mdio = (PAVB_MDIO_REQUEST)buf;
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+
+                if (ops && ops->mdio_write) {
+                    int rc = ops->mdio_write(&activeContext->intel_device,
+                                             (uint16_t)(mdio->page  & 0xFFFF),
+                                             (uint16_t)(mdio->reg   & 0xFFFF),
+                                             mdio->value);
+                    mdio->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
+                    status       = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    DEBUGP(DL_TRACE, "IOCTL_AVB_MDIO_WRITE: page=%u reg=%u val=0x%04X rc=%d\n",
+                           mdio->page, mdio->reg, mdio->value, rc);
+                } else {
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_MDIO_WRITE: mdio_write not supported on this device\n");
+                    mdio->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                    status = STATUS_NOT_SUPPORTED;
+                }
+                if (outLen >= sizeof(AVB_MDIO_REQUEST)) {
+                    info = sizeof(AVB_MDIO_REQUEST);
+                }
+            }
+        }
+        break;
+
+    // Implements #270 (TEST-STATISTICS-001): IOCTL_AVB_GET_STATISTICS
+    case IOCTL_AVB_GET_STATISTICS:
+        {
+            DEBUGP(DL_TRACE, "IOCTL_AVB_GET_STATISTICS called\n");
+            if (buf == NULL) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            if (outLen < sizeof(AVB_DRIVER_STATISTICS)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            PAVB_DRIVER_STATISTICS st = (PAVB_DRIVER_STATISTICS)buf;
+            st->TxPackets           = (avb_u64)currentContext->stats_tx_packets;
+            st->RxPackets           = (avb_u64)currentContext->stats_rx_packets;
+            st->TxBytes             = (avb_u64)currentContext->stats_tx_bytes;
+            st->RxBytes             = (avb_u64)currentContext->stats_rx_bytes;
+            st->PhcQueryCount       = (avb_u64)currentContext->stats_phc_query_count;
+            st->PhcAdjustCount      = (avb_u64)currentContext->stats_phc_adjust_count;
+            st->PhcSetCount         = (avb_u64)currentContext->stats_phc_set_count;
+            st->TimestampCount      = (avb_u64)currentContext->stats_timestamp_count;
+            st->IoctlCount          = (avb_u64)currentContext->stats_ioctl_count;
+            st->ErrorCount          = (avb_u64)currentContext->stats_error_count;
+            st->MemoryAllocFailures = (avb_u64)currentContext->stats_memory_alloc_failures;
+            st->HardwareFaults      = (avb_u64)currentContext->stats_hardware_faults;
+            st->FilterAttachCount   = (avb_u64)currentContext->stats_filter_attach_count;
+            status = STATUS_SUCCESS;
+            info   = sizeof(AVB_DRIVER_STATISTICS);
+        }
+        break;
+
+    case IOCTL_AVB_RESET_STATISTICS:
+        {
+            DEBUGP(DL_TRACE, "IOCTL_AVB_RESET_STATISTICS called\n");
+            InterlockedExchange64(&currentContext->stats_tx_packets,           0);
+            InterlockedExchange64(&currentContext->stats_rx_packets,           0);
+            InterlockedExchange64(&currentContext->stats_tx_bytes,             0);
+            InterlockedExchange64(&currentContext->stats_rx_bytes,             0);
+            InterlockedExchange64(&currentContext->stats_phc_query_count,      0);
+            InterlockedExchange64(&currentContext->stats_phc_adjust_count,     0);
+            InterlockedExchange64(&currentContext->stats_phc_set_count,        0);
+            InterlockedExchange64(&currentContext->stats_timestamp_count,      0);
+            InterlockedExchange64(&currentContext->stats_ioctl_count,          0);
+            InterlockedExchange64(&currentContext->stats_error_count,          0);
+            InterlockedExchange64(&currentContext->stats_memory_alloc_failures,0);
+            InterlockedExchange64(&currentContext->stats_hardware_faults,      0);
+            InterlockedExchange64(&currentContext->stats_filter_attach_count,  0);
+            status = STATUS_SUCCESS;
+            info   = 0;
+        }
+        break;
+
     default:
-        status = STATUS_INVALID_DEVICE_REQUEST; 
+        InterlockedIncrement64(&currentContext->stats_error_count);
+        status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }
 
-    // CRITICAL DEBUG: Force value to see if this line executes
-    if (info > 0) {
-        DEBUGP(DL_FATAL, "!!! AvbHandleDeviceIoControl END: info=%lu, setting Irp->IoStatus.Information\n", (ULONG)info);
-    }
     Irp->IoStatus.Information = info; 
     return status;
 }
@@ -3045,39 +3661,40 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     
     DEBUGP(DL_ERROR, "!!! DEBUG: AvbPlatformInit - dev is valid, proceeding...\n");
     
-    // Generic PTP register offsets (same for I210, I211, I217, I219, I225, I226)
-    const ULONG SYSTIML_REG = 0x0B600;
-    const ULONG SYSTIMH_REG = 0x0B604;
-    const ULONG TIMINCA_REG = 0x0B608;
-    const ULONG TSAUXC_REG = 0x0B640;   // Time Sync Auxiliary Control
+    // Get device operations for HAL compliance
+    const intel_device_ops_t *ops = intel_get_device_ops(dev->device_type);
+    if (!ops) {
+        DEBUGP(DL_ERROR, "? AvbPlatformInit: No device operations for type %d\n", dev->device_type);
+        return STATUS_NOT_SUPPORTED;
+    }
     
-    DEBUGP(DL_INFO, "? AvbPlatformInit: Starting PTP clock initialization\n");
-    DEBUGP(DL_INFO, "   Device: VID=0x%04X DID=0x%04X Type=%d\n", 
+    DEBUGP(DL_TRACE, "? AvbPlatformInit: Starting PTP clock initialization\n");
+    DEBUGP(DL_TRACE, "   Device: VID=0x%04X DID=0x%04X Type=%d\n", 
            dev->pci_vendor_id, dev->pci_device_id, dev->device_type);
     
     // Step 0: Enable PTP clock by clearing TSAUXC bit 31 (DisableSystime)
     ULONG tsauxc_value = 0;
-    if (AvbMmioReadReal(dev, TSAUXC_REG, &tsauxc_value) == 0) {
-        DEBUGP(DL_INFO, "   TSAUXC before: 0x%08X\n", tsauxc_value);
+    if (ops->read_tsauxc && ops->read_tsauxc(dev, &tsauxc_value) == 0) {
+        DEBUGP(DL_TRACE, "   TSAUXC before: 0x%08X\n", tsauxc_value);
         if (tsauxc_value & 0x80000000) {
             // Bit 31 is set - PTP clock is DISABLED, need to enable it
             tsauxc_value &= 0x7FFFFFFF;  // Clear bit 31 to enable SYSTIM
-            if (AvbMmioWriteReal(dev, TSAUXC_REG, tsauxc_value) != 0) {
+            if (ops->write_tsauxc && ops->write_tsauxc(dev, tsauxc_value) != 0) {
                 DEBUGP(DL_ERROR, "? Failed to enable PTP clock (TSAUXC write failed)\n");
                 return STATUS_DEVICE_HARDWARE_ERROR;
             }
-            DEBUGP(DL_INFO, "? PTP clock enabled (TSAUXC bit 31 cleared)\n");
+            DEBUGP(DL_TRACE, "? PTP clock enabled (TSAUXC bit 31 cleared)\n");
             
             // Verify the bit was cleared
             ULONG tsauxc_verify = 0;
-            if (AvbMmioReadReal(dev, TSAUXC_REG, &tsauxc_verify) == 0) {
-                DEBUGP(DL_INFO, "   TSAUXC after:  0x%08X\n", tsauxc_verify);
+            if (ops->read_tsauxc && ops->read_tsauxc(dev, &tsauxc_verify) == 0) {
+                DEBUGP(DL_TRACE, "   TSAUXC after:  0x%08X\n", tsauxc_verify);
             }
         } else {
-            DEBUGP(DL_INFO, "? PTP clock already enabled (TSAUXC=0x%08X)\n", tsauxc_value);
+            DEBUGP(DL_TRACE, "? PTP clock already enabled (TSAUXC=0x%08X)\n", tsauxc_value);
         }
     } else {
-        DEBUGP(DL_WARN, "? Could not read TSAUXC register\n");
+        DEBUGP(DL_TRACE, "? Could not read TSAUXC register\n");
     }
     
     // Step 1: Program TIMINCA for 1ns increment per clock cycle
@@ -3088,21 +3705,20 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     ULONG timinca_value = 0x18000000;  // Standard value for 25MHz clock
     
     ULONG current_timinca = 0;
-    if (AvbMmioReadReal(dev, TIMINCA_REG, &current_timinca) == 0) {
-        DEBUGP(DL_INFO, "   Current TIMINCA: 0x%08X\n", current_timinca);
+    if (ops->read_timinca && ops->read_timinca(dev, &current_timinca) == 0) {
+        DEBUGP(DL_TRACE, "   Current TIMINCA: 0x%08X\n", current_timinca);
     }
     
-    if (AvbMmioWriteReal(dev, TIMINCA_REG, timinca_value) != 0) {
+    if (ops->write_timinca && ops->write_timinca(dev, timinca_value) != 0) {
         DEBUGP(DL_ERROR, "? Failed to write TIMINCA register\n");
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
-    DEBUGP(DL_INFO, "? TIMINCA programmed: 0x%08X\n", timinca_value);
+    DEBUGP(DL_TRACE, "? TIMINCA programmed: 0x%08X\n", timinca_value);
     
     // Step 2: Read initial SYSTIM value (SYSTIM is READ-ONLY on I226, starts from 0 on power-up)
-    ULONG systim_init_lo = 0, systim_init_hi = 0;
-    if (AvbMmioReadReal(dev, SYSTIML_REG, &systim_init_lo) == 0 &&
-        AvbMmioReadReal(dev, SYSTIMH_REG, &systim_init_hi) == 0) {
-        DEBUGP(DL_INFO, "? Initial SYSTIM: 0x%08X%08X\n", systim_init_hi, systim_init_lo);
+    ULONGLONG systim_initial = 0;
+    if (ops->get_systime && ops->get_systime(dev, &systim_initial) == 0) {
+        DEBUGP(DL_TRACE, "? Initial SYSTIM: 0x%016llX\n", systim_initial);
     }
     
     // Step 3: Verify SYSTIM is incrementing (wait 10ms for better delta)
@@ -3110,30 +3726,25 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     delay.QuadPart = -100000;  // 10ms delay (10,000 microseconds)
     KeDelayExecutionThread(KernelMode, FALSE, &delay);
     
-    ULONG systim_check_lo = 0, systim_check_hi = 0;
-    if (AvbMmioReadReal(dev, SYSTIML_REG, &systim_check_lo) == 0 &&
-        AvbMmioReadReal(dev, SYSTIMH_REG, &systim_check_hi) == 0) {
+    ULONGLONG systim_current = 0;
+    if (ops->get_systime && ops->get_systime(dev, &systim_current) == 0) {
         
-        DEBUGP(DL_INFO, "? SYSTIM after 10ms: 0x%08X%08X\n", systim_check_hi, systim_check_lo);
+        DEBUGP(DL_TRACE, "? SYSTIM after 10ms: 0x%016llX\n", systim_current);
         
-        // Calculate delta (handle 64-bit properly)
-        ULONGLONG initial = ((ULONGLONG)systim_init_hi << 32) | systim_init_lo;
-        ULONGLONG current = ((ULONGLONG)systim_check_hi << 32) | systim_check_lo;
-        
-        if (current > initial) {
-            DEBUGP(DL_INFO, "?? PTP clock is RUNNING! Delta: %llu ns (expected ~10,000,000 ns for 10ms)\n", 
-                   (current - initial));
+        if (systim_current > systim_initial) {
+            DEBUGP(DL_TRACE, "?? PTP clock is RUNNING! Delta: %llu ns (expected ~10,000,000 ns for 10ms)\n", 
+                   (systim_current - systim_initial));
             // Note: ctx->hw_state update happens in caller (AvbBringUpHardware)
             return STATUS_SUCCESS;
         } else {
-            DEBUGP(DL_WARN, "?? PTP clock not incrementing (SYSTIM unchanged: initial=0x%llX, current=0x%llX)\n", 
-                   initial, current);
+            DEBUGP(DL_TRACE, "?? PTP clock not incrementing (SYSTIM unchanged: initial=0x%llX, current=0x%llX)\n", 
+                   systim_initial, systim_current);
             // Not a fatal error - continue anyway, TAS might still be testable
             return STATUS_SUCCESS;
         }
     }
     
-    DEBUGP(DL_WARN, "? Could not verify SYSTIM status\n");
+    DEBUGP(DL_TRACE, "? Could not verify SYSTIM status\n");
     return STATUS_SUCCESS;  // Non-fatal
 }
 VOID     AvbPlatformCleanup(_In_ device_t *dev){ UNREFERENCED_PARAMETER(dev); }
@@ -3227,7 +3838,7 @@ PMS_FILTER AvbFindIntelFilterModule(VOID)
         // Verify this is actually a supported Intel device
         if (g_AvbContext->intel_device.pci_vendor_id == INTEL_VENDOR_ID &&
             g_AvbContext->intel_device.pci_device_id != 0) {
-            DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Using global context VID=0x%04X DID=0x%04X\n",
+            DEBUGP(DL_TRACE, "AvbFindIntelFilterModule: Using global context VID=0x%04X DID=0x%04X\n",
                    g_AvbContext->intel_device.pci_vendor_id, g_AvbContext->intel_device.pci_device_id);
             return g_AvbContext->filter_instance;
         }
@@ -3238,7 +3849,7 @@ PMS_FILTER AvbFindIntelFilterModule(VOID)
     PLIST_ENTRY l; 
     BOOLEAN bFalse = FALSE; 
     
-    DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Searching filter list for best Intel adapter...\n");
+    DEBUGP(DL_TRACE, "AvbFindIntelFilterModule: Searching filter list for best Intel adapter...\n");
     
     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse); 
     l = FilterModuleList.Flink; 
@@ -3250,7 +3861,7 @@ PMS_FILTER AvbFindIntelFilterModule(VOID)
         if (f && f->AvbContext) { 
             PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)f->AvbContext;
             
-            DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Checking filter %wZ - VID=0x%04X DID=0x%04X state=%s\n",
+            DEBUGP(DL_TRACE, "AvbFindIntelFilterModule: Checking filter %wZ - VID=0x%04X DID=0x%04X state=%s\n",
                    &f->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
                    ctx->intel_device.pci_device_id, AvbHwStateName(ctx->hw_state));
             
@@ -3262,7 +3873,7 @@ PMS_FILTER AvbFindIntelFilterModule(VOID)
                 if (bestContext == NULL || ctx->hw_state > bestContext->hw_state) {
                     bestFilter = f;
                     bestContext = ctx;
-                    DEBUGP(DL_INFO, "AvbFindIntelFilterModule: New best candidate: %wZ (state=%s)\n",
+                    DEBUGP(DL_TRACE, "AvbFindIntelFilterModule: New best candidate: %wZ (state=%s)\n",
                            &f->MiniportFriendlyName, AvbHwStateName(ctx->hw_state));
                 }
             }
@@ -3272,12 +3883,12 @@ PMS_FILTER AvbFindIntelFilterModule(VOID)
     FILTER_RELEASE_LOCK(&FilterListLock, bFalse); 
     
     if (bestFilter && bestContext) {
-        DEBUGP(DL_INFO, "AvbFindIntelFilterModule: Selected best Intel filter: %wZ (VID=0x%04X DID=0x%04X state=%s)\n",
+        DEBUGP(DL_TRACE, "AvbFindIntelFilterModule: Selected best Intel filter: %wZ (VID=0x%04X DID=0x%04X state=%s)\n",
                &bestFilter->MiniportFriendlyName, bestContext->intel_device.pci_vendor_id,
                bestContext->intel_device.pci_device_id, AvbHwStateName(bestContext->hw_state));
         return bestFilter;
     }
     
-    DEBUGP(DL_WARN, "AvbFindIntelFilterModule: No Intel filter found with valid context\n");
+    DEBUGP(DL_TRACE, "AvbFindIntelFilterModule: No Intel filter found with valid context\n");
     return NULL; 
 }

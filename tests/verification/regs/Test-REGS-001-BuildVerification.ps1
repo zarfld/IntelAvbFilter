@@ -109,7 +109,7 @@ if (-not (Test-Path $BuildScript)) {
 
 # Step 4: Verify binary exists
 Write-Host "[4/4] Verifying binary..." -ForegroundColor Yellow
-$BinaryPath = Join-Path $RepoRoot "build\x64\$Configuration\IntelAvbFilter.sys"
+$BinaryPath = Join-Path $RepoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter.sys"
 
 if (Test-Path $BinaryPath) {
     $Binary = Get-Item $BinaryPath

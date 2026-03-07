@@ -22,28 +22,9 @@
 #include <stdio.h>
 #include <winioctl.h>
 #include <stdbool.h>
+#include "../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
-// SSOT IOCTL definition (to be added to avb_ioctl.h)
-#ifndef IOCTL_AVB_PHC_OFFSET_ADJUST
-#define _NDIS_CONTROL_CODE(Request,Method) \
-    CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, (Request), (Method), FILE_ANY_ACCESS)
-#define IOCTL_AVB_PHC_OFFSET_ADJUST _NDIS_CONTROL_CODE(46, METHOD_BUFFERED)
-#endif
-
-// SSOT structure (to be added to avb_ioctl.h)
-typedef struct AVB_OFFSET_REQUEST {
-    INT64 offset_ns;  // Offset in nanoseconds (positive or negative)
-    UINT32 status;    // NDIS_STATUS value
-} AVB_OFFSET_REQUEST;
-
-// IOCTL for reading PHC time (for verification)
-#define IOCTL_AVB_GET_TIMESTAMP _NDIS_CONTROL_CODE(24, METHOD_BUFFERED)
-
-typedef struct AVB_TIMESTAMP_REQUEST {
-    UINT64 timestamp; // out: current PHC time
-    UINT32 clock_id;  // optional; 0 default
-    UINT32 status;    // NDIS_STATUS value
-} AVB_TIMESTAMP_REQUEST;
+// Use structures from SSOT header: AVB_OFFSET_REQUEST, AVB_TIMESTAMP_REQUEST
 
 // Test statistics
 static int tests_passed = 0;
@@ -148,8 +129,8 @@ static void UT_OFFSET_001_ValidPositiveOffset() {
     
     printf("  Time before: %llu ns\n", timeBefore);
     
-    // Apply +10µs offset
-    INT64 offset = +10000LL; // +10 µs
+    // Apply +5ms offset (large enough to measure clearly above IOCTL round-trip overhead of ~100-200µs)
+    INT64 offset = +5000000LL; // +5 ms
     UINT32 status = 0;
     if (!ApplyOffset(hDevice, offset, &status)) {
         printf("FAILED: IOCTL failed (GetLastError=%lu, status=0x%08X)\n", GetLastError(), status);
@@ -176,10 +157,11 @@ static void UT_OFFSET_001_ValidPositiveOffset() {
     
     printf("  Time after:  %llu ns\n", timeAfter);
     
-    // Verify offset applied (allowing for small clock drift)
+    // Verify offset applied. Tolerance is 1ms to account for IOCTL round-trip overhead:
+    // timeAfter-timeBefore = offset + epsilon_IOCTL, where epsilon ~ 100-200µs.
     INT64 actualChange = (INT64)(timeAfter - timeBefore);
     INT64 expectedChange = offset;
-    INT64 tolerance = 1000; // 1µs tolerance for clock drift during test
+    INT64 tolerance = 1000000LL; // 1ms tolerance for IOCTL round-trip overhead
     
     if (actualChange < expectedChange - tolerance || actualChange > expectedChange + tolerance) {
         printf("FAILED: Offset not applied correctly (expected ~%lld ns, got %lld ns)\n", expectedChange, actualChange);
@@ -221,8 +203,8 @@ static void UT_OFFSET_002_ValidNegativeOffset() {
     
     printf("  Time before: %llu ns\n", timeBefore);
     
-    // Apply -5µs offset
-    INT64 offset = -5000LL; // -5 µs
+    // Apply -2ms offset (large enough to distinguish from IOCTL overhead of ~100-200µs)
+    INT64 offset = -2000000LL; // -2 ms
     UINT32 status = 0;
     if (!ApplyOffset(hDevice, offset, &status) || status != 0) {
         printf("FAILED: IOCTL failed (GetLastError=%lu, status=0x%08X)\n", GetLastError(), status);
@@ -243,7 +225,7 @@ static void UT_OFFSET_002_ValidNegativeOffset() {
     
     INT64 actualChange = (INT64)(timeAfter - timeBefore);
     INT64 expectedChange = offset;
-    INT64 tolerance = 1000; // 1µs tolerance
+    INT64 tolerance = 1000000LL; // 1ms tolerance for IOCTL round-trip overhead
     
     if (actualChange < expectedChange - tolerance || actualChange > expectedChange + tolerance) {
         printf("FAILED: Offset not applied correctly (expected ~%lld ns, got %lld ns)\n", expectedChange, actualChange);
@@ -308,7 +290,7 @@ static void UT_OFFSET_003_LargePositiveOffset() {
     
     INT64 actualChange = (INT64)(timeAfter - timeBefore);
     INT64 expectedChange = offset;
-    INT64 tolerance = 100000; // 100µs tolerance for large offset
+    INT64 tolerance = 1000000LL; // 1ms tolerance for IOCTL round-trip overhead
     
     if (actualChange < expectedChange - tolerance || actualChange > expectedChange + tolerance) {
         printf("FAILED: Large offset not applied correctly (expected ~%lld ns, got %lld ns)\n", expectedChange, actualChange);
@@ -508,7 +490,7 @@ static void UT_OFFSET_007_ZeroOffset() {
     
     // Time should be approximately unchanged (allowing small clock advance)
     INT64 change = (INT64)(timeAfter - timeBefore);
-    if (change < 0 || change > 10000) { // Allow up to 10µs clock advance
+    if (change < 0 || change > 2000000LL) { // Allow up to 2ms for IOCTL round-trip overhead
         printf("FAILED: Zero offset caused unexpected time change (%lld ns)\n", change);
         CloseHandle(hDevice);
         tests_failed++;
@@ -569,7 +551,8 @@ static void IT_OFFSET_001_SequentialOffsets() {
     
     printf("  Initial time: %llu ns\n", timeInitial);
     
-    INT64 offsets[] = {+10000, +20000, -5000, +15000, -8000};
+    // Use ms-scale offsets so the signal exceeds the ~100-200µs IOCTL overhead
+    INT64 offsets[] = {+10000000, +20000000, -5000000, +15000000, -8000000}; // ms-scale
     INT64 expectedTotal = 0;
     
     for (int i = 0; i < 5; i++) {
@@ -595,7 +578,7 @@ static void IT_OFFSET_001_SequentialOffsets() {
     printf("  Final time:   %llu ns\n", timeFinal);
     
     INT64 actualTotal = (INT64)(timeFinal - timeInitial);
-    INT64 tolerance = 5000; // 5µs tolerance for 5 sequential operations
+    INT64 tolerance = 2000000LL; // 2ms tolerance for 5 sequential IOCTL round trips
     
     if (actualTotal < expectedTotal - tolerance || actualTotal > expectedTotal + tolerance) {
         printf("FAILED: Sequential offsets did not accumulate correctly (expected %lld ns, got %lld ns)\n",

@@ -746,8 +746,8 @@ int main(int argc, char* argv[]) {
         printf("\n⚠️  %d TEST(S) FAILED - Review output above\n", g_tests_failed);
     }
     
-    printf("\nPress Enter to exit...");
-    getchar();
+   // printf("\nPress Enter to exit...");
+   // getchar();
     
     return g_tests_failed;
 }

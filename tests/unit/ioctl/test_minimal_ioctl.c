@@ -111,7 +111,7 @@ int main() {
         AVB_OPEN_REQUEST openReq;
         openReq.vendor_id = adapters[i].vendor_id;
         openReq.device_id = adapters[i].device_id;
-        openReq.reserved = 0;
+        openReq.index = i;  // Multi-adapter: specify which adapter instance
         openReq.status = 0xCCCCCCCC;
         
         result = DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,

@@ -83,7 +83,10 @@ static BOOL SetHWTimestamping(HANDLE adapter, UINT32 mode)
         req.enable_aux_ts = 0;
     } else {
         req.enable = 1;  /* Enable timestamping */
-        req.timer_mask = 0x1;  /* SYSTIM0 only */
+        /* For known valid modes (HW_TS_RX_ENABLED/TX_ENABLED/ALL_ENABLED), use SYSTIM0.
+         * For out-of-range modes (e.g. 0xFFFFFFFF), pass raw mode as timer_mask so
+         * the driver's timer_mask > 0xF validation can reject it (UT-HW-TS-005). */
+        req.timer_mask = (mode > HW_TS_ALL_ENABLED) ? mode : 0x1;
         req.enable_target_time = 0;  /* No target time interrupts */
         req.enable_aux_ts = 0;  /* No auxiliary timestamps */
         

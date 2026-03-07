@@ -22,9 +22,9 @@
  *   - TC-STAT-010: Zero initialization after driver reload
  *
  * IOCTLs Tested:
- *   - 0x9C40A020: IOCTL_GET_STATISTICS
- *   - 0x9C40A028: IOCTL_RESET_STATISTICS (optional)
- *   - 0x9C40A010: IOCTL_PHC_QUERY_TIME (for counter verification)
+ *   - IOCTL_AVB_GET_STATISTICS   (_NDIS_CONTROL_CODE(0x808, METHOD_BUFFERED))
+ *   - IOCTL_AVB_RESET_STATISTICS  (_NDIS_CONTROL_CODE(0x80A, METHOD_BUFFERED), optional)
+ *   - IOCTL_AVB_GET_HW_STATE      (_NDIS_CONTROL_CODE(37,  METHOD_BUFFERED), for counter verification)
  *
  * Standards Compliance:
  *   - ISO/IEC/IEEE 12207:2017 (Software Testing Process)
@@ -43,48 +43,25 @@
 #include <assert.h>
 #include <time.h>
 #include <intrin.h>
+#include "avb_ioctl.h"   /* SSOT: IOCTL_AVB_GET_STATISTICS, IOCTL_AVB_GET_CLOCK_CONFIG */
 
 // Define test result codes
 #define TEST_PASS 0
 #define TEST_FAIL 1
 #define TEST_SKIP 2
 
-// IOCTL codes
-#define IOCTL_GET_STATISTICS    0x9C40A020
-#define IOCTL_RESET_STATISTICS  0x9C40A028
-#define IOCTL_PHC_QUERY_TIME    0x9C40A010
-
-// Driver statistics structure (104 bytes)
-#pragma pack(push, 8)
-typedef struct _DRIVER_STATISTICS {
-    UINT64 TxPackets;           // Offset 0
-    UINT64 RxPackets;           // Offset 8
-    UINT64 TxBytes;             // Offset 16
-    UINT64 RxBytes;             // Offset 24
-    UINT64 PhcQueryCount;       // Offset 32
-    UINT64 PhcAdjustCount;      // Offset 40
-    UINT64 PhcSetCount;         // Offset 48
-    UINT64 TimestampCount;      // Offset 56
-    UINT64 IoctlCount;          // Offset 64
-    UINT64 ErrorCount;          // Offset 72
-    UINT64 MemoryAllocFailures; // Offset 80
-    UINT64 HardwareFaults;      // Offset 88
-    UINT64 FilterAttachCount;   // Offset 96
-} DRIVER_STATISTICS, *PDRIVER_STATISTICS;
-#pragma pack(pop)
-
-// PHC time query structure
-typedef struct _PHC_TIME_QUERY {
-    UINT64 SystemTime;
-    UINT64 PhcTime;
-    UINT32 Status;
-} PHC_TIME_QUERY, *PPHC_TIME_QUERY;
+// SSOT: all IOCTL codes and structures are from avb_ioctl.h — no magic numbers, no duplicates.
+// Types used:
+//   AVB_DRIVER_STATISTICS  (104 bytes, 13 × avb_u64) — statistics snapshot
+//   AVB_HW_STATE_QUERY     (output-only, for generating additional IOCTL traffic)
+// IOCTLs used:
+//   IOCTL_AVB_GET_STATISTICS, IOCTL_AVB_RESET_STATISTICS, IOCTL_AVB_GET_HW_STATE
 
 // Test result structure
 typedef struct {
     const char* name;
     int result;
-    const char* reason;
+    char reason[256];   /* stored by value — avoids dangling pointer from stack-local char[] */
     UINT64 duration_us;
 } TestResult;
 
@@ -122,7 +99,8 @@ static void RecordResult(const char* name, int result, const char* reason, UINT6
     if (g_test_count < 20) {
         g_results[g_test_count].name = name;
         g_results[g_test_count].result = result;
-        g_results[g_test_count].reason = reason;
+        strncpy_s(g_results[g_test_count].reason, sizeof(g_results[g_test_count].reason),
+                  reason ? reason : "", _TRUNCATE);
         g_results[g_test_count].duration_us = duration_us;
         g_test_count++;
     }
@@ -160,14 +138,14 @@ static void TestStatisticsInitialization(void) {
         return;
     }
     
-    DRIVER_STATISTICS stats = {0};
+    AVB_DRIVER_STATISTICS stats = {0};
     DWORD bytesReturned = 0;
     
     BOOL result = DeviceIoControl(
         hDevice,
-        IOCTL_GET_STATISTICS,
+        IOCTL_AVB_GET_STATISTICS,
         NULL, 0,
-        &stats, sizeof(DRIVER_STATISTICS),
+        &stats, sizeof(AVB_DRIVER_STATISTICS),
         &bytesReturned,
         NULL
     );
@@ -183,9 +161,9 @@ static void TestStatisticsInitialization(void) {
         return;
     }
     
-    if (bytesReturned != sizeof(DRIVER_STATISTICS)) {
+    if (bytesReturned != sizeof(AVB_DRIVER_STATISTICS)) {
         char reason[128];
-        sprintf(reason, "Wrong size returned (%lu, expected %zu)", bytesReturned, sizeof(DRIVER_STATISTICS));
+        sprintf(reason, "Wrong size returned (%lu, expected %zu)", bytesReturned, sizeof(AVB_DRIVER_STATISTICS));
         RecordResult(test_name, TEST_FAIL, reason, duration);
         return;
     }
@@ -218,12 +196,12 @@ static void TestBufferSizeValidation(void) {
         return;
     }
     
-    BYTE smallBuffer[50];  // Too small (need 104)
+    BYTE smallBuffer[50];  // Too small (need sizeof(AVB_DRIVER_STATISTICS) = 104)
     DWORD bytesReturned = 0;
     
     BOOL result = DeviceIoControl(
         hDevice,
-        IOCTL_GET_STATISTICS,
+        IOCTL_AVB_GET_STATISTICS,
         NULL, 0,
         smallBuffer, sizeof(smallBuffer),
         &bytesReturned,
@@ -275,9 +253,9 @@ static void TestNullBufferValidation(void) {
     
     BOOL result = DeviceIoControl(
         hDevice,
-        IOCTL_GET_STATISTICS,
+        IOCTL_AVB_GET_STATISTICS,
         NULL, 0,
-        NULL, sizeof(DRIVER_STATISTICS),  // NULL buffer
+        NULL, sizeof(AVB_DRIVER_STATISTICS),  // NULL buffer
         &bytesReturned,
         NULL
     );
@@ -325,28 +303,28 @@ static void TestIoctlCounterIncrement(void) {
     }
     
     // Get baseline statistics
-    DRIVER_STATISTICS statsBaseline = {0};
+    AVB_DRIVER_STATISTICS statsBaseline = {0};
     DWORD bytesReturned = 0;
     
-    if (!DeviceIoControl(hDevice, IOCTL_GET_STATISTICS, NULL, 0,
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
                         &statsBaseline, sizeof(statsBaseline), &bytesReturned, NULL)) {
         CloseHandle(hDevice);
         RecordResult(test_name, TEST_FAIL, "Failed to get baseline statistics", 0);
         return;
     }
     
-    // Issue 10 PHC query IOCTLs
+    // Issue 10 HW-state IOCTLs (SSOT: output-only, no magic numbers)
     for (int i = 0; i < 10; i++) {
-        PHC_TIME_QUERY query = {0};
-        DeviceIoControl(hDevice, IOCTL_PHC_QUERY_TIME, NULL, 0,
-                       &query, sizeof(query), &bytesReturned, NULL);
-        // Ignore failures - just testing counter increment
+        AVB_HW_STATE_QUERY hwState = {0};
+        DeviceIoControl(hDevice, IOCTL_AVB_GET_HW_STATE, NULL, 0,
+                       &hwState, sizeof(hwState), &bytesReturned, NULL);
+        // Ignore failures - just testing that IoctlCount increments
     }
     
     // Get updated statistics
-    DRIVER_STATISTICS statsAfter = {0};
+    AVB_DRIVER_STATISTICS statsAfter = {0};
     
-    if (!DeviceIoControl(hDevice, IOCTL_GET_STATISTICS, NULL, 0,
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
                         &statsAfter, sizeof(statsAfter), &bytesReturned, NULL)) {
         CloseHandle(hDevice);
         RecordResult(test_name, TEST_FAIL, "Failed to get updated statistics", 0);
@@ -396,29 +374,30 @@ static void TestErrorCounterIncrement(void) {
     }
     
     // Get baseline statistics
-    DRIVER_STATISTICS statsBaseline = {0};
+    AVB_DRIVER_STATISTICS statsBaseline = {0};
     DWORD bytesReturned = 0;
     
-    if (!DeviceIoControl(hDevice, IOCTL_GET_STATISTICS, NULL, 0,
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
                         &statsBaseline, sizeof(statsBaseline), &bytesReturned, NULL)) {
         CloseHandle(hDevice);
         RecordResult(test_name, TEST_FAIL, "Failed to get baseline statistics", 0);
         return;
     }
     
-    // Issue 5 invalid IOCTLs (buffer too small)
+    // Issue 5 invalid IOCTL_AVB_GET_STATISTICS calls with too-small output buffer
+    // (SSOT: 4 < sizeof(AVB_DRIVER_STATISTICS)=104 -> STATUS_BUFFER_TOO_SMALL)
     for (int i = 0; i < 5; i++) {
-        PHC_TIME_QUERY query = {0};
-        DeviceIoControl(hDevice, IOCTL_PHC_QUERY_TIME, NULL, 0,
-                       &query, 4,  // TOO SMALL (should be 16)
+        BYTE tinyBuf[4];
+        DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
+                       tinyBuf, sizeof(tinyBuf),
                        &bytesReturned, NULL);
-        // Expected to fail
+        // Expected to fail with ERROR_INSUFFICIENT_BUFFER
     }
     
     // Get updated statistics
-    DRIVER_STATISTICS statsAfter = {0};
+    AVB_DRIVER_STATISTICS statsAfter = {0};
     
-    if (!DeviceIoControl(hDevice, IOCTL_GET_STATISTICS, NULL, 0,
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
                         &statsAfter, sizeof(statsAfter), &bytesReturned, NULL)) {
         CloseHandle(hDevice);
         RecordResult(test_name, TEST_FAIL, "Failed to get updated statistics", 0);
@@ -471,14 +450,14 @@ static void TestQueryPerformance(void) {
     
     // Execute 100 queries and measure latency
     for (int i = 0; i < iterations; i++) {
-        DRIVER_STATISTICS stats = {0};
+        AVB_DRIVER_STATISTICS stats = {0};
         DWORD bytesReturned = 0;
         
         UINT64 start = GetTimestampUs();
         
         BOOL result = DeviceIoControl(
             hDevice,
-            IOCTL_GET_STATISTICS,
+            IOCTL_AVB_GET_STATISTICS,
             NULL, 0,
             &stats, sizeof(stats),
             &bytesReturned,
@@ -548,19 +527,19 @@ static void TestConcurrentQueries(void) {
     const int iterations = 50;
     
     for (int i = 0; i < iterations; i++) {
-        DRIVER_STATISTICS stats = {0};
+        AVB_DRIVER_STATISTICS stats = {0};
         DWORD bytesReturned = 0;
         
         BOOL result = DeviceIoControl(
             hDevice,
-            IOCTL_GET_STATISTICS,
+            IOCTL_AVB_GET_STATISTICS,
             NULL, 0,
             &stats, sizeof(stats),
             &bytesReturned,
             NULL
         );
         
-        if (result && bytesReturned == sizeof(DRIVER_STATISTICS)) {
+        if (result && bytesReturned == sizeof(AVB_DRIVER_STATISTICS)) {
             successCount++;
         }
     }
@@ -602,12 +581,12 @@ static void TestStatisticsPersistence(void) {
         return;
     }
     
-    DRIVER_STATISTICS stats1 = {0};
-    DRIVER_STATISTICS stats2 = {0};
+    AVB_DRIVER_STATISTICS stats1 = {0};
+    AVB_DRIVER_STATISTICS stats2 = {0};
     DWORD bytesReturned = 0;
     
     // Get first snapshot
-    if (!DeviceIoControl(hDevice, IOCTL_GET_STATISTICS, NULL, 0,
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
                         &stats1, sizeof(stats1), &bytesReturned, NULL)) {
         CloseHandle(hDevice);
         RecordResult(test_name, TEST_FAIL, "First query failed", 0);
@@ -615,7 +594,7 @@ static void TestStatisticsPersistence(void) {
     }
     
     // Get second snapshot immediately
-    if (!DeviceIoControl(hDevice, IOCTL_GET_STATISTICS, NULL, 0,
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
                         &stats2, sizeof(stats2), &bytesReturned, NULL)) {
         CloseHandle(hDevice);
         RecordResult(test_name, TEST_FAIL, "Second query failed", 0);
@@ -655,8 +634,8 @@ static void TestStructureSize(void) {
     const char* test_name = "TC-STAT-009: Structure size (104 bytes)";
     UINT64 start = GetTimestampUs();
     
-    size_t actual_size = sizeof(DRIVER_STATISTICS);
-    size_t expected_size = 104;
+    size_t actual_size = sizeof(AVB_DRIVER_STATISTICS);
+    size_t expected_size = 104;  /* AVB_DRIVER_STATISTICS = 13 × avb_u64 */
     
     UINT64 duration = GetTimestampUs() - start;
     

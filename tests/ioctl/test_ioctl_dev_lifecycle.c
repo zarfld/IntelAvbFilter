@@ -373,10 +373,59 @@ void Test_SingleAdapterEnumeration(TestContext *ctx) {
 
 /**
  * UT-DEV-ENUM-002: Multiple Adapter Enumeration
+ * Verifies that IOCTL_AVB_ENUM_ADAPTERS reports >= 2 adapters and that
+ * individual adapters 0 and 1 can each be enumerated independently.
+ * NOTE: This system has 6 x Intel I226-LM adapters, so this is not hardware-dependent.
  */
 void Test_MultipleAdapterEnumeration(TestContext *ctx) {
-    PrintTestResult(ctx, "UT-DEV-ENUM-002: Multiple Adapter Enumeration", 
-                    TEST_SKIP, "Requires 2+ adapters (hardware-dependent)");
+    HANDLE device;
+    UINT32 total_count = 0;
+    BOOL result;
+
+    device = OpenDevice(DEVICE_PATH_PRIMARY);
+    if (device == INVALID_HANDLE_VALUE) {
+        PrintTestResult(ctx, "UT-DEV-ENUM-002: Multiple Adapter Enumeration",
+                        TEST_SKIP, "Device not accessible");
+        return;
+    }
+
+    result = EnumerateAdapters(device, &total_count);
+
+    if (!result) {
+        CloseHandle(device);
+        PrintTestResult(ctx, "UT-DEV-ENUM-002: Multiple Adapter Enumeration",
+                        TEST_FAIL, "EnumerateAdapters IOCTL failed");
+        return;
+    }
+
+    printf("    Total adapters reported: %u\n", total_count);
+
+    if (total_count < 2) {
+        CloseHandle(device);
+        PrintTestResult(ctx, "UT-DEV-ENUM-002: Multiple Adapter Enumeration",
+                        TEST_SKIP, "Only 1 adapter detected (need 2+)");
+        return;
+    }
+
+    /* Verify adapters 0 and 1 can each be individually opened */
+    {
+        HANDLE a0 = OpenAdapterByIndex(device, 0);
+        HANDLE a1 = OpenAdapterByIndex(device, 1);
+
+        if (a0 != INVALID_HANDLE_VALUE) CloseHandle(a0);
+        if (a1 != INVALID_HANDLE_VALUE) CloseHandle(a1);
+        CloseHandle(device);
+
+        if (a0 == INVALID_HANDLE_VALUE || a1 == INVALID_HANDLE_VALUE) {
+            PrintTestResult(ctx, "UT-DEV-ENUM-002: Multiple Adapter Enumeration",
+                            TEST_FAIL, "Could not open both adapters 0 and 1 individually");
+            return;
+        }
+    }
+
+    printf("    Verified %u adapters, opened adapters 0 and 1 successfully\n", total_count);
+    PrintTestResult(ctx, "UT-DEV-ENUM-002: Multiple Adapter Enumeration",
+                    TEST_PASS, NULL);
 }
 
 /**
@@ -415,10 +464,47 @@ void Test_OpenFirstAvailableAdapter(TestContext *ctx) {
 
 /**
  * UT-DEV-OPEN-002: Open by Device Path
+ * Verifies the driver exposes its primary symbolic link (\\\\.\\ namespace).
+ * Both DEVICE_PATH_PRIMARY and DEVICE_PATH_ALTERNATE are tried; at least one
+ * must succeed.  No enumeration is required — the paths are static constants.
  */
 void Test_OpenByDevicePath(TestContext *ctx) {
-    PrintTestResult(ctx, "UT-DEV-OPEN-002: Open by Device Path", 
-                    TEST_SKIP, "Requires symbolic link path enumeration");
+    HANDLE h;
+    BOOL primary_ok, alt_ok, state_ok;
+    AVB_HW_STATE_QUERY state = {0};
+    DWORD bytes = 0;
+
+    /* Try primary path */
+    h = OpenDevice(DEVICE_PATH_PRIMARY);
+    primary_ok = (h != INVALID_HANDLE_VALUE);
+    if (primary_ok) {
+        state_ok = GetHardwareState(h, &state);
+        CloseHandle(h);
+        if (state_ok) {
+            printf("    Opened primary path: %s (hw_state=%u)\n",
+                   DEVICE_PATH_PRIMARY, state.hw_state);
+            PrintTestResult(ctx, "UT-DEV-OPEN-002: Open by Device Path",
+                            TEST_PASS, NULL);
+            return;
+        }
+    }
+
+    /* Fallback: try alternate path */
+    h = OpenDevice(DEVICE_PATH_ALTERNATE);
+    alt_ok = (h != INVALID_HANDLE_VALUE);
+    if (alt_ok) {
+        state_ok = GetHardwareState(h, &state);
+        CloseHandle(h);
+        printf("    Opened alternate path: %s (hw_state=%u)\n",
+               DEVICE_PATH_ALTERNATE, state.hw_state);
+        PrintTestResult(ctx, "UT-DEV-OPEN-002: Open by Device Path",
+                        state_ok ? TEST_PASS : TEST_FAIL,
+                        state_ok ? NULL : "Opened alternate path but IOCTL failed");
+        return;
+    }
+
+    PrintTestResult(ctx, "UT-DEV-OPEN-002: Open by Device Path",
+                    TEST_FAIL, "Neither primary nor alternate device path accessible");
 }
 
 /**
@@ -444,12 +530,66 @@ void Test_InvalidAdapterIndexRejection(TestContext *ctx) {
                     (adapter == INVALID_HANDLE_VALUE) ? NULL : "Invalid index accepted");
 }
 
+/* ---------------------------------------------------------------------------
+ * Concurrent-open worker: opens device, does one IOCTL, closes, sets result.
+ * ---------------------------------------------------------------------------*/
+typedef struct {
+    int     thread_id;
+    BOOL    success;
+} ConcurrentOpenArg;
+
+static DWORD WINAPI ConcurrentOpenWorker(LPVOID param) {
+    ConcurrentOpenArg *arg = (ConcurrentOpenArg *)param;
+    HANDLE h;
+    AVB_HW_STATE_QUERY state = {0};
+
+    h = OpenDevice(DEVICE_PATH_PRIMARY);
+    if (h == INVALID_HANDLE_VALUE) {
+        arg->success = FALSE;
+        return 1;
+    }
+    /* Do a harmless read-only IOCTL to exercise the concurrent path */
+    arg->success = GetHardwareState(h, &state);
+    CloseHandle(h);
+    return arg->success ? 0 : 1;
+}
+
 /**
  * UT-DEV-OPEN-004: Concurrent Open Requests
+ * Spawns 4 threads that each open the device and issue GET_HW_STATE
+ * simultaneously.  All must succeed — the driver must be re-entrant.
  */
 void Test_ConcurrentOpenRequests(TestContext *ctx) {
-    PrintTestResult(ctx, "UT-DEV-OPEN-004: Concurrent Open Requests", 
-                    TEST_SKIP, "Requires multi-threaded test framework");
+#define CONCURRENT_THREADS 4
+    HANDLE       threads[CONCURRENT_THREADS];
+    ConcurrentOpenArg args[CONCURRENT_THREADS];
+    DWORD        i, all_ok = TRUE;
+
+    for (i = 0; i < CONCURRENT_THREADS; i++) {
+        args[i].thread_id = (int)i;
+        args[i].success   = FALSE;
+        threads[i] = CreateThread(NULL, 0, ConcurrentOpenWorker, &args[i], 0, NULL);
+        if (threads[i] == NULL) {
+            printf("    Thread %lu creation failed: error %lu\n", i, GetLastError());
+            all_ok = FALSE;
+        }
+    }
+
+    /* Wait for all threads (with 5-second safety timeout each) */
+    for (i = 0; i < CONCURRENT_THREADS; i++) {
+        if (threads[i] != NULL) {
+            WaitForSingleObject(threads[i], 5000);
+            if (!args[i].success) all_ok = FALSE;
+            CloseHandle(threads[i]);
+        }
+    }
+
+    printf("    Concurrent threads: %d, all succeeded: %s\n",
+           CONCURRENT_THREADS, all_ok ? "YES" : "NO");
+    PrintTestResult(ctx, "UT-DEV-OPEN-004: Concurrent Open Requests",
+                    all_ok ? TEST_PASS : TEST_FAIL,
+                    all_ok ? NULL : "One or more concurrent opens/IOCTLs failed");
+#undef CONCURRENT_THREADS
 }
 
 /**

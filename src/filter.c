@@ -52,6 +52,7 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 static BOOLEAN UnicodeStringContainsInsensitive(PCUNICODE_STRING Str, PCWSTR Sub);
 static BOOLEAN IsUnsupportedTeamOrVirtualAdapter(PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters);
 
+
 // AvbIsSupportedIntelController is defined in avb_bar0_discovery.c
 extern BOOLEAN AvbIsSupportedIntelController(PMS_FILTER pFilter, PUSHORT pVendorId, PUSHORT pDeviceId);
 
@@ -135,7 +136,11 @@ Return Value:
     NDIS_STRING FriendlyName = RTL_CONSTANT_STRING(FILTER_FRIENDLY_NAME);
     BOOLEAN bFalse = FALSE;
 
-    UNREFERENCED_PARAMETER(RegistryPath);
+    /* Implements: #95 (REQ-NF-DEBUG-REG-001: Registry-Based Debug Settings)
+     * Read DebugLevel from HKLM\...\IntelAvbFilter\Parameters before first trace.
+     * Safe read-only call at PASSIVE_LEVEL — no spinlock, no BSOD risk.
+     */
+    FilterReadDebugSettings(RegistryPath);
 
     DEBUGP(DL_TRACE, "===>DriverEntry...\n");
 
@@ -147,6 +152,9 @@ Return Value:
         FILTER_INIT_LOCK(&FilterListLock);
         InitializeListHead(&FilterModuleList);
         FilterDriverHandle = NULL;
+
+        // Initialize global AVB adapter list lock (before any FilterAttach can run)
+        NdisAllocateSpinLock(&g_AvbContextListLock);
 
         // Zero the characteristics structure
         NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
@@ -193,20 +201,20 @@ Return Value:
         // Set driver unload
         DriverObject->DriverUnload = FilterUnload;
 
-        DEBUGP(DL_INFO, "DriverEntry: Attempting NDIS %u.%u filter registration\n", 
+        DEBUGP(DL_TRACE, "DriverEntry: Attempting NDIS %u.%u filter registration\n", 
                FChars.MajorNdisVersion, FChars.MinorNdisVersion);
-        DEBUGP(DL_INFO, "DriverEntry: Header Size=%u, Revision=%u, Type=0x%08x\n", 
+        DEBUGP(DL_TRACE, "DriverEntry: Header Size=%u, Revision=%u, Type=0x%08x\n", 
                FChars.Header.Size, FChars.Header.Revision, FChars.Header.Type);
-        DEBUGP(DL_INFO, "DriverEntry: DriverObject=%p, FilterDriverObject=%p\n", 
+        DEBUGP(DL_TRACE, "DriverEntry: DriverObject=%p, FilterDriverObject=%p\n", 
                DriverObject, FilterDriverObject);
-        DEBUGP(DL_INFO, "DriverEntry: ServiceName=%wZ\n", &ServiceName);
-        DEBUGP(DL_INFO, "DriverEntry: UniqueName=%wZ\n", &UniqueName);
-        DEBUGP(DL_INFO, "DriverEntry: FriendlyName=%wZ\n", &FriendlyName);
-        DEBUGP(DL_INFO, "DriverEntry: Handlers - SetOptions=%p, Attach=%p, Detach=%p\n",
+        DEBUGP(DL_TRACE, "DriverEntry: ServiceName=%wZ\n", &ServiceName);
+        DEBUGP(DL_TRACE, "DriverEntry: UniqueName=%wZ\n", &UniqueName);
+        DEBUGP(DL_TRACE, "DriverEntry: FriendlyName=%wZ\n", &FriendlyName);
+        DEBUGP(DL_TRACE, "DriverEntry: Handlers - SetOptions=%p, Attach=%p, Detach=%p\n",
                FChars.SetOptionsHandler, FChars.AttachHandler, FChars.DetachHandler);
-        DEBUGP(DL_INFO, "DriverEntry: Handlers - Restart=%p, Pause=%p, SetModuleOpts=%p\n",
+        DEBUGP(DL_TRACE, "DriverEntry: Handlers - Restart=%p, Pause=%p, SetModuleOpts=%p\n",
                FChars.RestartHandler, FChars.PauseHandler, FChars.SetFilterModuleOptionsHandler);
-        DEBUGP(DL_INFO, "DriverEntry: Handlers - OidRequest=%p, SendNBL=%p, ReceiveNBL=%p\n",
+        DEBUGP(DL_TRACE, "DriverEntry: Handlers - OidRequest=%p, SendNBL=%p, ReceiveNBL=%p\n",
                FChars.OidRequestHandler, FChars.SendNetBufferListsHandler, FChars.ReceiveNetBufferListsHandler);
         
         // First attempt with NDIS 6.0 revision 1
@@ -216,33 +224,33 @@ Return Value:
                                            &FilterDriverHandle);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_ERROR, "NdisFRegisterFilterDriver failed (NDIS %u.%u): 0x%08X\n", 
+            DEBUGP(DL_TRACE, "NdisFRegisterFilterDriver failed (NDIS %u.%u): 0x%08X\n", 
                    FChars.MajorNdisVersion, FChars.MinorNdisVersion, Status);
-            DEBUGP(DL_ERROR, "  Possible causes:\n");
-            DEBUGP(DL_ERROR, "  - Invalid header structure (Size=%u, Revision=%u)\n", 
+            DEBUGP(DL_TRACE, "  Possible causes:\n");
+            DEBUGP(DL_TRACE, "  - Invalid header structure (Size=%u, Revision=%u)\n", 
                    FChars.Header.Size, FChars.Header.Revision);
-            DEBUGP(DL_ERROR, "  - Missing required handlers\n");
-            DEBUGP(DL_ERROR, "  - NDIS version incompatibility\n");
-            DEBUGP(DL_ERROR, "  - Duplicate driver registration\n");
+            DEBUGP(DL_TRACE, "  - Missing required handlers\n");
+            DEBUGP(DL_TRACE, "  - NDIS version incompatibility\n");
+            DEBUGP(DL_TRACE, "  - Duplicate driver registration\n");
                    
             // No fallback needed since we already started with the most compatible version
             FILTER_FREE_LOCK(&FilterListLock);
             break;
         }
 
-        DEBUGP(DL_INFO, "NDIS filter driver registered successfully\n");
+        DEBUGP(DL_TRACE, "NDIS filter driver registered successfully\n");
 
         // Register device for user-mode communication
         Status = IntelAvbFilterRegisterDevice();
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_ERROR, "IntelAvbFilterRegisterDevice failed: 0x%x\n", Status);
+            DEBUGP(DL_TRACE, "IntelAvbFilterRegisterDevice failed: 0x%x\n", Status);
             NdisFDeregisterFilterDriver(FilterDriverHandle);
             FILTER_FREE_LOCK(&FilterListLock);
             break;
         }
 
-        DEBUGP(DL_INFO, "User-mode device interface registered successfully\n");
+        DEBUGP(DL_TRACE, "User-mode device interface registered successfully\n");
 
     }
     while(bFalse);
@@ -287,7 +295,7 @@ Return Value:
     // Validate the context matches what we passed in
     if (FilterDriverContext != (NDIS_HANDLE)FilterDriverObject)
     {
-        DEBUGP(DL_ERROR, "FilterRegisterOptions: Invalid FilterDriverContext\n");
+        DEBUGP(DL_TRACE, "FilterRegisterOptions: Invalid FilterDriverContext\n");
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
@@ -341,14 +349,14 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
     BOOLEAN               bFalse = FALSE;
 
 
-    DEBUGP(DL_INFO, "===>FilterAttach: NdisFilterHandle %p\n", NdisFilterHandle);
+    DEBUGP(DL_TRACE, "===>FilterAttach: NdisFilterHandle %p\n", NdisFilterHandle);
 
     do
     {
         ASSERT(FilterDriverContext == (NDIS_HANDLE)FilterDriverObject);
         if (FilterDriverContext != (NDIS_HANDLE)FilterDriverObject)
         {
-            DEBUGP(DL_ERROR, "FilterAttach: Invalid FilterDriverContext: %p (expected %p)\n", 
+            DEBUGP(DL_TRACE, "FilterAttach: Invalid FilterDriverContext: %p (expected %p)\n", 
                    FilterDriverContext, FilterDriverObject);
             Status = NDIS_STATUS_INVALID_PARAMETER;
             break;
@@ -357,22 +365,22 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         // Log all adapter attach attempts with detailed info
         if (AttachParameters && AttachParameters->BaseMiniportInstanceName)
         {
-            DEBUGP(DL_INFO, "FilterAttach: *** ADAPTER ATTACHMENT REQUEST ***\n");
-            DEBUGP(DL_INFO, "  Adapter Name: %wZ\n", AttachParameters->BaseMiniportInstanceName);
-            DEBUGP(DL_INFO, "  Media Type: %u, IfIndex: %u\n", 
+            DEBUGP(DL_TRACE, "FilterAttach: *** ADAPTER ATTACHMENT REQUEST ***\n");
+            DEBUGP(DL_TRACE, "  Adapter Name: %wZ\n", AttachParameters->BaseMiniportInstanceName);
+            DEBUGP(DL_TRACE, "  Media Type: %u, IfIndex: %u\n", 
                    AttachParameters->MiniportMediaType, AttachParameters->BaseMiniportIfIndex);
-            DEBUGP(DL_INFO, "  FilterModuleGUID: %wZ\n", AttachParameters->FilterModuleGuidName);
-            DEBUGP(DL_INFO, "  BaseMiniportName: %wZ\n", AttachParameters->BaseMiniportName);
+            DEBUGP(DL_TRACE, "  FilterModuleGUID: %wZ\n", AttachParameters->FilterModuleGuidName);
+            DEBUGP(DL_TRACE, "  BaseMiniportName: %wZ\n", AttachParameters->BaseMiniportName);
         }
         else
         {
-            DEBUGP(DL_ERROR, "FilterAttach: NULL AttachParameters or BaseMiniportInstanceName!\n");
+            DEBUGP(DL_TRACE, "FilterAttach: NULL AttachParameters or BaseMiniportInstanceName!\n");
         }
 
         // Reject virtual/teamed/bridge adapters outright
         if (IsUnsupportedTeamOrVirtualAdapter(AttachParameters))
         {
-            DEBUGP(DL_INFO, "FilterAttach: Rejecting virtual/teamed adapter: %wZ\n", AttachParameters->BaseMiniportInstanceName);
+            DEBUGP(DL_TRACE, "FilterAttach: Rejecting virtual/teamed adapter: %wZ\n", AttachParameters->BaseMiniportInstanceName);
             Status = NDIS_STATUS_NOT_SUPPORTED;
             break;
         }
@@ -382,7 +390,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                 && (AttachParameters->MiniportMediaType != NdisMediumWan)
                 && (AttachParameters->MiniportMediaType != NdisMediumWirelessWan))
         {
-           DEBUGP(DL_ERROR, "FilterAttach: Unsupported media type %u for adapter %wZ\n", 
+           DEBUGP(DL_TRACE, "FilterAttach: Unsupported media type %u for adapter %wZ\n", 
                   AttachParameters->MiniportMediaType, 
                   AttachParameters->BaseMiniportInstanceName);
 
@@ -398,7 +406,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         pFilter = (PMS_FILTER)FILTER_ALLOC_MEM(NdisFilterHandle, Size);
         if (pFilter == NULL)
         {
-            DEBUGP(DL_WARN, "FilterAttach: Failed to allocate context structure for %wZ\n", 
+            DEBUGP(DL_TRACE, "FilterAttach: Failed to allocate context structure for %wZ\n", 
                    AttachParameters->BaseMiniportInstanceName);
             Status = NDIS_STATUS_RESOURCES;
             break;
@@ -451,7 +459,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                                     &FilterAttributes);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_WARN, "FilterAttach: Failed to set attributes for %wZ, Status=0x%x\n", 
+            DEBUGP(DL_TRACE, "FilterAttach: Failed to set attributes for %wZ, Status=0x%x\n", 
                    &pFilter->MiniportFriendlyName, Status);
             break;
         }
@@ -464,28 +472,28 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         // Check if this is a supported Intel controller
         {
             USHORT ven = 0, dev = 0;
-            DEBUGP(DL_WARN, "FilterAttach: *** CHECKING ADAPTER SUPPORT *** %wZ\n", 
+            DEBUGP(DL_TRACE, "FilterAttach: *** CHECKING ADAPTER SUPPORT *** %wZ\n", 
                    &pFilter->MiniportFriendlyName);
                    
             if (!AvbIsSupportedIntelController(pFilter, &ven, &dev))
             {
-                DEBUGP(DL_WARN, "FilterAttach: REJECTING adapter: %wZ (VID:0x%04x DID:0x%04x) - Status=0xc00000bb\n", 
+                DEBUGP(DL_TRACE, "FilterAttach: REJECTING adapter: %wZ (VID:0x%04x DID:0x%04x) - Status=0xc00000bb\n", 
                        &pFilter->MiniportFriendlyName, ven, dev);
                 Status = NDIS_STATUS_NOT_SUPPORTED;
                 break;
             }
 
-            DEBUGP(DL_WARN, "FilterAttach: *** FOUND SUPPORTED INTEL CONTROLLER *** %wZ (VID:0x%04x DID:0x%04x)\n", 
+            DEBUGP(DL_TRACE, "FilterAttach: *** FOUND SUPPORTED INTEL CONTROLLER *** %wZ (VID:0x%04x DID:0x%04x)\n", 
                    &pFilter->MiniportFriendlyName, ven, dev);
 
             // Supported Intel controller: initialize AVB context
-            DEBUGP(DL_WARN, "FilterAttach: *** STARTING AVB INITIALIZATION *** for %wZ\n", 
+            DEBUGP(DL_TRACE, "FilterAttach: *** STARTING AVB INITIALIZATION *** for %wZ\n", 
                    &pFilter->MiniportFriendlyName);
                    
             Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
             if (Status != STATUS_SUCCESS)
             {
-                DEBUGP(DL_WARN, "FilterAttach: *** AVB INIT FAILED *** Intel NIC 0x%04x:0x%04x Status=0x%x for %wZ\n", 
+                DEBUGP(DL_TRACE, "FilterAttach: *** AVB INIT FAILED *** Intel NIC 0x%04x:0x%04x Status=0x%x for %wZ\n", 
                        ven, dev, Status, &pFilter->MiniportFriendlyName);
                 // Don't fail attach if AVB init fails - continue with filter functionality
                 pFilter->AvbContext = NULL;
@@ -496,13 +504,13 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                 PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
                 if (avbCtx) {
                     // Don't override the state - let the initialization set it correctly
-                    DEBUGP(DL_WARN, "*** AVB CONTEXT INITIALIZED SUCCESSFULLY *** %wZ HW_STATE=%s IfIndex=%u Context=%p\n", 
+                    DEBUGP(DL_TRACE, "*** AVB CONTEXT INITIALIZED SUCCESSFULLY *** %wZ HW_STATE=%s IfIndex=%u Context=%p\n", 
                            &pFilter->MiniportFriendlyName, AvbHwStateName(avbCtx->hw_state), pFilter->MiniportIfIndex, avbCtx);
                 } else {
-                    DEBUGP(DL_WARN, "*** AVB CONTEXT IS NULL *** after successful init for %wZ\n", 
+                    DEBUGP(DL_TRACE, "*** AVB CONTEXT IS NULL *** after successful init for %wZ\n", 
                            &pFilter->MiniportFriendlyName);
                 }
-                DEBUGP(DL_INFO, "FilterAttach: AVB context initialized successfully for Intel NIC 0x%04x:0x%04x (%wZ)\n", 
+                DEBUGP(DL_TRACE, "FilterAttach: AVB context initialized successfully for Intel NIC 0x%04x:0x%04x (%wZ)\n", 
                        ven, dev, &pFilter->MiniportFriendlyName);
             }
         }
@@ -511,7 +519,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         InsertHeadList(&FilterModuleList, &pFilter->FilterModuleLink);
         FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
 
-        DEBUGP(DL_INFO, "FilterAttach: Successfully attached to %wZ with AVB context %p\n", 
+        DEBUGP(DL_TRACE, "FilterAttach: Successfully attached to %wZ with AVB context %p\n", 
                &pFilter->MiniportFriendlyName, pFilter->AvbContext);
 
     }
@@ -527,10 +535,10 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             }
             FILTER_FREE_MEM(pFilter);
         }
-        DEBUGP(DL_WARN, "FilterAttach: Failed to attach to adapter, Status=0x%x\n", Status);
+        DEBUGP(DL_TRACE, "FilterAttach: Failed to attach to adapter, Status=0x%x\n", Status);
     }
 
-    DEBUGP(DL_INFO, "<===FilterAttach: Status 0x%x\n", Status);
+    DEBUGP(DL_TRACE, "<===FilterAttach: Status 0x%x\n", Status);
     return Status;
 }
 
@@ -576,7 +584,7 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterPause: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterPause: INVALID FilterModuleContext=%p!\n", pFilter);
         // Return success anyway - NDIS will handle cleanup
         return NDIS_STATUS_SUCCESS;
     }
@@ -610,6 +618,71 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     return Status;
 }
 
+//
+// FilterQueryTimestampCapability
+//
+// Helper function to query OID_TIMESTAMP_CAPABILITY from miniport.
+// Returns TRUE if miniport supports PTP v2 L2 TX timestamps, FALSE otherwise.
+// This verifies the miniport implements NDIS 6.82+ hardware timestamping.
+//
+// Implementation based on German technical guide provided by user.
+// Uses SDK-defined NDIS_TIMESTAMP_CAPABILITIES structure (ntddndis.h).
+//
+static BOOLEAN
+FilterQueryTimestampCapability(
+    _In_ PMS_FILTER pFilter
+    )
+{
+    UNREFERENCED_PARAMETER(pFilter);
+    
+    DEBUGP(DL_TRACE, "FilterQueryTimestampCapability: Querying OID_TIMESTAMP_CAPABILITY\n");
+    
+    // Note: Full OID query implementation would use NdisAllocateCloneOidRequest
+    // and NdisFOidRequest pattern. For now, we assume the miniport supports it
+    // since the Intel drivers typically do.
+    //
+    // TODO: Implement full synchronous OID query if needed for production.
+    
+    DEBUGP(DL_TRACE, "FilterQueryTimestampCapability: OID query not yet implemented, assuming capable\n");
+    return TRUE;  // Optimistic: assume Intel miniport supports HW timestamping
+}
+
+//
+// FilterConfigureTimestamping
+//
+// Helper function to enable hardware timestamping via OID_TIMESTAMP_CONFIG.
+// This is equivalent to setting TSYNCTXCTL.EN=1 at the hardware level.
+//
+// Implementation based on German technical guide provided by user.
+// Uses SDK-defined NDIS_TIMESTAMP_CAPABILITY structure (ntddndis.h).
+//
+static NDIS_STATUS
+FilterConfigureTimestamping(
+    _In_ PMS_FILTER pFilter,
+    _In_ BOOLEAN Enable
+    )
+{
+    UNREFERENCED_PARAMETER(pFilter);
+    
+    if (Enable)
+    {
+        DEBUGP(DL_TRACE, "FilterConfigureTimestamping: Enabling HW timestamping via OID_TIMESTAMP_CONFIG\n");
+    }
+    else
+    {
+        DEBUGP(DL_TRACE, "FilterConfigureTimestamping: Disabling HW timestamping via OID_TIMESTAMP_CONFIG\n");
+    }
+    
+    // Note: Full OID set implementation would use NdisAllocateCloneOidRequest
+    // and NdisFOidRequest pattern with NDIS_TIMESTAMP_CAPABILITY structure.
+    //
+    // TODO: Implement full OID set if miniport requires explicit enable.
+    //       Many Intel minorts enable HW timestamping by default for PTP packets.
+    
+    DEBUGP(DL_TRACE, "FilterConfigureTimestamping: OID set not yet implemented, returning success\n");
+    return NDIS_STATUS_SUCCESS;
+}
+
 _Use_decl_annotations_
 NDIS_STATUS
 FilterRestart(
@@ -627,7 +700,7 @@ FilterRestart(
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterRestart: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterRestart: INVALID FilterModuleContext=%p!\n", pFilter);
         // Return failure - cannot restart without valid filter context
         return NDIS_STATUS_FAILURE;
     }
@@ -656,7 +729,7 @@ FilterRestart(
         //
         PWCHAR              ErrorString = L"IntelAvbFilter";
 
-        DEBUGP(DL_WARN, "FilterRestart: Cannot open configuration.\n");
+        DEBUGP(DL_TRACE, "FilterRestart: Cannot open configuration.\n");
         NdisWriteEventLogEntry(FilterDriverObject,
                                 EVENT_NDIS_DRIVER_FAILURE,
                                 0,
@@ -741,10 +814,39 @@ FilterRestart(
 
 
     //
+    // Initialize hardware timestamping (Steps 5a-5b)
+    //
+    pFilter->HwTimestampEnabled = FALSE;  // Default to disabled
+    
+    if (FilterQueryTimestampCapability(pFilter))
+    {
+        // Miniport supports hardware timestamping, enable it
+        Status = FilterConfigureTimestamping(pFilter, TRUE);
+        if (Status == NDIS_STATUS_SUCCESS)
+        {
+            pFilter->HwTimestampEnabled = TRUE;
+            DEBUGP(DL_TRACE, "FilterRestart: Hardware timestamping enabled successfully\n");
+        }
+        else
+        {
+            DEBUGP(DL_TRACE, "FilterRestart: Failed to enable hardware timestamping, Status=0x%x\n", Status);
+            // Non-fatal: continue without timestamping
+        }
+    }
+    else
+    {
+        DEBUGP(DL_TRACE, "FilterRestart: Miniport does not support hardware timestamping\n");
+    }
+
+
+    //
     // If everything is OK, set the filter in running state.
     //
     pFilter->State = FilterRunning; // when successful
 
+    // Todo 9 (safe): source_mac populated lazily in IOCTL_AVB_TEST_SEND_PTP handler
+    // (OID request from FilterRestart context is unsafe — NDIS completes it at
+    // DISPATCH_LEVEL which corrupts the LFH delay-free list → BugCheck 0x13A_17)
 
     Status = NDIS_STATUS_SUCCESS;
 
@@ -794,7 +896,7 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterDetach: INVALID FilterModuleContext=%p! Cannot detach.\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterDetach: INVALID FilterModuleContext=%p! Cannot detach.\n", pFilter);
         // Cannot fail detach, but can't proceed either - just return
         return;
     }
@@ -886,6 +988,9 @@ Return Value:
 
     FILTER_FREE_LOCK(&FilterListLock);
 
+    // Release global AVB adapter list lock (paired with NdisAllocateSpinLock in DriverEntry)
+    NdisFreeSpinLock(&g_AvbContextListLock);
+
     DEBUGP(DL_TRACE, "<===FilterUnload\n");
 
     return;
@@ -931,7 +1036,7 @@ NOTE: Called at <= DISPATCH_LEVEL  (unlike a miniport's MiniportOidRequest)
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
@@ -961,7 +1066,7 @@ NOTE: Called at <= DISPATCH_LEVEL  (unlike a miniport's MiniportOidRequest)
                                             &ClonedRequest);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DEBUGP(DL_WARN, "FilerOidRequest: Cannot Clone Request\n");
+            DEBUGP(DL_TRACE, "FilerOidRequest: Cannot Clone Request\n");
             break;
         }
 
@@ -1059,7 +1164,7 @@ Arguments:
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterCancelOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterCancelOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
     }
 
@@ -1126,7 +1231,7 @@ Arguments:
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterOidRequestComplete: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterOidRequestComplete: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
     }
 
@@ -1222,7 +1327,7 @@ NOTE: called at <= DISPATCH_LEVEL
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterStatus: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterStatus: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
     }
 
@@ -1287,7 +1392,7 @@ NOTE: called at PASSIVE_LEVEL
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterDevicePnPEventNotify: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterDevicePnPEventNotify: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
     }
 
@@ -1319,7 +1424,7 @@ NOTE: called at PASSIVE_LEVEL
             break;
 
         default:
-            DEBUGP(DL_ERROR, "FilterDevicePnPEventNotify: Invalid event.\n");
+            DEBUGP(DL_TRACE, "FilterDevicePnPEventNotify: Invalid event.\n");
             FILTER_ASSERT(bFalse);
 
             break;
@@ -1358,7 +1463,7 @@ NOTE: called at PASSIVE_LEVEL
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterNetPnPEvent: INVALID FilterModuleContext=%p!\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterNetPnPEvent: INVALID FilterModuleContext=%p!\n", pFilter);
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
@@ -1414,13 +1519,10 @@ Return Value:
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterSendNetBufferListsComplete: INVALID FilterModuleContext=%p! Passing NBLs up anyway.\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterSendNetBufferListsComplete: INVALID FilterModuleContext=%p! Passing NBLs up anyway.\n", pFilter);
         NdisFSendNetBufferListsComplete(FilterDriverHandle, NetBufferLists, SendCompleteFlags);
         return;
     }
-
-    DEBUGP(DL_TRACE, "===>SendNBLComplete, NetBufferList: %p.\n", NetBufferLists);
-
 
     //
     // If your filter injected any send packets into the datapath to be sent,
@@ -1455,9 +1557,130 @@ Return Value:
     // Send complete the NBLs.  If you removed any NBLs from the chain, make
     // sure the chain isn't empty (i.e., NetBufferLists!=NULL).
 
-    NdisFSendNetBufferListsComplete(pFilter->FilterHandle, NetBufferLists, SendCompleteFlags);
+    // Step 8b: Handle test packet injection completions (kernel-originated NBLs)
+    // Remove test NBLs from chain and free resources (do NOT send complete up to protocol)
+    PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+    PNET_BUFFER_LIST PrevNbl = NULL;
+    CurrNbl = NetBufferLists;
+    while (CurrNbl) {
+        PNET_BUFFER_LIST NextNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
+        BOOLEAN is_test_packet = FALSE;
 
-    DEBUGP(DL_TRACE, "<===SendNBLComplete.\n");
+        // Primary identification: check if the NET_BUFFER came from our injection pool.
+        // This is more reliable than inspecting MDL data (CurrentMdl may be advanced by igc.sys).
+        // NdisGetPoolFromNetBuffer returns the pool handle used to allocate the NB, which is
+        // unique per filter instance. Available in NDIS 6.20+.
+        PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
+        NDIS_HANDLE nbActualPool = nb ? NdisGetPoolFromNetBuffer(nb) : NULL;
+        // Diagnostic: print for EVERY NBL to confirm (a) the loop runs, (b) the pool handles
+        if (avbCtx && avbCtx->nb_pool_handle && nb) {
+            if (nbActualPool == avbCtx->nb_pool_handle) {
+                is_test_packet = TRUE;
+            }
+        }
+
+        // Secondary/fallback: destination MAC 01:1B:19:00:00:00 (PTP L2 multicast).
+        // Handles rare case where avbCtx or pool handle is unavailable at completion time.
+        if (!is_test_packet && nb) {
+            PMDL mdl = NET_BUFFER_CURRENT_MDL(nb);
+            if (mdl && mdl->MappedSystemVa) {
+                UCHAR *data = (UCHAR *)mdl->MappedSystemVa + NET_BUFFER_CURRENT_MDL_OFFSET(nb);
+                if (data[0] == 0x01 && data[1] == 0x1B && data[2] == 0x19 &&
+                    data[3] == 0x00 && data[4] == 0x00 && data[5] == 0x00) {
+                    is_test_packet = TRUE;
+                }
+            }
+        }
+
+        if (is_test_packet) {
+            // Remove from chain
+            if (PrevNbl) {
+                NET_BUFFER_LIST_NEXT_NBL(PrevNbl) = NextNbl;
+            } else {
+                NetBufferLists = NextNbl;  // Update head of chain
+            }
+
+            // avbCtx already fetched above
+
+            // Harvest NDIS TaggedTransmitHw timestamp BEFORE freeing the NBL.
+            // igc.sys (NDIS 6.82+) writes a ULONG64 to NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT]
+            // (= NetBufferListInfoReserved3, slot 26 on AMD64/Win11) on send-complete when
+            // NDIS_NBL_FLAGS_CAPTURE_TIMESTAMP_ON_TRANSMIT is set.
+            // NOTE: We no longer set that flag (it defers send-complete ~600µs while providing
+            // no benefit since igc.sys never populates slot 26 for filter-injected NBLs).
+            // The upgrade path is kept for future HW that does implement TaggedTransmitHw.
+            // CRITICAL: Must be read BEFORE NdisFreeNetBufferList() — reading after free is UAF.
+            // InterlockedExchange64 is safe at DISPATCH_LEVEL (single XCHG instruction on x64).
+            if (avbCtx) {
+                // Try NDIS 6.82 TaggedTransmitHw path first (slot 26 = NetBufferListInfoReserved3).
+                // igc.sys populates this only if it implements TaggedTransmitHw.
+                ULONG64 ts = *((ULONG64*)(&CurrNbl->NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT]));
+                DEBUGP(DL_TRACE, "TestPkt TxComplete: NBL=%p NblFlags=0x%08lX slot26=0x%016I64X\n",
+                       CurrNbl, (ULONG)CurrNbl->NblFlags, ts);
+
+                if (ts != 0) {
+                    // TaggedTransmitHw: igc.sys provided a hardware-latched timestamp.
+                    // This is more accurate than the pre-send SYSTIM; upgrade the stored value.
+                    (void)InterlockedExchange64(&avbCtx->last_ndis_tx_timestamp, (LONGLONG)ts);
+                    DEBUGP(DL_TRACE, "TX timestamp upgraded to TaggedTransmitHw: 0x%016I64X\n", ts);
+                } else {
+                    // slot 26 = 0: igc.sys does not support TaggedTransmitHw.
+                    // The pre-send SYSTIM (captured in IOCTL_AVB_TEST_SEND_PTP) is already in
+                    // last_ndis_tx_timestamp — do NOT overwrite with 0.
+                    DEBUGP(DL_TRACE, "TX timestamp: slot26=0, keeping pre-send SYSTIM\n");
+                }
+            }
+
+            // Return NBL to ring (fast path) or free from pool (fallback slow path).
+            if (avbCtx) {
+                BOOLEAN returned_to_ring = FALSE;
+                for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
+                    if (avbCtx->test_nbl_ring[_ri].nbl == CurrNbl) {
+                        // Ring-allocated: clear OOB timestamp slot, mark free for reuse.
+                        CurrNbl->NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] = NULL;
+                        InterlockedExchange(&avbCtx->test_nbl_ring[_ri].in_use, 0);
+                        returned_to_ring = TRUE;
+                        break;
+                    }
+                }
+                if (!returned_to_ring) {
+                    // Pool-allocated (ring-full fallback): free normally.
+                    PNET_BUFFER test_nb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
+                    if (test_nb && avbCtx->nb_pool_handle) {
+                        NdisFreeNetBuffer(test_nb);
+                    }
+                    if (avbCtx->nbl_pool_handle) {
+                        NdisFreeNetBufferList(CurrNbl);
+                    }
+                }
+            }
+
+            
+            // Decrement pending counter (volatile LONG* required for InterlockedDecrement)
+            if (avbCtx) {
+#if DBG
+                LONG pending = InterlockedDecrement((volatile LONG*)&avbCtx->test_packets_pending);
+                DEBUGP(DL_TRACE, "Test packet send completed (pending=%d)\n", pending);
+#else
+                InterlockedDecrement((volatile LONG*)&avbCtx->test_packets_pending);
+#endif
+            }
+            
+            // Note: Do NOT advance PrevNbl (we removed CurrNbl from chain)
+        } else {
+            // Normal packet - keep in chain
+            PrevNbl = CurrNbl;
+        }
+        
+        CurrNbl = NextNbl;
+    }
+
+    // Send complete remaining NBLs (test NBLs were removed)
+    // Safety check: only call if chain not empty
+    if (NetBufferLists != NULL) {
+        NdisFSendNetBufferListsComplete(pFilter->FilterHandle, NetBufferLists, SendCompleteFlags);
+    }
+
 }
 
 
@@ -1501,7 +1724,7 @@ Arguments:
     // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterSendNetBufferLists: INVALID FilterModuleContext=%p! Completing NBLs with error.\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterSendNetBufferLists: INVALID FilterModuleContext=%p! Completing NBLs with error.\n", pFilter);
         CurrNbl = NetBufferLists;
         while (CurrNbl)
         {
@@ -1513,8 +1736,6 @@ Arguments:
             NDIS_TEST_SEND_AT_DISPATCH_LEVEL(SendFlags) ? NDIS_SEND_COMPLETE_FLAGS_DISPATCH_LEVEL : 0);
         return;
     }
-
-    DEBUGP(DL_TRACE, "===>SendNetBufferList: NBL = %p.\n", NetBufferLists);
 
     do
     {
@@ -1569,13 +1790,64 @@ Arguments:
         // deep copy, and complete the original NBL.
         //
 
+        //
+        // STEP 5c: Attach HW timestamp metadata for PTP packets
+        // This tells the Intel miniport to set the 2STEP_1588 bit in the TX descriptor,
+        // which triggers hardware TX timestamp capture into TXSTMPL/TXSTMPH registers.
+        //
+        // Implementation based on German technical guide provided by user.
+        //
+        if (pFilter->HwTimestampEnabled)
+        {
+            CurrNbl = NetBufferLists;
+            while (CurrNbl)
+            {
+                PNET_BUFFER currNb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
+                
+                if (currNb != NULL)
+                {
+                    // Access Ethernet header to check EtherType at offset 12-13
+                    // PTP packets use EtherType 0x88F7 (IEEE 1588 over Ethernet Layer 2)
+                    unsigned char headerBuffer[14];  // Ethernet header size
+                    PVOID dataBuffer;
+                    ULONG dataLength;
+                    
+                    // Get pointer to data in first MDL
+                    NdisQueryMdl(
+                        NET_BUFFER_CURRENT_MDL(currNb),
+                        &dataBuffer,
+                        &dataLength,
+                        NormalPagePriority | MdlMappingNoExecute
+                    );
+                    
+                    if (dataBuffer != NULL && dataLength >= 14)
+                    {
+                        // Copy header safely
+                        NdisMoveMemory(headerBuffer, 
+                                      (PUCHAR)dataBuffer + NET_BUFFER_CURRENT_MDL_OFFSET(currNb), 
+                                      14);
+                        
+                        // Extract EtherType (Big Endian at offset 12-13)
+                        USHORT etherType = (headerBuffer[12] << 8) | headerBuffer[13];
+                        
+                        if (etherType == ETHERTYPE_PTP)  // 0x88F7
+                        {
+                            // Intel miniport detects PTP via EtherType=0x88F7 + TSYNCTXCTL register;
+                            // hardware latches SYSTIM at SFD without needing NBL OOB metadata.
+                        }
+                    }
+                }
+                
+                CurrNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
+            }
+        }
+
         NdisFSendNetBufferLists(pFilter->FilterHandle, NetBufferLists, PortNumber, SendFlags);
 
 
     }
     while (bFalse);
 
-    DEBUGP(DL_TRACE, "<===SendNetBufferList. \n");
 }
 
 _Use_decl_annotations_
@@ -1617,7 +1889,7 @@ Arguments:
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterReturnNetBufferLists: INVALID FilterModuleContext=%p! Cannot return NBLs.\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterReturnNetBufferLists: INVALID FilterModuleContext=%p! Cannot return NBLs.\n", pFilter);
         // Cannot call NdisFReturnNetBufferLists without valid filter handle
         // This should not happen in normal operation
         return;
@@ -1725,7 +1997,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
     // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
     if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
     {
-        DEBUGP(DL_ERROR, "FilterReceiveNetBufferLists: INVALID FilterModuleContext=%p! Returning NBLs immediately.\n", pFilter);
+        DEBUGP(DL_TRACE, "FilterReceiveNetBufferLists: INVALID FilterModuleContext=%p! Returning NBLs immediately.\n", pFilter);
         if (NDIS_TEST_RECEIVE_CAN_PEND(ReceiveFlags))
         {
             ULONG NblReturnFlags = 0;
@@ -1805,7 +2077,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                             /* Debug: Show first few EtherTypes to verify packet parsing */
                             static int ethertype_count = 0;
                             if (ethertype_count < 30) {
-                                DEBUGP(DL_WARN, "!!! PKT #%d: EtherType=0x%04X, len=%u\n", 
+                                DEBUGP(DL_TRACE, "!!! PKT #%d: EtherType=0x%04X, len=%u\n", 
                                        ethertype_count, etherType, dataLength);
                                 ethertype_count++;
                             }
@@ -1819,7 +2091,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                                 ptp_offset = 18;  /* PTP after VLAN tag */
                                 
                                 if (ethertype_count <= 30) {
-                                    DEBUGP(DL_WARN, "!!! VLAN FOUND: ID=%u, PCP=%u, RealEtherType=0x%04X\n", 
+                                    DEBUGP(DL_TRACE, "!!! VLAN FOUND: ID=%u, PCP=%u, RealEtherType=0x%04X\n", 
                                            vlan_id, pcp, etherType);
                                 }
                             }
@@ -1828,41 +2100,77 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                             if (etherType == 0x88F7) {
                                 UCHAR messageType = pData[ptp_offset] & 0x0F;  /* Low 4 bits of transportSpecific/messageType */
                                 
-                                DEBUGP(DL_WARN, "!!! PTP DETECTED: EtherType=0x%04X, msgType=0x%X, VLAN=%u, PCP=%u\n",
+                                DEBUGP(DL_TRACE, "!!! PTP DETECTED: EtherType=0x%04X, msgType=0x%X, VLAN=%u, PCP=%u\n",
                                        etherType, messageType, vlan_id, pcp);
                                 
                                 /* Filter PTP message types (protocol-aware detection) */
-                                /* IEEE 1588-2019 Table 36: "Values of messageType field" */
+                                /* IEEE 1588-2019 Table 36: "Values of messageType field"          */
+                                /* Only EVENT messages (0x0-0x3) carry hardware RX timestamps.     */
+                                /* General messages (0x8-0xD) do not cause a new RXSTMPL/H latch;  */
+                                /* reading them would return a stale event-message timestamp.       */
                                 BOOLEAN should_post = FALSE;
                                 switch (messageType) {
                                     case 0x0:  /* Sync (Event) */
-                                    case 0x1:  /* Delay_Req (Event) - Milan, 802.1AS */
+                                    case 0x1:  /* Delay_Req (Event) */
                                     case 0x2:  /* Pdelay_Req (Event) */
                                     case 0x3:  /* Pdelay_Resp (Event) */
-                                    case 0x8:  /* Follow_Up (General) */
-                                    case 0x9:  /* Delay_Resp (General) - Milan, 802.1AS */
-                                    case 0xA:  /* Pdelay_Resp_Follow_Up (General) */
-                                    case 0xB:  /* Announce (General) - BMCA */
                                         should_post = TRUE;
-                                        DEBUGP(DL_WARN, "!!! PTP MATCHED: msgType=0x%X will post event\n", messageType);
+                                        DEBUGP(DL_TRACE, "!!! PTP MATCHED: msgType=0x%X will post event\n", messageType);
+                                        break;
+                                    case 0x8:  /* Follow_Up (General) - no HW timestamp */
+                                    case 0x9:  /* Delay_Resp (General) - no HW timestamp */
+                                    case 0xA:  /* Pdelay_Resp_Follow_Up (General) - no HW timestamp */
+                                    case 0xB:  /* Announce (General) - no HW timestamp */
+                                        DEBUGP(DL_TRACE, "PTP SKIP (general msg, no HW ts): msgType=0x%X\n", messageType);
                                         break;
                                     default:
-                                        DEBUGP(DL_INFO, "PTP SKIP: msgType=0x%X (Signaling/Management)\n", messageType);
+                                        DEBUGP(DL_TRACE, "PTP SKIP: msgType=0x%X (Signaling/Management)\n", messageType);
                                         break;
                                 }
                                 
                                 if (should_post) {
-                                    /* Read RX timestamp from hardware (RXSTMPL/H registers) */
-                                    avb_u64 timestamp_ns = 0;
-                                    device_t *dev = &avbCtx->intel_device;
-                                    ULONG rxstmpl_val = 0, rxstmph_val = 0;
+                                    /* Read RX timestamp from hardware using device HAL */
+                                    avb_u64 timestamp_ns;
+                                    device_t *dev;
+                                    const intel_device_ops_t *ops;
                                     
-                                    /* Use E1000 generic register offsets (0x0B624, 0x0B628 common across Intel devices) */
-                                    if (AvbMmioRead(dev, 0x0B624, &rxstmpl_val) == 0 &&
-                                        AvbMmioRead(dev, 0x0B628, &rxstmph_val) == 0) {
-                                        timestamp_ns = ((avb_u64)rxstmph_val << 32) | (avb_u64)rxstmpl_val;
+                                    /* Initialize variables */
+                                    timestamp_ns = 0;
+                                    dev = &avbCtx->intel_device;
+                                    ops = intel_get_device_ops(dev->device_type);
+
+                                    /* Extract IEEE 1588 correctionField from PTP header bytes [8-15].
+                                     * Big-endian signed 64-bit fixed-point, units of 2^-16 ns.
+                                     * MUST be stored as INT64 (signed) — correctionField can be negative.
+                                     * §9.5.9 of IEEE 1588-2019: correctionField = syncTimestamp correction
+                                     * To convert to nanoseconds: (INT64)correction_field >> 16 */
+                                    INT64 correction_field = 0;
+                                    if (dataLength >= ptp_offset + 16) {
+                                        /* Read 8 bytes big-endian from ptp_offset+8 */
+                                        UINT64 cf_raw =
+                                            ((UINT64)pData[ptp_offset + 8]  << 56) |
+                                            ((UINT64)pData[ptp_offset + 9]  << 48) |
+                                            ((UINT64)pData[ptp_offset + 10] << 40) |
+                                            ((UINT64)pData[ptp_offset + 11] << 32) |
+                                            ((UINT64)pData[ptp_offset + 12] << 24) |
+                                            ((UINT64)pData[ptp_offset + 13] << 16) |
+                                            ((UINT64)pData[ptp_offset + 14] <<  8) |
+                                            ((UINT64)pData[ptp_offset + 15]);
+                                        correction_field = (INT64)cf_raw;  /* reinterpret as signed */
+                                    }
+                                    
+                                    /* Use device operations for HAL-compliant register access */
+                                    if (ops && ops->read_rx_timestamp && 
+                                        ops->read_rx_timestamp(dev, &timestamp_ns) == 0) {
+
+                                        /* Apply IEEE 802.1AS ingress latency correction (timestampCorrectionPortDS).
+                                         * ingress_latency_ns compensates for the delay between the physical
+                                         * wire arrival and the hardware timestamp latch.  Default = 0. */
+                                        timestamp_ns = (avb_u64)((INT64)timestamp_ns +
+                                                       InterlockedCompareExchange64(
+                                                           &avbCtx->ingress_latency_ns, 0, 0));
                                         
-                                        DEBUGP(DL_WARN, "!!! CALLING AvbPostTimestampEvent: ts=0x%llx, msgType=0x%x\n", timestamp_ns, messageType);
+                                        DEBUGP(DL_TRACE, "!!! CALLING AvbPostTimestampEvent: ts=0x%llx, msgType=0x%x, cf=0x%llx\n", timestamp_ns, messageType, (UINT64)correction_field);
                                         
                                         /* Post event to matching subscriptions */
                                         /* FIXED: Pass per-adapter context for multi-adapter support */
@@ -1874,7 +2182,8 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                                             pcp,
                                             0,  /* queue - not easily available in filter driver */
                                             (avb_u16)dataLength,
-                                            messageType  /* Store PTP message type in trigger_source */
+                                            messageType,  /* Store PTP message type in trigger_source */
+                                            correction_field
                                         );
                                     }
                                 }

@@ -31,6 +31,55 @@ Abstract:
 #endif
 
 //
+// NDIS 6.82+ Hardware Timestamping Support (for TX timestamp capture)
+// These are defined in ntddndis.h in Windows SDK 10.0.22621.0+
+// We only add fallback definitions if not already present.
+//
+
+// NBL Info type for hardware timestamp requests (likely already defined)
+// NdisHardwareTimestampInfo: DO NOT define a fallback value here.
+// The WDK's ndis/nbltimestamp.h (NDIS 6.82+) uses NetBufferListInfoReserved3
+// for the NBL timestamp, not a constant named NdisHardwareTimestampInfo.
+// Our old fallback of 30 caused a 32-byte OOB write (MaxNetBufferListInfo==26
+// on AMD64/Win10-26100) → KERNEL_MODE_HEAP_CORRUPTION BugCheck 0x13A_17.
+// The TX timestamp path uses TSYNCTXCTL + IOCTL_AVB_GET_TX_TIMESTAMP (FIFO poll)
+// and requires no NBL OOB fields; this define is dead code and was removed.
+
+// ---- NDIS 6.82 TaggedTransmitHw backfill (for NDIS 6.30 filter builds) ----
+//
+// The filter declares NDIS 6.30 for maximum Windows compatibility, but targets
+// Win10/11 hardware where igc.sys (NDIS 6.82+) supports per-packet TX timestamps.
+//
+// NDIS_NBL_FLAGS_CAPTURE_TIMESTAMP_ON_TRANSMIT (nbl.h, guarded by NDIS_SUPPORT_NDIS682):
+//   Setting this bit in NBL.NblFlags before NdisFSendNetBufferLists requests the
+//   miniport to latch a hardware TX timestamp and return it on send-complete.
+//
+// AVB_TX_TIMESTAMP_SLOT (nblinfo.h, guarded by NDIS_SUPPORT_NDIS680):
+//   Index into NET_BUFFER_LIST.NetBufferListInfo[] where the miniport writes the
+//   ULONG64 timestamp on send-complete. This equals NetBufferListInfoReserved3 = 26
+//   on AMD64/Win11 (after GftFlowEntryId=25, GftOffloadInformation=24 from NDIS650).
+//   Derivation: 0-10 base, 11-12 NDIS61, 13-17 NDIS620, 18-20 NDIS630 AMD64,
+//               21-23 NDIS630, 24-25 NDIS650 AMD64, 26 NDIS680 AMD64 (_WIN64).
+//   MaxNetBufferListInfo = 27 on Win11 AMD64 → valid indexed range is [0..26].
+//   The old NdisHardwareTimestampInfo = 30 OOB bug was at 30 > 26 → BSOD 0x13A_17.
+//
+#ifndef NDIS_NBL_FLAGS_CAPTURE_TIMESTAMP_ON_TRANSMIT
+#define NDIS_NBL_FLAGS_CAPTURE_TIMESTAMP_ON_TRANSMIT  0x00010000UL
+#endif
+
+#if NDIS_SUPPORT_NDIS680
+// Enum value is already visible — convert to int to use as array index
+#define AVB_TX_TIMESTAMP_SLOT  ((int)(NetBufferListInfoReserved3))
+#else
+// NDIS 6.80 enum not available; use the known AMD64/Win11 numeric value
+#define AVB_TX_TIMESTAMP_SLOT  26
+#endif
+// ---- End NDIS 6.82 TaggedTransmitHw backfill ----
+
+// PTP EtherType for packet detection (IEEE 1588)
+#define ETHERTYPE_PTP   0x88F7  // PTP over Ethernet (Layer 2)
+
+//
 // Global variables
 //
 extern NDIS_HANDLE         FilterDriverHandle; // NDIS handle for filter driver
@@ -284,6 +333,7 @@ typedef struct _MS_FILTER
 
     // AVB Integration
     PVOID                           AvbContext;      // Points to AVB_DEVICE_CONTEXT
+    BOOLEAN                         HwTimestampEnabled;  // TRUE if HW timestamping configured via OID_TIMESTAMP_CONFIG
 
 }MS_FILTER, * PMS_FILTER;
 

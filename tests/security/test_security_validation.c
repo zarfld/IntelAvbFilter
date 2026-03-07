@@ -28,6 +28,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdbool.h>
+#include "../../include/avb_ioctl.h"  // SSOT for IOCTL definitions
 
 // ANSI color codes
 #define COLOR_RESET   "\x1b[0m"
@@ -39,13 +40,8 @@
 // Driver device name
 #define DRIVER_DEVICE_NAME "\\\\.\\IntelAvbFilter"
 
-// IOCTL codes (from avb_ioctl.h)
-#define IOCTL_AVB_SET_PHC_TIME          CTL_CODE(FILE_DEVICE_NETWORK, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_GET_PHC_TIME          CTL_CODE(FILE_DEVICE_NETWORK, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_SET_PHC_FREQ          CTL_CODE(FILE_DEVICE_NETWORK, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_GET_PHC_FREQ          CTL_CODE(FILE_DEVICE_NETWORK, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AVB_SET_TAS_SCHEDULE      CTL_CODE(FILE_DEVICE_NETWORK, 0x805, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define IOCTL_AVB_GET_TAS_STATUS        CTL_CODE(FILE_DEVICE_NETWORK, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// IOCTL codes - using canonical SSOT definitions from avb_ioctl.h
+// (No aliases - always prefer SSOT canonical names per ADR-SSOT-001)
 
 // Test result tracking
 typedef struct _TestResult {
@@ -115,7 +111,7 @@ BOOL TC_Security_001_NullPointerValidation(HANDLE hDevice, TestResult* result) {
     // Test 1: Null input buffer with non-zero length (should fail)
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,
+        IOCTL_AVB_SET_TIMESTAMP,
         NULL,                  // Null input buffer
         sizeof(UINT64),        // Non-zero length
         NULL,
@@ -143,7 +139,7 @@ BOOL TC_Security_001_NullPointerValidation(HANDLE hDevice, TestResult* result) {
     UINT64 timeValue = 1234567890;
     success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_GET_PHC_TIME,
+        IOCTL_AVB_GET_TIMESTAMP,
         &timeValue,
         sizeof(timeValue),
         NULL,                  // Null output buffer
@@ -200,7 +196,7 @@ BOOL TC_Security_002_BufferSizeValidation(HANDLE hDevice, TestResult* result) {
     // Attempt to send oversized buffer
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,
+        IOCTL_AVB_SET_TIMESTAMP,
         hugeBuffer,
         HUGE_BUFFER_SIZE,
         NULL,
@@ -256,7 +252,7 @@ BOOL TC_Security_003_IntegerOverflow(HANDLE hDevice, TestResult* result) {
 
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,
+        IOCTL_AVB_SET_TIMESTAMP,
         &invalidTime,
         sizeof(invalidTime),
         NULL,
@@ -281,7 +277,7 @@ BOOL TC_Security_003_IntegerOverflow(HANDLE hDevice, TestResult* result) {
 
     success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,
+        IOCTL_AVB_SET_TIMESTAMP,
         &invalidTime,
         sizeof(invalidTime),
         NULL,
@@ -317,7 +313,7 @@ BOOL TC_Security_004_BufferBoundsChecking(HANDLE hDevice, TestResult* result) {
 
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,
+        IOCTL_AVB_SET_TIMESTAMP,
         smallBuffer,
         sizeof(smallBuffer),  // Too small
         NULL,
@@ -377,7 +373,7 @@ BOOL TC_Security_005_PrivilegeEscalation(HANDLE hDevice, TestResult* result) {
 
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,  // Admin-only operation
+        IOCTL_AVB_SET_TIMESTAMP,  // Admin-only operation
         &timeValue,
         sizeof(timeValue),
         NULL,
@@ -434,7 +430,7 @@ BOOL TC_Security_006_MemorySafety(HANDLE hDevice, TestResult* result) {
     // Get PHC time (may return data or fail)
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_GET_PHC_TIME,
+        IOCTL_AVB_GET_TIMESTAMP,
         NULL,
         0,
         outputBuffer,
@@ -497,7 +493,7 @@ BOOL TC_Security_007_ResourceExhaustion(HANDLE hDevice, TestResult* result) {
     for (int i = 0; i < IOCTL_COUNT; i++) {
         BOOL success = DeviceIoControl(
             hDevice,
-            IOCTL_AVB_GET_PHC_TIME,
+            IOCTL_AVB_GET_TIMESTAMP,
             &timeValue,
             sizeof(timeValue),
             &timeValue,
@@ -614,7 +610,7 @@ BOOL TC_Security_009_DmaBufferValidation(HANDLE hDevice, TestResult* result) {
 
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,
+        IOCTL_AVB_SET_TIMESTAMP,
         buffer,
         sizeof(UINT64),
         NULL,
@@ -761,7 +757,7 @@ BOOL TC_Security_012_PrivilegeBoundary(HANDLE hDevice, TestResult* result) {
     // Test read-only operation (should work for all users)
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_GET_PHC_TIME,
+        IOCTL_AVB_GET_TIMESTAMP,
         NULL,
         0,
         &timeValue,
@@ -776,7 +772,7 @@ BOOL TC_Security_012_PrivilegeBoundary(HANDLE hDevice, TestResult* result) {
     // Test write operation (admin-only)
     success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_SET_PHC_TIME,
+        IOCTL_AVB_SET_TIMESTAMP,
         &timeValue,
         sizeof(timeValue),
         NULL,
@@ -827,7 +823,7 @@ BOOL TC_Security_013_DosResistance(HANDLE hDevice, TestResult* result) {
     for (int i = 0; i < FLOOD_COUNT; i++) {
         BOOL success = DeviceIoControl(
             hDevice,
-            IOCTL_AVB_GET_PHC_TIME,
+            IOCTL_AVB_GET_TIMESTAMP,
             NULL,
             0,
             &timeValue,

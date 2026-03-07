@@ -126,8 +126,8 @@ int main(void)
     CloseHandle(hDriver);
     
     printf("\n========================================\n");
-    printf("Press Enter to exit...\n");
-    getchar();
+    // printf("Press Enter to exit...\n");
+    // getchar();
     
     return 0;
 }

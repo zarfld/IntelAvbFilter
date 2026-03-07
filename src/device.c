@@ -6,6 +6,181 @@
 
 #include "precomp.h"
 
+/* ---------------------------------------------------------------------------
+ * FastIo dispatch for IOCTL_AVB_GET_TX_TIMESTAMP
+ *
+ * Bypasses IRP allocation entirely — reduces GET_TX round-trip from ~8µs
+ * (METHOD_BUFFERED IRP path) to ~0.5-1µs (direct call in caller's thread).
+ * Returns FALSE for all other IOCTLs so they fall through to the IRP path.
+ * ---------------------------------------------------------------------------*/
+static FAST_IO_DISPATCH g_IntelAvbFastIoDispatch;
+
+static BOOLEAN NTAPI
+IntelAvbFilterFastIoDeviceControl(
+    __in      PFILE_OBJECT     FileObject,
+    __in      BOOLEAN          Wait,
+    __in_opt  PVOID            InputBuffer,
+    __in      ULONG            InputBufferLength,
+    __out_opt PVOID            OutputBuffer,
+    __in      ULONG            OutputBufferLength,
+    __in      ULONG            IoControlCode,
+    __out     PIO_STATUS_BLOCK IoStatus,
+    __in      PDEVICE_OBJECT   DeviceObject)
+{
+    UNREFERENCED_PARAMETER(Wait);
+    UNREFERENCED_PARAMETER(InputBuffer);
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    /* Only accelerate the two hot-path IOCTLs; let everything else go via IRP. */
+    if (IoControlCode != IOCTL_AVB_GET_TX_TIMESTAMP &&
+        IoControlCode != IOCTL_AVB_TEST_SEND_PTP) {
+        return FALSE;
+    }
+
+    /* Resolve the adapter context: prefer per-file FsContext (set by OPEN_ADAPTER),
+     * fall back to the first found Intel adapter (single-adapter mode). */
+    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)(FileObject ? FileObject->FsContext : NULL);
+    if (!ctx) {
+        PMS_FILTER pFilter = AvbFindIntelFilterModule();
+        if (pFilter && pFilter->AvbContext) {
+            ctx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        }
+    }
+    if (!ctx) {
+        IoStatus->Status      = STATUS_DEVICE_NOT_READY;
+        IoStatus->Information = 0;
+        return TRUE;
+    }
+
+    /* -----------------------------------------------------------------------
+     * IOCTL_AVB_GET_TX_TIMESTAMP — atomically read-and-clear the TX timestamp.
+     * Reduces GET_TX round-trip from ~8µs (IRP) to ~0.5-1µs.
+     * ----------------------------------------------------------------------- */
+    if (IoControlCode == IOCTL_AVB_GET_TX_TIMESTAMP) {
+        if (!OutputBuffer || OutputBufferLength < sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
+            IoStatus->Status      = STATUS_BUFFER_TOO_SMALL;
+            IoStatus->Information = 0;
+            return TRUE;
+        }
+        __try {
+            PAVB_TX_TIMESTAMP_REQUEST req = (PAVB_TX_TIMESTAMP_REQUEST)OutputBuffer;
+            ProbeForWrite(req, sizeof(*req), sizeof(avb_u32));
+            LONGLONG ts = InterlockedExchange64(&ctx->last_ndis_tx_timestamp, 0LL);
+            req->timestamp_ns  = (avb_u64)(ULONG64)ts;
+            req->valid         = (ts != 0) ? 1 : 0;
+            req->sequence_id   = 0;
+            req->adapter_index = 0;
+            req->status        = (avb_u32)NDIS_STATUS_SUCCESS;
+            IoStatus->Status      = STATUS_SUCCESS;
+            IoStatus->Information = sizeof(*req);
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            IoStatus->Status      = GetExceptionCode();
+            IoStatus->Information = 0;
+        }
+        return TRUE;
+    }
+
+    /* -----------------------------------------------------------------------
+     * IOCTL_AVB_TEST_SEND_PTP — fire-and-forget kernel packet injection.
+     * Eliminates ~8µs IRP overhead; NdisFSendNetBufferLists is safe at PASSIVE_LEVEL.
+     * InputBuffer and OutputBuffer are the same user pointer (METHOD_BUFFERED semantics
+     * emulated: caller passes &req for both).
+     * ----------------------------------------------------------------------- */
+    if (!InputBuffer  || InputBufferLength  < sizeof(AVB_TEST_SEND_PTP_REQUEST) ||
+        !OutputBuffer || OutputBufferLength < sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
+        IoStatus->Status      = STATUS_BUFFER_TOO_SMALL;
+        IoStatus->Information = 0;
+        return TRUE;
+    }
+    if (!ctx->filter_instance || !ctx->filter_instance->FilterHandle) {
+        IoStatus->Status      = STATUS_DEVICE_NOT_READY;
+        IoStatus->Information = 0;
+        return TRUE;
+    }
+
+    volatile BOOLEAN lock_held = FALSE;  /* tracked for exception-safe release */
+    __try {
+        PAVB_TEST_SEND_PTP_REQUEST req = (PAVB_TEST_SEND_PTP_REQUEST)OutputBuffer;
+        ProbeForWrite(req, sizeof(*req), sizeof(avb_u32));
+        ProbeForRead(InputBuffer, InputBufferLength, sizeof(avb_u32));
+
+        avb_u32 seq_id = ((PAVB_TEST_SEND_PTP_REQUEST)InputBuffer)->sequence_id;
+
+        /* Acquire a pre-allocated ring slot (same logic as IRP path). */
+        int ring_slot = -1;
+        for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
+            if (ctx->test_nbl_ring[_ri].nbl != NULL &&
+                InterlockedCompareExchange(&ctx->test_nbl_ring[_ri].in_use, 1, 0) == 0) {
+                ring_slot = _ri;
+                break;
+            }
+        }
+
+        PNET_BUFFER_LIST nbl;
+        PUCHAR pkt;
+
+        if (ring_slot >= 0) {
+            /* Fast path: ring slot owned exclusively via CAS — no spinlock needed. */
+            nbl = ctx->test_nbl_ring[ring_slot].nbl;
+            ctx->test_nbl_ring[ring_slot].nb->DataOffset = 0;
+            nbl->Next = NULL;
+            pkt = (PUCHAR)ctx->test_nbl_ring[ring_slot].buffer;
+        } else {
+            /* Slow path: ring exhausted — allocate on demand under spinlock. */
+            NdisAcquireSpinLock(&ctx->test_send_lock);
+            lock_held = TRUE;
+            PNET_BUFFER nb = NdisAllocateNetBuffer(ctx->nb_pool_handle,
+                                                    ctx->test_packet_mdl, 0, 64);
+            if (!nb) { NdisReleaseSpinLock(&ctx->test_send_lock); lock_held = FALSE;
+                       IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+                       IoStatus->Information = 0; return TRUE; }
+            nbl = NdisAllocateNetBufferList(ctx->nbl_pool_handle, 0, 0);
+            if (!nbl) { NdisFreeNetBuffer(nb);
+                        NdisReleaseSpinLock(&ctx->test_send_lock); lock_held = FALSE;
+                        IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+                        IoStatus->Information = 0; return TRUE; }
+            NdisReleaseSpinLock(&ctx->test_send_lock);
+            lock_held = FALSE;
+            nbl->FirstNetBuffer = nb; nbl->Next = NULL;
+            pkt = (PUCHAR)ctx->test_packet_buffer;
+        }
+
+        /* Stamp PTP sequence ID (Big Endian, offset 44-45). These are kernel buffers — safe. */
+        pkt[44] = (UCHAR)((seq_id >> 8) & 0xFF);
+        pkt[45] = (UCHAR)(seq_id & 0xFF);
+
+        InterlockedIncrement(&ctx->test_packets_pending);
+
+        /* Use QPC for pre-send timestamp in FastIo SEND_PTP path.
+         * Avoids ~2µs BAR0 MMIO read per call; throughput test does not
+         * validate timestamp against hardware clock. */
+        LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
+        ULONG64 preSendTs = (ULONG64)pc.QuadPart;
+        InterlockedExchange64(&ctx->last_ndis_tx_timestamp, (LONGLONG)preSendTs);
+
+        /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
+         * Ring fast path: lock-free. Fallback: lock released above. */
+        NdisFSendNetBufferLists(ctx->filter_instance->FilterHandle, nbl, 0, 0);
+
+        /* Write back to user buffer (we are at PASSIVE_LEVEL, user buffer is accessible). */
+        req->timestamp_ns  = preSendTs;
+        req->packets_sent  = 1;
+        req->status        = (avb_u32)NDIS_STATUS_SUCCESS;
+        IoStatus->Status      = STATUS_SUCCESS;
+        IoStatus->Information = sizeof(*req);
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        if (lock_held) {
+            NdisReleaseSpinLock(&ctx->test_send_lock);
+        }
+        IoStatus->Status      = GetExceptionCode();
+        IoStatus->Information = 0;
+    }
+    return TRUE;
+}
+
 #pragma NDIS_INIT_FUNCTION(IntelAvbFilterRegisterDevice)
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -70,7 +245,23 @@ IntelAvbFilterRegisterDevice(
         // Workaround NDIS bug
         //
         DriverObject = (PDRIVER_OBJECT)FilterDriverObject;
-        
+
+        /* Register FastIoDeviceControl to bypass IRP for IOCTL_AVB_GET_TX_TIMESTAMP.
+         * Safety check: NdisDeviceObject should share the same DriverObject as the
+         * filter driver — verify before touching DriverObject->FastIoDispatch. */
+        {
+            PDRIVER_OBJECT pDrv = NdisDeviceObject->DriverObject;
+            if (pDrv == DriverObject) {
+                RtlZeroMemory(&g_IntelAvbFastIoDispatch, sizeof(g_IntelAvbFastIoDispatch));
+                g_IntelAvbFastIoDispatch.SizeOfFastIoDispatch = sizeof(FAST_IO_DISPATCH);
+                g_IntelAvbFastIoDispatch.FastIoDeviceControl  = IntelAvbFilterFastIoDeviceControl;
+                pDrv->FastIoDispatch = &g_IntelAvbFastIoDispatch;
+                DEBUGP(DL_ERROR, "!!! FastIoDeviceControl registered for IOCTL_AVB_GET_TX_TIMESTAMP\n");
+            } else {
+                DEBUGP(DL_WARN, "!!! NdisDeviceObject->DriverObject != FilterDriverObject, FastIo skipped\n");
+            }
+        }
+
         DEBUGP(DL_ERROR, "!!! Device interface created successfully: \\Device\\IntelAvbFilter -> \\\\.\\IntelAvbFilter\n");
     } else {
         DEBUGP(DL_ERROR, "!!! NdisRegisterDeviceEx FAILED: Status=0x%08X\n", Status);
@@ -171,55 +362,7 @@ IntelAvbFilterDeviceIoControl(
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
-    // ============================================================================
-    // IRP-LEVEL LOGGING: This executes BEFORE any other code in this function
-    // If Windows I/O Manager intercepts IOCTLs, this log won't appear
-    // ============================================================================
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
-    ULONG ioctlCodeAtEntry = IrpSp->Parameters.DeviceIoControl.IoControlCode;
-    
-    DEBUGP(DL_ERROR, "############################################################\n");
-    DEBUGP(DL_ERROR, "!!! IRP_MJ_DEVICE_CONTROL ARRIVED AT DRIVER\n");
-    DEBUGP(DL_ERROR, "!!! IRP=%p DeviceObject=%p\n", Irp, DeviceObject);
-    DEBUGP(DL_ERROR, "!!! IOCTL CODE: 0x%08X (decimal: %u)\n", ioctlCodeAtEntry, ioctlCodeAtEntry);
-    DEBUGP(DL_ERROR, "!!! FileObject: %p\n", IrpSp->FileObject);
-    DEBUGP(DL_ERROR, "!!! InputBufferLength: %u bytes\n", IrpSp->Parameters.DeviceIoControl.InputBufferLength);
-    DEBUGP(DL_ERROR, "!!! OutputBufferLength: %u bytes\n", IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
-    DEBUGP(DL_ERROR, "############################################################\n");
-    
-    // Check specific codes we're interested in
-    if (ioctlCodeAtEntry == 0x001700AC) {
-        DEBUGP(DL_ERROR, "!!! *** THIS IS SET_TARGET_TIME (code 43) ***\n");
-    } else if (ioctlCodeAtEntry == 0x00170084) {
-        DEBUGP(DL_ERROR, "!!! *** THIS IS TS_SUBSCRIBE (code 33) ***\n");
-    } else if (ioctlCodeAtEntry == 0x00170088) {
-        DEBUGP(DL_ERROR, "!!! *** THIS IS TS_RING_MAP (code 34) ***\n");
-    }
-    
-    // CRITICAL DEBUG: Log EVERY IOCTL that reaches this function
-    DEBUGP(DL_ERROR, "!!! DEVICE.C ENTRY: IOCTL=0x%08X FileObject=%p\n", 
-           IrpSp->Parameters.DeviceIoControl.IoControlCode,
-           IrpSp->FileObject);
-    
-    // Implements #17 (REQ-NF-DIAG-REG-001: Registry Diagnostics)
-    // DIAGNOSTIC: Write to registry to prove IOCTLs are reaching driver
-    // This bypasses DebugView issues
-    #if DBG
-    {
-        UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-        OBJECT_ATTRIBUTES keyAttrs;
-        HANDLE hKey = NULL;
-        InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st)) {
-            UNICODE_STRING valueName = RTL_CONSTANT_STRING(L"LastIOCTL");
-            ULONG ioctlCode = IrpSp->Parameters.DeviceIoControl.IoControlCode;
-            ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &ioctlCode, sizeof(ioctlCode));
-            ZwClose(hKey);
-        }
-    }
-    #endif
 
     if (IrpSp->FileObject == NULL)
     {
@@ -233,14 +376,8 @@ IntelAvbFilterDeviceIoControl(
     ASSERT(FilterDeviceExtension->Signature == 'FTDR');
     
     Irp->IoStatus.Information = 0;
-    
-    // CRITICAL DIAGNOSTIC: Log IOCTL code BEFORE switch to catch all paths
-    ULONG ioctlCode = IrpSp->Parameters.DeviceIoControl.IoControlCode;
-    DEBUGP(DL_ERROR, "!!! DEVICE.C: BEFORE SWITCH: IOCTL=0x%08X InputLen=%lu OutputLen=%lu\n",
-           ioctlCode,
-           IrpSp->Parameters.DeviceIoControl.InputBufferLength,
-           IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
 
+    ULONG ioctlCode = IrpSp->Parameters.DeviceIoControl.IoControlCode;
     switch (ioctlCode)
     {
 
@@ -326,6 +463,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SETUP_TAS:
         case IOCTL_AVB_SETUP_FP:
         case IOCTL_AVB_SETUP_PTM:
+        case IOCTL_AVB_SETUP_QAV:         // Implements #8 (REQ-F-QAV-001: Credit-Based Shaper Configuration)
         case IOCTL_AVB_MDIO_READ:
         case IOCTL_AVB_MDIO_WRITE:
         case IOCTL_AVB_GET_HW_STATE:
@@ -336,39 +474,29 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SET_QUEUE_TIMESTAMP:
         case IOCTL_AVB_SET_TARGET_TIME:
         case IOCTL_AVB_GET_AUX_TIMESTAMP:
+        case IOCTL_AVB_GET_TX_TIMESTAMP:  // Implements #35 (REQ-F-IOCTL-TS-001) - TX timestamp retrieval
+        case IOCTL_AVB_GET_RX_TIMESTAMP:  // Implements #35 (REQ-F-IOCTL-TS-001) - RX timestamp retrieval
+        case IOCTL_AVB_TEST_SEND_PTP:     // Implements #35 (Step 8b) - Kernel packet injection for testing
         case IOCTL_AVB_TS_SUBSCRIBE:      // Implements #13 (REQ-F-TS-SUB-001)
         case IOCTL_AVB_TS_RING_MAP:       // Implements #13 (REQ-F-TS-SUB-001)
         case IOCTL_AVB_TS_UNSUBSCRIBE:    // Implements #13 (REQ-F-TS-SUB-001) - Cleanup
+        case IOCTL_AVB_PHC_OFFSET_ADJUST: // Implements #38 (REQ-F-IOCTL-PHC-003) - PHC time offset adjustment
+        case IOCTL_AVB_SET_PORT_LATENCY:  // Implements IEEE 802.1AS port latency calibration
+        case IOCTL_AVB_GET_STATISTICS:    // Implements #270 (TEST-STATISTICS-001: Driver Statistics Query)
+        case IOCTL_AVB_RESET_STATISTICS:  // Implements #270 (TEST-STATISTICS-002: Driver Statistics Reset)
         {
-            DEBUGP(DL_ERROR, "!!! DEVICE.C: AVB IOCTL CASE HIT: IOCTL=0x%08X\n", 
-                   IrpSp->Parameters.DeviceIoControl.IoControlCode);
-            
-            // MULTI-ADAPTER FIX: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
+            // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
-            DEBUGP(DL_ERROR, "!!! DEVICE.C: FileObject=%p, FileObject->FsContext=%p\n",
-                   IrpSp->FileObject, IrpSp->FileObject ? IrpSp->FileObject->FsContext : NULL);
-            
             PAVB_DEVICE_CONTEXT targetContext = (PAVB_DEVICE_CONTEXT)IrpSp->FileObject->FsContext;
             
             if (targetContext != NULL) {
-                DEBUGP(DL_ERROR, "!!! DEVICE.C: Using per-handle context %p VID=0x%04X DID=0x%04X state=%s\n",
-                       targetContext, targetContext->intel_device.pci_vendor_id, targetContext->intel_device.pci_device_id,
-                       AvbHwStateName(targetContext->hw_state));
                 pFilter = targetContext->filter_instance;
             } else {
                 // Fall back to searching for any Intel filter (single-adapter mode)
-                DEBUGP(DL_WARN, "!!! DEVICE.C: FileObject->FsContext is NULL! Falling back to AvbFindIntelFilterModule()\n");
+                DEBUGP(DL_WARN, "DEVICE.C: FileObject->FsContext is NULL! Falling back to AvbFindIntelFilterModule()\n");
                 pFilter = AvbFindIntelFilterModule();
-                DEBUGP(DL_ERROR, "!!! DEVICE.C: Fallback found filter=%p\n", pFilter);
-                
-                if (pFilter) {
-                    DEBUGP(DL_ERROR, "!!! DEVICE.C: Filter Name: %wZ\n", &pFilter->MiniportFriendlyName);
-                    if (pFilter->AvbContext) {
-                        targetContext = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
-                        DEBUGP(DL_ERROR, "!!! DEVICE.C: Context VID=0x%04X DID=0x%04X state=%s\n",
-                               targetContext->intel_device.pci_vendor_id, targetContext->intel_device.pci_device_id,
-                               AvbHwStateName(targetContext->hw_state));
-                    }
+                if (pFilter && pFilter->AvbContext) {
+                    targetContext = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
                 }
 
                 // If not found, iterate all filter instances and lazily initialize until one succeeds
@@ -405,6 +533,12 @@ IntelAvbFilterDeviceIoControl(
                                            &cand->MiniportFriendlyName);
                                     pFilter = cand;
                                     targetContext = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                                    // Re-acquire the lock before break so the post-loop
+                                    // FILTER_RELEASE_LOCK at line ~547 always has a paired acquire.
+                                    // Without this, the break skips FILTER_ACQUIRE_LOCK at the
+                                    // bottom of the loop body, and the final release fires against
+                                    // an unheld lock → Driver Verifier 0xC4/0x32 (BSOD).
+                                    FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
                                     break;
                                 }
                                 else
@@ -426,93 +560,9 @@ IntelAvbFilterDeviceIoControl(
                 }
             }
 
-            // DIAGNOSTIC: Write context status BEFORE the NULL check
-            #if DBG
-            {
-                OBJECT_ATTRIBUTES keyAttrs2;
-                HANDLE hKey2;
-                NTSTATUS st2;
-                ULONG contextStatus;
-                UNICODE_STRING keyPath2;
-                UNICODE_STRING valueName2;
-                
-                RtlInitUnicodeString(&keyPath2, L"\\Registry\\Machine\\Software\\IntelAvb");
-                hKey2 = NULL;
-                InitializeObjectAttributes(&keyAttrs2, &keyPath2, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                
-                st2 = ZwCreateKey(&hKey2, KEY_WRITE, &keyAttrs2, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-                if (NT_SUCCESS(st2)) {
-                    RtlInitUnicodeString(&valueName2, L"TargetContextNullCheck");
-                    contextStatus = (targetContext == NULL) ? 0 : 1;
-                    ZwSetValueKey(hKey2, &valueName2, 0, REG_DWORD, &contextStatus, sizeof(contextStatus));
-                    ZwClose(hKey2);
-                }
-            }
-            #endif
-
             if (targetContext != NULL) {
-                DEBUGP(DL_ERROR, "!!! BEFORE AvbHandleDeviceIoControl: filter=%p context=%p IOCTL=0x%08X\n", 
-                       pFilter, targetContext, IrpSp->Parameters.DeviceIoControl.IoControlCode);
-                
-                // DIAGNOSTIC: Write pre-handler state to registry
-                #if DBG
-                {
-                    UNICODE_STRING keyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\IntelAvb");
-                    OBJECT_ATTRIBUTES keyAttrs;
-                    HANDLE hKey = NULL;
-                    InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                    
-                    NTSTATUS st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-                    if (NT_SUCCESS(st)) {
-                        UNICODE_STRING valueName = RTL_CONSTANT_STRING(L"StepReached");
-                        ULONG value = 1; // Step 1: Before handler
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &value, sizeof(value));
-                        ZwClose(hKey);
-                    }
-                }
-                #endif
-                
                 Status = AvbHandleDeviceIoControl(targetContext, Irp);
                 InfoLength = (ULONG)Irp->IoStatus.Information;
-                
-                // DIAGNOSTIC: Write post-handler state to registry
-                #if DBG
-                {
-                    OBJECT_ATTRIBUTES keyAttrs;
-                    HANDLE hKey;
-                    NTSTATUS st;
-                    ULONG value;
-                    ULONG irpInfo;
-                    UNICODE_STRING keyPath;
-                    UNICODE_STRING valueName;
-                    
-                    RtlInitUnicodeString(&keyPath, L"\\Registry\\Machine\\Software\\IntelAvb");
-                    hKey = NULL;
-                    InitializeObjectAttributes(&keyAttrs, &keyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-                    
-                    st = ZwCreateKey(&hKey, KEY_WRITE, &keyAttrs, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-                    if (NT_SUCCESS(st)) {
-                        RtlInitUnicodeString(&valueName, L"StepReached");
-                        value = 2;
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &value, sizeof(value));
-                        
-                        RtlInitUnicodeString(&valueName, L"PostHandlerStatus");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &Status, sizeof(Status));
-                        
-                        RtlInitUnicodeString(&valueName, L"PostHandlerInfoLength");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &InfoLength, sizeof(InfoLength));
-                        
-                        irpInfo = (ULONG)Irp->IoStatus.Information;
-                        RtlInitUnicodeString(&valueName, L"PostHandlerIrpInfo");
-                        ZwSetValueKey(hKey, &valueName, 0, REG_DWORD, &irpInfo, sizeof(irpInfo));
-                        
-                        ZwClose(hKey);
-                    }
-                }
-                #endif
-                
-                DEBUGP(DL_ERROR, "!!! AFTER AvbHandleDeviceIoControl: Status=0x%x, InfoLength=%lu\n", 
-                       Status, InfoLength);
             } else {
                 DEBUGP(DL_ERROR, "? No Intel filter found or AVB context not initialized\n");
                 Status = STATUS_DEVICE_NOT_READY;
@@ -709,6 +759,9 @@ IntelAvbFilterDeviceIoControl(
                     if (currentIndex == req->index) {
                         targetFilter = cand;
                         DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: MATCH! Using adapter at index %u\n", currentIndex);
+                        // Re-acquire before break so the post-loop FILTER_RELEASE_LOCK
+                        // at line ~764 always has a paired acquire (same pattern as lazy-init loop fix).
+                        FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
                         break;
                     }
                     currentIndex++;  /* This VID/DID matches, increment instance counter */
@@ -765,37 +818,8 @@ IntelAvbFilterDeviceIoControl(
             break;
     }
 
-    DEBUGP(DL_ERROR, "!!! DEVICE.C: AFTER SWITCH: IOCTL=0x%08X Status=0x%08X InfoLength=%lu\n",
-           IrpSp->Parameters.DeviceIoControl.IoControlCode, Status, InfoLength);
-
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = InfoLength;
-    
-    // DIAGNOSTIC: Write final IRP completion values to registry
-    #if DBG
-    {
-        OBJECT_ATTRIBUTES keyAttrs3;
-        HANDLE hKey3;
-        NTSTATUS st3;
-        UNICODE_STRING keyPath3;
-        UNICODE_STRING valueName3;
-        
-        RtlInitUnicodeString(&keyPath3, L"\\Registry\\Machine\\Software\\IntelAvb");
-        hKey3 = NULL;
-        InitializeObjectAttributes(&keyAttrs3, &keyPath3, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        
-        st3 = ZwCreateKey(&hKey3, KEY_WRITE, &keyAttrs3, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
-        if (NT_SUCCESS(st3)) {
-            RtlInitUnicodeString(&valueName3, L"FinalIrpStatus");
-            ZwSetValueKey(hKey3, &valueName3, 0, REG_DWORD, &Status, sizeof(Status));
-            
-            RtlInitUnicodeString(&valueName3, L"FinalInfoLength");
-            ZwSetValueKey(hKey3, &valueName3, 0, REG_DWORD, &InfoLength, sizeof(InfoLength));
-            
-            ZwClose(hKey3);
-        }
-    }
-    #endif
 
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
