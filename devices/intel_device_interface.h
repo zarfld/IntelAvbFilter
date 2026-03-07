@@ -49,6 +49,15 @@ typedef struct _intel_device_ops {
     int (*init_ptp)(device_t *dev);
     int (*enable_packet_timestamping)(device_t *dev, int enable);  // Enable TSYNCRXCTL/TSYNCTXCTL
     
+    // PTP register access operations (eliminates magic numbers in src/)
+    int (*read_tx_timestamp)(device_t *dev, uint64_t *timestamp_ns);   // Read TXSTMPL/H
+    int (*read_rx_timestamp)(device_t *dev, uint64_t *timestamp_ns);   // Read RXSTMPL/H  
+    int (*poll_tx_timestamp_fifo)(device_t *dev, uint64_t *timestamp_ns);  // Poll TX FIFO (returns 0=empty, 1=valid)
+    int (*read_timinca)(device_t *dev, uint32_t *timinca_value);       // Read TIMINCA register
+    int (*write_timinca)(device_t *dev, uint32_t timinca_value);       // Write TIMINCA register
+    int (*read_tsauxc)(device_t *dev, uint32_t *tsauxc_value);         // Read TSAUXC register
+    int (*write_tsauxc)(device_t *dev, uint32_t tsauxc_value);         // Write TSAUXC register (for bit operations)
+    
     // Target time operations (Issue #13 Task 7, IOCTLs 43/44)
     int (*set_target_time)(device_t *dev, uint8_t timer_index, uint64_t target_time_ns, int enable_interrupt);
     int (*get_target_time)(device_t *dev, uint8_t timer_index, uint64_t *target_time_ns);

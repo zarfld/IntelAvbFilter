@@ -429,7 +429,7 @@ AvbInitializeDeviceWithBar0Discovery(
     ctx->intel_device.pci_device_id = 0;
     ctx->intel_device.device_type = INTEL_DEVICE_UNKNOWN;
     ctx->intel_device.capabilities = 0; // Will be set based on device type
-    ctx->hw_state = AVB_HW_BOUND; // Initial state
+    AVB_SET_HW_STATE(ctx, AVB_HW_BOUND); // Initial state
 
     // Try to discover PCI IDs first (needed for capability assignment)
     USHORT vendorId = 0, deviceId = 0;
@@ -509,7 +509,7 @@ AvbInitializeDeviceWithBar0Discovery(
         NTSTATUS m = AvbMapIntelControllerMemory(ctx, bar0, barLen);
         if (NT_SUCCESS(m)) {
             ctx->hw_access_enabled = TRUE;
-            ctx->hw_state = AVB_HW_BAR_MAPPED;
+            AVB_SET_HW_STATE(ctx, AVB_HW_BAR_MAPPED);
             DEBUGP(DL_INFO, "MMIO mapped: BAR0=0x%llx, Len=0x%x, hw_state=%s\n", 
                    bar0.QuadPart, barLen, AvbHwStateName(ctx->hw_state));
         } else {

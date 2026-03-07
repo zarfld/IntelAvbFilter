@@ -23,7 +23,7 @@ Notes:
 
 #if DBG
 
-INT                 filterDebugLevel = DL_INFO;
+INT                 filterDebugLevel = DL_WARN;
 
 NDIS_SPIN_LOCK        filterDbgLogLock;
 
@@ -406,4 +406,100 @@ filterReleaseSpinLock(
     }
 }
 #endif // DBG_SPIN_LOCK
+
+
+/**
+ * FilterReadDebugSettings - Read debug level from registry at driver load time.
+ *
+ * Implements: #95 (REQ-NF-DEBUG-REG-001: Registry-Based Debug Settings)
+ * Verified by: #247 (TEST-DEBUG-REG-001)
+ *
+ * IRQL: Must be called at PASSIVE_LEVEL (DriverEntry only).
+ * Operation: READ-ONLY via RtlQueryRegistryValues — no writes, no BSOD risk.
+ *
+ * Registry path: HKLM\SYSTEM\CurrentControlSet\Services\IntelAvbFilter\Parameters
+ * Value name:    DebugLevel (REG_DWORD)
+ * Meaning:       Numeric threshold matching DL_* constants in flt_dbg.h:
+ *                  0  = DL_FATAL only
+ *                  2  = DL_ERROR (errors only)
+ *                  4  = DL_WARN  (errors + warnings, DEFAULT)
+ *                  5  = DL_TRACE
+ *                  6  = DL_INFO
+ *                  8  = DL_LOUD
+ *                 20  = DL_EXTRA_LOUD (all output)
+ *
+ * On failure or missing key: keeps compiled-in default (DL_WARN=4). Never crashes.
+ *
+ * Example (set verbose):
+ *   reg add "HKLM\SYSTEM\CurrentControlSet\Services\IntelAvbFilter\Parameters" /v DebugLevel /t REG_DWORD /d 8 /f
+ * Example (restore default):
+ *   reg delete "HKLM\SYSTEM\CurrentControlSet\Services\IntelAvbFilter\Parameters" /v DebugLevel /f
+ */
+VOID
+FilterReadDebugSettings(
+    _In_ PUNICODE_STRING RegistryPath
+)
+{
+#if DBG
+    NTSTATUS         status;
+    ULONG            debugLevel = (ULONG)DL_WARN;  /* default if key absent */
+    UNICODE_STRING   parametersPath;
+    WCHAR            pathBuffer[512];
+
+    static const WCHAR   suffix[]     = L"\\Parameters";
+    const USHORT         suffixBytes  = (USHORT)(sizeof(suffix) - sizeof(WCHAR));  /* exclude null */
+
+    /* Guard against path overflow */
+    if (RegistryPath == NULL ||
+        RegistryPath->Buffer == NULL ||
+        (ULONG)(RegistryPath->Length + suffixBytes + sizeof(WCHAR)) > sizeof(pathBuffer))
+    {
+        return;
+    }
+
+    /* Build absolute path: RegistryPath + "\Parameters" */
+    RtlCopyMemory(pathBuffer, RegistryPath->Buffer, RegistryPath->Length);
+    RtlCopyMemory((PUCHAR)pathBuffer + RegistryPath->Length, suffix, sizeof(suffix));
+
+    parametersPath.Buffer        = pathBuffer;
+    parametersPath.Length        = RegistryPath->Length + suffixBytes;
+    parametersPath.MaximumLength = (USHORT)sizeof(pathBuffer);
+
+    /* Query table: one entry + null terminator */
+    RTL_QUERY_REGISTRY_TABLE paramTable[2];
+    RtlZeroMemory(paramTable, sizeof(paramTable));
+
+    paramTable[0].Flags         = RTL_QUERY_REGISTRY_DIRECT;
+    paramTable[0].Name          = L"DebugLevel";
+    paramTable[0].EntryContext  = &debugLevel;
+    paramTable[0].DefaultType   = REG_DWORD;
+    paramTable[0].DefaultData   = &debugLevel;   /* unchanged on key-not-found */
+    paramTable[0].DefaultLength = sizeof(debugLevel);
+    /* paramTable[1] is the null terminator (already zeroed) */
+
+    status = RtlQueryRegistryValues(
+        RTL_REGISTRY_ABSOLUTE | RTL_REGISTRY_OPTIONAL,
+        parametersPath.Buffer,
+        paramTable,
+        NULL,
+        NULL
+    );
+
+    if (NT_SUCCESS(status))
+    {
+        /* Clamp to valid range [DL_FATAL(0) .. DL_EXTRA_LOUD(20)] */
+        if (debugLevel > (ULONG)DL_EXTRA_LOUD)
+        {
+            debugLevel = (ULONG)DL_EXTRA_LOUD;
+        }
+        filterDebugLevel = (INT)debugLevel;
+        DbgPrint("IntelAvbFilter: DebugLevel loaded from registry: %d (path: %wZ)\n",
+                 filterDebugLevel, &parametersPath);
+    }
+    /* On any failure keep the compiled-in default — no crash, no BSOD */
+
+#else  /* !DBG */
+    UNREFERENCED_PARAMETER(RegistryPath);
+#endif /* DBG */
+}
 

@@ -5,8 +5,8 @@
 // Temp file to test filter
 //
 
-#define _NDIS_CONTROL_CODE(request,method) \
-            CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, request, method, FILE_ANY_ACCESS)
+// Use _NDIS_CONTROL_CODE from SSOT header
+#include "../include/avb_ioctl.h"  // SSOT for _NDIS_CONTROL_CODE macro
 
 #define IOCTL_FILTER_RESTART_ALL            _NDIS_CONTROL_CODE(0, METHOD_BUFFERED)
 #define IOCTL_FILTER_RESTART_ONE_INSTANCE   _NDIS_CONTROL_CODE(1, METHOD_BUFFERED)

@@ -656,8 +656,9 @@ $AllTests = @(
         Type = "cl"
         Source = "tests/integration/tx_timestamp/test_tx_timestamp_retrieval.c"
         Output = "test_tx_timestamp_retrieval.exe"
-        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
-        Description = "Integration: TX Timestamp Retrieval IOCTL (Verifies #35 REQ-F-IOCTL-TS-001)"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen -I `"C:\npcap-sdk-1.16\Include`""
+        Libs = "ws2_32.lib wpcap.lib packet.lib /LIBPATH:`"C:\npcap-sdk-1.16\Lib\x64`""
+        Description = "Integration: TX Timestamp Retrieval IOCTL with Npcap Packet Injection (Verifies #35 REQ-F-IOCTL-TS-001)"
     },
     @{
         Name = "test_hw_state_machine"
@@ -994,6 +995,21 @@ $AllTests = @(
         TestCases = 14
         IOCTLs = "35"
         Requirement = "#8"
+    }
+
+    @{
+        Name = "test_send_ptp_debug"
+        Type = "cl"
+        Source = "tests\diagnostic\test_send_ptp_debug.c"
+        Output = "test_send_ptp_debug.exe"
+        Includes = "-I include"
+        Enabled = $true
+        Priority = "P1"
+        Description = "IOCTL_AVB_TEST_SEND_PTP diagnostic (Issue #51)"
+        Issue = "#51"
+        TestCases = 1
+        IOCTLs = "51"
+        Requirement = "#51"
     }
 
     @{

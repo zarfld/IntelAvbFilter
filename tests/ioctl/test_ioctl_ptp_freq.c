@@ -217,10 +217,16 @@ static int Test_MaximumPositiveAdjustment(TestContext *ctx)
 /*
  * Test UT-PTP-FREQ-005: Maximum Negative Adjustment
  * Verifies: Can set maximum negative frequency adjustment
+ *
+ * Hardware limit: with nominal 8 ns/cycle (125 MHz), the minimum TIMINCA increment_ns
+ * is 1, achieved when ppb = (1.0/8.0 - 1.0) * 1e9 = -875,000,000 ppb.
+ * Values below this produce increment_ns = 0 after ConvertPpbToIncrement, which
+ * the driver correctly rejects (clock stopped / frozen). -999,999,999 ppb is
+ * below this hardware limit and cannot be represented in the TIMINCA register.
  */
 static int Test_MaximumNegativeAdjustment(TestContext *ctx)
 {
-    INT64 adj_ppb = -999999999;
+    INT64 adj_ppb = -875000000;  /* Maximum representable negative: (1.0/8.0 - 1.0) * 1e9 */
     
     if (!AdjustFrequency(ctx->adapter, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-005: Maximum Negative Adjustment: IOCTL failed\n");

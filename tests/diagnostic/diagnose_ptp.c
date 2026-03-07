@@ -188,8 +188,8 @@ int main() {
     CloseHandle(h);
     
     printf("\n========================================\n");
-    printf("Press Enter to exit...");
-    getchar();
+   // printf("Press Enter to exit...");
+   // getchar();
     
     return 0;
 }

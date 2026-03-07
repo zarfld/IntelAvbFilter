@@ -214,4 +214,17 @@ __forceinline BOOLEAN WideCharStrStrIW(_In_reads_(lenChars) const WCHAR* haystac
 // Helper macro for %wZ logging safely
 #define WSTRZ(_pStr) ((_pStr) ? (_pStr) : L"")
 
+/**
+ * FilterReadDebugSettings - Apply registry-configured debug level.
+ *
+ * Implements: #95 (REQ-NF-DEBUG-REG-001: Registry-Based Debug Settings)
+ * Verified by: #247 (TEST-DEBUG-REG-001)
+ *
+ * Call ONCE from DriverEntry at IRQL = PASSIVE_LEVEL.
+ * Safe no-op in non-DBG builds.
+ *
+ * Registry value: HKLM\SYSTEM\CurrentControlSet\Services\IntelAvbFilter\Parameters\DebugLevel (REG_DWORD)
+ */
+VOID FilterReadDebugSettings(_In_ PUNICODE_STRING RegistryPath);
+
 #endif // _FILTDEBUG__H

@@ -269,8 +269,8 @@ int main(int argc, char* argv[]) {
     
     CloseHandle(h);
     
-    printf("\nPress Enter to exit...");
-    getchar();
+    // printf("\nPress Enter to exit...");
+    // getchar();
     
     return result;
 }

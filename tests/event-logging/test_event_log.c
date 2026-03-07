@@ -279,7 +279,8 @@ BOOL ValidateEventContent(EVT_HANDLE hEvent, DWORD expectedEventId, const char* 
     }
 
     // Validate Event ID in XML (simplified check)
-    wchar_t eventIdStr[16];
+    // Buffer: "<EventID>4294967295</EventID>" is 30 chars + null = 31 wchar_t; use 64 for safety
+    wchar_t eventIdStr[64];
     swprintf_s(eventIdStr, sizeof(eventIdStr) / sizeof(wchar_t), L"<EventID>%lu</EventID>", expectedEventId);
     BOOL hasEventId = (wcsstr(buffer, eventIdStr) != NULL);
 

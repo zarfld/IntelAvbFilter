@@ -19,14 +19,21 @@ param(
 $scriptPath = Join-Path $PSScriptRoot 'Run-Tests.ps1'
 
 # Default log file if not specified - use logs directory
-if (-not $LogFile -and $TestName) {
-    $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-    $logsDir = Join-Path $repoRoot "logs"
-    if (-not (Test-Path $logsDir)) {
-        New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+if (-not $LogFile) {
+    if ($TestName -or $Full) {
+        $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $logsDir = Join-Path $repoRoot "logs"
+        if (-not (Test-Path $logsDir)) {
+            New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+        }
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        
+        if ($TestName) {
+            $LogFile = Join-Path $logsDir "$TestName`_$timestamp.log"
+        } elseif ($Full) {
+            $LogFile = Join-Path $logsDir "full_test_suite_$timestamp.log"
+        }
     }
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $LogFile = Join-Path $logsDir "$TestName`_$timestamp.log"
 }
 
 # Build command to run script with transcript logging

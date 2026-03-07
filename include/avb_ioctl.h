@@ -23,12 +23,14 @@ extern "C" {
   typedef UINT16  avb_u16;
   typedef UINT32  avb_u32;
   typedef UINT64  avb_u64;
+  typedef INT64   avb_i64;
 #else
   #include <stdint.h>
-  typedef uint8_t  avb_u8;
-  typedef uint16_t avb_u16;
-  typedef uint32_t avb_u32;
-  typedef uint64_t avb_u64;
+  typedef uint8_t   avb_u8;
+  typedef uint16_t  avb_u16;
+  typedef uint32_t  avb_u32;
+  typedef uint64_t  avb_u64;
+  typedef int64_t   avb_i64;
 #endif
 
 /* Optional request header carried at the start of IOCTL payloads to convey ABI info */
@@ -99,6 +101,23 @@ typedef struct _IOCTL_VERSION {
 #define IOCTL_AVB_SET_QUEUE_TIMESTAMP   _NDIS_CONTROL_CODE(42, METHOD_BUFFERED)
 #define IOCTL_AVB_SET_TARGET_TIME       _NDIS_CONTROL_CODE(47, METHOD_BUFFERED)  /* Use code 47 (next available after 46) - bypasses Windows interception */
 #define IOCTL_AVB_GET_AUX_TIMESTAMP     _NDIS_CONTROL_CODE(44, METHOD_BUFFERED)
+#define IOCTL_AVB_PHC_OFFSET_ADJUST     _NDIS_CONTROL_CODE(48, METHOD_BUFFERED)  /* PHC time offset adjustment (nanosecond-precision) */
+#define IOCTL_AVB_GET_TX_TIMESTAMP      _NDIS_CONTROL_CODE(49, METHOD_BUFFERED)  /* Get TX timestamp for performance testing */
+#define IOCTL_AVB_GET_RX_TIMESTAMP      _NDIS_CONTROL_CODE(50, METHOD_BUFFERED)  /* Get RX timestamp for performance testing */
+#define IOCTL_AVB_TEST_SEND_PTP         _NDIS_CONTROL_CODE(51, METHOD_BUFFERED)  /* Test IOCTL: Send PTP packet from kernel (bypasses Npcap bypass issue) */
+/* IEEE 802.1AS-2020 §11.3: timestampCorrectionPortDS — per-port ingress/egress latency calibration.
+ * The driver adds ingress_latency_ns to every RX hardware timestamp and egress_latency_ns to every
+ * TX hardware timestamp so that user-mode gPTP stacks receive boundary-corrected timestamps without
+ * needing to know NIC-specific PHY latency values.
+ * Both values are signed so that negative latencies (early timestamp capture) are representable.
+ * Typical range: ±200 ns.  Persists until the driver is unloaded or a new SET_PORT_LATENCY is issued. */
+#define IOCTL_AVB_SET_PORT_LATENCY      _NDIS_CONTROL_CODE(52, METHOD_BUFFERED)
+
+/* Driver statistics query — implements #270 (TEST-STATISTICS-001) */
+/* Function 0x808 → 0x9C40A020 (matches test hardcoded value) */
+#define IOCTL_AVB_GET_STATISTICS        _NDIS_CONTROL_CODE(0x808, METHOD_BUFFERED)  /* 0x9C40A020 */
+/* Function 0x80A → 0x9C40A028 (optional reset) */
+#define IOCTL_AVB_RESET_STATISTICS      _NDIS_CONTROL_CODE(0x80A, METHOD_BUFFERED)  /* 0x9C40A028 */
 
 /* Request/response structures (mirror of avb_integration.h) */
 #define AVB_DEVICE_INFO_MAX 1024u
@@ -132,6 +151,12 @@ typedef struct AVB_FREQUENCY_REQUEST {
     avb_u32 current_increment; /* out: current TIMINCA value before change */
     avb_u32 status;            /* NDIS_STATUS value */
 } AVB_FREQUENCY_REQUEST, *PAVB_FREQUENCY_REQUEST;
+
+/* PHC time offset adjustment (nanosecond-precision time correction) */
+typedef struct AVB_OFFSET_REQUEST {
+    INT64   offset_ns;  /* in: Offset in nanoseconds (positive or negative) */
+    avb_u32 status;     /* out: NDIS_STATUS value */
+} AVB_OFFSET_REQUEST, *PAVB_OFFSET_REQUEST;
 
 /* Production clock configuration query (replaces raw register reads) */
 typedef struct AVB_CLOCK_CONFIG {
@@ -192,6 +217,49 @@ typedef struct AVB_AUX_TIMESTAMP_REQUEST {
     avb_u32 clear_flag;        /* in: 1=clear AUTT flag after reading */
     avb_u32 status;            /* out: NDIS_STATUS value */
 } AVB_AUX_TIMESTAMP_REQUEST, *PAVB_AUX_TIMESTAMP_REQUEST;
+
+/* TX timestamp retrieval (TXSTMPL/H registers)
+ * Read TX timestamp from hardware FIFO.
+ * Implements: Issue #35 (REQ-F-IOCTL-TS-001) - TX timestamp retrieval
+ * 
+ * Hardware behavior:
+ * - When packet with 2STEP_1588 flag is transmitted, hardware latches SYSTIM into TXSTMPL/H
+ * - Bit 31 of TXSTMPH indicates valid timestamp in FIFO
+ * - Reading TXSTMPL advances FIFO to next entry
+ * - FIFO depth: typically 4-8 entries (device-specific)
+ * 
+ * Critical: Must read TXSTMPL before TXSTMPH to unlock registers for next capture
+ */
+typedef struct AVB_TX_TIMESTAMP_REQUEST {
+    avb_u64 timestamp_ns;      /* out: TX timestamp in nanoseconds (from TXSTMPL/H) */
+    avb_u32 valid;             /* out: 1=timestamp valid (FIFO had entry), 0=FIFO empty */
+    avb_u32 sequence_id;       /* out: Packet sequence ID (if tracking enabled) */
+    avb_u32 adapter_index;     /* in: Adapter index (0-based, for multi-adapter systems) */
+    avb_u32 status;            /* out: NDIS_STATUS value */
+} AVB_TX_TIMESTAMP_REQUEST, *PAVB_TX_TIMESTAMP_REQUEST;
+
+/* Test IOCTL: Send PTP packet from kernel
+ * Implements: Step 8 (Kernel-Mode Test Packet Injection)
+ * 
+ * Purpose: Solves Npcap bypass issue by injecting PTP packets directly
+ *          from kernel mode via NdisFSendNetBufferLists, ensuring filter
+ *          driver can attach hardware timestamping metadata.
+ * 
+ * Workflow:
+ * 1. User-mode test calls IOCTL_AVB_TEST_SEND_PTP
+ * 2. Kernel allocates NET_BUFFER_LIST and crafts PTP Sync frame
+ * 3. Calls NdisFSendNetBufferLists → routes through FilterSendNetBufferLists
+ * 4. Filter detects EtherType 0x88F7 → attaches NdisHardwareTimestampInfo metadata
+ * 5. Miniport driver sets 2STEP_1588 descriptor bit → hardware captures TX timestamp
+ * 6. Test retrieves timestamp via IOCTL_AVB_GET_TX_TIMESTAMP (49)
+ */
+typedef struct AVB_TEST_SEND_PTP_REQUEST {
+    avb_u32 adapter_index;     /* in: Adapter index (0-based, for multi-adapter systems) */
+    avb_u32 sequence_id;       /* in: PTP sequence ID for packet tracking */
+    avb_u32 packets_sent;      /* out: Number of packets successfully queued for transmission */
+    avb_u32 status;            /* out: NDIS_STATUS value */
+    avb_u64 timestamp_ns;      /* out: Pre-send timestamp (SYSTIM or KeQPC) — zero if send failed */
+} AVB_TEST_SEND_PTP_REQUEST, *PAVB_TEST_SEND_PTP_REQUEST;
 
 /* Hardware timestamping control (TSAUXC register) 
  * Based on Intel Foxville Ethernet Controller specification:
@@ -310,15 +378,19 @@ typedef struct AVB_HW_STATE_QUERY {
 
 /* Timestamp event entry (written to ring buffer by driver ISR) */
 typedef struct AVB_TIMESTAMP_EVENT {
-    avb_u64 timestamp_ns;   /* Hardware timestamp (System Time Register in ns) */
-    avb_u32 event_type;     /* One of TS_EVENT_* constants */
-    avb_u32 sequence_num;   /* Monotonically increasing sequence number */
-    avb_u16 vlan_id;        /* VLAN tag (if present, else 0xFFFF) */
-    avb_u8  pcp;            /* Priority Code Point (802.1Q) */
-    avb_u8  queue;          /* Tx/Rx queue number */
-    avb_u16 packet_length;  /* Packet length (bytes) */
-    avb_u8  trigger_source; /* Target time source or GPIO pin (if aux event) */
-    avb_u8  reserved[5];    /* Pad to 32 bytes (cache-line friendly) */
+    avb_u64  timestamp_ns;      /* [0-7]   Hardware timestamp (System Time Register in ns) */
+    avb_u32  event_type;        /* [8-11]  One of TS_EVENT_* constants */
+    avb_u32  sequence_num;      /* [12-15] Monotonically increasing sequence number */
+    avb_u16  vlan_id;           /* [16-17] VLAN tag (if present, else 0xFFFF) */
+    avb_u8   pcp;               /* [18]    Priority Code Point (802.1Q) */
+    avb_u8   queue;             /* [19]    Tx/Rx queue number */
+    avb_u16  packet_length;     /* [20-21] Packet length (bytes) */
+    avb_u8   trigger_source;    /* [22]    PTP message type / Target time source / GPIO pin */
+    avb_u8   reserved[1];       /* [23]    Alignment pad */
+    /* IEEE 1588-2019 §9.5 correctionField: signed 64-bit fixed-point, 2^-16 ns units.
+     * Positive or NEGATIVE — MUST be declared INT64 (signed), not UINT64.
+     * To convert to nanoseconds: correctionField >> 16 (arithmetic right-shift). */
+    avb_i64  correction_field;  /* [24-31] PTP correctionField from packet header (0 if N/A) */
 } AVB_TIMESTAMP_EVENT, *PAVB_TIMESTAMP_EVENT;
 
 /* Ring buffer header (lock-free producer/consumer) 
@@ -359,6 +431,52 @@ typedef struct AVB_TIMESTAMP_RING_HEADER {
     avb_u8  reserved[32];             /* Pad to 64 bytes (cache-line boundary) */
     /* AVB_TIMESTAMP_EVENT events[count]; // Follows immediately in memory */
 } AVB_TIMESTAMP_RING_HEADER, *PAVB_TIMESTAMP_RING_HEADER;
+
+/* IEEE 802.1AS-2020 §11.3 timestampCorrectionPortDS latency calibration.
+ * Input to IOCTL_AVB_SET_PORT_LATENCY.
+ *
+ * ingress_latency_ns — time (ns) from physical wire arrival to hardware RX timestamp latch.
+ *                      Driver ADDS this to each RX timestamp before posting the event.
+ * egress_latency_ns  — time (ns) from hardware TX timestamp latch to physical wire departure.
+ *                      Driver ADDS this to each TX timestamp before posting the event.
+ *
+ * Both fields are signed INT64:
+ *   A NIC that latches the timestamp slightly BEFORE the wire event has a NEGATIVE latency.
+ *   A NIC that latches the timestamp slightly AFTER  the wire event has a POSITIVE latency.
+ *
+ * Set both to 0  (default) for no correction.
+ * Typical calibrated values: ±10 ns to ±200 ns depending on PHY.
+ */
+typedef struct AVB_PORT_LATENCY_REQUEST {
+    avb_i64 ingress_latency_ns;  /* Added to RX hardware timestamps (signed, nanoseconds) */
+    avb_i64 egress_latency_ns;   /* Added to TX hardware timestamps (signed, nanoseconds) */
+} AVB_PORT_LATENCY_REQUEST, *PAVB_PORT_LATENCY_REQUEST;
+
+/**
+ * Per-adapter runtime statistics returned by IOCTL_AVB_GET_STATISTICS.
+ * Implements: #270 (TEST-STATISTICS-001)
+ * Verifies:   #67  (REQ-F-STATISTICS-001)
+ *
+ * Structure size MUST be 13 × 8 = 104 bytes with 8-byte packing.
+ * Tests assert sizeof(AVB_DRIVER_STATISTICS) == 104.
+ */
+#pragma pack(push, 8)
+typedef struct _AVB_DRIVER_STATISTICS {
+    avb_u64 TxPackets;           /* Transmitted packet count               (offset  0) */
+    avb_u64 RxPackets;           /* Received packet count                  (offset  8) */
+    avb_u64 TxBytes;             /* Transmitted byte count                 (offset 16) */
+    avb_u64 RxBytes;             /* Received byte count                    (offset 24) */
+    avb_u64 PhcQueryCount;       /* PHC time query IOCTL calls             (offset 32) */
+    avb_u64 PhcAdjustCount;      /* PHC frequency-adjust IOCTL calls       (offset 40) */
+    avb_u64 PhcSetCount;         /* PHC set-time IOCTL calls               (offset 48) */
+    avb_u64 TimestampCount;      /* Hardware timestamp captures            (offset 56) */
+    avb_u64 IoctlCount;          /* Total IOCTL dispatch calls             (offset 64) */
+    avb_u64 ErrorCount;          /* IOCTL calls that returned an error     (offset 72) */
+    avb_u64 MemoryAllocFailures; /* NdisAllocate* failures                 (offset 80) */
+    avb_u64 HardwareFaults;      /* Hardware-fault events                  (offset 88) */
+    avb_u64 FilterAttachCount;   /* FilterAttach invocations               (offset 96) */
+} AVB_DRIVER_STATISTICS, *PAVB_DRIVER_STATISTICS;
+#pragma pack(pop)
 
 #ifdef __cplusplus
 }
