@@ -1710,8 +1710,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (inLen < sizeof(AVB_REGISTER_REQUEST) || outLen < sizeof(AVB_REGISTER_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL; 
             } else {
-                // CRITICAL FIX: Use the specific adapter context that was selected via IOCTL_AVB_OPEN_ADAPTER
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                // Per-handle routing: use currentContext which was resolved from
+                // FileObject->FsContext in device.c, not the global g_AvbContext singleton.
+                // Fixes: IOCTL_AVB_READ_REGISTER returned the same adapter for every handle.
+                PAVB_DEVICE_CONTEXT activeContext = currentContext;
                 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "Register access failed: Hardware not ready (state=%s)\n", 
