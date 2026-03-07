@@ -139,7 +139,7 @@
       <AdditionalIncludeDirectories>..;.;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1;AVB_VERSION_BUILD=$(AvbVersionBuild);AVB_VERSION_REVISION=$(AvbVersionRevision)</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
-      <PreCompiledHeaderFile>src\precomp.h</PreCompiledHeaderFile>
+      <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
       <PreCompiledHeader>Use</PreCompiledHeader>
     </ClCompile>
     <ResourceCompile>
@@ -159,7 +159,7 @@
       <AdditionalIncludeDirectories>..;.;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
-      <PreCompiledHeaderFile>src\precomp.h</PreCompiledHeaderFile>
+      <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
       <PreCompiledHeader>Use</PreCompiledHeader>
     </ClCompile>
     <ResourceCompile>
@@ -179,7 +179,7 @@
       <AdditionalIncludeDirectories>..;.;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreProcessorDefinitions>%(PreProcessorDefinitions);NDIS_WDM=1;NDIS630=1</PreProcessorDefinitions>
       <DisableSpecificWarnings>%(DisableSpecificWarnings);4201;4214</DisableSpecificWarnings>
-      <PreCompiledHeaderFile>src\precomp.h</PreCompiledHeaderFile>
+      <PreCompiledHeaderFile>precomp.h</PreCompiledHeaderFile>
       <PreCompiledHeader>Use</PreCompiledHeader>
     </ClCompile>
     <ResourceCompile>
