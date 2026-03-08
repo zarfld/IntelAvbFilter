@@ -1324,6 +1324,38 @@ $AllTests = @(
         Requirement = "#93"
         Standard = "REQ-F-POWER-002"
     }
+
+    # ── Sprint 4 — TDD / gPTP PHC contract / OS compat ──────────────────────
+    @{
+        Name = "test_gptp_phc_interface"
+        Type = "cl"
+        Source = "tests\gptp\test_gptp_phc_interface.c"
+        Output = "test_gptp_phc_interface.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "gPTP PHC Interface Contract Tests (Issue #210) - PHC read/adjust/offset/aux-ts as gPTP daemon would call"
+        Issue = "#210"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG), 38(ADJUST_FREQUENCY), 48(PHC_OFFSET_ADJUST), 44(GET_AUX_TIMESTAMP)"
+        Requirement = "#48"
+        Standard = "IEEE 802.1AS-2020 §11.3"
+    }
+    @{
+        Name = "test_win7_stub"
+        Type = "cl"
+        Source = "tests\compat\test_win7_stub.c"
+        Output = "test_win7_stub.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "Windows OS Compatibility Tests (Issue #258) - Win10+ required, Win7 wont-fix (EOL Jan 2020)"
+        Issue = "#258"
+        TestCases = 5
+        IOCTLs = "0x800(GET_VERSION)"
+        Requirement = "#258"
+        Standard = "REQ-NF-COMPAT-001"
+    }
 )
 
 # Filter tests if specific test requested
