@@ -2,6 +2,7 @@
 
 **Document ID**: TEST-PLAN-MASTER-CATEGORIZED  
 **Created**: 2026-03-07  
+**Last Verified**: 2026-03-08 (driver `e3d4c8f`, Run-Tests-Elevated.ps1)  
 **Status**: ✅ Active  
 **Phase**: 07-verification-validation  
 **Standards**: IEEE 1012-2016 (Verification & Validation)
@@ -64,6 +65,8 @@ Leave open; add a comment tracking the gap; do not close until gap is filled.
 
 | Issue | Test ID | Covering File(s) | Gap Description |
 |-------|---------|-----------------|-----------------|
+| #272 | TEST-PERF-TS-001: Timestamp Retrieval Latency <1µs | `tests/performance/test_timestamp_latency.c` | **3 FAILURES (2026-03-08)**: TC-PERF-TS-002 (cold-path median 3069 ns ≥ 1µs threshold), TC-PERF-TS-004 (P99 16703 ns ≥ 2µs), TC-PERF-TS-006 (concurrent threads exceeded threshold). PASS=7 FAIL=3. Warm-path passes (TC-PERF-TS-001: 97 ns). Failures are system-load sensitive. |
+| #312 | TEST-MDIO-PHY-001: MDIO/PHY Register Access | `tests/ioctl/test_ioctl_mdio_phy.c` | **7 FAILURES (2026-03-08)**: All actual MDIO read/write ops fail with `Win32 error 31` (ERROR_GEN_FAILURE). Only validation-path tests (invalid address/range rejection) pass. PASS=2 FAIL=7 SKIP=6. Root cause: MDIO IOCTL handler returns generic failure for all I226 register reads — hardware not responding or I226 MDIO not implemented in driver. |
 | #195 | TEST-IOCTL-SET-001: PHC Time Set | `test_ioctl_ptp_getset.c` | ForceSet=TRUE branch, privilege enforcement, monotonicity preservation during set not verified |
 | #200 | TEST-PERF-PHC-001: PHC Read Latency | `test_timestamp_latency.c` | PHC-query-specific P50 <500ns / P99 <1µs sub-measurement not confirmed |
 | #208 | TEST-MULTI-ADAPTER-001: Multi-Adapter PHC Sync | `test_all_adapters.c`, `avb_multi_adapter_test.c` | Cross-adapter PHC isolation ±10 ns not measured; cross-sync ≤100 ns not tested |
@@ -197,9 +200,10 @@ Not a driver feature test. Managed on a separate track.
 
 | Category | Count | Action |
 |----------|-------|--------|
-| ✅ Tested OK | 8 | ✅ Done — closed |
-| 🔁 Duplicates | 5 | ✅ Done — closed as duplicate |
-| 🟡 Nearly OK | 29 | Fill gaps → close |
+| ✅ Tested OK | 6 | Close (verified 2026-03-08, driver e3d4c8f) |
+| 🔁 Duplicates | 5 | Close as duplicate |
+| ⚠️ Moved to Cat-3 | 2 | #272 (3 perf failures), #312 (7 MDIO failures) — do not close |
+| 🟡 Nearly OK | 31 | Fill gaps → close (includes #272, #312 promoted from Cat-1) |
 | 🔴 Test Missing P0 | 4 | Write test code immediately |
 | 🔴 Test Missing P1 | 6 | Write test code (sprint backlog) |
 | 🔴 Test Missing P2/P3 | 16 | Write test code (future sprints) |
@@ -217,6 +221,16 @@ Not a driver feature test. Managed on a separate track.
 3. **New test files** → write when closing a gap requires it
 4. **TDD for unimplemented features** → write RED test, then implement driver feature, then close GREEN
 5. **Hardware/infrastructure-gated** → last; schedule when rig is available
+
+## rules to follow:
+
+ - .github\skills\run-tests\SKILL.md - defines proper test execution!
+ - tools\test\README.md - readme of Test infrastructure
+ - .github\instructions\phase-06-integration.instructions.md
+ - .github\instructions\phase-07-verification-validation.instructions.md 
+
+it is expected that the ruleas are being followed consistently
+
 
 ---
 
