@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Module Name:
 
@@ -33,7 +33,7 @@ AvbDiscoverIntelControllerResourcesEnhanced(
     
     // Intel PCIe configuration space structure (per Intel BAR documentation)
     struct {
-        ULONG VendorId;          // 0x00: Must be 0x8086 for Intel
+        ULONG VendorId;          // 0x00: Must be INTEL_VENDOR_ID for Intel
         ULONG DeviceId;          // 0x04: Device-specific ID
         ULONG Command;           // 0x08: PCI Command register
         ULONG Status;            // 0x0C: PCI Status register
@@ -83,12 +83,12 @@ AvbDiscoverIntelControllerResourcesEnhanced(
     }
     
     // Validate Intel vendor ID (per Intel BAR documentation)
-    if ((pciConfig.VendorId & 0xFFFF) != INTEL_VENDOR_ID) {
-        DEBUGP(DL_ERROR, "Not an Intel device: VendorId=0x%x\n", pciConfig.VendorId & 0xFFFF);
+    if ((pciConfig.VendorId & INTEL_MASK_16BIT) != INTEL_VENDOR_ID) {
+        DEBUGP(DL_ERROR, "Not an Intel device: VendorId=0x%x\n", pciConfig.VendorId & INTEL_MASK_16BIT);
         return STATUS_DEVICE_NOT_READY;
     }
     
-    USHORT deviceId = (pciConfig.VendorId >> 16) & 0xFFFF;
+    USHORT deviceId = (pciConfig.VendorId >> 16) & INTEL_MASK_16BIT;
     DEBUGP(DL_INFO, "Intel device detected: DeviceId=0x%x\n", deviceId);
     
     // Enhanced BAR0 validation per Intel PCIe BAR0 documentation
@@ -112,35 +112,35 @@ AvbDiscoverIntelControllerResourcesEnhanced(
     }
     
     // Extract physical address (per PCIe specification - clear lower 4 bits)
-    Bar0Address->QuadPart = bar0_raw & 0xFFFFFFF0;
+    Bar0Address->QuadPart = bar0_raw & INTEL_PCI_BAR_MMIO_MASK;
     
     // Intel controller-specific BAR0 length determination
     switch (deviceId) {
-        case 0x1533: // I210 copper
-        case 0x1536: // I210 fiber
-        case 0x1537: // I210 backplane
-        case 0x1538: // I210 SGMII
-        case 0x157B: // I210 flash-less
+        case INTEL_DEV_I210_AT: // I210 copper
+        case INTEL_DEV_I210_IS: // I210 fiber
+        case INTEL_DEV_I210_IT: // I210 backplane
+        case INTEL_DEV_I210_CS: // I210 SGMII
+        case INTEL_DEV_I210_FLASHLESS: // I210 flash-less
             *Bar0Length = 0x20000;  // 128KB for I210 family
             break;
             
-        case 0x15B7: // I219-LM
-        case 0x15B8: // I219-V
-        case 0x15D6: // I219-V (2)
-        case 0x15D7: // I219-LM (2)
-        case 0x15D8: // I219-LM (3)
+        case INTEL_DEV_I219_LM: // I219-LM
+        case INTEL_DEV_I219_V: // I219-V
+        case INTEL_DEV_I219_D0: // I219-V (2)
+        case INTEL_DEV_I219_D1: // I219-LM (2)
+        case INTEL_DEV_I219_D2: // I219-LM (3)
             *Bar0Length = 0x20000;  // 128KB for I219 family
             break;
             
-        case 0x15F2: // I225-LM
-        case 0x15F3: // I225-V
-        case 0x0D9F: // I225 variant
+        case INTEL_DEV_I225_V: // I225-LM
+        case INTEL_DEV_I225_IT: // I225-V
+        case INTEL_DEV_I225_VARIANT: // I225 variant
             *Bar0Length = 0x20000;  // 128KB for I225 family
             break;
             
-        case 0x125B: // I226-LM
-        case 0x125C: // I226-V
-        case 0x125D: // I226-IT
+        case INTEL_DEV_I226_LM: // I226-LM
+        case INTEL_DEV_I226_V: // I226-V
+        case INTEL_DEV_I226_IT: // I226-IT
             *Bar0Length = 0x20000;  // 128KB for I226 family
             break;
             
@@ -151,7 +151,7 @@ AvbDiscoverIntelControllerResourcesEnhanced(
     }
     
     // Final validation per Intel documentation
-    if (Bar0Address->QuadPart == 0 || Bar0Address->QuadPart == 0xFFFFFFF0) {
+    if (Bar0Address->QuadPart == 0 || Bar0Address->QuadPart == INTEL_PCI_BAR_MMIO_MASK) {
         DEBUGP(DL_ERROR, "Invalid BAR0 address: 0x%llx\n", Bar0Address->QuadPart);
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }

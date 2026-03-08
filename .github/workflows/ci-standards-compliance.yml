@@ -151,6 +151,44 @@ jobs:
           find src -name '*.cpp' -o -name '*.h' | head -10
           echo "✅ Source files found"
 
+  # Sprint 1 CI Gate: SSOT Magic Numbers Check (closes #305)
+  ssot-magic-numbers-gate:
+    name: SSOT Gate — No Raw Hex Literals in src/ (closes #305)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for raw hex literals in src/ (4+ significant digits)
+        # Verifies: #305 (REQ-NF-REGS-001 — Eliminate Magic Numbers)
+        # Any 0xNNNN pattern in a .c file under src/ that is NOT part of
+        # a #define, a comment, or a SSOT-exempt status code block is a
+        # violation; all constants must live in include/ SSOT headers.
+        run: |
+          echo "🔍 SSOT Gate: scanning src/ for raw hex literals (4+ digits)..."
+
+          # Gather violations: 4+ hex digit literals in .c files,
+          # excluding preprocessor definitions and comment-only lines.
+          violations=$(grep -rEn "0x[0-9A-Fa-f]{4,}" src/ --include="*.c" \
+            | grep -Ev "^\s*(//|/\*|\*)"       \
+            | grep -Ev "#\s*(define|include)"   \
+            | grep -Ev "NTSTATUS|STATUS_"       \
+            || true)
+
+          if [ -n "$violations" ]; then
+            echo ""
+            echo "❌ Raw hex literals (4+ digits) found in src/ — move to include/ SSOT headers:"
+            echo "-----------------------------------------------------------------------"
+            echo "$violations"
+            echo "-----------------------------------------------------------------------"
+            echo "Fix: define a named constant in include/intel_pci_ids.h,"
+            echo "     include/avb_events.h, or include/avb_ioctl.h and use"
+            echo "     the symbolic name instead of the raw literal."
+            exit 1
+          fi
+
+          echo "✅ No raw 4+ digit hex literals found in src/ — SSOT compliance confirmed"
+
   # Phase 05: TDD - Test-Driven Development
   unit-tests:
     name: Unit Tests (${{ matrix.os }}, ${{ matrix.config }})

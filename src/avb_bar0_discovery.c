@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Module Name:
 
@@ -80,46 +80,46 @@ AvbIsSupportedIntelController(
 
     if (WideContainsInsensitive(name, lenChars, L"I210")) { 
         if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
-        if (OutDeviceId) *OutDeviceId = 0x1533; 
+        if (OutDeviceId) *OutDeviceId = INTEL_DEV_I210_AT; 
         DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I210 (VID:0x%04X, DID:0x%04X)\n", 
-               INTEL_VENDOR_ID, 0x1533);
+               INTEL_VENDOR_ID, INTEL_DEV_I210_AT);
         return TRUE; 
     }
     if (WideContainsInsensitive(name, lenChars, L"I225")) { 
         if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
-        if (OutDeviceId) *OutDeviceId = 0x15F2; 
+        if (OutDeviceId) *OutDeviceId = INTEL_DEV_I225_V; 
         DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I225 (VID:0x%04X, DID:0x%04X)\n", 
-               INTEL_VENDOR_ID, 0x15F2);
+               INTEL_VENDOR_ID, INTEL_DEV_I225_V);
         return TRUE; 
     }
     if (WideContainsInsensitive(name, lenChars, L"I226")) { 
         if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
-        if (OutDeviceId) *OutDeviceId = 0x125B; 
+        if (OutDeviceId) *OutDeviceId = INTEL_DEV_I226_LM; 
         DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I226 (VID:0x%04X, DID:0x%04X)\n", 
-               INTEL_VENDOR_ID, 0x125B);
+               INTEL_VENDOR_ID, INTEL_DEV_I226_LM);
         return TRUE; 
     }
     if (WideContainsInsensitive(name, lenChars, L"I219")) { 
         if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
-        if (OutDeviceId) *OutDeviceId = 0x15B7; 
+        if (OutDeviceId) *OutDeviceId = INTEL_DEV_I219_LM; 
         DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I219 (VID:0x%04X, DID:0x%04X)\n", 
-               INTEL_VENDOR_ID, 0x15B7);
+               INTEL_VENDOR_ID, INTEL_DEV_I219_LM);
         return TRUE; 
     }
     if (WideContainsInsensitive(name, lenChars, L"I217")) { 
         if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; 
-        if (OutDeviceId) *OutDeviceId = 0x153A; 
+        if (OutDeviceId) *OutDeviceId = INTEL_DEV_I217_LM; 
         DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I217 (VID:0x%04X, DID:0x%04X)\n", 
-               INTEL_VENDOR_ID, 0x153A);
+               INTEL_VENDOR_ID, INTEL_DEV_I217_LM);
         return TRUE; 
     }
 
     // Also accept common marketing names
     if (WideContainsInsensitive(name, lenChars, L"ETHERNET CONNECTION I219") ||
         WideContainsInsensitive(name, lenChars, L"ETHERNET CONNECTION I217")) {
-        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = 0x15B7; 
+        if (OutVendorId) *OutVendorId = INTEL_VENDOR_ID; if (OutDeviceId) *OutDeviceId = INTEL_DEV_I219_LM; 
         DEBUGP(DL_INFO, "AvbIsSupportedIntelController: ? SUPPORTED - Intel I219/I217 (marketing name, VID:0x%04X, DID:0x%04X)\n", 
-               INTEL_VENDOR_ID, 0x15B7);
+               INTEL_VENDOR_ID, INTEL_DEV_I219_LM);
         return TRUE;
     }
 
@@ -215,37 +215,37 @@ AvbGetIntelBarLengthByDeviceId(USHORT deviceId)
 {
     switch (deviceId) {
         // I210 family (Datasheet 333016): 128KB CSR space
-        case 0x1533: // I210-AT
-        case 0x1536: // I210-IS
-        case 0x1537: // I210-IT
-        case 0x1538: // I210-CS/CL
-        case 0x157B: // Flash-less variant
-            return 0x20000; // 128KB
+        case INTEL_DEV_I210_AT: // I210-AT
+        case INTEL_DEV_I210_IS: // I210-IS
+        case INTEL_DEV_I210_IT: // I210-IT
+        case INTEL_DEV_I210_CS: // I210-CS/CL
+        case INTEL_DEV_I210_FLASHLESS: // Flash-less variant
+            return INTEL_BAR0_SIZE_128KB; // 128KB
 
         // I217/I219 family (PCH integrated MAC/PHY) � e1000e defines 128KB BAR
-        case 0x153A: // I217-LM
-        case 0x153B: // I217-V
-        case 0x15B7: // I219-LM
-        case 0x15B8: // I219-V
-        case 0x15D6:
-        case 0x15D7:
-        case 0x15D8:
-        case 0x0DC7:
-        case 0x1570:
-        case 0x15E3:
-            return 0x20000; // 128KB
+        case INTEL_DEV_I217_LM: // I217-LM
+        case INTEL_DEV_I217_V: // I217-V
+        case INTEL_DEV_I219_LM: // I219-LM
+        case INTEL_DEV_I219_V: // I219-V
+        case INTEL_DEV_I219_D0:
+        case INTEL_DEV_I219_D1:
+        case INTEL_DEV_I219_D2:
+        case INTEL_DEV_I219_LM_DC7:
+        case INTEL_DEV_I219_V6:
+        case INTEL_DEV_I219_LM6:
+            return INTEL_BAR0_SIZE_128KB; // 128KB
 
         // I225/I226 (Spec update/product briefs): 128KB CSR space
-        case 0x15F2: // I225
-        case 0x15F3:
-        case 0x0D9F:
-        case 0x125B: // I226
-        case 0x125C:
-        case 0x125D:
-            return 0x20000; // 128KB
+        case INTEL_DEV_I225_V: // I225
+        case INTEL_DEV_I225_IT:
+        case INTEL_DEV_I225_VARIANT:
+        case INTEL_DEV_I226_LM: // I226
+        case INTEL_DEV_I226_V:
+        case INTEL_DEV_I226_IT:
+            return INTEL_BAR0_SIZE_128KB; // 128KB
 
         default:
-            return 0x20000; // conservative default
+            return INTEL_BAR0_SIZE_128KB; // conservative default
     }
 }
 
@@ -318,8 +318,8 @@ AvbDiscoverIntelControllerResources(
 
     ObDereferenceObject(pdo);
 
-    slot.bits.DeviceNumber = (address >> 16) & 0xFFFF;
-    slot.bits.FunctionNumber = (address & 0xFFFF) & 0x7;
+    slot.bits.DeviceNumber = (address >> 16) & INTEL_MASK_16BIT;
+    slot.bits.FunctionNumber = (address & INTEL_MASK_16BIT) & 0x7;
     DEBUGP(DL_INFO, "? STEP 3 SUCCESS: Device Address = Bus:%lu, Device:%lu, Function:%lu\n", 
            busNumber, slot.bits.DeviceNumber, slot.bits.FunctionNumber);
 
@@ -331,8 +331,8 @@ AvbDiscoverIntelControllerResources(
         return status;
     }
 
-    USHORT ven = (USHORT)(id & 0xFFFF);
-    USHORT dev = (USHORT)((id >> 16) & 0xFFFF);
+    USHORT ven = (USHORT)(id & INTEL_MASK_16BIT);
+    USHORT dev = (USHORT)((id >> 16) & INTEL_MASK_16BIT);
     DEBUGP(DL_INFO, "? STEP 4 SUCCESS: VID=0x%04x, DID=0x%04x\n", ven, dev);
 
     if (ven != INTEL_VENDOR_ID) {
@@ -453,13 +453,13 @@ AvbInitializeDeviceWithBar0Discovery(
         ObDereferenceObject(pdo);
         if (!NT_SUCCESS(st)) break;
 
-        slot.bits.DeviceNumber = (address >> 16) & 0xFFFF;
-        slot.bits.FunctionNumber = (address & 0xFFFF) & 0x7;
+        slot.bits.DeviceNumber = (address >> 16) & INTEL_MASK_16BIT;
+        slot.bits.FunctionNumber = (address & INTEL_MASK_16BIT) & 0x7;
         st = AvbReadPciConfigDword(busNumber, slot, 0x00, &id);
         if (!NT_SUCCESS(st)) break;
         
-        vendorId = (USHORT)(id & 0xFFFF);
-        deviceId = (USHORT)((id >> 16) & 0xFFFF);
+        vendorId = (USHORT)(id & INTEL_MASK_16BIT);
+        deviceId = (USHORT)((id >> 16) & INTEL_MASK_16BIT);
         gotPciIds = TRUE;
         
         ctx->intel_device.pci_vendor_id = vendorId;

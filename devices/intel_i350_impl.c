@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Module Name:
 
@@ -150,7 +150,7 @@ static int init_ptp(device_t *dev)
     
     // I350 PTP initialization based on IGB driver patterns
     // Configure TIMINCA for 8ns increment (I350 typical value)
-    uint32_t timinca = 0x80000008;  // 8ns increment for I350
+    uint32_t timinca = INTEL_TIMINCA_I350_INIT;  // 8ns increment for I350
     result = ndis_platform_ops.mmio_write(dev, E1000_TIMINCA, timinca);
     if (result != 0) {
         DEBUGP(DL_ERROR, "I350 TIMINCA write failed\n");
@@ -220,8 +220,8 @@ static int set_systime(device_t *dev, uint64_t systime)
     init_ptp(dev);
     
     // Split timestamp
-    ts_low = (uint32_t)(systime & 0xFFFFFFFF);
-    ts_high = (uint32_t)((systime >> 32) & 0xFFFFFFFF);
+    ts_low = (uint32_t)(systime & INTEL_MASK_32BIT);
+    ts_high = (uint32_t)((systime >> 32) & INTEL_MASK_32BIT);
     
     // Write SYSTIM registers (I350 uses standard e1000 addresses)
     result = ndis_platform_ops.mmio_write(dev, E1000_SYSTIML, ts_low);
@@ -401,11 +401,11 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
 static int enable_packet_timestamping(device_t *dev, int enable)
 {
     // I350 PTP registers (IGB family)
-    const uint32_t TSYNCRXCTL = 0x0B344;
-    const uint32_t TSYNCTXCTL = 0x0B348;
-    const uint32_t RXTT_ENABLE = 0x80000000;  // Bit 31
-    const uint32_t TXTT_ENABLE = 0x80000000;  // Bit 31
-    const uint32_t TYPE_ALL = 0x0E000000;     // Bits 27-25
+    const uint32_t TSYNCRXCTL = INTEL_REG_TSYNCTXCTL;
+    const uint32_t TSYNCTXCTL = INTEL_REG_TSYNCRXCTL;
+    const uint32_t RXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
+    const uint32_t TXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
+    const uint32_t TYPE_ALL = INTEL_TIMINCA_INCPERIOD;     // Bits 27-25
     
     if (!dev || !ndis_platform_ops.mmio_write || !ndis_platform_ops.mmio_read) {
         return -1;
@@ -430,7 +430,7 @@ static int enable_packet_timestamping(device_t *dev, int enable)
     } else {
         // Disable packet timestamping
         uint32_t regval = 0;
-        const uint32_t TYPE_MASK = 0x0E000000;
+        const uint32_t TYPE_MASK = INTEL_TIMINCA_INCPERIOD;
         
         if (ndis_platform_ops.mmio_read(dev, TSYNCRXCTL, &regval) == 0) {
             regval &= ~(RXTT_ENABLE | TYPE_MASK);

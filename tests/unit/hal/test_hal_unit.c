@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <assert.h>
+#include <string.h>   /* For memset */
 #include <process.h>  /* For _exit() on Windows */
 
 // Test result tracking
@@ -417,15 +418,159 @@ void Test_CoreLogicUsesHAL(void) {
 }
 
 // =============================================================================
+// TC-HAL-009/010: TEST-DEVICE-ABS-THREADING-001 (closes #279)
+// 8-thread stress test + lock hold time < 100 µs
+// =============================================================================
+
+#define STRESS_THREADS           8
+#define STRESS_ITERS_PER_THREAD  10000
+#define LOCK_HOLD_LIMIT_NS       100000LL   /* 100 µs */
+
+typedef struct _STRESS_CTX {
+    MOCK_CONTEXT     mock;            /* shared PHC state */
+    CRITICAL_SECTION lock;            /* guards mock */
+    volatile LONGLONG maxP99HoldNs;   /* worst per-thread P99 hold time (ns) */
+    LONGLONG         qpcFreq;         /* QueryPerformanceFrequency */
+    volatile LONG    errorCount;
+    volatile LONG    successCount;
+} STRESS_CTX;
+
+/* qsort comparator for LONGLONG */
+static int CompareI64(const void* a, const void* b)
+{
+    LONGLONG va = *(const LONGLONG*)a;
+    LONGLONG vb = *(const LONGLONG*)b;
+    return (va > vb) - (va < vb);
+}
+
+static STRESS_CTX g_stressCtx;
+
+static DWORD WINAPI StressThread(LPVOID param)
+{
+    STRESS_CTX* ctx = (STRESS_CTX*)param;
+    LARGE_INTEGER ts, t0, t1;
+    LONGLONG holdTimes[STRESS_ITERS_PER_THREAD];
+    LONGLONG p99;
+    int i;
+
+    for (i = 0; i < STRESS_ITERS_PER_THREAD; i++) {
+        NTSTATUS st;
+        LONGLONG holdNs;
+
+        /* Measure ONLY the time the lock is actually held */
+        EnterCriticalSection(&ctx->lock);
+        QueryPerformanceCounter(&t0);
+        st = Mock_ReadPhc(&ctx->mock, &ts);
+        QueryPerformanceCounter(&t1);
+        LeaveCriticalSection(&ctx->lock);
+
+        holdNs = (t1.QuadPart - t0.QuadPart) * 1000000000LL / ctx->qpcFreq;
+        holdTimes[i] = holdNs;
+
+        if (st != 0) {
+            InterlockedIncrement(&ctx->errorCount);
+        } else {
+            InterlockedIncrement(&ctx->successCount);
+        }
+    }
+
+    /* Compute per-thread P99 and CAS-update global worst P99.
+     * Using P99 rather than max excludes OS scheduler preemptions,
+     * which can occur in user-mode but cannot happen inside a kernel
+     * spinlock (where IRQL is raised). */
+    qsort(holdTimes, STRESS_ITERS_PER_THREAD, sizeof(LONGLONG), CompareI64);
+    p99 = holdTimes[(int)(STRESS_ITERS_PER_THREAD * 99 / 100)];
+    {
+        LONGLONG cur;
+        do {
+            cur = ctx->maxP99HoldNs;
+            if (p99 <= cur) break;
+        } while (InterlockedCompareExchange64(&ctx->maxP99HoldNs, p99, cur) != cur);
+    }
+    return 0;
+}
+
+/**
+ * TC-HAL-009: 8-Thread Stress — no data race across 80,000 reads
+ * TC-HAL-010: Lock Hold Time — P99 lock hold < 100 µs (excludes OS scheduler outliers)
+ *
+ * Implements: TEST-DEVICE-ABS-THREADING-001
+ * Closes: #279
+ */
+void Test_ThreadStressAndLockHold(void)
+{
+    HANDLE threads[STRESS_THREADS];
+    LARGE_INTEGER freq;
+    int expected, actual;
+    int i;
+    char msg[160];
+
+    TEST_CASE("TC-HAL-009/010: TEST-DEVICE-ABS-THREADING-001 (closes #279)");
+    printf("  %d threads x %d iterations = %d total reads\n",
+           STRESS_THREADS, STRESS_ITERS_PER_THREAD,
+           STRESS_THREADS * STRESS_ITERS_PER_THREAD);
+    printf("  Lock hold limit: P99 < %lld us (max excluded: OS scheduler jitter)\n", LOCK_HOLD_LIMIT_NS / 1000);
+
+    /* Initialise shared context */
+    memset(&g_stressCtx, 0, sizeof(g_stressCtx));
+    g_stressCtx.mock.CurrentPhcValue = 0;
+    g_stressCtx.mock.ReadCount       = 0;
+    InitializeCriticalSection(&g_stressCtx.lock);
+    QueryPerformanceFrequency(&freq);
+    g_stressCtx.qpcFreq = freq.QuadPart;
+
+    /* Spawn 8 threads */
+    for (i = 0; i < STRESS_THREADS; i++) {
+        threads[i] = CreateThread(NULL, 0, StressThread, &g_stressCtx, 0, NULL);
+        if (!threads[i]) {
+            printf("  [FAIL] Failed to create thread %d\n", i);
+            g_results.total++;  g_results.failed++;
+            /* Close already-created handles */
+            while (--i >= 0) CloseHandle(threads[i]);
+            DeleteCriticalSection(&g_stressCtx.lock);
+            return;
+        }
+    }
+
+    /* Wait (up to 30 s) then clean up */
+    WaitForMultipleObjects(STRESS_THREADS, threads, TRUE, 30000);
+    for (i = 0; i < STRESS_THREADS; i++) CloseHandle(threads[i]);
+    DeleteCriticalSection(&g_stressCtx.lock);
+
+    expected = STRESS_THREADS * STRESS_ITERS_PER_THREAD;
+    actual   = (int)g_stressCtx.successCount;
+
+    printf("  Reads succeeded:  %d / %d\n", actual, expected);
+    printf("  Reads failed:     %ld\n",    (long)g_stressCtx.errorCount);
+    printf("  Worst-thread P99 lock hold: %lld ns (%lld us)\n",
+           g_stressCtx.maxP99HoldNs, g_stressCtx.maxP99HoldNs / 1000);
+
+    /* TC-HAL-009: zero errors (no corruption / data race) */
+    TEST_ASSERT(g_stressCtx.errorCount == 0,
+                "TC-HAL-009: No errors across 8 threads x 10000 reads");
+    TEST_ASSERT(actual == expected,
+                "TC-HAL-009: All 80000 reads succeeded");
+
+    /* TC-HAL-010: P99 lock hold < 100 us
+     * P99 excludes OS scheduler preemptions (which cannot happen inside a
+     * kernel spinlock where IRQL >= DISPATCH_LEVEL). */
+    sprintf(msg, "TC-HAL-010: Worst-thread P99 lock hold %lld ns < %lld ns (100 us)",
+            g_stressCtx.maxP99HoldNs, LOCK_HOLD_LIMIT_NS);
+    TEST_ASSERT(g_stressCtx.maxP99HoldNs < LOCK_HOLD_LIMIT_NS, msg);
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
 int main(void) {
     printf("========================================\n");
-    printf("HAL UNIT TESTS (TEST-PORTABILITY-HAL-001)\n");
+    printf("HAL UNIT TESTS (TEST-PORTABILITY-HAL-001 + TEST-DEVICE-ABS-THREADING-001)\n");
     printf("========================================\n");
     printf("Verifies: #84 (REQ-NF-PORTABILITY-001)\n");
-    printf("Issue: https://github.com/zarfld/IntelAvbFilter/issues/308\n\n");
+    printf("Closes:   #279 (TEST-DEVICE-ABS-THREADING-001)\n");
+    printf("Issue: https://github.com/zarfld/IntelAvbFilter/issues/308\n");
+    printf("Issue: https://github.com/zarfld/IntelAvbFilter/issues/279\n\n");
     
     // Run test cases
     Test_DeviceDetection();
@@ -435,7 +580,8 @@ int main(void) {
     Test_CapabilityDetection();
     Test_HAL_InitializationCleanup();
     Test_CoreLogicUsesHAL();
-    
+    Test_ThreadStressAndLockHold();
+
     // Ensure all output is flushed before printing results
     fflush(stdout);
     

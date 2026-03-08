@@ -2,13 +2,16 @@
  * test_register_constants.c
  * 
  * Verifies: #306 (TEST-REGS-003: Register Constants Match Intel Datasheets)
+ * Verifies: #289 (TEST-EVENT-ID-SSOT-001: Event ID SSOT assertions)
  * Implements: #21 (REQ-NF-REGS-001: Eliminate Magic Numbers)
  * 
  * This file uses compile-time assertions (C_ASSERT) to verify that register
- * offset definitions in intel-ethernet-regs match official Intel datasheets.
+ * offset definitions in intel-ethernet-regs match official Intel datasheets,
+ * and that all driver Event Log IDs match the SSOT in avb_events.h.
  * 
  * Compilation MUST be done with /kernel flag to enable C_ASSERT.
- * Any C_ASSERT failure indicates a YAML-to-datasheet mismatch.
+ * Any C_ASSERT failure indicates a YAML-to-datasheet mismatch or an
+ * event ID that has drifted from the authoritative avb_events.h definition.
  * 
  * References:
  * - Intel I210 Datasheet (333016-005, Revision 3.7)
@@ -21,6 +24,9 @@
 #include "i210_regs.h"
 #include "i225_regs.h"
 #include "i226_regs.h"
+
+/* SSOT for driver Event Log IDs (closes #289) */
+#include "..\..\..\include\avb_events.h"
 
 /**
  * PTP Register Assertions
@@ -144,3 +150,35 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     UNREFERENCED_PARAMETER(RegistryPath);
     return STATUS_SUCCESS;
 }
+
+/**
+ * Event ID SSOT Assertions  (TEST-EVENT-ID-SSOT-001 — closes #289)
+ *
+ * Each C_ASSERT below proves that the symbolic constant defined in
+ * avb_events.h equals the authoritative numeric value documented in the
+ * driver spec.  If anyone changes a numeric value in avb_events.h the
+ * build will break here, preventing silent ID drift.
+ *
+ * Range: HAL events 17300-17399.
+ */
+
+/* --- HAL events 17300-17399 --- */
+C_ASSERT(AVB_EVENT_UNSUPPORTED_DEVICE        == 17301);
+C_ASSERT(AVB_EVENT_NULL_OPERATION            == 17302);
+C_ASSERT(AVB_EVENT_CAPABILITY_MISMATCH       == 17303);
+C_ASSERT(AVB_EVENT_INVALID_REGISTER_OFFSET   == 17304);
+C_ASSERT(AVB_EVENT_HARDWARE_INIT_FAILED      == 17305);
+C_ASSERT(AVB_EVENT_VERSION_MISMATCH          == 17307);
+C_ASSERT(AVB_EVENT_OPERATION_NOT_IMPLEMENTED == 17310);
+
+/* Ordering guard: later IDs must be strictly greater */
+C_ASSERT(AVB_EVENT_NULL_OPERATION            > AVB_EVENT_UNSUPPORTED_DEVICE);
+C_ASSERT(AVB_EVENT_CAPABILITY_MISMATCH       > AVB_EVENT_NULL_OPERATION);
+C_ASSERT(AVB_EVENT_INVALID_REGISTER_OFFSET   > AVB_EVENT_CAPABILITY_MISMATCH);
+C_ASSERT(AVB_EVENT_HARDWARE_INIT_FAILED      > AVB_EVENT_INVALID_REGISTER_OFFSET);
+C_ASSERT(AVB_EVENT_VERSION_MISMATCH          > AVB_EVENT_HARDWARE_INIT_FAILED);
+C_ASSERT(AVB_EVENT_OPERATION_NOT_IMPLEMENTED > AVB_EVENT_VERSION_MISMATCH);
+
+/* Range guard: all HAL event IDs must stay within 17300-17399 */
+C_ASSERT(AVB_EVENT_UNSUPPORTED_DEVICE        >= 17300 && AVB_EVENT_UNSUPPORTED_DEVICE        <= 17399);
+C_ASSERT(AVB_EVENT_OPERATION_NOT_IMPLEMENTED >= 17300 && AVB_EVENT_OPERATION_NOT_IMPLEMENTED <= 17399);

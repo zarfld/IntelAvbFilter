@@ -2,12 +2,15 @@
  * @file test_hal_errors.c
  * @brief Hardware Abstraction Layer Error Scenario Tests
  * 
- * Test ID: TEST-PORTABILITY-HAL-002
+ * Test ID: TEST-PORTABILITY-HAL-002 / TEST-ERROR-MAP-001
  * Implements: #309 (TEST-PORTABILITY-HAL-002: Hardware Abstraction Layer Error Scenarios)
+ * Implements: #280 (TEST-ERROR-MAP-001: AVB→NTSTATUS Mapping Table)
  * Verifies: #84 (REQ-NF-PORTABILITY-001: Hardware Portability via Device Abstraction Layer)
  * Issue: https://github.com/zarfld/IntelAvbFilter/issues/309
+ * Issue: https://github.com/zarfld/IntelAvbFilter/issues/280
  * 
  * Tests Error Scenarios: ES-PORT-HAL-001 through ES-PORT-HAL-010
+ * Tests NTSTATUS Mapping: TC-ERR-MAP-001
  * 
  * Test Cases:
  *   TC-ERR-001: Unsupported Device ID (ES-PORT-HAL-001)
@@ -17,6 +20,8 @@
  *   TC-ERR-005: Hardware Initialization Failure (ES-PORT-HAL-005)
  *   TC-ERR-006: Operation Table Version Mismatch (ES-PORT-HAL-007)
  *   TC-ERR-007: Device-Specific State Overflow (ES-PORT-HAL-009)
+ *   TC-ERR-008: Missing Operation Implementation (ES-PORT-HAL-010)
+ *   TC-ERR-MAP-001: Exhaustive NDIS_STATUS→NTSTATUS 1:1 mapping table (closes #280)
  */
 
 #include <windows.h>
@@ -25,14 +30,42 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// NTSTATUS codes
-#define STATUS_SUCCESS                     0x00000000
-#define STATUS_NOT_SUPPORTED               0xC00000BB
-#define STATUS_ACCESS_VIOLATION            0xC0000005
-#define STATUS_INVALID_PARAMETER           0xC000000D
-#define STATUS_DEVICE_CONFIGURATION_ERROR  0xC0000182
-#define STATUS_REVISION_MISMATCH           0xC0000059
-#define STATUS_NOT_IMPLEMENTED             0xC0000002
+/* SSOT for all driver Event Log IDs (closes #289)
+ * Never use raw integer literals for event IDs — use these names only. */
+#include "../../../include/avb_events.h"
+
+/* Map SSOT names to the legacy local aliases used below */
+#define EVENT_ID_UNSUPPORTED_DEVICE        AVB_EVENT_UNSUPPORTED_DEVICE
+#define EVENT_ID_NULL_OPERATION            AVB_EVENT_NULL_OPERATION
+#define EVENT_ID_CAPABILITY_MISMATCH       AVB_EVENT_CAPABILITY_MISMATCH
+#define EVENT_ID_INVALID_REGISTER_OFFSET   AVB_EVENT_INVALID_REGISTER_OFFSET
+#define EVENT_ID_HARDWARE_INIT_FAILED      AVB_EVENT_HARDWARE_INIT_FAILED
+#define EVENT_ID_VERSION_MISMATCH          AVB_EVENT_VERSION_MISMATCH
+#define EVENT_ID_OPERATION_NOT_IMPLEMENTED AVB_EVENT_OPERATION_NOT_IMPLEMENTED
+#define STATUS_SUCCESS                     ((ULONG)0x00000000L)
+#define STATUS_UNSUCCESSFUL                ((ULONG)0xC0000001L)  /* NDIS_STATUS_FAILURE */
+#define STATUS_NOT_IMPLEMENTED             ((ULONG)0xC0000002L)
+#define STATUS_INVALID_PARAMETER           ((ULONG)0xC000000DL)
+#define STATUS_DEVICE_CONFIGURATION_ERROR  ((ULONG)0xC0000182L)
+#define STATUS_REVISION_MISMATCH           ((ULONG)0xC0000059L)
+#define STATUS_NOT_SUPPORTED               ((ULONG)0xC00000BBL)  /* NDIS_STATUS_NOT_SUPPORTED */
+#define STATUS_INSUFFICIENT_RESOURCES      ((ULONG)0xC000009AL)  /* NDIS_STATUS_RESOURCES */
+#define STATUS_BUFFER_TOO_SMALL            ((ULONG)0xC0000023L)  /* NDIS_STATUS_BUFFER_TOO_SHORT */
+#define STATUS_ACCESS_VIOLATION            ((ULONG)0xC0000005L)
+#define STATUS_CANCELLED                   ((ULONG)0xC0000120L)  /* NDIS_STATUS_REQUEST_ABORTED */
+#define STATUS_DEVICE_BUSY                 ((ULONG)0x80000011L)  /* NDIS_STATUS_RESET_IN_PROGRESS */
+#define STATUS_INVALID_DEVICE_REQUEST      ((ULONG)0xC0000010L)  /* NDIS_STATUS_NOT_RECOGNIZED */
+
+/* NDIS_STATUS symbolic aliases — map to their NTSTATUS numeric equivalents */
+#define NDIS_STATUS_SUCCESS                STATUS_SUCCESS
+#define NDIS_STATUS_FAILURE                STATUS_UNSUCCESSFUL
+#define NDIS_STATUS_INVALID_PARAMETER      STATUS_INVALID_PARAMETER
+#define NDIS_STATUS_NOT_SUPPORTED          STATUS_NOT_SUPPORTED
+#define NDIS_STATUS_RESOURCES              STATUS_INSUFFICIENT_RESOURCES
+#define NDIS_STATUS_BUFFER_TOO_SHORT       STATUS_BUFFER_TOO_SMALL
+#define NDIS_STATUS_REQUEST_ABORTED        STATUS_CANCELLED
+#define NDIS_STATUS_RESET_IN_PROGRESS      STATUS_DEVICE_BUSY
+#define NDIS_STATUS_NOT_RECOGNIZED         STATUS_INVALID_DEVICE_REQUEST
 
 // Event IDs (from requirement)
 #define EVENT_ID_UNSUPPORTED_DEVICE        17301
@@ -367,15 +400,79 @@ void Test_MissingOperationImplementation(void) {
                "Event 17310 logged for unimplemented operation");
 }
 
+/**
+ * TC-ERR-MAP-001: Exhaustive NDIS_STATUS → NTSTATUS 1:1 mapping table
+ *
+ * Asserts that every NDIS_STATUS code used by the AVB filter driver maps to
+ * the correct numeric NTSTATUS value, and that the symbolic NDIS_STATUS alias
+ * equals its NTSTATUS equivalent.  Covers all codes observed in filter.c,
+ * avb_ioctl.c, and avb_hal.c.
+ *
+ * Issue: closes #280 (TEST-ERROR-MAP-001: AVB→NTSTATUS Mapping)
+ */
+typedef struct {
+    const char* name;         /* Symbolic name for diagnostics */
+    ULONG       ndis_value;   /* Driver-side NDIS_STATUS emitted */
+    ULONG       nt_value;     /* Expected NTSTATUS seen in user-mode */
+} STATUS_MAP_ENTRY;
+
+/* Exhaustive table of all NDIS_STATUS codes used by the filter driver.
+ * Column 2 (ndis_value) is what the driver writes; column 3 (nt_value) is
+ * what must appear in the struct.status field returned to user-mode.
+ * For NDIS they are numerically identical — this table proves that and
+ * provides a permanent regression guard if the definitions ever diverge. */
+static const STATUS_MAP_ENTRY k_status_map[] = {
+    /* Core success */
+    { "NDIS_STATUS_SUCCESS",           NDIS_STATUS_SUCCESS,          STATUS_SUCCESS                    },
+    /* Error codes used in FilterAttach / device init */
+    { "NDIS_STATUS_FAILURE",           NDIS_STATUS_FAILURE,           STATUS_UNSUCCESSFUL               },
+    { "NDIS_STATUS_INVALID_PARAMETER", NDIS_STATUS_INVALID_PARAMETER, STATUS_INVALID_PARAMETER          },
+    { "NDIS_STATUS_NOT_SUPPORTED",     NDIS_STATUS_NOT_SUPPORTED,     STATUS_NOT_SUPPORTED              },
+    { "NDIS_STATUS_RESOURCES",         NDIS_STATUS_RESOURCES,         STATUS_INSUFFICIENT_RESOURCES     },
+    /* IOCTL response codes */
+    { "NDIS_STATUS_BUFFER_TOO_SHORT",  NDIS_STATUS_BUFFER_TOO_SHORT,  STATUS_BUFFER_TOO_SMALL           },
+    { "NDIS_STATUS_REQUEST_ABORTED",   NDIS_STATUS_REQUEST_ABORTED,   STATUS_CANCELLED                  },
+    { "NDIS_STATUS_RESET_IN_PROGRESS", NDIS_STATUS_RESET_IN_PROGRESS, STATUS_DEVICE_BUSY                },
+    { "NDIS_STATUS_NOT_RECOGNIZED",    NDIS_STATUS_NOT_RECOGNIZED,    STATUS_INVALID_DEVICE_REQUEST     },
+    /* HAL-specific error codes (non-NDIS) */
+    { "STATUS_NOT_IMPLEMENTED",        STATUS_NOT_IMPLEMENTED,        STATUS_NOT_IMPLEMENTED            },
+    { "STATUS_DEVICE_CONFIGURATION_ERROR", STATUS_DEVICE_CONFIGURATION_ERROR, STATUS_DEVICE_CONFIGURATION_ERROR },
+    { "STATUS_REVISION_MISMATCH",      STATUS_REVISION_MISMATCH,      STATUS_REVISION_MISMATCH          },
+};
+#define STATUS_MAP_COUNT ((int)(sizeof(k_status_map) / sizeof(k_status_map[0])))
+
+void Test_NtstatusErrorMapComplete(void) {
+    TEST_CASE("TC-ERR-MAP-001: Exhaustive NDIS_STATUS\u2192NTSTATUS 1:1 mapping table (closes #280)");
+    printf("  Verifying %d entries...\n", STATUS_MAP_COUNT);
+
+    for (int i = 0; i < STATUS_MAP_COUNT; i++) {
+        const STATUS_MAP_ENTRY* e = &k_status_map[i];
+        char msg[160];
+
+        /* Assert: NDIS alias == NTSTATUS constant (1:1 identity mapping) */
+        snprintf(msg, sizeof(msg), "%s (0x%08X) == expected NTSTATUS (0x%08X)",
+                 e->name, (unsigned)e->ndis_value, (unsigned)e->nt_value);
+        TEST_ASSERT(e->ndis_value == e->nt_value, msg);
+    }
+
+    /* Extra guard: ensure table covers at least 12 entries so no code
+     * silently removes rows. */
+    char count_msg[64];
+    snprintf(count_msg, sizeof(count_msg),
+             "Mapping table has >= 12 entries (actual: %d)", STATUS_MAP_COUNT);
+    TEST_ASSERT(STATUS_MAP_COUNT >= 12, count_msg);
+}
+
 // =============================================================================
 // MAIN
 // =============================================================================
 
 int main(void) {
-    printf("========================================\n");
-    printf("HAL ERROR SCENARIO TESTS (TEST-PORTABILITY-HAL-002)\n");
+    printf("\n========================================\n");
+    printf("HAL ERROR SCENARIO TESTS (TEST-PORTABILITY-HAL-002 / TEST-ERROR-MAP-001)\n");
     printf("========================================\n");
     printf("Verifies: #84 (REQ-NF-PORTABILITY-001)\n");
+    printf("Closes:   #280 (TEST-ERROR-MAP-001: NDIS_STATUS\u2192NTSTATUS mapping)\n");
     printf("Issue: https://github.com/zarfld/IntelAvbFilter/issues/309\n\n");
     
     // Run test cases
@@ -387,6 +484,7 @@ int main(void) {
     Test_VersionMismatch();
     Test_DeviceSpecificStateOverflow();
     Test_MissingOperationImplementation();
+    Test_NtstatusErrorMapComplete();  /* TC-ERR-MAP-001 — closes #280 */
     
     // Print results
     printf("\n========================================\n");

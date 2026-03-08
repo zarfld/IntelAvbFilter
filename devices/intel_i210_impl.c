@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Module Name:
 
@@ -121,14 +121,14 @@ static int set_systime(device_t *dev, uint64_t systime)
     }
     
     // Split timestamp
-    ts_low = (uint32_t)(systime & 0xFFFFFFFF);
-    ts_high = (uint32_t)((systime >> 32) & 0xFFFFFFFF);
+    ts_low = (uint32_t)(systime & INTEL_MASK_32BIT);
+    ts_high = (uint32_t)((systime >> 32) & INTEL_MASK_32BIT);
     
     // I210-specific SYSTIM register access
-    result = ndis_platform_ops.mmio_write(dev, 0x0B600, ts_low);   // SYSTIML
+    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIML, ts_low);   // SYSTIML
     if (result != 0) return result;
     
-    result = ndis_platform_ops.mmio_write(dev, 0x0B604, ts_high);  // SYSTIMH
+    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIMH, ts_high);  // SYSTIMH
     if (result != 0) return result;
     
     DEBUGP(DL_TRACE, "<==i210_set_systime: Success\n");
@@ -153,10 +153,10 @@ static int get_systime(device_t *dev, uint64_t *systime)
     }
     
     // Read SYSTIM registers
-    result = ndis_platform_ops.mmio_read(dev, 0x0B600, &ts_low);   // SYSTIML
+    result = ndis_platform_ops.mmio_read(dev, INTEL_REG_SYSTIML, &ts_low);   // SYSTIML
     if (result != 0) return result;
     
-    result = ndis_platform_ops.mmio_read(dev, 0x0B604, &ts_high);  // SYSTIMH
+    result = ndis_platform_ops.mmio_read(dev, INTEL_REG_SYSTIMH, &ts_high);  // SYSTIMH
     if (result != 0) return result;
     
     *systime = ((uint64_t)ts_high << 32) | ts_low;
@@ -183,11 +183,11 @@ static int init_ptp(device_t *dev)
     }
     
     // I210 PTP initialization - enable PHC
-    result = ndis_platform_ops.mmio_read(dev, 0x0B640, &tsauxc);  // TSAUXC
+    result = ndis_platform_ops.mmio_read(dev, INTEL_REG_TSAUXC, &tsauxc);  // TSAUXC
     if (result == 0) {
         // Clear DisableSystime bit (enable PHC)
-        tsauxc &= ~0x80000000;
-        result = ndis_platform_ops.mmio_write(dev, 0x0B640, tsauxc);
+        tsauxc &= ~INTEL_TSAUXC_DISABLE_SYSTIM;
+        result = ndis_platform_ops.mmio_write(dev, INTEL_REG_TSAUXC, tsauxc);
         if (result == 0) {
             DEBUGP(DL_INFO, "I210 PHC enabled via TSAUXC: 0x%08X\n", tsauxc);
         }
@@ -209,11 +209,11 @@ static int init_ptp(device_t *dev)
 static int enable_packet_timestamping(device_t *dev, int enable)
 {
     // I210 PTP registers (IGB family)
-    const uint32_t TSYNCRXCTL = 0x0B344;
-    const uint32_t TSYNCTXCTL = 0x0B348;
-    const uint32_t RXTT_ENABLE = 0x80000000;  // Bit 31
-    const uint32_t TXTT_ENABLE = 0x80000000;  // Bit 31
-    const uint32_t TYPE_ALL = 0x0E000000;     // Bits 27-25
+    const uint32_t TSYNCRXCTL = INTEL_REG_TSYNCTXCTL;
+    const uint32_t TSYNCTXCTL = INTEL_REG_TSYNCRXCTL;
+    const uint32_t RXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
+    const uint32_t TXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
+    const uint32_t TYPE_ALL = INTEL_TIMINCA_INCPERIOD;     // Bits 27-25
     
     if (!dev || !ndis_platform_ops.mmio_write || !ndis_platform_ops.mmio_read) {
         return -1;
@@ -238,7 +238,7 @@ static int enable_packet_timestamping(device_t *dev, int enable)
     } else {
         // Disable packet timestamping
         uint32_t regval = 0;
-        const uint32_t TYPE_MASK = 0x0E000000;
+        const uint32_t TYPE_MASK = INTEL_TIMINCA_INCPERIOD;
         
         if (ndis_platform_ops.mmio_read(dev, TSYNCRXCTL, &regval) == 0) {
             regval &= ~(RXTT_ENABLE | TYPE_MASK);
@@ -332,14 +332,14 @@ static int i210_poll_tx_timestamp_fifo(device_t *dev, uint64_t *timestamp_ns)
     result = ndis_platform_ops.mmio_read(dev, I210_TXSTMPH, &txstmph_val);
     if (result != 0) return result;
     
-    if (!(txstmph_val & 0x80000000)) {
+    if (!(txstmph_val & INTEL_TSYNC_VALID)) {
         return 0;  // FIFO empty
     }
     
     result = ndis_platform_ops.mmio_read(dev, I210_TXSTMPL, &txstmpl_val);
     if (result != 0) return result;
     
-    *timestamp_ns = ((uint64_t)(txstmph_val & 0x7FFFFFFF) << 32) | txstmpl_val;
+    *timestamp_ns = ((uint64_t)(txstmph_val & INTEL_TSYNC_TS_MASK) << 32) | txstmpl_val;
     return 1;  // Valid timestamp retrieved
 }
 

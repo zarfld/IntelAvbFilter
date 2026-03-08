@@ -10,6 +10,10 @@
 
 // Use Intel library headers for common types and device enums
 #include "external/intel_avb/lib/intel.h"
+// Intel register offsets, bitmasks, and shared constants (SSOT)
+#include "external/intel_avb/lib/intel_private.h"
+// Intel PCI device ID constants (SSOT)
+#include "include/intel_pci_ids.h"
 
 // Kernel-mode memory allocation shims for Intel library (user-mode code)
 // Intel library uses malloc/calloc/free which don't exist in kernel mode

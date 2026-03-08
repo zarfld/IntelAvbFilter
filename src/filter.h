@@ -79,6 +79,21 @@ Abstract:
 // PTP EtherType for packet detection (IEEE 1588)
 #define ETHERTYPE_PTP   0x88F7  // PTP over Ethernet (Layer 2)
 
+// 802.1Q VLAN EtherType
+#define ETH_P_8021Q     0x8100
+
+// VLAN "not set" sentinel (16-bit, all-ones)
+#define FILTER_VLAN_NONE  0xFFFF
+
+// Pointer validation thresholds (GitHub Issue #315 – crash prevention)
+// Any valid kernel pointer on x64 must be >= FILTER_PTR_MIN_VALID and
+// have the upper 16 bits equal to FILTER_PTR_KERNEL_MASK.
+#define FILTER_PTR_MIN_VALID    0x10000
+#define FILTER_PTR_KERNEL_MASK  0xFFFF000000000000ULL
+
+// Circular log buffer capacity (64K entries)
+#define FILTER_LOG_ARRAY_SIZE   0x10000
+
 //
 // Global variables
 //
@@ -117,12 +132,12 @@ typedef struct _QUEUE_HEADER
 
 #if TRACK_RECEIVES
 UINT         filterLogReceiveRefIndex = 0;
-ULONG_PTR    filterLogReceiveRef[0x10000];
+ULONG_PTR    filterLogReceiveRef[FILTER_LOG_ARRAY_SIZE];
 #endif
 
 #if TRACK_SENDS
 UINT         filterLogSendRefIndex = 0;
-ULONG_PTR    filterLogSendRef[0x10000];
+ULONG_PTR    filterLogSendRef[FILTER_LOG_ARRAY_SIZE];
 #endif
 
 #if TRACK_RECEIVES
@@ -132,7 +147,7 @@ ULONG_PTR    filterLogSendRef[0x10000];
         filterLogReceiveRef[filterLogReceiveRefIndex++] = (ULONG_PTR)(_Instance); \
         filterLogReceiveRef[filterLogReceiveRefIndex++] = (ULONG_PTR)(_NetBufferList); \
         filterLogReceiveRef[filterLogReceiveRefIndex++] = (ULONG_PTR)(_Ref); \
-        if (filterLogReceiveRefIndex >= (0x10000 - 5))                    \
+        if (filterLogReceiveRefIndex >= (FILTER_LOG_ARRAY_SIZE - 5))                    \
         {                                                              \
             filterLogReceiveRefIndex = 0;                                 \
         }                                                              \
@@ -148,7 +163,7 @@ ULONG_PTR    filterLogSendRef[0x10000];
         filterLogSendRef[filterLogSendRefIndex++] = (ULONG_PTR)(_Instance); \
         filterLogSendRef[filterLogSendRefIndex++] = (ULONG_PTR)(_NetBufferList); \
         filterLogSendRef[filterLogSendRefIndex++] = (ULONG_PTR)(_Ref); \
-        if (filterLogSendRefIndex >= (0x10000 - 5))                    \
+        if (filterLogSendRefIndex >= (FILTER_LOG_ARRAY_SIZE - 5))                    \
         {                                                              \
             filterLogSendRefIndex = 0;                                 \
         }                                                              \

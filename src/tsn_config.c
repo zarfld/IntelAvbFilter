@@ -1,4 +1,4 @@
-/*++
+﻿/*++
  *
  * TSN Configuration Templates and Helpers - Implementation
  *
@@ -102,20 +102,20 @@ NTSTATUS AvbGetDefaultPtmConfig(_Out_ struct ptm_config* config)
 BOOLEAN AvbSupportsTas(_In_ UINT16 deviceId)
 {
     switch (deviceId) {
-        case 0x15F2: // I225-LM 
-        case 0x15F3: // I225-V
-        case 0x15F4: // I225-K
-        case 0x15F5: // I225-K
-        case 0x15F6: // I225-IT
-        case 0x15F7: // I225-LMvP
-        case 0x15F8: // I225-V
-        case 0x15F9: // I225-IT
-        case 0x15FA: // I225-LM
-        case 0x15FB: // I225-LM
-        case 0x15FC: // I225-V
-        case 0x125B: // I226-LM
-        case 0x125C: // I226-V
-        case 0x125D: // I226-IT
+        case INTEL_DEV_I225_V: // I225-LM 
+        case INTEL_DEV_I225_IT: // I225-V
+        case INTEL_DEV_I225_LM: // I225-K
+        case INTEL_DEV_I225_K: // I225-K
+        case INTEL_DEV_I225_K2: // I225-IT
+        case INTEL_DEV_I225_LMVP: // I225-LMvP
+        case INTEL_DEV_I225_VB: // I225-V
+        case INTEL_DEV_I225_IT2: // I225-IT
+        case INTEL_DEV_I225_LM2: // I225-LM
+        case INTEL_DEV_I225_LM3: // I225-LM
+        case INTEL_DEV_I225_V2: // I225-V
+        case INTEL_DEV_I226_LM: // I226-LM
+        case INTEL_DEV_I226_V: // I226-V
+        case INTEL_DEV_I226_IT: // I226-IT
             return TRUE;
         default:
             return FALSE;
@@ -131,24 +131,24 @@ BOOLEAN AvbSupportsFp(_In_ UINT16 deviceId)
 BOOLEAN AvbSupportsPtm(_In_ UINT16 deviceId)
 {
     switch (deviceId) {
-        case 0x15F2: // I225-LM 
-        case 0x15F3: // I225-V
-        case 0x15F4: // I225-K
-        case 0x15F5: // I225-K
-        case 0x15F6: // I225-IT
-        case 0x15F7: // I225-LMvP
-        case 0x15F8: // I225-V
-        case 0x15F9: // I225-IT
-        case 0x15FA: // I225-LM
-        case 0x15FB: // I225-LM
-        case 0x15FC: // I225-V
-        case 0x125B: // I226-LM
-        case 0x125C: // I226-V
-        case 0x125D: // I226-IT
-        case 0x1533: // I210-T1
-        case 0x1539: // I211-AT
-        case 0x157B: // I210-T1
-        case 0x157C: // I210-IS
+        case INTEL_DEV_I225_V: // I225-LM 
+        case INTEL_DEV_I225_IT: // I225-V
+        case INTEL_DEV_I225_LM: // I225-K
+        case INTEL_DEV_I225_K: // I225-K
+        case INTEL_DEV_I225_K2: // I225-IT
+        case INTEL_DEV_I225_LMVP: // I225-LMvP
+        case INTEL_DEV_I225_VB: // I225-V
+        case INTEL_DEV_I225_IT2: // I225-IT
+        case INTEL_DEV_I225_LM2: // I225-LM
+        case INTEL_DEV_I225_LM3: // I225-LM
+        case INTEL_DEV_I225_V2: // I225-V
+        case INTEL_DEV_I226_LM: // I226-LM
+        case INTEL_DEV_I226_V: // I226-V
+        case INTEL_DEV_I226_IT: // I226-IT
+        case INTEL_DEV_I210_AT: // I210-T1
+        case INTEL_DEV_I211_AT: // I211-AT
+        case INTEL_DEV_I210_FLASHLESS: // I210-T1
+        case INTEL_DEV_I210_FLASHLESS2: // I210-IS
             return TRUE;
         default:
             return FALSE;
@@ -158,37 +158,37 @@ BOOLEAN AvbSupportsPtm(_In_ UINT16 deviceId)
 UINT8 AvbGetMaxTrafficClasses(_In_ UINT16 deviceId)
 {
     switch (deviceId) {
-        case 0x15F2: // I225-LM 
-        case 0x15F3: // I225-V
-        case 0x15F4: // I225-K
-        case 0x15F5: // I225-K
-        case 0x15F6: // I225-IT
-        case 0x15F7: // I225-LMvP
-        case 0x15F8: // I225-V
-        case 0x15F9: // I225-IT
-        case 0x15FA: // I225-LM
-        case 0x15FB: // I225-LM
-        case 0x15FC: // I225-V
-        case 0x125B: // I226-LM
-        case 0x125C: // I226-V
-        case 0x125D: // I226-IT
+        case INTEL_DEV_I225_V: // I225-LM 
+        case INTEL_DEV_I225_IT: // I225-V
+        case INTEL_DEV_I225_LM: // I225-K
+        case INTEL_DEV_I225_K: // I225-K
+        case INTEL_DEV_I225_K2: // I225-IT
+        case INTEL_DEV_I225_LMVP: // I225-LMvP
+        case INTEL_DEV_I225_VB: // I225-V
+        case INTEL_DEV_I225_IT2: // I225-IT
+        case INTEL_DEV_I225_LM2: // I225-LM
+        case INTEL_DEV_I225_LM3: // I225-LM
+        case INTEL_DEV_I225_V2: // I225-V
+        case INTEL_DEV_I226_LM: // I226-LM
+        case INTEL_DEV_I226_V: // I226-V
+        case INTEL_DEV_I226_IT: // I226-IT
             return 8;  // 8 traffic classes
-        case 0x1533: // I210-T1
-        case 0x1539: // I211-AT
-        case 0x157B: // I210-T1
-        case 0x157C: // I210-IS
+        case INTEL_DEV_I210_AT: // I210-T1
+        case INTEL_DEV_I211_AT: // I211-AT
+        case INTEL_DEV_I210_FLASHLESS: // I210-T1
+        case INTEL_DEV_I210_FLASHLESS2: // I210-IS
             return 4;  // 4 traffic classes
-        case 0x15A0: // I219-LM
-        case 0x15A1: // I219-V
-        case 0x15A2: // I219-LM
-        case 0x15A3: // I219-LM
-        case 0x15B7: // I219-LM
-        case 0x15B8: // I219-V
-        case 0x15B9: // I219-LM
-        case 0x15BB: // I219-LM
-        case 0x15BC: // I219-LM
-        case 0x15BD: // I219-LM
-        case 0x15BE: // I219-LM
+        case INTEL_DEV_I219_LM_A0: // I219-LM
+        case INTEL_DEV_I219_V_A0: // I219-V
+        case INTEL_DEV_I219_LM_A1: // I219-LM
+        case INTEL_DEV_I219_V_A1: // I219-LM
+        case INTEL_DEV_I219_LM: // I219-LM
+        case INTEL_DEV_I219_V: // I219-V
+        case INTEL_DEV_I219_LM3: // I219-LM
+        case INTEL_DEV_I219_LM4: // I219-LM
+        case INTEL_DEV_I219_V4: // I219-LM
+        case INTEL_DEV_I219_LM5: // I219-LM
+        case INTEL_DEV_I219_V5: // I219-LM
             return 2;  // Limited traffic class support
         default:
             return 1;  // Single queue
@@ -198,20 +198,20 @@ UINT8 AvbGetMaxTrafficClasses(_In_ UINT16 deviceId)
 UINT16 AvbGetMaxGateControlEntries(_In_ UINT16 deviceId)
 {
     switch (deviceId) {
-        case 0x15F2: // I225-LM 
-        case 0x15F3: // I225-V
-        case 0x15F4: // I225-K
-        case 0x15F5: // I225-K
-        case 0x15F6: // I225-IT
-        case 0x15F7: // I225-LMvP
-        case 0x15F8: // I225-V
-        case 0x15F9: // I225-IT
-        case 0x15FA: // I225-LM
-        case 0x15FB: // I225-LM
-        case 0x15FC: // I225-V
-        case 0x125B: // I226-LM
-        case 0x125C: // I226-V
-        case 0x125D: // I226-IT
+        case INTEL_DEV_I225_V: // I225-LM 
+        case INTEL_DEV_I225_IT: // I225-V
+        case INTEL_DEV_I225_LM: // I225-K
+        case INTEL_DEV_I225_K: // I225-K
+        case INTEL_DEV_I225_K2: // I225-IT
+        case INTEL_DEV_I225_LMVP: // I225-LMvP
+        case INTEL_DEV_I225_VB: // I225-V
+        case INTEL_DEV_I225_IT2: // I225-IT
+        case INTEL_DEV_I225_LM2: // I225-LM
+        case INTEL_DEV_I225_LM3: // I225-LM
+        case INTEL_DEV_I225_V2: // I225-V
+        case INTEL_DEV_I226_LM: // I226-LM
+        case INTEL_DEV_I226_V: // I226-V
+        case INTEL_DEV_I226_IT: // I226-IT
             return 1024; // Large gate control list
         default:
             return 0;    // TAS not supported

@@ -540,25 +540,8 @@ if ($TestExecutable) {
         Write-Info "TEST-REGS-001 script not found (skipping)"
     }
     
-    # TEST-REGS-002: Magic Number Detection (Static Analysis)
-    $regsTest2 = Join-Path $regsTestDir "Test-REGS-002-MagicNumberDetection.ps1"
-    if (Test-Path $regsTest2) {
-        Write-Host "`n    => TEST-REGS-002: Magic Number Detection (#305)" -ForegroundColor Yellow
-        $script:totalTests++
-        & $regsTest2
-        if ($LASTEXITCODE -eq 0) {
-            $script:passedTests++
-            Write-Success "TEST-REGS-002 PASSED - No magic numbers detected"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-002"; Status = "PASSED"; ExitCode = 0 }
-        } else {
-            $script:failedTests++
-            Write-Failure "TEST-REGS-002 FAILED - Magic numbers still present!"
-            Write-Info "This is expected until Issue #21 implementation is complete"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-002"; Status = "FAILED (Expected)"; ExitCode = $LASTEXITCODE }
-        }
-    } else {
-        Write-Info "TEST-REGS-002 script not found (skipping)"
-    }
+    # TEST-REGS-002: Magic Number Detection (Static Analysis) - C EXE
+    Invoke-Test "test_magic_numbers.exe" "TEST-REGS-002: SSOT Magic Number Static Analysis (#305)"
     
     # TEST-REGS-003: Register Constant Verification (C_ASSERT)
 $regsTest3 = Join-Path $regsTestDir "Test-REGS-003-RegisterConstantVerification.ps1"

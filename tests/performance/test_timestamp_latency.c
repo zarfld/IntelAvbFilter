@@ -16,12 +16,15 @@
  *   TC-PERF-TS-006: Concurrent Load (8 threads, median <1µs)
  *   TC-PERF-TS-007: Performance Degradation Check (<10% variance)
  *   TC-PERF-TS-008: Warm-up Effect (cache stabilization)
+ *   TC-PERF-PHC-001: PHC Query P50 Latency <6µs user-mode IOCTL (closes #274)
+ *   TC-PERF-PHC-002: PHC Query P99 Latency <30µs user-mode IOCTL (closes #200)
  * 
  * Requirement: Median <1µs, P99 <2µs for TX/RX timestamp queries
+ *              PHC-only IOCTL round-trip: P50 <6µs, P99 <30µs
  * 
  * Author: GitHub Copilot (Standards Compliance Agent)
  * Date: 2025-12-26
- * Issue: #272
+ * Issue: #272, closes #200 #274
  */
 
 #define UNICODE
@@ -104,6 +107,7 @@ void TestLatencyDistribution(void);
 void TestConcurrentLoad(void);
 void TestPerformanceDegradation(void);
 void TestWarmupEffect(void);
+void TestPhcQueryLatency(void);  /* TC-PERF-PHC-001/002 — closes #200 #274 */
 
 /*
  * Main entry point
@@ -127,6 +131,7 @@ int main(void)
     TestConcurrentLoad();
     TestPerformanceDegradation();
     TestWarmupEffect();
+    TestPhcQueryLatency();          /* TC-PERF-PHC-001/002 — closes #200 #274 */
 
     // Print summary
     PrintTestSummary();
@@ -666,6 +671,109 @@ void TestWarmupEffect(void)
         printf("❌ TC-PERF-TS-008: FAIL (no warm-up improvement)\n");
     }
 
+    CloseHandle(hDevice);
+    printf("\n");
+}
+
+/*
+ * TC-PERF-PHC-001: PHC Query P50 Latency <6 µs      — closes #274
+ * TC-PERF-PHC-002: PHC Query P99 Latency <30 µs     — closes #200
+ *
+ * Isolates IOCTL_AVB_GET_CLOCK_CONFIG (PHC-only path) from TX/RX timestamp
+ * IOCTLs.  Uses RDTSC to measure user-mode IOCTL round-trip for 10,000 calls
+ * after a 100-call warm-up.
+ *
+ * NOTE: Thresholds are for the full user-mode IOCTL round-trip, which includes
+ * kernel transition overhead (~2-5 µs per call on Windows).  The kernel-mode
+ * PHC read itself is <500 ns per ISSUE-200; that cannot be measured from
+ * user-mode without a dedicated kernel test.  ISSUE-200 explicitly sets the
+ * user-mode IOCTL bound at <10 µs median; we use 6 µs to leave headroom.
+ *
+ * Response struct: AVB_CLOCK_CONFIG (systim, timinca, tsauxc, clock_rate_mhz, status)
+ */
+void TestPhcQueryLatency(void)
+{
+    printf("--- TC-PERF-PHC-001/002: PHC Query Latency (IOCTL_AVB_GET_CLOCK_CONFIG) ---\n");
+
+    HANDLE hDevice = OpenAvbDevice();
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        RecordResult("TC-PERF-PHC-001", false, "Failed to open device");
+        RecordResult("TC-PERF-PHC-002", false, "Failed to open device");
+        return;
+    }
+
+    UINT64* latencies = (UINT64*)calloc(ITERATIONS, sizeof(UINT64));
+    if (!latencies) {
+        RecordResult("TC-PERF-PHC-001", false, "Memory allocation failed");
+        RecordResult("TC-PERF-PHC-002", false, "Memory allocation failed");
+        CloseHandle(hDevice);
+        return;
+    }
+
+    double cpuFreqGHz = GetCpuFrequencyGHz();
+
+    /* Warm-up: populate instruction and data caches */
+    printf("Warming up (%d PHC queries)...\n", WARMUP_ITERATIONS);
+    for (int i = 0; i < WARMUP_ITERATIONS; i++) {
+        AVB_CLOCK_CONFIG cfg = {0};
+        DWORD bytesReturned = 0;
+        DeviceIoControl(hDevice, IOCTL_AVB_GET_CLOCK_CONFIG,
+                        NULL, 0, &cfg, sizeof(cfg), &bytesReturned, NULL);
+    }
+
+    /* Measure: RDTSC around each IOCTL_AVB_GET_CLOCK_CONFIG call */
+    printf("Measuring PHC query latencies (%d iterations)...\n", ITERATIONS);
+    for (int i = 0; i < ITERATIONS; i++) {
+        AVB_CLOCK_CONFIG cfg = {0};
+        DWORD bytesReturned = 0;
+
+        UINT64 start = __rdtsc();
+        DeviceIoControl(hDevice, IOCTL_AVB_GET_CLOCK_CONFIG,
+                        NULL, 0, &cfg, sizeof(cfg), &bytesReturned, NULL);
+        UINT64 end = __rdtsc();
+
+        latencies[i] = end - start;
+    }
+
+    /* Calculate statistics */
+    double medianNs, p50Ns, p95Ns, p99Ns, meanNs;
+    CalculateStatistics(latencies, ITERATIONS, cpuFreqGHz,
+                        &medianNs, &p50Ns, &p95Ns, &p99Ns, &meanNs);
+
+    printf("PHC Query Latency (%d iterations, IOCTL_AVB_GET_CLOCK_CONFIG):\n", ITERATIONS);
+    printf("  Mean:   %.0f ns\n", meanNs);
+    printf("  Median: %.0f ns  (P50)\n", medianNs);
+    printf("  P95:    %.0f ns\n", p95Ns);
+    printf("  P99:    %.0f ns\n", p99Ns);
+    printf("  Thresholds: P50 < 6000 ns (6 us), P99 < 30000 ns (30 us) [user-mode IOCTL]\n");
+
+    /* TC-PERF-PHC-001: P50 < 6000 ns (6 us) — closes #274 */
+    if (medianNs < 6000.0) {
+        char reason[128];
+        snprintf(reason, sizeof(reason), "PASS: P50 %.0f ns < 6000 ns (PHC-only IOCTL round-trip)", medianNs);
+        RecordResult("TC-PERF-PHC-001", true, reason);
+        printf("[PASS] TC-PERF-PHC-001: %s\n", reason);
+    } else {
+        char reason[128];
+        snprintf(reason, sizeof(reason), "FAIL: P50 %.0f ns >= 6000 ns (PHC IOCTL too slow)", medianNs);
+        RecordResult("TC-PERF-PHC-001", false, reason);
+        printf("[FAIL] TC-PERF-PHC-001: %s\n", reason);
+    }
+
+    /* TC-PERF-PHC-002: P99 < 30000 ns (30 us) — closes #200 */
+    if (p99Ns < 30000.0) {
+        char reason[128];
+        snprintf(reason, sizeof(reason), "PASS: P99 %.0f ns < 30000 ns (PHC-only IOCTL round-trip)", p99Ns);
+        RecordResult("TC-PERF-PHC-002", true, reason);
+        printf("[PASS] TC-PERF-PHC-002: %s\n", reason);
+    } else {
+        char reason[128];
+        snprintf(reason, sizeof(reason), "FAIL: P99 %.0f ns >= 30000 ns (PHC IOCTL too slow)", p99Ns);
+        RecordResult("TC-PERF-PHC-002", false, reason);
+        printf("[FAIL] TC-PERF-PHC-002: %s\n", reason);
+    }
+
+    free(latencies);
     CloseHandle(hDevice);
     printf("\n");
 }

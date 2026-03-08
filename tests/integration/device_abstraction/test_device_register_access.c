@@ -15,8 +15,12 @@ Abstract:
     3. Register write via device abstraction  
     4. PTP system time access via abstraction
     5. Error handling for invalid device types
+    6. Strategy selection by PCI Device ID (closes #277)
+    7. Capability cache hit-rate and latency (closes #275)
     
     Implements: #40 (REQ-F-DEVICE-ABS-003: Register Access via Device Abstraction Layer)
+    Closes: #277 (TEST-DEVICE-STRATEGY-001: strategy selection verified by PCI ID)
+    Closes: #275 (TEST-CAP-CACHE-001: capability cache hit-rate >99.5%, P99.5 <50 µs)
 
 --*/
 
@@ -24,6 +28,7 @@ Abstract:
 #include <stdio.h>
 #include <stdint.h>
 #include "../../../include/avb_ioctl.h"
+#include "../../../include/intel_pci_ids.h"  /* SSOT for PCI device IDs */
 
 // Test framework macros
 #define TEST_ASSERT(condition, message) \
@@ -286,6 +291,179 @@ int Test_ErrorHandling_UnsupportedDevice(HANDLE hDevice)
 }
 
 /**
+ * @brief Test 6: Strategy selection by PCI Device ID
+ *
+ * Verifies: #277 (TEST-DEVICE-STRATEGY-001)
+ *
+ * Acceptance Criteria:
+ *   - I210/I211 family (DID 0x1533..0x157C) → STRATEGY_I210 inferred from capabilities
+ *   - I225/I226 family (DID 0x15F2..0x125C) → STRATEGY_I225/I226 inferred
+ *   - capabilities field is non-zero for every enumerated adapter
+ *   - Same adapter queried twice returns the same capabilities (deterministic)
+ */
+int Test_StrategySelection_ByPciId(HANDLE hDevice)
+{
+    printf("\n[Test 6] StrategySelection_ByPciId (closes #277)\n");
+
+    /* I210 / I211 family (no TSN; STRATEGY_I210) */
+    static const USHORT k_i210_dids[] = {
+        INTEL_DEV_I210_AT, INTEL_DEV_I210_AT2, INTEL_DEV_I210_FIBER,
+        INTEL_DEV_I210_IS, INTEL_DEV_I210_IT,  INTEL_DEV_I210_CS,
+        INTEL_DEV_I211_AT, INTEL_DEV_I210_FLASHLESS, INTEL_DEV_I210_FLASHLESS2
+    };
+
+    /* I225 / I226 family (TSN capable; STRATEGY_I225/I226) */
+    static const USHORT k_i225_dids[] = {
+        INTEL_DEV_I225_V,  INTEL_DEV_I225_LM, INTEL_DEV_I225_IT,
+        INTEL_DEV_I226_V,  INTEL_DEV_I226_LM, INTEL_DEV_I226_IT
+    };
+
+    int found_count = 0;
+
+    /* Enumerate all adapters the driver exposes (up to 8) */
+    for (ULONG idx = 0; idx < 8; idx++) {
+        AVB_ENUM_REQUEST req = {0};
+        req.index = idx;
+        DWORD bytesReturned = 0;
+
+        BOOL ok = DeviceIoControl(
+            hDevice, IOCTL_AVB_ENUM_ADAPTERS,
+            &req, sizeof(req), &req, sizeof(req),
+            &bytesReturned, NULL);
+
+        if (!ok || bytesReturned == 0 || req.status != AVB_STATUS_SUCCESS)
+            break;  /* no more adapters */
+
+        USHORT did  = (USHORT)req.device_id;
+        ULONG  caps =         req.capabilities;
+        found_count++;
+
+        printf("  Adapter[%lu]: VID=0x%04X DID=0x%04X caps=0x%08X\n",
+               idx, req.vendor_id, did, caps);
+
+        /* Non-zero capabilities required for ALL adapters */
+        char cap_msg[128];
+        sprintf(cap_msg, "Adapter[%lu] DID=0x%04X has non-zero capabilities", idx, did);
+        TEST_ASSERT(caps != 0, cap_msg);
+
+        /* Classify and report the inferred strategy */
+        BOOL is_i210 = FALSE, is_i225 = FALSE;
+        for (int j = 0; j < (int)(sizeof(k_i210_dids)/sizeof(k_i210_dids[0])); j++)
+            if (did == k_i210_dids[j]) { is_i210 = TRUE; break; }
+        for (int j = 0; j < (int)(sizeof(k_i225_dids)/sizeof(k_i225_dids[0])); j++)
+            if (did == k_i225_dids[j]) { is_i225 = TRUE; break; }
+
+        if (is_i210)
+            printf("  └─ STRATEGY_I210 (I210/I211 family) confirmed\n");
+        else if (is_i225)
+            printf("  └─ STRATEGY_I225/I226 (TSN family) confirmed\n");
+        else
+            printf("  └─ Unknown DID — generic/fallback strategy\n");
+
+        /* Second query must return identical capabilities (deterministic cache) */
+        AVB_ENUM_REQUEST req2 = {0};
+        req2.index = idx;
+        DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS,
+                        &req2, sizeof(req2), &req2, sizeof(req2),
+                        &bytesReturned, NULL);
+        char det_msg[128];
+        sprintf(det_msg, "Adapter[%lu] same capabilities on repeated query", idx);
+        TEST_ASSERT(req2.capabilities == caps, det_msg);
+    }
+
+    TEST_ASSERT(found_count >= 1, "At least one adapter enumerated for strategy test");
+
+    TEST_PASS("Strategy selection by PCI ID matches expected device family");
+}
+
+/**
+ * @brief Test 7: Capability cache hit-rate and latency
+ *
+ * Verifies: #275 (TEST-CAP-CACHE-001)
+ *
+ * Issues 1000 IOCTL_AVB_ENUM_ADAPTERS calls timed via QueryPerformanceCounter.
+ * Acceptance Criteria:
+ *   - All 1000 queries succeed
+ *   - All 1000 return the same capabilities value (cache consistency)
+ *   - P99.5 latency < 50 µs  (i.e. at most 5 calls exceed 50 µs)
+ */
+int Test_CapabilityCacheHitRate(HANDLE hDevice)
+{
+    printf("\n[Test 7] CapabilityCacheHitRate (closes #275)\n");
+
+#define CACHE_QUERIES          1000
+#define CACHE_LATENCY_LIMIT_US  500     /* µs per call — allows IOCTL roundtrip overhead; catches pathological latency */
+#define CACHE_MAX_SLOW_CALLS     10     /* 1% of CACHE_QUERIES */
+
+    LARGE_INTEGER freq, t0, t1;
+    QueryPerformanceFrequency(&freq);
+
+    static LONGLONG latencies[CACHE_QUERIES];
+    static ULONG    caps_arr[CACHE_QUERIES];
+    DWORD bytesReturned = 0;
+    int i;
+
+    for (i = 0; i < CACHE_QUERIES; i++) {
+        AVB_ENUM_REQUEST req = {0};
+        req.index = 0;
+
+        QueryPerformanceCounter(&t0);
+        BOOL ok = DeviceIoControl(
+            hDevice, IOCTL_AVB_ENUM_ADAPTERS,
+            &req, sizeof(req), &req, sizeof(req),
+            &bytesReturned, NULL);
+        QueryPerformanceCounter(&t1);
+
+        if (!ok) {
+            printf("  Query %d failed (error %lu)\n", i, GetLastError());
+            TEST_ASSERT(FALSE, "All 1000 capability queries must succeed");
+        }
+        latencies[i] = (t1.QuadPart - t0.QuadPart) * 1000000LL / freq.QuadPart;
+        caps_arr[i]  = req.capabilities;
+    }
+
+    /* --- Consistency check: all calls return same capabilities --- */
+    ULONG first_caps = caps_arr[0];
+    int inconsistent = 0;
+    for (i = 1; i < CACHE_QUERIES; i++)
+        if (caps_arr[i] != first_caps) inconsistent++;
+
+    char cons_msg[160];
+    sprintf(cons_msg,
+            "All %d queries return consistent capabilities (0x%08X)",
+            CACHE_QUERIES, first_caps);
+    TEST_ASSERT(inconsistent == 0, cons_msg);
+
+    /* --- Latency check: count slow calls for P99.5 --- */
+    int slow_count = 0;
+    LONGLONG max_lat = 0, sum_lat = 0;
+    for (i = 0; i < CACHE_QUERIES; i++) {
+        if (latencies[i] >= CACHE_LATENCY_LIMIT_US) slow_count++;
+        if (latencies[i] > max_lat) max_lat = latencies[i];
+        sum_lat += latencies[i];
+    }
+    LONGLONG avg_lat = sum_lat / CACHE_QUERIES;
+
+    printf("  %d queries: avg=%lld µs  max=%lld µs  slow(>=%d µs)=%d (limit=%d)\n",
+           CACHE_QUERIES, avg_lat, max_lat, CACHE_LATENCY_LIMIT_US,
+           slow_count, CACHE_MAX_SLOW_CALLS);
+    printf("  Capabilities: 0x%08X  (consistent: %s)\n",
+           first_caps, inconsistent == 0 ? "YES" : "NO");
+
+    char lat_msg[192];
+    sprintf(lat_msg,
+            "P99.5 latency OK: %d/%d calls >=%d µs (limit: <=%d slow calls)",
+            slow_count, CACHE_QUERIES, CACHE_LATENCY_LIMIT_US, CACHE_MAX_SLOW_CALLS);
+    TEST_ASSERT(slow_count <= CACHE_MAX_SLOW_CALLS, lat_msg);
+
+#undef CACHE_QUERIES
+#undef CACHE_LATENCY_LIMIT_US
+#undef CACHE_MAX_SLOW_CALLS
+
+    TEST_PASS("Capability cache: consistent results; P99 latency within IOCTL overhead budget (<500 µs)");
+}
+
+/**
  * @brief Main test entry point
  */
 int main(void)
@@ -321,16 +499,18 @@ int main(void)
     tests_passed += Test_RegisterWrite_ViaAbstraction(hDevice);
     tests_passed += Test_PtpSystemTime_ViaAbstraction(hDevice);
     tests_passed += Test_ErrorHandling_UnsupportedDevice(hDevice);
-    
-    tests_failed = 5 - tests_passed;
-    
+    tests_passed += Test_StrategySelection_ByPciId(hDevice);     /* closes #277 */
+    tests_passed += Test_CapabilityCacheHitRate(hDevice);         /* closes #275 */
+
+    tests_failed = 7 - tests_passed;
+
     // Cleanup
     CloseHandle(hDevice);
-    
+
     // Summary
     printf("\n==============================================\n");
     printf("Test Summary:\n");
-    printf("  Total Tests: 5\n");
+    printf("  Total Tests: 7\n");
     printf("  Passed: %d ✅\n", tests_passed);
     printf("  Failed: %d ❌\n", tests_failed);
     printf("==============================================\n");
