@@ -523,6 +523,87 @@ typedef struct AVB_ATDECC_POLL_REQUEST {
 #define IOCTL_AVB_ATDECC_EVENT_POLL         _NDIS_CONTROL_CODE(59, METHOD_BUFFERED)
 #define IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE  _NDIS_CONTROL_CODE(62, METHOD_BUFFERED)
 
+/*==============================================================================
+ * IEEE 802.1Q VLAN Tagging (Issue #213)
+ * IOCTLs:
+ *   IOCTL_AVB_VLAN_ENABLE  (53) — enable VLAN insertion / RX strip
+ *   IOCTL_AVB_VLAN_DISABLE (54) — disable VLAN insertion
+ *============================================================================*/
+typedef struct AVB_VLAN_REQUEST {
+    avb_u16 vlan_id;     /* in:  802.1Q VLAN ID (1-4094) */
+    avb_u8  pcp;         /* in:  Priority Code Point (0-7) */
+    avb_u8  strip_rx;    /* in:  1=strip 802.1Q tag on RX */
+    avb_u16 vlan_id_out; /* out: current vlan_id for read-back */
+    avb_u8  pcp_out;     /* out: current pcp for read-back */
+    avb_u8  enabled;     /* out: 1=VLAN insertion currently enabled */
+    avb_u32 status;      /* out: NDIS_STATUS */
+} AVB_VLAN_REQUEST, *PAVB_VLAN_REQUEST;
+
+#define IOCTL_AVB_VLAN_ENABLE    _NDIS_CONTROL_CODE(53, METHOD_BUFFERED)
+#define IOCTL_AVB_VLAN_DISABLE   _NDIS_CONTROL_CODE(54, METHOD_BUFFERED)
+
+/*==============================================================================
+ * IEEE 802.3az Energy-Efficient Ethernet — LPI (Issue #223)
+ * IOCTLs:
+ *   IOCTL_AVB_EEE_ENABLE  (55) — enable LPI (program EEER register)
+ *   IOCTL_AVB_EEE_DISABLE (56) — disable LPI (clear EEER register)
+ *============================================================================*/
+typedef struct AVB_EEE_REQUEST {
+    avb_u32 lpi_timer_us;  /* in:  LPI Assert timer in microseconds (1-255) */
+    avb_u32 eeer_readback; /* out: EEER register value after write */
+    avb_u32 status;        /* out: NDIS_STATUS */
+} AVB_EEE_REQUEST, *PAVB_EEE_REQUEST;
+
+#define IOCTL_AVB_EEE_ENABLE     _NDIS_CONTROL_CODE(55, METHOD_BUFFERED)
+#define IOCTL_AVB_EEE_DISABLE    _NDIS_CONTROL_CODE(56, METHOD_BUFFERED)
+
+/*==============================================================================
+ * IEEE 802.1Qbb Priority Flow Control (Issue #219)
+ * IOCTL:
+ *   IOCTL_AVB_PFC_ENABLE (57) — req.enable=1 enables, req.enable=0 disables
+ * Note: IOCTL_AVB_PFC_DISABLE is an alias; req.enable field selects operation.
+ *============================================================================*/
+typedef struct AVB_PFC_REQUEST {
+    avb_u8  enable;          /* in:  1=enable, 0=disable */
+    avb_u8  priority_mask;   /* in:  8-bit bitmask of PFC-enabled Traffic Classes */
+    avb_u8  quanta[8];       /* in:  per-TC pause quanta (0=default 0xFFFF) */
+    avb_u32 pfctop_readback; /* out: PFCTOP register after write */
+    avb_u32 status;          /* out: NDIS_STATUS */
+} AVB_PFC_REQUEST, *PAVB_PFC_REQUEST;
+
+#define IOCTL_AVB_PFC_ENABLE     _NDIS_CONTROL_CODE(57, METHOD_BUFFERED)
+#define IOCTL_AVB_PFC_DISABLE    IOCTL_AVB_PFC_ENABLE  /* same code; req.enable=0 disables */
+
+/*==============================================================================
+ * IEEE 802.1Qat Stream Reservation Protocol (Issue #211)
+ * IOCTLs:
+ *   IOCTL_AVB_SRP_REGISTER_STREAM   (60) — reserve bandwidth for a stream
+ *   IOCTL_AVB_SRP_DEREGISTER_STREAM (61) — release a stream reservation
+ *============================================================================*/
+#define SRP_CLASS_A  0u   /* max latency <2ms,  observation interval 125us */
+#define SRP_CLASS_B  1u   /* max latency <50ms, observation interval 250us */
+
+typedef struct AVB_SRP_REGISTER_REQUEST {
+    avb_u64 stream_id;          /* in:  IEEE 802.1Qat 64-bit stream identifier */
+    avb_u32 bandwidth_bps;      /* in:  required bandwidth in bits per second */
+    avb_u16 vlan_id;            /* in:  802.1Q VLAN ID for the stream */
+    avb_u8  priority;           /* in:  802.1p PCP (5=SR Class A, 4=SR Class B) */
+    avb_u8  latency_class;      /* in:  SRP_CLASS_A or SRP_CLASS_B */
+    avb_u16 max_frame_size;     /* in:  maximum frame size in bytes */
+    avb_u8  reserved[2];        /* padding */
+    avb_u32 reservation_handle; /* out: opaque 1-based handle for deregistration */
+    avb_u32 reserved_bw_bps;    /* out: actual bandwidth reserved by driver */
+    avb_u32 status;             /* out: NDIS_STATUS */
+} AVB_SRP_REGISTER_REQUEST, *PAVB_SRP_REGISTER_REQUEST;
+
+typedef struct AVB_SRP_DEREGISTER_REQUEST {
+    avb_u32 reservation_handle; /* in:  handle returned by REGISTER_STREAM */
+    avb_u32 status;             /* out: NDIS_STATUS */
+} AVB_SRP_DEREGISTER_REQUEST, *PAVB_SRP_DEREGISTER_REQUEST;
+
+#define IOCTL_AVB_SRP_REGISTER_STREAM    _NDIS_CONTROL_CODE(60, METHOD_BUFFERED)
+#define IOCTL_AVB_SRP_DEREGISTER_STREAM  _NDIS_CONTROL_CODE(61, METHOD_BUFFERED)
+
 #ifdef __cplusplus
 }
 #endif

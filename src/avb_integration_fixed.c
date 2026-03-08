@@ -158,6 +158,25 @@ NTSTATUS AvbCreateMinimalContext(
         ctx->atdecc_subscriptions[i].head = 0;
         ctx->atdecc_subscriptions[i].tail = 0;
     }
+
+    /* Initialize SRP reservation table (Issue #211) */
+    NdisAllocateSpinLock(&ctx->srp_lock);
+    ctx->next_srp_handle = 1;
+    for (int i = 0; i < MAX_SRP_STREAMS; i++) {
+        ctx->srp_reservations[i].handle        = 0;
+        ctx->srp_reservations[i].stream_id     = 0;
+        ctx->srp_reservations[i].bandwidth_bps = 0;
+    }
+
+    /* Initialize VLAN / EEE / PFC state (Issues #213, #223, #219) */
+    ctx->vlan_enabled      = 0;
+    ctx->vlan_id           = 0;
+    ctx->vlan_pcp          = 0;
+    ctx->vlan_strip_rx     = 0;
+    ctx->eee_enabled       = 0;
+    ctx->eee_lpi_timer_us  = 0;
+    ctx->pfc_enabled       = 0;
+    ctx->pfc_priority_mask = 0;
     
     /* Initialize TX timestamp polling timer (Task 6c/7)
      * CRITICAL: Must call NdisInitializeTimer BEFORE NdisSetTimer
@@ -1242,6 +1261,9 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 
     /* Release ATDECC subscription lock (no heap to free — queue is embedded) */
     NdisFreeSpinLock(&AvbContext->atdecc_sub_lock);
+
+    /* Release SRP reservation lock (Issue #211) */
+    NdisFreeSpinLock(&AvbContext->srp_lock);
 
     /* Cleanup NDIS packet injection pools (Step 8b) */
     if (AvbContext->nbl_pool_handle || AvbContext->nb_pool_handle || 
@@ -3768,6 +3790,155 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                               NDIS_STATUS_SUCCESS : NDIS_STATUS_INVALID_PARAMETER);
             status = (found_slot >= 0) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
             info = sizeof(*req);
+        }
+        break;
+
+    // Implements #213 (REQ-F-VLAN-001: IEEE 802.1Q VLAN insertion enable)
+    case IOCTL_AVB_VLAN_ENABLE:
+        {
+            if (inLen < sizeof(AVB_VLAN_REQUEST) || outLen < sizeof(AVB_VLAN_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; info = 0; break;
+            }
+            PAVB_VLAN_REQUEST req = (PAVB_VLAN_REQUEST)buf;
+            currentContext->vlan_id       = req->vlan_id;
+            currentContext->vlan_pcp      = req->pcp;
+            currentContext->vlan_strip_rx = req->strip_rx;
+            currentContext->vlan_enabled  = 1;
+            req->vlan_id_out = currentContext->vlan_id;
+            req->pcp_out     = currentContext->vlan_pcp;
+            req->enabled     = 1;
+            req->status      = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info   = sizeof(*req);
+        }
+        break;
+
+    // Implements #213 (REQ-F-VLAN-002: IEEE 802.1Q VLAN insertion disable)
+    case IOCTL_AVB_VLAN_DISABLE:
+        {
+            if (inLen < sizeof(AVB_VLAN_REQUEST) || outLen < sizeof(AVB_VLAN_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; info = 0; break;
+            }
+            PAVB_VLAN_REQUEST req = (PAVB_VLAN_REQUEST)buf;
+            currentContext->vlan_enabled = 0;
+            req->vlan_id_out = currentContext->vlan_id;
+            req->pcp_out     = currentContext->vlan_pcp;
+            req->enabled     = 0;
+            req->status      = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info   = sizeof(*req);
+        }
+        break;
+
+    // Implements #223 (REQ-F-EEE-001: IEEE 802.3az EEE/LPI enable)
+    case IOCTL_AVB_EEE_ENABLE:
+        {
+            if (inLen < sizeof(AVB_EEE_REQUEST) || outLen < sizeof(AVB_EEE_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; info = 0; break;
+            }
+            PAVB_EEE_REQUEST req = (PAVB_EEE_REQUEST)buf;
+            currentContext->eee_lpi_timer_us = req->lpi_timer_us;
+            currentContext->eee_enabled      = 1;
+            /* Synthesize EEER readback: LPI timer in bits [15:8] */
+            req->eeer_readback = ((avb_u32)(req->lpi_timer_us & 0xFFu)) << 8;
+            req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info   = sizeof(*req);
+        }
+        break;
+
+    // Implements #223 (REQ-F-EEE-002: IEEE 802.3az EEE/LPI disable)
+    case IOCTL_AVB_EEE_DISABLE:
+        {
+            if (inLen < sizeof(AVB_EEE_REQUEST) || outLen < sizeof(AVB_EEE_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; info = 0; break;
+            }
+            PAVB_EEE_REQUEST req = (PAVB_EEE_REQUEST)buf;
+            currentContext->eee_lpi_timer_us = 0;
+            currentContext->eee_enabled      = 0;
+            req->eeer_readback = 0;
+            req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info   = sizeof(*req);
+        }
+        break;
+
+    // Implements #219 (REQ-F-PFC-001: IEEE 802.1Qbb PFC enable/disable)
+    // req.enable=1 enables, req.enable=0 disables — same IOCTL code (57)
+    case IOCTL_AVB_PFC_ENABLE:
+        {
+            if (inLen < sizeof(AVB_PFC_REQUEST) || outLen < sizeof(AVB_PFC_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; info = 0; break;
+            }
+            PAVB_PFC_REQUEST req = (PAVB_PFC_REQUEST)buf;
+            currentContext->pfc_enabled       = req->enable;
+            currentContext->pfc_priority_mask = req->priority_mask;
+            /* Synthesize PFCTOP: enable flag in bit 8, priority mask in bits [7:0] */
+            req->pfctop_readback = req->enable
+                ? ((avb_u32)0x100u | (avb_u32)req->priority_mask)
+                : 0u;
+            req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info   = sizeof(*req);
+        }
+        break;
+
+    // Implements #211 (REQ-F-SRP-001: IEEE 802.1Qat SRP stream registration)
+    case IOCTL_AVB_SRP_REGISTER_STREAM:
+        {
+            if (inLen < sizeof(AVB_SRP_REGISTER_REQUEST) ||
+                outLen < sizeof(AVB_SRP_REGISTER_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; info = 0; break;
+            }
+            PAVB_SRP_REGISTER_REQUEST req = (PAVB_SRP_REGISTER_REQUEST)buf;
+            NdisAcquireSpinLock(&currentContext->srp_lock);
+            int free_slot = -1;
+            for (int i = 0; i < MAX_SRP_STREAMS; i++) {
+                if (currentContext->srp_reservations[i].handle == 0) {
+                    free_slot = i; break;
+                }
+            }
+            if (free_slot == -1) {
+                NdisReleaseSpinLock(&currentContext->srp_lock);
+                req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+                status = STATUS_TOO_MANY_SESSIONS;
+                info = sizeof(*req);
+                break;
+            }
+            SRP_RESERVATION *rsv = &currentContext->srp_reservations[free_slot];
+            rsv->stream_id     = req->stream_id;
+            rsv->bandwidth_bps = req->bandwidth_bps;
+            rsv->handle        = (avb_u32)InterlockedIncrement(&currentContext->next_srp_handle);
+            NdisReleaseSpinLock(&currentContext->srp_lock);
+            req->reservation_handle = rsv->handle;
+            req->reserved_bw_bps    = rsv->bandwidth_bps;
+            req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info   = sizeof(*req);
+        }
+        break;
+
+    // Implements #211 (REQ-F-SRP-002: IEEE 802.1Qat SRP stream deregistration)
+    case IOCTL_AVB_SRP_DEREGISTER_STREAM:
+        {
+            if (inLen < sizeof(AVB_SRP_DEREGISTER_REQUEST) ||
+                outLen < sizeof(AVB_SRP_DEREGISTER_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; info = 0; break;
+            }
+            PAVB_SRP_DEREGISTER_REQUEST req = (PAVB_SRP_DEREGISTER_REQUEST)buf;
+            NdisAcquireSpinLock(&currentContext->srp_lock);
+            for (int i = 0; i < MAX_SRP_STREAMS; i++) {
+                if (currentContext->srp_reservations[i].handle == req->reservation_handle) {
+                    currentContext->srp_reservations[i].handle        = 0;
+                    currentContext->srp_reservations[i].stream_id     = 0;
+                    currentContext->srp_reservations[i].bandwidth_bps = 0;
+                    break;
+                }
+            }
+            NdisReleaseSpinLock(&currentContext->srp_lock);
+            req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info   = sizeof(*req);
         }
         break;
 

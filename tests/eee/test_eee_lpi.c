@@ -27,15 +27,8 @@
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 
-/* ── TDD placeholder IOCTL codes ────────────────────────────────────────────── */
-#define IOCTL_AVB_EEE_ENABLE  _NDIS_CONTROL_CODE(55, METHOD_BUFFERED)
-#define IOCTL_AVB_EEE_DISABLE _NDIS_CONTROL_CODE(56, METHOD_BUFFERED)
-
-typedef struct AVB_EEE_REQUEST {
-    avb_u32 lpi_timer_us;   /* in: LPI Assert timer in microseconds (1-255) */
-    avb_u32 eeer_readback;  /* out: EEER register value after write */
-    avb_u32 status;         /* out: NDIS_STATUS */
-} AVB_EEE_REQUEST;
+/* IOCTL codes and structs from avb_ioctl.h (SSOT) — see include/avb_ioctl.h */
+/* AVB_EEE_REQUEST, IOCTL_AVB_EEE_ENABLE, IOCTL_AVB_EEE_DISABLE defined there */
 
 /* IEEE 802.3az MDIO addresses (MMD Device.Register) */
 #define EEE_MMD_DEVICE_PMAPMD   3u   /* PMA/PMD (IEEE MMD 3) */
@@ -58,7 +51,7 @@ static int TryIoctl(HANDLE h, DWORD code, void *buf, DWORD sz)
     if (DeviceIoControl(h, code, buf, sz, buf, sz, &ret, NULL)) return 1;
     DWORD e = GetLastError();
     if (e == ERROR_INVALID_FUNCTION || e == ERROR_NOT_SUPPORTED) {
-        printf("    [TDD-RED] IOCTL 0x%08lX not yet implemented (err=%lu)\n",
+        printf("    [SKIP] IOCTL 0x%08lX not supported (err=%lu)\n",
                (unsigned long)code, (unsigned long)e);
         return -1;
     }
@@ -177,9 +170,8 @@ int main(void)
 {
     int r;
     printf("============================================================\n");
-    printf("  IntelAvbFilter -- IEEE 802.3az EEE/LPI Tests [TDD-RED]\n");
+    printf("  IntelAvbFilter -- IEEE 802.3az EEE/LPI Tests\n");
     printf("  Implements: #223 (TEST-EEE-001)\n");
-    printf("  MDIO TCs run regardless; EEE_ENABLE/DISABLE TCs will SKIP\n");
     printf("============================================================\n\n");
 
 #define RUN(tc, label) \
@@ -190,9 +182,9 @@ int main(void)
     else            { g_skip++; printf("  [SKIP] %s\n\n", (label)); }
 
     RUN(TC_EEE_001_DeviceAccess,         "TC-EEE-001: Device node accessible");
-    RUN(TC_EEE_002_EEE_Enable,           "TC-EEE-002: IOCTL_AVB_EEE_ENABLE -> EEER [TDD-RED]");
+    RUN(TC_EEE_002_EEE_Enable,           "TC-EEE-002: IOCTL_AVB_EEE_ENABLE -> EEER");
     RUN(TC_EEE_003_MDIO_EEE_Capability,  "TC-EEE-003: MDIO read MMD 3.20 EEE Capability");
-    RUN(TC_EEE_004_EEE_Disable,          "TC-EEE-004: IOCTL_AVB_EEE_DISABLE -> LPI off [TDD-RED]");
+    RUN(TC_EEE_004_EEE_Disable,          "TC-EEE-004: IOCTL_AVB_EEE_DISABLE -> LPI off");
     RUN(TC_EEE_005_MDIO_EEE_Advertisement,"TC-EEE-005: MDIO read MMD 7.60 EEE Advertisement");
 
     printf("-------------------------------------------\n");

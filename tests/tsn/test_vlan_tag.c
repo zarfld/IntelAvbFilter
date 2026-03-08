@@ -28,20 +28,8 @@
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 
-/* ── TDD placeholder IOCTL codes (not yet in avb_ioctl.h) ─────────────────── */
-/* These codes will be reserved in avb_ioctl.h once implementation begins.     */
-#define IOCTL_AVB_VLAN_ENABLE  _NDIS_CONTROL_CODE(53, METHOD_BUFFERED)
-#define IOCTL_AVB_VLAN_DISABLE _NDIS_CONTROL_CODE(54, METHOD_BUFFERED)
-
-typedef struct AVB_VLAN_REQUEST {
-    avb_u16 vlan_id;   /* in: 802.1Q VLAN ID (1-4094) */
-    avb_u8  pcp;       /* in: Priority Code Point (0-7) */
-    avb_u8  strip_rx;  /* in: 1=strip 802.1Q tag on RX */
-    avb_u16 vlan_id_out; /* out: current vlan_id for read-back */
-    avb_u8  pcp_out;     /* out: current pcp for read-back */
-    avb_u8  enabled;     /* out: 1=VLAN insertion currently enabled */
-    avb_u32 status;      /* out: NDIS_STATUS */
-} AVB_VLAN_REQUEST;
+/* IOCTL codes and structs from avb_ioctl.h (SSOT) — see include/avb_ioctl.h */
+/* AVB_VLAN_REQUEST, IOCTL_AVB_VLAN_ENABLE, IOCTL_AVB_VLAN_DISABLE defined there */
 
 #define DEVICE_NAME "\\\\.\\IntelAvbFilter"
 static int g_pass = 0, g_fail = 0, g_skip = 0;
@@ -59,7 +47,7 @@ static int TryIoctl(HANDLE h, DWORD code, void *buf, DWORD sz)
     if (DeviceIoControl(h, code, buf, sz, buf, sz, &ret, NULL)) return 1;
     DWORD e = GetLastError();
     if (e == ERROR_INVALID_FUNCTION || e == ERROR_NOT_SUPPORTED) {
-        printf("    [TDD-RED] IOCTL 0x%08lX not yet implemented (err=%lu) -- expected at this phase\n",
+        printf("    [SKIP] IOCTL 0x%08lX not supported (err=%lu)\n",
                (unsigned long)code, (unsigned long)e);
         return -1;
     }
@@ -178,9 +166,8 @@ int main(void)
 {
     int r;
     printf("============================================================\n");
-    printf("  IntelAvbFilter -- IEEE 802.1Q VLAN Tag Tests [TDD-RED]\n");
+    printf("  IntelAvbFilter -- IEEE 802.1Q VLAN Tag Tests\n");
     printf("  Implements: #213 (TEST-VLAN-001)\n");
-    printf("  Status: SKIP expected until VLAN IOCTLs are implemented\n");
     printf("============================================================\n\n");
 
 #define RUN(tc, label) \
@@ -191,17 +178,15 @@ int main(void)
     else            { g_skip++; printf("  [SKIP] %s\n\n", (label)); }
 
     RUN(TC_VLAN_001_DeviceAccess, "TC-VLAN-001: Device node accessible (baseline)");
-    RUN(TC_VLAN_002_Enable,       "TC-VLAN-002: IOCTL_AVB_VLAN_ENABLE accepted [TDD-RED]");
-    RUN(TC_VLAN_003_ReadBack,     "TC-VLAN-003: VLAN config read-back preserved [TDD-RED]");
-    RUN(TC_VLAN_004_Disable,      "TC-VLAN-004: IOCTL_AVB_VLAN_DISABLE accepted [TDD-RED]");
-    RUN(TC_VLAN_005_DefaultDisabled, "TC-VLAN-005: Default state is VLAN-disabled [TDD-RED]");
+    RUN(TC_VLAN_002_Enable,       "TC-VLAN-002: IOCTL_AVB_VLAN_ENABLE accepted");
+    RUN(TC_VLAN_003_ReadBack,     "TC-VLAN-003: VLAN config read-back preserved");
+    RUN(TC_VLAN_004_Disable,      "TC-VLAN-004: IOCTL_AVB_VLAN_DISABLE accepted");
+    RUN(TC_VLAN_005_DefaultDisabled, "TC-VLAN-005: Default state is VLAN-disabled");
 
     printf("-------------------------------------------\n");
     printf(" PASS=%d  FAIL=%d  SKIP=%d  TOTAL=%d\n",
            g_pass, g_fail, g_skip, g_pass + g_fail + g_skip);
-    printf(" NOTE: SKIP count = number of unimplemented TDD-RED features\n");
     printf("-------------------------------------------\n");
 
-    /* TDD-RED: exit 0 even if skips, only fail on unexpected errors */
     return (g_fail == 0) ? 0 : 1;
 }
