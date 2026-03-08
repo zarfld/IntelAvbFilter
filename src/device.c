@@ -484,6 +484,9 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SET_PORT_LATENCY:  // Implements IEEE 802.1AS port latency calibration
         case IOCTL_AVB_GET_STATISTICS:    // Implements #270 (TEST-STATISTICS-001: Driver Statistics Query)
         case IOCTL_AVB_RESET_STATISTICS:  // Implements #270 (TEST-STATISTICS-002: Driver Statistics Reset)
+        case IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE:    // Implements #236 (REQ-F-ATDECC-SUB-001)
+        case IOCTL_AVB_ATDECC_EVENT_POLL:         // Implements #236 (REQ-F-ATDECC-POLL-001)
+        case IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE:  // Implements #236 (REQ-F-ATDECC-UNSUB-001)
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
