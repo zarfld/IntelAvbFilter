@@ -487,6 +487,13 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE:    // Implements #236 (REQ-F-ATDECC-SUB-001)
         case IOCTL_AVB_ATDECC_EVENT_POLL:         // Implements #236 (REQ-F-ATDECC-POLL-001)
         case IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE:  // Implements #236 (REQ-F-ATDECC-UNSUB-001)
+        case IOCTL_AVB_VLAN_ENABLE:               // Implements #213 (REQ-F-VLAN-001)
+        case IOCTL_AVB_VLAN_DISABLE:              // Implements #213 (REQ-F-VLAN-002)
+        case IOCTL_AVB_EEE_ENABLE:                // Implements #223 (REQ-F-EEE-001)
+        case IOCTL_AVB_EEE_DISABLE:               // Implements #223 (REQ-F-EEE-002)
+        case IOCTL_AVB_PFC_ENABLE:                // Implements #219 (REQ-F-PFC-001; req.enable field selects enable/disable)
+        case IOCTL_AVB_SRP_REGISTER_STREAM:       // Implements #211 (REQ-F-SRP-001)
+        case IOCTL_AVB_SRP_DEREGISTER_STREAM:     // Implements #211 (REQ-F-SRP-002)
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios

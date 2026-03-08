@@ -87,6 +87,17 @@ typedef struct _ATDECC_SUBSCRIPTION {
     ATDECC_EVENT_ENTRY queue[ATDECC_EVENT_QUEUE_DEPTH];
 } ATDECC_SUBSCRIPTION;
 
+/*=======================================================================
+ * SRP Stream Reservations (Issue #211 — IEEE 802.1Qat)
+ *=======================================================================*/
+#define MAX_SRP_STREAMS  16
+
+typedef struct _SRP_RESERVATION {
+    avb_u32 handle;         /* 1-based; 0 = unused slot */
+    avb_u64 stream_id;      /* IEEE 802.1Qat stream identifier */
+    avb_u32 bandwidth_bps;  /* reserved bandwidth in bits/sec */
+} SRP_RESERVATION;
+
 /* Timestamp Event Subscription Management (Issue #13)
  * Supports up to 32 concurrent subscriptions per adapter
  * NOTE: Increased from 8 to support full test suite execution
@@ -237,6 +248,28 @@ typedef struct _AVB_DEVICE_CONTEXT {
     ATDECC_SUBSCRIPTION atdecc_subscriptions[MAX_ATDECC_SUBSCRIPTIONS];
     NDIS_SPIN_LOCK      atdecc_sub_lock;
     volatile LONG       next_atdecc_sub_id;   /* 1-based monotonic allocator */
+
+    /* VLAN tagging state (Issue #213 — IEEE 802.1Q) */
+    avb_u16 vlan_id;
+    avb_u8  vlan_pcp;
+    avb_u8  vlan_strip_rx;
+    avb_u8  vlan_enabled;
+    avb_u8  vlan_pad[3];
+
+    /* EEE / LPI state (Issue #223 — IEEE 802.3az) */
+    avb_u8  eee_enabled;
+    avb_u8  eee_pad[3];
+    avb_u32 eee_lpi_timer_us;
+
+    /* PFC state (Issue #219 — IEEE 802.1Qbb) */
+    avb_u8  pfc_enabled;
+    avb_u8  pfc_priority_mask;
+    avb_u8  pfc_pad[2];
+
+    /* SRP stream reservations (Issue #211 — IEEE 802.1Qat) */
+    SRP_RESERVATION srp_reservations[MAX_SRP_STREAMS];
+    NDIS_SPIN_LOCK  srp_lock;
+    volatile LONG   next_srp_handle;  /* 1-based monotonic allocator */
 
     // Per-adapter list linkage — protected by g_AvbContextListLock
     struct _AVB_DEVICE_CONTEXT *next_context;

@@ -26,17 +26,8 @@
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 
-/* ── TDD placeholder IOCTL codes ────────────────────────────────────────────── */
-#define IOCTL_AVB_PFC_ENABLE   _NDIS_CONTROL_CODE(57, METHOD_BUFFERED)
-#define IOCTL_AVB_PFC_DISABLE  _NDIS_CONTROL_CODE(57, METHOD_BUFFERED) /* same code, mode field */
-
-typedef struct AVB_PFC_REQUEST {
-    avb_u8  enable;           /* in: 1=enable, 0=disable */
-    avb_u8  priority_mask;    /* in: 8-bit bitmask of PFC-enabled Traffic Classes */
-    avb_u8  quanta[8];        /* in: per-TC pause quanta (0=default 0xFFFF) */
-    avb_u32 pfctop_readback;  /* out: PFCTOP register after write */
-    avb_u32 status;           /* out: NDIS_STATUS */
-} AVB_PFC_REQUEST;
+/* IOCTL codes and structs from avb_ioctl.h (SSOT) — see include/avb_ioctl.h */
+/* AVB_PFC_REQUEST, IOCTL_AVB_PFC_ENABLE, IOCTL_AVB_PFC_DISABLE defined there */
 
 /* AN register for PAUSE capability (IEEE 802.3 Clause 37/28) */
 #define AN_MMD_DEVICE_7     7u
@@ -57,7 +48,7 @@ static int TryIoctl(HANDLE h, DWORD code, void *buf, DWORD sz)
     if (DeviceIoControl(h, code, buf, sz, buf, sz, &ret, NULL)) return 1;
     DWORD e = GetLastError();
     if (e == ERROR_INVALID_FUNCTION || e == ERROR_NOT_SUPPORTED) {
-        printf("    [TDD-RED] IOCTL 0x%08lX not yet implemented (err=%lu)\n",
+        printf("    [SKIP] IOCTL 0x%08lX not supported (err=%lu)\n",
                (unsigned long)code, (unsigned long)e);
         return -1;
     }
@@ -174,9 +165,8 @@ int main(void)
 {
     int r;
     printf("============================================================\n");
-    printf("  IntelAvbFilter -- IEEE 802.1Qbb PFC Tests [TDD-RED]\n");
+    printf("  IntelAvbFilter -- IEEE 802.1Qbb PFC Tests\n");
     printf("  Implements: #219 (TEST-PFC-001)\n");
-    printf("  MDIO TCs run regardless; PFC control TCs will SKIP\n");
     printf("============================================================\n\n");
 
 #define RUN(tc, label) \
@@ -187,8 +177,8 @@ int main(void)
     else            { g_skip++; printf("  [SKIP] %s\n\n", (label)); }
 
     RUN(TC_PFC_001_DeviceAccess,      "TC-PFC-001: Device node accessible");
-    RUN(TC_PFC_002_PFC_Enable,        "TC-PFC-002: IOCTL_AVB_PFC_ENABLE (priority_mask=0x03) [TDD-RED]");
-    RUN(TC_PFC_003_PFC_Disable,       "TC-PFC-003: IOCTL_AVB_PFC_DISABLE [TDD-RED]");
+    RUN(TC_PFC_002_PFC_Enable,        "TC-PFC-002: IOCTL_AVB_PFC_ENABLE (priority_mask=0x03)");
+    RUN(TC_PFC_003_PFC_Disable,       "TC-PFC-003: IOCTL_AVB_PFC_DISABLE");
     RUN(TC_PFC_004_MDIO_PAUSE_Capability, "TC-PFC-004: MDIO read MMD 7.19 PAUSE capability");
     RUN(TC_PFC_005_DeviceInfoPFC,     "TC-PFC-005: GET_DEVICE_INFO accessible (PFC scope)");
 
