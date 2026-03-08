@@ -478,6 +478,51 @@ typedef struct _AVB_DRIVER_STATISTICS {
 } AVB_DRIVER_STATISTICS, *PAVB_DRIVER_STATISTICS;
 #pragma pack(pop)
 
+/*==============================================================================
+ * ATDECC Entity Event Subscription (Issue #236 — IEEE 1722.1 §7.5 ADP)
+ *
+ * Provides a subscribe/poll/unsubscribe API for IEEE 1722.1 ATDECC entity
+ * discovery events (Entity Available / Entity Departing) announced via ADP.
+ *
+ * IOCTLs:
+ *   IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE   (58) — register subscription, return handle
+ *   IOCTL_AVB_ATDECC_EVENT_POLL        (59) — non-blocking dequeue of next event
+ *   IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE (62) — release subscription handle
+ *
+ * Usage flow:
+ *   1. SUBSCRIBE  → receive subscription_id
+ *   2. Poll loop: POLL(subscription_id) → event_available=1 + entity_guid/event_type
+ *   3. UNSUBSCRIBE(subscription_id)  when done
+ *============================================================================*/
+
+/* ATDECC event type bitmask (use in event_mask for SUBSCRIBE; set in event_type on POLL) */
+#define ATDECC_EVENT_ENTITY_AVAILABLE    0x00000001u  /* ADP Entity Available received  */
+#define ATDECC_EVENT_ENTITY_DEPARTING    0x00000002u  /* ADP Entity Departing received  */
+#define ATDECC_EVENT_ENTITY_DISCOVER     0x00000004u  /* ADP Entity Discover received   */
+
+/* Subscribe to ATDECC entity events */
+typedef struct AVB_ATDECC_SUBSCRIBE_REQUEST {
+    avb_u32 event_mask;        /* in:  ATDECC_EVENT_* bitmask (≥1 bit required) */
+    avb_u32 subscription_id;   /* out: opaque 1-based subscription handle        */
+    avb_u32 status;            /* out: 0=NDIS_STATUS_SUCCESS, else error         */
+} AVB_ATDECC_SUBSCRIBE_REQUEST, *PAVB_ATDECC_SUBSCRIBE_REQUEST;
+
+/* Poll (non-blocking dequeue) for the next queued ATDECC event */
+typedef struct AVB_ATDECC_POLL_REQUEST {
+    avb_u32 subscription_id;   /* in:  subscription handle from SUBSCRIBE         */
+    avb_u32 timeout_ms;        /* in:  reserved — always non-blocking in v1       */
+    avb_u64 entity_guid;       /* out: EUI-64 entity GUID                         */
+    avb_u32 capabilities;      /* out: ATDECC entity capabilities bitmask         */
+    avb_u32 event_type;        /* out: ATDECC_EVENT_* constant for this event     */
+    avb_u32 event_available;   /* out: 1=event returned, 0=queue empty            */
+    avb_u32 status;            /* out: 0=NDIS_STATUS_SUCCESS, else error          */
+} AVB_ATDECC_POLL_REQUEST, *PAVB_ATDECC_POLL_REQUEST;
+
+/* IOCTL codes */
+#define IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE    _NDIS_CONTROL_CODE(58, METHOD_BUFFERED)
+#define IOCTL_AVB_ATDECC_EVENT_POLL         _NDIS_CONTROL_CODE(59, METHOD_BUFFERED)
+#define IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE  _NDIS_CONTROL_CODE(62, METHOD_BUFFERED)
+
 #ifdef __cplusplus
 }
 #endif

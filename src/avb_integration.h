@@ -61,6 +61,32 @@ __forceinline const char* AvbHwStateName(LONG s) {
 /* Forward decl */
 typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
 
+/*=======================================================================
+ * ATDECC Entity Event Subscription Management (Issue #236 — IEEE 1722.1)
+ * Provides a simple per-subscription FIFO event queue for ADP entity
+ * discovery events.  Events are enqueued by the driver (e.g. from ADP
+ * frame parsing) and dequeued one-at-a-time via IOCTL_AVB_ATDECC_EVENT_POLL.
+ *=======================================================================*/
+#define MAX_ATDECC_SUBSCRIPTIONS  4
+#define ATDECC_EVENT_QUEUE_DEPTH  16   /* power-of-2; per-subscription ring */
+
+typedef struct _ATDECC_EVENT_ENTRY {
+    avb_u64 entity_guid;    /* EUI-64 entity GUID */
+    avb_u32 capabilities;   /* entity capabilities bitmask */
+    avb_u32 event_type;     /* ATDECC_EVENT_* constant */
+} ATDECC_EVENT_ENTRY;
+
+typedef struct _ATDECC_SUBSCRIPTION {
+    avb_u32  sub_id;        /* 1-based handle; 0 = unused slot */
+    avb_u32  event_mask;    /* ATDECC_EVENT_* bitmask subscribed to */
+    avb_u8   active;        /* 1 = live, 0 = unused */
+    avb_u8   _pad[3];
+    /* Lock-free ring: head=next-dequeue, tail=next-enqueue */
+    volatile LONG head;
+    volatile LONG tail;
+    ATDECC_EVENT_ENTRY queue[ATDECC_EVENT_QUEUE_DEPTH];
+} ATDECC_SUBSCRIPTION;
+
 /* Timestamp Event Subscription Management (Issue #13)
  * Supports up to 32 concurrent subscriptions per adapter
  * NOTE: Increased from 8 to support full test suite execution
@@ -206,6 +232,11 @@ typedef struct _AVB_DEVICE_CONTEXT {
     volatile LONGLONG stats_memory_alloc_failures;
     volatile LONGLONG stats_hardware_faults;
     volatile LONGLONG stats_filter_attach_count;
+
+    /* ATDECC Entity Event Subscriptions (Issue #236) */
+    ATDECC_SUBSCRIPTION atdecc_subscriptions[MAX_ATDECC_SUBSCRIPTIONS];
+    NDIS_SPIN_LOCK      atdecc_sub_lock;
+    volatile LONG       next_atdecc_sub_id;   /* 1-based monotonic allocator */
 
     // Per-adapter list linkage — protected by g_AvbContextListLock
     struct _AVB_DEVICE_CONTEXT *next_context;

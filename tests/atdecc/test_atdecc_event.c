@@ -1,10 +1,9 @@
 /**
  * @file test_atdecc_event.c
- * @brief TDD-RED: IEEE 1722.1 ATDECC entity event subscription contract test
+ * @brief IEEE 1722.1 ATDECC entity event subscription contract test
  *
  * Implements: #236 (TEST-EVENT-003: ATDECC entity discovery events)
- * TDD state : RED — IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE not yet implemented.
- *             All ATDECC TCs will SKIP until the feature is added.
+ * TDD state : GREEN — IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE implemented in driver.
  *
  * Acceptance criteria (from #236):
  *   - IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE queues entity-discovered events
@@ -14,10 +13,10 @@
  *
  * Test Cases: 5
  *   TC-ATDECC-001: Device node accessible (baseline)
- *   TC-ATDECC-002: IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE returns subscription handle [TDD-RED]
- *   TC-ATDECC-003: Poll for entity-discovered event (0ms timeout -> no result) [TDD-RED]
- *   TC-ATDECC-004: IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE cleans up handle         [TDD-RED]
- *   TC-ATDECC-005: Double-subscribe returns unique handles                       [TDD-RED]
+ *   TC-ATDECC-002: IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE returns subscription handle
+ *   TC-ATDECC-003: Poll for entity-discovered event (0ms timeout -> no result)
+ *   TC-ATDECC-004: IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE cleans up handle
+ *   TC-ATDECC-005: Double-subscribe returns unique handles
  *
  * @see https://github.com/zarfld/IntelAvbFilter/issues/236
  */
@@ -27,30 +26,14 @@
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 
-/* ── TDD placeholder IOCTL codes ────────────────────────────────────────────── */
-#define IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE   _NDIS_CONTROL_CODE(58, METHOD_BUFFERED)
-#define IOCTL_AVB_ATDECC_EVENT_POLL        _NDIS_CONTROL_CODE(59, METHOD_BUFFERED)
-#define IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE _NDIS_CONTROL_CODE(59, METHOD_BUFFERED) /* reuses for now */
-
-typedef struct AVB_ATDECC_SUBSCRIBE_REQUEST {
-    avb_u32 event_mask;       /* in: bitmask of ATDECC events to subscribe to */
-    avb_u32 subscription_id;  /* out: handle for subsequent poll/unsubscribe */
-    avb_u32 status;           /* out: NDIS_STATUS */
-} AVB_ATDECC_SUBSCRIBE_REQUEST;
-
-typedef struct AVB_ATDECC_POLL_REQUEST {
-    avb_u32 subscription_id;  /* in: subscription handle from SUBSCRIBE */
-    avb_u32 timeout_ms;       /* in: max wait (0 = non-blocking) */
-    avb_u64 entity_guid;      /* out: ATDECC entity GUID */
-    avb_u32 capabilities;     /* out: entity capabilities bitmask */
-    avb_u32 event_type;       /* out: 0=entity_available, 1=entity_departing, etc. */
-    avb_u32 event_available;  /* out: 1=event returned, 0=timeout */
-    avb_u32 status;           /* out: NDIS_STATUS */
-} AVB_ATDECC_POLL_REQUEST;
-
-/* ATDECC event mask bits */
-#define ATDECC_EVENT_ENTITY_AVAILABLE  0x01u
-#define ATDECC_EVENT_ENTITY_DEPARTING  0x02u
+/* IOCTL codes and structs are now defined in avb_ioctl.h (SSOT):
+ *   IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE   (code 58)
+ *   IOCTL_AVB_ATDECC_EVENT_POLL        (code 59)
+ *   IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE (code 62)
+ *   AVB_ATDECC_SUBSCRIBE_REQUEST
+ *   AVB_ATDECC_POLL_REQUEST
+ *   ATDECC_EVENT_ENTITY_AVAILABLE / ATDECC_EVENT_ENTITY_DEPARTING
+ */
 
 #define DEVICE_NAME "\\\\.\\IntelAvbFilter"
 static int g_pass = 0, g_fail = 0, g_skip = 0;
@@ -183,9 +166,8 @@ int main(void)
 {
     int r;
     printf("============================================================\n");
-    printf("  IntelAvbFilter -- IEEE 1722.1 ATDECC Event Tests [TDD-RED]\n");
+    printf("  IntelAvbFilter -- IEEE 1722.1 ATDECC Event Tests\n");
     printf("  Implements: #236 (TEST-EVENT-003)\n");
-    printf("  Status: SKIP expected until ATDECC IOCTLs are implemented\n");
     printf("============================================================\n\n");
 
 #define RUN(tc, label) \
@@ -196,10 +178,10 @@ int main(void)
     else            { g_skip++; printf("  [SKIP] %s\n\n", (label)); }
 
     RUN(TC_ATDECC_001_DeviceAccess, "TC-ATDECC-001: Device node accessible");
-    RUN(TC_ATDECC_002_Subscribe,    "TC-ATDECC-002: ATDECC_EVENT_SUBSCRIBE -> handle [TDD-RED]");
-    RUN(TC_ATDECC_003_Poll,         "TC-ATDECC-003: ATDECC_EVENT_POLL (0ms, no events) [TDD-RED]");
-    RUN(TC_ATDECC_004_Unsubscribe,  "TC-ATDECC-004: ATDECC_EVENT_UNSUBSCRIBE [TDD-RED]");
-    RUN(TC_ATDECC_005_DoubleSubscribe,"TC-ATDECC-005: Double-subscribe yields unique handles [TDD-RED]");
+    RUN(TC_ATDECC_002_Subscribe,    "TC-ATDECC-002: ATDECC_EVENT_SUBSCRIBE -> handle");
+    RUN(TC_ATDECC_003_Poll,         "TC-ATDECC-003: ATDECC_EVENT_POLL (0ms, no events)");
+    RUN(TC_ATDECC_004_Unsubscribe,  "TC-ATDECC-004: ATDECC_EVENT_UNSUBSCRIBE");
+    RUN(TC_ATDECC_005_DoubleSubscribe,"TC-ATDECC-005: Double-subscribe yields unique handles");
 
     printf("-------------------------------------------\n");
     printf(" PASS=%d  FAIL=%d  SKIP=%d  TOTAL=%d\n",

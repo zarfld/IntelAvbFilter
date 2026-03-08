@@ -147,6 +147,17 @@ NTSTATUS AvbCreateMinimalContext(
         ctx->subscriptions[i].user_va = NULL;
         ctx->subscriptions[i].sequence_num = 0;
     }
+
+    /* Initialize ATDECC entity event subscription table (Issue #236) */
+    NdisAllocateSpinLock(&ctx->atdecc_sub_lock);
+    ctx->next_atdecc_sub_id = 1;
+    for (int i = 0; i < MAX_ATDECC_SUBSCRIPTIONS; i++) {
+        ctx->atdecc_subscriptions[i].sub_id = 0;
+        ctx->atdecc_subscriptions[i].active = 0;
+        ctx->atdecc_subscriptions[i].event_mask = 0;
+        ctx->atdecc_subscriptions[i].head = 0;
+        ctx->atdecc_subscriptions[i].tail = 0;
+    }
     
     /* Initialize TX timestamp polling timer (Task 6c/7)
      * CRITICAL: Must call NdisInitializeTimer BEFORE NdisSetTimer
@@ -1228,7 +1239,10 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         }
     }
     NdisFreeSpinLock(&AvbContext->subscription_lock);
-    
+
+    /* Release ATDECC subscription lock (no heap to free — queue is embedded) */
+    NdisFreeSpinLock(&AvbContext->atdecc_sub_lock);
+
     /* Cleanup NDIS packet injection pools (Step 8b) */
     if (AvbContext->nbl_pool_handle || AvbContext->nb_pool_handle || 
         AvbContext->test_packet_buffer || AvbContext->test_packet_mdl) {
@@ -3627,6 +3641,133 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             InterlockedExchange64(&currentContext->stats_filter_attach_count,  0);
             status = STATUS_SUCCESS;
             info   = 0;
+        }
+        break;
+
+    // Implements #236 (REQ-F-ATDECC-SUB-001: ATDECC Entity Event Subscription)
+    // IEEE 1722.1 §7.5 ADP — subscribe to entity-available / entity-departing events.
+    case IOCTL_AVB_ATDECC_EVENT_SUBSCRIBE:
+        {
+            if (inLen < sizeof(AVB_ATDECC_SUBSCRIBE_REQUEST) ||
+                outLen < sizeof(AVB_ATDECC_SUBSCRIBE_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                info = 0;
+                break;
+            }
+            PAVB_ATDECC_SUBSCRIBE_REQUEST req = (PAVB_ATDECC_SUBSCRIBE_REQUEST)buf;
+            if (req->event_mask == 0) {
+                req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                status = STATUS_INVALID_PARAMETER;
+                info = sizeof(*req);
+                break;
+            }
+            NdisAcquireSpinLock(&currentContext->atdecc_sub_lock);
+            int free_slot = -1;
+            for (int i = 0; i < MAX_ATDECC_SUBSCRIPTIONS; i++) {
+                if (currentContext->atdecc_subscriptions[i].sub_id == 0) {
+                    free_slot = i;
+                    break;
+                }
+            }
+            if (free_slot == -1) {
+                NdisReleaseSpinLock(&currentContext->atdecc_sub_lock);
+                req->status = (avb_u32)NDIS_STATUS_RESOURCES;
+                status = STATUS_TOO_MANY_SESSIONS;
+                info = sizeof(*req);
+                break;
+            }
+            ATDECC_SUBSCRIPTION *sub = &currentContext->atdecc_subscriptions[free_slot];
+            sub->event_mask = req->event_mask;
+            sub->head = 0;
+            sub->tail = 0;
+            sub->active = 1;
+            sub->sub_id = (avb_u32)InterlockedIncrement(&currentContext->next_atdecc_sub_id);
+            NdisReleaseSpinLock(&currentContext->atdecc_sub_lock);
+            req->subscription_id = sub->sub_id;
+            req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info = sizeof(*req);
+        }
+        break;
+
+    // Implements #236 (REQ-F-ATDECC-POLL-001: non-blocking dequeue of ATDECC event)
+    case IOCTL_AVB_ATDECC_EVENT_POLL:
+        {
+            if (inLen < sizeof(AVB_ATDECC_POLL_REQUEST) ||
+                outLen < sizeof(AVB_ATDECC_POLL_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                info = 0;
+                break;
+            }
+            PAVB_ATDECC_POLL_REQUEST req = (PAVB_ATDECC_POLL_REQUEST)buf;
+            NdisAcquireSpinLock(&currentContext->atdecc_sub_lock);
+            ATDECC_SUBSCRIPTION *found = NULL;
+            for (int i = 0; i < MAX_ATDECC_SUBSCRIPTIONS; i++) {
+                if (currentContext->atdecc_subscriptions[i].sub_id == req->subscription_id &&
+                    currentContext->atdecc_subscriptions[i].active) {
+                    found = &currentContext->atdecc_subscriptions[i];
+                    break;
+                }
+            }
+            if (!found) {
+                NdisReleaseSpinLock(&currentContext->atdecc_sub_lock);
+                req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                status = STATUS_INVALID_PARAMETER;
+                info = sizeof(*req);
+                break;
+            }
+            req->event_available = 0;
+            req->entity_guid = 0;
+            req->capabilities = 0;
+            req->event_type = 0;
+            /* Dequeue one entry if available (lock-free style under spin lock) */
+            LONG h = found->head, t = found->tail;
+            if (h != t) {
+                ATDECC_EVENT_ENTRY *e = &found->queue[h & (ATDECC_EVENT_QUEUE_DEPTH - 1)];
+                req->entity_guid    = e->entity_guid;
+                req->capabilities   = e->capabilities;
+                req->event_type     = e->event_type;
+                req->event_available = 1;
+                found->head = h + 1;
+            }
+            NdisReleaseSpinLock(&currentContext->atdecc_sub_lock);
+            req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            status = STATUS_SUCCESS;
+            info = sizeof(*req);
+        }
+        break;
+
+    // Implements #236 (REQ-F-ATDECC-UNSUB-001: release ATDECC subscription)
+    case IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE:
+        {
+            if (inLen < sizeof(AVB_ATDECC_SUBSCRIBE_REQUEST) ||
+                outLen < sizeof(AVB_ATDECC_SUBSCRIBE_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                info = 0;
+                break;
+            }
+            PAVB_ATDECC_SUBSCRIBE_REQUEST req = (PAVB_ATDECC_SUBSCRIBE_REQUEST)buf;
+            NdisAcquireSpinLock(&currentContext->atdecc_sub_lock);
+            int found_slot = -1;
+            for (int i = 0; i < MAX_ATDECC_SUBSCRIPTIONS; i++) {
+                if (currentContext->atdecc_subscriptions[i].sub_id == req->subscription_id &&
+                    currentContext->atdecc_subscriptions[i].active) {
+                    found_slot = i;
+                    break;
+                }
+            }
+            if (found_slot >= 0) {
+                currentContext->atdecc_subscriptions[found_slot].sub_id = 0;
+                currentContext->atdecc_subscriptions[found_slot].active = 0;
+                currentContext->atdecc_subscriptions[found_slot].event_mask = 0;
+                currentContext->atdecc_subscriptions[found_slot].head = 0;
+                currentContext->atdecc_subscriptions[found_slot].tail = 0;
+            }
+            NdisReleaseSpinLock(&currentContext->atdecc_sub_lock);
+            req->status = (avb_u32)(found_slot >= 0 ?
+                              NDIS_STATUS_SUCCESS : NDIS_STATUS_INVALID_PARAMETER);
+            status = (found_slot >= 0) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+            info = sizeof(*req);
         }
         break;
 
