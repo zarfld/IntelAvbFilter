@@ -1177,6 +1177,59 @@ $AllTests = @(
         Requirement = "#187"
         Standard = "IEEE 1588-2019 s8.2, IEEE 802.1AS-2020 s8.6.2"
     }
+
+    # =========================================================================
+    # Sprint 2 P1 — Security + Multi-Adapter
+    # Issues: #264, #263, #248, #208, #214  Added: 2026-03-08
+    # =========================================================================
+
+    @{
+        Name = "test_ioctl_access_control"
+        Type = "cl"
+        Source = "tests\security\test_ioctl_access_control.c"
+        Output = "test_ioctl_access_control.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "IOCTL Access Control Tests (Issue #264) - handle access flags, invalid-handle rejection, two-handle independence"
+        Issue = "#264"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG), 48(PHC_OFFSET_ADJUST)"
+        Requirement = "#63"
+        Standard = "Windows Driver Security Checklist, OWASP"
+    }
+
+    @{
+        Name = "test_ioctl_buffer_fuzz"
+        Type = "cl"
+        Source = "tests\security\test_ioctl_buffer_fuzz.c"
+        Output = "test_ioctl_buffer_fuzz.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "IOCTL Buffer Fuzz Tests (Issues #263 #248) - NULL/undersized buffers, bogus codes, device survival"
+        Issue = "#263"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG), 48(PHC_OFFSET_ADJUST), 38, 24, 31, 37"
+        Requirement = "#63"
+        Standard = "Windows Driver Security Checklist, OWASP"
+    }
+
+    @{
+        Name = "test_multi_adapter_phc_sync"
+        Type = "cl"
+        Source = "tests\integration\test_multi_adapter_phc_sync.c"
+        Output = "test_multi_adapter_phc_sync.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Multi-Adapter PHC Sync Tests (Issues #208 #214) - enum, bind, parallel monotonic reads, cross-adapter independence"
+        Issue = "#208"
+        TestCases = 5
+        IOCTLs = "31(ENUM_ADAPTERS), 32(OPEN_ADAPTER), 45(GET_CLOCK_CONFIG)"
+        Requirement = "#188"
+        Standard = "IEEE 1588-2019 s7.2, IEEE 802.1AS-2020 s10.2"
+    }
 )
 
 # Filter tests if specific test requested
