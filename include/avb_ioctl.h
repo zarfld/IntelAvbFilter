@@ -381,7 +381,7 @@ typedef struct AVB_TIMESTAMP_EVENT {
     avb_u64  timestamp_ns;      /* [0-7]   Hardware timestamp (System Time Register in ns) */
     avb_u32  event_type;        /* [8-11]  One of TS_EVENT_* constants */
     avb_u32  sequence_num;      /* [12-15] Monotonically increasing sequence number */
-    avb_u16  vlan_id;           /* [16-17] VLAN tag (if present, else 0xFFFF) */
+    avb_u16  vlan_id;           /* [16-17] VLAN tag (if present, else INTEL_MASK_16BIT) */
     avb_u8   pcp;               /* [18]    Priority Code Point (802.1Q) */
     avb_u8   queue;             /* [19]    Tx/Rx queue number */
     avb_u16  packet_length;     /* [20-21] Packet length (bytes) */
@@ -424,7 +424,7 @@ typedef struct AVB_TIMESTAMP_RING_HEADER {
     avb_u32 count;                    /* Ring size (power of 2: 64, 128, 256, ..., 4096) */
     volatile avb_u32 overflow_count;  /* Number of events dropped due to full ring */
     avb_u32 event_mask;               /* Copy of subscription event_mask for diagnostics */
-    avb_u16 vlan_filter;              /* Copy of VLAN filter (0xFFFF = no filter) */
+    avb_u16 vlan_filter;              /* Copy of VLAN filter (INTEL_MASK_16BIT = no filter) */
     avb_u8  pcp_filter;               /* Copy of PCP filter (0xFF = no filter) */
     avb_u8  reserved0;                /* Align */
     avb_u64 total_events;             /* Total events posted (including dropped) */

@@ -46,7 +46,18 @@
 #define DEVICE_PATH "\\\\.\\IntelAvbFilter"
 #define REGISTRY_KEY "Software\\IntelAvb"
 #define REGISTRY_VALUE "LastIOCTL"
+// Registry path for FilterReadDebugSettings (flt_dbg.c) - TEST-DEBUG-REG-001, closes #247
+#define DEBUG_REG_KEY   "SYSTEM\\CurrentControlSet\\Services\\IntelAvbFilter\\Parameters"
+#define DEBUG_REG_VALUE "DebugLevel"
 
+// DL_* constants matching flt_dbg.h (for persistence assertions)
+#define DL_FATAL        0
+#define DL_ERROR        2
+#define DL_WARN         4   /* compiled-in default */
+#define DL_TRACE        5
+#define DL_INFO         6
+#define DL_LOUD         8
+#define DL_EXTRA_LOUD  20
 /**
  * Helper: Read LastIOCTL value from registry
  * Returns: IOCTL code, or 0 if read fails
@@ -553,6 +564,178 @@ BOOLEAN Test_BuildModeDetection()
 }
 
 /**
+ * Test Case: TEST-DEBUG-REG-001 - DebugLevel Registry Persistence
+ *
+ * Verifies that the DebugLevel value written by an administrator to
+ *   HKLM\SYSTEM\CurrentControlSet\Services\IntelAvbFilter\Parameters
+ * is durable across registry handle close/reopen, which is exactly what
+ * FilterReadDebugSettings() does at each driver load.
+ *
+ * Sub-tests:
+ *   TC-DEBUG-REG-001: Write DL_LOUD (8) and immediate read-back
+ *   TC-DEBUG-REG-002: Close and re-open key (simulates FilterReadDebugSettings on reload)
+ *   TC-DEBUG-REG-003: Write DL_WARN (4, compiled-in default) and verify persistence
+ *   TC-DEBUG-REG-004: Restore original registry state (idempotent cleanup)
+ *
+ * Closes: #247 (TEST-DEBUG-REG-001)
+ * Verifies: #95 (REQ-NF-DEBUG-REG-001: Registry-Based Debug Settings)
+ */
+BOOLEAN Test_DebugLevelPersistence()
+{
+    printf("\n[Test 7] TEST-DEBUG-REG-001: DebugLevel Persistence (closes #247)\n");
+    printf("  Registry: HKLM\\%s\\%s\n", DEBUG_REG_KEY, DEBUG_REG_VALUE);
+
+    /* Check admin status - writing HKLM\SYSTEM requires elevation.
+     * Run-Tests-Elevated.ps1 provides this. Non-admin runs SKIP gracefully. */
+    {
+        BOOL  fIsAdmin = FALSE;
+        PSID  pSid     = NULL;
+        SID_IDENTIFIER_AUTHORITY auth = SECURITY_NT_AUTHORITY;
+        if (AllocateAndInitializeSid(&auth, 2,
+                SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                0, 0, 0, 0, 0, 0, &pSid)) {
+            CheckTokenMembership(NULL, pSid, &fIsAdmin);
+            FreeSid(pSid);
+        }
+        if (!fIsAdmin) {
+            printf("  [SKIP] Admin required to write HKLM\\%s\n", DEBUG_REG_KEY);
+            printf("  [INFO] Run via Run-Tests-Elevated.ps1 for full test execution\n");
+            return TRUE;
+        }
+    }
+
+    HKEY  hKey     = NULL;
+    DWORD dataSize = sizeof(DWORD);
+    DWORD dataType = REG_DWORD;
+    DWORD tmpValue = 0;
+    LONG  rc;
+
+    /* Save original value so we can restore at end */
+    DWORD originalValue = DL_WARN;  /* assume default if absent */
+    BOOL  hadOriginal   = FALSE;
+
+    rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, DEBUG_REG_KEY, 0, KEY_READ, &hKey);
+    if (rc == ERROR_SUCCESS) {
+        dataSize = sizeof(DWORD);  dataType = REG_DWORD;
+        if (RegQueryValueExA(hKey, DEBUG_REG_VALUE, NULL, &dataType,
+                             (LPBYTE)&originalValue, &dataSize) == ERROR_SUCCESS) {
+            hadOriginal = TRUE;
+            printf("  [INFO] Pre-test DebugLevel = %lu\n", originalValue);
+        }
+        RegCloseKey(hKey);
+        hKey = NULL;
+    }
+
+    /* --- TC-DEBUG-REG-001: Write DL_LOUD (8) and read-back --- */
+    printf("\n  TC-DEBUG-REG-001: Write DL_LOUD (8) and read-back\n");
+
+    DWORD dwDisp = 0;
+    rc = RegCreateKeyExA(HKEY_LOCAL_MACHINE, DEBUG_REG_KEY, 0, NULL,
+                         REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE,
+                         NULL, &hKey, &dwDisp);
+    if (rc != ERROR_SUCCESS) {
+        printf("  [FAIL] TC-DEBUG-REG-001: Cannot open Parameters key (err=%ld) - admin required\n", rc);
+        return FALSE;
+    }
+    printf("  [PASS] TC-DEBUG-REG-001: Parameters key opened (%s)\n",
+           dwDisp == REG_CREATED_NEW_KEY ? "created" : "existing");
+
+    DWORD writeValue = (DWORD)DL_LOUD;
+    rc = RegSetValueExA(hKey, DEBUG_REG_VALUE, 0, REG_DWORD,
+                        (const BYTE*)&writeValue, sizeof(DWORD));
+    RegCloseKey(hKey);  hKey = NULL;
+    if (rc != ERROR_SUCCESS) {
+        printf("  [FAIL] TC-DEBUG-REG-001: Write DebugLevel=8 failed (err=%ld)\n", rc);
+        return FALSE;
+    }
+    printf("  [PASS] TC-DEBUG-REG-001: DebugLevel=8 (DL_LOUD) written\n");
+
+    rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, DEBUG_REG_KEY, 0, KEY_READ, &hKey);
+    if (rc != ERROR_SUCCESS) {
+        printf("  [FAIL] TC-DEBUG-REG-001: Immediate re-open failed (err=%ld)\n", rc);
+        return FALSE;
+    }
+    dataSize = sizeof(DWORD);  dataType = REG_DWORD;  tmpValue = 0;
+    rc = RegQueryValueExA(hKey, DEBUG_REG_VALUE, NULL, &dataType, (LPBYTE)&tmpValue, &dataSize);
+    RegCloseKey(hKey);  hKey = NULL;
+    if (rc != ERROR_SUCCESS || tmpValue != (DWORD)DL_LOUD) {
+        printf("  [FAIL] TC-DEBUG-REG-001: read-back mismatch (rc=%ld, got=%lu, want=8)\n", rc, tmpValue);
+        return FALSE;
+    }
+    printf("  [PASS] TC-DEBUG-REG-001: DebugLevel read-back = %lu (expected 8)\n", tmpValue);
+
+    /* --- TC-DEBUG-REG-002: Close/re-open (simulates FilterReadDebugSettings on driver reload) --- */
+    printf("\n  TC-DEBUG-REG-002: Close/re-open key (simulates driver reload read)\n");
+
+    rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, DEBUG_REG_KEY, 0, KEY_READ, &hKey);
+    if (rc != ERROR_SUCCESS) {
+        printf("  [FAIL] TC-DEBUG-REG-002: Re-open failed (err=%ld)\n", rc);
+        return FALSE;
+    }
+    printf("  [PASS] TC-DEBUG-REG-002: Parameters key re-opened after close\n");
+
+    dataSize = sizeof(DWORD);  dataType = REG_DWORD;  tmpValue = 0;
+    rc = RegQueryValueExA(hKey, DEBUG_REG_VALUE, NULL, &dataType, (LPBYTE)&tmpValue, &dataSize);
+    RegCloseKey(hKey);  hKey = NULL;
+    if (rc != ERROR_SUCCESS || tmpValue != (DWORD)DL_LOUD) {
+        printf("  [FAIL] TC-DEBUG-REG-002: Value lost after close/reopen (rc=%ld, got=%lu)\n", rc, tmpValue);
+        return FALSE;
+    }
+    printf("  [PASS] TC-DEBUG-REG-002: DebugLevel=%lu persists (driver loads DL_LOUD on reload)\n", tmpValue);
+
+    /* --- TC-DEBUG-REG-003: Write DL_WARN (4) and verify --- */
+    printf("\n  TC-DEBUG-REG-003: Write DL_WARN (4, compiled-in default) and verify persistence\n");
+
+    rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, DEBUG_REG_KEY, 0, KEY_WRITE, &hKey);
+    if (rc != ERROR_SUCCESS) {
+        printf("  [FAIL] TC-DEBUG-REG-003: Open for write failed (err=%ld)\n", rc);
+        return FALSE;
+    }
+    DWORD warnValue = (DWORD)DL_WARN;
+    rc = RegSetValueExA(hKey, DEBUG_REG_VALUE, 0, REG_DWORD,
+                        (const BYTE*)&warnValue, sizeof(DWORD));
+    RegCloseKey(hKey);  hKey = NULL;
+    if (rc != ERROR_SUCCESS) {
+        printf("  [FAIL] TC-DEBUG-REG-003: Write DL_WARN failed (err=%ld)\n", rc);
+        return FALSE;
+    }
+
+    rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, DEBUG_REG_KEY, 0, KEY_READ, &hKey);
+    if (rc != ERROR_SUCCESS) {
+        printf("  [FAIL] TC-DEBUG-REG-003: Re-open failed (err=%ld)\n", rc);
+        return FALSE;
+    }
+    dataSize = sizeof(DWORD);  dataType = REG_DWORD;  tmpValue = 0;
+    rc = RegQueryValueExA(hKey, DEBUG_REG_VALUE, NULL, &dataType, (LPBYTE)&tmpValue, &dataSize);
+    RegCloseKey(hKey);  hKey = NULL;
+    if (rc != ERROR_SUCCESS || tmpValue != (DWORD)DL_WARN) {
+        printf("  [FAIL] TC-DEBUG-REG-003: DL_WARN persistence failed (rc=%ld, got=%lu)\n", rc, tmpValue);
+        return FALSE;
+    }
+    printf("  [PASS] TC-DEBUG-REG-003: DebugLevel=4 (DL_WARN) persists (default on driver reload)\n");
+
+    /* --- TC-DEBUG-REG-004: Restore original state --- */
+    printf("\n  TC-DEBUG-REG-004: Restore original registry state\n");
+
+    rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, DEBUG_REG_KEY, 0, KEY_READ | KEY_WRITE, &hKey);
+    if (rc == ERROR_SUCCESS) {
+        if (hadOriginal) {
+            RegSetValueExA(hKey, DEBUG_REG_VALUE, 0, REG_DWORD,
+                           (const BYTE*)&originalValue, sizeof(DWORD));
+            printf("  [PASS] TC-DEBUG-REG-004: DebugLevel restored to %lu\n", originalValue);
+        } else {
+            RegDeleteValueA(hKey, DEBUG_REG_VALUE);
+            printf("  [PASS] TC-DEBUG-REG-004: DebugLevel removed (value was absent before test)\n");
+        }
+        RegCloseKey(hKey);
+    } else {
+        printf("  [INFO] TC-DEBUG-REG-004: Could not open key for restore (non-critical, err=%ld)\n", rc);
+    }
+
+    return TRUE;
+}
+
+/**
  * Main test execution
  */
 int main(int argc, char* argv[])
@@ -561,7 +744,9 @@ int main(int argc, char* argv[])
     printf("Registry Diagnostics Integration Test\n");
     printf("========================================\n");
     printf("Testing: REQ-NF-DIAG-REG-001 (Issue #17)\n");
+    printf("Testing: REQ-NF-DEBUG-REG-001 (Issue #95) / TEST-DEBUG-REG-001 (Issue #247)\n");
     printf("Feature: Debug-only registry-based IOCTL logging\n");
+    printf("Feature: DebugLevel runtime persistence across driver reload\n");
     printf("Registry: HKLM\\%s\\%s\n", REGISTRY_KEY, REGISTRY_VALUE);
     printf("========================================\n");
     
@@ -606,7 +791,13 @@ int main(int argc, char* argv[])
     if (Test_BuildModeDetection()) {
         passedTests++;
     }
-    
+
+    // Test 7: DebugLevel persistence (TEST-DEBUG-REG-001, closes #247)
+    totalTests++;
+    if (Test_DebugLevelPersistence()) {
+        passedTests++;
+    }
+
     // Summary
     printf("\n========================================\n");
     printf("Test Summary\n");

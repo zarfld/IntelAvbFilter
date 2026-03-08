@@ -253,9 +253,17 @@ $AllTests = @(
         Source = "tests/verification/regs/test_register_constants.c"
         Output = "test_register_constants.obj"
         CompileOnly = $true
-        Includes = "-I intel-ethernet-regs/gen -I C:\PROGRA~2\WI3CF2~1\10\Include\100226~1.0\km"
+        Includes = "-I intel-ethernet-regs/gen -I include -I C:\PROGRA~2\WI3CF2~1\10\Include\100226~1.0\km"
         CompilerFlags = "/c /kernel /WX /D_AMD64_ /DAMD64"  # Kernel mode requires architecture defines
-        Description = "Verification: Register Constants (TEST-REGS-003)"
+        Description = "Verification: Register Constants + Event ID SSOT (TEST-REGS-003, closes #289)"
+    },
+    @{
+        Name = "test_magic_numbers"
+        Type = "cl"
+        Source = "tests/verification/regs/test_magic_numbers.c"
+        Output = "test_magic_numbers.exe"
+        Includes = "-I include"
+        Description = "Verification: SSOT Magic Number Static Analysis (TEST-REGS-002, closes #305)"
     },
     
     # TSN Integration Tests (nmake)
@@ -487,7 +495,7 @@ $AllTests = @(
         Source = "tests/unit/hal/test_hal_unit.c"
         Output = "test_hal_unit.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
-        Description = "Unit: HAL Unit Tests (TEST-PORTABILITY-HAL-001, Issue #308)"
+        Description = "Unit: HAL Unit Tests (TEST-PORTABILITY-HAL-001 Issue #308, TEST-DEVICE-ABS-THREADING-001 closes #279)"
     },
     @{
         Name = "test_hal_errors"
@@ -683,7 +691,7 @@ $AllTests = @(
         Output = "test_registry_diagnostics.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Libs = "advapi32.lib"
-        Description = "Integration: Registry Diagnostics (Verifies #17 REQ-NF-DIAG-REG-001)"
+        Description = "Integration: Registry Diagnostics (Verifies #17 REQ-NF-DIAG-REG-001, closes #247 TEST-DEBUG-REG-001)"
     },
     
     # Diagnostic Tests (additional, cl.exe)
@@ -824,11 +832,12 @@ $AllTests = @(
         Source = "tests\ioctl\test_ioctl_ptp_getset.c"
         Output = "test_ptp_getset.exe"
         Includes = "-I include -I external/intel_avb/lib"
+        Libs = "advapi32.lib"
         Enabled = $true
         Priority = "P0"
-        Description = "PTP Get/Set Timestamp Tests (Issue #295)"
+        Description = "PTP Get/Set Timestamp Tests (Issue #295, closes #195 #266)"
         Issue = "#295"
-        TestCases = 12
+        TestCases = 14
         IOCTLs = "24, 25"
         Requirement = "#2"
     }

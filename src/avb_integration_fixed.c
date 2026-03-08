@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Module Name:
 
@@ -520,11 +520,11 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     DEBUGP(DL_TRACE, "? STEP 3 SUCCESS: intel_init completed successfully\n");
 
     DEBUGP(DL_TRACE, "? STEP 4: MMIO sanity check - reading CTRL register via Intel library...\n");
-    ULONG ctrl = 0xFFFFFFFF;
+    ULONG ctrl = INTEL_MASK_32BIT;
     
     // CLEAN ARCHITECTURE: Use Intel library for all register access - no device-specific contamination
-    if (intel_read_reg(&Ctx->intel_device, INTEL_GENERIC_CTRL_REG, &ctrl) != 0 || ctrl == 0xFFFFFFFF) {
-        DEBUGP(DL_ERROR, "? STEP 4 FAILED: MMIO sanity read failed CTRL=0x%08X (expected != 0xFFFFFFFF)\n", ctrl);
+    if (intel_read_reg(&Ctx->intel_device, INTEL_GENERIC_CTRL_REG, &ctrl) != 0 || ctrl == INTEL_MASK_32BIT) {
+        DEBUGP(DL_ERROR, "? STEP 4 FAILED: MMIO sanity read failed CTRL=0x%08X (expected != INTEL_MASK_32BIT)\n", ctrl);
         DEBUGP(DL_ERROR, "   This indicates BAR0 mapping is not working properly\n");
         return STATUS_DEVICE_NOT_READY;
     }
@@ -722,7 +722,7 @@ VOID AvbTxTimestampPollDpc(
             AvbContext,  /* Pass THIS adapter's context */
             TS_EVENT_TX_TIMESTAMP,
             timestamp_ns,
-            0xFFFF,  // No VLAN (TX timestamps don't include packet metadata)
+            INTEL_MASK_16BIT,  // No VLAN (TX timestamps don't include packet metadata)
             0xFF,    // No PCP
             0,       // Unknown queue
             0,       // Unknown packet length
@@ -799,7 +799,7 @@ VOID AvbPostTimestampEvent(
                i, sub->event_mask, event_type);
         
         /* Filter by VLAN ID (0xFFFF = no filter) */
-        if (sub->vlan_filter != 0xFFFF && sub->vlan_filter != vlan_id) continue;
+        if (sub->vlan_filter != INTEL_MASK_16BIT && sub->vlan_filter != vlan_id) continue;
         
         /* Filter by PCP (0xFF = no filter) */
         if (sub->pcp_filter != 0xFF && sub->pcp_filter != pcp) continue;
@@ -915,13 +915,13 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         if (ops->get_systime) {
             ops->get_systime(dev, &current_systim);
         }
-        AvbMmioReadReal(dev, 0xB644, &target0_low);  // TRGTTIML0
-        AvbMmioReadReal(dev, 0xB648, &target0_high); // TRGTTIMH0
-        AvbMmioReadReal(dev, 0xB64C, &target1_low);  // TRGTTIML1
-        AvbMmioReadReal(dev, 0xB650, &target1_high); // TRGTTIMH1
-        AvbMmioReadReal(dev, 0xB66C, &tsicr_raw);    // TSICR (Interrupt Cause)
-        AvbMmioReadReal(dev, 0xB640, &tsauxc_raw);   // TSAUXC (Auxiliary Control)
-        AvbMmioReadReal(dev, 0xB674, &tsim_raw);     // TSIM (Interrupt Mask)
+        AvbMmioReadReal(dev, INTEL_REG_TRGTTIML0, &target0_low);  // TRGTTIML0
+        AvbMmioReadReal(dev, INTEL_REG_TRGTTIMH0, &target0_high); // TRGTTIMH0
+        AvbMmioReadReal(dev, INTEL_REG_TRGTTIML1, &target1_low);  // TRGTTIML1
+        AvbMmioReadReal(dev, INTEL_REG_TRGTTIMH1, &target1_high); // TRGTTIMH1
+        AvbMmioReadReal(dev, INTEL_REG_TSICR, &tsicr_raw);    // TSICR (Interrupt Cause)
+        AvbMmioReadReal(dev, INTEL_REG_TSAUXC, &tsauxc_raw);   // TSAUXC (Auxiliary Control)
+        AvbMmioReadReal(dev, INTEL_REG_TSIM, &tsim_raw);     // TSIM (Interrupt Mask)
         
         uint64_t target0 = ((uint64_t)target0_high << 32) | target0_low;
         uint64_t target1 = ((uint64_t)target1_high << 32) | target1_low;
@@ -973,7 +973,7 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
                 AvbContext,
                 TS_EVENT_TARGET_TIME,
                 timestamp_ns,
-                0xFFFF,  /* vlan_id - not applicable */
+                INTEL_MASK_16BIT,  /* vlan_id - not applicable */
                 0xFF,    /* pcp - not applicable */
                 0,       /* queue - not applicable */
                 0,       /* packet_length - not applicable */
@@ -1006,7 +1006,7 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
                 AvbContext,
                 TS_EVENT_TARGET_TIME,
                 timestamp_ns,
-                0xFFFF,  /* vlan_id - not applicable */
+                INTEL_MASK_16BIT,  /* vlan_id - not applicable */
                 0xFF,    /* pcp - not applicable */
                 0,       /* queue - not applicable */
                 0,       /* packet_length - not applicable */
@@ -1522,8 +1522,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
                             
                             // Test MMIO sanity using generic register access
-                            ULONG ctrl = 0xFFFFFFFF;
-                            if (intel_read_reg(&currentContext->intel_device, INTEL_GENERIC_CTRL_REG, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
+                            ULONG ctrl = INTEL_MASK_32BIT;
+                            if (intel_read_reg(&currentContext->intel_device, INTEL_GENERIC_CTRL_REG, &ctrl) == 0 && ctrl != INTEL_MASK_32BIT) {
                                 DEBUGP(DL_TRACE, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
                                 AVB_SET_HW_STATE(currentContext, AVB_HW_BAR_MAPPED);
                                 currentContext->hw_access_enabled = TRUE;
@@ -1815,7 +1815,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         // increment_frac is in 2^-32 ns units per IOCTL contract (2^32 = 1 ns).
                         // TIMINCA INCFRAC field uses 2^-24 ns units (2^24 = 1 ns).
                         // Conversion: INCFRAC = increment_frac >> 8  (divide by 2^8 = 256)
-                        ULONG new_timinca = ((freq_req->increment_ns & 0xFF) << 24) | ((freq_req->increment_frac >> 8) & 0xFFFFFF);
+                        ULONG new_timinca = ((freq_req->increment_ns & 0xFF) << 24) | ((freq_req->increment_frac >> 8) & INTEL_TIMINCA_SUBNS_MASK);
                         
                         DEBUGP(DL_TRACE, "Adjusting clock frequency: %u ns + 0x%X frac (TIMINCA 0x%08X->0x%08X) VID=0x%04X DID=0x%04X\n",
                                freq_req->increment_ns, freq_req->increment_frac, current_timinca, new_timinca,
@@ -1930,7 +1930,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         
                         DEBUGP(DL_TRACE, "Clock config (VID=0x%04X DID=0x%04X): SYSTIM=0x%016llX, TIMINCA=0x%08X, TSAUXC=0x%08X (bit31=%s), Rate=%u MHz\n",
                                activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id,
-                               cfg->systim, cfg->timinca, cfg->tsauxc, (cfg->tsauxc & 0x80000000) ? "DISABLED" : "ENABLED",
+                               cfg->systim, cfg->timinca, cfg->tsauxc, (cfg->tsauxc & INTEL_TSAUXC_DISABLE_SYSTIM) ? "DISABLED" : "ENABLED",
                                cfg->clock_rate_mhz);
                     } else {
                         DEBUGP(DL_ERROR, "Failed to read clock configuration registers\n");
@@ -1995,10 +1995,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     }
                     
                     // TSAUXC register bit masks (Intel Foxville specification - common across all Intel PTP devices)
-                    const ULONG BIT31_DISABLE_SYSTIM0 = 0x80000000;  // Primary timer
-                    const ULONG BIT29_DISABLE_SYSTIM3 = 0x20000000;
-                    const ULONG BIT28_DISABLE_SYSTIM2 = 0x10000000;
-                    const ULONG BIT27_DISABLE_SYSTIM1 = 0x08000000;
+                    const ULONG BIT31_DISABLE_SYSTIM0 = INTEL_TSAUXC_DISABLE_SYSTIM;  // Primary timer
+                    const ULONG BIT29_DISABLE_SYSTIM3 = INTEL_TSAUXC_DISABLE_SYSTIM3;
+                    const ULONG BIT28_DISABLE_SYSTIM2 = INTEL_TSAUXC_DISABLE_SYSTIM2;
+                    const ULONG BIT27_DISABLE_SYSTIM1 = INTEL_TSAUXC_DISABLE_SYSTIM1;
                     const ULONG BIT10_EN_TS1 = 0x00000400;  // Enable aux timestamp 1
                     const ULONG BIT8_EN_TS0 = 0x00000100;   // Enable aux timestamp 0
                     const ULONG BIT4_EN_TT1 = 0x00000010;   // Enable target time 1
@@ -2145,7 +2145,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     uint32_t rxpbsize, new_rxpbsize;
                     
                     // Read current RXPBSIZE value (register 0x2404)
-                    if (intel_read_reg(dev, 0x2404, &rxpbsize) == 0) {
+                    if (intel_read_reg(dev, INTEL_REG_RXPBSIZE, &rxpbsize) == 0) {
                         rx_req->previous_rxpbsize = rxpbsize;
                         DEBUGP(DL_TRACE, "Current RXPBSIZE: 0x%08X\n", rxpbsize);
                         
@@ -2159,7 +2159,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         }
                         
                         // Write new value
-                        if (intel_write_reg(dev, 0x2404, new_rxpbsize) == 0) {
+                        if (intel_write_reg(dev, INTEL_REG_RXPBSIZE, new_rxpbsize) == 0) {
                             rx_req->current_rxpbsize = new_rxpbsize;
                             rx_req->requires_reset = (new_rxpbsize != rxpbsize) ? 1 : 0;
                             
@@ -2217,7 +2217,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     uint32_t srrctl, new_srrctl;
                     
                     // SRRCTL base: 0x0C00C, stride 0x40 per queue (I210/I226 pattern)
-                    uint32_t srrctl_offset = 0x0C00C + (queue_req->queue_index * 0x40);
+                    uint32_t srrctl_offset = INTEL_REG_SRRCTL0 + (queue_req->queue_index * 0x40);
                     
                     // Read current SRRCTL[n] value
                     if (intel_read_reg(dev, srrctl_offset, &srrctl) == 0) {
@@ -2289,8 +2289,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         
                         // FIX: Read previous target time BEFORE setting new value (for sentinel detection in tests)
                         uint32_t prev_low = 0, prev_high = 0;
-                        uint32_t trgttiml_reg = (tgt_req->timer_index == 0) ? 0xB644 : 0xB64C;  // TRGTTIML0 or TRGTTIML1
-                        uint32_t trgttimh_reg = (tgt_req->timer_index == 0) ? 0xB648 : 0xB650;  // TRGTTIMH0 or TRGTTIMH1
+                        uint32_t trgttiml_reg = (tgt_req->timer_index == 0) ? INTEL_REG_TRGTTIML0 : INTEL_REG_TRGTTIML1;  // TRGTTIML0 or TRGTTIML1
+                        uint32_t trgttimh_reg = (tgt_req->timer_index == 0) ? INTEL_REG_TRGTTIMH0 : INTEL_REG_TRGTTIMH1;  // TRGTTIMH0 or TRGTTIMH1
                         
                         // Read previous target time (with proper 3-parameter signature)
                         if (AvbMmioReadReal(dev, trgttiml_reg, &prev_low) != 0 ||
@@ -2814,8 +2814,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 // ERROR VALIDATION: Invalid ring_id (0xFFFFFFFF, 0, 0xDEADBEEF)
                 // Implements: UT-TS-ERROR-001 (Invalid Subscription Handle)
                 if (map_req->ring_id == 0 || 
-                    map_req->ring_id == 0xFFFFFFFF || 
-                    map_req->ring_id == 0xDEADBEEF) {
+                    map_req->ring_id == INTEL_MASK_32BIT || 
+                    map_req->ring_id == INTEL_SENTINEL_DEAD_BEEF) {
                     DEBUGP(DL_ERROR, "Invalid ring_id: 0x%08X\n", map_req->ring_id);
                     map_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                     status = STATUS_INVALID_PARAMETER;
@@ -3076,8 +3076,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
                             
                             // Test MMIO sanity
-                            ULONG ctrl = 0xFFFFFFFF;
-                            if (intel_read_reg(&AvbContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != 0xFFFFFFFF) {
+                            ULONG ctrl = INTEL_MASK_32BIT;
+                            if (intel_read_reg(&AvbContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != INTEL_MASK_32BIT) {
                                 DEBUGP(DL_TRACE, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
                                 AVB_SET_HW_STATE(AvbContext, AVB_HW_BAR_MAPPED);
                                 AvbContext->hw_access_enabled = TRUE;
@@ -3526,8 +3526,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 if (ops && ops->mdio_read) {
                     uint16_t val = 0;
                     int rc = ops->mdio_read(&activeContext->intel_device,
-                                            (uint16_t)(mdio->page & 0xFFFF),
-                                            (uint16_t)(mdio->reg  & 0xFFFF),
+                                            (uint16_t)(mdio->page & INTEL_MASK_16BIT),
+                                            (uint16_t)(mdio->reg  & INTEL_MASK_16BIT),
                                             &val);
                     mdio->value  = val;
                     mdio->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
@@ -3559,8 +3559,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
 
                 if (ops && ops->mdio_write) {
                     int rc = ops->mdio_write(&activeContext->intel_device,
-                                             (uint16_t)(mdio->page  & 0xFFFF),
-                                             (uint16_t)(mdio->reg   & 0xFFFF),
+                                             (uint16_t)(mdio->page  & INTEL_MASK_16BIT),
+                                             (uint16_t)(mdio->reg   & INTEL_MASK_16BIT),
                                              mdio->value);
                     mdio->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
                     status       = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
@@ -3678,9 +3678,9 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     ULONG tsauxc_value = 0;
     if (ops->read_tsauxc && ops->read_tsauxc(dev, &tsauxc_value) == 0) {
         DEBUGP(DL_TRACE, "   TSAUXC before: 0x%08X\n", tsauxc_value);
-        if (tsauxc_value & 0x80000000) {
+        if (tsauxc_value & INTEL_TSAUXC_DISABLE_SYSTIM) {
             // Bit 31 is set - PTP clock is DISABLED, need to enable it
-            tsauxc_value &= 0x7FFFFFFF;  // Clear bit 31 to enable SYSTIM
+            tsauxc_value &= INTEL_TSYNC_TS_MASK;  // Clear bit 31 to enable SYSTIM
             if (ops->write_tsauxc && ops->write_tsauxc(dev, tsauxc_value) != 0) {
                 DEBUGP(DL_ERROR, "? Failed to enable PTP clock (TSAUXC write failed)\n");
                 return STATUS_DEVICE_HARDWARE_ERROR;
@@ -3704,7 +3704,7 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     // - I210/I211: 25MHz -> TIMINCA = 0x18000000 (384ns per tick, 2.5M ticks/sec)
     // - I225/I226: 25MHz -> TIMINCA = 0x18000000
     // - I217/I219: Different clocking, but 0x18000000 works
-    ULONG timinca_value = 0x18000000;  // Standard value for 25MHz clock
+    ULONG timinca_value = INTEL_TIMINCA_DEFAULT;  // Standard value for 25MHz clock
     
     ULONG current_timinca = 0;
     if (ops->read_timinca && ops->read_timinca(dev, &current_timinca) == 0) {
@@ -3767,27 +3767,27 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 did)
 { 
     switch(did) {
         // I-series modern devices
-        case 0x1533: return INTEL_DEVICE_I210;  // I210 Copper
-        case 0x1534: return INTEL_DEVICE_I210;  // I210 Copper OEM1  
-        case 0x1535: return INTEL_DEVICE_I210;  // I210 Copper IT
-        case 0x1536: return INTEL_DEVICE_I210;  // I210 Fiber
-        case 0x1537: return INTEL_DEVICE_I210;  // I210 Serdes
-        case 0x1538: return INTEL_DEVICE_I210;  // I210 SGMII
+        case INTEL_DEV_I210_AT: return INTEL_DEVICE_I210;  // I210 Copper
+        case INTEL_DEV_I210_AT2: return INTEL_DEVICE_I210;  // I210 Copper OEM1  
+        case INTEL_DEV_I210_FIBER: return INTEL_DEVICE_I210;  // I210 Copper IT
+        case INTEL_DEV_I210_IS: return INTEL_DEVICE_I210;  // I210 Fiber
+        case INTEL_DEV_I210_IT: return INTEL_DEVICE_I210;  // I210 Serdes
+        case INTEL_DEV_I210_CS: return INTEL_DEVICE_I210;  // I210 SGMII
         
-        case 0x153A: 
-        case 0x153B: return INTEL_DEVICE_I217;  // I217 family
+        case INTEL_DEV_I217_LM: 
+        case INTEL_DEV_I217_V: return INTEL_DEVICE_I217;  // I217 family
         
-        case 0x15B7: 
-        case 0x15B8: 
-        case 0x15D6: 
-        case 0x15D7: 
-        case 0x15D8: 
-        case 0x0DC7: 
-        case 0x1570: 
-        case 0x15E3: return INTEL_DEVICE_I219;  // I219 family
+        case INTEL_DEV_I219_LM: 
+        case INTEL_DEV_I219_V: 
+        case INTEL_DEV_I219_D0: 
+        case INTEL_DEV_I219_D1: 
+        case INTEL_DEV_I219_D2: 
+        case INTEL_DEV_I219_LM_DC7: 
+        case INTEL_DEV_I219_V6: 
+        case INTEL_DEV_I219_LM6: return INTEL_DEVICE_I219;  // I219 family
         
-        case 0x15F2: return INTEL_DEVICE_I225;  // I225
-        case 0x125B: return INTEL_DEVICE_I226;  // I226
+        case INTEL_DEV_I225_V: return INTEL_DEVICE_I225;  // I225
+        case INTEL_DEV_I226_LM: return INTEL_DEVICE_I226;  // I226
         
         // IGB device family (82xxx series)
    //     case 0x10A7: return INTEL_DEVICE_82575;  // 82575EB Copper

@@ -71,7 +71,7 @@ typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_
 typedef struct _TS_SUBSCRIPTION {
     avb_u32 ring_id;                      // Subscription ID (1-based, 0=unused)
     avb_u32 event_mask;                   // TS_EVENT_* bitmask
-    avb_u16 vlan_filter;                  // VLAN ID filter (0xFFFF=no filter)
+    avb_u16 vlan_filter;                  // VLAN ID filter (INTEL_MASK_16BIT=no filter)
     avb_u8  pcp_filter;                   // PCP filter (0xFF=no filter)
     avb_u8  active;                       // 1=active, 0=unused slot
     PVOID ring_buffer;                    // NonPagedPool allocation (header + events)

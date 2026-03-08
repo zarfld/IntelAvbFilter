@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Module Name:
 
@@ -477,7 +477,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                    
             if (!AvbIsSupportedIntelController(pFilter, &ven, &dev))
             {
-                DEBUGP(DL_TRACE, "FilterAttach: REJECTING adapter: %wZ (VID:0x%04x DID:0x%04x) - Status=0xc00000bb\n", 
+                DEBUGP(DL_TRACE, "FilterAttach: REJECTING adapter: %wZ (VID:0x%04x DID:0x%04x) - Status=NDIS_STATUS_NOT_SUPPORTED\n", 
                        &pFilter->MiniportFriendlyName, ven, dev);
                 Status = NDIS_STATUS_NOT_SUPPORTED;
                 break;
@@ -582,7 +582,7 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     UNREFERENCED_PARAMETER(PauseParameters);
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterPause: INVALID FilterModuleContext=%p!\n", pFilter);
         // Return success anyway - NDIS will handle cleanup
@@ -698,7 +698,7 @@ FilterRestart(
     NDIS_CONFIGURATION_OBJECT        ConfigObject;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterRestart: INVALID FilterModuleContext=%p!\n", pFilter);
         // Return failure - cannot restart without valid filter context
@@ -894,7 +894,7 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     BOOLEAN                      bFalse = FALSE;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterDetach: INVALID FilterModuleContext=%p! Cannot detach.\n", pFilter);
         // Cannot fail detach, but can't proceed either - just return
@@ -1034,7 +1034,7 @@ NOTE: Called at <= DISPATCH_LEVEL  (unlike a miniport's MiniportOidRequest)
     BOOLEAN                 bFalse = FALSE;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
         return NDIS_STATUS_INVALID_PARAMETER;
@@ -1162,7 +1162,7 @@ Arguments:
     BOOLEAN                             bFalse = FALSE;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterCancelOidRequest: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
@@ -1229,7 +1229,7 @@ Arguments:
     BOOLEAN                             bFalse = FALSE;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterOidRequestComplete: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
@@ -1325,7 +1325,7 @@ NOTE: called at <= DISPATCH_LEVEL
 #endif
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterStatus: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
@@ -1390,7 +1390,7 @@ NOTE: called at PASSIVE_LEVEL
 #endif
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterDevicePnPEventNotify: INVALID FilterModuleContext=%p!\n", pFilter);
         return;
@@ -1461,7 +1461,7 @@ NOTE: called at PASSIVE_LEVEL
     NDIS_STATUS               Status = NDIS_STATUS_SUCCESS;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterNetPnPEvent: INVALID FilterModuleContext=%p!\n", pFilter);
         return NDIS_STATUS_INVALID_PARAMETER;
@@ -1517,7 +1517,7 @@ Return Value:
     PNET_BUFFER_LIST   CurrNbl;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterSendNetBufferListsComplete: INVALID FilterModuleContext=%p! Passing NBLs up anyway.\n", pFilter);
         NdisFSendNetBufferListsComplete(FilterDriverHandle, NetBufferLists, SendCompleteFlags);
@@ -1722,7 +1722,7 @@ Arguments:
     // Race condition: NDIS may call this after FilterDetach if packets are in flight
     // Check for NULL OR invalid kernel pointers (e.g., 0x4 seen in crash dumps)
     // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterSendNetBufferLists: INVALID FilterModuleContext=%p! Completing NBLs with error.\n", pFilter);
         CurrNbl = NetBufferLists;
@@ -1830,7 +1830,7 @@ Arguments:
                         // Extract EtherType (Big Endian at offset 12-13)
                         USHORT etherType = (headerBuffer[12] << 8) | headerBuffer[13];
                         
-                        if (etherType == ETHERTYPE_PTP)  // 0x88F7
+                        if (etherType == ETHERTYPE_PTP)  // IEEE 1588 PTP EtherType
                         {
                             // Intel miniport detects PTP via EtherType=0x88F7 + TSYNCTXCTL register;
                             // hardware latches SYSTIM at SFD without needing NBL OOB metadata.
@@ -1887,7 +1887,7 @@ Arguments:
     ULONG               Ref;
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterReturnNetBufferLists: INVALID FilterModuleContext=%p! Cannot return NBLs.\n", pFilter);
         // Cannot call NdisFReturnNetBufferLists without valid filter handle
@@ -1995,7 +1995,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
     // Race condition: NDIS may call this after FilterDetach if packets are in flight
     // Check for NULL OR invalid kernel pointers (e.g., 0x4 seen in crash dumps)
     // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
-    if (pFilter == NULL || (ULONG_PTR)pFilter < 0x10000 || ((ULONG_PTR)pFilter & 0xFFFF000000000000) != 0xFFFF000000000000)
+    if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterReceiveNetBufferLists: INVALID FilterModuleContext=%p! Returning NBLs immediately.\n", pFilter);
         if (NDIS_TEST_RECEIVE_CAN_PEND(ReceiveFlags))
@@ -2070,7 +2070,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                         if (pData) {
                             /* Parse Ethernet header */
                             USHORT etherType = ((USHORT)pData[12] << 8) | pData[13];
-                            USHORT vlan_id = 0xFFFF;  /* No VLAN by default */
+                            USHORT vlan_id = FILTER_VLAN_NONE;  /* No VLAN by default */
                             UCHAR pcp = 0xFF;         /* No PCP by default */
                             ULONG ptp_offset = 14;    /* PTP header offset after Ethernet */
                             
@@ -2083,7 +2083,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                             }
                             
                             /* Check for VLAN tag (0x8100) */
-                            if (etherType == 0x8100 && dataLength >= 18 + 34) {
+                            if (etherType == ETH_P_8021Q && dataLength >= 18 + 34) {
                                 vlan_id = ((USHORT)pData[14] << 8) | pData[15];
                                 pcp = (pData[14] >> 5) & 0x07;
                                 vlan_id &= 0x0FFF;  /* Mask to 12 bits */
@@ -2097,7 +2097,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                             }
                             
                             /* Check for PTP EtherType (0x88F7) */
-                            if (etherType == 0x88F7) {
+                            if (etherType == ETHERTYPE_PTP) {
                                 UCHAR messageType = pData[ptp_offset] & 0x0F;  /* Low 4 bits of transportSpecific/messageType */
                                 
                                 DEBUGP(DL_TRACE, "!!! PTP DETECTED: EtherType=0x%04X, msgType=0x%X, VLAN=%u, PCP=%u\n",

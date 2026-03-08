@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Module Name:
 
@@ -344,15 +344,15 @@ static int set_systime(device_t *dev, uint64_t systime)
         DEBUGP(DL_TRACE, "I226 using system time: 0x%llx\n", systime);
     }
     
-    // I226/I225: split format — SYSTIMH=seconds, SYSTIML=nanoseconds (0-999,999,999)
-    // Do NOT use (systime >> 32) / (systime & 0xFFFFFFFF) — that is the I210 flat format
+    // I226/I225: split format -- SYSTIMH=seconds, SYSTIML=nanoseconds (0-999,999,999)
+    // Do NOT use (systime >> 32) / (systime & 0xFFFFFFFF) -- that is the I210 flat format
     sec  = (uint32_t)(systime / 1000000000ULL);
     nsec = (uint32_t)(systime % 1000000000ULL);
     
     // Step 1: Disable SYSTIM counter for an atomic write sequence.
     // TSAUXC (0xB640) bit 31 halts the SYSTIM increment logic.
     // Note: The SSOT header labels this bit PLLLOCKED but the hardware spec defines it
-    // as "Disable systime" — confirmed via IEEE 1588 I226 hardware manual.
+    // as "Disable systime" -- confirmed via IEEE 1588 I226 hardware manual.
     ndis_platform_ops.mmio_read(dev, I226_TSAUXC, &tsauxc_val);
     result = ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_val | (1UL << 31));
     if (result != 0) {
@@ -398,7 +398,7 @@ static int get_systime(device_t *dev, uint64_t *systime)
     }
     
     // I226/I225: SYSTIMH=seconds, SYSTIML=nanoseconds (split format, NOT flat 64-bit)
-    // Read order: SYSTIML first — reading SYSTIML latches SYSTIMH into a shadow register,
+    // Read order: SYSTIML first -- reading SYSTIML latches SYSTIMH into a shadow register,
     // ensuring both values correspond to the same instant (hardware-guaranteed atomic snapshot).
     result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low);
     if (result != 0) return result;
@@ -407,7 +407,7 @@ static int get_systime(device_t *dev, uint64_t *systime)
     if (result != 0) return result;
     
     // Reconstruct 64-bit nanosecond timestamp: seconds * 1e9 + nanoseconds
-    // NOT ((high << 32) | low) — that would be the I210 flat format
+    // NOT ((high << 32) | low) -- that would be the I210 flat format
     *systime = (uint64_t)ts_high * 1000000000ULL + (uint64_t)ts_low;
     
     DEBUGP(DL_TRACE, "<==i226_get_systime: sec=%u nsec=%u total=0x%llx\n", ts_high, ts_low, *systime);
@@ -438,7 +438,7 @@ static int init_ptp(device_t *dev)
         
         // If TIMINCA is 0, set default 24ns increment for I226
         if (timinca == 0) {
-            timinca = 0x18000000;  // 24ns per cycle (I226 default)
+            timinca = INTEL_TIMINCA_DEFAULT;  // 24ns per cycle (I226 default)
             if (ndis_platform_ops.mmio_write(dev, I226_TIMINCA, timinca) != 0) {
                 DEBUGP(DL_TRACE, "I226: Failed to write TIMINCA\n");
                 return -1;
@@ -513,7 +513,7 @@ static int init_ptp(device_t *dev)
     // Without this filter, hardware may not timestamp packets during high-frequency polling
     uint32_t etqf_value = I226_ETQF_FILTER_ENABLE | I226_ETQF_1588 | ETH_P_1588;
     ndis_platform_ops.mmio_write(dev, I226_ETQF(3), etqf_value);
-    DEBUGP(DL_TRACE, "I226: EtherType filter configured (ETQF[3]=0x%08X, PTP EtherType=0x88F7)\n", etqf_value);
+    DEBUGP(DL_TRACE, "I226: EtherType filter configured (ETQF[3]=0x%08X, PTP EtherType=ETH_P_1588)\n", etqf_value);
     
     // Clear TX timestamp FIFO registers to remove any stale data (Linux igb_ptp.c:861-864)
     // CRITICAL: Without this, first timestamp retrieval in rapid polling may get stale data
@@ -701,7 +701,7 @@ static int enable_packet_timestamping(device_t *dev, int enable)
         DEBUGP(DL_TRACE, "I226: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
         
         // Enable TX packet timestamping using SSOT definitions
-        // Per i226 datasheet: bit 4 (EN) + bit 5 (RSVD, must be set) → 0x30
+        // Per i226 datasheet: bit 4 (EN) + bit 5 (RSVD, must be set) -> 0x30
         uint32_t tx_ctl = 0;
         tx_ctl = (uint32_t)I226_TSYNCTXCTL_SET(0, I226_TSYNCTXCTL_EN_MASK, I226_TSYNCTXCTL_EN_SHIFT, 1);      // bit 4: Enable
         tx_ctl = (uint32_t)I226_TSYNCTXCTL_SET(tx_ctl, I226_TSYNCTXCTL_RSVD_MASK, I226_TSYNCTXCTL_RSVD_SHIFT, 1); // bit 5: RSVD (required)
@@ -761,7 +761,7 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
     uint32_t trgttiml_offset = (timer_index == 0) ? I226_TRGTTIML0 : I226_TRGTTIML1;
     uint32_t trgttimh_offset = (timer_index == 0) ? I226_TRGTTIMH0 : I226_TRGTTIMH1;
     
-    uint32_t time_low = (uint32_t)(target_time_ns & 0xFFFFFFFF);
+    uint32_t time_low = (uint32_t)(target_time_ns & INTEL_MASK_32BIT);
     uint32_t time_high = (uint32_t)(target_time_ns >> 32);
     
     // Read current SYSTIM before setting target to show delta
@@ -803,7 +803,7 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
     DEBUGP(DL_TRACE, "!!! I226:   VERIFY: wrote=0x%08X%08X, read=0x%08X%08X %s\n",
            time_high, time_low, verify_high, verify_low,
            (verified_target == target_time_ns) ? "OK" : "MISMATCH!");
-    // NOTE: TRGTTIML0 is shadow-latched — the register value isn't visible on readback
+    // NOTE: TRGTTIML0 is shadow-latched -- the register value isn't visible on readback
     // until the timer is armed (TSAUXC.EN_TT0 set). Checking the readback here would
     // incorrectly flag working adapters as failing. Hardware responsiveness is instead
     // inferred in userspace from the previous_target sentinel value (see test skip logic).
@@ -967,8 +967,8 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         //   TimeSync interrupts (TT0, TT1, etc.) are in the "OTHER" interrupt
         //   category. Two levels of interrupt enable are required:
         //
-        //   1. TSIM (TimeSync Interrupt Mask) - bit 3 for TT0 ✅ Already done
-        //   2. EIMS (Extended Interrupt Mask Set) - bit 31 for OTHER ❌ MISSING!
+        //   1. TSIM (TimeSync Interrupt Mask) - bit 3 for TT0 [OK] Already done
+        //   2. EIMS (Extended Interrupt Mask Set) - bit 31 for OTHER [FAIL] MISSING!
         //
         // From i226.yaml (intel-ethernet-regs):
         //   EIMS register at 0x01524 (base 0x01500 + offset 0x24)
@@ -978,10 +978,10 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         // never reaches the CPU. This is why DPC polling sees TSICR=0 always.
         //
         // Evidence from registry diagnostics:
-        //   - i226_TSIM_After: 8 (bit 3 set, TT0 mask enabled) ✅
-        //   - i226_EN_TT0: 1 (target time feature enabled) ✅
-        //   - i226_FREQOUT0_After: 1000 (clock configured) ✅
-        //   - But TSICR.TT0 never triggers! ❌
+        //   - i226_TSIM_After: 8 (bit 3 set, TT0 mask enabled) [OK]
+        //   - i226_EN_TT0: 1 (target time feature enabled) [OK]
+        //   - i226_FREQOUT0_After: 1000 (clock configured) [OK]
+        //   - But TSICR.TT0 never triggers! [FAIL]
         //
         // This is identical to i210 architecture where TimeSync interrupts
         // require both TSIM (specific mask) and IMS/EIMS (category mask).
@@ -1003,7 +1003,7 @@ static int i226_set_target_time(device_t *dev, uint8_t timer_index,
         DEBUGP(DL_TRACE, "!!! I226:   EIMS after: 0x%08X (OTHER=%d) %s\n",
                eims_after,
                (eims_after & I226_EIMS_OTHER_MASK) ? 1 : 0,
-               (eims_after & I226_EIMS_OTHER_MASK) ? "ENABLED ✓" : "FAILED!");
+               (eims_after & I226_EIMS_OTHER_MASK) ? "ENABLED [OK]" : "FAILED!");
         
         // Read TSYNCRXCTL to verify timestamp system status
         if (ndis_platform_ops.mmio_read(dev, I226_TSYNCRXCTL, &tsyncrxctl) == 0) {
