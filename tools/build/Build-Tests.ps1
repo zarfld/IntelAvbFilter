@@ -1356,6 +1356,97 @@ $AllTests = @(
         Requirement = "#258"
         Standard = "REQ-NF-COMPAT-001"
     }
+    # ──── Sprint 4b: TDD-RED tests for unimplemented features ────────────────
+    @{
+        Name = "test_vlan_tag"
+        Type = "cl"
+        Source = "tests\tsn\test_vlan_tag.c"
+        Output = "test_vlan_tag.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "IEEE 802.1Q VLAN Insert/Strip Tests [TDD-RED] (Issue #213)"
+        Issue = "#213"
+        TestCases = 5
+        IOCTLs = "53(VLAN_ENABLE) [TDD-placeholder], 54(VLAN_DISABLE) [TDD-placeholder]"
+        Requirement = "#213"
+        Standard = "IEEE 802.1Q-2022"
+    }
+    @{
+        Name = "test_eee_lpi"
+        Type = "cl"
+        Source = "tests\eee\test_eee_lpi.c"
+        Output = "test_eee_lpi.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P3"
+        Description = "IEEE 802.3az EEE/LPI Tests [TDD-RED] (Issue #223)"
+        Issue = "#223"
+        TestCases = 5
+        IOCTLs = "55(EEE_ENABLE) [TDD-placeholder], 56(EEE_DISABLE) [TDD-placeholder], 29(MDIO_READ)"
+        Requirement = "#223"
+        Standard = "IEEE 802.3az-2010"
+    }
+    @{
+        Name = "test_pfc_pause"
+        Type = "cl"
+        Source = "tests\pfc\test_pfc_pause.c"
+        Output = "test_pfc_pause.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P3"
+        Description = "IEEE 802.1Qbb PFC Pause Tests [TDD-RED] (Issue #219)"
+        Issue = "#219"
+        TestCases = 5
+        IOCTLs = "57(PFC_ENABLE/DISABLE) [TDD-placeholder], 29(MDIO_READ), 21(GET_DEVICE_INFO)"
+        Requirement = "#219"
+        Standard = "IEEE 802.1Qbb-2011"
+    }
+    @{
+        Name = "test_atdecc_event"
+        Type = "cl"
+        Source = "tests\atdecc\test_atdecc_event.c"
+        Output = "test_atdecc_event.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P3"
+        Description = "IEEE 1722.1 ATDECC Entity Event Tests [TDD-RED] (Issue #236)"
+        Issue = "#236"
+        TestCases = 5
+        IOCTLs = "58(ATDECC_EVENT_SUBSCRIBE) [TDD-placeholder], 59(ATDECC_EVENT_UNSUBSCRIBE) [TDD-placeholder]"
+        Requirement = "#236"
+        Standard = "IEEE 1722.1-2021"
+    }
+    @{
+        Name = "test_srp_interface"
+        Type = "cl"
+        Source = "tests\srp\test_srp_interface.c"
+        Output = "test_srp_interface.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "IEEE 802.1Qat SRP Bandwidth Reservation Tests [TDD-RED] (Issue #211)"
+        Issue = "#211"
+        TestCases = 5
+        IOCTLs = "60(SRP_REGISTER_STREAM) [TDD-placeholder], 61(SRP_DEREGISTER_STREAM) [TDD-placeholder], 21(GET_DEVICE_INFO)"
+        Requirement = "#211"
+        Standard = "IEEE 802.1Qat-2010"
+    }
+    @{
+        Name = "test_gptp_daemon_coexist"
+        Type = "cl"
+        Source = "tests\openavnu\test_gptp_daemon_coexist.c"
+        Output = "test_gptp_daemon_coexist.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "OpenAvnu gPTP Daemon Coexistence Tests (Issue #240) - SKIPs if no daemon running"
+        Issue = "#240"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG), 38(ADJUST_FREQUENCY), 48(PHC_OFFSET_ADJUST)"
+        Requirement = "#240"
+        Standard = "IEEE 802.1AS-2020"
+    }
 )
 
 # Filter tests if specific test requested
