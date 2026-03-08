@@ -1230,6 +1230,100 @@ $AllTests = @(
         Requirement = "#188"
         Standard = "IEEE 1588-2019 s7.2, IEEE 802.1AS-2020 s10.2"
     }
+
+    # ── Sprint 3 — Error Recovery, Power, TSN/CBS, PnP, NDIS Latency, S3 ──────
+    @{
+        Name = "test_error_recovery"
+        Type = "cl"
+        Source = "tests\integration\test_error_recovery.c"
+        Output = "test_error_recovery.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Error Recovery Tests (Issues #215 #231 #254) - driver must not BSOD on malformed input"
+        Issue = "#215"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG), 31(ENUM_ADAPTERS), 48(PHC_OFFSET_ADJUST), 37(GET_HW_STATE)"
+        Requirement = "#215"
+        Standard = "ISO/IEC/IEEE 12207:2017 §6.4.5"
+    }
+    @{
+        Name = "test_power_management"
+        Type = "cl"
+        Source = "tests\power\test_power_management.c"
+        Output = "test_power_management.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Power Management Tests (Issue #218) - PHC preserved across handle close/reopen (simulates D0/D3)"
+        Issue = "#218"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG)"
+        Requirement = "#218"
+        Standard = "IEEE 1588-2019 s7.2"
+    }
+    @{
+        Name = "test_vlan_pcp_tc_mapping"
+        Type = "cl"
+        Source = "tests\tsn\test_vlan_pcp_tc_mapping.c"
+        Output = "test_vlan_pcp_tc_mapping.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "VLAN PCP->TC CBS Mapping Tests (Issues #276 #216) - CBS idle/send slope configurable per TC"
+        Issue = "#276"
+        TestCases = 5
+        IOCTLs = "35(SETUP_QAV), 37(GET_HW_STATE), 22(READ_REGISTER)"
+        Requirement = "#89"
+        Standard = "IEEE 802.1Qav-2009, IEEE 802.1Q-2022 s34.4"
+    }
+    @{
+        Name = "test_hot_plug"
+        Type = "cl"
+        Source = "tests\pnp\test_hot_plug.c"
+        Output = "test_hot_plug.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "setupapi.lib cfgmgr32.lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "PnP Hot-Plug Filter Restart Tests (Issue #262) - FilterRestart must re-expose AVB IOCTLs"
+        Issue = "#262"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG), 37(GET_HW_STATE)"
+        Requirement = "#91"
+        Standard = "ISO/IEC/IEEE 12207:2017 §6.4.6"
+    }
+    @{
+        Name = "test_ndis_fastpath_latency"
+        Type = "cl"
+        Source = "tests\ndis\test_ndis_fastpath_latency.c"
+        Output = "test_ndis_fastpath_latency.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "NDIS IOCTL Fast-Path Latency Benchmark (Issue #286) - P50<2us P99<10us"
+        Issue = "#286"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG)"
+        Requirement = "#92"
+        Standard = "REQ-NF-PERF-002"
+    }
+    @{
+        Name = "test_s3_sleep_wake"
+        Type = "cl"
+        Source = "tests\power\test_s3_sleep_wake.c"
+        Output = "test_s3_sleep_wake.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "PowrProf.lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "S3 Sleep/Wake PHC Preservation Tests (Issue #271) - PHC non-zero and driver ready after S3 resume"
+        Issue = "#271"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG), 37(GET_HW_STATE)"
+        Requirement = "#93"
+        Standard = "REQ-F-POWER-002"
+    }
 )
 
 # Filter tests if specific test requested
