@@ -2379,11 +2379,44 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 PAVB_AUX_TIMESTAMP_REQUEST aux_req = (PAVB_AUX_TIMESTAMP_REQUEST)buf;
 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                    DEBUGP(DL_ERROR, "Aux timestamp read: PTP not ready (state=%s)\n",
+                    DEBUGP(DL_TRACE, "Aux timestamp: hw_state=%s, attempting lazy PTP init\n",
                            AvbHwStateName(activeContext->hw_state));
-                    aux_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
-                    status = STATUS_DEVICE_NOT_READY;
-                } else if (aux_req->timer_index > 1) {
+
+                    /* Lazy-init identical to IOCTL_AVB_GET_TIMESTAMP path:
+                     * 1. If TIMINCA is already non-zero the clock is running -> promote state.
+                     * 2. If not, call AvbEnsureDeviceReady for I210/I225/I226. */
+                    if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                        ULONG timinca_val = 0;
+                        const intel_device_ops_t *lazy_ops =
+                            intel_get_device_ops(activeContext->intel_device.device_type);
+                        if (lazy_ops && lazy_ops->read_timinca &&
+                            lazy_ops->read_timinca(&activeContext->intel_device, &timinca_val) == 0 &&
+                            timinca_val != 0) {
+                            DEBUGP(DL_TRACE, "TIMINCA=0x%08X non-zero -> promoting to PTP_READY\n", timinca_val);
+                            AVB_SET_HW_STATE(activeContext, AVB_HW_PTP_READY);
+                        } else {
+                            intel_device_type_t dev_type = activeContext->intel_device.device_type;
+                            if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 ||
+                                dev_type == INTEL_DEVICE_I226) {
+                                DEBUGP(DL_TRACE, "Calling AvbEnsureDeviceReady for device type %d\n", dev_type);
+                                NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
+                                UNREFERENCED_PARAMETER(init_result);
+                                DEBUGP(DL_TRACE, "AvbEnsureDeviceReady -> 0x%08X, state now %s\n",
+                                       init_result, AvbHwStateName(activeContext->hw_state));
+                            }
+                        }
+                    }
+
+                    if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                        DEBUGP(DL_ERROR, "Aux timestamp read: PTP still not ready after init (state=%s)\n",
+                               AvbHwStateName(activeContext->hw_state));
+                        aux_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                        status = STATUS_DEVICE_NOT_READY;
+                        break;
+                    }
+                }
+
+                if (aux_req->timer_index > 1) {
                     DEBUGP(DL_ERROR, "Invalid timer index: %u (max 1)\n", aux_req->timer_index);
                     aux_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                     status = STATUS_INVALID_PARAMETER;
