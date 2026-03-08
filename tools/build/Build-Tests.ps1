@@ -1124,6 +1124,59 @@ $AllTests = @(
         IOCTLs = "27, 28"
         Requirement = "#11"
     }
+
+    # =========================================================================
+    # Sprint 2 P0 — PHC Monotonicity, Cross-Timestamp, Epoch Tests
+    # Issues: #285, #198, #196  Added: 2026-03-08
+    # =========================================================================
+
+    @{
+        Name = "test_ioctl_phc_monotonicity"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_phc_monotonicity.c"
+        Output = "test_ioctl_phc_monotonicity.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PHC Monotonicity Guarantee Tests (Issue #285) - 10K sequential reads + concurrent offset adjust"
+        Issue = "#285"
+        TestCases = 4
+        IOCTLs = "45(GET_CLOCK_CONFIG), 48(PHC_OFFSET_ADJUST)"
+        Requirement = "#185"
+        Standard = "IEEE 1588-2019 s6.4.1, IEEE 802.1AS-2020 s10.4"
+    }
+
+    @{
+        Name = "test_ioctl_xstamp"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_xstamp.c"
+        Output = "test_ioctl_xstamp.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PHC Cross-Timestamp Capture Tests (Issue #198) - QPC bracketing, P99 latency, correlation"
+        Issue = "#198"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG)"
+        Requirement = "#186"
+        Standard = "IEEE 1588-2019 B.3.2"
+    }
+
+    @{
+        Name = "test_ioctl_phc_epoch"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_phc_epoch.c"
+        Output = "test_ioctl_phc_epoch.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PHC Epoch Baseline and TAI-UTC Offset Validation Tests (Issue #196)"
+        Issue = "#196"
+        TestCases = 5
+        IOCTLs = "45(GET_CLOCK_CONFIG)"
+        Requirement = "#187"
+        Standard = "IEEE 1588-2019 s8.2, IEEE 802.1AS-2020 s8.6.2"
+    }
 )
 
 # Filter tests if specific test requested
