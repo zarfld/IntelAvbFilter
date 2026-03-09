@@ -38,6 +38,29 @@ PDEVICE_OBJECT      NdisDeviceObject = NULL;
 FILTER_LOCK         FilterListLock;
 LIST_ENTRY          FilterModuleList;
 
+/*
+ * ETW event logging infrastructure
+ * Provider GUID: {5DC1CA46-B07F-4A4F-9D02-1A02E7EC24E4}
+ * Manifest:      src/IntelAvbFilter.man (register with wevtutil im at install time)
+ * Implements: #65  (REQ-F-EVENT-LOG-001: Windows Event Log Integration)
+ * Closes:     #269 (TEST-EVENT-LOG-001)
+ */
+REGHANDLE g_EtwHandle = 0;  /* registered in DriverEntry, unregistered in FilterUnload */
+
+static const GUID g_IntelAvbFilterProviderGuid = {
+    0x5dc1ca46, 0xb07f, 0x4a4f, {0x9d, 0x02, 0x1a, 0x02, 0xe7, 0xec, 0x24, 0xe4}
+};
+
+/*
+ * EVENT_DESCRIPTOR: {Id, Version, Channel, Level, Opcode, Task, Keyword}
+ * Channel 0x09 = Application event log (importChannel name="Application")
+ * Levels: 1=Critical, 2=Error, 3=Warning, 4=Informational
+ */
+static const EVENT_DESCRIPTOR g_EvtDriverInit      = {   1, 0, 0x09, 4, 0, 0, 0 };
+static const EVENT_DESCRIPTOR g_EvtIoctlError      = { 100, 0, 0x09, 2, 0, 0, 0 };
+static const EVENT_DESCRIPTOR g_EvtPhcForceSetWarn = { 200, 0, 0x09, 3, 0, 0, 0 };
+static const EVENT_DESCRIPTOR g_EvtHardwareFault   = { 300, 0, 0x09, 1, 0, 0, 0 };
+
 NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 { 0, 0, 0},
       0,
@@ -251,6 +274,31 @@ Return Value:
         }
 
         DEBUGP(DL_TRACE, "User-mode device interface registered successfully\n");
+
+        /*
+         * Register ETW provider and emit Event ID 1 (driver initialization).
+         * The provider manifest (src/IntelAvbFilter.man) must be registered at
+         * install time via:
+         *   wevtutil im IntelAvbFilter.man /mf:<sys-path> /rf:<sys-path>
+         *
+         * Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 (TEST-EVENT-LOG-001)
+         */
+        {
+            NTSTATUS etw_status = EtwRegister(
+                &g_IntelAvbFilterProviderGuid,
+                NULL,   /* no enable callback */
+                NULL,   /* no callback context */
+                &g_EtwHandle);
+            if (NT_SUCCESS(etw_status)) {
+                /* Event ID 1: driver initialization — written to Application log */
+                EtwWrite(g_EtwHandle, &g_EvtDriverInit, NULL, 0, NULL);
+                DEBUGP(DL_TRACE, "ETW provider registered; Event ID 1 emitted.\n");
+            } else {
+                DEBUGP(DL_TRACE, "EtwRegister failed: 0x%08x (manifest may not be installed)\n",
+                       etw_status);
+                /* Non-fatal: driver continues without ETW. Test will soft-fail. */
+            }
+        }
 
     }
     while(bFalse);
@@ -971,6 +1019,12 @@ Return Value:
     UNREFERENCED_PARAMETER(DriverObject);
 
     DEBUGP(DL_TRACE, "===>FilterUnload\n");
+
+    /* Unregister ETW provider (paired with EtwRegister in DriverEntry) */
+    if (g_EtwHandle != 0) {
+        EtwUnregister(g_EtwHandle);
+        g_EtwHandle = 0;
+    }
 
     //
     // Should free the filter context list

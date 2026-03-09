@@ -231,11 +231,25 @@ function Uninstall-Driver {
         }
     }
     
+    # Unregister ETW manifest before stopping the service
+    # Implements: #65 (REQ-F-EVENT-LOG-001)
+    $installedMan = "C:\Windows\System32\drivers\IntelAvbFilter.man"
+    if (Test-Path $installedMan) {
+        Write-Host "Unregistering ETW manifest (wevtutil um)..." -ForegroundColor Gray
+        wevtutil um $installedMan 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "ETW manifest unregistered"
+        } else {
+            Write-Info "wevtutil um returned $LASTEXITCODE (may be OK if not previously registered)"
+        }
+        Remove-Item $installedMan -Force -ErrorAction SilentlyContinue
+    }
+
     # Stop service
     Write-Host "Stopping service..." -ForegroundColor Gray
     sc.exe stop IntelAvbFilter
     Start-Sleep -Seconds 2
-    
+
     # Delete service
     Write-Host "Deleting service..." -ForegroundColor Gray
     sc.exe delete IntelAvbFilter
@@ -395,7 +409,29 @@ function Install-Driver {
             Write-Host "  Copying .sys to C:\Windows\System32\drivers\..." -ForegroundColor Gray
             Copy-Item $sysFile "C:\Windows\System32\drivers\" -Force
         }
-        
+
+        # Step 3a.5: Register ETW manifest (Windows Event Log / Application channel)
+        # Implements: #65 (REQ-F-EVENT-LOG-001), Closes: #269 (TEST-EVENT-LOG-001)
+        $manFile       = Join-Path $driverDir "IntelAvbFilter.man"
+        $installedSys  = "C:\Windows\System32\drivers\IntelAvbFilter.sys"
+        $installedMan  = "C:\Windows\System32\drivers\IntelAvbFilter.man"
+        if (Test-Path $manFile) {
+            Write-Host "  Copying ETW manifest to C:\Windows\System32\drivers\..." -ForegroundColor Gray
+            Copy-Item $manFile "C:\Windows\System32\drivers\" -Force
+            # Unregister stale registration before re-registering
+            wevtutil um $installedMan 2>&1 | Out-Null
+            Write-Host "  Registering ETW provider (wevtutil im)..." -ForegroundColor Gray
+            $wevtOut = wevtutil im $installedMan "/mf:$installedSys" "/rf:$installedSys" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Success "ETW manifest registered: 'IntelAvbFilter' provider visible in Application log"
+            } else {
+                Write-Info "wevtutil im returned $LASTEXITCODE : $wevtOut"
+                Write-Info "(ETW events will not appear in Application log until manifest is registered)"
+            }
+        } else {
+            Write-Info "ETW manifest not found at $manFile — skipping wevtutil im"
+        }
+
         # Step 3b: Install via netcfg
         Push-Location $driverDir
         Write-Host "  Command: netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter" -ForegroundColor DarkGray

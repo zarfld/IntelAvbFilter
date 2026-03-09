@@ -197,6 +197,13 @@
     <Message Text="Copying signed $(TargetPath) to $(OutDir)$(ProjectName)\$(TargetFileName) for WDK Inf2Cat processing" Importance="high" />
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(OutDir)$(ProjectName)\$(TargetFileName)" />
   </Target>
+  <!-- Copy ETW manifest alongside SYS so Install-Driver.ps1 can find it -->
+  <!-- Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 (TEST-EVENT-LOG-001) -->
+  <Target Name="CopyEtwManifest" AfterTargets="CopySysForInf2Cat">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\src\IntelAvbFilter.man"
+          DestinationFiles="$(OutDir)$(ProjectName)\IntelAvbFilter.man"
+          SkipUnchangedFiles="true" />
+  </Target>
   <ItemGroup>
     <!--Leaf Item elements-->
     <ClCompile Include="src\avb_bar0_discovery.c" />
@@ -260,6 +267,9 @@
     <ClInclude Include="tests\taef\AvbTestCommon.h" />
     <ClInclude Include="src\tsn_config.h" />
     <Inf Include="IntelAvbFilter.inf" />
+    <!-- ETW manifest: registered at install time via wevtutil im -->
+    <!-- Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 -->
+    <None Include="src\IntelAvbFilter.man" />
   </ItemGroup>
   <ItemGroup>
     <FilesToPackage Include="build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf">

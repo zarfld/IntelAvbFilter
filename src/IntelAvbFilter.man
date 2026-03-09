@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<instrumentationManifest
+    xsi:schemaLocation="http://schemas.microsoft.com/win/2004/08/events eventman.xsd"
+    xmlns="http://schemas.microsoft.com/win/2004/08/events"
+    xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:trace="http://schemas.microsoft.com/win/2004/08/events/trace">
+  <instrumentation>
+    <events>
+      <!--
+        IntelAvbFilter ETW Provider
+        Provider GUID: {5DC1CA46-B07F-4A4F-9D02-1A02E7EC24E4}
+
+        Implements: #65  (REQ-F-EVENT-LOG-001: Windows Event Log Integration)
+        Closes:     #269 (TEST-EVENT-LOG-001)
+
+        Install:   wevtutil im IntelAvbFilter.man /mf:%SystemRoot%\System32\drivers\IntelAvbFilter.sys /rf:%SystemRoot%\System32\drivers\IntelAvbFilter.sys
+        Uninstall: wevtutil um IntelAvbFilter.man
+      -->
+      <provider
+          name="IntelAvbFilter"
+          guid="{5DC1CA46-B07F-4A4F-9D02-1A02E7EC24E4}"
+          symbol="INTELAVBFILTER_PROVIDER"
+          resourceFileName="%SystemRoot%\System32\drivers\IntelAvbFilter.sys"
+          messageFileName="%SystemRoot%\System32\drivers\IntelAvbFilter.sys">
+        <channels>
+          <!-- Import Windows Application event log channel (channel ID 0x09) -->
+          <importChannel name="Application" chid="App"/>
+        </channels>
+        <levels/>
+        <opcodes/>
+        <tasks/>
+        <events>
+          <!-- Event 1: Driver Initialization (Informational) -->
+          <event value="1"
+                 symbol="EVT_DRIVER_INIT"
+                 version="0"
+                 channel="App"
+                 level="win:Informational"
+                 message="$(string.EVT_DRIVER_INIT.message)"/>
+          <!-- Event 100: IOCTL Error (Error) -->
+          <event value="100"
+                 symbol="EVT_IOCTL_ERROR"
+                 version="0"
+                 channel="App"
+                 level="win:Error"
+                 message="$(string.EVT_IOCTL_ERROR.message)"/>
+          <!-- Event 200: PHC ForceSet Warning (Warning) -->
+          <event value="200"
+                 symbol="EVT_PHC_FORCESET_WARN"
+                 version="0"
+                 channel="App"
+                 level="win:Warning"
+                 message="$(string.EVT_PHC_FORCESET_WARN.message)"/>
+          <!-- Event 300: Hardware Fault (Critical) -->
+          <event value="300"
+                 symbol="EVT_HARDWARE_FAULT"
+                 version="0"
+                 channel="App"
+                 level="win:Critical"
+                 message="$(string.EVT_HARDWARE_FAULT.message)"/>
+        </events>
+      </provider>
+    </events>
+  </instrumentation>
+  <localization>
+    <resources culture="en-US">
+      <stringTable>
+        <string id="EVT_DRIVER_INIT.message"
+                value="IntelAvbFilter driver initialized successfully."/>
+        <string id="EVT_IOCTL_ERROR.message"
+                value="IntelAvbFilter IOCTL error occurred."/>
+        <string id="EVT_PHC_FORCESET_WARN.message"
+                value="IntelAvbFilter PHC time forced: potential clock discontinuity."/>
+        <string id="EVT_HARDWARE_FAULT.message"
+                value="IntelAvbFilter critical hardware fault detected."/>
+      </stringTable>
+    </resources>
+  </localization>
+</instrumentationManifest>
