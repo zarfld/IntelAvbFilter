@@ -642,34 +642,118 @@ static int setup_ptm(device_t *dev, struct ptm_config *config)
 }
 
 /**
- * @brief I226-specific MDIO read
+ * @brief I226-specific MDIO read via MDIC register (SSOT: I226_MDIC from i226_regs.h)
+ *
+ * Uses the same MDIC polling pattern as 82575/82576 but with I226-specific
+ * register offset from the SSOT-generated header.
+ *
  * @param dev Device handle
- * @param phy_addr PHY address
- * @param reg_addr Register address
+ * @param phy_addr PHY address (0-31)
+ * @param reg_addr Register address (0-31)
  * @param value Output value
- * @return 0 on success, <0 on error
+ * @return 0 on success, -1 on error/timeout
  */
 static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t *value)
 {
-    if (ndis_platform_ops.mdio_read) {
-        return ndis_platform_ops.mdio_read(dev, phy_addr, reg_addr, value);
+    uint32_t mdic;
+    int      timeout;
+    int      result;
+
+    if (dev == NULL || value == NULL) {
+        return -1;
     }
+    *value = 0;
+
+    // Build MDIC read command using SSOT bit definitions from i226_regs.h
+    mdic  = 0;
+    mdic |= (uint32_t)(reg_addr & 0x1FU) << I226_MDIC_REG_SHIFT;
+    mdic |= (uint32_t)(phy_addr & 0x1FU) << I226_MDIC_PHY_SHIFT;
+    mdic |= (uint32_t)(2U)               << I226_MDIC_OP_SHIFT;  // 2 = read
+    mdic |= (uint32_t)I226_MDIC_I_MASK;                          // interrupt on completion
+
+    result = ndis_platform_ops.mmio_write(dev, I226_MDIC, mdic);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I226 MDIC write failed (mdio_read setup)\n");
+        return -1;
+    }
+
+    // Poll ready bit (I226_MDIC_R_MASK)
+    for (timeout = 0; timeout < 1000; timeout++) {
+        result = ndis_platform_ops.mmio_read(dev, I226_MDIC, &mdic);
+        if (result != 0) {
+            DEBUGP(DL_ERROR, "I226 MDIC read poll failed\n");
+            return -1;
+        }
+        if (mdic & I226_MDIC_R_MASK) {
+            if (mdic & I226_MDIC_E_MASK) {
+                DEBUGP(DL_ERROR, "I226 MDIO read error bit set\n");
+                return -1;
+            }
+            *value = (uint16_t)(mdic & I226_MDIC_DATA_MASK);
+            DEBUGP(DL_TRACE, "I226 mdio_read phy=0x%x reg=0x%x -> 0x%04x\n",
+                   phy_addr, reg_addr, *value);
+            return 0;
+        }
+        KeStallExecutionProcessor(10); // 10 µs
+    }
+
+    DEBUGP(DL_ERROR, "I226 MDIO read timeout (phy=0x%x reg=0x%x)\n", phy_addr, reg_addr);
     return -1;
 }
 
 /**
- * @brief I226-specific MDIO write
+ * @brief I226-specific MDIO write via MDIC register (SSOT: I226_MDIC from i226_regs.h)
+ *
  * @param dev Device handle
- * @param phy_addr PHY address
- * @param reg_addr Register address
+ * @param phy_addr PHY address (0-31)
+ * @param reg_addr Register address (0-31)
  * @param value Value to write
- * @return 0 on success, <0 on error
+ * @return 0 on success, -1 on error/timeout
  */
 static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t value)
 {
-    if (ndis_platform_ops.mdio_write) {
-        return ndis_platform_ops.mdio_write(dev, phy_addr, reg_addr, value);
+    uint32_t mdic;
+    int      timeout;
+    int      result;
+
+    if (dev == NULL) {
+        return -1;
     }
+
+    // Build MDIC write command using SSOT bit definitions from i226_regs.h
+    mdic  = 0;
+    mdic |= (uint32_t)(value   & 0xFFFFU) << I226_MDIC_DATA_SHIFT;
+    mdic |= (uint32_t)(reg_addr & 0x1FU)  << I226_MDIC_REG_SHIFT;
+    mdic |= (uint32_t)(phy_addr & 0x1FU)  << I226_MDIC_PHY_SHIFT;
+    mdic |= (uint32_t)(1U)                << I226_MDIC_OP_SHIFT;  // 1 = write
+    mdic |= (uint32_t)I226_MDIC_I_MASK;                           // interrupt on completion
+
+    result = ndis_platform_ops.mmio_write(dev, I226_MDIC, mdic);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I226 MDIC write failed (mdio_write)\n");
+        return -1;
+    }
+
+    // Poll ready bit
+    for (timeout = 0; timeout < 1000; timeout++) {
+        result = ndis_platform_ops.mmio_read(dev, I226_MDIC, &mdic);
+        if (result != 0) {
+            DEBUGP(DL_ERROR, "I226 MDIC read poll failed (write confirm)\n");
+            return -1;
+        }
+        if (mdic & I226_MDIC_R_MASK) {
+            if (mdic & I226_MDIC_E_MASK) {
+                DEBUGP(DL_ERROR, "I226 MDIO write error bit set\n");
+                return -1;
+            }
+            DEBUGP(DL_TRACE, "I226 mdio_write phy=0x%x reg=0x%x val=0x%04x OK\n",
+                   phy_addr, reg_addr, value);
+            return 0;
+        }
+        KeStallExecutionProcessor(10); // 10 µs
+    }
+
+    DEBUGP(DL_ERROR, "I226 MDIO write timeout (phy=0x%x reg=0x%x)\n", phy_addr, reg_addr);
     return -1;
 }
 
