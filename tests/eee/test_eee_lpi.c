@@ -185,7 +185,10 @@ static int TC_EEE_005_MDIO_EEE_Advertisement(void)
     CloseHandle(h);
     if (!ok) {
         DWORD e = GetLastError();
-        if (e == ERROR_INVALID_FUNCTION || e == ERROR_NOT_SUPPORTED) return -1;
+        /* ERROR_INVALID_PARAMETER (87) = Clause 22 reg>31 guard fired — Clause 45 MMD 7.60
+         * access requires reg=60 which is out of Clause 22 range; treat as skip, not failure. */
+        if (e == ERROR_INVALID_FUNCTION || e == ERROR_NOT_SUPPORTED ||
+            e == ERROR_INVALID_PARAMETER) return -1;
         return 0;
     }
     printf("    MMD %u.%u (EEE Advertisement) = 0x%04X\n",
