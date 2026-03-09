@@ -2,7 +2,7 @@
 
 **Document ID**: TEST-PLAN-MASTER-CATEGORIZED  
 **Created**: 2026-03-07  
-**Last Verified**: 2026-03-08 (driver `e3d4c8f`, Run-Tests-Elevated.ps1, **Release build**)  
+**Last Verified**: 2026-03-09 (driver `e3d4c8f`; Sprints 1–4 code committed; Sprint 2 Release verification in progress)  
 **Status**: ✅ Active  
 **Phase**: 07-verification-validation  
 **Standards**: IEEE 1012-2016 (Verification & Validation)
@@ -68,74 +68,82 @@ Test binary exists but does not fully exercise all acceptance criteria stated in
 Leave open; add a comment tracking the gap; do not close until gap is filled.
 
 | Issue | Test ID | Covering File(s) | Gap Description |
-|-------|---------|-----------------|-----------------|
-| #195 | TEST-IOCTL-SET-001: PHC Time Set | `test_ioctl_ptp_getset.c` | ForceSet=TRUE branch, privilege enforcement, monotonicity preservation during set not verified |
-| #200 | TEST-PERF-PHC-001: PHC Read Latency | `test_timestamp_latency.c` | PHC-query-specific P50 <500ns / P99 <1µs sub-measurement not confirmed |
-| #208 | TEST-MULTI-ADAPTER-001: Multi-Adapter PHC Sync | `test_all_adapters.c`, `avb_multi_adapter_test.c` | Cross-adapter PHC isolation ±10 ns not measured; cross-sync ≤100 ns not tested |
+|-------|---------|-----------------|-----------------||
 | #209 | TEST-LAUNCH-TIME-001: Launch Time Offload | `test_ioctl_target_time.c` | Gate-window enforcement and missed-deadline detection not in test |
-| #215 | TEST-ERROR-HANDLING-001: Error Detection & Recovery | `test_hal_errors.c` | NIC disconnect recovery, DMA error, resource exhaustion not exercised by HAL unit tests |
 | #222 | TEST-DIAGNOSTICS-001: Network Diagnostics | `test_event_log.c` + `diagnostic/*.c` | Packet-capture path and ETW decode assertions not automated |
-| #231 | TEST-ERROR-RECOVERY-001: Fault Injection | `test_hal_errors.c` | Driver Verifier fault injection harness not automated |
 | #238 | TEST-PTP-001: HW Timestamp Correlation | `ptp_clock_control_test.c`, `rx_timestamping_test.c` | ±100 ns accuracy assertion across PHC-QPC pair not automated |
 | #247 | TEST-DEBUG-REG-001: Registry Debug Settings | `test_registry_diagnostics.c` | DebugLevel runtime persistence across driver reload not verified |
-| #248 | TEST-SECURITY-BUFFER-001: Buffer Overflow Protection | `test_security_validation.c` | Driver Verifier Special Pool CI run not automated |
 | #250 | TEST-INTEGRATION-SUITE-001: HIL Integration | `AvbIntegrationTests.c` | No formal pass/fail traceability report generated in CI |
 | #260 | TEST-COMPAT-I225-001: I225 Controller Compat | `tests/device_specific/i226/*.c` | No dedicated VEN_8086:DEV_15F2 detection test (I225-V device ID) |
 | #261 | TEST-COMPAT-I219-001: I219 Controller Compat | `avb_test_i219.c` | Test exists; requires physical I219 hardware to run |
-| #263 | TEST-IOCTL-BUFFER-001: IOCTL Buffer Validation | `test_security_validation.c` | Automated fuzz test not implemented |
-| #264 | TEST-SEC-IOCTL-001: IOCTL Access Control | `test_security_validation.c` | Dedicated elevated-vs-standard-user IOCTL rejection not automated |
-| #266 | TEST-PHC-SET-001: PHC Set + Monotonicity | `test_ioctl_ptp_getset.c` | ForceSet=TRUE code path and monotonicity invariant assertion not covered |
-| #269 | TEST-EVENT-LOG-001: Windows Event Log | `test_event_log.c` | SIEM/wevtutil query assertions and Event ID validation not automated |
-| #274 | TEST-PERF-PHC-001: PHC Query <500 ns | `test_timestamp_latency.c` | PHC-query-only RDTSC microbenchmark not isolated in test |
-| #275 | TEST-DEVICE-CAP-001: Device Capability Query | `test_hw_state.c`, `test_device_register_access.c` | Cache hit rate >99.5% and <50 µs latency not measured |
-| #277 | TEST-DAL-INIT-001: DAL Init & Strategy Selection | `test_device_register_access.c` | I210 vs I225 strategy-selection code path not verified explicitly |
-| #279 | TEST-DEVICE-ABS-THREADING-001: Thread-Safe DevOps | `test_hal_unit.c` | 8-thread stress and <100 µs lock hold time not automated |
-| #280 | TEST-ERROR-MAP-001: AVB→NTSTATUS Mapping | `test_hal_errors.c` | Exhaustive 1:1 enum→NTSTATUS assertion table not verified |
-| #285 | TEST-PHC-MONOTONIC-001 (detailed) | *(none yet)* | New test needed: 10M PHC reads + concurrent offset adjustments |
-| #287 | TEST-REG-ACCESS-LOCK-001: Spin Lock | `test_hal_unit.c` | Multi-CPU concurrent access + IRQL violation injection not done |
 | #288 | TEST-HW-DETECT-CAPS-001: HW Capability Detection | `test_hw_state.c`, `avb_test_i210_um.c` | PCI read latency <100 µs assertion not measured |
-| #289 | TEST-EVENT-ID-SSOT-001: Event ID SSOT | `test_register_constants.c` | SSOT check for Event IDs in `avb_events.h` not scripted |
-| #304 | TEST-REGS-001: Build with Submodule Headers | `test_register_constants.c`, `verify_offsets.c` | CI gate confirming zero build errors with submodule not enforced |
-| #305 | TEST-REGS-002: Magic Numbers Static Analysis | `test_register_constants.c` | CI grep scan for raw hex literals in `src/` not wired up |
-| #306 | TEST-REGS-003: Register Constants vs Datasheets | `test_register_constants.c` | Full datasheet offset assertion table not complete |
 
 ---
 
-## Category 4 — 🔴 Test Missing (Implementation Exists, New Test Code Needed)
+## Category 3b — 🔵 Test Written (Awaiting Release Build Verification)
 
-Driver feature is implemented; no automated test written yet.
-Prioritized by ROI / effort.
+Test code committed in Sprints 1–4; not yet verified against a **Release** build of the driver.
+Run each binary via `Run-Tests-Elevated.ps1` against a **Release** build to confirm pass/fail.
+On confirmed PASS: move to Category 1 and close the GitHub issue with evidence comment.
 
-### Priority P0 (Critical — write these first)
+| Issue | Test ID / Feature | Test File | Sprint | Committed |
+|-------|-------------------|-----------|--------|-----------|
+| #195 | TEST-IOCTL-SET-001: PHC Time Set (ForceSet=TRUE) | `tests/ioctl/test_ioctl_ptp_getset.c` | S1 | `97f6d40` |
+| #200 | TEST-PERF-PHC-001: PHC Read Latency P50/P99 | `tests/performance/test_timestamp_latency.c` | S1 | `97f6d40` |
+| #266 | TEST-PHC-SET-001: PHC Set + Monotonicity | `tests/ioctl/test_ioctl_ptp_getset.c` | S1 | `97f6d40` |
+| #269 | TEST-EVENT-LOG-001: Windows Event Log | `tests/event-logging/test_event_log.c` | S1 | `97f6d40` |
+| #274 | TEST-PERF-PHC-001: PHC Query <500 ns | `tests/performance/test_timestamp_latency.c` | S1 | `97f6d40` |
+| #275 | TEST-DEVICE-CAP-001: Device Capability Query | `tests/integration/test_device_register_access.c` | S1 | `97f6d40` |
+| #277 | TEST-DAL-INIT-001: DAL Init & Strategy Selection | `tests/integration/test_device_register_access.c` | S1 | `97f6d40` |
+| #279 | TEST-DEVICE-ABS-THREADING-001: Thread-Safe DevOps | `tests/hal/test_hal_unit.c` | S1 | `97f6d40` |
+| #280 | TEST-ERROR-MAP-001: AVB→NTSTATUS Mapping | `tests/hal/test_hal_errors.c` | S1 | `97f6d40` |
+| #287 | TEST-REG-ACCESS-LOCK-001: Spin Lock | `tests/hal/test_hal_unit.c` | S1 | `97f6d40` |
+| #289 | TEST-EVENT-ID-SSOT-001: Event ID SSOT | `tests/verification/regs/test_register_constants.c` | S1 | `97f6d40` |
+| #304 | TEST-REGS-001: Build with Submodule Headers | `tests/verification/regs/test_register_constants.c` | S1 | `97f6d40` |
+| #305 | TEST-REGS-002: Magic Numbers Static Analysis | CI grep gate (`.github/workflows/`) | S1 | `97f6d40` |
+| #306 | TEST-REGS-003: Register Constants vs Datasheets | `tests/verification/regs/test_register_constants.c` | S1 | `97f6d40` |
+| #285 | TEST-PHC-MONOTONIC-001: PHC Monotonicity | `tests/ioctl/test_ioctl_phc_monotonicity.c` | S2 | `6187381` |
+| #198 | TEST-IOCTL-XSTAMP-001: PHC Cross-Timestamp | `tests/ioctl/test_ioctl_xstamp.c` | S2 | `6187381` |
+| #196 | TEST-PTP-EPOCH-001: TAI Epoch Init | `tests/ioctl/test_ioctl_phc_epoch.c` | S2 | `6187381` |
+| #264 | TEST-SEC-IOCTL-001: IOCTL Access Control | `tests/security/test_ioctl_access_control.c` | S2 | `9d98f73` |
+| #263 | TEST-IOCTL-BUFFER-001: IOCTL Buffer Fuzz | `tests/security/test_ioctl_buffer_fuzz.c` | S2 | `9d98f73` |
+| #248 | TEST-SECURITY-BUFFER-001: Buffer Overflow Protection | `tests/security/test_ioctl_buffer_fuzz.c` | S2 | `9d98f73` |
+| #208 | TEST-MULTI-ADAPTER-001: Multi-Adapter PHC Sync | `tests/integration/test_multi_adapter_phc_sync.c` | S2 | `9d98f73` |
+| #214 | TEST-CROSS-SYNC-001: Cross-Adapter PHC Sync ≤100 ns | `tests/integration/test_multi_adapter_phc_sync.c` | S2 | `9d98f73` |
+| #218 | TEST-POWER-MGMT-001: D0/D3 State Transitions | `tests/power/test_power_management.c` | S3 | `4b51438` |
+| #271 | TEST-POWER-MGMT-S3-001: S3 Sleep/Wake | `tests/power/test_s3_sleep_wake.c` | S3 | `4b51438` |
+| #262 | TEST-HOT-PLUG-001: Hot-Plug PnP Detection | `tests/pnp/test_hot_plug.c` | S3 | `4b51438` |
+| #276 | TEST-VLAN-PCP-001: VLAN PCP→TC Mapping | `tests/tsn/test_vlan_pcp_tc_mapping.c` | S3 | `4b51438` |
+| #216 | TEST-QUEUE-PRIORITY-001: PCP→TC→Queue Assignment | `tests/tsn/test_vlan_pcp_tc_mapping.c` | S3 | `4b51438` |
+| #286 | TEST-NDIS-FASTPATH-001: NDIS Fast Path <1 µs | `tests/ndis/test_ndis_fastpath_latency.c` | S3 | `4b51438` |
+| #215 | TEST-ERROR-HANDLING-001: Error Detection & Recovery | `tests/integration/test_error_recovery.c` | S3 | `4b51438` |
+| #231 | TEST-ERROR-RECOVERY-001: Fault Injection | `tests/integration/test_error_recovery.c` | S3 | `4b51438` |
+| #254 | TEST-ERROR-INJECT-001: Driver Verifier Fault Injection | `tests/integration/test_error_recovery.c` | S3 | `4b51438` |
+| #210 | TEST-GPTP-001: gPTP PHC Interface Contract | `tests/gptp/test_gptp_phc_interface.c` | S4a | `5c45340` |
+| #213 | TEST-VLAN-001: VLAN Tag Insert/Strip | `tests/tsn/test_vlan_tag.c` | S4b | `617d4a0` |
+| #223 | TEST-EEE-001: EEE LPI | `tests/eee/test_eee_lpi.c` | S4b | `617d4a0` |
+| #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | S4b | `617d4a0` |
+| #236 | TEST-EVENT-003: ATDECC Entity Events | `tests/atdecc/test_atdecc_event.c` | S4b | `617d4a0` |
+| #211 | TEST-SRP-001: SRP Bandwidth Reservation | `tests/srp/test_srp_interface.c` | S4b | `617d4a0` |
+| #240 | TEST-GPTP-COMPAT-001: gPTP Daemon Coexistence | `tests/openavnu/test_gptp_daemon_coexist.c` | S4b | `617d4a0` |
+| #258 | TEST-COMPAT-WIN7-001: Win10+ OS Version Check | `tests/compat/test_win7_stub.c` | S4b | `617d4a0` |
 
-| Issue | Test ID | Feature | New Test Required |
-|-------|---------|---------|------------------|
-| #285 | TEST-PHC-MONOTONIC-001 | PHC monotonicity guarantee | `test_ioctl_phc_monotonicity.c`: 10M reads + concurrent offset; assert timestamp[i+1] >= timestamp[i] |
-| #198 | TEST-IOCTL-XSTAMP-001 | `IOCTL_AVB_PHC_CROSSTIMESTAMP` | `test_ioctl_xstamp.c`: PHC-QPC simultaneous snapshot; assert delta <10 µs |
-| #196 | TEST-PTP-EPOCH-001 | TAI epoch initialization | `test_ioctl_phc_epoch.c`: epoch=1970-01-01 UTC; TAI-UTC offset=37 s; boundary |
-| #274 | TEST-PERF-PHC-001 | PHC query latency <500 ns | RDTSC microbenchmark isolated to `IOCTL_PHC_QUERY` only |
+**Action**: Build each binary in **Release** configuration and run via `Run-Tests-Elevated.ps1`. On PASS → move to Category 1 + close GitHub issue with evidence comment.
 
-### Priority P1 (High)
+---
 
-| Issue | Test ID | Feature | New Test Required |
-|-------|---------|---------|------------------|
-| #271 | TEST-POWER-MGMT-S3-001 | S3 sleep/wake cycles | PowerShell sleep/wake automation; FilterPause/Restart callback verification |
-| #262 | TEST-HOT-PLUG-001 | Hot-plug PnP detection | `devcon disable/enable` cycle; assert re-init and no leaks |
-| #276 | TEST-VLAN-PCP-001 | VLAN PCP→TC mapping | PCP 0-7 register verification via IOCTL on I225/I226 |
-| #286 | TEST-NDIS-FASTPATH-001 | NDIS fast path <1 µs | RDTSC wrap around `FilterSendNetBufferLists`; 10,000 sample P99 |
-| #214 | TEST-CROSS-SYNC-001 | Cross-adapter PHC sync ≤100 ns | Extend multi-adapter suite; PHC offset comparison across handles |
-| #216 | TEST-QUEUE-PRIORITY-001 | PCP→TC→queue assignment | PCP 0-7 → hardware TC register read-back |
+## Category 4 — 🔴 Test Missing (Not in Sprint 1–4)
 
-### Priority P2 (Medium)
+No automated test written; not yet scheduled in Sprints 1–4. Target Sprint 5 or future sprints.
+
+### Priority P2 (Medium — Sprint 5)
 
 | Issue | Test ID | Feature | New Test Required |
 |-------|---------|---------|------------------|
 | #199 | TEST-PTP-CORR-001 | TX/RX PHC base correlation | TX and RX hardware timestamps must share PHC base; delta assertion |
-| #218 | TEST-POWER-MGMT-001 | D0/D3 state transitions | FilterPause/FilterRestart + PHC preservation across D0→D3→D0 |
 | #225 | TEST-PERF-REGRESSION-001 | Performance regression baseline | Capture metrics; fail on ≥5% regression vs baseline file |
 | #234 | TEST-EVENT-004 | AVTP diagnostic counter events | Trigger seq-gap/late-ts above threshold; verify event payload |
 | #241 | TEST-EVENT-NF-002 | Zero polling overhead | CPU% idle ≤0.1% with event subscription active but no events |
-| #254 | TEST-ERROR-INJECT-001 | Driver Verifier fault injection | Automated verifier enable/run/disable script |
 | #256 | TEST-COMPAT-WIN11-001 | Windows 11 compatibility | Driver install + basic IOCTL smoke test on Win11 21H2/22H2/23H2 |
 | #257 | TEST-COMPAT-WIN10-001 | Windows 10 compatibility | Driver install + smoke test on Win10 1809/21H2/22H2 |
 | #259 | TEST-COMPAT-SERVER-001 | Windows Server 2016+ | Driver install on Server 2019/2022; Server Core validation |
@@ -160,19 +168,11 @@ These issues are open and valid. Per TDD practice, tests should be written **bef
 
 | Issue | Test ID | Unimplemented Feature | Notes |
 |-------|---------|----------------------|---------------------|
-| #210 | TEST-GPTP-001 | gPTP stack (slave/master/BMCA) | Driver provides PHC access only; gPTP runs in user space (OpenAvnu) |
-| #211 | TEST-SRP-001 | IEEE 802.1Qat MSRP/MVRP/MMRP | SRP is Layer 2 control plane; not in NDIS filter driver scope |
-| #213 | TEST-VLAN-001 | VLAN tag insert/strip + filtering | VLAN operations not implemented in filter driver |
-| #219 | TEST-PFC-001 | IEEE 802.1Qbb Priority Flow Control | PFC is a NIC hardware feature; not exposed by driver |
-| #220 | TEST-HARDWARE-OFFLOAD-001 | TSO/RSS/LSO/checksum offload | Miniport driver features; not filter driver scope |
+| #220 | TEST-HARDWARE-OFFLOAD-001 | TSO/RSS/LSO/checksum offload | Miniport driver features; out of scope for NDIS filter driver |
 | #221 | TEST-LACP-001 | IEEE 802.1AX LACP | LACP protocol not in driver scope |
-| #223 | TEST-EEE-001 | IEEE 802.3az EEE/LPI | EEE is PHY-layer hardware; not implemented in filter |
 | #224 | TEST-SEGMENTATION-001 | MAC/IP/EtherType filtering rules | Complex packet filtering not implemented |
 | #227 | TEST-API-DOCS-001 (body: AVTP conformance) | IEEE 1722 AVTP packet format | AVTP is above the filter; body content mismatches title entirely |
 | #228 | TEST-USER-DOCS-001 (body: penetration testing) | Pen testing infrastructure | Requires specialized external tools; not automated in CI |
-| #236 | TEST-EVENT-003 | ATDECC (IEEE 1722.1) entity events | ATDECC not implemented |
-| #240 | TEST-GPTP-COMPAT-001 | External gPTP daemon coexistence (OpenAvnu) | Requires OpenAvnu runtime; not automatable in CI today |
-| #258 | TEST-COMPAT-WIN7-001 | Windows 7 SP1 support | Win7 EOL; driver targets Win10+; mark wont-fix |
 
 ---
 
@@ -204,13 +204,12 @@ Not a driver feature test. Managed on a separate track.
 |----------|-------|--------|
 | ✅ Tested OK | 8 | All closed (verified 2026-03-08, driver `e3d4c8f`, **Release build**) |
 | 🔁 Duplicates | 5 | Close as duplicate |
-| 🟡 Nearly OK | 29 | Fill gaps → close |
-| 🔴 Test Missing P0 | 4 | Write test code immediately |
-| 🔴 Test Missing P1 | 6 | Write test code (sprint backlog) |
-| 🔴 Test Missing P2/P3 | 16 | Write test code (future sprints) |
-| ⚫ TDD — write tests first | 13 | Write failing tests → implement → close |
+| 🟡 Nearly OK — Genuine Gaps | 8 | No Sprint 1–4 coverage; fill gap → close |
+| 🔵 Test Written — Awaiting Release Verification | 39 | Build Release + `Run-Tests-Elevated.ps1` → close on PASS |
+| 🔴 Test Missing (Sprint 5 / Future) | 14 | P2: 7 · P3: 7 — write test code then verify |
+| ⚫ Implementation Missing (out of driver scope) | 5 | Not in Sprint 1–4 scope; review per sprint |
 | 📋 Process/Infra/Docs | 13 | Separate track |
-| **Total reviewed** | **94** | |
+| **Total** | **92** | |
 
 ---
 
@@ -325,12 +324,14 @@ These need scheduled hardware time or a separate CI agent. Cannot be fully autom
 ### Execution order summary
 
 ```
-Sprint 1  →  Adds to existing files, runnable today           → closes ~15 issues
-Sprint 2  →  New .c files, no new hardware                    → closes ~8 issues
-Sprint 3  →  New .c files, elevated, PnP/power                → closes ~8 issues
-Sprint 4  →  TDD: write RED test → implement → GREEN          → closes ~8 issues
-Sprint 5  →  Long-running / OS compat / hardware-gated        → closes ~10 issues
+Sprint 1  →  ✅ Code committed `97f6d40`                          → ~14 issues awaiting Release verification
+Sprint 2  →  ✅ Code committed `6187381` + `9d98f73`              → ~8 issues  awaiting Release verification  ← VERIFY NEXT
+Sprint 3  →  ✅ Code committed `4b51438`                          → ~9 issues  awaiting Release verification
+Sprint 4  →  ✅ Code committed `5c45340` + `ca4a376` + `617d4a0` → ~8 issues  awaiting Release verification
+Sprint 5  →  ❌ Not started — long-running / OS compat / hw-gated → closes ~10 issues
 ```
+
+**Immediate next step**: Build and run Sprint 2 tests in **Release** configuration; update Category 3b rows with PASS/FAIL evidence.
 
 **Start with Sprint 1 — all work is in existing files, CI-runnable, no new hardware required.**
 
