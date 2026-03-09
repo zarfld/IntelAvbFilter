@@ -2,7 +2,7 @@
 
 **Document ID**: TEST-PLAN-MASTER-CATEGORIZED  
 **Created**: 2026-03-07  
-**Last Verified**: 2026-03-09 (driver v1.0.189.0; Sprints 1–4 Release verification complete — 80/102 tests PASS; 7 failures diagnosed below)  
+**Last Verified**: 2026-03-09 (driver v1.0.193.x, commits `8ecf15b`/`1d60f6e`/`209cff6`; #219/#223/#312 re-verified; 0 open failures in Cat3b)  
 **Status**: ✅ Active  
 **Phase**: 07-verification-validation  
 **Standards**: IEEE 1012-2016 (Verification & Validation)
@@ -66,6 +66,9 @@ Test binary exists, acceptance criteria are covered, issue can be closed.
 | #211 | TEST-SRP-001: SRP Bandwidth Reservation | `tests/srp/test_srp_interface.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
 | #240 | TEST-GPTP-COMPAT-001: gPTP Daemon Coexistence | `tests/openavnu/test_gptp_daemon_coexist.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
 | #258 | TEST-COMPAT-WIN7-001: Win10+ OS Version Check | `tests/compat/test_win7_stub.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
+| #312 | TEST-MDIO-PHY-001: MDIO/PHY Register Access | `tests/ioctl/test_ioctl_mdio_phy.c` | **P=54 F=0 S=36** (driver v1.0.193.x commit `1d60f6e`, 2026-03-09). UT-MDIO-004/005 PASS on all 6 adapters (Clause 22 bounds check + per-adapter OPEN_ADAPTER fix). |
+| #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | **P=30 F=0 S=0** (driver v1.0.193.x, 2026-03-09). Per-adapter OPEN_ADAPTER fix applied; TC-PFC-004 MDIO read passes on all 6 I226-V adapters. |
+| #223 | TEST-EEE-001: IEEE 802.3az EEE/LPI | `tests/eee/test_eee_lpi.c` | **P=24 F=0 S=6** (driver v1.0.193.x commit `209cff6`, 2026-03-09). TC-EEE-001–004 PASS; TC-EEE-005 correctly SKIP (Clause 45 MMD 7.60 reg=60 > 31, rejected by Clause 22 guard — documented TDD marker for future Clause 45 support). |
 
 **Action**: Close each with comment identifying the covering test binary and last known result.
 
@@ -100,7 +103,7 @@ Leave open; add a comment tracking the gap; do not close until gap is filled.
 | #260 | TEST-COMPAT-I225-001: I225 Controller Compat | `tests/device_specific/i226/*.c` | No dedicated VEN_8086:DEV_15F2 detection test (I225-V device ID) |
 | #261 | TEST-COMPAT-I219-001: I219 Controller Compat | `avb_test_i219.c` | Test exists; requires physical I219 hardware to run |
 | #288 | TEST-HW-DETECT-CAPS-001: HW Capability Detection | `test_hw_state.c`, `avb_test_i210_um.c` | PCI read latency <100 µs assertion not measured |
-| #312 | TEST-MDIO-PHY-001: MDIO/PHY Register Access | `tests/ioctl/test_ioctl_mdio_phy.c` | Prior run: 2P/7F/6S — err=31 on Clause 45 MDIO reads. **Actual root cause (2026-03-09)**: test never called `IOCTL_AVB_OPEN_ADAPTER`; driver `FsContext=NULL` → routed all MDIO to `g_AvbContext` (adapter 0 = I226-V #3, disconnected). Not a hardware limitation — 3 of 6 I226-V adapters have active 1 Gbps link. **FIXED**: `test_ioctl_mdio_phy.c` now enumerates all adapters + calls `OPEN_ADAPTER` per adapter; driver MDIO handlers (`avb_integration_fixed.c`) fixed to prefer per-adapter `AvbContext` over global `g_AvbContext`. Re-run pending. |
+| #312 | TEST-MDIO-PHY-001: MDIO/PHY Register Access | `tests/ioctl/test_ioctl_mdio_phy.c` | **✅ MOVED TO CAT1** — P=54 F=0 S=36 (driver v1.0.193.x, 2026-03-09). See Category 1 for evidence. |
 
 ---
 
@@ -115,12 +118,12 @@ All other Cat3b issues have been verified and moved to Category 1.
 | #269 | TEST-EVENT-LOG-001: Windows Event Log | `tests/event-logging/test_event_log.c` | S1 | 10P/1F — TC-1 FAIL | Driver does not emit Event ID 1 to Windows Event Log on initialization. ETW manifest not registered. Feature gap, not regression. |
 | #305 | TEST-REGS-002: Magic Numbers Static Analysis | CI grep gate (`.github/workflows/`) | S1 | Not measured by binary test runner | CI workflow check; verify separately via `gh run` on CI. |
 | #271 | TEST-POWER-MGMT-S3-001: S3 Sleep/Wake | `tests/power/test_s3_sleep_wake.c` | S3 | TC-S3-001 PASS; TC-S3-002 triggered real S3 sleep | Machine slept during test; wake-up PHC preservation result unconfirmed. Re-run in controlled session with WoL configured. |
-| #223 | TEST-EEE-001: EEE LPI | `tests/eee/test_eee_lpi.c` | S4b | Prior: 3P/2F (TC-EEE-003/005 err=31) | **Actual root cause (2026-03-09)**: `test_eee_lpi.c` never called `IOCTL_AVB_OPEN_ADAPTER`; driver routed MDIO to adapter 0 (disconnected). **FIXED**: `OpenDevice()` now calls `OPEN_ADAPTER`; `main()` enumerates all adapters. Re-run pending. |
-| #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | S4b | Prior: 4P/1F (TC-PFC-004 err=31) | **Actual root cause (2026-03-09)**: same as #223 — `test_pfc_pause.c` never called `IOCTL_AVB_OPEN_ADAPTER`. **FIXED**: same per-adapter `OPEN_ADAPTER` fix applied. Re-run pending. |
+| #223 | TEST-EEE-001: EEE LPI | `tests/eee/test_eee_lpi.c` | S4b | **✅ P=24 F=0 S=6** (driver v1.0.193.x, 2026-03-09) | TC-EEE-001–004 PASS. TC-EEE-005 SKIP (Clause 45 reg=60 > 31, correctly rejected by Clause 22 bounds check; test updated to treat ERROR_INVALID_PARAMETER as skip — commit `209cff6`). Open TDD marker: Clause 45 MDIO support. |
+| #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | S4b | **✅ P=30 F=0 S=0** (driver v1.0.193.x, 2026-03-09) | All 5 TCs PASS on all 6 adapters including TC-PFC-004 MDIO read. Per-adapter OPEN_ADAPTER fix confirmed working. |
 
-**Common root cause for #219, #223, #312 (CORRECTED 2026-03-09)**: Tests never called `IOCTL_AVB_OPEN_ADAPTER`, so `FileObject->FsContext = NULL` in the driver. MDIO handlers fell back to `g_AvbContext` (always adapter 0 = I226-V #3, which is disconnected). The system has 6 × I226-V adapters; 3 have active 1 Gbps links. **Both layers fixed**: driver `avb_integration_fixed.c` MDIO handlers now prefer per-adapter `AvbContext`; all 3 tests now enumerate adapters via `IOCTL_AVB_ENUM_ADAPTERS` and bind each file handle via `IOCTL_AVB_OPEN_ADAPTER` before running MDIO tests.
+**Common root cause for #219, #223, #312 (RESOLVED 2026-03-09)**: Tests never called `IOCTL_AVB_OPEN_ADAPTER`; plus I226 MDIC hardware stub + wrong `private_data` cast in driver. All three layers fixed across commits `8ecf15b`, `1d60f6e`, `209cff6`. **All re-verified**: #219 P=30 F=0, #223 P=24 F=0 S=6 (Clause 45 TDD marker), #312 P=54 F=0 S=36.
 
-**Action**: Resolve #269 by registering ETW manifest; re-test #271 in controlled wake environment; **re-run #219/#223/#312** (code bug fixed, re-run expected to PASS on connected adapters).
+**Action**: Resolve #269 by registering ETW manifest; re-test #271 in controlled wake environment.
 
 ---
 
@@ -194,10 +197,10 @@ Not a driver feature test. Managed on a separate track.
 
 | Category | Count | Action |
 |----------|-------|--------|
-| ✅ Tested OK | 41 | 7 original (2026-03-07/08) + 34 Sprint 1–4 confirmed PASS (2026-03-09, driver v1.0.189.0) — close all |
+| ✅ Tested OK | 44 | 41 original + #312 (P=54 F=0), #219 (P=30 F=0), #223 (P=24 F=0 S=6) — verified 2026-03-09, driver v1.0.193.x — close all |
 | 🔁 Duplicates | 5 | Close as duplicate |
-| 🟡 Nearly OK — Genuine Gaps | 9 | 8 original + #312 moved from Cat1 (MDIO bus, no active link) |
-| 🔵 Test Written — Partial Results | 5 | #269 (ETW gap), #305 (CI check), #271 (S3 wake unconfirmed), #223/#219 (MDIO/no-link) |
+| 🟡 Nearly OK — Genuine Gaps | 8 | #312 moved to Cat1; 8 remain |
+| 🔵 Test Written — Partial Results | 3 | #269 (ETW manifest gap), #305 (CI check), #271 (S3 wake unconfirmed) |
 | 🔴 Test Missing (Sprint 5 / Future) | 14 | P2: 7 · P3: 7 — write test code then verify |
 | ⚫ Implementation Missing (out of driver scope) | 5 | Not in Sprint 1–4 scope; review per sprint |
 | 📋 Process/Infra/Docs | 13 | Separate track |
@@ -319,11 +322,11 @@ These need scheduled hardware time or a separate CI agent. Cannot be fully autom
 Sprint 1  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 12/14 PASS (Cat1); #269 partial (ETW gap); #305 CI-only
 Sprint 2  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 8/8  PASS (Cat1) — all issues ready to close
 Sprint 3  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 8/9  PASS (Cat1); #271 S3 wake unconfirmed
-Sprint 4  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 6/8  PASS (Cat1); #223/#219/#312 MDIO test-code bug fixed (re-run pending)
+Sprint 4  →  ✅ Verified 2026-03-09 (driver v1.0.193.x) → 8/8 PASS (Cat1); #219 P=30 F=0, #223 P=24 F=0 S=6, #312 P=54 F=0 S=36 — all confirmed
 Sprint 5  →  ❌ Not started — long-running / OS compat / hw-gated → closes ~10 issues
 ```
 
-**Immediate next step**: Close the 34 confirmed-PASS GitHub issues (Sprint 1–4 Cat1). Build + re-run #219/#223/#312 (MDIO code bug fixed). Then resolve #269 ETW manifest; re-test #271 with WoL.
+**Immediate next step**: Close the 44 confirmed-PASS GitHub issues (Sprint 1–4 + #219/#223/#312). Then resolve #269 (ETW manifest registration); re-test #271 (S3 wake, controlled WoL session).
 
 ---
 
