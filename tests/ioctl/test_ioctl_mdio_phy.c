@@ -92,12 +92,18 @@ BOOL CheckMdioCapability(HANDLE adapter) {
 }
 
 /**
- * @brief Open first available AVB adapter
+ * @brief Open a specific AVB adapter by index using IOCTL_AVB_OPEN_ADAPTER.
+ *
+ * Without OPEN_ADAPTER, FileObject->FsContext is NULL and the driver uses
+ * g_AvbContext (adapter 0 = may be disconnected). This function binds the
+ * file handle to the correct per-adapter context so MDIO IOCTLs target
+ * the right adapter. Pattern from test_ioctl_ts_event_sub.c.
  */
-HANDLE OpenAdapter(void) {
+HANDLE OpenAdapterByIndex(UINT32 index, UINT16 device_id) {
     HANDLE h;
-    
-    /* Try symbolic link (typical driver interface) */
+    AVB_OPEN_REQUEST open_req = {0};
+    DWORD bytes_returned = 0;
+
     h = CreateFileA("\\\\.\\IntelAvbFilter",
                     GENERIC_READ | GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -105,11 +111,27 @@ HANDLE OpenAdapter(void) {
                     OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL,
                     NULL);
-    
+
     if (h == INVALID_HANDLE_VALUE) {
         printf("  [WARN] Could not open device: error %lu\n", GetLastError());
+        return INVALID_HANDLE_VALUE;
     }
-    
+
+    /* Bind handle to the specific adapter instance (sets FsContext in driver) */
+    open_req.vendor_id = 0x8086;  /* Intel */
+    open_req.device_id = device_id;
+    open_req.index     = index;
+
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                         &open_req, sizeof(open_req),
+                         &open_req, sizeof(open_req),
+                         &bytes_returned, NULL) || open_req.status != 0) {
+        printf("  [WARN] OPEN_ADAPTER failed for index=%u (err=%lu status=0x%08X)\n",
+               index, GetLastError(), open_req.status);
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+
     return h;
 }
 
@@ -471,7 +493,12 @@ void Test_BulkRegisterReadOptimization(TestContext *ctx) {
  *============================================================================*/
 
 int main(int argc, char **argv) {
-    TestContext ctx = {0};
+    HANDLE discovery;
+    AVB_ENUM_REQUEST enum_req = {0};
+    DWORD br = 0;
+    UINT32 adapter_index;
+    int total_pass = 0, total_fail = 0, total_skip = 0;
+    int adapters_tested = 0;
     
     printf("\n");
     printf("====================================================================\n");
@@ -481,87 +508,106 @@ int main(int argc, char **argv) {
     printf(" Issue: #312 (TEST-MDIO-PHY-001)\n");
     printf(" Requirement: #10 (REQ-F-MDIO-001)\n");
     printf(" IOCTLs: IOCTL_AVB_MDIO_READ (29), IOCTL_AVB_MDIO_WRITE (30)\n");
-    printf(" Total Tests: 15\n");
+    printf(" Total Tests per adapter: 15\n");
     printf(" Priority: P1\n");
     printf("====================================================================\n");
     printf("\n");
-    
-    /* Open adapter */
-    ctx.adapter = OpenAdapter();
-    if (ctx.adapter == INVALID_HANDLE_VALUE) {
-        printf("[ERROR] Failed to open AVB adapter. Skipping all tests.\n\n");
+
+    /* Open once for enumeration only */
+    discovery = CreateFileA("\\\\.\\IntelAvbFilter",
+                            GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (discovery == INVALID_HANDLE_VALUE) {
+        printf("[ERROR] Failed to open AVB device for enumeration. Aborting.\n\n");
         return 1;
     }
-    
-    /* Check if adapter supports MDIO */
-    if (!CheckMdioCapability(ctx.adapter)) {
-        printf("[INFO] Adapter does not support MDIO capability (INTEL_CAP_MDIO).\n");
-        printf("       MDIO is only supported on I219 and older adapters.\n");
-        printf("       I210, I225, I226 do NOT have MDIO capability.\n");
-        printf("       All tests will be SKIPPED.\n\n");
-        
-        /* Print summary showing all tests skipped */
-        printf("====================================================================\n");
-        printf(" Test Summary\n");
-        printf("====================================================================\n");
-        printf(" Total:  15 tests\n");
-        printf(" Passed: 0 tests\n");
-        printf(" Failed: 0 tests\n");
-        printf(" Skipped: 15 tests (Adapter does not support MDIO)\n");
-        printf("====================================================================\n\n");
-        
+
+    /* Iterate over all adapter indices until enumeration returns no more */
+    for (adapter_index = 0; adapter_index < 16; adapter_index++) {
+        TestContext ctx = {0};
+
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = adapter_index;
+        br = 0;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL)) {
+            break;  /* No more adapters */
+        }
+
+        printf("--------------------------------------------------------------------\n");
+        printf(" Adapter %u  VID=0x%04X DID=0x%04X\n",
+               adapter_index, enum_req.vendor_id, enum_req.device_id);
+        printf("--------------------------------------------------------------------\n");
+
+        /* Open with OPEN_ADAPTER to bind handle to this adapter's context */
+        ctx.adapter = OpenAdapterByIndex(adapter_index, enum_req.device_id);
+        if (ctx.adapter == INVALID_HANDLE_VALUE) {
+            printf("[SKIP] Could not bind to adapter %u\n\n", adapter_index);
+            continue;
+        }
+
+        /* Check if this adapter supports MDIO */
+        if (!CheckMdioCapability(ctx.adapter)) {
+            printf("[SKIP] Adapter %u does not report MDIO capability\n\n", adapter_index);
+            CloseHandle(ctx.adapter);
+            continue;
+        }
+
+        printf("[INFO] Adapter %u supports MDIO. Running tests...\n\n", adapter_index);
+        adapters_tested++;
+
+        /* Save PHY state */
+        SavePHYState(&ctx);
+
+        /* Run all test cases */
+        printf("Running MDIO/PHY tests...\n\n");
+        Test_BasicMDIORead(&ctx);
+        Test_BasicMDIOWrite(&ctx);
+        Test_MultiPagePHYAccess(&ctx);
+        Test_InvalidPHYAddressRejection(&ctx);
+        Test_OutOfRangeRegisterRejection(&ctx);
+        Test_ReadOnlyRegisterWriteProtection(&ctx);
+        Test_MDIOBusTimeoutHandling(&ctx);
+        Test_ConcurrentMDIOAccessSerialization(&ctx);
+        Test_ExtendedRegisterAccessClause45(&ctx);
+        Test_PHYResetViaMDIO(&ctx);
+        Test_AutoNegotiationStatusRead(&ctx);
+        Test_LinkPartnerAbilityRead(&ctx);
+        Test_CableDiagnosticsViaMDIO(&ctx);
+        Test_MDIOAccessDuringLowPower(&ctx);
+        Test_BulkRegisterReadOptimization(&ctx);
+
+        /* Restore PHY state */
+        RestorePHYState(&ctx);
         CloseHandle(ctx.adapter);
-        return 2;  /* Exit code 2 = all skipped */
+
+        printf("\n Adapter %u: P=%d F=%d S=%d\n\n",
+               adapter_index, ctx.pass_count, ctx.fail_count, ctx.skip_count);
+
+        total_pass += ctx.pass_count;
+        total_fail += ctx.fail_count;
+        total_skip += ctx.skip_count;
     }
-    
-    printf("[INFO] Adapter supports MDIO capability. Running tests...\n\n");
-    
-    /* Save PHY state */
-    SavePHYState(&ctx);
-    
-    /* Run test cases */
-    printf("Running MDIO/PHY tests...\n\n");
-    
-    Test_BasicMDIORead(&ctx);
-    Test_BasicMDIOWrite(&ctx);
-    Test_MultiPagePHYAccess(&ctx);
-    Test_InvalidPHYAddressRejection(&ctx);
-    Test_OutOfRangeRegisterRejection(&ctx);
-    Test_ReadOnlyRegisterWriteProtection(&ctx);
-    Test_MDIOBusTimeoutHandling(&ctx);
-    Test_ConcurrentMDIOAccessSerialization(&ctx);
-    Test_ExtendedRegisterAccessClause45(&ctx);
-    Test_PHYResetViaMDIO(&ctx);
-    Test_AutoNegotiationStatusRead(&ctx);
-    Test_LinkPartnerAbilityRead(&ctx);
-    Test_CableDiagnosticsViaMDIO(&ctx);
-    Test_MDIOAccessDuringLowPower(&ctx);
-    Test_BulkRegisterReadOptimization(&ctx);
-    
-    /* Restore PHY state */
-    RestorePHYState(&ctx);
-    
-    /* Close adapter */
-    CloseHandle(ctx.adapter);
-    
-    /* Print summary */
+
+    CloseHandle(discovery);
+
+    if (adapters_tested == 0) {
+        printf("[ERROR] No adapters with MDIO capability found.\n\n");
+        return 1;
+    }
+
+    /* Print aggregate summary */
     printf("\n");
     printf("====================================================================\n");
-    printf(" Test Summary\n");
+    printf(" Test Summary (%d adapter(s) with MDIO)\n", adapters_tested);
     printf("====================================================================\n");
-    printf(" Total:  %d tests\n", ctx.test_count);
-    printf(" Passed: %d tests\n", ctx.pass_count);
-    printf(" Failed: %d tests\n", ctx.fail_count);
-    printf(" Skipped: %d tests\n", ctx.skip_count);
+    printf(" Total Passed:  %d\n", total_pass);
+    printf(" Total Failed:  %d\n", total_fail);
+    printf(" Total Skipped: %d\n", total_skip);
     printf("====================================================================\n");
     printf("\n");
-    
-    /* Exit with pass rate */
-    if (ctx.fail_count > 0) {
-        return 1;  /* Failures detected */
-    } else if (ctx.pass_count == 0) {
-        return 2;  /* All tests skipped */
-    } else {
-        return 0;  /* Pass */
-    }
+
+    return (total_fail > 0) ? 1 : 0;
 }

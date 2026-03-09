@@ -100,7 +100,7 @@ Leave open; add a comment tracking the gap; do not close until gap is filled.
 | #260 | TEST-COMPAT-I225-001: I225 Controller Compat | `tests/device_specific/i226/*.c` | No dedicated VEN_8086:DEV_15F2 detection test (I225-V device ID) |
 | #261 | TEST-COMPAT-I219-001: I219 Controller Compat | `avb_test_i219.c` | Test exists; requires physical I219 hardware to run |
 | #288 | TEST-HW-DETECT-CAPS-001: HW Capability Detection | `test_hw_state.c`, `avb_test_i210_um.c` | PCI read latency <100 µs assertion not measured |
-| #312 | TEST-MDIO-PHY-001: MDIO/PHY Register Access | `tests/ioctl/test_ioctl_mdio_phy.c` | 2P/7F/6S (driver v1.0.189.0, 2026-03-09). UT-MDIO-001/002/006/010/011/012/015 fail: Win32 err=31 on all Clause 45 MDIO reads. Root cause: MDIO bus inaccessible on I226 adapters without active link cable. Not a driver code defect; re-test with NIC connected to peer. |
+| #312 | TEST-MDIO-PHY-001: MDIO/PHY Register Access | `tests/ioctl/test_ioctl_mdio_phy.c` | Prior run: 2P/7F/6S — err=31 on Clause 45 MDIO reads. **Actual root cause (2026-03-09)**: test never called `IOCTL_AVB_OPEN_ADAPTER`; driver `FsContext=NULL` → routed all MDIO to `g_AvbContext` (adapter 0 = I226-V #3, disconnected). Not a hardware limitation — 3 of 6 I226-V adapters have active 1 Gbps link. **FIXED**: `test_ioctl_mdio_phy.c` now enumerates all adapters + calls `OPEN_ADAPTER` per adapter; driver MDIO handlers (`avb_integration_fixed.c`) fixed to prefer per-adapter `AvbContext` over global `g_AvbContext`. Re-run pending. |
 
 ---
 
@@ -115,12 +115,12 @@ All other Cat3b issues have been verified and moved to Category 1.
 | #269 | TEST-EVENT-LOG-001: Windows Event Log | `tests/event-logging/test_event_log.c` | S1 | 10P/1F — TC-1 FAIL | Driver does not emit Event ID 1 to Windows Event Log on initialization. ETW manifest not registered. Feature gap, not regression. |
 | #305 | TEST-REGS-002: Magic Numbers Static Analysis | CI grep gate (`.github/workflows/`) | S1 | Not measured by binary test runner | CI workflow check; verify separately via `gh run` on CI. |
 | #271 | TEST-POWER-MGMT-S3-001: S3 Sleep/Wake | `tests/power/test_s3_sleep_wake.c` | S3 | TC-S3-001 PASS; TC-S3-002 triggered real S3 sleep | Machine slept during test; wake-up PHC preservation result unconfirmed. Re-run in controlled session with WoL configured. |
-| #223 | TEST-EEE-001: EEE LPI | `tests/eee/test_eee_lpi.c` | S4b | 3P/2F — TC-EEE-003/005 FAIL | EEE IOCTL enable/disable passes (TC-EEE-001/002/004). Clause 45 MDIO reads of MMD 3.20 / MMD 7.60 return err=31. Hardware: MDIO bus inaccessible without active link. |
-| #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | S4b | 4P/1F — TC-PFC-004 FAIL | PFC IOCTL enable/disable/status passes (TC-PFC-001/002/003/005). MDIO read of MMD 7.19 PAUSE capability returns err=31. Same hardware limitation as #223 and #312. |
+| #223 | TEST-EEE-001: EEE LPI | `tests/eee/test_eee_lpi.c` | S4b | Prior: 3P/2F (TC-EEE-003/005 err=31) | **Actual root cause (2026-03-09)**: `test_eee_lpi.c` never called `IOCTL_AVB_OPEN_ADAPTER`; driver routed MDIO to adapter 0 (disconnected). **FIXED**: `OpenDevice()` now calls `OPEN_ADAPTER`; `main()` enumerates all adapters. Re-run pending. |
+| #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | S4b | Prior: 4P/1F (TC-PFC-004 err=31) | **Actual root cause (2026-03-09)**: same as #223 — `test_pfc_pause.c` never called `IOCTL_AVB_OPEN_ADAPTER`. **FIXED**: same per-adapter `OPEN_ADAPTER` fix applied. Re-run pending. |
 
-**Common root cause for #219, #223, #312**: Clause 45 MDIO reads return `Win32 error 31 (ERROR_GEN_FAILURE)` on I226 adapters when no active link is present. This is a hardware/environment limitation, not a driver code defect. Re-test with NIC cable connected to a peer device.
+**Common root cause for #219, #223, #312 (CORRECTED 2026-03-09)**: Tests never called `IOCTL_AVB_OPEN_ADAPTER`, so `FileObject->FsContext = NULL` in the driver. MDIO handlers fell back to `g_AvbContext` (always adapter 0 = I226-V #3, which is disconnected). The system has 6 × I226-V adapters; 3 have active 1 Gbps links. **Both layers fixed**: driver `avb_integration_fixed.c` MDIO handlers now prefer per-adapter `AvbContext`; all 3 tests now enumerate adapters via `IOCTL_AVB_ENUM_ADAPTERS` and bind each file handle via `IOCTL_AVB_OPEN_ADAPTER` before running MDIO tests.
 
-**Action**: Resolve #269 by registering ETW manifest; re-test #271 in controlled wake environment; re-test #219/#223/#312 with active link.
+**Action**: Resolve #269 by registering ETW manifest; re-test #271 in controlled wake environment; **re-run #219/#223/#312** (code bug fixed, re-run expected to PASS on connected adapters).
 
 ---
 
@@ -319,11 +319,11 @@ These need scheduled hardware time or a separate CI agent. Cannot be fully autom
 Sprint 1  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 12/14 PASS (Cat1); #269 partial (ETW gap); #305 CI-only
 Sprint 2  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 8/8  PASS (Cat1) — all issues ready to close
 Sprint 3  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 8/9  PASS (Cat1); #271 S3 wake unconfirmed
-Sprint 4  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 6/8  PASS (Cat1); #223/#219 MDIO/no-link gap
+Sprint 4  →  ✅ Verified Release 2026-03-09 (driver v1.0.189.0) → 6/8  PASS (Cat1); #223/#219/#312 MDIO test-code bug fixed (re-run pending)
 Sprint 5  →  ❌ Not started — long-running / OS compat / hw-gated → closes ~10 issues
 ```
 
-**Immediate next step**: Close the 34 confirmed-PASS GitHub issues (Sprint 1–4 Cat1). Then resolve #269 ETW manifest, re-test #271 with WoL, re-test #219/#223/#312 with active link.
+**Immediate next step**: Close the 34 confirmed-PASS GitHub issues (Sprint 1–4 Cat1). Build + re-run #219/#223/#312 (MDIO code bug fixed). Then resolve #269 ETW manifest; re-test #271 with WoL.
 
 ---
 

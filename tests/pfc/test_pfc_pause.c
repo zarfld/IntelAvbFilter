@@ -36,10 +36,38 @@
 #define DEVICE_NAME "\\\\.\\IntelAvbFilter"
 static int g_pass = 0, g_fail = 0, g_skip = 0;
 
+/* Current adapter selection — set by main() for each adapter loop iteration */
+static UINT32 g_open_adapter_index = 0;
+static UINT16 g_open_device_id     = 0;
+
+/**
+ * @brief Open the current adapter with OPEN_ADAPTER binding.
+ *
+ * Without OPEN_ADAPTER, FileObject->FsContext = NULL and the driver uses
+ * g_AvbContext (adapter 0 = may be disconnected). This ensures MDIO IOCTLs
+ * reach the correct per-adapter instance.
+ */
 static HANDLE OpenDevice(void) {
-    return CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE,
-                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    AVB_OPEN_REQUEST open_req = {0};
+    DWORD br = 0;
+
+    HANDLE h = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return INVALID_HANDLE_VALUE;
+
+    open_req.vendor_id = 0x8086;
+    open_req.device_id = g_open_device_id;
+    open_req.index     = g_open_adapter_index;
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                         &open_req, sizeof(open_req),
+                         &open_req, sizeof(open_req), &br, NULL)
+        || open_req.status != 0) {
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
 }
 
 static int TryIoctl(HANDLE h, DWORD code, void *buf, DWORD sz)
@@ -163,11 +191,44 @@ static int TC_PFC_005_DeviceInfoPFC(void)
 
 int main(void)
 {
-    int r;
+    HANDLE discovery;
+    AVB_ENUM_REQUEST enum_req = {0};
+    DWORD br = 0;
+    UINT32 idx;
+    int total_pass = 0, total_fail = 0, total_skip = 0;
+    int adapters_tested = 0;
+
     printf("============================================================\n");
     printf("  IntelAvbFilter -- IEEE 802.1Qbb PFC Tests\n");
     printf("  Implements: #219 (TEST-PFC-001)\n");
+    printf("  MULTI-ADAPTER: tests run on each I226 instance\n");
     printf("============================================================\n\n");
+
+    discovery = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (discovery == INVALID_HANDLE_VALUE) {
+        printf("[ERROR] Cannot open AVB device node.\n");
+        return 1;
+    }
+
+    for (idx = 0; idx < 16; idx++) {
+        int r;
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = idx;
+        br = 0;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL))
+            break;
+
+        g_open_adapter_index = idx;
+        g_open_device_id     = enum_req.device_id;
+        g_pass = g_fail = g_skip = 0;
+
+        printf("--------------------------------------------\n");
+        printf("  Adapter %u  VID=0x%04X DID=0x%04X\n", idx, enum_req.vendor_id, enum_req.device_id);
+        printf("--------------------------------------------\n");
 
 #define RUN(tc, label) \
     printf("  %s\n", (label)); \
@@ -176,15 +237,27 @@ int main(void)
     else if (r == 0){ g_fail++; printf("  [FAIL] %s\n\n", (label)); } \
     else            { g_skip++; printf("  [SKIP] %s\n\n", (label)); }
 
-    RUN(TC_PFC_001_DeviceAccess,      "TC-PFC-001: Device node accessible");
-    RUN(TC_PFC_002_PFC_Enable,        "TC-PFC-002: IOCTL_AVB_PFC_ENABLE (priority_mask=0x03)");
-    RUN(TC_PFC_003_PFC_Disable,       "TC-PFC-003: IOCTL_AVB_PFC_DISABLE");
-    RUN(TC_PFC_004_MDIO_PAUSE_Capability, "TC-PFC-004: MDIO read MMD 7.19 PAUSE capability");
-    RUN(TC_PFC_005_DeviceInfoPFC,     "TC-PFC-005: GET_DEVICE_INFO accessible (PFC scope)");
+        RUN(TC_PFC_001_DeviceAccess,          "TC-PFC-001: Device node accessible");
+        RUN(TC_PFC_002_PFC_Enable,            "TC-PFC-002: IOCTL_AVB_PFC_ENABLE (priority_mask=0x03)");
+        RUN(TC_PFC_003_PFC_Disable,           "TC-PFC-003: IOCTL_AVB_PFC_DISABLE");
+        RUN(TC_PFC_004_MDIO_PAUSE_Capability, "TC-PFC-004: MDIO read MMD 7.19 PAUSE capability");
+        RUN(TC_PFC_005_DeviceInfoPFC,         "TC-PFC-005: GET_DEVICE_INFO accessible (PFC scope)");
+
+#undef RUN
+
+        printf("  Adapter %u: PASS=%d  FAIL=%d  SKIP=%d\n\n", idx, g_pass, g_fail, g_skip);
+        total_pass += g_pass;
+        total_fail += g_fail;
+        total_skip += g_skip;
+        adapters_tested++;
+    }
+
+    CloseHandle(discovery);
 
     printf("-------------------------------------------\n");
+    printf(" %d adapter(s) tested\n", adapters_tested);
     printf(" PASS=%d  FAIL=%d  SKIP=%d  TOTAL=%d\n",
-           g_pass, g_fail, g_skip, g_pass + g_fail + g_skip);
+           total_pass, total_fail, total_skip, total_pass + total_fail + total_skip);
     printf("-------------------------------------------\n");
-    return (g_fail == 0) ? 0 : 1;
+    return (total_fail == 0) ? 0 : 1;
 }

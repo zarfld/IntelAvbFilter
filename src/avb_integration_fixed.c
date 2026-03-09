@@ -3582,14 +3582,18 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
     /* MDIO (Management Data Input/Output) read — IEEE 802.3 Clause 22/45.
      * Routes to the device-specific mdio_read operation in intel_device_ops_t.
      * Input/Output: AVB_MDIO_REQUEST { page(phy_addr), reg, value(out), status }
-     * Implements: #9 (REQ-F-MDIO-001: PHY Register Read via MDIO) */
+     * Implements: #9 (REQ-F-MDIO-001: PHY Register Read via MDIO)
+     * MULTI-ADAPTER: Use AvbContext (per-file-handle, set by OPEN_ADAPTER) not
+     *                g_AvbContext (always adapter 0 = may be disconnected). */
     case IOCTL_AVB_MDIO_READ:
         {
             if (inLen < sizeof(AVB_MDIO_REQUEST) || outLen < sizeof(AVB_MDIO_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_MDIO_REQUEST mdio = (PAVB_MDIO_REQUEST)buf;
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                /* Use per-adapter context (set by OPEN_ADAPTER IOCTL via FsContext);
+                 * fall back to g_AvbContext only when no specific adapter was selected. */
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext ? AvbContext : g_AvbContext;
                 const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
 
                 if (ops && ops->mdio_read) {
@@ -3616,14 +3620,18 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
     /* MDIO write — IEEE 802.3 Clause 22/45.
      * Routes to the device-specific mdio_write operation in intel_device_ops_t.
      * Input: AVB_MDIO_REQUEST { page(phy_addr), reg, value(in), status(out) }
-     * Implements: #9 (REQ-F-MDIO-002: PHY Register Write via MDIO) */
+     * Implements: #9 (REQ-F-MDIO-002: PHY Register Write via MDIO)
+     * MULTI-ADAPTER: Use AvbContext (per-file-handle, set by OPEN_ADAPTER) not
+     *                g_AvbContext (always adapter 0 = may be disconnected). */
     case IOCTL_AVB_MDIO_WRITE:
         {
             if (inLen < sizeof(AVB_MDIO_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_MDIO_REQUEST mdio = (PAVB_MDIO_REQUEST)buf;
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                /* Use per-adapter context (set by OPEN_ADAPTER IOCTL via FsContext);
+                 * fall back to g_AvbContext only when no specific adapter was selected. */
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext ? AvbContext : g_AvbContext;
                 const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
 
                 if (ops && ops->mdio_write) {
