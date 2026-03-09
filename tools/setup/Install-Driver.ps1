@@ -429,7 +429,7 @@ function Install-Driver {
                 Write-Info "(ETW events will not appear in Application log until manifest is registered)"
             }
         } else {
-            Write-Info "ETW manifest not found at $manFile — skipping wevtutil im"
+            Write-Info "ETW manifest not found at $manFile - skipping wevtutil im"
         }
 
         # Step 3b: Install via netcfg
