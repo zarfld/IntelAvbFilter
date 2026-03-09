@@ -3591,6 +3591,20 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_MDIO_REQUEST mdio = (PAVB_MDIO_REQUEST)buf;
+
+                /* IEEE 802.3 Clause 22: PHY address is a 5-bit field (0-31),
+                 * register address is a 5-bit field (0-31). Reject out-of-range
+                 * values before reaching device hardware. */
+                if (mdio->page > 31 || mdio->reg > 31) {
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_MDIO_READ: out-of-range phy_addr=%u or reg=%u (Clause 22 max=31)\n",
+                           mdio->page, mdio->reg);
+                    mdio->value  = 0;
+                    mdio->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    info   = sizeof(AVB_MDIO_REQUEST);
+                    break;
+                }
+
                 /* Use per-adapter context (set by OPEN_ADAPTER IOCTL via FsContext);
                  * fall back to g_AvbContext only when no specific adapter was selected. */
                 PAVB_DEVICE_CONTEXT activeContext = AvbContext ? AvbContext : g_AvbContext;
@@ -3629,6 +3643,18 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_MDIO_REQUEST mdio = (PAVB_MDIO_REQUEST)buf;
+
+                /* IEEE 802.3 Clause 22: PHY address is a 5-bit field (0-31),
+                 * register address is a 5-bit field (0-31). Reject out-of-range
+                 * values before reaching device hardware. */
+                if (mdio->page > 31 || mdio->reg > 31) {
+                    DEBUGP(DL_ERROR, "IOCTL_AVB_MDIO_WRITE: out-of-range phy_addr=%u or reg=%u (Clause 22 max=31)\n",
+                           mdio->page, mdio->reg);
+                    mdio->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+
                 /* Use per-adapter context (set by OPEN_ADAPTER IOCTL via FsContext);
                  * fall back to g_AvbContext only when no specific adapter was selected. */
                 PAVB_DEVICE_CONTEXT activeContext = AvbContext ? AvbContext : g_AvbContext;
