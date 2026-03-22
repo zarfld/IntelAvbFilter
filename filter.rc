@@ -38,3 +38,19 @@
 
 #include "common.ver"
 
+/* ETW provider message-table and WEVT_TEMPLATE resources.
+ * mc.exe regenerates src\IntelAvbFilter_MSG00001.bin and src\IntelAvbFilterTEMP.BIN
+ * automatically at build time via the MessageCompile item in IntelAvbFilter.vcxproj
+ * (HeaderFilePath and RCFilePath both point to src\).
+ * No manual "generate-headers" step is required; the build is self-consistent.
+ *
+ * Without these resources the EventLog service cannot validate the
+ * ETW provider binary (wevtutil im warns "metadata resource not found")
+ * and silently refuses to subscribe the System channel.
+ *
+ * Implements: #65 (REQ-F-EVENT-LOG-001) - Closes: #269 (TEST-EVENT-LOG-001)
+ */
+LANGUAGE 0x9,0x1
+1 11 "src\\IntelAvbFilter_MSG00001.bin"
+1 WEVT_TEMPLATE "src\\IntelAvbFilterTEMP.BIN"
+

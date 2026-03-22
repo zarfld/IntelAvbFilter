@@ -265,6 +265,22 @@ $AllTests = @(
         Includes = "-I include"
         Description = "Verification: SSOT Magic Number Static Analysis (TEST-REGS-002, closes #305)"
     },
+    @{
+        Name = "test_scripts_consolidate"
+        Type = "cl"
+        Source = "tests/verification/scripts/test_scripts_consolidate.c"
+        Output = "test_scripts_consolidate.exe"
+        Includes = "-I include"
+        Description = "Verification: Script Consolidation Structure (TEST-SCRIPTS-CONSOLIDATE-001, #27/#292)"
+    },
+    @{
+        Name = "test_cleanup_archive"
+        Type = "cl"
+        Source = "tests/verification/cleanup/test_cleanup_archive.c"
+        Output = "test_cleanup_archive.exe"
+        Includes = "-I include"
+        Description = "Verification: Repo Archival & Organization (TEST-CLEANUP-ARCHIVE-001, #293/#294)"
+    },
     
     # TSN Integration Tests (nmake)
     @{
@@ -960,6 +976,22 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_perf_regression"
+        Type = "cl"
+        Source = "tests\performance\test_perf_regression.c"
+        Output = "test_perf_regression.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "setupapi.lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Performance Regression Baseline: capture metrics, fail on >=5% regression (Issue #225)"
+        Issue = "#225"
+        TestCases = 5
+        IOCTLs = "0x9C40A034, 0x9C40A031, 0x9C40A032"
+        Requirement = "#225"
+    }
+
+    @{
         Name = "test_event_log"
         Type = "cl"
         Source = "tests\event-logging\test_event_log.c"
@@ -1356,6 +1388,38 @@ $AllTests = @(
         Requirement = "#258"
         Standard = "REQ-NF-COMPAT-001"
     }
+    @{
+        Name = "test_compat_win11"
+        Type = "cl"
+        Source = "tests\compat\test_compat_win11.c"
+        Output = "test_compat_win11.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "advapi32.lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "Windows 11 Compatibility Smoke Test (Issue #256, TEST-COMPAT-WIN11-001) - closes #256"
+        Issue = "#256"
+        TestCases = 6
+        IOCTLs = "0x800(GET_VERSION)"
+        Requirement = "#256"
+        Standard = "REQ-NF-COMPAT-WIN11-001"
+    }
+    @{
+        Name = "test_build_sign"
+        Type = "cl"
+        Source = "tests\compat\test_build_sign.c"
+        Output = "test_build_sign.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "wintrust.lib crypt32.lib advapi32.lib"
+        Enabled = $true
+        Priority = "P2"
+        Description = "Build & Code-Signing Verification (Issue #243, TEST-BUILD-SIGN-001) - closes #243"
+        Issue = "#243"
+        TestCases = 7
+        IOCTLs = "none (signing/cert verification)"
+        Requirement = "#243"
+        Standard = "REQ-NF-SIGN-001"
+    }
     # ──── Sprint 4b: TDD-RED tests for unimplemented features ────────────────
     @{
         Name = "test_vlan_tag"
@@ -1415,6 +1479,73 @@ $AllTests = @(
         TestCases = 5
         IOCTLs = "58(ATDECC_EVENT_SUBSCRIBE) [TDD-placeholder], 59(ATDECC_EVENT_UNSUBSCRIBE) [TDD-placeholder]"
         Requirement = "#236"
+        Standard = "IEEE 1722.1-2021"
+    }
+
+    # =========================================================================
+    # Event Latency / Zero-Polling / ATDECC AEN Tests (Issues #176-#179)
+    # Test Plan: TEST-EVENT-001, 003, 005, 006 (P1)
+    # Live Milan/AVB infrastructure required for traffic-dependent TCs.
+    # GPIO oscilloscope TCs skipped unless AVB_TEST_HAS_OSCILLOSCOPE=1.
+    # =========================================================================
+    @{
+        Name = "test_zero_polling_overhead"
+        Type = "cl"
+        Source = "tests\event\test_zero_polling_overhead.c"
+        Output = "test_zero_polling_overhead.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Zero Polling Overhead - interrupt-driven delivery (Issue #178, TEST-EVENT-006)"
+        Issue = "#178"
+        TestCases = 6
+        IOCTLs = "22(READ_REGISTER), 33(TS_SUBSCRIBE), 46(TS_UNSUBSCRIBE)"
+        Requirement = "#13"
+        Standard = "IEEE 802.1AS-2020"
+    }
+    @{
+        Name = "test_ptp_event_latency"
+        Type = "cl"
+        Source = "tests\event\test_ptp_event_latency.c"
+        Output = "test_ptp_event_latency.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "PTP Event Latency - ring buffer delivery latency (Issue #177, TEST-EVENT-001)"
+        Issue = "#177"
+        TestCases = 5
+        IOCTLs = "33(TS_SUBSCRIBE), 34(TS_MAP_RING_BUFFER), 46(TS_UNSUBSCRIBE)"
+        Requirement = "#13"
+        Standard = "IEEE 802.1AS-2020"
+    }
+    @{
+        Name = "test_event_latency_4ch"
+        Type = "cl"
+        Source = "tests\event\test_event_latency_4ch.c"
+        Output = "test_event_latency_4ch.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "4-Channel Event Latency - multi-observer ordering (Issue #179, TEST-EVENT-005)"
+        Issue = "#179"
+        TestCases = 5
+        IOCTLs = "33(TS_SUBSCRIBE), 34(TS_MAP_RING_BUFFER), 46(TS_UNSUBSCRIBE)"
+        Requirement = "#13"
+        Standard = "IEEE 802.1AS-2020"
+    }
+    @{
+        Name = "test_atdecc_aen_protocol"
+        Type = "cl"
+        Source = "tests\atdecc\test_atdecc_aen_protocol.c"
+        Output = "test_atdecc_aen_protocol.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "ATDECC AEN Protocol - live entity discovery (Issue #176, TEST-EVENT-003)"
+        Issue = "#176"
+        TestCases = 6
+        IOCTLs = "58(ATDECC_EVENT_SUBSCRIBE), 59(ATDECC_EVENT_POLL), 62(ATDECC_EVENT_UNSUBSCRIBE)"
+        Requirement = "#13"
         Standard = "IEEE 1722.1-2021"
     }
     @{

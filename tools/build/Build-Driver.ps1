@@ -72,6 +72,8 @@ param(
     [switch]$Clean
 )
 
+$ErrorActionPreference = 'Stop'
+
 # Helper functions
 function Write-Step {
     param([string]$Message)

@@ -1,6 +1,8 @@
 # Build script for TSAUXC toggle test
 # Uses Visual Studio C++ compiler
 
+$ErrorActionPreference = 'Stop'
+
 param(
     [string]$BuildCmd = "cl /nologo /W4 /Zi /I include /I external/intel_avb/lib /I intel-ethernet-regs/gen tests/integration/tsn/tsauxc_toggle_test.c /Fe:tsauxc_toggle_test.exe"
 )

@@ -267,9 +267,20 @@
     <ClInclude Include="tests\taef\AvbTestCommon.h" />
     <ClInclude Include="src\tsn_config.h" />
     <Inf Include="IntelAvbFilter.inf" />
-    <!-- ETW manifest: registered at install time via wevtutil im -->
-    <!-- Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 -->
-    <None Include="src\IntelAvbFilter.man" />
+    <!-- ETW manifest: mc.exe compiles this at build time (-km), linking the message
+         table resource into the .sys so wevtutil im can validate the binary and the
+         EventLog service properly subscribes the System channel.
+         HeaderFilePath and RCFilePath redirect all mc.exe outputs to src\ so:
+           - src\IntelAvbFilter.h   (included by precomp.h) is always in sync
+           - src\IntelAvbFilter_MSG00001.bin + src\IntelAvbFilterTEMP.BIN
+             (referenced by filter.rc) are always rebuilt from the manifest.
+         This eliminates the manual "generate-headers" task as a required step.
+         Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 -->
+    <MessageCompile Include="src\IntelAvbFilter.man">
+      <KernelModeTypes>true</KernelModeTypes>
+      <HeaderFilePath>$(MSBuildProjectDirectory)\src</HeaderFilePath>
+      <RCFilePath>$(MSBuildProjectDirectory)\src</RCFilePath>
+    </MessageCompile>
   </ItemGroup>
   <ItemGroup>
     <FilesToPackage Include="build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf">

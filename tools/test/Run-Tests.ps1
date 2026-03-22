@@ -38,6 +38,8 @@ param(
     [switch]$SecureBootCheck
 )
 
+$ErrorActionPreference = 'Stop'
+
 # Require Administrator
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Error "This script requires Administrator privileges. Please run as Administrator."
@@ -74,6 +76,13 @@ function Invoke-Test {
         [string]$Description = ""
     )
     
+    if (-not (Test-Path $logsDir)) {
+        New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+    }
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $LogFile = Join-Path $logsDir "$TestName`_$timestamp.log"
+
+
     $testPath = Join-Path $testExeDir $TestName
     if (-not (Test-Path $testPath)) {
         Write-Host "`n  => $TestName" -ForegroundColor Cyan
@@ -96,8 +105,9 @@ function Invoke-Test {
         Write-Host "     $Description" -ForegroundColor Gray
     }
     
+    # should log to $LogFile, but also show output in real time
     $script:totalTests++
-    & $testPath
+    & $testPath 2>&1 | Tee-Object -FilePath $LogFile
     $exitCode = $LASTEXITCODE
     
     if ($exitCode -eq 0 -or $null -eq $exitCode) {
@@ -130,6 +140,7 @@ Write-Host @"
 $scriptDir = $PSScriptRoot  # tools/test
 $toolsDir = Split-Path $scriptDir -Parent  # tools
 $repoRoot = Split-Path $toolsDir -Parent  # repository root
+$logsDir = Join-Path $repoRoot "logs"
 $testExeDir = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
 
 # Test execution tracking
@@ -378,17 +389,30 @@ foreach ($test in $availableTests) {
 if ($TestExecutable) {
     # Run specific test
     Write-Step "Running Specific Test: $TestExecutable"
-    
-    $testPath = Join-Path $testExeDir $TestExecutable
-    if (-not (Test-Path $testPath)) {
-        Write-Failure "Test executable not found: $testPath"
-        exit 1
+
+    # ETW SUBSCRIPTION REFRESH (Implements #65 REQ-F-EVENT-LOG-001, TC-1 fix):
+    # For event-log tests, ensure the EventLog service has an active ETW subscription
+    # to the IntelAvbFilter provider.  Without this, EtwWriteTransfer returns STATUS_SUCCESS
+    # but delivers to 0 sessions — the event never appears in Application.evtx.
+    # The restart forces McGenControlCallbackV2(ENABLE_PROVIDER) to fire on the loaded
+    # driver, setting IntelAvbFilterEnableBits[0] = 1.
+    # This mirrors Step 4b in Install-Driver.ps1 and is safe to repeat before any test run.
+    if ($TestExecutable -match 'event_log') {
+        Write-Host "`n[ETW] Refreshing EventLog subscription for IntelAvbFilter provider..." -ForegroundColor DarkGray
+        $providerCheck = wevtutil gp IntelAvbFilter 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Stop-Service -Name EventLog -Force -ErrorAction SilentlyContinue
+            Start-Service -Name EventLog -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Write-Host "  [ETW] EventLog restarted — IntelAvbFilterEnableBits will be set by McGenControlCallbackV2" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  [WARN] IntelAvbFilter ETW provider not registered — TC-1 may fail" -ForegroundColor Yellow
+            Write-Host "         Run: wevtutil im src\IntelAvbFilter.man /mf:<sys> /rf:<sys>" -ForegroundColor Yellow
+        }
     }
-    
-    Write-Host "Executing: $testPath" -ForegroundColor Gray
-    Write-Host ""
-    & $testPath
-    
+
+    Invoke-Test -TestName $TestExecutable
+
 } elseif ($Quick) {
     # Quick tests only
     Write-Step "Running Quick Verification Tests"
@@ -400,7 +424,9 @@ if ($TestExecutable) {
     
     if (Test-Path $ssotTest1) {
         $script:totalTests++
-        & $ssotTest1
+        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+        $logFile = Join-Path $logsDir "TEST-SSOT-001_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        & $ssotTest1 2>&1 | Tee-Object -FilePath $logFile
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Host "[OK] SSOT validation passed - no duplicate IOCTLs" -ForegroundColor Green
@@ -430,15 +456,7 @@ if ($TestExecutable) {
     )
     
     foreach ($testName in $quickTests) {
-        $testPath = Join-Path $testExeDir $testName
-        if (Test-Path $testPath) {
-            Write-Host "`n===============================================" -ForegroundColor Cyan
-            Write-Host "Running: $testName" -ForegroundColor Yellow
-            Write-Host "===============================================" -ForegroundColor Cyan
-            & $testPath
-        } else {
-            Write-Info "Skipping $testName (not built)"
-        }
+        Invoke-Test -TestName $testName
     }
     
 } elseif ($Full) {
@@ -460,7 +478,9 @@ if ($TestExecutable) {
     if (Test-Path $ssotTest1) {
         Write-Host "`n    => TEST-SSOT-001: Verify No Duplicate IOCTL Definitions (#301)" -ForegroundColor Yellow
         $script:totalTests++
-        & $ssotTest1
+        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+        $logFile = Join-Path $logsDir "TEST-SSOT-001_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        & $ssotTest1 2>&1 | Tee-Object -FilePath $logFile
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Success "TEST-SSOT-001 PASSED"
@@ -479,7 +499,9 @@ if ($TestExecutable) {
     if (Test-Path $ssotTest3) {
         Write-Host "`n    => TEST-SSOT-003: Verify All Files Use SSOT Header (#302)" -ForegroundColor Yellow
         $script:totalTests++
-        & $ssotTest3
+        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+        $logFile = Join-Path $logsDir "TEST-SSOT-003_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        & $ssotTest3 2>&1 | Tee-Object -FilePath $logFile
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Success "TEST-SSOT-003 PASSED"
@@ -498,7 +520,9 @@ if ($TestExecutable) {
     if (Test-Path $ssotTest4) {
         Write-Host "`n    => TEST-SSOT-004: Verify SSOT Header Completeness (#303)" -ForegroundColor Yellow
         $script:totalTests++
-        & $ssotTest4
+        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+        $logFile = Join-Path $logsDir "TEST-SSOT-004_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        & $ssotTest4 2>&1 | Tee-Object -FilePath $logFile
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Success "TEST-SSOT-004 PASSED"
@@ -526,7 +550,9 @@ if ($TestExecutable) {
     if (Test-Path $regsTest1) {
         Write-Host "`n    => TEST-REGS-001: Build Verification (#304)" -ForegroundColor Yellow
         $script:totalTests++
-        & $regsTest1 -Configuration $Configuration
+        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+        $logFile = Join-Path $logsDir "TEST-REGS-001_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        & $regsTest1 -Configuration $Configuration 2>&1 | Tee-Object -FilePath $logFile
         if ($LASTEXITCODE -eq 0) {
             $script:passedTests++
             Write-Success "TEST-REGS-001 PASSED"
@@ -548,7 +574,9 @@ $regsTest3 = Join-Path $regsTestDir "Test-REGS-003-RegisterConstantVerification.
 if (Test-Path $regsTest3) {
     Write-Host "`n    => TEST-REGS-003: Register Constant Verification (#306)" -ForegroundColor Yellow
     $script:totalTests++
-    & $regsTest3 -Configuration $Configuration
+    if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+    $logFile = Join-Path $logsDir "TEST-REGS-003_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    & $regsTest3 -Configuration $Configuration 2>&1 | Tee-Object -FilePath $logFile
     if ($LASTEXITCODE -eq 0) {
         $script:passedTests++
         Write-Success "TEST-REGS-003 PASSED"
@@ -561,7 +589,13 @@ if (Test-Path $regsTest3) {
     } else {
         Write-Info "TEST-REGS-003 script not found (skipping)"
     }
-    
+
+    # SCRIPTS Consolidation Verification (Issue #27/#292, TEST-SCRIPTS-CONSOLIDATE-001)
+    Invoke-Test "test_scripts_consolidate.exe" "TEST-SCRIPTS-CONSOLIDATE-001: Script Consolidation Structure (#27/#292)"
+
+    # CLEANUP Archive Verification (Issue #293/#294, TEST-CLEANUP-ARCHIVE-001)
+    Invoke-Test "test_cleanup_archive.exe" "TEST-CLEANUP-ARCHIVE-001: Repo Archival & Organization (#293/#294)"
+
     # Phase 0: Architecture Compliance Validation
     Write-Host "`n=== PHASE 0: Architecture Compliance Validation ===" -ForegroundColor Green
     Write-Host "Purpose: Verify core architectural requirements are met" -ForegroundColor Gray
@@ -712,12 +746,7 @@ if (Test-Path $regsTest3) {
     Write-Host ""
     
     foreach ($test in $availableTests) {
-        Write-Host "`n===============================================" -ForegroundColor Cyan
-        Write-Host "Running: $($test.Name)" -ForegroundColor Yellow
-        Write-Host "===============================================" -ForegroundColor Cyan
-        
-        $testPath = $test.FullName
-        & $testPath
+        Invoke-Test -TestName $test.Name
     }
 }
 

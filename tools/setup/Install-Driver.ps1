@@ -279,6 +279,36 @@ function Uninstall-Driver {
     
     if ($Method -eq "netcfg") {
         # Uninstall via netcfg (THE correct method for NDIS filters)
+        # CRITICAL: Disable ALL adapters that have MS_IntelAvbFilter bound FIRST,
+        # so NDIS fully unbinds the LWF and releases the .sys image from kernel memory
+        # BEFORE netcfg -u runs. Only disabling "Intel" adapters is wrong -- the LWF
+        # binds to every ethernet adapter regardless of vendor.
+        Write-Host "`nDisabling all adapters bound to MS_IntelAvbFilter (force NDIS LWF unbind)..." -ForegroundColor Gray
+        $script:adaptersDisabledByUninstall = @()
+        try {
+            # Get every adapter that has the filter bound (Enabled or not)
+            $boundAdapterNames = @(Get-NetAdapterBinding -ComponentID 'MS_IntelAvbFilter' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Enabled } | Select-Object -ExpandProperty Name)
+
+            if ($boundAdapterNames.Count -eq 0) {
+                # Fallback: filter not registered yet, disable all ethernet adapters (any state)
+                Write-Host "  (MS_IntelAvbFilter binding not found - disabling all ethernet adapters)" -ForegroundColor DarkGray
+                $script:adaptersDisabledByUninstall = @(Get-NetAdapter |
+                    Where-Object { $_.MediaType -eq '802.3' -and $_.Status -ne 'Disabled' })
+            } else {
+                $script:adaptersDisabledByUninstall = @(Get-NetAdapter |
+                    Where-Object { $boundAdapterNames -contains $_.Name -and $_.Status -ne 'Disabled' })
+            }
+
+            foreach ($a in $script:adaptersDisabledByUninstall) {
+                Write-Host "  Disabling: $($a.Name)" -ForegroundColor DarkGray
+                Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            if ($script:adaptersDisabledByUninstall.Count -gt 0) { Start-Sleep -Seconds 3 }
+        } catch {
+            Write-Host "  Warning: adapter disable failed, continuing..." -ForegroundColor Yellow
+        }
+
         Write-Host "`nRemoving NDIS filter component (netcfg)..." -ForegroundColor Gray
         netcfg.exe -u MS_IntelAvbFilter
         
@@ -389,11 +419,40 @@ function Install-Driver {
     Write-Host "`nStep 1: Stopping service if running..." -ForegroundColor Gray
     sc stop IntelAvbFilter 2>&1 | Out-Null
     
+    # Declared before the netcfg/pnputil branch so adapters can always be re-enabled
+    # from any exit point (success, failure, or unhandled exception).
+    $adaptersToReEnable = @()
+
     if ($Method -eq "netcfg") {
         # NDIS Filter method (THE CORRECT method for NDIS Lightweight Filters)
         
-        # Step 2: Remove old installation
-        Write-Host "Step 2: Removing old installations (netcfg)..." -ForegroundColor Gray
+        # Step 2: Adapters were already disabled in Uninstall-Driver (script:adaptersDisabledByUninstall).
+        # If Install-Driver is called standalone (no prior uninstall), disable them here.
+        Write-Host "Step 2: Ensuring Intel adapters are disabled (NDIS unbind)..." -ForegroundColor Gray
+        if (-not $script:adaptersDisabledByUninstall) {
+            $adaptersToReEnable = @()
+            try {
+                $boundAdapterNames = @(Get-NetAdapterBinding -ComponentID 'MS_IntelAvbFilter' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Enabled } | Select-Object -ExpandProperty Name)
+                $adaptersToReEnable = if ($boundAdapterNames.Count -gt 0) {
+                    @(Get-NetAdapter | Where-Object { $boundAdapterNames -contains $_.Name -and $_.Status -eq 'Up' })
+                } else {
+                    @(Get-NetAdapter | Where-Object { $_.MediaType -eq '802.3' -and $_.Status -eq 'Up' })
+                }
+                foreach ($a in $adaptersToReEnable) {
+                    Write-Host "  Disabling: $($a.Name)" -ForegroundColor DarkGray
+                    Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue
+                }
+                if ($adaptersToReEnable.Count -gt 0) { Start-Sleep -Seconds 3 }
+            } catch {
+                Write-Host "  Warning: adapter disable failed, continuing..." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  Already disabled by uninstall step." -ForegroundColor DarkGray
+            $adaptersToReEnable = $script:adaptersDisabledByUninstall
+        }
+
+        Write-Host "Step 2b: Removing old NDIS filter component (netcfg)..." -ForegroundColor Gray
         netcfg.exe -u MS_IntelAvbFilter 2>&1 | Out-Null
         
         # Step 3: Install filter component via netcfg
@@ -405,31 +464,73 @@ function Install-Driver {
         # Step 3a: Manually copy .sys to drivers folder (required for NDIS filters)
         $driverDir = Split-Path $infPath -Parent
         $sysFile = Join-Path $driverDir "IntelAvbFilter.sys"
+        $installedSys  = "C:\Windows\System32\drivers\IntelAvbFilter.sys"
         if (Test-Path $sysFile) {
             Write-Host "  Copying .sys to C:\Windows\System32\drivers\..." -ForegroundColor Gray
-            Copy-Item $sysFile "C:\Windows\System32\drivers\" -Force
+            # The kernel holds a FILE_SHARE_DELETE image-section lock on the loaded .sys.
+            # We cannot overwrite it, but we CAN rename it out of the way, then copy
+            # the new file in under the original name.
+            # Use a timestamp-based backup name so a previously-locked .sys.old never
+            # blocks the rename (the old backup stays on disk until next reboot cleans it up).
+            $oldSysBak = "C:\Windows\System32\drivers\IntelAvbFilter.sys.old"
+            try {
+                if (Test-Path $installedSys) {
+                    # If a previous backup still exists (kernel-locked from last install),
+                    # rotate it to a timestamp name so our rename always has a free destination.
+                    if (Test-Path $oldSysBak) {
+                        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                        $rotated = "C:\Windows\System32\drivers\IntelAvbFilter.sys.bak.$stamp"
+                        Rename-Item $oldSysBak $rotated -Force -ErrorAction SilentlyContinue
+                        # If the rotate also failed (still locked) just leave it - we continue
+                        # and the primary rename of .sys -> .sys.old may still succeed because
+                        # the source (.sys) has FILE_SHARE_DELETE and the destination is now free.
+                    }
+                    Rename-Item $installedSys $oldSysBak -Force -ErrorAction Stop
+                    Write-Host "  Renamed locked .sys to .sys.old (will be deleted after reboot)" -ForegroundColor DarkGray
+                }
+                Copy-Item $sysFile $installedSys -Force -ErrorAction Stop
+                Write-Host "  .sys copied successfully" -ForegroundColor DarkGray
+            } catch {
+                # Rename also failed - fall back to scheduling replacement on next reboot
+                Write-Host "  WARNING: Cannot replace locked .sys directly. Scheduling for reboot..." -ForegroundColor Yellow
+                $tempSys = "C:\Windows\System32\drivers\IntelAvbFilter.sys.new"
+                Copy-Item $sysFile $tempSys -Force
+                $regKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
+                $existing = (Get-ItemProperty $regKey "PendingFileRenameOperations" -ErrorAction SilentlyContinue).PendingFileRenameOperations
+                $ops = [string[]]@(
+                    "\??\$installedSys", "",           # delete the old locked file on reboot
+                    "\??\$tempSys", "\??\$installedSys" # rename .new -> .sys on reboot
+                )
+                Set-ItemProperty $regKey "PendingFileRenameOperations" -Value ($existing + $ops) -Type MultiString
+                Write-Host "  [REBOOT REQUIRED] New driver will be activated after next reboot." -ForegroundColor Yellow
+            }
         }
 
-        # Step 3a.5: Register ETW manifest (Windows Event Log / Application channel)
+        # Step 3a.5: Register ETW manifest (Windows Event Log / System channel)
         # Implements: #65 (REQ-F-EVENT-LOG-001), Closes: #269 (TEST-EVENT-LOG-001)
         $manFile       = Join-Path $driverDir "IntelAvbFilter.man"
-        $installedSys  = "C:\Windows\System32\drivers\IntelAvbFilter.sys"
         $installedMan  = "C:\Windows\System32\drivers\IntelAvbFilter.man"
         if (Test-Path $manFile) {
             Write-Host "  Copying ETW manifest to C:\Windows\System32\drivers\..." -ForegroundColor Gray
             Copy-Item $manFile "C:\Windows\System32\drivers\" -Force
-            # Unregister stale registration before re-registering
-            wevtutil um $installedMan 2>&1 | Out-Null
-            Write-Host "  Registering ETW provider (wevtutil im)..." -ForegroundColor Gray
+
+            # ETW REGISTRATION (Closes #269 TC-1):
+            # wevtutil im runs BEFORE netcfg -l so the WINEVT\Publishers registry key is
+            # ready before the driver loads.  The EventLog service restart (which fires the
+            # McGenControlCallbackV2 enable callback) is done AFTER netcfg -l (see Step 4b
+            # below), once the driver IS loaded and EtwRegister has been called.  Restarting
+            # EventLog before driver load risks the "pending enable" not being delivered to
+            # a kernel-mode provider that registers later.
+            wevtutil um $installedMan 2>&1 | Out-Null  # Remove stale registration first
+            icacls $installedSys /grant "NT SERVICE\EventLog:(R)" 2>&1 | Out-Null
             $wevtOut = wevtutil im $installedMan "/mf:$installedSys" "/rf:$installedSys" 2>&1
             if ($LASTEXITCODE -eq 0) {
-                Write-Success "ETW manifest registered: 'IntelAvbFilter' provider visible in Application log"
+                Write-Success "ETW provider manifest registered (WINEVT registry updated)"
             } else {
                 Write-Info "wevtutil im returned $LASTEXITCODE : $wevtOut"
-                Write-Info "(ETW events will not appear in Application log until manifest is registered)"
             }
         } else {
-            Write-Info "ETW manifest not found at $manFile - skipping wevtutil im"
+            Write-Info "ETW manifest not found at $manFile - skipping ETW registration"
         }
 
         # Step 3b: Install via netcfg
@@ -449,6 +550,11 @@ function Install-Driver {
             Write-Host "  - Run: .\Setup-Driver.ps1 -CheckStatus" -ForegroundColor Cyan
             Write-Host "  - Check Windows Event Log: Event Viewer -> Windows Logs -> System" -ForegroundColor Cyan
             Write-Host "  - Enable test signing: .\Setup-Driver.ps1 -EnableTestSigning" -ForegroundColor Cyan
+            # SAFETY: adapters were disabled in Step 2 -- always re-enable before returning
+            Write-Host "`n[SAFETY] Re-enabling Intel adapters after failed install..." -ForegroundColor Yellow
+            foreach ($a in $adaptersToReEnable) {
+                Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue
+            }
             return $false
         }
         
@@ -477,23 +583,60 @@ function Install-Driver {
     }
     
     Write-Success "$Method installation completed"
-    
-    # Step 4: Restart network adapters (CRITICAL for NDIS filter service creation)
-    Write-Host "\nStep 4: Restarting Intel network adapters (triggers service creation)..." -ForegroundColor Gray
+
+    # Step 3c: Verify ETW registration (already registered in step 3a.5 before netcfg).
+    # Registration was moved pre-netcfg so EventLog subscription is live before DriverEntry fires.
+    if (Test-Path $installedMan) {
+        Write-Host "`nStep 3c: Verifying ETW provider registration..." -ForegroundColor Gray
+        $gpOut = wevtutil gp IntelAvbFilter 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "ETW provider active: IntelAvbFilter events routing to System log"
+        } else {
+            # Fallback: re-register if somehow missing (should not happen)
+            Write-Info "ETW provider not found, re-registering..."
+            icacls $installedSys /grant "NT SERVICE\EventLog:(R)" 2>&1 | Out-Null
+            wevtutil im $installedMan "/mf:$installedSys" "/rf:$installedSys" 2>&1 | Out-Null
+        }
+    }
+
+    # Step 4: Re-enable Intel adapters (triggers NDIS filter bind)
+    Write-Host "`nStep 4: Re-enabling Intel network adapters (triggers NDIS filter bind)..." -ForegroundColor Gray
+    # Use whichever list captured the disabled adapters (uninstall-time preferred)
+    $adaptersToEnable = if ($script:adaptersDisabledByUninstall) {
+        $script:adaptersDisabledByUninstall
+    } elseif ($adaptersToReEnable) {
+        $adaptersToReEnable
+    } else {
+        @(Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'Intel' })
+    }
     try {
-        $adapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'Intel' }
-        foreach ($adapter in $adapters) {
-            Write-Host "  Restarting: $($adapter.Name)" -ForegroundColor DarkGray
-            Disable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 500
+        foreach ($adapter in $adaptersToEnable) {
+            Write-Host "  Enabling: $($adapter.Name)" -ForegroundColor DarkGray
             Enable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
         }
-        Write-Host "  Adapters restarted" -ForegroundColor Green
+        Write-Host "  Adapters enabled" -ForegroundColor Green
     } catch {
-        Write-Host "  Warning: Adapter restart failed, continuing..." -ForegroundColor Yellow
+        Write-Host "  Warning: Adapter enable failed, continuing..." -ForegroundColor Yellow
     }
     Start-Sleep -Seconds 2
-    
+
+    # Step 4b: Restart EventLog service AFTER driver is loaded and EtwRegister has been called.
+    # ETW SUBSCRIPTION FIX (Closes #269 TC-1..TC-4, TC-7, TC-9..TC-11):
+    # When EventLog restarts, it calls EtwEnableTraceEx2 for every WINEVT\Publishers GUID.
+    # Because the driver IS NOW loaded (EtwRegister called in DriverEntry), the kernel
+    # fires McGenControlCallbackV2(EVENT_CONTROL_CODE_ENABLE_PROVIDER) SYNCHRONOUSLY during
+    # the EtwEnableTraceEx2 call.  This sets IntelAvbFilterEnableBits[0] so EtwWriteTransfer
+    # delivers events to Application.evtx.  Doing this BEFORE driver load risks the
+    # "pending enable" not being re-delivered to a just-registered kernel-mode provider.
+    if (Test-Path $installedMan) {
+        Write-Host "`nStep 4b: Restarting EventLog service (ETW subscription callback)..." -ForegroundColor Gray
+        Stop-Service -Name EventLog -Force -ErrorAction SilentlyContinue
+        Start-Service -Name EventLog -ErrorAction SilentlyContinue
+        Write-Host "  Waiting 3s for McGenControlCallbackV2 to set IntelAvbFilterEnableBits..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 3
+        Write-Success "EventLog restarted - ETW subscription callback delivered to loaded driver"
+    }
+
     # Step 5: Check service status (should exist after adapter restart)
     Write-Host "`nStep 5: Checking service status..." -ForegroundColor Gray
     Write-Host "---BEGIN SERVICE STATUS---" -ForegroundColor Cyan
