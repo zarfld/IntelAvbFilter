@@ -1,3 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Events>
+<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='IntelAvbFilter' Guid='{5dc1ca46-b07f-4a4f-9d02-1a02e7ec24e4}' EventSourceName='IntelAvbFilter'/><EventID Qualifiers='0'>1</EventID><Version>0</Version><Level>4</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x80000000000000</Keywords><TimeCreated SystemTime='2026-03-10T11:41:23.1882581Z'/><EventRecordID>65926</EventRecordID><Correlation/><Execution ProcessID='11156' ThreadID='0'/><Channel>Application</Channel><Computer>6xI226MACHINE</Computer><Security/></System><EventData><Data>Copilot test message</Data></EventData></Event>
 </Events>

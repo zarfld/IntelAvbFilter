@@ -722,7 +722,7 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
 
     // Build MDIC write command using SSOT bit definitions from i226_regs.h
     mdic  = 0;
-    mdic |= (uint32_t)(value   & 0xFFFFU) << I226_MDIC_DATA_SHIFT;
+    mdic |= (uint32_t)(value & (uint32_t)I226_MDIC_DATA_MASK) << I226_MDIC_DATA_SHIFT;
     mdic |= (uint32_t)(reg_addr & 0x1FU)  << I226_MDIC_REG_SHIFT;
     mdic |= (uint32_t)(phy_addr & 0x1FU)  << I226_MDIC_PHY_SHIFT;
     mdic |= (uint32_t)(1U)                << I226_MDIC_OP_SHIFT;  // 1 = write

@@ -106,8 +106,10 @@ extern FILTER_LOCK         FilterListLock;
 extern LIST_ENTRY          FilterModuleList;
 
 /* ETW provider registration handle (DriverEntry → FilterUnload)
+ * g_EtwInitEventEmitted: guards once-per-load EventID=1 emission in GET_VERSION handler
+ * g_EvtDriverInit: exposed for use in avb_integration_fixed.c IOCTL handler
  * Implements: #65 (REQ-F-EVENT-LOG-001) */
-extern REGHANDLE           g_EtwHandle;
+extern BOOLEAN             g_EtwInitEventEmitted;
 
 #define FILTER_FRIENDLY_NAME        L"IntelAvbFilter NDIS LightWeight Filter"
 #define FILTER_UNIQUE_NAME          L"{3f74ae86-14f9-4e79-9445-5b1e52ccd192}" //unique name, quid name

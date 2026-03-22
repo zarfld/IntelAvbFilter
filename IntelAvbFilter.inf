@@ -86,6 +86,25 @@ AddReg          = NdisImPlatformBindingOptions.reg
 [Install.Remove.Services]
 DelService=IntelAvbFilter,0x200 ; SPSVCINST_STOPSERVICE
 
+;-------------------------------------------------------------------------
+; ETW provider registration via driver package isolation-compliant directive.
+; Uses AddEventProvider (Win10 1809+) instead of HKLM AddReg.
+; Per: https://learn.microsoft.com/windows-hardware/drivers/install/inf-addeventprovider-directive
+; Per: https://learn.microsoft.com/windows-hardware/drivers/develop/porting-inf-to-windows-driver
+; Provider GUID: {5DC1CA46-B07F-4A4F-9D02-1A02E7EC24E4}
+; Channel: Application (imported)
+; Implements: #65 (REQ-F-EVENT-LOG-001)
+; Closes:     #269 (TEST-EVENT-LOG-001)
+;-------------------------------------------------------------------------
+[Install.Events]
+AddEventProvider={5DC1CA46-B07F-4A4F-9D02-1A02E7EC24E4},IntelAvbFilter_EventProvider_Inst
+
+[IntelAvbFilter_EventProvider_Inst]
+ProviderName  = IntelAvbFilter
+ResourceFile  = %13%\IntelAvbFilter.sys
+MessageFile   = %13%\IntelAvbFilter.sys
+ImportChannel = Application
+
 [NdisImPlatformBindingOptions.reg]
 ; By default, when an LBFO team or Bridge is created, all filters will be
 ; unbound from the underlying members and bound to the TNic(s).

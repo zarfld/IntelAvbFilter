@@ -25,8 +25,12 @@
           resourceFileName="%SystemRoot%\System32\drivers\IntelAvbFilter.sys"
           messageFileName="%SystemRoot%\System32\drivers\IntelAvbFilter.sys">
         <channels>
-          <!-- Import Windows Application event log channel (channel ID 0x09) -->
-          <importChannel name="Application" chid="App"/>
+          <!-- Import Windows System event log channel (channel ID 0x08).
+               Kernel-mode drivers CANNOT write to the Application channel (0x09):
+               WEL's EventLog session does not subscribe to kernel providers targeting
+               Application.  The System channel is accessible from kernel mode and is
+               the standard destination for driver events (matches osrusbfx2 pattern). -->
+          <importChannel name="System" chid="Sys"/>
         </channels>
         <levels/>
         <opcodes/>
@@ -36,28 +40,28 @@
           <event value="1"
                  symbol="EVT_DRIVER_INIT"
                  version="0"
-                 channel="App"
+                 channel="Sys"
                  level="win:Informational"
                  message="$(string.EVT_DRIVER_INIT.message)"/>
           <!-- Event 100: IOCTL Error (Error) -->
           <event value="100"
                  symbol="EVT_IOCTL_ERROR"
                  version="0"
-                 channel="App"
+                 channel="Sys"
                  level="win:Error"
                  message="$(string.EVT_IOCTL_ERROR.message)"/>
           <!-- Event 200: PHC ForceSet Warning (Warning) -->
           <event value="200"
                  symbol="EVT_PHC_FORCESET_WARN"
                  version="0"
-                 channel="App"
+                 channel="Sys"
                  level="win:Warning"
                  message="$(string.EVT_PHC_FORCESET_WARN.message)"/>
           <!-- Event 300: Hardware Fault (Critical) -->
           <event value="300"
                  symbol="EVT_HARDWARE_FAULT"
                  version="0"
-                 channel="App"
+                 channel="Sys"
                  level="win:Critical"
                  message="$(string.EVT_HARDWARE_FAULT.message)"/>
         </events>

@@ -30,15 +30,6 @@ typedef struct _INTEL_HARDWARE_CONTEXT {
     BOOLEAN mapped;                    // TRUE if successfully mapped
 } INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_CONTEXT;
 
-/* ------------------------------------------------------------------------- */
-/* Hardware lifecycle state machine (no fabrication) */
-typedef enum _AVB_HW_STATE {
-    AVB_HW_UNBOUND = 0,      /* Filter not yet attached to supported Intel miniport */
-    AVB_HW_BOUND,            /* Filter attached to supported Intel adapter (no BAR/MMIO yet) */
-    AVB_HW_BAR_MAPPED,       /* BAR0 resources discovered + MMIO mapped + basic register access validated */
-    AVB_HW_PTP_READY         /* PTP clock verified incrementing & timestamp capture enabled */
-} AVB_HW_STATE;
-
 /* Utility: readable name for state (for debug prints) */
 __forceinline const char* AvbHwStateName(LONG s) {
     switch ((AVB_HW_STATE)s) {
@@ -67,7 +58,8 @@ typedef struct _INTEL_HARDWARE_CONTEXT INTEL_HARDWARE_CONTEXT, *PINTEL_HARDWARE_
  * discovery events.  Events are enqueued by the driver (e.g. from ADP
  * frame parsing) and dequeued one-at-a-time via IOCTL_AVB_ATDECC_EVENT_POLL.
  *=======================================================================*/
-#define MAX_ATDECC_SUBSCRIPTIONS  4
+#define MAX_ATDECC_SUBSCRIPTIONS  16   /* 16 slots: subscriptions are driver-global (not per-handle);
+                                        * leak mitigation for tests that subscribe without unsubscribing. */
 #define ATDECC_EVENT_QUEUE_DEPTH  16   /* power-of-2; per-subscription ring */
 
 typedef struct _ATDECC_EVENT_ENTRY {
@@ -81,6 +73,7 @@ typedef struct _ATDECC_SUBSCRIPTION {
     avb_u32  event_mask;    /* ATDECC_EVENT_* bitmask subscribed to */
     avb_u8   active;        /* 1 = live, 0 = unused */
     avb_u8   _pad[3];
+    PFILE_OBJECT file_object; /* owning file handle — cleared on IRP_MJ_CLEANUP */
     /* Lock-free ring: head=next-dequeue, tail=next-enqueue */
     volatile LONG head;
     volatile LONG tail;
@@ -123,9 +116,11 @@ typedef struct _TS_SUBSCRIPTION {
 /* Pre-allocated NBL ring for fast SEND_PTP path.
  * Each slot owns its own packet buffer, MDL, NET_BUFFER, and NET_BUFFER_LIST.
  * Eliminates per-call NdisAllocateNetBuffer/NdisAllocateNetBufferList overhead (~10µs).
- * in_use: 0=free, 1=acquired by IOCTL_AVB_TEST_SEND_PTP handler,
- *         cleared by FilterSendNetBufferListsComplete when the NBL completes.
- * Ring size of 8 supports bursts of up to 8 in-flight test packets simultaneously.
+ * in_use: 0=free, 1=in-flight (CAS'd on acquire),
+ *         2=deferred-cleanup (set by AvbCleanupDevice when slot is in-flight;
+ *           FilterSendNetBufferListsComplete sees this and frees the slot instead of
+ *           returning it to the ring, then decrements ring_cleanup_deferred).
+ * Ring size of 32 supports bursts of up to 32 in-flight test packets simultaneously.
  * Implements: Issue #35 (REQ-F-IOCTL-TS-001) - throughput optimization.   */
 #define AVB_TEST_NBL_RING_SIZE  32   /* large enough to absorb ~100µs NIC completion jitter at 150K ops/sec */
 typedef struct _AVB_TEST_NBL_SLOT {
@@ -133,7 +128,7 @@ typedef struct _AVB_TEST_NBL_SLOT {
     PNET_BUFFER      nb;      /* pre-allocated NB, linked to this slot's MDL */
     PVOID            buffer;  /* per-slot packet buffer (TEST_PACKET_SIZE bytes, NonPaged) */
     PMDL             mdl;     /* per-slot MDL describing buffer */
-    volatile LONG    in_use;  /* 0=free, 1=in-flight; CAS'd on acquire, Exchange'd on complete */
+    volatile LONG    in_use;  /* 0=free, 1=in-flight, 2=deferred-cleanup (see above) */
     LONG             _pad;    /* ensure 8-byte alignment */
 } AVB_TEST_NBL_SLOT, *PAVB_TEST_NBL_SLOT;
 
@@ -178,6 +173,7 @@ typedef struct _AVB_DEVICE_CONTEXT {
     PMDL test_packet_mdl;                                 // MDL describing test_packet_buffer
     NDIS_SPIN_LOCK test_send_lock;                        // Protects test packet send operations
     volatile LONG test_packets_pending;                   // Count of outstanding test NBLs (for completion tracking)
+    volatile LONG ring_cleanup_deferred;                  // # of in-flight ring slots deferred for cleanup by FilterSendNetBufferListsComplete
 
     // Legacy ring (deprecated - kept for compatibility)
     // Timestamp event ring (section-based mapping)
@@ -305,6 +301,37 @@ extern NDIS_SPIN_LOCK      g_AvbContextListLock;
 NTSTATUS AvbInitializeDevice(
     _In_ PMS_FILTER FilterModule,
     _Outptr_ PAVB_DEVICE_CONTEXT *AvbContext
+);
+
+/**
+ * @brief Re-run hardware bring-up (capabilities + intel_init) without re-mapping BAR0.
+ * Safe to call when BAR0 is already mapped (AvbPerformBasicInitialization returns early).
+ * Use after S3/S4 resume to restore TIMINCA, TSAUXC, and TSYNCRXCTL/TSYNCTXCTL, which
+ * are reset to 0 by the hardware power cycle.
+ * @note Runs at PASSIVE_LEVEL; intel_init/init_ptp perform MMIO and a short delay.
+ * @param Ctx Device context.
+ * @return NTSTATUS STATUS_SUCCESS or error.
+ */
+NTSTATUS AvbBringUpHardware(
+    _Inout_ PAVB_DEVICE_CONTEXT Ctx
+);
+
+/**
+ * @brief Stop all periodic timers/DPCs for an AVB device context.
+ * Must be called from FilterPause to prevent MMIO reads on powered-down hardware (0x9F fix).
+ * Safe to call if timers are already stopped (idempotent).
+ * @param AvbContext Device context (may be NULL).
+ */
+VOID AvbStopTimers(
+    _In_opt_ PAVB_DEVICE_CONTEXT AvbContext
+);
+
+/**
+ * @brief Restart periodic timers if active subscriptions exist (call from FilterRestart).
+ * @param AvbContext Device context (may be NULL).
+ */
+VOID AvbRestartTimers(
+    _In_opt_ PAVB_DEVICE_CONTEXT AvbContext
 );
 
 /**

@@ -152,11 +152,12 @@ NTSTATUS AvbCreateMinimalContext(
     NdisAllocateSpinLock(&ctx->atdecc_sub_lock);
     ctx->next_atdecc_sub_id = 1;
     for (int i = 0; i < MAX_ATDECC_SUBSCRIPTIONS; i++) {
-        ctx->atdecc_subscriptions[i].sub_id = 0;
-        ctx->atdecc_subscriptions[i].active = 0;
-        ctx->atdecc_subscriptions[i].event_mask = 0;
-        ctx->atdecc_subscriptions[i].head = 0;
-        ctx->atdecc_subscriptions[i].tail = 0;
+        ctx->atdecc_subscriptions[i].sub_id      = 0;
+        ctx->atdecc_subscriptions[i].active      = 0;
+        ctx->atdecc_subscriptions[i].event_mask  = 0;
+        ctx->atdecc_subscriptions[i].file_object = NULL;
+        ctx->atdecc_subscriptions[i].head        = 0;
+        ctx->atdecc_subscriptions[i].tail        = 0;
     }
 
     /* Initialize SRP reservation table (Issue #211) */
@@ -1063,7 +1064,11 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
  */
 VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject)
 {
-    PAVB_DEVICE_CONTEXT AvbContext = g_AvbContext;
+    /* Prefer the per-handle adapter context (set by IOCTL_AVB_OPEN_ADAPTER).
+     * Fall back to g_AvbContext for handles that never called OPEN_ADAPTER. */
+    PAVB_DEVICE_CONTEXT AvbContext = (FileObject && FileObject->FsContext)
+                                     ? (PAVB_DEVICE_CONTEXT)FileObject->FsContext
+                                     : g_AvbContext;
     if (!AvbContext || !FileObject) return;
     
     int cleaned = 0;
@@ -1154,68 +1159,76 @@ VOID AvbCleanupFileSubscriptions(_In_ PFILE_OBJECT FileObject)
     if (cleaned > 0) {
         DEBUGP(DL_TRACE, "Cleaned up %d subscription(s) for FileObject=%p\n", cleaned, FileObject);
     }
+    /* NOTE: ATDECC subscriptions are driver-global and NOT tied to a file handle lifetime.
+     * They persist until explicitly UNSUBSCRIBED (IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE).
+     * This is by design — TC-002 subscribes on one handle and TC-003/TC-004 poll/unsubscribe
+     * from a different handle.  Slot exhaustion is mitigated by MAX_ATDECC_SUBSCRIPTIONS=16. */
+}
+
+/* BUGFIX 0x9F: Stop timers WITHOUT freeing memory.
+ * Called from FilterPause to prevent MMIO reads on powered-down hardware.
+ * Also called at the start of AvbCleanupDevice (idempotent — safe if already stopped).
+ * Must be called at IRQL = PASSIVE_LEVEL.
+ */
+VOID AvbStopTimers(_In_opt_ PAVB_DEVICE_CONTEXT AvbContext)
+{
+    if (!AvbContext) return;
+
+    /* CRITICAL: Cancel TX timestamp polling timer (Task 6c) */
+    if (AvbContext->tx_poll_active) {
+        BOOLEAN cancelled = FALSE;
+        AvbContext->tx_poll_active = FALSE;  /* Signal DPC to stop re-arming */
+        NdisCancelTimer(&AvbContext->tx_poll_timer, &cancelled);
+        KeFlushQueuedDpcs();                 /* Bug #1: wait for running DPC */
+        NdisCancelTimer(&AvbContext->tx_poll_timer, &cancelled); /* Bug #1b: cancel re-armed */
+        KeFlushQueuedDpcs();                 /* Bug #1c: drain DPC queued in flush window */
+        DEBUGP(DL_TRACE, "AvbStopTimers: TX poll timer stopped (was_pending=%d)\n", !cancelled);
+    }
+
+    /* CRITICAL: Cancel Target Time polling timer (Task 7) */
+    if (AvbContext->target_time_poll_active) {
+        BOOLEAN cancelled;
+        AvbContext->target_time_poll_active = FALSE;
+        cancelled = KeCancelTimer(&AvbContext->target_time_timer);
+        KeFlushQueuedDpcs();
+        KeCancelTimer(&AvbContext->target_time_timer);
+        KeFlushQueuedDpcs();
+        DEBUGP(DL_TRACE, "AvbStopTimers: target time timer stopped (was_pending=%d)\n", cancelled);
+    }
+}
+
+/* Restart timers after FilterRestart if there are active subscriptions.
+ * Only restarts tx_poll_timer; target_time_timer is re-armed on demand via IOCTL.
+ */
+VOID AvbRestartTimers(_In_opt_ PAVB_DEVICE_CONTEXT AvbContext)
+{
+    int i;
+    BOOLEAN has_subs = FALSE;
+
+    if (!AvbContext) return;
+    if (AvbContext->hw_state < AVB_HW_BAR_MAPPED) return;
+    if (AvbContext->tx_poll_active) return;  /* Already running */
+
+    NdisAcquireSpinLock(&AvbContext->subscription_lock);
+    for (i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
+        if (AvbContext->subscriptions[i].active) { has_subs = TRUE; break; }
+    }
+    NdisReleaseSpinLock(&AvbContext->subscription_lock);
+
+    if (has_subs) {
+        AvbContext->tx_poll_active = TRUE;
+        NdisSetTimer(&AvbContext->tx_poll_timer, 1);
+        DEBUGP(DL_ERROR, "!!! AvbRestartTimers: TX poll timer restarted after FilterRestart\n");
+    }
 }
 
 VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
 {
     if (!AvbContext) return;
-    
-    /* CRITICAL: Cancel TX timestamp polling timer FIRST (Task 6c) */
-    if (AvbContext->tx_poll_active) {
-        BOOLEAN cancelled = FALSE;
-        AvbContext->tx_poll_active = FALSE;  // Signal DPC to stop re-arming
-        NdisCancelTimer(&AvbContext->tx_poll_timer, &cancelled);
-        
-        // BUGFIX Bug #1 (0x13A_17 heap corruption - use-after-free race):
-        // Wait for ALL queued/running DPCs to complete before freeing ring buffers
-        // Root cause: TX poll DPC was writing to ring buffer AFTER cleanup freed it
-        KeFlushQueuedDpcs();
-        
-        // BUGFIX Bug #1b (0x13A_17 recurrence - DPC re-arm inside flush window):
-        // The DPC may have read tx_poll_active=TRUE before our write propagated,
-        // called NdisSetTimer() to re-arm, and THEN finished (allowing KeFlushQueuedDpcs
-        // to return). Cancel the re-armed timer.
-        NdisCancelTimer(&AvbContext->tx_poll_timer, &cancelled);
 
-        // BUGFIX Bug #1c (0x13A_17 recurrence - timer fires between flush and second cancel):
-        // On 4-CPU systems the re-armed 1ms timer may fire between KeFlushQueuedDpcs() and
-        // NdisCancelTimer() above: the timer is dequeued (second cancel returns FALSE) but the
-        // DPC is already QUEUED. A second flush drains that DPC before we free ring buffers.
-        // That DPC will see tx_poll_active==FALSE and NOT re-arm, so no further flushes needed.
-        KeFlushQueuedDpcs();
-        
-        DEBUGP(DL_TRACE, "TX polling timer stopped and DPC flushed (was_pending=%d)\n", !cancelled);
-    }
-    
-    /* CRITICAL: Cancel Target Time polling timer (Task 7) */
-    if (AvbContext->target_time_poll_active) {
-        // TRACE: Deactivating target time polling (diagnostic for flag state changes)
-        DEBUGP(DL_TRACE, "!!! TARGET_TIMER_CLEANUP: Deactivating flag (ctx=%p, before=%d)\n",
-               AvbContext, AvbContext->target_time_poll_active ? 1 : 0);
-        
-        AvbContext->target_time_poll_active = FALSE;  // Signal DPC to stop
-        
-        // TRACE: Confirm flag deactivation completed
-        DEBUGP(DL_TRACE, "!!! TARGET_TIMER_CLEANUP: Flag deactivated (ctx=%p, after=%d)\n",
-               AvbContext, AvbContext->target_time_poll_active ? 1 : 0);
-        
-        BOOLEAN cancelled = KeCancelTimer(&AvbContext->target_time_timer);  // Cancel timer (returns TRUE if was in queue)
-        UNREFERENCED_PARAMETER(cancelled);  // Used only in DEBUGP
-        
-        // Wait for any pending/running DPC to complete
-        KeFlushQueuedDpcs();
-        
-        // Cancel again: DPC may have re-armed the timer inside the flush window
-        // (same race as tx_poll_timer - see BUGFIX Bug #1b above)
-        KeCancelTimer(&AvbContext->target_time_timer);
-
-        // BUGFIX Bug #1c (same as tx_poll_timer): flush any DPC that fired between
-        // the first KeFlushQueuedDpcs and the KeCancelTimer above.
-        KeFlushQueuedDpcs();
-        
-        DEBUGP(DL_TRACE, "!!! TIMER STOPPED: Target Time DPC was called %d times (was_pending=%d)\n", 
-               AvbContext->target_time_dpc_call_count, !cancelled);
-    }
+    /* Stop timers first — this is the 0x9F fix path for unclean shutdown.
+     * AvbStopTimers is idempotent; if FilterPause already called it, this is a no-op. */
+    AvbStopTimers(AvbContext);
     
     // Remove from global list and promote a successor if needed
     AvbContextListRemove(AvbContext);
@@ -1290,7 +1303,23 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         
         // Free pre-allocated NBL ring slots BEFORE freeing the pools that own them.
         // Each slot has its own: NBL (from nbl_pool), NB (from nb_pool), MDL, and buffer.
+        // BUGFIX (UAF/BSOD): Do NOT free in-flight (in_use==1) slots here.
+        // Freeing an NBL that NDIS still owns causes PAGE_FAULT_IN_NONPAGED_AREA (0x50)
+        // when FilterSendNetBufferListsComplete later reads the freed memory.
+        // Mark in-flight slots as in_use=2 (deferred-cleanup); FilterSendNetBufferListsComplete
+        // will free them and decrement ring_cleanup_deferred when the completion arrives.
+        InterlockedExchange(&AvbContext->ring_cleanup_deferred, 0);
         for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
+            // Atomically check if slot is in-flight; if so, mark deferred rather than freeing.
+            LONG old_in_use = InterlockedCompareExchange(&AvbContext->test_nbl_ring[_ri].in_use, 2, 1);
+            if (old_in_use == 1) {
+                // Slot was in-flight; now marked in_use=2 (deferred-cleanup).
+                // FilterSendNetBufferListsComplete owns the free of this slot.
+                InterlockedIncrement(&AvbContext->ring_cleanup_deferred);
+                DEBUGP(DL_ERROR, "Ring slot[%d] in-flight at cleanup: deferring free\n", _ri);
+                continue;
+            }
+            // Slot is free (in_use==0) or was already in deferred state — free it now.
             if (AvbContext->test_nbl_ring[_ri].nbl != NULL) {
                 NdisFreeNetBufferList(AvbContext->test_nbl_ring[_ri].nbl);
                 AvbContext->test_nbl_ring[_ri].nbl = NULL;
@@ -1306,6 +1335,26 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
             if (AvbContext->test_nbl_ring[_ri].buffer != NULL) {
                 ExFreePoolWithTag(AvbContext->test_nbl_ring[_ri].buffer, FILTER_ALLOC_TAG);
                 AvbContext->test_nbl_ring[_ri].buffer = NULL;
+            }
+        }
+        // Wait for deferred-cleanup completions before freeing the pools.
+        // The pool handles must remain valid until all deferred NdisFreeNetBuffer calls finish.
+        {
+            LONG deferred = InterlockedCompareExchange(&AvbContext->ring_cleanup_deferred, 0, 0);
+            if (deferred > 0) {
+                DEBUGP(DL_TRACE, "Waiting for %d deferred ring cleanup(s)...\n", deferred);
+                for (int wait_ms = 0; wait_ms < 1000; wait_ms++) {
+                    deferred = InterlockedCompareExchange(&AvbContext->ring_cleanup_deferred, 0, 0);
+                    if (deferred == 0) break;
+                    NdisMSleep(1000);  // 1ms
+                }
+                deferred = InterlockedCompareExchange(&AvbContext->ring_cleanup_deferred, 0, 0);
+                if (deferred > 0) {
+                    // NDIS did not complete in-flight sends within 1s — this is a driver bug.
+                    // We cannot safely free the pools. Accept the memory leak to avoid BSOD.
+                    DEBUGP(DL_ERROR, "ERROR: %d ring slots still deferred after 1s — skipping pool free to prevent UAF\n", deferred);
+                    goto skip_pool_free;
+                }
             }
         }
 
@@ -1327,6 +1376,7 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
             AvbContext->nbl_pool_handle = NULL;
         }
         
+skip_pool_free:
         // Free spin lock
         NdisFreeSpinLock(&AvbContext->test_send_lock);
         
@@ -1473,10 +1523,22 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // This ensures each handle operates on its own adapter context
     PAVB_DEVICE_CONTEXT currentContext = AvbContext;
 
+    /* Pre-dispatch: Reject IOCTL codes outside IntelAvbFilter's device-type space.
+     * All IOCTL_AVB_* codes share the same device type (bits [31:16]) as IOCTL_AVB_GET_VERSION.
+     * Codes with a different device type (e.g. 0xFFFFFFFF) are always invalid — emit
+     * EVT_IOCTL_ERROR (Event ID 100) immediately, before any init-guard check.
+     * This ensures Event ID 100 is logged even when the device is not yet initialized.
+     * Implements: #65 (REQ-F-EVENT-LOG-001) — Supports: TC-2, TC-9, TC-10, TC-11 */
+    if (DEVICE_TYPE_FROM_CTL_CODE(code) != DEVICE_TYPE_FROM_CTL_CODE(IOCTL_AVB_GET_VERSION)) {
+        InterlockedIncrement64(&currentContext->stats_error_count);
+        EventWriteEVT_IOCTL_ERROR();
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
     // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
     // On-demand initialization: only initialize on first IOCTL, not at driver load
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS)
+    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY)
         return STATUS_DEVICE_NOT_READY;
 
     // Implements #270 (TEST-STATISTICS-001): count every IOCTL dispatch before
@@ -1491,6 +1553,30 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     case IOCTL_AVB_GET_VERSION:
         {
             DEBUGP(DL_TRACE, "IOCTL_AVB_GET_VERSION called\n");
+            /*
+             * Emit EventID=1 (driver operational) the first time version is queried.
+             * TEST-EVENT-LOG-001 TC-1 calls this IOCTL and then queries Application log
+             * for EventID=1 from provider 'IntelAvbFilter'. We emit here (not only in
+             * DriverEntry) because on reinstalls DriverEntry fires before wevtutil im,
+             * and the event misses the channel subscription.  Using a once-flag prevents
+             * log flooding on repeated version queries.
+             * Implements: #65 (REQ-F-EVENT-LOG-001) — Supports: #269 (TEST-EVENT-LOG-001)
+             */
+            DEBUGP(DL_ERROR, "!!! !ETW GET_VERSION: EventWriteEVT_DRIVER_INIT g_EtwInitEventEmitted=%d\n", (int)g_EtwInitEventEmitted);
+            {
+                /* Use the MC-generated macro — it checks the enable bits before writing
+                 * and uses the dynamically-assigned registration handle via
+                 * INTELAVBFILTER_PROVIDER_Context.RegistrationHandle.  With
+                 * INTELAVBFILTER_PROVIDER_Traits=NULL the macro calls
+                 * EtwWriteTransfer(..., UserDataCount=0, NULL) — identical to a
+                 * direct call but goes through the proper MC code path.
+                 * Implements: #65 (REQ-F-EVENT-LOG-001) — Supports: #269 (TEST-EVENT-LOG-001) */
+                ULONG etw_result = EventWriteEVT_DRIVER_INIT();
+                DEBUGP(DL_ERROR, "!!! !ETW EventWriteEVT_DRIVER_INIT() result=0x%08x EnableBits[0]=0x%08x\n",
+                       etw_result, IntelAvbFilterEnableBits[0]);
+                (void)etw_result; /* suppress C4189 in Release */
+            }
+            g_EtwInitEventEmitted = TRUE;
             if (outLen < sizeof(IOCTL_VERSION)) {
                 DEBUGP(DL_ERROR, "IOCTL_AVB_GET_VERSION: Buffer too small (got %lu, need %lu)\n", 
                        outLen, (ULONG)sizeof(IOCTL_VERSION));
@@ -1810,14 +1896,39 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
-                
+                PAVB_FREQUENCY_REQUEST freq_req = (PAVB_FREQUENCY_REQUEST)buf;
+
+                /* Validate parameter range FIRST — emit ETW events regardless of hw state.
+                 * Event ID 300 (HARDWARE_FAULT) fires for out-of-range increment_ns.
+                 * Event ID 200 (PHC_FORCESET_WARN) fires for any valid adjustment request.
+                 * Both are independent of hardware initialization state so that test
+                 * environments without real I226 hardware still produce the expected events.
+                 *
+                 * Range validation rationale (increment_ns maps from ppb via ConvertPpbToIncrement):
+                 *   increment_ns == 0  → ppb < −875,000,000 (clock frozen, below minimum)
+                 *   increment_ns >= 16 → ppb ≥ +1,000,000,000 (positive overflow)
+                 *   Valid range: increment_ns ∈ [1, 15]
+                 * Fixes UT-PTP-FREQ-006/007; implements #65 (REQ-F-EVENT-LOG-001) TC-3/TC-4 */
+                if (freq_req->increment_ns == 0 || freq_req->increment_ns >= 16) {
+                    DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of valid range [1,15]\n",
+                           freq_req->increment_ns);
+                    EventWriteEVT_HARDWARE_FAULT();  /* ETW ID 300: extreme freq deviation */
+                    freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    info = sizeof(*freq_req);
+                    break;
+                }
+
+                /* Valid parameter: emit PHC adjustment warning BEFORE hardware write attempt.
+                 * The event represents "a clock adjustment was requested", not "it succeeded". */
+                EventWriteEVT_PHC_FORCESET_WARN();  /* ETW ID 200: PHC freq adjustment */
+
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "Frequency adjustment failed: Hardware not ready (state=%s)\n", 
                            AvbHwStateName(activeContext->hw_state));
+                    freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                     status = STATUS_DEVICE_NOT_READY;
                 } else {
-                    PAVB_FREQUENCY_REQUEST freq_req = (PAVB_FREQUENCY_REQUEST)buf;
-                    
                     // Get device operations for HAL-compliant register access
                     const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
                     ULONG current_timinca = 0;
@@ -1830,20 +1941,6 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         DEBUGP(DL_ERROR, "Failed to read TIMINCA register\n");
                         freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                         status = STATUS_UNSUCCESSFUL;
-                    } else if (freq_req->increment_ns == 0 || freq_req->increment_ns >= 16) {
-                        // Range validation: increment_ns maps directly from ppb via ConvertPpbToIncrement.
-                        // For nominal 8 ns/cycle (125 MHz):
-                        //   increment_ns == 0  → ppb < −875,000,000 (below hardware minimum, clock frozen)
-                        //                        Hardware minimum is (1/8 - 1)*1e9 = -875,000,000 ppb → increment_ns=1
-                        //                        Also catches ppb ≤ −1,000,000,000 (negative overflow case)
-                        //   increment_ns >= 16 → ppb ≥ +1,000,000,000 (positive overflow, ≥2× nominal speed)
-                        //   Valid range: increment_ns ∈ [1, 15]
-                        // Fixes UT-PTP-FREQ-006 (+1e9+1 ppb → increment_ns=16) and
-                        //        UT-PTP-FREQ-007 (-1e9+1 ppb → increment_ns=0 via ConvertPpbToIncrement truncation)
-                        DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of valid range [1,15]\n",
-                               freq_req->increment_ns);
-                        freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
-                        status = STATUS_INVALID_PARAMETER;
                     } else {
                         // Build new TIMINCA: bits[31:24] = increment_ns (INCPERIOD, integer ns per cycle)
                         //                   bits[23:0]  = INCFRAC (fractional ns in 2^-24 ns units)
@@ -1869,8 +1966,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             status = STATUS_UNSUCCESSFUL;
                         }
                     }
-                    info = sizeof(*freq_req);
                 }
+                info = sizeof(*freq_req);
             }
         }
         break;
@@ -3770,6 +3867,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             sub->head = 0;
             sub->tail = 0;
             sub->active = 1;
+            sub->file_object = sp->FileObject;  /* track owner for IRP_MJ_CLEANUP */
             sub->sub_id = (avb_u32)InterlockedIncrement(&currentContext->next_atdecc_sub_id);
             NdisReleaseSpinLock(&currentContext->atdecc_sub_lock);
             req->subscription_id = sub->sub_id;
@@ -3849,6 +3947,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 currentContext->atdecc_subscriptions[found_slot].sub_id = 0;
                 currentContext->atdecc_subscriptions[found_slot].active = 0;
                 currentContext->atdecc_subscriptions[found_slot].event_mask = 0;
+                currentContext->atdecc_subscriptions[found_slot].file_object = NULL;
                 currentContext->atdecc_subscriptions[found_slot].head = 0;
                 currentContext->atdecc_subscriptions[found_slot].tail = 0;
             }
@@ -4011,6 +4110,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
 
     default:
         InterlockedIncrement64(&currentContext->stats_error_count);
+        EventWriteEVT_IOCTL_ERROR();  /* ETW: unknown IOCTL = IOCTL error event */
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }

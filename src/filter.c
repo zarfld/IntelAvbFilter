@@ -42,24 +42,23 @@ LIST_ENTRY          FilterModuleList;
  * ETW event logging infrastructure
  * Provider GUID: {5DC1CA46-B07F-4A4F-9D02-1A02E7EC24E4}
  * Manifest:      src/IntelAvbFilter.man (register with wevtutil im at install time)
+ * Uses mc.exe-generated macros from src/IntelAvbFilter.h (via precomp.h):
+ *   EventRegisterIntelAvbFilter()  — EtwRegister + McGenControlCallbackV2 enable callback
+ *   EventWriteEVT_DRIVER_INIT(NULL) — EtwWriteTransfer with correct enable-bit check
+ *   EventUnregisterIntelAvbFilter() — EtwUnregister
+ * McGenControlCallbackV2 is called synchronously during registration and sets the
+ * IntelAvbFilterEnableBits enable bits so that EventWriteEVT_DRIVER_INIT works
+ * immediately after registration.
  * Implements: #65  (REQ-F-EVENT-LOG-001: Windows Event Log Integration)
  * Closes:     #269 (TEST-EVENT-LOG-001)
  */
-REGHANDLE g_EtwHandle = 0;  /* registered in DriverEntry, unregistered in FilterUnload */
-
-static const GUID g_IntelAvbFilterProviderGuid = {
-    0x5dc1ca46, 0xb07f, 0x4a4f, {0x9d, 0x02, 0x1a, 0x02, 0xe7, 0xec, 0x24, 0xe4}
-};
 
 /*
- * EVENT_DESCRIPTOR: {Id, Version, Channel, Level, Opcode, Task, Keyword}
- * Channel 0x09 = Application event log (importChannel name="Application")
- * Levels: 1=Critical, 2=Error, 3=Warning, 4=Informational
+ * g_EtwInitEventEmitted: TRUE once EventID=1 has been successfully written to Application log.
+ * Set in IOCTL_AVB_GET_VERSION handler (avb_integration_fixed.c) after a successful write.
+ * Declared extern in filter.h; visible to avb_integration_fixed.c for diagnostic logging.
  */
-static const EVENT_DESCRIPTOR g_EvtDriverInit      = {   1, 0, 0x09, 4, 0, 0, 0 };
-static const EVENT_DESCRIPTOR g_EvtIoctlError      = { 100, 0, 0x09, 2, 0, 0, 0 };
-static const EVENT_DESCRIPTOR g_EvtPhcForceSetWarn = { 200, 0, 0x09, 3, 0, 0, 0 };
-static const EVENT_DESCRIPTOR g_EvtHardwareFault   = { 300, 0, 0x09, 1, 0, 0, 0 };
+BOOLEAN g_EtwInitEventEmitted = FALSE;
 
 NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 { 0, 0, 0},
@@ -277,6 +276,11 @@ Return Value:
 
         /*
          * Register ETW provider and emit Event ID 1 (driver initialization).
+         * EventRegisterIntelAvbFilter() uses McGenControlCallbackV2 as the enable
+         * callback.  ETW calls McGenControlCallbackV2 synchronously during
+         * registration if the EventLog-Application session has already enabled our
+         * provider, setting IntelAvbFilterEnableBits so EventWriteEVT_DRIVER_INIT
+         * sends the event via EtwWriteTransfer to the Application channel.
          * The provider manifest (src/IntelAvbFilter.man) must be registered at
          * install time via:
          *   wevtutil im IntelAvbFilter.man /mf:<sys-path> /rf:<sys-path>
@@ -284,17 +288,56 @@ Return Value:
          * Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 (TEST-EVENT-LOG-001)
          */
         {
-            NTSTATUS etw_status = EtwRegister(
-                &g_IntelAvbFilterProviderGuid,
-                NULL,   /* no enable callback */
-                NULL,   /* no callback context */
-                &g_EtwHandle);
-            if (NT_SUCCESS(etw_status)) {
-                /* Event ID 1: driver initialization — written to Application log */
-                EtwWrite(g_EtwHandle, &g_EvtDriverInit, NULL, 0, NULL);
-                DEBUGP(DL_TRACE, "ETW provider registered; Event ID 1 emitted.\n");
+            ULONG etw_status = EventRegisterIntelAvbFilter();
+            DEBUGP(DL_ERROR, "!!! !ETW EventRegisterIntelAvbFilter status=0x%08x handle=0x%p\n",
+                   etw_status, (PVOID)IntelAvbFilterHandle);
+            if (etw_status == 0 /* ERROR_SUCCESS */) {
+                /* EtwSetInformation(EventProviderSetTraits) is a best-effort call for
+                 * ETW trace-consumer tools (xperf, WPA) to display the provider name.
+                 * It returns STATUS_INVALID_INFO_CLASS (0xC0000102) on some Windows
+                 * builds for kernel-mode providers — this is harmless and expected.
+                 * WEL routing is purely GUID+channel based (WINEVT\Publishers registry)
+                 * and does NOT require this call.
+                 * NOTE: INTELAVBFILTER_PROVIDER_Traits is intentionally NULL (see precomp.h).
+                 * Setting traits would cause McGenEventWrite to embed
+                 * EVENT_DATA_DESCRIPTOR_TYPE_PROVIDER_METADATA (Reserved=2) in event data,
+                 * which makes EventLog misclassify manifested events as TraceLogging and
+                 * silently drop them. Traits = NULL is the correct setting for manifested
+                 * providers.
+                 * Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 (TEST-EVENT-LOG-001)
+                 */
+                {
+                    static const char g_EtwTraits[] = {
+                        /* UTF-8 format: UINT16 totalSize=17 (incl. this field), then "IntelAvbFilter\0" */
+                        0x11, 0x00,
+                        'I', 'n', 't', 'e', 'l', 'A', 'v', 'b', 'F', 'i', 'l', 't', 'e', 'r', 0x00
+                    }; /* 17 bytes: 2-byte size + 14-char name + null */
+                    NTSTATUS si_status = EtwSetInformation(
+                        IntelAvbFilterHandle,
+                        EventProviderSetTraits,
+                        (PVOID)g_EtwTraits,
+                        sizeof(g_EtwTraits));
+                    DEBUGP(DL_ERROR, "!!! !ETW EtwSetInformation(traits) status=0x%08lx (harmless if 0xC0000102)\n",
+                           (ULONG)si_status);
+                    (void)si_status;
+                }
+
+                /* Event ID 1: driver initialization — best-effort write from DriverEntry.
+                 * On first install, DriverEntry may run before WEL has processed the
+                 * WINEVT\Publishers registry entry, causing a race condition where
+                 * EtwWriteTransfer delivers to 0 sessions (silent STATUS_SUCCESS).
+                 * The reliable write for TC-1 is in IOCTL_AVB_GET_VERSION (avb_integration_fixed.c)
+                 * which fires only after WEL is definitely subscribed.
+                 * EventWriteEVT_DRIVER_INIT checks IntelAvbFilterEnableBits before writing;
+                 * the enable bits are set by McGenControlCallbackV2 when EventLog-System
+                 * subscribes after wevtutil im registers the manifest channel references.
+                 * Channel=0x8 (System) is correct; see src/IntelAvbFilter.man. */
+                ULONG write_status = EventWriteEVT_DRIVER_INIT();
+                DEBUGP(DL_ERROR, "!!! !ETW EventWriteEVT_DRIVER_INIT() status=0x%08x EnableBits[0]=0x%08x\n",
+                       write_status, IntelAvbFilterEnableBits[0]);
+                (void)write_status; /* suppress C4189 in Release: DEBUGP expands to nothing */
             } else {
-                DEBUGP(DL_TRACE, "EtwRegister failed: 0x%08x (manifest may not be installed)\n",
+                DEBUGP(DL_ERROR, "!!! !ETW EventRegisterIntelAvbFilter FAILED: 0x%08x (manifest may not be installed)\n",
                        etw_status);
                 /* Non-fatal: driver continues without ETW. Test will soft-fail. */
             }
@@ -660,6 +703,14 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
 
     Status = NDIS_STATUS_SUCCESS;
 
+    /* BUGFIX 0x9F: Stop timers before NDIS powers down the adapter.
+     * Without this, the 1ms tx_poll DPC continues MMIO reads on powered-down
+     * hardware, blocking the power IRP long enough to trigger DRIVER_POWER_STATE_FAILURE.
+     * AvbStopTimers is idempotent; AvbRestartTimers in FilterRestart re-arms if needed. */
+    if (pFilter->AvbContext != NULL) {
+        AvbStopTimers((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+    }
+
     pFilter->State = FilterPaused;
 
     DEBUGP(DL_TRACE, "<===FilterPause:  Status %x\n", Status);
@@ -908,6 +959,19 @@ FilterRestart(
         pFilter->State = FilterPaused;
     }
 
+    /* S3/S4 resume fix: re-initialize PHC hardware registers (TIMINCA, TSAUXC, TSYNCRXCTL,
+     * TSYNCTXCTL) that are cleared by the hardware power cycle.  BAR0 is already mapped so
+     * AvbPerformBasicInitialization returns immediately; intel_init/init_ptp then re-programs
+     * the PHC.  Must run before AvbRestartTimers so the DPC finds a running clock.
+     * Verifies: TC-S3-004 (PHC non-zero post-wake). */
+    if (pFilter->AvbContext != NULL) {
+        (void)AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+    }
+
+    /* BUGFIX 0x9F: restart timers if subscriptions survived the Pause/Restart cycle. */
+    if (pFilter->AvbContext != NULL) {
+        AvbRestartTimers((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+    }
 
     DEBUGP(DL_TRACE, "<===FilterRestart:  FilterModuleContext %p, Status %x\n", FilterModuleContext, Status);
     return Status;
@@ -1020,11 +1084,8 @@ Return Value:
 
     DEBUGP(DL_TRACE, "===>FilterUnload\n");
 
-    /* Unregister ETW provider (paired with EtwRegister in DriverEntry) */
-    if (g_EtwHandle != 0) {
-        EtwUnregister(g_EtwHandle);
-        g_EtwHandle = 0;
-    }
+    /* Unregister ETW provider (paired with EventRegisterIntelAvbFilter in DriverEntry) */
+    EventUnregisterIntelAvbFilter();
 
     //
     // Should free the filter context list
@@ -1690,10 +1751,36 @@ Return Value:
                 BOOLEAN returned_to_ring = FALSE;
                 for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
                     if (avbCtx->test_nbl_ring[_ri].nbl == CurrNbl) {
-                        // Ring-allocated: clear OOB timestamp slot, mark free for reuse.
+                        // Ring-allocated: clear OOB timestamp slot.
                         CurrNbl->NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] = NULL;
-                        InterlockedExchange(&avbCtx->test_nbl_ring[_ri].in_use, 0);
-                        returned_to_ring = TRUE;
+                        // Atomically swap in_use back; check old value for deferred-cleanup.
+                        LONG old_in_use = InterlockedExchange(&avbCtx->test_nbl_ring[_ri].in_use, 0);
+                        if (old_in_use == 2) {
+                            // BUGFIX (UAF/BSOD): Cleanup deferred this slot because it was
+                            // in-flight when AvbCleanupDevice ran.  Free slot resources now so
+                            // the pools (which cleanup kept alive) can be released safely.
+                            // MUST set returned_to_ring=TRUE to prevent the pool-free fallback
+                            // below from reading NET_BUFFER_LIST_FIRST_NB(CurrNbl) after free
+                            // (UAF) and calling NdisFreeNetBuffer a second time (double-free),
+                            // which caused the PAGE_FAULT_IN_NONPAGED_AREA (0x50) BSOD at
+                            // ndis!NdisFreeNetBuffer+0x54 when the freed page was unmapped.
+                            PNET_BUFFER      to_free_nb  = avbCtx->test_nbl_ring[_ri].nb;
+                            PMDL             to_free_mdl = avbCtx->test_nbl_ring[_ri].mdl;
+                            PVOID            to_free_buf = avbCtx->test_nbl_ring[_ri].buffer;
+                            avbCtx->test_nbl_ring[_ri].nb     = NULL;
+                            avbCtx->test_nbl_ring[_ri].nbl    = NULL;
+                            avbCtx->test_nbl_ring[_ri].mdl    = NULL;
+                            avbCtx->test_nbl_ring[_ri].buffer = NULL;
+                            NdisFreeNetBufferList(CurrNbl);
+                            if (to_free_nb)  NdisFreeNetBuffer(to_free_nb);
+                            if (to_free_mdl) IoFreeMdl(to_free_mdl);
+                            if (to_free_buf) ExFreePoolWithTag(to_free_buf, FILTER_ALLOC_TAG);
+                            InterlockedDecrement(&avbCtx->ring_cleanup_deferred);
+                            returned_to_ring = TRUE;  // slot handled; skip pool-free fallback
+                        } else {
+                            // Normal completion: return slot for reuse.
+                            returned_to_ring = TRUE;
+                        }
                         break;
                     }
                 }

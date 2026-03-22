@@ -7,6 +7,32 @@
 #include <filteruser.h>
 #include "flt_dbg.h"
 #include "filter.h"
+// Do NOT define INTELAVBFILTER_PROVIDER_Traits here.
+// IntelAvbFilter.h provides the default: #define INTELAVBFILTER_PROVIDER_Traits NULL
+//
+// Rationale: IntelAvbFilter is a MANIFESTED provider (manifest installed via
+// wevtutil im; WINEVT\Publishers\{GUID}\ChannelReferences\0 = Application/0x9).
+// EventLog-Application ETW session subscribes to the provider GUID automatically
+// from the ChannelReferences registry entry — no traits blob is needed.
+//
+// Embedding a traits descriptor (EVENT_DATA_DESCRIPTOR_TYPE_PROVIDER_METADATA,
+// Reserved=2) in event data is the TraceLogging/self-describing mechanism. When
+// applied to a manifested provider it causes EventLog to misclassify the event as
+// TraceLogging/self-describing and silently drop it instead of routing it to
+// Application.evtx via the manifested-event WEL channel path.
+//
+// With Traits=NULL, INTELAVBFILTER_PROVIDER_Context.Logger = 0, and McGenEventWrite
+// sets EventData[0] = {Ptr=0, Size=0, Reserved=0} — a plain empty descriptor.
+// The manifest provides all provider/channel/message metadata; the driver needs only
+// to call EtwWriteTransfer with the correct EVENT_DESCRIPTOR.Channel = 0x9 (Application).
+//
+// Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 (TEST-EVENT-LOG-001)
+
+// mc.exe-generated kernel-mode ETW provider macros (EventRegisterIntelAvbFilter,
+// EventWriteEVT_DRIVER_INIT, etc.).  Included here so every TU has the macro
+// definitions; the selectany globals are link-merged to one instance.
+// Implements: #65 (REQ-F-EVENT-LOG-001) — Closes: #269 (TEST-EVENT-LOG-001)
+#include "IntelAvbFilter.h"
 
 // Use Intel library headers for common types and device enums
 #include "external/intel_avb/lib/intel.h"

@@ -824,6 +824,7 @@ IntelAvbFilterDeviceIoControl(
                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
             DEBUGP(DL_ERROR, "!!!   Expected IOCTLs: OPEN_ADAPTER=0x%08X SUBSCRIBE=0x%08X RING_MAP=0x%08X SET_TARGET_TIME=0x%08X\n",
                    IOCTL_AVB_OPEN_ADAPTER, IOCTL_AVB_TS_SUBSCRIBE, IOCTL_AVB_TS_RING_MAP, IOCTL_AVB_SET_TARGET_TIME);
+            EventWriteEVT_IOCTL_ERROR_AssumeEnabled();  /* Implements: REQ-F-EVENT-LOG-001 (#65), Closes: TEST-EVENT-LOG-001 TC-2 (#269) */
             Status = STATUS_INVALID_DEVICE_REQUEST;
             break;
     }
