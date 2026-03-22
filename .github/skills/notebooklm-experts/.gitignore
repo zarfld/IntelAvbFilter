@@ -1,0 +1,6 @@
+# Chromium browser profile — contains Google session cookies, cached credentials
+# NEVER commit browser_state — it holds live Google auth tokens
+data/profiles/default/browser_state/
+
+# Python virtual environment — binaries, not source; recreated via pip
+.venv/
