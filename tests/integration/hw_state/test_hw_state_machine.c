@@ -44,14 +44,6 @@
 // Device path for IntelAvbFilter driver (matches working tests)
 #define DEVICE_PATH "\\\\.\\IntelAvbFilter"
 
-// Hardware state enum (from avb_integration.h lines 34-51)
-typedef enum _AVB_HW_STATE {
-    AVB_HW_UNBOUND = 0,      // Filter not yet attached to supported Intel miniport
-    AVB_HW_BOUND = 1,        // Filter attached to supported Intel adapter (no BAR/MMIO yet)
-    AVB_HW_BAR_MAPPED = 2,   // BAR0 resources discovered + MMIO mapped + basic register access validated
-    AVB_HW_PTP_READY = 3     // PTP clock verified incrementing & timestamp capture enabled
-} AVB_HW_STATE;
-
 // AVB_HW_STATE_QUERY structure now comes from avb_ioctl.h
 
 // Test statistics

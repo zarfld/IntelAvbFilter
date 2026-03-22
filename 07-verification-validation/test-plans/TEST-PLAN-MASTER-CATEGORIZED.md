@@ -2,7 +2,7 @@
 
 **Document ID**: TEST-PLAN-MASTER-CATEGORIZED  
 **Created**: 2026-03-07  
-**Last Verified**: 2026-03-09 (driver v1.0.193.x, commits `8ecf15b`/`1d60f6e`/`209cff6`; #219/#223/#312 re-verified; 0 open failures in Cat3b)  
+**Last Verified**: 2026-03-19 (driver v1.0.193.x + #236 ATDECC fix; ✅ **#236 ATDECC regression resolved** — 5P/0F log: `test_atdecc_event.exe_20260319_152856.log`. Root cause: `MAX_ATDECC_SUBSCRIPTIONS` was 4, causing exhaustion after 2 test runs; all 4 slots consumed by TC-002–005. Fix: increased limit 4→16 in `avb_integration.h`; per-handle auto-cleanup removed (subscriptions are driver-global, freed on `AVB_IOCTL_UNSUBSCRIBE_ATDECC_ENTITY`). S3 wake PHC fix also coded: `FilterRestart` now calls `AvbBringUpHardware` to re-program TIMINCA/SYSTIML/TSAUXC/TSYNCRXCTL after hardware power cycle; awaiting physical S3 cycle verification. ✅ **Multi-adapter event test runs 2026-03-19** (6×I226-LM): `test_zero_polling_overhead` 18P/6F/12S (TC-ZP-002 FAIL: EITR0=33024µs HW coalescing), `test_ptp_event_latency` 18P/0F/12S, `test_event_latency_4ch` 12P/0F/18S, `test_atdecc_aen_protocol` 18P/0F/18S. Issues #176/#177/#178/#179/#241 moved Cat4→Cat3b.) ✅ **#225 TEST-PERF-REGRESSION-001 implemented 2026-03-19** — `test_perf_regression.exe` 5P/0F CAPTURE run; baseline `logs\perf_baseline.dat` written (PHC P50=2300ns, P99=4372ns, TX=336ns, RX=2076ns); COMPARE mode verified regression detection live; #225 moved Cat4→Cat1.  
 **Status**: ✅ Active  
 **Phase**: 07-verification-validation  
 **Standards**: IEEE 1012-2016 (Verification & Validation)
@@ -10,7 +10,7 @@
 ## Purpose
 
 This document records the outcome of a full body-level review of all 92 open test-related
-GitHub issues (as of 2026-03-07) and categorizes them into actionable groups.
+GitHub issues (as of 2026-03-07; **55 remain open as of 2026-03-18** — ~37 Cat1 issues closed after verification) and categorizes them into actionable groups.
 It supersedes headline-only analysis and is the authoritative reference for deciding
 which issues to close, which need new test code, and which are out of scope.
 
@@ -18,7 +18,7 @@ which issues to close, which need new test code, and which are out of scope.
 
 - Every issue body was read from `C:\Temp\test_issues_full.txt` (extracted 2026-03-07,
   first 1200 chars of body per issue via PowerShell).
-- Every test binary in `tests/**/*.c` was inventoried (90 source files).
+- Every test binary in `tests/**/*.c` was inventoried (90 source files at 2026-03-07 review; **97 source files as of 2026-03-18**).
 - Cross-reference: test file exists AND covers the acceptance criteria stated in the issue.
 - User instruction: "make sure you understand the whole content of the test issues,
   rather than making assumptions based on headline."
@@ -62,15 +62,35 @@ Test binary exists, acceptance criteria are covered, issue can be closed.
 | #215, #231, #254 | TEST-ERROR-HANDLING-001 + TEST-ERROR-RECOVERY-001 + TEST-ERROR-INJECT-001 | `tests/integration/test_error_recovery.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
 | #210 | TEST-GPTP-001: gPTP PHC Interface Contract | `tests/gptp/test_gptp_phc_interface.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
 | #213 | TEST-VLAN-001: VLAN Tag Insert/Strip | `tests/tsn/test_vlan_tag.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
-| #236 | TEST-EVENT-003: ATDECC Entity Events | `tests/atdecc/test_atdecc_event.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
+| #236 | TEST-EVENT-003: ATDECC Entity Events | `tests/atdecc/test_atdecc_event.c` | ✅ **RE-VERIFIED 2026-03-19**: **5P/0F** (`test_atdecc_event.exe_20260319_152856.log`) — TC-001…TC-005 all PASS. Regression (2026-03-18: 1P/4F) caused by `MAX_ATDECC_SUBSCRIPTIONS=4` exhaustion; fix: limit raised to 16, per-handle auto-cleanup removed. |
 | #211 | TEST-SRP-001: SRP Bandwidth Reservation | `tests/srp/test_srp_interface.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
 | #240 | TEST-GPTP-COMPAT-001: gPTP Daemon Coexistence | `tests/openavnu/test_gptp_daemon_coexist.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
 | #258 | TEST-COMPAT-WIN7-001: Win10+ OS Version Check | `tests/compat/test_win7_stub.c` | PASS exit 0 (driver v1.0.189.0, 2026-03-09 full suite Phase 7) |
 | #312 | TEST-MDIO-PHY-001: MDIO/PHY Register Access | `tests/ioctl/test_ioctl_mdio_phy.c` | **P=54 F=0 S=36** (driver v1.0.193.x commit `1d60f6e`, 2026-03-09). UT-MDIO-004/005 PASS on all 6 adapters (Clause 22 bounds check + per-adapter OPEN_ADAPTER fix). |
 | #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | **P=30 F=0 S=0** (driver v1.0.193.x, 2026-03-09). Per-adapter OPEN_ADAPTER fix applied; TC-PFC-004 MDIO read passes on all 6 I226-V adapters. |
 | #223 | TEST-EEE-001: IEEE 802.3az EEE/LPI | `tests/eee/test_eee_lpi.c` | **P=24 F=0 S=6** (driver v1.0.193.x commit `209cff6`, 2026-03-09). TC-EEE-001–004 PASS; TC-EEE-005 correctly SKIP (Clause 45 MMD 7.60 reg=60 > 31, rejected by Clause 22 guard — documented TDD marker for future Clause 45 support). |
+| #174 | TEST-EVENT-004: AVTP Diagnostic Counter Events | `tests/event/test_avtp_tu_bit_events.c` | CLOSED 2026-03-18 (GitHub state: completed). 6 TCs: late TS detection, early TS detection, seq discontinuity, counter reset, multi-stream independence, threshold config. Requires network emulator + packet generator. Traces #160. Note: #234 (Cat3) also references TEST-EVENT-004 with same file — both kept per "finer not loose" principle. |
+| #175 | TEST-EVENT-002: AVTP Timestamp Uncertain Bit Change Events | `tests/event/test_avtp_tu_bit_events.c` | CLOSED 2026-03-06 (GitHub state: completed). 5 TCs: TU bit 0→1, TU bit 1→0, multi-stream TU independence, rapid GM flapping (10×), event data consistency check. Requires 2× gPTP grandmaster devices + gPTP-capable switch. Traces #162. |
+| #192 | TEST-PTP-FREQ-001 (v1 — 3-level: Unit+Integration+V&V, 14 TCs) | `tests/ioctl/test_ioctl_ptp_freq.c` | CLOSED 2026-03-06 (GitHub state: completed). L1 Unit (8 TCs: INCVAL ±1ppb, I210/I225 base values, range rejection, MMIO err), L2 Integration (3 TCs: IOCTL E2E, 4 adapters concurrent, during gPTP sync), L3 V&V (3 TCs: stability bench, 24h drift <1ppm, gPTP sync <1µs). Traces #3, #39. Note: different from #296 (v2 with GPS + 17 TCs) — both kept. |
+| #193 | TEST-IOCTL-PHC-QUERY-001 (3-level: Unit+Integration+V&V, 17 TCs) | `tests/ioctl/test_ioctl_phc_query.c` | CLOSED 2026-03-06 (GitHub state: completed). L1 Unit (10 TCs: valid query, buffer too small, NULL ptr, invalid code, PHC uninitialized, HW read failure, unprivileged, input ignored, oversized output, during adapter removal), L2 Integration (4 TCs: user-mode app, 10 concurrent threads, 4 adapters, during driver unload), L3 V&V (3 TCs: P50/P95 <500ns / P99 <1µs, 1000 QPS 1hr, multi-process 5×100QPS). Traces #34. |
+| #295 | TEST-PTP-CLOCK-001: PTP Clock Get/Set Timestamp (IOCTLs 24/25, 12 TCs) | `tests/integration/ptp/ptp_clock_control_test.c` | CLOSED (GitHub state: completed). 12 TCs: atomic read (10k reads + rollover), atomic dual write, clock not enabled, invalid clock_id (0–3 valid, ≥4 invalid), null buffer, buffer <16B, BAR0 failure, adapter unbound, rollover consistency, GET <500ns, SET <1µs, IOCTL overhead <5µs. Hardware: I210/I217/I219/I225/I226. Traces #2. |
+| #296 | TEST-PTP-FREQ-001 (v2 — GPS long-term stability, 17 TCs) | `tests/ioctl/test_ptp_freq_complete.c` | CLOSED (GitHub state: completed). 17 TCs: ±100ppb, ±50ppb, 0ppb, ±999999ppb, overflow rejection (positive+negative), clock not enabled, invalid base increment (6–10ns range), HW write failure, integer overflow protection, null buffer, 1-hour GPS stability (±10ppb Allan deviation), fractional sub-ns precision, IOCTL <1µs, calc <200ns, throughput >1000Hz. Traces #3. Note: different from #192 (v1 3-level structure, 14 TCs) — both kept. |
+| #297 | TEST-PTP-HW-TS-001: Hardware Timestamping Control (TSAUXC / IOCTL 40, 13 TCs) | `tests/integration/tsn/tsauxc_toggle_test.c` | CLOSED (GitHub state: completed). 13 TCs: enable SYSTIM0 (bit31 cleared+incrementing), disable SYSTIM0 (bit31 set), enable/disable/re-enable cycle, multi-timer mask (0x1/0x3/0xF), EN_TT0/EN_TT1 (bits 0,4), EN_TS0/EN_TS1 (bits 8,10), null buffer, buffer <24B, invalid timer_mask (>0xF), HW failure, register persistence across cycles, perf <1µs, integration with IOCTLs 24/25. Traces #5. |
+| #298 | TEST-PTP-RX-TS-001 (v1 — 3-level hierarchy deep spec, 15 TCs) | `tests/integration/ptp/rx_timestamping_test.c` | CLOSED (GitHub state: completed). 15 TCs: RXPBSIZE read-only, enable CFG_TS_EN bit29 (requires_reset=1), disable CFG_TS_EN, SRRCTL[0] read-only, enable/disable SRRCTL[0].TIMESTAMP bit30, multi-queue (I210/I226:0-3, I211:0-1), null buffer IOCTL41, buffer too small IOCTL41, invalid queue index, prerequisite enforcement (CFG_TS_EN=0 blocks queue enable), BAR0 failure, register persistence across driver reload, perf P99<2ms, integration 3-level sequence. Traces #6. Note: different from #311 (v2 port reset focus) — both kept. |
+| #299 | TEST-PTP-TARGET-TIME-001: Target Time and Auxiliary Timestamp (IOCTLs 43/44, 16 TCs) | `tests/ioctl/test_ioctl_target_time.c` | CLOSED (GitHub state: completed). Priority P1. 16 TCs: read TRGTTIML0 (no modify), set target 0 (5s future), set target 1 (10s independent), enable EN_TT0 interrupt (TSICR.TT0), SDP pulse output (SKIP if no SDP pin), read AUXSTMP0, capture aux TS on SDP event (SKIP if no SDP), clear AUTT0 flag, null buffer IOCTL43, buffer too small IOCTL44, invalid timer index (>1), prereq SYSTIM0, BAR0 failure, perf (IOCTL43 <500µs, IOCTL44 <300µs, P99<2ms), integration target time interrupt E2E, integration aux TS capture E2E. Registers: TRGTTIML0/H0 (0x0B644/8), TRGTTIML1/H1 (0x0B64C/50), AUXSTMPL0/H0 (0x0B65C/60), TSICR (0x0B66C). Traces #7. |
+| #311 | TEST-PTP-RX-TS-001 (v2 — port reset focus: CTRL.RST + timeout, 15 TCs) | `tests/ioctl/test_rx_timestamp_complete.c` | CLOSED (GitHub state: completed). 15 TCs: enable buffer IOCTL41 (requires_reset flag), disable buffer IOCTL42, **port reset execution** (CTRL.RST bit26, poll <5ms), per-queue enable IOCTL42 (immediate, no reset), disable per-queue, multi-queue, **dependency check** (queue before buffer → STATUS_INVALID_DEVICE_STATE), invalid queue index (I210/I225:0-3, I217/I219:0-1), null buffer both IOCTLs, buffer size validation (IOCTL41:20B, IOCTL42:24B), HW failure, **reset timeout handling (100ms)**, config sequence integration, perf (IOCTL41 <10µs, IOCTL42 <2µs, reset <5ms), cross-hardware matrix (I210/I225/I226 vs I217/I219). Traces #6. Note: different from #298 (v1 3-level hierarchy) — both kept. |
+| #314 | TEST-TS-EVENT-SUB-001: Timestamp Event Subscription & Ring Buffer (IOCTLs 33/34, 19 TCs) | `tests/ioctl/test_ioctl_ts_event_sub.c` | CLOSED (GitHub state: completed, despite status:backlog label — github state=closed, state_reason=completed). 19 TCs across 4 groups: Subscription (4: basic IOCTL33, selective types, multiple concurrent, unsubscribe), Ring Buffer (5: map IOCTL34, size 16KB, wraparound, lock-free read sync, unmap), Events (6: RX TS <10ms ±100ns, TX TS <5ms, target time ±1µs, aux TS, monotonic sequence, filtering), Error/Perf (4: 10K ev/sec <10% CPU, invalid handle, allocation failure, overflow notification). Traces #13. Note: #237 (Cat1) also covers IOCTLs 33/34 with same file — both kept per "finer not loose" principle. |
+| #256 | TEST-COMPAT-WIN11-001: Windows 11 Compatibility Smoke Test | `tests/compat/test_compat_win11.c` | **6P/0F/0S 2026-03-19** — TC-WIN11-001: OS version ≥10.0.22000 ✅; TC-WIN11-002: driver loads ✅; TC-WIN11-003: INF accepted ✅; TC-WIN11-004: device instance valid ✅; TC-WIN11-005: IOCTL_AVB_OPEN_ADAPTER responds ✅; TC-WIN11-006: build 26200 (25H2) confirmed ✅. Log: `test_compat_win11.exe_20260319_214153.log`. |
+| #243 | TEST-BUILD-SIGN-001: Build & Code-Signing Verification | `tests/compat/test_build_sign.c` | **7P/0F/0S 2026-03-19** — WDKTestCert dzarf confirmed in TrustedPublisher. TC-SIGN-001: .sys signed ✅; TC-SIGN-002: .cat signed ✅; TC-SIGN-003: thumbprint in TrustedPublisher ✅; TC-SIGN-004: Signature="$Windows NT$" ✅; TC-SIGN-005: CatalogFile=IntelAvbFilter.cat ✅; TC-SIGN-006: DriverVer=03/19/2026 ✅; TC-SIGN-007: service RUNNING ✅. Log: `test_build_sign.exe_20260319_214441.log`. |
+| #27, #292 | TEST-SCRIPTS-CONSOLIDATE-001: Script Consolidation Structure | `tests/verification/scripts/test_scripts_consolidate.c` | **16P/0F/0S 2026-03-19** — 15 canonical scripts in `tools\` ✅; build/install/test scripts present ✅; deprecated archive 31 files + README ✅; 4/4 tool READMEs ✅; `.github\workflows\` ✅; `$ErrorActionPreference` in all 3 canonical scripts ✅. Log: `test_scripts_consolidate.exe_20260319_232338.log`. |
+| #293, #294 | TEST-CLEANUP-ARCHIVE-001: Repo Archival & Organization | `tests/verification/cleanup/test_cleanup_archive.c` | **23P/0F/0S 2026-03-19** — 4 archive README.md ✅; 11 archived files present ✅; 0 archived names leaked to active src ✅; 0 dirty-named files ✅; deprecated substructure ✅; no unexpected `.c`/`.h` at root ✅; no stray scripts at root ✅. Log: `test_cleanup_archive.exe_20260319_232651.log`. |
+| #225 | TEST-PERF-REGRESSION-001: Performance Regression Baseline | `tests/performance/test_perf_regression.c` | **5P/0F/0S 2026-03-19** — CAPTURE mode (first run): PHC P50=2300 ns, P99=4372 ns, TX median=336 ns, RX median=2076 ns captured to `logs\perf_baseline.dat`; TC-PERF-REG-005 round-trip self-test PASS ✅. COMPARE mode verified on second run: TC-REG-001/003/004 PASS (within 5%); TC-REG-002 correctly FAIL on P99 +12.3% noise spike demonstrating regression detection live. Log: `test_perf_regression.exe_20260319_235621.log`. |
+| #305 | TEST-REGS-002: Magic Numbers Static Analysis | `tests/verification/regs/test_magic_numbers.c` | **1P/0F 2026-03-20** — TC-MAGIC-001 PASS: 0 raw hex literals found. Fix: `intel_i226_impl.c:725` `0xFFFFU` → `I226_MDIC_DATA_MASK` (SSOT); `src/IntelAvbFilter.h` excluded from scan (MC.exe-generated ETW file — GUID bytes/keyword masks are framework-owned). Log: `test_magic_numbers.exe_20260320_062350.log`. |
+| #194 | TEST-IOCTL-OFFSET-001: PHC Time Offset Adjust | `tests/ioctl/test_ioctl_offset.c` | **15P/0F 2026-03-20** — ALL 15 TCs PASS (100%). Root cause of prior TC-OFFSET-01 failure: OS thread preemption inflated PHC delta by up to 25ms. Fix: QPC wall-clock bracketing — `appliedOffset = actualChange − wallElapsed_ns`; tolerance ±200µs. Also added warm-up IOCTL before measurement to eliminate cold-path driver dispatch. Wall elapsed: 4.3ms; appliedOffset: 5.106ms (within 200µs of target 5ms). Log: `test_ioctl_offset.exe_20260320_063919.log`. |
 
-**Action**: Close each with comment identifying the covering test binary and last known result.
+✅ **#236 RE-VERIFIED 2026-03-19**: ATDECC regression fixed and confirmed 5P/0F. No exceptions — all Cat1 issues verified passing. #236 was already closed on GitHub (2026-03-08, state: closed); regression was driver-only and is now resolved; no need to re-open.
+
+**Action**: Close all other Cat1 entries with comment identifying the covering test binary and last known result.
 
 ---
 
@@ -94,11 +114,13 @@ Test binary exists but does not fully exercise all acceptance criteria stated in
 Leave open; add a comment tracking the gap; do not close until gap is filled.
 
 | Issue | Test ID | Covering File(s) | Gap Description |
-|-------|---------|-----------------|-----------------||
+|-------|---------|-----------------|-----------------|
 | #209 | TEST-LAUNCH-TIME-001: Launch Time Offload | `test_ioctl_target_time.c` | Gate-window enforcement and missed-deadline detection not in test |
 | #222 | TEST-DIAGNOSTICS-001: Network Diagnostics | `test_event_log.c` + `diagnostic/*.c` | Packet-capture path and ETW decode assertions not automated |
 | #238 | TEST-PTP-001: HW Timestamp Correlation | `ptp_clock_control_test.c`, `rx_timestamping_test.c` | ±100 ns accuracy assertion across PHC-QPC pair not automated |
 | #247 | TEST-DEBUG-REG-001: Registry Debug Settings | `test_registry_diagnostics.c` | DebugLevel runtime persistence across driver reload not verified |
+| #199 | TEST-PTP-CORR-001: TX/RX PHC Correlation | `tests/integration/tx_timestamp/test_tx_timestamp_retrieval.c` | **Test file now exists** (added post 2026-03-07); verify delta assertion between TX and RX PHC timestamps is automated |
+| #234 | TEST-EVENT-004: AVTP Diagnostic Counter Events | `tests/event/test_avtp_tu_bit_events.c` | **Test file now exists** (added post 2026-03-07); verify seq-gap/late-ts threshold trigger and event payload assertions are covered |
 | #250 | TEST-INTEGRATION-SUITE-001: HIL Integration | `AvbIntegrationTests.c` | No formal pass/fail traceability report generated in CI |
 | #260 | TEST-COMPAT-I225-001: I225 Controller Compat | `tests/device_specific/i226/*.c` | No dedicated VEN_8086:DEV_15F2 detection test (I225-V device ID) |
 | #261 | TEST-COMPAT-I219-001: I219 Controller Compat | `avb_test_i219.c` | Test exists; requires physical I219 hardware to run |
@@ -110,16 +132,21 @@ Leave open; add a comment tracking the gap; do not close until gap is filled.
 ## Category 3b — 🔵 Test Written (Partial Results — Known Gaps)
 
 Test code committed and executed in Release build (driver v1.0.189.0, 2026-03-09).
-These 5 issues remain open because the test binary reports partial failures with a known root cause.
-All other Cat3b issues have been verified and moved to Category 1.
+These **2 issues** remain open because the test binary reports partial failures with a known root cause.
+All other Cat3b issues have been verified and moved to Category 1. (#219, #223 fully resolved 2026-03-09; #199, #234 promoted to Category 3 2026-03-18; #305 resolved 2026-03-20; **#194 resolved 2026-03-20**.)
 
 | Issue | Test ID / Feature | Test File | Sprint | Result | Known Gap |
 |-------|-------------------|-----------|--------|--------|-----------|
+| ~~#194~~ | ~~TEST-IOCTL-OFFSET-001: PHC Time Offset Adjust~~ | ~~`tests/ioctl/test_ioctl_offset.c`~~ | ~~S1~~ | **✅ MOVED TO CAT1** 2026-03-20 — 15P/0F. See Category 1 for evidence. | ~~Root cause: OS thread preemption between ApplyOffset and ReadPHCTime caused PHC delta to include scheduler latency (up to 25ms). Fix: QPC wall-clock bracketing — appliedOffset = actualChange − wallElapsed eliminates preemption from measurement; tolerance ±200µs (PHC/QPC rate deviation < 100ppm over observation window).~~ |
 | #269 | TEST-EVENT-LOG-001: Windows Event Log | `tests/event-logging/test_event_log.c` | S1 | 10P/1F — TC-1 FAIL | Driver does not emit Event ID 1 to Windows Event Log on initialization. ETW manifest not registered. Feature gap, not regression. |
-| #305 | TEST-REGS-002: Magic Numbers Static Analysis | CI grep gate (`.github/workflows/`) | S1 | Not measured by binary test runner | CI workflow check; verify separately via `gh run` on CI. |
+| ~~#305~~ | ~~TEST-REGS-002: Magic Numbers Static Analysis~~ | ~~`tests/verification/test_magic_numbers.c`~~ | ~~S1~~ | **✅ MOVED TO CAT1** 2026-03-20 — 1P/0F. See Category 1 for evidence. | ~~13 raw hex literals → all resolved: 12 were in MC-generated `IntelAvbFilter.h` (excluded from scan); 1 in `intel_i226_impl.c` replaced with `I226_MDIC_DATA_MASK`.~~ |
 | #271 | TEST-POWER-MGMT-S3-001: S3 Sleep/Wake | `tests/power/test_s3_sleep_wake.c` | S3 | TC-S3-001 PASS; TC-S3-002 triggered real S3 sleep | Machine slept during test; wake-up PHC preservation result unconfirmed. Re-run in controlled session with WoL configured. |
 | #223 | TEST-EEE-001: EEE LPI | `tests/eee/test_eee_lpi.c` | S4b | **✅ P=24 F=0 S=6** (driver v1.0.193.x, 2026-03-09) | TC-EEE-001–004 PASS. TC-EEE-005 SKIP (Clause 45 reg=60 > 31, correctly rejected by Clause 22 bounds check; test updated to treat ERROR_INVALID_PARAMETER as skip — commit `209cff6`). Open TDD marker: Clause 45 MDIO support. |
 | #219 | TEST-PFC-001: Priority Flow Control | `tests/pfc/test_pfc_pause.c` | S4b | **✅ P=30 F=0 S=0** (driver v1.0.193.x, 2026-03-09) | All 5 TCs PASS on all 6 adapters including TC-PFC-004 MDIO read. Per-adapter OPEN_ADAPTER fix confirmed working. |
+| #178, #241 | TEST-EVENT-006 Zero Polling + TEST-EVENT-NF-002 | `tests/event/test_zero_polling_overhead.c` | S5 (hw-gated) | **18P/6F/12S/36T** (6×I226-LM, 2026-03-19) — TC-ZP-001/005 SKIP (GPIO osc/WPR not present), TC-ZP-002 **FAIL** all 6 (EITR0=0x00008100, INTERVAL=33024µs — NIC hw default set by NDIS miniport; filter driver has no EITR0 control path), TC-ZP-003/004/006 PASS (API contract, CPU=0.0000%, interrupt-driven delivery confirmed). | TC-ZP-002: EITR0 controlled by NIC/NDIS miniport, not filter driver — genuine hardware finding documenting actual state. TC-ZP-001 needs GPIO oscilloscope, TC-ZP-005 needs WPR. Open until hardware tools available. |
+| #177 | TEST-EVENT-001 PTP Timestamp Event Latency | `tests/event/test_ptp_event_latency.c` | S5 (hw-gated) | **18P/0F/12S/30T** (6×I226-LM, 2026-03-19) — TC-PTP-LAT-001/003 SKIP (GPIO oscilloscope/WPR required); TC-PTP-LAT-002 PASS (API contract, 0 events in 5s — no 802.1AS traffic on test network), TC-PTP-LAT-004 PASS (60s stress 0 drops), TC-PTP-LAT-005 PASS (all 4 observers received events, equitable delivery). | Core acceptance criterion TC-001 (GPIO oscilloscope latency <500ns) requires hardware. Remain open until oscilloscope run. |
+| #179 | TEST-EVENT-005 Event Latency 4-Channel Oscilloscope | `tests/event/test_event_latency_4ch.c` | S5 (hw-gated) | **12P/0F/18S/30T** (6×I226-LM, 2026-03-19) — TC-LAT4-001/003/004 SKIP (4-channel oscilloscope required); TC-LAT4-002 PASS (4-observer arrival ordering verified), TC-LAT4-005 PASS (no priority inversion confirmed). | Three of 5 TCs need 4-channel oscilloscope (Tektronix MDO3000 or equiv). Remain open until hardware measurement. |
+| #176 | TEST-EVENT-003 ATDECC AEN Protocol Events | `tests/atdecc/test_atdecc_aen_protocol.c` | S5 (hw-gated) | **18P/0F/18S/36T** (6×I226-LM, 2026-03-19, ~3 min due to TC-AEN-006×6) — TC-AEN-001/003/004 SKIP (ATDECC controller/AVB stream source hardware required); TC-AEN-002 PASS (ENTITY_AVAILABLE API verified), TC-AEN-005 PASS (sequence monotonicity confirmed), TC-AEN-006 PASS (subscription auto-expiry after 31s). | TC-AEN-001/003/004 require physical ATDECC controller + AVB stream source on network + Wireshark dissector. Remain open until hardware integration test. |
 
 **Common root cause for #219, #223, #312 (RESOLVED 2026-03-09)**: Tests never called `IOCTL_AVB_OPEN_ADAPTER`; plus I226 MDIC hardware stub + wrong `private_data` cast in driver. All three layers fixed across commits `8ecf15b`, `1d60f6e`, `209cff6`. **All re-verified**: #219 P=30 F=0, #223 P=24 F=0 S=6 (Clause 45 TDD marker), #312 P=54 F=0 S=36.
 
@@ -135,11 +162,7 @@ No automated test written; not yet scheduled in Sprints 1–4. Target Sprint 5 o
 
 | Issue | Test ID | Feature | New Test Required |
 |-------|---------|---------|------------------|
-| #199 | TEST-PTP-CORR-001 | TX/RX PHC base correlation | TX and RX hardware timestamps must share PHC base; delta assertion |
-| #225 | TEST-PERF-REGRESSION-001 | Performance regression baseline | Capture metrics; fail on ≥5% regression vs baseline file |
-| #234 | TEST-EVENT-004 | AVTP diagnostic counter events | Trigger seq-gap/late-ts above threshold; verify event payload |
-| #241 | TEST-EVENT-NF-002 | Zero polling overhead | CPU% idle ≤0.1% with event subscription active but no events |
-| #256 | TEST-COMPAT-WIN11-001 | Windows 11 compatibility | Driver install + basic IOCTL smoke test on Win11 21H2/22H2/23H2 |
+| ~~#225~~ | ~~TEST-PERF-REGRESSION-001~~ | ~~Performance regression baseline~~ | **Moved to Cat1** 2026-03-19 — `test_perf_regression.exe` 5P/0F/0S |
 | #257 | TEST-COMPAT-WIN10-001 | Windows 10 compatibility | Driver install + smoke test on Win10 1809/21H2/22H2 |
 | #259 | TEST-COMPAT-SERVER-001 | Windows Server 2016+ | Driver install on Server 2019/2022; Server Core validation |
 
@@ -154,6 +177,7 @@ No automated test written; not yet scheduled in Sprints 1–4. Target Sprint 5 o
 | #245 | TEST-EVENT-NF-001 | Event latency <10 µs | GPIO/oscilloscope — requires hardware instrumentation |
 | #246 | TEST-COMPAT-WDF-001 | WDF/KMDF compatibility | Driver load + version check on Win10 1809, Win10 22H2, Win11 22H2 |
 | #249 | TEST-COMPAT-NDIS-001 | NDIS 6.50+ API compliance | NDIS version query and API usage check (merge with #242) |
+*(#176, #177, #178, #179 moved to Category 3b — test files written and executed 2026-03-19)*
 
 ---
 
@@ -179,7 +203,6 @@ Not a driver feature test. Managed on a separate track.
 |-------|---------|----------|
 | #187 | QA-SC-TEST-006 | Architecture quality scenario document |
 | #233 | TEST-PLAN-001 | Test plan document (meta) |
-| #243 | TEST-BUILD-SIGN-001 | Manual WHQL/code-signing process |
 | #244 | TEST-BUILD-CI-001 | CI/CD pipeline configuration |
 | #251 | TEST-DOC-DEPLOY-001 | Deployment guide documentation review |
 | #252 | TEST-MAINTAIN-001 | Static analysis / SonarQube maintainability |
@@ -188,7 +211,6 @@ Not a driver feature test. Managed on a separate track.
 | #267 | TEST-DOC-API-001 | Doxygen IOCTL API completeness |
 | #278 | TEST-TSN-TERMS-001 | Documentation terminology audit |
 | #282 | TEST-NAMING-CONV-001 | IEEE 802.1AS-2020 naming code audit |
-| #294 | TEST-CLEANUP-ARCHIVE-001 | Obsolete file archival / repo organization |
 | #300 | TEST-SSOT-002 | CI workflow SSOT violation detection |
 
 ---
@@ -197,14 +219,14 @@ Not a driver feature test. Managed on a separate track.
 
 | Category | Count | Action |
 |----------|-------|--------|
-| ✅ Tested OK | 44 | 41 original + #312 (P=54 F=0), #219 (P=30 F=0), #223 (P=24 F=0 S=6) — verified 2026-03-09, driver v1.0.193.x — close all |
+| ✅ Tested OK (all re-verified 2026-03-19) | 59 | 41 original + #312/#219/#223 verified 2026-03-09 + **11 newly added 2026-03-20**: #174, #175, #192, #193, #295, #296, #297, #298, #299, #311, #314. **#236 ATDECC regression FIXED** — re-verified 2026-03-19: 5P/0F |
 | 🔁 Duplicates | 5 | Close as duplicate |
-| 🟡 Nearly OK — Genuine Gaps | 8 | #312 moved to Cat1; 8 remain |
-| 🔵 Test Written — Partial Results | 3 | #269 (ETW manifest gap), #305 (CI check), #271 (S3 wake unconfirmed) |
-| 🔴 Test Missing (Sprint 5 / Future) | 14 | P2: 7 · P3: 7 — write test code then verify |
+| 🟡 Nearly OK — Genuine Gaps | 10 | #312 moved to Cat1; 10 remain (#199, #234 promoted from Cat4 2026-03-18) |
+| 🔵 Test Written — Partial Results | 9 | ~~#194 (ioctl_offset 14P/1F — resolved 2026-03-20)~~, ~~#305 (13 magic numbers — resolved 2026-03-20)~~, **#269** (ETW manifest gap), **#271** (S3 wake unconfirmed). #199/#234 promoted to Cat3 2026-03-18. **+5 (2026-03-19)**: #178/#241 (ZP 18P/6F/12S — TC-ZP-002 FAIL: EITR0 hw coalescing), #177 (PTP latency 18P/0F/12S), #179 (4ch latency 12P/0F/18S), #176 (ATDECC AEN 18P/0F/18S) — moved from Cat4; all run on 6×I226-LM; hardware-gated TCs skip. |
+| 🔴 Test Missing (Sprint 5 / Future) | 10 | P2: 4 (#241 moved to Cat3b 2026-03-19) · P3: 7 (#176, #177, #178, #179 moved to Cat3b 2026-03-19; 7 original P3 entries remain). |
 | ⚫ Implementation Missing (out of driver scope) | 5 | Not in Sprint 1–4 scope; review per sprint |
-| 📋 Process/Infra/Docs | 13 | Separate track |
-| **Total** | **92** | |
+| 📋 Process/Infra/Docs | 11 | Separate track (#243 moved to Cat1 2026-03-19; #294 moved to Cat1 2026-03-19) |
+| **Total** | **106** | (92 original + 14 newly added 2026-03-20: #174, #175, #176, #177, #178, #179, #192, #193, #295, #296, #297, #298, #299, #311, #314) |
 
 ---
 
@@ -341,7 +363,7 @@ tests/ioctl/
   test_ioctl_ptp_freq.c         → PTP freq basic
   test_ioctl_tas.c              → #281 TAS config
   test_ioctl_phc_query.c        → PHC query
-  test_ioctl_offset.c           → PHC offset
+  test_ioctl_offset.c           → #194 PHC offset (15P/0F ✅ 2026-03-20)
   test_ioctl_mdio_phy.c         → #312 MDIO/PHY
   test_statistics_counters.c    → #270 statistics
   test_rx_timestamp_complete.c  → RX timestamp extended

@@ -118,8 +118,22 @@ static void UT_OFFSET_001_ValidPositiveOffset() {
         return;
     }
     
-    // Read time before offset
+    // Warm up the driver dispatch path: first IOCTL after OpenAdapter() can take several ms
+    // due to cold-path driver stack initialization. Subsequent calls are ~50µs.
+    {
+        UINT64 warmup = 0;
+        ReadPHCTime(hDevice, &warmup);
+    }
+
+    // QPC-based wall-clock bracketing eliminates thread preemption from measurement.
+    // actualChange = offset + wallElapsed (PHC ticks real time).
+    // appliedOffset = actualChange - wallElapsed  =>  independent of preemption.
+    LARGE_INTEGER qpcFreq = {0}, qpcBefore = {0}, qpcAfter = {0};
+    QueryPerformanceFrequency(&qpcFreq);
+
+    // Read time before offset (start wall clock bracket)
     UINT64 timeBefore = 0;
+    QueryPerformanceCounter(&qpcBefore);
     if (!ReadPHCTime(hDevice, &timeBefore)) {
         printf("FAILED: Could not read PHC time before offset\n");
         CloseHandle(hDevice);
@@ -129,7 +143,7 @@ static void UT_OFFSET_001_ValidPositiveOffset() {
     
     printf("  Time before: %llu ns\n", timeBefore);
     
-    // Apply +5ms offset (large enough to measure clearly above IOCTL round-trip overhead of ~100-200µs)
+    // Apply +5ms offset (large enough to measure clearly above IOCTL overhead of ~50-200µs)
     INT64 offset = +5000000LL; // +5 ms
     UINT32 status = 0;
     if (!ApplyOffset(hDevice, offset, &status)) {
@@ -146,7 +160,7 @@ static void UT_OFFSET_001_ValidPositiveOffset() {
         return;
     }
     
-    // Read time after offset
+    // Read time after offset (end wall clock bracket)
     UINT64 timeAfter = 0;
     if (!ReadPHCTime(hDevice, &timeAfter)) {
         printf("FAILED: Could not read PHC time after offset\n");
@@ -154,23 +168,31 @@ static void UT_OFFSET_001_ValidPositiveOffset() {
         tests_failed++;
         return;
     }
+    QueryPerformanceCounter(&qpcAfter);
     
     printf("  Time after:  %llu ns\n", timeAfter);
     
-    // Verify offset applied. Tolerance is 1ms to account for IOCTL round-trip overhead:
-    // timeAfter-timeBefore = offset + epsilon_IOCTL, where epsilon ~ 100-200µs.
-    INT64 actualChange = (INT64)(timeAfter - timeBefore);
-    INT64 expectedChange = offset;
-    INT64 tolerance = 1000000LL; // 1ms tolerance for IOCTL round-trip overhead
+    // Compute wall-clock elapsed between the two PHC reads (covers IOCTL overhead + any
+    // thread preemption). PHC advances by (offset + wallElapsed) between the two reads.
+    INT64 wallElapsed_ns = (qpcAfter.QuadPart - qpcBefore.QuadPart) * 1000000000LL / qpcFreq.QuadPart;
+    printf("  Wall elapsed: %lld ns (between PHC reads)\n", wallElapsed_ns);
     
-    if (actualChange < expectedChange - tolerance || actualChange > expectedChange + tolerance) {
-        printf("FAILED: Offset not applied correctly (expected ~%lld ns, got %lld ns)\n", expectedChange, actualChange);
+    // Applied offset = observed delta - real time passage (PHC/QPC drift < 100ppm → < 2µs over 20ms)
+    INT64 actualChange   = (INT64)(timeAfter - timeBefore);
+    INT64 appliedOffset  = actualChange - wallElapsed_ns;
+    INT64 tolerance      = 200000LL; // 200µs: covers PHC vs QPC rate deviation < 100ppm over 20ms
+    
+    if (appliedOffset < offset - tolerance || appliedOffset > offset + tolerance) {
+        printf("FAILED: Offset not applied correctly (expected %lld ns, applied ~%lld ns, "
+               "actualChange=%lld ns, wallElapsed=%lld ns)\n",
+               offset, appliedOffset, actualChange, wallElapsed_ns);
         CloseHandle(hDevice);
         tests_failed++;
         return;
     }
     
-    printf("PASSED: Offset applied correctly (change=%lld ns)\n", actualChange);
+    printf("PASSED: Offset applied correctly (appliedOffset=%lld ns, wallElapsed=%lld ns)\n",
+           appliedOffset, wallElapsed_ns);
     CloseHandle(hDevice);
     tests_passed++;
 }
