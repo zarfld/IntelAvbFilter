@@ -293,6 +293,13 @@ node_modules/
 *.plg
 
 # Visual Studio 6 workspace options file
+
+# IntelAvbFilter: temp/diagnostic artifacts (wevtutil output, build logs, RC temp files)
+build*_output.log
+RCa*
+*_diag*.txt
+tc1_*.txt
+logs/
 *.opt
 
 # Visual Studio 6 auto-generated workspace file (contains which files were open etc.)
