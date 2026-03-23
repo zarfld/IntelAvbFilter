@@ -82,6 +82,9 @@ Abstract:
 // 802.1Q VLAN EtherType
 #define ETH_P_8021Q     0x8100
 
+// 802.1Q VLAN ID mask (lower 12 bits)
+#define ETH_VLAN_ID_MASK  0x0FFF
+
 // VLAN "not set" sentinel (16-bit, all-ones)
 #define FILTER_VLAN_NONE  0xFFFF
 

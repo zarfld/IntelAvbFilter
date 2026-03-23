@@ -264,10 +264,10 @@ NTSTATUS AvbCreateMinimalContext(
     // transportSpecific(4 bits) | messageType(4 bits) = 0x02 (transportSpecific=0, messageType=SYNC=0)
     pkt[14] = 0x00;  // messageType = SYNC (0x0)
     pkt[15] = 0x02;  // versionPTP = 2
-    pkt[16] = 0x00; pkt[17] = 0x2C;  // messageLength = 44 bytes (0x002C)
+    pkt[16] = 0x00; pkt[17] = 0x2C;  // messageLength = 44 bytes (decimal 44)
     pkt[18] = 0x00;  // domainNumber = 0
     pkt[19] = 0x00;  // reserved
-    pkt[20] = 0x02; pkt[21] = 0x00;  // flagField = twoStepFlag (bit 9, 0x0200 big-endian)
+    pkt[20] = 0x02; pkt[21] = 0x00;  // flagField = twoStepFlag (bit 9, big-endian)
     // correctionField (8 bytes) = 0
     // sourcePortIdentity (10 bytes) = clockIdentity(8) + portNumber(2) = all zeros for test
     // sequenceId (2 bytes) - will be filled at send time (offset 44-45)
@@ -1531,7 +1531,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
      * Implements: #65 (REQ-F-EVENT-LOG-001) — Supports: TC-2, TC-9, TC-10, TC-11 */
     if (DEVICE_TYPE_FROM_CTL_CODE(code) != DEVICE_TYPE_FROM_CTL_CODE(IOCTL_AVB_GET_VERSION)) {
         InterlockedIncrement64(&currentContext->stats_error_count);
-        EventWriteEVT_IOCTL_ERROR();
+        EventWriteEVT_IOCTL_ERROR(NULL);
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
@@ -1571,7 +1571,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                  * EtwWriteTransfer(..., UserDataCount=0, NULL) — identical to a
                  * direct call but goes through the proper MC code path.
                  * Implements: #65 (REQ-F-EVENT-LOG-001) — Supports: #269 (TEST-EVENT-LOG-001) */
-                ULONG etw_result = EventWriteEVT_DRIVER_INIT();
+                ULONG etw_result = EventWriteEVT_DRIVER_INIT(NULL);
                 DEBUGP(DL_ERROR, "!!! !ETW EventWriteEVT_DRIVER_INIT() result=0x%08x EnableBits[0]=0x%08x\n",
                        etw_result, IntelAvbFilterEnableBits[0]);
                 (void)etw_result; /* suppress C4189 in Release */
@@ -1912,7 +1912,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 if (freq_req->increment_ns == 0 || freq_req->increment_ns >= 16) {
                     DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of valid range [1,15]\n",
                            freq_req->increment_ns);
-                    EventWriteEVT_HARDWARE_FAULT();  /* ETW ID 300: extreme freq deviation */
+                    EventWriteEVT_HARDWARE_FAULT(NULL);  /* ETW ID 300: extreme freq deviation */
                     freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                     status = STATUS_INVALID_PARAMETER;
                     info = sizeof(*freq_req);
@@ -1921,7 +1921,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
                 /* Valid parameter: emit PHC adjustment warning BEFORE hardware write attempt.
                  * The event represents "a clock adjustment was requested", not "it succeeded". */
-                EventWriteEVT_PHC_FORCESET_WARN();  /* ETW ID 200: PHC freq adjustment */
+                EventWriteEVT_PHC_FORCESET_WARN(NULL);  /* ETW ID 200: PHC freq adjustment */
 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "Frequency adjustment failed: Hardware not ready (state=%s)\n", 
@@ -2132,10 +2132,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     const ULONG BIT29_DISABLE_SYSTIM3 = INTEL_TSAUXC_DISABLE_SYSTIM3;
                     const ULONG BIT28_DISABLE_SYSTIM2 = INTEL_TSAUXC_DISABLE_SYSTIM2;
                     const ULONG BIT27_DISABLE_SYSTIM1 = INTEL_TSAUXC_DISABLE_SYSTIM1;
-                    const ULONG BIT10_EN_TS1 = 0x00000400;  // Enable aux timestamp 1
-                    const ULONG BIT8_EN_TS0 = 0x00000100;   // Enable aux timestamp 0
-                    const ULONG BIT4_EN_TT1 = 0x00000010;   // Enable target time 1
-                    const ULONG BIT0_EN_TT0 = 0x00000001;   // Enable target time 0
+                    const ULONG BIT10_EN_TS1 = INTEL_TSAUXC_EN_TS1;  // Enable aux timestamp 1
+                    const ULONG BIT8_EN_TS0 = INTEL_TSAUXC_EN_TS0;   // Enable aux timestamp 0
+                    const ULONG BIT4_EN_TT1 = INTEL_TSAUXC_EN_TT1;   // Enable target time 1
+                    const ULONG BIT0_EN_TT0 = INTEL_TSAUXC_EN_TT0;   // Enable target time 0
                     
                     // Get device operations for HAL-compliant register access
                     ops = intel_get_device_ops(activeContext->intel_device.device_type);
@@ -4110,7 +4110,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
 
     default:
         InterlockedIncrement64(&currentContext->stats_error_count);
-        EventWriteEVT_IOCTL_ERROR();  /* ETW: unknown IOCTL = IOCTL error event */
+        EventWriteEVT_IOCTL_ERROR(NULL);  /* ETW: unknown IOCTL = IOCTL error event */
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }

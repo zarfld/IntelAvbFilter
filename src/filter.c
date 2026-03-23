@@ -317,7 +317,7 @@ Return Value:
                         EventProviderSetTraits,
                         (PVOID)g_EtwTraits,
                         sizeof(g_EtwTraits));
-                    DEBUGP(DL_ERROR, "!!! !ETW EtwSetInformation(traits) status=0x%08lx (harmless if 0xC0000102)\n",
+                    DEBUGP(DL_ERROR, "!!! !ETW EtwSetInformation(traits) status=0x%08lx (harmless if STATUS_INVALID_INFO_CLASS)\n",
                            (ULONG)si_status);
                     (void)si_status;
                 }
@@ -332,7 +332,7 @@ Return Value:
                  * the enable bits are set by McGenControlCallbackV2 when EventLog-System
                  * subscribes after wevtutil im registers the manifest channel references.
                  * Channel=0x8 (System) is correct; see src/IntelAvbFilter.man. */
-                ULONG write_status = EventWriteEVT_DRIVER_INIT();
+                ULONG write_status = EventWriteEVT_DRIVER_INIT(NULL);
                 DEBUGP(DL_ERROR, "!!! !ETW EventWriteEVT_DRIVER_INIT() status=0x%08x EnableBits[0]=0x%08x\n",
                        write_status, IntelAvbFilterEnableBits[0]);
                 (void)write_status; /* suppress C4189 in Release: DEBUGP expands to nothing */
@@ -2227,7 +2227,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                             if (etherType == ETH_P_8021Q && dataLength >= 18 + 34) {
                                 vlan_id = ((USHORT)pData[14] << 8) | pData[15];
                                 pcp = (pData[14] >> 5) & 0x07;
-                                vlan_id &= 0x0FFF;  /* Mask to 12 bits */
+                                vlan_id &= ETH_VLAN_ID_MASK;  /* Mask to 12 bits */
                                 etherType = ((USHORT)pData[16] << 8) | pData[17];
                                 ptp_offset = 18;  /* PTP after VLAN tag */
                                 
