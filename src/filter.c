@@ -1862,7 +1862,7 @@ Arguments:
     // BUGFIX: GitHub Issue #315 - NULL/invalid pointer check to prevent DRIVER_IRQL_NOT_LESS_OR_EQUAL (0xD1)
     // Race condition: NDIS may call this after FilterDetach if packets are in flight
     // Check for NULL OR invalid kernel pointers (e.g., 0x4 seen in crash dumps)
-    // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
+    // Valid x64 kernel pointers have upper bits set (>= FFFF8000'00000000)
     if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterSendNetBufferLists: INVALID FilterModuleContext=%p! Completing NBLs with error.\n", pFilter);
@@ -1948,7 +1948,7 @@ Arguments:
                 if (currNb != NULL)
                 {
                     // Access Ethernet header to check EtherType at offset 12-13
-                    // PTP packets use EtherType 0x88F7 (IEEE 1588 over Ethernet Layer 2)
+                    // PTP packets use ETHERTYPE_PTP (IEEE 1588 over Ethernet Layer 2)
                     unsigned char headerBuffer[14];  // Ethernet header size
                     PVOID dataBuffer;
                     ULONG dataLength;
@@ -1973,7 +1973,7 @@ Arguments:
                         
                         if (etherType == ETHERTYPE_PTP)  // IEEE 1588 PTP EtherType
                         {
-                            // Intel miniport detects PTP via EtherType=0x88F7 + TSYNCTXCTL register;
+                            // Intel miniport detects PTP via EtherType= ETHERTYPE_PTP + TSYNCTXCTL register;
                             // hardware latches SYSTIM at SFD without needing NBL OOB metadata.
                         }
                     }
@@ -2223,7 +2223,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                                 ethertype_count++;
                             }
                             
-                            /* Check for VLAN tag (0x8100) */
+                            /* Check for VLAN tag ETH_P_8021Q */
                             if (etherType == ETH_P_8021Q && dataLength >= 18 + 34) {
                                 vlan_id = ((USHORT)pData[14] << 8) | pData[15];
                                 pcp = (pData[14] >> 5) & 0x07;
@@ -2237,7 +2237,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                                 }
                             }
                             
-                            /* Check for PTP EtherType (0x88F7) */
+                            /* Check for ETHERTYPE_PTP */
                             if (etherType == ETHERTYPE_PTP) {
                                 UCHAR messageType = pData[ptp_offset] & 0x0F;  /* Low 4 bits of transportSpecific/messageType */
                                 
