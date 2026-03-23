@@ -1650,7 +1650,8 @@ if (Test-Path $WdkKitsInclude) {
 foreach ($t in $TestsToBuild) {
     if ($t.Name -eq 'test_register_constants') {
         if ($WdkKmInclude) {
-            $t.Includes = $t.Includes -replace [regex]::Escape('C:\PROGRA~2\WI3CF2~1\10\Include\100226~1.0\km'), $WdkKmInclude
+            # Quote the path in case it contains spaces (e.g. "C:\Program Files (x86)\...")
+            $t.Includes = $t.Includes -replace [regex]::Escape('C:\PROGRA~2\WI3CF2~1\10\Include\100226~1.0\km'), "`"$WdkKmInclude`""
             Write-Host "INFO: test_register_constants WDK km path resolved to: $WdkKmInclude" -ForegroundColor Cyan
         } else {
             $t.Disabled = $true
