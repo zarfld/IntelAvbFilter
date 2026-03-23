@@ -121,7 +121,7 @@ AvbDiscoverIntelControllerResourcesEnhanced(
         case INTEL_DEV_I210_IT: // I210 backplane
         case INTEL_DEV_I210_CS: // I210 SGMII
         case INTEL_DEV_I210_FLASHLESS: // I210 flash-less
-            *Bar0Length = 0x20000;  // 128KB for I210 family
+            *Bar0Length = BAR0LENGTH_128KB;  // 128KB for I210 family
             break;
             
         case INTEL_DEV_I219_LM: // I219-LM
@@ -129,24 +129,24 @@ AvbDiscoverIntelControllerResourcesEnhanced(
         case INTEL_DEV_I219_D0: // I219-V (2)
         case INTEL_DEV_I219_D1: // I219-LM (2)
         case INTEL_DEV_I219_D2: // I219-LM (3)
-            *Bar0Length = 0x20000;  // 128KB for I219 family
+            *Bar0Length = BAR0LENGTH_128KB;  // 128KB for I219 family
             break;
             
         case INTEL_DEV_I225_V: // I225-LM
         case INTEL_DEV_I225_IT: // I225-V
         case INTEL_DEV_I225_VARIANT: // I225 variant
-            *Bar0Length = 0x20000;  // 128KB for I225 family
+            *Bar0Length = BAR0LENGTH_128KB;  // 128KB for I225 family
             break;
             
         case INTEL_DEV_I226_LM: // I226-LM
         case INTEL_DEV_I226_V: // I226-V
         case INTEL_DEV_I226_IT: // I226-IT
-            *Bar0Length = 0x20000;  // 128KB for I226 family
+            *Bar0Length = BAR0LENGTH_128KB;  // 128KB for I226 family
             break;
             
         default:
             DEBUGP(DL_WARN, "Unknown Intel device ID 0x%x, using default BAR0 size\n", deviceId);
-            *Bar0Length = 0x20000;  // Default 128KB
+            *Bar0Length = BAR0LENGTH_128KB;  // Default 128KB
             break;
     }
     
