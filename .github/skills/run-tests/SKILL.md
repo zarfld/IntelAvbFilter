@@ -13,10 +13,12 @@ description: Use when about to execute any .exe test binary, run any test comman
 - `& ".\build\...\<test>.exe"`
 - `cd build\...; .\test_something.exe`
 
-**The only correct invocation is:**
-```powershell
-.\tools\test\Run-Tests-Elevated.ps1 -TestName <test_name>.exe
-```
+**The correct invocations are:**
+
+| Context | Correct command |
+|---------|----------------|
+| Local dev (interactive) | `.\tools\test\Run-Tests-Elevated.ps1 -TestName <test>.exe` |
+| CI workflow (GitHub Actions) | `.\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Unit` |
 
 Running the `.exe` directly bypasses elevation, device enumeration, logging, and transcript capture. The terminal output shows nothing useful. **You will get wrong or no results and not know it.**
 
@@ -28,7 +30,9 @@ Running the `.exe` directly bypasses elevation, device enumeration, logging, and
 NEVER claim a test passed or failed without reading the log file output.
 
 NEVER run the .exe directly from the build output directory.
-ALWAYS use Run-Tests-Elevated.ps1 as the entry point.
+ALWAYS use the correct entry point for the context:
+  - Local dev:  Run-Tests-Elevated.ps1
+  - CI/Headless: Run-Tests-CI.ps1
 ```
 
 ---
@@ -36,12 +40,35 @@ ALWAYS use Run-Tests-Elevated.ps1 as the entry point.
 ## Script Architecture
 
 ```
-tools/test/Run-Tests-Elevated.ps1   ← ENTRY POINT (handles elevation via Start-Process -Verb RunAs -Wait)
-tools/test/Run-Tests.ps1            ← CANONICAL RUNNER (requires Admin; called by elevated wrapper)
+tools/test/Run-Tests-Elevated.ps1   ← LOCAL DEV entry point — elevation via Start-Process -Verb RunAs -Wait
+                                      Interactive UAC required; caller terminal shows NOTHING useful.
+                                      Transcript captured to logs/ — you MUST read the log file.
+                                      NOT suitable for headless CI.
+
+tools/test/Run-Tests.ps1            ← CANONICAL RUNNER — requires Admin + driver + Intel hardware.
+                                      Checks driver service, Intel NIC, device node \\.\IntelAvbFilter.
+                                      Use for full integration/hardware testing from an elevated terminal.
+
+tools/test/Run-Tests-CI.ps1         ← CI ENTRY POINT — GitHub Actions / headless CI only.
+                                      Runner is already Administrator; NO hardware/driver expected.
+                                      Hardware-independent tests only; no interactive prompts.
+                                      Correct invocation from CI workflow:
+                                        .\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Unit
+                                        .\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Integration
+
 tools/build/Build-Tests.ps1         ← BUILD (compile test executables)
 build/tools/avb_test/x64/Debug/     ← TEST BINARIES (.exe files)
-logs/                               ← LOG FILES (transcript written here by elevated wrapper)
+logs/                               ← LOG FILES (written by all three runners)
 ```
+
+### Which runner to use?
+
+| Context                              | Correct entry point           |
+|--------------------------------------|-------------------------------|
+| Local dev, interactive terminal      | `Run-Tests-Elevated.ps1`      |
+| Local dev, already in elevated shell | `Run-Tests.ps1`               |
+| GitHub Actions / headless CI         | `Run-Tests-CI.ps1`            |
+| CI workflow YAML step                | `Run-Tests-CI.ps1`            |
 
 `Run-Tests-Elevated.ps1` spawns a new elevated PowerShell via `Start-Process
 powershell -Verb RunAs -Wait`. The test output is captured in a transcript log

@@ -351,69 +351,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
-          $HwIndependentTests = @(
-            "test_register_constants",
-            "test_magic_numbers",
-            "test_scripts_consolidate",
-            "test_cleanup_archive",
-            "test_ioctl_simple",
-            "test_ioctl_routing",
-            "test_ioctl_trace",
-            "test_minimal_ioctl",
-            "test_clock_config",
-            "test_clock_working",
-            "test_direct_clock",
-            "test_hal_unit",
-            "test_hal_errors",
-            "test_hal_performance",
-            "test_atdecc_event",
-            "test_atdecc_aen_protocol",
-            "test_ioctl_version",
-            "test_mdio_phy",
-            "test_dev_lifecycle",
-            "test_ts_event_sub",
-            "test_ptp_getset"
-          )
-          $Passed = 0; $Failed = 0; $Skipped = 0
-          foreach ($Test in $HwIndependentTests) {
-            $Exe = Join-Path $OutDir "$Test.exe"
-            if (Test-Path $Exe) {
-              Write-Host "🧪 Running $Test..." -ForegroundColor Yellow
-              & $Exe
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "  ✅ PASSED" -ForegroundColor Green
-                $Passed++
-              } else {
-                Write-Host "  ❌ FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
-                $Failed++
-              }
-            } else {
-              Write-Host "  ⏭️ SKIPPED (not built): $Test" -ForegroundColor Gray
-              $Skipped++
-            }
-          }
-          Write-Host ""
-          Write-Host "📊 Results: $Passed passed, $Failed failed, $Skipped skipped" -ForegroundColor Cyan
-          if ($Failed -gt 0) { exit 1 }
+          # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
+          # Run-Tests-Elevated.ps1 uses Start-Process -Verb RunAs (interactive UAC) and is
+          # NOT suitable for headless CI.  Run-Tests-CI.ps1 is the correct entry point here.
+          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Unit
 
-      - name: Run hardware-dependent tests (Windows, continue-on-error)
+      - name: Hardware-dependent tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows'
         shell: pwsh
-        continue-on-error: true
         run: |
-          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
-          $HwTests = @("avb_test_i226", "avb_test_i210", "ptp_clock_control_test", "tsauxc_toggle_test", "device_open_test")
-          Write-Host "🔌 Running hardware-dependent tests (NIC required — expected to skip/fail on runner)..." -ForegroundColor Yellow
-          foreach ($Test in $HwTests) {
-            $Exe = Join-Path $OutDir "$Test.exe"
-            if (Test-Path $Exe) {
-              Write-Host "  🔌 $Test" -ForegroundColor Gray
-              & $Exe 2>&1 | Select-Object -First 5
-              Write-Host "  (exit $LASTEXITCODE — hardware not present on runner)" -ForegroundColor Gray
-            }
-          }
-          Write-Host "ℹ️ Hardware-dependent tests require a supported Intel NIC" -ForegroundColor Cyan
+          Write-Host "[INFO] Hardware-dependent tests (avb_test_i226, avb_test_i210, ptp_clock_control_test, " -ForegroundColor DarkGray
+          Write-Host "       tsauxc_toggle_test, device_open_test) require a supported Intel NIC." -ForegroundColor DarkGray
+          Write-Host "[INFO] These tests are NOT run on CI runners — execute them manually on a machine with hardware." -ForegroundColor DarkGray
 
       - name: Report test status
         shell: bash
@@ -623,58 +572,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
-          $HwIndependentIntegTests = @(
-            "ssot_register_validation_test",
-            "test_tsn_ioctl_handlers_um",
-            "test_all_adapters",
-            "test_multidev_adapter_enum",
-            "test_device_register_access",
-            "test_ndis_send_path",
-            "test_ndis_receive_path",
-            "test_hw_state_machine",
-            "test_lazy_initialization",
-            "test_registry_diagnostics"
-          )
-          $Passed = 0; $Failed = 0; $Skipped = 0
-          foreach ($Test in $HwIndependentIntegTests) {
-            $Exe = Join-Path $OutDir "$Test.exe"
-            if (Test-Path $Exe) {
-              Write-Host "🔗 Running $Test..." -ForegroundColor Yellow
-              & $Exe
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "  ✅ PASSED" -ForegroundColor Green
-                $Passed++
-              } else {
-                Write-Host "  ❌ FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
-                $Failed++
-              }
-            } else {
-              Write-Host "  ⏭️ SKIPPED (not built): $Test" -ForegroundColor Gray
-              $Skipped++
-            }
-          }
-          Write-Host ""
-          Write-Host "📊 Integration Results: $Passed passed, $Failed failed, $Skipped skipped" -ForegroundColor Cyan
-          if ($Failed -gt 0) { exit 1 }
+          # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
+          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Integration
 
-      - name: Run hardware-dependent integration tests (Windows, continue-on-error)
+      - name: Hardware-dependent integration tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows'
         shell: pwsh
-        continue-on-error: true
         run: |
-          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
-          $HwIntegTests = @("avb_test_i226", "avb_test_i210", "comprehensive_ioctl_test", "hw_timestamping_control_test", "rx_timestamping_test")
-          Write-Host "🔌 Running hardware-dependent integration tests (NIC required — expected to fail on runner)..." -ForegroundColor Yellow
-          foreach ($Test in $HwIntegTests) {
-            $Exe = Join-Path $OutDir "$Test.exe"
-            if (Test-Path $Exe) {
-              Write-Host "  🔌 $Test" -ForegroundColor Gray
-              & $Exe 2>&1 | Select-Object -First 5
-              Write-Host "  (exit $LASTEXITCODE — hardware not present on runner)" -ForegroundColor Gray
-            }
-          }
-          Write-Host "ℹ️ Hardware-dependent integration tests require a supported Intel NIC" -ForegroundColor Cyan
+          Write-Host "[INFO] Hardware-dependent integration tests (avb_test_i226, avb_test_i210, " -ForegroundColor DarkGray
+          Write-Host "       comprehensive_ioctl_test, hw_timestamping_control_test, rx_timestamping_test)" -ForegroundColor DarkGray
+          Write-Host "       require a supported Intel NIC — NOT run on CI runners." -ForegroundColor DarkGray
 
       - name: Validate integration test status
         shell: bash
