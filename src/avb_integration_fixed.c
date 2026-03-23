@@ -257,7 +257,7 @@ NTSTATUS AvbCreateMinimalContext(
     // Source MAC: Placeholder; real adapter MAC is patched in at FilterRestart
     //             (OID_802_3_CURRENT_ADDRESS → ctx->source_mac → bytes [6-11]).
     pkt[6] = 0x00; pkt[7] = 0x00; pkt[8] = 0x00; pkt[9] = 0x00; pkt[10] = 0x00; pkt[11] = 0x01;
-    // EtherType: 0x88F7 (PTP) - CRITICAL for filter detection
+    // EtherType: ETHERTYPE_PTP - CRITICAL for filter detection
     pkt[12] = 0x88; pkt[13] = 0xF7;
     
     // PTP Sync message (34 bytes minimum)
@@ -829,7 +829,7 @@ VOID AvbPostTimestampEvent(
         DEBUGP(DL_ERROR, "!!! Sub[%d]: Type MATCHED (mask 0x%x & event 0x%x) - will post event\n",
                i, sub->event_mask, event_type);
         
-        /* Filter by VLAN ID (0xFFFF = no filter) */
+        /* Filter by VLAN ID FILTER_VLAN_NONE */
         if (sub->vlan_filter != INTEL_MASK_16BIT && sub->vlan_filter != vlan_id) continue;
         
         /* Filter by PCP (0xFF = no filter) */
@@ -891,7 +891,7 @@ VOID AvbPostTimestampEvent(
  * HAL-COMPLIANT: Uses device ops, no hardcoded registers
  * 
  * CORRECTED per I225 datasheet:
- * - Checks TSICR (0xB66C) register bits 3-4 (TT0/TT1)
+ * - Checks TSICR register bits 3-4 (TT0/TT1)
  * - NOT AUTT0/AUTT1 which are for SDP input sampling
  * - Variable name "autt_flags" kept for backwards compatibility but actually holds TT flags
  */
@@ -921,7 +921,7 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
     
     dev = &AvbContext->intel_device;
     
-    /* Check TT0/TT1 flags in TSICR register (0xB66C) via device HAL
+    /* Check TT0/TT1 flags in TSICR register via device HAL
      * Bit pattern: 0x01 = TT0 (Target Time 0), 0x02 = TT1 (Target Time 1)
      * Per I225 datasheet Section 8.16.1: TSICR bits 3-4 are TT0/TT1 interrupt causes
      */
@@ -994,7 +994,7 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
         if (ops->get_systime && ops->get_systime(dev, &timestamp_ns) == 0) {
             /* Post target time event to subscribers
              * event_type: TS_EVENT_TARGET_TIME (0x04)
-             * vlan_id: 0xFFFF (not applicable)
+             * vlan_id: FILTER_VLAN_NONE (not applicable)
              * pcp: 0xFF (not applicable)
              * queue: 0 (not applicable)
              * packet_length: 0 (not applicable)
@@ -1525,7 +1525,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     /* Pre-dispatch: Reject IOCTL codes outside IntelAvbFilter's device-type space.
      * All IOCTL_AVB_* codes share the same device type (bits [31:16]) as IOCTL_AVB_GET_VERSION.
-     * Codes with a different device type (e.g. 0xFFFFFFFF) are always invalid — emit
+     * Codes with a different device type are always invalid — emit
      * EVT_IOCTL_ERROR (Event ID 100) immediately, before any init-guard check.
      * This ensures Event ID 100 is logged even when the device is not yet initialized.
      * Implements: #65 (REQ-F-EVENT-LOG-001) — Supports: TC-2, TC-9, TC-10, TC-11 */
@@ -2277,7 +2277,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     device_t *dev = &activeContext->intel_device;
                     uint32_t rxpbsize, new_rxpbsize;
                     
-                    // Read current RXPBSIZE value (register 0x2404)
+                    // Read current RXPBSIZE value
                     if (intel_read_reg(dev, INTEL_REG_RXPBSIZE, &rxpbsize) == 0) {
                         rx_req->previous_rxpbsize = rxpbsize;
                         DEBUGP(DL_TRACE, "Current RXPBSIZE: 0x%08X\n", rxpbsize);
@@ -2349,7 +2349,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     device_t *dev = &activeContext->intel_device;
                     uint32_t srrctl, new_srrctl;
                     
-                    // SRRCTL base: 0x0C00C, stride 0x40 per queue (I210/I226 pattern)
+                    // SRRCTL base: 0_0C00C, stride 0_40 per queue (I210/I226 pattern)
                     uint32_t srrctl_offset = INTEL_REG_SRRCTL0 + (queue_req->queue_index * 0x40);
                     
                     // Read current SRRCTL[n] value
