@@ -90,21 +90,24 @@ $HardwareDependentTests = @(
     "test_mdio_phy",               # MDIO PHY register access via driver
     "test_dev_lifecycle",          # device open/close lifecycle — needs driver node
     "test_ts_event_sub",           # timestamp event subscription via driver
-    "test_ptp_getset"              # PTP get/set time via driver IOCTL
+    "test_ptp_getset",             # PTP get/set time via driver IOCTL
+    # Integration-level tests — all require driver + hardware
+    "ssot_register_validation_test",  # SSOT register validation via device access
+    "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers — driver required
+    "test_all_adapters",              # enumerates all Intel AVB adapters
+    "test_multidev_adapter_enum",     # multi-device adapter enumeration
+    "test_device_register_access",    # direct device register read/write
+    "test_ndis_send_path",            # NDIS send path — needs NIC
+    "test_ndis_receive_path",         # NDIS receive path — needs NIC
+    "test_hw_state_machine",          # hardware state machine transitions
+    "test_lazy_initialization",       # lazy init via driver device open
+    "test_registry_diagnostics"       # registry diagnostics — driver service required
 )
 
-$IntegrationTests = @(
-    "ssot_register_validation_test",
-    "test_tsn_ioctl_handlers_um",
-    "test_all_adapters",
-    "test_multidev_adapter_enum",
-    "test_device_register_access",
-    "test_ndis_send_path",
-    "test_ndis_receive_path",
-    "test_hw_state_machine",
-    "test_lazy_initialization",
-    "test_registry_diagnostics"
-)
+# All integration-level tests open the driver device or enumerate hardware.
+# None can pass on a CI runner without the driver installed.
+# Listed in $HardwareDependentTests below; $IntegrationTests is intentionally empty.
+$IntegrationTests = @()
 
 # ===========================
 # Resolve which tests to run
