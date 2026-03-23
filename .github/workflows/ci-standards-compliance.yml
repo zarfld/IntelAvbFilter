@@ -294,6 +294,51 @@ jobs:
             exit 0
           }
 
+      - name: Install test build dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ## 1. Npcap SDK (required by test_tx_timestamp_retrieval)
+          $npcapDest = 'C:\npcap-sdk-1.16'
+          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+            Write-Host "✅ Npcap SDK already present" -ForegroundColor Green
+          } else {
+            Write-Host "📦 Downloading Npcap SDK 1.16..." -ForegroundColor Cyan
+            Invoke-WebRequest -Uri 'https://npcap.com/dist/npcap-sdk-1.16.zip' -OutFile 'C:\npcap-sdk.zip' -UseBasicParsing
+            New-Item -ItemType Directory -Path $npcapDest -Force | Out-Null
+            Expand-Archive -Path 'C:\npcap-sdk.zip' -DestinationPath $npcapDest -Force
+            Remove-Item 'C:\npcap-sdk.zip' -Force
+            if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+              Write-Host "✅ Npcap SDK installed at $npcapDest" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Npcap SDK install unexpected structure; listing:" -ForegroundColor Red
+              Get-ChildItem $npcapDest -Recurse | Select-Object -First 20 | Format-Table FullName
+            }
+          }
+
+          ## 2. TAEF / WEX development headers (required by taef_tests)
+          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
+          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
+          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
+            Write-Host "✅ TAEF development headers found in WDK" -ForegroundColor Green
+            "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
+            "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "🔍 TAEF headers not at standard WDK path; searching Windows Kits..." -ForegroundColor Yellow
+            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              $taefInc = $found.DirectoryName
+              Write-Host "✅ Found WexTestClass.h at $taefInc" -ForegroundColor Green
+              "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
+              $taefLib = Join-Path (Split-Path $taefInc -Parent) 'lib\x64'
+              if (-not (Test-Path "$taefLib\Wex.Common.lib")) { $taefLib = $taefInc }
+              "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+            } else {
+              Write-Host "⚠️ TAEF/WEX headers not found in WDK installation" -ForegroundColor Yellow
+              Write-Host "   taef_tests will be skipped (WDK installed without TAEF Testing component)" -ForegroundColor Gray
+            }
+          }
+
       - name: Build Windows driver tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -520,6 +565,51 @@ jobs:
           else
             echo "⚠️ No CMake configuration for integration tests"
           fi
+
+      - name: Install test build dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ## 1. Npcap SDK (required by test_tx_timestamp_retrieval)
+          $npcapDest = 'C:\npcap-sdk-1.16'
+          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+            Write-Host "✅ Npcap SDK already present" -ForegroundColor Green
+          } else {
+            Write-Host "📦 Downloading Npcap SDK 1.16..." -ForegroundColor Cyan
+            Invoke-WebRequest -Uri 'https://npcap.com/dist/npcap-sdk-1.16.zip' -OutFile 'C:\npcap-sdk.zip' -UseBasicParsing
+            New-Item -ItemType Directory -Path $npcapDest -Force | Out-Null
+            Expand-Archive -Path 'C:\npcap-sdk.zip' -DestinationPath $npcapDest -Force
+            Remove-Item 'C:\npcap-sdk.zip' -Force
+            if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+              Write-Host "✅ Npcap SDK installed at $npcapDest" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Npcap SDK install unexpected structure; listing:" -ForegroundColor Red
+              Get-ChildItem $npcapDest -Recurse | Select-Object -First 20 | Format-Table FullName
+            }
+          }
+
+          ## 2. TAEF / WEX development headers (required by taef_tests)
+          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
+          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
+          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
+            Write-Host "✅ TAEF development headers found in WDK" -ForegroundColor Green
+            "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
+            "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "🔍 TAEF headers not at standard WDK path; searching Windows Kits..." -ForegroundColor Yellow
+            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              $taefInc = $found.DirectoryName
+              Write-Host "✅ Found WexTestClass.h at $taefInc" -ForegroundColor Green
+              "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
+              $taefLib = Join-Path (Split-Path $taefInc -Parent) 'lib\x64'
+              if (-not (Test-Path "$taefLib\Wex.Common.lib")) { $taefLib = $taefInc }
+              "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+            } else {
+              Write-Host "⚠️ TAEF/WEX headers not found in WDK installation" -ForegroundColor Yellow
+              Write-Host "   taef_tests will be skipped (WDK installed without TAEF Testing component)" -ForegroundColor Gray
+            }
+          }
 
       - name: Build Windows integration tests (Windows)
         if: runner.os == 'Windows'

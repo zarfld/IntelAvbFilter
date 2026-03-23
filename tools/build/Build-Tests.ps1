@@ -1665,6 +1665,15 @@ foreach ($t in $TestsToBuild) {
             Write-Host "INFO: test_tx_timestamp_retrieval skipped (Npcap SDK not found at $NpcapSdk)" -ForegroundColor Yellow
         }
     }
+    if ($t.Name -eq 'taef_tests') {
+        $taefStdHeader = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Testing\Development\inc\WexTestClass.h'
+        $taefEnvHeader  = if ($env:TAEF_INCLUDE) { Join-Path $env:TAEF_INCLUDE 'WexTestClass.h' } else { $null }
+        $taefAvailable  = (Test-Path $taefStdHeader) -or ($taefEnvHeader -and (Test-Path $taefEnvHeader))
+        if (-not $taefAvailable) {
+            $t.Disabled = $true
+            Write-Host "INFO: taef_tests skipped (TAEF/WEX SDK not found; set TAEF_INCLUDE env var or install WDK with TAEF Testing component)" -ForegroundColor Yellow
+        }
+    }
 }
 Write-Host ""
 
