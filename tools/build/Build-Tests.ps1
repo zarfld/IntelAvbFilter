@@ -1635,6 +1635,38 @@ if (-not (Test-Path $OutputDir)) {
     Write-Host ""
 }
 
+# Resolve dynamic system-dependent paths in test definitions before building
+# 1. WDK km includes (test_register_constants) - find installed WDK version dynamically
+$WdkKitsInclude = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Include'
+$WdkKmInclude = $null
+if (Test-Path $WdkKitsInclude) {
+    $WdkKmInclude = Get-ChildItem $WdkKitsInclude -Directory |
+        Where-Object { Test-Path (Join-Path $_.FullName 'km\wdm.h') } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($WdkKmInclude) { $WdkKmInclude = Join-Path $WdkKmInclude 'km' }
+}
+# 2. Patch TestsToBuild entries with discovered/missing paths
+foreach ($t in $TestsToBuild) {
+    if ($t.Name -eq 'test_register_constants') {
+        if ($WdkKmInclude) {
+            $t.Includes = $t.Includes -replace [regex]::Escape('C:\PROGRA~2\WI3CF2~1\10\Include\100226~1.0\km'), $WdkKmInclude
+            Write-Host "INFO: test_register_constants WDK km path resolved to: $WdkKmInclude" -ForegroundColor Cyan
+        } else {
+            $t.Disabled = $true
+            Write-Host "INFO: test_register_constants skipped (WDK km headers not found under $WdkKitsInclude)" -ForegroundColor Yellow
+        }
+    }
+    if ($t.Name -eq 'test_tx_timestamp_retrieval') {
+        $NpcapSdk = 'C:\npcap-sdk-1.16'
+        if (-not (Test-Path $NpcapSdk)) {
+            $t.Disabled = $true
+            Write-Host "INFO: test_tx_timestamp_retrieval skipped (Npcap SDK not found at $NpcapSdk)" -ForegroundColor Yellow
+        }
+    }
+}
+Write-Host ""
+
 # Build each test
 foreach ($Test in $TestsToBuild) {
     Write-Host "Building: $($Test.Name)" -ForegroundColor Yellow
