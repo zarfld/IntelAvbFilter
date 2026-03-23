@@ -2135,7 +2135,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
     // BUGFIX: GitHub Issue #315 - NULL/invalid pointer check to prevent DRIVER_IRQL_NOT_LESS_OR_EQUAL (0xD1)
     // Race condition: NDIS may call this after FilterDetach if packets are in flight
     // Check for NULL OR invalid kernel pointers (e.g., 0x4 seen in crash dumps)
-    // Valid x64 kernel pointers have upper bits set (>= 0xFFFF8000'00000000)
+    // Valid x64 kernel pointers have upper bits set (>= FFFF8000'00000000)
     if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
     {
         DEBUGP(DL_TRACE, "FilterReceiveNetBufferLists: INVALID FilterModuleContext=%p! Returning NBLs immediately.\n", pFilter);
@@ -2185,7 +2185,7 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
         // Implements: Issue #13 (REQ-F-TS-SUB-001) Task 6a - RX path
         //
         // Protocol-aware filtering (IEEE 1588-2019):
-        //   - EtherType: 0x88F7 (PTP over Ethernet)
+        //   - EtherType: ETHERTYPE_PTP (PTP over Ethernet)
         //   - Message Types: Sync (0x0), Pdelay_Req (0x2), Pdelay_Resp (0x3),
         //                    Follow_Up (0x8), Pdelay_Resp_FU (0xA), Announce (0xB)
         //   - Read RX timestamp from RXSTMPL/H hardware registers
