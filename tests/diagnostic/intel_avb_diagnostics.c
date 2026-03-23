@@ -55,7 +55,7 @@ intel_device_info_t intel_devices[] = {
     {0x15D6, "Intel Ethernet Connection I219-V", "I219", TRUE, FALSE},
     {0x15D7, "Intel Ethernet Connection I219-LM", "I219", TRUE, FALSE},
     {0x15D8, "Intel Ethernet Connection I219-V", "I219", TRUE, FALSE},
-    {0x0DC7, "Intel Ethernet Connection (22) I219-LM", "I219", TRUE, FALSE}, // Your target!
+    {0x0DC7, "Intel Ethernet Connection (22) I219-LM", "I219", TRUE, FALSE},
     {0x1570, "Intel Ethernet Connection I219-V (5)", "I219", TRUE, FALSE},
     {0x15E3, "Intel Ethernet Connection I219-LM (6)", "I219", TRUE, FALSE},
     
@@ -322,12 +322,7 @@ void PrintDeviceDetails(detected_device_t* device)
         printf("   Advanced TSN: %s\n", device->device_info->tsn_advanced ? "? Yes" : "? No");
         printf("   Capabilities: %s\n", GetDeviceCapabilities(device->device_info));
         
-        // Special message for I219 (your target device)
-        if (device->device_id == 0x0DC7) {
-            printf("   ?? TARGET DEVICE: This is your Intel I219-LM test target!\n");
-            printf("   ? AVB/TSN Support: Basic IEEE 1588 timestamping available\n");
-            printf("   ? Filter Compatible: Fully supported by Intel AVB Filter Driver\n");
-        }
+        printf("   ? Filter Compatible: Fully supported by Intel AVB Filter Driver\n");
     } else {
         printf("   ??  Device information: Not in Intel AVB database\n");
         printf("   ?? Recommendation: Add Device ID 0x%04X to intel_devices[] table\n", device->device_id);
@@ -420,10 +415,10 @@ void DiagnoseDriverInstallation(void)
     printf("\nChecking driver files...\n");
     
     const char* driver_files[] = {
-        "x64\\Debug\\IntelAvbFilter.sys",
-        "x64\\Debug\\IntelAvbFilter.inf", 
-        "x64\\Debug\\IntelAvbFilter.cat",
-        "x64\\Debug\\IntelAvbFilter.cer",
+        "build\\x64\\Debug\\IntelAvbFilter\\IntelAvbFilter.sys",
+        "build\\x64\\Debug\\IntelAvbFilter\\IntelAvbFilter.inf",
+        "build\\x64\\Debug\\IntelAvbFilter\\IntelAvbFilter.cat",
+        "build\\x64\\Debug\\IntelAvbFilter\\IntelAvbFilter.cer",
         NULL
     };
     
@@ -518,12 +513,69 @@ void DiagnoseNetworkConfiguration(void)
         printf("  ??  May indicate network adapter issues\n");
     }
     
-    // Check for NDIS filter bindings
+    // Check for NDIS filter bindings via registry (elevated)
     printf("\nNDIS Filter Binding Analysis:\n");
     for (int i = 0; i < g_device_count; i++) {
         printf("  Device: %s\n", g_detected_devices[i].description);
-        printf("  Filter Bound: ??  Cannot determine without registry access\n");
-        printf("  Recommendation: Check Network Adapter Properties manually\n");
+        
+        // Query HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-...}\xxxx\FilterRunType
+        // A simpler check: look for IntelAvbFilter in the Ndi\FilterRunType or
+        // in HKLM\SYSTEM\CurrentControlSet\Control\Network\{4D36E972-...}\{guid}\Connection
+        // Most reliable: check if IntelAvbFilter appears in any adapter's FilterList
+        HKEY hNetKey;
+        BOOL filterFound = FALSE;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                "SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}",
+                0, KEY_READ, &hNetKey) == ERROR_SUCCESS) {
+            DWORD subkeyIndex = 0;
+            char subkeyName[64];
+            DWORD subkeyNameLen;
+            while (!filterFound) {
+                subkeyNameLen = sizeof(subkeyName);
+                if (RegEnumKeyExA(hNetKey, subkeyIndex++, subkeyName, &subkeyNameLen,
+                                  NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+                HKEY hAdapterKey;
+                char adapterSubpath[128];
+                snprintf(adapterSubpath, sizeof(adapterSubpath), "%s\\Ndi\\Interfaces", subkeyName);
+                // Check FilterRunType key under this adapter
+                char filterRunPath[128];
+                snprintf(filterRunPath, sizeof(filterRunPath), "%s", subkeyName);
+                HKEY hSubKey;
+                if (RegOpenKeyExA(hNetKey, filterRunPath, 0, KEY_READ, &hSubKey) == ERROR_SUCCESS) {
+                    char driverDesc[256] = {0};
+                    DWORD descSize = sizeof(driverDesc);
+                    RegQueryValueExA(hSubKey, "DriverDesc", NULL, NULL, (LPBYTE)driverDesc, &descSize);
+                    if (strstr(driverDesc, "IntelAvbFilter") != NULL) {
+                        filterFound = TRUE;
+                    }
+                    RegCloseKey(hSubKey);
+                }
+            }
+            RegCloseKey(hNetKey);
+        }
+        
+        // Simpler check: service ImagePath in HKLM\SYSTEM\CurrentControlSet\Services\IntelAvbFilter
+        // If service exists and is running, filter is effectively bound
+        HKEY hSvcKey;
+        BOOL serviceInstalled = FALSE;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                "SYSTEM\\CurrentControlSet\\Services\\IntelAvbFilter",
+                0, KEY_READ, &hSvcKey) == ERROR_SUCCESS) {
+            serviceInstalled = TRUE;
+            char imagePath[512] = {0};
+            DWORD pathSize = sizeof(imagePath);
+            if (RegQueryValueExA(hSvcKey, "ImagePath", NULL, NULL, (LPBYTE)imagePath, &pathSize) == ERROR_SUCCESS) {
+                printf("  ImagePath: %s\n", imagePath);
+            }
+            RegCloseKey(hSvcKey);
+        }
+        
+        if (serviceInstalled) {
+            printf("  Filter Bound: ? Service registered (check adapter properties for binding)\n");
+        } else {
+            printf("  Filter Bound: ? Service NOT installed\n");
+            printf("  Recommendation: Install driver first\n");
+        }
     }
 }
 
@@ -550,12 +602,7 @@ void DiagnoseHardwareAccess(void)
         
         if (device->device_info != NULL) {
             printf("   - AVB Capable: %s\n", device->device_info->avb_capable ? "? Yes" : "? No");
-            if (device->device_id == 0x0DC7) {
-                printf("   - ?? YOUR TARGET: Intel I219-LM confirmed!\n");
-                printf("   - ?? Expected registers: SYSTIML(0x0B600), SYSTIMH(0x0B604)\n");
-                printf("   - ?? Control register: CTRL(0x00000)\n"); 
-                printf("   - ?? Status register: STATUS(0x00008)\n");
-            }
+            printf("   - Generation: %s\n", device->device_info->generation);
         }
     }
     
@@ -564,7 +611,7 @@ void DiagnoseHardwareAccess(void)
     printf("2. Run hardware-only test application: avb_test_hardware_only.exe\n");
     printf("3. Monitor debug output with DebugView.exe\n");
     printf("4. Look for these SUCCESS patterns:\n");
-    printf("   ? 'REAL HARDWARE DISCOVERED: Intel I219'\n");
+    printf("   ? 'REAL HARDWARE DISCOVERED: Intel I2xx'\n");
     printf("   ? 'AvbMmioReadHardwareOnly: (REAL HARDWARE)'\n");
     printf("   ? 'BAR0=0xf7a00000, Length=0x20000'\n");
     printf("5. Look for these FAILURE patterns (good - problems visible!):\n");
@@ -584,19 +631,12 @@ void PrintSummaryAndRecommendations(void)
     if (g_device_count > 0) {
         printf("? HARDWARE STATUS: %d Intel controller(s) detected\n", g_device_count);
         
-        // Check for target device
-        BOOLEAN target_found = FALSE;
+        // Report the detected hardware
+        printf("?? HARDWARE READY: %d supported Intel AVB adapter(s) detected\n", g_device_count);
         for (int i = 0; i < g_device_count; i++) {
-            if (g_detected_devices[i].device_id == 0x0DC7) {
-                target_found = TRUE;
-                break;
-            }
-        }
-        
-        if (target_found) {
-            printf("?? TARGET HARDWARE: Intel I219-LM (0x0DC7) confirmed - Perfect for testing!\n");
-        } else {
-            printf("??  TARGET HARDWARE: I219-LM not found, but other Intel devices available\n");
+            printf("   - %s (0x%04X)\n",
+                   g_detected_devices[i].description,
+                   g_detected_devices[i].device_id);
         }
     } else {
         printf("? HARDWARE STATUS: No Intel controllers detected\n");
@@ -616,7 +656,7 @@ void PrintSummaryAndRecommendations(void)
         
         printf("?? INSTALLATION OPTIONS (choose based on your environment):\n");
         printf("   A) EV Code Signing Certificate (Corporate/Production):\n");
-        printf("      - Cost: ~€300/year\n"); 
+        printf("      - Cost: ~ï¿½300/year\n"); 
         printf("      - Works with Secure Boot immediately\n");
         printf("      - No IT policy violations\n");
         printf("      - Recommended for production deployment\n\n");
@@ -633,9 +673,9 @@ void PrintSummaryAndRecommendations(void)
         printf("      - Limited success with Secure Boot\n\n");
         
         printf("?? TESTING PROCEDURE (after installation):\n");
-        printf("   1. Compile: cl avb_test_i219.c /DHARDWARE_ONLY=1 /Fe:test.exe\n");
-        printf("   2. Install driver using chosen method above\n");
-        printf("   3. Run: test.exe\n");
+        printf("   1. Install driver using chosen method above\n");
+        printf("   2. Run: .\\tools\\test\\Run-Tests-Elevated.ps1 -TestName avb_i226_test.exe\n");
+        printf("      (or the appropriate device-specific test for your hardware)\n");
         printf("   4. Enable DebugView.exe (as Administrator)\n");
         printf("   5. Look for 'REAL HARDWARE' vs error messages\n\n");
         
