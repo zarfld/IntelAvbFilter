@@ -4180,9 +4180,9 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     
     // Step 1: Program TIMINCA for 1ns increment per clock cycle
     // Value depends on device clock frequency:
-    // - I210/I211: 25MHz -> TIMINCA = 0x18000000 (384ns per tick, 2.5M ticks/sec)
-    // - I225/I226: 25MHz -> TIMINCA = 0x18000000
-    // - I217/I219: Different clocking, but 0x18000000 works
+    // - I210/I211: 25MHz -> TIMINCA = INTEL_TIMINCA_DEFAULT (384ns per tick, 2.5M ticks/sec)
+    // - I225/I226: 25MHz -> TIMINCA = INTEL_TIMINCA_DEFAULT
+    // - I217/I219: Different clocking, but INTEL_TIMINCA_DEFAULT works
     ULONG timinca_value = INTEL_TIMINCA_DEFAULT;  // Standard value for 25MHz clock
     
     ULONG current_timinca = 0;
@@ -4268,37 +4268,37 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 did)
         case INTEL_DEV_I225_V: return INTEL_DEVICE_I225;  // I225
         case INTEL_DEV_I226_LM: return INTEL_DEVICE_I226;  // I226
         
-        // IGB device family (82xxx series)
-   //     case 0x10A7: return INTEL_DEVICE_82575;  // 82575EB Copper
-   //     case 0x10A9: return INTEL_DEVICE_82575;  // 82575EB Fiber/Serdes  
-   //     case 0x10D6: return INTEL_DEVICE_82575;  // 82575GB Quad Copper
+        // IGB device family (82xxx series) - when implementing those make sure you prevent magic numbers!!
+   //     case 0_10A7: return INTEL_DEVICE_82575;  // 82575EB Copper
+   //     case 0_10A9: return INTEL_DEVICE_82575;  // 82575EB Fiber/Serdes  
+   //     case 0_10D6: return INTEL_DEVICE_82575;  // 82575GB Quad Copper
         
-    //    case 0x10C9: return INTEL_DEVICE_82576;  // 82576 Gigabit Network Connection
-    //    case 0x10E6: return INTEL_DEVICE_82576;  // 82576 Fiber
-    //    case 0x10E7: return INTEL_DEVICE_82576;  // 82576 Serdes
-    //    case 0x10E8: return INTEL_DEVICE_82576;  // 82576 Quad Copper
-    //    case 0x1526: return INTEL_DEVICE_82576;  // 82576 Quad Copper ET2
-    //    case 0x150A: return INTEL_DEVICE_82576;  // 82576 NS
-    //    case 0x1518: return INTEL_DEVICE_82576;  // 82576 NS Serdes
-    //    case 0x150D: return INTEL_DEVICE_82576;  // 82576 Serdes Quad
+    //    case 0_10C9: return INTEL_DEVICE_82576;  // 82576 Gigabit Network Connection
+    //    case 0_10E6: return INTEL_DEVICE_82576;  // 82576 Fiber
+    //    case 0_10E7: return INTEL_DEVICE_82576;  // 82576 Serdes
+    //    case 0_10E8: return INTEL_DEVICE_82576;  // 82576 Quad Copper
+    //    case 0_1526: return INTEL_DEVICE_82576;  // 82576 Quad Copper ET2
+    //    case 0_150A: return INTEL_DEVICE_82576;  // 82576 NS
+    //    case 0_1518: return INTEL_DEVICE_82576;  // 82576 NS Serdes
+    //    case 0_150D: return INTEL_DEVICE_82576;  // 82576 Serdes Quad
         
-     //   case 0x150E: return INTEL_DEVICE_82580;  // 82580 Copper
-    //    case 0x150F: return INTEL_DEVICE_82580;  // 82580 Fiber
-   //     case 0x1510: return INTEL_DEVICE_82580;  // 82580 Serdes
-     //   case 0x1511: return INTEL_DEVICE_82580;  // 82580 SGMII
-   //     case 0x1516: return INTEL_DEVICE_82580;  // 82580 Copper Dual
-   //     case 0x1527: return INTEL_DEVICE_82580;  // 82580 Quad Fiber
+     //   case 0_150E: return INTEL_DEVICE_82580;  // 82580 Copper
+    //    case 0_150F: return INTEL_DEVICE_82580;  // 82580 Fiber
+   //     case 0_1510: return INTEL_DEVICE_82580;  // 82580 Serdes
+     //   case 0_1511: return INTEL_DEVICE_82580;  // 82580 SGMII
+   //     case 0_1516: return INTEL_DEVICE_82580;  // 82580 Copper Dual
+   //     case 0_1527: return INTEL_DEVICE_82580;  // 82580 Quad Fiber
         
-     //   case 0x1521: return INTEL_DEVICE_I350;   // I350 Copper
-    //    case 0x1522: return INTEL_DEVICE_I350;   // I350 Fiber
-    //    case 0x1523: return INTEL_DEVICE_I350;   // I350 Serdes
-    //    case 0x1524: return INTEL_DEVICE_I350;   // I350 SGMII
-    //    case 0x1546: return INTEL_DEVICE_I350;   // I350 DA4
+     //   case 0_1521: return INTEL_DEVICE_I350;   // I350 Copper
+    //    case 0_1522: return INTEL_DEVICE_I350;   // I350 Fiber
+    //    case 0_1523: return INTEL_DEVICE_I350;   // I350 Serdes
+    //    case 0_1524: return INTEL_DEVICE_I350;   // I350 SGMII
+    //    case 0_1546: return INTEL_DEVICE_I350;   // I350 DA4
         
         // I354 uses same operations as I350
-     //   case 0x1F40: return INTEL_DEVICE_I354;   // I354 Backplane 2.5GbE
-     //   case 0x1F41: return INTEL_DEVICE_I354;   // I354 Backplane 1GbE
-     //   case 0x1F45: return INTEL_DEVICE_I354;   // I354 SGMII
+     //   case 0_1F40: return INTEL_DEVICE_I354;   // I354 Backplane 2.5GbE
+     //   case 0_1F41: return INTEL_DEVICE_I354;   // I354 Backplane 1GbE
+     //   case 0_1F45: return INTEL_DEVICE_I354;   // I354 SGMII
         
         default: return INTEL_DEVICE_UNKNOWN; 
     }
