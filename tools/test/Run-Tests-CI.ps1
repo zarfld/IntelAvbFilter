@@ -37,17 +37,18 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ===========================
-# Guard: must already be Administrator.
-# CI runners (GitHub Actions, Azure Pipelines) run as SYSTEM/Administrator.
-# Do NOT attempt elevation here — if not admin, fail clearly.
+# No admin check here — by design.
+#
+# Run-Tests.ps1 (the full local runner) requires admin because it accesses the
+# driver device node (\\.\IntelAvbFilter) and runs hardware checks.
+#
+# Run-Tests-CI.ps1 only runs hardware-INDEPENDENT user-mode test executables
+# that have no driver or device dependency, so admin is NOT required.
+#
+# GitHub Actions Windows runners run with a non-elevated token by default even
+# though the account is in the Administrators group.  Checking IsInRole here
+# would cause an immediate exit-1 on every CI run.
 # ===========================
-if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "Run-Tests-CI.ps1 requires Administrator privileges."
-    Write-Error "On GitHub Actions runners this is automatic."
-    Write-Error "For local use run from an elevated terminal (not via Run-Tests-Elevated.ps1)."
-    exit 1
-}
 
 # ===========================
 # Helper functions
@@ -62,27 +63,34 @@ function Write-Note   { param([string]$m) Write-Host "[INFO] $m" -ForegroundColo
 # Built-in hardware-independent test lists
 # ===========================
 $UnitTests = @(
+    # Pure static/logic tests — no driver device, no hardware, run fine on CI.
     "test_register_constants",
     "test_magic_numbers",
     "test_scripts_consolidate",
-    "test_cleanup_archive",
-    "test_ioctl_simple",
-    "test_ioctl_routing",
-    "test_ioctl_trace",
-    "test_minimal_ioctl",
-    "test_clock_config",
-    "test_clock_working",
-    "test_direct_clock",
     "test_hal_unit",
-    "test_hal_errors",
-    "test_hal_performance",
-    "test_atdecc_event",
-    "test_atdecc_aen_protocol",
-    "test_ioctl_version",
-    "test_mdio_phy",
-    "test_dev_lifecycle",
-    "test_ts_event_sub",
-    "test_ptp_getset"
+    "test_hal_errors"
+)
+
+# These tests open \\.\IntelAvbFilter or exercise hardware paths; they require
+# the driver to be installed and will always fail on a runner without the NIC.
+# NOT added to $UnitTests / $IntegrationTests — documented here for visibility.
+$HardwareDependentTests = @(
+    "test_cleanup_archive",        # checks build output structure against installed driver
+    "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
+    "test_ioctl_routing",          # DeviceIoControl — driver must be loaded
+    "test_ioctl_trace",            # DeviceIoControl trace IOCTLs
+    "test_minimal_ioctl",          # minimal IOCTL round-trip to driver
+    "test_clock_config",           # hardware clock register access
+    "test_clock_working",          # PTP clock hardware test
+    "test_direct_clock",           # direct clock register read/write
+    "test_hal_performance",        # HAL timer/DMA performance — needs NIC
+    "test_atdecc_event",           # ATDECC event subscription via driver IOCTL
+    "test_atdecc_aen_protocol",    # ATDECC AEN protocol — driver IOCTL path
+    "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
+    "test_mdio_phy",               # MDIO PHY register access via driver
+    "test_dev_lifecycle",          # device open/close lifecycle — needs driver node
+    "test_ts_event_sub",           # timestamp event subscription via driver
+    "test_ptp_getset"              # PTP get/set time via driver IOCTL
 )
 
 $IntegrationTests = @(
