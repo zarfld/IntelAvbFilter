@@ -2977,7 +2977,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             } else {
                 PAVB_TS_RING_MAP_REQUEST map_req = (PAVB_TS_RING_MAP_REQUEST)buf;
                 
-                // ERROR VALIDATION: Invalid ring_id (0xFFFFFFFF, 0, 0xDEADBEEF)
+                // ERROR VALIDATION: Invalid ring_id (0_FFFFFFFF, 0, 0_DEADBEEF)
                 // Implements: UT-TS-ERROR-001 (Invalid Subscription Handle)
                 if (map_req->ring_id == 0 || 
                     map_req->ring_id == INTEL_MASK_32BIT || 
