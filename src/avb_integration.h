@@ -20,6 +20,7 @@ Abstract:
 
 // Intel constants
 #define INTEL_VENDOR_ID         0x8086
+#define BAR0LENGTH_128KB         0x20000 
 
 /* ------------------------------------------------------------------------- */
 /* Intel hardware context for MMIO mapping */
