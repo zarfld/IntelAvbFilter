@@ -292,6 +292,82 @@ jobs:
             exit 0
           }
 
+      - name: Build Windows driver tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "🏗️ Building Windows driver test executables (${{ matrix.config }})..." -ForegroundColor Cyan
+          .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
+          Write-Host "✅ Test build complete" -ForegroundColor Green
+
+      - name: Run hardware-independent unit tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
+          $HwIndependentTests = @(
+            "test_register_constants",
+            "test_magic_numbers",
+            "test_scripts_consolidate",
+            "test_cleanup_archive",
+            "test_ioctl_simple",
+            "test_ioctl_routing",
+            "test_ioctl_trace",
+            "test_minimal_ioctl",
+            "test_clock_config",
+            "test_clock_working",
+            "test_direct_clock",
+            "test_hal_unit",
+            "test_hal_errors",
+            "test_hal_performance",
+            "test_atdecc_event",
+            "test_atdecc_aen_protocol",
+            "test_ioctl_version",
+            "test_mdio_phy",
+            "test_dev_lifecycle",
+            "test_ts_event_sub",
+            "test_ptp_getset"
+          )
+          $Passed = 0; $Failed = 0; $Skipped = 0
+          foreach ($Test in $HwIndependentTests) {
+            $Exe = Join-Path $OutDir "$Test.exe"
+            if (Test-Path $Exe) {
+              Write-Host "🧪 Running $Test..." -ForegroundColor Yellow
+              & $Exe
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "  ✅ PASSED" -ForegroundColor Green
+                $Passed++
+              } else {
+                Write-Host "  ❌ FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
+                $Failed++
+              }
+            } else {
+              Write-Host "  ⏭️ SKIPPED (not built): $Test" -ForegroundColor Gray
+              $Skipped++
+            }
+          }
+          Write-Host ""
+          Write-Host "📊 Results: $Passed passed, $Failed failed, $Skipped skipped" -ForegroundColor Cyan
+          if ($Failed -gt 0) { exit 1 }
+
+      - name: Run hardware-dependent tests (Windows, continue-on-error)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
+          $HwTests = @("avb_test_i226", "avb_test_i210", "ptp_clock_control_test", "tsauxc_toggle_test", "device_open_test")
+          Write-Host "🔌 Running hardware-dependent tests (NIC required — expected to skip/fail on runner)..." -ForegroundColor Yellow
+          foreach ($Test in $HwTests) {
+            $Exe = Join-Path $OutDir "$Test.exe"
+            if (Test-Path $Exe) {
+              Write-Host "  🔌 $Test" -ForegroundColor Gray
+              & $Exe 2>&1 | Select-Object -First 5
+              Write-Host "  (exit $LASTEXITCODE — hardware not present on runner)" -ForegroundColor Gray
+            }
+          }
+          Write-Host "ℹ️ Hardware-dependent tests require a supported Intel NIC" -ForegroundColor Cyan
+
       - name: Report test status
         shell: bash
         run: |
@@ -423,7 +499,7 @@ jobs:
           fi
 
       - name: Build and run integration tests (CMake)
-        if: env.INTEGRATION_DIR != 'none'
+        if: env.INTEGRATION_DIR != 'none' && runner.os != 'Windows'
         shell: bash
         run: |
           if [ -f "${{ env.INTEGRATION_DIR }}/CMakeLists.txt" ]; then
@@ -441,6 +517,71 @@ jobs:
             echo "⚠️ No CMake configuration for integration tests"
           fi
 
+      - name: Build Windows integration tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "🏗️ Building Windows integration test executables (${{ matrix.config }})..." -ForegroundColor Cyan
+          .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
+          Write-Host "✅ Integration test build complete" -ForegroundColor Green
+
+      - name: Run Windows integration tests (hardware-independent subset)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
+          $HwIndependentIntegTests = @(
+            "ssot_register_validation_test",
+            "test_tsn_ioctl_handlers_um",
+            "test_all_adapters",
+            "test_multidev_adapter_enum",
+            "test_device_register_access",
+            "test_ndis_send_path",
+            "test_ndis_receive_path",
+            "test_hw_state_machine",
+            "test_lazy_initialization",
+            "test_registry_diagnostics"
+          )
+          $Passed = 0; $Failed = 0; $Skipped = 0
+          foreach ($Test in $HwIndependentIntegTests) {
+            $Exe = Join-Path $OutDir "$Test.exe"
+            if (Test-Path $Exe) {
+              Write-Host "🔗 Running $Test..." -ForegroundColor Yellow
+              & $Exe
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "  ✅ PASSED" -ForegroundColor Green
+                $Passed++
+              } else {
+                Write-Host "  ❌ FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
+                $Failed++
+              }
+            } else {
+              Write-Host "  ⏭️ SKIPPED (not built): $Test" -ForegroundColor Gray
+              $Skipped++
+            }
+          }
+          Write-Host ""
+          Write-Host "📊 Integration Results: $Passed passed, $Failed failed, $Skipped skipped" -ForegroundColor Cyan
+          if ($Failed -gt 0) { exit 1 }
+
+      - name: Run hardware-dependent integration tests (Windows, continue-on-error)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $OutDir = "build\tools\avb_test\x64\${{ matrix.config }}"
+          $HwIntegTests = @("avb_test_i226", "avb_test_i210", "comprehensive_ioctl_test", "hw_timestamping_control_test", "rx_timestamping_test")
+          Write-Host "🔌 Running hardware-dependent integration tests (NIC required — expected to fail on runner)..." -ForegroundColor Yellow
+          foreach ($Test in $HwIntegTests) {
+            $Exe = Join-Path $OutDir "$Test.exe"
+            if (Test-Path $Exe) {
+              Write-Host "  🔌 $Test" -ForegroundColor Gray
+              & $Exe 2>&1 | Select-Object -First 5
+              Write-Host "  (exit $LASTEXITCODE — hardware not present on runner)" -ForegroundColor Gray
+            }
+          }
+          Write-Host "ℹ️ Hardware-dependent integration tests require a supported Intel NIC" -ForegroundColor Cyan
+
       - name: Validate integration test status
         shell: bash
         run: |
@@ -450,7 +591,7 @@ jobs:
           echo "   Test Directory: ${{ env.INTEGRATION_DIR }}"
           echo ""
 
-          if [ "${{ env.INTEGRATION_DIR }}" = "none" ]; then
+          if [ "${{ env.INTEGRATION_DIR }}" = "none" ] && [ "${{ matrix.os }}" != "windows-latest" ]; then
             echo "⚠️ No integration tests detected"
             echo "   Standard location: test/integration/ or tests/integration/"
             echo "   Label integration tests with: set_tests_properties(test_name PROPERTIES LABELS integration)"
@@ -815,7 +956,7 @@ jobs:
   # Deployment (Phase 08) - only on master branch
   deploy-staging:
     name: Deploy to Staging (Phase 08 - Transition)
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     needs:
       [
         code-quality,
@@ -829,6 +970,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -836,24 +979,30 @@ jobs:
           python-version: "3.11"
 
       - name: Install PlatformIO
-        run: |
-          pip install --upgrade platformio
-          pio upgrade --dev
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Build ESP32 firmware
+        shell: pwsh
         run: |
-          echo "🏗️ Building ESP32 firmware..."
-          pio run -e esp32dev
+          Write-Host "🏗️ Building and signing Windows KMDF driver (Release)..." -ForegroundColor Cyan
+          .\tools\build\Build-Driver.ps1 -Configuration Release -Sign
+          Write-Host "✅ Driver build and signing complete" -ForegroundColor Green
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-firmware
-          path: .pio/build/esp32dev/firmware.bin
+          name: intel-avb-filter-driver-release
+          path: build\x64\Release\IntelAvbFilter\
           retention-days: 90
 
       - name: Report build status
         if: always()
+        shell: pwsh
         run: |
-          echo "📢 ESP32 Firmware Build: ${{ job.status }}"
-          echo "Phase 08: Ready for hardware deployment"
+          Write-Host "📢 Driver Build: ${{ job.status }}" -ForegroundColor Cyan
+          Write-Host "Phase 08: Windows KMDF driver packaged and ready for deployment"
+          $DriverFiles = Get-ChildItem -Path "build\x64\Release\IntelAvbFilter" -ErrorAction SilentlyContinue
+          if ($DriverFiles) {
+            Write-Host "📦 Driver artifacts:"
+            $DriverFiles | ForEach-Object { Write-Host "  - $($_.Name) ($([Math]::Round($_.Length/1KB, 1)) KB)" }
+          }
