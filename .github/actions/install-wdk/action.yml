@@ -80,9 +80,13 @@ runs:
         }
 
         # Check specifically for 10.0.22621.0 headers (the version pinned in vcxproj)
-        $requiredKmPath = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km\ntddk.h"
-        $inf2cat  = Find-WdkTool "inf2cat.exe"
-        $signtool = Find-WdkTool "signtool.exe"
+        $requiredKmPath  = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km\ntddk.h"
+        $reqVer          = "10.0.22621.0"
+        $kitsBase        = "C:\Program Files (x86)\Windows Kits\10"
+        $inf2cat         = Find-WdkTool "inf2cat.exe"
+        # Prefer signtool from the WDK 22621 bin (not the newer SDK bin)
+        $signtool        = Get-ChildItem "$kitsBase\bin\$reqVer" -Recurse -Filter "signtool.exe" `
+                               -ErrorAction SilentlyContinue | Select-Object -First 1
 
         if ($inf2cat -and $signtool -and (Test-Path $requiredKmPath)) {
             Write-Host "[OK] WDK 10.0.22621.0 already present — skipping install" -ForegroundColor Green
@@ -120,20 +124,54 @@ runs:
         }
 
         $inf2cat  = Find-WdkTool "inf2cat.exe"
-        $signtool = Find-WdkTool "signtool.exe"
 
         if (-not (Test-Path $requiredKmPath)) {
             Write-Host "[FAIL] Required WDK headers not found after install: $requiredKmPath" -ForegroundColor Red
+            exit 1
         }
-
-        if (-not $inf2cat -or -not $signtool) {
-            Write-Host "[FAIL] WDK tools not found after all install attempts" -ForegroundColor Red
-            Write-Host "  signtool : $(if($signtool){'found: '+$signtool.FullName}else{'NOT FOUND'})"
-            Write-Host "  inf2cat  : $(if($inf2cat){'found: '+$inf2cat.FullName}else{'NOT FOUND'})"
-            Write-Host "--- EXE files under Windows Kits 10 bin (for diagnosis) ---" -ForegroundColor DarkGray
+        if (-not $inf2cat) {
+            Write-Host "[FAIL] inf2cat.exe not found after WDK install" -ForegroundColor Red
             Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "*.exe" `
                 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName | Write-Host
             exit 1
         }
+        Write-Host "[OK] inf2cat  : $($inf2cat.FullName)" -ForegroundColor Green
+
+        # WDK does not ship signtool.exe — it lives in the Windows SDK bin dirs.
+        # Ensure signtool.exe is present alongside inf2cat in the WDK 10.0.22621.0 bin dirs
+        # so both tools report the same version path in the build log.
+        $kitsBase = "C:\Program Files (x86)\Windows Kits\10"
+        $reqVer   = "10.0.22621.0"
+        $sdkVer   = "10.0.26100.0"
+        Write-Host "🔗 Ensuring signtool.exe present in WDK $reqVer bin dirs..." -ForegroundColor Cyan
+        foreach ($arch in @('x64','x86','arm64','arm')) {
+            $wdkBinArch = "$kitsBase\bin\$reqVer\$arch"
+            $sdkBinArch = "$kitsBase\bin\$sdkVer\$arch"
+            $dstTool    = "$wdkBinArch\signtool.exe"
+            $srcTool    = "$sdkBinArch\signtool.exe"
+            if (-not (Test-Path $srcTool)) { continue }  # SDK doesn't have this arch
+            if (Test-Path $dstTool)        { continue }  # Already present
+            if (-not (Test-Path $wdkBinArch)) {
+                # WDK didn't create this arch dir at all — junction the whole dir
+                New-Item -ItemType Directory -Path (Split-Path $wdkBinArch) -Force | Out-Null
+                & cmd /c "mklink /J `"$wdkBinArch`" `"$sdkBinArch`"" | Out-Null
+                Write-Host "  [J] bin\$reqVer\$arch -> bin\$sdkVer\$arch" -ForegroundColor DarkGray
+            } else {
+                # WDK created the dir (has inf2cat etc.) but signtool is missing — hardlink it
+                & cmd /c "mklink /H `"$dstTool`" `"$srcTool`"" | Out-Null
+                Write-Host "  [H] bin\$reqVer\$arch\signtool.exe <- $sdkVer" -ForegroundColor DarkGray
+            }
+        }
+
+        # Now locate signtool preferring 10.0.22621.0
+        $signtool = Get-ChildItem "$kitsBase\bin\$reqVer" -Recurse -Filter "signtool.exe" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $signtool) {
+            # Fallback: accept any version
+            $signtool = Find-WdkTool "signtool.exe"
+        }
+        if (-not $signtool) {
+            Write-Host "[FAIL] signtool.exe not found anywhere under Windows Kits\10\bin" -ForegroundColor Red
+            exit 1
+        }
         Write-Host "[OK] signtool : $($signtool.FullName)" -ForegroundColor Green
-        Write-Host "[OK] inf2cat  : $($inf2cat.FullName)"  -ForegroundColor Green
