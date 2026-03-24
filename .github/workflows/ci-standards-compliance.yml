@@ -982,12 +982,37 @@ jobs:
       - name: Install PlatformIO
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build ESP32 firmware
+      - name: Install Windows Driver Kit (WDK)
         shell: pwsh
         run: |
-          Write-Host "🏗️ Building Windows KMDF driver (Release)..." -ForegroundColor Cyan
-          .\tools\build\Build-Driver.ps1 -Configuration Release
-          Write-Host "✅ Driver build complete" -ForegroundColor Green
+          Write-Host "📦 Downloading WDK installer..." -ForegroundColor Cyan
+          $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
+          $wdkInstaller = "$env:TEMP\wdksetup.exe"
+          Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
+          Write-Host "⚙️ Installing WDK (silent)..." -ForegroundColor Cyan
+          $proc = Start-Process -FilePath $wdkInstaller `
+            -ArgumentList "/quiet /norestart /features OptionId.DriverDevelopmentKit" `
+            -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "[FAIL] WDK installer exited with code $($proc.ExitCode)" -ForegroundColor Red
+            exit $proc.ExitCode
+          }
+          # Verify key tools are present
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $inf2cat  = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "inf2cat.exe"  -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $signtool -or -not $inf2cat) {
+            Write-Host "[FAIL] WDK tools not found after install" -ForegroundColor Red
+            exit 1
+          }
+          Write-Host "[OK] signtool: $($signtool.FullName)" -ForegroundColor Green
+          Write-Host "[OK] inf2cat : $($inf2cat.FullName)"  -ForegroundColor Green
+
+      - name: Build and sign ESP32 firmware
+        shell: pwsh
+        run: |
+          Write-Host "🏗️ Building and signing Windows KMDF driver (Release)..." -ForegroundColor Cyan
+          .\tools\build\Build-Driver.ps1 -Configuration Release -Sign
+          Write-Host "✅ Driver build and signing complete" -ForegroundColor Green
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
