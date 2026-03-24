@@ -223,7 +223,7 @@ if (-not $SkipDriver) {
             Write-Info "SDK $pinnedSdkVer headers not found; overriding TargetPlatformVersion to detected SDK $detectedSdk"
         } else {
             $targetPlatformVersion = $pinnedSdkVer
-            Write-Info "Could not detect installed SDK; using vcxproj default ($pinnedSdkVer) — build may fail with MSB8036"
+            Write-Info ('Could not detect installed SDK; using vcxproj default ({0}) - build may fail with MSB8036' -f $pinnedSdkVer)
         }
     }
 
@@ -351,12 +351,13 @@ if ($BuildTests) {
         $testName = [System.IO.Path]::GetFileNameWithoutExtension($makefile)
         Write-Host "`nBuilding $testName..." -ForegroundColor Yellow
         
-        $makefileDir = Split-Path $makefile -Parent
-        $makefileLeaf = Split-Path $makefile -Leaf
-        $buildCmd = "cmd /c `"`"$vcvarsPath`" && pushd `"$makefileDir`" && nmake -f `"$makefileLeaf`" && popd`""
-        
+        $makefilePath = Join-Path $repoRoot $makefile
+        $makefileDir  = Split-Path $makefilePath -Parent
+        $makefileLeaf = Split-Path $makefilePath -Leaf
+        $testBuildCmd = 'call "{0}" && pushd "{1}" && nmake -f "{2}" && popd' -f $vcvarsPath, $makefileDir, $makefileLeaf
+
         try {
-            Invoke-Expression $buildCmd | Out-Null
+            & cmd.exe /d /s /c $testBuildCmd | Out-Null
             
             if ($LASTEXITCODE -eq 0) {
                 Write-Success "$testName build succeeded"
