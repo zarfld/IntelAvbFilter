@@ -15,34 +15,61 @@ runs:
       run: |
         # MSB8036 fires when MSBuild cannot find the Windows SDK at the version
         # declared in WindowsTargetPlatformVersion (10.0.22621.0 in vcxproj).
-        # The Windows SDK and the WDK are separate installers.
-        $sdkUcrtPath = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\ucrt"
+        # The CI runner already has SDK 10.0.26100.0; installing an older version
+        # is blocked (installer returns 1001 — newer version present, no-op).
+        # Solution: create directory junctions so 10.0.22621.0 aliases 10.0.26100.0.
+        # MSBuild only needs the Include/Lib paths to exist at the pinned version.
+        $base        = "C:\Program Files (x86)\Windows Kits\10"
+        $reqVer      = "10.0.22621.0"
+        $existingVer = "10.0.26100.0"
+        $sdkUcrtPath = "$base\Include\$reqVer\ucrt"
+
         if (Test-Path $sdkUcrtPath) {
-            Write-Host "[OK] Windows SDK 10.0.22621.0 already present — skipping" -ForegroundColor Green
+            Write-Host "[OK] Windows SDK $reqVer Include\ucrt already present — skipping" -ForegroundColor Green
             exit 0
         }
-        Write-Host "📦 Downloading Windows SDK 22H2 (10.0.22621.0)..." -ForegroundColor Cyan
-        # Windows 11 SDK 22H2 (10.0.22621.x) standalone installer
-        $sdkUrl = "https://go.microsoft.com/fwlink/?linkid=2196241"
-        $sdkInstaller = "$env:TEMP\winsdksetup.exe"
-        Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkInstaller -UseBasicParsing
-        Write-Host "⚙️ Installing Windows SDK 22H2 (silent)..." -ForegroundColor Cyan
-        $sdkLog = "$env:TEMP\winsdksetup.log"
-        $proc = Start-Process -FilePath $sdkInstaller `
-            -ArgumentList "/quiet /norestart /log `"$sdkLog`" /features OptionId.WindowsSoftwareDevelopmentKit" `
-            -Wait -PassThru
-        $acceptableCodes = @(0, 3010, 1001)
-        if ($proc.ExitCode -notin $acceptableCodes) {
-            Write-Host "[FAIL] Windows SDK installer exited $($proc.ExitCode)" -ForegroundColor Red
-            if (Test-Path $sdkLog) { Get-Content $sdkLog -Tail 20 | ForEach-Object { Write-Host $_ } }
-            exit $proc.ExitCode
-        }
-        Write-Host "[INFO] Windows SDK installer exited $($proc.ExitCode)" -ForegroundColor Yellow
-        if (-not (Test-Path $sdkUcrtPath)) {
-            Write-Host "[FAIL] Windows SDK ucrt headers not found after install: $sdkUcrtPath" -ForegroundColor Red
+
+        # Verify the newer SDK that CI ships with is actually present
+        if (-not (Test-Path "$base\Include\$existingVer\ucrt")) {
+            Write-Host "[FAIL] Expected SDK $existingVer not found at $base\Include\$existingVer\ucrt" -ForegroundColor Red
             exit 1
         }
-        Write-Host "[OK] Windows SDK 10.0.22621.0 installed" -ForegroundColor Green
+
+        Write-Host "🔗 Creating directory junctions: SDK $reqVer -> $existingVer ..." -ForegroundColor Cyan
+
+        # --- Include junctions ---
+        $inclBase = "$base\Include\$reqVer"
+        New-Item -ItemType Directory -Path $inclBase -Force | Out-Null
+        foreach ($subdir in @('ucrt','um','shared','winrt','cppwinrt')) {
+            $src = "$base\Include\$existingVer\$subdir"
+            $dst = "$base\Include\$reqVer\$subdir"
+            if ((Test-Path $src) -and -not (Test-Path $dst)) {
+                & cmd /c "mklink /J `"$dst`" `"$src`"" | Out-Null
+                Write-Host "  [J] Include\$reqVer\$subdir -> Include\$existingVer\$subdir"
+            }
+        }
+
+        # --- Lib junctions ---
+        New-Item -ItemType Directory -Path "$base\Lib\$reqVer"       -Force | Out-Null
+        New-Item -ItemType Directory -Path "$base\Lib\$reqVer\ucrt"  -Force | Out-Null
+        New-Item -ItemType Directory -Path "$base\Lib\$reqVer\um"    -Force | Out-Null
+        foreach ($arch in @('x64','x86','arm','arm64')) {
+            foreach ($lib in @('ucrt','um')) {
+                $src = "$base\Lib\$existingVer\$lib\$arch"
+                $dst = "$base\Lib\$reqVer\$lib\$arch"
+                if ((Test-Path $src) -and -not (Test-Path $dst)) {
+                    & cmd /c "mklink /J `"$dst`" `"$src`"" | Out-Null
+                    Write-Host "  [J] Lib\$reqVer\$lib\$arch -> Lib\$existingVer\$lib\$arch"
+                }
+            }
+        }
+
+        # Final check
+        if (-not (Test-Path $sdkUcrtPath)) {
+            Write-Host "[FAIL] Junction creation failed — $sdkUcrtPath still missing" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "[OK] SDK $reqVer directories aliased to $existingVer via junctions" -ForegroundColor Green
 
     - name: Install WDK 22H2 (10.0.22621.0)
       shell: pwsh
