@@ -196,7 +196,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-11-arm, windows-latest,windows-2022]
         config: [Debug, Release]
         # Optionally exclude specific combinations if needed:
         # exclude:
@@ -451,7 +451,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [windows-11-arm, windows-latest, windows-2022]
         config: [Debug, Release]
         # Optionally exclude specific combinations:
         # exclude:
