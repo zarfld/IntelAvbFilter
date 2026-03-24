@@ -63,12 +63,12 @@ logs/                               ← LOG FILES (written by all three runners)
 
 ### Which runner to use?
 
-| Context                              | Correct entry point           |
-|--------------------------------------|-------------------------------|
-| Local dev, interactive terminal      | `Run-Tests-Elevated.ps1`      |
-| Local dev, already in elevated shell | `Run-Tests.ps1`               |
-| GitHub Actions / headless CI         | `Run-Tests-CI.ps1`            |
-| CI workflow YAML step                | `Run-Tests-CI.ps1`            |
+| Context                              | Correct entry point           | Admin needed?  |
+|--------------------------------------|-------------------------------|----------------|
+| Local dev, interactive terminal      | `Run-Tests-Elevated.ps1`      | Yes (auto-UAC) |
+| Local dev, already in elevated shell | `Run-Tests.ps1`               | Yes            |
+| GitHub Actions / headless CI         | `Run-Tests-CI.ps1`            | No (hw-independent tests only) |
+| CI workflow YAML step                | `Run-Tests-CI.ps1`            | No             |
 
 `Run-Tests-Elevated.ps1` spawns a new elevated PowerShell via `Start-Process
 powershell -Verb RunAs -Wait`. The test output is captured in a transcript log
