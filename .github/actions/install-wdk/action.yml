@@ -51,9 +51,23 @@ runs:
         $signtool = Find-WdkTool "signtool.exe"
 
         if (-not $inf2cat -or -not $signtool) {
-            Write-Host "[INFO] Trying winget fallback..." -ForegroundColor Yellow
-            winget install --id Microsoft.WindowsDriverKit `
-                --silent --accept-package-agreements --accept-source-agreements
+            # Fallback 1: Chocolatey (pre-installed on GitHub-hosted Windows runners)
+            Write-Host "[INFO] Trying Chocolatey fallback..." -ForegroundColor Yellow
+            choco install windows-driver-kit --yes --no-progress 2>&1 | Write-Host
+            $inf2cat  = Find-WdkTool "inf2cat.exe"
+            $signtool = Find-WdkTool "signtool.exe"
+        }
+
+        if (-not $inf2cat -or -not $signtool) {
+            # Fallback 2: WDK 22H2 (10.0.22621.0) — different version from SDK 26100, installs cleanly
+            Write-Host "[INFO] Trying WDK 22H2 (10.0.22621.0) direct download..." -ForegroundColor Yellow
+            $wdkUrl22 = "https://go.microsoft.com/fwlink/?linkid=2196230"
+            $wdkInstaller22 = "$env:TEMP\wdksetup22.exe"
+            Invoke-WebRequest -Uri $wdkUrl22 -OutFile $wdkInstaller22 -UseBasicParsing
+            $proc22 = Start-Process -FilePath $wdkInstaller22 `
+                -ArgumentList "/quiet /norestart /features OptionId.DriverDevelopmentKit" `
+                -Wait -PassThru
+            Write-Host "[INFO] WDK 22H2 installer exited $($proc22.ExitCode)" -ForegroundColor Yellow
             $inf2cat  = Find-WdkTool "inf2cat.exe"
             $signtool = Find-WdkTool "signtool.exe"
         }

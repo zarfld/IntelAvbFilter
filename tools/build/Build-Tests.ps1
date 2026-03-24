@@ -53,6 +53,19 @@ if ($ScriptDir -match '\\tools\\build$') {
     $RepoRoot = $ScriptDir
 }
 
+# Dynamically discover WDK kernel-mode include directory (works with any installed WDK version)
+$WdkKmDir = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Directory `
+    -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending |
+    Where-Object { Test-Path (Join-Path $_.FullName "km\ntddk.h") } |
+    Select-Object -First 1 -ExpandProperty FullName
+if ($WdkKmDir) {
+    $WdkKmDir = Join-Path $WdkKmDir "km"
+} else {
+    # Fallback: well-known path for WDK 10.0.26100.0 (keep existing hardcoded path as last resort)
+    $WdkKmDir = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\km"
+}
+
 Write-Host "Intel AVB Filter - Build Tests" -ForegroundColor Cyan
 Write-Host "==============================" -ForegroundColor Cyan
 Write-Host "Configuration: $Configuration" -ForegroundColor Yellow
@@ -253,7 +266,7 @@ $AllTests = @(
         Source = "tests/verification/regs/test_register_constants.c"
         Output = "test_register_constants.obj"
         CompileOnly = $true
-        Includes = "-I intel-ethernet-regs/gen -I include -I C:\PROGRA~2\WI3CF2~1\10\Include\100226~1.0\km"
+        Includes = "-I intel-ethernet-regs/gen -I include -I `"$WdkKmDir`""
         CompilerFlags = "/c /kernel /WX /D_AMD64_ /DAMD64"  # Kernel mode requires architecture defines
         Description = "Verification: Register Constants + Event ID SSOT (TEST-REGS-003, closes #289)"
     },
