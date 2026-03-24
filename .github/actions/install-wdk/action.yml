@@ -27,53 +27,61 @@ runs:
             exit 0
         }
 
-        Write-Host "📦 Downloading WDK installer..." -ForegroundColor Cyan
+        Write-Host "📦 Downloading WDK installer (10.0.26100.x)..." -ForegroundColor Cyan
         $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
         $wdkInstaller = "$env:TEMP\wdksetup.exe"
         Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
 
         Write-Host "⚙️ Installing WDK (silent)..." -ForegroundColor Cyan
+        $wdkLog = "$env:TEMP\wdksetup.log"
+        # NOTE: wdksetup.exe only supports /quiet /norestart /log — no /features argument
         $proc = Start-Process -FilePath $wdkInstaller `
-            -ArgumentList "/quiet /norestart /features OptionId.DriverDevelopmentKit" `
+            -ArgumentList "/quiet /norestart /log `"$wdkLog`"" `
             -Wait -PassThru
 
         # 0    = success
         # 3010 = success, reboot required (safe — tools are usable without reboot)
-        # 1001 = installer conflict with matching SDK already present; tools may already exist
+        # 1001 = installer conflict; tools may already be present
         $acceptableCodes = @(0, 3010, 1001)
         if ($proc.ExitCode -notin $acceptableCodes) {
             Write-Host "[FAIL] WDK installer exited with unexpected code $($proc.ExitCode)" -ForegroundColor Red
             exit $proc.ExitCode
         }
         Write-Host "[INFO] WDK installer exited $($proc.ExitCode) — verifying tools..." -ForegroundColor Yellow
+        if (Test-Path $wdkLog) {
+            Write-Host "--- WDK install log (last 20 lines) ---" -ForegroundColor DarkGray
+            Get-Content $wdkLog -Tail 20 | ForEach-Object { Write-Host $_ }
+        }
 
         $inf2cat  = Find-WdkTool "inf2cat.exe"
         $signtool = Find-WdkTool "signtool.exe"
 
         if (-not $inf2cat -or -not $signtool) {
-            # Fallback 1: Chocolatey (pre-installed on GitHub-hosted Windows runners)
-            Write-Host "[INFO] Trying Chocolatey fallback..." -ForegroundColor Yellow
-            choco install windows-driver-kit --yes --no-progress 2>&1 | Write-Host
-            $inf2cat  = Find-WdkTool "inf2cat.exe"
-            $signtool = Find-WdkTool "signtool.exe"
-        }
-
-        if (-not $inf2cat -or -not $signtool) {
-            # Fallback 2: WDK 22H2 (10.0.22621.0) — different version from SDK 26100, installs cleanly
+            # Fallback: WDK 22H2 (10.0.22621.0)
             Write-Host "[INFO] Trying WDK 22H2 (10.0.22621.0) direct download..." -ForegroundColor Yellow
             $wdkUrl22 = "https://go.microsoft.com/fwlink/?linkid=2196230"
             $wdkInstaller22 = "$env:TEMP\wdksetup22.exe"
+            $wdkLog22 = "$env:TEMP\wdksetup22.log"
             Invoke-WebRequest -Uri $wdkUrl22 -OutFile $wdkInstaller22 -UseBasicParsing
             $proc22 = Start-Process -FilePath $wdkInstaller22 `
-                -ArgumentList "/quiet /norestart /features OptionId.DriverDevelopmentKit" `
+                -ArgumentList "/quiet /norestart /log `"$wdkLog22`"" `
                 -Wait -PassThru
             Write-Host "[INFO] WDK 22H2 installer exited $($proc22.ExitCode)" -ForegroundColor Yellow
+            if (Test-Path $wdkLog22) {
+                Write-Host "--- WDK 22H2 install log (last 20 lines) ---" -ForegroundColor DarkGray
+                Get-Content $wdkLog22 -Tail 20 | ForEach-Object { Write-Host $_ }
+            }
             $inf2cat  = Find-WdkTool "inf2cat.exe"
             $signtool = Find-WdkTool "signtool.exe"
         }
 
         if (-not $inf2cat -or -not $signtool) {
             Write-Host "[FAIL] WDK tools not found after all install attempts" -ForegroundColor Red
+            Write-Host "  signtool : $(if($signtool){'found: '+$signtool.FullName}else{'NOT FOUND'})"
+            Write-Host "  inf2cat  : $(if($inf2cat){'found: '+$inf2cat.FullName}else{'NOT FOUND'})"
+            Write-Host "--- EXE files under Windows Kits 10 bin (for diagnosis) ---" -ForegroundColor DarkGray
+            Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "*.exe" `
+                -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName | Write-Host
             exit 1
         }
         Write-Host "[OK] signtool : $($signtool.FullName)" -ForegroundColor Green
