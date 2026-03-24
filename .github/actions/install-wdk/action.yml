@@ -1,16 +1,50 @@
 name: 'Install Windows Driver Kit (WDK)'
 description: >
-  Installs WDK 22H2 (10.0.22621.0) so that inf2cat.exe, signtool.exe and
-  kernel-mode headers are available for driver builds on the runner.
-  This exact version is required: the vcxproj hardcodes the include path
+  Installs Windows SDK 22H2 + WDK 22H2 (10.0.22621.0) for driver builds.
+  Both are required: the vcxproj uses WindowsTargetPlatformVersion=10.0.22621.0
+  (MSB8036 fires if the Windows SDK is absent) and hardcodes the WDK km path
   C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km
-  Skips installation if 10.0.22621.0 headers and tools are already present.
-  Exit code 1001/3010 from the installer is treated as non-fatal.
+  Skips each installer if the required artifacts are already present.
+  Exit code 1001/3010 from installers is treated as non-fatal.
 
 runs:
   using: composite
   steps:
-    - name: Install WDK (if not already present)
+    - name: Install Windows SDK 22H2 (10.0.22621.0)
+      shell: pwsh
+      run: |
+        # MSB8036 fires when MSBuild cannot find the Windows SDK at the version
+        # declared in WindowsTargetPlatformVersion (10.0.22621.0 in vcxproj).
+        # The Windows SDK and the WDK are separate installers.
+        $sdkUcrtPath = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\ucrt"
+        if (Test-Path $sdkUcrtPath) {
+            Write-Host "[OK] Windows SDK 10.0.22621.0 already present — skipping" -ForegroundColor Green
+            exit 0
+        }
+        Write-Host "📦 Downloading Windows SDK 22H2 (10.0.22621.0)..." -ForegroundColor Cyan
+        # Windows 11 SDK 22H2 (10.0.22621.x) standalone installer
+        $sdkUrl = "https://go.microsoft.com/fwlink/?linkid=2196241"
+        $sdkInstaller = "$env:TEMP\winsdksetup.exe"
+        Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkInstaller -UseBasicParsing
+        Write-Host "⚙️ Installing Windows SDK 22H2 (silent)..." -ForegroundColor Cyan
+        $sdkLog = "$env:TEMP\winsdksetup.log"
+        $proc = Start-Process -FilePath $sdkInstaller `
+            -ArgumentList "/quiet /norestart /log `"$sdkLog`" /features OptionId.WindowsSoftwareDevelopmentKit" `
+            -Wait -PassThru
+        $acceptableCodes = @(0, 3010, 1001)
+        if ($proc.ExitCode -notin $acceptableCodes) {
+            Write-Host "[FAIL] Windows SDK installer exited $($proc.ExitCode)" -ForegroundColor Red
+            if (Test-Path $sdkLog) { Get-Content $sdkLog -Tail 20 | ForEach-Object { Write-Host $_ } }
+            exit $proc.ExitCode
+        }
+        Write-Host "[INFO] Windows SDK installer exited $($proc.ExitCode)" -ForegroundColor Yellow
+        if (-not (Test-Path $sdkUcrtPath)) {
+            Write-Host "[FAIL] Windows SDK ucrt headers not found after install: $sdkUcrtPath" -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "[OK] Windows SDK 10.0.22621.0 installed" -ForegroundColor Green
+
+    - name: Install WDK 22H2 (10.0.22621.0)
       shell: pwsh
       run: |
         function Find-WdkTool([string]$Name) {
