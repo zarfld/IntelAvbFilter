@@ -1,10 +1,11 @@
 name: 'Install Windows Driver Kit (WDK)'
 description: >
-  Installs the WDK so that inf2cat.exe, signtool.exe and kernel-mode headers
-  are available for driver builds and test compilation on the runner.
-  Skips installation if the tools are already present.
-  Exit code 1001/3010 from the installer is treated as non-fatal (conflict
-  with an already-installed matching SDK version or reboot-pending).
+  Installs WDK 22H2 (10.0.22621.0) so that inf2cat.exe, signtool.exe and
+  kernel-mode headers are available for driver builds on the runner.
+  This exact version is required: the vcxproj hardcodes the include path
+  C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km
+  Skips installation if 10.0.22621.0 headers and tools are already present.
+  Exit code 1001/3010 from the installer is treated as non-fatal.
 
 runs:
   using: composite
@@ -17,24 +18,28 @@ runs:
                 -ErrorAction SilentlyContinue | Select-Object -First 1
         }
 
+        # Check specifically for 10.0.22621.0 headers (the version pinned in vcxproj)
+        $requiredKmPath = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km\ntddk.h"
         $inf2cat  = Find-WdkTool "inf2cat.exe"
         $signtool = Find-WdkTool "signtool.exe"
 
-        if ($inf2cat -and $signtool) {
-            Write-Host "[OK] WDK tools already present — skipping install" -ForegroundColor Green
+        if ($inf2cat -and $signtool -and (Test-Path $requiredKmPath)) {
+            Write-Host "[OK] WDK 10.0.22621.0 already present — skipping install" -ForegroundColor Green
             Write-Host "  signtool : $($signtool.FullName)"
             Write-Host "  inf2cat  : $($inf2cat.FullName)"
             exit 0
         }
 
-        Write-Host "📦 Downloading WDK installer (10.0.26100.x)..." -ForegroundColor Cyan
-        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
+        # Always install WDK 22H2 (10.0.22621.0) — this is the version pinned in the vcxproj.
+        # The vcxproj hardcodes: C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km
+        # Installing a different WDK version will NOT provide that path.
+        Write-Host "📦 Downloading WDK 22H2 (10.0.22621.0)..." -ForegroundColor Cyan
+        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2196230"
         $wdkInstaller = "$env:TEMP\wdksetup.exe"
         Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
 
-        Write-Host "⚙️ Installing WDK (silent)..." -ForegroundColor Cyan
+        Write-Host "⚙️ Installing WDK 22H2 (silent)..." -ForegroundColor Cyan
         $wdkLog = "$env:TEMP\wdksetup.log"
-        # NOTE: wdksetup.exe only supports /quiet /norestart /log — no /features argument
         $proc = Start-Process -FilePath $wdkInstaller `
             -ArgumentList "/quiet /norestart /log `"$wdkLog`"" `
             -Wait -PassThru
@@ -47,7 +52,7 @@ runs:
             Write-Host "[FAIL] WDK installer exited with unexpected code $($proc.ExitCode)" -ForegroundColor Red
             exit $proc.ExitCode
         }
-        Write-Host "[INFO] WDK installer exited $($proc.ExitCode) — verifying tools..." -ForegroundColor Yellow
+        Write-Host "[INFO] WDK installer exited $($proc.ExitCode) — verifying..." -ForegroundColor Yellow
         if (Test-Path $wdkLog) {
             Write-Host "--- WDK install log (last 20 lines) ---" -ForegroundColor DarkGray
             Get-Content $wdkLog -Tail 20 | ForEach-Object { Write-Host $_ }
@@ -56,23 +61,8 @@ runs:
         $inf2cat  = Find-WdkTool "inf2cat.exe"
         $signtool = Find-WdkTool "signtool.exe"
 
-        if (-not $inf2cat -or -not $signtool) {
-            # Fallback: WDK 22H2 (10.0.22621.0)
-            Write-Host "[INFO] Trying WDK 22H2 (10.0.22621.0) direct download..." -ForegroundColor Yellow
-            $wdkUrl22 = "https://go.microsoft.com/fwlink/?linkid=2196230"
-            $wdkInstaller22 = "$env:TEMP\wdksetup22.exe"
-            $wdkLog22 = "$env:TEMP\wdksetup22.log"
-            Invoke-WebRequest -Uri $wdkUrl22 -OutFile $wdkInstaller22 -UseBasicParsing
-            $proc22 = Start-Process -FilePath $wdkInstaller22 `
-                -ArgumentList "/quiet /norestart /log `"$wdkLog22`"" `
-                -Wait -PassThru
-            Write-Host "[INFO] WDK 22H2 installer exited $($proc22.ExitCode)" -ForegroundColor Yellow
-            if (Test-Path $wdkLog22) {
-                Write-Host "--- WDK 22H2 install log (last 20 lines) ---" -ForegroundColor DarkGray
-                Get-Content $wdkLog22 -Tail 20 | ForEach-Object { Write-Host $_ }
-            }
-            $inf2cat  = Find-WdkTool "inf2cat.exe"
-            $signtool = Find-WdkTool "signtool.exe"
+        if (-not (Test-Path $requiredKmPath)) {
+            Write-Host "[FAIL] Required WDK headers not found after install: $requiredKmPath" -ForegroundColor Red
         }
 
         if (-not $inf2cat -or -not $signtool) {
