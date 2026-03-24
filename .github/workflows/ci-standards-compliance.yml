@@ -294,6 +294,10 @@ jobs:
             exit 0
           }
 
+      - name: Install Windows Driver Kit (WDK)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/install-wdk
+
       - name: Install test build dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -514,6 +518,10 @@ jobs:
           else
             echo "⚠️ No CMake configuration for integration tests"
           fi
+
+      - name: Install Windows Driver Kit (WDK)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/install-wdk
 
       - name: Install test build dependencies (Windows)
         if: runner.os == 'Windows'
@@ -983,29 +991,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install Windows Driver Kit (WDK)
-        shell: pwsh
-        run: |
-          Write-Host "📦 Downloading WDK installer..." -ForegroundColor Cyan
-          $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
-          $wdkInstaller = "$env:TEMP\wdksetup.exe"
-          Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
-          Write-Host "⚙️ Installing WDK (silent)..." -ForegroundColor Cyan
-          $proc = Start-Process -FilePath $wdkInstaller `
-            -ArgumentList "/quiet /norestart /features OptionId.DriverDevelopmentKit" `
-            -Wait -PassThru
-          if ($proc.ExitCode -ne 0) {
-            Write-Host "[FAIL] WDK installer exited with code $($proc.ExitCode)" -ForegroundColor Red
-            exit $proc.ExitCode
-          }
-          # Verify key tools are present
-          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $inf2cat  = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "inf2cat.exe"  -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $signtool -or -not $inf2cat) {
-            Write-Host "[FAIL] WDK tools not found after install" -ForegroundColor Red
-            exit 1
-          }
-          Write-Host "[OK] signtool: $($signtool.FullName)" -ForegroundColor Green
-          Write-Host "[OK] inf2cat : $($inf2cat.FullName)"  -ForegroundColor Green
+        uses: ./.github/actions/install-wdk
 
       - name: Build and sign ESP32 firmware
         shell: pwsh
