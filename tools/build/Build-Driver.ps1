@@ -143,28 +143,34 @@ if (-not $SkipDriver) {
 if ($Sign) {
     Write-Step "Locating Windows Driver Kit tools"
     
-    $wdkVersions = @("10.0.26100.0", "10.0.22621.0", "10.0.19041.0")
-    $wdkBasePath = "C:\Program Files (x86)\Windows Kits\10\bin"
-    
-    $inf2catPath = $null
-    $signtoolPath = $null
-    
-    foreach ($version in $wdkVersions) {
-        $inf2cat = Join-Path $wdkBasePath "$version\x64\inf2cat.exe"
-        $signtool = Join-Path $wdkBasePath "$version\x64\signtool.exe"
-        
-        if ((Test-Path $inf2cat) -and (Test-Path $signtool)) {
-            $inf2catPath = $inf2cat
-            $signtoolPath = $signtool
-            Write-Success "Found WDK $version"
-            break
-        }
+    $wdkBinRoot = "C:\Program Files (x86)\Windows Kits\10\bin"
+
+    # inf2cat.exe only ships in the x86 subfolder; signtool.exe ships in all arch subfolders.
+    # Use recursive search so we find them regardless of the installed WDK version or arch layout.
+    $inf2catFound = Get-ChildItem $wdkBinRoot -Recurse -Filter "inf2cat.exe" `
+        -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Prefer x64 signtool; fall back to any arch if not present
+    $signtoolFound = Get-ChildItem $wdkBinRoot -Recurse -Filter "signtool.exe" `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.DirectoryName -match '\\x64$' } |
+        Select-Object -First 1
+    if (-not $signtoolFound) {
+        $signtoolFound = Get-ChildItem $wdkBinRoot -Recurse -Filter "signtool.exe" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
     }
-    
+
+    $inf2catPath  = if ($inf2catFound)  { $inf2catFound.FullName  } else { $null }
+    $signtoolPath = if ($signtoolFound) { $signtoolFound.FullName } else { $null }
+
     if (-not $inf2catPath -or -not $signtoolPath) {
         Write-Failure "WDK tools not found. Please install Windows Driver Kit."
+        Write-Host "  Searched: $wdkBinRoot" -ForegroundColor Yellow
+        Write-Host "  inf2cat  : $(if($inf2catPath){'found: '+$inf2catPath}else{'NOT FOUND'})"
+        Write-Host "  signtool : $(if($signtoolPath){'found: '+$signtoolPath}else{'NOT FOUND'})"
         exit 1
     }
+    Write-Success "Found inf2cat  : $inf2catPath"
+    Write-Success "Found signtool : $signtoolPath"
 }
 
 # ===========================
