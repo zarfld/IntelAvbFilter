@@ -199,15 +199,44 @@ if (-not $SkipDriver) {
     $revisionNumber = 0
     
     $buildCmd = if ($Clean) { "Clean;Build" } else { "Build" }
-    
+
+    # Auto-detect the truly available Windows SDK version to prevent MSB8036.
+    # The vcxproj pins WindowsTargetPlatformVersion=10.0.22621.0 but CI runners may
+    # only have SDK 10.0.26100.0.  We check the EXACT paths MSBuild's MSB8036 check
+    # uses (shared\sdkddkver.h + Lib\um\<arch>\gdi32.lib) and, if they're absent,
+    # find whichever SDK IS fully installed and override TargetPlatformVersion.
+    # The hardcoded WDK km include in AdditionalIncludeDirectories is unaffected.
+    $kitsBase    = "C:\Program Files (x86)\Windows Kits\10"
+    $pinnedSdkVer = "10.0.22621.0"
+    $sdkHeader   = "$kitsBase\Include\$pinnedSdkVer\shared\sdkddkver.h"
+    $sdkLib      = "$kitsBase\Lib\$pinnedSdkVer\um\$Platform\gdi32.lib"
+    if ((Test-Path $sdkHeader) -and (Test-Path $sdkLib)) {
+        $targetPlatformVersion = $pinnedSdkVer
+        Write-Info "SDK $pinnedSdkVer verified (sdkddkver.h + gdi32.lib present)"
+    } else {
+        $detectedSdk = Get-ChildItem "$kitsBase\Include" -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName "shared\sdkddkver.h") } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+        if ($detectedSdk) {
+            $targetPlatformVersion = $detectedSdk
+            Write-Info "SDK $pinnedSdkVer headers not found; overriding TargetPlatformVersion to detected SDK $detectedSdk"
+        } else {
+            $targetPlatformVersion = $pinnedSdkVer
+            Write-Info "Could not detect installed SDK; using vcxproj default ($pinnedSdkVer) — build may fail with MSB8036"
+        }
+    }
+
     Write-Host "  Solution: $solutionFile" -ForegroundColor Gray
     Write-Host "  Output: $outputDir" -ForegroundColor Gray
     Write-Host "  Version: 1.0.$buildNumber.$revisionNumber" -ForegroundColor Gray
-    
+    Write-Host "  SDK TargetPlatformVersion: $targetPlatformVersion" -ForegroundColor Gray
+
     & $msbuildPath $solutionFile `
         /t:$buildCmd `
         /p:Configuration=$Configuration `
         /p:Platform=$Platform `
+        /p:TargetPlatformVersion=$targetPlatformVersion `
         /p:AvbVersionBuild=$buildNumber `
         /p:AvbVersionRevision=$revisionNumber `
         /m `

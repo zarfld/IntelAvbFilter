@@ -18,58 +18,73 @@ runs:
         # The CI runner already has SDK 10.0.26100.0; installing an older version
         # is blocked (installer returns 1001 — newer version present, no-op).
         # Solution: create directory junctions so 10.0.22621.0 aliases 10.0.26100.0.
-        # MSBuild only needs the Include/Lib paths to exist at the pinned version.
+        # If junctions fail, Build-Driver.ps1 auto-detects the available SDK.
         $base        = "C:\Program Files (x86)\Windows Kits\10"
         $reqVer      = "10.0.22621.0"
         $existingVer = "10.0.26100.0"
-        $sdkUcrtPath = "$base\Include\$reqVer\ucrt"
 
-        if (Test-Path $sdkUcrtPath) {
-            Write-Host "[OK] Windows SDK $reqVer Include\ucrt already present — skipping" -ForegroundColor Green
+        # Skip only if the EXACT files MSBuild MSB8036 checks are already present
+        $msb8036Header = "$base\Include\$reqVer\shared\sdkddkver.h"
+        $msb8036Lib    = "$base\Lib\$reqVer\um\x64\gdi32.lib"
+        if ((Test-Path $msb8036Header) -and (Test-Path $msb8036Lib)) {
+            Write-Host "[OK] Windows SDK $reqVer MSB8036 paths already present — skipping" -ForegroundColor Green
             exit 0
         }
 
         # Verify the newer SDK that CI ships with is actually present
         if (-not (Test-Path "$base\Include\$existingVer\ucrt")) {
-            Write-Host "[FAIL] Expected SDK $existingVer not found at $base\Include\$existingVer\ucrt" -ForegroundColor Red
-            exit 1
+            Write-Host "[WARN] Expected SDK $existingVer not found at $base\Include\$existingVer\ucrt" -ForegroundColor Yellow
+            Write-Host "[INFO] Build-Driver.ps1 will detect the available SDK automatically"
+            exit 0
         }
 
         Write-Host "🔗 Creating directory junctions: SDK $reqVer -> $existingVer ..." -ForegroundColor Cyan
 
-        # --- Include junctions ---
-        $inclBase = "$base\Include\$reqVer"
-        New-Item -ItemType Directory -Path $inclBase -Force | Out-Null
-        foreach ($subdir in @('ucrt','um','shared','winrt','cppwinrt')) {
-            $src = "$base\Include\$existingVer\$subdir"
-            $dst = "$base\Include\$reqVer\$subdir"
-            if ((Test-Path $src) -and -not (Test-Path $dst)) {
-                & cmd /c "mklink /J `"$dst`" `"$src`"" | Out-Null
-                Write-Host "  [J] Include\$reqVer\$subdir -> Include\$existingVer\$subdir"
+        # Use PowerShell New-Item -ItemType Junction (native, proper error propagation).
+        # cmd /c mklink was silently swallowing failures via | Out-Null.
+        function New-Junction([string]$Dst, [string]$Src) {
+            if (-not (Test-Path $Src)) { return }
+            if (Test-Path $Dst) { return }
+            try {
+                New-Item -ItemType Junction -Path $Dst -Target $Src -ErrorAction Stop | Out-Null
+                Write-Host "  [J] $Dst -> $Src" -ForegroundColor DarkGray
+            } catch {
+                Write-Host "  [WARN] Junction failed: $Dst -> $Src : $_" -ForegroundColor Yellow
             }
+        }
+
+        # --- Include junctions ---
+        New-Item -ItemType Directory -Path "$base\Include\$reqVer" -Force | Out-Null
+        foreach ($subdir in @('ucrt','um','shared','winrt','cppwinrt')) {
+            New-Junction "$base\Include\$reqVer\$subdir" "$base\Include\$existingVer\$subdir"
         }
 
         # --- Lib junctions ---
-        New-Item -ItemType Directory -Path "$base\Lib\$reqVer"       -Force | Out-Null
-        New-Item -ItemType Directory -Path "$base\Lib\$reqVer\ucrt"  -Force | Out-Null
-        New-Item -ItemType Directory -Path "$base\Lib\$reqVer\um"    -Force | Out-Null
+        New-Item -ItemType Directory -Path "$base\Lib\$reqVer"      -Force | Out-Null
+        New-Item -ItemType Directory -Path "$base\Lib\$reqVer\ucrt" -Force | Out-Null
+        New-Item -ItemType Directory -Path "$base\Lib\$reqVer\um"   -Force | Out-Null
         foreach ($arch in @('x64','x86','arm','arm64')) {
-            foreach ($lib in @('ucrt','um')) {
-                $src = "$base\Lib\$existingVer\$lib\$arch"
-                $dst = "$base\Lib\$reqVer\$lib\$arch"
-                if ((Test-Path $src) -and -not (Test-Path $dst)) {
-                    & cmd /c "mklink /J `"$dst`" `"$src`"" | Out-Null
-                    Write-Host "  [J] Lib\$reqVer\$lib\$arch -> Lib\$existingVer\$lib\$arch"
-                }
-            }
+            New-Junction "$base\Lib\$reqVer\ucrt\$arch" "$base\Lib\$existingVer\ucrt\$arch"
+            New-Junction "$base\Lib\$reqVer\um\$arch"   "$base\Lib\$existingVer\um\$arch"
         }
 
-        # Final check
-        if (-not (Test-Path $sdkUcrtPath)) {
-            Write-Host "[FAIL] Junction creation failed — $sdkUcrtPath still missing" -ForegroundColor Red
-            exit 1
+        # Verify the EXACT paths MSBuild's MSB8036 check uses — not just ucrt.
+        $msb8036Header = "$base\Include\$reqVer\shared\sdkddkver.h"
+        $msb8036Lib    = "$base\Lib\$reqVer\um\x64\gdi32.lib"
+        $ok = $true
+        if (-not (Test-Path $msb8036Header)) {
+            Write-Host "[WARN] MSB8036 header still missing: $msb8036Header" -ForegroundColor Yellow
+            $ok = $false
         }
-        Write-Host "[OK] SDK $reqVer directories aliased to $existingVer via junctions" -ForegroundColor Green
+        if (-not (Test-Path $msb8036Lib)) {
+            Write-Host "[WARN] MSB8036 lib still missing: $msb8036Lib" -ForegroundColor Yellow
+            $ok = $false
+        }
+        if ($ok) {
+            Write-Host "[OK] SDK $reqVer directories aliased to $existingVer via junctions (MSB8036 paths verified)" -ForegroundColor Green
+        } else {
+            Write-Host "[INFO] Junctions incomplete — Build-Driver.ps1 will auto-detect available SDK and override TargetPlatformVersion" -ForegroundColor Yellow
+        }
 
     - name: Install WDK 22H2 (10.0.22621.0)
       shell: pwsh
