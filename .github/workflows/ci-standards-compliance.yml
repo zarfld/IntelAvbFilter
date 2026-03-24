@@ -985,9 +985,9 @@ jobs:
       - name: Build ESP32 firmware
         shell: pwsh
         run: |
-          Write-Host "🏗️ Building and signing Windows KMDF driver (Release)..." -ForegroundColor Cyan
-          .\tools\build\Build-Driver.ps1 -Configuration Release -Sign
-          Write-Host "✅ Driver build and signing complete" -ForegroundColor Green
+          Write-Host "🏗️ Building Windows KMDF driver (Release)..." -ForegroundColor Cyan
+          .\tools\build\Build-Driver.ps1 -Configuration Release
+          Write-Host "✅ Driver build complete" -ForegroundColor Green
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
