@@ -1,0 +1,1078 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated: 2026-03-25T19:13:41 -->
+<!-- Machine: 6XI226MACHINE (Microsoft Windows NT 10.0.26200.0) | Run date: 20260323 | OS: 10.0.26200 -->
+<!-- NOTE: Tests require Intel NIC hardware and installed driver -->
+<testsuites name="IntelAvbFilter Hardware Tests 20260323" tests="620" failures="7" skipped="21" time="0">
+  <testsuite name="avb_capability_validation_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_capability_validation_test.exe_20260323_141058.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_capability_validation_test (overall)" classname="avb_capability_validation_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_comprehensive_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_comprehensive_test.exe_20260323_141758.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_comprehensive_test (overall)" classname="avb_comprehensive_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_device_separation_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_device_separation_test.exe_20260323_141059.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_device_separation_test (overall)" classname="avb_device_separation_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_diagnostic_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_diagnostic_test.exe_20260323_141059.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_diagnostic_test (overall)" classname="avb_diagnostic_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_diagnostic_test_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_diagnostic_test_um.exe_20260323_141758.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_diagnostic_test_um (overall)" classname="avb_diagnostic_test_um" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_hw_state_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_hw_state_test.exe_20260323_141059.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_hw_state_test (overall)" classname="avb_hw_state_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_hw_state_test_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_hw_state_test_um.exe_20260323_141758.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_hw_state_test_um (overall)" classname="avb_hw_state_test_um" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_i226_advanced_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_i226_advanced_test.exe_20260323_141752.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_i226_advanced_test (overall)" classname="avb_i226_advanced_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_i226_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_i226_test.exe_20260323_141752.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_i226_test (overall)" classname="avb_i226_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_multi_adapter_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_multi_adapter_test.exe_20260323_141751.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_multi_adapter_test (overall)" classname="avb_multi_adapter_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_test_i210" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_test_i210.exe_20260323_141753.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_test_i210 (overall)" classname="avb_test_i210" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_test_i210_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_test_i210_um.exe_20260323_141759.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_test_i210_um (overall)" classname="avb_test_i210_um" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_test_i219" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_test_i219.exe_20260323_141800.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_test_i219 (overall)" classname="avb_test_i219" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="avb_test_i226" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="avb_test_i226.exe_20260323_141800.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="avb_test_i226 (overall)" classname="avb_test_i226" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="chatgpt5_i226_tas_validation" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="chatgpt5_i226_tas_validation.exe_20260323_141753.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="chatgpt5_i226_tas_validation (overall)" classname="chatgpt5_i226_tas_validation" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="comprehensive_ioctl_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="comprehensive_ioctl_test.exe_20260323_141800.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="comprehensive_ioctl_test (overall)" classname="comprehensive_ioctl_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="corrected_i226_tas_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="corrected_i226_tas_test.exe_20260323_141754.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="corrected_i226_tas_test (overall)" classname="corrected_i226_tas_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="critical_prerequisites_investigation" tests="1" failures="0" skipped="1" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="critical_prerequisites_investigation.exe_20260323_141754.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="critical_prerequisites_investigation (overall)" classname="critical_prerequisites_investigation" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="device_open_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="device_open_test.exe_20260323_141801.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="device_open_test (overall)" classname="device_open_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="diagnose_ptp" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="diagnose_ptp.exe_20260323_141801.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="diagnose_ptp (overall)" classname="diagnose_ptp" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="enhanced_tas_investigation" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="enhanced_tas_investigation.exe_20260323_141756.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="enhanced_tas_investigation (overall)" classname="enhanced_tas_investigation" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="hardware_investigation_tool" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="hardware_investigation_tool.exe_20260323_141757.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="hardware_investigation_tool (overall)" classname="hardware_investigation_tool" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="hw_timestamping_control_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="hw_timestamping_control_test.exe_20260323_141801.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="hw_timestamping_control_test (overall)" classname="hw_timestamping_control_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="intel_avb_diagnostics" tests="1" failures="0" skipped="1" errors="0" time="407" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="intel_avb_diagnostics.exe_20260323_141802.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="intel_avb_diagnostics (overall)" classname="intel_avb_diagnostics" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="ptp_clock_control_production_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="ptp_clock_control_production_test.exe_20260323_141057.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="ptp_clock_control_production_test (overall)" classname="ptp_clock_control_production_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="ptp_clock_control_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="ptp_clock_control_test.exe_20260323_141054.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="ptp_clock_control_test (overall)" classname="ptp_clock_control_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="quick_diagnostics" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="quick_diagnostics.exe_20260323_142450.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="quick_diagnostics (overall)" classname="quick_diagnostics" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="rx_timestamping_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="rx_timestamping_test.exe_20260323_142451.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="rx_timestamping_test (overall)" classname="rx_timestamping_test" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="ssot_register_validation_test" tests="1" failures="1" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="ssot_register_validation_test.exe_20260323_142451.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="ssot_register_validation_test (overall)" classname="ssot_register_validation_test" time="0"><failure message="0 test(s) failed - see ssot_register_validation_test.exe_20260323_142451.log">0 test(s) failed - see ssot_register_validation_test.exe_20260323_142451.log</failure></testcase>
+  </testsuite>
+  <testsuite name="test_all_adapters" tests="1" failures="0" skipped="1" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_all_adapters.exe_20260323_142452.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_all_adapters (overall)" classname="test_all_adapters" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_atdecc_aen_protocol" tests="6" failures="0" skipped="1" errors="0" time="1232" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_atdecc_aen_protocol.exe_20260323_194601.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-AEN-001: IDENTIFY_NOTIFICATION format" classname="test_atdecc_aen_protocol" time="0"><skipped/></testcase>
+    <testcase name="TC-AEN-002: Live ENTITY_AVAILABLE Announce" classname="test_atdecc_aen_protocol" time="0"/>
+    <testcase name="TC-AEN-003: Stream format change AEN" classname="test_atdecc_aen_protocol" time="0"/>
+    <testcase name="TC-AEN-004: Multi-controller broadcast" classname="test_atdecc_aen_protocol" time="0"/>
+    <testcase name="TC-AEN-005: Event sequence monotonicity" classname="test_atdecc_aen_protocol" time="0"/>
+    <testcase name="TC-AEN-006: Subscription auto-expiry after 31 s" classname="test_atdecc_aen_protocol" time="0"/>
+  </testsuite>
+  <testsuite name="test_atdecc_event" tests="5" failures="0" skipped="0" errors="0" time="31" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_atdecc_event.exe_20260323_152017.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-ATDECC-001: Device node accessible" classname="test_atdecc_event" time="0"/>
+    <testcase name="TC-ATDECC-002: ATDECC_EVENT_SUBSCRIBE -] handle" classname="test_atdecc_event" time="0"/>
+    <testcase name="TC-ATDECC-003: ATDECC_EVENT_POLL" classname="test_atdecc_event" time="0"/>
+    <testcase name="TC-ATDECC-004: ATDECC_EVENT_UNSUBSCRIBE" classname="test_atdecc_event" time="0"/>
+    <testcase name="TC-ATDECC-005: Double-subscribe yields unique handles" classname="test_atdecc_event" time="0"/>
+  </testsuite>
+  <testsuite name="test_avtp_tu_bit_events" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_avtp_tu_bit_events.exe_20260323_143700.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_avtp_tu_bit_events (overall)" classname="test_avtp_tu_bit_events" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_build_sign" tests="7" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_build_sign.exe_20260323_143700.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-SIGN-001: IntelAvbFilter.sys Authenticode signature" classname="test_build_sign" time="0"/>
+    <testcase name="TC-SIGN-002: intelavbfilter.cat Authenticode signature" classname="test_build_sign" time="0"/>
+    <testcase name="TC-SIGN-003: WDKTestCert in LocalMachine\TrustedPublisher" classname="test_build_sign" time="0"/>
+    <testcase name="TC-SIGN-004: INF Signature = '$Windows NT$'" classname="test_build_sign" time="0"/>
+    <testcase name="TC-SIGN-005: INF CatalogFile field present" classname="test_build_sign" time="0"/>
+    <testcase name="TC-SIGN-006: INF DriverVer field present" classname="test_build_sign" time="0"/>
+    <testcase name="TC-SIGN-007: Service RUNNING" classname="test_build_sign" time="0"/>
+  </testsuite>
+  <testsuite name="test_cleanup_archive" tests="23" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_cleanup_archive.exe_20260323_143701.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-CLEANUP-001: archive\filter_old\README.md exists" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-001: archive\backup\README.md exists" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-001: archive\avb_integration_old\README.md exists" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-001: tools\archive\deprecated\README.md exists" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\filter_old\filter_august.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\filter_old\filter_august.txt" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\backup\temp_filter_7624c57.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\backup\intel_tsn_enhanced_implementations.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\backup\tsn_hardware_activation_investigation.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\avb_integration_old\avb_integration.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\avb_integration_old\avb_context_management.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\avb_integration_old\avb_integration_fixed_backup.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\avb_integration_old\avb_integration_fixed_complete.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\avb_integration_old\avb_integration_fixed_new.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-002: present: archive\avb_integration_old\avb_integration_hardware_only.c" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-003: No archived filenames found in active source paths" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-004: No dirty-named files found in active source tree" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-005: deprecated\development exists" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-005: deprecated\setup exists" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-005: deprecated\test exists" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-005: deprecated\ root has 31 files" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-006: No unexpected .c/.h files at repo root" classname="test_cleanup_archive" time="0"/>
+    <testcase name="TC-CLEANUP-007: No stray scripts at repo root" classname="test_cleanup_archive" time="0"/>
+  </testsuite>
+  <testsuite name="test_clock_config" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_clock_config.exe_20260323_143701.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_clock_config (overall)" classname="test_clock_config" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_clock_working" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_clock_working.exe_20260323_143701.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_clock_working (overall)" classname="test_clock_working" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_compat_win11" tests="6" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_compat_win11.exe_20260323_143702.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-WIN11-001: OS build ]= 22000" classname="test_compat_win11" time="0"/>
+    <testcase name="TC-WIN11-002: Architecture is AMD64" classname="test_compat_win11" time="0"/>
+    <testcase name="TC-WIN11-003: Service IntelAvbFilter STATE = RUNNING" classname="test_compat_win11" time="0"/>
+    <testcase name="TC-WIN11-004: Device node accessible on Windows 11" classname="test_compat_win11" time="0"/>
+    <testcase name="TC-WIN11-005: IOCTL_AVB_GET_VERSION on Windows 11" classname="test_compat_win11" time="0"/>
+    <testcase name="TC-WIN11-006: Windows 11 version record" classname="test_compat_win11" time="0"/>
+  </testsuite>
+  <testsuite name="test_dev_lifecycle" tests="20" failures="0" skipped="7" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_dev_lifecycle.exe_20260323_143702.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-DEV-INIT-001: First-Time Device Initialization" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-INIT-002: Duplicate Initialization Prevention" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-INFO-001: Device Information Retrieval" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-INFO-002: Device Info Before Initialization" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-ENUM-001: Single Adapter Enumeration" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-ENUM-002: Multiple Adapter Enumeration" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-ENUM-003: Enumeration with No Adapters: Requires adapter removal" classname="test_dev_lifecycle" time="0"><skipped/></testcase>
+    <testcase name="UT-DEV-OPEN-001: Open First Available Adapter" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-OPEN-002: Open by Device Path" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-OPEN-003: Invalid Adapter Index Rejection" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-OPEN-004: Concurrent Open Requests" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-HW-STATE-001: Hardware State Retrieval - D0" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-HW-STATE-002: Hardware State During D3 Transition: Requires power management control" classname="test_dev_lifecycle" time="0"><skipped/></testcase>
+    <testcase name="UT-DEV-HW-STATE-003: Link State Detection: Requires manual cable toggle" classname="test_dev_lifecycle" time="0"><skipped/></testcase>
+    <testcase name="UT-DEV-HW-STATE-004: Resource Allocation Status" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-LIFECYCLE-001: Full Lifecycle Sequence" classname="test_dev_lifecycle" time="0"/>
+    <testcase name="UT-DEV-LIFECYCLE-002: Initialization After Failed Start: Requires failure injection mechanism" classname="test_dev_lifecycle" time="0"><skipped/></testcase>
+    <testcase name="UT-DEV-LIFECYCLE-003: Hot-Plug Device Detection: Requires manual hot-plug operation" classname="test_dev_lifecycle" time="0"><skipped/></testcase>
+    <testcase name="UT-DEV-LIFECYCLE-004: Graceful Shutdown Sequence: Requires driver shutdown test framework" classname="test_dev_lifecycle" time="0"><skipped/></testcase>
+    <testcase name="UT-DEV-LIFECYCLE-005: PnP Remove and Re-Add: Requires Device Manager control or devcon" classname="test_dev_lifecycle" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_device_register_access" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_device_register_access.exe_20260323_141033.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_device_register_access (overall)" classname="test_device_register_access" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_direct_clock" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_direct_clock.exe_20260323_143703.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_direct_clock (overall)" classname="test_direct_clock" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_eee_lpi" tests="5" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_eee_lpi.exe_20260323_143703.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-EEE-001: Device node accessible" classname="test_eee_lpi" time="0"/>
+    <testcase name="TC-EEE-002: IOCTL_AVB_EEE_ENABLE -] EEER" classname="test_eee_lpi" time="0"/>
+    <testcase name="TC-EEE-003: MDIO read MMD 3.20 EEE Capability" classname="test_eee_lpi" time="0"/>
+    <testcase name="TC-EEE-004: IOCTL_AVB_EEE_DISABLE -] LPI off" classname="test_eee_lpi" time="0"/>
+    <testcase name="TC-EEE-005: MDIO read MMD 7.60 EEE Advertisement" classname="test_eee_lpi" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_error_recovery" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_error_recovery.exe_20260323_143704.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-ERR-001: IOCTL valid stress" classname="test_error_recovery" time="0"/>
+    <testcase name="TC-ERR-002: Error-path stress" classname="test_error_recovery" time="0"/>
+    <testcase name="TC-ERR-003: Driver Verifier active" classname="test_error_recovery" time="0"/>
+    <testcase name="TC-ERR-004: IOCTL storm" classname="test_error_recovery" time="0"/>
+    <testcase name="TC-ERR-005: Event Log bugcheck scan" classname="test_error_recovery" time="0"/>
+  </testsuite>
+  <testsuite name="test_event_latency_4ch" tests="5" failures="0" skipped="3" errors="0" time="41" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_event_latency_4ch.exe_20260323_143738.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-LAT4-001: CH1-CH4 GPIO delta timings" classname="test_event_latency_4ch" time="0"><skipped/></testcase>
+    <testcase name="TC-LAT4-002: 4-observer arrival ordering" classname="test_event_latency_4ch" time="0"/>
+    <testcase name="TC-LAT4-003: Latency [1 ┬Ás at 1600 ev/s" classname="test_event_latency_4ch" time="0"><skipped/></testcase>
+    <testcase name="TC-LAT4-004: Jitter std dev [100 ns" classname="test_event_latency_4ch" time="0"><skipped/></testcase>
+    <testcase name="TC-LAT4-005: No priority inversion across 4 channels" classname="test_event_latency_4ch" time="0"/>
+  </testsuite>
+  <testsuite name="test_event_log" tests="1" failures="0" skipped="0" errors="0" time="39" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_event_log.exe_20260323_143841.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_event_log (overall)" classname="test_event_log" time="0"/>
+  </testsuite>
+  <testsuite name="test_extended_diag" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_extended_diag.exe_20260323_144219.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_extended_diag (overall)" classname="test_extended_diag" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_gptp_daemon_coexist" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_gptp_daemon_coexist.exe_20260323_144219.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-COEXIST-001: Detect gPTP daemon process" classname="test_gptp_daemon_coexist" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_gptp_phc_interface" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_gptp_phc_interface.exe_20260323_144219.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-GPTP-001: PHC read" classname="test_gptp_phc_interface" time="0"/>
+    <testcase name="TC-GPTP-002: Frequency adjust noop" classname="test_gptp_phc_interface" time="0"/>
+    <testcase name="TC-GPTP-003: Offset adjust 0 ns" classname="test_gptp_phc_interface" time="0"/>
+    <testcase name="TC-GPTP-004: Cross-timestamp stub" classname="test_gptp_phc_interface" time="0"/>
+    <testcase name="TC-GPTP-005: Full gPTP workflow" classname="test_gptp_phc_interface" time="0"/>
+  </testsuite>
+  <testsuite name="test_hal_errors" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_hal_errors.exe_20260323_141052.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_hal_errors (overall)" classname="test_hal_errors" time="0"/>
+  </testsuite>
+  <testsuite name="test_hal_performance" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_hal_performance.exe_20260323_141052.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_hal_performance (overall)" classname="test_hal_performance" time="0"/>
+  </testsuite>
+  <testsuite name="test_hal_unit" tests="1" failures="0" skipped="0" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_hal_unit.exe_20260323_141050.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_hal_unit (overall)" classname="test_hal_unit" time="0"/>
+  </testsuite>
+  <testsuite name="test_hot_plug" tests="6" failures="0" skipped="3" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_hot_plug.exe_20260323_144220.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-PNP-001: Enumerate device" classname="test_hot_plug" time="0"/>
+    <testcase name="TC-PNP-002: Device status + IOCTL alive" classname="test_hot_plug" time="0"/>
+    <testcase name="TC-PNP-003: Disable via devcon" classname="test_hot_plug" time="0"><skipped/></testcase>
+    <testcase name="TC-PNP-003 was skipped; cannot test re-enable" classname="test_hot_plug" time="0"><skipped/></testcase>
+    <testcase name="TC-PNP-004: Re-enable via devcon" classname="test_hot_plug" time="0"><skipped/></testcase>
+    <testcase name="TC-PNP-005: PHC functional after re-enable" classname="test_hot_plug" time="0"/>
+  </testsuite>
+  <testsuite name="test_hw_state_machine" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_hw_state_machine.exe_20260323_141048.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_hw_state_machine (overall)" classname="test_hw_state_machine" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_hw_ts_ctrl" tests="13" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_hw_ts_ctrl.exe_20260323_141103.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-HW-TS-001: Disable All Timestamping" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-002: Enable RX Timestamping Only" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-003: Enable TX Timestamping Only" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-004: Enable Both RX/TX Timestamping" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-005: Invalid Mode Rejection" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-006: Rapid Mode Switching" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-007: Enable During Active Traffic" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-008: Mode Persistence" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-009: Concurrent Requests" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-010: NULL Pointer Handling" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-011: Register Persistence" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-012: Hardware Support" classname="test_hw_ts_ctrl" time="0"/>
+    <testcase name="UT-HW-TS-013: Integration with Get/Set Timestamp" classname="test_hw_ts_ctrl" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_access_control" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_access_control.exe_20260323_144220.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-ACCTL-001: Full-access read" classname="test_ioctl_access_control" time="0"/>
+    <testcase name="TC-ACCTL-002: Read-only handle rejects write IOCTL" classname="test_ioctl_access_control" time="0"/>
+    <testcase name="TC-ACCTL-003: Invalid handle rejection" classname="test_ioctl_access_control" time="0"/>
+    <testcase name="TC-ACCTL-004: Closed handle rejection" classname="test_ioctl_access_control" time="0"/>
+    <testcase name="TC-ACCTL-005: Two-handle independence" classname="test_ioctl_access_control" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_buffer_fuzz" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_buffer_fuzz.exe_20260323_144220.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-FUZZ-001: NULL/zero-size buffers ÔÇö no crash" classname="test_ioctl_buffer_fuzz" time="0"/>
+    <testcase name="TC-FUZZ-002: NULL input non-zero length ÔÇö rejected" classname="test_ioctl_buffer_fuzz" time="0"/>
+    <testcase name="TC-FUZZ-003: Undersized buffers ÔÇö no crash" classname="test_ioctl_buffer_fuzz" time="0"/>
+    <testcase name="TC-FUZZ-004: Bogus IOCTL codes rejected" classname="test_ioctl_buffer_fuzz" time="0"/>
+    <testcase name="TC-FUZZ-005: Device still functional" classname="test_ioctl_buffer_fuzz" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_fp_ptm" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_fp_ptm.exe_20260323_144221.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ioctl_fp_ptm (overall)" classname="test_ioctl_fp_ptm" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ioctl_offset" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_offset.exe_20260323_144221.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ioctl_offset (overall)" classname="test_ioctl_offset" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ioctl_phc_epoch" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_phc_epoch.exe_20260323_144221.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-EPOCH-001: Basic read ] 0" classname="test_ioctl_phc_epoch" time="0"/>
+    <testcase name="TC-EPOCH-002: Clock advances" classname="test_ioctl_phc_epoch" time="0"/>
+    <testcase name="TC-EPOCH-003: TAI-UTC offset Ôëê 37 s" classname="test_ioctl_phc_epoch" time="0"/>
+    <testcase name="TC-EPOCH-004: Below year-2100 bound" classname="test_ioctl_phc_epoch" time="0"/>
+    <testcase name="TC-EPOCH-005: Spot monotonicity" classname="test_ioctl_phc_epoch" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_phc_monotonicity" tests="4" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_phc_monotonicity.exe_20260323_144222.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-MONO-001: Sequential monotonicity" classname="test_ioctl_phc_monotonicity" time="0"/>
+    <testcase name="TC-MONO-002: Concurrent offset adjust" classname="test_ioctl_phc_monotonicity" time="0"/>
+    <testcase name="TC-MONO-003: Clock rate sanity" classname="test_ioctl_phc_monotonicity" time="0"/>
+    <testcase name="TC-MONO-004: Invalid handle rejection" classname="test_ioctl_phc_monotonicity" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_phc_query" tests="17" failures="0" skipped="6" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_phc_query.exe_20260323_144223.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-PHC-QUERY-001: Valid PHC Query" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="UT-PHC-QUERY-002: Output Buffer Too Small" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="UT-PHC-QUERY-003: NULL Output Buffer" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="UT-PHC-QUERY-004: Invalid IOCTL Code" classname="test_ioctl_phc_query" time="0"><skipped/></testcase>
+    <testcase name="UT-PHC-QUERY-005: Adapter Not Initialized" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="UT-PHC-QUERY-006: PHC Hardware Read Failure" classname="test_ioctl_phc_query" time="0"><skipped/></testcase>
+    <testcase name="UT-PHC-QUERY-007: Unprivileged User Access" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="UT-PHC-QUERY-008: Input Buffer Ignored" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="UT-PHC-QUERY-009: Oversized Output Buffer" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="UT-PHC-QUERY-010: IOCTL During Adapter Removal" classname="test_ioctl_phc_query" time="0"><skipped/></testcase>
+    <testcase name="IT-PHC-QUERY-001: User-Mode App" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="IT-PHC-QUERY-002: Concurrent Queries" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="IT-PHC-QUERY-003: Multi-Adapter Queries" classname="test_ioctl_phc_query" time="0"><skipped/></testcase>
+    <testcase name="IT-PHC-QUERY-004: Query During Unload" classname="test_ioctl_phc_query" time="0"><skipped/></testcase>
+    <testcase name="VV-PHC-QUERY-001: Latency Benchmark: IOCTL p95=99000 ns, min=48200 ns, max=569000 ns" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="VV-PHC-QUERY-002: Stress Test" classname="test_ioctl_phc_query" time="0"/>
+    <testcase name="VV-PHC-QUERY-003: Multi-Process Access" classname="test_ioctl_phc_query" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ioctl_routing" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_routing.exe_20260323_144224.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ioctl_routing (overall)" classname="test_ioctl_routing" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ioctl_simple" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_simple.exe_20260323_144225.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ioctl_simple (overall)" classname="test_ioctl_simple" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ioctl_target_time" tests="13" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_target_time.exe_20260323_144225.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-TARGET-001" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-TARGET-002" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-TARGET-003" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-TARGET-004" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-TARGET-009" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-TARGET-011" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-TARGET-EVENT-001: Ring buffer mapping not yet implemented" classname="test_ioctl_target_time" time="0"><skipped/></testcase>
+    <testcase name="TC-AUX-001" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-AUX-002" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-AUX-008" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-AUX-009" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-AUX-010" classname="test_ioctl_target_time" time="0"/>
+    <testcase name="TC-AUX-011" classname="test_ioctl_target_time" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_tas" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_tas.exe_20260323_144226.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ioctl_tas (overall)" classname="test_ioctl_tas" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_trace" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_trace.exe_20260323_144226.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ioctl_trace (overall)" classname="test_ioctl_trace" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ioctl_version" tests="3" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_version.exe_20260323_144226.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-VERSION-001: Driver version = 1.0.291.0 Ô£ô" classname="test_ioctl_version" time="0"/>
+    <testcase name="UT-VERSION-002: Buffer size correct (8 bytes = 4 fields) Ô£ô" classname="test_ioctl_version" time="0"/>
+    <testcase name="UT-VERSION-003: 100 queries consistent (all return 1.0.291.0) Ô£ô" classname="test_ioctl_version" time="0"/>
+  </testsuite>
+  <testsuite name="test_ioctl_xstamp" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ioctl_xstamp.exe_20260323_144226.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-XSTAMP-001: Single capture sanity" classname="test_ioctl_xstamp" time="0"/>
+    <testcase name="TC-XSTAMP-002: Capture latency P99" classname="test_ioctl_xstamp" time="0"/>
+    <testcase name="TC-XSTAMP-003: PHC monotonic" classname="test_ioctl_xstamp" time="0"/>
+    <testcase name="TC-XSTAMP-004: Back-to-back advance" classname="test_ioctl_xstamp" time="0"/>
+    <testcase name="TC-XSTAMP-005: PHC/QPC correlation" classname="test_ioctl_xstamp" time="0"/>
+  </testsuite>
+  <testsuite name="test_lazy_initialization" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_lazy_initialization.exe_20260323_141049.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_lazy_initialization (overall)" classname="test_lazy_initialization" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_magic_numbers" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_magic_numbers.exe_20260323_144227.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_magic_numbers (overall)" classname="test_magic_numbers" time="0"/>
+  </testsuite>
+  <testsuite name="test_mdio_phy" tests="15" failures="0" skipped="6" errors="0" time="2" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_mdio_phy.exe_20260323_144227.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-MDIO-001: Basic MDIO Read" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-002: Basic MDIO Write" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-003: Multi-Page PHY Access: Vendor-specific, requires PHY identification" classname="test_mdio_phy" time="0"><skipped/></testcase>
+    <testcase name="UT-MDIO-004: Invalid PHY Address Rejection" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-005: Out-of-Range Register Rejection" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-006: Read-Only Register Write Protection" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-007: MDIO Bus Timeout Handling: Requires PHY simulation or hardware fault injection" classname="test_mdio_phy" time="0"><skipped/></testcase>
+    <testcase name="UT-MDIO-008: Concurrent MDIO Access Serialization: Requires multi-threaded test framework" classname="test_mdio_phy" time="0"><skipped/></testcase>
+    <testcase name="UT-MDIO-009: Extended Register Access" classname="test_mdio_phy" time="0"><skipped/></testcase>
+    <testcase name="UT-MDIO-010: PHY Reset via MDIO" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-011: Auto-Negotiation Status Read" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-012: Link Partner Ability Read" classname="test_mdio_phy" time="0"/>
+    <testcase name="UT-MDIO-013: Cable Diagnostics via MDIO: Vendor-specific registers" classname="test_mdio_phy" time="0"><skipped/></testcase>
+    <testcase name="UT-MDIO-014: MDIO Access During Low Power: Requires power management test framework" classname="test_mdio_phy" time="0"><skipped/></testcase>
+    <testcase name="UT-MDIO-015: Bulk Register Read Optimization" classname="test_mdio_phy" time="0"/>
+  </testsuite>
+  <testsuite name="test_minimal_ioctl" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_minimal_ioctl.exe_20260323_144231.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_minimal_ioctl (overall)" classname="test_minimal_ioctl" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_multi_adapter_phc_sync" tests="5" failures="0" skipped="0" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_multi_adapter_phc_sync.exe_20260323_144231.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-MADAPT-001: Enumerate adapters" classname="test_multi_adapter_phc_sync" time="0"/>
+    <testcase name="TC-MADAPT-002: Bind + read adapter 0" classname="test_multi_adapter_phc_sync" time="0"/>
+    <testcase name="TC-MADAPT-003: Parallel reads monotonic" classname="test_multi_adapter_phc_sync" time="0"/>
+    <testcase name="TC-MADAPT-004: Cross-adapter independence" classname="test_multi_adapter_phc_sync" time="0"/>
+    <testcase name="TC-MADAPT-005: Handle isolation" classname="test_multi_adapter_phc_sync" time="0"/>
+  </testsuite>
+  <testsuite name="test_multidev_adapter_enum" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_multidev_adapter_enum.exe_20260323_141033.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_multidev_adapter_enum (overall)" classname="test_multidev_adapter_enum" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ndis_fastpath_latency" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ndis_fastpath_latency.exe_20260323_144233.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-NDIS-LAT-001: 0 failures in 10k calls" classname="test_ndis_fastpath_latency" time="0"/>
+    <testcase name="TC-NDIS-LAT-002: P50 [ 2 ┬Ás" classname="test_ndis_fastpath_latency" time="0"/>
+    <testcase name="TC-NDIS-LAT-003: P99 [ 10 ┬Ás" classname="test_ndis_fastpath_latency" time="0"/>
+    <testcase name="TC-NDIS-LAT-004: No calls ] 100 ┬Ás" classname="test_ndis_fastpath_latency" time="0"/>
+    <testcase name="TC-NDIS-LAT-005: Mean latency" classname="test_ndis_fastpath_latency" time="0"/>
+  </testsuite>
+  <testsuite name="test_ndis_receive_path" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ndis_receive_path.exe_20260323_141034.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ndis_receive_path (overall)" classname="test_ndis_receive_path" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_ndis_send_path" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ndis_send_path.exe_20260323_141033.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_ndis_send_path (overall)" classname="test_ndis_send_path" time="0"/>
+  </testsuite>
+  <testsuite name="test_perf_regression" tests="6" failures="1" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_perf_regression.exe_20260323_144234.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-PERF-REG-005: round-trip fidelity OK" classname="test_perf_regression" time="0"/>
+    <testcase name="TC-PERF-REG-001: PASS: PHC P50 4980 ns [= baseline 4859 ns" classname="test_perf_regression" time="0"/>
+    <testcase name="TC-PERF-REG-002: FAIL: PHC P99 129275 ns ] baseline 23097 ns" classname="test_perf_regression" time="0"><failure message="[FAIL] TC-PERF-REG-002: FAIL: PHC P99 129275 ns ] baseline 23097 ns (+459.7% ]= 5% threshold)">[FAIL] TC-PERF-REG-002: FAIL: PHC P99 129275 ns ] baseline 23097 ns (+459.7% ]= 5% threshold)</failure></testcase>
+    <testcase name="TC-PERF-REG-003: PASS: TX median 396 ns [= baseline 387 ns" classname="test_perf_regression" time="0"/>
+    <testcase name="TC-PERF-REG-004: PASS: RX median 3516 ns [= baseline 3499 ns" classname="test_perf_regression" time="0"/>
+    <testcase name="TC-PERF-REG-005: PASS: Baseline file write/read round-trip fidelity confirmed" classname="test_perf_regression" time="0"/>
+  </testsuite>
+  <testsuite name="test_pfc_pause" tests="5" failures="0" skipped="0" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_pfc_pause.exe_20260323_144235.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-PFC-001: Device node accessible" classname="test_pfc_pause" time="0"/>
+    <testcase name="TC-PFC-002: IOCTL_AVB_PFC_ENABLE" classname="test_pfc_pause" time="0"/>
+    <testcase name="TC-PFC-003: IOCTL_AVB_PFC_DISABLE" classname="test_pfc_pause" time="0"/>
+    <testcase name="TC-PFC-004: MDIO read MMD 7.19 PAUSE capability" classname="test_pfc_pause" time="0"/>
+    <testcase name="TC-PFC-005: GET_DEVICE_INFO accessible" classname="test_pfc_pause" time="0"/>
+  </testsuite>
+  <testsuite name="test_power_management" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_power_management.exe_20260323_144237.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-PWRMGMT-001: PHC preserved across close/reopen" classname="test_power_management" time="0"/>
+    <testcase name="TC-PWRMGMT-002: PHC vs wall-clock accuracy" classname="test_power_management" time="0"/>
+    <testcase name="TC-PWRMGMT-003: Rapid open/close cycles" classname="test_power_management" time="0"/>
+    <testcase name="TC-PWRMGMT-004: PHC monotonic across reopens" classname="test_power_management" time="0"/>
+    <testcase name="TC-PWRMGMT-005: Concurrent handle survives partner cycle" classname="test_power_management" time="0"/>
+  </testsuite>
+  <testsuite name="test_ptp_event_latency" tests="5" failures="0" skipped="2" errors="0" time="416" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ptp_event_latency.exe_20260323_144238.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-PTP-LAT-001: GPIO oscilloscope latency [500 ns" classname="test_ptp_event_latency" time="0"><skipped/></testcase>
+    <testcase name="TC-PTP-LAT-002: Event data fields valid" classname="test_ptp_event_latency" time="0"/>
+    <testcase name="TC-PTP-LAT-003: WPA zero-polling CPU profile" classname="test_ptp_event_latency" time="0"><skipped/></testcase>
+    <testcase name="TC-PTP-LAT-004: Stress receive 60 s, zero drops" classname="test_ptp_event_latency" time="0"/>
+    <testcase name="TC-PTP-LAT-005: 4 observers equitable delivery" classname="test_ptp_event_latency" time="0"/>
+  </testsuite>
+  <testsuite name="test_ptp_freq" tests="15" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ptp_freq.exe_20260323_141102.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-PTP-FREQ-001: Zero Frequency Adjustment" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-002: Positive Frequency Adjustment" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-003: Negative Frequency Adjustment" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-004: Maximum Positive Adjustment" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-005: Maximum Negative Adjustment" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-006: Out-of-Range Rejection" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-007: Out-of-Range Rejection" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-008: Small Adjustment" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-009: Rapid Frequency Changes" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-010: Persistence" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-011: Fractional Precision" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-012: Concurrent Requests" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-013: During Active Sync" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-014: Null Pointer Handling" classname="test_ptp_freq" time="0"/>
+    <testcase name="UT-PTP-FREQ-015: Reset on Restart" classname="test_ptp_freq" time="0"/>
+  </testsuite>
+  <testsuite name="test_ptp_freq_complete" tests="14" failures="0" skipped="0" errors="0" time="2186" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ptp_freq_complete.exe_20260323_144940.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-FREQ-001: Positive PPB Adjustment" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="UT-FREQ-002: Negative PPB Adjustment" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="UT-FREQ-003: Device-Specific INCVAL Base Values" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="UT-FREQ-004: Maximum PPB Adjustment Range" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="UT-FREQ-005: Out-of-Range Rejection" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="UT-FREQ-006: INCVAL Register Write" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="UT-FREQ-007: INCVAL Read-Back Verification" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="UT-FREQ-008: Hardware Fault During Adjustment" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="IT-FREQ-001: IOCTL Frequency Adjustment End-to-End" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="IT-FREQ-002: Multi-Adapter" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="IT-FREQ-003: gPTP Sync" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="VV-FREQ-003: gPTP sync test completed" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="VV-FREQ-001: Stability test completed" classname="test_ptp_freq_complete" time="0"/>
+    <testcase name="VV-FREQ-002: Long-term drift test completed" classname="test_ptp_freq_complete" time="0"/>
+  </testsuite>
+  <testsuite name="test_ptp_getset" tests="14" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ptp_getset.exe_20260323_141101.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-PTP-GETSET-001: Basic Get Timestamp" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-002: Basic Set Timestamp" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-003: Timestamp Monotonicity" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-004: Nanoseconds Wraparound" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-005: Invalid Nanoseconds Rejection" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-006: Zero Timestamp Handling" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-007: Maximum Timestamp Value" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-008: Rapid Consecutive Reads" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-009: Clock Resolution: Clock running, IOCTL delta = 23584 ns" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-010: Backward Time Jump Detection" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-011: NULL Pointer Handling" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-012: Concurrent Access" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-013: ForceSet Readback" classname="test_ptp_getset" time="0"/>
+    <testcase name="UT-PTP-GETSET-014: Privilege Enforcement ÔÇö SET denied (error 87, expected ERROR_ACCESS_DENIED=5) [DRIVER NOTE: should return STATUS_ACCESS_DENIED per #195]" classname="test_ptp_getset" time="0"/>
+  </testsuite>
+  <testsuite name="test_qav_cbs" tests="14" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_qav_cbs.exe_20260323_141100.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-CBS-001: Configure CBS" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-002: Configure CBS" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-003: Disable CBS" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-004: Disable CBS" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-005: Configure CBS" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-006: Configure CBS" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-007: Invalid Traffic Class Rejected" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-008: Positive Send Slope Rejected" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-009: Negative Hi-Credit Rejected" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-010: Positive Lo-Credit Rejected" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-011: Rapid Enable/Disable Switching" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-012: NULL Pointer Handling" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-013: CBS Configuration Persistence" classname="test_qav_cbs" time="0"/>
+    <testcase name="UT-CBS-014: CBS Register Read-Back Verification" classname="test_qav_cbs" time="0"/>
+  </testsuite>
+  <testsuite name="test_registry_diagnostics" tests="7" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_registry_diagnostics.exe_20260323_141049.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-DEBUG-REG-001: Parameters key opened" classname="test_registry_diagnostics" time="0"/>
+    <testcase name="TC-DEBUG-REG-001: DebugLevel=8 (DL_LOUD) written" classname="test_registry_diagnostics" time="0"/>
+    <testcase name="TC-DEBUG-REG-001: DebugLevel read-back = 8" classname="test_registry_diagnostics" time="0"/>
+    <testcase name="TC-DEBUG-REG-002: Parameters key re-opened after close" classname="test_registry_diagnostics" time="0"/>
+    <testcase name="TC-DEBUG-REG-002: DebugLevel=8 persists" classname="test_registry_diagnostics" time="0"/>
+    <testcase name="TC-DEBUG-REG-003: DebugLevel=4" classname="test_registry_diagnostics" time="0"/>
+    <testcase name="TC-DEBUG-REG-004: DebugLevel removed" classname="test_registry_diagnostics" time="0"/>
+  </testsuite>
+  <testsuite name="test_rx_timestamp" tests="16" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_rx_timestamp.exe_20260323_141103.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-RX-TS-001: Enable Global RX Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-002: Disable Global RX Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-003: Toggle Global RX Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-004: NULL Pointer Handling" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-005: Enable Queue 0 Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-006: Enable Queue 1 Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-007: Enable Queue 2 Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-008: Enable Queue 3 Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-009: Disable Queue 0 Timestamping" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-010: Enable All Queues" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-011: Disable All Queues" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-012: Invalid Queue Index Rejected" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-013: NULL Pointer Handling" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-014: Rapid Queue Toggle" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-015: Queue Enable Without Global: Driver accepted" classname="test_rx_timestamp" time="0"/>
+    <testcase name="UT-RX-TS-016: Hardware Capability" classname="test_rx_timestamp" time="0"/>
+  </testsuite>
+  <testsuite name="test_rx_timestamp_complete" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_rx_timestamp_complete.exe_20260323_152606.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_rx_timestamp_complete (overall)" classname="test_rx_timestamp_complete" time="0"/>
+  </testsuite>
+  <testsuite name="test_s3_sleep_wake" tests="5" failures="1" skipped="0" errors="0" time="7227" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_s3_sleep_wake.exe_20260323_152607.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-S3-001: Pre-sleep PHC baseline" classname="test_s3_sleep_wake" time="0"/>
+    <testcase name="TC-S3-003: Trigger S3" classname="test_s3_sleep_wake" time="0"/>
+    <testcase name="TC-S3-003: Device ready after wake" classname="test_s3_sleep_wake" time="0"/>
+    <testcase name="TC-S3-004: PHC non-zero post-wake" classname="test_s3_sleep_wake" time="0"><failure message="[FAIL] TC-S3-004: PHC non-zero post-wake">[FAIL] TC-S3-004: PHC non-zero post-wake</failure></testcase>
+    <testcase name="TC-S3-005: HW state valid post-wake" classname="test_s3_sleep_wake" time="0"/>
+  </testsuite>
+  <testsuite name="test_scripts_consolidate" tests="16" failures="0" skipped="0" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_scripts_consolidate.exe_20260323_172636.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-SCRIPTS-001: 15 canonical scripts in tools\" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-003: tools\build\Build-Driver.ps1 exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-003: tools\build\Build-Tests.ps1 exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-003: tools\build\Build-And-Sign.ps1 exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-004: tools\setup\Install-Driver.ps1 exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-004: tools\setup\Install-Driver-Elevated.ps1 exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-005: tools\test\Run-Tests.ps1 exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-005: tools\test\Run-Tests-Elevated.ps1 exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-006: tools\archive\deprecated\ directory exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-006: 31 files in tools\archive\deprecated\ root" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-006: tools\archive\deprecated\README.md exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-007: 4/4 tool READMEs present" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-008: .github\workflows\ directory exists" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-009: tools\build\Build-Driver.ps1 has $ErrorActionPreference" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-009: tools\build\Build-Tests.ps1 has $ErrorActionPreference" classname="test_scripts_consolidate" time="0"/>
+    <testcase name="TC-SCRIPTS-009: tools\test\Run-Tests.ps1 has $ErrorActionPreference" classname="test_scripts_consolidate" time="0"/>
+  </testsuite>
+  <testsuite name="test_security_validation" tests="1" failures="0" skipped="1" errors="0" time="2" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_security_validation.exe_20260323_172638.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_security_validation (overall)" classname="test_security_validation" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_send_ptp_debug" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_send_ptp_debug.exe_20260323_172641.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_send_ptp_debug (overall)" classname="test_send_ptp_debug" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_srp_interface" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_srp_interface.exe_20260323_172641.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-SRP-001: Device node accessible" classname="test_srp_interface" time="0"/>
+    <testcase name="TC-SRP-002: SRP_REGISTER_STREAM Class A 2Mbps" classname="test_srp_interface" time="0"/>
+    <testcase name="TC-SRP-003: Verify reserved_bw_bps != 0" classname="test_srp_interface" time="0"/>
+    <testcase name="TC-SRP-004: SRP_DEREGISTER_STREAM" classname="test_srp_interface" time="0"/>
+    <testcase name="TC-SRP-005: GET_DEVICE_INFO after SRP ops" classname="test_srp_interface" time="0"/>
+  </testsuite>
+  <testsuite name="test_statistics_counters" tests="10" failures="0" skipped="2" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_statistics_counters.exe_20260323_172641.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-STAT-001: Statistics initialization" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-002: Buffer size validation" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-003: NULL buffer validation" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-004: IOCTL counter increment" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-005: Error counter increment" classname="test_statistics_counters" time="0"><skipped/></testcase>
+    <testcase name="TC-STAT-006: Query performance" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-007: Concurrent query calls" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-008: Statistics persistence" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-009: Structure size" classname="test_statistics_counters" time="0"/>
+    <testcase name="TC-STAT-010: Zero initialization after reload" classname="test_statistics_counters" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_timestamp_latency" tests="12" failures="5" skipped="0" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_timestamp_latency.exe_20260323_172642.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-PERF-PHC-001: PASS: P50 5293 ns [ 6000 ns" classname="test_timestamp_latency" time="0"/>
+    <testcase name="TC-PERF-PHC-002: FAIL: P99 53209 ns ]= 30000 ns" classname="test_timestamp_latency" time="0"><failure message="[FAIL] TC-PERF-PHC-002: FAIL: P99 53209 ns ]= 30000 ns (PHC IOCTL too slow)">[FAIL] TC-PERF-PHC-002: FAIL: P99 53209 ns ]= 30000 ns (PHC IOCTL too slow)</failure></testcase>
+    <testcase name="TC-PERF-TS-001: ê°hÊ÷" classname="test_timestamp_latency" time="0"/>
+    <testcase name="TC-PERF-TS-003: h°´i" classname="test_timestamp_latency" time="0"/>
+    <testcase name="TC-PERF-TS-002: X¸´i" classname="test_timestamp_latency" time="0"><failure message="[FAIL] TC-PERF-TS-002: X¸´i">[FAIL] TC-PERF-TS-002: X¸´i</failure></testcase>
+    <testcase name="TC-PERF-TS-004: ê°hÊ÷" classname="test_timestamp_latency" time="0"><failure message="[FAIL] TC-PERF-TS-004: ê°hÊ÷">[FAIL] TC-PERF-TS-004: ê°hÊ÷</failure></testcase>
+    <testcase name="TC-PERF-TS-005: h°´i" classname="test_timestamp_latency" time="0"/>
+    <testcase name="TC-PERF-TS-006: FAIL: Some threads exceeded thresholds" classname="test_timestamp_latency" time="0"><failure message="[FAIL] TC-PERF-TS-006: FAIL: Some threads exceeded thresholds">[FAIL] TC-PERF-TS-006: FAIL: Some threads exceeded thresholds</failure></testcase>
+    <testcase name="TC-PERF-TS-007: h°´i" classname="test_timestamp_latency" time="0"/>
+    <testcase name="TC-PERF-TS-008: PASS: Warm-up reduces latency" classname="test_timestamp_latency" time="0"/>
+    <testcase name="TC-PERF-PHC-001: ê°hÊ÷" classname="test_timestamp_latency" time="0"/>
+    <testcase name="TC-PERF-PHC-002: ê°hÊ÷" classname="test_timestamp_latency" time="0"><failure message="[FAIL] TC-PERF-PHC-002: ê°hÊ÷">[FAIL] TC-PERF-PHC-002: ê°hÊ÷</failure></testcase>
+  </testsuite>
+  <testsuite name="test_ts_event_sub" tests="21" failures="0" skipped="4" errors="0" time="407" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_ts_event_sub.exe_20260323_141104.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="UT-TS-SUB-001: Basic Event Subscription" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-SUB-002: Selective Event Type Subscription" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-SUB-003: Multiple Concurrent Subscriptions" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-SUB-004: Unsubscribe Operation" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-RING-001: Ring Buffer Mapping" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-RING-002: Ring Buffer Size Negotiation" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-RING-003: Ring Buffer Wraparound" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-RING-004: Ring Buffer Read Synchronization" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-EVENT-001: RX Timestamp Event Delivery: No RX events received" classname="test_ts_event_sub" time="0"><skipped/></testcase>
+    <testcase name="UT-TS-EVENT-002: TX Timestamp Event Delivery: No TX events received" classname="test_ts_event_sub" time="0"><skipped/></testcase>
+    <testcase name="UT-TS-EVENT-003: Target Time Reached Event" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-EVENT-004: Aux Timestamp Event" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-EVENT-005: Event Sequence Numbering" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-EVENT-006: Event Filtering by Criteria" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-RING-005: Ring Buffer Unmap Operation" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-PERF-001: High Event Rate Performance: Requires sustained traffic generation (10K events/sec) - benchmark test" classname="test_ts_event_sub" time="0"><skipped/></testcase>
+    <testcase name="UT-TS-ERROR-001: Invalid Subscription Handle" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-ERROR-002: Ring Buffer Mapping Failure" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-ERROR-003: Event Overflow Notification" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-EVENT-001: RX Timestamp Event Delivery" classname="test_ts_event_sub" time="0"/>
+    <testcase name="UT-TS-EVENT-003: Target Time Reached Event: TRGTTIML0 stuck at hardware-reset value - adapter not responding to register writes" classname="test_ts_event_sub" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_tsn_ioctl_handlers" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_tsn_ioctl_handlers.exe_20260323_141059.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_tsn_ioctl_handlers (overall)" classname="test_tsn_ioctl_handlers" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_tsn_ioctl_handlers_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_tsn_ioctl_handlers_um.exe_20260323_172645.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_tsn_ioctl_handlers_um (overall)" classname="test_tsn_ioctl_handlers_um" time="0"><skipped/></testcase>
+  </testsuite>
+  <testsuite name="test_tx_timestamp_retrieval" tests="1" failures="1" skipped="0" errors="0" time="7" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_tx_timestamp_retrieval.exe_20260323_141034.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="test_tx_timestamp_retrieval (overall)" classname="test_tx_timestamp_retrieval" time="0"><failure message="7 test(s) failed - see test_tx_timestamp_retrieval.exe_20260323_141034.log">7 test(s) failed - see test_tx_timestamp_retrieval.exe_20260323_141034.log</failure></testcase>
+  </testsuite>
+  <testsuite name="test_vlan_pcp_tc_mapping" tests="5" failures="0" skipped="0" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_vlan_pcp_tc_mapping.exe_20260323_172645.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-VLAN-001: Configure CBS TC=0" classname="test_vlan_pcp_tc_mapping" time="0"/>
+    <testcase name="TC-VLAN-002: Configure CBS TC=1" classname="test_vlan_pcp_tc_mapping" time="0"/>
+    <testcase name="TC-VLAN-003: HW state operational" classname="test_vlan_pcp_tc_mapping" time="0"/>
+    <testcase name="TC-VLAN-004: Disable CBS TC=0" classname="test_vlan_pcp_tc_mapping" time="0"/>
+    <testcase name="TC-VLAN-005: Read TQAVCTRL register" classname="test_vlan_pcp_tc_mapping" time="0"/>
+  </testsuite>
+  <testsuite name="test_vlan_tag" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_vlan_tag.exe_20260323_172648.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-VLAN-001: Device node accessible" classname="test_vlan_tag" time="0"/>
+    <testcase name="TC-VLAN-002: IOCTL_AVB_VLAN_ENABLE accepted" classname="test_vlan_tag" time="0"/>
+    <testcase name="TC-VLAN-003: VLAN config read-back preserved" classname="test_vlan_tag" time="0"/>
+    <testcase name="TC-VLAN-004: IOCTL_AVB_VLAN_DISABLE accepted" classname="test_vlan_tag" time="0"/>
+    <testcase name="TC-VLAN-005: Default state is VLAN-disabled" classname="test_vlan_tag" time="0"/>
+  </testsuite>
+  <testsuite name="test_win7_stub" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_win7_stub.exe_20260323_172648.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-COMPAT-001: Runtime OS major ]= 10" classname="test_win7_stub" time="0"/>
+    <testcase name="TC-COMPAT-002: Build number ]= 9200" classname="test_win7_stub" time="0"/>
+    <testcase name="TC-COMPAT-003: Device node accessible on current OS" classname="test_win7_stub" time="0"/>
+    <testcase name="TC-COMPAT-004: IOCTL_AVB_GET_VERSION on Win10+ ABI" classname="test_win7_stub" time="0"/>
+    <testcase name="TC-COMPAT-005: Windows version record" classname="test_win7_stub" time="0"/>
+  </testsuite>
+  <testsuite name="test_zero_polling_overhead" tests="6" failures="1" skipped="2" errors="0" time="50" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="test_zero_polling_overhead.exe_20260323_172649.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="TC-ZP-001: Source-code audit ÔÇö no polling in ISR/DPC files" classname="test_zero_polling_overhead" time="0"><skipped/></testcase>
+    <testcase name="TC-ZP-002: EITR0 register = 0" classname="test_zero_polling_overhead" time="0"><failure message="[FAIL] TC-ZP-002: EITR0 register = 0 (no interrupt coalescing)">[FAIL] TC-ZP-002: EITR0 register = 0 (no interrupt coalescing)</failure></testcase>
+    <testcase name="TC-ZP-003: Events arrive while user thread sleeps" classname="test_zero_polling_overhead" time="0"/>
+    <testcase name="TC-ZP-004: CPU overhead [ 0.5% during idle subscribe" classname="test_zero_polling_overhead" time="0"/>
+    <testcase name="TC-ZP-005: WPR/WPA profiling environment present" classname="test_zero_polling_overhead" time="0"><skipped/></testcase>
+    <testcase name="TC-ZP-006: Synchronous subscribe proves interrupt-driven delivery" classname="test_zero_polling_overhead" time="0"/>
+  </testsuite>
+  <testsuite name="tsauxc_toggle_test" tests="1" failures="1" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="tsauxc_toggle_test.exe_20260323_172801.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="tsauxc_toggle_test (overall)" classname="tsauxc_toggle_test" time="0"><failure message="0 test(s) failed - see tsauxc_toggle_test.exe_20260323_172801.log">0 test(s) failed - see tsauxc_toggle_test.exe_20260323_172801.log</failure></testcase>
+  </testsuite>
+  <testsuite name="tsn_hardware_activation_validation" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+    <properties>
+      <property name="log_file" value="tsn_hardware_activation_validation.exe_20260323_141100.log"/>
+      <property name="run_date" value="20260323"/>
+    </properties>
+    <testcase name="tsn_hardware_activation_validation (overall)" classname="tsn_hardware_activation_validation" time="0"><skipped/></testcase>
+  </testsuite>
+</testsuites>
+

@@ -1018,3 +1018,75 @@ jobs:
             Write-Host "📦 Driver artifacts:"
             $DriverFiles | ForEach-Object { Write-Host "  - $($_.Name) ($([Math]::Round($_.Length/1KB, 1)) KB)" }
           }
+
+  # Hardware Test Evidence Publication (Phase 07 evidence)
+  # Tests that require an Intel NIC + installed driver are run locally and their
+  # results committed to test-evidence/ as JUnit XML.  This job surfaces them in
+  # the GitHub Actions test-results UI so coverage is visible without re-running
+  # on the CI runner.
+  # Implements: #265 (TEST-COVERAGE-001), #244 (TEST-BUILD-CI-001)
+  # Traces to:  #98 (REQ-NF-BUILD-CI-001)
+  hardware-test-evidence:
+    name: Hardware Test Evidence (local run, committed XML)
+    runs-on: ubuntu-latest
+    # Run independently of build jobs — evidence comes from committed files
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check evidence file exists
+        id: check-evidence
+        run: |
+          if [ -f "test-evidence/hardware-results-latest.xml" ]; then
+            echo "EVIDENCE_EXISTS=true" >> $GITHUB_ENV
+            COUNT=$(grep -o '<testcase' test-evidence/hardware-results-latest.xml | wc -l)
+            FAIL=$(grep -o '<failure' test-evidence/hardware-results-latest.xml | wc -l)
+            DATE=$(grep -o 'Run date: [0-9]\{8\}' test-evidence/hardware-results-latest.xml | head -1 | grep -o '[0-9]\{8\}')
+            echo "EVIDENCE_COUNT=$COUNT" >> $GITHUB_ENV
+            echo "EVIDENCE_FAIL=$FAIL" >> $GITHUB_ENV
+            echo "EVIDENCE_DATE=${DATE:-unknown}" >> $GITHUB_ENV
+            echo "Found hardware test evidence: $COUNT tests ($FAIL failed), run date: ${DATE:-unknown}"
+          else
+            echo "EVIDENCE_EXISTS=false" >> $GITHUB_ENV
+            echo "No hardware test evidence committed. Run tools/test/Convert-Logs-To-JUnit.ps1 locally."
+          fi
+
+      - name: Publish hardware test evidence
+        if: env.EVIDENCE_EXISTS == 'true'
+        uses: dorny/test-reporter@v1
+        with:
+          name: "Hardware Tests (local evidence ${{ env.EVIDENCE_DATE }})"
+          path: "test-evidence/hardware-results-latest.xml"
+          reporter: java-junit
+          # evidence-only: do not fail CI just because hardware tests failed
+          # (hardware tests inherently require NIC + driver, cannot run on runner)
+          fail-on-error: "false"
+
+      - name: Summarize evidence
+        if: always()
+        run: |
+          if [ "$EVIDENCE_EXISTS" = "true" ]; then
+            echo "## Hardware Test Evidence" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Test cases | $EVIDENCE_COUNT |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failures   | $EVIDENCE_FAIL |" >> $GITHUB_STEP_SUMMARY
+            echo "| Run date   | $EVIDENCE_DATE |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> Tests require Intel I2xx NIC + installed IntelAvbFilter driver." >> $GITHUB_STEP_SUMMARY
+            echo "> Evidence committed via \`tools/test/Convert-Logs-To-JUnit.ps1\`." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Hardware Test Evidence" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo ":warning: No hardware test evidence committed yet." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Run locally and commit:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "# On machine with Intel NIC + driver installed:" >> $GITHUB_STEP_SUMMARY
+            echo ".\tools\test\Run-Tests-Elevated.ps1" >> $GITHUB_STEP_SUMMARY
+            echo ".\tools\test\Convert-Logs-To-JUnit.ps1" >> $GITHUB_STEP_SUMMARY
+            echo "git add test-evidence/ ; git commit -m 'chore(evidence): update hardware test results'" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
