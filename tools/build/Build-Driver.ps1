@@ -335,7 +335,7 @@ if ($Sign -and -not $SkipDriver) {
     
     # Sign CAT file
     Write-Host "Signing CAT file..." -ForegroundColor Gray
-    & $signtoolPath sign /v /s My /n $certName /t http://timestamp.digicert.com $catFile
+    & $signtoolPath sign /v /fd SHA256 /s My /n $certName /t http://timestamp.digicert.com $catFile
     
     if ($LASTEXITCODE -ne 0) {
         Write-Failure "Signing failed! Exit code: $LASTEXITCODE"
