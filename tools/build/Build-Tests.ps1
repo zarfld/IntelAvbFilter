@@ -535,6 +535,14 @@ $AllTests = @(
         Description = "Unit: HAL Error Scenario Tests (TEST-PORTABILITY-HAL-002, Issue #309)"
     },
     @{
+        Name = "test_ioctl_abi"
+        Type = "cl"
+        Source = "tests/unit/abi/test_ioctl_abi.c"
+        Output = "test_ioctl_abi.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Unit: IOCTL ABI Stability and Uniqueness (TEST-ABI-001, Part of #265)"
+    },
+    @{
         Name = "test_hal_performance"
         Type = "cl"
         Source = "tests/unit/hal/test_hal_performance.c"

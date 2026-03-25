@@ -68,7 +68,8 @@ $UnitTests = @(
     "test_magic_numbers",
     "test_scripts_consolidate",
     "test_hal_unit",
-    "test_hal_errors"
+    "test_hal_errors",
+    "test_ioctl_abi"       # IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require

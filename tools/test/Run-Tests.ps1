@@ -612,6 +612,7 @@ if (Test-Path $regsTest3) {
         @{Name="test_hal_unit.exe"; Desc="Verify HAL Unit Tests (#84 REQ-NF-PORTABILITY-001, #308 TEST-PORTABILITY-HAL-001)"},
         @{Name="test_hal_errors.exe"; Desc="Verify HAL Error Scenario Tests (#84 REQ-NF-PORTABILITY-001, #309 TEST-PORTABILITY-HAL-002)"},
         @{Name="test_hal_performance.exe"; Desc="Verify HAL Performance Metrics (#84 REQ-NF-PORTABILITY-001, #310 TEST-PORTABILITY-HAL-003)"},
+        @{Name="test_ioctl_abi.exe"; Desc="Verify IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)"},
         @{Name="ptp_clock_control_test.exe"; Desc="Verify PTP Clock Control including GET_CLOCK_CONFIG (#4)"},
         @{Name="ptp_clock_control_production_test.exe"; Desc="Verify PTP Clock Production IOCTLs (#4 P0 CRITICAL)"},
         @{Name="avb_capability_validation_test.exe"; Desc="Verify realistic hardware capability reporting (no false advertising)"},
@@ -707,6 +708,7 @@ if (Test-Path $regsTest3) {
         "test_tx_timestamp_retrieval.exe", "test_hw_state_machine.exe",
         "test_lazy_initialization.exe", "test_registry_diagnostics.exe",
         "test_hal_unit.exe", "test_hal_errors.exe", "test_hal_performance.exe",
+        "test_ioctl_abi.exe",
         "ptp_clock_control_test.exe", "ptp_clock_control_production_test.exe",
         "avb_capability_validation_test.exe", "avb_device_separation_test.exe",
         # Phase 1
