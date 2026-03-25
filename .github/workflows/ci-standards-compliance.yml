@@ -360,6 +360,39 @@ jobs:
           # NOT suitable for headless CI.  Run-Tests-CI.ps1 is the correct entry point here.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Unit
 
+      - name: Run SSOT & register verification tests (Windows)
+        # Verifies: #301 (TEST-SSOT-001), #302 (TEST-SSOT-003), #303 (TEST-SSOT-004)
+        #           #304 (TEST-REGS-001), #305 (TEST-REGS-002), #306 (TEST-REGS-003)
+        # Static analysis + build artifact checks — no hardware required.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $failed = 0
+
+          Write-Host "🔍 Running SSOT verification tests (#301, #302, #303)..." -ForegroundColor Cyan
+          & tests\verification\ssot\Run-All-SSOT-Tests.ps1
+          if ($LASTEXITCODE -ne 0) { $failed++ }
+
+          Write-Host ""
+          Write-Host "🔍 Running REGS verification tests (#304, #305, #306)..." -ForegroundColor Cyan
+          & tests\verification\regs\Test-REGS-002-MagicNumberDetection.ps1
+          if ($LASTEXITCODE -ne 0) { $failed++ }
+
+          & tests\verification\regs\Test-REGS-001-BuildVerification.ps1 -Configuration ${{ matrix.config }}
+          if ($LASTEXITCODE -ne 0) { $failed++ }
+
+          & tests\verification\regs\Test-REGS-003-RegisterConstantVerification.ps1 -Configuration ${{ matrix.config }}
+          if ($LASTEXITCODE -ne 0) { $failed++ }
+
+          if ($failed -gt 0) {
+            Write-Host ""
+            Write-Host "❌ $failed SSOT/REGS verification test(s) failed" -ForegroundColor Red
+            exit 1
+          }
+          Write-Host ""
+          Write-Host "✅ All SSOT & register verification tests passed" -ForegroundColor Green
+
       - name: Hardware-dependent tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows'
         shell: pwsh
