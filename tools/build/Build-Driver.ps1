@@ -227,16 +227,26 @@ if (-not $SkipDriver) {
         }
     }
 
+    # Derive the SDK bin path so MSBuild's <MessageCompile> task picks mc.exe from the
+    # SAME SDK as TargetPlatformVersion.  Without this override, WindowsSdkVerBinPath
+    # defaults to whatever Visual Studio's toolchain init set (= the runner's pre-installed
+    # SDK, e.g. 10.0.26100.0 on GitHub-hosted runners), causing mc.exe to generate a
+    # 40-line bare-descriptor header instead of the 961-line kernel-mode wrapper macros
+    # that src/IntelAvbFilter.h and all consumers require.
+    $sdkBinPath = Join-Path $kitsBase "bin\$targetPlatformVersion\"
+
     Write-Host "  Solution: $solutionFile" -ForegroundColor Gray
     Write-Host "  Output: $outputDir" -ForegroundColor Gray
     Write-Host "  Version: 1.0.$buildNumber.$revisionNumber" -ForegroundColor Gray
     Write-Host "  SDK TargetPlatformVersion: $targetPlatformVersion" -ForegroundColor Gray
+    Write-Host "  SDK bin path (mc.exe): $sdkBinPath" -ForegroundColor Gray
 
     & $msbuildPath $solutionFile `
         /t:$buildCmd `
         /p:Configuration=$Configuration `
         /p:Platform=$Platform `
         /p:TargetPlatformVersion=$targetPlatformVersion `
+        "/p:WindowsSdkVerBinPath=$sdkBinPath" `
         /p:AvbVersionBuild=$buildNumber `
         /p:AvbVersionRevision=$revisionNumber `
         /m `

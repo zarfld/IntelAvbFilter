@@ -1,0 +1,38 @@
+<Project>
+  <!--
+    Fix: The WDK MessageCompile task does not honour KernelModeTypes=true.
+    It omits the -km flag regardless of SDK version, producing a 40-line
+    bare EVENT_DESCRIPTOR header instead of the 961-line kernel-mode wrapper
+    macro header that src/IntelAvbFilter.h must contain.
+
+    This target re-runs mc.exe with -km AFTER MessageCompile (which may have
+    generated the wrong header) and BEFORE ClCompile (which needs the macros).
+    TargetPlatformVersion is set to 10.0.22621.0 by Build-Driver.ps1.
+
+    Fixes CI: GitHub-hosted runners have SDK 10.0.26100.0 as default but the
+    install-wdk action installs 10.0.22621.0.  Build-Driver.ps1 passes
+    /p:TargetPlatformVersion and /p:WindowsSdkVerBinPath to pin mc.exe.
+  -->
+  <Target Name="FixEtwKernelModeHeader"
+          AfterTargets="MessageCompile"
+          BeforeTargets="ClCompile">
+
+    <PropertyGroup>
+      <!-- Derive mc.exe from TargetPlatformVersion (same SDK as headers/libs). -->
+      <_KitsBase>C:\Program Files (x86)\Windows Kits\10</_KitsBase>
+      <_FixMcExe>$(_KitsBase)\bin\$(TargetPlatformVersion)\x64\mc.exe</_FixMcExe>
+      <!-- Fall back to x86 if x64 mc.exe is absent. -->
+      <_FixMcExe Condition="!Exists('$(_FixMcExe)')">$(_KitsBase)\bin\$(TargetPlatformVersion)\x86\mc.exe</_FixMcExe>
+      <!-- Absolute skip if we cannot find ANY mc.exe - diagnostics will catch it. -->
+      <_SkipFixEtw Condition="!Exists('$(_FixMcExe)')">true</_SkipFixEtw>
+    </PropertyGroup>
+
+    <Message Text="[FixEtwKernelModeHeader] mc.exe = $(_FixMcExe)" Importance="high" />
+
+    <Exec Condition="'$(_SkipFixEtw)' != 'true'"
+          Command="&quot;$(_FixMcExe)&quot; -km -h &quot;$(MSBuildProjectDirectory)\src&quot; -r &quot;$(MSBuildProjectDirectory)\src&quot; -z IntelAvbFilter &quot;$(MSBuildProjectDirectory)\src\IntelAvbFilter.man&quot;" />
+
+    <Warning Condition="'$(_SkipFixEtw)' == 'true'"
+             Text="[FixEtwKernelModeHeader] mc.exe not found for SDK $(TargetPlatformVersion) - ETW header may be incorrect" />
+  </Target>
+</Project>
