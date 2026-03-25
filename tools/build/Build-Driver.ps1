@@ -279,23 +279,41 @@ if (-not $SkipDriver) {
 if ($Sign -and -not $SkipDriver) {
     Write-Step "Generating Catalog and Signing"
     
-    $catFile = Join-Path $outputDir "IntelAvbFilter.cat"
-    
-    # Generate CAT using inf2cat
-    Write-Host "Generating CAT file..." -ForegroundColor Gray
-    & $inf2catPath /driver:"$outputDir" /os:10_X64
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Failure "CAT generation failed! Exit code: $LASTEXITCODE"
-        exit $LASTEXITCODE
+    # The WDK build (MSBuild) runs inf2cat internally on the package sub-directory
+    # $(OutDir)\$(ProjectName)\ (e.g. build\x64\Release\IntelAvbFilter\IntelAvbFilter\).
+    # Calling inf2cat on the outer $outputDir recurses into the obj\ sub-directory
+    # that contains the stamped INF but NOT the .sys file, triggering inf2cat error
+    # 22.9.1 ("is missing or cannot be decompressed from source media").
+    # Use the WDK-generated catalog directly; only call inf2cat manually as a
+    # fallback when the WDK catalog is absent.
+    $projectName = [System.IO.Path]::GetFileName($outputDir)   # "IntelAvbFilter"
+    $wdkPkgDir   = Join-Path $outputDir $projectName           # ...\IntelAvbFilter\IntelAvbFilter\
+    $catFile     = Get-ChildItem $wdkPkgDir -Filter "*.cat" -ErrorAction SilentlyContinue |
+                   Select-Object -First 1 -ExpandProperty FullName
+
+    if ($catFile) {
+        Write-Info "Using WDK-generated catalog (skipping redundant Inf2Cat): $catFile"
+    } else {
+        # Manual fallback: pass the WDK package directory to inf2cat, not the outer
+        # $outputDir, to avoid the obj\ stamped-INF/missing-sys issue.
+        $infCatDir = if (Test-Path $wdkPkgDir) { $wdkPkgDir } else { $outputDir }
+        Write-Host "Generating CAT file from: $infCatDir" -ForegroundColor Gray
+        & $inf2catPath /driver:"$infCatDir" /os:10_X64
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Failure "CAT generation failed! Exit code: $LASTEXITCODE"
+            exit $LASTEXITCODE
+        }
+
+        $catFile = Get-ChildItem $infCatDir -Filter "*.cat" -ErrorAction SilentlyContinue |
+                   Select-Object -First 1 -ExpandProperty FullName
+        if (-not $catFile) {
+            Write-Failure "CAT file not created in: $infCatDir"
+            exit 1
+        }
     }
-    
-    if (-not (Test-Path $catFile)) {
-        Write-Failure "CAT file not created: $catFile"
-        exit 1
-    }
-    
-    Write-Success "CAT file generated: $(Get-Item $catFile | Select-Object -ExpandProperty Length) bytes"
+
+    Write-Success "CAT file: $(Get-Item $catFile | Select-Object -ExpandProperty Length) bytes"
     
     # Check for test certificate
     $certName = "Intel AVB Filter Test Certificate"
