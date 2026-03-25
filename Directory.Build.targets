@@ -35,4 +35,31 @@
     <Warning Condition="'$(_SkipFixEtw)' == 'true'"
              Text="[FixEtwKernelModeHeader] mc.exe not found for SDK $(TargetPlatformVersion) - ETW header may be incorrect" />
   </Target>
+
+  <!--
+    Fix: FilesToPackage items in the vcxproj are hardcoded to
+    "build\x64\Debug\IntelAvbFilter\..." regardless of $(Configuration).
+    Introduced in commit 202ac68: "$(OutDir)"-based items were changed to
+    an absolute local-machine path (D:\Repos\...) and then to a relative
+    path still locked to the Debug folder.  When building Release the
+    Debug path does not exist, causing MSB3030 in WindowsDriver.common.targets.
+
+    This ItemGroup runs at import time (after the vcxproj ItemGroups) and:
+      1. Removes the hardcoded Debug-only items.
+      2. Adds configuration-correct $(OutDir)-based replacements so that
+         both Debug and Release builds package the right files.
+  -->
+  <ItemGroup>
+    <FilesToPackage Remove="build\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" />
+    <FilesToPackage Remove="build\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys" />
+    <FilesToPackage Include="$(OutDir)IntelAvbFilter.inf">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="$(OutDir)IntelAvbFilter.sys">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+  </ItemGroup>
+
 </Project>
