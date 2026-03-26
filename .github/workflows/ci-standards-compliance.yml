@@ -207,11 +207,11 @@ jobs:
         # all automated suites — run them manually on a dedicated test machine only.
         include:
           - os: self-hosted-hardware
-            runner: [self-hosted, Windows, hardware]
+            runner: [self-hosted, Windows, i226]
             config: Debug
             hardware: true
           - os: self-hosted-hardware
-            runner: [self-hosted, Windows, hardware]
+            runner: [self-hosted, Windows, i226]
             config: Release
             hardware: true
 
@@ -515,11 +515,11 @@ jobs:
         # Sleep/hibernate tests (test_s3_sleep_wake) are intentionally absent.
         include:
           - os: self-hosted-hardware
-            runner: [self-hosted, Windows, hardware]
+            runner: [self-hosted, Windows, i226]
             config: Debug
             hardware: true
           - os: self-hosted-hardware
-            runner: [self-hosted, Windows, hardware]
+            runner: [self-hosted, Windows, i226]
             config: Release
             hardware: true
 
