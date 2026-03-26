@@ -183,6 +183,31 @@ int main(void)
     RUN(TC_ATDECC_004_Unsubscribe,  "TC-ATDECC-004: ATDECC_EVENT_UNSUBSCRIBE");
     RUN(TC_ATDECC_005_DoubleSubscribe,"TC-ATDECC-005: Double-subscribe yields unique handles");
 
+    /* Cleanup: ATDECC subscriptions are driver-global and persist until explicitly
+     * unsubscribed.  TC-004 unsubscribes the TC-002 subscription; however TC-005
+     * creates two new subscriptions (stored in g_subscription_id_1/2) that are
+     * never released.  Without this cleanup every test run leaks 2 slots, causing
+     * STATUS_TOO_MANY_SESSIONS (err=69) after ~8 runs. */
+    {
+        HANDLE h_cleanup = OpenDevice();
+        if (h_cleanup != INVALID_HANDLE_VALUE) {
+            AVB_ATDECC_SUBSCRIBE_REQUEST uq;
+            if (g_subscription_id_1 != 0) {
+                ZeroMemory(&uq, sizeof(uq));
+                uq.subscription_id = g_subscription_id_1;
+                TryIoctl(h_cleanup, IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE, &uq, sizeof(uq));
+                g_subscription_id_1 = 0;
+            }
+            if (g_subscription_id_2 != 0) {
+                ZeroMemory(&uq, sizeof(uq));
+                uq.subscription_id = g_subscription_id_2;
+                TryIoctl(h_cleanup, IOCTL_AVB_ATDECC_EVENT_UNSUBSCRIBE, &uq, sizeof(uq));
+                g_subscription_id_2 = 0;
+            }
+            CloseHandle(h_cleanup);
+        }
+    }
+
     printf("-------------------------------------------\n");
     printf(" PASS=%d  FAIL=%d  SKIP=%d  TOTAL=%d\n",
            g_pass, g_fail, g_skip, g_pass + g_fail + g_skip);
