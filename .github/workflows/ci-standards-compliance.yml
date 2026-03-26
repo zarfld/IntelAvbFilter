@@ -312,11 +312,16 @@ jobs:
           }
 
       - name: Install Windows Driver Kit (WDK)
-        if: runner.os == 'Windows'
+        # Skip on self-hosted hardware runners — WDK is already installed there.
+        # Attempting to install/modify WDK on a developer machine risks corrupting
+        # the existing build environment. No installations on self-hosted runners.
+        if: runner.os == 'Windows' && matrix.hardware != true
         uses: ./.github/actions/install-wdk
 
       - name: Install test build dependencies (Windows)
-        if: runner.os == 'Windows'
+        # Skip on self-hosted hardware runners — Npcap SDK and WDK headers must
+        # already be present. No downloads or installations on self-hosted runners.
+        if: runner.os == 'Windows' && matrix.hardware != true
         shell: pwsh
         run: |
           ## 1. Npcap SDK (required by test_tx_timestamp_retrieval)
@@ -359,6 +364,76 @@ jobs:
               Write-Host "   taef_tests will be skipped (WDK installed without TAEF Testing component)" -ForegroundColor Gray
             }
           }
+
+      - name: Verify prerequisites (self-hosted hardware runner)
+        # On self-hosted runners, verify all required tools are present.
+        # This job NEVER installs anything — it only reports missing prerequisites.
+        if: runner.os == 'Windows' && matrix.hardware == true
+        shell: pwsh
+        run: |
+          $missing = @()
+
+          # WDK km headers (required by driver build)
+          $wdkKm = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $wdkFound = Get-ChildItem $wdkKm -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
+                      Select-Object -First 1
+          if ($wdkFound) {
+            Write-Host "✅ WDK km headers present: $($wdkFound.FullName)" -ForegroundColor Green
+            "WDK_VERSION=$($wdkFound.Name)" >> $env:GITHUB_ENV
+          } else {
+            $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
+          }
+
+          # Npcap SDK
+          $npcapDest = 'C:\npcap-sdk-1.16'
+          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+            Write-Host "✅ Npcap SDK present: $npcapDest" -ForegroundColor Green
+          } else {
+            $missing += "Npcap SDK (expected at $npcapDest)"
+          }
+
+          # TAEF / WEX headers (export to ENV for build if found)
+          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
+          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
+          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
+            Write-Host "✅ TAEF development headers present" -ForegroundColor Green
+            "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
+            "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+          } else {
+            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Write-Host "✅ TAEF headers found at $($found.DirectoryName)" -ForegroundColor Green
+              "TAEF_INCLUDE=$($found.DirectoryName)" >> $env:GITHUB_ENV
+              $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
+              "TAEF_LIB=$lib" >> $env:GITHUB_ENV
+            } else {
+              Write-Host "⚠️ TAEF/WEX headers not found — taef_tests will be skipped" -ForegroundColor Yellow
+            }
+          }
+
+          # MSBuild / Visual Studio
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
+            if ($vsPath) {
+              Write-Host "✅ Visual Studio present: $vsPath" -ForegroundColor Green
+            } else {
+              $missing += 'Visual Studio (vswhere found no installations)'
+            }
+          } else {
+            $missing += 'Visual Studio installer / vswhere.exe'
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Host "" 
+            Write-Host "❌ Missing prerequisites on self-hosted runner:" -ForegroundColor Red
+            $missing | ForEach-Object { Write-Host "   - $_" -ForegroundColor Red }
+            Write-Host "Install these manually on the runner machine before running hardware CI jobs." -ForegroundColor Red
+            exit 1
+          }
+          Write-Host "" 
+          Write-Host "✅ All prerequisites verified on $env:RUNNER_NAME" -ForegroundColor Green
 
       - name: Build Windows driver tests (Windows)
         if: runner.os == 'Windows'
@@ -595,11 +670,16 @@ jobs:
           fi
 
       - name: Install Windows Driver Kit (WDK)
-        if: runner.os == 'Windows'
+        # Skip on self-hosted hardware runners — WDK is already installed there.
+        # Attempting to install/modify WDK on a developer machine risks corrupting
+        # the existing build environment. No installations on self-hosted runners.
+        if: runner.os == 'Windows' && matrix.hardware != true
         uses: ./.github/actions/install-wdk
 
       - name: Install test build dependencies (Windows)
-        if: runner.os == 'Windows'
+        # Skip on self-hosted hardware runners — Npcap SDK and WDK headers must
+        # already be present. No downloads or installations on self-hosted runners.
+        if: runner.os == 'Windows' && matrix.hardware != true
         shell: pwsh
         run: |
           ## 1. Npcap SDK (required by test_tx_timestamp_retrieval)
@@ -642,6 +722,76 @@ jobs:
               Write-Host "   taef_tests will be skipped (WDK installed without TAEF Testing component)" -ForegroundColor Gray
             }
           }
+
+      - name: Verify prerequisites (self-hosted hardware runner)
+        # On self-hosted runners, verify all required tools are present.
+        # This job NEVER installs anything — it only reports missing prerequisites.
+        if: runner.os == 'Windows' && matrix.hardware == true
+        shell: pwsh
+        run: |
+          $missing = @()
+
+          # WDK km headers (required by driver build)
+          $wdkKm = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $wdkFound = Get-ChildItem $wdkKm -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
+                      Select-Object -First 1
+          if ($wdkFound) {
+            Write-Host "✅ WDK km headers present: $($wdkFound.FullName)" -ForegroundColor Green
+            "WDK_VERSION=$($wdkFound.Name)" >> $env:GITHUB_ENV
+          } else {
+            $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
+          }
+
+          # Npcap SDK
+          $npcapDest = 'C:\npcap-sdk-1.16'
+          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+            Write-Host "✅ Npcap SDK present: $npcapDest" -ForegroundColor Green
+          } else {
+            $missing += "Npcap SDK (expected at $npcapDest)"
+          }
+
+          # TAEF / WEX headers (export to ENV for build if found)
+          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
+          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
+          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
+            Write-Host "✅ TAEF development headers present" -ForegroundColor Green
+            "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
+            "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+          } else {
+            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Write-Host "✅ TAEF headers found at $($found.DirectoryName)" -ForegroundColor Green
+              "TAEF_INCLUDE=$($found.DirectoryName)" >> $env:GITHUB_ENV
+              $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
+              "TAEF_LIB=$lib" >> $env:GITHUB_ENV
+            } else {
+              Write-Host "⚠️ TAEF/WEX headers not found — taef_tests will be skipped" -ForegroundColor Yellow
+            }
+          }
+
+          # MSBuild / Visual Studio
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
+            if ($vsPath) {
+              Write-Host "✅ Visual Studio present: $vsPath" -ForegroundColor Green
+            } else {
+              $missing += 'Visual Studio (vswhere found no installations)'
+            }
+          } else {
+            $missing += 'Visual Studio installer / vswhere.exe'
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Host "" 
+            Write-Host "❌ Missing prerequisites on self-hosted runner:" -ForegroundColor Red
+            $missing | ForEach-Object { Write-Host "   - $_" -ForegroundColor Red }
+            Write-Host "Install these manually on the runner machine before running hardware CI jobs." -ForegroundColor Red
+            exit 1
+          }
+          Write-Host "" 
+          Write-Host "✅ All prerequisites verified on $env:RUNNER_NAME" -ForegroundColor Green
 
       - name: Build Windows integration tests (Windows)
         if: runner.os == 'Windows'
