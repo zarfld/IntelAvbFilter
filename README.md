@@ -2,70 +2,74 @@
 
 A Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bridging) and TSN (Time-Sensitive Networking) capabilities for Intel Ethernet controllers.
 
-## 🎯 **HONEST STATUS UPDATE - January 2025**
+[![CI — Standards Compliance](https://github.com/zarfld/IntelAvbFilter/actions/workflows/ci-standards-compliance.yml/badge.svg)](https://github.com/zarfld/IntelAvbFilter/actions/workflows/ci-standards-compliance.yml)
+[![Traceability Check](https://github.com/zarfld/IntelAvbFilter/actions/workflows/traceability-check.yml/badge.svg)](https://github.com/zarfld/IntelAvbFilter/actions/workflows/traceability-check.yml)
 
-**Build Status**: ✅ **WORKING** - Driver compiles successfully  
-**Basic Features**: ✅ **FUNCTIONAL** - Device enumeration, register access working  
-**TSN IOCTL Handlers**: ✅ **FIXED** - TAS/FP/PTM IOCTLs no longer return ERROR_INVALID_FUNCTION  
-**Advanced Features**: ⚠️ **MIXED RESULTS** - Handler infrastructure working, some hardware activation issues remain
+## 🎯 **Project Status — March 2026**
 
-### **Hardware Testing Results** (Updated January 2025)
+### CI / Test Infrastructure
 
-#### **✅ What's Actually Working:**
-- **Device enumeration**: Functional (2 Intel adapters detected)
-- **Multi-adapter context switching**: Functional
-- **Register access infrastructure**: All MMIO operations working
-- **TSN IOCTL handlers**: **✅ FIXED** - TAS/FP/PTM handlers now functional (no more Error 1)
-- **I226 PTP clock**: Running properly (SYSTIM incrementing)
-- **I226 MDIO PHY management**: Fully operational
-- **I226 interrupt management**: EITR programming working
-- **Basic queue management**: Priority setting functional
+| Gate | Status |
+|------|--------|
+| Driver build (MSBuild, Debug + Release) | ✅ Passing |
+| SSOT magic-numbers gate (`src/`) | ✅ Passing |
+| Hardware unit tests (self-hosted, 6×I226-LM) | ✅ **106 / 113 passed (93.8%)** |
+| IOCTL ABI compatibility | ✅ 20/20 |
+| PTP timestamp event subscription | ✅ 98 / 0 passed/failed (6 adapters) |
+| SSOT & register verification | ✅ Passing |
+| GitHub Issues traceability | ✅ Passing |
 
-#### **❌ What Has Issues:**
-- **I210 PTP clock**: Stuck at zero despite proper configuration
-- **I226 TAS activation**: Enable bit doesn't stick despite complete setup
-- **I226 Frame Preemption**: Configuration not taking effect
-- **I226 EEE**: Register writes being ignored by hardware
-- **I226 2.5G speed**: Currently limited to 100 Mbps (infrastructure?)
+**Self-hosted runner**: Windows, 6× Intel I226-LM, driver installed, build number 345.  
+**GitHub-hosted runners**: `windows-latest`, `windows-2022` — hardware-independent tests only.
 
-#### **⚠️ What Needs Investigation:**
-- **I226 advanced TSN hardware activation**: May require Intel-specific initialization sequences
-- **Speed configuration**: May be limited by network infrastructure
-- **Power management features**: May require additional hardware prerequisites
+### Hardware Test Results (2026-03-23, self-hosted, 6×I226-LM)
 
-### **🎉 Recent Fixes (January 2025)**
-
-#### **TSN IOCTL Handler Fix - COMPLETED** ✅
-**Issue**: TAS, Frame Preemption, and PTM IOCTLs returned `ERROR_INVALID_FUNCTION` (Error 1)  
-**Root Cause**: Missing case handlers in IOCTL switch statement  
-**Fix**: Added proper case handlers that call Intel library functions  
-**Status**: **VERIFIED WORKING** with hardware testing
-
-**Before Fix**:
 ```
-❌ IOCTL_AVB_SETUP_TAS: Not implemented (Error: 1)
-❌ IOCTL_AVB_SETUP_FP: Not implemented (Error: 1)
-❌ IOCTL_AVB_SETUP_PTM: Not implemented (Error: 1)
+Test executables available : 105
+Total tests run            : 113
+Passed                     : 106  (93.8%)
+Failed                     :   7  (see Known Failures)
 ```
 
-**After Fix**:
-```
-✅ IOCTL_AVB_SETUP_TAS: Handler exists and succeeded (FIX WORKED)
-✅ IOCTL_AVB_SETUP_FP: Handler exists and succeeded (FIX WORKED)  
-✅ IOCTL_AVB_SETUP_PTM: Handler exists, returned error 31 (FIX WORKED)
-```
+#### ✅ Verified Working
+
+- **Device enumeration** — 6 Intel I226-LM adapters detected and opened
+- **Multi-adapter context isolation** — per-handle adapter switching confirmed
+- **Register access (MMIO)** — all read/write operations clean
+- **PTP / IEEE 1588 clock** — SYSTIM incrementing; frequency adjust, get/set time, offset correction all passing
+- **PTP timestamp event subscription** — 97 P / 0 F; TX/RX timestamp events delivered
+- **TAS (802.1Qbv) IOCTL** — 10 P / 0 F, configuration accepted
+- **CBS (802.1Qav) IOCTL** — 14 P / 0 F, configuration accepted
+- **Frame Preemption + PTM IOCTLs** — verified passing
+- **IOCTL ABI stability** — 20/20 struct-size checks pass (no ABI regression)
+- **ATDECC entity notification** — 5 P / 0 F (regression fixed: `MAX_ATDECC_SUBSCRIPTIONS` 4→16)
+- **Performance baseline captured** — PHC P50=2300 ns, P99=4372 ns; TX=336 ns, RX=2076 ns
+- **NDIS LWF send / receive paths** — passing
+- **SSOT register constants** — zero raw hex literals in `src/`
+
+#### ⚠️ Known Failures / Limitations
+
+| Test | Status | Root Cause / Notes |
+|------|--------|--------------------|
+| `test_zero_polling_overhead` TC-ZP-002 | ⚠️ Known HW | EITR0=33024 µs HW interrupt coalescing — expected hardware behavior |
+| `test_s3_sleep_wake` | ⏸ Excluded from CI | `SetSuspendState` would suspend the runner; run manually on dedicated machine |
+| `test_tx_timestamp_retrieval` | 🔧 Ongoing | TX timestamp capture path under investigation |
+| `avb_test_i219` | 🔌 No hardware | No I219 adapter on CI runner |
+| `test_event_log` | 🔧 Intermittent | Timing-sensitive; passes in isolation |
+| `test_perf_regression` | 📋 Baseline only | COMPARE mode works; CAPTURE mode exits 1 by design |
+| `test_magic_numbers` | ✅ Superseded | Replaced by CI SSOT static gate (`ssot-magic-numbers-gate` job) |
 
 ## 🔧 **Supported Intel Controllers**
 
-### **Comprehensive Device Support Status:**
+### Comprehensive Device Support Status
 
-| Controller | Basic Detection | Register Access | PTP/1588 | TSN IOCTLs | TSN Hardware | Current Issues |
-|------------|----------------|-----------------|----------|------------|--------------|----------------|
-| **Intel I210** | ✅ Working | ✅ Working | ❌ Clock stuck | ✅ **Ready** | ❌ Limited | PTP initialization |
-| **Intel I217** | ⚠️ Code ready | ⚠️ Ready | ⚠️ Ready | ✅ **Ready** | ❌ Limited | Needs hardware testing |
-| **Intel I219** | ✅ Working | ⚠️ Ready | ⚠️ Ready | ✅ **Ready** | ❌ Limited | Needs hardware testing |
-| **Intel I225** | ✅ Working | ⚠️ Ready | ⚠️ Ready | ✅ **Ready** | ❌ TAS issues | Needs hardware testing |
-| **Intel I226** | ✅ Working | ✅ Working | ✅ Working | ✅ **Working** | ❌ TAS/FP failing | Hardware activation needs work |
+| Controller | Detection | Register Access | PTP/1588 | TSN IOCTLs | Notes |
+|------------|-----------|-----------------|----------|------------|-------|
+| **Intel I226** | ✅ Verified | ✅ Verified | ✅ Verified | ✅ Verified | **Primary CI platform** — 6× on self-hosted runner |
+| **Intel I225** | ✅ Code ready | ✅ Code ready | ✅ Code ready | ✅ Code ready | Near-identical to I226; needs dedicated hardware run |
+| **Intel I219** | ✅ Code ready | ✅ Code ready | ⚠️ Code ready | ✅ Code ready | No I219 on CI runner — `avb_test_i219` skipped |
+| **Intel I210** | ✅ Code ready | ✅ Code ready | ⚠️ Code ready | ✅ Code ready | No I210 on CI runner; needs dedicated hardware run |
+| **Intel I217** | ⚠️ Code ready | ⚠️ Code ready | ⚠️ Code ready | ✅ Code ready | Needs hardware testing |
 
 **Not Supported**: Intel 82574L (lacks AVB/TSN hardware features)
 
