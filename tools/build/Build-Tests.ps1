@@ -1599,6 +1599,29 @@ $AllTests = @(
         Requirement = "#240"
         Standard = "IEEE 802.1AS-2020"
     }
+
+    # =========================================================================
+    # Step 3 — NDIS LWF Lifecycle Coverage (Pillars 2/3/4)
+    # TEST-LCY-001: Part of #265 (TEST-COVERAGE-001)
+    # Proves lifecycle callbacks actually ran (not just compiled) by asserting
+    # delta-counter expectations via IOCTL_AVB_GET_STATISTICS snapshots.
+    # =========================================================================
+
+    @{
+        Name = "test_lifecycle_coverage"
+        Type = "cl"
+        Source = "tests\hardware\test_lifecycle_coverage.c"
+        Output = "test_lifecycle_coverage.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "setupapi.lib cfgmgr32.lib iphlpapi.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "NDIS LWF Lifecycle Coverage Scenarios: FilterAttach/Pause/Restart/Detach deltas, NBL gauges, OID counters, NIC disable/re-enable cycle (TEST-LCY-001, Part of #265)"
+        Issue = "#265"
+        TestCases = 6
+        IOCTLs = "IOCTL_AVB_GET_STATISTICS(0x9C40A020), IOCTL_AVB_RESET_STATISTICS(0x9C40A028)"
+        Requirement = "#265"
+    }
 )
 
 # Filter tests if specific test requested
