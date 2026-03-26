@@ -1,4 +1,4 @@
-name: CI - Standards Compliance & Quality Gates
+﻿name: CI - Standards Compliance & Quality Gates
 
 # 🏗️ COMPREHENSIVE CI/CD VALIDATION (10-15 min)
 # Full standards compliance validation with matrix testing across platforms
@@ -369,7 +369,7 @@ jobs:
         # On self-hosted runners, verify all required tools are present.
         # This job NEVER installs anything — it only reports missing prerequisites.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           $missing = @()
 
@@ -437,7 +437,7 @@ jobs:
 
       - name: Build Windows driver tests (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           Write-Host "🏗️ Building Windows driver test executables (${{ matrix.config }})..." -ForegroundColor Cyan
           .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
@@ -445,7 +445,7 @@ jobs:
 
       - name: Run hardware-independent unit tests (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
           # Run-Tests-Elevated.ps1 uses Start-Process -Verb RunAs (interactive UAC) and is
@@ -457,7 +457,7 @@ jobs:
         # test_s3_sleep_wake is intentionally absent from HardwareUnit: TC-S3-002 calls
         # SetSuspendState which puts the host into S3 sleep, blocking the runner.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           Write-Host "🔧 Running hardware-dependent unit tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareUnit
@@ -467,7 +467,7 @@ jobs:
         #           #304 (TEST-REGS-001), #305 (TEST-REGS-002), #306 (TEST-REGS-003)
         # Static analysis + build artifact checks — no hardware required.
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           $ErrorActionPreference = 'Stop'
           $failed = 0
@@ -497,7 +497,7 @@ jobs:
 
       - name: Hardware-dependent tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows' && matrix.hardware == false
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           Write-Host "[INFO] Hardware-dependent tests (avb_test_i226, avb_test_i210, ptp_clock_control_test, "
           Write-Host "       tsauxc_toggle_test, device_open_test) require a supported Intel NIC."
@@ -516,7 +516,7 @@ jobs:
 
       - name: Report test status (hardware runner)
         if: matrix.hardware == true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           Write-Host "Test Status Report"
           Write-Host "   Runner: $env:RUNNER_NAME"
@@ -736,7 +736,7 @@ jobs:
         # On self-hosted runners, verify all required tools are present.
         # This job NEVER installs anything — it only reports missing prerequisites.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           $missing = @()
 
@@ -804,7 +804,7 @@ jobs:
 
       - name: Build Windows integration tests (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           Write-Host "🏗️ Building Windows integration test executables (${{ matrix.config }})..." -ForegroundColor Cyan
           .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
@@ -812,7 +812,7 @@ jobs:
 
       - name: Run Windows integration tests (hardware-independent subset)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Integration
@@ -821,14 +821,14 @@ jobs:
         # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
         # test_s3_sleep_wake is intentionally absent from HardwareIntegration.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           Write-Host "🔧 Running hardware-dependent integration tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareIntegration
 
       - name: Hardware-dependent integration tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows' && matrix.hardware == false
-        shell: powershell
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           Write-Host "[INFO] Hardware-dependent integration tests (avb_test_i226, avb_test_i210, "
           Write-Host "       comprehensive_ioctl_test, hw_timestamping_control_test, rx_timestamping_test)"
