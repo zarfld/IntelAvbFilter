@@ -222,6 +222,10 @@ jobs:
           submodules: true
 
       - name: Setup Python
+        # Skip on self-hosted hardware runners — Python is already installed there.
+        # actions/setup-python tries to download/install Python which fails on these
+        # machines due to PowerShell execution policy restrictions.
+        if: matrix.hardware != true
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -238,10 +242,11 @@ jobs:
           brew install cmake ninja
 
       - name: Install CMake and Build Tools (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.hardware != true
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Detect and configure build system
+        if: matrix.hardware != true
         shell: bash
         run: |
           echo "🔍 Detecting build system..."
@@ -530,6 +535,10 @@ jobs:
           submodules: true
 
       - name: Setup Python
+        # Skip on self-hosted hardware runners — Python is already installed there.
+        # actions/setup-python tries to download/install Python which fails on these
+        # machines due to PowerShell execution policy restrictions.
+        if: matrix.hardware != true
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -546,10 +555,11 @@ jobs:
           brew install cmake ninja
 
       - name: Install CMake and Build Tools (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.hardware != true
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Detect integration test configuration
+        if: matrix.hardware != true
         shell: bash
         run: |
           echo "🔍 Detecting integration test setup..."
