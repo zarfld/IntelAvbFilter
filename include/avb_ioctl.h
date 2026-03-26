@@ -70,7 +70,11 @@ typedef struct _IOCTL_VERSION {
 
 /* AVB-specific IOCTLs (must match kernel) */
 /* Version query IOCTL - MUST be first (Issue #64, #273) */
-#define IOCTL_AVB_GET_VERSION           _NDIS_CONTROL_CODE(0x800, METHOD_BUFFERED)  /* 0x9C40A000 */
+/* NOTE: _NDIS_CONTROL_CODE values use CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD=0x17, fn, METHOD_BUFFERED, FILE_ANY_ACCESS).
+ * Modern WDK (10.0.26100+) ndis.h does NOT define _NDIS_CONTROL_CODE, so both kernel and user-mode code
+ * use the fallback definition below.  Formula: 0x170000 | (fn << 2).
+ * Previously incorrect inline comments (0x9C40Axxx) referred to an older NDIS-header definition—removed. */
+#define IOCTL_AVB_GET_VERSION           _NDIS_CONTROL_CODE(0x800, METHOD_BUFFERED)  /* 0x00172000 */
 #define IOCTL_AVB_INIT_DEVICE           _NDIS_CONTROL_CODE(20, METHOD_BUFFERED)
 #define IOCTL_AVB_GET_DEVICE_INFO       _NDIS_CONTROL_CODE(21, METHOD_BUFFERED)
 #ifndef NDEBUG
@@ -117,10 +121,10 @@ typedef struct _IOCTL_VERSION {
 #define IOCTL_AVB_SET_PORT_LATENCY      _NDIS_CONTROL_CODE(52, METHOD_BUFFERED)
 
 /* Driver statistics query — implements #270 (TEST-STATISTICS-001) */
-/* Function 0x808 → 0x9C40A020 (matches test hardcoded value) */
-#define IOCTL_AVB_GET_STATISTICS        _NDIS_CONTROL_CODE(0x808, METHOD_BUFFERED)  /* 0x9C40A020 */
-/* Function 0x80A → 0x9C40A028 (optional reset) */
-#define IOCTL_AVB_RESET_STATISTICS      _NDIS_CONTROL_CODE(0x80A, METHOD_BUFFERED)  /* 0x9C40A028 */
+/* Function 0x808 → value 0x00172020: 0x170000 | (0x808 << 2) */
+#define IOCTL_AVB_GET_STATISTICS        _NDIS_CONTROL_CODE(0x808, METHOD_BUFFERED)  /* 0x00172020 */
+/* Function 0x80A → value 0x00172028 */
+#define IOCTL_AVB_RESET_STATISTICS      _NDIS_CONTROL_CODE(0x80A, METHOD_BUFFERED)  /* 0x00172028 */
 
 /* Request/response structures (mirror of avb_integration.h) */
 #define AVB_DEVICE_INFO_MAX 1024u

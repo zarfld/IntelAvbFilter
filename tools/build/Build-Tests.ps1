@@ -1619,7 +1619,7 @@ $AllTests = @(
         Description = "NDIS LWF Lifecycle Coverage Scenarios: FilterAttach/Pause/Restart/Detach deltas, NBL gauges, OID counters, NIC disable/re-enable cycle (TEST-LCY-001, Part of #265)"
         Issue = "#265"
         TestCases = 6
-        IOCTLs = "IOCTL_AVB_GET_STATISTICS(0x9C40A020), IOCTL_AVB_RESET_STATISTICS(0x9C40A028)"
+        IOCTLs = "IOCTL_AVB_GET_STATISTICS(0x00172020), IOCTL_AVB_RESET_STATISTICS(0x00172028)"
         Requirement = "#265"
     }
 )
