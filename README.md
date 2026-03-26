@@ -15,7 +15,7 @@ A Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bri
 | SSOT magic-numbers gate (`src/`) | ✅ Passing |
 | Hardware unit tests (self-hosted, 6×I226-LM) | ✅ **106 / 113 passed (93.8%)** |
 | IOCTL ABI compatibility | ✅ 20/20 |
-| PTP timestamp event subscription | ✅ 98 / 0 passed/failed (6 adapters) |
+| PTP timestamp event subscription | ✅ 97 / 0 passed/failed (6 adapters) |
 | SSOT & register verification | ✅ Passing |
 | GitHub Issues traceability | ✅ Passing |
 
@@ -51,13 +51,11 @@ Failed                     :   7  (see Known Failures)
 
 | Test | Status | Root Cause / Notes |
 |------|--------|--------------------|
-| `test_zero_polling_overhead` TC-ZP-002 | ⚠️ Known HW | EITR0=33024 µs HW interrupt coalescing — expected hardware behavior |
-| `test_s3_sleep_wake` | ⏸ Excluded from CI | `SetSuspendState` would suspend the runner; run manually on dedicated machine |
-| `test_tx_timestamp_retrieval` | 🔧 Ongoing | TX timestamp capture path under investigation |
+| `test_zero_polling_overhead` TC-ZP-002 | ⚠️ Known HW | EITR0=33 024 µs HW interrupt coalescing — controlled by NDIS miniport; filter driver has no EITR0 control path |
+| `test_s3_sleep_wake` TC-S3-002 | ⏸ Unconfirmed | S3 wake-up PHC preservation still pending; `FilterRestart` fix coded but needs controlled wake environment to verify |
+| `test_tx_timestamp_retrieval` | 🔧 Ongoing | TX timestamp capture delta assertion not yet automated (Cat.3 gap — #199) |
 | `avb_test_i219` | 🔌 No hardware | No I219 adapter on CI runner |
-| `test_event_log` | 🔧 Intermittent | Timing-sensitive; passes in isolation |
-| `test_perf_regression` | 📋 Baseline only | COMPARE mode works; CAPTURE mode exits 1 by design |
-| `test_magic_numbers` | ✅ Superseded | Replaced by CI SSOT static gate (`ssot-magic-numbers-gate` job) |
+| `test_event_log` TC-ETW-001 | 🔧 Feature gap | Driver ETW manifest not registered; Event ID 1 not emitted on init — fix in progress (#269) |
 
 ## 🔧 **Supported Intel Controllers**
 
