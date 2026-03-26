@@ -1,14 +1,14 @@
-# Lib-AvbLifecycle.ps1
-# Shared lifecycle metrics snapshot helpers — single source of truth (SSOT).
+﻿# Lib-AvbLifecycle.ps1
+# Shared lifecycle metrics snapshot helpers  --  single source of truth (SSOT).
 # Dot-sourced by Run-Tests.ps1 and Run-Tests-CI.ps1.
 #
 # Implements: #27 (REQ-NF-SCRIPTS-001: Consolidated Script Architecture)
 #
 # What this does:
-#   Get-AvbLifecycleSnapshot  — opens \\.\IntelAvbFilter, runs ENUM_ADAPTERS →
+#   Get-AvbLifecycleSnapshot   --  opens \\.\IntelAvbFilter, runs ENUM_ADAPTERS →
 #       OPEN_ADAPTER → GET_STATISTICS, returns a hashtable of 14 key driver
 #       counters, or $null (with a [LCY] diagnostic) if the driver is absent.
-#   Write-LifecycleDiff       — prints the before/after delta for a test, with
+#   Write-LifecycleDiff        --  prints the before/after delta for a test, with
 #       colour-coded warnings for underflows, errors, and unexpected detaches.
 #
 # Why snapshot before/after every test?
@@ -22,7 +22,7 @@
 #   OutstandingReceiveNBLs !!UNDERFLOW!!  NBL gauge rolls to ~UINT64_MAX when
 #   OutstandingSendNBLs                   the driver returns more NBLs to NDIS
 #                                         than it indicated outstanding (refcount
-#                                         bug — was TC-LCY-003 / PR #fix-filter)
+#                                         bug  --  was TC-LCY-003 / PR #fix-filter)
 #   OutstandingOids        !!UNDERFLOW!!  OID pipeline undercount; OID was
 #                                         completed without prior increment.
 #   ErrorCount             YELLOW         Any driver error during the test.
@@ -38,7 +38,7 @@
 #
 # SSOT IOCTL code rationale:
 #   CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD=0x17, fn, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
-#   Modern WDK (10.0.26100+) ndis.h does NOT define _NDIS_CONTROL_CODE — both
+#   Modern WDK (10.0.26100+) ndis.h does NOT define _NDIS_CONTROL_CODE  --  both
 #   kernel and user-mode code reach these values via the avb_ioctl.h fallback
 #   that calls winioctl.h CTL_CODE directly.  Old NDIS headers produced the
 #   0x9C40Axxx family which is WRONG for this environment.
@@ -58,7 +58,7 @@
 #   offset 176: FilterNetPnPCount  offset 184: PauseRestartGeneration
 
 function Get-AvbLifecycleSnapshot {
-    # Load DeviceIoControl P/Invoke (idempotent — Add-Type skipped if type already loaded)
+    # Load DeviceIoControl P/Invoke (idempotent  --  Add-Type skipped if type already loaded)
     if (-not ([System.Management.Automation.PSTypeName]'AvbIoctl').Type) {
         Add-Type -TypeDefinition @"
 using System;
@@ -101,11 +101,11 @@ public class AvbIoctl {
             0, [IntPtr]::Zero, [AvbIoctl]::OPEN_EXISTING,
             [AvbIoctl]::FILE_ATTRIBUTE_NORMAL, [IntPtr]::Zero)
         if ($h -eq [AvbIoctl]::INVALID_HANDLE_VALUE) {
-            Write-Host "  [LCY] (driver device not accessible — snapshot skipped)" -ForegroundColor DarkGray
+            Write-Host "  [LCY] (driver device not accessible  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
 
-        # Step 1: ENUM_ADAPTERS — get vendor/device ID for adapter 0
+        # Step 1: ENUM_ADAPTERS  --  get vendor/device ID for adapter 0
         # AVB_ENUM_REQUEST layout: index(u32)+count(u32)+vendor_id(u16)+device_id(u16)+capabilities(u32)+status(u32) = 20 bytes
         $enumBuf = New-Object byte[] 20  # index=0 already zero
         $enumRet = [uint32]0
@@ -113,19 +113,19 @@ public class AvbIoctl {
             $enumBuf, 20, $enumBuf, 20, [ref]$enumRet, [IntPtr]::Zero)
         if (-not $ok -or $enumRet -lt 20) {
             [AvbIoctl]::CloseHandle($h) | Out-Null
-            Write-Host "  [LCY] (ENUM_ADAPTERS failed — snapshot skipped)" -ForegroundColor DarkGray
+            Write-Host "  [LCY] (ENUM_ADAPTERS failed  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
         $adapterCount = [System.BitConverter]::ToUInt32($enumBuf, 4)
         if ($adapterCount -eq 0) {
             [AvbIoctl]::CloseHandle($h) | Out-Null
-            Write-Host "  [LCY] (no bound adapters — snapshot skipped)" -ForegroundColor DarkGray
+            Write-Host "  [LCY] (no bound adapters  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
         $vendorId = [System.BitConverter]::ToUInt16($enumBuf, 8)
         $deviceId = [System.BitConverter]::ToUInt16($enumBuf, 10)
 
-        # Step 2: OPEN_ADAPTER — bind handle to adapter 0
+        # Step 2: OPEN_ADAPTER  --  bind handle to adapter 0
         # AVB_OPEN_REQUEST layout: vendor_id(u16)+device_id(u16)+index(u32)+status(u32) = 12 bytes
         $openBuf = New-Object byte[] 12
         $v = [System.BitConverter]::GetBytes([uint16]$vendorId)
@@ -138,18 +138,18 @@ public class AvbIoctl {
             $openBuf, 12, $openBuf, 12, [ref]$openRet, [IntPtr]::Zero)
         if (-not $ok -or $openRet -lt 12) {
             [AvbIoctl]::CloseHandle($h) | Out-Null
-            Write-Host "  [LCY] (OPEN_ADAPTER failed — snapshot skipped)" -ForegroundColor DarkGray
+            Write-Host "  [LCY] (OPEN_ADAPTER failed  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
 
-        # Step 3: GET_STATISTICS — read 192-byte stats for adapter 0
+        # Step 3: GET_STATISTICS  --  read 192-byte stats for adapter 0
         $buf = New-Object byte[] 192
         $returned = [uint32]0
         $ok = [AvbIoctl]::DeviceIoControlOut($h, [AvbIoctl]::IOCTL_AVB_GET_STATISTICS,
             [IntPtr]::Zero, 0, $buf, 192, [ref]$returned, [IntPtr]::Zero)
         [AvbIoctl]::CloseHandle($h) | Out-Null
         if (-not $ok -or $returned -lt 192) {
-            Write-Host "  [LCY] (GET_STATISTICS failed — snapshot skipped)" -ForegroundColor DarkGray
+            Write-Host "  [LCY] (GET_STATISTICS failed  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
 
@@ -179,9 +179,9 @@ public class AvbIoctl {
 
 # Print a before/after diff of lifecycle metrics (only changed fields shown).
 # Colour coding:
-#   RED    — !!UNDERFLOW!! on a gauge (OutstandingXxx wrapped to ~UINT64_MAX)
-#   YELLOW — ErrorCount / FilterDetachCount / HardwareFaults increased
-#   GRAY   — normal counter activity
+#   RED     --  !!UNDERFLOW!! on a gauge (OutstandingXxx wrapped to ~UINT64_MAX)
+#   YELLOW  --  ErrorCount / FilterDetachCount / HardwareFaults increased
+#   GRAY    --  normal counter activity
 function Write-LifecycleDiff {
     param($Before, $After, [string]$Label)
     if ($null -eq $Before -or $null -eq $After) {
@@ -201,9 +201,9 @@ function Write-LifecycleDiff {
         }
     }
     if ($changed.Count -eq 0) {
-        Write-Host "  [LCY] $Label — no lifecycle metric changes" -ForegroundColor DarkGray
+        Write-Host "  [LCY] $Label  --  no lifecycle metric changes" -ForegroundColor DarkGray
     } else {
-        Write-Host "  [LCY] $Label — lifecycle metric delta:" -ForegroundColor DarkGray
+        Write-Host "  [LCY] $Label  --  lifecycle metric delta:" -ForegroundColor DarkGray
         foreach ($line in $changed) {
             $color = if ($line -match 'UNDERFLOW') { 'Red' } elseif ($line -match 'Error|Fault|Detach') { 'Yellow' } else { 'DarkGray' }
             Write-Host $line -ForegroundColor $color
