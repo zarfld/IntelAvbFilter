@@ -139,7 +139,27 @@ $HardwareUnitTests = @(
     "test_dev_lifecycle",          # device open/close lifecycle -- needs driver node
     "test_ts_event_sub",           # timestamp event subscription via driver
     "test_ptp_getset",             # PTP get/set time via driver IOCTL
-    "test_power_management"        # open→PHC→close→200ms Sleep→reopen (no system sleep)
+    "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
+    # Phase A: IOCTL functional tests (REQ #2-#13, previously missing from CI)
+    "test_ptp_freq",               # PTP frequency adjustment -- REQ-F-PTP-002 (#3)
+    "test_ptp_freq_complete",      # PTP frequency adjustment extended -- REQ-F-PTP-002 (#3)
+    "test_hw_ts_ctrl",             # hardware timestamp control -- REQ-F-PTP-003 (#5)
+    "test_rx_timestamp",           # RX timestamping -- REQ-F-PTP-004 (#6)
+    "test_rx_timestamp_complete",  # RX timestamping extended -- REQ-F-PTP-004 (#6)
+    "test_ioctl_target_time",      # target time/aux timestamp -- REQ-F-PTP-005 (#7)
+    "test_qav_cbs",                # Credit-Based Shaper config -- REQ-F-QAV-001 (#8)
+    "test_ioctl_tas",              # Time-Aware Shaper config -- REQ-F-TAS-001 (#9)
+    "test_ioctl_fp_ptm",           # Frame Preemption & PTM -- REQ-F-FP-001 (#11)
+    "test_tx_timestamp_retrieval", # TX timestamp retrieval -- REQ-F-IOCTL-TS-001 (#35)
+    "test_ioctl_phc_query",        # PHC query IOCTL -- REQ-F-PTP-PHC (#192)
+    "test_ioctl_offset",           # PHC offset adjustment -- (#194)
+    "test_ioctl_phc_epoch",        # PHC epoch management -- (#196)
+    "test_ioctl_phc_monotonicity", # PHC monotonicity guarantee -- (#197)
+    "test_ioctl_xstamp",           # cross-timestamp (PTP/system correlation) -- (#198)
+    "test_ioctl_abi",              # IOCTL ABI backward-compatibility
+    "test_ioctl_access_control",   # IOCTL access-control (privilege enforcement)
+    "test_ioctl_buffer_fuzz",      # IOCTL buffer-boundary fuzzing (security)
+    "test_tsn_ioctl_handlers"      # TSN IOCTL handlers (kernel-side, non-um)
 )
 
 # Integration-level tests that require the driver device node or Intel NIC.
