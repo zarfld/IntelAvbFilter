@@ -1,8 +1,13 @@
-# Intel AVB Filter Driver - Current Status Report
+> ⚠️ **HISTORICAL DOCUMENT — January 2025**  
+> This report is from early development when only simulation testing was possible.  
+> **Current status (March 2026): 106/113 hardware tests passing on 6×Intel I226-LM.**  
+> See [README.md](README.md) for the single source of truth on project status.
+
+# Intel AVB Filter Driver - Status Report (January 2025, Historical)
 
 **Date**: January 2025  
 **Build Status**: ? **SUCCESS** - Driver compiles cleanly  
-**Testing Status**: ?? **SIMULATION ONLY** - No real Intel hardware available  
+**Testing Status**: ?? **SIMULATION ONLY** - No real Intel hardware available at this time  
 
 ---
 

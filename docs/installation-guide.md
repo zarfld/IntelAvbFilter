@@ -4,7 +4,7 @@
 
 ### System Requirements
 - Windows 10 version 1809+ or Windows 11
-- Intel Ethernet Controller (I210, I217, I219, I225, I226, I350, 82575, 82576, or 82580)
+- Intel Ethernet Controller (I210, I217, I219, I225, I226, I225, or I226)
 - Administrator privileges
 - Visual Studio 2019+ with Windows Driver Kit (WDK) for development
 
@@ -53,7 +53,7 @@ bcdedit /enum {current} | findstr /i "testsigning"
 
 ```powershell
 # Navigate to the driver package directory
-cd "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter"
+cd ".\x64\Debug\IntelAvbFilter"
 
 # Install the driver using pnputil
 pnputil /add-driver IntelAvbFilter.inf /install
@@ -139,25 +139,25 @@ cd "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64"
 
 # Sign the driver .sys file
 .\signtool.exe sign /v /f $certPath /p $certPassword /t http://timestamp.digicert.com `
-    "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys"
+    ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys"
 
 # Sign the catalog file
 .\signtool.exe sign /v /f $certPath /p $certPassword /t http://timestamp.digicert.com `
-    "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.cat"
+    ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.cat"
 
 # Verify signatures
 .\signtool.exe verify /v /pa `
-    "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys"
+    ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys"
 ```
 
 ### Step 4: Install the Driver
 
 ```powershell
 # Install using pnputil
-pnputil /add-driver "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" /install
+pnputil /add-driver ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" /install
 
 # Or using netcfg for NDIS filter drivers
-netcfg -v -l "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
+netcfg -v -l ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
 ```
 
 ---
@@ -290,7 +290,7 @@ Error message: No connection could be made because the target machine actively r
 **Solution 3 - Clean Visual Studio Cache**:
 ```powershell
 # Close Visual Studio first!
-cd C:\Users\dzarf\source\repos\IntelAvbFilter
+cd .
 Remove-Item -Path ".vs" -Recurse -Force
 # Reopen Visual Studio and rebuild
 ```
@@ -304,10 +304,10 @@ Remove-Item -Path ".vs" -Recurse -Force
 **Solution**:
 ```powershell
 # Use absolute path
-netcfg -v -l "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
+netcfg -v -l ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
 
 # Verify all required files are present
-ls "C:\Users\dzarf\source\repos\IntelAvbFilter\x64\Debug\IntelAvbFilter"
+ls ".\x64\Debug\IntelAvbFilter"
 # Should show: IntelAvbFilter.inf, IntelAvbFilter.sys, IntelAvbFilter.cat
 ```
 
@@ -402,7 +402,7 @@ eventvwr.msc
 
 ```powershell
 # Run the AVB test application
-cd "C:\Users\dzarf\source\repos\IntelAvbFilter\tools\avb_test"
+cd ".\tools\avb_test"
 .\avb_test.exe
 
 # Expected output:

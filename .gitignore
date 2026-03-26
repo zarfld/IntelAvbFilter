@@ -373,3 +373,13 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 event_log_export.xml
+
+# -- Driver development artifacts (root-level) --------------------------------
+DvlErrLog.txt
+RCb*
+# Test runner output files
+test_output*.txt
+test_script*.txt
+test_baseline_*.txt
+# WDK / MSVC intermediate files in root
+*.cer

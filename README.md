@@ -205,7 +205,7 @@ Run from Command Palette (`Ctrl+Shift+P → Tasks: Run Task`):
 
 ### **Manual Installation** (Advanced Users)
 
-For complete manual installation instructions see [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md).
+For complete manual installation instructions see [docs/installation-guide.md](docs/installation-guide.md).
 
 ```cmd
 # Enable test signing (required for development)
