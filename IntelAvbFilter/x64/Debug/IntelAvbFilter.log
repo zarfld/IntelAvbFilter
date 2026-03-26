@@ -1,4 +1,0 @@
-﻿  precomp.c
-D:\Repos\IntelAvbFilter\precomp.h(2,10): error C1083: Datei (Include) kann nicht geöffnet werden: "ndis.h": No such file or directory
-  (Quelldatei „precomp.c“ wird kompiliert)
-  
