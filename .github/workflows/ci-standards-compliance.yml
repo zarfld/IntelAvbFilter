@@ -369,7 +369,7 @@ jobs:
         # On self-hosted runners, verify all required tools are present.
         # This job NEVER installs anything — it only reports missing prerequisites.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: pwsh
+        shell: powershell
         run: |
           $missing = @()
 
@@ -379,8 +379,8 @@ jobs:
                       Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
                       Select-Object -First 1
           if ($wdkFound) {
-            Write-Host "✅ WDK km headers present: $($wdkFound.FullName)" -ForegroundColor Green
-            "WDK_VERSION=$($wdkFound.Name)" >> $env:GITHUB_ENV
+            Write-Host "WDK km headers present: $($wdkFound.FullName)"
+            "WDK_VERSION=$($wdkFound.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
           }
@@ -388,7 +388,7 @@ jobs:
           # Npcap SDK
           $npcapDest = 'C:\npcap-sdk-1.16'
           if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
-            Write-Host "✅ Npcap SDK present: $npcapDest" -ForegroundColor Green
+            Write-Host "Npcap SDK present: $npcapDest"
           } else {
             $missing += "Npcap SDK (expected at $npcapDest)"
           }
@@ -397,18 +397,18 @@ jobs:
           $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
           $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
           if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
-            Write-Host "✅ TAEF development headers present" -ForegroundColor Green
-            "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
-            "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+            Write-Host "TAEF development headers present"
+            "TAEF_INCLUDE=$taefInc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "TAEF_LIB=$taefLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($found) {
-              Write-Host "✅ TAEF headers found at $($found.DirectoryName)" -ForegroundColor Green
-              "TAEF_INCLUDE=$($found.DirectoryName)" >> $env:GITHUB_ENV
+              Write-Host "TAEF headers found at $($found.DirectoryName)"
+              "TAEF_INCLUDE=$($found.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
               $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
-              "TAEF_LIB=$lib" >> $env:GITHUB_ENV
+              "TAEF_LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             } else {
-              Write-Host "⚠️ TAEF/WEX headers not found — taef_tests will be skipped" -ForegroundColor Yellow
+              Write-Host "WARNING: TAEF/WEX headers not found -- taef_tests will be skipped"
             }
           }
 
@@ -417,7 +417,7 @@ jobs:
           if (Test-Path $vswhere) {
             $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
             if ($vsPath) {
-              Write-Host "✅ Visual Studio present: $vsPath" -ForegroundColor Green
+              Write-Host "Visual Studio present: $vsPath"
             } else {
               $missing += 'Visual Studio (vswhere found no installations)'
             }
@@ -426,18 +426,18 @@ jobs:
           }
 
           if ($missing.Count -gt 0) {
-            Write-Host "" 
-            Write-Host "❌ Missing prerequisites on self-hosted runner:" -ForegroundColor Red
-            $missing | ForEach-Object { Write-Host "   - $_" -ForegroundColor Red }
-            Write-Host "Install these manually on the runner machine before running hardware CI jobs." -ForegroundColor Red
+            Write-Host ""
+            Write-Host "ERROR: Missing prerequisites on self-hosted runner:"
+            $missing | ForEach-Object { Write-Host "   - $_" }
+            Write-Host "Install these manually on the runner machine before running hardware CI jobs."
             exit 1
           }
-          Write-Host "" 
-          Write-Host "✅ All prerequisites verified on $env:RUNNER_NAME" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "All prerequisites verified on $env:RUNNER_NAME"
 
       - name: Build Windows driver tests (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "🏗️ Building Windows driver test executables (${{ matrix.config }})..." -ForegroundColor Cyan
           .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
@@ -445,7 +445,7 @@ jobs:
 
       - name: Run hardware-independent unit tests (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
           # Run-Tests-Elevated.ps1 uses Start-Process -Verb RunAs (interactive UAC) and is
@@ -457,7 +457,7 @@ jobs:
         # test_s3_sleep_wake is intentionally absent from HardwareUnit: TC-S3-002 calls
         # SetSuspendState which puts the host into S3 sleep, blocking the runner.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "🔧 Running hardware-dependent unit tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareUnit
@@ -467,7 +467,7 @@ jobs:
         #           #304 (TEST-REGS-001), #305 (TEST-REGS-002), #306 (TEST-REGS-003)
         # Static analysis + build artifact checks — no hardware required.
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $failed = 0
@@ -497,21 +497,30 @@ jobs:
 
       - name: Hardware-dependent tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows' && matrix.hardware == false
-        shell: pwsh
+        shell: powershell
         run: |
-          Write-Host "[INFO] Hardware-dependent tests (avb_test_i226, avb_test_i210, ptp_clock_control_test, " -ForegroundColor DarkGray
-          Write-Host "       tsauxc_toggle_test, device_open_test) require a supported Intel NIC." -ForegroundColor DarkGray
-          Write-Host "[INFO] These tests are NOT run on CI runners — execute them manually on a machine with hardware." -ForegroundColor DarkGray
+          Write-Host "[INFO] Hardware-dependent tests (avb_test_i226, avb_test_i210, ptp_clock_control_test, "
+          Write-Host "       tsauxc_toggle_test, device_open_test) require a supported Intel NIC."
+          Write-Host "[INFO] These tests are NOT run on CI runners -- execute them manually on a machine with hardware."
 
       - name: Report test status
+        if: matrix.hardware != true
         shell: bash
         run: |
-          echo "📊 Test Status Report"
+          echo "Test Status Report"
           echo "   OS: ${{ matrix.os }}"
           echo "   Configuration: ${{ matrix.config }}"
           echo "   Build System: ${{ env.BUILD_SYSTEM }}"
           echo ""
-          echo "📈 Code coverage target: >=${{ env.MIN_TEST_COVERAGE }}%"
+          echo "Code coverage target: >=${{ env.MIN_TEST_COVERAGE }}%"
+
+      - name: Report test status (hardware runner)
+        if: matrix.hardware == true
+        shell: powershell
+        run: |
+          Write-Host "Test Status Report"
+          Write-Host "   Runner: $env:RUNNER_NAME"
+          Write-Host "   Configuration: ${{ matrix.config }}"
 
   traceability-coverage:
     name: Traceability Coverage Enforcement
@@ -727,7 +736,7 @@ jobs:
         # On self-hosted runners, verify all required tools are present.
         # This job NEVER installs anything — it only reports missing prerequisites.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: pwsh
+        shell: powershell
         run: |
           $missing = @()
 
@@ -737,8 +746,8 @@ jobs:
                       Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
                       Select-Object -First 1
           if ($wdkFound) {
-            Write-Host "✅ WDK km headers present: $($wdkFound.FullName)" -ForegroundColor Green
-            "WDK_VERSION=$($wdkFound.Name)" >> $env:GITHUB_ENV
+            Write-Host "WDK km headers present: $($wdkFound.FullName)"
+            "WDK_VERSION=$($wdkFound.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
           }
@@ -746,7 +755,7 @@ jobs:
           # Npcap SDK
           $npcapDest = 'C:\npcap-sdk-1.16'
           if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
-            Write-Host "✅ Npcap SDK present: $npcapDest" -ForegroundColor Green
+            Write-Host "Npcap SDK present: $npcapDest"
           } else {
             $missing += "Npcap SDK (expected at $npcapDest)"
           }
@@ -755,18 +764,18 @@ jobs:
           $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
           $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
           if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
-            Write-Host "✅ TAEF development headers present" -ForegroundColor Green
-            "TAEF_INCLUDE=$taefInc" >> $env:GITHUB_ENV
-            "TAEF_LIB=$taefLib" >> $env:GITHUB_ENV
+            Write-Host "TAEF development headers present"
+            "TAEF_INCLUDE=$taefInc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "TAEF_LIB=$taefLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
             $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($found) {
-              Write-Host "✅ TAEF headers found at $($found.DirectoryName)" -ForegroundColor Green
-              "TAEF_INCLUDE=$($found.DirectoryName)" >> $env:GITHUB_ENV
+              Write-Host "TAEF headers found at $($found.DirectoryName)"
+              "TAEF_INCLUDE=$($found.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
               $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
-              "TAEF_LIB=$lib" >> $env:GITHUB_ENV
+              "TAEF_LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             } else {
-              Write-Host "⚠️ TAEF/WEX headers not found — taef_tests will be skipped" -ForegroundColor Yellow
+              Write-Host "WARNING: TAEF/WEX headers not found -- taef_tests will be skipped"
             }
           }
 
@@ -775,7 +784,7 @@ jobs:
           if (Test-Path $vswhere) {
             $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
             if ($vsPath) {
-              Write-Host "✅ Visual Studio present: $vsPath" -ForegroundColor Green
+              Write-Host "Visual Studio present: $vsPath"
             } else {
               $missing += 'Visual Studio (vswhere found no installations)'
             }
@@ -784,18 +793,18 @@ jobs:
           }
 
           if ($missing.Count -gt 0) {
-            Write-Host "" 
-            Write-Host "❌ Missing prerequisites on self-hosted runner:" -ForegroundColor Red
-            $missing | ForEach-Object { Write-Host "   - $_" -ForegroundColor Red }
-            Write-Host "Install these manually on the runner machine before running hardware CI jobs." -ForegroundColor Red
+            Write-Host ""
+            Write-Host "ERROR: Missing prerequisites on self-hosted runner:"
+            $missing | ForEach-Object { Write-Host "   - $_" }
+            Write-Host "Install these manually on the runner machine before running hardware CI jobs."
             exit 1
           }
-          Write-Host "" 
-          Write-Host "✅ All prerequisites verified on $env:RUNNER_NAME" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "All prerequisites verified on $env:RUNNER_NAME"
 
       - name: Build Windows integration tests (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "🏗️ Building Windows integration test executables (${{ matrix.config }})..." -ForegroundColor Cyan
           .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
@@ -803,7 +812,7 @@ jobs:
 
       - name: Run Windows integration tests (hardware-independent subset)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Integration
@@ -812,20 +821,21 @@ jobs:
         # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
         # test_s3_sleep_wake is intentionally absent from HardwareIntegration.
         if: runner.os == 'Windows' && matrix.hardware == true
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "🔧 Running hardware-dependent integration tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareIntegration
 
       - name: Hardware-dependent integration tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows' && matrix.hardware == false
-        shell: pwsh
+        shell: powershell
         run: |
-          Write-Host "[INFO] Hardware-dependent integration tests (avb_test_i226, avb_test_i210, " -ForegroundColor DarkGray
-          Write-Host "       comprehensive_ioctl_test, hw_timestamping_control_test, rx_timestamping_test)" -ForegroundColor DarkGray
-          Write-Host "       require a supported Intel NIC — NOT run on CI runners." -ForegroundColor DarkGray
+          Write-Host "[INFO] Hardware-dependent integration tests (avb_test_i226, avb_test_i210, "
+          Write-Host "       comprehensive_ioctl_test, hw_timestamping_control_test, rx_timestamping_test)"
+          Write-Host "       require a supported Intel NIC -- NOT run on CI runners."
 
       - name: Validate integration test status
+        if: matrix.hardware != true
         shell: bash
         run: |
           echo "📊 Integration Test Status"
