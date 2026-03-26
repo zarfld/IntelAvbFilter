@@ -66,6 +66,13 @@ function Write-Skip   { param([string]$m) Write-Host "[SKIP] $m" -ForegroundColo
 function Write-Note   { param([string]$m) Write-Host "[INFO] $m" -ForegroundColor Yellow }
 
 # ===========================
+# Lifecycle Metrics Snapshot — SSOT: tools/test/Lib-AvbLifecycle.ps1
+# ===========================
+# Gracefully skipped when driver is absent (Unit/Integration suites on GitHub-hosted runners).
+# Active on HardwareUnit/HardwareIntegration suites where the driver is installed.
+. (Join-Path $PSScriptRoot 'Lib-AvbLifecycle.ps1')
+
+# ===========================
 # Built-in hardware-independent test lists
 # ===========================
 $UnitTests = @(
@@ -258,9 +265,16 @@ foreach ($TestName in $TestList) {
 
     Write-Host "`n  => $exeName" -ForegroundColor Cyan
 
+    # --- Lifecycle snapshot BEFORE ---
+    $lcyBefore = Get-AvbLifecycleSnapshot
+
     # Run the binary, tee to log, capture exit code.
     & $exePath 2>&1 | Tee-Object -FilePath $logFile
     $exitCode = $LASTEXITCODE
+
+    # --- Lifecycle snapshot AFTER + diff ---
+    $lcyAfter = Get-AvbLifecycleSnapshot
+    Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
 
     if ($exitCode -eq 0 -or $null -eq $exitCode) {
         $passedTests++
