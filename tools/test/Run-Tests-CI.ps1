@@ -1,12 +1,12 @@
-# Run-Tests-CI.ps1
+﻿# Run-Tests-CI.ps1
 # CI-specific test runner for GitHub Actions and other headless CI environments.
 #
-# RATIONALE — Three-script test architecture:
-#   Run-Tests-Elevated.ps1  LOCAL DEV only — spawns elevated shell via Start-Process -Verb RunAs.
+# RATIONALE -- Three-script test architecture:
+#   Run-Tests-Elevated.ps1  LOCAL DEV only -- spawns elevated shell via Start-Process -Verb RunAs.
 #                           Interactive UAC required; caller terminal shows nothing (logs only).
-#   Run-Tests.ps1           ADMIN DEV / full suite — checks driver service, Intel hardware,
+#   Run-Tests.ps1           ADMIN DEV / full suite -- checks driver service, Intel hardware,
 #                           device node. Requires the driver to be installed and hardware present.
-#   Run-Tests-CI.ps1        CI use — GitHub runner is already Administrator; no hardware/driver
+#   Run-Tests-CI.ps1        CI use -- GitHub runner is already Administrator; no hardware/driver
 #                           expected; hardware-independent tests only; no interactive prompts.
 #
 # Implements: #27 (REQ-NF-SCRIPTS-001: Consolidated Script Architecture)
@@ -43,7 +43,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ===========================
-# No admin check here — by design.
+# No admin check here -- by design.
 #
 # Run-Tests.ps1 (the full local runner) requires admin because it accesses the
 # driver device node (\\.\IntelAvbFilter) and runs hardware checks.
@@ -69,7 +69,7 @@ function Write-Note   { param([string]$m) Write-Host "[INFO] $m" -ForegroundColo
 # Built-in hardware-independent test lists
 # ===========================
 $UnitTests = @(
-    # Pure static/logic tests — no driver device, no hardware, run fine on CI.
+    # Pure static/logic tests -- no driver device, no hardware, run fine on CI.
     "test_register_constants",
     "test_magic_numbers",
     "test_scripts_consolidate",
@@ -80,35 +80,35 @@ $UnitTests = @(
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require
 # the driver to be installed and will always fail on a runner without the NIC.
-# NOT added to $UnitTests / $IntegrationTests — documented here for visibility.
+# NOT added to $UnitTests / $IntegrationTests -- documented here for visibility.
 $HardwareDependentTests = @(
     "test_cleanup_archive",        # checks build output structure against installed driver
     "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
-    "test_ioctl_routing",          # DeviceIoControl — driver must be loaded
+    "test_ioctl_routing",          # DeviceIoControl -- driver must be loaded
     "test_ioctl_trace",            # DeviceIoControl trace IOCTLs
     "test_minimal_ioctl",          # minimal IOCTL round-trip to driver
     "test_clock_config",           # hardware clock register access
     "test_clock_working",          # PTP clock hardware test
     "test_direct_clock",           # direct clock register read/write
-    "test_hal_performance",        # HAL timer/DMA performance — needs NIC
+    "test_hal_performance",        # HAL timer/DMA performance -- needs NIC
     "test_atdecc_event",           # ATDECC event subscription via driver IOCTL
-    "test_atdecc_aen_protocol",    # ATDECC AEN protocol — driver IOCTL path
+    "test_atdecc_aen_protocol",    # ATDECC AEN protocol -- driver IOCTL path
     "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
     "test_mdio_phy",               # MDIO PHY register access via driver
-    "test_dev_lifecycle",          # device open/close lifecycle — needs driver node
+    "test_dev_lifecycle",          # device open/close lifecycle -- needs driver node
     "test_ts_event_sub",           # timestamp event subscription via driver
     "test_ptp_getset",             # PTP get/set time via driver IOCTL
-    # Integration-level tests — all require driver + hardware
+    # Integration-level tests -- all require driver + hardware
     "ssot_register_validation_test",  # SSOT register validation via device access
-    "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers — driver required
+    "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers -- driver required
     "test_all_adapters",              # enumerates all Intel AVB adapters
     "test_multidev_adapter_enum",     # multi-device adapter enumeration
     "test_device_register_access",    # direct device register read/write
-    "test_ndis_send_path",            # NDIS send path — needs NIC
-    "test_ndis_receive_path",         # NDIS receive path — needs NIC
+    "test_ndis_send_path",            # NDIS send path -- needs NIC
+    "test_ndis_receive_path",         # NDIS receive path -- needs NIC
     "test_hw_state_machine",          # hardware state machine transitions
     "test_lazy_initialization",       # lazy init via driver device open
-    "test_registry_diagnostics"       # registry diagnostics — driver service required
+    "test_registry_diagnostics"       # registry diagnostics -- driver service required
 )
 
 # All integration-level tests open the driver device or enumerate hardware.
@@ -120,23 +120,23 @@ $IntegrationTests = @()
 # Hardware-dependent test lists (self-hosted runner only)
 # ===========================
 # Unit-level tests that require the driver device node (\\.\.\IntelAvbFilter) or Intel NIC.
-# Safe to run on an automated self-hosted runner — none of these hibernate or sleep the PC.
-# EXCLUDED: test_s3_sleep_wake (TC-S3-002 calls SetSuspendState — hibernates the host).
+# Safe to run on an automated self-hosted runner -- none of these hibernate or sleep the PC.
+# EXCLUDED: test_s3_sleep_wake (TC-S3-002 calls SetSuspendState -- hibernates the host).
 $HardwareUnitTests = @(
     "test_cleanup_archive",        # checks build output against installed driver
     "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
-    "test_ioctl_routing",          # DeviceIoControl — driver must be loaded
+    "test_ioctl_routing",          # DeviceIoControl -- driver must be loaded
     "test_ioctl_trace",            # DeviceIoControl trace IOCTLs
     "test_minimal_ioctl",          # minimal IOCTL round-trip to driver
     "test_clock_config",           # hardware clock register access
     "test_clock_working",          # PTP clock hardware test
     "test_direct_clock",           # direct clock register read/write
-    "test_hal_performance",        # HAL timer/DMA performance — needs NIC
+    "test_hal_performance",        # HAL timer/DMA performance -- needs NIC
     "test_atdecc_event",           # ATDECC event subscription via driver IOCTL
-    "test_atdecc_aen_protocol",    # ATDECC AEN protocol — driver IOCTL path
+    "test_atdecc_aen_protocol",    # ATDECC AEN protocol -- driver IOCTL path
     "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
     "test_mdio_phy",               # MDIO PHY register access via driver
-    "test_dev_lifecycle",          # device open/close lifecycle — needs driver node
+    "test_dev_lifecycle",          # device open/close lifecycle -- needs driver node
     "test_ts_event_sub",           # timestamp event subscription via driver
     "test_ptp_getset",             # PTP get/set time via driver IOCTL
     "test_power_management"        # open→PHC→close→200ms Sleep→reopen (no system sleep)
@@ -146,15 +146,15 @@ $HardwareUnitTests = @(
 # Safe to run on an automated self-hosted runner.
 $HardwareIntegrationTests = @(
     "ssot_register_validation_test",  # SSOT register validation via device access
-    "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers — driver required
+    "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers -- driver required
     "test_all_adapters",              # enumerates all Intel AVB adapters
     "test_multidev_adapter_enum",     # multi-device adapter enumeration
     "test_device_register_access",    # direct device register read/write
-    "test_ndis_send_path",            # NDIS send path — needs NIC
-    "test_ndis_receive_path",         # NDIS receive path — needs NIC
+    "test_ndis_send_path",            # NDIS send path -- needs NIC
+    "test_ndis_receive_path",         # NDIS receive path -- needs NIC
     "test_hw_state_machine",          # hardware state machine transitions
     "test_lazy_initialization",       # lazy init via driver device open
-    "test_registry_diagnostics"       # registry diagnostics — driver service required
+    "test_registry_diagnostics"       # registry diagnostics -- driver service required
 )
 
 # ===========================
@@ -226,7 +226,7 @@ foreach ($TestName in $TestList) {
     $exePath = Join-Path $testExeDir $exeName
 
     if (-not (Test-Path $exePath)) {
-        Write-Skip "$exeName (binary not found — not built or not applicable)"
+        Write-Skip "$exeName (binary not found -- not built or not applicable)"
         $skippedTests++
         $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = "N/A" }
         continue
@@ -264,7 +264,7 @@ foreach ($TestName in $TestList) {
 Write-Host @"
 
 ================================================================
-  CI Test Summary — $Suite suite ($Configuration)
+  CI Test Summary -- $Suite suite ($Configuration)
 ================================================================
 "@ -ForegroundColor Cyan
 
@@ -277,7 +277,7 @@ Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
 Write-Host ""
 
 if ($failedTests -eq 0 -and $passedTests -eq 0) {
-    Write-Note "No tests ran (all skipped — check that Build-Tests.ps1 ran first)"
+    Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)"
     exit 0
 }
 
