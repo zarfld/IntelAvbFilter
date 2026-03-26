@@ -2081,7 +2081,13 @@ Arguments:
     DEBUGP(DL_TRACE, "===>ReturnNetBufferLists, NetBufferLists is %p.\n", NetBufferLists);
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
-        InterlockedDecrement64(&avbCtx->stats_outstanding_receive_nbls);
+        /* Count actual NBLs being returned — NDIS may return a subset of an original
+         * indication batch, so we cannot assume 1:1 with FilterReceiveNetBufferLists
+         * calls. Decrement by the real chain length to keep the gauge balanced. */
+        PNET_BUFFER_LIST countNbl = NetBufferLists;
+        LONGLONG nblCount = 0;
+        while (countNbl) { nblCount++; countNbl = NET_BUFFER_LIST_NEXT_NBL(countNbl); }
+        InterlockedAdd64(&avbCtx->stats_outstanding_receive_nbls, -nblCount);
     }
 
 
@@ -2200,7 +2206,10 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
     DEBUGP(DL_TRACE, "===>ReceiveNetBufferList: NetBufferLists = %p.\n", NetBufferLists);
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
-        InterlockedIncrement64(&avbCtx->stats_outstanding_receive_nbls);
+        /* Use NumberOfNetBufferLists (batch size) not +1: a single call may carry
+         * multiple NBLs, and NDIS may return them in smaller sub-batches via
+         * FilterReturnNetBufferLists, causing underflow if we only increment by 1. */
+        InterlockedAdd64(&avbCtx->stats_outstanding_receive_nbls, (LONGLONG)NumberOfNetBufferLists);
     }
     do
     {
