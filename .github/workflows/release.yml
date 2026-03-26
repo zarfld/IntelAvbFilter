@@ -1,0 +1,307 @@
+# Release Pipeline — IntelAvbFilter
+#
+# Packages and publishes GitHub Releases containing the signed driver bundle
+# (IntelAvbFilter.inf / .sys / .cat) with SHA256 checksums and install notes.
+#
+# Triggers:
+#   1. push: tags: v*         — manual tagged release  (e.g. git tag v0.1-alpha && git push --tags)
+#   2. schedule: Monday 03:00 UTC — automated weekly pre-release if commits exist since last tag
+#   3. workflow_dispatch       — on-demand with optional version override
+#
+# Artifacts path (matches deploy-staging in ci-standards-compliance.yml):
+#   build\x64\Release\IntelAvbFilter\
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  schedule:
+    - cron: '0 3 * * 1'   # Monday 03:00 UTC — weekly automated pre-release
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.2-alpha). Leave blank to auto-generate.'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # required to create/update releases and tags
+
+env:
+  ARTIFACT_DIR: build\x64\Release\IntelAvbFilter
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Determine version string and whether to proceed
+  # ─────────────────────────────────────────────────────────────────────────
+  prepare:
+    name: Prepare Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version:       ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history required for tag inspection
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # Auto-generate: <latest-tag>-nightly-YYYYMMDD
+            LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1")
+            # Strip any existing nightly suffix so we don't stack them
+            BASE=$(echo "$LATEST" | sed 's/-nightly-[0-9]*//')
+            VERSION="${BASE}-nightly-$(date +%Y%m%d)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Pre-release if tag contains alpha/beta/rc/nightly/dev, or dispatch with prerelease=true
+          if echo "$VERSION" | grep -qE '(alpha|beta|rc|nightly|dev)'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Release version: $VERSION"
+
+      - name: Check for new commits since last release
+        id: check
+        shell: bash
+        run: |
+          # Tag and workflow_dispatch runs always proceed.
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Scheduled run: skip if nothing has changed since the last tag.
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No tags found — proceeding with first release"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          COMMITS=$(git log "${LAST_TAG}..HEAD" --oneline | wc -l)
+          if [ "$COMMITS" -gt 0 ]; then
+            echo "Found $COMMITS commit(s) since $LAST_TAG — proceeding"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No commits since $LAST_TAG — skipping scheduled release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Build and sign the driver, package ZIP + SHA256
+  # ─────────────────────────────────────────────────────────────────────────
+  build-driver:
+    name: Build Driver (Release)
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install MSVC tools
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Windows Driver Kit (WDK)
+        uses: ./.github/actions/install-wdk
+
+      # Step name intentionally matches the Deploy to Staging job in ci-standards-compliance.yml
+      - name: Deploy to Staging
+        shell: pwsh
+        run: |
+          Write-Host "Building IntelAvbFilter ${{ needs.prepare.outputs.version }}..." -ForegroundColor Cyan
+          .\tools\build\Build-Driver.ps1 -Configuration Release -Sign
+          Write-Host "Driver build and signing complete" -ForegroundColor Green
+
+      - name: Verify driver artifacts
+        shell: pwsh
+        run: |
+          $dir = "${{ env.ARTIFACT_DIR }}"
+          $required = @('IntelAvbFilter.inf', 'IntelAvbFilter.sys', 'IntelAvbFilter.cat')
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dir $_)) }
+          if ($missing.Count -gt 0) {
+            Write-Host "ERROR: Missing driver artifacts:" -ForegroundColor Red
+            $missing | ForEach-Object { Write-Host "  - $_" }
+            exit 1
+          }
+          Write-Host "Driver artifacts verified:" -ForegroundColor Green
+          Get-ChildItem $dir -File | ForEach-Object {
+            Write-Host "  $($_.Name)  ($([Math]::Round($_.Length/1KB, 1)) KB)"
+          }
+
+      - name: Generate SHA256 checksums
+        shell: pwsh
+        run: |
+          $dir = "${{ env.ARTIFACT_DIR }}"
+          $lines = Get-ChildItem $dir -File |
+            Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+              "$hash  $($_.Name)"
+            }
+          $lines | Out-File -FilePath (Join-Path $dir 'SHA256SUMS.txt') -Encoding utf8 -Force
+          Write-Host "SHA256SUMS.txt:"
+          $lines | ForEach-Object { Write-Host "  $_" }
+
+      - name: Package driver ZIP
+        shell: pwsh
+        run: |
+          $version = "${{ needs.prepare.outputs.version }}"
+          $dir     = "${{ env.ARTIFACT_DIR }}"
+          $zipName = "IntelAvbFilter-${version}-windows-x64.zip"
+          $files   = Get-ChildItem $dir -File
+          Compress-Archive -Path $files.FullName -DestinationPath $zipName -Force
+          Write-Host "Packaged: $zipName  ($([Math]::Round((Get-Item $zipName).Length/1KB, 1)) KB)"
+          # Save name for downstream step
+          "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: driver-release-package
+          path: IntelAvbFilter-*.zip
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Create GitHub Release
+  # ─────────────────────────────────────────────────────────────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: [prepare, build-driver]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download driver package
+        uses: actions/download-artifact@v4
+        with:
+          name: driver-release-package
+          path: release-assets/
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          cat > release-assets/release_notes.md << 'NOTES_EOF'
+          ## IntelAvbFilter VERSION_PLACEHOLDER
+
+          Windows NDIS 6.30 LWF (Light-Weight Filter) driver for IEEE 802.1 AVB/TSN support
+          on Intel Ethernet controllers.
+
+          > **⚠️ Alpha / Pre-release** — Test-signed only. Requires test-signing mode.
+          > Not for production use.
+
+          ---
+
+          ### Supported Controllers
+
+          | Controller | Status |
+          |---|---|
+          | Intel I226-LM / I226-V | ✅ Verified — 6 units, 113 test cases (106/113 passing) |
+          | Intel I225-LM / I225-V | 🔷 Code-ready, unverified (no hardware in lab) |
+          | Intel I219-LM / I219-V | 🔷 Code-ready, unverified |
+          | Intel I210 | 🔷 Code-ready, unverified |
+          | Intel I217 | 🔷 Code-ready, unverified |
+
+          ---
+
+          ### Installation
+
+          **Prerequisites:** Windows 10 / 11 x64 · PowerShell 5.1+ · Administrator rights
+
+          ```powershell
+          # 1. Enable test signing (one-time; requires reboot)
+          bcdedit /set testsigning on
+          Restart-Computer
+
+          # 2. Extract and install
+          Expand-Archive IntelAvbFilter-VERSION_PLACEHOLDER-windows-x64.zip -DestinationPath IntelAvbFilter
+          cd IntelAvbFilter
+          powershell -ExecutionPolicy Bypass -File tools\setup\Install-Driver.ps1 -Configuration Release -Action InstallDriver
+
+          # 3. Verify adapter is visible
+          Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Intel*" }
+          ```
+
+          ### Uninstall
+
+          ```powershell
+          powershell -ExecutionPolicy Bypass -File tools\setup\Install-Driver.ps1 -Configuration Release -Action UninstallDriver
+          # Optionally restore default boot config
+          bcdedit /set testsigning off
+          Restart-Computer
+          ```
+
+          ---
+
+          ### SHA256 Checksums
+
+          Checksums for the ZIP contents are included as `SHA256SUMS.txt` inside the archive.
+          Verify with:
+          ```powershell
+          $zip = "IntelAvbFilter-VERSION_PLACEHOLDER-windows-x64.zip"
+          (Get-FileHash $zip -Algorithm SHA256).Hash
+          ```
+
+          ---
+
+          ### Known Failures (7 / 113 tests)
+
+          | Test | Category | Reason |
+          |---|---|---|
+          | `test_eitr0_coalescing` | Cat 2 | EITR0 register coalescing not committed |
+          | `test_s3_sleep_wake` | Cat 2 | S3 wake unconfirmed — run manually only |
+          | `test_event_log` | Cat 2 | ETW manifest not registered (feature gap #269) |
+          | `test_i219_link_*` | Cat 3 | No I219 hardware in CI lab |
+          | `test_oscilloscope_*` | Cat 3 | Requires lab oscilloscope equipment |
+
+          ---
+
+          ### Build Info
+
+          | Field | Value |
+          |---|---|
+          | Build | Automated CI — `deploy-staging` |
+          | Signing | Test-signed (self-signed certificate) |
+          | Platform | Windows x64 |
+          | WDK | Windows Driver Kit 10.x |
+
+          NOTES_EOF
+
+          # Replace VERSION_PLACEHOLDER with actual version
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" release-assets/release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ needs.prepare.outputs.version }}
+          name:       "IntelAvbFilter ${{ needs.prepare.outputs.version }}"
+          body_path:  release-assets/release_notes.md
+          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+          draft:      false
+          files:      release-assets/IntelAvbFilter-*.zip
