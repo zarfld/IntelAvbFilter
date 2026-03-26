@@ -17,12 +17,18 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug",
 
-    # Suite selects the built-in hardware-independent test list.
-    # "Unit" = fast unit tests (unit-tests CI job)
-    # "Integration" = integration-level tests (integration-tests CI job)
-    # "All" = both lists combined
+    # Suite selects the built-in test list.
+    # "Unit"              = fast hardware-independent unit tests (GitHub-hosted CI)
+    # "Integration"       = hardware-independent integration tests (GitHub-hosted CI; currently empty)
+    # "All"               = Unit + Integration combined
+    # "HardwareUnit"      = unit-level tests that need Intel NIC + driver (self-hosted runner only)
+    # "HardwareIntegration" = integration-level tests that need Intel NIC + driver (self-hosted runner only)
+    #
+    # SAFETY NOTE: test_s3_sleep_wake (TC-S3-002) sends the machine into S3 sleep via
+    # SetSuspendState. It is intentionally absent from ALL automated suites including
+    # HardwareUnit and HardwareIntegration. Run it manually on a dedicated test machine.
     [Parameter(Mandatory=$false)]
-    [ValidateSet("Unit", "Integration", "All")]
+    [ValidateSet("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration")]
     [string]$Suite = "Unit",
 
     # Override the test list entirely (names without .exe extension).
@@ -111,15 +117,58 @@ $HardwareDependentTests = @(
 $IntegrationTests = @()
 
 # ===========================
+# Hardware-dependent test lists (self-hosted runner only)
+# ===========================
+# Unit-level tests that require the driver device node (\\.\.\IntelAvbFilter) or Intel NIC.
+# Safe to run on an automated self-hosted runner — none of these hibernate or sleep the PC.
+# EXCLUDED: test_s3_sleep_wake (TC-S3-002 calls SetSuspendState — hibernates the host).
+$HardwareUnitTests = @(
+    "test_cleanup_archive",        # checks build output against installed driver
+    "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
+    "test_ioctl_routing",          # DeviceIoControl — driver must be loaded
+    "test_ioctl_trace",            # DeviceIoControl trace IOCTLs
+    "test_minimal_ioctl",          # minimal IOCTL round-trip to driver
+    "test_clock_config",           # hardware clock register access
+    "test_clock_working",          # PTP clock hardware test
+    "test_direct_clock",           # direct clock register read/write
+    "test_hal_performance",        # HAL timer/DMA performance — needs NIC
+    "test_atdecc_event",           # ATDECC event subscription via driver IOCTL
+    "test_atdecc_aen_protocol",    # ATDECC AEN protocol — driver IOCTL path
+    "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
+    "test_mdio_phy",               # MDIO PHY register access via driver
+    "test_dev_lifecycle",          # device open/close lifecycle — needs driver node
+    "test_ts_event_sub",           # timestamp event subscription via driver
+    "test_ptp_getset",             # PTP get/set time via driver IOCTL
+    "test_power_management"        # open→PHC→close→200ms Sleep→reopen (no system sleep)
+)
+
+# Integration-level tests that require the driver device node or Intel NIC.
+# Safe to run on an automated self-hosted runner.
+$HardwareIntegrationTests = @(
+    "ssot_register_validation_test",  # SSOT register validation via device access
+    "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers — driver required
+    "test_all_adapters",              # enumerates all Intel AVB adapters
+    "test_multidev_adapter_enum",     # multi-device adapter enumeration
+    "test_device_register_access",    # direct device register read/write
+    "test_ndis_send_path",            # NDIS send path — needs NIC
+    "test_ndis_receive_path",         # NDIS receive path — needs NIC
+    "test_hw_state_machine",          # hardware state machine transitions
+    "test_lazy_initialization",       # lazy init via driver device open
+    "test_registry_diagnostics"       # registry diagnostics — driver service required
+)
+
+# ===========================
 # Resolve which tests to run
 # ===========================
 if ($Tests.Count -gt 0) {
     $TestList = $Tests
 } else {
     $TestList = switch ($Suite) {
-        "Unit"        { $UnitTests }
-        "Integration" { $IntegrationTests }
-        "All"         { $UnitTests + $IntegrationTests }
+        "Unit"                  { $UnitTests }
+        "Integration"           { $IntegrationTests }
+        "All"                   { $UnitTests + $IntegrationTests }
+        "HardwareUnit"          { $HardwareUnitTests }
+        "HardwareIntegration"   { $HardwareIntegrationTests }
     }
 }
 
@@ -146,7 +195,7 @@ Write-Host @"
   Suite         : $Suite
   Test binaries : $testExeDir
   Log output    : $logsDir
-  Hardware tests: SKIPPED (no Intel NIC expected on CI runner)
+  Hardware tests: $( if ($Suite -like 'Hardware*') { 'ENABLED (self-hosted runner with Intel NIC)' } else { 'SKIPPED (no Intel NIC expected on CI runner)' } )
 ================================================================
 "@ -ForegroundColor Cyan
 

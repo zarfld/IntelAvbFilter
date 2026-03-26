@@ -192,16 +192,28 @@ jobs:
   # Phase 05: TDD - Test-Driven Development
   unit-tests:
     name: Unit Tests (${{ matrix.os }}, ${{ matrix.config }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner || matrix.os }}
+    # Allow the self-hosted hardware runner to fail without blocking the rest of CI.
+    # This handles the runner being offline or hardware unavailable.
+    continue-on-error: ${{ matrix.hardware == true }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest,windows-2022]
         config: [Debug, Release]
-        # Optionally exclude specific combinations if needed:
-        # exclude:
-        #   - os: macos-latest
-        #     config: Debug
+        hardware: [false]
+        # Self-hosted runner with Intel NIC + IntelAvbFilter driver installed.
+        # Sleep/hibernate tests (test_s3_sleep_wake) are intentionally absent from
+        # all automated suites — run them manually on a dedicated test machine only.
+        include:
+          - os: self-hosted-hardware
+            runner: [self-hosted, Windows, hardware]
+            config: Debug
+            hardware: true
+          - os: self-hosted-hardware
+            runner: [self-hosted, Windows, hardware]
+            config: Release
+            hardware: true
 
     steps:
       - name: Checkout code
@@ -360,6 +372,16 @@ jobs:
           # NOT suitable for headless CI.  Run-Tests-CI.ps1 is the correct entry point here.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Unit
 
+      - name: Run hardware-dependent unit tests (self-hosted, Intel NIC required)
+        # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
+        # test_s3_sleep_wake is intentionally absent from HardwareUnit: TC-S3-002 calls
+        # SetSuspendState which puts the host into S3 sleep, blocking the runner.
+        if: runner.os == 'Windows' && matrix.hardware == true
+        shell: pwsh
+        run: |
+          Write-Host "🔧 Running hardware-dependent unit tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
+          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareUnit
+
       - name: Run SSOT & register verification tests (Windows)
         # Verifies: #301 (TEST-SSOT-001), #302 (TEST-SSOT-003), #303 (TEST-SSOT-004)
         #           #304 (TEST-REGS-001), #305 (TEST-REGS-002), #306 (TEST-REGS-003)
@@ -394,7 +416,7 @@ jobs:
           Write-Host "✅ All SSOT & register verification tests passed" -ForegroundColor Green
 
       - name: Hardware-dependent tests (Windows, skipped — no Intel NIC on runner)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.hardware == false
         shell: pwsh
         run: |
           Write-Host "[INFO] Hardware-dependent tests (avb_test_i226, avb_test_i210, ptp_clock_control_test, " -ForegroundColor DarkGray
@@ -479,17 +501,27 @@ jobs:
   # Phase 06: Integration Testing
   integration-tests:
     name: Integration Tests (${{ matrix.os }}, ${{ matrix.config }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner || matrix.os }}
     needs: [unit-tests]
+    # Allow the self-hosted hardware runner to fail without blocking the rest of CI.
+    continue-on-error: ${{ matrix.hardware == true }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, windows-2022]
         config: [Debug, Release]
-        # Optionally exclude specific combinations:
-        # exclude:
-        #   - os: macos-latest
-        #     config: Debug
+        hardware: [false]
+        # Self-hosted runner with Intel NIC + IntelAvbFilter driver installed.
+        # Sleep/hibernate tests (test_s3_sleep_wake) are intentionally absent.
+        include:
+          - os: self-hosted-hardware
+            runner: [self-hosted, Windows, hardware]
+            config: Debug
+            hardware: true
+          - os: self-hosted-hardware
+            runner: [self-hosted, Windows, hardware]
+            config: Release
+            hardware: true
 
     steps:
       - name: Checkout code
@@ -616,8 +648,17 @@ jobs:
           # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Integration
 
+      - name: Run hardware-dependent integration tests (self-hosted, Intel NIC required)
+        # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
+        # test_s3_sleep_wake is intentionally absent from HardwareIntegration.
+        if: runner.os == 'Windows' && matrix.hardware == true
+        shell: pwsh
+        run: |
+          Write-Host "🔧 Running hardware-dependent integration tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
+          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareIntegration
+
       - name: Hardware-dependent integration tests (Windows, skipped — no Intel NIC on runner)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.hardware == false
         shell: pwsh
         run: |
           Write-Host "[INFO] Hardware-dependent integration tests (avb_test_i226, avb_test_i210, " -ForegroundColor DarkGray
