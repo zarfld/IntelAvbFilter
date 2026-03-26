@@ -597,6 +597,8 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                     // Don't override the state - let the initialization set it correctly
                     DEBUGP(DL_TRACE, "*** AVB CONTEXT INITIALIZED SUCCESSFULLY *** %wZ HW_STATE=%s IfIndex=%u Context=%p\n", 
                            &pFilter->MiniportFriendlyName, AvbHwStateName(avbCtx->hw_state), pFilter->MiniportIfIndex, avbCtx);
+                    /* BUG FIX: stats_filter_attach_count was declared but never incremented (ABI 2.0) */
+                    InterlockedIncrement64(&avbCtx->stats_filter_attach_count);
                 } else {
                     DEBUGP(DL_TRACE, "*** AVB CONTEXT IS NULL *** after successful init for %wZ\n", 
                            &pFilter->MiniportFriendlyName);
@@ -681,6 +683,11 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     }
 
     DEBUGP(DL_TRACE, "===>IntelAvbFilter FilterPause: FilterInstance %p\n", FilterModuleContext);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_filter_pause_count);
+        InterlockedIncrement64(&avbCtx->stats_pause_restart_generation);
+    }
 
     //
     // Set the flag that the filter is going to pause
@@ -805,6 +812,10 @@ FilterRestart(
     }
 
     DEBUGP(DL_TRACE, "===>FilterRestart:   FilterModuleContext %p\n", FilterModuleContext);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_filter_restart_count);
+    }
 
     FILTER_ASSERT(pFilter->State == FilterPaused);
 
@@ -1014,6 +1025,10 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     }
 
     DEBUGP(DL_TRACE, "===>FilterDetach:    FilterInstance %p\n", FilterModuleContext);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_filter_detach_count);
+    }
 
 
     //
@@ -1156,6 +1171,11 @@ NOTE: Called at <= DISPATCH_LEVEL  (unlike a miniport's MiniportOidRequest)
     }
 
     DEBUGP(DL_TRACE, "===>FilterOidRequest: Request %p.\n", Request);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_oid_request_count);
+        InterlockedIncrement64(&avbCtx->stats_outstanding_oids);
+    }
 
     //
     // Most of the time, a filter will clone the OID request and pass down
@@ -1351,6 +1371,11 @@ Arguments:
     }
 
     DEBUGP(DL_TRACE, "===>FilterOidRequestComplete, Request %p.\n", Request);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_oid_complete_count);
+        InterlockedDecrement64(&avbCtx->stats_outstanding_oids);
+    }
 
     Context = (PFILTER_REQUEST_CONTEXT)(&Request->SourceReserved[0]);
     OriginalRequest = (*Context);
@@ -1447,6 +1472,10 @@ NOTE: called at <= DISPATCH_LEVEL
     }
 
     DEBUGP(DL_TRACE, "===>FilterStatus, IndicateStatus = %8x.\n", StatusIndication->StatusCode);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_filter_status_count);
+    }
 
 
     //
@@ -1582,6 +1611,11 @@ NOTE: called at PASSIVE_LEVEL
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_filter_net_pnp_count);
+    }
+
     //
     // The filter may do processing on the event here, including intercepting
     // and dropping it entirely.  However, the sample does nothing with Net PNP
@@ -1675,6 +1709,9 @@ Return Value:
     // Step 8b: Handle test packet injection completions (kernel-originated NBLs)
     // Remove test NBLs from chain and free resources (do NOT send complete up to protocol)
     PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+    if (avbCtx != NULL) {
+        InterlockedDecrement64(&avbCtx->stats_outstanding_send_nbls);
+    }
     PNET_BUFFER_LIST PrevNbl = NULL;
     CurrNbl = NetBufferLists;
     while (CurrNbl) {
@@ -1878,6 +1915,11 @@ Arguments:
         return;
     }
 
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_outstanding_send_nbls);
+    }
+
     do
     {
 
@@ -2037,6 +2079,10 @@ Arguments:
     }
 
     DEBUGP(DL_TRACE, "===>ReturnNetBufferLists, NetBufferLists is %p.\n", NetBufferLists);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedDecrement64(&avbCtx->stats_outstanding_receive_nbls);
+    }
 
 
     //
@@ -2152,6 +2198,10 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
     }
 
     DEBUGP(DL_TRACE, "===>ReceiveNetBufferList: NetBufferLists = %p.\n", NetBufferLists);
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        InterlockedIncrement64(&avbCtx->stats_outstanding_receive_nbls);
+    }
     do
     {
 

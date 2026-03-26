@@ -10,7 +10,10 @@ extern "C" {
 #endif
 
 /* ABI versioning for coordination across components */
-#define AVB_IOCTL_ABI_VERSION 0x00010000u
+/* ABI 2.0: AVB_DRIVER_STATISTICS extended from 13 fields (104 bytes) to
+ *          24 fields (192 bytes) to support lifecycle/datapath coverage.
+ *          Old clients (v1.x) must be recompiled against this header. */
+#define AVB_IOCTL_ABI_VERSION 0x00020000u
 
 /* Bring in SSOT TSN/PTM types */
 /* Relative include path (header lives in include/, external path is sibling) */
@@ -465,24 +468,47 @@ typedef struct AVB_PORT_LATENCY_REQUEST {
  * Implements: #270 (TEST-STATISTICS-001)
  * Verifies:   #67  (REQ-F-STATISTICS-001)
  *
- * Structure size MUST be 13 × 8 = 104 bytes with 8-byte packing.
- * Tests assert sizeof(AVB_DRIVER_STATISTICS) == 104.
+ * Structure size MUST be 24 × 8 = 192 bytes with 8-byte packing.
+ * Tests assert sizeof(AVB_DRIVER_STATISTICS) == 192.
+ *
+ * ABI history:
+ *   v1.0 (ABI 0x00010000): 13 fields, 104 bytes — basic traffic + IOCTL counters
+ *   v2.0 (ABI 0x00020000): 24 fields, 192 bytes — + lifecycle/datapath coverage fields
  */
 #pragma pack(push, 8)
 typedef struct _AVB_DRIVER_STATISTICS {
-    avb_u64 TxPackets;           /* Transmitted packet count               (offset  0) */
-    avb_u64 RxPackets;           /* Received packet count                  (offset  8) */
-    avb_u64 TxBytes;             /* Transmitted byte count                 (offset 16) */
-    avb_u64 RxBytes;             /* Received byte count                    (offset 24) */
-    avb_u64 PhcQueryCount;       /* PHC time query IOCTL calls             (offset 32) */
-    avb_u64 PhcAdjustCount;      /* PHC frequency-adjust IOCTL calls       (offset 40) */
-    avb_u64 PhcSetCount;         /* PHC set-time IOCTL calls               (offset 48) */
-    avb_u64 TimestampCount;      /* Hardware timestamp captures            (offset 56) */
-    avb_u64 IoctlCount;          /* Total IOCTL dispatch calls             (offset 64) */
-    avb_u64 ErrorCount;          /* IOCTL calls that returned an error     (offset 72) */
-    avb_u64 MemoryAllocFailures; /* NdisAllocate* failures                 (offset 80) */
-    avb_u64 HardwareFaults;      /* Hardware-fault events                  (offset 88) */
-    avb_u64 FilterAttachCount;   /* FilterAttach invocations               (offset 96) */
+    /* --- Original 13 fields (ABI 1.0) ------------------------------------ */
+    avb_u64 TxPackets;               /* Transmitted packet count               (offset   0) */
+    avb_u64 RxPackets;               /* Received packet count                  (offset   8) */
+    avb_u64 TxBytes;                 /* Transmitted byte count                 (offset  16) */
+    avb_u64 RxBytes;                 /* Received byte count                    (offset  24) */
+    avb_u64 PhcQueryCount;           /* PHC time query IOCTL calls             (offset  32) */
+    avb_u64 PhcAdjustCount;          /* PHC frequency-adjust IOCTL calls       (offset  40) */
+    avb_u64 PhcSetCount;             /* PHC set-time IOCTL calls               (offset  48) */
+    avb_u64 TimestampCount;          /* Hardware timestamp captures            (offset  56) */
+    avb_u64 IoctlCount;              /* Total IOCTL dispatch calls             (offset  64) */
+    avb_u64 ErrorCount;              /* IOCTL calls that returned an error     (offset  72) */
+    avb_u64 MemoryAllocFailures;     /* NdisAllocate* failures                 (offset  80) */
+    avb_u64 HardwareFaults;          /* Hardware-fault events                  (offset  88) */
+    avb_u64 FilterAttachCount;       /* FilterAttach invocations               (offset  96) */
+    /* --- Extended fields (ABI 2.0) — lifecycle and datapath coverage ------ */
+    avb_u64 FilterPauseCount;        /* FilterPause entry count                (offset 104) */
+    avb_u64 FilterRestartCount;      /* FilterRestart entry count              (offset 112) */
+    avb_u64 FilterDetachCount;       /* FilterDetach entry count               (offset 120) */
+    avb_u64 OutstandingSendNBLs;     /* Outstanding send NBL gauge             (offset 128)
+                                      * Inc: FilterSendNetBufferLists entry
+                                      * Dec: FilterSendNetBufferListsComplete  */
+    avb_u64 OutstandingReceiveNBLs;  /* Outstanding receive NBL gauge          (offset 136)
+                                      * Inc: FilterReceiveNetBufferLists entry
+                                      * Dec: FilterReturnNetBufferLists        */
+    avb_u64 OidRequestCount;         /* FilterOidRequest entry count           (offset 144) */
+    avb_u64 OidCompleteCount;        /* FilterOidRequestComplete entry count   (offset 152) */
+    avb_u64 OutstandingOids;         /* Outstanding OID gauge                  (offset 160)
+                                      * Inc: FilterOidRequest entry
+                                      * Dec: FilterOidRequestComplete          */
+    avb_u64 FilterStatusCount;       /* FilterStatus invocations               (offset 168) */
+    avb_u64 FilterNetPnPCount;       /* FilterNetPnPEvent invocations          (offset 176) */
+    avb_u64 PauseRestartGeneration;  /* Inc at FilterPause entry — cycle count (offset 184) */
 } AVB_DRIVER_STATISTICS, *PAVB_DRIVER_STATISTICS;
 #pragma pack(pop)
 

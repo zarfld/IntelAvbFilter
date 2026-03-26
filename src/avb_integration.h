@@ -225,7 +225,8 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * Implements #270 (TEST-STATISTICS-001).
      * Fields are incremented with InterlockedIncrement64 so they are safe
      * from concurrent IOCTL dispatch and NDIS send/receive paths.
-     * Layout MUST match AVB_DRIVER_STATISTICS in avb_ioctl.h (104 bytes).
+     * Layout MUST match AVB_DRIVER_STATISTICS in avb_ioctl.h (192 bytes, ABI 2.0).
+     * Original 13 fields (ABI 1.0, 104 bytes) + 11 extended fields (ABI 2.0).
      */
     volatile LONGLONG stats_tx_packets;
     volatile LONGLONG stats_rx_packets;
@@ -240,6 +241,18 @@ typedef struct _AVB_DEVICE_CONTEXT {
     volatile LONGLONG stats_memory_alloc_failures;
     volatile LONGLONG stats_hardware_faults;
     volatile LONGLONG stats_filter_attach_count;
+    /* --- Extended fields (ABI 2.0) — lifecycle and datapath coverage --- */
+    volatile LONGLONG stats_filter_pause_count;       /* FilterPause entry count */
+    volatile LONGLONG stats_filter_restart_count;     /* FilterRestart entry count */
+    volatile LONGLONG stats_filter_detach_count;      /* FilterDetach entry count */
+    volatile LONGLONG stats_outstanding_send_nbls;    /* Outstanding send NBL gauge */
+    volatile LONGLONG stats_outstanding_receive_nbls; /* Outstanding receive NBL gauge */
+    volatile LONGLONG stats_oid_request_count;        /* FilterOidRequest entry count */
+    volatile LONGLONG stats_oid_complete_count;       /* FilterOidRequestComplete entry count */
+    volatile LONGLONG stats_outstanding_oids;         /* Outstanding OID gauge */
+    volatile LONGLONG stats_filter_status_count;      /* FilterStatus entry count */
+    volatile LONGLONG stats_filter_net_pnp_count;     /* FilterNetPnPEvent entry count */
+    volatile LONGLONG stats_pause_restart_generation; /* Incremented at each FilterPause entry */
 
     /* ATDECC Entity Event Subscriptions (Issue #236) */
     ATDECC_SUBSCRIPTION atdecc_subscriptions[MAX_ATDECC_SUBSCRIPTIONS];

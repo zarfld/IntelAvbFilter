@@ -146,8 +146,8 @@ static void test_abi_version(void)
                 "AVB_IOCTL_ABI_VERSION is non-zero");
     TEST_ASSERT((AVB_IOCTL_ABI_VERSION & 0xFFFF0000u) != 0u,
                 "AVB_IOCTL_ABI_VERSION major field (high 16 bits) is non-zero");
-    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00010000u,
-                "AVB_IOCTL_ABI_VERSION == 0x00010000 (documented v1.0)");
+    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020000u,
+                "AVB_IOCTL_ABI_VERSION == 0x00020000 (v2.0 - stats struct extended to 192 bytes)");
 }
 
 /* ---------------------------------------------------------------------------
@@ -269,6 +269,12 @@ static void test_struct_sizes(void)
     TEST_CASE("TC-ABI-017: sizeof(AVB_TS_UNSUBSCRIBE_REQUEST) == 8");
     TEST_ASSERT(sizeof(AVB_TS_UNSUBSCRIBE_REQUEST) == 8,
                 "sizeof(AVB_TS_UNSUBSCRIBE_REQUEST) == 8  (ring_id + status)");
+
+    /* TC-ABI-018 ------------------------------------------------------------ */
+    /* 24 x avb_u64 (13 original ABI 1.0 + 11 extended ABI 2.0) x 8 = 192.  */
+    TEST_CASE("TC-ABI-018: sizeof(AVB_DRIVER_STATISTICS) == 192");
+    TEST_ASSERT(sizeof(AVB_DRIVER_STATISTICS) == 192,
+                "sizeof(AVB_DRIVER_STATISTICS) == 192  (24 x avb_u64, ABI 2.0)");
 }
 
 int main(void)

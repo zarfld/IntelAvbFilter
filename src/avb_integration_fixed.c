@@ -3804,6 +3804,18 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             st->MemoryAllocFailures = (avb_u64)currentContext->stats_memory_alloc_failures;
             st->HardwareFaults      = (avb_u64)currentContext->stats_hardware_faults;
             st->FilterAttachCount   = (avb_u64)currentContext->stats_filter_attach_count;
+            /* Extended fields (ABI 2.0) */
+            st->FilterPauseCount       = (avb_u64)currentContext->stats_filter_pause_count;
+            st->FilterRestartCount     = (avb_u64)currentContext->stats_filter_restart_count;
+            st->FilterDetachCount      = (avb_u64)currentContext->stats_filter_detach_count;
+            st->OutstandingSendNBLs    = (avb_u64)currentContext->stats_outstanding_send_nbls;
+            st->OutstandingReceiveNBLs = (avb_u64)currentContext->stats_outstanding_receive_nbls;
+            st->OidRequestCount        = (avb_u64)currentContext->stats_oid_request_count;
+            st->OidCompleteCount       = (avb_u64)currentContext->stats_oid_complete_count;
+            st->OutstandingOids        = (avb_u64)currentContext->stats_outstanding_oids;
+            st->FilterStatusCount      = (avb_u64)currentContext->stats_filter_status_count;
+            st->FilterNetPnPCount      = (avb_u64)currentContext->stats_filter_net_pnp_count;
+            st->PauseRestartGeneration = (avb_u64)currentContext->stats_pause_restart_generation;
             status = STATUS_SUCCESS;
             info   = sizeof(AVB_DRIVER_STATISTICS);
         }
@@ -3825,6 +3837,18 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             InterlockedExchange64(&currentContext->stats_memory_alloc_failures,0);
             InterlockedExchange64(&currentContext->stats_hardware_faults,      0);
             InterlockedExchange64(&currentContext->stats_filter_attach_count,  0);
+            /* Extended fields (ABI 2.0) */
+            InterlockedExchange64(&currentContext->stats_filter_pause_count,       0);
+            InterlockedExchange64(&currentContext->stats_filter_restart_count,     0);
+            InterlockedExchange64(&currentContext->stats_filter_detach_count,      0);
+            InterlockedExchange64(&currentContext->stats_outstanding_send_nbls,    0);
+            InterlockedExchange64(&currentContext->stats_outstanding_receive_nbls, 0);
+            InterlockedExchange64(&currentContext->stats_oid_request_count,        0);
+            InterlockedExchange64(&currentContext->stats_oid_complete_count,       0);
+            InterlockedExchange64(&currentContext->stats_outstanding_oids,         0);
+            InterlockedExchange64(&currentContext->stats_filter_status_count,      0);
+            InterlockedExchange64(&currentContext->stats_filter_net_pnp_count,     0);
+            InterlockedExchange64(&currentContext->stats_pause_restart_generation, 0);
             status = STATUS_SUCCESS;
             info   = 0;
         }
