@@ -265,6 +265,6 @@ Full development workflow, coding standards, and traceability requirements are i
 
 ## 📄 **License**
 
-This project is licensed under the **GNU General Public License v2.0** — see [LICENSE](LICENSE) for the full text.
+This project is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) for the full text.
 
 Derivative works must be distributed under the same license (copyleft). Commercial use is permitted provided the source remains open.
