@@ -160,43 +160,53 @@ msbuild IntelAvbFilter.sln /p:Configuration=Debug /p:Platform=x64
 
 ## 🚀 **Installation**
 
-### **Quick Installation Using Automated Scripts** ✅ RECOMMENDED
-
-We provide PowerShell scripts to simplify the installation process:
+All installation features are consolidated in `tools/setup/Install-Driver.ps1`. Run from an **Administrator** PowerShell prompt in the repo root.
 
 #### **Step 1: Enable Test Signing and Install Driver**
-```powershell
-# Open PowerShell as Administrator
-cd C:\Users\dzarf\source\repos\IntelAvbFilter
 
-# Check current status
-.\setup_driver.ps1 -CheckStatus
+```powershell
+# Check current driver and certificate status
+.\tools\setup\Install-Driver.ps1 -CheckStatus
 
 # Enable test signing (requires reboot)
-.\setup_driver.ps1 -EnableTestSigning
+.\tools\setup\Install-Driver.ps1 -EnableTestSigning
 shutdown /r /t 0
 
 # After reboot, install the driver
-.\setup_driver.ps1 -InstallDriver
+.\tools\setup\Install-Driver.ps1 -Configuration Debug -InstallDriver
 ```
 
-#### **Step 2: Troubleshoot Certificate Issues (if needed)**
+#### **Step 2: Reinstall or Uninstall**
+
 ```powershell
-# Diagnose certificate problems
-.\troubleshoot_certificates.ps1
+# Clean reinstall (uninstall + install)
+.\tools\setup\Install-Driver.ps1 -Configuration Debug -Reinstall
 
-# Fix certificate installation automatically
-.\troubleshoot_certificates.ps1 -FixCertificates
-
-# Verify certificates are properly installed
-.\troubleshoot_certificates.ps1
+# Uninstall only
+.\tools\setup\Install-Driver.ps1 -Configuration Debug -UninstallDriver
 ```
+
+#### **Certificate Issues**
+
+`Install-Driver.ps1` handles both required certificate stores (Trusted Root + Trusted Publishers) automatically:
+
+```powershell
+# Diagnose and fix certificate problems
+.\tools\setup\Install-Driver.ps1 -CheckStatus
+.\tools\setup\Install-Driver.ps1 -Configuration Debug -Reinstall
+```
+
+### **VS Code Tasks** (Recommended for Development)
+
+Run from Command Palette (`Ctrl+Shift+P → Tasks: Run Task`):
+- **install-driver-debug** — Build + Install (auto-elevates via UAC)
+- **reinstall-driver-debug** — Rebuild + Reinstall (auto-elevates)
+- **uninstall-driver** — Remove driver (auto-elevates)
 
 ### **Manual Installation** (Advanced Users)
 
-For complete manual installation instructions, see [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md)
+For complete manual installation instructions see [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md).
 
-#### **Driver Installation Requirements:**
 ```cmd
 # Enable test signing (required for development)
 bcdedit /set testsigning on
@@ -209,34 +219,50 @@ pnputil /add-driver IntelAvbFilter.inf /install
 dir \\.\IntelAvbFilter  # Should succeed if Intel hardware present
 ```
 
-### **Common Certificate Errors - SOLVED** ✅
+## 📖 **Usage**
 
-**Problem**: Getting certificate errors even after installing certificate manually
+After installing the driver, run tests using the canonical test runner:
 
-**Root Cause**: Certificate needs to be in **BOTH** stores:
-- Trusted Root Certification Authorities
-- **Trusted Publishers** ← Most commonly forgotten!
-
-**Solution**: Use our automated script:
 ```powershell
-.\troubleshoot_certificates.ps1 -FixCertificates
+# Quick verification (2 tests — fast, confirms driver is alive)
+.\tools\test\Run-Tests.ps1 -Configuration Debug -Quick
+
+# Full test suite (6 phases — comprehensive hardware validation)
+.\tools\test\Run-Tests.ps1 -Configuration Debug -Full
+
+# Full suite with log capture
+.\tools\test\Run-Tests.ps1 -Configuration Debug -Full -CollectLogs
+
+# Run a specific test executable
+.\tools\test\Run-Tests.ps1 -Configuration Debug -TestExecutable avb_test_i226.exe
 ```
 
-This will automatically:
-1. Find your IntelAvbFilter certificate
-2. Remove old/stale certificates
-3. Install to **BOTH** required certificate stores
-4. Verify installation success
+See [tools/test/README.md](tools/test/README.md) for all `-TestExecutable` names and parameters.
 
-### **Uninstalling the Driver**
+To build the driver:
 
 ```powershell
-# Using setup script
-.\setup_driver.ps1 -UninstallDriver
+# Debug build (incremental)
+.\tools\build\Build-Driver.ps1 -Configuration Debug
 
-# Manual method
-netcfg -v -u MS_IntelAvbFilter
+# Release build
+.\tools\build\Build-Driver.ps1 -Configuration Release
 
-# Disable test signing (optional)
-bcdedit /set testsigning off
-shutdown /r /t 0
+# Clean rebuild
+.\tools\build\Build-Driver.ps1 -Configuration Debug -Clean
+```
+
+See [tools/build/README.md](tools/build/README.md) for full build script documentation.
+
+## 🤝 **Contributing**
+
+1. Create a GitHub Issue before starting work (`Fixes #N` or `Implements #N` in your PR)
+2. Write a failing test before implementing — TDD (Red → Green → Refactor)
+3. Ensure all CI gates pass before requesting review
+4. Keep PRs small and focused (one logical change per PR)
+
+Full development workflow, coding standards, and traceability requirements are in [`.github/copilot-instructions.md`](.github/copilot-instructions.md).
+
+## 📄 **License**
+
+No license file has been added to this repository yet. Until one is specified, all rights are reserved by the author.
