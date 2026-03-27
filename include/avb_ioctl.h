@@ -59,7 +59,12 @@ typedef struct _IOCTL_VERSION {
     avb_u16 Minor;     /* API version - compatible additions (manually set) */
     avb_u16 Build;     /* Incrementing build counter (default: 0) */
     avb_u16 Revision;  /* Source control commit count or patch number (default: 0) */
+    avb_u16 Flags;     /* Build configuration flags (see AVB_VERSION_FLAG_*) */
+    avb_u16 Reserved;  /* Reserved, must be zero */
 } IOCTL_VERSION, *PIOCTL_VERSION;
+
+/* Build configuration flags returned in IOCTL_VERSION.Flags */
+#define AVB_VERSION_FLAG_DEBUG_BUILD  0x0001u  /* Driver was built in Debug configuration (DBG=1) */
 
 /* IOCTL macro (METHOD_BUFFERED) */
 #ifndef _NDIS_CONTROL_CODE

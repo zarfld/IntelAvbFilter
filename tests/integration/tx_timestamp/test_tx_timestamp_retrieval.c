@@ -57,6 +57,14 @@ typedef ULONG NDIS_STATUS;
 #define TARGET_LATENCY_P99_US 15   /* µs: observed worst-case 8.4 µs; 15 µs allows CI scheduling jitter */
 #define TARGET_THROUGHPUT_SINGLE_THREAD 30000  /* ops/sec: observed 40-79K; 30K is ~25% below worst case */
 
+/* Relaxed performance targets for Debug driver builds.
+ * Debug drivers emit DbgPrint on every IOCTL hot-path, adding 5-50 µs overhead
+ * depending on whether a kernel debugger / DebugView is capturing output.
+ * Calibrated against 6x I226-LM with Debug driver + DebugView: observed 15-65K ops/sec
+ * throughput and 10-15 µs P99 latency. 25% safety margin applied below worst case. */
+#define TARGET_LATENCY_P99_US_DEBUG 30         /* µs: 2x Release threshold, covers DbgPrint overhead */
+#define TARGET_THROUGHPUT_SINGLE_THREAD_DEBUG 10000  /* ops/sec: ~67% below observed 15K worst case */
+
 /* Test results counters */
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -64,6 +72,29 @@ static int tests_failed = 0;
 
 /* Discovered adapter count (populated during enumeration) */
 static int adapter_count = 0;
+
+/* True when the installed driver is a Debug build (detected via IOCTL_AVB_GET_VERSION Flags).
+ * Performance thresholds are loosened for Debug drivers due to DbgPrint overhead. */
+static bool g_debug_driver = false;
+
+/**
+ * Detect whether the installed driver is a Debug build.
+ * Calls IOCTL_AVB_GET_VERSION and checks AVB_VERSION_FLAG_DEBUG_BUILD in Flags.
+ * Old drivers (before Flags field was added) report 8-byte responses; treated as Release.
+ */
+static bool is_debug_driver(HANDLE hDevice) {
+    IOCTL_VERSION ver = {0};
+    DWORD br = 0;
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_VERSION,
+                         NULL, 0, &ver, sizeof(ver), &br, NULL)) {
+        return false; /* query failed – assume Release */
+    }
+    /* Guard: old driver without Flags field returns sizeof(old struct) = 8 bytes */
+    if (br < (DWORD)(offsetof(IOCTL_VERSION, Flags) + sizeof(ver.Flags))) {
+        return false;
+    }
+    return (ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) != 0;
+}
 
 /* Utility: Print test result */
 static void test_result(const char* test_name, bool passed) {
@@ -403,10 +434,13 @@ static void test_ioctl_latency(HANDLE hDevice, HANDLE hDevOv, uint32_t adapter_i
         
         printf("  Samples: %d successful (%.1f%%)\n", successful_samples, 
                (successful_samples * 100.0) / LATENCY_SAMPLE_COUNT);
+        double p99_target_us = g_debug_driver ? TARGET_LATENCY_P99_US_DEBUG
+                                               : TARGET_LATENCY_P99_US;
         printf("  P50 latency: %.2f µs (target: <%.0f µs)\n", p50_us, (double)TARGET_LATENCY_P50_US);
-        printf("  P99 latency: %.2f µs (target: <%.0f µs)\n", p99_us, (double)TARGET_LATENCY_P99_US);
-        
-        passed = (p50_us < TARGET_LATENCY_P50_US) && (p99_us < TARGET_LATENCY_P99_US);
+        printf("  P99 latency: %.2f µs (target: <%.0f µs%s)\n", p99_us, p99_target_us,
+               g_debug_driver ? " [Debug driver - relaxed]" : "");
+
+        passed = (p50_us < TARGET_LATENCY_P50_US) && (p99_us < p99_target_us);
     }
     
     free(latencies);
@@ -468,10 +502,13 @@ static void test_throughput_single_thread(HANDLE hDevice, HANDLE hDevOv, uint32_
     
     printf("  Packets sent: %d in %.3f sec\n", packets_sent, actual_time_sec);
     printf("  Timestamps retrieved: %d\n", timestamps_retrieved);
-    printf("  Throughput: %.0f ops/sec (target: >%d ops/sec)\n", 
-           throughput, TARGET_THROUGHPUT_SINGLE_THREAD);
-    
-    passed = passed && (throughput >= TARGET_THROUGHPUT_SINGLE_THREAD);
+    int throughput_target = g_debug_driver ? TARGET_THROUGHPUT_SINGLE_THREAD_DEBUG
+                                             : TARGET_THROUGHPUT_SINGLE_THREAD;
+    printf("  Throughput: %.0f ops/sec (target: >%d ops/sec%s)\n",
+           throughput, throughput_target,
+           g_debug_driver ? " [Debug driver - relaxed]" : "");
+
+    passed = passed && (throughput >= throughput_target);
     test_result("TX Timestamp Throughput (Single Thread)", passed);
 }
 
@@ -625,6 +662,16 @@ int main(void) {
     }
     printf("Found %d adapter(s). Running full test suite on each.\n", adapter_count);
     
+    // Detect Debug vs Release driver and announce it so CI logs are clear
+    g_debug_driver = is_debug_driver(hDevice);
+    if (g_debug_driver) {
+        printf("\n[WARN] Debug driver detected - performance thresholds relaxed\n");
+        printf("  Throughput target: >%d ops/sec (Release: >%d ops/sec)\n",
+               TARGET_THROUGHPUT_SINGLE_THREAD_DEBUG, TARGET_THROUGHPUT_SINGLE_THREAD);
+        printf("  P99 latency target: <%.0f µs (Release: <%.0f µs)\n",
+               (double)TARGET_LATENCY_P99_US_DEBUG, (double)TARGET_LATENCY_P99_US);
+    }
+
     // Step 8d: Kernel packet injection via IOCTL 51 (replaces Npcap)
     printf("\nKernel packet injection configured (via IOCTL_AVB_TEST_SEND_PTP).\n");
     printf("All tests will use kernel NBL send path through filter driver.\n");

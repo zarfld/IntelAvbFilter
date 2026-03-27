@@ -1586,10 +1586,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             }
             
             PIOCTL_VERSION version = (PIOCTL_VERSION)buf;
-            version->Major = AVB_VERSION_MAJOR;
-            version->Minor = AVB_VERSION_MINOR;
-            version->Build = AVB_VERSION_BUILD;
+            version->Major    = AVB_VERSION_MAJOR;
+            version->Minor    = AVB_VERSION_MINOR;
+            version->Build    = AVB_VERSION_BUILD;
             version->Revision = AVB_VERSION_REVISION;
+            version->Flags    = 0;
+            version->Reserved = 0;
+#ifdef DBG
+            version->Flags |= AVB_VERSION_FLAG_DEBUG_BUILD;
+#endif
             
             DEBUGP(DL_TRACE, "IOCTL_AVB_GET_VERSION: Returning version %u.%u.%u.%u\n", 
                    version->Major, version->Minor, version->Build, version->Revision);
