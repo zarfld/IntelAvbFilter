@@ -1,6 +1,6 @@
-# Chromium browser profile — contains Google session cookies, cached credentials
-# NEVER commit browser_state — it holds live Google auth tokens
-data/profiles/default/browser_state/
+# Runtime data directory — contains Google auth tokens, session state, and user-specific
+# notebook library config. NEVER commit — personal credentials and local state only.
+data/
 
 # Python virtual environment — binaries, not source; recreated via pip
 .venv/

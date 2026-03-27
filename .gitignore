@@ -387,3 +387,5 @@ test_baseline_*.txt
 *.cer
 .github/skills/notebooklm-experts/data/profiles/default/auth_info.json
 .github/skills/notebooklm-experts/data/profiles.json
+.github/skills/notebooklm-experts/data/profiles/default/auth_info.json
+.github/skills/notebooklm-experts/data/profiles.json
