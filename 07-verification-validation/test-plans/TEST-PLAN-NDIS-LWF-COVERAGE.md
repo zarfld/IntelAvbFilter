@@ -72,12 +72,12 @@ sequences. NDIS lifecycle constraints (from MSDN):
 | Counter | Struct field | Status |
 |---|---|---|
 | FilterAttach invocations | `AVB_DRIVER_STATISTICS::FilterAttachCount` | ✅ Exists |
-| FilterPause invocations | — | ❌ Missing |
-| FilterRestart invocations | — | ❌ Missing |
-| FilterDetach invocations | — | ❌ Missing |
-| Outstanding send NBLs at Pause | — | ❌ Missing |
-| Outstanding receive NBLs at Pause | — | ❌ Missing |
-| Pause/Restart generation number | — | ❌ Missing |
+| FilterPause invocations | `AVB_DRIVER_STATISTICS::FilterPauseCount` | ✅ Exists (ABI 2.0, `filter.c` line 688) |
+| FilterRestart invocations | `AVB_DRIVER_STATISTICS::FilterRestartCount` | ✅ Exists (ABI 2.0, `filter.c` line 817) |
+| FilterDetach invocations | `AVB_DRIVER_STATISTICS::FilterDetachCount` | ✅ Exists (ABI 2.0, `filter.c` line 1030) |
+| Outstanding send NBLs at Pause | `AVB_DRIVER_STATISTICS::OutstandingSendNBLs` | ✅ Exists (ABI 2.0, per-NBL counting fixed 2026-03-27) |
+| Outstanding receive NBLs at Pause | `AVB_DRIVER_STATISTICS::OutstandingReceiveNBLs` | ✅ Exists (ABI 2.0, uses `InterlockedAdd64` with NBL count) |
+| Pause/Restart generation number | `AVB_DRIVER_STATISTICS::PauseRestartGeneration` | ✅ Exists (ABI 2.0, `filter.c` line 689) |
 
 **Acceptance Criteria for each scenario**:
 ```
@@ -125,8 +125,8 @@ including NDIS-documented edge conditions:
 | RX packet count | `AVB_DRIVER_STATISTICS::RxPackets` | ✅ Exists |
 | TX byte count | `AVB_DRIVER_STATISTICS::TxBytes` | ✅ Exists |
 | RX byte count | `AVB_DRIVER_STATISTICS::RxBytes` | ✅ Exists |
-| Outstanding send NBLs | — | ❌ Missing |
-| Outstanding receive NBLs | — | ❌ Missing |
+| Outstanding send NBLs | `AVB_DRIVER_STATISTICS::OutstandingSendNBLs` | ✅ Exists (per-NBL counting fixed 2026-03-27) |
+| Outstanding receive NBLs | `AVB_DRIVER_STATISTICS::OutstandingReceiveNBLs` | ✅ Exists (uses `InterlockedAdd64` with `NumberOfNetBufferLists`) |
 | NBLs with NDIS_RECEIVE_FLAGS_RESOURCES | — | ❌ Missing |
 | Packet disposition: pass-through | — | ❌ Missing |
 | Packet disposition: modified | — | ❌ Missing |
@@ -162,11 +162,11 @@ and NetPnP/power events.
 |---|---|---|
 | Total IOCTL dispatch calls | `AVB_DRIVER_STATISTICS::IoctlCount` | ✅ Exists |
 | IOCTL errors | `AVB_DRIVER_STATISTICS::ErrorCount` | ✅ Exists |
-| OID requests dispatched | — | ❌ Missing |
-| OID completions | — | ❌ Missing |
-| Outstanding OID count | — | ❌ Missing |
-| FilterStatus indications | — | ❌ Missing |
-| FilterNetPnPEvent calls | — | ❌ Missing |
+| OID requests dispatched | `AVB_DRIVER_STATISTICS::OidRequestCount` | ✅ Exists (ABI 2.0, `filter.c` line 1176) |
+| OID completions | `AVB_DRIVER_STATISTICS::OidCompleteCount` | ✅ Exists (ABI 2.0, `filter.c` line 1376) |
+| Outstanding OID count | `AVB_DRIVER_STATISTICS::OutstandingOids` | ✅ Exists (ABI 2.0, inc/dec paired) |
+| FilterStatus indications | `AVB_DRIVER_STATISTICS::FilterStatusCount` | ✅ Exists (ABI 2.0, `filter.c` line 1477) |
+| FilterNetPnPEvent calls | `AVB_DRIVER_STATISTICS::FilterNetPnPCount` | ✅ Exists (ABI 2.0, `filter.c` line 1616) |
 
 **Scenarios to prove** (from MSDN direct-OID documentation):
 - OID success path

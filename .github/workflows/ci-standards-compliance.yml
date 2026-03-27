@@ -190,6 +190,75 @@ jobs:
 
           echo "✅ No raw 4+ digit hex literals found in src/ — SSOT compliance confirmed"
 
+  # Pillar 1: PREfast static analysis — NDIS LWF kernel driver
+  static-analysis-prefast:
+    name: Pillar 1 — PREfast Driver Static Analysis (/analyze)
+    runs-on: windows-latest
+    # Non-blocking phase-in: surfaces C6xxx findings without gating merges.
+    # Remove continue-on-error once the baseline reaches zero findings.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up MSVC environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Windows Driver Kit (WDK)
+        uses: ./.github/actions/install-wdk
+
+      - name: Run PREfast analysis (Release|x64)
+        shell: pwsh
+        run: |
+          # RunCodeAnalysis=true enables WDK PREfast (/analyze) for the kernel driver.
+          # TreatWarningAsError=false overrides the vcxproj setting so all C6xxx findings
+          # surface as warnings in the build log, not as hard errors that abort MSBuild.
+          # AvbVersionBuild/Revision=0 avoids needing build_number.txt in CI.
+          Write-Host "=== PREfast Analysis: Release|x64 ===" -ForegroundColor Cyan
+          msbuild IntelAvbFilter.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:RunCodeAnalysis=true `
+            /p:TreatWarningAsError=false `
+            /p:AvbVersionBuild=0 `
+            /p:AvbVersionRevision=0 `
+            /t:Rebuild `
+            2>&1 | Tee-Object prefast-output.txt
+          $buildExit = $LASTEXITCODE
+
+          Write-Host ""
+          Write-Host "=== PREfast Finding Summary ===" -ForegroundColor Cyan
+          $findings = Select-String -Path prefast-output.txt -Pattern 'warning C6\d{3}' |
+                      Select-Object -ExpandProperty Line
+          $findingCount = $findings.Count
+          $colour = if ($findingCount -eq 0) { 'Green' } else { 'Yellow' }
+          Write-Host "Total C6xxx findings: $findingCount" -ForegroundColor $colour
+          if ($findingCount -gt 0) {
+            Write-Host ""
+            Write-Host "--- Finding codes (most frequent first) ---"
+            $findings |
+              Select-String -Pattern 'C6\d{3}' -AllMatches |
+              ForEach-Object { $_.Matches } |
+              Select-Object -ExpandProperty Value |
+              Group-Object |
+              Sort-Object Count -Descending |
+              ForEach-Object { Write-Host "  $($_.Name): $($_.Count)" }
+          }
+          exit $buildExit
+
+      - name: Upload PREfast results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prefast-analysis-results
+          path: |
+            prefast-output.txt
+            build/x64/Release/**/*.nativecodeanalysis.xml
+          retention-days: 30
+
   # Phase 05: TDD - Test-Driven Development
   unit-tests:
     name: Unit Tests (${{ matrix.os }}, ${{ matrix.config }})
