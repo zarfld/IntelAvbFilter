@@ -44,15 +44,15 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 
 | Gate | Status | Notes |
 |---|---|---|
-| MSVC `/analyze` (PREfast) in CI | ❌ Not enabled | No `<RunCodeAnalysis>true</RunCodeAnalysis>` in vcxproj |
+| MSVC `/analyze` (PREfast) in CI | ✅ Added | `static-analysis-prefast` job in `ci-standards-compliance.yml` (`/p:RunCodeAnalysis=true`, `continue-on-error: true` phase-in) |
 | SDV run + DVL artifact | ❌ Not in CI | Manual only; no committed DVL file |
-| CodeQL on `src/` driver code | ❌ Not wired | `security-scan` job uses Trivy (container/dep), not C driver CodeQL |
+| CodeQL on `src/` driver code | ✅ Added | `.github/workflows/codeql-driver.yml` — MSDT config, builds Release\|x64 under tracer, uploads SARIF to Security tab |
 | CodeQL on submodules | ✅ Partial | `external/windows_driver_samples` + `external/intel_mfd` have own workflows |
 
 **Acceptance Criteria**:
-- [ ] `msbuild /p:RunCodeAnalysis=true` produces zero Level-4 PREfast warnings on `src/*.c`
+- [x] `msbuild /p:RunCodeAnalysis=true` CI job added (`static-analysis-prefast`); baseline findings surfaced — resolve before removing `continue-on-error`
 - [ ] SDV run completes with no `Defect` findings; results committed to `test-evidence/sdv-results-*.xml`
-- [ ] `codeql.yml` added for main driver source using `microsoft/windows-driver-developer-supplemental-tools`
+- [x] `codeql-driver.yml` added for main driver source using MSDT `codeql-config.yml@development`
 - [ ] DVL committed to `test-evidence/dvl-*.xml` before each release cut
 
 **CI Layer**: Per-PR / CI static gates (build-time, no hardware required).

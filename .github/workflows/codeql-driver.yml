@@ -1,0 +1,109 @@
+name: "Pillar 1 — CodeQL Driver Analysis (C/C++)"
+
+# CodeQL analysis for the IntelAvbFilter kernel driver C source.
+# Uses microsoft/Windows-Driver-Developer-Supplemental-Tools (MSDT) query pack
+# which includes NDIS/WDM-specific rules and driver DDI-safety checks on top of
+# the standard CodeQL cpp library.
+#
+# Runs on:
+#   - Every push to master/develop (full analysis)
+#   - Every PR targeting master/develop (incremental feedback)
+#   - Weekly schedule (Saturday 03:00 UTC) — catches newly introduced CVEs
+#   - workflow_dispatch (manual trigger)
+#
+# Results are uploaded to GitHub Advanced Security (SARIF) and surfaced in the
+# Security tab as Code Scanning alerts.
+#
+# References:
+#   - TEST-PLAN-NDIS-LWF-COVERAGE.md Pillar 1 (Static Rule Coverage)
+#   - https://github.com/microsoft/Windows-Driver-Developer-Supplemental-Tools
+#   - https://docs.github.com/en/code-security/code-scanning
+
+on:
+  push:
+    branches: [master, develop, "feature/**", "release/**"]
+    paths:
+      - "src/**"
+      - "include/**"
+      - "IntelAvbFilter.vcxproj"
+      - "IntelAvbFilter.vcxproj.filters"
+      - ".github/workflows/codeql-driver.yml"
+  pull_request:
+    branches: [master, develop]
+    paths:
+      - "src/**"
+      - "include/**"
+      - "IntelAvbFilter.vcxproj"
+      - "IntelAvbFilter.vcxproj.filters"
+      - ".github/workflows/codeql-driver.yml"
+  schedule:
+    # Saturday 03:00 UTC — weekly baseline scan
+    - cron: "0 3 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required to upload SARIF results to the Security tab
+  security-events: write
+  # Required to read CodeQL Action status
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL — C/C++ Driver Analysis (MSDT rules)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up MSVC environment (x64)
+        # Required so MSBuild and cl.exe are on PATH for the CodeQL build tracer.
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Windows Driver Kit (WDK)
+        # Installs SDK 10.0.22621.0 + WDK 10.0.22621.0 side-by-side.
+        # The vcxproj uses WindowsTargetPlatformVersion=10.0.22621.0; without the
+        # matching SDK/WDK headers the build tracer fails to capture the compilation.
+        uses: ./.github/actions/install-wdk
+
+      - name: Initialize CodeQL (MSDT driver config)
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          build-mode: manual
+          # MSDT config enables Windows Driver DDI-safety queries + NDIS rules on
+          # top of the standard cpp library queries.
+          # Pinned to the same branch used by microsoft/Windows-driver-samples.
+          config-file: microsoft/Windows-Driver-Developer-Supplemental-Tools/config/codeql-config.yml@development
+
+      - name: Build driver for CodeQL tracing (Release|x64)
+        shell: pwsh
+        run: |
+          # Build the driver so the CodeQL tracer can capture all compilation units.
+          # TreatWarningAsError=false: analysis warnings must not abort the build.
+          # RunCodeAnalysis=false: keep PREfast separate (static-analysis-prefast job).
+          Write-Host "=== CodeQL build trace: IntelAvbFilter Release|x64 ===" -ForegroundColor Cyan
+          msbuild IntelAvbFilter.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:TreatWarningAsError=false `
+            /p:RunCodeAnalysis=false `
+            /p:AvbVersionBuild=0 `
+            /p:AvbVersionRevision=0 `
+            /t:Rebuild
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed (exit $LASTEXITCODE) — CodeQL analysis aborted" -ForegroundColor Red
+            exit $LASTEXITCODE
+          }
+          Write-Host "Build succeeded — CodeQL tracer captured compilation units" -ForegroundColor Green
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
+          # Output SARIF alongside driver binary in the build tree for local inspection.
+          output: build/codeql-results
+          upload: true
