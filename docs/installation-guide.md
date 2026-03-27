@@ -14,9 +14,14 @@
 
 There are **three** ways to install this driver, depending on your scenario:
 
-### Method 1: Test Signing (Development/Testing) ? RECOMMENDED FOR TESTING
+### Method 1: Test Signing (Development/Testing) — RECOMMENDED FOR TESTING
 ### Method 2: Self-Signed Certificate with Local Trust
 ### Method 3: Production Signing (WHQL/EV Certificate)
+
+> **Where do the driver files come from?**  
+> - **GitHub Release (recommended):** download `IntelAvbFilter-vX.Y-windows-x64.zip` from the [Releases page](https://github.com/zarfld/IntelAvbFilter/releases) and extract it.  
+> - **Build from source:** run `tools\build\Build-Driver.ps1 -Configuration Release` — output lands in `build\x64\Release\IntelAvbFilter\`.  
+> The canonical install entry point is always `tools\setup\Install-Driver.ps1`, which locates the built artifacts automatically.
 
 ---
 
@@ -51,16 +56,27 @@ bcdedit /enum {current} | findstr /i "testsigning"
 
 ### Step 3: Install the Driver
 
-```powershell
-# Navigate to the driver package directory
-cd ".\x64\Debug\IntelAvbFilter"
+**Easiest — use the install script (handles pnputil + certificate automatically):**
 
-# Install the driver using pnputil
+```powershell
+# From the repo root (after building or extracting a release ZIP)
+powershell -ExecutionPolicy Bypass -File tools\setup\Install-Driver.ps1 -Configuration Release -Action InstallDriver
+```
+
+**Manual alternative (if running from an extracted release ZIP):**
+
+```powershell
+# Navigate to the extracted driver folder
+cd IntelAvbFilter   # folder created by Expand-Archive
+
+# Install via pnputil
 pnputil /add-driver IntelAvbFilter.inf /install
 
-# Alternative method using netcfg (for filter drivers)
+# Alternative for NDIS filter drivers
 netcfg -v -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
 ```
+
+> **Note:** `x64\Debug\IntelAvbFilter\` is a local MSBuild output folder — it is not present in the cloned repo. Always build first or use a release ZIP.
 
 ### Step 4: Verify Installation
 
@@ -127,37 +143,44 @@ Get-ChildItem -Path "Cert:\LocalMachine\TrustedPublisher" | Where-Object {$_.Sub
 
 ### Step 3: Sign the Driver with Your Certificate
 
-You need to re-sign the driver package with your certificate:
+You need to re-sign the driver package with your certificate.  
+First, build the driver (output is in `build\x64\Release\IntelAvbFilter\`) or extract a release ZIP.
 
 ```powershell
-# Set certificate path and password
-$certPath = "C:\IntelAvbFilter_Cert.pfx"
+# Set paths
+$certPath     = "C:\IntelAvbFilter_Cert.pfx"
 $certPassword = "YourPassword"
+$driverDir    = ".\build\x64\Release\IntelAvbFilter"   # adjust to extracted ZIP dir if applicable
 
-# Navigate to WDK tools directory (adjust path for your WDK version)
-cd "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64"
+# Locate signtool from WDK
+$signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Select-Object -Last 1).FullName
 
 # Sign the driver .sys file
-.\signtool.exe sign /v /f $certPath /p $certPassword /t http://timestamp.digicert.com `
-    ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys"
+& $signtool sign /v /f $certPath /p $certPassword /t http://timestamp.digicert.com "$driverDir\IntelAvbFilter.sys"
 
 # Sign the catalog file
-.\signtool.exe sign /v /f $certPath /p $certPassword /t http://timestamp.digicert.com `
-    ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.cat"
+& $signtool sign /v /f $certPath /p $certPassword /t http://timestamp.digicert.com "$driverDir\IntelAvbFilter.cat"
 
 # Verify signatures
-.\signtool.exe verify /v /pa `
-    ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.sys"
+& $signtool verify /v /pa "$driverDir\IntelAvbFilter.sys"
 ```
 
 ### Step 4: Install the Driver
 
-```powershell
-# Install using pnputil
-pnputil /add-driver ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" /install
+**Easiest — use the install script:**
 
-# Or using netcfg for NDIS filter drivers
-netcfg -v -l ".\x64\Debug\IntelAvbFilter\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\setup\Install-Driver.ps1 -Configuration Release -Action InstallDriver
+```
+
+**Manual alternative:**
+
+```powershell
+$driverDir = ".\build\x64\Release\IntelAvbFilter"  # or extracted ZIP folder
+pnputil /add-driver "$driverDir\IntelAvbFilter.inf" /install
+
+# NDIS filter alternative
+netcfg -v -l "$driverDir\IntelAvbFilter.inf" -c s -i MS_IntelAvbFilter
 ```
 
 ---
@@ -393,6 +416,13 @@ eventvwr.msc
    IntelAvb: Modern: I210, I217, I219, I226, I350, I354
    IntelAvb: Legacy: 82575, 82576, 82580
    ```
+   > **Note on the device list in these log lines:** The initialization log reflects the
+   > raw IGB register-family detection table inherited from the Intel igb driver lineage.
+   > **I350, I354, 82575, 82576, and 82580 are not supported or tested** — they lack the
+   > IEEE 802.1 AVB/TSN hardware features (launch-time scheduler, CBS, hardware PTP)
+   > required by this driver. The only controllers with verified or code-ready support
+   > are listed in the [README Supported Controllers table](../README.md#-supported-intel-controllers):
+   > I226 (verified), I225, I219, I210, I217 (code-ready, unverified).
 
 ---
 
