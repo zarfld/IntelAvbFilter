@@ -24,6 +24,7 @@
 on:
   push:
     branches: [master, develop, "feature/**", "release/**"]
+    tags: ['v*']
   pull_request:
     branches: [master, develop]
   schedule:
@@ -1218,7 +1219,11 @@ jobs:
         acceptance-tests,
         security-scan,
       ]
-    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
@@ -1250,6 +1255,42 @@ jobs:
           name: intel-avb-filter-driver-release
           path: build\x64\Release\IntelAvbFilter\
           retention-days: 90
+
+      - name: Package driver for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zipName = "IntelAvbFilter-$tag.zip"
+          Compress-Archive -Path "build\x64\Release\IntelAvbFilter\*" -DestinationPath $zipName -Force
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
+          "$hash  $zipName" | Out-File "$zipName.sha256" -Encoding ascii
+          Write-Host "Created $zipName (SHA256: $hash)"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "IntelAvbFilter ${{ github.ref_name }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          files: |
+            IntelAvbFilter-${{ github.ref_name }}.zip
+            IntelAvbFilter-${{ github.ref_name }}.zip.sha256
+          body: |
+            ## Intel AVB Filter Driver ${{ github.ref_name }}
+
+            Compiled, signed Windows KMDF driver for IEEE 802.1AS / AVB hardware timestamping.
+
+            **Supported adapters:** Intel I226, I225, I219, I210, I217
+
+            ### Installation
+            1. Download and extract `IntelAvbFilter-${{ github.ref_name }}.zip`
+            2. Run `Install-Driver.ps1` (elevated) from the extracted folder, or follow [docs/installation-guide.md](https://github.com/${{ github.repository }}/blob/master/docs/installation-guide.md)
+
+            ### SHA256 Checksum
+            See attached `.sha256` file.
 
       - name: Report build status
         if: always()
