@@ -1285,9 +1285,23 @@ jobs:
 
             **Supported adapters:** Intel I226, I225, I219, I210, I217
 
-            ### Installation
-            1. Download and extract `IntelAvbFilter-${{ github.ref_name }}.zip`
-            2. Run `Install-Driver.ps1` (elevated) from the extracted folder, or follow [docs/installation-guide.md](https://github.com/${{ github.repository }}/blob/master/docs/installation-guide.md)
+            ### Install (quick / GUI)
+            1. Extract the ZIP
+            2. Right-click `IntelAvbFilter.inf` → **Install**
+            3. Open adapter properties (Network Connections → Adapter → Properties) and ensure the filter is enabled for the target adapter
+            4. Reboot if requested
+
+            ### Install (reproducible / CLI)
+            Admin console in the extracted folder:
+
+            `pnputil /add-driver .\IntelAvbFilter.inf /install`
+
+            ### Prerequisites (test-signed driver)
+            This package is **test-signed**. To load test-signed kernel drivers:
+            - **Disable Secure Boot** in UEFI/BIOS
+            - Enable **TESTSIGNING** (Test Mode)
+
+            (Windows does not load test-signed kernel drivers by default.)
 
             ### SHA256 Checksum
             See attached `.sha256` file.
