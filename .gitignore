@@ -385,3 +385,5 @@ test_script*.txt
 test_baseline_*.txt
 # WDK / MSVC intermediate files in root
 *.cer
+.github/skills/notebooklm-experts/data/profiles/default/auth_info.json
+.github/skills/notebooklm-experts/data/profiles.json
