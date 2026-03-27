@@ -1262,7 +1262,20 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $zipName = "IntelAvbFilter-$tag.zip"
-          Compress-Archive -Path "build\x64\Release\IntelAvbFilter\*" -DestinationPath $zipName -Force
+          $buildRoot  = "build\x64\Release\IntelAvbFilter"
+          $wdkPkgDir  = Join-Path $buildRoot "IntelAvbFilter"   # WDK package: .cat .inf .sys .man
+
+          # Collect only the installable driver files into a flat staging dir
+          $staging = New-Item -ItemType Directory -Path "release-staging" -Force
+          # WDK package files (includes the .cat required by pnputil)
+          Get-ChildItem $wdkPkgDir -File | Copy-Item -Destination $staging
+          # Test certificate (needed to import into Trusted Publishers for test-signed driver)
+          Get-ChildItem $buildRoot -Filter "*.cer" -File | Copy-Item -Destination $staging
+
+          Write-Host "Staged files:"
+          Get-ChildItem $staging | ForEach-Object { Write-Host "  $($_.Name)" }
+
+          Compress-Archive -Path "$staging\*" -DestinationPath $zipName -Force
           $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
           "$hash  $zipName" | Out-File "$zipName.sha256" -Encoding ascii
           Write-Host "Created $zipName (SHA256: $hash)"
@@ -1285,6 +1298,12 @@ jobs:
 
             **Supported adapters:** Intel I226, I225, I219, I210, I217
 
+            ### Prerequisites (test-signed driver)
+            This package is **test-signed**. Before installing:
+            - **Disable Secure Boot** in UEFI/BIOS
+            - Enable **TESTSIGNING** (Test Mode): `bcdedit /set testsigning on` (admin, then reboot)
+            - Import the test certificate: double-click `IntelAvbFilter.cer` → install into **"Local Machine → Trusted Root Certification Authorities"** and **"Local Machine → Trusted Publishers"**
+
             ### Install (quick / GUI)
             1. Extract the ZIP
             2. Right-click `IntelAvbFilter.inf` → **Install**
@@ -1295,13 +1314,6 @@ jobs:
             Admin console in the extracted folder:
 
             `pnputil /add-driver .\IntelAvbFilter.inf /install`
-
-            ### Prerequisites (test-signed driver)
-            This package is **test-signed**. To load test-signed kernel drivers:
-            - **Disable Secure Boot** in UEFI/BIOS
-            - Enable **TESTSIGNING** (Test Mode)
-
-            (Windows does not load test-signed kernel drivers by default.)
 
             ### SHA256 Checksum
             See attached `.sha256` file.
