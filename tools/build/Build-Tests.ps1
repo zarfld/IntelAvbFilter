@@ -730,6 +730,14 @@ $AllTests = @(
         Libs = "advapi32.lib"
         Description = "Integration: Registry Diagnostics (Verifies #17 REQ-NF-DIAG-REG-001, closes #247 TEST-DEBUG-REG-001)"
     },
+    @{
+        Name = "test_ptp_corr"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_corr.c"
+        Output = "test_ptp_corr.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: PTP Hardware Correlation (IT-CORR-001..004, closes #199 TEST-PTP-CORR-001)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
