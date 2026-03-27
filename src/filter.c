@@ -1710,7 +1710,15 @@ Return Value:
     // Remove test NBLs from chain and free resources (do NOT send complete up to protocol)
     PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
     if (avbCtx != NULL) {
-        InterlockedDecrement64(&avbCtx->stats_outstanding_send_nbls);
+        /* FIX: Count the batch being completed. FilterSendNetBufferLists increments
+         * per-NBL; a single InterlockedDecrement underflows when the completion
+         * batch is smaller than the original send batch (NDIS may split batches). */
+        LONGLONG nCompleted = 0;
+        {
+            PNET_BUFFER_LIST _n = NetBufferLists;
+            while (_n) { nCompleted++; _n = NET_BUFFER_LIST_NEXT_NBL(_n); }
+        }
+        InterlockedAdd64(&avbCtx->stats_outstanding_send_nbls, -nCompleted);
     }
     PNET_BUFFER_LIST PrevNbl = NULL;
     CurrNbl = NetBufferLists;
@@ -1917,7 +1925,14 @@ Arguments:
 
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
-        InterlockedIncrement64(&avbCtx->stats_outstanding_send_nbls);
+        /* FIX: Count per-NBL so the gauge correctly tracks outstanding NBLs, not
+         * outstanding calls.  Mirrors the per-NBL decrement in SendComplete. */
+        LONGLONG nSending = 0;
+        {
+            PNET_BUFFER_LIST _n = NetBufferLists;
+            while (_n) { nSending++; _n = NET_BUFFER_LIST_NEXT_NBL(_n); }
+        }
+        InterlockedAdd64(&avbCtx->stats_outstanding_send_nbls, nSending);
     }
 
     do

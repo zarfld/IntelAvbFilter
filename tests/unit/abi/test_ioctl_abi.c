@@ -10,7 +10,7 @@
  * Test Cases:
  *   TC-ABI-001: All IOCTL code values are unique (no collisions)
  *   TC-ABI-002: AVB_IOCTL_ABI_VERSION format is valid (non-zero, major != 0)
- *   TC-ABI-003: sizeof(IOCTL_VERSION) == 8          (4 x uint16, no padding)
+ *   TC-ABI-003: sizeof(IOCTL_VERSION) == 12         (6 x uint16: Major,Minor,Build,Revision,Flags,Reserved)
  *   TC-ABI-004: sizeof(AVB_REQUEST_HEADER) == 8     (2 x uint32, no padding)
  *   TC-ABI-005: sizeof(AVB_FREQUENCY_REQUEST) == 16 (4 x uint32)
  *   TC-ABI-006: sizeof(AVB_TIMESTAMP_REQUEST) == 16 (uint64 + 2 x uint32)
@@ -167,11 +167,12 @@ static void test_abi_version(void)
 static void test_struct_sizes(void)
 {
     /* TC-ABI-003 ------------------------------------------------------------ */
-    /* struct { uint16 Major; uint16 Minor; uint16 Build; uint16 Revision; }   */
-    /* 4 x 2 = 8 bytes, struct alignment = 2, no padding.                     */
-    TEST_CASE("TC-ABI-003: sizeof(IOCTL_VERSION) == 8");
-    TEST_ASSERT(sizeof(IOCTL_VERSION) == 8,
-                "sizeof(IOCTL_VERSION) == 8  (Major,Minor,Build,Revision as uint16)");
+    /* struct { uint16 Major; uint16 Minor; uint16 Build; uint16 Revision;     */
+    /*           uint16 Flags; uint16 Reserved; }                              */
+    /* 6 x 2 = 12 bytes, struct alignment = 2, no padding.                    */
+    TEST_CASE("TC-ABI-003: sizeof(IOCTL_VERSION) == 12");
+    TEST_ASSERT(sizeof(IOCTL_VERSION) == 12,
+                "sizeof(IOCTL_VERSION) == 12  (Major,Minor,Build,Revision,Flags,Reserved as uint16)");
 
     /* TC-ABI-004 ------------------------------------------------------------ */
     /* struct { uint32 abi_version; uint32 header_size; }                      */
