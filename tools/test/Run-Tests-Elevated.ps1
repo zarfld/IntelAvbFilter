@@ -13,6 +13,9 @@ param(
     [string]$TestExecutable,
     
     [Parameter(Mandatory=$false)]
+    [string]$TestArgs = "",
+
+    [Parameter(Mandatory=$false)]
     [string]$LogFile
 )
 
@@ -50,6 +53,9 @@ if ($TestName) {
     # Ensure .exe extension for test name
     $testExe = if ($TestName -notmatch '\.exe$') { "$TestName.exe" } else { $TestName }
     $command += " -TestExecutable '$testExe'"
+}
+if ($TestArgs) {
+    $command += " -TestArgs '$TestArgs'"
 }
 if ($TestExecutable) {
     $command += " -TestExecutable '$TestExecutable'"

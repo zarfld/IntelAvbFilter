@@ -763,6 +763,15 @@ $AllTests = @(
         Libs = "advapi32.lib"
         Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..009, Track A closes #317)"
     },
+    @{
+        Name = "test_vv_corr_001_stability"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_vv_corr_001_stability.c"
+        Output = "test_vv_corr_001_stability.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "advapi32.lib"
+        Description = "V&V: VV-CORR-001 24-Hour PHC Correlation Stability Monitor (Track E closes #317)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{

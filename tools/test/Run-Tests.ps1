@@ -32,6 +32,9 @@ param(
     [string]$TestExecutable,
     
     [Parameter(Mandatory=$false)]
+    [string]$TestArgs = "",
+
+    [Parameter(Mandatory=$false)]
     [switch]$HardwareOnly,
     
     [Parameter(Mandatory=$false)]
@@ -78,7 +81,8 @@ function Write-Info {
 function Invoke-Test {
     param(
         [string]$TestName,
-        [string]$Description = ""
+        [string]$Description = "",
+        [string]$TestArgs = ""
     )
     
     if (-not (Test-Path $logsDir)) {
@@ -115,7 +119,12 @@ function Invoke-Test {
 
     # should log to $LogFile, but also show output in real time
     $script:totalTests++
-    & $testPath 2>&1 | Tee-Object -FilePath $LogFile
+    if ($TestArgs) {
+        $argList = $TestArgs -split ' '
+        & $testPath @argList 2>&1 | Tee-Object -FilePath $LogFile
+    } else {
+        & $testPath 2>&1 | Tee-Object -FilePath $LogFile
+    }
     $exitCode = $LASTEXITCODE
 
     # --- Lifecycle snapshot AFTER + diff ---
@@ -423,7 +432,7 @@ if ($TestExecutable) {
         }
     }
 
-    Invoke-Test -TestName $TestExecutable
+    Invoke-Test -TestName $TestExecutable -TestArgs $TestArgs
 
 } elseif ($Quick) {
     # Quick tests only
