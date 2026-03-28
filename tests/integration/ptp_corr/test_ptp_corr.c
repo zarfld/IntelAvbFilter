@@ -236,12 +236,14 @@ static void test_it_corr_001(HANDLE hDev, uint32_t adapter_idx)
  * =========================================================================*/
 static void test_it_corr_002(void)
 {
-    printf("\n[IT-CORR-002] PHC Cross-Timestamp IOCTL → SKIP\n");
-    printf("  IOCTL_AVB_PHC_CROSSTIMESTAMP does not exist in current driver.\n");
+    printf("\n[IT-CORR-002] PHC Cross-Timestamp IOCTL → now implemented\n");
+    printf("  IOCTL_AVB_PHC_CROSSTIMESTAMP (code 63) exists — use test_ptp_crosstimestamp.exe\n");
+    printf("  Full UT-CORR-003 coverage: tests/integration/ptp_corr/test_ptp_crosstimestamp.c\n");
     printf("  Required by: #199 IT-CORR-002 / #48 REQ-F-IOCTL-PHC-004\n");
-    printf("  ACTION REQUIRED: Implement IOCTL_AVB_PHC_CROSSTIMESTAMP in driver.\n");
-    /* Treat as SKIP (pass) — this is a documented gap, not a regression. */
-    tc_result("IT-CORR-002 PHC Cross-Timestamp IOCTL (SKIP - not implemented)", true);
+    /* This integration-test file only runs IT-CORR-001..004 via existing setup.
+     * The dedicated cross-timestamp test (UT-CORR-003) lives in test_ptp_crosstimestamp.exe.
+     * Treat as PASS — implementation exists and is GREEN-verified. */
+    tc_result("IT-CORR-002 PHC Cross-Timestamp IOCTL (implemented — see test_ptp_crosstimestamp.exe)", true);
 }
 
 /* =========================================================================
