@@ -1,9 +1,9 @@
 # Test Plan: Mock NDIS Unit Test Harness — Closing #199 Coverage Gaps
 
 **Test Plan ID**: TP-HARNESS-001  
-**Version**: 1.0  
-**Date**: 2026-03-27  
-**Status**: 🔴 Gap Identified — Implementation Required  
+**Version**: 1.2  
+**Date**: 2026-03-28  
+**Status**: 🟡 In Progress — Track C Complete, Tracks A/B/D/E Pending  
 **Phase**: 07-verification-validation  
 **Standards**: IEEE 1012-2016
 
@@ -11,15 +11,15 @@
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
-| 1.0 | 2026-03-27 | AI Agent | Initial gap analysis following premature closure of #199 |
-
+| 1.0 | 2026-03-27 | AI Agent | Initial gap analysis following premature closure of #199 || 1.1 | 2026-03-28 | AI Agent | Corrected Track B IOCTL code (27→53; 27=SETUP_FP); corrected Track C effort (~4d→~1d; handler case only — code/struct/dispatch exist) |
+| 1.2 | 2026-03-28 | AI Agent | Track C COMPLETE — `IOCTL_AVB_GET_RX_TIMESTAMP` handler implemented (TDD GREEN 12/12); UT-CORR-002 PASS, UT-CORR-004 SKIP (no loopback cable, IOCTL OK) |
 ## Context — Why This Plan Exists
 
 Issue #199 (TEST-PTP-CORR-001) was closed on 2026-03-27 after running only **4 of 17 specified tests**.
 
 The 4 tests actually run were the four Integration Tests (IT-CORR-001..004) via `test_ptp_corr.exe`.
 - IT-CORR-001 ✅ PASS (14/14 across 6 adapters, rate ratio ~1.003–1.069)
-- IT-CORR-002 ⚠️ SKIP (`IOCTL_AVB_PHC_CROSSTIMESTAMP` not implemented)
+- IT-CORR-002 ⚠️ SKIP (`IOCTL_AVB_PHC_CROSSTIMESTAMP` does not exist — to be created as IOCTL **code 53**; code 27 is already `IOCTL_AVB_SETUP_FP`)
 - IT-CORR-003 ✅ PASS (multi-adapter correlation independence)
 - IT-CORR-004 ✅ PASS (correlation under high packet rate)
 
@@ -49,9 +49,9 @@ This plan defines four work tracks to close all 13 remaining gaps with the minim
 | Test ID | What it proves | Blocking Dependency | Track |
 |---------|---------------|---------------------|-------|
 | UT-CORR-001 | `phc_before ≤ txTs ≤ phc_after` (unified epoch bracket) | Epochs must be identical — requires mock | D |
-| UT-CORR-002 | `phc_before ≤ rxTs ≤ phc_after` (RX timestamp correlation) | `IOCTL_AVB_GET_RX_TIMESTAMP` not yet implemented | C |
+| ✅ UT-CORR-002 | `phc_before ≤ rxTs ≤ phc_after` (RX timestamp correlation) | ~~`IOCTL_AVB_GET_RX_TIMESTAMP` handler missing~~ **DONE** — handler implemented 2026-03-28 (GREEN 6/6 adapters) | C |
 | UT-CORR-003 | Cross-timestamp PHC↔System accuracy <10µs | `IOCTL_AVB_PHC_CROSSTIMESTAMP` not implemented | B |
-| UT-CORR-004 | TX→RX loopback causality (`rxTs > txTs`, delay <10µs) | RX timestamp IOCTL + loopback cable | C |
+| ✅ UT-CORR-004 | TX→RX loopback causality (`rxTs > txTs`, delay <10µs) | ~~RX timestamp IOCTL + loopback cable~~ **DONE** — IOCTL reachable; causality SKIP (no loopback cable — hardware-gated, acceptable) | C |
 | UT-CORR-005 | Correlation maintained after `PHC.SetTime(0)` | IOCTL infrastructure already exists | A |
 | UT-CORR-006 | Correlation maintained during `SetFrequencyAdj(+100 PPM)` | IOCTL infrastructure already exists | A |
 | UT-CORR-007 | Jitter stddev <100ns (1000 samples) | Already partially in IT-CORR-001; extend | A |
@@ -152,7 +152,7 @@ NOTE: PHC epoch WILL reset on reload — test verifies correlation (rate), not e
 ### Track B — `IOCTL_AVB_PHC_CROSSTIMESTAMP` Implementation
 
 **Effort**: ~3 days (2d driver impl + 0.5d test + 0.5d review)  
-**Description**: Implement `IOCTL_AVB_PHC_CROSSTIMESTAMP` (IOCTL code 27, per #48).  
+**Description**: Implement `IOCTL_AVB_PHC_CROSSTIMESTAMP` (new IOCTL **code 53**, per #48 — note: code 27 is already `IOCTL_AVB_SETUP_FP` and is **not** available; this is a full new IOCTL: header define + struct + `device.c` dispatch + `avb_integration_fixed.c` handler).  
 **Closes**: UT-CORR-003, VV-CORR-003 (partial — also needs Track C for VV-CORR-003 RX)  
 **Unblocks**: IT-CORR-002 (already written, just SKIPPED)
 
@@ -181,17 +181,22 @@ ADAPTERS: run on each adapter independently
 
 ---
 
-### Track C — RX Timestamp IOCTL
+### Track C — RX Timestamp IOCTL ✅ COMPLETE (2026-03-28)
 
-**Effort**: ~4 days (3d driver impl + 1d test)  
-**Description**: Add `IOCTL_AVB_GET_RX_TIMESTAMP` to capture hardware RX timestamps.  
-**Closes**: UT-CORR-002, UT-CORR-004, VV-CORR-003 (with Track B)  
-**Dependencies**: Hardware RX timestamping must be enabled (CFG_TS_EN, SRRCTL[q].TIMESTAMP)
+**Effort**: ~1 day (handler case body only)  
+**Status**: **COMPLETE** — TDD GREEN confirmed  
+**Description**: `case IOCTL_AVB_GET_RX_TIMESTAMP:` handler added to `src/avb_integration_fixed.c` at line 2658.  
+**Result**:
+- UT-CORR-002: **PASS** — `r.valid=1`, `r.status=0x00000000` on all 6 adapters (I226-LM, DID=0x125B)
+- UT-CORR-004: **SKIP** — IOCTL reachable (handler works); causality assertion skipped due to no loopback cable (hardware-gated SKIP — acceptable per plan)
+- Test log: `logs/test_ptp_corr_extended.exe_20260328_115538.log` — `Total: 12  Passed: 12  Failed: 0`
 
-**What's needed**:
-- Driver stores last-seen RX hardware timestamp in `AVB_ADAPTER_CONTEXT` similar to how
-  `last_ndis_tx_timestamp` is stored in `IntelAvbFilterFastIoDeviceControl`.
-- New IOCTL retrieves the stored timestamp.
+**Implementation**:
+- `src/avb_integration_fixed.c` line 2658: HAL-only path via `ops->read_rx_timestamp()`, `rc==0 → valid=1`, capability guard, HW state guard
+- `tests/integration/ptp_corr/test_ptp_corr_extended.c`: UT-CORR-002 + UT-CORR-004
+- `tools/build/Build-Tests.ps1`: build entry added for `test_ptp_corr_extended`
+- Implements #48 (REQ-F-IOCTL-PHC-004) | Verifies #149 (REQ-F-PTP-007) | Closes Track C of #317  
+**Closes**: UT-CORR-002, UT-CORR-004, VV-CORR-003 partial (RX side — still needs Track B for PHC cross-timestamp)
 
 **Test: UT-CORR-002**
 ```
@@ -292,7 +297,7 @@ NOTE: This is a system-level V&V activity, not automated CI
 | P0 — Sprint 5 | B | UT-CORR-003 + unlock IT-CORR-002 (2 tests) | 3d | None |
 | P1 — Sprint 5 | E (VV-CORR-001) | VV-CORR-001 (1 test) | 1d | Track A |
 | P1 — Sprint 6 | D1/D2 | UT-CORR-001, UT-CORR-010 (2 tests) | 3d | None |
-| P2 — Sprint 6 | C | UT-CORR-002, UT-CORR-004 (2 tests) | 4d | RX TS hw |
+| ✅ DONE | C | UT-CORR-002, UT-CORR-004 (2 tests) | ~~1d~~ complete 2026-03-28 | ~~RX TS hw~~ resolved |
 | P3 — Future | E (VV-CORR-002,003) | VV-CORR-002, VV-CORR-003 (2 tests) | 2d | gPTP + Track B+C |
 
 **Sprint 5 target**: 8 of 13 gaps closed (UT-CORR-003..009, VV-CORR-001)  
@@ -313,8 +318,8 @@ NOTE: This is a system-level V&V activity, not automated CI
 - [ ] VV-CORR-001: 24h log shows no drift; summary stats within target
 - [ ] UT-CORR-001: PASS (bracket test) after Track D epoch unification
 - [ ] UT-CORR-010: PASS (null timestamp graceful error)
-- [ ] UT-CORR-002: PASS (RX correlation) — hardware-gated SKIP acceptable
-- [ ] UT-CORR-004: PASS (loopback causality) — hardware-gated SKIP acceptable
+- [x] UT-CORR-002: PASS (RX correlation) — **PASS on all 6 adapters** (2026-03-28)
+- [x] UT-CORR-004: PASS (loopback causality) — **SKIP** (no loopback cable; IOCTL reachable — hardware-gated SKIP accepted per plan) (2026-03-28)
 - [ ] VV-CORR-002: PASS or documented SKIP with rationale (gPTP lab required)
 - [ ] VV-CORR-003: PASS or documented SKIP (requires B+C+loopback cable)
 

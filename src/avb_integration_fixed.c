@@ -2655,6 +2655,59 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
+    case IOCTL_AVB_GET_RX_TIMESTAMP:
+        {
+            DEBUGP(DL_TRACE, "IOCTL_AVB_GET_RX_TIMESTAMP called\n");
+            if (inLen < sizeof(AVB_TX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_TX_TIMESTAMP_REQUEST rx_req = (PAVB_TX_TIMESTAMP_REQUEST)buf;
+
+                // Initialize output fields
+                rx_req->timestamp_ns = 0;
+                rx_req->valid = 0;
+                rx_req->sequence_id = 0;
+                rx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+
+                PAVB_DEVICE_CONTEXT activeContext = currentContext;
+
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_TRACE, "RX timestamp read: PTP not ready (state=%s)\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    rx_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    // HAL-compliant MMIO register read (RXSTMPL/H).
+                    // read_rx_timestamp() reads a plain register pair — NOT a FIFO.
+                    // Contract: rc == 0 → register read OK (valid = 1); rc < 0 → MMIO error.
+                    const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (!ops || !ops->read_rx_timestamp) {
+                        DEBUGP(DL_ERROR, "Device does not support RX timestamp register read\n");
+                        rx_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        status = STATUS_NOT_SUPPORTED;
+                    } else {
+                        device_t *dev = &activeContext->intel_device;
+                        int rc = ops->read_rx_timestamp(dev, &rx_req->timestamp_ns);
+                        if (rc < 0) {
+                            DEBUGP(DL_ERROR, "Failed to read RX timestamp registers: %d\n", rc);
+                            rx_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        } else {
+                            // rc == 0: RXSTMPL/H read successfully (plain register, no FIFO semantics)
+                            rx_req->valid = 1;
+                            rx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                            info = sizeof(*rx_req);
+                            DEBUGP(DL_TRACE, "RX timestamp retrieved: 0x%016llX (%llu ns)\n",
+                                   (unsigned long long)rx_req->timestamp_ns,
+                                   (unsigned long long)rx_req->timestamp_ns);
+                        }
+                    }
+                }
+            }
+        }
+        break;
+
     case IOCTL_AVB_TEST_SEND_PTP:
         {
             DEBUGP(DL_TRACE, "IOCTL_AVB_TEST_SEND_PTP called (Step 8b - Kernel packet injection)\n");

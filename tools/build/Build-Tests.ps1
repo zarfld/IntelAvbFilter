@@ -738,6 +738,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: PTP Hardware Correlation (IT-CORR-001..004, closes #199 TEST-PTP-CORR-001)"
     },
+    @{
+        Name = "test_ptp_corr_extended"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_corr_extended.c"
+        Output = "test_ptp_corr_extended.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: PTP RX Timestamp Correlation (UT-CORR-002, UT-CORR-004, Track C closes #317)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
