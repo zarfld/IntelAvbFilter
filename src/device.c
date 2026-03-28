@@ -509,6 +509,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_PFC_ENABLE:                // Implements #219 (REQ-F-PFC-001; req.enable field selects enable/disable)
         case IOCTL_AVB_SRP_REGISTER_STREAM:       // Implements #211 (REQ-F-SRP-001)
         case IOCTL_AVB_SRP_DEREGISTER_STREAM:     // Implements #211 (REQ-F-SRP-002)
+        case IOCTL_AVB_PHC_CROSSTIMESTAMP:        // Implements #48 (REQ-F-IOCTL-PHC-004: PHC↔System Cross-Timestamp)
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios

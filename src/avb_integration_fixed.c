@@ -2655,6 +2655,67 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
+    case IOCTL_AVB_PHC_CROSSTIMESTAMP:
+        {
+            DEBUGP(DL_TRACE, "IOCTL_AVB_PHC_CROSSTIMESTAMP called\n");
+            if (inLen < sizeof(AVB_CROSS_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_CROSS_TIMESTAMP_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_CROSS_TIMESTAMP_REQUEST ct_req = (PAVB_CROSS_TIMESTAMP_REQUEST)buf;
+
+                /* Initialise output fields */
+                ct_req->phc_time_ns   = 0;
+                ct_req->system_qpc    = 0;
+                ct_req->qpc_frequency = 0;
+                ct_req->valid         = 0;
+                ct_req->status        = (avb_u32)NDIS_STATUS_SUCCESS;
+
+                PAVB_DEVICE_CONTEXT activeContext = currentContext;
+
+                if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                    DEBUGP(DL_TRACE, "Cross-timestamp: PTP not ready (state=%s)\n",
+                           AvbHwStateName(activeContext->hw_state));
+                    ct_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                } else {
+                    /* HAL compliance: use ops->get_systime() — no register addresses in src/ */
+                    const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (!ops || !ops->get_systime) {
+                        DEBUGP(DL_ERROR, "Device does not support get_systime\n");
+                        ct_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        status = STATUS_NOT_SUPPORTED;
+                    } else {
+                        /* Sample QPC frequency once — it is constant per boot */
+                        LARGE_INTEGER freq = {0};
+                        LARGE_INTEGER qpc  = KeQueryPerformanceCounter(&freq);
+
+                        /* Read PHC via HAL — sequential but typically <1µs on x86 */
+                        uint64_t phc_ns = 0;
+                        device_t *dev   = &activeContext->intel_device;
+                        int rc = ops->get_systime(dev, &phc_ns);
+
+                        if (rc < 0) {
+                            DEBUGP(DL_ERROR, "get_systime failed: %d\n", rc);
+                            ct_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        } else {
+                            ct_req->phc_time_ns   = phc_ns;
+                            ct_req->system_qpc    = (avb_u64)qpc.QuadPart;
+                            ct_req->qpc_frequency = (avb_u64)freq.QuadPart;
+                            ct_req->valid         = 1;
+                            ct_req->status        = (avb_u32)NDIS_STATUS_SUCCESS;
+                            info = sizeof(*ct_req);
+                            DEBUGP(DL_TRACE, "Cross-timestamp: phc=%llu ns  qpc=%lld  freq=%lld\n",
+                                   (unsigned long long)phc_ns,
+                                   (long long)qpc.QuadPart,
+                                   (long long)freq.QuadPart);
+                        }
+                    }
+                }
+            }
+        }
+        break;
+
     case IOCTL_AVB_GET_RX_TIMESTAMP:
         {
             DEBUGP(DL_TRACE, "IOCTL_AVB_GET_RX_TIMESTAMP called\n");

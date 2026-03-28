@@ -746,6 +746,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: PTP RX Timestamp Correlation (UT-CORR-002, UT-CORR-004, Track C closes #317)"
     },
+    @{
+        Name = "test_ptp_crosstimestamp"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_crosstimestamp.c"
+        Output = "test_ptp_crosstimestamp.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: PHC Cross-Timestamp IOCTL (UT-CORR-003, Track B closes #317 / #48)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{

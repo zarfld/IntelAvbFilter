@@ -647,6 +647,38 @@ typedef struct AVB_SRP_DEREGISTER_REQUEST {
 #define IOCTL_AVB_SRP_REGISTER_STREAM    _NDIS_CONTROL_CODE(60, METHOD_BUFFERED)
 #define IOCTL_AVB_SRP_DEREGISTER_STREAM  _NDIS_CONTROL_CODE(61, METHOD_BUFFERED)
 
+/*==============================================================================
+ * PHC ↔ System Cross-Timestamp (Issue #48 / REQ-F-IOCTL-PHC-004)
+ * IOCTL:
+ *   IOCTL_AVB_PHC_CROSSTIMESTAMP (63) — atomically sample PHC (SYSTIM via
+ *   ops->get_systime) and system counter (KeQueryPerformanceCounter) so
+ *   user-mode can compute the PHC↔wall-clock offset to <10µs accuracy.
+ *
+ * Input:  AVB_CROSS_TIMESTAMP_REQUEST.adapter_index  (which adapter)
+ * Output: AVB_CROSS_TIMESTAMP_REQUEST.phc_time_ns    (PHC nanoseconds)
+ *         AVB_CROSS_TIMESTAMP_REQUEST.system_qpc     (QPC ticks)
+ *         AVB_CROSS_TIMESTAMP_REQUEST.qpc_frequency  (QPC Hz)
+ *         AVB_CROSS_TIMESTAMP_REQUEST.valid           (1=both reads OK)
+ *         AVB_CROSS_TIMESTAMP_REQUEST.status          (NDIS_STATUS)
+ *
+ * Accuracy note: the two reads are sequential (not HW-atomic).  Latency
+ * is typically <1µs on modern x86; worst-case interrupt latency may push
+ * this to ~10µs which is still within the REQ-F-IOCTL-PHC-004 budget.
+ *
+ * HAL compliance: phc_time_ns read via ops->get_systime() — no register
+ * addresses in src/.
+ *============================================================================*/
+typedef struct AVB_CROSS_TIMESTAMP_REQUEST {
+    avb_u32 adapter_index; /* in:  adapter index (0-based, from ENUM_ADAPTERS) */
+    avb_u64 phc_time_ns;   /* out: PHC time in nanoseconds (ops->get_systime)  */
+    avb_u64 system_qpc;    /* out: KeQueryPerformanceCounter tick value         */
+    avb_u64 qpc_frequency; /* out: QPC ticks per second                        */
+    avb_u32 valid;         /* out: 1=both reads succeeded                      */
+    avb_u32 status;        /* out: NDIS_STATUS value                           */
+} AVB_CROSS_TIMESTAMP_REQUEST, *PAVB_CROSS_TIMESTAMP_REQUEST;
+
+#define IOCTL_AVB_PHC_CROSSTIMESTAMP     _NDIS_CONTROL_CODE(63, METHOD_BUFFERED)
+
 #ifdef __cplusplus
 }
 #endif
