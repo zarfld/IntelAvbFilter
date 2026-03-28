@@ -754,6 +754,15 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Integration: PHC Cross-Timestamp IOCTL (UT-CORR-003, Track B closes #317 / #48)"
     },
+    @{
+        Name = "test_ptp_phc_stability"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_phc_stability.c"
+        Output = "test_ptp_phc_stability.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "advapi32.lib"
+        Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..009, Track A closes #317)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{

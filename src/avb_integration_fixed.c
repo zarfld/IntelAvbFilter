@@ -2865,15 +2865,21 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 } else {
                     // Monotonicity guard: reject *small* backward time jumps only.
                     // Large intentional resets (e.g. to year 2001, or to epoch 0) must be allowed.
-                    // Only reject if the backward delta is below threshold (< 30 seconds).
-                    //   UT-PTP-GETSET-010: 10s backward jump → rejected ✓  (fixes flicker)
+                    // Only reject if the backward delta is below threshold (< 30 seconds) AND
+                    // the target is itself a real-world (non-near-epoch-0) timestamp.
+                    // Near-epoch-0 targets (< 30 s) are always treated as intentional epoch resets,
+                    // not NTP drift corrections, and are allowed through unconditionally.
+                    //   UT-PTP-GETSET-010: 10s backward from large current time → rejected ✓
                     //   UT-PTP-GETSET-004: set to year 2001 (~22yr backward) → allowed ✓
                     //   UT-PTP-GETSET-005: set to near-future valid time → allowed ✓
                     //   UT-PTP-GETSET-006: set to epoch 0 (~53yr backward) → allowed ✓
+                    //   UT-CORR-005:       set to 1ms (near-epoch-0 reset) → allowed ✓
                     ULONGLONG current_t = 0;
                     const ULONGLONG MAX_SMALL_BACKWARD_JUMP_NS = 30ULL * 1000000000ULL;  /* 30 seconds */
                     intel_gettime(&activeContext->intel_device, r->clock_id, &current_t, NULL);
-                    if (current_t > 0 && r->timestamp < current_t && (current_t - r->timestamp) < MAX_SMALL_BACKWARD_JUMP_NS) {
+                    if (current_t > 0 && r->timestamp < current_t &&
+                        (current_t - r->timestamp) < MAX_SMALL_BACKWARD_JUMP_NS &&
+                        r->timestamp >= MAX_SMALL_BACKWARD_JUMP_NS) {
                         DEBUGP(DL_WARN, "SET_TIMESTAMP rejected: backward jump (new=0x%llx < current=0x%llx)\n",
                                r->timestamp, current_t);
                         r->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;

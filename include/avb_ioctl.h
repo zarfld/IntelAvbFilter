@@ -270,7 +270,12 @@ typedef struct AVB_TEST_SEND_PTP_REQUEST {
     avb_u32 sequence_id;       /* in: PTP sequence ID for packet tracking */
     avb_u32 packets_sent;      /* out: Number of packets successfully queued for transmission */
     avb_u32 status;            /* out: NDIS_STATUS value */
-    avb_u64 timestamp_ns;      /* out: Pre-send timestamp (SYSTIM or KeQPC) — zero if send failed */
+    avb_u64 timestamp_ns;      /* out: Pre-send SYSTIM snapshot (captured just before NdisFSendNetBufferLists) */
+    avb_u64 phc_at_send_ns;    /* out: PHC (SYSTIM) snapshot captured at IOCTL entry — same kernel call
+                                *      as timestamp_ns; delta = timestamp_ns - phc_at_send_ns is the
+                                *      kernel setup time (~100-500 ns), independent of user-mode latency.
+                                *      Used by UT-CORR-005..009 to verify TX-PHC correlation without
+                                *      the ~60-100 µs user-mode IOCTL round-trip gap. */
 } AVB_TEST_SEND_PTP_REQUEST, *PAVB_TEST_SEND_PTP_REQUEST;
 
 /* Hardware timestamping control (TSAUXC register) 

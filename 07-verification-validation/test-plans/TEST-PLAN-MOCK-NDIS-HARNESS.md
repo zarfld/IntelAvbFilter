@@ -72,7 +72,7 @@ This plan defines four work tracks to close all 13 remaining gaps with the minim
 
 ## Work Tracks
 
-### Track A — IOCTL Harness Extension (No New Infrastructure)
+### Track A — PHC Stability Under State Changes (UT-CORR-005..009)
 
 **Effort**: ~2 days  
 **Description**: Add test cases to `tests/integration/ptp_corr/test_ptp_corr.c` or a companion
@@ -92,7 +92,7 @@ stores QPC→ns while `IOCTL_AVB_GET_TIMESTAMP` returns SYSTIM ns — *different
 Therefore UT-CORR-001 bracket test must remain in Track D (mock). The IOCTL harness can only prove
 *rate consistency*, which is what IT-CORR-001 already demonstrates.
 
-#### Track A — Test Specifications
+#### PHC Stability Under State Changes — Test Specifications
 
 **UT-CORR-005 (After Epoch Reset)**
 ```
@@ -266,7 +266,7 @@ has high infrastructure cost relative to the coverage gain.
 
 **Effort**: ~1 day per test (automated monitoring scripts)  
 **Closes**: VV-CORR-001, VV-CORR-002  
-**Dependencies**: Track A for VV-CORR-001; real gPTP stack for VV-CORR-002
+**Dependencies**: PHC Stability Under State Changes (UT-CORR-005..009) for VV-CORR-001; real gPTP stack for VV-CORR-002
 
 **VV-CORR-001 (24-Hour Stability Monitor)**
 ```
@@ -294,7 +294,7 @@ NOTE: This is a system-level V&V activity, not automated CI
 
 | Priority | Track | Tests Closed | Effort | Prerequisite |
 |----------|-------|-------------|--------|--------------|
-| P0 — Sprint 5 | A | UT-CORR-005..009 (5 tests) | 2d | None |
+| P0 — Sprint 5 | PHC Stability (Track A) | UT-CORR-005..009 (5 tests) | 2d | None |
 | ✅ DONE | B | UT-CORR-003 + IT-CORR-002 (2 tests) | ~~3d~~ complete 2026-03-28 | ~~None~~ resolved |
 | P1 — Sprint 5 | E (VV-CORR-001) | VV-CORR-001 (1 test) | 1d | Track A |
 | P1 — Sprint 6 | D1/D2 | UT-CORR-001, UT-CORR-010 (2 tests) | 3d | None |
