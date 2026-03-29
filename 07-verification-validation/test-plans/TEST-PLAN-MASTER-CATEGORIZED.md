@@ -115,7 +115,7 @@ Leave open; add a comment tracking the gap; do not close until gap is filled.
 
 | Issue | Test ID | Covering File(s) | Gap Description |
 |-------|---------|-----------------|-----------------|
-| #209 | TEST-LAUNCH-TIME-001: Launch Time Offload | `test_ioctl_target_time.c` | Gate-window enforcement and missed-deadline detection not in test |
+| #209 | TEST-LAUNCH-TIME-001: Launch Time Offload | `test_ioctl_target_time.c` | **✅ CLOSED 2026-03-29** — Past-target-time guard added to `IOCTL_AVB_SET_TARGET_TIME` (`avb_integration_fixed.c`). TC-TARGET-005 rejects past times with Win32 error 87. 15/15 PASS (0F, 1 SKIP=ring-buf). See `2ad239e`. |
 | #222 | TEST-DIAGNOSTICS-001: Network Diagnostics | `test_event_log.c` + `diagnostic/*.c` | Packet-capture path and ETW decode assertions not automated |
 | #238 | TEST-PTP-001: HW Timestamp Correlation | `ptp_clock_control_test.c`, `rx_timestamping_test.c` | **✅ CLOSED 2026-03-29** — `TestPhcQpcCoherence()` added to `ptp_clock_control_test.c`. TC-5a (bracket <500 µs) and TC-5b (PHC monotone + rate sanity [0.95..1.10×]) PASS 6/6 adapters (6×I226-LM). Test runs FIRST in main() to avoid dirty PHC state from Tests 1-4. |
 | #247 | TEST-DEBUG-REG-001: Registry Debug Settings | `test_registry_diagnostics.c` | DebugLevel runtime persistence across driver reload not verified |
@@ -357,7 +357,7 @@ Sprint 5  →  ❌ Not started — long-running / OS compat / hw-gated → close
 ```
 tests/ioctl/
   test_ioctl_qav_cbs.c          → #283 CBS config
-  test_ioctl_target_time.c      → #209 launch time
+  test_ioctl_target_time.c      → #209 launch time ✅ 15/15 PASS 2026-03-29
   test_ioctl_rx_timestamp.c     → RX timestamp basic
   test_ioctl_ptp_getset.c       → #195 #266 PHC get/set
   test_ioctl_ptp_freq.c         → PTP freq basic
