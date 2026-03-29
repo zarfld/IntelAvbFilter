@@ -166,7 +166,12 @@ $HardwareUnitTests = @(
     "test_ioctl_abi",              # IOCTL ABI backward-compatibility
     "test_ioctl_access_control",   # IOCTL access-control (privilege enforcement)
     "test_ioctl_buffer_fuzz",      # IOCTL buffer-boundary fuzzing (security)
-    "test_tsn_ioctl_handlers"      # TSN IOCTL handlers (kernel-side, non-um)
+    "test_tsn_ioctl_handlers",     # TSN IOCTL handlers (kernel-side, non-um)
+    # Phase B: PHC/QPC coherence + VV coverage (added 2026-03-29)
+    "ptp_clock_control_test",      # PHC/QPC coherence TC-5a/TC-5b -- #238
+    "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
+    "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
+    "test_lifecycle_coverage"      # Pillar-2 NDIS LWF lifecycle counters
 )
 
 # Integration-level tests that require the driver device node or Intel NIC.
@@ -181,7 +186,10 @@ $HardwareIntegrationTests = @(
     "test_ndis_receive_path",         # NDIS receive path -- needs NIC
     "test_hw_state_machine",          # hardware state machine transitions
     "test_lazy_initialization",       # lazy init via driver device open
-    "test_registry_diagnostics"       # registry diagnostics -- driver service required
+    "test_registry_diagnostics",      # registry diagnostics -- driver service required
+    # Phase B: extended cross-domain / correlation tests (added 2026-03-29)
+    "test_ptp_corr_extended",         # extended PTP correlation -- duration ~5 min
+    "test_vv_corr_003_crossdomain"    # cross-domain V&V validation -- VV-CORR-003
 )
 
 # ===========================

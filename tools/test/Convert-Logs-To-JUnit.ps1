@@ -228,9 +228,13 @@ foreach ($log in $targetLogs) {
         $totalFail += $suite.Failed
         $totalSkip += $suite.Skipped
         if ($ShowDetails) {
-            $st  = if ($suite.Failed -gt 0) { "[FAIL]" } else { "[PASS]" }
-            $clr = if ($suite.Failed -gt 0) { "Red" } else { "Green" }
-            Write-Host "  $st $($suite.Name): $($suite.Passed)/$($suite.Total) passed  [$($suite.TestCases.Count) cases]" -ForegroundColor $clr
+            # Use actual case counts (not summary-line counts, which fail for TC-* style logs)
+            $tcTotal = $suite.TestCases.Count
+            $tcPass  = @($suite.TestCases | Where-Object { -not $_.Failed -and -not $_.Skipped }).Count
+            $tcFail  = @($suite.TestCases | Where-Object { $_.Failed }).Count
+            $st  = if ($tcFail -gt 0) { "[FAIL]" } else { "[PASS]" }
+            $clr = if ($tcFail -gt 0) { "Red" } else { "Green" }
+            Write-Host "  $st $($suite.Name): $tcPass/$tcTotal passed  [$tcTotal cases]" -ForegroundColor $clr
         }
     }
 }
@@ -246,9 +250,11 @@ $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine("<!-- Machine: $machineName | Run date: $RunDate | OS: $osVersion -->")
 [void]$sb.AppendLine("<!-- NOTE: Tests require Intel NIC hardware and installed driver -->")
 
-$total   = $totalRun
-$fail    = $totalFail
-$skipped = $totalSkip
+# Compute accurate root-level totals from parsed test cases (summary-line counts
+# are unreliable when logs use TC-* style markers without a 'Total:' summary line)
+$total   = ($suites | ForEach-Object { $_.TestCases.Count } | Measure-Object -Sum).Sum
+$fail    = ($suites | ForEach-Object { @($_.TestCases | Where-Object { $_.Failed  }).Count } | Measure-Object -Sum).Sum
+$skipped = ($suites | ForEach-Object { @($_.TestCases | Where-Object { $_.Skipped }).Count } | Measure-Object -Sum).Sum
 [void]$sb.AppendLine('<testsuites name="IntelAvbFilter Hardware Tests ' + $RunDate + '" tests="' + $total + '" failures="' + $fail + '" skipped="' + $skipped + '" time="0">')
 
 foreach ($suite in $suites) {
@@ -302,6 +308,7 @@ Copy-Item $outPath $latestPath -Force
 Write-Host ""
 Write-Host "[OK] JUnit XML: $outPath" -ForegroundColor Green
 Write-Host "[OK] Latest:    $latestPath" -ForegroundColor Green
-Write-Host "[OK] Summary:   $($suites.Count) test suites | $totalRun tests | $totalPass passed | $totalFail failed | $totalSkip skipped" -ForegroundColor Cyan
+$passed = $total - $fail - $skipped
+Write-Host "[OK] Summary:   $($suites.Count) test suites | $total tests | $passed passed | $fail failed | $skipped skipped" -ForegroundColor Cyan
 
-exit $(if ($totalFail -gt 0) { 1 } else { 0 })
+exit $(if ($fail -gt 0) { 1 } else { 0 })
