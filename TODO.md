@@ -18,13 +18,7 @@ tests. Remaining work is targeted gap-filling, CI hardening, and production sign
 - **Action**: Register ETW manifest at driver load; add `mc.exe`-generated header to driver
   build; add EventWrite call in `DriverEntry`; re-verify TC-ETW-001.
 - **Issue**: [#269](https://github.com/zarfld/IntelAvbFilter/issues/269)
-### #209 â Missed-Deadline Detection (TC-TARGET-005: **FAIL** â confirmed driver gap)
-- **Problem**: Driver silently accepts a target time set 1 second in the past without returning
-  an error or raising an event. `IOCTL_AVB_SET_TX_LAUNCH_TIME` does not validate that
-  `launch_time_ns > current_phc_ns`; missed-deadline rejection logic is absent in the driver.
-- **Action**: Add past-target guard in `AvbSetTxLaunchTime()` (or equivalent ioctl handler);
-  return `STATUS_INVALID_PARAMETER` or a domain error code; re-verify TC-TARGET-005.
-- **Issue**: [#209](https://github.com/zarfld/IntelAvbFilter/issues/209)
+
 
 ### #271 — S3 Sleep/Wake PHC Preservation (TC-S3-002: **unconfirmed**)
 - **Problem**: Test triggered real S3 sleep during run; wake-up PHC preservation result
@@ -44,7 +38,7 @@ These tests pass what they cover but do not yet exercise all acceptance criteria
 | Issue | Gap | Action |
 |-------|-----|--------|
 | ~~[#199](https://github.com/zarfld/IntelAvbFilter/issues/199)~~ | ~~TX/RX PHC correlation â delta assertion between TX and RX PHC timestamps not automated~~ | ✅ **DONE 2026-03-29** â TC-CORR-TX-RX-001 added to `test_tx_timestamp_retrieval.c`; **42/42 PASS** |
-| [#209](https://github.com/zarfld/IntelAvbFilter/issues/209) | ~~Launch-time gate-window enforcement and missed-deadline detection missing~~ | TC-TARGET-006/007 added, **PASS**; **TC-TARGET-005 FAIL** confirmed â driver silently accepts past target time, missed-deadline rejection absent (see Active Failures) |
+| ~~[#209](https://github.com/zarfld/IntelAvbFilter/issues/209)~~ | ~~Launch-time gate-window enforcement and missed-deadline detection missing~~ | ✅ **DONE 2026-03-29** — TC-TARGET-005/006/007 all PASS; **15/15 PASS** — past-target-time guard added to `IOCTL_AVB_SET_TARGET_TIME` handler; rejects `target_time < current_systim` with `STATUS_INVALID_PARAMETER` |
 | [#222](https://github.com/zarfld/IntelAvbFilter/issues/222) | Packet-capture path and ETW decode assertions not automated | Extend diagnostic test suite |
 | ~~[#234](https://github.com/zarfld/IntelAvbFilter/issues/234)~~ | ~~AVTP diagnostic counter: seq-gap/late-ts threshold trigger and event payload assertions~~ | ✅ **DONE 2026-03-29** â UT-011..015 added to `test_avtp_tu_bit_events.c`; **20/20 PASS** |
 | ~~[#238](https://github.com/zarfld/IntelAvbFilter/issues/238)~~ | ~~±100 ns accuracy assertion across PHC-QPC pair not automated~~ | ✅ **DONE 2026-03-29** — TC-5a/TC-5b added to `ptp_clock_control_test.c`; 12/12 PASS |
