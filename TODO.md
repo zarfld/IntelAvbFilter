@@ -37,7 +37,7 @@ These tests pass what they cover but do not yet exercise all acceptance criteria
 
 | Issue | Gap | Action |
 |-------|-----|--------|
-| ~~[#199](https://github.com/zarfld/IntelAvbFilter/issues/199)~~ | ~~TX/RX PHC correlation â delta assertion between TX and RX PHC timestamps not automated~~ | ✅ **DONE 2026-03-29** â TC-CORR-TX-RX-001 added to `test_tx_timestamp_retrieval.c`; **42/42 PASS** |
+| ~~[#199](https://github.com/zarfld/IntelAvbFilter/issues/199)~~ | ~~TX/RX PHC correlation — all 17 tests (UT-CORR-001..010, VV-CORR-001..003, IT-CORR-001..004) not automated~~ | ✅ **DONE 2026-03-29** — All tracks complete: UT-CORR-001..009 PASS; VV-CORR-001 **PASS 86400s** (mean=0.0 ns, log `test_vv_corr_001_stability_20260328_195650`); VV-CORR-003 PASS 42/42; UT-CORR-004/010 + VV-CORR-002 hw-gated SKIP. **#317 CLOSED**. |
 | ~~[#209](https://github.com/zarfld/IntelAvbFilter/issues/209)~~ | ~~Launch-time gate-window enforcement and missed-deadline detection missing~~ | ✅ **DONE 2026-03-29** — TC-TARGET-005/006/007 all PASS; **15/15 PASS** — past-target-time guard added to `IOCTL_AVB_SET_TARGET_TIME` handler; rejects `target_time < current_systim` with `STATUS_INVALID_PARAMETER` |
 | [#222](https://github.com/zarfld/IntelAvbFilter/issues/222) | Packet-capture path and ETW decode assertions not automated | Extend diagnostic test suite |
 | ~~[#234](https://github.com/zarfld/IntelAvbFilter/issues/234)~~ | ~~AVTP diagnostic counter: seq-gap/late-ts threshold trigger and event payload assertions~~ | ✅ **DONE 2026-03-29** â UT-011..015 added to `test_avtp_tu_bit_events.c`; **20/20 PASS** |

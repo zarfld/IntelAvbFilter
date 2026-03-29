@@ -119,7 +119,7 @@ Leave open; add a comment tracking the gap; do not close until gap is filled.
 | #222 | TEST-DIAGNOSTICS-001: Network Diagnostics | `test_event_log.c` + `diagnostic/*.c` | Packet-capture path and ETW decode assertions not automated |
 | #238 | TEST-PTP-001: HW Timestamp Correlation | `ptp_clock_control_test.c`, `rx_timestamping_test.c` | **✅ CLOSED 2026-03-29** — `TestPhcQpcCoherence()` added to `ptp_clock_control_test.c`. TC-5a (bracket <500 µs) and TC-5b (PHC monotone + rate sanity [0.95..1.10×]) PASS 6/6 adapters (6×I226-LM). Test runs FIRST in main() to avoid dirty PHC state from Tests 1-4. |
 | #247 | TEST-DEBUG-REG-001: Registry Debug Settings | `test_registry_diagnostics.c` | DebugLevel runtime persistence across driver reload not verified |
-| #199 | TEST-PTP-CORR-001: PTP Hardware Correlation | `tests/integration/ptp_corr/test_ptp_corr.c` | **🔴 REOPENED 2026-03-27** — closed prematurely with only 4/17 tests run. IT-CORR-001/003/004 ✅ PASS (14/14, 6×I226-LM); IT-CORR-002 ⚠️ SKIP (`IOCTL_AVB_PHC_CROSSTIMESTAMP` not implemented). **13 tests never run**: UT-CORR-001..010 (unit) + VV-CORR-001..003 (V&V). See **#317** (INFRA tracking) and `TEST-PLAN-MOCK-NDIS-HARNESS.md` for 4-track remediation plan. |
+| #199 | TEST-PTP-CORR-001: PTP Hardware Correlation | `tests/integration/ptp_corr/test_ptp_corr.c` | **✅ CLOSED 2026-03-29** — All 17 tests resolved. IT-CORR-001/003/004 ✅ PASS; IT-CORR-002 ✅ PASS (IOCTL 63 implemented); UT-CORR-001..009 ✅ PASS; UT-CORR-004/010 ⚠️ SKIP (hw-gated/accepted); VV-CORR-001 ✅ PASS (86400s, 2026-03-29); VV-CORR-003 ✅ PASS (42/42); VV-CORR-002 ⚠️ SKIP (gPTP lab). #317 closed. See `TEST-PLAN-MOCK-NDIS-HARNESS.md` v1.7. |
 | #234 | TEST-EVENT-004: AVTP Diagnostic Counter Events | `tests/event/test_avtp_tu_bit_events.c` | **Test file now exists** (added post 2026-03-07); verify seq-gap/late-ts threshold trigger and event payload assertions are covered |
 | #250 | TEST-INTEGRATION-SUITE-001: HIL Integration | `AvbIntegrationTests.c` | No formal pass/fail traceability report generated in CI |
 | #260 | TEST-COMPAT-I225-001: I225 Controller Compat | `tests/device_specific/i226/*.c` | No dedicated VEN_8086:DEV_15F2 detection test (I225-V device ID) |
@@ -221,11 +221,11 @@ Not a driver feature test. Managed on a separate track.
 |----------|-------|--------|
 | ✅ Tested OK (all re-verified 2026-03-19) | 59 | 41 original + #312/#219/#223 verified 2026-03-09 + **11 newly added 2026-03-20**: #174, #175, #192, #193, #295, #296, #297, #298, #299, #311, #314. **#236 ATDECC regression FIXED** — re-verified 2026-03-19: 5P/0F |
 | 🔁 Duplicates | 5 | Close as duplicate |
-| 🟡 Nearly OK — Genuine Gaps | 10 | #312 moved to Cat1; 10 remain (#199, #234 promoted from Cat4 2026-03-18). **⚠️ #199 REOPENED 2026-03-27** — was closed with only 4/17 tests run; 13 tests still outstanding (UT-CORR-001..010, VV-CORR-001..003). See #317 + `TEST-PLAN-MOCK-NDIS-HARNESS.md`. |
+| 🟡 Nearly OK — Genuine Gaps | 9 | #312 moved to Cat1; **#199 CLOSED 2026-03-29** — all 17 tests resolved (UT-CORR-001..009 PASS, UT-CORR-004/010 hw-gated SKIP, VV-CORR-001 PASS 86400s, VV-CORR-003 PASS 42/42, VV-CORR-002 SKIP gPTP lab). 9 remain. |
 | 🔵 Test Written — Partial Results | 9 | ~~#194 (ioctl_offset 14P/1F — resolved 2026-03-20)~~, ~~#305 (13 magic numbers — resolved 2026-03-20)~~, **#269** (ETW manifest gap), **#271** (S3 wake unconfirmed). #199/#234 promoted to Cat3 2026-03-18. **+5 (2026-03-19)**: ~~#178/#241~~ (ZP 18P/0F/18S — TC-ZP-002 SKIP-HARDWARE-LIMIT: EITR0 miniport constraint, resolved 2026-03-29), #177 (PTP latency 18P/0F/12S), #179 (4ch latency 12P/0F/18S), #176 (ATDECC AEN 18P/0F/18S) — moved from Cat4; all run on 6×I226-LM; hardware-gated TCs skip. |
 | 🔴 Test Missing (Sprint 5 / Future) | 10 | P2: 4 (#241 moved to Cat3b 2026-03-19) · P3: 7 (#176, #177, #178, #179 moved to Cat3b 2026-03-19; 7 original P3 entries remain). |
 | ⚫ Implementation Missing (out of driver scope) | 5 | Not in Sprint 1–4 scope; review per sprint |
-| 📋 Process/Infra/Docs | 12 | Separate track (#243 moved to Cat1 2026-03-19; #294 moved to Cat1 2026-03-19). **+1 (#317)**: [INFRA] Mock NDIS Unit Test Harness — prerequisite for #199 UT/VV closure. |
+| 📋 Process/Infra/Docs | 12 | Separate track (#243 moved to Cat1 2026-03-19; #294 moved to Cat1 2026-03-19). **#317 COMPLETE 2026-03-29** — [INFRA] Mock NDIS Unit Test Harness all closure criteria met; VV-CORR-001 PASS 86400s; #199 closed. |
 | **Total** | **107** | (92 original + 14 newly added 2026-03-20 + **1 new 2026-03-27**: #317 harness infra issue) |
 
 ---
