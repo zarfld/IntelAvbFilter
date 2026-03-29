@@ -128,6 +128,8 @@ jobs:
             05-implementation/tests/generated/
             reports/traceability-report.md
   # Phase 05: Implementation Quality Checks
+  # Implements: #252 (TEST-MAINTAIN-001: Verify Code Maintainability Standards)
+  # Traces to:  #85 (REQ-NF-MAINTAIN-001)
   code-quality:
     needs: [github-issues-generation]
     name: Code Quality & Standards (IEEE 1016, XP Practices)
@@ -139,18 +141,199 @@ jobs:
         with:
           fetch-depth: 0 # Full history for better analysis
 
+      - name: Install analysis tools
+        run: |
+          pip install lizard
+          sudo apt-get install -y clang-format
+
+      # Test 1 & 7: Cyclomatic complexity ≤10 and long function detection (<5% >50 lines)
+      # Verifies: #252 (TEST-MAINTAIN-001 steps 1 & 7)
+      - name: Test 1+7 — Cyclomatic complexity and long function check (lizard)
+        run: |
+          echo "🔍 Running lizard complexity + length analysis on src/..."
+          lizard src/ -l c --CCN 10 --length 50 --xml > /tmp/lizard-report.xml || true
+          lizard src/ -l c --CCN 10 --length 50 > /tmp/lizard-report.txt || true
+          cat /tmp/lizard-report.txt
+
+          # Check for complexity violations (CCN > 10)
+          ccn_violations=$(lizard src/ -l c --CCN 10 2>&1 | grep -E "^.*\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+" | awk '$3 > 10' || true)
+          if [ -n "$ccn_violations" ]; then
+            echo ""
+            echo "❌ Functions with cyclomatic complexity >10:"
+            echo "$ccn_violations"
+            exit 1
+          fi
+
+          # Check long function ratio (<5% of functions may exceed 50 lines)
+          total_funcs=$(lizard src/ -l c 2>/dev/null | grep -cE "^[[:space:]]+[0-9]" || echo 0)
+          long_funcs=$(lizard src/ -l c --length 50 2>/dev/null | grep -E "^[[:space:]]+[0-9]" | awk '$2 > 50' | wc -l || echo 0)
+          if [ "$total_funcs" -gt 0 ]; then
+            ratio=$(echo "scale=2; $long_funcs * 100 / $total_funcs" | bc)
+            echo "Long functions (>50 lines): $long_funcs / $total_funcs ($ratio%)"
+            too_many=$(echo "$ratio > 5" | bc)
+            if [ "$too_many" = "1" ]; then
+              echo "❌ More than 5% of functions exceed 50 lines ($ratio%)"
+              exit 1
+            fi
+          fi
+          echo "✅ Complexity and length checks passed"
+
+      # Test 2: Code duplication <3%
+      # Verifies: #252 (TEST-MAINTAIN-001 step 2)
+      - name: Test 2 — Code duplication detection
+        run: |
+          echo "🔍 Checking code duplication in src/..."
+          # lizard --duplicate reports duplicated tokens; use as a proxy metric
+          dup_output=$(lizard src/ -l c --duplicate 2>&1 || true)
+          echo "$dup_output"
+
+          # Count duplicate blocks reported (each "Duplicate" line = one block)
+          dup_count=$(echo "$dup_output" | grep -c "^Duplicate" || true)
+          echo "Duplicate blocks found: $dup_count"
+
+          if [ "$dup_count" -gt 10 ]; then
+            echo "❌ Excessive duplication: $dup_count duplicate blocks (threshold: 10)"
+            echo "   Extract duplicated logic into shared helper functions."
+            exit 1
+          fi
+          echo "✅ Code duplication within acceptable range ($dup_count blocks)"
+        continue-on-error: true  # Phase-in: surface findings without blocking yet
+
+      # Test 3: Function comment coverage (all public functions must have a header comment)
+      # Verifies: #252 (TEST-MAINTAIN-001 step 3)
+      - name: Test 3 — Public function comment coverage
+        run: |
+          echo "🔍 Checking public function comment coverage in src/ and include/..."
+          missing=0
+          total=0
+
+          # For each .c and .h file, find function definitions preceded by no comment
+          # Pattern: a line that looks like a function definition not preceded by // or /*
+          for f in $(find src include -name "*.c" -o -name "*.h" 2>/dev/null); do
+            # Extract line numbers of function definitions (return-type name(...) {)
+            # then check if the immediately preceding non-blank line is a comment
+            python3 - "$f" <<'PYEOF'
+          import sys, re
+
+          path = sys.argv[1]
+          try:
+              lines = open(path, encoding='utf-8', errors='replace').readlines()
+          except Exception:
+              sys.exit(0)
+
+          func_re = re.compile(r'^[A-Za-z_][A-Za-z0-9_ *]+\s+[A-Za-z_][A-Za-z0-9_]*\s*\(')
+          comment_re = re.compile(r'^\s*(/\*|\*|//)')
+          missing = 0
+          total = 0
+          for i, line in enumerate(lines):
+              # Skip preprocessor, blank, typedef, struct, etc.
+              stripped = line.strip()
+              if not stripped or stripped.startswith('#') or stripped.startswith('typedef') \
+                 or stripped.startswith('struct') or stripped.startswith('//') \
+                 or stripped.startswith('/*') or stripped.startswith('*'):
+                  continue
+              if func_re.match(stripped) and '{' in line:
+                  total += 1
+                  # Walk back to find preceding non-blank line
+                  j = i - 1
+                  while j >= 0 and not lines[j].strip():
+                      j -= 1
+                  if j < 0 or not comment_re.match(lines[j]):
+                      print(f"  MISSING comment: {path}:{i+1}: {stripped[:80]}")
+                      missing += 1
+          if total > 0:
+              print(f"  {path}: {total - missing}/{total} functions commented")
+          sys.exit(1 if missing > 0 else 0)
+          PYEOF
+            if [ $? -ne 0 ]; then
+              missing=$((missing + 1))
+            fi
+            total=$((total + 1))
+          done
+
+          if [ "$missing" -gt 0 ]; then
+            echo ""
+            echo "❌ $missing file(s) contain public functions missing header comments"
+            exit 1
+          fi
+          echo "✅ Public function comment coverage passed"
+        continue-on-error: true  # Phase-in: surface findings without blocking yet
+
+      # Test 4: Coding style compliance (clang-format)
+      # Verifies: #252 (TEST-MAINTAIN-001 step 4)
+      - name: Test 4 — Coding style compliance (clang-format)
+        run: |
+          echo "🔍 Running clang-format style check on src/..."
+
+          # Use LLVM style as baseline (closest to WDK/kernel conventions)
+          # If a .clang-format file exists at repo root, it will be used automatically.
+          style_flag="--style=file"
+          if [ ! -f ".clang-format" ]; then
+            style_flag="--style={BasedOnStyle: LLVM, IndentWidth: 4, ColumnLimit: 120}"
+          fi
+
+          violations=""
+          for f in $(find src -name "*.c" -o -name "*.h"); do
+            diff_out=$(clang-format $style_flag --dry-run --Werror "$f" 2>&1 || true)
+            if [ -n "$diff_out" ]; then
+              violations="$violations\n  $f"
+            fi
+          done
+
+          if [ -n "$violations" ]; then
+            echo "⚠️  Style violations found in:"
+            echo -e "$violations"
+            echo ""
+            echo "  Run: clang-format $style_flag -i <file> to auto-fix"
+          else
+            echo "✅ No clang-format style violations"
+          fi
+        continue-on-error: true  # Phase-in: report without blocking until .clang-format is baselined
+
+      # Test 5: Dead code / unused symbol detection (surfaced via PREfast — see static-analysis-prefast job)
+      # C4505 (unreferenced functions) and C6001 patterns caught there.
+      # Verifies: #252 (TEST-MAINTAIN-001 step 5) — complementary check via cppcheck
+      - name: Test 5 — Dead code detection (cppcheck)
+        run: |
+          sudo apt-get install -y cppcheck
+          echo "🔍 Running cppcheck for unused functions and unreachable code..."
+          cppcheck --enable=unusedFunction --enable=style \
+            --suppress=missingIncludeSystem \
+            --error-exitcode=0 \
+            --template="{file}:{line}: [{severity}] {id}: {message}" \
+            src/ 2>&1 | tee /tmp/cppcheck-report.txt || true
+
+          unused=$(grep -c "unusedFunction\|unreadVariable\|unusedVariable" /tmp/cppcheck-report.txt || true)
+          echo "Unused symbol findings: $unused"
+          if [ "$unused" -gt 0 ]; then
+            echo "⚠️  $unused unused symbol(s) detected — review /tmp/cppcheck-report.txt"
+          else
+            echo "✅ No unused symbols detected"
+          fi
+        continue-on-error: true  # Phase-in: surface findings without blocking yet
+
+      # Test 6: Magic number detection — handled by ssot-magic-numbers-gate job (closes #305)
+      # Verifies: #252 (TEST-MAINTAIN-001 step 6) — see ssot-magic-numbers-gate below
+
+      # Test 8: Upload all analysis results as CI artifacts
+      # Verifies: #252 (TEST-MAINTAIN-001 step 8)
+      - name: Upload code quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-quality-reports
+          path: |
+            /tmp/lizard-report.txt
+            /tmp/lizard-report.xml
+            /tmp/cppcheck-report.txt
+          retention-days: 30
+
       - name: Check Markdown documentation
         run: |
           echo "📄 Validating Markdown documentation..."
           pip install mdformat
           find . -name '*.md' ! -path './node_modules/*' ! -path './.pio/*' | head -20 || echo "✅ Markdown check skipped"
         continue-on-error: true
-
-      - name: Check C/C++ code exists
-        run: |
-          echo "🔍 Checking C/C++ source files..."
-          find src -name '*.cpp' -o -name '*.h' | head -10
-          echo "✅ Source files found"
 
   # Sprint 1 CI Gate: SSOT Magic Numbers Check (closes #305)
   ssot-magic-numbers-gate:
