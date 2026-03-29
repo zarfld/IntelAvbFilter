@@ -19,15 +19,6 @@ CI hardening, and production sign-off.
   build; add EventWrite call in `DriverEntry`; re-verify TC-ETW-001.
 - **Issue**: [#269](https://github.com/zarfld/IntelAvbFilter/issues/269)
 
-### #178 / #241 — Zero Polling Overhead TC-ZP-002 (**6F** — known HW constraint)
-- **Situation**: EITR0 = 33,024 µs interrupt coalescing (NIC default set by NDIS miniport).
-  NDIS LWF has no IOCTL to change EITR0 — this is a genuine hardware/architecture finding,
-  not a bug.
-- **Action**: Update test spec to document this as an observed platform constraint, not a
-  failure; mark TC-ZP-002 as SKIP-HARDWARE-LIMIT with explanatory message.
-- **Issues**: [#178](https://github.com/zarfld/IntelAvbFilter/issues/178),
-  [#241](https://github.com/zarfld/IntelAvbFilter/issues/241)
-
 ### #271 — S3 Sleep/Wake PHC Preservation (TC-S3-002: **unconfirmed**)
 - **Problem**: Test triggered real S3 sleep during run; wake-up PHC preservation result
   unconfirmed. `FilterRestart` S3 PHC fix is coded (`AvbBringUpHardware` called to
