@@ -1,12 +1,12 @@
 # Intel AVB Filter Driver - TODO
 
-**Last Updated**: March 2026 (build 345, driver v1.0.193.x)
+**Last Updated**: March 2026 (build 345, driver v1.0.193.x, 2026-03-29)
 
 ## 🟢 Current Phase: Post-Validation — Filling Remaining Gaps
 
 I226-LM hardware validation is substantially complete. The CI runner has 6×Intel I226-LM
-adapters and runs 113 tests; 106/113 pass (93.8%). Remaining work is targeted gap-filling,
-CI hardening, and production sign-off.
+adapters. The hardware-dependent suite (HardwareUnit + HardwareIntegration) covers 60+
+tests. Remaining work is targeted gap-filling, CI hardening, and production sign-off.
 
 ---
 
@@ -40,7 +40,7 @@ These tests pass what they cover but do not yet exercise all acceptance criteria
 | [#209](https://github.com/zarfld/IntelAvbFilter/issues/209) | Launch-time gate-window enforcement and missed-deadline detection missing | Extend `test_ioctl_target_time.c` |
 | [#222](https://github.com/zarfld/IntelAvbFilter/issues/222) | Packet-capture path and ETW decode assertions not automated | Extend diagnostic test suite |
 | [#234](https://github.com/zarfld/IntelAvbFilter/issues/234) | AVTP diagnostic counter: seq-gap/late-ts threshold trigger and event payload assertions | Extend `test_avtp_tu_bit_events.c` |
-| [#238](https://github.com/zarfld/IntelAvbFilter/issues/238) | ±100 ns accuracy assertion across PHC-QPC pair not automated | Extend `ptp_clock_control_test.c` |
+| ~~[#238](https://github.com/zarfld/IntelAvbFilter/issues/238)~~ | ~~±100 ns accuracy assertion across PHC-QPC pair not automated~~ | ✅ **DONE 2026-03-29** — TC-5a/TC-5b added to `ptp_clock_control_test.c`; 12/12 PASS |
 | [#247](https://github.com/zarfld/IntelAvbFilter/issues/247) | DebugLevel runtime persistence across driver reload not verified | Extend `test_registry_diagnostics.c` |
 | [#250](https://github.com/zarfld/IntelAvbFilter/issues/250) | HIL integration — no formal pass/fail traceability report generated in CI | Add CI step to emit structured report |
 | [#260](https://github.com/zarfld/IntelAvbFilter/issues/260) | I225-V device ID (VEN_8086:DEV_15F2) detection test missing | Add device-specific test or expand existing |
@@ -66,8 +66,20 @@ These tests have written code but need specific hardware to run the critical tes
 
 From **TEST-PLAN-NDIS-LWF-COVERAGE** (Pillar 1 — Static Analysis):
 
-- [ ] Enable MSVC `/analyze` (PREfast) in CI — add `<RunCodeAnalysis>true</RunCodeAnalysis>` to
-  `.vcxproj`; zero Level-4 warnings required before green
+- [x] ~~Enable MSVC `/analyze` (PREfast) in CI~~ — ✅ **DONE** (`static-analysis-prefast` job in
+  `ci-standards-compliance.yml`; `continue-on-error: true` phase-in until baseline = 0)
+- [ ] Run SDV and commit DVL artifact — `test-evidence/dvl-*.xml` required before each release
+- [x] ~~Wire CodeQL for main driver source~~ — ✅ **DONE** (`codeql-driver.yml` uses
+  `microsoft/windows-driver-developer-supplemental-tools`)
+- [ ] Commit SDV results to `test-evidence/sdv-results-*.xml`
+- [ ] Remove `continue-on-error: true` from PREfast job once C6xxx baseline reaches zero
+
+From **TEST-PLAN-NDIS-LWF-COVERAGE** (Pillar 2 — Lifecycle Coverage):
+
+- [x] ~~Add missing statistics counters to `AVB_DRIVER_STATISTICS` struct~~ — ✅ **DONE**
+  (all 7 fields: FilterAttach/Pause/Restart/Detach, OutstandingSend/ReceiveNBLs, PauseRestartGeneration)
+- [x] ~~Write lifecycle smoke test~~ — ✅ **DONE** (`test_lifecycle_coverage.exe` built;
+  added to `HardwareUnitTests` suite in `Run-Tests-CI.ps1` 2026-03-29)
 - [ ] Run SDV and commit DVL artifact — `test-evidence/dvl-*.xml` required before each release
 - [ ] Wire CodeQL for main driver source using
   `microsoft/windows-driver-developer-supplemental-tools` action
