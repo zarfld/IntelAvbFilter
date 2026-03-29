@@ -387,6 +387,82 @@ BOOLEAN Test_OpenAdapter_InvalidVidDid()
 }
 
 /**
+ * TC-DEV-I225-001: Detect I225-V hardware and verify AVB capability bits.
+ *
+ * Scenario: Enumerate all adapters, find any I225-V (device_id 0x15F2 or 0x15F3).
+ *   Given: System may or may not have an I225-V installed.
+ *   When:  IOCTL_AVB_ENUM_ADAPTERS is called for each adapter index 0..count-1.
+ *   Then:
+ *     - If no I225 found → [SKIP] — machine does not have I225 hardware; test passes.
+ *     - If I225 found → vendor_id == 0x8086 AND capabilities != 0 (has AVB support).
+ *
+ * Gap closure: Issue #260 (Cat.3 — I225 capabilities not validated against real hardware).
+ * Also supplements: Issue #15 (TEST-MULTIDEV-001 base enumeration).
+ */
+BOOLEAN Test_I225_Detection(void)
+{
+    printf("\n=== TC-DEV-I225-001: I225-V Device Detection and Capability Check ===\n");
+
+    HANDLE hDevice = CreateFile(
+        DEVICE_PATH,
+        GENERIC_READ | GENERIC_WRITE,
+        0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL
+    );
+    TEST_ASSERT(hDevice != INVALID_HANDLE_VALUE, "Open device for I225 detection");
+
+    /* First pass: get adapter count */
+    AVB_ENUM_REQUEST probe = {0};
+    probe.index = 0;
+    DWORD bytesReturned = 0;
+    BOOL ok = DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS,
+                              &probe, sizeof(probe),
+                              &probe, sizeof(probe),
+                              &bytesReturned, NULL);
+    TEST_ASSERT(ok, "IOCTL_AVB_ENUM_ADAPTERS probe (get count)");
+    UINT32 adapterCount = probe.count;
+    printf("   Adapter count: %u\n", adapterCount);
+
+    /* Second pass: scan for I225 */
+    BOOLEAN foundI225 = FALSE;
+    for (UINT32 i = 0; i < adapterCount && i < 16; i++) {
+        AVB_ENUM_REQUEST req = {0};
+        req.index = i;
+        bytesReturned = 0;
+        ok = DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS,
+                             &req, sizeof(req),
+                             &req, sizeof(req),
+                             &bytesReturned, NULL);
+        if (!ok) continue;
+
+        printf("   [%u] VID=0x%04X DID=0x%04X caps=0x%08X\n",
+               i, req.vendor_id, req.device_id, req.capabilities);
+
+        /* I225-V device IDs */
+        if (req.device_id == 0x15F2 || req.device_id == 0x15F3) {
+            foundI225 = TRUE;
+            printf("   I225 detected at index %u (DID=0x%04X)\n", i, req.device_id);
+            TEST_ASSERT_EQUAL(0x8086, req.vendor_id,
+                              "TC-DEV-I225-001: I225 vendor_id == 0x8086 (Intel)");
+            TEST_ASSERT(req.capabilities != 0,
+                        "TC-DEV-I225-001: I225 capabilities bitmask non-zero (AVB support present)");
+            TEST_ASSERT_EQUAL(AVB_STATUS_SUCCESS, req.status,
+                              "TC-DEV-I225-001: I225 enumeration status == AVB_STATUS_SUCCESS");
+        }
+    }
+
+    CloseHandle(hDevice);
+
+    if (!foundI225) {
+        printf("   [SKIP] TC-DEV-I225-001: No I225 hardware found on this machine.\n");
+        printf("   [SKIP] Test requires physical Intel I225-V NIC (DID 0x15F2 or 0x15F3).\n");
+        printf("   [PASS] TC-DEV-I225-001: SKIPPED (hardware not present) — counted as pass.\n");
+    } else {
+        printf("   [PASS] TC-DEV-I225-001: PASSED — I225 detected with correct vendor and capabilities.\n");
+    }
+    return TRUE;
+}
+
+/**
  * Main test runner
  */
 int main(int argc, char* argv[])
@@ -406,6 +482,7 @@ int main(int argc, char* argv[])
     if (Test_EnumerateAdapters_OutOfBounds()) passCount++; else failCount++;
     if (Test_OpenAdapter_ByVidDid()) passCount++; else failCount++;
     if (Test_OpenAdapter_InvalidVidDid()) passCount++; else failCount++;
+    if (Test_I225_Detection()) passCount++; else failCount++;
     
     // Print summary
     printf("\n");

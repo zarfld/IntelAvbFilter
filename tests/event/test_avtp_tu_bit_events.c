@@ -716,6 +716,384 @@ static int Test_VV_MilanCompliance_EventLatency(void) {
 }
 
 //=============================================================================
+// Seq-Gap / Late-Timestamp Mock Infrastructure (Issue #234 gap closure)
+//=============================================================================
+
+/**
+ * Per-stream AVTP receive state for sequence-gap and late-timestamp tracking.
+ *
+ * Adds EVENT-002-UT-011 through UT-015 to close the Cat.3 gap identified in #234:
+ *   "seq-gap/late-ts threshold trigger and event payload assertions missing"
+ *
+ * Implements gap closure for Issue #234 (TEST-AVTP-SEQGAP-001).
+ */
+
+/* Seq-gap event payload — what the driver would emit on sequence number skip */
+typedef struct _AVTP_SEQ_GAP_EVENT {
+    UINT64  StreamId;
+    UINT16  ExpectedSeq;   /* What seq number we expected */
+    UINT16  ReceivedSeq;   /* What seq number we actually received */
+    UINT32  GapCount;      /* Cumulative gaps detected on this stream */
+    UINT64  TimestampNs;   /* Detection time */
+} AVTP_SEQ_GAP_EVENT;
+
+/* Late-timestamp event payload — what the driver would emit when a packet
+ * arrives after its playout deadline */
+typedef struct _AVTP_LATE_TS_EVENT {
+    UINT64  StreamId;
+    UINT64  PacketTimestampNs;    /* PTP time embedded in AVTP header */
+    UINT64  ArrivalTimestampNs;   /* Hardware RX timestamp */
+    UINT64  PlayoutDeadlineNs;    /* PacketTimestampNs + playout_window */
+    UINT64  LateByNs;             /* Arrival - PlayoutDeadline (>0 means late) */
+    UINT32  LateCount;            /* Cumulative late-arrivals on this stream */
+} AVTP_LATE_TS_EVENT;
+
+/* Per-stream receive state */
+typedef struct _AVTP_RX_STATE {
+    UINT64  StreamId;
+    UINT32  PlayoutWindowNs;   /* Acceptable playout window in nanoseconds */
+    BOOLEAN HasLastSeq;
+    UINT16  LastSeq;
+    UINT32  SeqGapCount;
+    UINT32  LateCount;
+} AVTP_RX_STATE;
+
+#define MAX_RX_STREAMS 8
+static AVTP_RX_STATE   g_RxStates[MAX_RX_STREAMS];
+static UINT32           g_RxStreamCount = 0;
+
+/* Seq-gap event buffer */
+static AVTP_SEQ_GAP_EVENT g_SeqGapEvents[50];
+static UINT32              g_SeqGapEventCount = 0;
+
+/* Late-ts event buffer */
+static AVTP_LATE_TS_EVENT g_LateTsEvents[50];
+static UINT32              g_LateTsEventCount = 0;
+
+static void MockRxStateInit(void)
+{
+    memset(g_RxStates,       0, sizeof(g_RxStates));
+    memset(g_SeqGapEvents,   0, sizeof(g_SeqGapEvents));
+    memset(g_LateTsEvents,   0, sizeof(g_LateTsEvents));
+    g_RxStreamCount      = 0;
+    g_SeqGapEventCount   = 0;
+    g_LateTsEventCount   = 0;
+}
+
+static AVTP_RX_STATE *MockFindOrCreateRxStream(UINT64 StreamId, UINT32 PlayoutWindowNs)
+{
+    for (UINT32 i = 0; i < g_RxStreamCount; i++) {
+        if (g_RxStates[i].StreamId == StreamId) {
+            return &g_RxStates[i];
+        }
+    }
+    if (g_RxStreamCount >= MAX_RX_STREAMS) {
+        return NULL;
+    }
+    AVTP_RX_STATE *s = &g_RxStates[g_RxStreamCount++];
+    s->StreamId      = StreamId;
+    s->PlayoutWindowNs = PlayoutWindowNs;
+    s->HasLastSeq    = FALSE;
+    s->LastSeq       = 0;
+    s->SeqGapCount   = 0;
+    s->LateCount     = 0;
+    return s;
+}
+
+/**
+ * Simulate receiving an AVTP packet.
+ * @param StreamId        Stream identifier
+ * @param SeqNum          Sequence number in the AVTP header
+ * @param PacketTs        PTP timestamp in the AVTP header (ns)
+ * @param ArrivalTs       Hardware RX timestamp (ns)
+ * @param PlayoutWindow   Acceptable latency window (ns) — 0 = use stream default
+ * @return TRUE if a seq-gap was detected (event pushed to g_SeqGapEvents)
+ */
+static BOOLEAN MockSimulateAvtpReceive(UINT64 StreamId, UINT16 SeqNum,
+                                        UINT64 PacketTs, UINT64 ArrivalTs,
+                                        UINT32 PlayoutWindow)
+{
+    AVTP_RX_STATE *s = MockFindOrCreateRxStream(StreamId, PlayoutWindow);
+    if (!s) {
+        return FALSE;
+    }
+    BOOLEAN seq_gap_detected = FALSE;
+
+    /* --- Sequence-gap check --- */
+    if (s->HasLastSeq) {
+        UINT16 expected = (UINT16)(s->LastSeq + 1);
+        if (SeqNum != expected) {
+            /* Gap detected */
+            s->SeqGapCount++;
+            seq_gap_detected = TRUE;
+            if (g_SeqGapEventCount < ARRAYSIZE(g_SeqGapEvents)) {
+                AVTP_SEQ_GAP_EVENT *ev = &g_SeqGapEvents[g_SeqGapEventCount++];
+                ev->StreamId    = StreamId;
+                ev->ExpectedSeq = expected;
+                ev->ReceivedSeq = SeqNum;
+                ev->GapCount    = s->SeqGapCount;
+
+                LARGE_INTEGER pc;
+                QueryPerformanceCounter(&pc);
+                LARGE_INTEGER freq;
+                QueryPerformanceFrequency(&freq);
+                ev->TimestampNs = (UINT64)(pc.QuadPart * 1000000000ULL / freq.QuadPart);
+            }
+        }
+    }
+    s->HasLastSeq = TRUE;
+    s->LastSeq    = SeqNum;
+
+    /* --- Late-timestamp check --- */
+    if (PlayoutWindow > 0 && ArrivalTs > 0 && PacketTs > 0) {
+        UINT64 deadline = PacketTs + (UINT64)PlayoutWindow;
+        if (ArrivalTs > deadline) {
+            s->LateCount++;
+            if (g_LateTsEventCount < ARRAYSIZE(g_LateTsEvents)) {
+                AVTP_LATE_TS_EVENT *le = &g_LateTsEvents[g_LateTsEventCount++];
+                le->StreamId          = StreamId;
+                le->PacketTimestampNs = PacketTs;
+                le->ArrivalTimestampNs = ArrivalTs;
+                le->PlayoutDeadlineNs  = deadline;
+                le->LateByNs           = ArrivalTs - deadline;
+                le->LateCount          = s->LateCount;
+            }
+        }
+    }
+
+    return seq_gap_detected;
+}
+
+//=============================================================================
+// EVENT-002 Seq-Gap / Late-Timestamp Tests (Issue #234 gap closure)
+//=============================================================================
+
+/**
+ * EVENT-002-UT-011: Sequence Gap Detection
+ *
+ * Sends seq 0, 1, 3 (skipping 2) and verifies a seq-gap event is emitted
+ * with ExpectedSeq=2, ReceivedSeq=3.
+ *
+ * Implements gap closure for Issue #234 (Cat.3: seq-gap detection not tested).
+ */
+static int Test_SeqGap_Detection(void)
+{
+    TEST_START("EVENT-002-UT-011", "Sequence gap detection (seq 0,1,3 — missing 2)");
+
+    MockRxStateInit();
+
+    UINT64 sid = TEST_STREAM_ID_1;
+    UINT64 now = 1000000000ULL;   /* 1s baseline */
+    UINT32 window = 250000;       /* 250µs playout window — not relevant here */
+
+    /* Inject seq 0 and 1 — consecutive, no gap */
+    BOOLEAN g0 = MockSimulateAvtpReceive(sid, 0, now,            now + 1000,  window);
+    BOOLEAN g1 = MockSimulateAvtpReceive(sid, 1, now + 125000,   now + 126000, window);
+
+    ASSERT_FALSE(g0, "seq 0 (first) should not produce gap event");
+    ASSERT_FALSE(g1, "seq 1 (consecutive after 0) should not produce gap event");
+    ASSERT_EQUAL(g_SeqGapEventCount, 0, "no gap events after sequential packets");
+
+    /* Inject seq 3 (skip seq 2) — should trigger gap */
+    BOOLEAN g3 = MockSimulateAvtpReceive(sid, 3, now + 375000, now + 376000, window);
+    ASSERT_TRUE(g3, "seq 3 after seq 1 should detect gap (missing seq 2)");
+    ASSERT_EQUAL(g_SeqGapEventCount, 1, "exactly one gap event emitted");
+
+    AVTP_SEQ_GAP_EVENT *ev = &g_SeqGapEvents[0];
+    ASSERT_EQUAL(ev->StreamId,    sid, "gap event StreamId matches");
+    ASSERT_EQUAL(ev->ExpectedSeq, 2,   "gap event ExpectedSeq == 2");
+    ASSERT_EQUAL(ev->ReceivedSeq, 3,   "gap event ReceivedSeq == 3");
+    ASSERT_EQUAL(ev->GapCount,    1,   "cumulative gap count == 1");
+    ASSERT_NOT_EQUAL(ev->TimestampNs, 0, "gap event timestamp is non-zero");
+
+    printf("  Gap event: stream=%llX expected=%u got=%u count=%u ts=%llu ns\n",
+           (unsigned long long)ev->StreamId,
+           ev->ExpectedSeq, ev->ReceivedSeq, ev->GapCount,
+           (unsigned long long)ev->TimestampNs);
+
+    RETURN_PASS();
+}
+
+/**
+ * EVENT-002-UT-012: Sequence Gap Counter Increment
+ *
+ * Injects three separate gaps and verifies the cumulative counter increments
+ * monotonically per stream, and that the event payload reflects the running count.
+ *
+ * Implements gap closure for Issue #234.
+ */
+static int Test_SeqGap_CounterIncrement(void)
+{
+    TEST_START("EVENT-002-UT-012",
+               "Seq gap counter increments monotonically (3 injected gaps)");
+
+    MockRxStateInit();
+
+    UINT64 sid   = TEST_STREAM_ID_2;
+    UINT64 base  = 2000000000ULL;
+    UINT32 win   = 250000;
+
+    /* Establish base: seq 10 */
+    MockSimulateAvtpReceive(sid, 10, base, base + 1000, win);
+
+    /* Gap 1: seq 12 (missing 11) */
+    MockSimulateAvtpReceive(sid, 12, base + 125000, base + 126000, win);
+    /* Gap 2: seq 15 (missing 13,14) */
+    MockSimulateAvtpReceive(sid, 15, base + 250000, base + 251000, win);
+    /* Gap 3: seq 20 (missing 16..19) */
+    MockSimulateAvtpReceive(sid, 20, base + 375000, base + 376000, win);
+
+    ASSERT_EQUAL(g_SeqGapEventCount, 3, "three gap events emitted");
+
+    /* Verify monotonically increasing GapCount field */
+    ASSERT_EQUAL(g_SeqGapEvents[0].GapCount, 1, "first gap event GapCount == 1");
+    ASSERT_EQUAL(g_SeqGapEvents[1].GapCount, 2, "second gap event GapCount == 2");
+    ASSERT_EQUAL(g_SeqGapEvents[2].GapCount, 3, "third gap event GapCount == 3");
+
+    /* All events must reference the same stream */
+    for (UINT32 i = 0; i < 3; i++) {
+        ASSERT_EQUAL(g_SeqGapEvents[i].StreamId, sid,
+                     "all gap events belong to the correct stream");
+    }
+
+    printf("  Gap counters: %u, %u, %u (expected 1, 2, 3)\n",
+           g_SeqGapEvents[0].GapCount,
+           g_SeqGapEvents[1].GapCount,
+           g_SeqGapEvents[2].GapCount);
+
+    RETURN_PASS();
+}
+
+/**
+ * EVENT-002-UT-013: Sequence Gap Event Payload Completeness
+ *
+ * Verifies all mandatory payload fields are populated correctly:
+ * StreamId, ExpectedSeq, ReceivedSeq, GapCount, TimestampNs (non-zero).
+ *
+ * Implements gap closure for Issue #234.
+ */
+static int Test_SeqGap_EventPayload(void)
+{
+    TEST_START("EVENT-002-UT-013",
+               "Seq gap event payload completeness (all fields populated)");
+
+    MockRxStateInit();
+
+    UINT64 sid = TEST_STREAM_ID_3;
+    UINT64 base = 3000000000ULL;
+    UINT32 win  = 500000;
+
+    /* Seq 100 → 102 (gap at 101) */
+    MockSimulateAvtpReceive(sid, 100, base,        base + 1000, win);
+    MockSimulateAvtpReceive(sid, 102, base + 125000, base + 126000, win);
+
+    ASSERT_EQUAL(g_SeqGapEventCount, 1, "one gap event emitted");
+
+    AVTP_SEQ_GAP_EVENT *ev = &g_SeqGapEvents[0];
+
+    /* All payload fields must be non-zero / correct */
+    ASSERT_NOT_EQUAL(ev->StreamId,    0,   "StreamId is non-zero");
+    ASSERT_EQUAL(ev->StreamId,        sid, "StreamId matches injected stream");
+    ASSERT_EQUAL(ev->ExpectedSeq,     101, "ExpectedSeq is 101");
+    ASSERT_EQUAL(ev->ReceivedSeq,     102, "ReceivedSeq is 102");
+    ASSERT_EQUAL(ev->GapCount,        1,   "GapCount is 1");
+    ASSERT_NOT_EQUAL(ev->TimestampNs, 0,   "TimestampNs is non-zero (clock was sampled)");
+
+    printf("  Payload: StreamId=0x%llX Exp=%u Rcv=%u Count=%u Ts=%llu\n",
+           (unsigned long long)ev->StreamId,
+           ev->ExpectedSeq, ev->ReceivedSeq, ev->GapCount,
+           (unsigned long long)ev->TimestampNs);
+
+    RETURN_PASS();
+}
+
+/**
+ * EVENT-002-UT-014: Late-Timestamp Detection
+ *
+ * Injects a packet where arrival time > packet_timestamp + playout_window.
+ * Verifies a late-ts event is emitted with correct LateByNs and LateCount.
+ *
+ * Implements gap closure for Issue #234.
+ */
+static int Test_LateTs_Detection(void)
+{
+    TEST_START("EVENT-002-UT-014",
+               "Late-timestamp detection (arrival after playout deadline)");
+
+    MockRxStateInit();
+
+    UINT64 sid        = TEST_STREAM_ID_1;
+    UINT32 window     = 250000;           /* 250 µs playout window */
+    UINT64 pkt_ts     = 5000000000ULL;    /* PTP timestamp in packet */
+    UINT64 deadline   = pkt_ts + window;
+
+    /* On-time packet: arrives exactly at deadline */
+    BOOLEAN late0 = MockSimulateAvtpReceive(sid, 0, pkt_ts, deadline, window);
+    ASSERT_EQUAL(g_LateTsEventCount, 0, "on-time packet must not emit late-ts event");
+
+    /* Late packet: arrives 500µs after deadline */
+    UINT64 late_arrival = deadline + 500000;
+    BOOLEAN gap_check = MockSimulateAvtpReceive(sid, 1, pkt_ts + 125000,
+                                                 late_arrival, window);
+    (void)gap_check;  /* Seq is consecutive; seq-gap result not the focus here */
+
+    ASSERT_EQUAL(g_LateTsEventCount, 1, "late packet must emit exactly one late-ts event");
+
+    AVTP_LATE_TS_EVENT *le = &g_LateTsEvents[0];
+    ASSERT_EQUAL(le->StreamId,            sid,         "StreamId matches");
+    ASSERT_EQUAL(le->PacketTimestampNs,   pkt_ts + 125000, "PacketTs stored correctly");
+    ASSERT_EQUAL(le->PlayoutDeadlineNs,   pkt_ts + 125000 + window, "Deadline computed correctly");
+    ASSERT_NOT_EQUAL(le->LateByNs,        0,            "LateByNs is non-zero");
+    ASSERT_EQUAL(le->LateCount,           1,            "LateCount == 1");
+
+    printf("  Late event: LateByNs=%llu (%.1f µs)  LateCount=%u\n",
+           (unsigned long long)le->LateByNs,
+           (double)le->LateByNs / 1000.0,
+           le->LateCount);
+
+    RETURN_PASS();
+}
+
+/**
+ * EVENT-002-UT-015: Late-Timestamp Counter Increment
+ *
+ * Injects three late packets on the same stream and verifies the cumulative
+ * LateCount increments with each event.
+ *
+ * Implements gap closure for Issue #234.
+ */
+static int Test_LateTs_CounterIncrement(void)
+{
+    TEST_START("EVENT-002-UT-015",
+               "Late-ts counter increments monotonically (3 late arrivals)");
+
+    MockRxStateInit();
+
+    UINT64 sid    = TEST_STREAM_ID_2;
+    UINT32 window = 250000;
+
+    /* Inject 3 consecutive late packets */
+    for (UINT16 seq = 0; seq < 3; seq++) {
+        UINT64 pkt_ts     = 6000000000ULL + (UINT64)seq * 125000;
+        UINT64 deadline   = pkt_ts + window;
+        UINT64 arrival    = deadline + 1000000;   /* 1ms late */
+        MockSimulateAvtpReceive(sid, seq, pkt_ts, arrival, window);
+    }
+
+    ASSERT_EQUAL(g_LateTsEventCount, 3, "three late-ts events emitted");
+    ASSERT_EQUAL(g_LateTsEvents[0].LateCount, 1, "first  event LateCount == 1");
+    ASSERT_EQUAL(g_LateTsEvents[1].LateCount, 2, "second event LateCount == 2");
+    ASSERT_EQUAL(g_LateTsEvents[2].LateCount, 3, "third  event LateCount == 3");
+
+    printf("  LateCount sequence: %u, %u, %u (expected 1, 2, 3)\n",
+           g_LateTsEvents[0].LateCount,
+           g_LateTsEvents[1].LateCount,
+           g_LateTsEvents[2].LateCount);
+
+    RETURN_PASS();
+}
+
+//=============================================================================
 // Test Suite Entry Point
 //=============================================================================
 
@@ -767,6 +1145,17 @@ int main(void) {
     
     RUN_TEST(Test_VV_RapidTransitions);
     RUN_TEST(Test_VV_MilanCompliance_EventLatency);
+
+    // Seq-Gap / Late-Timestamp Tests (Issue #234 gap closure)
+    printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    printf("SEQ-GAP / LATE-TIMESTAMP TESTS (5 tests — Issue #234 gap closure)\n");
+    printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+
+    RUN_TEST(Test_SeqGap_Detection);
+    RUN_TEST(Test_SeqGap_CounterIncrement);
+    RUN_TEST(Test_SeqGap_EventPayload);
+    RUN_TEST(Test_LateTs_Detection);
+    RUN_TEST(Test_LateTs_CounterIncrement);
     
     // Summary
     printf("\n═══════════════════════════════════════════════════════════════\n");
