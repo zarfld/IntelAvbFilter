@@ -772,6 +772,14 @@ $AllTests = @(
         Libs = "advapi32.lib"
         Description = "V&V: VV-CORR-001 24-Hour PHC Correlation Stability Monitor (Track E closes #317)"
     },
+    @{
+        Name = "test_vv_corr_003_crossdomain"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_vv_corr_003_crossdomain.c"
+        Output = "test_vv_corr_003_crossdomain.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "V&V: VV-CORR-003 Cross-domain PHC<->System<->TX<->RX correlation (Tracks B+C+D closes #317 / #149)"
+    },
     
     # Diagnostic Tests (additional, cl.exe)
     @{
