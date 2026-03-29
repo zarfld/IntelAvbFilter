@@ -2438,7 +2438,26 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             prev_high = 0;
                         }
                         tgt_req->previous_target = ((avb_u64)prev_high << 32) | prev_low;
-                        
+
+                        /* TC-TARGET-005: Reject past target times.
+                         * Read SYSTIM; if target_time is already elapsed, return
+                         * STATUS_INVALID_PARAMETER instead of arming the hardware
+                         * with a deadline that can never fire. */
+                        if (ops->get_systime && tgt_req->target_time != 0) {
+                            uint64_t current_systim = 0;
+                            if (ops->get_systime(dev, &current_systim) == 0 &&
+                                tgt_req->target_time < current_systim) {
+                                DEBUGP(DL_TRACE, "!!! SET_TARGET_TIME: rejected - past time "
+                                       "(target=%llu < systim=%llu)\n",
+                                       (unsigned long long)tgt_req->target_time,
+                                       (unsigned long long)current_systim);
+                                tgt_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                                status = STATUS_INVALID_PARAMETER;
+                                info = sizeof(*tgt_req);
+                                break;
+                            }
+                        }
+
 DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 0x%016llX\n", 
                        tgt_req->timer_index, (unsigned long long)tgt_req->target_time, 
                        (unsigned long long)tgt_req->target_time,
