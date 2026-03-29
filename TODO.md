@@ -80,18 +80,6 @@ From **TEST-PLAN-NDIS-LWF-COVERAGE** (Pillar 2 — Lifecycle Coverage):
   (all 7 fields: FilterAttach/Pause/Restart/Detach, OutstandingSend/ReceiveNBLs, PauseRestartGeneration)
 - [x] ~~Write lifecycle smoke test~~ — ✅ **DONE** (`test_lifecycle_coverage.exe` built;
   added to `HardwareUnitTests` suite in `Run-Tests-CI.ps1` 2026-03-29)
-- [ ] Run SDV and commit DVL artifact — `test-evidence/dvl-*.xml` required before each release
-- [ ] Wire CodeQL for main driver source using
-  `microsoft/windows-driver-developer-supplemental-tools` action
-- [ ] Commit SDV results to `test-evidence/sdv-results-*.xml`
-
-From **TEST-PLAN-NDIS-LWF-COVERAGE** (Pillar 2 — Lifecycle Coverage):
-
-- [ ] Add missing statistics counters to `AVB_DRIVER_STATISTICS` struct:
-  `FilterPauseCount`, `FilterRestartCount`, `FilterDetachCount`,
-  `OutstandingSendNBLs`, `OutstandingReceiveNBLs`, `PauseRestartGeneration`
-- [ ] Write lifecycle smoke test that exercises Attach → Restart → Pause → Detach sequence
-  and asserts each counter incremented correctly
 
 ---
 
