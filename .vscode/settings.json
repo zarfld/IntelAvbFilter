@@ -7,6 +7,7 @@
         "/^powershell -File tools\\\\test\\\\Run-Tests-Elevated\\.ps1 -TestName test_ts_event_sub$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "Get-Item": true
     }
 }
