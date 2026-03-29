@@ -69,13 +69,9 @@ static void diagnostic_print_hw_state(HANDLE h)
                                &bytesRet, NULL);
     printf("  Result: %s  BytesReturned: %lu\n", ok ? "SUCCESS" : "FAILED", bytesRet);
     if (ok && bytesRet > 0) {
-        printf("  VID=0x%04X DID=0x%04X\n", devInfo.pci_vendor_id, devInfo.pci_device_id);
-        printf("  hw_state=%u  capabilities=0x%016llX\n",
-               devInfo.hw_state, (unsigned long long)devInfo.capabilities);
-        if (devInfo.hw_state < 3) {
-            printf("  *** WARNING: hw_state < BAR_MAPPED — "
-                   "GET_CLOCK_CONFIG will return STATUS_DEVICE_NOT_READY ***\n");
-        }
+        /* device_info is a null-terminated string returned by the driver */
+        devInfo.device_info[AVB_DEVICE_INFO_MAX - 1] = '\0';
+        printf("  device_info: %s\n", devInfo.device_info);
     }
 
     /* GET_CLOCK_CONFIG */

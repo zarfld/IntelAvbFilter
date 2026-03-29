@@ -481,8 +481,6 @@ $AllTests = @(
     },
     
     # Unit Tests - Hardware (cl.exe)
-    # DISABLED: test_hw_state - uses outdated AVB_DEVICE_INFO_REQUEST fields
-    # TODO: Update to use device_info string parsing instead of direct struct fields
     @{
         Name = "test_hw_state"
         Type = "cl"
@@ -490,7 +488,6 @@ $AllTests = @(
         Output = "test_hw_state.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Unit: Hardware State Test"
-        Disabled = $true  # Needs update: AVB_DEVICE_INFO_REQUEST changed
     },
     @{
         Name = "test_clock_config"
