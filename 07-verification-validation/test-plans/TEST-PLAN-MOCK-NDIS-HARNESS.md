@@ -1,9 +1,9 @@
 # Test Plan: Mock NDIS Unit Test Harness — Closing #199 Coverage Gaps
 
 **Test Plan ID**: TP-HARNESS-001  
-**Version**: 1.5  
-**Date**: 2026-03-28  
-**Status**: 🟡 In Progress — Tracks A/B/C/D Complete, Track E Pending  
+**Version**: 1.6  
+**Date**: 2026-03-29  
+**Status**: 🟡 In Progress — Tracks A/B/C/D/E(VV-CORR-003) Complete, VV-CORR-001 Running, VV-CORR-002 SKIP  
 **Phase**: 07-verification-validation  
 **Standards**: IEEE 1012-2016
 
@@ -16,6 +16,7 @@
 | 1.3 | 2026-03-28 | AI Agent | Track B COMPLETE — `IOCTL_AVB_PHC_CROSSTIMESTAMP` (code 63) implemented (TDD GREEN 6/6); UT-CORR-003 PASS all adapters; IT-CORR-002 SKIP removed |
 | 1.4 | 2026-03-28 | AI Agent | Track A COMPLETE — `phc_at_send_ns` field + single-read fix + monotonicity guard fix + 50ms window; UT-CORR-005..009 15/15 PASS (log `184011`) |
 | 1.5 | 2026-03-28 | AI Agent | Track D COMPLETE — UT-CORR-001 PASS (30/30, windows 42-50 µs, SYSTIM epoch confirmed, no mock needed); UT-CORR-010 SKIP-guard verified (full TS-disable run pending VV-CORR-001 completion) |
+| 1.6 | 2026-03-29 | AI Agent | VV-CORR-003 PASS (42/42, 6 adapters, cross-domain PHC↔System↔TX confirmed, 2026-03-29); VV-CORR-002 documented SKIP (gPTP lab required); warm-up/MAX_ADAPTERS fixes applied to test |
 ## Context — Why This Plan Exists
 
 Issue #199 (TEST-PTP-CORR-001) was closed on 2026-03-27 after running only **4 of 17 specified tests**.
@@ -67,8 +68,8 @@ This plan defines four work tracks to close all 13 remaining gaps with the minim
 | Test ID | What it proves | Blocking Dependency | Track |
 |---------|---------------|---------------------|-------|
 | VV-CORR-001 | 24-hour correlation stability (mean <1µs, no drift) | Long-running monitor script (no new infra) | E |
-| VV-CORR-002 | Production gPTP workload: <1µs sync, 1 hour | Real gPTP grandmaster + pfd/ptp4l integration | E |
-| VV-CORR-003 | Cross-domain PHC↔System↔TX↔RX within tolerances | `IOCTL_AVB_PHC_CROSSTIMESTAMP` + RX IOCTL | B+C |
+| ⚠️ VV-CORR-002 | Production gPTP workload: <1µs sync, 1 hour | Real gPTP grandmaster + pfd/ptp4l integration — **SKIP: gPTP lab not available** | E |
+| ✅ VV-CORR-003 | Cross-domain PHC↔System↔TX↔RX within tolerances | `IOCTL_AVB_PHC_CROSSTIMESTAMP` + RX IOCTL — **PASS 42/42, 6 adapters, 2026-03-29** | B+C |
 
 ---
 
@@ -304,11 +305,12 @@ NOTE: This is a system-level V&V activity, not automated CI
 | P1 — Sprint 5 | E (VV-CORR-001) | VV-CORR-001 (1 test) | 1d | Track A |
 | ✅ DONE | D | UT-CORR-001 PASS, UT-CORR-010 PASS (SKIP guard) (2 tests) | ~~3d~~ complete 2026-03-28 | No mock needed — SYSTIM epoch confirmed |
 | ✅ DONE | C | UT-CORR-002, UT-CORR-004 (2 tests) | ~~1d~~ complete 2026-03-28 | ~~RX TS hw~~ resolved |
-| P3 — Future | E (VV-CORR-002,003) | VV-CORR-002, VV-CORR-003 (2 tests) | 2d | gPTP + Track B+C |
+| ✅ DONE | E (VV-CORR-003) | VV-CORR-003 (1 test) | ~~2d~~ complete 2026-03-29 | Tracks B+C+D |
+| ⚠️ SKIP | E (VV-CORR-002) | VV-CORR-002 — gPTP lab required; hardware-gated SKIP documented | — | gPTP + GPS-disciplined grandmaster |
 
 **Sprint 5 target**: 8 of 13 gaps closed (UT-CORR-003..009, VV-CORR-001)  
 **Sprint 6 target**: Close remaining UT-CORR-001, 002, 004, 010 = full unit coverage  
-**Future / infrastructure-gated**: VV-CORR-002, VV-CORR-003
+**Infrastructure-gated SKIP**: VV-CORR-002 (gPTP lab with GPS-disciplined grandmaster required)
 
 ---
 
@@ -326,8 +328,8 @@ NOTE: This is a system-level V&V activity, not automated CI
 - [x] UT-CORR-010: PASS (TS-disable graceful) — **built and verified SKIP-guard works** (2026-03-28). Full run (with disable exercised) pending VV-CORR-001 24h completion.
 - [x] UT-CORR-002: PASS (RX correlation) — **PASS on all 6 adapters** (2026-03-28)
 - [x] UT-CORR-004: PASS (loopback causality) — **SKIP** (no loopback cable; IOCTL reachable — hardware-gated SKIP accepted per plan) (2026-03-28)
-- [ ] VV-CORR-002: PASS or documented SKIP with rationale (gPTP lab required)
-- [ ] VV-CORR-003: PASS or documented SKIP (requires B+C+loopback cable)
+- [⚠️] VV-CORR-002: PASS or documented SKIP — **SKIP (hardware-gated)**: requires GPS-disciplined gPTP grandmaster + ptp4l/gptp stack; system-level V&V deferred to field deployment with real gPTP infrastructure (documented 2026-03-29)
+- [x] VV-CORR-003: PASS or documented SKIP — **PASS 42/42** (6 adapters, Cross-domain PHC↔System↔TX correlation confirmed, RX SKIP hardware-gated, log `test_vv_corr_003_crossdomain_20260329_082639`, 2026-03-29)
 
 ---
 
