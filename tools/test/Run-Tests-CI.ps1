@@ -269,7 +269,8 @@ foreach ($TestName in $TestList) {
 
     $totalTests++
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $logFile   = Join-Path $logsDir "$($TestName)_CI_$timestamp.log"
+    # Filename format matches Convert-Logs-To-JUnit.ps1 expectation: <name>.exe_YYYYMMDD_HHMMSS.log
+    $logFile   = Join-Path $logsDir "${exeName}_${timestamp}.log"
 
     Write-Host "`n  => $exeName" -ForegroundColor Cyan
 
@@ -317,6 +318,27 @@ Write-Host "  Failed : $failedTests" -ForegroundColor $(if ($failedTests -gt 0) 
 Write-Host "  Skipped: $skippedTests (not built)" -ForegroundColor DarkGray
 Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
 Write-Host ""
+
+# ===========================
+# JUnit XML report
+# ===========================
+$junitScript = Join-Path $scriptDir 'Convert-Logs-To-JUnit.ps1'
+if (Test-Path $junitScript) {
+    $runDateStr = Get-Date -Format 'yyyyMMdd'
+    $junitOut   = Join-Path $logsDir "junit-${Suite}-${Configuration}-${runDateStr}.xml"
+    Write-Host ""
+    Write-Step "Generating JUnit XML report..."
+    & $junitScript -LogsDir $logsDir -RunDate $runDateStr -OutputFile $junitOut -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -ne 0) {
+        Write-Note "JUnit conversion returned non-zero (may be no logs yet -- skipped tests only)"
+    }
+    if (Test-Path $junitOut) {
+        Write-Ok "JUnit XML: $junitOut"
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            "JUNIT_XML=$junitOut" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        }
+    }
+}
 
 if ($failedTests -eq 0 -and $passedTests -eq 0) {
     Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)"
