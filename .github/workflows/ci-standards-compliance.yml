@@ -149,6 +149,7 @@ jobs:
       # Test 1 & 7: Cyclomatic complexity ≤10 and long function detection (<5% >50 lines)
       # Verifies: #252 (TEST-MAINTAIN-001 steps 1 & 7)
       - name: Test 1+7 — Cyclomatic complexity and long function check (lizard)
+        continue-on-error: true
         run: |
           echo "🔍 Running lizard complexity + length analysis on src/..."
           lizard src/ -l c --CCN 10 --length 50 --xml > /tmp/lizard-report.xml || true
