@@ -167,26 +167,34 @@ function Parse-TestLog {
     #   "[SKIP] TC-HAL-001: description"
     #   "PASS: TC-SCRIPTS-001: description"
     #   "FAIL: TC-MAGIC-001: description"
+    #   "[PASS] [Adapter0[VEN_8086:DEV_125B]] TC-LCY-001: description"  (adapter-prefixed)
+    #   "[FAIL] [Adapter0[VEN_8086:DEV_125B]] TC-LCY-003: description"  (adapter-prefixed)
+    #   "[SKIP] [Adapter0[VEN_8086:DEV_125B]] TC-LCY-006: description"  (adapter-prefixed)
+    # The adapter prefix is included in the case name so each adapter×TC combination
+    # is unique in the JUnit XML, giving correct per-adapter pass/fail granularity.
 
     $cases     = [System.Collections.Generic.List[hashtable]]::new()
     $caseNames = [System.Collections.Generic.HashSet[string]]::new()
 
+    # Optional adapter prefix pattern: [AdapterN[VEN_XXXX:DEV_YYYY]]
+    $adapterPrefix = '(?:\[Adapter\d+\[[^\]]*\]\]\s+)?'
+
     foreach ($line in $lines) {
         $stripped = $line.Trim()
 
-        if ($stripped -match '^\[PASS\]\s+((?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)' -or
+        if ($stripped -match "^\[PASS\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)" -or
             $stripped -match '^PASS:\s+((?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)') {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
                 $cases.Add(@{ Name = $caseName; Failed = $false; Skipped = $false; FailMsg = '' })
             }
-        } elseif ($stripped -match '^\[FAIL\]\s+((?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)' -or
+        } elseif ($stripped -match "^\[FAIL\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)" -or
                   $stripped -match '^FAIL:\s+((?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)') {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
                 $cases.Add(@{ Name = $caseName; Failed = $true; Skipped = $false; FailMsg = $stripped })
             }
-        } elseif ($stripped -match '^\[SKIP\]\s+((?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)') {
+        } elseif ($stripped -match "^\[SKIP\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)") {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
                 $cases.Add(@{ Name = $caseName; Failed = $false; Skipped = $true; FailMsg = '' })
