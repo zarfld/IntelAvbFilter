@@ -830,8 +830,11 @@ jobs:
 
   traceability-coverage:
     name: Traceability Coverage Enforcement
-    # Wait for unit-tests so traceability-summary artifacts from hardware runs are available.
-    needs: [github-issues-generation, unit-tests]
+    # Wait for both unit-tests AND integration-tests so ALL traceability-summary
+    # artifacts are available before computing 'Requirements Tested: N/T (xx%)'.
+    # This includes: GitHub-hosted (Debug+Release), self-hosted hardware (Debug+Release)
+    # for both HardwareUnit and HardwareIntegration suites.
+    needs: [github-issues-generation, unit-tests, integration-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -855,11 +858,26 @@ jobs:
             --min-req ${{ env.MIN_REQ_LINKAGE_COVERAGE }} \
             --min-req-test ${{ env.MIN_REQ_TEST_COVERAGE }}
 
-      - name: Download test execution traceability artifacts
-        # Collect summaries uploaded by unit-test matrix runs (hardware + non-hardware).
+      - name: Download test execution traceability artifacts (unit tests)
+        # Collect summaries from ALL unit-test matrix runs:
+        # GitHub-hosted (windows-latest + windows-2022, Debug + Release)
+        # and self-hosted hardware runner (Debug + Release, -Suite HardwareUnit).
         uses: actions/download-artifact@v4
         with:
           pattern: traceability-unit-*
+          path: test-traceability
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Download test execution traceability artifacts (integration tests)
+        # Collect summaries from ALL integration-test matrix runs:
+        # GitHub-hosted (windows-latest + windows-2022, Debug + Release)
+        # and self-hosted hardware runner (Debug + Release, -Suite HardwareIntegration).
+        # Requirements that appear in both unit and integration artifacts are deduplicated
+        # by req number — each requirement is counted once (worst-case pass/fail/skip).
+        uses: actions/download-artifact@v4
+        with:
+          pattern: traceability-integration-*
           path: test-traceability
           merge-multiple: true
         continue-on-error: true
@@ -869,6 +887,9 @@ jobs:
         # Reports 'Requirements Tested: N/T (xx%)' from actual CI run outcomes.
         # Source of truth: each test file's printf("  Verifies: #N ...") statements.
         # SKIP is shown explicitly — never assumed pass or fail.
+        # Note: the same requirement may appear in multiple matrix runs (Debug+Release,
+        # unit+integration). Counts are accumulated; n_tested = len(unique req numbers),
+        # so each requirement is counted once regardless of how many configs tested it.
         run: |
           python - <<'PYTHON_SCRIPT'
           import re, sys, json
@@ -1263,6 +1284,17 @@ jobs:
           } else {
               Write-Host "[INFO] No traceability summary found in logs/" -ForegroundColor Yellow
           }
+
+      - name: Upload traceability summary artifact
+        # Upload execution traceability summary so Traceability Coverage Enforcement
+        # can aggregate 'Requirements Tested' across ALL matrix runs (unit + integration,
+        # GitHub-hosted + self-hosted, Debug + Release).
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: traceability-integration-${{ matrix.os }}-${{ matrix.config }}
+          path: test-evidence/traceability-summary-*.md
+          if-no-files-found: ignore
 
       - name: Validate integration test status
         if: matrix.hardware != true
