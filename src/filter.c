@@ -1374,7 +1374,13 @@ Arguments:
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
         InterlockedIncrement64(&avbCtx->stats_oid_complete_count);
-        InterlockedDecrement64(&avbCtx->stats_outstanding_oids);
+        {
+            /* UNDERFLOW GUARD: RESET may zero this gauge while an OID is in-flight. */
+            LONGLONG result = InterlockedDecrement64(&avbCtx->stats_outstanding_oids);
+            if (result < 0) {
+                InterlockedCompareExchange64(&avbCtx->stats_outstanding_oids, 0LL, result);
+            }
+        }
     }
 
     Context = (PFILTER_REQUEST_CONTEXT)(&Request->SourceReserved[0]);
@@ -1718,7 +1724,17 @@ Return Value:
             PNET_BUFFER_LIST _n = NetBufferLists;
             while (_n) { nCompleted++; _n = NET_BUFFER_LIST_NEXT_NBL(_n); }
         }
-        InterlockedAdd64(&avbCtx->stats_outstanding_send_nbls, -nCompleted);
+        {
+            /* UNDERFLOW GUARD: IOCTL_AVB_RESET_STATISTICS may zero this gauge while
+             * sends are in-flight. If the decrement races with a reset, the result
+             * goes negative (LONGLONG) which casts to ~UINT64_MAX in GET_STATISTICS.
+             * CAS-clamp to 0: if we produced a negative value, replace it with 0.
+             * The CAS fails harmlessly if another thread already fixed or incremented. */
+            LONGLONG result = InterlockedAdd64(&avbCtx->stats_outstanding_send_nbls, -nCompleted);
+            if (result < 0) {
+                InterlockedCompareExchange64(&avbCtx->stats_outstanding_send_nbls, 0LL, result);
+            }
+        }
     }
     PNET_BUFFER_LIST PrevNbl = NULL;
     CurrNbl = NetBufferLists;
@@ -2102,7 +2118,14 @@ Arguments:
         PNET_BUFFER_LIST countNbl = NetBufferLists;
         LONGLONG nblCount = 0;
         while (countNbl) { nblCount++; countNbl = NET_BUFFER_LIST_NEXT_NBL(countNbl); }
-        InterlockedAdd64(&avbCtx->stats_outstanding_receive_nbls, -nblCount);
+        {
+            /* UNDERFLOW GUARD: same race as send path — RESET may zero this while
+             * receives are in-flight, causing subsequent returns to go negative. */
+            LONGLONG result = InterlockedAdd64(&avbCtx->stats_outstanding_receive_nbls, -nblCount);
+            if (result < 0) {
+                InterlockedCompareExchange64(&avbCtx->stats_outstanding_receive_nbls, 0LL, result);
+            }
+        }
     }
 
 
