@@ -167,6 +167,7 @@ int main(void)
     int r;
     printf("============================================================\n");
     printf("  IntelAvbFilter -- IEEE 1722.1 ATDECC Event Tests\n");
+    printf("  Verifies:   #162 (REQ-F-EVENT-003: ATDECC Unsolicited Notifications)\n");
     printf("  Implements: #236 (TEST-EVENT-003)\n");
     printf("============================================================\n\n");
 

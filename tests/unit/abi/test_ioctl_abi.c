@@ -283,7 +283,8 @@ int main(void)
     printf("=======================================================\n");
     printf("TEST-ABI-001: IOCTL ABI Stability Tests\n");
     printf("  Part of: Issue #265 (TEST-COVERAGE-001)\n");
-    printf("  Verifies: avb_ioctl.h struct sizes and IOCTL code uniqueness\n");
+    printf("  Verifies:   #24  (REQ-NF-SSOT-001: Single Source of Truth for IOCTL Interface)\n");
+    printf("  Implements: #265 (TEST-COVERAGE-001: Verify Unit Test Coverage)\n");
     printf("=======================================================\n");
 
     test_ioctl_uniqueness();

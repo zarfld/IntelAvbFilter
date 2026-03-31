@@ -36,6 +36,8 @@ const char* InterpretMarker(avb_u32 status) {
 int main() {
     printf("========================================\n");
     printf("MULTI-ADAPTER GET_CLOCK_CONFIG TEST\n");
+    printf("  Verifies:   #24  (REQ-NF-SSOT-001: Single Source of Truth for IOCTL Interface)\n");
+    printf("  Implements: #302 (TEST-SSOT-003: Verify All Files Use SSOT Header Include)\n");
     printf("========================================\n\n");
     
     HANDLE h = CreateFileA("\\\\.\\IntelAvbFilter",

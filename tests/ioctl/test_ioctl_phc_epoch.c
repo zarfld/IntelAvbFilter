@@ -3,7 +3,7 @@
  * @brief PHC Epoch Baseline and TAI-UTC Offset Validation Tests
  *
  * Implements: #196 (TEST-IOCTL-PHC-EPOCH-001)
- * Verifies:   #187 (REQ-F-PHC-EPOCH-001: PHC epoch base = TAI 1970-01-01 00:00:00)
+ * Verifies:   #41  (REQ-F-PTP-EPOCH-001: PTP Epoch and Time Scale (TAI))
  *
  * IOCTL codes:
  *   45 (IOCTL_AVB_GET_CLOCK_CONFIG) — returns systim (hardware clock in nanoseconds)
@@ -376,6 +376,8 @@ int main(void)
     printf(" IOCTL_AVB_GET_CLOCK_CONFIG (code 45)\n");
     printf(" TAI epoch: 1970-01-01T00:00:00Z\n");
     printf(" TAI-UTC offset: %llu s\n", TAI_UTC_OFFSET_S);
+    printf("  Verifies:   #41  (REQ-F-PTP-EPOCH-001: PTP Epoch and Time Scale)\n");
+    printf("  Implements: #196 (TEST-PTP-EPOCH-001: TAI Epoch Initialization)\n");
     printf("===========================================\n");
 
     UINT64 utc_ns = GetUtcNs();

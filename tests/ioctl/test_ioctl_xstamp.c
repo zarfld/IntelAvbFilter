@@ -3,7 +3,7 @@
  * @brief PHC Cross-Timestamp Tests (PHC ↔ System Clock capture)
  *
  * Implements: #198 (TEST-IOCTL-XSTAMP-001)
- * Verifies:   #186 (REQ-F-PHC-XSTAMP-001: Cross-timestamp PHC with host clock)
+ * Verifies:   #48  (REQ-F-IOCTL-XSTAMP-001: Cross-Timestamp Query (PHC + System Time))
  *
  * IOCTL codes:
  *   45 (IOCTL_AVB_GET_CLOCK_CONFIG) — returns systim (PHC in nanoseconds)
@@ -339,6 +339,8 @@ int main(void)
     printf(" PHC Cross-Timestamp Tests (Issue #198)\n");
     printf(" IOCTL_AVB_GET_CLOCK_CONFIG (code 45)\n");
     printf(" QPC freq: %lld Hz\n", s_qpc_freq.QuadPart);
+    printf("  Verifies:   #48  (REQ-F-IOCTL-XSTAMP-001: Cross-Timestamp Query)\n");
+    printf("  Implements: #198 (TEST-IOCTL-XSTAMP-001: Cross-Timestamp Verification)\n");
     printf("===========================================\n");
 
     Results r = {0};

@@ -9,6 +9,7 @@
 
 int main(void) {
     printf("Direct GET_CLOCK_CONFIG Test (No OPEN_ADAPTER)\n");
+    printf("  Verifies:   #25  (REQ-F-PTP-IOCTL-001: GET_CLOCK_CONFIG)\n");
     printf("==============================================\n\n");
     
     HANDLE h = CreateFileA("\\\\.\\IntelAvbFilter", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);

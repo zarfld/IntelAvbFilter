@@ -809,6 +809,8 @@ int main(int argc, char **argv)
     printf("================================================================\n");
     printf("NDIS LWF Lifecycle Coverage Tests\n");
     printf("TEST-LCY-001 | Part of #265 (TEST-COVERAGE-001)\n");
+    printf("  Verifies:   #36  (REQ-F-NDIS-ATTACH-001: FilterAttach/FilterDetach)\n");
+    printf("  Implements: #265 (TEST-COVERAGE-001: Verify Unit Test Coverage)\n");
     printf("================================================================\n\n");
 
     /* ABI version guard */

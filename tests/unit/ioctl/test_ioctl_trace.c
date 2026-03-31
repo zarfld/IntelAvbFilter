@@ -25,6 +25,8 @@ int main(void) {
     
     printf("===========================================\n");
     printf("IOCTL CODE VERIFICATION TEST\n");
+    printf("  Verifies:   #24  (REQ-NF-SSOT-001: Single Source of Truth for IOCTL Interface)\n");
+    printf("  Implements: #301 (TEST-SSOT-001: Verify No Duplicate IOCTL Definitions)\n");
     printf("===========================================\n\n");
     
     // Print calculated IOCTL codes

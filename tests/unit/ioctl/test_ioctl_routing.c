@@ -142,6 +142,7 @@ static void TestIoctlWithOpen(HANDLE h, DWORD ioctl, const char* name) {
 
 int main(void) {
     printf("IOCTL Routing Diagnostic Test\n");
+    printf("  Verifies:   #25  (REQ-F-PTP-IOCTL-001: GET_CLOCK_CONFIG)\n");
     printf("==============================\n");
     printf("\n");
     printf("GET_CLOCK_CONFIG IOCTL code: 0x%08X\n", IOCTL_AVB_GET_CLOCK_CONFIG);

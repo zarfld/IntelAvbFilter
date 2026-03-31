@@ -6,6 +6,7 @@
 #include "../include/avb_ioctl.h"
 
 int main() {
+    printf("  Verifies:   #25  (REQ-F-PTP-IOCTL-001: GET_CLOCK_CONFIG)\n");
     printf("Opening driver...\n");
     HANDLE hDriver = CreateFileA("\\\\.\\IntelAvbFilter",
                                   GENERIC_READ | GENERIC_WRITE,

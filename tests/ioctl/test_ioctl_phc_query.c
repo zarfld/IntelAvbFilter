@@ -709,6 +709,7 @@ int main(void)
     
     printf("\n====================================\n");
     printf("PHC Query IOCTL Verification Tests\n");
+    printf("Verifies:   #34  (REQ-F-IOCTL-PHC-001: PHC Time Query)\n");
     printf("Implements: #193 (TEST-IOCTL-PHC-QUERY-001)\n");
     printf("====================================\n\n");
     

@@ -16,6 +16,7 @@ int main(void)
 {
     printf("========================================\n");
     printf("GET_CLOCK_CONFIG DIAGNOSTIC TEST\n");
+    printf("  Verifies:   #25  (REQ-F-PTP-IOCTL-001: GET_CLOCK_CONFIG)\n");
     printf("========================================\n\n");
 
     // Open driver

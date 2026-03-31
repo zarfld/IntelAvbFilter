@@ -3,7 +3,7 @@
  * @brief PHC Monotonicity Guarantee Tests
  *
  * Implements: #285 (TEST-IOCTL-PHC-MONO-001)
- * Verifies:   #185 (REQ-NF-PHC-001: PHC must never go backwards in normal operation)
+ * Verifies:   #47  (REQ-NF-REL-PHC-001: PHC Monotonicity and Reliability)
  *
  * IOCTL codes:
  *   45 (IOCTL_AVB_GET_CLOCK_CONFIG)   - continuous PHC reads
@@ -320,6 +320,8 @@ int main(void)
     printf(" PHC Monotonicity Tests (Issue #285)\n");
     printf(" IOCTL_AVB_GET_CLOCK_CONFIG (code 45)\n");
     printf(" IOCTL_AVB_PHC_OFFSET_ADJUST (code 48)\n");
+    printf("  Verifies:   #47  (REQ-NF-REL-PHC-001: PHC Monotonicity and Reliability)\n");
+    printf("  Implements: #285 (TEST-PHC-MONOTONIC-001: PHC Monotonicity Verification)\n");
     printf("===========================================\n");
 
     Results r = {0};

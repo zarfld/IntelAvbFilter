@@ -694,7 +694,7 @@ int main(void) {
     
     printf("====================================================================\n");
     printf("TX Timestamp Retrieval Integration Tests\n");
-    printf("Implements: Issue #35 (REQ-F-IOCTL-TS-001)\n");
+    printf("  Verifies:   #35  (REQ-F-IOCTL-TS-001: TX Timestamp Retrieval)\n");
     printf("====================================================================\n");
     
     // Open device handle
