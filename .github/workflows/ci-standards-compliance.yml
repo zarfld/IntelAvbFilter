@@ -862,11 +862,14 @@ jobs:
         # Collect summaries from ALL unit-test matrix runs:
         # GitHub-hosted (windows-latest + windows-2022, Debug + Release)
         # and self-hosted hardware runner (Debug + Release, -Suite HardwareUnit).
+        # NOTE: merge-multiple intentionally omitted — all artifacts have the same
+        # filename (traceability-summary-YYYYMMDD.md); merge-multiple:true would
+        # cause last-write-wins overwrite. Each artifact keeps its own sub-folder
+        # so rglob() in the Python step finds all files independently.
         uses: actions/download-artifact@v4
         with:
           pattern: traceability-unit-*
           path: test-traceability
-          merge-multiple: true
         continue-on-error: true
 
       - name: Download test execution traceability artifacts (integration tests)
@@ -875,11 +878,11 @@ jobs:
         # and self-hosted hardware runner (Debug + Release, -Suite HardwareIntegration).
         # Requirements that appear in both unit and integration artifacts are deduplicated
         # by req number — each requirement is counted once (worst-case pass/fail/skip).
+        # NOTE: merge-multiple intentionally omitted — see unit tests step above.
         uses: actions/download-artifact@v4
         with:
           pattern: traceability-integration-*
           path: test-traceability
-          merge-multiple: true
         continue-on-error: true
 
       - name: Enforce test execution coverage
@@ -895,7 +898,7 @@ jobs:
           import re, sys, json
           from pathlib import Path
 
-          summaries = list(Path('test-traceability').glob('traceability-summary-*.md'))
+          summaries = list(Path('test-traceability').rglob('traceability-summary-*.md'))
           if not summaries:
               print('No test execution traceability artifacts found.')
               print('This is expected on runs without a self-hosted hardware runner.')
