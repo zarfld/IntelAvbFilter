@@ -744,6 +744,14 @@ $AllTests = @(
         Description = "Integration: PTP RX Timestamp Correlation (UT-CORR-002, UT-CORR-004, Track C closes #317)"
     },
     @{
+        Name = "test_ptp_001"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_001.c"
+        Output = "test_ptp_001.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Integration: TEST-PTP-001 PTP HW Timestamp Correlation for gPTP (closes #238, verifies #149)"
+    },
+    @{
         Name = "test_ptp_crosstimestamp"
         Type = "cl"
         Source = "tests/integration/ptp_corr/test_ptp_crosstimestamp.c"
@@ -1135,6 +1143,28 @@ $AllTests = @(
         IOCTLs = "43, 44"
         Requirement = "#7"
     }
+
+    # =========================================================================
+    # Launch Time IOCTL Test (Issue #209) - 2026-01-02
+    # Test Plan: TEST-LAUNCH-TIME-001 (P1)
+    # Implements: #6 (REQ-F-LAUNCH-001: Launch Time Offload, IEEE 802.1Qbv §8.6.8.4)
+    # =========================================================================
+
+    @{
+        Name = "test_ioctl_launch_time"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_launch_time.c"
+        Output = "test_ioctl_launch_time.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Launch Time Offload IOCTL Tests (Issue #209, IEEE 802.1Qbv)"
+        Issue = "#209"
+        TestCases = 17
+        IOCTLs = "53"
+        Requirement = "#6"
+    }
+
     # =========================================================================
     # PHC Query IOCTL Test (Issue #193) - 2025-12-09
     # Test Plan: TEST-IOCTL-PHC-QUERY-001 (P0 Critical)

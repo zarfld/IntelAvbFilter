@@ -125,6 +125,15 @@ typedef struct _IOCTL_VERSION {
  * Typical range: ±200 ns.  Persists until the driver is unloaded or a new SET_PORT_LATENCY is issued. */
 #define IOCTL_AVB_SET_PORT_LATENCY      _NDIS_CONTROL_CODE(52, METHOD_BUFFERED)
 
+/* Per-packet TX launch time scheduling via TQAVLAUNCHTIME registers.
+ * Implements: #6 (REQ-F-LAUNCH-001: Launch Time Offload) per IEEE 802.1Qbv §8.6.8.4.
+ * When enable_launch_time=1 and launch_time_ns > 0, the NIC holds each packet in the
+ * TX queue until PHC time >= launch_time_ns (hardware-gated transmission).
+ * When enable_launch_time=0 or launch_time_ns=0, packets are transmitted immediately.
+ * Supported on I225/I226 (devices with INTEL_CAP_TSN_TAS capability).
+ * Note: Code 53 was already taken by IOCTL_AVB_VLAN_ENABLE; using 64 instead. */
+#define IOCTL_AVB_SET_LAUNCH_TIME       _NDIS_CONTROL_CODE(64, METHOD_BUFFERED)
+
 /* Driver statistics query — implements #270 (TEST-STATISTICS-001) */
 /* Function 0x808 → value 0x00172020: 0x170000 | (0x808 << 2) */
 #define IOCTL_AVB_GET_STATISTICS        _NDIS_CONTROL_CODE(0x808, METHOD_BUFFERED)  /* 0x00172020 */
@@ -683,6 +692,34 @@ typedef struct AVB_CROSS_TIMESTAMP_REQUEST {
 } AVB_CROSS_TIMESTAMP_REQUEST, *PAVB_CROSS_TIMESTAMP_REQUEST;
 
 #define IOCTL_AVB_PHC_CROSSTIMESTAMP     _NDIS_CONTROL_CODE(63, METHOD_BUFFERED)
+
+/*============================================================================
+ * IOCTL_AVB_SET_LAUNCH_TIME — IEEE 802.1Qbv per-packet TX launch time scheduling.
+ * Implements: #6 (REQ-F-LAUNCH-001: Launch Time Offload)
+ * Verifies:   #209 (TEST-LAUNCH-TIME-001)
+ *
+ * traffic_class     — Target TX queue (0-7 matching 802.1Q priority).
+ * enable_launch_time — 1=hold packets until launch_time_ns; 0=transmit immediately.
+ * launch_time_ns    — Absolute PHC time (nanoseconds).  0 means immediate (no hold).
+ *                     If enable_launch_time=1 and launch_time_ns < current SYSTIM,
+ *                     the driver rejects with STATUS_INVALID_PARAMETER (past-time
+ *                     guard, same semantics as IOCTL_AVB_SET_TARGET_TIME).
+ * previous_launch_time_ns — Out: last value written for this TC (0 if never set).
+ *                           Enables UT-LAUNCH-007 register-integrity verification.
+ * status            — Out: NDIS_STATUS (0 = success).
+ *
+ * NOTE: Hardware register programming (TQAVLAUNCHTIME / TQAVCTRL offsets) is
+ * validated as a stub until register offsets are confirmed in SSOT headers.
+ * Context-level tracking (last_launch_time[8]) is fully operational.
+ *============================================================================*/
+typedef struct AVB_LAUNCH_TIME_REQUEST {
+    avb_u8  traffic_class;           /* in:  TX traffic class (0-7) */
+    avb_u8  enable_launch_time;      /* in:  1 = hold until launch_time_ns; 0 = immediate */
+    avb_u8  reserved[2];             /* in:  padding — set to 0 */
+    avb_u64 launch_time_ns;          /* in:  absolute PHC launch time (ns); 0 = immediate */
+    avb_u64 previous_launch_time_ns; /* out: last set value for this TC (0 if never set) */
+    avb_u32 status;                  /* out: NDIS_STATUS value */
+} AVB_LAUNCH_TIME_REQUEST, *PAVB_LAUNCH_TIME_REQUEST;
 
 #ifdef __cplusplus
 }

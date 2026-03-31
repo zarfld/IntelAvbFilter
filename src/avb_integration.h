@@ -194,6 +194,12 @@ typedef struct _AVB_DEVICE_CONTEXT {
     ULONG   qav_hi_credit;
     ULONG   qav_lo_credit;
 
+    /* IEEE 802.1Qbv per-TC launch time snapshot — implements #6 (REQ-F-LAUNCH-001).
+     * Indexed by traffic_class (0-7). 0 = never set.
+     * Written/read by IOCTL_AVB_SET_LAUNCH_TIME handler; returned as
+     * previous_launch_time_ns for UT-LAUNCH-007 register-integrity verification. */
+    ULONGLONG last_launch_time[8];
+
     /* IEEE 802.1AS-2020 §11.3 timestampCorrectionPortDS latency calibration.
      * Set via IOCTL_AVB_SET_PORT_LATENCY.  Both default to 0 (no correction). */
     volatile LONG64 ingress_latency_ns;   /* Added to RX hardware timestamps (signed, ns) */

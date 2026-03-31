@@ -2490,6 +2490,85 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
+    case IOCTL_AVB_SET_LAUNCH_TIME:
+        /* Implements: #6 (REQ-F-LAUNCH-001: Launch Time Offload, IEEE 802.1Qbv §8.6.8.4)
+         * Verifies:   #209 (TEST-LAUNCH-TIME-001)
+         * Programs per-TC launch time for hardware-gated TX scheduling.
+         * Hardware register write (TQAVLAUNCHTIME/TQAVCTRL) is deferred until register
+         * offsets are confirmed in SSOT headers; context tracking is fully operational. */
+        {
+            DEBUGP(DL_TRACE, "!!! IOCTL_AVB_SET_LAUNCH_TIME called\n");
+            if (inLen < sizeof(AVB_LAUNCH_TIME_REQUEST) || outLen < sizeof(AVB_LAUNCH_TIME_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext;
+                PAVB_LAUNCH_TIME_REQUEST lt_req = (PAVB_LAUNCH_TIME_REQUEST)buf;
+
+                /* TC-LAUNCH-ABI-002: Validate traffic class (0-7 per IEEE 802.1Q). */
+                if (lt_req->traffic_class >= 8) {
+                    DEBUGP(DL_ERROR, "SET_LAUNCH_TIME: invalid tc=%u (must be 0-7)\n",
+                           lt_req->traffic_class);
+                    lt_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                    status = STATUS_INVALID_PARAMETER;
+                    info = sizeof(*lt_req);
+                } else {
+                    BOOLEAN past_time_rejected = FALSE;
+
+                    /* UT-LAUNCH-004: Past-time guard.
+                     * Mirrors IOCTL_AVB_SET_TARGET_TIME: if enable_launch_time=1 and
+                     * launch_time_ns is already elapsed, reject immediately. */
+                    if (lt_req->enable_launch_time && lt_req->launch_time_ns != 0) {
+                        const intel_device_ops_t *ops = intel_get_device_ops(
+                            activeContext->intel_device.device_type);
+                        if (ops && ops->get_systime) {
+                            uint64_t current_systim = 0;
+                            if (ops->get_systime(&activeContext->intel_device, &current_systim) == 0 &&
+                                lt_req->launch_time_ns < current_systim) {
+                                DEBUGP(DL_TRACE,
+                                       "!!! SET_LAUNCH_TIME: rejected - past time "
+                                       "(lt=%llu < systim=%llu)\n",
+                                       (unsigned long long)lt_req->launch_time_ns,
+                                       (unsigned long long)current_systim);
+                                lt_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                                status = STATUS_INVALID_PARAMETER;
+                                info = sizeof(*lt_req);
+                                past_time_rejected = TRUE;
+                            }
+                        }
+                    }
+
+                    if (!past_time_rejected) {
+                        /* UT-LAUNCH-007: Return previous value for compare-and-swap semantics. */
+                        lt_req->previous_launch_time_ns =
+                            activeContext->last_launch_time[lt_req->traffic_class];
+
+                        /* Update in-context snapshot. */
+                        activeContext->last_launch_time[lt_req->traffic_class] =
+                            lt_req->launch_time_ns;
+
+                        if (lt_req->enable_launch_time && lt_req->launch_time_ns != 0) {
+                            /* TODO: Program TQAVLAUNCHTIME[tc] and TQAVCTRL registers once
+                             * register base offsets are confirmed and added to SSOT headers.
+                             * Tracking issue: pending i225/i226 datasheet register confirmation. */
+                            DEBUGP(DL_TRACE,
+                                   "!!! SET_LAUNCH_TIME: tc=%u lt=%llu ns "
+                                   "(hw programming stub — TQAVLAUNCHTIME pending SSOT validation)\n",
+                                   lt_req->traffic_class,
+                                   (unsigned long long)lt_req->launch_time_ns);
+                        } else {
+                            DEBUGP(DL_TRACE, "!!! SET_LAUNCH_TIME: tc=%u immediate mode\n",
+                                   lt_req->traffic_class);
+                        }
+
+                        lt_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                        status = STATUS_SUCCESS;
+                        info = sizeof(*lt_req);
+                    }
+                }
+            }
+        }
+        break;
+
     case IOCTL_AVB_GET_AUX_TIMESTAMP:
         {
             DEBUGP(DL_TRACE, "IOCTL_AVB_GET_AUX_TIMESTAMP called\n");

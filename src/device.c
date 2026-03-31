@@ -477,6 +477,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SET_RX_TIMESTAMP:
         case IOCTL_AVB_SET_QUEUE_TIMESTAMP:
         case IOCTL_AVB_SET_TARGET_TIME:
+        case IOCTL_AVB_SET_LAUNCH_TIME:   // Implements #6 (REQ-F-LAUNCH-001: Launch Time Offload, IEEE 802.1Qbv)
         case IOCTL_AVB_GET_AUX_TIMESTAMP:
         case IOCTL_AVB_GET_TX_TIMESTAMP:  // Implements #35 (REQ-F-IOCTL-TS-001) - TX timestamp retrieval
         case IOCTL_AVB_GET_RX_TIMESTAMP:  // Implements #35 (REQ-F-IOCTL-TS-001) - RX timestamp retrieval
