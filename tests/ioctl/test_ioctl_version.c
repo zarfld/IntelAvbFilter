@@ -112,16 +112,17 @@ static BOOL TestVersionBufferSize(HANDLE hDevice)
         return FALSE;
     }
     
-    const DWORD EXPECTED_SIZE = 8;  // 4 fields x 2 bytes each = 8 bytes
+    /* IOCTL_VERSION has 6 x uint16 fields: Major, Minor, Build, Revision, Flags, Reserved */
+    const DWORD EXPECTED_SIZE = (DWORD)sizeof(IOCTL_VERSION);  /* 12 bytes */
     if (bytesReturned != EXPECTED_SIZE) {
         printf("  [FAIL] UT-VERSION-002: bytes_returned=%lu, expected=%lu\n", 
                bytesReturned, EXPECTED_SIZE);
         return FALSE;
     }
     
-    printf("  [PASS] UT-VERSION-002: Buffer size correct (%lu bytes = 4 fields) ✓\n", EXPECTED_SIZE);
-    printf("    INFO: Structure: Major=%u, Minor=%u, Build=%u, Revision=%u\n",
-           version.Major, version.Minor, version.Build, version.Revision);
+    printf("  [PASS] UT-VERSION-002: Buffer size correct (%lu bytes = sizeof(IOCTL_VERSION)) ✓\n", EXPECTED_SIZE);
+    printf("    INFO: Major=%u, Minor=%u, Build=%u, Revision=%u, Flags=0x%04X, Reserved=%u\n",
+           version.Major, version.Minor, version.Build, version.Revision, version.Flags, version.Reserved);
     return TRUE;
 }
 
