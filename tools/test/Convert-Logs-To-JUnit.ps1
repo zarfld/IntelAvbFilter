@@ -234,7 +234,7 @@ function Parse-TestLog {
         foreach ($c in $cases) { $testCases.Add($c) }
     } else {
         # No named test cases -- emit one synthetic entry from the summary
-        $overallFailed  = ($failedTests -gt 0) -or ($allText -match '(?i)TESTS\s+FAILED')
+        $overallFailed  = ($failedTests -gt 0) -or ($allText -match '(?i)TESTS?\s+FAILED(?![:\s]*\d)')
         $overallSkipped = ($totalTests -eq 0 -and $passedTests -eq 0 -and $failedTests -eq 0)
         $msg = if ($overallFailed) { "$failedTests test(s) failed - see $($LogFile.Name)" } else { '' }
         $testCases.Add(@{
