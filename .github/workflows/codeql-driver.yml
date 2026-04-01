@@ -208,27 +208,62 @@ jobs:
           Get-ChildItem -Path $SuiteDir -Filter "*.qls" | Sort-Object Name |
             ForEach-Object { Write-Host "  $($_.Name)" }
 
-          # WHCP_22H2 qlpack.yml declares codeql/cpp-all: "*" which in 2025/2026 resolves
-          # to cpp-all@8.0.3+. That version requires CLI 2.17+ (extensible predicates
-          # underwent breaking rename). CLI 2.15.4 is incompatible with cpp-all >= 8.0.0.
-          # Patch the constraint BEFORE pack install to exclude the 8.x series.
-          # MSDT compatibility matrix confirms CLI 2.15.4 requires cpp-all < 8.0.0.
-          Write-Host "Patching qlpack.yml: constraining codeql/cpp-all to < 8.0.0 ..." -ForegroundColor Cyan
+          # ----- Resolve codeql/cpp-all at a version compatible with CLI 2.15.4 -----
+          # Problem: WHCP_22H2 qlpack.yml declares codeql/cpp-all: "*".
+          #   codeql pack install resolves "*" from the registry and downloads the LATEST,
+          #   which is cpp-all@8.0.3 (requires CLI 2.17+ extensible predicates).
+          # Fix strategy:
+          #   1. Download codeql/cpp-queries@0.9.0 FIRST — per MSDT CLI-2.15.4 matrix.
+          #      codeql/cpp-queries@0.9.0 depends on a compatible (pre-8.0) cpp-all and
+          #      installs it into the global packages cache (~/.codeql/packages/codeql/cpp-all/).
+          #   2. Detect the version that landed in the cache.
+          #   3. Patch qlpack.yml to pin codeql/cpp-all to that exact version string
+          #      (CodeQL qlpack only accepts "*" or an exact version — NOT range operators).
+          #   4. Run codeql pack install — now uses the pinned (compatible) version.
+
+          Write-Host "Downloading codeql/cpp-queries@0.9.0 (MSDT CLI 2.15.4 matrix) ..." -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" pack download codeql/cpp-queries@0.9.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Detect which codeql/cpp-all version the above download installed.
+          # codeql pack download installs transitive dependencies to the global pack cache.
+          $PacksRoot   = "$env:USERPROFILE\.codeql\packages"
+          $CppAllCache = "$PacksRoot\codeql\cpp-all"
+          $CppAllVersion = $null
+
+          # Primary: global packages cache (~/.codeql/packages/codeql/cpp-all/<version>/)
+          if (Test-Path $CppAllCache) {
+            $CppAllVersion = (Get-ChildItem $CppAllCache -Directory |
+              Where-Object { $_.Name -match '^\d' } |
+              Sort-Object Name | Select-Object -Last 1).Name
+          }
+          # Fallback: bundled inside the cpp-queries pack itself
+          if (-not $CppAllVersion) {
+            $Bundled = "$PacksRoot\codeql\cpp-queries\0.9.0\.codeql\libraries\codeql\cpp-all"
+            if (Test-Path $Bundled) {
+              $CppAllVersion = (Get-ChildItem $Bundled -Directory |
+                Sort-Object Name | Select-Object -Last 1).Name
+            }
+          }
+
+          if (-not $CppAllVersion) {
+            Write-Error "FAIL: could not detect codeql/cpp-all version installed by cpp-queries@0.9.0"
+            exit 1
+          }
+          Write-Host "Detected compatible codeql/cpp-all version: $CppAllVersion" -ForegroundColor Green
+
+          # Patch qlpack.yml: replace wildcard with the exact detected version.
+          # IMPORTANT: CodeQL qlpack only accepts "*" or exact SemVer strings — NOT range operators.
           $QlpackFile = "$PackDir\qlpack.yml"
-          (Get-Content $QlpackFile) -replace 'codeql/cpp-all: "\*"', 'codeql/cpp-all: "< 8.0.0"' |
-            Set-Content $QlpackFile
-          Write-Host "Patched qlpack.yml:" -ForegroundColor DarkCyan
+          $qlpackContent = Get-Content $QlpackFile -Raw
+          $qlpackContent = $qlpackContent.Replace('codeql/cpp-all: "*"', "codeql/cpp-all: `"$CppAllVersion`"")
+          Set-Content $QlpackFile -Value $qlpackContent -NoNewline
+          Write-Host "Patched qlpack.yml (codeql/cpp-all pinned to $CppAllVersion):" -ForegroundColor DarkCyan
           Get-Content $QlpackFile | Write-Host
 
-          # Install pack dependencies (now resolves cpp-all to a version < 8.0.0).
+          # Install remaining pack dependencies (codeql/cpp-all is already downloaded).
           Write-Host "Installing query pack dependencies (qlpack.yml) ..." -ForegroundColor Cyan
           & "$env:CODEQL_EXE" pack install $PackDir
-
-          # The .qls suite files reference 'from: codeql/cpp-queries' which is not in qlpack.yml.
-          # Per MSDT matrix: CLI 2.15.4 requires codeql/cpp-queries@0.9.0 (not latest ~1.5.x).
-          # Latest (1.5.15) bundles cpp-all@8.0.3 which is incompatible with CLI 2.15.4.
-          Write-Host "Downloading codeql/cpp-queries@0.9.0 (per MSDT CLI 2.15.4 matrix) ..." -ForegroundColor Cyan
-          & "$env:CODEQL_EXE" pack download codeql/cpp-queries@0.9.0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           "WHCP_SUITE_DIR=$SuiteDir" | Out-File -FilePath $env:GITHUB_ENV -Append
