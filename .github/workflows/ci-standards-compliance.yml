@@ -893,6 +893,10 @@ jobs:
         # Note: the same requirement may appear in multiple matrix runs (Debug+Release,
         # unit+integration). Counts are accumulated; n_tested = len(unique req numbers),
         # so each requirement is counted once regardless of how many configs tested it.
+        # Note: "Hardware Test Evidence (local run, committed XML)" job is NOT included
+        # here — it publishes committed XML via dorny/test-reporter for UI display only
+        # and does not upload a traceability-unit-* or traceability-integration-* artifact.
+        # The self-hosted hardware runner fresh runs DO contribute via those artifacts.
         run: |
           python - <<'PYTHON_SCRIPT'
           import re, sys, json
@@ -904,10 +908,14 @@ jobs:
               print('This is expected on runs without a self-hosted hardware runner.')
               sys.exit(0)
 
-          # Parse matrix rows: | [#N](url) | suite | impl | PASS | FAIL | SKIP |
-          row_re  = re.compile(r'^\| \[#(\d+)\]\([^)]+\) \| .+ \| (\d+) \| (\d+) \| (\d+) \|')
+          # Parse matrix rows: | [#N](url) | suite | test-issue-col | PASS | FAIL | SKIP |
+          # Columns: req=#N, suite=name, test_issue=[#M](url) or —, pass/fail/skip=int
+          row_re   = re.compile(r'^\| \[#(\d+)\]\([^)]+\) \| ([^|]+) \| ([^|]*) \| (\d+) \| (\d+) \| (\d+) \|')
+          issue_re = re.compile(r'#(\d+)')
 
-          tested = {}  # req_num -> {pass, fail, skip}
+          tested      = {}   # req_num -> {pass, fail, skip}
+          test_issues = set()  # TEST-issue numbers from the "Test Issue" column (Implements: #N)
+
           for md in summaries:
               in_table = False
               for line in md.read_text(encoding='utf-8').splitlines():
@@ -917,13 +925,16 @@ jobs:
                   if in_table:
                       m = row_re.match(line)
                       if m:
-                          req = m.group(1)
-                          p, f, s = int(m.group(2)), int(m.group(3)), int(m.group(4))
+                          req     = m.group(1)
+                          ti_col  = m.group(3)
+                          p, f, s = int(m.group(4)), int(m.group(5)), int(m.group(6))
                           if req not in tested:
                               tested[req] = {'pass': 0, 'fail': 0, 'skip': 0}
                           tested[req]['pass'] += p
                           tested[req]['fail'] += f
                           tested[req]['skip'] += s
+                          for ti in issue_re.findall(ti_col):
+                              test_issues.add(ti)
                       elif line.startswith('###') or not line.strip():
                           in_table = False
 
@@ -933,22 +944,36 @@ jobs:
           if trace_json.exists():
               data = json.loads(trace_json.read_text(encoding='utf-8'))
               for key in ('requirement', 'REQ', 'REQ-'):
-                  m = data.get('metrics', {}).get(key, {})
-                  if isinstance(m, dict) and (m.get('total') or m.get('count')):
-                      total_reqs = m.get('total') or m.get('count')
+                  m2 = data.get('metrics', {}).get(key, {})
+                  if isinstance(m2, dict) and (m2.get('total') or m2.get('count')):
+                      total_reqs = m2.get('total') or m2.get('count')
                       break
 
-          n_tested    = len(tested)
-          n_pass_only = sum(1 for v in tested.values() if v['pass'] > 0 and v['fail'] == 0)
-          n_fail      = sum(1 for v in tested.values() if v['fail'] > 0)
-          n_skip_only = sum(1 for v in tested.values() if v['pass'] == 0 and v['fail'] == 0)
+          n_tested     = len(tested)
+          # Pass (pure): all outcomes are passes (no skips, no fails)
+          n_pass_pure  = sum(1 for v in tested.values() if v['pass'] > 0 and v['skip'] == 0 and v['fail'] == 0)
+          # Pass+Skip: at least one pass, at least one skip, no fails
+          # (e.g. multi-adapter test where some adapters pass and some skip sub-cases)
+          n_pass_skip  = sum(1 for v in tested.values() if v['pass'] > 0 and v['skip'] > 0  and v['fail'] == 0)
+          n_fail       = sum(1 for v in tested.values() if v['fail'] > 0)
+          # Skip-only: no passes, no fails — all test cases for this req were skipped
+          n_skip_only  = sum(1 for v in tested.values() if v['pass'] == 0 and v['fail'] == 0)
 
           if total_reqs:
               pct = n_tested / total_reqs * 100
               print(f'Requirements Tested: {n_tested}/{total_reqs} ({pct:.0f}%)')
           else:
               print(f'Requirements with test outcomes: {n_tested} (total REQ count unavailable)')
-          print(f'  Pass-only: {n_pass_only}  |  Fail: {n_fail}  |  Skip-only: {n_skip_only}')
+          print(f'  Pass: {n_pass_pure}  |  Pass+Skip: {n_pass_skip}  |  Fail: {n_fail}  |  Skip-only: {n_skip_only}')
+          print(f'  (Pass = all PASS; Pass+Skip = PASS present, some sub-cases skipped; Skip-only = no PASS evidence)')
+          print(f'  Source: traceability-unit-* + traceability-integration-* CI artifacts only.')
+          print(f'  Note: committed test-evidence/hardware-results-latest.xml is NOT counted here.')
+
+          n_test_issues = len(test_issues)
+          if n_test_issues:
+              print(f'Test Issues Tested (Implements: #N): {n_test_issues} unique TEST-* issues exercised in CI')
+          else:
+              print('Test Issues Tested: 0 (no Implements: #N links in traceability table — add them to test main())')
 
           if n_fail:
               fail_list = sorted([r for r, v in tested.items() if v['fail'] > 0], key=int)
