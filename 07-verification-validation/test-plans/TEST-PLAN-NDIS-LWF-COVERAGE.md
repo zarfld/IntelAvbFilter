@@ -47,7 +47,7 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 | MSVC `/analyze` (PREfast) in CI | ✅ Added | `static-analysis-prefast` job in `ci-standards-compliance.yml` (`/p:RunCodeAnalysis=true`, `continue-on-error: true` phase-in) |
 | SDV run + DVL artifact | ❌ Not in CI | Manual only; no committed DVL file |
 | CodeQL CI quality gate | ✅ Added | `analyze` job in `codeql-driver.yml` — MSDT `@development` branch, bundled CodeQL, uploads SARIF to GitHub Security tab; good for PR feedback, **NOT valid for WHCP DVL** |
-| CodeQL WHCP certification job | ✅ Added 2026-04-01 | `analyze-whcp` job in `codeql-driver.yml` — pinned CodeQL 2.15.4 + MSDT WHCP_22H2 + `windows-drivers@1.0.13` + `cpp-queries@0.9.0`; runs `suites/windows_driver_recommended.qls` + `suites/windows_driver_mustfix.qls` (pack 1.0.13 naming); generates DVL via `msbuild /t:dvl`; triggers on `master`/`release/*` and `workflow_dispatch` |
+| CodeQL WHCP certification job | ✅ Added 2026-04-01 | `analyze-whcp` job in `codeql-driver.yml` — pinned CodeQL 2.15.4 + MSDT WHCP_22H2 clone + `codeql/windows-drivers` local suites; runs `suites/windows_driver_recommended.qls` + `suites/windows_driver_mustfix.qls` from cloned WHCP_22H2 repo (pack 1.0.13 distribution lacks `.qls` files); generates DVL via `msbuild /t:dvl`; triggers on `master`/`release/*` and `workflow_dispatch` |
 | CodeQL on submodules | ✅ Partial | `external/windows_driver_samples` + `external/intel_mfd` have own workflows |
 
 **WHCP CodeQL version matrix used** (Win11 22H2 target / WHCP_22H2 branch):  
@@ -57,14 +57,14 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 | MSDT branch | `WHCP_22H2` | Must match target Windows version |
 | `microsoft/windows-drivers` pack | 1.0.13 | Pinned per WHCP_22H2 matrix |
 | `microsoft/cpp-queries` pack | 0.9.0 | Required for mustfix CWE checks (CWE-190, CWE-120, CWE-327, etc.) |
-| Query suite | `suites/windows_driver_recommended.qls` | Superset of `windows_driver_mustfix.qls` + `windows_driver_mustrun.qls` (pack 1.0.13 naming under `suites/`) |
-| Exit gate | `suites/windows_driver_mustfix.qls` violations → fail | Violations block WHCP certification |
+| Query suite | `suites/windows_driver_recommended.qls` (local path from MSDT WHCP_22H2 clone) | Superset; pack 1.0.13 distribution has no `.qls` files — local clone required per MSDT CI |
+| Exit gate | `suites/windows_driver_mustfix.qls` violations → fail (local path, MSDT WHCP_22H2 clone) | Violations block WHCP certification |
 
 **Acceptance Criteria**:
 - [x] `msbuild /p:RunCodeAnalysis=true` CI job added (`static-analysis-prefast`); baseline findings surfaced — resolve before removing `continue-on-error`
 - [ ] SDV run completes with no `Defect` findings; results committed to `test-evidence/sdv-results-*.xml`
 - [x] `analyze` job: `codeql-driver.yml` CI quality gate using MSDT `codeql-config.yml@development` (PR feedback)
-- [x] `analyze-whcp` job: WHCP-grade analysis added 2026-04-01; runs `suites/windows_driver_recommended.qls` + `suites/windows_driver_mustfix.qls` (pack 1.0.13) with pinned CLI + WHCP_22H2 packs; generates DVL
+- [x] `analyze-whcp` job: WHCP-grade analysis added 2026-04-01; clones MSDT WHCP_22H2 and runs `suites/windows_driver_recommended.qls` + `suites/windows_driver_mustfix.qls` (local paths) with pinned CLI 2.15.4; generates DVL
 - [x] `suites/windows_driver_mustfix.qls` violations fail the `analyze-whcp` job (blocks WHCP cert on any blocking finding)
 - [ ] DVL artifact (from `whcp-codeql-artifacts-N`) committed to `test-evidence/dvl-YYYYMMDD.DVL.XML` before each release cut
 - [ ] `suites/windows_driver_mustfix.qls` zero violations confirmed on most recent `analyze-whcp` run

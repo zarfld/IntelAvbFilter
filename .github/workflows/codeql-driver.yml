@@ -184,38 +184,50 @@ jobs:
           & $codeqlExe version
           "CODEQL_EXE=$codeqlExe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Download WHCP_22H2 query packs
+      - name: Clone MSDT WHCP_22H2 (query suites + dependencies)
         shell: pwsh
         run: |
-          # WHCP_22H2 pack versions per Microsoft version matrix:
-          #   microsoft/windows-drivers@1.0.13  (linux-driver-kit + NDIS + WDM rules)
-          #   microsoft/cpp-queries@0.9.0       (required for mustfix.qls CWE checks)
-          # NOTE: mustfix.qls and recommended.qls span BOTH packs — cpp-queries is
-          # mandatory for full WHCP coverage (CWE-190, CWE-120, CWE-327, etc.).
-          Write-Host "Downloading microsoft/windows-drivers@1.0.13 ..." -ForegroundColor Cyan
-          & "$env:CODEQL_EXE" pack download "microsoft/windows-drivers@1.0.13"
-          Write-Host "Downloading microsoft/cpp-queries@0.9.0 ..." -ForegroundColor Cyan
-          & "$env:CODEQL_EXE" pack download "microsoft/cpp-queries@0.9.0"
-          Write-Host "Installed packs:" -ForegroundColor Green
-          & "$env:CODEQL_EXE" resolve qlpacks
+          # Pack microsoft/windows-drivers@1.0.13 was published WITHOUT .qls suite files.
+          # The suite files (windows_driver_recommended.qls, windows_driver_mustfix.qls)
+          # only exist in the MSDT source repository at:
+          #   codeql/windows-drivers/queries/suites/
+          # Per MSDT README and MSDT CI (build-codeql.yaml), the supported approach
+          # for CLI 2.15.4 + VS17.8+ is to clone the WHCP_22H2 branch and use
+          # local paths to the .qls files.
+          $MsdtPath = "$env:RUNNER_TEMP\msdt-whcp"
+          Write-Host "Cloning MSDT WHCP_22H2 (--depth 1, no submodules) ..." -ForegroundColor Cyan
+          git clone https://github.com/microsoft/Windows-Driver-Developer-Supplemental-Tools.git `
+            --branch WHCP_22H2 --depth 1 --no-recurse-submodules `
+            $MsdtPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Diagnose installed pack suite paths
+          $PackDir  = "$MsdtPath\codeql\windows-drivers\queries"
+          $SuiteDir = "$PackDir\suites"
+
+          Write-Host "=== Suite files in WHCP_22H2 clone ===" -ForegroundColor Green
+          Get-ChildItem -Path $SuiteDir -Filter "*.qls" | Sort-Object Name |
+            ForEach-Object { Write-Host "  $($_.Name)" }
+
+          # Install pack dependencies (resolves codeql/cpp-all for CLI 2.15.4).
+          Write-Host "Installing query pack dependencies ..." -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" pack install $PackDir
+
+          "WHCP_SUITE_DIR=$SuiteDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "WHCP_SUITE_DIR=$SuiteDir" -ForegroundColor Green
+
+      - name: Verify WHCP suite files exist
         shell: pwsh
         run: |
-          # List all .qls files in the installed pack to confirm suite paths before analysis.
-          # Pack 1.0.13 (WHCP_22H2): suites/windows_driver_recommended.qls + suites/windows_driver_mustfix.qls
-          # Pack >=1.8.0 (main):     windows-driver-suites/recommended.qls + windows-driver-suites/mustfix.qls
-          $PackRoot = "$env:USERPROFILE\.codeql\packages\microsoft\windows-drivers\1.0.13"
-          if (-not (Test-Path $PackRoot)) {
-            Write-Warning "Pack root not found: $PackRoot (pack may not have downloaded)"
-          } else {
-            Write-Host "=== .qls files in microsoft/windows-drivers@1.0.13 ===" -ForegroundColor Cyan
-            Get-ChildItem -Path $PackRoot -Recurse -Filter "*.qls" -ErrorAction SilentlyContinue |
-              Sort-Object FullName |
-              ForEach-Object {
-                $Rel = $_.FullName.Substring($PackRoot.Length + 1).Replace('\', '/')
-                Write-Host "  $Rel"
-              }
+          # Confirm the two required .qls files were cloned successfully.
+          $Recommended = "$env:WHCP_SUITE_DIR\windows_driver_recommended.qls"
+          $Mustfix     = "$env:WHCP_SUITE_DIR\windows_driver_mustfix.qls"
+          foreach ($f in @($Recommended, $Mustfix)) {
+            if (Test-Path $f) {
+              Write-Host "[OK] $f" -ForegroundColor Green
+            } else {
+              Write-Error "[MISSING] $f — clone may have failed"
+              exit 1
+            }
           }
 
       - name: Create CodeQL database (WHCP build trace)
@@ -235,13 +247,16 @@ jobs:
       - name: Run windows_driver_recommended.qls (full WHCP suite)
         shell: pwsh
         run: |
-          # Pack microsoft/windows-drivers@1.0.13 (WHCP_22H2) uses legacy suite naming:
-          #   Path: suites/windows_driver_recommended.qls
-          # NOTE: "windows-driver-suites/recommended.qls" is only valid for pack >=1.8.0.
+          # Use the local .qls path from the MSDT WHCP_22H2 clone.
+          # Pack 1.0.13 distribution lacks .qls files; local clone is required.
+          # Path confirmed from MSDT build-codeql.yaml CI:
+          #   codeql/windows-drivers/queries/suites/windows_driver_recommended.qls
           New-Item -ItemType Directory -Force -Path build/codeql-whcp | Out-Null
-          Write-Host "=== Running windows_driver_recommended.qls (WHCP_22H2, pack 1.0.13) ===" -ForegroundColor Cyan
+          $Suite = "$env:WHCP_SUITE_DIR\windows_driver_recommended.qls"
+          Write-Host "=== Running windows_driver_recommended.qls (WHCP_22H2, local clone) ===" -ForegroundColor Cyan
+          Write-Host "Suite: $Suite"
           & "$env:CODEQL_EXE" database analyze "$env:CODEQL_DB" `
-            "microsoft/windows-drivers:suites/windows_driver_recommended.qls" `
+            $Suite `
             --format=sarifv2.1.0 `
             --output=build/codeql-whcp/IntelAvbFilter-recommended.sarif `
             --threads=0
@@ -252,10 +267,12 @@ jobs:
         shell: pwsh
         run: |
           # windows_driver_mustfix.qls = subset of recommended; violations BLOCK WHCP cert.
-          # Pack 1.0.13 path: suites/windows_driver_mustfix.qls
-          Write-Host "=== Running windows_driver_mustfix.qls (WHCP blocking checks) ===" -ForegroundColor Cyan
+          # Use the local .qls path from the MSDT WHCP_22H2 clone.
+          $Suite = "$env:WHCP_SUITE_DIR\windows_driver_mustfix.qls"
+          Write-Host "=== Running windows_driver_mustfix.qls (WHCP blocking checks, local clone) ===" -ForegroundColor Cyan
+          Write-Host "Suite: $Suite"
           & "$env:CODEQL_EXE" database analyze "$env:CODEQL_DB" `
-            "microsoft/windows-drivers:suites/windows_driver_mustfix.qls" `
+            $Suite `
             --format=sarifv2.1.0 `
             --output=build/codeql-whcp/IntelAvbFilter-mustfix.sarif `
             --threads=0
