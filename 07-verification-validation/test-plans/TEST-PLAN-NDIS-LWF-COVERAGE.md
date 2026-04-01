@@ -46,14 +46,28 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 |---|---|---|
 | MSVC `/analyze` (PREfast) in CI | ✅ Added | `static-analysis-prefast` job in `ci-standards-compliance.yml` (`/p:RunCodeAnalysis=true`, `continue-on-error: true` phase-in) |
 | SDV run + DVL artifact | ❌ Not in CI | Manual only; no committed DVL file |
-| CodeQL on `src/` driver code | ✅ Added | `.github/workflows/codeql-driver.yml` — MSDT config, builds Release\|x64 under tracer, uploads SARIF to Security tab |
+| CodeQL CI quality gate | ✅ Added | `analyze` job in `codeql-driver.yml` — MSDT `@development` branch, bundled CodeQL, uploads SARIF to GitHub Security tab; good for PR feedback, **NOT valid for WHCP DVL** |
+| CodeQL WHCP certification job | ✅ Added 2026-04-01 | `analyze-whcp` job in `codeql-driver.yml` — pinned CodeQL 2.15.4 + MSDT WHCP_22H2 + `windows-drivers@1.0.13` + `cpp-queries@0.9.0`; runs `recommended.qls` + `mustfix.qls`; generates DVL via `msbuild /t:dvl`; triggers on `master`/`release/*` and `workflow_dispatch` |
 | CodeQL on submodules | ✅ Partial | `external/windows_driver_samples` + `external/intel_mfd` have own workflows |
+
+**WHCP CodeQL version matrix used** (Win11 22H2 target / WHCP_22H2 branch):  
+| Component | Version | Why |
+|---|---|---|
+| CodeQL CLI | 2.15.4 | Required for WHCP_22H2 with VS 17.8+ |
+| MSDT branch | `WHCP_22H2` | Must match target Windows version |
+| `microsoft/windows-drivers` pack | 1.0.13 | Pinned per WHCP_22H2 matrix |
+| `microsoft/cpp-queries` pack | 0.9.0 | Required for mustfix CWE checks (CWE-190, CWE-120, CWE-327, etc.) |
+| Query suite | `recommended.qls` | Superset of `mustfix.qls` + `mustrun.qls` |
+| Exit gate | `mustfix.qls` violations → fail | Violations block WHCP certification |
 
 **Acceptance Criteria**:
 - [x] `msbuild /p:RunCodeAnalysis=true` CI job added (`static-analysis-prefast`); baseline findings surfaced — resolve before removing `continue-on-error`
 - [ ] SDV run completes with no `Defect` findings; results committed to `test-evidence/sdv-results-*.xml`
-- [x] `codeql-driver.yml` added for main driver source using MSDT `codeql-config.yml@development`
-- [ ] DVL committed to `test-evidence/dvl-*.xml` before each release cut
+- [x] `analyze` job: `codeql-driver.yml` CI quality gate using MSDT `codeql-config.yml@development` (PR feedback)
+- [x] `analyze-whcp` job: WHCP-grade analysis added 2026-04-01; runs `recommended.qls` + `mustfix.qls` with pinned CLI + WHCP_22H2 packs; generates DVL
+- [x] `mustfix.qls` violations fail the `analyze-whcp` job (blocks WHCP cert on any blocking finding)
+- [ ] DVL artifact (from `whcp-codeql-artifacts-N`) committed to `test-evidence/dvl-YYYYMMDD.DVL.XML` before each release cut
+- [ ] `mustfix.qls` zero violations confirmed on most recent `analyze-whcp` run
 
 **CI Layer**: Per-PR / CI static gates (build-time, no hardware required).
 

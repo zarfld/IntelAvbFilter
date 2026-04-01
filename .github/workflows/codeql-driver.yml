@@ -5,19 +5,24 @@ name: "Pillar 1 — CodeQL Driver Analysis (C/C++)"
 # which includes NDIS/WDM-specific rules and driver DDI-safety checks on top of
 # the standard CodeQL cpp library.
 #
-# Runs on:
-#   - Every push to master/develop (full analysis)
-#   - Every PR targeting master/develop (incremental feedback)
-#   - Weekly schedule (Saturday 03:00 UTC) — catches newly introduced CVEs
-#   - workflow_dispatch (manual trigger)
+# TWO JOBS:
+#   analyze       — General-use / CI quality gate.
+#                   Uses MSDT @development branch (latest driver queries).
+#                   Runs on every push/PR. Fast feedback; NOT valid for WHCP DVL.
 #
-# Results are uploaded to GitHub Advanced Security (SARIF) and surfaced in the
-# Security tab as Code Scanning alerts.
+#   analyze-whcp  — WHCP certification-grade analysis.
+#                   Pinned: CodeQL CLI 2.15.4 + MSDT WHCP_22H2 branch +
+#                   microsoft/windows-drivers@1.0.13 + microsoft/cpp-queries@0.9.0.
+#                   Runs mustfix.qls (blocks cert on violations) AND recommended.qls.
+#                   Generates DVL via `msbuild /t:dvl` — artifact uploaded for HLK.
+#                   Triggers: workflow_dispatch + push to master/release/*.
 #
 # References:
 #   - TEST-PLAN-NDIS-LWF-COVERAGE.md Pillar 1 (Static Rule Coverage)
+#   - https://learn.microsoft.com/windows-hardware/drivers/devtest/static-tools-and-codeql
+#   - https://learn.microsoft.com/windows-hardware/drivers/devtest/codeql-queries
 #   - https://github.com/microsoft/Windows-Driver-Developer-Supplemental-Tools
-#   - https://docs.github.com/en/code-security/code-scanning
+#   - WHCP version matrix: CodeQL 2.15.4 + WHCP_22H2 + windows-drivers@1.0.13 + cpp-queries@0.9.0
 
 on:
   push:
@@ -49,9 +54,15 @@ permissions:
   actions: read
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: General-use / CI quality gate.
+  # Uses MSDT @development branch (latest driver queries, bundled CodeQL version).
+  # Results surfaced in GitHub Security tab for PR feedback.
+  # ⚠ NOT valid for WHCP DVL generation — see analyze-whcp job below.
+  # ─────────────────────────────────────────────────────────────────────────────
   analyze:
-    name: CodeQL — C/C++ Driver Analysis (MSDT rules)
-    runs-on: windows-latest
+    name: CodeQL — C/C++ Driver Analysis (MSDT dev-branch, CI quality gate)
+    runs-on: windows-2022
 
     steps:
       - name: Checkout repository (with submodules)
@@ -69,14 +80,15 @@ jobs:
         # matching SDK/WDK headers the build tracer fails to capture the compilation.
         uses: ./.github/actions/install-wdk
 
-      - name: Initialize CodeQL (MSDT driver config)
+      - name: Initialize CodeQL (MSDT driver config — development branch)
         uses: github/codeql-action/init@v3
         with:
           languages: c-cpp
           build-mode: manual
           # MSDT config enables Windows Driver DDI-safety queries + NDIS rules on
           # top of the standard cpp library queries.
-          # Pinned to the same branch used by microsoft/Windows-driver-samples.
+          # NOTE: @development = general-use, NOT a WHCP-certified branch.
+          # For WHCP-grade analysis use the analyze-whcp job below.
           config-file: microsoft/Windows-Driver-Developer-Supplemental-Tools/config/codeql-config.yml@development
 
       - name: Build driver for CodeQL tracing (Release|x64)
@@ -107,3 +119,192 @@ jobs:
           # Output SARIF alongside driver binary in the build tree for local inspection.
           output: build/codeql-results
           upload: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: WHCP certification-grade CodeQL analysis.
+  #
+  # Pinned per WHCP version matrix (Win11 22H2 / WHCP_22H2):
+  #   CodeQL CLI:              2.15.4
+  #   MSDT branch:             WHCP_22H2
+  #   microsoft/windows-drivers pack: 1.0.13
+  #   microsoft/cpp-queries pack:     0.9.0
+  #
+  # Query suites run explicitly:
+  #   recommended.qls  — full set (superset of mustrun + mustfix)
+  #   mustfix.qls      — subset; violations BLOCK WHCP cert; exit non-zero on findings
+  #
+  # After analysis: generates Driver Verification Log (DVL) via MSBuild /t:dvl.
+  # DVL is required for HLK Static Tools Logo test (WHCP certification).
+  # DVL artifact uploaded for manual commit to test-evidence/ before release.
+  #
+  # Trigger: workflow_dispatch (manual) + push to master/release/* (not PRs).
+  # ─────────────────────────────────────────────────────────────────────────────
+  analyze-whcp:
+    name: CodeQL — WHCP Certification Analysis (pinned CLI 2.15.4 + WHCP_22H2 + DVL)
+    runs-on: windows-2022
+    # Only run on master/release pushes and manual triggers — not on every PR
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/')))
+
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up MSVC environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Windows Driver Kit (WDK 22H2)
+        uses: ./.github/actions/install-wdk
+
+      - name: Install CodeQL CLI 2.15.4 (WHCP_22H2 required version)
+        id: codeql-install
+        shell: pwsh
+        run: |
+          # WHCP_22H2 requires exactly CodeQL CLI 2.15.4 (VS 17.8+ path).
+          # Ref: https://learn.microsoft.com/windows-hardware/drivers/devtest/static-tools-and-codeql
+          $Version  = "2.15.4"
+          $ZipUrl   = "https://github.com/github/codeql-cli-binaries/releases/download/v$Version/codeql-win64.zip"
+          $ZipPath  = "$env:RUNNER_TEMP\codeql-$Version.zip"
+          $ExtractTo = "C:\codeql-$Version"
+
+          Write-Host "Downloading CodeQL CLI $Version from $ZipUrl" -ForegroundColor Cyan
+          Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
+          Expand-Archive -Path $ZipPath -DestinationPath $ExtractTo -Force
+
+          $codeqlExe = "$ExtractTo\codeql\codeql.exe"
+          if (-not (Test-Path $codeqlExe)) {
+            Write-Error "CodeQL CLI not found at expected path: $codeqlExe"
+            exit 1
+          }
+          Write-Host "CodeQL CLI installed: $codeqlExe" -ForegroundColor Green
+          & $codeqlExe version
+          "CODEQL_EXE=$codeqlExe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download WHCP_22H2 query packs
+        shell: pwsh
+        run: |
+          # WHCP_22H2 pack versions per Microsoft version matrix:
+          #   microsoft/windows-drivers@1.0.13  (linux-driver-kit + NDIS + WDM rules)
+          #   microsoft/cpp-queries@0.9.0       (required for mustfix.qls CWE checks)
+          # NOTE: mustfix.qls and recommended.qls span BOTH packs — cpp-queries is
+          # mandatory for full WHCP coverage (CWE-190, CWE-120, CWE-327, etc.).
+          Write-Host "Downloading microsoft/windows-drivers@1.0.13 ..." -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" pack download "microsoft/windows-drivers@1.0.13"
+          Write-Host "Downloading microsoft/cpp-queries@0.9.0 ..." -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" pack download "microsoft/cpp-queries@0.9.0"
+          Write-Host "Installed packs:" -ForegroundColor Green
+          & "$env:CODEQL_EXE" resolve qlpacks
+
+      - name: Create CodeQL database (WHCP build trace)
+        shell: pwsh
+        run: |
+          $DbPath = "$env:RUNNER_TEMP\codeql-db-whcp"
+          Write-Host "=== Creating CodeQL database: $DbPath ===" -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" database create $DbPath `
+            --language=cpp `
+            --source-root=. `
+            --command="msbuild IntelAvbFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /p:TreatWarningAsError=false /p:RunCodeAnalysis=false /p:AvbVersionBuild=0 /p:AvbVersionRevision=0 /t:Rebuild" `
+            --overwrite
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CODEQL_DB=$DbPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Database created successfully" -ForegroundColor Green
+
+      - name: Run recommended.qls (full WHCP suite)
+        shell: pwsh
+        run: |
+          # recommended.qls = mustfix.qls + mustrun.qls + additional checks.
+          # Running recommended.qls covers all WHCP certification requirements.
+          New-Item -ItemType Directory -Force -Path build/codeql-whcp | Out-Null
+          Write-Host "=== Running recommended.qls (WHCP_22H2) ===" -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" database analyze "$env:CODEQL_DB" `
+            "microsoft/windows-drivers:windows-driver-suites/recommended.qls" `
+            --format=sarifv2.1.0 `
+            --output=build/codeql-whcp/IntelAvbFilter-recommended.sarif `
+            --threads=0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "recommended.qls analysis complete" -ForegroundColor Green
+
+      - name: Check mustfix.qls violations (blocks WHCP certification)
+        shell: pwsh
+        run: |
+          # mustfix.qls = subset of recommended; violations BLOCK WHCP cert.
+          # Run separately to get an explicit pass/fail exit code.
+          Write-Host "=== Running mustfix.qls (WHCP blocking checks) ===" -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" database analyze "$env:CODEQL_DB" `
+            "microsoft/windows-drivers:windows-driver-suites/mustfix.qls" `
+            --format=sarifv2.1.0 `
+            --output=build/codeql-whcp/IntelAvbFilter-mustfix.sarif `
+            --threads=0
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "mustfix.qls found violations — driver CANNOT pass WHCP certification" -ForegroundColor Red
+            exit $LASTEXITCODE
+          }
+          Write-Host "mustfix.qls: no violations — WHCP blocking checks passed" -ForegroundColor Green
+
+      - name: Generate Driver Verification Log (DVL)
+        shell: pwsh
+        run: |
+          # DVL is required for the HLK Static Tools Logo test (WHCP certification).
+          # MSBuild /t:dvl looks for <DriverName>.sarif in the project directory.
+          # Copy the WHCP-grade SARIF there before invoking the DVL target.
+          Write-Host "=== Generating DVL from WHCP-grade SARIF ===" -ForegroundColor Cyan
+          Copy-Item build/codeql-whcp/IntelAvbFilter-recommended.sarif IntelAvbFilter.sarif -Force
+
+          msbuild IntelAvbFilter.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /t:dvl
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "DVL generation failed (exit $LASTEXITCODE)" -ForegroundColor Red
+            exit $LASTEXITCODE
+          }
+
+          # DVL is placed in the project directory by the WDK target.
+          $DvlFile = Get-ChildItem -Filter "*.DVL.XML" | Select-Object -First 1
+          if (-not $DvlFile) {
+            Write-Error "DVL file not found after msbuild /t:dvl"
+            exit 1
+          }
+          Write-Host "DVL generated: $($DvlFile.FullName)" -ForegroundColor Green
+
+          # Stamp build number into filename and copy to output dir.
+          $BuildNum = (Get-Content build_number.txt -ErrorAction SilentlyContinue) ?? "0"
+          $Dated = "IntelAvbFilter-WHCP22H2-$(Get-Date -Format yyyyMMdd)-build$BuildNum.DVL.XML"
+          Copy-Item $DvlFile.FullName "build/codeql-whcp/$Dated"
+          Copy-Item $DvlFile.FullName "build/codeql-whcp/IntelAvbFilter-latest.DVL.XML"
+          "DVL_FILE=build/codeql-whcp/$Dated" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload WHCP artifacts (SARIF + DVL)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: whcp-codeql-artifacts-${{ github.run_number }}
+          path: |
+            build/codeql-whcp/*.sarif
+            build/codeql-whcp/*.DVL.XML
+          retention-days: 90
+
+      - name: Upload WHCP SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: build/codeql-whcp/IntelAvbFilter-recommended.sarif
+          category: "/language:c-cpp/whcp"
+
+      - name: DVL commit reminder
+        if: success()
+        shell: pwsh
+        run: |
+          Write-Host "" -ForegroundColor White
+          Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+          Write-Host "║  DVL GENERATED — ACTION REQUIRED FOR WHCP CERTIFICATION      ║" -ForegroundColor Yellow
+          Write-Host "╠══════════════════════════════════════════════════════════════╣" -ForegroundColor Yellow
+          Write-Host "║  Download artifact: whcp-codeql-artifacts-${{ github.run_number }}      ║" -ForegroundColor Yellow
+          Write-Host "║  Commit DVL to:     test-evidence/dvl-YYYYMMDD.DVL.XML       ║" -ForegroundColor Yellow
+          Write-Host "║  Include in HLK package for Static Tools Logo test.          ║" -ForegroundColor Yellow
+          Write-Host "║  See: TEST-PLAN-NDIS-LWF-COVERAGE.md Pillar 1               ║" -ForegroundColor Yellow
+          Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Yellow
