@@ -418,7 +418,7 @@ AvbInitializeDeviceWithBar0Discovery(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    RtlZeroMemory(&ctx->intel_device, sizeof(ctx->intel_device));
+    RtlZeroMemory(ctx, sizeof(AVB_DEVICE_CONTEXT));
     ctx->initialized = FALSE;
     ctx->filter_instance = FilterModule;
     ctx->hw_access_enabled = FALSE;

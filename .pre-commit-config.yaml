@@ -6,6 +6,17 @@
 repos:
   - repo: local
     hooks:
+      # Convert test logs to JUnit XML and stage evidence when source files change.
+      # Exits 1 if evidence files were updated (auto-fixer pattern) -- re-commit to include them.
+      # Trigger: any staged src/*.c or src/*.h file (code change → fresh evidence expected).
+      - id: convert-logs-to-junit
+        name: Convert test logs to JUnit XML (test evidence)
+        entry: pwsh -NoProfile -ExecutionPolicy Bypass -File tools/test/pre-commit-update-evidence.ps1
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.(c|h)$
+        verbose: true
+
       # Validate specification files
       - id: validate-specs
         name: Validate Specification Files
