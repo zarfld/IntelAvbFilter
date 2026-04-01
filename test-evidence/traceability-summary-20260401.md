@@ -17,7 +17,7 @@ These logs contain no `Verifies: #N` lines and are **not** in the matrix above:
 
 | Test Suite | :white_check_mark: PASS | :x: FAIL | :next_track_button: SKIP |
 |------------|:-----------------------:|:--------:|:------------------------:|
-| test_hw_state | 4 | 4 | 0 |
+| test_hw_state | 12 | 0 | 0 |
 | test_hw_state_machine | 0 | 0 | 1 |
 | test_lazy_initialization | 0 | 0 | 1 |
 

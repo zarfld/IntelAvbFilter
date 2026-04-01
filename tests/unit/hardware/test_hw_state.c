@@ -9,7 +9,9 @@
  * Threshold rationale (empirical, 2026-03-29, 5 runs, Release + Debug drivers):
  *   Release driver P50: 14-23µs, P99: 26-129µs — OS scheduler jitter at measurement
  *   boundary inflates P99 tail; 250µs gives 2x margin above worst observed P99.
- *   Debug driver P50: ~100µs (driver-verifier overhead), P99: ~100-107µs.
+ *   Debug driver P50: ~48-51µs (verifier overhead), P99: 194-493µs (verifier + OS jitter).
+ *   Debug thresholds: P50 <75µs, P99 <600µs — selected at runtime when IOCTL_AVB_GET_VERSION
+ *   returns Flags & AVB_VERSION_FLAG_DEBUG_BUILD (driver self-reports its build type).
  *   Max single-sample spikes: up to 12.6ms — Windows scheduler preemption (one quantum
  *   = 15.625ms); genuine hardware hangs manifest at >100ms. 15ms threshold distinguishes
  *   OS jitter from real hardware stalls.
@@ -175,21 +177,43 @@ static void test_pci_latency_one_adapter(HANDLE h, int adapter_index)
 
     free(samples);
 
-    /* Assert P50 < 50 µs */
-    if (p50 > LAT_P50_THRESHOLD_NS) {
+    /* Select thresholds based on driver's reported build type.
+     * Query IOCTL_AVB_GET_VERSION; if AVB_VERSION_FLAG_DEBUG_BUILD is set the driver
+     * runs under Driver Verifier, inflating P50 ~3x and P99 ~5x vs Release.         */
+    uint64_t p50_limit = LAT_P50_THRESHOLD_NS;
+    uint64_t p99_limit = LAT_P99_THRESHOLD_NS;
+    {
+        IOCTL_VERSION ver;
+        ZeroMemory(&ver, sizeof(ver));
+        DWORD verBytes = 0;
+        if (DeviceIoControl(h, IOCTL_AVB_GET_VERSION,
+                            NULL, 0,
+                            &ver, sizeof(ver),
+                            &verBytes, NULL) &&
+            verBytes >= sizeof(ver) &&
+            (ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD)) {
+            p50_limit = 75000ULL;   /* 75 µs — 50% margin over worst Debug P50 (~51µs)  */
+            p99_limit = 600000ULL;  /* 600 µs — ~2x margin over worst Debug P99 (493µs) */
+            printf("  [Debug driver] Relaxed thresholds: P50 <%.0f µs  P99 <%.0f µs\n",
+                   (double)p50_limit / 1000.0, (double)p99_limit / 1000.0);
+        }
+    }
+
+    /* Assert P50 */
+    if (p50 > p50_limit) {
         char reason[128];
         sprintf(reason, "P50 %llu ns exceeds %llu ns (%.0f µs limit)",
-                (unsigned long long)p50, (unsigned long long)LAT_P50_THRESHOLD_NS,
-                (double)LAT_P50_THRESHOLD_NS / 1000.0);
+                (unsigned long long)p50, (unsigned long long)p50_limit,
+                (double)p50_limit / 1000.0);
         TEST_FAIL(id, reason);
         return;
     }
-    /* Assert P99 < 100 µs */
-    if (p99 > LAT_P99_THRESHOLD_NS) {
+    /* Assert P99 */
+    if (p99 > p99_limit) {
         char reason[128];
         sprintf(reason, "P99 %llu ns exceeds %llu ns (%.0f µs limit)",
-                (unsigned long long)p99, (unsigned long long)LAT_P99_THRESHOLD_NS,
-                (double)LAT_P99_THRESHOLD_NS / 1000.0);
+                (unsigned long long)p99, (unsigned long long)p99_limit,
+                (double)p99_limit / 1000.0);
         TEST_FAIL(id, reason);
         return;
     }

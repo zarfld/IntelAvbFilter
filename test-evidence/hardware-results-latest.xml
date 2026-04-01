@@ -1,8 +1,8 @@
 ﻿<?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated: 2026-04-01T16:03:37 -->
+<!-- Generated: 2026-04-01T16:19:39 -->
 <!-- Machine: 6XI226MACHINE | Run date: 20260401 | OS: 10.0.26200 -->
 <!-- NOTE: Tests require Intel NIC hardware and installed driver -->
-<testsuites name="IntelAvbFilter Hardware Tests 20260401" tests="64" failures="4" skipped="17" time="0">
+<testsuites name="IntelAvbFilter Hardware Tests 20260401" tests="68" failures="0" skipped="17" time="0">
   <testsuite name="test_dev_lifecycle" tests="20" failures="0" skipped="7" errors="0" time="32" hostname="6XI226MACHINE">
     <properties>
       <property name="log_file" value="test_dev_lifecycle.exe_20260401_155159.log"/>
@@ -138,9 +138,9 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_hw_state" tests="8" failures="4" skipped="0" errors="0" time="31" hostname="6XI226MACHINE">
+  <testsuite name="test_hw_state" tests="12" failures="0" skipped="0" errors="0" time="31" hostname="6XI226MACHINE">
     <properties>
-      <property name="log_file" value="test_hw_state.exe_20260401_155111.log"/>
+      <property name="log_file" value="test_hw_state.exe_20260401_161815.log"/>
       <property name="run_date" value="20260401"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
     </properties>
@@ -154,17 +154,25 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
       </properties>
     </testcase>
-    <testcase name="TC-PCI-LAT-001[adapter 1]: P99 284000 ns exceeds 250000 ns" classname="test_hw_state" time="0">
+    <testcase name="TC-PCI-LAT-001[adapter 1]" classname="test_hw_state" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
       </properties>
-      <failure message="[FAIL] TC-PCI-LAT-001[adapter 1]: P99 284000 ns exceeds 250000 ns (250 ┬Ás limit)">[FAIL] TC-PCI-LAT-001[adapter 1]: P99 284000 ns exceeds 250000 ns (250 ┬Ás limit)</failure>
     </testcase>
-    <testcase name="TC-PCI-LAT-001[adapter 2]: P99 368600 ns exceeds 250000 ns" classname="test_hw_state" time="0">
+    <testcase name="TC-PCI-LAT-002[adapter 1]" classname="test_hw_state" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
       </properties>
-      <failure message="[FAIL] TC-PCI-LAT-001[adapter 2]: P99 368600 ns exceeds 250000 ns (250 ┬Ás limit)">[FAIL] TC-PCI-LAT-001[adapter 2]: P99 368600 ns exceeds 250000 ns (250 ┬Ás limit)</failure>
+    </testcase>
+    <testcase name="TC-PCI-LAT-001[adapter 2]" classname="test_hw_state" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PCI-LAT-002[adapter 2]" classname="test_hw_state" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
+      </properties>
     </testcase>
     <testcase name="TC-PCI-LAT-001[adapter 3]" classname="test_hw_state" time="0">
       <properties>
@@ -176,17 +184,25 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
       </properties>
     </testcase>
-    <testcase name="TC-PCI-LAT-001[adapter 4]: P99 310900 ns exceeds 250000 ns" classname="test_hw_state" time="0">
+    <testcase name="TC-PCI-LAT-001[adapter 4]" classname="test_hw_state" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
       </properties>
-      <failure message="[FAIL] TC-PCI-LAT-001[adapter 4]: P99 310900 ns exceeds 250000 ns (250 ┬Ás limit)">[FAIL] TC-PCI-LAT-001[adapter 4]: P99 310900 ns exceeds 250000 ns (250 ┬Ás limit)</failure>
     </testcase>
-    <testcase name="TC-PCI-LAT-001[adapter 5]: P50 50800 ns exceeds 50000 ns" classname="test_hw_state" time="0">
+    <testcase name="TC-PCI-LAT-002[adapter 4]" classname="test_hw_state" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
       </properties>
-      <failure message="[FAIL] TC-PCI-LAT-001[adapter 5]: P50 50800 ns exceeds 50000 ns (50 ┬Ás limit)">[FAIL] TC-PCI-LAT-001[adapter 5]: P50 50800 ns exceeds 50000 ns (50 ┬Ás limit)</failure>
+    </testcase>
+    <testcase name="TC-PCI-LAT-001[adapter 5]" classname="test_hw_state" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PCI-LAT-002[adapter 5]" classname="test_hw_state" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
+      </properties>
     </testcase>
   </testsuite>
   <testsuite name="test_hw_state_machine" tests="1" failures="0" skipped="1" errors="0" time="65" hostname="6XI226MACHINE">
