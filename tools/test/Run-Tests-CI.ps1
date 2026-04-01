@@ -128,7 +128,11 @@ $IntegrationTests = @()
 # ===========================
 # Unit-level tests that require the driver device node (\\.\.\IntelAvbFilter) or Intel NIC.
 # Safe to run on an automated self-hosted runner -- none of these hibernate or sleep the PC.
-# EXCLUDED: test_s3_sleep_wake (TC-S3-002 calls SetSuspendState -- hibernates the host).
+#
+# EXCLUDED from ALL automated suites (unsafe or long-running):
+#   test_s3_sleep_wake          -- TC-S3-002 calls SetSuspendState (hibernates host, needs button press).
+#   test_vv_corr_001_stability  -- VV-CORR-001 24-hour PHC stability monitor. Run manually on
+#                                  a dedicated lab machine only. See Issue #317 Track E.
 $HardwareUnitTests = @(
     "test_cleanup_archive",        # checks build output against installed driver
     "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
@@ -171,7 +175,32 @@ $HardwareUnitTests = @(
     "ptp_clock_control_test",      # PHC/QPC coherence TC-5a/TC-5b -- #238
     "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
     "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
-    "test_lifecycle_coverage"      # Pillar-2 NDIS LWF lifecycle counters
+    "test_lifecycle_coverage",     # Pillar-2 NDIS LWF lifecycle counters
+    # Phase C: Additional unit tests registered 2026-04-01 (built but previously absent from CI)
+    "test_hw_state",               # hardware state enum/OID query -- REQ-F-HWCTX-001 (#18)
+    "test_statistics_counters",    # IOCTL statistics counters -- REQ-NF-DIAG-001 (#270)
+    "test_event_log",              # Windows Event Log integration -- (#269)
+    "test_build_sign",             # build & code-signing verification -- (#243)
+    "test_compat_win11",           # Windows 11 compatibility smoke -- (#256)
+    "test_win7_stub",              # OS compat Win10+ assertion -- (#258)
+    "test_eee_lpi",                # IEEE 802.3az EEE/LPI [TDD-RED] -- (#223)
+    "test_pfc_pause",              # IEEE 802.1Qbb PFC [TDD-RED] -- (#219)
+    "test_srp_interface",          # IEEE 802.1Qat SRP [TDD-RED] -- (#211)
+    "test_vlan_tag",               # IEEE 802.1Q VLAN insert/strip [TDD-RED] -- (#213)
+    "test_vlan_pcp_tc_mapping",    # VLAN PCP->TC CBS mapping -- (#276)
+    "test_security_validation",    # security validation & vuln scan -- (#226)
+    "test_ioctl_launch_time",      # launch time offload IOCTL -- (#209)
+    "test_avtp_tu_bit_events",     # AVTP TU-bit change events -- (#175)
+    "test_ptp_event_latency",      # PTP event ring-buffer latency -- (#177)
+    "test_event_latency_4ch",      # 4-channel multi-observer event latency -- (#179)
+    "test_gptp_phc_interface",     # gPTP PHC interface contract -- (#210)
+    "test_send_ptp_debug",         # IOCTL_AVB_TEST_SEND_PTP diagnostic -- (#51)
+    "test_timestamp_latency",      # TX/RX timestamp latency <1us -- (#272)
+    "test_perf_regression",        # performance regression baseline -- (#225)
+    "test_ndis_fastpath_latency",  # NDIS IOCTL fast-path latency P99<10us -- (#286)
+    "test_hot_plug",               # PnP hot-plug filter restart -- (#262)
+    "test_error_recovery",         # error recovery / no-BSOD on malformed input -- (#215)
+    "test_multi_adapter_phc_sync"  # multi-adapter PHC sync/independence -- (#208)
 )
 
 # Integration-level tests that require the driver device node or Intel NIC.
@@ -189,7 +218,16 @@ $HardwareIntegrationTests = @(
     "test_registry_diagnostics",      # registry diagnostics -- driver service required
     # Phase B: extended cross-domain / correlation tests (added 2026-03-29)
     "test_ptp_corr_extended",         # extended PTP correlation -- duration ~5 min
-    "test_vv_corr_003_crossdomain"    # cross-domain V&V validation -- VV-CORR-003
+    "test_vv_corr_003_crossdomain",   # cross-domain V&V validation -- VV-CORR-003
+    # Phase C: Additional integration tests registered 2026-04-01 (built but previously absent from CI)
+    "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
+    "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
+    "test_ptp_phc_stability",         # PHC stability UT-CORR-005..009; ~1K samples@2ms -- (#317)
+    "ptp_clock_control_production",   # PTP clock production test -- (#238)
+    "hw_timestamping_control",        # HW timestamping control integration
+    "rx_timestamping",                # RX timestamping integration
+    "tsauxc_toggle_test",             # TSAUXC register toggle (TSN)
+    "test_gptp_daemon_coexist"        # OpenAvnu gPTP daemon coexistence; SKIPs if no daemon -- (#240)
 )
 
 # ===========================
