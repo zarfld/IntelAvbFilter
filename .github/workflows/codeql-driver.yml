@@ -81,7 +81,7 @@ jobs:
         uses: ./.github/actions/install-wdk
 
       - name: Initialize CodeQL (MSDT driver config — development branch)
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: c-cpp
           build-mode: manual
@@ -113,7 +113,7 @@ jobs:
           Write-Host "Build succeeded — CodeQL tracer captured compilation units" -ForegroundColor Green
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:c-cpp"
           # Output SARIF alongside driver binary in the build tree for local inspection.
@@ -129,9 +129,9 @@ jobs:
   #   microsoft/windows-drivers pack: 1.0.13
   #   microsoft/cpp-queries pack:     0.9.0
   #
-  # Query suites run explicitly:
-  #   recommended.qls  — full set (superset of mustrun + mustfix)
-  #   mustfix.qls      — subset; violations BLOCK WHCP cert; exit non-zero on findings
+  # Query suites run explicitly (pack 1.0.13 uses legacy underscore naming under suites/):
+  #   suites/windows_driver_recommended.qls  — full set (superset of mustrun + mustfix)
+  #   suites/windows_driver_mustfix.qls      — subset; violations BLOCK WHCP cert; exit non-zero on findings
   #
   # After analysis: generates Driver Verification Log (DVL) via MSBuild /t:dvl.
   # DVL is required for HLK Static Tools Logo test (WHCP certification).
@@ -199,6 +199,25 @@ jobs:
           Write-Host "Installed packs:" -ForegroundColor Green
           & "$env:CODEQL_EXE" resolve qlpacks
 
+      - name: Diagnose installed pack suite paths
+        shell: pwsh
+        run: |
+          # List all .qls files in the installed pack to confirm suite paths before analysis.
+          # Pack 1.0.13 (WHCP_22H2): suites/windows_driver_recommended.qls + suites/windows_driver_mustfix.qls
+          # Pack >=1.8.0 (main):     windows-driver-suites/recommended.qls + windows-driver-suites/mustfix.qls
+          $PackRoot = "$env:USERPROFILE\.codeql\packages\microsoft\windows-drivers\1.0.13"
+          if (-not (Test-Path $PackRoot)) {
+            Write-Warning "Pack root not found: $PackRoot (pack may not have downloaded)"
+          } else {
+            Write-Host "=== .qls files in microsoft/windows-drivers@1.0.13 ===" -ForegroundColor Cyan
+            Get-ChildItem -Path $PackRoot -Recurse -Filter "*.qls" -ErrorAction SilentlyContinue |
+              Sort-Object FullName |
+              ForEach-Object {
+                $Rel = $_.FullName.Substring($PackRoot.Length + 1).Replace('\', '/')
+                Write-Host "  $Rel"
+              }
+          }
+
       - name: Create CodeQL database (WHCP build trace)
         shell: pwsh
         run: |
@@ -213,37 +232,38 @@ jobs:
           "CODEQL_DB=$DbPath" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Database created successfully" -ForegroundColor Green
 
-      - name: Run recommended.qls (full WHCP suite)
+      - name: Run windows_driver_recommended.qls (full WHCP suite)
         shell: pwsh
         run: |
-          # recommended.qls = mustfix.qls + mustrun.qls + additional checks.
-          # Running recommended.qls covers all WHCP certification requirements.
+          # Pack microsoft/windows-drivers@1.0.13 (WHCP_22H2) uses legacy suite naming:
+          #   Path: suites/windows_driver_recommended.qls
+          # NOTE: "windows-driver-suites/recommended.qls" is only valid for pack >=1.8.0.
           New-Item -ItemType Directory -Force -Path build/codeql-whcp | Out-Null
-          Write-Host "=== Running recommended.qls (WHCP_22H2) ===" -ForegroundColor Cyan
+          Write-Host "=== Running windows_driver_recommended.qls (WHCP_22H2, pack 1.0.13) ===" -ForegroundColor Cyan
           & "$env:CODEQL_EXE" database analyze "$env:CODEQL_DB" `
-            "microsoft/windows-drivers:windows-driver-suites/recommended.qls" `
+            "microsoft/windows-drivers:suites/windows_driver_recommended.qls" `
             --format=sarifv2.1.0 `
             --output=build/codeql-whcp/IntelAvbFilter-recommended.sarif `
             --threads=0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Host "recommended.qls analysis complete" -ForegroundColor Green
+          Write-Host "windows_driver_recommended.qls analysis complete" -ForegroundColor Green
 
-      - name: Check mustfix.qls violations (blocks WHCP certification)
+      - name: Check mustfix violations (blocks WHCP certification)
         shell: pwsh
         run: |
-          # mustfix.qls = subset of recommended; violations BLOCK WHCP cert.
-          # Run separately to get an explicit pass/fail exit code.
-          Write-Host "=== Running mustfix.qls (WHCP blocking checks) ===" -ForegroundColor Cyan
+          # windows_driver_mustfix.qls = subset of recommended; violations BLOCK WHCP cert.
+          # Pack 1.0.13 path: suites/windows_driver_mustfix.qls
+          Write-Host "=== Running windows_driver_mustfix.qls (WHCP blocking checks) ===" -ForegroundColor Cyan
           & "$env:CODEQL_EXE" database analyze "$env:CODEQL_DB" `
-            "microsoft/windows-drivers:windows-driver-suites/mustfix.qls" `
+            "microsoft/windows-drivers:suites/windows_driver_mustfix.qls" `
             --format=sarifv2.1.0 `
             --output=build/codeql-whcp/IntelAvbFilter-mustfix.sarif `
             --threads=0
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "mustfix.qls found violations — driver CANNOT pass WHCP certification" -ForegroundColor Red
+            Write-Host "windows_driver_mustfix.qls violations found — driver CANNOT pass WHCP certification" -ForegroundColor Red
             exit $LASTEXITCODE
           }
-          Write-Host "mustfix.qls: no violations — WHCP blocking checks passed" -ForegroundColor Green
+          Write-Host "windows_driver_mustfix.qls: no violations — WHCP blocking checks passed" -ForegroundColor Green
 
       - name: Generate Driver Verification Log (DVL)
         shell: pwsh
@@ -289,7 +309,7 @@ jobs:
           retention-days: 90
 
       - name: Upload WHCP SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: build/codeql-whcp/IntelAvbFilter-recommended.sarif
