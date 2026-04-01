@@ -208,9 +208,16 @@ jobs:
           Get-ChildItem -Path $SuiteDir -Filter "*.qls" | Sort-Object Name |
             ForEach-Object { Write-Host "  $($_.Name)" }
 
-          # Install pack dependencies (resolves codeql/cpp-all for CLI 2.15.4).
-          Write-Host "Installing query pack dependencies ..." -ForegroundColor Cyan
+          # Install pack dependencies declared in qlpack.yml (resolves codeql/cpp-all).
+          Write-Host "Installing query pack dependencies (qlpack.yml) ..." -ForegroundColor Cyan
           & "$env:CODEQL_EXE" pack install $PackDir
+
+          # The .qls suite files (mustfix + recommended) also reference 'from: codeql/cpp-queries'
+          # which is NOT listed in qlpack.yml and therefore not installed by 'pack install'.
+          # Download it explicitly so the analyze step can resolve it.
+          Write-Host "Downloading codeql/cpp-queries (required by suite 'from:' directives) ..." -ForegroundColor Cyan
+          & "$env:CODEQL_EXE" pack download codeql/cpp-queries
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           "WHCP_SUITE_DIR=$SuiteDir" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "WHCP_SUITE_DIR=$SuiteDir" -ForegroundColor Green
