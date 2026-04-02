@@ -76,16 +76,25 @@ typedef struct _RX_TIMESTAMP_QUERY {
 #define P99_THRESHOLD_RX_NS    100000  // <100µs RX MMIO P99 (allows PCIe latency spikes)
 
 #define CONCURRENT_P99_NS 10000    // <10µs under 8-thread load (was 5µs; borderline for concurrent IOCTL)
+#define MAX_ADAPTERS 16
 
-// Test Result Structure
+// Test Result Structure — buffered fields to avoid dangling pointer from local reason strings
 typedef struct _TEST_RESULT {
-    const char* TestCase;
+    char TestCase[80];   /* "TC-PERF-TS-001/adapter:0" etc. */
     bool Passed;
-    const char* Reason;
+    char Reason[192];
 } TEST_RESULT;
 
-TEST_RESULT g_Results[20];
+TEST_RESULT g_Results[100]; /* up to MAX_ADAPTERS(16) x ~10 tests each */
 int g_ResultCount = 0;
+
+// Per-adapter context — set by main() before each adapter's test run
+// OpenAvbDevice() reads these to bind the handle via IOCTL_AVB_OPEN_ADAPTER.
+typedef struct { UINT16 vendor_id; UINT16 device_id; UINT32 index; } PerAdapterInfo;
+static UINT16 g_adapter_vendor_id = 0;
+static UINT16 g_adapter_device_id = 0;
+static UINT32 g_adapter_index     = 0;
+static char   g_adapter_tag[32]   = "";  /* "adapter:0" .. "adapter:N" */
 
 // Thread-safe latency storage for concurrent tests
 typedef struct _THREAD_LATENCY_DATA {
@@ -121,28 +130,88 @@ void TestPhcQueryLatency(void);  /* TC-PERF-PHC-001/002 — closes #200 #274 */
  */
 int main(void)
 {
-    printf("\n=== TEST-PERF-TS-001: Timestamp Retrieval Latency <1us ===\n");
+    printf("\n=== TEST-PERF-TS-001: Timestamp Retrieval Latency ===\n");
     printf("Verifies: #65 (REQ-NF-PERF-TS-001)\n");
     printf("Issue: #272\n");
     printf("Iterations: %d\n", ITERATIONS);
-    printf("Requirement: Median <1µs, P99 <2µs\n\n");
+    printf("Requirement: TX Median <1us P99 <2us; RX Median <5us P99 <100us\n\n");
 
-    // Get CPU frequency for RDTSC → nanosecond conversion
     double cpuFreqGHz = GetCpuFrequencyGHz();
-    printf("CPU Frequency: %.2f GHz (%.3f cycles/ns)\n\n", cpuFreqGHz, cpuFreqGHz);
+    printf("CPU Frequency: %.2f GHz (%.3f cycles/ns)\n", cpuFreqGHz, cpuFreqGHz);
 
-    // Run test cases
-    TestTxTimestampLatency();
-    TestRxTimestampLatency();
-    TestLatencyDistribution();
-    TestConcurrentLoad();
-    TestPerformanceDegradation();
-    TestWarmupEffect();
-    TestPhcQueryLatency();          /* TC-PERF-PHC-001/002 — closes #200 #274 */
+    /* ------------------------------------------------------------------ *
+     * Enumerate all Intel adapters via IOCTL_AVB_ENUM_ADAPTERS.           *
+     * A plain discovery handle is opened here (no OPEN_ADAPTER), iterated *
+     * to collect VID/DID/index, then closed.  The per-adapter loop below  *
+     * opens fresh handles for each adapter and binds them individually.   *
+     * ------------------------------------------------------------------ */
+    PerAdapterInfo adapters[MAX_ADAPTERS];
+    int adapterCount = 0;
 
-    // Print summary
+    HANDLE hEnum = CreateFileA("\\\\.\\IntelAvbFilter",
+                               GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hEnum == INVALID_HANDLE_VALUE) {
+        printf("[FAIL] Cannot open device for enumeration (error %lu)\n", GetLastError());
+        return 1;
+    }
+
+    for (int i = 0; i < MAX_ADAPTERS; i++) {
+        AVB_ENUM_REQUEST req;
+        memset(&req, 0, sizeof(req));
+        req.index = (UINT32)i;
+        DWORD br = 0;
+        if (!DeviceIoControl(hEnum, IOCTL_AVB_ENUM_ADAPTERS,
+                             &req, sizeof(req), &req, sizeof(req), &br, NULL))
+            break;
+        adapters[adapterCount].vendor_id = req.vendor_id;
+        adapters[adapterCount].device_id = req.device_id;
+        adapters[adapterCount].index     = (UINT32)i;
+        adapterCount++;
+    }
+    CloseHandle(hEnum);
+
+    if (adapterCount == 0) {
+        /* IOCTL_AVB_ENUM_ADAPTERS not supported or no adapters — run once
+         * against the default context so tests still execute. */
+        printf("[WARN] IOCTL_AVB_ENUM_ADAPTERS returned 0 — single-adapter fallback\n");
+        adapters[0].vendor_id = 0;
+        adapters[0].device_id = 0;
+        adapters[0].index     = 0;
+        adapterCount = 1;
+    }
+
+    printf("Running latency tests on %d adapter(s)\n", adapterCount);
+
+    /* ------------------------------------------------------------------ *
+     * Per-adapter test loop.  g_adapter_* globals are set before each    *
+     * run so that OpenAvbDevice() (called inside every test function)    *
+     * binds to the correct adapter via IOCTL_AVB_OPEN_ADAPTER.           *
+     * RecordResult() embeds g_adapter_tag in the stored test case name   *
+     * so each adapter's results appear as distinct JUnit entries.        *
+     * ------------------------------------------------------------------ */
+    for (int ai = 0; ai < adapterCount; ai++) {
+        g_adapter_vendor_id = adapters[ai].vendor_id;
+        g_adapter_device_id = adapters[ai].device_id;
+        g_adapter_index     = adapters[ai].index;
+        snprintf(g_adapter_tag, sizeof(g_adapter_tag), "adapter:%d", ai);
+
+        printf("\n========== %s (VID=0x%04X DID=0x%04X) ==========\n",
+               g_adapter_tag,
+               (unsigned)adapters[ai].vendor_id,
+               (unsigned)adapters[ai].device_id);
+
+        TestTxTimestampLatency();
+        TestRxTimestampLatency();
+        TestLatencyDistribution();
+        TestConcurrentLoad();
+        TestPerformanceDegradation();
+        TestWarmupEffect();
+        TestPhcQueryLatency();      /* TC-PERF-PHC-001/002 — closes #200 #274 */
+    }
+
     PrintTestSummary();
-
     return 0;
 }
 
@@ -803,7 +872,33 @@ HANDLE OpenAvbDevice(void)
                                  NULL);
 
     if (hDevice == INVALID_HANDLE_VALUE) {
-        printf("❌ Failed to open IntelAvbFilter device (error %lu)\n", GetLastError());
+        printf("[FAIL] Failed to open IntelAvbFilter device (error %lu)\n", GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
+
+    /* Bind handle to the specific adapter set by main() for this iteration.
+     * Without IOCTL_AVB_OPEN_ADAPTER, FileObject->FsContext is NULL and the
+     * driver falls back to the first/default adapter context, meaning all
+     * subsequent IOCTLs hit adapter 0 regardless of intent. */
+    if (g_adapter_vendor_id != 0 || g_adapter_index != 0) {
+        AVB_OPEN_REQUEST req = {0};
+        req.vendor_id = g_adapter_vendor_id;
+        req.device_id = g_adapter_device_id;
+        req.index     = g_adapter_index;
+        DWORD br = 0;
+        if (!DeviceIoControl(hDevice, IOCTL_AVB_OPEN_ADAPTER,
+                             &req, sizeof(req), &req, sizeof(req), &br, NULL)
+                || req.status != 0) {
+            printf("  [WARN] OPEN_ADAPTER failed for %s "
+                   "(VID=0x%04X DID=0x%04X idx=%u status=0x%08X err=%lu)\n",
+                   g_adapter_tag,
+                   (unsigned)g_adapter_vendor_id,
+                   (unsigned)g_adapter_device_id,
+                   (unsigned)g_adapter_index,
+                   (unsigned)req.status,
+                   GetLastError());
+            /* Continue — falls back to default adapter context */
+        }
     }
 
     return hDevice;
@@ -814,10 +909,21 @@ HANDLE OpenAvbDevice(void)
  */
 void RecordResult(const char* testCase, bool passed, const char* reason)
 {
-    if (g_ResultCount < 20) {
-        g_Results[g_ResultCount].TestCase = testCase;
+    if (g_ResultCount < 100) {
+        /* Include adapter tag in test case name so per-adapter results are distinct */
+        if (g_adapter_tag[0] != '\0') {
+            snprintf(g_Results[g_ResultCount].TestCase,
+                     sizeof(g_Results[g_ResultCount].TestCase),
+                     "%s/%s", testCase, g_adapter_tag);
+        } else {
+            strncpy_s(g_Results[g_ResultCount].TestCase,
+                      sizeof(g_Results[g_ResultCount].TestCase),
+                      testCase, _TRUNCATE);
+        }
         g_Results[g_ResultCount].Passed = passed;
-        g_Results[g_ResultCount].Reason = reason;
+        strncpy_s(g_Results[g_ResultCount].Reason,
+                  sizeof(g_Results[g_ResultCount].Reason),
+                  reason ? reason : "", _TRUNCATE);
         g_ResultCount++;
     }
 }
@@ -895,8 +1001,8 @@ void PrintTestSummary(void)
         const char* status = g_Results[i].Passed ? "PASS" : "FAIL";
         printf("[%s] %s: %s\n",
                status,
-               g_Results[i].TestCase,
-               g_Results[i].Reason);
+               g_Results[i].TestCase,   /* char[] — no dangling pointer */
+               g_Results[i].Reason);    /* char[] — no dangling pointer */
 
         if (g_Results[i].Passed) {
             passed++;
