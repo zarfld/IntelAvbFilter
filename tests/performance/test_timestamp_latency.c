@@ -114,7 +114,7 @@ void CalculateStatistics(UINT64* latencies, int count, double cpuFreqGHz,
                         double* medianNs, double* p50Ns, double* p95Ns, 
                         double* p99Ns, double* meanNs);
 void GenerateHistogram(UINT64* latencies, int count, double cpuFreqGHz);
-void PrintTestSummary(void);
+int  PrintTestSummary(void);  /* returns number of failed test cases */
 
 // Test Case Functions
 void TestTxTimestampLatency(void);
@@ -211,8 +211,11 @@ int main(void)
         TestPhcQueryLatency();      /* TC-PERF-PHC-001/002 — closes #200 #274 */
     }
 
-    PrintTestSummary();
-    return 0;
+    int failCount = PrintTestSummary();
+    /* Skipped cases do not fail CI — only FAIL-level results drive exit code.
+     * Exit 0 → CI PASS (possibly with partial-coverage annotations in JUnit).
+     * Exit 1 → CI FAIL (at least one TC-level failure across any adapter). */
+    return failCount > 0 ? 1 : 0;
 }
 
 /*
@@ -991,33 +994,45 @@ void CalculateStatistics(UINT64* latencies, int count, double cpuFreqGHz,
 /*
  * Helper: Print test summary
  */
-void PrintTestSummary(void)
+int PrintTestSummary(void)
 {
     int passed = 0;
     int failed = 0;
+    int skipped = 0;
 
     printf("=== Test Summary ===\n");
     for (int i = 0; i < g_ResultCount; i++) {
-        const char* status = g_Results[i].Passed ? "PASS" : "FAIL";
-        printf("[%s] %s: %s\n",
-               status,
-               g_Results[i].TestCase,   /* char[] — no dangling pointer */
-               g_Results[i].Reason);    /* char[] — no dangling pointer */
-
         if (g_Results[i].Passed) {
+            printf("[PASS] %s: %s\n",
+                   g_Results[i].TestCase,
+                   g_Results[i].Reason);
             passed++;
+        } else if (g_Results[i].Reason[0] != '\0' &&
+                   strncmp(g_Results[i].Reason, "SKIP", 4) == 0) {
+            /* skipped entries stored via RecordResult(tc, false, "SKIP: ...") */
+            printf("[SKIP] %s: %s\n",
+                   g_Results[i].TestCase,
+                   g_Results[i].Reason);
+            skipped++;
         } else {
+            printf("[FAIL] %s: %s\n",
+                   g_Results[i].TestCase,
+                   g_Results[i].Reason);
             failed++;
         }
     }
 
-    double passRate = (double)passed / (double)g_ResultCount * 100.0;
-    printf("\nTotal: %d/%d (%.1f%% pass rate)\n",
-           passed, g_ResultCount, passRate);
+    if (g_ResultCount > 0) {
+        double passRate = (double)(passed + skipped) / (double)g_ResultCount * 100.0;
+        printf("\nTotal: %d/%d (%.1f%% pass rate); %d failed, %d skipped\n",
+               passed, g_ResultCount, passRate, failed, skipped);
+    }
 
     if (failed == 0) {
-        printf("✅ All tests passed!\n");
+        printf("\xE2\x9C\x85 All tests passed!\n");
     } else {
-        printf("❌ %d test(s) failed\n", failed);
+        printf("\xE2\x9D\x8C %d test(s) failed\n", failed);
     }
+
+    return failed;  /* caller uses this for process exit code */
 }

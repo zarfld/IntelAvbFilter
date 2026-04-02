@@ -127,6 +127,25 @@ function Invoke-Test {
     }
     $exitCode = $LASTEXITCODE
 
+    # --- Per-test-case JUnit XML (Parse-TestResults.ps1) ---
+    # Parses [PASS]/[FAIL]/[SKIP] TC-ID(/adapter:N): reason lines and emits
+    # JUnit XML with adapter-aware skip aggregation:
+    #   all-skip       → <skipped/>                  (genuine N/A)
+    #   any-fail       → <failure/>                   (CI-blocking)
+    #   partial-skip   → PASS + PARTIAL COVERAGE note (soft warning)
+    #   all-pass       → clean <testcase/>
+    $parserScript = Join-Path $PSScriptRoot 'Parse-TestResults.ps1'
+    if (Test-Path $parserScript) {
+        $parserOutput = & $parserScript -LogFile $LogFile 2>&1
+        $parserOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        # If parser found TC-level failures but binary exited 0 (known bug in some
+        # test binaries), propagate the failure so CI is not blind to it.
+        if ($LASTEXITCODE -ne 0 -and ($exitCode -eq 0 -or $null -eq $exitCode)) {
+            Write-Host "  [WARN] Per-test-case failures detected despite exit code 0 — see JUnit XML" -ForegroundColor Yellow
+            $exitCode = $LASTEXITCODE
+        }
+    }
+
     # --- Lifecycle snapshot AFTER + diff ---
     $lcyAfter = Get-AvbLifecycleSnapshot
     Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
@@ -168,6 +187,7 @@ $testExeDir = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
 $script:totalTests = 0
 $script:passedTests = 0
 $script:failedTests = 0
+$script:skippedTests = 0   # initialized here; do not rely on implicit $null
 $script:testResults = @()
 
 # ===========================
