@@ -18,7 +18,7 @@
  *   - TC-STAT-006: Statistics query performance (<100µs mean)
  *   - TC-STAT-007: Multiple concurrent query calls
  *   - TC-STAT-008: Statistics persistence across queries
- *   - TC-STAT-009: Structure size validation (104 bytes)
+ *   - TC-STAT-009: Structure size validation (192 bytes)
  *   - TC-STAT-010: Zero initialization after driver reload
  *
  * IOCTLs Tested:
@@ -52,7 +52,7 @@
 
 // SSOT: all IOCTL codes and structures are from avb_ioctl.h — no magic numbers, no duplicates.
 // Types used:
-//   AVB_DRIVER_STATISTICS  (104 bytes, 13 × avb_u64) — statistics snapshot
+//   AVB_DRIVER_STATISTICS  (192 bytes, 24 × avb_u64) — statistics snapshot (ABI 2.0)
 //   AVB_HW_STATE_QUERY     (output-only, for generating additional IOCTL traffic)
 // IOCTLs used:
 //   IOCTL_AVB_GET_STATISTICS, IOCTL_AVB_RESET_STATISTICS, IOCTL_AVB_GET_HW_STATE
@@ -123,8 +123,8 @@ static UINT64 GetTimestampUs(void) {
  * 
  * Steps:
  *   1. Query statistics via IOCTL_GET_STATISTICS
- *   2. Verify all 13 counters = 0
- *   3. Verify structure size = 104 bytes
+ *   2. Verify all 24 counters = 0
+ *   3. Verify structure size = 192 bytes
  * 
  * Expected: All counters initialized to zero
  */
@@ -171,7 +171,7 @@ static void TestStatisticsInitialization(void) {
     // Note: We don't verify counters are zero since driver may have been running
     // This test just verifies the structure can be queried successfully
     
-    RecordResult(test_name, TEST_PASS, "Statistics structure queried (104 bytes)", duration);
+    RecordResult(test_name, TEST_PASS, "Statistics structure queried (192 bytes)", duration);
 }
 
 /**
@@ -196,7 +196,7 @@ static void TestBufferSizeValidation(void) {
         return;
     }
     
-    BYTE smallBuffer[50];  // Too small (need sizeof(AVB_DRIVER_STATISTICS) = 104)
+    BYTE smallBuffer[50];  // Too small (need sizeof(AVB_DRIVER_STATISTICS) = 192)
     DWORD bytesReturned = 0;
     
     BOOL result = DeviceIoControl(
@@ -385,7 +385,7 @@ static void TestErrorCounterIncrement(void) {
     }
     
     // Issue 5 invalid IOCTL_AVB_GET_STATISTICS calls with too-small output buffer
-    // (SSOT: 4 < sizeof(AVB_DRIVER_STATISTICS)=104 -> STATUS_BUFFER_TOO_SMALL)
+    // (SSOT: 4 < sizeof(AVB_DRIVER_STATISTICS)=192 -> STATUS_BUFFER_TOO_SMALL)
     for (int i = 0; i < 5; i++) {
         BYTE tinyBuf[4];
         DeviceIoControl(hDevice, IOCTL_AVB_GET_STATISTICS, NULL, 0,
@@ -622,20 +622,20 @@ static void TestStatisticsPersistence(void) {
 /**
  * @brief TC-STAT-009: Structure Size Validation
  * 
- * Verify DRIVER_STATISTICS structure is exactly 104 bytes.
+ * Verify DRIVER_STATISTICS structure is exactly 192 bytes (ABI 2.0).
  * 
  * Steps:
- *   1. Verify sizeof(DRIVER_STATISTICS) = 104
+ *   1. Verify sizeof(DRIVER_STATISTICS) = 192
  *   2. Verify all fields properly aligned
  * 
- * Expected: Structure size = 104 bytes
+ * Expected: Structure size = 192 bytes
  */
 static void TestStructureSize(void) {
-    const char* test_name = "TC-STAT-009: Structure size (104 bytes)";
+    const char* test_name = "TC-STAT-009: Structure size (192 bytes)";
     UINT64 start = GetTimestampUs();
     
     size_t actual_size = sizeof(AVB_DRIVER_STATISTICS);
-    size_t expected_size = 104;  /* AVB_DRIVER_STATISTICS = 13 × avb_u64 */
+    size_t expected_size = 192;  /* AVB_DRIVER_STATISTICS = 24 × avb_u64 (ABI 2.0) */
     
     UINT64 duration = GetTimestampUs() - start;
     
@@ -647,7 +647,7 @@ static void TestStructureSize(void) {
         return;
     }
     
-    RecordResult(test_name, TEST_PASS, "Structure size = 104 bytes", duration);
+    RecordResult(test_name, TEST_PASS, "Structure size = 192 bytes", duration);
 }
 
 /**
