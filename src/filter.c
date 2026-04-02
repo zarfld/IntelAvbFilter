@@ -111,14 +111,28 @@ IsUnsupportedTeamOrVirtualAdapter(
     _In_ PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters
 )
 {
-    PCUNICODE_STRING name = AttachParameters->BaseMiniportInstanceName;
-    if (!name || !name->Buffer) return FALSE;
-    if (UnicodeStringContainsInsensitive(name, L"Multiplexor")) return TRUE;   // Microsoft Network Adapter Multiplexor Driver (LBFO)
-    if (UnicodeStringContainsInsensitive(name, L"Team")) return TRUE;          // Teaming TNIC
-    if (UnicodeStringContainsInsensitive(name, L"Bridge")) return TRUE;        // Bridge/ICS
-    if (UnicodeStringContainsInsensitive(name, L"vEthernet")) return TRUE;     // Hyper-V vNIC
-    if (UnicodeStringContainsInsensitive(name, L"Hyper-V")) return TRUE;       // Hyper-V naming
-    if (UnicodeStringContainsInsensitive(name, L"Virtual")) return TRUE;       // Generic virtual NICs
+    /*
+     * BUGFIX (0x50 PAGE_FAULT, 2026-03-26): BaseMiniportInstanceName->Buffer
+     * can be freed NDIS memory by the time we read it (Hyper-V vEthernet attach
+     * race).  Wrap all access in __try/__except to prevent the BSOD.
+     * Root cause: NDIS passes AttachParameters with a BaseMiniportInstanceName
+     * whose Buffer pointer may reference a freed/recycled allocation when a
+     * Hyper-V virtual adapter attaches concurrently.
+     */
+    __try {
+        PCUNICODE_STRING name = AttachParameters->BaseMiniportInstanceName;
+        if (!name || !name->Buffer || name->Length == 0) return FALSE;
+        if (UnicodeStringContainsInsensitive(name, L"Multiplexor")) return TRUE;   // Microsoft Network Adapter Multiplexor Driver (LBFO)
+        if (UnicodeStringContainsInsensitive(name, L"Team")) return TRUE;          // Teaming TNIC
+        if (UnicodeStringContainsInsensitive(name, L"Bridge")) return TRUE;        // Bridge/ICS
+        if (UnicodeStringContainsInsensitive(name, L"vEthernet")) return TRUE;     // Hyper-V vNIC
+        if (UnicodeStringContainsInsensitive(name, L"Hyper-V")) return TRUE;       // Hyper-V naming
+        if (UnicodeStringContainsInsensitive(name, L"Virtual")) return TRUE;       // Generic virtual NICs
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        DEBUGP(DL_ERROR, "IsUnsupportedTeamOrVirtualAdapter: exception 0x%08X reading adapter name — treating as unsupported\n",
+               GetExceptionCode());
+        return TRUE;  /* Fail-safe: if we can't read the name, reject the adapter */
+    }
     return FALSE;
 }
 
