@@ -982,7 +982,7 @@ jobs:
           if gh_token:
               try:
                   api_url = (f'https://api.github.com/repos/{gh_repo}/issues'
-                             '?labels=test-case&state=all&per_page=100')
+                             '?labels=type%3Atest-case&state=all&per_page=100')
                   all_count = 0
                   while api_url:
                       req_obj = urllib.request.Request(api_url, headers={
@@ -1492,8 +1492,8 @@ jobs:
 
           print("🎭 Acceptance Criteria Validation Status\n")
 
-          # Query all issues with test-case label
-          test_issues = repo.get_issues(labels=["test-case"], state="all")
+          # Query all issues with type:test-case label
+          test_issues = repo.get_issues(labels=["type:test-case"], state="all")
           test_count = sum(1 for _ in test_issues)
 
           # Query all functional/non-functional requirements
