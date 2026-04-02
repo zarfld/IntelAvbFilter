@@ -97,8 +97,14 @@ static NTSTATUS Mock_GetCapabilities(void* Context, HARDWARE_CAPABILITIES* Caps)
 }
 
 static NTSTATUS Mock_Initialize(void* Context) {
-    // Simulate minimal initialization work
-    Sleep(1);  // 1ms simulated work
+    /* Simulate constant-time initialization work via a fixed-length busy loop.
+     * Sleep(1) was removed: on Windows the default timer resolution is 15.625ms
+     * so Sleep(1) sleeps ~15-17ms with >10% variance from OS scheduling jitter,
+     * which causes PM-HAL-009 to fail its <10% variance assertion spuriously. */
+    volatile LONGLONG sum = 0;
+    int i;
+    for (i = 0; i < 50000; i++) { sum += i; }
+    (void)sum;
     return 0;
 }
 
