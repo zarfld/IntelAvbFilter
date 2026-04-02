@@ -4,8 +4,7 @@
 
 <AssessmentScore ScoreName="IntelAvbFilter.x64.CodeAnalysis.NORUN" ScoreValue="0" ScoreUnit="" />
 
-<AssessmentScore ScoreName="IntelAvbFilter.x64.Semmle.Summary" ScoreValue="1" ScoreUnit="Types of defects seen and/or rules not run" />
-<AssessmentScore ScoreName="IntelAvbFilter.x64.Semmle.Defect.SM02320" ScoreValue="1" ScoreUnit="SEMMLE_FAILED" />
+<AssessmentScore ScoreName="IntelAvbFilter.x64.Semmle.Summary" ScoreValue="0" ScoreUnit="Types of defects seen and/or rules not run" />
 
-<AssessmentScore ScoreName="IntelAvbFilter.x64.General.Checksum" ScoreValue="kCd3dQ24hau2JB41Fz1shr2v0WDXsXccUsuWFTqQx20Dpwb8u5a96TpXO46yYQoRJbRbKQT391/cW/x2rARkzg==" ScoreUnit="DVL Checksum Value" />
+<AssessmentScore ScoreName="IntelAvbFilter.x64.General.Checksum" ScoreValue="kGwFqjV4EdNY5xj7YyeuuDo9YudH/+mjyTaHjm2KfgCXBRIRrjF8YLSjnCo1rs0N+h0c+0ql5CLIk5iuDCngJA==" ScoreUnit="DVL Checksum Value" />
 </Data>

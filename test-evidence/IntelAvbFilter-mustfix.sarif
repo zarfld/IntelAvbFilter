@@ -760,7 +760,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/spb/SpbTestTool/exe/internal.h",
+              "uri" : "external/windows_driver_samples/smartcrd/pscr/pscrnt.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 22
             }
@@ -783,7 +783,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/smartcrd/pscr/pscrnt.h",
+              "uri" : "external/windows_driver_samples/spb/SpbTestTool/exe/internal.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 23
             }
@@ -1220,7 +1220,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/audio/tests/HLK/ThirdPartyApoTests/APODeviceTest.h",
+              "uri" : "external/windows_driver_samples/avstream/avscamera/DMFT/stdafx.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 42
             }
@@ -1243,7 +1243,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/avstream/avscamera/DMFT/stdafx.h",
+              "uri" : "external/windows_driver_samples/audio/tests/HLK/ThirdPartyApoTests/APODeviceTest.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 43
             }
@@ -6303,7 +6303,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/WDI_Cmds.c",
+              "uri" : "external/windows_driver_samples/hid/vhidmini2/driver/umdf2/util.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 263
             }
@@ -6326,7 +6326,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/hid/vhidmini2/driver/umdf2/util.c",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/WDI_Cmds.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 264
             }
@@ -8120,7 +8120,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/TCPOFFLOAD_Typt.h",
+              "uri" : "external/windows_driver_samples/network/ndis/extension/samples/forward/precomp.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 342
             }
@@ -8143,7 +8143,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/ndis/extension/samples/forward/precomp.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/TCPOFFLOAD_Typt.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 343
             }
@@ -11915,7 +11915,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/P2PSvc_ActionInfo.c",
+              "uri" : "external/windows_driver_samples/gpio/samples/simgpio/simgpio.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 507
             }
@@ -11938,7 +11938,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/gpio/samples/simgpio/simgpio.c",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/P2PSvc_ActionInfo.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 508
             }
@@ -25416,7 +25416,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/general/toaster/toastDrv/kmdf/func/simple/toaster.c",
+              "uri" : "external/windows_driver_samples/filesys/miniFilter/avscan/filter/utility.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1094
             }
@@ -25439,7 +25439,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/filesys/miniFilter/avscan/filter/utility.c",
+              "uri" : "external/windows_driver_samples/general/toaster/toastDrv/kmdf/func/simple/toaster.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1095
             }
@@ -26957,7 +26957,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/EndianFree.h",
+              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/lib/HelperFunctions_IPAddress.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1161
             }
@@ -26980,7 +26980,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/lib/HelperFunctions_IPAddress.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/EndianFree.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1162
             }
@@ -32523,7 +32523,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.c",
+              "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1403
             }
@@ -32546,7 +32546,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.c",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1404
             }
@@ -32569,7 +32569,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.h",
+              "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1405
             }
@@ -32592,7 +32592,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1406
             }
@@ -41194,7 +41194,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/Dot11RAES.h",
+              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/CompletionFunctions_ProxyCallouts.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1780
             }
@@ -41217,7 +41217,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/CompletionFunctions_ProxyCallouts.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/Dot11RAES.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1781
             }
@@ -41746,7 +41746,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/NotifyFunctions_FastCallouts.h",
+              "uri" : "external/windows_driver_samples/network/trans/stmedit/sys/LwQueue.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1804
             }
@@ -41769,7 +41769,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/trans/stmedit/sys/LwQueue.h",
+              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/NotifyFunctions_FastCallouts.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1805
             }
@@ -44874,7 +44874,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/DrvLog.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalPowerSave.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1940
             }
@@ -44897,7 +44897,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalPowerSave.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/DrvLog.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 1941
             }
@@ -48370,7 +48370,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/WlanDriverEvents.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalWoWLAN.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2092
             }
@@ -48393,7 +48393,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalWoWLAN.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/WlanDriverEvents.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2093
             }
@@ -50256,7 +50256,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/novlan/precompsrc.c",
+              "uri" : "external/windows_driver_samples/hid/hclient/pnp.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2174
             }
@@ -50279,7 +50279,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/hid/hclient/pnp.c",
+              "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/novlan/precompsrc.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2175
             }
@@ -50302,7 +50302,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N6C_PlatformDef.c",
+              "uri" : "external/windows_driver_samples/hid/hclient/ecdisp.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2176
             }
@@ -50325,7 +50325,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/hid/hclient/ecdisp.c",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N6C_PlatformDef.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2177
             }
@@ -52510,7 +52510,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/SDIO/N6Sdio_dbg.h",
+              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/inc/WFPArrays.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2272
             }
@@ -52533,7 +52533,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/inc/WFPArrays.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/SDIO/N6Sdio_dbg.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2273
             }
@@ -52671,7 +52671,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/802_11_OID.h",
+              "uri" : "external/windows_driver_samples/gpio/samples/simdevice/common.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2279
             }
@@ -52694,7 +52694,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/gpio/samples/simdevice/common.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/802_11_OID.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2280
             }
@@ -53568,7 +53568,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/input/layout/fe_kbds/jpn/101/kbd101.c",
+              "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/miniport.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2318
             }
@@ -53591,7 +53591,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/miniport.c",
+              "uri" : "external/windows_driver_samples/input/layout/fe_kbds/jpn/101/kbd101.c",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2319
             }
@@ -56512,7 +56512,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/RmDef.h",
+              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/Framework_WFPSamplerCalloutDriver.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2446
             }
@@ -56535,7 +56535,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/Framework_WFPSamplerCalloutDriver.h",
+              "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/RmDef.h",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2447
             }
@@ -57294,7 +57294,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/examples/esxi_owner_example.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2480
             }
@@ -57317,7 +57317,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/esxi.py",
+              "uri" : "external/intel_mfd/examples/esxi_owner_example.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2481
             }
@@ -57386,7 +57386,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_bonding/__init__.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2484
             }
@@ -57409,7 +57409,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/esxi.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_bonding/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2485
             }
@@ -57547,7 +57547,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/__init__.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_rss/test_rss_freebsd.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2491
             }
@@ -57570,7 +57570,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_rss/test_rss_freebsd.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2492
             }
@@ -58467,7 +58467,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_virtualization/test_virtualization_linux.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mtu/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2531
             }
@@ -58490,7 +58490,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mtu/__init__.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_virtualization/test_virtualization_linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2532
             }
@@ -58697,7 +58697,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_base.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/queue/freebsd.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2541
             }
@@ -58720,7 +58720,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/queue/freebsd.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_base.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2542
             }
@@ -59318,7 +59318,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_linux.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2568
             }
@@ -59341,7 +59341,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/esxi.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2569
             }
@@ -60215,7 +60215,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/__init__.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/queue/windows.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2607
             }
@@ -60238,7 +60238,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/queue/windows.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2608
             }
@@ -60537,7 +60537,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_driver/test_driver_esxi.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/dma/const.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2621
             }
@@ -60560,7 +60560,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/dma/const.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_driver/test_driver_esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2622
             }
@@ -60721,7 +60721,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/examples/mac_feature_example.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/flow_control/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2629
             }
@@ -60744,7 +60744,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/flow_control/__init__.py",
+              "uri" : "external/intel_mfd/examples/mac_feature_example.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2630
             }
@@ -60905,7 +60905,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_interrupt/test_interrupt_esxi.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/interrupt/base.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2637
             }
@@ -60928,7 +60928,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/interrupt/base.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_interrupt/test_interrupt_esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2638
             }
@@ -61526,7 +61526,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/test_linux_utils.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/const.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2664
             }
@@ -61549,7 +61549,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/const.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/test_linux_utils.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2665
             }
@@ -61710,7 +61710,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/capture/base.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/link/linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2672
             }
@@ -61733,7 +61733,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/link/linux.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/capture/base.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2673
             }
@@ -62009,7 +62009,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_linux.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/data_structures.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2685
             }
@@ -62032,7 +62032,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/data_structures.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2686
             }
@@ -62055,7 +62055,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/esxi.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2687
             }
@@ -62469,7 +62469,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_vlan/test_vlan_windows.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_queue/test_queue_windows.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2705
             }
@@ -62492,7 +62492,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_queue/test_queue_windows.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_vlan/test_vlan_windows.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2706
             }
@@ -62584,7 +62584,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/test_route_linux.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2710
             }
@@ -62607,7 +62607,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/__init__.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/test_route_linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2711
             }
@@ -63021,7 +63021,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/examples/windows_owner_examples.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/base.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2729
             }
@@ -63044,7 +63044,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/base.py",
+              "uri" : "external/intel_mfd/examples/windows_owner_examples.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2730
             }
@@ -63642,7 +63642,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/__init__.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_ip/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2756
             }
@@ -63665,7 +63665,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_ip/__init__.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2757
             }
@@ -64424,7 +64424,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_cpu/__init__.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/arp/linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2790
             }
@@ -64447,7 +64447,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/arp/linux.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_cpu/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2791
             }
@@ -64792,7 +64792,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_freebsd.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_interrupt/test_interrupt_esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2806
             }
@@ -64815,7 +64815,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_interrupt/test_interrupt_esxi.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/freebsd.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2807
             }
@@ -64838,7 +64838,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/freebsd.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_freebsd.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2808
             }
@@ -65321,7 +65321,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/examples/linux_bonding_example.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/ans/base.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2829
             }
@@ -65344,7 +65344,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/ans/base.py",
+              "uri" : "external/intel_mfd/examples/linux_bonding_example.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2830
             }
@@ -66172,7 +66172,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_windows.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/link_aggregation/esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2866
             }
@@ -66195,7 +66195,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/link_aggregation/esxi.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/mac/freebsd.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2867
             }
@@ -66218,7 +66218,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/mac/freebsd.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_windows.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2868
             }
@@ -66701,7 +66701,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/examples/mac_refresh_example.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/numa/windows.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2889
             }
@@ -66724,7 +66724,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/numa/windows.py",
+              "uri" : "external/intel_mfd/examples/mac_refresh_example.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2890
             }
@@ -67161,7 +67161,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/test_linux_gre.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/firewall/linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2909
             }
@@ -67184,7 +67184,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/firewall/linux.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/test_linux_gre.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2910
             }
@@ -67207,7 +67207,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ddp/__init__.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/stat_checker/base.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2911
             }
@@ -67230,7 +67230,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/stat_checker/base.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ddp/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2912
             }
@@ -67828,7 +67828,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_freebsd.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/windows.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2938
             }
@@ -67851,7 +67851,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/windows.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_freebsd.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2939
             }
@@ -68357,7 +68357,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_linux.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2961
             }
@@ -68380,7 +68380,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/__init__.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2962
             }
@@ -68679,7 +68679,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_esxi.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mac/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2975
             }
@@ -68702,7 +68702,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mac/__init__.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_esxi.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2976
             }
@@ -68978,7 +68978,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/__init__.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/network_manager/freebsd.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2988
             }
@@ -69001,7 +69001,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/network_manager/freebsd.py",
+              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/linux.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2989
             }
@@ -69024,7 +69024,7 @@
         "locations" : [ {
           "physicalLocation" : {
             "artifactLocation" : {
-              "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/linux.py",
+              "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/__init__.py",
               "uriBaseId" : "%SRCROOT%",
               "index" : 2990
             }
@@ -69502,13 +69502,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/spb/SpbTestTool/exe/internal.h",
+        "uri" : "external/windows_driver_samples/smartcrd/pscr/pscrnt.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 22
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/smartcrd/pscr/pscrnt.h",
+        "uri" : "external/windows_driver_samples/spb/SpbTestTool/exe/internal.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 23
       }
@@ -69622,13 +69622,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/audio/tests/HLK/ThirdPartyApoTests/APODeviceTest.h",
+        "uri" : "external/windows_driver_samples/avstream/avscamera/DMFT/stdafx.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 42
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/avstream/avscamera/DMFT/stdafx.h",
+        "uri" : "external/windows_driver_samples/audio/tests/HLK/ThirdPartyApoTests/APODeviceTest.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 43
       }
@@ -70948,13 +70948,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/WDI_Cmds.c",
+        "uri" : "external/windows_driver_samples/hid/vhidmini2/driver/umdf2/util.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 263
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/hid/vhidmini2/driver/umdf2/util.c",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/WDI_Cmds.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 264
       }
@@ -71422,13 +71422,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/TCPOFFLOAD_Typt.h",
+        "uri" : "external/windows_driver_samples/network/ndis/extension/samples/forward/precomp.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 342
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/ndis/extension/samples/forward/precomp.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/TCPOFFLOAD_Typt.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 343
       }
@@ -72412,13 +72412,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/P2PSvc_ActionInfo.c",
+        "uri" : "external/windows_driver_samples/gpio/samples/simgpio/simgpio.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 507
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/gpio/samples/simgpio/simgpio.c",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/P2PSvc_ActionInfo.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 508
       }
@@ -75934,13 +75934,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/general/toaster/toastDrv/kmdf/func/simple/toaster.c",
+        "uri" : "external/windows_driver_samples/filesys/miniFilter/avscan/filter/utility.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1094
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/filesys/miniFilter/avscan/filter/utility.c",
+        "uri" : "external/windows_driver_samples/general/toaster/toastDrv/kmdf/func/simple/toaster.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1095
       }
@@ -76336,13 +76336,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/EndianFree.h",
+        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/lib/HelperFunctions_IPAddress.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1161
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/lib/HelperFunctions_IPAddress.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/EndianFree.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1162
       }
@@ -77788,25 +77788,25 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.c",
+        "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1403
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.c",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1404
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.h",
+        "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1405
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/gpio/samples/simgpio_i2c/simgpio_i2c.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N62C_AP.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1406
       }
@@ -80050,13 +80050,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/Dot11RAES.h",
+        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/CompletionFunctions_ProxyCallouts.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1780
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/CompletionFunctions_ProxyCallouts.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/Dot11RAES.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1781
       }
@@ -80194,13 +80194,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/NotifyFunctions_FastCallouts.h",
+        "uri" : "external/windows_driver_samples/network/trans/stmedit/sys/LwQueue.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1804
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/trans/stmedit/sys/LwQueue.h",
+        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/NotifyFunctions_FastCallouts.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1805
       }
@@ -81010,13 +81010,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/DrvLog.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalPowerSave.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1940
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalPowerSave.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/COMMON/DrvLog.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 1941
       }
@@ -81922,13 +81922,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/WlanDriverEvents.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalWoWLAN.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2092
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/HAL/HalWoWLAN.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/WlanDriverEvents.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2093
       }
@@ -82414,25 +82414,25 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/novlan/precompsrc.c",
+        "uri" : "external/windows_driver_samples/hid/hclient/pnp.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2174
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/hid/hclient/pnp.c",
+        "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/novlan/precompsrc.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2175
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N6C_PlatformDef.c",
+        "uri" : "external/windows_driver_samples/hid/hclient/ecdisp.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2176
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/hid/hclient/ecdisp.c",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/N6C_PlatformDef.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2177
       }
@@ -83002,13 +83002,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/SDIO/N6Sdio_dbg.h",
+        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/inc/WFPArrays.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2272
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/inc/WFPArrays.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/SDIO/N6Sdio_dbg.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2273
       }
@@ -83044,13 +83044,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/802_11_OID.h",
+        "uri" : "external/windows_driver_samples/gpio/samples/simdevice/common.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2279
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/gpio/samples/simdevice/common.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/PLATFORM/NDIS6/802_11_OID.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2280
       }
@@ -83278,13 +83278,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/input/layout/fe_kbds/jpn/101/kbd101.c",
+        "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/miniport.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2318
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/ndis/mux/driver/60/miniport.c",
+        "uri" : "external/windows_driver_samples/input/layout/fe_kbds/jpn/101/kbd101.c",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2319
       }
@@ -84046,13 +84046,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/RmDef.h",
+        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/Framework_WFPSamplerCalloutDriver.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2446
       }
     }, {
       "location" : {
-        "uri" : "external/windows_driver_samples/network/trans/WFPSampler/sys/Framework_WFPSamplerCalloutDriver.h",
+        "uri" : "external/windows_driver_samples/network/wlan/WDI/HEADER/RmDef.h",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2447
       }
@@ -84250,13 +84250,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/examples/esxi_owner_example.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2480
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/esxi.py",
+        "uri" : "external/intel_mfd/examples/esxi_owner_example.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2481
       }
@@ -84274,13 +84274,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_bonding/__init__.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2484
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/esxi.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_bonding/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2485
       }
@@ -84316,13 +84316,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/__init__.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_rss/test_rss_freebsd.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2491
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_rss/test_rss_freebsd.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2492
       }
@@ -84556,13 +84556,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_virtualization/test_virtualization_linux.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mtu/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2531
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mtu/__init__.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_virtualization/test_virtualization_linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2532
       }
@@ -84616,13 +84616,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_base.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/queue/freebsd.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2541
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/queue/freebsd.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_base.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2542
       }
@@ -84778,13 +84778,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_linux.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2568
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/esxi.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2569
       }
@@ -85012,13 +85012,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/__init__.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/queue/windows.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2607
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/queue/windows.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2608
       }
@@ -85096,13 +85096,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_driver/test_driver_esxi.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/dma/const.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2621
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/dma/const.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_driver/test_driver_esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2622
       }
@@ -85144,13 +85144,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/examples/mac_feature_example.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/flow_control/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2629
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/flow_control/__init__.py",
+        "uri" : "external/intel_mfd/examples/mac_feature_example.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2630
       }
@@ -85192,13 +85192,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_interrupt/test_interrupt_esxi.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/interrupt/base.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2637
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/interrupt/base.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_interrupt/test_interrupt_esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2638
       }
@@ -85354,13 +85354,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/test_linux_utils.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/const.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2664
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/const.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_utils/test_linux_utils.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2665
       }
@@ -85402,13 +85402,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/capture/base.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/link/linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2672
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/link/linux.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/capture/base.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2673
       }
@@ -85480,19 +85480,19 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_linux.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/data_structures.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2685
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/data_structures.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2686
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/ip/esxi.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2687
       }
@@ -85600,13 +85600,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_vlan/test_vlan_windows.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_queue/test_queue_windows.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2705
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_queue/test_queue_windows.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_vlan/test_vlan_windows.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2706
       }
@@ -85630,13 +85630,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/test_route_linux.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2710
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/route/__init__.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/test_route_linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2711
       }
@@ -85744,13 +85744,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/examples/windows_owner_examples.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/base.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2729
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/base.py",
+        "uri" : "external/intel_mfd/examples/windows_owner_examples.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2730
       }
@@ -85906,13 +85906,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/__init__.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_ip/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2756
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_ip/__init__.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_route/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2757
       }
@@ -86110,13 +86110,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_cpu/__init__.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/arp/linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2790
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/arp/linux.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_cpu/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2791
       }
@@ -86206,19 +86206,19 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_freebsd.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_interrupt/test_interrupt_esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2806
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_interface/test_feature/test_interrupt/test_interrupt_esxi.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/freebsd.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2807
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/freebsd.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_freebsd.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2808
       }
@@ -86344,13 +86344,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/examples/linux_bonding_example.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/ans/base.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2829
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/ans/base.py",
+        "uri" : "external/intel_mfd/examples/linux_bonding_example.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2830
       }
@@ -86566,19 +86566,19 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_windows.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/link_aggregation/esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2866
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/link_aggregation/esxi.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/mac/freebsd.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2867
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/mac/freebsd.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_windows.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2868
       }
@@ -86704,13 +86704,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/examples/mac_refresh_example.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/numa/windows.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2889
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/numa/windows.py",
+        "uri" : "external/intel_mfd/examples/mac_refresh_example.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2890
       }
@@ -86824,25 +86824,25 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/test_linux_gre.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/firewall/linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2909
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/firewall/linux.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_gre/test_linux_gre.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2910
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ddp/__init__.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/stat_checker/base.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2911
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/stat_checker/base.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ddp/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2912
       }
@@ -86998,13 +86998,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_freebsd.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/windows.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2938
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/vlan/windows.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_mac/test_mac_freebsd.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2939
       }
@@ -87136,13 +87136,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_linux.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2961
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/driver/__init__.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_ip/test_ip_linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2962
       }
@@ -87220,13 +87220,13 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_esxi.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mac/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2975
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/mac/__init__.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/test_esxi.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2976
       }
@@ -87298,19 +87298,19 @@
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/__init__.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/network_manager/freebsd.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2988
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_adapter_owner/feature/network_manager/freebsd.py",
+        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/linux.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2989
       }
     }, {
       "location" : {
-        "uri" : "external/intel_mfd/mfd_network_adapter/network_interface/feature/memory/linux.py",
+        "uri" : "external/intel_mfd/tests/unit/test_mfd_network_adapter/test_network_adapter_owner/test_feature/test_geneve/__init__.py",
         "uriBaseId" : "%SRCROOT%",
         "index" : 2990
       }
