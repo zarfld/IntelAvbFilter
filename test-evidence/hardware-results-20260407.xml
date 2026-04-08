@@ -1,0 +1,135 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated: 2026-04-08T07:45:05 -->
+<!-- Machine: 6XI226MACHINE | Run date: 20260407 | OS: 10.0.26200 -->
+<!-- NOTE: Tests require Intel NIC hardware and installed driver -->
+<testsuites name="IntelAvbFilter Hardware Tests 20260407" tests="19" failures="0" skipped="3" time="0">
+  <testsuite name="test_vv_corr_003_crossdomain" tests="7" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE">
+    <properties>
+      <property name="log_file" value="test_vv_corr_003_crossdomain.exe_20260407_212421.log"/>
+      <property name="run_date" value="20260407"/>
+      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+    </properties>
+    <testcase name="VV-CORR-003-A phc_xt in [phc_before, phc_after]" classname="test_vv_corr_003_crossdomain" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="VV-CORR-003-A bracket window [ 100┬Ás" classname="test_vv_corr_003_crossdomain" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="VV-CORR-003-A QPC data valid" classname="test_vv_corr_003_crossdomain" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="VV-CORR-003-B tx_ts in [phc_before, phc_after]" classname="test_vv_corr_003_crossdomain" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="VV-CORR-003-C phc_xt [= tx_ts" classname="test_vv_corr_003_crossdomain" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="VV-CORR-003-D RX IOCTL handler reachable" classname="test_vv_corr_003_crossdomain" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="VV-CORR-003-D RX bracket" classname="test_vv_corr_003_crossdomain" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+  </testsuite>
+  <testsuite name="test_win7_stub" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE">
+    <properties>
+      <property name="log_file" value="test_win7_stub.exe_20260407_212421.log"/>
+      <property name="run_date" value="20260407"/>
+      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+    </properties>
+    <testcase name="TC-COMPAT-001: Runtime OS major ]= 10" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-002: Build number ]= 9200" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-003: Device node accessible on current OS" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-004: IOCTL_AVB_GET_VERSION on Win10+ ABI" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-005: Windows version record" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+  </testsuite>
+  <testsuite name="test_zero_polling_overhead" tests="6" failures="0" skipped="3" errors="0" time="55" hostname="6XI226MACHINE">
+    <properties>
+      <property name="log_file" value="test_zero_polling_overhead.exe_20260407_212422.log"/>
+      <property name="run_date" value="20260407"/>
+      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+    </properties>
+    <testcase name="TC-ZP-001: Source-code audit ÔÇö no polling in ISR/DPC files" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+      <skipped/>
+    </testcase>
+    <testcase name="TC-ZP-002: EITR0 register = 0" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+      <skipped/>
+    </testcase>
+    <testcase name="TC-ZP-003: Events arrive while user thread sleeps" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-ZP-004: CPU overhead [ 0.5% during idle subscribe" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-ZP-005: WPR/WPA profiling environment present" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+      <skipped/>
+    </testcase>
+    <testcase name="TC-ZP-006: Synchronous subscribe proves interrupt-driven delivery" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+    </testcase>
+  </testsuite>
+  <testsuite name="tsauxc_toggle_test" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE">
+    <properties>
+      <property name="log_file" value="tsauxc_toggle_test.exe_20260407_212534.log"/>
+      <property name="run_date" value="20260407"/>
+    </properties>
+    <testcase name="tsauxc_toggle_test (overall)" classname="tsauxc_toggle_test" time="0"/>
+  </testsuite>
+</testsuites>
+
