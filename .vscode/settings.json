@@ -20,6 +20,11 @@
         "/^python --version$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "/^powershell\\.exe -File tools\\\\build\\\\Build-Tests\\.ps1 -Filter test_vv_corr_001_stability 2>&1 \\| Select-String -Pattern \"error\\|warning\\|Built\\|FAIL\\|test_vv_corr\" \\| Select-Object -Last 30$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        ".\\tools\\test\\Run-Tests-Elevated.ps1": true
     }
 }
