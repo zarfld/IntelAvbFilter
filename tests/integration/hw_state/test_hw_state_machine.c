@@ -19,6 +19,7 @@
 #include <winioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 // Include shared IOCTL definitions (matches working tests like test_tx_timestamp_retrieval.c)
@@ -43,6 +44,18 @@
 
 // Device path for IntelAvbFilter driver (matches working tests)
 #define DEVICE_PATH "\\\\.\\IntelAvbFilter"
+
+// Maximum adapters to enumerate
+#define MAX_ADAPTERS 8
+
+// Per-adapter info from IOCTL_AVB_ENUM_ADAPTERS
+typedef struct {
+    DWORD index;
+    WORD  vendor_id;
+    WORD  device_id;
+    ULONG capabilities;
+    ULONG status;
+} ADAPTER_INFO;
 
 // AVB_HW_STATE_QUERY structure now comes from avb_ioctl.h
 
@@ -258,13 +271,31 @@ BOOL Test_BasicStateQuery(HANDLE hDevice) {
         // Validate device ID is recognized Intel NIC
         // Common Intel Ethernet controllers: I210 (0x1533), I225 (0x15F2), I226 (0x125B), I217 (0x153A)
         BOOL recognized_device = (
-            query.device_id == 0x1533 ||  // I210
-            query.device_id == 0x15F2 ||  // I225
-            query.device_id == 0x15F3 ||  // I225-V
-            query.device_id == 0x125B ||  // I226-LM
-            query.device_id == 0x125C ||  // I226-V
+            /* I210 family (2013) */
+            query.device_id == 0x1533 ||  // I210 Copper
+            query.device_id == 0x1534 ||  // I210 Copper OEM1
+            query.device_id == 0x1535 ||  // I210 Copper IT
+            query.device_id == 0x1536 ||  // I210 Fiber
+            query.device_id == 0x1537 ||  // I210 Serdes
+            query.device_id == 0x1538 ||  // I210 SGMII
+            /* I217 family (2013) */
             query.device_id == 0x153A ||  // I217-LM
-            query.device_id == 0x153B      // I217-V
+            query.device_id == 0x153B ||  // I217-V
+            /* I219 family (2014) */
+            query.device_id == 0x15B7 ||  // I219-LM
+            query.device_id == 0x15B8 ||  // I219-V
+            query.device_id == 0x15D6 ||  // I219-LM
+            query.device_id == 0x15D7 ||  // I219-LM
+            query.device_id == 0x15D8 ||  // I219-V
+            query.device_id == 0x0DC7 ||  // I219-LM
+            query.device_id == 0x1570 ||  // I219-V
+            query.device_id == 0x15E3 ||  // I219-LM
+            /* I225 family (2019) */
+            query.device_id == 0x15F2 ||  // I225-LM
+            query.device_id == 0x15F3 ||  // I225-V
+            /* I226 family (2020) */
+            query.device_id == 0x125B ||  // I226-LM
+            query.device_id == 0x125C     // I226-V
         );
 
         if (!recognized_device) {
@@ -620,7 +651,58 @@ BOOL Test_QueryLatency(HANDLE hDevice) {
 }
 
 /**
- * Main test execution
+ * Enumerate all adapters from the driver.
+ * Returns the total count (0 if none or on error).
+ */
+static DWORD EnumerateAdapters(HANDLE hEnum, ADAPTER_INFO *out, DWORD max_count)
+{
+    DWORD count = 0;
+    for (DWORD idx = 0; idx < max_count; idx++) {
+        AVB_ENUM_REQUEST req = {0};
+        req.index = idx;
+        DWORD bytes = 0;
+        BOOL ok = DeviceIoControl(hEnum,
+            IOCTL_AVB_ENUM_ADAPTERS,
+            &req, sizeof(req),
+            &req, sizeof(req),
+            &bytes, NULL);
+        if (!ok) break;
+        if (idx == 0) {
+            count = req.count;
+            if (count == 0) break;
+        }
+        out[idx].index        = idx;
+        out[idx].vendor_id    = req.vendor_id;
+        out[idx].device_id    = req.device_id;
+        out[idx].capabilities = req.capabilities;
+        out[idx].status       = req.status;
+        if (idx + 1 >= count) break;
+    }
+    return count;
+}
+
+/**
+ * Bind a device handle to a specific adapter index.
+ * Soft failure: if IOCTL_AVB_OPEN_ADAPTER is not supported, tests still
+ * run against the default (first) adapter context.
+ */
+static BOOL BindAdapterToHandle(HANDLE h, DWORD index, WORD vendor_id, WORD device_id)
+{
+    AVB_OPEN_REQUEST req = {0};
+    req.vendor_id = vendor_id;
+    req.device_id = device_id;
+    req.index     = index;
+    DWORD bytes = 0;
+    return DeviceIoControl(h,
+        IOCTL_AVB_OPEN_ADAPTER,
+        &req, sizeof(req),
+        &req, sizeof(req),
+        &bytes, NULL);
+}
+
+/**
+ * Main test execution — runs all tests on every available adapter.
+ * Rule: tests MUST execute against all supported adapters on the machine.
  */
 int main(void) {
     printf("========================================\n");
@@ -631,43 +713,103 @@ int main(void) {
     printf("Device:  %s\n", DEVICE_PATH);
     printf("========================================\n");
 
-    // Open device
-    HANDLE hDevice = OpenDevice();
-    if (hDevice == INVALID_HANDLE_VALUE) {
+    /* ── Phase 1: Enumerate all adapters ── */
+    HANDLE hEnum = OpenDevice();
+    if (hEnum == INVALID_HANDLE_VALUE) {
         printf("\nERROR: Cannot open device. Driver not installed or not running.\n");
         printf("       Run: sc query IntelAvbFilter\n");
         return 1;
     }
 
-    printf("Device opened successfully.\n");
+    ADAPTER_INFO adapters[MAX_ADAPTERS];
+    memset(adapters, 0, sizeof(adapters));
+    DWORD adapter_count = EnumerateAdapters(hEnum, adapters, MAX_ADAPTERS);
+    CloseHandle(hEnum);
 
-    // Run all tests
-    Test_BasicStateQuery(hDevice);
-    Test_StateProgression(hDevice);
-    Test_ReservedFieldValidation(hDevice);
-    Test_CapabilitiesReporting(hDevice);
-    Test_MultipleQueryConsistency(hDevice);
-    Test_QueryLatency(hDevice);
+    if (adapter_count == 0) {
+        printf("ERROR: No adapters found via IOCTL_AVB_ENUM_ADAPTERS.\n");
+        printf("       Driver is running but not bound to any Intel NIC.\n");
+        return 1;
+    }
 
-    // Close device
-    CloseHandle(hDevice);
+    printf("\nAdapters detected: %lu — running full test suite on each.\n", adapter_count);
 
-    // Print summary
+    /* ── Phase 2: Run all tests on each adapter ── */
+    int adapters_passed = 0;
+    int adapters_failed = 0;
+
+    for (DWORD i = 0; i < adapter_count; i++) {
+        printf("\n########################################\n");
+        printf("Adapter %lu / %lu  (VID=0x%04X  DID=0x%04X)\n",
+               i + 1, adapter_count,
+               adapters[i].vendor_id, adapters[i].device_id);
+        printf("########################################\n");
+
+        int snap_total  = g_stats.total_tests;
+        int snap_passed = g_stats.passed_tests;
+        int snap_failed = g_stats.failed_tests;
+
+        HANDLE h = OpenDevice();
+        if (h == INVALID_HANDLE_VALUE) {
+            printf("  [SKIP] Cannot open device handle for adapter %lu\n", i);
+            adapters_failed++;
+            continue;
+        }
+
+        if (!BindAdapterToHandle(h, adapters[i].index,
+                                    adapters[i].vendor_id, adapters[i].device_id)) {
+            printf("  [INFO] IOCTL_AVB_OPEN_ADAPTER returned FALSE (error %lu);\n"
+                   "         tests run on default adapter context.\n",
+                   GetLastError());
+        } else {
+            printf("  [INFO] Bound to adapter %lu (VID=0x%04X DID=0x%04X)\n",
+                   i, adapters[i].vendor_id, adapters[i].device_id);
+        }
+
+        Test_BasicStateQuery(h);
+        Test_StateProgression(h);
+        Test_ReservedFieldValidation(h);
+        Test_CapabilitiesReporting(h);
+        Test_MultipleQueryConsistency(h);
+        Test_QueryLatency(h);
+
+        CloseHandle(h);
+
+        int delta_total  = g_stats.total_tests  - snap_total;
+        int delta_passed = g_stats.passed_tests - snap_passed;
+        int delta_failed = g_stats.failed_tests - snap_failed;
+
+        printf("\n  --- Adapter %lu result: %d/%d passed ---\n",
+               i + 1, delta_passed, delta_total);
+
+        if (delta_failed == 0)
+            adapters_passed++;
+        else
+            adapters_failed++;
+    }
+
+    /* ── Phase 3: Overall summary ── */
     printf("\n========================================\n");
-    printf("Test Summary\n");
+    printf("Test Summary (All %lu Adapters)\n", adapter_count);
     printf("========================================\n");
-    printf("Total Tests:  %d\n", g_stats.total_tests);
-    printf("Passed:       %d\n", g_stats.passed_tests);
-    printf("Failed:       %d\n", g_stats.failed_tests);
-    printf("Success Rate: %.1f%%\n", 
-           (g_stats.total_tests > 0) ? (100.0 * g_stats.passed_tests / g_stats.total_tests) : 0.0);
+    printf("Adapters Tested:   %lu\n", adapter_count);
+    printf("Adapters Passed:   %d\n", adapters_passed);
+    printf("Adapters Failed:   %d\n", adapters_failed);
+    printf("Total Test Points: %d\n", g_stats.total_tests);
+    printf("Passed:            %d\n", g_stats.passed_tests);
+    printf("Failed:            %d\n", g_stats.failed_tests);
+    printf("Success Rate:      %.1f%%\n",
+           (g_stats.total_tests > 0) ?
+           (100.0 * g_stats.passed_tests / g_stats.total_tests) : 0.0);
     printf("========================================\n");
 
-    if (g_stats.failed_tests > 0) {
-        printf("\nRESULT: FAILED (%d/%d tests failed)\n", g_stats.failed_tests, g_stats.total_tests);
+    if (g_stats.failed_tests > 0 || adapters_failed > 0) {
+        printf("\nRESULT: FAILED (%d/%d test points failed, %d/%lu adapters had failures)\n",
+               g_stats.failed_tests, g_stats.total_tests, adapters_failed, adapter_count);
         return 1;
     } else {
-        printf("\nRESULT: SUCCESS (All %d tests passed)\n", g_stats.total_tests);
+        printf("\nRESULT: SUCCESS (All %d test points passed across %lu adapters)\n",
+               g_stats.total_tests, adapter_count);
         return 0;
     }
 }
