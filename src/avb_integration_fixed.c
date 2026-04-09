@@ -77,6 +77,78 @@ static VOID AvbTxTimestampPollDpc(
     _In_ PVOID SystemSpecific2,
     _In_ PVOID SystemSpecific3);
 
+/**
+ * @brief Compute currently supported LWF capability subset for a context.
+ *
+ * Hardware capabilities remain published via intel_device.capabilities.
+ * This helper derives what the current LWF implementation can actively service,
+ * using device ops availability and known implementation status.
+ *
+ * @param ctx AVB device context
+ * @return Bitmask using INTEL_CAP_* flags for driver-supported features
+ */
+static ULONG AvbGetLwfSupportedCapabilities(_In_ PAVB_DEVICE_CONTEXT ctx)
+{
+    ULONG driver_caps = 0;
+    const intel_device_ops_t *ops = NULL;
+
+    if (ctx == NULL) {
+        return 0;
+    }
+
+    // Keep informational hardware traits in sync for diagnostics.
+    driver_caps |= (ctx->intel_device.capabilities & (INTEL_CAP_2_5G | INTEL_CAP_EEE));
+
+    if (ctx->hw_state < AVB_HW_BAR_MAPPED) {
+        return driver_caps;
+    }
+
+    if (ctx->intel_device.capabilities & INTEL_CAP_MMIO) {
+        driver_caps |= INTEL_CAP_MMIO;
+    }
+
+    ops = intel_get_device_ops(ctx->intel_device.device_type);
+    if (ops == NULL) {
+        return driver_caps;
+    }
+
+    if ((ctx->intel_device.capabilities & INTEL_CAP_MDIO) &&
+        ops->mdio_read != NULL && ops->mdio_write != NULL) {
+        driver_caps |= INTEL_CAP_MDIO;
+    }
+
+    if ((ctx->intel_device.capabilities & INTEL_CAP_BASIC_1588) &&
+        ops->init_ptp != NULL && ops->get_systime != NULL) {
+        driver_caps |= INTEL_CAP_BASIC_1588;
+    }
+
+    if ((ctx->intel_device.capabilities & INTEL_CAP_ENHANCED_TS) &&
+        ops->enable_packet_timestamping != NULL &&
+        ops->read_tx_timestamp != NULL &&
+        ops->read_rx_timestamp != NULL) {
+        driver_caps |= INTEL_CAP_ENHANCED_TS;
+    }
+
+    if ((ctx->intel_device.capabilities & INTEL_CAP_TSN_TAS) &&
+        ops->setup_tas != NULL) {
+        driver_caps |= INTEL_CAP_TSN_TAS;
+    }
+
+    // Frame preemption and PTM are currently pending for I226 implementation.
+    if (ctx->intel_device.device_type != INTEL_DEVICE_I226) {
+        if ((ctx->intel_device.capabilities & INTEL_CAP_TSN_FP) &&
+            ops->setup_frame_preemption != NULL) {
+            driver_caps |= INTEL_CAP_TSN_FP;
+        }
+        if ((ctx->intel_device.capabilities & INTEL_CAP_PCIe_PTM) &&
+            ops->setup_ptm != NULL) {
+            driver_caps |= INTEL_CAP_PCIe_PTM;
+        }
+    }
+
+    return driver_caps;
+}
+
 
 /* Platform ops wrapper (Intel library selects this) */
 static int PlatformInitWrapper(_In_ device_t *dev) { 
@@ -3433,11 +3505,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             q->hw_state = (avb_u32)AvbContext->hw_state; 
             q->vendor_id = AvbContext->intel_device.pci_vendor_id; 
             q->device_id = AvbContext->intel_device.pci_device_id; 
-            q->capabilities = AvbContext->intel_device.capabilities; 
+                     q->capabilities = AvbContext->intel_device.capabilities;
+                     q->reserved = AvbGetLwfSupportedCapabilities(AvbContext);
             info = sizeof(*q);
             
-            DEBUGP(DL_TRACE, "? HW_STATE: state=%s, VID=0x%04X, DID=0x%04X, caps=0x%08X\n",
-                   AvbHwStateName(q->hw_state), q->vendor_id, q->device_id, q->capabilities);
+                     DEBUGP(DL_TRACE, "? HW_STATE: state=%s, VID=0x%04X, DID=0x%04X, hw_caps=0x%08X, lwf_caps=0x%08X\n",
+                         AvbHwStateName(q->hw_state), q->vendor_id, q->device_id, q->capabilities, q->reserved);
             
             // Force BAR0 discovery attempt if hardware is still in BOUND state
             if (AvbContext->hw_state == AVB_HW_BOUND && AvbContext->hardware_context == NULL) {

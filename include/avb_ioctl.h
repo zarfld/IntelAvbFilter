@@ -395,9 +395,12 @@ typedef struct AVB_HW_STATE_QUERY {
     avb_u32 hw_state;     /* AVB_HW_STATE enum value */
     avb_u16 vendor_id;
     avb_u16 device_id;
-    avb_u32 capabilities; /* current published caps */
-    avb_u32 reserved;     /* future use */
+    avb_u32 capabilities; /* hardware capability bitmask (INTEL_CAP_*) */
+    avb_u32 reserved;     /* LWF driver-supported capability bitmask (INTEL_CAP_*) */
 } AVB_HW_STATE_QUERY, *PAVB_HW_STATE_QUERY;
+
+/* Accessor for AVB_HW_STATE_QUERY.reserved to preserve ABI size and layout. */
+#define AVB_HW_STATE_DRIVER_CAPABILITIES(_q_) ((_q_).reserved)
 
 /*==============================================================================
  * Ring Buffer Structures (Issue #13 - Timestamp Event Subscription)

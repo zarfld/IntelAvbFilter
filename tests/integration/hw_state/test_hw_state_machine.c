@@ -425,6 +425,15 @@ BOOL Test_CapabilitiesReporting(HANDLE hDevice) {
     } else if (query.capabilities != 0) {
         TEST_PASS("Capabilities reported (non-zero)");
         printf("    Capabilities bitmask: 0x%08lX\n", query.capabilities);
+
+        // New contract check: reserved carries driver-supported capability bits.
+        // If hardware is available and reports capabilities, LWF support must be
+        // explicitly reported (can be subset of hardware capabilities).
+        if (query.hw_state >= AVB_HW_BAR_MAPPED && query.reserved == 0) {
+            TEST_FAIL("Driver support capabilities exposed",
+                      "reserved field is 0 while hardware capabilities are non-zero");
+            return FALSE;
+        }
     } else {
         TEST_PASS("Capabilities field accessible");
     }
