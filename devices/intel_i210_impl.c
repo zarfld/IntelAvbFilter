@@ -208,48 +208,45 @@ static int init_ptp(device_t *dev)
  */
 static int enable_packet_timestamping(device_t *dev, int enable)
 {
-    // I210 PTP registers (IGB family)
-    const uint32_t TSYNCRXCTL = INTEL_REG_TSYNCTXCTL;
-    const uint32_t TSYNCTXCTL = INTEL_REG_TSYNCRXCTL;
-    const uint32_t RXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
-    const uint32_t TXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
-    const uint32_t TYPE_ALL = INTEL_TIMINCA_INCPERIOD;     // Bits 27-25
-    
     if (!dev || !ndis_platform_ops.mmio_write || !ndis_platform_ops.mmio_read) {
         return -1;
     }
     
     if (enable) {
-        // Enable RX packet timestamping
-        uint32_t rx_ctl = RXTT_ENABLE | TYPE_ALL;
-        if (ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, rx_ctl) != 0) {
+        // Enable RX packet timestamping: EN bit (bit 4) + TYPE_ALL (all PTP packets)
+        // SSOT constants from intel-ethernet-regs/gen/i210_regs.h
+        uint32_t rx_ctl = (uint32_t)I210_TSYNCRXCTL_SET(0, I210_TSYNCRXCTL_EN_MASK, I210_TSYNCRXCTL_EN_SHIFT, 1);
+        rx_ctl = (uint32_t)I210_TSYNCRXCTL_SET(rx_ctl, I210_TSYNCRXCTL_TYPE_MASK, I210_TSYNCRXCTL_TYPE_SHIFT, I210_TSYNCRXCTL_TYPE_ALL);
+        if (ndis_platform_ops.mmio_write(dev, I210_TSYNCRXCTL, rx_ctl) != 0) {
             DEBUGP(DL_ERROR, "I210: Failed to write TSYNCRXCTL\n");
             return -1;
         }
-        DEBUGP(DL_INFO, "I210: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
+        DEBUGP(DL_TRACE, "I210: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", rx_ctl);
         
-        // Enable TX packet timestamping
-        uint32_t tx_ctl = TXTT_ENABLE;
-        if (ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, tx_ctl) != 0) {
+        // Enable TX packet timestamping: EN bit (bit 4) only.
+        // Note: I210 (IGB family) does NOT require the Foxville RSVD bit 5 that I225/I226 needs.
+        uint32_t tx_ctl = (uint32_t)I210_TSYNCTXCTL_SET(0, I210_TSYNCTXCTL_EN_MASK, I210_TSYNCTXCTL_EN_SHIFT, 1);
+        if (ndis_platform_ops.mmio_write(dev, I210_TSYNCTXCTL, tx_ctl) != 0) {
             DEBUGP(DL_ERROR, "I210: Failed to write TSYNCTXCTL\n");
             return -1;
         }
-        DEBUGP(DL_INFO, "I210: Enabled TX packet timestamping (TSYNCTXCTL=0x%08X)\n", tx_ctl);
+        DEBUGP(DL_TRACE, "I210: TX timestamping enabled (TSYNCTXCTL=0x%08X)\n", tx_ctl);
     } else {
-        // Disable packet timestamping
+        // Disable RX packet timestamping: clear EN and TYPE fields
         uint32_t regval = 0;
-        const uint32_t TYPE_MASK = INTEL_TIMINCA_INCPERIOD;
-        
-        if (ndis_platform_ops.mmio_read(dev, TSYNCRXCTL, &regval) == 0) {
-            regval &= ~(RXTT_ENABLE | TYPE_MASK);
-            ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, regval);
+        if (ndis_platform_ops.mmio_read(dev, I210_TSYNCRXCTL, &regval) == 0) {
+            regval = (uint32_t)I210_TSYNCRXCTL_SET(regval, I210_TSYNCRXCTL_EN_MASK, I210_TSYNCRXCTL_EN_SHIFT, 0);
+            regval = (uint32_t)I210_TSYNCRXCTL_SET(regval, I210_TSYNCRXCTL_TYPE_MASK, I210_TSYNCRXCTL_TYPE_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I210_TSYNCRXCTL, regval);
         }
         
-        if (ndis_platform_ops.mmio_read(dev, TSYNCTXCTL, &regval) == 0) {
-            regval &= ~TXTT_ENABLE;
-            ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, regval);
+        // Disable TX packet timestamping: clear EN field
+        regval = 0;
+        if (ndis_platform_ops.mmio_read(dev, I210_TSYNCTXCTL, &regval) == 0) {
+            regval = (uint32_t)I210_TSYNCTXCTL_SET(regval, I210_TSYNCTXCTL_EN_MASK, I210_TSYNCTXCTL_EN_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I210_TSYNCTXCTL, regval);
         }
-        DEBUGP(DL_INFO, "I210: Disabled packet timestamping\n");
+        DEBUGP(DL_TRACE, "I210: Disabled packet timestamping\n");
     }
     
     return 0;
@@ -442,6 +439,14 @@ const intel_device_ops_t i210_ops = {
     .write_timinca = i210_write_timinca,
     .read_tsauxc = i210_read_tsauxc,
     .write_tsauxc = i210_write_tsauxc,
+    
+    // Target time / auxiliary timestamp operations - NOT SUPPORTED (I210 has no TSICR register)
+    .set_target_time = NULL,              // No TSICR/TRGTTIML registers on I210
+    .get_target_time = NULL,              // No TSICR/TRGTTIML registers on I210
+    .check_autt_flags = NULL,             // No TSAUXC AUTT flags on I210
+    .clear_autt_flag = NULL,              // No TSAUXC AUTT flags on I210
+    .get_aux_timestamp = NULL,            // No auxiliary timestamp FIFO on I210
+    .clear_aux_timestamp_flag = NULL,     // No auxiliary timestamp FIFO on I210
     
     // TSN operations - NOT SUPPORTED (I210 predates TSN hardware implementation)
     .setup_tas = NULL,                    // No TSN hardware
