@@ -105,16 +105,64 @@ static int get_info(device_t *dev, char *buffer, ULONG size)
  */
 static int init_ptp(device_t *dev)
 {
-    DEBUGP(DL_TRACE, "==>i219_init_ptp (I219-specific enhanced PTP)\n");
-    
+    uint32_t tsauxc;
+    uint32_t etqf0;
+    uint32_t etqs0;
+    int result;
+
+    DEBUGP(DL_TRACE, "==>i219_init_ptp\n");
+
     if (dev == NULL) {
         return -1;
     }
-    
-    // I219 enhanced PTP initialization via platform operations
-    // SSOT register definitions don't include PTP block for I219
-    DEBUGP(DL_INFO, "I219 enhanced PTP: Using platform PTP initialization\n");
-    
+
+    /* Step 1: Enable system time counting — clear DISABLE_SYSTIME (bit 31) in TSAUXC */
+    result = ndis_platform_ops.mmio_read(dev, I219_TSAUXC, &tsauxc);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to read TSAUXC: %d\n", result);
+        return result;
+    }
+    tsauxc &= ~INTEL_TSAUXC_DISABLE_SYSTIM;  /* bit 31 = 0 → counters run */
+    result = ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write TSAUXC: %d\n", result);
+        return result;
+    }
+    DEBUGP(DL_INFO, "I219 init_ptp: TSAUXC=0x%08X (systime enabled)\n", tsauxc);
+
+    /* Step 2: Set clock increment for 1GbE — IP=2, IV=16,000,000 (0xF42400)
+     * TIMINCA = 0x02F42400: increment period 2 cycles, value 0xF42400 sub-ns steps.
+     * Source: Intel I219 datasheet, TIMINCA register, 1GbE configuration. */
+    result = ndis_platform_ops.mmio_write(dev, I219_TIMINCA, 0x02F42400U);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write TIMINCA: %d\n", result);
+        return result;
+    }
+    DEBUGP(DL_INFO, "I219 init_ptp: TIMINCA=0x02F42400 (1GbE clock rate)\n");
+
+    /* Step 3: Configure ETQF0 to identify IEEE 1588 PTP packets (EtherType 0x88F7).
+     * Bits: QUEUE_EN(31)=1, TS_1588(30)=1, FILTER_EN(26)=1, ETYPE(15:0)=0x88F7 */
+    etqf0 = (uint32_t)I219_ETQF0_SET(0, I219_ETQF0_ETYPE_MASK, I219_ETQF0_ETYPE_SHIFT, 0x88F7ULL);
+    etqf0 = (uint32_t)I219_ETQF0_SET(etqf0, I219_ETQF0_FILTER_EN_MASK, I219_ETQF0_FILTER_EN_SHIFT, 1);
+    etqf0 = (uint32_t)I219_ETQF0_SET(etqf0, I219_ETQF0_TS_1588_MASK,   I219_ETQF0_TS_1588_SHIFT,   1);
+    etqf0 = (uint32_t)I219_ETQF0_SET(etqf0, I219_ETQF0_QUEUE_EN_MASK,  I219_ETQF0_QUEUE_EN_SHIFT,  1);
+    result = ndis_platform_ops.mmio_write(dev, I219_ETQF0, etqf0);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write ETQF0: %d\n", result);
+        return result;
+    }
+    DEBUGP(DL_INFO, "I219 init_ptp: ETQF0=0x%08X (PTP 0x88F7 filter)\n", etqf0);
+
+    /* Step 4: Configure ETQS0 to route IEEE 1588 packets to receive queue 0 */
+    etqs0 = (uint32_t)I219_ETQS0_SET(0,     I219_ETQS0_QUEUE_IDX_MASK, I219_ETQS0_QUEUE_IDX_SHIFT, 0);
+    etqs0 = (uint32_t)I219_ETQS0_SET(etqs0, I219_ETQS0_QUEUE_EN_MASK,  I219_ETQS0_QUEUE_EN_SHIFT,  1);
+    result = ndis_platform_ops.mmio_write(dev, I219_ETQS0, etqs0);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write ETQS0: %d\n", result);
+        return result;
+    }
+    DEBUGP(DL_INFO, "I219 init_ptp: ETQS0=0x%08X (queue 0 routing)\n", etqs0);
+
     DEBUGP(DL_TRACE, "<==i219_init_ptp: Success\n");
     return 0;
 }
@@ -127,31 +175,59 @@ static int init_ptp(device_t *dev)
  */
 static int set_systime(device_t *dev, uint64_t systime)
 {
+    uint32_t ts_low, ts_high, tsauxc;
+    int result;
+
     DEBUGP(DL_TRACE, "==>i219_set_systime: 0x%llx\n", systime);
-    
+
     if (dev == NULL) {
         return -1;
     }
-    
-    // Use current system time if zero
+
+    /* Ensure PTP hardware is initialized before writing the clock */
+    if (init_ptp(dev) != 0) {
+        DEBUGP(DL_ERROR, "I219 set_systime: PTP init failed — cannot set clock\n");
+        return -1;
+    }
+
     if (systime == 0) {
         LARGE_INTEGER currentTime;
         KeQuerySystemTime(&currentTime);
-        systime = currentTime.QuadPart * 100; // Convert to nanoseconds
-        DEBUGP(DL_INFO, "I219 using system time: 0x%llx\n", systime);
+        systime = currentTime.QuadPart * 100ULL;  /* 100-ns ticks → nanoseconds */
+        DEBUGP(DL_INFO, "I219 set_systime: using system time fallback: 0x%llx\n", systime);
     }
-    
-    // Initialize enhanced PTP if not already done
-    if (init_ptp(dev) != 0) {
-        DEBUGP(DL_ERROR, "I219 enhanced PTP initialization failed\n");
-        return -1;
+
+    ts_low  = (uint32_t)(systime & 0xFFFFFFFFU);
+    ts_high = (uint32_t)(systime >> 32);
+
+    /* Step 1: Freeze counters — set DISABLE_SYSTIME (bit 31) in TSAUXC */
+    result = ndis_platform_ops.mmio_read(dev, I219_TSAUXC, &tsauxc);
+    if (result != 0) return result;
+
+    result = ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc | INTEL_TSAUXC_DISABLE_SYSTIM);
+    if (result != 0) return result;
+
+    /* Step 2: Write SYSTIML (sub-nanosecond / low 32-bit of timestamp) */
+    result = ndis_platform_ops.mmio_write(dev, I219_SYSTIML, ts_low);
+    if (result != 0) {
+        /* Attempt to unfreeze on error */
+        ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
+        return result;
     }
-    
-    // I219 enhanced time setting via platform operations
-    DEBUGP(DL_INFO, "I219 enhanced time setting: 0x%llx (platform-based)\n", systime);
-    
-    DEBUGP(DL_TRACE, "<==i219_set_systime: Success (platform-based)\n");
-    return 0;
+
+    /* Step 3: Write SYSTIMH (high 32-bit of timestamp) */
+    result = ndis_platform_ops.mmio_write(dev, I219_SYSTIMH, ts_high);
+    if (result != 0) {
+        ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
+        return result;
+    }
+
+    /* Step 4: Unfreeze — clear DISABLE_SYSTIME to resume incrementing */
+    result = ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc & ~INTEL_TSAUXC_DISABLE_SYSTIM);
+
+    DEBUGP(DL_TRACE, "<==i219_set_systime: 0x%llx (SYSTIML=0x%08X SYSTIMH=0x%08X)\n",
+           systime, ts_low, ts_high);
+    return result;
 }
 
 /**
@@ -162,30 +238,41 @@ static int set_systime(device_t *dev, uint64_t systime)
  */
 static int get_systime(device_t *dev, uint64_t *systime)
 {
+    uint32_t ts_low, ts_high;
+    int result;
+
     DEBUGP(DL_TRACE, "==>i219_get_systime\n");
-    
+
     if (dev == NULL || systime == NULL) {
         return -1;
     }
-    
-    // I219 enhanced time reading via platform operations
-    if (ndis_platform_ops.read_timestamp) {
-        ULONGLONG platform_time;
-        int result = ndis_platform_ops.read_timestamp(dev, &platform_time);
-        if (result == 0) {
-            *systime = platform_time;
-            DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx (enhanced platform)\n", *systime);
-            return 0;
-        }
+
+    /* Read SYSTIML first: on IGB family, a SYSTIML read snapshots SYSTIMH to prevent
+     * a rollover mid-read.  SYSTIMH must be read immediately after. */
+    result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
+        goto fallback;
     }
-    
-    // Fallback to system time
-    LARGE_INTEGER currentTime;
-    KeQuerySystemTime(&currentTime);
-    *systime = currentTime.QuadPart * 100;
-    
-    DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx (fallback)\n", *systime);
+
+    result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
+        goto fallback;
+    }
+
+    *systime = ((uint64_t)ts_high << 32) | ts_low;
+    DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx (hardware)\n", *systime);
     return 0;
+
+fallback:
+    {
+        LARGE_INTEGER currentTime;
+        KeQuerySystemTime(&currentTime);
+        *systime = currentTime.QuadPart * 100ULL;
+        DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx (KE fallback)\n", *systime);
+        return 0;
+    }
 }
 
 /**
@@ -324,50 +411,55 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
  */
 static int enable_packet_timestamping(device_t *dev, int enable)
 {
-    // I219 PTP registers (IGB family)
-    const uint32_t TSYNCRXCTL = INTEL_REG_TSYNCTXCTL;
-    const uint32_t TSYNCTXCTL = INTEL_REG_TSYNCRXCTL;
-    const uint32_t RXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
-    const uint32_t TXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
-    const uint32_t TYPE_ALL = INTEL_TIMINCA_INCPERIOD;     // Bits 27-25
-    
     if (!dev || !ndis_platform_ops.mmio_write || !ndis_platform_ops.mmio_read) {
         return -1;
     }
-    
+
     if (enable) {
-        // Enable RX packet timestamping
-        uint32_t rx_ctl = RXTT_ENABLE | TYPE_ALL;
-        if (ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, rx_ctl) != 0) {
+        /* Enable RX packet timestamping.
+         * TSYNCRXCTL at 0xB620 (IGB PTP block base 0xB600 + 0x20).
+         * EN  = bit 4 (0x10): must be 1 to enable RX timestamping.
+         * TYPE = bits 3:1; ALL_PKTS = 4 → field value 4, stored at shift=1: 4<<1=0x08.
+         * Combined: 0x10 | 0x08 = 0x18. */
+        uint32_t rx_ctl = (uint32_t)I219_TSYNCRXCTL_SET(0,
+                              I219_TSYNCRXCTL_EN_MASK, I219_TSYNCRXCTL_EN_SHIFT, 1);
+        rx_ctl = (uint32_t)I219_TSYNCRXCTL_SET(rx_ctl,
+                              I219_TSYNCRXCTL_TYPE_MASK, I219_TSYNCRXCTL_TYPE_SHIFT,
+                              I219_TSYNCRXCTL_TYPE_ALL_PKTS);
+        if (ndis_platform_ops.mmio_write(dev, I219_TSYNCRXCTL, rx_ctl) != 0) {
             DEBUGP(DL_ERROR, "I219: Failed to write TSYNCRXCTL\n");
             return -1;
         }
-        DEBUGP(DL_INFO, "I219: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
-        
-        // Enable TX packet timestamping
-        uint32_t tx_ctl = TXTT_ENABLE;
-        if (ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, tx_ctl) != 0) {
+        DEBUGP(DL_INFO, "I219: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", rx_ctl);
+
+        /* Enable TX packet timestamping.
+         * TSYNCTXCTL at 0xB614 (IGB PTP block base 0xB600 + 0x14).
+         * EN = bit 4 (0x10): hardware latches SYSTIM on next 1588-flagged TX descriptor. */
+        uint32_t tx_ctl = (uint32_t)I219_TSYNCTXCTL_SET(0,
+                              I219_TSYNCTXCTL_EN_MASK, I219_TSYNCTXCTL_EN_SHIFT, 1);
+        if (ndis_platform_ops.mmio_write(dev, I219_TSYNCTXCTL, tx_ctl) != 0) {
             DEBUGP(DL_ERROR, "I219: Failed to write TSYNCTXCTL\n");
             return -1;
         }
-        DEBUGP(DL_INFO, "I219: Enabled TX packet timestamping (TSYNCTXCTL=0x%08X)\n", tx_ctl);
+        DEBUGP(DL_INFO, "I219: TX timestamping enabled (TSYNCTXCTL=0x%08X)\n", tx_ctl);
     } else {
-        // Disable packet timestamping
         uint32_t regval = 0;
-        const uint32_t TYPE_MASK = INTEL_TIMINCA_INCPERIOD;
-        
-        if (ndis_platform_ops.mmio_read(dev, TSYNCRXCTL, &regval) == 0) {
-            regval &= ~(RXTT_ENABLE | TYPE_MASK);
-            ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, regval);
+
+        if (ndis_platform_ops.mmio_read(dev, I219_TSYNCRXCTL, &regval) == 0) {
+            regval = (uint32_t)I219_TSYNCRXCTL_SET(regval,
+                          I219_TSYNCRXCTL_EN_MASK, I219_TSYNCRXCTL_EN_SHIFT, 0);
+            regval = (uint32_t)I219_TSYNCRXCTL_SET(regval,
+                          I219_TSYNCRXCTL_TYPE_MASK, I219_TSYNCRXCTL_TYPE_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I219_TSYNCRXCTL, regval);
         }
-        
-        if (ndis_platform_ops.mmio_read(dev, TSYNCTXCTL, &regval) == 0) {
-            regval &= ~TXTT_ENABLE;
-            ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, regval);
+        if (ndis_platform_ops.mmio_read(dev, I219_TSYNCTXCTL, &regval) == 0) {
+            regval = (uint32_t)I219_TSYNCTXCTL_SET(regval,
+                          I219_TSYNCTXCTL_EN_MASK, I219_TSYNCTXCTL_EN_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I219_TSYNCTXCTL, regval);
         }
-        DEBUGP(DL_INFO, "I219: Disabled packet timestamping\n");
+        DEBUGP(DL_INFO, "I219: Packet timestamping disabled\n");
     }
-    
+
     return 0;
 }
 
@@ -533,37 +625,53 @@ static int i219_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
 
 /**
  * @brief I219 device operations structure using clean generic function names
+ *
+ * NULL op rationale — I219 hardware does NOT implement the following registers;
+ * setting these ops to NULL is architecturally correct, not a stub:
+ *   set_target_time / get_target_time  → I219 lacks TRGTTIML0/H0 and TRGTTIML1/H1
+ *   check_autt_flags / clear_autt_flag → I219 lacks TSICR (no aux-timestamp interrupt status)
+ *   get_aux_timestamp / clear_aux_timestamp_flag → I219 lacks AUXSTMPL0/H0, AUXSTMPL1/H1
+ *   setup_tas / setup_frame_preemption / setup_ptm → I219 lacks TSN hardware (no TAS/FP/PTM)
+ * Callers must guard with ops->fn != NULL before invoking any of these.
  */
 const intel_device_ops_t i219_ops = {
     .device_name = "Intel I219 Gigabit Ethernet - Enhanced PTP",
     .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO,
-    
-    // Basic operations - clean generic names
-    .init = init,
+
+    /* Basic operations */
+    .init    = init,
     .cleanup = cleanup,
     .get_info = get_info,
-    
-    // PTP operations - enhanced capabilities
-    .set_systime = set_systime,
-    .get_systime = get_systime,
-    .init_ptp = init_ptp,
+
+    /* PTP clock operations */
+    .set_systime  = set_systime,
+    .get_systime  = get_systime,
+    .init_ptp     = init_ptp,
     .enable_packet_timestamping = enable_packet_timestamping,
-    
-    // PTP register access operations (HAL compliance - no magic numbers in src/)
-    .read_tx_timestamp = i219_read_tx_timestamp,
-    .read_rx_timestamp = i219_read_rx_timestamp,
+
+    /* PTP register accessors (HAL compliance — no magic numbers in src/) */
+    .read_tx_timestamp      = i219_read_tx_timestamp,
+    .read_rx_timestamp      = i219_read_rx_timestamp,
     .poll_tx_timestamp_fifo = i219_poll_tx_timestamp_fifo,
-    .read_timinca = i219_read_timinca,
+    .read_timinca  = i219_read_timinca,
     .write_timinca = i219_write_timinca,
-    .read_tsauxc = i219_read_tsauxc,
-    .write_tsauxc = i219_write_tsauxc,
-    
-    // TSN operations - I219 doesn't support TSN
-    .setup_tas = NULL,
-    .setup_frame_preemption = NULL,
-    .setup_ptm = NULL,
-    
-    // MDIO operations - I219 has excellent MDIO support using SSOT
-    .mdio_read = mdio_read,
+    .read_tsauxc   = i219_read_tsauxc,
+    .write_tsauxc  = i219_write_tsauxc,
+
+    /* Target time / aux timestamp — NULL: I219 hardware lacks TRGTTIML, TSICR, AUXSTMPL */
+    .set_target_time             = NULL,
+    .get_target_time             = NULL,
+    .check_autt_flags            = NULL,
+    .clear_autt_flag             = NULL,
+    .get_aux_timestamp           = NULL,
+    .clear_aux_timestamp_flag    = NULL,
+
+    /* TSN features — NULL: I219 is pre-TSN hardware (no TAS/FP/PTM registers) */
+    .setup_tas               = NULL,
+    .setup_frame_preemption  = NULL,
+    .setup_ptm               = NULL,
+
+    /* MDIO operations — I219 uses SSOT MDIC register definitions */
+    .mdio_read  = mdio_read,
     .mdio_write = mdio_write
 };
