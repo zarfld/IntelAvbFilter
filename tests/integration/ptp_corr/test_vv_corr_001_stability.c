@@ -15,7 +15,8 @@
  *     --hours       : run duration in hours (default 24)
  *     --minutes     : run duration in minutes (overrides --hours; useful for quick smoke tests)
  *     --interval-sec: sample interval in seconds (default 10)
- *     --adapter     : adapter index (default 0); use -1 for all adapters
+ *     --adapter     : adapter index (-1 = all capable adapters, default); use 0,1,… for a single adapter
+ *                      Adapters without INTEL_CAP_BASIC_1588 are automatically skipped in all-adapter mode.
  *
  * CSV output format (written to stdout AND logs/vv_corr_001_<timestamp>.csv):
  *   elapsed_s,adapter,phc_ns,delta_ns
@@ -52,7 +53,7 @@ typedef ULONG NDIS_STATUS;
  * -------------------------------------------------------------------------*/
 #define DEFAULT_HOURS        24
 #define DEFAULT_INTERVAL_SEC 10
-#define DEFAULT_ADAPTER      0    /* -1 = all */
+#define DEFAULT_ADAPTER      -1   /* default: all adapters; override with --adapter N for a single adapter */
 
 /* -------------------------------------------------------------------------
  * Pass/fail thresholds (per TP-HARNESS-001 Track E)
@@ -136,7 +137,43 @@ static int enumerate_adapters(HANDLE hDev, uint32_t *out_indices, int max_count)
         DWORD br = 0;
         BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_ENUM_ADAPTERS,
                                   &r, sizeof(r), &r, sizeof(r), &br, NULL);
-        if (!ok || r.status != NDIS_STATUS_SUCCESS) break;
+        if (!ok || r.status != NDIS_STATUS_SUCCESS) break;  /* no more adapters */
+
+        /* Skip adapters that lack IEEE 1588 PHC capability — they cannot
+         * participate in the correlation stability test. */
+        if (!(r.capabilities & INTEL_CAP_BASIC_1588)) {
+            printf("  [SKIP] Adapter %d: capabilities=0x%08X — no INTEL_CAP_BASIC_1588, skipping\n",
+                   idx, (unsigned)r.capabilities);
+            fflush(stdout);
+            continue;
+        }
+
+        /* Open (select) this adapter so the driver initialises its PTP clock
+         * (TSAUXC bit 31 cleared, TIMINCA programmed).  Per avb_ioctl.md:
+         * "Forces hardware initialization if target adapter not yet initialized".
+         * Without this call IOCTL_AVB_TEST_SEND_PTP fails because SYSTIM is
+         * never started.
+         *
+         * NOTE: open_r.index is the per-DID instance index (0 = first adapter
+         * with this device_id), NOT the global enumeration index.  Since all
+         * adapters on this system have distinct DIDs each instance index is 0. */
+        AVB_OPEN_REQUEST open_r = {0};
+        open_r.vendor_id = r.vendor_id;
+        open_r.device_id = r.device_id;
+        open_r.index     = 0;   /* per-DID instance index, not global index */
+        BOOL open_ok = DeviceIoControl(hDev, IOCTL_AVB_OPEN_ADAPTER,
+                                       &open_r, sizeof(open_r),
+                                       &open_r, sizeof(open_r), &br, NULL);
+        if (!open_ok || open_r.status != NDIS_STATUS_SUCCESS) {
+            printf("  [WARN] Adapter %d: IOCTL_AVB_OPEN_ADAPTER failed (ok=%d status=0x%08X) — skipping\n",
+                   idx, (int)open_ok, (unsigned)open_r.status);
+            fflush(stdout);
+            continue;
+        }
+        printf("  [INIT] Adapter %d (VID=0x%04X DID=0x%04X): PTP clock initialized via OPEN_ADAPTER\n",
+               idx, (unsigned)r.vendor_id, (unsigned)r.device_id);
+        fflush(stdout);
+
         out_indices[n++] = (uint32_t)idx;
     }
     return n;
@@ -214,6 +251,34 @@ static BOOL WINAPI ctrl_handler(DWORD type)
 }
 
 /* -------------------------------------------------------------------------
+ * Per-adapter sample worker — executed in parallel, one thread per adapter
+ * -------------------------------------------------------------------------*/
+typedef struct {
+    HANDLE   hDev;
+    uint32_t adapter_idx;
+    uint32_t seq;
+    uint32_t elapsed_s;
+    /* outputs */
+    bool     sample_ok;   /* sample_delta() succeeded */
+    bool     phc_ok;      /* read_phc() succeeded (fallback when sample_ok is false) */
+    int64_t  delta_ns;
+    uint64_t phc_ns;
+} AdapterWorkItem;
+
+static DWORD WINAPI adapter_sample_thread(LPVOID param)
+{
+    AdapterWorkItem *w = (AdapterWorkItem *)param;
+    w->sample_ok = sample_delta(w->hDev, w->adapter_idx, w->seq, &w->delta_ns, &w->phc_ns);
+    if (!w->sample_ok) {
+        w->phc_ok   = read_phc(w->hDev, w->adapter_idx, &w->phc_ns);
+        w->delta_ns = 0;
+    } else {
+        w->phc_ok = true;
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
  * main
  * -------------------------------------------------------------------------*/
 int main(int argc, char *argv[])
@@ -261,7 +326,7 @@ int main(int argc, char *argv[])
            (int)(run_total_secs / 3600),
            (int)((run_total_secs % 3600) / 60));
     printf("  Sample interval: %d seconds\n", interval_sec);
-    printf("  Adapter arg   : %s\n", adapter_arg == -1 ? "all" : "single (specified)");
+    printf("  Adapter arg   : %s\n", adapter_arg == -1 ? "all adapters (enumerate)" : "single");
     printf("  CSV output    : %s\n", csv_path);
     printf("  Thresholds     : mean < %llu ns, stddev < %.0f ns, no outlier >= %llu ns\n",
            (unsigned long long)MEAN_THRESHOLD_NS,
@@ -270,7 +335,7 @@ int main(int argc, char *argv[])
     printf("========================================================================\n");
     fflush(stdout);
 
-    /* --- Open device ----------------------------------------------------- */
+    /* --- Open enumeration handle ----------------------------------------- */
     HANDLE hDev = CreateFileW(
         DEVICE_PATH_W,
         GENERIC_READ | GENERIC_WRITE,
@@ -289,13 +354,97 @@ int main(int argc, char *argv[])
     if (adapter_arg == -1) {
         n_adapters = enumerate_adapters(hDev, all_adapters, MAX_ADAPTERS);
         if (n_adapters == 0) {
-            fprintf(stderr, "WARN: No HW-timestamp-capable adapters found; using adapter 0\n");
-            all_adapters[0] = 0;
-            n_adapters = 1;
+            printf("  [SKIP] No HW-timestamp-capable adapters found (INTEL_CAP_BASIC_1588 required).\n");
+            printf("         Run with --adapter N to target a specific adapter index.\n");
+            printf("[SKIP] VV-CORR-001 skipped: no capable adapters\n");
+            fflush(stdout);
+            CloseHandle(hDev);
+            return 0;  /* SKIP, not failure */
         }
     } else {
         n_adapters = 1;
         all_adapters[0] = (uint32_t)adapter_arg;
+    }
+    /* enumeration handle no longer needed */
+    CloseHandle(hDev);
+    hDev = INVALID_HANDLE_VALUE;
+
+    /* --- Open a dedicated handle per adapter so OPEN_ADAPTER binds its    ---
+     * --- FsContext to that FileObject and every subsequent IOCTL on the   ---
+     * --- same handle routes to the correct adapter.  Using a shared       ---
+     * --- handle causes the last OPEN_ADAPTER call to overwrite FsContext  ---
+     * --- for all callers on that handle.                                  ---
+     * -------------------------------------------------------------------------*/
+    HANDLE adp_handles[MAX_ADAPTERS];
+    for (int ai = 0; ai < n_adapters; ai++) adp_handles[ai] = INVALID_HANDLE_VALUE;
+
+    /* We need the VID/DID from the earlier enumeration to call OPEN_ADAPTER.
+     * Re-enumerate using a fresh handle (cheap — only scans once per adapter). */
+    HANDLE hEnum2 = CreateFileW(DEVICE_PATH_W, GENERIC_READ | GENERIC_WRITE,
+                                0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hEnum2 == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "FATAL: Cannot re-open device for OPEN_ADAPTER: error=%lu\n",
+                GetLastError());
+        return 1;
+    }
+
+    int ai_valid = 0;
+    for (int ai = 0; ai < n_adapters; ai++) {
+        uint32_t adp_idx = all_adapters[ai];
+
+        /* Re-fetch caps/ids for this adapter index */
+        AVB_ENUM_REQUEST er = {0};
+        er.index = (avb_u32)adp_idx;
+        DWORD ebr = 0;
+        BOOL eok = DeviceIoControl(hEnum2, IOCTL_AVB_ENUM_ADAPTERS,
+                                   &er, sizeof(er), &er, sizeof(er), &ebr, NULL);
+        if (!eok || er.status != NDIS_STATUS_SUCCESS) {
+            printf("  [WARN] Adapter %u: re-enum failed — skipping\n", adp_idx);
+            fflush(stdout);
+            continue;
+        }
+
+        /* Open a dedicated handle for this adapter */
+        HANDLE h = CreateFileW(DEVICE_PATH_W, GENERIC_READ | GENERIC_WRITE,
+                               0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            printf("  [WARN] Adapter %u: CreateFileW for dedicated handle failed (error=%lu) — skipping\n",
+                   adp_idx, GetLastError());
+            fflush(stdout);
+            continue;
+        }
+
+        /* Bind this handle to the adapter via OPEN_ADAPTER */
+        AVB_OPEN_REQUEST op = {0};
+        op.vendor_id = er.vendor_id;
+        op.device_id = er.device_id;
+        op.index     = 0;   /* per-DID instance index */
+        DWORD obr = 0;
+        BOOL ook = DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                                   &op, sizeof(op), &op, sizeof(op), &obr, NULL);
+        if (!ook || op.status != NDIS_STATUS_SUCCESS) {
+            printf("  [WARN] Adapter %u: OPEN_ADAPTER on dedicated handle failed (ok=%d status=0x%08X) — skipping\n",
+                   adp_idx, (int)ook, (unsigned)op.status);
+            fflush(stdout);
+            CloseHandle(h);
+            continue;
+        }
+        printf("  [BIND] Adapter %u (VID=0x%04X DID=0x%04X): dedicated handle bound via OPEN_ADAPTER\n",
+               adp_idx, (unsigned)er.vendor_id, (unsigned)er.device_id);
+        fflush(stdout);
+
+        adp_handles[ai_valid] = h;
+        all_adapters[ai_valid] = adp_idx;
+        ai_valid++;
+    }
+    CloseHandle(hEnum2);
+    n_adapters = ai_valid;
+
+    if (n_adapters == 0) {
+        printf("  [SKIP] No adapters could be bound via OPEN_ADAPTER.\n");
+        printf("[SKIP] VV-CORR-001 skipped: no adapters available\n");
+        fflush(stdout);
+        return 0;
     }
     printf("  Monitoring %d adapter(s):", n_adapters);
     for (int i = 0; i < n_adapters; i++) printf(" %u", all_adapters[i]);
@@ -314,7 +463,7 @@ int main(int argc, char *argv[])
         if (csv) {
             printf("  NOTE: Using local CSV path: %s\n", alt_path);
         } else {
-            fprintf(stderr, "WARN: Cannot create CSV log — proceeding without file output\n");
+            printf("  NOTE: Cannot create CSV log — proceeding without file output\n");
         }
     }
     if (csv) write_csv_header(csv);
@@ -343,34 +492,57 @@ int main(int argc, char *argv[])
 
         if (elapsed_ticks >= total_ticks) break;
 
-        /* Sample each adapter */
+        /* Sample all adapters in parallel — one thread per adapter so the
+         * interval timer is not stretched by N sequential IOCTL round-trips. */
+        AdapterWorkItem work[MAX_ADAPTERS];
+        HANDLE          threads[MAX_ADAPTERS];
+        for (int ai = 0; ai < n_adapters; ai++) {
+            work[ai].hDev        = adp_handles[ai];  /* per-adapter handle, bound to this adapter */
+            work[ai].adapter_idx = all_adapters[ai];
+            work[ai].seq         = seq++;
+            work[ai].elapsed_s   = elapsed_s;
+            work[ai].sample_ok   = false;
+            work[ai].phc_ok      = false;
+            work[ai].delta_ns    = 0;
+            work[ai].phc_ns      = 0;
+            threads[ai] = CreateThread(NULL, 0, adapter_sample_thread, &work[ai], 0, NULL);
+        }
+
+        /* Wait for all adapter threads before processing results */
+        if (n_adapters > 0)
+            WaitForMultipleObjects((DWORD)n_adapters, threads, TRUE, INFINITE);
+        for (int ai = 0; ai < n_adapters; ai++)
+            CloseHandle(threads[ai]);
+
+        /* Collect and store results */
         for (int ai = 0; ai < n_adapters; ai++) {
             uint32_t adp = all_adapters[ai];
-            int64_t  delta_ns = 0;
-            uint64_t phc_ns   = 0;
-
-            bool ok = sample_delta(hDev, adp, seq++, &delta_ns, &phc_ns);
-            if (!ok) {
-                /* Fallback: record PHC alone with delta=0 so CSV stays aligned */
-                if (!read_phc(hDev, adp, &phc_ns)) {
-                    phc_failures++;
-                    continue;
+            if (!work[ai].sample_ok && !work[ai].phc_ok) {
+                phc_failures++;
+                if (phc_failures <= 3 || phc_failures % 60 == 0) {
+                    printf(
+                        "  [WARN] adp=%u  both IOCTL_AVB_TEST_SEND_PTP and"
+                        " IOCTL_AVB_GET_TIMESTAMP failed"
+                        " (phc_failures=%zu, tx_failures=%zu, elapsed=%us)"
+                        " -- no sample written\n",
+                        adp, phc_failures, tx_failures, elapsed_s);
+                    fflush(stdout);
                 }
-                tx_failures++;
-                delta_ns = 0;
+                continue;
             }
+            if (!work[ai].sample_ok) tx_failures++;
 
             /* --- Store sample ------------------------------------------- */
             if (s_sample_count < MAX_SAMPLES) {
                 s_samples[s_sample_count].elapsed_s = elapsed_s;
                 s_samples[s_sample_count].adapter   = adp;
-                s_samples[s_sample_count].phc_ns    = phc_ns;
-                s_samples[s_sample_count].delta_ns  = delta_ns;
+                s_samples[s_sample_count].phc_ns    = work[ai].phc_ns;
+                s_samples[s_sample_count].delta_ns  = work[ai].delta_ns;
                 if (csv) write_csv_row(csv, &s_samples[s_sample_count]);
                 s_sample_count++;
             }
 
-            /* --- Progress print every 10 samples to avoid log spam ------ */
+            /* --- Progress print every 10 iterations to avoid log spam --- */
             if (iteration % 10 == 0) {
                 uint32_t remaining_s = (uint32_t)((double)(total_ticks - elapsed_ticks)
                                                     / (double)freq_qpc.QuadPart);
@@ -378,8 +550,8 @@ int main(int argc, char *argv[])
                        elapsed_s,
                        remaining_s / 3600, (remaining_s % 3600) / 60,
                        adp,
-                       (unsigned long long)phc_ns,
-                       (long long)delta_ns);
+                       (unsigned long long)work[ai].phc_ns,
+                       (long long)work[ai].delta_ns);
                 fflush(stdout);
             }
         }
@@ -395,7 +567,10 @@ int main(int argc, char *argv[])
     }
 
     if (csv) fclose(csv);
-    CloseHandle(hDev);
+    for (int ai = 0; ai < n_adapters; ai++) {
+        if (adp_handles[ai] != INVALID_HANDLE_VALUE)
+            CloseHandle(adp_handles[ai]);
+    }
 
     /* --- Final report ---------------------------------------------------- */
     printf("\n========================================================================\n");
