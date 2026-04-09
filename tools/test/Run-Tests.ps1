@@ -316,7 +316,12 @@ if (-not $SkipHardwareCheck) {
                         $deviceName = switch ($did) {
                             "1533" { "Intel I210 Gigabit Network Connection" }
                             "153A" { "Intel I217-LM Gigabit Network Connection" }
+                            "15BB" { "Intel I219-LM Gigabit Network Connection" }
+                            "15BC" { "Intel I219-V Gigabit Network Connection" }
+                            "15BD" { "Intel I219-LM Gigabit Network Connection" }
+                            "15BE" { "Intel I219-V Gigabit Network Connection" }
                             "15F3" { "Intel I219-LM Gigabit Network Connection" }
+                            "15F4" { "Intel I219-V Gigabit Network Connection" }
                             "125B" { "Intel I226-V 2.5GbE Network Connection" }
                             "125C" { "Intel I226-LM 2.5GbE Network Connection" }
                             "1521" { "Intel I350 Gigabit Network Connection" }
@@ -325,7 +330,7 @@ if (-not $SkipHardwareCheck) {
                         Write-Host "    Device: $deviceName" -ForegroundColor Cyan
                         
                         # Check if supported
-                        $supported = $did -in @("1533", "153A", "15F3", "125B", "125C", "1521")
+                        $supported = $did -in @("1533", "153A", "15BB", "15BC", "15BD", "15BE", "15F3", "15F4", "125B", "125C", "1521")
                         if ($supported) {
                             Write-Success "    [SUPPORTED] This device is supported by the driver"
                         } else {
