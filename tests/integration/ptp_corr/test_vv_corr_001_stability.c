@@ -433,6 +433,30 @@ int main(int argc, char *argv[])
                adp_idx, (unsigned)er.vendor_id, (unsigned)er.device_id);
         fflush(stdout);
 
+        /* Probe hw_state on the bound handle to confirm PTP readiness */
+        {
+            AVB_HW_STATE_QUERY hsq = {0};
+            DWORD hbr = 0;
+            BOOL hok = DeviceIoControl(h, IOCTL_AVB_GET_HW_STATE,
+                                       &hsq, sizeof(hsq), &hsq, sizeof(hsq), &hbr, NULL);
+            if (!hok) {
+                printf("  [DIAG] Adapter %u: GET_HW_STATE failed (error=%lu) — PTP state unknown\n",
+                       adp_idx, GetLastError());
+            } else {
+                /* AVB_HW_PTP_READY == 3 as per avb_integration_fixed.c state machine */
+                const char *state_name =
+                    (hsq.hw_state == 0) ? "UNINITIALIZED" :
+                    (hsq.hw_state == 1) ? "BAR_MAPPED" :
+                    (hsq.hw_state == 2) ? "PHY_READY" :
+                    (hsq.hw_state == 3) ? "PTP_READY" :
+                    (hsq.hw_state == 4) ? "FULLY_OPERATIONAL" : "UNKNOWN";
+                printf("  [DIAG] Adapter %u: hw_state=%u (%s)  caps=0x%08X%s\n",
+                       adp_idx, (unsigned)hsq.hw_state, state_name, (unsigned)hsq.capabilities,
+                       (hsq.hw_state < 3) ? "  <-- PTP NOT READY: TEST_SEND_PTP and GET_TIMESTAMP will fail" : "");
+            }
+            fflush(stdout);
+        }
+
         adp_handles[ai_valid] = h;
         all_adapters[ai_valid] = adp_idx;
         ai_valid++;
@@ -448,7 +472,42 @@ int main(int argc, char *argv[])
     }
     printf("  Monitoring %d adapter(s):", n_adapters);
     for (int i = 0; i < n_adapters; i++) printf(" %u", all_adapters[i]);
-    printf("\n\n");
+    printf("\n");
+
+    /* --- One-shot IOCTL probe per adapter (diagnose before sampling loop) - */
+    for (int ai = 0; ai < n_adapters; ai++) {
+        uint32_t adp_idx = all_adapters[ai];
+        HANDLE   h       = adp_handles[ai];
+
+        /* Probe TEST_SEND_PTP */
+        {
+            AVB_TEST_SEND_PTP_REQUEST tsp = {0};
+            tsp.adapter_index = adp_idx;
+            tsp.sequence_id   = 0xDEAD;
+            DWORD br = 0;
+            BOOL ok = DeviceIoControl(h, IOCTL_AVB_TEST_SEND_PTP,
+                                      &tsp, sizeof(tsp), &tsp, sizeof(tsp), &br, NULL);
+            DWORD err = GetLastError();
+            printf("  [PROBE] adp=%u  TEST_SEND_PTP: ok=%d winErr=0x%08lX ndis=0x%08X pktsSent=%u ts=%llu\n",
+                   adp_idx, (int)ok, err, (unsigned)tsp.status,
+                   (unsigned)tsp.packets_sent, (unsigned long long)tsp.timestamp_ns);
+        }
+
+        /* Probe GET_TIMESTAMP */
+        {
+            AVB_TIMESTAMP_REQUEST tsr = {0};
+            tsr.clock_id = adp_idx;
+            DWORD br = 0;
+            BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                                      &tsr, sizeof(tsr), &tsr, sizeof(tsr), &br, NULL);
+            DWORD err = GetLastError();
+            printf("  [PROBE] adp=%u  GET_TIMESTAMP:  ok=%d winErr=0x%08lX ndis=0x%08X ts=%llu\n",
+                   adp_idx, (int)ok, err, (unsigned)tsr.status,
+                   (unsigned long long)tsr.timestamp);
+        }
+        fflush(stdout);
+    }
+    printf("\n");
 
     /* --- Open CSV -------------------------------------------------------- */
     FILE *csv = fopen(csv_path, "w");
