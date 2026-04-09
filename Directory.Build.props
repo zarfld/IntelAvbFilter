@@ -1,5 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
+  <!--
+    WDK 10.0.22621.0 ships Microsoft.DriverKit.Build.Tasks.17.0.dll only (built for VS 2022).
+    VS 2026 (version 18.x) sets VisualStudioVersion=18.0, causing MSB4062 because the
+    18.0.dll does not exist.  Override to 17.0 so WindowsDriver.common.targets resolves the
+    DLL correctly.  This does NOT affect the C++ compiler toolset (v143) used for compilation.
+    Remove this override once a WDK with native VS 2026 support is released.
+  -->
+  <PropertyGroup Condition="'$(VisualStudioVersion)' >= '18.0'">
+    <VisualStudioVersion>17.0</VisualStudioVersion>
+  </PropertyGroup>
+
+  <!--
+    TEMPORARY DEV WORKAROUND - remove once MSVC v143 Spectre-mitigated libs are installed.
+    The WDK WindowsKernelModeDriver10.0 toolset forces SpectreMitigation=Spectre via
+    Driver_SpectreMitigation. Production kernel drivers MUST have Spectre mitigations.
+    Install via VS Installer Individual Components:
+      "MSVC v143 - VS 2022 C++ x64/x86 Spectre-mitigated libs"
+      ComponentId: Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre
+    Then delete this PropertyGroup.
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' or '$(Configuration)' == 'Release'">
+    <Driver_SpectreMitigation Condition="'$(Driver_SpectreMitigation)' == ''">false</Driver_SpectreMitigation>
+  </PropertyGroup>
+
   <!-- Redirect build output to build\ directory instead of x64\ -->
   <PropertyGroup>
     <OutDir>$(MSBuildProjectDirectory)\build\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>

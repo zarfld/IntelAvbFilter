@@ -8,6 +8,18 @@
             "approve": true,
             "matchCommandLine": true
         },
-        "Get-Item": true
+        "Get-Item": true,
+        "/^cd /d \"c:\\\\Users\\\\User\\\\IntelAvbFilter\\.worktrees\\\\copilot-worktree-2026-04-08T15-03-26\\\\\\.github\\\\skills\\\\notebooklm-experts\" ; cmd /c \"\\.\\\\run\\.bat ask_question\\.py --question \"\"In the Intel I210 datasheet or IGB driver, what are the register offsets for TSYNCRXCTL and TSYNCTXCTL\\? What is the correct bit to set to ENABLE RX timestamping \\(RXTT_ENABLE\\) and what bit value enables TX timestamping \\(TXTT_ENABLE\\)\\?\"\"\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^Set-Location \"c:\\\\Users\\\\User\\\\IntelAvbFilter\\.worktrees\\\\copilot-worktree-2026-04-08T15-03-26\\\\\\.github\\\\skills\\\\notebooklm-experts\"; cmd /c \"run\\.bat ask_question\\.py --question \"\"In the Intel I210 datasheet or IGB driver, what are the register offsets for TSYNCRXCTL and TSYNCTXCTL\\? What is the correct bit to set to ENABLE RX timestamping \\(RXTT_ENABLE\\) and what bit value enables TX timestamping \\(TXTT_ENABLE\\)\\?\"\"\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python --version$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }
