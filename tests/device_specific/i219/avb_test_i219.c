@@ -1,310 +1,232 @@
-/*++
-
-Module Name:
-
-    avb_test_i219.c
-
-Abstract:
-
-    Simple test application for Intel AVB Filter Driver I219 validation
-    Tests device detection and basic hardware access
-
---*/
-
-/*
- * POLICY COMPLIANCE: Use shared IOCTL ABI (include/avb_ioctl.h); remove ad-hoc copies
- */
-#include <windows.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include "../../../include/avb_ioctl.h"
-
 /**
- * @brief Test I219 device detection and basic access
+ * @file avb_test_i219.c
+ * @brief I219-specific user-mode validation test
+ *
+ * Enumerates all Intel adapters, locates an I219 (DID 0x15B7 family),
+ * opens it via IOCTL_AVB_OPEN_ADAPTER, and runs I219-specific hardware checks.
+ * Prints [SKIP] and exits 0 if no I219 is present — safe for CI.
+ *
+ * I219-specific notes:
+ *   - MMIO BAR0 PTP block base: 0xB600
+ *   - SYSTIML=0xB600, SYSTIMH=0xB604, TSYNCTXCTL=0xB614, TSYNCRXCTL=0xB620
+ *   - No TRGTTIM / AUXSTMP registers (2-step only; INTEL_CAP_ENHANCED_TS)
+ *   - MDIO via page 800/801 protocol (INTEL_CAP_MDIO)
+ *
+ * SSOT: ../../../include/avb_ioctl.h (via avb_test_common.h)
  */
-int main()
+
+#include "../../common/avb_test_common.h"
+
+/* I219 PCI Device ID range — add new SKUs as they ship */
+static int is_i219(avb_u16 did)
 {
-    HANDLE hDevice = INVALID_HANDLE_VALUE;
-    DWORD bytesReturned;
+    return (did == 0x15B7 || did == 0x15B8 ||           /* Gen 1 */
+            did == 0x15BB || did == 0x15BC ||           /* Gen 4 */
+            did == 0x15BD || did == 0x15BE ||           /* Gen 5 */
+            did == 0x15DF || did == 0x15E0 ||           /* Gen 13 */
+            did == 0x15E1 || did == 0x15E2 ||           /* Gen 9 */
+            did == 0x15E3 ||                            /* Gen 10 */
+            did == 0x0D4F || did == 0x0D4E ||           /* Gen 14 */
+            did == 0x0D4C || did == 0x0D4D ||           /* Gen 15 */
+            did == 0x0D4A ||                            /* Gen 16 */
+            did == 0x550F || did == 0x5510 ||           /* Gen 18 */
+            did == 0x5511 || did == 0x5512 ||           /* Gen 19 */
+            did == 0x5513 || did == 0x5514);            /* Gen 20 */
+}
+
+int main(void)
+{
+    printf("=== Intel I219 User-Mode Test ===\n\n");
+
+    /* Enumerate all adapters */
+    AvbAdapterInfo adapters[AVB_MAX_ADAPTERS];
+    ZeroMemory(adapters, sizeof(adapters));
+    int count = AvbEnumerateAdapters(adapters, AVB_MAX_ADAPTERS);
+
+    if (count == 0) {
+        printf("[SKIP] No Intel adapters found via IntelAvbFilter driver.\n");
+        printf("       Ensure driver is installed: sc query IntelAvbFilter\n");
+        return 0;
+    }
+
+    /* Find an I219 */
+    const AvbAdapterInfo *i219 = NULL;
+    for (int i = 0; i < count; i++) {
+        if (is_i219(adapters[i].device_id)) {
+            i219 = &adapters[i];
+            break;
+        }
+    }
+
+    if (!i219) {
+        printf("[SKIP] No I219 adapter found among %d detected adapter(s).\n", count);
+        for (int i = 0; i < count; i++) {
+            char caps[128];
+            printf("       Adapter %d: %s (DID=0x%04X) caps=%s\n",
+                   adapters[i].global_index,
+                   adapters[i].device_name,
+                   adapters[i].device_id,
+                   AvbCapabilityString(adapters[i].capabilities, caps, sizeof(caps)));
+        }
+        return 0;
+    }
+
+    {
+        char caps[128];
+        printf("[INFO] Found I219: DID=0x%04X global_index=%u caps=%s\n",
+               i219->device_id, i219->global_index,
+               AvbCapabilityString(i219->capabilities, caps, sizeof(caps)));
+    }
+
+    /* Open a handle bound to the I219 */
+    HANDLE h = AvbOpenAdapter(i219);
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("[FAIL] AvbOpenAdapter failed for I219 (error %lu)\n", GetLastError());
+        return 1;
+    }
+
+    AvbTestStats stats;
+    ZeroMemory(&stats, sizeof(stats));
+
+    DWORD bytesReturned = 0;
     BOOL result;
-    
-    printf("=== Intel AVB Filter Driver I219 Test ===\n\n");
-    
-    // Open device
-    hDevice = CreateFile(
-        L"\\\\.\\IntelAvbFilter",
-        GENERIC_READ | GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-    
-    if (hDevice == INVALID_HANDLE_VALUE) {
-        printf("ERROR: Cannot open IntelAvbFilter device (Error: %lu)\n", GetLastError());
-        printf("Make sure the driver is installed and loaded.\n");
-        return -1;
-    }
-    
-    printf("? Successfully opened IntelAvbFilter device\n");
-    
-    // Test 1: Initialize device
+
+    /* ── Test 1: Device initialization ── */
     printf("\n--- Test 1: Device Initialization ---\n");
-    result = DeviceIoControl(
-        hDevice,
-        IOCTL_AVB_INIT_DEVICE,
-        NULL,
-        0,
-        NULL,
-        0,
-        &bytesReturned,
-        NULL
-    );
-    
+    result = DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE,
+                             NULL, 0, NULL, 0, &bytesReturned, NULL);
     if (result) {
-        printf("? Device initialization: SUCCESS\n");
+        AVB_REPORT_PASS(&stats, "IOCTL_AVB_INIT_DEVICE");
     } else {
-        printf("? Device initialization: FAILED (Error: %lu)\n", GetLastError());
+        printf("  [WARN] IOCTL_AVB_INIT_DEVICE failed (error %lu) — continuing\n", GetLastError());
+        stats.skipped++; stats.total++;
     }
-    
-    // Test 2: Get device info
+
+    /* ── Test 2: Device info ── */
     printf("\n--- Test 2: Device Information ---\n");
-    AVB_DEVICE_INFO_REQUEST dir; ZeroMemory(&dir, sizeof(dir)); dir.buffer_size = sizeof(dir.device_info);
-    result = DeviceIoControl(
-        hDevice,
-        IOCTL_AVB_GET_DEVICE_INFO,
-        &dir,
-        sizeof(dir),
-        &dir,
-        sizeof(dir),
-        &bytesReturned,
-        NULL
-    );
-    if (result) {
-        dir.device_info[(dir.buffer_size < sizeof(dir.device_info)) ? dir.buffer_size : (sizeof(dir.device_info)-1)]='\0';
-        printf("? Device info string: %s (status=0x%08X used=%u)\n", dir.device_info, dir.status, dir.buffer_size);
-    } else {
-        printf("? Device info: FAILED (Error: %lu)\n", GetLastError());
-    }
-    
-    // Test 3: Read basic registers (from SSOT where available)
-    printf("\n--- Test 3: Register Access Tests ---\n");
-    
-    // Test reading device control register
-    AVB_REGISTER_REQUEST regRequest; ZeroMemory(&regRequest, sizeof(regRequest));
-    regRequest.offset = 0x00000;  // CTRL
-    
-    result = DeviceIoControl(
-        hDevice,
-        IOCTL_AVB_READ_REGISTER,
-        &regRequest,
-        sizeof(regRequest),
-        &regRequest,
-        sizeof(regRequest),
-        &bytesReturned,
-        NULL
-    );
-    
-    if (result) {
-        printf("? Control Register (0x00000): 0x%08X\n", regRequest.value);
-        if (regRequest.value != 0 && regRequest.value != 0x12340000) {
-            printf("   ?? Looks like REAL hardware value!\n");
-        } else {
-            printf("   ??  Might be simulated value\n");
-        }
-    } else {
-        printf("? Control Register read: FAILED (Error: %lu)\n", GetLastError());
-    }
-    
-    // Test reading device status register  
-    regRequest.offset = 0x00008;  // STATUS
-    
-    result = DeviceIoControl(
-        hDevice,
-        IOCTL_AVB_READ_REGISTER,
-        &regRequest,
-        sizeof(regRequest),
-        &regRequest,
-        sizeof(regRequest),
-        &bytesReturned,
-        NULL
-    );
-    
-    if (result) {
-        printf("? Status Register (0x00008): 0x%08X\n", regRequest.value);
-        if (regRequest.value & 0x00000002) {  // Link up bit
-            printf("   ?? Link Status: UP\n");
-        } else {
-            printf("   ?? Link Status: DOWN\n");
-        }
-    } else {
-        printf("? Status Register read: FAILED (Error: %lu)\n", GetLastError());
-    }
-    
-    // Test 4: Enable I219 PTP/IEEE 1588 hardware timestamping and verify register state
-    // TDD: These tests define expected I219 PTP behavior — they exercise:
-    //   enable_packet_timestamping (fix: wrong offsets 0xB344/48 → 0xB614/20, wrong enable bit)
-    //   init_ptp (fix: stub → TSAUXC+TIMINCA+ETQF0+ETQS0 writes)
-    //   set_systime (fix: stub → TSAUXC freeze/SYSTIML/SYSTIMH/unfreeze)
-    //   get_systime (fix: KE fallback → hardware SYSTIML/SYSTIMH read)
-    printf("\n--- Test 4: Enable PTP Hardware Timestamping ---\n");
     {
-        AVB_HW_TIMESTAMPING_REQUEST hwts; ZeroMemory(&hwts, sizeof(hwts));
-        hwts.enable             = 1;  // Enable timestamping
-        hwts.timer_mask         = 1;  // SYSTIM0 (primary timer only)
-        hwts.enable_target_time = 0;  // No target time interrupts (I219 lacks TRGTTIML)
-        hwts.enable_aux_ts      = 0;  // No aux timestamp (I219 lacks AUXSTMPL)
-
-        result = DeviceIoControl(
-            hDevice,
-            IOCTL_AVB_SET_HW_TIMESTAMPING,
-            &hwts, sizeof(hwts),
-            &hwts, sizeof(hwts),
-            &bytesReturned, NULL
-        );
-
-        if (result && hwts.status == 0 /* NDIS_STATUS_SUCCESS */) {
-            printf("PASS: HW timestamping enabled (TSAUXC: 0x%08X -> 0x%08X)\n",
-                   hwts.previous_tsauxc, hwts.current_tsauxc);
-        } else {
-            printf("FAIL: HW timestamping enable failed (DeviceIoControl=%d err=%lu status=0x%08X)\n",
-                   result, GetLastError(), hwts.status);
-        }
-
-        // Verify TSYNCTXCTL register has EN bit set (bit 4 = 0x10)
-        // I219 TSYNCTXCTL is at MMIO offset 0xB614 (IGB PTP block base 0xB600 + 0x14)
-        // Bug under test: current code writes to 0xB344 (82580/I350 offset) instead of 0xB614
-        AVB_REGISTER_REQUEST txCtlReg; ZeroMemory(&txCtlReg, sizeof(txCtlReg));
-        txCtlReg.offset = 0xB614;  /* I219_TSYNCTXCTL */
-
-        BOOL txRegOk = DeviceIoControl(
-            hDevice,
-            IOCTL_AVB_READ_REGISTER,
-            &txCtlReg, sizeof(txCtlReg),
-            &txCtlReg, sizeof(txCtlReg),
-            &bytesReturned, NULL
-        );
-        if (txRegOk) {
-            printf("  TSYNCTXCTL (0xB614) = 0x%08X\n", txCtlReg.value);
-            if (txCtlReg.value & 0x10u) {  /* bit 4 = TX EN */
-                printf("  PASS: TSYNCTXCTL EN bit (bit 4) is SET - TX timestamping active\n");
-            } else {
-                printf("  FAIL: TSYNCTXCTL EN bit (bit 4) NOT set (bug: wrong offset or enable bit)\n");
-            }
-        } else {
-            printf("  FAIL: Cannot read TSYNCTXCTL at 0xB614 (Error: %lu)\n", GetLastError());
-        }
-
-        // Verify TSYNCRXCTL register has EN bit and TYPE_ALL_PKTS set
-        // I219 TSYNCRXCTL is at MMIO offset 0xB620 (PTP base 0xB600 + 0x20)
-        // Expected: EN(bit4)=1, TYPE(bits3:1)=4 -> 0x10 | (4<<1) = 0x18
-        // Bug under test: current code writes to 0xB348 (wrong) and uses wrong enable bits
-        AVB_REGISTER_REQUEST rxCtlReg; ZeroMemory(&rxCtlReg, sizeof(rxCtlReg));
-        rxCtlReg.offset = 0xB620;  /* I219_TSYNCRXCTL */
-
-        BOOL rxRegOk = DeviceIoControl(
-            hDevice,
-            IOCTL_AVB_READ_REGISTER,
-            &rxCtlReg, sizeof(rxCtlReg),
-            &rxCtlReg, sizeof(rxCtlReg),
-            &bytesReturned, NULL
-        );
-        if (rxRegOk) {
-            DWORD enBit    = (rxCtlReg.value >> 4) & 0x1u;  /* bit 4 */
-            DWORD typeField = (rxCtlReg.value >> 1) & 0x7u;  /* bits 3:1 */
-            printf("  TSYNCRXCTL (0xB620) = 0x%08X (EN=%lu TYPE=%lu)\n",
-                   rxCtlReg.value, (unsigned long)enBit, (unsigned long)typeField);
-            if (enBit) {
-                printf("  PASS: TSYNCRXCTL EN bit (bit 4) is SET - RX timestamping active\n");
-            } else {
-                printf("  FAIL: TSYNCRXCTL EN bit (bit 4) NOT set (bug: wrong offset or enable bit)\n");
-            }
-            if (typeField == 4u) {  /* ALL_PKTS = 4 in I219 TYPE field */
-                printf("  PASS: TSYNCRXCTL TYPE = ALL_PKTS (4)\n");
-            } else {
-                printf("  FAIL: TSYNCRXCTL TYPE = %lu, expected 4 (ALL_PKTS)\n", (unsigned long)typeField);
-            }
-        } else {
-            printf("  FAIL: Cannot read TSYNCRXCTL at 0xB620 (Error: %lu)\n", GetLastError());
-        }
-    }
-
-    // Test 5: Set and read back hardware PTP system clock (SYSTIML/SYSTIMH)
-    // Bug under test: set_systime is a stub — never writes SYSTIML/SYSTIMH
-    printf("\n--- Test 5: Hardware PTP System Clock ---\n");
-    {
-        // Read hardware clock — should be non-zero if init_ptp ran correctly
-        // I219: reading SYSTIML latches SYSTIMH to prevent rollover
-        AVB_REGISTER_REQUEST stmlReg; ZeroMemory(&stmlReg, sizeof(stmlReg));
-        stmlReg.offset = 0xB600;  /* I219_SYSTIML */
-
-        AVB_REGISTER_REQUEST stmhReg; ZeroMemory(&stmhReg, sizeof(stmhReg));
-        stmhReg.offset = 0xB604;  /* I219_SYSTIMH */
-
-        BOOL stmlOk = DeviceIoControl(
-            hDevice, IOCTL_AVB_READ_REGISTER,
-            &stmlReg, sizeof(stmlReg), &stmlReg, sizeof(stmlReg), &bytesReturned, NULL
-        );
-        BOOL stmhOk = DeviceIoControl(
-            hDevice, IOCTL_AVB_READ_REGISTER,
-            &stmhReg, sizeof(stmhReg), &stmhReg, sizeof(stmhReg), &bytesReturned, NULL
-        );
-
-        if (stmlOk && stmhOk) {
-            avb_u64 hwTime = ((avb_u64)stmhReg.value << 32) | stmlReg.value;
-            printf("  SYSTIML (0xB600) = 0x%08X\n", stmlReg.value);
-            printf("  SYSTIMH (0xB604) = 0x%08X\n", stmhReg.value);
-            printf("  Hardware PTP time = 0x%016llX (%llu ns)\n", hwTime, hwTime);
-            if (hwTime != 0) {
-                printf("  PASS: Hardware PTP clock is running (non-zero)\n");
-            } else {
-                printf("  FAIL: Hardware PTP clock reads zero (init_ptp stub did not initialize TIMINCA)\n");
-            }
-        } else {
-            printf("  FAIL: Cannot read SYSTIML/SYSTIMH (Error: %lu)\n", GetLastError());
-        }
-    }
-
-    // Test 6: GET_TIMESTAMP IOCTL returns hardware clock time (not KE fallback)
-    // Bug under test: get_systime uses KeQuerySystemTime fallback instead of reading hardware
-    printf("\n--- Test 6: GET_TIMESTAMP returns hardware clock ---\n");
-    {
-        AVB_TIMESTAMP_REQUEST getReq; ZeroMemory(&getReq, sizeof(getReq));
-        getReq.clock_id = 0;
-
-        result = DeviceIoControl(
-            hDevice,
-            IOCTL_AVB_GET_TIMESTAMP,
-            &getReq, sizeof(getReq),
-            &getReq, sizeof(getReq),
-            &bytesReturned, NULL
-        );
-
+        AVB_DEVICE_INFO_REQUEST dir;
+        ZeroMemory(&dir, sizeof(dir));
+        dir.buffer_size = sizeof(dir.device_info);
+        result = DeviceIoControl(h, IOCTL_AVB_GET_DEVICE_INFO,
+                                 &dir, sizeof(dir), &dir, sizeof(dir),
+                                 &bytesReturned, NULL);
         if (result) {
-            printf("  GET_TIMESTAMP = 0x%016llX (%llu ns)\n", getReq.timestamp, getReq.timestamp);
-            if (getReq.timestamp != 0) {
-                printf("  PASS: GET_TIMESTAMP returns non-zero timestamp\n");
-            } else {
-                printf("  FAIL: GET_TIMESTAMP returns zero (get_systime stub bug)\n");
-            }
+            dir.device_info[sizeof(dir.device_info) - 1] = '\0';
+            printf("  [PASS] Device info: %s (status=0x%08X)\n",
+                   dir.device_info, dir.status);
+            stats.passed++; stats.total++;
         } else {
-            printf("  FAIL: GET_TIMESTAMP IOCTL failed (Error: %lu status=0x%08X)\n",
-                   GetLastError(), getReq.status);
+            AVB_REPORT_FAIL(&stats, "IOCTL_AVB_GET_DEVICE_INFO", "DeviceIoControl failed");
         }
     }
 
-    // Summary
-    printf("\n=== TEST SUMMARY ===\n");
-    printf("Tests 1-3: Device enumeration and basic register access\n");
-    printf("Tests 4-6: I219 PTP hardware timestamping (requires fixed i219_impl.c)\n");
-    printf("  Test 4 PASS: TSYNCTXCTL/TSYNCRXCTL at 0xB614/0xB620 have EN bit (bit 4) set\n");
-    printf("  Test 5 PASS: SYSTIML/SYSTIMH non-zero (init_ptp wrote TIMINCA)\n");
-    printf("  Test 6 PASS: GET_TIMESTAMP returns non-zero hardware PHC time\n");
-    printf("\nIf FAIL, enable debug output:\n");
-    printf("  1. DebugView.exe (Sysinternals), Capture Kernel\n");
-    printf("  2. Look for 'i219_enable_packet_timestamping', 'i219_init_ptp', 'i219_get_systime'\n");
+    /* ── Test 3: CTRL and STATUS registers ── */
+    printf("\n--- Test 3: Register Access ---\n");
+    {
+        avb_u32 v = 0;
+        int rc = AvbReadReg(h, 0x00000, &v);
+        if (rc == 0) { printf("  [PASS] CTRL (0x00000) = 0x%08X\n", (unsigned)v); stats.passed++; stats.total++; }
+        else          { printf("  [FAIL] CTRL read failed (error %d)\n", rc);        stats.failed++; stats.total++; }
+    }
+    {
+        avb_u32 v = 0;
+        int rc = AvbReadReg(h, 0x00008, &v);
+        if (rc == 0) { printf("  [PASS] STATUS (0x00008) = 0x%08X%s\n", (unsigned)v,
+                               (v & 0x2u) ? " [link up]" : " [link down]"); stats.passed++; stats.total++; }
+        else          { printf("  [FAIL] STATUS read failed (error %d)\n", rc);                           stats.failed++; stats.total++; }
+    }
 
-    CloseHandle(hDevice);
-    return 0;
+    /* ── Test 4: Enable PTP HW timestamping ── */
+    printf("\n--- Test 4: PTP Hardware Timestamping Enable ---\n");
+    {
+        AVB_HW_TIMESTAMPING_REQUEST hwts;
+        ZeroMemory(&hwts, sizeof(hwts));
+        hwts.enable             = 1;
+        hwts.timer_mask         = 1;   /* SYSTIM0 */
+        hwts.enable_target_time = 0;   /* I219 has no TRGTTIM */
+        hwts.enable_aux_ts      = 0;   /* I219 has no AUXSTMP */
+
+        result = DeviceIoControl(h, IOCTL_AVB_SET_HW_TIMESTAMPING,
+                                 &hwts, sizeof(hwts), &hwts, sizeof(hwts),
+                                 &bytesReturned, NULL);
+
+        if (result && hwts.status == 0) {
+            printf("  [PASS] HW timestamping enabled "
+                   "(TSAUXC: 0x%08X -> 0x%08X)\n",
+                   hwts.previous_tsauxc, hwts.current_tsauxc);
+            stats.passed++; stats.total++;
+        } else {
+            printf("  [FAIL] SET_HW_TIMESTAMPING failed "
+                   "(ok=%d error=%lu status=0x%08X)\n",
+                   result, GetLastError(), hwts.status);
+            stats.failed++; stats.total++;
+        }
+
+        /* Verify TSYNCTXCTL EN bit at I219-specific offset 0xB614 */
+        avb_u32 txctl = 0;
+        if (AvbReadReg(h, 0xB614, &txctl) == 0) {
+            printf("  [INFO] TSYNCTXCTL (0xB614) = 0x%08X\n", (unsigned)txctl);
+            if (txctl & 0x10u) { AVB_REPORT_PASS(&stats, "TSYNCTXCTL EN bit (bit4) set"); }
+            else               { AVB_REPORT_FAIL(&stats, "TSYNCTXCTL EN bit", "EN bit not set at 0xB614"); }
+        } else {
+            AVB_REPORT_FAIL(&stats, "TSYNCTXCTL read", "AvbReadReg(0xB614) failed");
+        }
+
+        /* Verify TSYNCRXCTL EN bit at I219-specific offset 0xB620 */
+        avb_u32 rxctl = 0;
+        if (AvbReadReg(h, 0xB620, &rxctl) == 0) {
+            DWORD en   = (rxctl >> 4) & 0x1u;
+            DWORD type = (rxctl >> 1) & 0x7u;
+            printf("  [INFO] TSYNCRXCTL (0xB620) = 0x%08X (EN=%lu TYPE=%lu)\n",
+                   (unsigned)rxctl, (unsigned long)en, (unsigned long)type);
+            if (en)     { AVB_REPORT_PASS(&stats, "TSYNCRXCTL EN bit (bit4) set"); }
+            else        { AVB_REPORT_FAIL(&stats, "TSYNCRXCTL EN bit", "EN bit not set at 0xB620"); }
+            if (type == 4u) { AVB_REPORT_PASS(&stats, "TSYNCRXCTL TYPE=ALL_PKTS(4)"); }
+            else            { printf("  [FAIL] TSYNCRXCTL TYPE=%lu, expected 4 (ALL_PKTS)\n", (unsigned long)type);
+                              stats.failed++; stats.total++; }
+        } else {
+            AVB_REPORT_FAIL(&stats, "TSYNCRXCTL read", "AvbReadReg(0xB620) failed");
+        }
+    }
+
+    /* ── Test 5: Hardware PTP clock (SYSTIML/SYSTIMH) ── */
+    printf("\n--- Test 5: Hardware PTP Clock ---\n");
+    {
+        avb_u32 stml = 0, stmh = 0;
+        int rcl = AvbReadReg(h, 0xB600, &stml);  /* I219_SYSTIML — latch read */
+        int rch = AvbReadReg(h, 0xB604, &stmh);  /* I219_SYSTIMH */
+
+        if (rcl == 0 && rch == 0) {
+            avb_u64 hwTime = ((avb_u64)stmh << 32) | stml;
+            printf("  [INFO] SYSTIML (0xB600)=0x%08X SYSTIMH (0xB604)=0x%08X\n",
+                   (unsigned)stml, (unsigned)stmh);
+            printf("  [INFO] Hardware PTP time = 0x%016llX (%llu ns)\n",
+                   (unsigned long long)hwTime, (unsigned long long)hwTime);
+            if (hwTime != 0) { AVB_REPORT_PASS(&stats, "Hardware PTP clock running (non-zero)"); }
+            else              { AVB_REPORT_FAIL(&stats, "Hardware PTP clock", "Time is zero — TIMINCA not initialized"); }
+        } else {
+            AVB_REPORT_FAIL(&stats, "SYSTIML/SYSTIMH read", "AvbReadReg failed");
+        }
+    }
+
+    /* ── Test 6: GET_TIMESTAMP IOCTL ── */
+    printf("\n--- Test 6: IOCTL_AVB_GET_TIMESTAMP ---\n");
+    {
+        AVB_TIMESTAMP_REQUEST ts;
+        ZeroMemory(&ts, sizeof(ts));
+        result = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                                 &ts, sizeof(ts), &ts, sizeof(ts),
+                                 &bytesReturned, NULL);
+        if (result) {
+            printf("  [INFO] Timestamp = 0x%016llX\n", (unsigned long long)ts.timestamp);
+            if (ts.timestamp != 0) { AVB_REPORT_PASS(&stats, "GET_TIMESTAMP non-zero"); }
+            else                   { AVB_REPORT_FAIL(&stats, "GET_TIMESTAMP", "Returned zero — hardware not initialized"); }
+        } else {
+            AVB_REPORT_FAIL(&stats, "IOCTL_AVB_GET_TIMESTAMP", "DeviceIoControl failed");
+        }
+    }
+
+    CloseHandle(h);
+    return AvbPrintSummary(&stats);
 }

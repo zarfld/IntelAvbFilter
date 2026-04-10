@@ -1,26 +1,149 @@
-/* Re-create avb_test_i210_um.c after accidental truncation */
-#include <windows.h>
-#include <stdio.h>
-#include <stdint.h>
-#include "../../../include/avb_ioctl.h"
+/**
+ * @file avb_test_i210_um.c
+ * @brief I210-specific user-mode validation test
+ *
+ * Enumerates all Intel adapters, locates the I210 (DID 0x1533 family),
+ * opens it via IOCTL_AVB_OPEN_ADAPTER, and runs basic hardware checks.
+ * Prints [SKIP] and exits 0 if no I210 is present — safe for CI.
+ *
+ * SSOT: ../../../include/avb_ioctl.h (via avb_test_common.h)
+ */
 
-static int read_reg(HANDLE h, uint32_t off, uint32_t *val) {
-    AVB_REGISTER_REQUEST req; ZeroMemory(&req, sizeof(req));
-    DWORD br=0; BOOL ok; req.offset=off;
-    ok = DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &req, sizeof(req), &req, sizeof(req), &br, NULL);
-    if(!ok) return (int)GetLastError();
-    *val = req.value; return 0;
+#include "../../common/avb_test_common.h"
+
+/* I210 PCI Device IDs */
+#define I210_DID_COPPER  0x1533
+#define I210_DID_OEM1    0x1534
+#define I210_DID_IT      0x1535
+#define I210_DID_FIBER   0x1536
+#define I210_DID_SERDES  0x1537
+#define I210_DID_SGMII   0x1538
+
+static int is_i210(avb_u16 device_id)
+{
+    return device_id == I210_DID_COPPER ||
+           device_id == I210_DID_OEM1   ||
+           device_id == I210_DID_IT     ||
+           device_id == I210_DID_FIBER  ||
+           device_id == I210_DID_SERDES ||
+           device_id == I210_DID_SGMII;
 }
 
-int main(void){
-    HANDLE h=CreateFileW(L"\\\\.\\IntelAvbFilter", GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
-    if(h==INVALID_HANDLE_VALUE){ printf("Open fail err=%lu\n", GetLastError()); return 1; }
-    printf("Opened device.\n"); DWORD br=0; (void)DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE,NULL,0,NULL,0,&br,NULL);
-    AVB_DEVICE_INFO_REQUEST di; ZeroMemory(&di,sizeof(di)); di.buffer_size=sizeof(di.device_info);
-    if(DeviceIoControl(h, IOCTL_AVB_GET_DEVICE_INFO,&di,sizeof(di),&di,sizeof(di),&br,NULL)){
-        di.device_info[(di.buffer_size<sizeof(di.device_info))?di.buffer_size:sizeof(di.device_info)-1]='\0';
-        printf("Info: %s (status=0x%08X used=%u)\n", di.device_info, di.status, di.buffer_size);
-    } else printf("Device info ioctl failed (err=%lu)\n", GetLastError());
-    uint32_t v; if(read_reg(h,0x00000,&v)==0) printf("CTRL=0x%08X\n", v); if(read_reg(h,0x00008,&v)==0) printf("STATUS=0x%08X\n", v);
-    AVB_TIMESTAMP_REQUEST ts; ZeroMemory(&ts,sizeof(ts)); if(DeviceIoControl(h,IOCTL_AVB_GET_TIMESTAMP,&ts,sizeof(ts),&ts,sizeof(ts),&br,NULL)) printf("TS=0x%016llX\n", (unsigned long long)ts.timestamp); else printf("TS ioctl fail (%lu)\n", GetLastError());
-    CloseHandle(h); return 0; }
+int main(void)
+{
+    printf("=== Intel I210 User-Mode Test ===\n\n");
+
+    /* Enumerate all adapters */
+    AvbAdapterInfo adapters[AVB_MAX_ADAPTERS];
+    ZeroMemory(adapters, sizeof(adapters));
+    int count = AvbEnumerateAdapters(adapters, AVB_MAX_ADAPTERS);
+
+    if (count == 0) {
+        printf("[SKIP] No Intel adapters found via IntelAvbFilter driver.\n");
+        printf("       Ensure driver is installed: sc query IntelAvbFilter\n");
+        return 0;
+    }
+
+    /* Find an I210 */
+    const AvbAdapterInfo *i210 = NULL;
+    for (int i = 0; i < count; i++) {
+        if (is_i210(adapters[i].device_id)) {
+            i210 = &adapters[i];
+            break;
+        }
+    }
+
+    if (!i210) {
+        printf("[SKIP] No I210 adapter found among %d detected adapter(s).\n", count);
+
+        /* Print what IS present so the user can diagnose */
+        for (int i = 0; i < count; i++) {
+            char caps[128];
+            printf("       Adapter %d: %s (DID=0x%04X) caps=%s\n",
+                   adapters[i].global_index,
+                   adapters[i].device_name,
+                   adapters[i].device_id,
+                   AvbCapabilityString(adapters[i].capabilities, caps, sizeof(caps)));
+        }
+        return 0;
+    }
+
+    {
+        char caps[128];
+        printf("[INFO] Found I210: DID=0x%04X global_index=%u caps=%s\n",
+               i210->device_id, i210->global_index,
+               AvbCapabilityString(i210->capabilities, caps, sizeof(caps)));
+    }
+
+    /* Open a handle bound to the I210 */
+    HANDLE h = AvbOpenAdapter(i210);
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("[FAIL] AvbOpenAdapter failed for I210 (error %lu)\n", GetLastError());
+        return 1;
+    }
+
+    AvbTestStats stats;
+    ZeroMemory(&stats, sizeof(stats));
+
+    /* ── Test 1: CTRL register ── */
+    {
+        avb_u32 ctrl = 0;
+        int rc = AvbReadReg(h, 0x00000, &ctrl);
+        if (rc == 0) {
+            printf("  [PASS] CTRL register: 0x%08X\n", (unsigned)ctrl);
+            stats.passed++; stats.total++;
+        } else {
+            printf("  [FAIL] CTRL register read failed (error %d)\n", rc);
+            stats.failed++; stats.total++;
+        }
+    }
+
+    /* ── Test 2: STATUS register ── */
+    {
+        avb_u32 status = 0;
+        int rc = AvbReadReg(h, 0x00008, &status);
+        if (rc == 0) {
+            printf("  [PASS] STATUS register: 0x%08X\n", (unsigned)status);
+            stats.passed++; stats.total++;
+        } else {
+            printf("  [FAIL] STATUS register read failed (error %d)\n", rc);
+            stats.failed++; stats.total++;
+        }
+    }
+
+    /* ── Test 3: Hardware timestamp ── */
+    {
+        AVB_TIMESTAMP_REQUEST ts;
+        ZeroMemory(&ts, sizeof(ts));
+        DWORD br = 0;
+        if (DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                            &ts, sizeof(ts), &ts, sizeof(ts), &br, NULL)) {
+            printf("  [PASS] Timestamp: 0x%016llX\n", (unsigned long long)ts.timestamp);
+            stats.passed++; stats.total++;
+        } else {
+            printf("  [FAIL] IOCTL_AVB_GET_TIMESTAMP failed (error %lu)\n", GetLastError());
+            stats.failed++; stats.total++;
+        }
+    }
+
+    /* ── Test 4: Device info ── */
+    {
+        AVB_DEVICE_INFO_REQUEST di;
+        ZeroMemory(&di, sizeof(di));
+        di.buffer_size = sizeof(di.device_info);
+        DWORD br = 0;
+        if (DeviceIoControl(h, IOCTL_AVB_GET_DEVICE_INFO,
+                            &di, sizeof(di), &di, sizeof(di), &br, NULL)) {
+            di.device_info[sizeof(di.device_info) - 1] = '\0';
+            printf("  [PASS] Device info: %s (status=0x%08X)\n",
+                   di.device_info, di.status);
+            stats.passed++; stats.total++;
+        } else {
+            printf("  [FAIL] IOCTL_AVB_GET_DEVICE_INFO failed (error %lu)\n", GetLastError());
+            stats.failed++; stats.total++;
+        }
+    }
+
+    CloseHandle(h);
+    return AvbPrintSummary(&stats);
+}
