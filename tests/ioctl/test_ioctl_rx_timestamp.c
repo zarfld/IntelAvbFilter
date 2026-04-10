@@ -477,4 +477,3 @@ int main(void) {
 
     return (g_failCount == 0) ? 0 : 1;
 }
-}

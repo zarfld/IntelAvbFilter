@@ -396,6 +396,7 @@ $AllTests = @(
         Name = "avb_test_i210_device"
         Type = "cl"
         Source = "tests/device_specific/i210/avb_test_i210_um.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "avb_test_i210.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "I210 Device-Specific Test"
@@ -404,6 +405,7 @@ $AllTests = @(
         Name = "avb_test_i219"
         Type = "cl"
         Source = "tests/device_specific/i219/avb_test_i219.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "avb_test_i219.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "I219 Device-Specific Test"
@@ -922,6 +924,7 @@ $AllTests = @(
         Name = "test_ptp_getset"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_ptp_getset.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "test_ptp_getset.exe"
         Includes = "-I include -I external/intel_avb/lib"
         Libs = "advapi32.lib"
@@ -938,6 +941,7 @@ $AllTests = @(
         Name = "test_ptp_freq"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_ptp_freq.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "test_ptp_freq.exe"
         Includes = "-I include -I external/intel_avb/lib"
         Enabled = $true
@@ -969,6 +973,7 @@ $AllTests = @(
         Name = "test_hw_ts_ctrl"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_hw_ts_ctrl.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "test_hw_ts_ctrl.exe"
         Includes = "-I include -I external/intel_avb/lib"
         Enabled = $true
@@ -989,6 +994,7 @@ $AllTests = @(
         Name = "test_rx_timestamp"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_rx_timestamp.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "test_rx_timestamp.exe"
         Includes = "-I include -I external/intel_avb/lib"
         Enabled = $true
@@ -1103,6 +1109,7 @@ $AllTests = @(
         Name = "test_qav_cbs"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_qav_cbs.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "test_qav_cbs.exe"
         Includes = "-I include -I external/intel_avb/lib"
         Enabled = $true
@@ -1831,13 +1838,14 @@ foreach ($Test in $TestsToBuild) {
         
         # Build command with full output path
         # Check if compile-only (produces .obj) or executable (produces .exe)
+        $ExtraSrc = if ($Test.ExtraSources) { " $($Test.ExtraSources)" } else { "" }
         if ($Test.CompileOnly) {
             # Compile-only: use /Fo for object file output
             $CompilerFlags = if ($Test.CompilerFlags) { $Test.CompilerFlags } else { "/c" }
-            $BuildCmd = "cl /nologo /W4 /Zi $CompilerFlags $($Test.Includes) $($Test.Source) /Fo:`"$OutputPath`""
+            $BuildCmd = "cl /nologo /W4 /Zi $CompilerFlags $($Test.Includes) $($Test.Source)$ExtraSrc /Fo:`"$OutputPath`""
         } else {
             # Executable: use /Fe for executable output
-            $BuildCmd = "cl /nologo /W4 /Zi $($Test.Includes) $($Test.Source) /Fe:`"$OutputPath`""
+            $BuildCmd = "cl /nologo /W4 /Zi $($Test.Includes) $($Test.Source)$ExtraSrc /Fe:`"$OutputPath`""
             if ($Test.Libs) {
                 $BuildCmd += " /link $($Test.Libs)"
             }
