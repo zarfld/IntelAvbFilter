@@ -316,12 +316,21 @@ foreach ($TestName in $TestList) {
     $lcyBefore = Get-AvbLifecycleSnapshot
 
     # Run the binary, tee to log, capture exit code.
-    & $exePath 2>&1 | Tee-Object -FilePath $logFile
+    # NOTE: Override ErrorActionPreference to Continue in a child scope.
+    # PS 5.1 with EAP=Stop converts any stderr output from a native .exe into a
+    # terminating NativeCommandError — which would crash the entire test runner.
+    & {
+        $ErrorActionPreference = 'Continue'
+        & $exePath 2>&1 | Tee-Object -FilePath $logFile
+    }
     $exitCode = $LASTEXITCODE
 
     # --- Lifecycle snapshot AFTER + diff ---
     $lcyAfter = Get-AvbLifecycleSnapshot
-    Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
+    $lcyAnomalies = Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
+    if ($lcyAnomalies) {
+        Write-Host "  [WARN:LCY] Lifecycle anomaly detected (underflow/error/OID imbalance) -- see [LCY] lines above" -ForegroundColor Yellow
+    }
 
     if ($exitCode -eq 0 -or $null -eq $exitCode) {
         $passedTests++

@@ -118,12 +118,18 @@ function Invoke-Test {
     $lcyBefore = Get-AvbLifecycleSnapshot
 
     # should log to $LogFile, but also show output in real time
+    # NOTE: Override ErrorActionPreference to Continue in a child scope.
+    # PS 5.1 with EAP=Stop converts any stderr output from a native .exe into a
+    # terminating NativeCommandError — which would crash the entire test runner.
     $script:totalTests++
-    if ($TestArgs) {
-        $argList = $TestArgs -split ' '
-        & $testPath @argList 2>&1 | Tee-Object -FilePath $LogFile
-    } else {
-        & $testPath 2>&1 | Tee-Object -FilePath $LogFile
+    & {
+        $ErrorActionPreference = 'Continue'
+        if ($TestArgs) {
+            $argList = $TestArgs -split ' '
+            & $testPath @argList 2>&1 | Tee-Object -FilePath $LogFile
+        } else {
+            & $testPath 2>&1 | Tee-Object -FilePath $LogFile
+        }
     }
     $exitCode = $LASTEXITCODE
 
@@ -148,7 +154,10 @@ function Invoke-Test {
 
     # --- Lifecycle snapshot AFTER + diff ---
     $lcyAfter = Get-AvbLifecycleSnapshot
-    Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
+    $lcyAnomalies = Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
+    if ($lcyAnomalies) {
+        Write-Host "  [WARN:LCY] Lifecycle anomaly detected (underflow/error/OID imbalance) -- see [LCY] lines above" -ForegroundColor Yellow
+    }
 
     if ($exitCode -eq 0 -or $null -eq $exitCode) {
         $script:passedTests++

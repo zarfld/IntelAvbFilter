@@ -58,6 +58,14 @@
 #   offset 176: FilterNetPnPCount  offset 184: PauseRestartGeneration
 
 function Get-AvbLifecycleSnapshot {
+    # Phase A: Enumerate ALL bound adapters and collect per-adapter AVB_DRIVER_STATISTICS.
+    # Returns @{ Adapters = @( @{ AdapterIndex=0; VendorId=...; DeviceId=...; IoctlCount=...; ... }, ... ) }
+    # or $null when the driver is absent or misconfigured.
+    #
+    # Each adapter has independent counters — only snapshotting adapter 0 was blind to IOCTLs
+    # dispatched to adapters 1+ (e.g. avb_test_i210.exe always showed +2 even when sending 4 IOCTLs).
+    # Per-adapter snapshots fix that gap.
+
     # Load DeviceIoControl P/Invoke (idempotent  --  Add-Type skipped if type already loaded)
     if (-not ([System.Management.Automation.PSTypeName]'AvbIoctl').Type) {
         Add-Type -TypeDefinition @"
@@ -95,6 +103,9 @@ public class AvbIoctl {
 "@ -ErrorAction SilentlyContinue
     }
 
+    # Helper: read a little-endian uint64 from a byte array at offset $off
+    function Read-u64([byte[]]$b, [int]$off) { [System.BitConverter]::ToUInt64($b, $off) }
+
     try {
         $h = [AvbIoctl]::CreateFile('\\.\IntelAvbFilter',
             [AvbIoctl]::GENERIC_READ -bor [AvbIoctl]::GENERIC_WRITE,
@@ -105,7 +116,7 @@ public class AvbIoctl {
             return $null
         }
 
-        # Step 1: ENUM_ADAPTERS  --  get vendor/device ID for adapter 0
+        # Step 1: ENUM_ADAPTERS(index=0) to learn total adapter count.
         # AVB_ENUM_REQUEST layout: index(u32)+count(u32)+vendor_id(u16)+device_id(u16)+capabilities(u32)+status(u32) = 20 bytes
         $enumBuf = New-Object byte[] 20  # index=0 already zero
         $enumRet = [uint32]0
@@ -116,97 +127,181 @@ public class AvbIoctl {
             Write-Host "  [LCY] (ENUM_ADAPTERS failed  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
-        $adapterCount = [System.BitConverter]::ToUInt32($enumBuf, 4)
-        if ($adapterCount -eq 0) {
+        $totalAdapters = [System.BitConverter]::ToUInt32($enumBuf, 4)
+        if ($totalAdapters -eq 0) {
             [AvbIoctl]::CloseHandle($h) | Out-Null
             Write-Host "  [LCY] (no bound adapters  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
-        $vendorId = [System.BitConverter]::ToUInt16($enumBuf, 8)
-        $deviceId = [System.BitConverter]::ToUInt16($enumBuf, 10)
 
-        # Step 2: OPEN_ADAPTER  --  bind handle to adapter 0
+        # Step 2: For each adapter i: ENUM_ADAPTERS(i) -> OPEN_ADAPTER(i) -> GET_STATISTICS.
         # AVB_OPEN_REQUEST layout: vendor_id(u16)+device_id(u16)+index(u32)+status(u32) = 12 bytes
-        $openBuf = New-Object byte[] 12
-        $v = [System.BitConverter]::GetBytes([uint16]$vendorId)
-        $d = [System.BitConverter]::GetBytes([uint16]$deviceId)
-        $openBuf[0] = $v[0]; $openBuf[1] = $v[1]
-        $openBuf[2] = $d[0]; $openBuf[3] = $d[1]
-        # index=0 at offset 4 (already zero)
-        $openRet = [uint32]0
-        $ok = [AvbIoctl]::DeviceIoControlInOut($h, [AvbIoctl]::IOCTL_AVB_OPEN_ADAPTER,
-            $openBuf, 12, $openBuf, 12, [ref]$openRet, [IntPtr]::Zero)
-        if (-not $ok -or $openRet -lt 12) {
-            [AvbIoctl]::CloseHandle($h) | Out-Null
-            Write-Host "  [LCY] (OPEN_ADAPTER failed  --  snapshot skipped)" -ForegroundColor DarkGray
-            return $null
+        # Each OPEN_ADAPTER rebinds the handle context; GET_STATISTICS returns that adapter's stats.
+        $adapters = @()
+        for ($i = 0; $i -lt $totalAdapters; $i++) {
+            # ENUM_ADAPTERS(i)  --  get vendor/device ID for adapter i
+            $eBuf = New-Object byte[] 20
+            $iBytes = [System.BitConverter]::GetBytes([uint32]$i)
+            [System.Array]::Copy($iBytes, 0, $eBuf, 0, 4)
+            $eRet = [uint32]0
+            $ok = [AvbIoctl]::DeviceIoControlInOut($h, [AvbIoctl]::IOCTL_AVB_ENUM_ADAPTERS,
+                $eBuf, 20, $eBuf, 20, [ref]$eRet, [IntPtr]::Zero)
+            if (-not $ok -or $eRet -lt 20) { continue }
+            $vid = [System.BitConverter]::ToUInt16($eBuf, 8)
+            $did = [System.BitConverter]::ToUInt16($eBuf, 10)
+
+            # OPEN_ADAPTER(vid, did, i)  --  bind handle context to adapter i
+            $oBuf = New-Object byte[] 12
+            $v  = [System.BitConverter]::GetBytes([uint16]$vid)
+            $d  = [System.BitConverter]::GetBytes([uint16]$did)
+            $ix = [System.BitConverter]::GetBytes([uint32]$i)
+            $oBuf[0] = $v[0];  $oBuf[1] = $v[1]
+            $oBuf[2] = $d[0];  $oBuf[3] = $d[1]
+            $oBuf[4] = $ix[0]; $oBuf[5] = $ix[1]; $oBuf[6] = $ix[2]; $oBuf[7] = $ix[3]
+            $oRet = [uint32]0
+            $ok = [AvbIoctl]::DeviceIoControlInOut($h, [AvbIoctl]::IOCTL_AVB_OPEN_ADAPTER,
+                $oBuf, 12, $oBuf, 12, [ref]$oRet, [IntPtr]::Zero)
+            if (-not $ok -or $oRet -lt 12) { continue }
+
+            # GET_STATISTICS  --  read 192-byte AVB_DRIVER_STATISTICS for adapter i
+            $sBuf = New-Object byte[] 192
+            $sRet = [uint32]0
+            $ok = [AvbIoctl]::DeviceIoControlOut($h, [AvbIoctl]::IOCTL_AVB_GET_STATISTICS,
+                [IntPtr]::Zero, 0, $sBuf, 192, [ref]$sRet, [IntPtr]::Zero)
+            if (-not $ok -or $sRet -lt 192) { continue }
+
+            $adapters += @{
+                AdapterIndex           = $i
+                VendorId               = $vid
+                DeviceId               = $did
+                TxPackets              = Read-u64 $sBuf   0
+                RxPackets              = Read-u64 $sBuf   8
+                IoctlCount             = Read-u64 $sBuf  64
+                ErrorCount             = Read-u64 $sBuf  72
+                FilterAttachCount      = Read-u64 $sBuf  96
+                FilterPauseCount       = Read-u64 $sBuf 104
+                FilterRestartCount     = Read-u64 $sBuf 112
+                FilterDetachCount      = Read-u64 $sBuf 120
+                OutstandingSendNBLs    = Read-u64 $sBuf 128
+                OutstandingReceiveNBLs = Read-u64 $sBuf 136
+                OidRequestCount        = Read-u64 $sBuf 144
+                OidCompleteCount       = Read-u64 $sBuf 152
+                OutstandingOids        = Read-u64 $sBuf 160
+                PauseRestartGeneration = Read-u64 $sBuf 184
+            }
         }
 
-        # Step 3: GET_STATISTICS  --  read 192-byte stats for adapter 0
-        $buf = New-Object byte[] 192
-        $returned = [uint32]0
-        $ok = [AvbIoctl]::DeviceIoControlOut($h, [AvbIoctl]::IOCTL_AVB_GET_STATISTICS,
-            [IntPtr]::Zero, 0, $buf, 192, [ref]$returned, [IntPtr]::Zero)
         [AvbIoctl]::CloseHandle($h) | Out-Null
-        if (-not $ok -or $returned -lt 192) {
-            Write-Host "  [LCY] (GET_STATISTICS failed  --  snapshot skipped)" -ForegroundColor DarkGray
+        if ($adapters.Count -eq 0) {
+            Write-Host "  [LCY] (no adapter statistics collected  --  snapshot skipped)" -ForegroundColor DarkGray
             return $null
         }
-
-        # Parse AVB_DRIVER_STATISTICS fields (little-endian uint64, avb_ioctl.h offsets)
-        function u64([byte[]]$b,[int]$off){ [System.BitConverter]::ToUInt64($b,$off) }
-        return @{
-            TxPackets              = u64 $buf   0
-            RxPackets              = u64 $buf   8
-            IoctlCount             = u64 $buf  64
-            ErrorCount             = u64 $buf  72
-            FilterAttachCount      = u64 $buf  96
-            FilterPauseCount       = u64 $buf 104
-            FilterRestartCount     = u64 $buf 112
-            FilterDetachCount      = u64 $buf 120
-            OutstandingSendNBLs    = u64 $buf 128
-            OutstandingReceiveNBLs = u64 $buf 136
-            OidRequestCount        = u64 $buf 144
-            OidCompleteCount       = u64 $buf 152
-            OutstandingOids        = u64 $buf 160
-            PauseRestartGeneration = u64 $buf 184
-        }
+        return @{ Adapters = $adapters }
     } catch {
         Write-Host "  [LCY] (exception in snapshot: $_)" -ForegroundColor DarkGray
         return $null
     }
 }
 
-# Print a before/after diff of lifecycle metrics (only changed fields shown).
+# Print a before/after per-adapter diff of lifecycle metrics (only changed fields shown).
 # Colour coding:
 #   RED     --  !!UNDERFLOW!! on a gauge (OutstandingXxx wrapped to ~UINT64_MAX)
-#   YELLOW  --  ErrorCount / FilterDetachCount / HardwareFaults increased
+#   YELLOW  --  ErrorCount / FilterDetachCount increase, or OID dispatch imbalance
 #   GRAY    --  normal counter activity
+#
+# Phase B: Returns [bool] $true if any anomaly was detected so callers can emit [WARN:LCY].
+# Anomaly conditions:
+#   - UNDERFLOW on any gauge (OutstandingSendNBLs / OutstandingReceiveNBLs / OutstandingOids)
+#   - ErrorCount increased during the test
+#   - FilterDetachCount increased during the test (unexpected adapter detach)
+#   - OidRequestCount delta != OidCompleteCount delta (OID pipeline drain incomplete)
 function Write-LifecycleDiff {
     param($Before, $After, [string]$Label)
     if ($null -eq $Before -or $null -eq $After) {
         # Snapshot messages already printed by Get-AvbLifecycleSnapshot; no diff available
-        return
+        return $false
     }
 
-    $changed = @()
-    foreach ($key in $After.Keys | Sort-Object) {
-        $bVal = $Before[$key]
-        $aVal = $After[$key]
-        if ($aVal -ne $bVal) {
-            # Highlight gauge underflows (wraps to near UINT64_MAX)
-            $flag = if ($aVal -gt 0xFFFFFFF000000000 -and $bVal -lt $aVal) { ' !!UNDERFLOW!!' } else { '' }
-            $delta = if ($aVal -ge $bVal) { "+$($aVal - $bVal)" } else { "-$($bVal - $aVal)$flag" }
-            $changed += "    {0,-28} {1,20} -> {2,20}  ({3})" -f $key, $bVal, $aVal, $delta
+    # Ordered list of stats fields to diff (excludes identity keys AdapterIndex/VendorId/DeviceId)
+    $statsFields = @(
+        'TxPackets','RxPackets','IoctlCount','ErrorCount',
+        'FilterAttachCount','FilterPauseCount','FilterRestartCount','FilterDetachCount',
+        'OutstandingSendNBLs','OutstandingReceiveNBLs',
+        'OidRequestCount','OidCompleteCount','OutstandingOids','PauseRestartGeneration'
+    )
+
+    $hasAnomalies = $false
+
+    foreach ($afterAdp in $After.Adapters) {
+        $idx      = $afterAdp.AdapterIndex
+        $beforeAdp = $Before.Adapters | Where-Object { $_.AdapterIndex -eq $idx }
+        if (-not $beforeAdp) { continue }
+
+        $adpTag = 'Adapter{0}[VEN_{1:X4}:DEV_{2:X4}]' -f $idx, $afterAdp.VendorId, $afterAdp.DeviceId
+
+        # Gauge fields represent "in-flight" counts and should always be near 0.
+        # Underflow = UINT64 wraparound: a gauge that was 0 decremented → wraps to ~UINT64_MAX.
+        # We detect this as: gauge field AND after-value > 1,000,000 (physically impossible in-flight count).
+        # NOTE: Do NOT use the hex literal 0xFFFFFFF000000000 here — in PS5.1 that overflows Int64
+        #       and becomes negative, causing ALL UInt64 comparisons to evaluate as true (false positive).
+        $gaugeFields = @('OutstandingSendNBLs', 'OutstandingReceiveNBLs', 'OutstandingOids')
+
+        # Build list of changed fields for this adapter
+        $changed = @()
+        foreach ($key in $statsFields) {
+            $bVal = $beforeAdp[$key]
+            $aVal = $afterAdp[$key]
+            if ($aVal -ne $bVal) {
+                # Underflow only possible on gauge fields; threshold of 1,000,000 is well above any
+                # sane in-flight count but safely below a wrapped UINT64 value (> 1.8e19).
+                $underflow = ($key -in $gaugeFields) -and ($aVal -gt [uint64]1000000)
+                $flag  = if ($underflow) { ' !!UNDERFLOW!!' } else { '' }
+                $delta = if ($aVal -ge $bVal) { "+$($aVal - $bVal)" } else { "-$($bVal - $aVal)$flag" }
+                $changed += [PSCustomObject]@{
+                    Key       = $key
+                    Before    = $bVal
+                    After     = $aVal
+                    Delta     = $delta
+                    Underflow = $underflow
+                }
+            }
+        }
+
+        # Phase B: anomaly detection for this adapter
+        foreach ($c in $changed) {
+            if ($c.Underflow) { $hasAnomalies = $true }
+            elseif ($c.Key -in 'ErrorCount','FilterDetachCount' -and $c.After -gt $c.Before) {
+                $hasAnomalies = $true
+            }
+        }
+        # OID dispatch/complete imbalance: OIDs sent but not all drained during this test window
+        $oidReq = $changed | Where-Object { $_.Key -eq 'OidRequestCount' }
+        $oidCmp = $changed | Where-Object { $_.Key -eq 'OidCompleteCount' }
+        $oidImbalance = $false
+        if ($oidReq -and $oidCmp) {
+            $dReq = $oidReq.After - $oidReq.Before
+            $dCmp = $oidCmp.After - $oidCmp.Before
+            if ($dReq -ne $dCmp) { $oidImbalance = $true; $hasAnomalies = $true }
+        }
+
+        if ($changed.Count -eq 0) {
+            Write-Host "  [LCY] $Label ($adpTag)  --  no lifecycle metric changes" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  [LCY] $Label ($adpTag)  --  lifecycle metric delta:" -ForegroundColor DarkGray
+            foreach ($c in $changed) {
+                $line  = '    {0,-28} {1,20} -> {2,20}  ({3})' -f $c.Key, $c.Before, $c.After, $c.Delta
+                $color = if ($c.Underflow) { 'Red' }
+                         elseif ($c.Key -in 'ErrorCount','FilterDetachCount') { 'Yellow' }
+                         else { 'DarkGray' }
+                Write-Host $line -ForegroundColor $color
+            }
+            if ($oidImbalance) {
+                $dReq = $oidReq.After - $oidReq.Before
+                $dCmp = $oidCmp.After - $oidCmp.Before
+                Write-Host "    !OID imbalance: +$dReq dispatched vs +$dCmp completed" -ForegroundColor Yellow
+            }
         }
     }
-    if ($changed.Count -eq 0) {
-        Write-Host "  [LCY] $Label  --  no lifecycle metric changes" -ForegroundColor DarkGray
-    } else {
-        Write-Host "  [LCY] $Label  --  lifecycle metric delta:" -ForegroundColor DarkGray
-        foreach ($line in $changed) {
-            $color = if ($line -match 'UNDERFLOW') { 'Red' } elseif ($line -match 'Error|Fault|Detach') { 'Yellow' } else { 'DarkGray' }
-            Write-Host $line -ForegroundColor $color
-        }
-    }
+
+    return $hasAnomalies
 }
