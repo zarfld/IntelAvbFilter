@@ -27,6 +27,8 @@
 
 /* Single Source of Truth for IOCTL definitions */
 #include "../../include/avb_ioctl.h"
+/* Single Source of Truth for PCI device ID constants */
+#include "../../include/intel_pci_ids.h"
 
 /* =========================================================
  * Configuration

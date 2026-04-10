@@ -24,6 +24,9 @@
 /* Single Source of Truth for IOCTL definitions */
 #include "../include/avb_ioctl.h"
 
+/* Multi-adapter enumeration and capability gating */
+#include "../common/avb_test_common.h"
+
 /* Test result codes */
 #define TEST_PASS 0
 #define TEST_FAIL 1
@@ -629,45 +632,70 @@ int main(void)
     printf("====================================================================\n");
     printf("\n");
     
-    ctx.adapter = OpenAdapter();
-    if (ctx.adapter == INVALID_HANDLE_VALUE) {
-        printf("[ERROR] Failed to open AVB adapter. Skipping all tests.\n");
-        return TEST_FAIL;
+    /* Enumerate all adapters; run tests on each that supports BASIC_1588 */
+    AvbAdapterInfo adapters[AVB_MAX_ADAPTERS];
+    int adapterCount = AvbEnumerateAdapters(adapters, AVB_MAX_ADAPTERS);
+    int anyFound = 0;
+
+    if (adapterCount <= 0) {
+        printf("[SKIP] No AVB adapters found. Skipping all tests.\n");
+        return TEST_SKIP;
     }
-    
-    printf("Running Hardware Timestamping Control tests...\n\n");
-    
-    #define RUN_TEST(test) do { \
-        int result = test(&ctx); \
-        ctx.test_count++; \
-        if (result == TEST_PASS) ctx.pass_count++; \
-        else if (result == TEST_FAIL) ctx.fail_count++; \
-        else if (result == TEST_SKIP) ctx.skip_count++; \
-    } while(0)
-    
-    RUN_TEST(Test_DisableAllTimestamping);
-    RUN_TEST(Test_EnableRxTimestampingOnly);
-    RUN_TEST(Test_EnableTxTimestampingOnly);
-    RUN_TEST(Test_EnableBothRxTxTimestamping);
-    RUN_TEST(Test_InvalidModeRejection);
-    RUN_TEST(Test_RapidModeSwitching);
-    RUN_TEST(Test_EnableDuringActiveTraffic);
-    RUN_TEST(Test_ModePersistenceAfterDisable);
-    RUN_TEST(Test_ConcurrentModeChangeRequests);
-    RUN_TEST(Test_NullPointerHandling);
-    RUN_TEST(Test_RegisterPersistence);
-    RUN_TEST(Test_HardwareSupportVerification);
-    RUN_TEST(Test_IntegrationWithGetSetTimestamp);
-    
-    #undef RUN_TEST
-    
-    /* Reset to disabled before cleanup */
-    SetHWTimestamping(ctx.adapter, HW_TS_DISABLED);
-    
-    if (ctx.adapter != INVALID_HANDLE_VALUE) {
+
+    for (int ai = 0; ai < adapterCount; ai++) {
+        if (!AVB_HAS_CAP(&adapters[ai], INTEL_CAP_BASIC_1588)) {
+            printf("[SKIP] Adapter %s (DID=0x%04X) lacks BASIC_1588 — skipping.\n",
+                   adapters[ai].device_name, adapters[ai].device_id);
+            continue;
+        }
+        anyFound = 1;
+        printf("--- Adapter %d: %s (DID=0x%04X) ---\n",
+               adapters[ai].global_index, adapters[ai].device_name, adapters[ai].device_id);
+
+        ctx.adapter = AvbOpenAdapter(&adapters[ai]);
+        if (ctx.adapter == INVALID_HANDLE_VALUE) {
+            printf("[ERROR] Failed to open adapter %s. Skipping.\n", adapters[ai].device_name);
+            continue;
+        }
+
+        printf("Running Hardware Timestamping Control tests...\n\n");
+
+        #define RUN_TEST(test) do { \
+            int result = test(&ctx); \
+            ctx.test_count++; \
+            if (result == TEST_PASS) ctx.pass_count++; \
+            else if (result == TEST_FAIL) ctx.fail_count++; \
+            else if (result == TEST_SKIP) ctx.skip_count++; \
+        } while(0)
+
+        RUN_TEST(Test_DisableAllTimestamping);
+        RUN_TEST(Test_EnableRxTimestampingOnly);
+        RUN_TEST(Test_EnableTxTimestampingOnly);
+        RUN_TEST(Test_EnableBothRxTxTimestamping);
+        RUN_TEST(Test_InvalidModeRejection);
+        RUN_TEST(Test_RapidModeSwitching);
+        RUN_TEST(Test_EnableDuringActiveTraffic);
+        RUN_TEST(Test_ModePersistenceAfterDisable);
+        RUN_TEST(Test_ConcurrentModeChangeRequests);
+        RUN_TEST(Test_NullPointerHandling);
+        RUN_TEST(Test_RegisterPersistence);
+        RUN_TEST(Test_HardwareSupportVerification);
+        RUN_TEST(Test_IntegrationWithGetSetTimestamp);
+
+        #undef RUN_TEST
+
+        /* Reset to disabled before close */
+        SetHWTimestamping(ctx.adapter, HW_TS_DISABLED);
+
         CloseHandle(ctx.adapter);
+        ctx.adapter = INVALID_HANDLE_VALUE;
     }
-    
+
+    if (!anyFound) {
+        printf("[SKIP] No adapter with BASIC_1588 found.\n");
+        return TEST_SKIP;
+    }
+
     printf("\n");
     printf("====================================================================\n");
     printf(" Test Summary\n");
@@ -678,6 +706,6 @@ int main(void)
     printf(" Skipped: %d tests\n", ctx.skip_count);
     printf("====================================================================\n");
     printf("\n");
-    
+
     return (ctx.fail_count > 0) ? TEST_FAIL : TEST_PASS;
 }

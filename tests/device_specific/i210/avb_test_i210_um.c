@@ -11,22 +11,16 @@
 
 #include "../../common/avb_test_common.h"
 
-/* I210 PCI Device IDs */
-#define I210_DID_COPPER  0x1533
-#define I210_DID_OEM1    0x1534
-#define I210_DID_IT      0x1535
-#define I210_DID_FIBER   0x1536
-#define I210_DID_SERDES  0x1537
-#define I210_DID_SGMII   0x1538
+/* I210 PCI Device IDs — SSOT from intel_pci_ids.h (via avb_test_common.h) */
 
 static int is_i210(avb_u16 device_id)
 {
-    return device_id == I210_DID_COPPER ||
-           device_id == I210_DID_OEM1   ||
-           device_id == I210_DID_IT     ||
-           device_id == I210_DID_FIBER  ||
-           device_id == I210_DID_SERDES ||
-           device_id == I210_DID_SGMII;
+    return device_id == INTEL_DEV_I210_AT    ||
+           device_id == INTEL_DEV_I210_AT2   ||
+           device_id == INTEL_DEV_I210_FIBER ||
+           device_id == INTEL_DEV_I210_IS    ||
+           device_id == INTEL_DEV_I210_IT    ||
+           device_id == INTEL_DEV_I210_CS;
 }
 
 int main(void)

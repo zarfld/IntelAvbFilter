@@ -25,6 +25,9 @@
 /* Single Source of Truth for IOCTL definitions */
 #include "../../include/avb_ioctl.h"
 
+/* Multi-adapter enumeration and capability gating */
+#include "../common/avb_test_common.h"
+
 // Traffic Class definitions (per IEEE 802.1Q)
 #define CBS_TRAFFIC_CLASS_A  0  // Class A (high priority)
 #define CBS_TRAFFIC_CLASS_B  1  // Class B (medium priority)
@@ -471,44 +474,59 @@ int main(void) {
     printf(" Priority: P0 (Critical)\n");
     printf("====================================================================\n\n");
     
-    // Open device
-    g_hDevice = CreateFileW(
-        L"\\\\.\\IntelAvbFilter",
-        GENERIC_READ | GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        0,
-        NULL
-    );
-    
-    if (g_hDevice == INVALID_HANDLE_VALUE) {
-        printf("ERROR: Failed to open device (error %lu)\n", GetLastError());
-        printf("Make sure the driver is installed and running.\n\n");
-        return 1;
+    /* Enumerate all adapters; run tests on each that supports TSN_TAS (CBS requires TAS port) */
+    AvbAdapterInfo adapters[AVB_MAX_ADAPTERS];
+    int adapterCount = AvbEnumerateAdapters(adapters, AVB_MAX_ADAPTERS);
+    int anyFound = 0;
+
+    if (adapterCount <= 0) {
+        printf("[SKIP] No AVB adapters found. Skipping all tests.\n");
+        return 2;
     }
-    
-    printf("Running Credit-Based Shaper tests...\n\n");
-    
-    // Run all tests
-    Test_ConfigureCbsClassAEnabled();
-    Test_ConfigureCbsClassBEnabled();
-    Test_DisableCbsClassA();
-    Test_DisableCbsClassB();
-    Test_ConfigureCbsZeroCredits();
-    Test_ConfigureCbsMaxCredits();
-    Test_InvalidTrafficClass();
-    Test_InvalidSlopePositiveSend();
-    Test_InvalidCreditNegativeHi();
-    Test_InvalidCreditPositiveLo();
-    Test_RapidEnableDisable();
-    Test_NullPointerHandling();
-    Test_CbsConfigurationPersistence();
-    Test_CbsRegisterReadBack();
-    
-    // Cleanup
-    CloseHandle(g_hDevice);
-    
+
+    for (int ai = 0; ai < adapterCount; ai++) {
+        if (!AVB_HAS_CAP(&adapters[ai], INTEL_CAP_TSN_TAS)) {
+            printf("[SKIP] Adapter %s (DID=0x%04X) lacks TSN_TAS — skipping.\n",
+                   adapters[ai].device_name, adapters[ai].device_id);
+            continue;
+        }
+        anyFound = 1;
+        printf("--- Adapter %d: %s (DID=0x%04X) ---\n",
+               adapters[ai].global_index, adapters[ai].device_name, adapters[ai].device_id);
+
+        g_hDevice = AvbOpenAdapter(&adapters[ai]);
+        if (g_hDevice == INVALID_HANDLE_VALUE) {
+            printf("[ERROR] Failed to open adapter %s. Skipping.\n", adapters[ai].device_name);
+            continue;
+        }
+
+        printf("Running Credit-Based Shaper tests...\n\n");
+
+        // Run all tests
+        Test_ConfigureCbsClassAEnabled();
+        Test_ConfigureCbsClassBEnabled();
+        Test_DisableCbsClassA();
+        Test_DisableCbsClassB();
+        Test_ConfigureCbsZeroCredits();
+        Test_ConfigureCbsMaxCredits();
+        Test_InvalidTrafficClass();
+        Test_InvalidSlopePositiveSend();
+        Test_InvalidCreditNegativeHi();
+        Test_InvalidCreditPositiveLo();
+        Test_RapidEnableDisable();
+        Test_NullPointerHandling();
+        Test_CbsConfigurationPersistence();
+        Test_CbsRegisterReadBack();
+
+        CloseHandle(g_hDevice);
+        g_hDevice = INVALID_HANDLE_VALUE;
+    }
+
+    if (!anyFound) {
+        printf("[SKIP] No adapter with TSN_TAS (CBS) support found.\n");
+        return 2;
+    }
+
     // Summary
     printf("\n");
     printf("====================================================================\n");
@@ -519,6 +537,6 @@ int main(void) {
     printf(" Failed:  %d tests\n", g_failCount);
     printf(" Skipped: %d tests\n", g_skipCount);
     printf("====================================================================\n\n");
-    
+
     return (g_failCount == 0) ? 0 : 1;
 }

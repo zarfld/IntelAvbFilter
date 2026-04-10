@@ -125,53 +125,53 @@ const char *AvbDeviceName(avb_u16 device_id)
 {
     switch (device_id) {
         /* Intel I210 family */
-        case 0x1533: return "I210";
-        case 0x1534: return "I210-OEM1";
-        case 0x1535: return "I210-IT";
-        case 0x1536: return "I210-Fiber";
-        case 0x1537: return "I210-Serdes";
-        case 0x1538: return "I210-SGMII";
+        case INTEL_DEV_I210_AT:       return "I210";
+        case INTEL_DEV_I210_AT2:      return "I210-OEM1";
+        case INTEL_DEV_I210_FIBER:    return "I210-IT";
+        case INTEL_DEV_I210_IS:       return "I210-Fiber";
+        case INTEL_DEV_I210_IT:       return "I210-Serdes";
+        case INTEL_DEV_I210_CS:       return "I210-SGMII";
 
         /* Intel I225 family */
-        case 0x15F2: return "I225-LM";
-        case 0x15F3: return "I225-V";
-        case 0x15F4: return "I225-IT";
+        case INTEL_DEV_I225_V:        return "I225-LM";
+        case INTEL_DEV_I225_IT:       return "I225-V";
+        case INTEL_DEV_I225_LM:       return "I225-IT";
 
         /* Intel I226 family */
-        case 0x125B: return "I226-LM";
-        case 0x125C: return "I226-V";
-        case 0x125D: return "I226-IT";
-        case 0x125E: return "I226-LMVP";
+        case INTEL_DEV_I226_LM:       return "I226-LM";
+        case INTEL_DEV_I226_V:        return "I226-V";
+        case INTEL_DEV_I226_IT:       return "I226-IT";
+        case 0x125EU:                 return "I226-LMVP";  /* no SSOT constant yet */
 
         /* Intel I219 family — representative + all known SKUs */
-        case 0x15B7: return "I219-LM";
-        case 0x15B8: return "I219-V";
-        case 0x15BB: return "I219-LM4";
-        case 0x15BC: return "I219-V4";
-        case 0x15BD: return "I219-LM5";
-        case 0x15BE: return "I219-V5";
-        case 0x15DF: return "I219-LM13";
-        case 0x15E0: return "I219-V13";
-        case 0x15E1: return "I219-LM9";
-        case 0x15E2: return "I219-V9";
-        case 0x15E3: return "I219-LM10";
-        case 0x0D4F: return "I219-LM14";
-        case 0x0D4E: return "I219-V14";
-        case 0x0D4C: return "I219-LM15";
-        case 0x0D4D: return "I219-V15";
-        case 0x0D4A: return "I219-LM16";
-        case 0x550F: return "I219-LM18";
-        case 0x5510: return "I219-V18";
-        case 0x5511: return "I219-LM19";
-        case 0x5512: return "I219-V19";
-        case 0x5513: return "I219-LM20";
-        case 0x5514: return "I219-V20";
+        case INTEL_DEV_I219_LM:       return "I219-LM";
+        case INTEL_DEV_I219_V:        return "I219-V";
+        case INTEL_DEV_I219_LM4:      return "I219-LM4";
+        case INTEL_DEV_I219_V4:       return "I219-V4";
+        case INTEL_DEV_I219_LM5:      return "I219-LM5";
+        case INTEL_DEV_I219_V5:       return "I219-V5";
+        case 0x15DFU:                 return "I219-LM13"; /* SKU not yet in intel_pci_ids.h */
+        case 0x15E0U:                 return "I219-V13";
+        case 0x15E1U:                 return "I219-LM9";
+        case 0x15E2U:                 return "I219-V9";
+        case INTEL_DEV_I219_LM6:      return "I219-LM10";
+        case 0x0D4FU:                 return "I219-LM14";
+        case 0x0D4EU:                 return "I219-V14";
+        case 0x0D4CU:                 return "I219-LM15";
+        case 0x0D4DU:                 return "I219-V15";
+        case 0x0D4AU:                 return "I219-LM16";
+        case 0x550FU:                 return "I219-LM18";
+        case 0x5510U:                 return "I219-V18";
+        case 0x5511U:                 return "I219-LM19";
+        case 0x5512U:                 return "I219-V19";
+        case 0x5513U:                 return "I219-LM20";
+        case 0x5514U:                 return "I219-V20";
 
         /* Intel I217 family */
-        case 0x153A: return "I217-LM";
-        case 0x153B: return "I217-V";
+        case INTEL_DEV_I217_LM:       return "I217-LM";
+        case INTEL_DEV_I217_V:        return "I217-V";
 
-        default:     return "Intel-NIC";
+        default:                      return "Intel-NIC";
     }
 }
 

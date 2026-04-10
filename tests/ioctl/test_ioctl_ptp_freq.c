@@ -25,6 +25,9 @@
 /* Single Source of Truth for IOCTL definitions */
 #include "../include/avb_ioctl.h"
 
+/* Multi-adapter enumeration and capability gating */
+#include "../common/avb_test_common.h"
+
 /* Test result codes */
 #define TEST_PASS 0
 #define TEST_FAIL 1
@@ -655,55 +658,78 @@ int main(void)
     printf("====================================================================\n");
     printf("\n");
     
-    /* Open adapter */
-    ctx.adapter = OpenAdapter();
-    if (ctx.adapter == INVALID_HANDLE_VALUE) {
-        printf("[ERROR] Failed to open AVB adapter. Skipping all tests.\n");
-        return TEST_FAIL;
+    /* Enumerate all adapters; run tests on each that supports BASIC_1588 */
+    AvbAdapterInfo adapters[AVB_MAX_ADAPTERS];
+    int adapterCount = AvbEnumerateAdapters(adapters, AVB_MAX_ADAPTERS);
+    int anyFound = 0;
+
+    if (adapterCount <= 0) {
+        printf("[SKIP] No AVB adapters found. Skipping all tests.\n");
+        return TEST_SKIP;
     }
-    
-    /* Enable hardware timestamping (required for timestamp operations) */
-    if (!EnableHWTimestamping(ctx.adapter)) {
-        printf("[WARN] Failed to enable hardware timestamping. Some tests may fail.\n");
-    }
-    
-    printf("Running PTP Frequency Adjustment tests...\n\n");
-    
-    /* Run tests */
-    #define RUN_TEST(test) do { \
-        int result = test(&ctx); \
-        ctx.test_count++; \
-        if (result == TEST_PASS) ctx.pass_count++; \
-        else if (result == TEST_FAIL) ctx.fail_count++; \
-        else if (result == TEST_SKIP) ctx.skip_count++; \
-    } while(0)
-    
-    RUN_TEST(Test_ZeroFrequencyAdjustment);
-    RUN_TEST(Test_PositiveFrequencyAdjustment);
-    RUN_TEST(Test_NegativeFrequencyAdjustment);
-    RUN_TEST(Test_MaximumPositiveAdjustment);
-    RUN_TEST(Test_MaximumNegativeAdjustment);
-    RUN_TEST(Test_OutOfRangeRejectionPositive);
-    RUN_TEST(Test_OutOfRangeRejectionNegative);
-    RUN_TEST(Test_SmallAdjustment);
-    RUN_TEST(Test_RapidFrequencyChanges);
-    RUN_TEST(Test_FrequencyAdjustmentPersistence);
-    RUN_TEST(Test_FractionalPPBPrecision);
-    RUN_TEST(Test_ConcurrentAdjustmentRequests);
-    RUN_TEST(Test_AdjustmentDuringActiveSync);
-    RUN_TEST(Test_NullPointerHandling);
-    RUN_TEST(Test_AdjustmentResetOnRestart);
-    
-    #undef RUN_TEST
-    
-    /* Reset to nominal before cleanup */
-    AdjustFrequency(ctx.adapter, 0);
-    
-    /* Cleanup */
-    if (ctx.adapter != INVALID_HANDLE_VALUE) {
+
+    for (int ai = 0; ai < adapterCount; ai++) {
+        if (!AVB_HAS_CAP(&adapters[ai], INTEL_CAP_BASIC_1588)) {
+            printf("[SKIP] Adapter %s (DID=0x%04X) lacks BASIC_1588 — skipping.\n",
+                   adapters[ai].device_name, adapters[ai].device_id);
+            continue;
+        }
+        anyFound = 1;
+        printf("--- Adapter %d: %s (DID=0x%04X) ---\n",
+               adapters[ai].global_index, adapters[ai].device_name, adapters[ai].device_id);
+
+        ctx.adapter = AvbOpenAdapter(&adapters[ai]);
+        if (ctx.adapter == INVALID_HANDLE_VALUE) {
+            printf("[ERROR] Failed to open adapter %s. Skipping.\n", adapters[ai].device_name);
+            continue;
+        }
+
+        /* Enable hardware timestamping (required for timestamp operations) */
+        if (!EnableHWTimestamping(ctx.adapter)) {
+            printf("[WARN] Failed to enable hardware timestamping. Some tests may fail.\n");
+        }
+
+        printf("Running PTP Frequency Adjustment tests...\n\n");
+
+        /* Run tests */
+        #define RUN_TEST(test) do { \
+            int result = test(&ctx); \
+            ctx.test_count++; \
+            if (result == TEST_PASS) ctx.pass_count++; \
+            else if (result == TEST_FAIL) ctx.fail_count++; \
+            else if (result == TEST_SKIP) ctx.skip_count++; \
+        } while(0)
+
+        RUN_TEST(Test_ZeroFrequencyAdjustment);
+        RUN_TEST(Test_PositiveFrequencyAdjustment);
+        RUN_TEST(Test_NegativeFrequencyAdjustment);
+        RUN_TEST(Test_MaximumPositiveAdjustment);
+        RUN_TEST(Test_MaximumNegativeAdjustment);
+        RUN_TEST(Test_OutOfRangeRejectionPositive);
+        RUN_TEST(Test_OutOfRangeRejectionNegative);
+        RUN_TEST(Test_SmallAdjustment);
+        RUN_TEST(Test_RapidFrequencyChanges);
+        RUN_TEST(Test_FrequencyAdjustmentPersistence);
+        RUN_TEST(Test_FractionalPPBPrecision);
+        RUN_TEST(Test_ConcurrentAdjustmentRequests);
+        RUN_TEST(Test_AdjustmentDuringActiveSync);
+        RUN_TEST(Test_NullPointerHandling);
+        RUN_TEST(Test_AdjustmentResetOnRestart);
+
+        #undef RUN_TEST
+
+        /* Reset to nominal before close */
+        AdjustFrequency(ctx.adapter, 0);
+
         CloseHandle(ctx.adapter);
+        ctx.adapter = INVALID_HANDLE_VALUE;
     }
-    
+
+    if (!anyFound) {
+        printf("[SKIP] No adapter with BASIC_1588 found.\n");
+        return TEST_SKIP;
+    }
+
     /* Summary */
     printf("\n");
     printf("====================================================================\n");
@@ -715,6 +741,6 @@ int main(void)
     printf(" Skipped: %d tests\n", ctx.skip_count);
     printf("====================================================================\n");
     printf("\n");
-    
+
     return (ctx.fail_count > 0) ? TEST_FAIL : TEST_PASS;
 }

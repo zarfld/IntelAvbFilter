@@ -17,21 +17,21 @@
 
 #include "../../common/avb_test_common.h"
 
-/* I219 PCI Device ID range — add new SKUs as they ship */
+/* I219 PCI Device ID range — uses SSOT intel_pci_ids.h where constants exist */
 static int is_i219(avb_u16 did)
 {
-    return (did == 0x15B7 || did == 0x15B8 ||           /* Gen 1 */
-            did == 0x15BB || did == 0x15BC ||           /* Gen 4 */
-            did == 0x15BD || did == 0x15BE ||           /* Gen 5 */
-            did == 0x15DF || did == 0x15E0 ||           /* Gen 13 */
-            did == 0x15E1 || did == 0x15E2 ||           /* Gen 9 */
-            did == 0x15E3 ||                            /* Gen 10 */
-            did == 0x0D4F || did == 0x0D4E ||           /* Gen 14 */
-            did == 0x0D4C || did == 0x0D4D ||           /* Gen 15 */
-            did == 0x0D4A ||                            /* Gen 16 */
-            did == 0x550F || did == 0x5510 ||           /* Gen 18 */
-            did == 0x5511 || did == 0x5512 ||           /* Gen 19 */
-            did == 0x5513 || did == 0x5514);            /* Gen 20 */
+    return (did == INTEL_DEV_I219_LM   || did == INTEL_DEV_I219_V   ||   /* Gen 1 */
+            did == INTEL_DEV_I219_LM4  || did == INTEL_DEV_I219_V4  ||   /* Gen 4 */
+            did == INTEL_DEV_I219_LM5  || did == INTEL_DEV_I219_V5  ||   /* Gen 5 */
+            did == 0x15DFU || did == 0x15E0U ||                           /* Gen 13 — no SSOT constant yet */
+            did == 0x15E1U || did == 0x15E2U ||                           /* Gen 9 */
+            did == INTEL_DEV_I219_LM6  ||                                 /* Gen 10 */
+            did == 0x0D4FU || did == 0x0D4EU ||                           /* Gen 14 */
+            did == 0x0D4CU || did == 0x0D4DU ||                           /* Gen 15 */
+            did == 0x0D4AU ||                                             /* Gen 16 */
+            did == 0x550FU || did == 0x5510U ||                           /* Gen 18 */
+            did == 0x5511U || did == 0x5512U ||                           /* Gen 19 */
+            did == 0x5513U || did == 0x5514U);                            /* Gen 20 */
 }
 
 int main(void)
