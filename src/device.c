@@ -53,6 +53,39 @@ IntelAvbFilterFastIoDeviceControl(
         return TRUE;
     }
 
+    /* Validate the context is still live and acquire a reference under
+     * FilterListLock.  This closes the use-after-free race: FilterDetach
+     * sets AVB_HW_TEARDOWN + removes the list entry under this same lock
+     * before calling IoReleaseRemoveLockAndWait, so we either:
+     *   (a) acquire the lock before detach → context confirmed live, IoAcquireRemoveLock
+     *       succeeds, FilterDetach blocks in IoReleaseRemoveLockAndWait until we release, OR
+     *   (b) acquire the lock after detach → entry not found in list, return NOT_READY.
+     * In both cases the context is never accessed after ExFreePoolWithTag. */
+    {
+        BOOLEAN bFalse = FALSE;
+        PAVB_DEVICE_CONTEXT validCtx = NULL;
+        FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+        {
+            PLIST_ENTRY _l;
+            for (_l = FilterModuleList.Flink; _l != &FilterModuleList; _l = _l->Flink) {
+                PMS_FILTER _f = CONTAINING_RECORD(_l, MS_FILTER, FilterModuleLink);
+                if ((PVOID)_f->AvbContext == (PVOID)ctx &&
+                    AVB_READ_HW_STATE(ctx) != AVB_HW_TEARDOWN &&
+                    NT_SUCCESS(IoAcquireRemoveLock(&ctx->ioctl_remove_lock, FileObject))) {
+                    validCtx = ctx;
+                    break;
+                }
+            }
+        }
+        FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+        if (!validCtx) {
+            IoStatus->Status      = STATUS_DEVICE_NOT_READY;
+            IoStatus->Information = 0;
+            return TRUE;
+        }
+    }
+    /* ctx is now protected by ioctl_remove_lock; release it at every exit below. */
+
     /* -----------------------------------------------------------------------
      * IOCTL_AVB_GET_TX_TIMESTAMP — atomically read-and-clear the TX timestamp.
      * Reduces GET_TX round-trip from ~8µs (IRP) to ~0.5-1µs.
@@ -61,6 +94,7 @@ IntelAvbFilterFastIoDeviceControl(
         if (!OutputBuffer || OutputBufferLength < sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
             IoStatus->Status      = STATUS_BUFFER_TOO_SMALL;
             IoStatus->Information = 0;
+            IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
             return TRUE;
         }
         __try {
@@ -79,6 +113,7 @@ IntelAvbFilterFastIoDeviceControl(
             IoStatus->Status      = GetExceptionCode();
             IoStatus->Information = 0;
         }
+        IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
         return TRUE;
     }
 
@@ -92,11 +127,13 @@ IntelAvbFilterFastIoDeviceControl(
         !OutputBuffer || OutputBufferLength < sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
         IoStatus->Status      = STATUS_BUFFER_TOO_SMALL;
         IoStatus->Information = 0;
+        IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
         return TRUE;
     }
     if (!ctx->filter_instance || !ctx->filter_instance->FilterHandle) {
         IoStatus->Status      = STATUS_DEVICE_NOT_READY;
         IoStatus->Information = 0;
+        IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
         return TRUE;
     }
 
@@ -135,12 +172,16 @@ IntelAvbFilterFastIoDeviceControl(
                                                     ctx->test_packet_mdl, 0, 64);
             if (!nb) { NdisReleaseSpinLock(&ctx->test_send_lock); lock_held = FALSE;
                        IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
-                       IoStatus->Information = 0; return TRUE; }
+                       IoStatus->Information = 0;
+                       IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+                       return TRUE; }
             nbl = NdisAllocateNetBufferList(ctx->nbl_pool_handle, 0, 0);
             if (!nbl) { NdisFreeNetBuffer(nb);
                         NdisReleaseSpinLock(&ctx->test_send_lock); lock_held = FALSE;
                         IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
-                        IoStatus->Information = 0; return TRUE; }
+                        IoStatus->Information = 0;
+                        IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+                        return TRUE; }
             NdisReleaseSpinLock(&ctx->test_send_lock);
             lock_held = FALSE;
             nbl->FirstNetBuffer = nb; nbl->Next = NULL;
@@ -188,6 +229,7 @@ IntelAvbFilterFastIoDeviceControl(
         IoStatus->Status      = GetExceptionCode();
         IoStatus->Information = 0;
     }
+    IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
     return TRUE;
 }
 
@@ -583,8 +625,32 @@ IntelAvbFilterDeviceIoControl(
             }
 
             if (targetContext != NULL) {
-                Status = AvbHandleDeviceIoControl(targetContext, Irp);
-                InfoLength = (ULONG)Irp->IoStatus.Information;
+                /* Validate the resolved context is still live and acquire a
+                 * reference under FilterListLock so FilterDetach cannot free
+                 * it while the IOCTL is in-flight (use-after-free fix). */
+                PAVB_DEVICE_CONTEXT protectedCtx = NULL;
+                {
+                    PLIST_ENTRY _l;
+                    FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                    for (_l = FilterModuleList.Flink; _l != &FilterModuleList; _l = _l->Flink) {
+                        PMS_FILTER _f = CONTAINING_RECORD(_l, MS_FILTER, FilterModuleLink);
+                        if (_f->AvbContext == (PVOID)targetContext &&
+                            AVB_READ_HW_STATE(targetContext) != AVB_HW_TEARDOWN &&
+                            NT_SUCCESS(IoAcquireRemoveLock(&targetContext->ioctl_remove_lock, Irp))) {
+                            protectedCtx = targetContext;
+                            break;
+                        }
+                    }
+                    FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                }
+                if (protectedCtx != NULL) {
+                    Status = AvbHandleDeviceIoControl(protectedCtx, Irp);
+                    InfoLength = (ULONG)Irp->IoStatus.Information;
+                    IoReleaseRemoveLock(&protectedCtx->ioctl_remove_lock, Irp);
+                } else {
+                    DEBUGP(DL_ERROR, "? Target context no longer live (adapter detached?)\n");
+                    Status = STATUS_DEVICE_NOT_READY;
+                }
             } else {
                 DEBUGP(DL_ERROR, "? No Intel filter found or AVB context not initialized\n");
                 Status = STATUS_DEVICE_NOT_READY;
@@ -755,7 +821,7 @@ IntelAvbFilterDeviceIoControl(
             
             PAVB_OPEN_REQUEST req = (PAVB_OPEN_REQUEST)OutputBuffer;
             PMS_FILTER targetFilter = NULL;
-            UINT32 currentIndex = 0;  /* Track adapter instance index */
+            UINT32 currentIndex = 0;  /* Global adapter index — consistent with IOCTL_AVB_ENUM_ADAPTERS */
             
             DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X Index=%u\n",
                    req->vendor_id, req->device_id, req->index);
@@ -771,51 +837,56 @@ IntelAvbFilterDeviceIoControl(
                 FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
                 
                 USHORT ven = 0, dev = 0;
-                BOOLEAN isMatch = FALSE;
                 if (AvbIsSupportedIntelController(cand, &ven, &dev))
                 {
-                    /* Primary: exact DID match from AvbIsSupportedIntelController */
-                    isMatch = (ven == req->vendor_id && dev == (USHORT)req->device_id);
-
-                    /* Fallback 1: match against the real PCI DID stored in context.
-                     * Handles I219 variant DIDs (e.g. I219-LM4 = 0x15BB) where
-                     * AvbIsSupportedIntelController returns the representative 0x15B7
-                     * but the context was created with the true PCI DID. */
-                    if (!isMatch && cand->AvbContext)
+                    /* Global index counting — same ordering as IOCTL_AVB_ENUM_ADAPTERS.
+                     * When we reach the requested global position, verify the DID matches
+                     * and stop searching regardless of match outcome. */
+                    if (currentIndex == req->index)
                     {
-                        PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
-                        isMatch = (ctx->intel_device.pci_vendor_id == req->vendor_id &&
-                                   ctx->intel_device.pci_device_id == req->device_id);
-                    }
+                        BOOLEAN isMatch = FALSE;
 
-                    /* Fallback 2: family-match — same device family regardless of exact DID.
-                     * Handles I219 where AvbCreateMinimalContext stores the representative
-                     * DID (0x15B7) but the test sends the real PCI DID (0x15BB); both
-                     * resolve to INTEL_DEVICE_I219 via AvbGetIntelDeviceType(). */
-                    if (!isMatch && cand->AvbContext)
-                    {
-                        PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
-                        intel_device_type_t ctxType = AvbGetIntelDeviceType(ctx->intel_device.pci_device_id);
-                        intel_device_type_t reqType = AvbGetIntelDeviceType((USHORT)req->device_id);
-                        isMatch = (ven == req->vendor_id &&
-                                   ctxType != INTEL_DEVICE_UNKNOWN && ctxType == reqType);
-                    }
-                }
-                if (isMatch)
-                {
-                    /* Multi-adapter fix: Check if this is the requested instance */
-                    DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Found matching adapter currentIndex=%u (want %u) Name=%wZ\n",
-                           currentIndex, req->index, &cand->MiniportFriendlyName);
-                    
-                    if (currentIndex == req->index) {
-                        targetFilter = cand;
-                        DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: MATCH! Using adapter at index %u\n", currentIndex);
-                        // Re-acquire before break so the post-loop FILTER_RELEASE_LOCK
-                        // at line ~764 always has a paired acquire (same pattern as lazy-init loop fix).
+                        /* Primary: exact DID match from AvbIsSupportedIntelController */
+                        isMatch = (ven == req->vendor_id && dev == (USHORT)req->device_id);
+
+                        /* Fallback 1: match against the real PCI DID stored in context.
+                         * Handles I219 variant DIDs (e.g. I219-LM4 = 0x15BB) where
+                         * AvbIsSupportedIntelController returns the representative 0x15B7
+                         * but the context was created with the true PCI DID. */
+                        if (!isMatch && cand->AvbContext)
+                        {
+                            PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                            isMatch = (ctx->intel_device.pci_vendor_id == req->vendor_id &&
+                                       ctx->intel_device.pci_device_id == req->device_id);
+                        }
+
+                        /* Fallback 2: family-match — same device family regardless of exact DID.
+                         * Handles I219 where AvbCreateMinimalContext stores the representative
+                         * DID (0x15B7) but the test sends the real PCI DID (0x15BB); both
+                         * resolve to INTEL_DEVICE_I219 via AvbGetIntelDeviceType(). */
+                        if (!isMatch && cand->AvbContext)
+                        {
+                            PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                            intel_device_type_t ctxType = AvbGetIntelDeviceType(ctx->intel_device.pci_device_id);
+                            intel_device_type_t reqType = AvbGetIntelDeviceType((USHORT)req->device_id);
+                            isMatch = (ven == req->vendor_id &&
+                                       ctxType != INTEL_DEVICE_UNKNOWN && ctxType == reqType);
+                        }
+
+                        DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Global index %u adapter VID=0x%04X DID=0x%04X %s (want DID=0x%04X) Name=%wZ\n",
+                               currentIndex, ven, dev,
+                               isMatch ? "MATCH" : "DID-MISMATCH",
+                               req->device_id, &cand->MiniportFriendlyName);
+
+                        if (isMatch) {
+                            targetFilter = cand;
+                        }
+                        /* Always stop at the requested global position. Re-acquire before
+                         * break so the post-loop FILTER_RELEASE_LOCK is always paired. */
                         FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
                         break;
                     }
-                    currentIndex++;  /* This VID/DID matches, increment instance counter */
+                    currentIndex++;  /* Count ALL Intel adapters (same as ENUM_ADAPTERS) */
                 }
                 
                 FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);

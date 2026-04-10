@@ -637,7 +637,10 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         if (pFilter != NULL)
         {
             if (pFilter->AvbContext != NULL) {
-                AvbCleanupDevice((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+                PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+                AVB_SET_HW_STATE(avbCtx, AVB_HW_TEARDOWN);
+                IoReleaseRemoveLockAndWait(&avbCtx->ioctl_remove_lock, avbCtx);
+                AvbCleanupDevice(avbCtx);
                 pFilter->AvbContext = NULL;
             }
             FILTER_FREE_MEM(pFilter);
@@ -1066,11 +1069,23 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
 
     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
     RemoveEntryList(&pFilter->FilterModuleLink);
+    if (pFilter->AvbContext != NULL) {
+        /* Mark context as being torn down while still under FilterListLock so
+         * concurrent IOCTL dispatches (which check both list membership and
+         * hw_state under the same lock) cannot acquire a new reference after
+         * we've decided to free the context. */
+        AVB_SET_HW_STATE((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, AVB_HW_TEARDOWN);
+    }
     FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
 
     // Cleanup AVB context
     if (pFilter->AvbContext != NULL) {
-        AvbCleanupDevice((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        /* Release the initial "alive" reference and wait for all in-flight IOCTL
+         * dispatches to complete before proceeding with context teardown.
+         * This is the drain point that closes the use-after-free race window. */
+        IoReleaseRemoveLockAndWait(&avbCtx->ioctl_remove_lock, avbCtx);
+        AvbCleanupDevice(avbCtx);
         pFilter->AvbContext = NULL;
     }
 

@@ -201,6 +201,18 @@ NTSTATUS AvbCreateMinimalContext(
     // TRACE: Verify RtlZeroMemory correctly initialized flags (should be 0)
     DEBUGP(DL_ERROR, "!!! CONTEXT_ALLOC: Memory after zero (ctx=%p, target_flag=%d, tx_flag=%d)\n",
            ctx, (ULONG)ctx->target_time_poll_active, (ULONG)ctx->tx_poll_active);
+
+    /* Initialize IOCTL lifetime tracking (use-after-free fix).
+     * The remove lock starts with one reference (the "alive" reference).
+     * FilterDetach releases it via IoReleaseRemoveLockAndWait, which blocks
+     * until all in-flight IOCTL dispatch references are also released.
+     * MaxLockedMinutes=1: assert if any lock is held longer than 1 minute. */
+    IoInitializeRemoveLock(&ctx->ioctl_remove_lock, FILTER_ALLOC_TAG, 1, 0);
+    {
+        NTSTATUS lockSt = IoAcquireRemoveLock(&ctx->ioctl_remove_lock, ctx);
+        NT_ASSERT(NT_SUCCESS(lockSt));  /* Must always succeed on a fresh remove lock */
+        (void)lockSt;
+    }
     
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;

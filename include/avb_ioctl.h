@@ -384,7 +384,8 @@ typedef struct AVB_QAV_REQUEST {
 
 /* Hardware lifecycle state machine (shared ABI) */
 typedef enum _AVB_HW_STATE {
-    AVB_HW_UNBOUND = 0,      /* Filter not yet attached to supported Intel miniport */
+    AVB_HW_TEARDOWN  = -1,   /* Context is being freed; no new IOCTL access allowed */
+    AVB_HW_UNBOUND   =  0,   /* Filter not yet attached to supported Intel miniport */
     AVB_HW_BOUND,            /* Filter attached to supported Intel adapter (no BAR/MMIO yet) */
     AVB_HW_BAR_MAPPED,       /* BAR0 resources discovered + MMIO mapped + basic register access validated */
     AVB_HW_PTP_READY         /* PTP clock verified incrementing & timestamp capture enabled */

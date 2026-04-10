@@ -34,11 +34,13 @@ typedef struct _INTEL_HARDWARE_CONTEXT {
 /* Utility: readable name for state (for debug prints) */
 __forceinline const char* AvbHwStateName(LONG s) {
     switch ((AVB_HW_STATE)s) {
-    case AVB_HW_UNBOUND: return "UNBOUND"; 
-    case AVB_HW_BOUND: return "BOUND"; 
-    case AVB_HW_BAR_MAPPED: return "BAR_MAPPED"; 
-    case AVB_HW_PTP_READY: return "PTP_READY"; 
-    default: return "?"; }
+    case AVB_HW_TEARDOWN:  return "TEARDOWN";
+    case AVB_HW_UNBOUND:   return "UNBOUND";
+    case AVB_HW_BOUND:     return "BOUND";
+    case AVB_HW_BAR_MAPPED: return "BAR_MAPPED";
+    case AVB_HW_PTP_READY: return "PTP_READY";
+    default: return "?";
+    }
 }
 
 /*
@@ -289,6 +291,21 @@ typedef struct _AVB_DEVICE_CONTEXT {
 
     // Per-adapter list linkage — protected by g_AvbContextListLock
     struct _AVB_DEVICE_CONTEXT *next_context;
+
+    /*
+     * IOCTL lifetime tracking — prevents use-after-free during FilterDetach.
+     *
+     * Protocol:
+     *   - Initialized (+ initial reference acquired) in AvbCreateMinimalContext.
+     *   - IoAcquireRemoveLock called in device.c under FilterListLock before
+     *     each IOCTL dispatch.  The acquire occurs only when the context is
+     *     confirmed live in FilterModuleList and hw_state != AVB_HW_TEARDOWN.
+     *   - IoReleaseRemoveLock called after each IOCTL completes.
+     *   - FilterDetach: sets AVB_HW_TEARDOWN + RemoveEntryList under
+     *     FilterListLock, then calls IoReleaseRemoveLockAndWait to drain all
+     *     in-flight IOCTLs before AvbCleanupDevice / ExFreePoolWithTag.
+     */
+    IO_REMOVE_LOCK ioctl_remove_lock;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
 /*========================================================================
