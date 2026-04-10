@@ -475,12 +475,12 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     }
     
     // Set baseline capabilities even if hardware init fails
-    DEBUGP(DL_FATAL, "!!! DIAG: AvbBringUpHardware - BEFORE assignment: device_type=%d, old_caps=0x%08X, baseline_caps=0x%08X\n",
+    DEBUGP(DL_ERROR, "!!! DIAG: AvbBringUpHardware - BEFORE assignment: device_type=%d, old_caps=0x%08X, baseline_caps=0x%08X\n",
            Ctx->intel_device.device_type, Ctx->intel_device.capabilities, baseline_caps);
     Ctx->intel_device.capabilities = baseline_caps;
     DEBUGP(DL_TRACE, "? AvbBringUpHardware: Set baseline capabilities 0x%08X for device type %d\n", 
            baseline_caps, Ctx->intel_device.device_type);
-    DEBUGP(DL_FATAL, "!!! DIAG: AvbBringUpHardware - AFTER assignment: capabilities=0x%08X\n", 
+    DEBUGP(DL_ERROR, "!!! DIAG: AvbBringUpHardware - AFTER assignment: capabilities=0x%08X\n", 
            Ctx->intel_device.capabilities);
     
     NTSTATUS status = AvbPerformBasicInitialization(Ctx);
@@ -542,8 +542,28 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         return STATUS_SUCCESS;
     }
 
-    /* Step 1: Discover & map BAR0 if not yet mapped */
+    /* Step 1: Discover & map BAR0 if not yet mapped.
+     *
+     * IMPORTANT: i217/i219 are integrated PCH controllers — they access registers
+     * through MDIO paging (no discrete BAR0).  AvbDiscoverIntelControllerResources
+     * will always fail for these devices.  For MDIO-family devices we skip BAR0
+     * mapping entirely and mark the context as initialized at MDIO_READY level so
+     * that OPEN_ADAPTER and enumeration IOCTLs are not blocked by the init guard. */
+    BOOLEAN isMdioDevice = (Ctx->intel_device.device_type == INTEL_DEVICE_I219 ||
+                            Ctx->intel_device.device_type == INTEL_DEVICE_I217);
+
     if (Ctx->hardware_context == NULL) {
+        if (isMdioDevice) {
+            /* MDIO-based device: no BAR0, skip straight to base-capability promotion */
+            DEBUGP(DL_INFO, "? STEP 1 SKIPPED (MDIO device, no BAR0): VID=0x%04X DID=0x%04X type=%d\n",
+                   Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id,
+                   Ctx->intel_device.device_type);
+            Ctx->initialized = TRUE;
+            /* hw_state stays at AVB_HW_BOUND — MMIO-dependent paths will guard on
+             * hw_state < AVB_HW_BAR_MAPPED and degrade gracefully */
+            return STATUS_SUCCESS;
+        }
+
         DEBUGP(DL_TRACE, "? STEP 1: Starting BAR0 discovery and mapping...\n");
         PHYSICAL_ADDRESS bar0 = {0};
         ULONG barLen = 0;
@@ -590,17 +610,17 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         // **CRITICAL FIX**: Connect platform_data to Windows hardware context
         // This allows intel_avb library to access AVB_DEVICE_CONTEXT for platform operations
         priv->platform_data = (void*)Ctx;
-        DEBUGP(DL_FATAL, "!!! DIAG: STEP 2a: platform_data -> Ctx=%p (enables AvbMmioReadReal access)\n", Ctx);
+        DEBUGP(DL_ERROR, "!!! DIAG: STEP 2a: platform_data -> Ctx=%p (enables AvbMmioReadReal access)\n", Ctx);
         
         // CRITICAL: hardware_context might be NULL or uninitialized at this point
         // Only access it if we've already mapped hardware (Step 1 succeeded)
         if (Ctx->hardware_context != NULL && Ctx->hw_state >= AVB_HW_BAR_MAPPED) {
             PINTEL_HARDWARE_CONTEXT hwCtx = (PINTEL_HARDWARE_CONTEXT)Ctx->hardware_context;
             priv->mmio_base = hwCtx->mmio_base;
-            DEBUGP(DL_FATAL, "!!! DIAG: STEP 2b: mmio_base=%p from hardware_context\n", priv->mmio_base);
+            DEBUGP(DL_ERROR, "!!! DIAG: STEP 2b: mmio_base=%p from hardware_context\n", priv->mmio_base);
         } else {
             priv->mmio_base = NULL; // Will be set later when hardware is mapped
-            DEBUGP(DL_FATAL, "!!! DIAG: STEP 2b: MMIO not yet mapped, deferring\n");
+            DEBUGP(DL_ERROR, "!!! DIAG: STEP 2b: MMIO not yet mapped, deferring\n");
         }
         priv->initialized = 0;
         
@@ -1610,7 +1630,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
     // On-demand initialization: only initialize on first IOCTL, not at driver load
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY)
+    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER)
         return STATUS_DEVICE_NOT_READY;
 
     // Implements #270 (TEST-STATISTICS-001): count every IOCTL dispatch before
@@ -3567,6 +3587,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         } 
         break;
     case IOCTL_AVB_OPEN_ADAPTER:
+        DEBUGP(DL_ERROR, "!!! [DIAG] AvbHandleDeviceIoControl OPEN_ADAPTER entered ctx=%p outLen=%lu\n", AvbContext, outLen);
         DEBUGP(DL_TRACE, "? IOCTL_AVB_OPEN_ADAPTER: Multi-adapter context switching\n");
         
         if (outLen < sizeof(AVB_OPEN_REQUEST)) { 
@@ -3597,8 +3618,15 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                            &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
                            ctx->intel_device.pci_device_id);
                     
+                    /* Match by exact DID OR same device-family (handles variant DIDs like I219-LM4
+                     * where ENUM_ADAPTERS returns the family representative DID via
+                     * AvbIsSupportedIntelController, but the context stores the real PCI DID). */
+                    intel_device_type_t ctxType = AvbGetIntelDeviceType(ctx->intel_device.pci_device_id);
+                    intel_device_type_t reqType = AvbGetIntelDeviceType(req->device_id);
+                    BOOLEAN didMatch = (ctx->intel_device.pci_device_id == req->device_id);
+                    BOOLEAN familyMatch = (ctxType != INTEL_DEVICE_UNKNOWN && ctxType == reqType);
                     if (ctx->intel_device.pci_vendor_id == req->vendor_id && 
-                        ctx->intel_device.pci_device_id == req->device_id) {
+                        (didMatch || familyMatch)) {
                         // FIX: Check if this is the N-th matching adapter
                         if (matchCount == req->index) {
                             targetFilter = cand;
@@ -3619,6 +3647,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
             
             if (targetFilter == NULL) {
+                DEBUGP(DL_ERROR, "!!! [DIAG] OPEN_ADAPTER: INNER search found NO target for VID=0x%04X DID=0x%04X index=%u\n",
+                       req->vendor_id, req->device_id, req->index);
                 DEBUGP(DL_ERROR, "? OPEN_ADAPTER: No adapter found for VID=0x%04X DID=0x%04X\n", 
                        req->vendor_id, req->device_id);
                 DEBUGP(DL_ERROR, "   Available adapters:\n");
@@ -3674,26 +3704,32 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 
                 // CRITICAL FIX: Force PTP initialization for all supported devices
                 intel_device_type_t target_type = targetContext->intel_device.device_type;
-                if ((target_type == INTEL_DEVICE_I210 || target_type == INTEL_DEVICE_I225 || 
-                     target_type == INTEL_DEVICE_I226) &&
-                    targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
-                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Forcing PTP initialization for selected adapter\n");
-                    DEBUGP(DL_TRACE, "   - Device Type: %d\n", target_type);
-                    DEBUGP(DL_TRACE, "   - Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
-                    DEBUGP(DL_TRACE, "   - Hardware Context: %p\n", targetContext->hardware_context);
-                    
-                    // Force complete PTP setup
-                    AvbEnsureDeviceReady(targetContext);
-                    
-                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: PTP initialization completed\n");
-                    DEBUGP(DL_TRACE, "   - Final Hardware State: %s\n", AvbHwStateName(targetContext->hw_state));
-                    DEBUGP(DL_TRACE, "   - Final Capabilities: 0x%08X\n", targetContext->intel_device.capabilities);
+                BOOLEAN isMdioFamily = (target_type == INTEL_DEVICE_I219 ||
+                                        target_type == INTEL_DEVICE_I217);
+                if (target_type == INTEL_DEVICE_I210 || target_type == INTEL_DEVICE_I225 ||
+                    target_type == INTEL_DEVICE_I226) {
+                    /* BAR-mapped devices: require hw_state >= AVB_HW_BAR_MAPPED */
+                    if (targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Forcing PTP initialization (BAR device type=%d)\n", target_type);
+                        AvbEnsureDeviceReady(targetContext);
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: PTP init done hw_state=%s caps=0x%08X\n",
+                               AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
+                    }
+                } else if (isMdioFamily) {
+                    /* MDIO-based i217/i219: no BAR0, promote to PTP_READY directly.
+                     * Timestamping goes via intel_init() MDIO ops, not MMIO. */
+                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO device (type=%d) — promoting to PTP_READY\n", target_type);
+                    AVB_SET_HW_STATE(targetContext, AVB_HW_PTP_READY);
+                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO PTP_READY set hw_state=%s caps=0x%08X\n",
+                           AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
                 }
                 
                 req->status = 0; // Success
                 info = sizeof(*req);
                 status = STATUS_SUCCESS;
-                
+                DEBUGP(DL_ERROR, "!!! [DIAG] OPEN_ADAPTER: SUCCESS path DID=0x%04X type=%d mdio=%d hw=%s caps=0x%08X\n",
+                       (UINT)req->device_id, (int)target_type, (int)isMdioFamily,
+                       AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
                 DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Context switch completed successfully\n");
                 DEBUGP(DL_TRACE, "   - Active context: VID=0x%04X DID=0x%04X\n",
                        g_AvbContext->intel_device.pci_vendor_id,
@@ -3705,12 +3741,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         break;
     case IOCTL_AVB_SETUP_TAS:
         {
-            DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_TAS ENTERED - inLen=%lu outLen=%lu required=%lu\n",
+            DEBUGP(DL_ERROR, "!!! DIAG: IOCTL_AVB_SETUP_TAS ENTERED - inLen=%lu outLen=%lu required=%lu\n",
                    inLen, outLen, (ULONG)sizeof(AVB_TAS_REQUEST));
             DEBUGP(DL_TRACE, "? IOCTL_AVB_SETUP_TAS: Phase 2 Enhanced TAS Configuration\n");
             
             if (inLen < sizeof(AVB_TAS_REQUEST) || outLen < sizeof(AVB_TAS_REQUEST)) {
-                DEBUGP(DL_FATAL, "!!! DIAG: TAS SETUP FAILED - Buffer too small\n");
+                DEBUGP(DL_ERROR, "!!! DIAG: TAS SETUP FAILED - Buffer too small\n");
                 DEBUGP(DL_ERROR, "? TAS SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -3731,7 +3767,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     
                     // Check if this device supports TAS
                     if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
-                        DEBUGP(DL_FATAL, "!!! DIAG: TAS NOT SUPPORTED - caps=0x%08X (need INTEL_CAP_TSN_TAS=0x%08X)\n",
+                        DEBUGP(DL_ERROR, "!!! DIAG: TAS NOT SUPPORTED - caps=0x%08X (need INTEL_CAP_TSN_TAS=0x%08X)\n",
                                activeContext->intel_device.capabilities, INTEL_CAP_TSN_TAS);
                         DEBUGP(DL_TRACE, "? TAS SETUP: Device does not support TAS (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
@@ -3739,10 +3775,10 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
                     } else {
                         // Call Intel library TAS setup function (standard implementation)
-                        DEBUGP(DL_FATAL, "!!! DIAG: Calling intel_setup_time_aware_shaper...\n");
+                        DEBUGP(DL_ERROR, "!!! DIAG: Calling intel_setup_time_aware_shaper...\n");
                         DEBUGP(DL_TRACE, "? TAS SETUP: Calling Intel library TAS implementation\n");
                         int rc = intel_setup_time_aware_shaper(&activeContext->intel_device, &r->config);
-                        DEBUGP(DL_FATAL, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
+                        DEBUGP(DL_ERROR, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         
@@ -3780,12 +3816,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
 
     case IOCTL_AVB_SETUP_FP:
         {
-            DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_FP ENTERED - inLen=%lu outLen=%lu required=%lu\n",
+            DEBUGP(DL_ERROR, "!!! DIAG: IOCTL_AVB_SETUP_FP ENTERED - inLen=%lu outLen=%lu required=%lu\n",
                    inLen, outLen, (ULONG)sizeof(AVB_FP_REQUEST));
             DEBUGP(DL_TRACE, "? IOCTL_AVB_SETUP_FP: Phase 2 Enhanced Frame Preemption Configuration\n");
             
             if (inLen < sizeof(AVB_FP_REQUEST) || outLen < sizeof(AVB_FP_REQUEST)) {
-                DEBUGP(DL_FATAL, "!!! DIAG: FP SETUP FAILED - Buffer too small\n");
+                DEBUGP(DL_ERROR, "!!! DIAG: FP SETUP FAILED - Buffer too small\n");
                 DEBUGP(DL_ERROR, "? FP SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -3848,12 +3884,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
 
     case IOCTL_AVB_SETUP_PTM:
         {
-            DEBUGP(DL_FATAL, "!!! DIAG: IOCTL_AVB_SETUP_PTM ENTERED - inLen=%lu outLen=%lu required=%lu\n",
+            DEBUGP(DL_ERROR, "!!! DIAG: IOCTL_AVB_SETUP_PTM ENTERED - inLen=%lu outLen=%lu required=%lu\n",
                    inLen, outLen, (ULONG)sizeof(AVB_PTM_REQUEST));
             DEBUGP(DL_TRACE, "? IOCTL_AVB_SETUP_PTM: Phase 2 Enhanced PTM Configuration\n");
             
             if (inLen < sizeof(AVB_PTM_REQUEST) || outLen < sizeof(AVB_PTM_REQUEST)) {
-                DEBUGP(DL_FATAL, "!!! DIAG: PTM SETUP FAILED - Buffer too small\n");
+                DEBUGP(DL_ERROR, "!!! DIAG: PTM SETUP FAILED - Buffer too small\n");
                 DEBUGP(DL_ERROR, "? PTM SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
@@ -4583,7 +4619,8 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 did)
         case INTEL_DEV_I219_D2: 
         case INTEL_DEV_I219_LM_DC7: 
         case INTEL_DEV_I219_V6: 
-        case INTEL_DEV_I219_LM6: return INTEL_DEVICE_I219;  // I219 family
+        case INTEL_DEV_I219_LM6:
+        case INTEL_DEV_I219_LM4: return INTEL_DEVICE_I219;  // I219 family (incl. LM4=0x15BB)
         
         case INTEL_DEV_I225_V: return INTEL_DEVICE_I225;  // I225
         case INTEL_DEV_I226_LM: return INTEL_DEVICE_I226;  // I226

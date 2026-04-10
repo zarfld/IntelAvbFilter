@@ -165,8 +165,9 @@ static int enumerate_adapters(HANDLE hDev, uint32_t *out_indices, int max_count)
                                        &open_r, sizeof(open_r),
                                        &open_r, sizeof(open_r), &br, NULL);
         if (!open_ok || open_r.status != NDIS_STATUS_SUCCESS) {
-            printf("  [WARN] Adapter %d: IOCTL_AVB_OPEN_ADAPTER failed (ok=%d status=0x%08X) — skipping\n",
-                   idx, (int)open_ok, (unsigned)open_r.status);
+            DWORD gle = GetLastError();
+            printf("  [WARN] Adapter %d: IOCTL_AVB_OPEN_ADAPTER failed (ok=%d status=0x%08X winErr=0x%08X bytesRet=%u) -- skipping\n",
+                   idx, (int)open_ok, (unsigned)open_r.status, (unsigned)gle, (unsigned)br);
             fflush(stdout);
             continue;
         }

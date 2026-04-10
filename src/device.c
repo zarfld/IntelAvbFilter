@@ -161,6 +161,12 @@ IntelAvbFilterFastIoDeviceControl(
          * Must be read BEFORE NdisFSendNetBufferLists to capture pre-send PHC. */
         ULONG64 captureTs = 0;
         AvbReadTimestamp(&ctx->intel_device, &captureTs);
+        if (captureTs == 0) {
+            /* SYSTIM not running yet (TSAUXC disabled or timer not seeded) — fall back to
+             * QueryPerformanceCounter to ensure ts is always non-zero, mirroring AvbSendPtpCore. */
+            LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
+            captureTs = (ULONG64)pc.QuadPart;
+        }
         InterlockedExchange64(&ctx->last_ndis_tx_timestamp, (LONGLONG)captureTs);
 
         /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
@@ -667,12 +673,12 @@ IntelAvbFilterDeviceIoControl(
                         {
                             PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
                             
-                            DEBUGP(DL_FATAL, "!!! DIAG: ENUM_ADAPTERS - Reading from context %p:\n", ctx);
-                            DEBUGP(DL_FATAL, "    ctx->intel_device.pci_vendor_id=0x%04X\n", ctx->intel_device.pci_vendor_id);
-                            DEBUGP(DL_FATAL, "    ctx->intel_device.pci_device_id=0x%04X\n", ctx->intel_device.pci_device_id);
-                            DEBUGP(DL_FATAL, "    ctx->intel_device.device_type=%d\n", ctx->intel_device.device_type);
-                            DEBUGP(DL_FATAL, "    ctx->intel_device.capabilities=0x%08X\n", ctx->intel_device.capabilities);
-                            DEBUGP(DL_FATAL, "    ctx->hw_state=%d (%s)\n", ctx->hw_state, AvbHwStateName(ctx->hw_state));
+                            DEBUGP(DL_ERROR, "!!! DIAG: ENUM_ADAPTERS - Reading from context %p:\n", ctx);
+                            DEBUGP(DL_ERROR, "    ctx->intel_device.pci_vendor_id=0x%04X\n", ctx->intel_device.pci_vendor_id);
+                            DEBUGP(DL_ERROR, "    ctx->intel_device.pci_device_id=0x%04X\n", ctx->intel_device.pci_device_id);
+                            DEBUGP(DL_ERROR, "    ctx->intel_device.device_type=%d\n", ctx->intel_device.device_type);
+                            DEBUGP(DL_ERROR, "    ctx->intel_device.capabilities=0x%08X\n", ctx->intel_device.capabilities);
+                            DEBUGP(DL_ERROR, "    ctx->hw_state=%d (%s)\n", ctx->hw_state, AvbHwStateName(ctx->hw_state));
                             
                             // CRITICAL FIX: Don't call intel_init() here - it was already called during
                             // AvbBringUpHardware from IOCTL_AVB_INIT_DEVICE. Just read the cached capabilities.
@@ -682,7 +688,7 @@ IntelAvbFilterDeviceIoControl(
                             
                             DEBUGP(DL_INFO, "ENUM_ADAPTERS: Adapter #%lu capabilities=0x%08X (hw_state=%d)\n", 
                                    adapterCount, req->capabilities, ctx->hw_state);
-                            DEBUGP(DL_FATAL, "!!! DIAG: ENUM_ADAPTERS - Writing to response buffer: req->capabilities=0x%08X\n", 
+                            DEBUGP(DL_ERROR, "!!! DIAG: ENUM_ADAPTERS - Writing to response buffer: req->capabilities=0x%08X\n", 
                                    req->capabilities);
                         }
                         else
@@ -720,11 +726,11 @@ IntelAvbFilterDeviceIoControl(
             {
                 DEBUGP(DL_INFO, "ENUM_ADAPTERS: Success - Total adapters=%lu, returned adapter #%lu (VID=0x%04X, DID=0x%04X, caps=0x%08X)\n",
                        adapterCount, requestedIndex, req->vendor_id, req->device_id, req->capabilities);
-                DEBUGP(DL_FATAL, "!!! DIAG: ENUM_ADAPTERS - FINAL response buffer before IRP completion:\n");
-                DEBUGP(DL_FATAL, "    req=%p, req->count=%u, req->index=%u\n", req, req->count, req->index);
-                DEBUGP(DL_FATAL, "    req->vendor_id=0x%04X, req->device_id=0x%04X\n", req->vendor_id, req->device_id);
-                DEBUGP(DL_FATAL, "    req->capabilities=0x%08X\n", req->capabilities);
-                DEBUGP(DL_FATAL, "    InfoLength=%lu, sizeof(AVB_ENUM_REQUEST)=%lu\n", 
+                DEBUGP(DL_ERROR, "!!! DIAG: ENUM_ADAPTERS - FINAL response buffer before IRP completion:\n");
+                DEBUGP(DL_ERROR, "    req=%p, req->count=%u, req->index=%u\n", req, req->count, req->index);
+                DEBUGP(DL_ERROR, "    req->vendor_id=0x%04X, req->device_id=0x%04X\n", req->vendor_id, req->device_id);
+                DEBUGP(DL_ERROR, "    req->capabilities=0x%08X\n", req->capabilities);
+                DEBUGP(DL_ERROR, "    InfoLength=%lu, sizeof(AVB_ENUM_REQUEST)=%lu\n", 
                        InfoLength, (ULONG)sizeof(AVB_ENUM_REQUEST));
                 Status = NDIS_STATUS_SUCCESS;
                 InfoLength = sizeof(AVB_ENUM_REQUEST);
@@ -765,8 +771,37 @@ IntelAvbFilterDeviceIoControl(
                 FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
                 
                 USHORT ven = 0, dev = 0;
-                if (AvbIsSupportedIntelController(cand, &ven, &dev) && 
-                    ven == req->vendor_id && dev == req->device_id)
+                BOOLEAN isMatch = FALSE;
+                if (AvbIsSupportedIntelController(cand, &ven, &dev))
+                {
+                    /* Primary: exact DID match from AvbIsSupportedIntelController */
+                    isMatch = (ven == req->vendor_id && dev == (USHORT)req->device_id);
+
+                    /* Fallback 1: match against the real PCI DID stored in context.
+                     * Handles I219 variant DIDs (e.g. I219-LM4 = 0x15BB) where
+                     * AvbIsSupportedIntelController returns the representative 0x15B7
+                     * but the context was created with the true PCI DID. */
+                    if (!isMatch && cand->AvbContext)
+                    {
+                        PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                        isMatch = (ctx->intel_device.pci_vendor_id == req->vendor_id &&
+                                   ctx->intel_device.pci_device_id == req->device_id);
+                    }
+
+                    /* Fallback 2: family-match — same device family regardless of exact DID.
+                     * Handles I219 where AvbCreateMinimalContext stores the representative
+                     * DID (0x15B7) but the test sends the real PCI DID (0x15BB); both
+                     * resolve to INTEL_DEVICE_I219 via AvbGetIntelDeviceType(). */
+                    if (!isMatch && cand->AvbContext)
+                    {
+                        PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
+                        intel_device_type_t ctxType = AvbGetIntelDeviceType(ctx->intel_device.pci_device_id);
+                        intel_device_type_t reqType = AvbGetIntelDeviceType((USHORT)req->device_id);
+                        isMatch = (ven == req->vendor_id &&
+                                   ctxType != INTEL_DEVICE_UNKNOWN && ctxType == reqType);
+                    }
+                }
+                if (isMatch)
                 {
                     /* Multi-adapter fix: Check if this is the requested instance */
                     DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Found matching adapter currentIndex=%u (want %u) Name=%wZ\n",
@@ -792,6 +827,8 @@ IntelAvbFilterDeviceIoControl(
                 DEBUGP(DL_WARN, "!!! OPEN_ADAPTER: No adapter found for Index=%u (found %u matching adapters)\n",
                        req->index, currentIndex);
             }
+            DEBUGP(DL_ERROR, "!!! [DIAG] OPEN_ADAPTER: targetFilter=%p DID=0x%04X index=%u\n",
+                   targetFilter, (UINT)req->device_id, (UINT)req->index);
             
             if (targetFilter == NULL) {
                 req->status = (avb_u32)NDIS_STATUS_FAILURE;
@@ -809,7 +846,10 @@ IntelAvbFilterDeviceIoControl(
                     DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Storing context %p in FileObject %p for VID=0x%04X DID=0x%04X Index=%u\n",
                            targetFilter->AvbContext, IrpSp->FileObject, req->vendor_id, req->device_id, req->index);
                     
+                    DEBUGP(DL_ERROR, "!!! [DIAG] OPEN_ADAPTER: calling AvbHandleDeviceIoControl ctx=%p\n", targetFilter->AvbContext);
                     Status = AvbHandleDeviceIoControl((PAVB_DEVICE_CONTEXT)targetFilter->AvbContext, Irp);
+                    DEBUGP(DL_ERROR, "!!! [DIAG] OPEN_ADAPTER: AvbHandleDeviceIoControl returned 0x%08X info=%lu\n",
+                           (UINT)Status, (ULONG)Irp->IoStatus.Information);
                     InfoLength = (ULONG)Irp->IoStatus.Information;
                 } else {
                     req->status = (avb_u32)NDIS_STATUS_FAILURE;

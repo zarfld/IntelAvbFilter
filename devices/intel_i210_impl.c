@@ -19,6 +19,13 @@ Abstract:
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
 
+// I210 SYSTIMR (sub-nanoseconds) - read to trigger SYSTIML/SYSTIMH latch
+// Same address as E1000_SYSTIMR / I211_SYSTIMR - not in I210 SSOT spec but present in hardware
+#define I210_SYSTIMR  0x0B6F8
+
+// Forward declarations
+static int init_ptp(device_t *dev);
+
 /**
  * @brief Initialize I210 device
  * @param dev Device handle
@@ -27,11 +34,11 @@ extern const struct platform_ops ndis_platform_ops;
 static int init(device_t *dev)
 {
     DEBUGP(DL_TRACE, "==>i210_init\n");
-    
+
     if (dev == NULL) {
         return -1;
     }
-    
+
     // I210-specific initialization
     if (ndis_platform_ops.init) {
         NTSTATUS result = ndis_platform_ops.init(dev);
@@ -40,7 +47,15 @@ static int init(device_t *dev)
             return -1;
         }
     }
-    
+
+    // Initialize PTP clock (required for GET_TIMESTAMP and TX timestamps to work)
+    DEBUGP(DL_TRACE, "I210: Initializing PTP clock\n");
+    int ptp_result = init_ptp(dev);
+    if (ptp_result != 0) {
+        DEBUGP(DL_TRACE, "I210: PTP initialization returned: %d\n", ptp_result);
+        // Continue - basic functionality may still work
+    }
+
     DEBUGP(DL_TRACE, "<==i210_init: Success\n");
     return 0;
 }
@@ -145,23 +160,32 @@ static int get_systime(device_t *dev, uint64_t *systime)
 {
     uint32_t ts_low, ts_high;
     int result;
-    
+
     DEBUGP(DL_TRACE, "==>i210_get_systime\n");
-    
+
     if (dev == NULL || systime == NULL) {
         return -1;
     }
-    
-    // Read SYSTIM registers
-    result = ndis_platform_ops.mmio_read(dev, INTEL_REG_SYSTIML, &ts_low);   // SYSTIML
+
+    // I210 latch sequence: read SYSTIMR first (latches SYSTIML+SYSTIMH atomically per igb driver),
+    // then read SYSTIML (nanoseconds 0-999,999,999), then SYSTIMH (seconds).
+    // Reference: external/intel_igb/src/igb_ptp.c igb_ptp_read_i210()
+    {
+        uint32_t dummy = 0;
+        (void)ndis_platform_ops.mmio_read(dev, I210_SYSTIMR, &dummy);  // trigger latch
+    }
+
+    result = ndis_platform_ops.mmio_read(dev, I210_SYSTIML, &ts_low);   // nanoseconds
     if (result != 0) return result;
-    
-    result = ndis_platform_ops.mmio_read(dev, INTEL_REG_SYSTIMH, &ts_high);  // SYSTIMH
+
+    result = ndis_platform_ops.mmio_read(dev, I210_SYSTIMH, &ts_high);  // seconds
     if (result != 0) return result;
-    
-    *systime = ((uint64_t)ts_high << 32) | ts_low;
-    
-    DEBUGP(DL_TRACE, "<==i210_get_systime: 0x%llx\n", *systime);
+
+    // I210 SYSTIM: SYSTIMH = seconds, SYSTIML = nanoseconds (0-999,999,999)
+    // Convert to full nanoseconds (same as I225/I226 split format)
+    *systime = (uint64_t)ts_high * 1000000000ULL + (uint64_t)ts_low;
+
+    DEBUGP(DL_TRACE, "<==i210_get_systime: sec=%u ns=%u -> 0x%llx\n", ts_high, ts_low, *systime);
     return 0;
 }
 
@@ -173,26 +197,55 @@ static int get_systime(device_t *dev, uint64_t *systime)
  */
 static int init_ptp(device_t *dev)
 {
-    uint32_t tsauxc;
     int result;
-    
+
     DEBUGP(DL_TRACE, "==>i210_init_ptp\n");
-    
+
     if (dev == NULL) {
         return -1;
     }
-    
-    // I210 PTP initialization - enable PHC
-    result = ndis_platform_ops.mmio_read(dev, INTEL_REG_TSAUXC, &tsauxc);  // TSAUXC
-    if (result == 0) {
-        // Clear DisableSystime bit (enable PHC)
-        tsauxc &= ~INTEL_TSAUXC_DISABLE_SYSTIM;
-        result = ndis_platform_ops.mmio_write(dev, INTEL_REG_TSAUXC, tsauxc);
-        if (result == 0) {
-            DEBUGP(DL_INFO, "I210 PHC enabled via TSAUXC: 0x%08X\n", tsauxc);
+
+    // Step 1: Enable SYSTIM - write 0x0 to TSAUXC to clear all bits including bit 31 (DIS_ST).
+    // Linux igb: E1000_WRITE_REG(hw, E1000_TSAUXC, 0x0) — write zero, no read-modify-write.
+    // This must be done BEFORE seeding SYSTIM so the hardware accepts the new time.
+    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_TSAUXC, 0);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I210: Failed to clear TSAUXC\n");
+        return -1;
+    }
+    DEBUGP(DL_INFO, "I210: TSAUXC=0x0 (SYSTIM enabled)\n");
+
+    // Step 2: Seed SYSTIM with a known non-zero value.
+    // I210: SYSTIML=nanoseconds, SYSTIMH=seconds. Write SYSTIML first, SYSTIMH commits.
+    // Linux igb: igb_ptp_write_i210() writes SYSTIML then SYSTIMH.
+    if (ndis_platform_ops.mmio_write(dev, I210_SYSTIML, 1) != 0 ||
+        ndis_platform_ops.mmio_write(dev, I210_SYSTIMH, 0) != 0) {
+        DEBUGP(DL_TRACE, "I210: Failed to seed SYSTIM\n");
+        return -1;
+    }
+    DEBUGP(DL_TRACE, "I210: SYSTIM seeded (sec=0, ns=1)\n");
+
+    // Step 3: Enable TX timestamping
+    {
+        uint32_t tx_ctl = (uint32_t)I210_TSYNCTXCTL_SET(0, I210_TSYNCTXCTL_EN_MASK,
+                                                          I210_TSYNCTXCTL_EN_SHIFT, 1);
+        if (ndis_platform_ops.mmio_write(dev, I210_TSYNCTXCTL, tx_ctl) != 0) {
+            DEBUGP(DL_ERROR, "I210: Failed to write TSYNCTXCTL\n");
+        } else {
+            DEBUGP(DL_TRACE, "I210: TX timestamping enabled (TSYNCTXCTL=0x%08X)\n", tx_ctl);
         }
     }
-    
+
+    // Step 4: Enable RX timestamping (all PTP packets)
+    {
+        uint32_t rx_ctl = (uint32_t)I210_TSYNCRXCTL_SET(0, I210_TSYNCRXCTL_EN_MASK,
+                                                          I210_TSYNCRXCTL_EN_SHIFT, 1);
+        rx_ctl = (uint32_t)I210_TSYNCRXCTL_SET(rx_ctl, I210_TSYNCRXCTL_TYPE_MASK,
+                                                I210_TSYNCRXCTL_TYPE_SHIFT, I210_TSYNCRXCTL_TYPE_ALL);
+        ndis_platform_ops.mmio_write(dev, I210_TSYNCRXCTL, rx_ctl);
+        DEBUGP(DL_TRACE, "I210: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", rx_ctl);
+    }
+
     DEBUGP(DL_TRACE, "<==i210_init_ptp: Result=%d\n", result);
     return result;
 }

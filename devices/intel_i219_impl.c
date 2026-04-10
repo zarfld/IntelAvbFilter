@@ -247,17 +247,18 @@ static int get_systime(device_t *dev, uint64_t *systime)
         return -1;
     }
 
-    /* Read SYSTIML first: on IGB family, a SYSTIML read snapshots SYSTIMH to prevent
-     * a rollover mid-read.  SYSTIMH must be read immediately after. */
-    result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
-        goto fallback;
-    }
-
+    /* I219 (e1000e family): reading SYSTIMH first latches SYSTIML to prevent
+     * a rollover mid-read.  SYSTIML must be read immediately after.
+     * (Opposite of IGB/I210 where SYSTIML read latches SYSTIMH.) */
     result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
     if (result != 0) {
         DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
+        goto fallback;
+    }
+
+    result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
         goto fallback;
     }
 
