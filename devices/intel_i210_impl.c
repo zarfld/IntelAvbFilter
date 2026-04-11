@@ -19,10 +19,6 @@ Abstract:
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
 
-// I210 SYSTIMR (sub-nanoseconds) - read to trigger SYSTIML/SYSTIMH latch
-// Same address as E1000_SYSTIMR / I211_SYSTIMR - not in I210 SSOT spec but present in hardware
-#define I210_SYSTIMR  0x0B6F8
-
 // Forward declarations
 static int init_ptp(device_t *dev);
 

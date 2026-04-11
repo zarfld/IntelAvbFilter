@@ -25,6 +25,10 @@
             "approve": true,
             "matchCommandLine": true
         },
-        ".\\tools\\test\\Run-Tests-Elevated.ps1": true
+        ".\\tools\\test\\Run-Tests-Elevated.ps1": true,
+        "/^powershell -NoProfile -ExecutionPolicy Bypass -File tools/build/Build-Tests\\.ps1 -TestName test_timestamp_latency 2>&1 \\| Select-Object -Last 8$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }
