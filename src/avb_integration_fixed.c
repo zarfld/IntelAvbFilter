@@ -4632,7 +4632,7 @@ intel_device_type_t AvbGetIntelDeviceType(UINT16 did)
         case INTEL_DEV_I219_LM_DC7: 
         case INTEL_DEV_I219_V6: 
         case INTEL_DEV_I219_LM6:
-        case INTEL_DEV_I219_LM4: return INTEL_DEVICE_I219;  // I219 family (incl. LM4=0x15BB)
+        case INTEL_DEV_I219_LM4: return INTEL_DEVICE_I219;  // I219 family
         
         case INTEL_DEV_I225_V: return INTEL_DEVICE_I225;  // I225
         case INTEL_DEV_I226_LM: return INTEL_DEVICE_I226;  // I226

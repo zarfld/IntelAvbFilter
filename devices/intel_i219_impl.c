@@ -17,6 +17,7 @@ Abstract:
 #include "intel_device_interface.h"
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops
+#include "external/intel_avb/lib/intel_private.h"  // SSOT TIMINCA/EtherType constants
 #include "intel-ethernet-regs/gen/i219_regs.h"  // SSOT register definitions
 
 // External platform operations
@@ -133,16 +134,16 @@ static int init_ptp(device_t *dev)
     /* Step 2: Set clock increment for 1GbE — IP=2, IV=16,000,000 (0xF42400)
      * TIMINCA = 0x02F42400: increment period 2 cycles, value 0xF42400 sub-ns steps.
      * Source: Intel I219 datasheet, TIMINCA register, 1GbE configuration. */
-    result = ndis_platform_ops.mmio_write(dev, I219_TIMINCA, 0x02F42400U);
+    result = ndis_platform_ops.mmio_write(dev, I219_TIMINCA, INTEL_TIMINCA_I219_INIT);
     if (result != 0) {
         DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write TIMINCA: %d\n", result);
         return result;
     }
-    DEBUGP(DL_INFO, "I219 init_ptp: TIMINCA=0x02F42400 (1GbE clock rate)\n");
+    DEBUGP(DL_INFO, "I219 init_ptp: TIMINCA=0x%08X (1GbE clock rate)\n", INTEL_TIMINCA_I219_INIT);
 
     /* Step 3: Configure ETQF0 to identify IEEE 1588 PTP packets (EtherType 0x88F7).
      * Bits: QUEUE_EN(31)=1, TS_1588(30)=1, FILTER_EN(26)=1, ETYPE(15:0)=0x88F7 */
-    etqf0 = (uint32_t)I219_ETQF0_SET(0, I219_ETQF0_ETYPE_MASK, I219_ETQF0_ETYPE_SHIFT, 0x88F7ULL);
+    etqf0 = (uint32_t)I219_ETQF0_SET(0, I219_ETQF0_ETYPE_MASK, I219_ETQF0_ETYPE_SHIFT, (unsigned long long)INTEL_ETHERTYPE_PTP);
     etqf0 = (uint32_t)I219_ETQF0_SET(etqf0, I219_ETQF0_FILTER_EN_MASK, I219_ETQF0_FILTER_EN_SHIFT, 1);
     etqf0 = (uint32_t)I219_ETQF0_SET(etqf0, I219_ETQF0_TS_1588_MASK,   I219_ETQF0_TS_1588_SHIFT,   1);
     etqf0 = (uint32_t)I219_ETQF0_SET(etqf0, I219_ETQF0_QUEUE_EN_MASK,  I219_ETQF0_QUEUE_EN_SHIFT,  1);
@@ -151,7 +152,7 @@ static int init_ptp(device_t *dev)
         DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write ETQF0: %d\n", result);
         return result;
     }
-    DEBUGP(DL_INFO, "I219 init_ptp: ETQF0=0x%08X (PTP 0x88F7 filter)\n", etqf0);
+    DEBUGP(DL_INFO, "I219 init_ptp: ETQF0=0x%08X (PTP 0x%04X filter)\n", etqf0, (unsigned)INTEL_ETHERTYPE_PTP);
 
     /* Step 4: Configure ETQS0 to route IEEE 1588 packets to receive queue 0 */
     etqs0 = (uint32_t)I219_ETQS0_SET(0,     I219_ETQS0_QUEUE_IDX_MASK, I219_ETQS0_QUEUE_IDX_SHIFT, 0);
@@ -197,7 +198,7 @@ static int set_systime(device_t *dev, uint64_t systime)
         DEBUGP(DL_INFO, "I219 set_systime: using system time fallback: 0x%llx\n", systime);
     }
 
-    ts_low  = (uint32_t)(systime & 0xFFFFFFFFU);
+    ts_low  = (uint32_t)(systime & INTEL_MASK_32BIT);
     ts_high = (uint32_t)(systime >> 32);
 
     /* Step 1: Freeze counters — set DISABLE_SYSTIME (bit 31) in TSAUXC */
