@@ -850,8 +850,8 @@ IntelAvbFilterDeviceIoControl(
                         isMatch = (ven == req->vendor_id && dev == (USHORT)req->device_id);
 
                         /* Fallback 1: match against the real PCI DID stored in context.
-                         * Handles I219 variant DIDs (e.g. I219-LM4 = 0x15BB) where
-                         * AvbIsSupportedIntelController returns the representative 0x15B7
+                         * Handles I219 variant DIDs (e.g. I219-LM4 = INTEL_DEV_I219_LM4) where
+                         * AvbIsSupportedIntelController returns the representative INTEL_DEV_I219_LM
                          * but the context was created with the true PCI DID. */
                         if (!isMatch && cand->AvbContext)
                         {
@@ -862,7 +862,7 @@ IntelAvbFilterDeviceIoControl(
 
                         /* Fallback 2: family-match — same device family regardless of exact DID.
                          * Handles I219 where AvbCreateMinimalContext stores the representative
-                         * DID (0x15B7) but the test sends the real PCI DID (0x15BB); both
+                         * DID (INTEL_DEV_I219_LM) but the test sends the real PCI DID (INTEL_DEV_I219_LM4); both
                          * resolve to INTEL_DEVICE_I219 via AvbGetIntelDeviceType(). */
                         if (!isMatch && cand->AvbContext)
                         {
