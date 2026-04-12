@@ -594,9 +594,13 @@ static int i219_write_timinca(device_t *dev, uint32_t timinca_value)
  * @param dev Device context
  * @param tsauxc_value Output: TSAUXC register value
  * @return 0 on success, <0 on error
- * 
- * Implements: HAL compliance - eliminates magic numbers in src/
- * Replaces: Direct register access at 0x0B640
+ *
+ * NOTE: The I219 does NOT have a TSAUXC register. The I219 TimeSync register
+ * map ends at offset 0x0B638 (RXUDP); offset 0x0B640 is undefined on this
+ * device family (confirmed by Intel I218/I219 Specification Update).
+ * SYSTIM is always enabled on I219 once the clock is programmed.
+ * We return a pseudo-value of 0x0 (all disable bits clear = all timers enabled)
+ * to allow callers to proceed without hardware access.
  */
 static int i219_read_tsauxc(device_t *dev, uint32_t *tsauxc_value)
 {
@@ -604,7 +608,10 @@ static int i219_read_tsauxc(device_t *dev, uint32_t *tsauxc_value)
         return -EINVAL;
     }
     
-    return ndis_platform_ops.mmio_read(dev, I219_TSAUXC, tsauxc_value);
+    /* I219 has no TSAUXC register — report SYSTIM as always enabled (bit 31 = 0) */
+    *tsauxc_value = 0x00000000;
+    DEBUGP(DL_TRACE, "i219_read_tsauxc: TSAUXC not present on I219, returning pseudo 0x0 (always enabled)\n");
+    return 0;
 }
 
 /**
@@ -612,9 +619,9 @@ static int i219_read_tsauxc(device_t *dev, uint32_t *tsauxc_value)
  * @param dev Device context
  * @param tsauxc_value TSAUXC register value to write
  * @return 0 on success, <0 on error
- * 
- * Implements: HAL compliance - eliminates magic numbers in src/
- * Replaces: Direct register access at 0x0B640 and hardcoded bit masks
+ *
+ * NOTE: The I219 does NOT have a TSAUXC register. This is a no-op that
+ * reports success to callers. SYSTIM cannot be disabled via TSAUXC on I219.
  */
 static int i219_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
 {
@@ -622,7 +629,10 @@ static int i219_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
         return -EINVAL;
     }
     
-    return ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc_value);
+    /* I219 has no TSAUXC register — no-op, always succeeds */
+    DEBUGP(DL_TRACE, "i219_write_tsauxc: TSAUXC not present on I219, ignoring write of 0x%08X\n", tsauxc_value);
+    UNREFERENCED_PARAMETER(tsauxc_value);
+    return 0;
 }
 
 /**

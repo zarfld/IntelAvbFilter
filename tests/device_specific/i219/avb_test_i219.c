@@ -121,21 +121,7 @@ int main(void)
         }
     }
 
-    /* ── Test 3: CTRL and STATUS registers ── */
-    printf("\n--- Test 3: Register Access ---\n");
-    {
-        avb_u32 v = 0;
-        int rc = AvbReadReg(h, 0x00000, &v);
-        if (rc == 0) { printf("  [PASS] CTRL (0x00000) = 0x%08X\n", (unsigned)v); stats.passed++; stats.total++; }
-        else          { printf("  [FAIL] CTRL read failed (error %d)\n", rc);        stats.failed++; stats.total++; }
-    }
-    {
-        avb_u32 v = 0;
-        int rc = AvbReadReg(h, 0x00008, &v);
-        if (rc == 0) { printf("  [PASS] STATUS (0x00008) = 0x%08X%s\n", (unsigned)v,
-                               (v & 0x2u) ? " [link up]" : " [link down]"); stats.passed++; stats.total++; }
-        else          { printf("  [FAIL] STATUS read failed (error %d)\n", rc);                           stats.failed++; stats.total++; }
-    }
+    /* Test 3: Register Access -- covered by test_hw_state.exe (device-agnostic, runs on all adapters) */
 
     /* ── Test 4: Enable PTP HW timestamping ── */
     printf("\n--- Test 4: PTP Hardware Timestamping Enable ---\n");
@@ -163,52 +149,10 @@ int main(void)
             stats.failed++; stats.total++;
         }
 
-        /* Verify TSYNCTXCTL EN bit at I219-specific offset 0xB614 */
-        avb_u32 txctl = 0;
-        if (AvbReadReg(h, 0xB614, &txctl) == 0) {
-            printf("  [INFO] TSYNCTXCTL (0xB614) = 0x%08X\n", (unsigned)txctl);
-            if (txctl & 0x10u) { AVB_REPORT_PASS(&stats, "TSYNCTXCTL EN bit (bit4) set"); }
-            else               { AVB_REPORT_FAIL(&stats, "TSYNCTXCTL EN bit", "EN bit not set at 0xB614"); }
-        } else {
-            AVB_REPORT_FAIL(&stats, "TSYNCTXCTL read", "AvbReadReg(0xB614) failed");
-        }
-
-        /* Verify TSYNCRXCTL EN bit at I219-specific offset 0xB620 */
-        avb_u32 rxctl = 0;
-        if (AvbReadReg(h, 0xB620, &rxctl) == 0) {
-            DWORD en   = (rxctl >> 4) & 0x1u;
-            DWORD type = (rxctl >> 1) & 0x7u;
-            printf("  [INFO] TSYNCRXCTL (0xB620) = 0x%08X (EN=%lu TYPE=%lu)\n",
-                   (unsigned)rxctl, (unsigned long)en, (unsigned long)type);
-            if (en)     { AVB_REPORT_PASS(&stats, "TSYNCRXCTL EN bit (bit4) set"); }
-            else        { AVB_REPORT_FAIL(&stats, "TSYNCRXCTL EN bit", "EN bit not set at 0xB620"); }
-            if (type == 4u) { AVB_REPORT_PASS(&stats, "TSYNCRXCTL TYPE=ALL_PKTS(4)"); }
-            else            { printf("  [FAIL] TSYNCRXCTL TYPE=%lu, expected 4 (ALL_PKTS)\n", (unsigned long)type);
-                              stats.failed++; stats.total++; }
-        } else {
-            AVB_REPORT_FAIL(&stats, "TSYNCRXCTL read", "AvbReadReg(0xB620) failed");
-        }
+        /* Raw TSYNCTXCTL/TSYNCRXCTL register checks covered by test_hw_ts_ctrl.exe */
     }
 
-    /* ── Test 5: Hardware PTP clock (SYSTIML/SYSTIMH) ── */
-    printf("\n--- Test 5: Hardware PTP Clock ---\n");
-    {
-        avb_u32 stml = 0, stmh = 0;
-        int rcl = AvbReadReg(h, 0xB600, &stml);  /* I219_SYSTIML — latch read */
-        int rch = AvbReadReg(h, 0xB604, &stmh);  /* I219_SYSTIMH */
-
-        if (rcl == 0 && rch == 0) {
-            avb_u64 hwTime = ((avb_u64)stmh << 32) | stml;
-            printf("  [INFO] SYSTIML (0xB600)=0x%08X SYSTIMH (0xB604)=0x%08X\n",
-                   (unsigned)stml, (unsigned)stmh);
-            printf("  [INFO] Hardware PTP time = 0x%016llX (%llu ns)\n",
-                   (unsigned long long)hwTime, (unsigned long long)hwTime);
-            if (hwTime != 0) { AVB_REPORT_PASS(&stats, "Hardware PTP clock running (non-zero)"); }
-            else              { AVB_REPORT_FAIL(&stats, "Hardware PTP clock", "Time is zero — TIMINCA not initialized"); }
-        } else {
-            AVB_REPORT_FAIL(&stats, "SYSTIML/SYSTIMH read", "AvbReadReg failed");
-        }
-    }
+    /* Test 5: PTP Clock value -- covered by test_ptp_getset.exe (device-agnostic, runs on all adapters) */
 
     /* ── Test 6: GET_TIMESTAMP IOCTL ── */
     printf("\n--- Test 6: IOCTL_AVB_GET_TIMESTAMP ---\n");
@@ -224,6 +168,176 @@ int main(void)
             else                   { AVB_REPORT_FAIL(&stats, "GET_TIMESTAMP", "Returned zero — hardware not initialized"); }
         } else {
             AVB_REPORT_FAIL(&stats, "IOCTL_AVB_GET_TIMESTAMP", "DeviceIoControl failed");
+        }
+    }
+
+    /* ── Test 7: Capabilities Verification ── */
+    /*
+     * Addresses: #261 (TEST-COMPAT-I219-001), #114 (QA-SC-PORT-001)
+     *
+     * I219 must report INTEL_CAP_BASIC_1588 (PTP) and INTEL_CAP_MDIO.
+     * It must NOT report TSN features (TAS/FP/2.5G/EEE) — I219 is 1 GbE
+     * with no Time-Aware Shaper or Frame Preemption hardware.
+     * Expected capabilities: INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
+     *                        INTEL_CAP_MMIO | INTEL_CAP_MDIO
+     */
+    printf("\n--- Test 7: Capabilities Verification ---\n");
+    {
+        char capbuf[128];
+        avb_u32 caps = i219->capabilities;
+        printf("  [INFO] Capabilities = 0x%08X (%s)\n",
+               (unsigned)caps, AvbCapabilityString(caps, capbuf, sizeof(capbuf)));
+
+        /* Must have basic IEEE 1588 PTP support */
+        if (caps & INTEL_CAP_BASIC_1588) {
+            AVB_REPORT_PASS(&stats, "INTEL_CAP_BASIC_1588 present");
+        } else {
+            AVB_REPORT_FAIL(&stats, "INTEL_CAP_BASIC_1588", "PTP capability not reported — driver bug");
+        }
+
+        /* Must have MDIO support (PCH-based PHY access) */
+        if (caps & INTEL_CAP_MDIO) {
+            AVB_REPORT_PASS(&stats, "INTEL_CAP_MDIO present");
+        } else {
+            AVB_REPORT_FAIL(&stats, "INTEL_CAP_MDIO", "MDIO capability not reported");
+        }
+
+        /* Must NOT have TSN Time-Aware Shaper — I219 has no 802.1Qbv hardware */
+        if (!(caps & INTEL_CAP_TSN_TAS)) {
+            AVB_REPORT_PASS(&stats, "INTEL_CAP_TSN_TAS correctly absent (I219 has no TAS)");
+        } else {
+            AVB_REPORT_FAIL(&stats, "INTEL_CAP_TSN_TAS", "TAS reported on I219 — should not be supported");
+        }
+
+        /* Must NOT have Frame Preemption — I219 has no 802.1Qbu hardware */
+        if (!(caps & INTEL_CAP_TSN_FP)) {
+            AVB_REPORT_PASS(&stats, "INTEL_CAP_TSN_FP correctly absent (I219 has no FP)");
+        } else {
+            AVB_REPORT_FAIL(&stats, "INTEL_CAP_TSN_FP", "Frame Preemption reported on I219 — should not be supported");
+        }
+
+        /* Must NOT report 2.5 GbE — I219 is 1 GbE only */
+        if (!(caps & INTEL_CAP_2_5G)) {
+            AVB_REPORT_PASS(&stats, "INTEL_CAP_2_5G correctly absent (I219 is 1 GbE)");
+        } else {
+            AVB_REPORT_FAIL(&stats, "INTEL_CAP_2_5G", "2.5G reported on I219 — hardware is 1 GbE only");
+        }
+    }
+
+    /* ── Test 8: PTP Clock Monotonicity (via IOCTL_AVB_GET_TIMESTAMP) ── */
+    /*
+     * Addresses: #261 (TEST-COMPAT-I219-001 — Test 4: PTP Clock Accuracy)
+     *
+     * Read timestamp via IOCTL_AVB_GET_TIMESTAMP twice with a 10 ms gap.
+     * The second reading must be strictly greater than the first.
+     * Uses the same IOCTL path as Test 6 (proven to work on I219).
+     * Raw per-register access is covered by test_ioctl_phc_monotonicity.exe
+     * which runs on all supported adapters.
+     */
+    printf("\n--- Test 8: PTP Clock Monotonicity ---\n");
+    {
+        AVB_TIMESTAMP_REQUEST ts1req, ts2req;
+        ZeroMemory(&ts1req, sizeof(ts1req));
+        ZeroMemory(&ts2req, sizeof(ts2req));
+
+        BOOL ok1 = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                                   &ts1req, sizeof(ts1req), &ts1req, sizeof(ts1req),
+                                   &bytesReturned, NULL);
+        if (!ok1) {
+            AVB_REPORT_FAIL(&stats, "Monotonicity first read", "IOCTL_AVB_GET_TIMESTAMP failed");
+        } else {
+            avb_u64 ts1 = ts1req.timestamp;
+
+            Sleep(10);  /* 10 ms — clock must advance by at least ~10,000,000 ns */
+
+            BOOL ok2 = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                                       &ts2req, sizeof(ts2req), &ts2req, sizeof(ts2req),
+                                       &bytesReturned, NULL);
+            if (!ok2) {
+                AVB_REPORT_FAIL(&stats, "Monotonicity second read", "IOCTL_AVB_GET_TIMESTAMP failed");
+            } else {
+                avb_u64 ts2 = ts2req.timestamp;
+                avb_u64 delta = (ts2 > ts1) ? (ts2 - ts1) : 0;
+                printf("  [INFO] T1=0x%016llX T2=0x%016llX delta=%llu ns\n",
+                       (unsigned long long)ts1, (unsigned long long)ts2,
+                       (unsigned long long)delta);
+                if (ts2 > ts1) {
+                    AVB_REPORT_PASS(&stats, "PTP clock monotonic (T2 > T1)");
+                } else {
+                    AVB_REPORT_FAIL(&stats, "PTP clock monotonic",
+                                    "T2 <= T1 — clock not advancing or TIMINCA not set");
+                }
+            }
+        }
+    }
+
+    /* ── Test 9: I219 Variant Matrix ── */
+    /*
+     * Addresses: #261 (TEST-COMPAT-I219-001 — Test 7: I219 Variant Matrix)
+     *
+     * Verify the detected device ID is a recognized I219 variant and print
+     * the full variant table in [INFO] lines for the test log.
+     * Constants sourced from include/intel_pci_ids.h (SSOT).
+     */
+    printf("\n--- Test 9: I219 Variant Matrix ---\n");
+    {
+        static const struct { avb_u16 did; const char *name; } kI219Variants[] = {
+            { INTEL_DEV_I219_LM_A0,   "I219-LM (A0)"         },
+            { INTEL_DEV_I219_V_A0,    "I219-V  (A0)"         },
+            { INTEL_DEV_I219_LM_A1,   "I219-LM (A1)"         },
+            { INTEL_DEV_I219_V_A1,    "I219-V  (A1)"         },
+            { INTEL_DEV_I219_LM,      "I219-LM"              },
+            { INTEL_DEV_I219_V,       "I219-V"               },
+            { INTEL_DEV_I219_LM3,     "I219-LM3"             },
+            { INTEL_DEV_I219_LM4,     "I219-LM4"             },
+            { INTEL_DEV_I219_V4,      "I219-V4"              },
+            { INTEL_DEV_I219_LM5,     "I219-LM5"             },
+            { INTEL_DEV_I219_V5,      "I219-V5"              },
+            { INTEL_DEV_I219_D0,      "I219-V  (Skylake)"    },
+            { INTEL_DEV_I219_D1,      "I219-LM (Skylake)"    },
+            { INTEL_DEV_I219_D2,      "I219-LM (Kaby Lake)"  },
+            { INTEL_DEV_I219_LM_DC7,  "I219-LM (DC7)"        },
+            { INTEL_DEV_I219_V6,      "I219-V  (Broadwell)"  },
+            { INTEL_DEV_I219_LM6,     "I219-LM (Broadwell)"  },
+            { 0x15DFU, "I219-LM (Gen 13 Cannon Lake)"        },
+            { 0x15E0U, "I219-V  (Gen 13 Cannon Lake)"        },
+            { 0x15E1U, "I219-V  (Gen 9)"                     },
+            { 0x15E2U, "I219-LM (Gen 9)"                     },
+            { 0x0D4EU, "I219-LM (Gen 14 Tiger Lake)"         },
+            { 0x0D4FU, "I219-V  (Gen 14 Tiger Lake)"         },
+            { 0x0D4CU, "I219-LM (Gen 15 Alder Lake)"         },
+            { 0x0D4DU, "I219-V  (Gen 15 Alder Lake)"         },
+            { 0x0D4AU, "I219-LM (Gen 16 Raptor Lake)"        },
+            { 0x550FU, "I219-LM (Gen 18 Meteor Lake)"        },
+            { 0x5510U, "I219-V  (Gen 18 Meteor Lake)"        },
+            { 0x5511U, "I219-LM (Gen 19 Arrow Lake)"         },
+            { 0x5512U, "I219-V  (Gen 19 Arrow Lake)"         },
+            { 0x5513U, "I219-LM (Gen 20 Panther Lake)"       },
+            { 0x5514U, "I219-V  (Gen 20 Panther Lake)"       },
+        };
+        static const int kI219VariantCount =
+            (int)(sizeof(kI219Variants) / sizeof(kI219Variants[0]));
+
+        printf("  [INFO] Full I219 variant table (%d entries):\n", kI219VariantCount);
+        const char *matchName = NULL;
+        for (int vi = 0; vi < kI219VariantCount; vi++) {
+            int current = (kI219Variants[vi].did == i219->device_id) ? 1 : 0;
+            printf("  [INFO]   DID=0x%04X  %-34s %s\n",
+                   kI219Variants[vi].did,
+                   kI219Variants[vi].name,
+                   current ? "<-- THIS DEVICE" : "");
+            if (current) { matchName = kI219Variants[vi].name; }
+        }
+
+        if (matchName) {
+            printf("  [PASS] DID=0x%04X recognized as %s\n",
+                   (unsigned)i219->device_id, matchName);
+            stats.passed++; stats.total++;
+        } else {
+            printf("  [FAIL] DID=0x%04X not in recognized I219 variant table\n",
+                   (unsigned)i219->device_id);
+            printf("         Update kI219Variants[] in avb_test_i219.c\n");
+            stats.failed++; stats.total++;
         }
     }
 

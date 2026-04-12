@@ -711,7 +711,8 @@ if (Test-Path $regsTest3) {
         @{Name="test_ptp_freq.exe"; Desc="PTP Frequency Adjustment (IOCTL 38) - Issue #296"},
         @{Name="test_hw_ts_ctrl.exe"; Desc="Hardware Timestamping Control (IOCTL 40) - Issue #297"},
         @{Name="test_rx_timestamp.exe"; Desc="RX Timestamp Control (IOCTLs 41-42) - Issue #298"},
-        @{Name="test_ts_event_sub.exe"; Desc="Timestamp Event Subscription (IOCTLs 33-34) - Issue #314"}
+        @{Name="test_ts_event_sub.exe"; Desc="Timestamp Event Subscription (IOCTLs 33-34) - Issue #314"},
+        @{Name="test_ioctl_phc_monotonicity.exe"; Desc="PHC Clock Monotonicity (IOCTL_AVB_GET_TIMESTAMP) - Issue #261"}
     )
     foreach ($test in $batch3IoctlTests) {
         Invoke-Test -TestName $test.Name -Description $test.Desc
@@ -730,10 +731,18 @@ if (Test-Path $regsTest3) {
         Invoke-Test -TestName $testName
     }
     
-    # Phase 5: I210 Basic Testing
-    Write-Host "`n=== PHASE 5: I210 Basic Testing ===" -ForegroundColor Green
-    
-    Invoke-Test -TestName "avb_test_i210.exe"
+    # Phase 5: Adapter-Specific Tests (I210 / I219 / I226)
+    # Each exe locates its target NIC via AvbEnumerateAdapters and SKIPs if not present;
+    # running all three here ensures every supported adapter is exercised individually
+    # in addition to the cross-NIC device-agnostic runs in Phase 2.5.
+    Write-Host "`n=== PHASE 5: Adapter-Specific Tests (I210 / I219 / I226) ===" -ForegroundColor Green
+    Write-Host "Purpose: Adapter-specific capabilities, variant matrix, and I219/I226 unique features" -ForegroundColor Gray
+    Write-Host "Note: device-agnostic tests (test_hw_ts_ctrl, test_ptp_getset) in Phase 2.5 already" -ForegroundColor Gray
+    Write-Host "      iterate all adapters and provide cross-NIC reference data." -ForegroundColor Gray
+
+    Invoke-Test -TestName "avb_test_i210.exe" -Description "I210 adapter-specific validation (caps, variant, basic IOCTLs)"
+    Invoke-Test -TestName "avb_test_i219.exe" -Description "I219 adapter-specific validation (caps 0xC3, variant matrix, monotonicity)"
+    Invoke-Test -TestName "avb_test_i226.exe" -Description "I226 adapter-specific validation (caps, TSN features, variant matrix)"
     
     # Phase 6: Specialized Investigation Tests
     Write-Host "`n=== PHASE 6: Specialized Investigation Tests ===" -ForegroundColor Green
@@ -773,12 +782,13 @@ if (Test-Path $regsTest3) {
         # Phase 2.5
         "test_qav_cbs.exe", "test_ptp_getset.exe", "test_ptp_freq.exe",
         "test_hw_ts_ctrl.exe", "test_rx_timestamp.exe", "test_ts_event_sub.exe",
+        "test_ioctl_phc_monotonicity.exe",
         # Phase 3
         "avb_multi_adapter_test.exe",
         # Phase 4
         "avb_i226_test.exe", "avb_i226_advanced_test.exe",
         # Phase 5
-        "avb_test_i210.exe",
+        "avb_test_i210.exe", "avb_test_i219.exe", "avb_test_i226.exe",
         # Phase 6
         "chatgpt5_i226_tas_validation.exe", "corrected_i226_tas_test.exe",
         "critical_prerequisites_investigation.exe", "enhanced_tas_investigation.exe",

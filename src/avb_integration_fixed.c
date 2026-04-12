@@ -556,31 +556,36 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
 
     /* Step 1: Discover & map BAR0 if not yet mapped.
      *
-     * IMPORTANT: i217/i219 are integrated PCH controllers — they access registers
-     * through MDIO paging (no discrete BAR0).  AvbDiscoverIntelControllerResources
-     * will always fail for these devices.  For MDIO-family devices we skip BAR0
-     * mapping entirely and mark the context as initialized at MDIO_READY level so
-     * that OPEN_ADAPTER and enumeration IOCTLs are not blocked by the init guard. */
+     * I219/I217 are PCH-integrated controllers but they DO expose a 128 KB BAR0
+     * MMIO space containing the PTP register block (0x0B600–0x0B640).  We attempt
+     * BAR0 discovery for these devices exactly as for I210/I226.  If discovery
+     * fails (e.g. the LWF cannot decode PCI config for the PCH function) the
+     * isMdioDevice flag triggers a graceful fallback to software-only mode so that
+     * IOCTLs with non-MMIO fallback paths (e.g. KeQuerySystemTime) still work. */
     BOOLEAN isMdioDevice = (Ctx->intel_device.device_type == INTEL_DEVICE_I219 ||
                             Ctx->intel_device.device_type == INTEL_DEVICE_I217);
 
     if (Ctx->hardware_context == NULL) {
-        if (isMdioDevice) {
-            /* MDIO-based device: no BAR0, skip straight to base-capability promotion */
-            DEBUGP(DL_INFO, "? STEP 1 SKIPPED (MDIO device, no BAR0): VID=0x%04X DID=0x%04X type=%d\n",
-                   Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id,
-                   Ctx->intel_device.device_type);
-            Ctx->initialized = TRUE;
-            /* hw_state stays at AVB_HW_BOUND — MMIO-dependent paths will guard on
-             * hw_state < AVB_HW_BAR_MAPPED and degrade gracefully */
-            return STATUS_SUCCESS;
-        }
-
+        /* Attempt BAR0 discovery for all devices, including PCH-integrated I219/I217.
+         * These devices DO have a BAR0 MMIO space (128 KB) that contains the PTP
+         * register block (0x0B600–0x0B640).  If discovery fails — which can happen
+         * when the LWF cannot decode PCI config for PCH-attached functions — fall
+         * back gracefully to MDIO-only / software-fallback mode. */
         DEBUGP(DL_TRACE, "? STEP 1: Starting BAR0 discovery and mapping...\n");
         PHYSICAL_ADDRESS bar0 = {0};
         ULONG barLen = 0;
         NTSTATUS ds = AvbDiscoverIntelControllerResources(Ctx->filter_instance, &bar0, &barLen);
         if (!NT_SUCCESS(ds)) {
+            if (isMdioDevice) {
+                /* BAR0 discovery failed for PCH-integrated NIC (I219/I217).
+                 * Fall back to software-fallback mode: initialized=TRUE,
+                 * hardware_context=NULL.  MMIO-dependent IOCTLs will return
+                 * STATUS_UNSUCCESSFUL; paths with software fallbacks continue. */
+                DEBUGP(DL_WARN, "? STEP 1 MDIO-FALLBACK: I219/I217 BAR0 discovery failed (0x%08X) — software fallback mode\n",
+                       ds);
+                Ctx->initialized = TRUE;
+                return STATUS_SUCCESS;
+            }
             DEBUGP(DL_ERROR, "? STEP 1 FAILED: BAR0 discovery failed 0x%08X (cannot map MMIO yet) VID=0x%04X DID=0x%04X\n", 
                    ds, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
             return ds; /* propagate */
@@ -589,6 +594,13 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         
         NTSTATUS ms = AvbMapIntelControllerMemory(Ctx, bar0, barLen);
         if (!NT_SUCCESS(ms)) {
+            if (isMdioDevice) {
+                /* BAR0 mapping failed — fall back to software-fallback mode */
+                DEBUGP(DL_WARN, "? STEP 1 MDIO-FALLBACK: I219/I217 BAR0 map failed (0x%08X) — software fallback mode\n",
+                       ms);
+                Ctx->initialized = TRUE;
+                return STATUS_SUCCESS;
+            }
             DEBUGP(DL_ERROR, "? STEP 1b FAILED: BAR0 map failed 0x%08X (MmMapIoSpace)\n", ms);
             return ms;
         }
@@ -3728,12 +3740,23 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
                     }
                 } else if (isMdioFamily) {
-                    /* MDIO-based i217/i219: no BAR0, promote to PTP_READY directly.
-                     * Timestamping goes via intel_init() MDIO ops, not MMIO. */
-                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO device (type=%d) — promoting to PTP_READY\n", target_type);
-                    AVB_SET_HW_STATE(targetContext, AVB_HW_PTP_READY);
-                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO PTP_READY set hw_state=%s caps=0x%08X\n",
-                           AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
+                    if (targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                        /* BAR0 was successfully mapped during init (I219/I217 with
+                         * accessible PCI config).  Run the full MMIO-based PTP
+                         * initialisation path, same as I210/I226. */
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO device with MMIO BAR0 (type=%d) — PTP init\n", target_type);
+                        AvbEnsureDeviceReady(targetContext);
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MMIO PTP init done hw_state=%s caps=0x%08X\n",
+                               AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
+                    } else {
+                        /* No BAR0 available (software-fallback mode) — promote
+                         * hw_state directly so the context is usable for IOCTLs
+                         * that have non-MMIO fallback paths. */
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO-only device (type=%d) — promoting to PTP_READY\n", target_type);
+                        AVB_SET_HW_STATE(targetContext, AVB_HW_PTP_READY);
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO PTP_READY set hw_state=%s caps=0x%08X\n",
+                               AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
+                    }
                 }
                 
                 req->status = 0; // Success
