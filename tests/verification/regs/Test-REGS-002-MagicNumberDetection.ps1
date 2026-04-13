@@ -96,8 +96,10 @@ foreach ($File in $SourceFiles) {
     for ($LineNum = 0; $LineNum -lt $Content.Count; $LineNum++) {
         $Line = $Content[$LineNum]
         
-        # Skip comments
-        if ($Line -match '^\s*//' -or $Line -match '^\s*/\*' -or $Line -match '\*/\s*$') {
+        # Skip single-line comments and block comment openers only.
+        # Block comment body lines (* ...) are NOT excluded — hex literals
+        # in comments are also forbidden by the SSOT/no-magic-numbers rule.
+        if ($Line -match '^\s*//' -or $Line -match '^\s*/\*') {
             continue
         }
         

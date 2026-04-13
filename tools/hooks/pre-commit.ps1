@@ -59,7 +59,7 @@ $hasSourceChanges   = $staged | Where-Object { $_ -match $sourcePattern }
 $hasRegisterChanges = $staged | Where-Object { $_ -match $registerPattern }
 
 if (-not $hasSourceChanges) {
-    # No changes to C/C++ source files — nothing to enforce
+    # No changes to C/C++ source files - nothing to enforce
     exit 0
 }
 
@@ -73,7 +73,8 @@ Write-Host $banner                       -ForegroundColor Cyan
 Write-Host '  Pre-commit: SSOT & Magic Number Enforcement'  -ForegroundColor Cyan
 Write-Host $banner                       -ForegroundColor Cyan
 Write-Host ("  Staged files : {0}" -f $staged.Count) -ForegroundColor Gray
-Write-Host  "  Source changes detected — running compliance checks`n" -ForegroundColor Gray
+Write-Host  '  Source changes detected - running compliance checks' -ForegroundColor Gray
+Write-Host ''
 
 $ssotDir = Join-Path $RepoRoot 'tests\verification\ssot'
 $regsDir = Join-Path $RepoRoot 'tests\verification\regs'
@@ -154,6 +155,6 @@ if (-not $allPassed) {
 }
 
 Write-Host ""
-Write-Host "  All checks passed — proceeding with commit." -ForegroundColor Green
+Write-Host '  All checks passed - proceeding with commit.' -ForegroundColor Green
 Write-Host ""
 exit 0
