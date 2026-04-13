@@ -4023,8 +4023,22 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                             (uint16_t)(mdio->reg  & INTEL_MASK_16BIT),
                                             &val);
                     mdio->value  = val;
-                    mdio->status = (rc == 0) ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_FAILURE;
-                    status       = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    /* rc == 0  : success
+                     * rc < 0  : operation not reachable / not implemented on this adapter
+                     *            (e.g. MMIO unavailable from filter context) → NOT_SUPPORTED
+                     * rc > 0  : hardware protocol error (MDIC error bit set, timeout) → UNSUCCESSFUL */
+                    if (rc == 0) {
+                        mdio->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                        status       = STATUS_SUCCESS;
+                    } else if (rc < 0) {
+                        DEBUGP(DL_ERROR, "IOCTL_AVB_MDIO_READ: mdio_read not available on this adapter (rc=%d)\n", rc);
+                        mdio->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        status       = STATUS_NOT_SUPPORTED;
+                    } else {
+                        DEBUGP(DL_ERROR, "IOCTL_AVB_MDIO_READ: mdio_read hardware error (rc=%d)\n", rc);
+                        mdio->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status       = STATUS_UNSUCCESSFUL;
+                    }
                     DEBUGP(DL_TRACE, "IOCTL_AVB_MDIO_READ: page=%u reg=%u val=0x%04X rc=%d\n",
                            mdio->page, mdio->reg, val, rc);
                 } else {
