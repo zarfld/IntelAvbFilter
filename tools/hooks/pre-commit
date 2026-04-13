@@ -1,0 +1,21 @@
+#!/bin/sh
+# Git pre-commit hook
+#
+# Delegates to PowerShell for SSOT and magic-number enforcement.
+# Enforces:
+#   SSOT-001  No duplicate IOCTL definitions
+#   SSOT-003  SSOT include-path compliance
+#   SSOT-004  SSOT header completeness
+#   REGS-002  No magic-number hex literals in src/ or devices/
+#
+# Install (run once after cloning):
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/hooks/Install-Hooks.ps1
+#
+# Manual install:
+#   cp tools/hooks/pre-commit .git/hooks/pre-commit
+#
+# Emergency bypass (avoid unless absolutely necessary):
+#   git commit --no-verify
+
+exec powershell.exe -NoProfile -ExecutionPolicy Bypass \
+    -File "tools/hooks/pre-commit.ps1"
