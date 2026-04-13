@@ -45,6 +45,7 @@
 /* Adapter information */
 typedef struct {
     char device_path[256];    /* e.g., \\\.\\IntelAvbFilter */
+    UINT16 vendor_id;         /* PCI vendor ID (e.g., 0x8086 for Intel) */
     UINT16 device_id;         /* PCI device ID (e.g., 0x15F2 for i226) */
     char device_name[64];     /* e.g., "I226" */
     int adapter_index;        /* 0-based index */
@@ -129,6 +130,7 @@ int EnumerateAdapters(AdapterInfo *adapters, int max_adapters) {
             /* Adapter exists - populate info */
             strcpy_s(adapters[count].device_path, sizeof(adapters[count].device_path), 
                     "\\\\.\\IntelAvbFilter");
+            adapters[count].vendor_id = (UINT16)enum_req.vendor_id;
             adapters[count].device_id = enum_req.device_id;
             adapters[count].adapter_index = i;
             
