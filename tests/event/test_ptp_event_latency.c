@@ -198,8 +198,8 @@ static int TC_PTP_LAT_001_GpioOscilloscope(HANDLE h, const AdapterInfo *a) {
 static int TC_PTP_LAT_002_EventDataValid(HANDLE h, const AdapterInfo *a) {
     (void)a;
     if (h == INVALID_HANDLE_VALUE) {
-        printf("    [SKIP] Cannot open adapter\n");
-        return TEST_SKIP;
+        printf("    [FAIL] Cannot open adapter\n");
+        return TEST_FAIL;
     }
 
     UINT32 ring_id = Subscribe(h);
@@ -312,8 +312,8 @@ static int TC_PTP_LAT_003_WpaZeroPollProfile(HANDLE h, const AdapterInfo *a) {
 static int TC_PTP_LAT_004_StressNoDrop(HANDLE h, const AdapterInfo *a) {
     (void)a;
     if (h == INVALID_HANDLE_VALUE) {
-        printf("    [SKIP] Cannot open adapter\n");
-        return TEST_SKIP;
+        printf("    [FAIL] Cannot open adapter\n");
+        return TEST_FAIL;
     }
 
     UINT32 ring_id = Subscribe(h);
@@ -494,7 +494,7 @@ int main(void) {
     for (i = 0; i < g_adapter_count; i++) {
         handles[i] = OpenAdapter(&g_adapters[i]);
         if (handles[i] == INVALID_HANDLE_VALUE) {
-            printf("  [SKIP] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n",
+            printf("  [FAIL] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n",
                    i, g_adapters[i].vendor_id, g_adapters[i].device_id);
             continue;
         }
@@ -514,8 +514,9 @@ int main(void) {
 
     for (i = 0; i < g_adapter_count; i++) {
         if (handles[i] == INVALID_HANDLE_VALUE) {
-            printf("  --- Adapter %d/%d: SKIPPED (could not open) ---\n\n",
+            printf("  --- Adapter %d/%d: FAILED (could not open) ---\n\n",
                    i + 1, g_adapter_count);
+            total_fail++;
             continue;
         }
         HANDLE h = handles[i];

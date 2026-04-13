@@ -1473,7 +1473,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ctx.adapter_count; i++) {
         ctx.adapter_handles[i] = OpenAdapter(&ctx.adapters[i]);
         if (ctx.adapter_handles[i] == INVALID_HANDLE_VALUE) {
-            printf("  [SKIP] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n\n",
+            printf("  [FAIL] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n\n",
                    i, ctx.adapters[i].vendor_id, ctx.adapters[i].device_id);
             continue;
         }
@@ -1492,8 +1492,9 @@ int main(int argc, char **argv) {
         ctx.adapter = ctx.adapter_handles[adapter_idx];  /* Use pre-opened handle */
 
         if (ctx.adapter == INVALID_HANDLE_VALUE) {
-            printf("\n  [SKIP] Adapter [%d/%d]: could not open — skipping all tests for this adapter.\n\n",
+            printf("\n  [FAIL] Adapter [%d/%d]: could not open — DRIVER BUG: adapter open failed.\n\n",
                    adapter_idx + 1, ctx.adapter_count);
+            total_fail++;
             continue;
         }
 

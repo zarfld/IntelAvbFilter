@@ -391,7 +391,7 @@ int main(void) {
     for (i = 0; i < g_adapter_count; i++) {
         handles[i] = OpenAdapter(&g_adapters[i]);
         if (handles[i] == INVALID_HANDLE_VALUE) {
-            printf("  [SKIP] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n",
+            printf("  [FAIL] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n",
                    i, g_adapters[i].vendor_id, g_adapters[i].device_id);
             continue;
         }
@@ -411,8 +411,9 @@ int main(void) {
 
     for (i = 0; i < g_adapter_count; i++) {
         if (handles[i] == INVALID_HANDLE_VALUE) {
-            printf("  --- Adapter %d/%d: SKIPPED (could not open) ---\n\n",
+            printf("  --- Adapter %d/%d: FAILED (could not open) ---\n\n",
                    i + 1, g_adapter_count);
+            total_fail++;
             continue;
         }
         HANDLE h = handles[i];

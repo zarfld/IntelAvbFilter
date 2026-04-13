@@ -258,8 +258,8 @@ static int TC_ZP_001_SourceAudit(HANDLE h, const AdapterInfo *a) {
 static int TC_ZP_002_EitrRegister(HANDLE h, const AdapterInfo *a) {
     (void)a;
     if (h == INVALID_HANDLE_VALUE) {
-        printf("    [SKIP] Cannot open adapter\n");
-        return TEST_SKIP;
+        printf("    [FAIL] Cannot open adapter\n");
+        return TEST_FAIL;
     }
 
     AVB_REGISTER_REQUEST reg = {0};
@@ -305,8 +305,8 @@ static int TC_ZP_002_EitrRegister(HANDLE h, const AdapterInfo *a) {
 static int TC_ZP_003_RingBufferPassiveDelivery(HANDLE h, const AdapterInfo *a) {
     (void)a;
     if (h == INVALID_HANDLE_VALUE) {
-        printf("    [SKIP] Cannot open adapter\n");
-        return TEST_SKIP;
+        printf("    [FAIL] Cannot open adapter\n");
+        return TEST_FAIL;
     }
 
     /* Subscribe: all TS event types, no VLAN filter */
@@ -372,8 +372,8 @@ static int TC_ZP_003_RingBufferPassiveDelivery(HANDLE h, const AdapterInfo *a) {
 static int TC_ZP_004_CpuOverhead(HANDLE h, const AdapterInfo *a) {
     (void)a;
     if (h == INVALID_HANDLE_VALUE) {
-        printf("    [SKIP] Cannot open adapter\n");
-        return TEST_SKIP;
+        printf("    [FAIL] Cannot open adapter\n");
+        return TEST_FAIL;
     }
 
     HANDLE proc = GetCurrentProcess();
@@ -513,8 +513,8 @@ static int TC_ZP_005_WprCallStack(HANDLE h, const AdapterInfo *a) {
 static int TC_ZP_006_InterruptDrivenConfirmation(HANDLE h, const AdapterInfo *a) {
     (void)a;
     if (h == INVALID_HANDLE_VALUE) {
-        printf("    [SKIP] Cannot open adapter\n");
-        return TEST_SKIP;
+        printf("    [FAIL] Cannot open adapter\n");
+        return TEST_FAIL;
     }
 
     /*
@@ -589,7 +589,7 @@ int main(void) {
     for (i = 0; i < g_adapter_count; i++) {
         handles[i] = OpenAdapter(&g_adapters[i]);
         if (handles[i] == INVALID_HANDLE_VALUE) {
-            printf("  [SKIP] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n",
+            printf("  [FAIL] Cannot open adapter %d (VID=0x%04X DID=0x%04X) — skipping.\n",
                    i, g_adapters[i].vendor_id, g_adapters[i].device_id);
             continue;
         }
@@ -609,8 +609,9 @@ int main(void) {
 
     for (i = 0; i < g_adapter_count; i++) {
         if (handles[i] == INVALID_HANDLE_VALUE) {
-            printf("  --- Adapter %d/%d: SKIPPED (could not open) ---\n\n",
+            printf("  --- Adapter %d/%d: FAILED (could not open) ---\n\n",
                    i + 1, g_adapter_count);
+            total_fail++;
             continue;
         }
         HANDLE h = handles[i];

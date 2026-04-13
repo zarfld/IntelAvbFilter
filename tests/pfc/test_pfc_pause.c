@@ -89,8 +89,8 @@ static int TC_PFC_001_DeviceAccess(void)
 {
     HANDLE h = OpenDevice();
     if (h == INVALID_HANDLE_VALUE) {
-        printf("    [SKIP] Cannot open adapter (err=%lu)\n", GetLastError());
-        return -1;
+        printf("    [FAIL] Cannot open adapter (err=%lu) — driver failed to open\n", GetLastError());
+        return 0;
     }
     CloseHandle(h);
     printf("    Device node accessible\n");
@@ -101,7 +101,7 @@ static int TC_PFC_001_DeviceAccess(void)
 static int TC_PFC_002_PFC_Enable(void)
 {
     HANDLE h = OpenDevice();
-    if (h == INVALID_HANDLE_VALUE) return -1;
+    if (h == INVALID_HANDLE_VALUE) { printf("    [FAIL] Cannot open adapter (err=%lu)\n", GetLastError()); return 0; }
 
     AVB_PFC_REQUEST req;
     ZeroMemory(&req, sizeof(req));
@@ -120,7 +120,7 @@ static int TC_PFC_002_PFC_Enable(void)
 static int TC_PFC_003_PFC_Disable(void)
 {
     HANDLE h = OpenDevice();
-    if (h == INVALID_HANDLE_VALUE) return -1;
+    if (h == INVALID_HANDLE_VALUE) { printf("    [FAIL] Cannot open adapter (err=%lu)\n", GetLastError()); return 0; }
 
     AVB_PFC_REQUEST req;
     ZeroMemory(&req, sizeof(req));
@@ -139,7 +139,7 @@ static int TC_PFC_003_PFC_Disable(void)
 static int TC_PFC_004_MDIO_PAUSE_Capability(void)
 {
     HANDLE h = OpenDevice();
-    if (h == INVALID_HANDLE_VALUE) return -1;
+    if (h == INVALID_HANDLE_VALUE) { printf("    [FAIL] Cannot open adapter (err=%lu)\n", GetLastError()); return 0; }
 
     AVB_MDIO_REQUEST req;
     ZeroMemory(&req, sizeof(req));
@@ -169,7 +169,7 @@ static int TC_PFC_004_MDIO_PAUSE_Capability(void)
 static int TC_PFC_005_DeviceInfoPFC(void)
 {
     HANDLE h = OpenDevice();
-    if (h == INVALID_HANDLE_VALUE) return -1;
+    if (h == INVALID_HANDLE_VALUE) { printf("    [FAIL] Cannot open adapter (err=%lu)\n", GetLastError()); return 0; }
 
     AVB_DEVICE_INFO_REQUEST req;
     ZeroMemory(&req, sizeof(req));
