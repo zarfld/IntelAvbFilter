@@ -3622,92 +3622,34 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Looking for VID=0x%04X DID=0x%04X\n", 
                    req->vendor_id, req->device_id);
             
-            // Search through ALL filter modules to find the requested adapter
-            // CRITICAL FIX: Use index to select N-th adapter with matching VID/DID (multi-adapter support)
-            BOOLEAN bFalse = FALSE;
-            PMS_FILTER targetFilter = NULL;
-            PAVB_DEVICE_CONTEXT targetContext = NULL;
-            ULONG matchCount = 0;  // Count adapters matching VID/DID
-            
-            FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
-            PLIST_ENTRY Link = FilterModuleList.Flink;
-            
-            while (Link != &FilterModuleList && targetFilter == NULL) {
-                PMS_FILTER cand = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
-                Link = Link->Flink;
-                
-                if (cand && cand->AvbContext) {
-                    PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)cand->AvbContext;
-                    DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Checking filter %wZ - VID=0x%04X DID=0x%04X\n",
-                           &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
-                           ctx->intel_device.pci_device_id);
-                    
-                    /* Match by exact DID OR same device-family (handles variant DIDs like I219-LM4
-                     * where ENUM_ADAPTERS returns the family representative DID via
-                     * AvbIsSupportedIntelController, but the context stores the real PCI DID). */
-                    intel_device_type_t ctxType = AvbGetIntelDeviceType(ctx->intel_device.pci_device_id);
-                    intel_device_type_t reqType = AvbGetIntelDeviceType(req->device_id);
-                    BOOLEAN didMatch = (ctx->intel_device.pci_device_id == req->device_id);
-                    BOOLEAN familyMatch = (ctxType != INTEL_DEVICE_UNKNOWN && ctxType == reqType);
-                    if (ctx->intel_device.pci_vendor_id == req->vendor_id && 
-                        (didMatch || familyMatch)) {
-                        // FIX: Check if this is the N-th matching adapter
-                        if (matchCount == req->index) {
-                            targetFilter = cand;
-                            targetContext = ctx;
-                            DEBUGP(DL_TRACE, "? Found target adapter: %wZ (VID=0x%04X, DID=0x%04X, index=%u, match=%u)\n", 
-                                   &cand->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
-                                   ctx->intel_device.pci_device_id, req->index, matchCount);
-                            break;
-                        } else {
-                            DEBUGP(DL_TRACE, "? Skipping adapter %wZ (match %u, need index %u)\n",
-                                   &cand->MiniportFriendlyName, matchCount, req->index);
-                            matchCount++;
-                        }
-                    }
-                }
-            }
-            
-            FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
-            
-            if (targetFilter == NULL) {
-                DEBUGP(DL_ERROR, "!!! [DIAG] OPEN_ADAPTER: INNER search found NO target for VID=0x%04X DID=0x%04X index=%u\n",
-                       req->vendor_id, req->device_id, req->index);
-                DEBUGP(DL_ERROR, "? OPEN_ADAPTER: No adapter found for VID=0x%04X DID=0x%04X\n", 
-                       req->vendor_id, req->device_id);
-                DEBUGP(DL_ERROR, "   Available adapters:\n");
-                
-                // List all available adapters for debugging
-                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
-                Link = FilterModuleList.Flink;
-                while (Link != &FilterModuleList) {
-                    PMS_FILTER f = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
-                    Link = Link->Flink;
-                    if (f && f->AvbContext) {
-                        PAVB_DEVICE_CONTEXT ctx = (PAVB_DEVICE_CONTEXT)f->AvbContext;
-                        UNREFERENCED_PARAMETER(ctx);
-                        DEBUGP(DL_ERROR, "     - %wZ: VID=0x%04X DID=0x%04X\n",
-                               &f->MiniportFriendlyName, ctx->intel_device.pci_vendor_id, 
-                               ctx->intel_device.pci_device_id);
-                    }
-                }
-                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
-                
+            /* device.c already resolved the adapter by global index (consistent with
+             * IOCTL_AVB_ENUM_ADAPTERS ordering) and stored the correct context in
+             * FileObject->FsContext before calling AvbHandleDeviceIoControl here.
+             * Use the passed AvbContext directly.
+             *
+             * The previous inner search used a per-DID relative index (N-th adapter
+             * with matching VID/DID), which conflicts with the global index that
+             * ENUM_ADAPTERS returns and tests use.  That mismatch caused
+             * STATUS_NO_SUCH_DEVICE (0xC000000E) for any adapter at global index > 0
+             * when each DID appeared only once in the system. */
+            PAVB_DEVICE_CONTEXT targetContext = AvbContext;
+
+            if (targetContext == NULL) {
+                DEBUGP(DL_ERROR, "!!! [DIAG] OPEN_ADAPTER: AvbContext is NULL\n");
                 req->status = (avb_u32)STATUS_NO_SUCH_DEVICE;
                 info = sizeof(*req);
                 status = STATUS_SUCCESS; // IRP handled, but device not found
             } else {
                 // CRITICAL: Switch global context to the requested adapter
                 DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Switching global context\n");
-                DEBUGP(DL_TRACE, "   - From: VID=0x%04X DID=0x%04X (filter=%p)\n",
+                DEBUGP(DL_TRACE, "   - From: VID=0x%04X DID=0x%04X\n",
                        g_AvbContext ? g_AvbContext->intel_device.pci_vendor_id : 0,
-                       g_AvbContext ? g_AvbContext->intel_device.pci_device_id : 0,
-                       g_AvbContext ? g_AvbContext->filter_instance : NULL);
-                DEBUGP(DL_TRACE, "   - To:   VID=0x%04X DID=0x%04X (filter=%p)\n",
+                       g_AvbContext ? g_AvbContext->intel_device.pci_device_id : 0);
+                DEBUGP(DL_TRACE, "   - To:   VID=0x%04X DID=0x%04X index=%u\n",
                        targetContext->intel_device.pci_vendor_id,
                        targetContext->intel_device.pci_device_id,
-                       targetFilter);
-                
+                       req->index);
+
                 // Make the target context the active global context
                 g_AvbContext = targetContext;
                 
