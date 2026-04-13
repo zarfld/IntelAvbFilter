@@ -66,7 +66,7 @@ if (-not $hasSourceChanges) {
 # ---------------------------------------------------------------------------
 # 3. Run checks
 # ---------------------------------------------------------------------------
-$banner = ([char]0x2501) * 52   # thick horizontal line
+$banner = '-' * 52
 
 Write-Host ""
 Write-Host $banner                       -ForegroundColor Cyan
