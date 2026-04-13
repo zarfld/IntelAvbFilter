@@ -557,7 +557,7 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     /* Step 1: Discover & map BAR0 if not yet mapped.
      *
      * I219/I217 are PCH-integrated controllers but they DO expose a 128 KB BAR0
-     * MMIO space containing the PTP register block (0x0B600–0x0B640).  We attempt
+     * MMIO space containing the PTP register block (I210_SYSTIML through I210_TSAUXC).  We attempt
      * BAR0 discovery for these devices exactly as for I210/I226.  If discovery
      * fails (e.g. the LWF cannot decode PCI config for the PCH function) the
      * isMdioDevice flag triggers a graceful fallback to software-only mode so that
@@ -568,7 +568,7 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     if (Ctx->hardware_context == NULL) {
         /* Attempt BAR0 discovery for all devices, including PCH-integrated I219/I217.
          * These devices DO have a BAR0 MMIO space (128 KB) that contains the PTP
-         * register block (0x0B600–0x0B640).  If discovery fails — which can happen
+         * register block (I210_SYSTIML through I210_TSAUXC).  If discovery fails — which can happen
          * when the LWF cannot decode PCI config for PCH-attached functions — fall
          * back gracefully to MDIO-only / software-fallback mode. */
         DEBUGP(DL_TRACE, "? STEP 1: Starting BAR0 discovery and mapping...\n");

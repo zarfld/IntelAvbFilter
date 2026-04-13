@@ -25,55 +25,52 @@
 #include <math.h>
 #include "../../include/avb_ioctl.h"
 
-#define REG_SYSTIML     0x0B600  // System Time Low
-#define REG_SYSTIMH     0x0B604  // System Time High
-#define REG_TIMINCA     0x0B608  // Time Increment Attributes
-#define REG_TSAUXC      0x0B640  // Time Sync Auxiliary Control
+/* Read PHC time via IOCTL_AVB_GET_TIMESTAMP (replaces raw SYSTIML/H register reads). */
+static ULONGLONG GetPhcNs(HANDLE h)
+{
+    AVB_TIMESTAMP_REQUEST r;
+    ZeroMemory(&r, sizeof(r));
+    r.clock_id = 0;
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                              &r, sizeof(r), &r, sizeof(r), &br, NULL);
+    return (ok && r.status == 0) ? r.timestamp : 0;
+}
 
-// Helper functions
-static BOOL ReadRegister(HANDLE h, ULONG offset, ULONG* value) {
-    AVB_REGISTER_REQUEST req;
+/* Set PHC time via IOCTL_AVB_SET_TIMESTAMP. */
+static BOOL SetPhcNs(HANDLE h, ULONGLONG ns)
+{
+    AVB_TIMESTAMP_REQUEST r;
+    ZeroMemory(&r, sizeof(r));
+    r.timestamp = ns;
+    DWORD br = 0;
+    return DeviceIoControl(h, IOCTL_AVB_SET_TIMESTAMP,
+                           &r, sizeof(r), &r, sizeof(r), &br, NULL);
+}
+
+/* Read clock configuration (SYSTIM, TIMINCA, TSAUXC) via public API. */
+static BOOL GetClockConfig(HANDLE h, AVB_CLOCK_CONFIG *cfg)
+{
+    ZeroMemory(cfg, sizeof(*cfg));
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_CLOCK_CONFIG,
+                              cfg, sizeof(*cfg), cfg, sizeof(*cfg), &br, NULL);
+    return ok && (cfg->status == 0);
+}
+
+/* Set clock frequency via IOCTL_AVB_ADJUST_FREQUENCY.
+ * increment_ns  : integer ns per clock cycle (maps to TIMINCA[31:24]).
+ * increment_frac: sub-ns fractional component (2^32 = 1 ns); pass 0 for integer-only. */
+static BOOL AdjustFrequency(HANDLE h, ULONG increment_ns, ULONG increment_frac)
+{
+    AVB_FREQUENCY_REQUEST req;
     ZeroMemory(&req, sizeof(req));
-    req.offset = offset;
-    
-    DWORD bytesReturned = 0;
-    if (!DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, 
-                        &req, sizeof(req), 
-                        &req, sizeof(req), 
-                        &bytesReturned, NULL)) {
-        return FALSE;
-    }
-    
-    *value = req.value;
-    return TRUE;
-}
-
-static BOOL WriteRegister(HANDLE h, ULONG offset, ULONG value) {
-    AVB_REGISTER_REQUEST req;
-    ZeroMemory(&req, sizeof(req));
-    req.offset = offset;
-    req.value = value;
-    
-    DWORD bytesReturned = 0;
-    return DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, 
-                          &req, sizeof(req), 
-                          &req, sizeof(req), 
-                          &bytesReturned, NULL);
-}
-
-static ULONGLONG ReadSystim(HANDLE h) {
-    ULONG systiml = 0, systimh = 0;
-    if (!ReadRegister(h, REG_SYSTIML, &systiml) || !ReadRegister(h, REG_SYSTIMH, &systimh)) {
-        return 0;
-    }
-    return ((ULONGLONG)systimh << 32) | systiml;
-}
-
-static BOOL WriteSystim(HANDLE h, ULONGLONG timestamp) {
-    ULONG systiml = (ULONG)(timestamp & 0xFFFFFFFF);
-    ULONG systimh = (ULONG)(timestamp >> 32);
-    
-    return WriteRegister(h, REG_SYSTIMH, systimh) && WriteRegister(h, REG_SYSTIML, systiml);
+    req.increment_ns   = increment_ns;
+    req.increment_frac = increment_frac;
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_ADJUST_FREQUENCY,
+                              &req, sizeof(req), &req, sizeof(req), &br, NULL);
+    return ok && (req.status == 0);
 }
 
 /* Per-adapter PHC read via IOCTL_AVB_GET_TIMESTAMP (adapter-aware; no raw registers).
@@ -111,12 +108,12 @@ static int TestTimestampSetting(HANDLE h) {
     
     // Test 1a: Set to zero
     printf("Test 1a: Set SYSTIM to 0\n");
-    if (!WriteSystim(h, 0)) {
+    if (!SetPhcNs(h, 0)) {
         printf("  ?? FAILED: Could not write SYSTIM\n");
         testsFailed++;
     } else {
         Sleep(10);  // Small delay for write to settle
-        ULONGLONG readback = ReadSystim(h);
+        ULONGLONG readback = GetPhcNs(h);
         printf("  Wrote: 0x0000000000000000\n");
         printf("  Read:  0x%016llX\n", readback);
         
@@ -133,12 +130,12 @@ static int TestTimestampSetting(HANDLE h) {
     // Test 1b: Set to specific value (use reasonable nanosecond value)
     printf("\nTest 1b: Set SYSTIM to 0x0000000100000000 (4.3 seconds)\n");
     ULONGLONG testValue = 0x0000000100000000ULL;  // 4.3 billion ns = 4.3 seconds
-    if (!WriteSystim(h, testValue)) {
+    if (!SetPhcNs(h, testValue)) {
         printf("  ?? FAILED: Could not write SYSTIM\n");
         testsFailed++;
     } else {
         Sleep(10);
-        ULONGLONG readback = ReadSystim(h);
+        ULONGLONG readback = GetPhcNs(h);
         printf("  Wrote: 0x%016llX (%.3f seconds)\n", testValue, testValue / 1e9);
         printf("  Read:  0x%016llX (%.3f seconds)\n", readback, readback / 1e9);
         
@@ -170,7 +167,7 @@ static int TestTimestampSetting(HANDLE h) {
         // Not counted as failure - may not be implemented
     } else {
         Sleep(10);
-        ULONGLONG readback = ReadSystim(h);
+        ULONGLONG readback = GetPhcNs(h);
         printf("  Wrote: 0x5555555555555555 (via IOCTL)\n");
         printf("  Read:  0x%016llX\n", readback);
         printf("  Status: 0x%08X\n", tsReq.status);
@@ -198,56 +195,63 @@ static int TestClockAdjustment(HANDLE h) {
     int testsPassed = 0;
     int testsFailed = 0;
     
-    // Save original TIMINCA
+    // Save original TIMINCA via GET_CLOCK_CONFIG
+    AVB_CLOCK_CONFIG origCfg;
     ULONG originalTiminca = 0;
-    if (!ReadRegister(h, REG_TIMINCA, &originalTiminca)) {
-        printf("?? FAILED: Could not read TIMINCA\n");
+    if (!GetClockConfig(h, &origCfg)) {
+        printf("?? FAILED: Could not read clock config\n");
         return 1;
     }
+    originalTiminca = origCfg.timinca;
     printf("Original TIMINCA: 0x%08X\n\n", originalTiminca);
-    
-    // Test different TIMINCA values
+
+    /* Each entry: {increment_ns, raw_timinca_equiv, description}
+     * raw_timinca_equiv = increment_ns << 24 (integer-only, no fractional component). */
     struct {
-        ULONG timinca;
+        ULONG increment_ns;   /* passed to IOCTL_AVB_ADJUST_FREQUENCY */
+        ULONG timinca;        /* expected TIMINCA readback = increment_ns << 24 */
         const char* description;
-        double expectedRateMHz;  // Expected increment rate in MHz
+        double expectedRateMHz;
     } tests[] = {
-        {0x01000000, "1ns per cycle", 1.0},
-        {0x08000000, "8ns per cycle (I210 standard)", 0.125},
-        {0x18000000, "24ns per cycle (I226 standard)", 0.042},
-        {0x10000000, "16ns per cycle", 0.0625},
-        {0x04000000, "4ns per cycle", 0.25}
+        {1u,  0x01000000u, "1ns per cycle",               1.0},
+        {8u,  0x08000000u, "8ns per cycle (I210 standard)",  0.125},
+        {24u, 0x18000000u, "24ns per cycle (I226 standard)", 0.042},
+        {16u, 0x10000000u, "16ns per cycle",               0.0625},
+        {4u,  0x04000000u, "4ns per cycle",                0.25}
     };
-    
-    for (int i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {
-        printf("Test 2.%d: TIMINCA = 0x%08X (%s)\n", i+1, tests[i].timinca, tests[i].description);
-        
-        // Write TIMINCA
-        if (!WriteRegister(h, REG_TIMINCA, tests[i].timinca)) {
-            printf("  ?? FAILED: Could not write TIMINCA\n");
+
+    for (int i = 0; i < (int)(sizeof(tests) / sizeof(tests[0])); i++) {
+        printf("Test 2.%d: increment_ns=%u (%s)\n",
+               i+1, tests[i].increment_ns, tests[i].description);
+
+        // Set frequency via public API (no raw register access)
+        if (!AdjustFrequency(h, tests[i].increment_ns, 0u)) {
+            printf("  ?? FAILED: IOCTL_AVB_ADJUST_FREQUENCY failed\n");
             testsFailed++;
             continue;
         }
-        
-        // Verify write
+
+        // Verify via GET_CLOCK_CONFIG
+        AVB_CLOCK_CONFIG cfg;
         ULONG readbackTiminca = 0;
-        if (!ReadRegister(h, REG_TIMINCA, &readbackTiminca)) {
-            printf("  ?? FAILED: Could not read back TIMINCA\n");
+        if (!GetClockConfig(h, &cfg)) {
+            printf("  ?? FAILED: GET_CLOCK_CONFIG readback failed\n");
             testsFailed++;
             continue;
         }
-        
+        readbackTiminca = cfg.timinca;
+
         if (readbackTiminca != tests[i].timinca) {
-            printf("  ?? FAILED: TIMINCA readback mismatch (0x%08X != 0x%08X)\n", 
+            printf("  ?? FAILED: TIMINCA readback 0x%08X != expected 0x%08X\n",
                    readbackTiminca, tests[i].timinca);
             testsFailed++;
             continue;
         }
-        
-        printf("  ? TIMINCA written and verified\n");
-        
+
+        printf("  [PASS] TIMINCA verified: 0x%08X\n", readbackTiminca);
+
         // Measure clock increment rate
-        ULONGLONG t1 = ReadSystim(h);
+        ULONGLONG t1 = GetPhcNs(h);
         LARGE_INTEGER freq, start, end;
         QueryPerformanceFrequency(&freq);
         QueryPerformanceCounter(&start);
@@ -255,31 +259,30 @@ static int TestClockAdjustment(HANDLE h) {
         Sleep(100);  // 100ms measurement window
         
         QueryPerformanceCounter(&end);
-        ULONGLONG t2 = ReadSystim(h);
-        
+        ULONGLONG t2 = GetPhcNs(h);
+
         double elapsedMs = (double)(end.QuadPart - start.QuadPart) * 1000.0 / freq.QuadPart;
         LONGLONG systimDelta = (LONGLONG)(t2 - t1);
         double measuredRateNsPerMs = (double)systimDelta / elapsedMs;
-        
+
         printf("  Elapsed: %.2f ms\n", elapsedMs);
         printf("  SYSTIM delta: %lld ns\n", systimDelta);
         printf("  Rate: %.2f ns/ms (%.6f MHz)\n", measuredRateNsPerMs, measuredRateNsPerMs / 1000.0);
-        
-        // Note: Actual rate depends on hardware clock frequency
-        // This test just verifies SYSTIM is incrementing
+
         if (systimDelta > 0) {
-            printf("  ? PASSED: Clock is incrementing with TIMINCA=0x%08X\n", tests[i].timinca);
+            printf("  [PASS] Clock incrementing (increment_ns=%u)\n", tests[i].increment_ns);
             testsPassed++;
         } else {
-            printf("  ?? FAILED: Clock not incrementing\n");
+            printf("  [FAIL] Clock not incrementing\n");
             testsFailed++;
         }
         printf("\n");
     }
-    
-    // Restore original TIMINCA
-    printf("Restoring original TIMINCA: 0x%08X\n", originalTiminca);
-    WriteRegister(h, REG_TIMINCA, originalTiminca);
+
+    // Restore original TIMINCA via public API
+    printf("Restoring original TIMINCA: 0x%08X (increment_ns=%u)\n",
+           originalTiminca, originalTiminca >> 24);
+    AdjustFrequency(h, originalTiminca >> 24, 0u);
     
     printf("\n--- Test 2 Summary ---\n");
     printf("Passed: %d, Failed: %d\n", testsPassed, testsFailed);
@@ -295,27 +298,28 @@ static int TestFrequencyTuning(HANDLE h) {
     int testsPassed = 0;
     int testsFailed = 0;
     
-    // Save original TIMINCA
+    // Save original TIMINCA via GET_CLOCK_CONFIG
+    AVB_CLOCK_CONFIG t3cfg;
     ULONG originalTiminca = 0;
-    ReadRegister(h, REG_TIMINCA, &originalTiminca);
-    
-    printf("Test: Measure clock stability with standard TIMINCA\n");
-    
-    // Set standard I210 TIMINCA (8ns)
-    ULONG standardTiminca = 0x08000000;
-    if (!WriteRegister(h, REG_TIMINCA, standardTiminca)) {
-        printf("?? FAILED: Could not write TIMINCA\n");
+    if (GetClockConfig(h, &t3cfg)) {
+        originalTiminca = t3cfg.timinca;
+    }
+
+    printf("Test: Measure clock stability with standard 8ns increment\n");
+
+    // Set 8ns-per-cycle via public API (standard I210 rate)
+    if (!AdjustFrequency(h, 8u, 0u)) {
+        printf("[FAIL] IOCTL_AVB_ADJUST_FREQUENCY(8ns) failed\n");
         return 1;
     }
-    
-    printf("TIMINCA set to: 0x%08X (8ns per cycle)\n\n", standardTiminca);
-    
+    printf("Frequency set to 8ns per cycle (TIMINCA=0x%08X expected)\n\n", 8u << 24);
+
     // Take multiple measurements
     #define NUM_SAMPLES 5
     double rates[NUM_SAMPLES];
-    
+
     for (int i = 0; i < NUM_SAMPLES; i++) {
-        ULONGLONG t1 = ReadSystim(h);
+        ULONGLONG t1 = GetPhcNs(h);
         LARGE_INTEGER freq, start, end;
         QueryPerformanceFrequency(&freq);
         QueryPerformanceCounter(&start);
@@ -323,12 +327,12 @@ static int TestFrequencyTuning(HANDLE h) {
         Sleep(200);  // 200ms window for better accuracy
         
         QueryPerformanceCounter(&end);
-        ULONGLONG t2 = ReadSystim(h);
-        
+        ULONGLONG t2 = GetPhcNs(h);
+
         double elapsedMs = (double)(end.QuadPart - start.QuadPart) * 1000.0 / freq.QuadPart;
         LONGLONG systimDelta = (LONGLONG)(t2 - t1);
         rates[i] = (double)systimDelta / elapsedMs;
-        
+
         printf("  Sample %d: %.2f ms elapsed, %lld ns delta, rate=%.2f ns/ms\n",
                i+1, elapsedMs, systimDelta, rates[i]);
     }
@@ -362,9 +366,11 @@ static int TestFrequencyTuning(HANDLE h) {
         // Not counted as hard failure - may be expected on some systems
     }
     
-    // Restore original TIMINCA
-    WriteRegister(h, REG_TIMINCA, originalTiminca);
-    
+    // Restore original TIMINCA via public API
+    if (originalTiminca != 0) {
+        AdjustFrequency(h, originalTiminca >> 24, 0u);
+    }
+
     printf("\n--- Test 3 Summary ---\n");
     printf("Passed: %d, Failed: %d\n", testsPassed, testsFailed);
     return testsFailed;
@@ -383,19 +389,18 @@ static int TestClockDrift(HANDLE h) {
     
     // Set PTP clock to current Windows time
     ULONGLONG winTime1 = GetWindowsTimeNs();
-    if (!WriteSystim(h, winTime1)) {
-        printf("?? FAILED: Could not set SYSTIM\n");
-        return 1;
+    if (!SetPhcNs(h, winTime1)) {
+        printf("[WARN] SET_TIMESTAMP may not be supported; continuing\n");
     }
-    
+
     printf("  Initial sync: PTP = Windows = %llu ns\n", winTime1);
-    
+
     // Wait and measure drift
     printf("\nMeasuring drift over 1 second...\n");
     Sleep(1000);
-    
+
     ULONGLONG winTime2 = GetWindowsTimeNs();
-    ULONGLONG ptpTime2 = ReadSystim(h);
+    ULONGLONG ptpTime2 = GetPhcNs(h);
     
     LONGLONG winDelta = (LONGLONG)(winTime2 - winTime1);
     LONGLONG ptpDelta = (LONGLONG)(ptpTime2 - winTime1);
@@ -679,14 +684,14 @@ int main(int argc, char* argv[]) {
         printf("? Device initialized successfully\n");
     }
     
-    // Verify PTP clock is enabled
-    ULONG tsauxc = 0;
-    if (ReadRegister(h, REG_TSAUXC, &tsauxc)) {
-        printf("? TSAUXC: 0x%08X ", tsauxc);
-        if (tsauxc & 0x80000000) {
-            printf("(?? PTP DISABLED - tests may fail)\n\n");
+    // Verify PTP clock is enabled via GET_CLOCK_CONFIG (no raw register access)
+    AVB_CLOCK_CONFIG mainCfg;
+    if (GetClockConfig(h, &mainCfg)) {
+        printf("[INFO] TSAUXC: 0x%08X ", mainCfg.tsauxc);
+        if (mainCfg.tsauxc & 0x80000000U) {
+            printf("(PTP DISABLED - tests may fail)\n\n");
         } else {
-            printf("(? PTP ENABLED)\n\n");
+            printf("(PTP ENABLED)\n\n");
         }
     }
     

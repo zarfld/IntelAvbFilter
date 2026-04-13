@@ -1,14 +1,24 @@
 /**
  * @file tsauxc_toggle_test.c
- * @brief Comprehensive test for TSAUXC bit 31 (DisableSystime) enable/disable cycle
- * 
- * This test validates that we can correctly:
- * 1. Read current TSAUXC state
- * 2. Clear bit 31 to enable PTP clock (SYSTIM increments)
- * 3. Set bit 31 to disable PTP clock (SYSTIM freezes)
- * 4. Clear bit 31 again to re-enable PTP clock
- * 
- * Validates the implementation in avb_integration_fixed.c lines 1144-1166
+ * @brief Test for TSAUXC bit 31 (DisableSystime) enable/disable cycle
+ *
+ * Validates TSAUXC toggle via the public driver API only:
+ *   - IOCTL_AVB_ENUM_ADAPTERS      — discover all adapters
+ *   - IOCTL_AVB_OPEN_ADAPTER       — bind handle to a specific adapter
+ *   - IOCTL_AVB_SET_HW_TIMESTAMPING — enable/disable PTP (TSAUXC bit 31)
+ *   - IOCTL_AVB_GET_CLOCK_CONFIG   — read TSAUXC state (tsauxc field)
+ *   - IOCTL_AVB_GET_TIMESTAMP      — verify SYSTIM is ticking
+ *
+ * Adapter selection: the test iterates all adapters and picks the first one
+ * where IOCTL_AVB_SET_HW_TIMESTAMPING returns current_tsauxc != 0.
+ * Adapters where the driver no-ops TSAUXC (I219, I217) always return
+ * current_tsauxc == 0 and are automatically skipped.
+ *
+ * No raw register IOCTLs (debug-only).
+ * No register offset constants (internal driver detail, not public ABI).
+ *
+ * Verifies: Issue #NNN (TEST-TSAUXC-001)
+ * Traces to: #48 (REQ-F-IOCTL-PHC-004)
  */
 
 #include <windows.h>
@@ -16,261 +26,305 @@
 #include <stdlib.h>
 #include "../../include/avb_ioctl.h"
 
-#define REG_TSAUXC      0x0B640  // Time Sync Auxiliary Control
-#define REG_SYSTIML     0x0B600  // System Time Low
-#define REG_SYSTIMH     0x0B604  // System Time High
+/* Open a fresh handle to the driver device */
+static HANDLE OpenDriverHandle(void)
+{
+    return CreateFileW(L"\\\\.\\IntelAvbFilter",
+                       GENERIC_READ | GENERIC_WRITE,
+                       0, NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+}
 
-#define BIT31_DISABLE_SYSTIME  0x80000000
-
-// Helper function to read a register
-static BOOL ReadRegister(HANDLE h, ULONG offset, ULONG* value) {
-    AVB_REGISTER_REQUEST req;
+/* Enable or disable PTP hardware timestamping via public API.
+ * Returns TRUE on success.  out receives the request/response (may be NULL). */
+static BOOL SetHwTimestamping(HANDLE h, BOOL enable, AVB_HW_TIMESTAMPING_REQUEST *out)
+{
+    AVB_HW_TIMESTAMPING_REQUEST req;
     ZeroMemory(&req, sizeof(req));
-    req.offset = offset;
-    
-    DWORD bytesReturned = 0;
-    if (!DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, 
-                        &req, sizeof(req), 
-                        &req, sizeof(req), 
-                        &bytesReturned, NULL)) {
-        return FALSE;
-    }
-    
-    *value = req.value;
+    req.enable     = enable ? 1u : 0u;
+    req.timer_mask = 1u; /* SYSTIM0 only */
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_SET_HW_TIMESTAMPING,
+                              &req, sizeof(req),
+                              &req, sizeof(req),
+                              &br, NULL);
+    if (out) *out = req;
+    return ok && (req.status == 0);
+}
+
+/* Read current TSAUXC value via IOCTL_AVB_GET_CLOCK_CONFIG. */
+static BOOL GetClockConfig(HANDLE h, AVB_CLOCK_CONFIG *cfg)
+{
+    ZeroMemory(cfg, sizeof(*cfg));
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_CLOCK_CONFIG,
+                              cfg, sizeof(*cfg),
+                              cfg, sizeof(*cfg),
+                              &br, NULL);
+    return ok && (cfg->status == 0);
+}
+
+/* Read PHC time (nanoseconds) via IOCTL_AVB_GET_TIMESTAMP. */
+static BOOL ReadPhc(HANDLE h, ULONGLONG *out_ns)
+{
+    AVB_TIMESTAMP_REQUEST r;
+    ZeroMemory(&r, sizeof(r));
+    r.clock_id = 0;
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                              &r, sizeof(r),
+                              &r, sizeof(r),
+                              &br, NULL);
+    if (!ok || r.status != 0 || r.timestamp == 0) return FALSE;
+    *out_ns = r.timestamp;
     return TRUE;
 }
 
-// Helper function to write a register
-static BOOL WriteRegister(HANDLE h, ULONG offset, ULONG value) {
-    AVB_REGISTER_REQUEST req;
-    ZeroMemory(&req, sizeof(req));
-    req.offset = offset;
-    req.value = value;
-    
-    DWORD bytesReturned = 0;
-    return DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, 
-                          &req, sizeof(req), 
-                          &req, sizeof(req), 
-                          &bytesReturned, NULL);
-}
-
-// Test if SYSTIM counter is incrementing
-static BOOL IsSystimIncrementing(HANDLE h) {
-    ULONG systim1 = 0, systim2 = 0;
-    
-    if (!ReadRegister(h, REG_SYSTIML, &systim1)) {
-        printf("  ?? Failed to read SYSTIML (sample 1)\n");
+/* Check if SYSTIM is advancing over a 50 ms window. */
+static BOOL IsSystimIncrementing(HANDLE h)
+{
+    ULONGLONG t1 = 0, t2 = 0;
+    if (!ReadPhc(h, &t1)) {
+        printf("  [ERR] GET_TIMESTAMP failed (sample 1)\n");
         return FALSE;
     }
-    
-    Sleep(50); // 50ms delay
-    
-    if (!ReadRegister(h, REG_SYSTIML, &systim2)) {
-        printf("  ?? Failed to read SYSTIML (sample 2)\n");
+    Sleep(50);
+    if (!ReadPhc(h, &t2)) {
+        printf("  [ERR] GET_TIMESTAMP failed (sample 2)\n");
         return FALSE;
     }
-    
-    LONG delta = (LONG)(systim2 - systim1);
-    printf("  SYSTIML delta: %ld (0x%08X -> 0x%08X)\n", delta, systim1, systim2);
-    
+    LONGLONG delta = (LONGLONG)(t2 - t1);
+    printf("  PHC delta: %lld ns\n", delta);
     return (delta > 0);
 }
 
-// Main test function
-int TestTsauxcToggle(HANDLE h) {
+/* Run the TSAUXC toggle cycle on a handle already bound to a capable adapter.
+ * The caller must have already issued SET_HW_TIMESTAMPING(enable=1) so that
+ * PTP is active at entry. */
+static int RunToggleTest(HANDLE h)
+{
     printf("\n========================================\n");
     printf("TSAUXC BIT 31 ENABLE/DISABLE CYCLE TEST\n");
     printf("========================================\n\n");
-    
-    ULONG tsauxc_original = 0;
-    ULONG tsauxc_current = 0;
-    int testsPassed = 0;
-    int testsFailed = 0;
-    
-    // Step 0: Read original TSAUXC value
-    printf("STEP 0: Read original TSAUXC state\n");
-    if (!ReadRegister(h, REG_TSAUXC, &tsauxc_original)) {
-        printf("  ?? FAILED: Could not read TSAUXC register\n");
+
+    int passed = 0, failed = 0;
+    AVB_HW_TIMESTAMPING_REQUEST tsreq;
+    AVB_CLOCK_CONFIG cfg;
+
+    /* STEP 0 — read initial TSAUXC state via GET_CLOCK_CONFIG */
+    printf("STEP 0: Read initial TSAUXC state\n");
+    if (!GetClockConfig(h, &cfg)) {
+        printf("  [ERR] GET_CLOCK_CONFIG failed\n");
         return -1;
     }
-    printf("  TSAUXC original value: 0x%08X\n", tsauxc_original);
-    printf("  Bit 31 (DisableSystime): %s\n", 
-           (tsauxc_original & BIT31_DISABLE_SYSTIME) ? "SET (PTP DISABLED)" : "CLEAR (PTP ENABLED)");
+    printf("  TSAUXC initial : 0x%08X\n", cfg.tsauxc);
+    printf("  Bit 31         : %s\n",
+           (cfg.tsauxc & 0x80000000U) ? "SET (PTP DISABLED)" : "CLEAR (PTP ENABLED)");
     printf("\n");
-    
-    // Step 1: Ensure PTP is enabled (bit 31 cleared)
-    printf("STEP 1: Enable PTP clock (clear bit 31)\n");
-    tsauxc_current = tsauxc_original & ~BIT31_DISABLE_SYSTIME;  // Clear bit 31
-    if (!WriteRegister(h, REG_TSAUXC, tsauxc_current)) {
-        printf("  ?? FAILED: Could not write TSAUXC to enable PTP\n");
-        testsFailed++;
+
+    /* STEP 1 — enable PTP (clear bit 31) */
+    printf("STEP 1: Enable PTP clock (SET_HW_TIMESTAMPING enable=1)\n");
+    if (!SetHwTimestamping(h, TRUE, &tsreq)) {
+        printf("  [FAIL] SET_HW_TIMESTAMPING(enable=1) failed\n");
+        ++failed;
     } else {
-        printf("  ? Wrote TSAUXC: 0x%08X (bit 31 cleared)\n", tsauxc_current);
-        
-        // Verify the write
-        ULONG verify = 0;
-        if (ReadRegister(h, REG_TSAUXC, &verify)) {
-            printf("  TSAUXC readback: 0x%08X\n", verify);
-            if (verify & BIT31_DISABLE_SYSTIME) {
-                printf("  ?? FAILED: Bit 31 still set after clearing!\n");
-                testsFailed++;
-            } else {
-                printf("  ? PASSED: Bit 31 successfully cleared\n");
-                testsPassed++;
-                
-                // Verify SYSTIM is incrementing
-                printf("  Checking if SYSTIM is incrementing...\n");
-                if (IsSystimIncrementing(h)) {
-                    printf("  ? PASSED: SYSTIM is incrementing (PTP clock running)\n");
-                    testsPassed++;
-                } else {
-                    printf("  ?? FAILED: SYSTIM is NOT incrementing (PTP clock stuck)\n");
-                    testsFailed++;
-                }
-            }
+        printf("  TSAUXC before : 0x%08X\n", tsreq.previous_tsauxc);
+        printf("  TSAUXC after  : 0x%08X\n", tsreq.current_tsauxc);
+        if (tsreq.current_tsauxc & 0x80000000U) {
+            printf("  [FAIL] Bit 31 still set after enable\n");
+            ++failed;
         } else {
-            printf("  ?? FAILED: Could not read back TSAUXC\n");
-            testsFailed++;
+            printf("  [PASS] Bit 31 cleared\n");
+            ++passed;
+            printf("  Checking SYSTIM is ticking...\n");
+            if (IsSystimIncrementing(h)) {
+                printf("  [PASS] SYSTIM is running\n");
+                ++passed;
+            } else {
+                printf("  [FAIL] SYSTIM not incrementing after enable\n");
+                ++failed;
+            }
         }
     }
     printf("\n");
-    
-    // Step 2: Disable PTP clock (set bit 31)
-    printf("STEP 2: Disable PTP clock (set bit 31)\n");
-    tsauxc_current = tsauxc_original | BIT31_DISABLE_SYSTIME;  // Set bit 31
-    if (!WriteRegister(h, REG_TSAUXC, tsauxc_current)) {
-        printf("  ?? FAILED: Could not write TSAUXC to disable PTP\n");
-        testsFailed++;
+
+    /* STEP 2 — disable PTP (set bit 31) */
+    printf("STEP 2: Disable PTP clock (SET_HW_TIMESTAMPING enable=0)\n");
+    if (!SetHwTimestamping(h, FALSE, &tsreq)) {
+        printf("  [FAIL] SET_HW_TIMESTAMPING(enable=0) failed\n");
+        ++failed;
     } else {
-        printf("  ? Wrote TSAUXC: 0x%08X (bit 31 set)\n", tsauxc_current);
-        
-        // Verify the write
-        ULONG verify = 0;
-        if (ReadRegister(h, REG_TSAUXC, &verify)) {
-            printf("  TSAUXC readback: 0x%08X\n", verify);
-            if (!(verify & BIT31_DISABLE_SYSTIME)) {
-                printf("  ?? FAILED: Bit 31 not set after setting!\n");
-                testsFailed++;
-            } else {
-                printf("  ? PASSED: Bit 31 successfully set\n");
-                testsPassed++;
-                
-                // Verify SYSTIM is NOT incrementing (should be frozen)
-                printf("  Checking if SYSTIM is frozen...\n");
-                if (!IsSystimIncrementing(h)) {
-                    printf("  ? PASSED: SYSTIM is frozen (PTP clock disabled)\n");
-                    testsPassed++;
-                } else {
-                    printf("  ?? WARNING: SYSTIM is still incrementing (should be frozen)\n");
-                    printf("     This may be expected on some hardware variants\n");
-                    // Not counted as failure - some hardware may continue incrementing
-                }
-            }
+        printf("  TSAUXC before : 0x%08X\n", tsreq.previous_tsauxc);
+        printf("  TSAUXC after  : 0x%08X\n", tsreq.current_tsauxc);
+        if (!(tsreq.current_tsauxc & 0x80000000U)) {
+            printf("  [FAIL] Bit 31 not set after disable\n");
+            ++failed;
         } else {
-            printf("  ?? FAILED: Could not read back TSAUXC\n");
-            testsFailed++;
+            printf("  [PASS] Bit 31 set\n");
+            ++passed;
+            printf("  Checking SYSTIM freeze (hardware-dependent)...\n");
+            if (!IsSystimIncrementing(h)) {
+                printf("  [PASS] SYSTIM frozen\n");
+                ++passed;
+            } else {
+                printf("  [INFO] SYSTIM still ticking — acceptable on some hardware variants\n");
+            }
         }
     }
     printf("\n");
-    
-    // Step 3: Re-enable PTP clock (clear bit 31 again)
-    printf("STEP 3: Re-enable PTP clock (clear bit 31 again)\n");
-    tsauxc_current = tsauxc_current & ~BIT31_DISABLE_SYSTIME;  // Clear bit 31
-    if (!WriteRegister(h, REG_TSAUXC, tsauxc_current)) {
-        printf("  ?? FAILED: Could not write TSAUXC to re-enable PTP\n");
-        testsFailed++;
+
+    /* STEP 3 — re-enable PTP */
+    printf("STEP 3: Re-enable PTP clock (SET_HW_TIMESTAMPING enable=1)\n");
+    if (!SetHwTimestamping(h, TRUE, &tsreq)) {
+        printf("  [FAIL] SET_HW_TIMESTAMPING(re-enable) failed\n");
+        ++failed;
     } else {
-        printf("  ? Wrote TSAUXC: 0x%08X (bit 31 cleared)\n", tsauxc_current);
-        
-        // Verify the write
-        ULONG verify = 0;
-        if (ReadRegister(h, REG_TSAUXC, &verify)) {
-            printf("  TSAUXC readback: 0x%08X\n", verify);
-            if (verify & BIT31_DISABLE_SYSTIME) {
-                printf("  ?? FAILED: Bit 31 still set after re-clearing!\n");
-                testsFailed++;
-            } else {
-                printf("  ? PASSED: Bit 31 successfully cleared again\n");
-                testsPassed++;
-                
-                // Verify SYSTIM is incrementing again
-                printf("  Checking if SYSTIM is incrementing again...\n");
-                if (IsSystimIncrementing(h)) {
-                    printf("  ? PASSED: SYSTIM is incrementing (PTP clock running again)\n");
-                    testsPassed++;
-                } else {
-                    printf("  ?? FAILED: SYSTIM is NOT incrementing (PTP clock not recovered)\n");
-                    testsFailed++;
-                }
-            }
+        printf("  TSAUXC before : 0x%08X\n", tsreq.previous_tsauxc);
+        printf("  TSAUXC after  : 0x%08X\n", tsreq.current_tsauxc);
+        if (tsreq.current_tsauxc & 0x80000000U) {
+            printf("  [FAIL] Bit 31 still set after re-enable\n");
+            ++failed;
         } else {
-            printf("  ?? FAILED: Could not read back TSAUXC\n");
-            testsFailed++;
+            printf("  [PASS] Bit 31 cleared again\n");
+            ++passed;
+            printf("  Checking SYSTIM running again...\n");
+            if (IsSystimIncrementing(h)) {
+                printf("  [PASS] SYSTIM running again\n");
+                ++passed;
+            } else {
+                printf("  [FAIL] SYSTIM not recovering after re-enable\n");
+                ++failed;
+            }
         }
     }
     printf("\n");
-    
-    // Step 4: Restore original TSAUXC value
-    printf("STEP 4: Restore original TSAUXC value\n");
-    if (!WriteRegister(h, REG_TSAUXC, tsauxc_original)) {
-        printf("  ?? WARNING: Could not restore original TSAUXC value\n");
-    } else {
-        printf("  ? Restored TSAUXC to: 0x%08X\n", tsauxc_original);
-    }
-    printf("\n");
-    
-    // Summary
+
     printf("========================================\n");
     printf("TEST SUMMARY\n");
     printf("========================================\n");
-    printf("Tests Passed: %d\n", testsPassed);
-    printf("Tests Failed: %d\n", testsFailed);
-    
-    if (testsFailed == 0) {
-        printf("\n? ALL TESTS PASSED\n");
+    printf("Tests Passed: %d\n", passed);
+    printf("Tests Failed: %d\n", failed);
+
+    if (failed == 0) {
+        printf("\n[PASS] ALL TESTS PASSED\n");
         printf("TSAUXC bit 31 enable/disable cycle works correctly!\n");
         return 0;
     } else {
-        printf("\n? SOME TESTS FAILED\n");
-        printf("TSAUXC bit 31 toggle behavior may be incorrect.\n");
+        printf("\n[FAIL] SOME TESTS FAILED\n");
         return 1;
     }
 }
 
-int main(int argc, char* argv[]) {
-    printf("TSAUXC Toggle Test - Validates TSAUXC bit 31 enable/disable cycle\n");
-    printf("Target: Intel I210/I226 Ethernet Controllers\n\n");
-    
-    // Open driver handle
-    HANDLE h = CreateFileW(L"\\\\.\\IntelAvbFilter",
-                          GENERIC_READ | GENERIC_WRITE,
-                          0, NULL, OPEN_EXISTING,
-                          FILE_ATTRIBUTE_NORMAL, NULL);
-    
-    if (h == INVALID_HANDLE_VALUE) {
-        printf("ERROR: Could not open driver device (error %lu)\n", GetLastError());
-        printf("Ensure IntelAvbFilter driver is installed and running.\n");
+int main(void)
+{
+    printf("TSAUXC Toggle Test\n");
+    printf("Validates TSAUXC bit-31 enable/disable cycle via public driver API.\n");
+    printf("Adapters without functional TSAUXC (I219, I217) are skipped automatically.\n\n");
+
+    /* --- Step 1: probe adapter count --- */
+    HANDLE hEnum = OpenDriverHandle();
+    if (hEnum == INVALID_HANDLE_VALUE) {
+        printf("[ERR] Cannot open driver device (error %lu)\n", GetLastError());
         return -1;
     }
-    
-    printf("? Driver handle opened successfully\n\n");
-    
-    // Initialize device
-    DWORD bytesReturned = 0;
-    if (!DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &bytesReturned, NULL)) {
-        printf("WARNING: IOCTL_AVB_INIT_DEVICE failed (error %lu)\n", GetLastError());
-        printf("Continuing anyway...\n\n");
-    } else {
-        printf("? Device initialized successfully\n\n");
+
+    AVB_ENUM_REQUEST enumReq;
+    ZeroMemory(&enumReq, sizeof(enumReq));
+    DWORD br = 0;
+    if (!DeviceIoControl(hEnum, IOCTL_AVB_ENUM_ADAPTERS,
+                         &enumReq, sizeof(enumReq),
+                         &enumReq, sizeof(enumReq),
+                         &br, NULL)) {
+        printf("[ERR] IOCTL_AVB_ENUM_ADAPTERS failed (error %lu)\n", GetLastError());
+        CloseHandle(hEnum);
+        return -1;
     }
-    
-    // Run the toggle test
-    int result = TestTsauxcToggle(h);
-    
-    CloseHandle(h);
-    
-    // printf("\nPress Enter to exit...");
-    // getchar();
-    
+    DWORD adapterCount = enumReq.count;
+    CloseHandle(hEnum);
+
+    printf("Found %lu adapter(s)\n\n", adapterCount);
+    if (adapterCount == 0) {
+        printf("[SKIP] No Intel adapters found.\n");
+        return 0;
+    }
+
+    /* --- Step 2: find first adapter with functional TSAUXC ---
+     * Strategy: open a fresh handle per adapter, call OPEN_ADAPTER to bind it,
+     * then call SET_HW_TIMESTAMPING(enable=1).  If current_tsauxc == 0 the
+     * driver's abstraction layer signalled no real TSAUXC (no-op path) — skip.
+     * If current_tsauxc != 0 the register exists and we run the toggle test. */
+    HANDLE hTest  = INVALID_HANDLE_VALUE;
+    DWORD  testIdx = 0;
+    WORD   testVid = 0, testDid = 0;
+
+    for (DWORD i = 0; i < adapterCount; ++i) {
+        HANDLE hProbe = OpenDriverHandle();
+        if (hProbe == INVALID_HANDLE_VALUE) continue;
+
+        /* Query this adapter's VID/DID/caps */
+        AVB_ENUM_REQUEST er;
+        ZeroMemory(&er, sizeof(er));
+        er.index = i;
+        br = 0;
+        if (!DeviceIoControl(hProbe, IOCTL_AVB_ENUM_ADAPTERS,
+                             &er, sizeof(er), &er, sizeof(er), &br, NULL)) {
+            CloseHandle(hProbe);
+            continue;
+        }
+        printf("Adapter [%lu]: VID=0x%04X DID=0x%04X Caps=0x%08X\n",
+               i, er.vendor_id, er.device_id, er.capabilities);
+
+        /* Bind this handle to the adapter */
+        AVB_OPEN_REQUEST openReq;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.vendor_id = er.vendor_id;
+        openReq.device_id = er.device_id;
+        openReq.index     = 0; /* first instance for this VID/DID */
+        br = 0;
+        if (!DeviceIoControl(hProbe, IOCTL_AVB_OPEN_ADAPTER,
+                             &openReq, sizeof(openReq),
+                             &openReq, sizeof(openReq),
+                             &br, NULL)
+            || openReq.status != 0) {
+            printf("  [SKIP] IOCTL_AVB_OPEN_ADAPTER failed\n");
+            CloseHandle(hProbe);
+            continue;
+        }
+
+        /* Enable PTP and check whether TSAUXC is functional on this adapter.
+         * Adapters where the driver no-ops TSAUXC return current_tsauxc == 0. */
+        AVB_HW_TIMESTAMPING_REQUEST tsr;
+        if (!SetHwTimestamping(hProbe, TRUE, &tsr)) {
+            printf("  [SKIP] SET_HW_TIMESTAMPING failed\n");
+            CloseHandle(hProbe);
+            continue;
+        }
+
+        if (tsr.current_tsauxc == 0) {
+            printf("  [SKIP] current_tsauxc=0 — adapter has no functional TSAUXC\n");
+            CloseHandle(hProbe);
+            continue;
+        }
+
+        printf("  [OK] TSAUXC=0x%08X — adapter is TSAUXC-capable, selected for test\n",
+               tsr.current_tsauxc);
+        hTest  = hProbe;
+        testIdx = i;
+        testVid = er.vendor_id;
+        testDid = er.device_id;
+        break;
+    }
+
+    if (hTest == INVALID_HANDLE_VALUE) {
+        printf("\n[SKIP] No TSAUXC-capable adapter found.\n");
+        printf("       All present adapters reported current_tsauxc=0 (I219/I217 no-op path).\n");
+        return 0;
+    }
+
+    printf("\nRunning toggle test on adapter %lu (VID=0x%04X DID=0x%04X)\n",
+           testIdx, testVid, testDid);
+
+    int result = RunToggleTest(hTest);
+    CloseHandle(hTest);
     return result;
 }
