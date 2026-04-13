@@ -89,28 +89,51 @@ static void RecordResult(Results *r, int result, const char *name)
     else r->fail_count++;
 }
 
+/* Module-level adapter selector — set by main() per-adapter iteration */
+static UINT32 g_adapter_index = 0;
+static UINT16 g_adapter_did   = 0;
+
 static HANDLE OpenDevice(void)
 {
     HANDLE h = CreateFileA(
         DEVICE_NAME,
         GENERIC_READ | GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
         printf("  [SKIP] Cannot open device (error %lu)\n", GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
+    AVB_OPEN_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
+    req.vendor_id = 0x8086;
+    req.device_id = g_adapter_did;
+    req.index     = g_adapter_index;
+    DWORD br = 0;
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                         &req, sizeof(req), &req, sizeof(req), &br, NULL)
+        || req.status != 0) {
+        printf("  [SKIP] OPEN_ADAPTER failed (error %lu)\n", GetLastError());
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
     }
     return h;
 }
 
-/* Verify device is still alive by issuing a valid GET_CLOCK_CONFIG call. */
+/* Verify device is still alive by issuing a valid GET_HW_STATE call.
+ * Use GET_HW_STATE (not GET_CLOCK_CONFIG) because:
+ *   - GET_HW_STATE is supported on ALL adapters regardless of capabilities
+ *   - GET_CLOCK_CONFIG may return STATUS_NOT_SUPPORTED for adapters without
+ *     INTEL_CAP_BASIC_1588 (e.g. I219 in MDIO-only mode), which is correct
+ *     driver behaviour, not a post-fuzz malfunction indicator. */
 static BOOL DeviceAlive(HANDLE h)
 {
-    AVB_CLOCK_CONFIG cfg = {0};
+    AVB_HW_STATE_QUERY q = {0};
     DWORD bytes = 0;
     return DeviceIoControl(h,
-        IOCTL_AVB_GET_CLOCK_CONFIG,
-        &cfg, sizeof(cfg),
-        &cfg, sizeof(cfg),
+        IOCTL_AVB_GET_HW_STATE,
+        &q, sizeof(q),
+        &q, sizeof(q),
         &bytes, NULL);
 }
 
@@ -308,21 +331,53 @@ int main(void)
     printf("             #248 (TEST-SECURITY-BUFFER-001)\n");
     printf(" Verifies:   #63  (REQ-NF-SECURITY-001)\n");
     printf(" Standards:  Windows Driver Security Checklist, OWASP\n");
+    printf(" MULTI-ADAPTER: tests all enumerated adapters\n");
     printf("============================================================\n\n");
 
-    Results r = {0};
+    HANDLE discovery = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (discovery == INVALID_HANDLE_VALUE) {
+        printf("  [SKIP] Cannot open device (error %lu)\n", GetLastError());
+        return 1;
+    }
 
-    RecordResult(&r, TC_Fuzz_001_NullBuffersZeroSize(),        "TC-FUZZ-001: NULL/zero-size buffers — no crash");
-    RecordResult(&r, TC_Fuzz_002_NullInputNonZeroLength(),     "TC-FUZZ-002: NULL input non-zero length — rejected");
-    RecordResult(&r, TC_Fuzz_003_UndersizedBuffers(),          "TC-FUZZ-003: Undersized buffers — no crash");
-    RecordResult(&r, TC_Fuzz_004_InvalidIoctlCodes(),          "TC-FUZZ-004: Bogus IOCTL codes rejected");
-    RecordResult(&r, TC_Fuzz_005_DeviceStillFunctional(),      "TC-FUZZ-005: Device still functional");
+    int total_fail = 0, adapters_tested = 0;
+
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enum_req;
+        DWORD br = 0;
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = idx;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL))
+            break;
+
+        g_adapter_index = idx;
+        g_adapter_did   = enum_req.device_id;
+
+        printf("\n--- Adapter %u  VID=0x%04X DID=0x%04X ---\n",
+               idx, enum_req.vendor_id, enum_req.device_id);
+
+        Results r = {0};
+
+        RecordResult(&r, TC_Fuzz_001_NullBuffersZeroSize(),        "TC-FUZZ-001: NULL/zero-size buffers — no crash");
+        RecordResult(&r, TC_Fuzz_002_NullInputNonZeroLength(),     "TC-FUZZ-002: NULL input non-zero length — rejected");
+        RecordResult(&r, TC_Fuzz_003_UndersizedBuffers(),          "TC-FUZZ-003: Undersized buffers — no crash");
+        RecordResult(&r, TC_Fuzz_004_InvalidIoctlCodes(),          "TC-FUZZ-004: Bogus IOCTL codes rejected");
+        RecordResult(&r, TC_Fuzz_005_DeviceStillFunctional(),      "TC-FUZZ-005: Device still functional");
+
+        printf(" PASS=%d  FAIL=%d  SKIP=%d\n", r.pass_count, r.fail_count, r.skip_count);
+        total_fail += r.fail_count;
+        adapters_tested++;
+    }
+
+    CloseHandle(discovery);
 
     printf("\n-------------------------------------------\n");
-    printf(" PASS=%d  FAIL=%d  SKIP=%d  TOTAL=%d\n",
-           r.pass_count, r.fail_count, r.skip_count,
-           r.pass_count + r.fail_count + r.skip_count);
+    printf(" Adapters tested: %d  Total failures: %d\n", adapters_tested, total_fail);
     printf("-------------------------------------------\n");
 
-    return (r.fail_count > 0) ? 1 : 0;
+    return (total_fail > 0) ? 1 : 0;
 }

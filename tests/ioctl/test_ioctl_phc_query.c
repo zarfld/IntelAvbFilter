@@ -43,13 +43,17 @@ typedef struct {
     int skip_count;
 } TestContext;
 
-/* Helper: Open device */
+/* Module-level adapter selector — set by main() per-adapter iteration */
+static UINT32 g_adapter_index = 0;
+static UINT16 g_adapter_did   = 0;
+
+/* Helper: Open device and bind to per-adapter context via OPEN_ADAPTER */
 static HANDLE OpenAdapter(void)
 {
     HANDLE h = CreateFileA(
         "\\\\.\\IntelAvbFilter",
         GENERIC_READ | GENERIC_WRITE,
-        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
@@ -59,8 +63,24 @@ static HANDLE OpenAdapter(void)
     if (h == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
         printf("  [WARN] Could not open device: error %lu\n", err);
+        return INVALID_HANDLE_VALUE;
     }
-    
+
+    AVB_OPEN_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
+    req.vendor_id = 0x8086;
+    req.device_id = g_adapter_did;
+    req.index     = g_adapter_index;
+    DWORD br = 0;
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                         &req, sizeof(req), &req, sizeof(req), &br, NULL)
+        || req.status != 0) {
+        printf("  [WARN] OPEN_ADAPTER failed (error %lu, status=0x%08X)\n",
+               GetLastError(), req.status);
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+
     return h;
 }
 
@@ -237,50 +257,50 @@ static int Test_AdapterNotInitialized(TestContext *ctx)
 {
     AVB_PHC_QUERY_RESPONSE response;
     HANDLE fresh_handle;
-    
-    /* Open fresh handle without calling INIT_DEVICE */
+
+    /* Open fresh handle WITHOUT calling OPEN_ADAPTER.
+     * Per-FsContext driver model: any IOCTL on a handle with no adapter context
+     * (FsContext == NULL) must be rejected — driver returns ERROR_GEN_FAILURE (31). */
     fresh_handle = CreateFileA(
         "\\\\.\\IntelAvbFilter",
         GENERIC_READ | GENERIC_WRITE,
-        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
         NULL
     );
-    
+
     if (fresh_handle == INVALID_HANDLE_VALUE) {
         printf("  [FAIL] UT-PHC-QUERY-005: Adapter Not Initialized: Cannot open device\n");
         return TEST_FAIL;
     }
-    
-    /* Query without INIT_DEVICE - should work on default adapter */
+
+    /* Query without OPEN_ADAPTER — must fail with ERROR_GEN_FAILURE (31) */
+    ZeroMemory(&response, sizeof(response));
     DWORD bytesReturned = 0;
     BOOL result = DeviceIoControl(
         fresh_handle,
         IOCTL_AVB_GET_CLOCK_CONFIG,
-        &response,
-        sizeof(response),
-        &response,
-        sizeof(response),
-        &bytesReturned,
-        NULL
+        &response, sizeof(response),
+        &response, sizeof(response),
+        &bytesReturned, NULL
     );
-    
+    DWORD err = GetLastError();
+
     CloseHandle(fresh_handle);
-    
-    if (!result || response.status != 0) {
-        printf("  [FAIL] UT-PHC-QUERY-005: Adapter Not Initialized: Query failed (status=0x%08X)\n", response.status);
-        return TEST_FAIL;
+
+    if (!result && err == ERROR_GEN_FAILURE) {
+        printf("  [PASS] UT-PHC-QUERY-005: Adapter Not Initialized: correctly rejected with ERROR_GEN_FAILURE (31)\n");
+        return TEST_PASS;
     }
-    
-    if (response.systim == 0) {
-        printf("  [FAIL] UT-PHC-QUERY-005: Adapter Not Initialized: No timestamp returned\n");
-        return TEST_FAIL;
+
+    if (result) {
+        printf("  [FAIL] UT-PHC-QUERY-005: Adapter Not Initialized: IOCTL unexpectedly succeeded without OPEN_ADAPTER\n");
+    } else {
+        printf("  [FAIL] UT-PHC-QUERY-005: Adapter Not Initialized: expected ERROR_GEN_FAILURE(31), got error=%lu\n", err);
     }
-    
-    printf("  [PASS] UT-PHC-QUERY-005: Adapter Not Initialized (works on default adapter, SYSTIM=%llu)\n", response.systim);
-    return TEST_PASS;
+    return TEST_FAIL;
 }
 
 /*
@@ -704,109 +724,138 @@ static int Test_VV_MultiProcessAccess(TestContext *ctx)
 /* Main test runner */
 int main(void)
 {
-    TestContext ctx = {0};
     int result;
-    
+
     printf("\n====================================\n");
     printf("PHC Query IOCTL Verification Tests\n");
     printf("Verifies:   #34  (REQ-F-IOCTL-PHC-001: PHC Time Query)\n");
     printf("Implements: #193 (TEST-IOCTL-PHC-QUERY-001)\n");
+    printf("MULTI-ADAPTER: tests all enumerated adapters\n");
     printf("====================================\n\n");
-    
-    /* Open adapter */
-    ctx.adapter = OpenAdapter();
-    if (ctx.adapter == INVALID_HANDLE_VALUE) {
-        printf("ERROR: Could not open adapter\n");
+
+    /* Open discovery handle to enumerate adapters */
+    HANDLE discovery = CreateFileA(
+        "\\\\.\\IntelAvbFilter",
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (discovery == INVALID_HANDLE_VALUE) {
+        printf("ERROR: Could not open device (error %lu)\n", GetLastError());
         return 1;
     }
-    
-    printf("Running Level 1: Unit Tests (10 test cases)...\n\n");
-    
-    /* Run unit tests */
-    result = Test_ValidPHCQuery(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_BufferTooSmall(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_NullOutputBuffer(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_InvalidIoctlCode(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_AdapterNotInitialized(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_PHCHardwareReadFailure(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_UnprivilegedUserAccess(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_InputBufferIgnored(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_OversizedOutputBuffer(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_IoctlDuringAdapterRemoval(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    printf("\nRunning Level 2: Integration Tests (4 test cases)...\n\n");
-    
-    /* Run integration tests */
-    result = Test_IT_UserModeAppPHCQuery(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_IT_ConcurrentQueries(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_IT_MultiAdapterQueries(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_IT_QueryDuringUnload(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    printf("\nRunning Level 3: V&V Tests (3 test cases)...\n\n");
-    
-    /* Run V&V tests */
-    result = Test_VV_IoctlLatencyBenchmark(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_VV_StressTest(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    result = Test_VV_MultiProcessAccess(&ctx);
-    ctx.test_count++;
-    if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
-    
-    /* Print summary */
+
+    int total_fail = 0, adapters_tested = 0;
+
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enum_req;
+        DWORD br = 0;
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = idx;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL))
+            break;
+
+        g_adapter_index = idx;
+        g_adapter_did   = enum_req.device_id;
+
+        printf("\n--- Adapter %u  VID=0x%04X DID=0x%04X ---\n",
+               idx, enum_req.vendor_id, enum_req.device_id);
+
+        TestContext ctx = {0};
+        ctx.adapter = OpenAdapter();
+        if (ctx.adapter == INVALID_HANDLE_VALUE) {
+            printf("  [FAIL] Could not open adapter\n");
+            total_fail++; adapters_tested++; continue;
+        }
+
+        printf("Running Level 1: Unit Tests (10 test cases)...\n\n");
+
+        result = Test_ValidPHCQuery(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_BufferTooSmall(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_NullOutputBuffer(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_InvalidIoctlCode(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_AdapterNotInitialized(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_PHCHardwareReadFailure(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_UnprivilegedUserAccess(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_InputBufferIgnored(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_OversizedOutputBuffer(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_IoctlDuringAdapterRemoval(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        printf("\nRunning Level 2: Integration Tests (4 test cases)...\n\n");
+
+        result = Test_IT_UserModeAppPHCQuery(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_IT_ConcurrentQueries(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_IT_MultiAdapterQueries(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_IT_QueryDuringUnload(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        printf("\nRunning Level 3: V&V Tests (3 test cases)...\n\n");
+
+        result = Test_VV_IoctlLatencyBenchmark(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_VV_StressTest(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        result = Test_VV_MultiProcessAccess(&ctx);
+        ctx.test_count++;
+        if (result == TEST_PASS) ctx.pass_count++; else if (result == TEST_FAIL) ctx.fail_count++; else ctx.skip_count++;
+
+        printf("\n  Adapter %u: Total=%d Pass=%d Fail=%d Skip=%d\n",
+               idx, ctx.test_count, ctx.pass_count, ctx.fail_count, ctx.skip_count);
+
+        CloseHandle(ctx.adapter);
+        total_fail += ctx.fail_count;
+        adapters_tested++;
+    }
+
+    CloseHandle(discovery);
+
     printf("\n====================================\n");
-    printf("Test Summary:\n");
-    printf("  Total:  %d\n", ctx.test_count);
-    printf("  Passed: %d\n", ctx.pass_count);
-    printf("  Failed: %d\n", ctx.fail_count);
-    printf("  Skipped: %d\n", ctx.skip_count);
+    printf("  Adapters tested: %d  Total failures: %d\n", adapters_tested, total_fail);
     printf("====================================\n");
-    
-    CloseHandle(ctx.adapter);
-    
-    return (ctx.fail_count > 0) ? 1 : 0;
+
+    return (total_fail > 0) ? 1 : 0;
 }

@@ -481,8 +481,6 @@ static void Test_TC_RX_TS_015_CrossHardware(TestContext *ctx) {
  *============================================================================*/
 
 int main(void) {
-    TestContext ctx = {0};
-    
     printf("\n");
     printf("═══════════════════════════════════════════════════════════════════\n");
     printf("  PTP RX Timestamping Configuration Test Suite (Complete)\n");
@@ -492,49 +490,85 @@ int main(void) {
     printf("  IOCTLs:     41 (SET_RX_TIMESTAMP), 42 (SET_QUEUE_TIMESTAMP)\n");
     printf("  Test Cases: 15 (TC-RX-TS-001 through TC-RX-TS-015)\n");
     printf("  Priority:   P0 (Critical - IEEE 802.1AS compliance)\n");
+    printf("  MULTI-ADAPTER: tests all enumerated adapters\n");
     printf("═══════════════════════════════════════════════════════════════════\n");
     printf("\n");
-    
-    /* Open device */
-    ctx.device = OpenDevice();
-    if (ctx.device == INVALID_HANDLE_VALUE) {
+
+    HANDLE discovery = OpenDevice();
+    if (discovery == INVALID_HANDLE_VALUE) {
         printf("❌ FATAL: Cannot open device (error=%lu)\n", GetLastError());
         printf("   Run as Administrator and ensure driver is loaded.\n");
         return 1;
     }
-    
-    /* Run test cases */
-    Test_TC_RX_TS_001_EnableBuffer(&ctx);
-    Test_TC_RX_TS_002_DisableBuffer(&ctx);
-    Test_TC_RX_TS_003_PortReset(&ctx);
-    Test_TC_RX_TS_004_EnableQueue(&ctx);
-    Test_TC_RX_TS_005_DisableQueue(&ctx);
-    Test_TC_RX_TS_006_EnableMultipleQueues(&ctx);
-    Test_TC_RX_TS_007_DependencyCheck(&ctx);
-    Test_TC_RX_TS_008_InvalidQueue(&ctx);
-    Test_TC_RX_TS_009_NullBuffer(&ctx);
-    Test_TC_RX_TS_010_BufferSize(&ctx);
-    Test_TC_RX_TS_011_HardwareFailure(&ctx);
-    Test_TC_RX_TS_012_ResetTimeout(&ctx);
-    Test_TC_RX_TS_013_ConfigSequence(&ctx);
-    Test_TC_RX_TS_014_Performance(&ctx);
-    Test_TC_RX_TS_015_CrossHardware(&ctx);
-    
-    /* Close device */
-    CloseHandle(ctx.device);
-    
-    /* Print summary */
+
+    int total_fail = 0, adapters_tested = 0;
+
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enum_req;
+        DWORD br = 0;
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = idx;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL))
+            break;
+
+        printf("═══ Adapter %u  VID=0x%04X DID=0x%04X ═══\n",
+               idx, enum_req.vendor_id, enum_req.device_id);
+
+        TestContext ctx = {0};
+        ctx.device = OpenDevice();
+        if (ctx.device == INVALID_HANDLE_VALUE) {
+            printf("❌ FAIL: Cannot open per-adapter handle (error=%lu)\n", GetLastError());
+            total_fail++; adapters_tested++; continue;
+        }
+
+        AVB_OPEN_REQUEST open_req;
+        ZeroMemory(&open_req, sizeof(open_req));
+        open_req.vendor_id = enum_req.vendor_id;
+        open_req.device_id = enum_req.device_id;
+        open_req.index     = idx;
+        if (!DeviceIoControl(ctx.device, IOCTL_AVB_OPEN_ADAPTER,
+                             &open_req, sizeof(open_req),
+                             &open_req, sizeof(open_req), &br, NULL)
+            || open_req.status != 0) {
+            printf("❌ FAIL: OPEN_ADAPTER (error=%lu, status=0x%08X)\n",
+                   GetLastError(), open_req.status);
+            CloseHandle(ctx.device); total_fail++; adapters_tested++; continue;
+        }
+
+        /* Run test cases */
+        Test_TC_RX_TS_001_EnableBuffer(&ctx);
+        Test_TC_RX_TS_002_DisableBuffer(&ctx);
+        Test_TC_RX_TS_003_PortReset(&ctx);
+        Test_TC_RX_TS_004_EnableQueue(&ctx);
+        Test_TC_RX_TS_005_DisableQueue(&ctx);
+        Test_TC_RX_TS_006_EnableMultipleQueues(&ctx);
+        Test_TC_RX_TS_007_DependencyCheck(&ctx);
+        Test_TC_RX_TS_008_InvalidQueue(&ctx);
+        Test_TC_RX_TS_009_NullBuffer(&ctx);
+        Test_TC_RX_TS_010_BufferSize(&ctx);
+        Test_TC_RX_TS_011_HardwareFailure(&ctx);
+        Test_TC_RX_TS_012_ResetTimeout(&ctx);
+        Test_TC_RX_TS_013_ConfigSequence(&ctx);
+        Test_TC_RX_TS_014_Performance(&ctx);
+        Test_TC_RX_TS_015_CrossHardware(&ctx);
+
+        CloseHandle(ctx.device);
+
+        printf("  Adapter %u: Pass=%d Fail=%d Skip=%d\n",
+               idx, ctx.pass_count, ctx.fail_count, ctx.skip_count);
+        total_fail += ctx.fail_count;
+        adapters_tested++;
+        printf("\n");
+    }
+
+    CloseHandle(discovery);
+
+    printf("═══════════════════════════════════════════════════════════════════\n");
+    printf("  Adapters tested: %d  Total failures: %d\n", adapters_tested, total_fail);
+    printf("═══════════════════════════════════════════════════════════════════\n");
     printf("\n");
-    printf("═══════════════════════════════════════════════════════════════════\n");
-    printf("  Test Summary\n");
-    printf("═══════════════════════════════════════════════════════════════════\n");
-    printf("  Total:   %2d tests\n", ctx.test_count);
-    printf("  Passed:  %2d tests (%.1f%%)\n", ctx.pass_count, 
-           ctx.test_count > 0 ? (100.0 * ctx.pass_count / ctx.test_count) : 0.0);
-    printf("  Failed:  %2d tests\n", ctx.fail_count);
-    printf("  Skipped: %2d tests\n", ctx.skip_count);
-    printf("═══════════════════════════════════════════════════════════════════\n");
-    printf("\n");
-    
-    return (ctx.fail_count > 0) ? 1 : 0;
+
+    return (total_fail > 0) ? 1 : 0;
 }

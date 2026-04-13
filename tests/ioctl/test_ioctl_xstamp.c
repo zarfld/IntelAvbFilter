@@ -68,15 +68,34 @@ typedef struct {
 
 static LARGE_INTEGER s_qpc_freq;
 
+/* Module-level adapter selector — set by main() per-adapter iteration */
+static UINT32 g_adapter_index = 0;
+static UINT16 g_adapter_did   = 0;
+
 static HANDLE OpenDevice(void)
 {
     HANDLE h = CreateFileA(
         "\\\\.\\IntelAvbFilter",
         GENERIC_READ | GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
         printf("  [SKIP] Cannot open device (error %lu)\n", GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
+    AVB_OPEN_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
+    req.vendor_id = 0x8086;
+    req.device_id = g_adapter_did;
+    req.index     = g_adapter_index;
+    DWORD br = 0;
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                         &req, sizeof(req), &req, sizeof(req), &br, NULL)
+        || req.status != 0) {
+        printf("  [SKIP] OPEN_ADAPTER failed (error %lu, status=0x%08X)\n",
+               GetLastError(), req.status);
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
     }
     return h;
 }
@@ -341,20 +360,53 @@ int main(void)
     printf(" QPC freq: %lld Hz\n", s_qpc_freq.QuadPart);
     printf("  Verifies:   #48  (REQ-F-IOCTL-XSTAMP-001: Cross-Timestamp Query)\n");
     printf("  Implements: #198 (TEST-IOCTL-XSTAMP-001: Cross-Timestamp Verification)\n");
+    printf("  MULTI-ADAPTER: tests all enumerated adapters\n");
     printf("===========================================\n");
 
-    Results r = {0};
-    RecordResult(&r, TC_XStamp_001_SingleCapture(),   "TC-XSTAMP-001: Single capture sanity");
-    RecordResult(&r, TC_XStamp_002_CapturLatency(),   "TC-XSTAMP-002: Capture latency P99");
-    RecordResult(&r, TC_XStamp_003_PHCMonotonic(),    "TC-XSTAMP-003: PHC monotonic");
-    RecordResult(&r, TC_XStamp_004_BackToBack(),      "TC-XSTAMP-004: Back-to-back advance");
-    RecordResult(&r, TC_XStamp_005_Correlation(),     "TC-XSTAMP-005: PHC/QPC correlation");
+    HANDLE discovery = CreateFileA("\\\\.\\IntelAvbFilter",
+                                   GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (discovery == INVALID_HANDLE_VALUE) {
+        printf("[ERROR] Cannot open AVB device (error %lu)\n", GetLastError());
+        return 1;
+    }
+
+    int total_fail = 0, adapters_tested = 0;
+
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enum_req;
+        DWORD br = 0;
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = idx;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL))
+            break;
+
+        g_adapter_index = idx;
+        g_adapter_did   = enum_req.device_id;
+
+        printf("\n--- Adapter %u  VID=0x%04X DID=0x%04X ---\n",
+               idx, enum_req.vendor_id, enum_req.device_id);
+
+        Results r = {0};
+        RecordResult(&r, TC_XStamp_001_SingleCapture(),   "TC-XSTAMP-001: Single capture sanity");
+        RecordResult(&r, TC_XStamp_002_CapturLatency(),   "TC-XSTAMP-002: Capture latency P99");
+        RecordResult(&r, TC_XStamp_003_PHCMonotonic(),    "TC-XSTAMP-003: PHC monotonic");
+        RecordResult(&r, TC_XStamp_004_BackToBack(),      "TC-XSTAMP-004: Back-to-back advance");
+        RecordResult(&r, TC_XStamp_005_Correlation(),     "TC-XSTAMP-005: PHC/QPC correlation");
+
+        printf(" PASS=%d  FAIL=%d  SKIP=%d\n", r.pass_count, r.fail_count, r.skip_count);
+        total_fail += r.fail_count;
+        adapters_tested++;
+    }
+
+    CloseHandle(discovery);
 
     printf("\n-------------------------------------------\n");
-    printf(" PASS=%d  FAIL=%d  SKIP=%d  TOTAL=%d\n",
-           r.pass_count, r.fail_count, r.skip_count,
-           r.pass_count + r.fail_count + r.skip_count);
+    printf(" Adapters tested: %d  Total failures: %d\n", adapters_tested, total_fail);
     printf("-------------------------------------------\n");
 
-    return (r.fail_count > 0) ? 1 : 0;
+    return (total_fail > 0) ? 1 : 0;
 }

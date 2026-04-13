@@ -77,10 +77,32 @@ static void RecordResult(Results *r, int result, const char *name)
 }
 
 /* ────────────────────────── helpers ─────────────────────────────────────── */
+
+/* Module-level adapter selector — set by main() per-adapter iteration */
+static UINT32 g_adapter_index = 0;
+static UINT16 g_adapter_did   = 0;
+
 static HANDLE OpenDevice(void)
 {
-    return CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
-                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return INVALID_HANDLE_VALUE;
+
+    AVB_OPEN_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
+    req.vendor_id = 0x8086;
+    req.device_id = g_adapter_did;
+    req.index     = g_adapter_index;
+    DWORD br = 0;
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                         &req, sizeof(req), &req, sizeof(req), &br, NULL)
+        || req.status != 0) {
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
 }
 
 /* Read PHC time (systim) via IOCTL_AVB_GET_CLOCK_CONFIG. */
@@ -360,26 +382,59 @@ int main(void)
     printf("  IntelAvbFilter — Power Management Tests\n");
     printf("  Implements: #218 (TEST-POWER-MGMT-001)\n");
     printf("  Verifies:   #84  (REQ-NF-PWR-001: PHC preserved across D0/D3)\n");
+    printf("  MULTI-ADAPTER: tests all enumerated adapters\n");
     printf("============================================================\n\n");
 
-    Results r = {0};
+    HANDLE discovery = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (discovery == INVALID_HANDLE_VALUE) {
+        printf("[ERROR] Cannot open AVB device (error %lu)\n", GetLastError());
+        return 1;
+    }
 
-    RecordResult(&r, TC_PWRMGMT_001_PhcPreservedAcrossClose(),
-                 "TC-PWRMGMT-001: PHC preserved across close/reopen");
-    RecordResult(&r, TC_PWRMGMT_002_PhcVsWallClockAccuracy(),
-                 "TC-PWRMGMT-002: PHC vs wall-clock accuracy");
-    RecordResult(&r, TC_PWRMGMT_003_RapidOpenCloseCycles(),
-                 "TC-PWRMGMT-003: Rapid open/close cycles");
-    RecordResult(&r, TC_PWRMGMT_004_PhcMonotonousAcrossReopens(),
-                 "TC-PWRMGMT-004: PHC monotonic across reopens");
-    RecordResult(&r, TC_PWRMGMT_005_ConcurrentHandleSurvival(),
-                 "TC-PWRMGMT-005: Concurrent handle survives partner cycle");
+    int total_fail = 0, adapters_tested = 0;
+
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enum_req;
+        DWORD br = 0;
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = idx;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL))
+            break;
+
+        g_adapter_index = idx;
+        g_adapter_did   = enum_req.device_id;
+
+        printf("\n--- Adapter %u  VID=0x%04X DID=0x%04X ---\n",
+               idx, enum_req.vendor_id, enum_req.device_id);
+
+        Results r = {0};
+
+        RecordResult(&r, TC_PWRMGMT_001_PhcPreservedAcrossClose(),
+                     "TC-PWRMGMT-001: PHC preserved across close/reopen");
+        RecordResult(&r, TC_PWRMGMT_002_PhcVsWallClockAccuracy(),
+                     "TC-PWRMGMT-002: PHC vs wall-clock accuracy");
+        RecordResult(&r, TC_PWRMGMT_003_RapidOpenCloseCycles(),
+                     "TC-PWRMGMT-003: Rapid open/close cycles");
+        RecordResult(&r, TC_PWRMGMT_004_PhcMonotonousAcrossReopens(),
+                     "TC-PWRMGMT-004: PHC monotonic across reopens");
+        RecordResult(&r, TC_PWRMGMT_005_ConcurrentHandleSurvival(),
+                     "TC-PWRMGMT-005: Concurrent handle survives partner cycle");
+
+        printf(" PASS=%-2d FAIL=%-2d SKIP=%-2d\n",
+               r.pass_count, r.fail_count, r.skip_count);
+        total_fail += r.fail_count;
+        adapters_tested++;
+    }
+
+    CloseHandle(discovery);
 
     printf("\n-------------------------------------------\n");
-    printf(" PASS=%-2d FAIL=%-2d SKIP=%-2d TOTAL=%-2d\n",
-           r.pass_count, r.fail_count, r.skip_count,
-           r.pass_count + r.fail_count + r.skip_count);
+    printf(" Adapters tested: %d  Total failures: %d\n", adapters_tested, total_fail);
     printf("-------------------------------------------\n");
 
-    return (r.fail_count > 0) ? 1 : 0;
+    return (total_fail > 0) ? 1 : 0;
 }
