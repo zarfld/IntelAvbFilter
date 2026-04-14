@@ -140,6 +140,7 @@ int main() {
             if (result) {
                 open_req.vendor_id = enum_req.vendor_id;
                 open_req.device_id = enum_req.device_id;
+                open_req.index = i;  /* Bug fix: must pass the adapter index so the driver finds the right entry */
                 
                 result = DeviceIoControl(hDevice, IOCTL_AVB_OPEN_ADAPTER,
                                         &open_req, sizeof(open_req),
