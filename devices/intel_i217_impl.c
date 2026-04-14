@@ -149,26 +149,15 @@ static int init_ptp(device_t *dev)
  */
 static int set_systime(device_t *dev, uint64_t systime)
 {
-    UNREFERENCED_PARAMETER(systime);
-    
-    DEBUGP(DL_TRACE, "==>i217_set_systime\n");
-    
     if (dev == NULL) {
         return -1;
     }
     
-    // I217 SYSTIM registers are marked as read-only in SSOT
-    DEBUGP(DL_WARN, "I217 SYSTIM registers are read-only - cannot set system time\n");
-    DEBUGP(DL_INFO, "I217 requested time: 0x%llx (operation not supported)\n", systime);
-    
-    // Initialize PTP if not already done
-    if (init_ptp(dev) != 0) {
-        DEBUGP(DL_ERROR, "I217 PTP initialization failed\n");
-        return -1;
-    }
-    
-    DEBUGP(DL_TRACE, "<==i217_set_systime: Limited success (read-only SYSTIM)\n");
-    return 0;  // Return success but with limited functionality
+    /* I217 SYSTIM registers are read-only per SSOT (access=ro in i217.yaml).           */
+    /* Caller should not invoke set_systime on I217; return NOT_SUPPORTED.               */
+    DEBUGP(DL_WARN, "I217 set_systime: SYSTIM is read-only, operation not supported (0x%llx ignored)\n", systime);
+    DEBUGP(DL_TRACE, "<==i217_set_systime: STATUS_NOT_SUPPORTED\n");
+    return -ENOTSUP;
 }
 
 /**
@@ -208,7 +197,201 @@ static int get_systime(device_t *dev, uint64_t *systime)
 }
 
 /**
+ * @brief Acquire SWSM.SWESMBI semaphore before MDIC access (Section 10.2.5)
+ * @param dev Device handle
+ * @return 0 on success, -1 on timeout
+ */
+static int i217_acquire_swsm(device_t *dev)
+{
+    uint32_t swsm;
+    int retries;
+
+    for (retries = 0; retries < 1000; retries++) {
+        /* Write 1, then re-read; if still 1 we own the semaphore */
+        swsm = (uint32_t)I217_SWSM_SET(0,
+                    I217_SWSM_SWESMBI_MASK, I217_SWSM_SWESMBI_SHIFT, 1);
+        if (ndis_platform_ops.mmio_write(dev, I217_SWSM, swsm) != 0)
+            return -1;
+        if (ndis_platform_ops.mmio_read(dev, I217_SWSM, &swsm) != 0)
+            return -1;
+        if (I217_SWSM_GET(swsm, I217_SWSM_SWESMBI_MASK, I217_SWSM_SWESMBI_SHIFT))
+            return 0;  /* acquired */
+        KeStallExecutionProcessor(50); /* 50 µs back-off */
+    }
+    DEBUGP(DL_ERROR, "I217: SWSM semaphore acquire timeout\n");
+    return -1;
+}
+
+/**
+ * @brief Release SWSM.SWESMBI semaphore after MDIC access
+ * @param dev Device handle
+ */
+static void i217_release_swsm(device_t *dev)
+{
+    uint32_t swsm = (uint32_t)I217_SWSM_SET(0,
+                        I217_SWSM_SWESMBI_MASK, I217_SWSM_SWESMBI_SHIFT, 0);
+    ndis_platform_ops.mmio_write(dev, I217_SWSM, swsm);
+}
+
+/**
+ * @brief Core MDIC read (caller must hold SWSM semaphore)
+ */
+static int i217_mdic_read_locked(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t *value)
+{
+    uint32_t mdic_value;
+    int result;
+    int timeout;
+
+    mdic_value = (uint32_t)I217_MDIC_SET(0, I217_MDIC_DATA_MASK, I217_MDIC_DATA_SHIFT, 0);
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_REG_MASK, I217_MDIC_REG_SHIFT, reg_addr);
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_PHY_MASK, I217_MDIC_PHY_SHIFT, phy_addr);
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_OP_MASK, I217_MDIC_OP_SHIFT, 2); /* read */
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_I_MASK, I217_MDIC_I_SHIFT, 1);
+
+    result = ndis_platform_ops.mmio_write(dev, I217_MDIC, mdic_value);
+    if (result != 0) return result;
+
+    for (timeout = 0; timeout < 1000; timeout++) {
+        result = ndis_platform_ops.mmio_read(dev, I217_MDIC, &mdic_value);
+        if (result != 0) return result;
+        if (I217_MDIC_GET(mdic_value, I217_MDIC_R_MASK, I217_MDIC_R_SHIFT)) {
+            if (I217_MDIC_GET(mdic_value, I217_MDIC_E_MASK, I217_MDIC_E_SHIFT)) {
+                DEBUGP(DL_ERROR, "I217 MDIC read error\n");
+                return -1;
+            }
+            *value = (uint16_t)I217_MDIC_GET(mdic_value, I217_MDIC_DATA_MASK, I217_MDIC_DATA_SHIFT);
+            return 0;
+        }
+        KeStallExecutionProcessor(10);
+    }
+    DEBUGP(DL_ERROR, "I217 MDIC read timeout\n");
+    return -1;
+}
+
+/**
+ * @brief Core MDIC write (caller must hold SWSM semaphore)
+ */
+static int i217_mdic_write_locked(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t value)
+{
+    uint32_t mdic_value;
+    int result;
+    int timeout;
+
+    mdic_value = (uint32_t)I217_MDIC_SET(0, I217_MDIC_DATA_MASK, I217_MDIC_DATA_SHIFT, value);
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_REG_MASK, I217_MDIC_REG_SHIFT, reg_addr);
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_PHY_MASK, I217_MDIC_PHY_SHIFT, phy_addr);
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_OP_MASK, I217_MDIC_OP_SHIFT, 1); /* write */
+    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_I_MASK, I217_MDIC_I_SHIFT, 1);
+
+    result = ndis_platform_ops.mmio_write(dev, I217_MDIC, mdic_value);
+    if (result != 0) return result;
+
+    for (timeout = 0; timeout < 1000; timeout++) {
+        result = ndis_platform_ops.mmio_read(dev, I217_MDIC, &mdic_value);
+        if (result != 0) return result;
+        if (I217_MDIC_GET(mdic_value, I217_MDIC_R_MASK, I217_MDIC_R_SHIFT)) {
+            if (I217_MDIC_GET(mdic_value, I217_MDIC_E_MASK, I217_MDIC_E_SHIFT)) {
+                DEBUGP(DL_ERROR, "I217 MDIC write error\n");
+                return -1;
+            }
+            return 0;
+        }
+        KeStallExecutionProcessor(10);
+    }
+    DEBUGP(DL_ERROR, "I217 MDIC write timeout\n");
+    return -1;
+}
+
+/*
+ * I217 MDIO paging (Section 11.1.2.2.5):
+ *   PHY register 31 selects the page (page 800 = host, 801 = ME owned).
+ *   To access extended registers: write page to reg 31, write address to
+ *   reg I217_MDIO_ADDR_REG (0x11 = Address Set), read/write via
+ *   I217_MDIO_DATA_REG (0x12 = Data Cycle).  Semaphore must be held
+ *   throughout the full page-select + access sequence.
+ */
+#define I217_MDIO_PAGE_HOST 800
+#define I217_MDIO_PAGE_REG  31
+#define I217_MDIO_ADDR_REG  0x11
+#define I217_MDIO_DATA_REG  0x12
+
+/**
+ * @brief Read from an I217 paged PHY register (acquires SWSM internally)
+ * @param dev     Device handle
+ * @param phy_addr PHY address
+ * @param page    PHY page number (I217_MDIO_PAGE_HOST etc.)
+ * @param reg_addr Extended register address
+ * @param value   Output value
+ * @return 0 on success, <0 on error
+ */
+__pragma(warning(suppress: 4505))  /* C4505: not referenced yet (no I217 hardware to test) */
+static int i217_mdio_read_paged(device_t *dev, uint16_t phy_addr,
+                                uint16_t page, uint16_t reg_addr,
+                                uint16_t *value)
+{
+    int result;
+
+    if (i217_acquire_swsm(dev) != 0)
+        return -1;
+
+    /* Select page via register 31 */
+    result = i217_mdic_write_locked(dev, phy_addr, I217_MDIO_PAGE_REG, page);
+    if (result != 0) goto out;
+
+    /* Write target address using Address Set instruction (reg 0x11) */
+    result = i217_mdic_write_locked(dev, phy_addr, I217_MDIO_ADDR_REG, reg_addr);
+    if (result != 0) goto out;
+
+    /* Read data via Data Cycle register (reg 0x12) */
+    result = i217_mdic_read_locked(dev, phy_addr, I217_MDIO_DATA_REG, value);
+
+out:
+    i217_release_swsm(dev);
+    DEBUGP(DL_TRACE, "i217_mdio_read_paged: page=%d reg=0x%x value=0x%x rc=%d\n",
+           page, reg_addr, (result == 0) ? *value : 0, result);
+    return result;
+}
+
+/**
+ * @brief Write to an I217 paged PHY register (acquires SWSM internally)
+ * @param dev     Device handle
+ * @param phy_addr PHY address
+ * @param page    PHY page number
+ * @param reg_addr Extended register address
+ * @param value   Value to write
+ * @return 0 on success, <0 on error
+ */
+__pragma(warning(suppress: 4505))  /* C4505: not referenced yet (no I217 hardware to test) */
+static int i217_mdio_write_paged(device_t *dev, uint16_t phy_addr,
+                                 uint16_t page, uint16_t reg_addr,
+                                 uint16_t value)
+{
+    int result;
+
+    if (i217_acquire_swsm(dev) != 0)
+        return -1;
+
+    /* Select page */
+    result = i217_mdic_write_locked(dev, phy_addr, I217_MDIO_PAGE_REG, page);
+    if (result != 0) goto out;
+
+    /* Write address */
+    result = i217_mdic_write_locked(dev, phy_addr, I217_MDIO_ADDR_REG, reg_addr);
+    if (result != 0) goto out;
+
+    /* Write data */
+    result = i217_mdic_write_locked(dev, phy_addr, I217_MDIO_DATA_REG, value);
+
+out:
+    i217_release_swsm(dev);
+    DEBUGP(DL_TRACE, "i217_mdio_write_paged: page=%d reg=0x%x value=0x%x rc=%d\n",
+           page, reg_addr, value, result);
+    return result;
+}
+
+/**
  * @brief I217-specific MDIO read using SSOT register definitions
+ *        Acquires SWSM.SWESMBI semaphore before touching MDIC (Section 10.2.5).
  * @param dev Device handle
  * @param phy_addr PHY address
  * @param reg_addr Register address
@@ -217,58 +400,22 @@ static int get_systime(device_t *dev, uint64_t *systime)
  */
 static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t *value)
 {
-    uint32_t mdic_value;
     int result;
-    int timeout;
-    
+
     DEBUGP(DL_TRACE, "==>i217_mdio_read: phy=0x%x, reg=0x%x\n", phy_addr, reg_addr);
-    
-    if (dev == NULL || value == NULL) {
+
+    if (dev == NULL || value == NULL)
         return -1;
-    }
-    
-    // Build MDIC command using SSOT bit field definitions
-    mdic_value = (uint32_t)I217_MDIC_SET(0, I217_MDIC_DATA_MASK, I217_MDIC_DATA_SHIFT, 0);  // Data = 0 for read
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_REG_MASK, I217_MDIC_REG_SHIFT, reg_addr);
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_PHY_MASK, I217_MDIC_PHY_SHIFT, phy_addr);
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_OP_MASK, I217_MDIC_OP_SHIFT, 2);  // Read operation
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_I_MASK, I217_MDIC_I_SHIFT, 1);     // Interrupt on completion
-    
-    // Write MDIC command
-    result = ndis_platform_ops.mmio_write(dev, I217_MDIC, mdic_value);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I217 MDIC write failed\n");
-        return result;
-    }
-    
-    // Wait for completion (poll ready bit)
-    for (timeout = 0; timeout < 1000; timeout++) {
-        result = ndis_platform_ops.mmio_read(dev, I217_MDIC, &mdic_value);
-        if (result != 0) {
-            DEBUGP(DL_ERROR, "I217 MDIC read failed during polling\n");
-            return result;
-        }
-        
-        // Check for completion using SSOT bit definitions
-        if (I217_MDIC_GET(mdic_value, I217_MDIC_R_MASK, I217_MDIC_R_SHIFT)) {
-            // Check for error
-            if (I217_MDIC_GET(mdic_value, I217_MDIC_E_MASK, I217_MDIC_E_SHIFT)) {
-                DEBUGP(DL_ERROR, "I217 MDIO read error\n");
-                return -1;
-            }
-            
-            // Extract data using SSOT bit definitions
-            *value = (uint16_t)I217_MDIC_GET(mdic_value, I217_MDIC_DATA_MASK, I217_MDIC_DATA_SHIFT);
-            DEBUGP(DL_TRACE, "<==i217_mdio_read: value=0x%x\n", *value);
-            return 0;
-        }
-        
-        // Small delay
-        KeStallExecutionProcessor(10); // 10 microseconds
-    }
-    
-    DEBUGP(DL_ERROR, "I217 MDIO read timeout\n");
-    return -1;
+
+    if (i217_acquire_swsm(dev) != 0)
+        return -1;
+
+    result = i217_mdic_read_locked(dev, phy_addr, reg_addr, value);
+
+    i217_release_swsm(dev);
+
+    DEBUGP(DL_TRACE, "<==i217_mdio_read: value=0x%x rc=%d\n", (result == 0) ? *value : 0, result);
+    return result;
 }
 
 /**
@@ -281,56 +428,22 @@ static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16
  */
 static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16_t value)
 {
-    uint32_t mdic_value;
     int result;
-    int timeout;
-    
+
     DEBUGP(DL_TRACE, "==>i217_mdio_write: phy=0x%x, reg=0x%x, value=0x%x\n", phy_addr, reg_addr, value);
-    
-    if (dev == NULL) {
+
+    if (dev == NULL)
         return -1;
-    }
-    
-    // Build MDIC command using SSOT bit field definitions
-    mdic_value = (uint32_t)I217_MDIC_SET(0, I217_MDIC_DATA_MASK, I217_MDIC_DATA_SHIFT, value);
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_REG_MASK, I217_MDIC_REG_SHIFT, reg_addr);
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_PHY_MASK, I217_MDIC_PHY_SHIFT, phy_addr);
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_OP_MASK, I217_MDIC_OP_SHIFT, 1);  // Write operation
-    mdic_value = (uint32_t)I217_MDIC_SET(mdic_value, I217_MDIC_I_MASK, I217_MDIC_I_SHIFT, 1);     // Interrupt on completion
-    
-    // Write MDIC command
-    result = ndis_platform_ops.mmio_write(dev, I217_MDIC, mdic_value);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I217 MDIC write failed\n");
-        return result;
-    }
-    
-    // Wait for completion
-    for (timeout = 0; timeout < 1000; timeout++) {
-        result = ndis_platform_ops.mmio_read(dev, I217_MDIC, &mdic_value);
-        if (result != 0) {
-            DEBUGP(DL_ERROR, "I217 MDIC read failed during polling\n");
-            return result;
-        }
-        
-        // Check for completion using SSOT bit definitions
-        if (I217_MDIC_GET(mdic_value, I217_MDIC_R_MASK, I217_MDIC_R_SHIFT)) {
-            // Check for error
-            if (I217_MDIC_GET(mdic_value, I217_MDIC_E_MASK, I217_MDIC_E_SHIFT)) {
-                DEBUGP(DL_ERROR, "I217 MDIO write error\n");
-                return -1;
-            }
-            
-            DEBUGP(DL_TRACE, "<==i217_mdio_write: Success\n");
-            return 0;
-        }
-        
-        // Small delay
-        KeStallExecutionProcessor(10); // 10 microseconds
-    }
-    
-    DEBUGP(DL_ERROR, "I217 MDIO write timeout\n");
-    return -1;
+
+    if (i217_acquire_swsm(dev) != 0)
+        return -1;
+
+    result = i217_mdic_write_locked(dev, phy_addr, reg_addr, value);
+
+    i217_release_swsm(dev);
+
+    DEBUGP(DL_TRACE, "<==i217_mdio_write: rc=%d\n", result);
+    return result;
 }
 
 /**
@@ -343,50 +456,48 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
  */
 static int enable_packet_timestamping(device_t *dev, int enable)
 {
-    // I217 PTP registers (IGB family)
-    const uint32_t TSYNCRXCTL = INTEL_REG_TSYNCTXCTL;
-    const uint32_t TSYNCTXCTL = INTEL_REG_TSYNCRXCTL;
-    const uint32_t RXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
-    const uint32_t TXTT_ENABLE = INTEL_TSYNC_VALID;  // Bit 31
-    const uint32_t TYPE_ALL = INTEL_TIMINCA_INCPERIOD;     // Bits 27-25
-    
     if (!dev || !ndis_platform_ops.mmio_write || !ndis_platform_ops.mmio_read) {
         return -1;
     }
-    
+
     if (enable) {
-        // Enable RX packet timestamping
-        uint32_t rx_ctl = RXTT_ENABLE | TYPE_ALL;
-        if (ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, rx_ctl) != 0) {
+        /* Enable RX timestamping: EN=1, TYPE=L4 UDP PTP event messages (2-step capable) */
+        uint32_t rx_ctl = (uint32_t)I217_TSYNCRXCTL_SET(0,
+                              I217_TSYNCRXCTL_EN_MASK, I217_TSYNCRXCTL_EN_SHIFT, 1);
+        rx_ctl = (uint32_t)I217_TSYNCRXCTL_SET(rx_ctl,
+                              I217_TSYNCRXCTL_TYPE_MASK, I217_TSYNCRXCTL_TYPE_SHIFT,
+                              I217_TSYNCRXCTL_TYPE_L4UDP_PTP_EVT);
+        if (ndis_platform_ops.mmio_write(dev, I217_TSYNCRXCTL, rx_ctl) != 0) {
             DEBUGP(DL_ERROR, "I217: Failed to write TSYNCRXCTL\n");
             return -1;
         }
         DEBUGP(DL_INFO, "I217: Enabled RX packet timestamping (TSYNCRXCTL=0x%08X)\n", rx_ctl);
-        
-        // Enable TX packet timestamping
-        uint32_t tx_ctl = TXTT_ENABLE;
-        if (ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, tx_ctl) != 0) {
+
+        /* Enable TX timestamping: EN=1 */
+        uint32_t tx_ctl = (uint32_t)I217_TSYNCTXCTL_SET(0,
+                              I217_TSYNCTXCTL_EN_MASK, I217_TSYNCTXCTL_EN_SHIFT, 1);
+        if (ndis_platform_ops.mmio_write(dev, I217_TSYNCTXCTL, tx_ctl) != 0) {
             DEBUGP(DL_ERROR, "I217: Failed to write TSYNCTXCTL\n");
             return -1;
         }
         DEBUGP(DL_INFO, "I217: Enabled TX packet timestamping (TSYNCTXCTL=0x%08X)\n", tx_ctl);
     } else {
-        // Disable packet timestamping
-        uint32_t regval = 0;
-        const uint32_t TYPE_MASK = INTEL_TIMINCA_INCPERIOD;
-        
-        if (ndis_platform_ops.mmio_read(dev, TSYNCRXCTL, &regval) == 0) {
-            regval &= ~(RXTT_ENABLE | TYPE_MASK);
-            ndis_platform_ops.mmio_write(dev, TSYNCRXCTL, regval);
+        /* Disable: clear EN bit in each control register (read-modify-write) */
+        uint32_t regval;
+
+        if (ndis_platform_ops.mmio_read(dev, I217_TSYNCRXCTL, &regval) == 0) {
+            regval = (uint32_t)I217_TSYNCRXCTL_SET(regval,
+                                  I217_TSYNCRXCTL_EN_MASK, I217_TSYNCRXCTL_EN_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I217_TSYNCRXCTL, regval);
         }
-        
-        if (ndis_platform_ops.mmio_read(dev, TSYNCTXCTL, &regval) == 0) {
-            regval &= ~TXTT_ENABLE;
-            ndis_platform_ops.mmio_write(dev, TSYNCTXCTL, regval);
+        if (ndis_platform_ops.mmio_read(dev, I217_TSYNCTXCTL, &regval) == 0) {
+            regval = (uint32_t)I217_TSYNCTXCTL_SET(regval,
+                                  I217_TSYNCTXCTL_EN_MASK, I217_TSYNCTXCTL_EN_SHIFT, 0);
+            ndis_platform_ops.mmio_write(dev, I217_TSYNCTXCTL, regval);
         }
         DEBUGP(DL_INFO, "I217: Disabled packet timestamping\n");
     }
-    
+
     return 0;
 }
 
@@ -533,56 +644,63 @@ static int i217_read_tsauxc(device_t *dev, uint32_t *tsauxc_value)
 }
 
 /**
- * @brief Write TSAUXC register (Time Sync Auxiliary Control)
+ * @brief Write TSAUXC register — no-op for I217
  * @param dev Device context
- * @param tsauxc_value TSAUXC register value to write
- * @return 0 on success, <0 on error
- * 
- * Implements: HAL compliance - eliminates magic numbers in src/
- * Replaces: Direct register access at 0x0B640 and hardcoded bit masks
+ * @param tsauxc_value TSAUXC value (ignored)
+ * @return 0 (success, operation silently ignored)
+ *
+ * I217 has no hardware PPS outputs or auxiliary timestamp capture;
+ * TSAUXC writes are silently discarded to avoid side-effects.
+ * Callers that check enabled features via read_tsauxc will see the
+ * unchanged (hardware-reset) value and skip unsupported operations.
  */
 static int i217_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
 {
-    if (dev == NULL) {
+    UNREFERENCED_PARAMETER(tsauxc_value);
+    if (dev == NULL)
         return -EINVAL;
-    }
-    
-    return ndis_platform_ops.mmio_write(dev, I217_TSAUXC, tsauxc_value);
+    DEBUGP(DL_INFO, "I217 write_tsauxc: no-op (no HW PPS/aux on I217)\n");
+    return 0;
 }
 
 /**
- * @brief I217 device operations structure using clean generic function names
+ * @brief I217 device operations structure
+ *
+ * Capability notes:
+ *  - 2-step PTP only: SYSTIM is read-only; set_systime returns -ENOTSUP.
+ *  - No hardware PPS / auxiliary capture: write_tsauxc is a no-op.
+ *  - No TSICR / TRGTTIM / AUXSTMP: unsupported ops are NULL.
+ *  - MDIO paging (page 800/801) supported via mdio_read/write_paged.
+ *  - SWSM.SWESMBI semaphore acquired internally by all MDIO operations.
  */
 const intel_device_ops_t i217_ops = {
-    .device_name = "Intel I217 Gigabit Ethernet - Basic PTP",
-    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO,  // Basic PTP only
-    
-    // Basic operations - clean generic names
-    .init = init,
+    .device_name = "Intel I217 Gigabit Ethernet - Basic PTP (2-step only)",
+    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO,
+
+    .init    = init,
     .cleanup = cleanup,
     .get_info = get_info,
-    
-    // PTP operations - clean generic names
-    .set_systime = set_systime,    // Limited functionality (read-only SYSTIM)
+
+    /* set_systime returns -ENOTSUP (SYSTIM is read-only on I217) */
+    .set_systime = set_systime,
     .get_systime = get_systime,
     .init_ptp = init_ptp,
     .enable_packet_timestamping = enable_packet_timestamping,
-    
-    // PTP register access operations (HAL compliance - no magic numbers in src/)
-    .read_tx_timestamp = i217_read_tx_timestamp,
-    .read_rx_timestamp = i217_read_rx_timestamp,
-    .poll_tx_timestamp_fifo = i217_poll_tx_timestamp_fifo,
-    .read_timinca = i217_read_timinca,
-    .write_timinca = i217_write_timinca,
-    .read_tsauxc = i217_read_tsauxc,
-    .write_tsauxc = i217_write_tsauxc,
-    
-    // TSN operations - I217 doesn't support TSN
-    .setup_tas = NULL,
+
+    .read_tx_timestamp        = i217_read_tx_timestamp,
+    .read_rx_timestamp        = i217_read_rx_timestamp,
+    .poll_tx_timestamp_fifo   = i217_poll_tx_timestamp_fifo,
+    .read_timinca             = i217_read_timinca,
+    .write_timinca            = i217_write_timinca,
+    .read_tsauxc              = i217_read_tsauxc,
+    /* write_tsauxc is a no-op: I217 has no HW PPS / aux outputs */
+    .write_tsauxc             = i217_write_tsauxc,
+
+    /* TSN not supported on I217 */
+    .setup_tas              = NULL,
     .setup_frame_preemption = NULL,
-    .setup_ptm = NULL,
-    
-    // MDIO operations - I217 has good MDIO support
-    .mdio_read = mdio_read,
+    .setup_ptm              = NULL,
+
+    .mdio_read  = mdio_read,
     .mdio_write = mdio_write
 };
