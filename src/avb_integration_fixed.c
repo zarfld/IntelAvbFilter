@@ -502,6 +502,25 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         // Don't return error - allow enumeration with baseline capabilities
         return STATUS_SUCCESS;
     }
+
+    /* If BAR0 was NOT successfully mapped, strip capabilities that require
+     * direct MMIO register access.  BASIC_1588 is a hardware truth (the chip
+     * implements IEEE 1588) and must NOT be cleared.  INTEL_CAP_MMIO and
+     * INTEL_CAP_ENHANCED_TS are stripped to signal that register-level access
+     * is currently unavailable; GET_CLOCK_CONFIG guards on INTEL_CAP_MMIO and
+     * returns STATUS_NOT_SUPPORTED when it is absent.
+     *
+     * NOTE: Use hardware_context == NULL as the definitive BAR0 indicator, NOT
+     * hw_state.  The MDIO fallback path (I219/I217 with no accessible BAR0) sets
+     * hw_state = PTP_READY without mapping BAR0, so hw_state < BAR_MAPPED would
+     * miss the strip.  hardware_context is only non-NULL after a successful
+     * AvbMapIntelControllerMemory call and cannot be set by the fallback path. */
+    if (Ctx->hardware_context == NULL) {
+        Ctx->intel_device.capabilities &=
+            ~(UINT32)(INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO);
+        DEBUGP(DL_WARN, "?? AvbBringUpHardware: BAR0 not mapped (hardware_context=NULL, hw_state=%s) — stripped MMIO/ENHANCED_TS caps; remaining=0x%08X\n",
+               AvbHwStateName(Ctx->hw_state), Ctx->intel_device.capabilities);
+    }
     
     // Device-specific post-initialization (allocate Intel library private structure)
     DEBUGP(DL_ERROR, "!!! DEBUG: AvbBringUpHardware hw_state=%s (need BAR_MAPPED)\n", 
@@ -549,9 +568,21 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     
     if (!Ctx) return STATUS_INVALID_PARAMETER;
     
-    if (Ctx->hw_access_enabled) {
+    if (Ctx->hw_access_enabled && Ctx->hardware_context != NULL) {
         DEBUGP(DL_TRACE, "? AvbPerformBasicInitialization: Already initialized, returning success\n");
         return STATUS_SUCCESS;
+    }
+    if (Ctx->hw_access_enabled && Ctx->hardware_context == NULL) {
+        /* hw_access_enabled=TRUE but MMIO mapping lost — re-attempt BAR0 discovery */
+        DEBUGP(DL_WARN, "?? AvbPerformBasicInitialization: hw_access_enabled=TRUE but hardware_context=NULL (inconsistent) — re-attempting BAR0 discovery for DID=0x%04X\n",
+               Ctx->intel_device.pci_device_id);
+        Ctx->hw_access_enabled = FALSE;
+    }
+    if (Ctx->hw_access_enabled && Ctx->hardware_context == NULL) {
+        /* hw_access_enabled=TRUE but MMIO mapping lost — re-attempt BAR0 discovery */
+        DEBUGP(DL_WARN, "?? AvbPerformBasicInitialization: hw_access_enabled=TRUE but hardware_context=NULL (inconsistent) — re-attempting BAR0 discovery for DID=0x%04X\n",
+               Ctx->intel_device.pci_device_id);
+        Ctx->hw_access_enabled = FALSE;
     }
 
     /* Step 1: Discover & map BAR0 if not yet mapped.
@@ -577,20 +608,29 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         NTSTATUS ds = AvbDiscoverIntelControllerResources(Ctx->filter_instance, &bar0, &barLen);
         if (!NT_SUCCESS(ds)) {
             if (isMdioDevice) {
-                /* BAR0 discovery failed for PCH-integrated NIC (I219/I217).
-                 * Fall back to software-fallback mode: initialized=TRUE,
-                 * hardware_context=NULL.  MMIO-dependent IOCTLs will return
-                 * STATUS_UNSUCCESSFUL; paths with software fallbacks continue. */
-                DEBUGP(DL_WARN, "? STEP 1 MDIO-FALLBACK: I219/I217 BAR0 discovery failed (0x%08X) — software fallback mode\n",
-                       ds);
-                Ctx->initialized = TRUE;
-                return STATUS_SUCCESS;
+                /* Primary HAL-based BAR0 discovery failed for PCH-integrated NIC (I219/I217).
+                 * HalGetBusDataByOffset may not work for PCH functions on all platforms.
+                 * Try the PnP-translated resource query as an alternative — this reads the
+                 * OS-assigned physical address directly from the PnP resource list, which
+                 * works reliably for PCH-integrated devices. */
+                DEBUGP(DL_WARN, "?? STEP 1 MDIO: Primary discovery failed (0x%08X) — trying PnP resource query\n", ds);
+                ds = AvbDiscoverIntelControllerResourcesAlternative(Ctx->filter_instance, &bar0, &barLen);
+                if (!NT_SUCCESS(ds)) {
+                    /* Both paths failed — fall back to software-only mode. */
+                    DEBUGP(DL_WARN, "? STEP 1 MDIO-FALLBACK: I219/I217 all BAR0 discovery failed (last=0x%08X) — software fallback mode\n",
+                           ds);
+                    Ctx->initialized = TRUE;
+                    return STATUS_SUCCESS;
+                }
+                DEBUGP(DL_INFO, "? STEP 1a SUCCESS (PnP alt): BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
+            } else {
+                DEBUGP(DL_ERROR, "? STEP 1 FAILED: BAR0 discovery failed 0x%08X (cannot map MMIO yet) VID=0x%04X DID=0x%04X\n", 
+                       ds, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+                return ds; /* propagate */
             }
-            DEBUGP(DL_ERROR, "? STEP 1 FAILED: BAR0 discovery failed 0x%08X (cannot map MMIO yet) VID=0x%04X DID=0x%04X\n", 
-                   ds, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
-            return ds; /* propagate */
+        } else {
+            DEBUGP(DL_TRACE, "? STEP 1a SUCCESS: BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
         }
-        DEBUGP(DL_TRACE, "? STEP 1a SUCCESS: BAR0 discovered: PA=0x%llx Len=0x%x\n", bar0.QuadPart, barLen);
         
         NTSTATUS ms = AvbMapIntelControllerMemory(Ctx, bar0, barLen);
         if (!NT_SUCCESS(ms)) {
@@ -1747,8 +1787,10 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                    currentContext->intel_device.device_type == INTEL_DEVICE_I210 ? "I210" :
                    currentContext->intel_device.device_type == INTEL_DEVICE_I226 ? "I226" : "OTHER");
             
-            // Force immediate BAR0 discovery if hardware context is missing
-            if (currentContext->hardware_context == NULL && currentContext->hw_state == AVB_HW_BOUND) {
+            // Force immediate BAR0 discovery if hardware context is missing,
+            // regardless of hw_state.  OPEN_ADAPTER's MDIO-fallback may have
+            // promoted I219/I217 to PTP_READY without actually mapping BAR0.
+            if (currentContext->hardware_context == NULL) {
                 DEBUGP(DL_TRACE, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
                 
                 PHYSICAL_ADDRESS bar0 = {0};
@@ -2114,6 +2156,17 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     DEBUGP(DL_ERROR, "Clock config query failed: Hardware not ready (state=%s)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
+                } else if (!(activeContext->intel_device.capabilities & INTEL_CAP_MMIO)) {
+                    /* MMIO register access is not available on this adapter instance.
+                     * The hardware may implement IEEE 1588 (BASIC_1588 set) but BAR0
+                     * could not be mapped (e.g. I219 on platforms where the PCH MMIO
+                     * space is reserved by firmware).  Attempting register reads would
+                     * return garbage — report NOT_SUPPORTED so callers can distinguish
+                     * "hardware incapable" from "runtime inaccessible". */
+                    DEBUGP(DL_WARN, "GET_CLOCK_CONFIG: INTEL_CAP_MMIO not available (DID=0x%04X caps=0x%08X) — MMIO not accessible\n",
+                           activeContext->intel_device.pci_device_id,
+                           activeContext->intel_device.capabilities);
+                    status = STATUS_NOT_SUPPORTED;
                 } else {
                     PAVB_CLOCK_CONFIG cfg = (PAVB_CLOCK_CONFIG)buf;
                     
@@ -3674,7 +3727,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                         target_type == INTEL_DEVICE_I217);
                 if (target_type == INTEL_DEVICE_I210 || target_type == INTEL_DEVICE_I225 ||
                     target_type == INTEL_DEVICE_I226) {
-                    /* BAR-mapped devices: require hw_state >= AVB_HW_BAR_MAPPED */
+                    /* BAR-mapped devices: require hw_state >= AVB_H &&
+                         targetContext->hardware_context != NULLW_BAR_MAPPED */
                     if (targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
                         DEBUGP(DL_TRACE, "? OPEN_ADAPTER: Forcing PTP initialization (BAR device type=%d)\n", target_type);
                         AvbEnsureDeviceReady(targetContext);
@@ -3682,7 +3736,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
                     }
                 } else if (isMdioFamily) {
-                    if (targetContext->hw_state >= AVB_HW_BAR_MAPPED) {
+                    if (targetContext->hw_state >= AVB_HW_BAR_MAPPED &&
+                         targetContext->hardware_context != NULL) {
                         /* BAR0 was successfully mapped during init (I219/I217 with
                          * accessible PCI config).  Run the full MMIO-based PTP
                          * initialisation path, same as I210/I226. */
@@ -3693,10 +3748,21 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     } else {
                         /* No BAR0 available (software-fallback mode) — promote
                          * hw_state directly so the context is usable for IOCTLs
-                         * that have non-MMIO fallback paths. */
-                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO-only device (type=%d) — promoting to PTP_READY\n", target_type);
+                         * that have non-MMIO fallback paths.
+                         * IMPORTANT: Strip capabilities that require MMIO register
+                         * access (PTP clock config, enhanced timestamps) since the
+                         * hardware registers are not reachable.  Callers must check
+                         * capabilities before issuing PTP IOCTLs; without BASIC_1588
+                         * the driver will return STATUS_NOT_SUPPORTED. */
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO-only device (type=%d) — promoting to PTP_READY (no MMIO)\n", target_type);
                         AVB_SET_HW_STATE(targetContext, AVB_HW_PTP_READY);
-                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO PTP_READY set hw_state=%s caps=0x%08X\n",
+                        /* BASIC_1588 is a hardware truth — the I219 chip implements IEEE 1588.
+                         * Strip only INTEL_CAP_MMIO (and ENHANCED_TS which also requires MMIO)
+                         * so callers can distinguish "hardware supports PTP" from
+                         * "MMIO register access is available right now". */
+                        targetContext->intel_device.capabilities &=
+                            ~(UINT32)(INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO);
+                        DEBUGP(DL_TRACE, "? OPEN_ADAPTER: MDIO PTP_READY (fallback) hw_state=%s caps=0x%08X (MMIO regs unavailable)\n",
                                AvbHwStateName(targetContext->hw_state), targetContext->intel_device.capabilities);
                     }
                 }

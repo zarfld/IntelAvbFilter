@@ -208,6 +208,177 @@ AvbReadPciConfigDword(
     return (read == sizeof(ULONG)) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
+/* ===================================================================
+ * ECAM (Enhanced Configuration Access Mechanism) PCI config reader
+ * ===================================================================
+ * On modern Intel PCH systems (I219/I217), HAL PCI config reads via
+ * HalGetBusDataByOffset (legacy CF8/CFC port I/O) are blocked for
+ * PCH-internal devices.  ECAM reads config space from MMIO whose base
+ * is published in the ACPI MCFG table -- works for every PCIe endpoint
+ * on UEFI systems.
+ *
+ * Reference: PCI Express Base Specification 3.0 ss7.2.2
+ */
+
+/* ACPI MCFG allocation entry (16 bytes, packed) */
+#pragma pack(push, 1)
+typedef struct _AVB_MCFG_ENTRY {
+    ULONGLONG BaseAddress;   /* ECAM MMIO base for this segment */
+    USHORT    SegmentGroup;
+    UCHAR     StartBus;
+    UCHAR     EndBus;
+    ULONG     Reserved;
+} AVB_MCFG_ENTRY;
+#pragma pack(pop)
+
+/* Entries begin at offset 44 = 36-byte ACPI header + 8-byte reserved */
+#define AVB_MCFG_ENTRIES_OFFSET  44U
+
+/* Query header for ZwQuerySystemInformation / SystemFirmwareTableInformation.
+ * TableBuffer (variable-length MCFG data) follows this fixed 16-byte header
+ * in the same allocation. */
+typedef struct _AVB_FW_TABLE_QUERY {
+    ULONG  ProviderSignature;   /* 'ACPI' = 0x49504341 */
+    ULONG  Action;              /* 1 = Get               */
+    ULONG  TableID;             /* 'MCFG' = 0x4746434D  */
+    ULONG  TableBufferLength;   /* 0 on probe; needed size on output */
+} AVB_FW_TABLE_QUERY;   /* 16 bytes; MCFG table data follows inline */
+
+/* SystemFirmwareTableInformation = 76 (0x4C); available since Vista */
+#define AVB_SFTI_CLASS (76UL)
+
+/* ZwQuerySystemInformation is available in kernel mode but not always
+ * prototyped in WDK KM headers for all info classes.  Declare explicitly. */
+NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
+    _In_      ULONG  SystemInformationClass,
+    _Inout_   PVOID  SystemInformation,
+    _In_      ULONG  SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength);
+
+/*
+ * Retrieve the ECAM MMIO base for PCI bus BusNumber from ACPI MCFG.
+ * Called once per discovery attempt; runs at PASSIVE_LEVEL.
+ */
+static NTSTATUS
+AvbGetEcamBaseForBus(
+    _In_  ULONG      BusNumber,
+    _Out_ ULONGLONG *EcamBase,
+    _Out_ UCHAR     *StartBus)
+{
+    *EcamBase = 0;
+    *StartBus = 0;
+
+    /* --- Probe: discover required table-data size --- */
+    AVB_FW_TABLE_QUERY probe = { 0x49504341U, 1U, 0x4746434DU, 0U };
+    ULONG returnLen = 0;
+    NTSTATUS st = ZwQuerySystemInformation(AVB_SFTI_CLASS,
+                                           &probe, sizeof(probe), &returnLen);
+    if (st != STATUS_BUFFER_TOO_SMALL) {
+        DEBUGP(DL_WARN, "?? ECAM: MCFG probe -> 0x%08X (table not available)\n", st);
+        return NT_SUCCESS(st) ? STATUS_NOT_FOUND : st;
+    }
+
+    ULONG tableDataLen = (returnLen > (ULONG)sizeof(probe))
+                        ?  returnLen - (ULONG)sizeof(probe)
+                        : 512U;
+    if (probe.TableBufferLength > tableDataLen) tableDataLen = probe.TableBufferLength;
+    if (tableDataLen == 0 || tableDataLen > 65536U) return STATUS_INVALID_PARAMETER;
+
+    /* --- Allocate and read --- */
+    ULONG  allocSize = (ULONG)sizeof(AVB_FW_TABLE_QUERY) + tableDataLen;
+    UCHAR *buf = (UCHAR *)ExAllocatePool2(POOL_FLAG_NON_PAGED, allocSize, 'ECav');
+    if (!buf) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(buf, allocSize);
+
+    AVB_FW_TABLE_QUERY *sfti = (AVB_FW_TABLE_QUERY *)buf;
+    sfti->ProviderSignature  = 0x49504341U;
+    sfti->Action             = 1U;
+    sfti->TableID            = 0x4746434DU;
+    sfti->TableBufferLength  = tableDataLen;
+
+    st = ZwQuerySystemInformation(AVB_SFTI_CLASS, sfti, allocSize, &returnLen);
+    if (!NT_SUCCESS(st)) {
+        DEBUGP(DL_WARN, "?? ECAM: MCFG read -> 0x%08X\n", st);
+        ExFreePool(buf);
+        return st;
+    }
+
+    /* --- Parse MCFG allocation entries --- */
+    const UCHAR      *tableData = buf + sizeof(AVB_FW_TABLE_QUERY);
+    ULONG             tableLen  = sfti->TableBufferLength;
+
+    if (tableLen < AVB_MCFG_ENTRIES_OFFSET + (ULONG)sizeof(AVB_MCFG_ENTRY)) {
+        DEBUGP(DL_WARN, "?? ECAM: MCFG table too small (%u bytes)\n", tableLen);
+        ExFreePool(buf);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ULONG               numEntries = (tableLen - AVB_MCFG_ENTRIES_OFFSET)
+                                   / (ULONG)sizeof(AVB_MCFG_ENTRY);
+    const AVB_MCFG_ENTRY *ent      = (const AVB_MCFG_ENTRY *)
+                                     (tableData + AVB_MCFG_ENTRIES_OFFSET);
+
+    for (ULONG i = 0; i < numEntries; i++) {
+        if (BusNumber >= ent[i].StartBus && BusNumber <= ent[i].EndBus) {
+            *EcamBase = ent[i].BaseAddress;
+            *StartBus = ent[i].StartBus;
+            DEBUGP(DL_WARN,
+                   "?? ECAM: MCFG[%u] Base=0x%llX StartBus=%u EndBus=%u covers bus %u\n",
+                   i, ent[i].BaseAddress, ent[i].StartBus, ent[i].EndBus, BusNumber);
+            ExFreePool(buf);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    DEBUGP(DL_WARN, "?? ECAM: No MCFG entry covers bus %u (%u entries)\n",
+           BusNumber, numEntries);
+    ExFreePool(buf);
+    return STATUS_NOT_FOUND;
+}
+
+/*
+ * Read one DWORD from PCI config space via ECAM MMIO.
+ * EcamBase / StartBus must be pre-resolved by AvbGetEcamBaseForBus.
+ * Maps exactly 4 bytes; safe to call from PASSIVE_LEVEL.
+ */
+static NTSTATUS
+AvbReadPciConfigDwordEcamDirect(
+    _In_  ULONG               BusNumber,
+    _In_  AVB_PCI_SLOT_NUMBER  Slot,
+    _In_  ULONG               Offset,
+    _Out_ ULONG              *Value,
+    _In_  ULONGLONG            EcamBase,
+    _In_  UCHAR                StartBus)
+{
+    *Value = 0xFFFFFFFFU;
+
+    ULONG device   = Slot.bits.DeviceNumber;
+    ULONG function = Slot.bits.FunctionNumber;
+
+    /* ECAM: Base + ((Bus-Start)<<20) | (Dev<<15) | (Fn<<12) | Offset */
+    ULONGLONG cfgPhys = EcamBase
+        + (((ULONGLONG)(BusNumber - (ULONG)StartBus)) << 20)
+        + ((ULONGLONG)device   << 15)
+        + ((ULONGLONG)function << 12)
+        + (ULONGLONG)(Offset & 0xFFFU);
+
+    PHYSICAL_ADDRESS pa;
+    pa.QuadPart = (LONGLONG)cfgPhys;
+
+    PULONG va = (PULONG)MmMapIoSpace(pa, sizeof(ULONG), MmNonCached);
+    if (!va) {
+        DEBUGP(DL_WARN, "?? ECAM: MmMapIoSpace failed PA=0x%llX\n", pa.QuadPart);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    *Value = READ_REGISTER_ULONG(va);
+    MmUnmapIoSpace(va, sizeof(ULONG));
+
+    DEBUGP(DL_WARN, "?? ECAM: bus=%u dev=%u fn=%u off=0x%03X -> 0x%08X\n",
+           BusNumber, device, function, Offset, *Value);
+    return STATUS_SUCCESS;
+}
+
 // Helper: known BAR lengths per Intel device, based on Intel datasheets (I210/I219/I225/I226)
 static
 ULONG
@@ -247,6 +418,101 @@ AvbGetIntelBarLengthByDeviceId(USHORT deviceId)
         default:
             return INTEL_BAR0_SIZE_128KB; // conservative default
     }
+}
+
+/*
+ * Internal completion routine for synchronous PnP IRP dispatch.
+ * Returns STATUS_MORE_PROCESSING_REQUIRED to keep the IRP alive until the
+ * synchronous caller has read the final status and called IoFreeIrp.
+ */
+static NTSTATUS
+AvbSyncIrpCompletion(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP           Irp,
+    _In_ PVOID          Context)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+    KeSetEvent((PKEVENT)Context, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+/* GUID for BUS_INTERFACE_STANDARD (from wdm.h / initguid.h).
+ * Declared here to avoid INITGUID-in-header link issues in kernel builds. */
+static const GUID AVB_GUID_BUS_INTERFACE_STANDARD = {
+    0x496B8280L, 0x6F25, 0x11D0,
+    { 0xBE, 0xAF, 0x08, 0x00, 0x2B, 0xE2, 0x09, 0x2F }
+};
+
+/*
+ * Read one DWORD from PCI config space via BUS_INTERFACE_STANDARD.
+ *
+ * Queries the interface fresh on each call (self-contained; this is only
+ * used during initialization so the overhead is acceptable).
+ *
+ * The PCI bus driver services this for every PCIe function, including
+ * PCH-integrated devices (I219/I217) where HalGetBusDataByOffset (CF8/CFC)
+ * and ACPI MCFG access are blocked or unavailable.
+ *
+ * Must be called at PASSIVE_LEVEL.  The PDO must be referenced by the caller.
+ */
+static NTSTATUS
+AvbReadPciConfigViaBusInterface(
+    _In_  PDEVICE_OBJECT Pdo,
+    _In_  ULONG          Offset,
+    _Out_ ULONG         *Value)
+{
+    KEVENT                 event;
+    BUS_INTERFACE_STANDARD busIf  = { 0 };
+    NTSTATUS               status;
+    PIO_STACK_LOCATION     ioStack;
+
+    *Value = 0xFFFFFFFFU;
+
+    KeInitializeEvent(&event, SynchronizationEvent, FALSE);
+
+    PIRP irp = IoAllocateIrp(Pdo->StackSize, FALSE);
+    if (!irp) return STATUS_INSUFFICIENT_RESOURCES;
+
+    irp->IoStatus.Status      = STATUS_NOT_SUPPORTED;
+    irp->IoStatus.Information = 0;
+
+    IoSetCompletionRoutine(irp, AvbSyncIrpCompletion, &event, TRUE, TRUE, TRUE);
+
+    ioStack = IoGetNextIrpStackLocation(irp);
+    ioStack->MajorFunction = IRP_MJ_PNP;
+    ioStack->MinorFunction = IRP_MN_QUERY_INTERFACE;
+    ioStack->Parameters.QueryInterface.InterfaceType         = (LPGUID)&AVB_GUID_BUS_INTERFACE_STANDARD;
+    ioStack->Parameters.QueryInterface.Size                  = sizeof(BUS_INTERFACE_STANDARD);
+    ioStack->Parameters.QueryInterface.Version               = 1;
+    ioStack->Parameters.QueryInterface.Interface             = (PINTERFACE)&busIf;
+    ioStack->Parameters.QueryInterface.InterfaceSpecificData = NULL;
+
+    status = IoCallDriver(Pdo, irp);
+    if (status == STATUS_PENDING) {
+        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+    }
+    status = irp->IoStatus.Status;
+    IoFreeIrp(irp);
+
+    if (!NT_SUCCESS(status)) {
+        DEBUGP(DL_WARN, "?? BusIf: QueryInterface -> 0x%08X\n", status);
+        return status;
+    }
+
+    ULONG n = busIf.GetBusData(busIf.Context,
+                               PCI_WHICHSPACE_CONFIG,
+                               Value,
+                               Offset,
+                               sizeof(ULONG));
+    busIf.InterfaceDereference(busIf.Context);
+
+    if (n != sizeof(ULONG)) {
+        DEBUGP(DL_WARN, "?? BusIf: GetBusData at 0x%02X read %u byte(s)\n", Offset, n);
+        return STATUS_UNSUCCESSFUL;
+    }
+    DEBUGP(DL_WARN, "?? BusIf: config[0x%02X] = 0x%08X\n", Offset, *Value);
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -316,66 +582,119 @@ AvbDiscoverIntelControllerResources(
         return status;
     }
 
-    ObDereferenceObject(pdo);
-
-    slot.bits.DeviceNumber = (address >> 16) & INTEL_MASK_16BIT;
+    /* Keep pdo referenced until BAR0 config reads complete.
+     * BUS_INTERFACE_STANDARD fallback (added below) needs it for STEP 4-5. */
+    slot.bits.DeviceNumber   = (address >> 16) & INTEL_MASK_16BIT;
     slot.bits.FunctionNumber = (address & INTEL_MASK_16BIT) & 0x7;
-    DEBUGP(DL_INFO, "? STEP 3 SUCCESS: Device Address = Bus:%lu, Device:%lu, Function:%lu\n", 
+    DEBUGP(DL_WARN, "?? STEP 3 SUCCESS: bus=%lu dev=%lu fn=%lu\n",
            busNumber, slot.bits.DeviceNumber, slot.bits.FunctionNumber);
 
-    DEBUGP(DL_INFO, "?? STEP 4: Reading PCI Vendor/Device ID...\n");
-    // Read Vendor/Device ID (DWORD @ 0x00 per PCI spec)
+    /* Step 4: Read VID/DID.
+     *  1st attempt: HAL (CF8/CFC) -- fast but blocked for PCH-integrated MACs.
+     *  2nd attempt: ECAM direct MMIO via ACPI MCFG table.
+     *  3rd attempt: BUS_INTERFACE_STANDARD PnP IRP -- always works via PCI driver. */
+    ULONGLONG ecamBase  = 0;
+    UCHAR     ecamStart = 0;
+    BOOLEAN   useEcam   = FALSE;
+    BOOLEAN   useBusIf  = FALSE;
+
+    DEBUGP(DL_INFO, "?? STEP 4: Reading PCI Vendor/Device ID (HAL)...\n");
     status = AvbReadPciConfigDword(busNumber, slot, 0x00, &id);
     if (!NT_SUCCESS(status)) {
-        DEBUGP(DL_ERROR, "? STEP 4 FAILED: Failed to read PCI ID dword: 0x%x\n", status);
-        return status;
+        DEBUGP(DL_WARN, "?? STEP 4: HAL failed (0x%08X) -- trying ECAM\n", status);
+        NTSTATUS ecSt = AvbGetEcamBaseForBus(busNumber, &ecamBase, &ecamStart);
+        if (NT_SUCCESS(ecSt)) {
+            status = AvbReadPciConfigDwordEcamDirect(busNumber, slot, 0x00, &id,
+                                                     ecamBase, ecamStart);
+            if (NT_SUCCESS(status)) {
+                useEcam = TRUE;
+            } else {
+                DEBUGP(DL_ERROR, "? STEP 4 FAILED: ECAM VID read -> 0x%08X\n", status);
+                ObDereferenceObject(pdo);
+                return status;
+            }
+        } else {
+            /* ECAM unavailable -- last resort: BUS_INTERFACE_STANDARD via PnP IRP */
+            DEBUGP(DL_WARN, "?? STEP 4: ECAM unavail (0x%08X) -- trying BUS_INTERFACE_STANDARD\n", ecSt);
+            status = AvbReadPciConfigViaBusInterface(pdo, 0x00, &id);
+            if (NT_SUCCESS(status)) {
+                useBusIf = TRUE;
+            } else {
+                DEBUGP(DL_ERROR, "? STEP 4 FAILED: HAL/ECAM/BusIf all failed\n");
+                ObDereferenceObject(pdo);
+                return STATUS_UNSUCCESSFUL;
+            }
+        }
     }
 
     USHORT ven = (USHORT)(id & INTEL_MASK_16BIT);
     USHORT dev = (USHORT)((id >> 16) & INTEL_MASK_16BIT);
-    DEBUGP(DL_INFO, "? STEP 4 SUCCESS: VID=0x%04x, DID=0x%04x\n", ven, dev);
+    DEBUGP(DL_WARN, "? STEP 4 SUCCESS (%s): VID=0x%04X DID=0x%04X\n",
+           useEcam ? "ECAM" : "HAL", ven, dev);
 
     if (ven != INTEL_VENDOR_ID) {
         DEBUGP(DL_ERROR, "? VALIDATION FAILED: Not an Intel device: VEN=0x%04x, DEV=0x%04x\n", ven, dev);
+        ObDereferenceObject(pdo);
         return STATUS_DEVICE_NOT_READY;
     }
 
-    DEBUGP(DL_INFO, "?? STEP 5: Reading BAR0 configuration...\n");
-    // Read BAR0 low DWORD (@ 0x10). If 64-bit memory BAR, also read BAR1 (@ 0x14)
-    status = AvbReadPciConfigDword(busNumber, slot, 0x10, &bar0lo);
+    /* Step 5: Read BAR0 (and BAR1 for 64-bit BARs) via the same method. */
+    DEBUGP(DL_INFO, "?? STEP 5: Reading BAR0 (%s)...\n",
+           useEcam ? "ECAM" : useBusIf ? "BusIf" : "HAL");
+    if (useEcam) {
+        status = AvbReadPciConfigDwordEcamDirect(busNumber, slot, 0x10, &bar0lo,
+                                                 ecamBase, ecamStart);
+    } else if (useBusIf) {
+        status = AvbReadPciConfigViaBusInterface(pdo, 0x10, &bar0lo);
+    } else {
+        status = AvbReadPciConfigDword(busNumber, slot, 0x10, &bar0lo);
+    }
     if (!NT_SUCCESS(status)) {
         DEBUGP(DL_ERROR, "? STEP 5 FAILED: Failed to read BAR0: 0x%x\n", status);
+        ObDereferenceObject(pdo);
         return status;
     }
 
     if (bar0lo & 0x1) {
         DEBUGP(DL_ERROR, "? VALIDATION FAILED: BAR0 indicates I/O space, not MMIO: 0x%08x\n", bar0lo);
+        ObDereferenceObject(pdo);
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
     ULONGLONG phys = (ULONGLONG)(bar0lo & ~0xFUL);
 
-    // Bits [2:1] == 0b10 indicates 64-bit memory BAR per PCI spec
+    /* Bits [2:1] == 0b10 -> 64-bit memory BAR (PCI spec s6.2.5.1) */
     if ((bar0lo & 0x6) == 0x4) {
-        DEBUGP(DL_INFO, "?? STEP 5a: Reading BAR1 (high) for 64-bit BAR...\n");
-        status = AvbReadPciConfigDword(busNumber, slot, 0x14, &bar0hi);
+        DEBUGP(DL_INFO, "?? STEP 5a: Reading BAR1 (high 32 bits) for 64-bit BAR...\n");
+        if (useEcam) {
+            status = AvbReadPciConfigDwordEcamDirect(busNumber, slot, 0x14, &bar0hi,
+                                                     ecamBase, ecamStart);
+        } else if (useBusIf) {
+            status = AvbReadPciConfigViaBusInterface(pdo, 0x14, &bar0hi);
+        } else {
+            status = AvbReadPciConfigDword(busNumber, slot, 0x14, &bar0hi);
+        }
         if (!NT_SUCCESS(status)) {
-            DEBUGP(DL_ERROR, "? STEP 5a FAILED: Failed to read BAR1 (high) for 64-bit BAR: 0x%x\n", status);
+            DEBUGP(DL_ERROR, "? STEP 5a FAILED: Failed to read BAR1 (high 32 bits): 0x%x\n", status);
+            ObDereferenceObject(pdo);
             return status;
         }
         phys |= ((ULONGLONG)bar0hi) << 32;
-        DEBUGP(DL_INFO, "? STEP 5a SUCCESS: 64-bit BAR - BAR0=0x%08x, BAR1=0x%08x\n", bar0lo, bar0hi);
+        DEBUGP(DL_WARN, "? STEP 5 SUCCESS: 64-bit BAR PA=0x%llX\n", phys);
     } else {
-        DEBUGP(DL_INFO, "? STEP 5 SUCCESS: 32-bit BAR - BAR0=0x%08x\n", bar0lo);
+        DEBUGP(DL_WARN, "? STEP 5 SUCCESS: 32-bit BAR PA=0x%llX\n", phys);
     }
 
     Bar0Address->QuadPart = phys;
     *Bar0Length = AvbGetIntelBarLengthByDeviceId(dev);
 
-    DEBUGP(DL_INFO, "?? DISCOVERY COMPLETE: Intel controller detected: VEN=0x%04x, DEV=0x%04x\n", ven, dev);
-    DEBUGP(DL_INFO, "?? DISCOVERY COMPLETE: BAR0=0x%llx, Length=0x%x (MMIO enabled, %s BAR)\n",
-           Bar0Address->QuadPart, *Bar0Length,
-           ((bar0lo & 0x6) == 0x4) ? "64-bit" : "32-bit");
+    ObDereferenceObject(pdo);
+
+    DEBUGP(DL_WARN,
+           "?? DISCOVERY COMPLETE: VEN=0x%04X DID=0x%04X BAR0=0x%llX Len=0x%X (%s %s-bit)\n",
+           ven, dev, Bar0Address->QuadPart, *Bar0Length,
+           useEcam ? "ECAM" : useBusIf ? "BusIf" : "HAL",
+           ((bar0lo & 0x6) == 0x4) ? "64" : "32");
 
     DEBUGP(DL_TRACE, "<==AvbDiscoverIntelControllerResources: SUCCESS\n");
     return STATUS_SUCCESS;
@@ -388,10 +707,76 @@ AvbDiscoverIntelControllerResourcesAlternative(
     _Out_ PULONG Bar0Length
 )
 {
-    UNREFERENCED_PARAMETER(FilterModule);
-    UNREFERENCED_PARAMETER(Bar0Address);
-    UNREFERENCED_PARAMETER(Bar0Length);
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS status;
+    PDEVICE_OBJECT pdo = NULL;
+    ULONG bufferSize = 0;
+    PCM_RESOURCE_LIST resList = NULL;
+
+    DEBUGP(DL_TRACE, "==>AvbDiscoverIntelControllerResourcesAlternative (PnP BootConfigTranslated)\n");
+
+    if (!FilterModule || !Bar0Address || !Bar0Length) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Bar0Address->QuadPart = 0;
+    *Bar0Length = 0;
+
+    /* Step 1: Get PDO from filter */
+    status = AvbGetPdoFromFilter(FilterModule, &pdo);
+    if (!NT_SUCCESS(status)) {
+        DEBUGP(DL_ERROR, "?? Alt STEP 1 FAILED: AvbGetPdoFromFilter: 0x%08X\n", status);
+        return status;
+    }
+
+    /* Step 2: Query translated resource list size */
+    (void)IoGetDeviceProperty(pdo,
+                              DevicePropertyBootConfigurationTranslated,
+                              0, NULL, &bufferSize);
+    if (bufferSize == 0) {
+        DEBUGP(DL_ERROR, "?? Alt STEP 2 FAILED: DevicePropertyBootConfigurationTranslated size=0\n");
+        ObDereferenceObject(pdo);
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    /* Step 3: Allocate and read the resource list */
+    resList = (PCM_RESOURCE_LIST)ExAllocatePool2(POOL_FLAG_NON_PAGED, bufferSize, 'Lavb');
+    if (!resList) {
+        ObDereferenceObject(pdo);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    status = IoGetDeviceProperty(pdo,
+                                 DevicePropertyBootConfigurationTranslated,
+                                 bufferSize, resList, &bufferSize);
+    ObDereferenceObject(pdo);
+    if (!NT_SUCCESS(status)) {
+        DEBUGP(DL_ERROR, "?? Alt STEP 3 FAILED: IoGetDeviceProperty(BootConfigTranslated): 0x%08X\n", status);
+        ExFreePool(resList);
+        return status;
+    }
+
+    /* Step 4: Walk the resource list to find first memory range >= 64 KB (BAR0) */
+    for (ULONG i = 0; i < resList->Count; i++) {
+        PCM_FULL_RESOURCE_DESCRIPTOR full = &resList->List[i];
+        for (ULONG j = 0; j < full->PartialResourceList.Count; j++) {
+            PCM_PARTIAL_RESOURCE_DESCRIPTOR partial =
+                &full->PartialResourceList.PartialDescriptors[j];
+            if (partial->Type == CmResourceTypeMemory &&
+                partial->u.Memory.Length >= (64 * 1024)) {
+                Bar0Address->QuadPart = partial->u.Memory.Start.QuadPart;
+                *Bar0Length           = partial->u.Memory.Length;
+                DEBUGP(DL_INFO, "?? Alt SUCCESS: BAR0 via PnP: PA=0x%llx Len=0x%x\n",
+                       Bar0Address->QuadPart, *Bar0Length);
+                ExFreePool(resList);
+                DEBUGP(DL_TRACE, "<==AvbDiscoverIntelControllerResourcesAlternative: SUCCESS\n");
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+
+    DEBUGP(DL_WARN, "?? Alt STEP 4: No memory resource >= 64 KB found in PnP resource list\n");
+    ExFreePool(resList);
+    return STATUS_DEVICE_NOT_READY;
 }
 
 NTSTATUS
