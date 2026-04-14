@@ -138,6 +138,88 @@ int main(void)
         }
     }
 
+    /* ── Test 5: TIMINCA register initialized ── */
+    /*
+     * Verifies that init_ptp() correctly writes INTEL_TIMINCA_I210_INIT to
+     * the I210_TIMINCA register (0x0B608).  The I210 runs at 125 MHz, so each
+     * clock cycle is 8 ns → TIMINCA must be 0x08000000 (integer 8 in the
+     * increment field, fractional = 0).  A value of 0 means the SYSTIM clock
+     * never advances.
+     *
+     * Implements: issue for I210 TIMINCA init fix
+     */
+    printf("\n--- Test 5: TIMINCA register ---\n");
+    {
+        avb_u32 timinca = 0;
+        int rc = AvbReadReg(h, 0x0B608 /* I210_TIMINCA */, &timinca);
+        if (rc != 0) {
+            printf("  [FAIL] TIMINCA read failed (error %d)\n", rc);
+            stats.failed++; stats.total++;
+        } else {
+            printf("  [INFO] TIMINCA=0x%08X (expected 0x08000000)\n", (unsigned)timinca);
+            if (timinca == 0x08000000U) {
+                printf("  [PASS] TIMINCA correctly initialized (8 ns/cycle for 125 MHz)\n");
+                stats.passed++; stats.total++;
+            } else if (timinca == 0) {
+                printf("  [FAIL] TIMINCA=0: SYSTIM clock frozen — init_ptp() did not set TIMINCA\n");
+                stats.failed++; stats.total++;
+            } else {
+                printf("  [FAIL] TIMINCA=0x%08X: unexpected value (expected 0x08000000)\n",
+                       (unsigned)timinca);
+                stats.failed++; stats.total++;
+            }
+        }
+    }
+
+    /* ── Test 6: PTP clock monotonicity ── */
+    /*
+     * Reads SYSTIM twice via IOCTL_AVB_GET_TIMESTAMP with a 50 ms sleep.
+     * If TIMINCA == 0 the clock is frozen and T2 == T1 (FAIL).
+     * If TIMINCA is set correctly T2 > T1 by ~50,000,000 ns (PASS).
+     *
+     * This is the observable symptom of the TIMINCA bug.
+     */
+    printf("\n--- Test 6: PTP clock monotonicity (50 ms sleep) ---\n");
+    {
+        AVB_TIMESTAMP_REQUEST ts1req, ts2req;
+        DWORD br = 0;
+        ZeroMemory(&ts1req, sizeof(ts1req));
+        ZeroMemory(&ts2req, sizeof(ts2req));
+
+        BOOL ok1 = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                                   &ts1req, sizeof(ts1req), &ts1req, sizeof(ts1req),
+                                   &br, NULL);
+        if (!ok1) {
+            printf("  [FAIL] IOCTL_AVB_GET_TIMESTAMP (T1) failed (error %lu)\n", GetLastError());
+            stats.failed++; stats.total++;
+        } else {
+            avb_u64 t1 = ts1req.timestamp;
+            Sleep(50);  /* 50 ms — SYSTIM must advance by ~50,000,000 ns */
+
+            BOOL ok2 = DeviceIoControl(h, IOCTL_AVB_GET_TIMESTAMP,
+                                       &ts2req, sizeof(ts2req), &ts2req, sizeof(ts2req),
+                                       &br, NULL);
+            if (!ok2) {
+                printf("  [FAIL] IOCTL_AVB_GET_TIMESTAMP (T2) failed (error %lu)\n", GetLastError());
+                stats.failed++; stats.total++;
+            } else {
+                avb_u64 t2 = ts2req.timestamp;
+                avb_u64 delta = (t2 > t1) ? (t2 - t1) : 0;
+                printf("  [INFO] T1=0x%016llX T2=0x%016llX delta=%llu ns\n",
+                       (unsigned long long)t1, (unsigned long long)t2,
+                       (unsigned long long)delta);
+                if (t2 > t1) {
+                    printf("  [PASS] PTP clock monotonic (delta=%llu ns)\n",
+                           (unsigned long long)delta);
+                    stats.passed++; stats.total++;
+                } else {
+                    printf("  [FAIL] PTP clock NOT advancing (T2<=T1) — TIMINCA likely not set\n");
+                    stats.failed++; stats.total++;
+                }
+            }
+        }
+    }
+
     CloseHandle(h);
     return AvbPrintSummary(&stats);
 }
