@@ -160,7 +160,7 @@ static int enumerate_adapters(HANDLE hDev, uint32_t *out_indices, int max_count)
         AVB_OPEN_REQUEST open_r = {0};
         open_r.vendor_id = r.vendor_id;
         open_r.device_id = r.device_id;
-        open_r.index     = 0;   /* per-DID instance index, not global index */
+        open_r.index     = (avb_u32)idx;   /* global enumeration index — matches IOCTL_AVB_ENUM_ADAPTERS */
         BOOL open_ok = DeviceIoControl(hDev, IOCTL_AVB_OPEN_ADAPTER,
                                        &open_r, sizeof(open_r),
                                        &open_r, sizeof(open_r), &br, NULL);
@@ -419,7 +419,7 @@ int main(int argc, char *argv[])
         AVB_OPEN_REQUEST op = {0};
         op.vendor_id = er.vendor_id;
         op.device_id = er.device_id;
-        op.index     = 0;   /* per-DID instance index */
+        op.index     = (avb_u32)adp_idx;   /* global enumeration index — matches IOCTL_AVB_ENUM_ADAPTERS */
         DWORD obr = 0;
         BOOL ook = DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
                                    &op, sizeof(op), &op, sizeof(op), &obr, NULL);
