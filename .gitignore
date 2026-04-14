@@ -390,3 +390,7 @@ test_baseline_*.txt
 .github/skills/notebooklm-experts/data/profiles/default/auth_info.json
 .github/skills/notebooklm-experts/data/profiles.json
 docs/i219_status_and next_steps.md
+.github/skills/DbgView/DebugView/Dbgview.exe
+.github/skills/DbgView/DebugView/dbgview64.exe
+.github/skills/DbgView/DebugView/Dbgview64a.exe
+.github/skills/DbgView/DebugView/Eula.txt
