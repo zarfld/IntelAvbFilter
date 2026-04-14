@@ -84,11 +84,6 @@
 #define AVB_PCI_DWORD_INVALID       0xFFFFFFFFU
 
 /* --------------------------------------------------------------------------
- * BAR0 sizes
- * -------------------------------------------------------------------------- */
-#define INTEL_BAR0_SIZE_128KB       0x20000U  /* 128 KB CSR window     */
-
-/* --------------------------------------------------------------------------
  * ACPI firmware table signatures (little-endian 4-byte ASCII)
  * Used with ZwQuerySystemInformation / SystemFirmwareTableInformation to
  * locate the ACPI MCFG table that describes PCIe ECAM MMIO windows.
