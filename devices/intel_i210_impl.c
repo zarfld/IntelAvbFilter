@@ -213,7 +213,7 @@ static int init_ptp(device_t *dev)
 
     // Step 1.5: Initialize TIMINCA (clock increment register).
     // I210 runs at 125 MHz base clock → each cycle is 8 ns → TIMINCA = INTEL_TIMINCA_I210_INIT
-    // (= 0x08000000: integer part = 8, fractional part = 0).
+    // (integer part = 8, fractional part = 0).
     // Without this the SYSTIM clock never advances (frozen PHC).
     // Reference: external/intel_avb/lib/intel_private.h INTEL_TIMINCA_I210_INIT
     // Reference: Linux igb_ptp.c igb_ptp_reset() writes E1000_TIMINCA for i210/i211
@@ -226,7 +226,7 @@ static int init_ptp(device_t *dev)
         }
         DEBUGP(DL_TRACE, "I210: TIMINCA read=0x%08X\n", timinca);
         if (timinca != INTEL_TIMINCA_I210_INIT) {
-            timinca = INTEL_TIMINCA_I210_INIT;  /* 0x08000000: 8 ns/cycle at 125 MHz */
+            timinca = INTEL_TIMINCA_I210_INIT;  /* 8 ns/cycle at 125 MHz — see intel_private.h */
             if (ndis_platform_ops.mmio_write(dev, I210_TIMINCA, timinca) != 0) {
                 DEBUGP(DL_ERROR, "I210: Failed to write TIMINCA\n");
                 return -1;
