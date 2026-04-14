@@ -77,4 +77,33 @@
 #define INTEL_DEV_I226_V            0x125CU  /* I226-V                */
 #define INTEL_DEV_I226_IT           0x125DU  /* I226-IT               */
 
+/* --------------------------------------------------------------------------
+ * PCI config-space sentinel
+ * All-ones DWORD returned when a config-space read fails or the slot is empty.
+ * -------------------------------------------------------------------------- */
+#define AVB_PCI_DWORD_INVALID       0xFFFFFFFFU
+
+/* --------------------------------------------------------------------------
+ * BAR0 sizes
+ * -------------------------------------------------------------------------- */
+#define INTEL_BAR0_SIZE_128KB       0x20000U  /* 128 KB CSR window     */
+
+/* --------------------------------------------------------------------------
+ * ACPI firmware table signatures (little-endian 4-byte ASCII)
+ * Used with ZwQuerySystemInformation / SystemFirmwareTableInformation to
+ * locate the ACPI MCFG table that describes PCIe ECAM MMIO windows.
+ * -------------------------------------------------------------------------- */
+#define AVB_ACPI_PROVIDER_SIG       0x49504341U  /* 'ACPI' LE           */
+#define AVB_ACPI_TABLE_MCFG         0x4746434DU  /* 'MCFG' LE           */
+
+/* --------------------------------------------------------------------------
+ * BUS_INTERFACE_STANDARD GUID fields
+ * {496B8280-6F25-11D0-BEAF-08002BE2092F}
+ * Defined here to avoid INITGUID-in-header multiple-definition issues in
+ * kernel builds.  Use avb_bar0_discovery.c: AVB_GUID_BUS_INTERFACE_STANDARD.
+ * -------------------------------------------------------------------------- */
+#define AVB_BUS_IF_GUID_DATA1       0x496B8280UL
+#define AVB_BUS_IF_GUID_DATA2       0x6F25U
+#define AVB_BUS_IF_GUID_DATA3       0x11D0U
+
 #endif /* _INTEL_PCI_IDS_H_ */

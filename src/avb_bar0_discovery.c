@@ -238,9 +238,9 @@ typedef struct _AVB_MCFG_ENTRY {
  * TableBuffer (variable-length MCFG data) follows this fixed 16-byte header
  * in the same allocation. */
 typedef struct _AVB_FW_TABLE_QUERY {
-    ULONG  ProviderSignature;   /* 'ACPI' = 0x49504341 */
+    ULONG  ProviderSignature;   /* AVB_ACPI_PROVIDER_SIG */
     ULONG  Action;              /* 1 = Get               */
-    ULONG  TableID;             /* 'MCFG' = 0x4746434D  */
+    ULONG  TableID;             /* AVB_ACPI_TABLE_MCFG   */
     ULONG  TableBufferLength;   /* 0 on probe; needed size on output */
 } AVB_FW_TABLE_QUERY;   /* 16 bytes; MCFG table data follows inline */
 
@@ -269,7 +269,7 @@ AvbGetEcamBaseForBus(
     *StartBus = 0;
 
     /* --- Probe: discover required table-data size --- */
-    AVB_FW_TABLE_QUERY probe = { 0x49504341U, 1U, 0x4746434DU, 0U };
+    AVB_FW_TABLE_QUERY probe = { AVB_ACPI_PROVIDER_SIG, 1U, AVB_ACPI_TABLE_MCFG, 0U };
     ULONG returnLen = 0;
     NTSTATUS st = ZwQuerySystemInformation(AVB_SFTI_CLASS,
                                            &probe, sizeof(probe), &returnLen);
@@ -291,9 +291,9 @@ AvbGetEcamBaseForBus(
     RtlZeroMemory(buf, allocSize);
 
     AVB_FW_TABLE_QUERY *sfti = (AVB_FW_TABLE_QUERY *)buf;
-    sfti->ProviderSignature  = 0x49504341U;
+    sfti->ProviderSignature  = AVB_ACPI_PROVIDER_SIG;
     sfti->Action             = 1U;
-    sfti->TableID            = 0x4746434DU;
+    sfti->TableID            = AVB_ACPI_TABLE_MCFG;
     sfti->TableBufferLength  = tableDataLen;
 
     st = ZwQuerySystemInformation(AVB_SFTI_CLASS, sfti, allocSize, &returnLen);
@@ -350,7 +350,7 @@ AvbReadPciConfigDwordEcamDirect(
     _In_  ULONGLONG            EcamBase,
     _In_  UCHAR                StartBus)
 {
-    *Value = 0xFFFFFFFFU;
+    *Value = AVB_PCI_DWORD_INVALID;
 
     ULONG device   = Slot.bits.DeviceNumber;
     ULONG function = Slot.bits.FunctionNumber;
@@ -440,7 +440,7 @@ AvbSyncIrpCompletion(
 /* GUID for BUS_INTERFACE_STANDARD (from wdm.h / initguid.h).
  * Declared here to avoid INITGUID-in-header link issues in kernel builds. */
 static const GUID AVB_GUID_BUS_INTERFACE_STANDARD = {
-    0x496B8280L, 0x6F25, 0x11D0,
+    AVB_BUS_IF_GUID_DATA1, AVB_BUS_IF_GUID_DATA2, AVB_BUS_IF_GUID_DATA3,
     { 0xBE, 0xAF, 0x08, 0x00, 0x2B, 0xE2, 0x09, 0x2F }
 };
 
@@ -467,7 +467,7 @@ AvbReadPciConfigViaBusInterface(
     NTSTATUS               status;
     PIO_STACK_LOCATION     ioStack;
 
-    *Value = 0xFFFFFFFFU;
+    *Value = AVB_PCI_DWORD_INVALID;
 
     KeInitializeEvent(&event, SynchronizationEvent, FALSE);
 
