@@ -389,3 +389,4 @@ test_baseline_*.txt
 .github/skills/notebooklm-experts/data/profiles.json
 .github/skills/notebooklm-experts/data/profiles/default/auth_info.json
 .github/skills/notebooklm-experts/data/profiles.json
+docs/i219_status_and next_steps.md
