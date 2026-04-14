@@ -29,6 +29,9 @@
         "/^powershell -NoProfile -ExecutionPolicy Bypass -File tools/build/Build-Tests\\.ps1 -TestName test_timestamp_latency 2>&1 \\| Select-Object -Last 8$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        ".\\run.bat": true,
+        ".\\tools\\build\\Build-Tests.ps1": true,
+        ".\\tools\\build\\Build-Driver.ps1": true
     }
 }
