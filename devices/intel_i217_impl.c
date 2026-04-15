@@ -155,7 +155,8 @@ static int set_systime(device_t *dev, uint64_t systime)
     
     /* I217 SYSTIM registers are read-only per SSOT (access=ro in i217.yaml).           */
     /* Caller should not invoke set_systime on I217; return NOT_SUPPORTED.               */
-    DEBUGP(DL_WARN, "I217 set_systime: SYSTIM is read-only, operation not supported (0x%llx ignored)\n", systime);
+    UNREFERENCED_PARAMETER(systime);
+    DEBUGP(DL_WARN, "I217 set_systime: SYSTIM is read-only, operation not supported\n");
     DEBUGP(DL_TRACE, "<==i217_set_systime: STATUS_NOT_SUPPORTED\n");
     return -ENOTSUP;
 }
