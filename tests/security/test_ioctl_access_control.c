@@ -74,6 +74,39 @@ static HANDLE OpenDeviceAccess(DWORD desiredAccess)
     return h;  /* caller checks INVALID_HANDLE_VALUE */
 }
 
+/* Enumerate adapters and find the first one with BASIC_1588+MMIO capabilities.
+ * Returns TRUE and sets *vid_out, *did_out, *idx_out on success.
+ * Returns FALSE if no suitable adapter is present. */
+static BOOL FindFirstPhcCapableAdapter(UINT16 *vid_out, UINT16 *did_out, UINT32 *idx_out)
+{
+    HANDLE disc = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (disc == INVALID_HANDLE_VALUE) return FALSE;
+
+    BOOL found = FALSE;
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enumReq;
+        DWORD br = 0;
+        ZeroMemory(&enumReq, sizeof(enumReq));
+        enumReq.index = idx;
+        if (!DeviceIoControl(disc, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enumReq, sizeof(enumReq),
+                             &enumReq, sizeof(enumReq), &br, NULL))
+            break;
+        if ((enumReq.capabilities & (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                == (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO)) {
+            *vid_out = enumReq.vendor_id;
+            *did_out = enumReq.device_id;
+            *idx_out = idx;
+            found = TRUE;
+            break;
+        }
+    }
+    CloseHandle(disc);
+    return found;
+}
+
 /* Read PHC via IOCTL_AVB_GET_CLOCK_CONFIG (code 45). */
 static BOOL DoReadIoctl(HANDLE h, DWORD *errorOut)
 {
@@ -115,6 +148,27 @@ static int TC_ACCTL_001_FullAccessReadSucceeds(void)
         printf("    [SKIP] Cannot open device (error %lu) — driver not installed or not admin\n",
                GetLastError());
         return TEST_SKIP;
+    }
+
+    /* Enumerate and bind — Fix 2 gates GET_CLOCK_CONFIG for handles with
+     * FsContext==NULL. Adapter ordering is system-dependent; do NOT hardcode 0. */
+    {
+        UINT16 vid = 0; UINT16 did = 0; UINT32 idx = 0;
+        if (!FindFirstPhcCapableAdapter(&vid, &did, &idx)) {
+            CloseHandle(h);
+            printf("    [SKIP] No BASIC_1588+MMIO adapter found\n");
+            return TEST_SKIP;
+        }
+        AVB_OPEN_REQUEST openReq;
+        DWORD br = 0;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.vendor_id = vid;
+        openReq.device_id = did;
+        openReq.index     = idx;
+        DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                        &openReq, sizeof(openReq),
+                        &openReq, sizeof(openReq),
+                        &br, NULL);
     }
 
     DWORD err = 0;
@@ -280,6 +334,35 @@ static int TC_ACCTL_005_TwoHandlesIndependent(void)
         CloseHandle(h1);
         printf("    [SKIP] Cannot open second handle (error %lu)\n", GetLastError());
         return TEST_SKIP;
+    }
+
+    /* Bind each handle to the same capable adapter — adapter ordering is
+     * system-dependent; do NOT hardcode index 0. */
+    {
+        UINT16 vid = 0; UINT16 did = 0; UINT32 idx = 0;
+        if (!FindFirstPhcCapableAdapter(&vid, &did, &idx)) {
+            CloseHandle(h1); CloseHandle(h2);
+            printf("    [SKIP] No BASIC_1588+MMIO adapter found\n");
+            return TEST_SKIP;
+        }
+        AVB_OPEN_REQUEST openReq;
+        DWORD br = 0;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.vendor_id = vid;
+        openReq.device_id = did;
+        openReq.index     = idx;
+        DeviceIoControl(h1, IOCTL_AVB_OPEN_ADAPTER,
+                        &openReq, sizeof(openReq),
+                        &openReq, sizeof(openReq),
+                        &br, NULL);
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.vendor_id = vid;
+        openReq.device_id = did;
+        openReq.index     = idx;
+        DeviceIoControl(h2, IOCTL_AVB_OPEN_ADAPTER,
+                        &openReq, sizeof(openReq),
+                        &openReq, sizeof(openReq),
+                        &br, NULL);
     }
 
     /* Both should return a valid PHC reading */

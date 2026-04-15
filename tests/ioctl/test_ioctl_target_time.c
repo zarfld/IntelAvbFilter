@@ -1034,24 +1034,51 @@ int main(int argc, char* argv[]) {
     }
     
     printf("Device opened successfully: \\\\.\\IntelAvbFilter\n\n");
-    
-    /* Bind handle to adapter 0 (I226-LM — only adapter with TRGTTIML hardware).
-     * Without this, the auto-fallback may route to I210/I219 which lack TRGTTIML,
-     * causing SET_TARGET_TIME to return STATUS_NOT_SUPPORTED for all TC-TARGET tests. */
+
+    /* Enumerate adapters and bind to first with INTEL_CAP_TSN_TAS (implies TRGTTIML).
+     * Adapter ordering is configuration-dependent — do NOT hardcode index 0. */
     {
-        AVB_OPEN_REQUEST openReq;
-        DWORD openBytes = 0;
-        ZeroMemory(&openReq, sizeof(openReq));
-        openReq.index = 0;  /* adapter 0 (global index per ENUM_ADAPTERS order) */
-        if (DeviceIoControl(hDevice, IOCTL_AVB_OPEN_ADAPTER,
-                            &openReq, sizeof(openReq),
-                            &openReq, sizeof(openReq),
-                            &openBytes, NULL)) {
-            printf("[INFO] Adapter 0 opened (VID=0x%04X DID=0x%04X)\n",
-                   openReq.vendor_id, openReq.device_id);
-        } else {
-            printf("[WARN] OPEN_ADAPTER(index=0) failed (error %lu) - target time tests may fail\n",
-                   GetLastError());
+        BOOL bound = FALSE;
+        for (UINT32 idx = 0; idx < 16; idx++) {
+            AVB_ENUM_REQUEST enumReq;
+            DWORD br = 0;
+            ZeroMemory(&enumReq, sizeof(enumReq));
+            enumReq.index = idx;
+            if (!DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS,
+                                 &enumReq, sizeof(enumReq),
+                                 &enumReq, sizeof(enumReq), &br, NULL))
+                break;
+
+            if (!(enumReq.capabilities & INTEL_CAP_TSN_TAS))
+                continue;  /* no TRGTTIML on this adapter */
+
+            AVB_OPEN_REQUEST openReq;
+            ZeroMemory(&openReq, sizeof(openReq));
+            openReq.vendor_id = enumReq.vendor_id;
+            openReq.device_id = enumReq.device_id;
+            openReq.index     = idx;
+            if (!DeviceIoControl(hDevice, IOCTL_AVB_OPEN_ADAPTER,
+                                 &openReq, sizeof(openReq),
+                                 &openReq, sizeof(openReq), &br, NULL)
+                    || openReq.status != 0)
+                continue;
+
+            printf("[INFO] Bound to adapter %u VID=0x%04X DID=0x%04X (INTEL_CAP_TSN_TAS/TRGTTIML)\n",
+                   idx, enumReq.vendor_id, enumReq.device_id);
+            bound = TRUE;
+            break;
+        }
+        if (!bound) {
+            printf("[SKIP] No adapter with INTEL_CAP_TSN_TAS (TRGTTIML) found\n");
+            CloseHandle(hDevice);
+            printf("\n==============================================\n");
+            printf("TEST SUMMARY\n");
+            printf("==============================================\n");
+            printf("PASSED:  %d\nFAILED:  %d\nSKIPPED: %d\nTOTAL:   %d\n",
+                   tests_passed, tests_failed, tests_skipped,
+                   tests_passed + tests_failed + tests_skipped);
+            printf("==============================================\n");
+            return 0;  /* SKIP is not a failure */
         }
     }
 
@@ -1059,7 +1086,7 @@ int main(int argc, char* argv[]) {
     if (!enable_systim0(hDevice)) {
         printf("WARN: SYSTIM0 not enabled - some tests may fail\n\n");
     }
-    
+
     /* Run Target Time Tests (Issue #204 - subset) */
     printf("\n========== TARGET TIME TESTS (Issue #204) ==========\n\n");
     test_target_001_read_current(hDevice);

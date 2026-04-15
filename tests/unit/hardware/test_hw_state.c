@@ -241,7 +241,7 @@ static void test_pci_latency_all_adapters(HANDLE h)
 {
     printf("=== TEST: TC-PCI-LAT-003: Per-adapter latency sweep ===\n");
 
-    int adapter_count = 0;
+    int capable_count = 0;
     for (int i = 0; i < 16; i++) {
         AVB_ENUM_REQUEST req;
         ZeroMemory(&req, sizeof(req));
@@ -252,28 +252,55 @@ static void test_pci_latency_all_adapters(HANDLE h)
                                    &req, sizeof(req),
                                    &req, sizeof(req),
                                    &bytesRet, NULL);
-        if (!ok || req.status != 0) {
-            break;
-        }
-        printf("  Adapter %d: VID=0x%04X DID=0x%04X Caps=0x%08X\n",
+        if (!ok || req.status != 0)
+            break;  /* no more adapters */
+
+        if ((req.capabilities & (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                != (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+            continue;  /* adapter cannot service IOCTL_AVB_GET_CLOCK_CONFIG */
+
+        printf("  Adapter %d: VID=0x%04X DID=0x%04X Caps=0x%08X — running latency tests\n",
                i, req.vendor_id, req.device_id, req.capabilities);
-        adapter_count++;
+        capable_count++;
+
+        /* Open a dedicated per-adapter handle so the latency tests run against
+         * this specific adapter (not whatever h was last bound to). */
+        HANDLE hAdap = CreateFileA("\\\\.\\IntelAvbFilter",
+                                   GENERIC_READ | GENERIC_WRITE,
+                                   0, NULL, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hAdap == INVALID_HANDLE_VALUE) {
+            printf("  [WARN] Cannot open per-adapter handle (error=%lu) — skipping adapter %d\n",
+                   GetLastError(), i);
+            continue;
+        }
+
+        AVB_OPEN_REQUEST openReq;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.vendor_id = req.vendor_id;
+        openReq.device_id = req.device_id;
+        openReq.index     = (avb_u32)i;
+        bytesRet = 0;
+        if (!DeviceIoControl(hAdap, IOCTL_AVB_OPEN_ADAPTER,
+                             &openReq, sizeof(openReq),
+                             &openReq, sizeof(openReq), &bytesRet, NULL)
+                || openReq.status != 0) {
+            printf("  [WARN] OPEN_ADAPTER failed for adapter %d (error=%lu) — skipping\n",
+                   i, GetLastError());
+            CloseHandle(hAdap);
+            continue;
+        }
+
+        test_pci_latency_one_adapter(hAdap, i);
+        CloseHandle(hAdap);
     }
 
-    if (adapter_count == 0) {
-        TEST_SKIP("TC-PCI-LAT-003", "No adapters enumerated");
+    if (capable_count == 0) {
+        TEST_SKIP("TC-PCI-LAT-003", "No BASIC_1588+MMIO adapters enumerated");
         return;
     }
 
-    printf("  Found %d adapter(s) — testing latency per adapter\n\n", adapter_count);
-
-    /* Run latency sub-tests per adapter */
-    for (int ai = 0; ai < adapter_count; ai++) {
-        test_pci_latency_one_adapter(h, ai);
-    }
-
-    /* TC-PCI-LAT-003 overall pass: all per-adapter sub-tests must not have added failures
-     * (their individual PASS/FAIL macros already incremented the counters). */
+    /* TC-PCI-LAT-003 overall pass determined by per-adapter sub-test results */
 }
 
 /* -------------------------------------------------------------------------- */
@@ -294,6 +321,51 @@ int main(void)
     if (h == INVALID_HANDLE_VALUE) {
         printf("[FATAL] Cannot open IntelAvbFilter (error=%lu)\n", GetLastError());
         return 1;
+    }
+
+    /* Enumerate adapters and bind h to the first one with BASIC_1588+MMIO.
+     * Adapter ordering is configuration-dependent — do NOT hardcode index 0. */
+    {
+        BOOL bound = FALSE;
+        for (UINT32 idx = 0; idx < 16; idx++) {
+            AVB_ENUM_REQUEST enumReq;
+            DWORD br = 0;
+            ZeroMemory(&enumReq, sizeof(enumReq));
+            enumReq.index = idx;
+            if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
+                                 &enumReq, sizeof(enumReq),
+                                 &enumReq, sizeof(enumReq), &br, NULL))
+                break;
+
+            if ((enumReq.capabilities & (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                    != (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                continue;
+
+            AVB_OPEN_REQUEST openReq;
+            ZeroMemory(&openReq, sizeof(openReq));
+            openReq.vendor_id = enumReq.vendor_id;
+            openReq.device_id = enumReq.device_id;
+            openReq.index     = idx;
+            if (DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                                &openReq, sizeof(openReq),
+                                &openReq, sizeof(openReq), &br, NULL)
+                    && openReq.status == 0) {
+                printf("[INFO] Bound to adapter %u VID=0x%04X DID=0x%04X (BASIC_1588+MMIO)\n",
+                       idx, enumReq.vendor_id, enumReq.device_id);
+                bound = TRUE;
+                break;
+            }
+        }
+        if (!bound) {
+            printf("[SKIP] No BASIC_1588+MMIO adapter found — tests skipped\n");
+            CloseHandle(h);
+            printf("==============================================================\n");
+            printf("TEST SUMMARY\nPASSED:  %d\nFAILED:  %d\nSKIPPED: %d\nTOTAL:   %d\n",
+                   g_passed, g_failed, g_skipped,
+                   g_passed + g_failed + g_skipped);
+            printf("==============================================================\n");
+            return 0;  /* SKIP is not a failure */
+        }
     }
 
     /* Preserve original diagnostic output */

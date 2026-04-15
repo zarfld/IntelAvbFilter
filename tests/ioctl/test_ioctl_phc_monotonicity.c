@@ -55,16 +55,64 @@ typedef struct {
     int skip_count;
 } Results;
 
+/* Open a handle bound to the first adapter supporting BASIC_1588 + MMIO.
+ * Returns INVALID_HANDLE_VALUE if no capable adapter is found (caller must SKIP). */
 static HANDLE OpenDevice(void)
 {
-    HANDLE h = CreateFileA(
-        "\\\\.\\IntelAvbFilter",
-        GENERIC_READ | GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        printf("  [SKIP] Cannot open device (error %lu)\n", GetLastError());
+    /* Discovery handle — enumerate only, then close */
+    HANDLE disc = CreateFileA("\\\\.\\IntelAvbFilter",
+                              GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (disc == INVALID_HANDLE_VALUE) {
+        printf("  [SKIP] Cannot open IntelAvbFilter (error %lu)\n", GetLastError());
+        return INVALID_HANDLE_VALUE;
     }
+
+    HANDLE h = INVALID_HANDLE_VALUE;
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enumReq;
+        DWORD br = 0;
+        ZeroMemory(&enumReq, sizeof(enumReq));
+        enumReq.index = idx;
+        if (!DeviceIoControl(disc, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enumReq, sizeof(enumReq),
+                             &enumReq, sizeof(enumReq), &br, NULL))
+            break;  /* no more adapters */
+
+        if ((enumReq.capabilities & (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                != (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+            continue;  /* adapter lacks PHC MMIO clock — skip it */
+
+        /* Open a dedicated handle for this adapter */
+        h = CreateFileA("\\\\.\\IntelAvbFilter",
+                        GENERIC_READ | GENERIC_WRITE,
+                        0, NULL, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) break;
+
+        AVB_OPEN_REQUEST openReq;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.vendor_id = enumReq.vendor_id;
+        openReq.device_id = enumReq.device_id;
+        openReq.index     = idx;
+        if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                             &openReq, sizeof(openReq),
+                             &openReq, sizeof(openReq), &br, NULL)
+                || openReq.status != 0) {
+            CloseHandle(h);
+            h = INVALID_HANDLE_VALUE;
+            continue;
+        }
+        printf("  [INFO] Bound to adapter %u VID=0x%04X DID=0x%04X\n",
+               idx, enumReq.vendor_id, enumReq.device_id);
+        break;
+    }
+    CloseHandle(disc);
+
+    if (h == INVALID_HANDLE_VALUE)
+        printf("  [SKIP] No adapter with BASIC_1588+MMIO found\n");
     return h;
 }
 

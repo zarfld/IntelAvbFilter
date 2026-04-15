@@ -684,20 +684,46 @@ int main(int argc, char* argv[]) {
         printf("? Device initialized successfully\n");
     }
 
-    // Bind this handle to adapter 0 (required by per-handle IOCTL_AVB_GET_CLOCK_CONFIG gate)
+    /* Enumerate adapters and bind to the first one with BASIC_1588 + MMIO.
+     * Adapter ordering is configuration-dependent — do NOT hardcode index 0. */
     {
-        AVB_OPEN_REQUEST openReq;
-        ZeroMemory(&openReq, sizeof(openReq));
-        openReq.index = 0;  /* adapter 0 */
-        bytesReturned = 0;
-        if (DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
-                            &openReq, sizeof(openReq),
-                            &openReq, sizeof(openReq),
-                            &bytesReturned, NULL)) {
-            printf("? Adapter 0 opened (VID=0x%04X DID=0x%04X)\n",
-                   openReq.vendor_id, openReq.device_id);
-        } else {
-            printf("[WARN] OPEN_ADAPTER failed (error %lu) - continuing\n", GetLastError());
+        BOOL bound = FALSE;
+        for (UINT32 idx = 0; idx < 16; idx++) {
+            AVB_ENUM_REQUEST enumReq;
+            DWORD br = 0;
+            ZeroMemory(&enumReq, sizeof(enumReq));
+            enumReq.index = idx;
+            if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
+                                 &enumReq, sizeof(enumReq),
+                                 &enumReq, sizeof(enumReq), &br, NULL))
+                break;
+
+            if ((enumReq.capabilities & (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                    != (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                continue;
+
+            AVB_OPEN_REQUEST openReq;
+            ZeroMemory(&openReq, sizeof(openReq));
+            openReq.vendor_id = enumReq.vendor_id;
+            openReq.device_id = enumReq.device_id;
+            openReq.index     = idx;
+            bytesReturned = 0;
+            if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                                 &openReq, sizeof(openReq),
+                                 &openReq, sizeof(openReq),
+                                 &bytesReturned, NULL)
+                    || openReq.status != 0)
+                continue;
+
+            printf("? Bound to adapter %u VID=0x%04X DID=0x%04X (BASIC_1588+MMIO)\n",
+                   idx, enumReq.vendor_id, enumReq.device_id);
+            bound = TRUE;
+            break;
+        }
+        if (!bound) {
+            printf("[SKIP] No adapter with BASIC_1588+MMIO found — tests cannot run\n");
+            CloseHandle(h);
+            return 0;  /* SKIP is not a failure */
         }
     }
 

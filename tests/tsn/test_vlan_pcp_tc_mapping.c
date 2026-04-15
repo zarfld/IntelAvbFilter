@@ -103,8 +103,54 @@ static void RecordResult(Results *r, int result, const char *name)
 /* ────────────────────────── helpers ─────────────────────────────────────── */
 static HANDLE OpenDevice(void)
 {
-    return CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
-                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    /* Use a shared-mode discovery handle to enumerate adapters, then open an
+     * exclusive handle bound to the first adapter with BASIC_1588+MMIO.
+     * Adapter ordering is configuration-dependent — do NOT hardcode index 0. */
+    HANDLE disc = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (disc == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+
+    UINT16 vid = 0, did = 0;
+    UINT32 found_idx = (UINT32)-1;
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enumReq;
+        DWORD br = 0;
+        ZeroMemory(&enumReq, sizeof(enumReq));
+        enumReq.index = idx;
+        if (!DeviceIoControl(disc, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enumReq, sizeof(enumReq),
+                             &enumReq, sizeof(enumReq), &br, NULL))
+            break;
+        if ((enumReq.capabilities & (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))
+                == (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO)) {
+            vid       = enumReq.vendor_id;
+            did       = enumReq.device_id;
+            found_idx = idx;
+            break;
+        }
+    }
+    CloseHandle(disc);
+
+    if (found_idx == (UINT32)-1)
+        return INVALID_HANDLE_VALUE;  /* DeviceAlive will return FALSE — tests skip */
+
+    HANDLE h = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                           0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+
+    AVB_OPEN_REQUEST openReq;
+    DWORD bytes = 0;
+    ZeroMemory(&openReq, sizeof(openReq));
+    openReq.vendor_id = vid;
+    openReq.device_id = did;
+    openReq.index     = found_idx;
+    DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                    &openReq, sizeof(openReq),
+                    &openReq, sizeof(openReq),
+                    &bytes, NULL);
+    /* Non-fatal if OPEN_ADAPTER fails — DeviceAlive will return FALSE gracefully */
+    return h;
 }
 
 static BOOL DeviceAlive(HANDLE h)
