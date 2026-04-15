@@ -1,10 +1,22 @@
 ````skill
 ---
 name: run-tests
-description: Use when about to execute any .exe test binary, run any test command, investigate test failures, or claim any test result in this repo. STOP before running build/tools/avb_test .exe files directly - only Run-Tests-Elevated.ps1 is the correct entry point.
+description: "Use when running, executing, or invoking any test in IntelAvbFilter — avb_test_i210_um, avb_test_i219, ptp_clock_control_test, tsauxc_toggle_test, quick_diagnostics, or any .exe under build/tools/. Also when reading, interpreting, or claiming test results."
 ---
 
 # Running Tests in the IntelAvbFilter Repo
+
+## When to Use
+
+- About to run `avb_test_i210_um`, `avb_test_i219`, `ptp_clock_control_test`, `tsauxc_toggle_test`, `quick_diagnostics`, or any `.exe` under `build/tools/`
+- Typing a path like `build\tools\avb_test\x64\Debug\*.exe`
+- Asked to "run the tests", "verify with tests", "check if tests pass"
+- Reading or reporting results from a test log
+- Investigating a test failure
+
+**NOT for:** building (use `Build-Tests.ps1`), driver installation (use `Install-Driver-Elevated.ps1`).
+
+---
 
 ## HARD STOP — Read This Before Touching Any Test
 
@@ -18,6 +30,7 @@ description: Use when about to execute any .exe test binary, run any test comman
 | Context | Correct command |
 |---------|----------------|
 | Local dev (interactive) | `.\tools\test\Run-Tests-Elevated.ps1 -TestName <test>.exe` |
+| Local dev (interactive) with DbugViewLogging | `.\tools\test\Run-Tests-Elevated.ps1 -TestName <test>.exe -CaptureDbgView` |
 | CI workflow (GitHub Actions) | `.\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Unit` |
 
 Running the `.exe` directly bypasses elevation, device enumeration, logging, and transcript capture. The terminal output shows nothing useful. **You will get wrong or no results and not know it.**
