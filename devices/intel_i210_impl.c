@@ -123,14 +123,6 @@ static int set_systime(device_t *dev, uint64_t systime)
         return -1;
     }
     
-    // Use current system time if zero
-    if (systime == 0) {
-        LARGE_INTEGER currentTime;
-        KeQuerySystemTime(&currentTime);
-        systime = currentTime.QuadPart * 100; // Convert to nanoseconds
-        DEBUGP(DL_INFO, "I210 using system time: 0x%llx\n", systime);
-    }
-    
     /* I210 (IGB family) SYSTIM format: SYSTIMH = seconds, SYSTIML = nanoseconds (0..999999999).
      * This matches get_systime() which reconstructs via: ts_high * 1e9 + ts_low.
      * Writing raw 32-bit splits of the 64-bit ns value would produce a massive

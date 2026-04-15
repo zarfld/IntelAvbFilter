@@ -2151,9 +2151,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 DEBUGP(DL_ERROR, "!!! Buffer too small - returning error\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
-                DEBUGP(DL_ERROR, "!!! activeContext=%p (g_AvbContext=%p, AvbContext=%p)\n", 
-                       activeContext, g_AvbContext, AvbContext);
+                PAVB_DEVICE_CONTEXT activeContext = currentContext;
+                DEBUGP(DL_ERROR, "!!! activeContext=%p (currentContext=%p, g_AvbContext=%p)\n", 
+                       activeContext, currentContext, g_AvbContext);
                 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "Clock config query failed: Hardware not ready (state=%s)\n", 
@@ -3072,8 +3072,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             if (inLen < sizeof(AVB_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TIMESTAMP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL; 
             } else {
-                // Use the active global context (set by IOCTL_AVB_OPEN_ADAPTER)
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                // Use the per-handle context (set by IOCTL_AVB_OPEN_ADAPTER via device.c)
+                PAVB_DEVICE_CONTEXT activeContext = currentContext;
                 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
                     DEBUGP(DL_TRACE, "Timestamp access: Hardware state %s, checking PTP clock\n",
@@ -3174,7 +3174,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 status = STATUS_BUFFER_TOO_SMALL;
                 info = 0;
             } else {
-                PAVB_DEVICE_CONTEXT phcCtx = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT phcCtx = currentContext;
                 PAVB_OFFSET_REQUEST off_req = (PAVB_OFFSET_REQUEST)buf;
                 ULONGLONG current_t = 0;
                 int rc = intel_gettime(&phcCtx->intel_device, 0, &current_t, NULL);

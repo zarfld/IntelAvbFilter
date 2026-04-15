@@ -30,7 +30,11 @@
 static int tests_passed = 0;
 static int tests_failed = 0;
 
-// Helper: Open Intel AVB driver adapter
+/* Module-level adapter selector — set by main() per-adapter iteration */
+static UINT32 g_adapter_index = 0;
+static UINT16 g_adapter_did   = 0;
+
+// Helper: Open Intel AVB driver adapter and bind to current adapter via OPEN_ADAPTER
 static HANDLE OpenAdapter() {
     HANDLE hDevice = CreateFileA(
         "\\\\.\\IntelAvbFilter",
@@ -43,29 +47,44 @@ static HANDLE OpenAdapter() {
     );
     
     if (hDevice == INVALID_HANDLE_VALUE) {
-        DWORD err = GetLastError();
-        printf("  [WARN] Could not open device: error %lu\n", err);
+        printf("  [WARN] Could not open device: error %lu\n", GetLastError());
+        return INVALID_HANDLE_VALUE;
+    }
+
+    AVB_OPEN_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
+    req.vendor_id = 0x8086;
+    req.device_id = g_adapter_did;
+    req.index     = g_adapter_index;
+    DWORD br = 0;
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_OPEN_ADAPTER,
+                         &req, sizeof(req), &req, sizeof(req), &br, NULL)
+        || req.status != 0) {
+        printf("  [WARN] OPEN_ADAPTER failed (error %lu, status=0x%08X)\n",
+               GetLastError(), req.status);
+        CloseHandle(hDevice);
+        return INVALID_HANDLE_VALUE;
     }
     
     return hDevice;
 }
 
-// Helper: Read current PHC timestamp
+// Helper: Read current PHC timestamp via GET_CLOCK_CONFIG (per-handle, MMIO-backed)
 static BOOL ReadPHCTime(HANDLE hDevice, UINT64 *timestamp) {
-    AVB_TIMESTAMP_REQUEST request = {0};
+    AVB_CLOCK_CONFIG cfg = {0};
     DWORD bytesReturned = 0;
     
     BOOL success = DeviceIoControl(
         hDevice,
-        IOCTL_AVB_GET_TIMESTAMP,
-        &request, sizeof(request),
-        &request, sizeof(request),
+        IOCTL_AVB_GET_CLOCK_CONFIG,
+        &cfg, sizeof(cfg),
+        &cfg, sizeof(cfg),
         &bytesReturned,
         NULL
     );
     
-    if (success && request.status == 0) {
-        *timestamp = request.timestamp;
+    if (success && cfg.status == 0) {
+        *timestamp = cfg.systim;
         return TRUE;
     }
     
@@ -663,42 +682,91 @@ int main(void) {
     printf("Verifies: #38 (REQ-F-IOCTL-PHC-003: PHC Time Offset Adjustment IOCTL)\n");
     printf("Test Cases: 15 total (10 unit + 3 integration + 2 V&V)\n");
     printf("Priority: P0 (Critical)\n");
+    printf("MULTI-ADAPTER: tests all enumerated adapters with MMIO/BASIC_1588 capability\n");
     printf("=================================================================\n\n");
-    
-    // UNIT TESTS (10 test cases)
-    printf("====================\n");
-    printf("UNIT TESTS (10)\n");
-    printf("====================\n");
-    UT_OFFSET_001_ValidPositiveOffset();
-    UT_OFFSET_002_ValidNegativeOffset();
-    UT_OFFSET_003_LargePositiveOffset();
-    UT_OFFSET_004_OffsetUnderflow();
-    UT_OFFSET_005_BufferTooSmall();
-    UT_OFFSET_006_NullInputBuffer();
-    UT_OFFSET_007_ZeroOffset();
-    UT_OFFSET_008_010_Pending();
-    
-    // INTEGRATION TESTS (3 test cases)
-    printf("\n====================\n");
-    printf("INTEGRATION TESTS (3)\n");
-    printf("====================\n");
-    IT_OFFSET_001_SequentialOffsets();
-    IT_OFFSET_002_003_Pending();
-    
-    // V&V TESTS (2 test cases)
-    printf("\n====================\n");
-    printf("V&V TESTS (2)\n");
-    printf("====================\n");
-    VV_OFFSET_001_002_Pending();
-    
-    // SUMMARY
-    printf("\n=================================================================\n");
-    printf("TEST SUMMARY\n");
-    printf("=================================================================\n");
-    printf("PASSED: %d / 15 test cases (%.1f%%)\n", tests_passed, (tests_passed * 100.0) / 15);
-    printf("FAILED: %d / 15 test cases (%.1f%%)\n", tests_failed, (tests_failed * 100.0) / 15);
-    printf("=================================================================\n");
-    
-    // Return 0 if all tests passed
-    return (tests_failed == 0) ? 0 : 1;
+
+    /* Enumerate all adapters and run tests on each MMIO-capable one */
+    HANDLE discovery = CreateFileA("\\\\.\\IntelAvbFilter",
+                                   GENERIC_READ | GENERIC_WRITE,
+                                   0, NULL, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL, NULL);
+    if (discovery == INVALID_HANDLE_VALUE) {
+        printf("[FAIL] Cannot open device node (error %lu)\n", GetLastError());
+        return 1;
+    }
+
+    int adapters_tested = 0;
+    int total_fail      = 0;
+
+    for (UINT32 idx = 0; ; idx++) {
+        AVB_ENUM_REQUEST enum_req;
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = idx;
+        DWORD br = 0;
+        if (!DeviceIoControl(discovery, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL))
+            break;  /* no more adapters */
+
+        /* Skip adapters without MMIO/BASIC_1588 — OFFSET_ADJUST needs register access */
+        if (!(enum_req.capabilities & INTEL_CAP_MMIO) ||
+            !(enum_req.capabilities & INTEL_CAP_BASIC_1588)) {
+            printf("[SKIP] Adapter %u (VID=0x%04X DID=0x%04X): no MMIO/1588 capability — skipping\n",
+                   idx, enum_req.vendor_id, enum_req.device_id);
+            continue;
+        }
+
+        g_adapter_index = idx;
+        g_adapter_did   = enum_req.device_id;
+        tests_passed    = 0;
+        tests_failed    = 0;
+
+        printf("\n=== Adapter %u (VID=0x%04X DID=0x%04X caps=0x%08X) ===\n",
+               idx, enum_req.vendor_id, enum_req.device_id, enum_req.capabilities);
+
+        // UNIT TESTS (10 test cases)
+        printf("\n====================\n");
+        printf("UNIT TESTS (10)\n");
+        printf("====================\n");
+        UT_OFFSET_001_ValidPositiveOffset();
+        UT_OFFSET_002_ValidNegativeOffset();
+        UT_OFFSET_003_LargePositiveOffset();
+        UT_OFFSET_004_OffsetUnderflow();
+        UT_OFFSET_005_BufferTooSmall();
+        UT_OFFSET_006_NullInputBuffer();
+        UT_OFFSET_007_ZeroOffset();
+        UT_OFFSET_008_010_Pending();
+
+        // INTEGRATION TESTS (3 test cases)
+        printf("\n====================\n");
+        printf("INTEGRATION TESTS (3)\n");
+        printf("====================\n");
+        IT_OFFSET_001_SequentialOffsets();
+        IT_OFFSET_002_003_Pending();
+
+        // V&V TESTS (2 test cases)
+        printf("\n====================\n");
+        printf("V&V TESTS (2)\n");
+        printf("====================\n");
+        VV_OFFSET_001_002_Pending();
+
+        printf("\n=================================================================\n");
+        printf("TEST SUMMARY (Adapter %u)\n", idx);
+        printf("=================================================================\n");
+        printf("PASSED: %d / 15 test cases (%.1f%%)\n", tests_passed, (tests_passed * 100.0) / 15);
+        printf("FAILED: %d / 15 test cases (%.1f%%)\n", tests_failed, (tests_failed * 100.0) / 15);
+        printf("=================================================================\n");
+
+        adapters_tested++;
+        total_fail += tests_failed;
+    }
+
+    CloseHandle(discovery);
+
+    if (adapters_tested == 0) {
+        printf("[SKIP] No MMIO-capable adapters found — no tests ran\n");
+        return 0;  /* SKIP: no hardware to test */
+    }
+
+    return (total_fail == 0) ? 0 : 1;
 }

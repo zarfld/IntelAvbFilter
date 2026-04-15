@@ -305,7 +305,7 @@ int intel_gettime(device_t *dev, clockid_t clk_id, ULONGLONG *curtime, struct ti
     
     // Final fallback to system time
     KeQuerySystemTime(&currentTime);
-    *curtime = currentTime.QuadPart;
+    *curtime = (ULONGLONG)currentTime.QuadPart * 100ULL;  /* 100-ns ticks → nanoseconds */
     
     if (system_time) {
         system_time->tv_sec = (LONG)(currentTime.QuadPart / 10000000LL);

@@ -205,13 +205,6 @@ static int set_systime(device_t *dev, uint64_t systime)
         return -1;
     }
 
-    if (systime == 0) {
-        LARGE_INTEGER currentTime;
-        KeQuerySystemTime(&currentTime);
-        systime = currentTime.QuadPart * 100ULL;  /* 100-ns ticks → nanoseconds */
-        DEBUGP(DL_INFO, "I219 set_systime: using system time fallback: 0x%llx\n", systime);
-    }
-
     ts_low  = (uint32_t)(systime & INTEL_MASK_32BIT);
     ts_high = (uint32_t)(systime >> 32);
 

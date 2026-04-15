@@ -594,8 +594,8 @@ int main(int argc, char **argv) {
     CloseHandle(discovery);
 
     if (adapters_tested == 0) {
-        printf("[ERROR] No adapters with MDIO capability found.\n\n");
-        return 1;
+        printf("[SKIP] No adapters with MDIO capability found.\n\n");
+        return 0;  /* SKIP: no hardware to test, not a failure */
     }
 
     /* Print aggregate summary */

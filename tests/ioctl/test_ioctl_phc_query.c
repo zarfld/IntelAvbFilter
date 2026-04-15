@@ -495,6 +495,24 @@ static DWORD WINAPI ConcurrentQueryThread(LPVOID param)
         return 1;
     }
 
+    /* Bind this handle to the current adapter so GET_CLOCK_CONFIG uses per-handle context */
+    {
+        AVB_OPEN_REQUEST open_req;
+        ZeroMemory(&open_req, sizeof(open_req));
+        open_req.vendor_id = 0x8086;
+        open_req.device_id = (UINT16)g_adapter_did;
+        open_req.index     = g_adapter_index;
+        DWORD open_br = 0;
+        if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                             &open_req, sizeof(open_req),
+                             &open_req, sizeof(open_req), &open_br, NULL)
+            || open_req.status != 0) {
+            data->fail_count++;
+            CloseHandle(h);
+            return 1;
+        }
+    }
+
     for (i = 0; i < QUERIES_PER_THREAD; i++) {
         AVB_PHC_QUERY_RESPONSE response;
         DWORD bytesReturned = 0;
