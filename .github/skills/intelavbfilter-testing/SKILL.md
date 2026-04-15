@@ -147,20 +147,121 @@ The `Run-Tests.ps1` JUnit XML parser understands the `/adapter:N` suffix:
 | `tests/integration/multi_adapter/test_multidev_adapter_enum.c` | TC-MULTIDEV-001.1 | Iterates all adapters |
 | Phase 2.5 device-agnostic tests | `test_ptp_getset`, `test_hw_ts_ctrl`, … | Runner iterates adapters |
 
-### Tests that are adapter-family specific (intentionally single-adapter)
+### Tests that are adapter-family specific
 
-Phase 5 (`avb_test_i210.exe`, `avb_test_i219.exe`, `avb_test_i226.exe`) uses
-`AvbEnumerateAdapters()` internally to find *its* NIC and SKIPs if not present.
-This is correct — they test family-specific capabilities and must stay
-family-scoped. They complement, not replace, the device-agnostic multi-adapter runs.
+Phase 5 (`avb_test_i210.exe`, `avb_test_i219.exe`, `avb_test_i226.exe`) tests family-specific capabilities. **Family-scoped does NOT mean single-adapter.** These binaries MUST still iterate over ALL installed adapters of their target family:
+
+- If the system has two i226 ports → `avb_test_i226.exe` must run on **both**, emitting `TC-XXX/adapter:0` and `TC-XXX/adapter:1` lines.
+- `AvbEnumerateAdapters()` loops until no more adapters match — the test must not stop at the first match.
+- If no adapter of the target family is present → all test cases SKIP (genuine N/A, not a failure).
+
+They complement, not replace, the device-agnostic multi-adapter runs in earlier phases.
 
 ### Checklist when writing a new adapter-dependent test
 
 - [ ] Test uses `IOCTL_AVB_ENUM_ADAPTERS` loop — does NOT hard-code `index = 0`
 - [ ] Output includes `/adapter:N` suffix with VID/DID in each `PASS:`/`FAIL:` line
 - [ ] Test declares `"MULTI-ADAPTER: tests all enumerated adapters"` in its header `printf`
-- [ ] All-skip is treated as skip (no hardware present), not as failure
+- [ ] `SKIP:` is emitted **only** for `STATUS_NOT_SUPPORTED` or "no adapter of this family present"
+- [ ] Any IOCTL error that is NOT `STATUS_NOT_SUPPORTED` emits `FAIL:` (never SKIP)
+- [ ] Prerequisite failures emit `FAIL:`, not `SKIP:`
+- [ ] All-skip (no hardware present at all) treated as skip, not failure
 - [ ] Any single-adapter failure sets a non-zero exit code for the binary
+
+---
+
+## SKIP vs FAIL Semantics — Critical
+
+> **Tests exist to make problems visible. Hiding a problem behind SKIP is a test defect.**
+
+### The only valid reasons to SKIP
+
+A test case may emit `SKIP:` **only** when:
+
+1. **No adapter of the required family is present in the system** — there is nothing to test against.
+2. **The driver returned `STATUS_NOT_SUPPORTED`** for the IOCTL under test — the hardware genuinely does not implement the feature.
+
+```c
+// ✅ CORRECT — hardware lacks this feature
+if (status == STATUS_NOT_SUPPORTED) {
+    printf("  SKIP: TC-TAS-001/adapter:%u: TAS not supported "
+           "(VID=0x%04X DID=0x%04X)\n", idx, req.vendor_id, req.device_id);
+    continue;   // expected — skip is OK
+}
+```
+
+### Everything else is FAIL
+
+| Situation | Correct verdict | Rationale |
+|---|---|---|
+| Feature is supported but driver returns wrong value | `FAIL` | Implementation bug |
+| `IOCTL_AVB_OPEN_ADAPTER` returns any error | `FAIL` | Driver/implementation problem |
+| `CreateFileA("\\\\.\\IntelAvbFilter")` fails | `FAIL` | Driver not running — real problem |
+| A prerequisite step (clock set, init, etc.) fails | `FAIL` | Prerequisite failure **is** a bug |
+| Timestamp outside tolerance | `FAIL` | Correctness failure |
+| Driver returns unrecognized error code | `FAIL` | Must handle all cases |
+
+```c
+// ❌ WRONG — disguising a real error as a skip
+if (!DeviceIoControl(h, IOCTL_AVB_SET_TIME, ...)) {
+    printf("  SKIP: TC-PTP-002/adapter:%u: IOCTL failed\n", idx);
+}
+
+// ✅ CORRECT — expose the error
+if (!DeviceIoControl(h, IOCTL_AVB_SET_TIME, ...)) {
+    printf("  FAIL: TC-PTP-002/adapter:%u: IOCTL_AVB_SET_TIME failed (err=%lu)\n",
+           idx, GetLastError());
+    return 1;
+}
+```
+
+### Prerequisites not met → FAIL, not SKIP
+
+If a prerequisite step fails (open adapter, enable feature, set clock), all dependent test cases in that adapter iteration must report `FAIL`. The prerequisite failure **is the bug**; hiding it with SKIP destroys the diagnostic signal.
+
+```c
+// ❌ WRONG
+if (!setup_adapter(h, idx)) {
+    printf("  SKIP: TC-ABC-001/adapter:%u: setup failed\n", idx);
+    return;
+}
+
+// ✅ CORRECT
+if (!setup_adapter(h, idx)) {
+    printf("  FAIL: TC-ABC-001/adapter:%u: adapter setup failed "
+           "— prerequisite error (err=%lu)\n", idx, GetLastError());
+    g_failed++;
+    return 1;
+}
+```
+
+### Capability vs. correctness: the key distinction
+
+| Scenario | Driver action | Test verdict |
+|---|---|---|
+| Feature **not supported** by this NIC family | Return `STATUS_NOT_SUPPORTED` | `SKIP` |
+| Feature **supported**, but implementation is wrong | Return error or wrong data | `FAIL` |
+| Feature **supported**, prerequisites not met | Return error (implementation must guard) | `FAIL` |
+| Feature **supported** and works correctly | Return success + correct data | `PASS` |
+
+The driver itself is responsible for returning `STATUS_NOT_SUPPORTED` for capabilities it does not have. If a supported feature's *prerequisite* (e.g., link up, adapter open) is not met, the driver must return a specific error — not `STATUS_NOT_SUPPORTED`. Tests must surface that error as `FAIL`.
+
+### Decision tree
+
+```
+About to run TC-XXX on adapter N:
+  ├─ No adapter of required family present in system?
+  │    → SKIP  (genuine N/A — no hardware to test)
+  │
+  ├─ IOCTL returned STATUS_NOT_SUPPORTED?
+  │    → SKIP  (feature not implemented in this NIC)
+  │
+  ├─ Any other IOCTL error / driver failure?
+  │    → FAIL  (driver/implementation problem)
+  │
+  └─ IOCTL succeeded but result is wrong / out of tolerance?
+       → FAIL  (correctness problem)
+```
 
 ---
 
@@ -300,4 +401,7 @@ Get-Content $log.FullName
 | Reporting "tests pass" from build success alone | Build ≠ test execution | Run tests, read the log, state actual counts |
 | Adding a new test without a GitHub issue | Breaks traceability audit | Create TEST issue with `Traces to: #NNN` before or immediately after writing the test |
 | Ignoring `[SKIP]` results from hardware tests in CI | Might mask a real failure on hw | Validate same run with hardware before claiming full coverage |
+| Using `SKIP:` when an IOCTL returns an unexpected error | Hides an implementation bug | `SKIP:` is only valid for `STATUS_NOT_SUPPORTED` — anything else is `FAIL:` |
+| Using `SKIP:` when a prerequisite step fails | Prerequisite failure is a bug, not N/A | `FAIL:` with the prerequisite error; do not hide it |
+| Stopping family-specific test at first matching adapter | Misses second NIC of same family | Loop `AvbEnumerateAdapters()` to exhaustion, run on each adapter of the family |
 ````
