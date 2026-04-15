@@ -1035,6 +1035,26 @@ int main(int argc, char* argv[]) {
     
     printf("Device opened successfully: \\\\.\\IntelAvbFilter\n\n");
     
+    /* Bind handle to adapter 0 (I226-LM — only adapter with TRGTTIML hardware).
+     * Without this, the auto-fallback may route to I210/I219 which lack TRGTTIML,
+     * causing SET_TARGET_TIME to return STATUS_NOT_SUPPORTED for all TC-TARGET tests. */
+    {
+        AVB_OPEN_REQUEST openReq;
+        DWORD openBytes = 0;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.index = 0;  /* adapter 0 (global index per ENUM_ADAPTERS order) */
+        if (DeviceIoControl(hDevice, IOCTL_AVB_OPEN_ADAPTER,
+                            &openReq, sizeof(openReq),
+                            &openReq, sizeof(openReq),
+                            &openBytes, NULL)) {
+            printf("[INFO] Adapter 0 opened (VID=0x%04X DID=0x%04X)\n",
+                   openReq.vendor_id, openReq.device_id);
+        } else {
+            printf("[WARN] OPEN_ADAPTER(index=0) failed (error %lu) - target time tests may fail\n",
+                   GetLastError());
+        }
+    }
+
     /* Prerequisite: Enable SYSTIM0 */
     if (!enable_systim0(hDevice)) {
         printf("WARN: SYSTIM0 not enabled - some tests may fail\n\n");

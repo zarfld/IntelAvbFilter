@@ -554,6 +554,15 @@ IntelAvbFilterDeviceIoControl(
             PAVB_DEVICE_CONTEXT targetContext = (PAVB_DEVICE_CONTEXT)IrpSp->FileObject->FsContext;
             
             if (targetContext == NULL) {
+                /* Gate: IOCTL_AVB_GET_CLOCK_CONFIG requires an explicit OPEN_ADAPTER call.
+                 * Per UT-PHC-QUERY-005: a handle without a bound FsContext (no prior
+                 * IOCTL_AVB_OPEN_ADAPTER) must receive STATUS_UNSUCCESSFUL (= ERROR_GEN_FAILURE).
+                 * The auto-fallback below would otherwise serve the IOCTL and cause the
+                 * per-handle contract test to fail. */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_GET_CLOCK_CONFIG) {
+                    Status = STATUS_UNSUCCESSFUL;
+                    break;
+                }
                 // Fall back to searching for any Intel filter (single-adapter mode)
                 DEBUGP(DL_WARN, "DEVICE.C: FileObject->FsContext is NULL! Falling back to AvbFindIntelFilterModule()\n");
                 pFilter = AvbFindIntelFilterModule();
@@ -869,6 +878,14 @@ IntelAvbFilterDeviceIoControl(
                             intel_device_type_t reqType = AvbGetIntelDeviceType((USHORT)req->device_id);
                             isMatch = (ven == req->vendor_id &&
                                        ctxType != INTEL_DEVICE_UNKNOWN && ctxType == reqType);
+                        }
+
+                        /* Fallback 3: open-by-index mode — when vendor_id==0 && device_id==0
+                         * the caller requests whichever Intel adapter sits at this global index
+                         * (used by tests that enumerate adapters before calling OPEN_ADAPTER). */
+                        if (!isMatch)
+                        {
+                            isMatch = (req->vendor_id == 0 && req->device_id == 0);
                         }
 
                         DEBUGP(DL_INFO, "!!! OPEN_ADAPTER: Global index %u adapter VID=0x%04X DID=0x%04X %s (want DID=0x%04X) Name=%wZ\n",

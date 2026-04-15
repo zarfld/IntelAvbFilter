@@ -755,6 +755,25 @@ int main(void)
 
     printf("[INFO] AVB device opened successfully\n");
 
+    /* Bind handle to adapter 0 (I226-LM — only adapter with INTEL_CAP_TSN_FP and PTM).
+     * Without this the auto-fallback may route to I210/I219 which lack FP/PTM support. */
+    {
+        AVB_OPEN_REQUEST openReq;
+        DWORD openBytes = 0;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.index = 0;
+        if (DeviceIoControl(g_hDevice, IOCTL_AVB_OPEN_ADAPTER,
+                            &openReq, sizeof(openReq),
+                            &openReq, sizeof(openReq),
+                            &openBytes, NULL)) {
+            printf("[INFO] Adapter 0 opened (VID=0x%04X DID=0x%04X)\n",
+                   openReq.vendor_id, openReq.device_id);
+        } else {
+            printf("[WARN] OPEN_ADAPTER(index=0) failed (error %lu) - FP/PTM tests may fail\n",
+                   GetLastError());
+        }
+    }
+
     /* Run Frame Preemption tests */
     printf("\n--- Frame Preemption (FP) Tests ---\n");
     test_fp_basic_enable();

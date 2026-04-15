@@ -683,7 +683,24 @@ int main(int argc, char* argv[]) {
     if (DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &bytesReturned, NULL)) {
         printf("? Device initialized successfully\n");
     }
-    
+
+    // Bind this handle to adapter 0 (required by per-handle IOCTL_AVB_GET_CLOCK_CONFIG gate)
+    {
+        AVB_OPEN_REQUEST openReq;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.index = 0;  /* adapter 0 */
+        bytesReturned = 0;
+        if (DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                            &openReq, sizeof(openReq),
+                            &openReq, sizeof(openReq),
+                            &bytesReturned, NULL)) {
+            printf("? Adapter 0 opened (VID=0x%04X DID=0x%04X)\n",
+                   openReq.vendor_id, openReq.device_id);
+        } else {
+            printf("[WARN] OPEN_ADAPTER failed (error %lu) - continuing\n", GetLastError());
+        }
+    }
+
     // Verify PTP clock is enabled via GET_CLOCK_CONFIG (no raw register access)
     AVB_CLOCK_CONFIG mainCfg;
     if (GetClockConfig(h, &mainCfg)) {
