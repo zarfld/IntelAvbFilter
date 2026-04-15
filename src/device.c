@@ -553,9 +553,7 @@ IntelAvbFilterDeviceIoControl(
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
             PAVB_DEVICE_CONTEXT targetContext = (PAVB_DEVICE_CONTEXT)IrpSp->FileObject->FsContext;
             
-            if (targetContext != NULL) {
-                pFilter = targetContext->filter_instance;
-            } else {
+            if (targetContext == NULL) {
                 // Fall back to searching for any Intel filter (single-adapter mode)
                 DEBUGP(DL_WARN, "DEVICE.C: FileObject->FsContext is NULL! Falling back to AvbFindIntelFilterModule()\n");
                 pFilter = AvbFindIntelFilterModule();
