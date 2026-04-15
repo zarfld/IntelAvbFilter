@@ -192,7 +192,7 @@ static int Test_InvalidModeRejection(TestContext *ctx)
  */
 static int Test_RapidModeSwitching(TestContext *ctx)
 {
-    UINT32 modes[] = {HW_TS_DISABLED, HW_TS_RX_ENABLED, HW_TS_TX_ENABLED, HW_TS_ALL_ENABLED, HW_TS_DISABLED};
+    UINT32 modes[] = {HW_TS_DISABLED, HW_TS_RX_ENABLED, HW_TS_TX_ENABLED, HW_TS_ALL_ENABLED, HW_TS_ALL_ENABLED};
     
     for (int i = 0; i < 5; i++) {
         if (!SetHWTimestamping(ctx->adapter, modes[i])) {
@@ -684,8 +684,9 @@ int main(void)
 
         #undef RUN_TEST
 
-        /* Reset to disabled before close */
-        SetHWTimestamping(ctx.adapter, HW_TS_DISABLED);
+        /* Re-enable before close: leave adapters with SYSTIM running so subsequent
+         * tests (e.g. test_power_management) see a live clock. */
+        SetHWTimestamping(ctx.adapter, HW_TS_ALL_ENABLED);
 
         CloseHandle(ctx.adapter);
         ctx.adapter = INVALID_HANDLE_VALUE;

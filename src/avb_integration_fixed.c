@@ -762,6 +762,23 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
     // Hardware reset / filter-detach lowers hw_state back below AVB_HW_PTP_READY,
     // so this guard does NOT prevent recovery after a genuine hardware reset.
     if (context->hw_state >= AVB_HW_PTP_READY) {
+        /* Exception for I210: if a prior SET_HW_TIMESTAMPING(DISABLED) call set
+         * TSAUXC bit 31, the SYSTIM counter is frozen.  Clear BIT31 here so
+         * GET_TIMESTAMP callers see a running clock.  The I219 shadow is always
+         * up-to-date via its own write_tsauxc; only I210 needs the HW check. */
+        if (context->intel_device.device_type == INTEL_DEVICE_I210) {
+            const intel_device_ops_t *local_i210_ops = intel_get_device_ops(INTEL_DEVICE_I210);
+            if (local_i210_ops && local_i210_ops->read_tsauxc && local_i210_ops->write_tsauxc) {
+                ULONG tsauxc_val = 0;
+                if (local_i210_ops->read_tsauxc(&context->intel_device, &tsauxc_val) == 0 &&
+                    (tsauxc_val & INTEL_TSAUXC_DISABLE_SYSTIM)) {
+                    DEBUGP(DL_INFO, "AvbEnsureDeviceReady: I210 SYSTIM frozen (TSAUXC=0x%08X), clearing BIT31\n",
+                           tsauxc_val);
+                    tsauxc_val &= ~INTEL_TSAUXC_DISABLE_SYSTIM;
+                    local_i210_ops->write_tsauxc(&context->intel_device, tsauxc_val);
+                }
+            }
+        }
         DEBUGP(DL_TRACE, "AvbEnsureDeviceReady: Already PTP-ready (state=%s), skipping re-init\n",
                AvbHwStateName(context->hw_state));
         return STATUS_SUCCESS;
@@ -3111,7 +3128,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             intel_device_type_t dev_type = activeContext->intel_device.device_type;
                             
                             if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 || 
-                                dev_type == INTEL_DEVICE_I226) {
+                                dev_type == INTEL_DEVICE_I226 || dev_type == INTEL_DEVICE_I219) {
                                 DEBUGP(DL_TRACE, "Attempting PTP initialization for device type %d\n", dev_type);
                                 NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
                                 UNREFERENCED_PARAMETER(init_result);  // Used only in DEBUGP

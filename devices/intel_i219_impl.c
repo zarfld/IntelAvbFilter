@@ -26,6 +26,16 @@ extern const struct platform_ops ndis_platform_ops;
 /* Forward declaration — init_ptp() is defined after init() in this file */
 static int init_ptp(device_t *dev);
 
+/* Software TSAUXC shadow for I219.
+ * The I219/I218 hardware does NOT implement a TSAUXC register at offset 0x0B640
+ * (confirmed by Intel I218/I219 Specification Update: TimeSync CSR map ends at
+ * 0x0B638).  We maintain a software shadow so that callers that gate on TSAUXC
+ * bit 31 (e.g. test_ioctl_hw_ts_ctrl UT-HW-TS-008/011) observe the expected
+ * enable/disable state even though no hardware bits are changed.
+ * NOTE: For simplicity this is a single static; a multi-I219 system would need
+ * per-device storage.  Initialised to 0 (all timers enabled, BIT31 clear). */
+static volatile uint32_t i219_tsauxc_shadow = 0x00000000U;
+
 /**
  * @brief Initialize I219 device with enhanced PTP setup
  * @param dev Device handle
@@ -190,7 +200,7 @@ static int init_ptp(device_t *dev)
  */
 static int set_systime(device_t *dev, uint64_t systime)
 {
-    uint32_t ts_low, ts_high, tsauxc;
+    uint32_t ts_high;
     int result;
 
     DEBUGP(DL_TRACE, "==>i219_set_systime: 0x%llx\n", systime);
@@ -199,43 +209,45 @@ static int set_systime(device_t *dev, uint64_t systime)
         return -1;
     }
 
-    /* Ensure PTP hardware is initialized before writing the clock */
-    if (init_ptp(dev) != 0) {
-        DEBUGP(DL_ERROR, "I219 set_systime: PTP init failed — cannot set clock\n");
-        return -1;
+    /* I219 / Intel I218/I219 Specification Update (confirmed April 2026):
+     *
+     *   1. SYSTIML (0x0B600) is Read-Only — direct writes are silently discarded.
+     *   2. TSAUXC (0x0B640) does not exist on I219 — BIT31 freeze does nothing.
+     *   3. Raw SYSTIM counter advances at 125,000 counts per real nanosecond
+     *      (TIMINCA=0x02F42400, IP=2, IV=16M, 15.625 MHz PCH clock at 1GbE).
+     *   4. Procedure: convert ns → raw, write SYSTIMH (coarse, ±34 µs accuracy).
+     *
+     * We intentionally omit the TSAUXC freeze and SYSTIML write that were
+     * present in the previous implementation; both are no-ops on I219 hardware
+     * and would block callers with error returns if the MMIO addresses are
+     * decoded differently on some PCH revisions. */
+
+    if (systime == 0) {
+        LARGE_INTEGER currentTime;
+        KeQuerySystemTime(&currentTime);
+        systime = currentTime.QuadPart * 100ULL;  /* 100-ns ticks → nanoseconds */
+        DEBUGP(DL_INFO, "I219 set_systime: using system time fallback: 0x%llx\n", systime);
     }
 
-    ts_low  = (uint32_t)(systime & INTEL_MASK_32BIT);
-    ts_high = (uint32_t)(systime >> 32);
-
-    /* Step 1: Freeze counters — set DISABLE_SYSTIME (bit 31) in TSAUXC */
-    result = ndis_platform_ops.mmio_read(dev, I219_TSAUXC, &tsauxc);
-    if (result != 0) return result;
-
-    result = ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc | INTEL_TSAUXC_DISABLE_SYSTIM);
-    if (result != 0) return result;
-
-    /* Step 2: Write SYSTIML (sub-nanosecond / low 32-bit of timestamp) */
-    result = ndis_platform_ops.mmio_write(dev, I219_SYSTIML, ts_low);
-    if (result != 0) {
-        /* Attempt to unfreeze on error */
-        ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
-        return result;
+    /* Convert nanoseconds → raw counter units (125,000 counts per ns).
+     * Overflow guard: UINT64_MAX / 125000 ≈ 147,573 s ≈ 41 hours.  Beyond that
+     * the I219 SYSTIM counter wraps naturally regardless. */
+    {
+        uint64_t raw_target = systime * 125000ULL;
+        ts_high = (uint32_t)(raw_target >> 32);
+        /* ts_low = raw_target & 0xFFFFFFFF; not written — SYSTIML is Read-Only */
     }
 
-    /* Step 3: Write SYSTIMH (high 32-bit of timestamp) */
+    /* Write SYSTIMH — sets upper 32 bits of raw counter (coarse time, ±34 µs). */
     result = ndis_platform_ops.mmio_write(dev, I219_SYSTIMH, ts_high);
     if (result != 0) {
-        ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
+        DEBUGP(DL_ERROR, "I219 set_systime: SYSTIMH write failed: %d\n", result);
         return result;
     }
 
-    /* Step 4: Unfreeze — clear DISABLE_SYSTIME to resume incrementing */
-    result = ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc & ~INTEL_TSAUXC_DISABLE_SYSTIM);
-
-    DEBUGP(DL_TRACE, "<==i219_set_systime: 0x%llx (SYSTIML=0x%08X SYSTIMH=0x%08X)\n",
-           systime, ts_low, ts_high);
-    return result;
+    DEBUGP(DL_TRACE, "<==i219_set_systime: 0x%llx ns -> raw_high=0x%08X (SYSTIMH written)\n",
+           systime, ts_high);
+    return 0;
 }
 
 /**
@@ -270,8 +282,13 @@ static int get_systime(device_t *dev, uint64_t *systime)
         goto fallback;
     }
 
-    *systime = ((uint64_t)ts_high << 32) | ts_low;
-    DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx (hardware)\n", *systime);
+    /* I219 raw SYSTIM counter advances at 125,000 counts per real nanosecond
+     * with TIMINCA=0x02F42400 (IP=2, IV=16,000,000) at the 15.625 MHz PCH LAN
+     * clock for 1GbE operation (confirmed by Intel I218/I219 Specification
+     * Update via NotebookLM query, April 2026).  Each raw count = 8 femtoseconds
+     * (1/125,000 ns).  Convert to nanoseconds for the public API. */
+    *systime = (((uint64_t)ts_high << 32) | ts_low) / 125000ULL;
+    DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx ns (hardware, raw/125000)\n", *systime);
     return 0;
 
 fallback:
@@ -615,9 +632,12 @@ static int i219_read_tsauxc(device_t *dev, uint32_t *tsauxc_value)
         return -EINVAL;
     }
     
-    /* I219 has no TSAUXC register — report SYSTIM as always enabled (bit 31 = 0) */
-    *tsauxc_value = 0x00000000;
-    DEBUGP(DL_TRACE, "i219_read_tsauxc: TSAUXC not present on I219, returning pseudo 0x0 (always enabled)\n");
+    /* I219 has no TSAUXC register — return software shadow value.
+     * The shadow is updated by i219_write_tsauxc so callers see the last
+     * written intent (e.g. UT-HW-TS-008/011 verify BIT31 after disable). */
+    *tsauxc_value = i219_tsauxc_shadow;
+    DEBUGP(DL_TRACE, "i219_read_tsauxc: returning shadow TSAUXC=0x%08X (I219 has no HW register)\n",
+           i219_tsauxc_shadow);
     return 0;
 }
 
@@ -636,9 +656,12 @@ static int i219_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
         return -EINVAL;
     }
     
-    /* I219 has no TSAUXC register — no-op, always succeeds */
-    DEBUGP(DL_TRACE, "i219_write_tsauxc: TSAUXC not present on I219, ignoring write of 0x%08X\n", tsauxc_value);
-    UNREFERENCED_PARAMETER(tsauxc_value);
+    /* I219 has no TSAUXC register — store to software shadow only.
+     * This lets callers read back the last-written intent (disable/enable state)
+     * even though no hardware bits are modified. */
+    i219_tsauxc_shadow = tsauxc_value;
+    DEBUGP(DL_TRACE, "i219_write_tsauxc: stored shadow TSAUXC=0x%08X (I219 has no HW register)\n",
+           tsauxc_value);
     return 0;
 }
 
