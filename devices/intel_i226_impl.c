@@ -336,14 +336,6 @@ static int set_systime(device_t *dev, uint64_t systime)
         return -1;
     }
     
-    // Use current system time if zero
-    if (systime == 0) {
-        LARGE_INTEGER currentTime;
-        KeQuerySystemTime(&currentTime);
-        systime = currentTime.QuadPart * 100; // Convert 100ns units to nanoseconds
-        DEBUGP(DL_TRACE, "I226 using system time: 0x%llx\n", systime);
-    }
-    
     // I226/I225: split format -- SYSTIMH=seconds, SYSTIML=nanoseconds (0-999,999,999)
     // Do NOT use (systime >> 32) / (systime & 0xFFFFFFFF) -- that is the I210 flat format
     sec  = (uint32_t)(systime / 1000000000ULL);

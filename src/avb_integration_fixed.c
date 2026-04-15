@@ -755,7 +755,18 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
                context ? AvbHwStateName(context->hw_state) : "NULL");
         return STATUS_DEVICE_NOT_READY;
     }
-    
+
+    // Idempotency guard: skip re-initialization if already PTP-ready.
+    // Each device's init_ptp resets SYSTIM to epoch (sec=0, ns=1), so repeating
+    // it on every OPEN_ADAPTER call would destroy an already-running PTP clock.
+    // Hardware reset / filter-detach lowers hw_state back below AVB_HW_PTP_READY,
+    // so this guard does NOT prevent recovery after a genuine hardware reset.
+    if (context->hw_state >= AVB_HW_PTP_READY) {
+        DEBUGP(DL_TRACE, "AvbEnsureDeviceReady: Already PTP-ready (state=%s), skipping re-init\n",
+               AvbHwStateName(context->hw_state));
+        return STATUS_SUCCESS;
+    }
+
     DEBUGP(DL_TRACE, "? AvbEnsureDeviceReady: Starting device initialization\n");
     DEBUGP(DL_TRACE, "   - Context: VID=0x%04X DID=0x%04X (type=%d)\n", 
            context->intel_device.pci_vendor_id, context->intel_device.pci_device_id,
@@ -2259,9 +2270,14 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (inLen < sizeof(AVB_HW_TIMESTAMPING_REQUEST) || outLen < sizeof(AVB_HW_TIMESTAMPING_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = currentContext;
                 const intel_device_ops_t *ops = NULL;  // Declare at beginning of block
-                
+
+                if (activeContext == NULL) {
+                    DEBUGP(DL_ERROR, "HW timestamping control: no adapter selected (call OPEN_ADAPTER first)\n");
+                    status = STATUS_INVALID_DEVICE_REQUEST;
+                    break;
+                }
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "HW timestamping control failed: Hardware not ready (state=%s)\n", 
                            AvbHwStateName(activeContext->hw_state));
