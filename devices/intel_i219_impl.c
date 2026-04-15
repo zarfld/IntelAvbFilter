@@ -36,6 +36,15 @@ static int init_ptp(device_t *dev);
  * per-device storage.  Initialised to 0 (all timers enabled, BIT31 clear). */
 static volatile uint32_t i219_tsauxc_shadow = 0x00000000U;
 
+/* Software absolute-time offset for I219 SYSTIM.
+ * I219 SYSTIM is a free-running relative counter (200,000 raw counts per
+ * real nanosecond, wraps ~25.6 hours).  Absolute epoch time cannot be stored
+ * in hardware.  This offset is added in get_systime() so callers receive
+ * Unix-epoch-anchored nanoseconds.  Updated by set_systime() without any
+ * hardware register writes.
+ * NOTE: single static; a multi-I219 system would need per-device storage. */
+static volatile uint64_t i219_systim_offset = 0;
+
 /**
  * @brief Initialize I219 device with enhanced PTP setup
  * @param dev Device handle
@@ -188,6 +197,33 @@ static int init_ptp(device_t *dev)
     }
     DEBUGP(DL_INFO, "I219 init_ptp: ETQS0=0x%08X (queue 0 routing)\n", etqs0);
 
+    /* Step 5: Seed software time offset from current system clock so that
+     * get_systime() returns Unix-epoch-anchored nanoseconds immediately.
+     * KeQuerySystemTime returns Windows FILETIME (100-ns ticks from 1601-01-01).
+     * Subtract FILETIME epoch offset (116444736000000000) to get Unix epoch
+     * 100-ns ticks, then multiply by 100 to get nanoseconds. */
+    {
+        LARGE_INTEGER initTime;
+        uint32_t ts_hi = 0, ts_lo = 0;
+        const uint64_t FILETIME_TO_UNIX_EPOCH_100NS = 116444736000000000ULL;
+        uint64_t win_ticks;
+        uint64_t now_unix_ns;
+        uint64_t raw;
+
+        KeQuerySystemTime(&initTime);
+        win_ticks = (uint64_t)initTime.QuadPart;
+        now_unix_ns = (win_ticks >= FILETIME_TO_UNIX_EPOCH_100NS)
+            ? (win_ticks - FILETIME_TO_UNIX_EPOCH_100NS) * 100ULL
+            : 0ULL;
+
+        ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
+        ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
+        raw = ((uint64_t)ts_hi << 32) | ts_lo;
+        i219_systim_offset = now_unix_ns - raw / 200000ULL;
+        DEBUGP(DL_INFO, "I219 init_ptp: offset=0x%llx (epoch=0x%llx, raw_ns=0x%llx)\n",
+               i219_systim_offset, now_unix_ns, raw / 200000ULL);
+    }
+
     DEBUGP(DL_TRACE, "<==i219_init_ptp: Success\n");
     return 0;
 }
@@ -200,8 +236,8 @@ static int init_ptp(device_t *dev)
  */
 static int set_systime(device_t *dev, uint64_t systime)
 {
-    uint32_t ts_high;
-    int result;
+    uint32_t ts_hi = 0, ts_lo = 0;
+    uint64_t raw;
 
     DEBUGP(DL_TRACE, "==>i219_set_systime: 0x%llx\n", systime);
 
@@ -209,44 +245,40 @@ static int set_systime(device_t *dev, uint64_t systime)
         return -1;
     }
 
-    /* I219 / Intel I218/I219 Specification Update (confirmed April 2026):
+    /* I219 SYSTIM architecture (confirmed via Intel I219 spec, NotebookLM April 2026):
+     *   - TIMINCA=0x02F42400: IP=2, IV=16,000,000 — counter increments every 80 ns
+     *     by 16,000,000 raw counts → 200,000 raw counts per real nanosecond.
+     *   - SYSTIML (0x0B600): Read-Only.  Cannot set time by writing hardware.
+     *   - Max representable time: (2^64-1)/200000 ≈ 25.6 hours — cannot hold Unix epoch.
      *
-     *   1. SYSTIML (0x0B600) is Read-Only — direct writes are silently discarded.
-     *   2. TSAUXC (0x0B640) does not exist on I219 — BIT31 freeze does nothing.
-     *   3. Raw SYSTIM counter advances at 125,000 counts per real nanosecond
-     *      (TIMINCA=0x02F42400, IP=2, IV=16M, 15.625 MHz PCH clock at 1GbE).
-     *   4. Procedure: convert ns → raw, write SYSTIMH (coarse, ±34 µs accuracy).
-     *
-     * We intentionally omit the TSAUXC freeze and SYSTIML write that were
-     * present in the previous implementation; both are no-ops on I219 hardware
-     * and would block callers with error returns if the MMIO addresses are
-     * decoded differently on some PCH revisions. */
+     * We use a pure software-offset approach:
+     *   get_systime() = hardware_raw / 200000 + i219_systim_offset
+     *   set_systime(t) sets i219_systim_offset = t - hardware_raw / 200000
+     * No hardware register writes are required. */
 
     if (systime == 0) {
+        /* Caller passed 0 — seed from current system clock (Unix epoch ns). */
         LARGE_INTEGER currentTime;
+        const uint64_t FILETIME_TO_UNIX_EPOCH_100NS = 116444736000000000ULL;
+        uint64_t win_ticks;
         KeQuerySystemTime(&currentTime);
-        systime = currentTime.QuadPart * 100ULL;  /* 100-ns ticks → nanoseconds */
-        DEBUGP(DL_INFO, "I219 set_systime: using system time fallback: 0x%llx\n", systime);
+        win_ticks = (uint64_t)currentTime.QuadPart;
+        systime = (win_ticks >= FILETIME_TO_UNIX_EPOCH_100NS)
+            ? (win_ticks - FILETIME_TO_UNIX_EPOCH_100NS) * 100ULL
+            : 0ULL;
+        DEBUGP(DL_INFO, "I219 set_systime: using system time: 0x%llx\n", systime);
     }
 
-    /* Convert nanoseconds → raw counter units (125,000 counts per ns).
-     * Overflow guard: UINT64_MAX / 125000 ≈ 147,573 s ≈ 41 hours.  Beyond that
-     * the I219 SYSTIM counter wraps naturally regardless. */
-    {
-        uint64_t raw_target = systime * 125000ULL;
-        ts_high = (uint32_t)(raw_target >> 32);
-        /* ts_low = raw_target & 0xFFFFFFFF; not written — SYSTIML is Read-Only */
-    }
+    /* Read current raw counter (SYSTIMH read latches SYSTIML on I219). */
+    ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
+    ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
+    raw = ((uint64_t)ts_hi << 32) | ts_lo;
 
-    /* Write SYSTIMH — sets upper 32 bits of raw counter (coarse time, ±34 µs). */
-    result = ndis_platform_ops.mmio_write(dev, I219_SYSTIMH, ts_high);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 set_systime: SYSTIMH write failed: %d\n", result);
-        return result;
-    }
+    /* Update software offset — no hardware register writes needed. */
+    i219_systim_offset = systime - raw / 200000ULL;
 
-    DEBUGP(DL_TRACE, "<==i219_set_systime: 0x%llx ns -> raw_high=0x%08X (SYSTIMH written)\n",
-           systime, ts_high);
+    DEBUGP(DL_TRACE, "<==i219_set_systime: target=0x%llx -> offset=0x%llx (raw=0x%llx)\n",
+           systime, i219_systim_offset, raw);
     return 0;
 }
 
@@ -282,13 +314,14 @@ static int get_systime(device_t *dev, uint64_t *systime)
         goto fallback;
     }
 
-    /* I219 raw SYSTIM counter advances at 125,000 counts per real nanosecond
-     * with TIMINCA=0x02F42400 (IP=2, IV=16,000,000) at the 15.625 MHz PCH LAN
-     * clock for 1GbE operation (confirmed by Intel I218/I219 Specification
-     * Update via NotebookLM query, April 2026).  Each raw count = 8 femtoseconds
-     * (1/125,000 ns).  Convert to nanoseconds for the public API. */
-    *systime = (((uint64_t)ts_high << 32) | ts_low) / 125000ULL;
-    DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx ns (hardware, raw/125000)\n", *systime);
+    /* I219 raw SYSTIM counter advances at 200,000 counts per real nanosecond
+     * with TIMINCA=0x02F42400 (IP=2, IV=16,000,000) at the 25 MHz PCH clock
+     * (80 ns period × 16,000,000 counts/cycle = 200,000 counts/ns).
+     * Each raw count = 5 femtoseconds.  Add the software offset to return
+     * Unix-epoch-anchored nanoseconds (see i219_systim_offset). */
+    *systime = i219_systim_offset + (((uint64_t)ts_high << 32) | ts_low) / 200000ULL;
+    DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx ns (raw/200000 + offset=0x%llx)\n",
+           *systime, i219_systim_offset);
     return 0;
 
 fallback:

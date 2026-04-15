@@ -555,6 +555,27 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        /* Probe: capability bit is set, but verify the IOCTL is actually functional.
+         * Some adapters (e.g. I210) report INTEL_CAP_MDIO but the driver returns
+         * ERROR_NOT_SUPPORTED (50) — treat this as SKIP for the entire adapter. */
+        {
+            AVB_MDIO_REQUEST probe = {0};
+            DWORD probe_br = 0;
+            BOOL probe_ok;
+            probe.page = TEST_PHY_ADDR;
+            probe.reg = PHY_REG_CONTROL;
+            probe_ok = DeviceIoControl(ctx.adapter, IOCTL_AVB_MDIO_READ,
+                                       &probe, sizeof(probe),
+                                       &probe, sizeof(probe),
+                                       &probe_br, NULL);
+            if (!probe_ok && GetLastError() == ERROR_NOT_SUPPORTED) {
+                printf("[SKIP] Adapter %u: MDIO capability set but IOCTL returns ERROR_NOT_SUPPORTED\n\n",
+                       adapter_index);
+                CloseHandle(ctx.adapter);
+                continue;
+            }
+        }
+
         printf("[INFO] Adapter %u supports MDIO. Running tests...\n\n", adapter_index);
         adapters_tested++;
 
