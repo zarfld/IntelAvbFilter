@@ -2067,12 +2067,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                  * Both are independent of hardware initialization state so that test
                  * environments without real I226 hardware still produce the expected events.
                  *
-                 * Range validation rationale (increment_ns maps from ppb via ConvertPpbToIncrement):
-                 *   increment_ns == 0  → ppb < −875,000,000 (clock frozen, below minimum)
-                 *   increment_ns >= 16 → ppb ≥ +1,000,000,000 (positive overflow)
-                 *   Valid range: increment_ns ∈ [1, 15]
+                 * Range validation rationale:
+                 *   TIMINCA increment field is 8-bit → valid values 1..255.
+                 *   increment_ns == 0   → clock frozen (below minimum)
+                 *   increment_ns > 255  → exceeds 8-bit INCPERIOD field capacity
+                 *   increment_ns == 24  → I226 default (41.67 MHz); must be accepted
+                 *   increment_ns == 8   → I210 default (125 MHz); must be accepted
+                 *   Old bound >= 16 was wrong: rejected valid I226 24 ns increment.
                  * Fixes UT-PTP-FREQ-006/007; implements #65 (REQ-F-EVENT-LOG-001) TC-3/TC-4 */
-                if (freq_req->increment_ns == 0 || freq_req->increment_ns >= 16) {
+                if (freq_req->increment_ns == 0 || freq_req->increment_ns > 255) {
                     DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of valid range [1,15]\n",
                            freq_req->increment_ns);
                     EventWriteEVT_HARDWARE_FAULT(NULL);  /* ETW ID 300: extreme freq deviation */

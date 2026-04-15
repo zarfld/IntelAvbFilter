@@ -131,18 +131,21 @@ static int set_systime(device_t *dev, uint64_t systime)
         DEBUGP(DL_INFO, "I210 using system time: 0x%llx\n", systime);
     }
     
-    // Split timestamp
-    ts_low = (uint32_t)(systime & INTEL_MASK_32BIT);
-    ts_high = (uint32_t)((systime >> 32) & INTEL_MASK_32BIT);
-    
+    /* I210 (IGB family) SYSTIM format: SYSTIMH = seconds, SYSTIML = nanoseconds (0..999999999).
+     * This matches get_systime() which reconstructs via: ts_high * 1e9 + ts_low.
+     * Writing raw 32-bit splits of the 64-bit ns value would produce a massive
+     * readback mismatch (−1.3×10¹⁸ ns) because the register fields have different units. */
+    ts_high = (uint32_t)(systime / 1000000000ULL);  /* seconds */
+    ts_low  = (uint32_t)(systime % 1000000000ULL);  /* nanoseconds (0..999,999,999) */
+
     // I210-specific SYSTIM register access
-    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIML, ts_low);   // SYSTIML
+    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIML, ts_low);   // SYSTIML = ns
     if (result != 0) return result;
-    
-    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIMH, ts_high);  // SYSTIMH
+
+    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_SYSTIMH, ts_high);  // SYSTIMH = sec
     if (result != 0) return result;
-    
-    DEBUGP(DL_TRACE, "<==i210_set_systime: Success\n");
+
+    DEBUGP(DL_TRACE, "<==i210_set_systime: sec=%u ns=%u\n", ts_high, ts_low);
     return 0;
 }
 

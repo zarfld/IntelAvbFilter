@@ -23,6 +23,9 @@ Abstract:
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
 
+/* Forward declaration — init_ptp() is defined after init() in this file */
+static int init_ptp(device_t *dev);
+
 /**
  * @brief Initialize I219 device with enhanced PTP setup
  * @param dev Device handle
@@ -44,8 +47,19 @@ static int init(device_t *dev)
             return -1;
         }
     }
-    
-    DEBUGP(DL_INFO, "? I219 initialized successfully\n");
+
+    // Initialize PTP clock: enables SYSTIM counter by clearing TSAUXC bit 31 (DISABLE_SYSTIM).
+    // Without this call the I219 free-running counter never starts, so every get_systime()
+    // returns the same frozen value (delta==0 in test_hw_ts_ctrl / test_ioctl_phc_epoch).
+    {
+        int ptp_result = init_ptp(dev);
+        if (ptp_result != 0) {
+            DEBUGP(DL_WARN, "I219 init: PTP clock init returned %d — SYSTIM may be frozen\n", ptp_result);
+            /* Non-fatal: basic NDIS filtering still works; log and continue */
+        }
+    }
+
+    DEBUGP(DL_INFO, "I219 initialized successfully\n");
     DEBUGP(DL_TRACE, "<==i219_init: Success\n");
     return 0;
 }
