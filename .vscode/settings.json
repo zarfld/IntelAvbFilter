@@ -34,6 +34,7 @@
         ".\\tools\\build\\Build-Tests.ps1": true,
         ".\\tools\\build\\Build-Driver.ps1": true,
         "Group-Object": true,
-        "ForEach-Object": true
+        "ForEach-Object": true,
+        "Test-Path": true
     }
 }
