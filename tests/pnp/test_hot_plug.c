@@ -83,8 +83,16 @@ static void RecordResult(Results *r, int result, const char *name)
 /* ────────────────────────── helpers ─────────────────────────────────────── */
 static HANDLE OpenDevice(void)
 {
-    return CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
-                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                           0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return h;
+    /* Select adapter 0 — required before GET_CLOCK_CONFIG */
+    AVB_OPEN_REQUEST req = {0};
+    req.index = 0;
+    DWORD ret = 0;
+    DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER, &req, sizeof(req),
+                    &req, sizeof(req), &ret, NULL);
+    return h;
 }
 
 static BOOL DeviceAlive(HANDLE h)

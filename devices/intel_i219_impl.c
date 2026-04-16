@@ -150,22 +150,12 @@ static int init_ptp(device_t *dev)
         return -1;
     }
 
-    /* Step 1: Enable system time counting — clear DISABLE_SYSTIME (bit 31) in TSAUXC */
-    result = ndis_platform_ops.mmio_read(dev, I219_TSAUXC, &tsauxc);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to read TSAUXC: %d\n", result);
-        return result;
-    }
-    tsauxc &= ~INTEL_TSAUXC_DISABLE_SYSTIM;  /* bit 31 = 0 → counters run */
-    result = ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write TSAUXC: %d\n", result);
-        return result;
-    }
-    DEBUGP(DL_INFO, "I219 init_ptp: TSAUXC=0x%08X (systime enabled)\n", tsauxc);
-
-    /* Step 2: Set clock increment for 1GbE — IP=2, IV=16,000,000 (0xF42400)
+    /* Step 1: Set clock increment for 1GbE — IP=2, IV=16,000,000 (0xF42400)
      * TIMINCA = 0x02F42400: increment period 2 cycles, value 0xF42400 sub-ns steps.
+     * MUST be written first and unconditionally — this is what starts the clock.
+     * Previously this was gated behind a TSAUXC read, but I219 does not implement
+     * TSAUXC at 0x0B640; if the read failed the function returned early before
+     * TIMINCA was ever written, leaving the increment at 0 (frozen PHC bug).
      * Source: Intel I219 datasheet, TIMINCA register, 1GbE configuration. */
     result = ndis_platform_ops.mmio_write(dev, I219_TIMINCA, INTEL_TIMINCA_I219_INIT);
     if (result != 0) {
@@ -173,6 +163,16 @@ static int init_ptp(device_t *dev)
         return result;
     }
     DEBUGP(DL_INFO, "I219 init_ptp: TIMINCA=0x%08X (1GbE clock rate)\n", INTEL_TIMINCA_I219_INIT);
+
+    /* Step 2: Attempt to clear DISABLE_SYSTIME (bit 31) in TSAUXC — best-effort only.
+     * I219 may not implement this register at 0x0B640; do NOT return early on failure. */
+    if (ndis_platform_ops.mmio_read(dev, I219_TSAUXC, &tsauxc) == 0) {
+        tsauxc &= ~INTEL_TSAUXC_DISABLE_SYSTIM;  /* bit 31 = 0 → counters run */
+        ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
+        DEBUGP(DL_INFO, "I219 init_ptp: TSAUXC=0x%08X (systime enabled)\n", tsauxc);
+    } else {
+        DEBUGP(DL_WARN, "I219 init_ptp: TSAUXC read skipped (may not be implemented on this device)\n");
+    }
 
     /* Step 3: Configure ETQF0 to identify IEEE 1588 PTP packets (EtherType 0x88F7).
      * Bits: QUEUE_EN(31)=1, TS_1588(30)=1, FILTER_EN(26)=1, ETYPE(15:0)=0x88F7 */
