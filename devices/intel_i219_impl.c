@@ -363,8 +363,10 @@ fallback:
     }
 }
 
-/* I219 has exactly one internal PHY, hardwired at address 1. */
-#define I219_INTERNAL_PHY_ADDR  1
+/* I219 HV-PHY uses address 2 for standard Clause 22 registers (page 0, regs 0-31).
+ * Address 1 is used only for pages >= HV_INTC_FC_PAGE_START (768) — management registers.
+ * Reference: e1000e ich8lan.c e1000_get_phy_addr_for_hv_page(); intel_i219.c phy_addr=2 */
+#define I219_INTERNAL_PHY_ADDR  2
 
 /**
  * @brief Acquire EXTCNF_CTRL.SWFLAG — PHY/MDIO software ownership flag (PCH family)
