@@ -32,6 +32,8 @@
         },
         ".\\run.bat": true,
         ".\\tools\\build\\Build-Tests.ps1": true,
-        ".\\tools\\build\\Build-Driver.ps1": true
+        ".\\tools\\build\\Build-Driver.ps1": true,
+        "Group-Object": true,
+        "ForEach-Object": true
     }
 }
