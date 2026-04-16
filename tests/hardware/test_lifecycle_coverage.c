@@ -611,12 +611,49 @@ static void RunTC_LCY_006(HANDLE hDev, const char *adapterTag, UINT16 device_id)
     /* Allow NDIS FilterAttach + FilterRestart to complete (~4 seconds) */
     Sleep(4000);
 
+    /* The FsContext on hDev may be stale after FilterDetach destroyed the
+     * adapter context and FilterAttach created a new one.  Open a fresh
+     * handle and re-bind it to the same adapter (matched by device_id) so
+     * the after-snapshot IOCTL reaches the newly-attached adapter context. */
     AVB_DRIVER_STATISTICS after;
-    if (!ReadStats(hDev, &after)) {
-        RecordResult(name, TEST_FAIL,
-                     "IOCTL_AVB_GET_STATISTICS (after snapshot) failed",
-                     GetTimestampUs() - t0);
-        return;
+    {
+        BOOL gotAfter = FALSE;
+        HANDLE hFresh = CreateFileA("\\\\.\\IntelAvbFilter",
+                                    GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFresh != INVALID_HANDLE_VALUE) {
+            /* Find adapter with matching device_id and bind the fresh handle */
+            for (int ri = 0; ri < 8; ri++) {
+                AVB_ENUM_REQUEST ereq;
+                memset(&ereq, 0, sizeof(ereq));
+                ereq.index = (UINT32)ri;
+                DWORD br = 0;
+                if (!DeviceIoControl(hFresh, IOCTL_AVB_ENUM_ADAPTERS,
+                                     &ereq, sizeof(ereq), &ereq, sizeof(ereq), &br, NULL))
+                    break;
+                if (device_id != 0 && ereq.device_id != device_id)
+                    continue;
+                AVB_OPEN_REQUEST oreq;
+                memset(&oreq, 0, sizeof(oreq));
+                oreq.vendor_id = ereq.vendor_id;
+                oreq.device_id = ereq.device_id;
+                oreq.index     = ereq.index;
+                br = 0;
+                DeviceIoControl(hFresh, IOCTL_AVB_OPEN_ADAPTER,
+                                &oreq, sizeof(oreq), &oreq, sizeof(oreq), &br, NULL);
+                break;
+            }
+            gotAfter = ReadStats(hFresh, &after);
+            CloseHandle(hFresh);
+        }
+        if (!gotAfter) {
+            RecordResult(name, TEST_FAIL,
+                         "IOCTL_AVB_GET_STATISTICS (after snapshot) failed — "
+                         "adapter may not have re-attached within 4 s",
+                         GetTimestampUs() - t0);
+            return;
+        }
     }
 
     /* Compute deltas (unsigned subtraction is well-defined for wrap) */

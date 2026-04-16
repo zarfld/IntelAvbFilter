@@ -97,8 +97,32 @@ static int64_t g_min_ns  = INT64_MAX;
 /* ────────────────────────── helpers ─────────────────────────────────────── */
 static HANDLE OpenDevice(void)
 {
-    return CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
-                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                           0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return h;
+
+    /* Bind handle to the first available adapter so IOCTL_AVB_GET_CLOCK_CONFIG
+     * is routed through a valid FsContext.  The driver explicitly rejects
+     * GET_CLOCK_CONFIG when FileObject->FsContext is NULL (device.c gate).
+     * IOCTL_AVB_ENUM_ADAPTERS with index=0 fetches the first adapter's
+     * VID/DID; IOCTL_AVB_OPEN_ADAPTER then binds FsContext to that adapter. */
+    AVB_ENUM_REQUEST ereq;
+    DWORD br = 0;
+    memset(&ereq, 0, sizeof(ereq));
+    if (DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
+                        &ereq, sizeof(ereq), &ereq, sizeof(ereq), &br, NULL)
+            && ereq.vendor_id != 0) {
+        AVB_OPEN_REQUEST oreq;
+        memset(&oreq, 0, sizeof(oreq));
+        oreq.vendor_id = ereq.vendor_id;
+        oreq.device_id = ereq.device_id;
+        oreq.index     = 0;
+        br = 0;
+        DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                        &oreq, sizeof(oreq), &oreq, sizeof(oreq), &br, NULL);
+    }
+    return h;
 }
 
 /* Convert QPC ticks to nanoseconds */

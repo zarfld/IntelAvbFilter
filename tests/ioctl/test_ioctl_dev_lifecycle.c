@@ -407,16 +407,45 @@ void Test_MultipleAdapterEnumeration(TestContext *ctx) {
         return;
     }
 
-    /* Verify adapters 0 and 1 can each be individually opened */
+    /* Verify adapters 0 and 1 can each be individually opened.
+     * Use a fresh CreateFile handle per adapter: the driver rejects
+     * IOCTL_AVB_OPEN_ADAPTER when FileObject->FsContext is already bound
+     * (i.e. a previous OPEN_ADAPTER on the same handle must not pollute
+     * a subsequent attempt for a different adapter index). */
     {
-        HANDLE a0 = OpenAdapterByIndex(device, 0);
-        HANDLE a1 = OpenAdapterByIndex(device, 1);
+        BOOL ok0 = FALSE, ok1 = FALSE;
+        UINT32 i;
 
-        if (a0 != INVALID_HANDLE_VALUE) CloseHandle(a0);
-        if (a1 != INVALID_HANDLE_VALUE) CloseHandle(a1);
+        for (i = 0; i < 2; i++) {
+            HANDLE hFresh = OpenDevice(DEVICE_PATH_PRIMARY);
+            if (hFresh == INVALID_HANDLE_VALUE) break;
+
+            AVB_ENUM_REQUEST ereq;
+            memset(&ereq, 0, sizeof(ereq));
+            ereq.index = i;
+            DWORD br = 0;
+            if (!DeviceIoControl(hFresh, IOCTL_AVB_ENUM_ADAPTERS,
+                                 &ereq, sizeof(ereq), &ereq, sizeof(ereq), &br, NULL)) {
+                CloseHandle(hFresh);
+                break;
+            }
+
+            AVB_OPEN_REQUEST oreq;
+            memset(&oreq, 0, sizeof(oreq));
+            oreq.vendor_id = ereq.vendor_id;
+            oreq.device_id = ereq.device_id;
+            oreq.index     = i;
+            br = 0;
+            BOOL opened = DeviceIoControl(hFresh, IOCTL_AVB_OPEN_ADAPTER,
+                                          &oreq, sizeof(oreq), &oreq, sizeof(oreq), &br, NULL);
+            CloseHandle(hFresh);
+            if (i == 0) ok0 = opened;
+            else        ok1 = opened;
+        }
+
         CloseHandle(device);
 
-        if (a0 == INVALID_HANDLE_VALUE || a1 == INVALID_HANDLE_VALUE) {
+        if (!ok0 || !ok1) {
             PrintTestResult(ctx, "UT-DEV-ENUM-002: Multiple Adapter Enumeration",
                             TEST_FAIL, "Could not open both adapters 0 and 1 individually");
             return;
