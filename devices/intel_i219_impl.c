@@ -219,7 +219,8 @@ static int init_ptp(device_t *dev)
         ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
         ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
         raw = ((uint64_t)ts_hi << 32) | ts_lo;
-        i219_systim_offset = now_unix_ns - raw / 200000ULL;
+        InterlockedExchange64((volatile LONG64 *)&i219_systim_offset,
+                              (LONG64)(now_unix_ns - raw / 200000ULL));
         DEBUGP(DL_INFO, "I219 init_ptp: offset=0x%llx (epoch=0x%llx, raw_ns=0x%llx)\n",
                i219_systim_offset, now_unix_ns, raw / 200000ULL);
     }
@@ -274,11 +275,14 @@ static int set_systime(device_t *dev, uint64_t systime)
     ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
     raw = ((uint64_t)ts_hi << 32) | ts_lo;
 
-    /* Update software offset — no hardware register writes needed. */
-    i219_systim_offset = systime - raw / 200000ULL;
+    /* Update software offset — no hardware register writes needed.
+     * InterlockedExchange64 provides an explicit memory barrier so the write is
+     * visible on all cores before the function returns. */
+    InterlockedExchange64((volatile LONG64 *)&i219_systim_offset,
+                          (LONG64)(systime - raw / 200000ULL));
 
-    DEBUGP(DL_TRACE, "<==i219_set_systime: target=0x%llx -> offset=0x%llx (raw=0x%llx)\n",
-           systime, i219_systim_offset, raw);
+    DEBUGP(DL_WARN, "[I219-DIAG] SET: target=0x%llx offset=0x%llx raw=0x%llx raw/200k=%llu\n",
+           systime, i219_systim_offset, raw, raw / 200000ULL);
     return 0;
 }
 
@@ -301,17 +305,37 @@ static int get_systime(device_t *dev, uint64_t *systime)
 
     /* I219 (e1000e family): reading SYSTIMH first latches SYSTIML to prevent
      * a rollover mid-read.  SYSTIML must be read immediately after.
-     * (Opposite of IGB/I210 where SYSTIML read latches SYSTIMH.) */
-    result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
-        goto fallback;
-    }
-
-    result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
-        goto fallback;
+     * (Opposite of IGB/I210 where SYSTIML read latches SYSTIMH.)
+     *
+     * Double-read defensive check: if SYSTIMH changes between the two H reads,
+     * the counter wrapped between latching L and our second H read — retry.
+     * On I219 SYSTIM wraps every ~25.6 hours so retries are extremely rare in
+     * practice; this loop protects against the pathological case. */
+    {
+        uint32_t h1, h2;
+        int retry = 0;
+        do {
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &h1);
+            if (result != 0) {
+                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH(1) read failed (%d) — KE fallback\n", result);
+                goto fallback;
+            }
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
+            if (result != 0) {
+                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
+                goto fallback;
+            }
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &h2);
+            if (result != 0) {
+                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH(2) read failed (%d) — KE fallback\n", result);
+                goto fallback;
+            }
+            if (h1 != h2) {
+                DEBUGP(DL_WARN, "[I219-DIAG] GET: H changed during read (h1=0x%x h2=0x%x) — retry %d\n",
+                       h1, h2, ++retry);
+            }
+        } while (h1 != h2);
+        ts_high = h1;
     }
 
     /* I219 raw SYSTIM counter advances at 200,000 counts per real nanosecond
@@ -319,9 +343,13 @@ static int get_systime(device_t *dev, uint64_t *systime)
      * (80 ns period × 16,000,000 counts/cycle = 200,000 counts/ns).
      * Each raw count = 5 femtoseconds.  Add the software offset to return
      * Unix-epoch-anchored nanoseconds (see i219_systim_offset). */
-    *systime = i219_systim_offset + (((uint64_t)ts_high << 32) | ts_low) / 200000ULL;
-    DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx ns (raw/200000 + offset=0x%llx)\n",
-           *systime, i219_systim_offset);
+    {
+        uint64_t raw2 = ((uint64_t)ts_high << 32) | ts_low;
+        uint64_t offset_snap = i219_systim_offset;  /* volatile read; ring-3→0 entry provides fence */
+        *systime = offset_snap + raw2 / 200000ULL;
+        DEBUGP(DL_WARN, "[I219-DIAG] GET: result=0x%llx raw=0x%llx raw/200k=%llu offset=0x%llx\n",
+               *systime, raw2, raw2 / 200000ULL, offset_snap);
+    }
     return 0;
 
 fallback:
