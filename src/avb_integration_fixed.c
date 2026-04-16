@@ -2095,22 +2095,29 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                  * Both are independent of hardware initialization state so that test
                  * environments without real I226 hardware still produce the expected events.
                  *
-                 * Range validation rationale:
-                 *   TIMINCA increment field is 8-bit → valid values 1..255.
-                 *   increment_ns == 0   → clock frozen (below minimum)
-                 *   increment_ns > 255  → exceeds 8-bit INCPERIOD field capacity
-                 *   increment_ns == 24  → I226 default (41.67 MHz); must be accepted
-                 *   increment_ns == 8   → I210 default (125 MHz); must be accepted
-                 *   Old bound >= 16 was wrong: rejected valid I226 24 ns increment.
+                 * Per-device INCPERIOD ceiling (TIMINCA bits[31:24]):
+                 *   NOMINAL × (1 + ppb/1e9) < 2×NOMINAL when |ppb| < 1e9
+                 *   I225/I226 (~42 MHz, nominal INCPERIOD=24): max valid = floor(24×1.999…) = 47
+                 *   I210/I219/I217 (125 MHz, nominal INCPERIOD=8): max valid = floor(8×1.999…) = 15
+                 *   increment_ns == 0 → clock frozen (minimum violation; always rejected)
+                 *   ppb = +1,000,000,001 and NOMINAL=8 → increment_ns=16 → reject (FREQ-006)
+                 *   ppb = -1,000,000,001 → increment_ns=0  → reject  (FREQ-007)
+                 * Source: I217/I219 datasheet §11.1.2.7.13; Linux igb E1000_TIMINCA_INCPERIOD_SHIFT=24
                  * Fixes UT-PTP-FREQ-006/007; implements #65 (REQ-F-EVENT-LOG-001) TC-3/TC-4 */
-                if (freq_req->increment_ns == 0 || freq_req->increment_ns > 255) {
-                    DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of valid range [1,15]\n",
-                           freq_req->increment_ns);
-                    EventWriteEVT_HARDWARE_FAULT(NULL);  /* ETW ID 300: extreme freq deviation */
-                    freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
-                    status = STATUS_INVALID_PARAMETER;
-                    info = sizeof(*freq_req);
-                    break;
+                {
+                    intel_device_type_t _dtype = activeContext->intel_device.device_type;
+                    avb_u32 max_valid_incr = (_dtype == INTEL_DEVICE_I225 || _dtype == INTEL_DEVICE_I226)
+                                            ? 47u   /* ~42 MHz devices: nominal=24, ceiling=47 */
+                                            : 15u;  /* 125 MHz devices: nominal=8,  ceiling=15 */
+                    if (freq_req->increment_ns == 0 || freq_req->increment_ns > max_valid_incr) {
+                        DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of per-device range [1,%u] (DID=0x%04X)\n",
+                               freq_req->increment_ns, max_valid_incr, activeContext->intel_device.pci_device_id);
+                        EventWriteEVT_HARDWARE_FAULT(NULL);  /* ETW ID 300: extreme freq deviation */
+                        freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                        info = sizeof(*freq_req);
+                        break;
+                    }
                 }
 
                 /* Valid parameter: emit PHC adjustment warning BEFORE hardware write attempt.
