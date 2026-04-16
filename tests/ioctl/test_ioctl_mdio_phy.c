@@ -260,31 +260,42 @@ void Test_BasicMDIORead(TestContext *ctx) {
 
 /**
  * UT-MDIO-002: Basic MDIO Write Operation
+ *
+ * Uses PHY_REG_AUTONEG_ADV (reg 4 / ANAR) instead of PHY_REG_CONTROL (reg 0 / BMCR).
+ * BMCR has hardware-modified speed/duplex bits that the link-state machine reasserts
+ * after any write, so a simple write-readback comparison fails on active links.
+ * ANAR is a plain R/W latch: writes are stored and read back unchanged.
  */
 void Test_BasicMDIOWrite(TestContext *ctx) {
-    UINT16 original, written = 0x1000, readback = 0;
+    UINT16 original = 0, written, readback = 0;
     BOOL write_ok, read_ok;
-    
-    /* Save original value */
-    if (!ReadPHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_CONTROL, &original)) {
-        PrintTestResult(ctx, "UT-MDIO-002: Basic MDIO Write", TEST_FAIL, "Failed to read original");
+    char fail_msg[64];
+
+    /* Read original ANAR (reg 4) value */
+    if (!ReadPHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_AUTONEG_ADV, &original)) {
+        PrintTestResult(ctx, "UT-MDIO-002: Basic MDIO Write", TEST_FAIL, "Failed to read original ANAR");
         return;
     }
-    
-    /* Write test pattern */
-    write_ok = WritePHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_CONTROL, written);
-    
+
+    /* Toggle 10BASE-T HD bit (bit 5) — a stable R/W capability advertisement bit */
+    written = original ^ 0x0020;
+
+    /* Write modified value */
+    write_ok = WritePHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_AUTONEG_ADV, written);
+
     /* Readback */
-    read_ok = ReadPHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_CONTROL, &readback);
-    
-    /* Restore */
-    WritePHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_CONTROL, original);
-    
+    read_ok = ReadPHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_AUTONEG_ADV, &readback);
+
+    /* Restore before evaluating result */
+    WritePHYReg(ctx->adapter, TEST_PHY_ADDR, PHY_REG_AUTONEG_ADV, original);
+
     if (write_ok && read_ok && (readback == written)) {
         PrintTestResult(ctx, "UT-MDIO-002: Basic MDIO Write", TEST_PASS, NULL);
     } else {
-        PrintTestResult(ctx, "UT-MDIO-002: Basic MDIO Write", TEST_FAIL, 
-                        "Write or readback mismatch");
+        (void)_snprintf_s(fail_msg, sizeof(fail_msg), _TRUNCATE,
+                          "Write or readback mismatch (wrote=0x%04x got=0x%04x)",
+                          written, readback);
+        PrintTestResult(ctx, "UT-MDIO-002: Basic MDIO Write", TEST_FAIL, fail_msg);
     }
 }
 

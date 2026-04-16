@@ -335,6 +335,7 @@ static int get_systime(device_t *dev, uint64_t *systime)
                        h1, h2, ++retry);
             }
         } while (h1 != h2);
+        UNREFERENCED_PARAMETER(retry); /* incremented only inside DEBUGP; suppress C4189 in Release */
         ts_high = h1;
     }
 
@@ -362,10 +363,71 @@ fallback:
     }
 }
 
+/* I219 has exactly one internal PHY, hardwired at address 1. */
+#define I219_INTERNAL_PHY_ADDR  1
+
+/**
+ * @brief Acquire EXTCNF_CTRL.SWFLAG — PHY/MDIO software ownership flag (PCH family)
+ *
+ * The I219 shares the MDIO bus with the Management Engine (ME). The correct
+ * serialization mechanism is EXTCNF_CTRL.SWFLAG (bit 5, addr 0x00F00).
+ * ME checks this bit before accessing the PHY and backs off when SW holds it.
+ * SWSM.SWESMBI (0x05B50) is a general SW/FW semaphore and does NOT gate MDIO.
+ *
+ * Protocol (mirrors e1000_acquire_swflag_ich8lan in Linux e1000e):
+ *   1. First wait for SWFLAG to be clear (ME may hold it)
+ *   2. Set SWFLAG via read-modify-write
+ *   3. Read back to confirm we own it
+ *
+ * @return 0 on success, -1 on timeout
+ */
+static int i219_acquire_swsm(device_t *dev)
+{
+    uint32_t extcnf;
+    int retries;
+
+    /* Wait for SWFLAG to be clear (ME/previous owner may hold it) */
+    for (retries = 0; retries < 200; retries++) {
+        if (ndis_platform_ops.mmio_read(dev, I219_EXTCNF_CTRL, &extcnf) != 0)
+            return -1;
+        if (!(extcnf & (uint32_t)I219_EXTCNF_CTRL_SWFLAG_MASK))
+            break; /* clear — we can proceed */
+        KeStallExecutionProcessor(50); /* 50 µs back-off */
+    }
+
+    /* Set SWFLAG via read-modify-write */
+    if (ndis_platform_ops.mmio_read(dev, I219_EXTCNF_CTRL, &extcnf) != 0)
+        return -1;
+    extcnf |= (uint32_t)I219_EXTCNF_CTRL_SWFLAG_MASK;
+    if (ndis_platform_ops.mmio_write(dev, I219_EXTCNF_CTRL, extcnf) != 0)
+        return -1;
+
+    /* Read back to confirm ownership */
+    if (ndis_platform_ops.mmio_read(dev, I219_EXTCNF_CTRL, &extcnf) != 0)
+        return -1;
+    if (extcnf & (uint32_t)I219_EXTCNF_CTRL_SWFLAG_MASK)
+        return 0; /* acquired */
+
+    DEBUGP(DL_ERROR, "I219: EXTCNF_CTRL.SWFLAG acquire failed (val=0x%08X)\n", extcnf);
+    return -1;
+}
+
+/**
+ * @brief Release EXTCNF_CTRL.SWFLAG after MDIC access
+ */
+static void i219_release_swsm(device_t *dev)
+{
+    uint32_t extcnf;
+    if (ndis_platform_ops.mmio_read(dev, I219_EXTCNF_CTRL, &extcnf) != 0)
+        return;
+    extcnf &= ~(uint32_t)I219_EXTCNF_CTRL_SWFLAG_MASK;
+    ndis_platform_ops.mmio_write(dev, I219_EXTCNF_CTRL, extcnf);
+}
+
 /**
  * @brief I219-specific MDIO read using SSOT register definitions
  * @param dev Device handle
- * @param phy_addr PHY address
+ * @param phy_addr PHY address (validated 0-31; hardware always accesses internal PHY at addr 1)
  * @param reg_addr Register address
  * @param value Output value
  * @return 0 on success, <0 on error
@@ -381,17 +443,32 @@ static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16
     if (dev == NULL || value == NULL) {
         return -1;
     }
+
+    /* Clause 22: PHY address field is 5 bits (0-31). Addresses > 31 are invalid. */
+    if (phy_addr > 31) {
+        DEBUGP(DL_ERROR, "i219_mdio_read: invalid PHY address %u\n", (unsigned)phy_addr);
+        return -1;
+    }
     
     // Build MDIC command using SSOT bit field definitions
     mdic_value = (uint32_t)I219_MDIC_SET(0, I219_MDIC_DATA_MASK, I219_MDIC_DATA_SHIFT, 0);  // Data = 0 for read
     mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_REG_MASK, I219_MDIC_REG_SHIFT, reg_addr);
-    mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_PHY_MASK, I219_MDIC_PHY_SHIFT, phy_addr);
+    /* Always target the I219 internal PHY at address 1, regardless of caller-supplied phy_addr
+     * (I219 has a single internal PHY; MDIC at any other address returns zeros). */
+    mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_PHY_MASK, I219_MDIC_PHY_SHIFT, I219_INTERNAL_PHY_ADDR);
     mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_OP_MASK, I219_MDIC_OP_SHIFT, 2);  // Read operation
     mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_I_MASK, I219_MDIC_I_SHIFT, 1);     // Interrupt on completion
-    
+
+    /* Acquire SWSM semaphore before MDIC access (Management Engine shares PHY bus) */
+    if (i219_acquire_swsm(dev) != 0) {
+        DEBUGP(DL_ERROR, "I219 mdio_read: failed to acquire SWSM semaphore\n");
+        return -1;
+    }
+
     // Write MDIC command using SSOT register definition
     result = ndis_platform_ops.mmio_write(dev, I219_MDIC, mdic_value);
     if (result != 0) {
+        i219_release_swsm(dev);
         DEBUGP(DL_ERROR, "I219 MDIC write failed\n");
         return result;
     }
@@ -400,6 +477,7 @@ static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16
     for (timeout = 0; timeout < 1000; timeout++) {
         result = ndis_platform_ops.mmio_read(dev, I219_MDIC, &mdic_value);
         if (result != 0) {
+            i219_release_swsm(dev);
             DEBUGP(DL_ERROR, "I219 MDIC read failed during polling\n");
             return result;
         }
@@ -408,12 +486,14 @@ static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16
         if (I219_MDIC_GET(mdic_value, I219_MDIC_R_MASK, I219_MDIC_R_SHIFT)) {
             // Check for error
             if (I219_MDIC_GET(mdic_value, I219_MDIC_E_MASK, I219_MDIC_E_SHIFT)) {
+                i219_release_swsm(dev);
                 DEBUGP(DL_ERROR, "I219 MDIO read error\n");
                 return -1;
             }
             
             // Extract data using SSOT bit definitions
             *value = (uint16_t)I219_MDIC_GET(mdic_value, I219_MDIC_DATA_MASK, I219_MDIC_DATA_SHIFT);
+            i219_release_swsm(dev);
             DEBUGP(DL_TRACE, "<==i219_mdio_read: value=0x%x\n", *value);
             return 0;
         }
@@ -422,6 +502,7 @@ static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16
         KeStallExecutionProcessor(10); // 10 microseconds
     }
     
+    i219_release_swsm(dev);
     DEBUGP(DL_ERROR, "I219 MDIO read timeout\n");
     return -1;
 }
@@ -429,7 +510,7 @@ static int mdio_read(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint16
 /**
  * @brief I219-specific MDIO write using SSOT register definitions
  * @param dev Device handle
- * @param phy_addr PHY address
+ * @param phy_addr PHY address (validated 0-31; hardware always accesses internal PHY at addr 1)
  * @param reg_addr Register address
  * @param value Value to write
  * @return 0 on success, <0 on error
@@ -445,17 +526,31 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
     if (dev == NULL) {
         return -1;
     }
+
+    /* Clause 22: PHY address field is 5 bits (0-31). Addresses > 31 are invalid. */
+    if (phy_addr > 31) {
+        DEBUGP(DL_ERROR, "i219_mdio_write: invalid PHY address %u\n", (unsigned)phy_addr);
+        return -1;
+    }
     
     // Build MDIC command using SSOT bit field definitions
     mdic_value = (uint32_t)I219_MDIC_SET(0, I219_MDIC_DATA_MASK, I219_MDIC_DATA_SHIFT, value);
     mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_REG_MASK, I219_MDIC_REG_SHIFT, reg_addr);
-    mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_PHY_MASK, I219_MDIC_PHY_SHIFT, phy_addr);
+    /* Always target the I219 internal PHY at address 1, regardless of caller-supplied phy_addr. */
+    mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_PHY_MASK, I219_MDIC_PHY_SHIFT, I219_INTERNAL_PHY_ADDR);
     mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_OP_MASK, I219_MDIC_OP_SHIFT, 1);  // Write operation
     mdic_value = (uint32_t)I219_MDIC_SET(mdic_value, I219_MDIC_I_MASK, I219_MDIC_I_SHIFT, 1);     // Interrupt on completion
-    
+
+    /* Acquire SWSM semaphore before MDIC access (Management Engine shares PHY bus) */
+    if (i219_acquire_swsm(dev) != 0) {
+        DEBUGP(DL_ERROR, "I219 mdio_write: failed to acquire SWSM semaphore\n");
+        return -1;
+    }
+
     // Write MDIC command using SSOT register definition
     result = ndis_platform_ops.mmio_write(dev, I219_MDIC, mdic_value);
     if (result != 0) {
+        i219_release_swsm(dev);
         DEBUGP(DL_ERROR, "I219 MDIC write failed\n");
         return result;
     }
@@ -464,6 +559,7 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
     for (timeout = 0; timeout < 1000; timeout++) {
         result = ndis_platform_ops.mmio_read(dev, I219_MDIC, &mdic_value);
         if (result != 0) {
+            i219_release_swsm(dev);
             DEBUGP(DL_ERROR, "I219 MDIC read failed during polling\n");
             return result;
         }
@@ -472,10 +568,12 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
         if (I219_MDIC_GET(mdic_value, I219_MDIC_R_MASK, I219_MDIC_R_SHIFT)) {
             // Check for error
             if (I219_MDIC_GET(mdic_value, I219_MDIC_E_MASK, I219_MDIC_E_SHIFT)) {
+                i219_release_swsm(dev);
                 DEBUGP(DL_ERROR, "I219 MDIO write error\n");
                 return -1;
             }
             
+            i219_release_swsm(dev);
             DEBUGP(DL_TRACE, "<==i219_mdio_write: Success\n");
             return 0;
         }
@@ -484,6 +582,7 @@ static int mdio_write(device_t *dev, uint16_t phy_addr, uint16_t reg_addr, uint1
         KeStallExecutionProcessor(10); // 10 microseconds
     }
     
+    i219_release_swsm(dev);
     DEBUGP(DL_ERROR, "I219 MDIO write timeout\n");
     return -1;
 }
