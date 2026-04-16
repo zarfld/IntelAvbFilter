@@ -141,32 +141,78 @@ The `Run-Tests.ps1` JUnit XML parser understands the `/adapter:N` suffix:
 
 | Test file | TC-IDs | Notes |
 |---|---|---|
-| `tests/unit/hardware/test_hw_state.c` | TC-PCI-LAT-003 | "Per-adapter latency sweep" |
+| `tests/unit/hardware/test_hw_state.c` | TC-PCI-LAT-003 | Per-adapter latency sweep — runs on all adapters |
 | `tests/unit/ioctl/test_ioctl_simple.c` | inline | "MULTI-ADAPTER: tests all enumerated adapters" |
-| `tests/unit/ioctl/test_minimal_ioctl.c` | inline | "Tests all 6 Intel I226-V adapters" |
+| `tests/unit/ioctl/test_minimal_ioctl.c` | inline | Iterates all Intel adapters; SKIPs per-adapter on STATUS_NOT_SUPPORTED |
 | `tests/integration/multi_adapter/test_multidev_adapter_enum.c` | TC-MULTIDEV-001.1 | Iterates all adapters |
-| Phase 2.5 device-agnostic tests | `test_ptp_getset`, `test_hw_ts_ctrl`, … | Runner iterates adapters |
+| Phase 2.5 device-agnostic tests | `test_ptp_getset`, `test_hw_ts_ctrl`, … | Runner iterates all adapters; driver returns STATUS_NOT_SUPPORTED for unsupported NICs |
 
-### Tests that are adapter-family specific
+### Adapter-agnostic capability tests (the majority)
 
-Phase 5 (`avb_test_i210.exe`, `avb_test_i219.exe`, `avb_test_i226.exe`) tests family-specific capabilities. **Family-scoped does NOT mean single-adapter.** These binaries MUST still iterate over ALL installed adapters of their target family:
+**The vast majority of tests in this repo are adapter-agnostic and adapter-family-agnostic.** They test *capabilities* or *functionalities* through the generic public IOCTL interface — they do not know or care which NIC family is installed.
 
-- If the system has two i226 ports → `avb_test_i226.exe` must run on **both**, emitting `TC-XXX/adapter:0` and `TC-XXX/adapter:1` lines.
-- `AvbEnumerateAdapters()` loops until no more adapters match — the test must not stop at the first match.
-- If no adapter of the target family is present → all test cases SKIP (genuine N/A, not a failure).
+- A capability test runs on **every adapter enumerated** by `IOCTL_AVB_ENUM_ADAPTERS`.
+- It calls the relevant IOCTL and the driver determines whether the feature is supported.
+- If the feature is not supported: driver returns `STATUS_NOT_SUPPORTED` → test emits `SKIP:` for that adapter.
+- If the feature is supported: driver returns success or a specific error → test emits `PASS:` or `FAIL:`.
 
-They complement, not replace, the device-agnostic multi-adapter runs in earlier phases.
+This is the **only** correct way to handle capability differences. The test never pre-filters by device ID. The HAL inside the driver is responsible for knowing what each NIC supports; tests must not duplicate that knowledge.
 
-### Checklist when writing a new adapter-dependent test
+```c
+// ✅ CORRECT — adapter-agnostic capability probe
+DWORD bytes;
+BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_CAPABILITIES, &req, sizeof(req),
+                          &caps, sizeof(caps), &bytes, NULL);
+if (!ok) {
+    DWORD err = GetLastError();
+    if (err == ERROR_NOT_SUPPORTED) {   // driver mapped STATUS_NOT_SUPPORTED here
+        printf("  SKIP: TC-TAS-CAP-001/adapter:%u: TAS not supported "
+               "(VID=0x%04X DID=0x%04X)\n", idx, req.vendor_id, req.device_id);
+        continue;
+    }
+    printf("  FAIL: TC-TAS-CAP-001/adapter:%u: IOCTL_AVB_GET_CAPABILITIES failed "
+           "(err=%lu)\n", idx, err);
+    g_failed++; continue;
+}
+// feature is supported — run the full test
+run_tas_test(h, idx, &caps);
+
+// ❌ WRONG — test should never pre-filter by device ID
+if (req.device_id == 0x125B || req.device_id == 0x15F2) {  // ← FORBIDDEN
+    run_tas_test(h, idx, &caps);
+} else {
+    printf("  SKIP: TC-TAS-CAP-001/adapter:%u: not an i226/i225\n", idx);
+}
+```
+
+**Why no device-ID filtering in tests:**
+
+- Mixed configurations (i210 + i219 + i226 simultaneously) are a primary test scenario.
+- Hardcoded IDs break when new NICs are added without updating every test.
+- The driver's HAL already knows what is supported — tests calling the generic interface get the right answer automatically.
+- Behaviour comparison across adapter types is only possible if every test exercises every present adapter through the same code path.
+
+### Adapter-family-specific tests (the exception, not the rule)
+
+A small number of tests (currently one per supported family: `avb_test_i210.exe`, `avb_test_i219.exe`, `avb_test_i226.exe`) validate family-specific internal behaviour that the generic interface does not expose. These are the exception.
+
+- They MUST still iterate over **all adapters of their target family** — family-scoped ≠ single-adapter.
+  - *If the system has two i226 ports, `avb_test_i226.exe` must run on both.*
+- `AvbEnumerateAdapters()` loops until no more family members are found.
+- If no adapter of that family is present → all TC cases SKIP (genuine N/A, not a failure).
+- They complement, but do not replace, the adapter-agnostic tests that already covered the generic surface.
+
+### Checklist when writing a new hardware test
 
 - [ ] Test uses `IOCTL_AVB_ENUM_ADAPTERS` loop — does NOT hard-code `index = 0`
-- [ ] Output includes `/adapter:N` suffix with VID/DID in each `PASS:`/`FAIL:` line
-- [ ] Test declares `"MULTI-ADAPTER: tests all enumerated adapters"` in its header `printf`
-- [ ] `SKIP:` is emitted **only** for `STATUS_NOT_SUPPORTED` or "no adapter of this family present"
-- [ ] Any IOCTL error that is NOT `STATUS_NOT_SUPPORTED` emits `FAIL:` (never SKIP)
+- [ ] **No device-ID or family checks inside the test** — capability discovery is done via IOCTL, not `if (device_id == 0x…)`
+- [ ] Driver returns `STATUS_NOT_SUPPORTED` for unsupported features → test emits `SKIP:` and continues
+- [ ] Any other IOCTL error emits `FAIL:` — never disguised as `SKIP:`
 - [ ] Prerequisite failures emit `FAIL:`, not `SKIP:`
-- [ ] All-skip (no hardware present at all) treated as skip, not failure
-- [ ] Any single-adapter failure sets a non-zero exit code for the binary
+- [ ] Output includes `/adapter:N` suffix with VID/DID in each `PASS:`/`FAIL:`/`SKIP:` line
+- [ ] Test declares `"MULTI-ADAPTER: tests all enumerated adapters"` in its header `printf`
+- [ ] All-skip (no hardware at all) treated as skip, not failure at the binary level
+- [ ] Any single-adapter failure sets non-zero exit code for the binary
 
 ---
 
@@ -178,8 +224,8 @@ They complement, not replace, the device-agnostic multi-adapter runs in earlier 
 
 A test case may emit `SKIP:` **only** when:
 
-1. **No adapter of the required family is present in the system** — there is nothing to test against.
-2. **The driver returned `STATUS_NOT_SUPPORTED`** for the IOCTL under test — the hardware genuinely does not implement the feature.
+1. **No Intel adapters are present in the system at all** — there is nothing to test against (binary-level skip only).
+2. **The driver returned `STATUS_NOT_SUPPORTED`** for the IOCTL under test — the hardware genuinely does not implement the feature. The test must still have attempted the IOCTL; it must not pre-filter by device ID.
 
 ```c
 // ✅ CORRECT — hardware lacks this feature
@@ -404,4 +450,7 @@ Get-Content $log.FullName
 | Using `SKIP:` when an IOCTL returns an unexpected error | Hides an implementation bug | `SKIP:` is only valid for `STATUS_NOT_SUPPORTED` — anything else is `FAIL:` |
 | Using `SKIP:` when a prerequisite step fails | Prerequisite failure is a bug, not N/A | `FAIL:` with the prerequisite error; do not hide it |
 | Stopping family-specific test at first matching adapter | Misses second NIC of same family | Loop `AvbEnumerateAdapters()` to exhaustion, run on each adapter of the family |
+| `if (device_id == 0x125B) run_feature_test()` — ID-gating in test code | Breaks on new NICs; duplicates HAL knowledge; prevents mixed-config comparison | Always call the IOCTL and let the driver return `STATUS_NOT_SUPPORTED`; never pre-filter by ID |
+| Treating missing feature as `SKIP:` without driver confirmation | Test assumes what driver supports — assumption ≠ proof | Only `STATUS_NOT_SUPPORTED` from the driver earns a `SKIP:`; test must still call the IOCTL |
+| Writing a "generic" test that only runs against one adapter type silently | Other adapters get no coverage for this feature | Enumerate all, probe via IOCTL, log per-adapter result; let the driver decide |
 ````
