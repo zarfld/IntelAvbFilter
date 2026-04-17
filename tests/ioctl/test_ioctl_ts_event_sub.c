@@ -1107,8 +1107,17 @@ void Test_TargetTimeReachedEvent(TestContext *ctx) {
     if (!result) {
         UnmapRingBuffer(mapped_buffer);
         Unsubscribe(ctx->adapter, subscription);
-        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
-                        "DeviceIoControl failed");
+        if (lastError == ERROR_NOT_SUPPORTED) {
+            /* Driver returned STATUS_NOT_SUPPORTED: device has no set_target_time op
+             * (e.g. I219 has no TRGTTIML registers).  This is correct driver behaviour;
+             * the test cannot run on this device — SKIP, not FAIL. */
+            PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_SKIP,
+                            "Device does not support SET_TARGET_TIME (ERROR_NOT_SUPPORTED) "
+                            "— no TRGTTIML registers (I219 or similar)");
+        } else {
+            PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
+                            "DeviceIoControl failed");
+        }
         return;
     }
     
