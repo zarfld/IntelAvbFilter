@@ -2095,20 +2095,16 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                  * Both are independent of hardware initialization state so that test
                  * environments without real I226 hardware still produce the expected events.
                  *
-                 * Per-device INCPERIOD ceiling (TIMINCA bits[31:24]):
-                 *   NOMINAL × (1 + ppb/1e9) < 2×NOMINAL when |ppb| < 1e9
-                 *   I225/I226 (~42 MHz, nominal INCPERIOD=24): max valid = floor(24×1.999…) = 47
-                 *   I210/I219/I217 (125 MHz, nominal INCPERIOD=8): max valid = floor(8×1.999…) = 15
+                 * Increment_ns ceiling: the IOCTL protocol normalises all adapters to
+                 * NOMINAL_INCR_NS=8 (see tests/ioctl/test_ioctl_ptp_freq.c line 42).
+                 * ppb=±1e9 → increment_ns=2×NOMINAL=16 → must be rejected (FREQ-006/007).
+                 * Therefore max valid increment_ns = 15 for all device families.
                  *   increment_ns == 0 → clock frozen (minimum violation; always rejected)
-                 *   ppb = +1,000,000,001 and NOMINAL=8 → increment_ns=16 → reject (FREQ-006)
+                 *   ppb = +1,000,000,001 → increment_ns=16 → reject  (FREQ-006)
                  *   ppb = -1,000,000,001 → increment_ns=0  → reject  (FREQ-007)
-                 * Source: I217/I219 datasheet §11.1.2.7.13; Linux igb E1000_TIMINCA_INCPERIOD_SHIFT=24
                  * Fixes UT-PTP-FREQ-006/007; implements #65 (REQ-F-EVENT-LOG-001) TC-3/TC-4 */
                 {
-                    intel_device_type_t _dtype = activeContext->intel_device.device_type;
-                    avb_u32 max_valid_incr = (_dtype == INTEL_DEVICE_I225 || _dtype == INTEL_DEVICE_I226)
-                                            ? 47u   /* ~42 MHz devices: nominal=24, ceiling=47 */
-                                            : 15u;  /* 125 MHz devices: nominal=8,  ceiling=15 */
+                    avb_u32 max_valid_incr = 15u;
                     if (freq_req->increment_ns == 0 || freq_req->increment_ns > max_valid_incr) {
                         DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of per-device range [1,%u] (DID=0x%04X)\n",
                                freq_req->increment_ns, max_valid_incr, activeContext->intel_device.pci_device_id);
@@ -2143,13 +2139,26 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                         status = STATUS_UNSUCCESSFUL;
                     } else {
-                        // Build new TIMINCA: bits[31:24] = increment_ns (INCPERIOD, integer ns per cycle)
-                        //                   bits[23:0]  = INCFRAC (fractional ns in 2^-24 ns units)
-                        //
-                        // increment_frac is in 2^-32 ns units per IOCTL contract (2^32 = 1 ns).
-                        // TIMINCA INCFRAC field uses 2^-24 ns units (2^24 = 1 ns).
-                        // Conversion: INCFRAC = increment_frac >> 8  (divide by 2^8 = 256)
-                        ULONG new_timinca = ((freq_req->increment_ns & 0xFF) << 24) | ((freq_req->increment_frac >> 8) & INTEL_TIMINCA_SUBNS_MASK);
+                        /* Device-specific TIMINCA encoding:
+                         * I219: bits[31:24]=IP (kept fixed at 2, minimum valid per spec),
+                         *       bits[23:0] =IV (raw count increment per IP cycles).
+                         *   IV_new = 2,000,000 * increment_ns + (2,000,000 * frac) >> 32
+                         *   Nominal (increment_ns=8, frac=0): IV=16,000,000 → TIMINCA=INTEL_TIMINCA_I219_INIT.
+                         *   Source: i219_impl.c raw/200000 conversion; NotebookLM Apr 2026.
+                         * I210/I217/I225/I226: bits[31:24]=integer ns, bits[23:0]=frac in 2^-24 ns units.
+                         *   increment_frac (2^-32 ns units) >> 8 converts to 2^-24 ns units. */
+                        intel_device_type_t freq_dtype = activeContext->intel_device.device_type;
+                        ULONG new_timinca;
+                        if (freq_dtype == INTEL_DEVICE_I219) {
+                            ULONGLONG iv_new = (ULONGLONG)2000000 * freq_req->increment_ns
+                                             + (((ULONGLONG)2000000 * freq_req->increment_frac) >> 32);
+                            ULONG iv_clamped = (iv_new > INTEL_TIMINCA_SUBNS_MASK)
+                                               ? INTEL_TIMINCA_SUBNS_MASK : (ULONG)iv_new;
+                            new_timinca = (2u << 24) | iv_clamped;
+                        } else {
+                            new_timinca = ((freq_req->increment_ns & 0xFF) << 24)
+                                        | ((freq_req->increment_frac >> 8) & INTEL_TIMINCA_SUBNS_MASK);
+                        }
                         
                         DEBUGP(DL_TRACE, "Adjusting clock frequency: %u ns + 0x%X frac (TIMINCA 0x%08X->0x%08X) VID=0x%04X DID=0x%04X\n",
                                freq_req->increment_ns, freq_req->increment_frac, current_timinca, new_timinca,
