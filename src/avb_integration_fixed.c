@@ -2095,16 +2095,21 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                  * Both are independent of hardware initialization state so that test
                  * environments without real I226 hardware still produce the expected events.
                  *
-                 * Increment_ns ceiling: the IOCTL protocol normalises all adapters to
-                 * NOMINAL_INCR_NS=8 (see tests/ioctl/test_ioctl_ptp_freq.c line 42).
-                 * ppb=±1e9 → increment_ns=2×NOMINAL=16 → must be rejected (FREQ-006/007).
-                 * Therefore max valid increment_ns = 15 for all device families.
+                 * Increment_ns ceiling: device-specific because nominal hardware periods differ.
+                 *   I210/I211 @ 125 MHz → nominal = 8 ns → max = 2×8-1 = 15
+                 *   I226/I225 @ 200 MHz → nominal = 24 ns → max = 2×24-1 = 47
+                 *   I219 (PCH, MDIO)   → nominal = 2 ns  → max = 2×2-1  = 3
+                 *     (conservative; I219 TIMINCA IP field is 3-bit, max=7 from datasheet)
                  *   increment_ns == 0 → clock frozen (minimum violation; always rejected)
-                 *   ppb = +1,000,000,001 → increment_ns=16 → reject  (FREQ-006)
-                 *   ppb = -1,000,000,001 → increment_ns=0  → reject  (FREQ-007)
                  * Fixes UT-PTP-FREQ-006/007; implements #65 (REQ-F-EVENT-LOG-001) TC-3/TC-4 */
                 {
-                    avb_u32 max_valid_incr = 15u;
+                    /* Select per-device upper bound for the TIMINCA IP field */
+                    avb_u32 max_valid_incr;
+                    switch (activeContext->intel_device.device_type) {
+                        case INTEL_DEVICE_I226:  max_valid_incr = 47u; break; /* 2×24-1 */
+                        case INTEL_DEVICE_I219:  max_valid_incr = 7u;  break; /* I219 3-bit field */
+                        default:                 max_valid_incr = 15u; break; /* I210: 2×8-1 */
+                    }
                     if (freq_req->increment_ns == 0 || freq_req->increment_ns > max_valid_incr) {
                         DEBUGP(DL_ERROR, "Frequency adjustment rejected: increment_ns=%u out of per-device range [1,%u] (DID=0x%04X)\n",
                                freq_req->increment_ns, max_valid_incr, activeContext->intel_device.pci_device_id);

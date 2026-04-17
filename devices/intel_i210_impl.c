@@ -15,6 +15,7 @@ Abstract:
 #include "intel_device_interface.h"
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
+#include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
@@ -482,6 +483,117 @@ static int i210_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
     return ndis_platform_ops.mmio_write(dev, I210_TSAUXC, tsauxc_value);
 }
 
+/* ---------------------------------------------------------------------------
+ * I210 target-time support
+ *
+ * The I210 shares the same PTP auxiliary-control register layout as the I226:
+ *   I210_TSAUXC  (0x0B640) — Time Sync Auxiliary Control
+ *   I210_TRGTTIML0/H0 (0x0B644/0x0B648) — Target Time 0 Low/High
+ *   I210_TRGTTIML1/H1 (0x0B64C/0x0B650) — Target Time 1 Low/High
+ *   I210_FREQOUT0 (0x0B654) — must be non-zero to activate target-time compare
+ *   I210_TSIM   (0x0B674) — Time Sync Interrupt Mask
+ * The SSOT header (i210_regs.h) defines register addresses but not bit fields;
+ * the bit positions below are taken from the Intel I210 Ethernet Controller
+ * Datasheet v3.7, Sections 8.16.8 (TSAUXC) and 8.16.2 (TSIM).
+ * ---------------------------------------------------------------------------
+ */
+/* I210 TSAUXC bit masks (I210 DS §8.16.8) */
+#define I210_TSAUXC_EN_TT0_MASK   0x00000001U  /* bit 0: Target Time 0 enable */
+#define I210_TSAUXC_EN_TT1_MASK   0x00000002U  /* bit 1: Target Time 1 enable */
+/* I210 TSIM bit masks (I210 DS §8.16.2 — same positions as I226) */
+#define I210_TSIM_TT0_MASK        0x00000008U  /* bit 3: TT0 interrupt enable */
+#define I210_TSIM_TT1_MASK        0x00000010U  /* bit 4: TT1 interrupt enable */
+/* FREQOUT0 value: 1 µs half-cycle time activates target-time compare logic */
+#define I210_FREQOUT0_1MHZ        1000U        /* 1000 ns (within valid range 9–70 000 000 ns) */
+
+/**
+ * @brief Set target time for I210 adapter
+ *
+ * Writes the TRGTTIML0/H0 (or TRGTTIML1/H1) registers and arms the target-time
+ * interrupt so that AvbTimerDpcRoutine can detect the event via TSICR polling.
+ * Implementation mirrors i226_set_target_time, using I210-specific register names.
+ *
+ * @param dev            Device context
+ * @param timer_index    0 or 1 (selects TRGTTIM0 or TRGTTIM1)
+ * @param target_time_ns Target absolute time in nanoseconds
+ * @param enable_interrupt 1 = arm interrupt; 0 = write registers only
+ * @return 0 on success, -EINVAL / -EIO on error
+ */
+static int i210_set_target_time(device_t *dev, uint8_t timer_index,
+                                uint64_t target_time_ns, int enable_interrupt)
+{
+    DEBUGP(DL_TRACE, "!!! ENTRY: i210_set_target_time(timer=%u, target=0x%016llX, enable_int=%d)\n",
+           timer_index, (unsigned long long)target_time_ns, enable_interrupt);
+
+    if (timer_index > 1) {
+        DEBUGP(DL_TRACE, "I210: Invalid timer index %u (max 1)\n", timer_index);
+        return -EINVAL;
+    }
+
+    uint32_t trgttiml_offset = (timer_index == 0) ? I210_TRGTTIML0 : I210_TRGTTIML1;
+    uint32_t trgttimh_offset = (timer_index == 0) ? I210_TRGTTIMH0 : I210_TRGTTIMH1;
+
+    uint32_t time_low  = (uint32_t)(target_time_ns & 0xFFFFFFFFU);
+    uint32_t time_high = (uint32_t)(target_time_ns >> 32);
+
+    /* Write target time registers (low first for atomicity) */
+    if (ndis_platform_ops.mmio_write(dev, trgttiml_offset, time_low) != 0) {
+        DEBUGP(DL_TRACE, "I210: Failed to write TRGTTIML%u\n", timer_index);
+        return -EIO;
+    }
+    if (ndis_platform_ops.mmio_write(dev, trgttimh_offset, time_high) != 0) {
+        DEBUGP(DL_TRACE, "I210: Failed to write TRGTTIMH%u\n", timer_index);
+        return -EIO;
+    }
+
+    DEBUGP(DL_TRACE, "!!! I210: Target time %u written: 0x%08X%08X (%llu ns)\n",
+           timer_index, time_high, time_low, (unsigned long long)target_time_ns);
+
+    /* NOTE: DPC polling (like i226) is omitted here.  The I210 target-time interrupt
+     * is driven by TSICR TT0/TT1 bits (same register address as I226: 0x0B66C) and
+     * the existing ISR / TSICR-clear path in avb_integration_fixed.c handles it.
+     * A dedicated periodic poll DPC can be added later if diagnostic logging is needed. */
+
+    if (enable_interrupt) {
+        /* Enable EN_TT0/TT1 in TSAUXC */
+        uint32_t tsauxc = 0;
+        if (ndis_platform_ops.mmio_read(dev, I210_TSAUXC, &tsauxc) != 0) {
+            DEBUGP(DL_TRACE, "I210: Failed to read TSAUXC\n");
+            return -EIO;
+        }
+        uint32_t en_bit = (timer_index == 0) ? I210_TSAUXC_EN_TT0_MASK : I210_TSAUXC_EN_TT1_MASK;
+        tsauxc |= en_bit;
+        if (ndis_platform_ops.mmio_write(dev, I210_TSAUXC, tsauxc) != 0) {
+            DEBUGP(DL_TRACE, "I210: Failed to write TSAUXC\n");
+            return -EIO;
+        }
+        DEBUGP(DL_TRACE, "!!! I210: TSAUXC EN_TT%u set (0x%08X)\n", timer_index, tsauxc);
+
+        /* Enable TT interrupt in TSIM */
+        uint32_t tsim = 0;
+        if (ndis_platform_ops.mmio_read(dev, I210_TSIM, &tsim) != 0) {
+            DEBUGP(DL_TRACE, "I210: Failed to read TSIM\n");
+            return -EIO;
+        }
+        uint32_t tt_bit = (timer_index == 0) ? I210_TSIM_TT0_MASK : I210_TSIM_TT1_MASK;
+        tsim |= tt_bit;
+        if (ndis_platform_ops.mmio_write(dev, I210_TSIM, tsim) != 0) {
+            DEBUGP(DL_TRACE, "I210: Failed to write TSIM\n");
+            return -EIO;
+        }
+        DEBUGP(DL_TRACE, "!!! I210: TSIM TT%u enabled (0x%08X)\n", timer_index, tsim);
+
+        /* Write FREQOUT0 to activate target-time compare logic
+         * (See i226_set_target_time for detailed rationale; same silicon behaviour) */
+        ndis_platform_ops.mmio_write(dev, I210_FREQOUT0, I210_FREQOUT0_1MHZ);
+        DEBUGP(DL_TRACE, "!!! I210: FREQOUT0 set to %u ns\n", I210_FREQOUT0_1MHZ);
+    }
+
+    DEBUGP(DL_TRACE, "i210_set_target_time: done (timer=%u target=0x%016llX)\n",
+           timer_index, (unsigned long long)target_time_ns);
+    return 0;
+}
+
 /**
  * @brief I210 device operations structure - CORRECTED: No TSN support
  * I210 (2013) has excellent IEEE 1588 PTP but NO TSN features (TSN standard finalized 2015-2016)
@@ -510,9 +622,10 @@ const intel_device_ops_t i210_ops = {
     .read_tsauxc = i210_read_tsauxc,
     .write_tsauxc = i210_write_tsauxc,
     
-    // Target time / auxiliary timestamp operations - NOT SUPPORTED (I210 has no TSICR register)
-    .set_target_time = NULL,              // No TSICR/TRGTTIML registers on I210
-    .get_target_time = NULL,              // No TSICR/TRGTTIML registers on I210
+    // Target time / auxiliary timestamp operations
+    // I210 has TRGTTIML0/H0 and TRGTTIML1/H1 at 0x0B644–0x0B650 (I210 DS §8.14.21-24)
+    .set_target_time = i210_set_target_time,  // Implemented — I210 has target-time registers
+    .get_target_time = NULL,              // Not yet implemented
     .check_autt_flags = NULL,             // No TSAUXC AUTT flags on I210
     .clear_autt_flag = NULL,              // No TSAUXC AUTT flags on I210
     .get_aux_timestamp = NULL,            // No auxiliary timestamp FIFO on I210
