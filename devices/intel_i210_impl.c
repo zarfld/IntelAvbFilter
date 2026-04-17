@@ -533,8 +533,13 @@ static int i210_set_target_time(device_t *dev, uint8_t timer_index,
     uint32_t trgttiml_offset = (timer_index == 0) ? I210_TRGTTIML0 : I210_TRGTTIML1;
     uint32_t trgttimh_offset = (timer_index == 0) ? I210_TRGTTIMH0 : I210_TRGTTIMH1;
 
-    uint32_t time_low  = (uint32_t)(target_time_ns & 0xFFFFFFFFU);
-    uint32_t time_high = (uint32_t)(target_time_ns >> 32);
+    /* TRGTTIML0/H0 use the same seconds/nanoseconds split as SYSTIML/SYSTIMH
+     * (I210 DS §8.14.21-22): TRGTTIML0 = nanoseconds (0..999,999,999, bits 29:0),
+     *                          TRGTTIMH0 = seconds (bits 31:0).
+     * A raw bitwise split of a 64-bit ns value would overflow bits 29:0 and
+     * produce a value >999,999,999, violating the register constraint. */
+    uint32_t time_low  = (uint32_t)(target_time_ns % 1000000000ULL);  /* nanoseconds (0..999,999,999) */
+    uint32_t time_high = (uint32_t)(target_time_ns / 1000000000ULL);  /* seconds */
 
     /* Write target time registers (low first for atomicity) */
     if (ndis_platform_ops.mmio_write(dev, trgttiml_offset, time_low) != 0) {
