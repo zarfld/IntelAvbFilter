@@ -198,16 +198,25 @@ static int init_ptp(device_t *dev)
     DEBUGP(DL_INFO, "I219 init_ptp: ETQS0=0x%08X (queue 0 routing)\n", etqs0);
 
     /* Step 5: Seed software time offset from current system clock so that
-     * get_systime() returns Unix-epoch-anchored nanoseconds immediately.
+     * get_systime() returns TAI-epoch-anchored nanoseconds immediately.
      * KeQuerySystemTime returns Windows FILETIME (100-ns ticks from 1601-01-01).
      * Subtract FILETIME epoch offset (116444736000000000) to get Unix epoch
-     * 100-ns ticks, then multiply by 100 to get nanoseconds. */
+     * 100-ns ticks, then multiply by 100 to get nanoseconds (UTC).
+     *
+     * I219 SYSTIM is TAI-based (NotebookLM Q1, April 2026):
+     * e1000e settime64 accepts absolute nanoseconds in the TAI scale.
+     * Add 37 s TAI-UTC leap-second offset so get_systime() returns
+     * TAI-epoch nanoseconds as expected by the PTP stack.
+     * ptp4l / phc2sys will correct residual frequency drift (e.g.
+     * PCH spread-spectrum clocking ~2500 ppm) via ADJUST_FREQUENCY. */
     {
         LARGE_INTEGER initTime;
         uint32_t ts_hi = 0, ts_lo = 0;
         const uint64_t FILETIME_TO_UNIX_EPOCH_100NS = 116444736000000000ULL;
+        const uint64_t TAI_UTC_OFFSET_NS = 37000000000ULL; /* 37 leap seconds (as of 2017) */
         uint64_t win_ticks;
         uint64_t now_unix_ns;
+        uint64_t now_tai_ns;
         uint64_t raw;
 
         KeQuerySystemTime(&initTime);
@@ -215,14 +224,15 @@ static int init_ptp(device_t *dev)
         now_unix_ns = (win_ticks >= FILETIME_TO_UNIX_EPOCH_100NS)
             ? (win_ticks - FILETIME_TO_UNIX_EPOCH_100NS) * 100ULL
             : 0ULL;
+        now_tai_ns = now_unix_ns + TAI_UTC_OFFSET_NS;
 
         ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
         ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
         raw = ((uint64_t)ts_hi << 32) | ts_lo;
         InterlockedExchange64((volatile LONG64 *)&i219_systim_offset,
-                              (LONG64)(now_unix_ns - raw / 200000ULL));
-        DEBUGP(DL_INFO, "I219 init_ptp: offset=0x%llx (epoch=0x%llx, raw_ns=0x%llx)\n",
-               i219_systim_offset, now_unix_ns, raw / 200000ULL);
+                              (LONG64)(now_tai_ns - raw / 200000ULL));
+        DEBUGP(DL_INFO, "I219 init_ptp: offset=0x%llx (TAI_epoch=0x%llx, raw_ns=0x%llx)\n",
+               i219_systim_offset, now_tai_ns, raw / 200000ULL);
     }
 
     DEBUGP(DL_TRACE, "<==i219_init_ptp: Success\n");
