@@ -460,6 +460,25 @@ if ($TestExecutable) {
             Start-Service -Name EventLog -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             Write-Host "  [ETW] EventLog restarted — IntelAvbFilterEnableBits will be set by McGenControlCallbackV2" -ForegroundColor DarkGray
+
+            # Service health check: EventLog restart can cause NDIS filter detach.
+            # Verify IntelAvbFilter driver is still running; restart it if detached.
+            $avbSvc = Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
+            if ($null -eq $avbSvc) {
+                Write-Host "  [INFRA] IntelAvbFilter service not found — driver may not be installed." -ForegroundColor Yellow
+            } elseif ($avbSvc.Status -ne 'Running') {
+                Write-Host "  [INFRA] IntelAvbFilter stopped after EventLog restart — restarting driver..." -ForegroundColor Yellow
+                Start-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 5
+                $avbSvc = Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
+                if ($null -eq $avbSvc -or $avbSvc.Status -ne 'Running') {
+                    Write-Host "  [WARN] IntelAvbFilter failed to restart — subsequent tests may fail with device error 2." -ForegroundColor Yellow
+                } else {
+                    Write-Host "  [INFRA] IntelAvbFilter restarted successfully." -ForegroundColor DarkGray
+                }
+            } else {
+                Write-Host "  [INFRA] IntelAvbFilter service confirmed running." -ForegroundColor DarkGray
+            }
         } else {
             Write-Host "  [WARN] IntelAvbFilter ETW provider not registered — TC-1 may fail" -ForegroundColor Yellow
             Write-Host "         Run: wevtutil im src\IntelAvbFilter.man /mf:<sys> /rf:<sys>" -ForegroundColor Yellow
