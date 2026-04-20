@@ -207,18 +207,31 @@ static int TestClockAdjustment(HANDLE h) {
 
     /* Each entry: {increment_ns, raw_timinca_equiv, description}
      * raw_timinca_equiv = increment_ns << 24 (integer-only, no fractional component). */
+    /* Detect device nominal from current TIMINCA bits[31:24].
+     * I210 nominal=8 → max_valid_incr=15; I226 nominal=24 → max_valid_incr=47.
+     * All test values must be in [1, max_valid_incr] to pass driver validation. */
+    ULONG nominal_ns = (originalTiminca >> 24) & 0xFFU;
+    if (nominal_ns == 0u) nominal_ns = 8u;  /* fallback to I210 nominal */
+    ULONG max_valid = 2u * nominal_ns - 1u;
+    /* Use values relative to nominal so the table works for any adapter */
+    ULONG val_near_max = (max_valid > 2u) ? max_valid - 1u : max_valid; /* 2×nominal-2 */
+    ULONG val_mid      = nominal_ns + (nominal_ns / 2u);                 /* 1.5×nominal */
+    if (val_mid > max_valid) val_mid = nominal_ns;  /* clamp to range */
+
     struct {
         ULONG increment_ns;   /* passed to IOCTL_AVB_ADJUST_FREQUENCY */
         ULONG timinca;        /* expected TIMINCA readback = increment_ns << 24 */
         const char* description;
         double expectedRateMHz;
-    } tests[] = {
-        {1u,  0x01000000u, "1ns per cycle",               1.0},
-        {8u,  0x08000000u, "8ns per cycle (I210 standard)",  0.125},
-        {24u, 0x18000000u, "24ns per cycle (I226 standard)", 0.042},
-        {16u, 0x10000000u, "16ns per cycle",               0.0625},
-        {4u,  0x04000000u, "4ns per cycle",                0.25}
-    };
+    } tests[5];
+    /* Populate at runtime using detected nominal; all values within [1, max_valid_incr] */
+    tests[0].increment_ns = 1u;          tests[0].timinca = 1u << 24;           tests[0].description = "1ns per cycle (minimum)";          tests[0].expectedRateMHz = 1.0;
+    tests[1].increment_ns = nominal_ns;  tests[1].timinca = nominal_ns << 24;   tests[1].description = "nominal ns per cycle";              tests[1].expectedRateMHz = 1.0 / (double)nominal_ns;
+    tests[2].increment_ns = val_near_max;tests[2].timinca = val_near_max << 24; tests[2].description = "near-max ns per cycle";             tests[2].expectedRateMHz = 1.0 / (double)val_near_max;
+    tests[3].increment_ns = val_mid;     tests[3].timinca = val_mid << 24;      tests[3].description = "mid-range ns per cycle";            tests[3].expectedRateMHz = 1.0 / (double)val_mid;
+    tests[4].increment_ns = 4u;          tests[4].timinca = 4u << 24;           tests[4].description = "4ns per cycle";                     tests[4].expectedRateMHz = 0.25;
+    printf("Adapter nominal=%uns max_valid_incr=%u — test values: {%u, %u, %u, %u, 4}\n",
+           nominal_ns, max_valid, 1u, nominal_ns, val_near_max, val_mid);
 
     for (int i = 0; i < (int)(sizeof(tests) / sizeof(tests[0])); i++) {
         printf("Test 2.%d: increment_ns=%u (%s)\n",
