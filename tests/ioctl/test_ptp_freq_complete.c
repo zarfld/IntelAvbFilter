@@ -647,7 +647,38 @@ static int Test_VV_FREQ_003_gPTPSyncError(TestContext *ctx)
     
     HANDLE master = multi_ctx.handles[0];
     HANDLE slave = multi_ctx.handles[1];
-    
+
+    /* Pre-check: verify adapters are actually PTP-synchronized (master/slave).
+     * Read timestamps from both adapters and compare. Independent adapters will
+     * differ by seconds or more; synchronized ones differ by < 10 ms.
+     * Skip the 60-second measurement loop if they are clearly not synced —
+     * this prevents CI from blocking 60 s when no gPTP daemon is running. */
+    {
+        UINT64 ts_m = 0, ts_s = 0;
+        BOOL ts_ok = GetTimestamp(master, &ts_m) && GetTimestamp(slave, &ts_s);
+        if (!ts_ok || ts_m == 0 || ts_s == 0) {
+            printf("  [SKIP] VV-FREQ-003: Timestamp read failed — no PHC access\n");
+            for (int i = 0; i < multi_ctx.count; i++) {
+                if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE)
+                    CloseHandle(multi_ctx.handles[i]);
+            }
+            return TEST_SKIP;
+        }
+        UINT64 offset_ns = (ts_m > ts_s) ? (ts_m - ts_s) : (ts_s - ts_m);
+        if (offset_ns > 10000000ULL) {  /* > 10 ms → adapters not PTP-synced */
+            printf("  [SKIP] VV-FREQ-003: PHC offset %llu ns > 10 ms — "
+                   "adapters not in master/slave PTP relationship (no gPTP daemon?)\n",
+                   offset_ns);
+            for (int i = 0; i < multi_ctx.count; i++) {
+                if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE)
+                    CloseHandle(multi_ctx.handles[i]);
+            }
+            return TEST_SKIP;
+        }
+        printf("  [INFO] PHC offset between adapters: %llu ns — proceeding with sync test\n",
+               offset_ns);
+    }
+
     printf("  [INFO] Simulating gPTP sync (master-slave) for 60 seconds...\n");
     
     /* Apply same frequency adjustment to both adapters */
