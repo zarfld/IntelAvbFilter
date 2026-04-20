@@ -2143,7 +2143,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                      * so callers using bits[31:24] to detect nominal get 8, not INCPERIOD=2.
                      * I219 TIMINCA = (2 << 24) | IV where IV = 2,000,000 * logical_ns. */
                     if (activeContext->intel_device.device_type == INTEL_DEVICE_I219) {
-                        ULONG prev_iv = current_timinca & 0x00FFFFFFU;
+                        ULONG prev_iv = current_timinca & INTEL_TIMINCA_SUBNS_MASK;
                         ULONG prev_logical_ns = (prev_iv > 0u) ? (ULONG)(prev_iv / 2000000UL) : 8u;
                         if (prev_logical_ns == 0u) prev_logical_ns = 8u;  /* fallback to nominal */
                         freq_req->current_increment = (prev_logical_ns << 24);
