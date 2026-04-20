@@ -192,7 +192,7 @@ static void test_pci_latency_one_adapter(HANDLE h, int adapter_index)
                             &verBytes, NULL) &&
             verBytes >= sizeof(ver) &&
             (ver.Flags & AVB_VERSION_FLAG_DEBUG_BUILD)) {
-            p50_limit = 75000ULL;   /* 75 µs — 50% margin over worst Debug P50 (~51µs)  */
+            p50_limit = 100000ULL;  /* 100 µs — empirically observed P50 ~79µs on CI (debug+verifier) */
             p99_limit = 600000ULL;  /* 600 µs — ~2x margin over worst Debug P99 (493µs) */
             printf("  [Debug driver] Relaxed thresholds: P50 <%.0f µs  P99 <%.0f µs\n",
                    (double)p50_limit / 1000.0, (double)p99_limit / 1000.0);

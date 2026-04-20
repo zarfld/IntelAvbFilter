@@ -499,14 +499,56 @@ static int TestPhcQpcCoherence(HANDLE h)
     for (int ai = 0; ai < adapter_count; ai++) {
         printf("--- Adapter %d / %d ---\n", ai, adapter_count - 1);
 
+        /* Open a per-adapter handle bound to this adapter's FsContext.
+         * Without this, IOCTL_AVB_PHC_CROSSTIMESTAMP uses the FsContext set by
+         * OPEN_ADAPTER in main(), which always points to adapter 0. */
+        AVB_ENUM_REQUEST enumReq;
+        ZeroMemory(&enumReq, sizeof(enumReq));
+        enumReq.index = (ULONG)ai;
+        DWORD brEnum = 0;
+        if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enumReq, sizeof(enumReq),
+                             &enumReq, sizeof(enumReq), &brEnum, NULL)
+            || enumReq.status != 0) {
+            printf("  [SKIP] TC-5a/TC-5b adapter %d: ENUM_ADAPTERS failed\n", ai);
+            continue;
+        }
+
+        HANDLE hAdapter = CreateFileW(L"\\\\.\\IntelAvbFilter",
+                                      GENERIC_READ | GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      NULL, OPEN_EXISTING, 0, NULL);
+        if (hAdapter == INVALID_HANDLE_VALUE) {
+            printf("  [SKIP] TC-5a/TC-5b adapter %d: cannot open device handle (error %lu)\n",
+                   ai, GetLastError());
+            continue;
+        }
+
+        AVB_OPEN_REQUEST openReq;
+        ZeroMemory(&openReq, sizeof(openReq));
+        openReq.vendor_id = enumReq.vendor_id;
+        openReq.device_id = enumReq.device_id;
+        openReq.index     = (ULONG)ai;
+        DWORD brOpen = 0;
+        if (!DeviceIoControl(hAdapter, IOCTL_AVB_OPEN_ADAPTER,
+                             &openReq, sizeof(openReq),
+                             &openReq, sizeof(openReq), &brOpen, NULL)
+            || openReq.status != 0) {
+            printf("  [SKIP] TC-5a/TC-5b adapter %d: OPEN_ADAPTER failed"
+                   " (status=0x%08X GLE=%lu)\n", ai, openReq.status, GetLastError());
+            CloseHandle(hAdapter);
+            continue;
+        }
+
         /* -------------------------------------------------------------- *
          * TC-5a: bracket width < 500 µs                                  *
          * -------------------------------------------------------------- */
         printf("TC-5a: PHC-QPC bracket width < 500 µs (adapter %d)\n", ai);
 
         ULONGLONG phc_before = 0;
-        if (!ReadPhcForAdapter(h, (ULONG)ai, &phc_before)) {
+        if (!ReadPhcForAdapter(hAdapter, (ULONG)ai, &phc_before)) {
             printf("  [SKIP] TC-5a/TC-5b adapter %d: PHC read returns 0 — not running PTP\n", ai);
+            CloseHandle(hAdapter);
             continue;
         }
 
@@ -514,17 +556,18 @@ static int TestPhcQpcCoherence(HANDLE h)
         ZeroMemory(&r1, sizeof(r1));
         r1.adapter_index = (ULONG)ai;
         DWORD br = 0;
-        BOOL ok = DeviceIoControl(h, IOCTL_AVB_PHC_CROSSTIMESTAMP,
+        BOOL ok = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP,
                                   &r1, sizeof(r1), &r1, sizeof(r1), &br, NULL);
 
         ULONGLONG phc_after = 0;
-        ReadPhcForAdapter(h, (ULONG)ai, &phc_after);
+        ReadPhcForAdapter(hAdapter, (ULONG)ai, &phc_after);
 
         if (!ok || !r1.valid || r1.status != 0) {
             printf("  [FAIL] TC-5a/adapter %d: IOCTL_AVB_PHC_CROSSTIMESTAMP failed"
                    " (ok=%d valid=%u status=0x%08X GLE=%lu)\n",
                    ai, ok, r1.valid, r1.status, GetLastError());
             totalFailed++;
+            CloseHandle(hAdapter);
             continue;
         }
 
@@ -569,6 +612,7 @@ static int TestPhcQpcCoherence(HANDLE h)
         if (r1.qpc_frequency == 0) {
             printf("  [FAIL] TC-5b/adapter %d: qpc_frequency == 0\n", ai);
             totalFailed++;
+            CloseHandle(hAdapter);
             continue;
         }
 
@@ -581,12 +625,13 @@ static int TestPhcQpcCoherence(HANDLE h)
         ZeroMemory(&r2, sizeof(r2));
         r2.adapter_index = (ULONG)ai;
         br = 0;
-        ok = DeviceIoControl(h, IOCTL_AVB_PHC_CROSSTIMESTAMP,
+        ok = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP,
                              &r2, sizeof(r2), &r2, sizeof(r2), &br, NULL);
 
         if (!ok || !r2.valid || r2.status != 0) {
             printf("  [FAIL] TC-5b/adapter %d: second IOCTL failed\n", ai);
             totalFailed++;
+            CloseHandle(hAdapter);
             continue;
         }
 
@@ -597,12 +642,13 @@ static int TestPhcQpcCoherence(HANDLE h)
         ZeroMemory(&r3, sizeof(r3));
         r3.adapter_index = (ULONG)ai;
         br = 0;
-        ok = DeviceIoControl(h, IOCTL_AVB_PHC_CROSSTIMESTAMP,
+        ok = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP,
                              &r3, sizeof(r3), &r3, sizeof(r3), &br, NULL);
 
         if (!ok || !r3.valid || r3.status != 0) {
             printf("  [FAIL] TC-5b/adapter %d: third IOCTL failed\n", ai);
             totalFailed++;
+            CloseHandle(hAdapter);
             continue;
         }
 
@@ -661,6 +707,7 @@ static int TestPhcQpcCoherence(HANDLE h)
         }
 
         printf("\n");
+        CloseHandle(hAdapter);
     }
 
     printf("--- Test 5 Summary: %d adapter(s) tested, %d fail(s) ---\n",

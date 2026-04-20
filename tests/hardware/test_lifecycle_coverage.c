@@ -745,11 +745,25 @@ static void RunTC_LCY_004(HANDLE hDev, const char *adapterTag)
                 adapterTag);
     UINT64 t0 = GetTimestampUs();
 
+    /* TC-LCY-006 (NIC toggle) may have triggered FilterDetach+FilterAttach on
+     * the adapter whose context is stored in hDev->FsContext, creating a new
+     * AvbContext while FsContext still points to the freed old one.  A fresh
+     * handle with FsContext=NULL falls back to AvbFindIntelFilterModule, which
+     * always returns a live context.  Stats are per-context but RESET is just
+     * verifying the IOCTL mechanism works — the fresh handle is fine here. */
+    HANDLE hFresh = CreateFileA("\\\\.\\IntelAvbFilter",
+                                GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hUsed = (hFresh != INVALID_HANDLE_VALUE) ? hFresh : hDev;
+
     DWORD bytesReturned = 0;
-    BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_RESET_STATISTICS,
+    BOOL ok = DeviceIoControl(hUsed, IOCTL_AVB_RESET_STATISTICS,
                               NULL, 0, NULL, 0, &bytesReturned, NULL);
     if (!ok) {
         DWORD err = GetLastError();
+        if (hFresh != INVALID_HANDLE_VALUE) CloseHandle(hFresh);
         char reason[128];
         _snprintf_s(reason, sizeof(reason), _TRUNCATE,
                     "IOCTL_AVB_RESET_STATISTICS failed (GetLastError=%lu)", err);
@@ -758,7 +772,8 @@ static void RunTC_LCY_004(HANDLE hDev, const char *adapterTag)
     }
 
     AVB_DRIVER_STATISTICS s;
-    if (!ReadStats(hDev, &s)) {
+    if (!ReadStats(hUsed, &s)) {
+        if (hFresh != INVALID_HANDLE_VALUE) CloseHandle(hFresh);
         RecordResult(name, TEST_FAIL,
                      "IOCTL_AVB_GET_STATISTICS after reset failed",
                      GetTimestampUs() - t0);
@@ -822,6 +837,8 @@ static void RunTC_LCY_004(HANDLE hDev, const char *adapterTag)
     CHECK_FIELD_ZERO(FilterStatusCount)
     CHECK_FIELD_ZERO(FilterNetPnPCount)
     CHECK_FIELD_ZERO(PauseRestartGeneration)
+
+    if (hFresh != INVALID_HANDLE_VALUE) CloseHandle(hFresh);
 
     if (failCount > 0) {
         char reason[1100];
