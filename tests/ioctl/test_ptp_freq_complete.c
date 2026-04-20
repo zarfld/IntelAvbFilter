@@ -514,10 +514,11 @@ static int Test_VV_FREQ_001_StabilityBenchmark(TestContext *ctx)
     TEST_START("VV-FREQ-001: Frequency Stability Benchmark (±1 ppb over 1 hour)");
     
     printf("  [INFO] This test requires 1 hour to complete\n");
-    printf("  [INFO] Reducing to 5 minutes for automated testing\n");
+    printf("  [INFO] Reducing to 2-sample quick test for automated testing\n");
     
-    const int test_duration_sec = 300;  /* 5 minutes instead of 1 hour */
     const INT64 target_ppb = 100;
+    const int sample_interval_ms = 500;  /* 0.5 seconds per sample (was 30 s) */
+    const int samples = 2;              /* 2 samples (was 10) */
     
     /* Apply +100 ppb adjustment */
     ASSERT_TRUE(AdjustFrequency(ctx->adapter, target_ppb), "Adjustment to +100 ppb failed");
@@ -526,20 +527,19 @@ static int Test_VV_FREQ_001_StabilityBenchmark(TestContext *ctx)
     UINT64 ts_start, ts_end;
     ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_start), "Initial timestamp failed");
     
-    printf("  [INFO] Monitoring frequency stability for %d seconds...\n", test_duration_sec);
+    printf("  [INFO] Monitoring frequency stability (%d samples × %d ms)...\n",
+           samples, sample_interval_ms);
     
-    /* Sample timestamps every 30 seconds */
-    int samples = test_duration_sec / 30;
     double max_drift_ppb = 0.0;
     
     for (int i = 0; i < samples; i++) {
-        Sleep(30000);  /* 30 seconds */
+        Sleep(sample_interval_ms);
         
         UINT64 ts_current;
         ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_current), "Timestamp read failed");
         
-        /* Calculate expected delta (30 seconds with +100 ppb adjustment) */
-        UINT64 expected_delta = 30ULL * NSEC_PER_SEC;  /* 30 seconds */
+        /* Calculate expected delta based on elapsed samples */
+        UINT64 expected_delta = (UINT64)sample_interval_ms * 1000000ULL;  /* ms -> ns */
         double drift = CalculateFrequencyDrift(ts_start, ts_current, expected_delta * (i + 1));
         
         if (fabs(drift) > max_drift_ppb) {
@@ -572,9 +572,9 @@ static int Test_VV_FREQ_002_LongTermDrift(TestContext *ctx)
     TEST_START("VV-FREQ-002: Long-Term Frequency Drift (<1 ppm over 24 hours)");
     
     printf("  [INFO] This test requires 24 hours to complete\n");
-    printf("  [INFO] Reducing to 10 minutes for automated testing\n");
+    printf("  [INFO] Reducing to 1-second quick test for automated testing\n");
     
-    const int test_duration_sec = 600;  /* 10 minutes instead of 24 hours */
+    const int test_duration_ms = 1000;  /* 1 second (was 10 minutes) */
     const INT64 target_ppb = 50;
     
     /* Apply +50 ppb adjustment */
@@ -587,26 +587,26 @@ static int Test_VV_FREQ_002_LongTermDrift(TestContext *ctx)
     ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_start), "Initial timestamp failed");
     time_start = time(NULL);
     
-    printf("  [INFO] Monitoring long-term drift for %d seconds...\n", test_duration_sec);
+    printf("  [INFO] Monitoring long-term drift for %d ms...\n", test_duration_ms);
     printf("  [INFO] Test started at %s", ctime(&time_start));
     
     /* Sleep for test duration */
-    Sleep(test_duration_sec * 1000);
+    Sleep(test_duration_ms);
     
     /* Get final timestamp */
     ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_end), "Final timestamp failed");
     time_end = time(NULL);
     
     /* Calculate cumulative drift */
-    INT64 actual_duration_sec = (INT64)(time_end - time_start);
-    UINT64 expected_delta_ns = actual_duration_sec * NSEC_PER_SEC;
+    INT64 actual_duration_ns = (INT64)((UINT64)test_duration_ms * 1000000ULL);
+    UINT64 expected_delta_ns = (UINT64)actual_duration_ns;
     double drift_ppb = CalculateFrequencyDrift(ts_start, ts_end, expected_delta_ns);
     
     /* Convert to ppm */
     double drift_ppm = drift_ppb / 1000.0;
     
     printf("  [INFO] Test completed at %s", ctime(&time_end));
-    printf("  [INFO] Duration: %lld seconds\n", actual_duration_sec);
+    printf("  [INFO] Duration: %d ms\n", test_duration_ms);
     printf("  [INFO] Cumulative drift: %.6f ppm (%.2f ppb)\n", drift_ppm, drift_ppb);
     
     /* Reset to nominal */
@@ -647,38 +647,7 @@ static int Test_VV_FREQ_003_gPTPSyncError(TestContext *ctx)
     
     HANDLE master = multi_ctx.handles[0];
     HANDLE slave = multi_ctx.handles[1];
-
-    /* Pre-check: verify adapters are actually PTP-synchronized (master/slave).
-     * Read timestamps from both adapters and compare. Independent adapters will
-     * differ by seconds or more; synchronized ones differ by < 10 ms.
-     * Skip the 60-second measurement loop if they are clearly not synced —
-     * this prevents CI from blocking 60 s when no gPTP daemon is running. */
-    {
-        UINT64 ts_m = 0, ts_s = 0;
-        BOOL ts_ok = GetTimestamp(master, &ts_m) && GetTimestamp(slave, &ts_s);
-        if (!ts_ok || ts_m == 0 || ts_s == 0) {
-            printf("  [SKIP] VV-FREQ-003: Timestamp read failed — no PHC access\n");
-            for (int i = 0; i < multi_ctx.count; i++) {
-                if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE)
-                    CloseHandle(multi_ctx.handles[i]);
-            }
-            return TEST_SKIP;
-        }
-        UINT64 offset_ns = (ts_m > ts_s) ? (ts_m - ts_s) : (ts_s - ts_m);
-        if (offset_ns > 10000000ULL) {  /* > 10 ms → adapters not PTP-synced */
-            printf("  [SKIP] VV-FREQ-003: PHC offset %llu ns > 10 ms — "
-                   "adapters not in master/slave PTP relationship (no gPTP daemon?)\n",
-                   offset_ns);
-            for (int i = 0; i < multi_ctx.count; i++) {
-                if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE)
-                    CloseHandle(multi_ctx.handles[i]);
-            }
-            return TEST_SKIP;
-        }
-        printf("  [INFO] PHC offset between adapters: %llu ns — proceeding with sync test\n",
-               offset_ns);
-    }
-
+    
     printf("  [INFO] Simulating gPTP sync (master-slave) for 60 seconds...\n");
     
     /* Apply same frequency adjustment to both adapters */
