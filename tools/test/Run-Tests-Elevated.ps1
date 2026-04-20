@@ -72,7 +72,7 @@ if ($LogFile) {
 if ($LogFile) {
     $command += "; Stop-Transcript"
 }
-$command += "; Write-Host ''; Write-Host 'Press any key to close...' -ForegroundColor Yellow; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')"
+#$command += "; Write-Host ''; Write-Host 'Press any key to close...' -ForegroundColor Yellow; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')"
 
 $arguments = @(
     '-NoProfile'
