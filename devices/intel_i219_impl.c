@@ -313,40 +313,32 @@ static int get_systime(device_t *dev, uint64_t *systime)
         return -1;
     }
 
-    /* I219 (e1000e family): reading SYSTIMH first latches SYSTIML to prevent
-     * a rollover mid-read.  SYSTIML must be read immediately after.
-     * (Opposite of IGB/I210 where SYSTIML read latches SYSTIMH.)
+    /* I219 (e1000e family): reading SYSTIMH latches SYSTIML in hardware — the
+     * two registers form an atomic pair once SYSTIMH is read.  Read H first,
+     * then L immediately.  No retry loop is needed or correct here.
      *
-     * Double-read defensive check: if SYSTIMH changes between the two H reads,
-     * the counter wrapped between latching L and our second H read — retry.
-     * On I219 SYSTIM wraps every ~25.6 hours so retries are extremely rare in
-     * practice; this loop protects against the pathological case. */
+     * WHY NO RETRY: the raw I219 SYSTIM counter increments at 200,000 counts/ns,
+     * so the upper 32 bits (SYSTIMH) roll over every ~21.5µs.  A second read of
+     * SYSTIMH will almost always differ from the first because MMIO round-trips
+     * take ~5–50µs each — the window is far smaller than the rollover period.
+     * A "while (h1 != h2)" guard would loop indefinitely (observed: >12,000
+     * retries, P50 = 5 ms rather than the expected <75µs).
+     *
+     * The hardware guarantee makes the retry unnecessary: the pair
+     * (SYSTIMH_at_latch, SYSTIML_latched) is already atomic.
+     *
+     * Reference: Linux e1000e ptp.c e1000e_phc_gettimex64() — no retry loop. */
     {
-        uint32_t h1, h2;
-        int retry = 0;
-        do {
-            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &h1);
-            if (result != 0) {
-                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH(1) read failed (%d) — KE fallback\n", result);
-                goto fallback;
-            }
-            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
-            if (result != 0) {
-                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
-                goto fallback;
-            }
-            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &h2);
-            if (result != 0) {
-                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH(2) read failed (%d) — KE fallback\n", result);
-                goto fallback;
-            }
-            if (h1 != h2) {
-                DEBUGP(DL_WARN, "[I219-DIAG] GET: H changed during read (h1=0x%x h2=0x%x) — retry %d\n",
-                       h1, h2, ++retry);
-            }
-        } while (h1 != h2);
-        UNREFERENCED_PARAMETER(retry); /* incremented only inside DEBUGP; suppress C4189 in Release */
-        ts_high = h1;
+        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
+        if (result != 0) {
+            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
+            goto fallback;
+        }
+        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
+        if (result != 0) {
+            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
+            goto fallback;
+        }
     }
 
     /* I219 raw SYSTIM counter advances at 200,000 counts per real nanosecond
