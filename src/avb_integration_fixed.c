@@ -2098,8 +2098,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                  * Increment_ns ceiling: device-specific because nominal hardware periods differ.
                  *   I210/I211 @ 125 MHz → nominal = 8 ns → max = 2×8-1 = 15
                  *   I226/I225 @ 200 MHz → nominal = 24 ns → max = 2×24-1 = 47
-                 *   I219 (PCH, MDIO)   → nominal = 2 ns  → max = 2×2-1  = 3
-                 *     (conservative; I219 TIMINCA IP field is 3-bit, max=7 from datasheet)
+                 *   I219 (PCH, MDIO)   → nominal = 8 ns → IV=2M×ns, 24-bit IV → max = 2×8-1 = 15
+                 *     (I219 TIMINCA IP=2 fixed; logical ns range same as I210: [1,15])
+                 *     Positive ppb >+100% clamped in IV 24-bit field; range [-87.5%,+100%] valid.
                  *   increment_ns == 0 → clock frozen (minimum violation; always rejected)
                  * Fixes UT-PTP-FREQ-006/007; implements #65 (REQ-F-EVENT-LOG-001) TC-3/TC-4 */
                 {
@@ -2107,7 +2108,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     avb_u32 max_valid_incr;
                     switch (activeContext->intel_device.device_type) {
                         case INTEL_DEVICE_I226:  max_valid_incr = 47u; break; /* 2×24-1 */
-                        case INTEL_DEVICE_I219:  max_valid_incr = 7u;  break; /* I219 3-bit field */
+                        case INTEL_DEVICE_I219:  max_valid_incr = 15u; break; /* 2×8-1: same as I210 nominal */
                         default:                 max_valid_incr = 15u; break; /* I210: 2×8-1 */
                     }
                     if (freq_req->increment_ns == 0 || freq_req->increment_ns > max_valid_incr) {
@@ -2138,6 +2139,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     // Read current TIMINCA value
                     int rc = (ops && ops->read_timinca) ? ops->read_timinca(&activeContext->intel_device, &current_timinca) : -1;
                     freq_req->current_increment = current_timinca;
+                    /* For I219, normalize current_increment to I210-compat format (logical_ns << 24)
+                     * so callers using bits[31:24] to detect nominal get 8, not INCPERIOD=2.
+                     * I219 TIMINCA = (2 << 24) | IV where IV = 2,000,000 * logical_ns. */
+                    if (activeContext->intel_device.device_type == INTEL_DEVICE_I219) {
+                        ULONG prev_iv = current_timinca & 0x00FFFFFFU;
+                        ULONG prev_logical_ns = (prev_iv > 0u) ? (ULONG)(prev_iv / 2000000UL) : 8u;
+                        if (prev_logical_ns == 0u) prev_logical_ns = 8u;  /* fallback to nominal */
+                        freq_req->current_increment = (prev_logical_ns << 24);
+                    }
                     
                     if (rc != 0) {
                         DEBUGP(DL_ERROR, "Failed to read TIMINCA register\n");
