@@ -74,6 +74,13 @@ static int tests_failed = 0;
 /* Discovered adapter count (populated during enumeration) */
 static int adapter_count = 0;
 
+/* Per-adapter VID/DID captured during IOCTL_AVB_ENUM_ADAPTERS; used to bind
+ * hDevice to the correct clock via IOCTL_AVB_OPEN_ADAPTER before each
+ * adapter's test section.  Without the OPEN_ADAPTER call the kernel falls
+ * back to AvbFindIntelFilterModule() and every loop iteration tests the
+ * same physical clock regardless of the clock_id/adapter_idx field. */
+static struct { avb_u16 vendor_id; avb_u16 device_id; } g_adapters[8];
+
 /* True when the installed driver is a Debug build (detected via IOCTL_AVB_GET_VERSION Flags).
  * Performance thresholds are loosened for Debug drivers due to DbgPrint overhead. */
 static bool g_debug_driver = false;
@@ -759,6 +766,8 @@ int main(void) {
         
         printf("  Adapter %d: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
                i, enum_req.vendor_id, enum_req.device_id, enum_req.capabilities);
+        g_adapters[adapter_count].vendor_id = enum_req.vendor_id;
+        g_adapters[adapter_count].device_id = enum_req.device_id;
         adapter_count++;
     }
     
@@ -787,8 +796,34 @@ int main(void) {
     // test_ioctl_latency (10,000 iterations) runs last per adapter.
     for (int ai = 0; ai < adapter_count; ai++) {
         printf("\n------------------------------------------------------------\n");
-        printf("Running tests on adapter %d / %d\n", ai, adapter_count - 1);
+        printf("Running tests on adapter %d / %d (VID=0x%04X DID=0x%04X)\n",
+               ai, adapter_count - 1,
+               g_adapters[ai].vendor_id, g_adapters[ai].device_id);
         printf("------------------------------------------------------------\n");
+
+        /* Bind this device handle to adapter 'ai' so every subsequent IOCTL
+         * targets that adapter's PHC clock.  Without this call the kernel
+         * falls back to AvbFindIntelFilterModule() on every IOCTL — always
+         * the same adapter regardless of the clock_id field — so all three
+         * loop iterations silently test the identical underlying clock. */
+        AVB_OPEN_REQUEST open_req = {0};
+        open_req.vendor_id = g_adapters[ai].vendor_id;
+        open_req.device_id = g_adapters[ai].device_id;
+        open_req.index     = (avb_u32)ai;
+        DWORD brOA = 0;
+        if (!DeviceIoControl(hDevice, IOCTL_AVB_OPEN_ADAPTER,
+                             &open_req, sizeof(open_req),
+                             &open_req, sizeof(open_req),
+                             &brOA, NULL)) {
+            printf("  [SKIP] OPEN_ADAPTER failed for adapter %d "
+                   "(VID=0x%04X DID=0x%04X error=%lu) - skipping all tests\n",
+                   ai, g_adapters[ai].vendor_id, g_adapters[ai].device_id,
+                   GetLastError());
+            continue;
+        }
+        printf("  Bound to adapter %d clock (VID=0x%04X DID=0x%04X).\n",
+               ai, g_adapters[ai].vendor_id, g_adapters[ai].device_id);
+
         test_basic_tx_timestamp_retrieval(hDevice, (uint32_t)ai);
         test_timestamp_monotonicity(hDevice, (uint32_t)ai);
         test_timestamp_accuracy(hDevice, (uint32_t)ai);
