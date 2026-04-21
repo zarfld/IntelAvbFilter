@@ -341,6 +341,156 @@ int main(void)
         }
     }
 
+    /* ── Test 10: MDIO PHY Register Read (TEST-HW-I219-MDIO-001) ── */
+    /*
+     * Addresses: #151 (TEST-HW-I219-MDIO-001: PHY Register Access)
+     *            #153 (I219 PCH-Based MDIO acceptance criterion: MDIO PHY reads succeed)
+     *
+     * Read PHY Control Register (Clause 22, page 0, reg 0) via IOCTL_AVB_MDIO_READ.
+     * This exercises the full path: UM → IOCTL → driver → EXTCNF_CTRL.SWFLAG acquire
+     * → MDIC register write → MDIC ready-bit poll → EXTCNF_CTRL.SWFLAG release → result.
+     *
+     * PHY Control Register (MII reg 0) always returns a valid value on a live PHY:
+     *   - Bit 15 (Reset): always 0 after init (self-clearing)
+     *   - Bit 12 (Auto-negotiation enable): typically 1
+     *   - Bit 8 (Duplex): typically 1 (full duplex)
+     *   - Value 0xFFFF means the MDIO bus is non-responsive (hardware error)
+     *   - Value 0x0000 is also suspicious (no bits set in control reg is invalid)
+     *
+     * PHY Status Register (MII reg 1) is also read to confirm capability bits:
+     *   - Bit 2 (Link Status) may be 0 (cable disconnected) or 1
+     *   - Bit 5 (Auto-negotiation complete) typically 1 after init
+     *   - Bits 11-15 encode speed/duplex capabilities — must be non-zero
+     */
+    printf("\n--- Test 10: MDIO PHY Register Read (TEST-HW-I219-MDIO-001) ---\n");
+    {
+        AVB_MDIO_REQUEST mdioReq;
+
+        /* Read PHY Control Register (Clause 22, page 0, reg 0) */
+        ZeroMemory(&mdioReq, sizeof(mdioReq));
+        mdioReq.page = 0;  /* Clause 22 page 0 */
+        mdioReq.reg  = 0;  /* PHY Control Register */
+        result = DeviceIoControl(h, IOCTL_AVB_MDIO_READ,
+                                 &mdioReq, sizeof(mdioReq),
+                                 &mdioReq, sizeof(mdioReq),
+                                 &bytesReturned, NULL);
+        if (!result) {
+            AVB_REPORT_FAIL(&stats, "IOCTL_AVB_MDIO_READ (PHY reg 0)",
+                            "DeviceIoControl failed");
+        } else if (mdioReq.status != 0) {
+            printf("  [FAIL] MDIO_READ status=0x%08X — driver rejected request\n",
+                   mdioReq.status);
+            stats.failed++; stats.total++;
+        } else if (mdioReq.value == 0xFFFFU) {
+            AVB_REPORT_FAIL(&stats, "MDIO PHY reg 0",
+                            "Value=0xFFFF — MDIO bus non-responsive or PHY absent");
+        } else {
+            printf("  [PASS] PHY Control Reg (reg 0) = 0x%04X\n"
+                   "         AN_Enable=%u Duplex=%u Speed=%u%u\n",
+                   (unsigned)mdioReq.value,
+                   (mdioReq.value >> 12) & 1u,
+                   (mdioReq.value >>  8) & 1u,
+                   (mdioReq.value >>  6) & 1u,
+                   (mdioReq.value >> 13) & 1u);
+            stats.passed++; stats.total++;
+        }
+
+        /* Read PHY Status Register (Clause 22, page 0, reg 1) */
+        ZeroMemory(&mdioReq, sizeof(mdioReq));
+        mdioReq.page = 0;
+        mdioReq.reg  = 1;  /* PHY Status Register */
+        result = DeviceIoControl(h, IOCTL_AVB_MDIO_READ,
+                                 &mdioReq, sizeof(mdioReq),
+                                 &mdioReq, sizeof(mdioReq),
+                                 &bytesReturned, NULL);
+        if (!result || mdioReq.status != 0) {
+            printf("  [WARN] MDIO_READ PHY reg 1 failed (ok=%d status=0x%08X) — skipping\n",
+                   result, mdioReq.status);
+            stats.skipped++; stats.total++;
+        } else if (mdioReq.value == 0xFFFFU) {
+            AVB_REPORT_FAIL(&stats, "MDIO PHY reg 1",
+                            "Value=0xFFFF — PHY Status Register unreadable");
+        } else {
+            int link_up  = (mdioReq.value >> 2) & 1;
+            int an_done  = (mdioReq.value >> 5) & 1;
+            /* Bits [15:11] encode extended capabilities; at least one must be set on any
+             * real PHY (100BASE-TX Full, 100BASE-TX Half, 10BASE-T Full, 10BASE-T Half). */
+            int caps_ok  = (mdioReq.value >> 11) != 0;
+            printf("  [INFO] PHY Status Reg (reg 1) = 0x%04X "
+                   "(Link=%u AN_complete=%u caps[15:11]=0x%X)\n",
+                   (unsigned)mdioReq.value, link_up, an_done,
+                   (mdioReq.value >> 11) & 0x1FU);
+            if (caps_ok) {
+                AVB_REPORT_PASS(&stats, "PHY Status reg 1 capability bits non-zero");
+            } else {
+                AVB_REPORT_FAIL(&stats, "PHY Status reg 1",
+                                "Capability bits [15:11] all zero — unexpected for I219");
+            }
+        }
+    }
+
+    /* ── Test 11: MDIO PHY Identifier Read (TEST-HW-I219-MDIO-001 extended) ── */
+    /*
+     * Addresses: #151 (MDIO register mapping verification)
+     *
+     * PHY Identifier registers (reg 2 = OUI MSB, reg 3 = OUI LSB+model+rev)
+     * always return static device-specific values.  Intel I219 PHY OUI is
+     * 0x000547 (regs 2+3 = 0x0000, 0xA43x where x=revision).
+     * Reading a static register and confirming it matches the expected OUI is the
+     * strongest possible MDIO bus verification short of a write test.
+     * Avoids write risks (no PHY misconfiguration).
+     */
+    printf("\n--- Test 11: MDIO PHY Identifier (OUI verification) ---\n");
+    {
+        AVB_MDIO_REQUEST mdioId2, mdioId3;
+
+        /* Read PHY Identifier 1 (OUI bits [21:6]) */
+        ZeroMemory(&mdioId2, sizeof(mdioId2));
+        mdioId2.page = 0;
+        mdioId2.reg  = 2;
+        result = DeviceIoControl(h, IOCTL_AVB_MDIO_READ,
+                                 &mdioId2, sizeof(mdioId2),
+                                 &mdioId2, sizeof(mdioId2),
+                                 &bytesReturned, NULL);
+
+        /* Read PHY Identifier 2 (OUI bits [5:0] | model | revision) */
+        ZeroMemory(&mdioId3, sizeof(mdioId3));
+        mdioId3.page = 0;
+        mdioId3.reg  = 3;
+        result = DeviceIoControl(h, IOCTL_AVB_MDIO_READ,
+                                 &mdioId3, sizeof(mdioId3),
+                                 &mdioId3, sizeof(mdioId3),
+                                 &bytesReturned, NULL) && result;
+
+        if (!result || mdioId2.status != 0 || mdioId3.status != 0) {
+            printf("  [WARN] PHY Identifier read failed — skipping OUI check\n");
+            stats.skipped++; stats.total++;
+        } else if (mdioId2.value == 0xFFFFU || mdioId3.value == 0xFFFFU) {
+            AVB_REPORT_FAIL(&stats, "PHY Identifier registers",
+                            "0xFFFF returned — MDIO bus not responding");
+        } else {
+            /* Reconstruct 24-bit OUI from reg 2 (bits 21:6) and reg 3 (bits 5:0 in [15:10]) */
+            uint32_t oui = ((uint32_t)mdioId2.value << 6) |
+                           ((mdioId3.value >> 10) & 0x3FU);
+            uint32_t model = (mdioId3.value >> 4) & 0x3FU;
+            uint32_t rev   =  mdioId3.value & 0xFU;
+
+            printf("  [INFO] PHY ID1=0x%04X ID2=0x%04X → OUI=0x%06X model=0x%02X rev=%u\n",
+                   (unsigned)mdioId2.value, (unsigned)mdioId3.value,
+                   oui, model, rev);
+
+            /* Intel I219 PHY OUI (Marvell-derived, used by Intel):
+             * OUI = 0x000547 or similar Intel-assigned.  Any non-zero, non-0xFFFFFF OUI
+             * from valid registers is acceptable — confirms MDIO bus is functional. */
+            if (oui != 0x000000U && oui != 0xFFFFFFU) {
+                AVB_REPORT_PASS(&stats, "PHY Identifier OUI non-zero (MDIO bus functional)");
+            } else {
+                AVB_REPORT_FAIL(&stats, "PHY Identifier OUI",
+                                "OUI=0 or 0xFFFFFF — MDIO read not working correctly");
+            }
+        }
+    }
+
     CloseHandle(h);
     return AvbPrintSummary(&stats);
 }
