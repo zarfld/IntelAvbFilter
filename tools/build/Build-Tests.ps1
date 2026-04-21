@@ -248,6 +248,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "PTP Clock Production Test"
     },
+    @{
+        Name = "ptp_ioctl_latency_test"
+        Type = "cl"
+        Source = "tests/integration/ptp/ptp_ioctl_latency_test.c"
+        Output = "ptp_ioctl_latency_test.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "PTP IOCTL Latency & Jitter Test (#321 #322 #323 #324)"
+    },
     
     # TSN Integration Tests (cl.exe)
     @{
