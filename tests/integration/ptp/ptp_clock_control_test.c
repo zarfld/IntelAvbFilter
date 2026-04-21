@@ -15,8 +15,13 @@
  * Validates Intel I210/I226 PTP clock control implementation
  *
  * Traceability:
- *   Verifies: #238 (TEST-PTP-001), #4 (BUG: clock config)
- *   Traces to: #48 (REQ-F-IOCTL-PHC-004), #149 (REQ-F-PTP-007)
+ *   Verifies: #318 (TEST-PTP-STIME-001: PHC Get/Set Timestamp — Tests 1a/1b/1c)
+ *   Verifies: #319 (TEST-PTP-CTRL-001: ADJUST_FREQUENCY + GET_CLOCK_CONFIG — Tests 2+3)
+ *   Verifies: #320 (TEST-PHC-DRIFT-001: PHC vs Windows clock drift — Test 4)
+ *   Verifies: #238 (TEST-PTP-001: PHC-QPC bracket width + rate coherence — TC-5a/5b)
+ *   Traces to: #48 (REQ-F-IOCTL-XSTAMP-001: Cross-Timestamp Query)
+ *   Traces to: #149 (REQ-F-PTP-001: Hardware Timestamp Correlation)
+ *   Traces to: #4 (BUG: IOCTL_AVB_GET_CLOCK_CONFIG Not Working)
  */
 
 #include <windows.h>
