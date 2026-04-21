@@ -5,7 +5,7 @@ A Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bri
 [![CI — Standards Compliance](https://github.com/zarfld/IntelAvbFilter/actions/workflows/ci-standards-compliance.yml/badge.svg)](https://github.com/zarfld/IntelAvbFilter/actions/workflows/ci-standards-compliance.yml)
 [![Traceability Check](https://github.com/zarfld/IntelAvbFilter/actions/workflows/traceability-check.yml/badge.svg)](https://github.com/zarfld/IntelAvbFilter/actions/workflows/traceability-check.yml)
 
-## 🎯 **Project Status — March 2026**
+## 🎯 **Project Status — April 2026**
 
 ### CI / Test Infrastructure
 
@@ -13,23 +13,30 @@ A Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bri
 |------|--------|
 | Driver build (MSBuild, Debug + Release) | ✅ Passing |
 | SSOT magic-numbers gate (`src/`) | ✅ Passing |
-| Hardware unit tests (self-hosted, 6×I226-LM) | ✅ **106 / 113 passed (93.8%)** |
+| Hardware unit tests (self-hosted, 6×I226-LM) | ✅ **513 / 513 executed, 0 failures** (107 skipped — no matching HW) |
+| Hardware unit tests (self-hosted, I219) | ⚠️ **In progress** — I219 PHC frozen fix (#361) |
 | IOCTL ABI compatibility | ✅ 20/20 |
-| PTP timestamp event subscription | ✅ 97 / 0 passed/failed (6 adapters) |
+| PTP timestamp event subscription | ✅ Passing (6 adapters) |
 | SSOT & register verification | ✅ Passing |
 | GitHub Issues traceability | ✅ Passing |
 
-**Self-hosted runner**: Windows, 6× Intel I226-LM, driver installed, build number 345.  
+**Self-hosted runner 1** (`6XI226MACHINE`): Windows, 6× Intel I226-LM, driver installed.  
+**Self-hosted runner 2** (this machine): Windows, 1× Intel I219-LM + 1× Intel I210 + 1× Intel I226-LM, driver installed — added April 2026.  
 **GitHub-hosted runners**: `windows-latest`, `windows-2022` — hardware-independent tests only.
 
-### Hardware Test Results (2026-03-23, self-hosted, 6×I226-LM)
+### Hardware Test Results (2026-04-06, self-hosted, 6×I226-LM)
 
 ```
-Test executables available : 105
-Total tests run            : 113
-Passed                     : 106  (93.8%)
-Failed                     :   7  (see Known Failures)
+Test cases in suite        : 620
+Skipped (no matching HW)   : 107
+Actually executed          : 513
+Passed                     : 513  (100%)
+Failed                     :   0
 ```
+
+> **Note**: CI run 2026-04-21 ([#361](https://github.com/zarfld/IntelAvbFilter/pulls/361)) shows
+> new failures under investigation: I219 PHC frozen after get/set (`UT-PTP-GETSET-013`) and
+> TC-PERF-TS threshold regressions across 6 adapters — fix in progress.
 
 #### ✅ Verified Working
 
@@ -37,25 +44,26 @@ Failed                     :   7  (see Known Failures)
 - **Multi-adapter context isolation** — per-handle adapter switching confirmed
 - **Register access (MMIO)** — all read/write operations clean
 - **PTP / IEEE 1588 clock** — SYSTIM incrementing; frequency adjust, get/set time, offset correction all passing
-- **PTP timestamp event subscription** — 97 P / 0 F; TX/RX timestamp events delivered
-- **TAS (802.1Qbv) IOCTL** — 10 P / 0 F, configuration accepted
-- **CBS (802.1Qav) IOCTL** — 14 P / 0 F, configuration accepted
+- **PTP timestamp event subscription** — TX/RX timestamp events delivered on all adapters
+- **TAS (802.1Qbv) IOCTL** — configuration accepted
+- **CBS (802.1Qav) IOCTL** — configuration accepted
 - **Frame Preemption + PTM IOCTLs** — verified passing
 - **IOCTL ABI stability** — 20/20 struct-size checks pass (no ABI regression)
-- **ATDECC entity notification** — 5 P / 0 F (regression fixed: `MAX_ATDECC_SUBSCRIPTIONS` 4→16)
+- **ATDECC entity notification** — passing (regression fixed: `MAX_ATDECC_SUBSCRIPTIONS` 4→16)
 - **Performance baseline captured** — PHC P50=2300 ns, P99=4372 ns; TX=336 ns, RX=2076 ns
 - **NDIS LWF send / receive paths** — passing
 - **SSOT register constants** — zero raw hex literals in `src/`
 
-#### ⚠️ Known Failures / Limitations
+#### ⚠️ Known Failures / In Progress
 
 | Test | Status | Root Cause / Notes |
 |------|--------|--------------------|
 | `test_zero_polling_overhead` TC-ZP-002 | ⚠️ Known HW | EITR0=33 024 µs HW interrupt coalescing — controlled by NDIS miniport; filter driver has no EITR0 control path |
 | `test_s3_sleep_wake` TC-S3-002 | ⏸ Unconfirmed | S3 wake-up PHC preservation still pending; `FilterRestart` fix coded but needs controlled wake environment to verify |
 | `test_tx_timestamp_retrieval` | 🔧 Ongoing | TX timestamp capture delta assertion not yet automated (Cat.3 gap — #199) |
-| `avb_test_i219` | 🔌 No hardware | No I219 adapter on CI runner |
 | `test_event_log` TC-ETW-001 | 🔧 Feature gap | Driver ETW manifest not registered; Event ID 1 not emitted on init — fix in progress (#269) |
+| `UT-PTP-GETSET-013` ForceSet Readback | 🔧 In progress | I219 PHC frozen after forced time set (~3.8 M ns divergence) — fix in #361 |
+| `TC-PERF-TS-001/002/003` | 🔧 Under review | Timestamp latency exceeds thresholds on I219 path (median ~5 µs vs. 5 µs limit) — threshold or MMIO path review in #361 |
 
 ## 🔧 **Supported Intel Controllers**
 
@@ -63,10 +71,10 @@ Failed                     :   7  (see Known Failures)
 
 | Controller | Detection | Register Access | PTP/1588 | TSN IOCTLs | Notes |
 |------------|-----------|-----------------|----------|------------|-------|
-| **Intel I226** | ✅ Verified | ✅ Verified | ✅ Verified | ✅ Verified | **Primary CI platform** — 6× on self-hosted runner |
+| **Intel I226** | ✅ Verified | ✅ Verified | ✅ Verified | ✅ Verified | **Primary CI platform** — 6× I226-LM on runner 1; 1× on runner 2 |
 | **Intel I225** | ✅ Code ready | ✅ Code ready | ✅ Code ready | ✅ Code ready | Near-identical to I226; needs dedicated hardware run |
-| **Intel I219** | ✅ Code ready | ✅ Code ready | ⚠️ Code ready | ✅ Code ready | No I219 on CI runner — `avb_test_i219` skipped |
-| **Intel I210** | ✅ Code ready | ✅ Code ready | ⚠️ Code ready | ✅ Code ready | No I210 on CI runner; needs dedicated hardware run |
+| **Intel I219** | ✅ Verified | ✅ Verified | ⚠️ In progress | ✅ Verified | Hardware on runner 2 (added Apr 2026); PHC frozen fix in progress (#361) |
+| **Intel I210** | ✅ Verified | ✅ Verified | ⚠️ In progress | ✅ Verified | Hardware on runner 2 (added Apr 2026); PTP path under test |
 | **Intel I217** | ⚠️ Code ready | ⚠️ Code ready | ⚠️ Code ready | ✅ Code ready | Needs hardware testing |
 
 **Not Supported**: Intel 82574L (lacks AVB/TSN hardware features)
