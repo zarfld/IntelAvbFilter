@@ -861,7 +861,7 @@ AvbInitializeDeviceWithBar0Discovery(
         ULONG baseline_caps = 0;
         switch (ctx->intel_device.device_type) {
             case INTEL_DEVICE_I210:
-                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE;
+                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_EEE; // MDIO not implemented in driver
                 break;
             case INTEL_DEVICE_I217:
                 baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO;

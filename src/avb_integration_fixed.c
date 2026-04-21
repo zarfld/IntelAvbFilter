@@ -463,7 +463,7 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
             
         // Modern I-series devices - REALISTIC capabilities based on actual hardware
         case INTEL_DEVICE_I210:
-            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE; // Enhanced PTP, MDIO, EEE (2013)
+            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_EEE; // Enhanced PTP, EEE (2013) - MDIO not implemented in driver
             break;
         case INTEL_DEVICE_I217:
             baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic PTP (2013)
@@ -3882,7 +3882,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         DEBUGP(DL_TRACE, "? TAS SETUP: Device does not support TAS (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
-                        status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
+                        status = STATUS_NOT_SUPPORTED; // Return error so DeviceIoControl returns FALSE
                     } else {
                         // Call Intel library TAS setup function (standard implementation)
                         DEBUGP(DL_ERROR, "!!! DIAG: Calling intel_setup_time_aware_shaper...\n");
@@ -3955,7 +3955,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         DEBUGP(DL_TRACE, "? FP SETUP: Device does not support Frame Preemption (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
-                        status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
+                        status = STATUS_NOT_SUPPORTED; // Return error so DeviceIoControl returns FALSE
                     } else {
                         // Call Intel library Frame Preemption setup function (standard implementation)
                         DEBUGP(DL_TRACE, "? FP SETUP: Calling Intel library Frame Preemption implementation\n");
@@ -4022,7 +4022,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         DEBUGP(DL_TRACE, "? PTM SETUP: Device does not support PCIe PTM (caps=0x%08X)\n", 
                                activeContext->intel_device.capabilities);
                         r->status = (avb_u32)STATUS_NOT_SUPPORTED;
-                        status = STATUS_SUCCESS; // IOCTL handled, but feature not supported
+                        status = STATUS_NOT_SUPPORTED; // Return error so DeviceIoControl returns FALSE
                     } else {
                         // Phase 2: Use enhanced PTM implementation
                         DEBUGP(DL_TRACE, "? Phase 2: Calling enhanced PTM implementation\n");

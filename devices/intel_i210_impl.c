@@ -611,7 +611,7 @@ const intel_device_ops_t i210_ops = {
      * NOTE: implementation previously missing MDIO and EEE — corrected vs spec */
     .device_name = "Intel I210 Gigabit Ethernet - IEEE 1588 PTP + MDIO + EEE",
     .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
-                              INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE,
+                              INTEL_CAP_MMIO | INTEL_CAP_EEE, // MDIO not implemented in driver
     
     // Basic operations
     .init = init,
