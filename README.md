@@ -21,7 +21,7 @@ A Windows NDIS 6.30 lightweight filter driver that provides AVB (Audio/Video Bri
 | GitHub Issues traceability | ✅ Passing |
 
 **Self-hosted runner 1** (`6XI226MACHINE`): Windows, 6× Intel I226-LM, driver installed.  
-**Self-hosted runner 2** (this machine): Windows, 1× Intel I219-LM + 1× Intel I210 + 1× Intel I226-LM, driver installed — added April 2026.  
+**Self-hosted runner 2** ('Dell Optiplex 7060'): Windows, 1× Intel I219-LM + 1× Intel I210 + 1× Intel I226-LM, driver installed — added April 2026.  
 **GitHub-hosted runners**: `windows-latest`, `windows-2022` — hardware-independent tests only.
 
 ### Hardware Test Results (2026-04-06, self-hosted, 6×I226-LM)
