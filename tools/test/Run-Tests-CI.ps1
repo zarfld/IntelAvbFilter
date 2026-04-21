@@ -224,6 +224,7 @@ $HardwareIntegrationTests = @(
     "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
     "test_ptp_phc_stability",         # PHC stability UT-CORR-005..009; ~1K samples@2ms -- (#317)
     "ptp_clock_control_production",   # PTP clock production test -- (#238)
+    "ptp_ioctl_latency_test",         # PTP IOCTL latency & jitter -- (#321 #322 #323 #324)
     "hw_timestamping_control",        # HW timestamping control integration
     "rx_timestamping",                # RX timestamping integration
     "tsauxc_toggle_test",             # TSAUXC register toggle (TSN)
