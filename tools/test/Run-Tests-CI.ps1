@@ -228,7 +228,9 @@ $HardwareIntegrationTests = @(
     "hw_timestamping_control",        # HW timestamping control integration
     "rx_timestamping",                # RX timestamping integration
     "tsauxc_toggle_test",             # TSAUXC register toggle (TSN)
-    "test_gptp_daemon_coexist"        # OpenAvnu gPTP daemon coexistence; SKIPs if no daemon -- (#240)
+    "test_gptp_daemon_coexist",       # OpenAvnu gPTP daemon coexistence; SKIPs if no daemon -- (#240)
+    # Phase D: i219-specific compatibility tests (added to close #261)
+    "avb_test_i219"                   # I219 compat: detection, caps, PTP, monotonicity, variant matrix -- (#261 #76 #114)
 )
 
 # ===========================
