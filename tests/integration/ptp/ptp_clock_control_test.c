@@ -322,9 +322,20 @@ static int TestClockAdjustment(HANDLE h) {
         LARGE_INTEGER freq, start, end;
         QueryPerformanceFrequency(&freq);
         QueryPerformanceCounter(&start);
-        
-        Sleep(100);  // 100ms measurement window
-        
+
+        /* I219 get_systime() always divides raw by 200000 (nominal TIMINCA divisor),
+         * so apparent PHC rate ∝ IV/IV_nominal.  For increment_ns=1 (IV=2M vs
+         * nominal IV=16M), apparent rate ≈ 144 ns/ms → expected delta in 100ms ≈ 14µs,
+         * which is below the IOCTL timing-jitter noise floor (≈35µs).
+         * Extend the window to 3000ms so expected delta (≈430µs) >> noise floor. */
+        BOOL is_i219_hw = (orig_ip_nom == 2u && orig_iv_nom > 0u);
+        DWORD sleep_ms = 100u;
+        if (is_i219_hw && tests[i].increment_ns <= 2u) {
+            sleep_ms = 3000u;
+            printf("  [INFO] I219 low increment_ns: extending window to %ums (signal < noise at 100ms)\n", sleep_ms);
+        }
+        Sleep(sleep_ms);
+
         QueryPerformanceCounter(&end);
         ULONGLONG t2 = GetPhcNs(h);
 
