@@ -34,7 +34,7 @@
  * MULTI-ADAPTER: tests all enumerated adapters
  */
 
-#include "../../common/avb_test_common.h"
+#include "../common/avb_test_common.h"
 #include <stdlib.h>
 
 /* =========================================================

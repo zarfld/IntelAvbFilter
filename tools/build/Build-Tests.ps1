@@ -1917,6 +1917,8 @@ foreach ($Test in $TestsToBuild) {
             $SucceededTests += $Test.Name
         } else {
             Write-Host "  FAILED: Compiler returned error code $LASTEXITCODE" -ForegroundColor Red
+            # Print compiler output so CI logs show the actual errors
+            $result | Where-Object { $_ -match "error|warning" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
             $FailedTests += $Test.Name
         }
         
