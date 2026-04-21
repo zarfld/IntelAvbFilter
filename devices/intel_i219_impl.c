@@ -842,7 +842,11 @@ static int i219_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
  */
 const intel_device_ops_t i219_ops = {
     .device_name = "Intel I219 Gigabit Ethernet - Enhanced PTP",
-    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO,
+    /* Capabilities per Intel I219 datasheet (NotebookLM-verified):
+     * EEE: IEEE 802.3az LPI supported (1000BASE-T and 100BASE-TX)
+     * NOTE: implementation previously missing INTEL_CAP_EEE — corrected vs spec */
+    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
+                              INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE,
 
     /* Basic operations */
     .init    = init,

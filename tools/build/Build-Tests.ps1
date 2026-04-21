@@ -418,6 +418,42 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "I219 Device-Specific Test"
     },
+    @{
+        Name = "avb_test_portability"
+        Type = "cl"
+        Source = "tests/portability/avb_test_portability.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_portability.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Cross-Adapter Portability Test (QA-SC-PORT-001, Issue #114)"
+    },
+    @{
+        Name = "avb_test_i217"
+        Type = "cl"
+        Source = "tests/device_specific/i217/avb_test_i217.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_i217.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "I217 device-specific test: caps, MDIO, EEE, TSN NOT_SUPPORTED (Issue #114)"
+    },
+    @{
+        Name = "avb_test_i225"
+        Type = "cl"
+        Source = "tests/device_specific/i225/avb_test_i225.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_i225.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "I225 device-specific test: full TSN caps, MDIO, NO EEE (Issue #114)"
+    },
+    @{
+        Name = "avb_test_i226_um"
+        Type = "cl"
+        Source = "tests/device_specific/i226/avb_test_i226_um.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_i226_um.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "I226 device-specific test: full TSN caps, MDIO, EEE (Issue #114)"
+    },
     # Device-Specific Tests (nmake)
     @{
         Name = "avb_i226_test"

@@ -230,7 +230,13 @@ $HardwareIntegrationTests = @(
     "tsauxc_toggle_test",             # TSAUXC register toggle (TSN)
     "test_gptp_daemon_coexist",       # OpenAvnu gPTP daemon coexistence; SKIPs if no daemon -- (#240)
     # Phase D: i219-specific compatibility tests (added to close #261)
-    "avb_test_i219"                   # I219 compat: detection, caps, PTP, monotonicity, variant matrix -- (#261 #76 #114)
+    "avb_test_i219",                  # I219 compat: detection, caps, PTP, monotonicity, variant matrix -- (#261 #76 #114)
+    # Phase E: cross-adapter portability (QA-SC-PORT-001, Issue #114)
+    "avb_test_portability",           # capability-gate verification across all present Intel adapters -- (#114)
+    # Phase F: device-specific tests (I217/I225/I226 — SKIP-safe on machines without hardware)
+    "avb_test_i217",                  # I217 caps (BASIC_1588|ENHANCED_TS|MDIO|EEE), TSN NOT_SUPPORTED -- (#114)
+    "avb_test_i225",                  # I225 caps (full TSN, MDIO, NO EEE) -- (#114)
+    "avb_test_i226_um"                # I226 caps (full TSN, MDIO, EEE) -- (#114)
 )
 
 # ===========================

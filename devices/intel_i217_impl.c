@@ -675,8 +675,14 @@ static int i217_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
  *  - SWSM.SWESMBI semaphore acquired internally by all MDIO operations.
  */
 const intel_device_ops_t i217_ops = {
-    .device_name = "Intel I217 Gigabit Ethernet - Basic PTP (2-step only)",
-    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO,
+    /* Capabilities per Intel I217 datasheet (NotebookLM-verified):
+     * ENHANCED_TS: TSYNCTXCTL (0xB614) / TSYNCRXCTL (0xB620) present
+     * MDIO: MDC/MDIO management interface to PHY (MAC-register accessible)
+     * EEE: IEEE 802.3az Low Power Idle supported (1000BASE-T and 100BASE-TX)
+     * NOTE: implementation previously missing ENHANCED_TS, MDIO, EEE — corrected vs spec */
+    .device_name = "Intel I217 Gigabit Ethernet - PTP + MDIO + EEE",
+    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
+                              INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE,
 
     .init    = init,
     .cleanup = cleanup,

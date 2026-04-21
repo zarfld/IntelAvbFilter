@@ -1424,10 +1424,14 @@ static int i226_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
 
 // I226 device operations structure - using generic function names
 const intel_device_ops_t i226_ops = {
-    .device_name = "Intel I226 2.5G Ethernet - Advanced TSN",
-    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | 
+    /* Capabilities per Intel I226 datasheet (NotebookLM-verified):
+     * MDIO: IEEE 802.3 MII Management Interface to internal PHY (MAC register space)
+     * EEE: IEEE 802.3az EEE supported (key differentiator vs I225 which lacks EEE)
+     * NOTE: implementation previously missing INTEL_CAP_MDIO — corrected vs spec */
+    .device_name = "Intel I226 2.5G Ethernet - Advanced TSN + MDIO + EEE",
+    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
                              INTEL_CAP_TSN_TAS | INTEL_CAP_TSN_FP | INTEL_CAP_PCIE_PTM |
-                             INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE,
+                             INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE,
     
     // Basic operations - clean generic names
     .init = init,
