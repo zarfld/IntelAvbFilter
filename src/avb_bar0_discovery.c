@@ -861,7 +861,7 @@ AvbInitializeDeviceWithBar0Discovery(
         ULONG baseline_caps = 0;
         switch (ctx->intel_device.device_type) {
             case INTEL_DEVICE_I210:
-                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO;
+                baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE;
                 break;
             case INTEL_DEVICE_I217:
                 baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO;
@@ -875,7 +875,7 @@ AvbInitializeDeviceWithBar0Discovery(
                 break;
             case INTEL_DEVICE_I226:
                 baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
-                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE;
+                               INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE;
                 break;
             default:
                 baseline_caps = INTEL_CAP_MMIO;

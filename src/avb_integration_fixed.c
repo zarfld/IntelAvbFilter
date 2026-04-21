@@ -463,7 +463,7 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
             
         // Modern I-series devices - REALISTIC capabilities based on actual hardware
         case INTEL_DEVICE_I210:
-            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO; // Enhanced PTP, NO TSN (2013)
+            baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE; // Enhanced PTP, MDIO, EEE (2013)
             break;
         case INTEL_DEVICE_I217:
             baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic PTP (2013)
@@ -479,7 +479,7 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
             break;
         case INTEL_DEVICE_I226:
             baseline_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
-                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE; // Full TSN (2020)
+                           INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE; // Full TSN + MDIO (2020)
             break;
         default:
             baseline_caps = INTEL_CAP_MMIO; // Minimal safe assumption
