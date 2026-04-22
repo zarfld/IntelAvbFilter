@@ -314,7 +314,7 @@ jobs:
           else
             echo "✅ No unused symbols detected"
           fi
-        continue-on-error: true  # Phase-in: surface findings without blocking yet
+        continue-on-error: false  # Phase-in: surface findings without blocking yet
 
       # Test 6: Magic number detection — handled by ssot-magic-numbers-gate job (closes #305)
       # Verifies: #252 (TEST-MAINTAIN-001 step 6) — see ssot-magic-numbers-gate below
