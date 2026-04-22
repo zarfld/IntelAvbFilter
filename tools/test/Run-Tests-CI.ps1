@@ -193,6 +193,8 @@ $HardwareUnitTests = @(
     "test_avtp_tu_bit_events",     # AVTP TU-bit change events -- (#175)
     "test_ptp_event_latency",      # PTP event ring-buffer latency -- (#177)
     "test_event_latency_4ch",      # 4-channel multi-observer event latency -- (#179)
+    "test_event_nf_zero_polling",  # NF CPU-overhead budget quantification -- (#241, TEST-EVENT-NF-002)
+    "test_event_nf_latency",       # NF IOCTL-path latency P99 under adversarial load -- (#245, TEST-EVENT-NF-001)
     "test_gptp_phc_interface",     # gPTP PHC interface contract -- (#210)
     "test_send_ptp_debug",         # IOCTL_AVB_TEST_SEND_PTP diagnostic -- (#51)
     "test_timestamp_latency",      # TX/RX timestamp latency <1us -- (#272)

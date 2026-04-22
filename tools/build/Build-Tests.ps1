@@ -1653,6 +1653,21 @@ $AllTests = @(
         Standard = "IEEE 802.1AS-2020"
     }
     @{
+        Name = "test_event_nf_zero_polling"
+        Type = "cl"
+        Source = "tests\event\test_event_nf_zero_polling.c"
+        Output = "test_event_nf_zero_polling.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Zero Polling Overhead NF Performance - CPU budget quantification (Issue #241, TEST-EVENT-NF-002)"
+        Issue = "#241"
+        TestCases = 5
+        IOCTLs = "33(TS_SUBSCRIBE), 46(TS_UNSUBSCRIBE)"
+        Requirement = "#161"
+        Standard = "IEEE 802.1AS-2020"
+    }
+    @{
         Name = "test_ptp_event_latency"
         Type = "cl"
         Source = "tests\event\test_ptp_event_latency.c"
@@ -1680,6 +1695,21 @@ $AllTests = @(
         TestCases = 5
         IOCTLs = "33(TS_SUBSCRIBE), 34(TS_MAP_RING_BUFFER), 46(TS_UNSUBSCRIBE)"
         Requirement = "#13"
+        Standard = "IEEE 802.1AS-2020"
+    }
+    @{
+        Name = "test_event_nf_latency"
+        Type = "cl"
+        Source = "tests\event\test_event_nf_latency.c"
+        Output = "test_event_nf_latency.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Event Notification Latency NF Hard Real-Time - IOCTL budget + oscilloscope gate (Issue #245, TEST-EVENT-NF-001)"
+        Issue = "#245"
+        TestCases = 5
+        IOCTLs = "33(TS_SUBSCRIBE), 34(TS_MAP_RING_BUFFER), 46(TS_UNSUBSCRIBE)"
+        Requirement = "#165"
         Standard = "IEEE 802.1AS-2020"
     }
     @{
