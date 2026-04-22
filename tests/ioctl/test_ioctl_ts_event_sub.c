@@ -4,6 +4,8 @@
  * 
  * Implements: #314 (TEST-TS-EVENT-SUB-001)
  * Verifies: #13 (REQ-F-TS-EVENT-SUB-001: Timestamp Event Subscription via IOCTL)
+ * Implements: #237 (TEST-EVENT-001: Verify PTP HW Timestamp Capture Event Notifications)
+ * Verifies:   #168 (REQ-F-EVENT-001: Emit PTP Hardware Timestamp Capture Events)
  * 
  * Test Plan: TEST-PLAN-IOCTL-NEW-2025-12-31.md
  * IOCTLs: 33 (SUBSCRIBE_TS_EVENTS), 34 (MAP_TS_RING_BUFFER)
@@ -14,6 +16,8 @@
  * 
  * @see https://github.com/zarfld/IntelAvbFilter/issues/314
  * @see https://github.com/zarfld/IntelAvbFilter/issues/13
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/237
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/168
  */
 
 #include <windows.h>
