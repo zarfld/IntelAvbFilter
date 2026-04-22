@@ -21,7 +21,7 @@
 #include <string.h>
 
 /* Single Source of Truth for IOCTL definitions */
-#include "../include/avb_ioctl.h"
+#include "avb_ioctl.h"
 
 /* Test result codes */
 #define TEST_PASS 0

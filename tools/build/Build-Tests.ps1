@@ -1780,6 +1780,21 @@ $AllTests = @(
         IOCTLs = "IOCTL_AVB_GET_STATISTICS(0x00172020), IOCTL_AVB_RESET_STATISTICS(0x00172028)"
         Requirement = "#265"
     }
+    @{
+        Name = "test_hardware_detection"
+        Type = "cl"
+        Source = "tests\hardware\test_hardware_detection.c"
+        Output = "test_hardware_detection.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = ""
+        Enabled = $true
+        Priority = "P0"
+        Description = "Hardware Capability Detection & Register Access Safety: vendor_id/device_id validation, capability bitmask, concurrent IOCTL safety (Verifies #44 #45, Implements #288 #287)"
+        Issue = "#288"
+        TestCases = 4
+        IOCTLs = "IOCTL_AVB_ENUM_ADAPTERS, IOCTL_AVB_OPEN_ADAPTER, IOCTL_AVB_GET_HW_STATE"
+        Requirement = "#44 #45"
+    }
 )
 
 # Filter tests if specific test requested

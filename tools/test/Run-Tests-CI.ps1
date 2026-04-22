@@ -238,7 +238,8 @@ $HardwareIntegrationTests = @(
     # Phase F: device-specific tests (I217/I225/I226 — SKIP-safe on machines without hardware)
     "avb_test_i217",                  # I217 caps (BASIC_1588|ENHANCED_TS|MDIO|EEE), TSN NOT_SUPPORTED -- (#114)
     "avb_test_i225",                  # I225 caps (full TSN, MDIO, NO EEE) -- (#114)
-    "avb_test_i226_um"                # I226 caps (full TSN, MDIO, EEE) -- (#114)
+    "avb_test_i226_um",               # I226 caps (full TSN, MDIO, EEE) -- (#114)
+    "test_hardware_detection"         # HW capability detection & register access safety -- (#44 #45, #287 #288)
 )
 
 # ===========================
