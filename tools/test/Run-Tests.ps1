@@ -485,10 +485,58 @@ if ($TestExecutable) {
         }
     }
 
-    Invoke-Test -TestName $TestExecutable -TestArgs $TestArgs
+    if ($TestExecutable -match '\.ps1$') {
+        # PowerShell script test — find it in tests\ tree and invoke directly
+        $ps1TestPath = $null
+        $searchRoots = @(
+            (Join-Path $repoRoot "tests"),
+            (Join-Path $repoRoot "tools\test")
+        )
+        foreach ($root in $searchRoots) {
+            $candidate = Get-ChildItem -Path $root -Filter $TestExecutable -Recurse -ErrorAction SilentlyContinue |
+                         Select-Object -First 1
+            if ($candidate) { $ps1TestPath = $candidate.FullName; break }
+        }
+        if (-not $ps1TestPath) {
+            # Try bare name without extension in tests/ tree (e.g. Test-DebugLevelVerbosity)
+            $bareName = [System.IO.Path]::GetFileNameWithoutExtension($TestExecutable) + '.ps1'
+            foreach ($root in $searchRoots) {
+                $candidate = Get-ChildItem -Path $root -Filter $bareName -Recurse -ErrorAction SilentlyContinue |
+                             Select-Object -First 1
+                if ($candidate) { $ps1TestPath = $candidate.FullName; break }
+            }
+        }
+        if ($ps1TestPath) {
+            Write-Host "`n  => $TestExecutable" -ForegroundColor Cyan
+            Write-Host "     Script: $ps1TestPath" -ForegroundColor Gray
+            $script:totalTests++
+            & {
+                $ErrorActionPreference = 'Continue'
+                if ($TestArgs) {
+                    $argList = $TestArgs -split ' '
+                    & $ps1TestPath @argList 2>&1
+                } else {
+                    & $ps1TestPath 2>&1
+                }
+            }
+            if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
+                $script:passedTests++
+                $script:testResults += [PSCustomObject]@{ Name = $TestExecutable; Status = "PASSED"; ExitCode = 0 }
+            } else {
+                $script:failedTests++
+                $script:testResults += [PSCustomObject]@{ Name = $TestExecutable; Status = "FAILED"; ExitCode = $LASTEXITCODE }
+            }
+        } else {
+            Write-Host "`n  => $TestExecutable" -ForegroundColor Cyan
+            Write-Failure "PS1 test script not found: $TestExecutable"
+            $script:totalTests++; $script:failedTests++
+            $script:testResults += [PSCustomObject]@{ Name = $TestExecutable; Status = "NOT_FOUND"; ExitCode = -1 }
+        }
+    } else {
+        Invoke-Test -TestName $TestExecutable -TestArgs $TestArgs
+    }
 
 } elseif ($Quick) {
-    # Quick tests only
     Write-Step "Running Quick Verification Tests"
     
     # SSOT Quick Check (critical for code quality)
@@ -531,6 +579,22 @@ if ($TestExecutable) {
     
     foreach ($testName in $quickTests) {
         Invoke-Test -TestName $testName
+    }
+
+    # Test-DebugLevelVerbosity.ps1: DbgView sentinel check (#95/#247)
+    $verbosityTest = Get-ChildItem -Path (Join-Path $repoRoot "tests") -Filter "Test-DebugLevelVerbosity.ps1" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($verbosityTest) {
+        Write-Host "`n  => Test-DebugLevelVerbosity.ps1" -ForegroundColor Cyan
+        Write-Host "     Verify DebugLevel verbosity via DbgView log parsing (#95/#247 behavioral gap)" -ForegroundColor Gray
+        $script:totalTests++
+        & { $ErrorActionPreference = 'Continue'; & $verbosityTest.FullName -SkipReload 2>&1 }
+        if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
+            $script:passedTests++
+            $script:testResults += [PSCustomObject]@{ Name = "Test-DebugLevelVerbosity.ps1"; Status = "PASSED"; ExitCode = 0 }
+        } else {
+            $script:failedTests++
+            $script:testResults += [PSCustomObject]@{ Name = "Test-DebugLevelVerbosity.ps1"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
+        }
     }
     
 } elseif ($Full) {
@@ -683,6 +747,7 @@ if (Test-Path $regsTest3) {
         @{Name="test_hw_state_machine.exe"; Desc="Verify Hardware State Machine IOCTL (#18 REQ-F-HWCTX-001)"},
         @{Name="test_lazy_initialization.exe"; Desc="Verify Lazy Initialization (#16 REQ-F-LAZY-INIT-001)"},
         @{Name="test_registry_diagnostics.exe"; Desc="Verify Registry Diagnostics (#17 REQ-NF-DIAG-REG-001)"},
+        @{Name="Test-DebugLevelVerbosity.ps1"; Desc="Verify DebugLevel verbosity via DbgView log parsing (#95/#247 behavioral gap)"},
         @{Name="test_hal_unit.exe"; Desc="Verify HAL Unit Tests (#84 REQ-NF-PORTABILITY-001, #308 TEST-PORTABILITY-HAL-001)"},
         @{Name="test_hal_errors.exe"; Desc="Verify HAL Error Scenario Tests (#84 REQ-NF-PORTABILITY-001, #309 TEST-PORTABILITY-HAL-002)"},
         @{Name="test_hal_performance.exe"; Desc="Verify HAL Performance Metrics (#84 REQ-NF-PORTABILITY-001, #310 TEST-PORTABILITY-HAL-003)"},
@@ -693,7 +758,34 @@ if (Test-Path $regsTest3) {
         @{Name="avb_device_separation_test.exe"; Desc="Verify clean device separation architecture compliance"}
     )
     foreach ($test in $phase0Tests) {
-        Invoke-Test -TestName $test.Name -Description $test.Desc
+        if ($test.Name -match '\.ps1$') {
+            # PS1 test: find and invoke directly
+            $ps1Found = $null
+            foreach ($root in @((Join-Path $repoRoot "tests"), (Join-Path $repoRoot "tools\test"))) {
+                $ps1Found = Get-ChildItem -Path $root -Filter $test.Name -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($ps1Found) { break }
+            }
+            if ($ps1Found) {
+                Write-Host "`n  => $($test.Name)" -ForegroundColor Cyan
+                if ($test.Desc) { Write-Host "     $($test.Desc)" -ForegroundColor Gray }
+                $script:totalTests++
+                & { $ErrorActionPreference = 'Continue'; & $ps1Found.FullName 2>&1 }
+                if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
+                    $script:passedTests++
+                    $script:testResults += [PSCustomObject]@{ Name = $test.Name; Status = "PASSED"; ExitCode = 0 }
+                } else {
+                    $script:failedTests++
+                    $script:testResults += [PSCustomObject]@{ Name = $test.Name; Status = "FAILED"; ExitCode = $LASTEXITCODE }
+                }
+            } else {
+                Write-Host "`n  => $($test.Name)" -ForegroundColor Cyan
+                Write-Failure "PS1 test not found: $($test.Name)"
+                $script:totalTests++; $script:failedTests++
+                $script:testResults += [PSCustomObject]@{ Name = $test.Name; Status = "NOT_FOUND"; ExitCode = -1 }
+            }
+        } else {
+            Invoke-Test -TestName $test.Name -Description $test.Desc
+        }
     }
     
     # Phase 1: Basic Hardware Diagnostics

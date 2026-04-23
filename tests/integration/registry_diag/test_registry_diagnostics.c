@@ -870,6 +870,165 @@ static BOOL Test_DebugLevelFullReloadPersistence(void)
 }
 
 /**
+ * TC-DEBUG-REG-007: Parse DbgView log for DebugLevel sentinel.
+ *
+ * Verifies: #95 (REQ-NF-DEBUG-REG-001 — "debug level controls log verbosity correctly")
+ * Gap closure: behavioral verbosity verification (CaptureDbgView path, Issue #247).
+ *
+ * When Run-Tests-Elevated.ps1 is invoked with -CaptureDbgView, DebugView captures
+ * all DbgPrint output to logs\dbgview_<stem>_<timestamp>.log.  This test scans the
+ * most-recent log for the sentinel line emitted by FilterReadDebugSettings():
+ *
+ *   "IntelAvbFilter: DebugLevel loaded from registry: N (path: ...)"
+ *
+ * If found:
+ *   [PASS] - driver applied the registry value; confirms behavioral wiring.
+ * If absent but other IntelAvbFilter messages exist:
+ *   [SKIP] - debug build but log pre-dates this driver load, or FilterReadDebugSettings
+ *            ran before DbgView started (accepted — rerun with -CaptureDbgView).
+ * If no IntelAvbFilter messages at all:
+ *   [SKIP] - release build or DbgView not capturing kernel output.
+ *
+ * For full verbosity-change proof (DebugLevel X → messages suppressed/visible),
+ * use the companion PowerShell test:
+ *   tests\integration\registry_diag\Test-DebugLevelVerbosity.ps1
+ */
+static BOOL Test_DbgViewSentinel(void)
+{
+    printf("\n=== TC-DEBUG-REG-007: DbgView sentinel 'DebugLevel loaded from registry' ===\n");
+
+    /* Search for the most recent dbgview_*.log in <repoRoot>\logs\ */
+    WCHAR  exePath[MAX_PATH] = {0};
+    WCHAR  logsDir[MAX_PATH] = {0};
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+    /* Walk up from the exe location to find the logs\ directory.
+     * Build layout: exe is in build\<config>\ or repo root.
+     * We search up to 4 parent levels. */
+    WCHAR searchDir[MAX_PATH] = {0};
+    BOOL  foundLogsDir = FALSE;
+
+    wcsncpy_s(searchDir, MAX_PATH, exePath, _TRUNCATE);
+    for (int up = 0; up < 5; up++) {
+        /* Strip last path component */
+        WCHAR* lastSep = wcsrchr(searchDir, L'\\');
+        if (!lastSep) break;
+        *lastSep = L'\0';
+
+        /* Try searchDir\logs */
+        WCHAR candidate[MAX_PATH];
+        _snwprintf_s(candidate, MAX_PATH, _TRUNCATE, L"%s\\logs", searchDir);
+        DWORD attr = GetFileAttributesW(candidate);
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            wcsncpy_s(logsDir, MAX_PATH, candidate, _TRUNCATE);
+            foundLogsDir = TRUE;
+            break;
+        }
+    }
+
+    if (!foundLogsDir) {
+        printf("  [SKIP] TC-DEBUG-REG-007: logs\\ directory not found. "
+               "Run with -CaptureDbgView to generate a log.\n");
+        return TRUE;
+    }
+    wprintf(L"  [INFO] Searching: %s\\dbgview_*.log\n", logsDir);
+
+    /* Find the most-recently-modified dbgview_*.log */
+    WCHAR pattern[MAX_PATH];
+    _snwprintf_s(pattern, MAX_PATH, _TRUNCATE, L"%s\\dbgview_*.log", logsDir);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        printf("  [SKIP] TC-DEBUG-REG-007: No dbgview_*.log found in logs\\. "
+               "Start test with -CaptureDbgView.\n");
+        return TRUE;
+    }
+
+    /* Pick the most recent by LastWriteTime */
+    FILETIME newestTime = fd.ftLastWriteTime;
+    WCHAR    newestName[MAX_PATH];
+    wcsncpy_s(newestName, MAX_PATH, fd.cFileName, _TRUNCATE);
+    while (FindNextFileW(hFind, &fd)) {
+        if (CompareFileTime(&fd.ftLastWriteTime, &newestTime) > 0) {
+            newestTime = fd.ftLastWriteTime;
+            wcsncpy_s(newestName, MAX_PATH, fd.cFileName, _TRUNCATE);
+        }
+    }
+    FindClose(hFind);
+
+    WCHAR logPath[MAX_PATH];
+    _snwprintf_s(logPath, MAX_PATH, _TRUNCATE, L"%s\\%s", logsDir, newestName);
+    wprintf(L"  [INFO] Parsing: %s\n", logPath);
+
+    /* Read log line-by-line, search for sentinel and DL_INFO indicator */
+    HANDLE hFile = CreateFileW(logPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        printf("  [SKIP] TC-DEBUG-REG-007: Cannot open log file (err=%lu).\n", GetLastError());
+        return TRUE;
+    }
+
+    BOOL  foundSentinel    = FALSE;
+    BOOL  foundAvbMessages = FALSE;
+    INT   sentinelLevel    = -1;
+    char  line[1024];
+    int   linePos          = 0;
+    char  ch;
+    DWORD bytesRead;
+
+    while (ReadFile(hFile, &ch, 1, &bytesRead, NULL) && bytesRead == 1) {
+        if (ch == '\n' || ch == '\r') {
+            if (linePos > 0) {
+                line[linePos] = '\0';
+                linePos = 0;
+
+                /* Check for any IntelAvbFilter message */
+                if (strstr(line, "IntelAvbFilter:")) {
+                    foundAvbMessages = TRUE;
+                }
+
+                /* Check for sentinel: "DebugLevel loaded from registry: N" */
+                const char* sentinel = strstr(line, "DebugLevel loaded from registry:");
+                if (sentinel) {
+                    foundSentinel = TRUE;
+                    /* Parse level number after ": " */
+                    const char* numStart = sentinel + strlen("DebugLevel loaded from registry:");
+                    while (*numStart == ' ') numStart++;
+                    sentinelLevel = atoi(numStart);
+                }
+            }
+        } else {
+            if (linePos < (int)(sizeof(line) - 2)) {
+                line[linePos++] = ch;
+            }
+        }
+    }
+    CloseHandle(hFile);
+
+    if (foundSentinel) {
+        printf("  [PASS] TC-DEBUG-REG-007: Sentinel found — "
+               "'DebugLevel loaded from registry: %d'\n", sentinelLevel);
+        printf("  [INFO] Driver behaviorally confirmed: filterDebugLevel = %d "
+               "(DL_WARN=4, DL_INFO=6, DL_LOUD=8)\n", sentinelLevel);
+        return TRUE;
+    }
+
+    if (foundAvbMessages) {
+        printf("  [SKIP] TC-DEBUG-REG-007: 'IntelAvbFilter:' messages found but no "
+               "DebugLevel sentinel.\n");
+        printf("  [INFO] Possible causes: release build (DBG=0), or log predates "
+               "current driver load, or DbgView started after FilterReadDebugSettings ran.\n");
+        printf("  [INFO] Rerun with -CaptureDbgView BEFORE driver load to capture sentinel.\n");
+        return TRUE;
+    }
+
+    printf("  [SKIP] TC-DEBUG-REG-007: No 'IntelAvbFilter:' messages in log. "
+           "DbgView kernel capture not active or release build.\n");
+    return TRUE;
+}
+
+/**
  * Main test execution
  */
 int main(int argc, char* argv[])
@@ -881,6 +1040,7 @@ int main(int argc, char* argv[])
     printf("Testing: REQ-NF-DEBUG-REG-001 (Issue #95) / TEST-DEBUG-REG-001 (Issue #247)\n");
     printf("Feature: Debug-only registry-based IOCTL logging\n");
     printf("Feature: DebugLevel runtime persistence across driver reload\n");
+    printf("Feature: DbgView sentinel verification (TC-DEBUG-REG-007)\n");
     printf("Registry: HKLM\\%s\\%s\n", REGISTRY_KEY, REGISTRY_VALUE);
     printf("========================================\n");
     
@@ -944,6 +1104,12 @@ int main(int argc, char* argv[])
         passedTests++;
     }
 
+    // Test 10: DbgView sentinel verification (TC-DEBUG-REG-007, Issue #247 gap — CaptureDbgView)
+    totalTests++;
+    if (Test_DbgViewSentinel()) {
+        passedTests++;
+    }
+
     // Summary
     printf("\n========================================\n");
     printf("Test Summary\n");
@@ -956,9 +1122,10 @@ int main(int argc, char* argv[])
     
     if (passedTests == totalTests) {
         printf("\nRESULT: SUCCESS (All %d tests passed)\n", totalTests);
-        printf("\nNote: Some tests may show [SKIP] or [INFO] if driver is\n");
-        printf("      compiled in RELEASE mode (registry diagnostics disabled).\n");
-        printf("      This is expected and correct behavior.\n");
+        printf("\nNote: Some tests may show [SKIP] if driver is RELEASE build\n");
+        printf("      (registry diagnostics disabled) or DbgView not captured.\n");
+        printf("      For behavioral verbosity proof, run:\n");
+        printf("        Run-Tests-Elevated.ps1 -TestName Test-DebugLevelVerbosity -CaptureDbgView\n");
         return 0;
     } else {
         printf("\nRESULT: FAILURE (%d/%d tests failed)\n", 

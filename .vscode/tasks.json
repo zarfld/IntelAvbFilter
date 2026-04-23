@@ -395,6 +395,25 @@
 			],
 			"problemMatcher": []		},
 		{
+			"label": "run-test-debug-level-verbosity",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools\\test\\Run-Tests-Elevated.ps1",
+				"-TestName",
+				"Test-DebugLevelVerbosity",
+				"-CaptureDbgView"
+			],
+			"presentation": {
+				"reveal": "always"
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "install-driver-debug",
 			"type": "shell",
 			"command": "powershell",
