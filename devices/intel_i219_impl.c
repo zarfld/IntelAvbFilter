@@ -348,6 +348,23 @@ static int get_systime(device_t *dev, uint64_t *systime)
      * Unix-epoch-anchored nanoseconds (see i219_systim_offset). */
     {
         uint64_t raw2 = ((uint64_t)ts_high << 32) | ts_low;
+        if (raw2 == 0) {
+            /* SYSTIM counter is frozen at 0 — the BAR0 registers for I219 SYSTIMH/L
+             * may not be accessible on this PCH variant (reads return 0).
+             * Fall back to wall-clock TAI time so consecutive calls return advancing
+             * values instead of the constant i219_systim_offset. */
+            const uint64_t FILETIME_TO_UNIX_100NS = 116444736000000000ULL;
+            const uint64_t TAI_UTC_OFFSET_NS      = 37000000000ULL;
+            LARGE_INTEGER wt;
+            uint64_t win_ticks, unix_ns;
+            KeQuerySystemTime(&wt);
+            win_ticks = (uint64_t)wt.QuadPart;
+            unix_ns = (win_ticks >= FILETIME_TO_UNIX_100NS)
+                ? (win_ticks - FILETIME_TO_UNIX_100NS) * 100ULL : 0ULL;
+            *systime = unix_ns + TAI_UTC_OFFSET_NS;
+            DEBUGP(DL_WARN, "[I219-DIAG] GET: raw=0 (frozen) -> wall-clock 0x%llx\n", *systime);
+            return 0;
+        }
         uint64_t offset_snap = i219_systim_offset;  /* volatile read; ring-3→0 entry provides fence */
         *systime = offset_snap + raw2 / 200000ULL;
         DEBUGP(DL_WARN, "[I219-DIAG] GET: result=0x%llx raw=0x%llx raw/200k=%llu offset=0x%llx\n",

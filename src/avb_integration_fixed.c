@@ -2296,6 +2296,19 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         
                         cfg->status = (avb_u32)NDIS_STATUS_SUCCESS;
                         status = STATUS_SUCCESS;
+
+                        /* Normalize timinca for I219 to I210-compat format (logical_ns << 24)
+                         * so callers using bits[15:8] to extract increment_ns get the logical
+                         * nanosecond value (8) rather than a raw IV byte (0x24 = 36).
+                         * This matches the normalization done in ADJUST_FREQUENCY for
+                         * current_increment, preventing test_ptp_phc_stability UT-CORR-006
+                         * from submitting an out-of-range increment_ns value. */
+                        if (activeContext->intel_device.device_type == INTEL_DEVICE_I219) {
+                            ULONG raw_iv = cfg->timinca & INTEL_TIMINCA_SUBNS_MASK;
+                            ULONG logical_ns = (raw_iv > 0u) ? (ULONG)(raw_iv / 2000000UL) : 8u;
+                            if (logical_ns == 0u) logical_ns = 8u;
+                            cfg->timinca = (logical_ns << 24);
+                        }
                         
                         DEBUGP(DL_TRACE, "Clock config (VID=0x%04X DID=0x%04X): SYSTIM=0x%016llX, TIMINCA=0x%08X, TSAUXC=0x%08X (bit31=%s), Rate=%u MHz\n",
                                activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id,
@@ -3187,11 +3200,24 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                        activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
                 
                 if (code == IOCTL_AVB_GET_TIMESTAMP) {
-                    ULONGLONG t = 0; 
-                    struct timespec sys = {0}; 
-                    int rc = intel_gettime(&activeContext->intel_device, r->clock_id, &t, &sys); 
+                    ULONGLONG t = 0;
+                    int rc = -1;
+                    /* Primary: device HAL ops — same path as GET_CLOCK_CONFIG and FastIo
+                     * TEST_SEND_PTP so that read_phc() and preSendTs share a single
+                     * consistent, advancing clock source (fixes TC-PTP-001-FOLLOWUP). */
+                    {
+                        const intel_device_ops_t *ts_ops =
+                            intel_get_device_ops(activeContext->intel_device.device_type);
+                        if (ts_ops && ts_ops->get_systime) {
+                            rc = ts_ops->get_systime(&activeContext->intel_device, &t);
+                        }
+                    }
                     if (rc != 0) {
-                        rc = AvbReadTimestamp(&activeContext->intel_device, &t); 
+                        struct timespec sys = {0};
+                        rc = intel_gettime(&activeContext->intel_device, r->clock_id, &t, &sys);
+                    }
+                    if (rc != 0) {
+                        rc = AvbReadTimestamp(&activeContext->intel_device, &t);
                     }
                     r->timestamp = t; 
                     r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 

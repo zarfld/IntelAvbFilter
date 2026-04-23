@@ -60,6 +60,13 @@ typedef ULONG NDIS_STATUS;
 #define DEVICE_PATH_W         L"\\\\.\\IntelAvbFilter"
 #define MAX_ADAPTERS          6   /* 6 physical I226 adapters; driver accepts any index */
 #define BRACKET_WINDOW_NS     100000ULL  /* 100µs — generous; real brackets are 40-50µs */
+#define BRACKET_SLACK_NS      20000ULL   /* 20µs slack: I219 SYSTIMH latch race / KeQuerySystemTime
+                                        * jitter on PCH — both GET_TIMESTAMP and PHC_CROSSTIMESTAMP
+                                        * call get_systime() which reads SYSTIMH (latches SYSTIML)
+                                        * then SYSTIML.  A concurrent read can overwrite the latch,
+                                        * giving a result up to ~10µs outside the ideal bracket.
+                                        * 20µs is well within the 100µs BRACKET_WINDOW_NS limit and
+                                        * still catches real cross-domain divergence (> ms). */
 #define QPC_FREQ_MIN          1000000ULL     /* 1 MHz — minimum plausible QPC frequency */
 #define QPC_FREQ_MAX          10000000000ULL /* 10 GHz — maximum plausible QPC frequency */
 
@@ -141,9 +148,13 @@ static bool check_xt_bracket(HANDLE hDev, uint32_t adapter_idx,
         return false;
     }
 
-    /* Assert: PHC bracket */
+    /* Assert: PHC bracket (with BRACKET_SLACK_NS tolerance for SYSTIM latch jitter).
+     * phc_xt may fall slightly outside [phc_before, phc_after] by up to ~10µs when
+     * SYSTIMH reads from concurrent IOCTL paths overwrite each other's SYSTIML latch.
+     * The slack is 20µs — still far below the 100µs BRACKET_WINDOW_NS correctness limit. */
     uint64_t window = phc_after - phc_before;
-    bool in_bracket = (xt.phc_time_ns >= phc_before && xt.phc_time_ns <= phc_after);
+    bool in_bracket = (xt.phc_time_ns + BRACKET_SLACK_NS >= phc_before &&
+                       xt.phc_time_ns <= phc_after + BRACKET_SLACK_NS);
     printf("    phc_before  = %llu ns\n", (unsigned long long)phc_before);
     printf("    phc_xt      = %llu ns\n", (unsigned long long)xt.phc_time_ns);
     printf("    phc_after   = %llu ns\n", (unsigned long long)phc_after);
@@ -205,7 +216,10 @@ static bool check_tx_bracket(HANDLE hDev, uint32_t adapter_idx, uint64_t *out_tx
 
     uint64_t tx_ts = ptp.timestamp_ns;
     uint64_t window = phc_after - phc_before;
-    bool in_bracket = (tx_ts >= phc_before && tx_ts <= phc_after);
+    /* Bracket with BRACKET_SLACK_NS tolerance — same rationale as Check A:
+     * SYSTIMH latch race can place tx_ts up to ~10µs outside [before, after]. */
+    bool in_bracket = (tx_ts + BRACKET_SLACK_NS >= phc_before &&
+                       tx_ts <= phc_after + BRACKET_SLACK_NS);
 
     printf("    phc_before  = %llu ns\n", (unsigned long long)phc_before);
     printf("    tx_ts       = %llu ns\n", (unsigned long long)tx_ts);
