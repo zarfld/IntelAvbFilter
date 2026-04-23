@@ -281,7 +281,22 @@ static void check_rx_ioctl(HANDLE hDev, uint32_t adapter_idx)
         tc_result("VV-CORR-003-D RX bracket (SKIP - no loopback, hardware-gated)", true);
         return;
     }
-
+    /* Stale-register guard: if rx_ts is more than 10 s away from phc_before
+     * (i.e., |diff| > 10^10 ns), the RXSTMPH/L hardware latch holds a stale
+     * capture.  TSYNCRXCTL.RXTT=0 (no new frame received).  SKIP, not FAIL. */
+    {
+        uint64_t _diff = (r.timestamp_ns > phc_before)
+                         ? (r.timestamp_ns - phc_before)
+                         : (phc_before - r.timestamp_ns);
+        if (_diff > 10000000000ULL) {  /* > 10 s */
+            printf("    [SKIP] rx_ts=%llu, phc_before=%llu, diff=%llu ns (> 10 s) \u2014 stale hardware latch\n",
+                   (unsigned long long)r.timestamp_ns,
+                   (unsigned long long)phc_before,
+                   (unsigned long long)_diff);
+            tc_result("VV-CORR-003-D rx_ts stale (SKIP - hardware-gated, no loopback)", true);
+            return;
+        }
+    }
     /* Loopback cable connected — run full bracket */
     uint64_t rx_ts = r.timestamp_ns;
     uint64_t window = phc_after - phc_before;

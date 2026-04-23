@@ -827,6 +827,35 @@ int main(void)
     }
     printf("Found %d adapter(s).\n\n", adapter_count);
 
+    /* Bind FsContext on hDev via OPEN_ADAPTER so IOCTL_AVB_GET_CLOCK_CONFIG
+     * (used by UT-CORR-006) returns STATUS_SUCCESS.  The driver requires a
+     * non-NULL FsContext; without this call Win32 error 31 is returned. */
+    {
+        bool bound = false;
+        for (int _oi = 0; _oi < adapter_count && !bound; _oi++) {
+            AVB_ENUM_REQUEST _er = {0};
+            _er.index = (avb_u32)_oi;
+            DWORD _br = 0;
+            DeviceIoControl(hDev, IOCTL_AVB_ENUM_ADAPTERS,
+                            &_er, sizeof(_er), &_er, sizeof(_er), &_br, NULL);
+            if (!(_er.capabilities & INTEL_CAP_BASIC_1588)) continue;
+            AVB_OPEN_REQUEST _open = {0};
+            _open.vendor_id = _er.vendor_id;
+            _open.device_id = _er.device_id;
+            _open.index     = (avb_u32)_oi;
+            _br = 0;
+            BOOL _ok = DeviceIoControl(hDev, IOCTL_AVB_OPEN_ADAPTER,
+                                       &_open, sizeof(_open),
+                                       &_open, sizeof(_open), &_br, NULL);
+            if (_ok && _open.status == 0) {
+                printf("  [OPEN] Adapter %d (VID=0x%04X DID=0x%04X): bound via OPEN_ADAPTER\n",
+                       _oi, (unsigned)_er.vendor_id, (unsigned)_er.device_id);
+                bound = true;
+            }
+        }
+        Sleep(300);  /* allow I219 OID handler to complete PTP init */
+    }
+
     /* UT-CORR-007 and UT-CORR-008: per-adapter jitter and burst correlation */
     for (ai = 0; ai < adapter_count; ai++) {
         printf("\n--- Adapter %d / %d ---\n", ai, adapter_count - 1);

@@ -194,17 +194,31 @@ IntelAvbFilterFastIoDeviceControl(
 
         InterlockedIncrement(&ctx->test_packets_pending);
 
-        /* Single atomic SYSTIM read: the TX timestamp and PHC reference are
-         * the same hardware snapshot.  delta = tx - phc = 0 by construction,
-         * satisfying UT-CORR-005..009 (delta < 1 µs) in all build configs.
-         * A single read avoids the 5-20 µs gap that two consecutive
-         * AvbReadTimestamp calls produce in DBG=1 due to DbgPrint overhead.
+        /* Pre-send PHC snapshot via ops->get_systime(): returns properly-converted
+         * nanoseconds (raw/200000 + i219_systim_offset for I219; seconds*10^9 +
+         * sub-ns for I210/I225/I226).  This matches the domain returned by
+         * IOCTL_AVB_GET_TIMESTAMP so that bracket checks and IT-CORR-001 ratio
+         * comparisons are in the same unit.
+         * AvbReadTimestampReal was returning raw 5-femtosecond SYSTIM counts for
+         * I219 (driver bug: 3e18 raw counts >> 1.776e18 Unix ns).
          * Must be read BEFORE NdisFSendNetBufferLists to capture pre-send PHC. */
         ULONG64 captureTs = 0;
-        AvbReadTimestamp(&ctx->intel_device, &captureTs);
+        {
+            /* Use ops->get_systime() for properly-converted Unix ns.
+             * intel_get_device_ops() returns NULL for unknown types; get_systime()
+             * handles uninitialised SYSTIM via its own KeQuerySystemTime fallback.
+             * AVB_HW_BAR_MAPPED guard removed: hw_state on the ctx obtained from
+             * FsContext may be BOUND (below BAR_MAPPED) even when hardware is
+             * PTP_READY, because hw_state is updated on the filter context but
+             * FsContext can reflect a state snapshot from OPEN_ADAPTER time. */
+            const intel_device_ops_t *ops = intel_get_device_ops(ctx->intel_device.device_type);
+            if (ops && ops->get_systime) {
+                ops->get_systime(&ctx->intel_device, &captureTs);
+            }
+        }
         if (captureTs == 0) {
-            /* SYSTIM not running yet (TSAUXC disabled or timer not seeded) — fall back to
-             * QueryPerformanceCounter to ensure ts is always non-zero, mirroring AvbSendPtpCore. */
+            /* PHC not accessible (device type unknown or SYSTIM not initialised) —
+             * fall back to QueryPerformanceCounter to ensure ts is always non-zero. */
             LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
             captureTs = (ULONG64)pc.QuadPart;
         }

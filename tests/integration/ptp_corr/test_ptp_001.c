@@ -411,7 +411,7 @@ static void test_tc_ptp_001_corr(HANDLE hDev, uint32_t adapter_idx)
             return;
         }
         n++;
-        Sleep(2);  /* 2ms spacing between samples */
+        Sleep(100);  /* 100ms spacing: enough for scheduler quiescence, avoids \u00b15% outliers from 15.6ms timer tick jitter at 2ms */
     }
 
     /* Compute per-sample PHC/QPC ratio */
@@ -699,6 +699,35 @@ int main(void)
         return 1;
     }
     printf("\nFound %d adapter(s).\n", adapter_count);
+
+    /* Bind FsContext on hDev via OPEN_ADAPTER so IOCTL_AVB_GET_CLOCK_CONFIG
+     * returns STATUS_SUCCESS.  Without this, the driver returns STATUS_UNSUCCESSFUL
+     * (Win32=31) because it requires a non-NULL FsContext (set by OPEN_ADAPTER). */
+    {
+        bool bound = false;
+        for (int _oi = 0; _oi < adapter_count && !bound; _oi++) {
+            AVB_ENUM_REQUEST _er = {0};
+            _er.index = (avb_u32)_oi;
+            DWORD _br = 0;
+            DeviceIoControl(hDev, IOCTL_AVB_ENUM_ADAPTERS,
+                            &_er, sizeof(_er), &_er, sizeof(_er), &_br, NULL);
+            if (!(_er.capabilities & INTEL_CAP_BASIC_1588)) continue;
+            AVB_OPEN_REQUEST _open = {0};
+            _open.vendor_id = _er.vendor_id;
+            _open.device_id = _er.device_id;
+            _open.index     = (avb_u32)_oi;
+            _br = 0;
+            BOOL _ok = DeviceIoControl(hDev, IOCTL_AVB_OPEN_ADAPTER,
+                                       &_open, sizeof(_open),
+                                       &_open, sizeof(_open), &_br, NULL);
+            if (_ok && _open.status == 0) {
+                printf("  [OPEN] Adapter %d (VID=0x%04X DID=0x%04X): bound via OPEN_ADAPTER\n",
+                       _oi, (unsigned)_er.vendor_id, (unsigned)_er.device_id);
+                bound = true;
+            }
+        }
+        Sleep(300);  /* allow I219 OID handler to complete PTP init */
+    }
 
     /* Multi-adapter independence test (global — spans all adapters) */
     test_tc_ptp_001_multiadpt(hDev, adapter_count);
