@@ -226,8 +226,8 @@ static int init_ptp(device_t *dev)
             : 0ULL;
         now_tai_ns = now_unix_ns + TAI_UTC_OFFSET_NS;
 
-        ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
-        ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
+        ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);  /* FIRST: latch trigger */
+        ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);  /* SECOND: latched value */
         raw = ((uint64_t)ts_hi << 32) | ts_lo;
         InterlockedExchange64((volatile LONG64 *)&i219_systim_offset,
                               (LONG64)(now_tai_ns - raw / 200000ULL));
@@ -280,9 +280,9 @@ static int set_systime(device_t *dev, uint64_t systime)
         DEBUGP(DL_INFO, "I219 set_systime: using system time: 0x%llx\n", systime);
     }
 
-    /* Read current raw counter (SYSTIMH read latches SYSTIML on I219). */
-    ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
+    /* Read current raw counter — SYSTIML MUST be read first (latch trigger). */
     ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
+    ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
     raw = ((uint64_t)ts_hi << 32) | ts_lo;
 
     /* Update software offset — no hardware register writes needed.
@@ -313,30 +313,27 @@ static int get_systime(device_t *dev, uint64_t *systime)
         return -1;
     }
 
-    /* I219 (e1000e family): reading SYSTIMH latches SYSTIML in hardware — the
-     * two registers form an atomic pair once SYSTIMH is read.  Read H first,
-     * then L immediately.  No retry loop is needed or correct here.
+    /* I219 (e1000e family): SYSTIML MUST be read FIRST — reading SYSTIML triggers
+     * the hardware latch that captures SYSTIMH into a shadow register.  Reading
+     * SYSTIMH second returns the coherent latched value, giving an atomic 64-bit
+     * snapshot.  I218/I219 Spec Update Rev 1.3: SYSTIML read is the latch trigger.
      *
-     * WHY NO RETRY: the raw I219 SYSTIM counter increments at 200,000 counts/ns,
-     * so the upper 32 bits (SYSTIMH) roll over every ~21.5µs.  A second read of
-     * SYSTIMH will almost always differ from the first because MMIO round-trips
-     * take ~5–50µs each — the window is far smaller than the rollover period.
-     * A "while (h1 != h2)" guard would loop indefinitely (observed: >12,000
-     * retries, P50 = 5 ms rather than the expected <75µs).
+     * Wrong order (H before L) causes ~21.5 µs backward jumps when SYSTIML rolls
+     * over between reads (rollover period ≈ 21,474 ns at 200,000 counts/ns rate).
+     * At ~10–20 µs per IOCTL, every second call lands in the rollover danger zone,
+     * producing the characteristic alternating backward-jump pattern.
      *
-     * The hardware guarantee makes the retry unnecessary: the pair
-     * (SYSTIMH_at_latch, SYSTIML_latched) is already atomic.
-     *
-     * Reference: Linux e1000e ptp.c e1000e_phc_gettimex64() — no retry loop. */
+     * Reference: Linux e1000e ptp.c e1000e_phc_gettimex64() — reads SYSTIML first,
+     * then SYSTIMH, with tmreg_lock held (same latch-then-read order as this fix). */
     {
-        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
-        if (result != 0) {
-            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
-            goto fallback;
-        }
         result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
         if (result != 0) {
             DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
+            goto fallback;
+        }
+        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
+        if (result != 0) {
+            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
             goto fallback;
         }
     }

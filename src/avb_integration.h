@@ -156,6 +156,7 @@ typedef struct _AVB_DEVICE_CONTEXT {
     // Timestamp Event Subscriptions (Issue #13)
     TS_SUBSCRIPTION subscriptions[MAX_TS_SUBSCRIPTIONS];  // Subscription table
     NDIS_SPIN_LOCK subscription_lock;                     // Protects subscription table
+    NDIS_SPIN_LOCK systim_lock;                           // I219: serialises SYSTIML+SYSTIMH atomic read
     volatile LONG next_ring_id;                           // Monotonic ring_id allocator (1, 2, 3, ...)
 
     // TX Timestamp Polling (Task 6c)
