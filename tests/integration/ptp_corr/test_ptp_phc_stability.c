@@ -336,10 +336,26 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
         return;
     }
 
-    /* Decode current increment: TIMINCA byte1=integer ns, byte0=fractional */
-    uint32_t increment_ns   = (cfg.timinca >> 8) & 0xFF;
-    uint32_t increment_frac = cfg.timinca & 0xFF;
-    if (increment_ns == 0) { increment_ns = 8; increment_frac = 0; }  /* 125 MHz fallback */
+    /* Decode current increment: handles both I219 raw (IP=2, IV=ns×2,000,000) and
+     * I210/I226/normalised-I219 (IP=ns/cycle) TIMINCA formats.
+     * The old (cfg.timinca >> 8) & 0xFF formula read byte-1 of I219's IV field,
+     * producing a garbage increment_ns (e.g. 36) that caused the +1 adjustment
+     * to exceed driver validation (max_valid_incr=15). */
+    uint32_t _ip  = (cfg.timinca >> 24) & 0xFFu;
+    uint32_t _iv  = cfg.timinca & 0x00FFFFFFu;
+    uint32_t increment_ns;
+    uint32_t increment_frac;
+    if (_ip == 2u && _iv > 0u) {        /* I219 raw: IV = increment_ns × 2,000,000 */
+        increment_ns   = _iv / 2000000u;
+        if (increment_ns == 0u) increment_ns = 8u;
+        increment_frac = 0u;
+    } else if (_ip > 0u) {              /* I210/I226/normalised I219: IP = ns/cycle */
+        increment_ns   = _ip;
+        increment_frac = 0u;
+    } else {                            /* frozen / unknown — 125 MHz fallback */
+        increment_ns   = 8u;
+        increment_frac = 0u;
+    }
     printf("  Clock config: timinca=0x%08X  increment=%u ns  clock_rate=%u MHz\n",
            cfg.timinca, increment_ns, cfg.clock_rate_mhz);
 

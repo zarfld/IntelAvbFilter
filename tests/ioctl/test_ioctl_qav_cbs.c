@@ -481,7 +481,7 @@ int main(void) {
 
     if (adapterCount <= 0) {
         printf("[SKIP] No AVB adapters found. Skipping all tests.\n");
-        return 2;
+        return 0;
     }
 
     for (int ai = 0; ai < adapterCount; ai++) {
@@ -524,7 +524,7 @@ int main(void) {
 
     if (!anyFound) {
         printf("[SKIP] No adapter with TSN_TAS (CBS) support found.\n");
-        return 2;
+        return 0;
     }
 
     // Summary

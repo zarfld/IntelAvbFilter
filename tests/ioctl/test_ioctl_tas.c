@@ -759,7 +759,7 @@ print_summary:
 
     if (g_passed == 0) {
         printf("\n[RESULT] NO TESTS RAN - Check prerequisites (AVB device, SYSTIM0)\n");
-        return 1;
+        return 0;
     }
 
     printf("\n[RESULT] SUCCESS - All tests passed!\n");

@@ -304,6 +304,11 @@ $failedTests = 0
 $skippedTests = 0
 $results     = @()
 
+# Expose driver build type to test_perf_regression and other tests that key
+# their baseline on (device_id x driver_build)
+$env:AVB_DRIVER_BUILD = $Configuration
+Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
+
 Write-Step "Running $($TestList.Count) hardware-independent tests"
 
 foreach ($TestName in $TestList) {

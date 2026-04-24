@@ -42,9 +42,10 @@
 #define ITERATIONS         10000
 #define WARMUP_ITERATIONS  100
 #define REGRESSION_THRESHOLD 0.05   /* 5% - fail if current > baseline * 1.05 */
-#define BASELINE_FILE      "logs\\perf_baseline.dat"
-#define BASELINE_FILE_TMP  "logs\\perf_baseline.tmp"
-#define MAX_RESULTS        20
+#define BASELINE_FILE_BASE  "logs\\perf_baseline"
+#define BASELINE_PATH_MAX   128
+#define MAX_RESULTS        64
+#define MAX_ADAPTERS        8
 
 /* -------------------------------------------------------------------------
  * Test Result Infrastructure (matches test_timestamp_latency.c pattern)
@@ -177,23 +178,28 @@ typedef struct {
     double tx_median_ns;
     double rx_median_ns;
     char   captured_date[32];
+    char   device_id_str[12];   /* e.g. "0x15B7" - audit trail */
+    char   driver_build[16];    /* "Debug" or "Release" - audit trail */
 } PERF_BASELINE;
 
-static bool WriteBaseline(const PERF_BASELINE* b)
+static bool WriteBaseline(const PERF_BASELINE* b,
+                           const char* filePath, const char* fileTmpPath)
 {
     /* Write to tmp first, then rename (atomic-ish) */
-    FILE* f = fopen(BASELINE_FILE_TMP, "w");
+    FILE* f = fopen(fileTmpPath, "w");
     if (!f) {
         /* Try creating the logs directory */
         CreateDirectoryA("logs", NULL);
-        f = fopen(BASELINE_FILE_TMP, "w");
+        f = fopen(fileTmpPath, "w");
         if (!f) {
             fprintf(stderr, "ERROR: Cannot create baseline temp file '%s'\n",
-                    BASELINE_FILE_TMP);
+                    fileTmpPath);
             return false;
         }
     }
 
+    if (b->device_id_str[0]) fprintf(f, "device_id=%s\n",    b->device_id_str);
+    if (b->driver_build[0])  fprintf(f, "driver_build=%s\n", b->driver_build);
     fprintf(f, "phc_p50_ns=%.3f\n",    b->phc_p50_ns);
     fprintf(f, "phc_p99_ns=%.3f\n",    b->phc_p99_ns);
     fprintf(f, "tx_median_ns=%.3f\n",  b->tx_median_ns);
@@ -202,8 +208,8 @@ static bool WriteBaseline(const PERF_BASELINE* b)
     fclose(f);
 
     /* Replace baseline atomically */
-    DeleteFileA(BASELINE_FILE);
-    if (!MoveFileA(BASELINE_FILE_TMP, BASELINE_FILE)) {
+    DeleteFileA(filePath);
+    if (!MoveFileA(fileTmpPath, filePath)) {
         fprintf(stderr, "ERROR: Could not rename tmp to baseline (%lu)\n",
                 GetLastError());
         return false;
@@ -212,11 +218,11 @@ static bool WriteBaseline(const PERF_BASELINE* b)
 }
 
 /* Returns true if file found and parsed successfully, false if absent/corrupt */
-static bool ReadBaseline(PERF_BASELINE* b)
+static bool ReadBaseline(PERF_BASELINE* b, const char* filePath)
 {
     memset(b, 0, sizeof(*b));
 
-    FILE* f = fopen(BASELINE_FILE, "r");
+    FILE* f = fopen(filePath, "r");
     if (!f) {
         return false;  /* File absent -> capture mode */
     }
@@ -251,7 +257,7 @@ static bool ReadBaseline(PERF_BASELINE* b)
     /* Need all 4 metric fields to be valid */
     if (fieldsRead < 4) {
         fprintf(stderr, "WARN: Baseline file '%s' missing fields (%d/4) - treating as absent\n",
-                BASELINE_FILE, fieldsRead);
+                filePath, fieldsRead);
         return false;
     }
 
@@ -411,6 +417,91 @@ static bool MeasureRxLatency(HANDLE hDevice, double* medianNs)
 }
 
 /* -------------------------------------------------------------------------
+ * Context detection helpers
+ * ------------------------------------------------------------------------- */
+static const char* GetDriverBuildType(void)
+{
+    /* CI sets AVB_DRIVER_BUILD=Debug|Release before running tests.
+     * This reliably reflects the installed *driver* build type,
+     * regardless of how the test binary itself was compiled. */
+    static char envBuild[16] = {0};
+    if (envBuild[0] == '\0') {
+        DWORD n = GetEnvironmentVariableA("AVB_DRIVER_BUILD",
+                                          envBuild, sizeof(envBuild));
+        if (n == 0 || (strcmp(envBuild, "Debug") != 0 &&
+                       strcmp(envBuild, "Release") != 0)) {
+            /* Fallback: detect from test binary compile-time define */
+#ifdef _DEBUG
+            strncpy(envBuild, "Debug",   sizeof(envBuild) - 1);
+#else
+            strncpy(envBuild, "Release", sizeof(envBuild) - 1);
+#endif
+        }
+    }
+    return envBuild;
+}
+
+/* -------------------------------------------------------------------------
+ * Adapter enumeration and selection helpers
+ * Pattern: test_hw_state_machine.c ("best pattern" per adapter-coverage-matrix.md)
+ * Rule: all tests MUST run on ALL supported adapters.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    DWORD   index;
+    avb_u16 vendor_id;
+    avb_u16 device_id;
+    avb_u32 capabilities;
+} ADAPTER_INFO;
+
+static DWORD EnumerateAdapters(HANDLE hDevice, ADAPTER_INFO* out, DWORD maxCount)
+{
+    DWORD count = 0;
+    for (DWORD idx = 0; idx < maxCount; idx++) {
+        AVB_ENUM_REQUEST req;
+        memset(&req, 0, sizeof(req));
+        req.index = idx;
+        DWORD bytes = 0;
+        BOOL ok = DeviceIoControl(hDevice, IOCTL_AVB_ENUM_ADAPTERS,
+                                  &req, sizeof(req), &req, sizeof(req),
+                                  &bytes, NULL);
+        if (!ok) break;
+        if (idx == 0) {
+            count = req.count;
+            if (count == 0) break;
+        }
+        out[idx].index        = idx;
+        out[idx].vendor_id    = req.vendor_id;
+        out[idx].device_id    = req.device_id;
+        out[idx].capabilities = req.capabilities;
+        if (idx + 1 >= count) break;
+    }
+    return count;
+}
+
+static BOOL BindAdapterToHandle(HANDLE h, DWORD index, avb_u16 vendor_id, avb_u16 device_id)
+{
+    AVB_OPEN_REQUEST req;
+    memset(&req, 0, sizeof(req));
+    req.vendor_id = vendor_id;
+    req.device_id = device_id;
+    req.index     = index;
+    DWORD bytes = 0;
+    return DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                           &req, sizeof(req), &req, sizeof(req),
+                           &bytes, NULL);
+}
+
+static void BuildBaselinePaths(avb_u16 deviceId, const char* buildType,
+                                char* filePath,    int filePathLen,
+                                char* fileTmpPath, int fileTmpLen)
+{
+    snprintf(filePath,    filePathLen, "%s_0x%04X_%s.dat",
+             BASELINE_FILE_BASE, (unsigned)deviceId, buildType);
+    snprintf(fileTmpPath, fileTmpLen,  "%s_0x%04X_%s.tmp",
+             BASELINE_FILE_BASE, (unsigned)deviceId, buildType);
+}
+
+/* -------------------------------------------------------------------------
  * TC-PERF-REG-005: Baseline file round-trip self-test
  *
  * Write known values, read them back, verify round-trip fidelity.
@@ -520,6 +611,8 @@ static bool CheckRegression(double current, double baseline,
 
 /* -------------------------------------------------------------------------
  * main
+ * Rule: enumerate ALL supported adapters and measure each one.
+ * Each adapter gets its own baseline: logs\perf_baseline_0x{DID}_{Build}.dat
  * ------------------------------------------------------------------------- */
 int main(void)
 {
@@ -530,167 +623,227 @@ int main(void)
     printf("=============================================================\n\n");
 
     /* -----------------------------------------------------------------------
-     * TC-PERF-REG-005: Baseline round-trip self-test (no driver needed)
+     * TC-PERF-REG-005: Baseline round-trip self-test (adapter-agnostic, once)
      * --------------------------------------------------------------------- */
     printf("--- TC-PERF-REG-005: Baseline file round-trip self-test ---\n");
     TestBaselineRoundTrip();
     printf("\n");
 
     /* -----------------------------------------------------------------------
-     * Determine run mode
+     * Phase 1: Enumerate ALL adapters via IOCTL_AVB_ENUM_ADAPTERS
      * --------------------------------------------------------------------- */
-    PERF_BASELINE baseline;
-    bool hasBaseline = ReadBaseline(&baseline);
-
-    const char* mode = hasBaseline ? "COMPARE" : "CAPTURE";
-    printf("Run mode: %s\n", mode);
-    if (hasBaseline) {
-        printf("  Loaded baseline (captured %s):\n",
-               baseline.captured_date[0] ? baseline.captured_date : "unknown");
-        printf("    phc_p50_ns  = %.0f ns\n", baseline.phc_p50_ns);
-        printf("    phc_p99_ns  = %.0f ns\n", baseline.phc_p99_ns);
-        printf("    tx_median   = %.0f ns\n", baseline.tx_median_ns);
-        printf("    rx_median   = %.0f ns\n", baseline.rx_median_ns);
-    } else {
-        printf("  No baseline found at '%s' - will capture this run.\n\n",
-               BASELINE_FILE);
-    }
-    printf("\n");
-
-    /* -----------------------------------------------------------------------
-     * Open device
-     * --------------------------------------------------------------------- */
-    HANDLE hDevice = OpenAvbDevice();
-    if (hDevice == INVALID_HANDLE_VALUE) {
+    HANDLE hEnum = OpenAvbDevice();
+    if (hEnum == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
-
-        /* Mark TCs 001-004 as skipped (device unavailable) */
-        const char* skipMsg = "SKIP: Driver not installed/running";
-        RecordResult("TC-PERF-REG-001", false, skipMsg);
-        RecordResult("TC-PERF-REG-002", false, skipMsg);
-        RecordResult("TC-PERF-REG-003", false, skipMsg);
-        RecordResult("TC-PERF-REG-004", false, skipMsg);
-
         fprintf(stderr,
                 "ERROR: Cannot open IntelAvbFilter device (error %lu).\n"
                 "  Ensure driver is installed and running.\n"
                 "  Run: tools\\setup\\Install-Driver-Elevated.ps1\n",
                 err);
+        RecordResult("TC-PERF-REG-001", false, "SKIP: Driver not installed/running");
+        RecordResult("TC-PERF-REG-002", false, "SKIP: Driver not installed/running");
+        RecordResult("TC-PERF-REG-003", false, "SKIP: Driver not installed/running");
+        RecordResult("TC-PERF-REG-004", false, "SKIP: Driver not installed/running");
         PrintTestSummary();
         return 1;
     }
 
-    /* -----------------------------------------------------------------------
-     * Measure current metrics
-     * --------------------------------------------------------------------- */
-    printf("--- Measuring current performance metrics ---\n");
-    double phcP50  = 0.0, phcP99  = 0.0;
-    double txMedian = 0.0, rxMedian = 0.0;
+    ADAPTER_INFO adapters[MAX_ADAPTERS];
+    memset(adapters, 0, sizeof(adapters));
+    DWORD adapter_count = EnumerateAdapters(hEnum, adapters, MAX_ADAPTERS);
+    CloseHandle(hEnum);
 
-    bool phcOk = MeasurePhcLatency(hDevice, &phcP50, &phcP99);
-    bool txOk  = MeasureTxLatency(hDevice,  &txMedian);
-    bool rxOk  = MeasureRxLatency(hDevice,  &rxMedian);
-
-    CloseHandle(hDevice);
-    printf("\n");
-
-    /* -----------------------------------------------------------------------
-     * TC-PERF-REG-001..004: Compare or capture
-     * --------------------------------------------------------------------- */
-    char reason[256];
-
-    if (!phcOk) {
-        RecordResult("TC-PERF-REG-001", false,
-                     "FAIL: PHC latency measurement failed (alloc/device error)");
-        RecordResult("TC-PERF-REG-002", false,
-                     "FAIL: PHC latency measurement failed (alloc/device error)");
-    } else if (hasBaseline) {
-        printf("--- TC-PERF-REG-001/002: PHC regression check ---\n");
-        bool ok1 = CheckRegression(phcP50, baseline.phc_p50_ns,
-                                   "PHC P50", reason, sizeof(reason));
-        RecordResult("TC-PERF-REG-001", ok1, _strdup(reason));
-        printf("  [%s] TC-PERF-REG-001: %s\n", ok1 ? "PASS" : "FAIL", reason);
-
-        bool ok2 = CheckRegression(phcP99, baseline.phc_p99_ns,
-                                   "PHC P99", reason, sizeof(reason));
-        RecordResult("TC-PERF-REG-002", ok2, _strdup(reason));
-        printf("  [%s] TC-PERF-REG-002: %s\n", ok2 ? "PASS" : "FAIL", reason);
-        printf("\n");
-    } else {
-        /* CAPTURE mode */
-        snprintf(reason, sizeof(reason),
-                 "CAPTURE: PHC P50 %.0f ns recorded as baseline", phcP50);
-        RecordResult("TC-PERF-REG-001", true, _strdup(reason));
-        printf("  [CAPTURE] TC-PERF-REG-001: %s\n", reason);
-
-        snprintf(reason, sizeof(reason),
-                 "CAPTURE: PHC P99 %.0f ns recorded as baseline", phcP99);
-        RecordResult("TC-PERF-REG-002", true, _strdup(reason));
-        printf("  [CAPTURE] TC-PERF-REG-002: %s\n", reason);
-        printf("\n");
+    if (adapter_count == 0) {
+        fprintf(stderr, "ERROR: No adapters found. Driver running but not bound to any NIC.\n");
+        RecordResult("TC-PERF-REG-001", false, "SKIP: No adapters found via IOCTL_AVB_ENUM_ADAPTERS");
+        RecordResult("TC-PERF-REG-002", false, "SKIP: No adapters found via IOCTL_AVB_ENUM_ADAPTERS");
+        RecordResult("TC-PERF-REG-003", false, "SKIP: No adapters found via IOCTL_AVB_ENUM_ADAPTERS");
+        RecordResult("TC-PERF-REG-004", false, "SKIP: No adapters found via IOCTL_AVB_ENUM_ADAPTERS");
+        PrintTestSummary();
+        return 1;
     }
 
-    if (!txOk) {
-        RecordResult("TC-PERF-REG-003", false,
-                     "FAIL: TX latency measurement failed (alloc/device error)");
-    } else if (hasBaseline) {
-        printf("--- TC-PERF-REG-003: TX regression check ---\n");
-        bool ok3 = CheckRegression(txMedian, baseline.tx_median_ns,
-                                   "TX median", reason, sizeof(reason));
-        RecordResult("TC-PERF-REG-003", ok3, _strdup(reason));
-        printf("  [%s] TC-PERF-REG-003: %s\n", ok3 ? "PASS" : "FAIL", reason);
-        printf("\n");
-    } else {
-        snprintf(reason, sizeof(reason),
-                 "CAPTURE: TX median %.0f ns recorded as baseline", txMedian);
-        RecordResult("TC-PERF-REG-003", true, _strdup(reason));
-        printf("  [CAPTURE] TC-PERF-REG-003: %s\n", reason);
-        printf("\n");
-    }
+    const char* buildType = GetDriverBuildType();
+    printf("Adapters detected: %lu  |  driver_build=%s\n", adapter_count, buildType);
 
-    if (!rxOk) {
-        RecordResult("TC-PERF-REG-004", false,
-                     "FAIL: RX latency measurement failed (alloc/device error)");
-    } else if (hasBaseline) {
-        printf("--- TC-PERF-REG-004: RX regression check ---\n");
-        bool ok4 = CheckRegression(rxMedian, baseline.rx_median_ns,
-                                   "RX median", reason, sizeof(reason));
-        RecordResult("TC-PERF-REG-004", ok4, _strdup(reason));
-        printf("  [%s] TC-PERF-REG-004: %s\n", ok4 ? "PASS" : "FAIL", reason);
-        printf("\n");
-    } else {
-        snprintf(reason, sizeof(reason),
-                 "CAPTURE: RX median %.0f ns recorded as baseline", rxMedian);
-        RecordResult("TC-PERF-REG-004", true, _strdup(reason));
-        printf("  [CAPTURE] TC-PERF-REG-004: %s\n", reason);
-        printf("\n");
-    }
+    /* Static storage so TC name pointers remain valid through PrintTestSummary */
+    static char tc_names[MAX_ADAPTERS][4][32];
 
     /* -----------------------------------------------------------------------
-     * Write new baseline only in CAPTURE mode (when all measurements succeed)
+     * Phase 2: Per-adapter measurement loop
+     * Each adapter: open handle -> OPEN_ADAPTER -> measure -> compare/capture
      * --------------------------------------------------------------------- */
-    if (!hasBaseline && phcOk && txOk && rxOk) {
-        PERF_BASELINE newBaseline;
-        newBaseline.phc_p50_ns   = phcP50;
-        newBaseline.phc_p99_ns   = phcP99;
-        newBaseline.tx_median_ns = txMedian;
-        newBaseline.rx_median_ns = rxMedian;
+    for (DWORD i = 0; i < adapter_count; i++) {
+        snprintf(tc_names[i][0], 32, "TC-PERF-REG-001[%lu]", i);
+        snprintf(tc_names[i][1], 32, "TC-PERF-REG-002[%lu]", i);
+        snprintf(tc_names[i][2], 32, "TC-PERF-REG-003[%lu]", i);
+        snprintf(tc_names[i][3], 32, "TC-PERF-REG-004[%lu]", i);
 
-        /* Get current date for audit trail */
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        snprintf(newBaseline.captured_date, sizeof(newBaseline.captured_date),
-                 "%04d-%02d-%02d",
-                 (int)st.wYear, (int)st.wMonth, (int)st.wDay);
+        printf("\n########################################\n");
+        printf("Adapter %lu/%lu  VID=0x%04X  DID=0x%04X\n",
+               i + 1, adapter_count,
+               (unsigned)adapters[i].vendor_id, (unsigned)adapters[i].device_id);
+        printf("########################################\n");
 
-        if (WriteBaseline(&newBaseline)) {
-            printf("Baseline written to '%s' (%s)\n",
-                   BASELINE_FILE, newBaseline.captured_date);
+        char baselinePath[BASELINE_PATH_MAX];
+        char baselineTmpPath[BASELINE_PATH_MAX];
+        BuildBaselinePaths(adapters[i].device_id, buildType,
+                           baselinePath,    sizeof(baselinePath),
+                           baselineTmpPath, sizeof(baselineTmpPath));
+        printf("  Context: device_id=0x%04X  driver_build=%s\n",
+               (unsigned)adapters[i].device_id, buildType);
+        printf("  Baseline file: %s\n\n", baselinePath);
+
+        /* Open a fresh handle for this adapter */
+        HANDLE h = OpenAvbDevice();
+        if (h == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            printf("  [SKIP] Cannot open device handle (error %lu) — skipping adapter %lu\n",
+                   err, i);
+            continue;
+        }
+
+        /* Bind to this specific adapter so all subsequent IOCTLs target it */
+        if (!BindAdapterToHandle(h, adapters[i].index,
+                                 adapters[i].vendor_id, adapters[i].device_id)) {
+            DWORD err = GetLastError();
+            printf("  [SKIP] IOCTL_AVB_OPEN_ADAPTER error %lu (DID=0x%04X) — skipping adapter %lu\n",
+                   err, (unsigned)adapters[i].device_id, i);
+            CloseHandle(h);
+            continue;
+        }
+        printf("  [INFO] Bound to adapter %lu (VID=0x%04X DID=0x%04X)\n",
+               i, (unsigned)adapters[i].vendor_id, (unsigned)adapters[i].device_id);
+
+        /* Determine run mode */
+        PERF_BASELINE baseline;
+        bool hasBaseline = ReadBaseline(&baseline, baselinePath);
+
+        const char* mode = hasBaseline ? "COMPARE" : "CAPTURE";
+        printf("Run mode: %s\n", mode);
+        if (hasBaseline) {
+            printf("  Loaded baseline (captured %s, device 0x%04X, %s driver):\n",
+                   baseline.captured_date[0] ? baseline.captured_date : "unknown",
+                   (unsigned)adapters[i].device_id, buildType);
+            printf("    phc_p50_ns  = %.0f ns\n", baseline.phc_p50_ns);
+            printf("    phc_p99_ns  = %.0f ns\n", baseline.phc_p99_ns);
+            printf("    tx_median   = %.0f ns\n", baseline.tx_median_ns);
+            printf("    rx_median   = %.0f ns\n", baseline.rx_median_ns);
         } else {
-            fprintf(stderr, "WARN: Failed to write baseline - results still PASS\n");
+            printf("  No baseline found at '%s' - will capture this run.\n\n",
+                   baselinePath);
         }
         printf("\n");
-    }
+
+        /* Measure */
+        printf("--- Measuring current performance metrics ---\n");
+        double phcP50 = 0.0, phcP99 = 0.0, txMedian = 0.0, rxMedian = 0.0;
+        bool phcOk = MeasurePhcLatency(h, &phcP50, &phcP99);
+        bool txOk  = MeasureTxLatency(h,  &txMedian);
+        bool rxOk  = MeasureRxLatency(h,  &rxMedian);
+        CloseHandle(h);
+        printf("\n");
+
+        /* TC-PERF-REG-001/002: PHC */
+        char reason[256];
+        if (!phcOk) {
+            RecordResult(tc_names[i][0], false,
+                         "FAIL: PHC latency measurement failed (alloc/device error)");
+            RecordResult(tc_names[i][1], false,
+                         "FAIL: PHC latency measurement failed (alloc/device error)");
+        } else if (hasBaseline) {
+            printf("--- %s/%s: PHC regression check ---\n",
+                   tc_names[i][0], tc_names[i][1]);
+            bool ok1 = CheckRegression(phcP50, baseline.phc_p50_ns,
+                                       "PHC P50", reason, sizeof(reason));
+            RecordResult(tc_names[i][0], ok1, _strdup(reason));
+            printf("  [%s] %s: %s\n", ok1 ? "PASS" : "FAIL", tc_names[i][0], reason);
+
+            bool ok2 = CheckRegression(phcP99, baseline.phc_p99_ns,
+                                       "PHC P99", reason, sizeof(reason));
+            RecordResult(tc_names[i][1], ok2, _strdup(reason));
+            printf("  [%s] %s: %s\n", ok2 ? "PASS" : "FAIL", tc_names[i][1], reason);
+            printf("\n");
+        } else {
+            snprintf(reason, sizeof(reason),
+                     "CAPTURE: PHC P50 %.0f ns recorded as baseline", phcP50);
+            RecordResult(tc_names[i][0], true, _strdup(reason));
+            printf("  [CAPTURE] %s: %s\n", tc_names[i][0], reason);
+
+            snprintf(reason, sizeof(reason),
+                     "CAPTURE: PHC P99 %.0f ns recorded as baseline", phcP99);
+            RecordResult(tc_names[i][1], true, _strdup(reason));
+            printf("  [CAPTURE] %s: %s\n", tc_names[i][1], reason);
+            printf("\n");
+        }
+
+        /* TC-PERF-REG-003: TX */
+        if (!txOk) {
+            RecordResult(tc_names[i][2], false,
+                         "FAIL: TX latency measurement failed (alloc/device error)");
+        } else if (hasBaseline) {
+            printf("--- %s: TX regression check ---\n", tc_names[i][2]);
+            bool ok3 = CheckRegression(txMedian, baseline.tx_median_ns,
+                                       "TX median", reason, sizeof(reason));
+            RecordResult(tc_names[i][2], ok3, _strdup(reason));
+            printf("  [%s] %s: %s\n", ok3 ? "PASS" : "FAIL", tc_names[i][2], reason);
+            printf("\n");
+        } else {
+            snprintf(reason, sizeof(reason),
+                     "CAPTURE: TX median %.0f ns recorded as baseline", txMedian);
+            RecordResult(tc_names[i][2], true, _strdup(reason));
+            printf("  [CAPTURE] %s: %s\n", tc_names[i][2], reason);
+            printf("\n");
+        }
+
+        /* TC-PERF-REG-004: RX */
+        if (!rxOk) {
+            RecordResult(tc_names[i][3], false,
+                         "FAIL: RX latency measurement failed (alloc/device error)");
+        } else if (hasBaseline) {
+            printf("--- %s: RX regression check ---\n", tc_names[i][3]);
+            bool ok4 = CheckRegression(rxMedian, baseline.rx_median_ns,
+                                       "RX median", reason, sizeof(reason));
+            RecordResult(tc_names[i][3], ok4, _strdup(reason));
+            printf("  [%s] %s: %s\n", ok4 ? "PASS" : "FAIL", tc_names[i][3], reason);
+            printf("\n");
+        } else {
+            snprintf(reason, sizeof(reason),
+                     "CAPTURE: RX median %.0f ns recorded as baseline", rxMedian);
+            RecordResult(tc_names[i][3], true, _strdup(reason));
+            printf("  [CAPTURE] %s: %s\n", tc_names[i][3], reason);
+            printf("\n");
+        }
+
+        /* Write baseline in CAPTURE mode (all measurements must succeed) */
+        if (!hasBaseline && phcOk && txOk && rxOk) {
+            PERF_BASELINE newBaseline;
+            memset(&newBaseline, 0, sizeof(newBaseline));
+            newBaseline.phc_p50_ns   = phcP50;
+            newBaseline.phc_p99_ns   = phcP99;
+            newBaseline.tx_median_ns = txMedian;
+            newBaseline.rx_median_ns = rxMedian;
+
+            snprintf(newBaseline.device_id_str, sizeof(newBaseline.device_id_str),
+                     "0x%04X", (unsigned)adapters[i].device_id);
+            strncpy(newBaseline.driver_build, buildType,
+                    sizeof(newBaseline.driver_build) - 1);
+
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            snprintf(newBaseline.captured_date, sizeof(newBaseline.captured_date),
+                     "%04d-%02d-%02d",
+                     (int)st.wYear, (int)st.wMonth, (int)st.wDay);
+
+            if (WriteBaseline(&newBaseline, baselinePath, baselineTmpPath)) {
+                printf("Baseline written to '%s' (%s)\n",
+                       baselinePath, newBaseline.captured_date);
+            } else {
+                fprintf(stderr, "WARN: Failed to write baseline - results still PASS\n");
+            }
+            printf("\n");
+        }
+    } /* end per-adapter loop */
 
     PrintTestSummary();
     return 0;  /* Never reached; PrintTestSummary calls exit() */
