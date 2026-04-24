@@ -1,4 +1,3 @@
-````skill
 ---
 name: run-tests
 description: "Use when running, executing, or invoking any test in IntelAvbFilter — avb_test_i210_um, avb_test_i219, ptp_clock_control_test, tsauxc_toggle_test, quick_diagnostics, or any .exe under build/tools/. Also when reading, interpreting, or claiming test results."
