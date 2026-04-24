@@ -2297,19 +2297,11 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         cfg->status = (avb_u32)NDIS_STATUS_SUCCESS;
                         status = STATUS_SUCCESS;
 
-                        /* Normalize timinca for I219 to I210-compat format (logical_ns << 24)
-                         * so callers using bits[15:8] to extract increment_ns get the logical
-                         * nanosecond value (8) rather than a raw IV byte (0x24 = 36).
-                         * This matches the normalization done in ADJUST_FREQUENCY for
-                         * current_increment, preventing test_ptp_phc_stability UT-CORR-006
-                         * from submitting an out-of-range increment_ns value. */
-                        if (activeContext->intel_device.device_type == INTEL_DEVICE_I219) {
-                            ULONG raw_iv = cfg->timinca & INTEL_TIMINCA_SUBNS_MASK;
-                            ULONG logical_ns = (raw_iv > 0u) ? (ULONG)(raw_iv / 2000000UL) : 8u;
-                            if (logical_ns == 0u) logical_ns = 8u;
-                            cfg->timinca = (logical_ns << 24);
-                        }
-                        
+                        /* Return raw hardware TIMINCA without normalization.
+                         * I219 callers that need to decode increment_ns must handle the
+                         * I219 raw format (IP=2, IV=ns×2,000,000) and I210/normalised
+                         * format (IP=ns/cycle) separately — see ptp_clock_control_test
+                         * and test_ptp_phc_stability for the correct decode patterns. */
                         DEBUGP(DL_TRACE, "Clock config (VID=0x%04X DID=0x%04X): SYSTIM=0x%016llX, TIMINCA=0x%08X, TSAUXC=0x%08X (bit31=%s), Rate=%u MHz\n",
                                activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id,
                                cfg->systim, cfg->timinca, cfg->tsauxc, (cfg->tsauxc & INTEL_TSAUXC_DISABLE_SYSTIM) ? "DISABLED" : "ENABLED",
@@ -3275,14 +3267,24 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     off_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                     status = STATUS_UNSUCCESSFUL;
                 } else {
-                    /* Apply offset - reject if result would be negative time */
-                    INT64 new_t = (INT64)current_t + off_req->offset_ns;
-                    if (new_t < 0) {
-                        /* Reject: offset would cause clock to go before epoch 0 */
+                    /* Apply offset using unsigned arithmetic to avoid INT64 overflow
+                     * when current_t > 2^63 (e.g. FILETIME-based epoch timestamp
+                     * ~1.34e19 ns which wraps negative when cast to INT64). */
+                    ULONGLONG new_ts;
+                    BOOLEAN offset_valid;
+                    if (off_req->offset_ns < 0) {
+                        ULONGLONG abs_off = (ULONGLONG)(-(off_req->offset_ns));
+                        offset_valid = (abs_off <= current_t);
+                        new_ts = offset_valid ? (current_t - abs_off) : 0;
+                    } else {
+                        offset_valid = TRUE;
+                        new_ts = current_t + (ULONGLONG)off_req->offset_ns;
+                    }
+                    if (!offset_valid) {
+                        /* Reject: offset would take clock before epoch 0 */
                         off_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
                         status = STATUS_INVALID_PARAMETER;
                     } else {
-                        ULONGLONG new_ts = (ULONGLONG)new_t;
                         /* Call intel_set_systime directly - bypasses the 30s monotonicity guard
                          * in SET_TIMESTAMP, so small backward corrections succeed. */
                         rc = intel_set_systime(&phcCtx->intel_device, new_ts);
