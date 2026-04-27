@@ -332,24 +332,28 @@ static int get_systime(device_t *dev, uint64_t *systime)
      *                matching latched value.
      * Reference: Intel I219 datasheet, SYSTIML/SYSTIMH latch mechanism. */
     {
-        /* Raise IRQL to HIGH_LEVEL — equivalent to Linux e1000e spin_lock_irqsave.
-         * NdisAcquireSpinLock only reaches DISPATCH_LEVEL; the miniport ISR at
-         * DIRQL can still fire and re-trigger the SYSTIML latch between our two
-         * reads.  The 4-register H1==H2 approach is insufficient: when ISR fires
-         * between L1 and H1 reads, H1 is contaminated to H+1; L2 is then post-
-         * rollover so H2=H+1 naturally — H1==H2 accepted but L1 is pre-rollover,
-         * producing the consistent ~10,835 ns backward jump.
-         * Raising to HIGH_LEVEL blocks ALL hardware interrupts on this CPU for
-         * the ~100 ns SYSTIML→SYSTIMH window, eliminating the race entirely. */
-        KIRQL irql_old;
-        KeRaiseIrql(HIGH_LEVEL, &irql_old);
-        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
-        if (result == 0)
+        /* L1-H-L2 seqlock: read SYSTIML (triggers latch), SYSTIMH (shadow), then
+         * SYSTIML again for validation.  If L2 < L1, a rollover occurred during our
+         * reads — the igc.sys ISR on another CPU re-triggered the SYSTIML latch
+         * post-rollover, overwriting our SYSTIMH shadow with H+1 while our L1 was
+         * still pre-rollover.  KeRaiseIrql(HIGH_LEVEL) only blocks the LOCAL CPU;
+         * on SMP systems the miniport ISR on CPU1 is unaffected.  The L2 < L1 check
+         * detects the stale shadow without requiring a shared lock with igc.sys.
+         * Normal path: 0 retries (>99% of calls).  Max 3 retries caps worst case.
+         * Reference: Intel I219 SYSTIML/SYSTIMH latch, confirmed root cause Apr-2026. */
+        uint32_t ts_low2 = 0;
+        int tries;
+        for (tries = 0; tries < 3; tries++) {
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
+            if (result != 0) goto fallback;
             result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
-        KeLowerIrql(irql_old);
-        if (result != 0) {
-            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIM read failed (%d) — KE fallback\n", result);
-            goto fallback;
+            if (result != 0) goto fallback;
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low2);
+            if (result != 0) goto fallback;
+            if (ts_low2 >= ts_low)
+                break;  /* No rollover: SYSTIMH shadow is valid for ts_low */
+            DEBUGP(DL_WARN, "[I219-DIAG] SYSTIML rollover (L=%u L2=%u) retry %d\n",
+                   ts_low, ts_low2, tries + 1);
         }
     }
 
