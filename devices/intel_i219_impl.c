@@ -315,26 +315,52 @@ static int get_systime(device_t *dev, uint64_t *systime)
 
     /* I219 (e1000e family): SYSTIML MUST be read FIRST — reading SYSTIML triggers
      * the hardware latch that captures SYSTIMH into a shadow register.  Reading
-     * SYSTIMH second returns the coherent latched value, giving an atomic 64-bit
-     * snapshot.  I218/I219 Spec Update Rev 1.3: SYSTIML read is the latch trigger.
+     * SYSTIMH second returns the coherent latched value.
+     * I218/I219 Spec Update Rev 1.3: SYSTIML read is the latch trigger.
      *
-     * Wrong order (H before L) causes ~21.5 µs backward jumps when SYSTIML rolls
-     * over between reads (rollover period ≈ 21,474 ns at 200,000 counts/ns rate).
-     * At ~10–20 µs per IOCTL, every second call lands in the rollover danger zone,
-     * producing the characteristic alternating backward-jump pattern.
+     * Latch re-trigger race (confirmed: Intel I219 spec, NotebookLM April 2026):
+     * Any reader of SYSTIML re-arms the latch to the current SYSTIMH.  A miniport
+     * ISR on another CPU can read SYSTIML between our two reads.  If SYSTIML has
+     * just rolled over (~every 21.47 µs), the ISR re-latches SYSTIMH = N+1 while
+     * our SYSTIML = X_pre_rollover, producing an inflated raw2.  The next correct
+     * call then appears ~10–21 µs backward (Release: 0.3–0.8% failure rate).
      *
-     * Reference: Linux e1000e ptp.c e1000e_phc_gettimex64() — reads SYSTIML first,
-     * then SYSTIMH, with tmreg_lock held (same latch-then-read order as this fix). */
+     * Fix — four-register read (L1, H1, L2, H2):
+     *   If H1 == H2: SYSTIMH did not change; pair (H1, L1) is consistent.
+     *   If H1 != H2: SYSTIMH changed (rollover occurred between reads 1 and 3);
+     *                use pair (H2, L2) — L2 was read AFTER rollover, H2 is its
+     *                matching latched value.
+     * Reference: Intel I219 datasheet, SYSTIML/SYSTIMH latch mechanism. */
     {
-        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
+        uint32_t ts_low2 = 0, ts_high2 = 0;
+
+        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);   /* pair-1 latch trigger */
         if (result != 0) {
             DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
             goto fallback;
         }
-        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
+        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);  /* pair-1 latched value */
         if (result != 0) {
             DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
             goto fallback;
+        }
+        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low2);  /* pair-2 latch trigger */
+        if (result != 0) {
+            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML recheck failed (%d) — using pair 1\n", result);
+            result = 0;  /* non-fatal: fall through with pair 1 */
+        } else {
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high2); /* pair-2 latched value */
+            if (result != 0) {
+                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH recheck failed (%d) — using pair 1\n", result);
+                result = 0;  /* non-fatal: fall through with pair 1 */
+            } else if (ts_high2 != ts_high) {
+                /* SYSTIMH changed between pairs 1 and 2: rollover contaminated pair 1.
+                 * Pair 2 is the consistent atomic snapshot — use it. */
+                ts_low  = ts_low2;
+                ts_high = ts_high2;
+                DEBUGP(DL_WARN, "[I219-DIAG] SYSTIMH changed (H1=%u H2=%u): rollover; using pair 2\n",
+                       (unsigned)ts_high, (unsigned)ts_high2);
+            }
         }
     }
 
