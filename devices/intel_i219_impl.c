@@ -304,7 +304,7 @@ static int set_systime(device_t *dev, uint64_t systime)
  */
 static int get_systime(device_t *dev, uint64_t *systime)
 {
-    uint32_t ts_low, ts_high;
+    uint32_t ts_low = 0, ts_high = 0;
     int result;
 
     DEBUGP(DL_TRACE, "==>i219_get_systime\n");
@@ -332,35 +332,24 @@ static int get_systime(device_t *dev, uint64_t *systime)
      *                matching latched value.
      * Reference: Intel I219 datasheet, SYSTIML/SYSTIMH latch mechanism. */
     {
-        uint32_t ts_low2 = 0, ts_high2 = 0;
-
-        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);   /* pair-1 latch trigger */
+        /* Raise IRQL to HIGH_LEVEL — equivalent to Linux e1000e spin_lock_irqsave.
+         * NdisAcquireSpinLock only reaches DISPATCH_LEVEL; the miniport ISR at
+         * DIRQL can still fire and re-trigger the SYSTIML latch between our two
+         * reads.  The 4-register H1==H2 approach is insufficient: when ISR fires
+         * between L1 and H1 reads, H1 is contaminated to H+1; L2 is then post-
+         * rollover so H2=H+1 naturally — H1==H2 accepted but L1 is pre-rollover,
+         * producing the consistent ~10,835 ns backward jump.
+         * Raising to HIGH_LEVEL blocks ALL hardware interrupts on this CPU for
+         * the ~100 ns SYSTIML→SYSTIMH window, eliminating the race entirely. */
+        KIRQL irql_old;
+        KeRaiseIrql(HIGH_LEVEL, &irql_old);
+        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
+        if (result == 0)
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
+        KeLowerIrql(irql_old);
         if (result != 0) {
-            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
+            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIM read failed (%d) — KE fallback\n", result);
             goto fallback;
-        }
-        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);  /* pair-1 latched value */
-        if (result != 0) {
-            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH read failed (%d) — KE fallback\n", result);
-            goto fallback;
-        }
-        result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low2);  /* pair-2 latch trigger */
-        if (result != 0) {
-            DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML recheck failed (%d) — using pair 1\n", result);
-            result = 0;  /* non-fatal: fall through with pair 1 */
-        } else {
-            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high2); /* pair-2 latched value */
-            if (result != 0) {
-                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH recheck failed (%d) — using pair 1\n", result);
-                result = 0;  /* non-fatal: fall through with pair 1 */
-            } else if (ts_high2 != ts_high) {
-                /* SYSTIMH changed between pairs 1 and 2: rollover contaminated pair 1.
-                 * Pair 2 is the consistent atomic snapshot — use it. */
-                ts_low  = ts_low2;
-                ts_high = ts_high2;
-                DEBUGP(DL_WARN, "[I219-DIAG] SYSTIMH changed (H1=%u H2=%u): rollover; using pair 2\n",
-                       (unsigned)ts_high, (unsigned)ts_high2);
-            }
         }
     }
 
