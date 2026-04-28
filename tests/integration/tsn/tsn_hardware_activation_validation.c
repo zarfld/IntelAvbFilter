@@ -190,68 +190,102 @@ static void TestPhase2FramePreemptionActivation(HANDLE h) {
 }
 
 static void TestPhase2I210PTPClockFix(HANDLE h) {
-    printf("\n?? Phase 2: I210 PTP Clock Fix Test\n");
+    printf("\n🔬 Phase 2: I210 PTP Clock Fix Test\n");
     printf("===================================\n");
     printf("Purpose: Verify I210 PTP clock advances instead of being stuck at zero\n\n");
-    
-    // First select I210 adapter
-    printf("?? Step 1: Selecting I210 adapter context...\n");
-    AVB_OPEN_REQUEST openReq;
-    ZeroMemory(&openReq, sizeof(openReq));
-    openReq.vendor_id = 0x8086;
-    openReq.device_id = 0x1533; // I210
-    
+
+    // Enumerate to find an I210 adapter dynamically
+    printf("🔬 Locating I210 adapter via enumeration...\n");
+    AVB_ENUM_REQUEST enumReq;
+    ZeroMemory(&enumReq, sizeof(enumReq));
     DWORD bytesReturned = 0;
-    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER, &openReq, sizeof(openReq),
-                        &openReq, sizeof(openReq), &bytesReturned, NULL) || 
-        openReq.status != 0) {
-        printf("? I210 not available for testing\n");
-        return;
-    }
-    
-    printf("? I210 adapter selected\n");
-    
-    // Check initial SYSTIM state
-    printf("\n?? Step 2: Checking initial I210 SYSTIM state...\n");
-    
-    DWORD systiml1 = 0, systimh1 = 0;
-    if (ReadRegister(h, I210_SYSTIML, &systiml1) && 
-        ReadRegister(h, I210_SYSTIMH, &systimh1)) {
-        printf("?? Initial SYSTIM: 0x%08X%08X\n", systimh1, systiml1);
-        
-        if (systiml1 == 0 && systimh1 == 0) {
-            printf("?? I210 PTP clock appears stuck at zero - applying Phase 2 fix\n");
+    BOOL found = FALSE;
+    UINT32 adapterIdx = 0;
+
+    for (UINT32 i = 0; i < 16; i++) {
+        ZeroMemory(&enumReq, sizeof(enumReq));
+        enumReq.index = i;
+        if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS, &enumReq, sizeof(enumReq),
+                             &enumReq, sizeof(enumReq), &bytesReturned, NULL)
+            || enumReq.status != 0) {
+            break;
+        }
+        /* I210 family: 0x1533 Copper, 0x1536 Fiber, 0x1537 SGMII,
+           0x1538 Copper Flashless, 0x157B/0x157C Backplane, 0x1539 I211 */
+        if (enumReq.device_id == 0x1533 || enumReq.device_id == 0x1536 ||
+            enumReq.device_id == 0x1537 || enumReq.device_id == 0x1538 ||
+            enumReq.device_id == 0x157B || enumReq.device_id == 0x157C ||
+            enumReq.device_id == 0x1539) {
+            found = TRUE;
+            adapterIdx = i;
+            printf("✅ Found I210-family adapter at index %u (DID=0x%04X)\n",
+                   i, enumReq.device_id);
+            break;
         }
     }
-    
-    // Trigger device initialization (which includes Phase 2 PTP fix for I210)
-    printf("\n?? Step 3: Triggering Phase 2 I210 PTP initialization...\n");
-    
-    if (DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &bytesReturned, NULL)) {
-        printf("? I210 initialization completed\n");
-    } else {
-        printf("? I210 initialization failed\n");
+
+    if (!found) {
+        printf("[SKIP] No I210-family adapter present — skipping I210 PTP clock test\n");
         return;
     }
-    
+
+    // Select the discovered I210 adapter
+    printf("\n🔬 Step 1: Selecting I210 adapter context...\n");
+    AVB_OPEN_REQUEST openReq;
+    ZeroMemory(&openReq, sizeof(openReq));
+    openReq.vendor_id = enumReq.vendor_id;
+    openReq.device_id = enumReq.device_id;
+
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER, &openReq, sizeof(openReq),
+                         &openReq, sizeof(openReq), &bytesReturned, NULL) ||
+        openReq.status != 0) {
+        printf("❌ I210 not available for testing\n");
+        return;
+    }
+
+    printf("✅ I210 adapter selected\n");
+
+    // Check initial SYSTIM state
+    printf("\n🔬 Step 2: Checking initial I210 SYSTIM state...\n");
+
+    DWORD systiml1 = 0, systimh1 = 0;
+    if (ReadRegister(h, I210_SYSTIML, &systiml1) &&
+        ReadRegister(h, I210_SYSTIMH, &systimh1)) {
+        printf("📊 Initial SYSTIM: 0x%08X%08X\n", systimh1, systiml1);
+
+        if (systiml1 == 0 && systimh1 == 0) {
+            printf("⚠️  I210 PTP clock appears stuck at zero - applying Phase 2 fix\n");
+        }
+    }
+
+    // Trigger device initialization (which includes Phase 2 PTP fix for I210)
+    printf("\n🔬 Step 3: Triggering Phase 2 I210 PTP initialization...\n");
+
+    if (DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &bytesReturned, NULL)) {
+        printf("✅ I210 initialization completed\n");
+    } else {
+        printf("❌ I210 initialization failed\n");
+        return;
+    }
+
     // Verify clock is now advancing
-    printf("\n?? Step 4: Verifying I210 PTP clock advancement...\n");
-    
+    printf("\n🔬 Step 4: Verifying I210 PTP clock advancement...\n");
+
     Sleep(100); // Allow time for clock to advance
-    
+
     DWORD systiml2 = 0, systimh2 = 0;
-    if (ReadRegister(h, I210_SYSTIML, &systiml2) && 
+    if (ReadRegister(h, I210_SYSTIML, &systiml2) &&
         ReadRegister(h, I210_SYSTIMH, &systimh2)) {
-        printf("?? SYSTIM after fix: 0x%08X%08X\n", systimh2, systiml2);
-        
+        printf("📊 SYSTIM after fix: 0x%08X%08X\n", systimh2, systiml2);
+
         if (systiml2 > systiml1 || systimh2 > systimh1) {
-            printf("?? SUCCESS: Phase 2 I210 PTP Clock Fix CONFIRMED!\n");
-            printf("   ? Clock is now advancing properly\n");
-            printf("   ? SYSTIM: 0x%08X%08X -> 0x%08X%08X\n", 
+            printf("✅ SUCCESS: Phase 2 I210 PTP Clock Fix CONFIRMED!\n");
+            printf("   ✅ Clock is now advancing properly\n");
+            printf("   ✅ SYSTIM: 0x%08X%08X -> 0x%08X%08X\n",
                    systimh1, systiml1, systimh2, systiml2);
         } else {
-            printf("? FAILURE: I210 PTP clock still stuck\n");
-            printf("   ?? Clock not advancing: 0x%08X%08X -> 0x%08X%08X\n", 
+            printf("❌ FAILURE: I210 PTP clock still stuck\n");
+            printf("   ⚠️  Clock not advancing: 0x%08X%08X -> 0x%08X%08X\n",
                    systimh1, systiml1, systimh2, systiml2);
         }
     }

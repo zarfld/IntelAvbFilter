@@ -102,18 +102,42 @@ BOOLEAN Test_EnumerateAdapters_FirstAdapter()
     TEST_ASSERT(req.count >= 1, "At least one Intel adapter found");
     TEST_ASSERT_EQUAL(0x8086, req.vendor_id, "Vendor ID is Intel (0x8086)");
     
-    // Valid Intel I210/I225/I226/I350 device IDs
-    BOOLEAN validDeviceId = 
-        (req.device_id == 0x125B) || // I350
-        (req.device_id == 0x1521) || // I350
-        (req.device_id == 0x15B7) || // I210
-        (req.device_id == 0x15B8) || // I210
-        (req.device_id == 0x15F2) || // I225
-        (req.device_id == 0x15F3) || // I225
-        (req.device_id == 0x15F6) || // I226
-        (req.device_id == 0x15F7) || // I226
-        (req.device_id == 0x153A) || // I217/I219
-        (req.device_id == 0x15B9);   // I219
+    // Valid Intel device IDs — all supported adapter families
+    BOOLEAN validDeviceId =
+        (req.device_id == 0x1533) || // I210 Copper
+        (req.device_id == 0x1536) || // I210 Fiber
+        (req.device_id == 0x1537) || // I210 SGMII
+        (req.device_id == 0x1538) || // I210 Copper Flashless
+        (req.device_id == 0x157B) || // I210 Copper Backplane
+        (req.device_id == 0x157C) || // I210 Fiber Backplane
+        (req.device_id == 0x1539) || // I211 Copper
+        (req.device_id == 0x153A) || // I217-LM
+        (req.device_id == 0x153B) || // I217-V
+        (req.device_id == 0x15A0) || // I218-LM
+        (req.device_id == 0x15A1) || // I218-V
+        (req.device_id == 0x15A2) || // I218-LM
+        (req.device_id == 0x15A3) || // I218-V
+        (req.device_id == 0x15B7) || // I219-LM
+        (req.device_id == 0x15B8) || // I219-V
+        (req.device_id == 0x15B9) || // I219-LM
+        (req.device_id == 0x15D7) || // I219-LM
+        (req.device_id == 0x15D8) || // I219-V
+        (req.device_id == 0x15DF) || // I219-LM
+        (req.device_id == 0x15E0) || // I219-V
+        (req.device_id == 0x15E1) || // I219-LM
+        (req.device_id == 0x15E2) || // I219-V
+        (req.device_id == 0x15F2) || // I225-LM
+        (req.device_id == 0x15F3) || // I225-V
+        (req.device_id == 0x15F6) || // I225-IT
+        (req.device_id == 0x15F7) || // I225-LMVP
+        (req.device_id == 0x125B) || // I226-LM
+        (req.device_id == 0x125C) || // I226-V
+        (req.device_id == 0x125D) || // I226-IT
+        (req.device_id == 0x125E) || // I226-LMVP
+        (req.device_id == 0x1521) || // I350-T4
+        (req.device_id == 0x1522) || // I350-F2
+        (req.device_id == 0x1523) || // I350-F4
+        (req.device_id == 0x1524);   // I350-T2
     
     TEST_ASSERT(validDeviceId, "Device ID is valid Intel NIC");
     TEST_ASSERT_EQUAL(AVB_STATUS_SUCCESS, req.status, "Status is success");
