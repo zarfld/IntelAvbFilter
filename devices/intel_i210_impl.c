@@ -604,14 +604,13 @@ static int i210_set_target_time(device_t *dev, uint8_t timer_index,
  * I210 (2013) has excellent IEEE 1588 PTP but NO TSN features (TSN standard finalized 2015-2016)
  */
 const intel_device_ops_t i210_ops = {
-    /* Capabilities per Intel I210 datasheet (NotebookLM-verified):
+    /* Capabilities per Intel I210 datasheet:
      * ENHANCED_TS: TSYNCTXCTL (0xB614) / TSYNCRXCTL (0xB620) present
-     * MDIO: standard MDC/MDIO management interface accessible via MAC register space
-     * EEE: IEEE 802.3az EEE + Low Power Idle (LPI) supported
-     * NOTE: implementation previously missing MDIO and EEE — corrected vs spec */
-    .device_name = "Intel I210 Gigabit Ethernet - IEEE 1588 PTP + MDIO + EEE",
+     * MDIO and EEE not implemented in this driver.
+     * Per avb_capability_validation_test expected=0x083: neither MDIO nor EEE bits set. */
+    .device_name = "Intel I210 Gigabit Ethernet - IEEE 1588 PTP",
     .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
-                              INTEL_CAP_MMIO | INTEL_CAP_EEE, // MDIO not implemented in driver
+                              INTEL_CAP_MMIO, // MDIO and EEE not implemented in driver
     
     // Basic operations
     .init = init,
