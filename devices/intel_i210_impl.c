@@ -607,10 +607,11 @@ const intel_device_ops_t i210_ops = {
     /* Capabilities per Intel I210 datasheet:
      * ENHANCED_TS: TSYNCTXCTL (0xB614) / TSYNCRXCTL (0xB620) present
      * MDIO and EEE not implemented in this driver.
-     * Per avb_capability_validation_test expected=0x083: neither MDIO nor EEE bits set. */
+     * EEE: IEEE 802.3az EEE supported via EEER register (0x0E30), LPI mode, 1000BASE-T and 100BASE-TX.
+     * MDIO: Not implemented in driver (integrated PHY, NULL ops). */
     .device_name = "Intel I210 Gigabit Ethernet - IEEE 1588 PTP",
     .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
-                              INTEL_CAP_MMIO, // MDIO and EEE not implemented in driver
+                              INTEL_CAP_MMIO | INTEL_CAP_EEE, // EEE supported per I210 datasheet (EEER 0x0E30)
     
     // Basic operations
     .init = init,

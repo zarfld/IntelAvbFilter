@@ -1427,11 +1427,11 @@ const intel_device_ops_t i226_ops = {
     /* Capabilities per Intel I226 datasheet:
      * I226 is MMIO-only (like I225); no MDIO interface exposed to driver.
      * EEE: IEEE 802.3az EEE supported (key differentiator vs I225 which lacks EEE)
-     * Per avb_capability_validation_test expected=0x1BF: MDIO bit must NOT be set. */
+     * MDIO: mdio_read/mdio_write implemented (see line 648, 705). */
     .device_name = "Intel I226 2.5G Ethernet - Advanced TSN + EEE",
     .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
                              INTEL_CAP_TSN_TAS | INTEL_CAP_TSN_FP | INTEL_CAP_PCIE_PTM |
-                             INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE,
+                             INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE,
     
     // Basic operations - clean generic names
     .init = init,
