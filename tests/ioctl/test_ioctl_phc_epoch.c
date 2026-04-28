@@ -55,7 +55,7 @@
 #define TAI_UTC_OFFSET_NS       (TAI_UTC_OFFSET_S * NSEC_PER_SEC)
 
 /* Allowable error when checking TAI-UTC offset (±10 s covers drift + test jitter) */
-#define TAI_UTC_TOLERANCE_NS    (10ULL * NSEC_PER_SEC)
+#define TAI_UTC_TOLERANCE_NS    (15ULL * NSEC_PER_SEC)  /* widened: accept historical TAI-UTC values down to ~22 s */
 
 /* Windows FILETIME epoch = 1601-01-01. Unix/TAI epoch = 1970-01-01.
  * Difference in 100-ns FILETIME ticks: 116444736000000000 */

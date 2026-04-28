@@ -29,7 +29,31 @@ static HANDLE open_device(void) {
     if (h == INVALID_HANDLE_VALUE) {
         printf("ERROR: Failed to open device (error %lu)\n", GetLastError());
         printf("  Is the driver installed and running?\n");
+        return h;
     }
+
+    /* CRITICAL: IOCTL_AVB_GET_CLOCK_CONFIG (Test 1) requires FsContext set via
+     * IOCTL_AVB_OPEN_ADAPTER.  Enumerate adapter 0 and bind this handle to it. */
+    AVB_ENUM_REQUEST er;
+    ZeroMemory(&er, sizeof(er));
+    er.index = 0;
+    DWORD br = 0;
+    if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
+                          &er, sizeof(er), &er, sizeof(er), &br, NULL)
+            || er.status != 0) {
+        /* Enumeration failed — return unbound handle */
+        return h;
+    }
+
+    AVB_OPEN_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
+    req.vendor_id = er.vendor_id;
+    req.device_id = er.device_id;
+    req.index     = 0;
+    br = 0;
+    DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                    &req, sizeof(req), &req, sizeof(req), &br, NULL);
+    /* Even if OPEN_ADAPTER fails, return h — SET_HW_TIMESTAMPING/GET_TIMESTAMP still work */
     return h;
 }
 
