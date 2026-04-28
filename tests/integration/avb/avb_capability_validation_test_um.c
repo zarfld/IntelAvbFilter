@@ -102,7 +102,7 @@ ULONG GetExpectedCapabilities(intel_device_type_t device_type) {
             
         // Modern I-series devices - REALISTIC capabilities based on actual hardware
         case INTEL_DEVICE_I210:
-            return INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO; // Enhanced PTP, NO TSN (2013)
+            return INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_EEE; // Enhanced PTP + EEE (2013, EEER 0x0E30 confirmed per datasheet)
         case INTEL_DEVICE_I217:
             return INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO | INTEL_CAP_MDIO; // Basic PTP (2013)
         case INTEL_DEVICE_I219:
@@ -114,7 +114,7 @@ ULONG GetExpectedCapabilities(intel_device_type_t device_type) {
                    INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO; // First Intel TSN (2019)
         case INTEL_DEVICE_I226:
             return INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_TSN_TAS | 
-                   INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_EEE; // Full TSN (2020)
+                   INTEL_CAP_TSN_FP | INTEL_CAP_PCIe_PTM | INTEL_CAP_2_5G | INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE; // Full TSN + MDIO (2020, mdio_read/write implemented)
         default:
             return INTEL_CAP_MMIO; // Minimal safe assumption
     }
