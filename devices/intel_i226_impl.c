@@ -593,6 +593,15 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     }
 }
 
+/* PCIe Extended Capability List constants (PCIe spec §7.6.2) */
+/* TODO: add to intel-ethernet-regs/devices/pcie_common.yaml when reggen supports PCIe arch constants */
+#define PCIE_EXT_CAP_BASE       0x100       /* First extended cap at config offset 256 */
+#define PCIE_EXT_CAP_LIMIT      0x1000      /* PCIe config space size is 4 KB */
+#define PCIE_EXT_CAP_ID_MASK    0xFFFF      /* Cap ID occupies bits [15:0] of cap header */
+#define PCIE_EXT_CAP_NEXT_SHIFT 20          /* Next cap pointer in bits [31:20] */
+#define PCIE_EXT_CAP_NEXT_MASK  0xFFC       /* Next cap pointer is DWORD-aligned (12 bits) */
+#define PCIE_EXT_CAP_HDR_ABSENT 0xFFFFFFFF  /* All-ones header means cap is absent / unimplemented */
+
 /**
  * @brief Scan PCIe extended capability list for a given capability ID.
  * @param dev         Device handle
@@ -608,18 +617,18 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
 static int find_pcie_ext_cap(device_t *dev, uint16_t cap_id, uint32_t *cap_offset)
 {
     uint32_t hdr;
-    uint32_t offset = 0x100;
+    uint32_t offset = PCIE_EXT_CAP_BASE;
 
-    while (offset != 0 && offset < 0x1000) {
+    while (offset != 0 && offset < PCIE_EXT_CAP_LIMIT) {
         if (ndis_platform_ops.pci_read_config(dev, offset, &hdr) != 0)
             return -1;
-        if (hdr == 0 || hdr == 0xFFFFFFFFU)
+        if (hdr == 0 || hdr == (uint32_t)PCIE_EXT_CAP_HDR_ABSENT)
             break;  /* absent or read error — end of list */
-        if ((uint16_t)(hdr & 0xFFFFU) == cap_id) {
+        if ((uint16_t)(hdr & PCIE_EXT_CAP_ID_MASK) == cap_id) {
             *cap_offset = offset;
             return 0;
         }
-        offset = (hdr >> 20) & 0xFFCU;  /* next cap pointer, DWORD-aligned */
+        offset = (hdr >> PCIE_EXT_CAP_NEXT_SHIFT) & PCIE_EXT_CAP_NEXT_MASK;
     }
     return -1;
 }
