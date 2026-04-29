@@ -594,43 +594,135 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
 }
 
 /**
- * @brief Setup I226 Frame Preemption
- * @param dev Device handle
- * @param config FP configuration
+ * @brief Scan PCIe extended capability list for a given capability ID.
+ * @param dev         Device handle
+ * @param cap_id      PCIe extended capability ID to find
+ * @param cap_offset  Output: DWORD offset in PCIe config space where cap begins
+ * @return 0 on success, -1 if not found or read error
+ *
+ * PCIe extended caps start at config-space offset 0x100.  Each header is:
+ *   bits [15:0]  - Capability ID
+ *   bits [19:16] - Version
+ *   bits [31:20] - Next capability offset (DWORD-aligned)
+ */
+static int find_pcie_ext_cap(device_t *dev, uint16_t cap_id, uint32_t *cap_offset)
+{
+    uint32_t hdr;
+    uint32_t offset = 0x100;
+
+    while (offset != 0 && offset < 0x1000) {
+        if (ndis_platform_ops.pci_read_config(dev, offset, &hdr) != 0)
+            return -1;
+        if (hdr == 0 || hdr == 0xFFFFFFFFU)
+            break;  /* absent or read error — end of list */
+        if ((uint16_t)(hdr & 0xFFFFU) == cap_id) {
+            *cap_offset = offset;
+            return 0;
+        }
+        offset = (hdr >> 20) & 0xFFCU;  /* next cap pointer, DWORD-aligned */
+    }
+    return -1;
+}
+
+/**
+ * @brief Setup I226 Frame Preemption (IEEE 802.3br / 802.1Qbu)
+ *
+ * Writes I226_FP_CONFIG (MMIO 0x08700) using SSOT macros from i226_regs.h.
+ * If preemptable_queues == 0, FP is disabled.
+ *
+ * @param dev    Device handle
+ * @param config FP configuration (preemptable_queues, min_fragment_size, verify_disable)
  * @return 0 on success, <0 on error
  */
 static int setup_frame_preemption(device_t *dev, struct tsn_fp_config *config)
 {
+    uint32_t fp_cfg = 0;
+    int result;
+
     DEBUGP(DL_TRACE, "==>i226_setup_frame_preemption\n");
-    
+
     if (dev == NULL || config == NULL) {
-        return -1;
+        return -EINVAL;
     }
-    
-    // I226 Frame Preemption implementation to be added
-    DEBUGP(DL_TRACE, "I226 Frame Preemption: Implementation pending\n");
-    
-    return 0;
+
+    result = ndis_platform_ops.mmio_read(dev, I226_FP_CONFIG, &fp_cfg);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "i226_setup_frame_preemption: mmio_read I226_FP_CONFIG failed: %d\n", result);
+        return result;
+    }
+
+    if (config->preemptable_queues != 0) {
+        /* Enable FP and configure preemptable queues */
+        fp_cfg = (uint32_t)I226_FP_CONFIG_SET(fp_cfg, I226_FP_CONFIG_EN_MASK,
+                                               I226_FP_CONFIG_EN_SHIFT, 1);
+        fp_cfg = (uint32_t)I226_FP_CONFIG_SET(fp_cfg, I226_FP_CONFIG_PREEMPTABLE_QUEUES_MASK,
+                                               I226_FP_CONFIG_PREEMPTABLE_QUEUES_SHIFT,
+                                               config->preemptable_queues);
+        fp_cfg = (uint32_t)I226_FP_CONFIG_SET(fp_cfg, I226_FP_CONFIG_MIN_FRAGMENT_SIZE_MASK,
+                                               I226_FP_CONFIG_MIN_FRAGMENT_SIZE_SHIFT,
+                                               config->min_fragment_size);
+        if (config->verify_disable) {
+            fp_cfg = (uint32_t)I226_FP_CONFIG_SET(fp_cfg, I226_FP_CONFIG_VERIFY_DIS_MASK,
+                                                   I226_FP_CONFIG_VERIFY_DIS_SHIFT, 1);
+        }
+    } else {
+        /* Disable FP */
+        fp_cfg = (uint32_t)I226_FP_CONFIG_SET(fp_cfg, I226_FP_CONFIG_EN_MASK,
+                                               I226_FP_CONFIG_EN_SHIFT, 0);
+    }
+
+    result = ndis_platform_ops.mmio_write(dev, I226_FP_CONFIG, fp_cfg);
+    DEBUGP(DL_TRACE, "<==i226_setup_frame_preemption: result=%d fp_cfg=0x%08X\n", result, fp_cfg);
+    return result;
 }
 
 /**
- * @brief Setup I226 PTM
- * @param dev Device handle
- * @param config PTM configuration
+ * @brief Setup I226 PCIe PTM (Precision Time Measurement, IEEE 1588 Annex B)
+ *
+ * Finds the PTM extended capability in PCIe config space (cap ID 0x001F)
+ * and writes I226_PTM_CTRL to enable/disable PTM and root-complex PTM.
+ *
+ * @param dev    Device handle
+ * @param config PTM configuration (enabled, clock_granularity)
  * @return 0 on success, <0 on error
  */
 static int setup_ptm(device_t *dev, struct ptm_config *config)
 {
+    uint32_t ptm_cap_base = 0;
+    uint32_t ptm_ctrl = 0;
+    int result;
+
     DEBUGP(DL_TRACE, "==>i226_setup_ptm\n");
-    
+
     if (dev == NULL || config == NULL) {
-        return -1;
+        return -EINVAL;
     }
-    
-    // I226 PTM implementation to be added
-    DEBUGP(DL_TRACE, "I226 PTM: Implementation pending\n");
-    
-    return 0;
+
+    result = find_pcie_ext_cap(dev, I226_PTM_CAP_ID, &ptm_cap_base);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "i226_setup_ptm: PTM extended capability (ID=0x%04X) not found in PCIe config space\n",
+               I226_PTM_CAP_ID);
+        return -EINVAL;
+    }
+
+    result = ndis_platform_ops.pci_read_config(dev, ptm_cap_base + I226_PTM_CTRL, &ptm_ctrl);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "i226_setup_ptm: pci_read_config PTM_CTRL failed: %d\n", result);
+        return result;
+    }
+
+    if (config->enabled) {
+        ptm_ctrl |= I226_PTM_CTRL_EN_MASK;
+        ptm_ctrl |= I226_PTM_CTRL_RCPTM_EN_MASK;
+    } else {
+        ptm_ctrl &= ~I226_PTM_CTRL_EN_MASK;
+        ptm_ctrl &= ~I226_PTM_CTRL_RCPTM_EN_MASK;
+    }
+
+    result = ndis_platform_ops.pci_write_config(dev, ptm_cap_base + I226_PTM_CTRL, ptm_ctrl);
+    DEBUGP(DL_TRACE, "<==i226_setup_ptm: result=%d ptm_ctrl=0x%08X (cap_base=0x%08X)\n",
+           result, ptm_ctrl, ptm_cap_base);
+    return result;
 }
 
 /**
