@@ -122,11 +122,30 @@ static HANDLE OpenAvbDevice(void)
 }
 
 /* -------------------------------------------------------------------------
- * CPU Frequency (conservative 3 GHz estimate, same as test_timestamp_latency)
+ * CPU Frequency — calibrated via RDTSC vs QPC over a 10 ms window.
+ * The previous hardcoded 3.0 GHz caused calibration errors on platforms
+ * where the TSC rate differs (e.g. Intel N150 Gracemont at ~800 MHz base).
  * ------------------------------------------------------------------------- */
 static double GetCpuFrequencyGHz(void)
 {
-    return 3.0;
+    LARGE_INTEGER qpcFreq;
+    if (!QueryPerformanceFrequency(&qpcFreq) || qpcFreq.QuadPart == 0)
+        return 3.0;  /* last-resort fallback */
+
+    LONGLONG spinTicks = qpcFreq.QuadPart / 100;  /* 10 ms */
+    if (spinTicks < 1) spinTicks = 1;
+
+    LARGE_INTEGER qpcStart, qpcEnd;
+    QueryPerformanceCounter(&qpcStart);
+    UINT64 rdtscStart = __rdtsc();
+    do { QueryPerformanceCounter(&qpcEnd); }
+    while ((qpcEnd.QuadPart - qpcStart.QuadPart) < spinTicks);
+    UINT64 rdtscEnd = __rdtsc();
+
+    LONGLONG qpcElapsed   = qpcEnd.QuadPart - qpcStart.QuadPart;
+    UINT64   rdtscElapsed = rdtscEnd - rdtscStart;
+    double   tscHz = (double)rdtscElapsed * (double)qpcFreq.QuadPart / (double)qpcElapsed;
+    return tscHz / 1.0e9;
 }
 
 /* -------------------------------------------------------------------------

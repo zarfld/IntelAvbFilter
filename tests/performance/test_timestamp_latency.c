@@ -991,16 +991,35 @@ void RecordResult(const char* testCase, bool passed, const char* reason)
  */
 double GetCpuFrequencyGHz(void)
 {
-    LARGE_INTEGER frequency;
-    if (!QueryPerformanceFrequency(&frequency)) {
-        // Fallback to 3GHz if query fails
-        return 3.0;
+    // Calibrate RDTSC rate against QueryPerformanceCounter over a 10ms window.
+    // This is necessary because RDTSC runs at the fixed TSC frequency (not the
+    // current P-state), which varies by platform (e.g. 800 MHz on Intel N150
+    // Gracemont vs ~3.0 GHz on Core i5/i7).  A hardcoded 3.0 GHz assumption
+    // causes 3-4x calibration error on low-power platforms and makes all
+    // nanosecond measurements platform-dependent.
+    LARGE_INTEGER qpcFreq;
+    if (!QueryPerformanceFrequency(&qpcFreq) || qpcFreq.QuadPart == 0) {
+        return 3.0;  // last-resort fallback
     }
 
-    // Estimate CPU frequency from performance counter
-    // This is approximate; ideally use CPUID or registry
-    // For now, assume modern CPU ~2.5-3.5 GHz
-    return 3.0;  // Conservative estimate
+    // Spin for ~10 ms worth of QPC ticks to accumulate enough RDTSC counts.
+    LONGLONG spinTicks = qpcFreq.QuadPart / 100;   // 1% of 1 s = 10 ms
+    if (spinTicks < 1) spinTicks = 1;
+
+    LARGE_INTEGER qpcStart, qpcEnd;
+    QueryPerformanceCounter(&qpcStart);
+    UINT64 rdtscStart = __rdtsc();
+    do {
+        QueryPerformanceCounter(&qpcEnd);
+    } while ((qpcEnd.QuadPart - qpcStart.QuadPart) < spinTicks);
+    UINT64 rdtscEnd = __rdtsc();
+
+    LONGLONG qpcElapsed   = qpcEnd.QuadPart - qpcStart.QuadPart;
+    UINT64   rdtscElapsed = rdtscEnd - rdtscStart;
+
+    // TSC frequency (Hz) = rdtscElapsed * qpcFreq / qpcElapsed
+    double tscHz = (double)rdtscElapsed * (double)qpcFreq.QuadPart / (double)qpcElapsed;
+    return tscHz / 1.0e9;  // return GHz
 }
 
 /*
