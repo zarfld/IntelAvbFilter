@@ -435,6 +435,13 @@ static int TC_NF_LAT_003_LatencyUnderCpuLoad(HANDLE h, const AdapterInfo *a) {
         return TEST_SKIP;
     }
 
+    if (g_platform_slow) {
+        Unsubscribe(h, ring_id);
+        printf("    [SKIP] Platform QPC < 100 MHz (HPET-backed) —"
+               " CPU stress on 4 E-cores starves the test thread; ratio assertion invalid.\n");
+        return TEST_SKIP;
+    }
+
     /* Baseline: 100 samples under idle */
     printf("    Collecting 100 baseline samples (idle)...\n");
     LONGLONG baseline[100];
