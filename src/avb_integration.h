@@ -467,6 +467,28 @@ NTSTATUS AvbDiscoverIntelControllerResourcesAlternative(
     _Out_ PULONG Bar0Length
 );
 
+/**
+ * @brief Read a DWORD from the device's PCIe config space via BUS_INTERFACE_STANDARD.
+ * Supports the full 4 KB PCIe config space (0x000-0xFFC), including Extended
+ * Capabilities (0x100-0xFFC).  Must be called at PASSIVE_LEVEL.
+ */
+NTSTATUS AvbPciReadConfigDwordViaBusInterface(
+    _In_  PMS_FILTER FilterModule,
+    _In_  ULONG      Offset,
+    _Out_ ULONG     *Value
+);
+
+/**
+ * @brief Write a DWORD to the device's PCIe config space via BUS_INTERFACE_STANDARD.
+ * Supports the full 4 KB PCIe config space (0x000-0xFFC), including Extended
+ * Capabilities (0x100-0xFFC).  Must be called at PASSIVE_LEVEL.
+ */
+NTSTATUS AvbPciWriteConfigDwordViaBusInterface(
+    _In_ PMS_FILTER FilterModule,
+    _In_ ULONG      Offset,
+    _In_ ULONG      Value
+);
+
 /*========================================================================
  * Real hardware memory mapping
  *=======================================================================*/
