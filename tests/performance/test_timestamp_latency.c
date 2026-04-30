@@ -106,6 +106,9 @@ typedef struct _TEST_RESULT {
 
 TEST_RESULT g_Results[100]; /* up to MAX_ADAPTERS(16) x ~10 tests each */
 int g_ResultCount = 0;
+/* Set in main() when TSC < 1.5 GHz (e.g. Intel N150 Gracemont at 0.8 GHz).
+ * Absolute-latency TCs are SKIP on such platforms; relative TCs still run. */
+static bool g_platformTooSlowForPerfTests = false;
 
 // Per-adapter context — set by main() before each adapter's test run
 // OpenAvbDevice() reads these to bind the handle via IOCTL_AVB_OPEN_ADAPTER.
@@ -157,6 +160,15 @@ int main(void)
 
     double cpuFreqGHz = GetCpuFrequencyGHz();
     printf("CPU Frequency: %.2f GHz (%.3f cycles/ns)\n", cpuFreqGHz, cpuFreqGHz);
+
+    if (cpuFreqGHz < 1.5) {
+        g_platformTooSlowForPerfTests = true;
+        printf("[SKIP-PLATFORM] TSC %.2f GHz < 1.5 GHz minimum for absolute-latency tests.\n"
+               "  TC-PERF-TS-001 to -006 and TC-PERF-PHC-001/002 will SKIP on this machine.\n"
+               "  Relative tests TC-PERF-TS-007/008 will still run.\n"
+               "  Use a >=1.5 GHz platform (e.g. Core i5/i7) for full perf validation.\n",
+               cpuFreqGHz);
+    }
 
     /* ------------------------------------------------------------------ *
      * Enumerate all Intel adapters via IOCTL_AVB_ENUM_ADAPTERS.           *
@@ -244,6 +256,13 @@ int main(void)
 void TestTxTimestampLatency(void)
 {
     printf("--- TC-PERF-TS-001/003: TX Timestamp Latency ---\n");
+
+    if (g_platformTooSlowForPerfTests) {
+        RecordResult("TC-PERF-TS-001", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        RecordResult("TC-PERF-TS-003", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        printf("  [SKIP] Platform TSC < 1.5 GHz\n\n");
+        return;
+    }
 
     HANDLE hDevice = OpenAvbDevice();
     if (hDevice == INVALID_HANDLE_VALUE) {
@@ -342,6 +361,13 @@ void TestRxTimestampLatency(void)
 {
     printf("--- TC-PERF-TS-002/004: RX Timestamp Latency ---\n");
 
+    if (g_platformTooSlowForPerfTests) {
+        RecordResult("TC-PERF-TS-002", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        RecordResult("TC-PERF-TS-004", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        printf("  [SKIP] Platform TSC < 1.5 GHz\n\n");
+        return;
+    }
+
     HANDLE hDevice = OpenAvbDevice();
     if (hDevice == INVALID_HANDLE_VALUE) {
         RecordResult("TC-PERF-TS-002", false, "Failed to open device");
@@ -433,6 +459,12 @@ void TestRxTimestampLatency(void)
 void TestLatencyDistribution(void)
 {
     printf("--- TC-PERF-TS-005: Latency Distribution ---\n");
+
+    if (g_platformTooSlowForPerfTests) {
+        RecordResult("TC-PERF-TS-005", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        printf("  [SKIP] Platform TSC < 1.5 GHz\n\n");
+        return;
+    }
 
     HANDLE hDevice = OpenAvbDevice();
     if (hDevice == INVALID_HANDLE_VALUE) {
@@ -549,6 +581,12 @@ unsigned __stdcall TimestampQueryThread(void* param)
 void TestConcurrentLoad(void)
 {
     printf("--- TC-PERF-TS-006: Concurrent Load (8 threads) ---\n");
+
+    if (g_platformTooSlowForPerfTests) {
+        RecordResult("TC-PERF-TS-006", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        printf("  [SKIP] Platform TSC < 1.5 GHz\n\n");
+        return;
+    }
 
     HANDLE hDevice = OpenAvbDevice();
     if (hDevice == INVALID_HANDLE_VALUE) {
@@ -830,6 +868,13 @@ void TestWarmupEffect(void)
 void TestPhcQueryLatency(void)
 {
     printf("--- TC-PERF-PHC-001/002: PHC Query Latency (IOCTL_AVB_GET_CLOCK_CONFIG) ---\n");
+
+    if (g_platformTooSlowForPerfTests) {
+        RecordResult("TC-PERF-PHC-001", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        RecordResult("TC-PERF-PHC-002", true, "SKIP: TSC < 1.5 GHz platform (below perf test minimum)");
+        printf("  [SKIP] Platform TSC < 1.5 GHz\n\n");
+        return;
+    }
 
     HANDLE hDevice = OpenAvbDevice();
     if (hDevice == INVALID_HANDLE_VALUE) {
