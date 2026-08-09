@@ -200,6 +200,23 @@ $script:skippedTests = 0   # initialized here; do not rely on implicit $null
 $script:testResults = @()
 
 # ===========================
+# Precondition Gate — test signing, Secure Boot, driver, hardware
+# ===========================
+$precondScript = Join-Path $toolsDir 'setup\Test-Preconditions.ps1'
+if (Test-Path $precondScript) {
+    Write-Step "Checking test preconditions"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $precondScript -ForTest
+    $precondExit = $LASTEXITCODE
+    if ($precondExit -eq 1) {
+        Write-Host "[PRECONDITIONS] Critical checks failed. Fix issues above before running tests." -ForegroundColor Red
+        exit 1
+    }
+    # Exit code 2 (warnings only) — continue with caution
+} else {
+    Write-Host "[WARN] Test-Preconditions.ps1 not found — skipping precondition checks." -ForegroundColor Yellow
+}
+
+# ===========================
 # Feature: Secure Boot Check (from test_secure_boot_compatible.bat)
 # ===========================
 if ($SecureBootCheck) {

@@ -657,6 +657,26 @@ function Install-Driver {
 
 # Main execution
 try {
+    # ─────────────────────────────────────────────────────────────────
+    # Precondition check — run before any install/reinstall action
+    # ─────────────────────────────────────────────────────────────────
+    $isInstallAction = $InstallDriver -or $Reinstall
+    if ($isInstallAction) {
+        $precondScript = Join-Path $PSScriptRoot 'Test-Preconditions.ps1'
+        if (Test-Path $precondScript) {
+            Write-Host "`n==> Checking installation preconditions..." -ForegroundColor Cyan
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $precondScript -ForInstall
+            $precondExit = $LASTEXITCODE
+            if ($precondExit -eq 1) {
+                Write-Host "[PRECONDITIONS] Critical checks failed. Fix issues above before installing." -ForegroundColor Red
+                exit 1
+            }
+            # Exit code 2 = warnings only; proceed with notice
+        } else {
+            Write-Host "[WARN] Test-Preconditions.ps1 not found — skipping precondition checks." -ForegroundColor Yellow
+        }
+    }
+
     # Process parameters
     if ($EnableTestSigning) {
         $result = Enable-TestSigningMode
