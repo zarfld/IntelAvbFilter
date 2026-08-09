@@ -4,6 +4,7 @@
  *
  * Implements: #177 (TEST-EVENT-001)
  * Verifies: #13 (REQ-F-TS-EVENT-SUB-001), #2 (REQ-F-PTP-GETSET-001)
+ * Verifies: #168 (REQ-F-EVENT-001), #165 (REQ-NF-EVENT-001), #161 (REQ-NF-EVENT-002)
  *
  * Tests that are gated behind external hardware:
  *   TC-PTP-LAT-001  GPIO oscilloscope measurement         → SKIP_IF_NO_OSCILLOSCOPE

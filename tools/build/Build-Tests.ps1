@@ -248,6 +248,14 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "PTP Clock Production Test"
     },
+    @{
+        Name = "ptp_ioctl_latency_test"
+        Type = "cl"
+        Source = "tests/integration/ptp/ptp_ioctl_latency_test.c"
+        Output = "ptp_ioctl_latency_test.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "PTP IOCTL Latency & Jitter Test (#321 #322 #323 #324)"
+    },
     
     # TSN Integration Tests (cl.exe)
     @{
@@ -409,6 +417,42 @@ $AllTests = @(
         Output = "avb_test_i219.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "I219 Device-Specific Test"
+    },
+    @{
+        Name = "avb_test_portability"
+        Type = "cl"
+        Source = "tests/portability/avb_test_portability.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_portability.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Cross-Adapter Portability Test (QA-SC-PORT-001, Issue #114)"
+    },
+    @{
+        Name = "avb_test_i217"
+        Type = "cl"
+        Source = "tests/device_specific/i217/avb_test_i217.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_i217.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "I217 device-specific test: caps, MDIO, EEE, TSN NOT_SUPPORTED (Issue #114)"
+    },
+    @{
+        Name = "avb_test_i225"
+        Type = "cl"
+        Source = "tests/device_specific/i225/avb_test_i225.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_i225.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "I225 device-specific test: full TSN caps, MDIO, NO EEE (Issue #114)"
+    },
+    @{
+        Name = "avb_test_i226_um"
+        Type = "cl"
+        Source = "tests/device_specific/i226/avb_test_i226_um.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_i226_um.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "I226 device-specific test: full TSN caps, MDIO, EEE (Issue #114)"
     },
     # Device-Specific Tests (nmake)
     @{
@@ -1609,6 +1653,21 @@ $AllTests = @(
         Standard = "IEEE 802.1AS-2020"
     }
     @{
+        Name = "test_event_nf_zero_polling"
+        Type = "cl"
+        Source = "tests\event\test_event_nf_zero_polling.c"
+        Output = "test_event_nf_zero_polling.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Zero Polling Overhead NF Performance - CPU budget quantification (Issue #241, TEST-EVENT-NF-002)"
+        Issue = "#241"
+        TestCases = 5
+        IOCTLs = "33(TS_SUBSCRIBE), 46(TS_UNSUBSCRIBE)"
+        Requirement = "#161"
+        Standard = "IEEE 802.1AS-2020"
+    }
+    @{
         Name = "test_ptp_event_latency"
         Type = "cl"
         Source = "tests\event\test_ptp_event_latency.c"
@@ -1636,6 +1695,21 @@ $AllTests = @(
         TestCases = 5
         IOCTLs = "33(TS_SUBSCRIBE), 34(TS_MAP_RING_BUFFER), 46(TS_UNSUBSCRIBE)"
         Requirement = "#13"
+        Standard = "IEEE 802.1AS-2020"
+    }
+    @{
+        Name = "test_event_nf_latency"
+        Type = "cl"
+        Source = "tests\event\test_event_nf_latency.c"
+        Output = "test_event_nf_latency.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "Event Notification Latency NF Hard Real-Time - IOCTL budget + oscilloscope gate (Issue #245, TEST-EVENT-NF-001)"
+        Issue = "#245"
+        TestCases = 5
+        IOCTLs = "33(TS_SUBSCRIBE), 34(TS_MAP_RING_BUFFER), 46(TS_UNSUBSCRIBE)"
+        Requirement = "#165"
         Standard = "IEEE 802.1AS-2020"
     }
     @{
@@ -1705,6 +1779,21 @@ $AllTests = @(
         TestCases = 6
         IOCTLs = "IOCTL_AVB_GET_STATISTICS(0x00172020), IOCTL_AVB_RESET_STATISTICS(0x00172028)"
         Requirement = "#265"
+    }
+    @{
+        Name = "test_hardware_detection"
+        Type = "cl"
+        Source = "tests\hardware\test_hardware_detection.c"
+        Output = "test_hardware_detection.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = ""
+        Enabled = $true
+        Priority = "P0"
+        Description = "Hardware Capability Detection & Register Access Safety: vendor_id/device_id validation, capability bitmask, concurrent IOCTL safety (Verifies #44 #45, Implements #288 #287)"
+        Issue = "#288"
+        TestCases = 4
+        IOCTLs = "IOCTL_AVB_ENUM_ADAPTERS, IOCTL_AVB_OPEN_ADAPTER, IOCTL_AVB_GET_HW_STATE"
+        Requirement = "#44 #45"
     }
 )
 
@@ -1873,6 +1962,8 @@ foreach ($Test in $TestsToBuild) {
             $SucceededTests += $Test.Name
         } else {
             Write-Host "  FAILED: Compiler returned error code $LASTEXITCODE" -ForegroundColor Red
+            # Print compiler output so CI logs show the actual errors
+            $result | Where-Object { $_ -match "error|warning" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
             $FailedTests += $Test.Name
         }
         

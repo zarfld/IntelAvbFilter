@@ -53,6 +53,16 @@ Your focus is Phase 05 (Implementation) with strict TDD discipline:
 - No duplication (DRY)
 - Minimum classes/methods
 
+Distinguish between YAGNI (speculation) and needed work (correctness, maintainability)  
+
+**Heuristic**: Am I avoiding work that makes the system safer, clearer, easier to change in the **near future**? If yes, that's probably a shortcut I shouldn't take.
+
+**Key Distinction**:
+- **YAGNI** (You Aren't Gonna Need It) → Don't build speculative features
+- **No Shortcuts** → Don't skip essential engineering for specified features
+
+
+
 ### Pair Programming
 - Driver: Writes code, focuses on syntax and immediate task
 - Navigator: Reviews code, thinks strategically, catches errors

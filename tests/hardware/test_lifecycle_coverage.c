@@ -611,12 +611,49 @@ static void RunTC_LCY_006(HANDLE hDev, const char *adapterTag, UINT16 device_id)
     /* Allow NDIS FilterAttach + FilterRestart to complete (~4 seconds) */
     Sleep(4000);
 
+    /* The FsContext on hDev may be stale after FilterDetach destroyed the
+     * adapter context and FilterAttach created a new one.  Open a fresh
+     * handle and re-bind it to the same adapter (matched by device_id) so
+     * the after-snapshot IOCTL reaches the newly-attached adapter context. */
     AVB_DRIVER_STATISTICS after;
-    if (!ReadStats(hDev, &after)) {
-        RecordResult(name, TEST_FAIL,
-                     "IOCTL_AVB_GET_STATISTICS (after snapshot) failed",
-                     GetTimestampUs() - t0);
-        return;
+    {
+        BOOL gotAfter = FALSE;
+        HANDLE hFresh = CreateFileA("\\\\.\\IntelAvbFilter",
+                                    GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFresh != INVALID_HANDLE_VALUE) {
+            /* Find adapter with matching device_id and bind the fresh handle */
+            for (int ri = 0; ri < 8; ri++) {
+                AVB_ENUM_REQUEST ereq;
+                memset(&ereq, 0, sizeof(ereq));
+                ereq.index = (UINT32)ri;
+                DWORD br = 0;
+                if (!DeviceIoControl(hFresh, IOCTL_AVB_ENUM_ADAPTERS,
+                                     &ereq, sizeof(ereq), &ereq, sizeof(ereq), &br, NULL))
+                    break;
+                if (device_id != 0 && ereq.device_id != device_id)
+                    continue;
+                AVB_OPEN_REQUEST oreq;
+                memset(&oreq, 0, sizeof(oreq));
+                oreq.vendor_id = ereq.vendor_id;
+                oreq.device_id = ereq.device_id;
+                oreq.index     = ereq.index;
+                br = 0;
+                DeviceIoControl(hFresh, IOCTL_AVB_OPEN_ADAPTER,
+                                &oreq, sizeof(oreq), &oreq, sizeof(oreq), &br, NULL);
+                break;
+            }
+            gotAfter = ReadStats(hFresh, &after);
+            CloseHandle(hFresh);
+        }
+        if (!gotAfter) {
+            RecordResult(name, TEST_FAIL,
+                         "IOCTL_AVB_GET_STATISTICS (after snapshot) failed — "
+                         "adapter may not have re-attached within 4 s",
+                         GetTimestampUs() - t0);
+            return;
+        }
     }
 
     /* Compute deltas (unsigned subtraction is well-defined for wrap) */
@@ -708,11 +745,25 @@ static void RunTC_LCY_004(HANDLE hDev, const char *adapterTag)
                 adapterTag);
     UINT64 t0 = GetTimestampUs();
 
+    /* TC-LCY-006 (NIC toggle) may have triggered FilterDetach+FilterAttach on
+     * the adapter whose context is stored in hDev->FsContext, creating a new
+     * AvbContext while FsContext still points to the freed old one.  A fresh
+     * handle with FsContext=NULL falls back to AvbFindIntelFilterModule, which
+     * always returns a live context.  Stats are per-context but RESET is just
+     * verifying the IOCTL mechanism works — the fresh handle is fine here. */
+    HANDLE hFresh = CreateFileA("\\\\.\\IntelAvbFilter",
+                                GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hUsed = (hFresh != INVALID_HANDLE_VALUE) ? hFresh : hDev;
+
     DWORD bytesReturned = 0;
-    BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_RESET_STATISTICS,
+    BOOL ok = DeviceIoControl(hUsed, IOCTL_AVB_RESET_STATISTICS,
                               NULL, 0, NULL, 0, &bytesReturned, NULL);
     if (!ok) {
         DWORD err = GetLastError();
+        if (hFresh != INVALID_HANDLE_VALUE) CloseHandle(hFresh);
         char reason[128];
         _snprintf_s(reason, sizeof(reason), _TRUNCATE,
                     "IOCTL_AVB_RESET_STATISTICS failed (GetLastError=%lu)", err);
@@ -721,7 +772,8 @@ static void RunTC_LCY_004(HANDLE hDev, const char *adapterTag)
     }
 
     AVB_DRIVER_STATISTICS s;
-    if (!ReadStats(hDev, &s)) {
+    if (!ReadStats(hUsed, &s)) {
+        if (hFresh != INVALID_HANDLE_VALUE) CloseHandle(hFresh);
         RecordResult(name, TEST_FAIL,
                      "IOCTL_AVB_GET_STATISTICS after reset failed",
                      GetTimestampUs() - t0);
@@ -785,6 +837,8 @@ static void RunTC_LCY_004(HANDLE hDev, const char *adapterTag)
     CHECK_FIELD_ZERO(FilterStatusCount)
     CHECK_FIELD_ZERO(FilterNetPnPCount)
     CHECK_FIELD_ZERO(PauseRestartGeneration)
+
+    if (hFresh != INVALID_HANDLE_VALUE) CloseHandle(hFresh);
 
     if (failCount > 0) {
         char reason[1100];

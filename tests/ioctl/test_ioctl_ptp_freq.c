@@ -47,6 +47,7 @@
 typedef struct {
     HANDLE adapter;
     INT64 initial_frequency;
+    UINT32 nominal_incr_ns;  /* Device-specific nominal: 8 for I210, 24 for I226 */
     int test_count;
     int pass_count;
     int fail_count;
@@ -74,36 +75,41 @@ static HANDLE OpenAdapter(void)
     return h;
 }
 
-/* Helper: Convert ppb to increment_ns/increment_frac */
-static void ConvertPpbToIncrement(INT64 ppb, UINT32 *increment_ns, UINT32 *increment_frac)
+/* Helper: Convert ppb to increment_ns/increment_frac
+ *
+ * Uses the device-detected nominal_ns so the boundary arithmetic is correct on
+ * every adapter (I210 nominal=8, I226 nominal=24, I219 fallback=8).
+ * Callers pass ctx->nominal_incr_ns; NOMINAL_INCR_NS is the fallback default.
+ *
+ * Example (I226, nominal=24, ppb=+50000):
+ *   new_increment = 24.0 * (1 + 50000/1e9) = 24.0 * 1.00005 = 24.0012 ns
+ *   increment_ns = 24, increment_frac = 0.0012 * 2^32
+ */
+static void ConvertPpbToIncrement(INT64 ppb, UINT32 nominal_ns,
+                                   UINT32 *increment_ns, UINT32 *increment_frac)
 {
-    /* Calculate adjusted increment:
-     * new_increment = nominal_increment * (1 + ppb/1e9)
-     * For 125MHz base clock: nominal = 8ns
-     * 
-     * Example: ppb = +50000 (50 ppm faster)
-     *   new_increment = 8.0 * (1 + 50000/1e9) = 8.0 * 1.00005 = 8.0004 ns
-     *   increment_ns = 8
-     *   increment_frac = 0.0004 * 2^32 = 1717986918
-     */
     double adjustment_factor = 1.0 + ((double)ppb / 1000000000.0);
-    double new_increment = (double)NOMINAL_INCR_NS * adjustment_factor;
-    
+    double new_increment = (double)nominal_ns * adjustment_factor;
+
     *increment_ns = (UINT32)new_increment;  /* Integer part */
     double frac_part = new_increment - (double)(*increment_ns);
     *increment_frac = (UINT32)(frac_part * FRAC_SCALE);
 }
 
-/* Helper: Adjust frequency */
-static BOOL AdjustFrequency(HANDLE adapter, INT64 ppb)
+/* Helper: Adjust frequency
+ * nominal_ns — device-specific nominal period; use ctx->nominal_incr_ns.
+ * Thread contexts that use small ppb values may pass NOMINAL_INCR_NS safely
+ * since small adjustments are well within range for all supported devices.
+ */
+static BOOL AdjustFrequency(HANDLE adapter, UINT32 nominal_ns, INT64 ppb)
 {
     AVB_FREQUENCY_REQUEST req = {0};  /* ✅ Use SSOT structure */
     DWORD bytesReturned = 0;
     BOOL result;
-    
-    /* Convert ppb to increment_ns/increment_frac */
-    ConvertPpbToIncrement(ppb, &req.increment_ns, &req.increment_frac);
-    
+
+    /* Convert ppb to increment_ns/increment_frac using device-specific nominal */
+    ConvertPpbToIncrement(ppb, nominal_ns, &req.increment_ns, &req.increment_frac);
+
     result = DeviceIoControl(
         adapter,
         IOCTL_AVB_ADJUST_FREQUENCY,
@@ -112,14 +118,59 @@ static BOOL AdjustFrequency(HANDLE adapter, INT64 ppb)
         &bytesReturned,
         NULL
     );
-    
+
     /* ✅ Check BOTH DeviceIoControl result AND driver status field */
     if (result && req.status != 0) {
         /* IOCTL succeeded but driver returned error status */
         return FALSE;
     }
-    
+
     return result;
+}
+
+/* Helper: Detect device nominal increment_ns by probing the current TIMINCA register.
+ * Sends increment_ns=NOMINAL_INCR_NS (8) — valid for any device — then reads
+ * back current_increment (the value BEFORE the write) and extracts bits[31:24] = integer ns.
+ * Restores the original TIMINCA if it differed from 8ns nominal.
+ * Returns the actual nominal period (8 for I210, 24 for I226, etc.).
+ */
+static UINT32 GetDeviceNominalIncrNs(HANDLE adapter)
+{
+    AVB_FREQUENCY_REQUEST req = {0};
+    DWORD bytesReturned = 0;
+    UINT32 nominal;
+
+    req.increment_ns = NOMINAL_INCR_NS;  /* 8 - valid for any supported device */
+    req.increment_frac = 0;
+
+    BOOL ok = DeviceIoControl(
+        adapter,
+        IOCTL_AVB_ADJUST_FREQUENCY,
+        &req, sizeof(req),
+        &req, sizeof(req),
+        &bytesReturned,
+        NULL
+    );
+
+    if (!ok || (req.status != 0) || req.current_increment == 0) {
+        return NOMINAL_INCR_NS;  /* Fallback: assume I210 nominal */
+    }
+
+    /* current_increment holds the TIMINCA value BEFORE our write:
+     * bits[31:24] = integer ns increment per cycle = hardware nominal */
+    nominal = (req.current_increment >> 24) & 0xFF;
+    if (nominal == 0) return NOMINAL_INCR_NS;  /* Safety fallback */
+
+    /* Restore the original TIMINCA if we changed it */
+    if (nominal != NOMINAL_INCR_NS) {
+        AVB_FREQUENCY_REQUEST restore = {0};
+        restore.increment_ns  = nominal;
+        restore.increment_frac = req.current_increment & 0x00FFFFFFU;  /* preserve sub-ns */
+        DeviceIoControl(adapter, IOCTL_AVB_ADJUST_FREQUENCY,
+                        &restore, sizeof(restore), &restore, sizeof(restore), &bytesReturned, NULL);
+    }
+
+    return nominal;
 }
 
 /* Helper: Enable hardware timestamping */
@@ -156,7 +207,7 @@ static BOOL EnableHWTimestamping(HANDLE adapter)
  */
 static int Test_ZeroFrequencyAdjustment(TestContext *ctx)
 {
-    if (!AdjustFrequency(ctx->adapter, 0)) {
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 0)) {
         printf("  [FAIL] UT-PTP-FREQ-001: Zero Frequency Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
@@ -172,8 +223,8 @@ static int Test_ZeroFrequencyAdjustment(TestContext *ctx)
 static int Test_PositiveFrequencyAdjustment(TestContext *ctx)
 {
     INT64 adj_ppb = 100000;  /* +100 ppm */
-    
-    if (!AdjustFrequency(ctx->adapter, adj_ppb)) {
+
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-002: Positive Frequency Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
@@ -189,8 +240,8 @@ static int Test_PositiveFrequencyAdjustment(TestContext *ctx)
 static int Test_NegativeFrequencyAdjustment(TestContext *ctx)
 {
     INT64 adj_ppb = -100000;  /* -100 ppm */
-    
-    if (!AdjustFrequency(ctx->adapter, adj_ppb)) {
+
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-003: Negative Frequency Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
@@ -205,10 +256,11 @@ static int Test_NegativeFrequencyAdjustment(TestContext *ctx)
  */
 static int Test_MaximumPositiveAdjustment(TestContext *ctx)
 {
-    /* Intel I210/I225 typically supports up to ±999999999 ppb */
+    /* nominal*(1 + 999999999/1e9) = nominal*1.999999999 ≈ 2*nominal-epsilon
+     * → increment_ns = 2*nominal-1 = max_valid_incr for all devices → accepted */
     INT64 adj_ppb = 999999999;
-    
-    if (!AdjustFrequency(ctx->adapter, adj_ppb)) {
+
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-004: Maximum Positive Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
@@ -229,9 +281,13 @@ static int Test_MaximumPositiveAdjustment(TestContext *ctx)
  */
 static int Test_MaximumNegativeAdjustment(TestContext *ctx)
 {
-    INT64 adj_ppb = -875000000;  /* Maximum representable negative: (1.0/8.0 - 1.0) * 1e9 */
-    
-    if (!AdjustFrequency(ctx->adapter, adj_ppb)) {
+    /* -875000000 ppb: nominal*(1-0.875) = nominal*0.125 → increment_ns ≥ 1 for all devices
+     * I210 (nominal=8):  8*0.125=1  ≥ 1 ✓
+     * I226 (nominal=24): 24*0.125=3 ≥ 1 ✓
+     * I219 (fallback=8): 8*0.125=1  ≥ 1 ✓ */
+    INT64 adj_ppb = -875000000;
+
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-005: Maximum Negative Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
@@ -242,35 +298,61 @@ static int Test_MaximumNegativeAdjustment(TestContext *ctx)
 
 /*
  * Test UT-PTP-FREQ-006: Out-of-Range Rejection (Positive)
- * Verifies: Rejects adjustments > +1e9 ppb
+ * Verifies: Rejects adjustments that map to increment_ns > max_valid_incr
+ *
+ * Device-specific behaviour:
+ *   ppb = +1 000 000 001 via ConvertPpbToIncrement(nominal=N) gives:
+ *     increment_ns = N * (1 + 1 000 000 001/1 000 000 000) = N * 2.000000001 = 2*N
+ *   max_valid_incr = 2*N - 1  for all devices, so 2*N is always rejected.
+ *
+ *   I210 (nominal=8 → max=15):  ppb → increment_ns=16 > 15 ✓ rejected
+ *   I226 (nominal=24 → max=47): ppb → increment_ns=48 > 47 ✓ rejected
+ *   I219 (GetDeviceNominalIncrNs falls back to 8 because writing 8 fails on
+ *         I219 max=7): ppb → increment_ns=16 > 7 ✓ rejected
+ *
+ * The full ConvertPpbToIncrement → IOCTL path is exercised on every adapter.
  */
 static int Test_OutOfRangeRejectionPositive(TestContext *ctx)
 {
     INT64 adj_ppb = 1000000001;  /* > +1e9 ppb (invalid) */
-    
-    if (AdjustFrequency(ctx->adapter, adj_ppb)) {
-        printf("  [FAIL] UT-PTP-FREQ-006: Out-of-Range Rejection (Positive): Invalid value accepted\n");
+
+    if (AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
+        printf("  [FAIL] UT-PTP-FREQ-006: Out-of-Range Rejection (Positive): "
+               "Invalid value accepted (ppb=%lld, nominal=%u)\n",
+               (long long)adj_ppb, ctx->nominal_incr_ns);
         return TEST_FAIL;
     }
-    
-    printf("  [PASS] UT-PTP-FREQ-006: Out-of-Range Rejection (Positive)\n");
+
+    printf("  [PASS] UT-PTP-FREQ-006: Out-of-Range Rejection (Positive) "
+           "(ppb=%lld, nominal=%u ns)\n",
+           (long long)adj_ppb, ctx->nominal_incr_ns);
     return TEST_PASS;
 }
 
 /*
  * Test UT-PTP-FREQ-007: Out-of-Range Rejection (Negative)
  * Verifies: Rejects adjustments < -1e9 ppb
+ *
+ * ppb = -1 000 000 001 via ConvertPpbToIncrement(nominal=N) gives:
+ *   new_increment = N * (1 - 1.000000001) = N * (-0.000000001) ≈ 0
+ *   increment_ns = 0 (truncation toward zero), which the driver always rejects
+ *   (increment_ns==0 means clock frozen — rejected for all devices).
+ * Exercises the full ConvertPpbToIncrement → IOCTL path on every adapter.
  */
 static int Test_OutOfRangeRejectionNegative(TestContext *ctx)
 {
     INT64 adj_ppb = -1000000001;  /* < -1e9 ppb (invalid) */
-    
-    if (AdjustFrequency(ctx->adapter, adj_ppb)) {
-        printf("  [FAIL] UT-PTP-FREQ-007: Out-of-Range Rejection (Negative): Invalid value accepted\n");
+
+    if (AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
+        printf("  [FAIL] UT-PTP-FREQ-007: Out-of-Range Rejection (Negative): "
+               "Invalid value accepted (ppb=%lld, nominal=%u)\n",
+               (long long)adj_ppb, ctx->nominal_incr_ns);
         return TEST_FAIL;
     }
-    
-    printf("  [PASS] UT-PTP-FREQ-007: Out-of-Range Rejection (Negative)\n");
+
+    printf("  [PASS] UT-PTP-FREQ-007: Out-of-Range Rejection (Negative) "
+           "(ppb=%lld, nominal=%u ns)\n",
+           (long long)adj_ppb, ctx->nominal_incr_ns);
     return TEST_PASS;
 }
 
@@ -281,8 +363,8 @@ static int Test_OutOfRangeRejectionNegative(TestContext *ctx)
 static int Test_SmallAdjustment(TestContext *ctx)
 {
     INT64 adj_ppb = 1;  /* +1 ppb */
-    
-    if (!AdjustFrequency(ctx->adapter, adj_ppb)) {
+
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-008: Small Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
@@ -302,7 +384,7 @@ static int Test_RapidFrequencyChanges(TestContext *ctx)
     int i;
     
     for (i = 0; i < count; i++) {
-        if (!AdjustFrequency(ctx->adapter, adjustments[i])) {
+        if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adjustments[i])) {
             printf("  [FAIL] UT-PTP-FREQ-009: Rapid Frequency Changes: Adjustment %d failed\n", i);
             return TEST_FAIL;
         }
@@ -323,7 +405,7 @@ static int Test_FrequencyAdjustmentPersistence(TestContext *ctx)
     INT64 delta1, delta2;
     
     /* Set to nominal (0 ppb) and get baseline */
-    if (!AdjustFrequency(ctx->adapter, 0)) {
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 0)) {
         printf("  [FAIL] UT-PTP-FREQ-010: Persistence: Initial adjustment failed\n");
         return TEST_FAIL;
     }
@@ -345,7 +427,7 @@ static int Test_FrequencyAdjustmentPersistence(TestContext *ctx)
     delta1 = ts2.timestamp - ts1.timestamp;
     
     /* Apply +1000 ppb adjustment (+1000ns per second = +100ns per 100ms) */
-    if (!AdjustFrequency(ctx->adapter, 1000)) {
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 1000)) {
         printf("  [FAIL] UT-PTP-FREQ-010: Persistence: Adjustment to +1000 ppb failed\n");
         return TEST_FAIL;
     }
@@ -368,7 +450,7 @@ static int Test_FrequencyAdjustmentPersistence(TestContext *ctx)
     if (delta1 > 0 && delta2 > 0 && ts3.timestamp > ts1.timestamp) {
         printf("  [PASS] UT-PTP-FREQ-010: Persistence (delta1=%lld ns, delta2=%lld ns)\n", delta1, delta2);
         /* Reset to nominal */
-        AdjustFrequency(ctx->adapter, 0);
+        AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 0);
         return TEST_PASS;
     }
     
@@ -399,13 +481,13 @@ static int Test_FractionalPPBPrecision(TestContext *ctx)
     /* Precision is hardware-dependent, but IOCTL should accept any INT64 value within range */
     
     /* Test very small adjustment (0.001 ppb) */
-    if (!AdjustFrequency(ctx->adapter, 1)) {
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 1)) {
         printf("  [FAIL] UT-PTP-FREQ-011: Fractional Precision: 0.001 ppb adjustment failed\n");
         return TEST_FAIL;
     }
-    
+
     /* Reset to nominal */
-    AdjustFrequency(ctx->adapter, 0);
+    AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 0);
     
     printf("  [PASS] UT-PTP-FREQ-011: Fractional Precision (VID:0x%04X DID:0x%04X)\n",
            enum_req.vendor_id, enum_req.device_id);
@@ -415,6 +497,8 @@ static int Test_FractionalPPBPrecision(TestContext *ctx)
 /* Thread context for concurrent test */
 typedef struct {
     HANDLE adapter;
+    UINT32 nominal_ns;   /* Device-specific nominal — small ppb values are
+                          * unaffected, but pass through correctly. */
     INT64 adjustment;
     int iterations;
     volatile LONG* success_count;
@@ -425,9 +509,9 @@ static DWORD WINAPI FrequencyWorker(LPVOID param)
 {
     FreqThreadContext* tc = (FreqThreadContext*)param;
     int i;
-    
+
     for (i = 0; i < tc->iterations; i++) {
-        if (AdjustFrequency(tc->adapter, tc->adjustment)) {
+        if (AdjustFrequency(tc->adapter, tc->nominal_ns, tc->adjustment)) {
             InterlockedIncrement(tc->success_count);
         } else {
             InterlockedIncrement(tc->fail_count);
@@ -455,6 +539,7 @@ static int Test_ConcurrentAdjustmentRequests(TestContext *ctx)
     /* Create 4 threads with different frequency adjustments */
     for (i = 0; i < 4; i++) {
         thread_ctx[i].adapter = ctx->adapter;
+        thread_ctx[i].nominal_ns = ctx->nominal_incr_ns;
         thread_ctx[i].adjustment = adjustments[i];
         thread_ctx[i].iterations = 10;  /* 10 adjustments per thread */
         thread_ctx[i].success_count = &success_count;
@@ -483,8 +568,8 @@ static int Test_ConcurrentAdjustmentRequests(TestContext *ctx)
     }
     
     /* Reset to nominal */
-    AdjustFrequency(ctx->adapter, 0);
-    
+    AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 0);
+
     if (success_count > 0 && fail_count == 0) {
         printf("  [PASS] UT-PTP-FREQ-012: Concurrent Requests (%ld succeeded, %ld failed)\n",
                (long)success_count, (long)fail_count);
@@ -513,7 +598,7 @@ static int Test_AdjustmentDuringActiveSync(TestContext *ctx)
     }
     
     /* Apply frequency adjustment while timestamps are active */
-    if (!AdjustFrequency(ctx->adapter, 100000)) {  /* +100 ppm */
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 100000)) {  /* +100 ppm */
         printf("  [FAIL] UT-PTP-FREQ-013: During Active Sync: Adjustment failed\n");
         return TEST_FAIL;
     }
@@ -528,8 +613,8 @@ static int Test_AdjustmentDuringActiveSync(TestContext *ctx)
     }
     
     /* Reset to nominal */
-    AdjustFrequency(ctx->adapter, 0);
-    
+    AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 0);
+
     /* Debug output */
     printf("  DEBUG: ts1=%lld, ts2=%lld, delta=%lld ns\n", ts1.timestamp, ts2.timestamp, ts2.timestamp - ts1.timestamp);
     
@@ -585,7 +670,7 @@ static int Test_AdjustmentResetOnRestart(TestContext *ctx)
     DWORD br;
     
     /* Step 1: Apply non-zero frequency adjustment (+100 ppm) */
-    if (!AdjustFrequency(ctx->adapter, 100000)) {
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 100000)) {
         printf("  [FAIL] UT-PTP-FREQ-015: Reset on Restart: Initial adjustment failed\n");
         return TEST_FAIL;
     }
@@ -629,13 +714,13 @@ static int Test_AdjustmentResetOnRestart(TestContext *ctx)
     ctx->adapter = adapter2;
     
     /* Step 7: Apply small adjustment to verify adapter is functional */
-    if (!AdjustFrequency(ctx->adapter, 1000)) {
+    if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 1000)) {
         printf("  [FAIL] UT-PTP-FREQ-015: Reset on Restart: Adapter not functional after reopen\n");
         return TEST_FAIL;
     }
-    
+
     /* Reset to nominal for next tests */
-    AdjustFrequency(ctx->adapter, 0);
+    AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, 0);
     
     printf("  [PASS] UT-PTP-FREQ-015: Reset on Restart (adapter handle close/reopen)\n");
     return TEST_PASS;
@@ -689,6 +774,12 @@ int main(void)
             printf("[WARN] Failed to enable hardware timestamping. Some tests may fail.\n");
         }
 
+        /* Detect device-specific nominal increment_ns (8 for I210, 24 for I226, …)
+         * so that FREQ-006's out-of-range boundary is computed correctly per device. */
+        ctx.nominal_incr_ns = GetDeviceNominalIncrNs(ctx.adapter);
+        if (ctx.nominal_incr_ns == 0) ctx.nominal_incr_ns = NOMINAL_INCR_NS;
+        printf("  [INFO] Device nominal increment: %u ns/cycle\n", ctx.nominal_incr_ns);
+
         printf("Running PTP Frequency Adjustment tests...\n\n");
 
         /* Run tests */
@@ -719,7 +810,7 @@ int main(void)
         #undef RUN_TEST
 
         /* Reset to nominal before close */
-        AdjustFrequency(ctx.adapter, 0);
+        AdjustFrequency(ctx.adapter, ctx.nominal_incr_ns, 0);
 
         CloseHandle(ctx.adapter);
         ctx.adapter = INVALID_HANDLE_VALUE;

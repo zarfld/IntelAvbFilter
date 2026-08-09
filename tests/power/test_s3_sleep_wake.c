@@ -94,8 +94,35 @@ static DWORD    g_wake_ready_ms   = 0; /* ms from sleep-return to device-ready *
 /* ────────────────────────── helpers ─────────────────────────────────────── */
 static HANDLE OpenDevice(void)
 {
-    return CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
-                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                           0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return INVALID_HANDLE_VALUE;
+
+    /* CRITICAL: IOCTL_AVB_GET_CLOCK_CONFIG requires FsContext to be set via
+     * IOCTL_AVB_OPEN_ADAPTER.  Without it the driver returns ERROR_GEN_FAILURE.
+     * Enumerate adapter 0 and bind this handle to it. */
+    AVB_ENUM_REQUEST er;
+    ZeroMemory(&er, sizeof(er));
+    er.index = 0;
+    DWORD br = 0;
+    if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
+                          &er, sizeof(er), &er, sizeof(er), &br, NULL)
+            || er.status != 0) {
+        /* Enumeration failed — return unbound handle (GET_HW_STATE still works) */
+        return h;
+    }
+
+    AVB_OPEN_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
+    req.vendor_id = er.vendor_id;
+    req.device_id = er.device_id;
+    req.index     = 0;
+    br = 0;
+    DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                    &req, sizeof(req), &req, sizeof(req), &br, NULL);
+    /* Even if OPEN_ADAPTER fails, return h — GET_HW_STATE still works */
+    return h;
 }
 
 static BOOL ReadPHC(HANDLE h, uint64_t *ns_out)

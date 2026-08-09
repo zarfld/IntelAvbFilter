@@ -193,6 +193,8 @@ $HardwareUnitTests = @(
     "test_avtp_tu_bit_events",     # AVTP TU-bit change events -- (#175)
     "test_ptp_event_latency",      # PTP event ring-buffer latency -- (#177)
     "test_event_latency_4ch",      # 4-channel multi-observer event latency -- (#179)
+    "test_event_nf_zero_polling",  # NF CPU-overhead budget quantification -- (#241, TEST-EVENT-NF-002)
+    "test_event_nf_latency",       # NF IOCTL-path latency P99 under adversarial load -- (#245, TEST-EVENT-NF-001)
     "test_gptp_phc_interface",     # gPTP PHC interface contract -- (#210)
     "test_send_ptp_debug",         # IOCTL_AVB_TEST_SEND_PTP diagnostic -- (#51)
     "test_timestamp_latency",      # TX/RX timestamp latency <1us -- (#272)
@@ -224,10 +226,20 @@ $HardwareIntegrationTests = @(
     "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
     "test_ptp_phc_stability",         # PHC stability UT-CORR-005..009; ~1K samples@2ms -- (#317)
     "ptp_clock_control_production",   # PTP clock production test -- (#238)
+    "ptp_ioctl_latency_test",         # PTP IOCTL latency & jitter -- (#321 #322 #323 #324)
     "hw_timestamping_control",        # HW timestamping control integration
     "rx_timestamping",                # RX timestamping integration
     "tsauxc_toggle_test",             # TSAUXC register toggle (TSN)
-    "test_gptp_daemon_coexist"        # OpenAvnu gPTP daemon coexistence; SKIPs if no daemon -- (#240)
+    "test_gptp_daemon_coexist",       # OpenAvnu gPTP daemon coexistence; SKIPs if no daemon -- (#240)
+    # Phase D: i219-specific compatibility tests (added to close #261)
+    "avb_test_i219",                  # I219 compat: detection, caps, PTP, monotonicity, variant matrix -- (#261 #76 #114)
+    # Phase E: cross-adapter portability (QA-SC-PORT-001, Issue #114)
+    "avb_test_portability",           # capability-gate verification across all present Intel adapters -- (#114)
+    # Phase F: device-specific tests (I217/I225/I226 — SKIP-safe on machines without hardware)
+    "avb_test_i217",                  # I217 caps (BASIC_1588|ENHANCED_TS|MDIO|EEE), TSN NOT_SUPPORTED -- (#114)
+    "avb_test_i225",                  # I225 caps (full TSN, MDIO, NO EEE) -- (#114)
+    "avb_test_i226_um",               # I226 caps (full TSN, MDIO, EEE) -- (#114)
+    "test_hardware_detection"         # HW capability detection & register access safety -- (#44 #45, #287 #288)
 )
 
 # ===========================
@@ -291,6 +303,11 @@ $passedTests = 0
 $failedTests = 0
 $skippedTests = 0
 $results     = @()
+
+# Expose driver build type to test_perf_regression and other tests that key
+# their baseline on (device_id x driver_build)
+$env:AVB_DRIVER_BUILD = $Configuration
+Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
 
 Write-Step "Running $($TestList.Count) hardware-independent tests"
 

@@ -32,9 +32,10 @@ IntelAvbFilterFastIoDeviceControl(
     UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(DeviceObject);
 
-    /* Only accelerate the two hot-path IOCTLs; let everything else go via IRP. */
-    if (IoControlCode != IOCTL_AVB_GET_TX_TIMESTAMP &&
-        IoControlCode != IOCTL_AVB_TEST_SEND_PTP) {
+    /* Only accelerate these hot-path IOCTLs; let everything else go via IRP. */
+    if (IoControlCode != IOCTL_AVB_GET_TX_TIMESTAMP    &&
+        IoControlCode != IOCTL_AVB_TEST_SEND_PTP        &&
+        IoControlCode != IOCTL_AVB_PHC_CROSSTIMESTAMP) {
         return FALSE;
     }
 
@@ -108,6 +109,65 @@ IntelAvbFilterFastIoDeviceControl(
             req->status        = (avb_u32)NDIS_STATUS_SUCCESS;
             IoStatus->Status      = STATUS_SUCCESS;
             IoStatus->Information = sizeof(*req);
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            IoStatus->Status      = GetExceptionCode();
+            IoStatus->Information = 0;
+        }
+        IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+        return TRUE;
+    }
+
+    /* -----------------------------------------------------------------------
+     * IOCTL_AVB_PHC_CROSSTIMESTAMP — atomically sample PHC + QPC.
+     *
+     * Moved to FastIo path to reduce round-trip from ~89µs (IRP) to <5µs,
+     * satisfying:
+     *   TC-XSTAMP-PERF-001b  (throughput > 25K ops/sec)
+     *   VV-CORR-003-A        (bracket window < 100µs)
+     *
+     * InputBuffer / OutputBuffer are the same user pointer (METHOD_BUFFERED
+     * semantics emulated: caller passes &req for both).
+     * ----------------------------------------------------------------------- */
+    if (IoControlCode == IOCTL_AVB_PHC_CROSSTIMESTAMP) {
+        if (!OutputBuffer || OutputBufferLength < sizeof(AVB_CROSS_TIMESTAMP_REQUEST)) {
+            IoStatus->Status      = STATUS_BUFFER_TOO_SMALL;
+            IoStatus->Information = 0;
+            IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+            return TRUE;
+        }
+        const intel_device_ops_t *xops = intel_get_device_ops(ctx->intel_device.device_type);
+        if (!xops || !xops->get_systime || AVB_READ_HW_STATE(ctx) < AVB_HW_PTP_READY) {
+            NTSTATUS xs = (!xops || !xops->get_systime) ? STATUS_NOT_SUPPORTED
+                                                        : STATUS_DEVICE_NOT_READY;
+            IoStatus->Status      = xs;
+            IoStatus->Information = 0;
+            IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+            return TRUE;
+        }
+        __try {
+            PAVB_CROSS_TIMESTAMP_REQUEST ct = (PAVB_CROSS_TIMESTAMP_REQUEST)OutputBuffer;
+            ProbeForWrite(ct, sizeof(*ct), sizeof(avb_u32));
+            /* Sample QPC (constant-frequency TSC-based counter) then PHC MMIO.
+             * Both reads are <1µs on modern x86; total kernel time <5µs. */
+            LARGE_INTEGER freq = {0};
+            LARGE_INTEGER qpc  = KeQueryPerformanceCounter(&freq);
+            uint64_t phc_ns    = 0;
+            int rc = xops->get_systime(&ctx->intel_device, &phc_ns);
+            if (rc < 0) {
+                ct->valid  = 0;
+                ct->status = (avb_u32)NDIS_STATUS_FAILURE;
+                IoStatus->Status      = STATUS_UNSUCCESSFUL;
+                IoStatus->Information = sizeof(*ct);
+            } else {
+                ct->phc_time_ns   = (avb_u64)phc_ns;
+                ct->system_qpc    = (avb_u64)qpc.QuadPart;
+                ct->qpc_frequency = (avb_u64)freq.QuadPart;
+                ct->valid         = 1;
+                ct->status        = (avb_u32)NDIS_STATUS_SUCCESS;
+                IoStatus->Status      = STATUS_SUCCESS;
+                IoStatus->Information = sizeof(*ct);
+            }
         }
         __except(EXCEPTION_EXECUTE_HANDLER) {
             IoStatus->Status      = GetExceptionCode();
@@ -194,17 +254,31 @@ IntelAvbFilterFastIoDeviceControl(
 
         InterlockedIncrement(&ctx->test_packets_pending);
 
-        /* Single atomic SYSTIM read: the TX timestamp and PHC reference are
-         * the same hardware snapshot.  delta = tx - phc = 0 by construction,
-         * satisfying UT-CORR-005..009 (delta < 1 µs) in all build configs.
-         * A single read avoids the 5-20 µs gap that two consecutive
-         * AvbReadTimestamp calls produce in DBG=1 due to DbgPrint overhead.
+        /* Pre-send PHC snapshot via ops->get_systime(): returns properly-converted
+         * nanoseconds (raw/200000 + i219_systim_offset for I219; seconds*10^9 +
+         * sub-ns for I210/I225/I226).  This matches the domain returned by
+         * IOCTL_AVB_GET_TIMESTAMP so that bracket checks and IT-CORR-001 ratio
+         * comparisons are in the same unit.
+         * AvbReadTimestampReal was returning raw 5-femtosecond SYSTIM counts for
+         * I219 (driver bug: 3e18 raw counts >> 1.776e18 Unix ns).
          * Must be read BEFORE NdisFSendNetBufferLists to capture pre-send PHC. */
         ULONG64 captureTs = 0;
-        AvbReadTimestamp(&ctx->intel_device, &captureTs);
+        {
+            /* Use ops->get_systime() for properly-converted Unix ns.
+             * intel_get_device_ops() returns NULL for unknown types; get_systime()
+             * handles uninitialised SYSTIM via its own KeQuerySystemTime fallback.
+             * AVB_HW_BAR_MAPPED guard removed: hw_state on the ctx obtained from
+             * FsContext may be BOUND (below BAR_MAPPED) even when hardware is
+             * PTP_READY, because hw_state is updated on the filter context but
+             * FsContext can reflect a state snapshot from OPEN_ADAPTER time. */
+            const intel_device_ops_t *ops = intel_get_device_ops(ctx->intel_device.device_type);
+            if (ops && ops->get_systime) {
+                ops->get_systime(&ctx->intel_device, &captureTs);
+            }
+        }
         if (captureTs == 0) {
-            /* SYSTIM not running yet (TSAUXC disabled or timer not seeded) — fall back to
-             * QueryPerformanceCounter to ensure ts is always non-zero, mirroring AvbSendPtpCore. */
+            /* PHC not accessible (device type unknown or SYSTIM not initialised) —
+             * fall back to QueryPerformanceCounter to ensure ts is always non-zero. */
             LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
             captureTs = (ULONG64)pc.QuadPart;
         }
@@ -366,16 +440,79 @@ IntelAvbFilterDispatch(
             break;
 
         case IRP_MJ_CLEANUP:
-            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLEANUP - Handle being closed, cleaning up subscriptions for FileObject=%p\n", IrpStack->FileObject);
-            AvbCleanupFileSubscriptions(IrpStack->FileObject);
-            
-            // MULTI-ADAPTER FIX: Clear the per-handle adapter context to prevent use-after-close
-            if (IrpStack->FileObject->FsContext != NULL) {
-                DEBUGP(DL_INFO, "!!! IRP_MJ_CLEANUP: Clearing FsContext %p from FileObject %p\n",
-                       IrpStack->FileObject->FsContext, IrpStack->FileObject);
+        {
+            /* BSOD FIX (bugcheck 0xA / IRQL_NOT_LESS_OR_EQUAL — UAF race with FilterDetach):
+             *
+             * IRP_MJ_CLEANUP may arrive *after* FilterDetach has already called
+             * AvbCleanupDevice(), which ends with ExFreePoolWithTag(AvbContext).
+             * FileObject->FsContext still holds the now-freed pointer.  Calling
+             * AvbCleanupFileSubscriptions() dereferences that pointer to acquire
+             * AvbContext->subscription_lock via NdisAcquireSpinLock().  That call
+             * raises IRQL to DISPATCH_LEVEL and then reads freed (possibly paged)
+             * pool memory — causing bugcheck 0xA.
+             *
+             * Fix: mirror the same FilterListLock + IoAcquireRemoveLock guard
+             * already used by the IOCTL dispatch path (see device.c ~line 67).
+             *   1. Under FilterListLock, verify the context is still present in
+             *      FilterModuleList and not in AVB_HW_TEARDOWN state.
+             *   2. Atomically acquire ioctl_remove_lock to pin the context alive.
+             * FilterDetach removes the entry from FilterModuleList *and* sets
+             * AVB_HW_TEARDOWN under FilterListLock *before* calling
+             * IoReleaseRemoveLockAndWait, so we cannot simultaneously see a live
+             * entry and fail IoAcquireRemoveLock.
+             *
+             * If the acquire fails the adapter is in teardown — FilterDetach's
+             * AvbCleanupDevice() has already (or will) clean up all subscriptions.
+             * We just clear FsContext and return without touching freed memory.
+             */
+            PAVB_DEVICE_CONTEXT cleanupCtx =
+                (PAVB_DEVICE_CONTEXT)IrpStack->FileObject->FsContext;
+            BOOLEAN contextAcquired = FALSE;
+            BOOLEAN bFalse          = FALSE;
+
+            DEBUGP(DL_ERROR,
+                   "!!! IRP_MJ_CLEANUP - Handle being closed, FileObject=%p FsContext=%p\n",
+                   IrpStack->FileObject, cleanupCtx);
+
+            if (cleanupCtx != NULL) {
+                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                {
+                    PLIST_ENTRY _l;
+                    for (_l = FilterModuleList.Flink;
+                         _l != &FilterModuleList;
+                         _l = _l->Flink)
+                    {
+                        PMS_FILTER _f = CONTAINING_RECORD(_l, MS_FILTER, FilterModuleLink);
+                        if ((PVOID)_f->AvbContext == (PVOID)cleanupCtx          &&
+                            AVB_READ_HW_STATE(cleanupCtx) != AVB_HW_TEARDOWN    &&
+                            NT_SUCCESS(IoAcquireRemoveLock(
+                                &cleanupCtx->ioctl_remove_lock, Irp)))
+                        {
+                            contextAcquired = TRUE;
+                            break;
+                        }
+                    }
+                }
+                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+            }
+
+            if (contextAcquired) {
+                /* Context alive and pinned by remove lock — safe to clean subscriptions. */
+                AvbCleanupFileSubscriptions(IrpStack->FileObject);
+                IrpStack->FileObject->FsContext = NULL;
+                IoReleaseRemoveLock(&cleanupCtx->ioctl_remove_lock, Irp);
+            } else {
+                /* Context is being torn down or already freed.
+                 * AvbCleanupDevice() handles subscription teardown for this adapter.
+                 * Do NOT dereference cleanupCtx — it may be freed pool memory. */
+                DEBUGP(DL_WARN,
+                       "!!! IRP_MJ_CLEANUP: context %p in teardown/freed — "
+                       "skipping subscription cleanup (UAF BSOD prevention)\n",
+                       cleanupCtx);
                 IrpStack->FileObject->FsContext = NULL;
             }
             break;
+        }
 
         case IRP_MJ_CLOSE:
             DEBUGP(DL_ERROR, "!!! IRP_MJ_CLOSE\n");

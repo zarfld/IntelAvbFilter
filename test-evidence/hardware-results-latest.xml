@@ -1,282 +1,49 @@
 ﻿<?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated: 2026-04-08T07:46:14 -->
-<!-- Machine: 6XI226MACHINE (Microsoft Windows NT 10.0.26200.0) | Run date: 20260406 | OS: 10.0.26200 -->
+<!-- Generated: 2026-04-27T21:01:57 -->
+<!-- Machine: DESKTOP-RSUO2LV | Run date: 20260427 | OS: 10.0.26200 -->
 <!-- NOTE: Tests require Intel NIC hardware and installed driver -->
-<testsuites name="IntelAvbFilter Hardware Tests 20260406" tests="620" failures="0" skipped="107" time="0">
-  <testsuite name="avb_capability_validation_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+<testsuites name="IntelAvbFilter Hardware Tests 20260427" tests="471" failures="3" skipped="81" time="0">
+  <testsuite name="ptp_clock_control_test" tests="6" failures="0" skipped="0" errors="0" time="3" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="avb_capability_validation_test.exe_20260406_111155.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_capability_validation_test (overall)" classname="avb_capability_validation_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_comprehensive_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_comprehensive_test.exe_20260406_111846.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_comprehensive_test (overall)" classname="avb_comprehensive_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_device_separation_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_device_separation_test.exe_20260406_111155.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_device_separation_test (overall)" classname="avb_device_separation_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_diagnostic_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_diagnostic_test.exe_20260406_111155.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_diagnostic_test (overall)" classname="avb_diagnostic_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_diagnostic_test_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_diagnostic_test_um.exe_20260406_111846.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_diagnostic_test_um (overall)" classname="avb_diagnostic_test_um" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_hw_state_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_hw_state_test.exe_20260406_111156.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_hw_state_test (overall)" classname="avb_hw_state_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_hw_state_test_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_hw_state_test_um.exe_20260406_111846.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_hw_state_test_um (overall)" classname="avb_hw_state_test_um" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_i226_advanced_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_i226_advanced_test.exe_20260406_111840.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_i226_advanced_test (overall)" classname="avb_i226_advanced_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_i226_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_i226_test.exe_20260406_111840.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_i226_test (overall)" classname="avb_i226_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_multi_adapter_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_multi_adapter_test.exe_20260406_111839.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_multi_adapter_test (overall)" classname="avb_multi_adapter_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_test_i210" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_test_i210.exe_20260406_111841.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_test_i210 (overall)" classname="avb_test_i210" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_test_i210_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_test_i210_um.exe_20260406_111847.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_test_i210_um (overall)" classname="avb_test_i210_um" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_test_i219" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_test_i219.exe_20260406_111848.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_test_i219 (overall)" classname="avb_test_i219" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="avb_test_i226" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="avb_test_i226.exe_20260406_111848.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="avb_test_i226 (overall)" classname="avb_test_i226" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="chatgpt5_i226_tas_validation" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="chatgpt5_i226_tas_validation.exe_20260406_111841.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="chatgpt5_i226_tas_validation (overall)" classname="chatgpt5_i226_tas_validation" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="comprehensive_ioctl_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="comprehensive_ioctl_test.exe_20260406_111848.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="comprehensive_ioctl_test (overall)" classname="comprehensive_ioctl_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="corrected_i226_tas_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="corrected_i226_tas_test.exe_20260406_111842.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="corrected_i226_tas_test (overall)" classname="corrected_i226_tas_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="critical_prerequisites_investigation" tests="1" failures="0" skipped="1" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="critical_prerequisites_investigation.exe_20260406_111842.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="critical_prerequisites_investigation (overall)" classname="critical_prerequisites_investigation" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="device_open_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="device_open_test.exe_20260406_111848.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="device_open_test (overall)" classname="device_open_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="diagnose_ptp" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="diagnose_ptp.exe_20260406_111849.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="diagnose_ptp (overall)" classname="diagnose_ptp" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="enhanced_tas_investigation" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="enhanced_tas_investigation.exe_20260406_111844.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="enhanced_tas_investigation (overall)" classname="enhanced_tas_investigation" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="hardware_investigation_tool" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="hardware_investigation_tool.exe_20260406_111845.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="hardware_investigation_tool (overall)" classname="hardware_investigation_tool" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="hw_timestamping_control_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="hw_timestamping_control_test.exe_20260406_111849.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="hw_timestamping_control_test (overall)" classname="hw_timestamping_control_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="intel_avb_diagnostics" tests="1" failures="0" skipped="1" errors="0" time="22610" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="intel_avb_diagnostics.exe_20260406_111850.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="intel_avb_diagnostics (overall)" classname="intel_avb_diagnostics" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="ptp_clock_control_production_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="ptp_clock_control_production_test.exe_20260406_111154.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="ptp_clock_control_production_test (overall)" classname="ptp_clock_control_production_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="ptp_clock_control_test" tests="12" failures="0" skipped="0" errors="0" time="3" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="ptp_clock_control_test.exe_20260406_111149.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="ptp_clock_control_test.exe_20260427_202449.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
     </properties>
-    <testcase name="TC-5a/adapter 0: bracket 41389 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
+    <testcase name="TC-5a/adapter 0: bracket 8472 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
       </properties>
     </testcase>
-    <testcase name="TC-5b/adapter 0: PHC monotone, rate 1.029334 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
+    <testcase name="TC-5b/adapter 0: PHC monotone, rate 1.029304 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
       </properties>
     </testcase>
-    <testcase name="TC-5a/adapter 1: bracket 57272 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
+    <testcase name="TC-5a/adapter 1: bracket 65166 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
       </properties>
     </testcase>
-    <testcase name="TC-5b/adapter 1: PHC monotone, rate 1.029307 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
+    <testcase name="TC-5b/adapter 1: PHC monotone, rate 1.003892 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
       </properties>
     </testcase>
-    <testcase name="TC-5a/adapter 2: bracket 60921 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
+    <testcase name="TC-5a/adapter 2: bracket 44000 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
       </properties>
     </testcase>
-    <testcase name="TC-5b/adapter 2: PHC monotone, rate 1.029333 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-5a/adapter 3: bracket 60203 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-5b/adapter 3: PHC monotone, rate 1.029336 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-5a/adapter 4: bracket 71099 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-5b/adapter 4: PHC monotone, rate 1.029327 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-5a/adapter 5: bracket 87502 ns [ 500 ┬Ás" classname="ptp_clock_control_test" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-5b/adapter 5: PHC monotone, rate 1.029333 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
+    <testcase name="TC-5b/adapter 2: PHC monotone, rate 0.959971 in [0.95, 1.10]" classname="ptp_clock_control_test" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="quick_diagnostics" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_atdecc_aen_protocol" tests="6" failures="0" skipped="3" errors="0" time="121" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="quick_diagnostics.exe_20260406_173540.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="quick_diagnostics (overall)" classname="quick_diagnostics" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="rx_timestamping_test" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="rx_timestamping_test.exe_20260406_173541.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="rx_timestamping_test (overall)" classname="rx_timestamping_test" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="ssot_register_validation_test" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="ssot_register_validation_test.exe_20260406_173541.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="ssot_register_validation_test (overall)" classname="ssot_register_validation_test" time="0"/>
-  </testsuite>
-  <testsuite name="test_all_adapters" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_all_adapters.exe_20260406_173541.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="test_all_adapters (overall)" classname="test_all_adapters" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="test_atdecc_aen_protocol" tests="6" failures="0" skipped="1" errors="0" time="9695" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_atdecc_aen_protocol.exe_20260406_173542.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_atdecc_aen_protocol.exe_20260427_201401.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/176"/>
     </properties>
@@ -298,12 +65,14 @@
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/176"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-AEN-004: Multi-controller broadcast" classname="test_atdecc_aen_protocol" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/176"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-AEN-005: Event sequence monotonicity" classname="test_atdecc_aen_protocol" time="0">
       <properties>
@@ -318,10 +87,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_atdecc_event" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_atdecc_event" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_atdecc_event.exe_20260406_202359.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_atdecc_event.exe_20260427_201401.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/162"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/236"/>
     </properties>
@@ -356,10 +125,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_avtp_tu_bit_events" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_avtp_tu_bit_events" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_avtp_tu_bit_events.exe_20260406_202359.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_avtp_tu_bit_events.exe_20260427_205401.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/169"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/175"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/169"/>
@@ -375,10 +144,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_build_sign" tests="7" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_build_sign" tests="7" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_build_sign.exe_20260406_202400.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_build_sign.exe_20260427_205358.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/243"/>
     </properties>
     <testcase name="TC-SIGN-001: IntelAvbFilter.sys Authenticode signature" classname="test_build_sign" time="0">
@@ -395,6 +164,7 @@
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/243"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-SIGN-004: INF Signature = '$Windows NT$'" classname="test_build_sign" time="0">
       <properties>
@@ -417,10 +187,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_cleanup_archive" tests="23" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_cleanup_archive" tests="23" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_cleanup_archive.exe_20260406_202400.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_cleanup_archive.exe_20260427_201358.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/293"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/294"/>
     </properties>
@@ -563,10 +333,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_clock_config" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_clock_config" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_clock_config.exe_20260406_202400.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_clock_config.exe_20260427_201359.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/25"/>
     </properties>
     <testcase name="test_clock_config (overall)" classname="test_clock_config" time="0">
@@ -576,10 +346,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_clock_working" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_clock_working" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_clock_working.exe_20260406_202400.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_clock_working.exe_20260427_201400.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/25"/>
     </properties>
     <testcase name="test_clock_working (overall)" classname="test_clock_working" time="0">
@@ -589,10 +359,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_compat_win11" tests="6" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_compat_win11" tests="6" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_compat_win11.exe_20260406_202401.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_compat_win11.exe_20260427_205359.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/256"/>
     </properties>
     <testcase name="TC-WIN11-001: OS build ]= 22000" classname="test_compat_win11" time="0">
@@ -626,10 +396,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_dev_lifecycle" tests="20" failures="0" skipped="7" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_dev_lifecycle" tests="20" failures="0" skipped="7" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_dev_lifecycle.exe_20260406_202401.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_dev_lifecycle.exe_20260427_202006.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/12"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/313"/>
     </properties>
@@ -761,23 +531,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_device_register_access" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_direct_clock" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_device_register_access.exe_20260406_111130.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/40"/>
-    </properties>
-    <testcase name="test_device_register_access (overall)" classname="test_device_register_access" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/40"/>
-      </properties>
-      <skipped/>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_direct_clock" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_direct_clock.exe_20260406_202401.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_direct_clock.exe_20260427_201400.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/25"/>
     </properties>
     <testcase name="test_direct_clock (overall)" classname="test_direct_clock" time="0">
@@ -787,10 +544,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_eee_lpi" tests="5" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_eee_lpi" tests="5" failures="0" skipped="2" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_eee_lpi.exe_20260406_202402.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_eee_lpi.exe_20260427_205359.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/223"/>
     </properties>
     <testcase name="TC-EEE-001: Device node accessible" classname="test_eee_lpi" time="0">
@@ -807,6 +564,7 @@
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/223"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-EEE-004: IOCTL_AVB_EEE_DISABLE -] LPI off" classname="test_eee_lpi" time="0">
       <properties>
@@ -820,10 +578,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_error_recovery" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_error_recovery" tests="5" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_error_recovery.exe_20260406_202402.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_error_recovery.exe_20260427_210150.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/72"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/215"/>
     </properties>
@@ -844,6 +602,7 @@
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/72"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/215"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-ERR-004: IOCTL storm" classname="test_error_recovery" time="0">
       <properties>
@@ -858,10 +617,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_event_latency_4ch" tests="5" failures="0" skipped="3" errors="0" time="41" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_event_latency_4ch" tests="5" failures="0" skipped="3" errors="0" time="5" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_event_latency_4ch.exe_20260406_202427.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_event_latency_4ch.exe_20260427_205732.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/179"/>
     </properties>
@@ -899,37 +658,94 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_event_log" tests="1" failures="0" skipped="0" errors="0" time="38" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_event_log" tests="1" failures="0" skipped="0" errors="0" time="35" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_event_log.exe_20260406_202529.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_event_log.exe_20260427_205041.log"/>
+      <property name="run_date" value="20260427"/>
     </properties>
     <testcase name="test_event_log (overall)" classname="test_event_log" time="0"/>
   </testsuite>
-  <testsuite name="test_extended_diag" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_event_nf_latency" tests="5" failures="0" skipped="1" errors="0" time="2" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_extended_diag.exe_20260406_202900.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_event_nf_latency.exe_20260427_210142.log"/>
+      <property name="run_date" value="20260427"/>
+      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/165"/>
+      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/245"/>
     </properties>
-    <testcase name="test_extended_diag (overall)" classname="test_extended_diag" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="test_gptp_daemon_coexist" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_gptp_daemon_coexist.exe_20260406_202901.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/240"/>
-    </properties>
-    <testcase name="TC-COEXIST-001: Detect gPTP daemon process" classname="test_gptp_daemon_coexist" time="0">
+    <testcase name="TC-NF-LAT-001: IOCTL ring-map round-trip P99 [ 1 ms" classname="test_event_nf_latency" time="0">
       <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/240"/>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/165"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/245"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-LAT-002: Subscribe/Unsubscribe IOCTL path latency [ 10 ms each" classname="test_event_nf_latency" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/165"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/245"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-LAT-003: Ring-map latency stable under CPU load" classname="test_event_nf_latency" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/165"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/245"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-LAT-004: 1000 rapid ring-map queries ÔÇö no queuing growth detected" classname="test_event_nf_latency" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/165"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/245"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-LAT-005: GPIO oscilloscope hard real-time [ 10 ┬Ás" classname="test_event_nf_latency" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/165"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/245"/>
       </properties>
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_gptp_phc_interface" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_event_nf_zero_polling" tests="5" failures="0" skipped="0" errors="0" time="91" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_gptp_phc_interface.exe_20260406_202901.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_event_nf_zero_polling.exe_20260427_205802.log"/>
+      <property name="run_date" value="20260427"/>
+      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/161"/>
+      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/241"/>
+    </properties>
+    <testcase name="TC-NF-ZP-001: Thread count audit ÔÇö no polling threads on subscribe" classname="test_event_nf_zero_polling" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/161"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/241"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-ZP-002: Extended idle CPU [ 0.1% for 30 s active subscription" classname="test_event_nf_zero_polling" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/161"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/241"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-ZP-003: Baseline parity ÔÇö subscribed-no-events CPU Ôëê unsubscribed CPU" classname="test_event_nf_zero_polling" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/161"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/241"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-ZP-004: Post-unsubscribe CPU decay within 3 s" classname="test_event_nf_zero_polling" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/161"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/241"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-NF-ZP-005: Dual-subscription overhead [ 0.2%" classname="test_event_nf_zero_polling" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/161"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/241"/>
+      </properties>
+    </testcase>
+  </testsuite>
+  <testsuite name="test_gptp_phc_interface" tests="5" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
+    <properties>
+      <property name="log_file" value="test_gptp_phc_interface.exe_20260427_210144.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/210"/>
     </properties>
@@ -956,6 +772,7 @@
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/210"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-GPTP-005: Full gPTP workflow" classname="test_gptp_phc_interface" time="0">
       <properties>
@@ -964,22 +781,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_hal_errors" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_hal_performance" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_hal_errors.exe_20260406_111148.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/84"/>
-    </properties>
-    <testcase name="test_hal_errors (overall)" classname="test_hal_errors" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/84"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_hal_performance" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_hal_performance.exe_20260406_111148.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_hal_performance.exe_20260427_201400.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/84"/>
     </properties>
     <testcase name="test_hal_performance (overall)" classname="test_hal_performance" time="0">
@@ -988,22 +793,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_hal_unit" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_hot_plug" tests="6" failures="0" skipped="3" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_hal_unit.exe_20260406_111147.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/84"/>
-    </properties>
-    <testcase name="test_hal_unit (overall)" classname="test_hal_unit" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/84"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_hot_plug" tests="6" failures="0" skipped="3" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_hot_plug.exe_20260406_202901.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_hot_plug.exe_20260427_210150.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/91"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/262"/>
     </properties>
@@ -1047,10 +840,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_hw_state" tests="12" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_hw_state" tests="6" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_hw_state.exe_20260406_202901.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_hw_state.exe_20260427_205041.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
     </properties>
     <testcase name="TC-PCI-LAT-001[adapter 0]" classname="test_hw_state" time="0">
@@ -1083,54 +876,11 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
       </properties>
     </testcase>
-    <testcase name="TC-PCI-LAT-001[adapter 3]" classname="test_hw_state" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PCI-LAT-002[adapter 3]" classname="test_hw_state" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PCI-LAT-001[adapter 4]" classname="test_hw_state" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PCI-LAT-002[adapter 4]" classname="test_hw_state" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PCI-LAT-001[adapter 5]" classname="test_hw_state" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PCI-LAT-002[adapter 5]" classname="test_hw_state" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/288"/>
-      </properties>
-    </testcase>
   </testsuite>
-  <testsuite name="test_hw_state_machine" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_hw_ts_ctrl" tests="13" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_hw_state_machine.exe_20260406_111145.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/18"/>
-    </properties>
-    <testcase name="test_hw_state_machine (overall)" classname="test_hw_state_machine" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/18"/>
-      </properties>
-      <skipped/>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_hw_ts_ctrl" tests="13" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_hw_ts_ctrl.exe_20260406_111159.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_hw_ts_ctrl.exe_20260427_202435.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/5"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/297"/>
     </properties>
@@ -1213,10 +963,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_abi" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_abi" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_abi.exe_20260406_111148.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_abi.exe_20260427_202448.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/24"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
     </properties>
@@ -1228,10 +978,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_access_control" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_access_control" tests="5" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_access_control.exe_20260406_202902.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_access_control.exe_20260427_202449.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/63"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/264"/>
     </properties>
@@ -1258,6 +1008,7 @@
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/63"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/264"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-ACCTL-005: Two-handle independence" classname="test_ioctl_access_control" time="0">
       <properties>
@@ -1266,10 +1017,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_buffer_fuzz" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_buffer_fuzz" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_buffer_fuzz.exe_20260406_202902.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_buffer_fuzz.exe_20260427_202449.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/63"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/263"/>
     </properties>
@@ -1304,10 +1055,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_fp_ptm" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_fp_ptm" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_fp_ptm.exe_20260406_202902.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_fp_ptm.exe_20260427_202438.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/11"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/212"/>
     </properties>
@@ -1319,10 +1070,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_launch_time" tests="18" failures="0" skipped="12" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_launch_time" tests="18" failures="0" skipped="12" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_launch_time.exe_20260406_202902.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_launch_time.exe_20260427_205400.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/6"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/209"/>
     </properties>
@@ -1447,10 +1198,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_offset" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_offset" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_offset.exe_20260406_202903.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_offset.exe_20260427_202446.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/38"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/194"/>
     </properties>
@@ -1462,10 +1213,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_phc_epoch" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_phc_epoch" tests="5" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_phc_epoch.exe_20260406_202903.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_phc_epoch.exe_20260427_202447.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/41"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/196"/>
     </properties>
@@ -1486,6 +1237,7 @@
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/41"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/196"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-EPOCH-004: Below year-2100 bound" classname="test_ioctl_phc_epoch" time="0">
       <properties>
@@ -1500,10 +1252,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_phc_monotonicity" tests="4" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_phc_monotonicity" tests="4" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_phc_monotonicity.exe_20260406_202904.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_phc_monotonicity.exe_20260427_202447.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/47"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/285"/>
     </properties>
@@ -1532,10 +1284,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_phc_query" tests="17" failures="0" skipped="6" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_phc_query" tests="19" failures="0" skipped="6" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_phc_query.exe_20260406_202905.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_phc_query.exe_20260427_202446.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/34"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/193"/>
     </properties>
@@ -1564,7 +1316,7 @@
       </properties>
       <skipped/>
     </testcase>
-    <testcase name="UT-PHC-QUERY-005: Adapter Not Initialized" classname="test_ioctl_phc_query" time="0">
+    <testcase name="UT-PHC-QUERY-005: Adapter Not Initialized: correctly rejected with ERROR_GEN_FAILURE" classname="test_ioctl_phc_query" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/34"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/193"/>
@@ -1628,7 +1380,7 @@
       </properties>
       <skipped/>
     </testcase>
-    <testcase name="VV-PHC-QUERY-001: Latency Benchmark: IOCTL p95=23400 ns, min=12400 ns, max=48500 ns" classname="test_ioctl_phc_query" time="0">
+    <testcase name="VV-PHC-QUERY-001: Latency Benchmark: IOCTL p95=4000 ns, min=3700 ns, max=10900 ns" classname="test_ioctl_phc_query" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/34"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/193"/>
@@ -1647,11 +1399,23 @@
       </properties>
       <skipped/>
     </testcase>
+    <testcase name="VV-PHC-QUERY-001: Latency Benchmark: IOCTL p95=16000 ns, min=13300 ns, max=33800 ns" classname="test_ioctl_phc_query" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/34"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/193"/>
+      </properties>
+    </testcase>
+    <testcase name="VV-PHC-QUERY-001: Latency Benchmark: IOCTL p95=26000 ns, min=12200 ns, max=46100 ns" classname="test_ioctl_phc_query" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/34"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/193"/>
+      </properties>
+    </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_routing" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_routing" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_routing.exe_20260406_202905.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_routing.exe_20260427_201358.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/25"/>
     </properties>
     <testcase name="test_ioctl_routing (overall)" classname="test_ioctl_routing" time="0">
@@ -1661,10 +1425,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_simple" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_simple" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_simple.exe_20260406_202906.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_simple.exe_20260427_201358.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/25"/>
     </properties>
     <testcase name="test_ioctl_simple (overall)" classname="test_ioctl_simple" time="0">
@@ -1674,10 +1438,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_target_time" tests="16" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_target_time" tests="16" failures="0" skipped="1" errors="0" time="1" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_target_time.exe_20260406_202906.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_target_time.exe_20260427_202437.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/7"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/204"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/299"/>
@@ -1796,10 +1560,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_tas" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_tas" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_tas.exe_20260406_202906.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_tas.exe_20260427_202438.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/9"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/206"/>
     </properties>
@@ -1810,10 +1574,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_trace" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_trace" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_trace.exe_20260406_202906.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_trace.exe_20260427_201359.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/24"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/301"/>
     </properties>
@@ -1825,10 +1589,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_version" tests="3" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_version" tests="3" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_version.exe_20260406_202907.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_version.exe_20260427_202005.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/64"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/273"/>
     </properties>
@@ -1851,10 +1615,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ioctl_xstamp" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ioctl_xstamp" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ioctl_xstamp.exe_20260406_202907.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ioctl_xstamp.exe_20260427_202448.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/198"/>
     </properties>
@@ -1889,23 +1653,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_lazy_initialization" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_lifecycle_coverage" tests="15" failures="1" skipped="4" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_lazy_initialization.exe_20260406_111146.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/16"/>
-    </properties>
-    <testcase name="test_lazy_initialization (overall)" classname="test_lazy_initialization" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/16"/>
-      </properties>
-      <skipped/>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_lifecycle_coverage" tests="30" failures="0" skipped="6" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_lifecycle_coverage.exe_20260406_202907.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_lifecycle_coverage.exe_20260427_202532.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
     </properties>
@@ -1940,155 +1691,64 @@
       </properties>
       <skipped/>
     </testcase>
-    <testcase name="[Adapter1[VEN_8086:DEV_125B]] TC-LCY-001: FilterAttachCount]=1 and FilterRestartCount]=1 after bind" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter1[VEN_8086:DEV_1533]] TC-LCY-001: FilterAttachCount]=1 and FilterRestartCount]=1 after bind" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
     </testcase>
-    <testcase name="[Adapter1[VEN_8086:DEV_125B]] TC-LCY-002: OidRequestCount ] 0 after driver bind" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter1[VEN_8086:DEV_1533]] TC-LCY-002: OidRequestCount ] 0 after driver bind" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
     </testcase>
-    <testcase name="[Adapter1[VEN_8086:DEV_125B]] TC-LCY-003: Gauge invariants - OutstandingNBLs and OutstandingOids in sane range" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter1[VEN_8086:DEV_1533]] TC-LCY-003: Gauge invariants - OutstandingNBLs and OutstandingOids in sane range" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
     </testcase>
-    <testcase name="[Adapter1[VEN_8086:DEV_125B]] TC-LCY-005: IoctlCount increments by exactly 1 per GET_STATISTICS call" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter1[VEN_8086:DEV_1533]] TC-LCY-005: IoctlCount increments by exactly 1 per GET_STATISTICS call" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
     </testcase>
-    <testcase name="[Adapter1[VEN_8086:DEV_125B]] TC-LCY-006: NIC disable/re-enable - Pause+Restart deltas and zero NBL gauges" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-      <skipped/>
-    </testcase>
-    <testcase name="[Adapter2[VEN_8086:DEV_125B]] TC-LCY-001: FilterAttachCount]=1 and FilterRestartCount]=1 after bind" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter2[VEN_8086:DEV_125B]] TC-LCY-002: OidRequestCount ] 0 after driver bind" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter2[VEN_8086:DEV_125B]] TC-LCY-003: Gauge invariants - OutstandingNBLs and OutstandingOids in sane range" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter2[VEN_8086:DEV_125B]] TC-LCY-005: IoctlCount increments by exactly 1 per GET_STATISTICS call" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter2[VEN_8086:DEV_125B]] TC-LCY-006: NIC disable/re-enable - Pause+Restart deltas and zero NBL gauges" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter1[VEN_8086:DEV_1533]] TC-LCY-006: NIC disable/re-enable - Pause+Restart deltas and zero NBL gauges" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
       <skipped/>
     </testcase>
-    <testcase name="[Adapter3[VEN_8086:DEV_125B]] TC-LCY-001: FilterAttachCount]=1 and FilterRestartCount]=1 after bind" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter3[VEN_8086:DEV_125B]] TC-LCY-002: OidRequestCount ] 0 after driver bind" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter3[VEN_8086:DEV_125B]] TC-LCY-003: Gauge invariants - OutstandingNBLs and OutstandingOids in sane range" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter3[VEN_8086:DEV_125B]] TC-LCY-005: IoctlCount increments by exactly 1 per GET_STATISTICS call" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter3[VEN_8086:DEV_125B]] TC-LCY-006: NIC disable/re-enable - Pause+Restart deltas and zero NBL gauges" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter2[VEN_8086:DEV_15B7]] TC-LCY-001: FilterAttachCount]=1 and FilterRestartCount]=1 after bind" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
       <skipped/>
     </testcase>
-    <testcase name="[Adapter4[VEN_8086:DEV_125B]] TC-LCY-001: FilterAttachCount]=1 and FilterRestartCount]=1 after bind" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter2[VEN_8086:DEV_15B7]] TC-LCY-002: OidRequestCount ] 0 after driver bind" classname="test_lifecycle_coverage" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
+      </properties>
+      <failure message="[FAIL] [Adapter2[VEN_8086:DEV_15B7]] TC-LCY-002: OidRequestCount ] 0 after driver bind">[FAIL] [Adapter2[VEN_8086:DEV_15B7]] TC-LCY-002: OidRequestCount ] 0 after driver bind</failure>
+    </testcase>
+    <testcase name="[Adapter2[VEN_8086:DEV_15B7]] TC-LCY-003: Gauge invariants - OutstandingNBLs and OutstandingOids in sane range" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
     </testcase>
-    <testcase name="[Adapter4[VEN_8086:DEV_125B]] TC-LCY-002: OidRequestCount ] 0 after driver bind" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter2[VEN_8086:DEV_15B7]] TC-LCY-005: IoctlCount increments by exactly 1 per GET_STATISTICS call" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
       </properties>
     </testcase>
-    <testcase name="[Adapter4[VEN_8086:DEV_125B]] TC-LCY-003: Gauge invariants - OutstandingNBLs and OutstandingOids in sane range" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter4[VEN_8086:DEV_125B]] TC-LCY-005: IoctlCount increments by exactly 1 per GET_STATISTICS call" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter4[VEN_8086:DEV_125B]] TC-LCY-006: NIC disable/re-enable - Pause+Restart deltas and zero NBL gauges" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-      <skipped/>
-    </testcase>
-    <testcase name="[Adapter5[VEN_8086:DEV_125B]] TC-LCY-001: FilterAttachCount]=1 and FilterRestartCount]=1 after bind" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter5[VEN_8086:DEV_125B]] TC-LCY-002: OidRequestCount ] 0 after driver bind" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter5[VEN_8086:DEV_125B]] TC-LCY-003: Gauge invariants - OutstandingNBLs and OutstandingOids in sane range" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter5[VEN_8086:DEV_125B]] TC-LCY-005: IoctlCount increments by exactly 1 per GET_STATISTICS call" classname="test_lifecycle_coverage" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
-      </properties>
-    </testcase>
-    <testcase name="[Adapter5[VEN_8086:DEV_125B]] TC-LCY-006: NIC disable/re-enable - Pause+Restart deltas and zero NBL gauges" classname="test_lifecycle_coverage" time="0">
+    <testcase name="[Adapter2[VEN_8086:DEV_15B7]] TC-LCY-006: NIC disable/re-enable - Pause+Restart deltas and zero NBL gauges" classname="test_lifecycle_coverage" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/36"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/265"/>
@@ -2096,22 +1756,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_magic_numbers" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_mdio_phy" tests="15" failures="0" skipped="6" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_magic_numbers.exe_20260406_202908.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/21"/>
-    </properties>
-    <testcase name="test_magic_numbers (overall)" classname="test_magic_numbers" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/21"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_mdio_phy" tests="15" failures="0" skipped="6" errors="0" time="2" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_mdio_phy.exe_20260406_202908.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_mdio_phy.exe_20260427_202005.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/10"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/312"/>
     </properties>
@@ -2212,10 +1860,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_minimal_ioctl" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_minimal_ioctl" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_minimal_ioctl.exe_20260406_202912.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_minimal_ioctl.exe_20260427_201359.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/24"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/302"/>
     </properties>
@@ -2227,10 +1875,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_multi_adapter_phc_sync" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_multi_adapter_phc_sync" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_multi_adapter_phc_sync.exe_20260406_202912.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_multi_adapter_phc_sync.exe_20260427_210156.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/188"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/208"/>
     </properties>
@@ -2265,31 +1913,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_multidev_adapter_enum" tests="2" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ndis_fastpath_latency" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_multidev_adapter_enum.exe_20260406_111129.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/15"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/15"/>
-    </properties>
-    <testcase name="TC-DEV-I225-001: No I225 hardware found on this machine." classname="test_multidev_adapter_enum" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/15"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/15"/>
-      </properties>
-      <skipped/>
-    </testcase>
-    <testcase name="TC-DEV-I225-001: SKIPPED (hardware not present) ÔÇö counted as pass." classname="test_multidev_adapter_enum" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/15"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/15"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_ndis_fastpath_latency" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_ndis_fastpath_latency.exe_20260406_202913.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ndis_fastpath_latency.exe_20260427_210149.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/92"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/286"/>
     </properties>
@@ -2324,39 +1951,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ndis_receive_path" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_perf_regression" tests="14" failures="2" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ndis_receive_path.exe_20260406_111131.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/43"/>
-    </properties>
-    <testcase name="test_ndis_receive_path (overall)" classname="test_ndis_receive_path" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/43"/>
-      </properties>
-      <skipped/>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_ndis_send_path" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_ndis_send_path.exe_20260406_111130.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/42"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/42"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/291"/>
-    </properties>
-    <testcase name="test_ndis_send_path (overall)" classname="test_ndis_send_path" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/42"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/42"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/291"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_perf_regression" tests="6" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_perf_regression.exe_20260406_202914.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_perf_regression.exe_20260427_210149.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
     </properties>
     <testcase name="TC-PERF-REG-005: round-trip fidelity OK" classname="test_perf_regression" time="0">
@@ -2364,22 +1962,64 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-REG-001: PASS: PHC P50 2389 ns [= baseline 4859 ns" classname="test_perf_regression" time="0">
+    <testcase name="TC-PERF-REG-001[0]: PASS: PHC P50 926 ns [= baseline 925 ns" classname="test_perf_regression" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-REG-002: PASS: PHC P99 6717 ns [= baseline 23097 ns" classname="test_perf_regression" time="0">
+    <testcase name="TC-PERF-REG-002[0]: FAIL: PHC P99 1674 ns ] baseline 1585 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+      <failure message="[FAIL] TC-PERF-REG-002[0]: FAIL: PHC P99 1674 ns ] baseline 1585 ns (+5.6% ]= 5% threshold)">[FAIL] TC-PERF-REG-002[0]: FAIL: PHC P99 1674 ns ] baseline 1585 ns (+5.6% ]= 5% threshold)</failure>
+    </testcase>
+    <testcase name="TC-PERF-REG-003[0]: PASS: TX median 298 ns [= baseline 297 ns" classname="test_perf_regression" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-REG-003: PASS: TX median 400 ns [= baseline 387 ns" classname="test_perf_regression" time="0">
+    <testcase name="TC-PERF-REG-004[0]: PASS: RX median 927 ns [= baseline 922 ns" classname="test_perf_regression" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-REG-004: PASS: RX median 2440 ns [= baseline 3499 ns" classname="test_perf_regression" time="0">
+    <testcase name="TC-PERF-REG-001[1]: PASS: PHC P50 923 ns [= baseline 925 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PERF-REG-002[1]: PASS: PHC P99 1029 ns [= baseline 1243 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PERF-REG-003[1]: PASS: TX median 297 ns [= baseline 297 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PERF-REG-004[1]: PASS: RX median 923 ns [= baseline 921 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PERF-REG-001[2]: PASS: PHC P50 925 ns [= baseline 922 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PERF-REG-002[2]: FAIL: PHC P99 1754 ns ] baseline 1359 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+      <failure message="[FAIL] TC-PERF-REG-002[2]: FAIL: PHC P99 1754 ns ] baseline 1359 ns (+29.1% ]= 5% threshold)">[FAIL] TC-PERF-REG-002[2]: FAIL: PHC P99 1754 ns ] baseline 1359 ns (+29.1% ]= 5% threshold)</failure>
+    </testcase>
+    <testcase name="TC-PERF-REG-003[2]: PASS: TX median 299 ns [= baseline 297 ns" classname="test_perf_regression" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-PERF-REG-004[2]: PASS: RX median 921 ns [= baseline 921 ns" classname="test_perf_regression" time="0">
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/225"/>
       </properties>
@@ -2390,10 +2030,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_pfc_pause" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_pfc_pause" tests="5" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_pfc_pause.exe_20260406_202915.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_pfc_pause.exe_20260427_205359.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/219"/>
     </properties>
     <testcase name="TC-PFC-001: Device node accessible" classname="test_pfc_pause" time="0">
@@ -2415,6 +2055,7 @@
       <properties>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/219"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="TC-PFC-005: GET_DEVICE_INFO accessible" classname="test_pfc_pause" time="0">
       <properties>
@@ -2422,10 +2063,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_power_management" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_power_management" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_power_management.exe_20260406_202915.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_power_management.exe_20260427_202328.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/84"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/218"/>
     </properties>
@@ -2460,231 +2101,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ptp_001" tests="24" failures="0" skipped="0" errors="0" time="16" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ptp_crosstimestamp" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ptp_001.exe_20260406_202917.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-    </properties>
-    <testcase name="TC-PTP-001-INIT Adapter enumerable" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-INIT PHC readable" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-MULTIADPT Adapter 0 PHC nonzero" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-MULTIADPT Adapter 1 PHC nonzero" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-MULTIADPT Adapter 0 PHC advances" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-MULTIADPT Adapter 1 PHC advances independently" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-CLOCK-CFG IOCTL succeeds" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-CLOCK-CFG Valid clock rate" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-XTSTAMP IOCTL succeeds" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-XTSTAMP valid==1" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-XTSTAMP PHC nonzero" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-XTSTAMP QPC nonzero" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-XTSTAMP QPC frequency nonzero" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-RXTS Handler exists" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-RXTS STATUS_SUCCESS" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-RXTS valid==1" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-BRACKET phc_before [= preSendTs" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-BRACKET preSendTs [= phc_after" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-CORR Rate stable ]=80% within +-5% of mean" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-FOLLOWUP Second send succeeds" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-FOLLOWUP PHC monotonically advances" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-FOLLOWUP preSendTs2 ] preSendTs1" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-SUSTAINED [20% failure rate over 100 samples" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PTP-001-ZEROLOSS Zero timestamp pair loss" classname="test_ptp_001" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/238"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_ptp_corr" tests="4" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_ptp_corr.exe_20260406_202933.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-    </properties>
-    <testcase name="IT-CORR-002 PHC Cross-Timestamp IOCTL" classname="test_ptp_corr" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-      </properties>
-    </testcase>
-    <testcase name="IT-CORR-003 Multi-Adapter Independence" classname="test_ptp_corr" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-      </properties>
-    </testcase>
-    <testcase name="IT-CORR-001 PHC-TX Rate Consistency" classname="test_ptp_corr" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-      </properties>
-    </testcase>
-    <testcase name="IT-CORR-004 High Rate Correlation" classname="test_ptp_corr" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_ptp_corr_extended" tests="6" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_ptp_corr_extended.exe_20260406_202933.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-    </properties>
-    <testcase name="UT-CORR-001 phc_before [= txTs" classname="test_ptp_corr_extended" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-001 txTs [= phc_after" classname="test_ptp_corr_extended" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-002 RX Timestamp IOCTL Handler" classname="test_ptp_corr_extended" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-004 TXÔåÆRX Causality" classname="test_ptp_corr_extended" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-010 SEND_PTP with TS disabled: no crash/hang" classname="test_ptp_corr_extended" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-010 Driver responds after TS disable/re-enable" classname="test_ptp_corr_extended" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_ptp_crosstimestamp" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_ptp_crosstimestamp.exe_20260406_202934.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ptp_crosstimestamp.exe_20260427_202455.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
     </properties>
     <testcase name="UT-CORR-003 PHC Cross-Timestamp IOCTL" classname="test_ptp_crosstimestamp" time="0">
@@ -2693,10 +2113,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ptp_event_latency" tests="5" failures="0" skipped="2" errors="0" time="415" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ptp_event_latency" tests="5" failures="0" skipped="2" errors="0" time="204" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ptp_event_latency.exe_20260406_202934.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ptp_event_latency.exe_20260427_205401.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/2"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/177"/>
@@ -2739,10 +2159,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ptp_freq" tests="15" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ptp_freq" tests="15" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ptp_freq.exe_20260406_111158.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ptp_freq.exe_20260427_202331.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/3"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/296"/>
     </properties>
@@ -2837,10 +2257,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ptp_freq_complete" tests="14" failures="0" skipped="0" errors="0" time="2691" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ptp_freq_complete" tests="14" failures="0" skipped="1" errors="0" time="62" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ptp_freq_complete.exe_20260406_203636.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ptp_freq_complete.exe_20260427_202332.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/3"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/192"/>
     </properties>
@@ -2898,11 +2318,12 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/192"/>
       </properties>
     </testcase>
-    <testcase name="IT-FREQ-002: Multi-Adapter" classname="test_ptp_freq_complete" time="0">
+    <testcase name="IT-FREQ-002: Only 3 adapter" classname="test_ptp_freq_complete" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/3"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/192"/>
       </properties>
+      <skipped/>
     </testcase>
     <testcase name="IT-FREQ-003: gPTP Sync" classname="test_ptp_freq_complete" time="0">
       <properties>
@@ -2910,7 +2331,7 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/192"/>
       </properties>
     </testcase>
-    <testcase name="VV-FREQ-003: gPTP sync test completed" classname="test_ptp_freq_complete" time="0">
+    <testcase name="VV-FREQ-003: gPTP sync error [100 ┬Ás" classname="test_ptp_freq_complete" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/3"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/192"/>
@@ -2929,10 +2350,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ptp_getset" tests="14" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ptp_getset" tests="16" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ptp_getset.exe_20260406_111157.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ptp_getset.exe_20260427_202327.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/2"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/70"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/295"/>
@@ -2993,7 +2414,7 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/295"/>
       </properties>
     </testcase>
-    <testcase name="UT-PTP-GETSET-009: Clock Resolution: Clock running, IOCTL delta = 20605 ns" classname="test_ptp_getset" time="0">
+    <testcase name="UT-PTP-GETSET-009: Clock Resolution: Clock running, IOCTL delta = 2444 ns" classname="test_ptp_getset" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/2"/>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/70"/>
@@ -3035,55 +2456,25 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/295"/>
       </properties>
     </testcase>
-  </testsuite>
-  <testsuite name="test_ptp_phc_stability" tests="5" failures="0" skipped="0" errors="0" time="6" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_ptp_phc_stability.exe_20260406_212127.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
-    </properties>
-    <testcase name="UT-CORR-007 Jitter: 1000-sample delta stddev [ 100 ns" classname="test_ptp_phc_stability" time="0">
+    <testcase name="UT-PTP-GETSET-009: Clock Resolution: Clock running, IOCTL delta = 9091 ns" classname="test_ptp_getset" time="0">
       <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/2"/>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/70"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/295"/>
       </properties>
     </testcase>
-    <testcase name="UT-CORR-008 Burst: 100 pairs, all |delta|[1us, stddev[100ns" classname="test_ptp_phc_stability" time="0">
+    <testcase name="UT-PTP-GETSET-009: Clock Resolution: Clock running, IOCTL delta = 254640 ns" classname="test_ptp_getset" time="0">
       <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-005 Epoch Reset: seed correct, advancing, TX-PHC correlated" classname="test_ptp_phc_stability" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-006 Freq Adj: IOCTL OK, PHC advancing, TX-PHC correlated" classname="test_ptp_phc_stability" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
-      </properties>
-    </testcase>
-    <testcase name="UT-CORR-009 Driver Reload: re-open OK, PHC valid, TX-PHC correlated" classname="test_ptp_phc_stability" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/199"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/48"/>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/2"/>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/70"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/295"/>
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_qav_cbs" tests="14" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_qav_cbs" tests="14" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_qav_cbs.exe_20260406_111157.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_qav_cbs.exe_20260427_202438.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/8"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/207"/>
     </properties>
@@ -3172,84 +2563,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_registry_diagnostics" tests="9" failures="0" skipped="2" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_rx_timestamp" tests="16" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_registry_diagnostics.exe_20260406_111146.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-    </properties>
-    <testcase name="TC-DEBUG-REG-001: Parameters key opened" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-001: DebugLevel=8 (DL_LOUD) written" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-001: DebugLevel read-back = 8" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-002: Parameters key re-opened after close" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-002: DebugLevel=8 persists" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-003: DebugLevel=4" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-004: DebugLevel removed" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-005: IOCTL_AVB_GET_CLOCK_CONFIG failed before handle close (err=122) ÔÇö may need debug driver" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-      <skipped/>
-    </testcase>
-    <testcase name="TC-DEBUG-REG-006: deferred ÔÇö manual execution required" classname="test_registry_diagnostics" time="0">
-      <properties>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/17"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/95"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/247"/>
-      </properties>
-      <skipped/>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_rx_timestamp" tests="16" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_rx_timestamp.exe_20260406_111159.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_rx_timestamp.exe_20260427_202436.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/6"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/298"/>
     </properties>
@@ -3350,10 +2667,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_rx_timestamp_complete" tests="1" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_rx_timestamp_complete" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_rx_timestamp_complete.exe_20260406_212140.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_rx_timestamp_complete.exe_20260427_202436.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/6"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/311"/>
     </properties>
@@ -3362,168 +2679,27 @@
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/6"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/311"/>
       </properties>
+      <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_s3_sleep_wake" tests="5" failures="0" skipped="0" errors="0" time="129" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_security_validation" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_s3_sleep_wake.exe_20260406_212140.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/93"/>
-      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/271"/>
-    </properties>
-    <testcase name="TC-S3-001: Pre-sleep PHC baseline" classname="test_s3_sleep_wake" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/93"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/271"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-S3-003: Trigger S3" classname="test_s3_sleep_wake" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/93"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/271"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-S3-003: Device ready after wake" classname="test_s3_sleep_wake" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/93"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/271"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-S3-004: PHC non-zero post-wake" classname="test_s3_sleep_wake" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/93"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/271"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-S3-005: HW state valid post-wake" classname="test_s3_sleep_wake" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/93"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/271"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_scripts_consolidate" tests="16" failures="0" skipped="0" errors="0" time="3" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_scripts_consolidate.exe_20260406_212351.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-    </properties>
-    <testcase name="TC-SCRIPTS-001: 23 canonical scripts in tools\" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-003: tools\build\Build-Driver.ps1 exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-003: tools\build\Build-Tests.ps1 exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-003: tools\build\Build-And-Sign.ps1 exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-004: tools\setup\Install-Driver.ps1 exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-004: tools\setup\Install-Driver-Elevated.ps1 exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-005: tools\test\Run-Tests.ps1 exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-005: tools\test\Run-Tests-Elevated.ps1 exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-006: tools\archive\deprecated\ directory exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-006: 31 files in tools\archive\deprecated\ root" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-006: tools\archive\deprecated\README.md exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-007: 4/4 tool READMEs present" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-008: .github\workflows\ directory exists" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-009: tools\build\Build-Driver.ps1 has $ErrorActionPreference" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-009: tools\build\Build-Tests.ps1 has $ErrorActionPreference" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-SCRIPTS-009: tools\test\Run-Tests.ps1 has $ErrorActionPreference" classname="test_scripts_consolidate" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/27"/>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/292"/>
-      </properties>
-    </testcase>
-  </testsuite>
-  <testsuite name="test_security_validation" tests="1" failures="0" skipped="1" errors="0" time="1" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_security_validation.exe_20260406_212355.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_security_validation.exe_20260427_205400.log"/>
+      <property name="run_date" value="20260427"/>
     </properties>
     <testcase name="test_security_validation (overall)" classname="test_security_validation" time="0"><skipped/></testcase>
   </testsuite>
-  <testsuite name="test_send_ptp_debug" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_send_ptp_debug" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_send_ptp_debug.exe_20260406_212356.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_send_ptp_debug.exe_20260427_210145.log"/>
+      <property name="run_date" value="20260427"/>
     </properties>
     <testcase name="test_send_ptp_debug (overall)" classname="test_send_ptp_debug" time="0"><skipped/></testcase>
   </testsuite>
-  <testsuite name="test_srp_interface" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_srp_interface" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_srp_interface.exe_20260406_212356.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_srp_interface.exe_20260427_205400.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/211"/>
     </properties>
     <testcase name="TC-SRP-001: Device node accessible" classname="test_srp_interface" time="0">
@@ -3552,10 +2728,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_statistics_counters" tests="10" failures="0" skipped="2" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_statistics_counters" tests="10" failures="0" skipped="2" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_statistics_counters.exe_20260406_212357.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_statistics_counters.exe_20260427_205041.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/67"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/270"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/67"/>
@@ -3633,188 +2809,116 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_timestamp_latency" tests="84" failures="0" skipped="0" errors="0" time="8" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_timestamp_latency" tests="42" failures="0" skipped="0" errors="0" time="2" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_timestamp_latency.exe_20260406_212357.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_timestamp_latency.exe_20260427_210145.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
     </properties>
-    <testcase name="TC-PERF-TS-002: PASS: Median 2382 ns [ 5us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-002: PASS: Median 935 ns [ 5us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-004: PASS: P99 5513 ns [ 100us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-004: PASS: P99 10885 ns [ 100us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-001: PASS: P50 2437 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-001: PASS: P50 987 ns [ 8000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-002: PASS: P99 5038 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-002: PASS: P99 4345 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-002: PASS: Median 2404 ns [ 5us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-002: PASS: Median 957 ns [ 5us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-004: PASS: P99 5486 ns [ 100us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-004: PASS: P99 4101 ns [ 100us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-001: PASS: P50 2453 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-001: PASS: P50 919 ns [ 8000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-002: PASS: P99 9722 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-002: PASS: P99 3379 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-002: PASS: Median 2449 ns [ 5us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-002: PASS: Median 937 ns [ 5us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-004: PASS: P99 10610 ns [ 100us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-004: PASS: P99 4361 ns [ 100us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-001: PASS: P50 2430 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-001: PASS: P50 926 ns [ 8000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-002: PASS: P99 9517 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-002: PASS: P99 1585 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-002: PASS: Median 2381 ns [ 5us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-001/adapter:0: PASS: Median 311 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-004: PASS: P99 29469 ns [ 100us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-003/adapter:0: PASS: P99 1272 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-001: PASS: P50 2377 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-002/adapter:0: PASS: Median 935 ns [ 5us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-002: PASS: P99 8130 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-004/adapter:0: PASS: P99 10885 ns [ 100us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-002: PASS: Median 2386 ns [ 5us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-005/adapter:0: PASS: 99.4% [ 1┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-004: PASS: P99 6952 ns [ 100us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-001: PASS: P50 2479 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-002: PASS: P99 5415 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-002: PASS: Median 2393 ns [ 5us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-004: PASS: P99 5869 ns [ 100us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-001: PASS: P50 2196 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-002: PASS: P99 4939 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-001/adapter:0: PASS: Median 94 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-003/adapter:0: PASS: P99 117 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-002/adapter:0: PASS: Median 2382 ns [ 5us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-004/adapter:0: PASS: P99 5513 ns [ 100us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-005/adapter:0: PASS: 100.0% [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-006/adapter:0: PASS: All threads median [1┬Ás, P99 [20┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-006/adapter:0: PASS: All threads median [5┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
@@ -3832,55 +2936,55 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-001/adapter:0: PASS: P50 2437 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-001/adapter:0: PASS: P50 987 ns [ 8000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-002/adapter:0: PASS: P99 5038 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-002/adapter:0: PASS: P99 4345 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-001/adapter:1: PASS: Median 94 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-001/adapter:1: PASS: Median 329 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-003/adapter:1: PASS: P99 119 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-003/adapter:1: PASS: P99 1022 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-002/adapter:1: PASS: Median 2404 ns [ 5us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-002/adapter:1: PASS: Median 957 ns [ 5us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-004/adapter:1: PASS: P99 5486 ns [ 100us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-004/adapter:1: PASS: P99 4101 ns [ 100us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-005/adapter:1: PASS: 99.7% [ 1┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-005/adapter:1: PASS: 99.4% [ 1┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-006/adapter:1: PASS: All threads median [1┬Ás, P99 [20┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-006/adapter:1: PASS: All threads median [5┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-007/adapter:1: PASS: Variance 1.0% [ 70%" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-007/adapter:1: PASS: Variance 0.0% [ 70%" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
@@ -3892,49 +2996,49 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-001/adapter:1: PASS: P50 2453 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-001/adapter:1: PASS: P50 919 ns [ 8000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-002/adapter:1: PASS: P99 9722 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-002/adapter:1: PASS: P99 3379 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-001/adapter:2: PASS: Median 96 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-001/adapter:2: PASS: Median 311 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-003/adapter:2: PASS: P99 135 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-003/adapter:2: PASS: P99 325 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-002/adapter:2: PASS: Median 2449 ns [ 5us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-002/adapter:2: PASS: Median 937 ns [ 5us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-004/adapter:2: PASS: P99 10610 ns [ 100us" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-004/adapter:2: PASS: P99 4361 ns [ 100us" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-005/adapter:2: PASS: 100.0% [ 1┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-005/adapter:2: PASS: 99.4% [ 1┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-TS-006/adapter:2: PASS: All threads median [1┬Ás, P99 [20┬Ás" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-TS-006/adapter:2: PASS: All threads median [5┬Ás" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
@@ -3952,203 +3056,23 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-001/adapter:2: PASS: P50 2430 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-001/adapter:2: PASS: P50 926 ns [ 8000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
-    <testcase name="TC-PERF-PHC-002/adapter:2: PASS: P99 9517 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-001/adapter:3: PASS: Median 97 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-003/adapter:3: PASS: P99 100 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-002/adapter:3: PASS: Median 2381 ns [ 5us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-004/adapter:3: PASS: P99 29469 ns [ 100us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-005/adapter:3: PASS: 99.9% [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-006/adapter:3: PASS: All threads median [1┬Ás, P99 [20┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-007/adapter:3: PASS: Variance 0.0% [ 70%" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-008/adapter:3: PASS: Warm-up reduces latency" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-001/adapter:3: PASS: P50 2377 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-002/adapter:3: PASS: P99 8130 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-001/adapter:4: PASS: Median 95 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-003/adapter:4: PASS: P99 112 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-002/adapter:4: PASS: Median 2386 ns [ 5us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-004/adapter:4: PASS: P99 6952 ns [ 100us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-005/adapter:4: PASS: 100.0% [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-006/adapter:4: PASS: All threads median [1┬Ás, P99 [20┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-007/adapter:4: PASS: Variance 0.4% [ 70%" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-008/adapter:4: PASS: Warm-up reduces latency" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-001/adapter:4: PASS: P50 2479 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-002/adapter:4: PASS: P99 5415 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-001/adapter:5: PASS: Median 95 ns [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-003/adapter:5: PASS: P99 347 ns [ 2┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-002/adapter:5: PASS: Median 2393 ns [ 5us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-004/adapter:5: PASS: P99 5869 ns [ 100us" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-005/adapter:5: PASS: 100.0% [ 1┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-006/adapter:5: PASS: All threads median [1┬Ás, P99 [20┬Ás" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-007/adapter:5: PASS: Variance 1.1% [ 70%" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-TS-008/adapter:5: PASS: Warm-up reduces latency" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-001/adapter:5: PASS: P50 2196 ns [ 6000 ns" classname="test_timestamp_latency" time="0">
-      <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
-        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
-      </properties>
-    </testcase>
-    <testcase name="TC-PERF-PHC-002/adapter:5: PASS: P99 4939 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
+    <testcase name="TC-PERF-PHC-002/adapter:2: PASS: P99 1585 ns [ 30000 ns" classname="test_timestamp_latency" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/65"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/272"/>
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_ts_event_sub" tests="21" failures="0" skipped="4" errors="0" time="399" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_ts_event_sub" tests="22" failures="0" skipped="5" errors="0" time="200" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_ts_event_sub.exe_20260406_111200.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_ts_event_sub.exe_20260427_202007.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/314"/>
     </properties>
@@ -4200,12 +3124,11 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/314"/>
       </properties>
     </testcase>
-    <testcase name="UT-TS-EVENT-001: RX Timestamp Event Delivery: No RX events received" classname="test_ts_event_sub" time="0">
+    <testcase name="UT-TS-EVENT-001: RX Timestamp Event Delivery" classname="test_ts_event_sub" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/314"/>
       </properties>
-      <skipped/>
     </testcase>
     <testcase name="UT-TS-EVENT-002: TX Timestamp Event Delivery: No TX events received" classname="test_ts_event_sub" time="0">
       <properties>
@@ -4269,13 +3192,21 @@
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/314"/>
       </properties>
     </testcase>
-    <testcase name="UT-TS-EVENT-001: RX Timestamp Event Delivery" classname="test_ts_event_sub" time="0">
+    <testcase name="UT-TS-EVENT-003: Target Time Reached Event: No event received within 3 s - target-time interrupt requires link-up/operational adapter state" classname="test_ts_event_sub" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/314"/>
       </properties>
+      <skipped/>
     </testcase>
-    <testcase name="UT-TS-EVENT-003: Target Time Reached Event: TRGTTIML0 stuck at hardware-reset value - adapter not responding to register writes" classname="test_ts_event_sub" time="0">
+    <testcase name="UT-TS-EVENT-001: RX Timestamp Event Delivery: No RX events received" classname="test_ts_event_sub" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/314"/>
+      </properties>
+      <skipped/>
+    </testcase>
+    <testcase name="UT-TS-EVENT-003: Target Time Reached Event: Device does not support SET_TARGET_TIME" classname="test_ts_event_sub" time="0">
       <properties>
         <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
         <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/314"/>
@@ -4283,24 +3214,10 @@
       <skipped/>
     </testcase>
   </testsuite>
-  <testsuite name="test_tsn_ioctl_handlers" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_tx_timestamp_retrieval" tests="1" failures="0" skipped="0" errors="0" time="3" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_tsn_ioctl_handlers.exe_20260406_111156.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="test_tsn_ioctl_handlers (overall)" classname="test_tsn_ioctl_handlers" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="test_tsn_ioctl_handlers_um" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_tsn_ioctl_handlers_um.exe_20260406_212408.log"/>
-      <property name="run_date" value="20260406"/>
-    </properties>
-    <testcase name="test_tsn_ioctl_handlers_um (overall)" classname="test_tsn_ioctl_handlers_um" time="0"><skipped/></testcase>
-  </testsuite>
-  <testsuite name="test_tx_timestamp_retrieval" tests="1" failures="0" skipped="0" errors="0" time="10" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
-    <properties>
-      <property name="log_file" value="test_tx_timestamp_retrieval.exe_20260406_111131.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_tx_timestamp_retrieval.exe_20260427_202438.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/35"/>
     </properties>
     <testcase name="TC-CORR-TX-RX-001: TX/RX PHC correlation" classname="test_tx_timestamp_retrieval" time="0">
@@ -4309,10 +3226,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_vlan_pcp_tc_mapping" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_vlan_pcp_tc_mapping" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_vlan_pcp_tc_mapping.exe_20260406_212408.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_vlan_pcp_tc_mapping.exe_20260427_205400.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/89"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/276"/>
     </properties>
@@ -4347,10 +3264,10 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_vlan_tag" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_vlan_tag" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_vlan_tag.exe_20260406_212408.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_vlan_tag.exe_20260427_205400.log"/>
+      <property name="run_date" value="20260427"/>
       <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/213"/>
     </properties>
     <testcase name="TC-VLAN-001: Device node accessible" classname="test_vlan_tag" time="0">
@@ -4379,24 +3296,84 @@
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="test_vv_corr_001_stability" tests="1" failures="0" skipped="0" errors="0" time="86412" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_win7_stub" tests="5" failures="0" skipped="0" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="test_vv_corr_001_stability.exe_20260406_212409.log"/>
-      <property name="run_date" value="20260406"/>
-      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      <property name="log_file" value="test_win7_stub.exe_20260427_205359.log"/>
+      <property name="run_date" value="20260427"/>
+      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
     </properties>
-    <testcase name="VV-CORR-001 PHC correlation stable over 86400-second run" classname="test_vv_corr_001_stability" time="0">
+    <testcase name="TC-COMPAT-001: Runtime OS major ]= 10" classname="test_win7_stub" time="0">
       <properties>
-        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-002: Build number ]= 9200" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-003: Device node accessible on current OS" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-004: IOCTL_AVB_GET_VERSION on Win10+ ABI" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-COMPAT-005: Windows version record" classname="test_win7_stub" time="0">
+      <properties>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/258"/>
       </properties>
     </testcase>
   </testsuite>
-  <testsuite name="tsn_hardware_activation_validation" tests="1" failures="0" skipped="1" errors="0" time="0" hostname="6XI226MACHINE (Microsoft Windows NT 10.0.26200.0)">
+  <testsuite name="test_zero_polling_overhead" tests="6" failures="0" skipped="3" errors="0" time="19" hostname="DESKTOP-RSUO2LV">
     <properties>
-      <property name="log_file" value="tsn_hardware_activation_validation.exe_20260406_111156.log"/>
-      <property name="run_date" value="20260406"/>
+      <property name="log_file" value="test_zero_polling_overhead.exe_20260427_202455.log"/>
+      <property name="run_date" value="20260427"/>
+      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+      <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
     </properties>
-    <testcase name="tsn_hardware_activation_validation (overall)" classname="tsn_hardware_activation_validation" time="0"><skipped/></testcase>
+    <testcase name="TC-ZP-001: Source-code audit ÔÇö no polling in ISR/DPC files" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+      <skipped/>
+    </testcase>
+    <testcase name="TC-ZP-002: EITR0 register = 0" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+      <skipped/>
+    </testcase>
+    <testcase name="TC-ZP-003: Events arrive while user thread sleeps" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-ZP-004: CPU overhead [ 0.5% during idle subscribe" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+    </testcase>
+    <testcase name="TC-ZP-005: WPR/WPA profiling environment present" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+      <skipped/>
+    </testcase>
+    <testcase name="TC-ZP-006: Synchronous subscribe proves interrupt-driven delivery" classname="test_zero_polling_overhead" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/13"/>
+        <property name="implements" value="https://github.com/zarfld/IntelAvbFilter/issues/178"/>
+      </properties>
+    </testcase>
   </testsuite>
 </testsuites>
 

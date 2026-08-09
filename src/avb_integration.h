@@ -156,6 +156,7 @@ typedef struct _AVB_DEVICE_CONTEXT {
     // Timestamp Event Subscriptions (Issue #13)
     TS_SUBSCRIPTION subscriptions[MAX_TS_SUBSCRIPTIONS];  // Subscription table
     NDIS_SPIN_LOCK subscription_lock;                     // Protects subscription table
+    NDIS_SPIN_LOCK systim_lock;                           // I219: serialises SYSTIML+SYSTIMH atomic read
     volatile LONG next_ring_id;                           // Monotonic ring_id allocator (1, 2, 3, ...)
 
     // TX Timestamp Polling (Task 6c)
@@ -464,6 +465,28 @@ NTSTATUS AvbDiscoverIntelControllerResourcesAlternative(
     _In_ PMS_FILTER FilterModule,
     _Out_ PPHYSICAL_ADDRESS Bar0Address,
     _Out_ PULONG Bar0Length
+);
+
+/**
+ * @brief Read a DWORD from the device's PCIe config space via BUS_INTERFACE_STANDARD.
+ * Supports the full 4 KB PCIe config space (0x000-0xFFC), including Extended
+ * Capabilities (0x100-0xFFC).  Must be called at PASSIVE_LEVEL.
+ */
+NTSTATUS AvbPciReadConfigDwordViaBusInterface(
+    _In_  PMS_FILTER FilterModule,
+    _In_  ULONG      Offset,
+    _Out_ ULONG     *Value
+);
+
+/**
+ * @brief Write a DWORD to the device's PCIe config space via BUS_INTERFACE_STANDARD.
+ * Supports the full 4 KB PCIe config space (0x000-0xFFC), including Extended
+ * Capabilities (0x100-0xFFC).  Must be called at PASSIVE_LEVEL.
+ */
+NTSTATUS AvbPciWriteConfigDwordViaBusInterface(
+    _In_ PMS_FILTER FilterModule,
+    _In_ ULONG      Offset,
+    _In_ ULONG      Value
 );
 
 /*========================================================================

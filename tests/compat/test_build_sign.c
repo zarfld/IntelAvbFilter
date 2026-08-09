@@ -17,8 +17,7 @@
  *
  * Evidence captured: 2026-03-19 on 6xI226MACHINE
  *   Signer  : CN="WDKTestCert dzarf,134092412853815814"
- *   Thumbprint: E1BC26771052A9EFBA92DA5DD9C5FD6B6343367D
- *   Validity: 12/3/2025 - 12/3/2035
+ *   Thumbprint: (read dynamically from signed .sys -- not hardcoded; varies per machine)
  *   Status  : Valid (both .sys and .cat, confirmed via Get-AuthenticodeSignature)
  *   INF     : DriverVer=03/19/2026,11.29.44.464, CatalogFile=IntelAvbFilter.cat
  *   Store   : Cert confirmed in LocalMachine\TrustedPublisher
@@ -53,13 +52,96 @@ static const GUID WINTRUST_ACTION_VERIFY_V2 = {
 };
 
 /*
- * WDK test certificate SHA-1 thumbprint (20 bytes).
- * E1BC26771052A9EFBA92DA5DD9C5FD6B6343367D
+ * Helper: extract the SHA-1 thumbprint of the Authenticode signer from a PE or CAT file.
+ * Uses CryptQueryObject to read the embedded PKCS#7 signature and get the signer cert.
+ * Returns TRUE and fills tp_out[20] on success, FALSE on failure.
+ *
+ * This avoids hardcoding a machine-specific thumbprint -- the test works on any dev
+ * machine regardless of which WDK test cert was generated there.
  */
-static const BYTE g_cert_thumbprint[] = {
-    0xE1u, 0xBCu, 0x26u, 0x77u, 0x10u, 0x52u, 0xA9u, 0xEFu, 0xBAu, 0x92u,
-    0xDAu, 0x5Du, 0xD9u, 0xC5u, 0xFDu, 0x6Bu, 0x63u, 0x43u, 0x36u, 0x7Du
-};
+static BOOL get_file_signer_thumbprint(const char *file_path, BYTE tp_out[20])
+{
+    DWORD encoding = 0, content_type = 0, format_type = 0;
+    HCERTSTORE hMsgStore = NULL;
+    HCRYPTMSG  hMsg      = NULL;
+
+    BOOL ok = CryptQueryObject(
+        CERT_QUERY_OBJECT_FILE,
+        file_path,
+        CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+        CERT_QUERY_FORMAT_FLAG_BINARY,
+        0,
+        &encoding, &content_type, &format_type,
+        &hMsgStore, &hMsg, NULL);
+
+    if (!ok || !hMsg) {
+        if (hMsgStore) CertCloseStore(hMsgStore, 0);
+        if (hMsg)      CryptMsgClose(hMsg);
+        return FALSE;
+    }
+
+    /* Get signer count */
+    DWORD signer_count = 0, cb = sizeof(signer_count);
+    if (!CryptMsgGetParam(hMsg, CMSG_SIGNER_COUNT_PARAM, 0, &signer_count, &cb)
+            || signer_count == 0) {
+        CertCloseStore(hMsgStore, 0);
+        CryptMsgClose(hMsg);
+        return FALSE;
+    }
+
+    /* Get signer info for index 0 */
+    DWORD si_size = 0;
+    CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, NULL, &si_size);
+    if (si_size == 0) {
+        CertCloseStore(hMsgStore, 0);
+        CryptMsgClose(hMsg);
+        return FALSE;
+    }
+
+    CMSG_SIGNER_INFO *pSigner = (CMSG_SIGNER_INFO *)HeapAlloc(GetProcessHeap(), 0, si_size);
+    if (!pSigner) {
+        CertCloseStore(hMsgStore, 0);
+        CryptMsgClose(hMsg);
+        return FALSE;
+    }
+
+    if (!CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, pSigner, &si_size)) {
+        HeapFree(GetProcessHeap(), 0, pSigner);
+        CertCloseStore(hMsgStore, 0);
+        CryptMsgClose(hMsg);
+        return FALSE;
+    }
+
+    /* Locate the signer cert in the embedded cert store by issuer+serial */
+    CERT_INFO ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.Issuer       = pSigner->Issuer;
+    ci.SerialNumber = pSigner->SerialNumber;
+
+    PCCERT_CONTEXT pCert = CertFindCertificateInStore(
+        hMsgStore,
+        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+        0,
+        CERT_FIND_SUBJECT_CERT,
+        &ci,
+        NULL);
+
+    HeapFree(GetProcessHeap(), 0, pSigner);
+
+    BOOL result = FALSE;
+    if (pCert) {
+        DWORD tp_size = 20;
+        if (CertGetCertificateContextProperty(pCert, CERT_SHA1_HASH_PROP_ID, tp_out, &tp_size)
+                && tp_size == 20) {
+            result = TRUE;
+        }
+        CertFreeCertificateContext(pCert);
+    }
+
+    CertCloseStore(hMsgStore, 0);
+    CryptMsgClose(hMsg);
+    return result;
+}
 
 /* TRUST_E_NOSIGNATURE: file has no Authenticode signature embedded/cataloged */
 #define TRUST_E_NOSIGNATURE_CODE ((LONG)0x800B0100L)
@@ -313,12 +395,38 @@ static int TC_SIGN_002_CatSignature(void)
 
 /* ────────────────────────── TC-SIGN-003 ───────────────────────────────────── */
 /*
- * Verify the WDKTestCert signing certificate is installed in the
+ * Verify the signing certificate used on IntelAvbFilter.sys is installed in the
  * LocalMachine\TrustedPublisher certificate store.
- * This is required for the kernel code integrity check to accept the driver.
+ *
+ * The thumbprint is read dynamically from the .sys Authenticode signature rather
+ * than hardcoded, so this test works on any development machine regardless of which
+ * WDK test certificate was generated there.
  */
 static int TC_SIGN_003_CertInTrustedPublisher(void)
 {
+    if (!g_paths_valid) {
+        printf("    [SKIP] Build artifacts path not resolved\n");
+        return -1;
+    }
+
+    if (GetFileAttributesA(g_sys_path) == INVALID_FILE_ATTRIBUTES) {
+        printf("    [SKIP] .sys not found: %s\n", g_sys_path);
+        return -1;
+    }
+
+    /* Dynamically extract the signing cert thumbprint from the .sys */
+    BYTE tp[20] = {0};
+    if (!get_file_signer_thumbprint(g_sys_path, tp)) {
+        printf("    [SKIP] Could not extract signer thumbprint from .sys\n");
+        printf("    (.sys may be unsigned or CryptQueryObject failed)\n");
+        return -1;
+    }
+
+    printf("    Signer thumbprint (from .sys): ");
+    for (int i = 0; i < 20; i++) printf("%02X", tp[i]);
+    printf("\n");
+
+    /* Look for that exact cert in LocalMachine\TrustedPublisher */
     HCERTSTORE hStore = CertOpenStore(
         CERT_STORE_PROV_SYSTEM_A, 0, 0,
         CERT_SYSTEM_STORE_LOCAL_MACHINE,
@@ -329,13 +437,9 @@ static int TC_SIGN_003_CertInTrustedPublisher(void)
         return 0;
     }
 
-    /* Search by SHA-1 thumbprint */
-    BYTE tp_copy[sizeof(g_cert_thumbprint)];
-    memcpy(tp_copy, g_cert_thumbprint, sizeof(tp_copy));
-
     CRYPT_HASH_BLOB blob;
-    blob.cbData = (DWORD)sizeof(tp_copy);
-    blob.pbData = tp_copy;
+    blob.cbData = 20;
+    blob.pbData = tp;
 
     PCCERT_CONTEXT pCtx = CertFindCertificateInStore(
         hStore,
@@ -350,19 +454,14 @@ static int TC_SIGN_003_CertInTrustedPublisher(void)
         char subj[256] = "";
         CertGetNameStringA(pCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL,
                            subj, sizeof(subj));
-        char issuer[256] = "";
-        CertGetNameStringA(pCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE,
-                           CERT_NAME_ISSUER_FLAG, NULL, issuer, sizeof(issuer));
         printf("    Subject         : %s\n", subj);
-        printf("    Issuer          : %s\n", issuer);
-        printf("    Thumbprint      : E1BC26771052A9EFBA92DA5DD9C5FD6B6343367D\n");
         CertFreeCertificateContext(pCtx);
     }
 
     CertCloseStore(hStore, 0);
 
     if (!found) {
-        printf("    [FAIL] WDKTestCert not found in LocalMachine\\TrustedPublisher\n");
+        printf("    [FAIL] Signing cert not found in LocalMachine\\TrustedPublisher\n");
         printf("    Required: bcdedit /set testsigning on + certmgr install cert\n");
         return 0;
     }
@@ -520,7 +619,7 @@ int main(void)
     printf("  IntelAvbFilter -- Build & Code-Signing Verification\n");
     printf("  Implements: #243 (TEST-BUILD-SIGN-001)\n");
     printf("  Cert type: WDK test certificate (dev/test signing, not WHQL)\n");
-    printf("  Thumbprint: E1BC26771052A9EFBA92DA5DD9C5FD6B6343367D\n");
+    printf("  Thumbprint: (read dynamically from signed .sys)\n");
     printf("============================================================\n\n");
 
     /* Locate build artifacts before signing TCs execute */

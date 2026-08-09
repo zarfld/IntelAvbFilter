@@ -55,8 +55,11 @@ if ($Full) {
     $command += " -Full"
 }
 if ($TestName) {
-    # Ensure .exe extension for test name
-    $testExe = if ($TestName -notmatch '\.exe$') { "$TestName.exe" } else { $TestName }
+    # PS1 test scripts (e.g. Test-DebugLevelVerbosity) are dispatched directly;
+    # all other names get .exe appended if missing.
+    $testExe = if ($TestName -match '\.ps1$') { $TestName }
+               elseif ($TestName -notmatch '\.exe$') { "$TestName.exe" }
+               else { $TestName }
     $command += " -TestExecutable '$testExe'"
 }
 if ($TestArgs) {
@@ -72,7 +75,7 @@ if ($LogFile) {
 if ($LogFile) {
     $command += "; Stop-Transcript"
 }
-$command += "; Write-Host ''; Write-Host 'Press any key to close...' -ForegroundColor Yellow; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')"
+#$command += "; Write-Host ''; Write-Host 'Press any key to close...' -ForegroundColor Yellow; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')"
 
 $arguments = @(
     '-NoProfile'

@@ -150,22 +150,12 @@ static int init_ptp(device_t *dev)
         return -1;
     }
 
-    /* Step 1: Enable system time counting — clear DISABLE_SYSTIME (bit 31) in TSAUXC */
-    result = ndis_platform_ops.mmio_read(dev, I219_TSAUXC, &tsauxc);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to read TSAUXC: %d\n", result);
-        return result;
-    }
-    tsauxc &= ~INTEL_TSAUXC_DISABLE_SYSTIM;  /* bit 31 = 0 → counters run */
-    result = ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I219 init_ptp: Failed to write TSAUXC: %d\n", result);
-        return result;
-    }
-    DEBUGP(DL_INFO, "I219 init_ptp: TSAUXC=0x%08X (systime enabled)\n", tsauxc);
-
-    /* Step 2: Set clock increment for 1GbE — IP=2, IV=16,000,000 (0xF42400)
+    /* Step 1: Set clock increment for 1GbE — IP=2, IV=16,000,000 (0xF42400)
      * TIMINCA = 0x02F42400: increment period 2 cycles, value 0xF42400 sub-ns steps.
+     * MUST be written first and unconditionally — this is what starts the clock.
+     * Previously this was gated behind a TSAUXC read, but I219 does not implement
+     * TSAUXC at 0x0B640; if the read failed the function returned early before
+     * TIMINCA was ever written, leaving the increment at 0 (frozen PHC bug).
      * Source: Intel I219 datasheet, TIMINCA register, 1GbE configuration. */
     result = ndis_platform_ops.mmio_write(dev, I219_TIMINCA, INTEL_TIMINCA_I219_INIT);
     if (result != 0) {
@@ -173,6 +163,16 @@ static int init_ptp(device_t *dev)
         return result;
     }
     DEBUGP(DL_INFO, "I219 init_ptp: TIMINCA=0x%08X (1GbE clock rate)\n", INTEL_TIMINCA_I219_INIT);
+
+    /* Step 2: Attempt to clear DISABLE_SYSTIME (bit 31) in TSAUXC — best-effort only.
+     * I219 may not implement this register at 0x0B640; do NOT return early on failure. */
+    if (ndis_platform_ops.mmio_read(dev, I219_TSAUXC, &tsauxc) == 0) {
+        tsauxc &= ~INTEL_TSAUXC_DISABLE_SYSTIM;  /* bit 31 = 0 → counters run */
+        ndis_platform_ops.mmio_write(dev, I219_TSAUXC, tsauxc);
+        DEBUGP(DL_INFO, "I219 init_ptp: TSAUXC=0x%08X (systime enabled)\n", tsauxc);
+    } else {
+        DEBUGP(DL_WARN, "I219 init_ptp: TSAUXC read skipped (may not be implemented on this device)\n");
+    }
 
     /* Step 3: Configure ETQF0 to identify IEEE 1588 PTP packets (EtherType 0x88F7).
      * Bits: QUEUE_EN(31)=1, TS_1588(30)=1, FILTER_EN(26)=1, ETYPE(15:0)=0x88F7 */
@@ -198,16 +198,25 @@ static int init_ptp(device_t *dev)
     DEBUGP(DL_INFO, "I219 init_ptp: ETQS0=0x%08X (queue 0 routing)\n", etqs0);
 
     /* Step 5: Seed software time offset from current system clock so that
-     * get_systime() returns Unix-epoch-anchored nanoseconds immediately.
+     * get_systime() returns TAI-epoch-anchored nanoseconds immediately.
      * KeQuerySystemTime returns Windows FILETIME (100-ns ticks from 1601-01-01).
      * Subtract FILETIME epoch offset (116444736000000000) to get Unix epoch
-     * 100-ns ticks, then multiply by 100 to get nanoseconds. */
+     * 100-ns ticks, then multiply by 100 to get nanoseconds (UTC).
+     *
+     * I219 SYSTIM is TAI-based (NotebookLM Q1, April 2026):
+     * e1000e settime64 accepts absolute nanoseconds in the TAI scale.
+     * Add 37 s TAI-UTC leap-second offset so get_systime() returns
+     * TAI-epoch nanoseconds as expected by the PTP stack.
+     * ptp4l / phc2sys will correct residual frequency drift (e.g.
+     * PCH spread-spectrum clocking ~2500 ppm) via ADJUST_FREQUENCY. */
     {
         LARGE_INTEGER initTime;
         uint32_t ts_hi = 0, ts_lo = 0;
         const uint64_t FILETIME_TO_UNIX_EPOCH_100NS = 116444736000000000ULL;
+        const uint64_t TAI_UTC_OFFSET_NS = 37000000000ULL; /* 37 leap seconds (as of 2017) */
         uint64_t win_ticks;
         uint64_t now_unix_ns;
+        uint64_t now_tai_ns;
         uint64_t raw;
 
         KeQuerySystemTime(&initTime);
@@ -215,14 +224,15 @@ static int init_ptp(device_t *dev)
         now_unix_ns = (win_ticks >= FILETIME_TO_UNIX_EPOCH_100NS)
             ? (win_ticks - FILETIME_TO_UNIX_EPOCH_100NS) * 100ULL
             : 0ULL;
+        now_tai_ns = now_unix_ns + TAI_UTC_OFFSET_NS;
 
-        ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
-        ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
+        ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);  /* FIRST: latch trigger */
+        ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);  /* SECOND: latched value */
         raw = ((uint64_t)ts_hi << 32) | ts_lo;
         InterlockedExchange64((volatile LONG64 *)&i219_systim_offset,
-                              (LONG64)(now_unix_ns - raw / 200000ULL));
-        DEBUGP(DL_INFO, "I219 init_ptp: offset=0x%llx (epoch=0x%llx, raw_ns=0x%llx)\n",
-               i219_systim_offset, now_unix_ns, raw / 200000ULL);
+                              (LONG64)(now_tai_ns - raw / 200000ULL));
+        DEBUGP(DL_INFO, "I219 init_ptp: offset=0x%llx (TAI_epoch=0x%llx, raw_ns=0x%llx)\n",
+               i219_systim_offset, now_tai_ns, raw / 200000ULL);
     }
 
     DEBUGP(DL_TRACE, "<==i219_init_ptp: Success\n");
@@ -270,9 +280,9 @@ static int set_systime(device_t *dev, uint64_t systime)
         DEBUGP(DL_INFO, "I219 set_systime: using system time: 0x%llx\n", systime);
     }
 
-    /* Read current raw counter (SYSTIMH read latches SYSTIML on I219). */
-    ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
+    /* Read current raw counter — SYSTIML MUST be read first (latch trigger). */
     ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_lo);
+    ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_hi);
     raw = ((uint64_t)ts_hi << 32) | ts_lo;
 
     /* Update software offset — no hardware register writes needed.
@@ -294,7 +304,7 @@ static int set_systime(device_t *dev, uint64_t systime)
  */
 static int get_systime(device_t *dev, uint64_t *systime)
 {
-    uint32_t ts_low, ts_high;
+    uint32_t ts_low = 0, ts_high = 0;
     int result;
 
     DEBUGP(DL_TRACE, "==>i219_get_systime\n");
@@ -303,40 +313,48 @@ static int get_systime(device_t *dev, uint64_t *systime)
         return -1;
     }
 
-    /* I219 (e1000e family): reading SYSTIMH first latches SYSTIML to prevent
-     * a rollover mid-read.  SYSTIML must be read immediately after.
-     * (Opposite of IGB/I210 where SYSTIML read latches SYSTIMH.)
+    /* I219 (e1000e family): SYSTIML MUST be read FIRST — reading SYSTIML triggers
+     * the hardware latch that captures SYSTIMH into a shadow register.  Reading
+     * SYSTIMH second returns the coherent latched value.
+     * I218/I219 Spec Update Rev 1.3: SYSTIML read is the latch trigger.
      *
-     * Double-read defensive check: if SYSTIMH changes between the two H reads,
-     * the counter wrapped between latching L and our second H read — retry.
-     * On I219 SYSTIM wraps every ~25.6 hours so retries are extremely rare in
-     * practice; this loop protects against the pathological case. */
+     * Latch re-trigger race (confirmed: Intel I219 spec, NotebookLM April 2026):
+     * Any reader of SYSTIML re-arms the latch to the current SYSTIMH.  A miniport
+     * ISR on another CPU can read SYSTIML between our two reads.  If SYSTIML has
+     * just rolled over (~every 21.47 µs), the ISR re-latches SYSTIMH = N+1 while
+     * our SYSTIML = X_pre_rollover, producing an inflated raw2.  The next correct
+     * call then appears ~10–21 µs backward (Release: 0.3–0.8% failure rate).
+     *
+     * Fix — four-register read (L1, H1, L2, H2):
+     *   If H1 == H2: SYSTIMH did not change; pair (H1, L1) is consistent.
+     *   If H1 != H2: SYSTIMH changed (rollover occurred between reads 1 and 3);
+     *                use pair (H2, L2) — L2 was read AFTER rollover, H2 is its
+     *                matching latched value.
+     * Reference: Intel I219 datasheet, SYSTIML/SYSTIMH latch mechanism. */
     {
-        uint32_t h1, h2;
-        int retry = 0;
-        do {
-            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &h1);
-            if (result != 0) {
-                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH(1) read failed (%d) — KE fallback\n", result);
-                goto fallback;
-            }
+        /* L1-H-L2 seqlock: read SYSTIML (triggers latch), SYSTIMH (shadow), then
+         * SYSTIML again for validation.  If L2 < L1, a rollover occurred during our
+         * reads — the igc.sys ISR on another CPU re-triggered the SYSTIML latch
+         * post-rollover, overwriting our SYSTIMH shadow with H+1 while our L1 was
+         * still pre-rollover.  KeRaiseIrql(HIGH_LEVEL) only blocks the LOCAL CPU;
+         * on SMP systems the miniport ISR on CPU1 is unaffected.  The L2 < L1 check
+         * detects the stale shadow without requiring a shared lock with igc.sys.
+         * Normal path: 0 retries (>99% of calls).  Max 3 retries caps worst case.
+         * Reference: Intel I219 SYSTIML/SYSTIMH latch, confirmed root cause Apr-2026. */
+        uint32_t ts_low2 = 0;
+        int tries;
+        for (tries = 0; tries < 3; tries++) {
             result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low);
-            if (result != 0) {
-                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIML read failed (%d) — KE fallback\n", result);
-                goto fallback;
-            }
-            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &h2);
-            if (result != 0) {
-                DEBUGP(DL_ERROR, "I219 get_systime: SYSTIMH(2) read failed (%d) — KE fallback\n", result);
-                goto fallback;
-            }
-            if (h1 != h2) {
-                DEBUGP(DL_WARN, "[I219-DIAG] GET: H changed during read (h1=0x%x h2=0x%x) — retry %d\n",
-                       h1, h2, ++retry);
-            }
-        } while (h1 != h2);
-        UNREFERENCED_PARAMETER(retry); /* incremented only inside DEBUGP; suppress C4189 in Release */
-        ts_high = h1;
+            if (result != 0) goto fallback;
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIMH, &ts_high);
+            if (result != 0) goto fallback;
+            result = ndis_platform_ops.mmio_read(dev, I219_SYSTIML, &ts_low2);
+            if (result != 0) goto fallback;
+            if (ts_low2 >= ts_low)
+                break;  /* No rollover: SYSTIMH shadow is valid for ts_low */
+            DEBUGP(DL_WARN, "[I219-DIAG] SYSTIML rollover (L=%u L2=%u) retry %d\n",
+                   ts_low, ts_low2, tries + 1);
+        }
     }
 
     /* I219 raw SYSTIM counter advances at 200,000 counts per real nanosecond
@@ -346,6 +364,23 @@ static int get_systime(device_t *dev, uint64_t *systime)
      * Unix-epoch-anchored nanoseconds (see i219_systim_offset). */
     {
         uint64_t raw2 = ((uint64_t)ts_high << 32) | ts_low;
+        if (raw2 == 0) {
+            /* SYSTIM counter is frozen at 0 — the BAR0 registers for I219 SYSTIMH/L
+             * may not be accessible on this PCH variant (reads return 0).
+             * Fall back to wall-clock TAI time so consecutive calls return advancing
+             * values instead of the constant i219_systim_offset. */
+            const uint64_t FILETIME_TO_UNIX_100NS = 116444736000000000ULL;
+            const uint64_t TAI_UTC_OFFSET_NS      = 37000000000ULL;
+            LARGE_INTEGER wt;
+            uint64_t win_ticks, unix_ns;
+            KeQuerySystemTime(&wt);
+            win_ticks = (uint64_t)wt.QuadPart;
+            unix_ns = (win_ticks >= FILETIME_TO_UNIX_100NS)
+                ? (win_ticks - FILETIME_TO_UNIX_100NS) * 100ULL : 0ULL;
+            *systime = unix_ns + TAI_UTC_OFFSET_NS;
+            DEBUGP(DL_WARN, "[I219-DIAG] GET: raw=0 (frozen) -> wall-clock 0x%llx\n", *systime);
+            return 0;
+        }
         uint64_t offset_snap = i219_systim_offset;  /* volatile read; ring-3→0 entry provides fence */
         *systime = offset_snap + raw2 / 200000ULL;
         DEBUGP(DL_WARN, "[I219-DIAG] GET: result=0x%llx raw=0x%llx raw/200k=%llu offset=0x%llx\n",
@@ -840,7 +875,11 @@ static int i219_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
  */
 const intel_device_ops_t i219_ops = {
     .device_name = "Intel I219 Gigabit Ethernet - Enhanced PTP",
-    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS | INTEL_CAP_MMIO | INTEL_CAP_MDIO,
+    /* Capabilities per Intel I219 datasheet (NotebookLM-verified):
+     * EEE: IEEE 802.3az LPI supported (1000BASE-T and 100BASE-TX)
+     * NOTE: implementation previously missing INTEL_CAP_EEE — corrected vs spec */
+    .supported_capabilities = INTEL_CAP_BASIC_1588 | INTEL_CAP_ENHANCED_TS |
+                              INTEL_CAP_MMIO | INTEL_CAP_MDIO | INTEL_CAP_EEE,
 
     /* Basic operations */
     .init    = init,

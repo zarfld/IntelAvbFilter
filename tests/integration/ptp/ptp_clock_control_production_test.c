@@ -147,7 +147,44 @@ int main(void) {
     if (h == INVALID_HANDLE_VALUE) {
         return 1;
     }
-    
+
+    /* Open the first available adapter — required before IOCTL_AVB_GET_CLOCK_CONFIG.
+     * The driver gates GET_CLOCK_CONFIG on FsContext != NULL (set by OPEN_ADAPTER).
+     * Without this call the driver returns STATUS_UNSUCCESSFUL (error 31). */
+    {
+        AVB_ENUM_REQUEST enum_req;
+        AVB_OPEN_REQUEST open_req;
+        DWORD br = 0;
+
+        ZeroMemory(&enum_req, sizeof(enum_req));
+        enum_req.index = 0;
+        if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
+                             &enum_req, sizeof(enum_req),
+                             &enum_req, sizeof(enum_req), &br, NULL)
+            || enum_req.status != 0) {
+            printf("ERROR: ENUM_ADAPTERS failed — no adapter found (error %lu)\n",
+                   GetLastError());
+            CloseHandle(h);
+            return 1;
+        }
+
+        ZeroMemory(&open_req, sizeof(open_req));
+        open_req.vendor_id = enum_req.vendor_id;
+        open_req.device_id = enum_req.device_id;
+        open_req.index = 0;
+        if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                             &open_req, sizeof(open_req),
+                             &open_req, sizeof(open_req), &br, NULL)
+            || open_req.status != 0) {
+            printf("ERROR: OPEN_ADAPTER failed (error %lu, status=0x%08X)\n",
+                   GetLastError(), open_req.status);
+            CloseHandle(h);
+            return 1;
+        }
+        printf("Opened adapter VID=0x%04X DID=0x%04X index=0\n\n",
+               enum_req.vendor_id, enum_req.device_id);
+    }
+
     // Test 1: Query initial clock configuration
     printf("Test 1: Query Clock Configuration\n");
     {

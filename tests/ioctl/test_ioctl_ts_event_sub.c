@@ -4,6 +4,10 @@
  * 
  * Implements: #314 (TEST-TS-EVENT-SUB-001)
  * Verifies: #13 (REQ-F-TS-EVENT-SUB-001: Timestamp Event Subscription via IOCTL)
+ * Implements: #237 (TEST-EVENT-001: Verify PTP HW Timestamp Capture Event Notifications)
+ * Verifies:   #168 (REQ-F-EVENT-001: Emit PTP Hardware Timestamp Capture Events)
+ * Implements: #327 (TEST-TSRING-001: Verify Shared Memory Ring Buffer for Timestamp Events)
+ * Verifies:   #19 (REQ-F-TSRING-001: Shared Memory Ring Buffer for Timestamp Events)
  * 
  * Test Plan: TEST-PLAN-IOCTL-NEW-2025-12-31.md
  * IOCTLs: 33 (SUBSCRIBE_TS_EVENTS), 34 (MAP_TS_RING_BUFFER)
@@ -14,6 +18,10 @@
  * 
  * @see https://github.com/zarfld/IntelAvbFilter/issues/314
  * @see https://github.com/zarfld/IntelAvbFilter/issues/13
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/237
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/168
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/327
+ * @see https://github.com/zarfld/IntelAvbFilter/issues/19
  */
 
 #include <windows.h>
@@ -1107,8 +1115,17 @@ void Test_TargetTimeReachedEvent(TestContext *ctx) {
     if (!result) {
         UnmapRingBuffer(mapped_buffer);
         Unsubscribe(ctx->adapter, subscription);
-        PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
-                        "DeviceIoControl failed");
+        if (lastError == ERROR_NOT_SUPPORTED) {
+            /* Driver returned STATUS_NOT_SUPPORTED: device has no set_target_time op
+             * (e.g. I219 has no TRGTTIML registers).  This is correct driver behaviour;
+             * the test cannot run on this device — SKIP, not FAIL. */
+            PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_SKIP,
+                            "Device does not support SET_TARGET_TIME (ERROR_NOT_SUPPORTED) "
+                            "— no TRGTTIML registers (I219 or similar)");
+        } else {
+            PrintTestResult(ctx, "UT-TS-EVENT-003: Target Time Reached Event", TEST_FAIL,
+                            "DeviceIoControl failed");
+        }
         return;
     }
     

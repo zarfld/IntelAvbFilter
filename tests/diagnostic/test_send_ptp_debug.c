@@ -42,14 +42,18 @@ int main(void) {
     }
     printf("[OK] Device opened\n\n");
     
-    // Enumerate adapters first
-    printf("Enumerating adapters...\n");
-    for (UINT32 i = 0; i < 10; i++) {
+    // Enumerate adapters and test IOCTL_AVB_TEST_SEND_PTP on each
+    printf("Enumerating adapters and testing IOCTL_AVB_TEST_SEND_PTP on each...\n\n");
+
+    int totalAdapters = 0;
+    int failCount = 0;
+
+    for (UINT32 i = 0; i < 16; i++) {
         AVB_ENUM_REQUEST enum_req = {0};
         enum_req.index = i;
-        
+
         DWORD bytesRet = 0;
-        BOOL success = DeviceIoControl(
+        BOOL enumOk = DeviceIoControl(
             hDevice,
             IOCTL_AVB_ENUM_ADAPTERS,
             &enum_req, sizeof(enum_req),
@@ -57,75 +61,81 @@ int main(void) {
             &bytesRet,
             NULL
         );
-        
-        if (!success || enum_req.status != NDIS_STATUS_SUCCESS) {
-            break;
+
+        if (!enumOk || enum_req.status != NDIS_STATUS_SUCCESS) {
+            break;  /* no more adapters */
         }
-        
-        printf("  Adapter %u: VID=0x%04X, DID=0x%04X, Caps=0x%08X\n",
+
+        totalAdapters++;
+        printf("--- Adapter %u: VID=0x%04X, DID=0x%04X, Caps=0x%08X ---\n",
                i, enum_req.vendor_id, enum_req.device_id, enum_req.capabilities);
+
+        printf("Testing IOCTL_AVB_TEST_SEND_PTP (Code 51)...\n");
+        printf("  Adapter Index: %u\n", i);
+        printf("  Sequence ID: 1\n\n");
+
+        AVB_TEST_SEND_PTP_REQUEST req = {0};
+        req.adapter_index = i;
+        req.sequence_id = 1;
+
+        DWORD bytesReturned = 0;
+        BOOL success = DeviceIoControl(
+            hDevice,
+            IOCTL_AVB_TEST_SEND_PTP,
+            &req, sizeof(req),
+            &req, sizeof(req),
+            &bytesReturned,
+            NULL
+        );
+
+        printf("IOCTL Result:\n");
+        printf("  DeviceIoControl success: %s\n", success ? "YES" : "NO");
+        if (!success) {
+            printf("  GetLastError(): %lu (0x%08lX)\n", GetLastError(), GetLastError());
+        }
+        printf("  BytesReturned: %lu\n", bytesReturned);
+        printf("  req.status: 0x%08X\n", req.status);
+        printf("  req.packets_sent: %u\n\n", req.packets_sent);
+
+        // Decode status
+        printf("Status Interpretation:\n");
+        if (req.status == NDIS_STATUS_SUCCESS) {
+            printf("  ✓ SUCCESS - Packet sent successfully\n");
+        } else if (req.status == NDIS_STATUS_ADAPTER_NOT_FOUND) {
+            printf("  ✗ NDIS_STATUS_ADAPTER_NOT_FOUND (0xC0010002)\n");
+            printf("    → Adapter index %u not found in FilterModuleList\n", req.adapter_index);
+            printf("    → Check: Is adapter bound to filter?\n");
+            failCount++;
+        } else if (req.status == NDIS_STATUS_RESOURCES) {
+            printf("  ✗ NDIS_STATUS_RESOURCES (0xC000009A)\n");
+            printf("    → NBL/NB pools not allocated\n");
+            failCount++;
+        } else if (req.status == NDIS_STATUS_ADAPTER_NOT_READY) {
+            printf("  ✗ NDIS_STATUS_ADAPTER_NOT_READY (0xC00000AD)\n");
+            printf("    → filter_instance is NULL\n");
+            failCount++;
+        } else if (req.status == NDIS_STATUS_FAILURE) {
+            printf("  ✗ NDIS_STATUS_FAILURE (0xC0000001)\n");
+            printf("    → Generic failure in IOCTL handler\n");
+            failCount++;
+        } else {
+            printf("  ✗ UNKNOWN STATUS: 0x%08X\n", req.status);
+            failCount++;
+        }
+        printf("\n");
     }
-    printf("\n");
-    
-    // Test IOCTL_AVB_TEST_SEND_PTP for adapter index 0
-    printf("Testing IOCTL_AVB_TEST_SEND_PTP (Code 51)...\n");
-    printf("  Adapter Index: 0\n");
-    printf("  Sequence ID: 1\n\n");
-    
-    AVB_TEST_SEND_PTP_REQUEST req = {0};
-    req.adapter_index = 0;
-    req.sequence_id = 1;
-    
-    DWORD bytesReturned = 0;
-    BOOL success = DeviceIoControl(
-        hDevice,
-        IOCTL_AVB_TEST_SEND_PTP,
-        &req, sizeof(req),
-        &req, sizeof(req),
-        &bytesReturned,
-        NULL
-    );
-    
-    printf("IOCTL Result:\n");
-    printf("  DeviceIoControl success: %s\n", success ? "YES" : "NO");
-    if (!success) {
-        printf("  GetLastError(): %lu (0x%08lX)\n", GetLastError(), GetLastError());
-    }
-    printf("  BytesReturned: %lu\n", bytesReturned);
-    printf("  req.status: 0x%08X\n", req.status);
-    printf("  req.packets_sent: %u\n\n", req.packets_sent);
-    
-    // Decode status
-    printf("Status Interpretation:\n");
-    if (req.status == NDIS_STATUS_SUCCESS) {
-        printf("  ✓ SUCCESS - Packet sent successfully\n");
-    } else if (req.status == NDIS_STATUS_ADAPTER_NOT_FOUND) {
-        printf("  ✗ NDIS_STATUS_ADAPTER_NOT_FOUND (0xC0010002)\n");
-        printf("    → Adapter index %u not found in FilterModuleList\n", req.adapter_index);
-        printf("    → Check: Is I226 adapter bound to filter?\n");
-    } else if (req.status == NDIS_STATUS_RESOURCES) {
-        printf("  ✗ NDIS_STATUS_RESOURCES (0xC000009A)\n");
-        printf("    → NBL/NB pools not allocated\n");
-        printf("    → Check: Did AvbCreateMinimalContext succeed?\n");
-    } else if (req.status == NDIS_STATUS_ADAPTER_NOT_READY) {
-        printf("  ✗ NDIS_STATUS_ADAPTER_NOT_READY (0xC00000AD)\n");
-        printf("    → filter_instance is NULL\n");
-        printf("    → Check: Is filter attached to adapter?\n");
-    } else if (req.status == NDIS_STATUS_FAILURE) {
-        printf("  ✗ NDIS_STATUS_FAILURE (0xC0000001)\n");
-        printf("    → Generic failure in IOCTL handler\n");
-    } else {
-        printf("  ✗ UNKNOWN STATUS: 0x%08X\n", req.status);
-    }
-    
+
     printf("\n====================================================================\n");
-    if (req.status == NDIS_STATUS_SUCCESS && req.packets_sent > 0) {
-        printf("RESULT: SUCCESS - Packet injection working!\n");
+    printf("  Adapters tested: %d   Failures: %d\n", totalAdapters, failCount);
+    if (totalAdapters == 0) {
+        printf("RESULT: NO ADAPTERS FOUND\n");
+    } else if (failCount == 0) {
+        printf("RESULT: SUCCESS - Packet injection working on all adapters!\n");
     } else {
-        printf("RESULT: FAILED - See status interpretation above\n");
+        printf("RESULT: FAILED - %d adapter(s) failed (see above)\n", failCount);
     }
     printf("====================================================================\n");
-    
+
     CloseHandle(hDevice);
-    return (req.status == NDIS_STATUS_SUCCESS) ? 0 : 1;
+    return (totalAdapters > 0 && failCount == 0) ? 0 : 1;
 }

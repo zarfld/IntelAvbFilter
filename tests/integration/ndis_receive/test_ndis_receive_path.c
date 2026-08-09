@@ -16,7 +16,7 @@ Abstract:
     - DISPATCH_LEVEL IRQL validation
     - FilterReceive callback registration
 
-    Test execution via IOCTL infrastructure on real hardware (6x Intel I226 adapters).
+    Test execution via IOCTL infrastructure on real hardware (all enumerated Intel adapters).
     
     Traces to: #290 (TEST-NDIS-RECEIVE-PATH-001)
     Verifies: #43 (REQ-F-NDIS-RECEIVE-001: FilterReceive / FilterReceiveNetBufferLists)
@@ -108,11 +108,7 @@ BOOL Test_NonPtpPacketFastPath()
         return FALSE;
     }
 
-    if (adapterCount != 6) {
-        printf("  ⚠️  Expected 6 adapters, found %lu\n", adapterCount);
-    }
-
-    printf("  ✅ PASS: FilterReceive operational (%lu adapters)\n", adapterCount);
+    printf("  ✅ PASS: FilterReceive operational (%lu adapter(s))\n", adapterCount);
     CloseHandle(hDevice);
     return TRUE;
 }
@@ -218,14 +214,10 @@ BOOL Test_NblChainProcessing()
         return FALSE;
     }
 
-    if (adapterCount == 6) {
-        printf("  ✅ PASS: All 6 adapters processed (NBL chain handling confirmed)\n");
-    } else {
-        printf("  ⚠️  Expected 6 adapters, found %lu\n", adapterCount);
-    }
+    printf("  ✅ PASS: %lu adapter(s) processed (NBL chain handling confirmed)\n", adapterCount);
 
     CloseHandle(hDevice);
-    return (adapterCount == 6);
+    return (adapterCount >= 1);
 }
 
 //=============================================================================
@@ -296,14 +288,10 @@ BOOL Test_FilterReceiveCallbackRegistration()
         return FALSE;
     }
 
-    if (adapterCount == 6) {
-        printf("  ✅ PASS: All 6 adapters attached (callback registration confirmed)\n");
-    } else {
-        printf("  ⚠️  Expected 6 adapters, found %lu\n", adapterCount);
-    }
+    printf("  ✅ PASS: %lu adapter(s) attached (callback registration confirmed)\n", adapterCount);
 
     CloseHandle(hDevice);
-    return (adapterCount == 6);
+    return (adapterCount >= 1);
 }
 
 //=============================================================================
@@ -314,7 +302,7 @@ int main(int argc, char *argv[])
 {
     printf("\n============================================================\n");
     printf("  TEST-NDIS-RECEIVE-PATH-001: NDIS FilterReceive Tests\n");
-    printf("  Hardware: 6x Intel I226-LM 2.5GbE Network Adapters\n");
+    printf("  Hardware: All enumerated Intel adapters\n");
     printf("  Test Type: User-mode integration via IOCTL\n");
     printf("  Verifies: #43 (REQ-F-NDIS-RECEIVE-001)\n");
     printf("  Traces to: #290 (TEST-NDIS-RECEIVE-PATH-001)\n");

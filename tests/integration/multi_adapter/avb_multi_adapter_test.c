@@ -788,56 +788,73 @@ static void TestMultiAdapterEnumeration(HANDLE h) {
 }
 
 static void TestAdapterSelection(HANDLE h) {
-    printf("\n?? === ENHANCED ADAPTER SELECTION TEST ===\n");
-    
-    // Test opening specific adapters with full validation
-    USHORT testDeviceIds[] = {0x1533, 0x125B}; // I210, I226 (only test existing adapters)
-    char* deviceNames[] = {"I210", "I226"};
-    
-    for (int i = 0; i < sizeof(testDeviceIds)/sizeof(testDeviceIds[0]); i++) {
-        printf("\n?? Comprehensive test for %s (DID=0x%04X):\n", deviceNames[i], testDeviceIds[i]);
-        
+    printf("\n🔬 === ENHANCED ADAPTER SELECTION TEST ===\n");
+    printf("Testing all enumerated adapters dynamically.\n");
+
+    DWORD br = 0;
+    int tested = 0;
+
+    for (UINT32 idx = 0; idx < 16; idx++) {
+        AVB_ENUM_REQUEST enumReq;
+        ZeroMemory(&enumReq, sizeof(enumReq));
+        enumReq.index = idx;
+
+        if (!DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS, &enumReq, sizeof(enumReq),
+                             &enumReq, sizeof(enumReq), &br, NULL)
+            || enumReq.status != 0) {
+            break;  /* no more adapters */
+        }
+
+        printf("\n🔬 Comprehensive test for adapter %u (VID=0x%04X DID=0x%04X):\n",
+               idx, enumReq.vendor_id, enumReq.device_id);
+        tested++;
+
         AVB_OPEN_REQUEST openReq;
         ZeroMemory(&openReq, sizeof(openReq));
-        openReq.vendor_id = 0x8086;
-        openReq.device_id = testDeviceIds[i];
-        
-        DWORD br = 0;
-        BOOL result = DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER, &openReq, sizeof(openReq), 
-                                     &openReq, sizeof(openReq), &br, NULL);
-        
+        openReq.vendor_id = enumReq.vendor_id;
+        openReq.device_id = enumReq.device_id;
+
+        BOOL result = DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER, &openReq, sizeof(openReq),
+                                      &openReq, sizeof(openReq), &br, NULL);
+
         if (result && openReq.status == 0) {
-            printf("   ? Successfully opened %s adapter\n", deviceNames[i]);
-            
+            printf("   ✅ Successfully opened adapter\n");
+
             // Get device information
             AVB_DEVICE_INFO_REQUEST infoReq;
             ZeroMemory(&infoReq, sizeof(infoReq));
-            
-            if (DeviceIoControl(h, IOCTL_AVB_GET_DEVICE_INFO, &infoReq, sizeof(infoReq), 
-                               &infoReq, sizeof(infoReq), &br, NULL)) {
-                printf("   ?? Device Info: \"%s\"\n", infoReq.device_info);
+
+            if (DeviceIoControl(h, IOCTL_AVB_GET_DEVICE_INFO, &infoReq, sizeof(infoReq),
+                                &infoReq, sizeof(infoReq), &br, NULL)) {
+                printf("   📋 Device Info: \"%s\"\n", infoReq.device_info);
             }
-            
+
             // Test CTRL register to verify register access
             AVB_REGISTER_REQUEST regReq;
             ZeroMemory(&regReq, sizeof(regReq));
             regReq.offset = 0x00000; // CTRL
-            
-            if (DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &regReq, sizeof(regReq), 
-                               &regReq, sizeof(regReq), &br, NULL)) {
-                printf("   ?? CTRL Register: 0x%08X ? Hardware access working\n", regReq.value);
+
+            if (DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &regReq, sizeof(regReq),
+                                &regReq, sizeof(regReq), &br, NULL)) {
+                printf("   📊 CTRL Register: 0x%08X ✅ Hardware access working\n", regReq.value);
             } else {
-                printf("   ? Failed to read CTRL register\n");
+                printf("   ❌ Failed to read CTRL register\n");
             }
-            
+
         } else {
-            printf("   ? Failed to open %s adapter\n", deviceNames[i]);
+            printf("   ❌ Failed to open adapter\n");
             if (result) {
                 printf("      IOCTL succeeded but adapter status: 0x%08X\n", openReq.status);
             } else {
                 printf("      IOCTL failed with error: %lu\n", GetLastError());
             }
         }
+    }
+
+    if (tested == 0) {
+        printf("   ⚠️  No adapters enumerated\n");
+    } else {
+        printf("\n   Adapters tested: %d\n", tested);
     }
 }
 

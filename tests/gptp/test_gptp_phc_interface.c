@@ -46,10 +46,18 @@ static int g_skip = 0;
 /* ────────────────────────── helpers ────────────────────────────────────────── */
 static HANDLE OpenDevice(void)
 {
-    return CreateFileA(DEVICE_NAME,
-                       GENERIC_READ | GENERIC_WRITE,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE,
-                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h = CreateFileA(DEVICE_NAME,
+                           GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return h;
+    /* Select adapter 0 — required before GET_CLOCK_CONFIG and other per-adapter IOCTLs */
+    AVB_OPEN_REQUEST req = {0};
+    req.index = 0;
+    DWORD ret = 0;
+    DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER, &req, sizeof(req),
+                    &req, sizeof(req), &ret, NULL);
+    return h;
 }
 
 static BOOL IoctlInOut(HANDLE h, DWORD code, void *buf, DWORD sz)
