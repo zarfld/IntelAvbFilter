@@ -34,6 +34,15 @@
 #define INTEL_DEV_I217_V            0x153BU  /* I217-V                */
 
 /* --------------------------------------------------------------------------
+ * Intel I350 family (IGB server NIC, IEEE 1588 PTP, no TSN)
+ * -------------------------------------------------------------------------- */
+#define INTEL_DEV_I350_T4           0x1521U  /* I350-T4  4-port Copper */
+#define INTEL_DEV_I350_F2           0x1522U  /* I350-F2  2-port Fiber  */
+#define INTEL_DEV_I350_F4           0x1523U  /* I350-F4  4-port Fiber  */
+#define INTEL_DEV_I350_T2           0x1524U  /* I350-T2  2-port Copper */
+#define INTEL_DEV_I350_DA4          0x1546U  /* I350-DA4 4-port SFP+   */
+
+/* --------------------------------------------------------------------------
  * Intel I219 family (PCH integrated, MDIO interface)
  * -------------------------------------------------------------------------- */
 #define INTEL_DEV_I219_LM_A0        0x15A0U  /* I219-LM (A0)          */

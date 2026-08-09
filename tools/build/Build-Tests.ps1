@@ -437,6 +437,15 @@ $AllTests = @(
         Description = "I217 device-specific test: caps, MDIO, EEE, TSN NOT_SUPPORTED (Issue #114)"
     },
     @{
+        Name = "avb_test_i350"
+        Type = "cl"
+        Source = "tests/device_specific/i350/avb_test_i350.c"
+        ExtraSources = "tests/common/avb_test_common.c"
+        Output = "avb_test_i350.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "I350 device-specific test: caps, MDIO, IEEE 1588, TSN NOT_SUPPORTED"
+    },
+    @{
         Name = "avb_test_i225"
         Type = "cl"
         Source = "tests/device_specific/i225/avb_test_i225.c"

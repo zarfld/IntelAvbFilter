@@ -171,6 +171,13 @@ const char *AvbDeviceName(avb_u16 device_id)
         case INTEL_DEV_I217_LM:       return "I217-LM";
         case INTEL_DEV_I217_V:        return "I217-V";
 
+        /* Intel I350 family */
+        case INTEL_DEV_I350_T4:       return "I350-T4";
+        case INTEL_DEV_I350_F2:       return "I350-F2";
+        case INTEL_DEV_I350_F4:       return "I350-F4";
+        case INTEL_DEV_I350_T2:       return "I350-T2";
+        case INTEL_DEV_I350_DA4:      return "I350-DA4";
+
         default:                      return "Intel-NIC";
     }
 }

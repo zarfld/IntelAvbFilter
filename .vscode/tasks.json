@@ -198,6 +198,24 @@
 			"group": "test"
 		},
 		{
+			"label": "build-test-i350",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"tools/build/Build-Tests.ps1",
+				"-TestName",
+				"avb_test_i350"
+			],
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "test"
+		},
+		{
 			"label": "build-quick-diagnostics",
 			"type": "shell",
 			"command": "powershell",
@@ -249,6 +267,24 @@
 			},
 			"dependsOn": [
 				"build-test-i219"
+			]
+		},
+		{
+			"label": "run-i350-test",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"./avb_test_i350.exe"
+			],
+			"presentation": {
+				"reveal": "always"
+			},
+			"dependsOn": [
+				"build-test-i350"
 			]
 		},
 		{
