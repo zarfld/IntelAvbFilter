@@ -1816,6 +1816,7 @@ Return Value:
             // The upgrade path is kept for future HW that does implement TaggedTransmitHw.
             // CRITICAL: Must be read BEFORE NdisFreeNetBufferList() — reading after free is UAF.
             // InterlockedExchange64 is safe at DISPATCH_LEVEL (single XCHG instruction on x64).
+#if NDIS_SUPPORT_NDIS680
             if (avbCtx) {
                 // Try NDIS 6.82 TaggedTransmitHw path first (slot 26 = NetBufferListInfoReserved3).
                 // igc.sys populates this only if it implements TaggedTransmitHw.
@@ -1835,6 +1836,7 @@ Return Value:
                     DEBUGP(DL_TRACE, "TX timestamp: slot26=0, keeping pre-send SYSTIM\n");
                 }
             }
+#endif /* NDIS_SUPPORT_NDIS680 */
 
             // Return NBL to ring (fast path) or free from pool (fallback slow path).
             if (avbCtx) {
@@ -1842,7 +1844,9 @@ Return Value:
                 for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
                     if (avbCtx->test_nbl_ring[_ri].nbl == CurrNbl) {
                         // Ring-allocated: clear OOB timestamp slot.
+#if NDIS_SUPPORT_NDIS680
                         CurrNbl->NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] = NULL;
+#endif
                         // Atomically swap in_use back; check old value for deferred-cleanup.
                         LONG old_in_use = InterlockedExchange(&avbCtx->test_nbl_ring[_ri].in_use, 0);
                         if (old_in_use == 2) {
