@@ -65,6 +65,38 @@ function Write-Fail   { param([string]$m) Write-Host "[FAIL] $m" -ForegroundColo
 function Write-Skip   { param([string]$m) Write-Host "[SKIP] $m" -ForegroundColor DarkGray }
 function Write-Note   { param([string]$m) Write-Host "[INFO] $m" -ForegroundColor Yellow }
 
+# Checks IntelAvbFilter service health; attempts one restart if Stopped.
+# Returns $false (and logs cause) if stuck in STOP_PENDING or restart fails.
+function Test-AvbDriverHealth {
+    param([string]$AfterTest = '')
+    $tag = if ($AfterTest) { " after $AfterTest" } else { '' }
+    $svc = Get-Service -Name 'IntelAvbFilter' -ErrorAction SilentlyContinue
+    if ($null -eq $svc) {
+        Write-Host "  [INFRA] IntelAvbFilter service not found$tag" -ForegroundColor Red
+        return $false
+    }
+    if ($svc.Status -eq 'Running') { return $true }
+    if ($svc.Status -eq 'StopPending') {
+        Write-Host "  [INFRA] IntelAvbFilter STOP_PENDING$tag -- stuck; requires reboot to recover" -ForegroundColor Red
+        return $false
+    }
+    Write-Host "  [INFRA] IntelAvbFilter is $($svc.Status)$tag -- attempting restart..." -ForegroundColor Yellow
+    try {
+        Start-Service -Name 'IntelAvbFilter' -ErrorAction Stop
+        Start-Sleep -Seconds 5
+        $svc.Refresh()
+        if ($svc.Status -eq 'Running') {
+            Write-Host "  [INFRA] IntelAvbFilter restarted successfully" -ForegroundColor DarkGray
+            return $true
+        }
+        Write-Host "  [INFRA] IntelAvbFilter restart did not reach Running (status: $($svc.Status))" -ForegroundColor Red
+        return $false
+    } catch {
+        Write-Host "  [INFRA] Start-Service IntelAvbFilter failed: $_" -ForegroundColor Red
+        return $false
+    }
+}
+
 # ===========================
 # Lifecycle Metrics Snapshot — SSOT: tools/test/Lib-AvbLifecycle.ps1
 # ===========================
@@ -309,11 +341,21 @@ $results     = @()
 $env:AVB_DRIVER_BUILD = $Configuration
 Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
 
-Write-Step "Running $($TestList.Count) hardware-independent tests"
+Write-Step "Running $($TestList.Count) tests"
+
+$driverLost = $false   # set when driver becomes inaccessible mid-suite
 
 foreach ($TestName in $TestList) {
     $exeName = if ($TestName.EndsWith(".exe")) { $TestName } else { "$TestName.exe" }
     $exePath = Join-Path $testExeDir $exeName
+
+    # Skip remaining hardware tests if driver was lost by a previous test.
+    if ($driverLost) {
+        Write-Skip "$exeName (INFRA: driver lost -- skipping to prevent cascade failures)"
+        $skippedTests++
+        $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED(INFRA)"; Exit = "N/A" }
+        continue
+    }
 
     if (-not (Test-Path $exePath)) {
         Write-Skip "$exeName (binary not found -- not built or not applicable)"
@@ -362,6 +404,12 @@ foreach ($TestName in $TestList) {
             Write-Note "-FailFast: stopping after first failure"
             break
         }
+    }
+
+    # After each hardware test: verify the driver is still accessible.
+    if ($Suite -like 'Hardware*' -and -not (Test-AvbDriverHealth -AfterTest $exeName)) {
+        Write-Fail "INFRA: driver lost after $exeName -- remaining hardware tests will be skipped"
+        $driverLost = $true
     }
 }
 

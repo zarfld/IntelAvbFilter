@@ -713,6 +713,13 @@ jobs:
           # NOT suitable for headless CI.  Run-Tests-CI.ps1 is the correct entry point here.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Unit
 
+      - name: Verify IntelAvbFilter driver accessible (self-hosted)
+        # Pre-flight: confirm the driver is Running and the device node opens before
+        # launching 50+ hardware tests that would all cascade-fail if the driver is down.
+        if: runner.os == 'Windows' && matrix.hardware == true
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: .\tools\test\Test-DriverPreFlight.ps1
+
       - name: Run hardware-dependent unit tests (self-hosted, Intel NIC required)
         # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
         # test_s3_sleep_wake is intentionally absent from HardwareUnit: TC-S3-002 calls
@@ -1298,6 +1305,12 @@ jobs:
         run: |
           # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Integration
+
+      - name: Verify IntelAvbFilter driver accessible (self-hosted)
+        # Pre-flight: confirm driver state before integration tests for the same reason as the unit-test job.
+        if: runner.os == 'Windows' && matrix.hardware == true
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: .\tools\test\Test-DriverPreFlight.ps1
 
       - name: Run hardware-dependent integration tests (self-hosted, Intel NIC required)
         # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
