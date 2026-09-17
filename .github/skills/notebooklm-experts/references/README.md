@@ -131,7 +131,7 @@ stateDiagram-v2
 
 # Add notebook đầu tiên
 .\run.bat notebook_manager.py add \
-  --url "https://notebooklm.google.com/notebook/..." \
+  --url "https://notebook.google.com/notebook/..." \
   --name "My Docs" \
   --description "What this contains" \
   --topics "topic1,topic2"

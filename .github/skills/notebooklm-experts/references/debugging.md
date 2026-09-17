@@ -1,5 +1,5 @@
 ---
-name: notebooklm-debugging
+name: Gemini Notebook-debugging
 description: Per-layer debug workflow and recovery guide for the NotebookLM skill
 ---
 

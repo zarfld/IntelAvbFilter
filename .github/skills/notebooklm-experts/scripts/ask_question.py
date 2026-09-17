@@ -71,7 +71,7 @@ def refresh_notebook_name_only(notebook_url: str, headless: bool = True, profile
         page = context.new_page()
         print("  Opening notebook for name refresh...")
         page.goto(notebook_url, wait_until="domcontentloaded")
-        page.wait_for_url(re.compile(r"^https://notebooklm\.google\.com/"), timeout=10000)
+        page.wait_for_url(re.compile(r"^https://notebook\.google\.com/"), timeout=10000)
 
         detected_title = ""
         deadline = time.time() + 10
@@ -160,7 +160,7 @@ def ask_notebooklm(question: str, notebook_url: str, headless: bool = True, prof
         page.goto(notebook_url, wait_until="domcontentloaded")
 
         # Wait for NotebookLM
-        page.wait_for_url(re.compile(r"^https://notebooklm\.google\.com/"), timeout=10000)
+        page.wait_for_url(re.compile(r"^https://notebook\.google\.com/"), timeout=10000)
 
         # Refresh notebook name in library if page title changed.
         try:

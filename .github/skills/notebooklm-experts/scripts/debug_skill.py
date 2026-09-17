@@ -142,7 +142,7 @@ class SmokeTester:
                     "Library is empty — no notebooks registered",
                     hint=(
                         "Run:  .\\run.bat notebook_manager.py add \\\n"
-                        "           --url \"https://notebooklm.google.com/notebook/...\" \\\n"
+                        "           --url \"https://notebook.google.com/notebook/...\" \\\n"
                         "           --name \"My Docs\" --description \"...\" --topics \"topic1,topic2\""
                     )
                 )
@@ -199,7 +199,7 @@ class SmokeTester:
             with sync_playwright() as p:
                 context = BrowserFactory.launch_persistent_context(p, headless=True)
                 page = context.new_page()
-                page.goto("https://notebooklm.google.com/", wait_until="domcontentloaded")
+                page.goto("https://notebook.google.com/", wait_until="domcontentloaded")
                 title = page.title()
                 url_after = page.url
                 context.close()

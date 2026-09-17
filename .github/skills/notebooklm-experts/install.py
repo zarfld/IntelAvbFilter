@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-First-time setup for NotebookLM Experts skill.
+First-time setup for Gemini Notebook Experts skill.
 Creates an isolated .venv and installs all dependencies.
 
 Usage:

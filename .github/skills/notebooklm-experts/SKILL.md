@@ -1,5 +1,5 @@
 ---
-name: notebooklm-experts
+name: Gemini Notebook-experts
 description: This skill should be used when the user wants to query Google NotebookLM notebooks directly from GitHub Copilot for source-grounded, citation-backed answers from Gemini. Provides browser automation, isolated venv, library management, and persistent auth. Drastically reduced hallucinations through document-only responses.
 license: MIT
 compatibility: Requires Python 3.9+, Google Chrome, uv package manager
@@ -19,7 +19,7 @@ Interact with Google NotebookLM to query documentation with Gemini's source-grou
 
 Trigger when user:
 - Mentions NotebookLM explicitly
-- Shares NotebookLM URL (`https://notebooklm.google.com/notebook/...`)
+- Shares NotebookLM URL (`https://notebook.google.com/notebook/...`)
 - Asks to query their notebooks or documentation
 - Wants to add documentation to the NotebookLM library
 - Uses phrases like "ask my NotebookLM", "check my docs", "query my notebook"
@@ -144,7 +144,7 @@ After completion, profile is ready to use:
 
 :: Add notebook to library (ALL parameters REQUIRED)
 .\run.bat notebook_manager.py add ^
-  --url "https://notebooklm.google.com/notebook/..." ^
+  --url "https://notebook.google.com/notebook/..." ^
   --name "Descriptive Name" ^
   --description "What this notebook contains" ^
   --topics "topic1,topic2,topic3"

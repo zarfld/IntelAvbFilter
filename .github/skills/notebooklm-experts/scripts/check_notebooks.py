@@ -65,7 +65,7 @@ class NotebookValidator:
             
             # Check if logged in by visiting home
             print("Verifying session...")
-            page.goto("https://notebooklm.google.com/")
+            page.goto("https://notebook.google.com/")
             time.sleep(3)
             
             if "Sign in" in page.title() or "accounts.google.com" in page.url:
@@ -123,7 +123,7 @@ class NotebookValidator:
             
             if not is_active:
                 # Case 2: Redirected to home (common when notebook doesn't exist or no access)
-                if current_url == "https://notebooklm.google.com/":
+                if current_url == "https://notebook.google.com/":
                     is_active = False
                     reason = "Redirected to home (Not Found/No Access)"
                 # Case 3: Explicit 404 or Error text (needs actual text from UI, guessing common patterns)

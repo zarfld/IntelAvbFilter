@@ -79,7 +79,7 @@ Only **1 test** (`test_hw_state_machine`) exercises all three adapters. The gap 
 
 ## Table 2 — Capability Eligibility
 
-Analytical — derived from runtime capability bitmasks decoded against `INTEL_CAP_*` bit definitions, cross-referenced with Intel adapter datasheets (NotebookLM: https://notebooklm.google.com/notebook/5bcc7d84-81a5-43b7-a629-5622901872a2).
+Analytical — derived from runtime capability bitmasks decoded against `INTEL_CAP_*` bit definitions, cross-referenced with Intel adapter datasheets (NotebookLM: https://notebook.google.com/notebook/5bcc7d84-81a5-43b7-a629-5622901872a2).
 
 Legend: `✅ ELIGIBLE` `⛔ NOT ELIGIBLE` `〰️ AGNOSTIC` (no adapter-specific caps required) `⚠️ PARTIAL` (core eligible; sub-tests need cap gate)
 

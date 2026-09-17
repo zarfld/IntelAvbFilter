@@ -1,4 +1,4 @@
-# NotebookLM Skill Dependencies
+# Gemini Notebook Skill Dependencies
 # These will be installed in the skill's local .venv
 
 # Core browser automation with anti-detection

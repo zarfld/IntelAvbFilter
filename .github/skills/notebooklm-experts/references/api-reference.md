@@ -98,7 +98,7 @@ stateDiagram-v2
 
 | Parameter | Required | Example |
 |-----------|----------|---------|
-| `--url` | Yes | `https://notebooklm.google.com/notebook/...` |
+| `--url` | Yes | `https://notebook.google.com/notebook/...` |
 | `--name` | Yes | `"API Documentation"` |
 | `--description` | Yes | `"Complete REST API docs"` |
 | `--topics` | Yes | `"api,rest,docs"` |
@@ -220,7 +220,7 @@ stateDiagram-v2
       "name": "API Documentation",
       "description": "Complete REST API docs for v2.0",
       "topics": ["api", "rest", "documentation"],
-      "url": "https://notebooklm.google.com/notebook/...",
+      "url": "https://notebook.google.com/notebook/...",
       "added_at": "2024-01-10T12:00:00Z",
       "last_accessed": "2024-01-15T08:30:00Z"
     }
