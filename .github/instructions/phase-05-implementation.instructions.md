@@ -1,6 +1,6 @@
 ---
 description: "Phase 05 guidance for implementation following ISO/IEC/IEEE 12207:2017. Core XP practices: Test-Driven Development (TDD), pair programming, continuous integration, and refactoring."
-applyTo: "05-implementation/**"
+applyTo: "05-implementation/**,src/**/*.c,src/**/*.h,devices/**/*.c,devices/**/*.h,include/**/*.h"
 ---
 
 # Phase 05: Implementation (Construction)
