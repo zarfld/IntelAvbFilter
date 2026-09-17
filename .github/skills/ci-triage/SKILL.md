@@ -31,7 +31,9 @@ This skill replaces that loop with one pass: collect all failure evidence, group
 DO NOT PUSH AFTER FIXING ONLY ONE JOB CATEGORY.
 
 Collect all failed jobs for the target run(s), categorize them,
-and clear every failing category in one local batch before push.
+CREATE A GITHUB ISSUE for each failing category,
+prove all fixes locally,
+and push via a PR that links Fixes/Implements #NNN for every issue.
 ```
 
 ## One-Pass Workflow
@@ -77,9 +79,21 @@ Group failing jobs into these categories:
 
 Build one categorized checklist before editing code.
 
-### 3. Build one combined fix plan
+### 3. Create or identify governing GitHub Issues
 
-For each failing category, define concrete file edits and local verification commands.
+Every confirmed CI failure category requires a GitHub Issue before any fix is implemented. GitHub Issues are the lifecycle SSOT for this repository.
+
+- Search existing open issues for a matching requirement or test-case issue that already covers this failure.
+- If none exists, create a new issue using the appropriate template (REQ-F/REQ-NF for a structural defect; TEST for a failing test case). Include: clear title, affected CI job name, and reproduction evidence from step 1.
+- Record the issue number. It is the governing reference for every commit message and the PR.
+
+Use `lifecycle-traceability` for the exact template fields and relationship syntax required by this repository.
+
+**Do not write a single line of fix code without a governing issue number.**
+
+### 4. Build one combined fix plan
+
+For each failing category, define concrete file edits and local verification commands. Record the governing issue number alongside each planned change.
 
 Rules:
 
@@ -87,11 +101,13 @@ Rules:
 - No "fix-now, triage-later"
 - If the same category failed in prior run(s), include those signatures in the same batch
 
-### 4. Implement all category fixes in one branch state
+### 5. Implement all category fixes in one branch state
+
+Work on a branch that references the governing issue (e.g. `fix/ci-<NNN>-<short-description>`). Every commit message must include the issue reference: `fix: <description> (#NNN)`.
 
 Apply all needed changes before running final verification. Keep changes small and traceable, but do not split into separate push attempts per category.
 
-### 5. Verify locally across all affected categories
+### 6. Verify locally across all affected categories
 
 Run local checks that map to each failed category:
 
@@ -101,9 +117,23 @@ Run local checks that map to each failed category:
 
 Use repository-approved runners and scripts. For test execution details, follow run-tests.
 
-### 6. Push only after all affected categories are green
+**Do not open the PR until all local verifications pass. Evidence first.**
 
-Report evidence by category (command + result) before claiming CI-ready status.
+### 7. Push via PR linked to governing issue(s)
+
+Open a PR that references all governing issues in the PR body using exact repository syntax:
+
+```
+Fixes #NNN
+```
+
+or when the issue should remain open after merge:
+
+```
+Implements #NNN
+```
+
+Use `lifecycle-traceability` for the complete PR relationship syntax. Report per-category verification evidence (command + result) in the PR description before requesting review.
 
 ## IntelAvbFilter-Specific Command Patterns
 
@@ -157,14 +187,19 @@ Before pushing, confirm all items:
 
 - [ ] Failing jobs collected from the target run(s)
 - [ ] Every failure mapped to one of: lint, traceability, test/coverage
-- [ ] Fixes implemented for every failing category
+- [ ] GitHub Issue created or identified for each failing category
+- [ ] Governing issue number(s) recorded
+- [ ] Fixes implemented for every failing category on a branch referencing the issue
+- [ ] Every commit message includes `(#NNN)` issue reference
 - [ ] Local verification run for every failing category
 - [ ] Evidence recorded per category (command + pass/fail)
+- [ ] PR body includes `Fixes #NNN` or `Implements #NNN` for each governing issue
 
-If one category is not locally reproducible, document why and what evidence supports proceeding.
+If one category is not locally reproducible, document why and what evidence supports proceeding — and still create the issue before closing the loop.
 
 ## Use With
 
+- lifecycle-traceability: GitHub Issue creation, PR relationship syntax (`Fixes/Implements #N`), and template field requirements
 - run-tests: correct test entry points and log interpretation
 - systematic-debugging: root-cause-first investigation for non-obvious failures
 - verification-before-completion: evidence before success claims
@@ -175,6 +210,8 @@ If one category is not locally reproducible, document why and what evidence supp
 |---|---|---|
 | Fix only the first failing job in a run | Next CI run fails in another category | Collect all failing jobs first, then batch-fix |
 | Treat "latest run" as full history | Miss recurring failures from prior runs | Include current + relevant previous runs in triage |
+| Start writing fix code before creating a GitHub Issue | No traceability; violates repo lifecycle rules | Create the issue first; record the number before touching code |
+| Open a PR without `Fixes/Implements #N` | PR fails traceability validation; orphan commit | Always link PR to governing issue using exact repo syntax |
 | Verify only tests or only lint | False CI readiness claims | Verify every affected category |
 | Push without category evidence | Rework and trust loss | Report per-category command evidence before push |
 
@@ -182,18 +219,28 @@ If one category is not locally reproducible, document why and what evidence supp
 
 ```text
 1) Collect run evidence
-   - gh run view ... --log-failed
+   - mcp: get_check_runs(pullNumber=NNN)  [preferred]
+   - gh run view ... --log-failed          [fallback]
    - gh run view ... --json jobs
-   - gh run download ... (if artifacts are needed)
 
 2) Build category map
    - Lint:
    - Traceability:
    - Test/Coverage:
 
-3) Implement all fixes in one batch
+3) Create/identify GitHub Issue per failing category
+   - Search existing issues first
+   - Create if none found (use appropriate template)
+   - Record: Issue #NNN governs this fix cycle
 
-4) Verify by category locally
+4) Implement all fixes on branch fix/ci-NNN-<desc>
+   - Commit messages: "fix: <desc> (#NNN)"
 
-5) Push once
+5) Verify by category locally (evidence before claims)
+   - Lint: ...
+   - Traceability: ...
+   - Tests: Run-Tests-CI.ps1 -Suite Unit
+
+6) Open PR with body: "Fixes #NNN" (or "Implements #NNN")
+   - Include per-category evidence in PR description
 ```
