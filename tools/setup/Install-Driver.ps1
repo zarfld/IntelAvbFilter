@@ -673,7 +673,7 @@ try {
             }
             # Exit code 2 = warnings only; proceed with notice
         } else {
-            Write-Host "[WARN] Test-Preconditions.ps1 not found — skipping precondition checks." -ForegroundColor Yellow
+            Write-Host "[WARN] Test-Preconditions.ps1 not found - skipping precondition checks." -ForegroundColor Yellow
         }
     }
 
