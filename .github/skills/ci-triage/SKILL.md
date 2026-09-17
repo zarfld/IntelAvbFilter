@@ -1,146 +1,199 @@
 ---
 name: ci-triage
-description: Use when CI fails across multiple jobs or repeated run URLs are being shared, especially when lint, traceability, and test quality failures appear in separate rounds and should be fixed in one local batch before the next push.
+description: Use when CI failures arrive as repeated run URLs, when multiple jobs fail across successive runs, or when uncertain whether lint, traceability, and test/coverage categories are all fixed before pushing.
 ---
 
-# CI Failure Triage
+# CI Failure Triage for One-Push Recovery
 
 ## Overview
 
-Repeated "fix one CI failure category, push, wait, repeat" loops waste sessions and fragment context.
+Repeated loop pattern:
 
-**Core principle:** Pull all failing job evidence first, classify by failure category, fix all categories in one batch, then verify locally before pushing.
+1. Open one CI run
+2. Fix one failing job
+3. Push
+4. New run fails in a different job
+
+This skill replaces that loop with one pass: collect all failure evidence, group by category, fix all categories in one batch, then verify locally before push.
 
 ## When to Use
 
-Use this skill when:
-- A CI run URL is provided and one or more jobs failed
-- Failures are split across different jobs (for example code quality, traceability, tests)
-- A previous push fixed one job but another job now fails
-- You want one consolidated fix round instead of 3-5 CI cycles
+- The human shares one or more GitHub Actions run URLs and asks for fixes
+- Failures rotate between Code Quality, Traceability Coverage, and Unit Test/Coverage jobs
+- A prior fix passed one job but the next run failed a different category
+- You are unsure whether all CI failure categories are covered locally
 
-Do not use this skill when:
-- CI is fully green
-- Failure is purely infrastructure/transient (runner outage, network interruption)
-- The user asked for a single targeted fix only
+**Not for:** deep single-bug root-cause work without CI evidence. Use systematic-debugging for that.
 
-## Required Inputs
+## The Iron Law
 
-- Run identifier: full URL or numeric run id
-- Repository slug
-- Local branch with write access
+```
+DO NOT PUSH AFTER FIXING ONLY ONE JOB CATEGORY.
 
-If only URL is available, extract run id from the URL path.
+Collect all failed jobs for the target run(s), categorize them,
+and clear every failing category in one local batch before push.
+```
 
 ## One-Pass Workflow
 
-### 1. Collect all failed jobs and logs first
+### 1. Collect complete CI evidence first
 
-```powershell
-# Replace values with actual repo/run
-$repo = "owner/repo"
-$runId = "1234567890"
+**Preferred — GitHub MCP (if available with actions support):**
 
-# Summary with job statuses
-gh run view $runId --repo $repo
+The GitHub MCP tools in this repo's VS Code environment expose `pull_request_read → get_check_runs`, which returns check run name, status, and conclusion for the **current head commit** of a given PR. Use this when you have a PR number.
 
-# JSON for machine-readable triage
-gh run view $runId --repo $repo --json jobs,conclusion,headSha,headBranch,url
+```
+mcp: pull_request_read(method=get_check_runs, pullNumber=NNN)
+→ returns: [{name, status, conclusion, html_url, started_at, completed_at}]
 ```
 
-For each failed job, fetch logs before touching code:
+This covers the category-detection step for lint/traceability/test jobs visible as check runs.
+
+**Hard Limitation — Stop here if blocked:** `get_check_runs` only covers the PR's **current HEAD commit**. If you have a run URL (e.g. `/actions/runs/35227464543`) that is NOT the HEAD of an open PR, the GitHub MCP tools in this environment cannot retrieve its jobs or logs — `GET /actions/runs/{id}/jobs` is not exposed. Options: (a) get the PR number whose HEAD failed and use `get_check_runs`; (b) use gh CLI fallback below; (c) install the full `github/github-mcp-server` which exposes `list_workflow_run_jobs`. For those, fall back to gh CLI:
 
 ```powershell
-gh run view $runId --repo $repo --job <job-id> --log
+# Summary with per-job outcomes (gh CLI fallback)
+gh run view <run-id-or-url> --log-failed
+
+# Machine-readable job list for categorization
+gh run view <run-id-or-url> --json jobs,name,headBranch,headSha,workflowName
+
+# Optional: download artifacts for coverage or reports
+gh run download <run-id-or-url> -D .\artifacts\ci-run-<id>
 ```
 
-If available, download artifacts for deeper diagnostics:
+If the thread includes multiple recent runs, collect each run before planning fixes. Do not assume the latest run contains all failure categories seen in the loop.
 
-```powershell
-gh run download $runId --repo $repo --dir artifacts/ci-$runId
-```
+### 2. Categorize failures by job family
 
-### 2. Categorize failures by remediation domain
+Group failing jobs into these categories:
 
-Group each failing signal into one category:
+- Lint/Code Quality
+  - Static checks, formatting, style, compile-time quality gates
+- Traceability Coverage
+  - Requirement/issue-link validation, traceability matrix checks, SSOT policy checks
+- Unit Test/Coverage
+  - Test failures, failing assertions, coverage threshold failures
 
-| Category | Typical Signals | Primary Fix Surface |
-|---|---|---|
-| Lint / Code Quality | formatting checks, static analysis, style violations | source files, lint config, generated headers as needed |
-| Traceability Coverage | missing or malformed requirement/test links, traceability script failures | requirements/docs/issues metadata, traceability docs/scripts |
-| Unit Test / Coverage | failing test cases, coverage thresholds not met | test logic, implementation defects, missing tests |
+Build one categorized checklist before editing code.
+
+### 3. Build one combined fix plan
+
+For each failing category, define concrete file edits and local verification commands.
 
 Rules:
-- One failure can map to multiple categories if evidence supports it.
-- Do not start fixing until all failed jobs are categorized.
-- Keep a short triage note mapping: job -> category -> file targets.
 
-### 3. Build a single fix batch
+- No single-category push
+- No "fix-now, triage-later"
+- If the same category failed in prior run(s), include those signatures in the same batch
 
-Apply fixes category-by-category locally in one working set:
-- Resolve all lint/code-quality issues
-- Resolve all traceability coverage issues
-- Resolve all unit test/coverage issues
+### 4. Implement all category fixes in one branch state
 
-Use these companion skills during implementation:
-- `run-tests` for correct local test execution and log interpretation
-- `systematic-debugging` before proposing fixes for failing tests
-- `verification-before-completion` before claiming completion
+Apply all needed changes before running final verification. Keep changes small and traceable, but do not split into separate push attempts per category.
 
-### 4. Verify locally before push
+### 5. Verify locally across all affected categories
 
-Run local equivalents for each category before any push:
-- Lint/static checks used by CI
-- Traceability validation script(s)
-- Relevant unit test suite and coverage check(s)
+Run local checks that map to each failed category:
 
-Minimum gate:
-- All locally reproducible CI checks for all failed categories are green
-- No unresolved failures remain from the original run categories
+- Lint/Code Quality: equivalent local lint/static/build command(s)
+- Traceability Coverage: repository traceability/standards validation command(s)
+- Unit Test/Coverage: repository test command(s) for affected suite(s)
 
-### 5. Push once
+Use repository-approved runners and scripts. For test execution details, follow run-tests.
 
-Push only after all categories pass locally. The goal is one push per CI failure round, not one push per job.
+### 6. Push only after all affected categories are green
 
-## Triage Template
+Report evidence by category (command + result) before claiming CI-ready status.
 
-Use this structure in notes/comments while working:
+## IntelAvbFilter-Specific Command Patterns
 
-```text
-Run: <url or id>
-Failed jobs:
-- <job A> -> Lint / Code Quality
-- <job B> -> Traceability Coverage
-- <job C> -> Unit Test / Coverage
+**MCP — check run status for a PR (preferred when PR number is known):**
 
-Planned local checks:
-- <lint command>
-- <traceability command>
-- <tests/coverage command>
-
-Status before push:
-- Lint: PASS/FAIL
-- Traceability: PASS/FAIL
-- Tests/Coverage: PASS/FAIL
-
-Decision:
-- Push now / Continue fixing
 ```
+pull_request_read(method=get_check_runs, owner=zarfld, repo=IntelAvbFilter, pullNumber=NNN)
+```
+
+Returns: `name`, `status`, `conclusion`, `html_url` for each check — sufficient to categorize jobs without gh CLI.
+
+**MCP — commit-level combined status:**
+
+```
+pull_request_read(method=get_status, owner=zarfld, repo=IntelAvbFilter, pullNumber=NNN)
+```
+
+**gh CLI — when run ID is known and MCP log access is unavailable:**
+
+```powershell
+gh run view <run-id-or-url> --log-failed
+gh run view <run-id-or-url> --json jobs
+```
+
+**Local test runners:**
+
+```powershell
+# CI/unit-style (no hardware required)
+.\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Unit
+
+# Hardware/interactive
+.\tools\test\Run-Tests-Elevated.ps1 -TestName <test>.exe
+```
+
+For traceability and SSOT checks, run the same scripts invoked by the failing CI job definitions instead of guessing substitutes.
+
+## Anti-Loop Safeguards
+
+Stop and re-triage if any of these appear:
+
+- "Let us fix this one job first and push"
+- "Lint passed locally, so CI should be fine"
+- "We can check traceability after the next run"
+- "Tests probably pass because build passed"
+
+Any of the above means you are re-entering the multi-round CI loop.
+
+## Pre-Push Gate
+
+Before pushing, confirm all items:
+
+- [ ] Failing jobs collected from the target run(s)
+- [ ] Every failure mapped to one of: lint, traceability, test/coverage
+- [ ] Fixes implemented for every failing category
+- [ ] Local verification run for every failing category
+- [ ] Evidence recorded per category (command + pass/fail)
+
+If one category is not locally reproducible, document why and what evidence supports proceeding.
+
+## Use With
+
+- run-tests: correct test entry points and log interpretation
+- systematic-debugging: root-cause-first investigation for non-obvious failures
+- verification-before-completion: evidence before success claims
 
 ## Common Mistakes
 
-| Mistake | Why It Causes CI Loops | Correct Behavior |
+| Mistake | Consequence | Correct behavior |
 |---|---|---|
-| Fixing only the first failed job | Subsequent jobs fail in next run | Categorize all failed jobs first |
-| Pushing before local verification | Uses CI as a debugger | Run local equivalents for all categories |
-| Treating traceability as documentation-only | CI blocks on metadata correctness too | Validate traceability with same rigor as tests |
-| Running tests incorrectly | False pass/fail conclusions | Use `run-tests` entry points and read logs |
+| Fix only the first failing job in a run | Next CI run fails in another category | Collect all failing jobs first, then batch-fix |
+| Treat "latest run" as full history | Miss recurring failures from prior runs | Include current + relevant previous runs in triage |
+| Verify only tests or only lint | False CI readiness claims | Verify every affected category |
+| Push without category evidence | Rework and trust loss | Report per-category command evidence before push |
 
-## Completion Criteria
+## Quick Triage Skeleton
 
-This skill is correctly applied when:
-- All failed jobs from the referenced CI run were inspected
-- Failures were categorized into lint, traceability, and test/coverage domains
-- Fixes for all affected categories were implemented before pushing
-- Local verification for all categories passed
-- Exactly one consolidated push was needed for that CI round
+```text
+1) Collect run evidence
+   - gh run view ... --log-failed
+   - gh run view ... --json jobs
+   - gh run download ... (if artifacts are needed)
+
+2) Build category map
+   - Lint:
+   - Traceability:
+   - Test/Coverage:
+
+3) Implement all fixes in one batch
+
+4) Verify by category locally
+
+5) Push once
+```
