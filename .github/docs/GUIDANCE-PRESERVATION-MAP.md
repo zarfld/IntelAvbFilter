@@ -64,6 +64,7 @@ For executable current guidance, `lifecycle-traceability` follows the repository
 - `.github/ISSUE_TEMPLATE/07-test-case.yml` explicitly requires `Verifies` for TEST → requirement relationships and states that `Traces to` is the wrong relationship for that purpose.
 - `.github/instructions/tests.instructions.md` likewise uses `Verifies: #N` in test-source examples.
 - `Traces to` remains the parent/lineage relationship.
+- The preserved `StandardsComplianceAdvisor` agent contains historical traceability examples; treat `lifecycle-traceability` + templates/CI validator as the executable contract.
 
 If the validator later disagrees with active templates, agents must inspect/report the conflict rather than inventing syntax.
 
@@ -74,7 +75,7 @@ If the validator later disagrees with active templates, agents must inspect/repo
 - It does not remove existing skills or prompts.
 - It does not change requirements, architecture, implementation, or test lifecycle state.
 - It does not treat any previous instruction as "generic filler" merely because it is verbose.
-- It does not yet perform the separate P0.2 instruction-discovery/activation cleanup.
+- It does not yet perform the separate P0.2 instruction-discovery/activation cleanup (including updating existing agent-discovery docs that still refer to the pre-P0.1 root `AGENTS.md` advisor).
 
 ## Review checklist
 

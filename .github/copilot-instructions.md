@@ -134,7 +134,7 @@ Use the existing path-specific phase instructions; they remain authoritative for
 
 `01 Stakeholder Requirements → 02 Requirements → 03 Architecture → 04 Design → 05 Implementation → 06 Integration → 07 Verification & Validation → 08 Transition → 09 Operation & Maintenance`.
 
-Before substantial lifecycle work, identify the phase and apply its `.github/instructions/phase-*.instructions.md` guidance. Use specialist agents when their domain matches the task. For cross-phase standards/lifecycle guidance, use `StandardsComplianceAdvisor` from `.github/agents/standards-compliance-advisor.agent.md`.
+Before substantial lifecycle work, identify the phase and apply its `.github/instructions/phase-*.instructions.md` guidance. Use specialist agents when their domain matches the task. For cross-phase standards/lifecycle guidance, use `StandardsComplianceAdvisor` from `.github/agents/standards-compliance-advisor.agent.md`; for issue/PR/test traceability syntax, use the `lifecycle-traceability` skill (current templates/CI contract).
 
 ## 12. Success criteria
 
