@@ -1,6 +1,6 @@
 ---
 description: "Test-specific traceability and evidence rules for test source/specification files; routes to the preserved detailed testing instruction set on demand."
-applyTo: "**/tests/**,**/*.test.js,**/*.test.ts,**/*.test.py,**/*.spec.js,**/*.spec.ts,**/*.spec.py"
+applyTo: "**/tests/**,**/*.test.js,**/*.test.ts,**/*.test.py,**/*.spec.js,**/*.spec.ts,**/*.spec.py",**/*test*.c,**/tests/**/*.c
 ---
 
 # Test-Specific Instructions
