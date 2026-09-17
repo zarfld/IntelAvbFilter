@@ -36,5 +36,6 @@
         "Group-Object": true,
         "ForEach-Object": true,
         "Test-Path": true
-    }
+    },
+    "chat.sessionSync.enabled": true
 }
