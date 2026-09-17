@@ -137,7 +137,7 @@ intel_write_reg(dev, I226_TSAUXC, value);   // constant name is fine, but callin
 dev->ops->set_auxtime_config(dev, config);
 ```
 
-See `hardware_abstraction_SRC.md` for the full HAL enforcement rules.
+See `.github/instructions/hardware-abstraction-src.instructions.md` for the auto-applied HAL boundary and `.github/docs/HARDWARE-ABSTRACTION-SRC-REFERENCE.md` for the full preserved enforcement guidance.
 
 ---
 
