@@ -62,10 +62,10 @@ public class AvbPreFlight {
 
 $h = [AvbPreFlight]::CreateFile(
     '\\.\IntelAvbFilter',
-    0xC0000000,   # GENERIC_READ | GENERIC_WRITE
-    0, [IntPtr]::Zero,
-    3,            # OPEN_EXISTING
-    0x80,         # FILE_ATTRIBUTE_NORMAL
+    [uint32]0xC0000000,   # GENERIC_READ | GENERIC_WRITE
+    [uint32]0, [IntPtr]::Zero,
+    [uint32]3,            # OPEN_EXISTING
+    [uint32]0x80,         # FILE_ATTRIBUTE_NORMAL
     [IntPtr]::Zero)
 
 if ($h -eq [AvbPreFlight]::INVALID_HANDLE_VALUE) {
