@@ -1,76 +1,81 @@
 ---
-description: "CRITICAL ARCHITECTURAL REQUIREMENT**: All code must use the **Single Source of Truth (SSOT)** header."
-applyTo: "**/**.c"
-applyTo: "**/**.h"
+description: "CRITICAL architectural requirement: C source and header files must use the authoritative AVB IOCTL Single Source of Truth (SSOT) header."
+applyTo: "**/*.c,**/*.h"
 ---
+
 # SSOT Header Usage - Intel AVB Filter Driver
 
-## ? **MANDATORY: Use SSOT Header Path**
+## MANDATORY: Use the SSOT header path
 
-**CRITICAL ARCHITECTURAL REQUIREMENT**: All code must use the **Single Source of Truth (SSOT)** header:
+**CRITICAL ARCHITECTURAL REQUIREMENT**: all affected code must use the **Single Source of Truth (SSOT)** header:
 
 ```c
-// ? CORRECT - SSOT path (ALWAYS use this)
+// CORRECT - authoritative SSOT path
 #include "include/avb_ioctl.h"
 
-// ? WRONG - Legacy/duplicate path (NEVER use this)  
+// WRONG - legacy/duplicate path
 #include "external/intel_avb/include/avb_ioctl.h"
 ```
 
-## ?? **File Structure**
+## File structure
 
-```
+```text
 Intel AVB Filter Driver/
-??? include/avb_ioctl.h  ? ?? SSOT (Single Source of Truth)
-?   ??? Purpose: Authoritative IOCTL definitions
-?   ??? Status: ? MAINTAINED and SYNCHRONIZED
-?
-??? external/intel_avb/include/avb_ioctl.h                     ? ? LEGACY (should not be used)
-    ??? Purpose: Historical duplicate
-    ??? Status: ?? MAY BE OUT OF SYNC
+├── include/avb_ioctl.h
+│   ├── Purpose: authoritative IOCTL definitions
+│   └── Status: maintained SSOT
+└── external/intel_avb/include/avb_ioctl.h
+    ├── Purpose: historical duplicate
+    └── Status: legacy; may be out of sync and must not be used as the project IOCTL SSOT
 ```
 
-## ?? **Why SSOT Matters**
+## Why SSOT matters
 
-According to copilot instructions:
-- **"no duplicate or redundant implementations"**  
-- **"use centralized, reusable functions instead"**
-- **"no implementation based assumptions"**
+This rule implements the repository principles to avoid duplicate/redundant implementations, centralize reusable definitions, and avoid implementation-based assumptions.
 
-### **Problems with Wrong Path**:
-1. **?? Synchronization Issues**: Two headers can drift apart
-2. **?? Build Failures**: Different struct definitions cause link errors  
-3. **? Architecture Violation**: Contradicts clean codebase principles
+Using the legacy path risks:
 
-### **Benefits of SSOT Path**:
-1. **? Guaranteed Consistency**: Single source, no drift
-2. **? Clean Architecture**: Follows established patterns
-3. **? Easy Maintenance**: One file to update
+1. synchronization drift between duplicate headers;
+2. build or ABI failures caused by different structure/constant definitions;
+3. violation of the repository's one-source-of-truth architecture.
 
-## ?? **How to Fix Include Paths**
+Using the canonical path provides one maintained definition set and a clear review/build contract.
 
-### **In User-Mode Test Files**:
+## Include-path guidance
+
+### User-mode test files
+
 ```c
-// From tools/avb_test/ directory:
+// From tools/avb_test/:
 #include "../../include/avb_ioctl.h"
 
-// From tests/taef/ directory:  
+// From tests/taef/:
 #include "../../include/avb_ioctl.h"
 
-// From root directory:
+// From the repository root:
 #include "include/avb_ioctl.h"
 ```
 
-### **In Makefiles**:
+### Makefiles / build configuration
+
+Configure the repository `include` directory, not the legacy external duplicate:
+
 ```makefile
 CFLAGS = /I../../include
 ```
 
-## ?? **Files Fixed for SSOT Compliance**
+For root-based build variables:
 
-### ? **Fixed Files**:
+```makefile
+INCLUDE_PATH = /I$(ROOT)/include
+```
+
+The exact relative form may vary by build file, but it must resolve to the authoritative repository `include/` directory and must not make `external/intel_avb/include` the source of AVB IOCTL definitions.
+
+## Files historically fixed for SSOT compliance
+
 - `tools/avb_test/avb_capability_validation_test_um.c`
-- `tools/avb_test/avb_device_separation_test_um.c`  
+- `tools/avb_test/avb_device_separation_test_um.c`
 - `tools/avb_test/avb_i226_test.c`
 - `tools/avb_test/avb_i226_advanced_test.c`
 - `tools/avb_test/hardware_investigation_tool.c`
@@ -78,33 +83,25 @@ CFLAGS = /I../../include
 - `tools/avb_test/avb_capability_validation.mak`
 - `tools/avb_test/avb_device_separation_validation.mak`
 
-### ?? **Check Your Code**:
+Treat this list as historical evidence, not as an exhaustive statement of current compliance. Verify the current tree before making claims.
+
+## Check for violations
+
 ```bash
-# Find files using wrong include path:
-grep -r "include.*avb_ioctl.h" . | grep -v external/intel_avb
+# Find direct references to the legacy duplicate path in C/header code:
+grep -R --include='*.c' --include='*.h' \
+  'external/intel_avb/include/avb_ioctl.h' .
 ```
 
-## ?? **Build System Integration**
+A clean result is no production/test C or header file including that legacy path, unless an explicitly documented migration/compatibility case has been approved.
 
-All makefiles and build configurations should use:
-```makefile
-INCLUDE_PATH = /I$(ROOT)/external/intel_avb/include
-```
+## Future prevention
 
-This ensures:
-- ? **Consistent header resolution**
-- ? **No path confusion**  
-- ? **Architecture compliance**
-
-## ?? **Future Prevention**
-
-1. **Code Review**: Check all new files use SSOT path
-2. **Documentation**: Reference this file in PR templates  
-3. **Build Validation**: Consider build-time checks for wrong paths
-4. **Team Training**: Ensure all developers know SSOT requirement
+1. **Code review**: reject new code that treats the legacy duplicate as authoritative.
+2. **Build validation**: keep include paths pointed at the repository `include/` SSOT.
+3. **Architecture discipline**: when definitions change, update the canonical SSOT rather than creating another copy.
+4. **Evidence first**: verify actual include resolution and current repository state before claiming compliance.
 
 ---
 
-**Remember**: **ALWAYS use `include/avb_ioctl.h`** ?
-
-This is a **mandatory architectural requirement** per copilot instructions.
+**Remember**: use the authoritative `include/avb_ioctl.h` definition set. This is a mandatory architectural rule.
