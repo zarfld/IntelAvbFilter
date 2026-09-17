@@ -57,15 +57,19 @@ public class AvbPreFlight {
     [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool CloseHandle(IntPtr hObject);
     public static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
+    // Constants defined in C# to avoid PowerShell 5.1 hex-literal overflow
+    public const uint GENERIC_READ_WRITE    = 0xC0000000u;
+    public const uint OPEN_EXISTING        = 3u;
+    public const uint FILE_ATTRIBUTE_NORMAL = 0x80u;
 }
 '@ -ErrorAction SilentlyContinue
 
 $h = [AvbPreFlight]::CreateFile(
     '\\.\IntelAvbFilter',
-    [uint32]0xC0000000,   # GENERIC_READ | GENERIC_WRITE
+    [AvbPreFlight]::GENERIC_READ_WRITE,
     [uint32]0, [IntPtr]::Zero,
-    [uint32]3,            # OPEN_EXISTING
-    [uint32]0x80,         # FILE_ATTRIBUTE_NORMAL
+    [AvbPreFlight]::OPEN_EXISTING,
+    [AvbPreFlight]::FILE_ATTRIBUTE_NORMAL,
     [IntPtr]::Zero)
 
 if ($h -eq [AvbPreFlight]::INVALID_HANDLE_VALUE) {
