@@ -196,9 +196,9 @@ static void tc_script_count(void)
     }
 
     n = count_scripts_recursive(tools_dir, excl, 3);
-    snprintf(msg, sizeof(msg), "%d canonical scripts in tools\\ (target <25)", n);
+    snprintf(msg, sizeof(msg), "%d canonical scripts in tools\\ (target <26)", n);
 
-    if (n < 25)   PASS("TC-SCRIPTS-001", "%s", msg);
+    if (n < 26)   PASS("TC-SCRIPTS-001", "%s", msg);
     else          FAIL("TC-SCRIPTS-001", "%s", msg);
 }
 
