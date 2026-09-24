@@ -1804,6 +1804,22 @@ $AllTests = @(
         IOCTLs = "IOCTL_AVB_ENUM_ADAPTERS, IOCTL_AVB_OPEN_ADAPTER, IOCTL_AVB_GET_HW_STATE"
         Requirement = "#44 #45"
     }
+    # TC-LCY-328: regression for #328 (control device missing after service restart)
+    @{
+        Name = "test_control_device_lifecycle"
+        Type = "cl"
+        Source = "tests\hardware\test_control_device_lifecycle.c"
+        Output = "test_control_device_lifecycle.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "advapi32.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Control device lifecycle regression (TC-LCY-328): device must survive service stop+start. Regression for #328."
+        Issue = "#328"
+        TestCases = 1
+        IOCTLs = "IOCTL_AVB_GET_STATISTICS"
+        Requirement = "#328"
+    }
 )
 
 # Filter tests if specific test requested

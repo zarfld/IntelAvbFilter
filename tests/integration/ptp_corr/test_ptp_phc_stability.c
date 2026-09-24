@@ -671,11 +671,18 @@ static bool restart_service(const char *svc_name, int timeout_ms)
     printf("  Service stop: state=%lu (waited %d ms)\n", ss.dwCurrentState, waited);
 
     BOOL start_ok = StartServiceA(hSvc, 0, NULL);
-    if (!start_ok && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
-        printf("  FAIL: StartService failed (error %lu)\n", GetLastError());
+    DWORD startErr = start_ok ? 0 : GetLastError();
+    /* ERROR_ALREADY_EXISTS (183): old module still unloading; NDIS will reload it.
+     * Wait for the reload to complete rather than failing immediately. */
+    if (!start_ok && startErr != ERROR_SERVICE_ALREADY_RUNNING
+                  && startErr != ERROR_ALREADY_EXISTS) {
+        printf("  FAIL: StartService failed (error %lu)\n", startErr);
         CloseServiceHandle(hSvc);
         CloseServiceHandle(hSCM);
         return false;
+    }
+    if (startErr == ERROR_ALREADY_EXISTS) {
+        printf("  StartService: ERROR_ALREADY_EXISTS (183) -- module still unloading, waiting for NDIS reload\n");
     }
 
     waited = 0;
@@ -683,6 +690,20 @@ static bool restart_service(const char *svc_name, int timeout_ms)
         Sleep(500); waited += 500;
         if (!QueryServiceStatus(hSvc, &ss)) break;
         if (ss.dwCurrentState == SERVICE_RUNNING) break;
+        /* NDIS performs a double pause/detach cycle during filter reload (~26 s on 6-adapter
+         * HIL machines).  If the service transitions RUNNING→STOPPED during that cycle,
+         * re-issue StartServiceA so the filter re-binds after the cycle completes. */
+        if (ss.dwCurrentState == SERVICE_STOPPED) {
+            BOOL retry_ok = StartServiceA(hSvc, 0, NULL);
+            DWORD retryErr = retry_ok ? 0 : GetLastError();
+            if (!retry_ok && retryErr != ERROR_SERVICE_ALREADY_RUNNING
+                          && retryErr != ERROR_ALREADY_EXISTS) {
+                printf("  StartService retry failed (error %lu)\n", retryErr);
+                break;
+            }
+            printf("  StartService retry (NDIS double-cycle) waited=%d ms err=%lu\n",
+                   waited, retryErr);
+        }
     }
     printf("  Service start: state=%lu (waited %d ms)\n", ss.dwCurrentState, waited);
 
@@ -735,7 +756,11 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
     CloseHandle(hDev1);
 
     /* --- Step 2: Restart service --- */
-    bool svc_ok = restart_service(SERVICE_NAME, 8000);
+    /* 120 s: NDIS performs a double pause/detach/reattach cycle during filter reload.
+     * On 6-adapter HIL machines the cycle completes in ~30 s; 120 s gives ample margin.
+     * restart_service also retries StartServiceA if the service goes RUNNING→STOPPED
+     * during the NDIS double-cycle. */
+    bool svc_ok = restart_service(SERVICE_NAME, 120000);
     if (!svc_ok) {
         printf("  [SKIP] Service restart failed or timed out — non-fatal\n");
         tc_result("UT-CORR-009 Driver Reload (SKIP - service restart failed)", true);
