@@ -307,8 +307,7 @@ IntelAvbFilterFastIoDeviceControl(
     return TRUE;
 }
 
-#pragma NDIS_INIT_FUNCTION(IntelAvbFilterRegisterDevice)
-
+/* #328 fix: removed NDIS_INIT_FUNCTION — function must be resident to re-register at runtime from FilterAttach */
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NDIS_STATUS
 IntelAvbFilterRegisterDevice(
@@ -441,76 +440,53 @@ IntelAvbFilterDispatch(
 
         case IRP_MJ_CLEANUP:
         {
-            /* BSOD FIX (bugcheck 0xA / IRQL_NOT_LESS_OR_EQUAL — UAF race with FilterDetach):
-             *
-             * IRP_MJ_CLEANUP may arrive *after* FilterDetach has already called
-             * AvbCleanupDevice(), which ends with ExFreePoolWithTag(AvbContext).
-             * FileObject->FsContext still holds the now-freed pointer.  Calling
-             * AvbCleanupFileSubscriptions() dereferences that pointer to acquire
-             * AvbContext->subscription_lock via NdisAcquireSpinLock().  That call
-             * raises IRQL to DISPATCH_LEVEL and then reads freed (possibly paged)
-             * pool memory — causing bugcheck 0xA.
-             *
-             * Fix: mirror the same FilterListLock + IoAcquireRemoveLock guard
-             * already used by the IOCTL dispatch path (see device.c ~line 67).
-             *   1. Under FilterListLock, verify the context is still present in
-             *      FilterModuleList and not in AVB_HW_TEARDOWN state.
-             *   2. Atomically acquire ioctl_remove_lock to pin the context alive.
-             * FilterDetach removes the entry from FilterModuleList *and* sets
-             * AVB_HW_TEARDOWN under FilterListLock *before* calling
-             * IoReleaseRemoveLockAndWait, so we cannot simultaneously see a live
-             * entry and fail IoAcquireRemoveLock.
-             *
-             * If the acquire fails the adapter is in teardown — FilterDetach's
-             * AvbCleanupDevice() has already (or will) clean up all subscriptions.
-             * We just clear FsContext and return without touching freed memory.
-             */
-            PAVB_DEVICE_CONTEXT cleanupCtx =
-                (PAVB_DEVICE_CONTEXT)IrpStack->FileObject->FsContext;
-            BOOLEAN contextAcquired = FALSE;
-            BOOLEAN bFalse          = FALSE;
+            /* Subscriptions are per-adapter: a FileObject may have subscribed to multiple
+             * adapters (each OPEN_ADAPTER+TS_SUBSCRIBE pair stores into that adapter's
+             * context).  FsContext only holds the LAST opened adapter, so single-context
+             * cleanup left other adapters' timers running indefinitely (5-hour hang, #328).
+             * Walk ALL live adapters and call AvbCleanupFileSubscriptionsForContext on each.
+             * UAF safety: same FilterListLock + IoAcquireRemoveLock guard as the IOCTL path
+             * ensures we never touch a context already freed by FilterDetach. */
+            PFILE_OBJECT cleanupFo = IrpStack->FileObject;
+            PAVB_DEVICE_CONTEXT ctxBuf[16];
+            ULONG nCtx = 0;
+            BOOLEAN bFalse = FALSE;
 
             DEBUGP(DL_ERROR,
                    "!!! IRP_MJ_CLEANUP - Handle being closed, FileObject=%p FsContext=%p\n",
-                   IrpStack->FileObject, cleanupCtx);
+                   cleanupFo, cleanupFo ? cleanupFo->FsContext : NULL);
 
-            if (cleanupCtx != NULL) {
-                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+            FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+            {
+                PLIST_ENTRY _l;
+                for (_l = FilterModuleList.Flink;
+                     _l != &FilterModuleList && nCtx < ARRAYSIZE(ctxBuf);
+                     _l = _l->Flink)
                 {
-                    PLIST_ENTRY _l;
-                    for (_l = FilterModuleList.Flink;
-                         _l != &FilterModuleList;
-                         _l = _l->Flink)
+                    PMS_FILTER _f = CONTAINING_RECORD(_l, MS_FILTER, FilterModuleLink);
+                    PAVB_DEVICE_CONTEXT ctx = _f->AvbContext;
+                    if (ctx &&
+                        AVB_READ_HW_STATE(ctx) != AVB_HW_TEARDOWN &&
+                        NT_SUCCESS(IoAcquireRemoveLock(&ctx->ioctl_remove_lock, Irp)))
                     {
-                        PMS_FILTER _f = CONTAINING_RECORD(_l, MS_FILTER, FilterModuleLink);
-                        if ((PVOID)_f->AvbContext == (PVOID)cleanupCtx          &&
-                            AVB_READ_HW_STATE(cleanupCtx) != AVB_HW_TEARDOWN    &&
-                            NT_SUCCESS(IoAcquireRemoveLock(
-                                &cleanupCtx->ioctl_remove_lock, Irp)))
-                        {
-                            contextAcquired = TRUE;
-                            break;
-                        }
+                        ctxBuf[nCtx++] = ctx;
                     }
                 }
-                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+            }
+            FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+
+            for (ULONG i = 0; i < nCtx; i++) {
+                AvbCleanupFileSubscriptionsForContext(cleanupFo, ctxBuf[i]);
+                IoReleaseRemoveLock(&ctxBuf[i]->ioctl_remove_lock, Irp);
             }
 
-            if (contextAcquired) {
-                /* Context alive and pinned by remove lock — safe to clean subscriptions. */
-                AvbCleanupFileSubscriptions(IrpStack->FileObject);
-                IrpStack->FileObject->FsContext = NULL;
-                IoReleaseRemoveLock(&cleanupCtx->ioctl_remove_lock, Irp);
-            } else {
-                /* Context is being torn down or already freed.
-                 * AvbCleanupDevice() handles subscription teardown for this adapter.
-                 * Do NOT dereference cleanupCtx — it may be freed pool memory. */
+            if (nCtx == 0) {
                 DEBUGP(DL_WARN,
-                       "!!! IRP_MJ_CLEANUP: context %p in teardown/freed — "
-                       "skipping subscription cleanup (UAF BSOD prevention)\n",
-                       cleanupCtx);
-                IrpStack->FileObject->FsContext = NULL;
+                       "!!! IRP_MJ_CLEANUP: no live adapters found — "
+                       "all contexts in teardown/freed (UAF BSOD prevention)\n");
             }
+
+            cleanupFo->FsContext = NULL;
             break;
         }
 

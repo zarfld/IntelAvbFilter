@@ -380,12 +380,14 @@ VOID AvbCleanupDevice(
     _In_opt_ PAVB_DEVICE_CONTEXT AvbContext
 );
 
-/** * @brief Cleanup timestamp subscriptions for a file object (implicit unsubscribe on handle close).
- * @param FileObject File object being closed (from IRP_MJ_CLEANUP).
+/** * @brief Cleanup timestamp subscriptions for a file object in one adapter context.
+ * @param FileObject File object being closed.
+ * @param AvbContext Adapter context to clean (caller holds its ioctl_remove_lock).
  * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 5 - Option B
  */
-VOID AvbCleanupFileSubscriptions(
-    _In_ PFILE_OBJECT FileObject
+VOID AvbCleanupFileSubscriptionsForContext(
+    _In_ PFILE_OBJECT      FileObject,
+    _In_ PAVB_DEVICE_CONTEXT AvbContext
 );
 
 /**
