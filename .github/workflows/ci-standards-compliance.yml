@@ -41,6 +41,7 @@ env:
   # Minimum % of requirements that must have actual test execution outcomes in CI.
   # 0 = informational only. Raise once hardware-runner coverage reaches a stable baseline.
   MIN_REQ_TEST_COVERAGE: 0
+  BUILD_SYSTEM: MSBuild
 
 jobs:
   spec-validation:
