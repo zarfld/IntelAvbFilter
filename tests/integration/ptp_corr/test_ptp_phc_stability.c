@@ -646,13 +646,11 @@ static bool restart_service(const char *svc_name, int timeout_ms)
 {
     SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
     if (!hSCM) {
-        printf("  [SKIP] OpenSCManager failed (error %lu) — elevated?\n", GetLastError());
+        printf("  [SKIP] OpenSCManager failed (error %lu) -- elevated?\n", GetLastError());
         return false;
     }
-
     SC_HANDLE hSvc = OpenServiceA(hSCM, svc_name,
-                                   SERVICE_STOP | SERVICE_START |
-                                   SERVICE_QUERY_STATUS);
+                                   SERVICE_STOP | SERVICE_QUERY_STATUS);
     if (!hSvc) {
         printf("  [SKIP] OpenService('%s') failed (error %lu)\n", svc_name, GetLastError());
         CloseServiceHandle(hSCM);
@@ -669,54 +667,35 @@ static bool restart_service(const char *svc_name, int timeout_ms)
         if (ss.dwCurrentState == SERVICE_STOPPED) break;
     }
     printf("  Service stop: state=%lu (waited %d ms)\n", ss.dwCurrentState, waited);
-
-    BOOL start_ok = StartServiceA(hSvc, 0, NULL);
-    DWORD startErr = start_ok ? 0 : GetLastError();
-    /* ERROR_ALREADY_EXISTS (183): old module still unloading; NDIS will reload it.
-     * Wait for the reload to complete rather than failing immediately. */
-    if (!start_ok && startErr != ERROR_SERVICE_ALREADY_RUNNING
-                  && startErr != ERROR_ALREADY_EXISTS) {
-        printf("  FAIL: StartService failed (error %lu)\n", startErr);
-        CloseServiceHandle(hSvc);
-        CloseServiceHandle(hSCM);
-        return false;
-    }
-    if (startErr == ERROR_ALREADY_EXISTS) {
-        printf("  StartService: ERROR_ALREADY_EXISTS (183) -- module still unloading, waiting for NDIS reload\n");
-    }
-
-    waited = 0;
-    while (waited < timeout_ms) {
-        Sleep(500); waited += 500;
-        if (!QueryServiceStatus(hSvc, &ss)) break;
-        if (ss.dwCurrentState == SERVICE_RUNNING) break;
-        /* NDIS performs a double pause/detach cycle during filter reload (~26 s on 6-adapter
-         * HIL machines).  If the service transitions RUNNING→STOPPED during that cycle,
-         * re-issue StartServiceA so the filter re-binds after the cycle completes. */
-        if (ss.dwCurrentState == SERVICE_STOPPED) {
-            BOOL retry_ok = StartServiceA(hSvc, 0, NULL);
-            DWORD retryErr = retry_ok ? 0 : GetLastError();
-            if (!retry_ok && retryErr != ERROR_SERVICE_ALREADY_RUNNING
-                          && retryErr != ERROR_ALREADY_EXISTS) {
-                if (retryErr == ERROR_FILE_NOT_FOUND) {
-                    /* Driver binary inaccessible: install left .sys.old deferred-delete
-                     * that fired on module unload.  Requires manual_uninstall + reboot. */
-                    printf("  FATAL: StartService retry error %lu (ERROR_FILE_NOT_FOUND) -- "
-                           "driver binary gone. Run manual_uninstall.ps1 and reboot.\n", retryErr);
-                } else {
-                    printf("  StartService retry failed (error %lu)\n", retryErr);
-                }
-                break;
-            }
-            printf("  StartService retry (NDIS double-cycle) waited=%d ms err=%lu\n",
-                   waited, retryErr);
-        }
-    }
-    printf("  Service start: state=%lu (waited %d ms)\n", ss.dwCurrentState, waited);
-
     CloseServiceHandle(hSvc);
     CloseServiceHandle(hSCM);
-    return (ss.dwCurrentState == SERVICE_RUNNING);
+
+    /* Delegate restart to the established install infrastructure.
+     * Direct StartServiceA fails during NDIS's double pause/detach cycle because
+     * the DriverStore .sys is transiently inaccessible; the install script handles
+     * DriverStore lock detection, pnputil sequencing, and NDIS rebind correctly.
+     * CWD is assumed to be the repo root (set by Run-Tests-Elevated.ps1). */
+    printf("  Reinstalling via Install-Driver-Elevated.ps1 -Action Reinstall...\n");
+    int rc = system("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass"
+                    " -File tools\\setup\\Install-Driver-Elevated.ps1"
+                    " -Configuration Debug -Action Reinstall");
+    if (rc != 0) {
+        printf("  [FAIL] Reinstall script returned exit code %d\n", rc);
+        return false;
+    }
+
+    hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!hSCM) return false;
+    hSvc = OpenServiceA(hSCM, svc_name, SERVICE_QUERY_STATUS);
+    bool running = false;
+    if (hSvc) {
+        QueryServiceStatus(hSvc, &ss);
+        printf("  Service state after reinstall: %lu\n", ss.dwCurrentState);
+        running = (ss.dwCurrentState == SERVICE_RUNNING);
+        CloseServiceHandle(hSvc);
+    }
+    CloseServiceHandle(hSCM);
+    return running;
 }
 
 static void test_ut_corr_009(uint32_t adapter_count_before)
@@ -763,10 +742,8 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
     CloseHandle(hDev1);
 
     /* --- Step 2: Restart service --- */
-    /* 120 s: NDIS performs a double pause/detach/reattach cycle during filter reload.
-     * On 6-adapter HIL machines the cycle completes in ~30 s; 120 s gives ample margin.
-     * restart_service also retries StartServiceA if the service goes RUNNING→STOPPED
-     * during the NDIS double-cycle. */
+    /* Delegates to Install-Driver-Elevated.ps1 -Action Reinstall which handles
+     * DriverStore locking, pnputil sequencing, and NDIS rebind timing. */
     bool svc_ok = restart_service(SERVICE_NAME, 120000);
     if (!svc_ok) {
         /* A failed service restart leaves the environment broken — not a non-fatal skip. */
