@@ -136,16 +136,15 @@ if (Test-Path $manPath) {
 }
 
 # ---------------------------------------------------------------------------
-# 4c. Remove leftover .sys and .sys.old files
-#     Install-Driver-Elevated.ps1 renames a locked .sys to .sys.old when the
-#     service is running; the old copy is deleted after reboot.  Remove both
-#     explicitly to avoid stale binaries blocking a fresh install.
+# 4c. Remove leftover .sys / .sys.old / .sys.new / .sys.bak.* / .man files
+#     Older installs used rename-to-.sys.old; current installs use retry-copy (no .sys.old).
+#     Remove all variants to ensure a clean slate for the next install.
 # ---------------------------------------------------------------------------
 
 Write-Host ""
 Write-Host "[4c/6] Cleaning up driver binary remnants in System32\drivers..."
 
-foreach ($ext in @(".sys", ".sys.old", ".man")) {
+foreach ($ext in @(".sys", ".sys.old", ".sys.new", ".man")) {
     $path = "$env:SystemRoot\System32\drivers\IntelAvbFilter$ext"
     if (Test-Path $path) {
         try {
@@ -157,6 +156,12 @@ foreach ($ext in @(".sys", ".sys.old", ".man")) {
         }
     }
 }
+# Remove any timestamped .sys.bak.* files left by previous installs
+Get-Item "$env:SystemRoot\System32\drivers\IntelAvbFilter.sys.bak.*" -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        try   { Remove-Item $_.FullName -Force; Write-Host "  Removed $($_.FullName)" }
+        catch { Write-Warning "  Could not remove $($_.FullName) : $_" }
+    }
 
 # ---------------------------------------------------------------------------
 # 5. Remove the actual NDIS / NetCfg component

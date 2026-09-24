@@ -467,38 +467,55 @@ function Install-Driver {
         $installedSys  = "C:\Windows\System32\drivers\IntelAvbFilter.sys"
         if (Test-Path $sysFile) {
             Write-Host "  Copying .sys to C:\Windows\System32\drivers\..." -ForegroundColor Gray
-            # The kernel holds a FILE_SHARE_DELETE image-section lock on the loaded .sys.
-            # We cannot overwrite it, but we CAN rename it out of the way, then copy
-            # the new file in under the original name.
-            # Use a timestamp-based backup name so a previously-locked .sys.old never
-            # blocks the rename (the old backup stays on disk until next reboot cleans it up).
-            $oldSysBak = "C:\Windows\System32\drivers\IntelAvbFilter.sys.old"
-            try {
-                if (Test-Path $installedSys) {
-                    # If a previous backup still exists (kernel-locked from last install),
-                    # rotate it to a timestamp name so our rename always has a free destination.
-                    if (Test-Path $oldSysBak) {
-                        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-                        $rotated = "C:\Windows\System32\drivers\IntelAvbFilter.sys.bak.$stamp"
-                        Rename-Item $oldSysBak $rotated -Force -ErrorAction SilentlyContinue
-                        # If the rotate also failed (still locked) just leave it - we continue
-                        # and the primary rename of .sys -> .sys.old may still succeed because
-                        # the source (.sys) has FILE_SHARE_DELETE and the destination is now free.
-                    }
-                    Rename-Item $installedSys $oldSysBak -Force -ErrorAction Stop
-                    Write-Host "  Renamed locked .sys to .sys.old (will be deleted after reboot)" -ForegroundColor DarkGray
+            # FIX #328: Use retry-copy instead of rename-to-.sys.old.
+            # Renaming the loaded .sys to .sys.old while the kernel still holds its image-section
+            # handle creates a deferred-delete race: when the kernel releases the handle after a
+            # later service stop, Windows deletes .sys.old, and on some code paths the SCM ends
+            # up with ERROR_FILE_NOT_FOUND (error 2) on the next StartService.
+            #
+            # Instead we just retry the direct overwrite. After 'sc stop' the kernel releases the
+            # image-section lock within a few seconds; the adapter-disable + netcfg -u above add
+            # implicit dwell time.  10 attempts × 2 s = 20 s budget before falling back to the
+            # PendingFileRenameOperations reboot path (which does NOT create .sys.old).
+            #
+            # Also clean up any leftover .sys.old / .sys.bak.* from previous installs so they
+            # cannot interfere with future restarts.
+            foreach ($stale in @("C:\Windows\System32\drivers\IntelAvbFilter.sys.old")) {
+                if (Test-Path $stale) {
+                    Remove-Item $stale -Force -ErrorAction SilentlyContinue
+                    Write-Host "  Removed stale: $stale" -ForegroundColor DarkGray
                 }
-                Copy-Item $sysFile $installedSys -Force -ErrorAction Stop
-                Write-Host "  .sys copied successfully" -ForegroundColor DarkGray
-            } catch {
-                # Rename also failed - fall back to scheduling replacement on next reboot
-                Write-Host "  WARNING: Cannot replace locked .sys directly. Scheduling for reboot..." -ForegroundColor Yellow
+            }
+            Get-Item "C:\Windows\System32\drivers\IntelAvbFilter.sys.bak.*" -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                    Write-Host "  Removed stale backup: $($_.Name)" -ForegroundColor DarkGray
+                }
+
+            $copyOk = $false
+            for ($attempt = 1; $attempt -le 10; $attempt++) {
+                try {
+                    Copy-Item $sysFile $installedSys -Force -ErrorAction Stop
+                    $copyOk = $true
+                    Write-Host "  .sys copied successfully (attempt $attempt)" -ForegroundColor DarkGray
+                    break
+                } catch {
+                    if ($attempt -lt 10) {
+                        Write-Host "  .sys still locked (attempt $attempt/10), retrying in 2 s..." -ForegroundColor DarkGray
+                        Start-Sleep -Seconds 2
+                    }
+                }
+            }
+            if (-not $copyOk) {
+                # File still locked after 20 s -- schedule replacement on next reboot.
+                # NOTE: does NOT create .sys.old; uses a distinct .sys.new temp name.
+                Write-Host "  WARNING: Cannot replace locked .sys after 10 attempts. Scheduling for reboot..." -ForegroundColor Yellow
                 $tempSys = "C:\Windows\System32\drivers\IntelAvbFilter.sys.new"
                 Copy-Item $sysFile $tempSys -Force
                 $regKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
                 $existing = (Get-ItemProperty $regKey "PendingFileRenameOperations" -ErrorAction SilentlyContinue).PendingFileRenameOperations
                 $ops = [string[]]@(
-                    "\??\$installedSys", "",           # delete the old locked file on reboot
+                    "\??\$installedSys", "",            # delete the old locked file on reboot
                     "\??\$tempSys", "\??\$installedSys" # rename .new -> .sys on reboot
                 )
                 Set-ItemProperty $regKey "PendingFileRenameOperations" -Value ($existing + $ops) -Type MultiString

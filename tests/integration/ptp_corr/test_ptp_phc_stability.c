@@ -698,7 +698,14 @@ static bool restart_service(const char *svc_name, int timeout_ms)
             DWORD retryErr = retry_ok ? 0 : GetLastError();
             if (!retry_ok && retryErr != ERROR_SERVICE_ALREADY_RUNNING
                           && retryErr != ERROR_ALREADY_EXISTS) {
-                printf("  StartService retry failed (error %lu)\n", retryErr);
+                if (retryErr == ERROR_FILE_NOT_FOUND) {
+                    /* Driver binary inaccessible: install left .sys.old deferred-delete
+                     * that fired on module unload.  Requires manual_uninstall + reboot. */
+                    printf("  FATAL: StartService retry error %lu (ERROR_FILE_NOT_FOUND) -- "
+                           "driver binary gone. Run manual_uninstall.ps1 and reboot.\n", retryErr);
+                } else {
+                    printf("  StartService retry failed (error %lu)\n", retryErr);
+                }
                 break;
             }
             printf("  StartService retry (NDIS double-cycle) waited=%d ms err=%lu\n",
@@ -762,8 +769,10 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
      * during the NDIS double-cycle. */
     bool svc_ok = restart_service(SERVICE_NAME, 120000);
     if (!svc_ok) {
-        printf("  [SKIP] Service restart failed or timed out — non-fatal\n");
-        tc_result("UT-CORR-009 Driver Reload (SKIP - service restart failed)", true);
+        /* A failed service restart leaves the environment broken — not a non-fatal skip. */
+        printf("  [FAIL] Service restart failed — driver environment requires recovery.\n");
+        printf("  Run: tools\\setup\\manual_uninstall.ps1 then reboot, then reinstall.\n");
+        tc_result("UT-CORR-009 Driver Reload (FAIL - service restart failed)", false);
         return;
     }
     Sleep(1000);  /* extra settle after service reaches RUNNING */
