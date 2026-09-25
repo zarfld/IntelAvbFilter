@@ -715,12 +715,45 @@ jobs:
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Unit
 
       - name: Install IntelAvbFilter driver (self-hosted)
-        # CI runner is already Administrator — call Install-Driver.ps1 directly.
-        # Install-Driver-Elevated.ps1 uses Start-Process -Verb RunAs (interactive UAC) and is
-        # NOT suitable for headless CI.
+        # Runner service is not elevated; run Install-Driver.ps1 via a SYSTEM scheduled task
+        # (SYSTEM is always admin without interactive UAC, unlike Start-Process -Verb RunAs).
         if: runner.os == 'Windows' && matrix.hardware == true
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: .\tools\setup\Install-Driver.ps1 -Configuration ${{ matrix.config }} -Reinstall
+        run: |
+          $log    = "$env:TEMP\avb-driver-install-${{ matrix.config }}.log"
+          $script = (Resolve-Path '.\tools\setup\Install-Driver.ps1').Path
+          $inner  = "$env:TEMP\avb-driver-install-inner.ps1"
+          @"
+          Start-Transcript -Path '$log' -Force | Out-Null
+          & '$script' -Configuration ${{ matrix.config }} -Reinstall
+          `$ec = `$LASTEXITCODE
+          Stop-Transcript | Out-Null
+          exit `$ec
+          "@ | Set-Content $inner -Encoding UTF8
+          $action    = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                         -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$inner`""
+          $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+          Register-ScheduledTask -TaskName 'AvbDriverInstall' -Action $action `
+            -Principal $principal -Force | Out-Null
+          Start-ScheduledTask -TaskName 'AvbDriverInstall'
+          $deadline = (Get-Date).AddSeconds(180)
+          do { Start-Sleep -Seconds 2 } while (
+            (Get-ScheduledTask -TaskName 'AvbDriverInstall').State -eq 'Running' -and
+            (Get-Date) -lt $deadline
+          )
+          $exitCode = (Get-ScheduledTaskInfo -TaskName 'AvbDriverInstall').LastTaskResult
+          Unregister-ScheduledTask -TaskName 'AvbDriverInstall' -Confirm:$false
+          Remove-Item $inner -Force -ErrorAction SilentlyContinue
+          if (Test-Path $log) {
+            Get-Content $log | Where-Object {
+              $_ -notmatch '^Windows PowerShell transcript|^(Start|End) time:'
+            }
+          }
+          if ($exitCode -ne 0) {
+            Write-Host "Driver install failed (exit $exitCode)" -ForegroundColor Red
+            exit $exitCode
+          }
+          Write-Host 'Driver installed successfully' -ForegroundColor Green
 
       - name: Verify IntelAvbFilter driver accessible (self-hosted)
         # Pre-flight: confirm the driver is Running and the device node opens before
@@ -1316,12 +1349,45 @@ jobs:
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Integration
 
       - name: Install IntelAvbFilter driver (self-hosted)
-        # CI runner is already Administrator — call Install-Driver.ps1 directly.
-        # Install-Driver-Elevated.ps1 uses Start-Process -Verb RunAs (interactive UAC) and is
-        # NOT suitable for headless CI.
+        # Runner service is not elevated; run Install-Driver.ps1 via a SYSTEM scheduled task
+        # (SYSTEM is always admin without interactive UAC, unlike Start-Process -Verb RunAs).
         if: runner.os == 'Windows' && matrix.hardware == true
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: .\tools\setup\Install-Driver.ps1 -Configuration ${{ matrix.config }} -InstallDriver
+        run: |
+          $log    = "$env:TEMP\avb-driver-install-${{ matrix.config }}.log"
+          $script = (Resolve-Path '.\tools\setup\Install-Driver.ps1').Path
+          $inner  = "$env:TEMP\avb-driver-install-inner.ps1"
+          @"
+          Start-Transcript -Path '$log' -Force | Out-Null
+          & '$script' -Configuration ${{ matrix.config }} -Reinstall
+          `$ec = `$LASTEXITCODE
+          Stop-Transcript | Out-Null
+          exit `$ec
+          "@ | Set-Content $inner -Encoding UTF8
+          $action    = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                         -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$inner`""
+          $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+          Register-ScheduledTask -TaskName 'AvbDriverInstall' -Action $action `
+            -Principal $principal -Force | Out-Null
+          Start-ScheduledTask -TaskName 'AvbDriverInstall'
+          $deadline = (Get-Date).AddSeconds(180)
+          do { Start-Sleep -Seconds 2 } while (
+            (Get-ScheduledTask -TaskName 'AvbDriverInstall').State -eq 'Running' -and
+            (Get-Date) -lt $deadline
+          )
+          $exitCode = (Get-ScheduledTaskInfo -TaskName 'AvbDriverInstall').LastTaskResult
+          Unregister-ScheduledTask -TaskName 'AvbDriverInstall' -Confirm:$false
+          Remove-Item $inner -Force -ErrorAction SilentlyContinue
+          if (Test-Path $log) {
+            Get-Content $log | Where-Object {
+              $_ -notmatch '^Windows PowerShell transcript|^(Start|End) time:'
+            }
+          }
+          if ($exitCode -ne 0) {
+            Write-Host "Driver install failed (exit $exitCode)" -ForegroundColor Red
+            exit $exitCode
+          }
+          Write-Host 'Driver installed successfully' -ForegroundColor Green
 
       - name: Verify IntelAvbFilter driver accessible (self-hosted)
         # Pre-flight: confirm driver state before integration tests for the same reason as the unit-test job.
