@@ -996,6 +996,7 @@ FilterRestart(
         FILTER_RELEASE_LOCK(&FilterListLock, bFalse2);
         if (bReregister) {
             NDIS_STATUS devStatus = IntelAvbFilterRegisterDevice();
+            UNREFERENCED_PARAMETER(devStatus); /* consumed by DEBUGP only; no-op in Release */
             DEBUGP(DL_ERROR, "!!! [#328] FilterRestart: control device re-registered Status=0x%x Handle=%p\n",
                    devStatus, NdisFilterDeviceHandle);
         }
