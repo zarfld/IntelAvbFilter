@@ -52,7 +52,7 @@ jobs:
       issues: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -86,7 +86,7 @@ jobs:
       issues: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -141,7 +141,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0 # Full history for better analysis
 
@@ -346,7 +346,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check for raw hex literals in src/ (4+ significant digits)
         # Verifies: #305 (REQ-NF-REGS-001 — Eliminate Magic Numbers)
@@ -388,7 +388,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -479,7 +479,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -846,7 +846,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -1036,7 +1036,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -1104,7 +1104,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -1404,7 +1404,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -1483,7 +1483,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -1546,7 +1546,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: ADR Impact Scan
         run: |
           ALLOW_EMPTY_SPECS=1 python scripts/adr_impact_scan.py --warn-only || echo "ADR impact scan completed"
@@ -1589,7 +1589,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check for sensitive data
         run: |
@@ -1635,7 +1635,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -1767,7 +1767,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -1887,7 +1887,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check evidence file exists
         id: check-evidence

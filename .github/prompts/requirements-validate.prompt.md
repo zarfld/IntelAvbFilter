@@ -564,7 +564,7 @@ jobs:
     if: contains(github.event.issue.labels.*.name, 'type:requirement') || contains(github.event.issue.labels.*.name, 'type:stakeholder-requirement')
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Validate Requirement Issue
         uses: actions/github-script@v7

@@ -159,7 +159,7 @@ Contract Checklist:
 Example (GitHub Actions snippet):
 ```yaml
 - name: Checkout repository (with submodules)
-  uses: actions/checkout@v4
+  uses: actions/checkout@v5
   with:
     submodules: recursive
 
