@@ -721,7 +721,7 @@ jobs:
         if: runner.os == 'Windows' && matrix.hardware == true
         continue-on-error: true
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: .\tools\setup\Install-Driver.ps1 -Configuration ${{ matrix.config }} -Action Reinstall
+        run: .\tools\setup\Install-Driver.ps1 -Configuration ${{ matrix.config }} -Reinstall
  
       - name: Verify IntelAvbFilter driver accessible (self-hosted)
         # Pre-flight: confirm the driver is Running and the device node opens before
