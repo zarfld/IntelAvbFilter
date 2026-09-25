@@ -673,7 +673,7 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Build Driver
         run: .\tools\build\Build-Driver.ps1 -Configuration Debug

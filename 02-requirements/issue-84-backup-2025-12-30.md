@@ -223,7 +223,7 @@ jobs:
   benchmark:
     runs-on: [self-hosted, performance-test-rig]  # Dedicated hardware
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Build driver
         run: msbuild IntelAvbFilter.sln /p:Configuration=Release
