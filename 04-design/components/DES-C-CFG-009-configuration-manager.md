@@ -5203,7 +5203,7 @@ jobs:
           ./tests/config_manager/test_runner.exe --xml-output=test-results.xml
       
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results
           path: test-results.xml

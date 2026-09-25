@@ -245,7 +245,7 @@ jobs:
         run: python scripts/analyze_benchmarks.py --compare-to baseline.json
       
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: performance-results
           path: |

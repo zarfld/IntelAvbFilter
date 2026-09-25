@@ -44,7 +44,7 @@ jobs:
           python scripts/github-traceability-report.py > reports/traceability.md
       
       - name: Upload traceability report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: traceability-report
           path: reports/traceability.md

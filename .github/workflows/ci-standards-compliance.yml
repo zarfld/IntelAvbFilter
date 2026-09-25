@@ -122,7 +122,7 @@ jobs:
           mkdir -p reports
           python scripts/github-traceability-report.py > reports/traceability-report.md
       - name: Upload generated artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: spec-generated-artifacts
           path: |
@@ -324,7 +324,7 @@ jobs:
       # Verifies: #252 (TEST-MAINTAIN-001 step 8)
       - name: Upload code quality reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: code-quality-reports
           path: |
@@ -439,7 +439,7 @@ jobs:
 
       - name: Upload PREfast results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: prefast-analysis-results
           path: |
@@ -811,7 +811,7 @@ jobs:
         # Upload the execution traceability summary so the Traceability Coverage Enforcement
         # job can compute 'Requirements Tested: N/T (xx%)' across all matrix runs.
         if: always() && runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: traceability-unit-${{ matrix.os }}-${{ matrix.config }}
           path: test-evidence/traceability-summary-*.md
@@ -1369,7 +1369,7 @@ jobs:
         # can aggregate 'Requirements Tested' across ALL matrix runs (unit + integration,
         # GitHub-hosted + self-hosted, Debug + Release).
         if: always() && runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: traceability-integration-${{ matrix.os }}-${{ matrix.config }}
           path: test-evidence/traceability-summary-*.md
@@ -1467,7 +1467,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload traceability reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: traceability-reports
           path: reports/
@@ -1727,7 +1727,7 @@ jobs:
           cat compliance-report.md
 
       - name: Upload compliance report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: compliance-report
           path: compliance-report.md
@@ -1790,7 +1790,7 @@ jobs:
           Write-Host " Driver build and signing complete" -ForegroundColor Green
 
       - name: Upload firmware artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: intel-avb-filter-driver-release
           path: build\x64\Release\IntelAvbFilter\

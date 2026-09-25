@@ -600,7 +600,7 @@ jobs:
           python scripts/reverse-engineer-requirements.py src tests
       
       - name: Upload report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: reverse-engineering-report
           path: reverse-engineering-report.md

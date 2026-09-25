@@ -519,7 +519,7 @@ jobs:
       
       - name: Upload test artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: acceptance-test-results
           path: |
