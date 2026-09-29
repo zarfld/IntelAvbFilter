@@ -5,10 +5,16 @@ param(
     
     [Parameter(Mandatory=$true)]
     [ValidateSet('InstallDriver', 'Reinstall', 'UninstallDriver')]
-    [string]$Action
+    [string]$Action,
+
+    # Start DebugView kernel capture around the test run and save to a log file.
+    # Requires .github\skills\DbgView\DebugView\Dbgview.exe (run tools\setup\Install-DbgView.ps1 once).
+    [Parameter(Mandatory=$false)]
+    [switch]$CaptureDbgView
 )
 
 $ErrorActionPreference = 'Stop'
+$repoRoot   = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 
 try {
     $scriptPath     = Join-Path $PSScriptRoot 'Install-Driver.ps1'
@@ -36,8 +42,36 @@ try {
         $tempScript
     )
 
+    # ── Optional: start DebugView kernel capture ───────────────────────────────────
+    $dbgViewProc = $null
+    if ($CaptureDbgView) {
+        $dbgViewScript = Join-Path $repoRoot '.github\skills\DbgView\Start-DbgViewCapture.ps1'
+        if (Test-Path $dbgViewScript) {
+            # Derive log stem from test name or suite label
+            $dbgLogStem = "dbgview_install-driver-$($Action.ToLower())"
+            Write-Host "[DbgView] Starting kernel capture (stem: $dbgLogStem)..." -ForegroundColor Cyan
+            $dbgViewProc = & $dbgViewScript -LogName $dbgLogStem
+            if ($dbgViewProc) {
+                Write-Host "[DbgView] Capturing on PID=$($dbgViewProc.Id)" -ForegroundColor Green
+                Start-Sleep -Milliseconds 500   # give DbgView time to open the log file
+            }
+        } else {
+            Write-Warning "[DbgView] Start script not found at '$dbgViewScript'. Skipping capture."
+        }
+    }
+
     Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait
 
+    # ── Stop DebugView if we started it ───────────────────────────────────────────
+    if ($dbgViewProc) {
+        $stopScript = Join-Path $repoRoot '.github\skills\DbgView\Stop-DbgViewCapture.ps1'
+        if (Test-Path $stopScript) {
+            & $stopScript -ProcessId $dbgViewProc.Id
+        } else {
+            Stop-Process -Id $dbgViewProc.Id -Force -ErrorAction SilentlyContinue
+            Write-Host "[DbgView] Stopped PID=$($dbgViewProc.Id)" -ForegroundColor Green
+        }
+    }
     # Display transcript so output is visible in this (non-elevated) window
     if (Test-Path $transcriptPath) {
         Write-Host ""
