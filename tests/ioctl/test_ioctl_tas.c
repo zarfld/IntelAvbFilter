@@ -63,6 +63,7 @@ typedef struct {
     BOOL     valid;              /* 1 = snapshot was taken successfully */
     avb_u32  tsauxc_before;     /* TSAUXC value before enable_systim0 */
     BOOL     tas_was_armed;     /* driver reported TAS armed before test */
+    struct tsn_tas_config tas_original_config; /* GCL config if tas_was_armed */
 } TAS_SNAPSHOT;
 
 /* Capture TSAUXC and TAS armed state before any mutation.
@@ -96,13 +97,31 @@ static BOOL tas_capture_state(HANDLE hDevice, TAS_SNAPSHOT *snap) {
         return FALSE;
     }
     snap->tas_was_armed = (tasState.armed != 0);
+    if (snap->tas_was_armed) {
+        memcpy(&snap->tas_original_config, &tasState.config, sizeof(tasState.config));
+    }
     snap->valid = TRUE;
     printf("  [SNAPSHOT] tsauxc=0x%08X tas_armed=%d\n", snap->tsauxc_before, snap->tas_was_armed);
+    if (snap->tas_was_armed) {
+        printf("  [SNAPSHOT] WARNING: TAS was armed before test — original GCL captured (base_time may be expired on restore)\n");
+    }
     return TRUE;
 }
 
 /* Restore TSAUXC and TAS state to the captured baseline.
- * Returns FALSE if any restoration operation failed (caller must fail the test). */
+ * Returns FALSE if any restoration operation failed (caller must fail the test).
+ *
+ * TAS restoration semantics:
+ *   - If TAS was disarmed before test: call IOCTL_AVB_DISARM_TAS and verify.
+ *   - If TAS was armed before test: attempt to re-arm with original GCL.
+ *     Limitation: base_time in the original config may have expired by restore time.
+ *     We detect this, report it explicitly as a BLOCKED condition, and do NOT
+ *     claim successful restoration. The caller must handle this as a hard failure.
+ *
+ * TSAUXC restoration: uses previous_tsauxc captured in snapshot to restore
+ * the enable/disable state of SYSTIM0. Note: this only controls the enable bit
+ * (bit 31); other TSAUXC bits (target-time enables, aux-ts enables) are not
+ * preserved — they would need a dedicated capture/restore path. */
 static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
     if (!snap->valid) {
         printf("  [RESTORE-FAIL] No valid snapshot — cannot restore\n");
@@ -112,22 +131,73 @@ static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
     BOOL ok = TRUE;
     DWORD br = 0;
 
-    /* Always disarm TAS regardless of original state */
-    AVB_DISARM_TAS_REQUEST disarm;
-    ZeroMemory(&disarm, sizeof(disarm));
-    if (!DeviceIoControl(hDevice, IOCTL_AVB_DISARM_TAS,
-                         NULL, 0,
-                         &disarm, sizeof(disarm),
-                         &br, NULL) || disarm.status != 0) {
-        printf("  [RESTORE-FAIL] TAS disarm failed (error=%lu status=0x%08X)\n",
-               GetLastError(), disarm.status);
-        ok = FALSE;
+    if (!snap->tas_was_armed) {
+        /* Original state: TAS disarmed. Disarm and verify. */
+        AVB_DISARM_TAS_REQUEST disarm;
+        ZeroMemory(&disarm, sizeof(disarm));
+        if (!DeviceIoControl(hDevice, IOCTL_AVB_DISARM_TAS,
+                             NULL, 0,
+                             &disarm, sizeof(disarm),
+                             &br, NULL) || disarm.status != 0) {
+            printf("  [RESTORE-FAIL] TAS disarm failed (error=%lu status=0x%08X)\n",
+                   GetLastError(), disarm.status);
+            ok = FALSE;
+        } else {
+            printf("  [RESTORE] TAS disarmed (original state: disarmed)\n");
+        }
     } else {
-        printf("  [RESTORE] TAS disarmed\n");
+        /* Original state: TAS was armed.
+         * Attempt to re-arm with original GCL — but base_time may be expired.
+         * Compute whether base_time is still in the future. */
+        ULONGLONG now_ns = 0;
+        {
+            AVB_TIMESTAMP_REQUEST tsReq;
+            ZeroMemory(&tsReq, sizeof(tsReq));
+            if (DeviceIoControl(hDevice, IOCTL_AVB_GET_TIMESTAMP,
+                                &tsReq, sizeof(tsReq),
+                                &tsReq, sizeof(tsReq),
+                                &br, NULL) && tsReq.status == 0) {
+                now_ns = tsReq.timestamp;
+            }
+        }
+
+        ULONGLONG base_ns = (ULONGLONG)snap->tas_original_config.base_time_s * 1000000000ULL
+                          + snap->tas_original_config.base_time_ns;
+
+        if (base_ns != 0 && now_ns != 0 && now_ns > base_ns) {
+            /* base_time has passed — cannot restore original armed schedule safely.
+             * Report as BLOCKED: the test must record this as a restoration limitation.
+             * Per the contract: "explicitly report that limitation rather than claiming
+             * successful restoration." */
+            printf("  [RESTORE-BLOCKED] Original TAS base_time (%llu ns) has expired (now=%llu ns)\n",
+                   (unsigned long long)base_ns, (unsigned long long)now_ns);
+            printf("  [RESTORE-BLOCKED] Cannot re-arm with original GCL — base_time semantics require future timestamp\n");
+            printf("  [RESTORE-BLOCKED] Disarming instead and marking restoration as incomplete\n");
+            /* Best-effort: at least disarm so hardware is not stuck in a stale schedule */
+            AVB_DISARM_TAS_REQUEST disarm;
+            ZeroMemory(&disarm, sizeof(disarm));
+            DeviceIoControl(hDevice, IOCTL_AVB_DISARM_TAS, NULL, 0,
+                            &disarm, sizeof(disarm), &br, NULL);
+            ok = FALSE; /* hard failure — restoration is incomplete */
+        } else {
+            /* Try to re-arm with original config */
+            AVB_TAS_REQUEST rearm;
+            ZeroMemory(&rearm, sizeof(rearm));
+            memcpy(&rearm.config, &snap->tas_original_config, sizeof(rearm.config));
+            if (!DeviceIoControl(hDevice, IOCTL_AVB_SETUP_TAS,
+                                 &rearm, sizeof(rearm),
+                                 &rearm, sizeof(rearm),
+                                 &br, NULL) || rearm.status != 0) {
+                printf("  [RESTORE-FAIL] TAS re-arm failed (error=%lu status=0x%08X)\n",
+                       GetLastError(), rearm.status);
+                ok = FALSE;
+            } else {
+                printf("  [RESTORE] TAS re-armed with original GCL (original state: armed)\n");
+            }
+        }
     }
 
-    /* Restore TSAUXC via SET_HW_TIMESTAMPING using the captured tsauxc_before.
-     * Bit 31 of TSAUXC is DIS_SYSTIM0: if it was set before, disable; else enable. */
+    /* Restore TSAUXC enable/disable state (bit 31 only — see limitation note above) */
     AVB_HW_TIMESTAMPING_REQUEST hwTs;
     ZeroMemory(&hwTs, sizeof(hwTs));
     hwTs.enable        = ((snap->tsauxc_before & 0x80000000u) == 0) ? 1 : 0;
@@ -147,9 +217,9 @@ static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
     return ok;
 }
 
-/* Independent post-restore verification: confirm TAS reports disarmed.
- * Returns FALSE if driver still reports TAS armed after restore. */
-static BOOL tas_verify_restore(HANDLE hDevice) {
+/* Independent post-restore verification: confirm TAS armed state matches snapshot.
+ * Returns FALSE if driver state does not match what was captured before the test. */
+static BOOL tas_verify_restore(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
     AVB_TAS_STATE tasState;
     ZeroMemory(&tasState, sizeof(tasState));
     DWORD br = 0;
@@ -160,11 +230,17 @@ static BOOL tas_verify_restore(HANDLE hDevice) {
         printf("  [VERIFY-FAIL] Cannot verify TAS state after restore\n");
         return FALSE;
     }
-    if (tasState.armed) {
-        printf("  [VERIFY-FAIL] TAS still armed after restore (armed=%u)\n", tasState.armed);
+    BOOL now_armed = (tasState.armed != 0);
+    if (now_armed != snap->tas_was_armed) {
+        printf("  [VERIFY-FAIL] TAS armed state mismatch: was %d before test, is %d after restore\n",
+               snap->tas_was_armed, now_armed);
         return FALSE;
     }
-    printf("  [VERIFY-OK] TAS confirmed disarmed after restore\n");
+    if (!now_armed) {
+        printf("  [VERIFY-OK] TAS confirmed disarmed (matches original state)\n");
+    } else {
+        printf("  [VERIFY-OK] TAS confirmed armed (matches original state)\n");
+    }
     return TRUE;
 }
 
@@ -185,7 +261,7 @@ static int run_with_restore(HANDLE hDevice, const char *case_name,
 
     /* Restore unconditionally — pass, fail, or skip */
     BOOL restore_ok = tas_restore_state(hDevice, &snap);
-    BOOL verify_ok  = restore_ok ? tas_verify_restore(hDevice) : FALSE;
+    BOOL verify_ok  = restore_ok ? tas_verify_restore(hDevice, &snap) : FALSE;
 
     if (!restore_ok || !verify_ok) {
         printf("  [CLEANUP-FAIL] %s: state restoration failed — halting further cases\n", case_name);
@@ -278,8 +354,7 @@ static void run_tas_case_sequence(HANDLE hDevice, const char *selected_case) {
                              hw_cases[index].fn,
                              &g_passed, &g_failed, &g_skipped);
         } else {
-            /* Negative/validation case: no persistent state change */
-            hw_cases[index - 8 + 8]; /* suppress unused var; use neg_cases */
+            /* Negative/validation case (TC-TAS-009..010): no persistent state change */
             neg_cases[index - 8].fn(hDevice);
         }
         return;

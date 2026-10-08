@@ -1,4 +1,4 @@
-﻿/*++
+/*++
 
 Module Name:
 
@@ -468,6 +468,7 @@ const intel_device_ops_t i350_ops = {
     
     // TSN operations - NOT SUPPORTED (I350 predates TSN standard 2015-2016)
     .setup_tas = NULL,                    // No TSN hardware
+    .disable_tas = NULL,         /* No TAS hardware on this device */
     .setup_frame_preemption = NULL,       // No TSN hardware  
     .setup_ptm = NULL,                    // No PCIe PTM hardware
     

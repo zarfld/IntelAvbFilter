@@ -1,4 +1,4 @@
-﻿/*++
+/*++
 
 Module Name:
 
@@ -478,6 +478,7 @@ const intel_device_ops_t e82580_ops = {
     
     // TSN operations - 82580 doesn't support advanced TSN
     .setup_tas = NULL,
+    .disable_tas = NULL,         /* No TAS hardware on this device */
     .setup_frame_preemption = NULL,
     .setup_ptm = NULL,
     

@@ -70,7 +70,11 @@ typedef struct _intel_device_ops {
     
     // TSN operations (optional - can be NULL for basic devices)
     int (*setup_tas)(device_t *dev, struct tsn_tas_config *config);
-    int (*setup_frame_preemption)(device_t *dev, struct tsn_fp_config *config);
+        /* disable_tas: clear the hardware TSN transmit mode bit (TQAVCTRL.TRANSMIT_MODE_TSN on I226).
+         * Returns 0 on success, -ENOTSUP if hardware has no TAS disable path, <0 on hardware error.
+         * NULL means device never had TAS hardware (e.g. I219, I210). */
+        int (*disable_tas)(device_t *dev);
+        int (*setup_frame_preemption)(device_t *dev, struct tsn_fp_config *config);
     int (*setup_ptm)(device_t *dev, struct ptm_config *config);
     
     // Device-specific register access (optional overrides)

@@ -260,6 +260,7 @@ const intel_device_ops_t e82576_ops = {
     
     // TSN operations - NOT SUPPORTED (TSN standard didn't exist in 2009)
     .setup_tas = NULL,
+    .disable_tas = NULL,         /* No TAS hardware on this device */
     .setup_frame_preemption = NULL,
     .setup_ptm = NULL,
     

@@ -1,4 +1,4 @@
-﻿/*++
+/*++
 
 Module Name:
 
@@ -644,6 +644,7 @@ const intel_device_ops_t i210_ops = {
     
     // TSN operations - NOT SUPPORTED (I210 predates TSN hardware implementation)
     .setup_tas = NULL,                    // No TSN hardware
+    .disable_tas = NULL,         /* No TAS hardware on this device */
     .setup_frame_preemption = NULL,       // No TSN hardware
     .setup_ptm = NULL,                    // No PCIe PTM hardware
     

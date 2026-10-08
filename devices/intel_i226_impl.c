@@ -593,7 +593,63 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     }
 }
 
-/* PCIe Extended Capability List constants (PCIe spec §7.6.2) */
+/**
+ * @brief Disable I226 Time Aware Shaper hardware.
+ *
+ * Clears TQAVCTRL.TRANSMIT_MODE_TSN (bit 0) and TQAVCTRL.ENHANCED_QAV (bit 3),
+ * then reads back to verify the bits are cleared.
+ *
+ * This is the documented hardware disable path for I225/I226 per Intel IGC Linux
+ * driver (drivers/net/ethernet/intel/igc/igc_tsn.c igc_tsn_disable_offload()).
+ *
+ * Returns 0 on success, -1 on MMIO read/write error, -2 if readback shows
+ * TRANSMIT_MODE_TSN still set (hardware did not accept the clear).
+ */
+static int disable_tas(device_t *dev)
+{
+    uint32_t regValue = 0;
+    int result;
+
+    DEBUGP(DL_TRACE, "==>i226_disable_tas\n");
+
+    if (dev == NULL) {
+        return -1;
+    }
+
+    result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL read failed (%d)\n", result);
+        return -1;
+    }
+
+    DEBUGP(DL_TRACE, "i226_disable_tas: TQAVCTRL before=0x%08X\n", regValue);
+
+    /* Clear TSN transmit mode and enhanced QAV bits */
+    regValue &= ~(uint32_t)(I226_TQAVCTRL_TRANSMIT_MODE_TSN | I226_TQAVCTRL_ENHANCED_QAV);
+
+    result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL write failed (%d)\n", result);
+        return -1;
+    }
+
+    /* Readback to verify hardware accepted the clear */
+    result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
+    if (result != 0) {
+        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL readback failed (%d)\n", result);
+        return -1;
+    }
+
+    if (regValue & I226_TQAVCTRL_TRANSMIT_MODE_TSN) {
+        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL readback shows TSN still set (0x%08X) -- hardware refused clear\n", regValue);
+        return -2;
+    }
+
+    DEBUGP(DL_TRACE, "<==i226_disable_tas: SUCCESS TQAVCTRL=0x%08X\n", regValue);
+    return 0;
+}
+
+
 /* TODO: add to intel-ethernet-regs/devices/pcie_common.yaml when reggen supports PCIe arch constants */
 #define PCIE_EXT_CAP_BASE       0x100       /* First extended cap at config offset 256 */
 #define PCIE_EXT_CAP_LIMIT      0x1000      /* PCIe config space size is 4 KB */
@@ -1564,6 +1620,7 @@ const intel_device_ops_t i226_ops = {
     
     // TSN operations - clean generic names
     .setup_tas = setup_tas,
+    .disable_tas = disable_tas,
     .setup_frame_preemption = setup_frame_preemption,
     .setup_ptm = setup_ptm,
     

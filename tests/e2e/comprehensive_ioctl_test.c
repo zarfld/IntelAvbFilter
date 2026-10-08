@@ -698,6 +698,34 @@ static const char* GetDeviceName(avb_u16 vid, avb_u16 did) {
 //=============================================================================
 
 int main(int argc, char* argv[]) {
+    /* P0.3: Destructive tests (those that mutate hardware state without full
+     * snapshot/restore) are BLOCKED by default.  Pass --allow-destructive to
+     * explicitly opt in after verifying safe restore support is available.
+     *
+     * Blocked tests and the required safe-restore capability:
+     *   Test 6  (WRITE_REGISTER / SYSTIML) — destroys PHC; no restore implemented
+     *   Test 8  (SET_TIMESTAMP)             — resets PHC; no restore implemented
+     *   Test 9  (ADJUST_FREQUENCY)          — changes TIMINCA; no restore implemented
+     *   Test 12 (SET_RX_TIMESTAMP)          — changes RXPBSIZE; requires port reset to reverse
+     *   Test 14 (SETUP_FP)                  — enables FP; no restore implemented
+     *   Test 15 (SETUP_PTM)                 — enables PTM; no restore implemented
+     *   Test 16 (SET_QUEUE_TIMESTAMP)       — enables queue TS; no restore implemented
+     *   Test 17 (SET_TARGET_TIME)           — sets target time; target fires and is not cleared
+     *
+     * Add per-test snapshot/restore (matching test_ptp_phc_stability.c UT-CORR-005/006 pattern)
+     * before removing the BLOCKED gates below.
+     */
+    BOOL allow_destructive = FALSE;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--allow-destructive") == 0) {
+            allow_destructive = TRUE;
+        }
+    }
+    if (!allow_destructive) {
+        printf("[INFO] Destructive tests BLOCKED (pass --allow-destructive to enable)\n");
+        printf("[INFO] Tests 6,8,9,12,14,15,16,17 require safe restore support — see source\n\n");
+    }
+
     printf("============================================================\n");
     printf("COMPREHENSIVE IOCTL TEST SUITE\n");
     printf("Tests all 44 IntelAvbFilter IOCTLs (20-44)\n");
@@ -723,32 +751,43 @@ int main(int argc, char* argv[]) {
     DWORD bytesReturned = 0;
     BOOL initResult = DeviceIoControl(h, IOCTL_AVB_INIT_DEVICE, NULL, 0, NULL, 0, &bytesReturned, NULL);
     if (!initResult) {
-        printf("⚠️  IOCTL_AVB_INIT_DEVICE FAILED (Error: %lu)\n", GetLastError());
+        printf("WARNING: IOCTL_AVB_INIT_DEVICE FAILED (Error: %lu)\n", GetLastError());
         printf("    Hardware will NOT be initialized - capabilities will be 0!\n");
         printf("    Continuing anyway to show failure pattern...\n\n");
     } else {
-        printf("✓ IOCTL_AVB_INIT_DEVICE succeeded\n\n");
+        printf("+ IOCTL_AVB_INIT_DEVICE succeeded\n\n");
     }
     
-    // Run all tests
+    // Non-destructive read/query tests (always run)
     Test_01_EnumAdapters(h);
     Test_02_OpenAdapter(h);
     Test_03_GetDeviceInfo(h);
     Test_04_GetHwState(h);
     Test_05_ReadRegister(h);
-    Test_06_WriteRegister(h);
     Test_07_GetTimestamp(h);
-    Test_08_SetTimestamp(h);
-    Test_09_AdjustFrequency(h);
     Test_10_GetClockConfig(h);
-    Test_11_SetHwTimestamping(h);
-    Test_12_SetRxTimestamp(h);
-    Test_13_SetupTAS(h);
-    Test_14_SetupFP(h);
-    Test_15_SetupPTM(h);
-    Test_16_SetQueueTimestamp(h);
-    Test_17_SetTargetTime(h);
     Test_18_GetAuxTimestamp(h);
+
+    // Destructive tests with restore (safe to run)
+    Test_11_SetHwTimestamping(h);  /* has TSAUXC restore */
+    Test_13_SetupTAS(h);           /* has IOCTL_AVB_DISARM_TAS restore */
+
+    // BLOCKED: destructive without safe restore — require explicit opt-in
+    if (allow_destructive) {
+        printf("\n[WARNING] Running destructive tests — PHC and hardware config will be modified\n");
+        printf("[WARNING] Safe restore is NOT implemented for these tests\n\n");
+        Test_06_WriteRegister(h);
+        Test_08_SetTimestamp(h);
+        Test_09_AdjustFrequency(h);
+        Test_12_SetRxTimestamp(h);
+        Test_14_SetupFP(h);
+        Test_15_SetupPTM(h);
+        Test_16_SetQueueTimestamp(h);
+        Test_17_SetTargetTime(h);
+    } else {
+        g_tests_skipped += 8;  /* account for the 8 blocked destructive tests */
+        printf("\n[BLOCKED] Tests 6,8,9,12,14,15,16,17: not run (pass --allow-destructive)\n");
+    }
     
     CloseHandle(h);
     

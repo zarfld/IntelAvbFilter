@@ -1,4 +1,4 @@
-﻿/*++
+/*++
 
 Module Name:
 
@@ -911,6 +911,7 @@ const intel_device_ops_t i219_ops = {
 
     /* TSN features — NULL: I219 is pre-TSN hardware (no TAS/FP/PTM registers) */
     .setup_tas               = NULL,
+    .disable_tas = NULL,         /* No TAS hardware on this device */
     .setup_frame_preemption  = NULL,
     .setup_ptm               = NULL,
 

@@ -2838,69 +2838,103 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
-    /* Fix #328 / audit A9: TAS state query (test-state-restoration contract).
+    /* Fix #328 / audit A9/P0.4: TAS state query (test-state-restoration contract).
      * Returns driver-tracked armed state and last GCL parameters.
+     * Uses AvbContext (per-handle selected adapter) not g_AvbContext.
      * No hardware readback — I225/I226 have no documented GCL register readback path. */
     case IOCTL_AVB_GET_TAS_STATE:
         {
             if (outLen < sizeof(AVB_TAS_STATE)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 PAVB_TAS_STATE tas_state = (PAVB_TAS_STATE)buf;
                 RtlZeroMemory(tas_state, sizeof(*tas_state));
-                if (activeContext != NULL) {
-                    tas_state->armed = (avb_u32)InterlockedOr(&activeContext->tas_armed, 0);
+                if (AvbContext != NULL) {
+                    tas_state->armed = (avb_u32)InterlockedOr(&AvbContext->tas_armed, 0);
                     if (tas_state->armed) {
-                        RtlCopyMemory(&tas_state->config, &activeContext->last_tas_config,
+                        RtlCopyMemory(&tas_state->config, &AvbContext->last_tas_config,
                                       sizeof(tas_state->config));
                     }
                     tas_state->status = (avb_u32)STATUS_SUCCESS;
                 } else {
                     tas_state->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
+                    status = STATUS_DEVICE_NOT_CONNECTED;
                 }
                 info = sizeof(AVB_TAS_STATE);
-                status = STATUS_SUCCESS;
             }
         }
         break;
 
-    /* Fix #328 / audit A9: TAS disarm (test-state-restoration contract).
-     * Calls setup_tas with an all-gates-open zero-duration schedule then clears tas_armed.
-     * If setup_tas is not supported (e.g., I219), clears driver flag only. */
+    /* Fix #328 / audit P0.1/P0.4: TAS disarm — corrected implementation.
+     *
+     * P0.1 corrections:
+     *  - Use ops->disable_tas (clears TQAVCTRL.TRANSMIT_MODE_TSN + hardware readback).
+     *  - Propagate hardware errors; never clear tas_armed on hardware failure.
+     *  - Return explicit BLOCKED status when no disable path exists.
+     *
+     * P0.4 correction:
+     *  - Use AvbContext (per-handle selected adapter) not g_AvbContext override.
+     *  - las_tas_config zeroed only on confirmed success.
+     */
     case IOCTL_AVB_DISARM_TAS:
         {
             if (outLen < sizeof(AVB_DISARM_TAS_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
                 PAVB_DISARM_TAS_REQUEST disarm = (PAVB_DISARM_TAS_REQUEST)buf;
                 RtlZeroMemory(disarm, sizeof(*disarm));
-                if (activeContext != NULL) {
-                    const intel_device_ops_t *ops =
-                        intel_get_device_ops(activeContext->intel_device.device_type);
-                    if (ops && ops->setup_tas) {
-                        /* All-gates-open single-entry schedule with zero cycle time
-                         * signals the hardware to stop gating; behaviour is device-specific.
-                         * A zero cycle_time_ns may be rejected by strict hardware — in that
-                         * case we still clear the driver flag so tests can proceed. */
-                        struct tsn_tas_config disarm_cfg;
-                        RtlZeroMemory(&disarm_cfg, sizeof(disarm_cfg));
-                        disarm_cfg.gate_states[0]    = 0xFF; /* all queues open */
-                        disarm_cfg.gate_durations[0] = 0;    /* zero duration = disable */
-                        ops->setup_tas(&activeContext->intel_device, &disarm_cfg);
-                        /* Ignore return: driver flag must always be cleared */
-                    }
-                    InterlockedExchange(&activeContext->tas_armed, 0);
-                    RtlZeroMemory(&activeContext->last_tas_config,
-                                  sizeof(activeContext->last_tas_config));
-                    disarm->status = (avb_u32)STATUS_SUCCESS;
-                    DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] TAS disarmed on ctx=%p\n", activeContext);
-                } else {
+                if (AvbContext == NULL) {
                     disarm->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
+                    status = STATUS_DEVICE_NOT_CONNECTED;
+                } else {
+                    const intel_device_ops_t *ops =
+                        intel_get_device_ops(AvbContext->intel_device.device_type);
+                    int hw_result = 0;
+
+                    if (ops && ops->disable_tas) {
+                        /* Use device-specific hardware disable path with readback */
+                        hw_result = ops->disable_tas(&AvbContext->intel_device);
+                        if (hw_result == 0) {
+                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] TQAVCTRL cleared on ctx=%p\n", AvbContext);
+                            InterlockedExchange(&AvbContext->tas_armed, 0);
+                            RtlZeroMemory(&AvbContext->last_tas_config,
+                                          sizeof(AvbContext->last_tas_config));
+                            disarm->status = (avb_u32)STATUS_SUCCESS;
+                        } else if (hw_result == -2) {
+                            /* Hardware refused to clear TRANSMIT_MODE_TSN */
+                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] HARDWARE REFUSED clear ctx=%p rc=%d\n",
+                                   AvbContext, hw_result);
+                            disarm->status = (avb_u32)STATUS_UNSUCCESSFUL;
+                            status = STATUS_UNSUCCESSFUL;
+                            /* tas_armed NOT cleared — state is unknown/dirty */
+                        } else {
+                            /* MMIO error */
+                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] MMIO error ctx=%p rc=%d\n",
+                                   AvbContext, hw_result);
+                            disarm->status = (avb_u32)STATUS_IO_DEVICE_ERROR;
+                            status = STATUS_IO_DEVICE_ERROR;
+                            /* tas_armed NOT cleared */
+                        }
+                    } else if (ops && ops->setup_tas == NULL) {
+                        /* Device never had TAS hardware — driver flag only, no HW action needed */
+                        DEBUGP(DL_TRACE, "TAS disarm: no TAS hardware on ctx=%p (device has no setup_tas)\n", AvbContext);
+                        InterlockedExchange(&AvbContext->tas_armed, 0);
+                        RtlZeroMemory(&AvbContext->last_tas_config, sizeof(AvbContext->last_tas_config));
+                        disarm->status = (avb_u32)STATUS_SUCCESS;
+                    } else {
+                        /* Device has setup_tas but no disable_tas — hardware path unknown.
+                         * Cannot safely disarm; block and require driver update. */
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] BLOCKED: device has setup_tas but no disable_tas path ctx=%p\n",
+                               AvbContext);
+                        disarm->status = (avb_u32)STATUS_NOT_SUPPORTED;
+                        status = STATUS_NOT_SUPPORTED;
+                        /* tas_armed NOT cleared — state is indeterminate */
+                    }
                 }
                 info = sizeof(AVB_DISARM_TAS_REQUEST);
-                status = STATUS_SUCCESS;
+                if (status == STATUS_SUCCESS) {
+                    status = STATUS_SUCCESS; /* explicit for clarity */
+                }
             }
         }
         break;
