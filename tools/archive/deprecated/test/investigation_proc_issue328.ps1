@@ -155,3 +155,9 @@ foreach ($t in $BadSuite) {
  .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration Debug 
  .\tools\test\Run-Tests-Elevated.ps1 -TestName "test_ptp_phc_stability.exe" -CaptureDbgView -Configuration Debug 
 }
+
+# Start DbgView manually BEFORE running the script
+# DO NOT use -CaptureDbgView — DbgView must stay running across both runs
+.\tools\test\Run-Tests-Elevated.ps1 -TestName 'test_ioctl_tas.exe' -TestArgs '--case TC-TAS-001' -CaptureDbgView -Configuration Debug 
+.\tools\test\Run-Tests-Elevated.ps1 -TestName 'test_ptp_phc_stability.exe' -CaptureDbgView -Configuration Debug 
+# Only stop DbgView after everything (including the hang) completes or is killed
