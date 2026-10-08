@@ -661,6 +661,8 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_SRP_REGISTER_STREAM:       // Implements #211 (REQ-F-SRP-001)
         case IOCTL_AVB_SRP_DEREGISTER_STREAM:     // Implements #211 (REQ-F-SRP-002)
         case IOCTL_AVB_PHC_CROSSTIMESTAMP:        // Implements #48 (REQ-F-IOCTL-PHC-004: PHC↔System Cross-Timestamp)
+        case IOCTL_AVB_GET_TAS_STATE:             // Fix #328: test-state-restoration readback (code 65)
+        case IOCTL_AVB_DISARM_TAS:                // Fix #328: test-state-restoration disarm (code 66)
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios

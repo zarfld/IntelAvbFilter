@@ -143,10 +143,13 @@ typedef struct _IOCTL_VERSION {
  * hardware state after a power cycle, NIC reset, or direct register manipulation. */
 #define IOCTL_AVB_GET_TAS_STATE         _NDIS_CONTROL_CODE(65, METHOD_BUFFERED)
 
-/* TAS disarm — explicitly clear the GCL and mark TAS as disarmed.
- * Calls setup_tas with an all-gates-open, zero-duration schedule, then clears
- * the driver's tas_armed flag.  Use in test teardown.
- * No input parameters; adapter selected by the current OPEN_ADAPTER context. */
+/* TAS disarm — request hardware TAS disable and clear driver-tracked armed flag.
+ * On I226/I225: returns STATUS_NOT_SUPPORTED (BLOCKED) — no safe NDIS-compatible
+ * in-place TAS disable path exists without an adapter reset (see P0.2 analysis in
+ * devices/intel_i226_impl.c).  Tests requiring disarm on TAS-capable hardware must
+ * be classified BLOCKED until a supported transition path is established.
+ * On non-TAS devices (I219, I210, etc.): clears driver flag, returns success.
+ * No input parameters required. */
 #define IOCTL_AVB_DISARM_TAS            _NDIS_CONTROL_CODE(66, METHOD_BUFFERED)
 
 /* Driver statistics query — implements #270 (TEST-STATISTICS-001) */

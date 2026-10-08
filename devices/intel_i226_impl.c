@@ -594,59 +594,39 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
 }
 
 /**
- * @brief Disable I226 Time Aware Shaper hardware.
+ * @brief Disable I226 Time Aware Shaper — FAIL CLOSED.
  *
- * Clears TQAVCTRL.TRANSMIT_MODE_TSN (bit 0) and TQAVCTRL.ENHANCED_QAV (bit 3),
- * then reads back to verify the bits are cleared.
+ * Safety assessment (P0.2 review against Linux igc_tsn.c):
  *
- * This is the documented hardware disable path for I225/I226 per Intel IGC Linux
- * driver (drivers/net/ethernet/intel/igc/igc_tsn.c igc_tsn_disable_offload()).
+ * The Linux IGC driver (igc_tsn_disable_offload / igc_tsn_offload_apply) does NOT
+ * clear TQAVCTRL.TRANSMIT_MODE_TSN in-place on a running adapter.  It schedules a
+ * full adapter reset (igc_reset) via igc_tsn_offload_apply because the hardware
+ * requires a link-cycle or reset for the transmit-mode transition to take effect.
+ * A successful MMIO readback of the cleared bit is NOT sufficient evidence that the
+ * operational state has changed; the prior register value may be latched internally.
  *
- * Returns 0 on success, -1 on MMIO read/write error, -2 if readback shows
- * TRANSMIT_MODE_TSN still set (hardware did not accept the clear).
+ * Additionally:
+ *  - TQAVCTRL.ENHANCED_QAV is a Credit-Based Shaper control that may be configured
+ *    independently of TAS. Clearing it unconditionally can disturb CBS.
+ *  - The miniport driver (igc.sys) owns TQAVCTRL. An NDIS filter writing it directly
+ *    races with the miniport's own TQAVCTRL management.
+ *  - No NDIS OID exists to request the miniport to disable TSN transmit mode without
+ *    a full reset.
+ *
+ * A safe Windows/NDIS-compatible TAS disable path cannot be established in this
+ * filter driver without a miniport OID or an explicit link-cycle.  This function
+ * therefore fails closed so that affected tests are correctly reported as BLOCKED
+ * rather than silently proceeding with an unverified hardware transition.
+ *
+ * Returns -ENOTSUP always.  When disable_tas returns -ENOTSUP, IOCTL_AVB_DISARM_TAS
+ * returns STATUS_NOT_SUPPORTED and the test is classified BLOCKED.
  */
 static int disable_tas(device_t *dev)
 {
-    uint32_t regValue = 0;
-    int result;
-
-    DEBUGP(DL_TRACE, "==>i226_disable_tas\n");
-
-    if (dev == NULL) {
-        return -1;
-    }
-
-    result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL read failed (%d)\n", result);
-        return -1;
-    }
-
-    DEBUGP(DL_TRACE, "i226_disable_tas: TQAVCTRL before=0x%08X\n", regValue);
-
-    /* Clear TSN transmit mode and enhanced QAV bits */
-    regValue &= ~(uint32_t)(I226_TQAVCTRL_TRANSMIT_MODE_TSN | I226_TQAVCTRL_ENHANCED_QAV);
-
-    result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL write failed (%d)\n", result);
-        return -1;
-    }
-
-    /* Readback to verify hardware accepted the clear */
-    result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL readback failed (%d)\n", result);
-        return -1;
-    }
-
-    if (regValue & I226_TQAVCTRL_TRANSMIT_MODE_TSN) {
-        DEBUGP(DL_ERROR, "i226_disable_tas: TQAVCTRL readback shows TSN still set (0x%08X) -- hardware refused clear\n", regValue);
-        return -2;
-    }
-
-    DEBUGP(DL_TRACE, "<==i226_disable_tas: SUCCESS TQAVCTRL=0x%08X\n", regValue);
-    return 0;
+    UNREFERENCED_PARAMETER(dev);
+    DEBUGP(DL_ERROR, "!!! [#328] i226_disable_tas: BLOCKED — no safe NDIS-compatible "
+           "TAS disable path without adapter reset (see P0.2 analysis)\n");
+    return -ENOTSUP;
 }
 
 

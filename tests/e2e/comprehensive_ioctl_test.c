@@ -768,14 +768,16 @@ int main(int argc, char* argv[]) {
     Test_10_GetClockConfig(h);
     Test_18_GetAuxTimestamp(h);
 
-    // Destructive tests with restore (safe to run)
-    Test_11_SetHwTimestamping(h);  /* has TSAUXC restore */
-    Test_13_SetupTAS(h);           /* has IOCTL_AVB_DISARM_TAS restore */
-
-    // BLOCKED: destructive without safe restore — require explicit opt-in
+    // BLOCKED: Tests with incomplete or BLOCKED restoration paths.
+    // These run only with --allow-destructive; see individual test comments for
+    // what capability is needed before reclassifying as safe.
     if (allow_destructive) {
         printf("\n[WARNING] Running destructive tests — PHC and hardware config will be modified\n");
-        printf("[WARNING] Safe restore is NOT implemented for these tests\n\n");
+        printf("[WARNING] Safe restore is NOT implemented or is BLOCKED for these tests\n\n");
+        // Test_11: TSAUXC restore covers bit 31 only; other bits not restored
+        Test_11_SetHwTimestamping(h);
+        // Test_13: IOCTL_AVB_DISARM_TAS returns STATUS_NOT_SUPPORTED on I226/I225
+        Test_13_SetupTAS(h);
         Test_06_WriteRegister(h);
         Test_08_SetTimestamp(h);
         Test_09_AdjustFrequency(h);
@@ -785,8 +787,9 @@ int main(int argc, char* argv[]) {
         Test_16_SetQueueTimestamp(h);
         Test_17_SetTargetTime(h);
     } else {
-        g_tests_skipped += 8;  /* account for the 8 blocked destructive tests */
-        printf("\n[BLOCKED] Tests 6,8,9,12,14,15,16,17: not run (pass --allow-destructive)\n");
+        g_tests_skipped += 10;  /* 8 previously blocked + 11 + 13 now also blocked */
+        printf("\n[BLOCKED] Tests 6,8,9,11,12,13,14,15,16,17: not run (pass --allow-destructive)\n");
+        printf("[BLOCKED] Tests 11,13 reclassified: incomplete/BLOCKED restoration paths\n");
     }
     
     CloseHandle(h);

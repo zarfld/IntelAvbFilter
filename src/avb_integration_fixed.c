@@ -1988,7 +1988,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 status = STATUS_BUFFER_TOO_SMALL; 
             } else {
                 // CRITICAL FIX: Use the specific adapter context that was selected via IOCTL_AVB_OPEN_ADAPTER
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 
                 DEBUGP(DL_TRACE, "   - Using context: VID=0x%04X DID=0x%04X\n",
                        activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
@@ -2114,7 +2114,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (inLen < sizeof(AVB_FREQUENCY_REQUEST) || outLen < sizeof(AVB_FREQUENCY_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 PAVB_FREQUENCY_REQUEST freq_req = (PAVB_FREQUENCY_REQUEST)buf;
 
                 /* Validate parameter range FIRST — emit ETW events regardless of hw state.
@@ -2539,7 +2539,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (inLen < sizeof(AVB_RX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_RX_TIMESTAMP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 PAVB_RX_TIMESTAMP_REQUEST rx_req = (PAVB_RX_TIMESTAMP_REQUEST)buf;
 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
@@ -2607,7 +2607,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (inLen < sizeof(AVB_QUEUE_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_QUEUE_TIMESTAMP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 PAVB_QUEUE_TIMESTAMP_REQUEST queue_req = (PAVB_QUEUE_TIMESTAMP_REQUEST)buf;
 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
@@ -2945,7 +2945,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             if (inLen < sizeof(AVB_AUX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_AUX_TIMESTAMP_REQUEST)) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 PAVB_AUX_TIMESTAMP_REQUEST aux_req = (PAVB_AUX_TIMESTAMP_REQUEST)buf;
 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
@@ -4032,7 +4032,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 DEBUGP(DL_ERROR, "? TAS SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 
                 // TAS requires PTP clock running for time-synchronized gate scheduling
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
@@ -4120,7 +4120,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 DEBUGP(DL_ERROR, "? FP SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 
                 // Frame Preemption is time-synchronized - requires PTP clock running
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
@@ -4188,7 +4188,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 DEBUGP(DL_ERROR, "? PTM SETUP: Buffer too small\n");
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 
                 if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
                     DEBUGP(DL_ERROR, "? PTM SETUP: Hardware not ready (state=%s)\n", 
