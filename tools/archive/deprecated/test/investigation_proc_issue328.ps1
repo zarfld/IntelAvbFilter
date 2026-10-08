@@ -137,7 +137,19 @@ foreach ($t in $GoodSuite) {
 # exclude here as GoodSuite contains "test_ptp_phc_stability.exe" as last test anyway - only acivate to determine if there is BadTest causing issues
  # // .\tools\test\Run-Tests-Elevated.ps1 -TestName "test_ptp_phc_stability.exe" -CaptureDbgView -Configuration Debug 
 } 
- 
+
+.\tools\setup\Install-Driver-Elevated.ps1 -Configuration Debug -Action Reinstall -CaptureDbgView 
+$identifyBadCase = @(
+    "chatgpt5_i226_tas_validation.exe", 
+    "corrected_i226_tas_test.exe", 
+    "test_ioctl_tas.exe", 
+    "comprehensive_ioctl_test.exe" 
+)
+foreach ($t in $identifyBadCase) { 
+  .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration Debug 
+ .\tools\test\Run-Tests-Elevated.ps1 -TestName "test_ptp_phc_stability.exe" -CaptureDbgView -Configuration Debug 
+}
+
 foreach ($t in $BadSuite) { 
  .\tools\setup\Install-Driver-Elevated.ps1 -Configuration Debug -Action Reinstall -CaptureDbgView 
  .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration Debug 

@@ -37,6 +37,7 @@ PITFALL Prevention:
 
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
 #include <winioctl.h>
 #include <setupapi.h>
 #include <initguid.h>
@@ -50,6 +51,88 @@ DEFINE_GUID(GUID_DEVINTERFACE_AVB_FILTER,
 static int g_passed = 0;
 static int g_failed = 0;
 static int g_skipped = 0;
+
+static void test_basic_gcl_config(HANDLE hDevice);
+static void test_max_gcl_size(HANDLE hDevice);
+static void test_min_gate_window(HANDLE hDevice);
+static void test_max_gate_window(HANDLE hDevice);
+static void test_audio_schedule(HANDLE hDevice);
+static void test_all_gates_open(HANDLE hDevice);
+static void test_all_gates_closed(HANDLE hDevice);
+static void test_industrial_schedule(HANDLE hDevice);
+static void test_null_buffer(HANDLE hDevice);
+static void test_buffer_too_small(HANDLE hDevice);
+
+struct tas_test_case {
+    const char *name;
+    void (*fn)(HANDLE hDevice);
+};
+
+static void print_usage(const char *program_name) {
+    fprintf(stderr,
+            "Usage: %s [--case TC-TAS-001] [--case TC-TAS-009] [--help]\n"
+            "If omitted, all TAS test cases are executed in sequence.\n",
+            program_name);
+}
+
+static int find_tas_case_index(const char *selected_case) {
+    static const struct tas_test_case tas_cases[] = {
+        { "TC-TAS-001", test_basic_gcl_config },
+        { "TC-TAS-002", test_max_gcl_size },
+        { "TC-TAS-003", test_min_gate_window },
+        { "TC-TAS-004", test_max_gate_window },
+        { "TC-TAS-005", test_audio_schedule },
+        { "TC-TAS-006", test_all_gates_open },
+        { "TC-TAS-007", test_all_gates_closed },
+        { "TC-TAS-008", test_industrial_schedule },
+        { "TC-TAS-009", test_null_buffer },
+        { "TC-TAS-010", test_buffer_too_small }
+    };
+
+    if (selected_case == NULL) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < sizeof(tas_cases) / sizeof(tas_cases[0]); ++i) {
+        if (_stricmp(tas_cases[i].name, selected_case) == 0) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static void run_tas_case_sequence(HANDLE hDevice, const char *selected_case) {
+    static const struct tas_test_case tas_cases[] = {
+        { "TC-TAS-001", test_basic_gcl_config },
+        { "TC-TAS-002", test_max_gcl_size },
+        { "TC-TAS-003", test_min_gate_window },
+        { "TC-TAS-004", test_max_gate_window },
+        { "TC-TAS-005", test_audio_schedule },
+        { "TC-TAS-006", test_all_gates_open },
+        { "TC-TAS-007", test_all_gates_closed },
+        { "TC-TAS-008", test_industrial_schedule },
+        { "TC-TAS-009", test_null_buffer },
+        { "TC-TAS-010", test_buffer_too_small }
+    };
+
+    if (selected_case != NULL) {
+        int index = find_tas_case_index(selected_case);
+        if (index < 0) {
+            fprintf(stderr, "[ERROR] Unknown TAS testcase: %s\n", selected_case);
+            return;
+        }
+
+        printf("[INFO] Running selected TAS case: %s\n", selected_case);
+        tas_cases[index].fn(hDevice);
+        return;
+    }
+
+    printf("[INFO] Running all TAS cases in sequence\n");
+    for (size_t i = 0; i < sizeof(tas_cases) / sizeof(tas_cases[0]); ++i) {
+        tas_cases[i].fn(hDevice);
+    }
+}
 
 // Helper: Open AVB device - tries symbolic link first (simpler), then SetupAPI enumeration
 static HANDLE OpenAvbDevice(void) {
@@ -667,19 +750,42 @@ static void test_buffer_too_small(HANDLE hDevice) {
 // Main Test Runner
 // ============================================================================
 
-int main(void) {
+int main(int argc, char *argv[]) {
+    const char *selected_case = NULL;
+
+    for (int i = 1; i < argc; ++i) {
+        if (_stricmp(argv[i], "--help") == 0 || _stricmp(argv[i], "-h") == 0 || _stricmp(argv[i], "/?") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        }
+
+        if (_stricmp(argv[i], "--case") == 0 || _stricmp(argv[i], "-case") == 0 ||
+            _stricmp(argv[i], "--test-case") == 0 || _stricmp(argv[i], "-test-case") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "[ERROR] Missing TAS case name after %s\n", argv[i]);
+                print_usage(argv[0]);
+                return 2;
+            }
+            selected_case = argv[++i];
+        }
+    }
+
     printf("=======================================================================\n");
     printf(" TAS (Time-Aware Scheduler) Tests - Requirement #9 (IEEE 802.1Qbv)\n");
     printf("=======================================================================\n");
     printf(" SSOT Structures: AVB_TAS_REQUEST + tsn_tas_config\n");
-    printf(" Test Issue: #206 (15 test cases)\n");
+    printf(" Test Issue: #206 (10 TAS cases)\n");
     printf(" Reference: avb_test_um.c tas_audio(), test_tsn_ioctl_handlers_um.c\n");
+    if (selected_case != NULL) {
+        printf(" Selected case: %s\n", selected_case);
+    }
     printf("=======================================================================\n");
 
     HANDLE hDevice = OpenAvbDevice();
     if (hDevice == INVALID_HANDLE_VALUE) {
         printf("\n[FATAL] Cannot open AVB device - all tests skipped\n");
-        return 1;
+        g_skipped = (selected_case != NULL) ? 1 : 10;
+        goto print_summary;
     }
 
     /* Enumerate adapters and bind to the first one with INTEL_CAP_TSN_TAS.
@@ -715,30 +821,17 @@ int main(void) {
             bound = TRUE;
             break;
         }
+
         if (!bound) {
             printf("[SKIP] No adapter with INTEL_CAP_TSN_TAS found — TAS tests cannot run\n");
             CloseHandle(hDevice);
-            g_skipped = g_passed + g_failed + 15;  /* account for all 15 TCs */
+            g_skipped = (selected_case != NULL) ? 1 : 10;
             goto print_summary;
         }
     }
 
     printf("\nRunning TAS Tests...\n");
-
-    // Unit Tests
-    test_basic_gcl_config(hDevice);
-    test_max_gcl_size(hDevice);
-    test_min_gate_window(hDevice);
-    test_max_gate_window(hDevice);
-    test_audio_schedule(hDevice);
-    test_all_gates_open(hDevice);
-    test_all_gates_closed(hDevice);
-    test_industrial_schedule(hDevice);
-
-    // Error Handling Tests
-    test_null_buffer(hDevice);
-    test_buffer_too_small(hDevice);
-
+    run_tas_case_sequence(hDevice, selected_case);
     CloseHandle(hDevice);
 
     // Summary
@@ -762,6 +855,10 @@ print_summary:
         return 0;
     }
 
-    printf("\n[RESULT] SUCCESS - All tests passed!\n");
+    if (selected_case != NULL) {
+        printf("\n[RESULT] SUCCESS - Selected TAS case %s passed!\n", selected_case);
+    } else {
+        printf("\n[RESULT] SUCCESS - All tests passed!\n");
+    }
     return 0;
 }
