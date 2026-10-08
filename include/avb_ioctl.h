@@ -134,6 +134,21 @@ typedef struct _IOCTL_VERSION {
  * Note: Code 53 was already taken by IOCTL_AVB_VLAN_ENABLE; using 64 instead. */
 #define IOCTL_AVB_SET_LAUNCH_TIME       _NDIS_CONTROL_CODE(64, METHOD_BUFFERED)
 
+/* TAS state query — test-state-restoration contract (fix #328).
+ * Returns whether TAS is currently armed on the active adapter and the last
+ * programmed GCL parameters, as remembered by the driver.  This is driver-level
+ * state only; it does NOT read back hardware GCL registers because no documented
+ * readback path exists for the GCL entries on I225/I226.
+ * Use for snapshot/restore verification in tests; do not treat as authoritative
+ * hardware state after a power cycle, NIC reset, or direct register manipulation. */
+#define IOCTL_AVB_GET_TAS_STATE         _NDIS_CONTROL_CODE(65, METHOD_BUFFERED)
+
+/* TAS disarm — explicitly clear the GCL and mark TAS as disarmed.
+ * Calls setup_tas with an all-gates-open, zero-duration schedule, then clears
+ * the driver's tas_armed flag.  Use in test teardown.
+ * No input parameters; adapter selected by the current OPEN_ADAPTER context. */
+#define IOCTL_AVB_DISARM_TAS            _NDIS_CONTROL_CODE(66, METHOD_BUFFERED)
+
 /* Driver statistics query — implements #270 (TEST-STATISTICS-001) */
 /* Function 0x808 → value 0x00172020: 0x170000 | (0x808 << 2) */
 #define IOCTL_AVB_GET_STATISTICS        _NDIS_CONTROL_CODE(0x808, METHOD_BUFFERED)  /* 0x00172020 */
@@ -315,6 +330,20 @@ typedef struct AVB_TAS_REQUEST {
     struct tsn_tas_config  config;
     avb_u32                status; /* NDIS_STATUS value */
 } AVB_TAS_REQUEST, *PAVB_TAS_REQUEST;
+
+/* TAS state query response (IOCTL_AVB_GET_TAS_STATE).
+ * Returns driver-tracked armed state and last programmed GCL parameters.
+ * No input fields required; output only. */
+typedef struct AVB_TAS_STATE {
+    avb_u32               armed;   /* out: 1=TAS was armed by IOCTL_AVB_SETUP_TAS, 0=not armed or disarmed */
+    struct tsn_tas_config  config;  /* out: last programmed GCL (valid only when armed=1) */
+    avb_u32               status;  /* out: NDIS_STATUS value */
+} AVB_TAS_STATE, *PAVB_TAS_STATE;
+
+/* TAS disarm response (IOCTL_AVB_DISARM_TAS). No input required. */
+typedef struct AVB_DISARM_TAS_REQUEST {
+    avb_u32 status; /* out: NDIS_STATUS value */
+} AVB_DISARM_TAS_REQUEST, *PAVB_DISARM_TAS_REQUEST;
 
 typedef struct AVB_FP_REQUEST {
     struct tsn_fp_config   config;

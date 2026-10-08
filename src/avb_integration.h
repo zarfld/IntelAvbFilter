@@ -307,6 +307,19 @@ typedef struct _AVB_DEVICE_CONTEXT {
      *     in-flight IOCTLs before AvbCleanupDevice / ExFreePoolWithTag.
      */
     IO_REMOVE_LOCK ioctl_remove_lock;
+
+    /*
+     * TAS armed state tracking (fix #328 / test-state-restoration contract).
+     * Set to 1 by the IOCTL_AVB_SETUP_TAS handler on successful arm.
+     * Used to detect dirty state at FilterPause/FilterDetach and by tests
+     * for snapshot/restore verification.
+     * Access: InterlockedExchange/InterlockedOr (may be read at DISPATCH_LEVEL).
+     */
+    volatile LONG tas_armed;
+
+    /* Last programmed TAS GCL parameters (valid when tas_armed==1).
+     * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */
+    struct tsn_tas_config last_tas_config;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
 /*========================================================================

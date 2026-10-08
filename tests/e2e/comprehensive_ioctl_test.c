@@ -422,6 +422,20 @@ static void Test_11_SetHwTimestamping(HANDLE h) {
     printf("  Previous TSAUXC: 0x%08X\n", req.previous_tsauxc);
     printf("  Current TSAUXC: 0x%08X\n", req.current_tsauxc);
     printf("  Status: 0x%08X\n", req.status);
+
+    /* Restore: write back the original TSAUXC state */
+    AVB_HW_TIMESTAMPING_REQUEST restore_req;
+    ZeroMemory(&restore_req, sizeof(restore_req));
+    restore_req.enable     = ((req.previous_tsauxc & 0x80000000u) == 0) ? 1 : 0;
+    restore_req.timer_mask = 0x1;
+    if (!DeviceIoControl(h, IOCTL_AVB_SET_HW_TIMESTAMPING,
+                         &restore_req, sizeof(restore_req),
+                         &restore_req, sizeof(restore_req),
+                         &bytesReturned, NULL) || restore_req.status != 0) {
+        TEST_FAIL("TSAUXC restore failed after Test_11");
+        return;
+    }
+    printf("  Restored TSAUXC: 0x%08X\n", restore_req.current_tsauxc);
     TEST_PASS();
 }
 
@@ -483,6 +497,18 @@ static void Test_13_SetupTAS(HANDLE h) {
     }
     
     printf("  Status: 0x%08X\n", req.status);
+
+    /* Restore: disarm TAS unconditionally */
+    AVB_DISARM_TAS_REQUEST disarm;
+    ZeroMemory(&disarm, sizeof(disarm));
+    if (!DeviceIoControl(h, IOCTL_AVB_DISARM_TAS,
+                         NULL, 0,
+                         &disarm, sizeof(disarm),
+                         &bytesReturned, NULL) || disarm.status != 0) {
+        TEST_FAIL("TAS disarm failed after Test_13");
+        return;
+    }
+    printf("  TAS disarmed (status=0x%08X)\n", disarm.status);
     TEST_PASS();
 }
 

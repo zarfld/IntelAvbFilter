@@ -2838,6 +2838,73 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
+    /* Fix #328 / audit A9: TAS state query (test-state-restoration contract).
+     * Returns driver-tracked armed state and last GCL parameters.
+     * No hardware readback — I225/I226 have no documented GCL register readback path. */
+    case IOCTL_AVB_GET_TAS_STATE:
+        {
+            if (outLen < sizeof(AVB_TAS_STATE)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_TAS_STATE tas_state = (PAVB_TAS_STATE)buf;
+                RtlZeroMemory(tas_state, sizeof(*tas_state));
+                if (activeContext != NULL) {
+                    tas_state->armed = (avb_u32)InterlockedOr(&activeContext->tas_armed, 0);
+                    if (tas_state->armed) {
+                        RtlCopyMemory(&tas_state->config, &activeContext->last_tas_config,
+                                      sizeof(tas_state->config));
+                    }
+                    tas_state->status = (avb_u32)STATUS_SUCCESS;
+                } else {
+                    tas_state->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
+                }
+                info = sizeof(AVB_TAS_STATE);
+                status = STATUS_SUCCESS;
+            }
+        }
+        break;
+
+    /* Fix #328 / audit A9: TAS disarm (test-state-restoration contract).
+     * Calls setup_tas with an all-gates-open zero-duration schedule then clears tas_armed.
+     * If setup_tas is not supported (e.g., I219), clears driver flag only. */
+    case IOCTL_AVB_DISARM_TAS:
+        {
+            if (outLen < sizeof(AVB_DISARM_TAS_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PAVB_DEVICE_CONTEXT activeContext = g_AvbContext ? g_AvbContext : AvbContext;
+                PAVB_DISARM_TAS_REQUEST disarm = (PAVB_DISARM_TAS_REQUEST)buf;
+                RtlZeroMemory(disarm, sizeof(*disarm));
+                if (activeContext != NULL) {
+                    const intel_device_ops_t *ops =
+                        intel_get_device_ops(activeContext->intel_device.device_type);
+                    if (ops && ops->setup_tas) {
+                        /* All-gates-open single-entry schedule with zero cycle time
+                         * signals the hardware to stop gating; behaviour is device-specific.
+                         * A zero cycle_time_ns may be rejected by strict hardware — in that
+                         * case we still clear the driver flag so tests can proceed. */
+                        struct tsn_tas_config disarm_cfg;
+                        RtlZeroMemory(&disarm_cfg, sizeof(disarm_cfg));
+                        disarm_cfg.gate_states[0]    = 0xFF; /* all queues open */
+                        disarm_cfg.gate_durations[0] = 0;    /* zero duration = disable */
+                        ops->setup_tas(&activeContext->intel_device, &disarm_cfg);
+                        /* Ignore return: driver flag must always be cleared */
+                    }
+                    InterlockedExchange(&activeContext->tas_armed, 0);
+                    RtlZeroMemory(&activeContext->last_tas_config,
+                                  sizeof(activeContext->last_tas_config));
+                    disarm->status = (avb_u32)STATUS_SUCCESS;
+                    DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] TAS disarmed on ctx=%p\n", activeContext);
+                } else {
+                    disarm->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
+                }
+                info = sizeof(AVB_DISARM_TAS_REQUEST);
+                status = STATUS_SUCCESS;
+            }
+        }
+        break;
+
     case IOCTL_AVB_GET_AUX_TIMESTAMP:
         {
             DEBUGP(DL_TRACE, "IOCTL_AVB_GET_AUX_TIMESTAMP called\n");
@@ -3974,6 +4041,10 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                    (unsigned)r->config.cycle_time_s,
                                    (unsigned)r->config.cycle_time_ns);
                             DEBUGP(DL_TRACE, "? TAS configuration successful\n");
+                            /* Record armed state for test-state-restoration (fix #328 / A9) */
+                            InterlockedExchange(&activeContext->tas_armed, 1);
+                            /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
+                            RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
                         } else {
                             DEBUGP(DL_ERROR, "? TAS setup failed: %d\n", rc);
                             

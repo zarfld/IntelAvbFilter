@@ -52,6 +52,150 @@ static int g_passed = 0;
 static int g_failed = 0;
 static int g_skipped = 0;
 
+// ============================================================================
+// Snapshot / Restore infrastructure (test-state-restoration contract)
+// Every hardware-mutating case MUST call tas_capture_state before mutation
+// and tas_restore_state (unconditionally) after, reporting cleanup failures
+// as hard test failures.
+// ============================================================================
+
+typedef struct {
+    BOOL     valid;              /* 1 = snapshot was taken successfully */
+    avb_u32  tsauxc_before;     /* TSAUXC value before enable_systim0 */
+    BOOL     tas_was_armed;     /* driver reported TAS armed before test */
+} TAS_SNAPSHOT;
+
+/* Capture TSAUXC and TAS armed state before any mutation.
+ * Returns FALSE and leaves snapshot->valid=0 on failure; caller must not mutate. */
+static BOOL tas_capture_state(HANDLE hDevice, TAS_SNAPSHOT *snap) {
+    ZeroMemory(snap, sizeof(*snap));
+
+    /* Read current clock config for TSAUXC baseline */
+    AVB_CLOCK_CONFIG clockCfg;
+    ZeroMemory(&clockCfg, sizeof(clockCfg));
+    DWORD br = 0;
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_CLOCK_CONFIG,
+                         &clockCfg, sizeof(clockCfg),
+                         &clockCfg, sizeof(clockCfg),
+                         &br, NULL) || clockCfg.status != 0) {
+        printf("  [CAPTURE-FAIL] Cannot read TSAUXC before test (error=%lu status=0x%08X)\n",
+               GetLastError(), clockCfg.status);
+        return FALSE;
+    }
+    snap->tsauxc_before = clockCfg.tsauxc;
+
+    /* Read TAS armed state */
+    AVB_TAS_STATE tasState;
+    ZeroMemory(&tasState, sizeof(tasState));
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_TAS_STATE,
+                         NULL, 0,
+                         &tasState, sizeof(tasState),
+                         &br, NULL) || tasState.status != 0) {
+        printf("  [CAPTURE-FAIL] Cannot read TAS state before test (error=%lu status=0x%08X)\n",
+               GetLastError(), tasState.status);
+        return FALSE;
+    }
+    snap->tas_was_armed = (tasState.armed != 0);
+    snap->valid = TRUE;
+    printf("  [SNAPSHOT] tsauxc=0x%08X tas_armed=%d\n", snap->tsauxc_before, snap->tas_was_armed);
+    return TRUE;
+}
+
+/* Restore TSAUXC and TAS state to the captured baseline.
+ * Returns FALSE if any restoration operation failed (caller must fail the test). */
+static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
+    if (!snap->valid) {
+        printf("  [RESTORE-FAIL] No valid snapshot — cannot restore\n");
+        return FALSE;
+    }
+
+    BOOL ok = TRUE;
+    DWORD br = 0;
+
+    /* Always disarm TAS regardless of original state */
+    AVB_DISARM_TAS_REQUEST disarm;
+    ZeroMemory(&disarm, sizeof(disarm));
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_DISARM_TAS,
+                         NULL, 0,
+                         &disarm, sizeof(disarm),
+                         &br, NULL) || disarm.status != 0) {
+        printf("  [RESTORE-FAIL] TAS disarm failed (error=%lu status=0x%08X)\n",
+               GetLastError(), disarm.status);
+        ok = FALSE;
+    } else {
+        printf("  [RESTORE] TAS disarmed\n");
+    }
+
+    /* Restore TSAUXC via SET_HW_TIMESTAMPING using the captured tsauxc_before.
+     * Bit 31 of TSAUXC is DIS_SYSTIM0: if it was set before, disable; else enable. */
+    AVB_HW_TIMESTAMPING_REQUEST hwTs;
+    ZeroMemory(&hwTs, sizeof(hwTs));
+    hwTs.enable        = ((snap->tsauxc_before & 0x80000000u) == 0) ? 1 : 0;
+    hwTs.timer_mask    = 0x1; /* SYSTIM0 */
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_SET_HW_TIMESTAMPING,
+                         &hwTs, sizeof(hwTs),
+                         &hwTs, sizeof(hwTs),
+                         &br, NULL) || hwTs.status != 0) {
+        printf("  [RESTORE-FAIL] TSAUXC restore failed (error=%lu status=0x%08X)\n",
+               GetLastError(), hwTs.status);
+        ok = FALSE;
+    } else {
+        printf("  [RESTORE] TSAUXC restored (enable=%u current=0x%08X)\n",
+               hwTs.enable, hwTs.current_tsauxc);
+    }
+
+    return ok;
+}
+
+/* Independent post-restore verification: confirm TAS reports disarmed.
+ * Returns FALSE if driver still reports TAS armed after restore. */
+static BOOL tas_verify_restore(HANDLE hDevice) {
+    AVB_TAS_STATE tasState;
+    ZeroMemory(&tasState, sizeof(tasState));
+    DWORD br = 0;
+    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_TAS_STATE,
+                         NULL, 0,
+                         &tasState, sizeof(tasState),
+                         &br, NULL) || tasState.status != 0) {
+        printf("  [VERIFY-FAIL] Cannot verify TAS state after restore\n");
+        return FALSE;
+    }
+    if (tasState.armed) {
+        printf("  [VERIFY-FAIL] TAS still armed after restore (armed=%u)\n", tasState.armed);
+        return FALSE;
+    }
+    printf("  [VERIFY-OK] TAS confirmed disarmed after restore\n");
+    return TRUE;
+}
+
+/* Run one hardware-mutating TAS case with full snapshot/restore lifecycle.
+ * Returns 0=pass, 1=test-fail, 2=cleanup-fail (nonzero means fail). */
+static int run_with_restore(HANDLE hDevice, const char *case_name,
+                            void (*fn)(HANDLE), int *passed, int *failed, int *skipped) {
+    TAS_SNAPSHOT snap;
+    if (!tas_capture_state(hDevice, &snap)) {
+        printf("  [FAIL] %s: cannot capture state — test not executed\n", case_name);
+        (*failed)++;
+        return 1;
+    }
+
+    int before_pass = *passed, before_fail = *failed;
+    fn(hDevice);
+    int test_failed = (*failed > before_fail);
+
+    /* Restore unconditionally — pass, fail, or skip */
+    BOOL restore_ok = tas_restore_state(hDevice, &snap);
+    BOOL verify_ok  = restore_ok ? tas_verify_restore(hDevice) : FALSE;
+
+    if (!restore_ok || !verify_ok) {
+        printf("  [CLEANUP-FAIL] %s: state restoration failed — halting further cases\n", case_name);
+        (*failed)++;
+        return 2; /* hard stop: do not run more hardware-mutating cases */
+    }
+
+    return test_failed ? 1 : 0;
+}
+
 static void test_basic_gcl_config(HANDLE hDevice);
 static void test_max_gcl_size(HANDLE hDevice);
 static void test_min_gate_window(HANDLE hDevice);
@@ -103,7 +247,9 @@ static int find_tas_case_index(const char *selected_case) {
 }
 
 static void run_tas_case_sequence(HANDLE hDevice, const char *selected_case) {
-    static const struct tas_test_case tas_cases[] = {
+    /* Hardware-mutating cases (TC-TAS-001..008) use run_with_restore.
+     * Negative/validation cases (TC-TAS-009..010) do not mutate persistent state. */
+    static const struct tas_test_case hw_cases[] = {
         { "TC-TAS-001", test_basic_gcl_config },
         { "TC-TAS-002", test_max_gcl_size },
         { "TC-TAS-003", test_min_gate_window },
@@ -111,7 +257,9 @@ static void run_tas_case_sequence(HANDLE hDevice, const char *selected_case) {
         { "TC-TAS-005", test_audio_schedule },
         { "TC-TAS-006", test_all_gates_open },
         { "TC-TAS-007", test_all_gates_closed },
-        { "TC-TAS-008", test_industrial_schedule },
+        { "TC-TAS-008", test_industrial_schedule }
+    };
+    static const struct tas_test_case neg_cases[] = {
         { "TC-TAS-009", test_null_buffer },
         { "TC-TAS-010", test_buffer_too_small }
     };
@@ -124,13 +272,33 @@ static void run_tas_case_sequence(HANDLE hDevice, const char *selected_case) {
         }
 
         printf("[INFO] Running selected TAS case: %s\n", selected_case);
-        tas_cases[index].fn(hDevice);
+        if (index < 8) {
+            /* Hardware-mutating: run with snapshot/restore */
+            run_with_restore(hDevice, selected_case,
+                             hw_cases[index].fn,
+                             &g_passed, &g_failed, &g_skipped);
+        } else {
+            /* Negative/validation case: no persistent state change */
+            hw_cases[index - 8 + 8]; /* suppress unused var; use neg_cases */
+            neg_cases[index - 8].fn(hDevice);
+        }
         return;
     }
 
-    printf("[INFO] Running all TAS cases in sequence\n");
-    for (size_t i = 0; i < sizeof(tas_cases) / sizeof(tas_cases[0]); ++i) {
-        tas_cases[i].fn(hDevice);
+    printf("[INFO] Running all TAS cases with per-case snapshot/restore\n");
+    for (size_t i = 0; i < sizeof(hw_cases) / sizeof(hw_cases[0]); ++i) {
+        int rc = run_with_restore(hDevice, hw_cases[i].name,
+                                  hw_cases[i].fn,
+                                  &g_passed, &g_failed, &g_skipped);
+        if (rc == 2) {
+            printf("[ABORT] Cleanup failure — stopping hardware-mutating cases\n");
+            /* Count remaining hw cases as skipped */
+            g_skipped += (int)(sizeof(hw_cases) / sizeof(hw_cases[0]) - i - 1);
+            break;
+        }
+    }
+    for (size_t i = 0; i < sizeof(neg_cases) / sizeof(neg_cases[0]); ++i) {
+        neg_cases[i].fn(hDevice);
     }
 }
 
@@ -707,12 +875,13 @@ static void test_null_buffer(HANDLE hDevice) {
         printf("  [PASS] Null buffer correctly rejected (error=%lu)\n", error);
         g_passed++;
     } else if (result) {
-        // Operation succeeded when it should have failed
-        printf("  [PASS] Null buffer accepted (driver may not validate - acceptable behavior)\n");
-        g_passed++;  // Not a failure - some drivers don't validate null buffers
+        /* Driver accepted null buffer — this is a driver validation defect, not acceptable behaviour */
+        printf("  [FAIL] Null buffer unexpectedly accepted — driver MUST reject null input (status=0x%08X)\n",
+               ERROR_SUCCESS);
+        g_failed++;
     } else {
         printf("  [WARN] Unexpected error code (error=%lu, expected 87 or 122)\n", error);
-        g_passed++;  // Still pass - just a different error
+        g_passed++;  /* Different error still counts as rejection */
     }
 }
 
@@ -737,12 +906,12 @@ static void test_buffer_too_small(HANDLE hDevice) {
         printf("  [PASS] Small buffer correctly rejected (error=%lu)\n", error);
         g_passed++;
     } else if (result) {
-        // Operation succeeded when it should have failed
-        printf("  [PASS] Small buffer accepted (driver may not validate size - acceptable behavior)\n");
-        g_passed++;  // Not a failure - some drivers don't validate buffer size
+        /* Driver accepted undersized buffer — this is a driver validation defect */
+        printf("  [FAIL] Undersized buffer unexpectedly accepted — driver MUST reject insufficient input\n");
+        g_failed++;
     } else {
         printf("  [WARN] Unexpected error code (error=%lu, expected 87 or 122)\n", error);
-        g_passed++;  // Still pass - just a different error
+        g_passed++;  /* Different error still counts as rejection */
     }
 }
 
@@ -850,9 +1019,9 @@ print_summary:
         return 1;
     }
 
-    if (g_passed == 0) {
-        printf("\n[RESULT] NO TESTS RAN - Check prerequisites (AVB device, SYSTIM0)\n");
-        return 0;
+    if (g_passed == 0 && g_failed == 0) {
+        printf("\n[RESULT] NO TESTS RAN - Check prerequisites (AVB device, SYSTIM0, TAS capability)\n");
+        return 2;  /* distinct from pass=0 and fail=1 so CI can detect no-run */
     }
 
     if (selected_case != NULL) {
