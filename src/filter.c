@@ -2320,6 +2320,11 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
         return;
     }
 
+    /* [#328 probe-A] Upgrade to DL_ERROR so this appears in DbgView even when TAS-armed.
+     * Proves whether FilterReceiveNetBufferLists is still being called during the
+     * NdisFDeregisterFilterDriver hang, and shows the filter state at each entry. */
+    DEBUGP(DL_ERROR, "!!! [#328-RX-CYCLE] FilterReceiveNetBufferLists: state=%d nbls=%u ctx=%p\n",
+           (int)pFilter->State, NumberOfNetBufferLists, pFilter->AvbContext);
     DEBUGP(DL_TRACE, "===>ReceiveNetBufferList: NetBufferLists = %p.\n", NetBufferLists);
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
@@ -2487,6 +2492,10 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
                                                        InterlockedCompareExchange64(
                                                            &avbCtx->ingress_latency_ns, 0, 0));
                                         
+                                        /* [#328 probe-B] Proves the RX path (not the DPC) is the source of the
+                                         * AvbPostTimestampEvent calls visible in DbgView during the hang. */
+                                        DEBUGP(DL_ERROR, "!!! [#328-RXPATH-POST] AvbPostTimestampEvent from RX path: adapter=0x%04X ts=0x%llx msgType=0x%x\n",
+                                               avbCtx->intel_device.pci_device_id, (unsigned long long)timestamp_ns, messageType);
                                         DEBUGP(DL_TRACE, "!!! CALLING AvbPostTimestampEvent: ts=0x%llx, msgType=0x%x, cf=0x%llx\n", timestamp_ns, messageType, (UINT64)correction_field);
                                         
                                         /* Post event to matching subscriptions */
@@ -2560,12 +2569,22 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
             FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
         }
 
+        /* [#328 probe-C] Bracket NdisFIndicateReceiveNetBufferLists with DL_ERROR probes.
+         * If probe-INDICATE-ENTER appears but probe-INDICATE-RETURN never follows, the
+         * call is blocking — proving that a protocol driver above holds NBLs indefinitely
+         * while the TAS-armed hardware drives continuous receive traffic. */
+        DEBUGP(DL_ERROR, "!!! [#328-INDICATE-ENTER] NdisFIndicateReceiveNetBufferLists: nbls=%u OutstandingRcvs=%u state=%d\n",
+               NumberOfNetBufferLists,
+               pFilter->TrackReceives ? pFilter->OutstandingRcvs : 0U,
+               (int)pFilter->State);
         NdisFIndicateReceiveNetBufferLists(
                    pFilter->FilterHandle,
                    NetBufferLists,
                    PortNumber,
                    NumberOfNetBufferLists,
                    ReceiveFlags);
+        DEBUGP(DL_ERROR, "!!! [#328-INDICATE-RETURN] NdisFIndicateReceiveNetBufferLists returned: nbls=%u\n",
+               NumberOfNetBufferLists);
 
 
         if (NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags) &&
