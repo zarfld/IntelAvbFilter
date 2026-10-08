@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file comprehensive_ioctl_test.c
  * @brief Comprehensive test suite for all IntelAvbFilter IOCTLs
  * 
@@ -29,9 +29,9 @@ static int g_tests_passed = 0;
 static int g_tests_failed = 0;
 static int g_tests_skipped = 0;
 
-#define TEST_PASS() do { g_tests_passed++; printf("  ✓ PASSED\n"); } while(0)
-#define TEST_FAIL(msg) do { g_tests_failed++; printf("  ✗ FAILED: %s\n", msg); } while(0)
-#define TEST_SKIP(msg) do { g_tests_skipped++; printf("  ⊘ SKIPPED: %s\n", msg); } while(0)
+#define TEST_PASS() do { g_tests_passed++; printf("  âœ“ PASSED\n"); } while(0)
+#define TEST_FAIL(msg) do { g_tests_failed++; printf("  âœ— FAILED: %s\n", msg); } while(0)
+#define TEST_SKIP(msg) do { g_tests_skipped++; printf("  âŠ˜ SKIPPED: %s\n", msg); } while(0)
 
 // Device info globals (discovered dynamically)
 static char g_device_name[256] = "Unknown";
@@ -185,7 +185,7 @@ static void Test_04_GetHwState(HANDLE h) {
     printf("  Capabilities: 0x%08X\n", state.capabilities);
     
     if (state.hw_state < 3) {
-        printf("  ⚠️  WARNING: PTP operations require state >= PTP_READY (3)\n");
+        printf("  âš ï¸  WARNING: PTP operations require state >= PTP_READY (3)\n");
         printf("      Current state (%u) may cause timestamp IOCTLs to fail\n", state.hw_state);
     }
     
@@ -292,7 +292,7 @@ static void Test_07_GetTimestamp(HANDLE h) {
                         &req, sizeof(req),
                         &bytesReturned, NULL)) {
         DWORD error = GetLastError();
-        printf("  ⚠️  DeviceIoControl failed (GLE=%lu)\n", error);
+        printf("  âš ï¸  DeviceIoControl failed (GLE=%lu)\n", error);
         if (error == ERROR_NOT_READY || error == 21) {
             printf("  Reason: Hardware state < PTP_READY (requires clock initialization)\n");
             printf("  Workaround: Use raw register access (IOCTLs 22-23) or wait for PTP init\n");
@@ -703,28 +703,23 @@ int main(int argc, char* argv[]) {
      * explicitly opt in after verifying safe restore support is available.
      *
      * Blocked tests and the required safe-restore capability:
-     *   Test 6  (WRITE_REGISTER / SYSTIML) — destroys PHC; no restore implemented
-     *   Test 8  (SET_TIMESTAMP)             — resets PHC; no restore implemented
-     *   Test 9  (ADJUST_FREQUENCY)          — changes TIMINCA; no restore implemented
-     *   Test 12 (SET_RX_TIMESTAMP)          — changes RXPBSIZE; requires port reset to reverse
-     *   Test 14 (SETUP_FP)                  — enables FP; no restore implemented
-     *   Test 15 (SETUP_PTM)                 — enables PTM; no restore implemented
-     *   Test 16 (SET_QUEUE_TIMESTAMP)       — enables queue TS; no restore implemented
-     *   Test 17 (SET_TARGET_TIME)           — sets target time; target fires and is not cleared
+     *   Test 6  (WRITE_REGISTER / SYSTIML) â€” destroys PHC; no restore implemented
+     *   Test 8  (SET_TIMESTAMP)             â€” resets PHC; no restore implemented
+     *   Test 9  (ADJUST_FREQUENCY)          â€” changes TIMINCA; no restore implemented
+     *   Test 12 (SET_RX_TIMESTAMP)          â€” changes RXPBSIZE; requires port reset to reverse
+     *   Test 14 (SETUP_FP)                  â€” enables FP; no restore implemented
+     *   Test 15 (SETUP_PTM)                 â€” enables PTM; no restore implemented
+     *   Test 16 (SET_QUEUE_TIMESTAMP)       â€” enables queue TS; no restore implemented
+     *   Test 17 (SET_TARGET_TIME)           â€” sets target time; target fires and is not cleared
      *
      * Add per-test snapshot/restore (matching test_ptp_phc_stability.c UT-CORR-005/006 pattern)
      * before removing the BLOCKED gates below.
      */
+    /* P0.3: --allow-destructive bypass permanently removed from standard suite.
+     * Destructive diagnostics belong in a separate explicitly non-conformant workflow. */
     BOOL allow_destructive = FALSE;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--allow-destructive") == 0) {
-            allow_destructive = TRUE;
-        }
-    }
-    if (!allow_destructive) {
-        printf("[INFO] Destructive tests BLOCKED (pass --allow-destructive to enable)\n");
-        printf("[INFO] Tests 6,8,9,12,14,15,16,17 require safe restore support — see source\n\n");
-    }
+    (void)argc; (void)argv;
+
 
     printf("============================================================\n");
     printf("COMPREHENSIVE IOCTL TEST SUITE\n");
@@ -744,7 +739,7 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     
-    printf("✓ Driver opened successfully\n\n");
+    printf("âœ“ Driver opened successfully\n\n");
     
     // Initialize device - CRITICAL for hardware access
     printf("[INIT] Calling IOCTL_AVB_INIT_DEVICE...\n");
@@ -772,7 +767,7 @@ int main(int argc, char* argv[]) {
     // These run only with --allow-destructive; see individual test comments for
     // what capability is needed before reclassifying as safe.
     if (allow_destructive) {
-        printf("\n[WARNING] Running destructive tests — PHC and hardware config will be modified\n");
+        printf("\n[WARNING] Running destructive tests â€” PHC and hardware config will be modified\n");
         printf("[WARNING] Safe restore is NOT implemented or is BLOCKED for these tests\n\n");
         // Test_11: TSAUXC restore covers bit 31 only; other bits not restored
         Test_11_SetHwTimestamping(h);
@@ -802,16 +797,16 @@ int main(int argc, char* argv[]) {
     printf("Capabilities: 0x%08X\n", g_capabilities);
     PrintCapabilities(g_capabilities);
     printf("\n");
-    printf("✓ Passed:  %d\n", g_tests_passed);
-    printf("✗ Failed:  %d\n", g_tests_failed);
-    printf("⊘ Skipped: %d (capability-dependent)\n", g_tests_skipped);
+    printf("âœ“ Passed:  %d\n", g_tests_passed);
+    printf("âœ— Failed:  %d\n", g_tests_failed);
+    printf("âŠ˜ Skipped: %d (capability-dependent)\n", g_tests_skipped);
     printf("============================================================\n");
     
     if (g_tests_failed == 0) {
-        printf("\n🎉 ALL APPLICABLE TESTS PASSED!\n");
+        printf("\nðŸŽ‰ ALL APPLICABLE TESTS PASSED!\n");
         printf("Driver is fully functional for detected device capabilities.\n");
     } else {
-        printf("\n⚠️  %d TEST(S) FAILED - Review output above\n", g_tests_failed);
+        printf("\nâš ï¸  %d TEST(S) FAILED - Review output above\n", g_tests_failed);
     }
     
    // printf("\nPress Enter to exit...");

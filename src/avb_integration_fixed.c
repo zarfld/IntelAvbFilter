@@ -2900,6 +2900,14 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             RtlZeroMemory(&AvbContext->last_tas_config,
                                           sizeof(AvbContext->last_tas_config));
                             disarm->status = (avb_u32)STATUS_SUCCESS;
+                        } else if (hw_result == -ENOTSUP) {
+                            /* P0.2: disable_tas intentionally returns -ENOTSUP (no safe in-place
+                             * disable path for this device).  Map to STATUS_NOT_SUPPORTED so the
+                             * caller receives a distinct, unambiguous status code. */
+                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] ENOTSUP: no disable path on ctx=%p\n", AvbContext);
+                            disarm->status = (avb_u32)STATUS_NOT_SUPPORTED;
+                            status = STATUS_NOT_SUPPORTED;
+                            /* tas_armed NOT cleared — hardware state indeterminate */
                         } else if (hw_result == -2) {
                             /* Hardware refused to clear TRANSMIT_MODE_TSN */
                             DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] HARDWARE REFUSED clear ctx=%p rc=%d\n",

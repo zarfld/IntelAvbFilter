@@ -1285,6 +1285,14 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_tas_restore_contract"
+        Type = "cl"
+        Source = "tests\unit\test_tas_restore_contract.c"
+        Output = "test_tas_restore_contract.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Description = "Mock unit tests: TAS state-restoration contract (P0.6 / #328)"
+    },
+    @{
         Name = "test_ioctl_tas"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_tas.c"
