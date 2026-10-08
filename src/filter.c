@@ -1,4 +1,4 @@
-﻿/*++
+/*++
 
 Module Name:
 
@@ -37,6 +37,14 @@ PDEVICE_OBJECT      NdisDeviceObject = NULL;
 
 FILTER_LOCK         FilterListLock;
 LIST_ENTRY          FilterModuleList;
+
+/*
+ * Fix #328: Global flag set to 1 in FilterUnload before NdisFDeregisterFilterDriver blocks.
+ * FilterReceiveNetBufferLists reads this flag (no lock — volatile + InterlockedOr) and drops
+ * inbound NBLs immediately when set, draining the RX path so NDIS can quiesce and call
+ * FilterPause/FilterDetach without waiting for a quiet network window that never arrives.
+ */
+volatile LONG       g_FilterStopping = 0;
 
 /*
  * ETW event logging infrastructure
@@ -181,6 +189,8 @@ Return Value:
     DEBUGP(DL_TRACE, "===>DriverEntry...\n");
     /* #328 diagnostic: confirm whether module actually reloaded after service restart */
     DEBUGP(DL_ERROR, "!!! [#328] DriverEntry: CALLED (module loaded/reloaded)\n");
+    /* Fix #328: reset stopping flag on every fresh driver load */
+    InterlockedExchange(&g_FilterStopping, 0);
 
     FilterDriverObject = DriverObject;
 
@@ -1169,6 +1179,12 @@ Return Value:
     DEBUGP(DL_TRACE, "===>FilterUnload\n");
     /* #328 diagnostic */
     DEBUGP(DL_ERROR, "!!! [#328] FilterUnload: DevHandle=%p\n", NdisFilterDeviceHandle);
+
+    /* Fix #328: Signal all FilterReceiveNetBufferLists calls to drop NBLs immediately.
+     * Must be set BEFORE NdisFDeregisterFilterDriver so the RX flood drains before
+     * NDIS attempts to call FilterPause. */
+    InterlockedExchange(&g_FilterStopping, 1);
+    DEBUGP(DL_ERROR, "!!! [#328] FilterUnload: g_FilterStopping SET — RX path will drop NBLs\n");
 
     /* Unregister ETW provider (paired with EventRegisterIntelAvbFilter in DriverEntry) */
     EventUnregisterIntelAvbFilter();
@@ -2359,7 +2375,36 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
         FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
 #endif
 
-        ASSERT(NumberOfNetBufferLists >= 1);
+    /*
+     * Fix #328: Drop inbound NBLs immediately when the driver is stopping.
+     *
+     * g_FilterStopping is set to 1 in FilterUnload BEFORE NdisFDeregisterFilterDriver
+     * is called.  NDIS cannot call FilterPause while FilterReceiveNetBufferLists is
+     * continuously running on other threads — it waits for a quiescent window that
+     * never arrives on a busy network.  Dropping NBLs here drains the outstanding
+     * count to zero, giving NDIS the quiescent window it needs to call FilterPause,
+     * then FilterDetach, then complete NdisFDeregisterFilterDriver.
+     *
+     * ReceiveFlags CAN_PEND: if 0 the miniport owns the NBLs; skip NdisFReturn.
+     */
+    if (InterlockedOr(&g_FilterStopping, 0)) {
+        DEBUGP(DL_ERROR, "!!! [#328-PAUSE-DROP] FilterReceiveNetBufferLists: dropping %u NBL(s) -- g_FilterStopping=1\n",
+               NumberOfNetBufferLists);
+        if (NDIS_TEST_RECEIVE_CAN_PEND(ReceiveFlags)) {
+            ULONG ReturnFlags2 = 0;
+            if (NDIS_TEST_RECEIVE_AT_DISPATCH_LEVEL(ReceiveFlags)) {
+                NDIS_SET_RETURN_FLAG(ReturnFlags2, NDIS_RETURN_FLAGS_DISPATCH_LEVEL);
+            }
+            NdisFReturnNetBufferLists(pFilter->FilterHandle, NetBufferLists, ReturnFlags2);
+        }
+        if (pFilter->AvbContext != NULL) {
+            InterlockedAdd64(&((PAVB_DEVICE_CONTEXT)pFilter->AvbContext)->stats_outstanding_receive_nbls,
+                             -(LONGLONG)NumberOfNetBufferLists);
+        }
+        return;
+    }
+
+
 
         //
         // Task 6a: PTP message detection for timestamp event generation

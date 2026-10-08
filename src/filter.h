@@ -111,6 +111,7 @@ extern LIST_ENTRY          FilterModuleList;
  * g_EvtDriverInit: exposed for use in avb_integration_fixed.c IOCTL handler
  * Implements: #65 (REQ-F-EVENT-LOG-001) */
 extern BOOLEAN             g_EtwInitEventEmitted;
+extern volatile LONG       g_FilterStopping;   /* Fix #328: set in FilterUnload to drain RX before NdisFDeregisterFilterDriver */
 
 #define FILTER_FRIENDLY_NAME        L"IntelAvbFilter NDIS LightWeight Filter"
 #define FILTER_UNIQUE_NAME          L"{3f74ae86-14f9-4e79-9445-5b1e52ccd192}" //unique name, quid name
