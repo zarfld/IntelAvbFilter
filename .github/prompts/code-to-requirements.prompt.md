@@ -588,7 +588,7 @@ jobs:
   reverse-engineer:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -600,7 +600,7 @@ jobs:
           python scripts/reverse-engineer-requirements.py src tests
       
       - name: Upload report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: reverse-engineering-report
           path: reverse-engineering-report.md

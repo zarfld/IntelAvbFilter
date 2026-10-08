@@ -104,6 +104,7 @@ if ($SetIhvNetworkMask) {
 $argList = @(
     "/f",           # skip filter-save confirmation on exit
     "/t",           # start minimised to tray
+    "/k",           # enable kernel message capture
     "/l", $LogFile  # begin logging immediately
 )
 if ($Append) { $argList += "/a" }

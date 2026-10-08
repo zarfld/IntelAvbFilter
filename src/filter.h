@@ -70,9 +70,7 @@ Abstract:
 #if NDIS_SUPPORT_NDIS680
 // Enum value is already visible — convert to int to use as array index
 #define AVB_TX_TIMESTAMP_SLOT  ((int)(NetBufferListInfoReserved3))
-#else
-// NDIS 6.80 enum not available; use the known AMD64/Win11 numeric value
-#define AVB_TX_TIMESTAMP_SLOT  26
+// NDIS_SUPPORT_NDIS680 absent → slot 26 is OOB; all uses must be inside this same guard
 #endif
 // ---- End NDIS 6.82 TaggedTransmitHw backfill ----
 

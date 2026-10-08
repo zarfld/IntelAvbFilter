@@ -646,13 +646,11 @@ static bool restart_service(const char *svc_name, int timeout_ms)
 {
     SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
     if (!hSCM) {
-        printf("  [SKIP] OpenSCManager failed (error %lu) — elevated?\n", GetLastError());
+        printf("  [SKIP] OpenSCManager failed (error %lu) -- elevated?\n", GetLastError());
         return false;
     }
-
     SC_HANDLE hSvc = OpenServiceA(hSCM, svc_name,
-                                   SERVICE_STOP | SERVICE_START |
-                                   SERVICE_QUERY_STATUS);
+                                   SERVICE_STOP | SERVICE_QUERY_STATUS);
     if (!hSvc) {
         printf("  [SKIP] OpenService('%s') failed (error %lu)\n", svc_name, GetLastError());
         CloseServiceHandle(hSCM);
@@ -669,26 +667,35 @@ static bool restart_service(const char *svc_name, int timeout_ms)
         if (ss.dwCurrentState == SERVICE_STOPPED) break;
     }
     printf("  Service stop: state=%lu (waited %d ms)\n", ss.dwCurrentState, waited);
+    CloseServiceHandle(hSvc);
+    CloseServiceHandle(hSCM);
 
-    BOOL start_ok = StartServiceA(hSvc, 0, NULL);
-    if (!start_ok && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
-        printf("  FAIL: StartService failed (error %lu)\n", GetLastError());
-        CloseServiceHandle(hSvc);
-        CloseServiceHandle(hSCM);
+    /* Delegate restart to the established install infrastructure.
+     * Direct StartServiceA fails during NDIS's double pause/detach cycle because
+     * the DriverStore .sys is transiently inaccessible; the install script handles
+     * DriverStore lock detection, pnputil sequencing, and NDIS rebind correctly.
+     * CWD is assumed to be the repo root (set by Run-Tests-Elevated.ps1). */
+    printf("  Reinstalling via Install-Driver-Elevated.ps1 -Action Reinstall...\n");
+    int rc = system("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass"
+                    " -File tools\\setup\\Install-Driver-Elevated.ps1"
+                    " -Configuration Debug -Action Reinstall");
+    if (rc != 0) {
+        printf("  [FAIL] Reinstall script returned exit code %d\n", rc);
         return false;
     }
 
-    waited = 0;
-    while (waited < timeout_ms) {
-        Sleep(500); waited += 500;
-        if (!QueryServiceStatus(hSvc, &ss)) break;
-        if (ss.dwCurrentState == SERVICE_RUNNING) break;
+    hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!hSCM) return false;
+    hSvc = OpenServiceA(hSCM, svc_name, SERVICE_QUERY_STATUS);
+    bool running = false;
+    if (hSvc) {
+        QueryServiceStatus(hSvc, &ss);
+        printf("  Service state after reinstall: %lu\n", ss.dwCurrentState);
+        running = (ss.dwCurrentState == SERVICE_RUNNING);
+        CloseServiceHandle(hSvc);
     }
-    printf("  Service start: state=%lu (waited %d ms)\n", ss.dwCurrentState, waited);
-
-    CloseServiceHandle(hSvc);
     CloseServiceHandle(hSCM);
-    return (ss.dwCurrentState == SERVICE_RUNNING);
+    return running;
 }
 
 static void test_ut_corr_009(uint32_t adapter_count_before)
@@ -735,10 +742,14 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
     CloseHandle(hDev1);
 
     /* --- Step 2: Restart service --- */
-    bool svc_ok = restart_service(SERVICE_NAME, 8000);
+    /* Delegates to Install-Driver-Elevated.ps1 -Action Reinstall which handles
+     * DriverStore locking, pnputil sequencing, and NDIS rebind timing. */
+    bool svc_ok = restart_service(SERVICE_NAME, 120000);
     if (!svc_ok) {
-        printf("  [SKIP] Service restart failed or timed out — non-fatal\n");
-        tc_result("UT-CORR-009 Driver Reload (SKIP - service restart failed)", true);
+        /* A failed service restart leaves the environment broken — not a non-fatal skip. */
+        printf("  [FAIL] Service restart failed — driver environment requires recovery.\n");
+        printf("  Run: tools\\setup\\manual_uninstall.ps1 then reboot, then reinstall.\n");
+        tc_result("UT-CORR-009 Driver Reload (FAIL - service restart failed)", false);
         return;
     }
     Sleep(1000);  /* extra settle after service reaches RUNNING */

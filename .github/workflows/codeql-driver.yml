@@ -66,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout repository (with submodules)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -150,7 +150,7 @@ jobs:
 
     steps:
       - name: Checkout repository (with submodules)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -370,7 +370,7 @@ jobs:
           "DVL_FILE=build/codeql-whcp/$Dated" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload WHCP artifacts (SARIF + DVL)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: whcp-codeql-artifacts-${{ github.run_number }}

@@ -179,6 +179,8 @@ Return Value:
     FilterReadDebugSettings(RegistryPath);
 
     DEBUGP(DL_TRACE, "===>DriverEntry...\n");
+    /* #328 diagnostic: confirm whether module actually reloaded after service restart */
+    DEBUGP(DL_ERROR, "!!! [#328] DriverEntry: CALLED (module loaded/reloaded)\n");
 
     FilterDriverObject = DriverObject;
 
@@ -727,6 +729,10 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
 
     Status = NDIS_STATUS_SUCCESS;
 
+    /* #328 diagnostic: ENTRY probe before AvbStopTimers (if this appears but the next one doesn't, AvbStopTimers hung) */
+    DEBUGP(DL_ERROR, "!!! [#328] FilterPause ENTER: instance=%p ctx=%p\n",
+           pFilter, pFilter->AvbContext);
+
     /* BUGFIX 0x9F: Stop timers before NDIS powers down the adapter.
      * Without this, the 1ms tx_poll DPC continues MMIO reads on powered-down
      * hardware, blocking the power IRP long enough to trigger DRIVER_POWER_STATE_FAILURE.
@@ -736,6 +742,10 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     }
 
     pFilter->State = FilterPaused;
+
+    /* #328 diagnostic: log device handle state on every pause (DL_ERROR = always visible) */
+    DEBUGP(DL_ERROR, "!!! [#328] FilterPause: instance=%p DevHandle=%p\n",
+           pFilter, NdisFilterDeviceHandle);
 
     DEBUGP(DL_TRACE, "<===FilterPause:  Status %x\n", Status);
     return Status;
@@ -829,6 +839,9 @@ FilterRestart(
     }
 
     DEBUGP(DL_TRACE, "===>FilterRestart:   FilterModuleContext %p\n", FilterModuleContext);
+    /* #328 diagnostic */
+    DEBUGP(DL_ERROR, "!!! [#328] FilterRestart: instance=%p DevHandle=%p\n",
+           pFilter, NdisFilterDeviceHandle);
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
         InterlockedIncrement64(&avbCtx->stats_filter_restart_count);
@@ -971,6 +984,24 @@ FilterRestart(
     //
     pFilter->State = FilterRunning; // when successful
 
+    /* #328: if FilterUnload destroyed the control device and DriverEntry was not re-run,
+     * re-register here -- FilterRestart fires after the NDIS bind cycle is complete,
+     * so NdisRegisterDeviceEx is safe and does not defer subsequent FilterRestart calls. */
+    if (NdisFilterDeviceHandle == NULL && Status == NDIS_STATUS_SUCCESS) {
+        BOOLEAN bReregister = FALSE;
+        BOOLEAN bFalse2 = FALSE;
+        FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse2);
+        /* Only the first adapter reaching Running state triggers re-registration */
+        bReregister = (NdisFilterDeviceHandle == NULL);
+        FILTER_RELEASE_LOCK(&FilterListLock, bFalse2);
+        if (bReregister) {
+            NDIS_STATUS devStatus = IntelAvbFilterRegisterDevice();
+            UNREFERENCED_PARAMETER(devStatus); /* consumed by DEBUGP only; no-op in Release */
+            DEBUGP(DL_ERROR, "!!! [#328] FilterRestart: control device re-registered Status=0x%x Handle=%p\n",
+                   devStatus, NdisFilterDeviceHandle);
+        }
+    }
+
     // Todo 9 (safe): source_mac populated lazily in IOCTL_AVB_TEST_SEND_PTP handler
     // (OID request from FilterRestart context is unsafe — NDIS completes it at
     // DISPATCH_LEVEL which corrupts the LFH delay-free list → BugCheck 0x13A_17)
@@ -1042,6 +1073,9 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     }
 
     DEBUGP(DL_TRACE, "===>FilterDetach:    FilterInstance %p\n", FilterModuleContext);
+    /* #328 diagnostic */
+    DEBUGP(DL_ERROR, "!!! [#328] FilterDetach: instance=%p DevHandle=%p\n",
+           pFilter, NdisFilterDeviceHandle);
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
         InterlockedIncrement64(&avbCtx->stats_filter_detach_count);
@@ -1084,7 +1118,11 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
         /* Release the initial "alive" reference and wait for all in-flight IOCTL
          * dispatches to complete before proceeding with context teardown.
          * This is the drain point that closes the use-after-free race window. */
+        DEBUGP(DL_ERROR, "!!! [#328] FilterDetach: IoReleaseRemoveLockAndWait ENTER instance=%p ctx=%p\n",
+               pFilter, avbCtx);
         IoReleaseRemoveLockAndWait(&avbCtx->ioctl_remove_lock, avbCtx);
+        DEBUGP(DL_ERROR, "!!! [#328] FilterDetach: IoReleaseRemoveLockAndWait RETURNED instance=%p\n",
+               pFilter);
         AvbCleanupDevice(avbCtx);
         pFilter->AvbContext = NULL;
     }
@@ -1093,6 +1131,8 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     // Free the memory allocated
     FILTER_FREE_MEM(pFilter);
 
+    /* #328 diagnostic: confirm each FilterDetach fully completes (not stuck at IoReleaseRemoveLockAndWait) */
+    DEBUGP(DL_ERROR, "!!! [#328] FilterDetach: COMPLETE instance=%p\n", pFilter);
     DEBUGP(DL_TRACE, "<===FilterDetach Successfully\n");
     return;
 }
@@ -1127,6 +1167,8 @@ Return Value:
     UNREFERENCED_PARAMETER(DriverObject);
 
     DEBUGP(DL_TRACE, "===>FilterUnload\n");
+    /* #328 diagnostic */
+    DEBUGP(DL_ERROR, "!!! [#328] FilterUnload: DevHandle=%p\n", NdisFilterDeviceHandle);
 
     /* Unregister ETW provider (paired with EventRegisterIntelAvbFilter in DriverEntry) */
     EventUnregisterIntelAvbFilter();
@@ -1135,7 +1177,11 @@ Return Value:
     // Should free the filter context list
     //
     IntelAvbFilterDeregisterDevice();
+    /* #328 diagnostic: NdisFDeregisterFilterDriver blocks until all FilterDetach callbacks complete;
+     * if we never see COMPLETE below, it is stuck waiting for a FilterDetach to finish. */
+    DEBUGP(DL_ERROR, "!!! [#328] FilterUnload: calling NdisFDeregisterFilterDriver (will block until all FilterDetach done)\n");
     NdisFDeregisterFilterDriver(FilterDriverHandle);
+    DEBUGP(DL_ERROR, "!!! [#328] FilterUnload: COMPLETE (NdisFDeregisterFilterDriver returned)\n");
 
 #if DBG
     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
@@ -1816,6 +1862,7 @@ Return Value:
             // The upgrade path is kept for future HW that does implement TaggedTransmitHw.
             // CRITICAL: Must be read BEFORE NdisFreeNetBufferList() — reading after free is UAF.
             // InterlockedExchange64 is safe at DISPATCH_LEVEL (single XCHG instruction on x64).
+#if NDIS_SUPPORT_NDIS680
             if (avbCtx) {
                 // Try NDIS 6.82 TaggedTransmitHw path first (slot 26 = NetBufferListInfoReserved3).
                 // igc.sys populates this only if it implements TaggedTransmitHw.
@@ -1835,6 +1882,7 @@ Return Value:
                     DEBUGP(DL_TRACE, "TX timestamp: slot26=0, keeping pre-send SYSTIM\n");
                 }
             }
+#endif /* NDIS_SUPPORT_NDIS680 */
 
             // Return NBL to ring (fast path) or free from pool (fallback slow path).
             if (avbCtx) {
@@ -1842,7 +1890,9 @@ Return Value:
                 for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
                     if (avbCtx->test_nbl_ring[_ri].nbl == CurrNbl) {
                         // Ring-allocated: clear OOB timestamp slot.
+#if NDIS_SUPPORT_NDIS680
                         CurrNbl->NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] = NULL;
+#endif
                         // Atomically swap in_use back; check old value for deferred-cleanup.
                         LONG old_in_use = InterlockedExchange(&avbCtx->test_nbl_ring[_ri].in_use, 0);
                         if (old_in_use == 2) {

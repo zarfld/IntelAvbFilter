@@ -673,7 +673,7 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Build Driver
         run: .\tools\build\Build-Driver.ps1 -Configuration Debug
@@ -685,13 +685,13 @@ jobs:
         run: .\tools\test\Run-IOCTL-Missing-Reqs-Tests.ps1
       
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results
           path: test_results_ioctl.xml
       
       - name: Upload Coverage Report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: coverage_ioctl.html

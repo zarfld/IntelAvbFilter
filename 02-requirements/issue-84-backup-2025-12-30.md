@@ -223,7 +223,7 @@ jobs:
   benchmark:
     runs-on: [self-hosted, performance-test-rig]  # Dedicated hardware
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - name: Build driver
         run: msbuild IntelAvbFilter.sln /p:Configuration=Release
@@ -245,7 +245,7 @@ jobs:
         run: python scripts/analyze_benchmarks.py --compare-to baseline.json
       
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: performance-results
           path: |
