@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory=$false)]
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',
@@ -98,7 +98,7 @@ if ($LogFile) {
     Write-Host "Output will be logged to: $LogFile" -ForegroundColor Cyan
 }
 
-# ── Optional: start DebugView kernel capture ───────────────────────────────────
+# -- Optional: start DebugView kernel capture -----------------------------------
 $dbgViewProc = $null
 if ($CaptureDbgView) {
     $dbgViewScript = Join-Path $repoRoot '.github\skills\DbgView\Start-DbgViewCapture.ps1'
@@ -118,13 +118,13 @@ if ($CaptureDbgView) {
     }
 }
 
-# ── Launch elevated child and capture its exit code ───────────────────────────
+# -- Launch elevated child and capture its exit code ---------------------------
 # -PassThru returns a Process object so we can read ExitCode after -Wait.
 # Without -PassThru the exit code is silently discarded (P0 fix #328).
 $childProc = Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait -PassThru
 $childExitCode = if ($null -ne $childProc) { $childProc.ExitCode } else { -1 }
 
-# ── Stop DebugView if we started it ───────────────────────────────────────────
+# -- Stop DebugView if we started it -------------------------------------------
 if ($dbgViewProc) {
     $stopScript = Join-Path $repoRoot '.github\skills\DbgView\Stop-DbgViewCapture.ps1'
     if (Test-Path $stopScript) {
@@ -139,10 +139,10 @@ if ($LogFile -and (Test-Path $LogFile)) {
     Write-Host "`nLog file created: $LogFile" -ForegroundColor Green
 }
 
-# ── Propagate child exit code ─────────────────────────────────────────────────
+# -- Propagate child exit code -------------------------------------------------
 # Exit codes from Run-Tests.ps1 (and native test binaries):
-#   0 = PASS          — all tests passed
-#   1 = FAIL/BLOCKED  — at least one test failed, blocked, or CLEANUP_FAILED
-#   2 = SKIP_ONLY     — tests ran but no hardware found; all SKIP_NO_TESTS
+#   0 = PASS          -- all tests passed
+#   1 = FAIL/BLOCKED  -- at least one test failed, blocked, or CLEANUP_FAILED
+#   2 = SKIP_ONLY     -- tests ran but no hardware found; all SKIP_NO_TESTS
 # The elevated wrapper must not swallow these; callers (CI, scripts) depend on them.
 exit $childExitCode

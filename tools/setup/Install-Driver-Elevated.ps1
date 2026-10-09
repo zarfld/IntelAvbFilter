@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory=$true)]
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration,
@@ -16,30 +16,34 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot   = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 
-try {
-    $scriptPath     = Join-Path $PSScriptRoot 'Install-Driver.ps1'
-    $transcriptPath = Join-Path $env:TEMP "install-driver-$(Get-Date -Format yyyyMMdd_HHmmss).log"
+# Build the temp wrapper script BEFORE the try/catch block.
+# Using individual strings avoids PS5.1 parser issues with here-strings
+# adjacent to other constructs in the same script file.
+$scriptPath     = Join-Path $PSScriptRoot 'Install-Driver.ps1'
+$transcriptPath = Join-Path $env:TEMP "install-driver-$(Get-Date -Format yyyyMMdd_HHmmss).log"
+$tempScript     = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.ps1'
 
-    # Write a temp wrapper that captures transcript AND propagates the child exit code.
-    # The exit code must be captured BEFORE Stop-Transcript — Stop-Transcript's own
-    # return value must not overwrite the install result.
-    $tempScript = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.ps1'
-    @"
-Start-Transcript -Path '$transcriptPath' -Force | Out-Null
-`$_installExitCode = 0
-try {
-    & '$scriptPath' -Configuration $Configuration -$Action
-    `$_installExitCode = `$LASTEXITCODE
-    if (`$null -eq `$_installExitCode) { `$_installExitCode = 0 }
-} catch {
-    Write-Host "EXCEPTION during Install-Driver.ps1: `$_" -ForegroundColor Red
-    `$_installExitCode = 1
-} finally {
-    Stop-Transcript | Out-Null
-}
-exit `$_installExitCode
-"@ | Set-Content $tempScript -Encoding UTF8
+# Write temp wrapper: captures transcript AND preserves exit code across Stop-Transcript.
+# Lines using single quotes produce literal $-variables for the child script.
+# Lines using double quotes expand $scriptPath/$transcriptPath/$Configuration/$Action here.
+$tempLines = @(
+    "Start-Transcript -Path '$transcriptPath' -Force | Out-Null",
+    '$_installExitCode = 0',
+    'try {',
+    "    & '$scriptPath' -Configuration $Configuration -$Action",
+    '    $_installExitCode = $LASTEXITCODE',
+    '    if ($null -eq $_installExitCode) { $_installExitCode = 0 }',
+    '} catch {',
+    '    Write-Host "EXCEPTION during Install-Driver.ps1: $_" -ForegroundColor Red',
+    '    $_installExitCode = 1',
+    '} finally {',
+    '    Stop-Transcript | Out-Null',
+    '}',
+    'exit $_installExitCode'
+)
+[System.IO.File]::WriteAllText($tempScript, ($tempLines -join "`r`n"), [System.Text.Encoding]::UTF8)
 
+try {
     $arguments = @(
         '-NoProfile'
         '-ExecutionPolicy'
@@ -48,7 +52,7 @@ exit `$_installExitCode
         $tempScript
     )
 
-    # ── Optional: start DebugView kernel capture ───────────────────────────────────
+    # -- Optional: start DebugView kernel capture -----------------------------------
     $dbgViewProc = $null
     if ($CaptureDbgView) {
         $dbgViewScript = Join-Path $repoRoot '.github\skills\DbgView\Start-DbgViewCapture.ps1'
@@ -58,7 +62,6 @@ exit `$_installExitCode
             $dbgViewProc = & $dbgViewScript -LogName $dbgLogStem
             if ($dbgViewProc) {
                 Write-Host "[DbgView] Started PID=$($dbgViewProc.Id)" -ForegroundColor Green
-                Write-Host "[DbgView] Logging to: $((Get-ChildItem (Join-Path $repoRoot 'logs') -Filter "dbgview_install*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName)" -ForegroundColor Gray
                 Write-Host "[DbgView] Capturing on PID=$($dbgViewProc.Id)" -ForegroundColor Green
                 Start-Sleep -Milliseconds 500
             }
@@ -67,7 +70,7 @@ exit `$_installExitCode
         }
     }
 
-    # ── Launch elevated child and capture its exit code ────────────────────────
+    # -- Launch elevated child and capture its exit code ------------------------
     # -PassThru is required so we can read ExitCode after -Wait.
     # Distinguish three failure modes:
     #   - UAC cancelled / launch failed ($childProc is null or ExitCode unavailable)
@@ -75,7 +78,7 @@ exit `$_installExitCode
     #   - Success (childProc.ExitCode == 0)
     $childProc = Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait -PassThru -ErrorAction SilentlyContinue
     $installExitCode = if ($null -eq $childProc) {
-        Write-Host "WARNING: Elevated process did not start — UAC may have been cancelled or launch failed" -ForegroundColor Yellow
+        Write-Host "WARNING: Elevated process did not start -- UAC may have been cancelled or launch failed" -ForegroundColor Yellow
         -1
     } elseif ($null -eq $childProc.ExitCode) {
         Write-Host "WARNING: Elevated process exit code unavailable (process object invalid)" -ForegroundColor Yellow
@@ -84,7 +87,7 @@ exit `$_installExitCode
         $childProc.ExitCode
     }
 
-    # ── Stop DebugView if we started it ───────────────────────────────────────
+    # -- Stop DebugView if we started it ---------------------------------------
     if ($dbgViewProc) {
         $stopScript = Join-Path $repoRoot '.github\skills\DbgView\Stop-DbgViewCapture.ps1'
         if (Test-Path $stopScript) {
@@ -105,7 +108,7 @@ exit `$_installExitCode
             Write-Host
     } else {
         if ($installExitCode -eq -1) {
-            Write-Host "WARNING: No transcript and no elevated process — UAC was likely cancelled" -ForegroundColor Yellow
+            Write-Host "WARNING: No transcript and no elevated process -- UAC was likely cancelled" -ForegroundColor Yellow
         } else {
             Write-Host "WARNING: No transcript captured (script may have crashed before Start-Transcript)" -ForegroundColor Yellow
         }
@@ -120,7 +123,7 @@ exit `$_installExitCode
     #  -1   = UAC cancelled or process launch failed (treated as error by caller)
     if ($installExitCode -ne 0) {
         if ($installExitCode -eq -1) {
-            Write-Host "ERROR: Elevated install did not complete — UAC cancelled or launch failed" -ForegroundColor Red
+            Write-Host "ERROR: Elevated install did not complete -- UAC cancelled or launch failed" -ForegroundColor Red
         } else {
             Write-Host "ERROR: Install-Driver.ps1 exited with code $installExitCode" -ForegroundColor Red
         }

@@ -73,7 +73,7 @@ function Write-Info {
 }
 
 # ===========================
-# Lifecycle Metrics Snapshot — SSOT: tools/test/Lib-AvbLifecycle.ps1
+# Lifecycle Metrics Snapshot -- SSOT: tools/test/Lib-AvbLifecycle.ps1
 # ===========================
 . (Join-Path $PSScriptRoot 'Lib-AvbLifecycle.ps1')
 
@@ -120,7 +120,7 @@ function Invoke-Test {
     # should log to $LogFile, but also show output in real time
     # NOTE: Override ErrorActionPreference to Continue in a child scope.
     # PS 5.1 with EAP=Stop converts any stderr output from a native .exe into a
-    # terminating NativeCommandError — which would crash the entire test runner.
+    # terminating NativeCommandError -- which would crash the entire test runner.
     $script:totalTests++
     & {
         $ErrorActionPreference = 'Continue'
@@ -147,7 +147,7 @@ function Invoke-Test {
         # If parser found TC-level failures but binary exited 0 (known bug in some
         # test binaries), propagate the failure so CI is not blind to it.
         if ($LASTEXITCODE -ne 0 -and ($exitCode -eq 0 -or $null -eq $exitCode)) {
-            Write-Host "  [WARN] Per-test-case failures detected despite exit code 0 — see JUnit XML" -ForegroundColor Yellow
+            Write-Host "  [WARN] Per-test-case failures detected despite exit code 0 -- see JUnit XML" -ForegroundColor Yellow
             $exitCode = $LASTEXITCODE
         }
     }
@@ -177,7 +177,7 @@ function Invoke-Test {
         }
     } elseif ($exitCode -eq 3) {
         # exit 3 = BLOCKED: mandatory test cases could not run (restore capability absent)
-        Write-Host "  [BLOCKED] Mandatory test cases BLOCKED — restore capability absent (exit 3)" -ForegroundColor Yellow
+        Write-Host "  [BLOCKED] Mandatory test cases BLOCKED -- restore capability absent (exit 3)" -ForegroundColor Yellow
         $script:failedTests++
         $script:testResults += [PSCustomObject]@{
             Name     = $TestName
@@ -227,7 +227,7 @@ $script:skippedTests = 0   # initialized here; do not rely on implicit $null
 $script:testResults = @()
 
 # ===========================
-# Precondition Gate — test signing, Secure Boot, driver, hardware
+# Precondition Gate -- test signing, Secure Boot, driver, hardware
 # ===========================
 $precondScript = Join-Path $toolsDir 'setup\Test-Preconditions.ps1'
 if (Test-Path $precondScript) {
@@ -238,9 +238,9 @@ if (Test-Path $precondScript) {
         Write-Host "[PRECONDITIONS] Critical checks failed. Fix issues above before running tests." -ForegroundColor Red
         exit 1
     }
-    # Exit code 2 (warnings only) — continue with caution
+    # Exit code 2 (warnings only) -- continue with caution
 } else {
-    Write-Host "[WARN] Test-Preconditions.ps1 not found — skipping precondition checks." -ForegroundColor Yellow
+    Write-Host "[WARN] Test-Preconditions.ps1 not found -- skipping precondition checks." -ForegroundColor Yellow
 }
 
 # ===========================
@@ -492,7 +492,7 @@ if ($TestExecutable) {
     # ETW SUBSCRIPTION REFRESH (Implements #65 REQ-F-EVENT-LOG-001, TC-1 fix):
     # For event-log tests, ensure the EventLog service has an active ETW subscription
     # to the IntelAvbFilter provider.  Without this, EtwWriteTransfer returns STATUS_SUCCESS
-    # but delivers to 0 sessions — the event never appears in Application.evtx.
+    # but delivers to 0 sessions -- the event never appears in Application.evtx.
     # The restart forces McGenControlCallbackV2(ENABLE_PROVIDER) to fire on the loaded
     # driver, setting IntelAvbFilterEnableBits[0] = 1.
     # This mirrors Step 4b in Install-Driver.ps1 and is safe to repeat before any test run.
@@ -503,20 +503,20 @@ if ($TestExecutable) {
             Stop-Service -Name EventLog -Force -ErrorAction SilentlyContinue
             Start-Service -Name EventLog -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
-            Write-Host "  [ETW] EventLog restarted — IntelAvbFilterEnableBits will be set by McGenControlCallbackV2" -ForegroundColor DarkGray
+            Write-Host "  [ETW] EventLog restarted -- IntelAvbFilterEnableBits will be set by McGenControlCallbackV2" -ForegroundColor DarkGray
 
             # Service health check: EventLog restart can cause NDIS filter detach.
             # Verify IntelAvbFilter driver is still running; restart it if detached.
             $avbSvc = Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
             if ($null -eq $avbSvc) {
-                Write-Host "  [INFRA] IntelAvbFilter service not found — driver may not be installed." -ForegroundColor Yellow
+                Write-Host "  [INFRA] IntelAvbFilter service not found -- driver may not be installed." -ForegroundColor Yellow
             } elseif ($avbSvc.Status -ne 'Running') {
-                Write-Host "  [INFRA] IntelAvbFilter stopped after EventLog restart — restarting driver..." -ForegroundColor Yellow
+                Write-Host "  [INFRA] IntelAvbFilter stopped after EventLog restart -- restarting driver..." -ForegroundColor Yellow
                 Start-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 5
                 $avbSvc = Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
                 if ($null -eq $avbSvc -or $avbSvc.Status -ne 'Running') {
-                    Write-Host "  [WARN] IntelAvbFilter failed to restart — subsequent tests may fail with device error 2." -ForegroundColor Yellow
+                    Write-Host "  [WARN] IntelAvbFilter failed to restart -- subsequent tests may fail with device error 2." -ForegroundColor Yellow
                 } else {
                     Write-Host "  [INFRA] IntelAvbFilter restarted successfully." -ForegroundColor DarkGray
                 }
@@ -524,13 +524,13 @@ if ($TestExecutable) {
                 Write-Host "  [INFRA] IntelAvbFilter service confirmed running." -ForegroundColor DarkGray
             }
         } else {
-            Write-Host "  [WARN] IntelAvbFilter ETW provider not registered — TC-1 may fail" -ForegroundColor Yellow
+            Write-Host "  [WARN] IntelAvbFilter ETW provider not registered -- TC-1 may fail" -ForegroundColor Yellow
             Write-Host "         Run: wevtutil im src\IntelAvbFilter.man /mf:<sys> /rf:<sys>" -ForegroundColor Yellow
         }
     }
 
     if ($TestExecutable -match '\.ps1$') {
-        # PowerShell script test — find it in tests\ tree and invoke directly
+        # PowerShell script test -- find it in tests\ tree and invoke directly
         $ps1TestPath = $null
         $searchRoots = @(
             (Join-Path $repoRoot "tests"),
@@ -953,7 +953,7 @@ if (Test-Path $regsTest3) {
     $remainingTests = $availableTests | Where-Object { $coveredTests -notcontains $_.Name.ToLower() }
 
     if ($remainingTests.Count -eq 0) {
-        Write-Host "  (no additional tests — all executables already covered above)" -ForegroundColor Gray
+        Write-Host "  (no additional tests -- all executables already covered above)" -ForegroundColor Gray
     } else {
         Write-Info "Found $($remainingTests.Count) additional test(s) not in explicit phases"
         foreach ($test in $remainingTests) {
@@ -1070,13 +1070,13 @@ if ($script:totalTests -gt 0) {
     Write-Host "  Total Tests Run:    $($script:totalTests)" -ForegroundColor Cyan
     
     if ($script:passedTests -gt 0) {
-        Write-Host "  ✓ Passed:          $($script:passedTests)" -ForegroundColor Green
+        Write-Host "  OK Passed:          $($script:passedTests)" -ForegroundColor Green
     }
     if ($script:failedTests -gt 0) {
-        Write-Host "  ✗ Failed:          $($script:failedTests)" -ForegroundColor Red
+        Write-Host "  X Failed:          $($script:failedTests)" -ForegroundColor Red
     }
     if ($script:skippedTests -gt 0) {
-        Write-Host "  ○ Skipped:         $($script:skippedTests)" -ForegroundColor Yellow
+        Write-Host "  o Skipped:         $($script:skippedTests)" -ForegroundColor Yellow
     }
     
     # Calculate success rate
@@ -1159,9 +1159,9 @@ Write-Host "================================================================" -F
 # ===========================
 # Propagate exit code
 # Exit codes:
-#   0 = PASS      — all tests passed (or no tests were run as a deliberate no-op)
-#   1 = FAIL      — at least one test failed, blocked, or reported CLEANUP_FAILED
-#   2 = SKIP_ONLY — tests ran but all produced SKIP_NO_TESTS (no hardware/device)
+#   0 = PASS      -- all tests passed (or no tests were run as a deliberate no-op)
+#   1 = FAIL      -- at least one test failed, blocked, or reported CLEANUP_FAILED
+#   2 = SKIP_ONLY -- tests ran but all produced SKIP_NO_TESTS (no hardware/device)
 # ===========================
 if ($script:failedTests -gt 0) {
     exit 1
