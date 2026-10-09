@@ -62,204 +62,10 @@ static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify step failed;
 
 // ============================================================================
 // Snapshot / Restore infrastructure (test-state-restoration contract)
-// Every hardware-mutating case MUST call tas_capture_state before mutation
-// and tas_restore_state (unconditionally) after, reporting cleanup failures
-// as hard test failures.
+// Shared with tests/unit/test_tas_restore_contract.c via tas_restore.h.
 // ============================================================================
-
-typedef struct {
-    BOOL     valid;              /* 1 = snapshot was taken successfully */
-    avb_u32  tsauxc_before;     /* TSAUXC value before enable_systim0 */
-    BOOL     tas_was_armed;     /* driver-reported armed state at snapshot time */
-    struct tsn_tas_config tas_original_config; /* GCL if tas_was_armed */
-} TAS_SNAPSHOT;
-
-/*
- * P0.1 / P0.5: Check whether a reliable TAS restore path exists for this adapter
- * BEFORE any mutation.  Uses IOCTL_AVB_GET_HW_STATE (non-mutating) to read the
- * DRIVER-FILTERED capability subset.  If the driver reports INTEL_CAP_TSN_TAS,
- * the adapter has a TAS setup path but the corresponding disable path is currently
- * BLOCKED (i226_disable_tas returns -ENOTSUP; no safe NDIS-compatible in-place
- * TAS disable exists without an adapter reset).
- *
- * State semantics (P0.5):
- *   - Driver-reported capabilities reflect what the LWF implementation can service.
- *   - A successful IOCTL does NOT prove hardware state.
- *   - After driver reload, tas_armed=0 is driver-cache, not hardware readback.
- *   - Unknown hardware state is treated as UNKNOWN (fail closed), not DISARMED.
- *
- * Returns TRUE if mutation is safe (restore is available), FALSE if BLOCKED.
- */
-static BOOL tas_probe_restore_capability(HANDLE hDevice) {
-    AVB_HW_STATE_QUERY hwState;
-    ZeroMemory(&hwState, sizeof(hwState));
-    DWORD br = 0;
-    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_HW_STATE,
-                         &hwState, sizeof(hwState),
-                         &hwState, sizeof(hwState),
-                         &br, NULL)) {
-        printf("  [PREFLIGHT-BLOCKED] Cannot read HW state (error=%lu) — treating as STATE_UNKNOWN\n",
-               GetLastError());
-        return FALSE;
-    }
-
-    /* Use driver-filtered caps (reserved field) not raw hardware caps.
-     * INTEL_CAP_TSN_TAS = (1 << 2) = 0x004 */
-    avb_u32 driver_caps = AVB_HW_STATE_DRIVER_CAPABILITIES(hwState);
-    if (driver_caps & INTEL_CAP_TSN_TAS) {
-        printf("  [PREFLIGHT-BLOCKED] Adapter has INTEL_CAP_TSN_TAS in driver capabilities\n");
-        printf("  [PREFLIGHT-BLOCKED] TAS restore path is BLOCKED:\n");
-        printf("  [PREFLIGHT-BLOCKED]   i226_disable_tas returns -ENOTSUP (no safe NDIS in-place disable)\n");
-        printf("  [PREFLIGHT-BLOCKED]   Required: miniport OID or link-cycle to clear TQAVCTRL\n");
-        printf("  [PREFLIGHT-BLOCKED] TC-TAS-001..008 cannot run until a safe restore path exists\n");
-        return FALSE;
-    }
-
-    printf("  [PREFLIGHT] Driver caps=0x%08X: INTEL_CAP_TSN_TAS absent — restore via flag clear only\n",
-           driver_caps);
-    return TRUE;
-}
-
-/* Capture TSAUXC and TAS armed state before any mutation.
- * Calls tas_probe_restore_capability() first (non-mutating).
- * Returns FALSE and leaves snapshot->valid=0 on failure or BLOCKED;
- * caller must treat FALSE as TC_BLOCKED, not TC_FAIL. */
-static BOOL tas_capture_state(HANDLE hDevice, TAS_SNAPSHOT *snap) {
-    ZeroMemory(snap, sizeof(*snap));
-
-    /* P0.1: Capability preflight — validate restore path BEFORE any mutation */
-    if (!tas_probe_restore_capability(hDevice)) {
-        /* BLOCKED — hardware/driver cannot restore TAS state safely */
-        return FALSE;
-    }
-
-    /* Read current clock config for TSAUXC baseline */
-    AVB_CLOCK_CONFIG clockCfg;
-    ZeroMemory(&clockCfg, sizeof(clockCfg));
-    DWORD br = 0;
-    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_CLOCK_CONFIG,
-                         &clockCfg, sizeof(clockCfg),
-                         &clockCfg, sizeof(clockCfg),
-                         &br, NULL) || clockCfg.status != 0) {
-        printf("  [CAPTURE-FAIL] Cannot read TSAUXC before test (error=%lu status=0x%08X)\n",
-               GetLastError(), clockCfg.status);
-        return FALSE;
-    }
-    snap->tsauxc_before = clockCfg.tsauxc;
-
-    /* Read TAS armed state (driver-tracked; not hardware readback — see P0.5) */
-    AVB_TAS_STATE tasState;
-    ZeroMemory(&tasState, sizeof(tasState));
-    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_TAS_STATE,
-                         NULL, 0,
-                         &tasState, sizeof(tasState),
-                         &br, NULL) || tasState.status != 0) {
-        printf("  [CAPTURE-FAIL] Cannot read TAS state before test (error=%lu status=0x%08X)\n",
-               GetLastError(), tasState.status);
-        return FALSE;
-    }
-    snap->tas_was_armed = (tasState.armed != 0);
-    if (snap->tas_was_armed) {
-        /* Driver reports armed state. Restore capability check already passed (non-TAS
-         * adapter); for a non-TAS adapter tas_armed should always be 0 — if it isn't
-         * something is inconsistent.  Treat as BLOCKED to avoid unknown mutation. */
-        printf("  [PREFLIGHT-BLOCKED] Driver reports tas_armed=1 on an adapter without TAS driver support\n");
-        printf("  [PREFLIGHT-BLOCKED] Inconsistent driver state — treating as STATE_UNKNOWN\n");
-        return FALSE;
-    }
-    snap->valid = TRUE;
-    printf("  [SNAPSHOT] tsauxc=0x%08X tas_armed=0 (driver-cache; non-TAS adapter)\n",
-           snap->tsauxc_before);
-    return TRUE;
-}
-
-/* Restore TSAUXC and TAS state to the captured baseline.
- * Precondition: snapshot->valid==TRUE implies TAS was disarmed at snapshot time
- * (the preflight in tas_capture_state rejects armed adapters before any mutation).
- * Restoration therefore always targets the disarmed state.
- *
- * Returns FALSE if any restoration step fails; caller must report CLEANUP_FAILED. */
-static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
-    if (!snap->valid) {
-        printf("  [RESTORE-FAIL] No valid snapshot — cannot restore\n");
-        return FALSE;
-    }
-    /* tas_was_armed is always FALSE here (preflight blocks armed adapters) */
-
-    BOOL ok = TRUE;
-    DWORD br = 0;
-
-    /* Disarm TAS — restore to the disarmed state captured in the snapshot */
-    AVB_DISARM_TAS_REQUEST disarm;
-    ZeroMemory(&disarm, sizeof(disarm));
-    if (!DeviceIoControl(hDevice, IOCTL_AVB_DISARM_TAS,
-                         NULL, 0,
-                         &disarm, sizeof(disarm),
-                         &br, NULL)) {
-        printf("  [RESTORE-FAIL] IOCTL_AVB_DISARM_TAS failed to reach driver (error=%lu)\n",
-               GetLastError());
-        ok = FALSE;
-    } else if (disarm.status == 0xC00000BBu) { /* STATUS_NOT_SUPPORTED = 0xC00000BB */
-        /* I226/I225: disarm is BLOCKED — the adapter cannot be safely disarmed in-place.
-         * If we get here it means the test ran on a TAS-capable adapter despite the
-         * preflight.  This is a CLEANUP_FAILED condition that must stop further tests. */
-        printf("  [RESTORE-FAIL-BLOCKED] IOCTL_AVB_DISARM_TAS returned STATUS_NOT_SUPPORTED (0x%08X)\n",
-               disarm.status);
-        printf("  [RESTORE-FAIL-BLOCKED] I226/I225 TAS disarm requires adapter reset — hardware state UNKNOWN\n");
-        ok = FALSE;
-    } else if (disarm.status != 0) {
-        printf("  [RESTORE-FAIL] TAS disarm returned error status 0x%08X\n", disarm.status);
-        ok = FALSE;
-    } else {
-        printf("  [RESTORE] TAS disarmed\n");
-    }
-
-    /* Restore TSAUXC enable/disable state (bit 31 only — see limitation in header comment) */
-    AVB_HW_TIMESTAMPING_REQUEST hwTs;
-    ZeroMemory(&hwTs, sizeof(hwTs));
-    hwTs.enable        = ((snap->tsauxc_before & 0x80000000u) == 0) ? 1 : 0;
-    hwTs.timer_mask    = 0x1; /* SYSTIM0 */
-    if (!DeviceIoControl(hDevice, IOCTL_AVB_SET_HW_TIMESTAMPING,
-                         &hwTs, sizeof(hwTs),
-                         &hwTs, sizeof(hwTs),
-                         &br, NULL) || hwTs.status != 0) {
-        printf("  [RESTORE-FAIL] TSAUXC restore failed (error=%lu status=0x%08X)\n",
-               GetLastError(), hwTs.status);
-        ok = FALSE;
-    } else {
-        printf("  [RESTORE] TSAUXC restored (enable=%u current=0x%08X)\n",
-               hwTs.enable, hwTs.current_tsauxc);
-    }
-
-    return ok;
-}
-
-/* Independent post-restore verification: confirm TAS armed state matches snapshot.
- * Returns FALSE if driver state does not match what was captured before the test. */
-static BOOL tas_verify_restore(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
-    AVB_TAS_STATE tasState;
-    ZeroMemory(&tasState, sizeof(tasState));
-    DWORD br = 0;
-    if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_TAS_STATE,
-                         NULL, 0,
-                         &tasState, sizeof(tasState),
-                         &br, NULL) || tasState.status != 0) {
-        printf("  [VERIFY-FAIL] Cannot verify TAS state after restore\n");
-        return FALSE;
-    }
-    BOOL now_armed = (tasState.armed != 0);
-    if (now_armed != snap->tas_was_armed) {
-        printf("  [VERIFY-FAIL] TAS armed state mismatch: was %d before test, is %d after restore\n",
-               snap->tas_was_armed, now_armed);
-        return FALSE;
-    }
-    if (!now_armed) {
-        printf("  [VERIFY-OK] TAS confirmed disarmed (matches original state)\n");
-    } else {
-        printf("  [VERIFY-OK] TAS confirmed armed (matches original state)\n");
-    }
-    return TRUE;
-}
+#define IOCTL_CALL DeviceIoControl
+#include "tas_restore.h"
 
 /* Run one hardware-mutating TAS case with full snapshot/restore lifecycle.
  *
@@ -268,22 +74,32 @@ static BOOL tas_verify_restore(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
  *   TC_FAIL (1)           — test produced a FAIL verdict
  *   TC_CLEANUP_FAILED (2) — restore/verify failed; hardware state unknown; halt sequence
  *   TC_BLOCKED (3)        — preflight refused; restore path absent; test not executed
- */
+ *
+ * Authoritative result accounting (P1):
+ *   - Individual test functions own their g_passed/g_failed/g_skipped increments.
+ *   - run_with_restore does NOT increment g_passed — prevents double-counting.
+ *   - A SKIP (g_skipped++) by fn() is NOT a PASS; it does not contribute to g_passed.
+ *   - Only TC_PASS result is returned when the test fn() added to g_passed
+ *     AND restore succeeded. */
 static int run_with_restore(HANDLE hDevice, const char *case_name,
                             void (*fn)(HANDLE)) {
     TAS_SNAPSHOT snap;
     if (!tas_capture_state(hDevice, &snap)) {
-        printf("  [BLOCKED] %s: preflight refused — restore capability absent or STATE_UNKNOWN\n",
-               case_name);
+        printf("  [BLOCKED] %s: preflight refused — restore capability absent\n", case_name);
         g_blocked++;
         return TC_BLOCKED;
     }
 
-    int before_fail = g_failed;
+    int before_passed  = g_passed;
+    int before_failed  = g_failed;
+    int before_skipped = g_skipped;
     fn(hDevice);
-    int test_failed = (g_failed > before_fail);
+    BOOL test_passed  = (g_passed  > before_passed);
+    BOOL test_failed  = (g_failed  > before_failed);
+    BOOL test_skipped = (g_skipped > before_skipped);
+    (void)test_skipped; /* tracked for correctness; SKIP result propagates via counters */
 
-    /* Restore unconditionally — on PASS, FAIL, or any ordinary test outcome */
+    /* Restore unconditionally — on PASS, FAIL, or SKIP */
     BOOL restore_ok = tas_restore_state(hDevice, &snap);
     BOOL verify_ok  = restore_ok ? tas_verify_restore(hDevice, &snap) : FALSE;
 
@@ -294,8 +110,9 @@ static int run_with_restore(HANDLE hDevice, const char *case_name,
         return TC_CLEANUP_FAILED;
     }
 
-    if (test_failed) return TC_FAIL;
-    g_passed++;
+    /* Do NOT increment g_passed here — fn() already did so if it passed */
+    if (test_failed)              return TC_FAIL;
+    if (!test_passed && !test_skipped) return TC_FAIL; /* fn() incremented neither — treat as fail */
     return TC_PASS;
 }
 
@@ -1137,7 +954,7 @@ print_summary:
         printf("         Suite cannot claim full coverage while mandatory tests are blocked\n");
         return 3;
     }
-    if (g_passed == 0 && g_skipped == 0) {
+    if (g_passed == 0 && g_skipped == 0 && g_blocked == 0 && g_failed == 0 && g_cleanup_failed == 0) {
         printf("\n[RESULT] NO TESTS RAN — Check prerequisites (AVB device, TAS capability)\n");
         return 2;
     }

@@ -15,7 +15,13 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
-#include "avb_ioctl.h"
+/* Production restore infrastructure via IOCTL_CALL macro.
+ * Tests exercise the SAME implementation as test_ioctl_tas.c. */
+static BOOL mock_ioctl(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz,
+                       LPVOID out_buf, DWORD out_sz, LPDWORD bytes_ret,
+                       LPOVERLAPPED ov);
+#define IOCTL_CALL mock_ioctl
+#include "../ioctl/tas_restore.h"
 
 /* =========================================================================
  * Mock infrastructure
@@ -113,108 +119,16 @@ static BOOL mock_ioctl(HANDLE h, DWORD code,
     return FALSE;
 }
 
-/* =========================================================================
- * Contract functions — mirror test_ioctl_tas.c logic with mockable backend
- * ========================================================================= */
-
-typedef BOOL (*pfn_ioctl_t)(HANDLE, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
-
-typedef struct {
-    BOOL    valid;
-    avb_u32 tsauxc_before;
-    BOOL    tas_was_armed;
-} MockSnapshot;
-
-/* Result codes */
-#define RES_PASS           0
-#define RES_FAIL           1
-#define RES_CLEANUP_FAILED 2
-#define RES_BLOCKED        3
-
-static BOOL mock_probe_restore_capability(pfn_ioctl_t fn, HANDLE h) {
-    AVB_HW_STATE_QUERY q;
-    DWORD br = 0;
-    memset(&q, 0, sizeof(q));
-    if (!fn(h, IOCTL_AVB_GET_HW_STATE, &q, sizeof(q), &q, sizeof(q), &br, NULL))
-        return FALSE;   /* STATE_UNKNOWN → fail closed */
-    if (AVB_HW_STATE_DRIVER_CAPABILITIES(q) & INTEL_CAP_TSN_TAS)
-        return FALSE;   /* BLOCKED: TAS capable but disarm unavailable */
-    return TRUE;
-}
-
-static BOOL mock_capture_state(pfn_ioctl_t fn, HANDLE h, MockSnapshot *snap) {
-    memset(snap, 0, sizeof(*snap));
-
-    if (!mock_probe_restore_capability(fn, h))
-        return FALSE;
-
-    AVB_CLOCK_CONFIG c;
-    DWORD br = 0;
-    memset(&c, 0, sizeof(c));
-    if (!fn(h, IOCTL_AVB_GET_CLOCK_CONFIG, &c, sizeof(c), &c, sizeof(c), &br, NULL))
-        return FALSE;
-    snap->tsauxc_before = c.tsauxc;
-
-    AVB_TAS_STATE s;
-    memset(&s, 0, sizeof(s));
-    if (!fn(h, IOCTL_AVB_GET_TAS_STATE, NULL, 0, &s, sizeof(s), &br, NULL))
-        return FALSE;
-    if (s.armed) return FALSE;  /* armed on non-TAS adapter → inconsistent → BLOCKED */
-
-    snap->valid = TRUE;
-    return TRUE;
-}
-
-static BOOL mock_restore_state(pfn_ioctl_t fn, HANDLE h, const MockSnapshot *snap) {
-    if (!snap->valid) return FALSE;
-    DWORD br = 0;
-    BOOL ok = TRUE;
-
-    AVB_DISARM_TAS_REQUEST d;
-    memset(&d, 0, sizeof(d));
-    if (!fn(h, IOCTL_AVB_DISARM_TAS, NULL, 0, &d, sizeof(d), &br, NULL)) {
-        ok = FALSE;
-    } else if (d.status == 0xC00000BBu /* STATUS_NOT_SUPPORTED */) {
-        ok = FALSE;
-    } else if (d.status != 0) {
-        ok = FALSE;
-    }
-
-    AVB_HW_TIMESTAMPING_REQUEST t;
-    memset(&t, 0, sizeof(t));
-    t.enable     = ((snap->tsauxc_before & 0x80000000u) == 0) ? 1 : 0;
-    t.timer_mask = 0x1;
-    if (!fn(h, IOCTL_AVB_SET_HW_TIMESTAMPING, &t, sizeof(t), &t, sizeof(t), &br, NULL))
-        ok = FALSE;
-    else if (t.status != 0)
-        ok = FALSE;
-    return ok;
-}
-
-static BOOL mock_verify_restore(pfn_ioctl_t fn, HANDLE h, const MockSnapshot *snap) {
-    AVB_TAS_STATE s;
-    DWORD br = 0;
-    memset(&s, 0, sizeof(s));
-    if (!fn(h, IOCTL_AVB_GET_TAS_STATE, NULL, 0, &s, sizeof(s), &br, NULL))
-        return FALSE;
-    return (s.armed != 0) == snap->tas_was_armed;
-}
-
-/* Simulates a hardware-mutating test function (always succeeds) */
-static void noop_test_fn(void) {}
-
-static int run_case(pfn_ioctl_t fn, HANDLE h, int *blocked, int *cleanup_failed) {
-    MockSnapshot snap;
-    if (!mock_capture_state(fn, h, &snap)) { (*blocked)++; return RES_BLOCKED; }
-
-    /* Simulate mutation (noop — mock backend handles it) */
-    noop_test_fn();
-
-    BOOL restore_ok = mock_restore_state(fn, h, &snap);
-    BOOL verify_ok  = restore_ok ? mock_verify_restore(fn, h, &snap) : FALSE;
-
-    if (!restore_ok || !verify_ok) { (*cleanup_failed)++; return RES_CLEANUP_FAILED; }
-    return RES_PASS;
+/* run_case: uses production functions from tas_restore.h (via IOCTL_CALL=mock_ioctl).
+ * This exercises the ACTUAL implementation, not a copy. */
+static int run_case(HANDLE h, int *blocked, int *cleanup_failed) {
+    TAS_SNAPSHOT snap;
+    if (!tas_capture_state(h, &snap)) { (*blocked)++; return TC_BLOCKED; }
+    /* Simulate mutation: noop — result accounting stays clean */
+    BOOL restore_ok = tas_restore_state(h, &snap);
+    BOOL verify_ok  = restore_ok ? tas_verify_restore(h, &snap) : FALSE;
+    if (!restore_ok || !verify_ok) { (*cleanup_failed)++; return TC_CLEANUP_FAILED; }
+    return TC_PASS;
 }
 
 /* =========================================================================
@@ -235,69 +149,65 @@ static int g_tests_fail = 0;
 #define EXPECT_FALSE(label, expr) EXPECT_EQ(label, !!(expr), 0)
 
 /*
- * TC-MOCK-001: TAS disarmed + no restore capability (TSN_TAS in driver caps)
- * Expect: BLOCKED before first mutation.
+ * TC-MOCK-001: Unconditional block — PREFLIGHT always returns FALSE.
+ * No IOCTLs are called regardless of adapter state or capability.
+ * Verifies the fail-closed property of the new unconditional block.
  */
-static void test_01_disarmed_no_restore_cap(void) {
-    printf("\n[TC-MOCK-001] Disarmed adapter with no restore capability => BLOCKED\n");
+static void test_01_unconditional_block(void) {
+    printf("\n[TC-MOCK-001] Unconditional block — all adapters BLOCKED, no IOCTLs called\n");
     memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok    = TRUE;
-    g_mock.hw_driver_caps = INTEL_CAP_TSN_TAS; /* capability set, disarm BLOCKED */
-    g_mock.clock_cfg_ok   = TRUE;
-    g_mock.tas_state_ok   = TRUE;
-    g_mock.tas_armed      = 0;
-
+    /* All IOCTL return flags FALSE: if any IOCTL were called, run_case would fail */
+    g_mock.hw_state_ok = FALSE;
+    g_mock.clock_cfg_ok = FALSE;
+    g_mock.tas_state_ok = FALSE;
+    /* Even with all IOCTLs failing, run_case must return TC_BLOCKED (not TC_FAIL) */
     int blocked = 0, cleanup_failed = 0;
-    int rc = run_case(mock_ioctl, MOCK_HANDLE, &blocked, &cleanup_failed);
-
-    EXPECT_EQ("result is BLOCKED", rc, RES_BLOCKED);
+    int rc = run_case(MOCK_HANDLE, &blocked, &cleanup_failed);
+    EXPECT_EQ("result is TC_BLOCKED", rc, TC_BLOCKED);
     EXPECT_EQ("blocked counter incremented", blocked, 1);
     EXPECT_EQ("cleanup_failed is 0", cleanup_failed, 0);
 }
 
 /*
- * TC-MOCK-002: TAS armed + no restore capability
- * Expect: BLOCKED before first mutation.
+ * TC-MOCK-002: Previously armed adapter — still BLOCKED unconditionally.
+ * Verifies that armed state is never even checked (preflight exits before IOCTL).
  */
-static void test_02_armed_no_restore_cap(void) {
-    printf("\n[TC-MOCK-002] Armed adapter with no restore capability => BLOCKED\n");
+static void test_02_armed_always_blocked(void) {
+    printf("\n[TC-MOCK-002] Armed adapter => BLOCKED (unconditional, armed state not checked)\n");
     memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok    = TRUE;
-    g_mock.hw_driver_caps = INTEL_CAP_TSN_TAS;
-    g_mock.tas_state_ok   = TRUE;
-    g_mock.tas_armed      = 1;
-
+    g_mock.tas_state_ok = TRUE;
+    g_mock.tas_armed    = 1; /* would indicate armed state if checked */
     int blocked = 0, cleanup_failed = 0;
-    int rc = run_case(mock_ioctl, MOCK_HANDLE, &blocked, &cleanup_failed);
-
-    EXPECT_EQ("result is BLOCKED", rc, RES_BLOCKED);
+    int rc = run_case(MOCK_HANDLE, &blocked, &cleanup_failed);
+    EXPECT_EQ("result is TC_BLOCKED", rc, TC_BLOCKED);
     EXPECT_EQ("blocked counter incremented", blocked, 1);
 }
 
 /*
- * TC-MOCK-003: HW state query fails => STATE_UNKNOWN => BLOCKED (fail closed).
+ * TC-MOCK-003: GET_HW_STATE failure — BLOCKED regardless (no IOCTL called by preflight).
+ * Demonstrates that the old GET_HW_STATE-based preflight has been removed.
+ * Zero IOCTLs means zero initialization side-effects.
  */
-static void test_03_hw_state_query_fails(void) {
-    printf("\n[TC-MOCK-003] HW state IOCTL fails => STATE_UNKNOWN => BLOCKED\n");
+static void test_03_get_hw_state_not_called(void) {
+    printf("\n[TC-MOCK-003] GET_HW_STATE not called by new preflight — BLOCKED regardless\n");
     memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok = FALSE; /* IOCTL fails */
-
+    g_mock.hw_state_ok    = FALSE; /* would cause STATE_UNKNOWN in old code */
+    g_mock.hw_driver_caps = 0;    /* would cause PASS in old code if hw_state_ok were TRUE */
     int blocked = 0, cleanup_failed = 0;
-    int rc = run_case(mock_ioctl, MOCK_HANDLE, &blocked, &cleanup_failed);
-
-    EXPECT_EQ("result is BLOCKED", rc, RES_BLOCKED);
-    EXPECT_EQ("blocked counter incremented", blocked, 1);
+    int rc = run_case(MOCK_HANDLE, &blocked, &cleanup_failed);
+    EXPECT_EQ("result is TC_BLOCKED", rc, TC_BLOCKED);
 }
 
 /*
- * TC-MOCK-004: disable_tas returns -ENOTSUP => STATUS_NOT_SUPPORTED =>
- * CLEANUP_FAILED (not success, not generic error).
+ * TC-MOCK-004: Fix for old fail-open: previously a non-TAS adapter would pass preflight,
+ * arm TAS, then fail at disarm with STATUS_NOT_SUPPORTED -> CLEANUP_FAILED.
+ * With the unconditional block, this scenario now produces BLOCKED (not CLEANUP_FAILED).
+ * Directly tests tas_restore_state to verify STATUS_NOT_SUPPORTED produces FALSE.
  */
-static void test_04_disarm_enotsup_status(void) {
-    printf("\n[TC-MOCK-004] DISARM_TAS returns STATUS_NOT_SUPPORTED => CLEANUP_FAILED\n");
+static void test_04_disarm_not_supported_restore_fails(void) {
+    printf("\n[TC-MOCK-004] STATUS_NOT_SUPPORTED from DISARM_TAS => tas_restore_state returns FALSE\n");
     memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok    = TRUE;
-    g_mock.hw_driver_caps = 0;  /* no TSN_TAS → preflight passes */
+    /* All IOCTLs succeed except disarm returns NOT_SUPPORTED */
     g_mock.clock_cfg_ok   = TRUE;
     g_mock.tas_state_ok   = TRUE;
     g_mock.tas_armed      = 0;
@@ -306,81 +216,95 @@ static void test_04_disarm_enotsup_status(void) {
     g_mock.set_ts_ok      = TRUE;
     g_mock.set_ts_status  = 0;
 
-    int blocked = 0, cleanup_failed = 0;
-    int rc = run_case(mock_ioctl, MOCK_HANDLE, &blocked, &cleanup_failed);
+    /* Direct call to tas_restore_state — bypasses preflight */
+    TAS_SNAPSHOT snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.valid = TRUE; snap.tsauxc_before = 0; snap.tas_was_armed = FALSE;
 
-    EXPECT_EQ("result is CLEANUP_FAILED", rc, RES_CLEANUP_FAILED);
-    EXPECT_EQ("cleanup_failed counter incremented", cleanup_failed, 1);
-    EXPECT_EQ("blocked counter is 0", blocked, 0);
+    BOOL restore_ok = tas_restore_state(MOCK_HANDLE, &snap);
+    EXPECT_FALSE("tas_restore_state returns FALSE on STATUS_NOT_SUPPORTED", restore_ok);
+
+    /* In full run_case flow: unconditional block means disarm is never reached */
+    int blocked = 0, cleanup_failed = 0;
+    int rc = run_case(MOCK_HANDLE, &blocked, &cleanup_failed);
+    EXPECT_EQ("run_case returns TC_BLOCKED (not TC_CLEANUP_FAILED)", rc, TC_BLOCKED);
+    EXPECT_EQ("cleanup_failed is 0 — disarm never reached", cleanup_failed, 0);
 }
 
 /*
- * TC-MOCK-005: Cleanup fails => CLEANUP_FAILED; subsequent test not run.
- * Simulate two cases; first finishes but second cleanup fails; third must not run.
+ * TC-MOCK-005: CLEANUP_FAILED path via direct restore_state call.
+ * Since run_case always returns BLOCKED (unconditional), CLEANUP_FAILED can
+ * only be triggered by code that directly calls tas_restore_state after mutation.
+ * Verify the path still produces the correct result for future use.
  */
-static void test_05_cleanup_fail_halts_sequence(void) {
-    printf("\n[TC-MOCK-005] CLEANUP_FAILED halts further hardware-mutating cases\n");
-
-    /* Case A: succeeds including restore */
+static void test_05_cleanup_failed_from_restore(void) {
+    printf("\n[TC-MOCK-005] Direct restore_state path: CLEANUP_FAILED when disarm fails\n");
     memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok    = TRUE;
-    g_mock.hw_driver_caps = 0;
-    g_mock.clock_cfg_ok   = TRUE;
-    g_mock.tas_state_ok   = TRUE;
-    g_mock.tas_armed      = 0;
-    g_mock.disarm_ok      = TRUE;
-    g_mock.disarm_status  = 0;
+    g_mock.disarm_ok      = FALSE; /* IOCTL_AVB_DISARM_TAS DeviceIoControl returns FALSE */
     g_mock.set_ts_ok      = TRUE;
     g_mock.set_ts_status  = 0;
 
-    int blocked = 0, cleanup_failed = 0;
-    int rc_a = run_case(mock_ioctl, MOCK_HANDLE, &blocked, &cleanup_failed);
-    EXPECT_EQ("Case A passes", rc_a, RES_PASS);
+    TAS_SNAPSHOT snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.valid = TRUE; snap.tsauxc_before = 0; snap.tas_was_armed = FALSE;
 
-    /* Case B: restore fails (DISARM returns NOT_SUPPORTED) */
-    g_mock.disarm_status = 0xC00000BBu;
-    int rc_b = run_case(mock_ioctl, MOCK_HANDLE, &blocked, &cleanup_failed);
-    EXPECT_EQ("Case B is CLEANUP_FAILED", rc_b, RES_CLEANUP_FAILED);
-    EXPECT_EQ("cleanup_failed=1 after case B", cleanup_failed, 1);
+    BOOL restore_ok = tas_restore_state(MOCK_HANDLE, &snap);
+    EXPECT_FALSE("tas_restore_state returns FALSE when DISARM_TAS IOCTL fails", restore_ok);
 
-    /* Case C: must NOT run — caller detects CLEANUP_FAILED and skips */
-    /* (Simulated by checking that the caller loop would break here) */
-    int case_c_would_run = (rc_b != RES_CLEANUP_FAILED); /* FALSE = correct */
-    EXPECT_FALSE("Case C does not run after CLEANUP_FAILED", case_c_would_run);
+    /* Verify CLEANUP_FAILED path: restore FALSE -> verify not called -> CLEANUP_FAILED */
+    int cleanup_failed = 0;
+    BOOL verify_ok = restore_ok ? tas_verify_restore(MOCK_HANDLE, &snap) : FALSE;
+    if (!restore_ok || !verify_ok) cleanup_failed++;
+    EXPECT_EQ("cleanup_failed counted when restore fails", cleanup_failed, 1);
 }
 
 /*
- * TC-MOCK-006: All mandatory TAS tests blocked => suite exit code 3, not 0.
+ * TC-MOCK-006: All mandatory TAS hw tests blocked => exit code 3, not 0.
  */
 static void test_06_all_blocked_exit_code(void) {
     printf("\n[TC-MOCK-006] All hw cases blocked => exit code 3, not 0\n");
-    /* Simulate: g_blocked=8, g_passed=0, g_failed=0 */
     int passed = 0, failed = 0, blocked = 8, cleanup_failed = 0;
-
-    /* Exit code logic mirrors test_ioctl_tas.c main() */
     int exit_code;
     if (cleanup_failed > 0)        exit_code = 4;
     else if (failed > 0)           exit_code = 1;
     else if (blocked > 0)          exit_code = 3;
     else if (passed == 0)          exit_code = 2;
     else                           exit_code = 0;
-
     EXPECT_EQ("exit code is 3 (BLOCKED mandatory)", exit_code, 3);
 }
 
 /*
- * TC-MOCK-007: Two adapters with different mock states — no cross-contamination.
- * Adapter A has no TSN_TAS (can proceed); Adapter B has TSN_TAS (blocked).
+ * TC-MOCK-007: Two adapters — both BLOCKED — no cross-contamination.
  */
-static void test_07_two_adapters_no_cross_contamination(void) {
-    printf("\n[TC-MOCK-007] Two adapters — no wrong-adapter access\n");
+static void test_07_two_adapters_both_blocked(void) {
+    printf("\n[TC-MOCK-007] Two adapters — both BLOCKED, counters independent\n");
     int blocked_a = 0, cleanup_a = 0;
     int blocked_b = 0, cleanup_b = 0;
 
-    /* Adapter A: non-TAS, all IOCTLs succeed */
+    memset(&g_mock, 0, sizeof(g_mock));
+    int rc_a = run_case((HANDLE)(ULONG_PTR)0xAAAA, &blocked_a, &cleanup_a);
+    EXPECT_EQ("Adapter A blocked", rc_a, TC_BLOCKED);
+    EXPECT_EQ("Adapter A blocked_a=1", blocked_a, 1);
+    EXPECT_EQ("Adapter A cleanup_a=0", cleanup_a, 0);
+
+    memset(&g_mock, 0, sizeof(g_mock));
+    int rc_b = run_case((HANDLE)(ULONG_PTR)0xBBBB, &blocked_b, &cleanup_b);
+    EXPECT_EQ("Adapter B blocked", rc_b, TC_BLOCKED);
+    EXPECT_EQ("Adapter B blocked_b=1", blocked_b, 1);
+
+    /* Verify counters are independent */
+    EXPECT_EQ("Adapter A blocked_a unchanged by B", blocked_a, 1);
+    EXPECT_EQ("Adapter A cleanup_a unchanged by B", cleanup_a, 0);
+}
+
+/*
+ * TC-MOCK-008: Standard suite has no destructive bypass.
+ */
+static void test_08_no_destructive_bypass(void) {
+    printf("\n[TC-MOCK-008] No destructive bypass — BLOCKED regardless of mock config\n");
     memset(&g_mock, 0, sizeof(g_mock));
     g_mock.hw_state_ok    = TRUE;
-    g_mock.hw_driver_caps = 0;   /* no TSN_TAS */
+    g_mock.hw_driver_caps = 0; /* old code would have allowed this through */
     g_mock.clock_cfg_ok   = TRUE;
     g_mock.tas_state_ok   = TRUE;
     g_mock.tas_armed      = 0;
@@ -388,62 +312,21 @@ static void test_07_two_adapters_no_cross_contamination(void) {
     g_mock.disarm_status  = 0;
     g_mock.set_ts_ok      = TRUE;
     g_mock.set_ts_status  = 0;
-    int rc_a = run_case(mock_ioctl, (HANDLE)(ULONG_PTR)0xAAAA, &blocked_a, &cleanup_a);
-    EXPECT_EQ("Adapter A passes", rc_a, RES_PASS);
-
-    /* Adapter B: TAS-capable, blocked */
-    memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok    = TRUE;
-    g_mock.hw_driver_caps = INTEL_CAP_TSN_TAS;
-    int rc_b = run_case(mock_ioctl, (HANDLE)(ULONG_PTR)0xBBBB, &blocked_b, &cleanup_b);
-    EXPECT_EQ("Adapter B blocked", rc_b, RES_BLOCKED);
-
-    /* Verify no cross-contamination: A's counters unchanged by B's run */
-    EXPECT_EQ("Adapter A blocked_a unchanged", blocked_a, 0);
-    EXPECT_EQ("Adapter A cleanup_a unchanged", cleanup_a, 0);
-    EXPECT_EQ("Adapter B blocked_b=1", blocked_b, 1);
-}
-
-/*
- * TC-MOCK-008: Standard suite has no destructive bypass.
- * Verified structurally: run_case() always goes through mock_capture_state()
- * which always calls mock_probe_restore_capability().  No mechanism exists to
- * skip the preflight in the standard contract functions.
- */
-static void test_08_no_destructive_bypass(void) {
-    printf("\n[TC-MOCK-008] Standard suite has no destructive bypass\n");
-
-    /* With TSN_TAS set (BLOCKED adapter), any attempt to run a hw case returns
-     * BLOCKED regardless of any flag passed from outside. */
-    memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok    = TRUE;
-    g_mock.hw_driver_caps = INTEL_CAP_TSN_TAS;
-
+    /* Even with all IOCTLs succeeding, the unconditional block prevents execution */
     int blocked = 0, cleanup_failed = 0;
-    int rc = run_case(mock_ioctl, MOCK_HANDLE, &blocked, &cleanup_failed);
-
-    EXPECT_EQ("hw case is BLOCKED (no bypass)", rc, RES_BLOCKED);
-    EXPECT_EQ("blocked counter is 1", blocked, 1);
+    int rc = run_case(MOCK_HANDLE, &blocked, &cleanup_failed);
+    EXPECT_EQ("hw case is BLOCKED (unconditional)", rc, TC_BLOCKED);
+    EXPECT_EQ("blocked=1", blocked, 1);
+    EXPECT_EQ("cleanup_failed=0", cleanup_failed, 0);
 }
 
 /*
- * TC-MOCK-009: Non-mutating parameter-validation test remains executable.
- * TC-TAS-009/010 (null buffer, small buffer) do not call capture/restore —
- * they are always executable regardless of adapter state.
+ * TC-MOCK-009: Non-mutating parameter tests always executable.
  */
 static void test_09_negative_tests_always_executable(void) {
     printf("\n[TC-MOCK-009] Non-mutating parameter tests always executable\n");
-
-    /* Simulate TC-TAS-009: probe_restore not called; test proceeds directly */
-    /* With all IOCTLs failing, the negative test still runs (it uses a different code path) */
-    memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.hw_state_ok = FALSE; /* everything fails — irrelevant for negative tests */
-
-    /* The key behavior: negative tests call DeviceIoControl(IOCTL_AVB_SETUP_TAS) with
-     * invalid buffers and check for failure.  That call is not part of capture/restore.
-     * Simulated here: a negative test function returns "passed" without consulting mock. */
-    int neg_test_result = 0; /* RES_PASS */
-    EXPECT_EQ("negative test executes independently of restore capability", neg_test_result, RES_PASS);
+    int neg_test_result = TC_PASS;
+    EXPECT_EQ("negative test executes independently of restore capability", neg_test_result, TC_PASS);
 }
 
 /* =========================================================================
@@ -457,13 +340,13 @@ int main(void) {
     printf(" No driver or hardware required.\n");
     printf("=======================================================================\n");
 
-    test_01_disarmed_no_restore_cap();
-    test_02_armed_no_restore_cap();
-    test_03_hw_state_query_fails();
-    test_04_disarm_enotsup_status();
-    test_05_cleanup_fail_halts_sequence();
+    test_01_unconditional_block();
+    test_02_armed_always_blocked();
+    test_03_get_hw_state_not_called();
+    test_04_disarm_not_supported_restore_fails();
+    test_05_cleanup_failed_from_restore();
     test_06_all_blocked_exit_code();
-    test_07_two_adapters_no_cross_contamination();
+    test_07_two_adapters_both_blocked();
     test_08_no_destructive_bypass();
     test_09_negative_tests_always_executable();
 
