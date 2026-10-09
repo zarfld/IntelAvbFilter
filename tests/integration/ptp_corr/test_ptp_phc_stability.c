@@ -255,9 +255,13 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     if (!read_phc(hDev, adapter_idx, &phc_after)) {
         printf("  FAIL: PHC read failed immediately after SET_TIMESTAMP\n");
         tc_result("UT-CORR-005 PHC readable after reset", false);
+        /* Best-effort restore on early exit — check return value */
         set_req.timestamp = phc_before + 200000000ULL;
-        DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
-                        &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL);
+        if (!DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
+                        &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL)) {
+            printf("  [CLEANUP_FAILED] PHC restore IOCTL failed on early exit (error %lu)\n", GetLastError());
+            s_cleanup_failed++;
+        }
         return;
     }
 
@@ -275,9 +279,13 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     if (!near_seed) {
         printf("  FAIL: PHC not in expected window after epoch reset\n");
         tc_result("UT-CORR-005 PHC near seed after reset", false);
+        /* Best-effort restore on early exit — check return value */
         set_req.timestamp = phc_before + 500000000ULL;
-        DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
-                        &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL);
+        if (!DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
+                        &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL)) {
+            printf("  [CLEANUP_FAILED] PHC restore IOCTL failed on early exit (error %lu)\n", GetLastError());
+            s_cleanup_failed++;
+        }
         return;
     }
 
@@ -803,6 +811,15 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
         count_after++;
     }
     printf("  Adapter count: before=%u  after=%d\n", adapter_count_before, count_after);
+    /* Strict: adapter count must not decrease after reload.
+     * A reduced set means at least one adapter did not rebind successfully. */
+    if (count_after < (int)adapter_count_before) {
+        printf("  FAIL: Adapter count decreased after reload (%u -> %d) — rebind incomplete\n",
+               adapter_count_before, count_after);
+        CloseHandle(hDev2);
+        tc_result("UT-CORR-009 Driver Reload (FAIL - adapter count decreased)", false);
+        return;
+    }
 
     /* --- Step 4: Verify TX-PHC correlation after reload --- */
     uint64_t phc2 = 0;
@@ -811,10 +828,12 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
     uint64_t phc2_send = 0;  /* atomic PHC ref from kernel IOCTL entry */
     bool tx2_ok   = phc2_ok && send_ptp_get_tx(hDev2, 0, 0x901U, &tx2, &phc2_send);
     bool corr_ok  = true;
+    bool tx_available = false;  /* track whether TX timestamps were actually available */
 
     if (phc2_ok) {
         printf("  After reload: phc2 = %llu ns\n", (unsigned long long)phc2);
         if (tx2_ok) {
+            tx_available = true;
             int64_t d = (int64_t)(tx2 - phc2_send);
             printf("  After reload: tx2  = %llu ns  (delta = %lld ns)\n",
                    (unsigned long long)tx2, (long long)d);
@@ -823,7 +842,10 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
                 corr_ok = false;
             }
         } else {
-            printf("  NOTE: TX unavailable after reload (link down?)\n");
+            /* TX unavailable is explicitly distinguished from a correlation failure.
+             * Report as SKIP_TX rather than silently treating as correlated. */
+            printf("  NOTE: TX timestamp unavailable after reload (link down / HW ts not ready)\n");
+            printf("  NOTE: PHC readback succeeded; TX-PHC correlation cannot be verified\n");
         }
     } else {
         printf("  FAIL: PHC not readable after driver reload\n");
@@ -831,10 +853,14 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
 
     CloseHandle(hDev2);
 
-    bool passed = phc2_ok && (count_after > 0) && corr_ok;
+    bool passed = phc2_ok && ((int)count_after >= (int)adapter_count_before) && corr_ok;
     if (!phc2_ok)       printf("  FAIL: PHC not readable after reload\n");
-    if (count_after == 0) printf("  FAIL: No adapters after reload\n");
-    tc_result("UT-CORR-009 Driver Reload: re-open OK, PHC valid, TX-PHC correlated", passed);
+    /* Report the TX availability in the verdict label so it is unambiguous */
+    if (passed && !tx_available) {
+        tc_result("UT-CORR-009 Driver Reload: re-open OK, PHC valid (TX unavailable — correlation unverified)", passed);
+    } else {
+        tc_result("UT-CORR-009 Driver Reload: re-open OK, PHC valid, TX-PHC correlated", passed);
+    }
 }
 
 /* =========================================================================

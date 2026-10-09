@@ -770,13 +770,12 @@ static void test_industrial_schedule(HANDLE hDevice) {
     }
 }
 
-// ============================================================================
-// Error Handling Tests
-// ============================================================================
-
 /*
 TC-TAS-009: Null Buffer Validation
-Expected: IOCTL rejects null input/output buffers (error=ERROR_INVALID_PARAMETER or ERROR_INSUFFICIENT_BUFFER)
+Expected: IOCTL rejects null input/output buffers.
+Acceptable rejection codes: ERROR_INVALID_PARAMETER (87), ERROR_INSUFFICIENT_BUFFER (122).
+Any other outcome — including unexpected success — is a FAIL.
+Note: these tests actively submit an IOCTL to the driver; they are not read-only.
 */
 static void test_null_buffer(HANDLE hDevice) {
     printf("\n[TC-TAS-009] Null Buffer Validation...\n");
@@ -786,24 +785,27 @@ static void test_null_buffer(HANDLE hDevice) {
                                  NULL, 0, NULL, 0, &bytesReturned, NULL);
     DWORD error = GetLastError();
 
-    // Should fail with specific error codes
-    if (!result && (error == ERROR_INVALID_PARAMETER || error == ERROR_INSUFFICIENT_BUFFER || error == 122 || error == 87)) {
+    if (!result && (error == ERROR_INVALID_PARAMETER || error == ERROR_INSUFFICIENT_BUFFER)) {
         printf("  [PASS] Null buffer correctly rejected (error=%lu)\n", error);
         g_passed++;
     } else if (result) {
-        /* Driver accepted null buffer — this is a driver validation defect, not acceptable behaviour */
-        printf("  [FAIL] Null buffer unexpectedly accepted — driver MUST reject null input (status=0x%08X)\n",
-               ERROR_SUCCESS);
+        printf("  [FAIL] Null buffer unexpectedly accepted — driver MUST reject null input\n");
         g_failed++;
     } else {
-        printf("  [WARN] Unexpected error code (error=%lu, expected 87 or 122)\n", error);
-        g_passed++;  /* Different error still counts as rejection */
+        /* Unrecognised error code: the driver rejected the IOCTL but for an undocumented
+         * reason.  This is a FAIL — it indicates the driver's validation path is non-standard
+         * and may behave differently on other systems or kernel versions. */
+        printf("  [FAIL] Unrecognised rejection error code=%lu (expected 87 or 122) — driver validation non-standard\n", error);
+        g_failed++;
     }
 }
 
 /*
-TC-TAS-010: Buffer Too Small
-Expected: IOCTL rejects undersized buffers (error=ERROR_INSUFFICIENT_BUFFER or ERROR_INVALID_PARAMETER)
+TC-TAS-010: Buffer Too Small Validation
+Expected: IOCTL rejects undersized buffers.
+Acceptable rejection codes: ERROR_INVALID_PARAMETER (87), ERROR_INSUFFICIENT_BUFFER (122).
+Any other outcome — including unexpected success — is a FAIL.
+Note: these tests actively submit an IOCTL to the driver; they are not read-only.
 */
 static void test_buffer_too_small(HANDLE hDevice) {
     printf("\n[TC-TAS-010] Buffer Too Small Validation...\n");
@@ -817,17 +819,16 @@ static void test_buffer_too_small(HANDLE hDevice) {
                                  &bytesReturned, NULL);
     DWORD error = GetLastError();
 
-    // Should fail with specific error codes
-    if (!result && (error == ERROR_INSUFFICIENT_BUFFER || error == ERROR_INVALID_PARAMETER || error == 122 || error == 87)) {
+    if (!result && (error == ERROR_INSUFFICIENT_BUFFER || error == ERROR_INVALID_PARAMETER)) {
         printf("  [PASS] Small buffer correctly rejected (error=%lu)\n", error);
         g_passed++;
     } else if (result) {
-        /* Driver accepted undersized buffer — this is a driver validation defect */
         printf("  [FAIL] Undersized buffer unexpectedly accepted — driver MUST reject insufficient input\n");
         g_failed++;
     } else {
-        printf("  [WARN] Unexpected error code (error=%lu, expected 87 or 122)\n", error);
-        g_passed++;  /* Different error still counts as rejection */
+        /* Unrecognised error code — same reasoning as TC-TAS-009 */
+        printf("  [FAIL] Unrecognised rejection error code=%lu (expected 87 or 122) — driver validation non-standard\n", error);
+        g_failed++;
     }
 }
 

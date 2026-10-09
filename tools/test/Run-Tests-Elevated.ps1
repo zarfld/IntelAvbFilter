@@ -109,7 +109,11 @@ if ($CaptureDbgView) {
     }
 }
 
-Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait
+# ── Launch elevated child and capture its exit code ───────────────────────────
+# -PassThru returns a Process object so we can read ExitCode after -Wait.
+# Without -PassThru the exit code is silently discarded (P0 fix #328).
+$childProc = Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait -PassThru
+$childExitCode = if ($null -ne $childProc) { $childProc.ExitCode } else { -1 }
 
 # ── Stop DebugView if we started it ───────────────────────────────────────────
 if ($dbgViewProc) {
@@ -125,3 +129,11 @@ if ($dbgViewProc) {
 if ($LogFile -and (Test-Path $LogFile)) {
     Write-Host "`nLog file created: $LogFile" -ForegroundColor Green
 }
+
+# ── Propagate child exit code ─────────────────────────────────────────────────
+# Exit codes from Run-Tests.ps1 (and native test binaries):
+#   0 = PASS          — all tests passed
+#   1 = FAIL/BLOCKED  — at least one test failed, blocked, or CLEANUP_FAILED
+#   2 = SKIP_ONLY     — tests ran but no hardware found; all SKIP_NO_TESTS
+# The elevated wrapper must not swallow these; callers (CI, scripts) depend on them.
+exit $childExitCode

@@ -1285,6 +1285,14 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_exit_code_propagation"
+        Type = "cl"
+        Source = "tests\unit\test_exit_code_propagation.c"
+        Output = "test_exit_code_propagation.exe"
+        Includes = "-I include"
+        Description = "Mock exit-code propagation test (#328 P0 verification)"
+    },
+    @{
         Name = "test_tas_restore_contract"
         Type = "cl"
         Source = "tests\unit\test_tas_restore_contract.c"

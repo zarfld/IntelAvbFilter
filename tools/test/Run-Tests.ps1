@@ -164,14 +164,41 @@ function Invoke-Test {
         $script:testResults += [PSCustomObject]@{
             Name = $TestName
             Status = "PASSED"
-            ExitCode = if ($exitCode) { $exitCode } else { 0 }
+            ExitCode = 0
         }
-    } else {
-        Write-Host "  [WARN] Test exited with code $exitCode" -ForegroundColor Yellow
+    } elseif ($exitCode -eq 2) {
+        # exit 2 = NO_TESTS_RAN: device absent, no adapter, or all tests skipped
+        Write-Host "  [SKIP] Test ran but produced no results (no device/all skipped, exit 2)" -ForegroundColor Yellow
+        $script:skippedTests++
+        $script:testResults += [PSCustomObject]@{
+            Name     = $TestName
+            Status   = "SKIP_NO_TESTS"
+            ExitCode = $exitCode
+        }
+    } elseif ($exitCode -eq 3) {
+        # exit 3 = BLOCKED: mandatory test cases could not run (restore capability absent)
+        Write-Host "  [BLOCKED] Mandatory test cases BLOCKED — restore capability absent (exit 3)" -ForegroundColor Yellow
         $script:failedTests++
         $script:testResults += [PSCustomObject]@{
-            Name = $TestName
-            Status = "FAILED"
+            Name     = $TestName
+            Status   = "BLOCKED"
+            ExitCode = $exitCode
+        }
+    } elseif ($exitCode -eq 4) {
+        # exit 4 = CLEANUP_FAILED: hardware state unknown after restore failure
+        Write-Host "  [CLEANUP_FAILED] Hardware state UNKNOWN after restore failure (exit 4)" -ForegroundColor Red
+        $script:failedTests++
+        $script:testResults += [PSCustomObject]@{
+            Name     = $TestName
+            Status   = "CLEANUP_FAILED"
+            ExitCode = $exitCode
+        }
+    } else {
+        Write-Host "  [FAIL] Test exited with code $exitCode" -ForegroundColor Red
+        $script:failedTests++
+        $script:testResults += [PSCustomObject]@{
+            Name     = $TestName
+            Status   = "FAILED"
             ExitCode = $exitCode
         }
     }
@@ -1128,3 +1155,18 @@ Write-Host ""
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "  Test Suite Complete!" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Cyan
+
+# ===========================
+# Propagate exit code
+# Exit codes:
+#   0 = PASS      — all tests passed (or no tests were run as a deliberate no-op)
+#   1 = FAIL      — at least one test failed, blocked, or reported CLEANUP_FAILED
+#   2 = SKIP_ONLY — tests ran but all produced SKIP_NO_TESTS (no hardware/device)
+# ===========================
+if ($script:failedTests -gt 0) {
+    exit 1
+} elseif ($script:passedTests -eq 0 -and $script:skippedTests -gt 0) {
+    exit 2
+} else {
+    exit 0
+}
