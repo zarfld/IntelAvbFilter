@@ -79,10 +79,17 @@ $className = if ($ClassNameOverride) {
 #
 # Format:
 #   [PASS] TC-STAT-001: reason
-#   [FAIL] TC-PERF-TS-006/adapter:0: Some threads exceeded thresholds
-#   [SKIP] TC-STAT-009: requires driver restart (user-mode limitation)
+#   [FAIL]           TC-PERF-TS-006/adapter:0: Some threads exceeded thresholds
+#   [SKIP]           TC-STAT-009: requires driver restart (user-mode limitation)
+#   [BLOCKED]        TC-TAS-001: restore capability absent
+#   [CLEANUP_FAILED] TC-TAS-001: hardware state unknown
+#   [PASS]           UT-CORR-007 Jitter: ...   (PHC stability tests use UT-CORR-NNN IDs)
+#   [FAIL]           UT-CORR-009 Driver Reload: ...
 # ---------------------------------------------------------------------------
-$pattern = '^\s*\[(PASS|FAIL|SKIP)\]\s+(TC-[\w-]+(?:/adapter:\d+)?)\s*:(.*)'
+# Pattern captures: status (PASS/FAIL/SKIP/BLOCKED/CLEANUP_FAILED)
+#                   test ID (TC-* or UT-CORR-* with optional /adapter:N)
+#                   reason text
+$pattern = '^\s*\[(PASS|FAIL|SKIP|BLOCKED|CLEANUP_FAILED)\]\s+((?:TC-|UT-CORR-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
 $entries = [System.Collections.Generic.List[hashtable]]::new()
 
 $content = Get-Content $LogFile -ErrorAction SilentlyContinue
@@ -97,6 +104,17 @@ $content | ForEach-Object {
         $fullId = $Matches[2].Trim()
         $reason = $Matches[3].Trim()
 
+        # Normalise BLOCKED and CLEANUP_FAILED to FAIL for JUnit aggregation
+        # but preserve the original status in the reason for visibility
+        $junitStatus = switch ($status) {
+            'BLOCKED'        { 'FAIL' }
+            'CLEANUP_FAILED' { 'FAIL' }
+            default          { $status }
+        }
+        $reasonWithStatus = if ($status -in @('BLOCKED','CLEANUP_FAILED')) {
+            "[$status] $reason"
+        } else { $reason }
+
         # Split "TC-PERF-TS-001/adapter:0" → tcBase="TC-PERF-TS-001" adapter="adapter:0"
         $slash = $fullId.IndexOf('/')
         if ($slash -ge 0) {
@@ -108,10 +126,11 @@ $content | ForEach-Object {
         }
 
         $entries.Add(@{
-            Status  = $status
-            TcBase  = $tcBase
-            Adapter = $adapter
-            Reason  = $reason
+            Status     = $junitStatus        # PASS/FAIL/SKIP (JUnit-normalised)
+            OrigStatus = $status             # original: BLOCKED/CLEANUP_FAILED preserved
+            TcBase     = $tcBase
+            Adapter    = $adapter
+            Reason     = $reasonWithStatus   # includes [BLOCKED]/[CLEANUP_FAILED] prefix
         })
     }
 }

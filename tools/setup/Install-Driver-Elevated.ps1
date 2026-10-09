@@ -20,19 +20,25 @@ try {
     $scriptPath     = Join-Path $PSScriptRoot 'Install-Driver.ps1'
     $transcriptPath = Join-Path $env:TEMP "install-driver-$(Get-Date -Format yyyyMMdd_HHmmss).log"
 
-    # Write a tiny wrapper that enables transcript capture and calls the real script
+    # Write a temp wrapper that captures transcript AND propagates the child exit code.
+    # The exit code must be captured BEFORE Stop-Transcript — Stop-Transcript's own
+    # return value must not overwrite the install result.
     $tempScript = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.ps1'
     @"
 Start-Transcript -Path '$transcriptPath' -Force | Out-Null
+`$_installExitCode = 0
 try {
     & '$scriptPath' -Configuration $Configuration -$Action
+    `$_installExitCode = `$LASTEXITCODE
+    if (`$null -eq `$_installExitCode) { `$_installExitCode = 0 }
 } catch {
-    Write-Host "EXCEPTION: `$_" -ForegroundColor Red
-    exit 1
+    Write-Host "EXCEPTION during Install-Driver.ps1: `$_" -ForegroundColor Red
+    `$_installExitCode = 1
 } finally {
     Stop-Transcript | Out-Null
 }
-"@ | Set-Content $tempScript
+exit `$_installExitCode
+"@ | Set-Content $tempScript -Encoding UTF8
 
     $arguments = @(
         '-NoProfile'
@@ -47,31 +53,48 @@ try {
     if ($CaptureDbgView) {
         $dbgViewScript = Join-Path $repoRoot '.github\skills\DbgView\Start-DbgViewCapture.ps1'
         if (Test-Path $dbgViewScript) {
-            # Derive log stem from test name or suite label
             $dbgLogStem = "dbgview_install-driver-$($Action.ToLower())"
             Write-Host "[DbgView] Starting kernel capture (stem: $dbgLogStem)..." -ForegroundColor Cyan
             $dbgViewProc = & $dbgViewScript -LogName $dbgLogStem
             if ($dbgViewProc) {
+                Write-Host "[DbgView] Started PID=$($dbgViewProc.Id)" -ForegroundColor Green
+                Write-Host "[DbgView] Logging to: $((Get-ChildItem (Join-Path $repoRoot 'logs') -Filter "dbgview_install*" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName)" -ForegroundColor Gray
                 Write-Host "[DbgView] Capturing on PID=$($dbgViewProc.Id)" -ForegroundColor Green
-                Start-Sleep -Milliseconds 500   # give DbgView time to open the log file
+                Start-Sleep -Milliseconds 500
             }
         } else {
             Write-Warning "[DbgView] Start script not found at '$dbgViewScript'. Skipping capture."
         }
     }
 
-    Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait
+    # ── Launch elevated child and capture its exit code ────────────────────────
+    # -PassThru is required so we can read ExitCode after -Wait.
+    # Distinguish three failure modes:
+    #   - UAC cancelled / launch failed ($childProc is null or ExitCode unavailable)
+    #   - Install-Driver.ps1 failed (childProc.ExitCode != 0)
+    #   - Success (childProc.ExitCode == 0)
+    $childProc = Start-Process powershell -Verb RunAs -ArgumentList $arguments -Wait -PassThru -ErrorAction SilentlyContinue
+    $installExitCode = if ($null -eq $childProc) {
+        Write-Host "WARNING: Elevated process did not start — UAC may have been cancelled or launch failed" -ForegroundColor Yellow
+        -1
+    } elseif ($null -eq $childProc.ExitCode) {
+        Write-Host "WARNING: Elevated process exit code unavailable (process object invalid)" -ForegroundColor Yellow
+        -1
+    } else {
+        $childProc.ExitCode
+    }
 
-    # ── Stop DebugView if we started it ───────────────────────────────────────────
+    # ── Stop DebugView if we started it ───────────────────────────────────────
     if ($dbgViewProc) {
         $stopScript = Join-Path $repoRoot '.github\skills\DbgView\Stop-DbgViewCapture.ps1'
         if (Test-Path $stopScript) {
             & $stopScript -ProcessId $dbgViewProc.Id
         } else {
             Stop-Process -Id $dbgViewProc.Id -Force -ErrorAction SilentlyContinue
-            Write-Host "[DbgView] Stopped PID=$($dbgViewProc.Id)" -ForegroundColor Green
+            Write-Host "[DbgView] Stopped PID=$($dbgViewProc.Id) (Dbgview)" -ForegroundColor Green
         }
     }
+
     # Display transcript so output is visible in this (non-elevated) window
     if (Test-Path $transcriptPath) {
         Write-Host ""
@@ -81,13 +104,31 @@ try {
                            $_ -notmatch "^(Start|End) time:|^(Username|RunAs user|Configuration|Machine):" } |
             Write-Host
     } else {
-        Write-Host "WARNING: No transcript captured (UAC may have been denied or script crashed before Start-Transcript)" -ForegroundColor Yellow
+        if ($installExitCode -eq -1) {
+            Write-Host "WARNING: No transcript and no elevated process — UAC was likely cancelled" -ForegroundColor Yellow
+        } else {
+            Write-Host "WARNING: No transcript captured (script may have crashed before Start-Transcript)" -ForegroundColor Yellow
+        }
     }
 
     Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
 
+    # Propagate the install result to the caller.
+    # Exit codes:
+    #   0   = success
+    #   1   = Install-Driver.ps1 reported failure
+    #  -1   = UAC cancelled or process launch failed (treated as error by caller)
+    if ($installExitCode -ne 0) {
+        if ($installExitCode -eq -1) {
+            Write-Host "ERROR: Elevated install did not complete — UAC cancelled or launch failed" -ForegroundColor Red
+        } else {
+            Write-Host "ERROR: Install-Driver.ps1 exited with code $installExitCode" -ForegroundColor Red
+        }
+        exit 1
+    }
+
 } catch {
-    Write-Host "ERROR: Failed to launch elevated script" -ForegroundColor Red
+    Write-Host "ERROR: Failed to launch elevated install script" -ForegroundColor Red
     Write-Host "  $_" -ForegroundColor Yellow
     exit 1
 }
