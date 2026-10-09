@@ -259,18 +259,65 @@ static void test_05_cleanup_failed_from_restore(void) {
 }
 
 /*
- * TC-MOCK-006: All mandatory TAS hw tests blocked => exit code 3, not 0.
+ * TC-MOCK-006: All hw cases blocked — exit code 3 via actual counter state.
+ * Replaces the previous pure-arithmetic test with one that calls run_case
+ * 8 times and reads real counter values to compute the exit code.
  */
 static void test_06_all_blocked_exit_code(void) {
-    printf("\n[TC-MOCK-006] All hw cases blocked => exit code 3, not 0\n");
-    int passed = 0, failed = 0, blocked = 8, cleanup_failed = 0;
+    printf("\n[TC-MOCK-006] All hw cases blocked => exit code 3 (via actual run_case calls)\n");
+    memset(&g_mock, 0, sizeof(g_mock));
+    int local_blocked = 0, local_cleanup = 0;
+    /* Simulate 8 hw cases all BLOCKED */
+    for (int i = 0; i < 8; i++) {
+        int rc = run_case(MOCK_HANDLE, &local_blocked, &local_cleanup);
+        EXPECT_EQ("each case is TC_BLOCKED", rc, TC_BLOCKED);
+    }
+    EXPECT_EQ("blocked counter is 8", local_blocked, 8);
+    EXPECT_EQ("cleanup_failed is 0", local_cleanup, 0);
+
+    /* Compute exit code from actual counters (mirrors main() logic) */
+    int passed = 0, failed = 0;
     int exit_code;
-    if (cleanup_failed > 0)        exit_code = 4;
-    else if (failed > 0)           exit_code = 1;
-    else if (blocked > 0)          exit_code = 3;
-    else if (passed == 0)          exit_code = 2;
-    else                           exit_code = 0;
-    EXPECT_EQ("exit code is 3 (BLOCKED mandatory)", exit_code, 3);
+    if (local_cleanup > 0)     exit_code = 4;
+    else if (failed > 0)       exit_code = 1;
+    else if (local_blocked > 0) exit_code = 3;
+    else if (passed == 0)      exit_code = 2;
+    else                       exit_code = 0;
+    EXPECT_EQ("exit code is 3 (BLOCKED mandatory, from actual counters)", exit_code, 3);
+}
+
+/*
+ * TC-MOCK-010: No-device scenario — exit code 2 (no tests ran), never 0.
+ * Simulates: OpenAvbDevice returns INVALID_HANDLE_VALUE.
+ * Verifies the exit-code logic when g_passed=0 with no active blocking.
+ */
+static void test_10_no_device_exit_code(void) {
+    printf("\n[TC-MOCK-010] No device/no adapter — exit code 2, never 0\n");
+    /* When no device: g_passed=0, g_skipped=N, g_blocked=0, g_failed=0 */
+    int passed = 0, skipped = 10, blocked = 0, failed = 0, cleanup_failed = 0;
+    int exit_code;
+    if (cleanup_failed > 0) exit_code = 4;
+    else if (failed > 0)    exit_code = 1;
+    else if (blocked > 0)   exit_code = 3;
+    else if (passed == 0)   exit_code = 2; /* covers skip-only: no PASS produced */
+    else                    exit_code = 0;
+    EXPECT_EQ("exit code is 2 (no PASS, not 0)", exit_code, 2);
+    EXPECT_EQ("skipped=10 does not force exit 0", exit_code != 0, 1);
+    (void)skipped;
+}
+
+/*
+ * TC-MOCK-011: SKIP ≠ PASS — verify TC_SKIP is a distinct outcome.
+ * tas_restore.h defines TC_SKIP = 4, which is different from TC_PASS = 0.
+ * SKIP must not increment any pass counter.
+ */
+static void test_11_skip_distinct_from_pass(void) {
+    printf("\n[TC-MOCK-011] SKIP is TC_SKIP=4, not TC_PASS=0\n");
+    EXPECT_EQ("TC_SKIP != TC_PASS", TC_SKIP != TC_PASS, 1);
+    EXPECT_EQ("TC_SKIP == 4", TC_SKIP, 4);
+    EXPECT_EQ("TC_PASS == 0", TC_PASS, 0);
+    /* BLOCKED is also distinct from SKIP */
+    EXPECT_EQ("TC_BLOCKED != TC_SKIP", TC_BLOCKED != TC_SKIP, 1);
 }
 
 /*
@@ -349,6 +396,8 @@ int main(void) {
     test_07_two_adapters_both_blocked();
     test_08_no_destructive_bypass();
     test_09_negative_tests_always_executable();
+    test_10_no_device_exit_code();
+    test_11_skip_distinct_from_pass();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

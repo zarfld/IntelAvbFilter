@@ -50,15 +50,11 @@ DEFINE_GUID(GUID_DEVINTERFACE_AVB_FILTER,
 // Test result counters — distinct categories (P0.4)
 static int g_passed         = 0;
 static int g_failed         = 0;
-static int g_skipped        = 0;  /* SKIP_UNSUPPORTED_CAPABILITY: hardware/driver lacks feature */
+static int g_skipped        = 0;  /* SKIP: hardware/driver lacks feature for this test */
 static int g_blocked        = 0;  /* BLOCKED_UNRESTORABLE: safe restore path absent */
-static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify step failed; hw state unknown */
+static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify failed; hw state unknown */
 
-/* Result codes for run_with_restore() */
-#define TC_PASS             0
-#define TC_FAIL             1
-#define TC_CLEANUP_FAILED   2
-#define TC_BLOCKED          3
+/* TC_SKIP = 4 is defined in tas_restore.h alongside TC_PASS/FAIL/CLEANUP_FAILED/BLOCKED */
 
 // ============================================================================
 // Snapshot / Restore infrastructure (test-state-restoration contract)
@@ -69,18 +65,18 @@ static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify step failed;
 
 /* Run one hardware-mutating TAS case with full snapshot/restore lifecycle.
  *
- * Return codes (P0.4):
- *   TC_PASS (0)           — test passed, restore succeeded, verify passed
- *   TC_FAIL (1)           — test produced a FAIL verdict
- *   TC_CLEANUP_FAILED (2) — restore/verify failed; hardware state unknown; halt sequence
- *   TC_BLOCKED (3)        — preflight refused; restore path absent; test not executed
+ * Return codes (from tas_restore.h):
+ *   TC_PASS (0)           — fn() produced exactly one g_passed++ AND restore succeeded
+ *   TC_FAIL (1)           — fn() produced a FAIL outcome (g_failed++)
+ *   TC_CLEANUP_FAILED (2) — restore/verify failed; hardware state UNKNOWN; halt sequence
+ *   TC_BLOCKED (3)        — preflight refused; test not executed (g_blocked++)
+ *   TC_SKIP (4)           — fn() skipped (g_skipped++); restore ran; no mutation verified
  *
- * Authoritative result accounting (P1):
- *   - Individual test functions own their g_passed/g_failed/g_skipped increments.
- *   - run_with_restore does NOT increment g_passed — prevents double-counting.
- *   - A SKIP (g_skipped++) by fn() is NOT a PASS; it does not contribute to g_passed.
- *   - Only TC_PASS result is returned when the test fn() added to g_passed
- *     AND restore succeeded. */
+ * Each testcase contributes exactly one authoritative outcome:
+ *   - fn() always increments exactly one of g_passed, g_failed, or g_skipped.
+ *   - run_with_restore reads the delta and maps it to the TC_* taxonomy.
+ *   - run_with_restore never increments g_passed (prevents double-counting).
+ */
 static int run_with_restore(HANDLE hDevice, const char *case_name,
                             void (*fn)(HANDLE)) {
     TAS_SNAPSHOT snap;
@@ -97,7 +93,6 @@ static int run_with_restore(HANDLE hDevice, const char *case_name,
     BOOL test_passed  = (g_passed  > before_passed);
     BOOL test_failed  = (g_failed  > before_failed);
     BOOL test_skipped = (g_skipped > before_skipped);
-    (void)test_skipped; /* tracked for correctness; SKIP result propagates via counters */
 
     /* Restore unconditionally — on PASS, FAIL, or SKIP */
     BOOL restore_ok = tas_restore_state(hDevice, &snap);
@@ -110,10 +105,14 @@ static int run_with_restore(HANDLE hDevice, const char *case_name,
         return TC_CLEANUP_FAILED;
     }
 
-    /* Do NOT increment g_passed here — fn() already did so if it passed */
-    if (test_failed)              return TC_FAIL;
-    if (!test_passed && !test_skipped) return TC_FAIL; /* fn() incremented neither — treat as fail */
-    return TC_PASS;
+    /* Map fn() outcome to TC_* — exactly one code returned */
+    if (test_failed)  return TC_FAIL;
+    if (test_skipped) return TC_SKIP;   /* SKIP is not PASS — counted separately */
+    if (test_passed)  return TC_PASS;
+    /* fn() incremented no counter — treat as unexpected failure */
+    printf("  [FAIL] %s: test function produced no outcome\n", case_name);
+    g_failed++;
+    return TC_FAIL;
 }
 
 static void test_basic_gcl_config(HANDLE hDevice);
@@ -933,12 +932,13 @@ print_summary:
     printf(" TOTAL:            %d\n", g_passed + g_failed + g_skipped + g_blocked + g_cleanup_failed);
     printf("=======================================================================\n");
 
-    /* Exit codes (P0.4):
-     *   0 = PASS  — no failures, no cleanup failures, no mandatory blocks
-     *   1 = FAIL  — at least one test failure
-     *   2 = NO TESTS RAN
-     *   3 = BLOCKED — mandatory hardware tests blocked (restore capability absent)
-     *   4 = CLEANUP_FAILED — at least one restore failed; hardware state unknown */
+    /* Exit codes:
+     *   4 = CLEANUP_FAILED — hardware state UNKNOWN after at least one restore failure
+     *   1 = FAIL           — at least one test produced FAIL
+     *   3 = BLOCKED        — mandatory hw tests blocked (restore capability absent)
+     *   2 = NO TESTS RAN   — device absent, no adapter, or all tests skipped with zero passes
+     *   0 = PASS           — all executed tests passed; no failures, no blocked, no cleanup issues
+     */
     if (g_cleanup_failed > 0) {
         printf("\n[RESULT] CLEANUP_FAILED — hardware state UNKNOWN after %d case(s)\n",
                g_cleanup_failed);
@@ -954,14 +954,22 @@ print_summary:
         printf("         Suite cannot claim full coverage while mandatory tests are blocked\n");
         return 3;
     }
-    if (g_passed == 0 && g_skipped == 0 && g_blocked == 0 && g_failed == 0 && g_cleanup_failed == 0) {
-        printf("\n[RESULT] NO TESTS RAN — Check prerequisites (AVB device, TAS capability)\n");
+    if (g_passed == 0) {
+        /* No test produced a PASS outcome — device absent, no adapter, or all skipped */
+        if (g_skipped > 0) {
+            printf("\n[RESULT] NO TESTS RAN — all %d test(s) skipped (no capable hardware)\n",
+                   g_skipped);
+        } else {
+            printf("\n[RESULT] NO TESTS RAN — Check prerequisites (AVB device, TAS capability)\n");
+        }
         return 2;
     }
     if (selected_case != NULL) {
-        printf("\n[RESULT] SUCCESS — Selected TAS case %s passed!\n", selected_case);
+        printf("\n[RESULT] PASS — Selected TAS case %s passed!\n", selected_case);
+    } else if (g_skipped > 0) {
+        printf("\n[RESULT] PASS — %d passed, %d skipped\n", g_passed, g_skipped);
     } else {
-        printf("\n[RESULT] SUCCESS — All applicable tests passed\n");
+        printf("\n[RESULT] PASS — All %d test(s) passed\n", g_passed);
     }
     return 0;
 }

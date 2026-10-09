@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file test_ptp_phc_stability.c
  * @brief PHC Stability Under State Changes — UT-CORR-005..009
  *
@@ -60,15 +60,26 @@ typedef ULONG NDIS_STATUS;
 /* -------------------------------------------------------------------------
  * Test result counters
  * -------------------------------------------------------------------------*/
-static int s_total  = 0;
-static int s_passed = 0;
-static int s_failed = 0;
+static int s_total    = 0;
+static int s_passed   = 0;
+static int s_failed   = 0;
+static int s_skipped  = 0;  /* SKIP: hardware not ready, capability absent */
+static int s_cleanup_failed = 0;  /* CLEANUP_FAILED: restore step failed */
 
 static void tc_result(const char *name, bool passed)
 {
     s_total++;
     if (passed) { s_passed++; printf("  [PASS] %s\n", name); }
     else        { s_failed++; printf("  [FAIL] %s\n", name); }
+}
+
+/* Use tc_skip instead of tc_result(name, true) for non-applicable conditions.
+ * SKIP is distinct from PASS in the summary and does not contribute to s_passed. */
+static void tc_skip(const char *reason)
+{
+    s_total++;
+    s_skipped++;
+    printf("  [SKIP] %s\n", reason);
 }
 
 /* -------------------------------------------------------------------------
@@ -200,7 +211,7 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     uint64_t phc_before = 0;
     if (!read_phc(hDev, adapter_idx, &phc_before)) {
         printf("  [SKIP] PHC read failed — adapter not ready\n");
-        tc_result("UT-CORR-005 Epoch Reset (SKIP - adapter not ready)", true);
+        tc_skip("UT-CORR-005 Epoch Reset: adapter not ready");
         return;
     }
     printf("  phc_before = %llu ns\n", (unsigned long long)phc_before);
@@ -297,11 +308,20 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
            (unsigned long long)phc_later, (unsigned long long)advance_ns,
            advancing ? "YES" : "NO");
 
-    /* --- Step 6: Restore PHC --- */
+    /* --- Step 6: Restore PHC (approximate — does not claim exact restoration).
+     * PHC time has advanced; we target phc_before + observed advance + 50ms margin.
+     * Check the IOCTL return but do not fail the test for minor timing drift. */
     set_req.timestamp = phc_before + advance_ns + 50000000ULL;
-    DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
-                    &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL);
-    printf("  PHC restored to ~%llu ns\n", (unsigned long long)set_req.timestamp);
+    BOOL phc_restore_ok = DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
+                                          &set_req, sizeof(set_req),
+                                          &set_req, sizeof(set_req), &br, NULL);
+    printf("  PHC restored to ~%llu ns (restore_ok=%d)\n",
+           (unsigned long long)set_req.timestamp, (int)phc_restore_ok);
+    if (!phc_restore_ok) {
+        printf("  [CLEANUP_FAILED] PHC restore IOCTL failed (error %lu) — PHC epoch left at reset value\n",
+               GetLastError());
+        s_cleanup_failed++;
+    }
 
     bool passed = near_seed && advancing && corr_after_ok;
     tc_result("UT-CORR-005 Epoch Reset: seed correct, advancing, TX-PHC correlated", passed);
@@ -363,7 +383,7 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     uint64_t phc1 = 0;
     if (!read_phc(hDev, adapter_idx, &phc1)) {
         printf("  [SKIP] PHC read failed — adapter not ready\n");
-        tc_result("UT-CORR-006 Freq Adj (SKIP - adapter not ready)", true);
+        tc_skip("UT-CORR-006 Freq Adj: adapter not ready");
         return;
     }
     printf("  phc1 = %llu ns\n", (unsigned long long)phc1);
@@ -426,7 +446,6 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     bool passed = phc2_ok && advancing && tx_corr_ok;
     if (!phc2_ok)     printf("  FAIL: PHC not readable after freq adjustment\n");
     if (!advancing)   printf("  FAIL: PHC not advancing after freq adjustment\n");
-    tc_result("UT-CORR-006 Freq Adj: IOCTL OK, PHC advancing, TX-PHC correlated", passed);
 
     /* --- Step 7: Restore original frequency --- */
     freq_req.increment_ns   = increment_ns;
@@ -435,6 +454,15 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
                                        &freq_req, sizeof(freq_req),
                                        &freq_req, sizeof(freq_req), &br, NULL);
     printf("  Restored increment to %u ns (ok=%d)\n", increment_ns, (int)restore_ok);
+    if (!restore_ok) {
+        printf("  [CLEANUP_FAILED] Frequency restore IOCTL failed (error %lu) — TIMINCA left at adjusted value\n",
+               GetLastError());
+        s_cleanup_failed++;
+        passed = false;  /* restore failure overrides test result */
+    }
+
+    /* Report result AFTER restore so restore outcome is included in verdict */
+    tc_result("UT-CORR-006 Freq Adj: IOCTL OK, PHC advancing, TX-PHC correlated", passed);
 }
 
 /* =========================================================================
@@ -461,14 +489,14 @@ static void test_ut_corr_007(HANDLE hDev, uint32_t adapter_idx)
     uint64_t pre = 0;
     if (!read_phc(hDev, adapter_idx, &pre)) {
         printf("  [SKIP] PHC read failed — adapter not ready\n");
-        tc_result("UT-CORR-007 Jitter (SKIP - adapter not ready)", true);
+        tc_skip("UT-CORR-007 Jitter: adapter not ready");
         return;
     }
 
     double *deltas = (double *)malloc(JITTER_SAMPLES * sizeof(double));
     if (!deltas) {
         printf("  [SKIP] malloc failed\n");
-        tc_result("UT-CORR-007 Jitter (SKIP - malloc)", true);
+        tc_skip("UT-CORR-007 Jitter: malloc failed");
         return;
     }
 
@@ -495,7 +523,7 @@ static void test_ut_corr_007(HANDLE hDev, uint32_t adapter_idx)
                tx_fail, JITTER_SAMPLES);
         printf("  PHC-only jitter tested separately; skipping TX correlation.\n");
         free(deltas);
-        tc_result("UT-CORR-007 Jitter (TX unavailable - SKIP TX correlation)", true);
+        tc_skip("UT-CORR-007 Jitter: TX unavailable");
         return;
     }
 
@@ -556,13 +584,13 @@ static void test_ut_corr_008(HANDLE hDev, uint32_t adapter_idx)
     uint64_t pre = 0;
     if (!read_phc(hDev, adapter_idx, &pre)) {
         printf("  [SKIP] PHC read failed — adapter not ready\n");
-        tc_result("UT-CORR-008 Burst (SKIP - adapter not ready)", true);
+        tc_skip("UT-CORR-008 Burst: adapter not ready");
         return;
     }
 
     double *deltas = (double *)malloc(BURST_COUNT * sizeof(double));
     if (!deltas) {
-        tc_result("UT-CORR-008 Burst (SKIP - malloc)", true);
+        tc_skip("UT-CORR-008 Burst: malloc failed");
         return;
     }
 
@@ -593,7 +621,7 @@ static void test_ut_corr_008(HANDLE hDev, uint32_t adapter_idx)
     if (tx_fail >= BURST_COUNT / 2) {
         printf("  NOTE: TX unavailable — link down or HW ts disabled. Skipping TX correlation.\n");
         free(deltas);
-        tc_result("UT-CORR-008 Burst (TX unavailable - SKIP TX correlation)", true);
+        tc_skip("UT-CORR-008 Burst: TX unavailable");
         return;
     }
 
@@ -810,16 +838,63 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
 }
 
 /* =========================================================================
- * main
+ * main — case selection and result reporting
+ *
+ * Usage:
+ *   test_ptp_phc_stability.exe                  (default: 007 + 008 per adapter)
+ *   test_ptp_phc_stability.exe --case UT-CORR-007
+ *   test_ptp_phc_stability.exe --case UT-CORR-005
+ *   test_ptp_phc_stability.exe --case UT-CORR-009   (lifecycle; explicit auth required)
+ *   test_ptp_phc_stability.exe --allow-lifecycle     (full suite including UT-CORR-009)
+ *
+ * UT-CORR-007/008: read-only correlation — default suite
+ * UT-CORR-005/006: PHC mutation — require explicit case selection
+ * UT-CORR-009:     driver lifecycle — require --case UT-CORR-009 or --allow-lifecycle
+ *
+ * Exit codes:
+ *   0 = PASS    — all selected tests passed
+ *   1 = FAIL    — at least one test failed
+ *   2 = SKIP    — all selected tests skipped (no capable hardware)
+ *   4 = CLEANUP_FAILED — restore step failed; hardware state uncertain
  * =========================================================================*/
-int main(void)
+int main(int argc, char *argv[])
 {
+    /* --- Parse command-line arguments --- */
+    const char *selected_case     = NULL;
+    bool        lifecycle_auth    = false;  /* UT-CORR-009 requires explicit authorization */
+    bool        mutation_explicit = false;  /* UT-CORR-005/006 require --case or explicit */
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--allow-lifecycle") == 0) {
+            lifecycle_auth = true;
+        } else if ((strcmp(argv[i], "--case") == 0 || strcmp(argv[i], "-case") == 0) && i + 1 < argc) {
+            selected_case = argv[++i];
+            if (strncmp(selected_case, "UT-CORR-009", 11) == 0) lifecycle_auth = true;
+            if (strncmp(selected_case, "UT-CORR-005", 11) == 0) mutation_explicit = true;
+            if (strncmp(selected_case, "UT-CORR-006", 11) == 0) mutation_explicit = true;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            fprintf(stderr,
+                "Usage: %s [--case UT-CORR-00X] [--allow-lifecycle]\n"
+                "  --case UT-CORR-007   correlation jitter (read-only)\n"
+                "  --case UT-CORR-008   correlation burst  (read-only)\n"
+                "  --case UT-CORR-005   PHC epoch reset    (mutation; restores approximately)\n"
+                "  --case UT-CORR-006   PHC freq adjust    (mutation; restores TIMINCA)\n"
+                "  --case UT-CORR-009   driver reload      (lifecycle; requires this flag)\n"
+                "  --allow-lifecycle    permit UT-CORR-009 in full-suite run\n"
+                "  (no args)            run UT-CORR-007 + 008 only\n", argv[0]);
+            return 0;
+        }
+    }
+    (void)mutation_explicit; /* mutation tests run when selected; no additional gate needed */
+
     printf("========================================================================\n");
     printf("PHC Stability Under State Changes -- UT-CORR-005..009\n");
-    printf("Tests: UT-CORR-005 (epoch reset),  UT-CORR-006 (freq adj),\n");
-    printf("       UT-CORR-007 (1000-sample delta jitter),\n");
-    printf("       UT-CORR-008 (100-burst delta consistency),\n");
-    printf("       UT-CORR-009 (driver reload)\n");
+    if (selected_case) {
+        printf("Selected case: %s\n", selected_case);
+    } else {
+        printf("Default suite: UT-CORR-007 + UT-CORR-008 (read-only correlation)\n");
+        if (lifecycle_auth) printf("Lifecycle authorized: UT-CORR-009 will run\n");
+    }
     printf("Verifies: #149 (REQ-F-PTP-007) -- TX-PHC correlation under state changes\n");
     printf("Spec: issue #199 per-test procedures | Closes: Track A of #317\n");
     printf("========================================================================\n");
@@ -884,33 +959,73 @@ int main(void)
     }
 
     /* UT-CORR-007 and UT-CORR-008: per-adapter jitter and burst correlation */
-    for (ai = 0; ai < adapter_count; ai++) {
+    bool run_007 = !selected_case || strncmp(selected_case, "UT-CORR-007", 11) == 0;
+    bool run_008 = !selected_case || strncmp(selected_case, "UT-CORR-008", 11) == 0;
+    bool run_005 = selected_case  && strncmp(selected_case, "UT-CORR-005", 11) == 0;
+    bool run_006 = selected_case  && strncmp(selected_case, "UT-CORR-006", 11) == 0;
+    bool run_009 = (selected_case && strncmp(selected_case, "UT-CORR-009", 11) == 0)
+                   || (!selected_case && lifecycle_auth);
+
+    for (ai = 0; (run_007 || run_008) && ai < adapter_count; ai++) {
         printf("\n--- Adapter %d / %d ---\n", ai, adapter_count - 1);
-        test_ut_corr_007(hDev, (uint32_t)ai);
-        test_ut_corr_008(hDev, (uint32_t)ai);
+        if (run_007) test_ut_corr_007(hDev, (uint32_t)ai);
+        if (run_008) test_ut_corr_008(hDev, (uint32_t)ai);
     }
 
-    /* UT-CORR-005 and UT-CORR-006: state-modifying tests (adapter 0 only) */
-    printf("\n--- Adapter 0 (state-modifying tests) ---\n");
-    test_ut_corr_005(hDev, 0);
-    test_ut_corr_006(hDev, 0);
+    /* UT-CORR-005 and UT-CORR-006: state-modifying tests (adapter 0 only)
+     * Halt subsequent mutation tests if a restore step fails. */
+    if (run_005 || run_006) {
+        printf("\n--- Adapter 0 (state-modifying tests) ---\n");
+        if (run_005) {
+            test_ut_corr_005(hDev, 0);
+            if (s_cleanup_failed > 0) {
+                printf("[HALT] CLEANUP_FAILED after UT-CORR-005 — skipping remaining mutation tests\n");
+                run_006 = false;
+            }
+        }
+        if (run_006) test_ut_corr_006(hDev, 0);
+    }
 
-    /* UT-CORR-009: driver reload — handle must be closed before service stop */
-    CloseHandle(hDev);
-    hDev = INVALID_HANDLE_VALUE;
-    test_ut_corr_009((uint32_t)adapter_count);
+    /* UT-CORR-009: driver lifecycle — explicit authorization required.
+     * Closes the device handle before service stop; not recoverable via
+     * --case selection of a read-only test. */
+    if (run_009) {
+        printf("\n--- Driver Lifecycle Test (UT-CORR-009) ---\n");
+        printf("  NOTE: This test reinstalls the driver. Adapter configuration\n");
+        printf("  may not match pre-test state after reinstall.\n");
+        printf("  Recovery: tools\\setup\\Install-Driver-Elevated.ps1 -Action Reinstall\n");
+        CloseHandle(hDev);
+        hDev = INVALID_HANDLE_VALUE;
+        test_ut_corr_009((uint32_t)adapter_count);
+    } else if (!selected_case && !lifecycle_auth) {
+        tc_skip("UT-CORR-009 Driver Reload: requires --allow-lifecycle or --case UT-CORR-009");
+        /* Device handle remains open; no reinstall occurs */
+    }
+
+    if (hDev != INVALID_HANDLE_VALUE) {
+        CloseHandle(hDev);
+    }
 
     /* Summary */
     printf("\n========================================================================\n");
     printf("Test Summary -- PHC Stability Under State Changes (#317 Track A)\n");
-    printf("  Total: %d  Passed: %d  Failed: %d\n", s_total, s_passed, s_failed);
-    if (s_failed == 0) {
-        printf("  STATUS: PASS (TDD GREEN)\n");
-    } else {
+    printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d  CleanupFailed: %d\n",
+           s_total, s_passed, s_failed, s_skipped, s_cleanup_failed);
+    if (s_cleanup_failed > 0) {
+        printf("  STATUS: CLEANUP_FAILED — hardware state uncertain after restore failure\n");
+        printf("  Recovery: tools\\setup\\Install-Driver-Elevated.ps1 -Action Reinstall\n");
+    } else if (s_failed > 0) {
         printf("  STATUS: FAIL\n");
         printf("  See output above for root cause details.\n");
+    } else if (s_passed == 0 && s_failed == 0) {
+        printf("  STATUS: SKIP — no test produced a PASS result\n");
+    } else {
+        printf("  STATUS: PASS (TDD GREEN)\n");
     }
     printf("========================================================================\n");
 
-    return (s_failed == 0) ? 0 : 1;
+    if (s_cleanup_failed > 0) return 4;
+    if (s_failed > 0)         return 1;
+    if (s_passed == 0)        return 2;  /* all skipped, no PASS */
+    return 0;
 }

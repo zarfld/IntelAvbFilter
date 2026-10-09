@@ -34,6 +34,7 @@ typedef struct {
 #define TC_FAIL             1
 #define TC_CLEANUP_FAILED   2
 #define TC_BLOCKED          3
+#define TC_SKIP             4   /* test ran, capability/hardware not available */
 #endif
 
 /*
