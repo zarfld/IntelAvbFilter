@@ -257,33 +257,49 @@ typedef struct AVB_AUX_TIMESTAMP_REQUEST {
     avb_u32 status;            /* out: NDIS_STATUS value */
 } AVB_AUX_TIMESTAMP_REQUEST, *PAVB_AUX_TIMESTAMP_REQUEST;
 
+/* Timestamp provenance: how a TX timestamp was obtained.
+ * Returned in ts_provenance fields of AVB_TX_TIMESTAMP_REQUEST and
+ * AVB_TEST_SEND_PTP_REQUEST.
+ *
+ * Consumers MUST treat any value other than AVB_TX_PROV_VERIFIED_HARDWARE_TX
+ * as NOT_VERIFIED for hardware TX-PHC correlation claims; report SKIP instead
+ * of PASS when the provenance is weaker than VERIFIED_HARDWARE_TX.
+ */
+#define AVB_TX_PROV_UNAVAILABLE           0u  /* hardware not ready; no timestamp available */
+#define AVB_TX_PROV_PRE_SEND_PHC          1u  /* SYSTIM sampled BEFORE NdisFSendNetBufferLists — not an egress timestamp */
+#define AVB_TX_PROV_SOFTWARE_FALLBACK     2u  /* QPC (KeQueryPerformanceCounter) fallback — SYSTIM inaccessible */
+#define AVB_TX_PROV_NDIS_TX_COMPLETION    3u  /* NDIS 6.82 TaggedTransmitHw (slot 26) from FilterSendNetBufferListsComplete */
+#define AVB_TX_PROV_VERIFIED_HARDWARE_TX  4u  /* hardware egress latch read from TXSTMPL/TXSTMPH FIFO after send-complete */
+
 /* TX timestamp retrieval (TXSTMPL/H registers)
  * Read TX timestamp from hardware FIFO.
  * Implements: Issue #35 (REQ-F-IOCTL-TS-001) - TX timestamp retrieval
- * 
+ *
  * Hardware behavior:
  * - When packet with 2STEP_1588 flag is transmitted, hardware latches SYSTIM into TXSTMPL/H
  * - Bit 31 of TXSTMPH indicates valid timestamp in FIFO
  * - Reading TXSTMPL advances FIFO to next entry
  * - FIFO depth: typically 4-8 entries (device-specific)
- * 
+ *
  * Critical: Must read TXSTMPL before TXSTMPH to unlock registers for next capture
  */
 typedef struct AVB_TX_TIMESTAMP_REQUEST {
-    avb_u64 timestamp_ns;      /* out: TX timestamp in nanoseconds (from TXSTMPL/H) */
-    avb_u32 valid;             /* out: 1=timestamp valid (FIFO had entry), 0=FIFO empty */
+    avb_u64 timestamp_ns;      /* out: TX timestamp in nanoseconds */
+    avb_u32 valid;             /* out: 1=timestamp present, 0=no timestamp available */
     avb_u32 sequence_id;       /* out: Packet sequence ID (if tracking enabled) */
-    avb_u32 adapter_index;     /* in: Adapter index (0-based, for multi-adapter systems) */
+    avb_u32 adapter_index;     /* in:  Adapter index (0-based, for multi-adapter systems) */
     avb_u32 status;            /* out: NDIS_STATUS value */
+    avb_u32 ts_provenance;     /* out: AVB_TX_PROV_* constant describing timestamp origin */
+    avb_u32 _reserved;         /* reserved; write 0 */
 } AVB_TX_TIMESTAMP_REQUEST, *PAVB_TX_TIMESTAMP_REQUEST;
 
 /* Test IOCTL: Send PTP packet from kernel
  * Implements: Step 8 (Kernel-Mode Test Packet Injection)
- * 
+ *
  * Purpose: Solves Npcap bypass issue by injecting PTP packets directly
  *          from kernel mode via NdisFSendNetBufferLists, ensuring filter
  *          driver can attach hardware timestamping metadata.
- * 
+ *
  * Workflow:
  * 1. User-mode test calls IOCTL_AVB_TEST_SEND_PTP
  * 2. Kernel allocates NET_BUFFER_LIST and crafts PTP Sync frame
@@ -291,18 +307,25 @@ typedef struct AVB_TX_TIMESTAMP_REQUEST {
  * 4. Filter detects EtherType 0x88F7 → attaches NdisHardwareTimestampInfo metadata
  * 5. Miniport driver sets 2STEP_1588 descriptor bit → hardware captures TX timestamp
  * 6. Test retrieves timestamp via IOCTL_AVB_GET_TX_TIMESTAMP (49)
+ *
+ * NOTE: timestamp_ns and phc_at_send_ns are TWO DISTINCT PHC snapshots captured at
+ * different points within the same kernel IOCTL call.  Neither is a hardware egress
+ * timestamp from the TXSTMPL/TXSTMPH FIFO.  ts_provenance is always PRE_SEND_PHC or
+ * SOFTWARE_FALLBACK.  For hardware TX-PHC correlation, use IOCTL_AVB_GET_TX_TIMESTAMP
+ * and verify ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX before claiming PASS.
  */
 typedef struct AVB_TEST_SEND_PTP_REQUEST {
-    avb_u32 adapter_index;     /* in: Adapter index (0-based, for multi-adapter systems) */
-    avb_u32 sequence_id;       /* in: PTP sequence ID for packet tracking */
+    avb_u32 adapter_index;     /* in:  Adapter index (0-based, for multi-adapter systems) */
+    avb_u32 sequence_id;       /* in:  PTP sequence ID for packet tracking */
     avb_u32 packets_sent;      /* out: Number of packets successfully queued for transmission */
     avb_u32 status;            /* out: NDIS_STATUS value */
-    avb_u64 timestamp_ns;      /* out: Pre-send SYSTIM snapshot (captured just before NdisFSendNetBufferLists) */
-    avb_u64 phc_at_send_ns;    /* out: PHC (SYSTIM) snapshot captured at IOCTL entry — same kernel call
-                                *      as timestamp_ns; delta = timestamp_ns - phc_at_send_ns is the
-                                *      kernel setup time (~100-500 ns), independent of user-mode latency.
-                                *      Used by UT-CORR-005..009 to verify TX-PHC correlation without
-                                *      the ~60-100 µs user-mode IOCTL round-trip gap. */
+    avb_u64 timestamp_ns;      /* out: PRE-SEND SYSTIM snapshot (captured just before NdisFSendNetBufferLists) */
+    avb_u64 phc_at_send_ns;    /* out: IOCTL-ENTRY SYSTIM snapshot (captured after buffer probe, before ring setup).
+                                *      delta = timestamp_ns - phc_at_send_ns represents kernel IOCTL setup overhead
+                                *      (~100-500 ns); both are pre-send and neither is a hardware egress timestamp.
+                                *      ts_provenance distinguishes software-fallback from hardware SYSTIM paths. */
+    avb_u32 ts_provenance;     /* out: AVB_TX_PROV_PRE_SEND_PHC or AVB_TX_PROV_SOFTWARE_FALLBACK */
+    avb_u32 _reserved;         /* reserved; write 0 */
 } AVB_TEST_SEND_PTP_REQUEST, *PAVB_TEST_SEND_PTP_REQUEST;
 
 /* Hardware timestamping control (TSAUXC register) 

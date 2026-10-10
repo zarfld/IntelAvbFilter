@@ -1616,12 +1616,28 @@ skip_pool_free:
 /* AvbSendPtpCore — shared hot-path for IOCTL_AVB_TEST_SEND_PTP.
  * Called from both the IRP dispatch path and the FastIoDeviceControl path.
  * On entry: activeContext and test_req are both non-NULL and accessible.
- * On return: test_req->timestamp_ns / packets_sent / status are filled. */
+ * On return: test_req->timestamp_ns / phc_at_send_ns / ts_provenance /
+ *            packets_sent / status are filled. */
 NTSTATUS AvbSendPtpCore(
     _In_ PAVB_DEVICE_CONTEXT activeContext,
     _Inout_ PAVB_TEST_SEND_PTP_REQUEST test_req)
 {
     NTSTATUS status = STATUS_SUCCESS;
+
+    /* IOCTL-entry PHC snapshot — captured before any pool/ring work.
+     * Stored in phc_at_send_ns; distinct from preSendTs (pre-send snapshot below). */
+    ULONG64 phcEntryTs = 0;
+    BOOLEAN phcEntryFromHw = FALSE;
+    {
+        const intel_device_ops_t *eops = intel_get_device_ops(activeContext->intel_device.device_type);
+        if (eops && eops->get_systime && eops->get_systime(&activeContext->intel_device, &phcEntryTs) == 0 && phcEntryTs != 0) {
+            phcEntryFromHw = TRUE;
+        }
+    }
+    if (phcEntryTs == 0) {
+        LARGE_INTEGER epc = KeQueryPerformanceCounter(NULL);
+        phcEntryTs = (ULONG64)epc.QuadPart;
+    }
 
     // Verify NDIS pools are allocated
     if (!activeContext->nbl_pool_handle || !activeContext->nb_pool_handle ||
@@ -1706,7 +1722,10 @@ NTSTATUS AvbSendPtpCore(
         preSendTs = (ULONG64)pc.QuadPart;
     }
     (void)InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, (LONGLONG)preSendTs);
-    test_req->timestamp_ns = preSendTs;
+    test_req->timestamp_ns    = preSendTs;   /* pre-send SYSTIM (just before NdisFSendNetBufferLists) */
+    test_req->phc_at_send_ns  = phcEntryTs;  /* IOCTL-entry SYSTIM (before ring/buffer setup) — distinct */
+    test_req->ts_provenance   = phcEntryFromHw ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_SOFTWARE_FALLBACK;
+    test_req->_reserved       = 0;
 
     /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
      * Ring-slot fast path: already lock-free. Fallback: lock released above. */
@@ -3062,68 +3081,76 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 tx_req->valid = 0;
                 tx_req->sequence_id = 0;
                 tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                tx_req->ts_provenance = AVB_TX_PROV_UNAVAILABLE;
+                tx_req->_reserved = 0;
 
                 // Adapter already selected by device.c via FileObject->FsContext (OPEN_ADAPTER).
                 // Use currentContext directly — no FilterModuleList walk needed.
                 PAVB_DEVICE_CONTEXT activeContext = currentContext;
 
-                // Primary path: NDIS 6.82 TaggedTransmitHw timestamp.
-                // FilterSendNetBufferListsComplete harvests igc.sys's ULONG64 hardware
-                // timestamp from NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] (slot 26 =
-                // NetBufferListInfoReserved3 on AMD64/Win11) and stores it here.
-                // InterlockedExchange64 atomically reads and clears the field (one-shot).
-                // This path does NOT require BAR-mapped MMIO — igc.sys owns the hardware
-                // registers and delivers the result via the NBL completion mechanism.
+                // Primary path: NDIS 6.82 TaggedTransmitHw timestamp OR pre-send SYSTIM fallback.
+                // FilterSendNetBufferListsComplete harvests igc.sys's ULONG64 hardware timestamp
+                // from NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] (slot 26) when available.
+                // NOTE: TaggedTransmitHw is currently dead (NDIS_NBL_FLAGS_CAPTURE_TIMESTAMP_ON_TRANSMIT
+                // not set; igc.sys does not populate slot 26 for filter-injected NBLs).
+                // As a result, last_ndis_tx_timestamp always holds the PRE_SEND_PHC snapshot set
+                // by AvbSendPtpCore before NdisFSendNetBufferLists; provenance is PRE_SEND_PHC,
+                // NOT VERIFIED_HARDWARE_TX.  Consumers must check ts_provenance before claiming
+                // hardware TX-PHC correlation.
                 LONGLONG ndisTs = InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, 0LL);
                 if (ndisTs != 0) {
                     tx_req->timestamp_ns = (avb_u64)(ULONG64)ndisTs;
                     tx_req->valid = 1;
                     tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                    tx_req->ts_provenance = AVB_TX_PROV_PRE_SEND_PHC;  /* not hardware egress */
                     status = STATUS_SUCCESS;
                     info = sizeof(*tx_req);
-                    DEBUGP(DL_TRACE, "TX timestamp from NDIS TaggedTransmitHw: 0x%016I64X (%I64u)\n",
+                    DEBUGP(DL_TRACE, "TX timestamp (PRE_SEND_PHC): 0x%016I64X (%I64u)\n",
                            (ULONG64)ndisTs, (ULONG64)ndisTs);
                 } else if (activeContext->hw_state < AVB_HW_PTP_READY) {
                     DEBUGP(DL_TRACE, "TX timestamp read: PTP not ready (state=%s)\n",
                            AvbHwStateName(activeContext->hw_state));
                     tx_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    tx_req->ts_provenance = AVB_TX_PROV_UNAVAILABLE;
                     status = STATUS_DEVICE_NOT_READY;
                 } else {
                     // Fallback: HAL-compliant MMIO FIFO polling (TXSTMPH/TXSTMPL direct read).
-                    // Used when NDIS TaggedTransmitHw is not supported by the miniport.
+                    // This path provides VERIFIED_HARDWARE_TX if the miniport supports it.
                     const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
                     if (!ops || !ops->poll_tx_timestamp_fifo) {
                         DEBUGP(DL_ERROR, "Device does not support TX timestamp FIFO polling\n");
                         tx_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        tx_req->ts_provenance = AVB_TX_PROV_UNAVAILABLE;
                         status = STATUS_NOT_SUPPORTED;
                     } else {
                         device_t *dev = &activeContext->intel_device;
-                        
+
                         // Poll TX timestamp FIFO (atomic TXSTMPH→TXSTMPL read)
                         // Returns: 1=valid timestamp, 0=FIFO empty, <0=error
                         int rc = ops->poll_tx_timestamp_fifo(dev, &tx_req->timestamp_ns);
-                        
+
                         if (rc < 0) {
                             DEBUGP(DL_ERROR, "Failed to poll TX timestamp FIFO: %d\n", rc);
                             tx_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            tx_req->ts_provenance = AVB_TX_PROV_UNAVAILABLE;
                             status = STATUS_UNSUCCESSFUL;
                         } else if (rc == 0) {
-                            // FIFO empty - not an error, just no timestamp available
                             tx_req->valid = 0;
                             tx_req->timestamp_ns = 0;
                             tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            tx_req->ts_provenance = AVB_TX_PROV_UNAVAILABLE;
                             status = STATUS_SUCCESS;
                             DEBUGP(DL_TRACE, "TX timestamp FIFO empty\n");
                         } else {
-                            // Valid timestamp retrieved (rc == 1)
                             tx_req->valid = 1;
                             tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            tx_req->ts_provenance = AVB_TX_PROV_VERIFIED_HARDWARE_TX;
                             status = STATUS_SUCCESS;
-                            DEBUGP(DL_TRACE, "TX timestamp retrieved: 0x%016llX (%llu ns)\n",
+                            DEBUGP(DL_TRACE, "TX timestamp (VERIFIED_HARDWARE_TX): 0x%016llX (%llu ns)\n",
                                    (unsigned long long)tx_req->timestamp_ns,
                                    (unsigned long long)tx_req->timestamp_ns);
                         }
-                        
+
                         info = sizeof(*tx_req);
                     }
                 }

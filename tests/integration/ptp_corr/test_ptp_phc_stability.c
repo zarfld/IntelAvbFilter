@@ -159,15 +159,19 @@ static bool get_tx_timestamp_retry(HANDLE hDev, uint32_t adapter_idx, uint64_t *
 }
 
 /* -------------------------------------------------------------------------
- * Send PTP test packet + get hardware TX timestamp
+ * Send PTP test packet and return provenance-tagged result.
  *
- * Injects a PTP Sync frame via IOCTL_AVB_TEST_SEND_PTP (kernel-mode,
- * bypasses Npcap/WFP access issues), then reads the TX timestamp from the
- * hardware capture FIFO via IOCTL_AVB_GET_TX_TIMESTAMP.
+ * Injects a PTP Sync frame via IOCTL_AVB_TEST_SEND_PTP (kernel-mode).
+ * Both timestamp_ns (pre-send) and phc_at_send_ns (IOCTL-entry) are now
+ * DISTINCT snapshots; their delta represents kernel IOCTL setup overhead
+ * (~100-500 ns) NOT hardware egress latency.
  *
- * Returns false if:
- *   - TEST_SEND_PTP IOCTL fails or driver reports zero packets sent
- *   - TX timestamp FIFO empty after retries (link down, HW ts disabled)
+ * ts_provenance is always PRE_SEND_PHC or SOFTWARE_FALLBACK — never
+ * VERIFIED_HARDWARE_TX.  Callers that need hardware TX-PHC correlation
+ * must use IOCTL_AVB_GET_TX_TIMESTAMP after the send and verify that
+ * ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX before claiming PASS.
+ *
+ * Returns false if the IOCTL fails or packets_sent == 0.
  * -------------------------------------------------------------------------*/
 static bool send_ptp_get_tx(HANDLE hDev, uint32_t adapter_idx,
                              uint32_t seq_id, uint64_t *out_tx_ns,
@@ -182,9 +186,31 @@ static bool send_ptp_get_tx(HANDLE hDev, uint32_t adapter_idx,
                               &send_req, sizeof(send_req), &br, NULL);
     if (!ok || send_req.status != NDIS_STATUS_SUCCESS || send_req.packets_sent == 0)
         return false;
-    if (out_phc_ns) *out_phc_ns = send_req.phc_at_send_ns;  /* atomic kernel PHC ref (IOCTL entry) */
-    *out_tx_ns = send_req.timestamp_ns;   /* pre-send SYSTIM (just before NdisFSendNetBufferLists) */
+    if (out_phc_ns) *out_phc_ns = send_req.phc_at_send_ns;  /* IOCTL-entry PHC snapshot */
+    *out_tx_ns = send_req.timestamp_ns;                       /* pre-send SYSTIM snapshot */
     return (*out_tx_ns > 0);
+}
+
+/* Returns true only when the SEND_PTP result carries provenance that confirms
+ * it came from hardware SYSTIM (not QPC fallback).  Currently always returns
+ * false because SEND_PTP never yields VERIFIED_HARDWARE_TX. */
+static bool send_ptp_is_hw_verified(HANDLE hDev, uint32_t adapter_idx, uint32_t seq_id,
+                                     uint64_t *out_tx_ns, uint64_t *out_phc_ns)
+{
+    AVB_TEST_SEND_PTP_REQUEST send_req = {0};
+    send_req.adapter_index = adapter_idx;
+    send_req.sequence_id   = seq_id;
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_TEST_SEND_PTP,
+                              &send_req, sizeof(send_req),
+                              &send_req, sizeof(send_req), &br, NULL);
+    if (!ok || send_req.status != NDIS_STATUS_SUCCESS || send_req.packets_sent == 0)
+        return false;
+    if (out_phc_ns) *out_phc_ns = send_req.phc_at_send_ns;
+    if (out_tx_ns)  *out_tx_ns  = send_req.timestamp_ns;
+    /* Only VERIFIED_HARDWARE_TX qualifies for TX-PHC correlation claims.
+     * PRE_SEND_PHC and SOFTWARE_FALLBACK always return false here. */
+    return (send_req.ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX);
 }
 
 /* =========================================================================
@@ -478,15 +504,19 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
  *
  * Procedure (per issue #199):
  *   For i in 0..999:
- *     phc[i] = read PHC
- *     tx[i]  = send PTP + get TX timestamp
- *     delta[i] = tx[i] - phc[i]
+ *     phc[i] = phc_at_send_ns (IOCTL-entry SYSTIM)
+ *     tx[i]  = timestamp_ns   (pre-send SYSTIM, distinct snapshot)
+ *     delta[i] = tx[i] - phc[i]   → kernel IOCTL setup overhead (~100-500 ns)
  *   Compute mean(delta) and stddev(delta)
  *   Assert: stddev < 100 ns
  *
- * delta[i] represents the sum of PHC-TX hardware correlation offset and
- * IOCTL round-trip latency.  The VARIATION (stddev) of delta across
- * samples is the correlation jitter — expected < 100 ns per issue #199.
+ * NOTE: Since IOCTL_AVB_TEST_SEND_PTP returns ts_provenance == PRE_SEND_PHC,
+ * this test measures kernel IOCTL setup time variation — NOT hardware TX
+ * egress vs PHC correlation.  For TRUE hardware TX-PHC correlation the test
+ * must use IOCTL_AVB_GET_TX_TIMESTAMP and verify ts_provenance ==
+ * AVB_TX_PROV_VERIFIED_HARDWARE_TX.  The test reports SKIP for the
+ * VERIFIED_HARDWARE_TX correlation claim; the PRE_SEND_PHC coherence sub-test
+ * still runs and reports the kernel overhead delta for regression purposes.
  * =========================================================================*/
 static void test_ut_corr_007(HANDLE hDev, uint32_t adapter_idx)
 {
@@ -501,6 +531,32 @@ static void test_ut_corr_007(HANDLE hDev, uint32_t adapter_idx)
         return;
     }
 
+    /* Probe provenance: send one packet and check ts_provenance. */
+    {
+        AVB_TEST_SEND_PTP_REQUEST probe = {0};
+        probe.adapter_index = adapter_idx;
+        probe.sequence_id   = 0x7000U;
+        DWORD pbr = 0;
+        BOOL pok = DeviceIoControl(hDev, IOCTL_AVB_TEST_SEND_PTP,
+                                   &probe, sizeof(probe), &probe, sizeof(probe), &pbr, NULL);
+        if (!pok || probe.status != NDIS_STATUS_SUCCESS) {
+            printf("  [SKIP] SEND_PTP probe failed — adapter not ready\n");
+            tc_skip("UT-CORR-007 Jitter: SEND_PTP probe failed");
+            return;
+        }
+        printf("  Provenance: ts_provenance=%u (%s)\n", probe.ts_provenance,
+               probe.ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX ? "VERIFIED_HARDWARE_TX" :
+               probe.ts_provenance == AVB_TX_PROV_PRE_SEND_PHC         ? "PRE_SEND_PHC" :
+               probe.ts_provenance == AVB_TX_PROV_SOFTWARE_FALLBACK    ? "SOFTWARE_FALLBACK" :
+               "UNAVAILABLE");
+        if (probe.ts_provenance != AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
+            printf("  NOTE: ts_provenance != VERIFIED_HARDWARE_TX — hardware TX-PHC correlation\n");
+            printf("        cannot be verified.  Measuring kernel IOCTL setup overhead instead.\n");
+            printf("        delta = timestamp_ns - phc_at_send_ns = pre-send minus IOCTL-entry\n");
+            printf("        (representative of kernel setup time, NOT hardware egress latency).\n");
+        }
+    }
+
     double *deltas = (double *)malloc(JITTER_SAMPLES * sizeof(double));
     if (!deltas) {
         printf("  [SKIP] malloc failed\n");
@@ -513,7 +569,7 @@ static void test_ut_corr_007(HANDLE hDev, uint32_t adapter_idx)
     int i;
     for (i = 0; i < JITTER_SAMPLES; i++) {
         uint64_t tx  = 0;
-        uint64_t phc = 0;  /* atomic kernel PHC ref from send_ptp_get_tx */
+        uint64_t phc = 0;  /* IOCTL-entry PHC ref from send_ptp_get_tx */
         if (!send_ptp_get_tx(hDev, adapter_idx, (uint32_t)(0x700U + (unsigned)i), &tx, &phc)) {
             tx_fail++;
             continue;
@@ -525,11 +581,9 @@ static void test_ut_corr_007(HANDLE hDev, uint32_t adapter_idx)
     printf("  Attempted: %d  TX failures: %d  Valid pairs: %d\n",
            JITTER_SAMPLES, tx_fail, valid);
 
-    /* If TX was never available, skip TX correlation (link down or HW ts disabled) */
     if (tx_fail >= JITTER_SAMPLES / 2) {
         printf("  NOTE: TX timestamps unavailable (%d/%d failures).\n",
                tx_fail, JITTER_SAMPLES);
-        printf("  PHC-only jitter tested separately; skipping TX correlation.\n");
         free(deltas);
         tc_skip("UT-CORR-007 Jitter: TX unavailable");
         return;
@@ -560,16 +614,23 @@ static void test_ut_corr_007(HANDLE hDev, uint32_t adapter_idx)
     printf("  Threshold: stddev < %llu ns (per issue #199)\n",
            (unsigned long long)DELTA_JITTER_NS);
 
+    /* Sub-test A: PRE_SEND_PHC coherence (kernel overhead variation).
+     * Passes when delta is non-negative and variation is bounded — confirms that
+     * two distinct PHC reads within the same IOCTL are coherent. */
+    bool coherence_ok = (mean >= 0.0) && (stddev <= (double)DELTA_JITTER_NS);
     if (mean < 0.0)
-        printf("  FAIL: Negative mean delta — TX timestamp before PHC read (impossible)\n");
+        printf("  FAIL: Negative mean delta — timestamp ordering violated\n");
     if (mean > (double)DELTA_1US_NS)
-        printf("  WARN: Mean delta %.1f ns > 1 us (systematic offset present)\n", mean);
-
-    bool passed = (mean >= 0.0) && (stddev <= (double)DELTA_JITTER_NS);
-    if (!passed)
+        printf("  WARN: Mean delta %.1f ns > 1 us (excessive kernel overhead)\n", mean);
+    if (!coherence_ok)
         printf("  FAIL: stddev %.1f ns > %llu ns threshold\n",
                stddev, (unsigned long long)DELTA_JITTER_NS);
-    tc_result("UT-CORR-007 Jitter: 1000-sample delta stddev < 100 ns", passed);
+    tc_result("UT-CORR-007 Jitter: PRE_SEND_PHC coherence (two distinct SYSTIM reads)", coherence_ok);
+
+    /* Sub-test B: VERIFIED_HARDWARE_TX correlation — requires hardware egress latch.
+     * Currently always SKIP because SEND_PTP returns PRE_SEND_PHC, not VERIFIED_HARDWARE_TX.
+     * Will become active when IOCTL_AVB_GET_TX_TIMESTAMP returns VERIFIED_HARDWARE_TX. */
+    tc_skip("UT-CORR-007 Hardware TX-PHC correlation: VERIFIED_HARDWARE_TX unavailable (not #328/#199 close criteria)");
 }
 
 /* =========================================================================
@@ -1026,7 +1087,11 @@ int main(int argc, char *argv[])
         Sleep(300);  /* allow I219 OID handler to complete PTP init */
     }
 
-    /* UT-CORR-007 and UT-CORR-008: per-adapter jitter and burst correlation */
+    /* UT-CORR-007 and UT-CORR-008: per-adapter jitter and burst correlation.
+     * MULTI-ADAPTER FIX: open a dedicated handle per adapter and bind it via
+     * IOCTL_AVB_OPEN_ADAPTER.  Using the shared hDev (bound to adapter 0) for
+     * all adapters routes every IOCTL to the same FsContext regardless of the
+     * adapter_index field in the request struct. */
     bool run_007 = !selected_case || strncmp(selected_case, "UT-CORR-007", 11) == 0;
     bool run_008 = !selected_case || strncmp(selected_case, "UT-CORR-008", 11) == 0;
     bool run_005 = selected_case  && strncmp(selected_case, "UT-CORR-005", 11) == 0;
@@ -1035,9 +1100,47 @@ int main(int argc, char *argv[])
                    || (!selected_case && lifecycle_auth);
 
     for (ai = 0; (run_007 || run_008) && ai < adapter_count; ai++) {
-        printf("\n--- Adapter %d / %d ---\n", ai, adapter_count - 1);
-        if (run_007) test_ut_corr_007(hDev, (uint32_t)ai);
-        if (run_008) test_ut_corr_008(hDev, (uint32_t)ai);
+        /* --- Per-adapter handle --- */
+        AVB_ENUM_REQUEST ai_enum = {0};
+        ai_enum.index = (avb_u32)ai;
+        DWORD ai_br = 0;
+        if (!DeviceIoControl(hDev, IOCTL_AVB_ENUM_ADAPTERS,
+                             &ai_enum, sizeof(ai_enum), &ai_enum, sizeof(ai_enum),
+                             &ai_br, NULL) || ai_enum.status != NDIS_STATUS_SUCCESS) {
+            printf("\n--- Adapter %d / %d: ENUM_ADAPTERS failed, skipping ---\n",
+                   ai, adapter_count - 1);
+            tc_skip("UT-CORR-007/008: ENUM_ADAPTERS failed for adapter");
+            continue;
+        }
+        HANDLE hAdap = CreateFileW(DEVICE_PATH_W, GENERIC_READ | GENERIC_WRITE,
+                                   0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hAdap == INVALID_HANDLE_VALUE) {
+            printf("\n--- Adapter %d / %d: per-adapter handle open failed (error %lu) ---\n",
+                   ai, adapter_count - 1, GetLastError());
+            tc_skip("UT-CORR-007/008: per-adapter handle open failed");
+            continue;
+        }
+        AVB_OPEN_REQUEST ai_open = {0};
+        ai_open.vendor_id = ai_enum.vendor_id;
+        ai_open.device_id = ai_enum.device_id;
+        ai_open.index     = (avb_u32)ai;
+        if (!DeviceIoControl(hAdap, IOCTL_AVB_OPEN_ADAPTER,
+                             &ai_open, sizeof(ai_open), &ai_open, sizeof(ai_open),
+                             &ai_br, NULL) || ai_open.status != 0) {
+            printf("\n--- Adapter %d / %d: OPEN_ADAPTER failed (error %lu, status=0x%08X) ---\n",
+                   ai, adapter_count - 1, GetLastError(), (unsigned)ai_open.status);
+            CloseHandle(hAdap);
+            tc_skip("UT-CORR-007/008: OPEN_ADAPTER failed for adapter");
+            continue;
+        }
+        printf("\n--- Adapter %d / %d  VID=0x%04X DID=0x%04X ---\n",
+               ai, adapter_count - 1,
+               (unsigned)ai_enum.vendor_id, (unsigned)ai_enum.device_id);
+
+        if (run_007) test_ut_corr_007(hAdap, (uint32_t)ai);
+        if (run_008) test_ut_corr_008(hAdap, (uint32_t)ai);
+
+        CloseHandle(hAdap);
     }
 
     /* UT-CORR-005 and UT-CORR-006: state-modifying tests (adapter 0 only)

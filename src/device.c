@@ -107,6 +107,11 @@ IntelAvbFilterFastIoDeviceControl(
             req->sequence_id   = 0;
             req->adapter_index = 0;
             req->status        = (avb_u32)NDIS_STATUS_SUCCESS;
+            /* last_ndis_tx_timestamp is set to the pre-send SYSTIM before NdisFSendNetBufferLists.
+             * TaggedTransmitHw (NDIS 6.82 slot 26) is not currently available, so this value is
+             * never upgraded to a real hardware egress timestamp at send-complete time. */
+            req->ts_provenance = (ts != 0) ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_UNAVAILABLE;
+            req->_reserved     = 0;
             IoStatus->Status      = STATUS_SUCCESS;
             IoStatus->Information = sizeof(*req);
         }
@@ -205,6 +210,22 @@ IntelAvbFilterFastIoDeviceControl(
 
         avb_u32 seq_id = ((PAVB_TEST_SEND_PTP_REQUEST)InputBuffer)->sequence_id;
 
+        /* IOCTL-entry PHC snapshot — captured before ring/buffer setup.
+         * This is the reference for phc_at_send_ns (distinct from captureTs below,
+         * which is captured just before NdisFSendNetBufferLists). */
+        ULONG64 phcEntryTs = 0;
+        BOOLEAN phcEntryFromHw = FALSE;
+        {
+            const intel_device_ops_t *eops = intel_get_device_ops(ctx->intel_device.device_type);
+            if (eops && eops->get_systime && eops->get_systime(&ctx->intel_device, &phcEntryTs) == 0 && phcEntryTs != 0) {
+                phcEntryFromHw = TRUE;
+            }
+        }
+        if (phcEntryTs == 0) {
+            LARGE_INTEGER epc = KeQueryPerformanceCounter(NULL);
+            phcEntryTs = (ULONG64)epc.QuadPart;
+        }
+
         /* Acquire a pre-allocated ring slot (same logic as IRP path). */
         int ring_slot = -1;
         for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
@@ -289,8 +310,9 @@ IntelAvbFilterFastIoDeviceControl(
         NdisFSendNetBufferLists(ctx->filter_instance->FilterHandle, nbl, 0, 0);
 
         /* Write back to user buffer (we are at PASSIVE_LEVEL, user buffer is accessible). */
-        req->timestamp_ns    = captureTs;
-        req->phc_at_send_ns  = captureTs;  /* same snapshot — delta = 0, proves coherence */
+        req->timestamp_ns    = captureTs;    /* pre-send SYSTIM (just before NdisFSendNetBufferLists) */
+        req->phc_at_send_ns  = phcEntryTs;  /* IOCTL-entry SYSTIM (before ring/buffer setup) — distinct snapshot */
+        req->ts_provenance   = phcEntryFromHw ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_SOFTWARE_FALLBACK;
         req->packets_sent    = 1;
         req->status          = (avb_u32)NDIS_STATUS_SUCCESS;
         IoStatus->Status      = STATUS_SUCCESS;

@@ -77,7 +77,7 @@ typedef struct {
     uint32_t elapsed_s;
     uint32_t adapter;
     uint64_t phc_ns;
-    int64_t  delta_ns;   /* tx_ns - phc_at_send_ns (= captureTs - captureTs = 0 by design) */
+    int64_t  delta_ns;   /* timestamp_ns - phc_at_send_ns = kernel IOCTL setup overhead (~100-500 ns) */
 } Sample;
 
 static Sample s_samples[MAX_SAMPLES];
@@ -101,10 +101,16 @@ static bool read_phc(HANDLE hDev, uint32_t adapter_idx, uint64_t *out_ns)
 /* -------------------------------------------------------------------------
  * TX send + delta capture helper
  *
- * Uses IOCTL_AVB_TEST_SEND_PTP which returns both timestamp_ns and
- * phc_at_send_ns from the same captureTs snapshot in the kernel.
- * delta = timestamp_ns - phc_at_send_ns = 0 by construction.
- * We record it anyway to detect any regression in the kernel-side guarantee.
+ * Uses IOCTL_AVB_TEST_SEND_PTP which returns two DISTINCT PHC snapshots:
+ *   timestamp_ns    = pre-send SYSTIM (just before NdisFSendNetBufferLists)
+ *   phc_at_send_ns  = IOCTL-entry SYSTIM (before ring/buffer setup)
+ *   delta           = timestamp_ns - phc_at_send_ns = kernel IOCTL setup overhead
+ *                     (~100-500 ns); NOT a hardware TX egress latency.
+ *   ts_provenance   = PRE_SEND_PHC or SOFTWARE_FALLBACK; never VERIFIED_HARDWARE_TX.
+ *
+ * This function records the kernel overhead delta for regression detection.
+ * A zero delta indicates self-comparison regression (both fields set from the
+ * same snapshot — the bug this test was created to catch and prevent).
  * -------------------------------------------------------------------------*/
 static bool sample_delta(HANDLE hDev, uint32_t adapter_idx,
                           uint32_t seq, int64_t *out_delta_ns,
