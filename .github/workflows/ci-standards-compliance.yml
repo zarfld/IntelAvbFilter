@@ -1670,11 +1670,11 @@ jobs:
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         env:
           # Pass the SHA256 computed from the build step to the pre-flight check.
-          # Pre-flight fails the gate if the installed driver doesn't match.
+          # Pre-flight exits 1 (INFRA_FAILURE) if the installed driver doesn't match.
           HIL_EXPECTED_DRIVER_SHA256: ${{ steps.build_driver.outputs.BUILD_DRIVER_SHA256 }}
+          # Enforce SHA256 gate: absence of expected hash = INFRA_FAILURE.
+          HIL_REQUIRED_SHA256_GATE: "1"
         run: .\tools\test\Test-DriverPreFlight.ps1
-        # Hard fail — suite must not start if driver is inaccessible (#328 sentinel)
-        # or SHA256 mismatch (stale driver installed on runner).
 
       - name: Run HIL mandatory gate tests
         id: hil_mandatory

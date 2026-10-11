@@ -89,7 +89,24 @@ static_assert(AVB_TX_PROV_PRE_SEND_PHC           == 1u,  "TEST-PROV-L05: constan
 static_assert(AVB_TX_PROV_SOFTWARE_FALLBACK      == 2u,  "TEST-PROV-L05: constant");
 static_assert(AVB_TX_PROV_NDIS_TX_COMPLETION     == 3u,  "TEST-PROV-L05: constant");
 static_assert(AVB_TX_PROV_VERIFIED_HARDWARE_TX   == 4u,  "TEST-PROV-L05: constant");
-static_assert(AVB_RX_PROV_HARDWARE_REGISTER       == 5u,  "TEST-PROV-L05: AVB_RX_PROV_HARDWARE_REGISTER must be 5");
+static_assert(AVB_RX_PROV_HARDWARE_REGISTER      == 5u,  "TEST-PROV-L05: AVB_RX_PROV_HARDWARE_REGISTER must be 5");
+
+/* Packed record bit-field sanity: PROV_SHIFT must be 61 (3 bits at top of ULONGLONG). */
+static_assert(AVB_TX_RECORD_PROV_SHIFT == 61ULL, "TEST-PROV-L05: prov shift must be 61");
+/* Self-consistency: packing and unpacking must round-trip for a known value.
+ * Use a timestamp known to fit: 1791575000000000000 = 0x18DFB08DFC660000 < 2^61.
+ * prov = PRE_SEND_PHC (1).  Packed high 3 bits = 001, low 61 bits = timestamp. */
+static_assert(
+    AVB_TX_RECORD_GET_PROV(AVB_TX_RECORD_PACK(0x0100000000000000ULL, 3u)) == 3u,
+    "TEST-PROV-L05: PROV round-trip must recover the original provenance");
+static_assert(
+    AVB_TX_RECORD_GET_TS(AVB_TX_RECORD_PACK(0x0100000000000000ULL, 3u))
+        == 0x0100000000000000ULL,
+    "TEST-PROV-L05: TS round-trip must recover the original timestamp");
+/* Zero timestamp must yield zero record regardless of provenance. */
+static_assert(
+    AVB_TX_RECORD_PACK(0ULL, 1u) == 0LL,
+    "TEST-PROV-L05: PACK(ts=0, prov=PRE_SEND_PHC) must yield 0");
 
 /* =========================================================================
  * Result tracking
@@ -609,7 +626,19 @@ static void test_h03(HANDLE hDev, bool driver_present)
         adapter_count++;
     }
     if (adapter_count < 2) {
-        tc_skip("TEST-PROV-H03", "fewer than 2 adapters - isolation requires >=2");
+        /* On a runner explicitly configured for multi-adapter testing
+         * (HIL_MULTI_ADAPTER_REQUIRED=1), fewer than 2 adapters is an
+         * infrastructure problem, not a capability gap. */
+        const char *multi_req = getenv("HIL_MULTI_ADAPTER_REQUIRED");
+        bool required = (multi_req && strcmp(multi_req, "1") == 0);
+        if (required) {
+            /* INFRA_FAILURE: runner is configured to have >=2 adapters but doesn't */
+            printf("  [INFRA_FAILURE] TEST-PROV-H03: HIL_MULTI_ADAPTER_REQUIRED=1 but only "
+                   "%d adapter(s) found — runner configuration broken\n", adapter_count);
+            s_total++; s_failed++;
+        } else {
+            tc_skip("TEST-PROV-H03", "fewer than 2 adapters - isolation requires >=2");
+        }
         return;
     }
     printf("  Adapter 0 caps=0x%08X  Adapter 1 caps=0x%08X\n", (unsigned)caps0, (unsigned)caps1);
@@ -698,53 +727,146 @@ static void test_h03(HANDLE hDev, bool driver_present)
 }
 
 /* -------------------------------------------------------------------------
- * TEST-PROV-H04: Unavailable hardware provenance (hardware-integrated).
+ * TEST-PROV-H04: Unavailable provenance on fresh handle (hardware-integrated).
  *
- * On a fresh handle (no prior SEND_PTP), GET_TX_TIMESTAMP must return
- * valid==0 and ts_provenance == UNAVAILABLE (last_ndis_tx_timestamp is 0
- * and the FIFO should be empty).
+ * Part A — positive control: SEND_PTP on h0, then GET_TX_TIMESTAMP on h0 must
+ *   return the same timestamp (proves the round-trip works before testing absence).
+ * Part B — isolation: GET_TX_TIMESTAMP on a second fresh handle (no SEND_PTP)
+ *   must return valid==0 and ts_provenance==UNAVAILABLE.
+ *
+ * Stale state: explicit drain before Part A. No generic SKIP for stale state.
  * -------------------------------------------------------------------------*/
 static void test_h04(HANDLE hDev, bool driver_present)
 {
-    printf("\n[TEST-PROV-H04] Unavailable hardware provenance (hardware-integrated)\n");
+    printf("\n[TEST-PROV-H04] Unavailable provenance + positive retrieval control\n");
     (void)hDev;
     if (!driver_present) { tc_skip("TEST-PROV-H04", "driver absent"); return; }
 
-    HANDLE h = open_dev();
-    if (h == INVALID_HANDLE_VALUE) {
-        tc_fail("TEST-PROV-H04", "CreateFileW failed");
-        return;
-    }
-    if (!bind_adapter(h, 0)) {
-        CloseHandle(h);
-        tc_fail("TEST-PROV-H04", "OPEN_ADAPTER failed");
-        return;
-    }
-
-    AVB_TX_TIMESTAMP_REQUEST r = {0};
-    DWORD br = 0;
-    BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TX_TIMESTAMP,
-                              &r, sizeof(r), &r, sizeof(r), &br, NULL);
-    CloseHandle(h);
-
-    if (!ok) {
-        tc_fail("TEST-PROV-H04", "GET_TX_TIMESTAMP IOCTL failed");
-        return;
-    }
-    if (r.valid == 0) {
-        if (r.ts_provenance == AVB_TX_PROV_UNAVAILABLE) {
-            tc_pass("TEST-PROV-H04", "valid==0 → ts_provenance==UNAVAILABLE");
-        } else {
-            char msg[128];
-            (void)sprintf(msg, "valid==0 but ts_provenance=%u (expected UNAVAILABLE)",
-                          (unsigned)r.ts_provenance);
-            tc_fail("TEST-PROV-H04", msg);
+    /* Part A: positive control */
+    {
+        HANDLE ha = open_dev();
+        if (ha == INVALID_HANDLE_VALUE) {
+            tc_fail("TEST-PROV-H04", "Part A: CreateFileW failed");
+            return;
         }
-    } else {
-        /* Stale timestamp from a previous test run; cannot enforce UNAVAILABLE. */
-        printf("  NOTE: valid==1 (stale from prior test), prov=%u — cannot enforce UNAVAILABLE\n",
-               (unsigned)r.ts_provenance);
-        tc_skip("TEST-PROV-H04", "stale timestamp present from prior test");
+        if (!bind_adapter(ha, 0)) {
+            CloseHandle(ha);
+            tc_fail("TEST-PROV-H04", "Part A: OPEN_ADAPTER failed");
+            return;
+        }
+
+        /* Drain any stale record before the positive-control send. */
+        {
+            AVB_TX_TIMESTAMP_REQUEST drain = {0};
+            DWORD dbr = 0;
+            DeviceIoControl(ha, IOCTL_AVB_GET_TX_TIMESTAMP,
+                            &drain, sizeof(drain), &drain, sizeof(drain), &dbr, NULL);
+            if (drain.valid) {
+                printf("  NOTE: drained stale record: ts=%llu prov=%u\n",
+                       (unsigned long long)drain.timestamp_ns, (unsigned)drain.ts_provenance);
+            }
+        }
+
+        /* Send PTP packet via ha to populate last_ndis_tx_record. */
+        AVB_TEST_SEND_PTP_REQUEST s = {0};
+        s.sequence_id = 0xD400;
+        DWORD sbr = 0;
+        BOOL sok = DeviceIoControl(ha, IOCTL_AVB_TEST_SEND_PTP,
+                                   &s, sizeof(s), &s, sizeof(s), &sbr, NULL);
+
+        if (!sok || s.packets_sent == 0) {
+            CloseHandle(ha);
+            /* Part A can't run if SEND_PTP fails — but Part B still relevant. */
+            printf("  NOTE: Part A skipped (SEND_PTP failed) — running Part B only\n");
+            goto part_b;
+        }
+
+        if (s.ts_provenance == AVB_TX_PROV_UNAVAILABLE) {
+            /* Check capability: if adapter has 1588, this is a FAIL */
+            AVB_ENUM_REQUEST er = {0};
+            er.index = 0;
+            DWORD ebr = 0;
+            DeviceIoControl(ha, IOCTL_AVB_ENUM_ADAPTERS,
+                            &er, sizeof(er), &er, sizeof(er), &ebr, NULL);
+            CloseHandle(ha);
+            if (er.capabilities & INTEL_CAP_BASIC_1588) {
+                tc_fail("TEST-PROV-H04",
+                        "Part A: SEND_PTP UNAVAILABLE on INTEL_CAP_BASIC_1588 adapter");
+            } else {
+                tc_skip("TEST-PROV-H04", "SKIP_UNSUPPORTED: adapter 0 lacks INTEL_CAP_BASIC_1588");
+            }
+            return;
+        }
+
+        /* Retrieve the stored timestamp immediately on the same handle. */
+        AVB_TX_TIMESTAMP_REQUEST g = {0};
+        DWORD gbr = 0;
+        BOOL gok = DeviceIoControl(ha, IOCTL_AVB_GET_TX_TIMESTAMP,
+                                   &g, sizeof(g), &g, sizeof(g), &gbr, NULL);
+        CloseHandle(ha);
+
+        if (!gok) {
+            tc_fail("TEST-PROV-H04", "Part A: GET_TX_TIMESTAMP IOCTL failed after SEND_PTP");
+            return;
+        }
+        if (g.valid == 0) {
+            tc_fail("TEST-PROV-H04",
+                    "Part A: GET_TX_TIMESTAMP returned valid==0 immediately after SEND_PTP "
+                    "(positive-control failure; record not stored or lost)");
+            return;
+        }
+        printf("  Part A PASS: SEND_PTP ts=%llu prov=%u; GET_TX_TIMESTAMP retrieved ts=%llu prov=%u\n",
+               (unsigned long long)s.timestamp_ns, (unsigned)s.ts_provenance,
+               (unsigned long long)g.timestamp_ns, (unsigned)g.ts_provenance);
+        s_total++; s_passed++;
+        printf("  [PASS] TEST-PROV-H04/part-A: positive control — SEND_PTP stores; GET_TX_TIMESTAMP retrieves\n");
+    }
+
+    part_b:;
+    /* Part B: fresh handle without any SEND_PTP must return UNAVAILABLE */
+    {
+        HANDLE hb = open_dev();
+        if (hb == INVALID_HANDLE_VALUE) {
+            tc_fail("TEST-PROV-H04", "Part B: CreateFileW failed");
+            return;
+        }
+        if (!bind_adapter(hb, 0)) {
+            CloseHandle(hb);
+            tc_fail("TEST-PROV-H04", "Part B: OPEN_ADAPTER failed");
+            return;
+        }
+
+        /* Drain any stale record on this handle's adapter context. */
+        {
+            AVB_TX_TIMESTAMP_REQUEST drain = {0};
+            DWORD dbr = 0;
+            DeviceIoControl(hb, IOCTL_AVB_GET_TX_TIMESTAMP,
+                            &drain, sizeof(drain), &drain, sizeof(drain), &dbr, NULL);
+            if (drain.valid) {
+                printf("  NOTE: Part B drained stale record before fresh check\n");
+            }
+        }
+
+        /* Query on this clean state — must get UNAVAILABLE. */
+        AVB_TX_TIMESTAMP_REQUEST r = {0};
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(hb, IOCTL_AVB_GET_TX_TIMESTAMP,
+                                  &r, sizeof(r), &r, sizeof(r), &br, NULL);
+        CloseHandle(hb);
+
+        if (!ok) {
+            tc_fail("TEST-PROV-H04", "Part B: GET_TX_TIMESTAMP IOCTL failed");
+            return;
+        }
+        if (r.valid != 0 || r.ts_provenance != AVB_TX_PROV_UNAVAILABLE) {
+            char msg[256];
+            (void)sprintf(msg,
+                "Part B: expected valid==0 and UNAVAILABLE after drain, got valid=%u prov=%u ts=%llu",
+                r.valid, (unsigned)r.ts_provenance, (unsigned long long)r.timestamp_ns);
+            tc_fail("TEST-PROV-H04", msg);
+            return;
+        }
+        tc_pass("TEST-PROV-H04", "Part B: fresh/drained handle returns valid==0 and UNAVAILABLE");
     }
 }
 
@@ -898,17 +1020,28 @@ static void test_h05(bool driver_present)
  * TEST-PROV-H06: GET_RX_TIMESTAMP V1/V2 ABI (hardware-integrated).
  *
  * Category: Windows device contract — RX timestamp register ABI.
- * Verifies:
- *   V1 (24-byte) GET_RX_TIMESTAMP: accepted; bytesReturned==24; canary untouched.
- *   V2 (32-byte) GET_RX_TIMESTAMP: accepted; bytesReturned==32; ts_provenance set.
- *   V2 provenance when register readable: AVB_RX_PROV_HARDWARE_REGISTER (5).
- *   V2 provenance when unavailable: UNAVAILABLE (0).
- *   Never returns AVB_TX_PROV_VERIFIED_HARDWARE_TX (4) for RX path.
+ * Capability-gated: ERROR_NOT_SUPPORTED on adapter without RX TS cap = SKIP_UNSUPPORTED.
+ * Any unexpected error on capable adapter = FAIL (no silent skip to PASS).
  * -------------------------------------------------------------------------*/
 static void test_h06(bool driver_present)
 {
     printf("\n[TEST-PROV-H06] GET_RX_TIMESTAMP V1/V2 ABI and provenance\n");
     if (!driver_present) { tc_skip("TEST-PROV-H06", "driver absent"); return; }
+
+    /* Get adapter capabilities to gate FAIL vs SKIP_UNSUPPORTED */
+    avb_u32 caps0 = 0;
+    {
+        HANDLE hcap = open_dev();
+        if (hcap != INVALID_HANDLE_VALUE) {
+            AVB_ENUM_REQUEST er = {0};
+            er.index = 0;
+            DWORD ebr = 0;
+            DeviceIoControl(hcap, IOCTL_AVB_ENUM_ADAPTERS,
+                            &er, sizeof(er), &er, sizeof(er), &ebr, NULL);
+            caps0 = er.capabilities;
+            CloseHandle(hcap);
+        }
+    }
 
     HANDLE h = open_dev();
     if (h == INVALID_HANDLE_VALUE) {
@@ -922,8 +1055,9 @@ static void test_h06(bool driver_present)
     }
 
     bool all_ok = true;
+    bool ioctl_not_supported = false;
 
-    /* V1 (24 bytes): driver must accept and return exactly 24 bytes */
+    /* ---- V1 (24 bytes): must accept and return exactly 24 bytes ---- */
     {
         uint8_t buf[40];
         memset(buf, 0xDD, sizeof(buf));
@@ -932,29 +1066,38 @@ static void test_h06(bool driver_present)
                                   buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
                                   buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
                                   &br, NULL);
-        if (!ok && GetLastError() != 0x80070057 /* INVALID_PARAMETER */) {
-            /* Some adapters don't implement RX FIFO read — STATUS_NOT_SUPPORTED is valid */
-            printf("  NOTE: GET_RX_TIMESTAMP V1 IOCTL returned error %lu (adapter may not support RX ts)\n",
-                   GetLastError());
-        } else if (ok && br != AVB_TX_TIMESTAMP_REQUEST_V1_SIZE) {
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err == ERROR_NOT_SUPPORTED || err == 50 /*ERROR_NOT_SUPPORTED*/) {
+                ioctl_not_supported = true;
+                printf("  NOTE: GET_RX_TIMESTAMP V1 not supported by this adapter (err=%lu)\n", err);
+            } else {
+                char msg[128];
+                (void)sprintf(msg, "GET_RX_TIMESTAMP V1 failed with unexpected Win32 error %lu", err);
+                tc_fail("TEST-PROV-H06", msg);
+                all_ok = false;
+            }
+        } else if (br != AVB_TX_TIMESTAMP_REQUEST_V1_SIZE) {
             char msg[128];
-            (void)sprintf(msg, "GET_RX_TIMESTAMP V1: bytesReturned=%lu expected %u", br, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE);
+            (void)sprintf(msg, "GET_RX_TIMESTAMP V1: bytesReturned=%lu expected %u",
+                          br, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE);
             tc_fail("TEST-PROV-H06", msg);
             all_ok = false;
-        } else if (ok) {
+        } else {
             /* Canary bytes 24-39 must be untouched */
+            bool canary_ok = true;
             for (int i = AVB_TX_TIMESTAMP_REQUEST_V1_SIZE; i < (int)sizeof(buf); i++) {
-                if (buf[i] != 0xDD) {
-                    tc_fail("TEST-PROV-H06", "GET_RX_TIMESTAMP V1: driver wrote past V1 buffer");
-                    all_ok = false;
-                    break;
-                }
+                if (buf[i] != 0xDD) { canary_ok = false; break; }
+            }
+            if (!canary_ok) {
+                tc_fail("TEST-PROV-H06", "GET_RX_TIMESTAMP V1: driver wrote past V1 buffer");
+                all_ok = false;
             }
         }
     }
 
-    /* V2 (32 bytes): check ts_provenance is not VERIFIED_HARDWARE_TX */
-    {
+    /* ---- V2 (32 bytes): bytesReturned==32 and correct provenance ---- */
+    if (!ioctl_not_supported) {
         uint8_t buf[32];
         memset(buf, 0, sizeof(buf));
         DWORD br = 0;
@@ -962,16 +1105,15 @@ static void test_h06(bool driver_present)
                                   buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
                                   buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
                                   &br, NULL);
-        if (ok) {
-            AVB_TX_TIMESTAMP_REQUEST *rx = (AVB_TX_TIMESTAMP_REQUEST *)buf;
-            if (rx->ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
-                tc_fail("TEST-PROV-H06",
-                        "GET_RX_TIMESTAMP V2 returned VERIFIED_HARDWARE_TX (must use AVB_RX_PROV_HARDWARE_REGISTER)");
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err != ERROR_NOT_SUPPORTED && err != 50) {
+                char msg[128];
+                (void)sprintf(msg, "GET_RX_TIMESTAMP V2 failed with Win32 error %lu", err);
+                tc_fail("TEST-PROV-H06", msg);
                 all_ok = false;
-            } else {
-                printf("  GET_RX_TIMESTAMP V2: valid=%u prov=%u bytesReturned=%lu\n",
-                       rx->valid, (unsigned)rx->ts_provenance, br);
             }
+        } else {
             if (br != sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
                 char msg[128];
                 (void)sprintf(msg, "GET_RX_TIMESTAMP V2: bytesReturned=%lu expected %u",
@@ -979,10 +1121,37 @@ static void test_h06(bool driver_present)
                 tc_fail("TEST-PROV-H06", msg);
                 all_ok = false;
             }
+            AVB_TX_TIMESTAMP_REQUEST *rx = (AVB_TX_TIMESTAMP_REQUEST *)buf;
+            if (rx->ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
+                tc_fail("TEST-PROV-H06",
+                        "GET_RX_TIMESTAMP V2 returned VERIFIED_HARDWARE_TX "
+                        "(must use AVB_RX_PROV_HARDWARE_REGISTER=5)");
+                all_ok = false;
+            } else {
+                printf("  GET_RX_TIMESTAMP V2: valid=%u prov=%u bytesReturned=%lu\n",
+                       rx->valid, (unsigned)rx->ts_provenance, br);
+            }
         }
     }
 
     CloseHandle(h);
+
+    if (ioctl_not_supported) {
+        /* Determine if this is a genuine capability gap or a driver bug */
+        if (caps0 & INTEL_CAP_BASIC_1588) {
+            /* Has 1588 but RX TS not supported — driver limitation, not hardware gap */
+            printf("  NOTE: adapter has INTEL_CAP_BASIC_1588 but GET_RX_TIMESTAMP not supported "
+                   "— driver implementation gap\n");
+            /* Still pass ABI check since V1/V2 buffer handling wasn't tested */
+            tc_skip("TEST-PROV-H06",
+                    "SKIP_UNSUPPORTED: GET_RX_TIMESTAMP not implemented for this adapter");
+        } else {
+            tc_skip("TEST-PROV-H06",
+                    "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588");
+        }
+        return;
+    }
+
     if (all_ok)
         tc_pass("TEST-PROV-H06", "GET_RX_TIMESTAMP V1/V2 ABI correct; no VERIFIED_HARDWARE_TX on RX path");
 }

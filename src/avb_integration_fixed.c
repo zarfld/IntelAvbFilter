@@ -1728,9 +1728,10 @@ NTSTATUS AvbSendPtpCore(
           ? AVB_TX_PROV_SOFTWARE_FALLBACK
           : AVB_TX_PROV_UNAVAILABLE;
 
-    /* Write provenance BEFORE timestamp so GET_TX_TIMESTAMP always reads a consistent pair. */
-    (void)InterlockedExchange(&activeContext->last_ndis_tx_provenance, (LONG)sendProv);
-    (void)InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, (LONGLONG)preSendTs);
+    /* Single atomic write: packs provenance into top 3 bits of the same LONGLONG.
+     * Concurrent SEND_PTP writers are safe: last write wins (FIFO semantics). */
+    (void)InterlockedExchange64(&activeContext->last_ndis_tx_record,
+                                AVB_TX_RECORD_PACK(preSendTs, sendProv));
     test_req->timestamp_ns   = preSendTs;
     test_req->phc_at_send_ns = phcEntryTs;
     if (out_len >= sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
@@ -3107,16 +3108,17 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 // Primary path: NDIS 6.82 TaggedTransmitHw timestamp OR pre-send SYSTIM fallback.
                 // FilterSendNetBufferListsComplete harvests igc.sys's ULONG64 hardware timestamp
                 // from NetBufferListInfo[AVB_TX_TIMESTAMP_SLOT] (slot 26) when available.
-                /* Read-clear timestamp, then read-clear provenance (writer stores provenance first). */
-                LONGLONG ndisTs      = InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, 0LL);
-                LONG storedProv      = InterlockedExchange(&activeContext->last_ndis_tx_provenance,
-                                                            (LONG)AVB_TX_PROV_UNAVAILABLE);
+                /* Single atomic read-and-clear: both timestamp and provenance in one operation. */
+                LONGLONG rec     = InterlockedExchange64(&activeContext->last_ndis_tx_record, 0LL);
+                ULONGLONG ndisTs = AVB_TX_RECORD_GET_TS(rec);
+                avb_u32 storedProv = (ndisTs != 0) ? AVB_TX_RECORD_GET_PROV(rec)
+                                                    : AVB_TX_PROV_UNAVAILABLE;
                 if (ndisTs != 0) {
-                    tx_req->timestamp_ns = (avb_u64)(ULONG64)ndisTs;
+                    tx_req->timestamp_ns = (avb_u64)ndisTs;
                     tx_req->valid = 1;
                     tx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
                     /* Preserve original provenance from SEND_PTP (PRE_SEND_PHC or SOFTWARE_FALLBACK). */
-                    if (has_v2) tx_req->ts_provenance = (avb_u32)storedProv;
+                    if (has_v2) tx_req->ts_provenance = storedProv;
                     status = STATUS_SUCCESS;
                     info = has_v2 ? sizeof(*tx_req) : AVB_TX_TIMESTAMP_REQUEST_V1_SIZE;
                     DEBUGP(DL_TRACE, "TX timestamp (prov=%u): 0x%016I64X (%I64u)\n",

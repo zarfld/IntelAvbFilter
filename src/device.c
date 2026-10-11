@@ -110,12 +110,10 @@ IntelAvbFilterFastIoDeviceControl(
             PAVB_TX_TIMESTAMP_REQUEST req = (PAVB_TX_TIMESTAMP_REQUEST)OutputBuffer;
             ProbeForWrite(req, OutputBufferLength < sizeof(*req) ?
                               OutputBufferLength : sizeof(*req), sizeof(avb_u32));
-            LONGLONG ts = InterlockedExchange64(&ctx->last_ndis_tx_timestamp, 0LL);
-            /* Read-clear provenance AFTER timestamp (writer stores provenance first,
-             * then timestamp; so if ts!=0 the provenance is already set). */
-            LONG stored_prov = InterlockedExchange(&ctx->last_ndis_tx_provenance,
-                                                    (LONG)AVB_TX_PROV_UNAVAILABLE);
-            req->timestamp_ns  = (avb_u64)(ULONG64)ts;
+            LONGLONG rec = InterlockedExchange64(&ctx->last_ndis_tx_record, 0LL);
+            ULONGLONG ts = AVB_TX_RECORD_GET_TS(rec);
+            avb_u32  prov = (ts != 0) ? AVB_TX_RECORD_GET_PROV(rec) : AVB_TX_PROV_UNAVAILABLE;
+            req->timestamp_ns  = (avb_u64)ts;
             req->valid         = (ts != 0) ? 1 : 0;
             req->sequence_id   = 0;
             req->adapter_index = 0;
@@ -123,7 +121,7 @@ IntelAvbFilterFastIoDeviceControl(
             /* Preserve original provenance from SEND_PTP (PRE_SEND_PHC or SOFTWARE_FALLBACK).
              * If the timestamp was 0 (nothing sent yet), report UNAVAILABLE. */
             if (OutputBufferLength >= sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
-                req->ts_provenance = (ts != 0) ? (avb_u32)stored_prov : AVB_TX_PROV_UNAVAILABLE;
+                req->ts_provenance = prov;
                 req->_reserved     = 0;
                 IoStatus->Information = sizeof(*req);
             } else {
@@ -339,8 +337,8 @@ IntelAvbFilterFastIoDeviceControl(
         /* Write provenance BEFORE timestamp so GET_TX_TIMESTAMP always sees
          * a consistent pair: if it reads a non-zero timestamp, the provenance
          * was already stored. */
-        InterlockedExchange(&ctx->last_ndis_tx_provenance, (LONG)prov);
-        InterlockedExchange64(&ctx->last_ndis_tx_timestamp, (LONGLONG)captureTs);
+        InterlockedExchange64(&ctx->last_ndis_tx_record,
+                              AVB_TX_RECORD_PACK(captureTs, prov));
 
         /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
          * Ring fast path: lock-free. Fallback: lock released above. */

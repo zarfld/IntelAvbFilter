@@ -215,20 +215,22 @@ typedef struct _AVB_DEVICE_CONTEXT {
     UCHAR source_mac_pad[2];                   /* pad to 8-byte alignment */
 
     /* NDIS 6.82 TaggedTransmitHw TX timestamp + provenance
-     * Populated by SEND_PTP (pre-send or SW-fallback) or by FilterSendNetBufferListsComplete
-     * when igc.sys provides TaggedTransmitHw (slot 26).
-     * Consumed (read-then-zero) by IOCTL_AVB_GET_TX_TIMESTAMP.
-     * Zero timestamp means "no timestamp available yet".
+    /* Packed TX timestamp record — single 64-bit atomic value encoding both the
+     * nanosecond timestamp and its provenance in one InterlockedExchange64 operation.
      *
-     * Write protocol: write provenance BEFORE timestamp so a reader that sees
-     * a non-zero timestamp always finds a valid provenance.
-     * Read protocol: read-clear timestamp first; then read-clear provenance.
-     * Both use Interlocked operations for acquire/release ordering.
+     * Layout (ULONGLONG view):
+     *   Bits 63-61 : provenance   (3 bits; AVB_TX_PROV_* values 0-7; see AVB_TX_RECORD_*)
+     *   Bits 60-0  : timestamp_ns (61 bits; up to 2.305e18 ns covers all current Unix+TAI values)
      *
-     * last_ndis_tx_provenance values: AVB_TX_PROV_* (avb_ioctl.h).
-     * Default (zeroed context): AVB_TX_PROV_UNAVAILABLE (0). */
-    volatile LONGLONG last_ndis_tx_timestamp;
-    volatile LONG     last_ndis_tx_provenance;   /* AVB_TX_PROV_* */
+     * Encoding macros (avb_ioctl.h): AVB_TX_RECORD_PACK, AVB_TX_RECORD_GET_TS, AVB_TX_RECORD_GET_PROV
+     *
+     * Zero value = no record (no SEND_PTP since last GET_TX_TIMESTAMP).
+     * When ts=0, prov is irrelevant — PACK always yields 0 for ts=0.
+     *
+     * Concurrency: a single InterlockedExchange64 makes both fields atomic.
+     * Multiple concurrent SEND_PTP writers: last write wins (FIFO semantics; correct).
+     * GET_TX_TIMESTAMP reader: single read-and-clear atomically retrieves both fields. */
+    volatile LONGLONG last_ndis_tx_record;   /* packed: prov[63:61] | ts_ns[60:0] */
 
     /* Pre-allocated NBL ring for fast IOCTL_AVB_TEST_SEND_PTP path.
      * Slots are allocated at context creation (AvbCreateMinimalContext) and

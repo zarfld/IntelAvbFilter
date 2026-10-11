@@ -1888,15 +1888,14 @@ Return Value:
 
                 if (ts != 0) {
                     /* TaggedTransmitHw: igc.sys provided a hardware-latched timestamp.
-                     * Write provenance BEFORE timestamp (same ordering as SEND_PTP path). */
-                    (void)InterlockedExchange(&avbCtx->last_ndis_tx_provenance,
-                                              (LONG)AVB_TX_PROV_NDIS_TX_COMPLETION);
-                    (void)InterlockedExchange64(&avbCtx->last_ndis_tx_timestamp, (LONGLONG)ts);
+                     * Single atomic write packs provenance+timestamp together. */
+                    (void)InterlockedExchange64(&avbCtx->last_ndis_tx_record,
+                                               AVB_TX_RECORD_PACK(ts, AVB_TX_PROV_NDIS_TX_COMPLETION));
                     DEBUGP(DL_TRACE, "TX timestamp upgraded to NDIS_TX_COMPLETION: 0x%016I64X\n", ts);
                 } else {
                     /* slot 26 = 0: igc.sys does not support TaggedTransmitHw.
-                     * The pre-send value (with its provenance) was already stored; leave both. */
-                    DEBUGP(DL_TRACE, "TX timestamp: slot26=0, keeping pre-send value and provenance\n");
+                     * The pre-send value (with its provenance) was already stored; leave it. */
+                    DEBUGP(DL_TRACE, "TX timestamp: slot26=0, keeping pre-send record\n");
                 }
             }
 #endif /* NDIS_SUPPORT_NDIS680 */

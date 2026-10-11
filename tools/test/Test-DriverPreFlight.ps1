@@ -33,27 +33,34 @@ if (Test-Path $drvPath) {
     Write-Ok "IntelAvbFilter.sys version  : $ver  (modified: $ts)"
     Write-Ok "IntelAvbFilter.sys SHA256   : $actualSha256"
 
-    # SHA256 comparison — fails the gate on driver/commit mismatch.
-    # Purpose: ensure the HIL runner is testing the exact binary built from
-    # this commit, not a stale installation.  Deploy the new driver via the
-    # authorized recovery-capable process before retrying.
-    $expectedSha256 = $env:HIL_EXPECTED_DRIVER_SHA256
+    # SHA256 verification — MANDATORY on mandatory HIL lane.
+    # HIL_REQUIRED_SHA256_GATE=1 makes the absence of HIL_EXPECTED_DRIVER_SHA256 a hard failure.
+    # This prevents running HIL tests without identity verification.
+    $expectedSha256   = $env:HIL_EXPECTED_DRIVER_SHA256
+    $sha256GateStrict = ($env:HIL_REQUIRED_SHA256_GATE -eq '1')
+
     if ($expectedSha256) {
         if ($actualSha256.ToLower() -eq $expectedSha256.ToLower()) {
             Write-Ok "SHA256 match               : installed driver matches build artifact"
         } else {
             Write-Err ("SHA256 MISMATCH: installed={0}  expected={1}" -f $actualSha256, $expectedSha256)
-            Write-Host "  The installed IntelAvbFilter.sys does not match the driver built from this commit." -ForegroundColor Red
+            Write-Host "  [INFRA_FAILURE] TEST-PROV-SHA256: installed driver does not match build artifact" -ForegroundColor Red
             Write-Host "  Redeploy via the authorized installation process before running hardware tests." -ForegroundColor Yellow
             exit 1
         }
+    } elseif ($sha256GateStrict) {
+        Write-Err "HIL_EXPECTED_DRIVER_SHA256 is empty but HIL_REQUIRED_SHA256_GATE=1"
+        Write-Host "  [INFRA_FAILURE] TEST-PROV-SHA256: SHA256 identity gate required but no expected hash provided" -ForegroundColor Red
+        Write-Host "  Ensure Build-Tests.ps1 produced build/driver-sha256.txt and the workflow" -ForegroundColor Yellow
+        Write-Host "  passed BUILD_DRIVER_SHA256 to HIL_EXPECTED_DRIVER_SHA256 env var." -ForegroundColor Yellow
+        exit 1
     } else {
-        Write-Warn "HIL_EXPECTED_DRIVER_SHA256 not set - skipping SHA256 match (set in workflow to enforce)"
+        Write-Warn "HIL_EXPECTED_DRIVER_SHA256 not set - SHA256 gate not enforced (set HIL_REQUIRED_SHA256_GATE=1 to enforce)"
     }
 
     if ($env:GITHUB_ACTIONS -eq 'true') {
-        "HIL_DRIVER_VERSION=$ver"        | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        "HIL_DRIVER_DATE=$ts"            | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "HIL_DRIVER_VERSION=$ver"         | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "HIL_DRIVER_DATE=$ts"             | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         "HIL_DRIVER_SHA256=$actualSha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     }
 } else {

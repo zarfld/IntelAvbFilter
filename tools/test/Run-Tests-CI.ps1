@@ -126,8 +126,10 @@ $UnitTests = @(
     "test_hal_unit",
     "test_hal_errors",
     "test_ioctl_abi",          # IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)
-    "test_tx_timestamp_provenance"  # Section L: pure logic + ABI static_assert (no device needed)
-                                    # Section H SKIPs gracefully when driver is absent.
+    "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
+                                     # Section H SKIPs gracefully when driver is absent.
+    # PowerShell logic tests (suffix .ps1, run via powershell.exe not compiled .exe)
+    "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1"  # TEST-PROV-L06 aggregation invariants
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require
@@ -484,12 +486,23 @@ foreach ($TestName in $TestList) {
     # HardwareMutation entries like "test_ptp_phc_stability --case UT-CORR-005"
     # embed arguments after the binary name. Split them here so the path lookup
     # uses only the binary name and arguments are passed correctly.
-    $parts   = $TestName -split '\s+', 2
-    $binName = $parts[0]
-    $testArgs = if ($parts.Count -gt 1) { $parts[1] } else { '' }
-
-    $exeName = if ($binName.EndsWith(".exe")) { $binName } else { "$binName.exe" }
-    $exePath = Join-Path $testExeDir $exeName
+    #
+    # PowerShell-native tests use the prefix "ps1:" followed by a repo-relative path.
+    # These are run via powershell.exe directly (not compiled .exe binaries).
+    $isPsTest = $TestName.StartsWith("ps1:")
+    $psScriptPath = $null
+    if ($isPsTest) {
+        $psScriptPath = Join-Path $repoRoot ($TestName.Substring(4))
+        $binName = [System.IO.Path]::GetFileNameWithoutExtension($psScriptPath)
+        $testArgs = ''
+        $exeName  = "$binName.ps1"
+    } else {
+        $parts   = $TestName -split '\s+', 2
+        $binName = $parts[0]
+        $testArgs = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+        $exeName = if ($binName.EndsWith(".exe")) { $binName } else { "$binName.exe" }
+    }
+    $exePath = if ($isPsTest) { $psScriptPath } else { Join-Path $testExeDir $exeName }
 
     # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
     if ($driverLost) {
@@ -508,7 +521,6 @@ foreach ($TestName in $TestList) {
 
     if (-not (Test-Path $exePath)) {
         if ($IsMandatorySuite) {
-            # Binary missing on a mandatory suite = build broke — report FAIL, not SKIP.
             Write-Fail "$exeName [BUILD-FAIL] binary not found at $exePath — mandatory test suite requires this binary"
             $failedTests++
             $totalTests++
@@ -523,8 +535,7 @@ foreach ($TestName in $TestList) {
 
     $totalTests++
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    # Use binary name only in log filename (args may contain spaces/special chars).
-    $logStem = $binName -replace '\.exe$',''
+    $logStem = $binName -replace '\.(exe|ps1)$',''
     $logFile = Join-Path $logsDir "${logStem}.exe_${timestamp}.log"
 
     Write-Host "`n  => $exeName$(if ($testArgs) { " $testArgs" } else { '' })" -ForegroundColor Cyan
@@ -532,10 +543,22 @@ foreach ($TestName in $TestList) {
     # --- Lifecycle snapshot BEFORE ---
     $lcyBefore = Get-AvbLifecycleSnapshot
 
-    # Run the binary with timeout via Start-Process + WaitForExit.
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName  = $exePath
-    $psi.Arguments = $testArgs  # empty string if no args
+    # Run the test.  PowerShell scripts use powershell.exe; .exe binaries use Start-Process.
+    if ($isPsTest) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName  = 'powershell.exe'
+        $psi.Arguments = "-ExecutionPolicy Bypass -NonInteractive -File `"$psScriptPath`""
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.UseShellExecute = $false
+    } else {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName  = $exePath
+        $psi.Arguments = $testArgs
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.UseShellExecute = $false
+    }
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.UseShellExecute = $false

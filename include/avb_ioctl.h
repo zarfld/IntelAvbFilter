@@ -277,10 +277,33 @@ typedef struct AVB_AUX_TIMESTAMP_REQUEST {
  */
 #define AVB_TX_PROV_UNAVAILABLE           0u  /* hardware not ready; no timestamp available */
 #define AVB_TX_PROV_PRE_SEND_PHC          1u  /* SYSTIM sampled BEFORE NdisFSendNetBufferLists — not an egress timestamp */
-#define AVB_TX_PROV_SOFTWARE_FALLBACK     2u  /* wall-clock fallback (SYSTIM_RC_SW_OK) — correct ns domain but not hardware MMIO */
+#define AVB_TX_PROV_SOFTWARE_FALLBACK     2u  /* wall-clock fallback (SYSTIME_RC_SW_OK) — correct ns domain but not hardware MMIO */
 #define AVB_TX_PROV_NDIS_TX_COMPLETION    3u  /* NDIS 6.82 TaggedTransmitHw (slot 26) from FilterSendNetBufferListsComplete */
 #define AVB_TX_PROV_VERIFIED_HARDWARE_TX  4u  /* hardware egress latch read from TXSTMPL/TXSTMPH FIFO after send-complete */
 #define AVB_RX_PROV_HARDWARE_REGISTER     5u  /* hardware RX timestamp read from RXSTMPL/H register pair (not a TX event) */
+
+/* ---- Single-atomic packed record: timestamp + provenance in one LONGLONG ----
+ * Stored in AVB_DEVICE_CONTEXT::last_ndis_tx_record (volatile LONGLONG).
+ * Atomic read-modify-write via InterlockedExchange64 — no separate provenance field,
+ * no write-ordering or reader-retry needed, concurrent writers safe (last wins).
+ *
+ * Bit layout (ULONGLONG view):
+ *   Bits 63-61 : provenance (3 bits; AVB_TX_PROV_* values 0-7)
+ *   Bits 60-0  : timestamp_ns (61 bits; max 2.305e18 ns > today's Unix+TAI ~1.79e18 ns)
+ *
+ * Zero value = no record (cleared by GET_TX_TIMESTAMP or context zeroing).
+ * When ts_ns == 0: pack always produces 0 (prov irrelevant). */
+#define AVB_TX_RECORD_PROV_SHIFT  61ULL
+#define AVB_TX_RECORD_PROV_MASK   ((ULONGLONG)0x7 << 61)
+#define AVB_TX_RECORD_TS_MASK     (~AVB_TX_RECORD_PROV_MASK)
+/* Pack ts+prov into a record; yields 0 when ts==0 regardless of prov. */
+#define AVB_TX_RECORD_PACK(ts_ns, prov)  \
+    ((LONGLONG)( (ULONGLONG)(ts_ns) != 0ULL                                              \
+        ? ((ULONGLONG)(ts_ns) & AVB_TX_RECORD_TS_MASK) |                                 \
+          (((ULONGLONG)(prov) & 0x7ULL) << AVB_TX_RECORD_PROV_SHIFT)                     \
+        : 0ULL ))
+#define AVB_TX_RECORD_GET_TS(r)    ((ULONGLONG)((LONGLONG)(r)) & AVB_TX_RECORD_TS_MASK)
+#define AVB_TX_RECORD_GET_PROV(r)  ((avb_u32)(((ULONGLONG)((LONGLONG)(r))) >> AVB_TX_RECORD_PROV_SHIFT))
 
 /* TX timestamp retrieval (TXSTMPL/H registers)
  * Read TX timestamp from hardware FIFO.
