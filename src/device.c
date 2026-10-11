@@ -32,7 +32,15 @@ IntelAvbFilterFastIoDeviceControl(
     UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(DeviceObject);
 
-    /* Only accelerate these hot-path IOCTLs; let everything else go via IRP. */
+    /* Only accelerate these hot-path IOCTLs; let everything else go via IRP.
+     *
+     * ARCHITECTURE NOTE: returning TRUE here for IOCTL_AVB_GET_TX_TIMESTAMP
+     * means ALL user-mode GET_TX_TIMESTAMP calls are handled entirely in FastIo
+     * and NEVER reach the IRP dispatch path in avb_integration_fixed.c.
+     * Consequence: the FIFO-polling path (ops->poll_tx_timestamp_fifo) in the
+     * IRP handler is architecturally unreachable while FastIo is registered.
+     * Any VERIFIED_HARDWARE_TX claim from poll_tx_timestamp_fifo therefore
+     * requires either disabling FastIo for this code or a dedicated design change. */
     if (IoControlCode != IOCTL_AVB_GET_TX_TIMESTAMP    &&
         IoControlCode != IOCTL_AVB_TEST_SEND_PTP        &&
         IoControlCode != IOCTL_AVB_PHC_CROSSTIMESTAMP) {
@@ -212,16 +220,27 @@ IntelAvbFilterFastIoDeviceControl(
     volatile BOOLEAN lock_held = FALSE;  /* tracked for exception-safe release */
     __try {
         PAVB_TEST_SEND_PTP_REQUEST req = (PAVB_TEST_SEND_PTP_REQUEST)OutputBuffer;
-        ProbeForWrite(req, sizeof(*req), sizeof(avb_u32));
+        /* Probe only the bytes we will actually write.  A V1 caller provides a
+         * 32-byte output buffer; probing 40 bytes (sizeof V2) would extend past the
+         * end of the user allocation and raise an exception or silently validate
+         * bytes the caller never intended to expose. */
+        ProbeForWrite(req, OutputBufferLength < sizeof(*req) ? OutputBufferLength : sizeof(*req), sizeof(avb_u32));
         ProbeForRead(InputBuffer, InputBufferLength, sizeof(avb_u32));
 
         avb_u32 seq_id = ((PAVB_TEST_SEND_PTP_REQUEST)InputBuffer)->sequence_id;
 
         /* IOCTL-entry PHC snapshot — captured before ring/buffer setup.
-         * This is the reference for phc_at_send_ns (distinct from captureTs below,
-         * which is captured just before NdisFSendNetBufferLists).
-         * phcEntryFromHw tracks the SOURCE so we can ensure captureTs uses the same
-         * source — mixing SYSTIM nanoseconds with QPC ticks in the delta is invalid. */
+         * FAIL CLOSED: if get_systime() returns 0 or unavailable, leave phcEntryTs=0.
+         * Never write raw QPC ticks to fields documented as nanoseconds.
+         *
+         * NOTE: I219 get_systime() has two internal software-fallback paths that
+         * return rc=0 with a KeQuerySystemTime-derived value instead of hardware
+         * SYSTIM:  (a) MMIO read failure → FILETIME-epoch nanoseconds (wrong epoch),
+         * (b) SYSTIM counter frozen at 0 → UNIX-epoch wall-clock nanoseconds.
+         * Case (a) is prevented by the hw_state BAR guard in AvbSendPtpCore (IRP path).
+         * Case (b) is accepted here as a legitimate I219 architectural limitation;
+         * the value is in the correct ns domain and advancing, making it usable for
+         * temporal ordering even if not from the hardware free-running counter. */
         ULONG64 phcEntryTs = 0;
         BOOLEAN phcEntryFromHw = FALSE;
         {
@@ -231,10 +250,8 @@ IntelAvbFilterFastIoDeviceControl(
                 phcEntryFromHw = TRUE;
             }
         }
-        if (!phcEntryFromHw) {
-            LARGE_INTEGER epc = KeQueryPerformanceCounter(NULL);
-            phcEntryTs = (ULONG64)epc.QuadPart;
-        }
+        /* No QPC fallback: if phcEntryTs==0 after the get_systime attempt, both
+         * timestamps remain 0 and ts_provenance will be set to UNAVAILABLE below. */
 
         /* Acquire a pre-allocated ring slot (same logic as IRP path). */
         int ring_slot = -1;
@@ -286,33 +303,26 @@ IntelAvbFilterFastIoDeviceControl(
         InterlockedIncrement(&ctx->test_packets_pending);
 
         /* Pre-send PHC snapshot — captured just before NdisFSendNetBufferLists.
-         * UNIT CONSISTENCY: if phcEntryTs came from SYSTIM (phcEntryFromHw==TRUE),
-         * captureTs must also come from SYSTIM.  If phcEntryTs fell back to QPC,
-         * captureTs must also use QPC.  Mixing SYSTIM nanoseconds with QPC ticks
-         * would make the delta (captureTs - phcEntryTs) meaningless. */
+         * FAIL CLOSED: both timestamps must come from get_systime() (SYSTIM domain, ns).
+         * Never write raw QPC ticks to ns fields. */
         ULONG64 captureTs = 0;
         BOOLEAN captureFromHw = FALSE;
         if (phcEntryFromHw) {
-            /* Entry snapshot succeeded via SYSTIM; try SYSTIM for pre-send too. */
+            /* Entry succeeded via get_systime; try get_systime for pre-send too. */
             const intel_device_ops_t *ops = intel_get_device_ops(ctx->intel_device.device_type);
             if (ops && ops->get_systime &&
                 ops->get_systime(&ctx->intel_device, &captureTs) == 0 && captureTs != 0) {
                 captureFromHw = TRUE;
             }
             if (!captureFromHw) {
-                /* SYSTIM unavailable for pre-send snapshot; fall back to QPC and
-                 * ALSO re-take entry snapshot as QPC to keep units consistent. */
-                LARGE_INTEGER epc2 = KeQueryPerformanceCounter(NULL);
-                phcEntryTs      = (ULONG64)epc2.QuadPart;
-                phcEntryFromHw  = FALSE;
-                LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
-                captureTs       = (ULONG64)pc.QuadPart;
+                /* Pre-send SYSTIM unavailable; cannot pair with the entry snapshot.
+                 * Zero both to fail closed — provenance will be UNAVAILABLE. */
+                phcEntryTs     = 0;
+                phcEntryFromHw = FALSE;
+                captureTs      = 0;
             }
-        } else {
-            /* Entry snapshot used QPC; use QPC for pre-send too (consistent units). */
-            LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
-            captureTs = (ULONG64)pc.QuadPart;
         }
+        /* No QPC fallback branch: if phcEntryFromHw==FALSE, captureTs stays 0. */
         InterlockedExchange64(&ctx->last_ndis_tx_timestamp, (LONGLONG)captureTs);
 
         /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
@@ -326,7 +336,10 @@ IntelAvbFilterFastIoDeviceControl(
         req->phc_at_send_ns  = phcEntryTs;
         req->packets_sent    = 1;
         req->status          = (avb_u32)NDIS_STATUS_SUCCESS;
-        avb_u32 prov = phcEntryFromHw ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_SOFTWARE_FALLBACK;
+        /* PRE_SEND_PHC: both snapshots are non-zero SYSTIM values in the same ns domain.
+         * UNAVAILABLE: at least one snapshot is 0 (get_systime unavailable or returned 0). */
+        avb_u32 prov = (phcEntryTs != 0 && captureTs != 0)
+                       ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_UNAVAILABLE;
         if (OutputBufferLength >= sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
             req->ts_provenance = prov;
             req->_reserved     = 0;

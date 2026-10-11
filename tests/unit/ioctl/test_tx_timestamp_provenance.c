@@ -53,7 +53,10 @@ typedef ULONG NDIS_STATUS;
 #include "../../../include/avb_ioctl.h"
 
 /* =========================================================================
- * TEST-PROV-L05: Compile-time struct layout assertions
+ * TEST-PROV-L05: Compile-time struct layout and ABI assertions.
+ *
+ * Category: Pure compile-time.  No device required.
+ * Exercises: shared production struct layout; avb_ioctl.h constants.
  * =========================================================================*/
 static_assert(
     offsetof(AVB_TX_TIMESTAMP_REQUEST, ts_provenance) ==
@@ -70,10 +73,17 @@ static_assert(
         offsetof(AVB_TEST_SEND_PTP_REQUEST, phc_at_send_ns),
     "TEST-PROV-L05: timestamp_ns and phc_at_send_ns must be at distinct offsets");
 
-static_assert(sizeof(AVB_TX_TIMESTAMP_REQUEST)   == 32u, "TEST-PROV-L05: V2 size check");
-static_assert(sizeof(AVB_TEST_SEND_PTP_REQUEST)  == 40u, "TEST-PROV-L05: V2 size check");
-static_assert(AVB_TX_TIMESTAMP_REQUEST_V1_SIZE   == 24u, "TEST-PROV-L05: V1 size check");
-static_assert(AVB_TEST_SEND_PTP_REQUEST_V1_SIZE  == 32u, "TEST-PROV-L05: V1 size check");
+/* V1 sizes must match the pre-extension struct sizes exactly. */
+static_assert(AVB_TX_TIMESTAMP_REQUEST_V1_SIZE   == 24u, "TEST-PROV-L05: V1 size mismatch");
+static_assert(AVB_TEST_SEND_PTP_REQUEST_V1_SIZE  == 32u, "TEST-PROV-L05: V1 size mismatch");
+/* V2 sizes = V1 + 4 (ts_provenance) + 4 (_reserved) = V1 + 8. */
+static_assert(sizeof(AVB_TX_TIMESTAMP_REQUEST)   == AVB_TX_TIMESTAMP_REQUEST_V1_SIZE  + 8u, "TEST-PROV-L05: V2 must be V1 + 8");
+static_assert(sizeof(AVB_TEST_SEND_PTP_REQUEST)  == AVB_TEST_SEND_PTP_REQUEST_V1_SIZE + 8u, "TEST-PROV-L05: V2 must be V1 + 8");
+/* ts_provenance and _reserved must be the final 8 bytes (4+4, naturally aligned). */
+static_assert(offsetof(AVB_TX_TIMESTAMP_REQUEST, ts_provenance) + sizeof(avb_u32) + sizeof(avb_u32)
+              == sizeof(AVB_TX_TIMESTAMP_REQUEST), "TEST-PROV-L05: V2 tail fields not at end");
+static_assert(offsetof(AVB_TEST_SEND_PTP_REQUEST, ts_provenance) + sizeof(avb_u32) + sizeof(avb_u32)
+              == sizeof(AVB_TEST_SEND_PTP_REQUEST), "TEST-PROV-L05: V2 tail fields not at end");
 static_assert(AVB_TX_PROV_UNAVAILABLE            == 0u,  "TEST-PROV-L05: constant");
 static_assert(AVB_TX_PROV_PRE_SEND_PHC           == 1u,  "TEST-PROV-L05: constant");
 static_assert(AVB_TX_PROV_SOFTWARE_FALLBACK      == 2u,  "TEST-PROV-L05: constant");
@@ -502,23 +512,29 @@ static void test_h02(HANDLE hDev, bool driver_present)
 }
 
 /* -------------------------------------------------------------------------
- * TEST-PROV-H03: Multi-adapter isolation (hardware-integrated).
+ * TEST-PROV-H03: Multi-adapter context isolation (hardware-integrated).
  *
- * Two handles bound to different adapters must each have an independently
- * operating SEND_PTP path.  Isolation is verified by checking that:
- *   (a) each handle's SEND_PTP succeeds independently, and
- *   (b) they report independent provenance tags (not shared state).
- * We do NOT compare VID/DID values copied from ENUM_ADAPTERS to verify
- * routing — that only checks enumeration, not actual IOCTL dispatch.
+ * Category: Windows device contract + per-adapter state isolation.
+ *           Requires >=2 adapters; SKIP otherwise.
+ *
+ * SEND_PTP on h0 stores a timestamp in h0's adapter context (adapter 0).
+ * GET_TX_TIMESTAMP on h1 (adapter 1) reads adapter 1's context, which was
+ * NOT written by h0's SEND_PTP.  If both adapters share a single context,
+ * h1 would return valid==1 after h0's send — exposing the routing fault.
+ *
+ * NOTE: dual SEND_PTP success alone does NOT prove per-adapter isolation.
+ * Both SEND_PTP calls could target the same FsContext (adapter 0) and still
+ * succeed.  This test uses cross-handle GET_TX_TIMESTAMP to independently
+ * observe the per-context timestamp state.
  *
  * SKIP if fewer than 2 adapters are enumerated.
  * -------------------------------------------------------------------------*/
 static void test_h03(HANDLE hDev, bool driver_present)
 {
-    printf("\n[TEST-PROV-H03] Multi-adapter isolation (hardware-integrated)\n");
+    printf("\n[TEST-PROV-H03] Multi-adapter context isolation via cross-handle GET_TX_TIMESTAMP\n");
     if (!driver_present) { tc_skip("TEST-PROV-H03", "driver absent"); return; }
 
-    /* Check adapter count */
+    /* Enumerate adapters */
     int adapter_count = 0;
     for (int idx = 0; idx < 16; idx++) {
         AVB_ENUM_REQUEST er = {0};
@@ -552,38 +568,51 @@ static void test_h03(HANDLE hDev, bool driver_present)
         return;
     }
 
-    /* Send via h0 and h1 independently; both must succeed (or both fail for
-     * hardware reasons — link down).  Asymmetric failures indicate routing issues. */
-    AVB_TEST_SEND_PTP_REQUEST r0 = {0}; r0.sequence_id = 0xB300;
-    AVB_TEST_SEND_PTP_REQUEST r1 = {0}; r1.sequence_id = 0xB301;
+    /* Step 1: Drain any stale timestamp on h1's context before the test. */
+    {
+        AVB_TX_TIMESTAMP_REQUEST drain = {0};
+        DWORD dbr = 0;
+        DeviceIoControl(h1, IOCTL_AVB_GET_TX_TIMESTAMP,
+                        &drain, sizeof(drain), &drain, sizeof(drain), &dbr, NULL);
+    }
+
+    /* Step 2: Send PTP packet via h0 (adapter 0 context). */
+    AVB_TEST_SEND_PTP_REQUEST s0 = {0};
+    s0.sequence_id = 0xB300;
     DWORD br = 0;
-    BOOL ok0 = DeviceIoControl(h0, IOCTL_AVB_TEST_SEND_PTP,
-                                &r0, sizeof(r0), &r0, sizeof(r0), &br, NULL);
-    BOOL ok1 = DeviceIoControl(h1, IOCTL_AVB_TEST_SEND_PTP,
-                                &r1, sizeof(r1), &r1, sizeof(r1), &br, NULL);
+    BOOL send_ok = DeviceIoControl(h0, IOCTL_AVB_TEST_SEND_PTP,
+                                    &s0, sizeof(s0), &s0, sizeof(s0), &br, NULL);
 
-    CloseHandle(h0); CloseHandle(h1);
+    /* Step 3: Read GET_TX_TIMESTAMP on h1 (adapter 1 context) immediately.
+     * If contexts are isolated, h1 must return valid==0 (adapter 1 was not
+     * written by h0's SEND_PTP).  If contexts are shared, h1 returns valid==1. */
+    AVB_TX_TIMESTAMP_REQUEST g1 = {0};
+    DWORD gbr = 0;
+    BOOL get_ok = DeviceIoControl(h1, IOCTL_AVB_GET_TX_TIMESTAMP,
+                                   &g1, sizeof(g1), &g1, sizeof(g1), &gbr, NULL);
 
-    if (!ok0 && !ok1) {
-        tc_skip("TEST-PROV-H03", "both SEND_PTP failed (link down?) — cannot verify isolation");
+    CloseHandle(h0);
+    CloseHandle(h1);
+
+    if (!send_ok) {
+        tc_skip("TEST-PROV-H03", "SEND_PTP on h0 failed (adapter 0 link down / not ready)");
         return;
     }
-    if (ok0 != ok1) {
+    if (!get_ok) {
+        tc_fail("TEST-PROV-H03", "GET_TX_TIMESTAMP on h1 IOCTL failed");
+        return;
+    }
+
+    if (g1.valid != 0) {
         char msg[128];
-        (void)sprintf(msg, "asymmetric SEND_PTP (ok0=%d ok1=%d) — possible routing fault", ok0, ok1);
+        (void)sprintf(msg,
+            "GET_TX_TIMESTAMP on h1 (adapter 1) returned valid=1 after SEND_PTP on h0 (adapter 0) — "
+            "adapters appear to share the same context (routing fault)");
         tc_fail("TEST-PROV-H03", msg);
         return;
     }
-    /* Both succeeded: verify each reports a valid provenance (not UNAVAILABLE) */
-    bool prov0_ok = (r0.ts_provenance == AVB_TX_PROV_PRE_SEND_PHC ||
-                     r0.ts_provenance == AVB_TX_PROV_SOFTWARE_FALLBACK);
-    bool prov1_ok = (r1.ts_provenance == AVB_TX_PROV_PRE_SEND_PHC ||
-                     r1.ts_provenance == AVB_TX_PROV_SOFTWARE_FALLBACK);
-    if (!prov0_ok || !prov1_ok) {
-        tc_fail("TEST-PROV-H03", "unexpected provenance from one of the handles");
-        return;
-    }
-    tc_pass("TEST-PROV-H03", "both handles sent independently with valid provenance");
+    tc_pass("TEST-PROV-H03",
+            "GET_TX_TIMESTAMP on h1 returned valid=0 after SEND_PTP on h0 — adapter contexts are isolated");
 }
 
 /* -------------------------------------------------------------------------
@@ -637,6 +666,152 @@ static void test_h04(HANDLE hDev, bool driver_present)
     }
 }
 
+/* -------------------------------------------------------------------------
+ * TEST-PROV-H05: V1/V2 ABI regression — bytesReturned and canary bytes.
+ *
+ * Category: Windows device contract (FastIo + METHOD_BUFFERED semantics).
+ *           Requires driver; hardware state irrelevant (adapter 0 used).
+ *
+ * Verifies:
+ *   V1 client (24-byte GET_TX_TIMESTAMP buffer):
+ *     - DeviceIoControl succeeds (not STATUS_BUFFER_TOO_SMALL)
+ *     - bytesReturned == 24 (driver does not over-report)
+ *     - canary bytes at offsets 24–31 are unchanged (driver does not overwrite)
+ *   V2 client (32-byte GET_TX_TIMESTAMP buffer):
+ *     - bytesReturned == 32
+ *   V1 client (32-byte SEND_PTP output buffer):
+ *     - DeviceIoControl succeeds
+ *     - bytesReturned == 32
+ *     - canary bytes at offsets 32–39 unchanged
+ *   V2 client (40-byte SEND_PTP output buffer):
+ *     - bytesReturned == 40
+ * -------------------------------------------------------------------------*/
+static void test_h05(bool driver_present)
+{
+    printf("\n[TEST-PROV-H05] V1/V2 ABI bytesReturned and canary bytes\n");
+    if (!driver_present) { tc_skip("TEST-PROV-H05", "driver absent"); return; }
+
+    HANDLE h = open_dev();
+    if (h == INVALID_HANDLE_VALUE) {
+        tc_fail("TEST-PROV-H05", "CreateFileW failed");
+        return;
+    }
+    if (!bind_adapter(h, 0)) {
+        CloseHandle(h);
+        tc_fail("TEST-PROV-H05", "OPEN_ADAPTER failed");
+        return;
+    }
+
+    bool all_ok = true;
+
+    /* ---- GET_TX_TIMESTAMP V1 (24 bytes) ---- */
+    {
+        /* Allocate 40 bytes; place canary pattern in bytes 24-39 */
+        uint8_t buf[40];
+        memset(buf, 0xCD, sizeof(buf));
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TX_TIMESTAMP,
+                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),   /* in: V2 size */
+                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,   /* out: V1 size */
+                                  &br, NULL);
+        if (!ok) {
+            tc_fail("TEST-PROV-H05", "GET_TX_TIMESTAMP V1 buffer rejected (STATUS_BUFFER_TOO_SMALL?)");
+            all_ok = false;
+        } else if (br != AVB_TX_TIMESTAMP_REQUEST_V1_SIZE) {
+            char msg[128];
+            (void)sprintf(msg, "GET_TX_TIMESTAMP V1: bytesReturned=%lu expected %u", br, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE);
+            tc_fail("TEST-PROV-H05", msg);
+            all_ok = false;
+        } else {
+            /* Verify canary at bytes 24-39 is untouched */
+            bool canary_ok = true;
+            for (int i = AVB_TX_TIMESTAMP_REQUEST_V1_SIZE; i < (int)sizeof(buf); i++) {
+                if (buf[i] != 0xCD) { canary_ok = false; break; }
+            }
+            if (!canary_ok) {
+                tc_fail("TEST-PROV-H05", "GET_TX_TIMESTAMP V1: driver wrote past V1 buffer (canary corrupted)");
+                all_ok = false;
+            }
+        }
+    }
+
+    /* ---- GET_TX_TIMESTAMP V2 (32 bytes) ---- */
+    {
+        uint8_t buf[32];
+        memset(buf, 0, sizeof(buf));
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_TX_TIMESTAMP,
+                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
+                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
+                                  &br, NULL);
+        if (!ok) {
+            tc_fail("TEST-PROV-H05", "GET_TX_TIMESTAMP V2 buffer failed");
+            all_ok = false;
+        } else if (br != sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
+            char msg[128];
+            (void)sprintf(msg, "GET_TX_TIMESTAMP V2: bytesReturned=%lu expected %u", br, (unsigned)sizeof(AVB_TX_TIMESTAMP_REQUEST));
+            tc_fail("TEST-PROV-H05", msg);
+            all_ok = false;
+        }
+    }
+
+    /* ---- SEND_PTP V1 (32-byte output buffer) ---- */
+    {
+        uint8_t buf[48];
+        memset(buf, 0xCD, sizeof(buf));
+        /* Zero out V1 input fields so the driver can process the request */
+        memset(buf, 0, AVB_TEST_SEND_PTP_REQUEST_V1_SIZE);
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(h, IOCTL_AVB_TEST_SEND_PTP,
+                                  buf, AVB_TEST_SEND_PTP_REQUEST_V1_SIZE,  /* in: V1 */
+                                  buf, AVB_TEST_SEND_PTP_REQUEST_V1_SIZE,  /* out: V1 */
+                                  &br, NULL);
+        if (!ok) {
+            tc_fail("TEST-PROV-H05", "SEND_PTP V1 buffer rejected (STATUS_BUFFER_TOO_SMALL?)");
+            all_ok = false;
+        } else if (br != AVB_TEST_SEND_PTP_REQUEST_V1_SIZE) {
+            char msg[128];
+            (void)sprintf(msg, "SEND_PTP V1: bytesReturned=%lu expected %u", br, AVB_TEST_SEND_PTP_REQUEST_V1_SIZE);
+            tc_fail("TEST-PROV-H05", msg);
+            all_ok = false;
+        } else {
+            /* Verify canary at bytes 32-47 is untouched */
+            bool canary_ok = true;
+            for (int i = AVB_TEST_SEND_PTP_REQUEST_V1_SIZE; i < (int)sizeof(buf); i++) {
+                if (buf[i] != 0xCD) { canary_ok = false; break; }
+            }
+            if (!canary_ok) {
+                tc_fail("TEST-PROV-H05", "SEND_PTP V1: driver wrote past V1 buffer (canary corrupted)");
+                all_ok = false;
+            }
+        }
+    }
+
+    /* ---- SEND_PTP V2 (40-byte output buffer) ---- */
+    {
+        uint8_t buf[40];
+        memset(buf, 0, sizeof(buf));
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(h, IOCTL_AVB_TEST_SEND_PTP,
+                                  buf, sizeof(AVB_TEST_SEND_PTP_REQUEST),
+                                  buf, sizeof(AVB_TEST_SEND_PTP_REQUEST),
+                                  &br, NULL);
+        if (!ok) {
+            tc_fail("TEST-PROV-H05", "SEND_PTP V2 buffer failed");
+            all_ok = false;
+        } else if (br != sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
+            char msg[128];
+            (void)sprintf(msg, "SEND_PTP V2: bytesReturned=%lu expected %u", br, (unsigned)sizeof(AVB_TEST_SEND_PTP_REQUEST));
+            tc_fail("TEST-PROV-H05", msg);
+            all_ok = false;
+        }
+    }
+
+    CloseHandle(h);
+    if (all_ok)
+        tc_pass("TEST-PROV-H05", "V1/V2 bytesReturned correct; V1 canary bytes untouched");
+}
+
 /* =========================================================================
  * main
  * =========================================================================*/
@@ -645,10 +820,10 @@ int main(int argc, char *argv[])
     (void)argc; (void)argv;
 
     printf("=======================================================================\n");
-    printf("TX Timestamp Provenance Regression — TEST-PROV-L01..L05, H01..H04\n");
+    printf("TX Timestamp Provenance Regression — TEST-PROV-L01..L05, H01..H05\n");
     printf("  Verifies: #149 (REQ-F-PTP-007) | Corrects: #199, #317 false-positives\n");
     printf("  Section L: pure-logic mock tests (always run)\n");
-    printf("  Section H: hardware-integrated (SKIP when driver absent; FAIL on setup error)\n");
+    printf("  Section H: Windows device contract + hardware (SKIP when driver absent; FAIL on setup error)\n");
     printf("=======================================================================\n");
 
     /* Section L: always runs regardless of hardware */
@@ -666,6 +841,7 @@ int main(int argc, char *argv[])
     test_h02(hDev, driver_present);
     test_h03(hDev, driver_present);
     test_h04(hDev, driver_present);
+    test_h05(driver_present);
 
     if (hDev != INVALID_HANDLE_VALUE) CloseHandle(hDev);
 

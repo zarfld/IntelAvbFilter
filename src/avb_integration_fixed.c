@@ -1627,21 +1627,20 @@ NTSTATUS AvbSendPtpCore(
     NTSTATUS status = STATUS_SUCCESS;
 
     /* IOCTL-entry PHC snapshot — captured before any pool/ring work.
-     * UNIT CONSISTENCY: phcEntryFromHw tracks the source so preSendTs uses the
-     * same source — mixing SYSTIM nanoseconds with QPC ticks is invalid. */
+     * BAR guard: only call get_systime() when MMIO is mapped, preventing the
+     * I219 MMIO-failure fallback (KeQuerySystemTime FILETIME-epoch ns, wrong epoch).
+     * FAIL CLOSED: if SYSTIM unavailable, phcEntryTs stays 0. Never write QPC ticks
+     * to fields documented as nanoseconds. */
     ULONG64 phcEntryTs = 0;
     BOOLEAN phcEntryFromHw = FALSE;
-    {
+    if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
         const intel_device_ops_t *eops = intel_get_device_ops(activeContext->intel_device.device_type);
         if (eops && eops->get_systime &&
             eops->get_systime(&activeContext->intel_device, &phcEntryTs) == 0 && phcEntryTs != 0) {
             phcEntryFromHw = TRUE;
         }
     }
-    if (!phcEntryFromHw) {
-        LARGE_INTEGER epc = KeQueryPerformanceCounter(NULL);
-        phcEntryTs = (ULONG64)epc.QuadPart;
-    }
+    /* No QPC fallback: phcEntryTs stays 0 if get_systime was unavailable. */
 
     // Verify NDIS pools are allocated
     if (!activeContext->nbl_pool_handle || !activeContext->nb_pool_handle ||
@@ -1724,27 +1723,22 @@ NTSTATUS AvbSendPtpCore(
             }
         }
         if (preSendTs == 0) {
-            /* SYSTIM unavailable for pre-send; re-take entry as QPC for unit consistency. */
-            LARGE_INTEGER epc2 = KeQueryPerformanceCounter(NULL);
-            phcEntryTs     = (ULONG64)epc2.QuadPart;
+            /* SYSTIM unavailable for pre-send; cannot pair with entry snapshot.
+             * Fail closed — zero both to avoid QPC ticks in ns fields. */
+            phcEntryTs     = 0;
             phcEntryFromHw = FALSE;
-            LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
-            preSendTs = (ULONG64)pc.QuadPart;
+            preSendTs      = 0;
         }
-    } else {
-        /* Entry used QPC; use QPC for pre-send (consistent units). */
-        LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
-        preSendTs = (ULONG64)pc.QuadPart;
     }
+    /* No QPC fallback branch: if phcEntryFromHw==FALSE, preSendTs stays 0. */
     (void)InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, (LONGLONG)preSendTs);
     test_req->timestamp_ns   = preSendTs;
     test_req->phc_at_send_ns = phcEntryTs;
-    /* Write V2 fields only if the output buffer accommodates them.
-     * out_len < V2 size means a V1-compiled caller; writing beyond V1 would
-     * write past the end of the I/O manager's system buffer. */
+    /* PRE_SEND_PHC: both snapshots are non-zero hardware/get_systime values in ns.
+     * UNAVAILABLE: at least one is 0 — SYSTIM was inaccessible (no QPC fallback). */
     if (out_len >= sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
-        test_req->ts_provenance = phcEntryFromHw ? AVB_TX_PROV_PRE_SEND_PHC
-                                                 : AVB_TX_PROV_SOFTWARE_FALLBACK;
+        test_req->ts_provenance = (phcEntryTs != 0 && preSendTs != 0)
+                                  ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_UNAVAILABLE;
         test_req->_reserved     = 0;
     }
 
@@ -3240,16 +3234,21 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
     case IOCTL_AVB_GET_RX_TIMESTAMP:
         {
             DEBUGP(DL_TRACE, "IOCTL_AVB_GET_RX_TIMESTAMP called\n");
-            if (inLen < sizeof(AVB_TX_TIMESTAMP_REQUEST) || outLen < sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
+            /* Accept V1 minimum (24 bytes); ts_provenance written only for V2 buffers. */
+            if (inLen < AVB_TX_TIMESTAMP_REQUEST_V1_SIZE ||
+                outLen < AVB_TX_TIMESTAMP_REQUEST_V1_SIZE) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 PAVB_TX_TIMESTAMP_REQUEST rx_req = (PAVB_TX_TIMESTAMP_REQUEST)buf;
+                BOOLEAN has_v2 = (outLen >= sizeof(AVB_TX_TIMESTAMP_REQUEST));
 
-                // Initialize output fields
+                // Initialize V1 fields always
                 rx_req->timestamp_ns = 0;
                 rx_req->valid = 0;
                 rx_req->sequence_id = 0;
                 rx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                // V2 fields initialized only when buffer is large enough
+                if (has_v2) { rx_req->ts_provenance = AVB_TX_PROV_UNAVAILABLE; rx_req->_reserved = 0; }
 
                 PAVB_DEVICE_CONTEXT activeContext = currentContext;
 
@@ -3259,9 +3258,6 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     rx_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
                     status = STATUS_DEVICE_NOT_READY;
                 } else {
-                    // HAL-compliant MMIO register read (RXSTMPL/H).
-                    // read_rx_timestamp() reads a plain register pair — NOT a FIFO.
-                    // Contract: rc == 0 → register read OK (valid = 1); rc < 0 → MMIO error.
                     const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
                     if (!ops || !ops->read_rx_timestamp) {
                         DEBUGP(DL_ERROR, "Device does not support RX timestamp register read\n");
@@ -3275,11 +3271,13 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             rx_req->status = (avb_u32)NDIS_STATUS_FAILURE;
                             status = STATUS_UNSUCCESSFUL;
                         } else {
-                            // rc == 0: RXSTMPL/H read successfully (plain register, no FIFO semantics)
                             rx_req->valid = 1;
                             rx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            /* RXSTMPL/H is a hardware-latched register pair — same
+                             * class as TXSTMPL/H.  No packet correlation is guaranteed. */
+                            if (has_v2) rx_req->ts_provenance = AVB_TX_PROV_VERIFIED_HARDWARE_TX;
                             status = STATUS_SUCCESS;
-                            info = sizeof(*rx_req);
+                            info = has_v2 ? sizeof(*rx_req) : AVB_TX_TIMESTAMP_REQUEST_V1_SIZE;
                             DEBUGP(DL_TRACE, "RX timestamp retrieved: 0x%016llX (%llu ns)\n",
                                    (unsigned long long)rx_req->timestamp_ns,
                                    (unsigned long long)rx_req->timestamp_ns);
