@@ -257,7 +257,17 @@ typedef struct AVB_AUX_TIMESTAMP_REQUEST {
     avb_u32 status;            /* out: NDIS_STATUS value */
 } AVB_AUX_TIMESTAMP_REQUEST, *PAVB_AUX_TIMESTAMP_REQUEST;
 
-/* Timestamp provenance: how a TX timestamp was obtained.
+/* ---- ABI versioning for provenance-extended structs ----
+ * V1 sizes match the structs as shipped before the ts_provenance extension.
+ * Drivers MUST accept V1-sized buffers and only write provenance when the
+ * caller provided a V2-sized buffer.  Callers compiled against old headers
+ * send V1 buffers and receive correct V1 responses; callers compiled against
+ * new headers send V2 buffers and receive provenance too.
+ */
+#define AVB_TX_TIMESTAMP_REQUEST_V1_SIZE    24u   /* sizeof without ts_provenance/_reserved */
+#define AVB_TEST_SEND_PTP_REQUEST_V1_SIZE   32u   /* sizeof without ts_provenance/_reserved */
+
+/* ---- Timestamp provenance constants ----
  * Returned in ts_provenance fields of AVB_TX_TIMESTAMP_REQUEST and
  * AVB_TEST_SEND_PTP_REQUEST.
  *

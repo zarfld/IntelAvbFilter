@@ -431,10 +431,12 @@ VOID AvbPostTimestampEvent(    _In_ PVOID AvbContextParam,    _In_ avb_u32 event
  */
 /* Fast-path SEND_PTP core — called by both the IRP handler and FastIoDeviceControl.
  * Caller must have validated activeContext != NULL and test_req != NULL / accessible.
- * On success: test_req->timestamp_ns, ->packets_sent, ->status are written. */
+ * On success: test_req->timestamp_ns, ->phc_at_send_ns, ->packets_sent, ->status are written.
+ * V2 fields (ts_provenance/_reserved) written only when out_len >= sizeof(AVB_TEST_SEND_PTP_REQUEST). */
 NTSTATUS AvbSendPtpCore(
     _In_ PAVB_DEVICE_CONTEXT activeContext,
-    _Inout_ PAVB_TEST_SEND_PTP_REQUEST test_req
+    _Inout_ PAVB_TEST_SEND_PTP_REQUEST test_req,
+    _In_ ULONG out_len
 );
 
 NTSTATUS AvbHandleDeviceIoControl(

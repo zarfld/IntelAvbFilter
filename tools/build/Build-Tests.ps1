@@ -287,6 +287,14 @@ $AllTests = @(
         Description = "Verification: SSOT Magic Number Static Analysis (TEST-REGS-002, closes #305)"
     },
     @{
+        Name = "test_tx_timestamp_provenance"
+        Type = "cl"
+        Source = "tests/unit/ioctl/test_tx_timestamp_provenance.c"
+        Output = "test_tx_timestamp_provenance.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Description = "Provenance regression: TEST-PROV-L01..L05, H01..H04 (corrects #199/#317 false-positives)"
+    },
+    @{
         Name = "test_scripts_consolidate"
         Type = "cl"
         Source = "tests/verification/scripts/test_scripts_consolidate.c"

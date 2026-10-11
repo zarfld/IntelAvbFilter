@@ -85,11 +85,13 @@ $className = if ($ClassNameOverride) {
 #   [CLEANUP_FAILED] TC-TAS-001: hardware state unknown
 #   [PASS]           UT-CORR-007 Jitter: ...   (PHC stability tests use UT-CORR-NNN IDs)
 #   [FAIL]           UT-CORR-009 Driver Reload: ...
+#   [PASS]           TEST-PROV-L01: ...        (provenance regression tests)
+#   [SKIP]           TEST-PROV-H03: ...
 # ---------------------------------------------------------------------------
 # Pattern captures: status (PASS/FAIL/SKIP/BLOCKED/CLEANUP_FAILED)
-#                   test ID (TC-* or UT-CORR-* with optional /adapter:N)
+#                   test ID (TC-*, UT-CORR-*, or TEST-PROV-* with optional /adapter:N)
 #                   reason text
-$pattern = '^\s*\[(PASS|FAIL|SKIP|BLOCKED|CLEANUP_FAILED)\]\s+((?:TC-|UT-CORR-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
+$pattern = '^\s*\[(PASS|FAIL|SKIP|BLOCKED|CLEANUP_FAILED)\]\s+((?:TC-|UT-CORR-|TEST-PROV-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
 $entries = [System.Collections.Generic.List[hashtable]]::new()
 
 $content = Get-Content $LogFile -ErrorAction SilentlyContinue

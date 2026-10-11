@@ -117,14 +117,16 @@ static bool read_phc(HANDLE hDev, uint32_t adapter_idx, uint64_t *out_ns)
 }
 
 /* -------------------------------------------------------------------------
- * Open device helper (used by UT-CORR-009 after reload)
+ * Open device helper — FILE_SHARE_READ|WRITE allows concurrent handles from
+ * the same process (needed for per-adapter handle isolation tests).
  * -------------------------------------------------------------------------*/
 static HANDLE open_device(void)
 {
     return CreateFileW(
         DEVICE_PATH_W,
         GENERIC_READ | GENERIC_WRITE,
-        0, NULL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
         NULL);
@@ -718,13 +720,23 @@ static void test_ut_corr_008(HANDLE hDev, uint32_t adapter_idx)
     printf("  Delta stats: mean=%.1f ns  stddev=%.1f ns  (threshold: stddev < %llu ns)\n",
            mean, stddev, (unsigned long long)DELTA_JITTER_NS);
 
-    bool passed = (out_of_range == 0) && (stddev <= (double)DELTA_JITTER_NS);
+    /* Sub-test A: PRE_SEND_PHC coherence — kernel overhead between two IOCTL snapshots.
+     * Checks that:
+     *   (a) all deltas are non-negative (ordering preserved), and
+     *   (b) stddev < 100 ns (timing is stable).
+     * This is NOT hardware TX egress vs PHC; it measures kernel IOCTL setup overhead. */
+    bool coherence_ok = (out_of_range == 0) && (stddev <= (double)DELTA_JITTER_NS);
     if (out_of_range > 0)
-        printf("  FAIL: %d sample(s) with |delta| >= 1 us\n", out_of_range);
+        printf("  FAIL: %d sample(s) with delta out of [0, 1µs) — ordering violated or excessive overhead\n",
+               out_of_range);
     if (stddev > (double)DELTA_JITTER_NS)
         printf("  FAIL: stddev %.1f ns > %llu ns threshold\n",
                stddev, (unsigned long long)DELTA_JITTER_NS);
-    tc_result("UT-CORR-008 Burst: 100 pairs, all |delta|<1us, stddev<100ns", passed);
+    tc_result("UT-CORR-008 Burst: PRE_SEND_PHC coherence (100 pairs, IOCTL-entry vs pre-send)", coherence_ok);
+
+    /* Sub-test B: hardware TX-PHC correlation — requires VERIFIED_HARDWARE_TX.
+     * Currently always SKIP because SEND_PTP returns PRE_SEND_PHC. */
+    tc_skip("UT-CORR-008 Hardware TX-PHC burst correlation: VERIFIED_HARDWARE_TX unavailable (not #328/#199 close criteria)");
 }
 
 /* =========================================================================
@@ -805,8 +817,9 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
     /* --- Pre-condition: record device-node accessibility and adapter identities --- */
     {
         HANDLE hProbe = CreateFileW(L"\\\\.\\IntelAvbFilter",
-                                    GENERIC_READ | GENERIC_WRITE, 0, NULL,
-                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                                    GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hProbe == INVALID_HANDLE_VALUE) {
             printf("  [PRE] \\\\.\\ IntelAvbFilter inaccessible before reload (Win32 error %lu)\n",
                    GetLastError());
@@ -817,7 +830,11 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
         CloseHandle(hProbe);
     }
 
-    /* --- Step 1: Verify TX-PHC correlation before reload --- */
+    /* --- Step 1: Verify PHC accessibility before reload (lifecycle check only).
+     * We do NOT check TX-PHC correlation before reload because send_ptp_get_tx
+     * returns a PRE_SEND_PHC snapshot, not a hardware egress timestamp.
+     * Checking |tx1 - phc1_send| < 1µs would measure kernel overhead, not
+     * hardware correlation, and is not a meaningful pre-reload baseline. --- */
     HANDLE hDev1 = open_device();
     if (hDev1 == INVALID_HANDLE_VALUE) {
         printf("  FAIL: Cannot open device before reload (error %lu)\n", GetLastError());
@@ -827,31 +844,22 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
 
     uint64_t phc1 = 0;
     bool phc1_ok  = read_phc(hDev1, 0, &phc1);
-    uint64_t tx1  = 0;
-    uint64_t phc1_send = 0;  /* atomic PHC ref from kernel IOCTL entry */
-    bool tx1_ok   = phc1_ok && send_ptp_get_tx(hDev1, 0, 0x900U, &tx1, &phc1_send);
-
     if (phc1_ok) {
-        printf("  Before reload: phc1 = %llu ns\n", (unsigned long long)phc1);
-        if (tx1_ok) {
-            int64_t d = (int64_t)(tx1 - phc1_send);
-            printf("  Before reload: tx1  = %llu ns  (delta = %lld ns)\n",
-                   (unsigned long long)tx1, (long long)d);
-            if (d < 0 || (uint64_t)d >= DELTA_1US_NS) {
-                printf("  FAIL: Initial |tx1 - phc1_send| = %lld ns >= 1 us before reload\n",
-                       (long long)d);
-                CloseHandle(hDev1);
-                tc_result("UT-CORR-009 TX-PHC correlation valid before reload", false);
-                return;
-            }
-        } else {
-            printf("  NOTE: TX unavailable before reload (link down?)\n");
-        }
+        printf("  Before reload: phc1 = %llu ns (PHC reachable)\n", (unsigned long long)phc1);
     } else {
-        printf("  NOTE: PHC read failed before reload\n");
+        printf("  Before reload: PHC not readable (adapter may not be PTP-ready)\n");
     }
-
-    /* Must close handle before stopping service */
+    /* TX availability is noted but not required as a pre-reload baseline. */
+    {
+        uint64_t tx1 = 0, phc1_send = 0;
+        bool tx1_ok = send_ptp_get_tx(hDev1, 0, 0x900U, &tx1, &phc1_send);
+        if (tx1_ok) {
+            printf("  Before reload: TX SEND_PTP OK (prov=PRE_SEND_PHC, delta=%lld ns)\n",
+                   (long long)(tx1 - phc1_send));
+        } else {
+            printf("  Before reload: TX SEND_PTP not available (link down / not ready)\n");
+        }
+    }
     CloseHandle(hDev1);
 
     /* --- Step 2: Restart service --- */
@@ -909,55 +917,49 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
         return;
     }
 
-    /* --- Step 4: Verify TX-PHC correlation after reload --- */
-    (void)vids_after; (void)dids_after; /* identity recorded above for log; future diff TBD */
+    /* --- Step 4: Verify PHC accessibility and adapter count after reload.
+     * Hardware TX-PHC correlation cannot be verified with PRE_SEND_PHC timestamps.
+     * The lifecycle test reports:
+     *   PASS  — device reachable, adapter count maintained, PHC readable.
+     *   FAIL  — device unreachable, adapter count decreased, or PHC not readable.
+     *   SKIP  — TX SEND_PTP is reported separately for information only.
+     * --- */
+    (void)vids_after; (void)dids_after;
     uint64_t phc2 = 0;
     bool phc2_ok  = read_phc(hDev2, 0, &phc2);
-    uint64_t tx2  = 0;
-    uint64_t phc2_send = 0;  /* atomic PHC ref from kernel IOCTL entry */
-    bool tx2_ok   = phc2_ok && send_ptp_get_tx(hDev2, 0, 0x901U, &tx2, &phc2_send);
-    bool corr_ok  = true;
-    bool tx_available = false;  /* track whether TX timestamps were actually available */
 
     if (phc2_ok) {
-        printf("  After reload: phc2 = %llu ns\n", (unsigned long long)phc2);
-        if (tx2_ok) {
-            tx_available = true;
-            int64_t d = (int64_t)(tx2 - phc2_send);
-            printf("  After reload: tx2  = %llu ns  (delta = %lld ns)\n",
-                   (unsigned long long)tx2, (long long)d);
-            if (d < 0 || (uint64_t)d >= DELTA_1US_NS) {
-                printf("  FAIL: |tx2 - phc2_send| = %lld ns >= 1 us after reload\n", (long long)d);
-                corr_ok = false;
-            }
-        } else {
-            /* TX unavailable is explicitly distinguished from a correlation failure.
-             * Report as SKIP_TX rather than silently treating as correlated. */
-            printf("  NOTE: TX timestamp unavailable after reload (link down / HW ts not ready)\n");
-            printf("  NOTE: PHC readback succeeded; TX-PHC correlation cannot be verified\n");
-        }
+        printf("  After reload: phc2 = %llu ns (PHC reachable)\n", (unsigned long long)phc2);
     } else {
-        printf("  FAIL: PHC not readable after driver reload\n");
+        printf("  After reload: PHC not readable\n");
+    }
+
+    /* Record TX availability for information; do not gate lifecycle verdict on it. */
+    {
+        uint64_t tx2 = 0, phc2_send = 0;
+        bool tx2_ok = phc2_ok && send_ptp_get_tx(hDev2, 0, 0x901U, &tx2, &phc2_send);
+        if (tx2_ok) {
+            printf("  After reload: TX SEND_PTP OK (prov=PRE_SEND_PHC, delta=%lld ns)\n",
+                   (long long)(tx2 - phc2_send));
+        } else {
+            printf("  After reload: TX SEND_PTP not available (link down / not ready)\n");
+        }
     }
 
     CloseHandle(hDev2);
 
-    /* Verdict: TX-PHC correlation is only claimed when TX timestamps were actually
-     * captured and verified.  When TX is unavailable, the test is a PARTIAL result —
-     * device-node access and PHC readback are verified, but the core correlation
-     * claim cannot be made.  This is reported as a separate SKIP-labelled verdict
-     * so it does not inflate the PASS count. */
-    if (!phc2_ok) {
+    /* Lifecycle verdict — independent of TX correlation claim. */
+    bool lifecycle_passed = phc2_ok && ((int)count_after >= (int)adapter_count_before);
+    if (!phc2_ok)
         printf("  FAIL: PHC not readable after reload\n");
-        tc_result("UT-CORR-009 Driver Reload (FAIL - PHC not readable)", false);
-    } else if (!tx_available) {
-        /* PHC readable, adapter count OK, but TX timestamps absent — cannot verify correlation */
-        tc_skip("UT-CORR-009 Driver Reload: PHC valid but TX unavailable — correlation unverified");
-    } else {
-        /* Full verification: PHC + TX correlation */
-        bool passed = corr_ok && ((int)count_after >= (int)adapter_count_before);
-        tc_result("UT-CORR-009 Driver Reload: re-open OK, PHC valid, TX-PHC correlated", passed);
-    }
+    if ((int)count_after < (int)adapter_count_before)
+        printf("  FAIL: Adapter count decreased after reload (%u → %d)\n",
+               adapter_count_before, count_after);
+    tc_result("UT-CORR-009 Driver Lifecycle: re-open, PHC reachable, adapter count maintained",
+              lifecycle_passed);
+
+    /* Hardware TX-PHC correlation: SKIP — requires VERIFIED_HARDWARE_TX. */
+    tc_skip("UT-CORR-009 Hardware TX-PHC correlation after reload: VERIFIED_HARDWARE_TX unavailable (not #328/#199 close criteria)");
 }
 
 /* =========================================================================
@@ -1113,11 +1115,12 @@ int main(int argc, char *argv[])
             continue;
         }
         HANDLE hAdap = CreateFileW(DEVICE_PATH_W, GENERIC_READ | GENERIC_WRITE,
-                                   0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hAdap == INVALID_HANDLE_VALUE) {
             printf("\n--- Adapter %d / %d: per-adapter handle open failed (error %lu) ---\n",
                    ai, adapter_count - 1, GetLastError());
-            tc_skip("UT-CORR-007/008: per-adapter handle open failed");
+            tc_result("UT-CORR-007/008: per-adapter handle open failed", false);
             continue;
         }
         AVB_OPEN_REQUEST ai_open = {0};

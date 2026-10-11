@@ -346,7 +346,8 @@ int main(int argc, char *argv[])
     HANDLE hDev = CreateFileW(
         DEVICE_PATH_W,
         GENERIC_READ | GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, NULL);
     if (hDev == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "FATAL: Cannot open %ls  error=%lu\n",
@@ -388,7 +389,8 @@ int main(int argc, char *argv[])
     /* We need the VID/DID from the earlier enumeration to call OPEN_ADAPTER.
      * Re-enumerate using a fresh handle (cheap — only scans once per adapter). */
     HANDLE hEnum2 = CreateFileW(DEVICE_PATH_W, GENERIC_READ | GENERIC_WRITE,
-                                0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hEnum2 == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "FATAL: Cannot re-open device for OPEN_ADAPTER: error=%lu\n",
                 GetLastError());
@@ -413,7 +415,8 @@ int main(int argc, char *argv[])
 
         /* Open a dedicated handle for this adapter */
         HANDLE h = CreateFileW(DEVICE_PATH_W, GENERIC_READ | GENERIC_WRITE,
-                               0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h == INVALID_HANDLE_VALUE) {
             printf("  [WARN] Adapter %u: CreateFileW for dedicated handle failed (error=%lu) — skipping\n",
                    adp_idx, GetLastError());
