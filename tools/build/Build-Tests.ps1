@@ -2146,6 +2146,33 @@ Write-Host ""
 # Return to original directory
 Pop-Location
 
+# --- Compute SHA256 of built driver SYS for HIL identity verification ---
+# Written to build\driver-sha256.txt so the HIL job can pass it via
+# HIL_EXPECTED_DRIVER_SHA256 env var to Test-DriverPreFlight.ps1.
+$sysPaths = @(
+    Join-Path $RepoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter.sys",
+    Join-Path $RepoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys"
+)
+$sysSha256 = $null
+foreach ($sysPath in $sysPaths) {
+    if (Test-Path $sysPath) {
+        $sysSha256 = (Get-FileHash $sysPath -Algorithm SHA256).Hash
+        Write-Host ""
+        Write-Host "[SHA256] $sysPath" -ForegroundColor Cyan
+        Write-Host "         $sysSha256" -ForegroundColor Cyan
+        $sha256File = Join-Path $RepoRoot "build\driver-sha256.txt"
+        "$sysSha256  $sysPath" | Set-Content -Path $sha256File -Encoding ASCII
+        Write-Host "[SHA256] Written to $sha256File" -ForegroundColor Cyan
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            "BUILD_DRIVER_SHA256=$sysSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        }
+        break
+    }
+}
+if (-not $sysSha256) {
+    Write-Host "[SHA256] WARNING: IntelAvbFilter.sys not found in build output (driver not built in this run?)" -ForegroundColor Yellow
+}
+
 # Exit with error code if any builds failed
 if ($FailCount -gt 0) {
     exit 1

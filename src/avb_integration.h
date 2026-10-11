@@ -214,14 +214,21 @@ typedef struct _AVB_DEVICE_CONTEXT {
     UCHAR source_mac[ETH_LENGTH_OF_ADDRESS];   /* 6 bytes */
     UCHAR source_mac_pad[2];                   /* pad to 8-byte alignment */
 
-    /* NDIS 6.82 TaggedTransmitHw TX timestamp
-     * Populated by FilterSendNetBufferListsComplete when igc.sys completes a
-     * test packet that had NDIS_NBL_FLAGS_CAPTURE_TIMESTAMP_ON_TRANSMIT set.
+    /* NDIS 6.82 TaggedTransmitHw TX timestamp + provenance
+     * Populated by SEND_PTP (pre-send or SW-fallback) or by FilterSendNetBufferListsComplete
+     * when igc.sys provides TaggedTransmitHw (slot 26).
      * Consumed (read-then-zero) by IOCTL_AVB_GET_TX_TIMESTAMP.
-     * Zero means "no timestamp available yet".
-     * Access protocol: InterlockedExchange64 for both store and load-then-zero.
-     * Reinterpreted as ULONG64; LONGLONG declaration satisfies Interlocked ABI. */
+     * Zero timestamp means "no timestamp available yet".
+     *
+     * Write protocol: write provenance BEFORE timestamp so a reader that sees
+     * a non-zero timestamp always finds a valid provenance.
+     * Read protocol: read-clear timestamp first; then read-clear provenance.
+     * Both use Interlocked operations for acquire/release ordering.
+     *
+     * last_ndis_tx_provenance values: AVB_TX_PROV_* (avb_ioctl.h).
+     * Default (zeroed context): AVB_TX_PROV_UNAVAILABLE (0). */
     volatile LONGLONG last_ndis_tx_timestamp;
+    volatile LONG     last_ndis_tx_provenance;   /* AVB_TX_PROV_* */
 
     /* Pre-allocated NBL ring for fast IOCTL_AVB_TEST_SEND_PTP path.
      * Slots are allocated at context creation (AvbCreateMinimalContext) and

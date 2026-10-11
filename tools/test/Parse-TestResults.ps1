@@ -109,14 +109,22 @@ $content | ForEach-Object {
         $fullId = $Matches[2].Trim()
         $reason = $Matches[3].Trim()
 
-        # Normalise BLOCKED and CLEANUP_FAILED to FAIL for JUnit aggregation
-        # but preserve the original status in the reason for visibility
+        # ── JUnit normalisation ──────────────────────────────────────────
+        # FAIL,  BLOCKED,      CLEANUP_FAILED, INFRA_FAILURE → JUnit failure
+        # SKIP,  SKIP_UNSUPPORTED               → JUnit skipped
+        # PASS                                  → JUnit passed
+        #
+        # NOTE: INFRA_FAILURE must NEVER produce a JUnit passing test case.
+        # A test that reports INFRA_FAILURE is evidence that the HIL runner,
+        # driver, or test binary is broken — treat it as hard failure.
         $junitStatus = switch ($status) {
-            'BLOCKED'        { 'FAIL' }
-            'CLEANUP_FAILED' { 'FAIL' }
-            default          { $status }
+            'BLOCKED'          { 'FAIL' }
+            'CLEANUP_FAILED'   { 'FAIL' }
+            'INFRA_FAILURE'    { 'FAIL' }
+            'SKIP_UNSUPPORTED' { 'SKIP' }
+            default            { $status }
         }
-        $reasonWithStatus = if ($status -in @('BLOCKED','CLEANUP_FAILED')) {
+        $reasonWithStatus = if ($status -in @('BLOCKED','CLEANUP_FAILED','INFRA_FAILURE')) {
             "[$status] $reason"
         } else { $reason }
 
@@ -132,10 +140,10 @@ $content | ForEach-Object {
 
         $entries.Add(@{
             Status     = $junitStatus        # PASS/FAIL/SKIP (JUnit-normalised)
-            OrigStatus = $status             # original: BLOCKED/CLEANUP_FAILED preserved
+            OrigStatus = $status             # original status preserved
             TcBase     = $tcBase
             Adapter    = $adapter
-            Reason     = $reasonWithStatus   # includes [BLOCKED]/[CLEANUP_FAILED] prefix
+            Reason     = $reasonWithStatus
         })
     }
 }

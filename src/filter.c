@@ -1887,15 +1887,16 @@ Return Value:
                        CurrNbl, (ULONG)CurrNbl->NblFlags, ts);
 
                 if (ts != 0) {
-                    // TaggedTransmitHw: igc.sys provided a hardware-latched timestamp.
-                    // This is more accurate than the pre-send SYSTIM; upgrade the stored value.
+                    /* TaggedTransmitHw: igc.sys provided a hardware-latched timestamp.
+                     * Write provenance BEFORE timestamp (same ordering as SEND_PTP path). */
+                    (void)InterlockedExchange(&avbCtx->last_ndis_tx_provenance,
+                                              (LONG)AVB_TX_PROV_NDIS_TX_COMPLETION);
                     (void)InterlockedExchange64(&avbCtx->last_ndis_tx_timestamp, (LONGLONG)ts);
-                    DEBUGP(DL_TRACE, "TX timestamp upgraded to TaggedTransmitHw: 0x%016I64X\n", ts);
+                    DEBUGP(DL_TRACE, "TX timestamp upgraded to NDIS_TX_COMPLETION: 0x%016I64X\n", ts);
                 } else {
-                    // slot 26 = 0: igc.sys does not support TaggedTransmitHw.
-                    // The pre-send SYSTIM (captured in IOCTL_AVB_TEST_SEND_PTP) is already in
-                    // last_ndis_tx_timestamp — do NOT overwrite with 0.
-                    DEBUGP(DL_TRACE, "TX timestamp: slot26=0, keeping pre-send SYSTIM\n");
+                    /* slot 26 = 0: igc.sys does not support TaggedTransmitHw.
+                     * The pre-send value (with its provenance) was already stored; leave both. */
+                    DEBUGP(DL_TRACE, "TX timestamp: slot26=0, keeping pre-send value and provenance\n");
                 }
             }
 #endif /* NDIS_SUPPORT_NDIS680 */

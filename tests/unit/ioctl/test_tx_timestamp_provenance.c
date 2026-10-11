@@ -406,109 +406,170 @@ static bool bind_adapter(HANDLE h, uint32_t idx)
 }
 
 /* -------------------------------------------------------------------------
- * TEST-PROV-H01: Self-comparison regression (hardware-integrated).
+ * TEST-PROV-H01: Self-comparison regression (hardware-integrated, per-adapter).
  *
- * Over 20 SEND_PTP calls, no packet may have timestamp_ns == phc_at_send_ns
- * while ts_provenance == PRE_SEND_PHC (which would indicate the driver
- * assigned the same variable to both fields).  Legitimate equal values from
- * a SOFTWARE_FALLBACK are acceptable because QPC resolution is coarser.
+ * For each enumerated adapter: if SEND_PTP returns PRE_SEND_PHC, the two
+ * snapshot fields must be distinct (separate reads captured a real delta).
+ *
+ * Hardware SKIP invariant: no packets on a capable adapter (INTEL_CAP_BASIC_1588)
+ * is FAIL, not SKIP.  Genuine SKIP_UNSUPPORTED requires adapter without 1588.
  * -------------------------------------------------------------------------*/
 static void test_h01(HANDLE hDev, bool driver_present)
 {
-    printf("\n[TEST-PROV-H01] Self-comparison regression (hardware-integrated)\n");
+    printf("\n[TEST-PROV-H01] Self-comparison regression (hardware-integrated, per-adapter)\n");
     if (!driver_present) { tc_skip("TEST-PROV-H01", "driver absent"); return; }
 
-    HANDLE h = open_dev();
-    if (h == INVALID_HANDLE_VALUE) {
-        tc_fail("TEST-PROV-H01", "CreateFileW failed — driver present but device inaccessible");
-        return;
-    }
-    if (!bind_adapter(h, 0)) {
-        CloseHandle(h);
-        tc_fail("TEST-PROV-H01", "OPEN_ADAPTER failed — setup error");
-        return;
-    }
-
-    int sent = 0, self_cmp_phc = 0;
-    for (int i = 0; i < 20; i++) {
-        AVB_TEST_SEND_PTP_REQUEST r = {0};
-        r.sequence_id = (avb_u32)(0xB100 + i);
+    int total_adapters = 0;
+    for (int adp = 0; adp < 8; adp++) {
+        AVB_ENUM_REQUEST er = {0};
+        er.index = (avb_u32)adp;
         DWORD br = 0;
-        if (!DeviceIoControl(h, IOCTL_AVB_TEST_SEND_PTP,
-                             &r, sizeof(r), &r, sizeof(r), &br, NULL) ||
-            r.status != NDIS_STATUS_SUCCESS || r.packets_sent == 0)
+        if (!DeviceIoControl(hDev, IOCTL_AVB_ENUM_ADAPTERS,
+                             &er, sizeof(er), &er, sizeof(er), &br, NULL) ||
+            er.status != NDIS_STATUS_SUCCESS)
+            break;
+        total_adapters++;
+
+        char tc_id[64];
+        (void)sprintf(tc_id, "TEST-PROV-H01/adapter:%d", adp);
+
+        HANDLE h = open_dev();
+        if (h == INVALID_HANDLE_VALUE) {
+            printf("  [FAIL] %s: CreateFileW failed\n", tc_id);
+            s_total++; s_failed++;
             continue;
-        sent++;
-        /* Self-comparison bug: identical values with PRE_SEND_PHC provenance */
-        if (r.timestamp_ns == r.phc_at_send_ns &&
-            r.ts_provenance == AVB_TX_PROV_PRE_SEND_PHC) {
-            self_cmp_phc++;
-            printf("    i=%d ts=%llu == phc=%llu prov=PRE_SEND_PHC  [SELF-COMPARISON BUG]\n",
-                   i, (unsigned long long)r.timestamp_ns, (unsigned long long)r.phc_at_send_ns);
+        }
+        if (!bind_adapter(h, (uint32_t)adp)) {
+            CloseHandle(h);
+            printf("  [FAIL] %s: OPEN_ADAPTER failed\n", tc_id);
+            s_total++; s_failed++;
+            continue;
+        }
+
+        bool has_1588 = (er.capabilities & INTEL_CAP_BASIC_1588) != 0;
+        int sent = 0, ioctl_fail = 0, self_cmp_phc = 0;
+
+        for (int i = 0; i < 20; i++) {
+            AVB_TEST_SEND_PTP_REQUEST r = {0};
+            r.sequence_id = (avb_u32)(0xD100 + adp * 20 + i);
+            DWORD sbr = 0;
+            BOOL ok = DeviceIoControl(h, IOCTL_AVB_TEST_SEND_PTP,
+                                      &r, sizeof(r), &r, sizeof(r), &sbr, NULL);
+            if (!ok || r.status != NDIS_STATUS_SUCCESS) { ioctl_fail++; continue; }
+            if (r.packets_sent == 0) { ioctl_fail++; continue; }
+            sent++;
+            if (r.timestamp_ns == r.phc_at_send_ns &&
+                r.ts_provenance == AVB_TX_PROV_PRE_SEND_PHC) {
+                self_cmp_phc++;
+                printf("    i=%d SELF-COMPARISON: ts=%llu phc=%llu prov=PRE_SEND_PHC\n",
+                       i, (unsigned long long)r.timestamp_ns, (unsigned long long)r.phc_at_send_ns);
+            }
+        }
+        CloseHandle(h);
+
+        s_total++;
+        if (sent == 0) {
+            if (has_1588) {
+                /* No packets on a capable adapter = FAIL (not SKIP) */
+                s_failed++;
+                printf("  [FAIL] %s: no packets sent on INTEL_CAP_BASIC_1588 adapter "
+                       "(IOCTL errors: %d) — hardware initialization failure\n",
+                       tc_id, ioctl_fail);
+            } else {
+                s_skipped++;
+                printf("  [SKIP] %s: SKIP_UNSUPPORTED — adapter lacks INTEL_CAP_BASIC_1588 "
+                       "(caps=0x%08X)\n", tc_id, (unsigned)er.capabilities);
+            }
+        } else if (self_cmp_phc > 0) {
+            s_failed++;
+            printf("  [FAIL] %s: %d/%d packets had PRE_SEND_PHC self-comparison bug\n",
+                   tc_id, self_cmp_phc, sent);
+        } else {
+            s_passed++;
+            printf("  [PASS] %s: %d packets, no PRE_SEND_PHC self-comparison\n", tc_id, sent);
         }
     }
-    CloseHandle(h);
 
-    if (sent == 0) {
-        tc_skip("TEST-PROV-H01", "no packets sent (adapter not PTP-ready)");
-        return;
-    }
-    if (self_cmp_phc > 0) {
-        char msg[128];
-        (void)sprintf(msg, "%d/%d packets had PRE_SEND_PHC + identical timestamps", self_cmp_phc, sent);
-        tc_fail("TEST-PROV-H01", msg);
-    } else {
-        tc_pass("TEST-PROV-H01", "no PRE_SEND_PHC self-comparison detected");
+    if (total_adapters == 0) {
+        tc_fail("TEST-PROV-H01", "no adapters enumerated (INFRA_FAILURE)");
     }
 }
 
 /* -------------------------------------------------------------------------
- * TEST-PROV-H02: Masquerade regression (hardware-integrated).
+ * TEST-PROV-H02: Masquerade regression (hardware-integrated, per-adapter).
  *
  * SEND_PTP must never return ts_provenance == VERIFIED_HARDWARE_TX or
  * NDIS_TX_COMPLETION; those are only valid from GET_TX_TIMESTAMP.
+ * Hardware SKIP invariant: capable adapter with 0 packets = FAIL.
  * -------------------------------------------------------------------------*/
 static void test_h02(HANDLE hDev, bool driver_present)
 {
-    printf("\n[TEST-PROV-H02] Masquerade regression (hardware-integrated)\n");
+    printf("\n[TEST-PROV-H02] Masquerade regression (hardware-integrated, per-adapter)\n");
     if (!driver_present) { tc_skip("TEST-PROV-H02", "driver absent"); return; }
 
-    HANDLE h = open_dev();
-    if (h == INVALID_HANDLE_VALUE) {
-        tc_fail("TEST-PROV-H02", "CreateFileW failed");
-        return;
-    }
-    if (!bind_adapter(h, 0)) {
-        CloseHandle(h);
-        tc_fail("TEST-PROV-H02", "OPEN_ADAPTER failed");
-        return;
-    }
-
-    int sent = 0, masquerade = 0;
-    for (int i = 0; i < 20; i++) {
-        AVB_TEST_SEND_PTP_REQUEST r = {0};
-        r.sequence_id = (avb_u32)(0xB200 + i);
+    int total_adapters = 0;
+    for (int adp = 0; adp < 8; adp++) {
+        AVB_ENUM_REQUEST er = {0};
+        er.index = (avb_u32)adp;
         DWORD br = 0;
-        if (!DeviceIoControl(h, IOCTL_AVB_TEST_SEND_PTP,
-                             &r, sizeof(r), &r, sizeof(r), &br, NULL) ||
-            r.status != NDIS_STATUS_SUCCESS || r.packets_sent == 0)
-            continue;
-        sent++;
-        if (r.ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX ||
-            r.ts_provenance == AVB_TX_PROV_NDIS_TX_COMPLETION) {
-            masquerade++;
-            printf("    i=%d ts_provenance=%u [MASQUERADE]\n", i, (unsigned)r.ts_provenance);
+        if (!DeviceIoControl(hDev, IOCTL_AVB_ENUM_ADAPTERS,
+                             &er, sizeof(er), &er, sizeof(er), &br, NULL) ||
+            er.status != NDIS_STATUS_SUCCESS)
+            break;
+        total_adapters++;
+
+        char tc_id[64];
+        (void)sprintf(tc_id, "TEST-PROV-H02/adapter:%d", adp);
+
+        HANDLE h = open_dev();
+        if (h == INVALID_HANDLE_VALUE) {
+            printf("  [FAIL] %s: CreateFileW failed\n", tc_id); s_total++; s_failed++; continue;
+        }
+        if (!bind_adapter(h, (uint32_t)adp)) {
+            CloseHandle(h);
+            printf("  [FAIL] %s: OPEN_ADAPTER failed\n", tc_id); s_total++; s_failed++; continue;
+        }
+
+        bool has_1588 = (er.capabilities & INTEL_CAP_BASIC_1588) != 0;
+        int sent = 0, masquerade = 0;
+
+        for (int i = 0; i < 20; i++) {
+            AVB_TEST_SEND_PTP_REQUEST r = {0};
+            r.sequence_id = (avb_u32)(0xD200 + adp * 20 + i);
+            DWORD sbr = 0;
+            BOOL ok = DeviceIoControl(h, IOCTL_AVB_TEST_SEND_PTP,
+                                      &r, sizeof(r), &r, sizeof(r), &sbr, NULL);
+            if (!ok || r.status != NDIS_STATUS_SUCCESS || r.packets_sent == 0) continue;
+            sent++;
+            if (r.ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX ||
+                r.ts_provenance == AVB_TX_PROV_NDIS_TX_COMPLETION) {
+                masquerade++;
+                printf("    i=%d ts_provenance=%u [MASQUERADE]\n", i, (unsigned)r.ts_provenance);
+            }
+        }
+        CloseHandle(h);
+
+        s_total++;
+        if (sent == 0) {
+            if (has_1588) {
+                s_failed++;
+                printf("  [FAIL] %s: no packets sent on capable adapter\n", tc_id);
+            } else {
+                s_skipped++;
+                printf("  [SKIP] %s: SKIP_UNSUPPORTED (caps=0x%08X)\n", tc_id, (unsigned)er.capabilities);
+            }
+        } else if (masquerade > 0) {
+            s_failed++;
+            printf("  [FAIL] %s: %d/%d packets claimed hardware provenance from SEND_PTP\n",
+                   tc_id, masquerade, sent);
+        } else {
+            s_passed++;
+            printf("  [PASS] %s: %d packets, no masquerade\n", tc_id, sent);
         }
     }
-    CloseHandle(h);
 
-    if (sent == 0) { tc_skip("TEST-PROV-H02", "no packets sent"); return; }
-    if (masquerade > 0) {
-        char msg[128];
-        (void)sprintf(msg, "%d/%d packets claimed hardware provenance from SEND_PTP", masquerade, sent);
-        tc_fail("TEST-PROV-H02", msg);
-    } else {
-        tc_pass("TEST-PROV-H02", "SEND_PTP never claims VERIFIED_HARDWARE_TX or NDIS_TX_COMPLETION");
+    if (total_adapters == 0) {
+        tc_fail("TEST-PROV-H02", "no adapters enumerated (INFRA_FAILURE)");
     }
 }
 
@@ -833,6 +894,99 @@ static void test_h05(bool driver_present)
         tc_pass("TEST-PROV-H05", "V1/V2 bytesReturned correct; V1 canary bytes untouched");
 }
 
+/* -------------------------------------------------------------------------
+ * TEST-PROV-H06: GET_RX_TIMESTAMP V1/V2 ABI (hardware-integrated).
+ *
+ * Category: Windows device contract — RX timestamp register ABI.
+ * Verifies:
+ *   V1 (24-byte) GET_RX_TIMESTAMP: accepted; bytesReturned==24; canary untouched.
+ *   V2 (32-byte) GET_RX_TIMESTAMP: accepted; bytesReturned==32; ts_provenance set.
+ *   V2 provenance when register readable: AVB_RX_PROV_HARDWARE_REGISTER (5).
+ *   V2 provenance when unavailable: UNAVAILABLE (0).
+ *   Never returns AVB_TX_PROV_VERIFIED_HARDWARE_TX (4) for RX path.
+ * -------------------------------------------------------------------------*/
+static void test_h06(bool driver_present)
+{
+    printf("\n[TEST-PROV-H06] GET_RX_TIMESTAMP V1/V2 ABI and provenance\n");
+    if (!driver_present) { tc_skip("TEST-PROV-H06", "driver absent"); return; }
+
+    HANDLE h = open_dev();
+    if (h == INVALID_HANDLE_VALUE) {
+        tc_fail("TEST-PROV-H06", "CreateFileW failed");
+        return;
+    }
+    if (!bind_adapter(h, 0)) {
+        CloseHandle(h);
+        tc_fail("TEST-PROV-H06", "OPEN_ADAPTER failed");
+        return;
+    }
+
+    bool all_ok = true;
+
+    /* V1 (24 bytes): driver must accept and return exactly 24 bytes */
+    {
+        uint8_t buf[40];
+        memset(buf, 0xDD, sizeof(buf));
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
+                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
+                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
+                                  &br, NULL);
+        if (!ok && GetLastError() != 0x80070057 /* INVALID_PARAMETER */) {
+            /* Some adapters don't implement RX FIFO read — STATUS_NOT_SUPPORTED is valid */
+            printf("  NOTE: GET_RX_TIMESTAMP V1 IOCTL returned error %lu (adapter may not support RX ts)\n",
+                   GetLastError());
+        } else if (ok && br != AVB_TX_TIMESTAMP_REQUEST_V1_SIZE) {
+            char msg[128];
+            (void)sprintf(msg, "GET_RX_TIMESTAMP V1: bytesReturned=%lu expected %u", br, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE);
+            tc_fail("TEST-PROV-H06", msg);
+            all_ok = false;
+        } else if (ok) {
+            /* Canary bytes 24-39 must be untouched */
+            for (int i = AVB_TX_TIMESTAMP_REQUEST_V1_SIZE; i < (int)sizeof(buf); i++) {
+                if (buf[i] != 0xDD) {
+                    tc_fail("TEST-PROV-H06", "GET_RX_TIMESTAMP V1: driver wrote past V1 buffer");
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* V2 (32 bytes): check ts_provenance is not VERIFIED_HARDWARE_TX */
+    {
+        uint8_t buf[32];
+        memset(buf, 0, sizeof(buf));
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
+                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
+                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
+                                  &br, NULL);
+        if (ok) {
+            AVB_TX_TIMESTAMP_REQUEST *rx = (AVB_TX_TIMESTAMP_REQUEST *)buf;
+            if (rx->ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
+                tc_fail("TEST-PROV-H06",
+                        "GET_RX_TIMESTAMP V2 returned VERIFIED_HARDWARE_TX (must use AVB_RX_PROV_HARDWARE_REGISTER)");
+                all_ok = false;
+            } else {
+                printf("  GET_RX_TIMESTAMP V2: valid=%u prov=%u bytesReturned=%lu\n",
+                       rx->valid, (unsigned)rx->ts_provenance, br);
+            }
+            if (br != sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
+                char msg[128];
+                (void)sprintf(msg, "GET_RX_TIMESTAMP V2: bytesReturned=%lu expected %u",
+                              br, (unsigned)sizeof(AVB_TX_TIMESTAMP_REQUEST));
+                tc_fail("TEST-PROV-H06", msg);
+                all_ok = false;
+            }
+        }
+    }
+
+    CloseHandle(h);
+    if (all_ok)
+        tc_pass("TEST-PROV-H06", "GET_RX_TIMESTAMP V1/V2 ABI correct; no VERIFIED_HARDWARE_TX on RX path");
+}
+
 /* =========================================================================
  * main
  * =========================================================================*/
@@ -841,7 +995,7 @@ int main(int argc, char *argv[])
     (void)argc; (void)argv;
 
     printf("=======================================================================\n");
-    printf("TX Timestamp Provenance Regression — TEST-PROV-L01..L05, H01..H05\n");
+    printf("TX Timestamp Provenance Regression -- TEST-PROV-L01..L06, H01..H06\n");
     printf("  Verifies: #149 (REQ-F-PTP-007) | Corrects: #199, #317 false-positives\n");
     printf("  Section L: pure-logic mock tests (always run)\n");
     printf("  Section H: Windows device contract + hardware (SKIP when driver absent; FAIL on setup error)\n");
@@ -863,6 +1017,7 @@ int main(int argc, char *argv[])
     test_h03(hDev, driver_present);
     test_h04(hDev, driver_present);
     test_h05(driver_present);
+    test_h06(driver_present);
 
     if (hDev != INVALID_HANDLE_VALUE) CloseHandle(hDev);
 

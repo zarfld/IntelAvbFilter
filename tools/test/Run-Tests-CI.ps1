@@ -480,7 +480,15 @@ Write-Step "Running $($TestList.Count) tests"
 $driverLost = $false   # set when driver becomes inaccessible mid-suite
 
 foreach ($TestName in $TestList) {
-    $exeName = if ($TestName.EndsWith(".exe")) { $TestName } else { "$TestName.exe" }
+    # Separate the binary name from any arguments embedded in the test name.
+    # HardwareMutation entries like "test_ptp_phc_stability --case UT-CORR-005"
+    # embed arguments after the binary name. Split them here so the path lookup
+    # uses only the binary name and arguments are passed correctly.
+    $parts   = $TestName -split '\s+', 2
+    $binName = $parts[0]
+    $testArgs = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+
+    $exeName = if ($binName.EndsWith(".exe")) { $binName } else { "$binName.exe" }
     $exePath = Join-Path $testExeDir $exeName
 
     # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
@@ -515,21 +523,19 @@ foreach ($TestName in $TestList) {
 
     $totalTests++
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    # Filename format matches Convert-Logs-To-JUnit.ps1 expectation: <name>.exe_YYYYMMDD_HHMMSS.log
-    $logFile   = Join-Path $logsDir "${exeName}_${timestamp}.log"
+    # Use binary name only in log filename (args may contain spaces/special chars).
+    $logStem = $binName -replace '\.exe$',''
+    $logFile = Join-Path $logsDir "${logStem}.exe_${timestamp}.log"
 
-    Write-Host "`n  => $exeName" -ForegroundColor Cyan
+    Write-Host "`n  => $exeName$(if ($testArgs) { " $testArgs" } else { '' })" -ForegroundColor Cyan
 
     # --- Lifecycle snapshot BEFORE ---
     $lcyBefore = Get-AvbLifecycleSnapshot
 
     # Run the binary with timeout via Start-Process + WaitForExit.
-    # NOTE: Start-Process does not stream stdout/stderr live; output is captured to log file.
-    # For the HardwareMandatory and HardwareMutation suites, the log file is always uploaded
-    # as a CI artifact so the absence of live output is acceptable.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName  = $exePath
-    $psi.Arguments = ($TestName -replace '^[^\s]+\s*', '')  # arguments after binary name
+    $psi.Arguments = $testArgs  # empty string if no args
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.UseShellExecute = $false

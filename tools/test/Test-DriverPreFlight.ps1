@@ -1,11 +1,16 @@
 ﻿# Test-DriverPreFlight.ps1
-# Verifies IntelAvbFilter service is Running and the device node is accessible.
-# Reports driver SYS version and current checkout SHA for build-SHA traceability.
-# Called by CI before each hardware-dependent test suite to surface driver loss
-# as a single clear failure instead of cascading into every test in the suite.
+# Verifies IntelAvbFilter service is Running, the device node is accessible,
+# and optionally verifies the installed driver SHA256 matches the expected
+# hash of the driver built from the current commit.
 #
-# Exit 0 = driver healthy; version/SHA reported to GITHUB_ENV.
-# Exit 1 = driver down; caller should abort hardware tests and reboot runner.
+# SHA256 verification:
+#   Set HIL_EXPECTED_DRIVER_SHA256 env var to the expected hash (computed at
+#   build time).  If set and the installed driver hash doesn't match, the
+#   pre-flight fails the mandatory gate — telling the operator to redeploy
+#   the driver via the authorized installation process.
+#
+# Exit 0 = driver healthy; identity reported to GITHUB_ENV.
+# Exit 1 = driver down, device-node loss, or SHA256 mismatch.
 
 $ErrorActionPreference = 'Stop'
 
@@ -16,7 +21,7 @@ function Write-Err  { param([string]$m) Write-Host "[ERROR] $m" -ForegroundColor
 Write-Host ""
 Write-Host "=== IntelAvbFilter HIL Pre-Flight Check ===" -ForegroundColor Cyan
 
-# --- 0. Driver version + build SHA traceability ---
+# --- 0. Driver identity (version + SHA256 + checkout SHA) ---
 Write-Host ""
 Write-Host "--- Driver / build identity ---"
 $drvPath = "$env:SystemRoot\System32\drivers\IntelAvbFilter.sys"
@@ -24,13 +29,36 @@ if (Test-Path $drvPath) {
     $vi  = (Get-Item $drvPath).VersionInfo
     $ver = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart).$($vi.FilePrivatePart)"
     $ts  = (Get-Item $drvPath).LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
-    Write-Ok "IntelAvbFilter.sys version : $ver  (modified: $ts)"
+    $actualSha256 = (Get-FileHash $drvPath -Algorithm SHA256).Hash
+    Write-Ok "IntelAvbFilter.sys version  : $ver  (modified: $ts)"
+    Write-Ok "IntelAvbFilter.sys SHA256   : $actualSha256"
+
+    # SHA256 comparison — fails the gate on driver/commit mismatch.
+    # Purpose: ensure the HIL runner is testing the exact binary built from
+    # this commit, not a stale installation.  Deploy the new driver via the
+    # authorized recovery-capable process before retrying.
+    $expectedSha256 = $env:HIL_EXPECTED_DRIVER_SHA256
+    if ($expectedSha256) {
+        if ($actualSha256.ToLower() -eq $expectedSha256.ToLower()) {
+            Write-Ok "SHA256 match               : installed driver matches build artifact"
+        } else {
+            Write-Err ("SHA256 MISMATCH: installed={0}  expected={1}" -f $actualSha256, $expectedSha256)
+            Write-Host "  The installed IntelAvbFilter.sys does not match the driver built from this commit." -ForegroundColor Red
+            Write-Host "  Redeploy via the authorized installation process before running hardware tests." -ForegroundColor Yellow
+            exit 1
+        }
+    } else {
+        Write-Warn "HIL_EXPECTED_DRIVER_SHA256 not set - skipping SHA256 match (set in workflow to enforce)"
+    }
+
     if ($env:GITHUB_ACTIONS -eq 'true') {
-        "HIL_DRIVER_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        "HIL_DRIVER_DATE=$ts"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "HIL_DRIVER_VERSION=$ver"        | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "HIL_DRIVER_DATE=$ts"            | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "HIL_DRIVER_SHA256=$actualSha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     }
 } else {
-    Write-Warn "IntelAvbFilter.sys not found at $drvPath"
+    Write-Err "IntelAvbFilter.sys not found at $drvPath -- driver not installed"
+    exit 1
 }
 
 try {

@@ -1651,14 +1651,30 @@ jobs:
         with:
           submodules: true
 
-      - name: Driver pre-flight — version, SHA, device node
+      - name: Build driver and test executables (from this commit)
+        id: build_driver
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: .\tools\test\Test-DriverPreFlight.ps1
-        # Hard fail — suite must not start if driver is inaccessible (#328 sentinel).
+        run: |
+          # Build the driver .SYS and test executables from the checked-out commit.
+          # Build-Tests.ps1 also computes SHA256 of the built .SYS and writes it to
+          # build\driver-sha256.txt and $env:GITHUB_OUTPUT (BUILD_DRIVER_SHA256).
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2>$null
+          if ($msbuild) {
+            $msbuild = Join-Path $msbuild "MSBuild\Current\Bin\MSBuild.exe"
+            & $msbuild IntelAvbFilter.vcxproj /p:Configuration=${{ matrix.config }} /p:Platform=x64 /v:minimal
+            if ($LASTEXITCODE -ne 0) { throw "Driver build failed" }
+          }
+          .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
 
-      - name: Build test executables (corresponds to this commit)
+      - name: Driver pre-flight — SHA256 match, service, device node
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
+        env:
+          # Pass the SHA256 computed from the build step to the pre-flight check.
+          # Pre-flight fails the gate if the installed driver doesn't match.
+          HIL_EXPECTED_DRIVER_SHA256: ${{ steps.build_driver.outputs.BUILD_DRIVER_SHA256 }}
+        run: .\tools\test\Test-DriverPreFlight.ps1
+        # Hard fail — suite must not start if driver is inaccessible (#328 sentinel)
+        # or SHA256 mismatch (stale driver installed on runner).
 
       - name: Run HIL mandatory gate tests
         id: hil_mandatory
@@ -1675,7 +1691,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: "hil-mandatory-logs-${{ matrix.nic }}-${{ matrix.config }}-${{ github.run_number }}"
-          path: logs/
+          path: |
+            logs/
+            build/driver-sha256.txt
           retention-days: 30
 
   # =========================================================================
