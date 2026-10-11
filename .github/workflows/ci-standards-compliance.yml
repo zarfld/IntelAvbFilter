@@ -1616,6 +1616,124 @@ jobs:
           sarif_file: "trivy-results.sarif"
         continue-on-error: true
 
+  # =========================================================================
+  # Hardware-in-the-Loop Mandatory Gate
+  # =========================================================================
+  # Runs on every supported self-hosted runner type (one job per NIC label).
+  # continue-on-error: false — failures block the CI gate.
+  # Tests: safe, non-mutating; driver loss = FAIL (#328 sentinel).
+  # test_tx_timestamp_provenance Section H: V1/V2 ABI canary, FastIo/IRP,
+  #   cross-handle isolation, masquerade, unavailability — all FAIL on error.
+  # Exit code 2 (SKIP_ONLY) is treated as FAIL on the HIL runner because
+  #   Section H MUST exercise the real driver.
+  #
+  # Runner labels follow the pattern [self-hosted, Windows, <nic>].
+  # Add runners for i217/i219/i210/i225 to the matrix once those machines
+  # are registered as self-hosted runners.
+  hardware-mandatory-gate:
+    name: "HIL Mandatory Gate (${{ matrix.nic }}, ${{ matrix.config }})"
+    runs-on: [self-hosted, Windows, "${{ matrix.nic }}"]
+    # FAIL blocks CI — never continue-on-error for the mandatory gate.
+    continue-on-error: false
+    timeout-minutes: 75
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: true
+      matrix:
+        nic: [i226]          # Expand to [i226, i219, i210, i225] as runners are added
+        config: [Debug]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Driver pre-flight — version, SHA, device node
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: .\tools\test\Test-DriverPreFlight.ps1
+        # Hard fail — suite must not start if driver is inaccessible (#328 sentinel).
+
+      - name: Build test executables (corresponds to this commit)
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
+
+      - name: Run HIL mandatory gate tests
+        id: hil_mandatory
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          # HardwareMandatory: binary missing = FAIL, driver loss = FAIL, SKIP_ONLY = FAIL.
+          .\tools\test\Run-Tests-CI.ps1 `
+            -Configuration ${{ matrix.config }} `
+            -Suite HardwareMandatory `
+            -TestTimeoutSeconds 300
+
+      - name: Upload HIL logs (always — needed for failure diagnosis)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: "hil-mandatory-logs-${{ matrix.nic }}-${{ matrix.config }}-${{ github.run_number }}"
+          path: logs/
+          retention-days: 30
+
+  # =========================================================================
+  # Hardware-in-the-Loop Mutation Lane
+  # =========================================================================
+  # Runs PHC epoch-reset and frequency-adjustment tests that modify hardware state.
+  # Runs ONLY after the mandatory gate passes.
+  # continue-on-error: true — mutation instability does not block the main gate.
+  # Each mutation test is responsible for restoring its hardware state before exit;
+  # CLEANUP_FAILED results halt the lane and are reported separately.
+  hardware-mutation-lane:
+    name: "HIL Mutation Lane (${{ matrix.nic }}, ${{ matrix.config }})"
+    runs-on: [self-hosted, Windows, "${{ matrix.nic }}"]
+    needs: [hardware-mandatory-gate]
+    # Mutation lane allowed to fail without blocking compliance-report.
+    continue-on-error: true
+    timeout-minutes: 45
+    if: >
+      (github.event_name == 'push' || github.event_name == 'pull_request' ||
+       github.event_name == 'workflow_dispatch') &&
+      needs.hardware-mandatory-gate.result == 'success'
+    strategy:
+      fail-fast: false   # run all mutation tests even if one fails to collect full state
+      matrix:
+        nic: [i226]
+        config: [Debug]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Driver pre-flight
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: .\tools\test\Test-DriverPreFlight.ps1
+
+      - name: Build test executables
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
+
+      - name: Run PHC mutation tests (isolated lane)
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          # HardwareMutation: PHC epoch reset + freq adjustment.
+          # Each test restores state; CLEANUP_FAILED recorded in logs.
+          .\tools\test\Run-Tests-CI.ps1 `
+            -Configuration ${{ matrix.config }} `
+            -Suite HardwareMutation `
+            -TestTimeoutSeconds 300
+
+      - name: Upload mutation lane logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: "hil-mutation-logs-${{ matrix.nic }}-${{ matrix.config }}-${{ github.run_number }}"
+          path: logs/
+          retention-days: 14
+
   # Standards Compliance Summary Report
   compliance-report:
     needs:
@@ -1628,6 +1746,7 @@ jobs:
         acceptance-tests,
         architecture-validation,
         security-scan,
+        hardware-mandatory-gate,
       ]
     name: Generate Standards Compliance Report
     runs-on: ubuntu-latest

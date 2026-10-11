@@ -23,12 +23,18 @@ param(
     # "All"               = Unit + Integration combined
     # "HardwareUnit"      = unit-level tests that need Intel NIC + driver (self-hosted runner only)
     # "HardwareIntegration" = integration-level tests that need Intel NIC + driver (self-hosted runner only)
+    # "HardwareMandatory" = safe subset of HardwareUnit that MUST pass on every supported HIL runner.
+    #                       Missing binary = FAIL.  Driver loss mid-suite = FAIL (not cascading SKIP).
+    #                       Use this suite for the mandatory CI quality gate.
+    # "HardwareMutation"  = PHC/TAS mutation tests (epoch-reset, freq-adj) that modify hardware state.
+    #                       Run in an isolated lane after HardwareMandatory; continue-on-error in CI.
     #
     # SAFETY NOTE: test_s3_sleep_wake (TC-S3-002) sends the machine into S3 sleep via
     # SetSuspendState. It is intentionally absent from ALL automated suites including
-    # HardwareUnit and HardwareIntegration. Run it manually on a dedicated test machine.
+    # HardwareMandatory and HardwareMutation. Run it manually on a dedicated test machine.
     [Parameter(Mandatory=$false)]
-    [ValidateSet("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration")]
+    [ValidateSet("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration",
+                 "HardwareMandatory", "HardwareMutation")]
     [string]$Suite = "Unit",
 
     # Override the test list entirely (names without .exe extension).
@@ -37,7 +43,12 @@ param(
 
     # Stop after first failing test instead of running all.
     [Parameter(Mandatory=$false)]
-    [switch]$FailFast
+    [switch]$FailFast,
+
+    # Per-test timeout in seconds.  0 = no timeout (use for suites without hardware).
+    # Default 300 s (5 min) for hardware suites; 60 s for unit-only suites.
+    [Parameter(Mandatory=$false)]
+    [int]$TestTimeoutSeconds = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,7 +125,9 @@ $UnitTests = @(
     "test_scripts_consolidate",
     "test_hal_unit",
     "test_hal_errors",
-    "test_ioctl_abi"       # IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)
+    "test_ioctl_abi",          # IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)
+    "test_tx_timestamp_provenance"  # Section L: pure logic + ABI static_assert (no device needed)
+                                    # Section H SKIPs gracefully when driver is absent.
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require
@@ -154,6 +167,63 @@ $HardwareDependentTests = @(
 # None can pass on a CI runner without the driver installed.
 # Listed in $HardwareDependentTests below; $IntegrationTests is intentionally empty.
 $IntegrationTests = @()
+
+# ===========================
+# HardwareMandatory — safe mandatory quality gate (self-hosted runner)
+# ===========================
+# Tests that MUST pass on every supported HIL runner against every commit.
+# Properties:
+#   - No PHC/TAS hardware state mutation (safe to run back-to-back).
+#   - Missing binary = FAIL (not SKIP) — caller broke the build.
+#   - Driver lost mid-suite = hard FAIL (not cascading SKIP) — #328 sentinel.
+#   - Exit code 2 (SKIP_ONLY from test_tx_timestamp_provenance Section H on a
+#     no-hardware runner) is treated as infrastructure failure here — Section H
+#     must exercise the actual driver on a HIL runner.
+#
+# EXCLUDED: PHC mutation, TAS mutation, driver reinstall, power states.
+# Run those in the HardwareMutation lane below.
+$HardwareMandatoryTests = @(
+    # Connectivity + device contract
+    "test_ioctl_version",              # IOCTL_AVB_GET_VERSION handshake — driver reachable
+    "test_ioctl_routing",              # IOCTL routing sanity
+    "test_ioctl_simple",               # basic open/close cycle
+    "test_minimal_ioctl",              # minimal round-trip (regression for #328 device-node loss)
+    "test_ioctl_abi",                  # IOCTL ABI backward-compat (TEST-ABI-001)
+    # TX timestamp provenance + V1/V2 ABI (REQ-F-PTP-007, #199, #317)
+    "test_tx_timestamp_provenance",    # Section L (logic) + Section H (FastIo V1/V2 canary,
+                                       # self-comparison, masquerade, cross-handle isolation)
+    "test_tx_timestamp_retrieval",     # TX timestamp FIFO retrieval; per-adapter results
+    # PHC query / availability
+    "test_ioctl_phc_query",            # IOCTL_AVB_GET_TIMESTAMP read-only
+    "test_ioctl_xstamp",               # cross-timestamp PHC↔QPC (VV-CORR-003)
+    "ptp_clock_control_test",          # PHC coherence TC-5a/TC-5b (read-only correlation)
+    # Multi-adapter isolation
+    "test_all_adapters",               # enumerate + open all adapters
+    "test_multidev_adapter_enum",      # per-adapter VID/DID identity
+    "test_multi_adapter_phc_sync",     # independent PHC per adapter
+    # Send-path + provenance
+    "test_send_ptp_debug",             # IOCTL_AVB_TEST_SEND_PTP diagnostic (PRE_SEND_PHC)
+    # RX timestamp
+    "test_rx_timestamp",               # IOCTL_AVB_GET_RX_TIMESTAMP V1/V2
+    "test_rx_timestamp_complete"       # extended RX timestamp cases
+)
+
+# ===========================
+# HardwareMutation — PHC/TAS hardware-mutating tests (isolated lane)
+# ===========================
+# These tests write to PHC epoch, clock increment, or TAS GCL registers.
+# Run in a SEPARATE CI job AFTER HardwareMandatory, with continue-on-error in CI
+# to avoid blocking on mutation instability.
+# Recovery: each mutation test must restore state before exit; CI records
+# cleanup failures and halts the mutation lane after any CLEANUP_FAILED result.
+#
+# EXCLUDED: driver reinstall (UT-CORR-009), system sleep (test_s3_sleep_wake).
+$HardwareMutationTests = @(
+    # PHC epoch reset and frequency adjustment (UT-CORR-005/006)
+    # --case ensures only the mutation sub-test runs, not the full stability suite.
+    "test_ptp_phc_stability --case UT-CORR-005",  # SET_TIMESTAMP(1ms) + restore
+    "test_ptp_phc_stability --case UT-CORR-006"   # ADJUST_FREQUENCY(+1ns) + restore
+)
 
 # ===========================
 # Hardware-dependent test lists (self-hosted runner only)
@@ -234,7 +304,9 @@ $HardwareUnitTests = @(
     "test_ndis_fastpath_latency",  # NDIS IOCTL fast-path latency P99<10us -- (#286)
     "test_hot_plug",               # PnP hot-plug filter restart -- (#262)
     "test_error_recovery",         # error recovery / no-BSOD on malformed input -- (#215)
-    "test_multi_adapter_phc_sync"  # multi-adapter PHC sync/independence -- (#208)
+    "test_multi_adapter_phc_sync",  # multi-adapter PHC sync/independence -- (#208)
+    # Provenance regression (TEST-PROV-L01..L05 logic + TEST-PROV-H01..H05 device contract)
+    "test_tx_timestamp_provenance"  # V1/V2 IOCTL ABI, FastIo canary, cross-handle isolation
 )
 
 # Integration-level tests that require the driver device node or Intel NIC.
@@ -279,6 +351,7 @@ $HardwareIntegrationTests = @(
 # ===========================
 if ($Tests.Count -gt 0) {
     $TestList = $Tests
+    $IsMandatorySuite = $false
 } else {
     $TestList = switch ($Suite) {
         "Unit"                  { $UnitTests }
@@ -286,6 +359,24 @@ if ($Tests.Count -gt 0) {
         "All"                   { $UnitTests + $IntegrationTests }
         "HardwareUnit"          { $HardwareUnitTests }
         "HardwareIntegration"   { $HardwareIntegrationTests }
+        "HardwareMandatory"     { $HardwareMandatoryTests }
+        "HardwareMutation"      { $HardwareMutationTests }
+    }
+    # HardwareMandatory enforces hard failures: binary missing = FAIL, driver loss = FAIL.
+    $IsMandatorySuite = ($Suite -eq "HardwareMandatory")
+}
+
+# Apply default timeout per suite class when not explicitly set.
+if ($TestTimeoutSeconds -eq 0) {
+    $TestTimeoutSeconds = switch ($Suite) {
+        "Unit"              { 60 }
+        "Integration"       { 120 }
+        "All"               { 120 }
+        "HardwareUnit"      { 300 }
+        "HardwareIntegration" { 600 }
+        "HardwareMandatory" { 300 }
+        "HardwareMutation"  { 300 }
+        default             { 120 }
     }
 }
 
@@ -302,6 +393,48 @@ if (-not (Test-Path $logsDir)) {
 }
 
 # ===========================
+# Driver version + build SHA (hardware suites only)
+# ===========================
+if ($Suite -like 'Hardware*') {
+    Write-Host ""
+    Write-Host "==> Build and driver identity" -ForegroundColor Cyan
+
+    # Checkout SHA — the commit under test
+    try {
+        $gitSha = & git rev-parse HEAD 2>&1
+        Write-Host "[INFO] Checkout SHA : $gitSha"
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            "HIL_CHECKOUT_SHA=$gitSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        }
+    } catch { Write-Host "[WARN] git rev-parse failed: $_" }
+
+    # Installed driver SYS file version
+    $drvPath = "$env:SystemRoot\System32\drivers\IntelAvbFilter.sys"
+    if (Test-Path $drvPath) {
+        $ver = (Get-Item $drvPath).VersionInfo
+        $verStr = "$($ver.FileMajorPart).$($ver.FileMinorPart).$($ver.FileBuildPart).$($ver.FilePrivatePart)"
+        $buildDate = (Get-Item $drvPath).LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+        Write-Host "[INFO] Driver version: $verStr  (SYS modified: $buildDate)"
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            "HIL_DRIVER_VERSION=$verStr"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "HIL_DRIVER_DATE=$buildDate"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        }
+    } else {
+        Write-Host "[WARN] IntelAvbFilter.sys not found at $drvPath — driver may not be installed"
+    }
+
+    # Runner NIC label (for per-NIC evidence matrix)
+    $nicLabel = $env:RUNNER_LABELS -split ',' | Where-Object { $_ -match '^i[0-9]' } | Select-Object -First 1
+    if (-not $nicLabel) { $nicLabel = $env:HIL_NIC_TYPE }
+    if ($nicLabel) {
+        Write-Host "[INFO] NIC type label: $nicLabel"
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            "HIL_NIC_TYPE=$nicLabel" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        }
+    }
+}
+
+# ===========================
 # Banner
 # ===========================
 Write-Host @"
@@ -309,9 +442,10 @@ Write-Host @"
 ================================================================
   Intel AVB Filter Driver - CI Test Runner
   Configuration : $Configuration
-  Suite         : $Suite
+  Suite         : $Suite  $( if ($IsMandatorySuite) { '  *** MANDATORY GATE ***' } )
   Test binaries : $testExeDir
   Log output    : $logsDir
+  Timeout/test  : ${TestTimeoutSeconds}s
   Hardware tests: $( if ($Suite -like 'Hardware*') { 'ENABLED (self-hosted runner with Intel NIC)' } else { 'SKIPPED (no Intel NIC expected on CI runner)' } )
 ================================================================
 "@ -ForegroundColor Cyan
@@ -330,11 +464,11 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 # ===========================
 # Run tests
 # ===========================
-$totalTests  = 0
-$passedTests = 0
-$failedTests = 0
+$totalTests   = 0
+$passedTests  = 0
+$failedTests  = 0
 $skippedTests = 0
-$results     = @()
+$results      = @()
 
 # Expose driver build type to test_perf_regression and other tests that key
 # their baseline on (device_id x driver_build)
@@ -349,18 +483,33 @@ foreach ($TestName in $TestList) {
     $exeName = if ($TestName.EndsWith(".exe")) { $TestName } else { "$TestName.exe" }
     $exePath = Join-Path $testExeDir $exeName
 
-    # Skip remaining hardware tests if driver was lost by a previous test.
+    # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
     if ($driverLost) {
-        Write-Skip "$exeName (INFRA: driver lost -- skipping to prevent cascade failures)"
-        $skippedTests++
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED(INFRA)"; Exit = "N/A" }
+        if ($IsMandatorySuite) {
+            Write-Fail "$exeName [INFRA-FAIL] driver lost — #328 sentinel: remaining mandatory tests FAIL"
+            $failedTests++
+            $totalTests++
+            $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(INFRA)"; Exit = -1 }
+        } else {
+            Write-Skip "$exeName (INFRA: driver lost -- skipping to prevent cascade failures)"
+            $skippedTests++
+            $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED(INFRA)"; Exit = "N/A" }
+        }
         continue
     }
 
     if (-not (Test-Path $exePath)) {
-        Write-Skip "$exeName (binary not found -- not built or not applicable)"
-        $skippedTests++
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = "N/A" }
+        if ($IsMandatorySuite) {
+            # Binary missing on a mandatory suite = build broke — report FAIL, not SKIP.
+            Write-Fail "$exeName [BUILD-FAIL] binary not found at $exePath — mandatory test suite requires this binary"
+            $failedTests++
+            $totalTests++
+            $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(BUILD)"; Exit = "N/A" }
+        } else {
+            Write-Skip "$exeName (binary not found -- not built or not applicable)"
+            $skippedTests++
+            $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = "N/A" }
+        }
         continue
     }
 
@@ -374,15 +523,38 @@ foreach ($TestName in $TestList) {
     # --- Lifecycle snapshot BEFORE ---
     $lcyBefore = Get-AvbLifecycleSnapshot
 
-    # Run the binary, tee to log, capture exit code.
-    # NOTE: Override ErrorActionPreference to Continue in a child scope.
-    # PS 5.1 with EAP=Stop converts any stderr output from a native .exe into a
-    # terminating NativeCommandError — which would crash the entire test runner.
-    & {
-        $ErrorActionPreference = 'Continue'
-        & $exePath 2>&1 | Tee-Object -FilePath $logFile
+    # Run the binary with timeout via Start-Process + WaitForExit.
+    # NOTE: Start-Process does not stream stdout/stderr live; output is captured to log file.
+    # For the HardwareMandatory and HardwareMutation suites, the log file is always uploaded
+    # as a CI artifact so the absence of live output is acceptable.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName  = $exePath
+    $psi.Arguments = ($TestName -replace '^[^\s]+\s*', '')  # arguments after binary name
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+
+    # Capture output in background threads, stream to console and log.
+    $outLines = [System.Collections.Generic.List[string]]::new()
+    $outJob = $proc.StandardOutput.ReadToEndAsync()
+    $errJob = $proc.StandardError.ReadToEndAsync()
+
+    $timedOut  = $false
+    $timeoutMs = $TestTimeoutSeconds * 1000
+    if (-not $proc.WaitForExit($timeoutMs)) {
+        $proc.Kill()
+        $timedOut = $true
+        Write-Fail "$exeName TIMEOUT after ${TestTimeoutSeconds}s"
     }
-    $exitCode = $LASTEXITCODE
+    $outText  = $outJob.Result
+    $errText  = $errJob.Result
+    $exitCode = if ($timedOut) { -999 } else { $proc.ExitCode }
+
+    # Write captured output to log and display on console.
+    $combined = if ($errText) { $outText + "`n" + $errText } else { $outText }
+    $combined | Out-File -FilePath $logFile -Encoding utf8
+    $combined -split "`n" | ForEach-Object { Write-Host "    $_" }
 
     # --- Lifecycle snapshot AFTER + diff ---
     $lcyAfter = Get-AvbLifecycleSnapshot
@@ -391,10 +563,20 @@ foreach ($TestName in $TestList) {
         Write-Host "  [WARN:LCY] Lifecycle anomaly detected (underflow/error/OID imbalance) -- see [LCY] lines above" -ForegroundColor Yellow
     }
 
-    if ($exitCode -eq 0 -or $null -eq $exitCode) {
+    if ($timedOut) {
+        $failedTests++
+        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(TIMEOUT)"; Exit = -999 }
+    } elseif ($exitCode -eq 0 -or $null -eq $exitCode) {
         $passedTests++
         Write-Ok "$exeName PASSED"
         $results += [PSCustomObject]@{ Name = $exeName; Status = "PASSED"; Exit = 0 }
+    } elseif ($exitCode -eq 2 -and $IsMandatorySuite) {
+        # Exit 2 = SKIP_ONLY from test_tx_timestamp_provenance (driver absent / all H tests skipped).
+        # On a mandatory HIL suite the driver MUST be present — SKIP_ONLY means
+        # Section H never ran, so V1/V2 canary, cross-handle isolation, etc. were not exercised.
+        Write-Fail "$exeName [HIL-FAIL] exit=2 SKIP_ONLY on mandatory suite — driver not accessible or Section H not exercised"
+        $failedTests++
+        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(SKIP_ONLY)"; Exit = $exitCode }
     } else {
         $failedTests++
         Write-Fail "$exeName FAILED (exit $exitCode)"
@@ -407,9 +589,15 @@ foreach ($TestName in $TestList) {
     }
 
     # After each hardware test: verify the driver is still accessible.
+    # MANDATORY: driver loss = hard infrastructure failure (not just cascade SKIP).
     if ($Suite -like 'Hardware*' -and -not (Test-AvbDriverHealth -AfterTest $exeName)) {
-        Write-Fail "INFRA: driver lost after $exeName -- remaining hardware tests will be skipped"
-        $driverLost = $true
+        if ($IsMandatorySuite) {
+            Write-Fail "INFRA: [#328-SENTINEL] driver lost after $exeName on mandatory suite — aborting"
+            $driverLost = $true
+        } else {
+            Write-Fail "INFRA: driver lost after $exeName -- remaining hardware tests will be skipped"
+            $driverLost = $true
+        }
     }
 }
 
@@ -427,7 +615,7 @@ $results | Format-Table -AutoSize
 
 Write-Host "  Passed : $passedTests" -ForegroundColor Green
 Write-Host "  Failed : $failedTests" -ForegroundColor $(if ($failedTests -gt 0) { "Red" } else { "Green" })
-Write-Host "  Skipped: $skippedTests (not built)" -ForegroundColor DarkGray
+Write-Host "  Skipped: $skippedTests" -ForegroundColor DarkGray
 Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
 Write-Host ""
 
