@@ -277,9 +277,10 @@ typedef struct AVB_AUX_TIMESTAMP_REQUEST {
  */
 #define AVB_TX_PROV_UNAVAILABLE           0u  /* hardware not ready; no timestamp available */
 #define AVB_TX_PROV_PRE_SEND_PHC          1u  /* SYSTIM sampled BEFORE NdisFSendNetBufferLists — not an egress timestamp */
-#define AVB_TX_PROV_SOFTWARE_FALLBACK     2u  /* QPC (KeQueryPerformanceCounter) fallback — SYSTIM inaccessible */
+#define AVB_TX_PROV_SOFTWARE_FALLBACK     2u  /* wall-clock fallback (SYSTIM_RC_SW_OK) — correct ns domain but not hardware MMIO */
 #define AVB_TX_PROV_NDIS_TX_COMPLETION    3u  /* NDIS 6.82 TaggedTransmitHw (slot 26) from FilterSendNetBufferListsComplete */
 #define AVB_TX_PROV_VERIFIED_HARDWARE_TX  4u  /* hardware egress latch read from TXSTMPL/TXSTMPH FIFO after send-complete */
+#define AVB_RX_PROV_HARDWARE_REGISTER     5u  /* hardware RX timestamp read from RXSTMPL/H register pair (not a TX event) */
 
 /* TX timestamp retrieval (TXSTMPL/H registers)
  * Read TX timestamp from hardware FIFO.

@@ -24,15 +24,25 @@ struct ptm_config;
 
 /**
  * @brief Intel device-specific operations interface
- * 
+ *
  * Each Intel device family implements this interface to provide
  * device-specific hardware access and feature support.
- * 
+ *
  * This design prevents cross-contamination between device implementations
  * and allows easy addition of new Intel adapter families.
- * 
+ *
  * Implements: #40 (REQ-F-DEVICE-ABS-003: Register Access via Device Abstraction Layer)
+ *
+ * get_systime() return-code contract:
+ *   SYSTIME_RC_HW_OK (0): hardware SYSTIM register successfully read; value is hardware-derived.
+ *   SYSTIME_RC_SW_OK (1): software fallback; value is valid (correct ns domain, advancing)
+ *                         but derived from the wall clock, NOT from the hardware counter.
+ *   <0:                   error; *systime is indeterminate.
+ * Callers that need hardware provenance must check rc == SYSTIME_RC_HW_OK.
+ * Callers that accept any valid value must check rc >= 0 (and *systime != 0).
  */
+#define SYSTIME_RC_HW_OK  0    /* hardware SYSTIM read; hardware-provenance */
+#define SYSTIME_RC_SW_OK  1    /* software-clock fallback; correct ns domain but not hardware */
 typedef struct _intel_device_ops {
     // Device identification and capabilities
     const char* device_name;

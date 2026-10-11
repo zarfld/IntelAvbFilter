@@ -87,11 +87,14 @@ $className = if ($ClassNameOverride) {
 #   [FAIL]           UT-CORR-009 Driver Reload: ...
 #   [PASS]           TEST-PROV-L01: ...        (provenance regression tests)
 #   [SKIP]           TEST-PROV-H03: ...
+#   [SKIP_UNSUPPORTED] TEST-PROV-H03: adapter lacks INTEL_CAP_BASIC_1588
+#   [BLOCKED]        TC-TAS-001: prerequisite not met
+#   [INFRA_FAILURE]  TC-PROV-H01: driver absent
 # ---------------------------------------------------------------------------
-# Pattern captures: status (PASS/FAIL/SKIP/BLOCKED/CLEANUP_FAILED)
+# Pattern captures: status (PASS/FAIL/SKIP/SKIP_UNSUPPORTED/BLOCKED/INFRA_FAILURE/CLEANUP_FAILED)
 #                   test ID (TC-*, UT-CORR-*, or TEST-PROV-* with optional /adapter:N)
 #                   reason text
-$pattern = '^\s*\[(PASS|FAIL|SKIP|BLOCKED|CLEANUP_FAILED)\]\s+((?:TC-|UT-CORR-|TEST-PROV-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
+$pattern = '^\s*\[(PASS|FAIL|SKIP(?:_UNSUPPORTED)?|BLOCKED|INFRA_FAILURE|CLEANUP_FAILED)\]\s+((?:TC-|UT-CORR-|TEST-PROV-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
 $entries = [System.Collections.Generic.List[hashtable]]::new()
 
 $content = Get-Content $LogFile -ErrorAction SilentlyContinue

@@ -367,8 +367,9 @@ static int get_systime(device_t *dev, uint64_t *systime)
         if (raw2 == 0) {
             /* SYSTIM counter is frozen at 0 — the BAR0 registers for I219 SYSTIMH/L
              * may not be accessible on this PCH variant (reads return 0).
-             * Fall back to wall-clock TAI time so consecutive calls return advancing
-             * values instead of the constant i219_systim_offset. */
+             * Return SYSTIME_RC_SW_OK with a wall-clock TAI value so callers can
+             * still obtain an advancing, ns-domain timestamp while tagging it as
+             * SOFTWARE_FALLBACK (not hardware SYSTIM). */
             const uint64_t FILETIME_TO_UNIX_100NS = 116444736000000000ULL;
             const uint64_t TAI_UTC_OFFSET_NS      = 37000000000ULL;
             LARGE_INTEGER wt;
@@ -378,8 +379,8 @@ static int get_systime(device_t *dev, uint64_t *systime)
             unix_ns = (win_ticks >= FILETIME_TO_UNIX_100NS)
                 ? (win_ticks - FILETIME_TO_UNIX_100NS) * 100ULL : 0ULL;
             *systime = unix_ns + TAI_UTC_OFFSET_NS;
-            DEBUGP(DL_WARN, "[I219-DIAG] GET: raw=0 (frozen) -> wall-clock 0x%llx\n", *systime);
-            return 0;
+            DEBUGP(DL_WARN, "[I219-DIAG] GET: raw=0 (frozen) -> wall-clock 0x%llx (SW fallback)\n", *systime);
+            return SYSTIME_RC_SW_OK;  /* software fallback, NOT hardware provenance */
         }
         uint64_t offset_snap = i219_systim_offset;  /* volatile read; ring-3→0 entry provides fence */
         *systime = offset_snap + raw2 / 200000ULL;
@@ -390,11 +391,15 @@ static int get_systime(device_t *dev, uint64_t *systime)
 
 fallback:
     {
-        LARGE_INTEGER currentTime;
-        KeQuerySystemTime(&currentTime);
-        *systime = currentTime.QuadPart * 100ULL;
-        DEBUGP(DL_TRACE, "<==i219_get_systime: 0x%llx (KE fallback)\n", *systime);
-        return 0;
+        /* MMIO reads failed — cannot read hardware SYSTIM at all.
+         * Return -1 (error).  Do NOT fill *systime with KeQuerySystemTime here:
+         * the FILETIME epoch (since 1601-01-01) is a completely different domain
+         * from the Unix+TAI epoch this driver uses, and a caller that compared
+         * a FILETIME-based value with a normal SYSTIM value would see a nonsense
+         * delta of ~1.16e19 ns.  Callers will use their own software fallback. */
+        *systime = 0;
+        DEBUGP(DL_TRACE, "<==i219_get_systime: MMIO error (fallback) -> returning -1\n");
+        return -1;
     }
 }
 

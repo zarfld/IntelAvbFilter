@@ -230,28 +230,28 @@ IntelAvbFilterFastIoDeviceControl(
         avb_u32 seq_id = ((PAVB_TEST_SEND_PTP_REQUEST)InputBuffer)->sequence_id;
 
         /* IOCTL-entry PHC snapshot — captured before ring/buffer setup.
-         * FAIL CLOSED: if get_systime() returns 0 or unavailable, leave phcEntryTs=0.
-         * Never write raw QPC ticks to fields documented as nanoseconds.
-         *
-         * NOTE: I219 get_systime() has two internal software-fallback paths that
-         * return rc=0 with a KeQuerySystemTime-derived value instead of hardware
-         * SYSTIM:  (a) MMIO read failure → FILETIME-epoch nanoseconds (wrong epoch),
-         * (b) SYSTIM counter frozen at 0 → UNIX-epoch wall-clock nanoseconds.
-         * Case (a) is prevented by the hw_state BAR guard in AvbSendPtpCore (IRP path).
-         * Case (b) is accepted here as a legitimate I219 architectural limitation;
-         * the value is in the correct ns domain and advancing, making it usable for
-         * temporal ordering even if not from the hardware free-running counter. */
+         * PROVENANCE: rc == SYSTIME_RC_HW_OK (0) → hardware MMIO, PRE_SEND_PHC
+         *             rc == SYSTIME_RC_SW_OK (1) → wall-clock fallback, SOFTWARE_FALLBACK
+         *             rc  < 0                    → error, UNAVAILABLE; phcEntryTs = 0
+         * The i219 raw2==0 path returns SYSTIME_RC_SW_OK with a valid Unix+TAI ns value.
+         * The i219 fallback: path (MMIO error) now returns -1 (no wrong-epoch pollution). */
         ULONG64 phcEntryTs = 0;
-        BOOLEAN phcEntryFromHw = FALSE;
+        avb_u32 phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
         {
             const intel_device_ops_t *eops = intel_get_device_ops(ctx->intel_device.device_type);
-            if (eops && eops->get_systime &&
-                eops->get_systime(&ctx->intel_device, &phcEntryTs) == 0 && phcEntryTs != 0) {
-                phcEntryFromHw = TRUE;
+            if (eops && eops->get_systime) {
+                int erc = eops->get_systime(&ctx->intel_device, &phcEntryTs);
+                if (erc == SYSTIME_RC_HW_OK && phcEntryTs != 0) {
+                    phcEntryProv = AVB_TX_PROV_PRE_SEND_PHC;
+                } else if (erc == SYSTIME_RC_SW_OK && phcEntryTs != 0) {
+                    phcEntryProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
+                } else {
+                    phcEntryTs  = 0;  /* error or zero value; fail-closed */
+                    phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
+                }
             }
         }
-        /* No QPC fallback: if phcEntryTs==0 after the get_systime attempt, both
-         * timestamps remain 0 and ts_provenance will be set to UNAVAILABLE below. */
+        /* No QPC fallback: never write raw QPC ticks to nanosecond fields. */
 
         /* Acquire a pre-allocated ring slot (same logic as IRP path). */
         int ring_slot = -1;
@@ -303,26 +303,35 @@ IntelAvbFilterFastIoDeviceControl(
         InterlockedIncrement(&ctx->test_packets_pending);
 
         /* Pre-send PHC snapshot — captured just before NdisFSendNetBufferLists.
-         * FAIL CLOSED: both timestamps must come from get_systime() (SYSTIM domain, ns).
-         * Never write raw QPC ticks to ns fields. */
-        ULONG64 captureTs = 0;
-        BOOLEAN captureFromHw = FALSE;
-        if (phcEntryFromHw) {
-            /* Entry succeeded via get_systime; try get_systime for pre-send too. */
+         * Uses the same provenance logic as phcEntryTs.
+         * Both snapshots fail-closed together when SYSTIM is unavailable. */
+        ULONG64 captureTs  = 0;
+        avb_u32 captureProv = AVB_TX_PROV_UNAVAILABLE;
+        if (phcEntryProv != AVB_TX_PROV_UNAVAILABLE) {
+            /* Entry snapshot succeeded; attempt pre-send snapshot from same source. */
             const intel_device_ops_t *ops = intel_get_device_ops(ctx->intel_device.device_type);
-            if (ops && ops->get_systime &&
-                ops->get_systime(&ctx->intel_device, &captureTs) == 0 && captureTs != 0) {
-                captureFromHw = TRUE;
-            }
-            if (!captureFromHw) {
-                /* Pre-send SYSTIM unavailable; cannot pair with the entry snapshot.
-                 * Zero both to fail closed — provenance will be UNAVAILABLE. */
-                phcEntryTs     = 0;
-                phcEntryFromHw = FALSE;
-                captureTs      = 0;
+            if (ops && ops->get_systime) {
+                int crc = ops->get_systime(&ctx->intel_device, &captureTs);
+                if (crc == SYSTIME_RC_HW_OK && captureTs != 0) {
+                    captureProv = AVB_TX_PROV_PRE_SEND_PHC;
+                } else if (crc == SYSTIME_RC_SW_OK && captureTs != 0) {
+                    captureProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
+                } else {
+                    /* Pre-send snapshot failed; fail closed for both. */
+                    captureTs   = 0;
+                    phcEntryTs  = 0;
+                    phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
+                    captureProv  = AVB_TX_PROV_UNAVAILABLE;
+                }
             }
         }
-        /* No QPC fallback branch: if phcEntryFromHw==FALSE, captureTs stays 0. */
+        /* Overall provenance = worst of the two snapshots. */
+        avb_u32 prov = (phcEntryProv == AVB_TX_PROV_PRE_SEND_PHC &&
+                         captureProv  == AVB_TX_PROV_PRE_SEND_PHC)
+                       ? AVB_TX_PROV_PRE_SEND_PHC
+                       : (phcEntryTs != 0 && captureTs != 0)
+                         ? AVB_TX_PROV_SOFTWARE_FALLBACK
+                         : AVB_TX_PROV_UNAVAILABLE;
         InterlockedExchange64(&ctx->last_ndis_tx_timestamp, (LONGLONG)captureTs);
 
         /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
@@ -336,10 +345,9 @@ IntelAvbFilterFastIoDeviceControl(
         req->phc_at_send_ns  = phcEntryTs;
         req->packets_sent    = 1;
         req->status          = (avb_u32)NDIS_STATUS_SUCCESS;
-        /* PRE_SEND_PHC: both snapshots are non-zero SYSTIM values in the same ns domain.
-         * UNAVAILABLE: at least one snapshot is 0 (get_systime unavailable or returned 0). */
-        avb_u32 prov = (phcEntryTs != 0 && captureTs != 0)
-                       ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_UNAVAILABLE;
+        /* prov: PRE_SEND_PHC when both snapshots are from hardware MMIO;
+         *       SOFTWARE_FALLBACK when either is wall-clock-derived (i219 frozen SYSTIM);
+         *       UNAVAILABLE when either snapshot failed. */
         if (OutputBufferLength >= sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
             req->ts_provenance = prov;
             req->_reserved     = 0;

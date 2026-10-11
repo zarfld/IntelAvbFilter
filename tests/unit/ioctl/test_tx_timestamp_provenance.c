@@ -89,6 +89,7 @@ static_assert(AVB_TX_PROV_PRE_SEND_PHC           == 1u,  "TEST-PROV-L05: constan
 static_assert(AVB_TX_PROV_SOFTWARE_FALLBACK      == 2u,  "TEST-PROV-L05: constant");
 static_assert(AVB_TX_PROV_NDIS_TX_COMPLETION     == 3u,  "TEST-PROV-L05: constant");
 static_assert(AVB_TX_PROV_VERIFIED_HARDWARE_TX   == 4u,  "TEST-PROV-L05: constant");
+static_assert(AVB_RX_PROV_HARDWARE_REGISTER       == 5u,  "TEST-PROV-L05: AVB_RX_PROV_HARDWARE_REGISTER must be 5");
 
 /* =========================================================================
  * Result tracking
@@ -515,26 +516,24 @@ static void test_h02(HANDLE hDev, bool driver_present)
  * TEST-PROV-H03: Multi-adapter context isolation (hardware-integrated).
  *
  * Category: Windows device contract + per-adapter state isolation.
- *           Requires >=2 adapters; SKIP otherwise.
+ *           Requires >=2 adapters; SKIP if fewer.
+ *           Requires h0's SEND_PTP to return non-UNAVAILABLE provenance.
  *
- * SEND_PTP on h0 stores a timestamp in h0's adapter context (adapter 0).
- * GET_TX_TIMESTAMP on h1 (adapter 1) reads adapter 1's context, which was
- * NOT written by h0's SEND_PTP.  If both adapters share a single context,
- * h1 would return valid==1 after h0's send — exposing the routing fault.
+ * Isolation proof: SEND_PTP on h0 sets last_ndis_tx_timestamp on adapter 0's
+ * context.  GET_TX_TIMESTAMP on h1 (adapter 1) must return valid==0 because
+ * h1 is bound to adapter 1's INDEPENDENT context.
  *
- * NOTE: dual SEND_PTP success alone does NOT prove per-adapter isolation.
- * Both SEND_PTP calls could target the same FsContext (adapter 0) and still
- * succeed.  This test uses cross-handle GET_TX_TIMESTAMP to independently
- * observe the per-context timestamp state.
- *
- * SKIP if fewer than 2 adapters are enumerated.
+ * If h0 gets UNAVAILABLE (SYSTIM inaccessible):
+ *   adapter has INTEL_CAP_BASIC_1588 → FAIL (should work on capable hardware)
+ *   adapter lacks INTEL_CAP_BASIC_1588 → SKIP_UNSUPPORTED (not applicable)
  * -------------------------------------------------------------------------*/
 static void test_h03(HANDLE hDev, bool driver_present)
 {
     printf("\n[TEST-PROV-H03] Multi-adapter context isolation via cross-handle GET_TX_TIMESTAMP\n");
     if (!driver_present) { tc_skip("TEST-PROV-H03", "driver absent"); return; }
 
-    /* Enumerate adapters */
+    /* Enumerate both adapters and capture capabilities */
+    avb_u32 caps0 = 0, caps1 = 0;
     int adapter_count = 0;
     for (int idx = 0; idx < 16; idx++) {
         AVB_ENUM_REQUEST er = {0};
@@ -544,12 +543,15 @@ static void test_h03(HANDLE hDev, bool driver_present)
                              &er, sizeof(er), &er, sizeof(er), &br, NULL) ||
             er.status != NDIS_STATUS_SUCCESS)
             break;
+        if (idx == 0) caps0 = er.capabilities;
+        if (idx == 1) caps1 = er.capabilities;
         adapter_count++;
     }
     if (adapter_count < 2) {
-        tc_skip("TEST-PROV-H03", "fewer than 2 adapters — isolation requires >=2");
+        tc_skip("TEST-PROV-H03", "fewer than 2 adapters - isolation requires >=2");
         return;
     }
+    printf("  Adapter 0 caps=0x%08X  Adapter 1 caps=0x%08X\n", (unsigned)caps0, (unsigned)caps1);
 
     HANDLE h0 = open_dev();
     HANDLE h1 = open_dev();
@@ -568,7 +570,7 @@ static void test_h03(HANDLE hDev, bool driver_present)
         return;
     }
 
-    /* Step 1: Drain any stale timestamp on h1's context before the test. */
+    /* Drain any stale timestamp on h1's context before the test. */
     {
         AVB_TX_TIMESTAMP_REQUEST drain = {0};
         DWORD dbr = 0;
@@ -576,16 +578,37 @@ static void test_h03(HANDLE hDev, bool driver_present)
                         &drain, sizeof(drain), &drain, sizeof(drain), &dbr, NULL);
     }
 
-    /* Step 2: Send PTP packet via h0 (adapter 0 context). */
+    /* Send PTP packet via h0 (adapter 0 context). */
     AVB_TEST_SEND_PTP_REQUEST s0 = {0};
-    s0.sequence_id = 0xB300;
+    s0.sequence_id = 0xC300;
     DWORD br = 0;
     BOOL send_ok = DeviceIoControl(h0, IOCTL_AVB_TEST_SEND_PTP,
                                     &s0, sizeof(s0), &s0, sizeof(s0), &br, NULL);
 
-    /* Step 3: Read GET_TX_TIMESTAMP on h1 (adapter 1 context) immediately.
-     * If contexts are isolated, h1 must return valid==0 (adapter 1 was not
-     * written by h0's SEND_PTP).  If contexts are shared, h1 returns valid==1. */
+    if (!send_ok || s0.packets_sent == 0) {
+        CloseHandle(h0); CloseHandle(h1);
+        tc_fail("TEST-PROV-H03", "SEND_PTP on h0 failed entirely (adapter not ready)");
+        return;
+    }
+
+    /* Require non-UNAVAILABLE provenance on h0 before claiming isolation evidence.
+     * If UNAVAILABLE: capable adapter = FAIL; incapable = SKIP_UNSUPPORTED. */
+    if (s0.ts_provenance == AVB_TX_PROV_UNAVAILABLE) {
+        CloseHandle(h0); CloseHandle(h1);
+        if (caps0 & INTEL_CAP_BASIC_1588) {
+            tc_fail("TEST-PROV-H03",
+                    "adapter 0 has INTEL_CAP_BASIC_1588 but SEND_PTP returned UNAVAILABLE - "
+                    "SYSTIM inaccessible; hardware not properly initialized");
+        } else {
+            tc_skip("TEST-PROV-H03",
+                    "SKIP_UNSUPPORTED: adapter 0 lacks INTEL_CAP_BASIC_1588");
+        }
+        return;
+    }
+    printf("  h0 SEND_PTP: ts=%llu ns  prov=%u  packets_sent=%u\n",
+           (unsigned long long)s0.timestamp_ns, (unsigned)s0.ts_provenance, (unsigned)s0.packets_sent);
+
+    /* GET_TX_TIMESTAMP on h1 (adapter 1 context) — must not see h0's timestamp. */
     AVB_TX_TIMESTAMP_REQUEST g1 = {0};
     DWORD gbr = 0;
     BOOL get_ok = DeviceIoControl(h1, IOCTL_AVB_GET_TX_TIMESTAMP,
@@ -594,25 +617,23 @@ static void test_h03(HANDLE hDev, bool driver_present)
     CloseHandle(h0);
     CloseHandle(h1);
 
-    if (!send_ok) {
-        tc_skip("TEST-PROV-H03", "SEND_PTP on h0 failed (adapter 0 link down / not ready)");
-        return;
-    }
     if (!get_ok) {
         tc_fail("TEST-PROV-H03", "GET_TX_TIMESTAMP on h1 IOCTL failed");
         return;
     }
+    printf("  h1 GET_TX_TIMESTAMP: valid=%u  prov=%u\n", g1.valid, (unsigned)g1.ts_provenance);
 
     if (g1.valid != 0) {
-        char msg[128];
+        char msg[256];
         (void)sprintf(msg,
-            "GET_TX_TIMESTAMP on h1 (adapter 1) returned valid=1 after SEND_PTP on h0 (adapter 0) — "
-            "adapters appear to share the same context (routing fault)");
+            "h1 (adapter 1) returned valid=1 after h0 (adapter 0) SEND_PTP - "
+            "contexts shared (routing fault); caps0=0x%08X caps1=0x%08X",
+            (unsigned)caps0, (unsigned)caps1);
         tc_fail("TEST-PROV-H03", msg);
         return;
     }
     tc_pass("TEST-PROV-H03",
-            "GET_TX_TIMESTAMP on h1 returned valid=0 after SEND_PTP on h0 — adapter contexts are isolated");
+            "h1 GET_TX_TIMESTAMP returned valid=0 after h0 SEND_PTP - adapter contexts isolated");
 }
 
 /* -------------------------------------------------------------------------

@@ -1172,29 +1172,17 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
     if (autt_flags & 0x01) {
         uint64_t timestamp_ns = 0;
         
-        /* Get current SYSTIM value (when target time was reached) */
-        if (ops->get_systime && ops->get_systime(dev, &timestamp_ns) == 0) {
-            /* Post target time event to subscribers
-             * event_type: TS_EVENT_TARGET_TIME (0x04)
-             * vlan_id: FILTER_VLAN_NONE (not applicable)
-             * pcp: 0xFF (not applicable)
-             * queue: 0 (not applicable)
-             * packet_length: 0 (not applicable)
-             * trigger_source: 0 (timer 0)
-             */
-            AvbPostTimestampEvent(
-                AvbContext,
-                TS_EVENT_TARGET_TIME,
-                timestamp_ns,
-                INTEL_MASK_16BIT,  /* vlan_id - not applicable */
-                0xFF,    /* pcp - not applicable */
-                0,       /* queue - not applicable */
-                0,       /* packet_length - not applicable */
-                0,       /* trigger_source: timer 0 */
-                0        /* correction_field - not applicable */
-            );
-            
-            DEBUGP(DL_TRACE, "!!! TARGET TIME 0 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+        /* Get current SYSTIM value (when target time was reached).
+         * Accept both hardware (rc=0) and wall-clock fallback (rc=1). */
+        if (ops->get_systime) {
+            int tt_rc = ops->get_systime(dev, &timestamp_ns);
+            if (tt_rc >= 0 && timestamp_ns != 0) {
+                /* Post target time event to subscribers */
+                AvbPostTimestampEvent(
+                    AvbContext, TS_EVENT_TARGET_TIME, timestamp_ns,
+                    INTEL_MASK_16BIT, 0xFF, 0, 0, 0, 0);
+                DEBUGP(DL_TRACE, "!!! TARGET TIME 0 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+            }
         }
         
         /* Clear TT0 flag in TSICR (write-1-to-clear) */
@@ -1210,24 +1198,16 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
     if (autt_flags & 0x02) {
         uint64_t timestamp_ns = 0;
         
-        /* Get current SYSTIM value */
-        if (ops->get_systime && ops->get_systime(dev, &timestamp_ns) == 0) {
-            /* Post target time event
-             * trigger_source: 1 (timer 1)
-             */
-            AvbPostTimestampEvent(
-                AvbContext,
-                TS_EVENT_TARGET_TIME,
-                timestamp_ns,
-                INTEL_MASK_16BIT,  /* vlan_id - not applicable */
-                0xFF,    /* pcp - not applicable */
-                0,       /* queue - not applicable */
-                0,       /* packet_length - not applicable */
-                1,       /* trigger_source: timer 1 */
-                0        /* correction_field - not applicable */
-            );
-            
-            DEBUGP(DL_TRACE, "!!! TARGET TIME 1 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+        /* Get current SYSTIM value — accept HW (rc=0) or SW fallback (rc=1). */
+        if (ops->get_systime) {
+            int tt1_rc = ops->get_systime(dev, &timestamp_ns);
+            if (tt1_rc >= 0 && timestamp_ns != 0) {
+                /* Post target time event */
+                AvbPostTimestampEvent(
+                    AvbContext, TS_EVENT_TARGET_TIME, timestamp_ns,
+                    INTEL_MASK_16BIT, 0xFF, 0, 0, 1, 0);
+                DEBUGP(DL_TRACE, "!!! TARGET TIME 1 EVENT POSTED: ts=%llu ns\n", timestamp_ns);
+            }
         }
         
         /* Clear TT1 flag in TSICR (write-1-to-clear) */
@@ -1627,20 +1607,29 @@ NTSTATUS AvbSendPtpCore(
     NTSTATUS status = STATUS_SUCCESS;
 
     /* IOCTL-entry PHC snapshot — captured before any pool/ring work.
-     * BAR guard: only call get_systime() when MMIO is mapped, preventing the
-     * I219 MMIO-failure fallback (KeQuerySystemTime FILETIME-epoch ns, wrong epoch).
-     * FAIL CLOSED: if SYSTIM unavailable, phcEntryTs stays 0. Never write QPC ticks
-     * to fields documented as nanoseconds. */
-    ULONG64 phcEntryTs = 0;
-    BOOLEAN phcEntryFromHw = FALSE;
+     * BAR guard: only call get_systime() when MMIO is mapped, preventing
+     * the i219 MMIO-failure path (which now returns -1 instead of a
+     * FILETIME-epoch value that would pollute the ns domain).
+     * PROVENANCE: SYSTIME_RC_HW_OK(0) → PRE_SEND_PHC
+     *             SYSTIME_RC_SW_OK(1) → SOFTWARE_FALLBACK (i219 frozen-SYSTIM)
+     *             rc < 0 or value==0  → UNAVAILABLE; fail-closed. */
+    ULONG64 phcEntryTs   = 0;
+    avb_u32 phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
     if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
         const intel_device_ops_t *eops = intel_get_device_ops(activeContext->intel_device.device_type);
-        if (eops && eops->get_systime &&
-            eops->get_systime(&activeContext->intel_device, &phcEntryTs) == 0 && phcEntryTs != 0) {
-            phcEntryFromHw = TRUE;
+        if (eops && eops->get_systime) {
+            int erc = eops->get_systime(&activeContext->intel_device, &phcEntryTs);
+            if (erc == SYSTIME_RC_HW_OK && phcEntryTs != 0) {
+                phcEntryProv = AVB_TX_PROV_PRE_SEND_PHC;
+            } else if (erc == SYSTIME_RC_SW_OK && phcEntryTs != 0) {
+                phcEntryProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
+            } else {
+                phcEntryTs   = 0;
+                phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
+            }
         }
     }
-    /* No QPC fallback: phcEntryTs stays 0 if get_systime was unavailable. */
+    /* No QPC fallback: never write raw QPC ticks to nanosecond fields. */
 
     // Verify NDIS pools are allocated
     if (!activeContext->nbl_pool_handle || !activeContext->nb_pool_handle ||
@@ -1707,38 +1696,43 @@ NTSTATUS AvbSendPtpCore(
 
     InterlockedIncrement(&activeContext->test_packets_pending);
 
-    // Capture pre-send timestamp with the SAME source as phcEntryTs.
-    ULONG64 preSendTs = 0;
-    if (phcEntryFromHw) {
-        /* Entry used SYSTIM; attempt SYSTIM for pre-send too. */
+    // Capture pre-send timestamp using the same provenance logic as phcEntryProv.
+    ULONG64 preSendTs   = 0;
+    avb_u32 preSendProv = AVB_TX_PROV_UNAVAILABLE;
+    if (phcEntryProv != AVB_TX_PROV_UNAVAILABLE) {
+        /* Entry snapshot is valid; try pre-send snapshot. */
         if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
             const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
             if (ops && ops->get_systime) {
-#if DBG
-                int systim_rc = ops->get_systime(&activeContext->intel_device, &preSendTs);
-                DEBUGP(DL_TRACE, "PRE-SEND SYSTIM: rc=%d ts=0x%016I64X\n", systim_rc, preSendTs);
-#else
-                ops->get_systime(&activeContext->intel_device, &preSendTs);
-#endif
+                int crc = ops->get_systime(&activeContext->intel_device, &preSendTs);
+                DEBUGP(DL_TRACE, "PRE-SEND SYSTIM: rc=%d ts=0x%016I64X\n", crc, preSendTs);
+                if (crc == SYSTIME_RC_HW_OK && preSendTs != 0) {
+                    preSendProv = AVB_TX_PROV_PRE_SEND_PHC;
+                } else if (crc == SYSTIME_RC_SW_OK && preSendTs != 0) {
+                    preSendProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
+                } else {
+                    /* Fail closed: zero both if pre-send snapshot unavailable. */
+                    preSendTs   = 0;
+                    phcEntryTs  = 0;
+                    phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
+                    preSendProv  = AVB_TX_PROV_UNAVAILABLE;
+                }
             }
         }
-        if (preSendTs == 0) {
-            /* SYSTIM unavailable for pre-send; cannot pair with entry snapshot.
-             * Fail closed — zero both to avoid QPC ticks in ns fields. */
-            phcEntryTs     = 0;
-            phcEntryFromHw = FALSE;
-            preSendTs      = 0;
-        }
     }
-    /* No QPC fallback branch: if phcEntryFromHw==FALSE, preSendTs stays 0. */
+    /* Overall provenance = worst of the two snapshots. */
+    avb_u32 sendProv =
+        (phcEntryProv == AVB_TX_PROV_PRE_SEND_PHC && preSendProv == AVB_TX_PROV_PRE_SEND_PHC)
+        ? AVB_TX_PROV_PRE_SEND_PHC
+        : (phcEntryTs != 0 && preSendTs != 0)
+          ? AVB_TX_PROV_SOFTWARE_FALLBACK
+          : AVB_TX_PROV_UNAVAILABLE;
+
     (void)InterlockedExchange64(&activeContext->last_ndis_tx_timestamp, (LONGLONG)preSendTs);
     test_req->timestamp_ns   = preSendTs;
     test_req->phc_at_send_ns = phcEntryTs;
-    /* PRE_SEND_PHC: both snapshots are non-zero hardware/get_systime values in ns.
-     * UNAVAILABLE: at least one is 0 — SYSTIM was inaccessible (no QPC fallback). */
     if (out_len >= sizeof(AVB_TEST_SEND_PTP_REQUEST)) {
-        test_req->ts_provenance = (phcEntryTs != 0 && preSendTs != 0)
-                                  ? AVB_TX_PROV_PRE_SEND_PHC : AVB_TX_PROV_UNAVAILABLE;
+        test_req->ts_provenance = sendProv;
         test_req->_reserved     = 0;
     }
 
@@ -2315,8 +2309,11 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                     
                     // Read clock-related registers using device operations (HAL-compliant - no magic numbers)
                     if (ops->get_systime != NULL) {
-                        rc |= ops->get_systime(&activeContext->intel_device, &systime);
-                        DEBUGP(DL_ERROR, "DEBUG: Read SYSTIME=0x%016llX rc=%d\n", systime, rc);
+                        /* SYSTIME_RC_SW_OK (1) is a valid software-fallback value; treat as success.
+                         * Only propagate negative (error) codes. */
+                        int systime_rc = ops->get_systime(&activeContext->intel_device, &systime);
+                        if (systime_rc < 0) rc |= systime_rc;  /* preserve error; ignore SW-fallback indicator */
+                        DEBUGP(DL_ERROR, "DEBUG: Read SYSTIME=0x%016llX rc=%d\n", systime, systime_rc);
                     } else {
                         rc = -1;
                     }
@@ -3273,9 +3270,10 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         } else {
                             rx_req->valid = 1;
                             rx_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
-                            /* RXSTMPL/H is a hardware-latched register pair — same
-                             * class as TXSTMPL/H.  No packet correlation is guaranteed. */
-                            if (has_v2) rx_req->ts_provenance = AVB_TX_PROV_VERIFIED_HARDWARE_TX;
+                            /* RXSTMPL/H is a hardware-latched register pair.
+                             * Use AVB_RX_PROV_HARDWARE_REGISTER (5) — distinct from
+                             * VERIFIED_HARDWARE_TX (4) which is a TX egress event. */
+                            if (has_v2) rx_req->ts_provenance = AVB_RX_PROV_HARDWARE_REGISTER;
                             status = STATUS_SUCCESS;
                             info = has_v2 ? sizeof(*rx_req) : AVB_TX_TIMESTAMP_REQUEST_V1_SIZE;
                             DEBUGP(DL_TRACE, "RX timestamp retrieved: 0x%016llX (%llu ns)\n",
@@ -3378,9 +3376,10 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 if (code == IOCTL_AVB_GET_TIMESTAMP) {
                     ULONGLONG t = 0;
                     int rc = -1;
-                    /* Primary: device HAL ops — same path as GET_CLOCK_CONFIG and FastIo
-                     * TEST_SEND_PTP so that read_phc() and preSendTs share a single
-                     * consistent, advancing clock source (fixes TC-PTP-001-FOLLOWUP). */
+                    /* Primary: device HAL ops.  Accept both HW (rc=0) and SW-fallback (rc=1)
+                     * as valid values; only propagate to intel_gettime when rc < 0 (MMIO error).
+                     * SYSTIME_RC_SW_OK (1) from i219 frozen-SYSTIM gives a valid advancing
+                     * wall-clock ns value that should be returned, not replaced. */
                     {
                         const intel_device_ops_t *ts_ops =
                             intel_get_device_ops(activeContext->intel_device.device_type);
@@ -3388,16 +3387,17 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             rc = ts_ops->get_systime(&activeContext->intel_device, &t);
                         }
                     }
-                    if (rc != 0) {
+                    if (rc < 0) {  /* error only; rc==1 (SW fallback) has t set correctly */
                         struct timespec sys = {0};
                         rc = intel_gettime(&activeContext->intel_device, r->clock_id, &t, &sys);
                     }
-                    if (rc != 0) {
+                    if (rc < 0) {
                         rc = AvbReadTimestamp(&activeContext->intel_device, &t);
                     }
-                    r->timestamp = t; 
-                    r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
-                    status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+                    r->timestamp = t;
+                    /* rc >= 0 means we have a value (HW or SW fallback); rc < 0 = no value. */
+                    r->status = (rc >= 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
+                    status    = (rc >= 0) ? STATUS_SUCCESS        : STATUS_UNSUCCESSFUL;
                 } else {
                     // Monotonicity guard: reject *small* backward time jumps only.
                     // Large intentional resets (e.g. to year 2001, or to epoch 0) must be allowed.
@@ -4929,8 +4929,11 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     
     // Step 2: Read initial SYSTIM value (SYSTIM is READ-ONLY on I226, starts from 0 on power-up)
     ULONGLONG systim_initial = 0;
-    if (ops->get_systime && ops->get_systime(dev, &systim_initial) == 0) {
-        DEBUGP(DL_TRACE, "? Initial SYSTIM: 0x%016llX\n", systim_initial);
+    if (ops->get_systime) {
+        int st_rc = ops->get_systime(dev, &systim_initial);
+        if (st_rc >= 0 && systim_initial != 0) {
+            DEBUGP(DL_TRACE, "? Initial SYSTIM: 0x%016llX (rc=%d)\n", systim_initial, st_rc);
+        }
     }
     
     // Step 3: Verify SYSTIM is incrementing (wait 10ms for better delta)
@@ -4939,9 +4942,10 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     KeDelayExecutionThread(KernelMode, FALSE, &delay);
     
     ULONGLONG systim_current = 0;
-    if (ops->get_systime && ops->get_systime(dev, &systim_current) == 0) {
-        
-        DEBUGP(DL_TRACE, "? SYSTIM after 10ms: 0x%016llX\n", systim_current);
+    if (ops->get_systime) {
+        int sc_rc = ops->get_systime(dev, &systim_current);
+        if (sc_rc >= 0 && systim_current != 0) {
+            DEBUGP(DL_TRACE, "? SYSTIM after 10ms: 0x%016llX (rc=%d)\n", systim_current, sc_rc);
         
         if (systim_current > systim_initial) {
             DEBUGP(DL_TRACE, "?? PTP clock is RUNNING! Delta: %llu ns (expected ~10,000,000 ns for 10ms)\n", 
@@ -4954,7 +4958,8 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
             // Not a fatal error - continue anyway, TAS might still be testable
             return STATUS_SUCCESS;
         }
-    }
+    }   /* if (sc_rc >= 0 ...) */
+}   /* if (ops->get_systime) */
     
     DEBUGP(DL_TRACE, "? Could not verify SYSTIM status\n");
     return STATUS_SUCCESS;  // Non-fatal
