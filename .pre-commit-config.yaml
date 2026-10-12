@@ -17,6 +17,41 @@ repos:
         files: ^src/.*\.(c|h)$
         verbose: true
 
+      # Trigger: any staged src/*.c or src/*.h file (code change → fresh evidence expected).
+      - id: build-driver (debug)
+        name: Build Driver
+        entry: pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\build\Build-Driver.ps1 -Configuration Debug
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.(c|h)$
+        verbose: true
+
+      - id: build-driver (release)
+        name: Build Driver
+        entry: pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\build\Build-Driver.ps1 -Configuration Release
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.(c|h)$
+        verbose: true
+
+      # Trigger: any staged ^tests/*.c or ^tests/*.h file (code change → fresh evidence expected).
+      - id: build-tests (debug)
+        name: Build Tests
+        entry: pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\build\Build-Tests.ps1 -Configuration Debug
+        language: system
+        pass_filenames: false
+        files: ^tests/.*\.(c|h)$
+        verbose: true
+
+      # Trigger: any staged ^tests/*.c or ^tests/*.h file (code change → fresh evidence expected).
+      - id: build-tests (release)
+        name: Build Tests
+        entry: pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\build\Build-Tests.ps1 -Configuration Release
+        language: system
+        pass_filenames: false
+        files: ^tests/.*\.(c|h)$
+        verbose: true
+
       # Validate specification files
       - id: validate-specs
         name: Validate Specification Files
