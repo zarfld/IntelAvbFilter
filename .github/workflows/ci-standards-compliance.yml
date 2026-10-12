@@ -1707,7 +1707,7 @@ jobs:
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           # Emit a clear summary of what driver was actually under test.
-          # This step makes the Contract A / Contract B distinction visible in the CI log.
+          # Fail-closed: absence of identity evidence is UNVERIFIED, not VERIFIED.
           $installedSha = $env:HIL_DRIVER_SHA256
           $buildSha     = '${{ steps.build_driver.outputs.BUILD_DRIVER_SHA256 }}'
           $checkout     = $env:HIL_CHECKOUT_SHA
@@ -1720,32 +1720,56 @@ jobs:
           Write-Host ("  Installed SHA   : {0}" -f $installedSha)
           Write-Host ("  Driver version  : {0}" -f $drv_ver)
 
-          if ($mismatch -eq 'true') {
+          # Determine contract using fail-closed logic.
+          # VERIFIED_CURRENT_BUILD: both hashes present, equal, and mismatch flag is NOT 'true'.
+          # BASELINE_DRIVER_ONLY:   hashes differ (mismatch=true), but both are present.
+          # UNVERIFIED:             either hash missing/empty, or evidence insufficient.
+          $installedPresent = -not ([string]::IsNullOrWhiteSpace($installedSha))
+          $buildPresent     = -not ([string]::IsNullOrWhiteSpace($buildSha))
+
+          if ($installedPresent -and $buildPresent -and ($mismatch -ne 'true')) {
             Write-Host ""
-            Write-Host "  [COVERAGE GAP] Tests ran against the PREINSTALLED driver, NOT the current commit build." -ForegroundColor Yellow
-            Write-Host "  Results verify the installed driver artifact, NOT commit $checkout" -ForegroundColor Yellow
-            Write-Host "  To verify commit changes, deploy via the authorized deployment lane." -ForegroundColor Yellow
-            # Emit job summary for GitHub Actions UI
+            Write-Host "  [VERIFIED_CURRENT_BUILD] Installed driver matches current commit build." -ForegroundColor Green
+            Write-Host "  Contract A: authorized preinstalled driver == current build artifact." -ForegroundColor Green
             if ($env:GITHUB_STEP_SUMMARY) {
               @"
-## HIL Identity Note
+## HIL Identity Audit
 - **Checkout SHA**: $checkout
 - **Built-SYS SHA256**: $buildSha
-- **Installed SHA256**: $installedSha
+- **Installed SHA256**: $installedSha (matches)
 - **Driver version**: $drv_ver
-- **Status**: COVERAGE GAP - tests ran against preinstalled driver, not current build.
-  To verify current-commit source changes, use the deployment lane.
+- **Contract**: VERIFIED_CURRENT_BUILD -- installed driver matches current commit build.
+"@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          } elseif ($installedPresent -and $buildPresent -and ($mismatch -eq 'true')) {
+            Write-Host ""
+            Write-Host "  [BASELINE_DRIVER_ONLY] Tests ran against PREINSTALLED driver, NOT current commit build." -ForegroundColor Yellow
+            Write-Host "  Results verify the installed driver artifact, NOT commit $checkout" -ForegroundColor Yellow
+            Write-Host "  To verify current-commit kernel changes, deploy via the authorized deployment lane." -ForegroundColor Yellow
+            if ($env:GITHUB_STEP_SUMMARY) {
+              @"
+## HIL Identity Audit
+- **Checkout SHA**: $checkout
+- **Built-SYS SHA256**: $buildSha
+- **Installed SHA256**: $installedSha (DIFFERENT -- coverage gap)
+- **Driver version**: $drv_ver
+- **Contract**: BASELINE_DRIVER_ONLY -- tests ran against preinstalled driver, not current build.
+  Kernel-code changes in this commit are NOT verified by these HIL results.
 "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           } else {
-            Write-Host "  [VERIFIED] Tests ran against current-commit build artifact." -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  [UNVERIFIED] Identity evidence missing or incomplete -- cannot confirm driver under test." -ForegroundColor Red
+            Write-Host ("  installedSha present: {0}  buildSha present: {1}  mismatch: {2}" -f $installedPresent, $buildPresent, $mismatch) -ForegroundColor Red
             if ($env:GITHUB_STEP_SUMMARY) {
               @"
-## HIL Identity Note
+## HIL Identity Audit
 - **Checkout SHA**: $checkout
-- **Installed SHA256**: $installedSha (matches current build)
+- **Built-SYS SHA256**: $buildSha (present: $buildPresent)
+- **Installed SHA256**: $installedSha (present: $installedPresent)
 - **Driver version**: $drv_ver
-- **Status**: VERIFIED - installed driver matches current commit build.
+- **Contract**: UNVERIFIED -- identity evidence missing; these HIL results cannot be attributed to a specific driver artifact.
+  Check HIL_EXPECTED_DRIVER_SHA256 secret and Build-Tests.ps1 SHA256 output.
 "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           }

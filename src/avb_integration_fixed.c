@@ -3898,65 +3898,15 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             q->hw_state = (avb_u32)AvbContext->hw_state; 
             q->vendor_id = AvbContext->intel_device.pci_vendor_id; 
             q->device_id = AvbContext->intel_device.pci_device_id; 
-                     q->capabilities = AvbContext->intel_device.capabilities;
-                     q->reserved = AvbGetLwfSupportedCapabilities(AvbContext);
+            q->capabilities = AvbContext->intel_device.capabilities;
+            q->reserved = AvbGetLwfSupportedCapabilities(AvbContext);
             info = sizeof(*q);
             
-                     DEBUGP(DL_TRACE, "? HW_STATE: state=%s, VID=0x%04X, DID=0x%04X, hw_caps=0x%08X, lwf_caps=0x%08X\n",
-                         AvbHwStateName(q->hw_state), q->vendor_id, q->device_id, q->capabilities, q->reserved);
-            
-            // Force BAR0 discovery attempt if hardware is still in BOUND state
-            if (AvbContext->hw_state == AVB_HW_BOUND && AvbContext->hardware_context == NULL) {
-                DEBUGP(DL_TRACE, "? FORCING BAR0 DISCOVERY: Hardware stuck in BOUND state, attempting manual discovery...\n");
-                
-                // Ensure device type is properly set
-                if (AvbContext->intel_device.device_type == INTEL_DEVICE_UNKNOWN && 
-                    AvbContext->intel_device.pci_device_id != 0) {
-                    AvbContext->intel_device.device_type = AvbGetIntelDeviceType(AvbContext->intel_device.pci_device_id);
-                    DEBUGP(DL_TRACE, "? Updated device type to %d for DID=0x%04X\n", 
-                           AvbContext->intel_device.device_type, AvbContext->intel_device.pci_device_id);
-                }
-                
-                PHYSICAL_ADDRESS bar0 = {0};
-                ULONG barLen = 0;
-                NTSTATUS ds = AvbDiscoverIntelControllerResources(AvbContext->filter_instance, &bar0, &barLen);
-                if (NT_SUCCESS(ds)) {
-                    DEBUGP(DL_TRACE, "? MANUAL BAR0 DISCOVERY SUCCESS: PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
-                    NTSTATUS ms = AvbMapIntelControllerMemory(AvbContext, bar0, barLen);
-                    if (NT_SUCCESS(ms)) {
-                        DEBUGP(DL_TRACE, "? MANUAL BAR0 MAPPING SUCCESS: Hardware context now available\n");
-                        
-                        // Complete the initialization sequence
-                        if (intel_init(&AvbContext->intel_device) == 0) {
-                            DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
-                            
-                            // Test MMIO sanity
-                            ULONG ctrl = INTEL_MASK_32BIT;
-                            if (intel_read_reg(&AvbContext->intel_device, I210_CTRL, &ctrl) == 0 && ctrl != INTEL_MASK_32BIT) {
-                                DEBUGP(DL_TRACE, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
-                                AVB_SET_HW_STATE(AvbContext, AVB_HW_BAR_MAPPED);
-                                AvbContext->hw_access_enabled = TRUE;
-                                AvbContext->initialized = TRUE;
-                                q->hw_state = (avb_u32)AvbContext->hw_state; // Update return value
-                                
-                                // Try I210 PTP initialization if applicable
-                                if (AvbContext->intel_device.device_type == INTEL_DEVICE_I210) {
-                                    DEBUGP(DL_TRACE, "?? MANUAL I210 PTP INIT: Starting...\n");
-                                    AvbI210EnsureSystimRunning(AvbContext);
-                                }
-                            } else {
-                                DEBUGP(DL_ERROR, "? MANUAL MMIO SANITY FAILED: CTRL=0x%08X\n", ctrl);
-                            }
-                        } else {
-                            DEBUGP(DL_ERROR, "? MANUAL intel_init FAILED\n");
-                        }
-                    } else {
-                        DEBUGP(DL_ERROR, "? MANUAL BAR0 MAPPING FAILED: 0x%08X\n", ms);
-                    }
-                } else {
-                    DEBUGP(DL_ERROR, "? MANUAL BAR0 DISCOVERY FAILED: 0x%08X\n", ds);
-                }
-            }
+            DEBUGP(DL_TRACE, "? HW_STATE: state=%s, VID=0x%04X, DID=0x%04X, hw_caps=0x%08X, lwf_caps=0x%08X\n",
+                   AvbHwStateName(q->hw_state), q->vendor_id, q->device_id, q->capabilities, q->reserved);
+            /* GET_HW_STATE is a pure observation query.  It must NOT trigger any BAR
+             * discovery, MMIO mapping, intel_init, PTP init or state writes.
+             * Callers that need initialization must use IOCTL_AVB_INIT_DEVICE. */
         } 
         break;
     case IOCTL_AVB_OPEN_ADAPTER:

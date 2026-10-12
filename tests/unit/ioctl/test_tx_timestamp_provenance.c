@@ -1119,29 +1119,106 @@ static void test_h05(bool driver_present)
 }
 
 /* -------------------------------------------------------------------------
+ * Physical RX timestamp capability table (VID/DID → hardware support).
+ *
+ * Source: Intel Ethernet Controller/PHY datasheets.
+ *
+ * PHYS_RX_TS_PRESENT  Discrete PCIe MAC with RXSTMPL/RXSTMPH registers
+ *                     accessible via BAR0.  Returned register value is a
+ *                     valid IEEE 1588 ingress timestamp.
+ *
+ * PHYS_RX_TS_ABSENT   PCH-integrated PHY (e.g. I219, I217).  The timestamp
+ *                     path is handled through the PCH MAC; RXSTMPL/H are not
+ *                     independently readable via a PCIe BAR.
+ *
+ * PHYS_RX_TS_UNKNOWN  VID/DID not in this table.  Cannot establish physical
+ *                     capability from hardware identity alone.
+ *
+ * This table is the authoritative source for SKIP_UNSUPPORTED decisions in
+ * H06.  Runtime MMIO availability, driver init errors, and LWF capability
+ * flags are NOT physical capability evidence and must not substitute for it.
+ * -------------------------------------------------------------------------*/
+typedef enum {
+    PHYS_RX_TS_UNKNOWN = 0,
+    PHYS_RX_TS_ABSENT  = 1,
+    PHYS_RX_TS_PRESENT = 2,
+} phys_rx_ts_cap_t;
+
+static const struct { avb_u16 did; phys_rx_ts_cap_t cap; const char *family; }
+g_phys_rx_ts_table[] = {
+    /* I210 -- discrete PCIe GbE MAC */
+    { 0x1533, PHYS_RX_TS_PRESENT, "I210-T1"        },
+    { 0x1536, PHYS_RX_TS_PRESENT, "I210-IS"        },
+    { 0x1537, PHYS_RX_TS_PRESENT, "I210-SGMII"     },
+    { 0x157B, PHYS_RX_TS_PRESENT, "I210-IT-PHY"    },
+    { 0x157C, PHYS_RX_TS_PRESENT, "I210-BACO-PHY"  },
+    /* I225 -- discrete PCIe 2.5G TSN MAC */
+    { 0x15F2, PHYS_RX_TS_PRESENT, "I225-LM"        },
+    { 0x15F3, PHYS_RX_TS_PRESENT, "I225-V"         },
+    { 0x3100, PHYS_RX_TS_PRESENT, "I225-IT"        },
+    { 0x0D9F, PHYS_RX_TS_PRESENT, "I225-K"         },
+    /* I226 -- discrete PCIe 2.5G TSN MAC */
+    { 0x125B, PHYS_RX_TS_PRESENT, "I226-LM"        },
+    { 0x125C, PHYS_RX_TS_PRESENT, "I226-V"         },
+    { 0x0DC7, PHYS_RX_TS_PRESENT, "I226-IT"        },
+    { 0x0DC6, PHYS_RX_TS_PRESENT, "I226-K"         },
+    { 0x0DC8, PHYS_RX_TS_PRESENT, "I226-BLANK"     },
+    /* I219 -- PCH-integrated PHY; no BAR-accessible RXSTMPL/H */
+    { 0x15B7, PHYS_RX_TS_ABSENT,  "I219-LM(1)"     },
+    { 0x15B8, PHYS_RX_TS_ABSENT,  "I219-V(1)"      },
+    { 0x0D4E, PHYS_RX_TS_ABSENT,  "I219-LM(18)"    },
+    { 0x0D4F, PHYS_RX_TS_ABSENT,  "I219-V(18)"     },
+    { 0x15D7, PHYS_RX_TS_ABSENT,  "I219-LM(7)"     },
+    { 0x15D8, PHYS_RX_TS_ABSENT,  "I219-V(7)"      },
+    { 0x15E3, PHYS_RX_TS_ABSENT,  "I219-LM(8)"     },
+    { 0x10F0, PHYS_RX_TS_ABSENT,  "I219-LM(old)"   },
+    { 0x1559, PHYS_RX_TS_ABSENT,  "I218-LM"        },
+    { 0x155A, PHYS_RX_TS_ABSENT,  "I218-V"         },
+    /* I217 -- PCH-integrated PHY */
+    { 0x153A, PHYS_RX_TS_ABSENT,  "I217-LM"        },
+    { 0x153B, PHYS_RX_TS_ABSENT,  "I217-V"         },
+};
+#define PHYS_RX_TS_TABLE_LEN \
+    (sizeof(g_phys_rx_ts_table) / sizeof(g_phys_rx_ts_table[0]))
+
+static phys_rx_ts_cap_t phys_rx_ts_lookup(avb_u16 did, const char **family_out)
+{
+    for (size_t i = 0; i < PHYS_RX_TS_TABLE_LEN; i++) {
+        if (g_phys_rx_ts_table[i].did == did) {
+            if (family_out) *family_out = g_phys_rx_ts_table[i].family;
+            return g_phys_rx_ts_table[i].cap;
+        }
+    }
+    if (family_out) *family_out = "unknown";
+    return PHYS_RX_TS_UNKNOWN;
+}
+
+/* -------------------------------------------------------------------------
  * TEST-PROV-H06: GET_RX_TIMESTAMP V1/V2 ABI (hardware-integrated).
  *
- * Capability semantics -- three distinct properties:
+ * Capability semantics -- four distinct properties:
  *
- *  (a) Hardware trait: device implements IEEE 1588 (INTEL_CAP_BASIC_1588 in
- *      ENUM_ADAPTERS.capabilities).
+ *  (a) Physical NIC capability: independently established from PCI DID using
+ *      g_phys_rx_ts_table above.  This is the ONLY valid basis for
+ *      SKIP_UNSUPPORTED.  Runtime state does NOT substitute for this.
  *
- *  (b) HAL implementation: driver has read_rx_timestamp() for this device.
+ *  (b) Hardware trait flag: INTEL_CAP_BASIC_1588 in ENUM_ADAPTERS.capabilities.
+ *      Supplementary; must be consistent with (a).
+ *
+ *  (c) HAL implementation: driver has read_rx_timestamp() for this device.
  *      Indicated by INTEL_CAP_ENHANCED_TS in IOCTL_AVB_GET_HW_STATE.reserved
- *      (LWF-supported capability set, set only when read_rx_timestamp != NULL).
+ *      (LWF-supported capability set; set only when read_rx_timestamp != NULL
+ *      AND BAR0 is mapped).  GET_HW_STATE is a pure observation query; it
+ *      does NOT trigger initialization (see P0.1 fix in avb_integration_fixed.c).
  *
- *  (c) Runtime MMIO availability: BAR0 was successfully mapped at runtime
- *      (INTEL_CAP_MMIO in IOCTL_AVB_GET_HW_STATE.reserved, stripped when
- *      hardware_context == NULL).
+ *  (d) Runtime MMIO availability: BAR0 mapped at runtime.
+ *      Indicated by INTEL_CAP_MMIO in IOCTL_AVB_GET_HW_STATE.reserved.
  *
- * Correct SKIP_UNSUPPORTED condition:
- *   LWF caps lacks INTEL_CAP_ENHANCED_TS  -> HAL implementation absent or MMIO unavailable
- *   This is SKIP_UNSUPPORTED only when the hardware also lacks BASIC_1588.
- *   When BASIC_1588 is present but ENHANCED_TS absent from LWF caps:
- *     -> BAR mapping failure or missing HAL implementation -> BLOCKED (not SKIP)
- *
- * Get LWF caps from IOCTL_AVB_GET_HW_STATE.reserved, NOT from ENUM_ADAPTERS
- * (which returns raw hardware capabilities, not runtime-filtered ones).
+ * Decision table:
+ *   phys=ABSENT                    -> SKIP_UNSUPPORTED (VID/DID evidence cited)
+ *   phys=UNKNOWN                   -> BLOCKED (capability precondition failed)
+ *   phys=PRESENT, !lwf_enhanced    -> BLOCKED (MMIO/HAL failure, not hardware gap)
+ *   phys=PRESENT, lwf_enhanced     -> run V1 + V2 ABI tests
  *
  * V2 positive provenance check: when valid==1, ts_provenance must be
  *   AVB_RX_PROV_HARDWARE_REGISTER (5), not merely != VERIFIED_HARDWARE_TX.
@@ -1222,39 +1299,69 @@ static void test_h06(bool driver_present)
     printf("  LWF runtime caps (GET_HW_STATE.reserved): 0x%08X\n", (unsigned)lwf_caps);
     printf("  HW state: 0x%08X\n", (unsigned)hw_state);
 
+    /* Step 2: physical NIC capability from VID/DID table (primary evidence). */
+    const char *phys_family = "unknown";
+    phys_rx_ts_cap_t phys_cap = phys_rx_ts_lookup(did0, &phys_family);
+    printf("  Physical RX TS (DID=0x%04X %s): %s\n",
+           (unsigned)did0, phys_family,
+           phys_cap == PHYS_RX_TS_PRESENT ? "PRESENT" :
+           phys_cap == PHYS_RX_TS_ABSENT  ? "ABSENT"  : "UNKNOWN");
+
     bool has_basic_1588 = (hw_caps  & INTEL_CAP_BASIC_1588)   != 0;
     bool lwf_enhanced   = (lwf_caps & INTEL_CAP_ENHANCED_TS)  != 0;
 
     printf("  BASIC_1588 in hw_caps: %d  ENHANCED_TS in lwf_caps: %d\n",
            has_basic_1588, lwf_enhanced);
 
-    /* Capability routing:
-     * !has_basic_1588            -> hardware does not support IEEE 1588 -> SKIP_UNSUPPORTED
-     * has_basic_1588 && !lwf_enhanced -> MMIO not available or read_rx_timestamp not
-     *                                    implemented -> BLOCKED (infrastructure or driver gap;
-     *                                    not a hardware absence) */
-    if (!has_basic_1588) {
-        tc_skip("TEST-PROV-H06", "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588 "
-                "(hardware does not implement IEEE 1588)");
+    /* Capability routing -- physical NIC table is primary SKIP_UNSUPPORTED gate.
+     *
+     * PHYS_RX_TS_ABSENT  -> hardware physically cannot do direct RX timestamp
+     *                       reads -> SKIP_UNSUPPORTED with VID/DID evidence.
+     *
+     * PHYS_RX_TS_UNKNOWN -> cannot determine physical capability from DID alone
+     *                       -> BLOCKED (capability precondition failed; do not
+     *                       guess or propagate a silent SKIP).
+     *
+     * PHYS_RX_TS_PRESENT -> discrete PCIe MAC with RXSTMPL/H.  Now check runtime:
+     *   !lwf_enhanced     -> MMIO not mapped or read_rx_timestamp not implemented
+     *                        -> BLOCKED (infrastructure gap, NOT hardware absence).
+     *   lwf_enhanced      -> run ABI tests.
+     */
+    if (phys_cap == PHYS_RX_TS_ABSENT) {
+        char msg[256];
+        (void)sprintf(msg,
+            "SKIP_UNSUPPORTED: %s (DID=0x%04X) is a PCH-integrated PHY; "
+            "RXSTMPL/H not independently accessible via BAR (DID table)",
+            phys_family, (unsigned)did0);
+        tc_skip("TEST-PROV-H06", msg);
         return;
     }
+    if (phys_cap == PHYS_RX_TS_UNKNOWN) {
+        char msg[256];
+        (void)sprintf(msg,
+            "BLOCKED: DID=0x%04X not in physical RX TS capability table; "
+            "cannot independently establish hardware support -- add entry to g_phys_rx_ts_table",
+            (unsigned)did0);
+        s_total++; s_failed++;
+        printf("  [FAIL] TEST-PROV-H06: %s\n", msg);
+        return;
+    }
+
+    /* phys_cap == PHYS_RX_TS_PRESENT: discrete PCIe MAC confirmed.
+     * Consistency cross-check (not a gate): BASIC_1588 should also be set. */
+    if (!has_basic_1588) {
+        printf("  [WARN] TEST-PROV-H06: DID=0x%04X (%s) physical RX TS PRESENT "
+               "but ENUM_ADAPTERS lacks BASIC_1588 -- driver capability detection inconsistency\n",
+               (unsigned)did0, phys_family);
+    }
+
     if (!lwf_enhanced) {
-        /* BASIC_1588 present but ENHANCED_TS absent from LWF caps.
-         * This means either BAR0 was not mapped (MMIO unavailable at runtime) OR
-         * the HAL does not implement read_rx_timestamp for this device.
-         * Neither is a hardware capability gap -- they are runtime/implementation issues. */
-        if (hw_caps & INTEL_CAP_MMIO) {
-            /* Hardware has MMIO-accessible registers but driver didn't map them. */
-            printf("  [BLOCKED] TEST-PROV-H06: BASIC_1588+MMIO in hw_caps but ENHANCED_TS absent "
-                   "from LWF caps -- BAR0 mapping failed or read_rx_timestamp not implemented.\n");
-            s_total++; s_failed++;
-        } else {
-            /* No MMIO in hw_caps at all (e.g. I219 PCH-integrated, no direct BAR access). */
-            tc_skip("TEST-PROV-H06",
-                    "SKIP_UNSUPPORTED: INTEL_CAP_ENHANCED_TS absent from LWF caps "
-                    "and adapter has no MMIO in hw_caps -- PCH-architecture NIC; "
-                    "RXSTMPL/H not independently accessible");
-        }
+        /* Physical hardware can do RX timestamps but driver cannot reach them at runtime. */
+        printf("  [BLOCKED] TEST-PROV-H06: %s (DID=0x%04X) physical RX TS present "
+               "but ENHANCED_TS absent from LWF caps -- "
+               "MMIO not mapped or read_rx_timestamp not implemented for this device\n",
+               phys_family, (unsigned)did0);
+        s_total++; s_failed++;
         return;
     }
 

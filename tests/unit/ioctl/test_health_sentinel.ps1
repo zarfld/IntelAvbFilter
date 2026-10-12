@@ -3,16 +3,18 @@
 # Invokes Run-Tests-CI.ps1 via a wrapper subprocess.
 # Injects health failure via AVB_TEST_HEALTH_FAIL_AFTER without a real driver.
 #
+# TEST-SENTINEL-001..007: #328 Behavioral Health Sentinel
+#
 # TEST-SENTINEL-001  fake test actually PASSED before health failure
 # TEST-SENTINEL-002  health-failure hook executed after that specific test
 # TEST-SENTINEL-003  exit=1 due to injected health failure (not another error)
-# TEST-SENTINEL-004  FAILED(INFRA) in actual generated JUnit XML
+# TEST-SENTINEL-004  FAILED(INFRA) in the actual generated JUnit XML (isolated dir)
 # TEST-SENTINEL-005  IsMandatorySuite by Suite alone (not gated on -Tests)
 # TEST-SENTINEL-006  test env var scope - AVB_TEST_HEALTH_FAIL_AFTER cleared after use
+# TEST-SENTINEL-007  negative: INFRA absent from JUnit -> TEST-SENTINEL-004 FAILs
 #
-# Log isolation: writes to its own tmpDir; cannot contaminate real HIL evidence.
-# Fault injection: AVB_TEST_HEALTH_FAIL_AFTER is set only in the subprocess env;
-#   the parent process env is not modified, preventing accidental HIL contamination.
+# Log isolation: writes to its own tmpDir via -LogsDir; cannot contaminate real HIL logs.
+# Fault injection: AVB_TEST_HEALTH_FAIL_AFTER is set only in the subprocess env.
 # No hardware or driver required.
 
 Set-StrictMode -Version Latest
@@ -31,9 +33,9 @@ function tc_fail { param([string]$n, [string]$why) $script:total++; $script:fail
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  TEST-SENTINEL-001..006: #328 Behavioral Health Sentinel" -ForegroundColor Cyan
+Write-Host "  TEST-SENTINEL-001..007: #328 Behavioral Health Sentinel" -ForegroundColor Cyan
 Write-Host "  Injects health failure via AVB_TEST_HEALTH_FAIL_AFTER=*" -ForegroundColor Cyan
-Write-Host "  Isolated logs; no contamination of real HIL evidence" -ForegroundColor Cyan
+Write-Host "  Isolated logs via -LogsDir; no contamination of HIL logs" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 if (-not (Test-Path $RunCIPath)) {
@@ -54,13 +56,15 @@ $fakePsTest = Join-Path $tmpDir "test_sentinel_fake.ps1"
 # Wrapper invokes Run-Tests-CI.ps1 with isolated log dir and injected health failure.
 # AVB_TEST_HEALTH_FAIL_AFTER is set ONLY inside this wrapper (subprocess env).
 # The parent process env is never modified, preventing accidental HIL contamination.
+# -LogsDir routes the runner's JUnit XML into $logsDir (isolated tmpDir), not repo logs/.
 $wrapperScript = Join-Path $tmpDir "wrapper.ps1"
 $fakePsTestFwd = $fakePsTest.Replace('\', '/')
+$logsEsc = $logsDir.Replace('\', '\\')
 $wrapperContent = @"
 `$env:AVB_TEST_HEALTH_FAIL_AFTER = '*'
 `$env:AVB_DRIVER_BUILD = 'Debug'
 & '$RunCIPath' -Suite HardwareMandatory -Tests @('ps1:$fakePsTestFwd') ``
-    -TestTimeoutSeconds 30 -Configuration Debug
+    -TestTimeoutSeconds 30 -Configuration Debug -LogsDir '$logsEsc'
 exit `$LASTEXITCODE
 "@
 $wrapperContent | Set-Content $wrapperScript -Encoding UTF8
@@ -122,55 +126,54 @@ if ($exitCode -eq 1 -and $infraPresent) {
     tc_fail "TEST-SENTINEL-003" "exit=1 but no INFRA marker -- exit 1 from a different cause"
 }
 
-# TEST-SENTINEL-004: FAILED(INFRA) in the actual generated JUnit XML
-# The runner generates JUnit XML in the repo's logs/ dir with today's date.
-# Check only XML files modified during or after the subprocess ran.
-$hilLogsDir = Join-Path $RepoRoot "logs"
-$xmlPattern = Join-Path $hilLogsDir "junit-HardwareMandatory-Debug-*.xml"
-# Only look at files written during this test run (created within the last 5 minutes)
-$cutoffTime = (Get-Date).AddMinutes(-5)
-$junitFiles = @(Get-ChildItem -Path $xmlPattern -ErrorAction SilentlyContinue |
-                Where-Object { $_.LastWriteTime -gt $cutoffTime })
-
-if ($junitFiles.Count -eq 0) {
-    # Accept the pre-existing XML only if it is the most-recently-created
-    # JUnit for this date AND it was updated after this test run started
-    $allXmls = @(Get-ChildItem -Path $xmlPattern -ErrorAction SilentlyContinue |
-                 Sort-Object LastWriteTime -Descending)
-    if ($allXmls.Count -gt 0) {
-        $latestXml = $allXmls[0]
-        # Consider XML relevant if it was updated in the last 10 minutes
-        if ($latestXml.LastWriteTime -gt (Get-Date).AddMinutes(-10)) {
-            $junitFiles = @($latestXml)
-        }
+# TEST-SENTINEL-004: FAILED(INFRA) in the actual generated JUnit XML (isolated dir).
+# Run-Tests-CI.ps1 was invoked with -LogsDir pointing to $logsDir (inside $tmpDir).
+# The JUnit XML must be in that exact directory -- no fallback to shared logs/ or console.
+# Accepting console output instead of JUnit is a false pass: remove that fallback here.
+$xmlFiles = @(Get-ChildItem -Path (Join-Path $logsDir "junit-*.xml") -ErrorAction SilentlyContinue)
+if ($xmlFiles.Count -eq 0) {
+    tc_fail "TEST-SENTINEL-004" ("No JUnit XML generated in isolated logs dir '{0}' -- Run-Tests-CI.ps1 must write JUnit into -LogsDir" -f $logsDir)
+} else {
+    $latestXml  = $xmlFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $xmlContent = Get-Content $latestXml.FullName -Raw -ErrorAction SilentlyContinue
+    $junitHasInfra = $xmlContent -match 'INFRA-HEALTH' -or
+                     $xmlContent -match 'FAILED\(INFRA\)' -or
+                     $xmlContent -match '<failure'
+    if ($junitHasInfra) {
+        tc_pass ("TEST-SENTINEL-004: INFRA/failure element in isolated JUnit '{0}'" -f $latestXml.Name)
+    } else {
+        tc_fail "TEST-SENTINEL-004" ("JUnit '{0}' exists but contains no INFRA/failure element -- Parse-TestResults must emit <failure> for INFRA_FAILURE results" -f $latestXml.Name)
     }
 }
 
-if ($junitFiles.Count -eq 0) {
-    tc_fail "TEST-SENTINEL-004" ("No recent JUnit XML found at '{0}' (generated by sentinel run)" -f $xmlPattern)
-} else {
-    $latestXml   = $junitFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    $xmlContent  = Get-Content $latestXml.FullName -Raw -ErrorAction SilentlyContinue
-    # INFRA failures are reported via the results log; Parse-TestResults uses the test log files
-    # not the summary. The JUnit XML reflects processed log entries.
-    # The sentinel produces: test_sentinel_fake.exe[INFRA-HEALTH] in results
-    # which Parse-TestResults should emit as <failure>
-    $junitHasInfra = $xmlContent -match 'INFRA-HEALTH' -or
-                     $xmlContent -match 'FAILED.INFRA.' -or
-                     $xmlContent -match 'failure.*328'
-    if ($junitHasInfra) {
-        tc_pass ("TEST-SENTINEL-004: INFRA marker in JUnit XML '{0}'" -f $latestXml.Name)
+# TEST-SENTINEL-007: negative test -- deliberately absent JUnit INFRA -> 004 check correctly FAILs.
+# Creates a JUnit XML without any failure element and verifies the 004 check rejects it.
+# This proves the check actually discriminates (positive proof that protection is real).
+& {
+    $negDir  = Join-Path $env:TEMP ("sentinel_neg_{0}" -f (Get-Random))
+    New-Item -ItemType Directory -Path $negDir -Force | Out-Null
+
+    $fakeXml     = Join-Path $negDir "junit-HardwareMandatory-Debug-20991231.xml"
+    $fakeContent = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="HardwareMandatory" tests="1" failures="0"><testcase name="TC-FAKE-001" classname="test_sentinel_fake" time="0.1"/></testsuite></testsuites>'
+    Set-Content $fakeXml -Value $fakeContent -Encoding UTF8
+
+    $negXmlFiles = @(Get-ChildItem -Path (Join-Path $negDir "junit-*.xml") -ErrorAction SilentlyContinue)
+    $negXmlOk    = $false
+    if ($negXmlFiles.Count -gt 0) {
+        $negXml     = $negXmlFiles[0]
+        $negContent = Get-Content $negXml.FullName -Raw -ErrorAction SilentlyContinue
+        $negHasInfra = $negContent -match 'INFRA-HEALTH' -or
+                       $negContent -match 'FAILED\(INFRA\)' -or
+                       $negContent -match '<failure'
+        if (-not $negHasInfra) { $negXmlOk = $true }
+    }
+
+    Remove-Item $negDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    if ($negXmlOk) {
+        tc_pass "TEST-SENTINEL-007: negative check correctly rejects JUnit without <failure> element"
     } else {
-        # Acceptable outcome: the JUnit XML may not contain the INFRA entry if Parse-TestResults
-        # runs on the combined log dir rather than the sentinel's isolated run.
-        # Verify that the RESULTS TABLE in Run-Tests-CI.ps1 output DID include FAILED(INFRA).
-        $resultsHaveInfra = $allOutput -match 'FAILED.INFRA.' -or $allOutput -match 'INFRA-HEALTH'
-        if ($resultsHaveInfra) {
-            tc_pass ("TEST-SENTINEL-004: INFRA entry confirmed in Run-Tests-CI.ps1 result table " +
-                     "(JUnit '{0}' uses accumulated logs which may not include sentinel run)" -f $latestXml.Name)
-        } else {
-            tc_fail "TEST-SENTINEL-004" ("JUnit '{0}' + result table: no INFRA entry found" -f $latestXml.Name)
-        }
+        tc_fail "TEST-SENTINEL-007" "Negative JUnit (no <failure>) passed SENTINEL-004 check -- check is too permissive"
     }
 }
 

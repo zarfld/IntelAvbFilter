@@ -48,7 +48,15 @@ param(
     # Per-test timeout in seconds.  0 = no timeout (use for suites without hardware).
     # Default 300 s (5 min) for hardware suites; 60 s for unit-only suites.
     [Parameter(Mandatory=$false)]
-    [int]$TestTimeoutSeconds = 0
+    [int]$TestTimeoutSeconds = 0,
+
+    # Override for the logs output directory.
+    # Default is <repo-root>/logs.
+    # The sentinel behavioral test passes an isolated tmpDir here so its JUnit
+    # output cannot contaminate or be confused with real HIL evidence.
+    # Ordinary HIL executions must NOT pass this parameter; CI leaves it unset.
+    [Parameter(Mandatory=$false)]
+    [string]$LogsDir = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -495,7 +503,14 @@ if ($TestTimeoutSeconds -eq 0) {
 $scriptDir   = $PSScriptRoot                                        # tools/test
 $repoRoot    = Split-Path (Split-Path $scriptDir -Parent) -Parent  # repository root
 $testExeDir  = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
-$logsDir     = Join-Path $repoRoot "logs"
+
+# -LogsDir may be supplied by the behavioral sentinel test for isolation.
+# Production HIL runs leave it empty so the default repo logs/ directory is used.
+if ($LogsDir -and $LogsDir.Trim() -ne "") {
+    $logsDir = $LogsDir
+} else {
+    $logsDir = Join-Path $repoRoot "logs"
+}
 
 if (-not (Test-Path $logsDir)) {
     New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
@@ -750,6 +765,15 @@ foreach ($TestName in $TestList) {
             Write-Fail "INFRA: $infraMsg --- remaining tests will be skipped"
         }
         $results += [PSCustomObject]@{ Name = "$exeName[INFRA-HEALTH]"; Status = "FAILED(INFRA)"; Exit = -2 }
+
+        # Write a synthetic log file so Convert-Logs-To-JUnit / Parse-TestResults
+        # can emit a <failure> element for this infrastructure failure in the JUnit XML.
+        # TC-INFRA-HEALTH-001 matches the TC-* pattern accepted by Parse-TestResults.
+        $infraLogTs  = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $infraLogFile = Join-Path $logsDir ("TC-INFRA-HEALTH.exe_{0}.log" -f $infraLogTs)
+        @"
+[INFRA_FAILURE] TC-INFRA-HEALTH-001: $infraMsg
+"@ | Set-Content $infraLogFile -Encoding utf8
     }
 }
 
