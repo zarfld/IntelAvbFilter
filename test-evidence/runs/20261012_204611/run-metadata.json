@@ -1,0 +1,17 @@
+﻿{
+    "run_id":  "20261012_204611",
+    "captured_at":  "2026-10-12T20:52:14+02:00",
+    "runner":  "DESKTOP-RSUO2LV",
+    "source_sha":  "1477ac38b1c4e222480208c487da600a1e74df7f",
+    "source_sha_note":  "Supplied by caller at capture time",
+    "test_exe_sha256":  "F366CA004BCF66F290F7D1FA2B15012ABA0BCA64BC99992BC3F8F30262999B52",
+    "installed_driver_sha256":  "C75352230EAEAFBBFFEE688782B67CFDBB5B2779B344CDDDFCF5D4962AF6554F",
+    "built_driver_sha256":  "C75352230EAEAFBBFFEE688782B67CFDBB5B2779B344CDDDFCF5D4962AF6554F",
+    "identity_contract":  "VERIFIED_CURRENT_BUILD",
+    "pci_ids":  "8086:125B(I226-LM,adapter:0) 8086:1533(I210-T1,adapter:1) 8086:15BB(I219-LM4,adapter:2-PnP) DRV-REPORTS:8086:15B7",
+    "test_name":  "test_tx_timestamp_provenance.exe",
+    "log_file":  "test_tx_timestamp_provenance.exe_20261012_204611.log",
+    "junit_file":  "junit-test_tx_timestamp_provenance-20261012_204611.xml",
+    "junit_tests":  21,
+    "junit_failures":  1
+}

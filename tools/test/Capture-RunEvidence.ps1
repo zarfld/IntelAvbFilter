@@ -82,6 +82,15 @@ if (-not (Test-Path $LogFile)) {
     exit 1
 }
 
+# Validate the input is a .log file, not an XML or other file.
+# Run-Tests.ps1 generates both *.log and *.xml in logs/ -- callers must pass the .log.
+if (-not $LogFile.EndsWith('.log')) {
+    Write-Error ("Input file does not have .log extension: {0}`n" +
+                 "Run-Tests.ps1 writes both *.log and *.xml to logs/; pass the .log file.`n" +
+                 "Use: `$log = Get-ChildItem logs -Filter 'test_<name>*.log' | Sort-Object LastWriteTime -Desc | Select-Object -First 1") -f $LogFile
+    exit 1
+}
+
 # Validate SHA256 format (64 hex chars) or "UNVERIFIED"
 function Assert-Sha256OrUnverified {
     param([string]$val, [string]$name)
@@ -173,12 +182,10 @@ Remove-Item $tmpLogDir -Recurse -Force -ErrorAction SilentlyContinue
 $convResult | Where-Object { $_ -match '\[OK\]|\[WARN\]|Summary' } |
     ForEach-Object { Write-Host "  $_" }
 
-if ($convExit -ne 0) {
-    Write-Error ("Convert-Logs-To-JUnit.ps1 returned exit code {0}; evidence capture aborted" -f $convExit)
-    exit 1
-}
+# Convert-Logs-To-JUnit exits 1 when tests FAIL (by design).
+# Only treat the exit as an error when the JUnit file was NOT produced.
 if (-not (Test-Path $junitOut)) {
-    Write-Error ("Expected JUnit file not created: {0}" -f $junitOut)
+    Write-Error ("Convert-Logs-To-JUnit.ps1 exit={0} and no JUnit produced -- conversion failed" -f $convExit)
     exit 1
 }
 
