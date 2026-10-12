@@ -1,0 +1,326 @@
+﻿**********************
+nStart der Windows PowerShell-Aufzeichnung
+Startzeit: 20261012194903
+Benutzername: DESKTOP-RSUO2LV\User
+RunAs-Benutzer: DESKTOP-RSUO2LV\User
+Konfigurationsname: 
+Computer: DESKTOP-RSUO2LV (Microsoft Windows NT 10.0.26200.0)
+Hostanwendung: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command Start-Transcript -Path 'C:\Users\User\IntelAvbFilter\logs\test_tx_timestamp_provenance.exe_20261012_194857.log' -Force | Out-Null; $_innerCode = 0; try { & 'C:\Users\User\IntelAvbFilter\tools\test\Run-Tests.ps1' -Configuration Debug -TestExecutable 'test_tx_timestamp_provenance.exe' -CollectLogs; $_innerCode = $LASTEXITCODE } catch { $_innerCode = 1 } finally { Stop-Transcript | Out-Null }; exit $_innerCode
+Prozess-ID: 14168
+PSVersion: 5.1.26100.9444
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9444
+BuildVersion: 10.0.26100.9444
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+================================================================
+  Intel AVB Filter Driver - Test Suite
+  Configuration: Debug
+================================================================
+
+==> Checking test preconditions
+[PASS] Execution policy: Bypass
+[PASS] Running as Administrator
+[PASS] Test signing: ENABLED
+[PASS] Secure Boot: disabled or not applicable
+[WARN] Windows Kits found at 'C:\Program Files (x86)\Windows Kits\10\' but no km/ headers detected -- SDK only, WDK may
+not be installed.
+[PASS] WDK installed: C:\Program Files (x86)\Windows Kits\10\ (version wdf)
+[PASS] Visual Studio (VC++ toolset): C:\Program Files\Microsoft Visual Studio\18\Community
+[PASS] Driver service: Running
+[PASS] Intel Ethernet adapters found: 3
+[INFO]   Intel(R) Ethernet Connection (7) I219-LM - Up
+[INFO]   Intel(R) I210 Gigabit Network Connection - Up
+[INFO]   Intel(R) Ethernet Controller I226-LM - Up
+
+[PRECONDITIONS] Passed with 1 warning(s). Review [WARN] items above.
+
+==> Checking Driver Service Status
+[OK] Service found: Running
+
+==> Enumerating Intel Network Adapters
+[OK] Found 3 Intel network adapter(s)
+
+  Adapter: Intel(R) Ethernet Connection (7) I219-LM
+    Name: Ethernet
+    Status: Up
+    MAC: E4-54-E8-61-38-E3
+    Speed: 1 Gbps
+    Hardware ID: PCI\VEN_8086&DEV_15BB&SUBSYS_085A1028&REV_10
+    VID: 0x8086, DID: 0x15BB
+    Device: Intel I219-LM Gigabit Network Connection
+[OK]     [SUPPORTED] This device is supported by the driver
+
+  Adapter: Intel(R) I210 Gigabit Network Connection
+    Name: Ethernet 2
+    Status: Up
+    MAC: C4-62-37-0B-B5-6E
+    Speed: 1 Gbps
+    Hardware ID: PCI\VEN_8086&DEV_1533&SUBSYS_00001D1A&REV_03
+    VID: 0x8086, DID: 0x1533
+    Device: Intel I210 Gigabit Network Connection
+[OK]     [SUPPORTED] This device is supported by the driver
+
+  Adapter: Intel(R) Ethernet Controller I226-LM
+    Name: Ethernet 3
+    Status: Up
+    MAC: F0-B2-B9-31-55-DB
+    Speed: 1 Gbps
+    Hardware ID: PCI\VEN_8086&DEV_125B&SUBSYS_8C5C103C&REV_04
+    VID: 0x8086, DID: 0x125B
+    Device: Intel I226-V 2.5GbE Network Connection
+[OK]     [SUPPORTED] This device is supported by the driver
+
+==> Testing Device Node Access
+[OK] Device node accessible: \\.\IntelAvbFilter
+
+==> Locating Test Executables
+[OK] Found 129 test executable(s)
+  [OK] avb_capability_validation_test.exe (44032 bytes)
+  [OK] avb_comprehensive_test.exe (665600 bytes)
+  [OK] avb_device_separation_test.exe (43008 bytes)
+  [OK] avb_diagnostic_test.exe (664576 bytes)
+  [OK] avb_diagnostic_test_um.exe (674304 bytes)
+  [OK] avb_hw_state_test.exe (664576 bytes)
+  [OK] avb_hw_state_test_um.exe (673792 bytes)
+  [OK] avb_i226_advanced_test.exe (685056 bytes)
+  [OK] avb_i226_test.exe (684544 bytes)
+  [OK] avb_multi_adapter_test.exe (692224 bytes)
+  [OK] avb_test_i210.exe (676864 bytes)
+  [OK] avb_test_i210_um.exe (693760 bytes)
+  [OK] avb_test_i217.exe (685056 bytes)
+  [OK] avb_test_i219.exe (685056 bytes)
+  [OK] avb_test_i225.exe (685056 bytes)
+  [OK] avb_test_i226.exe (693760 bytes)
+  [OK] avb_test_i226_um.exe (685568 bytes)
+  [OK] avb_test_i350.exe (681472 bytes)
+  [OK] avb_test_portability.exe (689152 bytes)
+  [OK] chatgpt5_i226_tas_validation.exe (679424 bytes)
+  [OK] comprehensive_ioctl_test.exe (684032 bytes)
+  [OK] corrected_i226_tas_test.exe (673792 bytes)
+  [OK] critical_prerequisites_investigation.exe (675840 bytes)
+  [OK] device_open_test.exe (666624 bytes)
+  [OK] diagnose_ptp.exe (669696 bytes)
+  [OK] enhanced_tas_investigation.exe (674816 bytes)
+  [OK] hardware_investigation_tool.exe (675328 bytes)
+  [OK] hw_timestamping_control_test.exe (670208 bytes)
+  [OK] intel_avb_diagnostics.exe (734208 bytes)
+  [OK] ptp_clock_control_production_test.exe (670720 bytes)
+  [OK] ptp_clock_control_test.exe (687616 bytes)
+  [OK] ptp_ioctl_latency_test.exe (680448 bytes)
+  [OK] quick_diagnostics.exe (698368 bytes)
+  [OK] rx_timestamping_test.exe (668160 bytes)
+  [OK] ssot_register_validation_test.exe (670208 bytes)
+  [OK] test_all_adapters.exe (668672 bytes)
+  [OK] test_atdecc_aen_protocol.exe (677888 bytes)
+  [OK] test_atdecc_event.exe (669696 bytes)
+  [OK] test_avtp_tu_bit_events.exe (698368 bytes)
+  [OK] test_build_sign.exe (702464 bytes)
+  [OK] test_cleanup_archive.exe (687616 bytes)
+  [OK] test_clock_config.exe (668160 bytes)
+  [OK] test_clock_working.exe (666624 bytes)
+  [OK] test_compat_win11.exe (672768 bytes)
+  [OK] test_control_device_lifecycle.exe (676352 bytes)
+  [OK] test_device_register_access.exe (675840 bytes)
+  [OK] test_dev_lifecycle.exe (679936 bytes)
+  [OK] test_direct_clock.exe (666112 bytes)
+  [OK] test_eee_lpi.exe (671744 bytes)
+  [OK] test_error_recovery.exe (677376 bytes)
+  [OK] test_event_latency_4ch.exe (675328 bytes)
+  [OK] test_event_log.exe (748544 bytes)
+  [OK] test_event_nf_latency.exe (681984 bytes)
+  [OK] test_event_nf_zero_polling.exe (678400 bytes)
+  [OK] test_exit_code_propagation.exe (665600 bytes)
+  [OK] test_extended_diag.exe (666624 bytes)
+  [OK] test_gptp_daemon_coexist.exe (672256 bytes)
+  [OK] test_gptp_phc_interface.exe (672256 bytes)
+  [OK] test_hal_errors.exe (678400 bytes)
+  [OK] test_hal_performance.exe (672768 bytes)
+  [OK] test_hal_unit.exe (682496 bytes)
+  [OK] test_hardware_detection.exe (671744 bytes)
+  [OK] test_hot_plug.exe (673280 bytes)
+  [OK] test_hw_state.exe (672768 bytes)
+  [OK] test_hw_state_machine.exe (678912 bytes)
+  [OK] test_hw_ts_ctrl.exe (686080 bytes)
+  [OK] test_ioctl_abi.exe (674304 bytes)
+  [OK] test_ioctl_access_control.exe (670208 bytes)
+  [OK] test_ioctl_buffer_fuzz.exe (669184 bytes)
+  [OK] test_ioctl_fp_ptm.exe (676352 bytes)
+  [OK] test_ioctl_launch_time.exe (681984 bytes)
+  [OK] test_ioctl_offset.exe (676352 bytes)
+  [OK] test_ioctl_phc_epoch.exe (673280 bytes)
+  [OK] test_ioctl_phc_monotonicity.exe (672256 bytes)
+  [OK] test_ioctl_phc_query.exe (676864 bytes)
+  [OK] test_ioctl_routing.exe (669184 bytes)
+  [OK] test_ioctl_simple.exe (667136 bytes)
+  [OK] test_ioctl_target_time.exe (684032 bytes)
+  [OK] test_ioctl_tas.exe (688640 bytes)
+  [OK] test_ioctl_trace.exe (667136 bytes)
+  [OK] test_ioctl_version.exe (669696 bytes)
+  [OK] test_ioctl_xstamp.exe (671232 bytes)
+  [OK] test_lazy_initialization.exe (675328 bytes)
+  [OK] test_lifecycle_coverage.exe (699904 bytes)
+  [OK] test_magic_numbers.exe (705536 bytes)
+  [OK] test_mdio_phy.exe (675840 bytes)
+  [OK] test_minimal_ioctl.exe (668672 bytes)
+  [OK] test_multidev_adapter_enum.exe (678400 bytes)
+  [OK] test_multi_adapter_phc_sync.exe (676864 bytes)
+  [OK] test_ndis_fastpath_latency.exe (670720 bytes)
+  [OK] test_ndis_receive_path.exe (671232 bytes)
+  [OK] test_ndis_send_path.exe (674816 bytes)
+  [OK] test_perf_regression.exe (822272 bytes)
+  [OK] test_pfc_pause.exe (671232 bytes)
+  [OK] test_power_management.exe (673280 bytes)
+  [OK] test_ptp_001.exe (684544 bytes)
+  [OK] test_ptp_corr.exe (674304 bytes)
+  [OK] test_ptp_corr_extended.exe (675840 bytes)
+  [OK] test_ptp_crosstimestamp.exe (671232 bytes)
+  [OK] test_ptp_event_latency.exe (677376 bytes)
+  [OK] test_ptp_freq.exe (687104 bytes)
+  [OK] test_ptp_freq_complete.exe (725504 bytes)
+  [OK] test_ptp_getset.exe (689664 bytes)
+  [OK] test_ptp_phc_stability.exe (723968 bytes)
+  [OK] test_qav_cbs.exe (680960 bytes)
+  [OK] test_registry_diagnostics.exe (684544 bytes)
+  [OK] test_rx_timestamp.exe (681984 bytes)
+  [OK] test_rx_timestamp_complete.exe (685568 bytes)
+  [OK] test_s3_sleep_wake.exe (671744 bytes)
+  [OK] test_scripts_consolidate.exe (676864 bytes)
+  [OK] test_security_validation.exe (685056 bytes)
+  [OK] test_send_ptp_debug.exe (667136 bytes)
+  [OK] test_srp_interface.exe (669184 bytes)
+  [OK] test_statistics_counters.exe (675328 bytes)
+  [OK] test_tas_restore_contract.exe (681472 bytes)
+  [OK] test_timestamp_latency.exe (691712 bytes)
+  [OK] test_tsn_ioctl_handlers.exe (669184 bytes)
+  [OK] test_tsn_ioctl_handlers_um.exe (669184 bytes)
+  [OK] test_ts_event_sub.exe (697856 bytes)
+  [OK] test_tx_timestamp_provenance.exe (700928 bytes)
+  [OK] test_tx_timestamp_retrieval.exe (677888 bytes)
+  [OK] test_vlan_pcp_tc_mapping.exe (670720 bytes)
+  [OK] test_vlan_tag.exe (669696 bytes)
+  [OK] test_vv_corr_001_stability.exe (700416 bytes)
+  [OK] test_vv_corr_003_crossdomain.exe (673280 bytes)
+  [OK] test_win7_stub.exe (671232 bytes)
+  [OK] test_zero_polling_overhead.exe (680960 bytes)
+  [OK] tsauxc_toggle_test.exe (670208 bytes)
+  [OK] tsn_hardware_activation_validation.exe (671744 bytes)
+
+==> Running Specific Test: test_tx_timestamp_provenance.exe
+
+  => test_tx_timestamp_provenance.exe
+=======================================================================
+TX Timestamp Provenance Regression -- TEST-PROV-L01..L06, H01..H06
+  Verifies: #149 (REQ-F-PTP-007) | Corrects: #199, #317 false-positives
+  Section L: pure-logic mock tests (always run)
+  Section H: Windows device contract + hardware (SKIP when driver absent; FAIL on setup error)
+=======================================================================
+
+=== Section L: Pure-logic mock tests (no device required) ===
+  [PASS] TEST-PROV-L05: compile-time struct layout assertions verified
+
+[TEST-PROV-L01] Independent capture invariant (mock)
+  [PASS] TEST-PROV-L01: self-comparison detection and independent-capture cases correct
+
+[TEST-PROV-L02] Provenance gating ├óÔé¼ÔÇØ SEND_PTP cannot claim VERIFIED_HARDWARE_TX (mock)
+  [PASS] TEST-PROV-L02: masquerade detection logic correct for all provenance values
+
+[TEST-PROV-L03] Multi-adapter routing invariant (mock)
+  [PASS] TEST-PROV-L03: mock routing invariants verified for 3 simulated adapters
+
+[TEST-PROV-L04] Unavailable provenance invariant (mock)
+  [PASS] TEST-PROV-L04: unavailable provenance invariant verified for all cases
+
+=== Section H: Hardware-integrated tests (driver present) ===
+
+[TEST-PROV-H01] Self-comparison regression (hardware-integrated, per-adapter)
+  [PASS] TEST-PROV-H01/adapter:0: 20/20 packets, no PRE_SEND_PHC self-comparison
+  [PASS] TEST-PROV-H01/adapter:1: 20/20 packets, no PRE_SEND_PHC self-comparison
+  [PASS] TEST-PROV-H01/adapter:2: 20/20 packets, no PRE_SEND_PHC self-comparison
+
+[TEST-PROV-H02] Masquerade regression (hardware-integrated, per-adapter)
+  [PASS] TEST-PROV-H02/adapter:0: 20 packets, no masquerade
+  [PASS] TEST-PROV-H02/adapter:1: 20 packets, no masquerade
+  [PASS] TEST-PROV-H02/adapter:2: 20 packets, no masquerade
+
+[TEST-PROV-H03] Multi-adapter context isolation via cross-handle GET_TX_TIMESTAMP
+  Adapter 0 caps=0x00000183  Adapter 1 caps=0x000001FF
+  h0 SEND_PTP: ts=13591089357402 ns  prov=1  packets_sent=1
+  h0 positive control: GET_TX_TIMESTAMP ts=13591089357402 prov=1 [OK]
+  h1 GET_TX_TIMESTAMP: valid=0  prov=0
+  [PASS] TEST-PROV-H03: positive control OK; h1 GET_TX_TIMESTAMP returned valid=0 ├óÔé¼ÔÇØ adapter contexts isolated
+
+[TEST-PROV-H04] Unavailable provenance + positive retrieval control
+  NOTE: drained stale record ts=13591089482288 prov=1
+  Part A: ts=13591089820644 prov=1 [value+provenance match]
+  [PASS] TEST-PROV-H04/part-A: positive control ÔÇö value and provenance consistent
+  [PASS] TEST-PROV-H04: Part A (value+prov consistent) + Part B (UNAVAILABLE after drain) both PASS
+
+[TEST-PROV-H05] V1/V2 ABI bytesReturned and canary bytes
+  [PASS] TEST-PROV-H05: V1/V2 bytesReturned correct; V1 canary bytes untouched
+
+[TEST-PROV-H06] GET_RX_TIMESTAMP V1/V2 ABI and provenance (per-adapter)
+  Adapter 0: VID=0x8086 DID=0x1533
+    hw_caps=0x00000183 lwf_caps=0x00000183 hw_state=0x00000003
+    Physical RX TS (I210-T1 DID=0x1533): PRESENT
+    GET_RX_TIMESTAMP V2: valid=1 prov=5 status=0x00000000
+  [PASS] TEST-PROV-H06/adapter:0: V1+V2 ABI correct for I210-T1 (DID=0x1533); provenance verified
+  Adapter 1: VID=0x8086 DID=0x125B
+    hw_caps=0x000001FF lwf_caps=0x000001FF hw_state=0x00000003
+    Physical RX TS (I226-LM DID=0x125B): PRESENT
+    GET_RX_TIMESTAMP V2: valid=1 prov=5 status=0x00000000
+  [PASS] TEST-PROV-H06/adapter:1: V1+V2 ABI correct for I226-LM (DID=0x125B); provenance verified
+  Adapter 2: VID=0x8086 DID=0x15B7
+    hw_caps=0x000000C3 lwf_caps=0x000000C3 hw_state=0x00000003
+    Physical RX TS (I219-LM(Skylake/PCH100) DID=0x15B7): ABSENT (PCH PHY)
+  [SKIP] TEST-PROV-H06/adapter:2: SKIP_UNSUPPORTED: I219-LM(Skylake/PCH100) (DID=0x15B7) is a PCH-integrated PHY; RXSTMPL/H not independently accessible via BAR (DID table)
+
+=======================================================================
+Summary ├óÔé¼ÔÇØ TX Timestamp Provenance Regression
+  Total: 18  Passed: 17  Failed: 0  Skipped: 1
+  STATUS: PASS
+  [JUnit] test_tx_timestamp_provenance.exe: 11 pass, 1 partial of 11 cases - test_tx_timestamp_provenance.exe_20261012_194909.xml
+    [PARTIAL] TEST-PROV-H06: skipped on [adapter:2] - : SKIP_UNSUPPORTED: I219-LM(Skylake/PCH100) (DID=0x15B7) is a PCH-integrated PHY; RXSTMPL/H not independently accessible via BAR (DID table)
+  [LCY] test_tx_timestamp_provenance.exe (Adapter0[VEN_8086:DEV_1533])  --  lifecycle metric delta:
+    IoctlCount                                  52970 ->                52982  (+12)
+  [LCY] test_tx_timestamp_provenance.exe (Adapter1[VEN_8086:DEV_125B])  --  lifecycle metric delta:
+    IoctlCount                                  42917 ->                42926  (+9)
+  [LCY] test_tx_timestamp_provenance.exe (Adapter2[VEN_8086:DEV_15B7])  --  lifecycle metric delta:
+    IoctlCount                                  43857 ->                43863  (+6)
+
+==> Collecting Event Logs
+Saving logs to: C:\Users\User\IntelAvbFilter\logs\test_logs_20261012_194910.txt
+[OK] Logs saved to: C:\Users\User\IntelAvbFilter\logs\test_logs_20261012_194910.txt
+
+================================================================
+                       TEST SUMMARY
+================================================================
+
+Infrastructure Status:
+  [OK] Driver service: Running
+  [OK] Intel adapters: 3 detected
+  [OK] Device node: Accessible
+  [OK] Test executables: 129 available
+
+Test Execution Results:
+  Total Tests Run:    1
+  OK Passed:          1
+  Success Rate:       100%
+
+Overall Assessment:
+  => ALL SYSTEMS OPERATIONAL!
+     Infrastructure validated, 1 tests passed.
+
+For detailed kernel debug output, use DebugView:
+  https://docs.microsoft.com/en-us/sysinternals/downloads/debugview
+
+================================================================
+  Test Suite Complete!
+================================================================
+**********************
+Ende der Windows PowerShell-Aufzeichnung
+Endzeit: 20261012194913
+**********************

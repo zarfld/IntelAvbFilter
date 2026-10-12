@@ -1,0 +1,105 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated: 2026-10-12T20:11:56 -->
+<!-- Machine: DESKTOP-RSUO2LV | Run date: 20261012 | OS: 10.0.26200 -->
+<!-- NOTE: Tests require Intel NIC hardware and installed driver -->
+<testsuites name="IntelAvbFilter Hardware Tests 20261012" tests="18" failures="0" skipped="1" time="0">
+  <testsuite name="test_tx_timestamp_provenance" tests="18" failures="0" skipped="1" errors="0" time="0" hostname="DESKTOP-RSUO2LV">
+    <properties>
+      <property name="log_file" value="test_tx_timestamp_provenance.exe_20261012_194857.log"/>
+      <property name="run_date" value="20261012"/>
+      <property name="verifies" value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+    </properties>
+    <testcase name="TEST-PROV-L05: compile-time struct layout assertions verified" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-L01: self-comparison detection and independent-capture cases correct" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-L02: masquerade detection logic correct for all provenance values" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-L03: mock routing invariants verified for 3 simulated adapters" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-L04: unavailable provenance invariant verified for all cases" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H01/adapter:0: 20/20 packets, no PRE_SEND_PHC self-comparison" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H01/adapter:1: 20/20 packets, no PRE_SEND_PHC self-comparison" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H01/adapter:2: 20/20 packets, no PRE_SEND_PHC self-comparison" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H02/adapter:0: 20 packets, no masquerade" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H02/adapter:1: 20 packets, no masquerade" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H02/adapter:2: 20 packets, no masquerade" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H03: positive control OK; h1 GET_TX_TIMESTAMP returned valid=0 ├óÔé¼ÔÇØ adapter contexts isolated" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H04/part-A: positive control ÔÇö value and provenance consistent" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H04: Part A (value+prov consistent) + Part B (UNAVAILABLE after drain) both PASS" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H05: V1/V2 bytesReturned correct; V1 canary bytes untouched" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H06/adapter:0: V1+V2 ABI correct for I210-T1 (DID=0x1533); provenance verified" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H06/adapter:1: V1+V2 ABI correct for I226-LM (DID=0x125B); provenance verified" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+    </testcase>
+    <testcase name="TEST-PROV-H06/adapter:2: SKIP_UNSUPPORTED: I219-LM" classname="test_tx_timestamp_provenance" time="0">
+      <properties>
+        <property name="verifies"   value="https://github.com/zarfld/IntelAvbFilter/issues/149"/>
+      </properties>
+      <skipped/>
+    </testcase>
+  </testsuite>
+</testsuites>
+
