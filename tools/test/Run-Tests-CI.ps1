@@ -232,7 +232,8 @@ $UnitTests = @(
     "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1",  # TEST-PROV-L06 aggregation invariants
     "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1",       # TEST-NOWAIT-001: no system("pause") in CI/HIL
     "ps1:tests/unit/build/test_build_tests_syspaths.ps1",       # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
-    "ps1:tests/unit/ioctl/test_health_sentinel.ps1"             # TEST-SENTINEL-001..004: #328 health check counter regression
+    "ps1:tests/unit/ioctl/test_health_sentinel.ps1",            # TEST-SENTINEL-001..006: #328 behavioral health sentinel
+    "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1"          # TEST-PREFLIGHT-001..005: preflight observational contract
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require

@@ -1702,6 +1702,54 @@ jobs:
             -Suite HardwareMandatory `
             -TestTimeoutSeconds 300
 
+      - name: Record driver/build identity separation (for audit)
+        if: always()
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          # Emit a clear summary of what driver was actually under test.
+          # This step makes the Contract A / Contract B distinction visible in the CI log.
+          $installedSha = $env:HIL_DRIVER_SHA256
+          $buildSha     = '${{ steps.build_driver.outputs.BUILD_DRIVER_SHA256 }}'
+          $checkout     = $env:HIL_CHECKOUT_SHA
+          $drv_ver      = $env:HIL_DRIVER_VERSION
+          $mismatch     = $env:HIL_DRIVER_MISMATCH
+
+          Write-Host "" ; Write-Host "=== HIL Identity Audit ===" -ForegroundColor Cyan
+          Write-Host ("  Checkout SHA    : {0}" -f $checkout)
+          Write-Host ("  Built-SYS SHA   : {0}" -f $buildSha)
+          Write-Host ("  Installed SHA   : {0}" -f $installedSha)
+          Write-Host ("  Driver version  : {0}" -f $drv_ver)
+
+          if ($mismatch -eq 'true') {
+            Write-Host ""
+            Write-Host "  [COVERAGE GAP] Tests ran against the PREINSTALLED driver, NOT the current commit build." -ForegroundColor Yellow
+            Write-Host "  Results verify the installed driver artifact, NOT commit $checkout" -ForegroundColor Yellow
+            Write-Host "  To verify commit changes, deploy via the authorized deployment lane." -ForegroundColor Yellow
+            # Emit job summary for GitHub Actions UI
+            if ($env:GITHUB_STEP_SUMMARY) {
+              @"
+## HIL Identity Note
+- **Checkout SHA**: $checkout
+- **Built-SYS SHA256**: $buildSha
+- **Installed SHA256**: $installedSha
+- **Driver version**: $drv_ver
+- **Status**: COVERAGE GAP - tests ran against preinstalled driver, not current build.
+  To verify current-commit source changes, use the deployment lane.
+"@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          } else {
+            Write-Host "  [VERIFIED] Tests ran against current-commit build artifact." -ForegroundColor Green
+            if ($env:GITHUB_STEP_SUMMARY) {
+              @"
+## HIL Identity Note
+- **Checkout SHA**: $checkout
+- **Installed SHA256**: $installedSha (matches current build)
+- **Driver version**: $drv_ver
+- **Status**: VERIFIED - installed driver matches current commit build.
+"@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          }
+
       - name: Upload HIL logs (always — needed for failure diagnosis)
         if: always()
         uses: actions/upload-artifact@v6

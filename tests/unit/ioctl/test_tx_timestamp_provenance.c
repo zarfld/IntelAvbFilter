@@ -1121,87 +1121,152 @@ static void test_h05(bool driver_present)
 /* -------------------------------------------------------------------------
  * TEST-PROV-H06: GET_RX_TIMESTAMP V1/V2 ABI (hardware-integrated).
  *
- * Category: Windows device contract -- RX timestamp register ABI.
+ * Capability semantics -- three distinct properties:
  *
- * Capability requirements for RXSTMPL/H to be accessible:
- *   INTEL_CAP_BASIC_1588   -- adapter supports IEEE 1588 at all
- *   INTEL_CAP_MMIO         -- MMIO register access is available
+ *  (a) Hardware trait: device implements IEEE 1588 (INTEL_CAP_BASIC_1588 in
+ *      ENUM_ADAPTERS.capabilities).
  *
- * INTEL_CAP_BASIC_1588 alone is NOT sufficient: I219 has BASIC_1588 but uses
- * a PCH-based architecture where RXSTMPL/H may not be independently accessible
- * via the filter driver's MMIO path. Only adapters that also report INTEL_CAP_MMIO
- * support direct RXSTMPL/H register reads via the HAL.
+ *  (b) HAL implementation: driver has read_rx_timestamp() for this device.
+ *      Indicated by INTEL_CAP_ENHANCED_TS in IOCTL_AVB_GET_HW_STATE.reserved
+ *      (LWF-supported capability set, set only when read_rx_timestamp != NULL).
  *
- * NOT_SUPPORTED semantics:
- *   caps has (BASIC_1588 | MMIO)  -> driver must implement RX TS -> FAIL
- *   caps lacks MMIO               -> RX timestamp not architecturally supported -> SKIP_UNSUPPORTED
- *   caps lacks BASIC_1588         -> no 1588 at all -> SKIP_UNSUPPORTED
+ *  (c) Runtime MMIO availability: BAR0 was successfully mapped at runtime
+ *      (INTEL_CAP_MMIO in IOCTL_AVB_GET_HW_STATE.reserved, stripped when
+ *      hardware_context == NULL).
+ *
+ * Correct SKIP_UNSUPPORTED condition:
+ *   LWF caps lacks INTEL_CAP_ENHANCED_TS  -> HAL implementation absent or MMIO unavailable
+ *   This is SKIP_UNSUPPORTED only when the hardware also lacks BASIC_1588.
+ *   When BASIC_1588 is present but ENHANCED_TS absent from LWF caps:
+ *     -> BAR mapping failure or missing HAL implementation -> BLOCKED (not SKIP)
+ *
+ * Get LWF caps from IOCTL_AVB_GET_HW_STATE.reserved, NOT from ENUM_ADAPTERS
+ * (which returns raw hardware capabilities, not runtime-filtered ones).
+ *
+ * V2 positive provenance check: when valid==1, ts_provenance must be
+ *   AVB_RX_PROV_HARDWARE_REGISTER (5), not merely != VERIFIED_HARDWARE_TX.
  * -------------------------------------------------------------------------*/
 static void test_h06(bool driver_present)
 {
     printf("\n[TEST-PROV-H06] GET_RX_TIMESTAMP V1/V2 ABI and provenance\n");
     if (!driver_present) { tc_skip("TEST-PROV-H06", "driver absent"); return; }
 
-    /* Get adapter capabilities via ENUM_ADAPTERS for authoritative capability evidence.
-     * Verify ENUM_ADAPTERS itself succeeds and NDIS status is SUCCESS before trusting caps. */
-    avb_u32 caps0 = 0;
+    /* Step 1: Get BOTH hardware caps (from ENUM_ADAPTERS) and LWF runtime caps
+     * (from GET_HW_STATE.reserved).  Both must succeed; mismatch is diagnostic. */
+    avb_u32 hw_caps = 0;    /* hardware trait caps (ENUM_ADAPTERS) */
+    avb_u32 lwf_caps = 0;   /* LWF-supported runtime caps (GET_HW_STATE.reserved) */
     avb_u16 vid0 = 0, did0 = 0;
-    bool enum_ok = false;
+    avb_u32 hw_state = 0;
+    bool enum_ok = false, hwstate_ok = false;
+
     {
         HANDLE hcap = open_dev();
-        if (hcap != INVALID_HANDLE_VALUE) {
+        if (hcap == INVALID_HANDLE_VALUE) {
+            tc_fail("TEST-PROV-H06", "CreateFileW failed for capability query");
+            return;
+        }
+        if (!bind_adapter(hcap, 0)) {
+            CloseHandle(hcap);
+            tc_fail("TEST-PROV-H06", "OPEN_ADAPTER failed for capability query");
+            return;
+        }
+
+        /* (a) Hardware traits from ENUM_ADAPTERS */
+        {
             AVB_ENUM_REQUEST er = {0};
             er.index = 0;
             DWORD ebr = 0;
             BOOL eok = DeviceIoControl(hcap, IOCTL_AVB_ENUM_ADAPTERS,
                                        &er, sizeof(er), &er, sizeof(er), &ebr, NULL);
             if (eok && er.status == NDIS_STATUS_SUCCESS) {
-                caps0    = er.capabilities;
-                vid0     = er.vendor_id;
-                did0     = er.device_id;
-                enum_ok  = true;
+                hw_caps = er.capabilities;
+                vid0    = er.vendor_id;
+                did0    = er.device_id;
+                enum_ok = true;
             } else {
-                printf("  NOTE: ENUM_ADAPTERS failed or returned NDIS error (ok=%d status=0x%08X)\n",
+                printf("  NOTE: ENUM_ADAPTERS failed (ok=%d status=0x%08X)\n",
                        eok, (unsigned)er.status);
             }
-            CloseHandle(hcap);
         }
+
+        /* (b) LWF runtime capabilities from GET_HW_STATE.reserved */
+        {
+            AVB_HW_STATE_QUERY hq = {0};
+            DWORD hbr = 0;
+            BOOL hok = DeviceIoControl(hcap, IOCTL_AVB_GET_HW_STATE,
+                                       &hq, sizeof(hq), &hq, sizeof(hq), &hbr, NULL);
+            if (hok) {
+                lwf_caps = AVB_HW_STATE_DRIVER_CAPABILITIES(hq);
+                hw_state = hq.hw_state;
+                hwstate_ok = true;
+            } else {
+                printf("  NOTE: IOCTL_AVB_GET_HW_STATE failed (error=%lu)\n", GetLastError());
+            }
+        }
+        CloseHandle(hcap);
     }
+
     if (!enum_ok) {
         tc_fail("TEST-PROV-H06",
-                "ENUM_ADAPTERS failed -- cannot determine capability evidence for SKIP_UNSUPPORTED");
+                "ENUM_ADAPTERS failed -- cannot establish hardware capability baseline");
         return;
     }
-    printf("  Adapter 0: VID=0x%04X DID=0x%04X caps=0x%08X\n",
-           (unsigned)vid0, (unsigned)did0, (unsigned)caps0);
-
-    /* Determine whether this adapter is expected to support RXSTMPL/H register reads. */
-    bool has_1588 = (caps0 & INTEL_CAP_BASIC_1588) != 0;
-    bool has_mmio = (caps0 & INTEL_CAP_MMIO) != 0;
-    bool rx_ts_expected = has_1588 && has_mmio;
-
-    printf("  INTEL_CAP_BASIC_1588=%d  INTEL_CAP_MMIO=%d  RX-TS-expected=%d\n",
-           has_1588, has_mmio, rx_ts_expected);
-
-    if (!has_1588) {
-        tc_skip("TEST-PROV-H06", "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588");
-        return;
-    }
-    if (!has_mmio) {
-        tc_skip("TEST-PROV-H06",
-                "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_MMIO "
-                "(PCH-based NIC; RXSTMPL/H not independently accessible via filter driver)");
+    if (!hwstate_ok) {
+        tc_fail("TEST-PROV-H06",
+                "IOCTL_AVB_GET_HW_STATE failed -- cannot get LWF runtime capabilities");
         return;
     }
 
+    printf("  Adapter 0: VID=0x%04X DID=0x%04X\n", (unsigned)vid0, (unsigned)did0);
+    printf("  Hardware caps (ENUM_ADAPTERS): 0x%08X\n", (unsigned)hw_caps);
+    printf("  LWF runtime caps (GET_HW_STATE.reserved): 0x%08X\n", (unsigned)lwf_caps);
+    printf("  HW state: 0x%08X\n", (unsigned)hw_state);
+
+    bool has_basic_1588 = (hw_caps  & INTEL_CAP_BASIC_1588)   != 0;
+    bool lwf_enhanced   = (lwf_caps & INTEL_CAP_ENHANCED_TS)  != 0;
+
+    printf("  BASIC_1588 in hw_caps: %d  ENHANCED_TS in lwf_caps: %d\n",
+           has_basic_1588, lwf_enhanced);
+
+    /* Capability routing:
+     * !has_basic_1588            -> hardware does not support IEEE 1588 -> SKIP_UNSUPPORTED
+     * has_basic_1588 && !lwf_enhanced -> MMIO not available or read_rx_timestamp not
+     *                                    implemented -> BLOCKED (infrastructure or driver gap;
+     *                                    not a hardware absence) */
+    if (!has_basic_1588) {
+        tc_skip("TEST-PROV-H06", "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588 "
+                "(hardware does not implement IEEE 1588)");
+        return;
+    }
+    if (!lwf_enhanced) {
+        /* BASIC_1588 present but ENHANCED_TS absent from LWF caps.
+         * This means either BAR0 was not mapped (MMIO unavailable at runtime) OR
+         * the HAL does not implement read_rx_timestamp for this device.
+         * Neither is a hardware capability gap -- they are runtime/implementation issues. */
+        if (hw_caps & INTEL_CAP_MMIO) {
+            /* Hardware has MMIO-accessible registers but driver didn't map them. */
+            printf("  [BLOCKED] TEST-PROV-H06: BASIC_1588+MMIO in hw_caps but ENHANCED_TS absent "
+                   "from LWF caps -- BAR0 mapping failed or read_rx_timestamp not implemented.\n");
+            s_total++; s_failed++;
+        } else {
+            /* No MMIO in hw_caps at all (e.g. I219 PCH-integrated, no direct BAR access). */
+            tc_skip("TEST-PROV-H06",
+                    "SKIP_UNSUPPORTED: INTEL_CAP_ENHANCED_TS absent from LWF caps "
+                    "and adapter has no MMIO in hw_caps -- PCH-architecture NIC; "
+                    "RXSTMPL/H not independently accessible");
+        }
+        return;
+    }
+
+    /* ---- Open IOCTL handle for ABI tests ---- */
     HANDLE h = open_dev();
     if (h == INVALID_HANDLE_VALUE) {
-        tc_fail("TEST-PROV-H06", "CreateFileW failed");
+        tc_fail("TEST-PROV-H06", "CreateFileW failed for ABI test");
         return;
     }
     if (!bind_adapter(h, 0)) {
         CloseHandle(h);
-        tc_fail("TEST-PROV-H06", "OPEN_ADAPTER failed");
+        tc_fail("TEST-PROV-H06", "OPEN_ADAPTER failed for ABI test");
         return;
     }
 
@@ -1214,23 +1279,22 @@ static void test_h06(bool driver_present)
         memset(buf, 0xDD, sizeof(buf));
         DWORD br = 0;
         BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
-                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,   /* V1 input */
-                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,   /* V1 output */
+                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
+                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
                                   &br, NULL);
         if (!ok) {
             DWORD err = GetLastError();
             if (err == ERROR_NOT_SUPPORTED || err == 50) {
-                /* Already verified (BASIC_1588 & MMIO) above.
-                 * NOT_SUPPORTED here means driver implementation is missing. FAIL. */
+                /* LWF caps confirmed ENHANCED_TS above; NOT_SUPPORTED = implementation bug. */
                 tc_fail("TEST-PROV-H06",
-                        "GET_RX_TIMESTAMP V1 returned NOT_SUPPORTED on BASIC_1588+MMIO adapter"
-                        " -- driver implementation missing (FAIL, not SKIP_UNSUPPORTED)");
+                        "GET_RX_TIMESTAMP V1 returned NOT_SUPPORTED despite ENHANCED_TS "
+                        "in LWF caps -- driver implementation bug");
                 all_ok = false;
                 CloseHandle(h);
                 return;
             } else {
                 char msg[128];
-                (void)sprintf(msg, "GET_RX_TIMESTAMP V1 failed with unexpected Win32 error %lu", err);
+                (void)sprintf(msg, "GET_RX_TIMESTAMP V1 failed Win32=%lu", err);
                 tc_fail("TEST-PROV-H06", msg);
                 all_ok = false;
             }
@@ -1241,7 +1305,6 @@ static void test_h06(bool driver_present)
             tc_fail("TEST-PROV-H06", msg);
             all_ok = false;
         } else {
-            /* Canary bytes 24-39 must be untouched */
             bool canary_ok = true;
             for (int i = AVB_TX_TIMESTAMP_REQUEST_V1_SIZE; i < (int)sizeof(buf); i++) {
                 if (buf[i] != 0xDD) { canary_ok = false; break; }
@@ -1284,16 +1347,41 @@ static void test_h06(bool driver_present)
                               br, (unsigned)sizeof(AVB_TX_TIMESTAMP_REQUEST));
                 tc_fail("TEST-PROV-H06", msg);
                 all_ok = false;
-            }
-            AVB_TX_TIMESTAMP_REQUEST *rx = (AVB_TX_TIMESTAMP_REQUEST *)buf;
-            if (rx->ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
-                tc_fail("TEST-PROV-H06",
-                        "GET_RX_TIMESTAMP V2 returned VERIFIED_HARDWARE_TX "
-                        "(must use AVB_RX_PROV_HARDWARE_REGISTER=5)");
-                all_ok = false;
             } else {
-                printf("  GET_RX_TIMESTAMP V2: valid=%u prov=%u bytesReturned=%lu\n",
-                       rx->valid, (unsigned)rx->ts_provenance, br);
+                AVB_TX_TIMESTAMP_REQUEST *rx = (AVB_TX_TIMESTAMP_REQUEST *)buf;
+                printf("  GET_RX_TIMESTAMP V2: valid=%u status=0x%08X prov=%u bytesReturned=%lu\n",
+                       rx->valid, (unsigned)rx->status, (unsigned)rx->ts_provenance, br);
+                /* Positive provenance check: when valid==1, must be HARDWARE_REGISTER.
+                 * Also reject VERIFIED_HARDWARE_TX (TX-specific, wrong for RX path). */
+                if (rx->valid == 1) {
+                    if (rx->ts_provenance != AVB_RX_PROV_HARDWARE_REGISTER) {
+                        char pmsg[256];
+                        (void)sprintf(pmsg,
+                            "GET_RX_TIMESTAMP V2 valid=1 but ts_provenance=%u; "
+                            "expected AVB_RX_PROV_HARDWARE_REGISTER=%u",
+                            (unsigned)rx->ts_provenance, (unsigned)AVB_RX_PROV_HARDWARE_REGISTER);
+                        tc_fail("TEST-PROV-H06", pmsg);
+                        all_ok = false;
+                    }
+                } else {
+                    /* valid==0: provenance must be UNAVAILABLE */
+                    if (rx->ts_provenance != AVB_TX_PROV_UNAVAILABLE) {
+                        char pmsg[256];
+                        (void)sprintf(pmsg,
+                            "GET_RX_TIMESTAMP V2 valid=0 but ts_provenance=%u; "
+                            "expected UNAVAILABLE=0",
+                            (unsigned)rx->ts_provenance);
+                        tc_fail("TEST-PROV-H06", pmsg);
+                        all_ok = false;
+                    }
+                }
+                /* Unconditional rejection of TX provenance on RX path */
+                if (rx->ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
+                    tc_fail("TEST-PROV-H06",
+                            "GET_RX_TIMESTAMP V2 returned VERIFIED_HARDWARE_TX "
+                            "(TX-specific value must never appear on RX path)");
+                    all_ok = false;
+                }
             }
         }
     }
@@ -1302,8 +1390,8 @@ static void test_h06(bool driver_present)
 
     if (all_ok)
         tc_pass("TEST-PROV-H06",
-                "GET_RX_TIMESTAMP V1 (genuine V1 input) and V2 ABI correct; "
-                "no VERIFIED_HARDWARE_TX on RX path");
+                "GET_RX_TIMESTAMP V1+V2 ABI correct; "
+                "V2 provenance AVB_RX_PROV_HARDWARE_REGISTER verified when valid==1");
 }
 
 /* =========================================================================

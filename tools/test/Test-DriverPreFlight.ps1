@@ -132,33 +132,31 @@ Write-Host "--- Service status ---"
 $svc = Get-Service -Name 'IntelAvbFilter' -ErrorAction SilentlyContinue
 if ($null -eq $svc) {
     Write-Err "IntelAvbFilter service not found -- driver not installed on this runner."
-    Write-Host "  Install the driver manually on the self-hosted machine before enabling hardware CI jobs." -ForegroundColor Yellow
+    Write-Host "  [INFRA_FAILURE] Service not present." -ForegroundColor Red
     exit 1
 }
 
-Write-Host "IntelAvbFilter service status: $($svc.Status)"
+$svcStatus = $svc.Status
+Write-Host "IntelAvbFilter service status: $svcStatus"
 
-if ($svc.Status -eq 'StopPending') {
-    Write-Err "IntelAvbFilter is stuck in STOP_PENDING -- reboot the runner machine to recover."
+if ($svcStatus -eq 'StopPending') {
+    Write-Err "IntelAvbFilter is STOP_PENDING -- reboot the runner machine to recover."
+    Write-Host "  [INFRA_FAILURE] Service stuck in STOP_PENDING; original state preserved." -ForegroundColor Red
     exit 1
 }
 
-if ($svc.Status -ne 'Running') {
-    Write-Warn "IntelAvbFilter is $($svc.Status) -- attempting Start-Service..."
-    try {
-        Start-Service -Name 'IntelAvbFilter' -ErrorAction Stop
-        Start-Sleep -Seconds 8
-        $svc.Refresh()
-        if ($svc.Status -ne 'Running') {
-            Write-Err "IntelAvbFilter failed to reach Running state (status: $($svc.Status))."
-            exit 1
-        }
-        Write-Ok "IntelAvbFilter restarted successfully."
-    } catch {
-        Write-Err "Start-Service IntelAvbFilter failed: $_"
-        exit 1
-    }
+if ($svcStatus -ne 'Running') {
+    # Record original state; do NOT attempt recovery here.
+    # Service not Running is an infrastructure problem, not a transient condition.
+    # Recovery belongs in a separately authorized workflow; masking failures here
+    # would allow a broken environment to silently PASS the preflight check.
+    Write-Err ("IntelAvbFilter service is '{0}' -- NOT Running." -f $svcStatus)
+    Write-Host "  [INFRA_FAILURE] Service state preserved as '$svcStatus' for diagnosis." -ForegroundColor Red
+    Write-Host "  Do not auto-restart in preflight; use the recovery workflow." -ForegroundColor Yellow
+    exit 1
 }
+
+Write-Ok "IntelAvbFilter service is Running."
 
 # --- 2. Device node accessibility check ---
 Add-Type -TypeDefinition @'
@@ -190,17 +188,14 @@ $h = [AvbPreFlight]::CreateFile(
 
 if ($h -eq [AvbPreFlight]::INVALID_HANDLE_VALUE) {
     $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    if ($err -eq 5) {
-        # ACCESS_DENIED with a Running service means the runner process is not elevated
-        # enough to open the device node directly. The service check above already caught
-        # STOP_PENDING, so this is likely a privilege gap â€” warn and let tests determine
-        # actual accessibility rather than pre-emptively blocking the suite.
-        Write-Warn "Cannot open device node (Win32 error=5 ACCESS_DENIED) -- runner may not be fully elevated."
-        Write-Host "  Hardware tests will still run; Run-Tests-CI.ps1 health checks will catch driver loss mid-suite." -ForegroundColor Yellow
-    } else {
-        Write-Err "Cannot open \\.\IntelAvbFilter (Win32 error=$err) -- #328 sentinel: device node inaccessible."
-        exit 1
+    $desc = switch ($err) {
+        2   { "ERROR_FILE_NOT_FOUND (2): device node does not exist" }
+        5   { "ERROR_ACCESS_DENIED (5): process is not elevated; runner must run as Administrator" }
+        default { "Win32 error $err" }
     }
+    Write-Err ("Cannot open \\.\IntelAvbFilter: {0} -- #328 sentinel" -f $desc)
+    Write-Host "  [INFRA_FAILURE] Device node inaccessible." -ForegroundColor Red
+    exit 1
 } else {
     [AvbPreFlight]::CloseHandle($h) | Out-Null
     Write-Ok "IntelAvbFilter service Running and device node accessible."
