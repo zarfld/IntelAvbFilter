@@ -4906,7 +4906,6 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     ULONG timinca_value;
     switch (dev->device_type) {
         case INTEL_DEVICE_I219:
-/
             timinca_value = INTEL_TIMINCA_I219_INIT;
             break;
         case INTEL_DEVICE_I217:
