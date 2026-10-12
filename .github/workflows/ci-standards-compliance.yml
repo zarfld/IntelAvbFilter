@@ -697,6 +697,13 @@ jobs:
           Write-Host ""
           Write-Host "All prerequisites verified on $env:RUNNER_NAME"
 
+      - name: Validate PowerShell 5.1 syntax (Windows)
+        # Early gate: fail immediately if any CI-critical script has a PS5.1 parser error.
+        # Runs BEFORE the build step so a syntax regression never silently reaches tests.
+        if: runner.os == 'Windows'
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: .\tools\ci\Validate-PS1Syntax.ps1
+
       - name: Build Windows driver tests (Windows)
         if: runner.os == 'Windows'
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'

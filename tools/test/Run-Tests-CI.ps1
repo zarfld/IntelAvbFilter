@@ -162,18 +162,22 @@ public static class AvbHealth {
     $bytesReturned = [uint32]0
     $buf = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(256)
     $ok  = $false
+    $err2 = 0
     try {
         $ok = [AvbHealth]::DeviceIoControl(
             $h, [AvbHealth]::IOCTL_AVB_GET_VERSION,
-            [IntPtr]::Zero, 0u, $buf, 256u,
+            [IntPtr]::Zero, [uint32]0, $buf, [uint32]256,
             [ref]$bytesReturned, [IntPtr]::Zero)
+        if (-not $ok) {
+            # Capture Win32 error immediately -- CloseHandle in finally{} can overwrite it.
+            $err2 = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        }
     } finally {
         [AvbHealth]::CloseHandle($h) | Out-Null
         [System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf)
     }
 
     if (-not $ok) {
-        $err2 = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
         Write-Host ("  [INFRA] IOCTL_AVB_GET_VERSION failed{0}: Win32={1}" -f $tag, $err2) `
               -ForegroundColor Red
         return $false
