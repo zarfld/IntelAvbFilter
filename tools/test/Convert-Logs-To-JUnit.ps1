@@ -22,6 +22,14 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$OutputFile = "",    # default: test-evidence/hardware-results-YYYYMMDD.xml
 
+    # When -OutputFile is explicitly supplied (isolated/sentinel runs) the caller
+    # is responsible for its own output destination; skip writing the shared
+    # hardware-results-latest.xml and traceability-summary-*.md so that
+    # behavioral test runs cannot corrupt production HIL evidence.
+    # Set this switch explicitly to force evidence-dir writes even when -OutputFile is set.
+    [Parameter(Mandatory=$false)]
+    [switch]$ForceEvidenceDir,
+
     [Parameter(Mandatory=$false)]
     [switch]$ShowDetails
 )
@@ -35,6 +43,11 @@ $scriptDir   = $PSScriptRoot
 $repoRoot    = Split-Path (Split-Path $scriptDir -Parent) -Parent
 $logsPath    = if ($LogsDir) { $LogsDir } else { Join-Path $repoRoot "logs" }
 $evidenceDir = Join-Path $repoRoot "test-evidence"
+
+# Write shared evidence-dir files (hardware-results-latest.xml, traceability MD)
+# only when NOT running in isolated/sentinel mode.
+# Isolated mode: -OutputFile is explicitly supplied and -ForceEvidenceDir is absent.
+$writeEvidenceDir = $ForceEvidenceDir -or (-not $OutputFile)
 
 if (-not (Test-Path $logsPath)) {
     Write-Error "Logs directory not found: $logsPath"
@@ -193,6 +206,15 @@ function Parse-TestLog {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
                 $cases.Add(@{ Name = $caseName; Failed = $true; Skipped = $false; FailMsg = $stripped })
+            }
+        } elseif ($stripped -match "^\[(INFRA_FAILURE|BLOCKED|CLEANUP_FAILED)\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)") {
+            # INFRA_FAILURE, BLOCKED, and CLEANUP_FAILED are all hard failures in JUnit.
+            # They must never appear as <skipped/> — doing so masks infrastructure breakage.
+            $infStatus = $Matches[1].Trim()
+            $caseName  = ($Matches[2] -replace '\s*\(.*\)\s*$', '').Trim()
+            if ($caseNames.Add($caseName)) {
+                $cases.Add(@{ Name = $caseName; Failed = $true; Skipped = $false;
+                              FailMsg = "[$infStatus] $($stripped -replace '^\[' + $infStatus + '\]\s*', '')" })
             }
         } elseif ($stripped -match "^\[SKIP\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)") {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
@@ -371,30 +393,36 @@ foreach ($suite in $suites) {
 # ------------------------------------------------------------------
 # Write output files
 # ------------------------------------------------------------------
-if (-not (Test-Path $evidenceDir)) {
-    New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
-}
 
 $outPath = if ($OutputFile) {
     $OutputFile
 } else {
+    if (-not (Test-Path $evidenceDir)) { New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null }
     Join-Path $evidenceDir "hardware-results-${RunDate}.xml"
 }
 
+$outDir = Split-Path $outPath -Parent
+if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 $sb.ToString() | Set-Content -Path $outPath -Encoding UTF8
 
-# Also write as 'latest' so CI can reference it without knowing the date
-$latestPath = Join-Path $evidenceDir "hardware-results-latest.xml"
-Copy-Item $outPath $latestPath -Force
+# Shared evidence-dir writes: hardware-results-latest.xml + traceability MD.
+# Skipped when running in isolated/sentinel mode (-OutputFile supplied without -ForceEvidenceDir)
+# to prevent behavioral test runs from corrupting production HIL evidence.
+if ($writeEvidenceDir) {
+    if (-not (Test-Path $evidenceDir)) { New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null }
+    $latestPath = Join-Path $evidenceDir "hardware-results-latest.xml"
+    Copy-Item $outPath $latestPath -Force
+} else {
+    $latestPath = $outPath   # point to isolated file for summary line
+}
 
 # ------------------------------------------------------------------
-# Generate Markdown traceability summary (appended to GITHUB_STEP_SUMMARY by CI)
+# Generate Markdown traceability summary
 # Requirement-centric: one row per (requirement × test-suite) pair.
 # PASS / FAIL / SKIP are explicit — skipped is never assumed pass or fail.
 # Source of truth: Verifies:/Implements: lines printed by each test file.
 # ------------------------------------------------------------------
 
-# Build requirement → [{Suite, Pass, Fail, Skip}] map
 $reqMap = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[hashtable]]]::new()
 foreach ($suite in $suites) {
     $tcPass = @($suite.TestCases | Where-Object { -not $_.Failed -and -not $_.Skipped }).Count
@@ -408,12 +436,11 @@ foreach ($suite in $suites) {
     }
 }
 
-$mdOut     = Join-Path $evidenceDir "traceability-summary-${RunDate}.md"
 $mdLines = [System.Collections.Generic.List[string]]::new()
 $mdLines.Add("## Test Traceability Matrix - $RunDate")
 $mdLines.Add("")
 $mdLines.Add('> **Source of truth**: `Verifies: #N` / `Implements: #N` statements printed by each test file.')
-    $mdLines.Add('> SKIP is shown explicitly - skipped test cases are never assumed to pass or fail.')
+$mdLines.Add('> SKIP is shown explicitly - skipped test cases are never assumed to pass or fail.')
 $mdLines.Add("> A requirement may be covered by multiple test suites; each suite appears as a separate row.")
 $mdLines.Add("")
 
@@ -435,7 +462,6 @@ if ($reqMap.Count -gt 0) {
     $mdLines.Add('Add `printf("  Verifies: #N (REQ-...)")` to your test `main()` to enable this table.')
 }
 
-# Suites that printed no Verifies: line - flag them
 $unlinked = @($suites | Where-Object { $_.VerifiesNums.Count -eq 0 })
 if ($unlinked.Count -gt 0) {
     $mdLines.Add("")
@@ -455,21 +481,30 @@ if ($unlinked.Count -gt 0) {
 
 $mdLines.Add("")
 $mdLines.Add("> Run date: $RunDate | Machine: $machineName | Generated by ``Convert-Logs-To-JUnit.ps1``.")
-$mdLatest  = Join-Path $evidenceDir "traceability-summary-latest.md"
-$mdLines -join "`n" | Set-Content -Path $mdOut    -Encoding UTF8
-Copy-Item $mdOut $mdLatest -Force
 
-# Also write alongside the JUnit XML so CI can read it without knowing the evidence dir
-$junitDir    = Split-Path $outPath -Parent
-$mdNearJunit = Join-Path $junitDir "traceability-summary-${RunDate}.md"
-if ($junitDir -ne $evidenceDir) {
-    $mdLines -join "`n" | Set-Content -Path $mdNearJunit -Encoding UTF8
+if ($writeEvidenceDir) {
+    if (-not (Test-Path $evidenceDir)) { New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null }
+    $mdOut    = Join-Path $evidenceDir "traceability-summary-${RunDate}.md"
+    $mdLatest = Join-Path $evidenceDir "traceability-summary-latest.md"
+    $mdLines -join "`n" | Set-Content -Path $mdOut    -Encoding UTF8
+    Copy-Item $mdOut $mdLatest -Force
+    # Also write alongside the JUnit XML when the output dir differs from evidence dir
+    $junitDir = Split-Path $outPath -Parent
+    if ($junitDir -ne $evidenceDir) {
+        $mdLines -join "`n" | Set-Content -Path (Join-Path $junitDir "traceability-summary-${RunDate}.md") -Encoding UTF8
+    }
+    Write-Host "[OK] Latest XML:      $latestPath" -ForegroundColor Green
+    Write-Host "[OK] Traceability MD: $mdLatest" -ForegroundColor Green
+} else {
+    # Isolated run: write the traceability MD next to the JUnit only
+    $junitDir = Split-Path $outPath -Parent
+    $mdNear   = Join-Path $junitDir "traceability-summary-${RunDate}.md"
+    $mdLines -join "`n" | Set-Content -Path $mdNear -Encoding UTF8
+    Write-Host "[OK] Isolated JUnit:  $outPath" -ForegroundColor Green
+    Write-Host "[NOTE] Evidence-dir writes skipped (isolated/sentinel run)" -ForegroundColor Yellow
 }
 
-Write-Host ""
 Write-Host "[OK] JUnit XML:       $outPath" -ForegroundColor Green
-Write-Host "[OK] Latest XML:      $latestPath" -ForegroundColor Green
-Write-Host "[OK] Traceability MD: $mdLatest" -ForegroundColor Green
 $passed = $total - $fail - $skipped
 Write-Host "[OK] Summary:   $($suites.Count) test suites | $total tests | $passed passed | $fail failed | $skipped skipped" -ForegroundColor Cyan
 

@@ -1225,280 +1225,252 @@ static phys_rx_ts_cap_t phys_rx_ts_lookup(avb_u16 did, const char **family_out)
  * -------------------------------------------------------------------------*/
 static void test_h06(bool driver_present)
 {
-    printf("\n[TEST-PROV-H06] GET_RX_TIMESTAMP V1/V2 ABI and provenance\n");
+    printf("\n[TEST-PROV-H06] GET_RX_TIMESTAMP V1/V2 ABI and provenance (per-adapter)\n");
     if (!driver_present) { tc_skip("TEST-PROV-H06", "driver absent"); return; }
 
-    /* Step 1: Get BOTH hardware caps (from ENUM_ADAPTERS) and LWF runtime caps
-     * (from GET_HW_STATE.reserved).  Both must succeed; mismatch is diagnostic. */
-    avb_u32 hw_caps = 0;    /* hardware trait caps (ENUM_ADAPTERS) */
-    avb_u32 lwf_caps = 0;   /* LWF-supported runtime caps (GET_HW_STATE.reserved) */
-    avb_u16 vid0 = 0, did0 = 0;
-    avb_u32 hw_state = 0;
-    bool enum_ok = false, hwstate_ok = false;
+    /* Enumerate every Intel adapter and run the full H06 sequence independently.
+     * OPEN_ADAPTER (inside bind_adapter) fails when the index does not exist; use
+     * that as the termination condition.  Cap at 16 to guard against infinite loops. */
+    bool any_adapter_tested = false;
+    int  adapter_count      = 0;
 
-    {
-        HANDLE hcap = open_dev();
-        if (hcap == INVALID_HANDLE_VALUE) {
-            tc_fail("TEST-PROV-H06", "CreateFileW failed for capability query");
-            return;
-        }
-        if (!bind_adapter(hcap, 0)) {
-            CloseHandle(hcap);
-            tc_fail("TEST-PROV-H06", "OPEN_ADAPTER failed for capability query");
-            return;
+    for (int idx = 0; idx < 16; idx++) {
+        HANDLE h = open_dev();
+        if (h == INVALID_HANDLE_VALUE) {
+            if (idx == 0) {
+                tc_fail("TEST-PROV-H06", "CreateFileW failed -- cannot open device node");
+            }
+            break;
         }
 
-        /* (a) Hardware traits from ENUM_ADAPTERS */
+        if (!bind_adapter(h, (uint32_t)idx)) {
+            CloseHandle(h);
+            /* bind_adapter failed → no adapter at this index; stop enumeration. */
+            break;
+        }
+        adapter_count++;
+
+        /* Build per-adapter TC-ID so each adapter has a distinct PASS/FAIL/SKIP entry. */
+        char tc_id[64];
+        (void)sprintf(tc_id, "TEST-PROV-H06/adapter:%d", idx);
+
+        /* ---- Capability queries (handle already bound to adapter idx) ---- */
+        avb_u32 hw_caps  = 0;
+        avb_u32 lwf_caps = 0;
+        avb_u16 vid      = 0, did = 0;
+        avb_u32 hw_state = 0;
+        bool enum_ok = false, hwstate_ok = false;
+
+        /* (a) Hardware traits via ENUM_ADAPTERS */
         {
             AVB_ENUM_REQUEST er = {0};
-            er.index = 0;
+            er.index = (uint32_t)idx;
             DWORD ebr = 0;
-            BOOL eok = DeviceIoControl(hcap, IOCTL_AVB_ENUM_ADAPTERS,
+            BOOL eok = DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS,
                                        &er, sizeof(er), &er, sizeof(er), &ebr, NULL);
             if (eok && er.status == NDIS_STATUS_SUCCESS) {
-                hw_caps = er.capabilities;
-                vid0    = er.vendor_id;
-                did0    = er.device_id;
-                enum_ok = true;
-            } else {
-                printf("  NOTE: ENUM_ADAPTERS failed (ok=%d status=0x%08X)\n",
-                       eok, (unsigned)er.status);
+                hw_caps  = er.capabilities;
+                vid      = er.vendor_id;
+                did      = er.device_id;
+                enum_ok  = true;
             }
         }
 
-        /* (b) LWF runtime capabilities from GET_HW_STATE.reserved */
+        /* (b) LWF runtime capabilities from GET_HW_STATE.reserved (pure observation) */
         {
             AVB_HW_STATE_QUERY hq = {0};
             DWORD hbr = 0;
-            BOOL hok = DeviceIoControl(hcap, IOCTL_AVB_GET_HW_STATE,
+            BOOL hok = DeviceIoControl(h, IOCTL_AVB_GET_HW_STATE,
                                        &hq, sizeof(hq), &hq, sizeof(hq), &hbr, NULL);
             if (hok) {
-                lwf_caps = AVB_HW_STATE_DRIVER_CAPABILITIES(hq);
-                hw_state = hq.hw_state;
+                lwf_caps   = AVB_HW_STATE_DRIVER_CAPABILITIES(hq);
+                hw_state   = hq.hw_state;
                 hwstate_ok = true;
-            } else {
-                printf("  NOTE: IOCTL_AVB_GET_HW_STATE failed (error=%lu)\n", GetLastError());
             }
         }
-        CloseHandle(hcap);
-    }
 
-    if (!enum_ok) {
-        tc_fail("TEST-PROV-H06",
-                "ENUM_ADAPTERS failed -- cannot establish hardware capability baseline");
-        return;
-    }
-    if (!hwstate_ok) {
-        tc_fail("TEST-PROV-H06",
-                "IOCTL_AVB_GET_HW_STATE failed -- cannot get LWF runtime capabilities");
-        return;
-    }
+        if (!enum_ok) {
+            char msg[256];
+            (void)sprintf(msg, "ENUM_ADAPTERS failed on adapter %d -- cannot establish capability baseline", idx);
+            tc_fail(tc_id, msg);
+            CloseHandle(h);
+            continue;
+        }
+        if (!hwstate_ok) {
+            char msg[256];
+            (void)sprintf(msg, "IOCTL_AVB_GET_HW_STATE failed on adapter %d -- cannot get LWF caps", idx);
+            tc_fail(tc_id, msg);
+            CloseHandle(h);
+            continue;
+        }
 
-    printf("  Adapter 0: VID=0x%04X DID=0x%04X\n", (unsigned)vid0, (unsigned)did0);
-    printf("  Hardware caps (ENUM_ADAPTERS): 0x%08X\n", (unsigned)hw_caps);
-    printf("  LWF runtime caps (GET_HW_STATE.reserved): 0x%08X\n", (unsigned)lwf_caps);
-    printf("  HW state: 0x%08X\n", (unsigned)hw_state);
+        printf("  Adapter %d: VID=0x%04X DID=0x%04X\n", idx, (unsigned)vid, (unsigned)did);
+        printf("    hw_caps=0x%08X lwf_caps=0x%08X hw_state=0x%08X\n",
+               (unsigned)hw_caps, (unsigned)lwf_caps, (unsigned)hw_state);
 
-    /* Step 2: physical NIC capability from VID/DID table (primary evidence). */
-    const char *phys_family = "unknown";
-    phys_rx_ts_cap_t phys_cap = phys_rx_ts_lookup(did0, &phys_family);
-    printf("  Physical RX TS (DID=0x%04X %s): %s\n",
-           (unsigned)did0, phys_family,
-           phys_cap == PHYS_RX_TS_PRESENT ? "PRESENT" :
-           phys_cap == PHYS_RX_TS_ABSENT  ? "ABSENT"  : "UNKNOWN");
+        /* ---- Physical capability (primary SKIP_UNSUPPORTED gate) ---- */
+        const char *phys_family = "unknown";
+        phys_rx_ts_cap_t phys_cap = phys_rx_ts_lookup(did, &phys_family);
+        printf("    Physical RX TS (%s DID=0x%04X): %s\n",
+               phys_family, (unsigned)did,
+               phys_cap == PHYS_RX_TS_PRESENT ? "PRESENT" :
+               phys_cap == PHYS_RX_TS_ABSENT  ? "ABSENT (PCH PHY)" : "UNKNOWN");
 
-    bool has_basic_1588 = (hw_caps  & INTEL_CAP_BASIC_1588)   != 0;
-    bool lwf_enhanced   = (lwf_caps & INTEL_CAP_ENHANCED_TS)  != 0;
+        if (phys_cap == PHYS_RX_TS_ABSENT) {
+            char msg[256];
+            (void)sprintf(msg,
+                "SKIP_UNSUPPORTED: %s (DID=0x%04X) is a PCH-integrated PHY; "
+                "RXSTMPL/H not independently accessible via BAR (DID table)",
+                phys_family, (unsigned)did);
+            tc_skip(tc_id, msg);
+            CloseHandle(h);
+            any_adapter_tested = true;
+            continue;
+        }
+        if (phys_cap == PHYS_RX_TS_UNKNOWN) {
+            char msg[256];
+            (void)sprintf(msg,
+                "BLOCKED: DID=0x%04X not in physical RX TS capability table; "
+                "add entry to g_phys_rx_ts_table",
+                (unsigned)did);
+            s_total++; s_failed++;
+            printf("  [FAIL] %s: %s\n", tc_id, msg);
+            CloseHandle(h);
+            continue;
+        }
 
-    printf("  BASIC_1588 in hw_caps: %d  ENHANCED_TS in lwf_caps: %d\n",
-           has_basic_1588, lwf_enhanced);
+        bool has_basic_1588 = (hw_caps & INTEL_CAP_BASIC_1588) != 0;
+        bool lwf_enhanced   = (lwf_caps & INTEL_CAP_ENHANCED_TS) != 0;
 
-    /* Capability routing -- physical NIC table is primary SKIP_UNSUPPORTED gate.
-     *
-     * PHYS_RX_TS_ABSENT  -> hardware physically cannot do direct RX timestamp
-     *                       reads -> SKIP_UNSUPPORTED with VID/DID evidence.
-     *
-     * PHYS_RX_TS_UNKNOWN -> cannot determine physical capability from DID alone
-     *                       -> BLOCKED (capability precondition failed; do not
-     *                       guess or propagate a silent SKIP).
-     *
-     * PHYS_RX_TS_PRESENT -> discrete PCIe MAC with RXSTMPL/H.  Now check runtime:
-     *   !lwf_enhanced     -> MMIO not mapped or read_rx_timestamp not implemented
-     *                        -> BLOCKED (infrastructure gap, NOT hardware absence).
-     *   lwf_enhanced      -> run ABI tests.
-     */
-    if (phys_cap == PHYS_RX_TS_ABSENT) {
-        char msg[256];
-        (void)sprintf(msg,
-            "SKIP_UNSUPPORTED: %s (DID=0x%04X) is a PCH-integrated PHY; "
-            "RXSTMPL/H not independently accessible via BAR (DID table)",
-            phys_family, (unsigned)did0);
-        tc_skip("TEST-PROV-H06", msg);
-        return;
-    }
-    if (phys_cap == PHYS_RX_TS_UNKNOWN) {
-        char msg[256];
-        (void)sprintf(msg,
-            "BLOCKED: DID=0x%04X not in physical RX TS capability table; "
-            "cannot independently establish hardware support -- add entry to g_phys_rx_ts_table",
-            (unsigned)did0);
-        s_total++; s_failed++;
-        printf("  [FAIL] TEST-PROV-H06: %s\n", msg);
-        return;
-    }
+        if (!has_basic_1588) {
+            printf("    [WARN] Physical PRESENT but hw_caps lacks BASIC_1588 -- driver detection inconsistency\n");
+        }
+        if (!lwf_enhanced) {
+            char msg[256];
+            (void)sprintf(msg,
+                "BLOCKED: %s (DID=0x%04X) physical RX TS PRESENT "
+                "but ENHANCED_TS absent from LWF caps -- MMIO not mapped or HAL not implemented",
+                phys_family, (unsigned)did);
+            s_total++; s_failed++;
+            printf("  [FAIL] %s: %s\n", tc_id, msg);
+            CloseHandle(h);
+            continue;
+        }
 
-    /* phys_cap == PHYS_RX_TS_PRESENT: discrete PCIe MAC confirmed.
-     * Consistency cross-check (not a gate): BASIC_1588 should also be set. */
-    if (!has_basic_1588) {
-        printf("  [WARN] TEST-PROV-H06: DID=0x%04X (%s) physical RX TS PRESENT "
-               "but ENUM_ADAPTERS lacks BASIC_1588 -- driver capability detection inconsistency\n",
-               (unsigned)did0, phys_family);
-    }
-
-    if (!lwf_enhanced) {
-        /* Physical hardware can do RX timestamps but driver cannot reach them at runtime. */
-        printf("  [BLOCKED] TEST-PROV-H06: %s (DID=0x%04X) physical RX TS present "
-               "but ENHANCED_TS absent from LWF caps -- "
-               "MMIO not mapped or read_rx_timestamp not implemented for this device\n",
-               phys_family, (unsigned)did0);
-        s_total++; s_failed++;
-        return;
-    }
-
-    /* ---- Open IOCTL handle for ABI tests ---- */
-    HANDLE h = open_dev();
-    if (h == INVALID_HANDLE_VALUE) {
-        tc_fail("TEST-PROV-H06", "CreateFileW failed for ABI test");
-        return;
-    }
-    if (!bind_adapter(h, 0)) {
-        CloseHandle(h);
-        tc_fail("TEST-PROV-H06", "OPEN_ADAPTER failed for ABI test");
-        return;
-    }
-
-    bool all_ok = true;
-
-    /* ---- V1 (24 bytes in, 24 bytes out): uses genuine V1 input AND output sizes ---- */
-    /* Exercises the driver's minimum-buffer acceptance path, not the V2 path by accident. */
-    {
-        uint8_t buf[40];
-        memset(buf, 0xDD, sizeof(buf));
-        DWORD br = 0;
-        BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
-                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
-                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
-                                  &br, NULL);
-        if (!ok) {
-            DWORD err = GetLastError();
-            if (err == ERROR_NOT_SUPPORTED || err == 50) {
-                /* LWF caps confirmed ENHANCED_TS above; NOT_SUPPORTED = implementation bug. */
-                tc_fail("TEST-PROV-H06",
-                        "GET_RX_TIMESTAMP V1 returned NOT_SUPPORTED despite ENHANCED_TS "
-                        "in LWF caps -- driver implementation bug");
-                all_ok = false;
-                CloseHandle(h);
-                return;
-            } else {
+        /* ---- V1 ABI test (genuine V1-sized buffers; 24 bytes in, 24 bytes out) ---- */
+        bool all_ok = true;
+        {
+            uint8_t buf[40];
+            memset(buf, 0xDD, sizeof(buf));
+            DWORD br = 0;
+            BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
+                                      buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
+                                      buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
+                                      &br, NULL);
+            if (!ok) {
+                DWORD err = GetLastError();
+                if (err == ERROR_NOT_SUPPORTED || err == 50) {
+                    char msg[256];
+                    (void)sprintf(msg,
+                        "GET_RX_TIMESTAMP V1 returned NOT_SUPPORTED despite ENHANCED_TS -- implementation bug");
+                    tc_fail(tc_id, msg);
+                    all_ok = false;
+                    CloseHandle(h);
+                    any_adapter_tested = true;
+                    continue;
+                }
                 char msg[128];
                 (void)sprintf(msg, "GET_RX_TIMESTAMP V1 failed Win32=%lu", err);
-                tc_fail("TEST-PROV-H06", msg);
+                tc_fail(tc_id, msg);
                 all_ok = false;
-            }
-        } else if (br != AVB_TX_TIMESTAMP_REQUEST_V1_SIZE) {
-            char msg[128];
-            (void)sprintf(msg, "GET_RX_TIMESTAMP V1: bytesReturned=%lu expected %u",
-                          br, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE);
-            tc_fail("TEST-PROV-H06", msg);
-            all_ok = false;
-        } else {
-            bool canary_ok = true;
-            for (int i = AVB_TX_TIMESTAMP_REQUEST_V1_SIZE; i < (int)sizeof(buf); i++) {
-                if (buf[i] != 0xDD) { canary_ok = false; break; }
-            }
-            if (!canary_ok) {
-                tc_fail("TEST-PROV-H06", "GET_RX_TIMESTAMP V1: driver wrote past V1 buffer");
-                all_ok = false;
-            }
-        }
-    }
-
-    /* ---- V2 (32 bytes in, 32 bytes out): required when V1 succeeded ---- */
-    /* NOT_SUPPORTED on V2 after V1 passed is a driver inconsistency = FAIL. */
-    {
-        uint8_t buf[32];
-        memset(buf, 0, sizeof(buf));
-        DWORD br = 0;
-        BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
-                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
-                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
-                                  &br, NULL);
-        if (!ok) {
-            DWORD err = GetLastError();
-            if (err == ERROR_NOT_SUPPORTED || err == 50) {
-                /* V1 succeeded; V2 NOT_SUPPORTED = driver inconsistency = FAIL. */
-                tc_fail("TEST-PROV-H06",
-                        "GET_RX_TIMESTAMP V2 returned NOT_SUPPORTED after V1 succeeded "
-                        "â€” driver inconsistency; V2 ABI is required");
+            } else if (br != AVB_TX_TIMESTAMP_REQUEST_V1_SIZE) {
+                char msg[128];
+                (void)sprintf(msg, "V1 bytesReturned=%lu expected %u", br, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE);
+                tc_fail(tc_id, msg);
                 all_ok = false;
             } else {
-                char msg[128];
-                (void)sprintf(msg, "GET_RX_TIMESTAMP V2 failed with Win32 error %lu", err);
-                tc_fail("TEST-PROV-H06", msg);
-                all_ok = false;
-            }
-        } else {
-            if (br != sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
-                char msg[128];
-                (void)sprintf(msg, "GET_RX_TIMESTAMP V2: bytesReturned=%lu expected %u",
-                              br, (unsigned)sizeof(AVB_TX_TIMESTAMP_REQUEST));
-                tc_fail("TEST-PROV-H06", msg);
-                all_ok = false;
-            } else {
-                AVB_TX_TIMESTAMP_REQUEST *rx = (AVB_TX_TIMESTAMP_REQUEST *)buf;
-                printf("  GET_RX_TIMESTAMP V2: valid=%u status=0x%08X prov=%u bytesReturned=%lu\n",
-                       rx->valid, (unsigned)rx->status, (unsigned)rx->ts_provenance, br);
-                /* Positive provenance check: when valid==1, must be HARDWARE_REGISTER.
-                 * Also reject VERIFIED_HARDWARE_TX (TX-specific, wrong for RX path). */
-                if (rx->valid == 1) {
-                    if (rx->ts_provenance != AVB_RX_PROV_HARDWARE_REGISTER) {
-                        char pmsg[256];
-                        (void)sprintf(pmsg,
-                            "GET_RX_TIMESTAMP V2 valid=1 but ts_provenance=%u; "
-                            "expected AVB_RX_PROV_HARDWARE_REGISTER=%u",
-                            (unsigned)rx->ts_provenance, (unsigned)AVB_RX_PROV_HARDWARE_REGISTER);
-                        tc_fail("TEST-PROV-H06", pmsg);
-                        all_ok = false;
-                    }
-                } else {
-                    /* valid==0: provenance must be UNAVAILABLE */
-                    if (rx->ts_provenance != AVB_TX_PROV_UNAVAILABLE) {
-                        char pmsg[256];
-                        (void)sprintf(pmsg,
-                            "GET_RX_TIMESTAMP V2 valid=0 but ts_provenance=%u; "
-                            "expected UNAVAILABLE=0",
-                            (unsigned)rx->ts_provenance);
-                        tc_fail("TEST-PROV-H06", pmsg);
-                        all_ok = false;
-                    }
+                bool canary_ok = true;
+                for (int i = AVB_TX_TIMESTAMP_REQUEST_V1_SIZE; i < (int)sizeof(buf); i++) {
+                    if (buf[i] != 0xDD) { canary_ok = false; break; }
                 }
-                /* Unconditional rejection of TX provenance on RX path */
-                if (rx->ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
-                    tc_fail("TEST-PROV-H06",
-                            "GET_RX_TIMESTAMP V2 returned VERIFIED_HARDWARE_TX "
-                            "(TX-specific value must never appear on RX path)");
+                if (!canary_ok) {
+                    tc_fail(tc_id, "GET_RX_TIMESTAMP V1: driver wrote past V1 buffer boundary");
                     all_ok = false;
                 }
             }
         }
+
+        /* ---- V2 ABI test (full struct; 32 bytes in, 32 bytes out) ---- */
+        {
+            uint8_t buf[32];
+            memset(buf, 0, sizeof(buf));
+            DWORD br = 0;
+            BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
+                                      buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
+                                      buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
+                                      &br, NULL);
+            if (!ok) {
+                DWORD err = GetLastError();
+                if (err == ERROR_NOT_SUPPORTED || err == 50) {
+                    tc_fail(tc_id, "GET_RX_TIMESTAMP V2 returned NOT_SUPPORTED after V1 succeeded -- ABI inconsistency");
+                    all_ok = false;
+                } else {
+                    char msg[128];
+                    (void)sprintf(msg, "GET_RX_TIMESTAMP V2 failed Win32=%lu", err);
+                    tc_fail(tc_id, msg);
+                    all_ok = false;
+                }
+            } else if (br != sizeof(AVB_TX_TIMESTAMP_REQUEST)) {
+                char msg[128];
+                (void)sprintf(msg, "V2 bytesReturned=%lu expected %u",
+                              br, (unsigned)sizeof(AVB_TX_TIMESTAMP_REQUEST));
+                tc_fail(tc_id, msg);
+                all_ok = false;
+            } else {
+                AVB_TX_TIMESTAMP_REQUEST *rx = (AVB_TX_TIMESTAMP_REQUEST *)buf;
+                printf("    GET_RX_TIMESTAMP V2: valid=%u prov=%u status=0x%08X\n",
+                       rx->valid, (unsigned)rx->ts_provenance, (unsigned)rx->status);
+                if (rx->valid == 1) {
+                    if (rx->ts_provenance != AVB_RX_PROV_HARDWARE_REGISTER) {
+                        char msg[256];
+                        (void)sprintf(msg,
+                            "V2 valid=1 but ts_provenance=%u; expected AVB_RX_PROV_HARDWARE_REGISTER=%u",
+                            (unsigned)rx->ts_provenance, (unsigned)AVB_RX_PROV_HARDWARE_REGISTER);
+                        tc_fail(tc_id, msg);
+                        all_ok = false;
+                    }
+                } else {
+                    if (rx->ts_provenance != AVB_TX_PROV_UNAVAILABLE) {
+                        char msg[256];
+                        (void)sprintf(msg,
+                            "V2 valid=0 but ts_provenance=%u; expected UNAVAILABLE=0",
+                            (unsigned)rx->ts_provenance);
+                        tc_fail(tc_id, msg);
+                        all_ok = false;
+                    }
+                }
+                if (rx->ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX) {
+                    tc_fail(tc_id, "V2 returned VERIFIED_HARDWARE_TX -- TX value must not appear on RX path");
+                    all_ok = false;
+                }
+            }
+        }
+
+        CloseHandle(h);
+        any_adapter_tested = true;
+
+        if (all_ok) {
+            char msg[256];
+            (void)sprintf(msg,
+                "V1+V2 ABI correct for %s (DID=0x%04X); provenance verified",
+                phys_family, (unsigned)did);
+            tc_pass(tc_id, msg);
+        }
+    } /* end per-adapter loop */
+
+    if (!any_adapter_tested && adapter_count == 0) {
+        tc_fail("TEST-PROV-H06", "No Intel adapters found -- ENUM_ADAPTERS returned empty");
     }
-
-    CloseHandle(h);
-
-    if (all_ok)
-        tc_pass("TEST-PROV-H06",
-                "GET_RX_TIMESTAMP V1+V2 ABI correct; "
-                "V2 provenance AVB_RX_PROV_HARDWARE_REGISTER verified when valid==1");
 }
 
 /* =========================================================================

@@ -1720,41 +1720,49 @@ jobs:
           Write-Host ("  Installed SHA   : {0}" -f $installedSha)
           Write-Host ("  Driver version  : {0}" -f $drv_ver)
 
-          # Determine contract using fail-closed logic.
-          # VERIFIED_CURRENT_BUILD: both hashes present, equal, and mismatch flag is NOT 'true'.
-          # BASELINE_DRIVER_ONLY:   hashes differ (mismatch=true), but both are present.
-          # UNVERIFIED:             either hash missing/empty, or evidence insufficient.
+          # Determine contract using direct hash comparison (fail-closed).
+          # Do NOT use the $mismatch flag as the primary equality gate:
+          # if the preflight did not set it (e.g. preflight skipped or failed silently)
+          # the flag is empty, which would make ($mismatch -ne 'true') true even when
+          # the hashes are actually different.
+          #
+          # VERIFIED_CURRENT_BUILD: both hashes non-empty AND equal (string comparison).
+          # BASELINE_DRIVER_ONLY:   both hashes non-empty AND NOT equal.
+          # UNVERIFIED:             one or both hashes are missing or empty.
           $installedPresent = -not ([string]::IsNullOrWhiteSpace($installedSha))
           $buildPresent     = -not ([string]::IsNullOrWhiteSpace($buildSha))
+          $hashesEqual      = $installedPresent -and $buildPresent -and
+                              ($installedSha.Trim() -eq $buildSha.Trim())
 
-          if ($installedPresent -and $buildPresent -and ($mismatch -ne 'true')) {
+          if ($hashesEqual) {
             Write-Host ""
-            Write-Host "  [VERIFIED_CURRENT_BUILD] Installed driver matches current commit build." -ForegroundColor Green
-            Write-Host "  Contract A: authorized preinstalled driver == current build artifact." -ForegroundColor Green
+            Write-Host "  [VERIFIED_CURRENT_BUILD] Installed driver matches current commit build (hashes equal)." -ForegroundColor Green
             if ($env:GITHUB_STEP_SUMMARY) {
               @"
 ## HIL Identity Audit
 - **Checkout SHA**: $checkout
 - **Built-SYS SHA256**: $buildSha
-- **Installed SHA256**: $installedSha (matches)
+- **Installed SHA256**: $installedSha (matches -- hash equality confirmed)
 - **Driver version**: $drv_ver
-- **Contract**: VERIFIED_CURRENT_BUILD -- installed driver matches current commit build.
+- **Contract**: VERIFIED_CURRENT_BUILD
 "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
-          } elseif ($installedPresent -and $buildPresent -and ($mismatch -eq 'true')) {
+          } elseif ($installedPresent -and $buildPresent) {
             Write-Host ""
-            Write-Host "  [BASELINE_DRIVER_ONLY] Tests ran against PREINSTALLED driver, NOT current commit build." -ForegroundColor Yellow
+            Write-Host "  [BASELINE_DRIVER_ONLY] Hashes differ -- tests ran against PREINSTALLED driver." -ForegroundColor Yellow
             Write-Host "  Results verify the installed driver artifact, NOT commit $checkout" -ForegroundColor Yellow
-            Write-Host "  To verify current-commit kernel changes, deploy via the authorized deployment lane." -ForegroundColor Yellow
+            Write-Host ("  installed: {0}..." -f $installedSha.Substring(0,[Math]::Min(12,$installedSha.Length))) -ForegroundColor Yellow
+            Write-Host ("  built:     {0}..." -f $buildSha.Substring(0,[Math]::Min(12,$buildSha.Length))) -ForegroundColor Yellow
+            Write-Host "  mismatch flag (supplementary): $mismatch" -ForegroundColor Yellow
             if ($env:GITHUB_STEP_SUMMARY) {
               @"
 ## HIL Identity Audit
 - **Checkout SHA**: $checkout
 - **Built-SYS SHA256**: $buildSha
-- **Installed SHA256**: $installedSha (DIFFERENT -- coverage gap)
+- **Installed SHA256**: $installedSha (DIFFERENT)
 - **Driver version**: $drv_ver
-- **Contract**: BASELINE_DRIVER_ONLY -- tests ran against preinstalled driver, not current build.
-  Kernel-code changes in this commit are NOT verified by these HIL results.
+- **mismatch flag** (supplementary): $mismatch
+- **Contract**: BASELINE_DRIVER_ONLY -- kernel changes in this commit are NOT HIL-verified.
 "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           } else {

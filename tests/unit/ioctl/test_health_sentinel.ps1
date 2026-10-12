@@ -127,53 +127,61 @@ if ($exitCode -eq 1 -and $infraPresent) {
 }
 
 # TEST-SENTINEL-004: FAILED(INFRA) in the actual generated JUnit XML (isolated dir).
-# Run-Tests-CI.ps1 was invoked with -LogsDir pointing to $logsDir (inside $tmpDir).
-# The JUnit XML must be in that exact directory -- no fallback to shared logs/ or console.
-# Accepting console output instead of JUnit is a false pass: remove that fallback here.
+# Strict checks (must ALL pass for a true PASS -- no false-positive from testcase name):
+#   (a) At least one JUnit XML exists in the isolated logs dir.
+#   (b) The root <testsuites failures="N"> attribute has N > 0.
+#   (c) At least one <failure> element appears inside an INFRA-related testcase.
+# TEST-SENTINEL-004 must NOT accept an XML that merely has "INFRA-HEALTH" in a testcase name
+# with that testcase rendered as <skipped/>.  That was the previous false-positive path.
 $xmlFiles = @(Get-ChildItem -Path (Join-Path $logsDir "junit-*.xml") -ErrorAction SilentlyContinue)
 if ($xmlFiles.Count -eq 0) {
-    tc_fail "TEST-SENTINEL-004" ("No JUnit XML generated in isolated logs dir '{0}' -- Run-Tests-CI.ps1 must write JUnit into -LogsDir" -f $logsDir)
+    tc_fail "TEST-SENTINEL-004" ("No JUnit XML in isolated logs dir '{0}'" -f $logsDir)
 } else {
     $latestXml  = $xmlFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $xmlContent = Get-Content $latestXml.FullName -Raw -ErrorAction SilentlyContinue
-    $junitHasInfra = $xmlContent -match 'INFRA-HEALTH' -or
-                     $xmlContent -match 'FAILED\(INFRA\)' -or
-                     $xmlContent -match '<failure'
-    if ($junitHasInfra) {
-        tc_pass ("TEST-SENTINEL-004: INFRA/failure element in isolated JUnit '{0}'" -f $latestXml.Name)
+
+    # (b) Root failures count > 0
+    $failCountOk = $xmlContent -match 'testsuites[^>]+failures="([1-9][0-9]*)"'
+
+    # (c) <failure> element present (not just testcase name containing INFRA)
+    $hasFailureElem = $xmlContent -match '<failure'
+
+    if ($failCountOk -and $hasFailureElem) {
+        tc_pass ("TEST-SENTINEL-004: root failures>0 AND <failure> element present in isolated JUnit '{0}'" -f $latestXml.Name)
+    } elseif (-not $failCountOk) {
+        $snippet = if ($xmlContent -match 'testsuites[^>]+') { $Matches[0].Substring(0, [Math]::Min(120, $Matches[0].Length)) } else { "(no testsuites element)" }
+        tc_fail "TEST-SENTINEL-004" ("JUnit root failures count is 0 or absent -- INFRA_FAILURE not reflected in XML. Snippet: {0}" -f $snippet)
     } else {
-        tc_fail "TEST-SENTINEL-004" ("JUnit '{0}' exists but contains no INFRA/failure element -- Parse-TestResults must emit <failure> for INFRA_FAILURE results" -f $latestXml.Name)
+        tc_fail "TEST-SENTINEL-004" ("JUnit failures>0 but no <failure> element found -- testcase may be <skipped/> instead of <failure>")
     }
 }
 
-# TEST-SENTINEL-007: negative test -- deliberately absent JUnit INFRA -> 004 check correctly FAILs.
-# Creates a JUnit XML without any failure element and verifies the 004 check rejects it.
-# This proves the check actually discriminates (positive proof that protection is real).
+# TEST-SENTINEL-007: negative test -- JUnit with failures="0" and no <failure> must fail 004 check.
+# This proves discriminating power: a passing-only JUnit must never satisfy SENTINEL-004.
 & {
-    $negDir  = Join-Path $env:TEMP ("sentinel_neg_{0}" -f (Get-Random))
+    $negDir = Join-Path $env:TEMP ("sentinel_neg_{0}" -f (Get-Random))
     New-Item -ItemType Directory -Path $negDir -Force | Out-Null
 
-    $fakeXml     = Join-Path $negDir "junit-HardwareMandatory-Debug-20991231.xml"
-    $fakeContent = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="HardwareMandatory" tests="1" failures="0"><testcase name="TC-FAKE-001" classname="test_sentinel_fake" time="0.1"/></testsuite></testsuites>'
-    Set-Content $fakeXml -Value $fakeContent -Encoding UTF8
+    $negXmlPath  = Join-Path $negDir "junit-HardwareMandatory-Debug-20991231.xml"
+    $negXmlContent = '<?xml version="1.0" encoding="utf-8"?><testsuites name="test" tests="1" failures="0" skipped="0"><testsuite name="TC-INFRA-HEALTH" tests="1" failures="0" skipped="1"><testcase name="TC-INFRA-HEALTH-001" classname="TC-INFRA-HEALTH" time="0"><skipped/></testcase></testsuite></testsuites>'
+    Set-Content $negXmlPath -Value $negXmlContent -Encoding UTF8
 
-    $negXmlFiles = @(Get-ChildItem -Path (Join-Path $negDir "junit-*.xml") -ErrorAction SilentlyContinue)
-    $negXmlOk    = $false
-    if ($negXmlFiles.Count -gt 0) {
-        $negXml     = $negXmlFiles[0]
-        $negContent = Get-Content $negXml.FullName -Raw -ErrorAction SilentlyContinue
-        $negHasInfra = $negContent -match 'INFRA-HEALTH' -or
-                       $negContent -match 'FAILED\(INFRA\)' -or
-                       $negContent -match '<failure'
-        if (-not $negHasInfra) { $negXmlOk = $true }
+    $negFiles = @(Get-ChildItem -Path (Join-Path $negDir "junit-*.xml") -ErrorAction SilentlyContinue)
+    $negXmlOk = $false
+    if ($negFiles.Count -gt 0) {
+        $nc = Get-Content $negFiles[0].FullName -Raw -ErrorAction SilentlyContinue
+        # Apply the SAME checks as SENTINEL-004 (both must fail for negXmlOk=true)
+        $negFailCount = $nc -match 'testsuites[^>]+failures="([1-9][0-9]*)"'
+        $negHasFailElem = $nc -match '<failure'
+        if (-not $negFailCount -and -not $negHasFailElem) { $negXmlOk = $true }
     }
 
     Remove-Item $negDir -Recurse -Force -ErrorAction SilentlyContinue
 
     if ($negXmlOk) {
-        tc_pass "TEST-SENTINEL-007: negative check correctly rejects JUnit without <failure> element"
+        tc_pass "TEST-SENTINEL-007: negative check: JUnit with <skipped/> and failures=0 correctly rejected by SENTINEL-004 logic"
     } else {
-        tc_fail "TEST-SENTINEL-007" "Negative JUnit (no <failure>) passed SENTINEL-004 check -- check is too permissive"
+        tc_fail "TEST-SENTINEL-007" "Negative JUnit (<skipped/>, failures=0) passed SENTINEL-004 check -- check is too permissive"
     }
 }
 
