@@ -12,6 +12,8 @@ $toolsDir = Split-Path $ArchiveDir -Parent  # .\tools\
 $repoRoot = Split-Path $toolsDir -Parent  # repository root
 $testExeDir = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
 
+# tools\test\Run-Tests-CI.ps1
+
 
 
   
