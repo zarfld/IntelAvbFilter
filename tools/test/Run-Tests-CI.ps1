@@ -1,4 +1,4 @@
-﻿# Run-Tests-CI.ps1
+# Run-Tests-CI.ps1
 # CI-specific test runner for GitHub Actions and other headless CI environments.
 #
 # RATIONALE -- Three-script test architecture:
