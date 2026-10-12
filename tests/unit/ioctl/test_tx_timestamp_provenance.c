@@ -1163,17 +1163,26 @@ g_phys_rx_ts_table[] = {
     { 0x0DC7, PHYS_RX_TS_PRESENT, "I226-IT"        },
     { 0x0DC6, PHYS_RX_TS_PRESENT, "I226-K"         },
     { 0x0DC8, PHYS_RX_TS_PRESENT, "I226-BLANK"     },
-    /* I219 -- PCH-integrated PHY; no BAR-accessible RXSTMPL/H */
-    { 0x15B7, PHYS_RX_TS_ABSENT,  "I219-LM(1)"     },
-    { 0x15B8, PHYS_RX_TS_ABSENT,  "I219-V(1)"      },
-    { 0x0D4E, PHYS_RX_TS_ABSENT,  "I219-LM(18)"    },
-    { 0x0D4F, PHYS_RX_TS_ABSENT,  "I219-V(18)"     },
-    { 0x15D7, PHYS_RX_TS_ABSENT,  "I219-LM(7)"     },
-    { 0x15D8, PHYS_RX_TS_ABSENT,  "I219-V(7)"      },
-    { 0x15E3, PHYS_RX_TS_ABSENT,  "I219-LM(8)"     },
-    { 0x10F0, PHYS_RX_TS_ABSENT,  "I219-LM(old)"   },
-    { 0x1559, PHYS_RX_TS_ABSENT,  "I218-LM"        },
-    { 0x155A, PHYS_RX_TS_ABSENT,  "I218-V"         },
+    /* I219 -- PCH-integrated PHY; no BAR-accessible RXSTMPL/H.
+     * Source: Intel I219 Ethernet Controller Datasheet (all revisions).
+     * The timestamp function is mediated by the PCH MAC; RXSTMPL/H are not
+     * independently readable via a PCIe BAR from the host CPU. */
+    { 0x15B7, PHYS_RX_TS_ABSENT,  "I219-LM(Skylake/PCH100)"    },
+    { 0x15B8, PHYS_RX_TS_ABSENT,  "I219-V(Skylake/PCH100)"     },
+    { 0x15BB, PHYS_RX_TS_ABSENT,  "I219-LM(Cannon/PCH300)"     },
+    { 0x15BC, PHYS_RX_TS_ABSENT,  "I219-V(Cannon/PCH300)"      },
+    { 0x15BD, PHYS_RX_TS_ABSENT,  "I219-LM(Comet/PCH300-H)"    },
+    { 0x15BE, PHYS_RX_TS_ABSENT,  "I219-V(Comet/PCH300-H)"     },
+    { 0x15D7, PHYS_RX_TS_ABSENT,  "I219-LM(Kaby/PCH300)"       },
+    { 0x15D8, PHYS_RX_TS_ABSENT,  "I219-V(Kaby/PCH300)"        },
+    { 0x15E3, PHYS_RX_TS_ABSENT,  "I219-LM(Ice/PCH400)"        },
+    { 0x15E4, PHYS_RX_TS_ABSENT,  "I219-V(Ice/PCH400)"         },
+    { 0x0D4E, PHYS_RX_TS_ABSENT,  "I219-LM(Tiger/PCH500)"      },
+    { 0x0D4F, PHYS_RX_TS_ABSENT,  "I219-V(Tiger/PCH500)"       },
+    { 0x0DC5, PHYS_RX_TS_ABSENT,  "I219-LM(Alder/PCH600)"      },
+    { 0x10F0, PHYS_RX_TS_ABSENT,  "I219-LM(legacy)"            },
+    { 0x1559, PHYS_RX_TS_ABSENT,  "I218-LM"                    },
+    { 0x155A, PHYS_RX_TS_ABSENT,  "I218-V"                     },
     /* I217 -- PCH-integrated PHY */
     { 0x153A, PHYS_RX_TS_ABSENT,  "I217-LM"        },
     { 0x153B, PHYS_RX_TS_ABSENT,  "I217-V"         },
