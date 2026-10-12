@@ -52,6 +52,22 @@ repos:
         files: ^tests/.*\.(c|h)$
         verbose: true
 
+      - id: run-tests (debug)
+        name: Run Tests
+        entry: pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\test\Run-Tests-CI.ps1 -Configuration Debug
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.(c|h)$
+        verbose: true
+
+      - id: run-tests (release)
+        name: Run Tests
+        entry: pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\test\Run-Tests-CI.ps1 -Configuration Release
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.(c|h)$
+        verbose: true
+
       # Validate specification files
       - id: validate-specs
         name: Validate Specification Files
