@@ -470,6 +470,26 @@ NTSTATUS AvbDiscoverIntelControllerResources(
 );
 
 /**
+ * @brief Read the actual PCI Vendor ID and Device ID from hardware config space.
+ *
+ * AvbIsSupportedIntelController() returns a representative family DID based on
+ * friendly-name matching (e.g. INTEL_DEV_I219_LM = 0x15B7 for all I219 variants).
+ * This function reads the authoritative DID from PCI config register 0x00 via the
+ * PDO path.  AvbInitializeDevice() calls this after AvbCreateMinimalContext() to
+ * correct pci_device_id to the real hardware value (e.g. 0x15BB for I219-LM4).
+ *
+ * @param FilterModule NDIS filter module.
+ * @param OutVendorId  Receives actual PCI Vendor ID.
+ * @param OutDeviceId  Receives actual PCI Device ID.
+ * @return STATUS_SUCCESS on success; caller retains representative DID on failure.
+ */
+NTSTATUS AvbReadActualPciIds(
+    _In_  PMS_FILTER FilterModule,
+    _Out_ USHORT*    OutVendorId,
+    _Out_ USHORT*    OutDeviceId
+);
+
+/**
  * @brief Convenience initializer that performs BAR0 discovery then device initialization.
  * @param FilterModule NDIS filter module.
  * @param AvbContext Receives created context.

@@ -830,6 +830,31 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
     if (!AvbIsSupportedIntelController(FilterModule, &ven, &dev)) return STATUS_NOT_SUPPORTED;
     NTSTATUS st = AvbCreateMinimalContext(FilterModule, ven, dev, AvbContext);
     if (!NT_SUCCESS(st)) return st;
+
+    /* AvbIsSupportedIntelController() returns a REPRESENTATIVE family DID (e.g.
+     * INTEL_DEV_I219_LM = 0x15B7) for every I219 variant regardless of the actual
+     * silicon (I219-LM4 = 0x15BB, I219-V = 0x15B8, …).  Correct the identity now
+     * so ENUM_ADAPTERS exposes the real PCI DID, not the family placeholder.
+     * Failure is non-fatal: the context retains the representative DID and the
+     * device-type/capabilities assignment remains correct (both map to I219). */
+    USHORT actualVen = 0, actualDev = 0;
+    NTSTATUS idSt = AvbReadActualPciIds(FilterModule, &actualVen, &actualDev);
+    if (NT_SUCCESS(idSt) && actualVen == INTEL_VENDOR_ID && actualDev != 0) {
+        PAVB_DEVICE_CONTEXT ctx = *AvbContext;
+        if (ctx->intel_device.pci_device_id != actualDev) {
+            DEBUGP(DL_WARN,
+                "AvbInitializeDevice: representative DID 0x%04X corrected to actual DID 0x%04X\n",
+                ctx->intel_device.pci_device_id, actualDev);
+        }
+        ctx->intel_device.pci_vendor_id = actualVen;
+        ctx->intel_device.pci_device_id = actualDev;
+        /* device_type is unchanged: both representative and actual map to the same family */
+    } else {
+        DEBUGP(DL_WARN,
+            "AvbInitializeDevice: AvbReadActualPciIds failed 0x%08X; retaining representative DID 0x%04X\n",
+            idSt, dev);
+    }
+
     (void)AvbBringUpHardware(*AvbContext); /* deferred; ignore failure */
     return STATUS_SUCCESS;
 }

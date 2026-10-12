@@ -38,6 +38,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <winioctl.h>
+#include <setupapi.h>
+#pragma comment(lib, "setupapi.lib")
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -1509,6 +1511,165 @@ static void test_h06(bool driver_present)
 }
 
 /* =========================================================================
+ * TEST-PROV-H07: ENUM_ADAPTERS DID must match the actual PCI DID.
+ *
+ * AvbIsSupportedIntelController() identifies adapters by friendly-name match and
+ * returns a REPRESENTATIVE family DID (e.g. 0x15B7 for all I219 variants).
+ * If AvbReadActualPciIds() is missing or fails, ENUM_ADAPTERS will report that
+ * representative DID instead of the real hardware DID (e.g. 0x15BB for I219-LM4).
+ *
+ * This test uses the Windows SetupAPI (DEVPKEY_Device_HardwareIds) to enumerate
+ * the authoritative PCI VEN/DEV identifiers for every Intel Ethernet adapter, then
+ * verifies that each adapter's ENUM_ADAPTERS result matches one of those identifiers.
+ *
+ * RED: driver without AvbReadActualPciIds() fix (reports 0x15B7 for I219-LM4 0x15BB).
+ * GREEN: driver with fix (reports actual DID from PCI config space).
+ * =========================================================================*/
+static void test_h07(bool driver_present)
+{
+    printf("\n[TEST-PROV-H07] ENUM_ADAPTERS DID must match actual PCI hardware DID\n");
+    if (!driver_present) { tc_skip("TEST-PROV-H07", "driver absent"); return; }
+
+    /* ---- Step 1: Collect actual PCI DIDs from Windows SetupAPI ---- */
+    /* Set of actual Intel Ethernet PCI DIDs obtained from DEVPKEY_Device_HardwareIds.
+     * Format: "PCI\VEN_8086&DEV_XXXX..." — we extract the DEV_XXXX value. */
+#define MAX_PNP_DIDS 32
+    avb_u16 pnp_dids[MAX_PNP_DIDS];
+    int     pnp_count = 0;
+
+    HDEVINFO devInfo = SetupDiGetClassDevs(NULL, "PCI", NULL,
+                                           DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        printf("  NOTE: SetupDiGetClassDevs failed (err=%lu)\n", GetLastError());
+        tc_skip("TEST-PROV-H07", "SetupDiGetClassDevs failed -- cannot get authoritative PCI DIDs");
+        return;
+    }
+
+    SP_DEVINFO_DATA devData;
+    devData.cbSize = sizeof(SP_DEVINFO_DATA);
+    for (DWORD idx = 0; SetupDiEnumDeviceInfo(devInfo, idx, &devData); idx++) {
+        /* Get Hardware IDs via the older SPDRP API (avoids DEVPKEY linkage) */
+        WCHAR hwIdBuf[1024];
+        DWORD reqSize = 0;
+        if (!SetupDiGetDeviceRegistryPropertyW(devInfo, &devData,
+                                               SPDRP_HARDWAREID,
+                                               NULL, (PBYTE)hwIdBuf, sizeof(hwIdBuf),
+                                               &reqSize)) {
+            continue;
+        }
+        /* hwIdBuf is a multi-sz: each entry is L"PCI\VEN_XXXX&DEV_YYYY..." */
+        const WCHAR *p = hwIdBuf;
+        while (*p && pnp_count < MAX_PNP_DIDS) {
+            /* Parse VEN_8086 and DEV_XXXX */
+            avb_u32 ven32 = 0, dev32 = 0;
+            const WCHAR *vp = NULL, *dp = NULL;
+            /* Case-insensitive search for "VEN_" and "DEV_" */
+            for (const WCHAR *c = p; *c && *(c+1) && *(c+2) && *(c+3) && *(c+4); c++) {
+                if ((c[0]=='V'||c[0]=='v') && (c[1]=='E'||c[1]=='e') &&
+                    (c[2]=='N'||c[2]=='n') &&  c[3]=='_')
+                    vp = c + 4;
+                if ((c[0]=='D'||c[0]=='d') && (c[1]=='E'||c[1]=='e') &&
+                    (c[2]=='V'||c[2]=='v') &&  c[3]=='_')
+                    dp = c + 4;
+            }
+            if (vp && dp) {
+                ven32 = wcstoul(vp, NULL, 16);
+                dev32 = wcstoul(dp, NULL, 16);
+                if (ven32 == 0x8086 && dev32 != 0) {
+                    /* Store only Intel devices */
+                    bool already = false;
+                    for (int k = 0; k < pnp_count; k++) {
+                        if (pnp_dids[k] == (avb_u16)dev32) { already = true; break; }
+                    }
+                    if (!already) {
+                        printf("  PnP DID found: 0x%04X\n", (unsigned)dev32);
+                        pnp_dids[pnp_count++] = (avb_u16)dev32;
+                    }
+                }
+            }
+            while (*p) p++;  /* skip to end of this string */
+            p++;             /* skip null terminator */
+        }
+    }
+    SetupDiDestroyDeviceInfoList(devInfo);
+
+    if (pnp_count == 0) {
+        tc_skip("TEST-PROV-H07", "No Intel PCI devices found via SetupAPI -- cannot verify");
+        return;
+    }
+
+    /* ---- Step 2: Compare with ENUM_ADAPTERS reported DIDs ---- */
+    HANDLE h = open_dev();
+    if (h == INVALID_HANDLE_VALUE) {
+        tc_fail("TEST-PROV-H07", "CreateFileW failed");
+        return;
+    }
+
+    bool any_pass = false, any_fail = false;
+    for (int idx = 0; idx < 16; idx++) {
+        /* Open a fresh handle to enumerate each adapter */
+        HANDLE hb = open_dev();
+        if (hb == INVALID_HANDLE_VALUE) break;
+        if (!bind_adapter(hb, (avb_u32)idx)) { CloseHandle(hb); break; }
+
+        AVB_ENUM_REQUEST er = {0};
+        er.index = (avb_u32)idx;
+        DWORD br = 0;
+        BOOL eok = DeviceIoControl(hb, IOCTL_AVB_ENUM_ADAPTERS,
+                                   &er, sizeof(er), &er, sizeof(er), &br, NULL);
+        CloseHandle(hb);
+        if (!eok || er.status != NDIS_STATUS_SUCCESS) break;
+
+        avb_u16 reported_did = er.device_id;
+
+        /* Check whether reported_did appears in the PnP list */
+        bool in_pnp = false;
+        for (int k = 0; k < pnp_count; k++) {
+            if (pnp_dids[k] == reported_did) { in_pnp = true; break; }
+        }
+
+        char tc_id[64];
+        (void)sprintf(tc_id, "TEST-PROV-H07/adapter:%d", idx);
+
+        if (in_pnp) {
+            char msg[256];
+            (void)sprintf(msg,
+                "DID 0x%04X matches a Windows PnP-reported Intel PCI DID",
+                (unsigned)reported_did);
+            tc_pass(tc_id, msg);
+            any_pass = true;
+        } else {
+            /* The reported DID is not in the PnP list.
+             * This means the driver is reporting a REPRESENTATIVE DID that
+             * does not correspond to any physical device on this machine.
+             * Most likely: AvbReadActualPciIds() fix is missing or failed.
+             *
+             * Check if we can find the real DID among PnP entries that would
+             * share the same device family (as context for the failure message). */
+            char msg[512];
+            char pnp_list[256] = {0};
+            for (int k = 0; k < pnp_count; k++) {
+                char tmp[16];
+                (void)sprintf(tmp, k == 0 ? "0x%04X" : " 0x%04X", (unsigned)pnp_dids[k]);
+                (void)strcat(pnp_list, tmp);
+            }
+            (void)sprintf(msg,
+                "DID 0x%04X from ENUM_ADAPTERS not found in PnP list [%s]; "
+                "likely a representative family DID -- AvbReadActualPciIds() fix needed",
+                (unsigned)reported_did, pnp_list);
+            tc_fail(tc_id, msg);
+            any_fail = true;
+        }
+    }
+
+    CloseHandle(h);
+
+    if (!any_pass && !any_fail) {
+        tc_fail("TEST-PROV-H07", "No adapters enumerated via ENUM_ADAPTERS");
+    }
+}
+
+/* =========================================================================
  * main
  * =========================================================================*/
 int main(int argc, char *argv[])
@@ -1539,6 +1700,7 @@ int main(int argc, char *argv[])
     test_h04(hDev, driver_present);
     test_h05(driver_present);
     test_h06(driver_present);
+    test_h07(driver_present);
 
     if (hDev != INVALID_HANDLE_VALUE) CloseHandle(hDev);
 
