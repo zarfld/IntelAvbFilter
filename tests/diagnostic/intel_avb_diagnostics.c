@@ -154,8 +154,11 @@ int main(int argc, char* argv[])
     printf("  Hardware Only Diagnostics Complete - All problems are now visible!\n");
     printf("=============================================================================\n");
 
-    /* system("pause") removed: interactive wait blocks unattended/CI execution.
-     * Exit code 0 = diagnostics ran; non-zero exit would indicate a fatal error above. */
+    /* intel_avb_diagnostics is classified as an INFORMATIONAL diagnostic tool.
+     * It always exits 0 regardless of what hardware problems it finds.
+     * Do NOT include it in PASS/FAIL test suites; use it for manual triage only.
+     * The absence of hardware (g_device_count == 0) is reported in the output
+     * but does not cause a non-zero exit because this tool is not a test. */
     return 0;
 }
 

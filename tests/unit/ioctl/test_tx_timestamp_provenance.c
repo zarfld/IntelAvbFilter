@@ -485,44 +485,34 @@ static void test_h01(HANDLE hDev, bool driver_present)
         CloseHandle(h);
 
         s_total++;
-        /* Required success threshold: 80% of 20 attempts (16 packets).
-         * Fewer successes on a capable adapter = FAIL regardless of self_cmp_phc. */
-        static const int REQUIRED_SENT = 16;
+        /* Any IOCTL error on a BASIC_1588-capable adapter is unexpected and must FAIL.
+         * There is no justification for an arbitrary 80% (16/20) threshold: if SEND_PTP
+         * fails on an initialised capable adapter, that is a driver or hardware problem,
+         * not a tolerable statistical variation. */
         if (sent == 0) {
             if (has_1588) {
                 s_failed++;
-                printf("  [FAIL] %s: no packets sent on INTEL_CAP_BASIC_1588 adapter "
-                       "(IOCTL errors: %d) â€” hardware initialization failure\n",
-                       tc_id, ioctl_fail);
+                printf("  [FAIL] %s: no packets sent on BASIC_1588 adapter "
+                       "(%d IOCTL errors) — initialization failure\n", tc_id, ioctl_fail);
             } else {
                 s_skipped++;
-                printf("  [SKIP] %s: SKIP_UNSUPPORTED â€” adapter lacks INTEL_CAP_BASIC_1588 "
+                printf("  [SKIP] %s: SKIP_UNSUPPORTED — adapter lacks INTEL_CAP_BASIC_1588 "
                        "(caps=0x%08X)\n", tc_id, (unsigned)er.capabilities);
             }
         } else if (has_1588 && ioctl_fail > 0) {
-            /* Any unexpected IOCTL error on a capable adapter must not be silently ignored. */
-            printf("  [WARN] %s: %d IOCTL error(s) on BASIC_1588 adapter (sent=%d/%d)\n",
-                   tc_id, ioctl_fail, sent, 20);
-            if (sent < REQUIRED_SENT) {
-                s_failed++;
-                printf("  [FAIL] %s: sent %d/%d (threshold %d) â€” too many IOCTL errors\n",
-                       tc_id, sent, 20, REQUIRED_SENT);
-            } else if (self_cmp_phc > 0) {
-                s_failed++;
-                printf("  [FAIL] %s: %d/%d packets had PRE_SEND_PHC self-comparison bug\n",
-                       tc_id, self_cmp_phc, sent);
-            } else {
-                s_passed++;
-                printf("  [PASS] %s: %d/%d packets OK (with %d IOCTL warning(s))\n",
-                       tc_id, sent, 20, ioctl_fail);
-            }
+            /* ANY unexpected IOCTL error on a capable adapter is a FAIL.
+             * The 16/20 threshold from a prior version was arbitrary and has been removed. */
+            s_failed++;
+            printf("  [FAIL] %s: %d unexpected IOCTL error(s) out of 20 attempts "
+                   "on BASIC_1588 adapter — not tolerable\n", tc_id, ioctl_fail);
         } else if (self_cmp_phc > 0) {
             s_failed++;
             printf("  [FAIL] %s: %d/%d packets had PRE_SEND_PHC self-comparison bug\n",
                    tc_id, self_cmp_phc, sent);
         } else {
             s_passed++;
-            printf("  [PASS] %s: %d packets, no PRE_SEND_PHC self-comparison\n", tc_id, sent);
+            printf("  [PASS] %s: %d/%d packets, no PRE_SEND_PHC self-comparison\n",
+                   tc_id, sent, 20);
         }
     }
 
@@ -587,29 +577,29 @@ static void test_h02(HANDLE hDev, bool driver_present)
         }
         CloseHandle(h);
 
-        static const int REQUIRED_SENT2 = 16;  /* 80% of 20 */
+        /* Any IOCTL error on a capable adapter is unexpected and must FAIL (no threshold). */
         s_total++;
         if (sent == 0) {
             if (has_1588) {
                 s_failed++;
-                printf("  [FAIL] %s: no packets sent on capable adapter (IOCTL errors: %d)\n",
+                printf("  [FAIL] %s: no packets sent on capable adapter (%d IOCTL errors)\n",
                        tc_id, ioctl_fail2);
             } else {
                 s_skipped++;
-                printf("  [SKIP] %s: SKIP_UNSUPPORTED (caps=0x%08X)\n", tc_id, (unsigned)er.capabilities);
+                printf("  [SKIP] %s: SKIP_UNSUPPORTED (caps=0x%08X)\n",
+                       tc_id, (unsigned)er.capabilities);
             }
-        } else if (has_1588 && ioctl_fail2 > 0 && sent < REQUIRED_SENT2) {
+        } else if (has_1588 && ioctl_fail2 > 0) {
             s_failed++;
-            printf("  [FAIL] %s: sent %d/%d (threshold %d) â€” too many IOCTL errors (%d)\n",
-                   tc_id, sent, 20, REQUIRED_SENT2, ioctl_fail2);
+            printf("  [FAIL] %s: %d unexpected IOCTL error(s) on BASIC_1588 adapter — not tolerable\n",
+                   tc_id, ioctl_fail2);
         } else if (masquerade > 0) {
             s_failed++;
             printf("  [FAIL] %s: %d/%d packets claimed hardware provenance from SEND_PTP\n",
                    tc_id, masquerade, sent);
         } else {
             s_passed++;
-            printf("  [PASS] %s: %d packets, no masquerade%s\n",
-                   tc_id, sent, ioctl_fail2 > 0 ? " (with IOCTL warning)" : "");
+            printf("  [PASS] %s: %d packets, no masquerade\n", tc_id, sent);
         }
     }
 
@@ -759,13 +749,35 @@ static void test_h03(HANDLE hDev, bool driver_present)
                (unsigned long long)g0self.timestamp_ns, (unsigned)g0self.ts_provenance);
     }
 
-    /* Now re-send on h0 so that h1 might pick it up if contexts are shared. */
+    /* Re-send on h0 so that h1 has a chance to receive if contexts are shared.
+     * Check the return status: if this send fails on a capable adapter, we cannot
+     * evaluate isolation (h1 has no record to possibly pick up). */
     {
         AVB_TEST_SEND_PTP_REQUEST s0b = {0};
         s0b.sequence_id = 0xC301;
         DWORD sbr2 = 0;
-        DeviceIoControl(h0, IOCTL_AVB_TEST_SEND_PTP,
-                        &s0b, sizeof(s0b), &s0b, sizeof(s0b), &sbr2, NULL);
+        BOOL resend_ok = DeviceIoControl(h0, IOCTL_AVB_TEST_SEND_PTP,
+                                          &s0b, sizeof(s0b), &s0b, sizeof(s0b), &sbr2, NULL);
+        if (!resend_ok || s0b.packets_sent == 0) {
+            CloseHandle(h0); CloseHandle(h1);
+            if (caps0 & INTEL_CAP_BASIC_1588) {
+                tc_fail("TEST-PROV-H03",
+                        "second SEND_PTP on h0 failed — cannot evaluate cross-adapter isolation");
+            } else {
+                tc_skip("TEST-PROV-H03",
+                        "SKIP_UNSUPPORTED: second SEND_PTP failed on non-BASIC_1588 adapter");
+            }
+            return;
+        }
+        if (s0b.ts_provenance == AVB_TX_PROV_UNAVAILABLE) {
+            CloseHandle(h0); CloseHandle(h1);
+            if (caps0 & INTEL_CAP_BASIC_1588) {
+                tc_fail("TEST-PROV-H03",
+                        "second SEND_PTP returned UNAVAILABLE on BASIC_1588 adapter");
+            }
+            /* If adapter was already classified non-capable earlier, we would not have reached here */
+            return;
+        }
     }
 
     /* GET_TX_TIMESTAMP on h1 (adapter 1 context) â€” must not see h0's timestamp. */
@@ -1140,22 +1152,33 @@ static void test_h06(bool driver_present)
     }
 
     bool all_ok = true;
-    bool ioctl_not_supported = false;
 
-    /* ---- V1 (24 bytes): must accept and return exactly 24 bytes ---- */
+    /* ---- V1 (24 bytes in, 24 bytes out): uses genuine V1 input AND output sizes ---- */
+    /* Exercises the driver's minimum-buffer acceptance path, not the V2 path by accident. */
     {
         uint8_t buf[40];
         memset(buf, 0xDD, sizeof(buf));
         DWORD br = 0;
         BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_RX_TIMESTAMP,
-                                  buf, sizeof(AVB_TX_TIMESTAMP_REQUEST),
-                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,
+                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,   /* V1 input */
+                                  buf, AVB_TX_TIMESTAMP_REQUEST_V1_SIZE,   /* V1 output */
                                   &br, NULL);
         if (!ok) {
             DWORD err = GetLastError();
-            if (err == ERROR_NOT_SUPPORTED || err == 50 /*ERROR_NOT_SUPPORTED*/) {
-                ioctl_not_supported = true;
-                printf("  NOTE: GET_RX_TIMESTAMP V1 not supported by this adapter (err=%lu)\n", err);
+            if (err == ERROR_NOT_SUPPORTED || err == 50) {
+                if (caps0 & INTEL_CAP_BASIC_1588) {
+                    /* Capable adapter, missing implementation = driver FAIL, not hardware gap */
+                    tc_fail("TEST-PROV-H06",
+                            "GET_RX_TIMESTAMP V1 returned NOT_SUPPORTED on BASIC_1588 adapter "
+                            "— missing driver implementation is a FAIL, not SKIP_UNSUPPORTED");
+                    all_ok = false;
+                } else {
+                    tc_skip("TEST-PROV-H06",
+                            "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588 "
+                            "(independently verified via ENUM_ADAPTERS)");
+                }
+                CloseHandle(h);
+                return;   /* V2 cannot be tested if V1 is not supported */
             } else {
                 char msg[128];
                 (void)sprintf(msg, "GET_RX_TIMESTAMP V1 failed with unexpected Win32 error %lu", err);
@@ -1181,8 +1204,9 @@ static void test_h06(bool driver_present)
         }
     }
 
-    /* ---- V2 (32 bytes): bytesReturned==32 and correct provenance ---- */
-    if (!ioctl_not_supported) {
+    /* ---- V2 (32 bytes in, 32 bytes out): required when V1 succeeded ---- */
+    /* NOT_SUPPORTED on V2 after V1 passed is a driver inconsistency = FAIL. */
+    {
         uint8_t buf[32];
         memset(buf, 0, sizeof(buf));
         DWORD br = 0;
@@ -1192,7 +1216,13 @@ static void test_h06(bool driver_present)
                                   &br, NULL);
         if (!ok) {
             DWORD err = GetLastError();
-            if (err != ERROR_NOT_SUPPORTED && err != 50) {
+            if (err == ERROR_NOT_SUPPORTED || err == 50) {
+                /* V1 succeeded; V2 NOT_SUPPORTED = driver inconsistency = FAIL. */
+                tc_fail("TEST-PROV-H06",
+                        "GET_RX_TIMESTAMP V2 returned NOT_SUPPORTED after V1 succeeded "
+                        "— driver inconsistency; V2 ABI is required");
+                all_ok = false;
+            } else {
                 char msg[128];
                 (void)sprintf(msg, "GET_RX_TIMESTAMP V2 failed with Win32 error %lu", err);
                 tc_fail("TEST-PROV-H06", msg);
@@ -1221,24 +1251,10 @@ static void test_h06(bool driver_present)
 
     CloseHandle(h);
 
-    if (ioctl_not_supported) {
-        /* Determine if this is a genuine capability gap or a driver bug */
-        if (caps0 & INTEL_CAP_BASIC_1588) {
-            /* Has 1588 but RX TS not supported â€” driver limitation, not hardware gap */
-            printf("  NOTE: adapter has INTEL_CAP_BASIC_1588 but GET_RX_TIMESTAMP not supported "
-                   "â€” driver implementation gap\n");
-            /* Still pass ABI check since V1/V2 buffer handling wasn't tested */
-            tc_skip("TEST-PROV-H06",
-                    "SKIP_UNSUPPORTED: GET_RX_TIMESTAMP not implemented for this adapter");
-        } else {
-            tc_skip("TEST-PROV-H06",
-                    "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588");
-        }
-        return;
-    }
-
     if (all_ok)
-        tc_pass("TEST-PROV-H06", "GET_RX_TIMESTAMP V1/V2 ABI correct; no VERIFIED_HARDWARE_TX on RX path");
+        tc_pass("TEST-PROV-H06",
+                "GET_RX_TIMESTAMP V1 (genuine V1 input) and V2 ABI correct; "
+                "no VERIFIED_HARDWARE_TX on RX path");
 }
 
 /* =========================================================================

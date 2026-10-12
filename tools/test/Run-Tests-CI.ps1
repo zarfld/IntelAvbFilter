@@ -209,7 +209,8 @@ $UnitTests = @(
     # PowerShell logic tests (suffix .ps1, run via powershell.exe not compiled .exe)
     "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1",  # TEST-PROV-L06 aggregation invariants
     "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1",       # TEST-NOWAIT-001: no system("pause") in CI/HIL
-    "ps1:tests/unit/build/test_build_tests_syspaths.ps1"        # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
+    "ps1:tests/unit/build/test_build_tests_syspaths.ps1",       # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
+    "ps1:tests/unit/ioctl/test_health_sentinel.ps1"             # TEST-SENTINEL-001..004: #328 health check counter regression
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require
@@ -698,15 +699,25 @@ foreach ($TestName in $TestList) {
     }
 
     # After each hardware test: verify the driver is still accessible.
-    # MANDATORY: driver loss = hard infrastructure failure (not just cascade SKIP).
+    # MANDATORY: driver loss = hard infrastructure failure (#328 sentinel).
+    # CRITICAL: this block must increment $failedTests and $totalTests unconditionally
+    # when the health check fails — even when the preceding test PASSED — so the
+    # suite always exits non-zero on driver loss, not silently exit 0.
     if ($Suite -like 'Hardware*' -and -not (Test-AvbDriverHealth -AfterTest $exeName)) {
+        $driverLost = $true
+        # Record driver identity at the point of failure for traceability.
+        $drvVer   = if ($env:HIL_DRIVER_VERSION) { $env:HIL_DRIVER_VERSION } else { 'unknown' }
+        $drvSha   = if ($env:HIL_DRIVER_SHA256)  { $env:HIL_DRIVER_SHA256.Substring(0, [Math]::Min(12, $env:HIL_DRIVER_SHA256.Length)) + '...' } else { 'unknown' }
+        $infraMsg = "[#328-SENTINEL] driver health check FAILED after $exeName (drv=$drvVer sha=$drvSha)"
+        # Increment BOTH counters — health check failure is a first-class test failure.
+        $failedTests++
+        $totalTests++
         if ($IsMandatorySuite) {
-            Write-Fail "INFRA: [#328-SENTINEL] driver lost after $exeName on mandatory suite — aborting"
-            $driverLost = $true
+            Write-Fail "INFRA: $infraMsg — mandatory suite aborting"
         } else {
-            Write-Fail "INFRA: driver lost after $exeName -- remaining hardware tests will be skipped"
-            $driverLost = $true
+            Write-Fail "INFRA: $infraMsg — remaining tests will be skipped"
         }
+        $results += [PSCustomObject]@{ Name = "$exeName[INFRA-HEALTH]"; Status = "FAILED(INFRA)"; Exit = -2 }
     }
 }
 
