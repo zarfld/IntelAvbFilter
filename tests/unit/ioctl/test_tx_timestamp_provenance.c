@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file test_tx_timestamp_provenance.c
  * @brief Provenance correctness regression tests â€” pure-logic and hardware-integrated.
  *
