@@ -4906,7 +4906,7 @@ NTSTATUS AvbPlatformInit(_In_ device_t *dev)
     ULONG timinca_value;
     switch (dev->device_type) {
         case INTEL_DEVICE_I219:
-            /* I219: IP=2, IV=16,000,000 (0x02F42400). Using DEFAULT (IV=0) freezes I219 clock. */
+/
             timinca_value = INTEL_TIMINCA_I219_INIT;
             break;
         case INTEL_DEVICE_I217:
