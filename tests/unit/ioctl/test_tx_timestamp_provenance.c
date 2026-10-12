@@ -1,6 +1,6 @@
-/**
+﻿/**
  * @file test_tx_timestamp_provenance.c
- * @brief Provenance correctness regression tests â€” pure-logic and hardware-integrated.
+ * @brief Provenance correctness regression tests Ã¢â‚¬â€ pure-logic and hardware-integrated.
  *
  * Section L (Logic): hardware-free mock tests.  No CreateFile / DeviceIoControl.
  *   TEST-PROV-L01  Independent capture: driver must record two distinct PHC reads,
@@ -22,7 +22,7 @@
  *   TEST-PROV-H03  Multi-adapter isolation: two handles bound to distinct adapters
  *                  service SEND_PTP independently (verified via provenance source tag,
  *                  not by comparing VID/DID copied from ENUM_ADAPTERS).
- *   TEST-PROV-H04  Unavailable hardware: fresh handle before any SEND_PTP â†’
+ *   TEST-PROV-H04  Unavailable hardware: fresh handle before any SEND_PTP Ã¢â€ â€™
  *                  GET_TX_TIMESTAMP returns valid==0 and ts_provenance==UNAVAILABLE.
  *
  * Verifies: #149 (REQ-F-PTP-007) | Corrects: #199, #317 false-positives
@@ -135,7 +135,7 @@ static void tc_skip(const char *id, const char *detail)
 }
 
 /* =========================================================================
- * Section L: Pure-logic mock tests â€” no device handle required
+ * Section L: Pure-logic mock tests Ã¢â‚¬â€ no device handle required
  * =========================================================================*/
 
 /* -------------------------------------------------------------------------
@@ -166,7 +166,7 @@ static void test_l01(void)
     {
         AVB_TEST_SEND_PTP_REQUEST r = {0};
         r.timestamp_ns   = 1791575000000000000ULL;   /* simulated SYSTIM (ns) */
-        r.phc_at_send_ns = 1791575000000000000ULL;   /* identical â€” bug */
+        r.phc_at_send_ns = 1791575000000000000ULL;   /* identical Ã¢â‚¬â€ bug */
         r.ts_provenance  = AVB_TX_PROV_PRE_SEND_PHC;
         r.packets_sent   = 1;
         r.status         = NDIS_STATUS_SUCCESS;
@@ -197,12 +197,12 @@ static void test_l01(void)
             return;
         }
         if (delta <= 0) {
-            tc_fail("TEST-PROV-L01", "case B: delta non-positive â€” ordering violated");
+            tc_fail("TEST-PROV-L01", "case B: delta non-positive Ã¢â‚¬â€ ordering violated");
             return;
         }
     }
 
-    /* Case C: SOFTWARE_FALLBACK â€” both in QPC ticks; delta may be tiny but non-zero. */
+    /* Case C: SOFTWARE_FALLBACK Ã¢â‚¬â€ both in QPC ticks; delta may be tiny but non-zero. */
     {
         AVB_TEST_SEND_PTP_REQUEST r = {0};
         r.timestamp_ns   = 1234567890ULL;
@@ -223,7 +223,7 @@ static void test_l01(void)
 }
 
 /* -------------------------------------------------------------------------
- * TEST-PROV-L02: Provenance gating â€” SEND_PTP cannot claim VERIFIED_HARDWARE_TX.
+ * TEST-PROV-L02: Provenance gating Ã¢â‚¬â€ SEND_PTP cannot claim VERIFIED_HARDWARE_TX.
  *
  * A SEND_PTP response always carries a pre-send snapshot, never a hardware
  * egress latch.  The check logic must reject VERIFIED_HARDWARE_TX from
@@ -231,14 +231,14 @@ static void test_l01(void)
  * -------------------------------------------------------------------------*/
 static void test_l02(void)
 {
-    printf("\n[TEST-PROV-L02] Provenance gating â€” SEND_PTP cannot claim VERIFIED_HARDWARE_TX (mock)\n");
+    printf("\n[TEST-PROV-L02] Provenance gating Ã¢â‚¬â€ SEND_PTP cannot claim VERIFIED_HARDWARE_TX (mock)\n");
 
     /* check_masquerade: returns true if the SEND_PTP response is claiming a
      * hardware provenance that SEND_PTP cannot legitimately provide. */
     #define check_masquerade(r) ((r).ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX || \
                                  (r).ts_provenance == AVB_TX_PROV_NDIS_TX_COMPLETION)
 
-    /* Case A: bug â€” SEND_PTP claims VERIFIED_HARDWARE_TX */
+    /* Case A: bug Ã¢â‚¬â€ SEND_PTP claims VERIFIED_HARDWARE_TX */
     {
         AVB_TEST_SEND_PTP_REQUEST r = {0};
         r.ts_provenance = AVB_TX_PROV_VERIFIED_HARDWARE_TX;
@@ -249,7 +249,7 @@ static void test_l02(void)
             return;
         }
     }
-    /* Case B: correct â€” SEND_PTP claims PRE_SEND_PHC */
+    /* Case B: correct Ã¢â‚¬â€ SEND_PTP claims PRE_SEND_PHC */
     {
         AVB_TEST_SEND_PTP_REQUEST r = {0};
         r.ts_provenance = AVB_TX_PROV_PRE_SEND_PHC;
@@ -260,7 +260,7 @@ static void test_l02(void)
             return;
         }
     }
-    /* Case C: correct â€” SEND_PTP claims SOFTWARE_FALLBACK */
+    /* Case C: correct Ã¢â‚¬â€ SEND_PTP claims SOFTWARE_FALLBACK */
     {
         AVB_TEST_SEND_PTP_REQUEST r = {0};
         r.ts_provenance = AVB_TX_PROV_SOFTWARE_FALLBACK;
@@ -344,7 +344,7 @@ static void test_l04(void)
 {
     printf("\n[TEST-PROV-L04] Unavailable provenance invariant (mock)\n");
 
-    /* Case A: correct â€” valid==0 and UNAVAILABLE */
+    /* Case A: correct Ã¢â‚¬â€ valid==0 and UNAVAILABLE */
     {
         AVB_TX_TIMESTAMP_REQUEST r = {0};
         r.valid         = 0;
@@ -353,7 +353,7 @@ static void test_l04(void)
         bool ok = (r.valid == 0) && (r.ts_provenance == AVB_TX_PROV_UNAVAILABLE);
         if (!ok) { tc_fail("TEST-PROV-L04", "case A: correct response rejected"); return; }
     }
-    /* Case B: bug â€” valid==0 but PRE_SEND_PHC */
+    /* Case B: bug Ã¢â‚¬â€ valid==0 but PRE_SEND_PHC */
     {
         AVB_TX_TIMESTAMP_REQUEST r = {0};
         r.valid         = 0;
@@ -362,7 +362,7 @@ static void test_l04(void)
         bool is_bug = (r.valid == 0) && (r.ts_provenance != AVB_TX_PROV_UNAVAILABLE);
         if (!is_bug) { tc_fail("TEST-PROV-L04", "case B: inconsistency not detected"); return; }
     }
-    /* Case C: valid==1 with PRE_SEND_PHC â€” legitimate */
+    /* Case C: valid==1 with PRE_SEND_PHC Ã¢â‚¬â€ legitimate */
     {
         AVB_TX_TIMESTAMP_REQUEST r = {0};
         r.timestamp_ns  = 1791575000000000000ULL;
@@ -493,10 +493,10 @@ static void test_h01(HANDLE hDev, bool driver_present)
             if (has_1588) {
                 s_failed++;
                 printf("  [FAIL] %s: no packets sent on BASIC_1588 adapter "
-                       "(%d IOCTL errors) — initialization failure\n", tc_id, ioctl_fail);
+                       "(%d IOCTL errors) â€” initialization failure\n", tc_id, ioctl_fail);
             } else {
                 s_skipped++;
-                printf("  [SKIP] %s: SKIP_UNSUPPORTED — adapter lacks INTEL_CAP_BASIC_1588 "
+                printf("  [SKIP] %s: SKIP_UNSUPPORTED â€” adapter lacks INTEL_CAP_BASIC_1588 "
                        "(caps=0x%08X)\n", tc_id, (unsigned)er.capabilities);
             }
         } else if (has_1588 && ioctl_fail > 0) {
@@ -504,7 +504,7 @@ static void test_h01(HANDLE hDev, bool driver_present)
              * The 16/20 threshold from a prior version was arbitrary and has been removed. */
             s_failed++;
             printf("  [FAIL] %s: %d unexpected IOCTL error(s) out of 20 attempts "
-                   "on BASIC_1588 adapter — not tolerable\n", tc_id, ioctl_fail);
+                   "on BASIC_1588 adapter â€” not tolerable\n", tc_id, ioctl_fail);
         } else if (self_cmp_phc > 0) {
             s_failed++;
             printf("  [FAIL] %s: %d/%d packets had PRE_SEND_PHC self-comparison bug\n",
@@ -591,7 +591,7 @@ static void test_h02(HANDLE hDev, bool driver_present)
             }
         } else if (has_1588 && ioctl_fail2 > 0) {
             s_failed++;
-            printf("  [FAIL] %s: %d unexpected IOCTL error(s) on BASIC_1588 adapter — not tolerable\n",
+            printf("  [FAIL] %s: %d unexpected IOCTL error(s) on BASIC_1588 adapter â€” not tolerable\n",
                    tc_id, ioctl_fail2);
         } else if (masquerade > 0) {
             s_failed++;
@@ -620,8 +620,8 @@ static void test_h02(HANDLE hDev, bool driver_present)
  * h1 is bound to adapter 1's INDEPENDENT context.
  *
  * If h0 gets UNAVAILABLE (SYSTIM inaccessible):
- *   adapter has INTEL_CAP_BASIC_1588 â†’ FAIL (should work on capable hardware)
- *   adapter lacks INTEL_CAP_BASIC_1588 â†’ SKIP_UNSUPPORTED (not applicable)
+ *   adapter has INTEL_CAP_BASIC_1588 Ã¢â€ â€™ FAIL (should work on capable hardware)
+ *   adapter lacks INTEL_CAP_BASIC_1588 Ã¢â€ â€™ SKIP_UNSUPPORTED (not applicable)
  * -------------------------------------------------------------------------*/
 static void test_h03(HANDLE hDev, bool driver_present)
 {
@@ -652,7 +652,7 @@ static void test_h03(HANDLE hDev, bool driver_present)
         if (required) {
             /* INFRA_FAILURE: runner is configured to have >=2 adapters but doesn't */
             printf("  [INFRA_FAILURE] TEST-PROV-H03: HIL_MULTI_ADAPTER_REQUIRED=1 but only "
-                   "%d adapter(s) found â€” runner configuration broken\n", adapter_count);
+                   "%d adapter(s) found Ã¢â‚¬â€ runner configuration broken\n", adapter_count);
             s_total++; s_failed++;
         } else {
             tc_skip("TEST-PROV-H03", "fewer than 2 adapters - isolation requires >=2");
@@ -731,7 +731,7 @@ static void test_h03(HANDLE hDev, bool driver_present)
             CloseHandle(h0); CloseHandle(h1);
             tc_fail("TEST-PROV-H03",
                     "positive-control FAIL: GET_TX_TIMESTAMP on h0 returned valid=0 "
-                    "immediately after SEND_PTP â€” record was not stored (ring-slot failure?)");
+                    "immediately after SEND_PTP Ã¢â‚¬â€ record was not stored (ring-slot failure?)");
             return;
         }
         if (g0self.timestamp_ns != s0.timestamp_ns) {
@@ -762,7 +762,7 @@ static void test_h03(HANDLE hDev, bool driver_present)
             CloseHandle(h0); CloseHandle(h1);
             if (caps0 & INTEL_CAP_BASIC_1588) {
                 tc_fail("TEST-PROV-H03",
-                        "second SEND_PTP on h0 failed — cannot evaluate cross-adapter isolation");
+                        "second SEND_PTP on h0 failed â€” cannot evaluate cross-adapter isolation");
             } else {
                 tc_skip("TEST-PROV-H03",
                         "SKIP_UNSUPPORTED: second SEND_PTP failed on non-BASIC_1588 adapter");
@@ -774,13 +774,18 @@ static void test_h03(HANDLE hDev, bool driver_present)
             if (caps0 & INTEL_CAP_BASIC_1588) {
                 tc_fail("TEST-PROV-H03",
                         "second SEND_PTP returned UNAVAILABLE on BASIC_1588 adapter");
+            } else {
+                /* Adapter not capable: first SEND_PTP succeeded (pre-send path works without
+                 * SYSTIM hardware), but provenance is UNAVAILABLE â€” expected for non-1588 adapters.
+                 * SKIP_UNSUPPORTED is appropriate. */
+                tc_skip("TEST-PROV-H03",
+                        "SKIP_UNSUPPORTED: second SEND_PTP UNAVAILABLE on non-BASIC_1588 adapter");
             }
-            /* If adapter was already classified non-capable earlier, we would not have reached here */
             return;
         }
     }
 
-    /* GET_TX_TIMESTAMP on h1 (adapter 1 context) â€” must not see h0's timestamp. */
+    /* GET_TX_TIMESTAMP on h1 (adapter 1 context) Ã¢â‚¬â€ must not see h0's timestamp. */
     AVB_TX_TIMESTAMP_REQUEST g1 = {0};
     DWORD gbr = 0;
     BOOL get_ok = DeviceIoControl(h1, IOCTL_AVB_GET_TX_TIMESTAMP,
@@ -805,14 +810,14 @@ static void test_h03(HANDLE hDev, bool driver_present)
         return;
     }
     tc_pass("TEST-PROV-H03",
-            "positive control OK; h1 GET_TX_TIMESTAMP returned valid=0 â€” adapter contexts isolated");
+            "positive control OK; h1 GET_TX_TIMESTAMP returned valid=0 Ã¢â‚¬â€ adapter contexts isolated");
 }
 
 /* -------------------------------------------------------------------------
  * TEST-PROV-H04: Unavailable provenance on fresh handle (hardware-integrated).
  *
  * Part A (mandatory): SEND_PTP on ha; GET_TX_TIMESTAMP on ha must return the
- *   same timestamp AND provenance — proves value + provenance consistency.
+ *   same timestamp AND provenance â€” proves value + provenance consistency.
  *   If Part A fails/is skipped on a capable adapter -> FAIL; Part B cannot
  *   substitute for a missing Part A result.
  * Part B: after deterministic drain, fresh-state GET_TX_TIMESTAMP must return
@@ -826,7 +831,7 @@ static void test_h04(HANDLE hDev, bool driver_present)
 
     bool part_a_passed = false;
 
-    /* Part A: positive control — mandatory */
+    /* Part A: positive control â€” mandatory */
     {
         HANDLE ha = open_dev();
         if (ha == INVALID_HANDLE_VALUE) {
@@ -868,9 +873,9 @@ static void test_h04(HANDLE hDev, bool driver_present)
 
         if (!sok || s.packets_sent == 0) {
             CloseHandle(ha);
-            /* SEND_PTP failure on capable adapter is a hard FAIL — Part B cannot compensate. */
+            /* SEND_PTP failure on capable adapter is a hard FAIL â€” Part B cannot compensate. */
             if (adp_caps & INTEL_CAP_BASIC_1588)
-                tc_fail("TEST-PROV-H04", "Part A: SEND_PTP failed on BASIC_1588 adapter — Part B cannot substitute");
+                tc_fail("TEST-PROV-H04", "Part A: SEND_PTP failed on BASIC_1588 adapter â€” Part B cannot substitute");
             else
                 tc_skip("TEST-PROV-H04", "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588");
             return;
@@ -884,7 +889,7 @@ static void test_h04(HANDLE hDev, bool driver_present)
             return;
         }
 
-        /* Retrieve the record immediately — verify value AND provenance. */
+        /* Retrieve the record immediately â€” verify value AND provenance. */
         AVB_TX_TIMESTAMP_REQUEST g = {0};
         DWORD gbr = 0;
         BOOL gok = DeviceIoControl(ha, IOCTL_AVB_GET_TX_TIMESTAMP,
@@ -898,14 +903,14 @@ static void test_h04(HANDLE hDev, bool driver_present)
         }
         if (g.timestamp_ns != s.timestamp_ns) {
             char msg[256];
-            (void)sprintf(msg, "Part A: value mismatch — SEND_PTP ts=%llu GET_TX ts=%llu",
+            (void)sprintf(msg, "Part A: value mismatch â€” SEND_PTP ts=%llu GET_TX ts=%llu",
                           (unsigned long long)s.timestamp_ns, (unsigned long long)g.timestamp_ns);
             tc_fail("TEST-PROV-H04", msg);
             return;
         }
         if (g.ts_provenance != s.ts_provenance) {
             char msg[256];
-            (void)sprintf(msg, "Part A: provenance mismatch — SEND_PTP prov=%u GET_TX prov=%u",
+            (void)sprintf(msg, "Part A: provenance mismatch â€” SEND_PTP prov=%u GET_TX prov=%u",
                           (unsigned)s.ts_provenance, (unsigned)g.ts_provenance);
             tc_fail("TEST-PROV-H04", msg);
             return;
@@ -913,7 +918,7 @@ static void test_h04(HANDLE hDev, bool driver_present)
         printf("  Part A: ts=%llu prov=%u [value+provenance match]\n",
                (unsigned long long)g.timestamp_ns, (unsigned)g.ts_provenance);
         s_total++; s_passed++;
-        printf("  [PASS] TEST-PROV-H04/part-A: positive control — value and provenance consistent\n");
+        printf("  [PASS] TEST-PROV-H04/part-A: positive control â€” value and provenance consistent\n");
         part_a_passed = true;
     }
 
@@ -968,7 +973,7 @@ static void test_h04(HANDLE hDev, bool driver_present)
 }
 
 /* -------------------------------------------------------------------------
- * TEST-PROV-H05: V1/V2 ABI regression â€” bytesReturned and canary bytes.
+ * TEST-PROV-H05: V1/V2 ABI regression Ã¢â‚¬â€ bytesReturned and canary bytes.
  *
  * Category: Windows device contract (FastIo + METHOD_BUFFERED semantics).
  *           Requires driver; hardware state irrelevant (adapter 0 used).
@@ -977,13 +982,13 @@ static void test_h04(HANDLE hDev, bool driver_present)
  *   V1 client (24-byte GET_TX_TIMESTAMP buffer):
  *     - DeviceIoControl succeeds (not STATUS_BUFFER_TOO_SMALL)
  *     - bytesReturned == 24 (driver does not over-report)
- *     - canary bytes at offsets 24â€“31 are unchanged (driver does not overwrite)
+ *     - canary bytes at offsets 24Ã¢â‚¬â€œ31 are unchanged (driver does not overwrite)
  *   V2 client (32-byte GET_TX_TIMESTAMP buffer):
  *     - bytesReturned == 32
  *   V1 client (32-byte SEND_PTP output buffer):
  *     - DeviceIoControl succeeds
  *     - bytesReturned == 32
- *     - canary bytes at offsets 32â€“39 unchanged
+ *     - canary bytes at offsets 32Ã¢â‚¬â€œ39 unchanged
  *   V2 client (40-byte SEND_PTP output buffer):
  *     - bytesReturned == 40
  * -------------------------------------------------------------------------*/
@@ -1116,28 +1121,77 @@ static void test_h05(bool driver_present)
 /* -------------------------------------------------------------------------
  * TEST-PROV-H06: GET_RX_TIMESTAMP V1/V2 ABI (hardware-integrated).
  *
- * Category: Windows device contract â€” RX timestamp register ABI.
- * Capability-gated: ERROR_NOT_SUPPORTED on adapter without RX TS cap = SKIP_UNSUPPORTED.
- * Any unexpected error on capable adapter = FAIL (no silent skip to PASS).
+ * Category: Windows device contract -- RX timestamp register ABI.
+ *
+ * Capability requirements for RXSTMPL/H to be accessible:
+ *   INTEL_CAP_BASIC_1588   -- adapter supports IEEE 1588 at all
+ *   INTEL_CAP_MMIO         -- MMIO register access is available
+ *
+ * INTEL_CAP_BASIC_1588 alone is NOT sufficient: I219 has BASIC_1588 but uses
+ * a PCH-based architecture where RXSTMPL/H may not be independently accessible
+ * via the filter driver's MMIO path. Only adapters that also report INTEL_CAP_MMIO
+ * support direct RXSTMPL/H register reads via the HAL.
+ *
+ * NOT_SUPPORTED semantics:
+ *   caps has (BASIC_1588 | MMIO)  -> driver must implement RX TS -> FAIL
+ *   caps lacks MMIO               -> RX timestamp not architecturally supported -> SKIP_UNSUPPORTED
+ *   caps lacks BASIC_1588         -> no 1588 at all -> SKIP_UNSUPPORTED
  * -------------------------------------------------------------------------*/
 static void test_h06(bool driver_present)
 {
     printf("\n[TEST-PROV-H06] GET_RX_TIMESTAMP V1/V2 ABI and provenance\n");
     if (!driver_present) { tc_skip("TEST-PROV-H06", "driver absent"); return; }
 
-    /* Get adapter capabilities to gate FAIL vs SKIP_UNSUPPORTED */
+    /* Get adapter capabilities via ENUM_ADAPTERS for authoritative capability evidence.
+     * Verify ENUM_ADAPTERS itself succeeds and NDIS status is SUCCESS before trusting caps. */
     avb_u32 caps0 = 0;
+    avb_u16 vid0 = 0, did0 = 0;
+    bool enum_ok = false;
     {
         HANDLE hcap = open_dev();
         if (hcap != INVALID_HANDLE_VALUE) {
             AVB_ENUM_REQUEST er = {0};
             er.index = 0;
             DWORD ebr = 0;
-            DeviceIoControl(hcap, IOCTL_AVB_ENUM_ADAPTERS,
-                            &er, sizeof(er), &er, sizeof(er), &ebr, NULL);
-            caps0 = er.capabilities;
+            BOOL eok = DeviceIoControl(hcap, IOCTL_AVB_ENUM_ADAPTERS,
+                                       &er, sizeof(er), &er, sizeof(er), &ebr, NULL);
+            if (eok && er.status == NDIS_STATUS_SUCCESS) {
+                caps0    = er.capabilities;
+                vid0     = er.vendor_id;
+                did0     = er.device_id;
+                enum_ok  = true;
+            } else {
+                printf("  NOTE: ENUM_ADAPTERS failed or returned NDIS error (ok=%d status=0x%08X)\n",
+                       eok, (unsigned)er.status);
+            }
             CloseHandle(hcap);
         }
+    }
+    if (!enum_ok) {
+        tc_fail("TEST-PROV-H06",
+                "ENUM_ADAPTERS failed -- cannot determine capability evidence for SKIP_UNSUPPORTED");
+        return;
+    }
+    printf("  Adapter 0: VID=0x%04X DID=0x%04X caps=0x%08X\n",
+           (unsigned)vid0, (unsigned)did0, (unsigned)caps0);
+
+    /* Determine whether this adapter is expected to support RXSTMPL/H register reads. */
+    bool has_1588 = (caps0 & INTEL_CAP_BASIC_1588) != 0;
+    bool has_mmio = (caps0 & INTEL_CAP_MMIO) != 0;
+    bool rx_ts_expected = has_1588 && has_mmio;
+
+    printf("  INTEL_CAP_BASIC_1588=%d  INTEL_CAP_MMIO=%d  RX-TS-expected=%d\n",
+           has_1588, has_mmio, rx_ts_expected);
+
+    if (!has_1588) {
+        tc_skip("TEST-PROV-H06", "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588");
+        return;
+    }
+    if (!has_mmio) {
+        tc_skip("TEST-PROV-H06",
+                "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_MMIO "
+                "(PCH-based NIC; RXSTMPL/H not independently accessible via filter driver)");
+        return;
     }
 
     HANDLE h = open_dev();
@@ -1166,19 +1220,14 @@ static void test_h06(bool driver_present)
         if (!ok) {
             DWORD err = GetLastError();
             if (err == ERROR_NOT_SUPPORTED || err == 50) {
-                if (caps0 & INTEL_CAP_BASIC_1588) {
-                    /* Capable adapter, missing implementation = driver FAIL, not hardware gap */
-                    tc_fail("TEST-PROV-H06",
-                            "GET_RX_TIMESTAMP V1 returned NOT_SUPPORTED on BASIC_1588 adapter "
-                            "— missing driver implementation is a FAIL, not SKIP_UNSUPPORTED");
-                    all_ok = false;
-                } else {
-                    tc_skip("TEST-PROV-H06",
-                            "SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588 "
-                            "(independently verified via ENUM_ADAPTERS)");
-                }
+                /* Already verified (BASIC_1588 & MMIO) above.
+                 * NOT_SUPPORTED here means driver implementation is missing. FAIL. */
+                tc_fail("TEST-PROV-H06",
+                        "GET_RX_TIMESTAMP V1 returned NOT_SUPPORTED on BASIC_1588+MMIO adapter"
+                        " -- driver implementation missing (FAIL, not SKIP_UNSUPPORTED)");
+                all_ok = false;
                 CloseHandle(h);
-                return;   /* V2 cannot be tested if V1 is not supported */
+                return;
             } else {
                 char msg[128];
                 (void)sprintf(msg, "GET_RX_TIMESTAMP V1 failed with unexpected Win32 error %lu", err);
@@ -1220,7 +1269,7 @@ static void test_h06(bool driver_present)
                 /* V1 succeeded; V2 NOT_SUPPORTED = driver inconsistency = FAIL. */
                 tc_fail("TEST-PROV-H06",
                         "GET_RX_TIMESTAMP V2 returned NOT_SUPPORTED after V1 succeeded "
-                        "— driver inconsistency; V2 ABI is required");
+                        "â€” driver inconsistency; V2 ABI is required");
                 all_ok = false;
             } else {
                 char msg[128];
@@ -1280,7 +1329,7 @@ int main(int argc, char *argv[])
     bool driver_present = (hDev != INVALID_HANDLE_VALUE);
 
     printf("\n=== Section H: Hardware-integrated tests (%s) ===\n",
-           driver_present ? "driver present" : "SKIP â€” driver absent");
+           driver_present ? "driver present" : "SKIP Ã¢â‚¬â€ driver absent");
 
     test_h01(hDev, driver_present);
     test_h02(hDev, driver_present);
@@ -1292,17 +1341,17 @@ int main(int argc, char *argv[])
     if (hDev != INVALID_HANDLE_VALUE) CloseHandle(hDev);
 
     printf("\n=======================================================================\n");
-    printf("Summary â€” TX Timestamp Provenance Regression\n");
+    printf("Summary Ã¢â‚¬â€ TX Timestamp Provenance Regression\n");
     printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d\n",
            s_total, s_passed, s_failed, s_skipped);
 
     if (s_failed > 0) {
-        printf("  STATUS: FAIL â€” do not close #199/#317\n");
+        printf("  STATUS: FAIL Ã¢â‚¬â€ do not close #199/#317\n");
         return 1;
     }
-    /* Only Section L passed and all Section H skipped â€” no definitive hardware evidence. */
+    /* Only Section L passed and all Section H skipped Ã¢â‚¬â€ no definitive hardware evidence. */
     if (!driver_present) {
-        printf("  STATUS: SKIP_ONLY â€” driver absent; Section L passed (compile+logic), Section H skipped\n");
+        printf("  STATUS: SKIP_ONLY Ã¢â‚¬â€ driver absent; Section L passed (compile+logic), Section H skipped\n");
         return 2;
     }
     printf("  STATUS: PASS\n");

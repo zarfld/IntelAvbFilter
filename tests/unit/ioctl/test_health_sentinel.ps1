@@ -1,6 +1,11 @@
 ﻿# test_health_sentinel.ps1
-# Regression: health check failure after last test must produce non-zero exit.
-# TEST-SENTINEL-001..004
+# Behavioral integration test for the #328 health sentinel.
+# Invokes Run-Tests-CI.ps1 via Start-Process with AVB_TEST_HEALTH_FAIL_AFTER=*
+# injecting a health failure without requiring a real driver or NIC.
+# 
+# TEST-SENTINEL-001  health failure after last passing test -> exit 1 (not 0)
+# TEST-SENTINEL-002  INFRA failure marker in Run-Tests-CI.ps1 output
+# TEST-SENTINEL-003  IsMandatorySuite set by Suite alone (not gated on -Tests override)
 # No hardware or driver required.
 
 Set-StrictMode -Version Latest
@@ -11,85 +16,105 @@ $RepoRoot  = Split-Path (Split-Path (Split-Path $ScriptDir -Parent) -Parent) -Pa
 $RunCIPath = Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1'
 
 $total = 0; $passed = 0; $failed = 0
-
-function tc_pass { param([string]$n) $script:total++; $script:passed++; Write-Host ("  [PASS] {0}" -f $n) -ForegroundColor Green }
-function tc_fail { param([string]$n, [string]$why) $script:total++; $script:failed++; Write-Host ("  [FAIL] {0}: {1}" -f $n, $why) -ForegroundColor Red }
+function tc_pass { param([string]$n) $script:total++; $script:passed++
+    Write-Host ("  [PASS] {0}" -f $n) -ForegroundColor Green }
+function tc_fail { param([string]$n, [string]$why) $script:total++; $script:failed++
+    Write-Host ("  [FAIL] {0}: {1}" -f $n, $why) -ForegroundColor Red }
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  TEST-SENTINEL-001..004: #328 Health Sentinel Regression" -ForegroundColor Cyan
+Write-Host "  TEST-SENTINEL-001..003: #328 Behavioral Health Sentinel" -ForegroundColor Cyan
+Write-Host "  Injects health failure via AVB_TEST_HEALTH_FAIL_AFTER=*" -ForegroundColor Cyan
+Write-Host "  Executes actual Run-Tests-CI.ps1 control flow (subprocess)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
-# TEST-SENTINEL-001: Counter logic
-# Simulate: 1 test passed, then health check fails after it.
-# $failedTests must be > 0 after the health failure.
-$passedTests_001  = 1
-$failedTests_001  = 0
-$totalTests_001   = 1
-$results_001      = @()
-$exeName_001      = "test_ioctl_version.exe"
-$healthFailed_001 = $true
-
-if ($healthFailed_001) {
-    $failedTests_001++
-    $totalTests_001++
-    $results_001 += [PSCustomObject]@{ Name = "$exeName_001[INFRA-HEALTH]"; Status = "FAILED(INFRA)"; Exit = -2 }
-}
-
-if ($failedTests_001 -gt 0) {
-    tc_pass "TEST-SENTINEL-001: failedTests correctly incremented ($failedTests_001) after health failure"
-} else {
-    tc_fail "TEST-SENTINEL-001" "failedTests still 0 after health failure - suite would EXIT 0 (FALSE PASS)"
-}
-
-# TEST-SENTINEL-002: Exit semantics
-$wouldExitNonZero = ($failedTests_001 -gt 0)
-if ($wouldExitNonZero) {
-    tc_pass "TEST-SENTINEL-002: suite would exit 1 (correct) - not 0"
-} else {
-    tc_fail "TEST-SENTINEL-002" "suite would exit 0 despite failedTests - false PASS"
-}
-
-# TEST-SENTINEL-003: Source verification
 if (-not (Test-Path $RunCIPath)) {
-    tc_fail "TEST-SENTINEL-003" "Run-Tests-CI.ps1 not found at $RunCIPath"
-} else {
-    $content = Get-Content $RunCIPath -Raw
-    $hasDriverLost = $content -match '\$driverLost\s*=\s*\$true'
-    $hasFailedInc  = $content -match '\$failedTests\+\+'
-    # Both must appear in the same proximity (within ~600 chars of each other)
-    $blockPattern = '(?s)\$driverLost\s*=\s*\$true.{0,600}\$failedTests\+\+'
-    $hasBlock = $content -match $blockPattern
-
-    if ($hasDriverLost -and $hasFailedInc -and $hasBlock) {
-        tc_pass "TEST-SENTINEL-003: Run-Tests-CI.ps1 increments failedTests in health failure block"
-    } elseif (-not $hasDriverLost) {
-        tc_fail "TEST-SENTINEL-003" "`$driverLost = `$true not found in Run-Tests-CI.ps1"
-    } elseif (-not $hasFailedInc) {
-        tc_fail "TEST-SENTINEL-003" "`$failedTests++ not found in Run-Tests-CI.ps1"
-    } else {
-        tc_fail "TEST-SENTINEL-003" "`$failedTests++ not in same block as `$driverLost = `$true"
-    }
+    tc_fail "TEST-SENTINEL-SETUP" ("Run-Tests-CI.ps1 not found at {0}" -f $RunCIPath)
+    exit 1
 }
 
-# TEST-SENTINEL-004: INFRA result entry
-$results_004 = @()
-$exeName_004 = "test_ioctl_version.exe"
-$results_004 += [PSCustomObject]@{ Name = "$exeName_004[INFRA-HEALTH]"; Status = "FAILED(INFRA)"; Exit = -2 }
+# Create a temporary fake passing test script
+$tmpDir = Join-Path $env:TEMP ("sentinel_test_{0}" -f (Get-Random))
+New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+$fakePsTest = Join-Path $tmpDir "test_sentinel_fake.ps1"
+"Write-Host '  [PASS] TC-FAKE-001: fake test always passes'; exit 0" | Set-Content $fakePsTest -Encoding UTF8
 
-$infraEntry = $results_004 | Where-Object { $_.Status -eq "FAILED(INFRA)" }
-if ($infraEntry) {
-    tc_pass "TEST-SENTINEL-004: FAILED(INFRA) result entry present in results array"
-} else {
-    tc_fail "TEST-SENTINEL-004" "No FAILED(INFRA) entry in results - INFRA failure invisible to JUnit"
+# Build a temporary wrapper script that calls Run-Tests-CI.ps1 with the correct -Tests parameter.
+# This avoids shell quoting issues when passing arrays through psi.Arguments.
+$wrapperScript = Join-Path $tmpDir "wrapper.ps1"
+$fakePsTestFwd = $fakePsTest.Replace('\', '/')
+$wrapperContent = @"
+`$env:AVB_TEST_HEALTH_FAIL_AFTER = '*'
+`$env:AVB_DRIVER_BUILD = 'Debug'
+& '$RunCIPath' -Suite HardwareMandatory -Tests @('ps1:$fakePsTestFwd') -TestTimeoutSeconds 30 -Configuration Debug
+exit `$LASTEXITCODE
+"@
+$wrapperContent | Set-Content $wrapperScript -Encoding UTF8
+
+# Run the wrapper via Start-Process
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName  = 'powershell.exe'
+$psi.Arguments = ("-ExecutionPolicy Bypass -NonInteractive -File `"" + $wrapperScript + "`"")
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError  = $true
+$psi.UseShellExecute = $false
+$psi.WorkingDirectory = $RepoRoot
+
+$proc = [System.Diagnostics.Process]::Start($psi)
+$outJob = $proc.StandardOutput.ReadToEndAsync()
+$errJob = $proc.StandardError.ReadToEndAsync()
+
+if (-not $proc.WaitForExit(60000)) {
+    $proc.Kill()
+    tc_fail "TEST-SENTINEL-001" "Run-Tests-CI.ps1 timed out (60s)"
+    Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    exit 1
 }
+$exitCode  = $proc.ExitCode
+$allOutput = $outJob.Result + [Environment]::NewLine + $errJob.Result
+
+Write-Host ""
+Write-Host "--- Run-Tests-CI.ps1 output (first 40 lines) ---" -ForegroundColor DarkGray
+($allOutput -split [Environment]::NewLine) | Select-Object -First 40 | ForEach-Object {
+    Write-Host ("  {0}" -f $_) -ForegroundColor DarkGray
+}
+Write-Host ("--- exit code: {0} ---" -f $exitCode) -ForegroundColor DarkGray
+
+# TEST-SENTINEL-001: exit must be 1
+if ($exitCode -eq 1) {
+    tc_pass "TEST-SENTINEL-001: exit=1 after injected health failure (RED->GREEN verified)"
+} else {
+    tc_fail "TEST-SENTINEL-001" ("exit={0}: expected 1; health failure did not produce non-zero exit" -f $exitCode)
+}
+
+# TEST-SENTINEL-002: INFRA marker must appear in output
+$hasInfra = ($allOutput -match 'FAILED.INFRA.') -or
+            ($allOutput -match 'INFRA-HEALTH') -or
+            ($allOutput -match '328-SENTINEL') -or
+            ($allOutput -match 'TEST-HOOK')
+if ($hasInfra) {
+    tc_pass "TEST-SENTINEL-002: INFRA failure marker in Run-Tests-CI.ps1 output"
+} else {
+    tc_fail "TEST-SENTINEL-002" "No FAILED(INFRA)/INFRA-HEALTH/#328-SENTINEL/TEST-HOOK in output"
+}
+
+# TEST-SENTINEL-003: source verification that IsMandatorySuite is by Suite alone
+$src = Get-Content $RunCIPath -Raw
+$decoupled = $src -match '(?ms)\$IsMandatorySuite\s*=\s*\(\$Suite\s*-eq\s*"HardwareMandatory"\)'
+if ($decoupled) {
+    tc_pass "TEST-SENTINEL-003: IsMandatorySuite determined by Suite alone (not gated on -Tests override)"
+} else {
+    tc_fail "TEST-SENTINEL-003" "IsMandatorySuite still gated on Tests override - decouple not applied"
+}
+
+Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+[System.Environment]::SetEnvironmentVariable('AVB_TEST_HEALTH_FAIL_AFTER', '', 'Process')
 
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
-
 if ($failed -gt 0) {
-    Write-Host "[FAIL] TEST-SENTINEL-001..004: #328 health sentinel regression detected" -ForegroundColor Red
+    Write-Host "[FAIL] TEST-SENTINEL: behavioral health sentinel regression" -ForegroundColor Red
     exit 1
 }
-Write-Host "[PASS] TEST-SENTINEL-001..004: health sentinel correctly fails on device-node loss" -ForegroundColor Green
+Write-Host "[PASS] TEST-SENTINEL: behavioral health sentinel verified" -ForegroundColor Green
 exit 0

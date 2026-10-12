@@ -1,4 +1,4 @@
-# Run-Tests-CI.ps1
+﻿# Run-Tests-CI.ps1
 # CI-specific test runner for GitHub Actions and other headless CI environments.
 #
 # RATIONALE -- Three-script test architecture:
@@ -85,7 +85,7 @@ function Write-Note   { param([string]$m) Write-Host "[INFO] $m" -ForegroundColo
 # Protocol:
 #  1. Confirm service is in Running state.
 #  2. Open \\.\IntelAvbFilter with FILE_SHARE_READ|WRITE (same as HIL clients).
-#  3. Execute IOCTL_AVB_GET_VERSION (0x172000) — read-only, no side effects.
+#  3. Execute IOCTL_AVB_GET_VERSION (0x172000) --- read-only, no side effects.
 #  4. Close the handle.
 #  5. Return $false on any unexpected failure; log Win32 error separately.
 #
@@ -100,22 +100,22 @@ function Test-AvbDriverHealth {
     param([string]$AfterTest = '')
     $tag = if ($AfterTest) { " after $AfterTest" } else { '' }
 
-    # ── 1. Service state ────────────────────────────────────────────────────
+    # ------ 1. Service state ------------------------------------------------------------------------------------------------------------------------------------------------------------
     $svc = Get-Service -Name 'IntelAvbFilter' -ErrorAction SilentlyContinue
     if ($null -eq $svc) {
         Write-Host "  [INFRA] IntelAvbFilter service not found$tag" -ForegroundColor Red
         return $false
     }
     if ($svc.Status -eq 'StopPending') {
-        Write-Host "  [INFRA] IntelAvbFilter STOP_PENDING$tag — stuck; requires reboot" -ForegroundColor Red
+        Write-Host "  [INFRA] IntelAvbFilter STOP_PENDING$tag --- stuck; requires reboot" -ForegroundColor Red
         return $false
     }
     if ($svc.Status -ne 'Running') {
-        Write-Host "  [INFRA] IntelAvbFilter is $($svc.Status)$tag — not Running (NOT auto-restarted)" -ForegroundColor Red
+        Write-Host "  [INFRA] IntelAvbFilter is $($svc.Status)$tag --- not Running (NOT auto-restarted)" -ForegroundColor Red
         return $false
     }
 
-    # ── 2 + 3 + 4. Device node open + IOCTL_AVB_GET_VERSION + close ─────────
+    # ------ 2 + 3 + 4. Device node open + IOCTL_AVB_GET_VERSION + close ---------------------------
     # Define once; -ErrorAction SilentlyContinue suppresses the error if already defined.
     Add-Type -ErrorAction SilentlyContinue -TypeDefinition @'
 using System;
@@ -151,7 +151,7 @@ public static class AvbHealth {
         $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
         $desc = switch ($err) {
             2   { "ERROR_FILE_NOT_FOUND: device node does not exist" }
-            5   { "ERROR_ACCESS_DENIED: privilege gap — runner may not be elevated" }
+            5   { "ERROR_ACCESS_DENIED: privilege gap - runner may not be elevated" }
             default { "Win32 error $err" }
         }
         Write-Host ("  [INFRA] Cannot open \\.\IntelAvbFilter{0}: {1} (#328 sentinel)" -f $tag, $desc) `
@@ -186,8 +186,30 @@ public static class AvbHealth {
     return $true
 }
 
+# ------ Test-only health-check hook ------------------------------------------------------------------------------------------------------------------------------------
+# Wraps Test-AvbDriverHealth with an optional simulation override.
+# PRODUCTION BEHAVIOR: $env:AVB_TEST_HEALTH_FAIL_AFTER is never set ---
+#   Invoke-DriverHealthCheck is identical to Test-AvbDriverHealth.
+# TEST-SENTINEL BEHAVIOR: set $env:AVB_TEST_HEALTH_FAIL_AFTER to a test name
+#   (or "*" to fail after any test).  The check returns $false once and clears
+#   the variable, allowing the sentinel integration test to drive the real
+#   control-flow path without requiring an actual driver failure.
+#
+# The production Test-AvbDriverHealth function is not modified.
+function Invoke-DriverHealthCheck {
+    param([string]$AfterTest = '')
+    $pattern = $env:AVB_TEST_HEALTH_FAIL_AFTER
+    if ($pattern -and ($pattern -eq '*' -or $AfterTest -like $pattern)) {
+        Write-Host "  [TEST-HOOK] Simulated health failure after '$AfterTest' (AVB_TEST_HEALTH_FAIL_AFTER=$pattern)" `
+              -ForegroundColor DarkYellow
+        $env:AVB_TEST_HEALTH_FAIL_AFTER = ''   # clear after triggering once
+        return $false
+    }
+    return (Test-AvbDriverHealth -AfterTest $AfterTest)
+}
+
 # ===========================
-# Lifecycle Metrics Snapshot — SSOT: tools/test/Lib-AvbLifecycle.ps1
+# Lifecycle Metrics Snapshot --- SSOT: tools/test/Lib-AvbLifecycle.ps1
 # ===========================
 # Gracefully skipped when driver is absent (Unit/Integration suites on GitHub-hosted runners).
 # Active on HardwareUnit/HardwareIntegration suites where the driver is installed.
@@ -252,22 +274,22 @@ $HardwareDependentTests = @(
 $IntegrationTests = @()
 
 # ===========================
-# HardwareMandatory — safe mandatory quality gate (self-hosted runner)
+# HardwareMandatory --- safe mandatory quality gate (self-hosted runner)
 # ===========================
 # Tests that MUST pass on every supported HIL runner against every commit.
 # Properties:
 #   - No PHC/TAS hardware state mutation (safe to run back-to-back).
-#   - Missing binary = FAIL (not SKIP) — caller broke the build.
-#   - Driver lost mid-suite = hard FAIL (not cascading SKIP) — #328 sentinel.
+#   - Missing binary = FAIL (not SKIP) --- caller broke the build.
+#   - Driver lost mid-suite = hard FAIL (not cascading SKIP) --- #328 sentinel.
 #   - Exit code 2 (SKIP_ONLY from test_tx_timestamp_provenance Section H on a
-#     no-hardware runner) is treated as infrastructure failure here — Section H
+#     no-hardware runner) is treated as infrastructure failure here --- Section H
 #     must exercise the actual driver on a HIL runner.
 #
 # EXCLUDED: PHC mutation, TAS mutation, driver reinstall, power states.
 # Run those in the HardwareMutation lane below.
 $HardwareMandatoryTests = @(
     # Connectivity + device contract
-    "test_ioctl_version",              # IOCTL_AVB_GET_VERSION handshake — driver reachable
+    "test_ioctl_version",              # IOCTL_AVB_GET_VERSION handshake --- driver reachable
     "test_ioctl_routing",              # IOCTL routing sanity
     "test_ioctl_simple",               # basic open/close cycle
     "test_minimal_ioctl",              # minimal round-trip (regression for #328 device-node loss)
@@ -278,7 +300,7 @@ $HardwareMandatoryTests = @(
     "test_tx_timestamp_retrieval",     # TX timestamp FIFO retrieval; per-adapter results
     # PHC query / availability
     "test_ioctl_phc_query",            # IOCTL_AVB_GET_TIMESTAMP read-only
-    "test_ioctl_xstamp",               # cross-timestamp PHC↔QPC (VV-CORR-003)
+    "test_ioctl_xstamp",               # cross-timestamp PHC---QPC (VV-CORR-003)
     "ptp_clock_control_test",          # PHC coherence TC-5a/TC-5b (read-only correlation)
     # Multi-adapter isolation
     "test_all_adapters",               # enumerate + open all adapters
@@ -292,7 +314,7 @@ $HardwareMandatoryTests = @(
 )
 
 # ===========================
-# HardwareMutation — PHC/TAS hardware-mutating tests (isolated lane)
+# HardwareMutation --- PHC/TAS hardware-mutating tests (isolated lane)
 # ===========================
 # These tests write to PHC epoch, clock increment, or TAS GCL registers.
 # Run in a SEPARATE CI job AFTER HardwareMandatory, with continue-on-error in CI
@@ -422,7 +444,7 @@ $HardwareIntegrationTests = @(
     "avb_test_i219",                  # I219 compat: detection, caps, PTP, monotonicity, variant matrix -- (#261 #76 #114)
     # Phase E: cross-adapter portability (QA-SC-PORT-001, Issue #114)
     "avb_test_portability",           # capability-gate verification across all present Intel adapters -- (#114)
-    # Phase F: device-specific tests (I217/I225/I226 — SKIP-safe on machines without hardware)
+    # Phase F: device-specific tests (I217/I225/I226 --- SKIP-safe on machines without hardware)
     "avb_test_i217",                  # I217 caps (BASIC_1588|ENHANCED_TS|MDIO|EEE), TSN NOT_SUPPORTED -- (#114)
     "avb_test_i225",                  # I225 caps (full TSN, MDIO, NO EEE) -- (#114)
     "avb_test_i226_um",               # I226 caps (full TSN, MDIO, EEE) -- (#114)
@@ -434,7 +456,9 @@ $HardwareIntegrationTests = @(
 # ===========================
 if ($Tests.Count -gt 0) {
     $TestList = $Tests
-    $IsMandatorySuite = $false
+    # $IsMandatorySuite is determined solely by $Suite, even when -Tests overrides the list.
+    # This allows the behavioral sentinel integration test to inject a custom test list
+    # while still exercising the HardwareMandatory control flow.
 } else {
     $TestList = switch ($Suite) {
         "Unit"                  { $UnitTests }
@@ -445,9 +469,10 @@ if ($Tests.Count -gt 0) {
         "HardwareMandatory"     { $HardwareMandatoryTests }
         "HardwareMutation"      { $HardwareMutationTests }
     }
-    # HardwareMandatory enforces hard failures: binary missing = FAIL, driver loss = FAIL.
-    $IsMandatorySuite = ($Suite -eq "HardwareMandatory")
 }
+# HardwareMandatory enforces hard failures: binary missing = FAIL, driver loss = FAIL.
+# This must be determined by Suite alone - not by whether -Tests was used.
+$IsMandatorySuite = ($Suite -eq "HardwareMandatory")
 
 # Apply default timeout per suite class when not explicitly set.
 if ($TestTimeoutSeconds -eq 0) {
@@ -482,7 +507,7 @@ if ($Suite -like 'Hardware*') {
     Write-Host ""
     Write-Host "==> Build and driver identity" -ForegroundColor Cyan
 
-    # Checkout SHA — the commit under test
+    # Checkout SHA --- the commit under test
     try {
         $gitSha = & git rev-parse HEAD 2>&1
         Write-Host "[INFO] Checkout SHA : $gitSha"
@@ -503,7 +528,7 @@ if ($Suite -like 'Hardware*') {
             "HIL_DRIVER_DATE=$buildDate"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         }
     } else {
-        Write-Host "[WARN] IntelAvbFilter.sys not found at $drvPath — driver may not be installed"
+        Write-Host "[WARN] IntelAvbFilter.sys not found at $drvPath --- driver may not be installed"
     }
 
     # Runner NIC label (for per-NIC evidence matrix)
@@ -573,7 +598,13 @@ foreach ($TestName in $TestList) {
     $isPsTest = $TestName.StartsWith("ps1:")
     $psScriptPath = $null
     if ($isPsTest) {
-        $psScriptPath = Join-Path $repoRoot ($TestName.Substring(4))
+        $rawPsPath = $TestName.Substring(4).Replace('/', '\')
+        # Use absolute path directly if provided; otherwise resolve relative to repo root
+        $psScriptPath = if ([System.IO.Path]::IsPathRooted($rawPsPath)) {
+            $rawPsPath
+        } else {
+            Join-Path $repoRoot $rawPsPath
+        }
         $binName = [System.IO.Path]::GetFileNameWithoutExtension($psScriptPath)
         $testArgs = ''
         $exeName  = "$binName.ps1"
@@ -588,7 +619,7 @@ foreach ($TestName in $TestList) {
     # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
     if ($driverLost) {
         if ($IsMandatorySuite) {
-            Write-Fail "$exeName [INFRA-FAIL] driver lost — #328 sentinel: remaining mandatory tests FAIL"
+            Write-Fail "$exeName [INFRA-FAIL] driver lost --- #328 sentinel: remaining mandatory tests FAIL"
             $failedTests++
             $totalTests++
             $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(INFRA)"; Exit = -1 }
@@ -602,7 +633,7 @@ foreach ($TestName in $TestList) {
 
     if (-not (Test-Path $exePath)) {
         if ($IsMandatorySuite) {
-            Write-Fail "$exeName [BUILD-FAIL] binary not found at $exePath — mandatory test suite requires this binary"
+            Write-Fail "$exeName [BUILD-FAIL] binary not found at $exePath --- mandatory test suite requires this binary"
             $failedTests++
             $totalTests++
             $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(BUILD)"; Exit = "N/A" }
@@ -682,9 +713,9 @@ foreach ($TestName in $TestList) {
         $results += [PSCustomObject]@{ Name = $exeName; Status = "PASSED"; Exit = 0 }
     } elseif ($exitCode -eq 2 -and $IsMandatorySuite) {
         # Exit 2 = SKIP_ONLY from test_tx_timestamp_provenance (driver absent / all H tests skipped).
-        # On a mandatory HIL suite the driver MUST be present — SKIP_ONLY means
+        # On a mandatory HIL suite the driver MUST be present --- SKIP_ONLY means
         # Section H never ran, so V1/V2 canary, cross-handle isolation, etc. were not exercised.
-        Write-Fail "$exeName [HIL-FAIL] exit=2 SKIP_ONLY on mandatory suite — driver not accessible or Section H not exercised"
+        Write-Fail "$exeName [HIL-FAIL] exit=2 SKIP_ONLY on mandatory suite --- driver not accessible or Section H not exercised"
         $failedTests++
         $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(SKIP_ONLY)"; Exit = $exitCode }
     } else {
@@ -701,21 +732,21 @@ foreach ($TestName in $TestList) {
     # After each hardware test: verify the driver is still accessible.
     # MANDATORY: driver loss = hard infrastructure failure (#328 sentinel).
     # CRITICAL: this block must increment $failedTests and $totalTests unconditionally
-    # when the health check fails — even when the preceding test PASSED — so the
+    # when the health check fails --- even when the preceding test PASSED --- so the
     # suite always exits non-zero on driver loss, not silently exit 0.
-    if ($Suite -like 'Hardware*' -and -not (Test-AvbDriverHealth -AfterTest $exeName)) {
+    if ($Suite -like 'Hardware*' -and -not (Invoke-DriverHealthCheck -AfterTest $exeName)) {
         $driverLost = $true
         # Record driver identity at the point of failure for traceability.
         $drvVer   = if ($env:HIL_DRIVER_VERSION) { $env:HIL_DRIVER_VERSION } else { 'unknown' }
         $drvSha   = if ($env:HIL_DRIVER_SHA256)  { $env:HIL_DRIVER_SHA256.Substring(0, [Math]::Min(12, $env:HIL_DRIVER_SHA256.Length)) + '...' } else { 'unknown' }
         $infraMsg = "[#328-SENTINEL] driver health check FAILED after $exeName (drv=$drvVer sha=$drvSha)"
-        # Increment BOTH counters — health check failure is a first-class test failure.
+        # Increment BOTH counters --- health check failure is a first-class test failure.
         $failedTests++
         $totalTests++
         if ($IsMandatorySuite) {
-            Write-Fail "INFRA: $infraMsg — mandatory suite aborting"
+            Write-Fail "INFRA: $infraMsg --- mandatory suite aborting"
         } else {
-            Write-Fail "INFRA: $infraMsg — remaining tests will be skipped"
+            Write-Fail "INFRA: $infraMsg --- remaining tests will be skipped"
         }
         $results += [PSCustomObject]@{ Name = "$exeName[INFRA-HEALTH]"; Status = "FAILED(INFRA)"; Exit = -2 }
     }
