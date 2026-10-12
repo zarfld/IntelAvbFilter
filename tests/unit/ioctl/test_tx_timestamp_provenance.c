@@ -1123,20 +1123,26 @@ static void test_h05(bool driver_present)
  *
  * Source: Intel Ethernet Controller/PHY datasheets.
  *
- * PHYS_RX_TS_PRESENT  Discrete PCIe MAC with RXSTMPL/RXSTMPH registers
- *                     accessible via BAR0.  Returned register value is a
- *                     valid IEEE 1588 ingress timestamp.
+ * PHYS_RX_TS_PRESENT  Intel Ethernet controller with RXSTMPL/RXSTMPH registers
+ *                     accessible via PCIe BAR0.  Includes both discrete PCIe
+ *                     adapters (I210/I225/I226) AND PCH-integrated controllers
+ *                     (I219/I218/I217): the PCH MAC exposes registers via PCIe
+ *                     exactly as a discrete adapter does.
+ *                     Evidence: Linux e1000e FLAG_HAS_HW_TIMESTAMP; e1000e_rx_hwtstamp()
+ *                     reads E1000_RXSTMPL/E1000_RXSTMPH for both adapter families.
  *
- * PHYS_RX_TS_ABSENT   PCH-integrated PHY (e.g. I219, I217).  The timestamp
- *                     path is handled through the PCH MAC; RXSTMPL/H are not
- *                     independently readable via a PCIe BAR.
+ * PHYS_RX_TS_ABSENT   Hardware physically cannot produce IEEE 1588 RX timestamps.
+ *                     Reserved for future entries where datasheets confirm absence.
+ *                     (Currently no known Intel Ethernet controller in this table
+ *                     falls into this category.)
  *
  * PHYS_RX_TS_UNKNOWN  VID/DID not in this table.  Cannot establish physical
  *                     capability from hardware identity alone.
  *
- * This table is the authoritative source for SKIP_UNSUPPORTED decisions in
- * H06.  Runtime MMIO availability, driver init errors, and LWF capability
- * flags are NOT physical capability evidence and must not substitute for it.
+ * NOTE: A missing Windows HAL implementation (read_rx_timestamp == NULL) or an
+ * unmapped BAR at runtime is NOT physical capability absence.  Those conditions
+ * produce BLOCKED, never SKIP_UNSUPPORTED.  SKIP_UNSUPPORTED is reserved for
+ * PHYS_RX_TS_ABSENT entries only.
  * -------------------------------------------------------------------------*/
 typedef enum {
     PHYS_RX_TS_UNKNOWN = 0,
@@ -1163,29 +1169,48 @@ g_phys_rx_ts_table[] = {
     { 0x0DC7, PHYS_RX_TS_PRESENT, "I226-IT"        },
     { 0x0DC6, PHYS_RX_TS_PRESENT, "I226-K"         },
     { 0x0DC8, PHYS_RX_TS_PRESENT, "I226-BLANK"     },
-    /* I219 -- PCH-integrated PHY; no BAR-accessible RXSTMPL/H.
-     * Source: Intel I219 Ethernet Controller Datasheet (all revisions).
-     * The timestamp function is mediated by the PCH MAC; RXSTMPL/H are not
-     * independently readable via a PCIe BAR from the host CPU. */
-    { 0x15B7, PHYS_RX_TS_ABSENT,  "I219-LM(Skylake/PCH100)"    },
-    { 0x15B8, PHYS_RX_TS_ABSENT,  "I219-V(Skylake/PCH100)"     },
-    { 0x15BB, PHYS_RX_TS_ABSENT,  "I219-LM(Cannon/PCH300)"     },
-    { 0x15BC, PHYS_RX_TS_ABSENT,  "I219-V(Cannon/PCH300)"      },
-    { 0x15BD, PHYS_RX_TS_ABSENT,  "I219-LM(Comet/PCH300-H)"    },
-    { 0x15BE, PHYS_RX_TS_ABSENT,  "I219-V(Comet/PCH300-H)"     },
-    { 0x15D7, PHYS_RX_TS_ABSENT,  "I219-LM(Kaby/PCH300)"       },
-    { 0x15D8, PHYS_RX_TS_ABSENT,  "I219-V(Kaby/PCH300)"        },
-    { 0x15E3, PHYS_RX_TS_ABSENT,  "I219-LM(Ice/PCH400)"        },
-    { 0x15E4, PHYS_RX_TS_ABSENT,  "I219-V(Ice/PCH400)"         },
-    { 0x0D4E, PHYS_RX_TS_ABSENT,  "I219-LM(Tiger/PCH500)"      },
-    { 0x0D4F, PHYS_RX_TS_ABSENT,  "I219-V(Tiger/PCH500)"       },
-    { 0x0DC5, PHYS_RX_TS_ABSENT,  "I219-LM(Alder/PCH600)"      },
-    { 0x10F0, PHYS_RX_TS_ABSENT,  "I219-LM(legacy)"            },
-    { 0x1559, PHYS_RX_TS_ABSENT,  "I218-LM"                    },
-    { 0x155A, PHYS_RX_TS_ABSENT,  "I218-V"                     },
-    /* I217 -- PCH-integrated PHY */
-    { 0x153A, PHYS_RX_TS_ABSENT,  "I217-LM"        },
-    { 0x153B, PHYS_RX_TS_ABSENT,  "I217-V"         },
+    /* I219 / I218 / I217 -- PCH-integrated Ethernet controllers.
+     *
+     * CLASSIFICATION: PHYS_RX_TS_PRESENT
+     *
+     * These controllers are integrated into the PCH chipset but are exposed to the
+     * host via PCIe and their registers -- including RXSTMPL/RXSTMPH -- ARE
+     * accessible via memory-mapped BAR0, identical to discrete adapters.
+     *
+     * Authoritative evidence (Linux kernel e1000e driver):
+     *   ich8lan.c: e1000_pch_spt_info (I219/Sunrise Point) -> FLAG_HAS_HW_TIMESTAMP
+     *   ich8lan.c: e1000_pch_lpt_info (I218/Lynx Point)    -> FLAG_HAS_HW_TIMESTAMP
+     *   ich8lan.c: e1000_82579_info   (I217/82579)         -> FLAG_HAS_HW_TIMESTAMP
+     *   netdev.c:  e1000e_rx_hwtstamp() reads E1000_RXSTMPL/E1000_RXSTMPH for
+     *              ALL adapters with FLAG_HAS_HW_TIMESTAMP via the standard er32() BAR path.
+     *
+     * Live HIL confirmation (DESKTOP-RSUO2LV, 2026-10-12):
+     *   I219-LM DID=0x15B7: lwf_caps=0xC3 -> INTEL_CAP_ENHANCED_TS (bit 1) SET,
+     *   driver claims read_rx_timestamp implemented with BAR0 mapped.
+     *
+     * Prior PHYS_RX_TS_ABSENT classification was WRONG: it conflated
+     * "PCH-integrated MAC architecture" with "registers inaccessible".
+     * A missing Windows HAL implementation is BLOCKED, not SKIP_UNSUPPORTED. */
+    { 0x15B7, PHYS_RX_TS_PRESENT, "I219-LM(Skylake/PCH100)"    },
+    { 0x15B8, PHYS_RX_TS_PRESENT, "I219-V(Skylake/PCH100)"     },
+    { 0x15BB, PHYS_RX_TS_PRESENT, "I219-LM(Cannon/PCH300)"     },
+    { 0x15BC, PHYS_RX_TS_PRESENT, "I219-V(Cannon/PCH300)"      },
+    { 0x15BD, PHYS_RX_TS_PRESENT, "I219-LM(Comet/PCH300-H)"    },
+    { 0x15BE, PHYS_RX_TS_PRESENT, "I219-V(Comet/PCH300-H)"     },
+    { 0x15D7, PHYS_RX_TS_PRESENT, "I219-LM(Kaby/PCH300)"       },
+    { 0x15D8, PHYS_RX_TS_PRESENT, "I219-V(Kaby/PCH300)"        },
+    { 0x15E3, PHYS_RX_TS_PRESENT, "I219-LM(Ice/PCH400)"        },
+    { 0x15E4, PHYS_RX_TS_PRESENT, "I219-V(Ice/PCH400)"         },
+    { 0x0D4E, PHYS_RX_TS_PRESENT, "I219-LM(Tiger/PCH500)"      },
+    { 0x0D4F, PHYS_RX_TS_PRESENT, "I219-V(Tiger/PCH500)"       },
+    { 0x0DC5, PHYS_RX_TS_PRESENT, "I219-LM(Alder/PCH600)"      },
+    { 0x10F0, PHYS_RX_TS_PRESENT, "I219-LM(legacy)"            },
+    /* I218 -- PCH-LPT (Lynx Point); FLAG_HAS_HW_TIMESTAMP in e1000e e1000_pch_lpt_info */
+    { 0x1559, PHYS_RX_TS_PRESENT, "I218-LM"                    },
+    { 0x155A, PHYS_RX_TS_PRESENT, "I218-V"                     },
+    /* I217 (82579) -- PCH-LPT; FLAG_HAS_HW_TIMESTAMP in e1000e e1000_82579_info */
+    { 0x153A, PHYS_RX_TS_PRESENT, "I217-LM(82579)"             },
+    { 0x153B, PHYS_RX_TS_PRESENT, "I217-V(82579)"              },
 };
 #define PHYS_RX_TS_TABLE_LEN \
     (sizeof(g_phys_rx_ts_table) / sizeof(g_phys_rx_ts_table[0]))
@@ -1323,7 +1348,8 @@ static void test_h06(bool driver_present)
         printf("    Physical RX TS (%s DID=0x%04X): %s\n",
                phys_family, (unsigned)did,
                phys_cap == PHYS_RX_TS_PRESENT ? "PRESENT" :
-               phys_cap == PHYS_RX_TS_ABSENT  ? "ABSENT (PCH PHY)" : "UNKNOWN");
+               phys_cap == PHYS_RX_TS_ABSENT  ? "ABSENT (hardware confirms no RXSTMPL/H)" :
+                                                 "UNKNOWN (not in table)");
 
         if (phys_cap == PHYS_RX_TS_ABSENT) {
             char msg[256];
