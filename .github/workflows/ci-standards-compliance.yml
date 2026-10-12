@@ -1664,7 +1664,7 @@ jobs:
             & $msbuild IntelAvbFilter.vcxproj /p:Configuration=${{ matrix.config }} /p:Platform=x64 /v:minimal
             if ($LASTEXITCODE -ne 0) { throw "Driver build failed" }
           }
-          .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
+          .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }} -RequireDriverSha256
 
       - name: Driver pre-flight — SHA256 match, service, device node
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'

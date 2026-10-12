@@ -40,7 +40,13 @@ param(
     [switch]$ShowDetails,
     
     [Parameter(Mandatory=$false)]
-    [switch]$BuildDiagnosticTools  # Moved from Run-Tests.ps1 -CompileDiagnostics (separation of concerns)
+    [switch]$BuildDiagnosticTools,  # Moved from Run-Tests.ps1 -CompileDiagnostics (separation of concerns)
+
+    # When set, a missing IntelAvbFilter.sys artifact is a hard CI failure rather
+    # than a warning.  Pass this flag from the HIL build step so that the SHA256
+    # identity gate is fail-closed when the driver SYS must have been produced.
+    [Parameter(Mandatory=$false)]
+    [switch]$RequireDriverSha256
 )
 
 $ErrorActionPreference = "Stop"
@@ -2150,8 +2156,8 @@ Pop-Location
 # Written to build\driver-sha256.txt so the HIL job can pass it via
 # HIL_EXPECTED_DRIVER_SHA256 env var to Test-DriverPreFlight.ps1.
 $sysPaths = @(
-    Join-Path $RepoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter.sys",
-    Join-Path $RepoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys"
+    (Join-Path -Path $RepoRoot -ChildPath "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter.sys")
+    (Join-Path -Path $RepoRoot -ChildPath "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys")
 )
 $sysSha256 = $null
 foreach ($sysPath in $sysPaths) {
@@ -2170,6 +2176,11 @@ foreach ($sysPath in $sysPaths) {
     }
 }
 if (-not $sysSha256) {
+    if ($RequireDriverSha256) {
+        Write-Host "[SHA256] ERROR: IntelAvbFilter.sys not found -- mandatory HIL build requires a built driver artifact." -ForegroundColor Red
+        Write-Host "[SHA256]        Build the driver (MSBuild IntelAvbFilter.vcxproj) before calling Build-Tests.ps1 -RequireDriverSha256." -ForegroundColor Red
+        exit 1
+    }
     Write-Host "[SHA256] WARNING: IntelAvbFilter.sys not found in build output (driver not built in this run?)" -ForegroundColor Yellow
 }
 

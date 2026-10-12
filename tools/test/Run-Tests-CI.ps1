@@ -204,7 +204,8 @@ $UnitTests = @(
                                      # Section H SKIPs gracefully when driver is absent.
     # PowerShell logic tests (suffix .ps1, run via powershell.exe not compiled .exe)
     "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1",  # TEST-PROV-L06 aggregation invariants
-    "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1"        # TEST-NOWAIT-001: no system("pause") in CI/HIL
+    "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1",       # TEST-NOWAIT-001: no system("pause") in CI/HIL
+    "ps1:tests/unit/build/test_build_tests_syspaths.ps1"        # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require
