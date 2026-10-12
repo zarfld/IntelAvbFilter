@@ -76,36 +76,110 @@ function Write-Fail   { param([string]$m) Write-Host "[FAIL] $m" -ForegroundColo
 function Write-Skip   { param([string]$m) Write-Host "[SKIP] $m" -ForegroundColor DarkGray }
 function Write-Note   { param([string]$m) Write-Host "[INFO] $m" -ForegroundColor Yellow }
 
-# Checks IntelAvbFilter service health; attempts one restart if Stopped.
-# Returns $false (and logs cause) if stuck in STOP_PENDING or restart fails.
+# Test-AvbDriverHealth: verifies that the IntelAvbFilter driver is RUNNING,
+# the device node is accessible, and a minimal health IOCTL succeeds.
+#
+# Issue #328: a RUNNING service can coexist with an inaccessible control device.
+# Checking service state alone is NOT sufficient.
+#
+# Protocol:
+#  1. Confirm service is in Running state.
+#  2. Open \\.\IntelAvbFilter with FILE_SHARE_READ|WRITE (same as HIL clients).
+#  3. Execute IOCTL_AVB_GET_VERSION (0x172000) — read-only, no side effects.
+#  4. Close the handle.
+#  5. Return $false on any unexpected failure; log Win32 error separately.
+#
+# Deliberate non-actions:
+#  - Never auto-restart the service to conceal a failure.
+#  - Never retry: a failure here must be surfaced immediately.
+#  - ACCESS_DENIED = hard $false (privilege problem, not transient).
+#
+# Callers: invoked before the HardwareMandatory suite and after every test
+# in Hardware* suites.
 function Test-AvbDriverHealth {
     param([string]$AfterTest = '')
     $tag = if ($AfterTest) { " after $AfterTest" } else { '' }
+
+    # ── 1. Service state ────────────────────────────────────────────────────
     $svc = Get-Service -Name 'IntelAvbFilter' -ErrorAction SilentlyContinue
     if ($null -eq $svc) {
         Write-Host "  [INFRA] IntelAvbFilter service not found$tag" -ForegroundColor Red
         return $false
     }
-    if ($svc.Status -eq 'Running') { return $true }
     if ($svc.Status -eq 'StopPending') {
-        Write-Host "  [INFRA] IntelAvbFilter STOP_PENDING$tag -- stuck; requires reboot to recover" -ForegroundColor Red
+        Write-Host "  [INFRA] IntelAvbFilter STOP_PENDING$tag — stuck; requires reboot" -ForegroundColor Red
         return $false
     }
-    Write-Host "  [INFRA] IntelAvbFilter is $($svc.Status)$tag -- attempting restart..." -ForegroundColor Yellow
-    try {
-        Start-Service -Name 'IntelAvbFilter' -ErrorAction Stop
-        Start-Sleep -Seconds 5
-        $svc.Refresh()
-        if ($svc.Status -eq 'Running') {
-            Write-Host "  [INFRA] IntelAvbFilter restarted successfully" -ForegroundColor DarkGray
-            return $true
+    if ($svc.Status -ne 'Running') {
+        Write-Host "  [INFRA] IntelAvbFilter is $($svc.Status)$tag — not Running (NOT auto-restarted)" -ForegroundColor Red
+        return $false
+    }
+
+    # ── 2 + 3 + 4. Device node open + IOCTL_AVB_GET_VERSION + close ─────────
+    # Define once; -ErrorAction SilentlyContinue suppresses the error if already defined.
+    Add-Type -ErrorAction SilentlyContinue -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AvbHealth {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateFile(
+        string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+        IntPtr lpSec, uint dwCreationDisposition,
+        uint dwFlagsAndAttributes, IntPtr hTemplate);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool DeviceIoControl(
+        IntPtr hDevice, uint dwIoControlCode,
+        IntPtr lpInBuffer, uint nInBufferSize,
+        IntPtr lpOutBuffer, uint nOutBufferSize,
+        out uint lpBytesReturned, IntPtr lpOverlapped);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+    public static readonly IntPtr INVALID = new IntPtr(-1);
+    public const uint GENERIC_READ_WRITE = 0xC0000000u;
+    public const uint SHARE_RW          = 3u;
+    public const uint OPEN_EXISTING     = 3u;
+    public const uint FLAG_NORMAL       = 0x80u;
+    public const uint IOCTL_AVB_GET_VERSION = 0x00172000u;
+}
+'@
+    $h = [AvbHealth]::CreateFile('\\.\IntelAvbFilter',
+          [AvbHealth]::GENERIC_READ_WRITE, [AvbHealth]::SHARE_RW,
+          [IntPtr]::Zero, [AvbHealth]::OPEN_EXISTING,
+          [AvbHealth]::FLAG_NORMAL, [IntPtr]::Zero)
+
+    if ($h -eq [AvbHealth]::INVALID) {
+        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $desc = switch ($err) {
+            2   { "ERROR_FILE_NOT_FOUND: device node does not exist" }
+            5   { "ERROR_ACCESS_DENIED: privilege gap — runner may not be elevated" }
+            default { "Win32 error $err" }
         }
-        Write-Host "  [INFRA] IntelAvbFilter restart did not reach Running (status: $($svc.Status))" -ForegroundColor Red
-        return $false
-    } catch {
-        Write-Host "  [INFRA] Start-Service IntelAvbFilter failed: $_" -ForegroundColor Red
+        Write-Host ("  [INFRA] Cannot open \\.\IntelAvbFilter{0}: {1} (#328 sentinel)" -f $tag, $desc) `
+              -ForegroundColor Red
         return $false
     }
+
+    $bytesReturned = [uint32]0
+    $buf = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(256)
+    $ok  = $false
+    try {
+        $ok = [AvbHealth]::DeviceIoControl(
+            $h, [AvbHealth]::IOCTL_AVB_GET_VERSION,
+            [IntPtr]::Zero, 0u, $buf, 256u,
+            [ref]$bytesReturned, [IntPtr]::Zero)
+    } finally {
+        [AvbHealth]::CloseHandle($h) | Out-Null
+        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf)
+    }
+
+    if (-not $ok) {
+        $err2 = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-Host ("  [INFRA] IOCTL_AVB_GET_VERSION failed{0}: Win32={1}" -f $tag, $err2) `
+              -ForegroundColor Red
+        return $false
+    }
+
+    return $true
 }
 
 # ===========================
@@ -129,7 +203,8 @@ $UnitTests = @(
     "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
                                      # Section H SKIPs gracefully when driver is absent.
     # PowerShell logic tests (suffix .ps1, run via powershell.exe not compiled .exe)
-    "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1"  # TEST-PROV-L06 aggregation invariants
+    "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1",  # TEST-PROV-L06 aggregation invariants
+    "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1"        # TEST-NOWAIT-001: no system("pause") in CI/HIL
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require

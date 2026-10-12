@@ -153,8 +153,9 @@ int main(int argc, char* argv[])
     printf("\n=============================================================================\n");
     printf("  Hardware Only Diagnostics Complete - All problems are now visible!\n");
     printf("=============================================================================\n");
-    
-    system("pause");
+
+    /* system("pause") removed: interactive wait blocks unattended/CI execution.
+     * Exit code 0 = diagnostics ran; non-zero exit would indicate a fatal error above. */
     return 0;
 }
 

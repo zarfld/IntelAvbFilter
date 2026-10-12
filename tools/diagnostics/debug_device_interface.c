@@ -229,7 +229,7 @@ int main() {
     printf("2. Check if filter appears in network adapter properties\n");
     printf("3. Verify filter is bound to Intel I219 adapter\n");
     printf("4. Restart network adapter if needed\n\n");
-    
-    system("pause");
+
+    /* system("pause") removed: interactive wait blocks unattended/CI execution. */
     return 0;
 }
