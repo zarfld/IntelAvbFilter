@@ -21,7 +21,7 @@ foreach ($Suite in $CISuite) {
  .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
 } 
 
-$CIFailed = @("test_scripts_consolidate.exe","test_ioctl_abi.exe", "test_tx_timestamp_provenance.exe","test_build_tests_syspaths.ps1")
+$CIFailed = @("test_scripts_consolidate.exe","test_ioctl_abi.exe", "test_tx_timestamp_provenance.exe")
 foreach ($t in $CIFailed) { 
  .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
 } 
