@@ -31,4 +31,4 @@ foreach ($t in $CIFailed) {
 #$FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
 #foreach ($t in $FullSuite) { 
 # .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
-} 
+#} 
