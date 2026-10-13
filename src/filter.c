@@ -554,6 +554,11 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                         pFilter->MiniportName.Length);
 
         pFilter->MiniportIfIndex = AttachParameters->BaseMiniportIfIndex;
+        /* Store the physical PCI PDO (NDIS 6.20+ field) for AvbGetPdoFromFilter.
+         * This is the actual PCI PDO used by pci.sys, not the NDIS binding device.
+         * Required to correctly read DevicePropertyHardwareID for PCH-integrated
+         * NICs (e.g. I219) where the NDIS binding device and PCI PDO differ. */
+        pFilter->MiniportPhysicalDeviceObject = AttachParameters->MiniportPhysicalDeviceObject;
         //
         // The filter should initialize TrackReceives and TrackSends properly. For this
         // driver, since its default characteristic has both a send and a receive handler,

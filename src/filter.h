@@ -357,6 +357,7 @@ typedef struct _MS_FILTER
     // AVB Integration
     PVOID                           AvbContext;      // Points to AVB_DEVICE_CONTEXT
     BOOLEAN                         HwTimestampEnabled;  // TRUE if HW timestamping configured via OID_TIMESTAMP_CONFIG
+    PDEVICE_OBJECT                  MiniportPhysicalDeviceObject; // PCI PDO from NDIS_FILTER_ATTACH_PARAMETERS
 
 }MS_FILTER, * PMS_FILTER;
 
