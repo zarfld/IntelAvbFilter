@@ -18,7 +18,7 @@
  *   TC-ABI-008: sizeof(AVB_OFFSET_REQUEST) == 16    (INT64 + uint32 + 4-byte trailing pad)
  *   TC-ABI-009: sizeof(AVB_RX_TIMESTAMP_REQUEST) == 20  (5 x uint32)
  *   TC-ABI-010: sizeof(AVB_QUEUE_TIMESTAMP_REQUEST) == 20 (5 x uint32)
- *   TC-ABI-011: sizeof(AVB_TX_TIMESTAMP_REQUEST) == 24  (uint64 + 4 x uint32)
+ *   TC-ABI-011: sizeof(AVB_TX_TIMESTAMP_REQUEST) == 32  (uint64 + 6 x uint32); V1_SIZE == 24
  *   TC-ABI-012: sizeof(AVB_DEVICE_INFO_REQUEST) == 1032 (char[1024] + 2 x uint32)
  *   TC-ABI-013: sizeof(AVB_OPEN_REQUEST) == 12      (2 x uint16 + 2 x uint32)
  *   TC-ABI-014: sizeof(AVB_ENUM_REQUEST) == 20      (2 x uint32 + 2 x uint16 + 2 x uint32)
@@ -221,11 +221,14 @@ static void test_struct_sizes(void)
                 "sizeof(AVB_QUEUE_TIMESTAMP_REQUEST) == 20  (5 x uint32)");
 
     /* TC-ABI-011 ------------------------------------------------------------ */
-    /* struct { uint64 timestamp_ns; uint32 x4 }                              */
-    /* uint64@0(8) + 4x uint32@8 (16) = 24, aligned to 8.                    */
-    TEST_CASE("TC-ABI-011: sizeof(AVB_TX_TIMESTAMP_REQUEST) == 24");
-    TEST_ASSERT(sizeof(AVB_TX_TIMESTAMP_REQUEST) == 24,
-                "sizeof(AVB_TX_TIMESTAMP_REQUEST) == 24  (uint64 + 4 x uint32)");
+    /* struct { uint64 timestamp_ns; uint32 x6 }                              */
+    /* uint64@0(8) + 6x uint32@8 (24) = 32, aligned to 8.                    */
+    /* V1 (before ts_provenance/_reserved): 8 + 4x uint32 = 24 bytes.        */
+    TEST_CASE("TC-ABI-011: sizeof(AVB_TX_TIMESTAMP_REQUEST) == 32 (V2)");
+    TEST_ASSERT(sizeof(AVB_TX_TIMESTAMP_REQUEST) == 32,
+                "sizeof(AVB_TX_TIMESTAMP_REQUEST) == 32  (uint64 + 6 x uint32)");
+    TEST_ASSERT(AVB_TX_TIMESTAMP_REQUEST_V1_SIZE == 24,
+                "AVB_TX_TIMESTAMP_REQUEST_V1_SIZE == 24  (V1 backward-compat size without ts_provenance/_reserved)");
 
     /* TC-ABI-012 ------------------------------------------------------------ */
     /* struct { char[1024]; uint32 buffer_size; uint32 status; }              */
