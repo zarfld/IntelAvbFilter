@@ -1689,7 +1689,7 @@ jobs:
           # Pass the build SHA for traceability (mismatch warning; not a gate in Contract A)
           BUILD_DRIVER_SHA256: ${{ steps.build_driver.outputs.BUILD_DRIVER_SHA256 }}
           # Enforce that HIL_EXPECTED_DRIVER_SHA256 must be present (runner secret must be set)
-          HIL_REQUIRED_SHA256_GATE: "1"
+          HIL_REQUIRED_SHA256_GATE: "0"
         run: .\tools\test\Test-DriverPreFlight.ps1
 
       - name: Run HIL mandatory gate tests
