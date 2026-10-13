@@ -223,134 +223,163 @@ IntelAvbFilterFastIoDeviceControl(
         return TRUE;
     }
 
-    volatile BOOLEAN lock_held = FALSE;  /* tracked for exception-safe release */
+    /* -----------------------------------------------------------------------
+     * IOCTL_AVB_TEST_SEND_PTP — three-phase structure to keep the spinlock
+     * and the exception-guarded user-buffer accesses in separate scopes.
+     *
+     * Structural rationale (CodeQL cpp/drivers/irql-too-low, C28120):
+     *   NdisAcquireSpinLock raises IRQL to DISPATCH_LEVEL.
+     *   NdisAllocateNetBuffer/List are kernel-pool functions: they return NULL
+     *   on failure and never raise SEH exceptions.  Therefore the spinlock can
+     *   be acquired and released entirely outside any __try/__except scope,
+     *   eliminating the lock/exception-boundary crossing that triggered C28120.
+     *   __analysis_assume (commit 6c97d82) addressed PREfast but not CodeQL;
+     *   this structural fix resolves the alert in both analysers.
+     * ----------------------------------------------------------------------- */
+
+    /* Phase A — probe and read user input (only user-buffer accesses need SEH). */
+    PAVB_TEST_SEND_PTP_REQUEST req = (PAVB_TEST_SEND_PTP_REQUEST)OutputBuffer;
+    avb_u32 seq_id = 0;
     __try {
-        PAVB_TEST_SEND_PTP_REQUEST req = (PAVB_TEST_SEND_PTP_REQUEST)OutputBuffer;
         /* Probe only the bytes we will actually write.  A V1 caller provides a
          * 32-byte output buffer; probing 40 bytes (sizeof V2) would extend past the
          * end of the user allocation and raise an exception or silently validate
          * bytes the caller never intended to expose. */
         ProbeForWrite(req, OutputBufferLength < sizeof(*req) ? OutputBufferLength : sizeof(*req), sizeof(avb_u32));
         ProbeForRead(InputBuffer, InputBufferLength, sizeof(avb_u32));
+        seq_id = ((PAVB_TEST_SEND_PTP_REQUEST)InputBuffer)->sequence_id;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        IoStatus->Status      = GetExceptionCode();
+        IoStatus->Information = 0;
+        IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+        return TRUE;
+    }
 
-        avb_u32 seq_id = ((PAVB_TEST_SEND_PTP_REQUEST)InputBuffer)->sequence_id;
+    /* Phase B — kernel-only work: no user-buffer access, no SEH guard needed.
+     * The spinlock acquire/release pair is entirely within this phase so no
+     * lock crosses an exception boundary. */
 
-        /* IOCTL-entry PHC snapshot — captured before ring/buffer setup.
-         * PROVENANCE: rc == SYSTIME_RC_HW_OK (0) → hardware MMIO, PRE_SEND_PHC
-         *             rc == SYSTIME_RC_SW_OK (1) → wall-clock fallback, SOFTWARE_FALLBACK
-         *             rc  < 0                    → error, UNAVAILABLE; phcEntryTs = 0
-         * The i219 raw2==0 path returns SYSTIME_RC_SW_OK with a valid Unix+TAI ns value.
-         * The i219 fallback: path (MMIO error) now returns -1 (no wrong-epoch pollution). */
-        ULONG64 phcEntryTs = 0;
-        avb_u32 phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
-        {
-            const intel_device_ops_t *eops = intel_get_device_ops(ctx->intel_device.device_type);
-            if (eops && eops->get_systime) {
-                int erc = eops->get_systime(&ctx->intel_device, &phcEntryTs);
-                if (erc == SYSTIME_RC_HW_OK && phcEntryTs != 0) {
-                    phcEntryProv = AVB_TX_PROV_PRE_SEND_PHC;
-                } else if (erc == SYSTIME_RC_SW_OK && phcEntryTs != 0) {
-                    phcEntryProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
-                } else {
-                    phcEntryTs  = 0;  /* error or zero value; fail-closed */
-                    phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
-                }
+    /* IOCTL-entry PHC snapshot — captured before ring/buffer setup.
+     * PROVENANCE: rc == SYSTIME_RC_HW_OK (0) → hardware MMIO, PRE_SEND_PHC
+     *             rc == SYSTIME_RC_SW_OK (1) → wall-clock fallback, SOFTWARE_FALLBACK
+     *             rc  < 0                    → error, UNAVAILABLE; phcEntryTs = 0
+     * The i219 raw2==0 path returns SYSTIME_RC_SW_OK with a valid Unix+TAI ns value.
+     * The i219 fallback: path (MMIO error) now returns -1 (no wrong-epoch pollution). */
+    ULONG64 phcEntryTs = 0;
+    avb_u32 phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
+    {
+        const intel_device_ops_t *eops = intel_get_device_ops(ctx->intel_device.device_type);
+        if (eops && eops->get_systime) {
+            int erc = eops->get_systime(&ctx->intel_device, &phcEntryTs);
+            if (erc == SYSTIME_RC_HW_OK && phcEntryTs != 0) {
+                phcEntryProv = AVB_TX_PROV_PRE_SEND_PHC;
+            } else if (erc == SYSTIME_RC_SW_OK && phcEntryTs != 0) {
+                phcEntryProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
+            } else {
+                phcEntryTs  = 0;  /* error or zero value; fail-closed */
+                phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
             }
         }
-        /* No QPC fallback: never write raw QPC ticks to nanosecond fields. */
+    }
+    /* No QPC fallback: never write raw QPC ticks to nanosecond fields. */
 
-        /* Acquire a pre-allocated ring slot (same logic as IRP path). */
-        int ring_slot = -1;
-        for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
-            if (ctx->test_nbl_ring[_ri].nbl != NULL &&
-                InterlockedCompareExchange(&ctx->test_nbl_ring[_ri].in_use, 1, 0) == 0) {
-                ring_slot = _ri;
-                break;
-            }
+    /* Acquire a pre-allocated ring slot (same logic as IRP path). */
+    int ring_slot = -1;
+    for (int _ri = 0; _ri < AVB_TEST_NBL_RING_SIZE; _ri++) {
+        if (ctx->test_nbl_ring[_ri].nbl != NULL &&
+            InterlockedCompareExchange(&ctx->test_nbl_ring[_ri].in_use, 1, 0) == 0) {
+            ring_slot = _ri;
+            break;
         }
+    }
 
-        PNET_BUFFER_LIST nbl;
-        PUCHAR pkt;
+    PNET_BUFFER_LIST nbl;
+    PUCHAR pkt;
 
-        if (ring_slot >= 0) {
-            /* Fast path: ring slot owned exclusively via CAS — no spinlock needed. */
-            nbl = ctx->test_nbl_ring[ring_slot].nbl;
-            ctx->test_nbl_ring[ring_slot].nb->DataOffset = 0;
-            nbl->Next = NULL;
-            pkt = (PUCHAR)ctx->test_nbl_ring[ring_slot].buffer;
-        } else {
-            /* Slow path: ring exhausted — allocate on demand under spinlock. */
-            NdisAcquireSpinLock(&ctx->test_send_lock);
-            lock_held = TRUE;
-            PNET_BUFFER nb = NdisAllocateNetBuffer(ctx->nb_pool_handle,
-                                                    ctx->test_packet_mdl, 0, 64);
-            if (!nb) { NdisReleaseSpinLock(&ctx->test_send_lock); lock_held = FALSE;
-                       IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
-                       IoStatus->Information = 0;
-                       IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
-                       return TRUE; }
-            nbl = NdisAllocateNetBufferList(ctx->nbl_pool_handle, 0, 0);
-            if (!nbl) { NdisFreeNetBuffer(nb);
-                        NdisReleaseSpinLock(&ctx->test_send_lock); lock_held = FALSE;
-                        IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
-                        IoStatus->Information = 0;
-                        IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
-                        return TRUE; }
+    if (ring_slot >= 0) {
+        /* Fast path: ring slot owned exclusively via CAS — no spinlock needed. */
+        nbl = ctx->test_nbl_ring[ring_slot].nbl;
+        ctx->test_nbl_ring[ring_slot].nb->DataOffset = 0;
+        nbl->Next = NULL;
+        pkt = (PUCHAR)ctx->test_nbl_ring[ring_slot].buffer;
+    } else {
+        /* Slow path: ring exhausted — allocate on demand under spinlock.
+         * Acquire and release are visibly paired here, outside any __try scope.
+         * NdisAllocateNetBuffer/List return NULL on failure; they do not raise. */
+        NdisAcquireSpinLock(&ctx->test_send_lock);
+        PNET_BUFFER nb = NdisAllocateNetBuffer(ctx->nb_pool_handle,
+                                                ctx->test_packet_mdl, 0, 64);
+        if (!nb) {
             NdisReleaseSpinLock(&ctx->test_send_lock);
-            lock_held = FALSE;
-            nbl->FirstNetBuffer = nb; nbl->Next = NULL;
-            pkt = (PUCHAR)ctx->test_packet_buffer;
+            IoStatus->Status      = STATUS_INSUFFICIENT_RESOURCES;
+            IoStatus->Information = 0;
+            IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+            return TRUE;
         }
+        nbl = NdisAllocateNetBufferList(ctx->nbl_pool_handle, 0, 0);
+        if (!nbl) {
+            NdisFreeNetBuffer(nb);
+            NdisReleaseSpinLock(&ctx->test_send_lock);
+            IoStatus->Status      = STATUS_INSUFFICIENT_RESOURCES;
+            IoStatus->Information = 0;
+            IoReleaseRemoveLock(&ctx->ioctl_remove_lock, FileObject);
+            return TRUE;
+        }
+        NdisReleaseSpinLock(&ctx->test_send_lock);
+        nbl->FirstNetBuffer = nb; nbl->Next = NULL;
+        pkt = (PUCHAR)ctx->test_packet_buffer;
+    }
 
-        /* Stamp PTP sequence ID (Big Endian, offset 44-45). These are kernel buffers — safe. */
-        pkt[44] = (UCHAR)((seq_id >> 8) & 0xFF);
-        pkt[45] = (UCHAR)(seq_id & 0xFF);
+    /* Stamp PTP sequence ID (Big Endian, offset 44-45). These are kernel buffers — safe. */
+    pkt[44] = (UCHAR)((seq_id >> 8) & 0xFF);
+    pkt[45] = (UCHAR)(seq_id & 0xFF);
 
-        InterlockedIncrement(&ctx->test_packets_pending);
+    InterlockedIncrement(&ctx->test_packets_pending);
 
-        /* Pre-send PHC snapshot — captured just before NdisFSendNetBufferLists.
-         * Uses the same provenance logic as phcEntryTs.
-         * Both snapshots fail-closed together when SYSTIM is unavailable. */
-        ULONG64 captureTs  = 0;
-        avb_u32 captureProv = AVB_TX_PROV_UNAVAILABLE;
-        if (phcEntryProv != AVB_TX_PROV_UNAVAILABLE) {
-            /* Entry snapshot succeeded; attempt pre-send snapshot from same source. */
-            const intel_device_ops_t *ops = intel_get_device_ops(ctx->intel_device.device_type);
-            if (ops && ops->get_systime) {
-                int crc = ops->get_systime(&ctx->intel_device, &captureTs);
-                if (crc == SYSTIME_RC_HW_OK && captureTs != 0) {
-                    captureProv = AVB_TX_PROV_PRE_SEND_PHC;
-                } else if (crc == SYSTIME_RC_SW_OK && captureTs != 0) {
-                    captureProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
-                } else {
-                    /* Pre-send snapshot failed; fail closed for both. */
-                    captureTs   = 0;
-                    phcEntryTs  = 0;
-                    phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
-                    captureProv  = AVB_TX_PROV_UNAVAILABLE;
-                }
+    /* Pre-send PHC snapshot — captured just before NdisFSendNetBufferLists.
+     * Uses the same provenance logic as phcEntryTs.
+     * Both snapshots fail-closed together when SYSTIM is unavailable. */
+    ULONG64 captureTs  = 0;
+    avb_u32 captureProv = AVB_TX_PROV_UNAVAILABLE;
+    if (phcEntryProv != AVB_TX_PROV_UNAVAILABLE) {
+        /* Entry snapshot succeeded; attempt pre-send snapshot from same source. */
+        const intel_device_ops_t *ops = intel_get_device_ops(ctx->intel_device.device_type);
+        if (ops && ops->get_systime) {
+            int crc = ops->get_systime(&ctx->intel_device, &captureTs);
+            if (crc == SYSTIME_RC_HW_OK && captureTs != 0) {
+                captureProv = AVB_TX_PROV_PRE_SEND_PHC;
+            } else if (crc == SYSTIME_RC_SW_OK && captureTs != 0) {
+                captureProv = AVB_TX_PROV_SOFTWARE_FALLBACK;
+            } else {
+                /* Pre-send snapshot failed; fail closed for both. */
+                captureTs   = 0;
+                phcEntryTs  = 0;
+                phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
+                captureProv  = AVB_TX_PROV_UNAVAILABLE;
             }
         }
-        /* Overall provenance = worst of the two snapshots. */
-        avb_u32 prov = (phcEntryProv == AVB_TX_PROV_PRE_SEND_PHC &&
-                         captureProv  == AVB_TX_PROV_PRE_SEND_PHC)
-                       ? AVB_TX_PROV_PRE_SEND_PHC
-                       : (phcEntryTs != 0 && captureTs != 0)
-                         ? AVB_TX_PROV_SOFTWARE_FALLBACK
-                         : AVB_TX_PROV_UNAVAILABLE;
-        /* Write provenance BEFORE timestamp so GET_TX_TIMESTAMP always sees
-         * a consistent pair: if it reads a non-zero timestamp, the provenance
-         * was already stored. */
-        InterlockedExchange64(&ctx->last_ndis_tx_record,
-                              AVB_TX_RECORD_PACK(captureTs, prov));
+    }
+    /* Overall provenance = worst of the two snapshots. */
+    avb_u32 prov = (phcEntryProv == AVB_TX_PROV_PRE_SEND_PHC &&
+                     captureProv  == AVB_TX_PROV_PRE_SEND_PHC)
+                   ? AVB_TX_PROV_PRE_SEND_PHC
+                   : (phcEntryTs != 0 && captureTs != 0)
+                     ? AVB_TX_PROV_SOFTWARE_FALLBACK
+                     : AVB_TX_PROV_UNAVAILABLE;
+    /* Write provenance BEFORE timestamp so GET_TX_TIMESTAMP always sees
+     * a consistent pair: if it reads a non-zero timestamp, the provenance
+     * was already stored. */
+    InterlockedExchange64(&ctx->last_ndis_tx_record,
+                          AVB_TX_RECORD_PACK(captureTs, prov));
 
-        /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
-         * Ring fast path: lock-free. Fallback: lock released above. */
-        NdisFSendNetBufferLists(ctx->filter_instance->FilterHandle, nbl, 0, 0);
+    /* NdisFSendNetBufferLists MUST NOT be called while holding a spinlock.
+     * Ring fast path: lock-free. Slow path: lock already released above. */
+    NdisFSendNetBufferLists(ctx->filter_instance->FilterHandle, nbl, 0, 0);
 
-        /* Write back to user buffer (we are at PASSIVE_LEVEL, user buffer is accessible).
-         * V1 fields are always written; V2 fields (ts_provenance, _reserved) require
-         * the caller to have provided a buffer large enough for the full V2 struct. */
+    /* Phase C — write results back to user buffer (user-buffer access needs SEH).
+     * IRQL is PASSIVE_LEVEL here: spinlock was released in Phase B. */
+    __try {
         req->timestamp_ns    = captureTs;
         req->phc_at_send_ns  = phcEntryTs;
         req->packets_sent    = 1;
@@ -369,15 +398,6 @@ IntelAvbFilterFastIoDeviceControl(
         IoStatus->Status = STATUS_SUCCESS;
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        if (lock_held) {
-            /* lock_held == TRUE: NdisAcquireSpinLock was called → IRQL is DISPATCH_LEVEL.
-             * PREfast/CodeQL C28120: static analysis loses IRQL state at __except entry
-             * because FAST_IO_DEVICE_CONTROL has no concrete IRQL annotation.
-             * __analysis_assume makes the lock_held ↔ DISPATCH_LEVEL invariant explicit;
-             * it is a zero-cost analyzer hint with no effect on generated code. */
-            __analysis_assume(KeGetCurrentIrql() == DISPATCH_LEVEL);
-            NdisReleaseSpinLock(&ctx->test_send_lock);
-        }
         IoStatus->Status      = GetExceptionCode();
         IoStatus->Information = 0;
     }
