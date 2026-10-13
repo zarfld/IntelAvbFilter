@@ -71,11 +71,10 @@ static VOID AvbContextListRemove(_In_ PAVB_DEVICE_CONTEXT Ctx)
 /* Forward declarations */
 static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx);
 static VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext);
-static VOID AvbTxTimestampPollDpc(
-    _In_ PVOID SystemSpecific1,
-    _In_ PVOID FunctionContext,
-    _In_ PVOID SystemSpecific2,
-    _In_ PVOID SystemSpecific3);
+/* Role-type forward declaration — carries _Function_class_(NDIS_TIMER_FUNCTION) so CodeQL
+ * and SAL can verify this matches the PNDIS_TIMER_FUNCTION parameter of NdisInitializeTimer.
+ * Fixes CodeQL alert #9 (cpp/windows/incorrect-callback-role). */
+static NDIS_TIMER_FUNCTION AvbTxTimestampPollDpc;
 
 /**
  * @brief Compute currently supported LWF capability subset for a context.
@@ -868,7 +867,7 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
  *   - Reading TXSTMPL advances FIFO to next entry
  *   - FIFO depth varies by device (typically 4-8 entries)
  */
-VOID AvbTxTimestampPollDpc(
+static VOID AvbTxTimestampPollDpc(
     _In_ PVOID SystemSpecific1,
     _In_ PVOID FunctionContext,
     _In_ PVOID SystemSpecific2,
