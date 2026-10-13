@@ -383,7 +383,42 @@ static int get_systime(device_t *dev, uint64_t *systime)
             return SYSTIME_RC_SW_OK;  /* software fallback, NOT hardware provenance */
         }
         uint64_t offset_snap = i219_systim_offset;  /* volatile read; ring-3→0 entry provides fence */
-        *systime = offset_snap + raw2 / 200000ULL;
+        uint64_t candidate   = offset_snap + raw2 / 200000ULL;
+
+        /* EPOCH GUARD: detect and correct a FILETIME-domain offset in i219_systim_offset.
+         *
+         * If init_ptp() or set_systime() was called before the NDIS adapter was fully
+         * settled (e.g. immediately after driver installation), the FILETIME→Unix epoch
+         * subtraction may have produced 0 (the :0ULL branch in init_ptp step 5), leaving
+         * i219_systim_offset at its static-initialiser value 0.  A subsequent reinit
+         * may then seed the offset using raw FILETIME nanoseconds (win_ticks × 100)
+         * instead of Unix nanoseconds.
+         *
+         * Evidence (HIL 20261013_132601):
+         *   SEND_PTP    = 13436363180579320620 ns  (≈ FILETIME ns for Oct 13, 2026)
+         *   GET_TX      =  1907148134510850860 ns
+         *   difference  = 11529215046068469760 = 5 × 2^61   ← silent AVB_TX_RECORD_PACK truncation
+         *
+         * Detection boundary: FILETIME ns for Jan 1, 1970 = 11644473600 × 10^9 ns.
+         * Any candidate >= that value is definitively in FILETIME domain because
+         * Unix+TAI cannot reach 1.164×10^19 ns until the year 2369.
+         *
+         * Correction: subtract the FILETIME→Unix epoch offset in nanoseconds.
+         * Also update i219_systim_offset so subsequent calls are correct without
+         * needing another correction. */
+        const uint64_t FILETIME_EPOCH_NS = 11644473600ULL * 1000000000ULL; /* 1.164×10^19 ns */
+        if (candidate >= FILETIME_EPOCH_NS) {
+            uint64_t corrected = candidate - FILETIME_EPOCH_NS;
+            DEBUGP(DL_ERROR, "[I219-EPOCH-FIX] ts 0x%llx is FILETIME domain; "
+                   "correcting to Unix domain 0x%llx (offset was 0x%llx)\n",
+                   candidate, corrected, offset_snap);
+            /* Update the static offset so future calls are already correct. */
+            InterlockedExchange64((volatile LONG64 *)&i219_systim_offset,
+                                  (LONG64)(offset_snap - FILETIME_EPOCH_NS));
+            candidate = corrected;
+        }
+
+        *systime = candidate;
         DEBUGP(DL_WARN, "[I219-DIAG] GET: result=0x%llx raw=0x%llx raw/200k=%llu offset=0x%llx\n",
                *systime, raw2, raw2 / 200000ULL, offset_snap);
     }

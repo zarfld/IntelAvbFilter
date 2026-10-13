@@ -1752,6 +1752,26 @@ NTSTATUS AvbSendPtpCore(
           ? AVB_TX_PROV_SOFTWARE_FALLBACK
           : AVB_TX_PROV_UNAVAILABLE;
 
+    /* PACK-TIME GUARD: reject any timestamp that would be silently truncated by
+     * AVB_TX_RECORD_PACK.  The packed record stores 61 bits of timestamp; values
+     * >= 2^61 = 2305843009213693952 ns cannot round-trip and must NOT be stored.
+     * Fail closed: downgrade to UNAVAILABLE so callers see a definitive failure
+     * rather than a plausible-looking but wrong value.
+     *
+     * The I219 epoch-correction in get_systime() handles the known FILETIME case;
+     * this guard is a belt-and-suspenders catch-all for any producer bug. */
+    if (preSendTs >= (ULONG64)AVB_TX_RECORD_TS_MASK) {
+        DEBUGP(DL_ERROR,
+            "AvbSendPtpCore: preSendTs 0x%llx >= TS_MASK (2^61) -- "
+            "silent truncation prevented; failing closed (UNAVAILABLE)\n",
+            preSendTs);
+        preSendTs    = 0;
+        phcEntryTs   = 0;
+        sendProv     = AVB_TX_PROV_UNAVAILABLE;
+        preSendProv  = AVB_TX_PROV_UNAVAILABLE;
+        phcEntryProv = AVB_TX_PROV_UNAVAILABLE;
+    }
+
     /* Single atomic write: packs provenance into top 3 bits of the same LONGLONG.
      * Concurrent SEND_PTP writers are safe: last write wins (FIFO semantics). */
     (void)InterlockedExchange64(&activeContext->last_ndis_tx_record,

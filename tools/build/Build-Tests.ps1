@@ -1850,6 +1850,21 @@ $AllTests = @(
         IOCTLs = "IOCTL_AVB_GET_STATISTICS"
         Requirement = "#328"
     }
+    @{
+        Name = "test_device_idle_regression"
+        Type = "cl"
+        Source = "tests\hardware\test_device_idle_regression.c"
+        Output = "test_device_idle_regression.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "advapi32.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Idle/power transition observational regression (TC-LCY-IDLE-001): device must remain accessible after session lock/unlock."
+        Issue = "#328"
+        TestCases = 1
+        IOCTLs = "IOCTL_AVB_GET_VERSION IOCTL_AVB_GET_STATISTICS"
+        Requirement = "#328"
+    }
 )
 
 # Filter tests if specific test requested

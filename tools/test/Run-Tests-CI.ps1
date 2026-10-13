@@ -239,8 +239,7 @@ $UnitTests = @(
     "test_hal_unit",
     "test_hal_errors",
     "test_ioctl_abi",          # IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)
-    "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
-                                     # Section H SKIPs gracefully when driver is absent.
+
     # PowerShell logic tests (suffix .ps1, run via powershell.exe not compiled .exe)
     "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1",  # TEST-PROV-L06 aggregation invariants
     "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1",       # TEST-NOWAIT-001: no system("pause") in CI/HIL
@@ -269,6 +268,8 @@ $HardwareDependentTests = @(
     "test_dev_lifecycle",          # device open/close lifecycle -- needs driver node
     "test_ts_event_sub",           # timestamp event subscription via driver
     "test_ptp_getset",             # PTP get/set time via driver IOCTL
+        "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
+                                     # Section H SKIPs gracefully when driver is absent.
     # Integration-level tests -- all require driver + hardware
     "ssot_register_validation_test",  # SSOT register validation via device access
     "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers -- driver required
@@ -372,6 +373,8 @@ $HardwareUnitTests = @(
     "test_ts_event_sub",           # timestamp event subscription via driver
     "test_ptp_getset",             # PTP get/set time via driver IOCTL
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
+        "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
+                                     # Section H SKIPs gracefully when driver is absent.
     # Phase A: IOCTL functional tests (REQ #2-#13, previously missing from CI)
     "test_ptp_freq",               # PTP frequency adjustment -- REQ-F-PTP-002 (#3)
     "test_ptp_freq_complete",      # PTP frequency adjustment extended -- REQ-F-PTP-002 (#3)

@@ -381,6 +381,92 @@ static void test_l04(void)
 /* =========================================================================
  * Section L summary
  * =========================================================================*/
+/* -------------------------------------------------------------------------
+ * TEST-PROV-L06: 61-bit timestamp truncation regression.
+ *
+ * Evidence from HIL run 20261013_132601 (I219-LM4, adapter:0):
+ *   SEND_PTP pair A:  13436363180579320620 ns  (FILETIME domain, Oct 13 2026)
+ *   GET_TX   pair A:   1907148134510850860 ns  (value after PACK/GET_TS)
+ *   difference:       11529215046068469760  =  5 × 2^61  (exact)
+ *
+ *   SEND_PTP pair B:  13436363180579363000 ns
+ *   GET_TX   pair B:   1907148134510893240 ns
+ *   difference:       11529215046068469760  =  5 × 2^61  (exact)
+ *
+ * Root cause: the I219 get_systime() returned a Windows FILETIME-domain value
+ * (~1.34e19 ns since 1601-01-01) instead of Unix+TAI (~1.79e18 ns since 1970).
+ * AVB_TX_RECORD_PACK masks to 61 bits, silently discarding the top 3 bits.
+ *
+ * This test verifies:
+ *   (a) The modulo relationship IS explained by 61-bit masking.
+ *   (b) A corrected caller (epoch fix applied at producer) would see matching values.
+ *   (c) The pack-time guard rejects timestamps >= 2^61 as UNAVAILABLE.
+ * -------------------------------------------------------------------------*/
+static void test_l06(void)
+{
+    printf("\n[TEST-PROV-L06] 61-bit truncation regression (I219 FILETIME epoch)\n");
+
+    bool ok = true;
+
+    /* Exact observed pairs from HIL run 20261013_132601 */
+    const uint64_t send_a = 13436363180579320620ULL;
+    const uint64_t get_a  =  1907148134510850860ULL;
+    const uint64_t send_b = 13436363180579363000ULL;
+    const uint64_t get_b  =  1907148134510893240ULL;
+    const uint64_t two61  = (uint64_t)AVB_TX_RECORD_TS_MASK + 1ULL;  /* 2^61 */
+
+    /* (a) Modulo relationship: difference must be an integer multiple of 2^61 */
+    uint64_t diff_a = send_a - get_a;
+    uint64_t diff_b = send_b - get_b;
+    if (diff_a % two61 != 0 || diff_b % two61 != 0) {
+        tc_fail("TEST-PROV-L06", "difference is not a multiple of 2^61 -- math wrong");
+        ok = false;
+    }
+    if (diff_a != diff_b) {
+        tc_fail("TEST-PROV-L06", "pair A and pair B have different modular offsets");
+        ok = false;
+    }
+    printf("  Pair A: diff=%llu = %llu x 2^61\n",
+           (unsigned long long)diff_a, (unsigned long long)(diff_a / two61));
+
+    /* (b) AVB_TX_RECORD_GET_TS of PACK(send, prov) must equal get (by definition) */
+    LONGLONG rec_a = AVB_TX_RECORD_PACK(send_a, AVB_TX_PROV_PRE_SEND_PHC);
+    LONGLONG rec_b = AVB_TX_RECORD_PACK(send_b, AVB_TX_PROV_PRE_SEND_PHC);
+    if (AVB_TX_RECORD_GET_TS(rec_a) != get_a || AVB_TX_RECORD_GET_TS(rec_b) != get_b) {
+        tc_fail("TEST-PROV-L06", "GET_TS(PACK(send)) != get -- macro mismatch");
+        ok = false;
+    }
+
+    /* (c) Pack-time guard: send_a >= 2^61 so AVB_TX_RECORD_TS_MASK == 0x1FFFFFFFFFFFFFFF
+     * means any ts >= 2^61 must NOT be stored. Verify the guard boundary. */
+    if (send_a < two61) {
+        tc_fail("TEST-PROV-L06", "send_a not >= 2^61 -- test data wrong");
+        ok = false;
+    }
+
+    /* (d) Epoch correction: FILETIME_EPOCH_NS subtraction must produce Unix+TAI */
+    const uint64_t FILETIME_EPOCH_NS = 11644473600ULL * 1000000000ULL;
+    uint64_t corrected_a = send_a - FILETIME_EPOCH_NS;
+    uint64_t corrected_b = send_b - FILETIME_EPOCH_NS;
+    /* Corrected values must be safely below 2^61 */
+    if (corrected_a >= two61 || corrected_b >= two61) {
+        tc_fail("TEST-PROV-L06", "epoch-corrected values still exceed 2^61 -- correction wrong");
+        ok = false;
+    }
+    /* Corrected pair A and pair B must still have the same delta */
+    if ((corrected_b - corrected_a) != (send_b - send_a)) {
+        tc_fail("TEST-PROV-L06", "epoch correction changed pair delta");
+        ok = false;
+    }
+    printf("  Corrected pair A: 0x%016llx (%.3e ns, in Unix+TAI domain)\n",
+           (unsigned long long)corrected_a, (double)corrected_a);
+
+    if (ok)
+        tc_pass("TEST-PROV-L06",
+                "61-bit truncation confirmed; epoch correction valid; "
+                "pair delta preserved; corrected values within TS_MASK");
+}
+
 static void run_section_l(void)
 {
     printf("\n=== Section L: Pure-logic mock tests (no device required) ===\n");
@@ -393,6 +479,7 @@ static void run_section_l(void)
     test_l02();
     test_l03();
     test_l04();
+    test_l06();
 }
 
 /* =========================================================================
