@@ -1833,30 +1833,32 @@ Return Value:
         PNET_BUFFER_LIST NextNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
         BOOLEAN is_test_packet = FALSE;
 
-        // Primary identification: check if the NET_BUFFER came from our injection pool.
-        // This is more reliable than inspecting MDL data (CurrentMdl may be advanced by igc.sys).
-        // NdisGetPoolFromNetBuffer returns the pool handle used to allocate the NB, which is
-        // unique per filter instance. Available in NDIS 6.20+.
+        /* Identify injected test packets by NB pool handle — the only sound criterion.
+         *
+         * Ring-allocated NBs: NdisAllocateNetBuffer(ctx->nb_pool_handle, ...) in
+         *   AvbPerformBasicInitialization → NdisGetPoolFromNetBuffer returns nb_pool_handle.
+         * Slow-path NBs (ring exhausted): same allocator, same result.
+         * Legitimate traffic: different pool → NdisGetPoolFromNetBuffer returns a different
+         *   handle → is_test_packet stays FALSE → NBL passes through untouched.
+         *
+         * Removed (CodeQL #10/#11 — opaque MDL field access + misclassification risk):
+         *   A secondary fallback previously matched the PTP L2 multicast destination MAC
+         *   (01:1B:19:00:00:00) via mdl->MappedSystemVa.  That check:
+         *     (a) accessed the opaque MDL field directly (cpp/windows/opaque-mdl-field-access);
+         *     (b) was redundant: all our injected NBs allocate from nb_pool_handle, so the
+         *         primary check already covers ring and slow-path paths;
+         *     (c) was harmful: 01:1B:19:00:00:00 is the IEEE 1588 "all ordinary/boundary clocks"
+         *         multicast address used by every PTP implementation.  Legitimate PTP frames
+         *         sent by the system (ptpd, linuxptp, sfptpd, …) with this destination would
+         *         have been stripped from the completion chain and freed, silently suppressing
+         *         the protocol's own send-completions.
+         * If avbCtx or nb_pool_handle is NULL the pool check returns FALSE → the NBL is
+         * forwarded normally.  That is the correct safe-failure behaviour. */
         PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(CurrNbl);
         NDIS_HANDLE nbActualPool = nb ? NdisGetPoolFromNetBuffer(nb) : NULL;
-        // Diagnostic: print for EVERY NBL to confirm (a) the loop runs, (b) the pool handles
-        if (avbCtx && avbCtx->nb_pool_handle && nb) {
-            if (nbActualPool == avbCtx->nb_pool_handle) {
-                is_test_packet = TRUE;
-            }
-        }
-
-        // Secondary/fallback: destination MAC 01:1B:19:00:00:00 (PTP L2 multicast).
-        // Handles rare case where avbCtx or pool handle is unavailable at completion time.
-        if (!is_test_packet && nb) {
-            PMDL mdl = NET_BUFFER_CURRENT_MDL(nb);
-            if (mdl && mdl->MappedSystemVa) {
-                UCHAR *data = (UCHAR *)mdl->MappedSystemVa + NET_BUFFER_CURRENT_MDL_OFFSET(nb);
-                if (data[0] == 0x01 && data[1] == 0x1B && data[2] == 0x19 &&
-                    data[3] == 0x00 && data[4] == 0x00 && data[5] == 0x00) {
-                    is_test_packet = TRUE;
-                }
-            }
+        if (avbCtx && avbCtx->nb_pool_handle && nb &&
+            nbActualPool == avbCtx->nb_pool_handle) {
+            is_test_packet = TRUE;
         }
 
         if (is_test_packet) {
