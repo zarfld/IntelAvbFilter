@@ -51,6 +51,55 @@
 #define DEVICE_PATH "\\\\.\\IntelAvbFilter"
 
 /**
+ * Returns TRUE if did is a driver-supported Intel NIC device ID.
+ *
+ * Single source of truth for the DID whitelist within this test file so
+ * Test_EnumerateAdapters_FirstAdapter and Test_EnumerateAdapters_AllAdapters
+ * share one definition and no adapter is silently skipped.
+ *
+ * Verifies: #15 (REQ-F-MULTIDEV-001)
+ */
+static BOOLEAN IsKnownIntelNicDid(UINT16 did)
+{
+    return
+        (did == 0x1533) || // I210 Copper
+        (did == 0x1536) || // I210 Fiber
+        (did == 0x1537) || // I210 SGMII
+        (did == 0x1538) || // I210 Copper Flashless
+        (did == 0x157B) || // I210 Copper Backplane
+        (did == 0x157C) || // I210 Fiber Backplane
+        (did == 0x1539) || // I211 Copper
+        (did == 0x153A) || // I217-LM
+        (did == 0x153B) || // I217-V
+        (did == 0x15A0) || // I218-LM
+        (did == 0x15A1) || // I218-V
+        (did == 0x15A2) || // I218-LM
+        (did == 0x15A3) || // I218-V
+        (did == 0x15B7) || // I219-LM
+        (did == 0x15B8) || // I219-V
+        (did == 0x15B9) || // I219-LM
+        (did == 0x15BB) || // I219-LM4 (Cannon Lake / Whiskey Lake PCH)
+        (did == 0x15D7) || // I219-LM
+        (did == 0x15D8) || // I219-V
+        (did == 0x15DF) || // I219-LM
+        (did == 0x15E0) || // I219-V
+        (did == 0x15E1) || // I219-LM
+        (did == 0x15E2) || // I219-V
+        (did == 0x15F2) || // I225-LM
+        (did == 0x15F3) || // I225-V
+        (did == 0x15F6) || // I225-IT
+        (did == 0x15F7) || // I225-LMVP
+        (did == 0x125B) || // I226-LM
+        (did == 0x125C) || // I226-V
+        (did == 0x125D) || // I226-IT
+        (did == 0x125E) || // I226-LMVP
+        (did == 0x1521) || // I350-T4
+        (did == 0x1522) || // I350-F2
+        (did == 0x1523) || // I350-F4
+        (did == 0x1524);   // I350-T2
+}
+
+/**
  * Test Case: REQ-F-MULTIDEV-001.1 - Adapter Enumeration
  * 
  * Scenario: Enumerate all Intel adapters in system
@@ -102,44 +151,7 @@ BOOLEAN Test_EnumerateAdapters_FirstAdapter()
     TEST_ASSERT(req.count >= 1, "At least one Intel adapter found");
     TEST_ASSERT_EQUAL(0x8086, req.vendor_id, "Vendor ID is Intel (0x8086)");
     
-    // Valid Intel device IDs — all supported adapter families
-    BOOLEAN validDeviceId =
-        (req.device_id == 0x1533) || // I210 Copper
-        (req.device_id == 0x1536) || // I210 Fiber
-        (req.device_id == 0x1537) || // I210 SGMII
-        (req.device_id == 0x1538) || // I210 Copper Flashless
-        (req.device_id == 0x157B) || // I210 Copper Backplane
-        (req.device_id == 0x157C) || // I210 Fiber Backplane
-        (req.device_id == 0x1539) || // I211 Copper
-        (req.device_id == 0x153A) || // I217-LM
-        (req.device_id == 0x153B) || // I217-V
-        (req.device_id == 0x15A0) || // I218-LM
-        (req.device_id == 0x15A1) || // I218-V
-        (req.device_id == 0x15A2) || // I218-LM
-        (req.device_id == 0x15A3) || // I218-V
-        (req.device_id == 0x15B7) || // I219-LM
-        (req.device_id == 0x15B8) || // I219-V
-        (req.device_id == 0x15B9) || // I219-LM
-        (req.device_id == 0x15D7) || // I219-LM
-        (req.device_id == 0x15D8) || // I219-V
-        (req.device_id == 0x15DF) || // I219-LM
-        (req.device_id == 0x15E0) || // I219-V
-        (req.device_id == 0x15E1) || // I219-LM
-        (req.device_id == 0x15E2) || // I219-V
-        (req.device_id == 0x15F2) || // I225-LM
-        (req.device_id == 0x15F3) || // I225-V
-        (req.device_id == 0x15F6) || // I225-IT
-        (req.device_id == 0x15F7) || // I225-LMVP
-        (req.device_id == 0x125B) || // I226-LM
-        (req.device_id == 0x125C) || // I226-V
-        (req.device_id == 0x125D) || // I226-IT
-        (req.device_id == 0x125E) || // I226-LMVP
-        (req.device_id == 0x1521) || // I350-T4
-        (req.device_id == 0x1522) || // I350-F2
-        (req.device_id == 0x1523) || // I350-F4
-        (req.device_id == 0x1524);   // I350-T2
-    
-    TEST_ASSERT(validDeviceId, "Device ID is valid Intel NIC");
+    TEST_ASSERT(IsKnownIntelNicDid((UINT16)req.device_id), "Device ID is valid Intel NIC");
     TEST_ASSERT_EQUAL(AVB_STATUS_SUCCESS, req.status, "Status is success");
     
     CloseHandle(hDevice);
@@ -215,6 +227,7 @@ BOOLEAN Test_EnumerateAdapters_AllAdapters()
         TEST_ASSERT_EQUAL(totalAdapters, req.count, 
                          "Count remains consistent across queries");
         TEST_ASSERT_EQUAL(0x8086, req.vendor_id, "Vendor ID is Intel");
+        TEST_ASSERT(IsKnownIntelNicDid((UINT16)req.device_id), "Device ID is valid Intel NIC");
         
         printf("   Adapter[%u]: VID=0x%04X DID=0x%04X Caps=0x%08X\n",
                i, req.vendor_id, req.device_id, req.capabilities);

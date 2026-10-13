@@ -14,7 +14,23 @@ $testExeDir = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
 
 
 
-$CIFailed = @("test_scripts_consolidate.exe","test_ioctl_abi.exe", "test_tx_timestamp_provenance.exe")
+$CIFailed = @("test_tx_timestamp_provenance.exe",
+                "test_tx_timestamp_retrieval.exe",
+                "test_ioctl_xstamp.exe", 
+                "test_multidev_adapter_enum.exe",
+                "test_ioctl_tas.exe",
+                #"test_atdecc_aen_protocol.exe",
+                "test_atdecc_aen_protocol.exe",
+                "test_ioctl_tas.exe",
+                "test_tx_timestamp_retrieval.exe",
+                "test_lifecycle_coverage.exe",
+                "test_event_log.exe",
+                "test_ptp_event_latency.exe",
+                "test_control_device_lifecycle.exe",
+                "test_hw_state_machine.exe",
+                "test_ptp_corr_extended.exe",
+                "test_vv_corr_003_crossdomain.exe",
+                "test_ptp_phc_stability.exe")
 foreach ($t in $CIFailed) { 
  .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
 } 
@@ -25,13 +41,11 @@ foreach ($t in $CIFailed) {
 
 
 # tools\test\Run-Tests-CI.ps1
-$CISuite = @("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration",
-                 "HardwareMandatory", "HardwareMutation")
-
-
-foreach ($Suite in $CISuite) { 
- .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
-} 
+#$CISuite = @("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
+#$CISuite =@("Unit")
+#foreach ($Suite in $CISuite) { 
+# .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
+#} 
 
 
 
