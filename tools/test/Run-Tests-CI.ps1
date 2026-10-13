@@ -56,7 +56,12 @@ param(
     # output cannot contaminate or be confused with real HIL evidence.
     # Ordinary HIL executions must NOT pass this parameter; CI leaves it unset.
     [Parameter(Mandatory=$false)]
-    [string]$LogsDir = ""
+    [string]$LogsDir = "",
+
+    # Start DebugView kernel capture around the test run and save to a log file.
+    # Requires .github\skills\DbgView\DebugView\Dbgview.exe (run tools\setup\Install-DbgView.ps1 once).
+    [Parameter(Mandatory=$false)]
+    [switch]$CaptureDbgView
 )
 
 $ErrorActionPreference = 'Stop'
