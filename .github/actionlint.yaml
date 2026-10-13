@@ -1,0 +1,10 @@
+# actionlint configuration for IntelAvbFilter
+# Declares custom self-hosted runner labels used in HIL jobs so actionlint
+# does not report them as unknown.  Current HIL target: i226 NIC runner.
+# Expand the list as additional runners (i219, i210, i225) are added.
+self-hosted-runner:
+  labels:
+    - i226
+    - i219
+    - i210
+    - i225

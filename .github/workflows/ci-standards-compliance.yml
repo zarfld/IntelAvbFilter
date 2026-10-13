@@ -1738,14 +1738,14 @@ jobs:
             Write-Host ""
             Write-Host "  [VERIFIED_CURRENT_BUILD] Installed driver matches current commit build (hashes equal)." -ForegroundColor Green
             if ($env:GITHUB_STEP_SUMMARY) {
-              @"
-## HIL Identity Audit
-- **Checkout SHA**: $checkout
-- **Built-SYS SHA256**: $buildSha
-- **Installed SHA256**: $installedSha (matches -- hash equality confirmed)
-- **Driver version**: $drv_ver
-- **Contract**: VERIFIED_CURRENT_BUILD
-"@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              @(
+                "## HIL Identity Audit",
+                "- **Checkout SHA**: $checkout",
+                "- **Built-SYS SHA256**: $buildSha",
+                "- **Installed SHA256**: $installedSha (matches -- hash equality confirmed)",
+                "- **Driver version**: $drv_ver",
+                "- **Contract**: VERIFIED_CURRENT_BUILD"
+              ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           } elseif ($installedPresent -and $buildPresent) {
             Write-Host ""
@@ -1755,30 +1755,30 @@ jobs:
             Write-Host ("  built:     {0}..." -f $buildSha.Substring(0,[Math]::Min(12,$buildSha.Length))) -ForegroundColor Yellow
             Write-Host "  mismatch flag (supplementary): $mismatch" -ForegroundColor Yellow
             if ($env:GITHUB_STEP_SUMMARY) {
-              @"
-## HIL Identity Audit
-- **Checkout SHA**: $checkout
-- **Built-SYS SHA256**: $buildSha
-- **Installed SHA256**: $installedSha (DIFFERENT)
-- **Driver version**: $drv_ver
-- **mismatch flag** (supplementary): $mismatch
-- **Contract**: BASELINE_DRIVER_ONLY -- kernel changes in this commit are NOT HIL-verified.
-"@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              @(
+                "## HIL Identity Audit",
+                "- **Checkout SHA**: $checkout",
+                "- **Built-SYS SHA256**: $buildSha",
+                "- **Installed SHA256**: $installedSha (DIFFERENT)",
+                "- **Driver version**: $drv_ver",
+                "- **mismatch flag** (supplementary): $mismatch",
+                "- **Contract**: BASELINE_DRIVER_ONLY -- kernel changes in this commit are NOT HIL-verified."
+              ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           } else {
             Write-Host ""
             Write-Host "  [UNVERIFIED] Identity evidence missing or incomplete -- cannot confirm driver under test." -ForegroundColor Red
             Write-Host ("  installedSha present: {0}  buildSha present: {1}  mismatch: {2}" -f $installedPresent, $buildPresent, $mismatch) -ForegroundColor Red
             if ($env:GITHUB_STEP_SUMMARY) {
-              @"
-## HIL Identity Audit
-- **Checkout SHA**: $checkout
-- **Built-SYS SHA256**: $buildSha (present: $buildPresent)
-- **Installed SHA256**: $installedSha (present: $installedPresent)
-- **Driver version**: $drv_ver
-- **Contract**: UNVERIFIED -- identity evidence missing; these HIL results cannot be attributed to a specific driver artifact.
-  Check HIL_EXPECTED_DRIVER_SHA256 secret and Build-Tests.ps1 SHA256 output.
-"@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              @(
+                "## HIL Identity Audit",
+                "- **Checkout SHA**: $checkout",
+                "- **Built-SYS SHA256**: $buildSha (present: $buildPresent)",
+                "- **Installed SHA256**: $installedSha (present: $installedPresent)",
+                "- **Driver version**: $drv_ver",
+                "- **Contract**: UNVERIFIED -- identity evidence missing; these HIL results cannot be attributed to a specific driver artifact.",
+                "  Check HIL_EXPECTED_DRIVER_SHA256 secret and Build-Tests.ps1 SHA256 output."
+              ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           }
 
