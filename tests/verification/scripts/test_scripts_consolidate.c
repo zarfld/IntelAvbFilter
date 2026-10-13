@@ -177,9 +177,14 @@ static int file_contains(const char *path, const char *needle)
  * ========================================================================= */
 
 /*
- * TC-SCRIPTS-001: Canonical script count < 27 (consolidated from 80+)
- * Counts .ps1/.bat/.cmd in tools\, excluding archive and lib subdirs.
- * Budget raised to 27 to accommodate tools\diagnostics\check_device_access.ps1.
+ * TC-SCRIPTS-001: Canonical script count < 30 (consolidated from 80+)
+ * Counts .ps1/.bat/.cmd in tools\, excluding archive, lib, and scripts subdirs.
+ * Budget history:
+ *   <27 -- raised to accommodate tools\diagnostics\check_device_access.ps1
+ *   <29 -- raised to accommodate tools\setup\manual_uninstall.ps1
+ *          and tools\ci\Validate-PS1Syntax.ps1 (CI syntax gate)
+ *   <30 -- raised to accommodate tools\test\Capture-RunEvidence.ps1
+ *          (post-run evidence snapshot helper)
  */
 static void tc_script_count(void)
 {
@@ -197,9 +202,9 @@ static void tc_script_count(void)
     }
 
     n = count_scripts_recursive(tools_dir, excl, 3);
-    snprintf(msg, sizeof(msg), "%d canonical scripts in tools\\ (target <27)", n);
+    snprintf(msg, sizeof(msg), "%d canonical scripts in tools\\ (target <30)", n);
 
-    if (n < 27)   PASS("TC-SCRIPTS-001", "%s", msg);
+    if (n < 30)   PASS("TC-SCRIPTS-001", "%s", msg);
     else          FAIL("TC-SCRIPTS-001", "%s", msg);
 }
 
