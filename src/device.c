@@ -970,9 +970,9 @@ IntelAvbFilterDeviceIoControl(
                             // AvbBringUpHardware from IOCTL_AVB_INIT_DEVICE. Just read the cached capabilities.
                             // Calling intel_init() repeatedly resets capabilities to 0 when it fails.
                             // Override VID/DID from context: AvbIsSupportedIntelController() returns
-                            // a representative family DID (e.g. 0x15B7 for all I219 variants).
+                            // a representative family DID (e.g. for all I219 variants).
                             // AvbReadActualPciIds() corrects pci_device_id to the real hardware DID
-                            // (e.g. 0x15BB for I219-LM4) during FilterAttach.  Use the corrected value.
+                            // (e.g. for I219-LM4) during FilterAttach.  Use the corrected value.
                             if (ctx->intel_device.pci_vendor_id != 0 && ctx->intel_device.pci_device_id != 0) {
                                 req->vendor_id = (USHORT)ctx->intel_device.pci_vendor_id;
                                 req->device_id = (USHORT)ctx->intel_device.pci_device_id;
