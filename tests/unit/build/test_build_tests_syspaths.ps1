@@ -69,9 +69,13 @@ foreach ($Configuration in @('Debug', 'Release')) {
     }
 
     # TC-3: First path is the flat layout (single IntelAvbFilter directory).
+    # The negative condition is anchored to the trailing .sys file so that
+    # GitHub Actions checkout paths (D:\a\IntelAvbFilter\IntelAvbFilter\...)
+    # are not mistakenly rejected by the broader "*\IntelAvbFilter\IntelAvbFilter\*"
+    # pattern, which would match the double-nested runner checkout structure.
     $flat = $sysPaths[0]
     if (($flat -like "*\IntelAvbFilter\IntelAvbFilter.sys") -and
-        ($flat -notlike "*\IntelAvbFilter\IntelAvbFilter\*")) {
+        ($flat -notlike "*\IntelAvbFilter\IntelAvbFilter\IntelAvbFilter.sys")) {
         tc_pass "sysPaths-flat-layout-$Configuration"
     } else {
         tc_fail "sysPaths-flat-layout-$Configuration" "Unexpected flat path: $flat"

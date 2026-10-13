@@ -680,7 +680,7 @@ foreach ($TestName in $TestList) {
     if ($isPsTest) {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName  = 'powershell.exe'
-        $psi.Arguments = "-ExecutionPolicy Bypass -NonInteractive -File `"$psScriptPath`""
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -NonInteractive -File `"$psScriptPath`""
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError  = $true
         $psi.UseShellExecute = $false
