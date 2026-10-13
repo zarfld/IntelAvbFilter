@@ -12,6 +12,18 @@ $toolsDir = Split-Path $ArchiveDir -Parent  # .\tools\
 $repoRoot = Split-Path $toolsDir -Parent  # repository root
 $testExeDir = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
 
+
+
+$CIFailed = @("test_scripts_consolidate.exe","test_ioctl_abi.exe", "test_tx_timestamp_provenance.exe")
+foreach ($t in $CIFailed) { 
+ .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+} 
+
+
+
+
+
+
 # tools\test\Run-Tests-CI.ps1
 $CISuite = @("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration",
                  "HardwareMandatory", "HardwareMutation")
@@ -21,10 +33,6 @@ foreach ($Suite in $CISuite) {
  .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
 } 
 
-$CIFailed = @("test_scripts_consolidate.exe","test_ioctl_abi.exe", "test_tx_timestamp_provenance.exe")
-foreach ($t in $CIFailed) { 
- .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
-} 
 
 
 
