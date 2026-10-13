@@ -739,6 +739,13 @@ foreach ($TestName in $TestList) {
         Write-Fail "$exeName [HIL-FAIL] exit=2 SKIP_ONLY on mandatory suite --- driver not accessible or Section H not exercised"
         $failedTests++
         $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(SKIP_ONLY)"; Exit = $exitCode }
+    } elseif ($exitCode -eq 2) {
+        # Exit 2 = SKIP_ONLY on a non-mandatory suite (Unit/Integration/HardwareUnit).
+        # Section L passed; Section H skipped because driver is absent.
+        # Expected on GitHub-hosted runners and any machine without the driver installed.
+        $skippedTests++
+        Write-Skip "$exeName (exit=2 SKIP_ONLY: Section L passed, Section H skipped -- driver absent)"
+        $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = $exitCode }
     } else {
         $failedTests++
         Write-Fail "$exeName FAILED (exit $exitCode)"
