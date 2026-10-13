@@ -373,7 +373,7 @@ $HardwareUnitTests = @(
     "test_ts_event_sub",           # timestamp event subscription via driver
     "test_ptp_getset",             # PTP get/set time via driver IOCTL
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
-        "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
+    "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
                                      # Section H SKIPs gracefully when driver is absent.
     # Phase A: IOCTL functional tests (REQ #2-#13, previously missing from CI)
     "test_ptp_freq",               # PTP frequency adjustment -- REQ-F-PTP-002 (#3)
