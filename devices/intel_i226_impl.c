@@ -78,14 +78,16 @@ static int init_ptp(device_t *dev);
  * On I226, target time interrupts may not generate MSI-X interrupts reliably,
  * so polling TSICR is required to detect AUTT0/AUTT1 flags.
  */
-#pragma warning(push)
-#pragma warning(disable: 4505)  // Unreferenced function - used as DPC callback (function pointer)
+/* Role-type forward declaration — carries _Function_class_(KDEFERRED_ROUTINE) so CodeQL
+ * and SAL can verify this matches the PKDEFERRED_ROUTINE parameter of KeInitializeDpc.
+ * Fixes CodeQL alert #8 (cpp/windows/incorrect-callback-role). */
+static KDEFERRED_ROUTINE AvbTimerDpcRoutine;
+
 static VOID AvbTimerDpcRoutine(
-    PKDPC Dpc,
-    PVOID DeferredContext,
-    PVOID SystemArgument1,
-    PVOID SystemArgument2)
-#pragma warning(pop)
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
 {
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
