@@ -832,8 +832,8 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
     if (!NT_SUCCESS(st)) return st;
 
     /* AvbIsSupportedIntelController() returns a REPRESENTATIVE family DID (e.g.
-     * INTEL_DEV_I219_LM = 0x15B7) for every I219 variant regardless of the actual
-     * silicon (I219-LM4 = 0x15BB, I219-V = 0x15B8, …).  Correct the identity now
+     * INTEL_DEV_I219_LM) for every I219 variant regardless of the actual
+     * silicon (I219-LM4, I219-V, …).  Correct the identity now
      * so ENUM_ADAPTERS exposes the real PCI DID, not the family placeholder.
      * Failure is non-fatal: the context retains the representative DID and the
      * device-type/capabilities assignment remains correct (both map to I219). */
