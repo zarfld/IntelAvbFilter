@@ -2037,42 +2037,70 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     case IOCTL_AVB_GET_DEVICE_INFO:
         {
             DEBUGP(DL_TRACE, "? IOCTL_AVB_GET_DEVICE_INFO: Starting device info request\n");
-            
-            if (outLen < sizeof(AVB_DEVICE_INFO_REQUEST)) { 
+
+            /* Guard consistent with other METHOD_BUFFERED handlers in this function.
+             * For METHOD_BUFFERED, AssociatedIrp.SystemBuffer is a kernel pool
+             * allocation guaranteed non-NULL when outLen > 0, but the explicit
+             * check documents the contract and anchors CodeQL's provenance model. */
+            if (buf == NULL) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            if (outLen < sizeof(AVB_DEVICE_INFO_REQUEST)) {
                 DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Buffer too small\n");
-                status = STATUS_BUFFER_TOO_SMALL; 
+                status = STATUS_BUFFER_TOO_SMALL;
             } else {
-                // CRITICAL FIX: Use the specific adapter context that was selected via IOCTL_AVB_OPEN_ADAPTER
-                PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
-                
+                /* P0.1: use the per-handle selected adapter context. */
+                PAVB_DEVICE_CONTEXT activeContext = AvbContext;
+
                 DEBUGP(DL_TRACE, "   - Using context: VID=0x%04X DID=0x%04X\n",
-                       activeContext->intel_device.pci_vendor_id, activeContext->intel_device.pci_device_id);
+                       activeContext->intel_device.pci_vendor_id,
+                       activeContext->intel_device.pci_device_id);
                 DEBUGP(DL_TRACE, "   - Hardware state: %s\n", AvbHwStateName(activeContext->hw_state));
                 DEBUGP(DL_TRACE, "   - Device type: %d\n", activeContext->intel_device.device_type);
                 DEBUGP(DL_TRACE, "   - Filter instance: %p\n", activeContext->filter_instance);
-                
-                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) { 
-                    DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Hardware not ready - hw_state=%s\n", 
+
+                if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                    DEBUGP(DL_ERROR, "? DEVICE_INFO FAILED: Hardware not ready - hw_state=%s\n",
                            AvbHwStateName(activeContext->hw_state));
-                    status = STATUS_DEVICE_NOT_READY; 
+                    status = STATUS_DEVICE_NOT_READY;
                 } else {
                     DEBUGP(DL_TRACE, "? DEVICE_INFO: Hardware state validation passed\n");
-                    
-                    PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf; 
-                    RtlZeroMemory(r->device_info, sizeof(r->device_info)); 
-                    
-// Note: private_data already points to struct intel_private with platform_data set during initialization
-                    
+
+                    /* Stage the device-info string in a local kernel-stack buffer.
+                     *
+                     * BUFFER PROVENANCE (CodeQL #14 / #15 / #16):
+                     *   buf = Irp->AssociatedIrp.SystemBuffer, which for a
+                     *   METHOD_BUFFERED IOCTL (_NDIS_CONTROL_CODE(21,METHOD_BUFFERED))
+                     *   is a NonPagedPool allocation managed by the I/O Manager —
+                     *   not a user-mode pointer.  CodeQL cannot resolve the
+                     *   METHOD_BUFFERED constant through the _NDIS_CONTROL_CODE macro
+                     *   expansion and conservatively treats the pointer as potentially
+                     *   user-mode, flagging intel_get_device_info / RtlStringCbCopyA /
+                     *   RtlStringCbLengthA when they write to r->device_info.
+                     *
+                     *   Fix: compute into a local kernel-stack buffer (provenance
+                     *   unambiguous to CodeQL), then copy to the system buffer in a
+                     *   single bounded RtlCopyMemory.  Observable behaviour is
+                     *   identical; the RtlZeroMemory+copy ensures the system buffer
+                     *   is fully initialised before the I/O Manager copies it back.
+                     *
+                     *   Stack cost: AVB_DEVICE_INFO_MAX (1024) bytes.  Acceptable at
+                     *   PASSIVE_LEVEL in the IOCTL dispatch path. */
+                    char localInfo[AVB_DEVICE_INFO_MAX];
+                    RtlZeroMemory(localInfo, sizeof(localInfo));
+
                     DEBUGP(DL_TRACE, "?? DEVICE_INFO: Calling intel_get_device_info...\n");
-                    int rc = intel_get_device_info(&activeContext->intel_device, r->device_info, sizeof(r->device_info)); 
+                    int rc = intel_get_device_info(&activeContext->intel_device,
+                                                   localInfo, sizeof(localInfo));
                     DEBUGP(DL_TRACE, "?? DEVICE_INFO: intel_get_device_info returned %d\n", rc);
-                    
+
                     if (rc == 0) {
-                        DEBUGP(DL_TRACE, "? DEVICE_INFO: Device info string: %s\n", r->device_info);
+                        DEBUGP(DL_TRACE, "? DEVICE_INFO: Device info string: %s\n", localInfo);
                     } else {
                         DEBUGP(DL_ERROR, "? DEVICE_INFO: intel_get_device_info failed with code %d\n", rc);
-                        // Fallback to manual device info generation
-                        const char* deviceName = "";
+                        const char *deviceName = "";
                         switch (activeContext->intel_device.device_type) {
                             case INTEL_DEVICE_I210: deviceName = "Intel I210 Gigabit Ethernet - Full TSN Support"; break;
                             case INTEL_DEVICE_I226: deviceName = "Intel I226 2.5G Ethernet - Advanced TSN"; break;
@@ -2081,19 +2109,24 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                             case INTEL_DEVICE_I219: deviceName = "Intel I219 Gigabit Ethernet - Enhanced PTP"; break;
                             default: deviceName = "Unknown Intel Ethernet Device"; break;
                         }
-                        RtlStringCbCopyA(r->device_info, sizeof(r->device_info), deviceName);
-                        rc = 0; // Override failure
-                        DEBUGP(DL_TRACE, "? DEVICE_INFO: Using fallback device info: %s\n", r->device_info);
+                        RtlStringCbCopyA(localInfo, sizeof(localInfo), deviceName);
+                        rc = 0;
+                        DEBUGP(DL_TRACE, "? DEVICE_INFO: Using fallback device info: %s\n", localInfo);
                     }
-                    
-                    size_t used = 0; 
-                    (void)RtlStringCbLengthA(r->device_info, sizeof(r->device_info), &used); 
-                    r->buffer_size = (ULONG)used; 
-                    r->status = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE; 
-                    info = sizeof(*r); 
-                    status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL; 
-                    
-                    DEBUGP(DL_TRACE, "? DEVICE_INFO COMPLETE: status=0x%08X, buffer_size=%lu\n", status, r->buffer_size);
+
+                    size_t used = 0;
+                    (void)RtlStringCbLengthA(localInfo, sizeof(localInfo), &used);
+
+                    /* Write to system buffer — single bounded copy, provenance clear. */
+                    PAVB_DEVICE_INFO_REQUEST r = (PAVB_DEVICE_INFO_REQUEST)buf;
+                    RtlCopyMemory(r->device_info, localInfo, sizeof(r->device_info));
+                    r->buffer_size = (ULONG)used;
+                    r->status      = (rc == 0) ? NDIS_STATUS_SUCCESS : NDIS_STATUS_FAILURE;
+                    info   = sizeof(*r);
+                    status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+
+                    DEBUGP(DL_TRACE, "? DEVICE_INFO COMPLETE: status=0x%08X, buffer_size=%lu\n",
+                           status, r->buffer_size);
                 }
             }
         }
