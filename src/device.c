@@ -15,6 +15,10 @@
  * ---------------------------------------------------------------------------*/
 static FAST_IO_DISPATCH g_IntelAvbFastIoDispatch;
 
+/* Role-type forward declaration — carries _Function_class_(FAST_IO_DEVICE_CONTROL) so
+ * CodeQL and SAL can verify the callback signature matches PFAST_IO_DEVICE_CONTROL. */
+static FAST_IO_DEVICE_CONTROL IntelAvbFilterFastIoDeviceControl;
+
 static BOOLEAN NTAPI
 IntelAvbFilterFastIoDeviceControl(
     __in      PFILE_OBJECT     FileObject,
@@ -366,6 +370,12 @@ IntelAvbFilterFastIoDeviceControl(
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
         if (lock_held) {
+            /* lock_held == TRUE: NdisAcquireSpinLock was called → IRQL is DISPATCH_LEVEL.
+             * PREfast/CodeQL C28120: static analysis loses IRQL state at __except entry
+             * because FAST_IO_DEVICE_CONTROL has no concrete IRQL annotation.
+             * __analysis_assume makes the lock_held ↔ DISPATCH_LEVEL invariant explicit;
+             * it is a zero-cost analyzer hint with no effect on generated code. */
+            __analysis_assume(KeGetCurrentIrql() == DISPATCH_LEVEL);
             NdisReleaseSpinLock(&ctx->test_send_lock);
         }
         IoStatus->Status      = GetExceptionCode();
