@@ -34,14 +34,25 @@ foreach ($Configuration in $Configurations){
                     "test_vv_corr_003_crossdomain.exe",
                     "test_ptp_phc_stability.exe")
     foreach ($t in $CIFailed) { 
-    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+ #   .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     } 
 
+
+$BenchmarkTests = @(
+    'ptp_clock_control_test.exe'      # TC-5b PHC/QPC coherence; TC-5b runs first in main()
+    'test_timestamp_latency.exe'      # P50/P95/P99 latency; no --case filter
+    'test_tx_timestamp_retrieval.exe' # TC-CORR-TX-RX-001 per adapter; no --case filter
+    'test_ptp_phc_stability.exe'      # UT-CORR-007+008 (PRE_SEND_PHC overhead); no --case needed
+    'test_ptp_001.exe'                # TC-PTP-001-CORR rate stability; no --case filter
+)
+    foreach ($t in $BenchmarkTests) { 
+    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+    }
     # tools\test\Run-Tests-CI.ps1
     $CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
     #$CISuite =@("All")
     foreach ($Suite in $CISuite) { 
-    .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
+    #.\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
     } 
 
     #$FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
