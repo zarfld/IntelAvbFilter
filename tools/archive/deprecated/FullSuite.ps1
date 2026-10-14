@@ -38,11 +38,11 @@ foreach ($Configuration in $Configurations){
     } 
 
     # tools\test\Run-Tests-CI.ps1
-    #$CISuite = @("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
-    #$CISuite =@("Unit")
-    #foreach ($Suite in $CISuite) { 
-    # .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
-    #} 
+    $CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
+    #$CISuite =@("All")
+    foreach ($Suite in $CISuite) { 
+    .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
+    } 
 
     #$FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
     #foreach ($t in $FullSuite) { 
