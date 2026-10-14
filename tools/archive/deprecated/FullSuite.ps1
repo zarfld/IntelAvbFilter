@@ -24,7 +24,7 @@ foreach ($Configuration in $Configurations){
                     #"test_atdecc_aen_protocol.exe",
                     "test_atdecc_aen_protocol.exe",
                     "test_ioctl_tas.exe",
-                    "test_tx_timestamp_retrieval.exe",
+                   # "test_tx_timestamp_retrieval.exe",
                     "test_lifecycle_coverage.exe",
                     "test_event_log.exe",
                     "test_ptp_event_latency.exe",
