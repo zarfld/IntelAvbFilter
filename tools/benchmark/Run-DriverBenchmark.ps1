@@ -127,53 +127,115 @@ function Get-DriverFileHash([string]$path) {
     return $null
 }
 
+function Get-OemInfForImagePath([string]$imagePath) {
+    # Returns the oem*.inf name that registered the given DriverStore path.
+    # Reads HKLM service DisplayName which INetCfg stamps with "@oem<N>.inf,..." on install.
+    $dn = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter" `
+           -ErrorAction SilentlyContinue).DisplayName
+    if ($dn -match '@(oem\d+\.inf)') { return $Matches[1] }
+    return $null
+}
+
 function Record-DriverIdentity([string]$cellId, [string]$driverConfig) {
-    $driverStorePath = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter" `
-        -ErrorAction SilentlyContinue).ImagePath
-    $driverStoreResolved = if ($driverStorePath) {
-        $driverStorePath -replace '\\SystemRoot', $env:SystemRoot
-    } else { $null }
+    # ── 1. Build artifact SHA (outer build = package binary, SHA proven identical) ──
+    $buildArtPath  = Join-Path $repoRoot "build\x64\$driverConfig\IntelAvbFilter\IntelAvbFilter.sys"
+    $buildArtHash  = Get-DriverFileHash $buildArtPath
+    $buildArtSize  = if (Test-Path $buildArtPath) { (Get-Item $buildArtPath).Length } else { $null }
 
-    $buildArt  = Join-Path $repoRoot "build\x64\$driverConfig\IntelAvbFilter\IntelAvbFilter.sys"
-    $sys32     = "$env:SystemRoot\System32\drivers\IntelAvbFilter.sys"
+    # ── 2. Configured ImagePath (what the kernel SCM will load on next start) ──
+    $svcReg         = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter" `
+                      -ErrorAction SilentlyContinue
+    $imagePathRaw   = $svcReg.ImagePath           # e.g. \SystemRoot\System32\DriverStore\...
+    $imagePathRes   = if ($imagePathRaw) { $imagePathRaw -replace '\\SystemRoot', $env:SystemRoot } else { $null }
+    $imagePathHash  = if ($imagePathRes) { Get-DriverFileHash $imagePathRes } else { $null }
+    $imagePathSize  = if ($imagePathRes -and (Test-Path $imagePathRes)) { (Get-Item $imagePathRes).Length } else { $null }
+    $imagePathDate  = if ($imagePathRes -and (Test-Path $imagePathRes)) { (Get-Item $imagePathRes).LastWriteTime.ToString('o') } else { $null }
+    $registeredOem  = Get-OemInfForImagePath $imagePathRaw
 
-    $buildHash = Get-DriverFileHash $buildArt
-    $sys32Hash = Get-DriverFileHash $sys32
-    $storeHash = if ($driverStoreResolved) { Get-DriverFileHash $driverStoreResolved } else { $null }
+    # ── 3. System32 copy (written by installer as a reference copy, NOT what kernel loads) ──
+    $sys32Path = "$env:SystemRoot\System32\drivers\IntelAvbFilter.sys"
+    $sys32Hash = Get-DriverFileHash $sys32Path
+    $sys32Size = if (Test-Path $sys32Path) { (Get-Item $sys32Path).Length } else { $null }
+    $sys32Date = if (Test-Path $sys32Path) { (Get-Item $sys32Path).LastWriteTime.ToString('o') } else { $null }
 
-    $contract = if ($buildHash -and $sys32Hash -and $buildHash -eq $sys32Hash -and
-                    ($null -eq $storeHash -or $storeHash -eq $buildHash)) {
+    # ── 4. Driver version from System32 copy (version resource stays meaningful) ──
+    $driverVersion = if (Test-Path $sys32Path) { (Get-Item $sys32Path).VersionInfo.FileVersion } else { $null }
+
+    # ── 5. Classification ────────────────────────────────────────────────────
+    # VERIFIED_FILE_MATCH   : ImagePath file SHA == build artifact SHA.
+    #                         This is the highest provenance achievable without a kernel debugger.
+    # DRIVER_IDENTITY_MISMATCH: ImagePath file SHA != build artifact SHA.
+    #                         Driver under test is NOT the selected build configuration.
+    #                         All test results must be labelled accordingly.
+    # DRIVER_IDENTITY_UNKNOWN: ImagePath absent, unresolvable, or file missing.
+    # LOADED_IMAGE           : Always UNVERIFIED (requires kernel debugger or ETW module load events).
+    $contract = if (-not $imagePathHash -or -not $buildArtHash) {
+        "DRIVER_IDENTITY_UNKNOWN"
+    } elseif ($imagePathHash -eq $buildArtHash) {
         "VERIFIED_FILE_MATCH"
-    } elseif ($sys32Hash) {
-        "BASELINE_DRIVER_ONLY"
     } else {
-        "UNVERIFIED"
+        "DRIVER_IDENTITY_MISMATCH"
     }
 
     $rec = [ordered]@{
-        Timestamp          = (Get-Date -Format 'o')
-        CellId             = $cellId
-        DriverConfig       = $driverConfig
-        Commit             = (& git -C $repoRoot rev-parse HEAD 2>$null)
-        DirtyTree          = ("$(git -C $repoRoot status --short 2>$null)".Trim() -ne "")
-        DriverVersion      = if (Test-Path $sys32) { (Get-Item $sys32).VersionInfo.FileVersion } else { $null }
-        DriverDate         = if (Test-Path $sys32) { (Get-Item $sys32).LastWriteTime.ToString('o') } else { $null }
-        BuildArtifactSHA256  = $buildHash
-        System32SHA256       = $sys32Hash
-        DriverStoreSHA256    = $storeHash
-        DriverStorePath      = $driverStoreResolved
-        LoadedImageSHA256    = "UNVERIFIED (kernel debugger required)"
-        Contract             = $contract
+        Timestamp              = (Get-Date -Format 'o')
+        CellId                 = $cellId
+        DriverConfig           = $driverConfig
+        Commit                 = (& git -C $repoRoot rev-parse HEAD 2>$null)
+        DirtyTree              = ("$(git -C $repoRoot status --short 2>$null)".Trim() -ne "")
+
+        # Build artifact (selected configuration)
+        BuildArtifactPath      = $buildArtPath
+        BuildArtifactSHA256    = $buildArtHash
+        BuildArtifactSize      = $buildArtSize
+
+        # ImagePath (authoritative for what kernel loads on next boot/service start)
+        ServiceImagePathRaw    = $imagePathRaw
+        ServiceImagePathResolved = $imagePathRes
+        ServiceImagePathSHA256 = $imagePathHash
+        ServiceImagePathSize   = $imagePathSize
+        ServiceImagePathDate   = $imagePathDate
+        RegisteredOemInf       = $registeredOem
+
+        # System32 copy (reference copy; NOT what the kernel loads when INF uses DIRID 13)
+        System32Path           = $sys32Path
+        System32SHA256         = $sys32Hash
+        System32Size           = $sys32Size
+        System32Date           = $sys32Date
+
+        # Version resource
+        DriverVersion          = $driverVersion
+
+        # Loaded kernel image — cannot be verified without kernel debugger
+        LoadedImageSHA256      = "UNVERIFIED -- kernel debugger or ETW module-load event required"
+
+        # Identity classification
+        Contract               = $contract
     }
     $rec | ConvertTo-Json | Out-File (Join-Path $BenchmarkDir "${cellId}_identity.json") -Encoding utf8
 
-    Write-Ok "  Contract: $contract"
-    Write-Info "  BuildArt : $($rec.BuildArtifactSHA256)"
-    Write-Info "  System32 : $($rec.System32SHA256)"
-    Write-Info "  DrvrStore: $($rec.DriverStoreSHA256)"
-    if ($contract -ne 'VERIFIED_FILE_MATCH') {
-        Write-Warn "  Results for cell $cellId are BASELINE_DRIVER_ONLY (not attributed to current build)"
+    # Console output
+    $contractColor = if ($contract -eq "VERIFIED_FILE_MATCH") { "Green" }
+                     elseif ($contract -eq "DRIVER_IDENTITY_MISMATCH") { "Red" }
+                     else { "Yellow" }
+    Write-Host "  Contract: $contract" -ForegroundColor $contractColor
+    Write-Info "  Build artifact  SHA: $buildArtHash  ($driverConfig, $buildArtSize B)"
+    Write-Info "  ImagePath       SHA: $imagePathHash  ($imagePathSize B)"
+    Write-Info "  System32 copy   SHA: $sys32Hash  ($sys32Size B)"
+    Write-Info "  Registered OEM INF : $registeredOem"
+    Write-Info "  LoadedImage        : UNVERIFIED"
+
+    if ($contract -eq "DRIVER_IDENTITY_MISMATCH") {
+        Write-Warn ""
+        Write-Warn "  DRIVER_IDENTITY_MISMATCH: tests will execute against a driver that"
+        Write-Warn "  does NOT match the selected $driverConfig build artifact."
+        Write-Warn "  Results for this cell CANNOT be attributed to the $driverConfig driver."
+        Write-Warn "  Actual loaded driver: $imagePathHash (via $imagePathRes)"
+        Write-Warn "  Expected            : $buildArtHash"
+    } elseif ($contract -eq "DRIVER_IDENTITY_UNKNOWN") {
+        Write-Warn "  Identity cannot be established. Results are UNATTRIBUTABLE."
     }
+
     return $rec
 }
 
