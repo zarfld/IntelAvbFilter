@@ -39,10 +39,12 @@ foreach ($Configuration in $Configurations){
 
 
 $BenchmarkTests = @(
-    'ptp_clock_control_test.exe'      # TC-5b PHC/QPC coherence; TC-5b runs first in main()
-    'test_timestamp_latency.exe'      # P50/P95/P99 latency; no --case filter
-    'test_tx_timestamp_retrieval.exe' # TC-CORR-TX-RX-001 per adapter; no --case filter
-    'test_ptp_phc_stability.exe'      # UT-CORR-007+008 (PRE_SEND_PHC overhead); no --case needed
+    'test_ioctl_phc_crosstimestamp_v2.exe',
+    'test_ioctl_xstamp_v2.exe',
+    'ptp_clock_control_test.exe',      # TC-5b PHC/QPC coherence; TC-5b runs first in main()
+    'test_timestamp_latency.exe',      # P50/P95/P99 latency; no --case filter
+    'test_tx_timestamp_retrieval.exe', # TC-CORR-TX-RX-001 per adapter; no --case filter
+    'test_ptp_phc_stability.exe',      # UT-CORR-007+008 (PRE_SEND_PHC overhead); no --case needed
     'test_ptp_001.exe'                # TC-PTP-001-CORR rate stability; no --case filter
 )
     foreach ($t in $BenchmarkTests) { 

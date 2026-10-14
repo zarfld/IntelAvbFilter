@@ -732,6 +732,57 @@ static int TestPhcQpcCoherence(HANDLE h)
         }
 
         /* -------------------------------------------------------------- *
+         * TC-5b provenance gate (P0.2, Fixes #340)                       *
+         * One V2 cross-timestamp call establishes the PHC clock source   *
+         * before rate measurement begins.  If V2 is unavailable (old     *
+         * driver) or the source is not REGISTER_DERIVED, TC-5b cannot    *
+         * claim hardware-derived coherence — report INCONCLUSIVE and     *
+         * fail closed.  Rate measurement is only meaningful when the      *
+         * clock is hardware-derived; a SW_WALLCLOCK rate ≈ 1.0 merely    *
+         * measures wall-clock accuracy, not PHC/QPC coherence.           *
+         * -------------------------------------------------------------- */
+        {
+            AVB_CROSS_TIMESTAMP_V2_REQUEST v2prov;
+            ZeroMemory(&v2prov, sizeof(v2prov));
+            v2prov.struct_version = AVB_XTSTAMP_V2_VERSION;
+            v2prov.struct_size    = (avb_u32)sizeof(v2prov);
+            v2prov.adapter_index  = (ULONG)ai;
+            DWORD brV2 = 0;
+            BOOL okV2 = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP_V2,
+                                        &v2prov, sizeof(v2prov),
+                                        &v2prov, sizeof(v2prov), &brV2, NULL);
+            if (!okV2 || !v2prov.valid) {
+                printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE: V2 IOCTL unavailable"
+                       " (old driver or driver error, GLE=%lu) —"
+                       " hardware provenance unverifiable\n",
+                       ai, GetLastError());
+                totalFailed++;
+                CloseHandle(hAdapter);
+                continue;
+            }
+            if (v2prov.avb_phc_source != AVB_PHC_SOURCE_REGISTER_DERIVED) {
+                static const char *srcName[] = {
+                    "REGISTER_DERIVED", "SW_WALLCLOCK", "UNAVAILABLE", "UNKNOWN"
+                };
+                avb_u32 s = v2prov.avb_phc_source;
+                const char *sn = (s < 4) ? srcName[s] : "UNKNOWN";
+                printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE:"
+                       " PHC source=%s (rc=%d) —"
+                       " hardware-derived timestamp not confirmed;"
+                       " rate measurement would reflect %s, not hardware PHC\n",
+                       ai, sn, v2prov.get_systime_rc,
+                       (v2prov.avb_phc_source == AVB_PHC_SOURCE_SW_WALLCLOCK)
+                           ? "wall-clock" : "unavailable clock");
+                totalFailed++;
+                CloseHandle(hAdapter);
+                continue;
+            }
+            printf("  [INFO] TC-5b/adapter %d: provenance=REGISTER_DERIVED"
+                   " (rc=%d) — hardware coherence measurement proceeding\n",
+                   ai, v2prov.get_systime_rc);
+        }
+
+        /* -------------------------------------------------------------- *
          * TC-5b: PHC monotonicity + rate sanity check                    *
          * Three cross-timestamps: r1 (from TC-5a), r2 (+200 ms), r3.     *
          * PASS: PHC monotone AND rate in [0.95, 1.10] real-time.         *
