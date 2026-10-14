@@ -3307,6 +3307,93 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
+    case IOCTL_AVB_PHC_CROSSTIMESTAMP_V2:
+        {
+            /* V2 cross-timestamp with PHC provenance.
+             *
+             * IRP SystemBuffer (METHOD_BUFFERED): buf is kernel memory; no user
+             * ProbeForRead/Write needed. inLen/outLen are the actual lengths.
+             * struct_size from the client is checked for protocol confirmation
+             * only — it is NEVER used as a memory-access bound. */
+            PAVB_CROSS_TIMESTAMP_V2_REQUEST v2 = (PAVB_CROSS_TIMESTAMP_V2_REQUEST)buf;
+            PAVB_DEVICE_CONTEXT activeContext;
+            const intel_device_ops_t *v2ops;
+            LARGE_INTEGER v2freq;
+            LARGE_INTEGER v2qpc;
+            uint64_t v2phc = 0;
+            int v2rc;
+
+            DEBUGP(DL_TRACE, "IOCTL_AVB_PHC_CROSSTIMESTAMP_V2 called\n");
+
+            if (inLen  < sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST) ||
+                outLen < sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+
+            /* Zero output fields before any conditional write */
+            v2->phc_time_ns    = 0;
+            v2->system_qpc     = 0;
+            v2->qpc_frequency  = 0;
+            v2->valid          = 0;
+            v2->avb_phc_source = AVB_PHC_SOURCE_UNKNOWN;
+            v2->get_systime_rc = -1;
+            v2->_reserved_out  = 0;
+
+            if (v2->struct_version != AVB_XTSTAMP_V2_VERSION) {
+                DEBUGP(DL_WARN, "CROSSTIMESTAMP_V2: version=%u expected %u\n",
+                       (ULONG)v2->struct_version, (ULONG)AVB_XTSTAMP_V2_VERSION);
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            if (v2->_reserved_in != 0) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            activeContext = currentContext;
+            if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                v2->avb_phc_source = AVB_PHC_SOURCE_UNAVAILABLE;
+                status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+
+            v2ops = intel_get_device_ops(activeContext->intel_device.device_type);
+            if (!v2ops || !v2ops->get_systime) {
+                v2->avb_phc_source = AVB_PHC_SOURCE_UNAVAILABLE;
+                status = STATUS_NOT_SUPPORTED;
+                break;
+            }
+
+            /* ONE get_systime() call — PHC and provenance are from the same sample */
+            v2freq.QuadPart = 0;
+            v2qpc = KeQueryPerformanceCounter(&v2freq);
+            v2rc = v2ops->get_systime(&activeContext->intel_device, &v2phc);
+
+            v2->get_systime_rc = (avb_i32)v2rc;
+            v2->system_qpc     = (avb_u64)v2qpc.QuadPart;
+            v2->qpc_frequency  = (avb_u64)v2freq.QuadPart;
+
+            if (v2rc < 0) {
+                v2->avb_phc_source = AVB_PHC_SOURCE_UNAVAILABLE;
+                v2->valid          = 0;
+                status             = STATUS_UNSUCCESSFUL;
+            } else {
+                v2->phc_time_ns    = (avb_u64)v2phc;
+                v2->valid          = 1;
+                v2->avb_phc_source = (v2rc == SYSTIME_RC_SW_OK)
+                                     ? AVB_PHC_SOURCE_SW_WALLCLOCK
+                                     : AVB_PHC_SOURCE_REGISTER_DERIVED;
+                info   = sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST);
+                status = STATUS_SUCCESS;
+                DEBUGP(DL_TRACE,
+                       "CROSSTIMESTAMP_V2: phc=%llu src=%u rc=%d\n",
+                       (unsigned long long)v2phc,
+                       (ULONG)v2->avb_phc_source, v2rc);
+            }
+        }
+        break;
+
     case IOCTL_AVB_GET_RX_TIMESTAMP:
         {
             DEBUGP(DL_TRACE, "IOCTL_AVB_GET_RX_TIMESTAMP called\n");

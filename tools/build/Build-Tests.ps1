@@ -1383,6 +1383,39 @@ $AllTests = @(
     }
 
     @{
+        Name = "test_ioctl_xstamp_v2"
+        Type = "cl"
+        Source = "tests\unit\ioctl\test_ioctl_xstamp_v2.c"
+        Output = "test_ioctl_xstamp_v2.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PHC Cross-Timestamp V2 Provenance ABI Tests (P0.1) - layout, buffer, provenance mapping, driver gate"
+        Issue = "#198"
+        TestCases = 13
+        IOCTLs = "67(PHC_CROSSTIMESTAMP_V2)"
+        Requirement = "#48"
+        Standard = "IEEE 1588-2019 B.3.2"
+    }
+
+    @{
+        Name = "test_ioctl_phc_crosstimestamp_v2"
+        Type = "cl"
+        Source = "tests\ioctl\test_ioctl_phc_crosstimestamp_v2.c"
+        Output = "test_ioctl_phc_crosstimestamp_v2.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "kernel32.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "PHC Provenance V2 Real HIL Tests - per-adapter provenance, rate, V1 backward compat (TEST-IOCTL-XSTAMP-V2-HIL)"
+        Issue = "#198"
+        TestCases = 9
+        IOCTLs = "67(PHC_CROSSTIMESTAMP_V2),63(PHC_CROSSTIMESTAMP),36(ENUM_ADAPTERS),35(OPEN_ADAPTER)"
+        Requirement = "#48"
+        Standard = "IEEE 1588-2019 B.3.2"
+    }
+
+    @{
         Name = "test_ioctl_phc_epoch"
         Type = "cl"
         Source = "tests\ioctl\test_ioctl_phc_epoch.c"

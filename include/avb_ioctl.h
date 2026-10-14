@@ -26,6 +26,7 @@ extern "C" {
   typedef UINT16  avb_u16;
   typedef UINT32  avb_u32;
   typedef UINT64  avb_u64;
+  typedef INT32   avb_i32;
   typedef INT64   avb_i64;
 #else
   #include <stdint.h>
@@ -33,6 +34,7 @@ extern "C" {
   typedef uint16_t  avb_u16;
   typedef uint32_t  avb_u32;
   typedef uint64_t  avb_u64;
+  typedef int32_t   avb_i32;
   typedef int64_t   avb_i64;
 #endif
 
@@ -784,7 +786,103 @@ typedef struct AVB_CROSS_TIMESTAMP_REQUEST {
     avb_u32 status;        /* out: NDIS_STATUS value                           */
 } AVB_CROSS_TIMESTAMP_REQUEST, *PAVB_CROSS_TIMESTAMP_REQUEST;
 
+/* Compile-time size verification for V1. */
+#if defined(_KERNEL_MODE)
+C_ASSERT(sizeof(AVB_CROSS_TIMESTAMP_REQUEST) == 40);
+#elif defined(__cplusplus)
+static_assert(sizeof(AVB_CROSS_TIMESTAMP_REQUEST) == 40, "V1 size changed");
+#endif
+
 #define IOCTL_AVB_PHC_CROSSTIMESTAMP     _NDIS_CONTROL_CODE(63, METHOD_BUFFERED)
+
+/*============================================================================
+ * IOCTL_AVB_PHC_CROSSTIMESTAMP_V2 (67) — PHC cross-timestamp with provenance.
+ *
+ * Same semantics as IOCTL_AVB_PHC_CROSSTIMESTAMP (code 63), but additionally
+ * reports the provenance of the PHC sample so callers can distinguish
+ * hardware-register reads from software wall-clock fallback.
+ *
+ * The PHC value and provenance originate from exactly ONE ops->get_systime()
+ * call.  There is no raw SYSTIM or TIMINCA field: separate MMIO reads are
+ * not guaranteed to represent the same sample.
+ *
+ * PHC provenance constants (avb_phc_source field):
+ *   AVB_PHC_SOURCE_REGISTER_DERIVED (0): get_systime() returned SYSTIME_RC_HW_OK.
+ *     The value is derived from hardware MMIO register reads.  This does NOT
+ *     imply the underlying hardware clock counter is advancing correctly;
+ *     clock quality must be assessed independently.
+ *   AVB_PHC_SOURCE_SW_WALLCLOCK (1): get_systime() returned SYSTIME_RC_SW_OK.
+ *     The value is derived from KeQuerySystemTime() (wall-clock fallback).
+ *     The value is advancing and in the correct ns/TAI domain, but it is NOT
+ *     from a hardware SYSTIM register.
+ *   AVB_PHC_SOURCE_UNAVAILABLE (2): get_systime() returned an error (rc < 0).
+ *     phc_time_ns is 0 and valid is 0.
+ *   AVB_PHC_SOURCE_UNKNOWN (3): this field was not populated (e.g. old driver
+ *     returning STATUS_NOT_SUPPORTED for this IOCTL).  Callers must treat
+ *     UNKNOWN as indicating that hardware provenance cannot be claimed.
+ *
+ * Versioning protocol:
+ *   Client: set struct_version = AVB_XTSTAMP_V2_VERSION (2),
+ *           set struct_size    = sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST).
+ *   Driver: rejects struct_version != 2 with STATUS_INVALID_PARAMETER.
+ *   Driver: rejects actual InputBufferLength or OutputBufferLength <
+ *           sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST) with STATUS_BUFFER_TOO_SMALL.
+ *   New client / old driver: old driver returns STATUS_NOT_SUPPORTED for
+ *           unknown IOCTL code 67 — caller should fall back to V1.
+ *
+ * IoStatus.Information: set to sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST) on
+ * success; 0 on all error status codes.
+ *
+ * ABI safety: struct_size supplied by the client is used for version negotiation
+ * only; it is NEVER used as a memory-access bound.  All reads and writes use
+ * sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST) after InputBufferLength/
+ * OutputBufferLength have been validated against that exact size.
+ *
+ * This IOCTL is dispatched via the IRP path only; it is not accelerated via
+ * FastIo.  Callers that require the ~0.5µs FastIo latency should use V1.
+ *
+ * Implements: #48 (REQ-F-IOCTL-PHC-004: PHC↔System Cross-Timestamp Query)
+ *============================================================================*/
+
+/* PHC source provenance constants for AVB_CROSS_TIMESTAMP_V2_REQUEST */
+#define AVB_PHC_SOURCE_REGISTER_DERIVED  0u   /* SYSTIME_RC_HW_OK: MMIO-register path */
+#define AVB_PHC_SOURCE_SW_WALLCLOCK      1u   /* SYSTIME_RC_SW_OK: KeQuerySystemTime fallback */
+#define AVB_PHC_SOURCE_UNAVAILABLE       2u   /* get_systime() failed (rc < 0) */
+#define AVB_PHC_SOURCE_UNKNOWN           3u   /* not populated — old driver or error */
+
+#define AVB_XTSTAMP_V2_VERSION  2u
+
+typedef struct AVB_CROSS_TIMESTAMP_V2_REQUEST {
+    /* ── input fields (IN) ─────────────────────────────────────── */
+    avb_u32 struct_version;     /* in:  must be AVB_XTSTAMP_V2_VERSION (2)          */
+    avb_u32 struct_size;        /* in:  must be sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST);
+                                 *      used for protocol version detection only —
+                                 *      never used as a memory-access bound           */
+    avb_u32 adapter_index;      /* in:  adapter index (0-based, from ENUM_ADAPTERS)  */
+    avb_u32 _reserved_in;       /* in:  reserved; must be 0                          */
+    /* ── output fields (OUT) ───────────────────────────────────── */
+    avb_u64 phc_time_ns;        /* out: PHC time in nanoseconds from get_systime()   */
+    avb_u64 system_qpc;         /* out: KeQueryPerformanceCounter ticks              */
+    avb_u64 qpc_frequency;      /* out: QPC ticks per second                        */
+    avb_u32 valid;              /* out: 1 = phc_time_ns and system_qpc are populated */
+    avb_u32 avb_phc_source;     /* out: AVB_PHC_SOURCE_* constant                   */
+    avb_i32 get_systime_rc;     /* out: raw return code from ops->get_systime()      */
+    avb_u32 _reserved_out;      /* out: 0                                           */
+} AVB_CROSS_TIMESTAMP_V2_REQUEST, *PAVB_CROSS_TIMESTAMP_V2_REQUEST;
+
+/* Compile-time layout verification.
+ * In kernel mode (WDK C build) use C_ASSERT, which is a WDK-provided
+ * sizeof-based no-op that fires a compile-time error on false conditions.
+ * In C++ and user-mode C builds, use static_assert.
+ * Only sizeof is checked here — offsetof in array subscripts requires C11
+ * _Static_assert and is not portable across all WDK/MSVC combinations. */
+#if defined(_KERNEL_MODE)
+C_ASSERT(sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST) == 56);
+#elif defined(__cplusplus)
+static_assert(sizeof(AVB_CROSS_TIMESTAMP_V2_REQUEST) == 56, "V2 size changed");
+#endif
+
+#define IOCTL_AVB_PHC_CROSSTIMESTAMP_V2  _NDIS_CONTROL_CODE(67, METHOD_BUFFERED)
 
 /*============================================================================
  * IOCTL_AVB_SET_LAUNCH_TIME — IEEE 802.1Qbv per-packet TX launch time scheduling.
