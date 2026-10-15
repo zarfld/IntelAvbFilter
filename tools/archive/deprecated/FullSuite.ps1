@@ -16,20 +16,105 @@ foreach ($Configuration in $Configurations){
 
 
 
-    $CIFailed = @("test_ptp_event_latency.exe",
-                    "test_event_log.exe", 
-                    "test_ioctl_offset.exe ",
-                    "test_tx_timestamp_retrieval.exe",
-                    "test_ioctl_tas.exe",
-                    "test_lifecycle_coverage.exe ",
-                    "test_tsn_ioctl_handlers.exe",
-                    "ptp_clock_control_test.exe",
-                    "rx_timestamping.exe",
-                    "hw_timestamping_control.exe",
-                    "ptp_clock_control_production.exe",
-                    "test_ptp_phc_stability.exe ")
+    $CIFailed = @(
+    # CI Test Summary -- HardwareMandatory suite (Debug)
+        #test_ioctl_version.exe               PASSED    0
+        #test_ioctl_routing.exe               PASSED    0
+        #test_ioctl_simple.exe                PASSED    0
+        #test_minimal_ioctl.exe               PASSED    0
+        #test_ioctl_abi.exe                   PASSED    0
+        #test_tx_timestamp_provenance.exe     PASSED    0
+        "test_tx_timestamp_retrieval.exe",#      FAILED    1
+        #test_ioctl_phc_query.exe             PASSED    0
+        #test_ioctl_xstamp.exe                PASSED    0
+        "test_ioctl_phc_crosstimestamp_v2.exe",# FAILED    1
+        #ptp_clock_control_test.exe           PASSED    0
+        #test_all_adapters.exe                PASSED    0
+        #test_multidev_adapter_enum.exe       PASSED    0
+        #test_multi_adapter_phc_sync.exe      PASSED    0
+        #test_send_ptp_debug.exe              PASSED    0
+        #test_rx_timestamp.exe                PASSED    0
+        #test_rx_timestamp_complete.exe       PASSED    0
+
+        #================================================================
+        #  CI Test Summary -- HardwareUnit suite (Release)
+        #================================================================
+        #Name                             Status          Exit
+        #----                             ------          ----
+        #test_cleanup_archive.exe         PASSED             0
+        #test_ioctl_simple.exe            PASSED             0
+        #test_ioctl_routing.exe           PASSED             0
+        #test_ioctl_trace.exe             PASSED             0
+        #test_minimal_ioctl.exe           PASSED             0
+        #test_clock_config.exe            PASSED             0
+        #test_clock_working.exe           PASSED             0
+        #test_direct_clock.exe            PASSED             0
+        #test_hal_performance.exe         PASSED             0
+        #test_atdecc_event.exe            PASSED             0
+        "test_atdecc_aen_protocol.exe",#     FAILED(TIMEOUT) -999
+        #test_ioctl_version.exe           PASSED             0
+        #test_mdio_phy.exe                PASSED             0
+        #test_dev_lifecycle.exe           PASSED             0
+        #test_ts_event_sub.exe            PASSED             0
+        #test_ptp_getset.exe              PASSED             0
+        #test_power_management.exe        PASSED             0
+        #test_tx_timestamp_provenance.exe PASSED             0
+        #test_ptp_freq.exe                PASSED             0
+        #test_ptp_freq_complete.exe       PASSED             0
+        #test_hw_ts_ctrl.exe              PASSED             0
+        #test_rx_timestamp.exe            PASSED             0
+        #test_rx_timestamp_complete.exe   PASSED             0
+        #test_ioctl_target_time.exe       PASSED             0
+        #test_qav_cbs.exe                 PASSED             0
+        "test_ioctl_tas.exe", #               FAILED             3
+        #test_ioctl_fp_ptm.exe            PASSED             0
+        "test_tx_timestamp_retrieval.exe", #  FAILED             1
+        #test_ioctl_phc_query.exe         PASSED             0
+        #test_ioctl_offset.exe            PASSED             0
+        #test_ioctl_phc_epoch.exe         PASSED             0
+        #test_ioctl_phc_monotonicity.exe  PASSED             0
+        #test_ioctl_xstamp.exe            PASSED             0
+        #test_ioctl_xstamp_v2.exe         PASSED             0
+        #test_ioctl_abi.exe               PASSED             0
+        #test_ioctl_access_control.exe    PASSED             0
+        #test_ioctl_buffer_fuzz.exe       PASSED             0
+        "test_tsn_ioctl_handlers.exe", #      SKIPPED          N/A
+        #ptp_clock_control_test.exe       PASSED             0
+        #test_ptp_crosstimestamp.exe      PASSED             0
+        #test_zero_polling_overhead.exe   PASSED             0
+        "test_lifecycle_coverage.exe", #      FAILED             1
+        #test_hw_state.exe                PASSED             0
+        #test_statistics_counters.exe     PASSED             0
+        "test_event_log.exe", #               FAILED             1
+        #test_build_sign.exe              PASSED             0
+        #test_compat_win11.exe            PASSED             0
+        #test_win7_stub.exe               PASSED             0
+        #test_eee_lpi.exe                 PASSED             0
+        #test_pfc_pause.exe               PASSED             0
+        #test_srp_interface.exe           PASSED             0
+        #test_vlan_tag.exe                PASSED             0
+        #test_vlan_pcp_tc_mapping.exe     PASSED             0
+        #test_security_validation.exe     PASSED             0
+        #test_ioctl_launch_time.exe       PASSED             0
+        #test_avtp_tu_bit_events.exe      PASSED             0
+        "test_ptp_event_latency.exe" #       FAILED             1
+        #test_event_latency_4ch.exe       PASSED             0
+        #test_event_nf_zero_polling.exe   PASSED             0
+        #test_event_nf_latency.exe        PASSED             0
+        #test_gptp_phc_interface.exe      PASSED             0
+        #test_send_ptp_debug.exe          PASSED             0
+        #test_timestamp_latency.exe       PASSED             0
+        #test_perf_regression.exe         PASSED             0
+        #test_ndis_fastpath_latency.exe   PASSED             0
+        #test_hot_plug.exe                PASSED             0
+        #test_error_recovery.exe          PASSED             0
+        #test_multi_adapter_phc_sync.exe  PASSED             0
+        #test_tx_timestamp_provenance.exe PASSED             0
+
+
+    )
     foreach ($t in $CIFailed) { 
- #   .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     } 
 
 
