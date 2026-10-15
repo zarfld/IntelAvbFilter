@@ -397,6 +397,133 @@ static int TC_V2_018_UnexpectedRcNotRD(void)
     return PASS;
 }
 
+/* ─── TC-XSTAMP-V2-019..026: Shared TC5b_Classify3/W3 regression cases ─────
+ *
+ * These tests call the SAME classification functions used by production TC-5b
+ * (via tc5b_classify.h).  They exercise the actual decision logic, not merely
+ * boolean predicates.
+ *
+ * Regression cases mandated by P0.3.1 (#340):
+ *   019  RD/RD/RD nominal rate            => PASS
+ *   020  SW/SW/SW rate ~1.000             => INCONCLUSIVE
+ *   021  SW/RD/RD good rate               => INCONCLUSIVE (w1 non-HW)
+ *   022  RD/RD/SW good rate               => INCONCLUSIVE (not all_hw)
+ *   023  RD/RD/RD frozen                  => TAKE_W3 signal
+ *   024  W3 RD/RD still frozen 0.000002   => FAIL (missing else regression)
+ *   025  W3 RD/RD improving 0.87          => INCONCLUSIVE (not PASS)
+ *   026  W3 RD/RD recovery 0.998          => PASS
+ * ─────────────────────────────────────────────────────────────────────────── */
+#include "../../tc5b_classify.h"
+
+static int TC_V2_019_RdRdRd_GoodRate(void)
+{
+    char msg[128];
+    TC5b_V v = TC5b_Classify3(1,1,1, 1, 1.003895, 1.003892, msg, sizeof(msg));
+    if (v != TC5B_PASS) {
+        printf("    FAIL: expected PASS, got %d — %s\n", (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
+static int TC_V2_020_SwSwSw_WallRate(void)
+{
+    char msg[128];
+    TC5b_V v = TC5b_Classify3(0,0,0, 1, 1.001, 0.999, msg, sizeof(msg));
+    if (v != TC5B_INCONCLUSIVE) {
+        printf("    FAIL: expected INCONCLUSIVE, got %d — %s\n", (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
+static int TC_V2_021_SwRdRd_GoodRate(void)
+{
+    char msg[128];
+    /* r1=SW, r2=RD, r3=RD — window-1 has a non-HW endpoint */
+    TC5b_V v = TC5b_Classify3(0,1,1, 1, 1.003895, 1.003892, msg, sizeof(msg));
+    if (v != TC5B_INCONCLUSIVE) {
+        printf("    FAIL: expected INCONCLUSIVE, got %d — %s\n", (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
+static int TC_V2_022_RdRdSw_GoodRate(void)
+{
+    char msg[128];
+    /* r1=RD, r2=RD, r3=SW — all_hw=F; rate_12 is good but r3 is SW */
+    TC5b_V v = TC5b_Classify3(1,1,0, 1, 1.003895, 1.003892, msg, sizeof(msg));
+    if (v != TC5B_INCONCLUSIVE) {
+        printf("    FAIL: expected INCONCLUSIVE, got %d — %s\n", (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
+static int TC_V2_023_RdRdRd_Frozen_NeedsW3(void)
+{
+    char msg[128];
+    /* Near-frozen I219 pattern */
+    TC5b_V v = TC5b_Classify3(1,1,1, 1, 0.000002, 0.000003, msg, sizeof(msg));
+    if (v != TC5B_TAKE_W3) {
+        printf("    FAIL: expected TAKE_W3, got %d — %s\n", (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
+/* TC-024: regression for the missing-else bug — rate_34 still near-frozen,
+ * rate_34 NOT > rate_23, so improving condition is false.
+ * Previous code: fell through without verdict => false PASS.
+ * Correct:       FAIL (hardware clock failure). */
+static int TC_V2_024_W3_StillFrozen_MustFail(void)
+{
+    char msg[128];
+    /* rate_23=0.000003, rate_34=0.000002: rate_34 <= rate_23, not improving */
+    TC5b_V v = TC5b_ClassifyW3(1,1, 0.000003, 0.000002, msg, sizeof(msg));
+    if (v != TC5B_FAIL) {
+        printf("    FAIL: expected FAIL (regression: missing else), got %d — %s\n",
+               (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
+static int TC_V2_025_W3_Improving_NotPass(void)
+{
+    char msg[128];
+    /* rate_34=0.87: improving (>rate_23=0.000002) AND >=0.85, but outside [0.95,1.10] */
+    TC5b_V v = TC5b_ClassifyW3(1,1, 0.000002, 0.87, msg, sizeof(msg));
+    if (v != TC5B_INCONCLUSIVE) {
+        printf("    FAIL: expected INCONCLUSIVE (improving but outside spec), got %d — %s\n",
+               (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
+static int TC_V2_026_W3_Recovery_Pass(void)
+{
+    char msg[128];
+    /* rate_34=0.998: inside [0.95,1.10] => approved recovery PASS */
+    TC5b_V v = TC5b_ClassifyW3(1,1, 0.000002, 0.998, msg, sizeof(msg));
+    if (v != TC5B_PASS) {
+        printf("    FAIL: expected PASS (recovery inside spec), got %d — %s\n",
+               (int)v, msg);
+        return FAIL;
+    }
+    printf("    %s\n", msg);
+    return PASS;
+}
+
 /* ─── TC-XSTAMP-V2-HIL-001: Hardware gate — V2 IOCTL reachable ─────────────────
  * This test REQUIRES an installed driver. It is INCONCLUSIVE (→ CI FAIL)
  * when the driver is absent or the IOCTL returns STATUS_NOT_SUPPORTED,
@@ -614,6 +741,17 @@ int main(void)
     Record(&r, TC_V2_016_RecoveryOutsideSpec(),  "TC-XSTAMP-V2-016", "recovery 0.87 outside [0.95,1.10] -> NOT PASS");
     Record(&r, TC_V2_017_RecoveryInsideSpec(),   "TC-XSTAMP-V2-017", "HW recovery 0.998 inside [0.95,1.10] -> PASS path valid");
     Record(&r, TC_V2_018_UnexpectedRcNotRD(),    "TC-XSTAMP-V2-018", "rc>1 must not map to REGISTER_DERIVED");
+
+    /* TC-019..026: shared TC5b_Classify3/W3 regression cases (P0.3.1, #340) */
+    printf("\n--- TC-5b Classify3/W3 Regression Cases (shared production logic) ---\n");
+    Record(&r, TC_V2_019_RdRdRd_GoodRate(),      "TC-XSTAMP-V2-019", "RD/RD/RD nominal rate => PASS");
+    Record(&r, TC_V2_020_SwSwSw_WallRate(),      "TC-XSTAMP-V2-020", "SW/SW/SW rate ~1.0 => INCONCLUSIVE");
+    Record(&r, TC_V2_021_SwRdRd_GoodRate(),      "TC-XSTAMP-V2-021", "SW/RD/RD good rate => INCONCLUSIVE");
+    Record(&r, TC_V2_022_RdRdSw_GoodRate(),      "TC-XSTAMP-V2-022", "RD/RD/SW good rate => INCONCLUSIVE");
+    Record(&r, TC_V2_023_RdRdRd_Frozen_NeedsW3(),"TC-XSTAMP-V2-023", "RD/RD/RD frozen => TAKE_W3");
+    Record(&r, TC_V2_024_W3_StillFrozen_MustFail(),"TC-XSTAMP-V2-024","W3 still frozen 0.000002 => FAIL (regression)");
+    Record(&r, TC_V2_025_W3_Improving_NotPass(), "TC-XSTAMP-V2-025", "W3 improving 0.87 => INCONCLUSIVE");
+    Record(&r, TC_V2_026_W3_Recovery_Pass(),     "TC-XSTAMP-V2-026", "W3 recovery 0.998 => PASS");
 
     /* Hardware-dependent tests — INCONCLUSIVE if driver absent */
     printf("\n--- Hardware-Dependent (INCONCLUSIVE = CI FAIL) ---\n");
