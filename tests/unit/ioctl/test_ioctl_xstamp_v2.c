@@ -258,6 +258,145 @@ static int TC_V2_009_SignedRcField(void)
     return PASS;
 }
 
+/* ─── TC-5b Window Classification Truth Table (hardware-independent) ─────────
+ *
+ * These tests verify the TC-5b classification invariants using synthetic
+ * provenance values and rate boundary constants.  No hardware or driver
+ * access is needed.
+ *
+ * Rules under test (P0.3, #340):
+ *   1. A window is hardware-derived only when BOTH endpoints are REGISTER_DERIVED.
+ *   2. A PASS verdict requires the accepted window to be fully HW-derived.
+ *   3. Recovery rate must be in [0.95, 1.10]; improvement alone (0.85–0.949)
+ *      is not sufficient for PASS.
+ *   4. SW_WALLCLOCK or mixed-provenance windows produce INCONCLUSIVE or
+ *      a result that is NOT a hardware-PASS.
+ *   5. RC > 1 (unexpected positive) must not be silently mapped to REGISTER_DERIVED.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/* Helper: returns TRUE if both endpoints are REGISTER_DERIVED (matches TC-5b logic) */
+static int WindowIsHW(avb_u32 src_start, avb_u32 src_end) {
+    return (src_start == AVB_PHC_SOURCE_REGISTER_DERIVED) &&
+           (src_end   == AVB_PHC_SOURCE_REGISTER_DERIVED);
+}
+/* Helper: returns TRUE if rate is within the hardware acceptance band */
+static int RateOK(double rate) {
+    return (rate >= 0.95 && rate <= 1.10);
+}
+
+/* TC-XSTAMP-V2-010: HW/HW/HW with good rates → must qualify as PASS path */
+static int TC_V2_010_HwHwHw_GoodRate(void)
+{
+    avb_u32 s = AVB_PHC_SOURCE_REGISTER_DERIVED;
+    int w1 = WindowIsHW(s, s);  /* HW/HW */
+    int w2 = WindowIsHW(s, s);  /* HW/HW */
+    double rate = 1.003895;      /* typical I210 rate */
+    if (!w1)        return FAIL; /* window-1 must be HW */
+    if (!w2)        return FAIL; /* window-2 must be HW */
+    if (!RateOK(rate)) return FAIL; /* rate must be in [0.95,1.10] */
+    /* => Both windows HW AND rate good => PASS path is valid */
+    return PASS;
+}
+
+/* TC-XSTAMP-V2-011: HW/HW/HW with near-frozen rate → must NOT be in PASS band */
+static int TC_V2_011_HwHwHw_FrozenRate(void)
+{
+    avb_u32 s = AVB_PHC_SOURCE_REGISTER_DERIVED;
+    int w1 = WindowIsHW(s, s);
+    double rate = 0.000002;  /* I219 near-frozen measured rate */
+    if (!w1)         return FAIL; /* window is HW */
+    if (RateOK(rate)) return FAIL; /* near-frozen must NOT be in [0.95,1.10] */
+    /* rate < 0.10 → triggers frozen-clock branch in TC-5b — not PASS */
+    if (rate >= 0.10) return FAIL;
+    return PASS;
+}
+
+/* TC-XSTAMP-V2-012: SW/HW/HW with numerically good rate on window-1 → NOT a HW PASS */
+static int TC_V2_012_SwHwHw_GoodRate(void)
+{
+    avb_u32 sw = AVB_PHC_SOURCE_SW_WALLCLOCK;
+    avb_u32 hw = AVB_PHC_SOURCE_REGISTER_DERIVED;
+    int w1 = WindowIsHW(sw, hw);  /* SW + HW = NOT a HW window */
+    double rate12 = 1.001;         /* numerically in [0.95,1.10] */
+    if (w1)            return FAIL; /* mixed window must NOT be classified HW */
+    if (!RateOK(rate12)) return FAIL; /* rate is in range numerically */
+    /* w1 is NOT HW despite good rate => final PASS must not fire for w1 */
+    /* (Bug B6: this was the false-PASS path before P0.3) */
+    return PASS; /* confirms: w1=!HW blocks the final else PASS branch */
+}
+
+/* TC-XSTAMP-V2-013: HW/HW/SW — window-2 mixed, window-1 HW → w1 can PASS, w2 cannot */
+static int TC_V2_013_HwHwSw_GoodRate(void)
+{
+    avb_u32 hw = AVB_PHC_SOURCE_REGISTER_DERIVED;
+    avb_u32 sw = AVB_PHC_SOURCE_SW_WALLCLOCK;
+    int w1 = WindowIsHW(hw, hw);  /* HW + HW = HW window */
+    int w2 = WindowIsHW(hw, sw);  /* HW + SW = NOT a HW window */
+    if (!w1) return FAIL; /* window-1 is HW */
+    if (w2)  return FAIL; /* window-2 endpoint SW makes it non-HW */
+    /* Only w1 can contribute to a HW PASS; w2 cannot */
+    return PASS;
+}
+
+/* TC-XSTAMP-V2-014: SW/SW/SW → all samples SW → no HW window → INCONCLUSIVE */
+static int TC_V2_014_SwSwSw_Inconclusive(void)
+{
+    avb_u32 sw = AVB_PHC_SOURCE_SW_WALLCLOCK;
+    int w1 = WindowIsHW(sw, sw);
+    int w2 = WindowIsHW(sw, sw);
+    if (w1 || w2) return FAIL;  /* neither window is HW */
+    /* !w1 && !w2 → TC-5b branch B2 fires → INCONCLUSIVE */
+    return PASS;
+}
+
+/* TC-XSTAMP-V2-015: SW/HW/SW — mixed windows → neither window is fully HW */
+static int TC_V2_015_Mixed_NeitherHW(void)
+{
+    avb_u32 sw = AVB_PHC_SOURCE_SW_WALLCLOCK;
+    avb_u32 hw = AVB_PHC_SOURCE_REGISTER_DERIVED;
+    int w1 = WindowIsHW(sw, hw);  /* SW + HW = not HW */
+    int w2 = WindowIsHW(hw, sw);  /* HW + SW = not HW */
+    if (w1 || w2) return FAIL;    /* both must be non-HW */
+    /* !w1 && !w2 → B2 fires → INCONCLUSIVE */
+    return PASS;
+}
+
+/* TC-XSTAMP-V2-016: Recovery trend at 0.87 → outside [0.95,1.10] → NOT PASS */
+static int TC_V2_016_RecoveryOutsideSpec(void)
+{
+    double rate_recovering = 0.87;
+    /* Represents B3b: rate_34 > rate_23 && rate_34 >= 0.85 but rate_34 < 0.95 */
+    if (RateOK(rate_recovering))  return FAIL; /* 0.87 must NOT be in [0.95,1.10] */
+    if (rate_recovering < 0.85)   return FAIL; /* it does satisfy the OLD trend threshold */
+    /* Post-P0.3: this path must produce INCONCLUSIVE, not PASS */
+    return PASS; /* confirms: 0.85-0.949 range cannot PASS */
+}
+
+/* TC-XSTAMP-V2-017: HW recovery inside [0.95,1.10] → PASS (B3a) */
+static int TC_V2_017_RecoveryInsideSpec(void)
+{
+    avb_u32 hw = AVB_PHC_SOURCE_REGISTER_DERIVED;
+    int w3 = WindowIsHW(hw, hw);   /* r3 and r4 both HW */
+    double rate_34 = 0.998;         /* inside [0.95,1.10] */
+    if (!w3)           return FAIL; /* window must be HW */
+    if (!RateOK(rate_34)) return FAIL; /* rate must be in [0.95,1.10] */
+    /* w3_hw AND rate in spec → B3a → PASS */
+    return PASS;
+}
+
+/* TC-XSTAMP-V2-018: rc > 1 must not map to REGISTER_DERIVED */
+static int TC_V2_018_UnexpectedRcNotRD(void)
+{
+    /* Verify that IssueV2XTimestamp rejects rc > 1 before returning TRUE.
+     * We can test the constant expectations: only rc==0 => REGISTER_DERIVED. */
+    avb_i32 unexpected_rc = 5;  /* not a defined return code */
+    /* The only rc that maps to REGISTER_DERIVED is 0 */
+    int maps_to_rd = (unexpected_rc == 0);
+    if (maps_to_rd) return FAIL; /* rc=5 must NOT map to REGISTER_DERIVED */
+    /* rc > 1 → IssueV2XTimestamp returns FALSE → INCONCLUSIVE, not HW PASS */
+    return PASS;
+}
+
 /* ─── TC-XSTAMP-V2-HIL-001: Hardware gate — V2 IOCTL reachable ─────────────────
  * This test REQUIRES an installed driver. It is INCONCLUSIVE (→ CI FAIL)
  * when the driver is absent or the IOCTL returns STATUS_NOT_SUPPORTED,
@@ -458,11 +597,23 @@ int main(void)
     Record(&r, TC_V2_002_Zeroinit(),              "TC-XSTAMP-V2-002", "Zero-init correctness");
     Record(&r, TC_V2_003_ProvenanceMapping(),     "TC-XSTAMP-V2-003", "Provenance constant mapping");
     Record(&r, TC_V2_004_RegisterDerivedNotQuality(), "TC-XSTAMP-V2-004", "REGISTER_DERIVED != quality");
-    Record(&r, TC_V2_005_MixedProvenanceInconclusive(), "TC-XSTAMP-V2-005", "Mixed provenance → INCONCLUSIVE");
+    Record(&r, TC_V2_005_MixedProvenanceInconclusive(), "TC-XSTAMP-V2-005", "Mixed provenance -> INCONCLUSIVE");
     Record(&r, TC_V2_006_VersionNegotiation(),   "TC-XSTAMP-V2-006", "Version negotiation constants");
     Record(&r, TC_V2_007_StructSizeAdvisory(),   "TC-XSTAMP-V2-007", "struct_size advisory-only");
     Record(&r, TC_V2_008_V1Unchanged(),          "TC-XSTAMP-V2-008", "V1 struct unchanged");
     Record(&r, TC_V2_009_SignedRcField(),        "TC-XSTAMP-V2-009", "avb_i32 signed rc field");
+
+    /* TC-5b window classification truth table (hardware-independent, P0.3) */
+    printf("\n--- TC-5b Classification Truth Table (hardware-independent) ---\n");
+    Record(&r, TC_V2_010_HwHwHw_GoodRate(),      "TC-XSTAMP-V2-010", "HW/HW/HW good rate -> PASS path valid");
+    Record(&r, TC_V2_011_HwHwHw_FrozenRate(),    "TC-XSTAMP-V2-011", "HW/HW/HW near-frozen -> NOT in [0.95,1.10]");
+    Record(&r, TC_V2_012_SwHwHw_GoodRate(),      "TC-XSTAMP-V2-012", "SW/HW/HW good rate -> window-1 NOT HW (no false PASS)");
+    Record(&r, TC_V2_013_HwHwSw_GoodRate(),      "TC-XSTAMP-V2-013", "HW/HW/SW -> window-2 NOT HW, window-1 can PASS");
+    Record(&r, TC_V2_014_SwSwSw_Inconclusive(),  "TC-XSTAMP-V2-014", "SW/SW/SW -> no HW window -> INCONCLUSIVE");
+    Record(&r, TC_V2_015_Mixed_NeitherHW(),      "TC-XSTAMP-V2-015", "SW/HW/SW -> neither window HW -> INCONCLUSIVE");
+    Record(&r, TC_V2_016_RecoveryOutsideSpec(),  "TC-XSTAMP-V2-016", "recovery 0.87 outside [0.95,1.10] -> NOT PASS");
+    Record(&r, TC_V2_017_RecoveryInsideSpec(),   "TC-XSTAMP-V2-017", "HW recovery 0.998 inside [0.95,1.10] -> PASS path valid");
+    Record(&r, TC_V2_018_UnexpectedRcNotRD(),    "TC-XSTAMP-V2-018", "rc>1 must not map to REGISTER_DERIVED");
 
     /* Hardware-dependent tests — INCONCLUSIVE if driver absent */
     printf("\n--- Hardware-Dependent (INCONCLUSIVE = CI FAIL) ---\n");

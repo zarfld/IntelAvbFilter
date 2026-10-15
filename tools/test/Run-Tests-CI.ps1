@@ -318,6 +318,14 @@ $HardwareMandatoryTests = @(
     "test_ioctl_xstamp",               # cross-timestamp PHC---QPC (VV-CORR-003)
     "test_ioctl_phc_crosstimestamp_v2", # V2 provenance per adapter; INCONCLUSIVE=FAIL (#340)
     "ptp_clock_control_test",          # PHC coherence TC-5a/TC-5b (read-only correlation)
+                                       # CONTRACT NOTE: ptp_clock_control_test calls
+                                       # AdjustFrequency (writes TIMINCA) inside TC-5b
+                                       # before each adapter measurement. This is a PHC
+                                       # mutation that contradicts the "non-mutating" contract
+                                       # above. Tracked under #340 for future separation:
+                                       # TC-5a+5b measurement should be split from Tests 1-4
+                                       # and the ADJUST_FREQUENCY pre-measurement write into
+                                       # separate executables (read-only vs. mutating lane).
     # Multi-adapter isolation
     "test_all_adapters",               # enumerate + open all adapters
     "test_multidev_adapter_enum",      # per-adapter VID/DID identity
