@@ -2,7 +2,7 @@
  * @file test_idle_verdict.c
  * @brief Deterministic unit tests for the TC-LCY-IDLE-001 verdict logic.
  *
- * Implements: TC-IDLE-UNIT-001 through TC-IDLE-UNIT-010
+ * Implements: TC-IDLE-UNIT-001 through TC-IDLE-UNIT-012
  * Traces to:  #328 (IntelAvbFilter absent after NIC power management)
  * Verifies:   idle_verdict.h — ComputeIdleVerdict() truth table
  *
@@ -11,29 +11,32 @@
  * CI-safe.
  *
  * Truth table under test (from idle_verdict.h):
- *   !phase_a_ok                   → TC_SKIP  (2) BASELINE_UNAVAILABLE
- *   !phase_c_ok                   → TC_FAIL  (1) DEVICE_FAILURE_OBSERVED
- *   LIFECYCLE_CONFIRMED           → TC_PASS  (0) VERIFIED_TRANSITION
- *   LIFECYCLE_AMBIGUOUS           → TC_INCONCLUSIVE (3)
- *   LIFECYCLE_NOT_OBSERVED        → TC_INCONCLUSIVE (3) TRANSITION_NOT_OBSERVED
+ *   !phase_a_ok                                          → TC_SKIP (2)
+ *   !phase_c_ok                                          → TC_FAIL (1)
+ *   LIFECYCLE_CONFIRMED  +  pwr_event_verified           → TC_PASS (0)
+ *   LIFECYCLE_CONFIRMED  + !pwr_event_verified           → TC_INCONCLUSIVE (3)
+ *   LIFECYCLE_AMBIGUOUS                                  → TC_INCONCLUSIVE (3)
+ *   LIFECYCLE_NOT_OBSERVED                               → TC_INCONCLUSIVE (3)
  *
  * Test cases:
  *   TC-IDLE-UNIT-001  No transition, device accessible → INCONCLUSIVE
  *   TC-IDLE-UNIT-002  Enter pressed but no counter change → INCONCLUSIVE
- *   TC-IDLE-UNIT-003  PauseRestartGeneration increased → PASS
- *   TC-IDLE-UNIT-004  FilterDetach + FilterAttach increased → PASS
- *   TC-IDLE-UNIT-005  FilterPauseCount + FilterRestartCount increased → PASS
+ *   TC-IDLE-UNIT-003  PauseRestartGeneration increased, no pwr verification → INCONCLUSIVE
+ *   TC-IDLE-UNIT-004  FilterDetach+Attach increased, no pwr verification → INCONCLUSIVE
+ *   TC-IDLE-UNIT-005  FilterPause+Restart only, no pwr verification → INCONCLUSIVE
  *   TC-IDLE-UNIT-006  Device path lost (error 2) → FAIL
  *   TC-IDLE-UNIT-007  Lifecycle counter decreased → INCONCLUSIVE (AMBIGUOUS)
  *   TC-IDLE-UNIT-008  Adapter index changes (no Phase A/C match) → INCONCLUSIVE
  *   TC-IDLE-UNIT-009  Phase A fails (baseline unavailable) → SKIP
  *   TC-IDLE-UNIT-010  Phase C stats unavailable (stats_valid==0) → INCONCLUSIVE
+ *   TC-IDLE-UNIT-011  Lifecycle confirmed + pwr_event_verified → PASS
+ *   TC-IDLE-UNIT-012  Two adapters: only unrelated adapter changes state → INCONCLUSIVE
  *
  * Build (see tools/build/Build-Tests.ps1):
  *   cl /nologo /W4 /WX /Zi /DWIN32 /D_WIN32_WINNT=0x0A00
  *      -I include -I external/intel_avb/lib
  *      tests\unit\lifecycle\test_idle_verdict.c
- *      /Fe:build\x64\Debug\test_idle_verdict.exe
+ *      /Fe:build\tools\avb_test\x64\Debug\test_idle_verdict.exe
  */
 
 #ifndef _WIN32_WINNT
@@ -70,7 +73,7 @@ static void AssertVerdict(const char *tc_id, int expected, int actual,
     }
 }
 
-/* Helper: build a valid single-adapter Phase A snapshot */
+/* Helper: fill an adapter snapshot with explicit field values */
 static void FillAdapter(AdapterSnapshot *s,
                         avb_u16 vid, avb_u16 did, avb_u32 idx,
                         avb_u64 attach, avb_u64 pause, avb_u64 restart,
@@ -93,125 +96,113 @@ static void FillAdapter(AdapterSnapshot *s,
 static void Test_NoTransition_Accessible(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
-    in.phase_a_ok      = 1;
-    in.phase_c_ok      = 1;
-    in.adapter_count_a = 1;
-    in.adapter_count_c = 1;
+    in.phase_a_ok        = 1;
+    in.phase_c_ok        = 1;
+    in.adapter_count_a   = 1;
+    in.adapter_count_c   = 1;
+    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 5, 5, 2, 5, 100);
-    in.snap_c[0] = in.snap_a[0];  /* identical — no change */
+    in.snap_c[0] = in.snap_a[0];
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
     AssertVerdict("TC-IDLE-UNIT-001", TC_INCONCLUSIVE, v, reason);
 }
 
 /* ── TC-IDLE-UNIT-002: Enter pressed but no lifecycle change → INCONCLUSIVE ─ */
-/*
- * Simulates the user pressing Enter immediately without performing a power
- * transition.  Counters are identical; verdict must be INCONCLUSIVE.
- */
 static void Test_EnterWithoutTransition(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
-    in.phase_a_ok      = 1;
-    in.phase_c_ok      = 1;
-    in.adapter_count_a = 1;
-    in.adapter_count_c = 1;
+    in.phase_a_ok        = 1;
+    in.phase_c_ok        = 1;
+    in.adapter_count_a   = 1;
+    in.adapter_count_c   = 1;
+    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x1533, 0, 1, 1, 1, 0, 1, 487);
-    in.snap_c[0] = in.snap_a[0];  /* OID-only traffic; no lifecycle delta */
+    in.snap_c[0] = in.snap_a[0];
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
     AssertVerdict("TC-IDLE-UNIT-002", TC_INCONCLUSIVE, v, reason);
 }
 
-/* ── TC-IDLE-UNIT-003: PauseRestartGeneration increased → PASS ──────────── */
-static void Test_PauseGenIncreased(void)
+/* ── TC-IDLE-UNIT-003: lifecycle increased, NO pwr verification → INCONCLUSIVE */
+/*
+ * A PauseRestartGeneration increment proves NDIS called FilterPause, but the
+ * cause (power-management, cable event, admin action) is unknown.
+ * Without pwr_event_verified the verdict MUST be INCONCLUSIVE, not PASS.
+ */
+static void Test_PauseGenIncreased_NoPwrVerify(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
-    in.phase_a_ok      = 1;
-    in.phase_c_ok      = 1;
-    in.adapter_count_a = 1;
-    in.adapter_count_c = 1;
+    in.phase_a_ok        = 1;
+    in.phase_c_ok        = 1;
+    in.adapter_count_a   = 1;
+    in.adapter_count_c   = 1;
+    in.pwr_event_verified = 0;  /* no independent power-cause verification */
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 0, 2, 100);
-    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0,
-                3,  /* attach unchanged */
-                3,  /* pause +1 */
-                3,  /* restart +1 */
-                0,  /* detach unchanged */
-                3,  /* gen +1 */
-                110 /* OID +10 */);
+    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0, 3, 3, 3, 0, 3, 110);
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
-    AssertVerdict("TC-IDLE-UNIT-003", TC_PASS, v, reason);
+    AssertVerdict("TC-IDLE-UNIT-003", TC_INCONCLUSIVE, v, reason);
 }
 
-/* ── TC-IDLE-UNIT-004: FilterDetach+Attach increased → PASS ─────────────── */
-static void Test_DetachAttachIncreased(void)
+/* ── TC-IDLE-UNIT-004: FilterDetach+Attach increased, NO pwr verify → INCONCLUSIVE */
+static void Test_DetachAttachIncreased_NoPwrVerify(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
-    in.phase_a_ok      = 1;
-    in.phase_c_ok      = 1;
-    in.adapter_count_a = 1;
-    in.adapter_count_c = 1;
+    in.phase_a_ok        = 1;
+    in.phase_c_ok        = 1;
+    in.adapter_count_a   = 1;
+    in.adapter_count_c   = 1;
+    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x15BB, 0, 1, 1, 1, 1, 1, 50);
-    FillAdapter(&in.snap_c[0], 0x8086, 0x15BB, 0,
-                2,  /* attach +1 */
-                2,  /* pause +1 */
-                2,  /* restart +1 */
-                2,  /* detach +1 */
-                2,  /* gen +1 */
-                60);
+    FillAdapter(&in.snap_c[0], 0x8086, 0x15BB, 0, 2, 2, 2, 2, 2, 60);
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
-    AssertVerdict("TC-IDLE-UNIT-004", TC_PASS, v, reason);
+    AssertVerdict("TC-IDLE-UNIT-004", TC_INCONCLUSIVE, v, reason);
 }
 
-/* ── TC-IDLE-UNIT-005: FilterPause+Restart increased (no detach) → PASS ─── */
-static void Test_PauseRestartOnly(void)
+/* ── TC-IDLE-UNIT-005: FilterPause+Restart only, NO pwr verify → INCONCLUSIVE */
+static void Test_PauseRestartOnly_NoPwrVerify(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
-    in.phase_a_ok      = 1;
-    in.phase_c_ok      = 1;
-    in.adapter_count_a = 1;
-    in.adapter_count_c = 1;
+    in.phase_a_ok        = 1;
+    in.phase_c_ok        = 1;
+    in.adapter_count_a   = 1;
+    in.adapter_count_c   = 1;
+    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x1533, 1, 1, 0, 0, 0, 0, 20);
-    FillAdapter(&in.snap_c[0], 0x8086, 0x1533, 1,
-                1,  /* attach unchanged */
-                1,  /* pause +1 */
-                1,  /* restart +1 */
-                0,  /* detach unchanged */
-                1,  /* gen +1 */
-                30);
+    FillAdapter(&in.snap_c[0], 0x8086, 0x1533, 1, 1, 1, 1, 0, 1, 30);
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
-    AssertVerdict("TC-IDLE-UNIT-005", TC_PASS, v, reason);
+    AssertVerdict("TC-IDLE-UNIT-005", TC_INCONCLUSIVE, v, reason);
 }
 
 /* ── TC-IDLE-UNIT-006: device path lost (error 2) → FAIL ─────────────────── */
 static void Test_DevicePathLost(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
-    in.phase_a_ok           = 1;
-    in.phase_c_ok           = 0;
-    in.phase_c_win32_err    = 2;  /* ERROR_FILE_NOT_FOUND — #328 exact symptom */
-    in.adapter_count_a      = 1;
-    in.adapter_count_c      = 0;  /* device gone; no adapters accessible */
+    in.phase_a_ok        = 1;
+    in.phase_c_ok        = 0;
+    in.phase_c_win32_err = 2;  /* ERROR_FILE_NOT_FOUND — #328 exact symptom */
+    in.adapter_count_a   = 1;
+    in.adapter_count_c   = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 1, 2, 80);
 
@@ -220,15 +211,10 @@ static void Test_DevicePathLost(void)
 }
 
 /* ── TC-IDLE-UNIT-007: lifecycle counter decreased → INCONCLUSIVE ─────────── */
-/*
- * A counter decrease indicates context recreation or RESET_STATISTICS.
- * Cannot interpret as confirmed power-management activity; must be AMBIGUOUS
- * → INCONCLUSIVE.  Must NOT return PASS.
- */
 static void Test_CounterDecreased(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
     in.phase_a_ok      = 1;
     in.phase_c_ok      = 1;
@@ -236,28 +222,17 @@ static void Test_CounterDecreased(void)
     in.adapter_count_c = 1;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 5, 5, 2, 5, 100);
-    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0,
-                1,  /* attach DECREASED (context recreated) */
-                1,  /* pause DECREASED */
-                1,  /* restart DECREASED */
-                0,  /* detach DECREASED */
-                1,  /* gen DECREASED */
-                10);
+    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0, 1, 1, 1, 0, 1, 10);
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
     AssertVerdict("TC-IDLE-UNIT-007", TC_INCONCLUSIVE, v, reason);
 }
 
-/* ── TC-IDLE-UNIT-008: adapter index changes — no match → INCONCLUSIVE ───── */
-/*
- * Phase A has adapter VID=0x8086 DID=0x125B at index 0.
- * Phase C enumerates the same VID/DID but at index 1 (enumeration order changed).
- * Since matching uses (VID, DID, enum_index), no pair matches → AMBIGUOUS.
- */
+/* ── TC-IDLE-UNIT-008: adapter index changes → INCONCLUSIVE ──────────────── */
 static void Test_AdapterIndexChanged(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
     in.phase_a_ok      = 1;
     in.phase_c_ok      = 1;
@@ -265,8 +240,7 @@ static void Test_AdapterIndexChanged(void)
     in.adapter_count_c = 1;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 1, 2, 80);
-    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 1, /* index changed from 0 to 1 */
-                3, 2, 2, 1, 2, 80);
+    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 1, /* index changed */ 3, 2, 2, 1, 2, 80);
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
     AssertVerdict("TC-IDLE-UNIT-008", TC_INCONCLUSIVE, v, reason);
@@ -276,24 +250,19 @@ static void Test_AdapterIndexChanged(void)
 static void Test_PhaseA_Unavailable(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
-    in.phase_a_ok = 0;  /* device inaccessible at baseline */
+    in.phase_a_ok = 0;
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
     AssertVerdict("TC-IDLE-UNIT-009", TC_SKIP, v, reason);
 }
 
 /* ── TC-IDLE-UNIT-010: Phase C stats unavailable (stats_valid==0) → INCONCLUSIVE */
-/*
- * Device is accessible in Phase C (CreateFile OK, version IOCTL OK) but
- * OPEN_ADAPTER or GET_STATISTICS failed for the adapter.  Without lifecycle
- * data the verdict cannot be PASS; it must be INCONCLUSIVE.
- */
 static void Test_PhaseC_StatsUnavailable(void)
 {
     IdleVerdictInput in;
-    char reason[256];
+    char reason[512];
     memset(&in, 0, sizeof(in));
     in.phase_a_ok      = 1;
     in.phase_c_ok      = 1;
@@ -302,15 +271,80 @@ static void Test_PhaseC_StatsUnavailable(void)
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x1533, 0, 1, 1, 1, 0, 1, 40);
 
-    /* Phase C adapter present but stats failed */
     memset(&in.snap_c[0], 0, sizeof(in.snap_c[0]));
-    in.snap_c[0].vendor_id  = 0x8086;
-    in.snap_c[0].device_id  = 0x1533;
-    in.snap_c[0].enum_index = 0;
+    in.snap_c[0].vendor_id   = 0x8086;
+    in.snap_c[0].device_id   = 0x1533;
+    in.snap_c[0].enum_index  = 0;
     in.snap_c[0].stats_valid = 0;  /* IOCTL failed */
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
     AssertVerdict("TC-IDLE-UNIT-010", TC_INCONCLUSIVE, v, reason);
+}
+
+/* ── TC-IDLE-UNIT-011: lifecycle confirmed + pwr_event_verified → PASS ───── */
+/*
+ * This is the ONLY path to TC_PASS.  The caller must independently verify
+ * a qualifying NIC power-management event (e.g., corroborated Windows
+ * Event Log entries) before setting pwr_event_verified=1.
+ * In a fully automated HIL run pwr_event_verified will normally remain 0
+ * because this test does not implement power-event verification.
+ */
+static void Test_LifecycleConfirmed_PwrVerified(void)
+{
+    IdleVerdictInput in;
+    char reason[512];
+    memset(&in, 0, sizeof(in));
+    in.phase_a_ok         = 1;
+    in.phase_c_ok         = 1;
+    in.adapter_count_a    = 1;
+    in.adapter_count_c    = 1;
+    in.pwr_event_verified = 1;  /* caller confirmed a qualifying power event */
+
+    FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 1, 2, 80);
+    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0, 3, 3, 3, 2, 3, 90);
+
+    int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
+    AssertVerdict("TC-IDLE-UNIT-011", TC_PASS, v, reason);
+}
+
+/* ── TC-IDLE-UNIT-012: unrelated adapter changes; target NIC unchanged → INCONCLUSIVE */
+/*
+ * Setup: two adapters:
+ *   idx=0  VID=0x8086 DID=0x125B  (I226-LM) — lifecycle counters INCREASE
+ *   idx=1  VID=0x8086 DID=0x15BB  (I219-LM) — counters UNCHANGED
+ *
+ * The #328 scenario involves NIC power-management recovery on ANY adapter
+ * losing the control device.  Lifecycle activity on one adapter (I226) is
+ * not sufficient to confirm the power-management cause even if the OTHER
+ * adapter (I219) was unchanged.  Without pwr_event_verified the verdict
+ * remains INCONCLUSIVE.
+ *
+ * Also validates multi-adapter matching: I219 is correctly matched as
+ * unchanged; I226 as changed; ComputeLifecycleEvidence returns CONFIRMED
+ * for the pair set; but ComputeIdleVerdict still returns INCONCLUSIVE
+ * because pwr_event_verified=0.
+ */
+static void Test_UnrelatedAdapterChanges(void)
+{
+    IdleVerdictInput in;
+    char reason[512];
+    memset(&in, 0, sizeof(in));
+    in.phase_a_ok         = 1;
+    in.phase_c_ok         = 1;
+    in.adapter_count_a    = 2;
+    in.adapter_count_c    = 2;
+    in.pwr_event_verified = 0;
+
+    /* Phase A */
+    FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 1, 2, 80);  /* I226 */
+    FillAdapter(&in.snap_a[1], 0x8086, 0x15BB, 1, 1, 1, 1, 0, 1, 50);  /* I219 */
+
+    /* Phase C: I226 changed, I219 unchanged */
+    FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0, 3, 3, 3, 2, 3, 90);  /* I226 +Gen+Detach */
+    FillAdapter(&in.snap_c[1], 0x8086, 0x15BB, 1, 1, 1, 1, 0, 1, 50);  /* I219 unchanged */
+
+    int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
+    AssertVerdict("TC-IDLE-UNIT-012", TC_INCONCLUSIVE, v, reason);
 }
 
 /* ── main ────────────────────────────────────────────────────────────────── */
@@ -319,16 +353,18 @@ int main(void)
     printf("TC-LCY-IDLE-001 Verdict Unit Tests\n");
     printf("====================================\n\n");
 
-    Test_NoTransition_Accessible();     /* 001 */
-    Test_EnterWithoutTransition();      /* 002 */
-    Test_PauseGenIncreased();           /* 003 */
-    Test_DetachAttachIncreased();       /* 004 */
-    Test_PauseRestartOnly();            /* 005 */
-    Test_DevicePathLost();              /* 006 */
-    Test_CounterDecreased();            /* 007 */
-    Test_AdapterIndexChanged();         /* 008 */
-    Test_PhaseA_Unavailable();          /* 009 */
-    Test_PhaseC_StatsUnavailable();     /* 010 */
+    Test_NoTransition_Accessible();          /* 001 */
+    Test_EnterWithoutTransition();           /* 002 */
+    Test_PauseGenIncreased_NoPwrVerify();    /* 003 */
+    Test_DetachAttachIncreased_NoPwrVerify();/* 004 */
+    Test_PauseRestartOnly_NoPwrVerify();     /* 005 */
+    Test_DevicePathLost();                   /* 006 */
+    Test_CounterDecreased();                 /* 007 */
+    Test_AdapterIndexChanged();              /* 008 */
+    Test_PhaseA_Unavailable();              /* 009 */
+    Test_PhaseC_StatsUnavailable();          /* 010 */
+    Test_LifecycleConfirmed_PwrVerified();   /* 011 */
+    Test_UnrelatedAdapterChanges();          /* 012 */
 
     printf("\n====================================\n");
     printf("Results: %d passed, %d failed\n", g_passed, g_failed);

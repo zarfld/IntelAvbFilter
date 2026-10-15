@@ -1907,9 +1907,9 @@ $AllTests = @(
         Libs = ""
         Enabled = $true
         Priority = "P0"
-        Description = "Unit: TC-LCY-IDLE-001 verdict truth table (10 deterministic cases; no hardware access). Verifies idle_verdict.h ComputeIdleVerdict() logic."
+        Description = "Unit: TC-LCY-IDLE-001 verdict truth table (12 deterministic cases; no hardware access). Verifies idle_verdict.h ComputeIdleVerdict() logic including pwr_event_verified gate."
         Issue = "#328"
-        TestCases = 10
+        TestCases = 12
         IOCTLs = ""
         Requirement = "#328"
     }
