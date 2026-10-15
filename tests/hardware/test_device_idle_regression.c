@@ -19,18 +19,21 @@
  *   under power-state change, not a driver unload.
  *
  * What this test does:
- *   Phase A (before): QueryDosDevice, 4-flag CreateFile matrix, read-only IOCTL,
- *                     NDIS lifecycle snapshot (IoctlCount, OidRequestCount).
+ *   Phase A (before): QueryDosDevice, 4-flag CreateFile matrix, GET_VERSION IOCTL,
+ *                     per-adapter lifecycle counter snapshot (via ENUM_ADAPTERS +
+ *                     OPEN_ADAPTER + GET_STATISTICS for each bound adapter).
  *   Phase B (trigger): The USER manually initiates the transition.
  *                      This test waits; it does NOT lock, idle, or power-manage.
- *   Phase C (after):   Same checks as Phase A. Compare all metrics.
- *   Verdict:           PASS = identical accessibility; FAIL = any degradation.
+ *   Phase C (after):   Same checks as Phase A.  Per-adapter identity matched by
+ *                      (vendor_id, device_id, enum_index); counters compared.
+ *   Verdict:           See idle_verdict.h truth table.
  *
  * Constraints (MUST observe):
  *   - Does NOT restart IntelAvbFilter, EventLog, or any other service.
  *   - Does NOT change NIC power settings.
  *   - Does NOT reinstall or reload the driver.
- *   - Only reads from the device (IOCTL_AVB_GET_STATISTICS, IOCTL_AVB_GET_VERSION).
+ *   - Read-only: IOCTL_AVB_GET_VERSION, IOCTL_AVB_ENUM_ADAPTERS,
+ *                IOCTL_AVB_OPEN_ADAPTER, IOCTL_AVB_GET_STATISTICS only.
  *   - Observational only: captures deltas without mutation.
  *
  * Usage (from elevated terminal):
@@ -46,11 +49,11 @@
  *      tests\hardware\test_device_idle_regression.c
  *      /Fe:build\tools\test_device_idle_regression.exe /link advapi32.lib
  *
- * Verdict codes:
- *   0 = TC-LCY-IDLE-001 PASS (device accessible before and after)
- *   1 = TC-LCY-IDLE-001 FAIL (device accessibility degraded — #328 reproduced)
- *   2 = SKIP (precondition not met or insufficient privilege)
- *   3 = TIMEOUT (user did not trigger transition within timeout window)
+ * Verdict codes (from idle_verdict.h):
+ *   0 = TC_PASS         NDIS lifecycle confirmed; device accessible before and after
+ *   1 = TC_FAIL         Device inaccessible after transition (#328 reproduced)
+ *   2 = TC_SKIP         Precondition not met (baseline unavailable)
+ *   3 = TC_INCONCLUSIVE Transition not observed, adapter ambiguity, or timeout
  */
 
 #ifndef _WIN32_WINNT
@@ -62,12 +65,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "avb_ioctl.h"
-
-/* ── Verdict codes ───────────────────────────────────────────────────────── */
-#define TC_PASS    0
-#define TC_FAIL    1
-#define TC_SKIP    2
-#define TC_TIMEOUT 3
+#include "idle_verdict.h"  /* TC_PASS/FAIL/SKIP/TC_INCONCLUSIVE, AdapterSnapshot,
+                              IdleVerdictInput, ComputeIdleVerdict() */
 
 /* ── Device path check ───────────────────────────────────────────────────── */
 static BOOL DevicePathPresent(DWORD *outErr)
@@ -97,44 +96,142 @@ static void ProbeAccessMatrix(AccessEntry *entries, int n)
     }
 }
 
-/* ── IOCTL probe (read-only; logs Win32 error) ───────────────────────────── */
-typedef struct { BOOL version_ok; DWORD version_err; BOOL stats_ok; DWORD stats_err; }
-IoctlSnapshot;
-
-static IoctlSnapshot ProbeIoctls(void)
+/* ── IOCTL health check (GET_VERSION) ────────────────────────────────────── */
+static BOOL ProbeVersionIoctl(DWORD *outErr)
 {
-    IoctlSnapshot s = {0};
     HANDLE h = CreateFileW(L"\\\\.\\IntelAvbFilter",
                            GENERIC_READ | GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        s.version_err = s.stats_err = GetLastError();
-        return s;
+        if (outErr) *outErr = GetLastError();
+        return FALSE;
     }
-    /* IOCTL_AVB_GET_VERSION: minimal read-only health check (always first) */
-    {
-        struct _IOCTL_VERSION vi = {0};
-        DWORD br = 0;
-        s.version_ok = DeviceIoControl(h, IOCTL_AVB_GET_VERSION,
-                                        NULL, 0, &vi, sizeof(vi), &br, NULL);
-        s.version_err = s.version_ok ? 0 : GetLastError();
-    }
-    /* IOCTL_AVB_GET_STATISTICS: per-adapter counters for lifecycle tracking */
-    {
-        AVB_DRIVER_STATISTICS stats = {0};
-        DWORD br = 0;
-        s.stats_ok = DeviceIoControl(h, IOCTL_AVB_GET_STATISTICS,
-                                      NULL, 0, &stats, sizeof(stats), &br, NULL);
-        s.stats_err = s.stats_ok ? 0 : GetLastError();
-    }
+    struct _IOCTL_VERSION vi = {0};
+    DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_GET_VERSION,
+                              NULL, 0, &vi, sizeof(vi), &br, NULL);
+    if (outErr) *outErr = ok ? 0 : GetLastError();
     CloseHandle(h);
-    return s;
+    return ok;
 }
 
-/* ── Print a phase snapshot ──────────────────────────────────────────────── */
-static BOOL PrintPhase(const char *label, AccessEntry *m, int n, IoctlSnapshot *io)
+/* ── Per-adapter lifecycle counter snapshot ──────────────────────────────── */
+/*
+ * Enumerates all filter-bound adapters, opens a fresh device handle per
+ * adapter, binds it via IOCTL_AVB_OPEN_ADAPTER, and reads per-adapter
+ * statistics into snaps[].
+ *
+ * Returns the number of adapters enumerated (0..max_snaps).
+ * snaps[] entries with stats_valid==0 had a failed OPEN or GET_STATISTICS.
+ */
+static int SnapshotAdapters(AdapterSnapshot *snaps, int max_snaps)
 {
+    int i;
+    AVB_ENUM_REQUEST req;
+    DWORD br;
+    int count;
+
+    memset(snaps, 0, (size_t)max_snaps * sizeof(snaps[0]));
+
+    HANDLE hEnum = CreateFileW(L"\\\\.\\IntelAvbFilter",
+                               GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hEnum == INVALID_HANDLE_VALUE) return 0;
+
+    /* First ENUM_ADAPTERS call: index=0, returns total count */
+    memset(&req, 0, sizeof(req));
+    br = 0;
+    if (!DeviceIoControl(hEnum, IOCTL_AVB_ENUM_ADAPTERS,
+                         &req, sizeof(req), &req, sizeof(req), &br, NULL)) {
+        CloseHandle(hEnum);
+        return 0;
+    }
+
+    count = (int)req.count;
+    if (count <= 0) { CloseHandle(hEnum); return 0; }
+    if (count > max_snaps) count = max_snaps;
+
+    /* Collect (VID, DID, capabilities) for each adapter index */
+    typedef struct { UINT16 vid; UINT16 did; UINT32 idx; } AdInfo;
+    AdInfo info[IDLE_MAX_ADAPTERS];
+    memset(info, 0, sizeof(info));
+
+    /* Index 0 was already returned above */
+    info[0].vid = req.vendor_id;
+    info[0].did = req.device_id;
+    info[0].idx = 0;
+
+    for (i = 1; i < count; i++) {
+        AVB_ENUM_REQUEST r;
+        memset(&r, 0, sizeof(r));
+        r.index = (UINT32)i;
+        br = 0;
+        if (DeviceIoControl(hEnum, IOCTL_AVB_ENUM_ADAPTERS,
+                            &r, sizeof(r), &r, sizeof(r), &br, NULL)) {
+            info[i].vid = r.vendor_id;
+            info[i].did = r.device_id;
+            info[i].idx = (UINT32)i;
+        }
+    }
+    CloseHandle(hEnum);
+
+    /* Open a fresh handle per adapter, bind, and read per-adapter stats */
+    for (i = 0; i < count; i++) {
+        AdapterSnapshot *s = &snaps[i];
+        s->vendor_id  = info[i].vid;
+        s->device_id  = info[i].did;
+        s->enum_index = info[i].idx;
+
+        HANDLE h = CreateFileW(L"\\\\.\\IntelAvbFilter",
+                               GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) continue;
+
+        AVB_OPEN_REQUEST oreq;
+        memset(&oreq, 0, sizeof(oreq));
+        oreq.vendor_id = info[i].vid;
+        oreq.device_id = info[i].did;
+        oreq.index     = info[i].idx;
+        br = 0;
+        if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER,
+                             &oreq, sizeof(oreq), &oreq, sizeof(oreq), &br, NULL)
+            || oreq.status != 0) {
+            CloseHandle(h);
+            continue;
+        }
+
+        AVB_DRIVER_STATISTICS stats;
+        memset(&stats, 0, sizeof(stats));
+        br = 0;
+        if (DeviceIoControl(h, IOCTL_AVB_GET_STATISTICS,
+                            NULL, 0, &stats, sizeof(stats), &br, NULL)
+            && br == sizeof(AVB_DRIVER_STATISTICS)) {
+            s->FilterAttachCount      = stats.FilterAttachCount;
+            s->FilterPauseCount       = stats.FilterPauseCount;
+            s->FilterRestartCount     = stats.FilterRestartCount;
+            s->FilterDetachCount      = stats.FilterDetachCount;
+            s->PauseRestartGeneration = stats.PauseRestartGeneration;
+            s->OidRequestCount        = stats.OidRequestCount;
+            s->stats_valid            = 1;
+        }
+        CloseHandle(h);
+    }
+
+    return count;
+}
+
+/* ── Phase print: access matrix + version IOCTL + per-adapter snapshot ───── */
+/*
+ * Returns TRUE if all required access checks and GET_VERSION succeed.
+ * Fills *out_count and snaps[0..IDLE_MAX_ADAPTERS-1] with per-adapter data.
+ */
+static BOOL PrintPhase(const char *label, AccessEntry *m, int n,
+                       AdapterSnapshot *snaps, int *out_count)
+{
+    int i;
     DWORD qdErr = 0;
     BOOL  qd    = DevicePathPresent(&qdErr);
     BOOL  allOk = qd;
@@ -143,18 +240,44 @@ static BOOL PrintPhase(const char *label, AccessEntry *m, int n, IoctlSnapshot *
            label, qd ? "OK" : "FAIL", qdErr);
 
     ProbeAccessMatrix(m, n);
-    for (int i = 0; i < n; i++) {
+    for (i = 0; i < n; i++) {
         printf("  [%s] CreateFile %-22s : %s (err=%lu)\n",
                label, m[i].label, m[i].ok ? "OK" : "FAIL", m[i].err);
         if (!m[i].ok) allOk = FALSE;
     }
 
-    *io = ProbeIoctls();
-    printf("  [%s] GET_VERSION                         : %s (err=%lu)\n",
-           label, io->version_ok ? "OK" : "FAIL", io->version_err);
-    printf("  [%s] GET_STATISTICS                      : %s (err=%lu)\n",
-           label, io->stats_ok ? "OK" : "FAIL", io->stats_err);
-    if (!io->version_ok) allOk = FALSE;
+    /* GET_VERSION: read-only health check */
+    {
+        DWORD verErr = 0;
+        BOOL verOk = ProbeVersionIoctl(&verErr);
+        printf("  [%s] GET_VERSION                         : %s (err=%lu)\n",
+               label, verOk ? "OK" : "FAIL", verErr);
+        if (!verOk) allOk = FALSE;
+    }
+
+    /* Per-adapter lifecycle snapshot */
+    *out_count = SnapshotAdapters(snaps, IDLE_MAX_ADAPTERS);
+    printf("  [%s] Adapters enumerated: %d\n", label, *out_count);
+    for (i = 0; i < *out_count; i++) {
+        const AdapterSnapshot *s = &snaps[i];
+        if (!s->stats_valid) {
+            printf("  [%s]   [%d] VID=%04X DID=%04X idx=%u -- STATS UNAVAILABLE\n",
+                   label, i, (unsigned)s->vendor_id, (unsigned)s->device_id,
+                   (unsigned)s->enum_index);
+            continue;
+        }
+        printf("  [%s]   [%d] VID=%04X DID=%04X idx=%u  "
+               "Attach=%llu Pause=%llu Restart=%llu Detach=%llu Gen=%llu OID=%llu\n",
+               label, i,
+               (unsigned)s->vendor_id, (unsigned)s->device_id,
+               (unsigned)s->enum_index,
+               (unsigned long long)s->FilterAttachCount,
+               (unsigned long long)s->FilterPauseCount,
+               (unsigned long long)s->FilterRestartCount,
+               (unsigned long long)s->FilterDetachCount,
+               (unsigned long long)s->PauseRestartGeneration,
+               (unsigned long long)s->OidRequestCount);
+    }
 
     return allOk;
 }
@@ -164,11 +287,15 @@ int main(int argc, char *argv[])
 {
     int timeout_s = 120;
     if (argc > 1) timeout_s = atoi(argv[1]);
-    const char *envT = getenv("TC_IDLE_TIMEOUT_S");
-    if (envT) { int v = atoi(envT); if (v > 0) timeout_s = v; }
+    {
+        const char *envT = getenv("TC_IDLE_TIMEOUT_S");
+        if (envT) { int v = atoi(envT); if (v > 0) timeout_s = v; }
+    }
     int auto_mode = 1; /* default: timeout-only (no Enter required) */
-    const char *envA = getenv("TC_IDLE_AUTO");
-    if (envA && atoi(envA) == 0) auto_mode = 0;
+    {
+        const char *envA = getenv("TC_IDLE_AUTO");
+        if (envA && atoi(envA) == 0) auto_mode = 0;
+    }
 
     printf("TC-LCY-IDLE-001: Device accessibility across idle/power transition\n");
     printf("  Regression: #328 (device absent after NIC power management)\n");
@@ -183,15 +310,21 @@ int main(int argc, char *argv[])
         { GENERIC_WRITE,                "GENERIC_WRITE",      FALSE, 0 },
         { GENERIC_READ | GENERIC_WRITE, "GENERIC_READ|WRITE", FALSE, 0 },
     };
-    IoctlSnapshot io_a = {0};
-    BOOL phase_a_ok = PrintPhase("A", m_a, 4, &io_a);
-    if (!phase_a_ok) {
+
+    IdleVerdictInput vin;
+    memset(&vin, 0, sizeof(vin));
+
+    vin.phase_a_ok = PrintPhase("A", m_a, 4,
+                                vin.snap_a, &vin.adapter_count_a) ? 1 : 0;
+
+    if (!vin.phase_a_ok) {
         printf("\n  [SKIP] Phase A precondition not met -- device not accessible at baseline.\n");
         printf("  ACTION: check service status and driver installation.\n\n");
-        printf("Summary: TC-LCY-IDLE-001 SKIP\n");
+        printf("Summary: TC-LCY-IDLE-001 SKIP (exit 2)\n");
         return TC_SKIP;
     }
-    printf("  [PASS-A] Baseline verified.\n\n");
+    printf("  [PASS-A] Baseline verified. %d adapter(s) snapshotted.\n\n",
+           vin.adapter_count_a);
 
     /* ── Phase B: wait for user-initiated transition ───────────────────────── */
     printf("[Phase B] Waiting for idle/power transition\n");
@@ -200,43 +333,40 @@ int main(int argc, char *argv[])
     printf("  When done (or to proceed without transition): press Enter\n");
     printf("  Automatic timeout in %d seconds.\n\n", timeout_s);
 
-    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD start   = GetTickCount();
-    BOOL  entered = FALSE;
+    {
+        HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD  start  = GetTickCount();
+        BOOL   entered = FALSE;
 
-    while (!entered) {
-        /* Non-blocking check for Enter key */
-        INPUT_RECORD ir;
-        DWORD nr = 0;
-        if (GetNumberOfConsoleInputEvents(hStdin, &nr) && nr > 0) {
-            ReadConsoleInput(hStdin, &ir, 1, &nr);
-            if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown &&
-                ir.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) {
-                entered = TRUE;
-                printf("  [Enter pressed -- proceeding to Phase C]\n\n");
-                break;
+        while (!entered) {
+            INPUT_RECORD ir;
+            DWORD nr = 0;
+            if (GetNumberOfConsoleInputEvents(hStdin, &nr) && nr > 0) {
+                ReadConsoleInput(hStdin, &ir, 1, &nr);
+                if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown &&
+                    ir.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) {
+                    entered = TRUE;
+                    printf("  [Enter pressed -- proceeding to Phase C]\n\n");
+                    break;
+                }
             }
-        }
-        DWORD elapsed = GetTickCount() - start;
-        if (!auto_mode && !entered) {
-            /* Manual mode: only Enter triggers */
-            Sleep(100);
-            continue;
-        }
-        if (elapsed >= (DWORD)(timeout_s * 1000)) {
-            if (!entered) {
+            DWORD elapsed = GetTickCount() - start;
+            if (!auto_mode && !entered) {
+                Sleep(100);
+                continue;
+            }
+            if (elapsed >= (DWORD)(timeout_s * 1000)) {
                 printf("\n  [TIMEOUT] %d s elapsed -- proceeding to Phase C automatically.\n\n",
                        timeout_s);
+                break;
             }
-            break;
+            if (elapsed % 10000 < 200) {
+                printf("  ... %d s remaining (press Enter to continue now)\r",
+                       timeout_s - (int)(elapsed / 1000));
+                fflush(stdout);
+            }
+            Sleep(200);
         }
-        /* Print countdown every 10 s */
-        if (elapsed % 10000 < 200) {
-            printf("  ... %d s remaining (press Enter to continue now)\r",
-                   timeout_s - (int)(elapsed / 1000));
-            fflush(stdout);
-        }
-        Sleep(200);
     }
 
     /* ── Phase C: post-transition snapshot ─────────────────────────────────── */
@@ -247,46 +377,60 @@ int main(int argc, char *argv[])
         { GENERIC_WRITE,                "GENERIC_WRITE",      FALSE, 0 },
         { GENERIC_READ | GENERIC_WRITE, "GENERIC_READ|WRITE", FALSE, 0 },
     };
-    IoctlSnapshot io_c = {0};
-    BOOL phase_c_ok = PrintPhase("C", m_c, 4, &io_c);
+
+    vin.phase_c_ok = PrintPhase("C", m_c, 4,
+                                vin.snap_c, &vin.adapter_count_c) ? 1 : 0;
+
+    /* Capture Win32 error for FAIL classification */
+    if (!vin.phase_c_ok) {
+        DWORD qdErr = 0;
+        DevicePathPresent(&qdErr);
+        /* Prefer the most specific error: path-absent → err=2; access-denied → err=5 */
+        vin.phase_c_win32_err = qdErr ? qdErr
+                              : (m_c[3].err ? m_c[3].err : m_c[2].err);
+    }
     printf("\n");
 
     /* ── Verdict ───────────────────────────────────────────────────────────── */
-    BOOL degraded = !phase_c_ok;
-
-    /* Classify device-path loss vs access-denied */
-    const char *failure_class = "";
-    if (!degraded) {
-        /* all OK */
-    } else if (!DevicePathPresent(NULL)) {
-        /* ERROR_FILE_NOT_FOUND (2): #328 exact symptom */
-        failure_class = "DEVICE_PATH_ABSENT";
-    } else if (m_c[3].err == ERROR_ACCESS_DENIED || m_c[2].err == ERROR_ACCESS_DENIED) {
-        /* Separate ACCESS_DENIED (5) from path-absent (2).
-         * ACCESS_DENIED can occur if the test runs non-elevated after an idle transition
-         * that changes the device security descriptor. */
-        failure_class = "ACCESS_DENIED_AFTER_IDLE";
-    } else {
-        failure_class = "DEVICE_IOCTL_FAILURE";
-    }
+    char reason[512];
+    memset(reason, 0, sizeof(reason));
+    int verdict = ComputeIdleVerdict(&vin, reason, sizeof(reason));
 
     printf("[Verdict]\n");
-    printf("  Phase A accessible : %s\n", phase_a_ok ? "YES" : "NO");
-    printf("  Phase C accessible : %s\n", phase_c_ok ? "YES" : "NO");
-    printf("  Degradation        : %s\n", degraded ? "YES" : "NO");
-    if (degraded) printf("  Failure class      : %s\n", failure_class);
+    printf("  Phase A accessible : %s\n", vin.phase_a_ok ? "YES" : "NO");
+    printf("  Phase C accessible : %s\n", vin.phase_c_ok ? "YES" : "NO");
+    printf("  Adapters (A/C)     : %d / %d\n",
+           vin.adapter_count_a, vin.adapter_count_c);
+    printf("  Outcome            : %s\n", reason);
     printf("\n");
 
-    if (!degraded) {
-        printf("[PASS] TC-LCY-IDLE-001: device accessible before and after idle transition\n");
-        printf("  NOTE: #328 NOT REPRODUCED in this run -- NOT RESOLVED.\n");
-        printf("  To reproduce: increase idle time, enable NIC power management, or\n");
-        printf("  perform multiple lock/unlock cycles.\n");
-        return TC_PASS;
-    } else {
-        printf("[FAIL] TC-LCY-IDLE-001: %s -- #328 REPRODUCED\n", failure_class);
-        printf("  Report: Win32 errors above; compare with #328 acceptance criteria.\n");
-        printf("  DO NOT reinstall driver without explicit authorization.\n");
-        return TC_FAIL;
+    switch (verdict) {
+    case TC_PASS:
+        printf("[PASS] TC-LCY-IDLE-001: VERIFIED_TRANSITION (exit 0)\n");
+        printf("  NDIS lifecycle event confirmed; device accessible before and after.\n");
+        printf("  #328 NOT REPRODUCED in this run.\n");
+        break;
+    case TC_FAIL:
+        printf("[FAIL] TC-LCY-IDLE-001: DEVICE_FAILURE_OBSERVED (exit 1)\n");
+        printf("  Device inaccessible after transition -- #328 REPRODUCED.\n");
+        printf("  Win32 error: %lu. DO NOT reinstall driver without explicit authorization.\n",
+               (unsigned long)vin.phase_c_win32_err);
+        break;
+    case TC_SKIP:
+        printf("[SKIP] TC-LCY-IDLE-001: BASELINE_UNAVAILABLE (exit 2)\n");
+        printf("  ACTION: verify service status and driver installation.\n");
+        break;
+    default: /* TC_INCONCLUSIVE */
+        printf("[INCONCLUSIVE] TC-LCY-IDLE-001: %s (exit 3)\n", reason);
+        printf("  No NDIS lifecycle activity was observed between Phase A and Phase C.\n");
+        printf("  To obtain a verifiable result:\n");
+        printf("    1. Trigger an actual idle/power-management transition (Win+L, then wait\n");
+        printf("       for display-off, then unlock) before the timeout expires.\n");
+        printf("    2. For forced NIC power cycling: disable and re-enable the adapter in\n");
+        printf("       Device Manager from a SEPARATE session (not this console window).\n");
+        printf("    3. Increase timeout: set TC_IDLE_TIMEOUT_S=300 and retry.\n");
+        break;
     }
+
+    return verdict;
 }

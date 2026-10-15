@@ -1892,10 +1892,25 @@ $AllTests = @(
         Libs = "advapi32.lib"
         Enabled = $true
         Priority = "P0"
-        Description = "Idle/power transition observational regression (TC-LCY-IDLE-001): device must remain accessible after session lock/unlock."
+        Description = "Idle/power transition observational regression (TC-LCY-IDLE-001): per-adapter lifecycle snapshot via ENUM/OPEN/GET_STATISTICS; verdict requires NDIS lifecycle evidence."
         Issue = "#328"
         TestCases = 1
-        IOCTLs = "IOCTL_AVB_GET_VERSION IOCTL_AVB_GET_STATISTICS"
+        IOCTLs = "IOCTL_AVB_GET_VERSION IOCTL_AVB_ENUM_ADAPTERS IOCTL_AVB_OPEN_ADAPTER IOCTL_AVB_GET_STATISTICS"
+        Requirement = "#328"
+    }
+    @{
+        Name = "test_idle_verdict"
+        Type = "cl"
+        Source = "tests\unit\lifecycle\test_idle_verdict.c"
+        Output = "test_idle_verdict.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = ""
+        Enabled = $true
+        Priority = "P0"
+        Description = "Unit: TC-LCY-IDLE-001 verdict truth table (10 deterministic cases; no hardware access). Verifies idle_verdict.h ComputeIdleVerdict() logic."
+        Issue = "#328"
+        TestCases = 10
+        IOCTLs = ""
         Requirement = "#328"
     }
 )
