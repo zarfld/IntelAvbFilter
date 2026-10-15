@@ -282,6 +282,37 @@ static BOOL PrintPhase(const char *label, AccessEntry *m, int n,
     return allOk;
 }
 
+/* ── Post-run evidence lines (consumed by tools/test/Evaluate-IdleTransition.ps1) ─ */
+/* Unambiguous UTC ISO-8601 with milliseconds, e.g. 2026-10-15T18:01:02.123Z. */
+static void EmitStamp(const char *event)
+{
+    SYSTEMTIME st;
+    GetSystemTime(&st);
+    printf("[EVIDENCE] stamp event=%s utc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\n",
+           event, st.wYear, st.wMonth, st.wDay,
+           st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+}
+
+static void EmitPhaseEvidence(const char *label, BOOL ok, DWORD win32Err,
+                              const AdapterSnapshot *snaps, int count)
+{
+    int i;
+    printf("[EVIDENCE] phase=%s device_ok=%d win32_err=%lu adapters=%d\n",
+           label, ok ? 1 : 0, (unsigned long)win32Err, count);
+    for (i = 0; i < count && i < IDLE_MAX_ADAPTERS; i++) {
+        const AdapterSnapshot *s = &snaps[i];
+        printf("[EVIDENCE] adapter phase=%s idx=%u vid=%04X did=%04X valid=%d "
+               "attach=%llu pause=%llu restart=%llu detach=%llu gen=%llu\n",
+               label, (unsigned)s->enum_index,
+               (unsigned)s->vendor_id, (unsigned)s->device_id, s->stats_valid,
+               (unsigned long long)s->FilterAttachCount,
+               (unsigned long long)s->FilterPauseCount,
+               (unsigned long long)s->FilterRestartCount,
+               (unsigned long long)s->FilterDetachCount,
+               (unsigned long long)s->PauseRestartGeneration);
+    }
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
@@ -314,8 +345,11 @@ int main(int argc, char *argv[])
     IdleVerdictInput vin;
     memset(&vin, 0, sizeof(vin));
 
+    EmitStamp("phaseA_start");
     vin.phase_a_ok = PrintPhase("A", m_a, 4,
                                 vin.snap_a, &vin.adapter_count_a) ? 1 : 0;
+    EmitStamp("phaseA_end");
+    EmitPhaseEvidence("A", vin.phase_a_ok, 0, vin.snap_a, vin.adapter_count_a);
 
     if (!vin.phase_a_ok) {
         printf("\n  [SKIP] Phase A precondition not met -- device not accessible at baseline.\n");
@@ -333,6 +367,7 @@ int main(int argc, char *argv[])
     printf("  When done (or to proceed without transition): press Enter\n");
     printf("  Automatic timeout in %d seconds.\n\n", timeout_s);
 
+    EmitStamp("phaseB_start");
     {
         HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
         DWORD  start  = GetTickCount();
@@ -369,6 +404,8 @@ int main(int argc, char *argv[])
         }
     }
 
+    EmitStamp("phaseB_end");
+
     /* ── Phase C: post-transition snapshot ─────────────────────────────────── */
     printf("[Phase C] Post-transition snapshot\n");
     AccessEntry m_c[] = {
@@ -378,8 +415,10 @@ int main(int argc, char *argv[])
         { GENERIC_READ | GENERIC_WRITE, "GENERIC_READ|WRITE", FALSE, 0 },
     };
 
+    EmitStamp("phaseC_start");
     vin.phase_c_ok = PrintPhase("C", m_c, 4,
                                 vin.snap_c, &vin.adapter_count_c) ? 1 : 0;
+    EmitStamp("phaseC_end");
 
     /* Capture Win32 error for FAIL classification */
     if (!vin.phase_c_ok) {
@@ -389,12 +428,15 @@ int main(int argc, char *argv[])
         vin.phase_c_win32_err = qdErr ? qdErr
                               : (m_c[3].err ? m_c[3].err : m_c[2].err);
     }
+    EmitPhaseEvidence("C", vin.phase_c_ok, vin.phase_c_win32_err,
+                      vin.snap_c, vin.adapter_count_c);
     printf("\n");
 
     /* ── Verdict ───────────────────────────────────────────────────────────── */
     char reason[512];
     memset(reason, 0, sizeof(reason));
     int verdict = ComputeIdleVerdict(&vin, reason, sizeof(reason));
+    printf("[EVIDENCE] observational_exit=%d\n", verdict);
 
     printf("[Verdict]\n");
     printf("  Phase A accessible : %s\n", vin.phase_a_ok ? "YES" : "NO");
@@ -405,14 +447,9 @@ int main(int argc, char *argv[])
     printf("\n");
 
     switch (verdict) {
-    case TC_PASS:
-        printf("[PASS] TC-LCY-IDLE-001: VERIFIED_TRANSITION (exit 0)\n");
-        printf("  NDIS lifecycle event confirmed; device accessible before and after.\n");
-        printf("  #328 NOT REPRODUCED in this run.\n");
-        break;
     case TC_FAIL:
         printf("[FAIL] TC-LCY-IDLE-001: DEVICE_FAILURE_OBSERVED (exit 1)\n");
-        printf("  Device inaccessible after transition -- #328 REPRODUCED.\n");
+        printf("  Control device inaccessible after Phase B (cause UNCONFIRMED).\n");
         printf("  Win32 error: %lu. DO NOT reinstall driver without explicit authorization.\n",
                (unsigned long)vin.phase_c_win32_err);
         break;
@@ -422,13 +459,8 @@ int main(int argc, char *argv[])
         break;
     default: /* TC_INCONCLUSIVE */
         printf("[INCONCLUSIVE] TC-LCY-IDLE-001: %s (exit 3)\n", reason);
-        printf("  No NDIS lifecycle activity was observed between Phase A and Phase C.\n");
-        printf("  To obtain a verifiable result:\n");
-        printf("    1. Trigger an actual idle/power-management transition (Win+L, then wait\n");
-        printf("       for display-off, then unlock) before the timeout expires.\n");
-        printf("    2. For forced NIC power cycling: disable and re-enable the adapter in\n");
-        printf("       Device Manager from a SEPARATE session (not this console window).\n");
-        printf("    3. Increase timeout: set TC_IDLE_TIMEOUT_S=300 and retry.\n");
+        printf("  Exit 3 = OBSERVATIONAL result only; this executable never reports PASS.\n");
+        printf("  Final #328 verdict: tools/test/Evaluate-IdleTransition.ps1 -LogFile <this log>\n");
         break;
     }
 
