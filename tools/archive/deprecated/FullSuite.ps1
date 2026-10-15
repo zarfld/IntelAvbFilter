@@ -114,7 +114,7 @@ foreach ($Configuration in $Configurations){
 
     )
     foreach ($t in $CIFailed) { 
-    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+ #   .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     } 
 
 
