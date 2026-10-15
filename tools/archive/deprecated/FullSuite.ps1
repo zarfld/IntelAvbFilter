@@ -16,25 +16,20 @@ foreach ($Configuration in $Configurations){
 
 
 
-    $CIFailed = @("test_tx_timestamp_provenance.exe",
+    $CIFailed = @("test_ptp_event_latency.exe",
+                    "test_event_log.exe", 
+                    "test_ioctl_offset.exe ",
                     "test_tx_timestamp_retrieval.exe",
-                    "test_ioctl_xstamp.exe", 
-                    "test_multidev_adapter_enum.exe",
                     "test_ioctl_tas.exe",
-                    #"test_atdecc_aen_protocol.exe",
-                    "test_atdecc_aen_protocol.exe",
-                    "test_ioctl_tas.exe",
-                   # "test_tx_timestamp_retrieval.exe",
-                    "test_lifecycle_coverage.exe",
-                    "test_event_log.exe",
-                    "test_ptp_event_latency.exe",
-                    "test_control_device_lifecycle.exe",
-                    "test_hw_state_machine.exe",
-                    "test_ptp_corr_extended.exe",
-                    "test_vv_corr_003_crossdomain.exe",
-                    "test_ptp_phc_stability.exe")
+                    "test_lifecycle_coverage.exe ",
+                    "test_tsn_ioctl_handlers.exe",
+                    "ptp_clock_control_test.exe",
+                    "rx_timestamping.exe",
+                    "hw_timestamping_control.exe",
+                    "ptp_clock_control_production.exe",
+                    "test_ptp_phc_stability.exe ")
     foreach ($t in $CIFailed) { 
- #   .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     } 
 
 
