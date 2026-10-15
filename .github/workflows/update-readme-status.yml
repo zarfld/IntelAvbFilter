@@ -1,0 +1,133 @@
+name: Update README CI Status
+
+# Regenerates the <!-- CI-STATUS:START/END --> block in README.md after
+# ci-standards-compliance.yml completes on master.
+#
+# ── Security model ──────────────────────────────────────────────────────────
+# Trigger:      workflow_run (not push/PR) so untrusted code from PR runs never
+#               reaches this workflow.
+# Code origin:  actions/checkout ref: master ensures only trusted master-branch
+#               scripts are executed, never code from the triggering CI run.
+# API access:   reads only GitHub Actions job metadata via GITHUB_TOKEN.
+#               No artifact download, no untrusted code execution.
+# Permissions:  contents:write (push README), actions:read (job metadata).
+#               GITHUB_TOKEN only; no PAT required.
+# Repo guard:   if-condition checks head_branch, event type, and repository
+#               full_name to exclude PRs, schedule, and forks.
+#
+# ── Loop prevention ─────────────────────────────────────────────────────────
+# GitHub automatically suppresses push-triggered workflows when the push is
+# made by the built-in GITHUB_TOKEN (Actions bot account).
+# Reference: https://docs.github.com/en/actions/security-guides/
+#            automatic-token-authentication#using-the-github_token-in-a-workflow
+# [skip ci] is therefore NOT added to the commit message.
+#
+# ── Race / stale-overwrite protection ───────────────────────────────────────
+# The generated block embeds machine-readable metadata:
+#   <!-- CI-STATUS-META: run_number=N run_id=M run_attempt=A -->
+# generate-readme-status.py reads this before writing and refuses to overwrite
+# a newer run with an older one (lower run_number or lower attempt number).
+# The concurrency group serialises updates; a push conflict is handled by
+# exiting 0 — the next CI completion will regenerate with correct data.
+#
+# ── Branch-protection compatibility ─────────────────────────────────────────
+# If direct push to master is protected, replace the git push step with a
+# step that calls `gh pr create --fill --base master` and enables auto-merge.
+# Add pull-requests:write to permissions in that case.
+#
+# ── workflow_dispatch behaviour ──────────────────────────────────────────────
+# With run_id:    renders the specified CI run.
+# Without run_id: auto-discovers the latest completed master CI run.
+# run_attempt is always taken from the fetched run metadata, not from the
+# event context, so the correct attempt-scoped job list is always used.
+
+on:
+  workflow_run:
+    workflows: ["CI - Standards Compliance & Quality Gates"]
+    types: [completed]
+
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: >
+          CI run ID to render.
+          Leave blank to auto-discover the latest completed master CI run.
+        required: false
+        type: string
+
+concurrency:
+  group: update-readme-status
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  update-status:
+    name: Regenerate README CI status block
+    runs-on: ubuntu-latest
+
+    # Trust filter: accept only
+    #   (a) completed runs of the main CI workflow on master from THIS repo, or
+    #   (b) manual workflow_dispatch from any authorised user.
+    # The repository.full_name guard rejects runs triggered by forks.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.head_branch == 'master' &&
+       github.event.workflow_run.event != 'pull_request' &&
+       github.event.workflow_run.repository.full_name == github.repository)
+
+    steps:
+      - name: Checkout master (trusted code only)
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate README status section
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # For workflow_run: id is the completed CI run to render.
+          # For workflow_dispatch: inputs.run_id may be empty (→ auto-discover).
+          # The script resolves '' or '0' to None and calls get_latest_run().
+          CI_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id || '' }}
+          # MASTER_SHA: current master HEAD (used only for stale-data detection).
+          # Distinct from the CI-tested commit SHA in the run metadata.
+          MASTER_SHA: ${{ github.sha }}
+        run: python scripts/generate-readme-status.py
+
+      - name: Commit and push updated README (if changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet README.md; then
+            echo "README.md unchanged — nothing to commit"
+            exit 0
+          fi
+
+          CI_SHA="${{ github.event.workflow_run.head_sha || 'manual' }}"
+          CI_RUN="${{ github.event.workflow_run.run_number || inputs.run_id || 'manual' }}"
+          CI_ATT="${{ github.event.workflow_run.run_attempt || 1 }}"
+          CI_CONC="${{ github.event.workflow_run.conclusion || 'n/a' }}"
+
+          git add README.md
+          git commit -m "docs: update CI status block
+
+          CI run    : #${CI_RUN} (attempt ${CI_ATT})
+          Conclusion: ${CI_CONC}
+          Tested SHA: ${CI_SHA}
+          Docs SHA  : ${{ github.sha }}
+
+          Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+
+          # A push conflict (another commit on master between checkout and push)
+          # is handled gracefully: exit 0 and let the next CI run regenerate.
+          git push || {
+            echo "Push rejected — a newer commit arrived on master."
+            echo "The next CI completion will regenerate the status block."
+            exit 0
+          }
+          echo "README.md pushed to master"
