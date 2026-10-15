@@ -316,6 +316,7 @@ $HardwareMandatoryTests = @(
     # PHC query / availability
     "test_ioctl_phc_query",            # IOCTL_AVB_GET_TIMESTAMP read-only
     "test_ioctl_xstamp",               # cross-timestamp PHC---QPC (VV-CORR-003)
+    "test_ioctl_phc_crosstimestamp_v2", # V2 provenance per adapter; INCONCLUSIVE=FAIL (#340)
     "ptp_clock_control_test",          # PHC coherence TC-5a/TC-5b (read-only correlation)
     # Multi-adapter isolation
     "test_all_adapters",               # enumerate + open all adapters
@@ -391,6 +392,7 @@ $HardwareUnitTests = @(
     "test_ioctl_phc_epoch",        # PHC epoch management -- (#196)
     "test_ioctl_phc_monotonicity", # PHC monotonicity guarantee -- (#197)
     "test_ioctl_xstamp",           # cross-timestamp (PTP/system correlation) -- (#198)
+    "test_ioctl_xstamp_v2",        # V2 ABI + HIL reachability (#340)
     "test_ioctl_abi",              # IOCTL ABI backward-compatibility
     "test_ioctl_access_control",   # IOCTL access-control (privilege enforcement)
     "test_ioctl_buffer_fuzz",      # IOCTL buffer-boundary fuzzing (security)

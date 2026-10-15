@@ -568,6 +568,32 @@ static int TestClockDrift(HANDLE h) {
  * Verifies: #238 (TEST-PTP-001: HW Timestamp Correlation)
  * Traces to: #48 (REQ-F-IOCTL-PHC-004) | #149 (REQ-F-PTP-007)
  * =========================================================================*/
+
+/* Issue one IOCTL_AVB_PHC_CROSSTIMESTAMP_V2 for adapter ai.
+ * Returns TRUE and fills *out when the IOCTL succeeds and valid==1.
+ * Used exclusively by TestPhcQpcCoherence TC-5b. */
+static BOOL IssueV2XTimestamp(HANDLE h, ULONG ai,
+                               AVB_CROSS_TIMESTAMP_V2_REQUEST *out)
+{
+    DWORD br = 0;
+    ZeroMemory(out, sizeof(*out));
+    out->struct_version = AVB_XTSTAMP_V2_VERSION;
+    out->struct_size    = (avb_u32)sizeof(*out);
+    out->adapter_index  = ai;
+    return DeviceIoControl(h, IOCTL_AVB_PHC_CROSSTIMESTAMP_V2,
+                           out, sizeof(*out), out, sizeof(*out), &br, NULL)
+           && out->valid;
+}
+
+static const char *V2SrcName(avb_u32 s) {
+    switch (s) {
+    case AVB_PHC_SOURCE_REGISTER_DERIVED: return "REGISTER_DERIVED";
+    case AVB_PHC_SOURCE_SW_WALLCLOCK:     return "SW_WALLCLOCK";
+    case AVB_PHC_SOURCE_UNAVAILABLE:      return "UNAVAILABLE";
+    default:                              return "UNKNOWN";
+    }
+}
+
 static int TestPhcQpcCoherence(HANDLE h)
 {
     printf("\n========================================\n");
@@ -732,143 +758,105 @@ static int TestPhcQpcCoherence(HANDLE h)
         }
 
         /* -------------------------------------------------------------- *
-         * TC-5b provenance gate (P0.2, Fixes #340)                       *
-         * One V2 cross-timestamp call establishes the PHC clock source   *
-         * before rate measurement begins.  If V2 is unavailable (old     *
-         * driver) or the source is not REGISTER_DERIVED, TC-5b cannot    *
-         * claim hardware-derived coherence — report INCONCLUSIVE and     *
-         * fail closed.  Rate measurement is only meaningful when the      *
-         * clock is hardware-derived; a SW_WALLCLOCK rate ≈ 1.0 merely    *
-         * measures wall-clock accuracy, not PHC/QPC coherence.           *
-         * -------------------------------------------------------------- */
-        {
-            AVB_CROSS_TIMESTAMP_V2_REQUEST v2prov;
-            ZeroMemory(&v2prov, sizeof(v2prov));
-            v2prov.struct_version = AVB_XTSTAMP_V2_VERSION;
-            v2prov.struct_size    = (avb_u32)sizeof(v2prov);
-            v2prov.adapter_index  = (ULONG)ai;
-            DWORD brV2 = 0;
-            BOOL okV2 = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP_V2,
-                                        &v2prov, sizeof(v2prov),
-                                        &v2prov, sizeof(v2prov), &brV2, NULL);
-            if (!okV2 || !v2prov.valid) {
-                printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE: V2 IOCTL unavailable"
-                       " (old driver or driver error, GLE=%lu) —"
-                       " hardware provenance unverifiable\n",
-                       ai, GetLastError());
-                totalFailed++;
-                CloseHandle(hAdapter);
-                continue;
-            }
-            if (v2prov.avb_phc_source != AVB_PHC_SOURCE_REGISTER_DERIVED) {
-                static const char *srcName[] = {
-                    "REGISTER_DERIVED", "SW_WALLCLOCK", "UNAVAILABLE", "UNKNOWN"
-                };
-                avb_u32 s = v2prov.avb_phc_source;
-                const char *sn = (s < 4) ? srcName[s] : "UNKNOWN";
-                printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE:"
-                       " PHC source=%s (rc=%d) —"
-                       " hardware-derived timestamp not confirmed;"
-                       " rate measurement would reflect %s, not hardware PHC\n",
-                       ai, sn, v2prov.get_systime_rc,
-                       (v2prov.avb_phc_source == AVB_PHC_SOURCE_SW_WALLCLOCK)
-                           ? "wall-clock" : "unavailable clock");
-                totalFailed++;
-                CloseHandle(hAdapter);
-                continue;
-            }
-            printf("  [INFO] TC-5b/adapter %d: provenance=REGISTER_DERIVED"
-                   " (rc=%d) — hardware coherence measurement proceeding\n",
-                   ai, v2prov.get_systime_rc);
-        }
-
-        /* -------------------------------------------------------------- *
-         * TC-5b: PHC monotonicity + rate sanity check                    *
-         * Three cross-timestamps: r1 (from TC-5a), r2 (+200 ms), r3.     *
-         * PASS: PHC monotone AND rate in [0.95, 1.10] real-time.         *
-         * Rate stability logged as informational; active PTP sync may    *
-         * legitimately change TIMINCA mid-window.                        *
+         * TC-5b: PHC monotonicity + rate sanity check (P0.2, Fixes #340) *
+         * All three rate samples are V2.  Each window's provenance is    *
+         * independently verified; SW_WALLCLOCK or mixed-provenance        *
+         * windows cannot contribute to a hardware-PASS result.            *
+         *                                                                  *
+         * v2r1 is a fresh V2 sample taken here — not the V1 r1 from      *
+         * TC-5a, which has no provenance information.                     *
+         *                                                                  *
+         * FAIL    = demonstrated hardware-quality violation (rate bad,    *
+         *           non-monotone) when all contributing endpoints are HW. *
+         * INCONCLUSIVE = missing or insufficient hardware provenance.     *
+         * Both cause totalFailed++ (mandatory fail-closed).               *
          * -------------------------------------------------------------- */
         printf("\nTC-5b: PHC monotonicity + rate sanity [0.95..1.10x] (adapter %d)\n", ai);
 
-        if (r1.qpc_frequency == 0) {
+        AVB_CROSS_TIMESTAMP_V2_REQUEST v2r1;
+        if (!IssueV2XTimestamp(hAdapter, (ULONG)ai, &v2r1)) {
+            printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE: V2 r1 unavailable"
+                   " (old driver or error, GLE=%lu)\n", ai, GetLastError());
+            totalFailed++;
+            CloseHandle(hAdapter);
+            continue;
+        }
+        if (v2r1.qpc_frequency == 0) {
             printf("  [FAIL] TC-5b/adapter %d: qpc_frequency == 0\n", ai);
             totalFailed++;
             CloseHandle(hAdapter);
             continue;
         }
 
-        ULONGLONG freq = r1.qpc_frequency;
+        ULONGLONG freq = v2r1.qpc_frequency;
 
-        /* ---- Window 1: r1 -> r2 ---- */
+        /* ---- Window 1: v2r1 -> v2r2 (+200 ms) ---- */
         Sleep(200);
-
-        AVB_CROSS_TIMESTAMP_REQUEST r2;
-        ZeroMemory(&r2, sizeof(r2));
-        r2.adapter_index = (ULONG)ai;
-        br = 0;
-        ok = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP,
-                             &r2, sizeof(r2), &r2, sizeof(r2), &br, NULL);
-
-        if (!ok || !r2.valid || r2.status != 0) {
-            printf("  [FAIL] TC-5b/adapter %d: second IOCTL failed\n", ai);
+        AVB_CROSS_TIMESTAMP_V2_REQUEST v2r2;
+        if (!IssueV2XTimestamp(hAdapter, (ULONG)ai, &v2r2)) {
+            printf("  [FAIL] TC-5b/adapter %d: V2 r2 failed (GLE=%lu)\n",
+                   ai, GetLastError());
             totalFailed++;
             CloseHandle(hAdapter);
             continue;
         }
 
-        /* ---- Window 2: r2 -> r3 (for rate stability info) ---- */
+        /* ---- Window 2: v2r2 -> v2r3 (+200 ms) ---- */
         Sleep(200);
-
-        AVB_CROSS_TIMESTAMP_REQUEST r3;
-        ZeroMemory(&r3, sizeof(r3));
-        r3.adapter_index = (ULONG)ai;
-        br = 0;
-        ok = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP,
-                             &r3, sizeof(r3), &r3, sizeof(r3), &br, NULL);
-
-        if (!ok || !r3.valid || r3.status != 0) {
-            printf("  [FAIL] TC-5b/adapter %d: third IOCTL failed\n", ai);
+        AVB_CROSS_TIMESTAMP_V2_REQUEST v2r3;
+        if (!IssueV2XTimestamp(hAdapter, (ULONG)ai, &v2r3)) {
+            printf("  [FAIL] TC-5b/adapter %d: V2 r3 failed (GLE=%lu)\n",
+                   ai, GetLastError());
             totalFailed++;
             CloseHandle(hAdapter);
             continue;
         }
 
         {
-            /* Monotonicity */
-            BOOL mono_12_phc = (r2.phc_time_ns > r1.phc_time_ns);
-            BOOL mono_12_qpc = (r2.system_qpc  > r1.system_qpc);
-            BOOL mono_23_phc = (r3.phc_time_ns > r2.phc_time_ns);
-            BOOL mono_23_qpc = (r3.system_qpc  > r2.system_qpc);
+            BOOL hw1 = (v2r1.avb_phc_source == AVB_PHC_SOURCE_REGISTER_DERIVED);
+            BOOL hw2 = (v2r2.avb_phc_source == AVB_PHC_SOURCE_REGISTER_DERIVED);
+            BOOL hw3 = (v2r3.avb_phc_source == AVB_PHC_SOURCE_REGISTER_DERIVED);
+            BOOL w1_hw = (hw1 && hw2);  /* window-1 both endpoints HW */
+            BOOL w2_hw = (hw2 && hw3);  /* window-2 both endpoints HW */
 
-            /* Rate (window 1) */
-            LONGLONG qpc_d12_ns = ((LONGLONG)(r2.system_qpc - r1.system_qpc)
+            printf("  prov r1=%s(rc=%d)  r2=%s(rc=%d)  r3=%s(rc=%d)\n",
+                   V2SrcName(v2r1.avb_phc_source), v2r1.get_systime_rc,
+                   V2SrcName(v2r2.avb_phc_source), v2r2.get_systime_rc,
+                   V2SrcName(v2r3.avb_phc_source), v2r3.get_systime_rc);
+
+            BOOL mono_12_phc = (v2r2.phc_time_ns > v2r1.phc_time_ns);
+            BOOL mono_12_qpc = (v2r2.system_qpc  > v2r1.system_qpc);
+            BOOL mono_23_phc = (v2r3.phc_time_ns > v2r2.phc_time_ns);
+            BOOL mono_23_qpc = (v2r3.system_qpc  > v2r2.system_qpc);
+
+            LONGLONG qpc_d12_ns = ((LONGLONG)(v2r2.system_qpc - v2r1.system_qpc)
                                   * 1000LL * 1000LL * 1000LL) / (LONGLONG)freq;
             double rate_12 = (qpc_d12_ns > 0)
-                ? ((double)(LONGLONG)(r2.phc_time_ns - r1.phc_time_ns)
+                ? ((double)(LONGLONG)(v2r2.phc_time_ns - v2r1.phc_time_ns)
                    / (double)qpc_d12_ns) : 0.0;
 
-            /* Rate (window 2) — informational only */
-            LONGLONG qpc_d23_ns = ((LONGLONG)(r3.system_qpc - r2.system_qpc)
+            LONGLONG qpc_d23_ns = ((LONGLONG)(v2r3.system_qpc - v2r2.system_qpc)
                                   * 1000LL * 1000LL * 1000LL) / (LONGLONG)freq;
             double rate_23 = (qpc_d23_ns > 0)
-                ? ((double)(LONGLONG)(r3.phc_time_ns - r2.phc_time_ns)
+                ? ((double)(LONGLONG)(v2r3.phc_time_ns - v2r2.phc_time_ns)
                    / (double)qpc_d23_ns) : 0.0;
             double stability_ppm = (rate_12 > 0.0)
                 ? (fabs(rate_12 - rate_23) / rate_12 * 1.0e6) : 0.0;
 
             printf("  PHC monotone r1->r2 : %s (%llu->%llu ns)\n",
                    mono_12_phc ? "YES" : "NO",
-                   (unsigned long long)r1.phc_time_ns,
-                   (unsigned long long)r2.phc_time_ns);
+                   (unsigned long long)v2r1.phc_time_ns,
+                   (unsigned long long)v2r2.phc_time_ns);
             printf("  PHC monotone r2->r3 : %s (%llu->%llu ns)\n",
                    mono_23_phc ? "YES" : "NO",
-                   (unsigned long long)r2.phc_time_ns,
-                   (unsigned long long)r3.phc_time_ns);
-            printf("  PHC/QPC rate w1     : %.6f  (%.0f ppm above real-time)\n",
-                   rate_12, (rate_12 - 1.0) * 1.0e6);
-            printf("  PHC/QPC rate w2     : %.6f  (%.0f ppm above real-time)\n",
-                   rate_23, (rate_23 - 1.0) * 1.0e6);
+                   (unsigned long long)v2r2.phc_time_ns,
+                   (unsigned long long)v2r3.phc_time_ns);
+            printf("  PHC/QPC rate w1     : %.6f  (%.0f ppm above real-time)%s\n",
+                   rate_12, (rate_12 - 1.0) * 1.0e6,
+                   w1_hw ? "" : "  [not hardware-derived]");
+            printf("  PHC/QPC rate w2     : %.6f  (%.0f ppm above real-time)%s\n",
+                   rate_23, (rate_23 - 1.0) * 1.0e6,
+                   w2_hw ? "" : "  [not hardware-derived]");
             printf("  Rate stability INFO : %.0f ppm (limit: informational only)\n",
                    stability_ppm);
 
@@ -877,42 +865,51 @@ static int TestPhcQpcCoherence(HANDLE h)
             BOOL rate_23_ok = (rate_23 >= 0.95 && rate_23 <= 1.10);
 
             if (!mono_ok) {
+                /* PHC monotonicity failure: hardware quality defect regardless of source.
+                 * A clock that goes backward is broken whether or not provenance is HW. */
                 printf("  [FAIL] TC-5b/adapter %d: PHC not monotonically increasing\n", ai);
                 totalFailed++;
-            } else if (!rate_12_ok && !rate_23_ok && rate_12 < 0.10) {
-                /* Window-1 nearly zero (TIMINCA=0 transient — I219 known issue after
-                 * concurrent IOCTL load from preceding tests).  The driver OID handler
-                 * re-initialises TIMINCA ~200 ms after OPEN_ADAPTER; window-2 may still
-                 * be partially recovering.  Take a third 200 ms window (+400..+600 ms)
-                 * at which point TIMINCA should be fully stable. */
+            } else if (!w1_hw && !w2_hw) {
+                /* All windows lack hardware provenance — wall-clock rate is meaningless */
+                printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE:"
+                       " all samples SW_WALLCLOCK/UNAVAILABLE —"
+                       " hardware PHC rate unverifiable\n", ai);
+                totalFailed++;
+            } else if (!rate_12_ok && !rate_23_ok && w1_hw && rate_12 < 0.10) {
+                /* Frozen-clock branch: window-1 REGISTER_DERIVED but near-zero rate.
+                 * OID handler may still be re-initialising TIMINCA.  Try window-3.
+                 * Only valid when window-1 endpoints are register-derived. */
                 printf("  [WARN] TC-5b/adapter %d: frozen-clock pattern"
                        " (w1=%.6f w2=%.6f) — measuring window-3\n",
                        ai, rate_12, rate_23);
 
-                Sleep(200);  /* window-3: spans +400 ms to +600 ms after OPEN_ADAPTER */
-                AVB_CROSS_TIMESTAMP_REQUEST r4;
-                ZeroMemory(&r4, sizeof(r4));
-                r4.adapter_index = (ULONG)ai;
-                DWORD br4 = 0;
-                BOOL ok4 = DeviceIoControl(hAdapter, IOCTL_AVB_PHC_CROSSTIMESTAMP,
-                                           &r4, sizeof(r4), &r4, sizeof(r4), &br4, NULL);
-                if (!ok4 || !r4.valid || r4.status != 0) {
-                    printf("  [FAIL] TC-5b/adapter %d: window-3 cross-timestamp failed\n", ai);
+                Sleep(200);
+                AVB_CROSS_TIMESTAMP_V2_REQUEST v2r4;
+                if (!IssueV2XTimestamp(hAdapter, (ULONG)ai, &v2r4)) {
+                    printf("  [FAIL] TC-5b/adapter %d: window-3 V2 IOCTL failed (GLE=%lu)\n",
+                           ai, GetLastError());
                     totalFailed++;
                 } else {
-                    LONGLONG qpc_d34_ns = ((LONGLONG)(r4.system_qpc - r3.system_qpc)
+                    BOOL hw4   = (v2r4.avb_phc_source == AVB_PHC_SOURCE_REGISTER_DERIVED);
+                    BOOL w3_hw = (hw3 && hw4);
+                    LONGLONG qpc_d34_ns = ((LONGLONG)(v2r4.system_qpc - v2r3.system_qpc)
                                           * 1000LL * 1000LL * 1000LL) / (LONGLONG)freq;
                     double rate_34 = (qpc_d34_ns > 0)
-                        ? ((double)(LONGLONG)(r4.phc_time_ns - r3.phc_time_ns)
+                        ? ((double)(LONGLONG)(v2r4.phc_time_ns - v2r3.phc_time_ns)
                            / (double)qpc_d34_ns) : 0.0;
-                    printf("  PHC/QPC rate w3     : %.6f  (%.0f ppm above real-time)\n",
-                           rate_34, (rate_34 - 1.0) * 1.0e6);
-                    if (rate_34 >= 0.95 && rate_34 <= 1.10) {
+                    printf("  prov r4=%s(rc=%d)  PHC/QPC rate w3 : %.6f  (%.0f ppm)%s\n",
+                           V2SrcName(v2r4.avb_phc_source), v2r4.get_systime_rc,
+                           rate_34, (rate_34 - 1.0) * 1.0e6,
+                           w3_hw ? "" : "  [not hardware-derived]");
+                    if (!w3_hw) {
+                        printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE:"
+                               " window-3 endpoint not REGISTER_DERIVED —"
+                               " hardware recovery unverifiable\n", ai);
+                        totalFailed++;
+                    } else if (rate_34 >= 0.95 && rate_34 <= 1.10) {
                         printf("  [WARN] TC-5b/adapter %d: w1+w2 transient,"
                                " w3 rate %.6f in [0.95,1.10] — PASS\n", ai, rate_34);
                     } else if (rate_34 > rate_23 && rate_34 >= 0.85) {
-                        /* Recovery trend: rate improving window-over-window.
-                         * 0.85 = OID re-init fired within first 30 ms of window-3. */
                         printf("  [WARN] TC-5b/adapter %d: w3=%.6f shows TIMINCA"
                                " recovery trend — PASS\n", ai, rate_34);
                     } else {
@@ -923,18 +920,31 @@ static int TestPhcQpcCoherence(HANDLE h)
                     }
                 }
             } else if (!rate_12_ok && !rate_23_ok) {
-                /* Both windows anomalous and window-1 was not clearly frozen:
-                 * genuine hardware frequency problem. */
-                printf("  [FAIL] TC-5b/adapter %d: both windows bad (w1=%.6f, w2=%.6f)\n",
-                       ai, rate_12, rate_23);
+                if (w1_hw || w2_hw) {
+                    printf("  [FAIL] TC-5b/adapter %d: both windows bad (w1=%.6f, w2=%.6f)\n",
+                           ai, rate_12, rate_23);
+                } else {
+                    printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE:"
+                           " both windows bad, mixed provenance\n", ai);
+                }
                 totalFailed++;
             } else if (!rate_12_ok) {
-                /* Window-1 anomaly (transient NIC re-init/TIMINCA reset) but window-2 is fine.
-                 * A single anomalous 200ms window is not a driver defect — the clock recovers. */
-                printf("  [WARN] TC-5b/adapter %d: window-1 rate anomaly (%.6f) — likely transient NIC event\n",
-                       ai, rate_12);
-                printf("  [PASS] TC-5b/adapter %d: PHC monotone, window-2 rate %.6f in [0.95, 1.10]\n",
-                       ai, rate_23);
+                if (!w1_hw) {
+                    /* Window-1 SW_WALLCLOCK — not a hardware quality failure */
+                    printf("  [WARN] TC-5b/adapter %d: window-1 not HW (%s) — skip w1\n",
+                           ai, V2SrcName(v2r1.avb_phc_source));
+                } else {
+                    printf("  [WARN] TC-5b/adapter %d: window-1 rate anomaly (%.6f)"
+                           " — likely transient NIC event\n", ai, rate_12);
+                }
+                if (w2_hw && rate_23_ok) {
+                    printf("  [PASS] TC-5b/adapter %d: PHC monotone, window-2 rate %.6f in [0.95, 1.10]\n",
+                           ai, rate_23);
+                } else {
+                    printf("  [FAIL] TC-5b/adapter %d INCONCLUSIVE:"
+                           " window-1 skipped, window-2 not valid hardware window\n", ai);
+                    totalFailed++;
+                }
             } else {
                 printf("  [PASS] TC-5b/adapter %d: PHC monotone, rate %.6f in [0.95, 1.10]\n",
                        ai, rate_12);
