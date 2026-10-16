@@ -9,9 +9,9 @@
 # machine, restart services, or clear the channel (the evaluator filters by Phase B window).
 #
 # During Phase B (test window): lock the session (Win+L), let the display turn off,
-# wake and unlock, then press Enter in the test window.  Timeout default: 1800 s.
+# wake and unlock, then press Enter in the test window.  Timeout default: 1200 s.
 param(
-    [int]$TimeoutSeconds = 1800,
+    [int]$TimeoutSeconds = 1200,
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug'
 )
 
@@ -56,12 +56,16 @@ try {
     # /q:true suppresses the "enabling an analytic log clears it" prompt.
     Invoke-Wevtutil sl $channel '/ms:67108864' | Out-Null
     Invoke-Wevtutil sl $channel '/e:true' '/q:true' | Out-Null
-    Write-Host "Channel enabled (64 MB). Starting test; Phase B waits for you (Enter) or $TimeoutSeconds s."
+    Write-Host "Channel enabled (64 MB). Starting test in a NEW elevated window (accept UAC)."
+    Write-Host "  In that window, after 'Phase B' appears: lock (Win+L), let the display turn off, wake, unlock,"
+    Write-Host "  then PRESS ENTER in that window.  Without Enter the run only ends after $TimeoutSeconds s."
 
     & (Join-Path $repoRoot 'tools\test\Run-Tests-Elevated.ps1') -Configuration $Configuration `
         -TestName test_device_idle_regression -TestArgs "$TimeoutSeconds" -LogFile $logFile
     $testExit = $LASTEXITCODE
-    Write-Host "Run-Tests-Elevated exit code: $testExit (3 = observational INCONCLUSIVE is expected)"
+    # The runner reports the exe's observational exit 3 (INCONCLUSIVE) as exit 1 ("1 test failed").
+    # That is NOT the #328 verdict; the evaluator below is.
+    Write-Host "Run-Tests-Elevated exit code: $testExit (1 is normal for an observational exit 3; the evaluator decides)"
 
     # Export BEFORE restoring/disabling.  /ow:true overwrites a stale file of the same name.
     Invoke-Wevtutil epl $channel $evtx '/ow:true' | Out-Null
@@ -70,11 +74,16 @@ try {
 }
 finally {
     # Always restore the original channel configuration.
-    try {
-        Invoke-Wevtutil sl $channel "/ms:$origMaxSize" | Out-Null
-        Invoke-Wevtutil sl $channel "/e:$($origEnabled.ToString().ToLower())" '/q:true' | Out-Null
-    } catch {
-        Write-Host "RESTORE FAILED -- restore manually: wevtutil sl $channel /e:$($origEnabled.ToString().ToLower()) /ms:$origMaxSize ($_)" -ForegroundColor Red
+    # ORDER MATTERS: disable first, then shrink.  Shrinking an enabled log below its current
+    # file size is refused (observed 2026-10-16: 18 MB live file vs 1 MB target).
+    $enabledArg = "/e:$($origEnabled.ToString().ToLower())"
+    try { Invoke-Wevtutil sl $channel $enabledArg '/q:true' | Out-Null }
+    catch { Write-Host "RESTORE (enabled) FAILED -- run: wevtutil sl $channel $enabledArg ($_)" -ForegroundColor Red }
+    try { Invoke-Wevtutil sl $channel "/ms:$origMaxSize" | Out-Null }
+    catch {
+        Write-Host ("RESTORE (maxSize) FAILED -- the live log file is larger than $origMaxSize bytes. " +
+                    "The export is already saved ($evtx); after reviewing it, clear and shrink: " +
+                    "wevtutil cl $channel ; wevtutil sl $channel /ms:$origMaxSize ($_)") -ForegroundColor Red
     }
     Write-Host 'Channel state after restore:'
     (& wevtutil gl $channel) | Select-String 'enabled|maxSize' | ForEach-Object { Write-Host "  $($_.Line.Trim())" }

@@ -233,11 +233,14 @@ function Read-AdapterInventory {
         $parsedInv = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         $rows = @(foreach ($p in $parsedInv) { $p })
     } else {
-        $rows = @(Get-NetAdapter -Physical -ErrorAction Stop | ForEach-Object {
-            [pscustomobject]@{ Name = $_.Name; InterfaceGuid = $_.InterfaceGuid
-                               InterfaceLuid = $_.InterfaceLuid; PnPDeviceID = $_.PnPDeviceID } })
+        $rows = @(Get-NetAdapter -Physical -ErrorAction Stop)
     }
+    # Optional properties (e.g. InterfaceLuid is absent on live Get-NetAdapter objects here)
+    # must not throw under StrictMode; GUID + PnP id are the identity keys.
+    $opt = { param($o, $n) $p = $o.PSObject.Properties[$n]; if ($p) { $p.Value } else { $null } }
     foreach ($r in $rows) {
+        $r = [pscustomobject]@{ Name = (& $opt $r 'Name'); InterfaceGuid = (& $opt $r 'InterfaceGuid')
+                                InterfaceLuid = (& $opt $r 'InterfaceLuid'); PnPDeviceID = (& $opt $r 'PnPDeviceID') }
         $vid = $null; $did = $null
         if ([string]$r.PnPDeviceID -match 'VEN_([0-9A-Fa-f]{4})&DEV_([0-9A-Fa-f]{4})') {
             $vid = [Convert]::ToUInt16($Matches[1], 16); $did = [Convert]::ToUInt16($Matches[2], 16)

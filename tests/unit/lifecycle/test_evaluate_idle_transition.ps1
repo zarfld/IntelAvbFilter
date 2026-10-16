@@ -175,6 +175,13 @@ $okX = ($e1.Id -eq 10309 -and $e1.Guid -eq $G226 -and $e1.Luid -eq 3 -and $e1.St
        ($e2.Guid -eq $G226 -and $e2.Luid -eq 3 -and $e2.Status -eq 0)
 if ($okX) { tc_pass 'TEST-IDLEEVAL-017 event XML parsed (named and positional fields)' } else { tc_fail 'TEST-IDLEEVAL-017' ($e1 | Out-String) }
 
+# TEST-IDLEEVAL-019: inventory objects WITHOUT InterfaceLuid (as live Get-NetAdapter here) still resolve -> PASS
+$InvNoLuid = $Inv3 | ForEach-Object { @{ Name = $_.Name; InterfaceGuid = $_.InterfaceGuid; PnPDeviceID = $_.PnPDeviceID } }
+Check 'TEST-IDLEEVAL-019' (Run-Eval (New-Log) $GoodSeq $InvNoLuid) 0 'verdict=PASS exit=0'
+# TEST-IDLEEVAL-020: only 10302 resume events (no 10308/10309/10307) are never a qualifying transition
+$only10302 = 1..5 | ForEach-Object { New-Ev 10302 "2026-10-15T18:02:0$_.000Z" }
+Check 'TEST-IDLEEVAL-020' (Run-Eval (New-Log) $only10302) 3 'INCONCLUSIVE/NO_POWER_EVIDENCE'
+
 # unknown win32 error on failed Phase C
 Check 'TEST-IDLEEVAL-018' (Run-Eval (New-Log -COk '0' -CErr 'unknown')) 1 'win32_err=unknown'
 
