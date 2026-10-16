@@ -246,7 +246,8 @@ $UnitTests = @(
     "ps1:tests/unit/build/test_build_tests_syspaths.ps1",       # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
     "ps1:tests/unit/ioctl/test_health_sentinel.ps1",            # TEST-SENTINEL-001..006: #328 behavioral health sentinel
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
-    "test_idle_verdict"                                           # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
+    "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
+    "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator
 )
 
 # These tests open \\.\IntelAvbFilter or exercise hardware paths; they require

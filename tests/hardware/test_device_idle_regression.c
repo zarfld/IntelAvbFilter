@@ -49,11 +49,14 @@
  *      tests\hardware\test_device_idle_regression.c
  *      /Fe:build\tools\test_device_idle_regression.exe /link advapi32.lib
  *
- * Verdict codes (from idle_verdict.h):
- *   0 = TC_PASS         NDIS lifecycle confirmed; device accessible before and after
- *   1 = TC_FAIL         Device inaccessible after transition (#328 reproduced)
+ * Exit codes (from idle_verdict.h) -- OBSERVATIONAL ONLY, never PASS:
+ *   0 = reserved        never returned by this executable
+ *   1 = TC_FAIL         Device inaccessible after Phase B (DEVICE_FAILURE_OBSERVED;
+ *                       power-management cause UNCONFIRMED)
  *   2 = TC_SKIP         Precondition not met (baseline unavailable)
- *   3 = TC_INCONCLUSIVE Transition not observed, adapter ambiguity, or timeout
+ *   3 = TC_INCONCLUSIVE Observational result; final #328 verdict is produced by
+ *                       tools/test/Evaluate-IdleTransition.ps1 from the [EVIDENCE]
+ *                       lines plus exported NDIS Diagnostic power events.
  */
 
 #ifndef _WIN32_WINNT
@@ -229,12 +232,16 @@ static int SnapshotAdapters(AdapterSnapshot *snaps, int max_snaps)
  * Fills *out_count and snaps[0..IDLE_MAX_ADAPTERS-1] with per-adapter data.
  */
 static BOOL PrintPhase(const char *label, AccessEntry *m, int n,
-                       AdapterSnapshot *snaps, int *out_count)
+                       AdapterSnapshot *snaps, int *out_count,
+                       DWORD *out_first_err)
 {
     int i;
     DWORD qdErr = 0;
     BOOL  qd    = DevicePathPresent(&qdErr);
     BOOL  allOk = qd;
+
+    /* First observed failure error; stays 0 if a check failed without an error. */
+    if (out_first_err) *out_first_err = qd ? 0 : qdErr;
 
     printf("  [%s] QueryDosDevice(\"IntelAvbFilter\"): %s (err=%lu)\n",
            label, qd ? "OK" : "FAIL", qdErr);
@@ -243,7 +250,10 @@ static BOOL PrintPhase(const char *label, AccessEntry *m, int n,
     for (i = 0; i < n; i++) {
         printf("  [%s] CreateFile %-22s : %s (err=%lu)\n",
                label, m[i].label, m[i].ok ? "OK" : "FAIL", m[i].err);
-        if (!m[i].ok) allOk = FALSE;
+        if (!m[i].ok) {
+            allOk = FALSE;
+            if (out_first_err && *out_first_err == 0) *out_first_err = m[i].err;
+        }
     }
 
     /* GET_VERSION: read-only health check */
@@ -252,7 +262,10 @@ static BOOL PrintPhase(const char *label, AccessEntry *m, int n,
         BOOL verOk = ProbeVersionIoctl(&verErr);
         printf("  [%s] GET_VERSION                         : %s (err=%lu)\n",
                label, verOk ? "OK" : "FAIL", verErr);
-        if (!verOk) allOk = FALSE;
+        if (!verOk) {
+            allOk = FALSE;
+            if (out_first_err && *out_first_err == 0) *out_first_err = verErr;
+        }
     }
 
     /* Per-adapter lifecycle snapshot */
@@ -297,8 +310,13 @@ static void EmitPhaseEvidence(const char *label, BOOL ok, DWORD win32Err,
                               const AdapterSnapshot *snaps, int count)
 {
     int i;
-    printf("[EVIDENCE] phase=%s device_ok=%d win32_err=%lu adapters=%d\n",
-           label, ok ? 1 : 0, (unsigned long)win32Err, count);
+    /* device_ok=0 with no captured error is reported as "unknown", never as 0. */
+    if (ok || win32Err != 0)
+        printf("[EVIDENCE] phase=%s device_ok=%d win32_err=%lu adapters=%d\n",
+               label, ok ? 1 : 0, (unsigned long)win32Err, count);
+    else
+        printf("[EVIDENCE] phase=%s device_ok=0 win32_err=unknown adapters=%d\n",
+               label, count);
     for (i = 0; i < count && i < IDLE_MAX_ADAPTERS; i++) {
         const AdapterSnapshot *s = &snaps[i];
         printf("[EVIDENCE] adapter phase=%s idx=%u vid=%04X did=%04X valid=%d "
@@ -347,11 +365,12 @@ int main(int argc, char *argv[])
 
     EmitStamp("phaseA_start");
     vin.phase_a_ok = PrintPhase("A", m_a, 4,
-                                vin.snap_a, &vin.adapter_count_a) ? 1 : 0;
+                                vin.snap_a, &vin.adapter_count_a, NULL) ? 1 : 0;
     EmitStamp("phaseA_end");
     EmitPhaseEvidence("A", vin.phase_a_ok, 0, vin.snap_a, vin.adapter_count_a);
 
     if (!vin.phase_a_ok) {
+        printf("[EVIDENCE] observational_exit=%d\n", TC_SKIP);
         printf("\n  [SKIP] Phase A precondition not met -- device not accessible at baseline.\n");
         printf("  ACTION: check service status and driver installation.\n\n");
         printf("Summary: TC-LCY-IDLE-001 SKIP (exit 2)\n");
@@ -417,17 +436,13 @@ int main(int argc, char *argv[])
 
     EmitStamp("phaseC_start");
     vin.phase_c_ok = PrintPhase("C", m_c, 4,
-                                vin.snap_c, &vin.adapter_count_c) ? 1 : 0;
+                                vin.snap_c, &vin.adapter_count_c,
+                                &vin.phase_c_win32_err) ? 1 : 0;
     EmitStamp("phaseC_end");
 
-    /* Capture Win32 error for FAIL classification */
-    if (!vin.phase_c_ok) {
-        DWORD qdErr = 0;
-        DevicePathPresent(&qdErr);
-        /* Prefer the most specific error: path-absent → err=2; access-denied → err=5 */
-        vin.phase_c_win32_err = qdErr ? qdErr
-                              : (m_c[3].err ? m_c[3].err : m_c[2].err);
-    }
+    /* phase_c_win32_err was captured inside PrintPhase at the moment of failure.
+       0 with phase_c_ok==0 means the failing check reported no error (unknown). */
+    if (vin.phase_c_ok) vin.phase_c_win32_err = 0;
     EmitPhaseEvidence("C", vin.phase_c_ok, vin.phase_c_win32_err,
                       vin.snap_c, vin.adapter_count_c);
     printf("\n");

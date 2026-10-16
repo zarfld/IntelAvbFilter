@@ -13,8 +13,9 @@
  * Truth table under test (from idle_verdict.h):
  *   !phase_a_ok                                          → TC_SKIP (2)
  *   !phase_c_ok                                          → TC_FAIL (1)
- *   LIFECYCLE_CONFIRMED  +  pwr_event_verified           → TC_PASS (0)
- *   LIFECYCLE_CONFIRMED  + !pwr_event_verified           → TC_INCONCLUSIVE (3)
+ *   LIFECYCLE_CONFIRMED                                  → TC_INCONCLUSIVE (3)
+ *   (the executable NEVER returns TC_PASS; the final #328 verdict comes from
+ *    tools/test/Evaluate-IdleTransition.ps1 with independent NDIS power evidence)
  *   LIFECYCLE_AMBIGUOUS                                  → TC_INCONCLUSIVE (3)
  *   LIFECYCLE_NOT_OBSERVED                               → TC_INCONCLUSIVE (3)
  *
@@ -29,7 +30,7 @@
  *   TC-IDLE-UNIT-008  Adapter index changes (no Phase A/C match) → INCONCLUSIVE
  *   TC-IDLE-UNIT-009  Phase A fails (baseline unavailable) → SKIP
  *   TC-IDLE-UNIT-010  Phase C stats unavailable (stats_valid==0) → INCONCLUSIVE
- *   TC-IDLE-UNIT-011  Lifecycle confirmed + pwr_event_verified → PASS
+ *   TC-IDLE-UNIT-011  Lifecycle confirmed on target adapter → INCONCLUSIVE (never PASS)
  *   TC-IDLE-UNIT-012  Two adapters: only unrelated adapter changes state → INCONCLUSIVE
  *
  * Build (see tools/build/Build-Tests.ps1):
@@ -102,7 +103,6 @@ static void Test_NoTransition_Accessible(void)
     in.phase_c_ok        = 1;
     in.adapter_count_a   = 1;
     in.adapter_count_c   = 1;
-    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 5, 5, 2, 5, 100);
     in.snap_c[0] = in.snap_a[0];
@@ -121,7 +121,6 @@ static void Test_EnterWithoutTransition(void)
     in.phase_c_ok        = 1;
     in.adapter_count_a   = 1;
     in.adapter_count_c   = 1;
-    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x1533, 0, 1, 1, 1, 0, 1, 487);
     in.snap_c[0] = in.snap_a[0];
@@ -134,7 +133,7 @@ static void Test_EnterWithoutTransition(void)
 /*
  * A PauseRestartGeneration increment proves NDIS called FilterPause, but the
  * cause (power-management, cable event, admin action) is unknown.
- * Without pwr_event_verified the verdict MUST be INCONCLUSIVE, not PASS.
+ * The classifier has no power evidence, so the verdict MUST be INCONCLUSIVE.
  */
 static void Test_PauseGenIncreased_NoPwrVerify(void)
 {
@@ -145,7 +144,6 @@ static void Test_PauseGenIncreased_NoPwrVerify(void)
     in.phase_c_ok        = 1;
     in.adapter_count_a   = 1;
     in.adapter_count_c   = 1;
-    in.pwr_event_verified = 0;  /* no independent power-cause verification */
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 0, 2, 100);
     FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0, 3, 3, 3, 0, 3, 110);
@@ -164,7 +162,6 @@ static void Test_DetachAttachIncreased_NoPwrVerify(void)
     in.phase_c_ok        = 1;
     in.adapter_count_a   = 1;
     in.adapter_count_c   = 1;
-    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x15BB, 0, 1, 1, 1, 1, 1, 50);
     FillAdapter(&in.snap_c[0], 0x8086, 0x15BB, 0, 2, 2, 2, 2, 2, 60);
@@ -183,7 +180,6 @@ static void Test_PauseRestartOnly_NoPwrVerify(void)
     in.phase_c_ok        = 1;
     in.adapter_count_a   = 1;
     in.adapter_count_c   = 1;
-    in.pwr_event_verified = 0;
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x1533, 1, 1, 0, 0, 0, 0, 20);
     FillAdapter(&in.snap_c[0], 0x8086, 0x1533, 1, 1, 1, 1, 0, 1, 30);
@@ -281,15 +277,14 @@ static void Test_PhaseC_StatsUnavailable(void)
     AssertVerdict("TC-IDLE-UNIT-010", TC_INCONCLUSIVE, v, reason);
 }
 
-/* ── TC-IDLE-UNIT-011: lifecycle confirmed + pwr_event_verified → PASS ───── */
+/* ── TC-IDLE-UNIT-011: lifecycle confirmed on target adapter → INCONCLUSIVE ── */
 /*
- * This is the ONLY path to TC_PASS.  The caller must independently verify
- * a qualifying NIC power-management event (e.g., corroborated Windows
- * Event Log entries) before setting pwr_event_verified=1.
- * In a fully automated HIL run pwr_event_verified will normally remain 0
- * because this test does not implement power-event verification.
+ * Lifecycle counters prove NDIS callbacks ran, not why.  The classifier has no
+ * power evidence, so even a fully confirmed lifecycle yields INCONCLUSIVE and
+ * the executable NEVER returns TC_PASS.  Only Evaluate-IdleTransition.ps1 may
+ * issue the final verdict, from independently correlated NDIS power events.
  */
-static void Test_LifecycleConfirmed_PwrVerified(void)
+static void Test_LifecycleConfirmed_NeverPass(void)
 {
     IdleVerdictInput in;
     char reason[512];
@@ -298,13 +293,16 @@ static void Test_LifecycleConfirmed_PwrVerified(void)
     in.phase_c_ok         = 1;
     in.adapter_count_a    = 1;
     in.adapter_count_c    = 1;
-    in.pwr_event_verified = 1;  /* caller confirmed a qualifying power event */
 
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 1, 2, 80);
     FillAdapter(&in.snap_c[0], 0x8086, 0x125B, 0, 3, 3, 3, 2, 3, 90);
 
     int v = ComputeIdleVerdict(&in, reason, sizeof(reason));
-    AssertVerdict("TC-IDLE-UNIT-011", TC_PASS, v, reason);
+    AssertVerdict("TC-IDLE-UNIT-011", TC_INCONCLUSIVE, v, reason);
+    if (ComputeLifecycleEvidence(&in, reason, sizeof(reason)) != LIFECYCLE_CONFIRMED) {
+        printf("[FAIL] TC-IDLE-UNIT-011 -> lifecycle evidence not CONFIRMED\n");
+        g_failed++;
+    }
 }
 
 /* ── TC-IDLE-UNIT-012: unrelated adapter changes; target NIC unchanged → INCONCLUSIVE */
@@ -316,13 +314,13 @@ static void Test_LifecycleConfirmed_PwrVerified(void)
  * The #328 scenario involves NIC power-management recovery on ANY adapter
  * losing the control device.  Lifecycle activity on one adapter (I226) is
  * not sufficient to confirm the power-management cause even if the OTHER
- * adapter (I219) was unchanged.  Without pwr_event_verified the verdict
- * remains INCONCLUSIVE.
+ * adapter (I219) was unchanged.  The classifier has no power
+ * evidence, so the verdict remains INCONCLUSIVE.
  *
  * Also validates multi-adapter matching: I219 is correctly matched as
  * unchanged; I226 as changed; ComputeLifecycleEvidence returns CONFIRMED
  * for the pair set; but ComputeIdleVerdict still returns INCONCLUSIVE
- * because pwr_event_verified=0.
+ * because power cause is never evaluated here.
  */
 static void Test_UnrelatedAdapterChanges(void)
 {
@@ -333,7 +331,6 @@ static void Test_UnrelatedAdapterChanges(void)
     in.phase_c_ok         = 1;
     in.adapter_count_a    = 2;
     in.adapter_count_c    = 2;
-    in.pwr_event_verified = 0;
 
     /* Phase A */
     FillAdapter(&in.snap_a[0], 0x8086, 0x125B, 0, 3, 2, 2, 1, 2, 80);  /* I226 */
@@ -363,7 +360,7 @@ int main(void)
     Test_AdapterIndexChanged();              /* 008 */
     Test_PhaseA_Unavailable();              /* 009 */
     Test_PhaseC_StatsUnavailable();          /* 010 */
-    Test_LifecycleConfirmed_PwrVerified();   /* 011 */
+    Test_LifecycleConfirmed_NeverPass();   /* 011 */
     Test_UnrelatedAdapterChanges();          /* 012 */
 
     printf("\n====================================\n");

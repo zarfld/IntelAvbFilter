@@ -1892,7 +1892,7 @@ $AllTests = @(
         Libs = "advapi32.lib"
         Enabled = $true
         Priority = "P0"
-        Description = "Idle/power transition observational regression (TC-LCY-IDLE-001): per-adapter lifecycle snapshot via ENUM/OPEN/GET_STATISTICS; verdict requires NDIS lifecycle evidence."
+        Description = "Idle/power transition observational regression (TC-LCY-IDLE-001): per-adapter lifecycle snapshot via ENUM/OPEN/GET_STATISTICS; emits [EVIDENCE] lines; observational only (exit 3 = INCONCLUSIVE), final verdict by Evaluate-IdleTransition.ps1."
         Issue = "#328"
         TestCases = 1
         IOCTLs = "IOCTL_AVB_GET_VERSION IOCTL_AVB_ENUM_ADAPTERS IOCTL_AVB_OPEN_ADAPTER IOCTL_AVB_GET_STATISTICS"
@@ -1907,7 +1907,7 @@ $AllTests = @(
         Libs = ""
         Enabled = $true
         Priority = "P0"
-        Description = "Unit: TC-LCY-IDLE-001 verdict truth table (12 deterministic cases; no hardware access). Verifies idle_verdict.h ComputeIdleVerdict() logic including pwr_event_verified gate."
+        Description = "Unit: TC-LCY-IDLE-001 verdict truth table (12 deterministic cases; no hardware access). Verifies idle_verdict.h ComputeIdleVerdict() observational logic (never TC_PASS; final #328 verdict is Evaluate-IdleTransition.ps1)."
         Issue = "#328"
         TestCases = 12
         IOCTLs = ""
