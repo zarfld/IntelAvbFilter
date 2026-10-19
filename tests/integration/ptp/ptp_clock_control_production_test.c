@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "../../../include/avb_ioctl.h"
+#include "../../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11), reject/restore helpers (#343) */
 
 #define DEVICE_PATH "\\\\.\\IntelAvbFilter"
 #define NDIS_STATUS_SUCCESS 0x00000000
@@ -135,6 +136,71 @@ static BOOL set_timestamp(HANDLE h, uint64_t timestamp) {
     return TRUE;
 }
 
+/* Test 2, I210 variant (issue #343; Intel I210 datasheet 333016 v3.7 section 8.15.11).
+ * INC_TIME = 8 ns +/- Incvalue*2^-32 ns, NOMINAL raw TIMINCA = 0; the old "(increment_ns << 24)" expectation is invalid.
+ * Old values {8, 6, 10, 4, 8} map to (TC steps 2.1 .. 2.5 keep their numbers):
+ *   2.1 8 ns  -> ACCEPTED, readback raw == 0 (nominal)            2.2 6 ns  -> REJECTED (unrepresentable), register UNCHANGED
+ *   2.3 10 ns -> REJECTED, UNCHANGED                              2.4 4 ns  -> REJECTED, UNCHANGED
+ *   2.5 8 ns  -> ACCEPTED, raw == 0 (was "restore original")
+ * Added: +/-100,000 ppb (provisional authorized range, #149) ACCEPTED with the datasheet-derived raw; +100,001 ppb and
+ * +999,999 ppb (the #3 limit; conflict #3 vs #149 recorded in #326/#343) REJECTED, UNCHANGED.
+ * The baseline raw TIMINCA is saved first and restored at the end (exactly when inside the policy, else nominal),
+ * verified by readback.  Returns TRUE only if every step passed. */
+static BOOL Test2FrequencyAdjustmentI210(HANDLE h) {
+    const uint32_t test_values[] = {8, 6, 10, 4, 8};
+    BOOL all_passed = TRUE;
+    unsigned baseline = 0, raw = 0, old_raw = 0, st = 0, ns = 0, frac = 0;
+    DWORD gle = 0;
+    const long long edge[2] = { (long long)AVB_TEST_I210_POLICY_PPB, -(long long)AVB_TEST_I210_POLICY_PPB };
+    int i;
+
+    if (!AvbTestReadTimincaRawEx(h, &baseline, &gle)) {
+        if (gle == ERROR_NOT_READY)
+            printf("  [BLOCKED] Test 2 (I210): device not ready (GLE=%lu) - no baseline TIMINCA, no frequency change attempted\n", gle);
+        else
+            printf("  [FAIL] Test 2 (I210): GET_CLOCK_CONFIG failed (GLE=%lu) - no baseline TIMINCA, no frequency change attempted\n", gle);
+        return FALSE;
+    }
+    printf("  I210 baseline TIMINCA raw=0x%08X (nominal is 0)\n", baseline);
+
+    for (i = 0; i < 5; i++) {
+        char label[96];
+        _snprintf_s(label, sizeof(label), _TRUNCATE, "2.%d: %u ns/cycle", i + 1, test_values[i]);
+        if (test_values[i] == 8u) {
+            if (!AvbTestAdjustFrequency(h, 8u, 0u, &old_raw, &st, &gle) || !AvbTestReadTimincaRaw(h, &raw) || raw != 0u) {
+                printf("  [FAIL] %s: expected ACCEPTED with raw 0 (nominal), got raw 0x%08X (gle=%lu)\n", label, raw, gle);
+                all_passed = FALSE;
+            } else {
+                printf("  [PASS] %s: accepted, raw 0x%08X -> 0x%08X (nominal)\n", label, old_raw, raw);
+            }
+        } else if (AvbTestI210ExpectRejectedUnchanged(h, test_values[i], 0u, label) != 1) {
+            all_passed = FALSE;
+        }
+        Sleep(100);
+    }
+
+    for (i = 0; i < 2; i++) {
+        char label[96];
+        unsigned expected = AvbTestI210RawFromPpb(edge[i]);
+        AvbTestI210RequestFromPpb(edge[i], &ns, &frac);
+        _snprintf_s(label, sizeof(label), _TRUNCATE, "2.%d: %+lld ppb (policy limit)", 6 + i, edge[i]);
+        if (!AvbTestAdjustFrequency(h, ns, frac, &old_raw, &st, &gle) || !AvbTestReadTimincaRaw(h, &raw) || raw != expected) {
+            printf("  [FAIL] %s: expected ACCEPTED with raw 0x%08X, got raw 0x%08X (gle=%lu)\n", label, expected, raw, gle);
+            all_passed = FALSE;
+        } else {
+            printf("  [PASS] %s: accepted, raw 0x%08X (datasheet-derived)\n", label, raw);
+        }
+    }
+
+    AvbTestI210RequestFromPpb((long long)AVB_TEST_I210_POLICY_PPB + 1, &ns, &frac);
+    if (AvbTestI210ExpectRejectedUnchanged(h, ns, frac, "2.8: +100,001 ppb (beyond the policy)") != 1) all_passed = FALSE;
+    AvbTestI210RequestFromPpb(999999LL, &ns, &frac);
+    if (AvbTestI210ExpectRejectedUnchanged(h, ns, frac, "2.9: +999,999 ppb (#3 limit, beyond the provisional #149 policy)") != 1) all_passed = FALSE;
+
+    if (AvbTestI210RestoreVerified(h, baseline, "Test 2 restore") != 1) all_passed = FALSE;
+    return all_passed;
+}
+
 int main(void) {
     HANDLE h = INVALID_HANDLE_VALUE;
     int tests_passed = 0;
@@ -212,6 +278,18 @@ int main(void) {
     
     // Test 2: Frequency adjustment with 5 different values
     printf("\nTest 2: Frequency Adjustment\n");
+    unsigned short t2did = 0;
+    const BOOL t2i210 = AvbTestGetBoundDid(h, &t2did) && AvbTestIsI210Did(t2did);
+    if (t2i210) {
+        if (Test2FrequencyAdjustmentI210(h)) {
+            printf("  \xE2\x9C\x93 Test 2 (I210 datasheet model): all steps passed\n");
+            tests_passed++;
+        } else {
+            printf("  \xE2\x9C\x97 Test 2 (I210 datasheet model) FAILED\n");
+            tests_failed++;
+        }
+    }
+    if (!t2i210)
     {
         uint32_t test_values[] = {8, 6, 10, 4, 8}; // Last one restores original
         BOOL all_passed = TRUE;

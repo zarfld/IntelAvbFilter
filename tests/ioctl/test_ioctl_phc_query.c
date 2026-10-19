@@ -22,6 +22,7 @@
 
 /* Single Source of Truth for IOCTL definitions */
 #include "avb_ioctl.h"
+#include "../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11) (#343) */
 
 /* Test result codes */
 #define TEST_PASS 0
@@ -147,11 +148,22 @@ static int Test_ValidPHCQuery(TestContext *ctx)
         return TEST_FAIL;
     }
     
-    if (response.timinca == 0) {
-        printf("  [FAIL] UT-PHC-QUERY-001: Valid PHC Query: TIMINCA is zero\n");
-        return TEST_FAIL;
+    {
+        /* I210 (#343; datasheet 8.15.11): raw TIMINCA 0 is the NOMINAL value, so "zero" is valid there; the I210 requirement is
+         * that the value is inside the provisional +/-100,000 ppb policy (#149).  Other adapters keep "non-zero". */
+        unsigned short q_did = 0;
+        const BOOL q_i210 = AvbTestGetBoundDid(ctx->adapter, &q_did) && AvbTestIsI210Did(q_did);
+        if (q_i210) {
+            if (!AvbTestI210RawInPolicy(response.timinca)) {
+                printf("  [FAIL] UT-PHC-QUERY-001: Valid PHC Query: I210 TIMINCA 0x%08X is %+lld ppb from nominal, outside the +/-%u ppb policy\n",
+                       response.timinca, AvbTestI210RawToPpb(response.timinca), (unsigned)AVB_TEST_I210_POLICY_PPB);
+                return TEST_FAIL;
+            }
+        } else if (response.timinca == 0) {
+            printf("  [FAIL] UT-PHC-QUERY-001: Valid PHC Query: TIMINCA is zero\n");
+            return TEST_FAIL;
+        }
     }
-    
     printf("  [PASS] UT-PHC-QUERY-001: Valid PHC Query (SYSTIM=%llu, rate=%u MHz, TIMINCA=0x%08X)\n",
            response.systim, response.clock_rate_mhz, response.timinca);
     return TEST_PASS;

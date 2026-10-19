@@ -54,6 +54,12 @@ typedef struct {
     int skip_count;
 } TestContext;
 
+/* I210 (issue #343; Intel I210 datasheet 333016 v3.7 section 8.15.11): INC_TIME = 8 ns +/- Incvalue*2^-32 ns, NOMINAL raw
+ * TIMINCA = 0, only +/-6.25 percent representable, provisional authorized range +/-100,000 ppb (#149).  #3 / #296 state
+ * +/-999,999 ppb: the conflict is recorded in #326 / #343 and the stricter policy is applied to the I210. */
+static BOOL     g_adapterIsI210 = FALSE;
+static unsigned g_savedRaw      = 0;    /* raw TIMINCA read BEFORE the first frequency change on this adapter (verified restore) */
+
 /* Helper: Open device */
 static HANDLE OpenAdapter(void)
 {
@@ -88,6 +94,12 @@ static HANDLE OpenAdapter(void)
 static void ConvertPpbToIncrement(INT64 ppb, UINT32 nominal_ns,
                                    UINT32 *increment_ns, UINT32 *increment_frac)
 {
+    if (g_adapterIsI210 && ppb > -1000000000LL && ppb < 1000000000LL) {
+        /* Exact datasheet arithmetic (round to nearest Incvalue unit): the floating-point path below can land one unit
+         * beyond the +/-100,000 ppb boundary and flip an accept into a reject. */
+        AvbTestI210RequestFromPpb((long long)ppb, increment_ns, increment_frac);
+        return;
+    }
     double adjustment_factor = 1.0 + ((double)ppb / 1000000000.0);
     double new_increment = (double)nominal_ns * adjustment_factor;
 
@@ -173,8 +185,33 @@ static UINT32 GetDeviceNominalIncrNs(HANDLE adapter)
     return nominal;
 }
 
-/* Helper: Enable hardware timestamping */
-static BOOL EnableHWTimestamping(HANDLE adapter)
+/* I210 only: after an ACCEPTED adjustment the register must read back the datasheet-derived raw value. */
+static BOOL I210RawMatches(HANDLE adapter, const char *tc, INT64 ppb)
+{
+    unsigned raw = 0, expected;
+    if (!g_adapterIsI210) return TRUE;
+    expected = AvbTestI210RawFromPpb((long long)ppb);
+    if (!AvbTestReadTimincaRaw(adapter, &raw)) {
+        printf("  [FAIL] %s: TIMINCA readback unavailable\n", tc);
+        return FALSE;
+    }
+    if (raw != expected) {
+        printf("  [FAIL] %s: TIMINCA readback 0x%08X != datasheet-derived 0x%08X (ppb=%lld)\n", tc, raw, expected, (long long)ppb);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* I210 only: a request outside the policy must be REJECTED (87) and leave the register UNCHANGED (#326 AC-4). */
+static BOOL I210RejectsUnchanged(HANDLE adapter, const char *tc, INT64 ppb)
+{
+    unsigned ns = 0, frac = 0;
+    if (!g_adapterIsI210) return TRUE;
+    AvbTestI210RequestFromPpb((long long)ppb, &ns, &frac);
+    return AvbTestI210ExpectRejectedUnchanged(adapter, ns, frac, tc) == 1;
+}
+
+/* Helper: Enable hardware timestamping */static BOOL EnableHWTimestamping(HANDLE adapter)
 {
     AVB_HW_TIMESTAMPING_REQUEST req = {0};
     DWORD bytesReturned = 0;
@@ -211,6 +248,7 @@ static int Test_ZeroFrequencyAdjustment(TestContext *ctx)
         printf("  [FAIL] UT-PTP-FREQ-001: Zero Frequency Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
+    if (!I210RawMatches(ctx->adapter, "UT-PTP-FREQ-001", 0)) return TEST_FAIL;   /* I210: nominal reads back raw 0 */
     
     printf("  [PASS] UT-PTP-FREQ-001: Zero Frequency Adjustment\n");
     return TEST_PASS;
@@ -228,6 +266,7 @@ static int Test_PositiveFrequencyAdjustment(TestContext *ctx)
         printf("  [FAIL] UT-PTP-FREQ-002: Positive Frequency Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
+    if (!I210RawMatches(ctx->adapter, "UT-PTP-FREQ-002", adj_ppb)) return TEST_FAIL;   /* I210: raw 0x00346DC6 */
     
     printf("  [PASS] UT-PTP-FREQ-002: Positive Frequency Adjustment (+100 ppm)\n");
     return TEST_PASS;
@@ -245,6 +284,7 @@ static int Test_NegativeFrequencyAdjustment(TestContext *ctx)
         printf("  [FAIL] UT-PTP-FREQ-003: Negative Frequency Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
+    if (!I210RawMatches(ctx->adapter, "UT-PTP-FREQ-003", adj_ppb)) return TEST_FAIL;   /* I210: raw 0x80346DC6 */
     
     printf("  [PASS] UT-PTP-FREQ-003: Negative Frequency Adjustment (-100 ppm)\n");
     return TEST_PASS;
@@ -258,12 +298,16 @@ static int Test_MaximumPositiveAdjustment(TestContext *ctx)
 {
     /* nominal*(1 + 999999999/1e9) = nominal*1.999999999 ≈ 2*nominal-epsilon
      * → increment_ns = 2*nominal-1 = max_valid_incr for all devices → accepted */
-    INT64 adj_ppb = 999999999;
+    /* I210: the maximum authorized positive adjustment is the provisional policy limit (+100,000 ppb, #149).
+     * +999,999,999 ppb is neither representable in TIMINCA (max +6.25 percent) nor authorized, and is covered
+     * by the rejection checks of UT-PTP-FREQ-006.  Other adapters keep their existing maximum. */
+    INT64 adj_ppb = g_adapterIsI210 ? (INT64)AVB_TEST_I210_POLICY_PPB : 999999999;
 
     if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-004: Maximum Positive Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
+    if (!I210RawMatches(ctx->adapter, "UT-PTP-FREQ-004", adj_ppb)) return TEST_FAIL;
     
     printf("  [PASS] UT-PTP-FREQ-004: Maximum Positive Adjustment\n");
     return TEST_PASS;
@@ -285,12 +329,15 @@ static int Test_MaximumNegativeAdjustment(TestContext *ctx)
      * I210 (nominal=8):  8*0.125=1  ≥ 1 ✓
      * I226 (nominal=24): 24*0.125=3 ≥ 1 ✓
      * I219 (fallback=8): 8*0.125=1  ≥ 1 ✓ */
-    INT64 adj_ppb = -875000000;
+    /* I210: maximum authorized negative adjustment = -100,000 ppb (policy). -875,000,000 ppb (increment_ns 1) was the old
+     * model's minimum and is unrepresentable on the I210 (datasheet window +/-6.25 percent). */
+    INT64 adj_ppb = g_adapterIsI210 ? -(INT64)AVB_TEST_I210_POLICY_PPB : -875000000;
 
     if (!AdjustFrequency(ctx->adapter, ctx->nominal_incr_ns, adj_ppb)) {
         printf("  [FAIL] UT-PTP-FREQ-005: Maximum Negative Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
+    if (!I210RawMatches(ctx->adapter, "UT-PTP-FREQ-005", adj_ppb)) return TEST_FAIL;
     
     printf("  [PASS] UT-PTP-FREQ-005: Maximum Negative Adjustment\n");
     return TEST_PASS;
@@ -323,6 +370,12 @@ static int Test_OutOfRangeRejectionPositive(TestContext *ctx)
         return TEST_FAIL;
     }
 
+    /* I210: the policy boundary and the #3 limit are rejected too, and the register stays UNCHANGED. */
+    if (!I210RejectsUnchanged(ctx->adapter, "UT-PTP-FREQ-006: +100,001 ppb", (INT64)AVB_TEST_I210_POLICY_PPB + 1) ||
+        !I210RejectsUnchanged(ctx->adapter, "UT-PTP-FREQ-006: +999,999 ppb (#3 limit)", 999999)) {
+        return TEST_FAIL;
+    }
+
     printf("  [PASS] UT-PTP-FREQ-006: Out-of-Range Rejection (Positive) "
            "(ppb=%lld, nominal=%u ns)\n",
            (long long)adj_ppb, ctx->nominal_incr_ns);
@@ -350,6 +403,12 @@ static int Test_OutOfRangeRejectionNegative(TestContext *ctx)
         return TEST_FAIL;
     }
 
+    /* I210: the policy boundary and the #3 limit are rejected too, and the register stays UNCHANGED. */
+    if (!I210RejectsUnchanged(ctx->adapter, "UT-PTP-FREQ-007: -100,001 ppb", -((INT64)AVB_TEST_I210_POLICY_PPB + 1)) ||
+        !I210RejectsUnchanged(ctx->adapter, "UT-PTP-FREQ-007: -999,999 ppb (#3 limit)", -999999)) {
+        return TEST_FAIL;
+    }
+
     printf("  [PASS] UT-PTP-FREQ-007: Out-of-Range Rejection (Negative) "
            "(ppb=%lld, nominal=%u ns)\n",
            (long long)adj_ppb, ctx->nominal_incr_ns);
@@ -368,6 +427,7 @@ static int Test_SmallAdjustment(TestContext *ctx)
         printf("  [FAIL] UT-PTP-FREQ-008: Small Adjustment: IOCTL failed\n");
         return TEST_FAIL;
     }
+    if (!I210RawMatches(ctx->adapter, "UT-PTP-FREQ-008", adj_ppb)) return TEST_FAIL;   /* I210: +1 ppb = 34 units = raw 0x22 */
     
     printf("  [PASS] UT-PTP-FREQ-008: Small Adjustment (+1 ppb)\n");
     return TEST_PASS;
@@ -769,8 +829,25 @@ int main(void)
             continue;
         }
 
-        /* Enable hardware timestamping (required for timestamp operations) */
-        if (!EnableHWTimestamping(ctx.adapter)) {
+        /* I210: save the raw TIMINCA BEFORE the first frequency change (the nominal probe below already writes) so that
+         * the original value can be restored and verified.  No baseline => no mutation. */
+        g_adapterIsI210 = AvbTestIsI210Did((USHORT)adapters[ai].device_id);
+        if (g_adapterIsI210) {
+            DWORD gle = 0;
+            if (!AvbTestReadTimincaRawEx(ctx.adapter, &g_savedRaw, &gle)) {
+                if (gle == ERROR_NOT_READY)
+                    printf("  [BLOCKED] adapter %s: device not ready (GLE=%lu) - no baseline TIMINCA, frequency tests not run\n", adapters[ai].device_name, gle);
+                else
+                    printf("  [FAIL] adapter %s: GET_CLOCK_CONFIG failed (GLE=%lu) - no baseline TIMINCA, frequency tests not run\n", adapters[ai].device_name, gle);
+                ctx.test_count++; ctx.fail_count++;
+                CloseHandle(ctx.adapter);
+                ctx.adapter = INVALID_HANDLE_VALUE;
+                continue;
+            }
+            printf("  [INFO] I210 baseline TIMINCA raw=0x%08X (nominal is 0), saved for verified restore\n", g_savedRaw);
+        }
+
+        /* Enable hardware timestamping (required for timestamp operations) */        if (!EnableHWTimestamping(ctx.adapter)) {
             printf("[WARN] Failed to enable hardware timestamping. Some tests may fail.\n");
         }
 
@@ -809,8 +886,14 @@ int main(void)
 
         #undef RUN_TEST
 
-        /* Reset to nominal before close */
+        if (g_adapterIsI210) {
+            /* Verified restore of the baseline saved before the first change (exact inside the policy, else nominal). */
+            ctx.test_count++;
+            if (AvbTestI210RestoreVerified(ctx.adapter, g_savedRaw, "UT-PTP-FREQ restore") != 1) ctx.fail_count++; else ctx.pass_count++;
+        } else {
+        /* Reset to nominal before close (non-I210 adapters: unchanged behavior, restore NOT verified) */
         AdjustFrequency(ctx.adapter, ctx.nominal_incr_ns, 0);
+        }
 
         CloseHandle(ctx.adapter);
         ctx.adapter = INVALID_HANDLE_VALUE;

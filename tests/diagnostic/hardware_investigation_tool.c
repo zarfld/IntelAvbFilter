@@ -236,7 +236,8 @@ void investigate_i210_ptp_clock(void)
     printf("\n?? Step 2: State Analysis\n");
     printf("    PHC Enable (TSAUXC bit 30): %s\n", (tsauxc & (1U << 30)) ? "ENABLED" : "DISABLED");
     printf("    Disable Systime (TSAUXC bit 31): %s\n", (tsauxc & (1U << 31)) ? "DISABLED" : "ENABLED");
-    printf("    TIMINCA Increment: %u ns\n", (timinca >> 24) & 0xFF);
+    printf("    TIMINCA raw 0x%08X; legacy (>>24) reading %u ns - NOT valid for the I210 (datasheet 8.15.11: nominal raw is 0)\n",
+           timinca, (timinca >> 24) & 0xFF);
     printf("    RX Time Sync (TSYNCRXCTL bit 4): %s\n", (tsyncrxctl & (1U << 4)) ? "ENABLED" : "DISABLED");
     printf("    TX Time Sync (TSYNCTXCTL bit 4): %s\n", (tsynctxctl & (1U << 4)) ? "ENABLED" : "DISABLED");
     

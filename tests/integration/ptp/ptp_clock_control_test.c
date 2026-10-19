@@ -30,22 +30,12 @@
 #include <math.h>
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"   /* INTEL_DEV_* (SSOT) to identify the bound adapter */
+#include "../../common/avb_test_common.h"  /* I210 TIMINCA oracle (datasheet 8.15.11), reject/restore helpers (#343) */
 
-/* DID of the adapter bound in main() for Tests 2/3 (0 until bound). I210 has a datasheet-defined
- * TIMINCA (8 ns +/- Incvalue*2^-32 ns, nominal raw 0); other adapters keep their own models. */
+/* DID of the adapter bound in main() for Tests 2/3 (0 until bound). The I210 has a datasheet-defined
+ * TIMINCA (INC_TIME = 8 ns +/- Incvalue*2^-32 ns, NOMINAL raw value 0, ISGN bit 31); the old
+ * "(increment_ns << 24)" interpretation is invalid for it.  Other adapters keep their own models. */
 static USHORT g_mainDid = 0;
-
-static BOOL IsI210Did(USHORT did)
-{
-    switch (did) {
-    case INTEL_DEV_I210_AT: case INTEL_DEV_I210_AT2: case INTEL_DEV_I210_FIBER:
-    case INTEL_DEV_I210_IS: case INTEL_DEV_I210_IT:  case INTEL_DEV_I210_CS:
-    case INTEL_DEV_I211_AT: case INTEL_DEV_I210_FLASHLESS: case INTEL_DEV_I210_FLASHLESS2:
-        return TRUE;
-    default:
-        return FALSE;
-    }
-}
 
 /* Read PHC time via IOCTL_AVB_GET_TIMESTAMP (replaces raw SYSTIML/H register reads). */
 static ULONGLONG GetPhcNs(HANDLE h)
@@ -219,24 +209,116 @@ static int TestTimestampSetting(HANDLE h) {
     return testsFailed;
 }
 
+/* ---- Test 2, I210 variant (issue #343; datasheet 333016 v3.7 section 8.15.11) ---------------------------
+ * INC_TIME = 8 ns +/- Incvalue * 2^-32 ns; raw TIMINCA 0 is NOMINAL; only increments within +/-6.25 percent of
+ * 8 ns are representable and the PROVISIONAL authorized range is +/-100,000 ppb (#149).  #3 / #296 state
+ * +/-999,999 ppb: that conflict is recorded in #326 / #343 and the stricter policy is applied here.
+ * Old assertion (TC ID kept)       -> corrected I210 expectation
+ *   2.1 "1 ns per cycle (minimum)"  -> unrepresentable: REJECTED (Win32 87), TIMINCA register UNCHANGED
+ *   2.2 "nominal ns per cycle"      -> ACCEPTED, readback raw == 0 (never 8<<24), PHC increments
+ *   2.3 "near-max ns per cycle"     -> +100,000 ppb (policy maximum): ACCEPTED, raw == oracle, PHC increments
+ *   2.4 "mid-range ns per cycle"    -> -100,000 ppb (policy minimum): ACCEPTED, raw == oracle, PHC increments
+ *   2.5 "low non-minimum (2 ns)"    -> unrepresentable: REJECTED, UNCHANGED
+ *   2.6-2.9 (new boundary checks)   -> +100,001 / -100,001 ppb, +999,999 ppb (#3 limit), 9 ns, 0 ns: REJECTED, UNCHANGED
+ * The original raw TIMINCA is saved first; if it cannot be read nothing is changed (BLOCKED).  The original value
+ * is restored (exactly when inside the policy, otherwise to nominal) and the restore is verified by readback. */
+static int I210AcceptAndMeasure(HANDLE h, const char *id, const char *what, long long ppb)
+{
+    unsigned ns = 0, frac = 0, prev = 0, st = 0, raw = 0, expected = AvbTestI210RawFromPpb(ppb);
+    DWORD gle = 0;
+    int failed = 0;
+    LARGE_INTEGER freq, start, end;
+    ULONGLONG t1, t2;
+
+    AvbTestI210RequestFromPpb(ppb, &ns, &frac);
+    printf("Test %s: %s (ppb=%lld => ns=%u frac=%u, expected raw 0x%08X)\n", id, what, ppb, ns, frac, expected);
+    if (!AvbTestAdjustFrequency(h, ns, frac, &prev, &st, &gle)) {
+        printf("  [FAIL] Test %s: ADJUST_FREQUENCY rejected an in-policy request (gle=%lu status=0x%08X)\n", id, gle, st);
+        return 1;
+    }
+    if (!AvbTestReadTimincaRaw(h, &raw)) {
+        printf("  [INCONCLUSIVE] Test %s: TIMINCA readback unavailable after the write\n", id);
+        return 1;
+    }
+    if (raw != expected) {
+        printf("  [FAIL] Test %s: TIMINCA readback 0x%08X != datasheet-derived 0x%08X\n", id, raw, expected);
+        failed++;
+    } else {
+        printf("  [PASS] Test %s: TIMINCA verified 0x%08X (previous raw 0x%08X)\n", id, raw, prev);
+    }
+    t1 = GetPhcNs(h);
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    Sleep(100);
+    QueryPerformanceCounter(&end);
+    t2 = GetPhcNs(h);
+    printf("  Elapsed: %.2f ms, SYSTIM delta: %lld ns\n",
+           (double)(end.QuadPart - start.QuadPart) * 1000.0 / freq.QuadPart, (LONGLONG)(t2 - t1));
+    if ((LONGLONG)(t2 - t1) > 0) {
+        printf("  [PASS] Test %s: clock incrementing\n", id);
+    } else {
+        printf("  [FAIL] Test %s: clock not incrementing\n", id);
+        failed++;
+    }
+    return failed;
+}
+
+static int TestClockAdjustmentI210(HANDLE h, ULONG savedRaw)
+{
+    int failed = 0;
+    unsigned n, f;
+    int r;
+
+    printf("[I210] datasheet model: raw TIMINCA 0 is nominal; provisional API range +/-%u ppb (#149; #3 conflict: #326/#343)\n\n",
+           (unsigned)AVB_TEST_I210_POLICY_PPB);
+
+    failed += (AvbTestI210ExpectRejectedUnchanged(h, 1u, 0u, "Test 2.1: 1 ns per cycle (minimum) is unrepresentable") != 1);
+    failed += I210AcceptAndMeasure(h, "2.2", "nominal ns per cycle", 0LL);
+    failed += I210AcceptAndMeasure(h, "2.3", "near-max: +100,000 ppb (policy maximum)", (long long)AVB_TEST_I210_POLICY_PPB);
+    failed += I210AcceptAndMeasure(h, "2.4", "mid-range: -100,000 ppb (policy minimum)", -(long long)AVB_TEST_I210_POLICY_PPB);
+    failed += (AvbTestI210ExpectRejectedUnchanged(h, 2u, 0u, "Test 2.5: 2 ns per cycle (low non-minimum) is unrepresentable") != 1);
+
+    AvbTestI210RequestFromPpb((long long)AVB_TEST_I210_POLICY_PPB + 1, &n, &f);
+    failed += (AvbTestI210ExpectRejectedUnchanged(h, n, f, "Test 2.6: +100,001 ppb is beyond the policy") != 1);
+    AvbTestI210RequestFromPpb(-((long long)AVB_TEST_I210_POLICY_PPB + 1), &n, &f);
+    failed += (AvbTestI210ExpectRejectedUnchanged(h, n, f, "Test 2.7: -100,001 ppb is beyond the policy") != 1);
+    AvbTestI210RequestFromPpb(999999LL, &n, &f);
+    failed += (AvbTestI210ExpectRejectedUnchanged(h, n, f, "Test 2.8: +999,999 ppb (the #3 limit) is beyond the provisional #149 policy") != 1);
+    failed += (AvbTestI210ExpectRejectedUnchanged(h, 9u, 0u, "Test 2.9a: 9 ns per cycle") != 1);
+    failed += (AvbTestI210ExpectRejectedUnchanged(h, 0u, 0u, "Test 2.9b: 0 ns per cycle (frozen clock)") != 1);
+
+    r = AvbTestI210RestoreVerified(h, savedRaw, "Test 2 restore");
+    failed += (r != 1);
+    return failed;
+}
+
 // Test 2: Clock Adjustment (TIMINCA)
 static int TestClockAdjustment(HANDLE h) {
     printf("\n========================================\n");
     printf("TEST 2: CLOCK ADJUSTMENT (TIMINCA)\n");
     printf("========================================\n\n");
-    
+
     int testsPassed = 0;
     int testsFailed = 0;
-    
+
     // Save original TIMINCA via GET_CLOCK_CONFIG
     AVB_CLOCK_CONFIG origCfg;
     ULONG originalTiminca = 0;
     if (!GetClockConfig(h, &origCfg)) {
-        printf("?? FAILED: Could not read clock config\n");
+        /* GET_CLOCK_CONFIG is a required IOCTL (#324/#326): its failure is an implementation FAIL, and with no
+         * baseline there is no safe restore path, so no frequency is changed. */
+        printf("?? FAILED: Could not read clock config (no baseline: no frequency change was attempted)\n");
         return 1;
     }
     originalTiminca = origCfg.timinca;
     printf("Original TIMINCA: 0x%08X\n\n", originalTiminca);
+
+    if (AvbTestIsI210Did(g_mainDid)) {
+        int i210Failed = TestClockAdjustmentI210(h, originalTiminca);
+        printf("\n--- Test 2 Summary (I210) ---\n");
+        printf("Failed: %d\n", i210Failed);
+        return i210Failed;
+    }
 
     /* Each entry: {increment_ns, raw_timinca_equiv, description}
      * raw_timinca_equiv = increment_ns << 24 (integer-only, no fractional component). */
@@ -431,8 +513,14 @@ static int TestFrequencyTuning(HANDLE h) {
     // Save original TIMINCA via GET_CLOCK_CONFIG
     AVB_CLOCK_CONFIG t3cfg;
     ULONG originalTiminca = 0;
-    if (GetClockConfig(h, &t3cfg)) {
+    BOOL  t3i210 = AvbTestIsI210Did(g_mainDid);
+    BOOL  t3haveBaseline = GetClockConfig(h, &t3cfg);
+    if (t3haveBaseline) {
         originalTiminca = t3cfg.timinca;
+    } else if (t3i210) {
+        /* No baseline => no verified restore => do not touch the frequency (GET_CLOCK_CONFIG itself is a required IOCTL). */
+        printf("[FAIL] Test 3: GET_CLOCK_CONFIG failed - no baseline TIMINCA, no frequency change was attempted\n");
+        return 1;
     }
 
     printf("Test: Measure clock stability with standard 8ns increment\n");
@@ -440,9 +528,22 @@ static int TestFrequencyTuning(HANDLE h) {
     // Set 8ns-per-cycle via public API (standard I210 rate)
     if (!AdjustFrequency(h, 8u, 0u)) {
         printf("[FAIL] IOCTL_AVB_ADJUST_FREQUENCY(8ns) failed\n");
+        if (t3i210) AvbTestI210RestoreVerified(h, originalTiminca, "Test 3 restore after failed set");
         return 1;
     }
-    printf("Frequency set to 8ns per cycle (TIMINCA=0x%08X expected)\n\n", 8u << 24);
+    if (t3i210) {
+        /* I210: 8 ns per cycle is NOMINAL = raw 0 (datasheet 8.15.11); the old (8 << 24) = 0x08000000 would be +3906 ppm. */
+        unsigned rawNow = 0xFFFFFFFFu;
+        if (AvbTestReadTimincaRaw(h, &rawNow) && rawNow == 0u) {
+            printf("[PASS] Frequency set to 8 ns per cycle: TIMINCA raw 0x%08X == nominal 0\n\n", rawNow);
+            testsPassed++;
+        } else {
+            printf("[FAIL] 8 ns per cycle must read back as nominal raw 0, got 0x%08X\n\n", rawNow);
+            testsFailed++;
+        }
+    } else {
+        printf("Frequency set to 8ns per cycle (TIMINCA=0x%08X expected)\n\n", 8u << 24);
+    }
 
     // Take multiple measurements
     #define NUM_SAMPLES 5
@@ -497,7 +598,11 @@ static int TestFrequencyTuning(HANDLE h) {
     }
     
     // Restore original TIMINCA via public API
-    if (originalTiminca != 0) {
+    if (t3i210) {
+        /* I210: decode the saved RAW value per the datasheet (never ">> 24"); restore exactly when inside the policy,
+         * otherwise to nominal; verified by readback.  A failed restore is a test FAIL, never silent. */
+        if (AvbTestI210RestoreVerified(h, originalTiminca, "Test 3 restore") != 1) testsFailed++;
+    } else if (originalTiminca != 0) {
         AdjustFrequency(h, originalTiminca >> 24, 0u);
     }
 
@@ -731,10 +836,18 @@ static int TestPhcQpcCoherence(HANDLE h)
                     nomInc = ip;  /* I210/I226: IP field is the nominal increment in ns */
                 }
             }
+            if (AvbTestIsI210Did((USHORT)enumReq.device_id)) {
+                /* I210: raw TIMINCA 0 is nominal and any value inside the +/-100,000 ppb policy satisfies the
+                 * rate-sanity band below.  Do NOT write the frequency here: this block has several early exits
+                 * and an unrestored write would leave the PHC changed (verified-restore rule, #343). */
+                printf("  [INFO] TC-5/adapter %d: I210 TIMINCA raw=0x%08X (nominal is 0); no pre-measurement write,"
+                       " waiting 300 ms for OPEN_ADAPTER side effects\n", ai, preCheckCfg.timinca);
+            } else {
             printf("  [INFO] TC-5/adapter %d: pre-measurement TIMINCA=0x%08X,"
                    " setting nominal increment_ns=%u then waiting 300 ms for OID\n",
                    ai, (preCheckCfg.timinca), nomInc);
             AdjustFrequency(hAdapter, nomInc, 0u);
+            }
             Sleep(300);  /* OID fires at ~200 ms; 300 ms ensures it has completed */
         }
 
@@ -991,6 +1104,7 @@ int main(int argc, char* argv[]) {
 
             printf("? Bound to adapter %u VID=0x%04X DID=0x%04X (BASIC_1588+MMIO)\n",
                    idx, enumReq.vendor_id, enumReq.device_id);
+            g_mainDid = (USHORT)enumReq.device_id;   /* selects the I210 (datasheet TIMINCA) variants of Tests 2/3 */
             savedMainOpenReq = openReq;  /* save for re-bind after TC-5b */
             bound = TRUE;
             break;

@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../include/avb_ioctl.h"
+#include "../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11), verified restore (#343) */
 
 // Test statistics
 static int g_tests_passed = 0;
@@ -349,6 +350,24 @@ static void Test_09_AdjustFrequency(HANDLE h) {
     
     AVB_FREQUENCY_REQUEST req;
     ZeroMemory(&req, sizeof(req));
+    /* I210 (#343; datasheet 8.15.11): save the RAW TIMINCA first so this mutating test can restore it, verified by readback.
+     * Without a baseline nothing is changed.  Other adapters keep the existing (gated, unrestored) behavior. */
+    unsigned short t9did = 0;
+    const BOOL t9i210 = AvbTestGetBoundDid(h, &t9did) && AvbTestIsI210Did(t9did);
+    unsigned t9base = 0;
+    if (t9i210) {
+        DWORD t9gle = 0;
+        if (!AvbTestReadTimincaRawEx(h, &t9base, &t9gle)) {
+            if (t9gle == ERROR_NOT_READY) {
+                printf("  [BLOCKED] device not ready (GLE=%lu): no baseline TIMINCA, frequency not changed\n", t9gle);
+                g_tests_skipped++;
+            } else {
+                TEST_FAIL("GET_CLOCK_CONFIG failed: no baseline TIMINCA, frequency not changed");
+            }
+            return;
+        }
+        printf("  I210 baseline TIMINCA raw=0x%08X (nominal is 0)\n", t9base);
+    }
     req.increment_ns = 8;  // 8ns per cycle (typical for I210)
     req.increment_frac = 0;
     
@@ -364,6 +383,14 @@ static void Test_09_AdjustFrequency(HANDLE h) {
     printf("  Previous TIMINCA: 0x%08X\n", req.current_increment);
     printf("  New config: %u ns + 0x%X frac\n", req.increment_ns, req.increment_frac);
     printf("  Status: 0x%08X\n", req.status);
+    if (t9i210) {
+        /* 8 ns per cycle is NOMINAL on the I210: raw 0 (the old "8 << 24" = 0x08000000 would be +3906 ppm). */
+        unsigned t9raw = 0xFFFFFFFFu;
+        BOOL nominal_ok = AvbTestReadTimincaRaw(h, &t9raw) && t9raw == 0u;
+        BOOL restored   = (AvbTestI210RestoreVerified(h, t9base, "Test 9 restore") == 1);
+        if (!nominal_ok) { TEST_FAIL("8 ns per cycle must read back as nominal raw 0"); return; }
+        if (!restored)   { TEST_FAIL("frequency restore failed - the PHC frequency is NOT restored"); return; }
+    }
     TEST_PASS();
 }
 

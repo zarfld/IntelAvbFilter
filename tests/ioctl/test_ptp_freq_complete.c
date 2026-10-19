@@ -27,6 +27,9 @@
 /* Single Source of Truth for IOCTL definitions */
 #include "../include/avb_ioctl.h"
 
+/* I210 TIMINCA oracle (datasheet 8.15.11) and verified-safety helpers (issue #343) */
+#include "../common/avb_test_common.h"
+
 /* Test result codes */
 #define TEST_PASS 0
 #define TEST_FAIL 1
@@ -91,6 +94,12 @@ typedef struct {
     int count;
     char device_paths[MAX_ADAPTERS][256];
 } MultiAdapterContext;
+
+/* I210 (issue #343; Intel I210 datasheet 333016 v3.7 section 8.15.11): INC_TIME = 8 ns +/- Incvalue*2^-32 ns, NOMINAL raw
+ * TIMINCA = 0, only +/-6.25 percent representable, provisional authorized range +/-100,000 ppb (#149).  #3 / #192 state
+ * +/-999,999 ppb: the conflict is recorded in #326 / #343 and the stricter policy is applied to the I210. */
+static BOOL     g_adapterIsI210 = FALSE;
+static unsigned g_savedRaw      = 0;    /* raw TIMINCA read BEFORE the first frequency change (verified restore) */
 
 /* Helper: Open device (always use default path - driver handles routing) */
 static HANDLE OpenAdapterByIndex(int index)
@@ -179,7 +188,12 @@ static int EnumerateAdapters(MultiAdapterContext *ctx)
 /* Helper: Convert ppb to increment_ns/increment_frac */
 static void ConvertPpbToIncrement(INT64 ppb, UINT32 *increment_ns, UINT32 *increment_frac)
 {
-    double adjustment_factor = 1.0 + ((double)ppb / 1000000000.0);
+    if (g_adapterIsI210 && ppb > -1000000000LL && ppb < 1000000000LL) {
+        /* Exact datasheet arithmetic (round to nearest Incvalue unit) so that expected raw values are exact and the
+         * +/-100,000 ppb boundary cannot flip by one unit through floating-point truncation. */
+        AvbTestI210RequestFromPpb((long long)ppb, increment_ns, increment_frac);
+        return;
+    }    double adjustment_factor = 1.0 + ((double)ppb / 1000000000.0);
     double new_increment = (double)NOMINAL_INCR_NS * adjustment_factor;
     
     *increment_ns = (UINT32)new_increment;
@@ -212,8 +226,30 @@ static BOOL AdjustFrequency(HANDLE adapter, INT64 ppb)
     return result;
 }
 
-/* Helper: Get timestamp */
-static BOOL GetTimestamp(HANDLE adapter, UINT64 *timestamp)
+/* I210 only: after an ACCEPTED adjustment the register must read back the datasheet-derived raw value. */
+static BOOL I210RawMatches(HANDLE adapter, const char *tc, INT64 ppb)
+{
+    unsigned raw = 0, expected;
+    if (!g_adapterIsI210) return TRUE;
+    expected = AvbTestI210RawFromPpb((long long)ppb);
+    if (!AvbTestReadTimincaRaw(adapter, &raw)) { printf("  [FAIL] %s: TIMINCA readback unavailable\n", tc); return FALSE; }
+    if (raw != expected) {
+        printf("  [FAIL] %s: TIMINCA readback 0x%08X != datasheet-derived 0x%08X (ppb=%lld)\n", tc, raw, expected, (long long)ppb);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* I210 only: a request outside the policy must be REJECTED (87) and leave the register UNCHANGED (#326 AC-4). */
+static BOOL I210RejectsUnchanged(HANDLE adapter, const char *tc, INT64 ppb)
+{
+    UINT32 ns = 0, frac = 0;
+    if (!g_adapterIsI210) return TRUE;
+    ConvertPpbToIncrement(ppb, &ns, &frac);
+    return AvbTestI210ExpectRejectedUnchanged(adapter, ns, frac, tc) == 1;
+}
+
+/* Helper: Get timestamp */static BOOL GetTimestamp(HANDLE adapter, UINT64 *timestamp)
 {
     AVB_TIMESTAMP_REQUEST req = {0};
     DWORD br;
@@ -248,6 +284,7 @@ static int Test_UT_FREQ_001_PositivePPB(TestContext *ctx)
     TEST_START("UT-FREQ-001: Positive PPB Adjustment (+10 ppb)");
     
     ASSERT_TRUE(AdjustFrequency(ctx->adapter, 10), "Adjustment to +10 ppb failed");
+    ASSERT_TRUE(I210RawMatches(ctx->adapter, "UT-FREQ-001", 10), "I210 TIMINCA readback != datasheet-derived value");
     
     /* Reset to nominal */
     AdjustFrequency(ctx->adapter, 0);
@@ -261,6 +298,7 @@ static int Test_UT_FREQ_002_NegativePPB(TestContext *ctx)
     TEST_START("UT-FREQ-002: Negative PPB Adjustment (-10 ppb)");
     
     ASSERT_TRUE(AdjustFrequency(ctx->adapter, -10), "Adjustment to -10 ppb failed");
+    ASSERT_TRUE(I210RawMatches(ctx->adapter, "UT-FREQ-002", -10), "I210 TIMINCA readback != datasheet-derived value");
     
     /* Reset to nominal */
     AdjustFrequency(ctx->adapter, 0);
@@ -294,6 +332,19 @@ static int Test_UT_FREQ_003_DeviceBaseValues(TestContext *ctx)
 static int Test_UT_FREQ_004_MaxPPBRange(TestContext *ctx)
 {
     TEST_START("UT-FREQ-004: Maximum PPB Adjustment Range (+999,999 ppb)");
+
+    if (g_adapterIsI210) {
+        /* I210 (#343): the authorized range is PROVISIONALLY +/-100,000 ppb (#149), so that is the maximum; +/-999,999 ppb
+         * (#3) is beyond it and must be REJECTED with the register UNCHANGED.  Conflict recorded in #326 / #343. */
+        ASSERT_TRUE(AdjustFrequency(ctx->adapter, (INT64)AVB_TEST_I210_POLICY_PPB), "Max positive (+100,000 ppb policy limit) failed");
+        ASSERT_TRUE(I210RawMatches(ctx->adapter, "UT-FREQ-004", (INT64)AVB_TEST_I210_POLICY_PPB), "I210 +100,000 ppb readback mismatch");
+        ASSERT_TRUE(AdjustFrequency(ctx->adapter, -(INT64)AVB_TEST_I210_POLICY_PPB), "Max negative (-100,000 ppb policy limit) failed");
+        ASSERT_TRUE(I210RawMatches(ctx->adapter, "UT-FREQ-004", -(INT64)AVB_TEST_I210_POLICY_PPB), "I210 -100,000 ppb readback mismatch");
+        ASSERT_TRUE(I210RejectsUnchanged(ctx->adapter, "UT-FREQ-004: +999,999 ppb (#3 limit)", 999999), "+999,999 ppb must be rejected, register unchanged");
+        ASSERT_TRUE(I210RejectsUnchanged(ctx->adapter, "UT-FREQ-004: -999,999 ppb (#3 limit)", -999999), "-999,999 ppb must be rejected, register unchanged");
+        AdjustFrequency(ctx->adapter, 0);
+        RETURN_PASS("UT-FREQ-004: Maximum PPB Adjustment Range (I210: +/-100,000 ppb policy; +/-999,999 ppb rejected)");
+    }
     
     ASSERT_TRUE(AdjustFrequency(ctx->adapter, 999999), "Max positive adjustment failed");
     ASSERT_TRUE(AdjustFrequency(ctx->adapter, -999999), "Max negative adjustment failed");
@@ -308,6 +359,16 @@ static int Test_UT_FREQ_004_MaxPPBRange(TestContext *ctx)
 static int Test_UT_FREQ_005_OutOfRangeReject(TestContext *ctx)
 {
     TEST_START("UT-FREQ-005: Out-of-Range Rejection");
+
+    if (g_adapterIsI210) {
+        /* I210 (#343): STRICT.  An accepted out-of-range value is an implementation defect (FAIL), never a warning, and
+         * every rejection must leave the TIMINCA register unchanged (#326 AC-4). */
+        ASSERT_TRUE(I210RejectsUnchanged(ctx->adapter, "UT-FREQ-005: +1,000,000,001 ppb", 1000000001LL), "out-of-range positive must be rejected");
+        ASSERT_TRUE(I210RejectsUnchanged(ctx->adapter, "UT-FREQ-005: -1,000,000,001 ppb", -1000000001LL), "out-of-range negative must be rejected");
+        ASSERT_TRUE(I210RejectsUnchanged(ctx->adapter, "UT-FREQ-005: +100,001 ppb", (INT64)AVB_TEST_I210_POLICY_PPB + 1), "beyond-policy positive must be rejected");
+        ASSERT_TRUE(I210RejectsUnchanged(ctx->adapter, "UT-FREQ-005: -100,001 ppb", -((INT64)AVB_TEST_I210_POLICY_PPB + 1)), "beyond-policy negative must be rejected");
+        RETURN_PASS("UT-FREQ-005: Out-of-Range Rejection (I210: strict, register unchanged)");
+    }
     
     /* These tests verify driver behavior - if driver accepts invalid values, 
      * that's a driver bug, not a test failure. The test correctly identifies the issue. */
@@ -332,6 +393,7 @@ static int Test_UT_FREQ_006_INCVALWrite(TestContext *ctx)
     
     /* Apply adjustment and verify IOCTL succeeds */
     ASSERT_TRUE(AdjustFrequency(ctx->adapter, 100), "INCVAL write (+100 ppb) failed");
+    ASSERT_TRUE(I210RawMatches(ctx->adapter, "UT-FREQ-006", 100), "I210 TIMINCA readback != datasheet-derived value");
     
     /* Reset to nominal */
     AdjustFrequency(ctx->adapter, 0);
@@ -349,6 +411,7 @@ static int Test_UT_FREQ_007_ReadBackVerify(TestContext *ctx)
     
     /* Set frequency adjustment */
     ASSERT_TRUE(AdjustFrequency(ctx->adapter, 50), "Adjustment to +50 ppb failed");
+    ASSERT_TRUE(I210RawMatches(ctx->adapter, "UT-FREQ-007", 50), "I210 TIMINCA readback != datasheet-derived value (+50 ppb = raw 0x6B6)");
     
     /* Try to read back (driver support required) */
     if (DeviceIoControl(ctx->adapter, IOCTL_AVB_ADJUST_FREQUENCY, 
@@ -729,8 +792,26 @@ int main(void)
         return TEST_FAIL;
     }
     
+    /* I210: identify the adapter and save the raw TIMINCA BEFORE the first frequency change, for a verified restore.
+     * No baseline => no mutation (a failing GET_CLOCK_CONFIG is an implementation FAIL; a not-ready device is BLOCKED). */
+    {
+        unsigned short did = 0;
+        g_adapterIsI210 = AvbTestGetBoundDid(ctx.adapter, &did) && AvbTestIsI210Did(did);
+        if (g_adapterIsI210) {
+            DWORD gle = 0;
+            if (!AvbTestReadTimincaRawEx(ctx.adapter, &g_savedRaw, &gle)) {
+                if (gle == ERROR_NOT_READY)
+                    printf("[BLOCKED] I210 (DID 0x%04X) not ready (GLE=%lu): no baseline TIMINCA, frequency tests not run\n", did, gle);
+                else
+                    printf("[FAIL] I210 (DID 0x%04X): GET_CLOCK_CONFIG failed (GLE=%lu): no baseline TIMINCA, frequency tests not run\n", did, gle);
+                CloseHandle(ctx.adapter);
+                return TEST_FAIL;
+            }
+            printf("[INFO] I210 (DID 0x%04X) baseline TIMINCA raw=0x%08X (nominal is 0), saved for verified restore\n", did, g_savedRaw);
+        }
+    }
+
     printf("Running PTP Frequency Adjustment Complete Test Suite...\n");
-    
     /* Macro to run tests */
     #define RUN_TEST(test) do { \
         int result = test(&ctx); \
@@ -774,9 +855,14 @@ int main(void)
     
     #undef RUN_TEST
     
-    /* Reset to nominal before cleanup */
+    if (g_adapterIsI210) {
+        /* Verified restore of the baseline saved before the first change (exact inside the policy, else nominal). */
+        ctx.test_count++;
+        if (AvbTestI210RestoreVerified(ctx.adapter, g_savedRaw, "UT/IT/VV-FREQ restore") != 1) ctx.fail_count++; else ctx.pass_count++;
+    } else {
+    /* Reset to nominal before cleanup (non-I210 adapters: unchanged behavior, restore NOT verified) */
     AdjustFrequency(ctx.adapter, 0);
-    
+    }
     /* Cleanup */
     if (ctx.adapter != INVALID_HANDLE_VALUE) {
         CloseHandle(ctx.adapter);

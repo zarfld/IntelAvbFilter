@@ -45,6 +45,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "../../../include/avb_ioctl.h"
+#include "../../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11) (#343) */
 
 /* ======================================================================
  * QPC helpers
@@ -280,7 +281,7 @@ static int TestClockConfigCompleteness(HANDLE h)
     /* TC-CLOCKCFG-001a: all mandatory fields populated */
     AVB_CLOCK_CONFIG cfg1;
     printf("TC-CLOCKCFG-001a: mandatory fields status==0, systim!=0,"
-           " timinca!=0, clock_rate_mhz!=0\n");
+           " timinca!=0 (I210: inside the policy; nominal is 0), clock_rate_mhz!=0\n");
     if (!GetClockConfig(h, &cfg1)) {
         printf("  [FAIL] TC-CLOCKCFG-001a: IOCTL_AVB_GET_CLOCK_CONFIG returned"
                " status=0x%08X\n", cfg1.status);
@@ -295,11 +296,21 @@ static int TestClockConfigCompleteness(HANDLE h)
         printf("  [FAIL] TC-CLOCKCFG-001a: systim == 0 (PHC not running)\n");
         failed++;
     }
-    if (cfg1.timinca == 0) {
+    /* I210 (#343; datasheet 8.15.11): raw TIMINCA 0 is the NOMINAL value (exactly 8 ns/cycle), not "increment not set".  The
+     * clock-running evidence for the I210 is the systim checks (001a above, 001b below); here the I210 requirement is that the
+     * register decodes to a value inside the provisional +/-100,000 ppb policy (#149). */
+    unsigned short b_did = 0;
+    const BOOL b_i210 = AvbTestGetBoundDid(h, &b_did) && AvbTestIsI210Did(b_did);
+    if (b_i210) {
+        if (!AvbTestI210RawInPolicy(cfg1.timinca)) {
+            printf("  [FAIL] TC-CLOCKCFG-001a: I210 timinca 0x%08X is %+lld ppb from nominal, outside the +/-%u ppb policy\n",
+                   cfg1.timinca, AvbTestI210RawToPpb(cfg1.timinca), (unsigned)AVB_TEST_I210_POLICY_PPB);
+            failed++;
+        }
+    } else if (cfg1.timinca == 0) {
         printf("  [FAIL] TC-CLOCKCFG-001a: timinca == 0 (clock increment not set)\n");
         failed++;
-    }
-    if (cfg1.clock_rate_mhz == 0) {
+    }    if (cfg1.clock_rate_mhz == 0) {
         printf("  [FAIL] TC-CLOCKCFG-001a: clock_rate_mhz == 0 (base rate unknown)\n");
         failed++;
     }
@@ -349,7 +360,18 @@ static int TestClockConfigCompleteness(HANDLE h)
         ULONG timinca = cfg1.timinca;
         ULONG ip = (timinca >> 24) & 0xFFu;
         ULONG iv = timinca & 0x00FFFFFFu;
-        if (ip == 2u && iv > 0u) {
+        if (b_i210) {
+            /* I210: datasheet format INC_TIME = 8 ns +/- Incvalue*2^-32 ns (ISGN bit 31).  The (IP, IV) decode of the other
+             * adapters would classify the legacy 0x08000000 as a valid "I210/I226 format"; the policy check does not. */
+            if (AvbTestI210RawInPolicy(timinca)) {
+                printf("  [PASS] TC-CLOCKCFG-001d: I210 datasheet format (raw 0x%08X = %+lld ppb from the 8 ns nominal)\n",
+                       timinca, AvbTestI210RawToPpb(timinca));
+            } else {
+                printf("  [FAIL] TC-CLOCKCFG-001d: I210 TIMINCA 0x%08X (%+lld ppb) is outside the +/-%u ppb policy\n",
+                       timinca, AvbTestI210RawToPpb(timinca), (unsigned)AVB_TEST_I210_POLICY_PPB);
+                failed++;
+            }
+        } else if (ip == 2u && iv > 0u) {
             /* I219 format: IP=2 (period=2ns), IV = increment_ns * 2,000,000 */
             ULONG inc_ns = iv / 2000000u;
             printf("  [PASS] TC-CLOCKCFG-001d: I219 format (IP=%u IV=%u"

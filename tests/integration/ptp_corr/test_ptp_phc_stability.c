@@ -44,6 +44,7 @@
 typedef ULONG NDIS_STATUS;
 
 #include "../../../include/avb_ioctl.h"
+#include "../../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11), verified restore (#343) */
 
 /* -------------------------------------------------------------------------
  * Configuration
@@ -415,6 +416,23 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     printf("  Clock config: timinca=0x%08X  increment=%u ns  clock_rate=%u MHz\n",
            cfg.timinca, increment_ns, cfg.clock_rate_mhz);
 
+    /* I210 (issue #343): the "(timinca >> 24)" decode above is INVALID for the I210 - datasheet 8.15.11:
+     * INC_TIME = 8 ns +/- Incvalue*2^-32 ns, NOMINAL raw 0, ISGN bit 31.  The stimulus "increment_ns + 1" (+12.5 percent) is not
+     * representable and exceeds the provisional +/-100,000 ppb policy (#149), so the I210 uses the policy limit in the direction
+     * AWAY from the baseline (always a measurable change), and restores the exact decoded baseline (inside the policy) or nominal. */
+    uint32_t stim_ns = increment_ns + 1U;
+    uint32_t stim_frac = increment_frac;
+    unsigned short corr6_did = 0;
+    const bool corr6_i210 = AvbTestGetBoundDid(hDev, &corr6_did) && AvbTestIsI210Did(corr6_did);
+    if (corr6_i210) {
+        unsigned norm = AvbTestI210RawInPolicy(cfg.timinca) ? cfg.timinca : 0u;
+        long long base_ppb = AvbTestI210RawToPpb(norm);
+        AvbTestI210RawToRequest(norm, &increment_ns, &increment_frac);   /* exact restore target */
+        AvbTestI210RequestFromPpb(base_ppb <= 0 ? (long long)AVB_TEST_I210_POLICY_PPB : -(long long)AVB_TEST_I210_POLICY_PPB,
+                                  &stim_ns, &stim_frac);
+        printf("  [I210] baseline raw=0x%08X (%+lld ppb); stimulus ns=%u frac=%u; restore target ns=%u frac=%u\n",
+               cfg.timinca, base_ppb, stim_ns, stim_frac, increment_ns, increment_frac);
+    }
     /* --- Step 2: Read PHC phc1 --- */
     uint64_t phc1 = 0;
     if (!read_phc(hDev, adapter_idx, &phc1)) {
@@ -431,8 +449,8 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
      * precision, sub-nanosecond PPM adjustments are not representable; +1 ns
      * creates a larger but valid test stimulus. */
     AVB_FREQUENCY_REQUEST freq_req = {0};
-    freq_req.increment_ns   = increment_ns + 1U;
-    freq_req.increment_frac = increment_frac;
+    freq_req.increment_ns   = stim_ns;
+    freq_req.increment_frac = stim_frac;
     BOOL freq_ok = DeviceIoControl(hDev, IOCTL_AVB_ADJUST_FREQUENCY,
                                     &freq_req, sizeof(freq_req),
                                     &freq_req, sizeof(freq_req), &br, NULL);
@@ -441,8 +459,8 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
         tc_result("UT-CORR-006 ADJUST_FREQUENCY reachable", false);
         return;
     }
-    printf("  ADJUST_FREQUENCY: %u ns -> %u ns  (current_increment=0x%08X)\n",
-           increment_ns, increment_ns + 1U, freq_req.current_increment);
+    printf("  ADJUST_FREQUENCY: %u ns -> %u ns + frac 0x%08X  (current_increment=0x%08X)\n",
+           increment_ns, stim_ns, stim_frac, freq_req.current_increment);
 
     /* --- Step 4: Sleep 100ms (PHC runs at adjusted rate) --- */
     Sleep(100);
@@ -484,12 +502,18 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     if (!advancing)   printf("  FAIL: PHC not advancing after freq adjustment\n");
 
     /* --- Step 7: Restore original frequency --- */
+    BOOL restore_ok;
+    if (corr6_i210) {
+        /* verified by readback against the saved RAW baseline (exact inside the policy, else nominal) */
+        restore_ok = (AvbTestI210RestoreVerified(hDev, cfg.timinca, "UT-CORR-006 restore") == 1);
+    } else {
     freq_req.increment_ns   = increment_ns;
     freq_req.increment_frac = increment_frac;
-    BOOL restore_ok = DeviceIoControl(hDev, IOCTL_AVB_ADJUST_FREQUENCY,
+    restore_ok = DeviceIoControl(hDev, IOCTL_AVB_ADJUST_FREQUENCY,
                                        &freq_req, sizeof(freq_req),
                                        &freq_req, sizeof(freq_req), &br, NULL);
     printf("  Restored increment to %u ns (ok=%d)\n", increment_ns, (int)restore_ok);
+    }
     if (!restore_ok) {
         printf("  [CLEANUP_FAILED] Frequency restore IOCTL failed (error %lu) — TIMINCA left at adjusted value\n",
                GetLastError());

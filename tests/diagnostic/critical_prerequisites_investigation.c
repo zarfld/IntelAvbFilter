@@ -217,8 +217,9 @@ void investigate_i226_ptp_clock(void)
     critical_read_register(0x0B614, &tsynctxctl, "TSYNCTXCTL");
     
     printf("    TIMINCA Analysis:\n");
-    printf("      Increment value: %u ns per tick\n", (timinca >> 24) & 0xFF);
-    printf("      Fine adjustment: 0x%04X\n", timinca & 0x00FFFFFF);
+    printf("      Raw value: 0x%08X (I210 datasheet 8.15.11: INC_TIME = 8 ns +/- Incvalue*2^-32 ns, ISGN = bit 31, nominal raw = 0)\n", timinca);
+    printf("      Legacy non-I210 reading: increment %u ns per tick, fine adjustment 0x%04X (NOT valid for the I210)\n",
+           (timinca >> 24) & 0xFF, timinca & 0x00FFFFFF);
     
     printf("    TSAUXC Analysis:\n");
     printf("      PHC Enable: %s\n", (tsauxc & (1U << 30)) ? "ENABLED" : "DISABLED");

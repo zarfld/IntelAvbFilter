@@ -138,15 +138,21 @@ int main(void)
         }
     }
 
-    /* ── Test 5: TIMINCA register initialized ── */
+    /* Test 5: TIMINCA register initialized -- */
     /*
-     * Verifies that init_ptp() correctly writes INTEL_TIMINCA_I210_INIT to
-     * the I210_TIMINCA register (0x0B608).  The I210 runs at 125 MHz, so each
-     * clock cycle is 8 ns → TIMINCA must be 0x08000000 (integer 8 in the
-     * increment field, fractional = 0).  A value of 0 means the SYSTIM clock
-     * never advances.
+     * Verifies that init_ptp() leaves the I210_TIMINCA register (0x0B608) in a datasheet-valid state.
+     * Intel I210 datasheet 333016 v3.7 section 8.15.11: INC_TIME = 8 ns +/- Incvalue * 2^-32 ns (Incvalue bits 30:0,
+     * ISGN bit 31, reset value 0).  The NOMINAL encoding is therefore raw 0.  The previous expectation 0x08000000
+     * ("8 << 24") is 8 ns + 2^27 * 2^-32 ns = 8.03125 ns per cycle = +3906.25 ppm: it is the DEFECT, not the goal, and
+     * raw 0 is NOT evidence of a frozen clock (that is what Test 6 measures).
      *
-     * Implements: issue for I210 TIMINCA init fix
+     * Expected outcomes:
+     *   raw == 0                              PASS (nominal, exactly 8 ns per 125 MHz cycle)
+     *   non-zero, inside +/-100,000 ppb       PASS with INFO (a valid frequency adjustment, e.g. by a gPTP servo; the
+     *                                         authorized range is provisional per #149, conflict with #3 in #326/#343)
+     *   0x08000000 or any value outside it    FAIL (mis-programmed clock, e.g. the legacy +3906 ppm defect)
+     *
+     * Implements: issue #343 (I210 TIMINCA encoding and duplicate initialization)
      */
     printf("\n--- Test 5: TIMINCA register ---\n");
     {
@@ -156,16 +162,19 @@ int main(void)
             printf("  [FAIL] TIMINCA read failed (error %d)\n", rc);
             stats.failed++; stats.total++;
         } else {
-            printf("  [INFO] TIMINCA=0x%08X (expected 0x08000000)\n", (unsigned)timinca);
-            if (timinca == 0x08000000U) {
-                printf("  [PASS] TIMINCA correctly initialized (8 ns/cycle for 125 MHz)\n");
+            printf("  [INFO] TIMINCA=0x%08X (datasheet nominal is 0; %+lld ppb from nominal)\n",
+                   (unsigned)timinca, AvbTestI210RawToPpb((unsigned)timinca));
+            if (timinca == 0U) {
+                printf("  [PASS] TIMINCA is nominal (exactly 8 ns/cycle for 125 MHz)\n");
                 stats.passed++; stats.total++;
-            } else if (timinca == 0) {
-                printf("  [FAIL] TIMINCA=0: SYSTIM clock frozen — init_ptp() did not set TIMINCA\n");
-                stats.failed++; stats.total++;
+            } else if (AvbTestI210RawInPolicy((unsigned)timinca)) {
+                printf("  [PASS] TIMINCA 0x%08X is a valid adjustment inside the +/-%u ppb policy\n",
+                       (unsigned)timinca, (unsigned)AVB_TEST_I210_POLICY_PPB);
+                stats.passed++; stats.total++;
             } else {
-                printf("  [FAIL] TIMINCA=0x%08X: unexpected value (expected 0x08000000)\n",
-                       (unsigned)timinca);
+                printf("  [FAIL] TIMINCA=0x%08X is %+lld ppb from nominal, outside the +/-%u ppb policy%s\n",
+                       (unsigned)timinca, AvbTestI210RawToPpb((unsigned)timinca), (unsigned)AVB_TEST_I210_POLICY_PPB,
+                       (timinca == 0x08000000U) ? " (the legacy '8 << 24' defect, +3906.25 ppm)" : "");
                 stats.failed++; stats.total++;
             }
         }
@@ -174,10 +183,8 @@ int main(void)
     /* ── Test 6: PTP clock monotonicity ── */
     /*
      * Reads SYSTIM twice via IOCTL_AVB_GET_TIMESTAMP with a 50 ms sleep.
-     * If TIMINCA == 0 the clock is frozen and T2 == T1 (FAIL).
-     * If TIMINCA is set correctly T2 > T1 by ~50,000,000 ns (PASS).
-     *
-     * This is the observable symptom of the TIMINCA bug.
+     * A frozen clock (e.g. TSAUXC DisableSystime set) gives T2 == T1 (FAIL); a running clock gives T2 > T1 by ~50,000,000 ns (PASS).
+     * NOTE: raw TIMINCA == 0 is the I210 NOMINAL value and says nothing about whether the clock runs.
      */
     printf("\n--- Test 6: PTP clock monotonicity (50 ms sleep) ---\n");
     {

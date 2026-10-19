@@ -33,6 +33,7 @@
 
 /* Single Source of Truth for IOCTL definitions */
 #include "../../include/avb_ioctl.h"
+#include "../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11) (#343) */
 
 /* ────────────────────────── constants ──────────────────────────────────────── */
 #define DEVICE_NAME          "\\\\.\\IntelAvbFilter"
@@ -121,15 +122,39 @@ static int TC_GPTP_002_FrequencyAdjust(void)
     ZeroMemory(&clk, sizeof(clk));
     IoctlInOut(h, IOCTL_AVB_GET_CLOCK_CONFIG, &clk, sizeof(clk));
 
-    avb_u32 cur_inc = clk.timinca & 0xFFu;  /* low 8 bits = ns increment */
-    if (cur_inc == 0) cur_inc = NOMINAL_INCREMENT_NS;
+    unsigned cur_inc = clk.timinca & 0xFFu;  /* low 8 bits = ns increment (valid for non-I210 adapters ONLY) */
+    unsigned cur_frac = 0;
+    unsigned short gptp_did = 0;
+    const BOOL gptp_i210 = AvbTestGetBoundDid(h, &gptp_did) && AvbTestIsI210Did(gptp_did);
+    if (gptp_i210) {
+        /* I210 (#343): the low 8 bits of the datasheet-encoded TIMINCA are NOT an ns increment (nominal raw is 0).  Decode the
+         * RAW value; a value outside the +/-100,000 ppb policy (e.g. the legacy 0x08000000, +3906 ppm) cannot be re-applied
+         * as a no-op - that is the defect state this test must not paper over. */
+        if (!AvbTestI210RawInPolicy(clk.timinca)) {
+            printf("    [FAIL] I210 TIMINCA 0x%08X is outside the +/-%u ppb policy: cannot re-apply it as a no-op (mis-programmed clock)\n",
+                   clk.timinca, (unsigned)AVB_TEST_I210_POLICY_PPB);
+            CloseHandle(h);
+            return 0;
+        }
+        AvbTestI210RawToRequest(clk.timinca, &cur_inc, &cur_frac);
+    } else if (cur_inc == 0) {
+        cur_inc = NOMINAL_INCREMENT_NS;
+    }
 
     AVB_FREQUENCY_REQUEST freq;
     ZeroMemory(&freq, sizeof(freq));
     freq.increment_ns   = cur_inc;
-    freq.increment_frac = 0;
+    freq.increment_frac = cur_frac;
 
     BOOL ok = IoctlInOut(h, IOCTL_AVB_ADJUST_FREQUENCY, &freq, sizeof(freq));
+    if (ok && gptp_i210) {
+        unsigned raw_after = 0;
+        if (!AvbTestReadTimincaRaw(h, &raw_after) || !AvbTestI210RawEquivalent(raw_after, clk.timinca)) {
+            printf("    [FAIL] I210 no-op re-apply changed TIMINCA: 0x%08X -> 0x%08X\n", clk.timinca, raw_after);
+            CloseHandle(h);
+            return 0;
+        }
+    }
     CloseHandle(h);
 
     if (!ok) {
@@ -268,8 +293,29 @@ static int TC_GPTP_005_FullWorkflow(void)
     ZeroMemory(&freq, sizeof(freq));
     avb_u32 inc = clk1.timinca & 0xFFu;
     if (inc == 0) inc = NOMINAL_INCREMENT_NS;
-    freq.increment_ns = inc;
-    IoctlInOut(h, IOCTL_AVB_ADJUST_FREQUENCY, &freq, sizeof(freq));
+    unsigned mono_did = 0;
+    {
+        unsigned short d16 = 0;
+        const BOOL mono_i210 = AvbTestGetBoundDid(h, &d16) && AvbTestIsI210Did(d16);
+        mono_did = mono_i210 ? 1u : 0u;
+        if (mono_i210) {
+            /* I210 (#343): decode the RAW TIMINCA per the datasheet.  If it is outside the policy, the incidental no-op is
+             * skipped (this test is about monotonicity; it must not rewrite a mis-programmed frequency). */
+            unsigned ns = 0, frac = 0;
+            if (AvbTestI210RawInPolicy(clk1.timinca)) {
+                AvbTestI210RawToRequest(clk1.timinca, &ns, &frac);
+                freq.increment_ns = ns;
+                freq.increment_frac = frac;
+                IoctlInOut(h, IOCTL_AVB_ADJUST_FREQUENCY, &freq, sizeof(freq));
+            } else {
+                printf("    [INFO] I210 TIMINCA 0x%08X outside the policy: frequency no-op skipped\n", clk1.timinca);
+            }
+        }
+    }
+    if (!mono_did) {
+        freq.increment_ns = inc;
+        IoctlInOut(h, IOCTL_AVB_ADJUST_FREQUENCY, &freq, sizeof(freq));
+    }
 
     /* ── Step 4: sleep ── */
     Sleep(MONO_SLEEP_MS);

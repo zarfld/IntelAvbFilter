@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../include/avb_ioctl.h"
+#include "../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11) (#343) */
 
 /* ── IOCTL codes (all existing) ─────────────────────────────────────────────── */
 /* IOCTL_AVB_GET_CLOCK_CONFIG / IOCTL_AVB_ADJUST_FREQUENCY / IOCTL_AVB_PHC_OFFSET_ADJUST
@@ -162,11 +163,36 @@ static int TC_COEXIST_003_AdjustFrequency(void)
     AVB_FREQUENCY_REQUEST adj;
     ZeroMemory(&adj, sizeof(adj));
     /* Use the current increment value so the write leaves the clock unchanged */
-    adj.increment_ns   = (cfg.timinca & 0x00FFFFFFu);  /* bits [23:0] of TIMINCA */
+    adj.increment_ns   = (cfg.timinca & 0x00FFFFFFu);  /* bits [23:0] of TIMINCA (non-I210 adapters ONLY) */
     adj.increment_frac = 0;
+
+    unsigned short coexist_did = 0;
+    const BOOL coexist_i210 = AvbTestGetBoundDid(h, &coexist_did) && AvbTestIsI210Did(coexist_did);
+    if (coexist_i210) {
+        /* I210 (#343): TIMINCA bits [23:0] are the Incvalue fraction, not an ns increment (nominal raw is 0).  Decode the RAW
+         * value per the datasheet; one outside the +/-100,000 ppb policy cannot be re-applied as a no-op. */
+        unsigned ns = 0, frac = 0;
+        if (!AvbTestI210RawInPolicy(cfg.timinca)) {
+            printf("    [FAIL] I210 TIMINCA 0x%08lX is outside the +/-%u ppb policy: cannot re-apply it as a no-op (mis-programmed clock)\n",
+                   (unsigned long)cfg.timinca, (unsigned)AVB_TEST_I210_POLICY_PPB);
+            CloseHandle(h);
+            return 0;
+        }
+        AvbTestI210RawToRequest(cfg.timinca, &ns, &frac);
+        adj.increment_ns   = ns;
+        adj.increment_frac = frac;
+    }
 
     int r = TryIoctl(h, IOCTL_AVB_ADJUST_FREQUENCY, &adj, sizeof(adj),
                      &adj, sizeof(adj));
+    if (r > 0 && coexist_i210) {
+        unsigned raw_after = 0;
+        if (!AvbTestReadTimincaRaw(h, &raw_after) || !AvbTestI210RawEquivalent(raw_after, cfg.timinca)) {
+            printf("    [FAIL] I210 no-op re-apply changed TIMINCA: 0x%08lX -> 0x%08X\n", (unsigned long)cfg.timinca, raw_after);
+            CloseHandle(h);
+            return 0;
+        }
+    }
     CloseHandle(h);
     if (r > 0)
         printf("    ADJUST_FREQUENCY(noop timinca=0x%08lX) success while daemon active\n",
