@@ -90,31 +90,34 @@ static int i210_timinca_within_api_range(uint32_t raw)
 /**
  * @brief Initialize I210 device
  * @param dev Device handle
- * @return 0 on success, <0 on error
+ * @return 0 on success, <0 on error (the PTP initialization failed; the device is NOT initialized)
+ *
+ * init_ptp() is the single owner of the I210 TSAUXC / TIMINCA / SYSTIM / timestamp-control programming.
+ * The generic platform init (AvbPlatformInit via ndis_platform_ops.init) is intentionally NOT called here
+ * (issue #343): for the I210 it wrote a second, contradictory TIMINCA (INTEL_TIMINCA_DEFAULT, a 25 MHz
+ * clock model) before init_ptp() programmed the datasheet-correct value.  Its responsibilities are retained
+ * as follows:
+ *   - enable SYSTIM (TSAUXC bit 31)  -> init_ptp(): TSAUXC is written to 0 when SYSTIM is disabled
+ *   - program TIMINCA                -> init_ptp(): nominal value, see i210_timinca_nominal()
+ *   - SYSTIM-advancing check         -> dropped: it was informational only (always returned success) and
+ *                                       ran before init_ptp() re-seeded SYSTIM.  PHC health verification is
+ *                                       separate lifecycle work and is NOT claimed by this function.
+ * Failures of mandatory steps are returned to the caller; they are no longer swallowed.
  */
 static int init(device_t *dev)
 {
+    int rc;
+
     DEBUGP(DL_TRACE, "==>i210_init\n");
 
     if (dev == NULL) {
         return -1;
     }
 
-    // I210-specific initialization
-    if (ndis_platform_ops.init) {
-        NTSTATUS result = ndis_platform_ops.init(dev);
-        if (!NT_SUCCESS(result)) {
-            DEBUGP(DL_ERROR, "I210 platform init failed: 0x%x\n", result);
-            return -1;
-        }
-    }
-
-    // Initialize PTP clock (required for GET_TIMESTAMP and TX timestamps to work)
-    DEBUGP(DL_TRACE, "I210: Initializing PTP clock\n");
-    int ptp_result = init_ptp(dev);
-    if (ptp_result != 0) {
-        DEBUGP(DL_TRACE, "I210: PTP initialization returned: %d\n", ptp_result);
-        // Continue - basic functionality may still work
+    rc = init_ptp(dev);
+    if (rc != 0) {
+        DEBUGP(DL_ERROR, "I210: PTP initialization failed: %d\n", rc);
+        return rc;
     }
 
     DEBUGP(DL_TRACE, "<==i210_init: Success\n");
@@ -246,14 +249,34 @@ static int get_systime(device_t *dev, uint64_t *systime)
 }
 
 /**
- * @brief Initialize I210 PTP functionality
- * I210 may require specific PHC initialization
+ * @brief Initialize I210 PTP functionality (idempotent; single owner of the I210 PTP programming)
  * @param dev Device handle
- * @return 0 on success, <0 on error
+ * @return 0 on success, <0 on error (NOT initialized; the caller must not treat the device as ready)
+ *
+ * The I210 configuration is first READ BACK, and only what is missing is written:
+ *   - full initialization  when SYSTIM is disabled (TSAUXC bit 31) or BOTH timestamp controls are off, i.e. a
+ *     fresh or power-cycled device: enable SYSTIM, program the nominal TIMINCA, seed SYSTIM, enable TX/RX.
+ *   - minimal repair       when the configuration is in place but TIMINCA is outside the provisional API
+ *     policy range (e.g. the legacy 0x08000000, +3906 ppm) or one timestamp control is off: fix only that.
+ *     SYSTIM is never re-seeded here.
+ *   - no writes at all     when everything is already configured.  A repeated init (bring-up, restart,
+ *     OPEN_ADAPTER, explicit INIT_DEVICE) therefore does not reset a running clock, does not clear target-time
+ *     enables in TSAUXC, and keeps an in-policy frequency adjustment.
+ * TIMINCA == 0 is the I210 NOMINAL value (datasheet 8.15.11), never evidence of "uninitialized".
+ * If the configuration cannot be read, nothing is written and the call fails.  Enabling a timestamp control
+ * is verified by readback.  This is configuration evidence only: it does NOT prove the clock advances at
+ * the right rate (PHC health is separate lifecycle work).
  */
 static int init_ptp(device_t *dev)
 {
-    int result;
+    const uint32_t nominal = i210_timinca_nominal();
+    const uint32_t want_tx = (uint32_t)I210_TSYNCTXCTL_SET(0, I210_TSYNCTXCTL_EN_MASK,
+                                                           I210_TSYNCTXCTL_EN_SHIFT, 1);
+    const uint32_t want_rx = (uint32_t)I210_TSYNCRXCTL_SET(
+                                 I210_TSYNCRXCTL_SET(0, I210_TSYNCRXCTL_EN_MASK, I210_TSYNCRXCTL_EN_SHIFT, 1),
+                                 I210_TSYNCRXCTL_TYPE_MASK, I210_TSYNCRXCTL_TYPE_SHIFT, I210_TSYNCRXCTL_TYPE_ALL);
+    uint32_t tsauxc = 0, timinca = 0, tx_ctl = 0, rx_ctl = 0;
+    int systim_off, tx_on, rx_on, full;
 
     DEBUGP(DL_TRACE, "==>i210_init_ptp\n");
 
@@ -261,77 +284,85 @@ static int init_ptp(device_t *dev)
         return -1;
     }
 
-    // Step 1: Enable SYSTIM - write 0x0 to TSAUXC to clear all bits including bit 31 (DIS_ST).
-    // Linux igb: E1000_WRITE_REG(hw, E1000_TSAUXC, 0x0) — write zero, no read-modify-write.
-    // This must be done BEFORE seeding SYSTIM so the hardware accepts the new time.
-    result = ndis_platform_ops.mmio_write(dev, INTEL_REG_TSAUXC, 0);
-    if (result != 0) {
-        DEBUGP(DL_ERROR, "I210: Failed to clear TSAUXC\n");
-        return -1;
+    /* Observe first. Nothing is written unless every configuration register could be read. */
+    if (ndis_platform_ops.mmio_read(dev, I210_TSAUXC, &tsauxc) != 0 ||
+        ndis_platform_ops.mmio_read(dev, I210_TIMINCA, &timinca) != 0 ||
+        ndis_platform_ops.mmio_read(dev, I210_TSYNCTXCTL, &tx_ctl) != 0 ||
+        ndis_platform_ops.mmio_read(dev, I210_TSYNCRXCTL, &rx_ctl) != 0) {
+        DEBUGP(DL_ERROR, "I210: cannot read the PTP configuration; not initializing\n");
+        return -EIO;
     }
-    DEBUGP(DL_INFO, "I210: TSAUXC=0x0 (SYSTIM enabled)\n");
+    DEBUGP(DL_TRACE, "I210: TSAUXC=0x%08X TIMINCA=0x%08X TSYNCTXCTL=0x%08X TSYNCRXCTL=0x%08X\n",
+           tsauxc, timinca, tx_ctl, rx_ctl);
 
-    // Step 1.5: Program TIMINCA (clock increment register) to the nominal 8 ns per 125 MHz cycle.
-    // Datasheet 333016 v3.7 section 8.15.11: INC_TIME = 8 ns +/- Incvalue * 2^-32 ns, reset value 0,
-    // so the NOMINAL encoding is Incvalue = 0, ISGN = 0 (see i210_timinca_nominal above).
-    // The previous 0x08000000 ("8 << 24") is 8 ns + 2^27 * 2^-32 ns = 8.03125 ns, i.e. +3906.25 ppm.
-    // KNOWN DEBT (TEST-TIMINCA-ARCH-006, deliberately RED): init() still reaches the generic
-    // AvbPlatformInit first, which also writes a TIMINCA, so the init chain has two programming steps
-    // until init() is restructured to make this function the single owner.
-    {
-        const uint32_t nominal = i210_timinca_nominal();
-        uint32_t timinca = 0;
-        int timinca_rc = ndis_platform_ops.mmio_read(dev, I210_TIMINCA, &timinca);
-        if (timinca_rc != 0) {
-            DEBUGP(DL_ERROR, "I210: Failed to read TIMINCA\n");
-            return -1;
+    systim_off = (tsauxc & INTEL_TSAUXC_DISABLE_SYSTIM) != 0;
+    tx_on = (tx_ctl & want_tx) == want_tx;
+    rx_on = (rx_ctl & (uint32_t)(I210_TSYNCRXCTL_EN_MASK | I210_TSYNCRXCTL_TYPE_MASK)) == want_rx;
+    full  = systim_off || (!tx_on && !rx_on);
+
+    if (full) {
+        /* Step 1: Enable SYSTIM - write 0x0 to TSAUXC to clear all bits including bit 31 (DIS_ST).
+         * Linux igb: E1000_WRITE_REG(hw, E1000_TSAUXC, 0x0) - write zero, no read-modify-write.
+         * This must be done BEFORE seeding SYSTIM so the hardware accepts the new time. */
+        if (ndis_platform_ops.mmio_write(dev, I210_TSAUXC, 0) != 0) {
+            DEBUGP(DL_ERROR, "I210: Failed to clear TSAUXC\n");
+            return -EIO;
         }
-        DEBUGP(DL_TRACE, "I210: TIMINCA read=0x%08X\n", timinca);
-        if (timinca != nominal) {
-            timinca = nominal;
-            if (ndis_platform_ops.mmio_write(dev, I210_TIMINCA, timinca) != 0) {
-                DEBUGP(DL_ERROR, "I210: Failed to write TIMINCA\n");
-                return -1;
-            }
-            DEBUGP(DL_INFO, "I210: TIMINCA set to nominal 0x%08X (8 ns/cycle)\n", timinca);
-        } else {
-            DEBUGP(DL_TRACE, "I210: TIMINCA already nominal (0x%08X)\n", timinca);
+        DEBUGP(DL_INFO, "I210: TSAUXC=0x0 (SYSTIM enabled)\n");
+    }
+
+    /* Step 2: TIMINCA to the nominal 8 ns per 125 MHz cycle.
+     * Datasheet 333016 v3.7 section 8.15.11: INC_TIME = 8 ns +/- Incvalue * 2^-32 ns, reset value 0,
+     * so the NOMINAL encoding is Incvalue = 0, ISGN = 0 (see i210_timinca_nominal above).
+     * The previous 0x08000000 ("8 << 24") is 8 ns + 2^27 * 2^-32 ns = 8.03125 ns, i.e. +3906.25 ppm.
+     * This is the ONLY place the I210 init chain programs TIMINCA (TEST-TIMINCA-ARCH-006).
+     * Full init: always the nominal value.  Otherwise only a value outside the policy range is repaired, so an
+     * in-policy ADJUST_FREQUENCY result survives a repeated init. */
+    if ((full && timinca != nominal) || (!full && !i210_timinca_within_api_range(timinca))) {
+        if (ndis_platform_ops.mmio_write(dev, I210_TIMINCA, nominal) != 0) {
+            DEBUGP(DL_ERROR, "I210: Failed to write TIMINCA\n");
+            return -EIO;
         }
+        DEBUGP(DL_INFO, "I210: TIMINCA set to nominal 0x%08X (8 ns/cycle)\n", nominal);
     }
 
-    // Step 2: Seed SYSTIM with a known non-zero value.
-    // I210: SYSTIML=nanoseconds, SYSTIMH=seconds. Write SYSTIML first, SYSTIMH commits.
-    // Linux igb: igb_ptp_write_i210() writes SYSTIML then SYSTIMH.
-    if (ndis_platform_ops.mmio_write(dev, I210_SYSTIML, 1) != 0 ||
-        ndis_platform_ops.mmio_write(dev, I210_SYSTIMH, 0) != 0) {
-        DEBUGP(DL_TRACE, "I210: Failed to seed SYSTIM\n");
-        return -1;
-    }
-    DEBUGP(DL_TRACE, "I210: SYSTIM seeded (sec=0, ns=1)\n");
-
-    // Step 3: Enable TX timestamping
-    {
-        uint32_t tx_ctl = (uint32_t)I210_TSYNCTXCTL_SET(0, I210_TSYNCTXCTL_EN_MASK,
-                                                          I210_TSYNCTXCTL_EN_SHIFT, 1);
-        if (ndis_platform_ops.mmio_write(dev, I210_TSYNCTXCTL, tx_ctl) != 0) {
-            DEBUGP(DL_ERROR, "I210: Failed to write TSYNCTXCTL\n");
-        } else {
-            DEBUGP(DL_TRACE, "I210: TX timestamping enabled (TSYNCTXCTL=0x%08X)\n", tx_ctl);
+    /* Step 3: Seed SYSTIM with a known non-zero value - full initialization only, never on a configured device.
+     * I210: SYSTIML=nanoseconds, SYSTIMH=seconds. Write SYSTIML first, SYSTIMH commits.
+     * Linux igb: igb_ptp_write_i210() writes SYSTIML then SYSTIMH. */
+    if (full) {
+        if (ndis_platform_ops.mmio_write(dev, I210_SYSTIML, 1) != 0 ||
+            ndis_platform_ops.mmio_write(dev, I210_SYSTIMH, 0) != 0) {
+            DEBUGP(DL_ERROR, "I210: Failed to seed SYSTIM\n");
+            return -EIO;
         }
+        DEBUGP(DL_TRACE, "I210: SYSTIM seeded (sec=0, ns=1)\n");
     }
 
-    // Step 4: Enable RX timestamping (all PTP packets)
-    {
-        uint32_t rx_ctl = (uint32_t)I210_TSYNCRXCTL_SET(0, I210_TSYNCRXCTL_EN_MASK,
-                                                          I210_TSYNCRXCTL_EN_SHIFT, 1);
-        rx_ctl = (uint32_t)I210_TSYNCRXCTL_SET(rx_ctl, I210_TSYNCRXCTL_TYPE_MASK,
-                                                I210_TSYNCRXCTL_TYPE_SHIFT, I210_TSYNCRXCTL_TYPE_ALL);
-        ndis_platform_ops.mmio_write(dev, I210_TSYNCRXCTL, rx_ctl);
-        DEBUGP(DL_TRACE, "I210: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", rx_ctl);
+    /* Step 4: Enable TX timestamping, verified by readback. */
+    if (!tx_on) {
+        uint32_t check = 0;
+        if (ndis_platform_ops.mmio_write(dev, I210_TSYNCTXCTL, want_tx) != 0 ||
+            ndis_platform_ops.mmio_read(dev, I210_TSYNCTXCTL, &check) != 0 || (check & want_tx) != want_tx) {
+            DEBUGP(DL_ERROR, "I210: TX timestamping could not be enabled\n");
+            return -EIO;
+        }
+        DEBUGP(DL_TRACE, "I210: TX timestamping enabled (TSYNCTXCTL=0x%08X)\n", want_tx);
     }
 
-    DEBUGP(DL_TRACE, "<==i210_init_ptp: Result=%d\n", result);
-    return result;
+    /* Step 5: Enable RX timestamping (all PTP packets), verified by readback. */
+    if (!rx_on) {
+        uint32_t check = 0;
+        if (ndis_platform_ops.mmio_write(dev, I210_TSYNCRXCTL, want_rx) != 0 ||
+            ndis_platform_ops.mmio_read(dev, I210_TSYNCRXCTL, &check) != 0 ||
+            (check & (uint32_t)(I210_TSYNCRXCTL_EN_MASK | I210_TSYNCRXCTL_TYPE_MASK)) != want_rx) {
+            DEBUGP(DL_ERROR, "I210: RX timestamping could not be enabled\n");
+            return -EIO;
+        }
+        DEBUGP(DL_TRACE, "I210: RX timestamping enabled (TSYNCRXCTL=0x%08X)\n", want_rx);
+    }
+
+    DEBUGP(DL_TRACE, "<==i210_init_ptp: success (%s)\n", full ? "full initialization" : "configuration verified/repaired");
+    return 0;
 }
 
 /**

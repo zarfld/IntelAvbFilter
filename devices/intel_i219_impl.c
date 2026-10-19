@@ -73,8 +73,12 @@ static int init(device_t *dev)
     {
         int ptp_result = init_ptp(dev);
         if (ptp_result != 0) {
-            DEBUGP(DL_WARN, "I219 init: PTP clock init returned %d — SYSTIM may be frozen\n", ptp_result);
-            /* Non-fatal: basic NDIS filtering still works; log and continue */
+            /* Report the failure: init() == 0 is what lets the generic layer establish
+             * AVB_HW_PTP_READY (AvbMarkPtpReady), so a failed PTP init must not look like success.
+             * init_ptp() fails only when MMIO access fails (unmapped / out of range), which is also
+             * what the generic MMIO sanity check rejects. */
+            DEBUGP(DL_ERROR, "I219 init: PTP clock init failed %d — SYSTIM may be frozen\n", ptp_result);
+            return -1;
         }
     }
 

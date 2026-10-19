@@ -1315,13 +1315,13 @@ $AllTests = @(
         Description = "Offline: status/capability/payload -> PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE (docs/testing/test-verdict-contract.md)"
     },
     @{
-        Name = "test_i210_frequency_ops"
+        Name = "test_i210_device_ops"
         Type = "cl"
-        Source = "tests\unit\ioctl\test_i210_frequency_ops.c"
+        Source = "tests\unit\ioctl\test_i210_device_ops.c"
         ExtraSources = "devices/intel_i210_impl.c"
-        Output = "test_i210_frequency_ops.exe"
+        Output = "test_i210_device_ops.exe"
         Includes = "-I tests/unit/host_shim -I . -I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
-        Description = "Offline: production I210 frequency ops vs datasheet 8.15.11 golden vectors on a fake register file (representability vs +/-100,000 ppb API range, no-MMIO validation, raw current_increment); Verifies #3, #149, #326, #21, #124"
+        Description = "Offline: production I210 device ops on a fake register file - frequency ops vs datasheet 8.15.11 golden vectors (representability vs +/-100,000 ppb API range, no-MMIO validation, raw current_increment) and init (single TIMINCA owner, no repeated SYSTIM seeding, honest failure propagation); Verifies #3, #149, #326, #343, #21, #124"
     },
     @{
         Name = "test_tx_corr_verdict"

@@ -155,6 +155,29 @@ static int PlatformInitWrapper(_In_ device_t *dev) {
 }
 static void PlatformCleanupWrapper(_In_ device_t *dev) { AvbPlatformCleanup(dev); }
 
+/**
+ * @brief Records that intel_init() returned 0 and moves hw_state to AVB_HW_PTP_READY.
+ *
+ * KNOWN IMPLEMENTATION GAP vs requirement #18: AVB_HW_PTP_READY is defined (include/avb_ioctl.h, #18) as
+ * "PTP clock verified incrementing & timestamp capture enabled".  This helper performs NO such
+ * verification: it trusts the device-specific init() return value.  Only the I210 init() verifies its
+ * timestamp-control writes by readback, and no device verifies that the clock increments.  Therefore
+ * hw_state == AVB_HW_PTP_READY currently means "init() reported success", NOT "clock verified"; do not
+ * report PHC health from it.  Clock-progression verification is not implemented (issue #343, scope E,
+ * blocked on a production-code test seam).
+ *
+ * Call it ONLY after a successful intel_init(), from the explicit lifecycle operations
+ * AvbBringUpHardware() and AvbEnsureDeviceReady(); no observation-only IOCTL may call it.
+ */
+static void AvbMarkPtpReady(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+{
+    Ctx->intel_device.capabilities |= INTEL_CAP_MMIO;
+    if (Ctx->hw_state < AVB_HW_PTP_READY) {
+        AVB_SET_HW_STATE(Ctx, AVB_HW_PTP_READY);
+        DEBUGP(DL_TRACE, "HW state -> %s (device ready)\n", AvbHwStateName(Ctx->hw_state));
+    }
+}
+
 const struct platform_ops ndis_platform_ops = {
     PlatformInitWrapper,
     PlatformCleanupWrapper,
@@ -432,7 +455,10 @@ skip_test_pools:
 
 /**
  * @brief Attempt full HW bring-up (intel_init + MMIO sanity + optional PTP for i210).
- *        Failure is non-fatal; enumeration remains with baseline capabilities.
+ *        A failure is REPORTED through the returned status (and hw_state stays below PTP_READY); it is non-fatal
+ *        for ENUMERATION: the context and baseline capabilities remain, and the callers that create contexts or
+ *        restart a filter discard the status on purpose.  Success means initialization completed, NOT that the
+ *        hardware clock has been shown to advance at the right rate.
  */
 NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
 {
@@ -496,8 +522,10 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     if (!NT_SUCCESS(status)) {
         DEBUGP(DL_TRACE, "?? AvbBringUpHardware: basic init failed 0x%08X (keeping baseline capabilities=0x%08X)\n", 
                status, baseline_caps);
-        // Don't return error - allow enumeration with baseline capabilities
-        return STATUS_SUCCESS;
+        /* Initialization FAILED, and the caller is told so (INIT_DEVICE returns this status).  The context and the
+         * baseline capabilities set above are kept, so the adapter stays ENUMERABLE; the callers that must not fail
+         * (AvbInitializeDevice, FilterRestart) deliberately discard this status.  hw_state stays below PTP_READY. */
+        return status;
     }
 
     /* If BAR0 was NOT successfully mapped, strip capabilities that require
@@ -537,8 +565,14 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         
         if (init_result == 0) {
             DEBUGP(DL_TRACE, "? intel_init() successful - device initialized with PTP and TSN\n");
+            /* Explicit lifecycle operation: establish readiness here, on success only, so observation-only
+             * IOCTLs never have to initialize (or reset) the PHC lazily.  On failure the state stays below
+             * PTP_READY and the adapter remains enumerable. */
+            AvbMarkPtpReady(Ctx);
         } else {
             DEBUGP(DL_TRACE, "?? intel_init() failed: %d (PTP/TSN features unavailable)\n", init_result);
+            /* Not initialized: report it instead of success.  hw_state stays below PTP_READY (no AvbMarkPtpReady). */
+            return STATUS_DEVICE_HARDWARE_ERROR;
         }
     } else {
         DEBUGP(DL_ERROR, "!!! DEBUG: SKIPPING intel_init() - hw_state not ready!\n");
@@ -754,6 +788,8 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
     }
 
     // Idempotency guard: skip re-initialization if already PTP-ready.
+    // NOTE (issue #343): this function is an EXPLICIT initialization/recovery operation (OPEN_ADAPTER and
+    // retries after a failed bring-up).  Observation-only IOCTLs must never call it.
     // Each device's init_ptp resets SYSTIM to epoch (sec=0, ns=1), so repeating
     // it on every OPEN_ADAPTER call would destroy an already-running PTP clock.
     // Hardware reset / filter-detach lowers hw_state back below AVB_HW_PTP_READY,
@@ -796,12 +832,8 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
     
     DEBUGP(DL_TRACE, "? AvbEnsureDeviceReady: Device initialization successful\n");
     
-    // Update capabilities and state based on successful initialization
-    context->intel_device.capabilities |= INTEL_CAP_MMIO;
-    if (context->hw_state < AVB_HW_PTP_READY) {
-        AVB_SET_HW_STATE(context, AVB_HW_PTP_READY);
-        DEBUGP(DL_TRACE, "HW state -> %s (device ready)\n", AvbHwStateName(context->hw_state));
-    }
+    // Establish readiness (single shared helper; only reached after intel_init succeeded)
+    AvbMarkPtpReady(context);
     
     return STATUS_SUCCESS;
 }
@@ -854,7 +886,10 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
             idSt, dev);
     }
 
-    (void)AvbBringUpHardware(*AvbContext); /* deferred; ignore failure */
+    /* Deliberately ignore a bring-up failure HERE: creating the context must succeed so that the adapter stays
+     * enumerable even when its hardware initialization failed.  The failure is not hidden - hw_state stays below
+     * PTP_READY and INIT_DEVICE / OPEN_ADAPTER (explicit recovery) report or retry it. */
+    (void)AvbBringUpHardware(*AvbContext);
     return STATUS_SUCCESS;
 }
 
@@ -2225,6 +2260,73 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* P0.1: use per-handle selected adapter, not global */
                 PAVB_FREQUENCY_REQUEST freq_req = (PAVB_FREQUENCY_REQUEST)buf;
 
+                /* Device-operations path (issue #343).  Generic code performs only ABI validation, dispatch, ETW
+                 * ordering and status translation; TIMINCA encoding, representability, the applicable range and
+                 * the register transaction belong to the device implementation behind these two operations.
+                 *   validate_frequency_request: side-effect free (no MMIO, no clock mutation, no initialization)
+                 *   adjust_frequency:           explicitly mutating
+                 * Return codes: 0 ok, -EINVAL unacceptable request, -ENOTSUP the HARDWARE has no such path,
+                 * other negative = register access failed.  A NULL operation means this DRIVER has no
+                 * implementation for the family yet (legacy path below) - it is never reported as unsupported
+                 * hardware. */
+                const intel_device_ops_t *freq_ops = intel_get_device_ops(activeContext->intel_device.device_type);
+                if (freq_ops != NULL && freq_ops->validate_frequency_request != NULL && freq_ops->adjust_frequency != NULL) {
+                    device_t *freq_dev = &activeContext->intel_device;
+                    uint32_t  previous_increment = 0;
+                    int       frc = freq_ops->validate_frequency_request(freq_dev, freq_req->increment_ns, freq_req->increment_frac);
+
+                    if (frc == -ENOTSUP) {
+                        freq_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                        status = STATUS_NOT_SUPPORTED;
+                        info = sizeof(*freq_req);
+                        break;
+                    }
+                    if (frc != 0) {
+                        DEBUGP(DL_ERROR, "Frequency adjustment rejected by the device (increment_ns=%u frac=0x%08X rc=%d DID=0x%04X)\n",
+                               freq_req->increment_ns, freq_req->increment_frac, frc, activeContext->intel_device.pci_device_id);
+                        EventWriteEVT_HARDWARE_FAULT(NULL);  /* ETW ID 300: unacceptable frequency request */
+                        freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                        status = STATUS_INVALID_PARAMETER;
+                        info = sizeof(*freq_req);
+                        break;
+                    }
+
+                    /* Acceptable request: ETW before the hardware gate ("an adjustment was requested"). */
+                    EventWriteEVT_PHC_FORCESET_WARN(NULL);  /* ETW ID 200: PHC freq adjustment */
+
+                    if (activeContext->hw_state < AVB_HW_BAR_MAPPED) {
+                        DEBUGP(DL_ERROR, "Frequency adjustment failed: Hardware not ready (state=%s)\n",
+                               AvbHwStateName(activeContext->hw_state));
+                        freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                        status = STATUS_DEVICE_NOT_READY;
+                    } else {
+                        frc = freq_ops->adjust_frequency(freq_dev, freq_req->increment_ns, freq_req->increment_frac,
+                                                         &previous_increment);
+                        freq_req->current_increment = previous_increment;   /* raw value read before the change */
+                        if (frc == 0) {
+                            freq_req->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                            status = STATUS_SUCCESS;
+                        } else if (frc == -EINVAL) {
+                            freq_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
+                            status = STATUS_INVALID_PARAMETER;
+                        } else if (frc == -ENOTSUP) {
+                            freq_req->status = (avb_u32)NDIS_STATUS_NOT_SUPPORTED;
+                            status = STATUS_NOT_SUPPORTED;
+                        } else {
+                            DEBUGP(DL_ERROR, "Failed to adjust the clock frequency (rc=%d)\n", frc);
+                            freq_req->status = (avb_u32)NDIS_STATUS_FAILURE;
+                            status = STATUS_UNSUCCESSFUL;
+                        }
+                    }
+                    info = sizeof(*freq_req);
+                    break;
+                }
+
+                /* UNRESOLVED HAL DEBT (issue #343): the code below is the LEGACY per-family TIMINCA validation and
+                 * encoding that still lives in src/ for families whose device implementation does not provide the
+                 * two frequency operations yet (I217/I219/I225/I226 and others).  It is intentionally unchanged;
+                 * migrate it family by family into devices/intel_<family>_impl.c behind characterization tests. */
+
                 /* Validate parameter range FIRST — emit ETW events regardless of hw state.
                  * Event ID 300 (HARDWARE_FAULT) fires for out-of-range increment_ns.
                  * Event ID 200 (PHC_FORCESET_WARN) fires for any valid adjustment request.
@@ -3068,43 +3170,14 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 PAVB_AUX_TIMESTAMP_REQUEST aux_req = (PAVB_AUX_TIMESTAMP_REQUEST)buf;
 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                    DEBUGP(DL_TRACE, "Aux timestamp: hw_state=%s, attempting lazy PTP init\n",
+                    /* Observation-only: never initialize, recover or promote here (issue #343).  TIMINCA is not a
+                     * readiness signal (0 is the I210 nominal value).  Use INIT_DEVICE / OPEN_ADAPTER. */
+                    DEBUGP(DL_ERROR, "Aux timestamp read: PTP not ready (state=%s); not initializing from a read-only IOCTL\n",
                            AvbHwStateName(activeContext->hw_state));
-
-                    /* Lazy-init identical to IOCTL_AVB_GET_TIMESTAMP path:
-                     * 1. If TIMINCA is already non-zero the clock is running -> promote state.
-                     * 2. If not, call AvbEnsureDeviceReady for I210/I225/I226. */
-                    if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
-                        ULONG timinca_val = 0;
-                        const intel_device_ops_t *lazy_ops =
-                            intel_get_device_ops(activeContext->intel_device.device_type);
-                        if (lazy_ops && lazy_ops->read_timinca &&
-                            lazy_ops->read_timinca(&activeContext->intel_device, &timinca_val) == 0 &&
-                            timinca_val != 0) {
-                            DEBUGP(DL_TRACE, "TIMINCA=0x%08X non-zero -> promoting to PTP_READY\n", timinca_val);
-                            AVB_SET_HW_STATE(activeContext, AVB_HW_PTP_READY);
-                        } else {
-                            intel_device_type_t dev_type = activeContext->intel_device.device_type;
-                            if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 ||
-                                dev_type == INTEL_DEVICE_I226) {
-                                DEBUGP(DL_TRACE, "Calling AvbEnsureDeviceReady for device type %d\n", dev_type);
-                                NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
-                                UNREFERENCED_PARAMETER(init_result);
-                                DEBUGP(DL_TRACE, "AvbEnsureDeviceReady -> 0x%08X, state now %s\n",
-                                       init_result, AvbHwStateName(activeContext->hw_state));
-                            }
-                        }
-                    }
-
-                    if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                        DEBUGP(DL_ERROR, "Aux timestamp read: PTP still not ready after init (state=%s)\n",
-                               AvbHwStateName(activeContext->hw_state));
-                        aux_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
-                        status = STATUS_DEVICE_NOT_READY;
-                        break;
-                    }
+                    aux_req->status = (avb_u32)NDIS_STATUS_ADAPTER_NOT_READY;
+                    status = STATUS_DEVICE_NOT_READY;
+                    break;
                 }
-
                 if (aux_req->timer_index > 1) {
                     DEBUGP(DL_ERROR, "Invalid timer index: %u (max 1)\n", aux_req->timer_index);
                     aux_req->status = (avb_u32)NDIS_STATUS_INVALID_PARAMETER;
@@ -3493,46 +3566,15 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 PAVB_DEVICE_CONTEXT activeContext = currentContext;
                 
                 if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                    DEBUGP(DL_TRACE, "Timestamp access: Hardware state %s, checking PTP clock\n",
+                    /* Never initialize, recover or promote from here (issue #343): TIMINCA is not a readiness
+                     * signal (0 is the I210 nominal value) and a timestamp query must not reset a running PHC.
+                     * Readiness is established by the explicit lifecycle operations (bring-up, INIT_DEVICE,
+                     * OPEN_ADAPTER). */
+                    DEBUGP(DL_ERROR, "Timestamp access: PTP not ready (state=%s); not initializing from a timestamp IOCTL\n",
                            AvbHwStateName(activeContext->hw_state));
-                    
-                    // Note: private_data already points to struct intel_private with platform_data set during initialization
-                    
-                    // If we have BAR access, check if PTP clock is already running
-                    if (activeContext->hw_state >= AVB_HW_BAR_MAPPED) {
-                        // Check TIMINCA register - if non-zero, clock is configured
-                        ULONG timinca = 0;
-                        const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
-                        if (ops && ops->read_timinca && 
-                            ops->read_timinca(&activeContext->intel_device, &timinca) == 0 && timinca != 0) {
-                            DEBUGP(DL_TRACE, "PTP clock already configured (TIMINCA=0x%08X), promoting to PTP_READY\n", timinca);
-                            AVB_SET_HW_STATE(activeContext, AVB_HW_PTP_READY);
-                        } else {
-                            // Try to initialize PTP for supported devices
-                            intel_device_type_t dev_type = activeContext->intel_device.device_type;
-                            
-                            if (dev_type == INTEL_DEVICE_I210 || dev_type == INTEL_DEVICE_I225 || 
-                                dev_type == INTEL_DEVICE_I226 || dev_type == INTEL_DEVICE_I219) {
-                                DEBUGP(DL_TRACE, "Attempting PTP initialization for device type %d\n", dev_type);
-                                NTSTATUS init_result = AvbEnsureDeviceReady(activeContext);
-                                UNREFERENCED_PARAMETER(init_result);  // Used only in DEBUGP
-                                DEBUGP(DL_TRACE, "PTP initialization result: 0x%08X, new state: %s\n", 
-                                       init_result, AvbHwStateName(activeContext->hw_state));
-                            } else {
-                                DEBUGP(DL_TRACE, "Device type %d does not support PTP initialization\n", dev_type);
-                            }
-                        }
-                    }
-                    
-                    // Check state again after potential initialization
-                    if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                        DEBUGP(DL_ERROR, "PTP clock not ready after initialization attempt (state=%s)\n",
-                               AvbHwStateName(activeContext->hw_state));
-                        status = STATUS_DEVICE_NOT_READY;
-                        break;
-                    }
+                    status = STATUS_DEVICE_NOT_READY;
+                    break;
                 }
-                
                 PAVB_TIMESTAMP_REQUEST r = (PAVB_TIMESTAMP_REQUEST)buf; 
                 
                 DEBUGP(DL_TRACE, "Timestamp %s: context VID=0x%04X DID=0x%04X\n",
@@ -4073,6 +4115,15 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
              * Callers that need initialization must use IOCTL_AVB_INIT_DEVICE. */
         } 
         break;
+    /* IOCTL_AVB_OPEN_ADAPTER - existing side effects (documented, issue #343):
+     *   - sets the DRIVER-GLOBAL g_AvbContext (unlocked) to the selected adapter; this also gates the TX-poll and
+     *     target-time DPCs;
+     *   - runs AvbBringUpHardware() when the context is not initialized yet;
+     *   - runs AvbEnsureDeviceReady() (an explicit initialization/recovery operation) for BAR-mapped adapters; it is
+     *     a no-op once the state is PTP_READY;
+     *   - MDIO-only I217/I219 without a mapped BAR0 are promoted to PTP_READY directly (software-fallback mode);
+     *   - reports success even when initialization failed: readiness is visible only through hw_state, and the
+     *     observation IOCTLs return STATUS_DEVICE_NOT_READY below PTP_READY. */
     case IOCTL_AVB_OPEN_ADAPTER:
         DEBUGP(DL_ERROR, "!!! [DIAG] AvbHandleDeviceIoControl OPEN_ADAPTER entered ctx=%p outLen=%lu\n", AvbContext, outLen);
         DEBUGP(DL_TRACE, "? IOCTL_AVB_OPEN_ADAPTER: Multi-adapter context switching\n");

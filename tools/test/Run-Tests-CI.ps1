@@ -243,7 +243,7 @@ $UnitTests = @(
     "test_hal_unit",
     "test_hal_errors",
     "test_ioctl_abi",          # IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)
-    "test_i210_frequency_ops", # production I210 frequency ops vs datasheet 8.15.11 golden vectors (offline, fake register file; #3 #149 #326)
+    "test_i210_device_ops",    # production I210 frequency ops + init contract vs datasheet 8.15.11 (offline, fake register file; #3 #149 #326 #343)
     "ps1:tests/unit/ioctl/test_i210_timinca_ownership.ps1",  # TEST-TIMINCA-OWN-001..007: single I210 writer + other adapters unchanged
     "test_verdict_contract",   # status/capability/payload -> verdict contract + raw NTSTATUS capture (offline, no driver)
     "test_tx_corr_verdict",    # TC-CORR-TX-RX-001 per-sample verdict: provenance / no-timestamp / NOT_IMPLEMENTED (#35, #199)

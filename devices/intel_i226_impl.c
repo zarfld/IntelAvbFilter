@@ -263,8 +263,11 @@ static int init(device_t *dev)
     DEBUGP(DL_TRACE, "I226: Initializing PTP clock\n");
     int ptp_result = init_ptp(dev);
     if (ptp_result != 0) {
-        DEBUGP(DL_TRACE, "I226: PTP initialization returned: %d\n", ptp_result);
-        // Continue - basic functionality still works
+        /* Report the failure: init() == 0 is what lets the generic layer establish AVB_HW_PTP_READY
+         * (AvbMarkPtpReady), so a failed PTP init must not look like success.  init_ptp() fails only
+         * when MMIO access fails (unmapped / out of range), which the generic MMIO sanity check also rejects. */
+        DEBUGP(DL_ERROR, "I226: PTP initialization failed: %d\n", ptp_result);
+        return -1;
     }
     
     DEBUGP(DL_TRACE, "<==i226_init: Success\n");
