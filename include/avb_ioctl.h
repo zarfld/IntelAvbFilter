@@ -136,7 +136,7 @@ typedef struct _IOCTL_VERSION {
  * Note: Code 53 was already taken by IOCTL_AVB_VLAN_ENABLE; using 64 instead. */
 #define IOCTL_AVB_SET_LAUNCH_TIME       _NDIS_CONTROL_CODE(64, METHOD_BUFFERED)
 
-/* TAS state query — test-state-restoration contract (fix #328).
+/* TAS state query — test-state-restoration contract (requirement #9, test issue #206).
  * Returns whether TAS is currently armed on the active adapter and the last
  * programmed GCL parameters, as remembered by the driver.  This is driver-level
  * state only; it does NOT read back hardware GCL registers because no documented
@@ -150,6 +150,10 @@ typedef struct _IOCTL_VERSION {
  * in-place TAS disable path exists without an adapter reset (see P0.2 analysis in
  * devices/intel_i226_impl.c).  Tests requiring disarm on TAS-capable hardware must
  * be classified BLOCKED until a supported transition path is established.
+ * KNOWN CONTRACT GAP: STATUS_NOT_SUPPORTED means the hardware lacks the capability
+ * (docs/testing/test-verdict-contract.md).  The missing safe-disable path on TAS-capable
+ * I225/I226 is a driver implementation gap and should report STATUS_NOT_IMPLEMENTED;
+ * tests treat NOT_SUPPORTED from a TAS-advertising adapter as a contract FAIL.
  * On non-TAS devices (I219, I210, etc.): clears driver flag, returns success.
  * No input parameters required. */
 #define IOCTL_AVB_DISARM_TAS            _NDIS_CONTROL_CODE(66, METHOD_BUFFERED)

@@ -51,8 +51,17 @@ param(
     [string]$OutputFile = "",
 
     [Parameter(Mandatory=$false)]
-    [string]$ClassNameOverride = ""
+    [string]$ClassNameOverride = "",
+
+    # Verification is MANDATORY unless this switch is given (fail-closed default).
+    #   mandatory: SKIP_NOT_IMPLEMENTED is incomplete -> exit 1; INCONCLUSIVE -> <failure/>
+    #   optional : both keep their label as <skipped/> and do not fail the run
+    # Used for the experimental HardwareMutation lane only.
+    [Parameter(Mandatory=$false)]
+    [switch]$OptionalVerification
 )
+
+. (Join-Path $PSScriptRoot 'TestVerdict.ps1')
 
 if (-not (Test-Path $LogFile)) {
     Write-Warning "Parse-TestResults: log file not found: $LogFile"
@@ -88,13 +97,16 @@ $className = if ($ClassNameOverride) {
 #   [PASS]           TEST-PROV-L01: ...        (provenance regression tests)
 #   [SKIP]           TEST-PROV-H03: ...
 #   [SKIP_UNSUPPORTED] TEST-PROV-H03: adapter lacks INTEL_CAP_BASIC_1588
+#   [SKIP_NOT_IMPLEMENTED] TC-TAS-001/adapter:0: ntstatus=0xC0000002 (hardware ok, driver op missing)
+#   [INCONCLUSIVE]   TC-X-001/adapter:0: capability unknown
 #   [BLOCKED]        TC-TAS-001: prerequisite not met
 #   [INFRA_FAILURE]  TC-PROV-H01: driver absent
+# Legacy text form (existing C tests):  [SKIP] ID: SKIP_UNSUPPORTED: reason
 # ---------------------------------------------------------------------------
-# Pattern captures: status (PASS/FAIL/SKIP/SKIP_UNSUPPORTED/BLOCKED/INFRA_FAILURE/CLEANUP_FAILED)
+# Pattern captures: status (tags in tools/test/TestVerdict.ps1)
 #                   test ID (TC-*, UT-CORR-*, or TEST-PROV-* with optional /adapter:N)
 #                   reason text
-$pattern = '^\s*\[(PASS|FAIL|SKIP(?:_UNSUPPORTED)?|BLOCKED|INFRA_FAILURE|CLEANUP_FAILED)\]\s+((?:TC-|UT-CORR-|TEST-PROV-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
+$pattern = '^\s*\[(' + $script:AvbVerdictTagPattern + ')\]\s+((?:TC-|UT-CORR-|TEST-PROV-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
 $entries = [System.Collections.Generic.List[hashtable]]::new()
 
 $content = Get-Content $LogFile -ErrorAction SilentlyContinue
@@ -105,28 +117,31 @@ if (-not $content) {
 
 $content | ForEach-Object {
     if ($_ -match $pattern) {
-        $status = $Matches[1].Trim()
-        $fullId = $Matches[2].Trim()
         $reason = $Matches[3].Trim()
+        $status = Resolve-AvbVerdict -Tag $Matches[1].Trim() -Reason $reason
+        $fullId = $Matches[2].Trim()
 
-        # ── JUnit normalisation ──────────────────────────────────────────
-        # FAIL,  BLOCKED,      CLEANUP_FAILED, INFRA_FAILURE → JUnit failure
-        # SKIP,  SKIP_UNSUPPORTED               → JUnit skipped
-        # PASS                                  → JUnit passed
+        # ── JUnit normalisation (shared table: tools/test/TestVerdict.ps1) ──
+        # FAIL, BLOCKED, CLEANUP_FAILED, INFRA_FAILURE → JUnit failure
+        # INCONCLUSIVE → failure (mandatory) / skipped (-OptionalVerification)
+        # SKIP, SKIP_UNSUPPORTED, SKIP_NOT_IMPLEMENTED → JUnit skipped
+        # PASS                                         → JUnit passed
         #
         # NOTE: INFRA_FAILURE must NEVER produce a JUnit passing test case.
         # A test that reports INFRA_FAILURE is evidence that the HIL runner,
         # driver, or test binary is broken — treat it as hard failure.
-        $junitStatus = switch ($status) {
-            'BLOCKED'          { 'FAIL' }
-            'CLEANUP_FAILED'   { 'FAIL' }
-            'INFRA_FAILURE'    { 'FAIL' }
-            'SKIP_UNSUPPORTED' { 'SKIP' }
-            default            { $status }
+        $junitStatus = switch (Get-AvbVerdictClass -Verdict $status -Optional:$OptionalVerification) {
+            'pass'    { 'PASS' }
+            'failure' { 'FAIL' }
+            'skipped' { 'SKIP' }
         }
-        $reasonWithStatus = if ($status -in @('BLOCKED','CLEANUP_FAILED','INFRA_FAILURE')) {
-            "[$status] $reason"
-        } else { $reason }
+        # Everything except the three plain tags keeps its exact verdict label so the
+        # classification survives normalisation (testcase id/adapter/ntstatus stay in the text).
+        $reasonWithStatus = if ($status -in @('PASS','FAIL','SKIP')) {
+            $reason
+        } else {
+            "[$status] " + ($reason -replace '^:\s*', '')
+        }
 
         # Split "TC-PERF-TS-001/adapter:0" → tcBase="TC-PERF-TS-001" adapter="adapter:0"
         $slash = $fullId.IndexOf('/')
@@ -140,7 +155,7 @@ $content | ForEach-Object {
 
         $entries.Add(@{
             Status     = $junitStatus        # PASS/FAIL/SKIP (JUnit-normalised)
-            OrigStatus = $status             # original status preserved
+            OrigStatus = $status             # exact verdict preserved (tag, or promoted legacy text)
             TcBase     = $tcBase
             Adapter    = $adapter
             Reason     = $reasonWithStatus
@@ -173,49 +188,78 @@ $totalCases   = $cases.Count
 $failedCases  = 0
 $skippedCases = 0      # counts only all-adapters-skip (real skip)
 $partialCases = 0      # some passed, some skipped — tracked for summary only
+$incompleteCases   = 0 # SKIP_NOT_IMPLEMENTED present (no failure): required work missing
+$inconclusiveCases = 0 # INCONCLUSIVE kept as skipped (-OptionalVerification only)
 
 $sb = [System.Text.StringBuilder]::new()
 
+# One adapter row rendered as "adapter:N: [TAG] reason" for messages.
+function Format-Row($r) { if ($r.Adapter) { "$($r.Adapter): $($r.Reason)" } else { $r.Reason } }
+function Esc($s) { [System.Security.SecurityElement]::Escape($s) }
+
 foreach ($tcBase in $cases.Keys) {
     $rows      = $cases[$tcBase]
-    $passCount = ($rows | Where-Object { $_.Status -eq 'PASS' }).Count
-    $failCount = ($rows | Where-Object { $_.Status -eq 'FAIL' }).Count
-    $skipCount = ($rows | Where-Object { $_.Status -eq 'SKIP' }).Count
+    $passCount = @($rows | Where-Object { $_.Status -eq 'PASS' }).Count
+    $failRows  = @($rows | Where-Object { $_.Status -eq 'FAIL' })
+    $failCount = $failRows.Count
+    $skipCount = @($rows | Where-Object { $_.Status -eq 'SKIP' }).Count
     $total     = $rows.Count
+    # Skipped rows that are NOT plain "N/A" skips: required work missing or not verified.
+    $nimplRows  = @($rows | Where-Object { $_.OrigStatus -eq 'SKIP_NOT_IMPLEMENTED' })
+    $inconRows  = @($rows | Where-Object { $_.Status -eq 'SKIP' -and $_.OrigStatus -eq 'INCONCLUSIVE' })
 
-    $tcAttr = "name=`"$([System.Security.SecurityElement]::Escape($tcBase))`" classname=`"$([System.Security.SecurityElement]::Escape($className))`""
+    $tcAttr = "name=`"$(Esc $tcBase)`" classname=`"$(Esc $className)`""
 
     if ($failCount -gt 0) {
         # ── FAIL: at least one adapter reported failure ──────────────────
         $failedCases++
-        $failParts = $rows | Where-Object { $_.Status -eq 'FAIL' } | ForEach-Object {
-            if ($_.Adapter) { "$($_.Adapter): $($_.Reason)" } else { $_.Reason }
-        }
-        $failMsg = ($failParts -join ';  ')
+        $failMsg = (($failRows | ForEach-Object { Format-Row $_ }) -join ';  ')
 
-        # Add skip context if some adapters also skipped (e.g. link down)
-        if ($skipCount -gt 0) {
-            $skipAdapters = ($rows | Where-Object { $_.Status -eq 'SKIP' } |
-                            ForEach-Object { $_.Adapter }) -join ', '
-            $firstSkipReason = ($rows | Where-Object { $_.Status -eq 'SKIP' } |
-                               Select-Object -First 1).Reason
-            $failMsg += "  [also skipped on ($skipAdapters): $firstSkipReason]"
+        # Keep every other non-passing adapter visible, with its exact verdict label.
+        $others = @($rows | Where-Object { $_.Status -eq 'SKIP' })
+        if ($others.Count -gt 0) {
+            $skipAdapters = ($others | ForEach-Object { $_.Adapter }) -join ', '
+            $firstSkipReason = $others[0].Reason
+            $failMsg += "  [also not passing on ($skipAdapters): $firstSkipReason]"
         }
+        # Exact class of the (first) failing row: FAIL / BLOCKED / CLEANUP_FAILED / INFRA_FAILURE / INCONCLUSIVE
+        $failType = $failRows[0].OrigStatus
 
         [void]$sb.AppendLine("    <testcase $tcAttr>")
-        [void]$sb.AppendLine("      <failure message=`"$([System.Security.SecurityElement]::Escape($failMsg))`"/>")
+        [void]$sb.AppendLine("      <failure type=`"$(Esc $failType)`" message=`"$(Esc $failMsg)`"/>")
+        [void]$sb.AppendLine("    </testcase>")
+
+    } elseif ($nimplRows.Count -gt 0 -or $inconRows.Count -gt 0) {
+        # ── INCOMPLETE: hardware supports it but the driver does not implement it
+        #    (SKIP_NOT_IMPLEMENTED), or evidence is insufficient (optional INCONCLUSIVE).
+        #    Stays a JUnit <skipped/> with an explicit gap message; it is NEVER folded
+        #    into PASS / PARTIAL COVERAGE.  Mandatory runs exit non-zero (see tail). ──
+        if ($nimplRows.Count -gt 0) { $incompleteCases++ } else { $inconclusiveCases++ }
+        $label    = if ($nimplRows.Count -gt 0) { 'SKIP_NOT_IMPLEMENTED' } else { 'INCONCLUSIVE' }
+        $gapRows  = @($rows | Where-Object { $_.Status -eq 'SKIP' -and $_.OrigStatus -in @('SKIP_NOT_IMPLEMENTED','INCONCLUSIVE') })
+        $gapMsg   = (($gapRows | ForEach-Object { Format-Row $_ }) -join ';  ')
+        $detail   = "incomplete ($label)"
+        if ($passCount -gt 0) {
+            $passAdapters = (($rows | Where-Object { $_.Status -eq 'PASS' } |
+                             ForEach-Object { if ($_.Adapter) { $_.Adapter } else { 'N/A' } }) -join ', ')
+            $detail += "; passed on [$passAdapters]"
+        }
+        $skipMsg = "$detail`: $gapMsg"
+
+        [void]$sb.AppendLine("    <testcase $tcAttr>")
+        [void]$sb.AppendLine("      <skipped message=`"$(Esc $skipMsg)`"/>")
         [void]$sb.AppendLine("    </testcase>")
 
     } elseif ($skipCount -eq $total) {
-        # ── ALL-SKIP: genuine skip — feature N/A, link down on all adapters,
-        #    requires restart, not implemented, etc. ──────────────────────
+        # ── ALL-SKIP: genuine skip — feature N/A (SKIP_UNSUPPORTED), link down on
+        #    all adapters, requires restart, etc. ─────────────────────────
         $skippedCases++
         $firstReason = $rows[0].Reason
         $adapterCtx  = if ($rows[0].Adapter) { "all $total adapter(s) skipped" } else { "skipped" }
         $skipMsg     = "$adapterCtx`: $firstReason"
 
         [void]$sb.AppendLine("    <testcase $tcAttr>")
-        [void]$sb.AppendLine("      <skipped message=`"$([System.Security.SecurityElement]::Escape($skipMsg))`"/>")
+        [void]$sb.AppendLine("      <skipped message=`"$(Esc $skipMsg)`"/>")
         [void]$sb.AppendLine("    </testcase>")
 
     } elseif ($skipCount -gt 0 -and $passCount -gt 0) {
@@ -247,12 +291,13 @@ $xmlContent = @"
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Generated by tools/test/Parse-TestResults.ps1
      Skip semantics:
-       <skipped>  = all adapters skipped (feature N/A)
-       <failure>  = at least one adapter failed
+       <skipped>  = all adapters skipped (feature N/A), OR labelled
+                    "incomplete (SKIP_NOT_IMPLEMENTED)": required work missing
+       <failure>  = at least one adapter failed (type= keeps the exact verdict)
        PASS + PARTIAL COVERAGE annotation = some adapters skipped (e.g. link-down),
                                             rest passed; no failures
 -->
-<testsuite name="$className" tests="$totalCases" failures="$failedCases" skipped="$skippedCases" time="0">
+<testsuite name="$className" tests="$totalCases" failures="$failedCases" skipped="$($skippedCases + $incompleteCases + $inconclusiveCases)" time="0">
 $($sb.ToString().TrimEnd())
 </testsuite>
 "@
@@ -268,14 +313,20 @@ $xmlContent | Set-Content -Path $OutputFile -Encoding UTF8
 # ---------------------------------------------------------------------------
 # Report to console (visible in Run-Tests.ps1 / CI transcript)
 # ---------------------------------------------------------------------------
-$passedCases = $totalCases - $failedCases - $skippedCases
+$passedCases = $totalCases - $failedCases - $skippedCases - $incompleteCases - $inconclusiveCases
 
-$color = if ($failedCases -gt 0) { 'Red' } elseif ($partialCases -gt 0) { 'Yellow' } else { 'Green' }
+$mandatory      = -not $OptionalVerification
+$incompleteFail = $mandatory -and ($incompleteCases -gt 0)
+$color = if ($failedCases -gt 0 -or $incompleteFail) { 'Red' }
+         elseif ($partialCases -gt 0 -or $incompleteCases -gt 0 -or $inconclusiveCases -gt 0) { 'Yellow' }
+         else { 'Green' }
 
 $detail = "  [JUnit] $className`: $passedCases pass"
-if ($partialCases -gt 0) { $detail += ", $partialCases partial" }
-if ($skippedCases -gt 0) { $detail += ", $skippedCases skip" }
-if ($failedCases  -gt 0) { $detail += ", $failedCases FAIL" }
+if ($partialCases -gt 0)      { $detail += ", $partialCases partial" }
+if ($skippedCases -gt 0)      { $detail += ", $skippedCases skip" }
+if ($incompleteCases -gt 0)   { $detail += ", $incompleteCases INCOMPLETE (SKIP_NOT_IMPLEMENTED)" }
+if ($inconclusiveCases -gt 0) { $detail += ", $inconclusiveCases INCONCLUSIVE (optional)" }
+if ($failedCases  -gt 0)      { $detail += ", $failedCases FAIL" }
 $detail += " of $totalCases cases - $([System.IO.Path]::GetFileName($OutputFile))"
 
 Write-Host $detail -ForegroundColor $color
@@ -285,7 +336,7 @@ if ($partialCases -gt 0) {
     foreach ($tcBase in $cases.Keys) {
         $rows     = $cases[$tcBase]
         $passed   = ($rows | Where-Object { $_.Status -eq 'PASS'}).Count
-        $skipped  = ($rows | Where-Object { $_.Status -eq 'SKIP'}).Count
+        $skipped  = ($rows | Where-Object { $_.Status -eq 'SKIP' -and $_.OrigStatus -notin @('SKIP_NOT_IMPLEMENTED','INCONCLUSIVE') }).Count
         $failCount = ($rows | Where-Object { $_.Status -eq 'FAIL'}).Count
         if ($skipped -gt 0 -and $passed -gt 0 -and $failCount -eq 0) {
             $skipAdapters = ($rows | Where-Object { $_.Status -eq 'SKIP'} |
@@ -297,5 +348,11 @@ if ($partialCases -gt 0) {
     }
 }
 
-# Exit non-zero only on TC-level failures; partial/skip do not block CI
-if ($failedCases -gt 0) { exit 1 } else { exit 0 }
+# Exit non-zero on TC-level failures.  Partial coverage and genuine SKIP/SKIP_UNSUPPORTED do not
+# block.  SKIP_NOT_IMPLEMENTED is a JUnit skip but incomplete compliance: for mandatory
+# verification it must not read as green, so the run exits 1 (use -OptionalVerification
+# for experimental lanes).
+if ($incompleteFail) {
+    Write-Host "  [INCOMPLETE] $incompleteCases testcase(s) carry SKIP_NOT_IMPLEMENTED: mandatory verification is not complete" -ForegroundColor Red
+}
+if ($failedCases -gt 0 -or $incompleteFail) { exit 1 } else { exit 0 }

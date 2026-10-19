@@ -1307,12 +1307,36 @@ $AllTests = @(
         Description = "Mock exit-code propagation test (#328 P0 verification)"
     },
     @{
+        Name = "test_verdict_contract"
+        Type = "cl"
+        Source = "tests\unit\test_verdict_contract.c"
+        Output = "test_verdict_contract.exe"
+        Includes = "-I include"
+        Description = "Offline: status/capability/payload -> PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE (docs/testing/test-verdict-contract.md)"
+    },
+    @{
+        Name = "test_i210_timinca_codec"
+        Type = "cl"
+        Source = "tests\unit\ioctl\test_i210_timinca_codec.c"
+        Output = "test_i210_timinca_codec.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Description = "Offline: I210 TIMINCA codec golden vectors from datasheet 8.15.11 (nominal/+/-/min/max, API range vs representability); Verifies #3, #149, #21, #124"
+    },
+    @{
+        Name = "test_tx_corr_verdict"
+        Type = "cl"
+        Source = "tests\unit\test_tx_corr_verdict.c"
+        Output = "test_tx_corr_verdict.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Description = "Offline: TC-CORR-TX-RX-001 per-sample verdict (provenance/no-timestamp/NOT_IMPLEMENTED/unknown capability); Verifies #35, #199"
+    },
+    @{
         Name = "test_tas_restore_contract"
         Type = "cl"
         Source = "tests\unit\test_tas_restore_contract.c"
         Output = "test_tas_restore_contract.exe"
         Includes = "-I include -I external/intel_avb/lib"
-        Description = "Mock unit tests: TAS state-restoration contract (P0.6 / #328)"
+        Description = "Mock unit tests: TAS state-restoration contract (Requirement #9, Test Issue #206)"
     },
     @{
         Name = "test_ioctl_tas"

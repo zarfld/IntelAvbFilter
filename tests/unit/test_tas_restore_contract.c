@@ -1,9 +1,17 @@
 /*
  * test_tas_restore_contract.c
- * Mock unit tests for the TAS state-restoration contract (P0.6 / #328)
+ * Mock unit tests for the TAS state-restoration contract
  *
  * Verifies behavior, not source text, using a configurable mock IOCTL backend.
  * No driver, hardware, or elevated privileges required.
+ *
+ * The mock follows the real METHOD_BUFFERED completion rules: an error completion makes
+ * DeviceIoControl return FALSE with a lossy Win32 error, and the output buffer is NOT
+ * copied back (so a status field inside it is never delivered).  The exact NTSTATUS is
+ * only available through IOCTL_NTSTATUS_CALL (NtDeviceIoControlFile in production).
+ *
+ * Verifies: #9 (REQ-F-TAS-001), #206 (TAS test issue)
+ * Verdict contract: docs/testing/test-verdict-contract.md
  *
  * Build:
  *   cl /nologo /W3 /Zi -I include -I external/intel_avb/lib
@@ -15,12 +23,15 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
-/* Production restore infrastructure via IOCTL_CALL macro.
+/* Production restore infrastructure via IOCTL_CALL / IOCTL_NTSTATUS_CALL macros.
  * Tests exercise the SAME implementation as test_ioctl_tas.c. */
 static BOOL mock_ioctl(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz,
                        LPVOID out_buf, DWORD out_sz, LPDWORD bytes_ret,
                        LPOVERLAPPED ov);
+static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz,
+                                LPVOID out_buf, DWORD out_sz, LPDWORD bytes_ret);
 #define IOCTL_CALL mock_ioctl
+#define IOCTL_NTSTATUS_CALL mock_ioctl_ntstatus
 #include "../ioctl/tas_restore.h"
 
 /* =========================================================================
@@ -40,9 +51,11 @@ typedef struct {
     BOOL     tas_state_ok;
     avb_u32  tas_armed;
 
-    /* IOCTL_AVB_DISARM_TAS */
-    BOOL     disarm_ok;         /* FALSE → DeviceIoControl call itself fails */
-    avb_u32  disarm_status;     /* NTSTATUS returned in response struct */
+    /* IOCTL_AVB_DISARM_TAS: the driver completes the IRP with this NTSTATUS.
+     * Error severity => DeviceIoControl FALSE, Win32 error mapped (lossy), payload untouched.
+     * AVB_NTSTATUS_UNAVAILABLE => the exact status cannot be observed. */
+    LONG     disarm_ntstatus;
+    int      disarm_calls;      /* how many times DISARM_TAS was issued */
 
     /* IOCTL_AVB_SET_HW_TIMESTAMPING */
     BOOL     set_ts_ok;
@@ -96,11 +109,20 @@ static BOOL mock_ioctl(HANDLE h, DWORD code,
         return TRUE;
     }
     if (code == IOCTL_AVB_DISARM_TAS) {
-        if (!g_mock.disarm_ok) { SetLastError(ERROR_INVALID_FUNCTION); return FALSE; }
+        /* Real completion rules: error severity => FALSE, lossy Win32 error, payload untouched. */
+        g_mock.disarm_calls++;
+        if (g_mock.disarm_ntstatus < 0) {
+            switch ((ULONG)g_mock.disarm_ntstatus) {
+            case 0xC00000BBu: SetLastError(ERROR_NOT_SUPPORTED);    break;  /* STATUS_NOT_SUPPORTED   -> 50 */
+            case 0xC0000002u: SetLastError(ERROR_INVALID_FUNCTION); break;  /* STATUS_NOT_IMPLEMENTED -> 1  */
+            default:          SetLastError(ERROR_GEN_FAILURE);      break;
+            }
+            return FALSE;
+        }
         if (out_sz >= sizeof(AVB_DISARM_TAS_REQUEST)) {
             AVB_DISARM_TAS_REQUEST *d = (AVB_DISARM_TAS_REQUEST *)out_buf;
             memset(d, 0, sizeof(*d));
-            d->status = g_mock.disarm_status;
+            d->status = 0;
             if (bytes_ret) *bytes_ret = sizeof(*d);
         }
         return TRUE;
@@ -117,6 +139,23 @@ static BOOL mock_ioctl(HANDLE h, DWORD code,
     /* Unhandled IOCTL code in mock */
     SetLastError(ERROR_INVALID_PARAMETER);
     return FALSE;
+}
+
+/* Raw NTSTATUS channel (NtDeviceIoControlFile in production).  For DISARM_TAS it returns exactly
+ * what the driver completed the IRP with, and it too leaves the output buffer untouched on error. */
+static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz,
+                                LPVOID out_buf, DWORD out_sz, LPDWORD bytes_ret)
+{
+    if (code == IOCTL_AVB_DISARM_TAS) {
+        g_mock.disarm_calls++;
+        if (g_mock.disarm_ntstatus >= 0 && out_buf && out_sz >= sizeof(AVB_DISARM_TAS_REQUEST)) {
+            memset(out_buf, 0, sizeof(AVB_DISARM_TAS_REQUEST));
+            if (bytes_ret) *bytes_ret = sizeof(AVB_DISARM_TAS_REQUEST);
+        }
+        return g_mock.disarm_ntstatus;
+    }
+    /* Other IOCTLs: success/failure from the BOOL mock; no exact status is modelled. */
+    return mock_ioctl(h, code, in_buf, in_sz, out_buf, out_sz, bytes_ret, NULL) ? 0 : AVB_NTSTATUS_UNAVAILABLE;
 }
 
 /* run_case: uses production functions from tas_restore.h (via IOCTL_CALL=mock_ioctl).
@@ -204,31 +243,75 @@ static void test_03_get_hw_state_not_called(void) {
  * With the unconditional block, this scenario now produces BLOCKED (not CLEANUP_FAILED).
  * Directly tests tas_restore_state to verify STATUS_NOT_SUPPORTED produces FALSE.
  */
-static void test_04_disarm_not_supported_restore_fails(void) {
-    printf("\n[TC-MOCK-004] STATUS_NOT_SUPPORTED from DISARM_TAS => tas_restore_state returns FALSE\n");
+/* Restore with a given DISARM_TAS completion status; returns the restore result and the
+ * classified verdict + preserved original NTSTATUS. */
+static BOOL restore_with(LONG disarm_ntstatus, AVB_CAP_EVIDENCE tas_cap,
+                         AVB_VERDICT *verdict, LONG *status_out)
+{
     memset(&g_mock, 0, sizeof(g_mock));
-    /* All IOCTLs succeed except disarm returns NOT_SUPPORTED */
-    g_mock.clock_cfg_ok   = TRUE;
-    g_mock.tas_state_ok   = TRUE;
-    g_mock.tas_armed      = 0;
-    g_mock.disarm_ok      = TRUE;
-    g_mock.disarm_status  = 0xC00000BBu; /* STATUS_NOT_SUPPORTED */
-    g_mock.set_ts_ok      = TRUE;
-    g_mock.set_ts_status  = 0;
+    g_mock.set_ts_ok     = TRUE;
+    g_mock.set_ts_status = 0;
+    g_mock.disarm_ntstatus = disarm_ntstatus;
 
-    /* Direct call to tas_restore_state — bypasses preflight */
     TAS_SNAPSHOT snap;
     memset(&snap, 0, sizeof(snap));
     snap.valid = TRUE; snap.tsauxc_before = 0; snap.tas_was_armed = FALSE;
+    /* Direct call - bypasses the (unconditionally BLOCKED) preflight */
+    return tas_restore_state_ex(MOCK_HANDLE, &snap, tas_cap, verdict, status_out);
+}
 
-    BOOL restore_ok = tas_restore_state(MOCK_HANDLE, &snap);
-    EXPECT_FALSE("tas_restore_state returns FALSE on STATUS_NOT_SUPPORTED", restore_ok);
+static void test_04_disarm_status_classification(void) {
+    AVB_VERDICT v; LONG st; BOOL ok;
 
-    /* In full run_case flow: unconditional block means disarm is never reached */
+    printf("\n[TC-MOCK-004a] STATUS_NOT_SUPPORTED from a TAS-advertising adapter => FAIL (contract violation)\n");
+    ok = restore_with(STATUS_NOT_SUPPORTED, AVB_CAP_PRESENT, &v, &st);
+    EXPECT_FALSE("restore fails", ok);
+    EXPECT_EQ("verdict FAIL (NOT_SUPPORTED means absent hardware, adapter advertises TAS)", v, AVB_VERDICT_FAIL);
+    EXPECT_EQ("original NTSTATUS preserved (0xC00000BB)", (ULONG)st, 0xC00000BBu);
+    EXPECT_EQ("DISARM issued exactly once", g_mock.disarm_calls, 1);
+
+    printf("\n[TC-MOCK-004b] STATUS_NOT_IMPLEMENTED => SKIP_NOT_IMPLEMENTED (safe disable path missing), restore FALSE\n");
+    ok = restore_with(STATUS_NOT_IMPLEMENTED, AVB_CAP_PRESENT, &v, &st);
+    EXPECT_FALSE("restore fails: hardware state cannot be restored", ok);
+    EXPECT_EQ("verdict SKIP_NOT_IMPLEMENTED (never FAIL / SKIP_UNSUPPORTED)", v, AVB_VERDICT_SKIP_NOT_IMPLEMENTED);
+    EXPECT_EQ("original NTSTATUS preserved (0xC0000002)", (ULONG)st, 0xC0000002u);
+
+    printf("\n[TC-MOCK-004c] NOT_SUPPORTED with no authoritative capability evidence => INCONCLUSIVE\n");
+    ok = restore_with(STATUS_NOT_SUPPORTED, AVB_CAP_UNKNOWN, &v, &st);
+    EXPECT_FALSE("restore fails", ok);
+    EXPECT_EQ("verdict INCONCLUSIVE (never SKIP_UNSUPPORTED)", v, AVB_VERDICT_INCONCLUSIVE);
+
+    printf("\n[TC-MOCK-004d] DISARM succeeds => restore TRUE, PASS\n");
+    ok = restore_with(STATUS_SUCCESS, AVB_CAP_PRESENT, &v, &st);
+    EXPECT_TRUE("restore succeeds", ok);
+    EXPECT_EQ("verdict PASS", v, AVB_VERDICT_PASS);
+
+    printf("\n[TC-MOCK-004e] Actual failure status => FAIL with the actual status\n");
+    ok = restore_with(STATUS_INVALID_PARAMETER, AVB_CAP_PRESENT, &v, &st);
+    EXPECT_FALSE("restore fails", ok);
+    EXPECT_EQ("verdict FAIL", v, AVB_VERDICT_FAIL);
+    EXPECT_EQ("original NTSTATUS preserved (0xC000000D)", (ULONG)st, 0xC000000Du);
+
+    printf("\n[TC-MOCK-004f] Exact status not observable => INCONCLUSIVE, never a fake pass\n");
+    ok = restore_with(AVB_NTSTATUS_UNAVAILABLE, AVB_CAP_PRESENT, &v, &st);
+    EXPECT_FALSE("restore fails", ok);
+    EXPECT_EQ("verdict INCONCLUSIVE", v, AVB_VERDICT_INCONCLUSIVE);
+
+    printf("\n[TC-MOCK-004g] Device not ready => BLOCKED, not an unsupported-hardware skip\n");
+    ok = restore_with(STATUS_DEVICE_NOT_READY, AVB_CAP_PRESENT, &v, &st);
+    EXPECT_FALSE("restore fails", ok);
+    EXPECT_EQ("verdict BLOCKED", v, AVB_VERDICT_BLOCKED);
+
+    printf("\n[TC-MOCK-004h] Full run_case flow: unconditional block still means disarm is never reached\n");
+    memset(&g_mock, 0, sizeof(g_mock));
+    g_mock.clock_cfg_ok   = TRUE;
+    g_mock.tas_state_ok   = TRUE;
+    g_mock.disarm_ntstatus = STATUS_NOT_SUPPORTED;
     int blocked = 0, cleanup_failed = 0;
     int rc = run_case(MOCK_HANDLE, &blocked, &cleanup_failed);
     EXPECT_EQ("run_case returns TC_BLOCKED (not TC_CLEANUP_FAILED)", rc, TC_BLOCKED);
-    EXPECT_EQ("cleanup_failed is 0 — disarm never reached", cleanup_failed, 0);
+    EXPECT_EQ("cleanup_failed is 0 - disarm never reached", cleanup_failed, 0);
+    EXPECT_EQ("no DISARM_TAS issued (hardware state preserved)", g_mock.disarm_calls, 0);
 }
 
 /*
@@ -240,7 +323,7 @@ static void test_04_disarm_not_supported_restore_fails(void) {
 static void test_05_cleanup_failed_from_restore(void) {
     printf("\n[TC-MOCK-005] Direct restore_state path: CLEANUP_FAILED when disarm fails\n");
     memset(&g_mock, 0, sizeof(g_mock));
-    g_mock.disarm_ok      = FALSE; /* IOCTL_AVB_DISARM_TAS DeviceIoControl returns FALSE */
+    g_mock.disarm_ntstatus = STATUS_UNSUCCESSFUL; /* IRP completed with an error: DeviceIoControl returns FALSE */
     g_mock.set_ts_ok      = TRUE;
     g_mock.set_ts_status  = 0;
 
@@ -355,8 +438,7 @@ static void test_08_no_destructive_bypass(void) {
     g_mock.clock_cfg_ok   = TRUE;
     g_mock.tas_state_ok   = TRUE;
     g_mock.tas_armed      = 0;
-    g_mock.disarm_ok      = TRUE;
-    g_mock.disarm_status  = 0;
+    g_mock.disarm_ntstatus = STATUS_SUCCESS;
     g_mock.set_ts_ok      = TRUE;
     g_mock.set_ts_status  = 0;
     /* Even with all IOCTLs succeeding, the unconditional block prevents execution */
@@ -383,14 +465,16 @@ static void test_09_negative_tests_always_executable(void) {
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
-    printf(" Issue #328 / P0.6\n");
+    printf(" Requirement #9 (REQ-F-TAS-001) / Test Issue #206\n");
+    printf(" Verifies: #9\n");
+    printf(" Implements: #206\n");
     printf(" No driver or hardware required.\n");
     printf("=======================================================================\n");
 
     test_01_unconditional_block();
     test_02_armed_always_blocked();
     test_03_get_hw_state_not_called();
-    test_04_disarm_not_supported_restore_fails();
+    test_04_disarm_status_classification();
     test_05_cleanup_failed_from_restore();
     test_06_all_blocked_exit_code();
     test_07_two_adapters_both_blocked();

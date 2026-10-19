@@ -31,10 +31,30 @@ param(
     [switch]$ForceEvidenceDir,
 
     [Parameter(Mandatory=$false)]
-    [switch]$ShowDetails
+    [switch]$ShowDetails,
+
+    # Build configuration / suite the logs were produced under; recorded as <property>
+    # elements so Debug and Release results stay distinguishable in the JUnit evidence.
+    [Parameter(Mandatory=$false)]
+    [string]$Configuration = "",
+
+    [Parameter(Mandatory=$false)]
+    # NOTE: not named $Suite - PowerShell variables are case-insensitive and this script
+    # uses $suite as a loop variable for parsed log suites.
+    [string]$SuiteName = "",
+
+    # Verification is MANDATORY unless this switch is given (fail-closed default):
+    # INCONCLUSIVE -> <failure/>.  With the switch it keeps its label as <skipped/>.
+    # SKIP_NOT_IMPLEMENTED is a labelled <skipped/> in both modes; the suite runner
+    # decides whether it makes a mandatory run incomplete.  Used for HardwareMutation only.
+    [Parameter(Mandatory=$false)]
+    [switch]$OptionalVerification
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Canonical verdict vocabulary shared with Parse-TestResults.ps1 and Run-Tests-CI.ps1.
+. (Join-Path $PSScriptRoot 'TestVerdict.ps1')
 
 # ------------------------------------------------------------------
 # Paths
@@ -192,20 +212,45 @@ function Parse-TestLog {
     # Optional adapter prefix pattern: [AdapterN[VEN_XXXX:DEV_YYYY]]
     $adapterPrefix = '(?:\[Adapter\d+\[[^\]]*\]\]\s+)?'
 
+    $caseBody = "($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)"
+    # Legacy text form used by existing C tests:  [SKIP] TC-X/adapter:0: SKIP_UNSUPPORTED: reason
+    $legacyRx = "^\[SKIP\]\s+$adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+(?:/adapter:\d+)?\s*:?\s*(SKIP_UNSUPPORTED|SKIP_NOT_IMPLEMENTED)\b"
+
     foreach ($line in $lines) {
         $stripped = $line.Trim()
 
-        if ($stripped -match "^\[PASS\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)" -or
+        # Labelled non-pass/fail verdicts (shared vocabulary: tools/test/TestVerdict.ps1).
+        # Before this branch existed the converter silently ignored [SKIP_UNSUPPORTED].
+        $labelled = $null; $labelledBody = $null
+        if ($stripped -match "^\[(SKIP_UNSUPPORTED|SKIP_NOT_IMPLEMENTED|INCONCLUSIVE)\]\s+$caseBody") {
+            $labelled = $Matches[1]; $labelledBody = $Matches[2]
+        } elseif ($stripped -match $legacyRx) {
+            $labelled = $Matches[1]
+            [void]($stripped -match "^\[SKIP\]\s+$caseBody")
+            $labelledBody = $Matches[1]
+        }
+
+        if ($labelled) {
+            $caseName = ($labelledBody -replace '\s*\(.*\)\s*$', '').Trim()
+            $class    = Get-AvbVerdictClass -Verdict $labelled -Optional:$OptionalVerification
+            if ($caseNames.Add($caseName)) {
+                # The exact verdict stays in the message; testcase id, adapter and any
+                # ntstatus=/did= evidence printed by the test are part of the body text.
+                $cases.Add(@{ Name = $caseName; Verdict = $labelled
+                              Failed  = ($class -eq 'failure'); Skipped = ($class -eq 'skipped')
+                              FailMsg = "[$labelled] $labelledBody" })
+            }
+        } elseif ($stripped -match "^\[PASS\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)" -or
             $stripped -match '^PASS:\s+((?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)') {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
-                $cases.Add(@{ Name = $caseName; Failed = $false; Skipped = $false; FailMsg = '' })
+                $cases.Add(@{ Name = $caseName; Verdict = 'PASS'; Failed = $false; Skipped = $false; FailMsg = '' })
             }
         } elseif ($stripped -match "^\[FAIL\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)" -or
                   $stripped -match '^FAIL:\s+((?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)') {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
-                $cases.Add(@{ Name = $caseName; Failed = $true; Skipped = $false; FailMsg = $stripped })
+                $cases.Add(@{ Name = $caseName; Verdict = 'FAIL'; Failed = $true; Skipped = $false; FailMsg = $stripped })
             }
         } elseif ($stripped -match "^\[(INFRA_FAILURE|BLOCKED|CLEANUP_FAILED)\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)") {
             # INFRA_FAILURE, BLOCKED, and CLEANUP_FAILED are all hard failures in JUnit.
@@ -213,13 +258,13 @@ function Parse-TestLog {
             $infStatus = $Matches[1].Trim()
             $caseName  = ($Matches[2] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
-                $cases.Add(@{ Name = $caseName; Failed = $true; Skipped = $false;
+                $cases.Add(@{ Name = $caseName; Verdict = $infStatus; Failed = $true; Skipped = $false;
                               FailMsg = "[$infStatus] $($stripped -replace '^\[' + $infStatus + '\]\s*', '')" })
             }
         } elseif ($stripped -match "^\[SKIP\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)") {
             $caseName = ($Matches[1] -replace '\s*\(.*\)\s*$', '').Trim()
             if ($caseNames.Add($caseName)) {
-                $cases.Add(@{ Name = $caseName; Failed = $false; Skipped = $true; FailMsg = '' })
+                $cases.Add(@{ Name = $caseName; Verdict = 'SKIP'; Failed = $false; Skipped = $true; FailMsg = '' })
             }
         }
     }
@@ -261,6 +306,7 @@ function Parse-TestLog {
         $msg = if ($overallFailed) { "$failedTests test(s) failed - see $($LogFile.Name)" } else { '' }
         $testCases.Add(@{
             Name    = "${testName} (overall)"
+            Verdict = if ($overallFailed) { 'FAIL' } elseif ($overallSkipped) { 'SKIP' } else { 'PASS' }
             Failed  = $overallFailed
             Skipped = $overallSkipped
             FailMsg = $msg
@@ -346,6 +392,9 @@ foreach ($suite in $suites) {
     [void]$sb.AppendLine('    <properties>')
     [void]$sb.AppendLine('      <property name="log_file" value="' + (EscapeXml $suite.LogFile) + '"/>')
     [void]$sb.AppendLine('      <property name="run_date" value="' + $RunDate + '"/>')
+    if ($Configuration) { [void]$sb.AppendLine('      <property name="configuration" value="' + (EscapeXml $Configuration) + '"/>') }
+    if ($SuiteName)     { [void]$sb.AppendLine('      <property name="suite" value="' + (EscapeXml $SuiteName) + '"/>') }
+    [void]$sb.AppendLine('      <property name="verification" value="' + $(if ($OptionalVerification) { 'optional' } else { 'mandatory' }) + '"/>')
     foreach ($n in $suite.VerifiesNums) {
         [void]$sb.AppendLine('      <property name="verifies" value="' + $ghBase + $n + '"/>')
     }
@@ -362,12 +411,17 @@ foreach ($suite in $suites) {
         $hasProps = ($suite.VerifiesNums.Count -gt 0) -or ($suite.ImplementsNums.Count -gt 0)
         $open = '    <testcase name="' + $cn + '" classname="' + $cl + '" time="0"'
 
+        # Labelled skips (SKIP_UNSUPPORTED / SKIP_NOT_IMPLEMENTED / optional INCONCLUSIVE) keep
+        # their exact verdict + evidence text; plain SKIP stays a bare <skipped/>.
+        $skipEl = if ($tc.Skipped -and $tc.FailMsg) { '<skipped message="' + (EscapeXml $tc.FailMsg) + '"/>' } else { '<skipped/>' }
+        $failTy = if ($tc.ContainsKey('Verdict') -and $tc.Verdict) { ' type="' + (EscapeXml $tc.Verdict) + '"' } else { '' }
+
         if (-not $hasProps) {
             if ($tc.Skipped) {
-                [void]$sb.AppendLine($open + '><skipped/></testcase>')
+                [void]$sb.AppendLine($open + '>' + $skipEl + '</testcase>')
             } elseif ($tc.Failed) {
                 $msg = EscapeXml $tc.FailMsg
-                [void]$sb.AppendLine($open + '><failure message="' + $msg + '">' + $msg + '</failure></testcase>')
+                [void]$sb.AppendLine($open + '><failure' + $failTy + ' message="' + $msg + '">' + $msg + '</failure></testcase>')
             } else {
                 [void]$sb.AppendLine($open + '/>')
             }
@@ -378,10 +432,10 @@ foreach ($suite in $suites) {
             foreach ($n in $suite.ImplementsNums) { [void]$sb.AppendLine('        <property name="implements" value="' + $ghBase + $n + '"/>') }
             [void]$sb.AppendLine('      </properties>')
             if ($tc.Skipped) {
-                [void]$sb.AppendLine('      <skipped/>')
+                [void]$sb.AppendLine('      ' + $skipEl)
             } elseif ($tc.Failed) {
                 $msg = EscapeXml $tc.FailMsg
-                [void]$sb.AppendLine('      <failure message="' + $msg + '">' + $msg + '</failure>')
+                [void]$sb.AppendLine('      <failure' + $failTy + ' message="' + $msg + '">' + $msg + '</failure>')
             }
             [void]$sb.AppendLine('    </testcase>')
         }
@@ -425,14 +479,20 @@ if ($writeEvidenceDir) {
 
 $reqMap = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[hashtable]]]::new()
 foreach ($suite in $suites) {
+    # Matrix tallies: FAIL = genuine failure classes only; SKIP = everything that is neither a
+    # pass nor a failure, which includes SKIP_NOT_IMPLEMENTED and INCONCLUSIVE (whatever JUnit
+    # class INCONCLUSIVE got), so no reader can mistake them for a pure pass.
     $tcPass = @($suite.TestCases | Where-Object { -not $_.Failed -and -not $_.Skipped }).Count
-    $tcFail = @($suite.TestCases | Where-Object { $_.Failed  }).Count
-    $tcSkip = @($suite.TestCases | Where-Object { $_.Skipped }).Count
+    $tcFail = @($suite.TestCases | Where-Object { $_.Failed -and $_.Verdict -ne 'INCONCLUSIVE' }).Count
+    $tcSkip = @($suite.TestCases | Where-Object { $_.Skipped -or $_.Verdict -eq 'INCONCLUSIVE' }).Count
+    # Exact-verdict subsets of SKIP.
+    $tcNimpl = @($suite.TestCases | Where-Object { $_.Verdict -eq 'SKIP_NOT_IMPLEMENTED' }).Count
+    $tcIncon = @($suite.TestCases | Where-Object { $_.Verdict -eq 'INCONCLUSIVE' }).Count
     foreach ($n in $suite.VerifiesNums) {
         if (-not $reqMap.ContainsKey($n)) {
             $reqMap[$n] = [System.Collections.Generic.List[hashtable]]::new()
         }
-        $reqMap[$n].Add(@{ Suite = $suite.Name; Implements = ($suite.ImplementsNums -join ', '); Pass = $tcPass; Fail = $tcFail; Skip = $tcSkip })
+        $reqMap[$n].Add(@{ Suite = $suite.Name; Implements = ($suite.ImplementsNums -join ', '); Pass = $tcPass; Fail = $tcFail; Skip = $tcSkip; NotImpl = $tcNimpl; Inconcl = $tcIncon })
     }
 }
 
@@ -441,19 +501,22 @@ $mdLines.Add("## Test Traceability Matrix - $RunDate")
 $mdLines.Add("")
 $mdLines.Add('> **Source of truth**: `Verifies: #N` / `Implements: #N` statements printed by each test file.')
 $mdLines.Add('> SKIP is shown explicitly - skipped test cases are never assumed to pass or fail.')
+$mdLines.Add('> FAIL = genuine failures. SKIP = neither pass nor failure, and includes NOT_IMPL and INCONCL. NOT_IMPL (SKIP_NOT_IMPLEMENTED)')
+$mdLines.Add('> marks required work that is missing: the requirement is **incomplete**, not verified. INCONCL (INCONCLUSIVE) means the')
+$mdLines.Add('> evidence was insufficient (a JUnit failure when mandatory); it is likewise not verified.')
 $mdLines.Add("> A requirement may be covered by multiple test suites; each suite appears as a separate row.")
 $mdLines.Add("")
 
 if ($reqMap.Count -gt 0) {
-    $mdLines.Add("| Requirement | Test Suite | Test Issue | :white_check_mark: PASS | :x: FAIL | :next_track_button: SKIP |")
-    $mdLines.Add("|-------------|------------|:----------:|:-----------------------:|:--------:|:------------------------:|")
+    $mdLines.Add("| Requirement | Test Suite | Test Issue | :white_check_mark: PASS | :x: FAIL | :next_track_button: SKIP | NOT_IMPL | INCONCL |")
+    $mdLines.Add("|-------------|------------|:----------:|:-----------------------:|:--------:|:------------------------:|:--------:|:-------:|")
     foreach ($reqNum in ($reqMap.Keys | Sort-Object { [int]$_ })) {
         $reqLink = "[#$reqNum]($ghBase$reqNum)"
         foreach ($entry in $reqMap[$reqNum]) {
             $implLinks = if ($entry.Implements) {
                 ($entry.Implements -split ',\s*' | ForEach-Object { "[#$_]($ghBase$_)" }) -join ' '
             } else { '—' }
-            $mdLines.Add("| $reqLink | $($entry.Suite) | $implLinks | $($entry.Pass) | $($entry.Fail) | $($entry.Skip) |")
+            $mdLines.Add("| $reqLink | $($entry.Suite) | $implLinks | $($entry.Pass) | $($entry.Fail) | $($entry.Skip) | $($entry.NotImpl) | $($entry.Inconcl) |")
         }
     }
 } else {
@@ -469,13 +532,15 @@ if ($unlinked.Count -gt 0) {
     $mdLines.Add("")
     $mdLines.Add('These logs contain no `Verifies: #N` lines and are **not** in the matrix above:')
     $mdLines.Add("")
-    $mdLines.Add("| Test Suite | :white_check_mark: PASS | :x: FAIL | :next_track_button: SKIP |")
-    $mdLines.Add("|------------|:-----------------------:|:--------:|:------------------------:|")
+    $mdLines.Add("| Test Suite | :white_check_mark: PASS | :x: FAIL | :next_track_button: SKIP | NOT_IMPL | INCONCL |")
+    $mdLines.Add("|------------|:-----------------------:|:--------:|:------------------------:|:--------:|:-------:|")
     foreach ($suite in $unlinked) {
         $p = @($suite.TestCases | Where-Object { -not $_.Failed -and -not $_.Skipped }).Count
-        $f = @($suite.TestCases | Where-Object { $_.Failed  }).Count
-        $s = @($suite.TestCases | Where-Object { $_.Skipped }).Count
-        $mdLines.Add("| $($suite.Name) | $p | $f | $s |")
+        $f = @($suite.TestCases | Where-Object { $_.Failed -and $_.Verdict -ne 'INCONCLUSIVE' }).Count
+        $s = @($suite.TestCases | Where-Object { $_.Skipped -or $_.Verdict -eq 'INCONCLUSIVE' }).Count
+        $ni =@($suite.TestCases | Where-Object { $_.Verdict -eq 'SKIP_NOT_IMPLEMENTED' }).Count
+        $ic = @($suite.TestCases | Where-Object { $_.Verdict -eq 'INCONCLUSIVE' }).Count
+        $mdLines.Add("| $($suite.Name) | $p | $f | $s | $ni | $ic |")
     }
 }
 
@@ -507,5 +572,10 @@ if ($writeEvidenceDir) {
 Write-Host "[OK] JUnit XML:       $outPath" -ForegroundColor Green
 $passed = $total - $fail - $skipped
 Write-Host "[OK] Summary:   $($suites.Count) test suites | $total tests | $passed passed | $fail failed | $skipped skipped" -ForegroundColor Cyan
+$nimplTotal = ($suites | ForEach-Object { @($_.TestCases | Where-Object { $_.Verdict -eq 'SKIP_NOT_IMPLEMENTED' }).Count } | Measure-Object -Sum).Sum
+$inconTotal = ($suites | ForEach-Object { @($_.TestCases | Where-Object { $_.Verdict -eq 'INCONCLUSIVE' }).Count } | Measure-Object -Sum).Sum
+if ($nimplTotal -gt 0 -or $inconTotal -gt 0) {
+    Write-Host "[NOT VERIFIED] $nimplTotal SKIP_NOT_IMPLEMENTED (incomplete) | $inconTotal INCONCLUSIVE (insufficient evidence) - counted inside the skipped/failed totals above" -ForegroundColor Yellow
+}
 
 exit $(if ($fail -gt 0) { 1 } else { 0 })

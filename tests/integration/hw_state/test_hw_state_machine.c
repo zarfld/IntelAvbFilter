@@ -24,6 +24,7 @@
 
 // Include shared IOCTL definitions (matches working tests like test_tx_timestamp_retrieval.c)
 #include "../../../include/avb_ioctl.h"
+#include "../../../include/intel_pci_ids.h"   /* INTEL_DEV_* SSOT for device recognition */
 
 // NDIS status codes for user-mode compilation (if not in avb_ioctl.h)
 #ifndef NDIS_STATUS_SUCCESS
@@ -268,39 +269,32 @@ BOOL Test_BasicStateQuery(HANDLE hDevice) {
         }
         TEST_PASS("Vendor ID is Intel (0x8086)");
 
-        // Validate device ID is recognized Intel NIC
-        // Common Intel Ethernet controllers: I210 (0x1533), I225 (0x15F2), I226 (0x125B), I217 (0x153A)
-        BOOL recognized_device = (
-            /* I210 family (2013) */
-            query.device_id == 0x1533 ||  // I210 Copper
-            query.device_id == 0x1534 ||  // I210 Copper OEM1
-            query.device_id == 0x1535 ||  // I210 Copper IT
-            query.device_id == 0x1536 ||  // I210 Fiber
-            query.device_id == 0x1537 ||  // I210 Serdes
-            query.device_id == 0x1538 ||  // I210 SGMII
-            /* I217 family (2013) */
-            query.device_id == 0x153A ||  // I217-LM
-            query.device_id == 0x153B ||  // I217-V
-            /* I219 family (2014) */
-            query.device_id == 0x15B7 ||  // I219-LM
-            query.device_id == 0x15B8 ||  // I219-V
-            query.device_id == 0x15D6 ||  // I219-LM
-            query.device_id == 0x15D7 ||  // I219-LM
-            query.device_id == 0x15D8 ||  // I219-V
-            query.device_id == 0x0DC7 ||  // I219-LM
-            query.device_id == 0x1570 ||  // I219-V
-            query.device_id == 0x15E3 ||  // I219-LM
-            /* I225 family (2019) */
-            query.device_id == 0x15F2 ||  // I225-LM
-            query.device_id == 0x15F3 ||  // I225-V
-            /* I226 family (2020) */
-            query.device_id == 0x125B ||  // I226-LM
-            query.device_id == 0x125C     // I226-V
-        );
+        // Validate device ID is a recognized Intel NIC: every INTEL_DEV_* in the SSOT
+        // (include/intel_pci_ids.h).  tests/unit/ioctl/test_known_device_table.ps1 fails if a macro
+        // is added there but not listed here.  (A generic "capabilities != 0" check is NOT device
+        // recognition and is deliberately not used.)
+        static const unsigned short kKnownIntelDevices[] = {
+    INTEL_DEV_I210_AT, INTEL_DEV_I210_AT2, INTEL_DEV_I210_FIBER, INTEL_DEV_I210_IS,
+    INTEL_DEV_I210_IT, INTEL_DEV_I210_CS, INTEL_DEV_I211_AT, INTEL_DEV_I210_FLASHLESS,
+    INTEL_DEV_I210_FLASHLESS2, INTEL_DEV_I217_LM, INTEL_DEV_I217_V, INTEL_DEV_I350_T4,
+    INTEL_DEV_I350_F2, INTEL_DEV_I350_F4, INTEL_DEV_I350_T2, INTEL_DEV_I350_DA4,
+    INTEL_DEV_I219_LM_A0, INTEL_DEV_I219_V_A0, INTEL_DEV_I219_LM_A1, INTEL_DEV_I219_V_A1,
+    INTEL_DEV_I219_LM, INTEL_DEV_I219_V, INTEL_DEV_I219_LM3, INTEL_DEV_I219_LM4,
+    INTEL_DEV_I219_V4, INTEL_DEV_I219_LM5, INTEL_DEV_I219_V5, INTEL_DEV_I219_D0,
+    INTEL_DEV_I219_D1, INTEL_DEV_I219_D2, INTEL_DEV_I219_LM_DC7, INTEL_DEV_I219_V6,
+    INTEL_DEV_I219_LM6, INTEL_DEV_I225_V, INTEL_DEV_I225_IT, INTEL_DEV_I225_LM,
+    INTEL_DEV_I225_K, INTEL_DEV_I225_K2, INTEL_DEV_I225_LMVP, INTEL_DEV_I225_VB,
+    INTEL_DEV_I225_IT2, INTEL_DEV_I225_LM2, INTEL_DEV_I225_LM3, INTEL_DEV_I225_V2,
+    INTEL_DEV_I225_VARIANT, INTEL_DEV_I226_LM, INTEL_DEV_I226_V, INTEL_DEV_I226_IT,
+        };
+        BOOL recognized_device = FALSE;
+        for (size_t k = 0; k < sizeof(kKnownIntelDevices) / sizeof(kKnownIntelDevices[0]); k++) {
+            if (query.device_id == kKnownIntelDevices[k]) { recognized_device = TRUE; break; }
+        }
 
         if (!recognized_device) {
             char reason[256];
-            sprintf(reason, "Unrecognized device ID 0x%04X (expected I210/I225/I226/I217)", query.device_id);
+            sprintf(reason, "Unrecognized device ID 0x%04X (not an INTEL_DEV_* in include/intel_pci_ids.h)", query.device_id);
             TEST_FAIL("Device ID recognition", reason);
             return FALSE;
         }

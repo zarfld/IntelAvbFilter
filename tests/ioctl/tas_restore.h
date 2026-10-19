@@ -11,15 +11,27 @@
  * This ensures the mock tests exercise the SAME implementation as the
  * production runner, not a duplicate copy.
  *
- * Issue #328 / P1 test quality
+ * IOCTL_NTSTATUS_CALL: callers also define this.  It returns the EXACT NTSTATUS an IOCTL was
+ * completed with.  Needed because IOCTLs are METHOD_BUFFERED (an error completion drops the
+ * output buffer, so a status field inside it is never delivered) and GetLastError() is lossy.
+ * In production:       #define IOCTL_NTSTATUS_CALL avb_ioctl_ntstatus   (tests/common/avb_ntstatus.h)
+ * In mock unit tests:  #define IOCTL_NTSTATUS_CALL mock_ioctl_ntstatus
+ *
+ * Verdicts follow docs/testing/test-verdict-contract.md.
+ *
+ * Verifies: #9 (REQ-F-TAS-001); Test Issue: #206
  */
 #pragma once
 
 #ifndef IOCTL_CALL
 #  error "Define IOCTL_CALL before including tas_restore.h (e.g. #define IOCTL_CALL DeviceIoControl)"
 #endif
+#ifndef IOCTL_NTSTATUS_CALL
+#  error "Define IOCTL_NTSTATUS_CALL before including tas_restore.h (e.g. #define IOCTL_NTSTATUS_CALL avb_ioctl_ntstatus)"
+#endif
 
 #include "../../include/avb_ioctl.h"
+#include "../common/avb_verdict.h"
 
 typedef struct {
     BOOL     valid;          /* 1 = snapshot was taken before any mutation */
@@ -41,7 +53,8 @@ typedef struct {
  * tas_probe_restore_capability — unconditional BLOCK.
  *
  * TC-TAS-001..008 are BLOCKED on all adapters until a safe, miniport-
- * coordinated TAS disable path exists (#328 P0.2).
+ * coordinated TAS disable path exists (P0.2; requirement #9, test issue #206).
+ * BLOCKED = unmet safety precondition. It is NOT evidence that the hardware lacks TAS.
  *
  * No IOCTLs are called.  The previous capability-based approach was unsafe:
  *   - AvbGetLwfSupportedCapabilities() omits INTEL_CAP_TSN_TAS below BAR_MAPPED.
@@ -53,7 +66,7 @@ typedef struct {
 static BOOL tas_probe_restore_capability(HANDLE hDevice) {
     (void)hDevice;
     printf("  [PREFLIGHT-BLOCKED] TC-TAS-001..008 unconditionally BLOCKED\n");
-    printf("  [PREFLIGHT-BLOCKED]   No safe TAS restore path (#328 P0.2)\n");
+    printf("  [PREFLIGHT-BLOCKED]   No safe TAS restore path (P0.2; #9 / #206)\n");
     printf("  [PREFLIGHT-BLOCKED]   Required: miniport OID or link-cycle (separate task)\n");
     return FALSE;
 }
@@ -101,32 +114,62 @@ static BOOL tas_capture_state(HANDLE hDevice, TAS_SNAPSHOT *snap) {
 }
 
 /*
- * tas_restore_state — restore captured baseline unconditionally.
+ * tas_restore_state_ex — restore captured baseline unconditionally.
  * Returns FALSE if any step fails; caller must report CLEANUP_FAILED.
+ *
+ * DISARM_TAS is classified from the EXACT NTSTATUS (see IOCTL_NTSTATUS_CALL above) per the
+ * verdict contract.  `tas_cap` is the evidence that THIS adapter supports TAS:
+ *   NOT_IMPLEMENTED                 -> SKIP_NOT_IMPLEMENTED (hardware ok, safe disable missing)
+ *   NOT_SUPPORTED + cap PRESENT     -> FAIL        (adapter advertises TAS yet says "not supported")
+ *   NOT_SUPPORTED + cap UNKNOWN     -> INCONCLUSIVE (never SKIP_UNSUPPORTED without evidence)
+ *   DEVICE_NOT_READY etc.           -> BLOCKED
+ *   other error                     -> FAIL
+ * Whatever the verdict, a failed DISARM leaves the hardware state UNKNOWN: returns FALSE.
+ * `verdict_out` / `status_out` (optional) report the classification and the original NTSTATUS.
  */
-static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
+static BOOL tas_restore_state_ex(HANDLE hDevice, const TAS_SNAPSHOT *snap,
+                                 AVB_CAP_EVIDENCE tas_cap,
+                                 AVB_VERDICT *verdict_out, LONG *status_out) {
     DWORD br = 0;
+    AVB_VERDICT disarm_v  = AVB_VERDICT_BLOCKED;
+    LONG        disarm_st = AVB_NTSTATUS_UNAVAILABLE;
+    BOOL ok = TRUE;
+
     if (!snap->valid) {
         printf("  [RESTORE-FAIL] No valid snapshot\n");
+        if (verdict_out) *verdict_out = AVB_VERDICT_BLOCKED;
+        if (status_out)  *status_out  = AVB_NTSTATUS_UNAVAILABLE;
         return FALSE;
     }
-    BOOL ok = TRUE;
 
     AVB_DISARM_TAS_REQUEST disarm;
     memset(&disarm, 0, sizeof(disarm));
-    if (!IOCTL_CALL(hDevice, IOCTL_AVB_DISARM_TAS, NULL, 0,
-                    &disarm, sizeof(disarm), &br, NULL)) {
-        printf("  [RESTORE-FAIL] DISARM_TAS IOCTL failed (error=%lu)\n", GetLastError());
-        ok = FALSE;
-    } else if (disarm.status == 0xC00000BBu) { /* STATUS_NOT_SUPPORTED */
-        printf("  [RESTORE-FAIL-BLOCKED] DISARM_TAS STATUS_NOT_SUPPORTED — hw state UNKNOWN\n");
-        ok = FALSE;
-    } else if (disarm.status != 0) {
-        printf("  [RESTORE-FAIL] DISARM_TAS status=0x%08X\n", disarm.status);
-        ok = FALSE;
-    } else {
+    disarm_st = IOCTL_NTSTATUS_CALL(hDevice, IOCTL_AVB_DISARM_TAS, NULL, 0,
+                                    &disarm, sizeof(disarm), &br);
+    /* On an error completion `disarm` was never written back (METHOD_BUFFERED), so the verdict
+     * is derived from the NTSTATUS; the payload is only consulted on success. */
+    disarm_v = avb_verdict_from_status(disarm_st, tas_cap, disarm.status == 0, 1);
+    switch (disarm_v) {
+    case AVB_VERDICT_PASS:
         printf("  [RESTORE] TAS disarmed\n");
+        break;
+    case AVB_VERDICT_SKIP_NOT_IMPLEMENTED:
+        printf("  [RESTORE-FAIL-BLOCKED] DISARM_TAS ntstatus=0x%08X NOT_IMPLEMENTED - safe TAS disable missing; hw state UNKNOWN\n",
+               (unsigned)disarm_st);
+        ok = FALSE;
+        break;
+    default:
+        if (disarm_st == AVB_NTSTATUS_UNAVAILABLE)
+            printf("  [RESTORE-FAIL] DISARM_TAS exact NTSTATUS unavailable (%s; error=%lu); hw state UNKNOWN\n",
+                   avb_verdict_tag(disarm_v), GetLastError());
+        else
+            printf("  [RESTORE-FAIL] DISARM_TAS ntstatus=0x%08X verdict=%s; hw state UNKNOWN\n",
+                   (unsigned)disarm_st, avb_verdict_tag(disarm_v));
+        ok = FALSE;
+        break;
     }
+    if (verdict_out) *verdict_out = disarm_v;
+    if (status_out)  *status_out  = disarm_st;
 
     AVB_HW_TIMESTAMPING_REQUEST hwTs;
     memset(&hwTs, 0, sizeof(hwTs));
@@ -142,6 +185,16 @@ static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
                hwTs.enable, hwTs.current_tsauxc);
     }
     return ok;
+}
+
+/*
+ * tas_restore_state — compatible wrapper.  Restore only follows arming TAS, which requires
+ * the TAS capability, so the adapter is treated as TAS-capable (a NOT_SUPPORTED answer is
+ * then a contract violation, not missing hardware).
+ */
+static BOOL tas_restore_state(HANDLE hDevice, const TAS_SNAPSHOT *snap) {
+    AVB_VERDICT v; LONG st;
+    return tas_restore_state_ex(hDevice, snap, AVB_CAP_PRESENT, &v, &st);
 }
 
 /*

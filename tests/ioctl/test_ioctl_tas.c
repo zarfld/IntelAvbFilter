@@ -60,7 +60,9 @@ static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify failed; hw s
 // Snapshot / Restore infrastructure (test-state-restoration contract)
 // Shared with tests/unit/test_tas_restore_contract.c via tas_restore.h.
 // ============================================================================
+#include "../common/avb_ntstatus.h"
 #define IOCTL_CALL DeviceIoControl
+#define IOCTL_NTSTATUS_CALL avb_ioctl_ntstatus
 #include "tas_restore.h"
 
 /* Run one hardware-mutating TAS case with full snapshot/restore lifecycle.

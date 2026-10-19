@@ -16,6 +16,7 @@ Abstract:
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
+#include "intel_i210_timinca.h"                    // TIMINCA codec on top of the register SSOT (I210_TIMINCA_*)
 
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
@@ -207,13 +208,14 @@ static int init_ptp(device_t *dev)
     }
     DEBUGP(DL_INFO, "I210: TSAUXC=0x0 (SYSTIM enabled)\n");
 
-    // Step 1.5: Initialize TIMINCA (clock increment register).
-    // I210 runs at 125 MHz base clock → each cycle is 8 ns → TIMINCA = INTEL_TIMINCA_I210_INIT
-    // (integer part = 8, fractional part = 0).
-    // Without this the SYSTIM clock never advances (frozen PHC).
-    // Reference: external/intel_avb/lib/intel_private.h INTEL_TIMINCA_I210_INIT
-    // Reference: Linux igb_ptp.c igb_ptp_reset() writes E1000_TIMINCA for i210/i211
+    // Step 1.5: Program TIMINCA (clock increment register) to the nominal 8 ns per 125 MHz cycle.
+    // Datasheet 333016 v3.7 section 8.15.11: INC_TIME = 8 ns +/- Incvalue * 2^-32 ns, reset value 0,
+    // so the NOMINAL encoding is Incvalue = 0, ISGN = 0 (see devices/intel_i210_timinca.h).
+    // The previous 0x08000000 ("8 << 24") is 8 ns + 2^27 * 2^-32 ns = 8.03125 ns, i.e. +3906.25 ppm.
+    // This function is the single owner of the I210 TIMINCA initialisation write
+    // (AvbPlatformInit no longer writes TIMINCA for I210).
     {
+        const uint32_t nominal = i210_timinca_nominal();
         uint32_t timinca = 0;
         int timinca_rc = ndis_platform_ops.mmio_read(dev, I210_TIMINCA, &timinca);
         if (timinca_rc != 0) {
@@ -221,15 +223,15 @@ static int init_ptp(device_t *dev)
             return -1;
         }
         DEBUGP(DL_TRACE, "I210: TIMINCA read=0x%08X\n", timinca);
-        if (timinca != INTEL_TIMINCA_I210_INIT) {
-            timinca = INTEL_TIMINCA_I210_INIT;  /* 8 ns/cycle at 125 MHz — see intel_private.h */
+        if (timinca != nominal) {
+            timinca = nominal;
             if (ndis_platform_ops.mmio_write(dev, I210_TIMINCA, timinca) != 0) {
                 DEBUGP(DL_ERROR, "I210: Failed to write TIMINCA\n");
                 return -1;
             }
-            DEBUGP(DL_INFO, "I210: TIMINCA set to 0x%08X (8 ns/cycle)\n", timinca);
+            DEBUGP(DL_INFO, "I210: TIMINCA set to nominal 0x%08X (8 ns/cycle)\n", timinca);
         } else {
-            DEBUGP(DL_TRACE, "I210: TIMINCA already correct (0x%08X)\n", timinca);
+            DEBUGP(DL_TRACE, "I210: TIMINCA already nominal (0x%08X)\n", timinca);
         }
     }
 

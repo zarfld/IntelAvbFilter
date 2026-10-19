@@ -228,6 +228,10 @@ function Invoke-DriverHealthCheck {
 # Active on HardwareUnit/HardwareIntegration suites where the driver is installed.
 . (Join-Path $PSScriptRoot 'Lib-AvbLifecycle.ps1')
 
+# Canonical verdict vocabulary (PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE),
+# shared with Parse-TestResults.ps1 and Convert-Logs-To-JUnit.ps1.  See docs/testing/test-verdict-contract.md
+. (Join-Path $PSScriptRoot 'TestVerdict.ps1')
+
 # ===========================
 # Built-in hardware-independent test lists
 # ===========================
@@ -239,9 +243,17 @@ $UnitTests = @(
     "test_hal_unit",
     "test_hal_errors",
     "test_ioctl_abi",          # IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)
+    "test_i210_timinca_codec", # I210 TIMINCA codec golden vectors from datasheet 8.15.11 (offline, #3 #149)
+    "ps1:tests/unit/ioctl/test_i210_timinca_ownership.ps1",  # TEST-TIMINCA-OWN-001..007: single I210 writer + other adapters unchanged
+    "test_verdict_contract",   # status/capability/payload -> verdict contract + raw NTSTATUS capture (offline, no driver)
+    "test_tx_corr_verdict",    # TC-CORR-TX-RX-001 per-sample verdict: provenance / no-timestamp / NOT_IMPLEMENTED (#35, #199)
+    "ps1:tests/unit/ioctl/test_known_device_table.ps1",  # TEST-DEVTABLE-001..003: hw_state device table vs intel_pci_ids.h (#18)
+    "ps1:tests/unit/ioctl/test_requirement_outcomes.ps1", # TEST-COVERAGE-VERDICT-001..007: requirement outcome classification (needs python)
+    "test_tas_restore_contract", # TAS restore contract mock (#9 / #206): DISARM_TAS status classification (offline, no driver)
 
     # PowerShell logic tests (suffix .ps1, run via powershell.exe not compiled .exe)
     "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1",  # TEST-PROV-L06 aggregation invariants
+    "ps1:tests/unit/ioctl/test_junit_verdict_normalization.ps1", # TEST-VERDICT-001..011: verdict contract in converter/parser/runner (sandboxed, no driver)
     "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1",       # TEST-NOWAIT-001: no system("pause") in CI/HIL
     "ps1:tests/unit/build/test_build_tests_syspaths.ps1",       # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
     "ps1:tests/unit/ioctl/test_health_sentinel.ps1",            # TEST-SENTINEL-001..006: #328 behavioral health sentinel
@@ -503,6 +515,11 @@ if ($Tests.Count -gt 0) {
 # This must be determined by Suite alone - not by whether -Tests was used.
 $IsMandatorySuite = ($Suite -eq "HardwareMandatory")
 
+# Verification class (not a new lane): every suite is mandatory verification except the
+# explicitly experimental HardwareMutation lane.  Mandatory + SKIP_NOT_IMPLEMENTED = INCOMPLETE,
+# mandatory + INCONCLUSIVE = nonpassing.  Optional keeps the labels but does not fail the run.
+$IsOptionalVerification = ((Get-AvbSuiteVerificationClass -Suite $Suite) -eq 'optional')
+
 # Apply default timeout per suite class when not explicitly set.
 if ($TestTimeoutSeconds -eq 0) {
     $TestTimeoutSeconds = switch ($Suite) {
@@ -612,6 +629,7 @@ $totalTests   = 0
 $passedTests  = 0
 $failedTests  = 0
 $skippedTests = 0
+$incompleteTests = 0   # exit 0 but SKIP_NOT_IMPLEMENTED reported on mandatory verification
 $results      = @()
 
 # Expose driver build type to test_perf_regression and other tests that key
@@ -740,12 +758,27 @@ foreach ($TestName in $TestList) {
         Write-Host "  [WARN:LCY] Lifecycle anomaly detected (underflow/error/OID imbalance) -- see [LCY] lines above" -ForegroundColor Yellow
     }
 
+    # Verdict gate: an executable exit code cannot express SKIP_NOT_IMPLEMENTED / INCONCLUSIVE,
+    # so read them from the log (same vocabulary the JUnit converters use).
+    $vc = Get-AvbVerdictCounts -Lines @($combined -split "`r?`n")
+
     if ($timedOut) {
         $failedTests++
         $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(TIMEOUT)"; Exit = -999 }
+    } elseif (($exitCode -eq 0 -or $null -eq $exitCode) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
+        $failedTests++
+        Write-Fail "$exeName INCONCLUSIVE ($($vc.Inconclusive) testcase(s)) --- insufficient evidence on mandatory verification"
+        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(INCONCLUSIVE)"; Exit = 0 }
+    } elseif (($exitCode -eq 0 -or $null -eq $exitCode) -and -not $IsOptionalVerification -and $vc.NotImplemented -gt 0) {
+        $incompleteTests++
+        Write-Fail "$exeName INCOMPLETE ($($vc.NotImplemented) testcase(s) SKIP_NOT_IMPLEMENTED) --- driver operation missing on mandatory verification"
+        $results += [PSCustomObject]@{ Name = $exeName; Status = "INCOMPLETE(NOT_IMPLEMENTED)"; Exit = 0 }
     } elseif ($exitCode -eq 0 -or $null -eq $exitCode) {
         $passedTests++
         Write-Ok "$exeName PASSED"
+        if ($vc.NotImplemented -gt 0 -or $vc.Inconclusive -gt 0) {
+            Write-Note "$exeName (optional verification): $($vc.NotImplemented) SKIP_NOT_IMPLEMENTED, $($vc.Inconclusive) INCONCLUSIVE --- reported, not verified"
+        }
         $results += [PSCustomObject]@{ Name = $exeName; Status = "PASSED"; Exit = 0 }
     } elseif ($exitCode -eq 2 -and $IsMandatorySuite) {
         # Exit 2 = SKIP_ONLY from test_tx_timestamp_provenance (driver absent / all H tests skipped).
@@ -818,6 +851,7 @@ $results | Format-Table -AutoSize
 
 Write-Host "  Passed : $passedTests" -ForegroundColor Green
 Write-Host "  Failed : $failedTests" -ForegroundColor $(if ($failedTests -gt 0) { "Red" } else { "Green" })
+Write-Host "  Incomplete (SKIP_NOT_IMPLEMENTED): $incompleteTests" -ForegroundColor $(if ($incompleteTests -gt 0) { "Red" } else { "Green" })
 Write-Host "  Skipped: $skippedTests" -ForegroundColor DarkGray
 Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
 Write-Host ""
@@ -831,7 +865,10 @@ if (Test-Path $junitScript) {
     $junitOut   = Join-Path $logsDir "junit-${Suite}-${Configuration}-${runDateStr}.xml"
     Write-Host ""
     Write-Step "Generating JUnit XML report..."
-    & $junitScript -LogsDir $logsDir -RunDate $runDateStr -OutputFile $junitOut -ErrorAction SilentlyContinue
+    $junitArgs = @{ LogsDir = $logsDir; RunDate = $runDateStr; OutputFile = $junitOut
+                    Configuration = $Configuration; SuiteName = $Suite }
+    if ($IsOptionalVerification) { $junitArgs.OptionalVerification = $true }
+    & $junitScript @junitArgs -ErrorAction SilentlyContinue
     if ($LASTEXITCODE -ne 0) {
         Write-Note "JUnit conversion returned non-zero (may be no logs yet -- skipped tests only)"
     }
@@ -843,13 +880,14 @@ if (Test-Path $junitScript) {
     }
 }
 
-if ($failedTests -eq 0 -and $passedTests -eq 0) {
+if ($failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
     Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)"
     exit 0
 }
 
-if ($failedTests -gt 0) {
-    Write-Fail "OVERALL: $failedTests test(s) FAILED"
+if ($failedTests -gt 0 -or $incompleteTests -gt 0) {
+    if ($failedTests -gt 0)     { Write-Fail "OVERALL: $failedTests test(s) FAILED" }
+    if ($incompleteTests -gt 0) { Write-Fail "OVERALL: $incompleteTests test(s) INCOMPLETE (SKIP_NOT_IMPLEMENTED on mandatory verification)" }
     exit 1
 }
 

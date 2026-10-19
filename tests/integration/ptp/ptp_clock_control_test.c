@@ -29,6 +29,23 @@
 #include <stdlib.h>
 #include <math.h>
 #include "../../include/avb_ioctl.h"
+#include "../../include/intel_pci_ids.h"   /* INTEL_DEV_* (SSOT) to identify the bound adapter */
+
+/* DID of the adapter bound in main() for Tests 2/3 (0 until bound). I210 has a datasheet-defined
+ * TIMINCA (8 ns +/- Incvalue*2^-32 ns, nominal raw 0); other adapters keep their own models. */
+static USHORT g_mainDid = 0;
+
+static BOOL IsI210Did(USHORT did)
+{
+    switch (did) {
+    case INTEL_DEV_I210_AT: case INTEL_DEV_I210_AT2: case INTEL_DEV_I210_FIBER:
+    case INTEL_DEV_I210_IS: case INTEL_DEV_I210_IT:  case INTEL_DEV_I210_CS:
+    case INTEL_DEV_I211_AT: case INTEL_DEV_I210_FLASHLESS: case INTEL_DEV_I210_FLASHLESS2:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
 
 /* Read PHC time via IOCTL_AVB_GET_TIMESTAMP (replaces raw SYSTIML/H register reads). */
 static ULONGLONG GetPhcNs(HANDLE h)

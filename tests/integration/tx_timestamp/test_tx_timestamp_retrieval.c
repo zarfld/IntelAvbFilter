@@ -36,6 +36,9 @@ typedef ULONG NDIS_STATUS;
 
 /* Include shared IOCTL definitions */
 #include "../../../include/avb_ioctl.h"
+/* Verdict contract (docs/testing/test-verdict-contract.md): raw NTSTATUS + per-sample verdict */
+#include "../../common/avb_ntstatus.h"
+#include "tx_corr_verdict.h"
 
 /* Test configuration */
 #define DEVICE_PATH_W L"\\\\.\\IntelAvbFilter"
@@ -79,7 +82,7 @@ static int adapter_count = 0;
  * adapter's test section.  Without the OPEN_ADAPTER call the kernel falls
  * back to AvbFindIntelFilterModule() and every loop iteration tests the
  * same physical clock regardless of the clock_id/adapter_idx field. */
-static struct { avb_u16 vendor_id; avb_u16 device_id; } g_adapters[8];
+static struct { avb_u16 vendor_id; avb_u16 device_id; avb_u32 caps; } g_adapters[8];
 
 /* True when the installed driver is a Debug build (detected via IOCTL_AVB_GET_VERSION Flags).
  * Performance thresholds are loosened for Debug drivers due to DbgPrint overhead. */
@@ -622,37 +625,60 @@ static void test_error_handling_invalid_params(HANDLE hDevice, uint32_t adapter_
  * either a driver bug or extreme scheduling jitter (fail individually but average
  * over 10 samples to tolerate single outliers).
  *
+ * Verdicts (docs/testing/test-verdict-contract.md; per-sample logic in tx_corr_verdict.h):
+ * a missing/weak/zero hardware TX timestamp on a PTP-advertising adapter is a FAIL, a missing
+ * driver operation is SKIP_NOT_IMPLEMENTED, unknown capability is INCONCLUSIVE.  It is never
+ * reported as PASS or as "skipped - no HW TX".  Each result line carries testcase id, adapter,
+ * PCI device id and the original NTSTATUS.
+ *
  * Gap closure: Issue #199 (Cat.3 — TX/RX PHC correlation).
  * Also supplements: Issue #232 (TC-TS-CORR-001 pattern), Issue #148 (TC-CORR-005..009).
  */
+static void report_corr_verdict(uint32_t adapter_idx, AVB_VERDICT v, LONG st,
+                                const char *op, const char *why)
+{
+    char line[320];
+    avb_verdict_format(line, sizeof(line), v, "TC-CORR-TX-RX-001", (int)adapter_idx,
+                       g_adapters[adapter_idx].device_id, st, op, why);
+    printf("  %s\n", line);
+    if (v == AVB_VERDICT_PASS) { tests_run++; tests_passed++; }
+    else if (v == AVB_VERDICT_FAIL || v == AVB_VERDICT_BLOCKED) { tests_run++; tests_failed++; }
+    /* SKIP_UNSUPPORTED / SKIP_NOT_IMPLEMENTED / INCONCLUSIVE are reported, not counted as passes;
+     * Run-Tests-CI.ps1 makes the latter two nonpassing for mandatory verification. */
+}
+
 static void test_tx_rx_phc_correlation(HANDLE hDevice, uint32_t adapter_idx)
 {
 #define CORR_SAMPLES        10
-#define CORR_DELTA_MAX_NS   5000ULL   /* 5 µs: hardware-to-PHC expected jitter */
 #define CORR_POLL_RETRIES   200       /* poll up to 200 × 1 ms = 200 ms */
 
     printf("\nTC-CORR-TX-RX-001: TX/RX PHC correlation (adapter %u)\n", adapter_idx);
 
+    const AVB_CAP_EVIDENCE cap = tx_corr_cap_from_driver_caps(g_adapters[adapter_idx].caps);
     uint32_t good_samples = 0;
-    uint32_t bad_samples  = 0;
     uint64_t max_delta_ns = 0;
 
     for (uint16_t seq = 0; seq < CORR_SAMPLES; seq++) {
-        /* 1. Send PTP packet and capture PHC-at-send */
+        TX_CORR_OBS obs;
+        memset(&obs, 0, sizeof(obs));
+        obs.cap = cap;
+
+        /* 1. Send PTP packet and capture PHC-at-send (raw NTSTATUS: error completions drop the payload) */
         AVB_TEST_SEND_PTP_REQUEST send_req = {0};
         send_req.adapter_index = adapter_idx;
         send_req.sequence_id   = seq;
 
         DWORD bytesRet = 0;
-        BOOL ok = DeviceIoControl(hDevice, IOCTL_AVB_TEST_SEND_PTP,
-                                  &send_req, sizeof(send_req),
-                                  &send_req, sizeof(send_req),
-                                  &bytesRet, NULL);
-        if (!ok || send_req.status != NDIS_STATUS_SUCCESS) {
-            printf("  [SKIP] TC-CORR-TX-RX-001[%u]: IOCTL_AVB_TEST_SEND_PTP failed "
-                   "(Win32=%lu status=0x%08X) — hardware TX unavailable\n",
-                   seq, GetLastError(), send_req.status);
-            test_result("TC-CORR-TX-RX-001 (skipped — no HW TX)", true);
+        obs.send_ntstatus = avb_ioctl_ntstatus(hDevice, IOCTL_AVB_TEST_SEND_PTP,
+                                               &send_req, sizeof(send_req),
+                                               &send_req, sizeof(send_req), &bytesRet);
+        obs.send_status_field = send_req.status;
+        obs.ts_ntstatus = STATUS_SUCCESS;   /* not reached when the send failed */
+        AVB_VERDICT v;
+        const char *why = "";
+        if (obs.send_ntstatus != STATUS_SUCCESS || send_req.status != NDIS_STATUS_SUCCESS) {
+            v = tx_corr_classify(&obs, &why);
+            report_corr_verdict(adapter_idx, v, obs.send_ntstatus, "TEST_SEND_PTP", why);
             return;
         }
         uint64_t phc_at_send = send_req.phc_at_send_ns;
@@ -660,61 +686,50 @@ static void test_tx_rx_phc_correlation(HANDLE hDevice, uint32_t adapter_idx)
             /* Driver does not populate phc_at_send_ns — fall back to timestamp_ns */
             phc_at_send = send_req.timestamp_ns;
         }
+        obs.phc_at_send_ns = phc_at_send;
 
-        /* 2. Poll for hardware TX timestamp */
+        /* 2. Poll for hardware TX timestamp; keep the last exact status and content */
         AVB_TX_TIMESTAMP_REQUEST ts_req = {0};
-        ts_req.adapter_index = adapter_idx;
-        bool got_hw_ts = false;
         for (int retry = 0; retry < CORR_POLL_RETRIES; retry++) {
             DWORD tsBytes = 0;
-            ok = DeviceIoControl(hDevice, IOCTL_AVB_GET_TX_TIMESTAMP,
-                                 &ts_req, sizeof(ts_req),
-                                 &ts_req, sizeof(ts_req),
-                                 &tsBytes, NULL);
-            if (ok && ts_req.valid) {
-                got_hw_ts = true;
-                break;
-            }
+            memset(&ts_req, 0, sizeof(ts_req));
+            ts_req.adapter_index = adapter_idx;
+            obs.ts_ntstatus = avb_ioctl_ntstatus(hDevice, IOCTL_AVB_GET_TX_TIMESTAMP,
+                                                 &ts_req, sizeof(ts_req),
+                                                 &ts_req, sizeof(ts_req), &tsBytes);
+            if (obs.ts_ntstatus != STATUS_SUCCESS || ts_req.valid) break;
             Sleep(1);
         }
-        if (!got_hw_ts) {
-            printf("  [SKIP] TC-CORR-TX-RX-001[%u]: No hardware TX timestamp captured "
-                   "after %d ms — hardware 2STEP capture may not be enabled\n",
-                   seq, CORR_POLL_RETRIES);
-            test_result("TC-CORR-TX-RX-001 (skipped — no HW TX timestamp)", true);
-            return;
-        }
+        obs.ts_valid      = ts_req.valid;
+        obs.ts_provenance = ts_req.ts_provenance;
+        obs.hw_ts_ns      = ts_req.timestamp_ns;
 
-        /* 3. Assert delta < 5 µs */
-        uint64_t hw_ts  = ts_req.timestamp_ns;
-        uint64_t delta  = (hw_ts > phc_at_send) ? (hw_ts - phc_at_send)
-                                                 : (phc_at_send - hw_ts);
-        if (delta > max_delta_ns) max_delta_ns = delta;
-
-        if (delta <= CORR_DELTA_MAX_NS) {
+        /* 3. Verdict for this sample (provenance, zero timestamp, delta threshold) */
+        v = tx_corr_classify(&obs, &why);
+        uint64_t delta = (obs.hw_ts_ns > phc_at_send) ? (obs.hw_ts_ns - phc_at_send)
+                                                      : (phc_at_send - obs.hw_ts_ns);
+        if (v == AVB_VERDICT_PASS) {
             good_samples++;
-            printf("  [OK ] sample %2u: hw_ts=%llu phc=%llu delta=%llu ns\n",
-                   seq, (unsigned long long)hw_ts,
-                   (unsigned long long)phc_at_send,
-                   (unsigned long long)delta);
-        } else {
-            bad_samples++;
-            printf("  [BAD] sample %2u: delta=%llu ns > %llu ns threshold "
-                   "(hw_ts=%llu phc=%llu)\n",
-                   seq, (unsigned long long)delta, (unsigned long long)CORR_DELTA_MAX_NS,
-                   (unsigned long long)hw_ts, (unsigned long long)phc_at_send);
+            if (delta > max_delta_ns) max_delta_ns = delta;
+            printf("  [OK ] sample %2u: hw_ts=%llu phc=%llu delta=%llu ns prov=%u\n",
+                   seq, (unsigned long long)obs.hw_ts_ns, (unsigned long long)phc_at_send,
+                   (unsigned long long)delta, (unsigned)obs.ts_provenance);
+            continue;
         }
+        printf("  sample %2u: hw_ts=%llu phc=%llu prov=%u valid=%u\n",
+               seq, (unsigned long long)obs.hw_ts_ns, (unsigned long long)phc_at_send,
+               (unsigned)obs.ts_provenance, (unsigned)obs.ts_valid);
+        report_corr_verdict(adapter_idx, v, obs.ts_ntstatus, "GET_TX_TIMESTAMP", why);
+        return;   /* first non-passing sample decides this adapter's verdict */
     }
 
-    bool passed = (bad_samples == 0);
     printf("  Summary: %u/%u samples within %llu ns threshold, max_delta=%llu ns\n",
            good_samples, CORR_SAMPLES,
-           (unsigned long long)CORR_DELTA_MAX_NS,
-           (unsigned long long)max_delta_ns);
-    test_result("TC-CORR-TX-RX-001: TX/RX PHC correlation", passed);
+           (unsigned long long)TX_CORR_DELTA_MAX_NS, (unsigned long long)max_delta_ns);
+    report_corr_verdict(adapter_idx, AVB_VERDICT_PASS, STATUS_SUCCESS, "TEST_SEND_PTP+GET_TX_TIMESTAMP",
+                        "all samples verified hardware TX timestamps within threshold");
 
 #undef CORR_SAMPLES
-#undef CORR_DELTA_MAX_NS
 #undef CORR_POLL_RETRIES
 }
 
@@ -789,6 +804,7 @@ int main(void) {
                i, enum_req.vendor_id, enum_req.device_id, enum_req.capabilities);
         g_adapters[adapter_count].vendor_id = enum_req.vendor_id;
         g_adapters[adapter_count].device_id = enum_req.device_id;
+        g_adapters[adapter_count].caps      = enum_req.capabilities;
         adapter_count++;
     }
     
