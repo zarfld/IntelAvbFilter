@@ -257,7 +257,7 @@ foreach ($Configuration in $Configurations){
         #test_hardware_detection.exe       PASSED     0
     )
     foreach ($t in $CIFailed) { 
- #   .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     } 
 
 
@@ -271,7 +271,7 @@ $BenchmarkTests = @(
 #    'test_ptp_001.exe'                # TC-PTP-001-CORR rate stability; no --case filter
 )
     foreach ($t in $BenchmarkTests) { 
-    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+#    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     }
     # tools\test\Run-Tests-CI.ps1
     $CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
