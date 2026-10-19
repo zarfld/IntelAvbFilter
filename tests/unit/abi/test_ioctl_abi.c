@@ -35,6 +35,7 @@
 
 #include <windows.h>
 #include <winioctl.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -279,6 +280,26 @@ static void test_struct_sizes(void)
     TEST_CASE("TC-ABI-018: sizeof(AVB_DRIVER_STATISTICS) == 192");
     TEST_ASSERT(sizeof(AVB_DRIVER_STATISTICS) == 192,
                 "sizeof(AVB_DRIVER_STATISTICS) == 192  (24 x avb_u64, ABI 2.0)");
+
+    /* TC-ABI-019 ------------------------------------------------------------ */
+    /* AVB_FREQUENCY_REQUEST field offsets.  current_increment (offset 8) carries
+     * the RAW TIMINCA register value read before the change (I219: normalised to
+     * logical_ns << 24).  Its offset, width and raw-register meaning are part of
+     * the public contract; device-layer refactors must not move or reinterpret it. */
+    TEST_CASE("TC-ABI-019: AVB_FREQUENCY_REQUEST field offsets 0/4/8/12, current_increment is 32-bit");
+    TEST_ASSERT(offsetof(AVB_FREQUENCY_REQUEST, increment_ns) == 0,
+                "offsetof(increment_ns) == 0");
+    TEST_ASSERT(offsetof(AVB_FREQUENCY_REQUEST, increment_frac) == 4,
+                "offsetof(increment_frac) == 4");
+    TEST_ASSERT(offsetof(AVB_FREQUENCY_REQUEST, current_increment) == 8,
+                "offsetof(current_increment) == 8");
+    TEST_ASSERT(offsetof(AVB_FREQUENCY_REQUEST, status) == 12,
+                "offsetof(status) == 12");
+    {
+        AVB_FREQUENCY_REQUEST probe;
+        TEST_ASSERT(sizeof(probe.current_increment) == 4,
+                    "sizeof(current_increment) == 4  (raw 32-bit TIMINCA)");
+    }
 }
 
 int main(void)

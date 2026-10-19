@@ -16,13 +16,76 @@ Abstract:
 #include "avb_integration.h"
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
-#include "intel_i210_timinca.h"                    // TIMINCA codec on top of the register SSOT (I210_TIMINCA_*)
 
 // External platform operations
 extern const struct platform_ops ndis_platform_ops;
 
 // Forward declarations
 static int init_ptp(device_t *dev);
+
+/* ---------------------------------------------------------------------------------------------------
+ * TIMINCA (clock increment) encoding.  Private to the I210 device implementation: the generic layer only
+ * sees the logical request (increment_ns + increment_frac / 2^32 ns) through the two frequency ops.
+ *
+ * Intel I210 Datasheet 333016 v3.7, sections 7.8.3.2 and 8.15.11 (TIMINCA, 0xB608):
+ *     SYSTIM advances every 8 ns clock cycle (125 MHz) by  INC_TIME = 8 ns +/- Incvalue * 2^-32 ns
+ *     Incvalue = bits 30:0, ISGN = bit 31 (1b = subtract), reset value 0 => exactly 8 ns: the NOMINAL value.
+ * The register layout (I210_TIMINCA, I210_TIMINCA_INCVALUE_*, I210_TIMINCA_ISGN_*) comes from the register
+ * SSOT (intel-ethernet-regs, #21 / ADR #124); nothing about the layout is redefined here.  Only the
+ * 8 ns cycle time and the policy range below have no SSOT definition.
+ *
+ * Physical representability (|L - 8 ns| <= (2^31 - 1) * 2^-32 ns, about +/-6.25 percent, i.e. increment_ns
+ * 7 or 8) is a separate check from the public API range policy.  The earlier (ns << 24) | frac24 model
+ * programmed 0x08000000 as "8 ns", which by the datasheet is 8.03125 ns per cycle (+3906.25 ppm).
+ * ------------------------------------------------------------------------------------------------- */
+#define I210_SYSTIM_CYCLE_NS        8u        /* datasheet 7.8.3.2: one 125 MHz cycle */
+#define I210_SYSTIM_FRAC_BITS       32u       /* Incvalue resolution: 2^-32 ns */
+
+/* PROVISIONAL public API range for ADJUST_FREQUENCY on I210: +/-100,000 ppb from #149 (which lists #3 as
+ * superseded; #3 states +/-999,999 ppb, the conflict is recorded in #326).  An API policy, NOT the hardware
+ * limit - do not describe it as one. */
+#define I210_FREQ_API_MAX_ABS_PPB   100000u
+
+/* Raw TIMINCA that gives exactly 8 ns per cycle (the reset value). */
+static uint32_t i210_timinca_nominal(void)
+{
+    return 0u;
+}
+
+/* Logical increment -> raw TIMINCA.  0 on success; -EINVAL (and *raw untouched) when not representable. */
+static int i210_timinca_encode(uint32_t increment_ns, uint32_t increment_frac, uint32_t *raw)
+{
+    const uint64_t nominal = (uint64_t)I210_SYSTIM_CYCLE_NS << I210_SYSTIM_FRAC_BITS;
+    const uint64_t total   = ((uint64_t)increment_ns << I210_SYSTIM_FRAC_BITS) | (uint64_t)increment_frac;
+    uint64_t magnitude;
+    uint32_t sign = 0u;
+
+    if (total >= nominal) {
+        magnitude = total - nominal;
+    } else {
+        magnitude = nominal - total;
+        sign = (uint32_t)I210_TIMINCA_ISGN_MASK;
+    }
+    if (magnitude > (uint64_t)I210_TIMINCA_INCVALUE_MASK) {
+        return -EINVAL;
+    }
+    *raw = sign | (uint32_t)((magnitude << I210_TIMINCA_INCVALUE_SHIFT) & I210_TIMINCA_INCVALUE_MASK);
+    return 0;
+}
+
+/* Largest |Incvalue| (2^-32 ns units) that a +/-ppb adjustment may use: round(ppb * 8 ns * 2^32 / 1e9). */
+static uint32_t i210_timinca_max_units_for_ppb(uint32_t ppb)
+{
+    const uint64_t period_units = (uint64_t)I210_SYSTIM_CYCLE_NS << I210_SYSTIM_FRAC_BITS;
+    return (uint32_t)(((uint64_t)ppb * period_units + 500000000ULL) / 1000000000ULL);
+}
+
+/* Non-zero when |Incvalue| of `raw` lies within the provisional +/-I210_FREQ_API_MAX_ABS_PPB policy range. */
+static int i210_timinca_within_api_range(uint32_t raw)
+{
+    const uint32_t magnitude = (uint32_t)(((uint64_t)raw & I210_TIMINCA_INCVALUE_MASK) >> I210_TIMINCA_INCVALUE_SHIFT);
+    return magnitude <= i210_timinca_max_units_for_ppb(I210_FREQ_API_MAX_ABS_PPB);
+}
 
 /**
  * @brief Initialize I210 device
@@ -210,10 +273,11 @@ static int init_ptp(device_t *dev)
 
     // Step 1.5: Program TIMINCA (clock increment register) to the nominal 8 ns per 125 MHz cycle.
     // Datasheet 333016 v3.7 section 8.15.11: INC_TIME = 8 ns +/- Incvalue * 2^-32 ns, reset value 0,
-    // so the NOMINAL encoding is Incvalue = 0, ISGN = 0 (see devices/intel_i210_timinca.h).
+    // so the NOMINAL encoding is Incvalue = 0, ISGN = 0 (see i210_timinca_nominal above).
     // The previous 0x08000000 ("8 << 24") is 8 ns + 2^27 * 2^-32 ns = 8.03125 ns, i.e. +3906.25 ppm.
-    // This function is the single owner of the I210 TIMINCA initialisation write
-    // (AvbPlatformInit no longer writes TIMINCA for I210).
+    // KNOWN DEBT (TEST-TIMINCA-ARCH-006, deliberately RED): init() still reaches the generic
+    // AvbPlatformInit first, which also writes a TIMINCA, so the init chain has two programming steps
+    // until init() is restructured to make this function the single owner.
     {
         const uint32_t nominal = i210_timinca_nominal();
         uint32_t timinca = 0;
@@ -485,6 +549,55 @@ static int i210_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
     return ndis_platform_ops.mmio_write(dev, I210_TSAUXC, tsauxc_value);
 }
 
+/**
+ * @brief Validate a logical frequency request (side-effect free: no MMIO, no clock mutation, no init)
+ * @return 0 if acceptable; -EINVAL if not representable in TIMINCA or outside the provisional API range
+ *
+ * Implements: #3 / #149 (frequency adjustment range), #326 (range conflict); HAL: intel_device_ops_t
+ */
+static int i210_validate_frequency_request(device_t *dev, uint32_t increment_ns, uint32_t increment_frac)
+{
+    uint32_t raw = 0;
+
+    UNREFERENCED_PARAMETER(dev);   /* pure: the request alone decides */
+
+    if (i210_timinca_encode(increment_ns, increment_frac, &raw) != 0) {
+        return -EINVAL;
+    }
+    if (!i210_timinca_within_api_range(raw)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+/**
+ * @brief Apply a logical frequency request: validate, read previous raw TIMINCA, encode, write
+ * @param previous_increment Out: raw TIMINCA value read before the change (AVB_FREQUENCY_REQUEST.current_increment)
+ * @return 0 on success; -EINVAL for an unacceptable request (no register touched); -EIO on register failure
+ */
+static int i210_adjust_frequency(device_t *dev, uint32_t increment_ns, uint32_t increment_frac,
+                                 uint32_t *previous_increment)
+{
+    uint32_t raw = 0;
+    uint32_t previous = 0;
+
+    if (dev == NULL || previous_increment == NULL) {
+        return -EINVAL;
+    }
+    if (i210_validate_frequency_request(dev, increment_ns, increment_frac) != 0 ||
+        i210_timinca_encode(increment_ns, increment_frac, &raw) != 0) {
+        return -EINVAL;
+    }
+    if (i210_read_timinca(dev, &previous) != 0) {
+        return -EIO;
+    }
+    *previous_increment = previous;
+    if (i210_write_timinca(dev, raw) != 0) {
+        return -EIO;
+    }
+    return 0;
+}
+
 /* ---------------------------------------------------------------------------
  * I210 target-time support
  *
@@ -634,7 +747,11 @@ const intel_device_ops_t i210_ops = {
     .write_timinca = i210_write_timinca,
     .read_tsauxc = i210_read_tsauxc,
     .write_tsauxc = i210_write_tsauxc,
-    
+
+    // PHC frequency adjustment: device-owned TIMINCA encoding (IOCTL_AVB_ADJUST_FREQUENCY)
+    .validate_frequency_request = i210_validate_frequency_request,
+    .adjust_frequency = i210_adjust_frequency,
+
     // Target time / auxiliary timestamp operations
     // I210 has TRGTTIML0/H0 and TRGTTIML1/H1 at 0x0B644–0x0B650 (I210 DS §8.14.21-24)
     .set_target_time = i210_set_target_time,  // Implemented — I210 has target-time registers

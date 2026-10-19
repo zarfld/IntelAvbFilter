@@ -1315,12 +1315,13 @@ $AllTests = @(
         Description = "Offline: status/capability/payload -> PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE (docs/testing/test-verdict-contract.md)"
     },
     @{
-        Name = "test_i210_timinca_codec"
+        Name = "test_i210_frequency_ops"
         Type = "cl"
-        Source = "tests\unit\ioctl\test_i210_timinca_codec.c"
-        Output = "test_i210_timinca_codec.exe"
-        Includes = "-I include -I external/intel_avb/lib"
-        Description = "Offline: I210 TIMINCA codec golden vectors from datasheet 8.15.11 (nominal/+/-/min/max, API range vs representability); Verifies #3, #149, #21, #124"
+        Source = "tests\unit\ioctl\test_i210_frequency_ops.c"
+        ExtraSources = "devices/intel_i210_impl.c"
+        Output = "test_i210_frequency_ops.exe"
+        Includes = "-I tests/unit/host_shim -I . -I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Description = "Offline: production I210 frequency ops vs datasheet 8.15.11 golden vectors on a fake register file (representability vs +/-100,000 ppb API range, no-MMIO validation, raw current_increment); Verifies #3, #149, #326, #21, #124"
     },
     @{
         Name = "test_tx_corr_verdict"

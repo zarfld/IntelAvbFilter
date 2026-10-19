@@ -98,7 +98,34 @@ typedef struct _intel_device_ops {
     // Advanced features (device-specific extensions)
     int (*enable_advanced_features)(device_t *dev, uint32_t feature_mask);
     int (*validate_configuration)(device_t *dev);
-    
+
+    /* ---- PHC frequency adjustment (IOCTL_AVB_ADJUST_FREQUENCY) --------------------------------
+     * The generic layer only validates the IOCTL buffer, routes, and translates the result to
+     * NTSTATUS / ETW.  Everything family-specific (TIMINCA encoding, representability, the applicable
+     * range, the register transaction) is owned by the device implementation behind these two ops.
+     *
+     * Logical request: increment = increment_ns + increment_frac / 2^32 nanoseconds per clock cycle.
+     *
+     * Return codes (shared by both ops):
+     *    0          accepted / applied
+     *   -EINVAL     request not acceptable for this family (not representable, or outside the family's
+     *               API range): STATUS_INVALID_PARAMETER.  No register was touched.
+     *   -ENOTSUP    the HARDWARE has no frequency-adjust path: STATUS_NOT_SUPPORTED.
+     *   other <0    register access failed (-EIO): STATUS_UNSUCCESSFUL.
+     * A NULL op pointer means the DRIVER has no implementation for this family (migration state):
+     * the generic layer then uses its legacy path, and at the end state returns STATUS_NOT_IMPLEMENTED.
+     */
+
+    /* Side-effect free: no MMIO, no clock mutation, no implicit initialization. */
+    int (*validate_frequency_request)(device_t *dev, uint32_t increment_ns, uint32_t increment_frac);
+
+    /* Explicitly mutating.  Re-validates first (rejection touches no register), reads the previous raw
+     * TIMINCA value into *previous_increment (the value reported as AVB_FREQUENCY_REQUEST.current_increment;
+     * per family: raw register, except I219 which keeps its documented logical_ns << 24 normalisation),
+     * then encodes and writes.  *previous_increment is set only once the read succeeded. */
+    int (*adjust_frequency)(device_t *dev, uint32_t increment_ns, uint32_t increment_frac,
+                            uint32_t *previous_increment);
+
 } intel_device_ops_t;
 
 /**

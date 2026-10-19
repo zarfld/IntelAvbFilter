@@ -7,13 +7,13 @@
 #  002  no I210-specific code in the generic frequency-adjust handler or in AvbPlatformInit
 #  003  the device registry dispatches to the correct family implementation
 #  004  TIMINCA fields come from the register SSOT: canonical YAML -> generated header agree, and
-#       the codec defines no register bits of its own
+#       the I210 implementation consumes the generated masks and defines no register bits of its own
 #  005  only the I210 device implementation programs the I210 TIMINCA register
 #  006  the I210 init chain performs exactly ONE TIMINCA programming step            (RED until redesign)
 #  007  other families still initialise through their own device init() + platform init
 #
 # These tests check structure and contracts, never source-text hashes. Behavioural proof lives in
-# test_i210_timinca_codec.c (independent datasheet vectors) and the init-liveness decision test.
+# test_i210_frequency_ops.c (independent datasheet vectors against the production device implementation).
 #
 # Implements: I210 TIMINCA correction (datasheet 333016 v3.7, 8.15.11)
 # Verifies:   #126, #92, #40, #21, #124, #3, #149
@@ -48,7 +48,7 @@ Write-Host "  TEST-TIMINCA-ARCH-001..007 - HAL boundary and register SSOT contra
 
 $integ = Read-Src 'src\avb_integration_fixed.c'
 $i210  = Read-Src 'devices\intel_i210_impl.c'
-$codec = Read-Src 'devices\intel_i210_timinca.h'
+$precomp = Read-Src 'src\precomp.h'
 
 # 001 ---------------------------------------------------------------------------------------------
 $offenders = @()
@@ -101,10 +101,12 @@ if ($ok) {
           ($gen -match ('I210_TIMINCA_INCVALUE_SHIFT\s+' + $incSh + '\b')) -and ($gen -match ('I210_TIMINCA_INCVALUE_MASK\s+\(\(\(1ULL<<' + $incW + '\)')) -and
           ($gen -match ('I210_TIMINCA_ISGN_SHIFT\s+' + $sgSh + '\b')) -and ($gen -match ('I210_TIMINCA_ISGN_MASK\s+\(\(\(1ULL<<' + $sgW + '\)'))
 }
-$codecCode = Strip-Comments $codec
-$redef = @([regex]::Matches($codecCode, '(?m)^\s*#\s*define\s+I210_TIMINCA_(INCVALUE|ISGN)\w*'))
-if ($ok -and $redef.Count -eq 0 -and $codecCode -match 'i210_regs\.h') { tc_pass "TEST-TIMINCA-ARCH-004-fields-originate-from-register-SSOT (canonical YAML: $($canonical.Name))" }
-else { tc_fail 'TEST-TIMINCA-ARCH-004' "yaml/header agree=$ok codec-redefinitions=$($redef.Count) canonical=$($canonical.Name)" }
+$i210Code = Strip-Comments $i210
+$redef = @([regex]::Matches($i210Code, '(?m)^\s*#\s*define\s+I210_TIMINCA\w*'))
+$consumes = ($i210Code -match '\bI210_TIMINCA_INCVALUE_MASK\b') -and ($i210Code -match '\bI210_TIMINCA_ISGN_MASK\b')
+$ssotIncluded = $precomp -match 'intel-ethernet-regs/gen/i210_regs\.h'
+if ($ok -and $redef.Count -eq 0 -and $consumes -and $ssotIncluded) { tc_pass "TEST-TIMINCA-ARCH-004-fields-originate-from-register-SSOT (canonical YAML: $($canonical.Name))" }
+else { tc_fail 'TEST-TIMINCA-ARCH-004' "yaml/header agree=$ok impl-redefinitions=$($redef.Count) impl-consumes-SSOT-masks=$consumes ssot-header-included=$ssotIncluded canonical=$($canonical.Name)" }
 
 # 005 ---------------------------------------------------------------------------------------------
 $users = @()
