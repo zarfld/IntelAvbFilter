@@ -1,7 +1,10 @@
 ---
 name: repository-audit
-description: repository-audit
-disable-model-invocation: true
+description: Audit the current IntelAvbFilter repository structure, engineering governance, CI,
+  security, and lifecycle traceability. Use for an explicit repository health or compliance review;
+  compare against actual paths and current policy rather than retired prompt layouts, and cite
+  observed evidence.
+disable-model-invocation: false
 ---
 # Repository Audit Prompt
 

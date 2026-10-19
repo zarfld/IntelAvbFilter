@@ -1,6 +1,9 @@
 ---
 name: requirements-validate
-description: requirements-validate
+description: Validate IntelAvbFilter stakeholder and system requirements against user intent,
+  completeness, consistency, testability, and current issue templates. Use when reviewing StR,
+  REQ-F, or REQ-NF records before approval or phase gates; report findings without inventing stakeholder
+  agreement.
 disable-model-invocation: true
 ---
 ````prompt

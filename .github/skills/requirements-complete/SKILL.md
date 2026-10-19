@@ -1,7 +1,10 @@
 ---
 name: requirements-complete
-description: requirements-complete
-disable-model-invocation: true
+description: Assess completeness and coverage of stakeholder, functional, non-functional, and
+  interface requirements tracked as GitHub Issues. Use for requested completeness audits before
+  architecture, implementation, or phase-gate decisions; identify missing scenarios and acceptance
+  criteria.
+disable-model-invocation: false
 ---
 ````prompt
 ---

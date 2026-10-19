@@ -1,7 +1,9 @@
 ---
 name: sfmea-create
-description: Guides Software Failure Modes Effects Analysis (SFMEA) following IEEE 1633-2016 Clause 5.2, Annex A
-disable-model-invocation: true
+description: Prepare a Software Failure Modes and Effects Analysis for IntelAvbFilter components
+  or interfaces. Use when assessing potential failure modes, causes, effects, controls, detection,
+  and mitigations under IEEE 1633; explicitly separate assumptions from verified design facts.
+disable-model-invocation: false
 ---
 # Software Failure Modes Effects Analysis (SFMEA) Creation Prompt
 

@@ -1,7 +1,9 @@
 ---
 name: user-story-expansion
-description: user-story-expansion
-disable-model-invocation: true
+description: Decompose approved features or epics into small, testable user stories with acceptance
+  criteria and GitHub Issue references. Use during explicitly requested incremental planning;
+  keep authoritative stakeholder and system requirement records unchanged unless separately approved.
+disable-model-invocation: false
 ---
 # User Story Expansion Prompt
 

@@ -1,7 +1,9 @@
 ---
 name: test-gap-filler
-description: test-gap-filler
-disable-model-invocation: true
+description: Identify missing verification coverage and propose or implement approved IntelAvbFilter
+  tests. Use when assessing requirement-to-TEST links or addressing coverage gaps; distinguish
+  unit, integration, and per-adapter HIL evidence and avoid interpreting skipped tests as passes.
+disable-model-invocation: false
 ---
 ````prompt
 ---

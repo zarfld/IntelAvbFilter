@@ -1,7 +1,9 @@
 ---
 name: tdd-compile
-description: tdd-compile
-disable-model-invocation: true
+description: Implement a traced IntelAvbFilter requirement or defect using a Red-Green-Refactor
+  workflow. Use for explicit code-change requests linked to approved requirement and TEST issues;
+  reproduce the failure and route hardware-facing verification through canonical test runners.
+disable-model-invocation: false
 ---
 ````prompt
 ---

@@ -1,7 +1,9 @@
 ---
 name: phase-transition-3to4
-description: phase-transition_3to4
-disable-model-invocation: true
+description: Plan the transition from architecture (phase 03) to detailed design (phase 04). Use
+  when approved architecture artifacts need to be decomposed into interfaces, design deliverables,
+  constraints, and traced implementation plans.
+disable-model-invocation: false
 ---
 ## Phase 04: Detailed Design - Standards-Compliant Transition
 

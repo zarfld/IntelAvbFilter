@@ -1,7 +1,9 @@
 ---
 name: traceability-builder
-description: traceability-builder
-disable-model-invocation: true
+description: Create or repair lifecycle relationships across StR, REQ, ADR, ARC-C, QA-SC, TEST,
+  and PR records. Use for explicit traceability work; reuse authoritative CI reports and existing
+  matrix scripts, preserve canonical link semantics, and require approval for issue mutations.
+disable-model-invocation: false
 ---
 ````prompt
 ---

@@ -1,7 +1,9 @@
 ---
 name: project-kickoff
-description: project-kickoff
-disable-model-invocation: true
+description: Run structured project or workstream discovery for IntelAvbFilter. Use when establishing
+  stakeholders, scope, assumptions, initial requirements, risks, and candidate GitHub Issues;
+  distinguish exploratory proposals from approved lifecycle records.
+disable-model-invocation: false
 ---
 # Project Kickoff & Discovery Prompt
 

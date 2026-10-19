@@ -1,7 +1,9 @@
 ---
 name: test-validate
-description: test-validate
-disable-model-invocation: true
+description: Audit IntelAvbFilter TEST issues and test implementations for traceability, intended
+  outcomes, coverage, and credible execution evidence. Use for formal test reviews or CI quality
+  assessments; report failures at the testcase, build, and physical-adapter levels.
+disable-model-invocation: false
 ---
 ````prompt
 ---

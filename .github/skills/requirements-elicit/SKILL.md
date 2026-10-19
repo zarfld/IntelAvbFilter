@@ -1,7 +1,9 @@
 ---
 name: requirements-elicit
-description: requirements-elicit
-disable-model-invocation: true
+description: Elicit stakeholder needs and derive candidate functional and non-functional requirements
+  for IntelAvbFilter. Use when a feature request is ambiguous or needs formalization; draft testable
+  criteria and appropriately linked GitHub Issue bodies without publishing them unapproved.
+disable-model-invocation: false
 ---
 ````prompt
 ---

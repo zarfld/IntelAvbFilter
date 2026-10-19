@@ -1,7 +1,9 @@
 ---
 name: traceability-validate
-description: traceability-validate
-disable-model-invocation: true
+description: Validate GitHub Issue relationships and end-to-end IntelAvbFilter traceability using
+  canonical Traces to, Verifies, and Verified by semantics. Use for explicit audits or gate checks;
+  verify link direction and target type and reuse existing CI traceability evidence.
+disable-model-invocation: false
 ---
 ````prompt
 ---

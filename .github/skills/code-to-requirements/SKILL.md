@@ -1,7 +1,9 @@
 ---
 name: code-to-requirements
-description: code-to-requirements
-disable-model-invocation: true
+description: Reverse-engineer candidate requirements and GitHub Issue bodies from existing IntelAvbFilter
+  C/C++, WDK, and tooling code. Use when implementation behavior lacks documented requirements
+  or when auditing code-to-requirement coverage; label inferred intent for stakeholder review.
+disable-model-invocation: false
 ---
 ````prompt
 ---

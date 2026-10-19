@@ -1,7 +1,9 @@
 ---
 name: architecture-starter
-description: architecture-starter
-disable-model-invocation: true
+description: Develop candidate architecture decisions, components, and quality scenarios from
+  IntelAvbFilter requirements. Use when starting or revising architecture work; keep platform-neutral
+  AVB/TSN interfaces distinct from Intel-specific implementations and preserve issue traceability.
+disable-model-invocation: false
 ---
 ````prompt
 ---

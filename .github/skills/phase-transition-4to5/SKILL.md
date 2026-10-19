@@ -1,6 +1,8 @@
 ---
 name: phase-transition-4to5
-description: phase-transition_4to5
+description: Plan the transition from detailed design (phase 04) to implementation (phase 05).
+  Use when preparing approved designs for TDD, code changes, interface reviews, traceability,
+  and verification gates.
 disable-model-invocation: true
 ---
 ## Phase 05: Implementation - TDD & Standards-Compliant Development

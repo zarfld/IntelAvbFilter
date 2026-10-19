@@ -1,7 +1,9 @@
 ---
 name: reliability-plan-create
-description: Creates comprehensive Software Reliability Program Plan (SRPP) following IEEE 1633-2016 Clause 5.1
-disable-model-invocation: true
+description: Draft a Software Reliability Program Plan for IntelAvbFilter or a scoped subsystem.
+  Use when establishing reliability objectives, measures, operational evidence, modeling methods,
+  ownership, and verification strategy under IEEE 1633.
+disable-model-invocation: false
 ---
 # Software Reliability Program Plan (SRPP) Creation Prompt
 

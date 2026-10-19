@@ -1,7 +1,9 @@
 ---
 name: operational-profile-create
-description: Creates Operational Profile (OP) with Markov Chain Usage Model (MCUM) following IEEE 1633-2016 Clause 5.1.1.3, 5.4
-disable-model-invocation: true
+description: Produce an evidence-based operational profile and Markov-chain usage model for IntelAvbFilter
+  or a scoped component. Use when a software reliability plan requires workload frequencies, state
+  transitions, and usage assumptions under IEEE 1633; identify missing field data.
+disable-model-invocation: false
 ---
 # Operational Profile Creation Prompt
 

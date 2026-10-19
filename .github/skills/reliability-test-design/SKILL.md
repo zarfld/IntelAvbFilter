@@ -1,7 +1,9 @@
 ---
 name: reliability-test-design
-description: Guides OP-driven reliability test design following IEEE 1633-2016 Clause 5.4
-disable-model-invocation: true
+description: Design operational-profile-driven reliability tests for IntelAvbFilter and its components
+  under IEEE 1633. Use when translating workload models, failure modes, and reliability objectives
+  into measurable tests; distinguish SIL, CI, and hardware-in-the-loop evidence.
+disable-model-invocation: false
 ---
 # Reliability Test Design (OP-Driven) Prompt
 

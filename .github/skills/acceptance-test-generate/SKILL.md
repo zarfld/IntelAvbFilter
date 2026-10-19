@@ -1,7 +1,10 @@
 ---
 name: acceptance-test-generate
-description: acceptance-test-generate
-disable-model-invocation: true
+description: Derive acceptance-test scenarios and candidate TEST issue bodies from stakeholder
+  acceptance criteria. Use when preparing acceptance coverage for approved IntelAvbFilter requirements;
+  reference canonical requirement issues and existing testing infrastructure. Do not publish issues
+  without authorization.
+disable-model-invocation: false
 ---
 ````prompt
 ---

@@ -1,7 +1,9 @@
 ---
 name: requirements-refine
-description: requirements-refine
-disable-model-invocation: true
+description: Refine existing stakeholder or system requirements into precise, atomic, and verifiable
+  GitHub Issue language. Use when requirements are ambiguous, inconsistent, overloaded, or difficult
+  to test; preserve the approved intent and do not modify issue bodies without authorization.
+disable-model-invocation: false
 ---
 ````prompt
 ---

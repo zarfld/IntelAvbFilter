@@ -1,7 +1,10 @@
 ---
 name: reliability-release-decision
-description: Guides release decisions based on reliability evidence following IEEE 1633-2016 Clause 5.5
-disable-model-invocation: true
+description: Assess whether an IntelAvbFilter build satisfies stated software reliability release
+  criteria using observed defects, operational profiles, growth models, and test evidence. Use
+  for a requested release-readiness decision; separate estimates from demonstrated evidence and
+  surface uncertainty.
+disable-model-invocation: false
 ---
 # Reliability Release Decision Prompt
 

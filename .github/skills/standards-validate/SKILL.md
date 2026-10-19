@@ -1,6 +1,9 @@
 ---
 name: standards-validate
-description: standards-validate
+description: Evaluate IntelAvbFilter engineering artifacts and lifecycle evidence against applicable
+  IEEE, ISO/IEC, WDK, and repository governance requirements. Use for explicit standards-compliance
+  reviews; distinguish proven nonconformities from absent evidence and avoid unsupported compliance
+  claims.
 disable-model-invocation: true
 ---
 # Standards Compliance Validation Prompt

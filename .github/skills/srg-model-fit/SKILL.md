@@ -1,7 +1,9 @@
 ---
 name: srg-model-fit
-description: Guides Software Reliability Growth (SRG) model selection and fitting following IEEE 1633-2016 Clause 5.4, 6.3
-disable-model-invocation: true
+description: Select, fit, and evaluate a software reliability growth model using IntelAvbFilter
+  failure observations and test exposure data. Use when estimating reliability trends or supporting
+  release decisions under IEEE 1633; assess data sufficiency and model limitations.
+disable-model-invocation: false
 ---
 # Software Reliability Growth (SRG) Model Fitting Prompt
 
