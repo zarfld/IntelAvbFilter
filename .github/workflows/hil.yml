@@ -13,7 +13,10 @@ name: HIL - Hardware-in-the-Loop (operator-dispatched)
 #   - only then: checkout (no persisted credentials) -> build (writes test-build-manifest.json) ->
 #     repository driver pre-flight -> Run-Tests-CI.ps1 (HIL safety gate + build provenance);
 #   - least privilege (contents: read), no overlapping HIL jobs.
-# HardwareMutation is intentionally not offered: TAS/FP/PTM have no verified restore path (#9/#206, #328 A2).
+# HardwareIntegration and HardwareMutation are intentionally not offered: their gate-runnable entries can issue
+# SETUP_TAS / SETUP_FP / SETUP_PTM (avb_test_portability, avb_test_i217/_i225/_i226_um) and nested processes,
+# and TAS/FP/PTM have no verified restore path (#9/#206, #328 A2).  Offered suites are proven free of
+# hardware-reaching TSN configuration by tests/unit/ci/test_hil_suite_safety.ps1.
 
 on:
   workflow_dispatch:
@@ -26,7 +29,7 @@ on:
       suite:
         description: Run-Tests-CI.ps1 hardware suite
         type: choice
-        options: [HardwareMandatory, HardwareUnit, HardwareIntegration]
+        options: [HardwareMandatory, HardwareUnit]
         default: HardwareMandatory
 
 permissions:
@@ -58,13 +61,13 @@ jobs:
       - id: hil-trusted-preflight
         name: Trusted HIL preflight (runner-local, outside the workspace)
         run: |
-          & 'C:\hil-trusted\Invoke-HilPreflight.ps1' -Mode Step
+          & 'C:\hil-trusted\Invoke-HilPreflight.ps1'
           exit $LASTEXITCODE
 
       - name: Validate dispatch inputs
         run: |
           if (@('Release', 'Debug') -notcontains $env:HIL_CONFIGURATION) { Write-Host "invalid configuration '$env:HIL_CONFIGURATION'"; exit 1 }
-          if (@('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration') -notcontains $env:HIL_SUITE) { Write-Host "invalid suite '$env:HIL_SUITE'"; exit 1 }
+          if (@('HardwareMandatory', 'HardwareUnit') -notcontains $env:HIL_SUITE) { Write-Host "invalid suite '$env:HIL_SUITE'"; exit 1 }
 
       - name: Checkout (no persisted credentials)
         uses: actions/checkout@v5

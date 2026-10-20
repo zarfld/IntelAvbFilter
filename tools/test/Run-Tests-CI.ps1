@@ -1174,6 +1174,11 @@ function Get-AvbSourceIdentity {
         if ($LASTEXITCODE -ne 0) { $res.Error = 'git status failed'; return $res }
         $res.Revision = ([string]$rev).Trim()
         $res.Dirty = [bool]$st
+        # Under GitHub Actions the checkout must be exactly the dispatched (authorized) commit.
+        if ($env:GITHUB_ACTIONS -eq 'true' -and $env:GITHUB_SHA -and $res.Revision -cne $env:GITHUB_SHA) {
+            $res.Error = "checked-out HEAD $($res.Revision) is not the dispatched commit GITHUB_SHA=$($env:GITHUB_SHA)"
+            return $res
+        }
         $res.Ok = $true
     } catch {
         $res.Error = "git unavailable: $($_.Exception.Message)"

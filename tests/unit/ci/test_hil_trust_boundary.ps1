@@ -835,30 +835,43 @@ else {
     if (-not ($firstStep -is [System.Collections.IDictionary]) -or $firstStep['id'] -ne 'hil-trusted-preflight' -or
         "$($firstStep['run'])" -notmatch [regex]::Escape("C:\hil-trusted\Invoke-HilPreflight.ps1")) { $pfIssues += 'hil.yml first step is not the runner-local trusted preflight' }
 }
-if (-not (Test-Path -LiteralPath $pfRef)) { $pfIssues += 'reference preflight missing' }
+$pfLib = Join-Path $RepoRoot 'tools\hil-trusted\HilPreflight.Policy.ps1'
+if (-not (Test-Path -LiteralPath $pfRef)) { $pfIssues += 'reference preflight entry missing' }
+if (-not (Test-Path -LiteralPath $pfLib)) { $pfIssues += 'reference preflight policy library missing' }
 else {
-    . $pfRef
+    # Policy smoke check only (the entry script always evaluates and exits; never dot-source it here).
+    # Full hook coverage: tests/unit/ci/test_hil_preflight.ps1.
+    . $pfLib
+    $sha = 'a' * 40
     $ok = @{ GITHUB_ACTIONS = 'true'; GITHUB_REPOSITORY = 'zarfld/IntelAvbFilter'; GITHUB_EVENT_NAME = 'workflow_dispatch'; GITHUB_REF = 'refs/heads/master'
-             GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master'; GITHUB_ACTOR = 'zarfld' }
-    function Merge-JobEnv([hashtable]$Base, [hashtable]$Delta) { $h = @{}; foreach ($k in $Base.Keys) { $h[$k] = $Base[$k] }; foreach ($k in $Delta.Keys) { if ($null -eq $Delta[$k]) { $h.Remove($k) } else { $h[$k] = $Delta[$k] } }; return $h }
-    $cases = [ordered]@{
-        'authorized master dispatch'   = @{ Env = $ok; Allow = $true }
-        'fork pull_request'            = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'pull_request'; GITHUB_REF = 'refs/pull/7/merge'; GITHUB_HEAD_REF = 'evil'; GITHUB_BASE_REF = 'master'; GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/pull/7/merge' }); Allow = $false }
-        'push to master'               = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'push' }); Allow = $false }
-        'dispatch from feature branch' = @{ Env = (Merge-JobEnv $ok @{ GITHUB_REF = 'refs/heads/feature/x'; GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/feature/x' }); Allow = $false }
-        'other workflow on master'     = @{ Env = (Merge-JobEnv $ok @{ GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/ci-standards-compliance.yml@refs/heads/master' }); Allow = $false }
-        'foreign repository'           = @{ Env = (Merge-JobEnv $ok @{ GITHUB_REPOSITORY = 'untrusted-fork/IntelAvbFilter'; GITHUB_WORKFLOW_REF = 'untrusted-fork/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master' }); Allow = $false }
-        'workflow ref missing'         = @{ Env = (Merge-JobEnv $ok @{ GITHUB_WORKFLOW_REF = $null }); Allow = $false }
-        'outside GitHub Actions'       = @{ Env = (Merge-JobEnv $ok @{ GITHUB_ACTIONS = $null }); Allow = $false }
-    }
-    foreach ($n in $cases.Keys) {
-        $d = Test-HilJobAuthorization -JobEnv $cases[$n].Env -Policy $HilPolicy
-        if ($d.Allowed -ne $cases[$n].Allow) { $pfIssues += ("{0}: allowed={1} expected={2} ({3})" -f $n, $d.Allowed, $cases[$n].Allow, ($d.Reasons -join '; ')) }
-    }
-    $dActor = Test-HilJobAuthorization -JobEnv (Merge-JobEnv $ok @{ GITHUB_ACTOR = 'someone-else' }) -Policy $HilPolicy -AllowedActors @('zarfld')
-    if ($dActor.Allowed) { $pfIssues += 'actor outside the operator allow-list was authorized' }
+             GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master'; GITHUB_ACTOR = 'zarfld'
+             GITHUB_SHA = $sha; GITHUB_WORKFLOW_SHA = $sha; GITHUB_RUN_ATTEMPT = '1' }
+    $fork = @{}; foreach ($k in $ok.Keys) { $fork[$k] = $ok[$k] }
+    $fork['GITHUB_EVENT_NAME'] = 'pull_request'; $fork['GITHUB_HEAD_REF'] = 'evil'; $fork['GITHUB_REF'] = 'refs/pull/7/merge'
+    if (-not (Test-HilJobAuthorization -JobEnv $ok -Policy (Get-HilPolicy) -AllowedActors @('zarfld')).Allowed) { $pfIssues += 'authorized master dispatch was denied' }
+    if ((Test-HilJobAuthorization -JobEnv $fork -Policy (Get-HilPolicy) -AllowedActors @('zarfld')).Allowed) { $pfIssues += 'fork pull request was authorized' }
 }
 tc_check 'TEST-HILTRUST-REAL-009-trusted-preflight-policy-authorizes-only-the-operator-dispatch-of-hil-yml-on-master' ($pfIssues.Count -eq 0) ($pfIssues -join ' || ')
+
+# hil.yml cannot be invoked as a reusable workflow, and it builds/tests exactly the dispatched commit.
+$idIssues = @()
+if (Test-Path -LiteralPath $hilPath) {
+    $hilEvents = @(Get-Events (Read-Yaml $hilPath))
+    if (($hilEvents -join ',') -ne 'workflow_dispatch') { $idIssues += "hil.yml triggers: [$($hilEvents -join ',')] (must be exactly workflow_dispatch; no workflow_call)" }
+    $hSteps = @((Read-Yaml $hilPath)['jobs']['hil']['steps'])
+    $co = @($hSteps | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('uses') -and "$($_['uses'])" -match '^actions/checkout@' })
+    if ($co.Count -ne 1) { $idIssues += "expected exactly one checkout step, found $($co.Count)" }
+    else {
+        $w = $co[0]['with']
+        if ("$($w['ref'])" -ne '${{ github.sha }}') { $idIssues += "checkout ref is '$($w['ref'])', not the dispatched commit (github.sha)" }
+        if ("$($w['clean'])" -ne 'true') { $idIssues += 'checkout does not clean the workspace (stale build outputs could survive)' }
+    }
+    $runs = @($hSteps | ForEach-Object { if ($_ -is [System.Collections.IDictionary] -and $_.Contains('run')) { "$($_['run'])" } else { '' } })
+    $iBuild = [array]::FindIndex([string[]]$runs, [Predicate[string]]{ param($x) $x -match 'Build-Tests\.ps1' })
+    $iRun   = [array]::FindIndex([string[]]$runs, [Predicate[string]]{ param($x) $x -match 'Run-Tests-CI\.ps1' })
+    if ($iBuild -lt 0 -or $iRun -lt 0 -or $iBuild -gt $iRun) { $idIssues += 'Build-Tests.ps1 must run before Run-Tests-CI.ps1 in the same job (manifest from this checkout)' }
+} else { $idIssues += 'hil.yml missing' }
+tc_check 'TEST-HILTRUST-REAL-010-hil-yml-not-reusable-and-builds-exactly-the-dispatched-commit' ($idIssues.Count -eq 0) ($idIssues -join ' || ')
 
 Remove-Item $script:Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

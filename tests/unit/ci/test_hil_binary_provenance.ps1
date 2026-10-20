@@ -126,7 +126,7 @@ function Get-FunctionText([string]$Path, [string[]]$Names) {
 $fnMissing = ''
 try {
     . ([scriptblock]::Create((Get-FunctionText $BuildPath @('Get-TestBuildArtifactName', 'New-TestBuildManifest', 'Write-TestBuildManifest'))))
-    . ([scriptblock]::Create((Get-FunctionText $RunCIPath @('Get-AvbManifestProp', 'Read-AvbBuildManifest', 'Get-AvbHilProvenanceDecision', 'Test-AvbHilNeedsProvenance'))))
+    . ([scriptblock]::Create((Get-FunctionText $RunCIPath @('Get-AvbManifestProp', 'Read-AvbBuildManifest', 'Get-AvbHilProvenanceDecision', 'Test-AvbHilNeedsProvenance', 'Get-AvbSourceIdentity'))))
 } catch { $fnMissing = $_.Exception.Message }
 tc_check 'TEST-HILPROV-019-provenance-functions-present' ($fnMissing -eq '') $fnMissing
 
@@ -240,6 +240,18 @@ if ($fnMissing -eq '') {
     $d9 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest (Read-AvbBuildManifest -Path $pUnknown -Configuration 'Debug') -Source $srcOk
     tc_check 'TEST-HILPROV-035-unknown-source-identity-fails-closed' `
         (($d8.Action -eq 'Block') -and ($d8.Reason -match 'source revision unavailable') -and ($d9.Action -eq 'Block')) ("current={0}: {1} | build={2}: {3}" -f $d8.Action, $d8.Reason, $d9.Action, $d9.Reason)
+    # Under GitHub Actions the checked-out HEAD must equal the dispatched GITHUB_SHA (read-only git on this checkout).
+    $script:IsSandbox = $false; $script:repoRoot = $RepoRoot
+    $saveGa = $env:GITHUB_ACTIONS; $saveSha = $env:GITHUB_SHA
+    try {
+        $env:GITHUB_ACTIONS = 'true'; $env:GITHUB_SHA = ('0' * 40)
+        $sMis = Get-AvbSourceIdentity
+        $head = (& git -C $RepoRoot rev-parse HEAD).Trim()
+        $env:GITHUB_SHA = $head
+        $sOk = Get-AvbSourceIdentity
+    } finally { $env:GITHUB_ACTIONS = $saveGa; $env:GITHUB_SHA = $saveSha }
+    tc_check 'TEST-HILPROV-040-github-actions-checkout-must-equal-dispatched-sha' `
+        ((-not $sMis.Ok) -and ($sMis.Error -match 'not the dispatched commit') -and $sOk.Ok -and ($sOk.Revision -eq $head)) ("mismatch: ok={0} '{1}' | match: ok={2}" -f $sMis.Ok, $sMis.Error, $sOk.Ok)
     $outcomesReenable = @{ 't_built' = @{ Status = 'failed'; Reason = 'compiler exit code 2 or output missing'; OutputPath = $null } }
     $testsReenable = @(@{ Name = 't_built'; Type = 'cl'; Output = 't_built.exe' }, @{ Name = 't_reenabled'; Type = 'cl'; Output = 't_reenabled.exe' })
     $mPartial = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $testsReenable -Outcomes $outcomesReenable -SourceRevision 'rev-now' -SourceDirty $false
