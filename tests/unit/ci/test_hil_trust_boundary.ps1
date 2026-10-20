@@ -976,6 +976,7 @@ else {
     if ("$($dep['name'])" -cne $DeployName) { $laneIssues += "deploy-staging name '$($dep['name'])' (hil.yml authorize looks up '$DeployName')" }
     if (@($dep['needs']) -notcontains 'acceptance-tests' -or @($dep['needs']) -notcontains 'unit-tests' -or @($dep['needs']) -notcontains 'integration-tests') { $laneIssues += "deploy-staging needs [$(@($dep['needs']) -join ',')]" }
     if ("$($dep['if'])" -notmatch "github\.event_name == 'push'" -or "$($dep['if'])" -notmatch "refs/heads/master") { $laneIssues += "deploy-staging condition changed: $($dep['if'])" }
+    if (@(@($dep['steps']) | Where-Object { "$($_['uses'])" -match '^actions/upload-artifact@' -and "$($_['with']['name'])" -eq 'intel-avb-filter-driver-release' }).Count -ne 1) { $laneIssues += 'deploy-staging no longer uploads intel-avb-filter-driver-release (hil.yml staged-driver identity)' }
 }
 foreach ($jid in $ciJobs.Keys) { if (@(if ($ciJobs[$jid].Contains('needs')) { @($ciJobs[$jid]['needs']) }) | Where-Object { $_ -like 'hil*' -or $_ -like '*-hil' }) { $laneIssues += "ci-standards job $jid depends on a HIL job" } }
 tc_check 'TEST-HILTRUST-REAL-008-hosted-ci-lanes-triggers-and-deploy-staging-preserved' ($laneIssues.Count -eq 0) ($laneIssues -join '; ')
@@ -1000,7 +1001,8 @@ else {
     $p = $az['permissions']
     if (-not ($p -is [System.Collections.IDictionary]) -or (@($p.Keys | Sort-Object) -join ',') -ne 'actions,contents' -or "$($p['actions'])" -ne 'read' -or "$($p['contents'])" -ne 'read') { $azIssues += 'authorize permissions must be exactly actions: read, contents: read' }
     if ("$($az['if'])".Trim() -cne $wrGuardReal) { $azIssues += "authorize if is not the workflow_run guard: $($az['if'])" }
-    foreach ($o in 'authorized', 'head_sha', 'upstream_run_id', 'upstream_run_attempt') { if ("$($az['outputs'][$o])" -ne "`${{ steps.authz.outputs.$o }}") { $azIssues += "authorize output $o" } }
+    foreach ($o in 'head_sha', 'upstream_run_id', 'upstream_run_attempt') { if ("$($az['outputs'][$o])" -ne "`${{ steps.authz.outputs.$o }}") { $azIssues += "authorize output $o" } }
+    foreach ($o in 'authorized', 'staged_driver_sha256') { if ("$($az['outputs'][$o])" -ne "`${{ steps.staged.outputs.$o }}") { $azIssues += "authorize output $o is not set by the staged-driver step" } }
     $azRun = "$(@($az['steps'])[0]['run'])"
     if ($azRun -notmatch [regex]::Escape("DEPLOY_JOB = '$DeployName'")) { $azIssues += 'authorize script does not look up the deploy-staging job by its exact name' }
     if ($azRun -notmatch [regex]::Escape("CI_PATH = '$ciRel'")) { $azIssues += 'authorize script does not pin the CI workflow path' }
@@ -1015,7 +1017,7 @@ foreach ($jid in $hilJobIds) {
     if ("$($first['id'])" -ne 'hil-trusted-preflight' -or $first.Contains('if') -or $first.Contains('continue-on-error')) { $azIssues += "${jid}: first step is not an unconditional hil-trusted-preflight" }
     foreach ($m in "GITHUB_WORKFLOW_REF -cne 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master'", "HIL_AUTHORIZED -cne 'true'",
                    'WindowsBuiltInRole]::Administrator', 'HIL_AUTHORIZED_DRIVER_SHA256', 'Get-Service -Name IntelAvbFilter', 'HIL_BUGCHECK_ACK', 'HIL_HALT',
-                   'Get-PnpDevice', 'Get-NetAdapter', 'exit 1') {
+                   'Get-PnpDevice', 'Get-NetAdapter', 'exit 1', "HIL_HALT -cne 'false'", 'HIL_BUGCHECK_ACK is not set', "GITHUB_RUN_ATTEMPT -cne '1'", 'HIL_STAGED_DRIVER_SHA256 -cnotmatch') {
         if ($fr.IndexOf($m) -lt 0) { $azIssues += "${jid}: preflight lacks '$m'" }
     }
     if ("$($first['env']['HIL_AUTHORIZED'])" -ne '${{ needs.authorize.outputs.authorized }}') { $azIssues += "${jid}: preflight HIL_AUTHORIZED is not the authorize output" }
@@ -1214,10 +1216,10 @@ srv.serve_forever()
                           path = $ciRel; name = 'CI - Standards Compliance & Quality Gates'; repository = [ordered]@{ full_name = $RepoName }; head_repository = [ordered]@{ full_name = $RepoName } }
         $run = [ordered]@{}; foreach ($k in $wr.Keys) { $run[$k] = $wr[$k] }
         $run['repository'] = [ordered]@{ full_name = $RepoName }; $run['head_repository'] = [ordered]@{ full_name = $RepoName }
-        return @{ Action = 'completed'; Wr = $wr; Run = $run; RunStatus = 200; Protected = $true; Cmp = 'ahead'; Paged = $false
-                  Jobs = @([ordered]@{ name = 'Unit Tests (windows-latest, Debug)'; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid },
-                           [ordered]@{ name = $DeployName; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid })
-                  Env = @{ GITHUB_REPOSITORY = $RepoName; GITHUB_EVENT_NAME = 'workflow_run' } }
+        return @{ Action = 'completed'; Wr = $wr; Run = $run; RunStatus = 200; Protected = $true; Tip = $sha; Paged = $false
+                  Jobs = @([ordered]@{ name = 'Unit Tests (windows-latest, Debug)'; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid; run_attempt = 1 },
+                           [ordered]@{ name = $DeployName; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid; run_attempt = 1 })
+                  Env = @{ GITHUB_REPOSITORY = $RepoName; GITHUB_EVENT_NAME = 'workflow_run'; GITHUB_RUN_ATTEMPT = '1' } }
     }
     $both = { param($s, $k, $v) $s.Wr[$k] = $v; $s.Run[$k] = $v }
     $azCases = [ordered]@{
@@ -1238,7 +1240,12 @@ srv.serve_forever()
         'API head_sha differs (wrong SHA)' = @{ Mod = { param($s) $s.Run.head_sha = ('f' * 40) }; Why = 'API run head_sha' }
         'stale attempt (CI re-run)'       = @{ Mod = { param($s) $s.Run.run_attempt = 2 }; Why = 'API run run_attempt' }
         'master not protected'            = @{ Mod = { param($s) $s.Protected = $false }; Why = 'not a protected branch' }
-        'SHA not on master'               = @{ Mod = { param($s) $s.Cmp = 'diverged' }; Why = 'not reachable from master' }
+        'SHA superseded on master'        = @{ Mod = { param($s) $s.Tip = ('d' * 40) }; Why = 'is not the current master tip' }
+        'staging success carried over from attempt 1 into attempt 2' = @{ Mod = { param($s) & $both $s 'run_attempt' 2 }; Why = '0 jobs named' }
+        'attempt 2 with its own staging job' = @{ Mod = { param($s) & $both $s 'run_attempt' 2; $s.Jobs[1].run_attempt = 2 }; Allow = $true }
+        'attempt 2 lists a failed attempt-1 staging and a successful attempt-2 staging' = @{ Mod = { param($s) & $both $s 'run_attempt' 2; $s.Jobs[0] = [ordered]@{ name = $DeployName; status = 'completed'; conclusion = 'failure'; head_sha = $sha; run_id = $rid; run_attempt = 1 }; $s.Jobs[1].run_attempt = 2 }; Allow = $true }
+        'staging job without run_attempt' = @{ Mod = { param($s) $s.Jobs[1].Remove('run_attempt') }; Why = '0 jobs named' }
+        'HIL re-run (attempt 2)'          = @{ Mod = { param($s) $s.Env.GITHUB_RUN_ATTEMPT = '2' }; Why = 'HIL re-run' }
         'API error'                       = @{ Mod = { param($s) $s.RunStatus = 500 }; Why = 'authorization error' }
         'malformed head_sha'              = @{ Mod = { param($s) & $both $s 'head_sha' 'master' }; Why = '40-hex' }
         'workflow_run requested'          = @{ Mod = { param($s) $s.Action = 'requested' }; Why = "action 'requested'" }
@@ -1254,13 +1261,12 @@ srv.serve_forever()
         $routes[$base] = @{ status = $s.RunStatus; body = $s.Run }
         if ($s.Paged) {
             $filler = @(1..100 | ForEach-Object { [ordered]@{ name = "filler $_"; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid } })
-            $routes["$base/attempts/1/jobs?per_page=100&page=1"] = @{ body = [ordered]@{ total_count = 101; jobs = $filler } }
-            $routes["$base/attempts/1/jobs?per_page=100&page=2"] = @{ body = [ordered]@{ total_count = 101; jobs = @($s.Jobs[1]) } }
+            $routes["$base/attempts/$($s.Wr.run_attempt)/jobs?per_page=100&page=1"] = @{ body = [ordered]@{ total_count = 101; jobs = $filler } }
+            $routes["$base/attempts/$($s.Wr.run_attempt)/jobs?per_page=100&page=2"] = @{ body = [ordered]@{ total_count = 101; jobs = @($s.Jobs[1]) } }
         } else {
-            $routes["$base/attempts/1/jobs?per_page=100&page=1"] = @{ body = [ordered]@{ total_count = @($s.Jobs).Count; jobs = @($s.Jobs) } }
+            $routes["$base/attempts/$($s.Wr.run_attempt)/jobs?per_page=100&page=1"] = @{ body = [ordered]@{ total_count = @($s.Jobs).Count; jobs = @($s.Jobs) } }
         }
-        $routes["/repos/$RepoName/branches/master"] = @{ body = @{ protected = $s.Protected } }
-        $routes["/repos/$RepoName/compare/$sha...master"] = @{ body = @{ status = $s.Cmp } }
+        $routes["/repos/$RepoName/branches/master"] = @{ body = @{ protected = $s.Protected; commit = @{ sha = $s.Tip } } }
         [System.IO.File]::WriteAllText($routesFile, ($routes | ConvertTo-Json -Depth 12))
         $evFile = Join-Path $script:Tmp "event_$i.json"; $outFile = Join-Path $script:Tmp "out_$i.txt"; $sumFile = Join-Path $script:Tmp "sum_$i.md"
         [System.IO.File]::WriteAllText($evFile, ([ordered]@{ action = $s.Action; workflow_run = $s.Wr } | ConvertTo-Json -Depth 12))
@@ -1275,6 +1281,32 @@ srv.serve_forever()
         }
     }
 
+    # (a2) staged-driver identification (exactly one IntelAvbFilter.sys in the upstream run's staging artifact)
+    $stStep = @(@($hilJobs['authorize']['steps']) | Where-Object { "$($_['id'])" -eq 'staged' })
+    $dlStep = @(@($hilJobs['authorize']['steps']) | Where-Object { "$($_['uses'])" -match '^actions/download-artifact@' })
+    if ($dlStep.Count -ne 1 -or "$($dlStep[0]['with']['run-id'])" -ne '${{ steps.authz.outputs.upstream_run_id }}' -or "$($dlStep[0]['with']['name'])" -ne 'intel-avb-filter-driver-release') { $x12 += 'authorize does not download the staging artifact of exactly the authorized upstream run' }
+    if ($stStep.Count -ne 1) { $x12 += 'authorize has no staged-driver identification step' }
+    else {
+        $stPy = Join-Path $script:Tmp 'staged.py'; [System.IO.File]::WriteAllText($stPy, ("$($stStep[0]['run'])" -replace "`r`n", "`n"))
+        $stCases = [ordered]@{
+            'one staged driver'          = @{ Files = @('IntelAvbFilter\IntelAvbFilter.sys'); Pre = 'true'; Allow = $true }
+            'case-insensitive name'      = @{ Files = @('pkg\INTELAVBFILTER.SYS'); Pre = 'true'; Allow = $true }
+            'no driver in the artifact'  = @{ Files = @('IntelAvbFilter\IntelAvbFilter.inf'); Pre = 'true'; Allow = $false }
+            'two drivers'                = @{ Files = @('a\IntelAvbFilter.sys', 'b\IntelAvbFilter.sys'); Pre = 'true'; Allow = $false }
+            'authorization step denied'  = @{ Files = @('IntelAvbFilter\IntelAvbFilter.sys'); Pre = ''; Allow = $false }
+        }
+        $q = 0
+        foreach ($n in $stCases.Keys) {
+            $q++; $dir = Join-Path $script:Tmp "staged_$q"
+            foreach ($f in $stCases[$n].Files) { $fp = Join-Path $dir $f; New-Item -ItemType Directory -Path (Split-Path $fp) -Force | Out-Null; [System.IO.File]::WriteAllText($fp, "driver-$n") }
+            $outFile = Join-Path $script:Tmp "staged_out_$q.txt"
+            $r = Invoke-Py $stPy @{ PRE_AUTHORIZED = $stCases[$n].Pre; STAGED_DIR = $dir; GITHUB_OUTPUT = $outFile }
+            $outTxt = if (Test-Path -LiteralPath $outFile) { Get-Content -LiteralPath $outFile -Raw } else { '' }
+            $want = if ($stCases[$n].Allow) { $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes("driver-$n"))).Replace('-', ''); "authorized=true`nstaged_driver_sha256=$h" } else { "authorized=false`nstaged_driver_sha256=`n" }
+            if (($r.Exit -ne $(if ($stCases[$n].Allow) { 0 } else { 1 })) -or ($outTxt -replace "`r", '').IndexOf($want) -ne 0) { $x12 += "staged '$n': exit $($r.Exit), output '$($outTxt -replace '\s+', ' ')'" }
+        }
+    }
+
     # (b) acceptance verdict over fixture evidence
     if ($accStep.Count -ne 1) { $x12 += "hil-acceptance has $($accStep.Count) verdict step(s)" }
     else {
@@ -1283,14 +1315,15 @@ srv.serve_forever()
         $junitFail = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-A-001: ok"/><testcase name="TC-B-001: bad"><failure message="x"/></testcase></testsuite></testsuites>'
         $junitSkip = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-HIL-COVERAGE-GAP-001: x"><skipped/></testcase></testsuite></testsuites>'
         $bom = New-Object System.Text.UTF8Encoding($true)
+        $stagedHash = 'A' * 64
         function New-Evidence([string]$Root) {
             foreach ($st in @(@{ S = 'unit'; J = 'hil-unit'; Su = @('HardwareMandatory', 'HardwareUnit') }, @{ S = 'integration'; J = 'hil-integration'; Su = @('HardwareIntegration') })) {
                 foreach ($cfg in 'Debug', 'Release') {
                     $b = Join-Path $Root "hil-evidence-$($st.S)-$cfg"
                     New-Item -ItemType Directory -Path $b -Force | Out-Null
-                    $id = [ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'; job = $st.J; configuration = $cfg }
+                    $id = [ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'; job = $st.J; configuration = $cfg; installedDriverSha256 = $stagedHash; stagedDriverSha256 = $stagedHash }
                     [System.IO.File]::WriteAllText((Join-Path $b 'hil-run-identity.json'), ($id | ConvertTo-Json), $bom)
-                    foreach ($su in $st.Su) { New-Item -ItemType Directory -Path (Join-Path $b $su) -Force | Out-Null; [System.IO.File]::WriteAllText((Join-Path $b "$su\junit-$su-$cfg-20261020.xml"), $junitPass) }
+                    foreach ($su in $st.Su) { New-Item -ItemType Directory -Path (Join-Path $b $su) -Force | Out-Null; [System.IO.File]::WriteAllText((Join-Path $b "$su\junit-$su-$cfg-20261020.xml"), $junitPass); [System.IO.File]::WriteAllText((Join-Path $b "$su\traceability-summary-20261020.md"), '| Requirement |') }
                 }
             }
         }
@@ -1310,6 +1343,13 @@ srv.serve_forever()
             'failing JUnit'                   = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-unit-Release\HardwareUnit\junit-HardwareUnit-Release-20261020.xml'), $junitFail) }; Exit = 1; Why = '1 failed' }
             'skip-only JUnit'                 = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-integration-Debug\HardwareIntegration\junit-HardwareIntegration-Debug-20261020.xml'), $junitSkip) }; Exit = 1; Why = '0 passed' }
             'suite JUnit missing'             = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-unit-Debug\HardwareUnit\junit-HardwareUnit-Debug-20261020.xml') -Force }; Exit = 1; Why = '0 JUnit file(s) for HardwareUnit' }
+            'installed driver is not the staged build' = @{ Mod = { param($r) foreach ($bb in Get-ChildItem $r -Directory) { Set-Identity $r $bb.Name 'installedDriverSha256' ('E' * 64) } }; Exit = 0; Out = 'is NOT the staged build' }
+            'driver changed during the run'   = @{ Mod = { param($r) Set-Identity $r 'hil-evidence-integration-Release' 'installedDriverSha256' ('E' * 64) }; Exit = 1; Why = 'installed driver changed or unknown' }
+            'bundle reports another staged build' = @{ Mod = { param($r) Set-Identity $r 'hil-evidence-unit-Debug' 'stagedDriverSha256' ('E' * 64) }; Exit = 1; Why = 'stagedDriverSha256=' }
+            'evidence of a HIL re-run attempt' = @{ Mod = { param($r) Set-Identity $r 'hil-evidence-unit-Release' 'runAttempt' '2' }; Exit = 1; Why = "runAttempt='2'" }
+            'acceptance in a HIL re-run'      = @{ Mod = {}; Attempt = '2'; Exit = 1; Why = 'HIL re-run attempt' }
+            'traceability summary missing'    = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-unit-Debug\HardwareMandatory\traceability-summary-20261020.md') -Force }; Exit = 1; Why = '0 traceability summary file(s) for HardwareMandatory' }
+            'stray traceability outside a bundle' = @{ Mod = { param($r) New-Item -ItemType Directory -Path (Join-Path $r 'old\HardwareUnit') -Force | Out-Null; [System.IO.File]::WriteAllText((Join-Path $r 'old\HardwareUnit\traceability-summary-20250101.md'), 'x') }; Exit = 1; Why = 'outside an identified bundle' }
             'stray JUnit outside a bundle'    = @{ Mod = { param($r) New-Item -ItemType Directory -Path (Join-Path $r 'stale\HardwareUnit') -Force | Out-Null; [System.IO.File]::WriteAllText((Join-Path $r 'stale\HardwareUnit\junit-HardwareUnit-Debug-20250101.xml'), $junitPass) }; Exit = 1; Why = 'outside an identified bundle' }
         }
         $k = 0
@@ -1321,8 +1361,9 @@ srv.serve_forever()
             $c = $acCases[$n]
             $unit = if ($c.ContainsKey('Unit')) { $c.Unit } else { 'success' }; $integ = if ($c.ContainsKey('Integ')) { $c.Integ } else { 'success' }
             $r = Invoke-Py $accPy @{ GITHUB_RUN_ID = '777'; HIL_HEAD_SHA = $sha; HIL_UPSTREAM_RUN_ID = "$rid"; HIL_UNIT = $unit; HIL_INTEGRATION = $integ
-                                    HIL_EVIDENCE_DIR = $root; GITHUB_STEP_SUMMARY = (Join-Path $script:Tmp "acc_$k.md") }
-            if ($r.Exit -ne $c.Exit -or ($c.Exit -ne 0 -and $r.Out.IndexOf($c.Why) -lt 0) -or ($c.Exit -eq 0 -and $r.Out -notmatch 'HIL acceptance: PASSED')) {
+                                    HIL_EVIDENCE_DIR = $root; GITHUB_STEP_SUMMARY = (Join-Path $script:Tmp "acc_$k.md"); HIL_STAGED_DRIVER_SHA256 = $stagedHash
+                                    GITHUB_RUN_ATTEMPT = $(if ($c.ContainsKey('Attempt')) { $c.Attempt } else { '1' }) }
+            if ($r.Exit -ne $c.Exit -or ($c.Exit -ne 0 -and $r.Out.IndexOf($c.Why) -lt 0) -or ($c.Exit -eq 0 -and ($r.Out -notmatch 'HIL acceptance: PASSED' -or $r.Out.IndexOf($(if ($c.ContainsKey('Out')) { $c.Out } else { 'IS the staged build' })) -lt 0))) {
                 $x12 += "acceptance '$n': exit $($r.Exit) (expected $($c.Exit)$(if ($c.Exit) { ", '$($c.Why)'" })): $($r.Out -replace '\s+', ' ')"
             }
         }
@@ -1333,6 +1374,85 @@ srv.serve_forever()
     if ($null -ne $srv -and -not $srv.HasExited) { $srv.Kill() }
 }
 tc_check 'TEST-HILTRUST-REAL-012-authorization-requires-successful-master-ci-with-deploy-staging-and-acceptance-requires-current-run-evidence' ($x12.Count -eq 0) ($x12 -join ' || ')
+
+# ---------------------------------------------------------------------------------------------------------
+# REAL-016: the physical jobs' inline preflight, executed with stubbed read-only cmdlets (no machine query): every
+# operator switch is fail-closed (missing HALT/acknowledgement/driver hash is never approval).
+# ---------------------------------------------------------------------------------------------------------
+$x16 = @()
+$pfRun = if ($null -ne $hilJobs['hil-unit']) { "$(@($hilJobs['hil-unit']['steps'])[0]['run'])" } else { '' }
+$isAdmin = (New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+$pfStubs = @'
+# Load the modules first: an autoload triggered later (e.g. by New-Object) would replace these stubs with the real,
+# machine-querying commands.  A stub that does not resolve to this file aborts with exit 99 before the preflight runs.
+Import-Module Microsoft.PowerShell.Utility, Microsoft.PowerShell.Management, Microsoft.PowerShell.Diagnostics, PnpDevice, NetAdapter -ErrorAction Stop
+function Get-Service { param($Name, $ErrorAction) if ($env:T_SVC -eq 'throw') { throw 'service not found' }; [pscustomobject]@{ Status = $env:T_SVC } }
+function Get-FileHash { param($LiteralPath, $Algorithm, $ErrorAction) [pscustomobject]@{ Hash = $env:T_DRV } }
+function Get-WinEvent { param($FilterHashtable, $ErrorAction)
+    if ($env:T_BC -eq 'error') { throw 'event log unavailable' }
+    $n = [int]$env:T_BC
+    if ($n -gt 0 -and [datetime]::Parse($env:T_BC_TIME, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) -lt $FilterHashtable.StartTime) { $n = 0 }
+    if ($n -eq 0) { throw (New-Object System.Management.Automation.ErrorRecord((New-Object Exception 'No events were found'), 'NoMatchingEventsFound', 'ObjectNotFound', $null)) }
+    1..$n | ForEach-Object { [pscustomobject]@{ Id = 1001 } } }
+function Get-PnpDevice { param($Class, $ErrorAction) foreach ($d in '125B', '1533', '15BB') { [pscustomobject]@{ InstanceId = "PCI\VEN_8086&DEV_$d&SUBSYS_0"; Status = $(if ($env:T_PNP_BAD -eq $d) { 'Error' } else { 'OK' }) } } }
+function Get-NetAdapter { param($ErrorAction) foreach ($d in '125B', '1533', '15BB') { [pscustomobject]@{ PnPDeviceID = "PCI\VEN_8086&DEV_$d&SUBSYS_0"; Status = $(if ($env:T_LINK_DOWN -eq $d) { 'Disconnected' } else { 'Up' }) } } }
+foreach ($c in 'Get-Service', 'Get-FileHash', 'Get-WinEvent', 'Get-PnpDevice', 'Get-NetAdapter') { $g = Get-Command $c; if ($g.CommandType -ne 'Function' -or $g.ScriptBlock.File -ne $PSCommandPath) { Write-Host "STUB-INACTIVE $c"; exit 99 } }
+$null = New-Object System.Object
+foreach ($c in 'Get-Service', 'Get-FileHash', 'Get-WinEvent', 'Get-PnpDevice', 'Get-NetAdapter') { if ((Get-Command $c).ScriptBlock.File -ne $PSCommandPath) { Write-Host "STUB-INACTIVE-AFTER-AUTOLOAD $c"; exit 99 } }
+'@
+$pfBase = @{ GITHUB_REPOSITORY = 'zarfld/IntelAvbFilter'; GITHUB_EVENT_NAME = 'workflow_run'; GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master'
+             GITHUB_RUN_ATTEMPT = '1'; HIL_AUTHORIZED = 'true'; AVB_HIL_EXPECTED_REVISION = ('0123456789abcdef' * 2 + '01234567'); HIL_UPSTREAM_RUN_ID = '4242'; HIL_UPSTREAM_RUN_ATTEMPT = '1'
+             HIL_STAGED_DRIVER_SHA256 = ('A' * 64); HIL_AUTHORIZED_DRIVER_SHA256 = ('B' * 64); HIL_BUGCHECK_ACK = '2026-10-20T13:40:00.0000000+02:00'; HIL_HALT = 'false'
+             T_SVC = 'Running'; T_DRV = ('B' * 64); T_BC = '0'; T_BC_TIME = '2026-10-20T10:00:00.0000000+02:00'; T_PNP_BAD = ''; T_LINK_DOWN = '' }
+$pfCases = [ordered]@{
+    'all checks pass'                     = @{ Set = @{}; Allow = $true }
+    'bugcheck before the acknowledgement' = @{ Set = @{ T_BC = '1' }; Allow = $true }
+    'HIL_HALT missing'                    = @{ Set = @{ HIL_HALT = $null }; Why = "HIL_HALT is ''" }
+    'HIL_HALT true'                       = @{ Set = @{ HIL_HALT = 'true' }; Why = "HIL_HALT is 'true'" }
+    'HIL_HALT FALSE (case)'               = @{ Set = @{ HIL_HALT = 'FALSE' }; Why = "HIL_HALT is 'FALSE'" }
+    'bugcheck acknowledgement missing'    = @{ Set = @{ HIL_BUGCHECK_ACK = $null }; Why = 'HIL_BUGCHECK_ACK is not set' }
+    'bugcheck acknowledgement malformed'  = @{ Set = @{ HIL_BUGCHECK_ACK = '20.10.2026 13:40' }; Why = 'is not an ISO 8601 round-trip timestamp' }
+    'bugcheck after the acknowledgement'  = @{ Set = @{ T_BC = '1'; T_BC_TIME = '2026-10-20T15:00:00.0000000+02:00' }; Why = 'unacknowledged bugcheck' }
+    'event log unreadable'                = @{ Set = @{ T_BC = 'error' }; Why = 'preflight error' }
+    'authorized driver hash missing'      = @{ Set = @{ HIL_AUTHORIZED_DRIVER_SHA256 = $null }; Why = 'HIL_AUTHORIZED_DRIVER_SHA256 variable is missing' }
+    'installed driver not authorized'     = @{ Set = @{ T_DRV = ('C' * 64) }; Why = 'is not the authorized' }
+    'staged driver unidentified'          = @{ Set = @{ HIL_STAGED_DRIVER_SHA256 = $null }; Why = 'did not identify the staged driver' }
+    'service stopped'                     = @{ Set = @{ T_SVC = 'Stopped' }; Why = 'is Stopped, not Running' }
+    'service missing'                     = @{ Set = @{ T_SVC = 'throw' }; Why = 'preflight error' }
+    'adapter PnP error'                   = @{ Set = @{ T_PNP_BAD = '1533' }; Why = 'adapter DEV_1533 PnP' }
+    'link down'                           = @{ Set = @{ T_LINK_DOWN = '125B' }; Why = 'adapter DEV_125B link' }
+    'authorize did not grant'             = @{ Set = @{ HIL_AUTHORIZED = $null }; Why = 'authorize job did not grant' }
+    'other workflow'                      = @{ Set = @{ GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/ci-standards-compliance.yml@refs/heads/master' }; Why = 'is not hil.yml on master' }
+    'HIL re-run'                          = @{ Set = @{ GITHUB_RUN_ATTEMPT = '2' }; Why = 'HIL re-run' }
+    'not workflow_run'                    = @{ Set = @{ GITHUB_EVENT_NAME = 'push' }; Why = 'is not workflow_run' }
+    'malformed revision'                  = @{ Set = @{ AVB_HIL_EXPECTED_REVISION = 'master' }; Why = 'is not a 40-hex commit id' }
+}
+if (-not $pfRun) { $x16 += 'hil-unit preflight missing' }
+else {
+    $pfFile = Join-Path $script:Tmp 'preflight.ps1'
+    [System.IO.File]::WriteAllText($pfFile, $pfStubs + "`r`n" + ($pfRun -replace "`r?`n", "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+    foreach ($n in $pfCases.Keys) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'powershell.exe'; $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$pfFile`""
+        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        foreach ($k in @($psi.EnvironmentVariables.Keys)) { if ($k -like 'GITHUB_*' -or $k -like 'HIL_*' -or $k -like 'T_*' -or $k -like 'AVB_*') { $psi.EnvironmentVariables.Remove($k) } }
+        $envs = @{}; foreach ($k in $pfBase.Keys) { $envs[$k] = $pfBase[$k] }; foreach ($k in $pfCases[$n].Set.Keys) { $envs[$k] = $pfCases[$n].Set[$k] }
+        foreach ($k in $envs.Keys) { if ($null -ne $envs[$k] -and "$($envs[$k])" -ne '') { $psi.EnvironmentVariables[$k] = [string]$envs[$k] } }
+        $pr = [System.Diagnostics.Process]::Start($psi)
+        $o = $pr.StandardOutput.ReadToEndAsync(); $e = $pr.StandardError.ReadToEndAsync()
+        if (-not $pr.WaitForExit(60000)) { $pr.Kill(); $x16 += "${n}: timeout"; continue }
+        $out = $o.Result + $e.Result
+        if ($pr.ExitCode -eq 99) { $x16 += "${n}: harness stub inactive (would query the machine): $($out -replace '\s+', ' ')"; continue }
+        $blocked = @(($out -split "`r?`n") | Where-Object { $_ -match '^\[HIL-PREFLIGHT\] BLOCKED: ' })
+        if ($pfCases[$n].ContainsKey('Allow')) {
+            $ok = if ($isAdmin) { $pr.ExitCode -eq 0 -and $out -match '\[HIL-PREFLIGHT\] AUTHORIZED' } else { $pr.ExitCode -eq 1 -and $blocked.Count -eq 1 -and $blocked[0] -match 'runner is not elevated' }
+            if (-not $ok) { $x16 += "${n}: expected only the elevation outcome (admin=$isAdmin); exit $($pr.ExitCode): $($blocked -join ' / ')" }
+        } elseif ($pr.ExitCode -ne 1 -or $out -match '\[HIL-PREFLIGHT\] AUTHORIZED' -or $out.IndexOf($pfCases[$n].Why) -lt 0) {
+            $x16 += "${n}: expected BLOCKED '$($pfCases[$n].Why)', exit $($pr.ExitCode): $($out -replace '\s+', ' ')"
+        }
+    }
+}
+tc_check 'TEST-HILTRUST-REAL-016-inline-preflight-is-fail-closed-for-halt-acknowledgement-driver-identity-and-baseline' ($x16.Count -eq 0) ($x16 -join ' || ')
 
 # ---------------------------------------------------------------------------------------------------------
 # REAL-013: evidence is this run's only (no committed test-evidence/ upload, HIL from RUNNER_TEMP) and each

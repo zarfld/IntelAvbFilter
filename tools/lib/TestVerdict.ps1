@@ -50,7 +50,7 @@ function Get-AvbVerdictClass {
         'SKIP'                 { return 'skipped' }
         'SKIP_UNSUPPORTED'     { return 'skipped' }
         'SKIP_NOT_IMPLEMENTED' { return 'skipped' }
-        default                { throw "Unknown test verdict '$Verdict' - add it to tools/test/TestVerdict.ps1" }
+        default                { throw "Unknown test verdict '$Verdict' - add it to tools/lib/TestVerdict.ps1" }
     }
 }
 

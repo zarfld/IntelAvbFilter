@@ -41,7 +41,7 @@ if ($Files.Count -eq 0) {
         "tools\build\Build-Tests.ps1",
         "tools\test\Parse-TestResults.ps1",
         "tools\test\Convert-Logs-To-JUnit.ps1",
-        "tools\test\TestVerdict.ps1",
+        "tools\lib\TestVerdict.ps1",
         "tools\ci\Validate-PS1Syntax.ps1"
     )
 }

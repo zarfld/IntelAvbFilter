@@ -286,9 +286,11 @@ $RanLog = Join-Path $Tmp 'ran.log'
 foreach ($d in (Join-Path $Tree 'tools\test'), (Join-Path $Tree 'src'), (Join-Path $Tree 'include'), $Fakes) {
     New-Item -ItemType Directory -Path $d -Force | Out-Null
 }
-foreach ($f in 'Run-Tests-CI.ps1', 'TestVerdict.ps1', 'Convert-Logs-To-JUnit.ps1') {
+foreach ($f in 'Run-Tests-CI.ps1', 'Convert-Logs-To-JUnit.ps1') {
     Copy-Item (Join-Path $RepoRoot "tools\test\$f") (Join-Path $Tree "tools\test\$f")
 }
+New-Item -ItemType Directory -Path (Join-Path $Tree 'tools\lib') -Force | Out-Null
+Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $Tree 'tools\lib\TestVerdict.ps1')
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }

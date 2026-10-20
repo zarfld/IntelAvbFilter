@@ -69,14 +69,39 @@ $stateFile = Join-Path $tmpDir "adapter_state.json"
                   "AdminStatus": "Up", "MediaStatus": "Up", "FilterBound": "True", "Name": "sentinel" } ],
   "clock":    [ { "Index": 0, "Did": "0x125B", "Ok": true, "Timinca": 0, "Tsauxc": 0 } ] }
 '@ | Set-Content $stateFile -Encoding UTF8
+
+# Build provenance (#328 F23, TC-SAFETY-GATE-002): a Hardware* suite dispatches only artifacts recorded as `built`
+# with a matching SHA256 in the configuration's test-build-manifest.json, at a known source revision.  The runner
+# reads that manifest next to its own tree, so the sentinel runs a sandbox COPY of the runner (as
+# test_hil_safety_gate.ps1 does) with a fixture manifest for the fake and a sandbox source identity.  The
+# repository's real build manifest is never written and production provenance stays unchanged.
+$tree = Join-Path $tmpDir 'tree'
+foreach ($d in 'tools\test', 'tools\lib', 'src', 'include', 'build\tools\avb_test\x64\Debug') { New-Item -ItemType Directory -Path (Join-Path $tree $d) -Force | Out-Null }
+foreach ($f in 'Run-Tests-CI.ps1', 'Convert-Logs-To-JUnit.ps1') { Copy-Item (Join-Path $RepoRoot "tools\test\$f") (Join-Path $tree "tools\test\$f") }
+Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $tree 'tools\lib\TestVerdict.ps1')
+@'
+function Get-AvbLifecycleSnapshot { return $null }
+function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
+'@ | Set-Content (Join-Path $tree 'tools\test\Lib-AvbLifecycle.ps1') -Encoding UTF8
+Copy-Item (Join-Path $RepoRoot 'src\avb_integration_fixed.c') (Join-Path $tree 'src\avb_integration_fixed.c')
+Copy-Item (Join-Path $RepoRoot 'include\intel_pci_ids.h') (Join-Path $tree 'include\intel_pci_ids.h')
+$treeRunner = Join-Path $tree 'tools\test\Run-Tests-CI.ps1'
+$manifest = [ordered]@{ schemaVersion = 1; producer = 'test_health_sentinel.ps1'; configuration = 'Debug'; platform = 'x64'
+    entries = @([ordered]@{ name = 'test_sentinel_fake'; type = 'sandbox-fake'; enabled = $true; status = 'built'; reason = ''
+                            artifact = 'test_sentinel_fake.ps1'; sha256 = (Get-FileHash -LiteralPath $fakePsTest -Algorithm SHA256).Hash
+                            sourceRevision = 'sentinel-rev'; sourceDirty = $false }) }
+($manifest | ConvertTo-Json -Depth 5) | Set-Content (Join-Path $tree 'build\tools\avb_test\x64\Debug\test-build-manifest.json') -Encoding UTF8
+
 $wrapperContent = @"
 `$env:AVB_TEST_HEALTH_FAIL_AFTER = '*'
 `$env:AVB_DRIVER_BUILD = 'Debug'
 `$env:AVB_TEST_SANDBOX = '1'
 `$env:AVB_TEST_SANDBOX_CLASSES = 'test_sentinel_fake=ReadOnly'
+`$env:AVB_TEST_SANDBOX_SOURCE_REVISION = 'sentinel-rev'
+`$env:AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
 `$env:AVB_TEST_ADAPTER_STATE_FILE = '$stateFile'
 `$env:AVB_TEST_STATE_SETTLE_SECONDS = '0'
-& '$RunCIPath' -Suite HardwareMandatory -Tests @('ps1:$fakePsTestFwd') ``
+& '$treeRunner' -Suite HardwareMandatory -Tests @('ps1:$fakePsTestFwd') ``
     -TestTimeoutSeconds 30 -Configuration Debug -LogsDir '$logsEsc'
 exit `$LASTEXITCODE
 "@

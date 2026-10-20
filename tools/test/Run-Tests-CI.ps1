@@ -231,7 +231,7 @@ function Invoke-DriverHealthCheck {
 
 # Canonical verdict vocabulary (PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE),
 # shared with Parse-TestResults.ps1 and Convert-Logs-To-JUnit.ps1.  See docs/testing/test-verdict-contract.md
-. (Join-Path $PSScriptRoot 'TestVerdict.ps1')
+. (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
 
 # ===========================
 # Built-in hardware-independent test lists
@@ -443,7 +443,7 @@ $HardwareIntegrationTests = @(
     # Phase C: Additional integration tests registered 2026-04-01 (built but previously absent from CI)
     "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
     "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
-    "test_ptp_phc_stability",         # PHC stability UT-CORR-005..009; ~1K samples@2ms -- (#317)
+    # test_ptp_phc_stability: temporary policy exclusion, see $HardwareIntegrationCoverageGaps
     # Phase D/E/F (avb_test_i219, avb_test_portability, avb_test_i217/i225/i226_um): see $HardwareIntegrationCoverageGaps
     "test_hardware_detection"         # HW capability detection & register access safety -- (#44 #45, #287 #288)
 )
@@ -507,6 +507,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'rx_timestamping'               = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
     'tsauxc_toggle_test'            = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
     'test_gptp_daemon_coexist'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
+    'test_ptp_phc_stability'        = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-20 - the default run is UT-CORR-007/008 only, but the binary contains the UT-CORR-009 driver reinstall path, ControlService STOP plus system Install-Driver-Elevated.ps1 -Action Reinstall, reachable only with --case UT-CORR-009 or --allow-lifecycle; coverage gap: UT-CORR-007/008 TX-PHC correlation, #149 #317'
     'ssot_register_validation_test' = 'Unknown: no build entry or source mapping in Build-Tests.ps1'
 }
 

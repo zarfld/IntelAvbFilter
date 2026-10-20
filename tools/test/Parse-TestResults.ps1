@@ -61,7 +61,7 @@ param(
     [switch]$OptionalVerification
 )
 
-. (Join-Path $PSScriptRoot 'TestVerdict.ps1')
+. (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
 
 if (-not (Test-Path $LogFile)) {
     Write-Warning "Parse-TestResults: log file not found: $LogFile"
@@ -103,7 +103,7 @@ $className = if ($ClassNameOverride) {
 #   [INFRA_FAILURE]  TC-PROV-H01: driver absent
 # Legacy text form (existing C tests):  [SKIP] ID: SKIP_UNSUPPORTED: reason
 # ---------------------------------------------------------------------------
-# Pattern captures: status (tags in tools/test/TestVerdict.ps1)
+# Pattern captures: status (tags in tools/lib/TestVerdict.ps1)
 #                   test ID (TC-*, UT-CORR-*, or TEST-PROV-* with optional /adapter:N)
 #                   reason text
 $pattern = '^\s*\[(' + $script:AvbVerdictTagPattern + ')\]\s+((?:TC-|UT-CORR-|TEST-PROV-)[\w-]+(?:/adapter:\d+)?)\s*(.*)'
@@ -121,7 +121,7 @@ $content | ForEach-Object {
         $status = Resolve-AvbVerdict -Tag $Matches[1].Trim() -Reason $reason
         $fullId = $Matches[2].Trim()
 
-        # ── JUnit normalisation (shared table: tools/test/TestVerdict.ps1) ──
+        # ── JUnit normalisation (shared table: tools/lib/TestVerdict.ps1) ──
         # FAIL, BLOCKED, CLEANUP_FAILED, INFRA_FAILURE → JUnit failure
         # INCONCLUSIVE → failure (mandatory) / skipped (-OptionalVerification)
         # SKIP, SKIP_UNSUPPORTED, SKIP_NOT_IMPLEMENTED → JUnit skipped

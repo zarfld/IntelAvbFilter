@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Canonical verdict vocabulary shared with Parse-TestResults.ps1 and Run-Tests-CI.ps1.
-. (Join-Path $PSScriptRoot 'TestVerdict.ps1')
+. (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
 
 # ------------------------------------------------------------------
 # Paths
@@ -219,7 +219,7 @@ function Parse-TestLog {
     foreach ($line in $lines) {
         $stripped = $line.Trim()
 
-        # Labelled non-pass/fail verdicts (shared vocabulary: tools/test/TestVerdict.ps1).
+        # Labelled non-pass/fail verdicts (shared vocabulary: tools/lib/TestVerdict.ps1).
         # Before this branch existed the converter silently ignored [SKIP_UNSUPPORTED].
         $labelled = $null; $labelledBody = $null
         if ($stripped -match "^\[(SKIP_UNSUPPORTED|SKIP_NOT_IMPLEMENTED|INCONCLUSIVE)\]\s+$caseBody") {

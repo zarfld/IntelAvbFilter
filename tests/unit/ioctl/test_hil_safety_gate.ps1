@@ -100,7 +100,7 @@ foreach ($s in $autoSuites.Keys) {
     foreach ($e in @($t.Keys)) {
         $cls = $registry[$e]; $why = [string]$t[$e]
         if (-not $cls)                                  { $gapBad += "${s}: $e unclassified" }
-        elseif (@('ReadOnly', 'Init') -contains $cls)   { $gapBad += "${s}: $e is $cls (runnable; not a justified gap)" }
+        elseif ((@('ReadOnly', 'Init') -contains $cls) -and $why -cnotmatch "^$($cls): TEMPORARY POLICY EXCLUSION \d{4}-\d{2}-\d{2} ") { $gapBad += "${s}: $e is $cls (runnable; only an explicit, dated TEMPORARY POLICY EXCLUSION may exclude it)" }
         if (@($hwLists[$autoSuites[$s]]) -contains $e)  { $gapBad += "${s}: $e is both listed and a gap" }
         if ($why.Trim().Length -lt 10)                  { $gapBad += "${s}: $e has no reason" }
         if ($why -match '\)\s*$')                       { $gapBad += "${s}: $e reason ends with ')'" }
@@ -115,6 +115,14 @@ $mustGap = @{ HardwareUnit = @('test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_ptp_
 $notGap = @()
 foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) { if ($null -eq $gapTables[$s] -or -not $gapTables[$s].Contains($e)) { $notGap += "${s}: $e" } } }
 tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-declared-gaps' ($notGap.Count -eq 0) ("not declared: {0}" -f ($notGap -join ', '))
+
+# test_ptp_phc_stability: excluded from unattended HIL by policy (driver-reinstall code in the binary), while the
+# classifier keeps its evidence-based ReadOnly class for the no-argument entry.
+$psGap = $gapTables['HardwareIntegration']
+tc_check 'TEST-HILGATE-037-phc-stability-policy-excluded-classifier-unchanged' `
+    (($null -ne $psGap) -and $psGap.Contains('test_ptp_phc_stability') -and ($registry['test_ptp_phc_stability'] -eq 'ReadOnly') -and
+     (@($hwLists['HardwareIntegrationTests']) -notcontains 'test_ptp_phc_stability') -and ("$($psGap['test_ptp_phc_stability'])" -match 'UT-CORR-007/008')) `
+    ("gap={0}; class={1}; listed={2}" -f $(if ($null -ne $psGap) { $psGap.Contains('test_ptp_phc_stability') } else { 'no table' }), $registry['test_ptp_phc_stability'], (@($hwLists['HardwareIntegrationTests']) -contains 'test_ptp_phc_stability'))
 
 $unsafeKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Unsafe' })
 $unsafeListed = @($unsafeKeys | Where-Object { $hwEntries -contains $_ })
@@ -216,9 +224,11 @@ $RanLog = Join-Path $Tmp 'ran.log'
 foreach ($d in (Join-Path $Tree 'tools\test'), (Join-Path $Tree 'src'), (Join-Path $Tree 'include'), $Fakes) {
     New-Item -ItemType Directory -Path $d -Force | Out-Null
 }
-foreach ($f in 'Run-Tests-CI.ps1', 'TestVerdict.ps1', 'Convert-Logs-To-JUnit.ps1') {
+foreach ($f in 'Run-Tests-CI.ps1', 'Convert-Logs-To-JUnit.ps1') {
     Copy-Item (Join-Path $RepoRoot "tools\test\$f") (Join-Path $Tree "tools\test\$f")
 }
+New-Item -ItemType Directory -Path (Join-Path $Tree 'tools\lib') -Force | Out-Null
+Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $Tree 'tools\lib\TestVerdict.ps1')
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }

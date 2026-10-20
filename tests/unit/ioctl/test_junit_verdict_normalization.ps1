@@ -29,7 +29,7 @@ $RepoRoot  = Split-Path (Split-Path (Split-Path $ScriptDir -Parent) -Parent) -Pa
 $ToolsTest = Join-Path $RepoRoot 'tools\test'
 $Convert   = Join-Path $ToolsTest 'Convert-Logs-To-JUnit.ps1'
 $Parse     = Join-Path $ToolsTest 'Parse-TestResults.ps1'
-$VerdictLib = Join-Path $ToolsTest 'TestVerdict.ps1'
+$VerdictLib = Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1'
 
 $total = 0; $passed = 0; $failed = 0
 function tc_pass { param([string]$n) $script:total++; $script:passed++; Write-Host "  [PASS] $n" -ForegroundColor Green }
@@ -159,10 +159,12 @@ Assert-Xml 'TEST-VERDICT-006-configuration-and-suite-recorded' $r `
 $Sandbox = Join-Path $Tmp 'sandbox'
 $SbTools = Join-Path $Sandbox 'tools\test'
 New-Item -ItemType Directory -Path $SbTools -Force | Out-Null
-foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1','TestVerdict.ps1','Lib-AvbLifecycle.ps1') {
+foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1','Lib-AvbLifecycle.ps1') {
     $src = Join-Path $ToolsTest $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $SbTools $f) }
 }
+New-Item -ItemType Directory -Path (Join-Path $Sandbox 'tools\lib') -Force | Out-Null
+Copy-Item $VerdictLib (Join-Path $Sandbox 'tools\lib\TestVerdict.ps1')
 # Replace the lifecycle library (it opens \\.\IntelAvbFilter) with inert stubs.
 @'
 function Get-AvbLifecycleSnapshot { return $null }
