@@ -22,6 +22,27 @@ Separate incident from Track A (#328 I226 unload hang, `issue-328-unload-hang-20
 - System and Application logs: no events in the ~2 min before either crash (buffered events may be lost on bugcheck). Defender/Operational: no events in either window.
 - Both kd runs produced no analysis output before the crash.
 
+- Header decode (on-host, no debugger, `DUMP_HEADER64`): crash 1 SystemTime **2026-10-20 09:40:31.188 UTC (11:40:31 local)**, uptime 2:52:27; crash 2 **11:35:07.974 UTC (13:35:07 local)**, uptime 1:54:21. Both BugCheck field `0x1000007E` with the WER parameters. Elapsed from kd start: crash 1 ≈ 54 s (11:39:37 → 11:40:31), crash 2 ≈ 2 min 01 s (13:33:07 → 13:35:08).
+- Second minidump preserved (E5): evidence copy == `Documents\Minidumps` copy (`975278BE…DF88`); comparison with the `C:\Windows\Minidump` original pending elevated hash.
+
+## Off-host analysis required (not yet performed — no off-host machine available to Claude)
+
+Exact faulting instruction, full call stack with caller modules, provenance of the NULL destination (`ub @rip`), and subsystem (audio init / power D-state / idle / stream / beep / other). Script: `C:\Users\User\HIL-evidence\offhost-kit\trackB_rtkvhd_0x7e.txt`.
+
+## Related history (inventory only, analysis deferred)
+
+Five BugCheck 0x9F on 2026-10-08, all `P1=0x4, P2=0x12C` (power IRP / PnP-sync timeout, 300 s):
+
+| Time | Dump | WER report |
+|---|---|---|
+| 15:52:13 | `C:\WINDOWS\Minidump\100826-5484-01.dmp` | 690a1140-992b-48ce-b199-d6ae76f23fde |
+| 16:07:40 | `C:\WINDOWS\Minidump\100826-5375-01.dmp` | 555e55d3-e005-484c-a170-c81ed1b05a67 |
+| 18:21:48 | `C:\WINDOWS\Minidump\100826-5593-01.dmp` | b7d8cb6e-6a2b-4dfb-9c12-33b12cc92468 |
+| 19:03:39 | `C:\WINDOWS\Minidump\100826-6015-01.dmp` | 535a644e-9962-4278-b557-ad1160ed5911 |
+| 19:55:18 | `C:\WINDOWS\Minidump\100826-6078-01.dmp` | 32ffc6f5-e926-4ae1-ad23-40181ad794b8 |
+
+Owning driver not examined. `Documents\Minidumps` additionally holds 7 dumps from 2026-04-10…17 (not inventoried further).
+
 ## THEORIES (unverified)
 
 | # | Theory | For | Against / missing |
