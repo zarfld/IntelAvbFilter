@@ -71,6 +71,47 @@ Copy of sys+pdb preserved outside the build tree (a Debug rebuild would overwrit
 `IOCTL_AVB_SETUP_TAS` on the I226, issued by a misclassified ReadOnly test, put the e2fn-owned adapter into TSN transmit mode without queue windows; I226 transmission stopped; e2fn could not complete send NBLs (NDIS STUCK_NBL at 09:16:05); NDIS could not pause the I226 stack, so `NdisFDeregisterFilterDriver` never reached our I226 FilterPause.
 Status: **LIKELY (timing + source), NOT PROVEN**. Missing: (a) P2 `FFFFE78C7395B030` resolved to the I226 netadapter; (b) `tas_armed` / `last_tas_config` for ctx `7FC53000` in the 09:16 dump; (c) datasheet semantics of TSN mode with empty STQT/ENDQT; (d) controlled reproduction on hardware (requires separate approval). FP with verify enabled (`0xFE`) is an alternative/additional TX-blocking mechanism — NOT VERIFIED.
 
+### A2 — I226 `setup_tas` vs. upstream Linux `igc` (2026-10-20, read-only research)
+
+Evidence classes: **[SRC]** our source at HEAD (confirmed by reading); **[IGC]** upstream Linux `igc` driver, `torvalds/linux` master as fetched 2026-10-20 — latest commits touching the files at that time: `igc_tsn.c` 0c6c32a8c854, `igc_main.c` a6e4b9a6deb9, `igc_regs.h` f05ce73cc3b2, `igc_defines.h` acb138b8235c (raw files were fetched from `master`, the SHAs were looked up separately); **[DS-CITED]** Intel datasheet sections *as quoted in igc comments* — the Intel I225/I226 datasheet (doc 596659) is NDA-gated and was **not** independently read; the in-repo `intel-ethernet-regs/spec/i225_i226/Intel_I225_Software_Manual_1.3.pdf` could not be text-extracted without a PDF tool (not installed); **[INF]** inference.
+
+**Hazardous implementation — CONFIRMED [SRC] (independent of #328 causality):** `devices/intel_i226_impl.c:534-599` `setup_tas()` on a running, e2fn-owned adapter:
+
+| # | Our `setup_tas` [SRC] | Upstream `igc` [IGC] / [DS-CITED] |
+|---|---|---|
+| 1 | Sets `TQAVCTRL \|= TRANSMIT_MODE_TSN \| ENHANCED_QAV` in place, no reset | `igc_tsn_offload_apply()`: "Per I225/6 HW Design Section 7.5.2.1 guideline, if tx mode change from legacy->tsn or tsn->legacy, then reset adapter is needed." → schedules adapter reset |
+| 2 | Never sets/clears `FUTSCDDIS` | `igc_tsn_enable_offload()`: "According to datasheet section 7.5.2.9.3.3, FutScdDis bit has to be configured before the cycle time and base time. Tx won't hang if a GCL is already running" → sets FUTSCDDIS when `BASET_H`/`BASET_L` are both 0 |
+| 3 | Never writes `BASET_L/H` | writes `BASET_H`, `BASET_L` (0 with FUTSCDDIS on i226) |
+| 4 | Never writes per-queue `STQT(i)`/`ENDQT(i)`/`TXQCTL(i)`; **ignores** `gate_states[]`/`gate_durations[]` of the request | writes `STQT(i)=ring->start_time`, `ENDQT(i)=ring->end_time`, `TXQCTL(i)` (STRICT_CYCLE/STRICT_END, LAUNCHT) per queue; `igc_save_qbv_schedule()` sets **start_time = end_time** for a queue the schedule never opens and marks its gate closed; `igc_qbv_clear_schedule()` / `igc_tsn_disable_offload()` use STQT=0, ENDQT=NSEC_PER_SEC, cycle=NSEC_PER_SEC ("all open") |
+| 5 | Programs only `QBVCYCLET` (not `QBVCYCLET_S`) | writes `QBVCYCLET_S` and `QBVCYCLET` |
+| 6 | Returns success after reading back only the TSN bit | — |
+| 7 | Disarm: fail-closed `NOT_IMPLEMENTED` (no in-place restore) | restore requires adapter reset (row 1) |
+
+**Register-definition discrepancies — CONFIRMED [SRC] vs [IGC]** (`devices/intel_i226_impl.c:35-53` vs `igc_regs.h` / `igc_defines.h`):
+
+| Item | ours | igc | |
+|---|---|---|---|
+| TQAVCTRL / BASET_L / BASET_H / QBVCYCLET | 0x3570 / 0x3314 / 0x3318 / 0x331C | same | ✓ |
+| TRANSMIT_MODE_TSN / ENHANCED_QAV | 0x1 / 0x8 | same | ✓ |
+| STQT(i) | 0x3340 + 4i | 0x3324 + 4i | ✗ |
+| ENDQT(i) | 0x3380 + 4i | 0x3334 + 4i | ✗ |
+| TXQCTL(i) | 0x3300 + 4i | 0x3344 + 4i | ✗ |
+| TQAVCTRL.FUTSCDDIS | 0x00800000 | 0x00000080 | ✗ |
+
+The mismatched macros are **defined but unused** (latent defect; any future use would write other registers). The register SSOT has only **placeholder** TSN entries (`intel-ethernet-regs/devices/i225.yaml`: `TAS_CTRL` at offset `0x0`); there is no I226 TSN register SSOT.
+
+**Exact sequence (local time, 2026-10-20):**
+
+1. **09:14:11–09:14:14** `test_ptp_freq@125B`, `test_ptp_freq_complete@125B` → I226 TIMINCA `0x18000000 → 0x08000000`; 09:14:29 CLEANUP_FAILED + HALT.
+2. **09:14:39** stale 8-April `test_tsn_ioctl_handlers.exe` (Disabled build entry, registry `ReadOnly`) runs during HALT: `IOCTL_AVB_SETUP_TAS`, `SETUP_FP` (preemptable `0xFE`, verify enabled), `SETUP_PTM` → all `SUCCESS (0x00000000)`; TC-INFRA-STATE then records I226 TIMINCA `0x08000000 → 0x18000000`.
+3. **09:14:54** onward: I226 `OutstandingSendNBLs` gauge 49 → … → 1649 (instrumented; can over-count, F10).
+4. **09:16:05.465** NDIS live dump `0x15E / P1=0x30 NDIS_BUGCHECK_STUCK_NBL`, miniport block `FFFFE78C7395B030` (adapter identity **not** resolved).
+5. **09:26:34.533** `FilterUnload`; I219 + I210 modules detach; I226 module never reaches `FilterPause`; I226 TX frozen; hang until crash 1 (Track B) at 11:40:31.
+
+**Causal status:** the TAS implementation is a **confirmed hazardous production defect** (rows 1–7; no reset, no FutScdDis, no schedule, success reported). That it **caused** the 09:16:05 STUCK_NBL and the 09:26 unload hang is **LIKELY, not proven** [INF]: missing are the I226 register state at 09:14:39–09:16 (TQAVCTRL, BASET, STQT/ENDQT, FUTSCDDIS), the identity of miniport block `FFFFE78C7395B030`, `tas_armed`/`last_tas_config` in the 09:16 dump (off-host analysis blocked), and a controlled reproduction. FP with verification enabled is an alternative/additional TX-blocking mechanism [INF].
+
+**Mitigation of the dispatch failure (iteration 2, uncommitted):** `Build-Tests.ps1` writes `test-build-manifest.json`; `Run-Tests-CI.ps1` blocks Hardware* artifacts that are Disabled / not built / hash-mismatched (TC-SAFETY-GATE-002); `test_tsn_ioctl_handlers` removed from `$HardwareUnitTests` and the registry. The TAS defect itself is **not** fixed.
+
 ### Effect of F21 on T1
 
 If off-host `!ndiskd.miniport FFFFE78C7395B030` resolves to the **I226 (e2fn.sys)** miniport, NDIS's own watchdog independently corroborates that **the I226 miniport held at least one NBL abnormally long at 09:16:05**, ~10 min before the unload hang — evidence that does not depend on our `OutstandingSendNBLs` gauge. Until then F21 is **consistent with** T1 but not proof (it could name the I210/I219 miniport). The gauge value 1649 remains an instrumented value that can over-count (F10 correction) and is not a count of pending packets.

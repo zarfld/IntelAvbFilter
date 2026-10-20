@@ -1,26 +1,27 @@
 # test_hil_binary_provenance.ps1
-# TEST-HILPROV-*: Run-Tests-CI.ps1 must dispatch only artifacts produced and authorized by the CURRENT build.
+# TEST-HILPROV-*: Run-Tests-CI.ps1 must dispatch only artifacts produced and authorized by the CURRENT build,
+# and Build-Tests.ps1 must record that authorization truthfully (#328 investigation F23).
 #
-# Characterization test (iteration 1, offline).  It does NOT change CI behaviour and is not listed in any
-# Run-Tests-CI suite.
+# Incident (2026-10-20 09:14:39): build\tools\avb_test\x64\Debug\test_tsn_ioctl_handlers.exe was an 8-April
+# binary whose Build-Tests entry is `Disabled = $true`; the runner found it with Test-Path only, classified it
+# ReadOnly and executed it during a state-integrity HALT, where it issued SETUP_TAS / SETUP_FP / SETUP_PTM.
 #
-# Incident reproduced (2026-10-20 09:14:39, #328 investigation F23): build\tools\avb_test\x64\Debug\
-# test_tsn_ioctl_handlers.exe was an 8-April binary whose Build-Tests entry is `Disabled = $true`; the runner
-# found it with Test-Path only, classified it ReadOnly, and executed it during a state-integrity HALT, where it
-# issued SETUP_TAS / SETUP_FP / SETUP_PTM successfully.
+# Contract under test:
+#   Build-Tests.ps1 writes build\tools\avb_test\x64\<Config>\test-build-manifest.json (schemaVersion 1):
+#     one entry per build entry, sorted by name: enabled + prerequisites, the outcome of this run
+#     (built | disabled | skipped | failed | not-built), the artifact name and - only for artifacts this run
+#     produced - their SHA256; written atomically; deterministic.
+#   Run-Tests-CI.ps1, in Hardware* suites, executes an artifact (test exe, ps1 outside the repository, sandbox
+#     fake) only if the manifest exists for this configuration, records the artifact as `built` by an enabled
+#     entry and the artifact's SHA256 matches; otherwise BLOCKED (TC-SAFETY-GATE-002), a failure in JUnit and a
+#     nonzero suite result.  Checked before the safety class and HALT rules.  Modification time is never used.
+#     Repository-tracked ps1 tests (run from source) and hosted Unit/Integration suites are not affected.
 #
-# Provenance contract asserted (proposed; the current runner implements none of it):
-#   - the build writes build\tools\avb_test\x64\<Config>\test-build-manifest.json listing every build entry
-#     with status (built | disabled | failed) and, for built entries, the SHA256 of the produced artifact;
-#   - in a Hardware* suite an item executes only if the manifest exists, lists the item as `built`, and the
-#     SHA256 of the artifact about to execute equals the manifest value; otherwise it is BLOCKED
-#     (TC-SAFETY-GATE-002) and never started.  ReadOnly class and an active HALT do not change this.
-#   - modification time is never a provenance criterion (neither to authorize nor to reject).
-#
-# Isolation: same sandbox technique as tests/unit/ioctl/test_hil_safety_gate.ps1 - a copy of the runner in a
-# temp tree, AVB_TEST_SANDBOX=1 (adapter state from JSON, device health stubbed, only ps1 fakes outside the
-# repository may execute).  In the sandbox the fake ps1 is "the artifact that would execute".  Nothing here
-# opens \\.\IntelAvbFilter, queries PnP, touches services/adapters, or writes repository logs.
+# Layers: static checks of the real repository; unit tests of the real functions (extracted from the scripts
+# by AST, run against synthetic .exe files that are never executed); behavioral runs of a sandboxed runner copy
+# (AVB_TEST_SANDBOX=1: adapter state from JSON, device health stubbed, only ps1 fakes outside the repository
+# may execute - the same technique as tests/unit/ioctl/test_hil_safety_gate.ps1).  Nothing here opens
+# \\.\IntelAvbFilter, queries PnP, touches services/adapters, or writes repository logs.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -36,10 +37,13 @@ function tc_fail { param([string]$n, [string]$why) $script:total++; $script:fail
 function tc_check { param([string]$n, [bool]$ok, [string]$why) if ($ok) { tc_pass $n } else { tc_fail $n $why } }
 
 Write-Host ""
-Write-Host "TEST-HILPROV: HIL dispatch must require current-build artifact provenance (offline characterization)" -ForegroundColor Cyan
+Write-Host "TEST-HILPROV: HIL dispatch requires current-build artifact provenance" -ForegroundColor Cyan
+
+$Tmp = Join-Path $env:TEMP ("hilprov_{0}" -f (Get-Random))
+New-Item -ItemType Directory -Path $Tmp -Force | Out-Null
 
 # ---------------------------------------------------------------------------------------------------------
-# Static (real repository): no runnable suite entry may resolve to a statically Disabled build entry
+# Static (real repository)
 # ---------------------------------------------------------------------------------------------------------
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($RunCIPath, [ref]$null, [ref]$null)
 function Get-RunnerList([string]$name) {
@@ -58,8 +62,15 @@ foreach ($n in 'UnitTests', 'HardwareDependentTests', 'IntegrationTests', 'Hardw
         $suiteEntries[$bin] += $n
     }
 }
+$registry = @{}
+$regAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                         $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                         $x.Left.VariablePath.UserPath -eq 'HilTestSafety' }, $true) | Select-Object -First 1
+if ($null -ne $regAst) {
+    $ht = $regAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+    foreach ($kv in $ht.KeyValuePairs) { $registry[$kv.Item1.Value] = ($kv.Item2.Extent.Text.Trim() -replace "^'|'$", '') }
+}
 
-# Build-Tests entries: Name / Output / statically Disabled
 $buildLines = Get-Content $BuildPath
 $staticDisabled = @{}
 for ($i = 0; $i -lt $buildLines.Count; $i++) {
@@ -78,6 +89,12 @@ $disabledListed = @($staticDisabled.Keys | Where-Object { $suiteEntries.Contains
                     ForEach-Object { "{0} (listed in {1})" -f $_, (($suiteEntries[$_] | Sort-Object -Unique) -join ',') })
 tc_check 'TEST-HILPROV-010-no-suite-entry-resolves-to-a-disabled-build-entry' ($staticDisabled.Count -gt 0 -and $disabledListed.Count -eq 0) `
     ("statically Disabled yet dispatchable: {0}" -f ($disabledListed -join '; '))
+tc_check 'TEST-HILPROV-011-removed-entry-not-reclassified-and-um-variant-stays-mutating' `
+    ((-not $registry.ContainsKey('test_tsn_ioctl_handlers')) -and ($registry['test_tsn_ioctl_handlers_um'] -eq 'Mutating')) `
+    ("registry: test_tsn_ioctl_handlers={0}; test_tsn_ioctl_handlers_um={1}" -f $(if ($registry.ContainsKey('test_tsn_ioctl_handlers')) { $registry['test_tsn_ioctl_handlers'] } else { '<absent>' }), $registry['test_tsn_ioctl_handlers_um'])
+$self = 'ps1:tests/unit/ci/test_hil_binary_provenance.ps1'
+tc_check 'TEST-HILPROV-012-registered-in-hosted-unit-suite' (((Get-RunnerList 'UnitTests') -contains $self) -and (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\unit\ci\test_hil_binary_provenance.ps1'))) `
+    "$self not listed in `$UnitTests"
 
 # Informational only (machine state, not a verdict): disabled-entry binaries present in local build output
 foreach ($cfg in 'Debug', 'Release') {
@@ -86,15 +103,128 @@ foreach ($cfg in 'Debug', 'Release') {
         $p = Join-Path $dir "$stem.exe"
         if (Test-Path -LiteralPath $p) {
             $fi = Get-Item -LiteralPath $p
-            Write-Host ("  [INFO] local leftover of Disabled entry: {0} ({1} B, written {2:yyyy-MM-dd HH:mm}, SHA256 {3})" -f $p, $fi.Length, $fi.LastWriteTime, (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.Substring(0, 16)) -ForegroundColor Yellow
+            Write-Host ("  [INFO] local leftover of Disabled entry: {0} ({1} B, written {2:yyyy-MM-dd HH:mm}) - not dispatchable without a manifest record" -f $p, $fi.Length, $fi.LastWriteTime) -ForegroundColor Yellow
         }
     }
 }
 
 # ---------------------------------------------------------------------------------------------------------
-# Behavioral: sandbox copy of the runner with a synthetic build manifest
+# Unit: real functions extracted by AST (never executes Build-Tests.ps1 or Run-Tests-CI.ps1)
 # ---------------------------------------------------------------------------------------------------------
-$Tmp    = Join-Path $env:TEMP ("hilprov_{0}" -f (Get-Random))
+function Get-FunctionText([string]$Path, [string[]]$Names) {
+    $a = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+    $txt = ''
+    foreach ($n in $Names) {
+        $f = $a.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $false)
+        if ($null -eq $f) { throw "function $n not found in $Path" }
+        $txt += $f.Extent.Text + "`n"
+    }
+    return $txt
+}
+$fnMissing = ''
+try {
+    . ([scriptblock]::Create((Get-FunctionText $BuildPath @('Get-TestBuildArtifactName', 'New-TestBuildManifest', 'Write-TestBuildManifest'))))
+    . ([scriptblock]::Create((Get-FunctionText $RunCIPath @('Get-AvbManifestProp', 'Read-AvbBuildManifest', 'Get-AvbHilProvenanceDecision', 'Test-AvbHilNeedsProvenance'))))
+} catch { $fnMissing = $_.Exception.Message }
+tc_check 'TEST-HILPROV-019-provenance-functions-present' ($fnMissing -eq '') $fnMissing
+
+if ($fnMissing -eq '') {
+    $U = Join-Path $Tmp 'unit'; New-Item -ItemType Directory -Path $U -Force | Out-Null
+    function New-SynthExe([string]$Name, [string]$Content) { $p = Join-Path $U $Name; Set-Content -LiteralPath $p -Value $Content -Encoding ASCII; return $p }
+    $exeBuilt   = New-SynthExe 't_built.exe'   'MZ synthetic built'
+    $exeStaleF  = New-SynthExe 't_failed.exe'  'MZ stale leftover of a failed entry'
+    $exeStaleD  = New-SynthExe 't_disabled.exe' 'MZ stale leftover of a disabled entry'
+    $tests = @(
+        @{ Name = 't_disabled'; Type = 'cl'; Output = 't_disabled.exe'; Disabled = $true },
+        @{ Name = 't_built';    Type = 'cl'; Output = 't_built.exe' },
+        @{ Name = 't_failed';   Type = 'cl'; Output = 't_failed.exe' },
+        @{ Name = 't_prereq';   Type = 'cl'; Output = 't_prereq.exe'; Disabled = $true; DisabledReason = 'prerequisite missing: Npcap SDK not found at C:\npcap-sdk-1.16' },
+        @{ Name = 't_skipped';  Type = 'nmake'; Makefile = 'x.mak' },
+        @{ Name = 't_nmake';    Type = 'nmake'; Makefile = 'y.mak' },
+        @{ Name = 't_vanished'; Type = 'cl'; Output = 't_vanished.exe' },
+        @{ Name = 't_carry';    Type = 'cl'; Output = 't_carry.exe' },
+        @{ Name = 't_nowdis';   Type = 'cl'; Output = 't_nowdis.exe'; Disabled = $true }
+    )
+    $outcomes = @{
+        't_disabled' = @{ Status = 'disabled'; Reason = 'entry is Disabled in Build-Tests.ps1'; OutputPath = $null }
+        't_built'    = @{ Status = 'built';  Reason = ''; OutputPath = $exeBuilt }
+        't_failed'   = @{ Status = 'failed'; Reason = 'compiler exit code 2 or output missing'; OutputPath = $null }
+        't_prereq'   = @{ Status = 'disabled'; Reason = 'prerequisite missing: Npcap SDK not found at C:\npcap-sdk-1.16'; OutputPath = $null }
+        't_skipped'  = @{ Status = 'skipped'; Reason = 'VS dev shell not initialized (nmake not invoked)'; OutputPath = $null }
+        't_nmake'    = @{ Status = 'built'; Reason = ''; OutputPath = $null }
+        't_vanished' = @{ Status = 'built'; Reason = ''; OutputPath = (Join-Path $U 't_vanished.exe') }
+    }   # t_carry and t_nowdis: not selected in this run (-TestName)
+    $previous = [pscustomobject]@{ schemaVersion = 1; configuration = 'Debug'; platform = 'x64'; entries = @(
+        [pscustomobject]@{ name = 't_carry';  status = 'built'; enabled = $true; artifact = 't_carry.exe';  sha256 = 'AA'; sourceRevision = 'rev-old'; sourceDirty = $false },
+        [pscustomobject]@{ name = 't_nowdis'; status = 'built'; enabled = $true; artifact = 't_nowdis.exe'; sha256 = 'BB'; sourceRevision = 'rev-old'; sourceDirty = $false }) }
+    $m = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -Previous $previous -SourceRevision 'rev-now' -SourceDirty $false
+    $byName = @{}; foreach ($e in @($m.entries)) { $byName[$e.name] = $e }
+    function Show-E($e) { return ("status={0} enabled={1} artifact={2} sha={3} reason={4}" -f $e.status, $e.enabled, $e.artifact, $e.sha256, $e.reason) }
+
+    $eb = $byName['t_built']
+    tc_check 'TEST-HILPROV-020-built-entry-records-artifact-and-sha256' `
+        (($eb.status -eq 'built') -and $eb.enabled -and ($eb.artifact -eq 't_built.exe') -and ($eb.sha256 -eq (Get-FileHash -LiteralPath $exeBuilt -Algorithm SHA256).Hash) -and ($eb.sourceRevision -eq 'rev-now')) (Show-E $eb)
+    $ef = $byName['t_failed']
+    tc_check 'TEST-HILPROV-021-failed-build-never-hashes-a-leftover-executable' (($ef.status -eq 'failed') -and ($null -eq $ef.sha256) -and ($ef.artifact -eq 't_failed.exe')) (Show-E $ef)
+    $ed = $byName['t_disabled']
+    tc_check 'TEST-HILPROV-022-disabled-entry-with-stale-exe-is-recorded-disabled-without-sha' (($ed.status -eq 'disabled') -and (-not $ed.enabled) -and ($null -eq $ed.sha256)) (Show-E $ed)
+    $ep = $byName['t_prereq']
+    tc_check 'TEST-HILPROV-023-runtime-prerequisite-is-recorded' (($ep.status -eq 'disabled') -and ($ep.prerequisites -match 'Npcap SDK') -and (-not $ep.enabled)) (Show-E $ep)
+    $es = $byName['t_skipped']
+    tc_check 'TEST-HILPROV-024-skipped-build-claims-nothing' (($es.status -eq 'skipped') -and ($null -eq $es.sha256)) (Show-E $es)
+    $en = $byName['t_nmake']
+    tc_check 'TEST-HILPROV-025-build-without-declared-artifact-is-not-dispatchable' (($en.status -eq 'built') -and ($null -eq $en.artifact) -and ($null -eq $en.sha256)) (Show-E $en)
+    $ev = $byName['t_vanished']
+    tc_check 'TEST-HILPROV-026-reported-success-without-artifact-is-failed' (($ev.status -eq 'failed') -and ($null -eq $ev.sha256)) (Show-E $ev)
+    $ec = $byName['t_carry']; $ew = $byName['t_nowdis']
+    $mOther = New-TestBuildManifest -Configuration 'Release' -Platform 'x64' -Tests $tests -Outcomes @{} -Previous $previous -SourceRevision 'rev-now' -SourceDirty $false
+    $eo = @($mOther.entries | Where-Object { $_.name -eq 't_carry' })[0]
+    tc_check 'TEST-HILPROV-027-carry-over-only-same-config-enabled-and-disabled-overrides' `
+        (($ec.status -eq 'built') -and ($ec.sha256 -eq 'AA') -and ($ec.sourceRevision -eq 'rev-old') -and
+         ($ew.status -eq 'disabled') -and ($null -eq $ew.sha256) -and ($eo.status -eq 'not-built') -and ($null -eq $eo.sha256)) `
+        ("carry: {0} | now-disabled: {1} | other-config: {2}" -f (Show-E $ec), (Show-E $ew), (Show-E $eo))
+    $rev = @($tests[($tests.Count - 1)..0])
+    $m2 = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $rev -Outcomes $outcomes -Previous $previous -SourceRevision 'rev-now' -SourceDirty $false
+    $j1 = $m | ConvertTo-Json -Depth 6; $j2 = $m2 | ConvertTo-Json -Depth 6
+    $names = @($m.entries | ForEach-Object { $_.name })
+    tc_check 'TEST-HILPROV-028-manifest-is-deterministic-and-sorted' (($j1 -ceq $j2) -and (($names -join ',') -eq ((@($names | Sort-Object)) -join ','))) `
+        ("equal={0}; order={1}" -f ($j1 -ceq $j2), ($names -join ','))
+    $mp = Join-Path $U 'test-build-manifest.json'
+    Set-Content -LiteralPath $mp -Value '{"old":true}' -Encoding ASCII
+    Write-TestBuildManifest -Manifest $m -Path $mp
+    $back = Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json
+    $left = @(Get-ChildItem -LiteralPath $U -Filter 'test-build-manifest.json.tmp-*')
+    Remove-Item -LiteralPath $mp -Force
+    Write-TestBuildManifest -Manifest $m -Path $mp
+    tc_check 'TEST-HILPROV-029-atomic-write-replaces-and-creates-without-temp-leftovers' `
+        (($back.schemaVersion -eq 1) -and (@($back.entries).Count -eq $tests.Count) -and ($left.Count -eq 0) -and (Test-Path -LiteralPath $mp) -and
+         (@(Get-ChildItem -LiteralPath $U -Filter 'test-build-manifest.json.tmp-*').Count -eq 0)) ("tmp leftovers={0}" -f $left.Count)
+
+    # Runner decision functions on synthetic artifacts
+    $script:repoRoot = $RepoRoot
+    Write-TestBuildManifest -Manifest $m -Path $mp
+    $rm = Read-AvbBuildManifest -Path $mp -Configuration 'Debug'
+    $d1 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rm
+    $d2 = Get-AvbHilProvenanceDecision -ArtifactPath $exeStaleD -Manifest $rm
+    $d3 = Get-AvbHilProvenanceDecision -ArtifactPath $exeStaleF -Manifest $rm
+    $dupM = [ordered]@{ schemaVersion = 1; configuration = 'Debug'; platform = 'x64'; entries = @(
+        [ordered]@{ name = 'a'; enabled = $true; status = 'built'; artifact = 't_built.exe'; sha256 = (Get-FileHash -LiteralPath $exeBuilt).Hash },
+        [ordered]@{ name = 'b'; enabled = $true; status = 'built'; artifact = 't_built.exe'; sha256 = (Get-FileHash -LiteralPath $exeBuilt).Hash }) }
+    $dupP = Join-Path $U 'dup.json'; ($dupM | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $dupP -Encoding UTF8
+    $d4 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest (Read-AvbBuildManifest -Path $dupP -Configuration 'Debug')
+    $repoPs1 = Join-Path $RepoRoot 'tests\unit\ioctl\test_hil_safety_gate.ps1'
+    tc_check 'TEST-HILPROV-030-runner-decisions-on-synthetic-artifacts' `
+        (($d1.Action -eq 'Run') -and ($d2.Action -eq 'Block') -and ($d2.Reason -match 'Disabled') -and ($d3.Action -eq 'Block') -and ($d3.Reason -match "status is 'failed'") -and
+         ($d4.Action -eq 'Block') -and ($d4.Reason -match 'ambiguous')) ("built={0} disabled={1}:{2} failed={3}:{4} dup={5}:{6}" -f $d1.Action, $d2.Action, $d2.Reason, $d3.Action, $d3.Reason, $d4.Action, $d4.Reason)
+    tc_check 'TEST-HILPROV-031-scope-repository-ps1-exempt-everything-else-checked' `
+        ((-not (Test-AvbHilNeedsProvenance -Entry 'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' -ArtifactPath $repoPs1)) -and
+         (Test-AvbHilNeedsProvenance -Entry 'ps1:C:/elsewhere/x.ps1' -ArtifactPath 'C:\elsewhere\x.ps1') -and
+         (Test-AvbHilNeedsProvenance -Entry 'test_ioctl_version' -ArtifactPath (Join-Path $RepoRoot 'build\tools\avb_test\x64\Debug\test_ioctl_version.exe'))) 'scope decision wrong'
+}
+
+# ---------------------------------------------------------------------------------------------------------
+# Behavioral: sandbox copy of the runner with synthetic build manifests
+# ---------------------------------------------------------------------------------------------------------
 $Tree   = Join-Path $Tmp 'tree'
 $Fakes  = Join-Path $Tmp 'fakes'
 $RanLog = Join-Path $Tmp 'ran.log'
@@ -116,7 +246,8 @@ $ManifestPath = Join-Path $ManifestDir 'test-build-manifest.json'
 New-Item -ItemType Directory -Path $ManifestDir -Force | Out-Null
 
 $Classes = 'test_sbprov_halter=Init;test_sbprov_disabled=ReadOnly;test_sbprov_current=ReadOnly;test_sbprov_stale=ReadOnly;' +
-           'test_sbprov_mismatch=ReadOnly;test_sbprov_newmtime=ReadOnly;test_sbprov_oldmtime=ReadOnly;test_sbprov_missing=ReadOnly'
+           'test_sbprov_mismatch=ReadOnly;test_sbprov_newmtime=ReadOnly;test_sbprov_oldmtime=ReadOnly;test_sbprov_missing=ReadOnly;' +
+           'test_sbprov_failed=ReadOnly;test_sbprov_skipped=ReadOnly;test_sbprov_nomanifest=ReadOnly;test_sbprov_wrongcfg=ReadOnly'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -131,8 +262,11 @@ function Get-ShaOfText([string]$Text) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try { return (($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('X2') }) -join '') } finally { $sha.Dispose() }
 }
-function Write-Manifest([object[]]$Entries) {
-    $m = [ordered]@{ schema = 1; configuration = 'Debug'; producer = 'tools/build/Build-Tests.ps1'; entries = $Entries }
+function New-MEntry([string]$Name, [string]$Status, [bool]$Enabled = $true, [string]$Sha = $null, [string]$Reason = '') {
+    return [ordered]@{ name = $Name; type = 'sandbox-fake'; enabled = $Enabled; status = $Status; reason = $Reason; artifact = "$Name.ps1"; sha256 = $Sha }
+}
+function Write-Manifest([object[]]$Entries, [string]$Configuration = 'Debug') {
+    $m = [ordered]@{ schemaVersion = 1; producer = 'test_hil_binary_provenance.ps1'; configuration = $Configuration; platform = 'x64'; entries = $Entries }
     ($m | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
 }
 
@@ -191,8 +325,13 @@ function Invoke-Sandbox {
 }
 function Tail($r) { return (($r.Out -split "`n" | Select-Object -Last 20) -join ' | ') }
 function Get-RanCount($r, [string]$Name) { return @($r.Ran | Where-Object { $_ -eq "RAN $Name" }).Count }
-function Test-ProvBlocked($r, [string]$Name) {
-    return ((Get-RanCount $r $Name) -eq 0) -and ($r.Out -match ("\[BLOCKED\] TC-SAFETY-GATE-002: [^\r\n]*{0}" -f [regex]::Escape($Name)))
+function Test-ProvBlocked($r, [string]$Name, [string]$ReasonRx = '.') {
+    return ((Get-RanCount $r $Name) -eq 0) -and
+           ($r.Out -match ("\[BLOCKED\] TC-SAFETY-GATE-002: [^\r\n]*{0}[^\r\n]*provenance: [^\r\n]*{1}" -f [regex]::Escape($Name), $ReasonRx))
+}
+function Show-Prov($r, [string]$Name) {
+    $l = @($r.Out -split "`n" | Where-Object { $_ -match [regex]::Escape($Name) -and $_ -match 'BLOCKED|RAN|SKIP' } | Select-Object -First 1)
+    return ("ran={0}; line={1}" -f (Get-RanCount $r $Name), $(if ($l.Count) { $l[0].Trim() } else { '<none>' }))
 }
 
 if ([System.IO.File]::ReadAllText($TreeRunner) -notmatch '\$env:AVB_TEST_SANDBOX\b') {
@@ -206,15 +345,13 @@ if ([System.IO.File]::ReadAllText($TreeRunner) -notmatch '\$env:AVB_TEST_SANDBOX
 $pHalter   = New-Fake 'test_sbprov_halter' (Edit-StateSnippet "`$a = @(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_1533' })[0]; `$a.AdminStatus = 'Down'")
 $pDisabled = New-Fake 'test_sbprov_disabled' "Write-Host 'stale binary: would issue SETUP_TAS/SETUP_FP/SETUP_PTM'"
 Write-Manifest @(
-    [ordered]@{ name = 'test_sbprov_halter';   status = 'built';    sha256 = (Get-Sha $pHalter) },
-    [ordered]@{ name = 'test_sbprov_disabled'; status = 'disabled'; reason = 'KM placeholder only (mirrors Build-Tests.ps1 test_tsn_ioctl_handlers)' }
+    (New-MEntry 'test_sbprov_halter' 'built' $true (Get-Sha $pHalter)),
+    (New-MEntry 'test_sbprov_disabled' 'disabled' $false $null 'KM placeholder only (mirrors Build-Tests.ps1 test_tsn_ioctl_handlers)')
 )
 $rA = Invoke-Sandbox 'runA' @((Get-Entry $pHalter), (Get-Entry $pDisabled))
-
 tc_check 'TEST-HILPROV-000-fixture-reproduces-halt-before-readonly-item' `
     (($rA.Out -match '\[CLEANUP_FAILED\] TC-INFRA-STATE-001: after test_sbprov_halter') -and ($rA.Out -match '\[HALT\] state-integrity halt')) (Tail $rA)
-tc_check 'TEST-HILPROV-001-disabled-build-entry-blocks-dispatch-even-readonly-during-halt' (Test-ProvBlocked $rA 'test_sbprov_disabled') `
-    ("expected BLOCKED TC-SAFETY-GATE-002 and not started; observed ran={0}" -f (Get-RanCount $rA 'test_sbprov_disabled'))
+tc_check 'TEST-HILPROV-001-disabled-build-entry-blocks-dispatch-even-readonly-during-halt' (Test-ProvBlocked $rA 'test_sbprov_disabled' 'Disabled') (Show-Prov $rA 'test_sbprov_disabled')
 
 # --- Run B: provenance matrix ---------------------------------------------------------------------------
 $pCurrent  = New-Fake 'test_sbprov_current'
@@ -222,36 +359,59 @@ $pStale    = New-Fake 'test_sbprov_stale'
 $pMismatch = New-Fake 'test_sbprov_mismatch'
 $pNewMtime = New-Fake 'test_sbprov_newmtime'
 $pOldMtime = New-Fake 'test_sbprov_oldmtime'
+$pFailed   = New-Fake 'test_sbprov_failed'
+$pSkipped  = New-Fake 'test_sbprov_skipped'
 $pMissing  = Join-Path $Fakes 'test_sbprov_missing.ps1'      # listed as built but the artifact is absent
 (Get-Item -LiteralPath $pNewMtime).LastWriteTime = (Get-Date).AddDays(1)
 (Get-Item -LiteralPath $pOldMtime).LastWriteTime = Get-Date '2020-01-01'
 Write-Manifest @(
-    [ordered]@{ name = 'test_sbprov_current';  status = 'built'; sha256 = (Get-Sha $pCurrent) },
-    [ordered]@{ name = 'test_sbprov_mismatch'; status = 'built'; sha256 = (Get-ShaOfText 'content produced by the current build') },
-    [ordered]@{ name = 'test_sbprov_newmtime'; status = 'built'; sha256 = (Get-ShaOfText 'content produced by the current build (newmtime)') },
-    [ordered]@{ name = 'test_sbprov_oldmtime'; status = 'built'; sha256 = (Get-Sha $pOldMtime) },
-    [ordered]@{ name = 'test_sbprov_missing';  status = 'built'; sha256 = (Get-ShaOfText 'missing') }
+    (New-MEntry 'test_sbprov_current'  'built' $true (Get-Sha $pCurrent)),
+    (New-MEntry 'test_sbprov_mismatch' 'built' $true (Get-ShaOfText 'content produced by the current build')),
+    (New-MEntry 'test_sbprov_newmtime' 'built' $true (Get-ShaOfText 'content produced by the current build (newmtime)')),
+    (New-MEntry 'test_sbprov_oldmtime' 'built' $true (Get-Sha $pOldMtime)),
+    (New-MEntry 'test_sbprov_missing'  'built' $true (Get-ShaOfText 'missing')),
+    (New-MEntry 'test_sbprov_failed'   'failed' $true $null 'compiler exit code 2 or output missing'),
+    (New-MEntry 'test_sbprov_skipped'  'skipped' $true $null 'VS dev shell not initialized (nmake not invoked)')
 )   # test_sbprov_stale deliberately absent: not produced by the current build
-$rB = Invoke-Sandbox 'runB' @((Get-Entry $pCurrent), (Get-Entry $pStale), (Get-Entry $pMismatch), (Get-Entry $pNewMtime), (Get-Entry $pOldMtime), (Get-Entry $pMissing))
+$rB = Invoke-Sandbox 'runB' @((Get-Entry $pCurrent), (Get-Entry $pStale), (Get-Entry $pMismatch), (Get-Entry $pNewMtime), (Get-Entry $pOldMtime),
+                              (Get-Entry $pMissing), (Get-Entry $pFailed), (Get-Entry $pSkipped))
 
-tc_check 'TEST-HILPROV-002-artifact-absent-from-current-build-manifest-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_stale') `
-    ("expected BLOCKED; observed ran={0}" -f (Get-RanCount $rB 'test_sbprov_stale'))
-tc_check 'TEST-HILPROV-003-artifact-sha256-mismatch-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_mismatch') `
-    ("expected BLOCKED; observed ran={0}" -f (Get-RanCount $rB 'test_sbprov_mismatch'))
-tc_check 'TEST-HILPROV-004-newer-mtime-does-not-authorize-a-mismatched-artifact' (Test-ProvBlocked $rB 'test_sbprov_newmtime') `
-    ("expected BLOCKED; observed ran={0}" -f (Get-RanCount $rB 'test_sbprov_newmtime'))
-tc_check 'TEST-HILPROV-005-authorized-current-build-artifact-runs' ((Get-RanCount $rB 'test_sbprov_current') -eq 1) `
-    ("expected ran=1; observed ran={0}; {1}" -f (Get-RanCount $rB 'test_sbprov_current'), (Tail $rB))
-tc_check 'TEST-HILPROV-006-old-mtime-does-not-block-an-authorized-artifact' ((Get-RanCount $rB 'test_sbprov_oldmtime') -eq 1) `
-    ("expected ran=1; observed ran={0}" -f (Get-RanCount $rB 'test_sbprov_oldmtime'))
+tc_check 'TEST-HILPROV-002-artifact-absent-from-current-build-manifest-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_stale' 'not recorded') (Show-Prov $rB 'test_sbprov_stale')
+tc_check 'TEST-HILPROV-003-artifact-sha256-mismatch-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_mismatch' 'SHA256 mismatch') (Show-Prov $rB 'test_sbprov_mismatch')
+tc_check 'TEST-HILPROV-004-newer-mtime-does-not-authorize-a-mismatched-artifact' (Test-ProvBlocked $rB 'test_sbprov_newmtime' 'SHA256 mismatch') (Show-Prov $rB 'test_sbprov_newmtime')
+tc_check 'TEST-HILPROV-005-authorized-current-build-artifact-runs' ((Get-RanCount $rB 'test_sbprov_current') -eq 1) (Show-Prov $rB 'test_sbprov_current')
+tc_check 'TEST-HILPROV-006-old-mtime-does-not-block-an-authorized-artifact' ((Get-RanCount $rB 'test_sbprov_oldmtime') -eq 1) (Show-Prov $rB 'test_sbprov_oldmtime')
 tc_check 'TEST-HILPROV-007-missing-artifact-is-not-executed' `
-    (((Get-RanCount $rB 'test_sbprov_missing') -eq 0) -and ($rB.Out -match 'test_sbprov_missing\.ps1 \(binary not found|TC-SAFETY-GATE-00[12]: [^\r\n]*test_sbprov_missing')) (Tail $rB)
+    (((Get-RanCount $rB 'test_sbprov_missing') -eq 0) -and ($rB.Out -match 'test_sbprov_missing\.ps1 \(binary not found|TC-SAFETY-GATE-00[12]: [^\r\n]*test_sbprov_missing')) (Show-Prov $rB 'test_sbprov_missing')
 tc_check 'TEST-HILPROV-008-provenance-blocks-fail-the-suite' ($rB.Exit -eq 1) ("expected exit 1; observed exit {0}" -f $rB.Exit)
+tc_check 'TEST-HILPROV-015-failed-build-entry-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_failed' "status is 'failed'") (Show-Prov $rB 'test_sbprov_failed')
+tc_check 'TEST-HILPROV-016-skipped-build-entry-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_skipped' "status is 'skipped'") (Show-Prov $rB 'test_sbprov_skipped')
+tc_check 'TEST-HILPROV-018-provenance-block-is-a-junit-failure' `
+    ($rB.Xml -match '<testcase name="TC-SAFETY-GATE-002: [^"]*test_sbprov_stale[^"]*"[^>]*><failure') ("junit length={0}" -f $rB.Xml.Length)
+
+# --- Run C: no manifest at all -> every non-repository artifact blocked ----------------------------------
+$pNoMan = New-Fake 'test_sbprov_nomanifest'
+Remove-Item -LiteralPath $ManifestPath -Force
+$rC = Invoke-Sandbox 'runC' @((Get-Entry $pNoMan))
+tc_check 'TEST-HILPROV-013-missing-manifest-blocks-and-fails-the-suite' ((Test-ProvBlocked $rC 'test_sbprov_nomanifest' 'manifest not found') -and $rC.Exit -eq 1) (Show-Prov $rC 'test_sbprov_nomanifest')
+
+# --- Run D: manifest of another configuration -------------------------------------------------------------
+$pWrongCfg = New-Fake 'test_sbprov_wrongcfg'
+Write-Manifest @((New-MEntry 'test_sbprov_wrongcfg' 'built' $true (Get-Sha $pWrongCfg))) -Configuration 'Release'
+$rD = Invoke-Sandbox 'runD' @((Get-Entry $pWrongCfg))
+tc_check 'TEST-HILPROV-014-manifest-of-another-configuration-is-rejected' (Test-ProvBlocked $rD 'test_sbprov_wrongcfg' "configuration 'Release'") (Show-Prov $rD 'test_sbprov_wrongcfg')
+
+# --- Run E: hosted Unit suite is not subject to the HIL provenance gate -----------------------------------
+$pHosted = New-Fake 'test_sbprov_hosted'
+Remove-Item -LiteralPath $ManifestPath -Force
+$rE = Invoke-Sandbox 'runE' @((Get-Entry $pHosted)) -Suite 'Unit'
+tc_check 'TEST-HILPROV-017-hosted-unit-suite-not-gated-by-hil-provenance' `
+    (((Get-RanCount $rE 'test_sbprov_hosted') -eq 1) -and ($rE.Out -notmatch 'TC-SAFETY-GATE-002') -and $rE.Exit -eq 0) (Show-Prov $rE 'test_sbprov_hosted')
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
-if ($failed -gt 0) { Write-Host "[FAIL] TEST-HILPROV: dispatch does not enforce artifact provenance (characterization)" -ForegroundColor Red; exit 1 }
+if ($failed -gt 0) { Write-Host "[FAIL] TEST-HILPROV: dispatch does not enforce artifact provenance" -ForegroundColor Red; exit 1 }
 Write-Host "[PASS] TEST-HILPROV: dispatch enforces current-build artifact provenance" -ForegroundColor Green
 exit 0

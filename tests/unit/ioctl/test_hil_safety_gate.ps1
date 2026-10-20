@@ -219,6 +219,22 @@ function Invoke-Sandbox {
     $stateFile = Join-Path $dir 'state.json'
     New-StateFile $stateFile
     if (Test-Path $RanLog) { Remove-Item $RanLog -Force }
+    # Hardware* suites dispatch only manifest-authorized artifacts (TEST-HILPROV, #328 F23); sandbox fakes are
+    # artifacts, so record each existing fake as built by an enabled entry with its SHA256.
+    $mEntries = @(); $mSeen = @{}
+    foreach ($t in $Tests) {
+        if (-not $t.StartsWith('ps1:')) { continue }
+        $fp = $t.Substring(4).Replace('/', '\')
+        if ($mSeen.ContainsKey($fp) -or -not (Test-Path -LiteralPath $fp)) { continue }
+        $mSeen[$fp] = $true
+        $mEntries += ,([ordered]@{ name = [System.IO.Path]::GetFileNameWithoutExtension($fp); type = 'sandbox-fake'; enabled = $true
+                                   status = 'built'; reason = ''; artifact = [System.IO.Path]::GetFileName($fp)
+                                   sha256 = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash })
+    }
+    $mDir = Join-Path $Tree 'build\tools\avb_test\x64\Debug'
+    New-Item -ItemType Directory -Path $mDir -Force | Out-Null
+    ([ordered]@{ schemaVersion = 1; producer = 'test_hil_safety_gate.ps1'; configuration = 'Debug'; platform = 'x64'; entries = $mEntries } |
+        ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $mDir 'test-build-manifest.json') -Encoding UTF8
     $envs = [ordered]@{
         AVB_TEST_SANDBOX = '1'; AVB_TEST_ADAPTER_STATE_FILE = $stateFile; AVB_TEST_SANDBOX_CLASSES = $Classes
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''

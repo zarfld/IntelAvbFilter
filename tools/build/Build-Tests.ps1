@@ -1956,10 +1956,106 @@ if ($TestName) {
     $TestsToBuild = @($AllTests)
 }
 
+# ---------------------------------------------------------------------------------------------------------
+# Test build manifest (HIL binary provenance; #328 investigation F23)
+# ---------------------------------------------------------------------------------------------------------
+# After every build run, <OutputDir>\test-build-manifest.json records each build entry: enabled/disabled with
+# the unmet prerequisite, the actual outcome of THIS run (built | disabled | skipped | failed | not-built),
+# the artifact file name the runner will execute and, only for artifacts this run produced, their SHA256.
+# Run-Tests-CI.ps1 executes a test binary in a Hardware* suite only if its artifact is recorded as `built`
+# by an enabled entry and the SHA256 matches.  Leftover files of disabled/failed/skipped entries are never
+# hashed, and `built` is never claimed when the compiler was not invoked or failed.
+# This is a correctness/provenance record, NOT a security boundary against malicious repository code.
+function Get-TestBuildArtifactName {
+    param($Test)
+    # Indexers (not dot access): a missing key is $null in any StrictMode.
+    if ($Test['Output']) { return [System.IO.Path]::GetFileName([string]$Test['Output']) }
+    if ($Test['Type'] -eq 'cl') { return "$($Test['Name']).exe" }
+    return $null   # nmake: outputs are defined by the makefile, not declared by the build entry
+}
+
+function New-TestBuildManifest {
+    param([string]$Configuration, [string]$Platform, [object[]]$Tests, [hashtable]$Outcomes,
+          $Previous, $SourceRevision, $SourceDirty)
+    # Records of entries not selected in this run (-TestName) are carried over only from a previous manifest
+    # of the same schema/configuration/platform, only if still enabled with the same artifact name.
+    function Get-Prop($o, [string]$n) {
+        if ($null -eq $o) { return $null }
+        if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return $o[$n] }; return $null }
+        if ($o.PSObject.Properties[$n]) { return $o.$n }
+        return $null
+    }
+    $prev = @{}
+    if ((Get-Prop $Previous 'schemaVersion') -eq 1 -and (Get-Prop $Previous 'configuration') -eq $Configuration -and
+        (Get-Prop $Previous 'platform') -eq $Platform) {
+        foreach ($p in @(Get-Prop $Previous 'entries')) {
+            $pn = Get-Prop $p 'name'
+            if ($pn) { $prev[[string]$pn] = [ordered]@{ status = (Get-Prop $p 'status'); enabled = (Get-Prop $p 'enabled'); artifact = (Get-Prop $p 'artifact')
+                                                    sha256 = (Get-Prop $p 'sha256'); sourceRevision = (Get-Prop $p 'sourceRevision'); sourceDirty = (Get-Prop $p 'sourceDirty') } }
+        }
+    }
+    $entries = @()
+    foreach ($t in @($Tests | Sort-Object { [string]$_['Name'] })) {
+        $tName = [string]$t['Name']
+        $artifact = Get-TestBuildArtifactName $t
+        $prereq = if ($t['DisabledReason']) { [string]$t['DisabledReason'] } else { '' }
+        $e = [ordered]@{
+            name = $tName; type = [string]$t['Type']; enabled = (-not $t['Disabled']); prerequisites = $prereq
+            status = 'not-built'; reason = ''; artifact = $artifact; sha256 = $null
+            sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
+        }
+        if ($Outcomes.ContainsKey($tName)) {
+            $o = $Outcomes[$tName]
+            $e.status = [string]$o['Status']
+            $e.reason = [string]$o['Reason']
+            $outPath = $o['OutputPath']
+            if ($o['Status'] -eq 'built') {
+                if (-not $outPath) {
+                    $e.reason = 'build succeeded; the entry declares no artifact (makefile-defined outputs are not authorized for dispatch)'
+                } elseif (Test-Path -LiteralPath $outPath) {
+                    $e.artifact = [System.IO.Path]::GetFileName([string]$outPath)
+                    $e.sha256 = (Get-FileHash -LiteralPath $outPath -Algorithm SHA256).Hash
+                } else {
+                    $e.status = 'failed'; $e.reason = "build reported success but the artifact is missing: $outPath"
+                }
+            }
+        } elseif ($t['Disabled']) {
+            $e.status = 'disabled'
+            $e.reason = if ($prereq) { $prereq } else { 'entry is Disabled in Build-Tests.ps1' }
+        } elseif ($prev.ContainsKey($tName) -and $prev[$tName]['status'] -eq 'built' -and
+                  $prev[$tName]['enabled'] -eq $true -and $prev[$tName]['artifact'] -eq $artifact) {
+            $p = $prev[$tName]
+            $e.status = 'built'; $e.reason = 'carried over from a previous build run (not selected in this run)'
+            $e.sha256 = $p.sha256; $e.sourceRevision = $p.sourceRevision; $e.sourceDirty = $p.sourceDirty
+        } else {
+            $e.reason = 'not built in this run and no reusable previous record'
+        }
+        $entries += ,$e
+    }
+    return [ordered]@{ schemaVersion = 1; producer = 'tools/build/Build-Tests.ps1'; configuration = $Configuration
+                       platform = $Platform; entries = $entries }
+}
+
+# Atomic write: complete file in the same directory, then rename over the previous manifest.
+function Write-TestBuildManifest {
+    param($Manifest, [string]$Path)
+    $json = ($Manifest | ConvertTo-Json -Depth 6) + "`r`n"
+    $tmp = "$Path.tmp-$PID"
+    try {
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        # [NullString]::Value: PowerShell would pass $null as "" (invalid backup path) to File.Replace.
+        if (Test-Path -LiteralPath $Path) { [System.IO.File]::Replace($tmp, $Path, [NullString]::Value) }
+        else { [System.IO.File]::Move($tmp, $Path) }
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+    }
+}
+
 # Build tracking
 $SucceededTests = @()
 $SkippedTests = @()
 $FailedTests = @()
+$BuildOutcomes = @{}   # Name -> @{ Status; Reason; OutputPath } (test build manifest)
 
 # Find VS environment once and initialize a VS dev shell in THIS process.
 # This avoids calling vcvars64.bat later (which can fail with cmd.exe "The input line is too long" once PATH is large).
@@ -2016,6 +2112,7 @@ foreach ($t in $TestsToBuild) {
             Write-Host "INFO: test_register_constants WDK km path resolved to: $WdkKmInclude" -ForegroundColor Cyan
         } else {
             $t.Disabled = $true
+            $t.DisabledReason = "prerequisite missing: WDK km headers not found under $WdkKitsInclude"
             Write-Host "INFO: test_register_constants skipped (WDK km headers not found under $WdkKitsInclude)" -ForegroundColor Yellow
         }
     }
@@ -2023,6 +2120,7 @@ foreach ($t in $TestsToBuild) {
         $NpcapSdk = 'C:\npcap-sdk-1.16'
         if (-not (Test-Path $NpcapSdk)) {
             $t.Disabled = $true
+            $t.DisabledReason = "prerequisite missing: Npcap SDK not found at $NpcapSdk"
             Write-Host "INFO: test_tx_timestamp_retrieval skipped (Npcap SDK not found at $NpcapSdk)" -ForegroundColor Yellow
         }
     }
@@ -2032,6 +2130,7 @@ foreach ($t in $TestsToBuild) {
         $taefAvailable  = (Test-Path $taefStdHeader) -or ($taefEnvHeader -and (Test-Path $taefEnvHeader))
         if (-not $taefAvailable) {
             $t.Disabled = $true
+            $t.DisabledReason = 'prerequisite missing: TAEF/WEX SDK not found (TAEF_INCLUDE / WDK Testing component)'
             Write-Host "INFO: taef_tests skipped (TAEF/WEX SDK not found; set TAEF_INCLUDE env var or install WDK with TAEF Testing component)" -ForegroundColor Yellow
         }
     }
@@ -2047,6 +2146,7 @@ foreach ($Test in $TestsToBuild) {
     if ($Test.Disabled) {
         Write-Host "  SKIPPED: Test is disabled (needs repair)" -ForegroundColor DarkYellow
         $SkippedTests += $Test.Name
+        $BuildOutcomes[$Test.Name] = @{ Status = 'disabled'; Reason = $(if ($Test.DisabledReason) { $Test.DisabledReason } else { 'entry is Disabled in Build-Tests.ps1' }); OutputPath = $null }
         Write-Host ""
         continue
     }
@@ -2065,6 +2165,7 @@ foreach ($Test in $TestsToBuild) {
         if (-not (Test-Path $Test.Source)) {
             Write-Host "  ERROR: Source file not found: $($Test.Source)" -ForegroundColor Red
             $FailedTests += $Test.Name
+            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "source file not found: $($Test.Source) (compiler not invoked)"; OutputPath = $null }
             Write-Host ""
             continue
         }
@@ -2094,6 +2195,7 @@ foreach ($Test in $TestsToBuild) {
         if (-not (Test-Path $BuildScript)) {
             Write-Host "  ERROR: vs_compile.ps1 not found" -ForegroundColor Red
             $FailedTests += $Test.Name
+            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = 'tools\vs_compile.ps1 not found (compiler not invoked)'; OutputPath = $null }
             Write-Host ""
             continue
         }
@@ -2101,14 +2203,17 @@ foreach ($Test in $TestsToBuild) {
         # Execute build
         $result = & $BuildScript -BuildCmd $BuildCmd 2>&1
         
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $OutputPath)) {
+        $compileExit = $LASTEXITCODE
+        if ($compileExit -eq 0 -and (Test-Path $OutputPath)) {
             Write-Host "  SUCCESS: $OutputPath created" -ForegroundColor Green
             $SucceededTests += $Test.Name
+            $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $OutputPath }
         } else {
-            Write-Host "  FAILED: Compiler returned error code $LASTEXITCODE" -ForegroundColor Red
+            Write-Host "  FAILED: Compiler returned error code $compileExit" -ForegroundColor Red
             # Print compiler output so CI logs show the actual errors
             $result | Where-Object { $_ -match "error|warning" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
             $FailedTests += $Test.Name
+            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "compiler exit code $compileExit or output missing"; OutputPath = $null }
         }
         
     } elseif ($Test.Type -eq "nmake") {
@@ -2120,6 +2225,7 @@ foreach ($Test in $TestsToBuild) {
         if (-not $VsDevShellInitialized) {
             Write-Host "  SKIPPED: VS dev shell not initialized" -ForegroundColor Yellow
             $SkippedTests += $Test.Name
+            $BuildOutcomes[$Test.Name] = @{ Status = 'skipped'; Reason = 'VS dev shell not initialized (nmake not invoked)'; OutputPath = $null }
             Write-Host ""
             continue
         }
@@ -2129,6 +2235,7 @@ foreach ($Test in $TestsToBuild) {
         if (-not (Test-Path $MakeFileAbs)) {
             Write-Host "  ERROR: Makefile not found: $MakeFileAbs" -ForegroundColor Red
             $FailedTests += $Test.Name
+            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "makefile not found: $MakeFileAbs (nmake not invoked)"; OutputPath = $null }
             Write-Host ""
             continue
         }
@@ -2180,6 +2287,7 @@ foreach ($Test in $TestsToBuild) {
             if ($buildExitCode -eq 0) {
                 Write-Host "  SUCCESS: nmake build completed" -ForegroundColor Green
                 $SucceededTests += $Test.Name
+                $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $null }
             } else {
                 Write-Host "  FAILED: nmake returned error code $buildExitCode" -ForegroundColor Red
                 if (-not $ShowDetails -and $output -and $output.Count -gt 0) {
@@ -2188,6 +2296,7 @@ foreach ($Test in $TestsToBuild) {
                     $output[$tailStart..($output.Count - 1)] | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
                 }
                 $FailedTests += $Test.Name
+                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "nmake exit code $buildExitCode"; OutputPath = $null }
             }
         } finally {
             Pop-Location
@@ -2196,6 +2305,7 @@ foreach ($Test in $TestsToBuild) {
     } else {
         Write-Host "  ERROR: Unknown build type: $($Test.Type)" -ForegroundColor Red
         $FailedTests += $Test.Name
+        $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "unknown build type '$($Test.Type)' (nothing invoked)"; OutputPath = $null }
     }
     
     Write-Host ""
@@ -2236,6 +2346,35 @@ if ($FailCount -gt 0) {
     $FailedTests | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
 }
 
+Write-Host ""
+
+# --- Test build manifest (consumed by Run-Tests-CI.ps1 before dispatching Hardware* test binaries) ---
+$TestManifestPath = Join-Path $OutputDir 'test-build-manifest.json'
+$srcRevision = $null; $srcDirty = $null
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    $rev = & git -C $RepoRoot rev-parse HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $rev) {
+        $srcRevision = ([string]$rev).Trim()
+        $dirty = & git -C $RepoRoot status --porcelain --untracked-files=no 2>$null
+        if ($LASTEXITCODE -eq 0) { $srcDirty = [bool]$dirty }
+    } else {
+        Write-Host "[MANIFEST] WARNING: git revision unavailable -- sourceRevision recorded as null" -ForegroundColor Yellow
+    }
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+$prevTestManifest = $null
+if (Test-Path -LiteralPath $TestManifestPath) {
+    try { $prevTestManifest = Get-Content -LiteralPath $TestManifestPath -Raw | ConvertFrom-Json }
+    catch { Write-Host "[MANIFEST] WARNING: previous manifest unreadable -- no records carried over: $_" -ForegroundColor Yellow }
+}
+$testManifest = New-TestBuildManifest -Configuration $Configuration -Platform $Platform -Tests $AllTests -Outcomes $BuildOutcomes `
+                    -Previous $prevTestManifest -SourceRevision $srcRevision -SourceDirty $srcDirty
+Write-TestBuildManifest -Manifest $testManifest -Path $TestManifestPath
+Write-Host ("[MANIFEST] {0} ({1} entries, {2} built with SHA256)" -f $TestManifestPath, @($testManifest.entries).Count,
+            @($testManifest.entries | Where-Object { $_.status -eq 'built' -and $_.sha256 }).Count) -ForegroundColor Cyan
 Write-Host ""
 
 # Return to original directory

@@ -259,6 +259,7 @@ $UnitTests = @(
     "ps1:tests/unit/build/test_build_tests_syspaths.ps1",       # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
     "ps1:tests/unit/ioctl/test_health_sentinel.ps1",            # TEST-SENTINEL-001..006: #328 behavioral health sentinel
     "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1",            # TEST-HILGATE-001..031: HIL safety gate + state integrity (sandboxed, no driver; #343)
+    "ps1:tests/unit/ci/test_hil_binary_provenance.ps1",         # TEST-HILPROV: build manifest + dispatch provenance gate (sandboxed, no driver; #328 F23)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
     "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator
@@ -426,7 +427,9 @@ $HardwareUnitTests = @(
     "test_ioctl_abi",              # IOCTL ABI backward-compatibility
     "test_ioctl_access_control",   # IOCTL access-control (privilege enforcement)
     "test_ioctl_buffer_fuzz",      # IOCTL buffer-boundary fuzzing (security)
-    "test_tsn_ioctl_handlers",     # TSN IOCTL handlers (kernel-side, non-um)
+    # test_tsn_ioctl_handlers removed (#328 F23): its build entry is Disabled (KM placeholder); a stale binary
+    # of it ran here as ReadOnly and issued SETUP_TAS/FP/PTM.  The UM test test_tsn_ioctl_handlers_um stays
+    # classified Mutating (not exact-target-aware -> BLOCKED by the safety gate).
     # Phase B: PHC/QPC coherence + VV coverage (added 2026-03-29)
     "ptp_clock_control_test",      # PHC/QPC coherence TC-5a/TC-5b -- #238
     "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
@@ -529,7 +532,6 @@ $HilTestSafety = @{
     'test_ioctl_xstamp'                = 'ReadOnly'
     'test_ioctl_xstamp_v2'             = 'ReadOnly'
     'test_ioctl_abi'                   = 'ReadOnly'   # static sizeof/code checks; no DeviceIoControl call
-    'test_tsn_ioctl_handlers'          = 'ReadOnly'
     'test_ptp_crosstimestamp'          = 'ReadOnly'
     'test_zero_polling_overhead'       = 'ReadOnly'   # launches "wpr.exe -status" only
     'test_hw_state'                    = 'ReadOnly'
@@ -1101,6 +1103,89 @@ function Add-HilBlocked {
         -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed" -f $Entry, $Reason)
 }
 
+# ---------------------------------------------------------------------------------------------------------
+# Build provenance (#328 investigation F23: a stale 8-April binary of a Disabled build entry was executed as
+# "ReadOnly" during a state-integrity HALT and changed I226 TSN state).
+# In a Hardware* suite an artifact executes only if tools/build/Build-Tests.ps1's test-build-manifest.json for
+# THIS configuration records it as `built` by an enabled entry and its SHA256 matches.  Checked after the
+# artifact is found and BEFORE the safety class / HALT rules; the artifact is never executed to decide.
+# Repository-tracked ps1 tests run from source and are exempt; every other artifact (test exe, ps1 outside the
+# repository, sandbox fake) needs a manifest record.  This is a correctness/provenance check, not a security
+# boundary against malicious repository code (runner trust boundary: investigations/hil-runner-trust-boundary).
+# ---------------------------------------------------------------------------------------------------------
+function Get-AvbManifestProp {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object.PSObject.Properties[$Name]) { return $Object.$Name }
+    return $null
+}
+
+function Read-AvbBuildManifest {
+    param([string]$Path, [string]$Configuration)
+    $res = @{ Ok = $false; Error = ''; ByArtifact = @{}; Path = $Path; Revision = $null }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $res.Error = "test build manifest not found: $Path (build with tools/build/Build-Tests.ps1 -Configuration $Configuration)"
+        return $res
+    }
+    try { $m = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
+    catch { $res.Error = "test build manifest unreadable: $Path ($($_.Exception.Message))"; return $res }
+    if ((Get-AvbManifestProp $m 'schemaVersion') -ne 1 -or $null -eq (Get-AvbManifestProp $m 'entries')) {
+        $res.Error = "test build manifest has an unsupported schema: $Path"
+        return $res
+    }
+    $mCfg = Get-AvbManifestProp $m 'configuration'
+    if ($mCfg -ne $Configuration) {
+        $res.Error = "test build manifest is for configuration '$mCfg' but this run is '$Configuration': $Path"
+        return $res
+    }
+    $ambiguous = @()
+    foreach ($e in @(Get-AvbManifestProp $m 'entries')) {
+        $a = [string](Get-AvbManifestProp $e 'artifact')
+        if (-not $a) { continue }
+        $k = $a.ToLowerInvariant()
+        if ($res.ByArtifact.ContainsKey($k)) { $ambiguous += $k } else { $res.ByArtifact[$k] = $e }
+    }
+    foreach ($k in $ambiguous) { $res.ByArtifact[$k] = $null }   # recorded by two entries -> never authorized
+    $res.Ok = $true
+    return $res
+}
+
+# Pure decision on an existing artifact: 'Run' | 'Block' (+ Reason).
+function Get-AvbHilProvenanceDecision {
+    param([string]$ArtifactPath, $Manifest)
+    if (-not $Manifest.Ok) { return @{ Action = 'Block'; Reason = $Manifest.Error } }
+    $leaf = [System.IO.Path]::GetFileName($ArtifactPath)
+    $k = $leaf.ToLowerInvariant()
+    if (-not $Manifest.ByArtifact.ContainsKey($k)) {
+        return @{ Action = 'Block'; Reason = "artifact '$leaf' is not recorded in the test build manifest (not produced by the current build)" }
+    }
+    $e = $Manifest.ByArtifact[$k]
+    if ($null -eq $e) { return @{ Action = 'Block'; Reason = "artifact '$leaf' is recorded by more than one build entry (ambiguous)" } }
+    $name   = Get-AvbManifestProp $e 'name'
+    $reason = Get-AvbManifestProp $e 'reason'
+    if ((Get-AvbManifestProp $e 'enabled') -ne $true) {
+        return @{ Action = 'Block'; Reason = "build entry '$name' is Disabled ($reason); artifact '$leaf' is a leftover" }
+    }
+    $status = Get-AvbManifestProp $e 'status'
+    if ($status -ne 'built') {
+        return @{ Action = 'Block'; Reason = "build entry '$name' status is '$status' ($reason); artifact '$leaf' was not produced by the current build" }
+    }
+    $sha = [string](Get-AvbManifestProp $e 'sha256')
+    if (-not $sha) { return @{ Action = 'Block'; Reason = "build entry '$name' records no SHA256 for '$leaf'" } }
+    $actual = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash
+    if ($actual -ne $sha.ToUpperInvariant()) {
+        return @{ Action = 'Block'; Reason = "SHA256 mismatch for '$leaf': artifact $actual, manifest $sha" }
+    }
+    return @{ Action = 'Run'; Reason = '' }
+}
+
+function Test-AvbHilNeedsProvenance {
+    param([string]$Entry, [string]$ArtifactPath)
+    if (-not $Entry.StartsWith('ps1:')) { return $true }
+    $root = [System.IO.Path]::GetFullPath($script:repoRoot).TrimEnd('\') + '\'
+    return (-not [System.IO.Path]::GetFullPath($ArtifactPath).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase))
+}
+
 function Invoke-HilBaseline {
     Write-Step "HIL safety gate: adapter + PHC baseline (observation only; the runner never enables, disables or rebinds an adapter)"
     try {
@@ -1235,6 +1320,16 @@ if ($IsHardwareSuite) {
     Invoke-HilBaseline
 }
 
+$BuildManifest = $null
+if ($IsHardwareSuite) {
+    $BuildManifest = Read-AvbBuildManifest -Path (Join-Path $testExeDir 'test-build-manifest.json') -Configuration $Configuration
+    if ($BuildManifest.Ok) {
+        Write-Note ("Build provenance: {0} ({1} artifact record(s))" -f $BuildManifest.Path, $BuildManifest.ByArtifact.Count)
+    } else {
+        Write-Host "  [BLOCKED] build provenance unavailable: $($BuildManifest.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
+    }
+}
+
 # Work items: a Mutating:Target entry becomes one item per exact target DID (AVB_HIL_TARGET_DID).
 $WorkItems = @()
 foreach ($t in $TestList) {
@@ -1323,6 +1418,16 @@ foreach ($WorkItem in $WorkItems) {
             $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = "N/A" }
         }
         continue
+    }
+
+    # Build provenance gate (#328 F23): before the safety class and HALT rules, never by executing the artifact.
+    if ($IsHardwareSuite -and (Test-AvbHilNeedsProvenance -Entry $TestName -ArtifactPath $exePath)) {
+        $prov = Get-AvbHilProvenanceDecision -ArtifactPath $exePath -Manifest $BuildManifest
+        if ($prov.Action -ne 'Run') {
+            Add-HilFailureRecord -Display $exeName -Status 'BLOCKED(PROVENANCE)' -Stem $itemStem `
+                -Line ("[BLOCKED] TC-SAFETY-GATE-002: {0}: provenance: {1} --- not executed" -f $TestName, $prov.Reason)
+            continue
+        }
     }
 
     # HIL safety gate (#343): decided by the runner before the process is started.
