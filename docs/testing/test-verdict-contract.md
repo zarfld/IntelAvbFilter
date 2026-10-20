@@ -2,7 +2,7 @@
 
 Single contract for what a testcase verdict means, how it maps to a driver status,
 and how it normalises to JUnit and to the CI gate. Implemented by
-`tools/test/TestVerdict.ps1` (shared by `Parse-TestResults.ps1`,
+`tools/lib/TestVerdict.ps1` (shared by `Parse-TestResults.ps1`,
 `Convert-Logs-To-JUnit.ps1`, `Run-Tests-CI.ps1`) and, on the C side, by
 `tests/common/avb_verdict.h`.
 
