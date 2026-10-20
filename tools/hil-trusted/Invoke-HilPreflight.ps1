@@ -24,15 +24,15 @@ try {
     $hilJobEnv  = Get-HilJobEnv
     $hilReasons = @()
     $hilReasons += @((Test-HilScriptLocation -ScriptRoot $hilRoot -JobEnv $hilJobEnv).Reasons)
-    $hilReasons += @((Test-HilAclRules -Rules (Get-HilAclRules $hilRoot) -Label $hilRoot).Reasons)
-    foreach ($f in $hilPolicy.TrustedFiles) {
-        $p = Join-Path $hilRoot $f
-        if (Test-Path -LiteralPath $p) { $hilReasons += @((Test-HilAclRules -Rules (Get-HilAclRules $p) -Label $p).Reasons) }
+    foreach ($p in @($hilRoot) + @($hilPolicy.TrustedFiles | ForEach-Object { Join-Path $hilRoot $_ } | Where-Object { Test-Path -LiteralPath $_ })) {
+        $hilReasons += @((Test-HilAclRules -Rules (Get-HilAclRules $p) -Label $p).Reasons)
+        $hilReasons += @((Test-HilAclOwner -OwnerSid (Get-HilAclOwnerSid $p) -Label $p).Reasons)
     }
     $hilPrincipal = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
     $hilReasons += @((Test-HilRunnerContext -Policy $hilPolicy -IsElevatedAdmin $hilPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)).Reasons)
     $hilReasons += @((Test-HilJobAuthorization -JobEnv $hilJobEnv -Policy $hilPolicy -AllowedActors (Read-HilAllowedActors $hilRoot)).Reasons)
 
+    $hilBaselineOk = $false   # authorization requires POSITIVE evidence: an explicit, sole 'OK' verdict
     if ($hilReasons.Count -eq 0) {
         $hilMb = Invoke-HilWithTimeout -Seconds $hilPolicy.TimeoutSeconds -ArgumentList @($hilLib, $hilRoot) -ScriptBlock {
             param($lib, $root)
@@ -42,12 +42,16 @@ try {
         }
         if ($hilMb.TimedOut -or $hilMb.Error) { $hilReasons += "machine baseline not completed: $($hilMb.Error)" }
         else {
-            $out = @($hilMb.Result | ForEach-Object { [string]$_ })
-            if (-not ($out.Count -eq 1 -and $out[0] -ceq 'OK')) { $hilReasons += $out }
+            $out = @(@($hilMb.Result) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ } | Where-Object { $_ -ne '' })
+            if ($out.Count -eq 1 -and $out[0] -ceq 'OK') { $hilBaselineOk = $true }
+            else {
+                $hilReasons += 'machine baseline did not return an explicit OK verdict'
+                $hilReasons += @($out | Where-Object { $_ -cne 'OK' })
+            }
         }
     }
 
-    if ($hilReasons.Count -eq 0) {
+    if ($hilReasons.Count -eq 0 -and $hilBaselineOk) {
         Write-Host "[HIL-PREFLIGHT] AUTHORIZED: $($hilJobEnv['GITHUB_WORKFLOW_REF']) @ $($hilJobEnv['GITHUB_SHA']) by $($hilJobEnv['GITHUB_ACTOR'])" -ForegroundColor Green
         $hilExit = 0
     } else {

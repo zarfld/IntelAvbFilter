@@ -205,6 +205,90 @@ Set-Content -LiteralPath (Join-Path $Inst 'HilPreflight.Policy.ps1') -Value 'fun
 $hCorrupt = Invoke-AsHook $ok
 tc_check 'TEST-HILPF-053-dot-sourced-hook-with-throwing-policy-denies' (($hCorrupt.Exit -eq 1) -and ($hCorrupt.Out -match 'preflight error')) ("exit={0}; {1}" -f $hCorrupt.Exit, ($hCorrupt.Out -replace '\s+', ' '))
 
+# Per-scenario exit codes of the REAL entry + REAL policy (dot-sourced as by the runner), allow-list present.
+function New-Install([string]$Name, [string]$PolicyOverrides = '') {
+    $d = Join-Path $Tmp $Name
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    Copy-Item $PfEntry, $PfLib $d
+    Set-Content -LiteralPath (Join-Path $d 'allowed-actors.txt') -Value "# operator allow-list`r`nzarfld" -Encoding ASCII
+    if ($PolicyOverrides) { Add-Content -LiteralPath (Join-Path $d 'HilPreflight.Policy.ps1') -Value ("`r`n# --- TEST OVERRIDES: I/O providers stubbed; decision functions unchanged ---`r`n" + $PolicyOverrides) }
+    return $d
+}
+function Invoke-Hook([string]$Dir, [hashtable]$JobEnv, [switch]$AsStep) {
+    $entry = Join-Path $Dir 'Invoke-HilPreflight.ps1'
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'
+    $cmd = if ($AsStep) { "& '$entry'; exit `$LASTEXITCODE" } else { ". '$entry'" }
+    $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ""$cmd"""
+    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    foreach ($k in @($psi.EnvironmentVariables.Keys)) { if ($k -like 'GITHUB_*' -or $k -like 'RUNNER_*') { $psi.EnvironmentVariables.Remove($k) } }
+    foreach ($k in $JobEnv.Keys) { $psi.EnvironmentVariables[$k] = [string]$JobEnv[$k] }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit(120000)) { $p.Kill(); return @{ Exit = -999; Out = 'TIMEOUT' } }
+    return @{ Exit = $p.ExitCode; Out = (($o.Result + "`n" + $e.Result) -replace '\s+', ' ') }
+}
+$realDir = New-Install 'real'
+$matrix = [ordered]@{
+    'fork pull request'          = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'pull_request'; GITHUB_REF = 'refs/pull/7/merge'; GITHUB_HEAD_REF = 'evil'; GITHUB_BASE_REF = 'master'; GITHUB_REPOSITORY = 'zarfld/IntelAvbFilter'; GITHUB_ACTOR = 'attacker'; GITHUB_TRIGGERING_ACTOR = 'attacker' }); Why = 'pull-request context' }
+    'same-repository pull request' = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'pull_request'; GITHUB_REF = 'refs/pull/8/merge'; GITHUB_HEAD_REF = 'feature/x'; GITHUB_BASE_REF = 'master' }); Why = 'pull-request context' }
+    'push'                       = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'push' }); Why = "event 'push'" }
+    'schedule'                   = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'schedule' }); Why = "event 'schedule'" }
+    'wrong repository'           = @{ Env = (Merge-JobEnv $ok @{ GITHUB_REPOSITORY = 'untrusted-fork/IntelAvbFilter' }); Why = "repository 'untrusted-fork" }
+    'wrong workflow'             = @{ Env = (Merge-JobEnv $ok @{ GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/ci-standards-compliance.yml@refs/heads/master' }); Why = 'ci-standards-compliance.yml' }
+    'no GitHub variables at all' = @{ Env = @{}; Why = 'required variable GITHUB_ACTIONS is missing' }
+    'missing workflow sha'       = @{ Env = (Merge-JobEnv $ok @{ GITHUB_WORKFLOW_SHA = $null }); Why = 'required variable GITHUB_WORKFLOW_SHA is missing' }
+    'unauthorized actor'         = @{ Env = (Merge-JobEnv $ok @{ GITHUB_ACTOR = 'someone-else'; GITHUB_TRIGGERING_ACTOR = 'someone-else' }); Why = "actor 'someone-else' is not on the operator allow-list" }
+    're-run'                     = @{ Env = (Merge-JobEnv $ok @{ GITHUB_RUN_ATTEMPT = '2' }); Why = 're-run' }
+}
+$mxBad = @()
+foreach ($n in $matrix.Keys) {
+    $h = Invoke-Hook $realDir $matrix[$n].Env
+    if (-not (($h.Exit -eq 1) -and ($h.Out -match [regex]::Escape($matrix[$n].Why)) -and ($h.Out -cnotmatch '\[HIL-PREFLIGHT\] AUTHORIZED') -and ($h.Out -notmatch 'machine baseline'))) {
+        $mxBad += ("{0}: exit={1} out={2}" -f $n, $h.Exit, $h.Out)
+    }
+}
+tc_check 'TEST-HILPF-060-dot-sourced-hook-exit-1-with-specific-reason-for-every-deny-scenario' ($mxBad.Count -eq 0) ($mxBad -join ' || ')
+$hStep = Invoke-Hook $realDir $matrix['fork pull request'].Env -AsStep
+tc_check 'TEST-HILPF-061-hil-yml-step-invocation-propagates-deny-exit-code' (($hStep.Exit -eq 1) -and ($hStep.Out -match 'DENIED')) ("exit={0}; {1}" -f $hStep.Exit, $hStep.Out)
+
+# Entry control flow with I/O providers stubbed (ACL/owner readers, machine baseline); decision functions real.
+$trustedIo = @'
+function Get-HilAclRules([string]$Path) { return @(@{ Sid = 'S-1-5-18'; Rights = 'FullControl'; Type = 'Allow' }, @{ Sid = 'S-1-5-32-544'; Rights = 'FullControl'; Type = 'Allow' }) }
+function Get-HilAclOwnerSid([string]$Path) { return 'S-1-5-32-544' }
+'@
+$ioCases = [ordered]@{
+    'authorized dispatch, baseline OK'  = @{ Ov = ($trustedIo + "`r`nfunction Test-HilMachineBaseline { param(`$Policy, `$Root, `$Probes) return @{ Ok = `$true; Reasons = @() } }"); Exit = 0; Why = 'AUTHORIZED' }
+    'baseline returns nothing'          = @{ Ov = ($trustedIo + "`r`nfunction Test-HilMachineBaseline { param(`$Policy, `$Root, `$Probes) }"); Exit = 1; Why = 'did not return an explicit OK verdict' }
+    'baseline negative verdict'         = @{ Ov = ($trustedIo + "`r`nfunction Test-HilMachineBaseline { param(`$Policy, `$Root, `$Probes) return @{ Ok = `$false; Reasons = @('adapter DEV_125B link status: Down') } }"); Exit = 1; Why = 'link status: Down' }
+    'baseline throws'                   = @{ Ov = ($trustedIo + "`r`nfunction Test-HilMachineBaseline { param(`$Policy, `$Root, `$Probes) throw 'probe exploded' }"); Exit = 1; Why = 'probe exploded' }
+    'baseline exceeds timeout'          = @{ Ov = ($trustedIo + "`r`n`$__hilPolicyOrig = `${function:Get-HilPolicy}`r`nfunction Get-HilPolicy { `$p = & `$__hilPolicyOrig; `$p.TimeoutSeconds = 2; return `$p }`r`nfunction Test-HilMachineBaseline { param(`$Policy, `$Root, `$Probes) Start-Sleep -Seconds 30; return @{ Ok = `$true; Reasons = @() } }"); Exit = 1; Why = 'timed out after 2 s' }
+    'untrusted owner of trusted folder' = @{ Ov = ($trustedIo + "`r`nfunction Get-HilAclOwnerSid([string]`$Path) { return 'S-1-5-21-1-2-3-1001' }`r`nfunction Test-HilMachineBaseline { param(`$Policy, `$Root, `$Probes) return @{ Ok = `$true; Reasons = @() } }"); Exit = 1; Why = "owned by 'S-1-5-21-1-2-3-1001'" }
+}
+$ioBad = @(); $i = 0
+foreach ($n in $ioCases.Keys) {
+    $i++
+    $d = New-Install ("io$i") $ioCases[$n].Ov
+    $h = Invoke-Hook $d $ok
+    $authorized = ($h.Out -cmatch '\[HIL-PREFLIGHT\] AUTHORIZED') -and ($h.Out -cnotmatch '\[HIL-PREFLIGHT\] DENIED')
+    if (-not (($h.Exit -eq $ioCases[$n].Exit) -and ($h.Out -match [regex]::Escape($ioCases[$n].Why)) -and ($authorized -eq ($ioCases[$n].Exit -eq 0)))) {
+        $ioBad += ("{0}: exit={1} expected={2} out={3}" -f $n, $h.Exit, $ioCases[$n].Exit, $h.Out)
+    }
+}
+tc_check 'TEST-HILPF-062-authorized-dispatch-exit-0-only-with-explicit-ok-and-trusted-owner-otherwise-exit-1' ($ioBad.Count -eq 0) ($ioBad -join ' || ')
+
+$o1 = Test-HilAclOwner -OwnerSid 'S-1-5-32-544' -Label 'x'; $o2 = Test-HilAclOwner -OwnerSid 'S-1-5-18' -Label 'x'; $o3 = Test-HilAclOwner -OwnerSid 'S-1-5-21-1-2-3-1001' -Label 'x'
+tc_check 'TEST-HILPF-023-owner-must-be-system-administrators-or-trustedinstaller' ($o1.Ok -and $o2.Ok -and -not $o3.Ok) ($o3.Reasons -join '; ')
+
+# The published early-return bypass cannot come back: no InvocationName logic, library import has no side effects.
+$libAst = [System.Management.Automation.Language.Parser]::ParseFile($PfLib, [ref]$null, [ref]$null)
+$libTop = @($libAst.EndBlock.Statements | Where-Object { -not ($_ -is [System.Management.Automation.Language.FunctionDefinitionAst]) })
+$libExits = @($libAst.FindAll({ param($x) $x -is [System.Management.Automation.Language.ExitStatementAst] }, $true))
+$bypass = @(@($PfEntry, $PfLib) | Where-Object { [System.IO.File]::ReadAllText($_) -match 'InvocationName|PSCommandPath\s*-ne|\$MyInvocation' })
+tc_check 'TEST-HILPF-003-no-invocation-based-early-return-and-side-effect-free-library' `
+    (($bypass.Count -eq 0) -and ($libTop.Count -eq 0) -and ($null -eq $libAst.ParamBlock) -and ($libExits.Count -eq 0)) `
+    ("invocation-logic files: [{0}]; library top-level non-function statements: {1}; library exits: {2}" -f ($bypass -join ','), $libTop.Count, $libExits.Count)
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""

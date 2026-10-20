@@ -88,6 +88,18 @@ function Get-HilAclRules([string]$Path) {
         @{ Sid = $sid; Rights = [string]$_.FileSystemRights; Type = [string]$_.AccessControlType }
     })
 }
+# Owner SID (locale-independent).  The owner implicitly holds WRITE_DAC and can re-grant itself write access.
+function Get-HilAclOwnerSid([string]$Path) {
+    $o = [string](Get-Acl -LiteralPath $Path).Owner
+    try { return (New-Object System.Security.Principal.NTAccount($o)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { return $o }
+}
+function Test-HilAclOwner {
+    param([string]$OwnerSid, [string]$Label)
+    $trusted = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    if ($trusted -ccontains $OwnerSid) { return @{ Ok = $true; Reasons = @() } }
+    return @{ Ok = $false; Reasons = @("$Label is owned by '$OwnerSid' (an owner can rewrite the ACL); owner must be SYSTEM, Administrators or TrustedInstaller") }
+}
+
 # Only SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER may hold any write-class right.
 function Test-HilAclRules {
     param([object[]]$Rules, [string]$Label)
@@ -160,7 +172,7 @@ function Test-HilMachineBaseline {
     $ackFile = Join-Path $Root 'bugcheck-ack.txt'
     $since = [datetime]::MinValue
     if (Test-Path -LiteralPath $ackFile) {
-        $txt = (Get-Content -LiteralPath $ackFile -Raw).Trim()
+        $txt = ([string](Get-Content -LiteralPath $ackFile -Raw)).Trim()   # [string]: an empty file reads as $null
         $parsed = [datetime]::MinValue
         if (-not [datetime]::TryParseExact($txt, 'o', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) {
             $r += "bugcheck acknowledgement '$txt' is not an ISO 8601 round-trip timestamp ($ackFile)"
@@ -174,7 +186,7 @@ function Test-HilMachineBaseline {
     elseif ($svc.Status -ne 'Running') { $r += "service $($Policy.ServiceName) is $($svc.Status), not Running" }
     $authFile = Join-Path $Root 'authorized-driver.sha256'
     $want = ''
-    if (Test-Path -LiteralPath $authFile) { $want = (((Get-Content -LiteralPath $authFile -Raw).Trim()) -split '\s+')[0] }
+    if (Test-Path -LiteralPath $authFile) { $want = ((([string](Get-Content -LiteralPath $authFile -Raw)).Trim()) -split '\s+')[0] }
     if ($want -notmatch '^[0-9A-Fa-f]{64}$') { $r += "no valid operator-authorized driver SHA256 in $authFile" }
     else {
         $h = & $Probes.FileHash $Policy.DriverFile
