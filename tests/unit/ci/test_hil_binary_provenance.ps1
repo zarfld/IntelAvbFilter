@@ -13,7 +13,9 @@
 #     produced - their SHA256; written atomically; deterministic.
 #   Run-Tests-CI.ps1, in Hardware* suites, executes an artifact (test exe, ps1 outside the repository, sandbox
 #     fake) only if the manifest exists for this configuration, records the artifact as `built` by an enabled
-#     entry and the artifact's SHA256 matches; otherwise BLOCKED (TC-SAFETY-GATE-002), a failure in JUnit and a
+#     entry, the artifact's SHA256 matches, the entry was built from a clean committed revision equal to the
+#     checked-out HEAD and the checkout has no tracked changes (no carry-over of earlier build records; a matching
+#     hash is never sufficient on its own); otherwise BLOCKED (TC-SAFETY-GATE-002), a failure in JUnit and a
 #     nonzero suite result.  Checked before the safety class and HALT rules.  Modification time is never used.
 #     Repository-tracked ps1 tests (run from source) and hosted Unit/Integration suites are not affected.
 #
@@ -153,11 +155,8 @@ if ($fnMissing -eq '') {
         't_skipped'  = @{ Status = 'skipped'; Reason = 'VS dev shell not initialized (nmake not invoked)'; OutputPath = $null }
         't_nmake'    = @{ Status = 'built'; Reason = ''; OutputPath = $null }
         't_vanished' = @{ Status = 'built'; Reason = ''; OutputPath = (Join-Path $U 't_vanished.exe') }
-    }   # t_carry and t_nowdis: not selected in this run (-TestName)
-    $previous = [pscustomobject]@{ schemaVersion = 1; configuration = 'Debug'; platform = 'x64'; entries = @(
-        [pscustomobject]@{ name = 't_carry';  status = 'built'; enabled = $true; artifact = 't_carry.exe';  sha256 = 'AA'; sourceRevision = 'rev-old'; sourceDirty = $false },
-        [pscustomobject]@{ name = 't_nowdis'; status = 'built'; enabled = $true; artifact = 't_nowdis.exe'; sha256 = 'BB'; sourceRevision = 'rev-old'; sourceDirty = $false }) }
-    $m = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -Previous $previous -SourceRevision 'rev-now' -SourceDirty $false
+    }   # t_carry, t_nowdis: not selected in this run (-TestName) although an earlier run built them
+    $m = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -SourceRevision 'rev-now' -SourceDirty $false
     $byName = @{}; foreach ($e in @($m.entries)) { $byName[$e.name] = $e }
     function Show-E($e) { return ("status={0} enabled={1} artifact={2} sha={3} reason={4}" -f $e.status, $e.enabled, $e.artifact, $e.sha256, $e.reason) }
 
@@ -177,14 +176,13 @@ if ($fnMissing -eq '') {
     $ev = $byName['t_vanished']
     tc_check 'TEST-HILPROV-026-reported-success-without-artifact-is-failed' (($ev.status -eq 'failed') -and ($null -eq $ev.sha256)) (Show-E $ev)
     $ec = $byName['t_carry']; $ew = $byName['t_nowdis']
-    $mOther = New-TestBuildManifest -Configuration 'Release' -Platform 'x64' -Tests $tests -Outcomes @{} -Previous $previous -SourceRevision 'rev-now' -SourceDirty $false
-    $eo = @($mOther.entries | Where-Object { $_.name -eq 't_carry' })[0]
-    tc_check 'TEST-HILPROV-027-carry-over-only-same-config-enabled-and-disabled-overrides' `
-        (($ec.status -eq 'built') -and ($ec.sha256 -eq 'AA') -and ($ec.sourceRevision -eq 'rev-old') -and
-         ($ew.status -eq 'disabled') -and ($null -eq $ew.sha256) -and ($eo.status -eq 'not-built') -and ($null -eq $eo.sha256)) `
-        ("carry: {0} | now-disabled: {1} | other-config: {2}" -f (Show-E $ec), (Show-E $ew), (Show-E $eo))
+    $bmParams = @((Get-Command New-TestBuildManifest).Parameters.Keys)
+    tc_check 'TEST-HILPROV-027-records-of-earlier-runs-are-never-carried-over' `
+        (($ec.status -eq 'not-built') -and ($null -eq $ec.sha256) -and ($ec.reason -match 'never carried over') -and
+         ($ew.status -eq 'disabled') -and ($null -eq $ew.sha256) -and ($bmParams -notcontains 'Previous')) `
+        ("not-selected: {0} | disabled: {1} | params: {2}" -f (Show-E $ec), (Show-E $ew), ($bmParams -join ','))
     $rev = @($tests[($tests.Count - 1)..0])
-    $m2 = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $rev -Outcomes $outcomes -Previous $previous -SourceRevision 'rev-now' -SourceDirty $false
+    $m2 = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $rev -Outcomes $outcomes -SourceRevision 'rev-now' -SourceDirty $false
     $j1 = $m | ConvertTo-Json -Depth 6; $j2 = $m2 | ConvertTo-Json -Depth 6
     $names = @($m.entries | ForEach-Object { $_.name })
     tc_check 'TEST-HILPROV-028-manifest-is-deterministic-and-sorted' (($j1 -ceq $j2) -and (($names -join ',') -eq ((@($names | Sort-Object)) -join ','))) `
@@ -204,14 +202,15 @@ if ($fnMissing -eq '') {
     $script:repoRoot = $RepoRoot
     Write-TestBuildManifest -Manifest $m -Path $mp
     $rm = Read-AvbBuildManifest -Path $mp -Configuration 'Debug'
-    $d1 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rm
-    $d2 = Get-AvbHilProvenanceDecision -ArtifactPath $exeStaleD -Manifest $rm
-    $d3 = Get-AvbHilProvenanceDecision -ArtifactPath $exeStaleF -Manifest $rm
+    $srcOk = @{ Ok = $true; Revision = 'rev-now'; Dirty = $false; Error = '' }
+    $d1 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rm -Source $srcOk
+    $d2 = Get-AvbHilProvenanceDecision -ArtifactPath $exeStaleD -Manifest $rm -Source $srcOk
+    $d3 = Get-AvbHilProvenanceDecision -ArtifactPath $exeStaleF -Manifest $rm -Source $srcOk
     $dupM = [ordered]@{ schemaVersion = 1; configuration = 'Debug'; platform = 'x64'; entries = @(
         [ordered]@{ name = 'a'; enabled = $true; status = 'built'; artifact = 't_built.exe'; sha256 = (Get-FileHash -LiteralPath $exeBuilt).Hash },
         [ordered]@{ name = 'b'; enabled = $true; status = 'built'; artifact = 't_built.exe'; sha256 = (Get-FileHash -LiteralPath $exeBuilt).Hash }) }
     $dupP = Join-Path $U 'dup.json'; ($dupM | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $dupP -Encoding UTF8
-    $d4 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest (Read-AvbBuildManifest -Path $dupP -Configuration 'Debug')
+    $d4 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest (Read-AvbBuildManifest -Path $dupP -Configuration 'Debug') -Source $srcOk
     $repoPs1 = Join-Path $RepoRoot 'tests\unit\ioctl\test_hil_safety_gate.ps1'
     tc_check 'TEST-HILPROV-030-runner-decisions-on-synthetic-artifacts' `
         (($d1.Action -eq 'Run') -and ($d2.Action -eq 'Block') -and ($d2.Reason -match 'Disabled') -and ($d3.Action -eq 'Block') -and ($d3.Reason -match "status is 'failed'") -and
@@ -220,6 +219,33 @@ if ($fnMissing -eq '') {
         ((-not (Test-AvbHilNeedsProvenance -Entry 'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' -ArtifactPath $repoPs1)) -and
          (Test-AvbHilNeedsProvenance -Entry 'ps1:C:/elsewhere/x.ps1' -ArtifactPath 'C:\elsewhere\x.ps1') -and
          (Test-AvbHilNeedsProvenance -Entry 'test_ioctl_version' -ArtifactPath (Join-Path $RepoRoot 'build\tools\avb_test\x64\Debug\test_ioctl_version.exe'))) 'scope decision wrong'
+
+    # Source identity: a matching SHA256 is never sufficient on its own
+    $mOldRev = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -SourceRevision 'rev-old' -SourceDirty $false
+    $pOld = Join-Path $U 'm_oldrev.json'; Write-TestBuildManifest -Manifest $mOldRev -Path $pOld
+    $mDirty = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -SourceRevision 'rev-now' -SourceDirty $true
+    $pDirty = Join-Path $U 'm_dirty.json'; Write-TestBuildManifest -Manifest $mDirty -Path $pDirty
+    $mUnknown = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -SourceRevision $null -SourceDirty $null
+    $pUnknown = Join-Path $U 'm_unknown.json'; Write-TestBuildManifest -Manifest $mUnknown -Path $pUnknown
+    $d5 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest (Read-AvbBuildManifest -Path $pOld -Configuration 'Debug') -Source $srcOk
+    tc_check 'TEST-HILPROV-032-artifact-built-at-another-commit-is-blocked-despite-matching-sha' `
+        (($d5.Action -eq 'Block') -and ($d5.Reason -match "built from revision 'rev-old' but the checkout is 'rev-now'")) ("{0}: {1}" -f $d5.Action, $d5.Reason)
+    $d6 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest (Read-AvbBuildManifest -Path $pDirty -Configuration 'Debug') -Source $srcOk
+    tc_check 'TEST-HILPROV-033-artifact-built-from-uncommitted-sources-is-blocked' `
+        (($d6.Action -eq 'Block') -and ($d6.Reason -match 'uncommitted or unknown source state')) ("{0}: {1}" -f $d6.Action, $d6.Reason)
+    $d7 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rm -Source @{ Ok = $true; Revision = 'rev-now'; Dirty = $true; Error = '' }
+    tc_check 'TEST-HILPROV-034-sources-edited-after-the-build-at-same-head-block' `
+        (($d7.Action -eq 'Block') -and ($d7.Reason -match 'uncommitted tracked changes')) ("{0}: {1}" -f $d7.Action, $d7.Reason)
+    $d8 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rm -Source @{ Ok = $false; Revision = $null; Dirty = $null; Error = 'git rev-parse HEAD failed' }
+    $d9 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest (Read-AvbBuildManifest -Path $pUnknown -Configuration 'Debug') -Source $srcOk
+    tc_check 'TEST-HILPROV-035-unknown-source-identity-fails-closed' `
+        (($d8.Action -eq 'Block') -and ($d8.Reason -match 'source revision unavailable') -and ($d9.Action -eq 'Block')) ("current={0}: {1} | build={2}: {3}" -f $d8.Action, $d8.Reason, $d9.Action, $d9.Reason)
+    $outcomesReenable = @{ 't_built' = @{ Status = 'failed'; Reason = 'compiler exit code 2 or output missing'; OutputPath = $null } }
+    $testsReenable = @(@{ Name = 't_built'; Type = 'cl'; Output = 't_built.exe' }, @{ Name = 't_reenabled'; Type = 'cl'; Output = 't_reenabled.exe' })
+    $mPartial = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $testsReenable -Outcomes $outcomesReenable -SourceRevision 'rev-now' -SourceDirty $false
+    $pb = @($mPartial.entries | Where-Object { $_.name -eq 't_built' })[0]; $pr = @($mPartial.entries | Where-Object { $_.name -eq 't_reenabled' })[0]
+    tc_check 'TEST-HILPROV-036-failed-partial-rebuild-and-reenabled-entry-authorize-nothing' `
+        (($pb.status -eq 'failed') -and ($null -eq $pb.sha256) -and ($pr.status -eq 'not-built') -and ($null -eq $pr.sha256)) ("failed: {0} | re-enabled: {1}" -f (Show-E $pb), (Show-E $pr))
 }
 
 # ---------------------------------------------------------------------------------------------------------
@@ -263,7 +289,8 @@ function Get-ShaOfText([string]$Text) {
     try { return (($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('X2') }) -join '') } finally { $sha.Dispose() }
 }
 function New-MEntry([string]$Name, [string]$Status, [bool]$Enabled = $true, [string]$Sha = $null, [string]$Reason = '') {
-    return [ordered]@{ name = $Name; type = 'sandbox-fake'; enabled = $Enabled; status = $Status; reason = $Reason; artifact = "$Name.ps1"; sha256 = $Sha }
+    return [ordered]@{ name = $Name; type = 'sandbox-fake'; enabled = $Enabled; status = $Status; reason = $Reason; artifact = "$Name.ps1"; sha256 = $Sha
+                       sourceRevision = 'sandbox-rev'; sourceDirty = $false }
 }
 function Write-Manifest([object[]]$Entries, [string]$Configuration = 'Debug') {
     $m = [ordered]@{ schemaVersion = 1; producer = 'test_hil_binary_provenance.ps1'; configuration = $Configuration; platform = 'x64'; entries = $Entries }
@@ -289,7 +316,7 @@ function Edit-StateSnippet([string]$Edit) {
 }
 
 function Invoke-Sandbox {
-    param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit')
+    param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [string]$SourceRevision = 'sandbox-rev', [string]$SourceDirty = '0')
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -300,6 +327,7 @@ function Invoke-Sandbox {
         AVB_TEST_SANDBOX = '1'; AVB_TEST_ADAPTER_STATE_FILE = $stateFile; AVB_TEST_SANDBOX_CLASSES = $Classes
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
+        AVB_TEST_SANDBOX_SOURCE_REVISION = $SourceRevision; AVB_TEST_SANDBOX_SOURCE_DIRTY = $SourceDirty
     }
     $lines = @()
     foreach ($k in $envs.Keys) {
@@ -400,6 +428,18 @@ $pWrongCfg = New-Fake 'test_sbprov_wrongcfg'
 Write-Manifest @((New-MEntry 'test_sbprov_wrongcfg' 'built' $true (Get-Sha $pWrongCfg))) -Configuration 'Release'
 $rD = Invoke-Sandbox 'runD' @((Get-Entry $pWrongCfg))
 tc_check 'TEST-HILPROV-014-manifest-of-another-configuration-is-rejected' (Test-ProvBlocked $rD 'test_sbprov_wrongcfg' "configuration 'Release'") (Show-Prov $rD 'test_sbprov_wrongcfg')
+
+# --- Run F/G: checkout moved to another commit / tracked sources edited after the build -------------------
+$pRev = New-Fake 'test_sbprov_wrongcfg'
+Write-Manifest @((New-MEntry 'test_sbprov_wrongcfg' 'built' $true (Get-Sha $pRev)))
+$rF = Invoke-Sandbox 'runF' @((Get-Entry $pRev)) -SourceRevision 'sandbox-rev-NEXT'
+tc_check 'TEST-HILPROV-037-checkout-at-new-commit-without-rebuild-is-blocked' `
+    ((Test-ProvBlocked $rF 'test_sbprov_wrongcfg' "built from revision 'sandbox-rev' but the checkout is 'sandbox-rev-NEXT'") -and $rF.Exit -eq 1) (Show-Prov $rF 'test_sbprov_wrongcfg')
+$rG = Invoke-Sandbox 'runG' @((Get-Entry $pRev)) -SourceDirty '1'
+tc_check 'TEST-HILPROV-038-dirty-checkout-at-same-head-is-blocked' `
+    ((Test-ProvBlocked $rG 'test_sbprov_wrongcfg' 'uncommitted tracked changes') -and $rG.Exit -eq 1) (Show-Prov $rG 'test_sbprov_wrongcfg')
+$rH = Invoke-Sandbox 'runH' @((Get-Entry $pRev))
+tc_check 'TEST-HILPROV-039-same-clean-revision-control-runs' ((Get-RanCount $rH 'test_sbprov_wrongcfg') -eq 1) (Show-Prov $rH 'test_sbprov_wrongcfg')
 
 # --- Run E: hosted Unit suite is not subject to the HIL provenance gate -----------------------------------
 $pHosted = New-Fake 'test_sbprov_hosted'

@@ -1150,10 +1150,51 @@ function Read-AvbBuildManifest {
     return $res
 }
 
+# Source identity of the checkout under test, computed once per suite: @{ Ok; Revision; Dirty; Error }.
+# Dirty = tracked modifications (untracked files are not considered).  Sandbox runs take it from
+# AVB_TEST_SANDBOX_SOURCE_REVISION / AVB_TEST_SANDBOX_SOURCE_DIRTY ('0' | '1'); the variables are ignored otherwise.
+function Get-AvbSourceIdentity {
+    $res = @{ Ok = $false; Revision = $null; Dirty = $null; Error = '' }
+    if ($script:IsSandbox) {
+        if (-not $env:AVB_TEST_SANDBOX_SOURCE_REVISION -or $env:AVB_TEST_SANDBOX_SOURCE_DIRTY -notmatch '^[01]$') {
+            $res.Error = 'sandbox source identity not provided (AVB_TEST_SANDBOX_SOURCE_REVISION / _DIRTY)'
+            return $res
+        }
+        $res.Revision = $env:AVB_TEST_SANDBOX_SOURCE_REVISION
+        $res.Dirty = ($env:AVB_TEST_SANDBOX_SOURCE_DIRTY -eq '1')
+        $res.Ok = $true
+        return $res
+    }
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $rev = & git -C $script:repoRoot rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $rev) { $res.Error = 'git rev-parse HEAD failed'; return $res }
+        $st = & git -C $script:repoRoot status --porcelain --untracked-files=no 2>$null
+        if ($LASTEXITCODE -ne 0) { $res.Error = 'git status failed'; return $res }
+        $res.Revision = ([string]$rev).Trim()
+        $res.Dirty = [bool]$st
+        $res.Ok = $true
+    } catch {
+        $res.Error = "git unavailable: $($_.Exception.Message)"
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    return $res
+}
+
 # Pure decision on an existing artifact: 'Run' | 'Block' (+ Reason).
+# A matching SHA256 is necessary but never sufficient: the artifact must have been built from the clean,
+# committed revision that is checked out now, and the checkout must still be clean.
 function Get-AvbHilProvenanceDecision {
-    param([string]$ArtifactPath, $Manifest)
+    param([string]$ArtifactPath, $Manifest, $Source)
     if (-not $Manifest.Ok) { return @{ Action = 'Block'; Reason = $Manifest.Error } }
+    if ($null -eq $Source -or -not $Source.Ok) {
+        return @{ Action = 'Block'; Reason = "current source revision unavailable ($(if ($Source) { $Source.Error } else { 'not computed' })); artifacts cannot be attributed" }
+    }
+    if ($Source.Dirty) {
+        return @{ Action = 'Block'; Reason = "checkout $($Source.Revision) has uncommitted tracked changes; test binaries cannot be attributed to a source revision" }
+    }
     $leaf = [System.IO.Path]::GetFileName($ArtifactPath)
     $k = $leaf.ToLowerInvariant()
     if (-not $Manifest.ByArtifact.ContainsKey($k)) {
@@ -1172,6 +1213,13 @@ function Get-AvbHilProvenanceDecision {
     }
     $sha = [string](Get-AvbManifestProp $e 'sha256')
     if (-not $sha) { return @{ Action = 'Block'; Reason = "build entry '$name' records no SHA256 for '$leaf'" } }
+    $bRev = [string](Get-AvbManifestProp $e 'sourceRevision')
+    if ((Get-AvbManifestProp $e 'sourceDirty') -ne $false) {
+        return @{ Action = 'Block'; Reason = "artifact '$leaf' was built from an uncommitted or unknown source state (revision '$bRev')" }
+    }
+    if (-not $bRev -or $bRev -ne $Source.Revision) {
+        return @{ Action = 'Block'; Reason = "artifact '$leaf' was built from revision '$bRev' but the checkout is '$($Source.Revision)'" }
+    }
     $actual = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash
     if ($actual -ne $sha.ToUpperInvariant()) {
         return @{ Action = 'Block'; Reason = "SHA256 mismatch for '$leaf': artifact $actual, manifest $sha" }
@@ -1321,12 +1369,19 @@ if ($IsHardwareSuite) {
 }
 
 $BuildManifest = $null
+$SourceIdentity = $null
 if ($IsHardwareSuite) {
     $BuildManifest = Read-AvbBuildManifest -Path (Join-Path $testExeDir 'test-build-manifest.json') -Configuration $Configuration
     if ($BuildManifest.Ok) {
         Write-Note ("Build provenance: {0} ({1} artifact record(s))" -f $BuildManifest.Path, $BuildManifest.ByArtifact.Count)
     } else {
         Write-Host "  [BLOCKED] build provenance unavailable: $($BuildManifest.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
+    }
+    $SourceIdentity = Get-AvbSourceIdentity
+    if ($SourceIdentity.Ok) {
+        Write-Note ("Source identity: {0} (tracked changes: {1})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty)
+    } else {
+        Write-Host "  [BLOCKED] source identity unavailable: $($SourceIdentity.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
     }
 }
 
@@ -1422,7 +1477,7 @@ foreach ($WorkItem in $WorkItems) {
 
     # Build provenance gate (#328 F23): before the safety class and HALT rules, never by executing the artifact.
     if ($IsHardwareSuite -and (Test-AvbHilNeedsProvenance -Entry $TestName -ArtifactPath $exePath)) {
-        $prov = Get-AvbHilProvenanceDecision -ArtifactPath $exePath -Manifest $BuildManifest
+        $prov = Get-AvbHilProvenanceDecision -ArtifactPath $exePath -Manifest $BuildManifest -Source $SourceIdentity
         if ($prov.Action -ne 'Run') {
             Add-HilFailureRecord -Display $exeName -Status 'BLOCKED(PROVENANCE)' -Stem $itemStem `
                 -Line ("[BLOCKED] TC-SAFETY-GATE-002: {0}: provenance: {1} --- not executed" -f $TestName, $prov.Reason)

@@ -229,7 +229,8 @@ function Invoke-Sandbox {
         $mSeen[$fp] = $true
         $mEntries += ,([ordered]@{ name = [System.IO.Path]::GetFileNameWithoutExtension($fp); type = 'sandbox-fake'; enabled = $true
                                    status = 'built'; reason = ''; artifact = [System.IO.Path]::GetFileName($fp)
-                                   sha256 = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash })
+                                   sha256 = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash
+                                   sourceRevision = 'sandbox-rev'; sourceDirty = $false })
     }
     $mDir = Join-Path $Tree 'build\tools\avb_test\x64\Debug'
     New-Item -ItemType Directory -Path $mDir -Force | Out-Null
@@ -239,6 +240,7 @@ function Invoke-Sandbox {
         AVB_TEST_SANDBOX = '1'; AVB_TEST_ADAPTER_STATE_FILE = $stateFile; AVB_TEST_SANDBOX_CLASSES = $Classes
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
+        AVB_TEST_SANDBOX_SOURCE_REVISION = 'sandbox-rev'; AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
     }
     foreach ($k in $ExtraEnv.Keys) { $envs[$k] = $ExtraEnv[$k] }
     $lines = @()

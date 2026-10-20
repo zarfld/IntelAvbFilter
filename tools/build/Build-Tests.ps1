@@ -1976,24 +1976,9 @@ function Get-TestBuildArtifactName {
 
 function New-TestBuildManifest {
     param([string]$Configuration, [string]$Platform, [object[]]$Tests, [hashtable]$Outcomes,
-          $Previous, $SourceRevision, $SourceDirty)
-    # Records of entries not selected in this run (-TestName) are carried over only from a previous manifest
-    # of the same schema/configuration/platform, only if still enabled with the same artifact name.
-    function Get-Prop($o, [string]$n) {
-        if ($null -eq $o) { return $null }
-        if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return $o[$n] }; return $null }
-        if ($o.PSObject.Properties[$n]) { return $o.$n }
-        return $null
-    }
-    $prev = @{}
-    if ((Get-Prop $Previous 'schemaVersion') -eq 1 -and (Get-Prop $Previous 'configuration') -eq $Configuration -and
-        (Get-Prop $Previous 'platform') -eq $Platform) {
-        foreach ($p in @(Get-Prop $Previous 'entries')) {
-            $pn = Get-Prop $p 'name'
-            if ($pn) { $prev[[string]$pn] = [ordered]@{ status = (Get-Prop $p 'status'); enabled = (Get-Prop $p 'enabled'); artifact = (Get-Prop $p 'artifact')
-                                                    sha256 = (Get-Prop $p 'sha256'); sourceRevision = (Get-Prop $p 'sourceRevision'); sourceDirty = (Get-Prop $p 'sourceDirty') } }
-        }
-    }
+          $SourceRevision, $SourceDirty)
+    # No carry-over: a record from an earlier run cannot be attributed to the current source without ambiguity
+    # (new commit, edited sources/headers, toolchain).  Entries not built by THIS run are `not-built`.
     $entries = @()
     foreach ($t in @($Tests | Sort-Object { [string]$_['Name'] })) {
         $tName = [string]$t['Name']
@@ -2022,13 +2007,8 @@ function New-TestBuildManifest {
         } elseif ($t['Disabled']) {
             $e.status = 'disabled'
             $e.reason = if ($prereq) { $prereq } else { 'entry is Disabled in Build-Tests.ps1' }
-        } elseif ($prev.ContainsKey($tName) -and $prev[$tName]['status'] -eq 'built' -and
-                  $prev[$tName]['enabled'] -eq $true -and $prev[$tName]['artifact'] -eq $artifact) {
-            $p = $prev[$tName]
-            $e.status = 'built'; $e.reason = 'carried over from a previous build run (not selected in this run)'
-            $e.sha256 = $p.sha256; $e.sourceRevision = $p.sourceRevision; $e.sourceDirty = $p.sourceDirty
         } else {
-            $e.reason = 'not built in this run and no reusable previous record'
+            $e.reason = 'not built in this run (records of earlier runs are never carried over)'
         }
         $entries += ,$e
     }
@@ -2365,13 +2345,11 @@ try {
 } finally {
     $ErrorActionPreference = $prevEap
 }
-$prevTestManifest = $null
-if (Test-Path -LiteralPath $TestManifestPath) {
-    try { $prevTestManifest = Get-Content -LiteralPath $TestManifestPath -Raw | ConvertFrom-Json }
-    catch { Write-Host "[MANIFEST] WARNING: previous manifest unreadable -- no records carried over: $_" -ForegroundColor Yellow }
-}
 $testManifest = New-TestBuildManifest -Configuration $Configuration -Platform $Platform -Tests $AllTests -Outcomes $BuildOutcomes `
-                    -Previous $prevTestManifest -SourceRevision $srcRevision -SourceDirty $srcDirty
+                    -SourceRevision $srcRevision -SourceDirty $srcDirty
+if ($srcDirty -ne $false) {
+    Write-Host "[MANIFEST] NOTE: built from an uncommitted or unknown source state -- Run-Tests-CI.ps1 will not authorize these artifacts for Hardware* suites" -ForegroundColor Yellow
+}
 Write-TestBuildManifest -Manifest $testManifest -Path $TestManifestPath
 Write-Host ("[MANIFEST] {0} ({1} entries, {2} built with SHA256)" -f $TestManifestPath, @($testManifest.entries).Count,
             @($testManifest.entries | Where-Object { $_.status -eq 'built' -and $_.sha256 }).Count) -ForegroundColor Cyan
