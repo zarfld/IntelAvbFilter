@@ -9,8 +9,14 @@
 #   REAL-* the same analyzer applied to .github/workflows of this repository.
 #
 # Model (fail closed):
-#   - untrusted events: pull_request, pull_request_target, pull_request_review, pull_request_review_comment,
-#     issue_comment, workflow_run; evaluated as a FORK pull request (head repo != base repo, actor = fork owner).
+#   - every trigger event is evaluated in explicit contexts:
+#       pull_request(_target/_review/_review_comment): a FORK PR and a SAME-REPOSITORY PR  -> Reachable;
+#       issue_comment, workflow_run                                                       -> Reachable;
+#       workflow_dispatch: master (Authorized, informational), feature branch / tag (UnauthorizedRef),
+#                          dispatch in a fork repository (ForeignRepo);
+#       any other event (push, schedule, release, ...) on master and on a feature branch  -> Automatic.
+#   - every self-hosted job needs explicit read-only permissions, an approval environment, a non-cancelling
+#     concurrency group and checkout without persisted credentials (Governance); missing = violation.
 #   - a job leg is "self-hosted" if any runs-on label is 'self-hosted' or is not a GitHub-hosted image label,
 #     or if runs-on cannot be evaluated.
 #   - a job is reachable unless its job-level `if:` evaluates to false for that context; an expression the
@@ -264,7 +270,10 @@ function Expand-Matrix($Matrix) {
 # ---------------------------------------------------------------------------------------------------------
 # Workflow analysis
 # ---------------------------------------------------------------------------------------------------------
-$UntrustedEvents = @('pull_request', 'pull_request_target', 'pull_request_review', 'pull_request_review_comment', 'issue_comment', 'workflow_run')
+$PullRequestEvents = @('pull_request', 'pull_request_target', 'pull_request_review', 'pull_request_review_comment')
+$UntrustedEvents = $PullRequestEvents + @('issue_comment', 'workflow_run')
+$OwnRepo = 'zarfld/IntelAvbFilter'
+$AuthorizedRef = 'refs/heads/master'
 $HostedLabelRx = '^(ubuntu|windows|macos)-[A-Za-z0-9.\-]+$'
 # Repository-controlled: relative/workspace script paths, repository directories, or build tools run on the tree.
 $RepoCodeRx = '(^|[\s''"(&;|])\.{1,2}[\\/]|(^|[\s''"(&;|])(tools|tests|scripts|src|build)[\\/]|\b(msbuild|nmake|cmake|make|cl|devenv|vstest\.console)(\.exe)?\s'
@@ -277,16 +286,71 @@ function Get-Events($Wf) {
     return @($on.Keys)
 }
 
-function New-Ctx([string]$EventName, $Leg) {
+# Context variants: 'fork' / 'same-repo' (pull requests), or a trusted-looking context with explicit repo + ref.
+function New-Ctx([string]$EventName, $Leg, [string]$Variant = 'fork', [string]$Ref = '', [string]$Repository = '') {
     $v = @{
-        'github.event_name' = $EventName; 'github.repository' = 'zarfld/IntelAvbFilter'; 'github.repository_owner' = 'zarfld'
+        'github.event_name' = $EventName; 'github.repository' = $OwnRepo; 'github.repository_owner' = 'zarfld'
         'github.actor' = 'untrusted-fork'; 'github.triggering_actor' = 'untrusted-fork'
         'github.event.pull_request.head.repo.full_name' = 'untrusted-fork/IntelAvbFilter'
         'github.event.pull_request.head.repo.fork' = 'true'; 'github.ref' = 'refs/pull/1/merge'
         'github.head_ref' = 'untrusted-branch'; 'github.base_ref' = 'master'
         'runner.os' = 'Windows'
     }
+    if ($Variant -eq 'same-repo') {
+        $v['github.event.pull_request.head.repo.full_name'] = $OwnRepo; $v['github.event.pull_request.head.repo.fork'] = 'false'
+        $v['github.actor'] = 'collaborator'; $v['github.triggering_actor'] = 'collaborator'
+    }
+    if ($Variant -eq 'trusted') {
+        foreach ($k in 'github.event.pull_request.head.repo.full_name', 'github.event.pull_request.head.repo.fork', 'github.head_ref', 'github.base_ref') { $v.Remove($k) }
+        $v['github.actor'] = 'zarfld'; $v['github.triggering_actor'] = 'zarfld'
+    }
+    if ($Ref) { $v['github.ref'] = $Ref }
+    if ($Repository) { $v['github.repository'] = $Repository; $v['github.repository_owner'] = ($Repository -split '/')[0] }
     return @{ Vars = $v; Leg = $Leg }
+}
+
+# Contexts to evaluate per trigger event; Kind = finding kind if the self-hosted job is reachable in it.
+function Get-EventContexts([string]$EventName, $Leg) {
+    $c = @()
+    if ($PullRequestEvents -contains $EventName) {
+        $c += @{ Kind = 'Reachable'; Label = 'fork-pr';      Ctx = (New-Ctx $EventName $Leg 'fork') }
+        $c += @{ Kind = 'Reachable'; Label = 'same-repo-pr'; Ctx = (New-Ctx $EventName $Leg 'same-repo') }
+    } elseif ($UntrustedEvents -contains $EventName) {
+        $c += @{ Kind = 'Reachable'; Label = 'untrusted';    Ctx = (New-Ctx $EventName $Leg 'fork') }
+    } elseif ($EventName -eq 'workflow_dispatch') {
+        $c += @{ Kind = 'Authorized';      Label = 'master';          Ctx = (New-Ctx $EventName $Leg 'trusted' $AuthorizedRef) }
+        $c += @{ Kind = 'UnauthorizedRef'; Label = 'feature-branch';  Ctx = (New-Ctx $EventName $Leg 'trusted' 'refs/heads/feature/x') }
+        $c += @{ Kind = 'UnauthorizedRef'; Label = 'tag';             Ctx = (New-Ctx $EventName $Leg 'trusted' 'refs/tags/v1.0.0') }
+        $c += @{ Kind = 'ForeignRepo';     Label = 'fork-repository'; Ctx = (New-Ctx $EventName $Leg 'trusted' $AuthorizedRef 'untrusted-fork/IntelAvbFilter') }
+    } else {
+        # push, schedule, release, repository_dispatch, merge_group, ...: never an operator decision
+        $c += @{ Kind = 'Automatic'; Label = 'master';         Ctx = (New-Ctx $EventName $Leg 'trusted' $AuthorizedRef) }
+        $c += @{ Kind = 'Automatic'; Label = 'feature-branch'; Ctx = (New-Ctx $EventName $Leg 'trusted' 'refs/heads/feature/x') }
+    }
+    return ,$c
+}
+
+# Governance of a self-hosted job: explicit read-only token, approval environment, no overlap, no persisted git
+# credentials.  Missing or non-map values fail closed.
+function Get-GovernanceIssues($Wf, $Job) {
+    $issues = @()
+    $perm = if ($Job.Contains('permissions')) { $Job['permissions'] } elseif ($Wf.Contains('permissions')) { $Wf['permissions'] } else { $null }
+    if ($null -eq $perm) { $issues += 'no explicit token permissions (repository default applies)' }
+    elseif (-not ($perm -is [System.Collections.IDictionary])) { $issues += "permissions '$perm' is not an explicit least-privilege map" }
+    else { foreach ($k in $perm.Keys) { if (@('read', 'none') -notcontains "$($perm[$k])") { $issues += "permission ${k}: $($perm[$k])" } } }
+    if (-not $Job.Contains('environment')) { $issues += 'no environment (no operator approval gate)' }
+    $conc = if ($Job.Contains('concurrency')) { $Job['concurrency'] } elseif ($Wf.Contains('concurrency')) { $Wf['concurrency'] } else { $null }
+    if ($null -eq $conc) { $issues += 'no concurrency group (overlapping HIL jobs possible)' }
+    elseif ($conc -is [System.Collections.IDictionary] -and "$($conc['cancel-in-progress'])" -ne 'false') { $issues += "concurrency cancel-in-progress is '$($conc['cancel-in-progress'])' (must be false)" }
+    if ($Job.Contains('steps')) {
+        foreach ($s in @($Job['steps'])) {
+            if ($s -is [System.Collections.IDictionary] -and $s.Contains('uses') -and "$($s['uses'])" -match '^actions/checkout@') {
+                $w = if ($s.Contains('with')) { $s['with'] } else { $null }
+                if (-not ($w -is [System.Collections.IDictionary] -and "$($w['persist-credentials'])" -eq 'false')) { $issues += "checkout persists git credentials ($($s['uses']))" }
+            }
+        }
+    }
+    return ,$issues
 }
 
 function Get-LegLabels($Job, $Ctx) {
@@ -327,8 +391,10 @@ function Get-StepOrderFinding($Steps, $Ctx) {
     return @{ HasPreflight = ($pre -ge 0); RepoBefore = $repo }
 }
 
-# Returns a list of findings: Kind = Reachable | Order | External
-function Get-WorkflowFindings([string]$Root, [string]$Rel, [string[]]$InheritedEvents = $null, [string]$Via = '') {
+# Returns findings.  Kind: Reachable (untrusted/PR event) | Automatic (push/schedule/...) | UnauthorizedRef
+# (dispatch from a non-authorized ref) | ForeignRepo (dispatch in another repository) | Order | Governance |
+# External | Authorized (informational: the intended operator path; not a violation).
+function Get-WorkflowFindings([string]$Root, [string]$Rel, [string[]]$InheritedEvents = $null, [string]$Via = '', $CallerJob = $null) {
     $wf = Read-Yaml (Join-Path $Root $Rel)
     $events = if ($InheritedEvents) { $InheritedEvents } else { @(Get-Events $wf) }
     $findings = @()
@@ -339,34 +405,42 @@ function Get-WorkflowFindings([string]$Root, [string]$Rel, [string[]]$InheritedE
         if ($job.Contains('uses')) {
             $u = "$($job['uses'])"
             foreach ($ev in $events) {
-                $ctx = New-Ctx $ev ([ordered]@{})
-                $gate = $true; if ($job.Contains('if')) { $g = Invoke-Expr "$($job['if'])" $ctx; $gate = (Test-Unk $g) -or (Test-Truthy $g) }
-                if (-not $gate) { continue }
+                $anyCtx = @(Get-EventContexts $ev ([ordered]@{}) | Where-Object {
+                    if (-not $job.Contains('if')) { return $true }
+                    $g = Invoke-Expr "$($job['if'])" $_.Ctx; return ((Test-Unk $g) -or (Test-Truthy $g)) })
+                if ($anyCtx.Count -eq 0) { continue }
                 if ($u -match '^\./(.+)$') {
-                    $findings += @(Get-WorkflowFindings $Root ($Matches[1]) @($ev) $jobName)
-                } elseif ($UntrustedEvents -contains $ev) {
+                    $findings += @(Get-WorkflowFindings $Root ($Matches[1]) @($ev) $jobName $job)
+                } elseif ($ev -ne 'workflow_dispatch') {
                     $findings += [pscustomobject]@{ Kind = 'External'; Job = $jobName; Leg = ''; Event = $ev; Detail = "external reusable workflow $u cannot be verified" }
                 }
             }
             continue
         }
         $legs = Expand-Matrix $(if ($job.Contains('strategy') -and $job['strategy'] -is [System.Collections.IDictionary] -and $job['strategy'].Contains('matrix')) { $job['strategy']['matrix'] } else { $null })
+        $jobSelfHosted = $false
         foreach ($leg in $legs) {
             $legDesc = if (Test-Unk $leg) { '<unevaluable matrix>' } else { (@($leg.Keys | ForEach-Object { "$_=$($leg[$_])" }) -join ',') }
             $selfHostedAny = $false
             foreach ($ev in $events) {
-                $ctx = New-Ctx $ev $leg
-                $labels = Get-LegLabels $job $ctx
-                if (-not (Test-SelfHostedLabels $labels)) { continue }
-                $selfHostedAny = $true
-                if ($UntrustedEvents -notcontains $ev) { continue }
-                $reach = $true
-                if ($job.Contains('if')) { $g = Invoke-Expr "$($job['if'])" $ctx; $reach = (Test-Unk $g) -or (Test-Truthy $g) }
-                if ($reach) {
+                $byKind = [ordered]@{}
+                $lbl = ''
+                foreach ($c in (Get-EventContexts $ev $leg)) {
+                    $labels = Get-LegLabels $job $c.Ctx
+                    if (-not (Test-SelfHostedLabels $labels)) { continue }
+                    $selfHostedAny = $true
                     $lbl = if (Test-Unk $labels) { '<unevaluable runs-on>' } else { ($labels -join ',') }
-                    $findings += [pscustomobject]@{ Kind = 'Reachable'; Job = $jobName; Leg = $legDesc; Event = $ev; Detail = "runs-on [$lbl]" }
+                    $reach = $true
+                    foreach ($g0 in @($CallerJob, $job)) {
+                        if ($null -ne $g0 -and $g0.Contains('if')) { $g = Invoke-Expr "$($g0['if'])" $c.Ctx; if (-not ((Test-Unk $g) -or (Test-Truthy $g))) { $reach = $false } }
+                    }
+                    if ($reach) { if (-not $byKind.Contains($c.Kind)) { $byKind[$c.Kind] = @() }; $byKind[$c.Kind] += $c.Label }
+                }
+                foreach ($k in $byKind.Keys) {
+                    $findings += [pscustomobject]@{ Kind = $k; Job = $jobName; Leg = $legDesc; Event = ("{0}[{1}]" -f $ev, ($byKind[$k] -join ',')); Detail = "runs-on [$lbl]" }
                 }
             }
+            if ($selfHostedAny) { $jobSelfHosted = $true }
             if ($selfHostedAny -and $job.Contains('steps')) {
                 $o = Get-StepOrderFinding $job['steps'] (New-Ctx 'push' $leg)
                 if ((-not $o.HasPreflight) -or $o.RepoBefore.Count -gt 0) {
@@ -374,6 +448,10 @@ function Get-WorkflowFindings([string]$Root, [string]$Rel, [string[]]$InheritedE
                     $findings += [pscustomobject]@{ Kind = 'Order'; Job = $jobName; Leg = $legDesc; Event = '*'; Detail = ("{0}: {1}" -f $pf, ($o.RepoBefore -join ' | ')) }
                 }
             }
+        }
+        if ($jobSelfHosted) {
+            $gi = Get-GovernanceIssues $wf $job
+            if ($gi.Count -gt 0) { $findings += [pscustomobject]@{ Kind = 'Governance'; Job = $jobName; Leg = ''; Event = '*'; Detail = ($gi -join ' | ') } }
         }
     }
     return $findings
@@ -412,13 +490,78 @@ $preflightStep = @"
 $fx01 = New-Fx 'fx01_safe.yml' @"
 on:
   workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: hil
+  cancel-in-progress: false
+jobs:
+  hil:
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, Windows, i226]
+    environment: hil
+    steps:
+$preflightStep
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: .\tools\build\Build-Tests.ps1
+"@
+$fx15 = New-Fx 'fx15_push.yml' @"
+on:
+  push:
+    branches: [master]
 jobs:
   hil:
     runs-on: [self-hosted, Windows, i226]
     steps:
 $preflightStep
+"@
+$fx16 = New-Fx 'fx16_schedule_guarded_by_repo_only.yml' @"
+on:
+  schedule:
+    - cron: '0 2 * * 0'
+jobs:
+  hil:
+    if: github.repository == 'zarfld/IntelAvbFilter'
+    runs-on: [self-hosted, Windows, i226]
+    steps:
+$preflightStep
+"@
+$fx17 = New-Fx 'fx17_dispatch_without_ref_guard.yml' @"
+on: [workflow_dispatch]
+jobs:
+  hil:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, Windows, i226]
+    steps:
+$preflightStep
+"@
+$fx18 = New-Fx 'fx18_governance_missing.yml' @"
+on: [workflow_dispatch]
+jobs:
+  hil:
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, Windows, i226]
+    steps:
+$preflightStep
       - uses: actions/checkout@v5
-      - run: .\tools\build\Build-Tests.ps1
+"@
+$fx19 = New-Fx 'fx19_governance_weak.yml' @"
+on: [workflow_dispatch]
+permissions: write-all
+concurrency:
+  group: hil
+  cancel-in-progress: true
+jobs:
+  hil:
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, Windows, i226]
+    environment: hil
+    permissions:
+      contents: write
+    steps:
+$preflightStep
 "@
 $fx02 = New-Fx 'fx02_pr_direct.yml' @"
 on: [pull_request]
@@ -570,8 +713,11 @@ $preflightStep
 
 function Get-Kind($F, [string]$Kind) { return ,@(@($F) | Where-Object { $null -ne $_ -and $_.Kind -eq $Kind }) }
 
+function Get-Violations($F) { return ,@(@($F) | Where-Object { $null -ne $_ -and $_.Kind -ne 'Authorized' }) }
+
 $f = Get-WorkflowFindings $Fx $fx01
-tc_check 'TEST-HILTRUST-FX-001-dispatch-only-with-trusted-preflight-first-has-no-findings' (@($f).Count -eq 0) (Show-Findings $f)
+tc_check 'TEST-HILTRUST-FX-001-guarded-governed-dispatch-with-trusted-preflight-first-has-no-violations' `
+    (((Get-Violations $f).Count -eq 0) -and ((Get-Kind $f 'Authorized').Count -eq 1)) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx02
 tc_check 'TEST-HILTRUST-FX-002-pull-request-to-self-hosted-is-reachable' ((Get-Kind $f 'Reachable').Count -eq 1) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx03
@@ -583,7 +729,9 @@ tc_check 'TEST-HILTRUST-FX-004-job-if-event-equals-dispatch-excludes-pull-reques
 $f = Get-WorkflowFindings $Fx $fx05
 tc_check 'TEST-HILTRUST-FX-005-job-if-not-equal-schedule-does-not-exclude-pull-request' ((Get-Kind $f 'Reachable').Count -eq 1) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx06
-tc_check 'TEST-HILTRUST-FX-006-same-repo-head-guard-excludes-fork-pull-request' ((Get-Kind $f 'Reachable').Count -eq 0) (Show-Findings $f)
+$r6 = Get-Kind $f 'Reachable'
+tc_check 'TEST-HILTRUST-FX-006-same-repo-head-guard-excludes-fork-pr-but-not-same-repository-pr' `
+    (($r6.Count -eq 1) -and ($r6[0].Event -match 'same-repo-pr') -and ($r6[0].Event -notmatch 'fork-pr')) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx07
 tc_check 'TEST-HILTRUST-FX-007-undecidable-guard-fails-closed-as-reachable' ((Get-Kind $f 'Reachable').Count -eq 1) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx08
@@ -604,7 +752,24 @@ tc_check 'TEST-HILTRUST-FX-012-non-hosted-custom-label-treated-as-self-hosted' (
 $f = Get-WorkflowFindings $Fx $fx13
 tc_check 'TEST-HILTRUST-FX-013-github-hosted-only-pull-request-job-has-no-findings' (@($f).Count -eq 0) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx14
-tc_check 'TEST-HILTRUST-FX-014-steps-excluded-by-step-if-and-system-tools-are-not-repo-code' (@($f).Count -eq 0) (Show-Findings $f)
+tc_check 'TEST-HILTRUST-FX-014-steps-excluded-by-step-if-and-system-tools-are-not-repo-code' ((Get-Kind $f 'Order').Count -eq 0) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx15
+tc_check 'TEST-HILTRUST-FX-015-push-to-self-hosted-is-an-automatic-execution' ((Get-Kind $f 'Automatic').Count -eq 1) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx16
+tc_check 'TEST-HILTRUST-FX-016-schedule-guarded-only-by-repository-is-still-automatic' ((Get-Kind $f 'Automatic').Count -eq 1) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx17
+$u17 = Get-Kind $f 'UnauthorizedRef'
+tc_check 'TEST-HILTRUST-FX-017-dispatch-without-ref-and-repo-guard-is-unauthorized' `
+    (($u17.Count -eq 1) -and ($u17[0].Event -match 'feature-branch') -and ($u17[0].Event -match 'tag') -and ((Get-Kind $f 'ForeignRepo').Count -eq 1)) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx18
+$g18 = Get-Kind $f 'Governance'
+tc_check 'TEST-HILTRUST-FX-018-missing-permissions-environment-concurrency-and-persisted-credentials-fail-closed' `
+    (($g18.Count -eq 1) -and ($g18[0].Detail -match 'no explicit token permissions') -and ($g18[0].Detail -match 'no environment') -and
+     ($g18[0].Detail -match 'no concurrency') -and ($g18[0].Detail -match 'persists git credentials') -and ((Get-Kind $f 'UnauthorizedRef').Count -eq 0)) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx19
+$g19 = Get-Kind $f 'Governance'
+tc_check 'TEST-HILTRUST-FX-019-write-permission-and-cancelling-concurrency-are-violations' `
+    (($g19.Count -eq 1) -and ($g19[0].Detail -match 'permission contents: write') -and ($g19[0].Detail -match 'cancel-in-progress')) (Show-Findings $f)
 
 # ---------------------------------------------------------------------------------------------------------
 # REAL: this repository's workflows (characterization; RED is the expected current result)
@@ -620,17 +785,80 @@ foreach ($wfFile in @(Get-ChildItem $wfDir -File | Where-Object { $_.Extension -
 $realReach = Get-Kind $realFindings 'Reachable'
 $realOrder = Get-Kind $realFindings 'Order'
 $realExt   = Get-Kind $realFindings 'External'
+$realAuto  = Get-Kind $realFindings 'Automatic'
+$realRef   = @((Get-Kind $realFindings 'UnauthorizedRef') + (Get-Kind $realFindings 'ForeignRepo'))
+$realGov   = Get-Kind $realFindings 'Governance'
+$realAuth  = Get-Kind $realFindings 'Authorized'
 
 Write-Host ""
 Write-Host "  REAL findings (repository .github/workflows):" -ForegroundColor Yellow
 foreach ($x in $realFindings) { Write-Host ("    [{0}] {1} {{{2}}} @{3}: {4}" -f $x.Kind, $x.Job, $x.Leg, $x.Event, $x.Detail) -ForegroundColor Yellow }
 
 tc_check 'TEST-HILTRUST-REAL-001-no-self-hosted-leg-reachable-from-untrusted-events' ($realReach.Count -eq 0) `
-    ("{0} reachable self-hosted leg(s)" -f $realReach.Count)
+    ("{0} reachable self-hosted leg(s): {1}" -f $realReach.Count, (Show-Findings $realReach))
 tc_check 'TEST-HILTRUST-REAL-002-no-repository-code-before-trusted-hil-preflight' ($realOrder.Count -eq 0) `
     ("{0} self-hosted leg(s) run repository code without/before a trusted preflight" -f $realOrder.Count)
 tc_check 'TEST-HILTRUST-REAL-003-no-unverifiable-external-workflow-on-untrusted-events' ($realExt.Count -eq 0) `
     ("{0} external reusable workflow reference(s)" -f $realExt.Count)
+tc_check 'TEST-HILTRUST-REAL-004-no-automatic-event-reaches-the-hil-runner' ($realAuto.Count -eq 0) (Show-Findings $realAuto)
+tc_check 'TEST-HILTRUST-REAL-005-unauthorized-refs-and-foreign-repositories-cannot-dispatch-hil' ($realRef.Count -eq 0) (Show-Findings $realRef)
+tc_check 'TEST-HILTRUST-REAL-006-self-hosted-jobs-least-privilege-approval-and-no-overlap' ($realGov.Count -eq 0) (Show-Findings $realGov)
+$hilAuth = @($realAuth | Where-Object { $_.Job -eq '.github/workflows/hil.yml/hil' })
+$selfHostedJobs = @($realFindings | Where-Object { $_.Kind -in 'Authorized', 'Reachable', 'Automatic', 'UnauthorizedRef', 'ForeignRepo', 'Order', 'Governance' } | ForEach-Object { ($_.Job -split ' -> ')[0] } | Sort-Object -Unique)
+tc_check 'TEST-HILTRUST-REAL-007-hil-yml-is-the-only-self-hosted-workflow-and-is-reachable-by-the-operator' `
+    (($hilAuth.Count -eq 1) -and ($hilAuth[0].Event -eq 'workflow_dispatch[master]') -and (($selfHostedJobs -join ',') -eq '.github/workflows/hil.yml/hil')) `
+    ("authorized: {0}; self-hosted jobs: {1}" -f (Show-Findings $hilAuth), ($selfHostedJobs -join ','))
+
+# Hosted CI lanes preserved: ci-standards-compliance unit/integration matrices and their triggers.
+$ci = Read-Yaml (Join-Path $RepoRoot '.github\workflows\ci-standards-compliance.yml')
+$ciEvents = @(Get-Events $ci)
+$laneIssues = @()
+foreach ($j in 'unit-tests', 'integration-tests') {
+    if (-not $ci['jobs'].Contains($j)) { $laneIssues += "$j missing"; continue }
+    $legs = Expand-Matrix $ci['jobs'][$j]['strategy']['matrix']
+    $hosted = @($legs | Where-Object { -not (Test-Unk $_) -and -not (Test-SelfHostedLabels (Get-LegLabels $ci['jobs'][$j] (New-Ctx 'push' $_ 'trusted' $AuthorizedRef))) })
+    $combos = @($hosted | ForEach-Object { "$($_['os'])/$($_['config'])" } | Sort-Object)
+    if (($combos -join ',') -ne 'windows-2022/Debug,windows-2022/Release,windows-latest/Debug,windows-latest/Release') { $laneIssues += "$j hosted legs: $($combos -join ',')" }
+    if (@($legs).Count -ne $hosted.Count) { $laneIssues += "$j still has non-hosted legs" }
+}
+foreach ($ev in 'push', 'pull_request', 'workflow_dispatch') { if ($ciEvents -notcontains $ev) { $laneIssues += "ci-standards-compliance lost trigger $ev" } }
+tc_check 'TEST-HILTRUST-REAL-008-github-hosted-ci-lanes-and-triggers-preserved' ($laneIssues.Count -eq 0) ($laneIssues -join '; ')
+
+# Trusted preflight (runner-local copy of tools/hil-trusted/Invoke-HilPreflight.ps1): authorization policy only.
+$pfRef = Join-Path $RepoRoot 'tools\hil-trusted\Invoke-HilPreflight.ps1'
+$pfIssues = @()
+$hilPath = Join-Path $RepoRoot '.github\workflows\hil.yml'
+if (-not (Test-Path -LiteralPath $hilPath)) { $pfIssues += '.github/workflows/hil.yml missing' }
+else {
+    $hilWf = Read-Yaml $hilPath
+    $firstStep = if ($hilWf['jobs'].Contains('hil')) { @($hilWf['jobs']['hil']['steps'])[0] } else { @{} }
+    if (-not ($firstStep -is [System.Collections.IDictionary]) -or $firstStep['id'] -ne 'hil-trusted-preflight' -or
+        "$($firstStep['run'])" -notmatch [regex]::Escape("C:\hil-trusted\Invoke-HilPreflight.ps1")) { $pfIssues += 'hil.yml first step is not the runner-local trusted preflight' }
+}
+if (-not (Test-Path -LiteralPath $pfRef)) { $pfIssues += 'reference preflight missing' }
+else {
+    . $pfRef
+    $ok = @{ GITHUB_ACTIONS = 'true'; GITHUB_REPOSITORY = 'zarfld/IntelAvbFilter'; GITHUB_EVENT_NAME = 'workflow_dispatch'; GITHUB_REF = 'refs/heads/master'
+             GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master'; GITHUB_ACTOR = 'zarfld' }
+    function Merge-JobEnv([hashtable]$Base, [hashtable]$Delta) { $h = @{}; foreach ($k in $Base.Keys) { $h[$k] = $Base[$k] }; foreach ($k in $Delta.Keys) { if ($null -eq $Delta[$k]) { $h.Remove($k) } else { $h[$k] = $Delta[$k] } }; return $h }
+    $cases = [ordered]@{
+        'authorized master dispatch'   = @{ Env = $ok; Allow = $true }
+        'fork pull_request'            = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'pull_request'; GITHUB_REF = 'refs/pull/7/merge'; GITHUB_HEAD_REF = 'evil'; GITHUB_BASE_REF = 'master'; GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/pull/7/merge' }); Allow = $false }
+        'push to master'               = @{ Env = (Merge-JobEnv $ok @{ GITHUB_EVENT_NAME = 'push' }); Allow = $false }
+        'dispatch from feature branch' = @{ Env = (Merge-JobEnv $ok @{ GITHUB_REF = 'refs/heads/feature/x'; GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/feature/x' }); Allow = $false }
+        'other workflow on master'     = @{ Env = (Merge-JobEnv $ok @{ GITHUB_WORKFLOW_REF = 'zarfld/IntelAvbFilter/.github/workflows/ci-standards-compliance.yml@refs/heads/master' }); Allow = $false }
+        'foreign repository'           = @{ Env = (Merge-JobEnv $ok @{ GITHUB_REPOSITORY = 'untrusted-fork/IntelAvbFilter'; GITHUB_WORKFLOW_REF = 'untrusted-fork/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master' }); Allow = $false }
+        'workflow ref missing'         = @{ Env = (Merge-JobEnv $ok @{ GITHUB_WORKFLOW_REF = $null }); Allow = $false }
+        'outside GitHub Actions'       = @{ Env = (Merge-JobEnv $ok @{ GITHUB_ACTIONS = $null }); Allow = $false }
+    }
+    foreach ($n in $cases.Keys) {
+        $d = Test-HilJobAuthorization -JobEnv $cases[$n].Env -Policy $HilPolicy
+        if ($d.Allowed -ne $cases[$n].Allow) { $pfIssues += ("{0}: allowed={1} expected={2} ({3})" -f $n, $d.Allowed, $cases[$n].Allow, ($d.Reasons -join '; ')) }
+    }
+    $dActor = Test-HilJobAuthorization -JobEnv (Merge-JobEnv $ok @{ GITHUB_ACTOR = 'someone-else' }) -Policy $HilPolicy -AllowedActors @('zarfld')
+    if ($dActor.Allowed) { $pfIssues += 'actor outside the operator allow-list was authorized' }
+}
+tc_check 'TEST-HILTRUST-REAL-009-trusted-preflight-policy-authorizes-only-the-operator-dispatch-of-hil-yml-on-master' ($pfIssues.Count -eq 0) ($pfIssues -join ' || ')
 
 Remove-Item $script:Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

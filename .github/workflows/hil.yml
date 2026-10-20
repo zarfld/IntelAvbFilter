@@ -1,0 +1,100 @@
+name: HIL - Hardware-in-the-Loop (operator-dispatched)
+
+# The authoritative and ONLY workflow allowed to reach the physical HIL workstation
+# (self-hosted runner labels [self-hosted, Windows, i226]).  Trust boundary (#328;
+# investigations/hil-runner-trust-boundary-20261020.md; tests/unit/ci/test_hil_trust_boundary.ps1):
+#   - trigger: workflow_dispatch only (needs repository write access); never pull_request,
+#     pull_request_target, push or schedule;
+#   - job guard: this repository, event workflow_dispatch and ref refs/heads/master only;
+#   - environment `hil`: required reviewer + deployment branch policy `master` (GitHub settings, manual);
+#   - FIRST step: runner-local trusted preflight OUTSIDE the workspace (C:\hil-trusted, installed by the
+#     operator from the reviewed reference tools/hil-trusted/Invoke-HilPreflight.ps1).  The same script is
+#     configured as the runner's ACTIONS_RUNNER_HOOK_JOB_STARTED hook, so a modified workflow cannot skip it;
+#   - only then: checkout (no persisted credentials) -> build (writes test-build-manifest.json) ->
+#     repository driver pre-flight -> Run-Tests-CI.ps1 (HIL safety gate + build provenance);
+#   - least privilege (contents: read), no overlapping HIL jobs.
+# HardwareMutation is intentionally not offered: TAS/FP/PTM have no verified restore path (#9/#206, #328 A2).
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Test build configuration
+        type: choice
+        options: [Release, Debug]
+        default: Release
+      suite:
+        description: Run-Tests-CI.ps1 hardware suite
+        type: choice
+        options: [HardwareMandatory, HardwareUnit, HardwareIntegration]
+        default: HardwareMandatory
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hil-physical-workstation
+  cancel-in-progress: false
+
+jobs:
+  hil:
+    name: HIL ${{ inputs.suite }} (${{ inputs.configuration }})
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, Windows, i226]
+    environment: hil
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    concurrency:
+      group: hil-physical-workstation-job
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+    env:
+      HIL_CONFIGURATION: ${{ inputs.configuration }}
+      HIL_SUITE: ${{ inputs.suite }}
+    steps:
+      - id: hil-trusted-preflight
+        name: Trusted HIL preflight (runner-local, outside the workspace)
+        run: |
+          & 'C:\hil-trusted\Invoke-HilPreflight.ps1' -Mode Step
+          exit $LASTEXITCODE
+
+      - name: Validate dispatch inputs
+        run: |
+          if (@('Release', 'Debug') -notcontains $env:HIL_CONFIGURATION) { Write-Host "invalid configuration '$env:HIL_CONFIGURATION'"; exit 1 }
+          if (@('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration') -notcontains $env:HIL_SUITE) { Write-Host "invalid suite '$env:HIL_SUITE'"; exit 1 }
+
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: 'false'
+          clean: 'true'
+
+      - name: Build test binaries (writes test-build-manifest.json)
+        run: |
+          .\tools\build\Build-Tests.ps1 -Configuration $env:HIL_CONFIGURATION
+          exit $LASTEXITCODE
+
+      - name: Driver pre-flight (repository)
+        run: |
+          .\tools\test\Test-DriverPreFlight.ps1
+          exit $LASTEXITCODE
+
+      - name: Run hardware suite (HIL safety gate + build provenance)
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite $env:HIL_SUITE
+          exit $LASTEXITCODE
+
+      - name: Upload HIL evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hil-${{ inputs.suite }}-${{ inputs.configuration }}-${{ github.run_id }}
+          path: |
+            logs/junit-*.xml
+            logs/traceability-summary-*.md
+            logs/*.log
+          retention-days: 30

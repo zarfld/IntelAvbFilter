@@ -35,6 +35,12 @@ Read-only audit. Nothing started, stopped, disabled or reconfigured.
 3. Runner group restricted to this repository and to `hil.yml` (runner-group "selected workflows").
 4. Fix ACL so `CodexSandboxUsers` cannot read `.credentials*`.
 
+## Iteration 3 status (offline; uncommitted; runner still offline)
+
+Implemented: self-hosted legs removed from `ci-standards-compliance.yml` (hosted lanes unchanged); new `.github/workflows/hil.yml` (workflow_dispatch only; job guard repository + event + `refs/heads/master`; `environment: hil`; `permissions: contents: read`; non-cancelling concurrency; first step runner-local `C:\hil-trusted\Invoke-HilPreflight.ps1`; checkout `persist-credentials: false`; inputs validated via env; HardwareMutation not offered); reference preflight `tools/hil-trusted/Invoke-HilPreflight.ps1` (job-authorization policy incl. `GITHUB_WORKFLOW_REF` + read-only machine baseline). `tests/unit/ci/test_hil_trust_boundary.ps1`: 29/29 (HEAD workflows: 21/8).
+
+Still manual (cannot be enforced or verified from the repository): environment `hil` with required reviewer + deployment branch `master`; fork-PR approval for all outside collaborators; branch protection/CODEOWNERS for `.github/workflows/**` and `tools/hil-trusted/**`; installing the preflight at `C:\hil-trusted` (admin-only ACL) and as `ACTIONS_RUNNER_HOOK_JOB_STARTED`; authorized driver SHA256 and bugcheck acknowledgement files; single runner start mechanism; `.credentials*` ACL; action SHA pinning. Personal public repository: runner groups / "selected workflows" restriction is not available — the job-started hook is the runner-side enforcement point.
+
 ## Characterization tests to write (offline, before any change)
 
 - `tests/unit/ci/test_hil_trust_boundary.ps1`: parse workflows; FAIL if any job resolving to a `self-hosted` label is reachable from `pull_request`/`pull_request_target` or lacks a repository guard; FAIL if any repo-code step precedes the HIL pre-flight. Expected RED today (F2, F3).

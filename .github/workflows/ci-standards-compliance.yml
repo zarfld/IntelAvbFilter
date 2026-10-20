@@ -450,7 +450,7 @@ jobs:
   # Phase 05: TDD - Test-Driven Development
   unit-tests:
     name: Unit Tests (${{ matrix.os }}, ${{ matrix.config }})
-    runs-on: ${{ matrix.runner || matrix.os }}
+    runs-on: ${{ matrix.os }}
     # Allow the self-hosted hardware runner to fail without blocking the rest of CI.
     # This handles the runner being offline or hardware unavailable.
     continue-on-error: ${{ matrix.hardware == true }}
@@ -464,18 +464,10 @@ jobs:
         os: [windows-latest,windows-2022]
         config: [Debug, Release]
         hardware: [false]
-        # Self-hosted runner with Intel NIC + IntelAvbFilter driver installed.
-        # Sleep/hibernate tests (test_s3_sleep_wake) are intentionally absent from
-        # all automated suites — run them manually on a dedicated test machine only.
-        include:
-          - os: self-hosted-hardware
-            runner: [self-hosted, Windows, i226]
-            config: Debug
-            hardware: true
-          - os: self-hosted-hardware
-            runner: [self-hosted, Windows, i226]
-            config: Release
-            hardware: true
+        # The self-hosted HIL legs (former `include: runner: [self-hosted, Windows, i226]`) were moved to
+        # .github/workflows/hil.yml: this workflow runs on push/pull_request/schedule and must never reach the
+        # physical HIL workstation (#328 trust boundary; tests/unit/ci/test_hil_trust_boundary.ps1).
+        # Sleep/hibernate tests (test_s3_sleep_wake) remain absent from all automated suites.
 
     steps:
       - name: Checkout code
@@ -1087,7 +1079,7 @@ jobs:
   # Phase 06: Integration Testing
   integration-tests:
     name: Integration Tests (${{ matrix.os }}, ${{ matrix.config }})
-    runs-on: ${{ matrix.runner || matrix.os }}
+    runs-on: ${{ matrix.os }}
     needs: [unit-tests]
     # Allow the self-hosted hardware runner to fail without blocking the rest of CI.
     continue-on-error: ${{ matrix.hardware == true }}
@@ -1101,17 +1093,7 @@ jobs:
         os: [windows-latest, windows-2022]
         config: [Debug, Release]
         hardware: [false]
-        # Self-hosted runner with Intel NIC + IntelAvbFilter driver installed.
-        # Sleep/hibernate tests (test_s3_sleep_wake) are intentionally absent.
-        include:
-          - os: self-hosted-hardware
-            runner: [self-hosted, Windows, i226]
-            config: Debug
-            hardware: true
-          - os: self-hosted-hardware
-            runner: [self-hosted, Windows, i226]
-            config: Release
-            hardware: true
+        # Self-hosted HIL legs moved to .github/workflows/hil.yml (operator-dispatched, trusted ref only).
 
     steps:
       - name: Checkout code
