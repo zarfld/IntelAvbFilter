@@ -242,16 +242,33 @@ if ($fnMissing -eq '') {
         (($d8.Action -eq 'Block') -and ($d8.Reason -match 'source revision unavailable') -and ($d9.Action -eq 'Block')) ("current={0}: {1} | build={2}: {3}" -f $d8.Action, $d8.Reason, $d9.Action, $d9.Reason)
     # Under GitHub Actions the checked-out HEAD must equal the dispatched GITHUB_SHA (read-only git on this checkout).
     $script:IsSandbox = $false; $script:repoRoot = $RepoRoot
-    $saveGa = $env:GITHUB_ACTIONS; $saveSha = $env:GITHUB_SHA
+    $saveGa = $env:GITHUB_ACTIONS; $saveSha = $env:GITHUB_SHA; $saveEv = $env:GITHUB_EVENT_NAME; $saveExp = $env:AVB_HIL_EXPECTED_REVISION
     try {
+        Remove-Item Env:GITHUB_EVENT_NAME, Env:AVB_HIL_EXPECTED_REVISION -ErrorAction SilentlyContinue
         $env:GITHUB_ACTIONS = 'true'; $env:GITHUB_SHA = ('0' * 40)
         $sMis = Get-AvbSourceIdentity
         $head = (& git -C $RepoRoot rev-parse HEAD).Trim()
         $env:GITHUB_SHA = $head
         $sOk = Get-AvbSourceIdentity
-    } finally { $env:GITHUB_ACTIONS = $saveGa; $env:GITHUB_SHA = $saveSha }
-    tc_check 'TEST-HILPROV-040-github-actions-checkout-must-equal-dispatched-sha' `
-        ((-not $sMis.Ok) -and ($sMis.Error -match 'not the dispatched commit') -and $sOk.Ok -and ($sOk.Revision -eq $head)) ("mismatch: ok={0} '{1}' | match: ok={2}" -f $sMis.Ok, $sMis.Error, $sOk.Ok)
+        # workflow_run (.github/workflows/hil.yml): GITHUB_SHA is the default-branch tip; the authorized upstream
+        # head_sha arrives as AVB_HIL_EXPECTED_REVISION and is mandatory.
+        $env:GITHUB_EVENT_NAME = 'workflow_run'; $env:GITHUB_SHA = ('f' * 40)
+        $wNone = Get-AvbSourceIdentity
+        $env:AVB_HIL_EXPECTED_REVISION = $head
+        $wOk = Get-AvbSourceIdentity
+        $env:AVB_HIL_EXPECTED_REVISION = ('0' * 40)
+        $wMis = Get-AvbSourceIdentity
+        $env:AVB_HIL_EXPECTED_REVISION = 'master'
+        $wBad = Get-AvbSourceIdentity
+    } finally {
+        $env:GITHUB_ACTIONS = $saveGa; $env:GITHUB_SHA = $saveSha; $env:GITHUB_EVENT_NAME = $saveEv; $env:AVB_HIL_EXPECTED_REVISION = $saveExp
+    }
+    tc_check 'TEST-HILPROV-040-github-actions-checkout-must-equal-authorized-sha' `
+        ((-not $sMis.Ok) -and ($sMis.Error -match 'not the authorized commit GITHUB_SHA') -and $sOk.Ok -and ($sOk.Revision -eq $head)) ("mismatch: ok={0} '{1}' | match: ok={2}" -f $sMis.Ok, $sMis.Error, $sOk.Ok)
+    tc_check 'TEST-HILPROV-041-workflow-run-binds-head-to-the-authorized-upstream-sha-not-github-sha' `
+        ((-not $wNone.Ok) -and ($wNone.Error -match 'required for workflow_run') -and $wOk.Ok -and ($wOk.Revision -eq $head) -and
+         (-not $wMis.Ok) -and ($wMis.Error -match 'AVB_HIL_EXPECTED_REVISION') -and (-not $wBad.Ok)) `
+        ("none: {0} '{1}' | ok: {2} | mismatch: {3} '{4}' | malformed: {5}" -f $wNone.Ok, $wNone.Error, $wOk.Ok, $wMis.Ok, $wMis.Error, $wBad.Ok)
     $outcomesReenable = @{ 't_built' = @{ Status = 'failed'; Reason = 'compiler exit code 2 or output missing'; OutputPath = $null } }
     $testsReenable = @(@{ Name = 't_built'; Type = 'cl'; Output = 't_built.exe' }, @{ Name = 't_reenabled'; Type = 'cl'; Output = 't_reenabled.exe' })
     $mPartial = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $testsReenable -Outcomes $outcomesReenable -SourceRevision 'rev-now' -SourceDirty $false

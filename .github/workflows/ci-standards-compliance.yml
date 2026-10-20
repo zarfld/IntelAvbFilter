@@ -451,9 +451,6 @@ jobs:
   unit-tests:
     name: Unit Tests (${{ matrix.os }}, ${{ matrix.config }})
     runs-on: ${{ matrix.os }}
-    # Allow the self-hosted hardware runner to fail without blocking the rest of CI.
-    # This handles the runner being offline or hardware unavailable.
-    continue-on-error: ${{ matrix.hardware == true }}
     permissions:
       contents: read
       checks: write
@@ -464,9 +461,8 @@ jobs:
         os: [windows-latest,windows-2022]
         config: [Debug, Release]
         hardware: [false]
-        # The self-hosted HIL legs (former `include: runner: [self-hosted, Windows, i226]`) were moved to
-        # .github/workflows/hil.yml: this workflow runs on push/pull_request/schedule and must never reach the
-        # physical HIL workstation (#328 trust boundary; tests/unit/ci/test_hil_trust_boundary.ps1).
+        # GitHub-hosted only.  Physical HIL runs in .github/workflows/hil.yml (workflow_run after this workflow and
+        # its deploy-staging job succeeded on a master push; #328 trust boundary, tests/unit/ci/test_hil_trust_boundary.ps1).
         # Sleep/hibernate tests (test_s3_sleep_wake) remain absent from all automated suites.
 
     steps:
@@ -619,76 +615,6 @@ jobs:
             }
           }
 
-      - name: Verify prerequisites (self-hosted hardware runner)
-        # On self-hosted runners, verify all required tools are present.
-        # This job NEVER installs anything — it only reports missing prerequisites.
-        if: runner.os == 'Windows' && matrix.hardware == true
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          $missing = @()
-
-          # WDK km headers (required by driver build)
-          $wdkKm = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
-          $wdkFound = Get-ChildItem $wdkKm -Directory -ErrorAction SilentlyContinue |
-                      Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
-                      Select-Object -First 1
-          if ($wdkFound) {
-            Write-Host "WDK km headers present: $($wdkFound.FullName)"
-            "WDK_VERSION=$($wdkFound.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          } else {
-            $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
-          }
-
-          # Npcap SDK
-          $npcapDest = 'C:\npcap-sdk-1.16'
-          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
-            Write-Host "Npcap SDK present: $npcapDest"
-          } else {
-            $missing += "Npcap SDK (expected at $npcapDest)"
-          }
-
-          # TAEF / WEX headers (export to ENV for build if found)
-          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
-          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
-          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
-            Write-Host "TAEF development headers present"
-            "TAEF_INCLUDE=$taefInc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            "TAEF_LIB=$taefLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          } else {
-            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) {
-              Write-Host "TAEF headers found at $($found.DirectoryName)"
-              "TAEF_INCLUDE=$($found.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-              $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
-              "TAEF_LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            } else {
-              Write-Host "WARNING: TAEF/WEX headers not found -- taef_tests will be skipped"
-            }
-          }
-
-          # MSBuild / Visual Studio
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vswhere) {
-            $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
-            if ($vsPath) {
-              Write-Host "Visual Studio present: $vsPath"
-            } else {
-              $missing += 'Visual Studio (vswhere found no installations)'
-            }
-          } else {
-            $missing += 'Visual Studio installer / vswhere.exe'
-          }
-
-          if ($missing.Count -gt 0) {
-            Write-Host ""
-            Write-Host "ERROR: Missing prerequisites on self-hosted runner:"
-            $missing | ForEach-Object { Write-Host "   - $_" }
-            Write-Host "Install these manually on the runner machine before running hardware CI jobs."
-            exit 1
-          }
-          Write-Host ""
-          Write-Host "All prerequisites verified on $env:RUNNER_NAME"
-
       - name: Validate PowerShell 5.1 syntax (Windows)
         # Early gate: fail immediately if any CI-critical script has a PS5.1 parser error.
         # Runs BEFORE the build step so a syntax regression never silently reaches tests.
@@ -713,23 +639,6 @@ jobs:
           # NOT suitable for headless CI.  Run-Tests-CI.ps1 is the correct entry point here.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Unit
  
-      - name: Verify IntelAvbFilter driver accessible (self-hosted)
-        # Pre-flight: confirm the driver is Running and the device node opens before
-        # launching 50+ hardware tests that would all cascade-fail if the driver is down.
-        if: runner.os == 'Windows' && matrix.hardware == true
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: .\tools\test\Test-DriverPreFlight.ps1
-
-      - name: Run hardware-dependent unit tests (self-hosted, Intel NIC required)
-        # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
-        # test_s3_sleep_wake is intentionally absent from HardwareUnit: TC-S3-002 calls
-        # SetSuspendState which puts the host into S3 sleep, blocking the runner.
-        if: runner.os == 'Windows' && matrix.hardware == true
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          Write-Host " Running hardware-dependent unit tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
-          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareUnit
-
       - name: Run SSOT & register verification tests (Windows)
         # Verifies: #301 (TEST-SSOT-001), #302 (TEST-SSOT-003), #303 (TEST-SSOT-004)
         #           #304 (TEST-REGS-001), #305 (TEST-REGS-002), #306 (TEST-REGS-003)
@@ -817,7 +726,8 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: traceability-unit-${{ matrix.os }}-${{ matrix.config }}
-          path: test-evidence/traceability-summary-*.md
+          # Current run only (logs/ is gitignored); test-evidence/ holds COMMITTED historical summaries.
+          path: logs/traceability-summary-*.md
           if-no-files-found: ignore
 
       - name: Report test status
@@ -830,14 +740,6 @@ jobs:
           echo "   Build System: ${{ env.BUILD_SYSTEM }}"
           echo ""
           echo "Code coverage target: >=${{ env.MIN_TEST_COVERAGE }}%"
-
-      - name: Report test status (hardware runner)
-        if: matrix.hardware == true
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          Write-Host "Test Status Report"
-          Write-Host "   Runner: $env:RUNNER_NAME"
-          Write-Host "   Configuration: ${{ matrix.config }}"
 
   traceability-coverage:
     name: Traceability Coverage Enforcement
@@ -1081,8 +983,6 @@ jobs:
     name: Integration Tests (${{ matrix.os }}, ${{ matrix.config }})
     runs-on: ${{ matrix.os }}
     needs: [unit-tests]
-    # Allow the self-hosted hardware runner to fail without blocking the rest of CI.
-    continue-on-error: ${{ matrix.hardware == true }}
     permissions:
       contents: read
       checks: write
@@ -1093,7 +993,7 @@ jobs:
         os: [windows-latest, windows-2022]
         config: [Debug, Release]
         hardware: [false]
-        # Self-hosted HIL legs moved to .github/workflows/hil.yml (operator-dispatched, trusted ref only).
+        # GitHub-hosted only.  Physical HIL: .github/workflows/hil.yml.
 
     steps:
       - name: Checkout code
@@ -1215,76 +1115,6 @@ jobs:
             }
           }
 
-      - name: Verify prerequisites (self-hosted hardware runner)
-        # On self-hosted runners, verify all required tools are present.
-        # This job NEVER installs anything — it only reports missing prerequisites.
-        if: runner.os == 'Windows' && matrix.hardware == true
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          $missing = @()
-
-          # WDK km headers (required by driver build)
-          $wdkKm = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
-          $wdkFound = Get-ChildItem $wdkKm -Directory -ErrorAction SilentlyContinue |
-                      Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
-                      Select-Object -First 1
-          if ($wdkFound) {
-            Write-Host "WDK km headers present: $($wdkFound.FullName)"
-            "WDK_VERSION=$($wdkFound.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          } else {
-            $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
-          }
-
-          # Npcap SDK
-          $npcapDest = 'C:\npcap-sdk-1.16'
-          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
-            Write-Host "Npcap SDK present: $npcapDest"
-          } else {
-            $missing += "Npcap SDK (expected at $npcapDest)"
-          }
-
-          # TAEF / WEX headers (export to ENV for build if found)
-          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
-          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
-          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
-            Write-Host "TAEF development headers present"
-            "TAEF_INCLUDE=$taefInc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            "TAEF_LIB=$taefLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          } else {
-            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) {
-              Write-Host "TAEF headers found at $($found.DirectoryName)"
-              "TAEF_INCLUDE=$($found.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-              $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
-              "TAEF_LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            } else {
-              Write-Host "WARNING: TAEF/WEX headers not found -- taef_tests will be skipped"
-            }
-          }
-
-          # MSBuild / Visual Studio
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vswhere) {
-            $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
-            if ($vsPath) {
-              Write-Host "Visual Studio present: $vsPath"
-            } else {
-              $missing += 'Visual Studio (vswhere found no installations)'
-            }
-          } else {
-            $missing += 'Visual Studio installer / vswhere.exe'
-          }
-
-          if ($missing.Count -gt 0) {
-            Write-Host ""
-            Write-Host "ERROR: Missing prerequisites on self-hosted runner:"
-            $missing | ForEach-Object { Write-Host "   - $_" }
-            Write-Host "Install these manually on the runner machine before running hardware CI jobs."
-            exit 1
-          }
-          Write-Host ""
-          Write-Host "All prerequisites verified on $env:RUNNER_NAME"
-
       - name: Build Windows integration tests (Windows)
         if: runner.os == 'Windows'
         shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
@@ -1299,21 +1129,6 @@ jobs:
         run: |
           # GitHub runner is already Administrator — call Run-Tests-CI.ps1 directly.
           .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite Integration
-
-      - name: Verify IntelAvbFilter driver accessible (self-hosted)
-        # Pre-flight: confirm driver state before integration tests for the same reason as the unit-test job.
-        if: runner.os == 'Windows' && matrix.hardware == true
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: .\tools\test\Test-DriverPreFlight.ps1
-
-      - name: Run hardware-dependent integration tests (self-hosted, Intel NIC required)
-        # Runs ONLY on the self-hosted runner that has an Intel NIC + driver installed.
-        # test_s3_sleep_wake is intentionally absent from HardwareIntegration.
-        if: runner.os == 'Windows' && matrix.hardware == true
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          Write-Host " Running hardware-dependent integration tests on $env:RUNNER_NAME..." -ForegroundColor Cyan
-          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareIntegration
 
       - name: Hardware-dependent integration tests (Windows, skipped — no Intel NIC on runner)
         if: runner.os == 'Windows' && matrix.hardware == false
@@ -1369,7 +1184,8 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: traceability-integration-${{ matrix.os }}-${{ matrix.config }}
-          path: test-evidence/traceability-summary-*.md
+          # Current run only (logs/ is gitignored); never the committed test-evidence/ summaries.
+          path: logs/traceability-summary-*.md
           if-no-files-found: ignore
 
       - name: Validate integration test status
@@ -1892,7 +1708,9 @@ jobs:
   # Implements: #265 (TEST-COVERAGE-001), #244 (TEST-BUILD-CI-001)
   # Traces to:  #98 (REQ-NF-BUILD-CI-001)
   hardware-test-evidence:
-    name: Hardware Test Evidence (local run, committed XML)
+    # HISTORICAL committed evidence only - never a result of this run and never hardware verification
+    # (that is .github/workflows/hil.yml).
+    name: Hardware Test Evidence (HISTORICAL committed XML, not this run)
     runs-on: ubuntu-latest
     # Run independently of build jobs — evidence comes from committed files
     if: always()
@@ -1924,7 +1742,7 @@ jobs:
         if: env.EVIDENCE_EXISTS == 'true'
         uses: dorny/test-reporter@v2
         with:
-          name: "Hardware Tests (local evidence ${{ env.EVIDENCE_DATE }})"
+          name: "HISTORICAL hardware evidence ${{ env.EVIDENCE_DATE }} (committed, not this run)"
           path: "test-evidence/hardware-results-latest.xml"
           reporter: java-junit
           # evidence-only: do not fail CI just because hardware tests failed

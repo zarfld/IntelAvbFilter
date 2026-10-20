@@ -1,5 +1,5 @@
 # test_hil_suite_safety.ps1
-# TEST-HILSUITE-*: the hardware suites offered by .github/workflows/hil.yml must not be able to execute TSN
+# TEST-HILSUITE-*: the hardware suites dispatched automatically (ci-standards-compliance.yml HIL jobs) must not be able to execute TSN
 # configuration (SETUP_TAS / SETUP_FP / SETUP_PTM / SETUP_QAV / SET_LAUNCH_TIME / DISARM_TAS) with a hardware
 # effect, nor nested executables, through any entry the HIL safety gate would run - regardless of the entry's
 # declared class.
@@ -33,7 +33,7 @@ function tc_fail { param([string]$n, [string]$why) $script:total++; $script:fail
 function tc_check { param([string]$n, [bool]$ok, [string]$why) if ($ok) { tc_pass $n } else { tc_fail $n $why } }
 
 Write-Host ""
-Write-Host "TEST-HILSUITE: TSN configuration and nested execution unreachable through hil.yml suites (static)" -ForegroundColor Cyan
+Write-Host "TEST-HILSUITE: TSN configuration and nested execution unreachable through automatic HIL suites (static)" -ForegroundColor Cyan
 
 # IOCTL function numbers from include/avb_ioctl.h (_NDIS_CONTROL_CODE(n) = CTL_CODE(0x17, n, ...) = 0x00170000 + 4n).
 $TsnFn = [ordered]@{ SETUP_TAS = 26; SETUP_FP = 27; SETUP_PTM = 28; SETUP_QAV = 35; SET_LAUNCH_TIME = 64; DISARM_TAS = 66 }
@@ -280,14 +280,16 @@ $SpawnExceptions.Remove('fx_wprok'); $SpawnExceptions.Remove('fx_wprbad')
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------------------------------------
-# REAL: hil.yml offered suites
+# REAL: hardware suites dispatched by any workflow (the automatic HIL jobs of ci-standards-compliance.yml)
 # ---------------------------------------------------------------------------------------------------------
-$hilText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
-$m = [regex]::Match($hilText, '(?ms)^\s{6}suite:\s*$.*?^\s{8}options:\s*\[([^\]]*)\]')
-$offered = if ($m.Success) { @($m.Groups[1].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @() }
-$approved = @('HardwareMandatory', 'HardwareUnit')
-tc_check 'TEST-HILSUITE-REAL-001-hil-yml-offers-only-reviewed-suites' (($offered.Count -gt 0) -and (@($offered | Where-Object { $approved -notcontains $_ }).Count -eq 0)) `
-    ("offered: [{0}]; approved: [{1}]" -f ($offered -join ','), ($approved -join ','))
+$offered = @()
+foreach ($wf in @(Get-ChildItem (Join-Path $RepoRoot '.github\workflows') -File | Where-Object { $_.Extension -in '.yml', '.yaml' })) {
+    foreach ($mm in [regex]::Matches([System.IO.File]::ReadAllText($wf.FullName), 'Run-Tests-CI\.ps1[^\r\n]*?-Suite\s+(Hardware\w+)')) { $offered += $mm.Groups[1].Value }
+}
+$offered = @($offered | Sort-Object -Unique)
+$approved = @('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration')
+tc_check 'TEST-HILSUITE-REAL-001-workflows-dispatch-only-reviewed-hardware-suites' (($offered.Count -gt 0) -and (@($offered | Where-Object { $approved -notcontains $_ }).Count -eq 0)) `
+    ("dispatched: [{0}]; approved: [{1}]" -f ($offered -join ','), ($approved -join ','))
 
 function Get-RunnerList([string]$name) {
     $as = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -338,6 +340,6 @@ tc_check 'TEST-HILSUITE-REAL-004-tas-fp-ptm-handlers-are-recognized-as-hardware-
 
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
-if ($failed -gt 0) { Write-Host "[FAIL] TEST-HILSUITE: hil.yml suites can reach TSN configuration or nested execution" -ForegroundColor Red; exit 1 }
-Write-Host "[PASS] TEST-HILSUITE: hil.yml suites cannot reach TSN configuration or nested execution" -ForegroundColor Green
+if ($failed -gt 0) { Write-Host "[FAIL] TEST-HILSUITE: automatic HIL suites can reach TSN configuration or nested execution" -ForegroundColor Red; exit 1 }
+Write-Host "[PASS] TEST-HILSUITE: automatic HIL suites cannot reach TSN configuration or nested execution" -ForegroundColor Green
 exit 0

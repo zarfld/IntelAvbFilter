@@ -2,6 +2,12 @@
 
 Read-only audit. Nothing started, stopped, disabled or reconfigured.
 
+> **Superseded path (iteration 5):** the manual-dispatch `hil.yml` and the runner-local `C:\hil-trusted` hook below
+> were replaced. `hil.yml` now starts on `workflow_run` after "CI - Standards Compliance & Quality Gates" completed
+> successfully for a master push with a successful `deploy-staging`, authorized by a GitHub-hosted job; the existing
+> runner is intentionally elevated. See `hil-automatic-ci-restoration-20261020.md`. The facts below remain the audit
+> record.
+
 ## FACTS
 
 1. Repository `zarfld/IntelAvbFilter` is public.

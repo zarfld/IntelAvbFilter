@@ -1,103 +1,667 @@
-name: HIL - Hardware-in-the-Loop (operator-dispatched)
+name: HIL - Hardware-in-the-Loop
 
-# The authoritative and ONLY workflow allowed to reach the physical HIL workstation
-# (self-hosted runner labels [self-hosted, Windows, i226]).  Trust boundary (#328;
-# investigations/hil-runner-trust-boundary-20261020.md; tests/unit/ci/test_hil_trust_boundary.ps1):
-#   - trigger: workflow_dispatch only (needs repository write access); never pull_request,
-#     pull_request_target, push or schedule;
-#   - job guard: this repository, event workflow_dispatch and ref refs/heads/master only;
-#   - environment `hil`: required reviewer + deployment branch policy `master` (GitHub settings, manual);
-#   - FIRST step: runner-local trusted preflight OUTSIDE the workspace (C:\hil-trusted, installed by the
-#     operator from the reviewed reference tools/hil-trusted/Invoke-HilPreflight.ps1).  The same script is
-#     configured as the runner's ACTIONS_RUNNER_HOOK_JOB_STARTED hook, so a modified workflow cannot skip it;
-#   - only then: checkout (no persisted credentials) -> build (writes test-build-manifest.json) ->
-#     repository driver pre-flight -> Run-Tests-CI.ps1 (HIL safety gate + build provenance);
-#   - least privilege (contents: read), no overlapping HIL jobs.
-# HardwareIntegration and HardwareMutation are intentionally not offered: their gate-runnable entries can issue
-# SETUP_TAS / SETUP_FP / SETUP_PTM (avb_test_portability, avb_test_i217/_i225/_i226_um) and nested processes,
-# and TAS/FP/PTM have no verified restore path (#9/#206, #328 A2).  Offered suites are proven free of
-# hardware-reaching TSN configuration by tests/unit/ci/test_hil_suite_safety.ps1.
+# Physical HIL on the I226/I210/I219 workstation (self-hosted runner, labels self-hosted/Windows/i226; the runner is
+# intentionally elevated: the IntelAvbFilter control device admits Administrators only, #73).
+#
+# Starts automatically when "CI - Standards Compliance & Quality Gates" (ci-standards-compliance.yml) completes.
+# A workflow_run workflow always runs THIS file from the default branch (master), never from the triggering branch
+# or pull request.  Order (Unit -> Integration -> Acceptance):
+#   authorize       GitHub-hosted.  The triggering CI run must be a push to master of zarfld/IntelAvbFilter that
+#                   completed successfully, the event payload must match the API (run id, attempt, head_sha, path,
+#                   event, branch, conclusion), its deploy-staging job must have completed with conclusion success
+#                   (skipped is not enough), master must be protected and head_sha reachable from master.
+#                   Nothing from the triggering run is interpolated into a script (event file + API only).
+#   hil-unit        self-hosted, Debug/Release (max-parallel 1): inline preflight (authorization context, elevation,
+#                   machine/driver baseline) BEFORE any repository code -> checkout of the authorized head_sha ->
+#                   build -> device pre-flight -> run identity -> Run-Tests-CI HardwareMandatory + HardwareUnit.
+#   hil-integration same, after hil-unit: Run-Tests-CI HardwareIntegration.
+#   hil-acceptance  GitHub-hosted: requires every current-run evidence bundle (identity = this run, authorized
+#                   head_sha, upstream run) with real passes; publishes JUnit and traceability.
+# Every non-eligible trigger (pull request, fork, other branch or tag, failed CI) skips every job; an eligible trigger
+# that fails verification fails `authorize` and nothing reaches the workstation.
+# Automatic suites run ReadOnly/Init entries only; excluded tests are reported as TC-HIL-COVERAGE-GAP-001.
+# Serialization: one runner instance + max-parallel 1 (a concurrency group would cancel pending runs or legs).
 
 on:
-  workflow_dispatch:
-    inputs:
-      configuration:
-        description: Test build configuration
-        type: choice
-        options: [Release, Debug]
-        default: Release
-      suite:
-        description: Run-Tests-CI.ps1 hardware suite
-        type: choice
-        options: [HardwareMandatory, HardwareUnit]
-        default: HardwareMandatory
+  workflow_run:
+    workflows: ["CI - Standards Compliance & Quality Gates"]
+    types: [completed]
 
-permissions:
-  contents: read
-
-concurrency:
-  group: hil-physical-workstation
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  hil:
-    name: HIL ${{ inputs.suite }} (${{ inputs.configuration }})
-    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+  authorize:
+    name: Authorize HIL (GitHub-hosted)
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      authorized: ${{ steps.authz.outputs.authorized }}
+      head_sha: ${{ steps.authz.outputs.head_sha }}
+      upstream_run_id: ${{ steps.authz.outputs.upstream_run_id }}
+      upstream_run_attempt: ${{ steps.authz.outputs.upstream_run_attempt }}
+    steps:
+      - name: Verify triggering CI run and its deploy-staging job
+        id: authz
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 -I {0}
+        run: |
+          # HIL authorization.  Inputs: the event file and the GitHub API only (no expression interpolation).
+          import json, os, re, sys, urllib.request
+
+          REPO = 'zarfld/IntelAvbFilter'
+          CI_PATH = '.github/workflows/ci-standards-compliance.yml'
+          DEPLOY_JOB = 'Deploy to Staging (Phase 08 - Transition)'   # name: of the deploy-staging job
+          API = os.environ.get('GITHUB_API_URL') or 'https://api.github.com'
+          reasons = []
+
+          def get(path):
+              req = urllib.request.Request(API + path, headers={
+                  'Authorization': 'Bearer ' + os.environ.get('GH_TOKEN', ''), 'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'IntelAvbFilter-hil-authorize'})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          def field(obj, path):
+              for k in path.split('.'):
+                  obj = obj.get(k) if isinstance(obj, dict) else None
+              return obj
+
+          sha, run_id, attempt = '', 0, 0
+          try:
+              if os.environ.get('GITHUB_REPOSITORY') != REPO:
+                  reasons.append('repository %r is not %s' % (os.environ.get('GITHUB_REPOSITORY'), REPO))
+              if os.environ.get('GITHUB_EVENT_NAME') != 'workflow_run':
+                  reasons.append('event %r is not workflow_run' % os.environ.get('GITHUB_EVENT_NAME'))
+              with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as fh:
+                  ev = json.load(fh)
+              if ev.get('action') != 'completed':
+                  reasons.append('workflow_run action %r is not completed' % ev.get('action'))
+              wr = ev.get('workflow_run') if isinstance(ev.get('workflow_run'), dict) else {}
+              want = {'repository.full_name': REPO, 'head_repository.full_name': REPO, 'event': 'push',
+                      'head_branch': 'master', 'status': 'completed', 'conclusion': 'success', 'path': CI_PATH}
+              for k, v in want.items():
+                  if field(wr, k) != v:
+                      reasons.append('triggering run %s is %r, not %r' % (k, field(wr, k), v))
+              sha, run_id, attempt = wr.get('head_sha'), wr.get('id'), wr.get('run_attempt')
+              if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
+                  reasons.append('head_sha %r is not a 40-hex commit id' % (sha,))
+              if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
+                  reasons.append('run id %r is invalid' % (run_id,))
+              if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                  reasons.append('run attempt %r is invalid' % (attempt,))
+              if not reasons:
+                  run = get('/repos/%s/actions/runs/%d' % (REPO, run_id))
+                  for k in ['id', 'run_attempt', 'head_sha', 'event', 'head_branch', 'path', 'status', 'conclusion',
+                            'repository.full_name', 'head_repository.full_name']:
+                      if field(run, k) != field(wr, k):
+                          reasons.append('API run %s=%r differs from the event %r (stale or re-run)' % (k, field(run, k), field(wr, k)))
+                  jobs, page = [], 1
+                  while True:
+                      j = get('/repos/%s/actions/runs/%d/attempts/%d/jobs?per_page=100&page=%d' % (REPO, run_id, attempt, page))
+                      batch = j.get('jobs') or []
+                      jobs += batch
+                      if not batch or len(jobs) >= int(j.get('total_count', 0)):
+                          break
+                      page += 1
+                  dep = [x for x in jobs if x.get('name') == DEPLOY_JOB]
+                  if len(dep) != 1:
+                      reasons.append('%d jobs named %r in CI run %d attempt %d (exactly 1 required)' % (len(dep), DEPLOY_JOB, run_id, attempt))
+                  else:
+                      d = dep[0]
+                      if d.get('status') != 'completed' or d.get('conclusion') != 'success':
+                          reasons.append('deploy-staging status=%r conclusion=%r (completed/success required; skipped is not enough)' % (d.get('status'), d.get('conclusion')))
+                      if d.get('head_sha') != sha or d.get('run_id') != run_id:
+                          reasons.append('deploy-staging belongs to %r / run %r, not %s / %d' % (d.get('head_sha'), d.get('run_id'), sha, run_id))
+                  if get('/repos/%s/branches/master' % REPO).get('protected') is not True:
+                      reasons.append('master is not a protected branch on GitHub')
+                  cmp_status = get('/repos/%s/compare/%s...master' % (REPO, sha)).get('status')
+                  if cmp_status not in ('identical', 'ahead'):
+                      reasons.append('head_sha is not reachable from master (compare status %r)' % (cmp_status,))
+          except Exception as e:
+              reasons.append('authorization error: %s: %s' % (type(e).__name__, e))
+
+          ok = not reasons
+          lines = ['authorized=%s' % ('true' if ok else 'false'), 'head_sha=%s' % (sha if ok else ''),
+                   'upstream_run_id=%s' % (run_id if ok else ''), 'upstream_run_attempt=%s' % (attempt if ok else '')]
+          if os.environ.get('GITHUB_OUTPUT'):
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+                  fh.write('\n'.join(lines) + '\n')
+          text = ('## HIL authorization: GRANTED - %s (CI run %s attempt %s)\n' % (sha, run_id, attempt) if ok else
+                  '## HIL authorization: DENIED\n' + ''.join('- %s\n' % r for r in reasons))
+          if os.environ.get('GITHUB_STEP_SUMMARY'):
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as fh:
+                  fh.write(text)
+          print(text)
+          if not ok:
+              print('::error title=HIL authorization DENIED::' + '; '.join(reasons))
+          sys.exit(0 if ok else 1)
+
+  hil-unit:
+    name: HIL Unit (self-hosted-hardware, ${{ matrix.config }})
+    needs: [authorize]
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && needs.authorize.outputs.authorized == 'true'
     runs-on: [self-hosted, Windows, i226]
     environment: hil
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
-    concurrency:
-      group: hil-physical-workstation-job
-      cancel-in-progress: false
-    defaults:
-      run:
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        config: [Debug, Release]
     env:
-      HIL_CONFIGURATION: ${{ inputs.configuration }}
-      HIL_SUITE: ${{ inputs.suite }}
+      AVB_HIL_EXPECTED_REVISION: ${{ needs.authorize.outputs.head_sha }}
+      HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
+      HIL_UPSTREAM_RUN_ATTEMPT: ${{ needs.authorize.outputs.upstream_run_attempt }}
+
     steps:
-      - id: hil-trusted-preflight
-        name: Trusted HIL preflight (runner-local, outside the workspace)
+      - name: Trusted HIL preflight (inline, before any repository code)
+        id: hil-trusted-preflight
+        # Defined by this file on master only (workflow_run).  The workspace may still hold an earlier job's files;
+        # nothing from it runs here.  Driver identity, halt switch and bugcheck acknowledgement are GitHub variables
+        # (repository or `hil` environment; editable by repository admins only), not files on the workstation.
+        env:
+          HIL_AUTHORIZED: ${{ needs.authorize.outputs.authorized }}
+          HIL_AUTHORIZED_DRIVER_SHA256: ${{ vars.HIL_AUTHORIZED_DRIVER_SHA256 }}
+          HIL_BUGCHECK_ACK: ${{ vars.HIL_BUGCHECK_ACK }}
+          HIL_HALT: ${{ vars.HIL_HALT }}
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
-          & 'C:\hil-trusted\Invoke-HilPreflight.ps1'
-          exit $LASTEXITCODE
+          $r = @()
+          try {
+            if ($env:GITHUB_REPOSITORY -cne 'zarfld/IntelAvbFilter') { $r += "repository '$env:GITHUB_REPOSITORY'" }
+            if ($env:GITHUB_EVENT_NAME -cne 'workflow_run') { $r += "event '$env:GITHUB_EVENT_NAME' is not workflow_run" }
+            if ($env:GITHUB_WORKFLOW_REF -cne 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master') { $r += "workflow '$env:GITHUB_WORKFLOW_REF' is not hil.yml on master" }
+            if ($env:HIL_AUTHORIZED -cne 'true') { $r += 'authorize job did not grant this run' }
+            if ($env:AVB_HIL_EXPECTED_REVISION -cnotmatch '^[0-9a-f]{40}$') { $r += "authorized head_sha '$env:AVB_HIL_EXPECTED_REVISION' is not a 40-hex commit id" }
+            $pr = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+            if (-not $pr.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { $r += 'runner is not elevated: the IntelAvbFilter control device admits Administrators only (#73)' }
+            if ($env:HIL_HALT -ceq 'true') { $r += 'HIL_HALT variable is true (operator halt)' }
+            $svc = Get-Service -Name IntelAvbFilter -ErrorAction Stop
+            if ([string]$svc.Status -ne 'Running') { $r += "service IntelAvbFilter is $($svc.Status), not Running" }
+            $want = ([string]$env:HIL_AUTHORIZED_DRIVER_SHA256).Trim()
+            if ($want -notmatch '^[0-9A-Fa-f]{64}$') { $r += 'HIL_AUTHORIZED_DRIVER_SHA256 variable is missing or not a SHA256' }
+            else {
+              $have = (Get-FileHash -LiteralPath (Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys') -Algorithm SHA256 -ErrorAction Stop).Hash
+              if ($have -ne $want.ToUpperInvariant()) { $r += "installed driver SHA256 $have is not the authorized $($want.ToUpperInvariant())" }
+            }
+            $since = [datetime]::MinValue
+            if ($env:HIL_BUGCHECK_ACK) {
+              $p = [datetime]::MinValue
+              if (-not [datetime]::TryParseExact($env:HIL_BUGCHECK_ACK, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$p)) { $r += "HIL_BUGCHECK_ACK '$env:HIL_BUGCHECK_ACK' is not an ISO 8601 round-trip timestamp" }
+              else { $since = $p.AddSeconds(1) }
+            }
+            $bc = 0
+            try { $bc = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 1001; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting'; StartTime = $since } -ErrorAction Stop).Count }
+            catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw } }
+            if ($bc -gt 0) { $r += "$bc unacknowledged bugcheck(s); set HIL_BUGCHECK_ACK after review" }
+            foreach ($did in '125B', '1533', '15BB') {
+              $pnp = @(Get-PnpDevice -Class Net -ErrorAction Stop | Where-Object { $_.InstanceId -match "VEN_8086&DEV_$did" })
+              if ($pnp.Count -eq 0 -or @($pnp | Where-Object { [string]$_.Status -ne 'OK' }).Count -gt 0) { $r += "adapter DEV_$did PnP: $(@($pnp | ForEach-Object { [string]$_.Status }) -join ',')" }
+              $na = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.PnPDeviceID -match "VEN_8086&DEV_$did" })
+              if ($na.Count -eq 0 -or @($na | Where-Object { [string]$_.Status -ne 'Up' }).Count -gt 0) { $r += "adapter DEV_$did link: $(@($na | ForEach-Object { [string]$_.Status }) -join ',')" }
+            }
+          } catch { $r += "preflight error: $($_.Exception.Message)" }
+          if ($r.Count -gt 0) {
+            Write-Host "::error title=HIL BLOCKED::$($r -join '; ')"
+            foreach ($x in $r) { Write-Host "[HIL-PREFLIGHT] BLOCKED: $x" }
+            exit 1
+          }
+          Write-Host "[HIL-PREFLIGHT] AUTHORIZED: $env:AVB_HIL_EXPECTED_REVISION (CI run $env:HIL_UPSTREAM_RUN_ID attempt $env:HIL_UPSTREAM_RUN_ATTEMPT)"
+          exit 0
 
-      - name: Validate dispatch inputs
-        run: |
-          if (@('Release', 'Debug') -notcontains $env:HIL_CONFIGURATION) { Write-Host "invalid configuration '$env:HIL_CONFIGURATION'"; exit 1 }
-          if (@('HardwareMandatory', 'HardwareUnit') -notcontains $env:HIL_SUITE) { Write-Host "invalid suite '$env:HIL_SUITE'"; exit 1 }
-
-      - name: Checkout (no persisted credentials)
+      - name: Checkout the authorized upstream commit
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize.outputs.head_sha }}
           persist-credentials: 'false'
           clean: 'true'
+          submodules: true
 
-      - name: Build test binaries (writes test-build-manifest.json)
+      - name: Verify checkout is the authorized commit
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
-          .\tools\build\Build-Tests.ps1 -Configuration $env:HIL_CONFIGURATION
+          $head = ([string](git rev-parse HEAD)).Trim()
+          if ($head -cne $env:AVB_HIL_EXPECTED_REVISION) { Write-Host "::error title=HIL BLOCKED::checked-out HEAD $head is not the authorized $env:AVB_HIL_EXPECTED_REVISION"; exit 1 }
+          Write-Host "HEAD = authorized $head"
+
+      - name: Verify prerequisites (self-hosted hardware runner)
+        # On self-hosted runners, verify all required tools are present.
+        # This job NEVER installs anything â€” it only reports missing prerequisites.
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          $missing = @()
+
+          # WDK km headers (required by driver build)
+          $wdkKm = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $wdkFound = Get-ChildItem $wdkKm -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
+                      Select-Object -First 1
+          if ($wdkFound) {
+            Write-Host "WDK km headers present: $($wdkFound.FullName)"
+            "WDK_VERSION=$($wdkFound.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
+          }
+
+          # Npcap SDK
+          $npcapDest = 'C:\npcap-sdk-1.16'
+          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+            Write-Host "Npcap SDK present: $npcapDest"
+          } else {
+            $missing += "Npcap SDK (expected at $npcapDest)"
+          }
+
+          # TAEF / WEX headers (export to ENV for build if found)
+          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
+          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
+          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
+            Write-Host "TAEF development headers present"
+            "TAEF_INCLUDE=$taefInc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "TAEF_LIB=$taefLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Write-Host "TAEF headers found at $($found.DirectoryName)"
+              "TAEF_INCLUDE=$($found.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
+              "TAEF_LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            } else {
+              Write-Host "WARNING: TAEF/WEX headers not found -- taef_tests will be skipped"
+            }
+          }
+
+          # MSBuild / Visual Studio
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
+            if ($vsPath) {
+              Write-Host "Visual Studio present: $vsPath"
+            } else {
+              $missing += 'Visual Studio (vswhere found no installations)'
+            }
+          } else {
+            $missing += 'Visual Studio installer / vswhere.exe'
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Host ""
+            Write-Host "ERROR: Missing prerequisites on self-hosted runner:"
+            $missing | ForEach-Object { Write-Host "   - $_" }
+            Write-Host "Install these manually on the runner machine before running hardware CI jobs."
+            exit 1
+          }
+          Write-Host ""
+          Write-Host "All prerequisites verified on $env:RUNNER_NAME"
+      - name: Build test binaries from this revision (test-build-manifest.json)
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
           exit $LASTEXITCODE
 
-      - name: Driver pre-flight (repository)
+      - name: Verify IntelAvbFilter driver accessible
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           .\tools\test\Test-DriverPreFlight.ps1
           exit $LASTEXITCODE
 
-      - name: Run hardware suite (HIL safety gate + build provenance)
+      - name: Record HIL run identity
+        # hil-acceptance rejects any bundle that is not this HIL run, this authorized revision and this upstream run.
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite $env:HIL_SUITE
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'hil-evidence'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          $id = [ordered]@{
+            runId                 = $env:GITHUB_RUN_ID
+            runAttempt            = $env:GITHUB_RUN_ATTEMPT
+            sha                   = $env:AVB_HIL_EXPECTED_REVISION
+            headRevision          = ([string](git rev-parse HEAD)).Trim()
+            upstreamRunId         = $env:HIL_UPSTREAM_RUN_ID
+            upstreamRunAttempt    = $env:HIL_UPSTREAM_RUN_ATTEMPT
+            job                   = $env:GITHUB_JOB
+            configuration         = '${{ matrix.config }}'
+            runner                = $env:RUNNER_NAME
+            installedDriverSha256 = (Get-FileHash -LiteralPath (Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys') -Algorithm SHA256).Hash
+            recordedUtc           = (Get-Date).ToUniversalTime().ToString('o')
+          }
+          ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
+          Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
+
+      - name: Run HardwareMandatory (mandatory HIL gate)
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareMandatory -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMandatory')
           exit $LASTEXITCODE
 
-      - name: Upload HIL evidence
+      - name: Run HardwareUnit
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareUnit -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareUnit')
+          exit $LASTEXITCODE
+
+      - name: Upload HIL evidence (this run only)
+        # RUNNER_TEMP is emptied by the runner for every job: only this job's identity, logs and JUnit are here.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: hil-${{ inputs.suite }}-${{ inputs.configuration }}-${{ github.run_id }}
-          path: |
-            logs/junit-*.xml
-            logs/traceability-summary-*.md
-            logs/*.log
-          retention-days: 30
+          name: hil-evidence-unit-${{ matrix.config }}
+          path: ${{ runner.temp }}/hil-evidence/
+          if-no-files-found: ignore
+
+  hil-integration:
+    name: HIL Integration (self-hosted-hardware, ${{ matrix.config }})
+    needs: [authorize, hil-unit]
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && needs.authorize.outputs.authorized == 'true'
+    runs-on: [self-hosted, Windows, i226]
+    environment: hil
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        config: [Debug, Release]
+    env:
+      AVB_HIL_EXPECTED_REVISION: ${{ needs.authorize.outputs.head_sha }}
+      HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
+      HIL_UPSTREAM_RUN_ATTEMPT: ${{ needs.authorize.outputs.upstream_run_attempt }}
+
+    steps:
+      - name: Trusted HIL preflight (inline, before any repository code)
+        id: hil-trusted-preflight
+        # Defined by this file on master only (workflow_run).  The workspace may still hold an earlier job's files;
+        # nothing from it runs here.  Driver identity, halt switch and bugcheck acknowledgement are GitHub variables
+        # (repository or `hil` environment; editable by repository admins only), not files on the workstation.
+        env:
+          HIL_AUTHORIZED: ${{ needs.authorize.outputs.authorized }}
+          HIL_AUTHORIZED_DRIVER_SHA256: ${{ vars.HIL_AUTHORIZED_DRIVER_SHA256 }}
+          HIL_BUGCHECK_ACK: ${{ vars.HIL_BUGCHECK_ACK }}
+          HIL_HALT: ${{ vars.HIL_HALT }}
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          $r = @()
+          try {
+            if ($env:GITHUB_REPOSITORY -cne 'zarfld/IntelAvbFilter') { $r += "repository '$env:GITHUB_REPOSITORY'" }
+            if ($env:GITHUB_EVENT_NAME -cne 'workflow_run') { $r += "event '$env:GITHUB_EVENT_NAME' is not workflow_run" }
+            if ($env:GITHUB_WORKFLOW_REF -cne 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master') { $r += "workflow '$env:GITHUB_WORKFLOW_REF' is not hil.yml on master" }
+            if ($env:HIL_AUTHORIZED -cne 'true') { $r += 'authorize job did not grant this run' }
+            if ($env:AVB_HIL_EXPECTED_REVISION -cnotmatch '^[0-9a-f]{40}$') { $r += "authorized head_sha '$env:AVB_HIL_EXPECTED_REVISION' is not a 40-hex commit id" }
+            $pr = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+            if (-not $pr.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { $r += 'runner is not elevated: the IntelAvbFilter control device admits Administrators only (#73)' }
+            if ($env:HIL_HALT -ceq 'true') { $r += 'HIL_HALT variable is true (operator halt)' }
+            $svc = Get-Service -Name IntelAvbFilter -ErrorAction Stop
+            if ([string]$svc.Status -ne 'Running') { $r += "service IntelAvbFilter is $($svc.Status), not Running" }
+            $want = ([string]$env:HIL_AUTHORIZED_DRIVER_SHA256).Trim()
+            if ($want -notmatch '^[0-9A-Fa-f]{64}$') { $r += 'HIL_AUTHORIZED_DRIVER_SHA256 variable is missing or not a SHA256' }
+            else {
+              $have = (Get-FileHash -LiteralPath (Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys') -Algorithm SHA256 -ErrorAction Stop).Hash
+              if ($have -ne $want.ToUpperInvariant()) { $r += "installed driver SHA256 $have is not the authorized $($want.ToUpperInvariant())" }
+            }
+            $since = [datetime]::MinValue
+            if ($env:HIL_BUGCHECK_ACK) {
+              $p = [datetime]::MinValue
+              if (-not [datetime]::TryParseExact($env:HIL_BUGCHECK_ACK, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$p)) { $r += "HIL_BUGCHECK_ACK '$env:HIL_BUGCHECK_ACK' is not an ISO 8601 round-trip timestamp" }
+              else { $since = $p.AddSeconds(1) }
+            }
+            $bc = 0
+            try { $bc = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 1001; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting'; StartTime = $since } -ErrorAction Stop).Count }
+            catch { if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw } }
+            if ($bc -gt 0) { $r += "$bc unacknowledged bugcheck(s); set HIL_BUGCHECK_ACK after review" }
+            foreach ($did in '125B', '1533', '15BB') {
+              $pnp = @(Get-PnpDevice -Class Net -ErrorAction Stop | Where-Object { $_.InstanceId -match "VEN_8086&DEV_$did" })
+              if ($pnp.Count -eq 0 -or @($pnp | Where-Object { [string]$_.Status -ne 'OK' }).Count -gt 0) { $r += "adapter DEV_$did PnP: $(@($pnp | ForEach-Object { [string]$_.Status }) -join ',')" }
+              $na = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.PnPDeviceID -match "VEN_8086&DEV_$did" })
+              if ($na.Count -eq 0 -or @($na | Where-Object { [string]$_.Status -ne 'Up' }).Count -gt 0) { $r += "adapter DEV_$did link: $(@($na | ForEach-Object { [string]$_.Status }) -join ',')" }
+            }
+          } catch { $r += "preflight error: $($_.Exception.Message)" }
+          if ($r.Count -gt 0) {
+            Write-Host "::error title=HIL BLOCKED::$($r -join '; ')"
+            foreach ($x in $r) { Write-Host "[HIL-PREFLIGHT] BLOCKED: $x" }
+            exit 1
+          }
+          Write-Host "[HIL-PREFLIGHT] AUTHORIZED: $env:AVB_HIL_EXPECTED_REVISION (CI run $env:HIL_UPSTREAM_RUN_ID attempt $env:HIL_UPSTREAM_RUN_ATTEMPT)"
+          exit 0
+
+      - name: Checkout the authorized upstream commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.authorize.outputs.head_sha }}
+          persist-credentials: 'false'
+          clean: 'true'
+          submodules: true
+
+      - name: Verify checkout is the authorized commit
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          $head = ([string](git rev-parse HEAD)).Trim()
+          if ($head -cne $env:AVB_HIL_EXPECTED_REVISION) { Write-Host "::error title=HIL BLOCKED::checked-out HEAD $head is not the authorized $env:AVB_HIL_EXPECTED_REVISION"; exit 1 }
+          Write-Host "HEAD = authorized $head"
+
+      - name: Verify prerequisites (self-hosted hardware runner)
+        # On self-hosted runners, verify all required tools are present.
+        # This job NEVER installs anything â€” it only reports missing prerequisites.
+        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          $missing = @()
+
+          # WDK km headers (required by driver build)
+          $wdkKm = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $wdkFound = Get-ChildItem $wdkKm -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } |
+                      Select-Object -First 1
+          if ($wdkFound) {
+            Write-Host "WDK km headers present: $($wdkFound.FullName)"
+            "WDK_VERSION=$($wdkFound.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            $missing += 'WDK km headers (ntddk.h not found under Windows Kits)'
+          }
+
+          # Npcap SDK
+          $npcapDest = 'C:\npcap-sdk-1.16'
+          if (Test-Path (Join-Path $npcapDest 'Include\pcap.h')) {
+            Write-Host "Npcap SDK present: $npcapDest"
+          } else {
+            $missing += "Npcap SDK (expected at $npcapDest)"
+          }
+
+          # TAEF / WEX headers (export to ENV for build if found)
+          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
+          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
+          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
+            Write-Host "TAEF development headers present"
+            "TAEF_INCLUDE=$taefInc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "TAEF_LIB=$taefLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits" -Recurse -Filter 'WexTestClass.h' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Write-Host "TAEF headers found at $($found.DirectoryName)"
+              "TAEF_INCLUDE=$($found.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              $lib = Join-Path (Split-Path $found.DirectoryName -Parent) 'lib\x64'
+              "TAEF_LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            } else {
+              Write-Host "WARNING: TAEF/WEX headers not found -- taef_tests will be skipped"
+            }
+          }
+
+          # MSBuild / Visual Studio
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -property installationPath 2>$null
+            if ($vsPath) {
+              Write-Host "Visual Studio present: $vsPath"
+            } else {
+              $missing += 'Visual Studio (vswhere found no installations)'
+            }
+          } else {
+            $missing += 'Visual Studio installer / vswhere.exe'
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Host ""
+            Write-Host "ERROR: Missing prerequisites on self-hosted runner:"
+            $missing | ForEach-Object { Write-Host "   - $_" }
+            Write-Host "Install these manually on the runner machine before running hardware CI jobs."
+            exit 1
+          }
+          Write-Host ""
+          Write-Host "All prerequisites verified on $env:RUNNER_NAME"
+      - name: Build test binaries from this revision (test-build-manifest.json)
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\build\Build-Tests.ps1 -Configuration ${{ matrix.config }}
+          exit $LASTEXITCODE
+
+      - name: Verify IntelAvbFilter driver accessible
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Test-DriverPreFlight.ps1
+          exit $LASTEXITCODE
+
+      - name: Record HIL run identity
+        # hil-acceptance rejects any bundle that is not this HIL run, this authorized revision and this upstream run.
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'hil-evidence'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          $id = [ordered]@{
+            runId                 = $env:GITHUB_RUN_ID
+            runAttempt            = $env:GITHUB_RUN_ATTEMPT
+            sha                   = $env:AVB_HIL_EXPECTED_REVISION
+            headRevision          = ([string](git rev-parse HEAD)).Trim()
+            upstreamRunId         = $env:HIL_UPSTREAM_RUN_ID
+            upstreamRunAttempt    = $env:HIL_UPSTREAM_RUN_ATTEMPT
+            job                   = $env:GITHUB_JOB
+            configuration         = '${{ matrix.config }}'
+            runner                = $env:RUNNER_NAME
+            installedDriverSha256 = (Get-FileHash -LiteralPath (Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys') -Algorithm SHA256).Hash
+            recordedUtc           = (Get-Date).ToUniversalTime().ToString('o')
+          }
+          ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
+          Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
+
+      - name: Run HardwareIntegration
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration ${{ matrix.config }} -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration')
+          exit $LASTEXITCODE
+
+      - name: Upload HIL evidence (this run only)
+        # RUNNER_TEMP is emptied by the runner for every job: only this job's identity, logs and JUnit are here.
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: hil-evidence-integration-${{ matrix.config }}
+          path: ${{ runner.temp }}/hil-evidence/
+          if-no-files-found: ignore
+
+  hil-acceptance:
+    name: HIL Acceptance (current-run evidence)
+    needs: [authorize, hil-unit, hil-integration]
+    # Runs whenever the HIL was authorized - also after a failed stage, so failures are published and judged.
+    if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && needs.authorize.outputs.authorized == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout the authorized upstream commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.authorize.outputs.head_sha }}
+          persist-credentials: 'false'
+
+      - name: Download HIL evidence of this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hil-evidence-*
+          path: hil-evidence
+
+      - name: Hardware acceptance verdict (current-run evidence)
+        env:
+          HIL_UNIT: ${{ needs.hil-unit.result }}
+          HIL_INTEGRATION: ${{ needs.hil-integration.result }}
+          HIL_HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
+          HIL_EVIDENCE_DIR: hil-evidence
+        shell: python3 -I {0}
+        run: |
+          # Every expected bundle must exist, belong to THIS run, the authorized revision and the upstream CI run,
+          # and contain the expected suites' JUnit with at least one pass and no failure.  Skipped is never a pass.
+          import glob, json, os, sys, xml.etree.ElementTree as ET
+
+          EXPECT = {'unit': ('hil-unit', ['HardwareMandatory', 'HardwareUnit']), 'integration': ('hil-integration', ['HardwareIntegration'])}
+          root = os.environ.get('HIL_EVIDENCE_DIR', 'hil-evidence')
+          run_id, sha, up = os.environ.get('GITHUB_RUN_ID', ''), os.environ.get('HIL_HEAD_SHA', ''), os.environ.get('HIL_UPSTREAM_RUN_ID', '')
+          bad, rows = [], []
+          for stage, var in (('hil-unit', 'HIL_UNIT'), ('hil-integration', 'HIL_INTEGRATION')):
+              if os.environ.get(var) != 'success':
+                  bad.append('%s result is %r (success required; skipped/blocked/failed is not hardware verification)' % (stage, os.environ.get(var)))
+          known = set()
+          for stage, (job, suites) in EXPECT.items():
+              for cfg in ('Debug', 'Release'):
+                  b = os.path.join(root, 'hil-evidence-%s-%s' % (stage, cfg))
+                  known.add(os.path.normpath(b))
+                  idf = os.path.join(b, 'hil-run-identity.json')
+                  if not os.path.isfile(idf):
+                      bad.append('%s: no evidence bundle with run identity' % os.path.basename(b)); continue
+                  with open(idf, encoding='utf-8-sig') as fh:
+                      ident = json.load(fh)
+                  for k, v in (('runId', run_id), ('sha', sha), ('headRevision', sha), ('upstreamRunId', up), ('job', job), ('configuration', cfg)):
+                      if str(ident.get(k)) != v:
+                          bad.append('%s: identity %s=%r, expected %r (not evidence of this run)' % (os.path.basename(b), k, ident.get(k), v))
+                  for s in suites:
+                      files = glob.glob(os.path.join(b, s, 'junit-%s-%s-*.xml' % (s, cfg)))
+                      if len(files) != 1:
+                          bad.append('%s: %d JUnit file(s) for %s' % (os.path.basename(b), len(files), s)); continue
+                      cases = ET.parse(files[0]).getroot().iter('testcase')
+                      n = f = sk = 0
+                      for c in cases:
+                          n += 1
+                          if c.find('failure') is not None or c.find('error') is not None: f += 1
+                          elif c.find('skipped') is not None: sk += 1
+                      rows.append('| %s | %s | %s | %d | %d | %d | %d |' % (stage, cfg, s, n - f - sk, f, sk, n))
+                      if f > 0 or n - f - sk <= 0:
+                          bad.append('%s %s %s: %d passed, %d failed' % (stage, cfg, s, n - f - sk, f))
+          for x in glob.glob(os.path.join(root, '**', 'junit-*.xml'), recursive=True):
+              if not any(os.path.normpath(x).startswith(k + os.sep) for k in known):
+                  bad.append('JUnit outside an identified bundle: %s' % x)
+          text = '## HIL acceptance: %s (run %s, %s, CI run %s)\n\n| Stage | Config | Suite | Pass | Fail | Skip | Total |\n|---|---|---|---|---|---|---|\n%s\n' % (
+              'PASSED' if not bad else 'FAILED', run_id, sha, up, '\n'.join(rows))
+          text += ''.join('- %s\n' % b for b in bad)
+          if os.environ.get('GITHUB_STEP_SUMMARY'):
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as fh:
+                  fh.write(text)
+          print(text)
+          if bad:
+              print('::error title=HIL acceptance FAILED::' + '; '.join(bad))
+          sys.exit(1 if bad else 0)
+
+      - name: Publish HIL JUnit results
+        if: always()
+        uses: dorny/test-reporter@v2
+        with:
+          name: 'HIL Hardware Tests (run ${{ github.run_id }})'
+          path: 'hil-evidence/*/*/junit-*.xml'
+          reporter: java-junit
+          fail-on-error: 'false'
+          fail-on-empty: 'false'
+
+      - name: HIL traceability and coverage-gap summary
+        if: always()
+        run: |
+          shopt -s nullglob
+          {
+            echo "## HIL traceability (run $GITHUB_RUN_ID)"
+            echo ""
+            echo "Declared automatic-HIL coverage gaps (skipped, never executed):"
+            grep -ho 'TC-HIL-COVERAGE-GAP-001: [^ ]*' hil-evidence/*/*/junit-*.xml | sort | uniq -c || true
+            for f in hil-evidence/*/*/traceability-summary-*.md; do echo ""; echo "### $f"; cat "$f"; done
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -334,24 +334,13 @@ $HardwareMandatoryTests = @(
     "test_ioctl_phc_query",            # IOCTL_AVB_GET_TIMESTAMP read-only
     "test_ioctl_xstamp",               # cross-timestamp PHC---QPC (VV-CORR-003)
     "test_ioctl_phc_crosstimestamp_v2", # V2 provenance per adapter; INCONCLUSIVE=FAIL (#340)
-    "ptp_clock_control_test",          # PHC coherence TC-5a/TC-5b (read-only correlation)
-                                       # CONTRACT NOTE: ptp_clock_control_test calls
-                                       # AdjustFrequency (writes TIMINCA) inside TC-5b
-                                       # before each adapter measurement. This is a PHC
-                                       # mutation that contradicts the "non-mutating" contract
-                                       # above. Tracked under #340 for future separation:
-                                       # TC-5a+5b measurement should be split from Tests 1-4
-                                       # and the ADJUST_FREQUENCY pre-measurement write into
-                                       # separate executables (read-only vs. mutating lane).
+    # ptp_clock_control_test, test_rx_timestamp, test_rx_timestamp_complete: see $HardwareMandatoryCoverageGaps
     # Multi-adapter isolation
     "test_all_adapters",               # enumerate + open all adapters
     "test_multidev_adapter_enum",      # per-adapter VID/DID identity
     "test_multi_adapter_phc_sync",     # independent PHC per adapter
     # Send-path + provenance
-    "test_send_ptp_debug",             # IOCTL_AVB_TEST_SEND_PTP diagnostic (PRE_SEND_PHC)
-    # RX timestamp
-    "test_rx_timestamp",               # IOCTL_AVB_GET_RX_TIMESTAMP V1/V2
-    "test_rx_timestamp_complete"       # extended RX timestamp cases
+    "test_send_ptp_debug"              # IOCTL_AVB_TEST_SEND_PTP diagnostic (PRE_SEND_PHC)
 )
 
 # ===========================
@@ -387,6 +376,7 @@ $HardwareMutationTests = @(
 #                                  administration: classified Unsafe in $HilTestSafety (#343).
 #   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
 #   entry, outside GitHub Actions, on an operator-attended machine.
+# Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
 $HardwareUnitTests = @(
     "test_cleanup_archive",        # checks build output against installed driver
     "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
@@ -400,65 +390,38 @@ $HardwareUnitTests = @(
     "test_atdecc_event",           # ATDECC event subscription via driver IOCTL
     "test_atdecc_aen_protocol",    # ATDECC AEN protocol -- driver IOCTL path
     "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
-    "test_mdio_phy",               # MDIO PHY register access via driver
     "test_dev_lifecycle",          # device open/close lifecycle -- needs driver node
-    "test_ts_event_sub",           # timestamp event subscription via driver
-    "test_ptp_getset",             # PTP get/set time via driver IOCTL
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
     "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
                                      # Section H SKIPs gracefully when driver is absent.
     # Phase A: IOCTL functional tests (REQ #2-#13, previously missing from CI)
-    "test_ptp_freq",               # PTP frequency adjustment -- REQ-F-PTP-002 (#3)
-    "test_ptp_freq_complete",      # PTP frequency adjustment extended -- REQ-F-PTP-002 (#3)
-    "test_hw_ts_ctrl",             # hardware timestamp control -- REQ-F-PTP-003 (#5)
-    "test_rx_timestamp",           # RX timestamping -- REQ-F-PTP-004 (#6)
-    "test_rx_timestamp_complete",  # RX timestamping extended -- REQ-F-PTP-004 (#6)
-    "test_ioctl_target_time",      # target time/aux timestamp -- REQ-F-PTP-005 (#7)
-    "test_qav_cbs",                # Credit-Based Shaper config -- REQ-F-QAV-001 (#8)
-    "test_ioctl_tas",              # Time-Aware Shaper config -- REQ-F-TAS-001 (#9)
-    "test_ioctl_fp_ptm",           # Frame Preemption & PTM -- REQ-F-FP-001 (#11)
     "test_tx_timestamp_retrieval", # TX timestamp retrieval -- REQ-F-IOCTL-TS-001 (#35)
     "test_ioctl_phc_query",        # PHC query IOCTL -- REQ-F-PTP-PHC (#192)
-    "test_ioctl_offset",           # PHC offset adjustment -- (#194)
     "test_ioctl_phc_epoch",        # PHC epoch management -- (#196)
-    "test_ioctl_phc_monotonicity", # PHC monotonicity guarantee -- (#197)
     "test_ioctl_xstamp",           # cross-timestamp (PTP/system correlation) -- (#198)
     "test_ioctl_xstamp_v2",        # V2 ABI + HIL reachability (#340)
     "test_ioctl_abi",              # IOCTL ABI backward-compatibility
-    "test_ioctl_access_control",   # IOCTL access-control (privilege enforcement)
-    "test_ioctl_buffer_fuzz",      # IOCTL buffer-boundary fuzzing (security)
     # test_tsn_ioctl_handlers removed (#328 F23): its build entry is Disabled (KM placeholder); a stale binary
     # of it ran here as ReadOnly and issued SETUP_TAS/FP/PTM.  The UM test test_tsn_ioctl_handlers_um stays
     # classified Mutating (not exact-target-aware -> BLOCKED by the safety gate).
     # Phase B: PHC/QPC coherence + VV coverage (added 2026-03-29)
-    "ptp_clock_control_test",      # PHC/QPC coherence TC-5a/TC-5b -- #238
     "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
     "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
     # Phase C: Additional unit tests registered 2026-04-01 (built but previously absent from CI)
     "test_hw_state",               # hardware state enum/OID query -- REQ-F-HWCTX-001 (#18)
     "test_statistics_counters",    # IOCTL statistics counters -- REQ-NF-DIAG-001 (#270)
-    "test_event_log",              # Windows Event Log integration -- (#269)
     "test_build_sign",             # build & code-signing verification -- (#243)
     "test_compat_win11",           # Windows 11 compatibility smoke -- (#256)
     "test_win7_stub",              # OS compat Win10+ assertion -- (#258)
-    "test_eee_lpi",                # IEEE 802.3az EEE/LPI [TDD-RED] -- (#223)
-    "test_pfc_pause",              # IEEE 802.1Qbb PFC [TDD-RED] -- (#219)
-    "test_srp_interface",          # IEEE 802.1Qat SRP [TDD-RED] -- (#211)
-    "test_vlan_tag",               # IEEE 802.1Q VLAN insert/strip [TDD-RED] -- (#213)
-    "test_vlan_pcp_tc_mapping",    # VLAN PCP->TC CBS mapping -- (#276)
-    "test_security_validation",    # security validation & vuln scan -- (#226)
-    "test_ioctl_launch_time",      # launch time offload IOCTL -- (#209)
     "test_avtp_tu_bit_events",     # AVTP TU-bit change events -- (#175)
     "test_ptp_event_latency",      # PTP event ring-buffer latency -- (#177)
     "test_event_latency_4ch",      # 4-channel multi-observer event latency -- (#179)
     "test_event_nf_zero_polling",  # NF CPU-overhead budget quantification -- (#241, TEST-EVENT-NF-002)
     "test_event_nf_latency",       # NF IOCTL-path latency P99 under adversarial load -- (#245, TEST-EVENT-NF-001)
-    "test_gptp_phc_interface",     # gPTP PHC interface contract -- (#210)
     "test_send_ptp_debug",         # IOCTL_AVB_TEST_SEND_PTP diagnostic -- (#51)
     "test_timestamp_latency",      # TX/RX timestamp latency <1us -- (#272)
     "test_perf_regression",        # performance regression baseline -- (#225)
     "test_ndis_fastpath_latency",  # NDIS IOCTL fast-path latency P99<10us -- (#286)
-    "test_error_recovery",         # error recovery / no-BSOD on malformed input -- (#215)
     "test_multi_adapter_phc_sync",  # multi-adapter PHC sync/independence -- (#208)
     # Provenance regression (TEST-PROV-L01..L05 logic + TEST-PROV-H01..H05 device contract)
     "test_tx_timestamp_provenance"  # V1/V2 IOCTL ABI, FastIo canary, cross-handle isolation
@@ -467,8 +430,6 @@ $HardwareUnitTests = @(
 # Integration-level tests that require the driver device node or Intel NIC.
 # Safe to run on an automated self-hosted runner.
 $HardwareIntegrationTests = @(
-    "ssot_register_validation_test",  # SSOT register validation via device access
-    "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers -- driver required
     "test_all_adapters",              # enumerates all Intel AVB adapters
     "test_multidev_adapter_enum",     # multi-device adapter enumeration
     "test_device_register_access",    # direct device register read/write
@@ -478,28 +439,76 @@ $HardwareIntegrationTests = @(
     "test_lazy_initialization",       # lazy init via driver device open
     "test_registry_diagnostics",      # registry diagnostics -- driver service required
     # Phase B: extended cross-domain / correlation tests (added 2026-03-29)
-    "test_ptp_corr_extended",         # extended PTP correlation -- duration ~5 min
     "test_vv_corr_003_crossdomain",   # cross-domain V&V validation -- VV-CORR-003
     # Phase C: Additional integration tests registered 2026-04-01 (built but previously absent from CI)
     "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
     "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
     "test_ptp_phc_stability",         # PHC stability UT-CORR-005..009; ~1K samples@2ms -- (#317)
-    "ptp_clock_control_production",   # PTP clock production test -- (#238)
-    "ptp_ioctl_latency_test",         # PTP IOCTL latency & jitter -- (#321 #322 #323 #324)
-    "hw_timestamping_control",        # HW timestamping control integration
-    "rx_timestamping",                # RX timestamping integration
-    "tsauxc_toggle_test",             # TSAUXC register toggle (TSN)
-    "test_gptp_daemon_coexist",       # OpenAvnu gPTP daemon coexistence; SKIPs if no daemon -- (#240)
-    # Phase D: i219-specific compatibility tests (added to close #261)
-    "avb_test_i219",                  # I219 compat: detection, caps, PTP, monotonicity, variant matrix -- (#261 #76 #114)
-    # Phase E: cross-adapter portability (QA-SC-PORT-001, Issue #114)
-    "avb_test_portability",           # capability-gate verification across all present Intel adapters -- (#114)
-    # Phase F: device-specific tests (I217/I225/I226 --- SKIP-safe on machines without hardware)
-    "avb_test_i217",                  # I217 caps (BASIC_1588|ENHANCED_TS|MDIO|EEE), TSN NOT_SUPPORTED -- (#114)
-    "avb_test_i225",                  # I225 caps (full TSN, MDIO, NO EEE) -- (#114)
-    "avb_test_i226_um",               # I226 caps (full TSN, MDIO, EEE) -- (#114)
+    # Phase D/E/F (avb_test_i219, avb_test_portability, avb_test_i217/i225/i226_um): see $HardwareIntegrationCoverageGaps
     "test_hardware_detection"         # HW capability detection & register access safety -- (#44 #45, #287 #288)
 )
+
+# ===========================
+# Automatic HIL coverage gaps
+# ===========================
+# HardwareMandatory, HardwareUnit and HardwareIntegration run unattended on every trusted master push
+# (.github/workflows/hil.yml, after CI and its deploy-staging succeeded).  They list ReadOnly and Init entries only:
+# a Mutating entry would be BLOCKED (a failure on every run), and a Mutating:Target entry changes adapter state
+# that an unattended runner cannot restore when cleanup fails (test_ptp_freq_complete left I226 TIMINCA changed
+# on 2026-10-20).  Every entry removed for that reason is listed here with its reason; the runner reports each
+# one as a skipped TC-HIL-COVERAGE-GAP-001 case, so the gap is visible in JUnit and never counted as a pass.
+# The entries stay classified in $HilTestSafety and run only through an explicit -Tests list on an attended run.
+# Reasons must not end in a parenthesis (the JUnit converter strips a trailing "(...)" from case names).
+$HardwareMandatoryCoverageGaps = [ordered]@{
+    'ptp_clock_control_test'     = 'Mutating: TC-5b ADJUST_FREQUENCY writes TIMINCA, plus SET_TIMESTAMP and INIT_DEVICE; contradicts the non-mutating Mandatory contract; split into read-only and mutating executables tracked in #340'
+    'test_rx_timestamp'          = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
+    'test_rx_timestamp_complete' = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
+}
+$HardwareUnitCoverageGaps = [ordered]@{
+    'test_ptp_freq'               = 'Mutating:Target: ADJUST_FREQUENCY and TIMINCA writes with restore; restore not verifiable unattended, see test_ptp_freq_complete'
+    'test_ptp_freq_complete'      = 'Mutating:Target: TIMINCA restore failed on I226 on 2026-10-20, CLEANUP_FAILED 0x18000000 to 0x08000000, investigations/issue-328-unload-hang-20261020.md'
+    'test_qav_cbs'                = 'Mutating:Target: WRITE_REGISTER and SETUP_QAV on the target adapter'
+    'ptp_clock_control_test'      = 'Mutating: SET_TIMESTAMP, ADJUST_FREQUENCY, INIT_DEVICE; not exact-target-aware; #340'
+    'test_mdio_phy'               = 'Mutating: MDIO_WRITE; not exact-target-aware'
+    'test_ts_event_sub'           = 'Mutating: SET_HW/RX/QUEUE_TIMESTAMP, SET_TARGET_TIME; not exact-target-aware'
+    'test_ptp_getset'             = 'Mutating: SET_TIMESTAMP, SET_HW_TIMESTAMPING; not exact-target-aware'
+    'test_hw_ts_ctrl'             = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
+    'test_rx_timestamp'           = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
+    'test_rx_timestamp_complete'  = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
+    'test_ioctl_target_time'      = 'Mutating: SET_TARGET_TIME, SET_HW_TIMESTAMPING; not exact-target-aware'
+    'test_ioctl_tas'              = 'Mutating: SETUP_TAS, DISARM_TAS; TSN configuration change; not exact-target-aware'
+    'test_ioctl_fp_ptm'           = 'Mutating: SETUP_FP, SETUP_PTM; TSN configuration change; not exact-target-aware'
+    'test_ioctl_offset'           = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
+    'test_ioctl_phc_monotonicity' = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
+    'test_ioctl_access_control'   = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
+    'test_ioctl_buffer_fuzz'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
+    'test_event_log'              = 'Mutating: ADJUST_FREQUENCY; not exact-target-aware'
+    'test_eee_lpi'                = 'Mutating: EEE_ENABLE/DISABLE; not exact-target-aware'
+    'test_pfc_pause'              = 'Mutating: PFC_ENABLE; not exact-target-aware'
+    'test_srp_interface'          = 'Mutating: SRP_REGISTER/DEREGISTER_STREAM; not exact-target-aware'
+    'test_vlan_tag'               = 'Mutating: VLAN_ENABLE/DISABLE; not exact-target-aware'
+    'test_vlan_pcp_tc_mapping'    = 'Mutating: SETUP_QAV; not exact-target-aware'
+    'test_security_validation'    = 'Mutating: SET_TIMESTAMP; not exact-target-aware'
+    'test_ioctl_launch_time'      = 'Mutating: SET_LAUNCH_TIME; not exact-target-aware'
+    'test_gptp_phc_interface'     = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
+    'test_error_recovery'         = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
+}
+$HardwareIntegrationCoverageGaps = [ordered]@{
+    'avb_test_i219'                 = 'Mutating:Target: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE on the target adapter; I219 compatibility, #261'
+    'avb_test_portability'          = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; QA-SC-PORT-001, #114'
+    'avb_test_i217'                 = 'Mutating:Target: SETUP_TAS, SETUP_FP, WRITE_REGISTER; TSN configuration change; #114'
+    'avb_test_i225'                 = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; #114'
+    'avb_test_i226_um'              = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; #114'
+    'test_tsn_ioctl_handlers_um'    = 'Mutating: SETUP_TAS/FP/PTM, INIT_DEVICE; TSN configuration change; not exact-target-aware'
+    'test_ptp_corr_extended'        = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
+    'ptp_clock_control_production'  = 'Mutating: SET_TIMESTAMP, ADJUST_FREQUENCY; not exact-target-aware'
+    'ptp_ioctl_latency_test'        = 'Mutating: SET_TIMESTAMP, INIT_DEVICE; not exact-target-aware'
+    'hw_timestamping_control'       = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
+    'rx_timestamping'               = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
+    'tsauxc_toggle_test'            = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
+    'test_gptp_daemon_coexist'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
+    'ssot_register_validation_test' = 'Unknown: no build entry or source mapping in Build-Tests.ps1'
+}
 
 # ===========================
 # HIL safety registry (#343) --- enforced by the runner before every Hardware* test
@@ -670,8 +679,9 @@ $scriptDir   = $PSScriptRoot                                        # tools/test
 $repoRoot    = Split-Path (Split-Path $scriptDir -Parent) -Parent  # repository root
 $testExeDir  = Join-Path $repoRoot "build\tools\avb_test\x64\$Configuration"
 
-# -LogsDir may be supplied by the behavioral sentinel test for isolation.
-# Production HIL runs leave it empty so the default repo logs/ directory is used.
+# -LogsDir isolates a run's evidence: the behavioral sentinel tests use it, and the automatic HIL jobs in
+# .github/workflows/hil.yml pass a per-suite directory under RUNNER_TEMP (emptied by the runner for every job)
+# so a persistent self-hosted workspace can never contribute an earlier run's logs.  Without it: <repo>/logs.
 if ($LogsDir -and $LogsDir.Trim() -ne "") {
     $logsDir = $LogsDir
 } else {
@@ -1103,6 +1113,21 @@ function Add-HilBlocked {
         -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed" -f $Entry, $Reason)
 }
 
+# A declared automatic-HIL coverage gap ($Hardware*CoverageGaps): never executed, shown as a skipped case.
+function Add-HilCoverageGap {
+    param([string]$Entry, [string]$Reason)
+    $script:skippedTests++
+    $script:coverageGapTests++
+    $script:results += [PSCustomObject]@{ Name = $Entry; Status = 'COVERAGE-GAP'; Exit = 'N/A' }
+    $line = "[SKIP] TC-HIL-COVERAGE-GAP-001: {0} excluded from automatic HIL --- {1}" -f $Entry, $Reason
+    Write-Host "  $line" -ForegroundColor DarkYellow
+    $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $p = Join-Path $script:logsDir ("{0}.exe_{1}.log" -f $Entry, $ts)
+    $i = 2
+    while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Entry, $i, $ts); $i++ }
+    $line | Set-Content -LiteralPath $p -Encoding utf8
+}
+
 # ---------------------------------------------------------------------------------------------------------
 # Build provenance (#328 investigation F23: a stale 8-April binary of a Disabled build entry was executed as
 # "ReadOnly" during a state-integrity HALT and changed I226 TSN state).
@@ -1174,10 +1199,24 @@ function Get-AvbSourceIdentity {
         if ($LASTEXITCODE -ne 0) { $res.Error = 'git status failed'; return $res }
         $res.Revision = ([string]$rev).Trim()
         $res.Dirty = [bool]$st
-        # Under GitHub Actions the checkout must be exactly the dispatched (authorized) commit.
-        if ($env:GITHUB_ACTIONS -eq 'true' -and $env:GITHUB_SHA -and $res.Revision -cne $env:GITHUB_SHA) {
-            $res.Error = "checked-out HEAD $($res.Revision) is not the dispatched commit GITHUB_SHA=$($env:GITHUB_SHA)"
-            return $res
+        # Under GitHub Actions the checkout must be exactly the authorized commit.  .github/workflows/hil.yml runs on
+        # workflow_run, where GITHUB_SHA is the default-branch tip, not the CI run that was verified; it passes the
+        # authorized upstream head_sha as AVB_HIL_EXPECTED_REVISION, and a workflow_run without it fails closed.
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            $expected = $env:GITHUB_SHA
+            $what = 'GITHUB_SHA'
+            if ($env:AVB_HIL_EXPECTED_REVISION -or $env:GITHUB_EVENT_NAME -eq 'workflow_run') {
+                $expected = $env:AVB_HIL_EXPECTED_REVISION
+                $what = 'AVB_HIL_EXPECTED_REVISION'
+                if ([string]$expected -cnotmatch '^[0-9a-f]{40}$') {
+                    $res.Error = "AVB_HIL_EXPECTED_REVISION '$expected' is not a 40-hex commit id (required for workflow_run)"
+                    return $res
+                }
+            }
+            if ($expected -and $res.Revision -cne $expected) {
+                $res.Error = "checked-out HEAD $($res.Revision) is not the authorized commit $what=$expected"
+                return $res
+            }
         }
         $res.Ok = $true
     } catch {
@@ -1387,6 +1426,18 @@ if ($IsHardwareSuite) {
         Write-Note ("Source identity: {0} (tracked changes: {1})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty)
     } else {
         Write-Host "  [BLOCKED] source identity unavailable: $($SourceIdentity.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
+    }
+}
+
+# Declared automatic-HIL coverage gaps of this suite (not with an explicit -Tests list).
+$coverageGapTests = 0
+if ($IsHardwareSuite -and $Tests.Count -eq 0) {
+    $gapTable = $null
+    if ($Suite -eq 'HardwareMandatory')       { $gapTable = $HardwareMandatoryCoverageGaps }
+    elseif ($Suite -eq 'HardwareUnit')        { $gapTable = $HardwareUnitCoverageGaps }
+    elseif ($Suite -eq 'HardwareIntegration') { $gapTable = $HardwareIntegrationCoverageGaps }
+    if ($null -ne $gapTable) {
+        foreach ($g in @($gapTable.Keys)) { Add-HilCoverageGap -Entry $g -Reason $gapTable[$g] }
     }
 }
 
@@ -1665,6 +1716,9 @@ Write-Host "  Passed : $passedTests" -ForegroundColor Green
 Write-Host "  Failed : $failedTests" -ForegroundColor $(if ($failedTests -gt 0) { "Red" } else { "Green" })
 Write-Host "  Incomplete (SKIP_NOT_IMPLEMENTED): $incompleteTests" -ForegroundColor $(if ($incompleteTests -gt 0) { "Red" } else { "Green" })
 Write-Host "  Skipped: $skippedTests" -ForegroundColor DarkGray
+if ($coverageGapTests -gt 0) {
+    Write-Host "  Coverage gaps (declared, not executed; included in Skipped): $coverageGapTests" -ForegroundColor DarkYellow
+}
 Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
 Write-Host ""
 
@@ -1690,6 +1744,12 @@ if (Test-Path $junitScript) {
             "JUNIT_XML=$junitOut" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         }
     }
+}
+
+if ($IsHardwareSuite -and $failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
+    # Skipped-only must not read as hardware verification.
+    Write-Fail "OVERALL: no hardware test PASSED in $Suite --- this is not hardware verification"
+    exit 1
 }
 
 if ($failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {

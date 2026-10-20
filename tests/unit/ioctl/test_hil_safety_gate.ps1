@@ -44,6 +44,25 @@ $hwLists = [ordered]@{}
 foreach ($n in 'HardwareUnitTests', 'HardwareIntegrationTests', 'HardwareMandatoryTests', 'HardwareMutationTests') { $hwLists[$n] = Get-RunnerList $n }
 $hwEntries = @($hwLists.Values | ForEach-Object { $_ } | Sort-Object -Unique)
 
+# Declared automatic-HIL coverage gaps: suite -> ordered entry -> reason (keys and values from the AST).
+function Get-RunnerGapTable([string]$name) {
+    $as = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                         $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                         $x.Left.VariablePath.UserPath -eq $name }, $true) | Select-Object -First 1
+    $t = [ordered]@{}
+    if ($null -eq $as) { return $null }
+    $h = $as.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+    foreach ($kv in $h.KeyValuePairs) {
+        $v = $kv.Item2.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
+        $t[$kv.Item1.Value] = if ($v) { $v.Value } else { '' }
+    }
+    return $t
+}
+$autoSuites = [ordered]@{ HardwareMandatory = 'HardwareMandatoryTests'; HardwareUnit = 'HardwareUnitTests'; HardwareIntegration = 'HardwareIntegrationTests' }
+$gapTables = [ordered]@{}
+foreach ($s in $autoSuites.Keys) { $gapTables[$s] = Get-RunnerGapTable "${s}CoverageGaps" }
+$gapEntries = @($gapTables.Values | Where-Object { $null -ne $_ } | ForEach-Object { @($_.Keys) } | Sort-Object -Unique)
+
 $registry = @{}
 $regAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
                          $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
@@ -59,9 +78,43 @@ tc_check 'TEST-HILGATE-001-every-hardware-entry-classified' (($registry.Count -g
     ("registry entries={0}; unclassified: {1}" -f $registry.Count, ($missing -join ', '))
 
 $badClass = @($registry.Keys | Where-Object { $validClasses -notcontains $registry[$_] } | ForEach-Object { "$_=$($registry[$_])" })
-$stale    = @($registry.Keys | Where-Object { ($hwEntries -notcontains $_) -and ($registry[$_] -ne 'Unsafe') })
+$stale    = @($registry.Keys | Where-Object { ($hwEntries -notcontains $_) -and ($gapEntries -notcontains $_) -and ($registry[$_] -ne 'Unsafe') })
 tc_check 'TEST-HILGATE-002-registry-values-valid-no-stale-keys' (($registry.Count -gt 0) -and $badClass.Count -eq 0 -and $stale.Count -eq 0) `
-    ("invalid: {0}; stale (not in any Hardware list): {1}" -f ($badClass -join ', '), ($stale -join ', '))
+    ("invalid: {0}; stale (not in any Hardware list or coverage-gap table): {1}" -f ($badClass -join ', '), ($stale -join ', '))
+
+# Automatic HIL suites (unattended, every trusted master push) list only ReadOnly and Init entries.
+$autoBad = @()
+foreach ($s in $autoSuites.Keys) {
+    foreach ($e in @($hwLists[$autoSuites[$s]])) { if (@('ReadOnly', 'Init') -notcontains $registry[$e]) { $autoBad += "${s}: $e=$($registry[$e])" } }
+}
+$autoCount = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) }).Count
+tc_check 'TEST-HILGATE-032-automatic-hil-suites-readonly-or-init-only' (($autoCount -gt 0) -and $autoBad.Count -eq 0) `
+    ("automatic entries={0}; not ReadOnly/Init: {1}" -f $autoCount, ($autoBad -join ', '))
+
+# Every gap is classified, really excluded (not also listed), justified (non-ReadOnly/Init class, reason),
+# and its reason survives the JUnit case-name normalisation (no trailing parenthesis).
+$gapBad = @()
+foreach ($s in $autoSuites.Keys) {
+    $t = $gapTables[$s]
+    if ($null -eq $t -or $t.Count -eq 0) { $gapBad += "${s}: gap table missing or empty"; continue }
+    foreach ($e in @($t.Keys)) {
+        $cls = $registry[$e]; $why = [string]$t[$e]
+        if (-not $cls)                                  { $gapBad += "${s}: $e unclassified" }
+        elseif (@('ReadOnly', 'Init') -contains $cls)   { $gapBad += "${s}: $e is $cls (runnable; not a justified gap)" }
+        if (@($hwLists[$autoSuites[$s]]) -contains $e)  { $gapBad += "${s}: $e is both listed and a gap" }
+        if ($why.Trim().Length -lt 10)                  { $gapBad += "${s}: $e has no reason" }
+        if ($why -match '\)\s*$')                       { $gapBad += "${s}: $e reason ends with ')'" }
+        if ($cls -and $why -notmatch ('^' + [regex]::Escape($cls) + ':')) { $gapBad += "${s}: $e reason does not start with its class '$($cls):'" }
+    }
+}
+tc_check 'TEST-HILGATE-033-coverage-gaps-classified-excluded-and-justified' ($gapBad.Count -eq 0) ($gapBad -join '; ')
+
+# The TSN configuration entries (TAS/FP/PTM) and the observed irreversible PHC mutation are declared gaps.
+$mustGap = @{ HardwareUnit = @('test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_ptp_freq_complete')
+              HardwareIntegration = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_tsn_ioctl_handlers_um') }
+$notGap = @()
+foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) { if ($null -eq $gapTables[$s] -or -not $gapTables[$s].Contains($e)) { $notGap += "${s}: $e" } } }
+tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-declared-gaps' ($notGap.Count -eq 0) ("not declared: {0}" -f ($notGap -join ', '))
 
 $unsafeKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Unsafe' })
 $unsafeListed = @($unsafeKeys | Where-Object { $hwEntries -contains $_ })
@@ -176,7 +229,7 @@ $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 
 $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=Init;test_sbfake_mut=Mutating;' +
            'test_sbfake_tgt=Mutating:Target;test_sbfake_unsafe=Unsafe;test_sbfake_disabler=ReadOnly;' +
-           'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target'
+           'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -194,7 +247,7 @@ function Edit-StateSnippet([string]$Edit) {
            "(`$s | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath `$sf -Encoding UTF8"
 }
 
-function New-StateFile([string]$Path) {
+function New-StateFile([string]$Path, [switch]$AllSupportedEnabled) {
     $state = [ordered]@{
         adapters = @(
             [ordered]@{ InstanceId = 'PCI\VEN_8086&DEV_125B&SUBSYS_00008086&REV_04\SB01'; PnpStatus = 'OK';    Problem = 0;  AdminStatus = 'Up';   MediaStatus = 'Up'; FilterBound = 'True';  Name = 'SB I226' },
@@ -207,17 +260,19 @@ function New-StateFile([string]$Path) {
             [ordered]@{ Index = 1; Did = '0x1533'; Ok = $true; Timinca = 0;          Tsauxc = 0 }
         )
     }
+    # Without the disabled I219 (TC-INFRA-ADAPTER-001 BLOCKED, a failure in every default run).
+    if ($AllSupportedEnabled) { $state.adapters = @($state.adapters | Where-Object { $_.Problem -eq 0 }) }
     ($state | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
 function Invoke-Sandbox {
     param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [int]$Timeout = 60,
-          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir)
+          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled)
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     $stateFile = Join-Path $dir 'state.json'
-    New-StateFile $stateFile
+    New-StateFile $stateFile -AllSupportedEnabled:$AllSupportedEnabled
     if (Test-Path $RanLog) { Remove-Item $RanLog -Force }
     # Hardware* suites dispatch only manifest-authorized artifacts (TEST-HILPROV, #328 F23); sandbox fakes are
     # artifacts, so record each existing fake as built by an enabled entry with its SHA256.
@@ -285,7 +340,8 @@ $behavioralIds = @('010-disabled-supported-adapter-blocked-not-enabled', '011-un
     '024-after-timeout-cleanup-failed-later-init-blocked', '025-timeout-of-non-readonly-halts-mutation-without-cleanup-failed',
     '026-timinca-change-is-cleanup-failed-for-that-target-only', '027-unsafe-runs-only-with-exact-entry-authorization',
     '028-sandbox-refuses-real-test-binaries', '029-hardware-entry-blocked-outside-hardware-suite',
-    '030-sandbox-requires-isolated-logs-dir')
+    '030-sandbox-requires-isolated-logs-dir', '035-coverage-gaps-reported-as-skipped-junit-cases-never-executed',
+    '036-hardware-suite-without-a-pass-fails')
 if ([System.IO.File]::ReadAllText($TreeRunner) -notmatch '\$env:AVB_TEST_SANDBOX\b') {
     foreach ($id in $behavioralIds) { tc_fail "TEST-HILGATE-$id" 'runner has no sandbox mode - behavioral case NOT executed (it would open the real device)' }
     Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -387,6 +443,29 @@ $rH = Invoke-Sandbox 'runH' @($tRo) -NoLogsDir
 tc_check 'TEST-HILGATE-030-sandbox-requires-isolated-logs-dir' `
     (($rH.Exit -eq 1) -and ($rH.Out -match 'AVB_TEST_SANDBOX=1 requires -LogsDir') -and (Get-RanCount $rH 'RAN') -eq 0 -and
      -not (Test-Path (Join-Path $Tree 'logs'))) (Tail $rH)
+
+# --- Run I: the suite's own list (no -Tests) reports every declared coverage gap as a skipped case -----------
+# Sandbox mode refuses every real binary (TEST-HILGATE-028), so nothing from the real list executes.
+$rI = Invoke-Sandbox 'runI' @() -Suite 'HardwareMandatory'
+$gapI = @(if ($null -ne $gapTables['HardwareMandatory']) { $gapTables['HardwareMandatory'].Keys })
+$gapMissing = @($gapI | Where-Object { $rI.Xml -notmatch ('<testcase name="TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($_) + ' excluded from automatic HIL[^"]*"[^>]*><skipped') })
+$gapCases = [regex]::Matches($rI.Xml, '<testcase name="TC-HIL-COVERAGE-GAP-001: ').Count
+tc_check 'TEST-HILGATE-035-coverage-gaps-reported-as-skipped-junit-cases-never-executed' `
+    (($gapI.Count -gt 0) -and $gapMissing.Count -eq 0 -and $gapCases -eq $gapI.Count -and (Get-RanCount $rI 'RAN') -eq 0 -and
+     ($rI.Out -match ('Coverage gaps \(declared, not executed; included in Skipped\): ' + $gapI.Count)) -and $rI.Exit -eq 1) `
+    ("gaps={0}; cases={1}; missing: {2}; exit={3}; {4}" -f $gapI.Count, $gapCases, ($gapMissing -join ','), $rI.Exit, (Tail $rI))
+
+# --- Run J: a Hardware* suite in which nothing passed (skip-only) is a failure, not hardware verification ----
+$tSkip = Join-Path $Fakes 'test_sbfake_skiponly.ps1'
+Set-Content -LiteralPath $tSkip -Encoding UTF8 -Value ("Add-Content -LiteralPath '{0}' -Value 'RAN test_sbfake_skiponly target='`r`n" -f $RanLog.Replace("'", "''") +
+    "Write-Host '  [SKIP] TC-SBFAKE-002: skip only'`r`nexit 2`r`n")
+$rJ = Invoke-Sandbox 'runJ' @('ps1:' + $tSkip.Replace('\', '/')) -AllSupportedEnabled
+# Control: the same fixture with one passing fake exits 0, so the failure above comes from "no pass" alone.
+$rJ2 = Invoke-Sandbox 'runJ2' @($tRo) -AllSupportedEnabled
+tc_check 'TEST-HILGATE-036-hardware-suite-without-a-pass-fails' `
+    (((Get-RanCount $rJ '^RAN test_sbfake_skiponly ') -eq 1) -and $rJ.Exit -eq 1 -and ($rJ.Out -match 'no hardware test PASSED in HardwareUnit') -and
+     ($rJ.Out -notmatch '\[FAIL\] OVERALL: \d+ test\(s\) FAILED') -and $rJ2.Exit -eq 0) `
+    ("ran={0}; exit={1}; control exit={2}; {3} || control: {4}" -f (Get-RanCount $rJ 'RAN'), $rJ.Exit, $rJ2.Exit, (Tail $rJ), (Tail $rJ2))
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
