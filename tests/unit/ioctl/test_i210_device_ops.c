@@ -559,6 +559,102 @@ int main(void)
         }
     }
 
+    printf("\n[T-002] shared enumerator exact-target filter (AvbEnumerateAdapters + AVB_HIL_TARGET_DID)\n");
+    {
+        AvbAdapterInfo list[3];
+        int n;
+        #define T002_FILL() do { ZeroMemory(list, sizeof(list)); \
+            list[0].vendor_id = 0x8086; list[0].device_id = 0x15BB; list[0].global_index = 0; \
+            list[1].vendor_id = 0x8086; list[1].device_id = 0x125B; list[1].global_index = 1; \
+            list[2].vendor_id = 0x8086; list[2].device_id = 0x1533; list[2].global_index = 2; } while (0)
+        T002_FILL(); SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, NULL);
+        n = AvbTestFilterToTarget(list, 3);
+        CHECK("no target requested -> list and count unchanged", n == 3 && list[0].device_id == 0x15BB && list[2].device_id == 0x1533);
+        T002_FILL(); SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, "0x1533");
+        n = AvbTestFilterToTarget(list, 3);
+        CHECK("target 0x1533 -> exactly one adapter, and it keeps its driver index 2 (OPEN_ADAPTER binds the right NIC)",
+              n == 1 && list[0].device_id == 0x1533 && list[0].global_index == 2);
+        T002_FILL(); SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, "0x1539");
+        n = AvbTestFilterToTarget(list, 3);
+        CHECK("target absent -> -1 (caller must fail), list untouched", n == -1 && list[0].device_id == 0x15BB && list[2].device_id == 0x1533);
+        T002_FILL(); list[1].device_id = 0x1533; SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, "0x1533");
+        n = AvbTestFilterToTarget(list, 3);
+        CHECK("duplicate target DID -> -1 (ambiguous)", n == -1);
+        T002_FILL(); SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, "zz");
+        n = AvbTestFilterToTarget(list, 3);
+        CHECK("malformed target value -> -1", n == -1);
+        SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, NULL);
+        #undef T002_FILL
+    }
+
+    /* ======================= physical rate verdict (issue #343, F) ======================= */
+    printf("\n[R-001] PHC/QPC rate fit + ABA verdict on synthetic samples (independent QPC timebase)\n");
+    {
+        AvbRateFit nom[3], wp, wm;
+        AvbRateEval ev;
+        const double qoff = 23e-6;                 /* PHC crystal vs host QPC: +23 ppm, cancels in the ABA ratio */
+        const double r0 = 1.0 + qoff;
+        RATE_WIN(&nom[0], r0, 2000, 60, 1u); RATE_WIN(&nom[1], r0, 2000, 60, 2u); RATE_WIN(&nom[2], r0, 2000, 60, 3u);
+
+        {   /* the fit itself */
+            AvbRateFit f;
+            RATE_WIN(&f, 1.0 + 1e-4, 0, 60, 9u);
+            CHECK("noiseless window: LS slope recovered to < 1e-12, residual < 1 ns, monotonic",
+                  f.ok && fabs(f.rate - (1.0 + 1e-4)) < 1e-12 && f.resid_rms_ns < 1.0 && f.monotonic && f.n == 60);
+        }
+        RATE_WIN(&wp, r0 * (1.0 + 100000e-9), 2000, 60, 4u);
+        RATE_WIN(&wm, r0 * (1.0 - 100000e-9), 2000, 60, 5u);
+        AvbRateEvaluate(nom, 3, &wp, 100000, 1, &ev);
+        CHECK("+100,000 ppb commanded and realised (2 us sample noise) -> PASS", ev.verdict == AVB_RATE_PASS && fabs(ev.delta_ppb - 100000.0) < 500.0);
+        AvbRateEvaluate(nom, 3, &wm, -100000, 1, &ev);
+        CHECK("-100,000 ppb commanded and realised -> PASS", ev.verdict == AVB_RATE_PASS && fabs(ev.delta_ppb + 100000.0) < 500.0);
+        AvbRateEvaluate(nom, 3, &wm, 100000, 1, &ev);
+        CHECK("sign error (+100,000 commanded, -100,000 realised) -> FAIL", ev.verdict == AVB_RATE_FAIL);
+        AvbRateEvaluate(nom, 3, &nom[1], 100000, 1, &ev);
+        CHECK("adjustment without effect (rate unchanged) -> FAIL", ev.verdict == AVB_RATE_FAIL);
+        AvbRateEvaluate(nom, 3, &wp, 100000, 0, &ev);
+        CHECK("perfect data but a sample not REGISTER_DERIVED (mixed provenance) -> INCONCLUSIVE", ev.verdict == AVB_RATE_INCONCLUSIVE);
+        {
+            AvbRateFit legacy[3], lp;
+            const double rl = r0 * (1.0 + 3906.25e-6);      /* legacy nominal raw 0x08000000 = +3906.25 ppm */
+            RATE_WIN(&legacy[0], rl, 2000, 60, 6u); RATE_WIN(&legacy[1], rl, 2000, 60, 7u); RATE_WIN(&legacy[2], rl, 2000, 60, 8u);
+            RATE_WIN(&lp, rl * (1.0 + 100000e-9), 2000, 60, 10u);
+            AvbRateEvaluate(legacy, 3, &lp, 100000, 1, &ev);
+            CHECK("legacy +3906.25 ppm nominal (even with a correct relative step) -> FAIL", ev.verdict == AVB_RATE_FAIL);
+        }
+        {
+            AvbRateFit fz[3];
+            RATE_WIN(&fz[0], 0.0, 0, 60, 11u); RATE_WIN(&fz[1], 0.0, 0, 60, 12u); RATE_WIN(&fz[2], 0.0, 0, 60, 13u);
+            AvbRateEvaluate(fz, 3, &fz[1], 100000, 1, &ev);
+            CHECK("frozen PHC (no advance) -> FAIL", ev.verdict == AVB_RATE_FAIL);
+        }
+        {
+            AvbRateFit nz[3], np;
+            RATE_WIN(&nz[0], r0, 2000, 60, 14u); RATE_WIN(&nz[1], r0 * (1.0 + 800e-9), 2000, 60, 15u); RATE_WIN(&nz[2], r0, 2000, 60, 16u);
+            RATE_WIN(&np, r0 * (1.0 + 100000e-9), 2000, 60, 17u);
+            AvbRateEvaluate(nz, 3, &np, 100000, 1, &ev);
+            CHECK("nominal windows 800 ppb apart, commanded step realised -> INCONCLUSIVE (cannot certify)", ev.verdict == AVB_RATE_INCONCLUSIVE && ev.spread_ppb > 500.0);
+            AvbRateEvaluate(nz, 3, &nz[0], 100000, 1, &ev);
+            CHECK("same noise, but no step at all (error far beyond 5x spread) -> FAIL, not INCONCLUSIVE", ev.verdict == AVB_RATE_FAIL);
+        }
+        {
+            AvbRateFit few;
+            RATE_WIN(&few, r0 * (1.0 + 100000e-9), 2000, 10, 18u);
+            AvbRateEvaluate(nom, 3, &few, 100000, 1, &ev);
+            CHECK("window with fewer than AVB_RATE_MIN_SAMPLES samples -> INCONCLUSIVE", ev.verdict == AVB_RATE_INCONCLUSIVE);
+        }
+        {
+            AvbRateFit q[3], b1, b2;
+            RATE_WIN(&q[0], r0, 0, 60, 19u); RATE_WIN(&q[1], r0, 0, 60, 20u); RATE_WIN(&q[2], r0, 0, 60, 21u);
+            RATE_WIN(&b1, r0 * (1.0 + 101900e-9), 0, 60, 22u);
+            RATE_WIN(&b2, r0 * (1.0 + 102100e-9), 0, 60, 23u);
+            AvbRateEvaluate(q, 3, &b1, 100000, 1, &ev);
+            CHECK("tolerance: 1,900 ppb off with a quiet baseline -> PASS (min tolerance 2,000 ppb)", ev.verdict == AVB_RATE_PASS && fabs(ev.tol_ppb - 2000.0) < 1e-6);
+            AvbRateEvaluate(q, 3, &b2, 100000, 1, &ev);
+            CHECK("tolerance: 2,100 ppb off -> FAIL", ev.verdict == AVB_RATE_FAIL);
+        }
+    }
+
     /* ======================= initialization (issue #343) ======================= */
     printf("\n[I-001] init is exposed through the device table\n");
     CHECK("init and init_ptp are implemented", i210_ops.init != NULL && i210_ops.init_ptp != NULL);

@@ -60,9 +60,22 @@ $fakePsTest = Join-Path $tmpDir "test_sentinel_fake.ps1"
 $wrapperScript = Join-Path $tmpDir "wrapper.ps1"
 $fakePsTestFwd = $fakePsTest.Replace('\', '/')
 $logsEsc = $logsDir.Replace('\', '\\')
+# Sandbox mode (#343 safety gate): the fake is classified ReadOnly only for this sub-run, adapter/PHC
+# state comes from a fixed JSON file (one healthy supported adapter), and the runner never touches the
+# device.  The injected health failure still drives the real post-test control flow.
+$stateFile = Join-Path $tmpDir "adapter_state.json"
+@'
+{ "adapters": [ { "InstanceId": "PCI\\VEN_8086&DEV_125B&SUBSYS_00008086&REV_04\\SENTINEL", "PnpStatus": "OK", "Problem": 0,
+                  "AdminStatus": "Up", "MediaStatus": "Up", "FilterBound": "True", "Name": "sentinel" } ],
+  "clock":    [ { "Index": 0, "Did": "0x125B", "Ok": true, "Timinca": 0, "Tsauxc": 0 } ] }
+'@ | Set-Content $stateFile -Encoding UTF8
 $wrapperContent = @"
 `$env:AVB_TEST_HEALTH_FAIL_AFTER = '*'
 `$env:AVB_DRIVER_BUILD = 'Debug'
+`$env:AVB_TEST_SANDBOX = '1'
+`$env:AVB_TEST_SANDBOX_CLASSES = 'test_sentinel_fake=ReadOnly'
+`$env:AVB_TEST_ADAPTER_STATE_FILE = '$stateFile'
+`$env:AVB_TEST_STATE_SETTLE_SECONDS = '0'
 & '$RunCIPath' -Suite HardwareMandatory -Tests @('ps1:$fakePsTestFwd') ``
     -TestTimeoutSeconds 30 -Configuration Debug -LogsDir '$logsEsc'
 exit `$LASTEXITCODE

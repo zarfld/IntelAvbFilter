@@ -218,6 +218,7 @@ function Invoke-DriverHealthCheck {
         $env:AVB_TEST_HEALTH_FAIL_AFTER = ''   # clear after triggering once
         return $false
     }
+    if ($script:IsSandbox) { return $true }   # sandbox never touches the device (see $IsSandbox)
     return (Test-AvbDriverHealth -AfterTest $AfterTest)
 }
 
@@ -257,6 +258,7 @@ $UnitTests = @(
     "ps1:tests/unit/ioctl/test_no_interactive_waits.ps1",       # TEST-NOWAIT-001: no system("pause") in CI/HIL
     "ps1:tests/unit/build/test_build_tests_syspaths.ps1",       # TEST-BUILD-SYSPATHS-001: sysPaths type-safety regression
     "ps1:tests/unit/ioctl/test_health_sentinel.ps1",            # TEST-SENTINEL-001..006: #328 behavioral health sentinel
+    "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1",            # TEST-HILGATE-001..031: HIL safety gate + state integrity (sandboxed, no driver; #343)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
     "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator
@@ -378,6 +380,12 @@ $HardwareMutationTests = @(
 #   test_s3_sleep_wake          -- TC-S3-002 calls SetSuspendState (hibernates host, needs button press).
 #   test_vv_corr_001_stability  -- VV-CORR-001 24-hour PHC stability monitor. Run manually on
 #                                  a dedicated lab machine only. See Issue #317 Track E.
+#   test_hot_plug               -- disables/enables the NIC through devcon (#262).  NIC administration:
+#                                  classified Unsafe in $HilTestSafety (#343).
+#   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  NIC
+#                                  administration: classified Unsafe in $HilTestSafety (#343).
+#   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
+#   entry, outside GitHub Actions, on an operator-attended machine.
 $HardwareUnitTests = @(
     "test_cleanup_archive",        # checks build output against installed driver
     "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
@@ -423,7 +431,6 @@ $HardwareUnitTests = @(
     "ptp_clock_control_test",      # PHC/QPC coherence TC-5a/TC-5b -- #238
     "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
     "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
-    "test_lifecycle_coverage",     # Pillar-2 NDIS LWF lifecycle counters
     # Phase C: Additional unit tests registered 2026-04-01 (built but previously absent from CI)
     "test_hw_state",               # hardware state enum/OID query -- REQ-F-HWCTX-001 (#18)
     "test_statistics_counters",    # IOCTL statistics counters -- REQ-NF-DIAG-001 (#270)
@@ -448,7 +455,6 @@ $HardwareUnitTests = @(
     "test_timestamp_latency",      # TX/RX timestamp latency <1us -- (#272)
     "test_perf_regression",        # performance regression baseline -- (#225)
     "test_ndis_fastpath_latency",  # NDIS IOCTL fast-path latency P99<10us -- (#286)
-    "test_hot_plug",               # PnP hot-plug filter restart -- (#262)
     "test_error_recovery",         # error recovery / no-BSOD on malformed input -- (#215)
     "test_multi_adapter_phc_sync",  # multi-adapter PHC sync/independence -- (#208)
     # Provenance regression (TEST-PROV-L01..L05 logic + TEST-PROV-H01..H05 device contract)
@@ -491,6 +497,127 @@ $HardwareIntegrationTests = @(
     "avb_test_i226_um",               # I226 caps (full TSN, MDIO, EEE) -- (#114)
     "test_hardware_detection"         # HW capability detection & register access safety -- (#44 #45, #287 #288)
 )
+
+# ===========================
+# HIL safety registry (#343) --- enforced by the runner before every Hardware* test
+# ===========================
+# Key = the exact suite entry (binary + arguments).  An entry missing from this table is BLOCKED.
+# Classes (from the comment- and string-stripped source, including local headers):
+#   ReadOnly        no IOCTL that changes adapter/PHC/TSN state (may open, read, timestamp, transmit)
+#   Init            IOCTL_AVB_INIT_DEVICE only (re-runs device init; I226 reseeds SYSTIM) --- runs, state verified
+#   Mutating        changes PHC/TSN/PHY state but cannot be pointed at one exact adapter --- BLOCKED
+#   Mutating:Target changes state only on the adapter named by AVB_HIL_TARGET_DID (AvbTestSelectTarget or the
+#                   shared AvbEnumerateAdapters filter) --- run once per supported, enabled adapter
+#   Unsafe          NIC / driver administration (disable, enable, restart, reinstall) --- BLOCKED unless
+#                   AVB_HIL_AUTHORIZE_UNSAFE names the exact entry; never under GitHub Actions
+#   Unknown         no reviewable source --- BLOCKED
+# The table is checked against the suite lists and the sources by tests/unit/ioctl/test_hil_safety_gate.ps1.
+$HilTestSafety = @{
+    # --- ReadOnly ---
+    'test_cleanup_archive'             = 'ReadOnly'
+    'test_ioctl_simple'                = 'ReadOnly'
+    'test_ioctl_trace'                 = 'ReadOnly'
+    'test_hal_performance'             = 'ReadOnly'
+    'test_atdecc_event'                = 'ReadOnly'
+    'test_atdecc_aen_protocol'         = 'ReadOnly'
+    'test_ioctl_version'               = 'ReadOnly'
+    'test_power_management'            = 'ReadOnly'
+    'test_tx_timestamp_provenance'     = 'ReadOnly'
+    'test_tx_timestamp_retrieval'      = 'ReadOnly'
+    'test_ioctl_phc_query'             = 'ReadOnly'
+    'test_ioctl_phc_epoch'             = 'ReadOnly'
+    'test_ioctl_xstamp'                = 'ReadOnly'
+    'test_ioctl_xstamp_v2'             = 'ReadOnly'
+    'test_ioctl_abi'                   = 'ReadOnly'   # static sizeof/code checks; no DeviceIoControl call
+    'test_tsn_ioctl_handlers'          = 'ReadOnly'
+    'test_ptp_crosstimestamp'          = 'ReadOnly'
+    'test_zero_polling_overhead'       = 'ReadOnly'   # launches "wpr.exe -status" only
+    'test_hw_state'                    = 'ReadOnly'
+    'test_statistics_counters'         = 'ReadOnly'   # "devcon restart" appears only in a SKIP message
+    'test_build_sign'                  = 'ReadOnly'
+    'test_compat_win11'                = 'ReadOnly'
+    'test_win7_stub'                   = 'ReadOnly'
+    'test_avtp_tu_bit_events'          = 'ReadOnly'
+    'test_ptp_event_latency'           = 'ReadOnly'
+    'test_event_latency_4ch'           = 'ReadOnly'
+    'test_event_nf_zero_polling'       = 'ReadOnly'
+    'test_event_nf_latency'            = 'ReadOnly'
+    'test_send_ptp_debug'              = 'ReadOnly'
+    'test_timestamp_latency'           = 'ReadOnly'
+    'test_perf_regression'             = 'ReadOnly'
+    'test_ndis_fastpath_latency'       = 'ReadOnly'
+    'test_multi_adapter_phc_sync'      = 'ReadOnly'
+    'test_ioctl_phc_crosstimestamp_v2' = 'ReadOnly'
+    'test_all_adapters'                = 'ReadOnly'
+    'test_multidev_adapter_enum'       = 'ReadOnly'
+    'test_device_register_access'      = 'ReadOnly'
+    'test_ndis_send_path'              = 'ReadOnly'
+    'test_ndis_receive_path'           = 'ReadOnly'
+    'test_lazy_initialization'         = 'ReadOnly'
+    'test_registry_diagnostics'        = 'ReadOnly'
+    'test_vv_corr_003_crossdomain'     = 'ReadOnly'
+    'test_ptp_001'                     = 'ReadOnly'   # ADJUST_FREQUENCY appears only in comments/printf text
+    'test_ptp_corr'                    = 'ReadOnly'
+    'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006/009 need --case
+    'test_hardware_detection'          = 'ReadOnly'
+    # --- Init (IOCTL_AVB_INIT_DEVICE) ---
+    'test_clock_config'                = 'Init'
+    'test_clock_working'               = 'Init'
+    'test_direct_clock'                = 'Init'
+    'test_dev_lifecycle'               = 'Init'       # "devcon" appears only in a SKIP message
+    'test_minimal_ioctl'               = 'Init'
+    'test_ioctl_routing'               = 'Init'
+    'test_hw_state_machine'            = 'Init'
+    # --- Mutating, exact-target-aware ---
+    'test_ptp_freq'                    = 'Mutating:Target'   # AvbTestSelectTarget
+    'test_ptp_freq_complete'           = 'Mutating:Target'   # AvbTestSelectTarget
+    'test_ptp_phc_stability --case UT-CORR-005' = 'Mutating:Target'   # AvbTestSelectTargetIndex
+    'test_ptp_phc_stability --case UT-CORR-006' = 'Mutating:Target'   # AvbTestSelectTargetIndex
+    'test_qav_cbs'                     = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
+    'avb_test_i217'                    = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
+    'avb_test_i219'                    = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
+    'avb_test_i225'                    = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
+    'avb_test_i226_um'                 = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
+    'avb_test_portability'             = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
+    # --- Mutating, not target-aware (BLOCKED until they honour AVB_HIL_TARGET_DID) ---
+    'test_mdio_phy'                    = 'Mutating'   # MDIO_WRITE
+    'test_ts_event_sub'                = 'Mutating'   # SET_HW/RX/QUEUE_TIMESTAMP, SET_TARGET_TIME
+    'test_ptp_getset'                  = 'Mutating'   # SET_TIMESTAMP, SET_HW_TIMESTAMPING
+    'test_hw_ts_ctrl'                  = 'Mutating'   # SET_HW_TIMESTAMPING
+    'test_rx_timestamp'                = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
+    'test_rx_timestamp_complete'       = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
+    'test_ioctl_target_time'           = 'Mutating'   # SET_TARGET_TIME, SET_HW_TIMESTAMPING
+    'test_ioctl_tas'                   = 'Mutating'   # SETUP_TAS, DISARM_TAS
+    'test_ioctl_fp_ptm'                = 'Mutating'   # SETUP_FP, SETUP_PTM
+    'test_ioctl_offset'                = 'Mutating'   # PHC_OFFSET_ADJUST
+    'test_ioctl_phc_monotonicity'      = 'Mutating'   # PHC_OFFSET_ADJUST
+    'test_ioctl_access_control'        = 'Mutating'   # PHC_OFFSET_ADJUST
+    'test_ioctl_buffer_fuzz'           = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
+    'ptp_clock_control_test'           = 'Mutating'   # SET_TIMESTAMP, ADJUST_FREQUENCY, INIT_DEVICE
+    'test_event_log'                   = 'Mutating'   # ADJUST_FREQUENCY
+    'test_eee_lpi'                     = 'Mutating'   # EEE_ENABLE/DISABLE
+    'test_pfc_pause'                   = 'Mutating'   # PFC_ENABLE
+    'test_srp_interface'               = 'Mutating'   # SRP_REGISTER/DEREGISTER_STREAM
+    'test_vlan_tag'                    = 'Mutating'   # VLAN_ENABLE/DISABLE
+    'test_vlan_pcp_tc_mapping'         = 'Mutating'   # SETUP_QAV
+    'test_security_validation'         = 'Mutating'   # SET_TIMESTAMP
+    'test_ioctl_launch_time'           = 'Mutating'   # SET_LAUNCH_TIME
+    'test_gptp_phc_interface'          = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
+    'test_error_recovery'              = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
+    'test_tsn_ioctl_handlers_um'       = 'Mutating'   # SETUP_TAS/FP/PTM, INIT_DEVICE
+    'test_ptp_corr_extended'           = 'Mutating'   # SET_HW_TIMESTAMPING
+    'ptp_clock_control_production'     = 'Mutating'   # SET_TIMESTAMP, ADJUST_FREQUENCY
+    'ptp_ioctl_latency_test'           = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE
+    'hw_timestamping_control'          = 'Mutating'   # SET_HW_TIMESTAMPING
+    'rx_timestamping'                  = 'Mutating'   # SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP
+    'tsauxc_toggle_test'               = 'Mutating'   # SET_HW_TIMESTAMPING
+    'test_gptp_daemon_coexist'         = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
+    # --- Unsafe (NIC administration; removed from every suite list) ---
+    'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
+    'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
+    # --- Unknown ---
+    'ssot_register_validation_test'    = 'Unknown'    # no build entry / source mapping in Build-Tests.ps1
+}
 
 # ===========================
 # Resolve which tests to run
@@ -549,6 +676,23 @@ if ($LogsDir -and $LogsDir.Trim() -ne "") {
     $logsDir = Join-Path $repoRoot "logs"
 }
 
+# Sandbox mode (offline runner tests only, e.g. tests/unit/ioctl/test_hil_safety_gate.ps1):
+# adapter/PHC state comes from the JSON file AVB_TEST_ADAPTER_STATE_FILE, the driver health check and
+# lifecycle snapshots are stubbed, and ONLY fake ps1 tests outside the repository may execute.
+# It requires an explicit -LogsDir outside <repo>/logs so sandbox evidence can never mix with HIL evidence.
+$IsSandbox = $false
+if ($env:AVB_TEST_SANDBOX -eq '1') {
+    $defaultLogsFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'logs')).TrimEnd('\')
+    $logsFull        = [System.IO.Path]::GetFullPath($logsDir).TrimEnd('\')
+    if (-not ($LogsDir -and $LogsDir.Trim() -ne '') -or $logsFull.StartsWith($defaultLogsFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Fail "AVB_TEST_SANDBOX=1 requires -LogsDir outside $defaultLogsFull --- refusing to run (no test executed)"
+        exit 1
+    }
+    $IsSandbox = $true
+}
+# Sandbox runs never export HIL identity or JUnit paths into the real CI job environment.
+$ExportGitHubEnv = (($env:GITHUB_ACTIONS -eq 'true') -and -not $IsSandbox)
+
 if (-not (Test-Path $logsDir)) {
     New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 }
@@ -564,7 +708,7 @@ if ($Suite -like 'Hardware*') {
     try {
         $gitSha = & git rev-parse HEAD 2>&1
         Write-Host "[INFO] Checkout SHA : $gitSha"
-        if ($env:GITHUB_ACTIONS -eq 'true') {
+        if ($ExportGitHubEnv) {
             "HIL_CHECKOUT_SHA=$gitSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         }
     } catch { Write-Host "[WARN] git rev-parse failed: $_" }
@@ -576,7 +720,7 @@ if ($Suite -like 'Hardware*') {
         $verStr = "$($ver.FileMajorPart).$($ver.FileMinorPart).$($ver.FileBuildPart).$($ver.FilePrivatePart)"
         $buildDate = (Get-Item $drvPath).LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
         Write-Host "[INFO] Driver version: $verStr  (SYS modified: $buildDate)"
-        if ($env:GITHUB_ACTIONS -eq 'true') {
+        if ($ExportGitHubEnv) {
             "HIL_DRIVER_VERSION=$verStr"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             "HIL_DRIVER_DATE=$buildDate"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         }
@@ -589,7 +733,7 @@ if ($Suite -like 'Hardware*') {
     if (-not $nicLabel) { $nicLabel = $env:HIL_NIC_TYPE }
     if ($nicLabel) {
         Write-Host "[INFO] NIC type label: $nicLabel"
-        if ($env:GITHUB_ACTIONS -eq 'true') {
+        if ($ExportGitHubEnv) {
             "HIL_NIC_TYPE=$nicLabel" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         }
     }
@@ -623,6 +767,456 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 }
 
 # ===========================
+# HIL safety gate + state integrity (#343)
+# ===========================
+# OBSERVATION ONLY: the runner never enables, disables, restarts or rebinds an adapter, a binding or the
+# driver.  A supported adapter that is unavailable is reported (BLOCKED / INFRA_FAILURE) and left as found.
+#
+#   baseline   supported-DID set from the SSOT (AvbGetIntelDeviceType + intel_pci_ids.h), PnP status /
+#              problem code, NetAdapter admin status, IntelAvbFilter binding, and per-adapter TIMINCA/TSAUXC
+#              via ENUM_ADAPTERS -> OPEN_ADAPTER -> GET_CLOCK_CONFIG (read-only; the same OPEN_ADAPTER loop the
+#              lifecycle snapshot already performs).
+#   gate       before every Hardware* test, from $HilTestSafety (see the table above the suite resolution).
+#   post-test  after every executed test, also after a timeout kill: compare with the baseline (settle up to
+#              $HilSettleSeconds); a difference is CLEANUP_FAILED and halts every later non-ReadOnly test.
+#              Link state and TSAUXC differences are reported as [WARN:STATE] (not enforced).
+$IsHardwareSuite     = ($Suite -like 'Hardware*')
+$HilSettleSeconds    = 10
+if ($IsSandbox -and $env:AVB_TEST_STATE_SETTLE_SECONDS -match '^\d+$') { $HilSettleSeconds = [int]$env:AVB_TEST_STATE_SETTLE_SECONDS }
+$stateHalt           = ''      # non-empty: every later non-ReadOnly test is BLOCKED
+$HilTargets          = @()     # exact-target DIDs ('0x125B') for Mutating:Target entries
+$HilSupported        = @{}
+$HilBaseline         = $null
+$UnderGitHubActions  = ($env:GITHUB_ACTIONS -eq 'true')
+$HilAuthorizedUnsafe = @()
+if ($env:AVB_HIL_AUTHORIZE_UNSAFE) {
+    $HilAuthorizedUnsafe = @($env:AVB_HIL_AUTHORIZE_UNSAFE -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Format-AvbDid { param([int]$Value) return ('0x{0:X4}' -f $Value) }
+
+function ConvertTo-AvbDid {
+    param([string]$Text)
+    if ($Text -match '^\s*(0x)?([0-9A-Fa-f]{1,4})\s*$') { return (Format-AvbDid ([Convert]::ToInt32($Matches[2], 16))) }
+    throw "invalid PCI device id '$Text'"
+}
+
+# Supported adapters = every non-commented 'case INTEL_DEV_*' of AvbGetIntelDeviceType(), resolved through
+# include/intel_pci_ids.h.  Any parse problem throws: a silent empty set would make every adapter "unsupported".
+function Get-AvbHilSupportedDids {
+    $src = Join-Path $repoRoot 'src\avb_integration_fixed.c'
+    $hdr = Join-Path $repoRoot 'include\intel_pci_ids.h'
+    foreach ($f in $src, $hdr) { if (-not (Test-Path -LiteralPath $f)) { throw "SSOT file missing: $f" } }
+    $m = [regex]::Match([System.IO.File]::ReadAllText($src), '(?s)\bintel_device_type_t\s+AvbGetIntelDeviceType\s*\([^)]*\)\s*\{(.*?)\r?\n\}')
+    if (-not $m.Success) { throw "AvbGetIntelDeviceType() definition not found in $src" }
+    $body  = [regex]::Replace($m.Groups[1].Value, '(?s)/\*.*?\*/', ' ')
+    $body  = [regex]::Replace($body, '//[^\r\n]*', ' ')
+    $names = @([regex]::Matches($body, '\bcase\s+(INTEL_DEV_\w+)\s*:') | ForEach-Object { $_.Groups[1].Value })
+    if ($names.Count -eq 0) { throw "no 'case INTEL_DEV_*' label parsed from AvbGetIntelDeviceType()" }
+    $defs = @{}
+    foreach ($d in [regex]::Matches([System.IO.File]::ReadAllText($hdr), '(?m)^\s*#define\s+(INTEL_DEV_\w+)\s+0x([0-9A-Fa-f]{4})U?\b')) {
+        $defs[$d.Groups[1].Value] = Format-AvbDid ([Convert]::ToInt32($d.Groups[2].Value, 16))
+    }
+    $out = @{}
+    foreach ($n in $names) {
+        if (-not $defs.ContainsKey($n)) { throw "$n is used in AvbGetIntelDeviceType() but not defined in $hdr" }
+        $out[$defs[$n]] = $n
+    }
+    return $out
+}
+
+function New-AvbHilAdapter {
+    param([string]$InstanceId, [string]$PnpStatus, [int]$Problem, [string]$AdminStatus, [string]$MediaStatus,
+          [string]$FilterBound, [string]$Name)
+    $did = ''
+    if ($InstanceId -match 'DEV_([0-9A-Fa-f]{4})') { $did = Format-AvbDid ([Convert]::ToInt32($Matches[1], 16)) }
+    return [pscustomobject]@{ InstanceId = $InstanceId; Did = $did; PnpStatus = $PnpStatus; Problem = $Problem
+                              AdminStatus = $AdminStatus; MediaStatus = $MediaStatus; FilterBound = $FilterBound; Name = $Name }
+}
+
+# Per-adapter TIMINCA/TSAUXC: ENUM_ADAPTERS -> OPEN_ADAPTER -> GET_CLOCK_CONFIG (all read-only).
+function Get-AvbHilClockState {
+    $res = @{ Ok = $false; Error = ''; Entries = @() }
+    if (-not ([System.Management.Automation.PSTypeName]'AvbHilIoctl').Type) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AvbHilIoctl {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool DeviceIoControl(IntPtr h, uint code, byte[] inBuf, uint inLen, byte[] outBuf, uint outLen, out uint ret, IntPtr ov);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr h);
+}
+'@
+    }
+    $IOCTL_ENUM = [uint32]0x0017007C; $IOCTL_OPEN = [uint32]0x00170080; $IOCTL_CLOCK = [uint32]0x001700B4   # fn 31 / 32 / 45
+    $h = [AvbHilIoctl]::CreateFile('\\.\IntelAvbFilter', [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+    if ($h -eq [IntPtr](-1)) {
+        $res.Error = "open \\.\IntelAvbFilter failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+        return $res
+    }
+    try {
+        $ret = [uint32]0
+        $e = New-Object byte[] 20
+        if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_ENUM, $e, 20, $e, 20, [ref]$ret, [IntPtr]::Zero)) {
+            $res.Error = "ENUM_ADAPTERS failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+            return $res
+        }
+        $count = [System.BitConverter]::ToUInt32($e, 4)
+        $entries = @()
+        for ($i = 0; $i -lt $count; $i++) {
+            $e = New-Object byte[] 20
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]$i), 0, $e, 0, 4)
+            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_ENUM, $e, 20, $e, 20, [ref]$ret, [IntPtr]::Zero)) {
+                $entries += [pscustomobject]@{ Index = $i; Did = '?'; Ok = $false; Timinca = 0; Tsauxc = 0; Error = "ENUM_ADAPTERS($i) failed" }
+                continue
+            }
+            $vid = [System.BitConverter]::ToUInt16($e, 8); $didv = [System.BitConverter]::ToUInt16($e, 10)
+            $did = Format-AvbDid $didv
+            $o = New-Object byte[] 12
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint16]$vid), 0, $o, 0, 2)
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint16]$didv), 0, $o, 2, 2)
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]$i), 0, $o, 4, 4)
+            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_OPEN, $o, 12, $o, 12, [ref]$ret, [IntPtr]::Zero)) {
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0
+                                               Error = "OPEN_ADAPTER failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
+                continue
+            }
+            $c = New-Object byte[] 24   # AVB_CLOCK_CONFIG: systim u64, timinca, tsauxc, clock_rate_mhz, status
+            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)) {
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0
+                                               Error = "GET_CLOCK_CONFIG failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
+                continue
+            }
+            $status = [System.BitConverter]::ToUInt32($c, 20)
+            if ($status -ne 0) {
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = ("GET_CLOCK_CONFIG status 0x{0:X8}" -f $status) }
+                continue
+            }
+            $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $true; Error = ''
+                                           Timinca = [System.BitConverter]::ToUInt32($c, 8); Tsauxc = [System.BitConverter]::ToUInt32($c, 12) }
+        }
+        $res.Entries = $entries
+        $res.Ok = $true
+    } finally {
+        [void][AvbHilIoctl]::CloseHandle($h)
+    }
+    return $res
+}
+
+function Get-AvbHilSandboxState {
+    $st = @{ Ok = $true; Error = ''; Adapters = @(); ClockOk = $true; ClockError = ''; Clock = @() }
+    $sf = $env:AVB_TEST_ADAPTER_STATE_FILE
+    if (-not $sf -or -not (Test-Path -LiteralPath $sf)) {
+        $st.Ok = $false; $st.ClockOk = $false; $st.Error = "sandbox state file not found: '$sf'"; $st.ClockError = $st.Error
+        return $st
+    }
+    $j = Get-Content -LiteralPath $sf -Raw | ConvertFrom-Json
+    $st.Adapters = @(foreach ($a in @($j.adapters)) {
+        New-AvbHilAdapter ([string]$a.InstanceId) ([string]$a.PnpStatus) ([int]$a.Problem) ([string]$a.AdminStatus) ([string]$a.MediaStatus) ([string]$a.FilterBound) ([string]$a.Name)
+    })
+    $st.Clock = @(foreach ($c in @($j.clock)) {
+        [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
+                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = '' }
+    })
+    return $st
+}
+
+function Get-AvbHilState {
+    if ($script:IsSandbox) { return (Get-AvbHilSandboxState) }
+    $st = @{ Ok = $true; Error = ''; Adapters = @(); ClockOk = $false; ClockError = ''; Clock = @() }
+    $pnp = @()
+    try {
+        $pnp = @(Get-PnpDevice -Class Net -PresentOnly -ErrorAction Stop | Where-Object { $_.InstanceId -match '^PCI\\VEN_8086&DEV_[0-9A-Fa-f]{4}' })
+    } catch {
+        $st.Ok = $false; $st.Error = "Get-PnpDevice failed: $($_.Exception.Message)"
+    }
+    $na = @{}
+    foreach ($n in @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue)) {
+        if ($n.PnPDeviceID) { $na[([string]$n.PnPDeviceID).ToUpperInvariant()] = $n }
+    }
+    $bind = @{}
+    foreach ($b in @(Get-NetAdapterBinding -ComponentID MS_IntelAvbFilter -IncludeHidden -ErrorAction SilentlyContinue)) {
+        $bind[[string]$b.Name] = [string]$b.Enabled
+    }
+    $list = @()
+    foreach ($d in $pnp) {
+        $n = $na[([string]$d.InstanceId).ToUpperInvariant()]
+        $problem = -1   # unknown = unhealthy, never silently 0
+        if ($null -ne $d.ConfigManagerErrorCode) { $problem = [int]$d.ConfigManagerErrorCode }
+        $admin = 'Unknown'; $media = 'Unknown'; $fb = 'Unknown'; $name = ''
+        if ($null -ne $n) {
+            $admin = [string]$n.AdminStatus; $media = [string]$n.Status; $name = [string]$n.Name
+            if ($bind.ContainsKey($name)) { $fb = $bind[$name] }
+        }
+        $list += New-AvbHilAdapter ([string]$d.InstanceId) ([string]$d.Status) $problem $admin $media $fb $name
+    }
+    $st.Adapters = $list
+    $ck = Get-AvbHilClockState
+    $st.ClockOk = $ck.Ok; $st.ClockError = $ck.Error; $st.Clock = $ck.Entries
+    return $st
+}
+
+# Returns @{ Diffs = enforced differences; Warn = observed-only differences }.
+function Compare-AvbHilState {
+    param($Base, $Cur)
+    $diffs = @(); $warn = @()
+    if (-not $Cur.Ok) {
+        $diffs += "adapter state not observable: $($Cur.Error)"
+    } else {
+        $bMap = @{}; foreach ($a in $Base.Adapters) { $bMap[$a.InstanceId] = $a }
+        $cMap = @{}; foreach ($a in $Cur.Adapters)  { $cMap[$a.InstanceId] = $a }
+        foreach ($k in @($bMap.Keys)) {
+            if (-not $cMap.ContainsKey($k)) { $diffs += "${k}: adapter no longer present"; continue }
+            foreach ($f in 'PnpStatus', 'Problem', 'AdminStatus', 'FilterBound') {
+                if ([string]$bMap[$k].$f -ne [string]$cMap[$k].$f) { $diffs += ("{0}: {1} {2} -> {3}" -f $k, $f, $bMap[$k].$f, $cMap[$k].$f) }
+            }
+            if ([string]$bMap[$k].MediaStatus -ne [string]$cMap[$k].MediaStatus) {
+                $warn += ("{0}: link {1} -> {2}" -f $k, $bMap[$k].MediaStatus, $cMap[$k].MediaStatus)
+            }
+        }
+        foreach ($k in @($cMap.Keys)) { if (-not $bMap.ContainsKey($k)) { $diffs += "${k}: adapter appeared" } }
+    }
+    if ($Base.ClockOk) {
+        if (-not $Cur.ClockOk) {
+            $diffs += "PHC clock state not observable: $($Cur.ClockError)"
+        } else {
+            $bc = @{}; foreach ($c in $Base.Clock) { $bc["$($c.Did)#$($c.Index)"] = $c }
+            $cc = @{}; foreach ($c in $Cur.Clock)  { $cc["$($c.Did)#$($c.Index)"] = $c }
+            foreach ($k in @($bc.Keys)) {
+                $b = $bc[$k]
+                if (-not $cc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): no longer enumerated by the driver" -f $b.Did, $b.Index); continue }
+                $c = $cc[$k]
+                if ($b.Ok -and -not $c.Ok) { $diffs += ("DID {0} (driver index {1}): clock config no longer readable ({2})" -f $b.Did, $b.Index, $c.Error); continue }
+                if ($b.Ok -and $c.Ok -and $b.Timinca -ne $c.Timinca) {
+                    $diffs += ("DID {0} (driver index {1}): TIMINCA 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Timinca, $c.Timinca)
+                }
+                if ($b.Ok -and $c.Ok -and $b.Tsauxc -ne $c.Tsauxc) {
+                    $warn += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
+                }
+            }
+            foreach ($k in @($cc.Keys)) {
+                if (-not $bc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): newly enumerated by the driver" -f $cc[$k].Did, $cc[$k].Index) }
+            }
+        }
+    }
+    return @{ Diffs = $diffs; Warn = $warn }
+}
+
+# Records a failure-class verdict that the runner itself determined (counted, shown, and written as a log
+# the JUnit converter turns into a <failure>).
+function Add-HilFailureRecord {
+    param([string]$Display, [string]$Status, [string]$Stem, [string]$Line)
+    $script:failedTests++
+    $script:totalTests++
+    $script:results += [PSCustomObject]@{ Name = $Display; Status = $Status; Exit = 'N/A' }
+    Write-Host "  $Line" -ForegroundColor Red
+    $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $p = Join-Path $script:logsDir ("{0}.exe_{1}.log" -f $Stem, $ts)
+    $i = 2
+    while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Stem, $i, $ts); $i++ }
+    $Line | Set-Content -LiteralPath $p -Encoding utf8
+}
+
+function Set-HilHalt {
+    param([string]$Reason)
+    if ($script:stateHalt) { return }
+    $script:stateHalt = $Reason
+    Write-Host "  [HALT] state-integrity halt: $Reason --- every later Init/Mutating/Unsafe test is BLOCKED; ReadOnly tests continue" -ForegroundColor Red
+}
+
+function Get-HilBinName {
+    param([string]$Entry)
+    if ($Entry.StartsWith('ps1:')) { return [System.IO.Path]::GetFileNameWithoutExtension($Entry.Substring(4)) }
+    return (($Entry -split '\s+', 2)[0] -replace '\.exe$', '')
+}
+
+# Sandbox: only ps1 fakes outside the repository may execute; their class comes from AVB_TEST_SANDBOX_CLASSES.
+function Test-HilSandboxFake {
+    param([string]$Entry)
+    if (-not $Entry.StartsWith('ps1:')) { return $false }
+    $p = $Entry.Substring(4).Replace('/', '\')
+    if (-not [System.IO.Path]::IsPathRooted($p)) { return $false }
+    $root = [System.IO.Path]::GetFullPath($script:repoRoot).TrimEnd('\') + '\'
+    return (-not [System.IO.Path]::GetFullPath($p).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase))
+}
+
+function Get-AvbHilTestClass {
+    param([string]$Entry)
+    if ($script:IsSandbox) {
+        $bin = Get-HilBinName $Entry
+        foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_CLASSES) -split ';')) {
+            if ($pair -match '^\s*([^=]+?)\s*=\s*(\S+)\s*$' -and $Matches[1] -eq $bin) { return $Matches[2] }
+        }
+        return ''
+    }
+    if ($HilTestSafety.ContainsKey($Entry)) { return $HilTestSafety[$Entry] }
+    return ''
+}
+
+# Pure decision: 'Run' | 'Block' (+ Reason).  A Mutating:Target item runs only with an exact target DID.
+function Get-AvbHilGateDecision {
+    param([string]$Entry, [string]$Class, [string]$Target, [string]$Halt, [int]$TargetCount,
+          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions)
+    $haltReason = "state-integrity halt ($Halt)"
+    switch ($Class) {
+        'ReadOnly' { return @{ Action = 'Run'; Reason = '' } }
+        'Init' {
+            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
+            return @{ Action = 'Run'; Reason = '' }
+        }
+        'Mutating:Target' {
+            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
+            if (-not $Target) {
+                if ($TargetCount -eq 0) { return @{ Action = 'Block'; Reason = 'no supported, enabled adapter is available as exact target (see TC-INFRA-ADAPTER-*)' } }
+                return @{ Action = 'Block'; Reason = 'Mutating:Target entry without an exact target DID' }
+            }
+            return @{ Action = 'Run'; Reason = '' }
+        }
+        'Mutating' {
+            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
+            return @{ Action = 'Block'; Reason = 'Mutating test is not exact-target-aware (does not honour AVB_HIL_TARGET_DID); it would change PHC/TSN/PHY state on whichever adapter the driver routes it to' }
+        }
+        'Unsafe' {
+            if ($UnderGitHubActions) {
+                return @{ Action = 'Block'; Reason = 'Unsafe (NIC/driver administration); AVB_HIL_AUTHORIZE_UNSAFE is ignored under GitHub Actions' }
+            }
+            if ($AuthorizedUnsafe -notcontains $Entry) {
+                return @{ Action = 'Block'; Reason = 'Unsafe (NIC/driver administration); requires AVB_HIL_AUTHORIZE_UNSAFE to name this exact entry on an operator-attended run' }
+            }
+            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
+            return @{ Action = 'Run'; Reason = '' }
+        }
+        'Unknown' { return @{ Action = 'Block'; Reason = 'classified Unknown (no reviewable source)' } }
+        ''        { return @{ Action = 'Block'; Reason = 'unclassified: no entry in the runner safety registry ($HilTestSafety)' } }
+        default   { return @{ Action = 'Block'; Reason = "invalid safety class '$Class'" } }
+    }
+}
+
+function Add-HilBlocked {
+    param([string]$Entry, [string]$Display, [string]$Stem, [string]$Reason)
+    Add-HilFailureRecord -Display $Display -Status 'BLOCKED(SAFETY)' -Stem $Stem `
+        -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed" -f $Entry, $Reason)
+}
+
+function Invoke-HilBaseline {
+    Write-Step "HIL safety gate: adapter + PHC baseline (observation only; the runner never enables, disables or rebinds an adapter)"
+    try {
+        $script:HilSupported = Get-AvbHilSupportedDids
+    } catch {
+        Add-HilFailureRecord -Display 'HIL-BASELINE' -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-ADAPTER' `
+            -Line "[INFRA_FAILURE] TC-INFRA-ADAPTER-000: supported-adapter set unavailable: $($_.Exception.Message)"
+        Set-HilHalt 'supported-adapter set unavailable'
+        return
+    }
+    $b = Get-AvbHilState
+    $script:HilBaseline = $b
+    if (-not $b.Ok) {
+        Add-HilFailureRecord -Display 'HIL-BASELINE' -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-STATE' `
+            -Line "[INFRA_FAILURE] TC-INFRA-STATE-000: adapter state not observable at baseline: $($b.Error)"
+        Set-HilHalt 'adapter state not observable at baseline'
+    }
+    if (-not $b.ClockOk) {
+        Add-HilFailureRecord -Display 'HIL-BASELINE' -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-STATE' `
+            -Line "[INFRA_FAILURE] TC-INFRA-STATE-000: PHC clock state not observable at baseline: $($b.ClockError)"
+        Set-HilHalt 'PHC clock state not observable at baseline'
+    }
+    $healthy = @()
+    $n = 0
+    $supportedPresent = 0
+    foreach ($a in $b.Adapters) {
+        if (-not $a.Did -or -not $script:HilSupported.ContainsKey($a.Did)) {
+            Write-Host ("  [INFO] unsupported Intel adapter DID {0} {1}: not in AvbGetIntelDeviceType --- not a test target" -f $a.Did, $a.InstanceId) -ForegroundColor DarkGray
+            $n++
+            continue
+        }
+        $supportedPresent++
+        $why = @(); $blocked = $false
+        if ($a.Problem -eq 22) { $why += 'disabled (problem 22)'; $blocked = $true }
+        elseif ($a.Problem -ne 0) { $why += "PnP problem $($a.Problem)" }
+        if ($a.PnpStatus -ne 'OK' -and $a.Problem -ne 22) { $why += "PnP status $($a.PnpStatus)" }
+        if ($a.AdminStatus -eq 'Down') { $why += 'administratively down'; $blocked = $true }
+        elseif ($a.AdminStatus -ne 'Up') { $why += "admin status $($a.AdminStatus)" }
+        if ($a.FilterBound -ne 'True') { $why += "IntelAvbFilter binding $($a.FilterBound)" }
+        if ($why.Count -gt 0) {
+            $tag = if ($blocked) { 'BLOCKED' } else { 'INFRA_FAILURE' }
+            Add-HilFailureRecord -Display ("adapter {0}" -f $a.Did) -Status $tag -Stem 'TC-INFRA-ADAPTER' `
+                -Line ("[{0}] TC-INFRA-ADAPTER-001/adapter:{1}: DID {2} ({3}) {4}: {5} --- supported adapter unavailable; the runner never enables or rebinds adapters, restore it manually to regain coverage" -f `
+                       $tag, $n, $a.Did, $script:HilSupported[$a.Did], $a.InstanceId, ($why -join ', '))
+        } else {
+            $healthy += $a.Did
+        }
+        $n++
+    }
+    if ($supportedPresent -eq 0) {
+        Add-HilFailureRecord -Display 'HIL-BASELINE' -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-ADAPTER' `
+            -Line "[INFRA_FAILURE] TC-INFRA-ADAPTER-005: no supported Intel adapter present (supported set: AvbGetIntelDeviceType)"
+    }
+    $dups = @($healthy | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+    foreach ($d in $dups) {
+        Add-HilFailureRecord -Display ("adapter {0}" -f $d) -Status 'BLOCKED' -Stem 'TC-INFRA-ADAPTER' `
+            -Line ("[BLOCKED] TC-INFRA-ADAPTER-003: DID {0} is present more than once --- exact targeting by device id is impossible; it is not a Mutating:Target target" -f $d)
+    }
+    $targets = @()
+    if ($b.ClockOk) {
+        foreach ($d in @($healthy | Sort-Object -Unique)) {
+            if ($dups -contains $d) { continue }
+            $ce = @($b.Clock | Where-Object { $_.Did -eq $d })
+            if ($ce.Count -eq 0) {
+                Add-HilFailureRecord -Display ("adapter {0}" -f $d) -Status 'INFRA_FAILURE' -Stem 'TC-INFRA-ADAPTER' `
+                    -Line ("[INFRA_FAILURE] TC-INFRA-ADAPTER-002: DID {0} is enabled in PnP but not enumerated by the driver (filter not attached)" -f $d)
+                continue
+            }
+            if (-not $ce[0].Ok) {
+                Add-HilFailureRecord -Display ("adapter {0}" -f $d) -Status 'BLOCKED' -Stem 'TC-INFRA-ADAPTER' `
+                    -Line ("[BLOCKED] TC-INFRA-ADAPTER-004: DID {0} clock config not readable ({1}) --- a mutation on it could not be verified; it is not a Mutating:Target target" -f $d, $ce[0].Error)
+                continue
+            }
+            $targets += $d
+        }
+    }
+    $script:HilTargets = $targets
+    $tlist = if ($targets.Count -gt 0) { $targets -join ', ' } else { '(none)' }
+    Write-Note "HIL exact targets for Mutating:Target tests: $tlist"
+}
+
+# After every executed test (also after a timeout kill).
+function Invoke-HilPostTestCheck {
+    param([string]$Display, [string]$Class, [bool]$TimedOut, [string]$Output)
+    if ($null -eq $script:HilBaseline) { return }
+    $cur = Get-AvbHilState
+    $cmp = Compare-AvbHilState $script:HilBaseline $cur
+    $first = @($cmp.Diffs)
+    $waited = 0
+    while (@($cmp.Diffs).Count -gt 0 -and $waited -lt $script:HilSettleSeconds) {
+        Start-Sleep -Seconds 1
+        $waited++
+        $cur = Get-AvbHilState
+        $cmp = Compare-AvbHilState $script:HilBaseline $cur
+    }
+    foreach ($w in @($cmp.Warn)) { Write-Host "  [WARN:STATE] after ${Display}: $w (observed, not enforced)" -ForegroundColor Yellow }
+    if (@($cmp.Diffs).Count -gt 0) {
+        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' `
+            -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change" -f $Display, (@($cmp.Diffs) -join '; '))
+        Set-HilHalt "CLEANUP_FAILED after $Display"
+        $script:HilBaseline = $cur   # later differences are attributed to later tests
+        return
+    }
+    if ($first.Count -gt 0) {
+        Write-Host ("  [WARN:STATE] after {0}: transient difference settled back to the baseline within {1}s: {2}" -f $Display, $waited, ($first -join '; ')) -ForegroundColor Yellow
+    }
+    if ($Class -ne 'ReadOnly') {
+        if ($TimedOut) {
+            Set-HilHalt "$Display ($Class) was killed after a timeout; state it may have left behind is not fully observable"
+        } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
+            Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself"
+        }
+    }
+}
+
+# ===========================
 # Run tests
 # ===========================
 $totalTests   = 0
@@ -637,11 +1231,28 @@ $results      = @()
 $env:AVB_DRIVER_BUILD = $Configuration
 Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
 
-Write-Step "Running $($TestList.Count) tests"
+if ($IsHardwareSuite) {
+    Invoke-HilBaseline
+}
+
+# Work items: a Mutating:Target entry becomes one item per exact target DID (AVB_HIL_TARGET_DID).
+$WorkItems = @()
+foreach ($t in $TestList) {
+    if ($IsHardwareSuite -and (Get-AvbHilTestClass $t) -eq 'Mutating:Target' -and $HilTargets.Count -gt 0) {
+        foreach ($d in $HilTargets) { $WorkItems += [pscustomobject]@{ Entry = $t; Target = $d } }
+    } else {
+        $WorkItems += [pscustomobject]@{ Entry = $t; Target = '' }
+    }
+}
+
+Write-Step "Running $($TestList.Count) tests ($($WorkItems.Count) work items)"
 
 $driverLost = $false   # set when driver becomes inaccessible mid-suite
 
-foreach ($TestName in $TestList) {
+foreach ($WorkItem in $WorkItems) {
+    $TestName  = $WorkItem.Entry
+    $targetDid = $WorkItem.Target
+    $failFastStop = $false
     # Separate the binary name from any arguments embedded in the test name.
     # HardwareMutation entries like "test_ptp_phc_stability --case UT-CORR-005"
     # embed arguments after the binary name. Split them here so the path lookup
@@ -669,6 +1280,11 @@ foreach ($TestName in $TestList) {
         $exeName = if ($binName.EndsWith(".exe")) { $binName } else { "$binName.exe" }
     }
     $exePath = if ($isPsTest) { $psScriptPath } else { Join-Path $testExeDir $exeName }
+    $itemStem = $binName -replace '\.(exe|ps1)$',''
+    if ($targetDid) {
+        $exeName  = "$exeName@$targetDid"
+        $itemStem = "$itemStem@$($targetDid.Substring(2))"
+    }
 
     # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
     if ($driverLost) {
@@ -682,6 +1298,16 @@ foreach ($TestName in $TestList) {
             $skippedTests++
             $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED(INFRA)"; Exit = "N/A" }
         }
+        continue
+    }
+
+    # A known hardware entry never runs outside a Hardware* suite: there is no baseline or gate there.
+    if (-not $IsHardwareSuite -and $HilTestSafety.ContainsKey($TestName) -and (($UnitTests + $IntegrationTests) -notcontains $TestName)) {
+        Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason 'hardware test requested outside a Hardware* suite (no adapter baseline or safety gate)'
+        continue
+    }
+    if ($IsSandbox -and -not (Test-HilSandboxFake $TestName)) {
+        Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason 'sandbox mode: only fake ps1 tests outside the repository may execute'
         continue
     }
 
@@ -699,15 +1325,27 @@ foreach ($TestName in $TestList) {
         continue
     }
 
+    # HIL safety gate (#343): decided by the runner before the process is started.
+    $hilClass = ''
+    if ($IsHardwareSuite) {
+        $hilClass = Get-AvbHilTestClass $TestName
+        $gate = Get-AvbHilGateDecision -Entry $TestName -Class $hilClass -Target $targetDid -Halt $stateHalt `
+                    -TargetCount $HilTargets.Count -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions
+        if ($gate.Action -ne 'Run') {
+            Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason $gate.Reason
+            continue
+        }
+    }
+
     $totalTests++
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $logStem = $binName -replace '\.(exe|ps1)$',''
+    $logStem = $itemStem
     $logFile = Join-Path $logsDir "${logStem}.exe_${timestamp}.log"
 
-    Write-Host "`n  => $exeName$(if ($testArgs) { " $testArgs" } else { '' })" -ForegroundColor Cyan
+    Write-Host "`n  => $exeName$(if ($testArgs) { " $testArgs" } else { '' })$(if ($hilClass) { "  [$hilClass]" } else { '' })" -ForegroundColor Cyan
 
     # --- Lifecycle snapshot BEFORE ---
-    $lcyBefore = Get-AvbLifecycleSnapshot
+    $lcyBefore = if ($IsSandbox) { $null } else { Get-AvbLifecycleSnapshot }
 
     # Run the test.  PowerShell scripts use powershell.exe; .exe binaries use Start-Process.
     if ($isPsTest) {
@@ -728,6 +1366,9 @@ foreach ($TestName in $TestList) {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.UseShellExecute = $false
+    # Exact target only for Mutating:Target work items; never inherited by any other test.
+    $psi.EnvironmentVariables.Remove('AVB_HIL_TARGET_DID')
+    if ($targetDid) { $psi.EnvironmentVariables['AVB_HIL_TARGET_DID'] = $targetDid }
     $proc = [System.Diagnostics.Process]::Start($psi)
 
     # Capture output in background threads, stream to console and log.
@@ -752,7 +1393,7 @@ foreach ($TestName in $TestList) {
     $combined -split "`n" | ForEach-Object { Write-Host "    $_" }
 
     # --- Lifecycle snapshot AFTER + diff ---
-    $lcyAfter = Get-AvbLifecycleSnapshot
+    $lcyAfter = if ($IsSandbox) { $null } else { Get-AvbLifecycleSnapshot }
     $lcyAnomalies = Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
     if ($lcyAnomalies) {
         Write-Host "  [WARN:LCY] Lifecycle anomaly detected (underflow/error/OID imbalance) -- see [LCY] lines above" -ForegroundColor Yellow
@@ -800,8 +1441,8 @@ foreach ($TestName in $TestList) {
         $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED"; Exit = $exitCode }
 
         if ($FailFast) {
-            Write-Note "-FailFast: stopping after first failure"
-            break
+            Write-Note "-FailFast: stopping after first failure (after the health and state checks)"
+            $failFastStop = $true
         }
     }
 
@@ -835,6 +1476,12 @@ foreach ($TestName in $TestList) {
 [INFRA_FAILURE] TC-INFRA-HEALTH-001: $infraMsg
 "@ | Set-Content $infraLogFile -Encoding utf8
     }
+
+    # Post-test adapter/PHC state integrity (#343) --- also after a timeout kill.
+    if ($IsHardwareSuite) {
+        Invoke-HilPostTestCheck -Display $exeName -Class $hilClass -TimedOut $timedOut -Output $combined
+    }
+    if ($failFastStop) { break }
 }
 
 # ===========================
@@ -874,7 +1521,7 @@ if (Test-Path $junitScript) {
     }
     if (Test-Path $junitOut) {
         Write-Ok "JUnit XML: $junitOut"
-        if ($env:GITHUB_ACTIONS -eq 'true') {
+        if ($ExportGitHubEnv) {
             "JUNIT_XML=$junitOut" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         }
     }

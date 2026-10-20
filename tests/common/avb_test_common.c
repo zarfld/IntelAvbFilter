@@ -6,6 +6,7 @@
  */
 
 #include "avb_test_common.h"
+#include <stdlib.h>
 
 /* =========================================================
  * AvbEnumerateAdapters
@@ -66,6 +67,22 @@ int AvbEnumerateAdapters(AvbAdapterInfo *out, int max_count)
     }
 
     CloseHandle(hDevice);
+
+    /* Exact target for Mutating:Target HIL work items (issue #343): when AVB_HIL_TARGET_DID is set,
+     * return only that adapter; if it does not name exactly one adapter, fail the process loudly
+     * instead of returning 0 adapters (which callers would report as a SKIP). */
+    {
+        int filtered = AvbTestFilterToTarget(out, count);
+        if (filtered < 0) {
+            char v[32] = "";
+            GetEnvironmentVariableA(AVB_TEST_TARGET_ENV, v, (DWORD)sizeof(v));
+            printf("[BLOCKED] TC-TARGET-001: %s=%s does not name exactly one enumerated adapter - no adapter returned, no operation performed\n",
+                   AVB_TEST_TARGET_ENV, v);
+            fflush(stdout);
+            exit(1);
+        }
+        count = filtered;
+    }
     return count;
 }
 

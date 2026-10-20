@@ -462,4 +462,19 @@ static __inline int AvbTestSelectTarget(const AvbAdapterInfo *list, int n, int *
     return AvbTestSelectTargetIndex(dids, n, value, out_index);
 }
 
+/* Exact-target filter used by AvbEnumerateAdapters() (the runner sets AVB_HIL_TARGET_DID only for
+ * Mutating:Target work items).  Returns the new adapter count:
+ *   variable not set                 -> n, list unchanged
+ *   exactly one adapter has that DID -> 1, list[0] = that adapter (driver global_index preserved)
+ *   bad value / absent / ambiguous   -> -1, list unchanged; the caller must fail, never fall back to all adapters */
+static __inline int AvbTestFilterToTarget(AvbAdapterInfo *list, int n)
+{
+    int ti = -1;
+    int sel = AvbTestSelectTarget(list, n, &ti);
+    if (sel == AVB_TARGET_NOT_REQUESTED) return n;
+    if (sel != AVB_TARGET_OK) return -1;
+    if (ti != 0) list[0] = list[ti];
+    return 1;
+}
+
 #endif /* AVB_TEST_COMMON_H */
