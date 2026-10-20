@@ -4,6 +4,7 @@
 $Configurations = @("Debug", "Release")
 $Configuration = "Debug"
 foreach ($Configuration in $Configurations){
+
     .\tools\build\Build-Driver.ps1 -Configuration $Configuration    
     .\tools\build\Build-Tests.ps1 -Configuration $Configuration    
     .\tools\setup\Install-Driver-Elevated.ps1 -Configuration $Configuration -Action Reinstall -CaptureDbgView 
@@ -277,7 +278,7 @@ $BenchmarkTests = @(
     $CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
     #$CISuite =@("All")
     foreach ($Suite in $CISuite) { 
-    #.\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
+    .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
     } 
 
     #$FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
