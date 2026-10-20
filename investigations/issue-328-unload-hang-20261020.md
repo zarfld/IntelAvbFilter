@@ -46,6 +46,21 @@ Copy of sys+pdb preserved outside the build tree (a Debug rebuild would overwrit
 12. RX drop path (`filter.c:2397-2412`) returns NBLs with `NdisFReturnNetBufferLists` when CAN_PEND; otherwise leaves ownership with caller. Correct per NDIS contract.
 13. Kernel debugging not enabled (SystemStartOptions has no DEBUG). `kd.exe` and `winxp\ndiskd.dll` installed. CrashDumpEnabled=3. No NDIS / Kernel-PnP System events since 09:20; NDIS/Operational empty. LiveKernelReports not readable without elevation.
 
+## Crash timeline (2026-10-20, after Phase A)
+
+16. **Crash 1:** BugCheck **0x7E** (`C0000005`, IP `FFFFF802'69DC6A7E`, exr `FFFF8B8A8C53F2C8`, cxr `FFFF8B8A8C53EAE0`), minidump `102026-6843-01.dmp` (SHA256 `407AC11E…32A3`, copy in `C:\Users\User\HIL-evidence\issue328-20261020\`). The kernel was alive at 11:40:08.842 (DbgView: I226 module still `state=4`, RX drop) → crash between 11:40:08.97 and boot at 11:40:46. Offline `kd.exe -z` on the 1.3 GB NDIS dump copy started **11:39:37** (PID 5168). The unload hang ended in this crash, not in teardown completion; our driver logged no lifecycle progress 09:26:35 → crash (capture lossy).
+17. **Crash 2:** BugCheck **0x7E** (`C0000005`, IP `FFFFF802'2C806A7E`, exr `FFFFBC07A895F2C8`, cxr `FFFFBC07A895EAE0`). Offline `kd.exe -z` on the 2.7 MB minidump copy started **13:33:07**; boot 13:35:23. IntelAvbFilter service STOPPED since the first reboot, no SCM events for it, no filter module attached at 12:46 ⇒ IntelAvbFilter LIKELY **not loaded** at crash 2.
+18. Same low bits in both crashes (IP `…06A7E`, exr `…F2C8`, cxr `…EAE0`) with different KASLR bases ⇒ LIKELY the **same module + offset** both times. No 0x7E in the previous 60 days (only 5× 0x9F on 2026-10-08).
+19. Both kd runs produced empty or header-only logs (`kd_ndis0916_pass1.log` 1358 B, `kd_minidump_0x7e.log` 0 B): **neither dump has been analyzed**. Faulting module is UNKNOWN.
+20. Self-hosted runner processes (`Runner.Listener`/`Runner.Worker`) not running after the reboots — not touched.
+
+### Crash assessment
+
+- **kd.exe execution on this host is IMPLICATED** (2 of 2 kd runs → identical 0x7E within ~1–2 min; 0 crashes in ~1 h 50 min without kd; 0× 0x7E in 60 days before). Mechanism UNKNOWN: kd is user-mode; the fault is in a kernel system thread. Candidates (none verified): a file-system/AV minifilter reacting to kd opening a kernel dump, a network component during symbol-server download, or another kernel component reacting to dbgeng activity.
+- **IntelAvbFilter involvement in the 0x7E: UNLIKELY** for crash 2 (driver not loaded); not established either way for crash 1.
+- **The crash does not test T1** (I226 completion hypothesis): it neither supports nor contradicts it. The pre-crash unload-hang facts (F5–F8) stand; the I226 hang state was destroyed by crash 1.
+- **Do not run kd/WinDbg/any dbgeng tool on this HIL host** until the 0x7E is understood; analyze the dumps on a different machine.
+
 ## THEORIES (ranked)
 
 | # | Theory | Status | For | Against | Missing observation |
