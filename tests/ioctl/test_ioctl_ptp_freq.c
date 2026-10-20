@@ -59,27 +59,10 @@ typedef struct {
  * +/-999,999 ppb: the conflict is recorded in #326 / #343 and the stricter policy is applied to the I210. */
 static BOOL     g_adapterIsI210 = FALSE;
 static unsigned g_savedRaw      = 0;    /* raw TIMINCA read BEFORE the first frequency change on this adapter (verified restore) */
-
-/* Helper: Open device */
-static HANDLE OpenAdapter(void)
-{
-    HANDLE h = CreateFileA(
-        "\\\\.\\IntelAvbFilter",
-        GENERIC_READ | GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-    
-    if (h == INVALID_HANDLE_VALUE) {
-        DWORD err = GetLastError();
-        printf("  [WARN] Could not open device: error %lu\n", err);
-    }
-    
-    return h;
-}
+/* The ONE adapter this run may mutate (AVB_HIL_TARGET_DID).  Every handle used for a frequency change is bound to it
+ * with IOCTL_AVB_OPEN_ADAPTER: an unbound handle would be routed to the driver-global current adapter, and the driver
+ * refuses GET_CLOCK_CONFIG on it (FullSuite 2026-10-19: restore readback failed after UT-PTP-FREQ-015). */
+static const AvbAdapterInfo *g_target = NULL;
 
 /* Helper: Convert ppb to increment_ns/increment_frac
  *
@@ -751,11 +734,11 @@ static int Test_AdjustmentResetOnRestart(TestContext *ctx)
     
     Sleep(100);  /* Small delay to let driver cleanup complete */
     
-    /* Step 4: Reopen adapter (simulates driver reload) */
-    adapter2 = OpenAdapter();
+    /* Step 4: Reopen adapter (simulates driver reload) - bound to the SAME target adapter (OPEN_ADAPTER) */
+    adapter2 = g_target ? AvbOpenAdapter(g_target) : INVALID_HANDLE_VALUE;
     if (adapter2 == INVALID_HANDLE_VALUE) {
         printf("  [FAIL] UT-PTP-FREQ-015: Reset on Restart: Failed to reopen adapter\n");
-        ctx->adapter = OpenAdapter();  /* Try to restore context for cleanup */
+        ctx->adapter = g_target ? AvbOpenAdapter(g_target) : INVALID_HANDLE_VALUE;  /* Try to restore context for cleanup */
         return TEST_FAIL;
     }
     
@@ -766,7 +749,7 @@ static int Test_AdjustmentResetOnRestart(TestContext *ctx)
     if (!DeviceIoControl(adapter2, IOCTL_AVB_ADJUST_FREQUENCY, &req2, sizeof(req2), &req2, sizeof(req2), &br, NULL)) {
         printf("  [FAIL] UT-PTP-FREQ-015: Reset on Restart: Cannot verify adjustment after reopen\n");
         CloseHandle(adapter2);
-        ctx->adapter = OpenAdapter();  /* Restore context */
+        ctx->adapter = g_target ? AvbOpenAdapter(g_target) : INVALID_HANDLE_VALUE;  /* Restore context (bound) */
         return TEST_FAIL;
     }
     
@@ -813,7 +796,22 @@ int main(void)
         return TEST_SKIP;
     }
 
+    /* These cases CHANGE the PHC frequency: act on exactly one operator-named adapter, never on "all" or on index 0. */
+    {
+        int ti = -1;
+        int sel = AvbTestSelectTarget(adapters, adapterCount, &ti);
+        if (sel != AVB_TARGET_OK) {
+            printf("[BLOCKED] UT-PTP-FREQ-001..015: exact target adapter required - %s=%s; no frequency change was made on any adapter\n",
+                   AVB_TEST_TARGET_ENV, AvbTargetSelectionName(sel));
+            return TEST_FAIL;   /* BLOCKED is a failure-class verdict (docs/testing/test-verdict-contract.md) */
+        }
+        g_target = &adapters[ti];
+        printf("[INFO] Target adapter: %s (DID=0x%04X, global index %u) via %s; other adapters are not touched\n",
+               g_target->device_name, g_target->device_id, g_target->global_index, AVB_TEST_TARGET_ENV);
+    }
+
     for (int ai = 0; ai < adapterCount; ai++) {
+        if (&adapters[ai] != g_target) continue;   /* exact target only */
         if (!AVB_HAS_CAP(&adapters[ai], INTEL_CAP_BASIC_1588)) {
             printf("[SKIP] Adapter %s (DID=0x%04X) lacks BASIC_1588 — skipping.\n",
                    adapters[ai].device_name, adapters[ai].device_id);

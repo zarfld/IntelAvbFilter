@@ -88,12 +88,6 @@ typedef struct {
     int skip_count;
 } TestContext;
 
-/* Multi-adapter context */
-typedef struct {
-    HANDLE handles[MAX_ADAPTERS];
-    int count;
-    char device_paths[MAX_ADAPTERS][256];
-} MultiAdapterContext;
 
 /* I210 (issue #343; Intel I210 datasheet 333016 v3.7 section 8.15.11): INC_TIME = 8 ns +/- Incvalue*2^-32 ns, NOMINAL raw
  * TIMINCA = 0, only +/-6.25 percent representable, provisional authorized range +/-100,000 ppb (#149).  #3 / #192 state
@@ -101,89 +95,6 @@ typedef struct {
 static BOOL     g_adapterIsI210 = FALSE;
 static unsigned g_savedRaw      = 0;    /* raw TIMINCA read BEFORE the first frequency change (verified restore) */
 
-/* Helper: Open device (always use default path - driver handles routing) */
-static HANDLE OpenAdapterByIndex(int index)
-{
-    HANDLE h;
-    
-    /* Driver uses single device node and routes to adapters via IOCTL */
-    h = CreateFileA(
-        "\\\\.\\IntelAvbFilter",
-        GENERIC_READ | GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-    
-    return h;
-}
-
-/* Helper: Enumerate all adapters using IOCTL_AVB_ENUM_ADAPTERS */
-static int EnumerateAdapters(MultiAdapterContext *ctx)
-{
-    HANDLE h = INVALID_HANDLE_VALUE;
-    AVB_ENUM_REQUEST enum_req = {0};
-    DWORD br;
-    int i;
-    
-    ctx->count = 0;
-    
-    /* Open driver device node */
-    h = CreateFileA(
-        "\\\\.\\IntelAvbFilter",
-        GENERIC_READ | GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-    
-    if (h == INVALID_HANDLE_VALUE) {
-        printf("  [ERROR] Failed to open device node\n");
-        return 0;
-    }
-    
-    /* Enumerate adapters using IOCTL */
-    for (i = 0; i < MAX_ADAPTERS; i++) {
-        ZeroMemory(&enum_req, sizeof(enum_req));
-        enum_req.index = i;
-        
-        if (DeviceIoControl(h, IOCTL_AVB_ENUM_ADAPTERS, 
-                           &enum_req, sizeof(enum_req),
-                           &enum_req, sizeof(enum_req), &br, NULL)) {
-            /* Open handle for this adapter (each test operation uses separate handle) */
-            ctx->handles[ctx->count] = CreateFileA(
-                "\\\\.\\IntelAvbFilter",
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                NULL,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                NULL
-            );
-            
-            if (ctx->handles[ctx->count] != INVALID_HANDLE_VALUE) {
-                snprintf(ctx->device_paths[ctx->count], 256, 
-                        "Adapter %d (VID:0x%04X DID:0x%04X)", 
-                        i, enum_req.vendor_id, enum_req.device_id);
-                ctx->count++;
-                printf("  [INFO] Adapter %d: VID:0x%04X DID:0x%04X\n", 
-                       i, enum_req.vendor_id, enum_req.device_id);
-            }
-        } else {
-            /* No more adapters */
-            break;
-        }
-    }
-    
-    CloseHandle(h);
-    
-    printf("  [INFO] Found %d adapter(s)\n", ctx->count);
-    return ctx->count;
-}
 
 /* Helper: Convert ppb to increment_ns/increment_frac */
 static void ConvertPpbToIncrement(INT64 ppb, UINT32 *increment_ns, UINT32 *increment_frac)
@@ -478,52 +389,14 @@ static int Test_IT_FREQ_001_EndToEnd(TestContext *ctx)
 static int Test_IT_FREQ_002_MultiAdapter(TestContext *ctx)
 {
     TEST_START("IT-FREQ-002: Concurrent Frequency Adjustments (Multi-Adapter)");
-    
-    MultiAdapterContext multi_ctx = {0};
-    int adapter_count = EnumerateAdapters(&multi_ctx);
-    
-    if (adapter_count < TARGET_ADAPTER_COUNT) {
-        printf("  [SKIP] IT-FREQ-002: Only %d adapter(s) found (need %d)\n", 
-               adapter_count, TARGET_ADAPTER_COUNT);
-        
-        /* Cleanup */
-        for (int i = 0; i < multi_ctx.count; i++) {
-            if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE) {
-                CloseHandle(multi_ctx.handles[i]);
-            }
-        }
-        return TEST_SKIP;
-    }
-    
-    /* Apply different frequency adjustments to each adapter */
-    INT64 adjustments[] = {100, -100, 50, -50};
-    int success_count = 0;
-    
-    for (int i = 0; i < TARGET_ADAPTER_COUNT; i++) {
-        if (AdjustFrequency(multi_ctx.handles[i], adjustments[i])) {
-            success_count++;
-            printf("  [INFO] Adapter %d: %+lld ppb adjustment successful\n", i, adjustments[i]);
-        } else {
-            printf("  [WARN] Adapter %d: Adjustment failed\n", i);
-        }
-    }
-    
-    /* Reset all adapters to nominal */
-    for (int i = 0; i < TARGET_ADAPTER_COUNT; i++) {
-        AdjustFrequency(multi_ctx.handles[i], 0);
-    }
-    
-    /* Cleanup */
-    for (int i = 0; i < multi_ctx.count; i++) {
-        if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE) {
-            CloseHandle(multi_ctx.handles[i]);
-        }
-    }
-    
-    ASSERT_EQUAL(success_count, TARGET_ADAPTER_COUNT, 
-                 "Not all adapters succeeded");
-    
-    RETURN_PASS("IT-FREQ-002: Multi-Adapter (4/4 adapters succeeded)");
+    (void)ctx;
+    /* NOT RUN (issue #343).  The previous body changed the frequency of "every" adapter through handles that were never
+     * bound with IOCTL_AVB_OPEN_ADAPTER, so all requests went to ONE driver-global adapter: it never exercised several
+     * adapters, and it mutated a NIC nobody selected.  Mutating several adapters in one run is outside the exact-target
+     * policy (AVB_HIL_TARGET_DID); a multi-adapter case needs a redesign with one bound handle and a verified restore per
+     * named adapter.  Unmet prerequisite => BLOCKED (a failure-class verdict, never PASS/SKIP). */
+    printf("  [BLOCKED] IT-FREQ-002: multi-adapter mutation not permitted (exact-target policy); needs redesign with bound handles per named adapter\n");
+    return TEST_FAIL;
 }
 
 /* IT-FREQ-003: Frequency Adjustment During Active gPTP Sync */
@@ -689,78 +562,13 @@ static int Test_VV_FREQ_003_gPTPSyncError(TestContext *ctx)
 {
     TEST_START("VV-FREQ-003: gPTP Synchronization Error (<1 µs over 1 hour)");
     
-    printf("  [INFO] This test requires 2 adapters (master/slave)\n");
-    printf("  [INFO] This test requires 1 hour to complete\n");
-    printf("  [INFO] Reducing to simulated test for automated testing\n");
-    
-    MultiAdapterContext multi_ctx = {0};
-    int adapter_count = EnumerateAdapters(&multi_ctx);
-    
-    if (adapter_count < 2) {
-        printf("  [SKIP] VV-FREQ-003: Only %d adapter(s) found (need 2 for master/slave)\n", adapter_count);
-        
-        /* Cleanup */
-        for (int i = 0; i < multi_ctx.count; i++) {
-            if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE) {
-                CloseHandle(multi_ctx.handles[i]);
-            }
-        }
-        return TEST_SKIP;
-    }
-    
-    HANDLE master = multi_ctx.handles[0];
-    HANDLE slave = multi_ctx.handles[1];
-    
-    printf("  [INFO] Simulating gPTP sync (master-slave) for 60 seconds...\n");
-    
-    /* Apply same frequency adjustment to both adapters */
-    ASSERT_TRUE(AdjustFrequency(master, 100), "Master adjustment failed");
-    ASSERT_TRUE(AdjustFrequency(slave, 100), "Slave adjustment failed");
-    
-    /* Measure sync error over 1 minute (reduced from 1 hour) */
-    int samples = 6;  /* 6 samples over 60 seconds */
-    UINT64 max_sync_error_ns = 0;
-    
-    for (int i = 0; i < samples; i++) {
-        Sleep(10000);  /* 10 seconds between samples */
-        
-        UINT64 ts_master, ts_slave;
-        ASSERT_TRUE(GetTimestamp(master, &ts_master), "Master timestamp failed");
-        ASSERT_TRUE(GetTimestamp(slave, &ts_slave), "Slave timestamp failed");
-        
-        /* Calculate sync error (absolute difference) */
-        UINT64 sync_error = (ts_master > ts_slave) ? 
-                           (ts_master - ts_slave) : (ts_slave - ts_master);
-        
-        if (sync_error > max_sync_error_ns) {
-            max_sync_error_ns = sync_error;
-        }
-        
-        printf("  [INFO] Sample %d/%d: sync error = %llu ns (%.3f µs)\n", 
-               i+1, samples, sync_error, sync_error / 1000.0);
-    }
-    
-    /* Reset both adapters to nominal */
-    AdjustFrequency(master, 0);
-    AdjustFrequency(slave, 0);
-    
-    /* Cleanup */
-    for (int i = 0; i < multi_ctx.count; i++) {
-        if (multi_ctx.handles[i] != INVALID_HANDLE_VALUE) {
-            CloseHandle(multi_ctx.handles[i]);
-        }
-    }
-    
-    printf("  [INFO] Maximum sync error: %llu ns (%.3f µs)\n", 
-           max_sync_error_ns, max_sync_error_ns / 1000.0);
-    
-    /* Acceptance criteria: <1 µs sustained (relaxed for simulated test) */
-    if (max_sync_error_ns < 100000) {  /* <100 µs acceptable for simulated test */
-        RETURN_PASS("VV-FREQ-003: gPTP sync error <100 µs (simulated test)");
-    } else {
-        printf("  [WARN] Sync error exceeds 100 µs (full hardware test recommended)\n");
-        RETURN_PASS("VV-FREQ-003: gPTP sync test completed (relaxed criteria)");
-    }
+    (void)ctx;
+    /* NOT RUN (issue #343).  The previous body used two handles that were never bound with IOCTL_AVB_OPEN_ADAPTER: both
+     * resolved to the same driver-global adapter, so it compared one PHC with itself, and both of its branches returned
+     * PASS ("relaxed criteria").  It provided no evidence.  Two-adapter gPTP sync needs a real master/slave setup and a
+     * redesign; until then this case is BLOCKED (failure-class), never PASS/SKIP. */
+    printf("  [BLOCKED] VV-FREQ-003: two-adapter gPTP sync needs a real master/slave setup and bound handles; not run\n");
+    return TEST_FAIL;
 }
 
 /*
@@ -785,11 +593,27 @@ int main(void)
     printf("╚════════════════════════════════════════════════════════════════╝\n");
     printf("\n");
     
-    /* Open primary adapter */
-    ctx.adapter = OpenAdapterByIndex(0);
-    if (ctx.adapter == INVALID_HANDLE_VALUE) {
-        printf("[ERROR] Failed to open AVB adapter. Skipping all tests.\n");
-        return TEST_FAIL;
+    /* Open the ONE operator-named target adapter, bound with IOCTL_AVB_OPEN_ADAPTER (issue #343).  The previous code opened
+     * the device node only: such a handle is routed to the driver-global current adapter, and the driver refuses
+     * GET_CLOCK_CONFIG on it by design (STATUS_UNSUCCESSFUL = GLE 31, device.c) - the FullSuite 2026-10-19 failure. */
+    {
+        AvbAdapterInfo adapters[AVB_MAX_ADAPTERS];
+        int n = AvbEnumerateAdapters(adapters, AVB_MAX_ADAPTERS);
+        int ti = -1;
+        int sel = (n > 0) ? AvbTestSelectTarget(adapters, n, &ti) : AVB_TARGET_ABSENT;
+        if (sel != AVB_TARGET_OK) {
+            printf("[BLOCKED] UT-FREQ-001..008, IT-FREQ-001..003, VV-FREQ-001..003: exact target adapter required - %s=%s"
+                   " (%d adapter(s) enumerated); no frequency change was made\n", AVB_TEST_TARGET_ENV, AvbTargetSelectionName(sel), n);
+            return TEST_FAIL;   /* BLOCKED is a failure-class verdict */
+        }
+        ctx.adapter = AvbOpenAdapter(&adapters[ti]);
+        if (ctx.adapter == INVALID_HANDLE_VALUE) {
+            printf("[FAIL] Target adapter %s (DID=0x%04X): IOCTL_AVB_OPEN_ADAPTER failed (GLE=%lu); no test run\n",
+                   adapters[ti].device_name, adapters[ti].device_id, GetLastError());
+            return TEST_FAIL;
+        }
+        printf("[INFO] Target adapter: %s (DID=0x%04X, global index %u), bound via OPEN_ADAPTER\n",
+               adapters[ti].device_name, adapters[ti].device_id, adapters[ti].global_index);
     }
     
     /* I210: identify the adapter and save the raw TIMINCA BEFORE the first frequency change, for a verified restore.

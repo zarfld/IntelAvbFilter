@@ -1024,6 +1024,7 @@ $AllTests = @(
         Name = "test_ptp_freq_complete"
         Type = "cl"
         Source = "tests\ioctl\test_ptp_freq_complete.c"
+        ExtraSources = "tests/common/avb_test_common.c"
         Output = "test_ptp_freq_complete.exe"
         Includes = "-I include -I external/intel_avb/lib"
         Enabled = $true

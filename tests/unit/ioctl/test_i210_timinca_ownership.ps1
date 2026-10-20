@@ -285,6 +285,32 @@ foreach ($fam in 'i210', 'i219', 'i226') {
 if ($bad13.Count -eq 0) { tc_pass 'TEST-TIMINCA-ARCH-013-init()-of-I210/I219/I226-returns-init_ptp-failure (no false PTP_READY from a swallowed failure)' }
 else { tc_fail 'TEST-TIMINCA-ARCH-013' ($bad13 -join '; ') }
 
+# 014 ---------------------------------------------------------------------------------------------
+# Mutating #343 HIL tests act on exactly ONE operator-named adapter (AVB_HIL_TARGET_DID) through a handle bound with
+# OPEN_ADAPTER.  FullSuite 2026-10-19: an unbound handle made the restore readback fail (GET_CLOCK_CONFIG refused) and
+# "adapter 0" changed from the I210 (Debug) to the I226 (Release).  Structural pin only; the selector itself is
+# verified behaviourally in test_i210_device_ops.c [T-001].
+$bad14 = @()
+$mutating = @('tests\ioctl\test_ioctl_ptp_freq.c', 'tests\ioctl\test_ptp_freq_complete.c', 'tests\integration\ptp_corr\test_ptp_phc_stability.c')
+foreach ($m in $mutating) {
+    $code = Strip-Comments (Read-Src $m)
+    if ($code -notmatch 'AvbTestSelectTarget(Index)?\s*\(') { $bad14 += "${m}: no exact-target selection" }
+    if ($code -match '\bOpenAdapterByIndex\s*\(' -or $code -match 'static\s+HANDLE\s+OpenAdapter\s*\(') { $bad14 += "${m}: defines an unbound open helper" }
+}
+foreach ($m in $mutating[0..1]) {   # the frequency tests open the device only through AvbOpenAdapter (OPEN_ADAPTER)
+    if ((Strip-Comments (Read-Src $m)) -match '\bCreateFile[AW]?\s*\(') { $bad14 += "${m}: opens the device directly (unbound handle)" }
+}
+$stab = Strip-Comments (Read-Src 'tests\integration\ptp_corr\test_ptp_phc_stability.c')
+if ($stab -match 'test_ut_corr_00[56]\s*\(\s*hDev\b') { $bad14 += 'test_ptp_phc_stability.c: UT-CORR-005/006 run on the shared first-adapter handle' }
+if ($stab -notmatch 'test_ut_corr_005\s*\(\s*hTarget\b' -or $stab -notmatch 'test_ut_corr_006\s*\(\s*hTarget\b') { $bad14 += 'test_ptp_phc_stability.c: UT-CORR-005/006 not on the bound target handle' }
+$ptpc = Strip-Comments (Read-Src 'tests\ioctl\test_ptp_freq_complete.c')
+foreach ($id in 'IT-FREQ-002', 'VV-FREQ-003') {
+    $fn = Get-Braced $ptpc ("static\s+int\s+Test_" + ($id -replace '-', '_') + '\w*\s*\([^)]*\)\s*\{')
+    if (-not $fn -or $fn -match 'AdjustFrequency\s*\(' -or $fn -notmatch '\[BLOCKED\]') { $bad14 += "test_ptp_freq_complete.c: $id must be BLOCKED (multi-adapter mutation) without changing any frequency" }
+}
+if ($bad14.Count -eq 0) { tc_pass 'TEST-TIMINCA-ARCH-014-mutating-#343-HIL-tests-use-one-explicit-bound-target-adapter' }
+else { tc_fail 'TEST-TIMINCA-ARCH-014' ($bad14 -join '; ') }
+
 Write-Host "  Summary: $($total - $failed)/$total passed, $failed failed"
 if ($failed -gt 0) { exit 1 }
 exit 0

@@ -357,11 +357,20 @@ static __inline int AvbTestI210RestoreVerified(HANDLE h, unsigned saved_raw, con
 {
     unsigned want = ((saved_raw & AVB_TEST_I210_TIMINCA_INCVALUE) == 0u) ? 0u : (AvbTestI210RawInPolicy(saved_raw) ? saved_raw : 0u);
     unsigned ns = 0, frac = 0, prev = 0, st = 0, now = 0;
-    DWORD gle = 0;
+    DWORD adj_gle = 0, rd_gle = 0;
+    BOOL adj_ok, rd_ok;
+    char rb[48];
     AvbTestI210RawToRequest(want, &ns, &frac);
-    if (!AvbTestAdjustFrequency(h, ns, frac, &prev, &st, &gle) || !AvbTestReadTimincaRaw(h, &now) || now != want) {
-        AVB_TEST_LOG("  [FAIL] %s: RESTORE FAILED (saved 0x%08X, wanted 0x%08X, now 0x%08X, gle=%lu) - the PHC frequency is NOT restored\n",
-               what, saved_raw, want, now, gle);
+    adj_ok = AvbTestAdjustFrequency(h, ns, frac, &prev, &st, &adj_gle);
+    /* ALWAYS attempt the readback, also after a failed restore request: the report must state what the register
+     * actually holds.  PASS only on adjust OK + successful readback + exact match; an unread value is never used. */
+    rd_ok = AvbTestReadTimincaRawEx(h, &now, &rd_gle);
+    if (!adj_ok || !rd_ok || now != want) {
+        if (rd_ok) _snprintf_s(rb, sizeof(rb), _TRUNCATE, "readback 0x%08X", now);
+        else       _snprintf_s(rb, sizeof(rb), _TRUNCATE, "readback UNREAD (gle=%lu)", rd_gle);
+        AVB_TEST_LOG("  [FAIL] %s: RESTORE FAILED (saved 0x%08X, wanted 0x%08X, restore request %s (status=0x%08X gle=%lu), %s)"
+                     " - the PHC frequency is NOT verified as restored\n",
+                     what, saved_raw, want, adj_ok ? "ok" : "FAILED", st, adj_gle, rb);
         return 0;
     }
     if (want != saved_raw)
@@ -380,6 +389,77 @@ static __inline BOOL AvbTestGetBoundDid(HANDLE h, unsigned short *did)
     if (!DeviceIoControl(h, IOCTL_AVB_GET_HW_STATE, &q, sizeof(q), &q, sizeof(q), &br, NULL)) return FALSE;
     *did = q.device_id;
     return TRUE;
+}
+
+/* =========================================================
+ * Exact target selection for MUTATING HIL tests (issue #343; FullSuite 2026-10-19 finding: "adapter 0" was the
+ * I210 in one pass and the I226 in the next, so a mutation lane silently changed a different NIC).
+ *
+ * A test that changes hardware state (TIMINCA, SYSTIM, TAS, PnP ...) must act on exactly ONE adapter that the
+ * operator named explicitly in AVB_HIL_TARGET_DID (hex PCI device ID, e.g. 0x1533).  There is no default and no
+ * fallback to enumeration index 0.  NOT_REQUESTED / ABSENT / AMBIGUOUS / BAD_VALUE are unmet safety prerequisites:
+ * the caller reports BLOCKED and performs no mutation.  The DID must be unique among the enumerated adapters,
+ * because the driver ABI exposes no PCI location or MAC (two NICs with one DID cannot be told apart).
+ * ========================================================= */
+#define AVB_TEST_TARGET_ENV "AVB_HIL_TARGET_DID"
+
+typedef enum {
+    AVB_TARGET_OK = 0,
+    AVB_TARGET_NOT_REQUESTED,   /* variable unset or empty */
+    AVB_TARGET_BAD_VALUE,       /* not 1..4 hex digits, or zero */
+    AVB_TARGET_ABSENT,          /* requested DID not enumerated */
+    AVB_TARGET_AMBIGUOUS        /* requested DID enumerated more than once */
+} AvbTargetSelection;
+
+static __inline const char *AvbTargetSelectionName(int s)
+{
+    switch (s) {
+    case AVB_TARGET_OK:            return "OK";
+    case AVB_TARGET_NOT_REQUESTED: return "NOT_REQUESTED (set " AVB_TEST_TARGET_ENV ")";
+    case AVB_TARGET_BAD_VALUE:     return "BAD_VALUE";
+    case AVB_TARGET_ABSENT:        return "ABSENT";
+    case AVB_TARGET_AMBIGUOUS:     return "AMBIGUOUS (DID not unique)";
+    default:                       return "UNKNOWN";
+    }
+}
+
+/* Pure selection (no I/O): *out_index is written only on AVB_TARGET_OK. */
+static __inline int AvbTestSelectTargetIndex(const unsigned short *dids, int n, const char *value, int *out_index)
+{
+    unsigned v = 0;
+    int digits = 0, i, hit = -1, hits = 0;
+    const char *p = value;
+    if (p == NULL) return AVB_TARGET_NOT_REQUESTED;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0') return AVB_TARGET_NOT_REQUESTED;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    for (; *p && *p != ' ' && *p != '\t'; p++) {
+        int d = (*p >= '0' && *p <= '9') ? *p - '0' : (*p >= 'a' && *p <= 'f') ? *p - 'a' + 10 :
+                (*p >= 'A' && *p <= 'F') ? *p - 'A' + 10 : -1;
+        if (d < 0 || ++digits > 4) return AVB_TARGET_BAD_VALUE;
+        v = (v << 4) | (unsigned)d;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '\0' || digits == 0 || v == 0u) return AVB_TARGET_BAD_VALUE;
+    for (i = 0; i < n; i++) { if (dids[i] == (unsigned short)v) { hits++; hit = i; } }
+    if (hits == 0) return AVB_TARGET_ABSENT;
+    if (hits > 1)  return AVB_TARGET_AMBIGUOUS;
+    if (out_index) *out_index = hit;
+    return AVB_TARGET_OK;
+}
+
+/* Reads AVB_HIL_TARGET_DID and selects within an AvbEnumerateAdapters() list. */
+static __inline int AvbTestSelectTarget(const AvbAdapterInfo *list, int n, int *out_index)
+{
+    char value[32];
+    unsigned short dids[AVB_MAX_ADAPTERS];
+    int i;
+    DWORD len = GetEnvironmentVariableA(AVB_TEST_TARGET_ENV, value, (DWORD)sizeof(value));
+    if (len == 0) return AVB_TARGET_NOT_REQUESTED;
+    if (len >= sizeof(value)) return AVB_TARGET_BAD_VALUE;
+    if (n > AVB_MAX_ADAPTERS) n = AVB_MAX_ADAPTERS;
+    for (i = 0; i < n; i++) dids[i] = list[i].device_id;
+    return AvbTestSelectTargetIndex(dids, n, value, out_index);
 }
 
 #endif /* AVB_TEST_COMMON_H */

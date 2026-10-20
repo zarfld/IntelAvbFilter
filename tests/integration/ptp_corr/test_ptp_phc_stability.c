@@ -83,6 +83,14 @@ static void tc_skip(const char *reason)
     printf("  [SKIP] %s\n", reason);
 }
 
+/* BLOCKED = unmet safety prerequisite; a failure-class verdict (docs/testing/test-verdict-contract.md), never PASS/SKIP. */
+static void tc_blocked(const char *reason)
+{
+    s_total++;
+    s_failed++;
+    printf("  [BLOCKED] %s\n", reason);
+}
+
 /* -------------------------------------------------------------------------
  * QPC helper — user-mode QueryPerformanceCounter wrapper
  * -------------------------------------------------------------------------*/
@@ -1065,6 +1073,7 @@ int main(int argc, char *argv[])
     /* Enumerate adapters */
     int adapter_count = 0;
     int ai;
+    unsigned short enum_dids[8] = {0};
     for (ai = 0; ai < 8; ai++) {
         AVB_ENUM_REQUEST r = {0};
         r.index = ai;
@@ -1074,6 +1083,7 @@ int main(int argc, char *argv[])
         if (!ok || r.status != NDIS_STATUS_SUCCESS) break;
         printf("  Adapter %d: VID=0x%04X DID=0x%04X Caps=0x%08X\n",
                ai, r.vendor_id, r.device_id, r.capabilities);
+        enum_dids[ai] = r.device_id;
         adapter_count++;
     }
 
@@ -1170,18 +1180,58 @@ int main(int argc, char *argv[])
         CloseHandle(hAdap);
     }
 
-    /* UT-CORR-005 and UT-CORR-006: state-modifying tests (adapter 0 only)
-     * Halt subsequent mutation tests if a restore step fails. */
+    /* UT-CORR-005 and UT-CORR-006: state-modifying tests on exactly ONE operator-named adapter (issue #343).
+     * Previously "adapter 0" = whichever adapter the driver enumerated first: the I210 in the Debug pass and the I226 in
+     * the Release pass of the FullSuite run of 2026-10-19.  Now: AVB_HIL_TARGET_DID selects the adapter (unique DID, no
+     * default), and a dedicated handle is bound to it with OPEN_ADAPTER.  Halt subsequent mutation tests if a restore
+     * step fails. */
     if (run_005 || run_006) {
-        printf("\n--- Adapter 0 (state-modifying tests) ---\n");
-        if (run_005) {
-            test_ut_corr_005(hDev, 0);
-            if (s_cleanup_failed > 0) {
-                printf("[HALT] CLEANUP_FAILED after UT-CORR-005 — skipping remaining mutation tests\n");
-                run_006 = false;
+        char target_value[32];
+        int  ti  = -1;
+        DWORD tl = GetEnvironmentVariableA(AVB_TEST_TARGET_ENV, target_value, (DWORD)sizeof(target_value));
+        int  sel = (tl == 0) ? AVB_TARGET_NOT_REQUESTED : (tl >= sizeof(target_value)) ? AVB_TARGET_BAD_VALUE
+                 : AvbTestSelectTargetIndex(enum_dids, adapter_count, target_value, &ti);
+        HANDLE hTarget = INVALID_HANDLE_VALUE;
+        if (sel == AVB_TARGET_OK) {
+            hTarget = CreateFileW(DEVICE_PATH_W, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hTarget != INVALID_HANDLE_VALUE) {
+                AVB_OPEN_REQUEST t_open = {0};
+                DWORD t_br = 0;
+                t_open.vendor_id = 0x8086;
+                t_open.device_id = enum_dids[ti];
+                t_open.index     = (avb_u32)ti;
+                if (!DeviceIoControl(hTarget, IOCTL_AVB_OPEN_ADAPTER, &t_open, sizeof(t_open), &t_open, sizeof(t_open),
+                                     &t_br, NULL) || t_open.status != 0) {
+                    printf("  [FAIL] UT-CORR-005/006: OPEN_ADAPTER of target DID=0x%04X failed (GLE=%lu status=0x%08X)\n",
+                           (unsigned)enum_dids[ti], GetLastError(), (unsigned)t_open.status);
+                    CloseHandle(hTarget);
+                    hTarget = INVALID_HANDLE_VALUE;
+                }
             }
         }
-        if (run_006) test_ut_corr_006(hDev, 0);
+        if (sel != AVB_TARGET_OK) {
+            char why[160];
+            _snprintf_s(why, sizeof(why), _TRUNCATE, "UT-CORR-005/006: exact target adapter required - %s=%s; no state change made",
+                        AVB_TEST_TARGET_ENV, AvbTargetSelectionName(sel));
+            if (run_005) tc_blocked(why);
+            if (run_006) tc_blocked(why);
+        } else if (hTarget == INVALID_HANDLE_VALUE) {
+            if (run_005) tc_result("UT-CORR-005: target adapter handle could not be bound", false);
+            if (run_006) tc_result("UT-CORR-006: target adapter handle could not be bound", false);
+        } else {
+            printf("\n--- Adapter %d DID=0x%04X (state-modifying tests, exact target via %s) ---\n",
+                   ti, (unsigned)enum_dids[ti], AVB_TEST_TARGET_ENV);
+            if (run_005) {
+                test_ut_corr_005(hTarget, (uint32_t)ti);
+                if (s_cleanup_failed > 0) {
+                    printf("[HALT] CLEANUP_FAILED after UT-CORR-005 — skipping remaining mutation tests\n");
+                    run_006 = false;
+                }
+            }
+            if (run_006) test_ut_corr_006(hTarget, (uint32_t)ti);
+            CloseHandle(hTarget);
+        }
     }
 
     /* UT-CORR-009: driver lifecycle — explicit authorization required.

@@ -39,6 +39,7 @@
 #include "precomp.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include "external/intel_avb/lib/intel_windows.h"
 #include "devices/intel_device_interface.h"
 
@@ -58,20 +59,29 @@ static int      g_fake_adjust_fail;      /* adjust fails with a generic device e
 static int      g_fake_adjust_swallow;   /* adjust reports success but never writes the register (buggy driver) */
 static DWORD    g_fake_reject_gle;       /* override the Win32 error of a rejection (0 = natural) */
 static int      g_fake_corrupt_on_reject;/* a (buggy) driver that changes TIMINCA even though it rejects */
+static int      g_fake_cfg_bad_status;   /* GET_CLOCK_CONFIG "succeeds" but reports a failing status field */
 static BOOL WINAPI FakeDeviceIoControl(HANDLE h, DWORD code, LPVOID in, DWORD in_sz, LPVOID out, DWORD out_sz,
                                        LPDWORD ret, LPOVERLAPPED ov);
 /* The helpers print verdict tags for the HIL tests.  Here several negative cases are deliberate, so de-tag the
  * output ("[FAIL]" -> "<FAIL>") to keep real tags reserved for this test's own CHECK results. */
+/* Captured helper output, so cases can assert what the helper REPORTED (not only what it returned). */
+static char   g_helper_log[4096];
+static size_t g_helper_len;
+#define HELPER_LOG_RESET()   (g_helper_len = 0, g_helper_log[0] = '\0')
+#define HELPER_LOG_HAS(s)    (strstr(g_helper_log, (s)) != NULL)
 static void HostHelperLog(const char *fmt, ...)
 {
     char buf[512];
     char *p;
+    size_t n;
     va_list ap;
     va_start(ap, fmt);
     _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
     va_end(ap);
     for (p = buf; *p; p++) { if (*p == '[') *p = '<'; else if (*p == ']') *p = '>'; }
     printf("      helper: %s", buf);
+    n = strlen(buf);
+    if (g_helper_len + n < sizeof(g_helper_log)) { memcpy(g_helper_log + g_helper_len, buf, n + 1); g_helper_len += n; }
 }
 #define AVB_TEST_LOG HostHelperLog
 #define DeviceIoControl FakeDeviceIoControl
@@ -187,7 +197,7 @@ static BOOL WINAPI FakeDeviceIoControl(HANDLE h, DWORD code, LPVOID in, DWORD in
         g_fake_cfg_calls++;
         if (g_fake_cfg_fail || (g_fake_cfg_fail_after >= 0 && g_fake_cfg_calls > g_fake_cfg_fail_after)) { SetLastError(g_fake_cfg_gle ? g_fake_cfg_gle : ERROR_GEN_FAILURE); return FALSE; }
         c->timinca = hw.timinca;
-        c->status = 0;
+        c->status = g_fake_cfg_bad_status ? 0xC0000001u : 0u;
         return TRUE;
     }
     if (code == IOCTL_AVB_GET_HW_STATE) {
@@ -473,6 +483,80 @@ int main(void)
         hw_reset(0x08000000u); g_fake_adjust_swallow = 1;
         CHECK("RestoreVerified: a driver that reports success but does not write the register is caught by the readback -> FAIL (0)", AvbTestI210RestoreVerified(fh, 0u, "swallowed restore") == 0);
         g_fake_adjust_swallow = 0;
+    }
+
+    /* FullSuite 2026-10-19 finding: the restore reported "now 0x00000000" although the readback never ran (the
+     * driver refuses GET_CLOCK_CONFIG on a handle without OPEN_ADAPTER).  The helper must PASS only on an actual,
+     * successful readback that matches exactly, and must never report an unread value. */
+    printf("\n[O-003] RestoreVerified reports only what it actually read back\n");
+    {
+        HANDLE fh = (HANDLE)(ULONG_PTR)1;
+        int r;
+        g_fake_cfg_fail_after = -1;
+
+        hw_reset(0x22u); g_fake_adjust_swallow = 1; g_fake_cfg_fail = 1; HELPER_LOG_RESET();
+        r = AvbTestI210RestoreVerified(fh, 0u, "unread restore");
+        CHECK("RestoreVerified: readback refused -> FAIL (0) and the report says UNREAD, never a register value",
+              r == 0 && HELPER_LOG_HAS("UNREAD") && !HELPER_LOG_HAS("now 0x00000000"));
+        g_fake_adjust_swallow = 0; g_fake_cfg_fail = 0;
+
+        hw_reset(0x22u); g_fake_adjust_fail = 1; HELPER_LOG_RESET();
+        r = AvbTestI210RestoreVerified(fh, 0u, "failed adjust");
+        CHECK("RestoreVerified: restore IOCTL failed -> FAIL (0) and the report carries the register value ACTUALLY read (0x00000022)",
+              r == 0 && HELPER_LOG_HAS("0x00000022"));
+        g_fake_adjust_fail = 0;
+
+        hw_reset(0x22u); g_fake_cfg_bad_status = 1; HELPER_LOG_RESET();
+        r = AvbTestI210RestoreVerified(fh, 0u, "bad readback status");
+        CHECK("RestoreVerified: GET_CLOCK_CONFIG returns TRUE with a failing status -> not a readback -> FAIL (0), reported UNREAD",
+              r == 0 && HELPER_LOG_HAS("UNREAD"));
+        g_fake_cfg_bad_status = 0;
+
+        hw_reset(0x22u); HELPER_LOG_RESET();
+        r = AvbTestI210RestoreVerified(fh, 0u, "good restore");
+        CHECK("RestoreVerified: adjust OK + readback OK + exact match -> PASS (1), report carries the read value",
+              r == 1 && hw.timinca == 0u && HELPER_LOG_HAS("restored TIMINCA 0x00000000 (verified by readback)"));
+    }
+
+    /* Exact-adapter targeting for MUTATING HIL tests (FullSuite 2026-10-19: "adapter 0" was the I210 in the Debug
+     * pass and the I226 in the Release pass).  Selection is explicit, unique, and never defaults to index 0. */
+    printf("\n[T-001] exact target selection for mutating HIL tests\n");
+    {
+        const unsigned short two[2]  = { 0x15BB, 0x1533 };          /* I219 enumerated first, I210 second */
+        const unsigned short dup[2]  = { 0x1533, 0x1533 };          /* two NICs with the same DID */
+        const unsigned short one[1]  = { 0x1533 };
+        int idx;
+        idx = -7; CHECK("no target requested (NULL) -> NOT_REQUESTED, index untouched (never a silent index 0)",
+                        AvbTestSelectTargetIndex(two, 2, NULL, &idx) == AVB_TARGET_NOT_REQUESTED && idx == -7);
+        idx = -7; CHECK("no target requested (\"\") -> NOT_REQUESTED, even with a single adapter",
+                        AvbTestSelectTargetIndex(one, 1, "", &idx) == AVB_TARGET_NOT_REQUESTED && idx == -7);
+        idx = -7; CHECK("\"0x1533\" -> OK, index 1 (not the first enumerated adapter)",
+                        AvbTestSelectTargetIndex(two, 2, "0x1533", &idx) == AVB_TARGET_OK && idx == 1);
+        idx = -7; CHECK("\"1533\" (hex without prefix) and \" 0X15bb \" (spaces, case) are accepted",
+                        AvbTestSelectTargetIndex(two, 2, "1533", &idx) == AVB_TARGET_OK && idx == 1 &&
+                        AvbTestSelectTargetIndex(two, 2, " 0X15bb ", &idx) == AVB_TARGET_OK && idx == 0);
+        idx = -7; CHECK("duplicate DID -> AMBIGUOUS (a DID alone cannot identify the adapter), index untouched",
+                        AvbTestSelectTargetIndex(dup, 2, "0x1533", &idx) == AVB_TARGET_AMBIGUOUS && idx == -7);
+        idx = -7; CHECK("requested DID not present -> ABSENT, index untouched",
+                        AvbTestSelectTargetIndex(two, 2, "0x125B", &idx) == AVB_TARGET_ABSENT && idx == -7);
+        idx = -7; CHECK("malformed values (\"zz\", \"0x\", \"0x1533x\", \"0x12345\", \"0\") -> BAD_VALUE",
+                        AvbTestSelectTargetIndex(two, 2, "zz", &idx) == AVB_TARGET_BAD_VALUE &&
+                        AvbTestSelectTargetIndex(two, 2, "0x", &idx) == AVB_TARGET_BAD_VALUE &&
+                        AvbTestSelectTargetIndex(two, 2, "0x1533x", &idx) == AVB_TARGET_BAD_VALUE &&
+                        AvbTestSelectTargetIndex(two, 2, "0x12345", &idx) == AVB_TARGET_BAD_VALUE &&
+                        AvbTestSelectTargetIndex(two, 2, "0", &idx) == AVB_TARGET_BAD_VALUE && idx == -7);
+        idx = -7; CHECK("zero adapters with a target -> ABSENT", AvbTestSelectTargetIndex(two, 0, "0x1533", &idx) == AVB_TARGET_ABSENT && idx == -7);
+        {
+            AvbAdapterInfo list[2];
+            ZeroMemory(list, sizeof(list));
+            list[0].vendor_id = 0x8086; list[0].device_id = 0x15BB; list[0].global_index = 0;
+            list[1].vendor_id = 0x8086; list[1].device_id = 0x1533; list[1].global_index = 1;
+            SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, NULL);
+            idx = -7; CHECK("env wrapper: variable unset -> NOT_REQUESTED", AvbTestSelectTarget(list, 2, &idx) == AVB_TARGET_NOT_REQUESTED && idx == -7);
+            SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, "0x1533");
+            idx = -7; CHECK("env wrapper: AVB_HIL_TARGET_DID=0x1533 -> OK, index 1", AvbTestSelectTarget(list, 2, &idx) == AVB_TARGET_OK && idx == 1);
+            SetEnvironmentVariableA(AVB_TEST_TARGET_ENV, NULL);
+        }
     }
 
     /* ======================= initialization (issue #343) ======================= */
