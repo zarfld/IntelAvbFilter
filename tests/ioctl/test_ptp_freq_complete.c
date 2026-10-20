@@ -440,6 +440,115 @@ static int Test_IT_FREQ_003_gPTPSync(TestContext *ctx)
 
 /*
  * =============================================================================
+ * UT-FREQ-RATE-I210-001/002: PHYSICAL RATE VERIFICATION (issue #343)
+ * =============================================================================
+ * The commanded +/-100,000 ppb is verified by the PHC RATE it produces against the host QPC (an independent
+ * timebase), not by reading back the TIMINCA value the driver wrote.  Windows N/P/N/M/N, RATE_WINDOW_MS each,
+ * IOCTL_AVB_PHC_CROSSTIMESTAMP_V2 every RATE_SAMPLE_MS on the bound target; verdict = AvbRateEvaluate()
+ * (avb_test_common.h, host-tested in test_i210_device_ops [R-001]).  I210 only; ~152 s.
+ */
+#define RATE_WINDOW_MS    30000
+#define RATE_SAMPLE_MS    500
+#define RATE_MAX_SAMPLES  128
+
+static unsigned g_targetIndex = 0;   /* driver global index of the bound target (informational V2 field) */
+
+typedef struct {
+    unsigned long long phc[RATE_MAX_SAMPLES];
+    unsigned long long qpc[RATE_MAX_SAMPLES];
+    unsigned long long qpc_freq;
+    int   n;
+    int   all_register_derived;   /* every sample valid, REGISTER_DERIVED, same QPC frequency */
+    DWORD gle;                    /* Win32 error of a failed IOCTL */
+} RateWindow;
+
+static BOOL SampleRateWindow(HANDLE h, RateWindow *w)
+{
+    int i;
+    w->n = 0; w->qpc_freq = 0; w->all_register_derived = 1; w->gle = 0;
+    for (i = 0; i < RATE_WINDOW_MS / RATE_SAMPLE_MS && w->n < RATE_MAX_SAMPLES; i++) {
+        AVB_CROSS_TIMESTAMP_V2_REQUEST r;
+        DWORD br = 0;
+        ZeroMemory(&r, sizeof(r));
+        r.struct_version = AVB_XTSTAMP_V2_VERSION;
+        r.struct_size    = (avb_u32)sizeof(r);
+        r.adapter_index  = g_targetIndex;
+        if (!DeviceIoControl(h, IOCTL_AVB_PHC_CROSSTIMESTAMP_V2, &r, sizeof(r), &r, sizeof(r), &br, NULL)) {
+            w->gle = GetLastError();
+            return FALSE;
+        }
+        if (!r.valid || r.qpc_frequency == 0 || r.avb_phc_source != AVB_PHC_SOURCE_REGISTER_DERIVED ||
+            (w->qpc_freq != 0 && r.qpc_frequency != w->qpc_freq)) {
+            w->all_register_derived = 0;
+        } else {
+            w->qpc_freq = r.qpc_frequency;
+            w->phc[w->n] = r.phc_time_ns;
+            w->qpc[w->n] = r.system_qpc;
+            w->n++;
+        }
+        Sleep(RATE_SAMPLE_MS);
+    }
+    return TRUE;
+}
+
+static void PrintRateBoth(const char *tag, const char *fmt, long long a, unsigned long b, int c)
+{
+    char msg[192];
+    _snprintf_s(msg, sizeof(msg), _TRUNCATE, fmt, a, b, c);
+    printf("  [%s] UT-FREQ-RATE-I210-001: %s\n", tag, msg);
+    printf("  [%s] UT-FREQ-RATE-I210-002: %s\n", tag, msg);
+}
+
+/* Returns the number of non-passing results (0..2).  Leaves the adapter at nominal; the verified restore of the
+ * saved baseline happens at the end of main(). */
+static int Test_UT_FREQ_RATE_I210(HANDLE h)
+{
+    static RateWindow w[5];
+    const long long cmd[5] = { 0, (long long)AVB_TEST_I210_POLICY_PPB, 0, -(long long)AVB_TEST_I210_POLICY_PPB, 0 };
+    AvbRateFit fit[5], nominal[3];
+    AvbRateEval ev;
+    int i, all_hw = 1, nonpass = 0;
+
+    TEST_START("UT-FREQ-RATE-I210-001/002: +/-100,000 ppb verified by PHC rate vs host QPC (N/P/N/M/N, 5 x 30 s)");
+    for (i = 0; i < 5; i++) {
+        unsigned ns = 0, frac = 0, prev = 0, st = 0, raw = 0;
+        DWORD gle = 0;
+        AvbTestI210RequestFromPpb(cmd[i], &ns, &frac);
+        if (!AvbTestAdjustFrequency(h, ns, frac, &prev, &st, &gle)) {
+            PrintRateBoth("FAIL", "ADJUST_FREQUENCY(%+lld ppb) failed (GLE=%lu) before window %d - no rate measured", cmd[i], gle, i);
+            AdjustFrequency(h, 0);
+            return 2;
+        }
+        if (!AvbTestReadTimincaRawEx(h, &raw, &gle) || raw != AvbTestI210RawFromPpb(cmd[i])) {
+            PrintRateBoth("FAIL", "TIMINCA does not hold the commanded %+lld ppb (GLE=%lu) before window %d - no rate measured", cmd[i], gle, i);
+            AdjustFrequency(h, 0);
+            return 2;
+        }
+        if (!SampleRateWindow(h, &w[i])) {
+            PrintRateBoth(w[i].gle == ERROR_NOT_READY ? "BLOCKED" : "FAIL",
+                          "IOCTL_AVB_PHC_CROSSTIMESTAMP_V2 failed during the %+lld ppb window (GLE=%lu, window %d)", cmd[i], w[i].gle, i);
+            AdjustFrequency(h, 0);
+            return 2;
+        }
+        AvbRateFitWindow(w[i].phc, w[i].qpc, w[i].n, w[i].qpc_freq, &fit[i]);
+        if (!w[i].all_register_derived) all_hw = 0;
+        printf("  [INFO] window %d (%+lld ppb): %d samples, PHC/QPC rate %.9f, LS residual %.0f ns rms, provenance %s\n",
+               i, cmd[i], fit[i].n, fit[i].rate, fit[i].resid_rms_ns, w[i].all_register_derived ? "REGISTER_DERIVED" : "NOT all REGISTER_DERIVED");
+    }
+    AdjustFrequency(h, 0);   /* nominal; verified restore of the saved baseline at the end of main() */
+
+    nominal[0] = fit[0]; nominal[1] = fit[2]; nominal[2] = fit[4];
+    AvbRateEvaluate(nominal, 3, &fit[1], (long long)AVB_TEST_I210_POLICY_PPB, all_hw, &ev);
+    printf("  [%s] UT-FREQ-RATE-I210-001: +100,000 ppb: %s\n", AvbRateVerdictTag(ev.verdict), ev.why);
+    if (ev.verdict != AVB_RATE_PASS) nonpass++;
+    AvbRateEvaluate(nominal, 3, &fit[3], -(long long)AVB_TEST_I210_POLICY_PPB, all_hw, &ev);
+    printf("  [%s] UT-FREQ-RATE-I210-002: -100,000 ppb: %s\n", AvbRateVerdictTag(ev.verdict), ev.why);
+    if (ev.verdict != AVB_RATE_PASS) nonpass++;
+    return nonpass;
+}
+
+/*
+ * =============================================================================
  * LEVEL 3: V&V TESTS (3 test cases)
  * =============================================================================
  */
@@ -448,113 +557,26 @@ static int Test_IT_FREQ_003_gPTPSync(TestContext *ctx)
 static int Test_VV_FREQ_001_StabilityBenchmark(TestContext *ctx)
 {
     TEST_START("VV-FREQ-001: Frequency Stability Benchmark (±1 ppb over 1 hour)");
-    
-    printf("  [INFO] This test requires 1 hour to complete\n");
-    printf("  [INFO] Reducing to 2-sample quick test for automated testing\n");
-    
-    const INT64 target_ppb = 100;
-    const int sample_interval_ms = 500;  /* 0.5 seconds per sample (was 30 s) */
-    const int samples = 2;              /* 2 samples (was 10) */
-    
-    /* Apply +100 ppb adjustment */
-    ASSERT_TRUE(AdjustFrequency(ctx->adapter, target_ppb), "Adjustment to +100 ppb failed");
-    
-    /* Get initial timestamp */
-    UINT64 ts_start, ts_end;
-    ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_start), "Initial timestamp failed");
-    
-    printf("  [INFO] Monitoring frequency stability (%d samples × %d ms)...\n",
-           samples, sample_interval_ms);
-    
-    double max_drift_ppb = 0.0;
-    
-    for (int i = 0; i < samples; i++) {
-        Sleep(sample_interval_ms);
-        
-        UINT64 ts_current;
-        ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_current), "Timestamp read failed");
-        
-        /* Calculate expected delta based on elapsed samples */
-        UINT64 expected_delta = (UINT64)sample_interval_ms * 1000000ULL;  /* ms -> ns */
-        double drift = CalculateFrequencyDrift(ts_start, ts_current, expected_delta * (i + 1));
-        
-        if (fabs(drift) > max_drift_ppb) {
-            max_drift_ppb = fabs(drift);
-        }
-        
-        printf("  [INFO] Sample %d/%d: drift = %.2f ppb\n", i+1, samples, drift);
-    }
-    
-    /* Get final timestamp */
-    ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_end), "Final timestamp failed");
-    
-    /* Reset to nominal */
-    AdjustFrequency(ctx->adapter, 0);
-    
-    printf("  [INFO] Maximum observed drift: %.2f ppb\n", max_drift_ppb);
-    
-    /* Acceptance criteria: max drift ±1 ppb (relaxed for 5-minute test) */
-    if (max_drift_ppb <= 10.0) {  /* ±10 ppb acceptable for short test */
-        RETURN_PASS("VV-FREQ-001: Stability within ±10 ppb (5-minute test)");
-    } else {
-        printf("  [WARN] Drift exceeds ±10 ppb (full 1-hour test recommended)\n");
-        RETURN_PASS("VV-FREQ-001: Stability test completed (relaxed criteria)");
-    }
+
+    (void)ctx;
+    /* NOT RUN (issue #343).  The previous quick check compared PHC deltas with Sleep() - a scheduler timer with
+     * millisecond jitter, i.e. no reference at ppb level - over 2 x 0.5 s, and returned PASS on both branches
+     * ("relaxed criteria").  It provided no evidence.  The 1-hour +/-1 ppb benchmark needs a long-run lane;
+     * the physical rate check against the QPC is UT-FREQ-RATE-I210-001/002. */
+    printf("  [INCONCLUSIVE] VV-FREQ-001: 1-hour +/-1 ppb stability benchmark not executed within the CI time budget; no evidence\n");
+    return TEST_FAIL;   /* INCONCLUSIVE is nonpassing on mandatory verification */
 }
 
 /* VV-FREQ-002: Long-Term Frequency Drift (<1 ppm over 24 hours) */
 static int Test_VV_FREQ_002_LongTermDrift(TestContext *ctx)
 {
     TEST_START("VV-FREQ-002: Long-Term Frequency Drift (<1 ppm over 24 hours)");
-    
-    printf("  [INFO] This test requires 24 hours to complete\n");
-    printf("  [INFO] Reducing to 1-second quick test for automated testing\n");
-    
-    const int test_duration_ms = 1000;  /* 1 second (was 10 minutes) */
-    const INT64 target_ppb = 50;
-    
-    /* Apply +50 ppb adjustment */
-    ASSERT_TRUE(AdjustFrequency(ctx->adapter, target_ppb), "Adjustment to +50 ppb failed");
-    
-    /* Get initial timestamp */
-    UINT64 ts_start, ts_end;
-    time_t time_start, time_end;
-    
-    ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_start), "Initial timestamp failed");
-    time_start = time(NULL);
-    
-    printf("  [INFO] Monitoring long-term drift for %d ms...\n", test_duration_ms);
-    printf("  [INFO] Test started at %s", ctime(&time_start));
-    
-    /* Sleep for test duration */
-    Sleep(test_duration_ms);
-    
-    /* Get final timestamp */
-    ASSERT_TRUE(GetTimestamp(ctx->adapter, &ts_end), "Final timestamp failed");
-    time_end = time(NULL);
-    
-    /* Calculate cumulative drift */
-    INT64 actual_duration_ns = (INT64)((UINT64)test_duration_ms * 1000000ULL);
-    UINT64 expected_delta_ns = (UINT64)actual_duration_ns;
-    double drift_ppb = CalculateFrequencyDrift(ts_start, ts_end, expected_delta_ns);
-    
-    /* Convert to ppm */
-    double drift_ppm = drift_ppb / 1000.0;
-    
-    printf("  [INFO] Test completed at %s", ctime(&time_end));
-    printf("  [INFO] Duration: %d ms\n", test_duration_ms);
-    printf("  [INFO] Cumulative drift: %.6f ppm (%.2f ppb)\n", drift_ppm, drift_ppb);
-    
-    /* Reset to nominal */
-    AdjustFrequency(ctx->adapter, 0);
-    
-    /* Acceptance criteria: <1 ppm (relaxed for 10-minute test) */
-    if (fabs(drift_ppm) < 10.0) {  /* <10 ppm acceptable for short test */
-        RETURN_PASS("VV-FREQ-002: Long-term drift <10 ppm (10-minute test)");
-    } else {
-        printf("  [WARN] Drift exceeds 10 ppm (full 24-hour test recommended)\n");
-        RETURN_PASS("VV-FREQ-002: Long-term drift test completed (relaxed criteria)");
-    }
+
+    (void)ctx;
+    /* NOT RUN (issue #343).  The previous quick check compared one PHC delta with a 1 s Sleep() and returned PASS on
+     * both branches ("relaxed criteria"): no evidence.  The 24-hour drift measurement needs a long-run lane. */
+    printf("  [INCONCLUSIVE] VV-FREQ-002: 24-hour <1 ppm drift measurement not executed within the CI time budget; no evidence\n");
+    return TEST_FAIL;   /* INCONCLUSIVE is nonpassing on mandatory verification */
 }
 
 /* VV-FREQ-003: gPTP Synchronization Error Validation (<1 µs Sustained) */
@@ -614,6 +636,7 @@ int main(void)
         }
         printf("[INFO] Target adapter: %s (DID=0x%04X, global index %u), bound via OPEN_ADAPTER\n",
                adapters[ti].device_name, adapters[ti].device_id, adapters[ti].global_index);
+        g_targetIndex = adapters[ti].global_index;
     }
     
     /* I210: identify the adapter and save the raw TIMINCA BEFORE the first frequency change, for a verified restore.
@@ -667,6 +690,21 @@ int main(void)
     RUN_TEST(Test_IT_FREQ_001_EndToEnd);
     RUN_TEST(Test_IT_FREQ_002_MultiAdapter);
     RUN_TEST(Test_IT_FREQ_003_gPTPSync);
+
+    /* Physical rate verification against the host QPC (issue #343): I210 only */
+    printf("\n═══════════════════════════════════════════════════════════════\n");
+    printf(" PHYSICAL RATE VERIFICATION (2 test cases, I210)\n");
+    printf("═══════════════════════════════════════════════════════════════\n");
+    ctx.test_count += 2;
+    if (g_adapterIsI210) {
+        int nonpass = Test_UT_FREQ_RATE_I210(ctx.adapter);
+        ctx.fail_count += nonpass;
+        ctx.pass_count += 2 - nonpass;
+    } else {
+        printf("  [SKIP] UT-FREQ-RATE-I210-001: not applicable - the target is not an I210\n");
+        printf("  [SKIP] UT-FREQ-RATE-I210-002: not applicable - the target is not an I210\n");
+        ctx.skip_count += 2;
+    }
     
     /* Level 3: V&V Tests (3 tests) */
     printf("\n═══════════════════════════════════════════════════════════════\n");

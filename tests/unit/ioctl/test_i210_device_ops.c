@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <math.h>
 #include "external/intel_avb/lib/intel_windows.h"
 #include "devices/intel_device_interface.h"
 
@@ -92,6 +93,25 @@ static void HostHelperLog(const char *fmt, ...)
 static int g_run = 0, g_fail = 0;
 #define CHECK(label, cond) do { g_run++; if (cond) printf("  [PASS] %s\n", (label)); \
     else { g_fail++; printf("  [FAIL] %s\n", (label)); } } while (0)
+
+/* Synthetic PHC/QPC window for the rate verdict: 10 MHz QPC sampled every 0.5 s, PHC = rate * elapsed plus
+ * deterministic uniform noise in [-noise_ns, +noise_ns], fitted by the helper under test. */
+static void RATE_WIN(AvbRateFit *f, double rate, int noise_ns, int n, unsigned seed)
+{
+    unsigned long long phc[256], qpc[256];
+    const unsigned long long qf = 10000000ULL;
+    unsigned s = seed * 2654435761u + 1u;
+    int i;
+    if (n > 256) n = 256;
+    for (i = 0; i < n; i++) {
+        double e = 0.0;
+        s = s * 1664525u + 1013904223u;
+        if (noise_ns) e = ((double)(s >> 8) / 16777216.0 * 2.0 - 1.0) * (double)noise_ns;
+        qpc[i] = 123456789ULL + (unsigned long long)i * (qf / 2ULL);
+        phc[i] = (unsigned long long)(1000000000000LL + llround(rate * ((double)i * 0.5e9) + e));
+    }
+    AvbRateFitWindow(phc, qpc, n, qf, f);
+}
 
 /* ---- fake register file behind the platform ops ---------------------------------------------------- */
 typedef struct { uint32_t off, val; int failed; } WLOG;

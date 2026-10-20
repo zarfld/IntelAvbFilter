@@ -477,4 +477,135 @@ static __inline int AvbTestFilterToTarget(AvbAdapterInfo *list, int n)
     return 1;
 }
 
+/* ---- Physical PHC frequency verification against the host QPC (issue #343) -----------------------------
+ * A frequency request is verified by the RATE it produces, measured against an independent timebase (QPC),
+ * not by reading back the register it wrote.  Windows N/P/N/M/N (nominal, +commanded, nominal, -commanded,
+ * nominal): the nominal windows give the PHC/QPC ratio r0 (both crystal offsets), the commanded change is
+ * measured relative to r0, so the QPC crystal error cancels.
+ *   samples not all REGISTER_DERIVED or too few          -> INCONCLUSIVE
+ *   PHC not monotonic / not advancing                    -> FAIL
+ *   |r0 - 1| > AVB_RATE_NOMINAL_LIMIT_PPM                -> FAIL  (e.g. legacy nominal +3906.25 ppm)
+ *   |delta - commanded| > max(AVB_RATE_MIN_TOL_PPB, 5 x spread of the nominal windows) -> FAIL
+ *   nominal spread > AVB_RATE_NOMINAL_SPREAD_PPB         -> INCONCLUSIVE (deviation cannot be certified)
+ *   otherwise                                            -> PASS */
+#include <math.h>
+#define AVB_RATE_MIN_SAMPLES         20
+#define AVB_RATE_NOMINAL_SPREAD_PPB  500.0
+#define AVB_RATE_MIN_TOL_PPB         2000.0
+#define AVB_RATE_NOMINAL_LIMIT_PPM   1000.0
+enum { AVB_RATE_PASS = 0, AVB_RATE_FAIL = 1, AVB_RATE_INCONCLUSIVE = 2 };
+
+typedef struct {
+    int    ok;              /* fit computed (>= 2 samples, nonzero QPC span) */
+    int    n;
+    int    monotonic;       /* PHC strictly increasing over the window */
+    double rate;            /* least-squares d(PHC ns) / d(QPC ns) */
+    double resid_rms_ns;
+} AvbRateFit;
+
+typedef struct {
+    int    verdict;         /* AVB_RATE_* */
+    double r0;              /* mean nominal PHC/QPC rate */
+    double spread_ppb;      /* (max - min) / r0 of the nominal windows */
+    double delta_ppb;       /* measured (rate / r0 - 1) */
+    double tol_ppb;
+    char   why[192];
+} AvbRateEval;
+
+static __inline const char *AvbRateVerdictTag(int v)
+{
+    return (v == AVB_RATE_PASS) ? "PASS" : (v == AVB_RATE_FAIL) ? "FAIL" : "INCONCLUSIVE";
+}
+
+static __inline void AvbRateFitWindow(const unsigned long long *phc_ns, const unsigned long long *qpc, int n,
+                                      unsigned long long qpc_freq, AvbRateFit *fit)
+{
+    double mx = 0.0, my = 0.0, sxx = 0.0, sxy = 0.0, ssr = 0.0;
+    int i;
+    fit->ok = 0; fit->n = n; fit->monotonic = 1; fit->rate = 0.0; fit->resid_rms_ns = 0.0;
+    if (n < 2 || qpc_freq == 0ULL) return;
+    for (i = 0; i < n; i++) {
+        mx += (double)(long long)(qpc[i] - qpc[0]) * 1e9 / (double)qpc_freq;
+        my += (double)(long long)(phc_ns[i] - phc_ns[0]);
+        if (i > 0 && phc_ns[i] <= phc_ns[i - 1]) fit->monotonic = 0;
+    }
+    mx /= n; my /= n;
+    for (i = 0; i < n; i++) {
+        double dx = (double)(long long)(qpc[i] - qpc[0]) * 1e9 / (double)qpc_freq - mx;
+        double dy = (double)(long long)(phc_ns[i] - phc_ns[0]) - my;
+        sxx += dx * dx; sxy += dx * dy;
+    }
+    if (sxx <= 0.0) return;
+    fit->rate = sxy / sxx;
+    for (i = 0; i < n; i++) {
+        double dx = (double)(long long)(qpc[i] - qpc[0]) * 1e9 / (double)qpc_freq - mx;
+        double dy = (double)(long long)(phc_ns[i] - phc_ns[0]) - my;
+        double r = dy - fit->rate * dx;
+        ssr += r * r;
+    }
+    fit->resid_rms_ns = sqrt(ssr / n);
+    fit->ok = 1;
+}
+
+static __inline void AvbRateEvaluate(const AvbRateFit *nominal, int n_nominal, const AvbRateFit *win,
+                                     long long commanded_ppb, int all_register_derived, AvbRateEval *ev)
+{
+    double lo = 0.0, hi = 0.0, sum = 0.0, err;
+    int i;
+    ev->verdict = AVB_RATE_INCONCLUSIVE; ev->r0 = 0.0; ev->spread_ppb = 0.0; ev->delta_ppb = 0.0; ev->tol_ppb = 0.0; ev->why[0] = '\0';
+    if (!all_register_derived) {
+        _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "PHC samples are not all REGISTER_DERIVED - the hardware clock was not measured");
+        return;
+    }
+    if (n_nominal < 2 || !win->ok || win->n < AVB_RATE_MIN_SAMPLES) {
+        _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "too few samples (window %d, need %d; %d nominal windows)", win->n, AVB_RATE_MIN_SAMPLES, n_nominal);
+        return;
+    }
+    for (i = 0; i < n_nominal; i++) {
+        if (!nominal[i].ok || nominal[i].n < AVB_RATE_MIN_SAMPLES) {
+            _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "too few samples in nominal window %d (%d, need %d)", i, nominal[i].n, AVB_RATE_MIN_SAMPLES);
+            return;
+        }
+    }
+    ev->verdict = AVB_RATE_FAIL;
+    for (i = 0; i < n_nominal; i++) {
+        if (!nominal[i].monotonic) { _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "PHC not monotonic in nominal window %d (frozen or stepping)", i); return; }
+    }
+    if (!win->monotonic) { _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "PHC not monotonic in the commanded window (frozen or stepping)"); return; }
+    for (i = 0; i < n_nominal; i++) {
+        double r = nominal[i].rate;
+        sum += r;
+        if (i == 0 || r < lo) lo = r;
+        if (i == 0 || r > hi) hi = r;
+    }
+    ev->r0 = sum / n_nominal;
+    if (ev->r0 < 0.5 || win->rate < 0.5) {
+        _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "PHC does not advance at the QPC rate (nominal %.6f, commanded %.6f)", ev->r0, win->rate);
+        return;
+    }
+    if (fabs(ev->r0 - 1.0) * 1e6 > AVB_RATE_NOMINAL_LIMIT_PPM) {
+        _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "nominal PHC/QPC rate off by %+.1f ppm (limit %.0f ppm) - nominal increment is wrong",
+                    (ev->r0 - 1.0) * 1e6, AVB_RATE_NOMINAL_LIMIT_PPM);
+        return;
+    }
+    ev->spread_ppb = (hi - lo) / ev->r0 * 1e9;
+    ev->delta_ppb  = (win->rate / ev->r0 - 1.0) * 1e9;
+    ev->tol_ppb    = (5.0 * ev->spread_ppb > AVB_RATE_MIN_TOL_PPB) ? 5.0 * ev->spread_ppb : AVB_RATE_MIN_TOL_PPB;
+    err = fabs(ev->delta_ppb - (double)commanded_ppb);
+    if (err > ev->tol_ppb) {
+        _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "measured %+.0f ppb vs commanded %+lld ppb: error %.0f ppb > tolerance %.0f ppb",
+                    ev->delta_ppb, commanded_ppb, err, ev->tol_ppb);
+        return;
+    }
+    if (ev->spread_ppb > AVB_RATE_NOMINAL_SPREAD_PPB) {
+        ev->verdict = AVB_RATE_INCONCLUSIVE;
+        _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "nominal windows spread %.0f ppb > %.0f ppb - the %+.0f ppb result cannot be certified",
+                    ev->spread_ppb, AVB_RATE_NOMINAL_SPREAD_PPB, ev->delta_ppb);
+        return;
+    }
+    ev->verdict = AVB_RATE_PASS;
+    _snprintf_s(ev->why, sizeof(ev->why), _TRUNCATE, "measured %+.0f ppb vs commanded %+lld ppb (error %.0f <= %.0f ppb; nominal %+.3f ppm, spread %.0f ppb)",
+                ev->delta_ppb, commanded_ppb, err, ev->tol_ppb, (ev->r0 - 1.0) * 1e6, ev->spread_ppb);
+}
+
 #endif /* AVB_TEST_COMMON_H */
