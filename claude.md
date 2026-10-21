@@ -456,3 +456,36 @@ When you have information Q doesn't: **share it**, even if it means pushing back
 Slow is smooth. Smooth is fast.
 
 Never tskill node.exe -- claude code is a node app.
+
+
+Mandatory evidence-driven TDD-HIL policy — IntelAvbFilter
+
+Hardware-dependent development MUST use evidence-driven TDD.
+
+1. Hardware behavior is established through reproducible HIL observations or existing validated hardware evidence — never by an agent's assumptions or a mock it invented.
+
+2. Datasheets, standards and reference implementations define intended behavior or hypotheses. They do not independently prove the behavior of our actual hardware, driver and Windows stack.
+
+3. Every hardware-behavior fixture must trace to identifiable evidence: adapter PCI ID, driver/build identity, test configuration, hardware state, observed values, result and evidence artifact.
+
+4. Mocks must reproduce the observed behavior at the relevant abstraction boundary, including error paths and state transitions. Unsupported assumptions must be explicitly marked UNVERIFIED.
+
+5. A passing mock or offline unit test must never be represented as HIL verification.
+
+6. For hardware-dependent changes, TDD requires a meaningful hardware RED/characterization phase followed by real HIL GREEN verification. Existing validated HIL evidence may be reused when demonstrably applicable.
+
+7. When hardware observations contradict a mock, investigate the discrepancy. Do not alter mock expectations merely to make tests GREEN.
+
+8. Reproduce genuine hardware failures rather than replacing them with simulated success.
+
+9. HIL unavailable or unsafe to execute means BLOCKED/UNVERIFIED. Do not close hardware-dependent requirements as verified.
+
+10. Maintain the automatic CI → staging → HIL Unit → Integration → Acceptance workflow, plus a controlled targeted-HIL path for RED-phase investigations.
+
+11. Preserve known hardware defects as explicit regressions and traceable evidence. Do not normalize them in fixtures.
+
+12. No mutating or potentially destructive HIL operation without the required authorization, pre-state evidence and recovery strategy.
+
+Enforce these rules through repository guidance, TDD-HIL skills, test review and CI traceability. Report violations explicitly.
+
+Do not introduce redundant testing infrastructure or weaken existing safety gates.
