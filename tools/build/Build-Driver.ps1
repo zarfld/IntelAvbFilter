@@ -69,8 +69,19 @@ param(
     [switch]$SkipDriver,
     
     [Parameter(Mandatory=$false)]
-    [switch]$Clean
+    [switch]$Clean,
+
+    # Controlled, stable signer (CI staging): PFX of the HIL test-signing certificate.  Implies -Sign.  The .sys is
+    # re-signed with it, the catalog is regenerated from the re-signed package and signed with it, and both signer
+    # thumbprints are verified.  Password from the environment variable named by -SigningPfxPasswordEnv (never a
+    # parameter value).  Without -SigningPfx the local behaviour is unchanged (WDK test certificate).
+    [Parameter(Mandatory=$false)]
+    [string]$SigningPfx,
+
+    [Parameter(Mandatory=$false)]
+    [string]$SigningPfxPasswordEnv = 'AVB_SIGNING_PFX_PASSWORD'
 )
+if ($SigningPfx) { $Sign = [switch]$true }
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
@@ -319,7 +330,47 @@ if ($Sign -and -not $SkipDriver) {
     }
 
     Write-Success "CAT file: $(Get-Item $catFile | Select-Object -ExpandProperty Length) bytes"
-    
+
+    if ($SigningPfx) {
+        # Stable signer: .sys (embedded) and catalog both signed by the controlled certificate.
+        $pfxPassword = [Environment]::GetEnvironmentVariable($SigningPfxPasswordEnv)
+        if (-not (Test-Path -LiteralPath $SigningPfx)) { Write-Failure "Signing PFX not found: $SigningPfx"; exit 1 }
+        if (-not $pfxPassword) { Write-Failure "Signing PFX password environment variable '$SigningPfxPasswordEnv' is empty"; exit 1 }
+        try {
+            $signer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $SigningPfx, $pfxPassword
+        } catch { Write-Failure "Signing PFX unreadable: $($_.Exception.Message)"; exit 1 }
+        $signerThumb = $signer.Thumbprint.ToUpperInvariant()
+        Write-Info "Stable signer: $($signer.Subject) ($signerThumb)"
+        $pkgSys = Join-Path $wdkPkgDir 'IntelAvbFilter.sys'
+        foreach ($target in @($pkgSys)) {
+            Reset-AvbExitCode
+            & $signtoolPath sign /fd SHA256 /f $SigningPfx /p $pfxPassword $target
+            $rc = Get-AvbExitCode
+            if (-not (Test-AvbExitSuccess $rc)) { Write-Failure "Signing $target failed! Exit code: $(Format-AvbExitCode $rc)"; exit (Get-AvbFailureExitCode $rc) }
+        }
+        Copy-Item -LiteralPath $pkgSys -Destination (Join-Path $outputDir 'IntelAvbFilter.sys') -Force
+        # The WDK catalog was made from the WDK-signed .sys; regenerate it from the re-signed package.
+        Remove-Item -LiteralPath $catFile -Force
+        Reset-AvbExitCode
+        & $inf2catPath /driver:"$wdkPkgDir" /os:10_X64
+        $rc = Get-AvbExitCode
+        $catFile = Get-ChildItem $wdkPkgDir -Filter "*.cat" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+        if (-not (Test-AvbExitSuccess $rc) -or -not $catFile) { Write-Failure "Catalog regeneration failed! Exit code: $(Format-AvbExitCode $rc)"; exit (Get-AvbFailureExitCode $rc) }
+        Reset-AvbExitCode
+        & $signtoolPath sign /fd SHA256 /f $SigningPfx /p $pfxPassword $catFile
+        $rc = Get-AvbExitCode
+        if (-not (Test-AvbExitSuccess $rc)) { Write-Failure "Signing catalog failed! Exit code: $(Format-AvbExitCode $rc)"; exit (Get-AvbFailureExitCode $rc) }
+        # Catalog coverage of the .sys (signature trust is not evaluated on the build machine: /pa would need the
+        # test root trusted there; the HIL runner verifies trust, the install verifies coverage again).
+        foreach ($f in @($pkgSys, $catFile)) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $f
+            $t = if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint.ToUpperInvariant() } else { '' }
+            if ($t -ne $signerThumb) { Write-Failure "$f is signed by '$t', expected the stable signer $signerThumb"; exit 1 }
+        }
+        Write-Success "Driver package signed by the stable signer $signerThumb (.sys + catalog)"
+    }
+}
+if ($Sign -and -not $SkipDriver -and -not $SigningPfx) {
     # Check for test certificate
     $certName = "Intel AVB Filter Test Certificate"
     $cert = Get-ChildItem -Path "Cert:\CurrentUser\My" | Where-Object {$_.Subject -like "*$certName*"} | Select-Object -First 1

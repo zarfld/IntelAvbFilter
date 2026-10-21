@@ -77,7 +77,27 @@ param(
     [switch]$Reinstall,
     
     [Parameter(Mandatory=$false)]
-    [string]$DriverPath
+    [string]$DriverPath,
+
+    # Unattended (CI) deployment of a verified staged package: tools/lib/DriverDeploy.ps1.  Requires -Reinstall or
+    # -InstallDriver, -PackageDir and -ExpectedSysSha256.  Never prompts, never reboots, never disables adapters,
+    # never deletes DriverStore directories, never restarts EventLog; every native step is bounded.
+    # Exit: 0 deployed | 1 infrastructure failure | 3 reboot/operator required.
+    [Parameter(Mandatory=$false)]
+    [switch]$NonInteractive,
+
+    [Parameter(Mandatory=$false)]
+    [string]$PackageDir,
+
+    [Parameter(Mandatory=$false)]
+    [string]$ExpectedSysSha256,
+
+    [Parameter(Mandatory=$false)]
+    [int]$StepTimeoutSeconds = 180,
+
+    # -NonInteractive: deployment record (steps, pre-state, post-state, outcome) written here as JSON.
+    [Parameter(Mandatory=$false)]
+    [string]$ResultJson
 )
 
 # Require Administrator
@@ -687,6 +707,38 @@ function Install-Driver {
     Write-Info "Run .\Setup-Driver.ps1 -CheckStatus to verify installation"
     
     return $true
+}
+
+# Unattended (CI) deployment: separate, bounded path; the attended path below is unchanged.
+if ($NonInteractive) {
+    . (Join-Path $PSScriptRoot '..\lib\DriverDeploy.ps1')
+    $bad = @()
+    if (-not ($Reinstall -or $InstallDriver)) { $bad += '-Reinstall or -InstallDriver' }
+    if ($UninstallDriver -or $EnableTestSigning) { $bad += 'no -UninstallDriver / -EnableTestSigning' }
+    if ($Method -ne 'netcfg') { $bad += '-Method netcfg' }
+    if (-not $PackageDir -or -not (Test-Path -LiteralPath $PackageDir -PathType Container)) { $bad += "-PackageDir <existing directory> (got '$PackageDir')" }
+    if ($ExpectedSysSha256 -notmatch '^[0-9A-Fa-f]{64}$') { $bad += '-ExpectedSysSha256 <64 hex>' }
+    if ($bad.Count -gt 0) { Write-Failure "-NonInteractive requires: $($bad -join '; ')"; exit 1 }
+    try {
+        $precondScript = Join-Path $PSScriptRoot 'Test-Preconditions.ps1'
+        Reset-AvbExitCode
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File $precondScript -ForInstall
+        $precondExit = Get-AvbExitCode
+        if (-not (Test-AvbExitSuccess $precondExit) -and $precondExit -ne 2) {
+            $result = [ordered]@{ outcome = 'FAILED'; exitCode = 1; reason = "installation preconditions failed (Test-Preconditions.ps1 exit $(Format-AvbExitCode $precondExit)); installed driver untouched"; steps = @(); preState = $null; postState = $null; managementRisk = '' }
+        } else {
+            $result = Invoke-AvbCiDriverDeployment -Sys (New-AvbRealSystem) -PackageDir (Resolve-Path -LiteralPath $PackageDir).Path `
+                          -ExpectedSysSha256 $ExpectedSysSha256 -StepTimeoutSeconds $StepTimeoutSeconds
+        }
+    } catch {
+        $result = [ordered]@{ outcome = 'FAILED'; exitCode = 1; reason = "deployment threw: $($_.Exception.Message)"; steps = @(); preState = $null; postState = $null; managementRisk = '' }
+    }
+    foreach ($s in @($result.steps)) { Write-Host ("  [{0}] {1}: {2}" -f $(if ($s.ok) { 'OK' } else { 'FAIL' }), $s.step, $s.detail) }
+    if ($result.managementRisk) { Write-Info $result.managementRisk }
+    $color = if ($result.exitCode -eq 0) { 'Green' } else { 'Red' }
+    Write-Host "[DEPLOY] $($result.outcome): $($result.reason)" -ForegroundColor $color
+    if ($ResultJson) { ($result | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ResultJson -Encoding UTF8 }
+    exit ([int]$result.exitCode)
 }
 
 # Main execution
