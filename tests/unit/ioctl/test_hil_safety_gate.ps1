@@ -681,7 +681,19 @@ $rQ2 = Invoke-Sandbox 'runQ2' @($tInit, $tRo) -AllSupportedEnabled -LockFile $lf
 tc_check 'TEST-HILGATE-052-absent-lock-is-acquired-before-mutation-and-released' `
     ((Get-RanCount $rQ2 '^RAN test_sbfake_init ') -eq 1 -and $rQ2.Out -match 'machine lock acquired by this run' -and -not (Test-Path $lfAbsent)) (Tail $rQ2)
 # 053: lock lost during execution -> no further mutation, LOCK_LOST persisted in the machine safety record
-$sfLost = Join-Path $Tmp 'safety_lost.json'; $null = Initialize-AvbHilSafetyRecord -Path $sfLost -Operator 'test' -Reason 'TEST-HILGATE-053'
+# A CLEAR record through the real bootstrap path: initialize (UNBASELINED) + authorized baseline under the lock.
+function New-ClearSafetyFile([string]$Name) {
+    $f = Join-Path $Tmp $Name; $null = Initialize-AvbHilSafetyRecord -Path $f -Operator 'test' -Reason $Name
+    $bl = Join-Path $Tmp "$Name.baseline.json"
+    ([ordered]@{ schema = 'avb-hil-baseline-authorization/1'; host = $env:COMPUTERNAME; verdict = 'BASELINE_VERIFIED'
+                 inventory = @([ordered]@{ did = '0x125B'; mac = '00-11-22-33-44-55' }); measurements = @([ordered]@{ name = 'TIMINCA'; value = '0x08000000' }) } | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $bl -Encoding UTF8
+    $lp = Join-Path $Tmp "$Name.lock"; $lk = Enter-AvbHilLock -Kind 'local' -Label 'test bootstrap' -Path $lp
+    $a = Approve-AvbHilSafetyBaseline -Path $f -Operator 'test' -Authorization 'synthetic sandbox baseline' -LockOwner $lk.Owner -LockPath $lp -BaselineEvidence $bl
+    $null = Exit-AvbHilLock -Owner $lk.Owner -Path $lp
+    if (-not $a.Ok) { throw "bootstrap of $Name failed: $($a.Why)" }
+    return $f
+}
+$sfLost = New-ClearSafetyFile 'safety_lost.json'
 $rQ3 = Invoke-Sandbox 'runQ3' @($tLockDrop, $tInit, $tRo2) -AllSupportedEnabled -LockFile (Join-Path $Tmp 'lost.lock') -SafetyFile $sfLost
 $sQ3 = Read-AvbHilSafetyState -Path $sfLost
 tc_check 'TEST-HILGATE-053-lock-lost-stops-mutation-and-is-recorded' `

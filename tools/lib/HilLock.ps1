@@ -143,7 +143,8 @@ function Resolve-AvbHilLockContext {
 # ---------------------------------------------------------------------------------------------------------
 # Machine-wide HIL safety record (Q 2026-10-21): %ProgramData%\IntelAvbFilter-hil-safety.json, schema avb-hil-safety/1.
 # Shared by every process, configuration and run on this machine (Debug, Release, LocalSuites, CI).
-#   CLEAR       explicitly initialized or cleared, no unrecovered event       -> Init/Mutating may run
+#   UNBASELINED record infrastructure exists, no authorized hardware baseline -> Init/Mutating BLOCKED
+#   CLEAR       authorized, evidence-backed baseline and no unrecovered event   -> Init/Mutating may run
 #   HALTED      at least one safety event with recovery PENDING / ATTEMPTED    -> Init/Mutating BLOCKED, ReadOnly runs
 #   UNAVAILABLE missing / unreadable / corrupt / wrong schema / other host /
 #               internally inconsistent                                       -> fail closed (as HALTED)
@@ -170,12 +171,18 @@ function Read-AvbHilSafetyState {
     if ($null -eq $r -or $r.schema -ne 'avb-hil-safety/1') { return (& $un "safety record has an unknown schema") }
     if ($r.host -ne $env:COMPUTERNAME) { return (& $un "safety record belongs to host '$($r.host)', not '$($env:COMPUTERNAME)' (stale or copied)") }
     $open = @(@($r.events) | Where-Object { $null -ne $_ -and $_.recovery.status -in @('PENDING', 'ATTEMPTED') })
+    $hasBaseline = ($null -ne $r.PSObject.Properties['baseline'] -and $null -ne $r.baseline)
+    if ($r.status -eq 'UNBASELINED') {
+        if ($open.Count -gt 0) { return (& $un 'safety record inconsistent: UNBASELINED with unrecovered events') }
+        return @{ State = 'UNBASELINED'; Why = 'no authorized hardware baseline (Approve-AvbHilSafetyBaseline)'; Record = $r }
+    }
     if ($r.status -eq 'HALTED') {
         if ($open.Count -eq 0) { return (& $un 'safety record inconsistent: HALTED without an unrecovered event') }
         return @{ State = 'HALTED'; Why = ("{0} unrecovered safety event(s), first: {1} {2} at {3}" -f $open.Count, $open[0].verdict, $open[0].trigger.executable, $open[0].utc); Record = $r }
     }
     if ($r.status -eq 'CLEAR') {
         if ($open.Count -gt 0) { return (& $un 'safety record inconsistent: CLEAR with unrecovered events') }
+        if (-not $hasBaseline) { return (& $un 'safety record inconsistent: CLEAR without an authorized baseline') }
         return @{ State = 'CLEAR'; Why = ''; Record = $r }
     }
     return (& $un "safety record has an unknown status '$($r.status)'")
@@ -186,7 +193,8 @@ function Initialize-AvbHilSafetyRecord {
     if (Test-Path -LiteralPath $Path) { return @{ Ok = $false; Why = "a safety record already exists at $Path (never overwritten; inspect it)" } }
     if (-not $Operator -or -not $Reason) { return @{ Ok = $false; Why = 'operator and reason are required' } }
     $now = (Get-Date).ToUniversalTime().ToString('o')
-    Write-AvbHilSafetyFile $Path ([ordered]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'CLEAR'; events = @()
+    # Infrastructure only: UNBASELINED, asserts nothing about the hardware (Approve-AvbHilSafetyBaseline makes it CLEAR).
+    Write-AvbHilSafetyFile $Path ([ordered]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'UNBASELINED'; baseline = $null; events = @()
         history = @([ordered]@{ utc = $now; operation = 'INITIALIZE'; operator = $Operator; reason = $Reason }) })
     return @{ Ok = $true; Why = '' }
 }
@@ -210,7 +218,7 @@ function Add-AvbHilSafetyEvent {
         return @{ Ok = $false; Why = "safety record unavailable ($($st.Why)); event written to $side"; EventId = $e.eventId }
     }
     $rec = if ($st.Record) { $st.Record } else {
-        [pscustomobject]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'HALTED'; events = @()
+        [pscustomobject]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'HALTED'; baseline = $null; events = @()
                            history = @([ordered]@{ utc = $now; operation = 'CREATED_BY_EVENT'; operator = ''; reason = 'no record existed when a safety event occurred' }) } }
     $rec.events = @(@($rec.events) + @($e)); $rec.status = 'HALTED'
     Write-AvbHilSafetyFile $Path $rec
@@ -234,8 +242,46 @@ function Clear-AvbHilSafetyHalt {
     if ($uncovered.Count -gt 0) { return @{ Ok = $false; Why = ("verification does not cover event(s): {0}" -f (($uncovered | ForEach-Object { $_.eventId }) -join ', ')) } }
     $now = (Get-Date).ToUniversalTime().ToString('o')
     foreach ($e in $open) { $e.recovery = [ordered]@{ status = 'VERIFIED'; operator = $Operator; evidence = $VerificationEvidence; utc = $now } }
-    $st.Record.status = 'CLEAR'
+    # Recovery restores the AUTHORIZED baseline; a machine that never had one returns to UNBASELINED, never CLEAR.
+    $st.Record.status = $(if ($null -ne $st.Record.PSObject.Properties['baseline'] -and $null -ne $st.Record.baseline) { 'CLEAR' } else { 'UNBASELINED' })
     $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $now; operation = 'CLEAR'; operator = $Operator; evidence = $VerificationEvidence; events = @($open | ForEach-Object { $_.eventId }) }))
+    Write-AvbHilSafetyFile $Path $st.Record
+    return @{ Ok = $true; Why = '' }
+}
+
+function Set-AvbRecordField($Record, [string]$Name, $Value) {
+    if ($null -ne $Record.PSObject.Properties[$Name]) { $Record.$Name = $Value } else { $Record | Add-Member -NotePropertyName $Name -NotePropertyValue $Value }
+}
+
+# Baseline authorization document (avb-hil-baseline-authorization/1): this host, BASELINE_VERIFIED, a physical inventory
+# in which every adapter has a DID and a stable identity (MAC or PCI location), and non-empty measurements.
+function Test-AvbHilBaselineEvidence {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Ok = $false; Why = 'baseline evidence document missing' } }
+    try { $b = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { return @{ Ok = $false; Why = "baseline evidence unreadable: $($_.Exception.Message)" } }
+    if ($b.schema -ne 'avb-hil-baseline-authorization/1' -or $b.host -ne $env:COMPUTERNAME) { return @{ Ok = $false; Why = 'baseline evidence has a wrong schema or host' } }
+    if ($b.verdict -ne 'BASELINE_VERIFIED') { return @{ Ok = $false; Why = "baseline verdict is '$($b.verdict)', not BASELINE_VERIFIED" } }
+    $inv = @($b.inventory)
+    $noId = @($inv | Where-Object { -not $_.did -or (-not ($_.PSObject.Properties['mac'] -and $_.mac) -and -not ($_.PSObject.Properties['pciLocation'] -and $_.pciLocation)) })
+    if ($inv.Count -eq 0 -or $noId.Count -gt 0) { return @{ Ok = $false; Why = 'baseline inventory empty or an adapter lacks a stable physical identity (MAC or PCI location)' } }
+    if (@($b.measurements).Count -eq 0) { return @{ Ok = $false; Why = 'baseline evidence has no measurements' } }
+    return @{ Ok = $true; Why = '' }
+}
+
+# Authorize the initial hardware baseline: UNBASELINED -> CLEAR (machine lock, operator, authorization text, evidence).
+function Approve-AvbHilSafetyBaseline {
+    param([string]$Path = (Get-AvbHilSafetyPath), [string]$Operator, [string]$Authorization, $LockOwner, [string]$LockPath = (Get-AvbHilLockPath), [string]$BaselineEvidence)
+    $held = Test-AvbHilLockHeld -Owner $LockOwner -Path $LockPath
+    if (-not $held.Ok) { return @{ Ok = $false; Why = "exclusive HIL control required: $($held.Why)" } }
+    if (-not $Operator -or -not $Authorization) { return @{ Ok = $false; Why = 'operator and explicit authorization text required' } }
+    $bv = Test-AvbHilBaselineEvidence -Path $BaselineEvidence
+    if (-not $bv.Ok) { return $bv }
+    $st = Read-AvbHilSafetyState -Path $Path
+    if ($st.State -ne 'UNBASELINED') { return @{ Ok = $false; Why = "record is $($st.State) $($st.Why) - only an UNBASELINED record takes an initial baseline" } }
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    Set-AvbRecordField $st.Record 'baseline' ([ordered]@{ evidence = $BaselineEvidence; operator = $Operator; authorization = $Authorization; utc = $now; via = 'APPROVE' })
+    $st.Record.status = 'CLEAR'
+    $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $now; operation = 'APPROVE_BASELINE'; operator = $Operator; authorization = $Authorization; evidence = $BaselineEvidence }))
     Write-AvbHilSafetyFile $Path $st.Record
     return @{ Ok = $true; Why = '' }
 }
@@ -246,12 +292,14 @@ function Invoke-AvbHilSafetyRebaseline {
     $held = Test-AvbHilLockHeld -Owner $LockOwner -Path $LockPath
     if (-not $held.Ok) { return @{ Ok = $false; Why = "exclusive HIL control required: $($held.Why)" } }
     if (-not $Operator -or -not $Approval) { return @{ Ok = $false; Why = 'operator and explicit approval text required' } }
-    if (-not $BaselineEvidence -or -not (Test-Path -LiteralPath $BaselineEvidence -PathType Leaf)) { return @{ Ok = $false; Why = 'new baseline evidence document missing' } }
+    $bv = Test-AvbHilBaselineEvidence -Path $BaselineEvidence
+    if (-not $bv.Ok) { return $bv }
     $st = Read-AvbHilSafetyState -Path $Path
     if ($st.State -ne 'HALTED') { return @{ Ok = $false; Why = "record is $($st.State) $($st.Why) - only a HALTED record can be rebaselined" } }
     $now = (Get-Date).ToUniversalTime().ToString('o')
     $open = @(@($st.Record.events) | Where-Object { $_.recovery.status -in @('PENDING', 'ATTEMPTED') })
     foreach ($e in $open) { $e.recovery = [ordered]@{ status = 'REBASELINED'; operator = $Operator; approval = $Approval; evidence = $BaselineEvidence; utc = $now } }
+    Set-AvbRecordField $st.Record 'baseline' ([ordered]@{ evidence = $BaselineEvidence; operator = $Operator; authorization = $Approval; utc = $now; via = 'REBASELINE' })
     $st.Record.status = 'CLEAR'
     $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $now; operation = 'REBASELINE'; operator = $Operator; approval = $Approval; evidence = $BaselineEvidence; events = @($open | ForEach-Object { $_.eventId }) }))
     Write-AvbHilSafetyFile $Path $st.Record

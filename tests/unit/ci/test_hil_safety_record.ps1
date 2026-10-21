@@ -21,7 +21,7 @@ Write-Host ""; Write-Host "TEST-SAFETYREC: machine-wide HIL safety record (offli
 $Tmp = Join-Path $env:TEMP ("safetyrec_{0}" -f (Get-Random)); New-Item -ItemType Directory -Path $Tmp -Force | Out-Null
 $missing = ''
 try { . (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
-      foreach ($f in 'Get-AvbHilSafetyPath', 'Read-AvbHilSafetyState', 'Initialize-AvbHilSafetyRecord', 'Add-AvbHilSafetyEvent', 'Clear-AvbHilSafetyHalt', 'Invoke-AvbHilSafetyRebaseline') {
+      foreach ($f in 'Get-AvbHilSafetyPath', 'Read-AvbHilSafetyState', 'Initialize-AvbHilSafetyRecord', 'Approve-AvbHilSafetyBaseline', 'Add-AvbHilSafetyEvent', 'Clear-AvbHilSafetyHalt', 'Invoke-AvbHilSafetyRebaseline') {
           if (-not (Get-Command $f -ErrorAction SilentlyContinue)) { throw "$f missing in tools/lib/HilLock.ps1" } } } catch { $missing = $_.Exception.Message }
 tc_check 'TEST-SAFETYREC-000-library-functions-present' ($missing -eq '') $missing
 if ($missing) { Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue; exit 1 }
@@ -36,6 +36,12 @@ function Write-Verification([string]$P, [string[]]$Ids, [string]$Verdict = 'REST
     ([ordered]@{ schema = 'avb-hil-recovery-verification/1'; host = $HostName; verdict = $Verdict; eventIds = @($Ids)
                  identity = @([ordered]@{ did = '0x125B'; mac = '00-11-22-33-44-55' }); checks = @([ordered]@{ name = 'TIMINCA'; expected = '0x18000000'; observed = '0x18000000'; ok = $true })
                  utc = (Get-Date).ToUniversalTime().AddSeconds(1).ToString('o') } | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $P -Encoding UTF8
+}
+# Baseline authorization evidence (verified physical inventory + measurements; produced by the read-only
+# characterization once it exists - synthetic here).
+function Write-Baseline([string]$P, [string]$Verdict = 'BASELINE_VERIFIED', [object[]]$Inventory = @([ordered]@{ did = '0x125B'; mac = '00-11-22-33-44-55'; pciLocation = 'PCIROOT(0)#PCI(1C00)#PCI(0000)' })) {
+    ([ordered]@{ schema = 'avb-hil-baseline-authorization/1'; host = $env:COMPUTERNAME; verdict = $Verdict; inventory = @($Inventory)
+                 measurements = @([ordered]@{ name = 'TIMINCA'; did = '0x125B'; value = '0x18000000' }); utc = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $P -Encoding UTF8
 }
 # Holding the lock is part of the clearing contract.
 $lockPath = Join-Path $Tmp 'hil.lock'
@@ -55,14 +61,38 @@ tc_check 'TEST-SAFETYREC-001-missing-corrupt-foreign-or-inaccessible-record-is-u
     ($s1.State -eq 'UNAVAILABLE' -and $s2.State -eq 'UNAVAILABLE' -and $s3.State -eq 'UNAVAILABLE' -and $s10.State -eq 'UNAVAILABLE' -and
      $s1.Why -match 'missing' -and $s3.Why -match 'OTHER-HOST') ("missing={0}:{1} corrupt={2} foreign={3}:{4} dir={5}" -f $s1.State, $s1.Why, $s2.State, $s3.State, $s3.Why, $s10.State)
 
-# 004: explicit initialization -> CLEAR; never overwrites an existing record
+# 004: initialization creates the record infrastructure only: UNBASELINED (blocks mutation, asserts nothing about the
+# hardware); it never overwrites an existing record.  Q 2026-10-21: initialization must not be a bypass.
 $p = Join-Path $Tmp 'record.json'
 $i1 = Initialize-AvbHilSafetyRecord -Path $p -Operator 'Q' -Reason 'first HIL safety record on this machine'
 $i2 = Initialize-AvbHilSafetyRecord -Path $p -Operator 'Q' -Reason 'again'
 $s4 = Read-AvbHilSafetyState -Path $p
 $i3 = Initialize-AvbHilSafetyRecord -Path $p2 -Operator 'Q' -Reason 'replace corrupt'
-tc_check 'TEST-SAFETYREC-004-explicit-initialization-is-clear-and-never-overwrites' `
-    ($i1.Ok -and -not $i2.Ok -and $s4.State -eq 'CLEAR' -and -not $i3.Ok -and ((Get-Content $p2 -Raw) -match 'not json')) ("init1={0} init2={1} state={2} overwriteCorrupt={3}" -f $i1.Ok, $i2.Ok, $s4.State, $i3.Ok)
+tc_check 'TEST-SAFETYREC-004-initialization-is-unbaselined-never-clear-and-never-overwrites' `
+    ($i1.Ok -and -not $i2.Ok -and $s4.State -eq 'UNBASELINED' -and -not $i3.Ok -and ((Get-Content $p2 -Raw) -match 'not json')) ("init1={0} init2={1} state={2} overwriteCorrupt={3}" -f $i1.Ok, $i2.Ok, $s4.State, $i3.Ok)
+
+# 016: only an authorized, evidence-backed initial baseline makes the record CLEAR
+$bOk = Join-Path $Tmp 'baseline.json'; Write-Baseline $bOk
+$bBad = Join-Path $Tmp 'baseline_bad.json'; Write-Baseline $bBad 'INCONCLUSIVE'
+$bNoId = Join-Path $Tmp 'baseline_noid.json'; Write-Baseline $bNoId 'BASELINE_VERIFIED' @([ordered]@{ did = '0x125B' })
+$a16 = @(
+    (Approve-AvbHilSafetyBaseline -Path $p -Operator 'Q' -Authorization 'x' -LockOwner $null -LockPath $lockPath -BaselineEvidence $bOk),
+    (Approve-AvbHilSafetyBaseline -Path $p -Operator 'Q' -Authorization '' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $bOk),
+    (Approve-AvbHilSafetyBaseline -Path $p -Operator 'Q' -Authorization 'x' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $bBad),
+    (Approve-AvbHilSafetyBaseline -Path $p -Operator 'Q' -Authorization 'x' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $bNoId))
+$sRej = (Read-AvbHilSafetyState -Path $p).State
+$a16ok = Approve-AvbHilSafetyBaseline -Path $p -Operator 'Q' -Authorization 'initial baseline from read-only characterization, approved by Q' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $bOk
+$s16 = Read-AvbHilSafetyState -Path $p
+tc_check 'TEST-SAFETYREC-016-only-an-authorized-verified-baseline-makes-the-record-clear' `
+    (@($a16 | Where-Object { $_.Ok }).Count -eq 0 -and $sRej -eq 'UNBASELINED' -and $a16ok.Ok -and $s16.State -eq 'CLEAR') `
+    ("rejected-all={0} stateAfterRejects={1} approve={2}:{3} state={4}; reasons: {5}" -f (@($a16 | Where-Object { $_.Ok }).Count -eq 0), $sRej, $a16ok.Ok, $a16ok.Why, $s16.State, (($a16 | ForEach-Object { $_.Why }) -join ' | '))
+
+# 017: clearing a halt on a machine that was never baselined returns it to UNBASELINED, never CLEAR
+$pN = Join-Path $Tmp 'never.json'; $null = Initialize-AvbHilSafetyRecord -Path $pN -Operator 'Q' -Reason 't'
+$aN = Add-AvbHilSafetyEvent -Path $pN -Event (New-Event 'CLEANUP_FAILED')
+$vN = Join-Path $Tmp 'verify_never.json'; Write-Verification $vN @($aN.EventId)
+$cN = Clear-AvbHilSafetyHalt -Path $pN -Operator 'Q' -LockOwner $lock.Owner -LockPath $lockPath -VerificationEvidence $vN
+tc_check 'TEST-SAFETYREC-017-clear-without-authorized-baseline-returns-to-unbaselined' ($cN.Ok -and (Read-AvbHilSafetyState -Path $pN).State -eq 'UNBASELINED') ("clear={0}:{1} state={2}" -f $cN.Ok, $cN.Why, (Read-AvbHilSafetyState -Path $pN).State)
 
 # 005: a safety event halts with every required field
 $a5 = Add-AvbHilSafetyEvent -Path $p -Event (New-Event 'CLEANUP_FAILED')
@@ -105,7 +135,7 @@ tc_check 'TEST-SAFETYREC-008-verified-clear-keeps-event-with-operator-and-eviden
 
 # 009: rebaselining needs explicit approval; events REBASELINED, original verdict unchanged
 $null = Add-AvbHilSafetyEvent -Path $p -Event (New-Event 'INCONCLUSIVE_RESTORATION')
-$nb = Join-Path $Tmp 'newbaseline.json'; '{"adapters":[]}' | Set-Content -LiteralPath $nb
+$nb = Join-Path $Tmp 'newbaseline.json'; Write-Baseline $nb
 $r9a = Invoke-AvbHilSafetyRebaseline -Path $p -Operator 'Q' -Approval '' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $nb
 $r9 = Invoke-AvbHilSafetyRebaseline -Path $p -Operator 'Q' -Approval 'original PHC epoch not reconstructible; approved by Q 2026-10-21' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $nb
 $s9 = Read-AvbHilSafetyState -Path $p

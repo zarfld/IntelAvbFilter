@@ -1713,7 +1713,11 @@ if ($IsHardwareSuite) {
     if ($IsSandbox) {
         $HilSafetyPath = if ($env:AVB_TEST_HIL_SAFETY_FILE) { $env:AVB_TEST_HIL_SAFETY_FILE } else {
             $sp = Join-Path $logsDir 'sandbox-hil-safety.json'
-            if (-not (Test-Path -LiteralPath $sp)) { $null = Initialize-AvbHilSafetyRecord -Path $sp -Operator 'sandbox' -Reason 'offline sandbox fixture' }
+            if (-not (Test-Path -LiteralPath $sp)) {   # sandbox fixture only: a CLEAR record with a synthetic, labelled baseline
+                ([ordered]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'CLEAR'; events = @()
+                             baseline = [ordered]@{ evidence = 'SANDBOX FIXTURE - not hardware evidence'; operator = 'sandbox'; authorization = 'offline sandbox'; via = 'SANDBOX' }
+                             history = @([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); operation = 'SANDBOX_FIXTURE'; operator = 'sandbox' }) } |
+                    ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $sp -Encoding UTF8 }
             $sp }
     } else { $HilSafetyPath = Get-AvbHilSafetyPath }
     $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
