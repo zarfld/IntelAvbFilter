@@ -386,9 +386,9 @@ function Get-ShaOfText([string]$Text) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try { return (($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('X2') }) -join '') } finally { $sha.Dispose() }
 }
-function New-MEntry([string]$Name, [string]$Status, [bool]$Enabled = $true, [string]$Sha = $null, [string]$Reason = '') {
+function New-MEntry([string]$Name, [string]$Status, [bool]$Enabled = $true, [string]$Sha = $null, [string]$Reason = '', $Dirty = $false, $Digest = $null) {
     return [ordered]@{ name = $Name; type = 'sandbox-fake'; enabled = $Enabled; status = $Status; reason = $Reason; artifact = "$Name.ps1"; sha256 = $Sha
-                       sourceRevision = 'sandbox-rev'; sourceDirty = $false }
+                       sourceRevision = 'sandbox-rev'; sourceDirty = $Dirty; sourceDigest = $Digest }
 }
 function Write-Manifest([object[]]$Entries, [string]$Configuration = 'Debug') {
     $m = [ordered]@{ schemaVersion = 1; producer = 'test_hil_binary_provenance.ps1'; configuration = $Configuration; platform = 'x64'; entries = $Entries }
@@ -414,7 +414,8 @@ function Edit-StateSnippet([string]$Edit) {
 }
 
 function Invoke-Sandbox {
-    param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [string]$SourceRevision = 'sandbox-rev', [string]$SourceDirty = '0')
+    param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [string]$SourceRevision = 'sandbox-rev', [string]$SourceDirty = '0',
+          [string]$SourceMode = '', [string]$SourceDigest = '')
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -426,6 +427,7 @@ function Invoke-Sandbox {
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = $SourceRevision; AVB_TEST_SANDBOX_SOURCE_DIRTY = $SourceDirty
+        AVB_TEST_SANDBOX_SOURCE_MODE = $SourceMode; AVB_TEST_SANDBOX_SOURCE_DIGEST = $SourceDigest
     }
     $lines = @()
     foreach ($k in $envs.Keys) {
@@ -539,6 +541,19 @@ tc_check 'TEST-HILPROV-038-dirty-checkout-at-same-head-is-blocked' `
 $rH = Invoke-Sandbox 'runH' @((Get-Entry $pRev))
 tc_check 'TEST-HILPROV-039-same-clean-revision-control-runs' ((Get-RanCount $rH 'test_sbprov_wrongcfg') -eq 1) (Show-Prov $rH 'test_sbprov_wrongcfg')
 
+# --- Run L: local pre-commit provenance end to end (uncommitted working tree, build-input digest) -----------
+$dgL = ('C' * 64)
+$pLoc = New-Fake 'test_sbprov_wrongcfg'
+Write-Manifest @((New-MEntry 'test_sbprov_wrongcfg' 'built' $true (Get-Sha $pLoc) '' $true $dgL))
+$rL1 = Invoke-Sandbox 'runL1' @((Get-Entry $pLoc)) -SourceDirty '1' -SourceMode 'local' -SourceDigest $dgL
+tc_check 'TEST-HILPROV-050-local-uncommitted-build-runs-and-is-labelled-local-evidence' `
+    (((Get-RanCount $rL1 'test_sbprov_wrongcfg') -eq 1) -and ($rL1.Out -match '\[LOCAL-EVIDENCE\]') -and ($rL1.Out -match "provenance mode: local; build-input digest: $dgL")) (Show-Prov $rL1 'test_sbprov_wrongcfg')
+$rL2 = Invoke-Sandbox 'runL2' @((Get-Entry $pLoc)) -SourceDirty '1' -SourceMode 'local' -SourceDigest ('D' * 64)
+tc_check 'TEST-HILPROV-051-local-edit-after-build-blocks-the-binary-and-fails-the-suite' `
+    ((Test-ProvBlocked $rL2 'test_sbprov_wrongcfg' 'build inputs changed after') -and $rL2.Exit -eq 1) (Show-Prov $rL2 'test_sbprov_wrongcfg')
+$rL3 = Invoke-Sandbox 'runL3' @((Get-Entry $pLoc)) -SourceDigest $dgL
+tc_check 'TEST-HILPROV-052-ci-mode-rejects-a-local-worktree-build-despite-matching-digest' `
+    ((Test-ProvBlocked $rL3 'test_sbprov_wrongcfg' 'uncommitted or unknown source state') -and $rL3.Exit -eq 1 -and ($rL3.Out -notmatch '\[LOCAL-EVIDENCE\]')) (Show-Prov $rL3 'test_sbprov_wrongcfg')
 # --- Run E: hosted Unit suite is not subject to the HIL provenance gate -----------------------------------
 $pHosted = New-Fake 'test_sbprov_hosted'
 Remove-Item -LiteralPath $ManifestPath -Force
