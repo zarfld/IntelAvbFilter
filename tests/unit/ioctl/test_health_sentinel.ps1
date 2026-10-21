@@ -80,6 +80,7 @@ foreach ($d in 'tools\test', 'tools\lib', 'src', 'include', 'build\tools\avb_tes
 foreach ($f in 'Run-Tests-CI.ps1', 'Convert-Logs-To-JUnit.ps1') { Copy-Item (Join-Path $RepoRoot "tools\test\$f") (Join-Path $tree "tools\test\$f") }
 Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $tree 'tools\lib\TestVerdict.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $tree 'tools\lib\NativeExit.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $tree 'tools\lib\SourceDigest.ps1')
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }

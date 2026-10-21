@@ -1982,9 +1982,10 @@ function Get-TestBuildArtifactName {
 
 function New-TestBuildManifest {
     param([string]$Configuration, [string]$Platform, [object[]]$Tests, [hashtable]$Outcomes,
-          $SourceRevision, $SourceDirty, $SourceDigest = $null, $SourceDigestFiles = $null)
+          $SourceRevision, $SourceDirty, $SourceDigest = $null, $SourceDigestFiles = $null, $BuiltUtc = $null)
     # sourceDigest (tools/lib/SourceDigest.ps1): the build inputs this run compiled - the only attribution a binary
     # built from an uncommitted working tree has (local pre-commit evidence; Run-Tests-CI.ps1 re-verifies it).
+    # BuiltUtc is passed in by the caller so the function stays a pure function of its inputs (deterministic manifest).
     # No carry-over: a record from an earlier run cannot be attributed to the current source without ambiguity
     # (new commit, edited sources/headers, toolchain).  Entries not built by THIS run are `not-built`.
     $entries = @()
@@ -2022,7 +2023,7 @@ function New-TestBuildManifest {
     }
     $mode = if ($SourceDirty -eq $false) { 'clean-commit' } elseif ($SourceDigest) { 'local-worktree' } else { 'unattributable' }
     return [ordered]@{ schemaVersion = 1; producer = 'tools/build/Build-Tests.ps1'; configuration = $Configuration
-                       platform = $Platform; builtUtc = (Get-Date).ToUniversalTime().ToString('o')
+                       platform = $Platform; builtUtc = $BuiltUtc
                        provenanceMode = $mode; sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
                        sourceDigest = $SourceDigest; sourceDigestFiles = $SourceDigestFiles; entries = $entries }
 }
@@ -2370,7 +2371,7 @@ if (-not $BuildInputDigestBefore.Ok -or -not $BuildInputDigestAfter.Ok) {
     $srcDigest = $BuildInputDigestAfter.Digest; $srcDigestFiles = $BuildInputDigestAfter.Files
 }
 $testManifest = New-TestBuildManifest -Configuration $Configuration -Platform $Platform -Tests $AllTests -Outcomes $BuildOutcomes `
-                    -SourceRevision $srcRevision -SourceDirty $srcDirty -SourceDigest $srcDigest -SourceDigestFiles $srcDigestFiles
+                    -SourceRevision $srcRevision -SourceDirty $srcDirty -SourceDigest $srcDigest -SourceDigestFiles $srcDigestFiles `
 if ($srcDirty -ne $false) {
     if ($srcDigest) {
         Write-Host "[MANIFEST] LOCAL PRE-COMMIT BUILD: uncommitted working tree, build-input digest $srcDigest ($srcDigestFiles inputs) -- Run-Tests-CI.ps1 authorizes these artifacts for LOCAL Hardware* runs only while the inputs are unchanged; never as clean-commit CI evidence" -ForegroundColor Yellow
