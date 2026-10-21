@@ -109,6 +109,17 @@ foreach ($s in $autoSuites.Keys) {
 }
 tc_check 'TEST-HILGATE-033-coverage-gaps-classified-excluded-and-justified' ($gapBad.Count -eq 0) ($gapBad -join '; ')
 
+# 043: no required hardware test disappears silently.  The four tests that were only commented out of every list
+# (P0 2026-10-21 sec. 1/5) are declared gaps - reported as NOT EXECUTED in every run - with their evidence-based class
+# (sources: test_vv_corr_001_stability uses ENUM/OPEN/GET_TIMESTAMP/GET_HW_STATE/TEST_SEND_PTP only;
+# test_s3_sleep_wake calls SetSuspendState; test_hot_plug devcon; test_lifecycle_coverage CM_Disable/Enable_DevNode).
+$silent = @(); $wantCls = [ordered]@{ test_s3_sleep_wake = 'Unsafe'; test_vv_corr_001_stability = 'ReadOnly'; test_hot_plug = 'Unsafe'; test_lifecycle_coverage = 'Unsafe' }
+foreach ($e in $wantCls.Keys) {
+    if ($gapEntries -notcontains $e) { $silent += "$e is not a declared coverage gap (it would disappear from every run)" }
+    if ($registry[$e] -ne $wantCls[$e]) { $silent += "$e classified '$($registry[$e])', expected '$($wantCls[$e])'" }
+}
+tc_check 'TEST-HILGATE-043-formerly-commented-out-tests-are-declared-gaps-never-silently-absent' ($silent.Count -eq 0) ($silent -join '; ')
+
 # The TSN configuration entries (TAS/FP/PTM) and the observed irreversible PHC mutation are declared gaps.
 $mustGap = @{ HardwareUnit = @('test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_ptp_freq_complete')
               HardwareIntegration = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_tsn_ioctl_handlers_um') }
@@ -251,7 +262,8 @@ $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 
 $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=Init;test_sbfake_mut=Mutating;' +
            'test_sbfake_tgt=Mutating:Target;test_sbfake_unsafe=Unsafe;test_sbfake_disabler=ReadOnly;' +
-           'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly'
+           'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
+           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -535,6 +547,30 @@ $leftMarker = @(Get-ChildItem (Join-Path $rKc.Dir 'logs') -Filter 'run-in-progre
 if ($leftMarker -ne 0) { $kBad += 'a completed run left its run-in-progress.json marker behind' }
 tc_check 'TEST-HILGATE-040-earlier-suite-halt-or-killed-run-blocks-later-mutation-readonly-continues' ($kBad.Count -eq 0) ($kBad -join ' ### ')
 
+# --- Run L: TSAUXC and link changes are enforced (P0 2026-10-21 sec. 2: never downgraded to warnings) --------
+$tAux  = New-Fake 'test_sbfake_tsauxc' (Edit-StateSnippet "`$c = @(`$s.clock | Where-Object { `$_.Did -eq '0x1533' })[0]; `$c.Tsauxc = 4")
+$tLink = New-Fake 'test_sbfake_link' (Edit-StateSnippet "`$a = @(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_125B' })[0]; `$a.MediaStatus = 'Disconnected'")
+$rL1 = Invoke-Sandbox 'runL1' @($tAux, $tInit) -AllSupportedEnabled
+$rL2 = Invoke-Sandbox 'runL2' @($tLink, $tInit) -AllSupportedEnabled
+tc_check 'TEST-HILGATE-041-tsauxc-and-link-changes-are-cleanup-failed-and-halt-never-warnings' `
+    (($rL1.Out -match '\[CLEANUP_FAILED\] TC-INFRA-STATE-001: after test_sbfake_tsauxc\.ps1: [^\r\n]*DID 0x1533 \(driver index 1\): TSAUXC 0x00000000 -> 0x00000004') -and
+     ($rL2.Out -match '\[CLEANUP_FAILED\] TC-INFRA-STATE-001: after test_sbfake_link\.ps1: [^\r\n]*DEV_125B[^\r\n]*: link Up -> Disconnected') -and
+     (Get-RanCount $rL1 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rL2 '^RAN test_sbfake_init ') -eq 0 -and
+     ($rL1.Out + $rL2.Out) -notmatch 'WARN:STATE\][^\r\n]*(TSAUXC|link)') `
+    ("tsauxc: {0} ### link: {1}" -f (Tail $rL1), (Tail $rL2))
+
+# --- Run M: a state-changing test whose restoration the runner cannot fully verify is never PASSED -------------
+# The runner verifies adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC, NOT PHC time continuity, rate or
+# offset (and none of TAS/FP/Qav/EEE/PFC/VLAN/MDIO/timestamp-control state).  Until it does, every executed
+# Init/Mutating/Mutating:Target/Unsafe test gets an INCONCLUSIVE state-unverified record (nonpassing, no halt).
+$rM = Invoke-Sandbox 'runM' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x125B' }
+$mUnv = @([regex]::Matches($rM.Out, '\[INCONCLUSIVE\] TC-INFRA-STATE-002: after (test_sbfake_\w+)\.ps1')) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+tc_check 'TEST-HILGATE-042-unverifiable-restoration-of-state-changing-test-is-inconclusive-never-passed' `
+    ((Get-RanCount $rM '^RAN test_sbfake_tgt ') -ge 1 -and (@($mUnv) -join ',') -eq 'test_sbfake_tgt' -and
+     ($rM.Out -match 'TC-INFRA-STATE-002: [^\r\n]*PHC time') -and (Test-FailureCase $rM 'TC-INFRA-STATE-002') -and $rM.Exit -eq 1 -and
+     ($rM.Out -notmatch '\[HALT\]')) `
+    ("unverified records for: [{0}] exit={1}; {2}" -f (@($mUnv) -join ','), $rM.Exit, (Tail $rM))
+
 # --- Run J: a Hardware* suite in which nothing passed (skip-only) is a failure, not hardware verification ----
 $tSkip = Join-Path $Fakes 'test_sbfake_skiponly.ps1'
 Set-Content -LiteralPath $tSkip -Encoding UTF8 -Value ("Add-Content -LiteralPath '{0}' -Value 'RAN test_sbfake_skiponly target='`r`n" -f $RanLog.Replace("'", "''") +
@@ -553,7 +589,11 @@ $rK2 = Invoke-Sandbox 'runK2' @($tInit, $tRo) -AllSupportedEnabled
 tc_check 'TEST-HILGATE-039-init-blocked-unattended-but-runs-attended' `
     (((Get-RanCount $rK1 '^RAN test_sbfake_init ') -eq 0) -and ((Get-RanCount $rK1 '^RAN test_sbfake_ro ') -eq 1) -and
      (Test-FailureCase $rK1 'TC-SAFETY-GATE-001: [^"]*test_sbfake_init[^"]*not approved for unattended HIL') -and $rK1.Exit -eq 1 -and
-     ((Get-RanCount $rK2 '^RAN test_sbfake_init ') -eq 1) -and ((Get-RanCount $rK2 '^RAN test_sbfake_ro ') -eq 1) -and $rK2.Exit -eq 0) `
+     ((Get-RanCount $rK2 '^RAN test_sbfake_init ') -eq 1) -and ((Get-RanCount $rK2 '^RAN test_sbfake_ro ') -eq 1) -and
+     # Attended: executed; nonpassing ONLY because its PHC restoration is not independently verified (TEST-HILGATE-042;
+     # expectation changed 2026-10-21 from exit 0 by the P0 rule "no mutation accepted without verified restoration").
+     $rK2.Exit -eq 1 -and ($rK2.Out -match '\[INCONCLUSIVE\] TC-INFRA-STATE-002: after test_sbfake_init\.ps1 \(Init\)') -and
+     ($rK2.Out -match 'Failed : 1\b') -and ($rK2.Out -notmatch '\[(FAIL|BLOCKED|CLEANUP_FAILED)\] TC-')) `
     ("unattended: ran={0} exit={1} | attended: ran={2} exit={3} | {4}" -f ($rK1.Ran -join '/'), $rK1.Exit, ($rK2.Ran -join '/'), $rK2.Exit, (Tail $rK1))
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue

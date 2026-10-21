@@ -64,6 +64,11 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$ResultsJson = "",
 
+    # Evidence root of earlier suites of the same HIL job (hil.yml: RUNNER_TEMP\hil-evidence).  A halt there
+    # (TIMEOUT / INFRA / CLEANUP_FAILED / stateHalt / a run that died) halts this run: Init/Mutating/Unsafe BLOCKED.
+    [Parameter(Mandatory=$false)]
+    [string]$PriorResultsDir = "",
+
     # NOT SUPPORTED here: this runner never captured DebugView output although it accepted the switch.  Kernel
     # capture for one test is tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView.  The switch is
     # kept only to reject it loudly instead of silently running without a capture.
@@ -383,14 +388,11 @@ $HardwareMutationTests = @(
 # Unit-level tests that require the driver device node (\\.\.\IntelAvbFilter) or Intel NIC.
 # Safe to run on an automated self-hosted runner -- none of these hibernate or sleep the PC.
 #
-# EXCLUDED from ALL automated suites (unsafe or long-running):
-#   test_s3_sleep_wake          -- TC-S3-002 calls SetSuspendState (hibernates host, needs button press).
-#   test_vv_corr_001_stability  -- VV-CORR-001 24-hour PHC stability monitor. Run manually on
-#                                  a dedicated lab machine only. See Issue #317 Track E.
-#   test_hot_plug               -- disables/enables the NIC through devcon (#262).  NIC administration:
-#                                  classified Unsafe in $HilTestSafety (#343).
-#   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  NIC
-#                                  administration: classified Unsafe in $HilTestSafety (#343).
+# NOT EXECUTED yet, declared in $HardwareIntegrationCoverageGaps (every run reports them as required, NOT EXECUTED):
+#   test_s3_sleep_wake          -- TC-S3-002 calls SetSuspendState (host S3; no unattended wake / recovery facility yet).
+#   test_vv_corr_001_stability  -- VV-CORR-001 24-hour PHC stability monitor (no long-duration lane yet; #317 Track E).
+#   test_hot_plug               -- disables/enables the NIC through devcon (#262).  Unsafe in $HilTestSafety (#343).
+#   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  Unsafe (#343).
 #   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
 #   entry, outside GitHub Actions, on an operator-attended machine.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
@@ -529,6 +531,11 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_gptp_daemon_coexist'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
     'test_ptp_phc_stability'        = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-20 - the default run is UT-CORR-007/008 only, but the binary contains the UT-CORR-009 driver reinstall path, ControlService STOP plus system Install-Driver-Elevated.ps1 -Action Reinstall, reachable only with --case UT-CORR-009 or --allow-lifecycle; coverage gap: UT-CORR-007/008 TX-PHC correlation, #149 #317'
     'ssot_register_validation_test' = 'Unknown: no build entry or source mapping in Build-Tests.ps1'
+    # Formerly only commented out of every list (silently absent); declared so every run reports them NOT EXECUTED.
+    'test_vv_corr_001_stability'    = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-21 - VV-CORR-001 requires a 24-hour run, default --hours 24; no long-duration HIL lane exists and shortening the run would change its acceptance criterion; #317 Track E'
+    'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
+    'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
+    'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
 }
 
 # ===========================
@@ -653,6 +660,9 @@ $HilTestSafety = @{
     # --- Unsafe (NIC administration; removed from every suite list) ---
     'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
     'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
+    'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
+    # --- ReadOnly (24-hour run; declared gap) ---
+    'test_vv_corr_001_stability'       = 'ReadOnly'   # ENUM/OPEN_ADAPTER, GET_TIMESTAMP, GET_HW_STATE, TEST_SEND_PTP
     # --- Unknown ---
     'ssot_register_validation_test'    = 'Unknown'    # no build entry / source mapping in Build-Tests.ps1
 }
@@ -816,8 +826,10 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 #              lifecycle snapshot already performs).
 #   gate       before every Hardware* test, from $HilTestSafety (see the table above the suite resolution).
 #   post-test  after every executed test, also after a timeout kill: compare with the baseline (settle up to
-#              $HilSettleSeconds); a difference is CLEANUP_FAILED and halts every later non-ReadOnly test.
-#              Link state and TSAUXC differences are reported as [WARN:STATE] (not enforced).
+#              $HilSettleSeconds); a difference - link state and TSAUXC included (P0 2026-10-21; previously only
+#              warnings) - is CLEANUP_FAILED and halts every later non-ReadOnly test.  After a non-ReadOnly test the
+#              restoration of what the runner cannot observe (PHC time/rate/offset, TSN/PHY/timestamp-control state)
+#              is INCONCLUSIVE (TC-INFRA-STATE-002): nonpassing, never assumed restored.
 $IsHardwareSuite     = ($Suite -like 'Hardware*')
 $HilSettleSeconds    = 10
 if ($IsSandbox -and $env:AVB_TEST_STATE_SETTLE_SECONDS -match '^\d+$') { $HilSettleSeconds = [int]$env:AVB_TEST_STATE_SETTLE_SECONDS }
@@ -1011,8 +1023,9 @@ function Compare-AvbHilState {
             foreach ($f in 'PnpStatus', 'Problem', 'AdminStatus', 'FilterBound') {
                 if ([string]$bMap[$k].$f -ne [string]$cMap[$k].$f) { $diffs += ("{0}: {1} {2} -> {3}" -f $k, $f, $bMap[$k].$f, $cMap[$k].$f) }
             }
+            # Enforced (P0 2026-10-21): a link that does not return within the settle window is a state change.
             if ([string]$bMap[$k].MediaStatus -ne [string]$cMap[$k].MediaStatus) {
-                $warn += ("{0}: link {1} -> {2}" -f $k, $bMap[$k].MediaStatus, $cMap[$k].MediaStatus)
+                $diffs += ("{0}: link {1} -> {2}" -f $k, $bMap[$k].MediaStatus, $cMap[$k].MediaStatus)
             }
         }
         foreach ($k in @($cMap.Keys)) { if (-not $bMap.ContainsKey($k)) { $diffs += "${k}: adapter appeared" } }
@@ -1032,7 +1045,7 @@ function Compare-AvbHilState {
                     $diffs += ("DID {0} (driver index {1}): TIMINCA 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Timinca, $c.Timinca)
                 }
                 if ($b.Ok -and $c.Ok -and $b.Tsauxc -ne $c.Tsauxc) {
-                    $warn += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
+                    $diffs += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
                 }
             }
             foreach ($k in @($cc.Keys)) {
@@ -1143,6 +1156,7 @@ function Write-AvbResultsJson {
 # Final exit of a completed run: results document first, then the exit code it records.
 function Complete-AvbRun {
     param([int]$Code, [string]$Overall)
+    if ($script:RunMarkerPath) { Remove-Item -LiteralPath $script:RunMarkerPath -Force -ErrorAction SilentlyContinue }
     try {
         $p = Write-AvbResultsJson -ExitCode $Code -Overall $Overall
         Write-Note "Results JSON: $p"
@@ -1165,6 +1179,26 @@ function Add-HilFailureRecord {
     while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Stem, $i, $ts); $i++ }
     $Line | Set-Content -LiteralPath $p -Encoding utf8
     Add-AvbResult -Name $Display -Status $Status -Exit 'N/A' -Reason $Line -LogPath $p -Lines @($Line) -Check:$Check
+}
+
+# Halt carried over from earlier suites of the same HIL job: '' or the reason.  Same stop rule as LocalSuites
+# (Get-AvbStopReason): FAILED(TIMEOUT) / INFRA_FAILURE / CLEANUP_FAILED record, a stateHalt, plus an unreadable results
+# document or a run-in-progress.json marker (that suite's runner died before completing: state unverified).
+function Get-AvbPriorHalt {
+    param([string]$Dir, [string]$OwnLogsDir = '')
+    if (-not (Test-Path -LiteralPath $Dir)) { return '' }
+    $own = if ($OwnLogsDir) { [System.IO.Path]::GetFullPath($OwnLogsDir).TrimEnd('\') + '\' } else { $null }
+    $why = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -Include 'results-*.json', 'run-in-progress.json' -ErrorAction Stop)) {
+        if ($own -and $f.FullName.StartsWith($own, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($f.Name -eq 'run-in-progress.json') { $why += "$($f.Directory.Name) did not complete (runner process ended without results; hardware state unverified)"; continue }
+        try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
+        if ($d.stateHalt) { $why += "$($d.suite): state-integrity halt ($($d.stateHalt))" }
+        foreach ($r in @($d.records)) {
+            if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE', 'CLEANUP_FAILED')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
+        }
+    }
+    return ($why -join '; ')
 }
 
 # Pure overall decision.  A required test not executed (coverage gap) or a testcase INCOMPLETE (SKIP_NOT_IMPLEMENTED)
@@ -1568,6 +1602,10 @@ function Invoke-HilPostTestCheck {
         } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
             Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself"
         }
+        # The runner's independent snapshot does not cover everything a state-changing test may modify; until it
+        # does, its restoration is not verified and the test cannot be green (no halt: nothing observed changed).
+        Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'FAILED(INCONCLUSIVE)' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
+            -Line ("[INCONCLUSIVE] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" -f $Display, $Class)
     }
 }
 
@@ -1592,6 +1630,16 @@ Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regressio
 
 if ($IsHardwareSuite) {
     Invoke-HilBaseline
+    # A halt of an earlier suite of the same HIL job carries over: its damaged state must not become this run's
+    # clean baseline for further mutation (P0 2026-10-21 sec. 2).  ReadOnly tests continue (same as an in-run halt).
+    if ($PriorResultsDir) {
+        $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnLogsDir $logsDir
+        if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
+    }
+    # Left behind only if this process dies before Complete-AvbRun; a later suite then halts (Get-AvbPriorHalt).
+    $RunMarkerPath = Join-Path $logsDir 'run-in-progress.json'
+    ([ordered]@{ suite = $Suite; configuration = $Configuration; pid = $PID; startedUtc = $AvbRunStartedUtc } | ConvertTo-Json) |
+        Set-Content -LiteralPath $RunMarkerPath -Encoding UTF8
 }
 
 $BuildManifest = $null

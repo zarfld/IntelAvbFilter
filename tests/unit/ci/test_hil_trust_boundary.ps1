@@ -1066,7 +1066,8 @@ foreach ($jid in $hilJobs.Keys) {
 tc_check 'TEST-HILTRUST-REAL-009-hil-starts-only-via-workflow-run-and-hosted-authorization-before-any-physical-job' ($azIssues.Count -eq 0) ($azIssues -join ' || ')
 
 # Each physical stage builds and tests exactly the authorized upstream commit, in order, with isolated evidence.
-$expectedSuites = @{ 'hil-debug' = 'HardwareMandatory,HardwareUnit,HardwareIntegration'; 'hil-release' = 'HardwareMandatory,HardwareUnit,HardwareIntegration' }
+# P0 2026-10-21: all four suites, HardwareMutation included, in the LocalSuites order with HardwareMandatory last.
+$expectedSuites = @{ 'hil-debug' = 'HardwareUnit,HardwareIntegration,HardwareMutation,HardwareMandatory'; 'hil-release' = 'HardwareUnit,HardwareIntegration,HardwareMutation,HardwareMandatory' }
 $idIssues = @()
 foreach ($jid in $hilJobIds) {
     if (-not $hilJobs.Contains($jid)) { $idIssues += "$jid missing"; continue }
@@ -1097,8 +1098,11 @@ foreach ($jid in $hilJobIds) {
     # No suite runs without a successful deployment of the staged package (a failed deployment executes zero tests).
     foreach ($s in @($hSteps | Where-Object { $_ -is [System.Collections.IDictionary] -and "$($_['run'])" -match 'Run-Tests-CI\.ps1' })) {
         $sif = if ($s.Contains('if')) { "$($s['if'])" } else { '' }
-        if ($sif -and $sif -notmatch "steps\.deploy\.outcome == 'success'") { $idIssues += "${jid}: suite step '$($s['name'])' can run without a successful deployment (if: $sif)" }
+        # Explicit if: required - the implicit success() would silently skip later suites (Mandatory last) after any failure.
+        if ($sif -notmatch "steps\.deploy\.outcome == 'success'" -or $sif -notmatch '!cancelled\(\)') { $idIssues += "${jid}: suite step '$($s['name'])' must run exactly when the deployment succeeded (if: '$sif')" }
         if ($sif -match '\balways\(\)') { $idIssues += "${jid}: suite step '$($s['name'])' uses always()" }
+        # A halt of an earlier suite of this job must carry over (Run-Tests-CI -PriorResultsDir, TEST-HILGATE-040).
+        if ("$($s['run'])" -notmatch "-PriorResultsDir \(Join-Path \`$env:RUNNER_TEMP 'hil-evidence'\)") { $idIssues += "${jid}: suite step '$($s['name'])' does not pass -PriorResultsDir (Join-Path `$env:RUNNER_TEMP 'hil-evidence')" }
     }
     foreach ($s in @($hSteps | Where-Object { $_ -is [System.Collections.IDictionary] -and "$($_['name'])" -match '^Release the HIL machine lock' })) { if ("$($s['if'])" -ne 'always()') { $idIssues += "${jid}: lock release is not always()" } }
     $suiteRuns = @($runs | Where-Object { $_ -match 'Run-Tests-CI\.ps1' })
@@ -1394,9 +1398,12 @@ srv.serve_forever()
     if ($accStep.Count -ne 1) { $x12 += "hil-acceptance has $($accStep.Count) verdict step(s)" }
     else {
         $accPy = Join-Path $script:Tmp 'accept.py'; [System.IO.File]::WriteAllText($accPy, ("$($accStep[0]['run'])" -replace "`r`n", "`n"))
-        $junitPass = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-A-001: ok"/><testcase name="TC-HIL-COVERAGE-GAP-001: x"><skipped/></testcase></testsuite></testsuites>'
+        $junitPass = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-A-001: ok"/><testcase name="TC-S-001: link down"><skipped/></testcase></testsuite></testsuites>'
         $junitFail = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-A-001: ok"/><testcase name="TC-B-001: bad"><failure message="x"/></testcase></testsuite></testsuites>'
-        $junitSkip = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-HIL-COVERAGE-GAP-001: x"><skipped/></testcase></testsuite></testsuites>'
+        $junitSkip = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-S-001: link down"><skipped/></testcase></testsuite></testsuites>'
+        # Runner output for a declared coverage gap (required test NOT executed): a failing BLOCKED case, overall INCOMPLETE.
+        $junitGap  = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-A-001: ok"/><testcase name="TC-HIL-COVERAGE-GAP-001: test_x NOT EXECUTED by automatic HIL"><failure message="x"/></testcase></testsuite></testsuites>'
+        $junitOldGap = '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="s"><testcase name="TC-A-001: ok"/><testcase name="TC-HIL-COVERAGE-GAP-001: test_x excluded"><skipped/></testcase></testsuite></testsuites>'
         $bom = New-Object System.Text.UTF8Encoding($true)
         $stagedOf = @{ Debug = ('A' * 64); Release = ('B' * 64) }
         function Write-J([string]$F, $O) { [System.IO.File]::WriteAllText($F, ($O | ConvertTo-Json -Depth 6), $bom) }
@@ -1407,7 +1414,7 @@ srv.serve_forever()
                 Write-J (Join-Path $b 'hil-run-identity.json') ([ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'
                     job = "hil-$($cfg.ToLower())"; configuration = $cfg; deploymentVerdict = 'DEPLOYED'; stagedDriverSha256 = $stagedOf[$cfg]; installedDriverSha256 = $stagedOf[$cfg]
                     imagePathSha256 = $stagedOf[$cfg]; runningImageEvidence = 'reloaded during this deployment' })
-                foreach ($su in 'HardwareMandatory', 'HardwareUnit', 'HardwareIntegration') {
+                foreach ($su in 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory') {
                     $sd = Join-Path $b $su; New-Item -ItemType Directory -Path $sd -Force | Out-Null
                     [System.IO.File]::WriteAllText((Join-Path $sd "junit-$su-$cfg-20261021.xml"), $junitPass)
                     [System.IO.File]::WriteAllText((Join-Path $sd 'traceability-summary-20261021.md'), '| Requirement |')
@@ -1429,6 +1436,11 @@ srv.serve_forever()
             'suite executed nothing'             = @{ Mod = { param($r) Set-J $r 'hil-evidence-Release\HardwareUnit\results-HardwareUnit-Release-20261021_120000_000.json' 'executedCount' 0 }; Exit = 1; Why = 'no test executed' }
             'failing JUnit'                      = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-Release\HardwareUnit\junit-HardwareUnit-Release-20261021.xml'), $junitFail) }; Exit = 1; Why = '1 failed' }
             'skip-only JUnit'                    = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-Debug\HardwareIntegration\junit-HardwareIntegration-Debug-20261021.xml'), $junitSkip) }; Exit = 1; Why = '0 passed' }
+            'coverage gap: required test not executed' = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-Debug\HardwareUnit\junit-HardwareUnit-Debug-20261021.xml'), $junitGap)
+                                                                   $f = 'hil-evidence-Debug\HardwareUnit\results-HardwareUnit-Debug-20261021_120000_000.json'
+                                                                   Set-J $r $f 'overall' 'INCOMPLETE'; Set-J $r $f 'counts' @{ PASSED = 3; 'COVERAGE-GAP' = 1 } }; Exit = 1; Why = 'HIL acceptance: INCOMPLETE' }
+            'coverage gap reported as a skip (pre-P0 runner)' = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-Release\HardwareIntegration\junit-HardwareIntegration-Release-20261021.xml'), $junitOldGap) }; Exit = 1; Why = 'required test(s) NOT EXECUTED' }
+            'HardwareMutation never ran'         = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-Release\HardwareMutation') -Recurse -Force }; Exit = 1; Why = 'Release HardwareMutation: 0 JUnit' }
             'runner overall not PASSED'          = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\HardwareMandatory\results-HardwareMandatory-Debug-20261021_120000_000.json' 'overall' 'NOT_VERIFIED' }; Exit = 1; Why = 'overall NOT_VERIFIED' }
             'leftover evidence of another run'   = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\hil-run-identity.json' 'runId' '776' }; Exit = 1; Why = "runId='776'" }
             'evidence of another revision'       = @{ Mod = { param($r) Set-J $r 'hil-evidence-Release\hil-run-identity.json' 'sha' ('b' * 40) }; Exit = 1; Why = 'identity sha=' }
@@ -1579,8 +1591,8 @@ $wantSites = (@($hilJobIds | ForEach-Object { "hil.yml/$_" } | Sort-Object) -joi
 foreach ($kk in $sites.Keys) {
     if ((@($sites[$kk] | Sort-Object) -join ',') -ne $wantSites) { $evIssues += "suite $kk dispatched from [$($sites[$kk] -join ', ')] (expected exactly [$wantSites])" }
 }
-foreach ($kk in 'HardwareMandatory', 'HardwareUnit', 'HardwareIntegration') { if (-not $sites.ContainsKey($kk)) { $evIssues += "suite $kk is not dispatched by any workflow" } }
-if ($sites.ContainsKey('HardwareMutation')) { $evIssues += 'HardwareMutation is dispatched automatically' }
+# P0 2026-10-21: HardwareMutation is mandatory automatic HIL (it was previously required NOT to be dispatched).
+foreach ($kk in 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory') { if (-not $sites.ContainsKey($kk)) { $evIssues += "suite $kk is not dispatched by any workflow" } }
 tc_check 'TEST-HILTRUST-REAL-013-current-run-evidence-only-and-one-dispatch-site-per-hardware-suite-and-configuration' ($evIssues.Count -eq 0) ($evIssues -join ' || ')
 
 Remove-Item $script:Tmp -Recurse -Force -ErrorAction SilentlyContinue

@@ -26,8 +26,9 @@ name: HIL - Hardware-in-the-Loop
 #                STAGED_BUILD_NOT_TESTED.  Publishes JUnit and traceability.
 # Every non-eligible trigger (pull request, fork, other branch or tag, failed CI) skips every job; an eligible trigger
 # that fails verification fails `authorize` and nothing reaches the workstation.
-# Automatic suites run ReadOnly/Init entries only; excluded tests are reported as TC-HIL-COVERAGE-GAP-001;
-# HardwareMutation is never run here.
+# All four suites run here (HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory last).  A required
+# test that is not executed yet (fixture/restoration or infrastructure missing) is a failing TC-HIL-COVERAGE-GAP-001
+# case and makes the suite and the acceptance verdict INCOMPLETE - never PASSED (P0 full HIL coverage, 2026-10-21).
 # Serialization: hil-release needs hil-debug; one runner instance; machine-wide lock file (tools/lib/HilLock.ps1)
 # shared with LocalSuites.ps1.  No concurrency group (it would cancel pending runs).
 
@@ -410,24 +411,36 @@ jobs:
           ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
           Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
 
-      - name: Run HardwareMandatory (mandatory HIL gate)
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMandatory -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMandatory')
-          exit $LASTEXITCODE
-
+      # Suites in the LocalSuites order, HardwareMandatory last.  Each runs whenever the deployment succeeded (a
+      # failure in one suite never hides the evidence of the next); -PriorResultsDir carries a halt of an earlier
+      # suite of this job (TIMEOUT / INFRA / CLEANUP_FAILED / state halt / killed run) so a damaged state never becomes
+      # a clean baseline: later Init/Mutating/Unsafe tests are BLOCKED, ReadOnly tests continue.
       - name: Run HardwareUnit
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareUnit -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareUnit')
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareUnit -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareUnit') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
           exit $LASTEXITCODE
 
       - name: Run HardwareIntegration
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration')
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
+          exit $LASTEXITCODE
+
+      - name: Run HardwareMutation
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMutation -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMutation') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
+          exit $LASTEXITCODE
+
+      - name: Run HardwareMandatory (mandatory HIL gate)
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMandatory -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMandatory') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
           exit $LASTEXITCODE
 
       - name: Machine state for the next configuration
@@ -607,24 +620,36 @@ jobs:
           ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
           Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
 
-      - name: Run HardwareMandatory (mandatory HIL gate)
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMandatory -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMandatory')
-          exit $LASTEXITCODE
-
+      # Suites in the LocalSuites order, HardwareMandatory last.  Each runs whenever the deployment succeeded (a
+      # failure in one suite never hides the evidence of the next); -PriorResultsDir carries a halt of an earlier
+      # suite of this job (TIMEOUT / INFRA / CLEANUP_FAILED / state halt / killed run) so a damaged state never becomes
+      # a clean baseline: later Init/Mutating/Unsafe tests are BLOCKED, ReadOnly tests continue.
       - name: Run HardwareUnit
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareUnit -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareUnit')
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareUnit -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareUnit') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
           exit $LASTEXITCODE
 
       - name: Run HardwareIntegration
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration')
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
+          exit $LASTEXITCODE
+
+      - name: Run HardwareMutation
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMutation -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMutation') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
+          exit $LASTEXITCODE
+
+      - name: Run HardwareMandatory (mandatory HIL gate)
+        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
+        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
+        run: |
+          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMandatory -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMandatory') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
           exit $LASTEXITCODE
 
       - name: Machine state for the next configuration
@@ -693,7 +718,9 @@ jobs:
           # passes and no failure.  Skipped is never a pass; a missing deployment or suite is HIL_NOT_EXECUTED.
           import glob, json, os, re, sys, xml.etree.ElementTree as ET
 
-          SUITES = ['HardwareMandatory', 'HardwareUnit', 'HardwareIntegration']
+          SUITES = ['HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory']
+          GAP = 'TC-HIL-COVERAGE-GAP-001'
+          incomplete = []
           root = os.environ.get('HIL_EVIDENCE_DIR', 'hil-evidence')
           run_id, sha, up = os.environ.get('GITHUB_RUN_ID', ''), os.environ.get('HIL_HEAD_SHA', ''), os.environ.get('HIL_UPSTREAM_RUN_ID', '')
           staged = {'Debug': os.environ.get('HIL_STAGED_DEBUG', ''), 'Release': os.environ.get('HIL_STAGED_RELEASE', '')}
@@ -743,14 +770,20 @@ jobs:
                       rd = json.load(fh)
                   if int(rd.get('executedCount') or 0) <= 0:
                       not_executed.append('%s %s: no test executed (%s)' % (cfg, s, rd.get('counts')))
-                  n = f = sk = 0
+                  n = f = sk = gap = 0
                   for c in ET.parse(files[0]).getroot().iter('testcase'):
                       n += 1
+                      if (c.get('name') or '').startswith(GAP): gap += 1; continue   # required, not executed: neither pass nor skip
                       if c.find('failure') is not None or c.find('error') is not None: f += 1
                       elif c.find('skipped') is not None: sk += 1
-                  rows.append('| %s | %s | %d | %d | %d | %d | %s |' % (cfg, s, n - f - sk, f, sk, n, rd.get('overall')))
-                  if f > 0 or n - f - sk <= 0 or rd.get('overall') != 'PASSED':
-                      bad.append('%s %s: %d passed, %d failed, overall %s' % (cfg, s, n - f - sk, f, rd.get('overall')))
+                  cnt = rd.get('counts') or {}
+                  ngap, ninc = max(gap, int(cnt.get('COVERAGE-GAP') or 0)), int(cnt.get('INCOMPLETE') or 0)
+                  passed = n - gap - f - sk
+                  rows.append('| %s | %s | %d | %d | %d | %d | %d | %s |' % (cfg, s, passed, f, sk, ngap + ninc, n, rd.get('overall')))
+                  if ngap or ninc:
+                      incomplete.append('%s %s: %d required test(s) NOT EXECUTED (coverage gap), %d INCOMPLETE' % (cfg, s, ngap, ninc))
+                  if f > 0 or passed <= 0 or rd.get('overall') not in ('PASSED', 'INCOMPLETE') or (rd.get('overall') == 'INCOMPLETE' and not (ngap or ninc)):
+                      bad.append('%s %s: %d passed, %d failed, overall %s' % (cfg, s, passed, f, rd.get('overall')))
           for x in glob.glob(os.path.join(root, '**', 'junit-*.xml'), recursive=True) + glob.glob(os.path.join(root, '**', 'traceability-summary-*.md'), recursive=True):
               if not any(os.path.normpath(x).startswith(k + os.sep) for k in known):
                   bad.append('evidence outside an identified bundle: %s' % x)
@@ -758,20 +791,22 @@ jobs:
               verdict = 'HIL_NOT_EXECUTED'
           elif bad:
               verdict = 'FAILED'
+          elif incomplete:
+              verdict = 'INCOMPLETE'
           elif not identity_ok:
               verdict = 'STAGED_BUILD_NOT_TESTED'
               bad.append('STAGED_BUILD_NOT_TESTED: the driver under test is not the staged build of %s' % sha)
           else:
               verdict = 'PASSED'
-          text = '## HIL acceptance: %s (run %s, %s, CI run %s)\n\n%s\n\n| Config | Suite | Pass | Fail | Skip | Total | Overall |\n|---|---|---|---|---|---|---|\n%s\n' % (
+          text = '## HIL acceptance: %s (run %s, %s, CI run %s)\n\n%s\n\n| Config | Suite | Pass | Fail | Skip | Not executed / incomplete | Total | Overall |\n|---|---|---|---|---|---|---|---|\n%s\n' % (
               verdict, run_id, sha, up, '\n\n'.join(lines), '\n'.join(rows))
-          text += ''.join('- %s\n' % x for x in not_executed + bad)
+          text += ''.join('- %s\n' % x for x in not_executed + bad + incomplete)
           if os.environ.get('GITHUB_STEP_SUMMARY'):
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as fh:
                   fh.write(text)
           print(text)
           if verdict != 'PASSED':
-              print('::error title=HIL acceptance %s::' % verdict + '; '.join(not_executed + bad))
+              print('::error title=HIL acceptance %s::' % verdict + '; '.join(not_executed + bad + incomplete))
           sys.exit(0 if verdict == 'PASSED' else 1)
 
       - name: Publish HIL JUnit results
@@ -791,7 +826,7 @@ jobs:
           {
             echo "## HIL traceability (run $GITHUB_RUN_ID)"
             echo ""
-            echo "Declared automatic-HIL coverage gaps (skipped, never executed):"
+            echo "Required tests NOT EXECUTED (coverage gaps; acceptance INCOMPLETE until each has a verified fixture):"
             grep -ho 'TC-HIL-COVERAGE-GAP-001: [^ ]*' hil-evidence/hil-evidence-{Debug,Release}/*/junit-*.xml | sort | uniq -c || true
             for f in hil-evidence/hil-evidence-{Debug,Release}/*/traceability-summary-*.md; do echo ""; echo "### $f"; cat "$f"; done
           } >> "$GITHUB_STEP_SUMMARY"
