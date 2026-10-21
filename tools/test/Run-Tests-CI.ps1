@@ -376,11 +376,18 @@ $HardwareMandatoryTests = @(
 #
 # EXCLUDED: driver reinstall (UT-CORR-009), system sleep (test_s3_sleep_wake).
 $HardwareMutationTests = @(
-    # PHC epoch reset and frequency adjustment (UT-CORR-005/006)
-    # --case ensures only the mutation sub-test runs, not the full stability suite.
-    "test_ptp_phc_stability --case UT-CORR-005",  # SET_TIMESTAMP(1ms) + restore
-    "test_ptp_phc_stability --case UT-CORR-006"   # ADJUST_FREQUENCY(+1ns) + restore
+    # Every eligible automatic mutation entry.  Empty until UT-CORR-005/006 are hardware-verified in their own
+    # executable (decision B); the suite is then INCOMPLETE under GitHub Actions, never PASSED.
 )
+# Attended-only (decision A, Q 2026-10-21): PHC epoch reset and frequency adjustment.  --case selects the sub-test,
+# but the executable also contains the UT-CORR-009 driver lifecycle path (process creation), so under GitHub Actions
+# each entry is a declared coverage gap (NOT EXECUTED, run INCOMPLETE; TEST-HILSUITE-REAL-003 unchanged); outside it
+# the entry is appended to the HardwareMutation run.  Removed only after B: UT-CORR-009 split out and 005/006
+# hardware-verified including restoration.  Reasons must not end in a parenthesis.
+$HardwareMutationAttendedOnly = [ordered]@{
+    'test_ptp_phc_stability --case UT-CORR-005' = 'Mutating:Target: SET_TIMESTAMP 1 ms plus restore; test_ptp_phc_stability.exe also contains the UT-CORR-009 driver lifecycle path, ControlService STOP and Install-Driver-Elevated.ps1 Reinstall by process creation, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-009 is split into its own executable and UT-CORR-005 is hardware-verified, decision B'
+    'test_ptp_phc_stability --case UT-CORR-006' = 'Mutating:Target: ADJUST_FREQUENCY +1 ns plus restore; test_ptp_phc_stability.exe also contains the UT-CORR-009 driver lifecycle path, ControlService STOP and Install-Driver-Elevated.ps1 Reinstall by process creation, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-009 is split into its own executable and UT-CORR-006 is hardware-verified, decision B'
+}
 
 # ===========================
 # Hardware-dependent test lists (self-hosted runner only)
@@ -1672,6 +1679,13 @@ if ($IsHardwareSuite -and $Tests.Count -eq 0) {
     elseif ($Suite -eq 'HardwareIntegration') { $gapTable = $HardwareIntegrationCoverageGaps }
     if ($null -ne $gapTable) {
         foreach ($g in @($gapTable.Keys)) { Add-HilCoverageGap -Entry $g -Reason $gapTable[$g] }
+    }
+    # Attended-only mutation entries: NOT EXECUTED gap under GitHub Actions, executed on an attended run.
+    if ($Suite -eq 'HardwareMutation') {
+        foreach ($g in @($HardwareMutationAttendedOnly.Keys)) {
+            if ($UnderGitHubActions) { Add-HilCoverageGap -Entry $g -Reason $HardwareMutationAttendedOnly[$g] }
+            else { $TestList = @($TestList) + @($g) }
+        }
     }
 }
 

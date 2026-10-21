@@ -289,7 +289,8 @@ foreach ($wf in @(Get-ChildItem (Join-Path $RepoRoot '.github\workflows') -File 
     foreach ($mm in [regex]::Matches([System.IO.File]::ReadAllText($wf.FullName), 'Run-Tests-CI\.ps1[^\r\n]*?-Suite\s+(Hardware\w+)')) { $offered += $mm.Groups[1].Value }
 }
 $offered = @($offered | Sort-Object -Unique)
-$approved = @('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration')
+# HardwareMutation approved for automatic HIL 2026-10-21 (Q, P0 decision A); REAL-003 stays unchanged for it.
+$approved = @('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation')
 tc_check 'TEST-HILSUITE-REAL-001-workflows-dispatch-only-reviewed-hardware-suites' (($offered.Count -gt 0) -and (@($offered | Where-Object { $approved -notcontains $_ }).Count -eq 0)) `
     ("dispatched: [{0}]; approved: [{1}]" -f ($offered -join ','), ($approved -join ','))
 

@@ -43,6 +43,14 @@ function Get-RunnerList([string]$name) {
 $hwLists = [ordered]@{}
 foreach ($n in 'HardwareUnitTests', 'HardwareIntegrationTests', 'HardwareMandatoryTests', 'HardwareMutationTests') { $hwLists[$n] = Get-RunnerList $n }
 $hwEntries = @($hwLists.Values | ForEach-Object { $_ } | Sort-Object -Unique)
+# Attended-only HardwareMutation entries (decision A 2026-10-21): executed outside GitHub Actions, a declared
+# coverage gap under it.  Keys from the AST (hashtable keys are not string constants of the right side).
+$attendedOnly = @()
+$aoAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $x.Left.VariablePath.UserPath -eq 'HardwareMutationAttendedOnly' }, $true) | Select-Object -First 1
+if ($null -ne $aoAst) { $aoHt = $aoAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true); $attendedOnly = @($aoHt.KeyValuePairs | ForEach-Object { $_.Item1.Value }) }
+$hwEntries = @(@($hwEntries) + @($attendedOnly) | Sort-Object -Unique)
 
 # Declared automatic-HIL coverage gaps: suite -> ordered entry -> reason (keys and values from the AST).
 function Get-RunnerGapTable([string]$name) {
@@ -570,6 +578,22 @@ tc_check 'TEST-HILGATE-042-unverifiable-restoration-of-state-changing-test-is-in
      ($rM.Out -match 'TC-INFRA-STATE-002: [^\r\n]*PHC time') -and (Test-FailureCase $rM 'TC-INFRA-STATE-002') -and $rM.Exit -eq 1 -and
      ($rM.Out -notmatch '\[HALT\]')) `
     ("unverified records for: [{0}] exit={1}; {2}" -f (@($mUnv) -join ','), $rM.Exit, (Tail $rM))
+
+# --- Run N: decision A - UT-CORR-005/006 are attended-only; under GitHub Actions they are NOT EXECUTED gaps -------
+# Their executable also contains the UT-CORR-009 driver lifecycle path (process creation; TEST-HILSUITE-REAL-003).
+$want = @('test_ptp_phc_stability --case UT-CORR-005', 'test_ptp_phc_stability --case UT-CORR-006')
+$rN1 = Invoke-Sandbox 'runN1' @() -Suite 'HardwareMutation' -AllSupportedEnabled -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
+$rN2 = Invoke-Sandbox 'runN2' @() -Suite 'HardwareMutation' -AllSupportedEnabled
+$nBad = @()
+if ((@($attendedOnly | Sort-Object) -join '|') -ne ($want -join '|')) { $nBad += "attended-only table: [$($attendedOnly -join ', ')]" }
+foreach ($e in $want) {
+    if (@($hwLists['HardwareMutationTests']) -contains $e) { $nBad += "$e still in `$HardwareMutationTests (gate-runnable under GitHub Actions)" }
+    if ($rN1.Out -notmatch ('\[BLOCKED\] TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($e) + ' NOT EXECUTED by automatic HIL[^\r\n]*UT-CORR-009')) { $nBad += "GHA: no NOT EXECUTED gap naming UT-CORR-009 for $e" }
+    if ($rN2.Out -notmatch ('TC-SAFETY-GATE-001: ' + [regex]::Escape($e) + ': sandbox mode')) { $nBad += "attended: $e not dispatched" }
+    if ($rN2.Out -match ('TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($e))) { $nBad += "attended: $e reported as a gap" }
+}
+if ((Get-RanCount $rN1 'RAN') -ne 0 -or $rN1.Exit -ne 1 -or $rN1.Out -notmatch 'HardwareMutation is INCOMPLETE') { $nBad += "GHA run: ran=$(Get-RanCount $rN1 'RAN') exit=$($rN1.Exit) " + (Tail $rN1) }
+tc_check 'TEST-HILGATE-044-ut-corr-005-006-attended-only-not-executed-gaps-under-github-actions' ($nBad.Count -eq 0) ($nBad -join ' ### ')
 
 # --- Run J: a Hardware* suite in which nothing passed (skip-only) is a failure, not hardware verification ----
 $tSkip = Join-Path $Fakes 'test_sbfake_skiponly.ps1'
