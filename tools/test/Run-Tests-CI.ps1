@@ -837,6 +837,16 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 #              warnings) - is CLEANUP_FAILED and halts every later non-ReadOnly test.  After a non-ReadOnly test the
 #              restoration of what the runner cannot observe (PHC time/rate/offset, TSN/PHY/timestamp-control state)
 #              is INCONCLUSIVE (TC-INFRA-STATE-002): nonpassing, never assumed restored.
+# Per-entry mutation matrix (P0 2026-10-21): the hardware/system state a non-ReadOnly entry may modify, from its source
+# and hardware evidence.  Vocabulary: ADAPTER TIMINCA TSAUXC PHC_TIME PHC_RATE TAS FP PTM QAV PFC EEE VLAN MDIO
+# TS_CONTROL TARGET_TIME DRIVER_LIFECYCLE.  The runner itself re-reads only $HilVerifiableState; an entry whose declared
+# state is a subset of it and re-reads equal to the baseline has VERIFIED restoration.  Undeclared entries, or state the
+# runner cannot observe, are INCONCLUSIVE_RESTORATION and halt every later mutation (option 1, global).  Widen
+# $HilVerifiableState only together with a new independent check; never declare less than an entry really modifies.
+$HilVerifiableState = @('ADAPTER', 'TIMINCA', 'TSAUXC')
+$HilMutatedState = [ordered]@{
+    # none declared yet: every real non-ReadOnly entry is treated as modifying unobserved state
+}
 $IsHardwareSuite     = ($Suite -like 'Hardware*')
 $HilSettleSeconds    = 10
 if ($IsSandbox -and $env:AVB_TEST_STATE_SETTLE_SECONDS -match '^\d+$') { $HilSettleSeconds = [int]$env:AVB_TEST_STATE_SETTLE_SECONDS }
@@ -1246,6 +1256,20 @@ function Test-HilSandboxFake {
     return (-not [System.IO.Path]::GetFullPath($p).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase))
 }
 
+# Declared mutated state of an entry (sandbox: AVB_TEST_SANDBOX_MUTATES 'bin=STATE,STATE;...'); @() = undeclared.
+function Get-AvbHilMutatedState {
+    param([string]$Entry)
+    if ($script:IsSandbox) {
+        $bin = Get-HilBinName $Entry
+        foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_MUTATES) -split ';')) {
+            if ($pair -match '^\s*([^=]+?)\s*=\s*(\S+)\s*$' -and $Matches[1] -eq $bin) { return @($Matches[2] -split ',') }
+        }
+        return @()
+    }
+    if ($HilMutatedState.Contains($Entry)) { return @($HilMutatedState[$Entry]) }
+    return @()
+}
+
 function Get-AvbHilTestClass {
     param([string]$Entry)
     if ($script:IsSandbox) {
@@ -1303,8 +1327,10 @@ function Get-AvbHilGateDecision {
 
 function Add-HilBlocked {
     param([string]$Entry, [string]$Display, [string]$Stem, [string]$Reason)
+    # Every blocked item names its intended adapter (a fanned-out Mutating:Target item is one per exact target DID).
+    $tgt = if ($script:AvbItem -and $script:AvbItem.Target) { "; intended target $($script:AvbItem.Target)" } else { '' }
     Add-HilFailureRecord -Display $Display -Status 'BLOCKED(SAFETY)' -Stem $Stem `
-        -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed" -f $Entry, $Reason)
+        -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed{2}" -f $Entry, $Reason, $tgt)
 }
 
 # A declared automatic-HIL coverage gap ($Hardware*CoverageGaps): a REQUIRED test that is not executed because its
@@ -1611,9 +1637,15 @@ function Invoke-HilPostTestCheck {
         } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
             Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself"
         }
-        # The runner's independent snapshot does not cover everything a state-changing test may modify: missing
-        # evidence (INCONCLUSIVE_RESTORATION), distinct from observed damage (CLEANUP_FAILED above).  Restoration
-        # that cannot be verified stops every later non-ReadOnly test (Q P0 2026-10-21 sec. 2 item 7).
+        # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
+        # baseline.  Otherwise missing evidence (INCONCLUSIVE_RESTORATION), distinct from observed damage
+        # (CLEANUP_FAILED above); it stops every later non-ReadOnly test (Q P0 2026-10-21 sec. 2 item 7, option 1).
+        $declared = @(if ($script:AvbItem) { Get-AvbHilMutatedState $script:AvbItem.Entry })
+        $unobserved = @($declared | Where-Object { $HilVerifiableState -notcontains $_ })
+        if ($declared.Count -gt 0 -and $unobserved.Count -eq 0 -and -not $TimedOut) {
+            Write-Host ("  [STATE] after {0}: restoration verified by independent re-read ({1})" -f $Display, ($declared -join ', ')) -ForegroundColor Green
+            return
+        }
         Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
             -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" -f $Display, $Class)
         Set-HilHalt "$Display ($Class): restoration not verified (INCONCLUSIVE_RESTORATION)"

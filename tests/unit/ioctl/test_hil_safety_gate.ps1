@@ -599,11 +599,12 @@ tc_check 'TEST-HILGATE-042-unverifiable-restoration-is-inconclusive-restoration-
 # enabled until isolation is hardware-verified.
 $rF = Invoke-Sandbox 'runF46' @($tTgtPhc, $tRo) -AllSupportedEnabled
 $fRan = @($rF.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgtphc ' })
-$fBlk = @([regex]::Matches($rF.Out, '\[BLOCKED\] TC-SAFETY-GATE-001: test_sbfake_tgtphc\.ps1@(0x[0-9A-F]{4}): state-integrity halt[^\r\n]*restoration not verified') | ForEach-Object { $_.Groups[1].Value })
+$fBlk = @([regex]::Matches($rF.Out, '\[BLOCKED\] TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_tgtphc\.ps1: state-integrity halt[^\r\n]*restoration not verified[^\r\n]*--- not executed; intended target (0x[0-9A-F]{4})') | ForEach-Object { $_.Groups[1].Value })
 tc_check 'TEST-HILGATE-046-unverified-restoration-blocks-remaining-targets-globally-readonly-continues' `
     ($fRan.Count -eq 1 -and $fBlk.Count -ge 1 -and @($fBlk | Where-Object { $fRan[0] -match $_ }).Count -eq 0 -and
      (Get-RanCount $rF '^RAN test_sbfake_ro ') -eq 1 -and $rF.Exit -eq 1) `
-    ("ran=[{0}] blocked targets=[{1}] exit={2}; {3}" -f ($fRan -join ' / '), ($fBlk -join ','), $rF.Exit, (Tail $rF))
+    ("ran=[{0}] blocked targets=[{1}] exit={2}; gate lines: {3}" -f ($fRan -join ' / '), ($fBlk -join ','), $rF.Exit,
+     (@([regex]::Matches($rF.Out, '(?m)^.*TC-SAFETY-GATE-001: .*tgtphc.*$') | ForEach-Object { $_.Value.Trim() }) -join ' | '))
 
 # 047: the mutation matrix uses the fixed state vocabulary and only classified non-ReadOnly entries; the runner verifies
 # exactly ADAPTER, TIMINCA, TSAUXC itself (anything else needs a new independent check, never a declaration).
