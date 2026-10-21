@@ -82,8 +82,10 @@ function Enter-AvbHilLock {
 }
 
 # Releases only a lock this owner holds.  @{ Ok; Why }
-function Exit-AvbHilLock {
+# Is the lock file currently held by $Owner?  @{ Ok; Why }.
+function Test-AvbHilLockHeld {
     param($Owner, [string]$Path = (Get-AvbHilLockPath))
+    if ($null -eq $Owner) { return @{ Ok = $false; Why = 'no lock owner given (exclusive HIL control required)' } }
     $cur = Read-AvbHilLock -Path $Path
     if ($null -eq $cur) { return @{ Ok = $false; Why = 'lock already absent' } }
     $same = ($cur.kind -eq $Owner.kind -and [string]$cur.pid -eq [string]$Owner.pid -and [string]$cur.runId -eq [string]$Owner.runId -and
@@ -93,6 +95,131 @@ function Exit-AvbHilLock {
         $same = ($cur.kind -eq 'ci' -and [string]$cur.runId -eq [string]$Owner.runId -and [string]$cur.runAttempt -eq [string]$Owner.runAttempt -and [string]$cur.job -eq [string]$Owner.job)
     }
     if (-not $same) { return @{ Ok = $false; Why = "lock is held by another owner ($($cur.kind) '$($cur.label)')" } }
+    return @{ Ok = $true; Why = '' }
+}
+
+function Exit-AvbHilLock {
+    param($Owner, [string]$Path = (Get-AvbHilLockPath))
+    $held = Test-AvbHilLockHeld -Owner $Owner -Path $Path
+    if (-not $held.Ok) { return $held }
     Remove-Item -LiteralPath $Path -Force
+    return @{ Ok = $true; Why = '' }
+}
+
+# ---------------------------------------------------------------------------------------------------------
+# Machine-wide HIL safety record (Q 2026-10-21): %ProgramData%\IntelAvbFilter-hil-safety.json, schema avb-hil-safety/1.
+# Shared by every process, configuration and run on this machine (Debug, Release, LocalSuites, CI).
+#   CLEAR       explicitly initialized or cleared, no unrecovered event       -> Init/Mutating may run
+#   HALTED      at least one safety event with recovery PENDING / ATTEMPTED    -> Init/Mutating BLOCKED, ReadOnly runs
+#   UNAVAILABLE missing / unreadable / corrupt / wrong schema / other host /
+#               internally inconsistent                                       -> fail closed (as HALTED)
+# Events are appended, never removed.  Nothing clears a halt implicitly (reboot, reinstall, new run, new baseline);
+# only Clear-AvbHilSafetyHalt (verified recovery) or Invoke-AvbHilSafetyRebaseline (operator-approved) do, and only on a
+# HALTED record while holding the machine lock.  Scope is GLOBAL until physical adapter identity and isolation are
+# hardware-verified.  An accidental-damage safeguard, not a security boundary (the file can be edited).
+# ---------------------------------------------------------------------------------------------------------
+function Get-AvbHilSafetyPath { return (Join-Path $env:ProgramData 'IntelAvbFilter-hil-safety.json') }
+
+function Write-AvbHilSafetyFile([string]$Path, $Record) {
+    $tmp = "$Path.tmp-$PID"
+    ($Record | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+# @{ State = CLEAR|HALTED|UNAVAILABLE; Why; Record }
+function Read-AvbHilSafetyState {
+    param([string]$Path = (Get-AvbHilSafetyPath))
+    $un = { param($w) return @{ State = 'UNAVAILABLE'; Why = $w; Record = $null } }
+    if (-not (Test-Path -LiteralPath $Path)) { return (& $un "safety record missing at $Path (initialize it explicitly)") }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return (& $un "safety record path is not a file: $Path") }
+    try { $r = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return (& $un "safety record unreadable or corrupt: $($_.Exception.Message)") }
+    if ($null -eq $r -or $r.schema -ne 'avb-hil-safety/1') { return (& $un "safety record has an unknown schema") }
+    if ($r.host -ne $env:COMPUTERNAME) { return (& $un "safety record belongs to host '$($r.host)', not '$($env:COMPUTERNAME)' (stale or copied)") }
+    $open = @(@($r.events) | Where-Object { $null -ne $_ -and $_.recovery.status -in @('PENDING', 'ATTEMPTED') })
+    if ($r.status -eq 'HALTED') {
+        if ($open.Count -eq 0) { return (& $un 'safety record inconsistent: HALTED without an unrecovered event') }
+        return @{ State = 'HALTED'; Why = ("{0} unrecovered safety event(s), first: {1} {2} at {3}" -f $open.Count, $open[0].verdict, $open[0].trigger.executable, $open[0].utc); Record = $r }
+    }
+    if ($r.status -eq 'CLEAR') {
+        if ($open.Count -gt 0) { return (& $un 'safety record inconsistent: CLEAR with unrecovered events') }
+        return @{ State = 'CLEAR'; Why = ''; Record = $r }
+    }
+    return (& $un "safety record has an unknown status '$($r.status)'")
+}
+
+function Initialize-AvbHilSafetyRecord {
+    param([string]$Path = (Get-AvbHilSafetyPath), [string]$Operator, [string]$Reason)
+    if (Test-Path -LiteralPath $Path) { return @{ Ok = $false; Why = "a safety record already exists at $Path (never overwritten; inspect it)" } }
+    if (-not $Operator -or -not $Reason) { return @{ Ok = $false; Why = 'operator and reason are required' } }
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    Write-AvbHilSafetyFile $Path ([ordered]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'CLEAR'; events = @()
+        history = @([ordered]@{ utc = $now; operation = 'INITIALIZE'; operator = $Operator; reason = $Reason }) })
+    return @{ Ok = $true; Why = '' }
+}
+
+# $SafetyEvent (-Event): verdict, scope, hardware, trigger, initialState, lastKnownState, evidence (eventId/utc/host/recovery are added).
+function Add-AvbHilSafetyEvent {
+    param([string]$Path = (Get-AvbHilSafetyPath), [Alias('Event')]$SafetyEvent)
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    # StrictMode-safe: callers may omit optional fields.
+    $f = { param($n) if ($SafetyEvent -is [System.Collections.IDictionary]) { if ($SafetyEvent.Contains($n)) { $SafetyEvent[$n] } } elseif ($null -ne $SafetyEvent -and $SafetyEvent.PSObject.Properties[$n]) { $SafetyEvent.$n } }
+    $scope = & $f 'scope'
+    $e = [ordered]@{ eventId = [guid]::NewGuid().ToString(); utc = $now; host = $env:COMPUTERNAME
+                     scope = $(if ($scope) { $scope } else { 'GLOBAL' }); hardware = (& $f 'hardware'); trigger = (& $f 'trigger')
+                     verdict = (& $f 'verdict'); initialState = (& $f 'initialState'); lastKnownState = (& $f 'lastKnownState')
+                     evidence = @(& $f 'evidence'); recovery = [ordered]@{ status = 'PENDING' } }
+    $st = Read-AvbHilSafetyState -Path $Path
+    if ($st.State -eq 'UNAVAILABLE' -and (Test-Path -LiteralPath $Path)) {
+        # Never overwrite an unreadable / foreign record (it is evidence): keep the event beside it.
+        $side = "$Path.event-$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfff')).json"
+        ($e | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $side -Encoding UTF8
+        return @{ Ok = $false; Why = "safety record unavailable ($($st.Why)); event written to $side"; EventId = $e.eventId }
+    }
+    $rec = if ($st.Record) { $st.Record } else {
+        [pscustomobject]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'HALTED'; events = @()
+                           history = @([ordered]@{ utc = $now; operation = 'CREATED_BY_EVENT'; operator = ''; reason = 'no record existed when a safety event occurred' }) } }
+    $rec.events = @(@($rec.events) + @($e)); $rec.status = 'HALTED'
+    Write-AvbHilSafetyFile $Path $rec
+    return @{ Ok = $true; Why = ''; EventId = $e.eventId }
+}
+
+function Clear-AvbHilSafetyHalt {
+    param([string]$Path = (Get-AvbHilSafetyPath), [string]$Operator, $LockOwner, [string]$LockPath = (Get-AvbHilLockPath), [string]$VerificationEvidence)
+    $held = Test-AvbHilLockHeld -Owner $LockOwner -Path $LockPath
+    if (-not $held.Ok) { return @{ Ok = $false; Why = "exclusive HIL control required: $($held.Why)" } }
+    if (-not $Operator) { return @{ Ok = $false; Why = 'responsible operator required' } }
+    $st = Read-AvbHilSafetyState -Path $Path
+    if ($st.State -ne 'HALTED') { return @{ Ok = $false; Why = "record is $($st.State) $($st.Why) - only a HALTED record can be cleared; an unavailable record is never replaced by clearing" } }
+    if (-not $VerificationEvidence -or -not (Test-Path -LiteralPath $VerificationEvidence -PathType Leaf)) { return @{ Ok = $false; Why = 'verification evidence document missing' } }
+    try { $v = Get-Content -LiteralPath $VerificationEvidence -Raw | ConvertFrom-Json } catch { return @{ Ok = $false; Why = "verification evidence unreadable: $($_.Exception.Message)" } }
+    if ($v.schema -ne 'avb-hil-recovery-verification/1' -or $v.host -ne $env:COMPUTERNAME) { return @{ Ok = $false; Why = 'verification evidence has a wrong schema or host' } }
+    if ($v.verdict -ne 'RESTORATION_VERIFIED') { return @{ Ok = $false; Why = "verification verdict is '$($v.verdict)', not RESTORATION_VERIFIED" } }
+    if (@($v.identity).Count -eq 0 -or @($v.checks).Count -eq 0 -or @(@($v.checks) | Where-Object { -not $_.ok }).Count -gt 0) { return @{ Ok = $false; Why = 'verification evidence lacks a confirmed identity or has a failing / missing check' } }
+    $open = @(@($st.Record.events) | Where-Object { $_.recovery.status -in @('PENDING', 'ATTEMPTED') })
+    $uncovered = @($open | Where-Object { @($v.eventIds) -notcontains $_.eventId })
+    if ($uncovered.Count -gt 0) { return @{ Ok = $false; Why = ("verification does not cover event(s): {0}" -f (($uncovered | ForEach-Object { $_.eventId }) -join ', ')) } }
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    foreach ($e in $open) { $e.recovery = [ordered]@{ status = 'VERIFIED'; operator = $Operator; evidence = $VerificationEvidence; utc = $now } }
+    $st.Record.status = 'CLEAR'
+    $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $now; operation = 'CLEAR'; operator = $Operator; evidence = $VerificationEvidence; events = @($open | ForEach-Object { $_.eventId }) }))
+    Write-AvbHilSafetyFile $Path $st.Record
+    return @{ Ok = $true; Why = '' }
+}
+
+# Operator-approved rebaselining when the original state cannot be reconstructed: the failure evidence and verdicts stay.
+function Invoke-AvbHilSafetyRebaseline {
+    param([string]$Path = (Get-AvbHilSafetyPath), [string]$Operator, [string]$Approval, $LockOwner, [string]$LockPath = (Get-AvbHilLockPath), [string]$BaselineEvidence)
+    $held = Test-AvbHilLockHeld -Owner $LockOwner -Path $LockPath
+    if (-not $held.Ok) { return @{ Ok = $false; Why = "exclusive HIL control required: $($held.Why)" } }
+    if (-not $Operator -or -not $Approval) { return @{ Ok = $false; Why = 'operator and explicit approval text required' } }
+    if (-not $BaselineEvidence -or -not (Test-Path -LiteralPath $BaselineEvidence -PathType Leaf)) { return @{ Ok = $false; Why = 'new baseline evidence document missing' } }
+    $st = Read-AvbHilSafetyState -Path $Path
+    if ($st.State -ne 'HALTED') { return @{ Ok = $false; Why = "record is $($st.State) $($st.Why) - only a HALTED record can be rebaselined" } }
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    $open = @(@($st.Record.events) | Where-Object { $_.recovery.status -in @('PENDING', 'ATTEMPTED') })
+    foreach ($e in $open) { $e.recovery = [ordered]@{ status = 'REBASELINED'; operator = $Operator; approval = $Approval; evidence = $BaselineEvidence; utc = $now } }
+    $st.Record.status = 'CLEAR'
+    $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $now; operation = 'REBASELINE'; operator = $Operator; approval = $Approval; evidence = $BaselineEvidence; events = @($open | ForEach-Object { $_.eventId }) }))
+    Write-AvbHilSafetyFile $Path $st.Record
     return @{ Ok = $true; Why = '' }
 }

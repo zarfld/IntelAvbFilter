@@ -358,6 +358,7 @@ New-Item -ItemType Directory -Path (Join-Path $Tree 'tools\lib') -Force | Out-Nu
 Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $Tree 'tools\lib\TestVerdict.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Tree 'tools\lib\NativeExit.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $Tree 'tools\lib\SourceDigest.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $Tree 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }

@@ -260,6 +260,7 @@ New-Item -ItemType Directory -Path (Join-Path $Tree 'tools\lib') -Force | Out-Nu
 Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $Tree 'tools\lib\TestVerdict.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Tree 'tools\lib\NativeExit.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $Tree 'tools\lib\SourceDigest.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $Tree 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
@@ -314,7 +315,7 @@ function New-StateFile([string]$Path, [switch]$AllSupportedEnabled) {
 
 function Invoke-Sandbox {
     param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [int]$Timeout = 60,
-          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled, [string]$PriorResultsDir = '')
+          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled, [string]$PriorResultsDir = '', [string]$SafetyFile = '')
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -340,7 +341,7 @@ function Invoke-Sandbox {
         ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $mDir 'test-build-manifest.json') -Encoding UTF8
     $envs = [ordered]@{
         AVB_TEST_SANDBOX = '1'; AVB_TEST_ADAPTER_STATE_FILE = $stateFile; AVB_TEST_SANDBOX_CLASSES = $Classes
-        AVB_TEST_SANDBOX_MUTATES = $Mutates
+        AVB_TEST_SANDBOX_MUTATES = $Mutates; AVB_TEST_HIL_SAFETY_FILE = $SafetyFile
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = 'sandbox-rev'; AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
@@ -626,6 +627,34 @@ else {
     }
 }
 tc_check 'TEST-HILGATE-047-mutation-matrix-vocabulary-and-runner-verifiable-state' ($mmBad.Count -eq 0) ($mmBad -join '; ')
+
+# --- Run P: machine-wide safety record (tools/lib/HilLock.ps1; Q 2026-10-21) -----------------------------------
+# The runner reads the record before any test: HALTED or UNAVAILABLE blocks every Init/Mutating test (ReadOnly runs);
+# a safety halt it raises is persisted, so a LATER run with a fresh, clean baseline is still blocked.  The sandbox uses
+# AVB_TEST_HIL_SAFETY_FILE; the machine record in %ProgramData% is never touched by these tests.
+. (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
+$sfHalted = Join-Path $Tmp 'safety_halted.json'
+$null = Initialize-AvbHilSafetyRecord -Path $sfHalted -Operator 'test' -Reason 'TEST-HILGATE-048'
+$null = Add-AvbHilSafetyEvent -Path $sfHalted -Event ([ordered]@{ verdict = 'CLEANUP_FAILED'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
+$rP1 = Invoke-Sandbox 'runP1' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sfHalted
+tc_check 'TEST-HILGATE-048-halted-machine-record-blocks-mutation-readonly-continues' `
+    ((Get-RanCount $rP1 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP1 '^RAN test_sbfake_ro ') -eq 1 -and
+     $rP1.Out -match 'TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_init\.ps1: state-integrity halt \(machine safety record HALTED' -and $rP1.Exit -eq 1) (Tail $rP1)
+$rP2 = Invoke-Sandbox 'runP2' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile (Join-Path $Tmp 'safety_absent.json')
+tc_check 'TEST-HILGATE-049-missing-machine-record-fails-closed-for-mutation' `
+    ((Get-RanCount $rP2 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP2 '^RAN test_sbfake_ro ') -eq 1 -and
+     $rP2.Out -match 'state-integrity halt \(machine safety record UNAVAILABLE[^\r\n]*missing' -and -not (Test-Path (Join-Path $Tmp 'safety_absent.json'))) (Tail $rP2)
+$sfShared = Join-Path $Tmp 'safety_shared.json'
+$null = Initialize-AvbHilSafetyRecord -Path $sfShared -Operator 'test' -Reason 'TEST-HILGATE-050'
+$rP3 = Invoke-Sandbox 'runP3' @($tDis, $tRo2) -SafetyFile $sfShared                        # run 1: CLEANUP_FAILED
+$sP3 = Read-AvbHilSafetyState -Path $sfShared
+$eP3 = if ($sP3.Record) { @($sP3.Record.events)[0] } else { $null }
+$rP4 = Invoke-Sandbox 'runP4' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sfShared   # run 2: fresh clean state
+tc_check 'TEST-HILGATE-050-safety-halt-persists-to-a-later-run-with-a-clean-baseline' `
+    ($sP3.State -eq 'HALTED' -and $eP3 -and $eP3.verdict -eq 'CLEANUP_FAILED' -and $eP3.trigger.executable -match 'test_sbfake_disabler' -and
+     $eP3.trigger.suite -eq 'HardwareUnit' -and $null -ne $eP3.initialState -and $null -ne $eP3.lastKnownState -and @($eP3.evidence).Count -ge 1 -and
+     (Get-RanCount $rP4 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP4 '^RAN test_sbfake_ro ') -eq 1 -and $rP4.Out -match 'machine safety record HALTED') `
+    ("record={0} verdict={1} trigger={2}; run2: {3}" -f $sP3.State, $(if ($eP3) { $eP3.verdict }), $(if ($eP3) { $eP3.trigger.executable }), (Tail $rP4))
 
 # 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
 # distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).

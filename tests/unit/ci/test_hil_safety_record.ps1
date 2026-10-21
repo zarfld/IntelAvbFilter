@@ -1,0 +1,133 @@
+# test_hil_safety_record.ps1
+# TEST-SAFETYREC-*: machine-wide persistent HIL safety record (tools/lib/HilLock.ps1; Q 2026-10-21).
+#
+# Contract: one record per machine (%ProgramData%\IntelAvbFilter-hil-safety.json) shared by every process,
+# configuration and run (Debug, Release, LocalSuites, CI).  State CLEAR | HALTED | UNAVAILABLE.  Missing, corrupt,
+# foreign-host, wrong-schema, inaccessible or internally inconsistent = UNAVAILABLE = fail closed for Init/Mutating.
+# Safety events are appended, never removed.  Only an explicit operation clears a halt: machine lock held, record
+# HALTED (never UNAVAILABLE), operator named, verification document (RESTORATION_VERIFIED, this host, every pending
+# event, measured checks).  Rebaselining needs explicit approval text and marks events REBASELINED - original verdicts
+# stay.  A reboot, reinstall, new run or new baseline never clears anything.  Offline: temp files only.
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$RepoRoot  = Split-Path (Split-Path (Split-Path $ScriptDir -Parent) -Parent) -Parent
+$total = 0; $passed = 0; $failed = 0
+function tc_check { param([string]$n, [bool]$ok, [string]$why)
+    $script:total++; if ($ok) { $script:passed++; Write-Host ("  [PASS] {0}" -f $n) -ForegroundColor Green } else { $script:failed++; Write-Host ("  [FAIL] {0}: {1}" -f $n, $why) -ForegroundColor Red } }
+Write-Host ""; Write-Host "TEST-SAFETYREC: machine-wide HIL safety record (offline, temp files)" -ForegroundColor Cyan
+
+$Tmp = Join-Path $env:TEMP ("safetyrec_{0}" -f (Get-Random)); New-Item -ItemType Directory -Path $Tmp -Force | Out-Null
+$missing = ''
+try { . (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
+      foreach ($f in 'Get-AvbHilSafetyPath', 'Read-AvbHilSafetyState', 'Initialize-AvbHilSafetyRecord', 'Add-AvbHilSafetyEvent', 'Clear-AvbHilSafetyHalt', 'Invoke-AvbHilSafetyRebaseline') {
+          if (-not (Get-Command $f -ErrorAction SilentlyContinue)) { throw "$f missing in tools/lib/HilLock.ps1" } } } catch { $missing = $_.Exception.Message }
+tc_check 'TEST-SAFETYREC-000-library-functions-present' ($missing -eq '') $missing
+if ($missing) { Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue; exit 1 }
+
+function New-Event([string]$Verdict = 'CLEANUP_FAILED') {
+    return [ordered]@{ verdict = $Verdict; scope = 'GLOBAL'
+        hardware = [ordered]@{ did = '0x125B'; driverIndex = 0; identityVerified = $false }
+        trigger  = [ordered]@{ testcase = 'TC-X-001'; executable = 'test_x.exe'; arguments = '--case X'; suite = 'HardwareMutation'; configuration = 'Debug'; runId = '42'; pid = $PID }
+        initialState = [ordered]@{ timinca = '0x18000000' }; lastKnownState = [ordered]@{ timinca = '0x08000000' }; evidence = @('C:\logs\x.log') }
+}
+function Write-Verification([string]$P, [string[]]$Ids, [string]$Verdict = 'RESTORATION_VERIFIED', [string]$HostName = $env:COMPUTERNAME) {
+    ([ordered]@{ schema = 'avb-hil-recovery-verification/1'; host = $HostName; verdict = $Verdict; eventIds = @($Ids)
+                 identity = @([ordered]@{ did = '0x125B'; mac = '00-11-22-33-44-55' }); checks = @([ordered]@{ name = 'TIMINCA'; expected = '0x18000000'; observed = '0x18000000'; ok = $true })
+                 utc = (Get-Date).ToUniversalTime().AddSeconds(1).ToString('o') } | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $P -Encoding UTF8
+}
+# Holding the lock is part of the clearing contract.
+$lockPath = Join-Path $Tmp 'hil.lock'
+$lock = Enter-AvbHilLock -Kind 'local' -Label 'safetyrec test' -Path $lockPath -WaitSeconds 1
+
+# 001-003, 010: unavailable record = fail closed
+$p1 = Join-Path $Tmp 'missing.json'
+$s1 = Read-AvbHilSafetyState -Path $p1
+$p2 = Join-Path $Tmp 'corrupt.json'; '{ not json' | Set-Content -LiteralPath $p2
+$s2 = Read-AvbHilSafetyState -Path $p2
+$p3 = Join-Path $Tmp 'foreign.json'; $null = Initialize-AvbHilSafetyRecord -Path $p3 -Operator 'Q' -Reason 'test'
+$j3 = Get-Content $p3 -Raw | ConvertFrom-Json; $j3.host = 'OTHER-HOST'; ($j3 | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $p3 -Encoding UTF8
+$s3 = Read-AvbHilSafetyState -Path $p3
+$p10 = Join-Path $Tmp 'adir.json'; New-Item -ItemType Directory -Path $p10 | Out-Null
+$s10 = Read-AvbHilSafetyState -Path $p10
+tc_check 'TEST-SAFETYREC-001-missing-corrupt-foreign-or-inaccessible-record-is-unavailable-fail-closed' `
+    ($s1.State -eq 'UNAVAILABLE' -and $s2.State -eq 'UNAVAILABLE' -and $s3.State -eq 'UNAVAILABLE' -and $s10.State -eq 'UNAVAILABLE' -and
+     $s1.Why -match 'missing' -and $s3.Why -match 'OTHER-HOST') ("missing={0}:{1} corrupt={2} foreign={3}:{4} dir={5}" -f $s1.State, $s1.Why, $s2.State, $s3.State, $s3.Why, $s10.State)
+
+# 004: explicit initialization -> CLEAR; never overwrites an existing record
+$p = Join-Path $Tmp 'record.json'
+$i1 = Initialize-AvbHilSafetyRecord -Path $p -Operator 'Q' -Reason 'first HIL safety record on this machine'
+$i2 = Initialize-AvbHilSafetyRecord -Path $p -Operator 'Q' -Reason 'again'
+$s4 = Read-AvbHilSafetyState -Path $p
+$i3 = Initialize-AvbHilSafetyRecord -Path $p2 -Operator 'Q' -Reason 'replace corrupt'
+tc_check 'TEST-SAFETYREC-004-explicit-initialization-is-clear-and-never-overwrites' `
+    ($i1.Ok -and -not $i2.Ok -and $s4.State -eq 'CLEAR' -and -not $i3.Ok -and ((Get-Content $p2 -Raw) -match 'not json')) ("init1={0} init2={1} state={2} overwriteCorrupt={3}" -f $i1.Ok, $i2.Ok, $s4.State, $i3.Ok)
+
+# 005: a safety event halts with every required field
+$a5 = Add-AvbHilSafetyEvent -Path $p -Event (New-Event 'CLEANUP_FAILED')
+$s5 = Read-AvbHilSafetyState -Path $p
+$e5 = if ($s5.Record) { @($s5.Record.events)[0] } else { $null }
+$need = 'eventId', 'utc', 'host', 'scope', 'hardware', 'trigger', 'verdict', 'initialState', 'lastKnownState', 'evidence', 'recovery'
+$lack = @(if ($e5) { $need | Where-Object { $null -eq $e5.$_ } } else { $need })
+tc_check 'TEST-SAFETYREC-005-safety-event-halts-and-records-every-required-field' `
+    ($a5.Ok -and $s5.State -eq 'HALTED' -and $lack.Count -eq 0 -and $e5.recovery.status -eq 'PENDING' -and $e5.scope -eq 'GLOBAL' -and $e5.host -eq $env:COMPUTERNAME) `
+    ("state={0} missing fields: {1}" -f $s5.State, ($lack -join ','))
+
+# 006: persistence across processes - a fresh process (new run, new baseline) still sees HALTED
+$lib = Join-Path $RepoRoot 'tools\lib\HilLock.ps1'
+$o6 = powershell -NoProfile -ExecutionPolicy Bypass -Command ". '$lib'; (Read-AvbHilSafetyState -Path '$p').State" 2>&1 | Out-String
+tc_check 'TEST-SAFETYREC-006-halt-persists-across-processes-and-runs' ($o6.Trim() -eq 'HALTED') ("fresh process read: {0}" -f $o6.Trim())
+
+# 007: clearing refused without lock, operator, or valid verification; record stays HALTED
+$id = [string]$e5.eventId
+$v = Join-Path $Tmp 'verify.json'; Write-Verification $v @($id)
+$vBad = Join-Path $Tmp 'verify_bad.json'; Write-Verification $vBad @($id) 'INCONCLUSIVE'
+$vNoEv = Join-Path $Tmp 'verify_noev.json'; Write-Verification $vNoEv @('other-event')
+$c7 = @(
+    (Clear-AvbHilSafetyHalt -Path $p -Operator 'Q' -LockOwner $null -LockPath $lockPath -VerificationEvidence $v),
+    (Clear-AvbHilSafetyHalt -Path $p -Operator '' -LockOwner $lock.Owner -LockPath $lockPath -VerificationEvidence $v),
+    (Clear-AvbHilSafetyHalt -Path $p -Operator 'Q' -LockOwner $lock.Owner -LockPath $lockPath -VerificationEvidence (Join-Path $Tmp 'absent.json')),
+    (Clear-AvbHilSafetyHalt -Path $p -Operator 'Q' -LockOwner $lock.Owner -LockPath $lockPath -VerificationEvidence $vBad),
+    (Clear-AvbHilSafetyHalt -Path $p -Operator 'Q' -LockOwner $lock.Owner -LockPath $lockPath -VerificationEvidence $vNoEv),
+    (Clear-AvbHilSafetyHalt -Path $p2 -Operator 'Q' -LockOwner $lock.Owner -LockPath $lockPath -VerificationEvidence $v))
+$s7 = Read-AvbHilSafetyState -Path $p
+tc_check 'TEST-SAFETYREC-007-clear-refused-without-lock-operator-or-verified-evidence-or-on-unavailable-record' `
+    (@($c7 | Where-Object { $_.Ok }).Count -eq 0 -and $s7.State -eq 'HALTED') ("accepted: {0}; state={1}; reasons: {2}" -f @($c7 | Where-Object { $_.Ok }).Count, $s7.State, (($c7 | ForEach-Object { $_.Why }) -join ' | '))
+
+# 008: verified clearing -> CLEAR; the event is kept with recovery VERIFIED, operator and evidence
+$c8 = Clear-AvbHilSafetyHalt -Path $p -Operator 'Q' -LockOwner $lock.Owner -LockPath $lockPath -VerificationEvidence $v
+$s8 = Read-AvbHilSafetyState -Path $p
+$e8 = if ($s8.Record) { @($s8.Record.events) | Where-Object { $_.eventId -eq $id } } else { $null }
+tc_check 'TEST-SAFETYREC-008-verified-clear-keeps-event-with-operator-and-evidence' `
+    ($c8.Ok -and $s8.State -eq 'CLEAR' -and $e8 -and $e8.verdict -eq 'CLEANUP_FAILED' -and $e8.recovery.status -eq 'VERIFIED' -and $e8.recovery.operator -eq 'Q' -and
+     $e8.recovery.evidence -eq $v -and @($s8.Record.history | Where-Object { $_.operation -eq 'CLEAR' }).Count -eq 1) ("clear={0}:{1} state={2}" -f $c8.Ok, $c8.Why, $s8.State)
+
+# 009: rebaselining needs explicit approval; events REBASELINED, original verdict unchanged
+$null = Add-AvbHilSafetyEvent -Path $p -Event (New-Event 'INCONCLUSIVE_RESTORATION')
+$nb = Join-Path $Tmp 'newbaseline.json'; '{"adapters":[]}' | Set-Content -LiteralPath $nb
+$r9a = Invoke-AvbHilSafetyRebaseline -Path $p -Operator 'Q' -Approval '' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $nb
+$r9 = Invoke-AvbHilSafetyRebaseline -Path $p -Operator 'Q' -Approval 'original PHC epoch not reconstructible; approved by Q 2026-10-21' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $nb
+$s9 = Read-AvbHilSafetyState -Path $p
+$e9 = @($s9.Record.events) | Where-Object { $_.verdict -eq 'INCONCLUSIVE_RESTORATION' }
+tc_check 'TEST-SAFETYREC-009-rebaseline-needs-approval-and-never-rewrites-the-failure' `
+    (-not $r9a.Ok -and $r9.Ok -and $s9.State -eq 'CLEAR' -and $e9 -and $e9.recovery.status -eq 'REBASELINED' -and $e9.verdict -eq 'INCONCLUSIVE_RESTORATION' -and
+     $e9.recovery.approval -match 'approved by Q') ("noApproval={0} approved={1}:{2} state={3}" -f $r9a.Ok, $r9.Ok, $r9.Why, $s9.State)
+
+# 011: an event on a corrupt record never overwrites it (sidecar) and the state stays UNAVAILABLE
+$a11 = Add-AvbHilSafetyEvent -Path $p2 -Event (New-Event 'CLEANUP_FAILED')
+$side = @(Get-ChildItem $Tmp -Filter 'corrupt.json.event-*.json').Count
+tc_check 'TEST-SAFETYREC-011-event-on-corrupt-record-goes-to-sidecar-record-untouched' `
+    (-not $a11.Ok -and $side -eq 1 -and ((Get-Content $p2 -Raw) -match 'not json') -and (Read-AvbHilSafetyState -Path $p2).State -eq 'UNAVAILABLE') ("ok={0} sidecars={1}" -f $a11.Ok, $side)
+
+# 012: an event when the record is missing creates a HALTED record (fail closed, nothing lost)
+$p12 = Join-Path $Tmp 'none.json'
+$a12 = Add-AvbHilSafetyEvent -Path $p12 -Event (New-Event 'FAILED(TIMEOUT)')
+tc_check 'TEST-SAFETYREC-012-event-without-record-creates-halted-record' ($a12.Ok -and (Read-AvbHilSafetyState -Path $p12).State -eq 'HALTED') ("ok={0}" -f $a12.Ok)
+
+$null = Exit-AvbHilLock -Owner $lock.Owner -Path $lockPath
+Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host ""; Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
+if ($failed -gt 0) { Write-Host "[FAIL] TEST-SAFETYREC: machine safety record contract violated" -ForegroundColor Red; exit 1 }
+Write-Host "[PASS] TEST-SAFETYREC: machine safety record contract holds" -ForegroundColor Green
+exit 0

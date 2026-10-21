@@ -252,6 +252,7 @@ function Invoke-DriverHealthCheck {
 . (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')    # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
 . (Join-Path $PSScriptRoot '..\lib\SourceDigest.ps1')  # build-input digest (local pre-commit provenance)
 . (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
+. (Join-Path $PSScriptRoot '..\lib\HilLock.ps1')       # machine lock + machine-wide HIL safety record
 
 # ===========================
 # Built-in hardware-independent test lists
@@ -282,6 +283,7 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_hil_binary_provenance.ps1",         # TEST-HILPROV: build manifest + dispatch provenance gate (sandboxed, no driver; #328 F23)
     "ps1:tests/unit/ci/test_runner_results_json.ps1",           # TEST-RESULTSJSON: machine-readable runner results (sandboxed, no driver)
     "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
+    "ps1:tests/unit/ci/test_hil_safety_record.ps1",             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
     "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)
     "ps1:tests/unit/ci/test_local_suites.ps1",                  # TEST-LOCALSUITES: local pre-commit HIL orchestration + DbgView reproduction contract (offline)
     "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
@@ -1169,6 +1171,7 @@ function Write-AvbResultsJson {
         buildManifest = $(if ($script:BuildManifest) { [ordered]@{ ok = $script:BuildManifest.Ok; path = $script:BuildManifest.Path; error = $script:BuildManifest.Error } } else { $null })
         driverIdentity = [ordered]@{ source = 'environment (HIL_DRIVER_*), not verified by this runner'; version = $env:HIL_DRIVER_VERSION; sha256 = $env:HIL_DRIVER_SHA256 }
         adapters = $adapters; stateHalt = $script:stateHalt
+        machineSafety = $(if ($script:HilSafetyState) { [ordered]@{ path = $script:HilSafetyPath; stateAtStart = $script:HilSafetyState.State; why = $script:HilSafetyState.Why } } else { $null })
         executedCount = @($records | Where-Object { $_.executed }).Count; notExecutedCount = @($records | Where-Object { -not $_.executed -and -not $_.check }).Count
         counts = $counts; overall = $Overall; exitCode = $ExitCode; records = $records
     }
@@ -1242,7 +1245,21 @@ function Get-AvbRunOverall {
 }
 
 function Set-HilHalt {
-    param([string]$Reason)
+    # -Verdict: a safety event caused by the current item; it is persisted in the machine-wide safety record
+    # (tools/lib/HilLock.ps1) so every later run on this machine stays halted until an explicit verified recovery.
+    param([string]$Reason, [string]$Verdict = '', $Last = $null)
+    if ($Verdict -and $script:IsHardwareSuite -and $script:HilSafetyPath) {
+        $it = $script:AvbItem
+        $ev = [ordered]@{ verdict = $Verdict; scope = 'GLOBAL'
+            hardware = [ordered]@{ did = $(if ($it) { $it.Target }); identityVerified = $false; note = 'adapter identity by DID only (no MAC/PCI correlation yet)' }
+            trigger  = [ordered]@{ testcase = $(if ($it) { $it.Entry }); executable = $(if ($it) { Split-Path -Leaf ([string]$it.Artifact) }); arguments = $(if ($it) { $it.Arguments })
+                                   suite = $Suite; configuration = $Configuration; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB; pid = $PID; reason = $Reason }
+            initialState = $script:HilBaseline; lastKnownState = $Last
+            evidence = @(@($(if ($it) { $it.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ }) }
+        $pr = Add-AvbHilSafetyEvent -Path $script:HilSafetyPath -SafetyEvent $ev
+        if ($pr.Ok) { Write-Host "  [SAFETY-RECORD] $Verdict persisted (event $($pr.EventId)); Init/Mutating stay BLOCKED on this machine until a verified recovery clears it" -ForegroundColor Red }
+        else { Write-Host "  [SAFETY-RECORD] NOT persisted in the record: $($pr.Why)" -ForegroundColor Red }
+    }
     if ($script:stateHalt) { return }
     $script:stateHalt = $Reason
     Write-Host "  [HALT] state-integrity halt: $Reason --- every later Init/Mutating/Unsafe test is BLOCKED; ReadOnly tests continue" -ForegroundColor Red
@@ -1632,7 +1649,7 @@ function Invoke-HilPostTestCheck {
     if (@($cmp.Diffs).Count -gt 0) {
         Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' -Check `
             -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change" -f $Display, (@($cmp.Diffs) -join '; '))
-        Set-HilHalt "CLEANUP_FAILED after $Display"
+        Set-HilHalt "CLEANUP_FAILED after $Display" -Verdict 'CLEANUP_FAILED' -Last $cur
         $script:HilBaseline = $cur   # later differences are attributed to later tests
         return
     }
@@ -1641,9 +1658,9 @@ function Invoke-HilPostTestCheck {
     }
     if ($Class -ne 'ReadOnly') {
         if ($TimedOut) {
-            Set-HilHalt "$Display ($Class) was killed after a timeout; state it may have left behind is not fully observable"
+            Set-HilHalt "$Display ($Class) was killed after a timeout; state it may have left behind is not fully observable" -Verdict 'FAILED(TIMEOUT)' -Last $cur
         } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
-            Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself"
+            Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself" -Verdict 'CLEANUP_FAILED' -Last $cur
         }
         # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
         # baseline.  Otherwise missing evidence (INCONCLUSIVE_RESTORATION), distinct from observed damage
@@ -1656,7 +1673,7 @@ function Invoke-HilPostTestCheck {
         }
         Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
             -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" -f $Display, $Class)
-        Set-HilHalt "$Display ($Class): restoration not verified (INCONCLUSIVE_RESTORATION)"
+        Set-HilHalt "$Display ($Class): restoration not verified (INCONCLUSIVE_RESTORATION)" -Verdict 'INCONCLUSIVE_RESTORATION' -Last $cur
     }
 }
 
@@ -1679,8 +1696,24 @@ $ResultsJsonPath  = if ($ResultsJson) { [System.IO.Path]::GetFullPath($ResultsJs
 $env:AVB_DRIVER_BUILD = $Configuration
 Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
 
+$HilSafetyPath = $null; $HilSafetyState = $null
+if ($IsHardwareSuite) {
+    # Machine-wide safety record: HALTED or UNAVAILABLE (missing/corrupt/foreign/inaccessible) = fail closed for every
+    # Init/Mutating test of this run; ReadOnly tests continue.  Sandbox: AVB_TEST_HIL_SAFETY_FILE if set (exactly that
+    # file), else a CLEAR fixture record in the sandbox logs directory; the %ProgramData% record is never touched.
+    if ($IsSandbox) {
+        $HilSafetyPath = if ($env:AVB_TEST_HIL_SAFETY_FILE) { $env:AVB_TEST_HIL_SAFETY_FILE } else {
+            $sp = Join-Path $logsDir 'sandbox-hil-safety.json'
+            if (-not (Test-Path -LiteralPath $sp)) { $null = Initialize-AvbHilSafetyRecord -Path $sp -Operator 'sandbox' -Reason 'offline sandbox fixture' }
+            $sp }
+    } else { $HilSafetyPath = Get-AvbHilSafetyPath }
+    $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
+    Write-Note "Machine safety record: $($HilSafetyState.State) ($HilSafetyPath) $($HilSafetyState.Why)"
+}
+
 if ($IsHardwareSuite) {
     Invoke-HilBaseline
+    if ($HilSafetyState.State -ne 'CLEAR') { Set-HilHalt "machine safety record $($HilSafetyState.State): $($HilSafetyState.Why)" }
     # A halt of an earlier suite of the same HIL job carries over: its damaged state must not become this run's
     # clean baseline for further mutation (P0 2026-10-21 sec. 2).  ReadOnly tests continue (same as an in-run halt).
     if ($PriorResultsDir) {
@@ -1936,7 +1969,7 @@ foreach ($WorkItem in $WorkItems) {
         $failedTests++
         Write-Fail "$exeName INCONCLUSIVE_RESTORATION ($($vc.InconclusiveRestoration) testcase(s)) --- the test could not verify its own restoration"
         Add-AvbResult -Name $exeName -Status "INCONCLUSIVE_RESTORATION" -Exit $exitCode
-        Set-HilHalt "$exeName reported INCONCLUSIVE_RESTORATION itself"
+        Set-HilHalt "$exeName reported INCONCLUSIVE_RESTORATION itself" -Verdict 'INCONCLUSIVE_RESTORATION'
     } elseif (($exitCode -eq 0) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
         $failedTests++
         Write-Fail "$exeName INCONCLUSIVE ($($vc.Inconclusive) testcase(s)) --- insufficient evidence on mandatory verification"

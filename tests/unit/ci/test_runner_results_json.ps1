@@ -84,7 +84,7 @@ foreach ($d in (Join-Path $Tree 'tools\test'), (Join-Path $Tree 'tools\lib'), (J
     New-Item -ItemType Directory -Path $d -Force | Out-Null
 }
 foreach ($f in 'Run-Tests-CI.ps1', 'Convert-Logs-To-JUnit.ps1') { Copy-Item (Join-Path $RepoRoot "tools\test\$f") (Join-Path $Tree "tools\test\$f") }
-foreach ($f in 'TestVerdict.ps1', 'NativeExit.ps1', 'SourceDigest.ps1') { Copy-Item (Join-Path $RepoRoot "tools\lib\$f") (Join-Path $Tree "tools\lib\$f") }
+foreach ($f in 'TestVerdict.ps1', 'NativeExit.ps1', 'SourceDigest.ps1', 'HilLock.ps1') { Copy-Item (Join-Path $RepoRoot "tools\lib\$f") (Join-Path $Tree "tools\lib\$f") }
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }

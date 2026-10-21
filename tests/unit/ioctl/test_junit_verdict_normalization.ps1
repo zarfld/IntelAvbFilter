@@ -168,6 +168,7 @@ New-Item -ItemType Directory -Path (Join-Path $Sandbox 'tools\lib') -Force | Out
 Copy-Item $VerdictLib (Join-Path $Sandbox 'tools\lib\TestVerdict.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Sandbox 'tools\lib\NativeExit.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $Sandbox 'tools\lib\SourceDigest.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $Sandbox 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
 # Replace the lifecycle library (it opens \\.\IntelAvbFilter) with inert stubs.
 @'
 function Get-AvbLifecycleSnapshot { return $null }
