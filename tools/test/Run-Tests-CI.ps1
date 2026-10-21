@@ -545,7 +545,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'tsauxc_toggle_test'            = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
     'test_gptp_daemon_coexist'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
     'test_ptp_phc_stability'        = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-20 - the default run is UT-CORR-007/008 only, but the binary contains the UT-CORR-009 driver reinstall path, ControlService STOP plus system Install-Driver-Elevated.ps1 -Action Reinstall, reachable only with --case UT-CORR-009 or --allow-lifecycle; coverage gap: UT-CORR-007/008 TX-PHC correlation, #149 #317'
-    'ssot_register_validation_test' = 'Unknown: no build entry or source mapping in Build-Tests.ps1'
+    'ssot_register_validation_test' = 'Unknown: not yet classified from its source; built by Build-Tests.ps1 entry ssot_register_validation, Output ssot_register_validation_test.exe, source tests/integration/tsn/ssot_register_validation_test.c - the earlier claim of no build entry was wrong, the entry name differs from the output name'
     # Formerly only commented out of every list (silently absent); declared so every run reports them NOT EXECUTED.
     'test_vv_corr_001_stability'    = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-21 - VV-CORR-001 requires a 24-hour run, default --hours 24; no long-duration HIL lane exists and shortening the run would change its acceptance criterion; #317 Track E'
     'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
@@ -679,7 +679,7 @@ $HilTestSafety = @{
     # --- ReadOnly (24-hour run; declared gap) ---
     'test_vv_corr_001_stability'       = 'ReadOnly'   # ENUM/OPEN_ADAPTER, GET_TIMESTAMP, GET_HW_STATE, TEST_SEND_PTP
     # --- Unknown ---
-    'ssot_register_validation_test'    = 'Unknown'    # no build entry / source mapping in Build-Tests.ps1
+    'ssot_register_validation_test'    = 'Unknown'    # built as Build-Tests Name ssot_register_validation; source not yet classified
 }
 
 # ===========================
