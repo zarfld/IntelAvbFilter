@@ -94,6 +94,8 @@ if (-not $DriverPath) {
     $DriverPath = Join-Path $repoRoot "build\x64\$Configuration\IntelAvbFilter\IntelAvbFilter"
 }
 
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
+
 # Helper functions
 function Write-Step {
     param([string]$Message)
@@ -135,8 +137,9 @@ function Enable-TestSigningMode {
     }
     
     # Enable test signing
+    Reset-AvbExitCode
     $result = bcdedit /set testsigning on 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    if (Test-AvbExitSuccess (Get-AvbExitCode)) {
         Write-Success "Test signing enabled successfully"
         Write-Info "REBOOT REQUIRED - Run 'shutdown /r /t 0' to restart"
         return $true
@@ -236,11 +239,13 @@ function Uninstall-Driver {
     $installedMan = "C:\Windows\System32\drivers\IntelAvbFilter.man"
     if (Test-Path $installedMan) {
         Write-Host "Unregistering ETW manifest (wevtutil um)..." -ForegroundColor Gray
+        Reset-AvbExitCode
         wevtutil um $installedMan 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) {
+        $umRc = Get-AvbExitCode
+        if (Test-AvbExitSuccess $umRc) {
             Write-Success "ETW manifest unregistered"
         } else {
-            Write-Info "wevtutil um returned $LASTEXITCODE (may be OK if not previously registered)"
+            Write-Info "wevtutil um returned $(Format-AvbExitCode $umRc) (may be OK if not previously registered)"
         }
         Remove-Item $installedMan -Force -ErrorAction SilentlyContinue
     }
@@ -310,8 +315,9 @@ function Uninstall-Driver {
         }
 
         Write-Host "`nRemoving NDIS filter component (netcfg)..." -ForegroundColor Gray
+        Reset-AvbExitCode
         netcfg.exe -u MS_IntelAvbFilter
-        
+        $netcfgRc = Get-AvbExitCode
         # CRITICAL: Manually clean DriverStore FileRepository cache
         # pnputil doesn't properly delete cached NDIS filter drivers
         # This is THE fix for "old driver stuck in memory" (#192-211 issues)
@@ -333,23 +339,25 @@ function Uninstall-Driver {
             Write-Host "  No cached drivers found (already clean)" -ForegroundColor Gray
         }
         
-        if ($LASTEXITCODE -eq 0) {
+        if (Test-AvbExitSuccess $netcfgRc) {
             Write-Success "Driver uninstalled successfully (netcfg)"
             return $true
         } else {
-            Write-Info "netcfg returned exit code $LASTEXITCODE (may indicate component not found)"
+            Write-Info "netcfg returned exit code $(Format-AvbExitCode $netcfgRc) (may indicate component not found)"
             return $true  # Not necessarily an error
         }
     } elseif ($Method -eq "pnputil") {
         # Uninstall via pnputil (for device driver method)
         Write-Host "Removing driver package (pnputil)..." -ForegroundColor Gray
+        Reset-AvbExitCode
         pnputil /delete-driver intelavbfilter.inf /uninstall /force 2>&1 | Out-Null
-        
-        if ($LASTEXITCODE -eq 0) {
+        $pnpDelRc = Get-AvbExitCode
+
+        if (Test-AvbExitSuccess $pnpDelRc) {
             Write-Success "Driver uninstalled successfully (pnputil)"
             return $true
         } else {
-            Write-Info "pnputil returned exit code $LASTEXITCODE"
+            Write-Info "pnputil returned exit code $(Format-AvbExitCode $pnpDelRc)"
             return $true  # Continue even if not found
         }
     }
@@ -540,11 +548,13 @@ function Install-Driver {
             # a kernel-mode provider that registers later.
             wevtutil um $installedMan 2>&1 | Out-Null  # Remove stale registration first
             icacls $installedSys /grant "NT SERVICE\EventLog:(R)" 2>&1 | Out-Null
+            Reset-AvbExitCode
             $wevtOut = wevtutil im $installedMan "/mf:$installedSys" "/rf:$installedSys" 2>&1
-            if ($LASTEXITCODE -eq 0) {
+            $imRc = Get-AvbExitCode
+            if (Test-AvbExitSuccess $imRc) {
                 Write-Success "ETW provider manifest registered (WINEVT registry updated)"
             } else {
-                Write-Info "wevtutil im returned $LASTEXITCODE : $wevtOut"
+                Write-Info "wevtutil im returned $(Format-AvbExitCode $imRc) : $wevtOut"
             }
         } else {
             Write-Info "ETW manifest not found at $manFile - skipping ETW registration"
@@ -554,11 +564,15 @@ function Install-Driver {
         Push-Location $driverDir
         Write-Host "  Command: netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter" -ForegroundColor DarkGray
         
-        netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
-        Pop-Location
+        Reset-AvbExitCode
         
-        if ($LASTEXITCODE -ne 0) {
-            Write-Failure "netcfg installation failed! Error code: $LASTEXITCODE"
+        netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
+        
+        $installRc = Get-AvbExitCode
+        Pop-Location
+
+        if (-not (Test-AvbExitSuccess $installRc)) {
+            Write-Failure "netcfg installation failed! Error code: $(Format-AvbExitCode $installRc)"
             Write-Host "`nCommon causes:" -ForegroundColor Yellow
             Write-Host "  1. Driver not signed and test signing disabled" -ForegroundColor Yellow
             Write-Host "  2. INF file syntax errors" -ForegroundColor Yellow
@@ -586,10 +600,14 @@ function Install-Driver {
         Write-Host "Step 3: Installing driver package via pnputil..." -ForegroundColor Gray
         Write-Host "  Command: pnputil /add-driver `"$infPath`" /install" -ForegroundColor DarkGray
         
+        Reset-AvbExitCode
+        
         pnputil /add-driver "$infPath" /install
         
-        if ($LASTEXITCODE -ne 0) {
-            Write-Failure "pnputil installation failed! Error code: $LASTEXITCODE"
+        $installRc = Get-AvbExitCode
+
+        if (-not (Test-AvbExitSuccess $installRc)) {
+            Write-Failure "pnputil installation failed! Error code: $(Format-AvbExitCode $installRc)"
             Write-Host "`nCommon causes:" -ForegroundColor Yellow
             Write-Host "  1. Driver not signed and test signing disabled" -ForegroundColor Yellow
             Write-Host "  2. INF file syntax errors" -ForegroundColor Yellow
@@ -605,8 +623,9 @@ function Install-Driver {
     # Registration was moved pre-netcfg so EventLog subscription is live before DriverEntry fires.
     if (Test-Path $installedMan) {
         Write-Host "`nStep 3c: Verifying ETW provider registration..." -ForegroundColor Gray
+        Reset-AvbExitCode
         $gpOut = wevtutil gp IntelAvbFilter 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        if (Test-AvbExitSuccess (Get-AvbExitCode)) {
             Write-Success "ETW provider active: IntelAvbFilter events routing to System log"
         } else {
             # Fallback: re-register if somehow missing (should not happen)
@@ -657,11 +676,13 @@ function Install-Driver {
     # Step 5: Check service status (should exist after adapter restart)
     Write-Host "`nStep 5: Checking service status..." -ForegroundColor Gray
     Write-Host "---BEGIN SERVICE STATUS---" -ForegroundColor Cyan
+    Reset-AvbExitCode
     $serviceStatus = sc.exe query IntelAvbFilter 2>&1
+    $scRc = Get-AvbExitCode
     $serviceStatus | ForEach-Object { Write-Host $_ }
     Write-Host "---END SERVICE STATUS---" -ForegroundColor Cyan
     
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-AvbExitSuccess $scRc)) {
         Write-Warning "Service not found - this may be normal if no Intel adapters are present"
     }
     
@@ -682,9 +703,11 @@ try {
         $precondScript = Join-Path $PSScriptRoot 'Test-Preconditions.ps1'
         if (Test-Path $precondScript) {
             Write-Host "`n==> Checking installation preconditions..." -ForegroundColor Cyan
+            Reset-AvbExitCode
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $precondScript -ForInstall
-            $precondExit = $LASTEXITCODE
-            if ($precondExit -eq 1) {
+            $precondExit = Get-AvbExitCode
+            # 0 = OK, 2 = warnings only; anything else - including no exit code at all - is a failed precondition.
+            if (-not (Test-AvbExitSuccess $precondExit) -and $precondExit -ne 2) {
                 Write-Host "[PRECONDITIONS] Critical checks failed. Fix issues above before installing." -ForegroundColor Red
                 exit 1
             }
