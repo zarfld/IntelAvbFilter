@@ -56,6 +56,7 @@ jobs:
           REPO = 'zarfld/IntelAvbFilter'
           CI_PATH = '.github/workflows/ci-standards-compliance.yml'
           DEPLOY_JOB = 'Deploy to Staging (Phase 08 - Transition)'   # name: of the deploy-staging job
+          METADATA_PATHS = {'README.md'}   # update-readme-status.yml writes only README.md
           API = os.environ.get('GITHUB_API_URL') or 'https://api.github.com'
           reasons = []
 
@@ -125,11 +126,31 @@ jobs:
                   br = get('/repos/%s/branches/master' % REPO)
                   if br.get('protected') is not True:
                       reasons.append('master is not a protected branch on GitHub')
-                  # Not stale: the authorized revision must be the current trusted master tip.  A superseded commit is
-                  # not tested; the newer commit's own CI + staging triggers HIL for it.
+                  # Not stale: head_sha must still be the trusted master CODE revision.  The tip may be newer only by
+                  # metadata-only commits: update-readme-status.yml runs on the same CI completion and pushes a README
+                  # commit with GITHUB_TOKEN, which never gets a CI run of its own.  Proven from the aggregate diff
+                  # head_sha...tip against a path allow-list (renames count both names) - never from authorship,
+                  # which is spoofable.  Any other change supersedes head_sha: its own CI + staging triggers HIL.
                   tip = field(br, 'commit.sha')
-                  if tip != sha:
-                      reasons.append('head_sha is not the current master tip %r (superseded or not on master)' % (tip,))
+                  if not isinstance(tip, str) or not re.fullmatch('[0-9a-f]{40}', tip):
+                      reasons.append('master tip %r is unreadable' % (tip,))
+                  elif tip != sha:
+                      cmp = get('/repos/%s/compare/%s...%s' % (REPO, sha, tip))
+                      files, commits = cmp.get('files'), cmp.get('commits')
+                      if cmp.get('status') != 'ahead':
+                          reasons.append('head_sha is not an ancestor of the master tip %s (compare status %r)' % (tip, cmp.get('status')))
+                      elif not isinstance(files, list) or not isinstance(commits, list) or len(commits) != cmp.get('ahead_by') or len(files) >= 300:
+                          reasons.append('cannot prove that %s only adds metadata to head_sha (incomplete compare: ahead_by=%r, %s commits, %s files)' % (
+                              tip, cmp.get('ahead_by'), len(commits) if isinstance(commits, list) else '?', len(files) if isinstance(files, list) else '?'))
+                      else:
+                          touched = set()
+                          for f in files:
+                              touched.update(p for p in (f.get('filename'), f.get('previous_filename')) if p)
+                          other = sorted(touched - METADATA_PATHS)
+                          if other:
+                              reasons.append('head_sha is superseded on master by a non-metadata change in %s: %s' % (tip, ', '.join(other[:10])))
+                          else:
+                              print('master tip %s adds only metadata commits to head_sha: %s' % (tip, ', '.join(c.get('sha', '')[:7] for c in commits)))
           except Exception as e:
               reasons.append('authorization error: %s: %s' % (type(e).__name__, e))
 
@@ -203,6 +224,7 @@ jobs:
       HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
       HIL_UPSTREAM_RUN_ATTEMPT: ${{ needs.authorize.outputs.upstream_run_attempt }}
       HIL_STAGED_DRIVER_SHA256: ${{ needs.authorize.outputs.staged_driver_sha256 }}
+      HIL_AUTHORIZED_DRIVER_SHA256: ${{ vars.HIL_AUTHORIZED_DRIVER_SHA256 }}
 
     steps:
       - name: Trusted HIL preflight (inline, before any repository code)
@@ -212,7 +234,6 @@ jobs:
         # (repository or `hil` environment; editable by repository admins only), not files on the workstation.
         env:
           HIL_AUTHORIZED: ${{ needs.authorize.outputs.authorized }}
-          HIL_AUTHORIZED_DRIVER_SHA256: ${{ vars.HIL_AUTHORIZED_DRIVER_SHA256 }}
           HIL_BUGCHECK_ACK: ${{ vars.HIL_BUGCHECK_ACK }}
           HIL_HALT: ${{ vars.HIL_HALT }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
@@ -366,6 +387,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = Join-Path $env:RUNNER_TEMP 'hil-evidence'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          # Running-driver evidence (read-only): the on-disk file can differ from the loaded image (a replaced file is
+          # not reloaded until the driver restarts); the driver reports no build hash of its own (IOCTL_VERSION).
+          $drvFile = Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys'
+          $img = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter').ImagePath
+          $imgPath = ($img -replace '^\\\?\?\\', '') -replace '^\\SystemRoot\\', ($env:SystemRoot + '\')
+          if ($imgPath -notmatch '^[A-Za-z]:\\') { $imgPath = Join-Path $env:SystemRoot $imgPath }
+          $mtime = (Get-Item -LiteralPath $drvFile).LastWriteTimeUtc
+          $boot = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime()
           $id = [ordered]@{
             runId                 = $env:GITHUB_RUN_ID
             runAttempt            = $env:GITHUB_RUN_ATTEMPT
@@ -378,6 +407,12 @@ jobs:
             runner                = $env:RUNNER_NAME
             installedDriverSha256 = (Get-FileHash -LiteralPath (Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys') -Algorithm SHA256).Hash
             stagedDriverSha256    = $env:HIL_STAGED_DRIVER_SHA256
+            authorizedDriverSha256 = ([string]$env:HIL_AUTHORIZED_DRIVER_SHA256).Trim().ToUpperInvariant()
+            serviceImagePath      = $img
+            imagePathSha256       = (Get-FileHash -LiteralPath $imgPath -Algorithm SHA256).Hash
+            driverFileLastWriteUtc = $mtime.ToString('o')
+            lastBootUtc           = $boot.ToString('o')
+            runningImageEvidence  = $(if ([IO.Path]::GetFullPath($imgPath) -ieq [IO.Path]::GetFullPath($drvFile) -and $mtime -lt $boot) { 'on-disk image unchanged since boot' } else { 'UNPROVEN: service ImagePath is another file or the driver file changed after boot' })
             recordedUtc           = (Get-Date).ToUniversalTime().ToString('o')
           }
           ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
@@ -423,6 +458,7 @@ jobs:
       HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
       HIL_UPSTREAM_RUN_ATTEMPT: ${{ needs.authorize.outputs.upstream_run_attempt }}
       HIL_STAGED_DRIVER_SHA256: ${{ needs.authorize.outputs.staged_driver_sha256 }}
+      HIL_AUTHORIZED_DRIVER_SHA256: ${{ vars.HIL_AUTHORIZED_DRIVER_SHA256 }}
 
     steps:
       - name: Trusted HIL preflight (inline, before any repository code)
@@ -432,7 +468,6 @@ jobs:
         # (repository or `hil` environment; editable by repository admins only), not files on the workstation.
         env:
           HIL_AUTHORIZED: ${{ needs.authorize.outputs.authorized }}
-          HIL_AUTHORIZED_DRIVER_SHA256: ${{ vars.HIL_AUTHORIZED_DRIVER_SHA256 }}
           HIL_BUGCHECK_ACK: ${{ vars.HIL_BUGCHECK_ACK }}
           HIL_HALT: ${{ vars.HIL_HALT }}
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
@@ -586,6 +621,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = Join-Path $env:RUNNER_TEMP 'hil-evidence'
           New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          # Running-driver evidence (read-only): the on-disk file can differ from the loaded image (a replaced file is
+          # not reloaded until the driver restarts); the driver reports no build hash of its own (IOCTL_VERSION).
+          $drvFile = Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys'
+          $img = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter').ImagePath
+          $imgPath = ($img -replace '^\\\?\?\\', '') -replace '^\\SystemRoot\\', ($env:SystemRoot + '\')
+          if ($imgPath -notmatch '^[A-Za-z]:\\') { $imgPath = Join-Path $env:SystemRoot $imgPath }
+          $mtime = (Get-Item -LiteralPath $drvFile).LastWriteTimeUtc
+          $boot = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime()
           $id = [ordered]@{
             runId                 = $env:GITHUB_RUN_ID
             runAttempt            = $env:GITHUB_RUN_ATTEMPT
@@ -598,6 +641,12 @@ jobs:
             runner                = $env:RUNNER_NAME
             installedDriverSha256 = (Get-FileHash -LiteralPath (Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys') -Algorithm SHA256).Hash
             stagedDriverSha256    = $env:HIL_STAGED_DRIVER_SHA256
+            authorizedDriverSha256 = ([string]$env:HIL_AUTHORIZED_DRIVER_SHA256).Trim().ToUpperInvariant()
+            serviceImagePath      = $img
+            imagePathSha256       = (Get-FileHash -LiteralPath $imgPath -Algorithm SHA256).Hash
+            driverFileLastWriteUtc = $mtime.ToString('o')
+            lastBootUtc           = $boot.ToString('o')
+            runningImageEvidence  = $(if ([IO.Path]::GetFullPath($imgPath) -ieq [IO.Path]::GetFullPath($drvFile) -and $mtime -lt $boot) { 'on-disk image unchanged since boot' } else { 'UNPROVEN: service ImagePath is another file or the driver file changed after boot' })
             recordedUtc           = (Get-Date).ToUniversalTime().ToString('o')
           }
           ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
@@ -658,7 +707,7 @@ jobs:
           root = os.environ.get('HIL_EVIDENCE_DIR', 'hil-evidence')
           run_id, sha, up = os.environ.get('GITHUB_RUN_ID', ''), os.environ.get('HIL_HEAD_SHA', ''), os.environ.get('HIL_UPSTREAM_RUN_ID', '')
           staged = os.environ.get('HIL_STAGED_DRIVER_SHA256', '')
-          bad, rows, installed = [], [], set()
+          bad, rows, installed, authorized, image, evidence = [], [], set(), set(), set(), set()
           if os.environ.get('GITHUB_RUN_ATTEMPT') != '1':
               bad.append('HIL re-run attempt %r: evidence of attempt 1 only' % os.environ.get('GITHUB_RUN_ATTEMPT'))
           for stage, var in (('hil-unit', 'HIL_UNIT'), ('hil-integration', 'HIL_INTEGRATION')):
@@ -679,6 +728,9 @@ jobs:
                       if str(ident.get(k)) != v:
                           bad.append('%s: identity %s=%r, expected %r (not evidence of this run)' % (os.path.basename(b), k, ident.get(k), v))
                   installed.add(str(ident.get('installedDriverSha256')))
+                  authorized.add(str(ident.get('authorizedDriverSha256')))
+                  image.add(str(ident.get('imagePathSha256')))
+                  evidence.add(str(ident.get('runningImageEvidence')))
                   for s in suites:
                       files = glob.glob(os.path.join(b, s, 'junit-%s-%s-*.xml' % (s, cfg)))
                       trace = glob.glob(os.path.join(b, s, 'traceability-summary-*.md'))
@@ -701,11 +753,20 @@ jobs:
           # Driver under test: one installed driver for the whole run; reported against the staged build of head_sha.
           if len(installed) != 1 or not re.fullmatch('[0-9A-F]{64}', next(iter(installed))):
               bad.append('installed driver changed or unknown during the run: %s' % sorted(installed))
-          drv = next(iter(installed)) if len(installed) == 1 else '?'
-          drv_line = ('driver under test IS the staged build of %s (%s)' % (sha, drv) if drv == staged else
-                      'driver under test %s is NOT the staged build %s of %s: test binaries of head_sha verified against the installed driver only' % (drv, staged, sha))
+          # Staged-build validation requires staged == installed == operator-authorized (and the service ImagePath
+          # file == the hashed file); anything else is STAGED_BUILD_NOT_TESTED - never a successful staging verdict.
+          one = lambda s: next(iter(s)) if len(s) == 1 else '?'
+          drv, auth, img = one(installed), one(authorized), one(image)
+          ids = (('staged', staged), ('installed', drv), ('authorized', auth), ('ImagePath file', img))
+          identity_ok = all(re.fullmatch('[0-9A-F]{64}', v or '') for _, v in ids) and len({v for _, v in ids}) == 1
+          drv_line = ('driver identity: staged == installed == authorized == ImagePath file = %s' % drv if identity_ok else
+                      'STAGED_BUILD_NOT_TESTED: ' + ', '.join('%s=%s' % (k, v) for k, v in ids))
+          drv_line += '\n\nrunning-image evidence: %s (the loaded image itself is not hashed; IOCTL_VERSION carries no build identity)' % ' / '.join(sorted(evidence))
+          verdict = 'FAILED' if bad else ('PASSED' if identity_ok else 'STAGED_BUILD_NOT_TESTED')
+          if not bad and not identity_ok:
+              bad.append('STAGED_BUILD_NOT_TESTED: the driver under test is not the staged build of %s' % sha)
           text = '## HIL acceptance: %s (run %s, %s, CI run %s)\n\n%s\n\n| Stage | Config | Suite | Pass | Fail | Skip | Total |\n|---|---|---|---|---|---|---|\n%s\n' % (
-              'PASSED' if not bad else 'FAILED', run_id, sha, up, drv_line, '\n'.join(rows))
+              verdict, run_id, sha, up, drv_line, '\n'.join(rows))
           text += ''.join('- %s\n' % b for b in bad)
           if os.environ.get('GITHUB_STEP_SUMMARY'):
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as fh:

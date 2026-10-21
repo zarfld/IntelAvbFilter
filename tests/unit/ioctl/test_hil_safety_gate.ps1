@@ -82,14 +82,14 @@ $stale    = @($registry.Keys | Where-Object { ($hwEntries -notcontains $_) -and 
 tc_check 'TEST-HILGATE-002-registry-values-valid-no-stale-keys' (($registry.Count -gt 0) -and $badClass.Count -eq 0 -and $stale.Count -eq 0) `
     ("invalid: {0}; stale (not in any Hardware list or coverage-gap table): {1}" -f ($badClass -join ', '), ($stale -join ', '))
 
-# Automatic HIL suites (unattended, every trusted master push) list only ReadOnly and Init entries.
+# Automatic HIL suites (unattended) list only ReadOnly entries: Init is a temporary policy exclusion (2026-10-21).
 $autoBad = @()
 foreach ($s in $autoSuites.Keys) {
-    foreach ($e in @($hwLists[$autoSuites[$s]])) { if (@('ReadOnly', 'Init') -notcontains $registry[$e]) { $autoBad += "${s}: $e=$($registry[$e])" } }
+    foreach ($e in @($hwLists[$autoSuites[$s]])) { if ($registry[$e] -ne 'ReadOnly') { $autoBad += "${s}: $e=$($registry[$e])" } }
 }
 $autoCount = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) }).Count
-tc_check 'TEST-HILGATE-032-automatic-hil-suites-readonly-or-init-only' (($autoCount -gt 0) -and $autoBad.Count -eq 0) `
-    ("automatic entries={0}; not ReadOnly/Init: {1}" -f $autoCount, ($autoBad -join ', '))
+tc_check 'TEST-HILGATE-032-automatic-hil-suites-readonly-only' (($autoCount -gt 0) -and $autoBad.Count -eq 0) `
+    ("automatic entries={0}; not ReadOnly: {1}" -f $autoCount, ($autoBad -join ', '))
 
 # Every gap is classified, really excluded (not also listed), justified (non-ReadOnly/Init class, reason),
 # and its reason survives the JUnit case-name normalisation (no trailing parenthesis).
@@ -123,6 +123,16 @@ tc_check 'TEST-HILGATE-037-phc-stability-policy-excluded-classifier-unchanged' `
     (($null -ne $psGap) -and $psGap.Contains('test_ptp_phc_stability') -and ($registry['test_ptp_phc_stability'] -eq 'ReadOnly') -and
      (@($hwLists['HardwareIntegrationTests']) -notcontains 'test_ptp_phc_stability') -and ("$($psGap['test_ptp_phc_stability'])" -match 'UT-CORR-007/008')) `
     ("gap={0}; class={1}; listed={2}" -f $(if ($null -ne $psGap) { $psGap.Contains('test_ptp_phc_stability') } else { 'no table' }), $registry['test_ptp_phc_stability'], (@($hwLists['HardwareIntegrationTests']) -contains 'test_ptp_phc_stability'))
+# Init coverage is retained, not removed: every Init registration stays classified and is a declared gap; each
+# automatic suite keeps at least one ReadOnly entry, so the real-pass requirement (TEST-HILGATE-036) stays satisfiable.
+$initKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Init' } | Sort-Object)
+$initNotGap = @($initKeys | Where-Object { $gapEntries -notcontains $_ })
+$noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$_]]); @($sl | Where-Object { $registry[$_] -eq 'ReadOnly' }).Count -eq 0 })
+$expectInit = @('test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_ioctl_routing', 'test_minimal_ioctl')
+tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suites-keep-readonly-entries' `
+    ((($initKeys -join ',') -eq ($expectInit -join ',')) -and $initNotGap.Count -eq 0 -and $noReadOnly.Count -eq 0) `
+    ("init keys: [{0}]; not declared as gap: [{1}]; suites without a ReadOnly entry: [{2}]" -f ($initKeys -join ','), ($initNotGap -join ','), ($noReadOnly -join ','))
+
 
 $unsafeKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Unsafe' })
 $unsafeListed = @($unsafeKeys | Where-Object { $hwEntries -contains $_ })
@@ -351,7 +361,7 @@ $behavioralIds = @('010-disabled-supported-adapter-blocked-not-enabled', '011-un
     '026-timinca-change-is-cleanup-failed-for-that-target-only', '027-unsafe-runs-only-with-exact-entry-authorization',
     '028-sandbox-refuses-real-test-binaries', '029-hardware-entry-blocked-outside-hardware-suite',
     '030-sandbox-requires-isolated-logs-dir', '035-coverage-gaps-reported-as-skipped-junit-cases-never-executed',
-    '036-hardware-suite-without-a-pass-fails')
+    '036-hardware-suite-without-a-pass-fails', '039-init-blocked-unattended-but-runs-attended')
 if ([System.IO.File]::ReadAllText($TreeRunner) -notmatch '\$env:AVB_TEST_SANDBOX\b') {
     foreach ($id in $behavioralIds) { tc_fail "TEST-HILGATE-$id" 'runner has no sandbox mode - behavioral case NOT executed (it would open the real device)' }
     Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -389,8 +399,9 @@ tc_check 'TEST-HILGATE-015-target-aware-mutating-fans-out-per-enabled-supported-
     ((($tgtRuns -join ',') -eq '0x125B,0x1533') -and (@($rA.Logs | Where-Object { $_ -match '^test_sbfake_tgt@125B\.exe_' }).Count -eq 1) -and
      (@($rA.Logs | Where-Object { $_ -match '^test_sbfake_tgt@1533\.exe_' }).Count -eq 1)) ("targets run: [{0}]; logs: {1}; {2}" -f ($tgtRuns -join ','), ($rA.Logs -join ','), (Tail $rA))
 $roRuns = @($rA.Ran | Where-Object { $_ -match '^RAN test_sbfake_(ro|init) ' })
-tc_check 'TEST-HILGATE-016-readonly-and-init-run-once-without-target-env' `
-    (($roRuns.Count -eq 2) -and (@($roRuns | Where-Object { $_ -notmatch 'target=$' }).Count -eq 0)) ("ran: {0}" -f ($rA.Ran -join ' / '))
+# Run A is unattended (GITHUB_ACTIONS=true): ReadOnly runs once without a target; Init is blocked by policy (039).
+tc_check 'TEST-HILGATE-016-readonly-runs-once-without-target-env-init-blocked-unattended' `
+    (($roRuns.Count -eq 1) -and ($roRuns[0] -match '^RAN test_sbfake_ro target=$') -and (Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_init[^"]*not approved for unattended HIL')) ("ran: {0}; {1}" -f ($rA.Ran -join ' / '), (Tail $rA))
 tc_check 'TEST-HILGATE-017-blocked-entries-fail-the-suite' ($rA.Exit -eq 1) ("exit={0}" -f $rA.Exit)
 $ghText = ''; if (Test-Path -LiteralPath $ghEnv) { $ghText = [System.IO.File]::ReadAllText($ghEnv) }
 tc_check 'TEST-HILGATE-018-sandbox-never-exports-hil-identity-or-junit-to-github-env' ($ghText.Trim() -eq '') ("GITHUB_ENV received: {0}" -f ($ghText -replace "`r?`n", ' | '))
@@ -476,6 +487,15 @@ tc_check 'TEST-HILGATE-036-hardware-suite-without-a-pass-fails' `
     (((Get-RanCount $rJ '^RAN test_sbfake_skiponly ') -eq 1) -and $rJ.Exit -eq 1 -and ($rJ.Out -match 'no hardware test PASSED in HardwareUnit') -and
      ($rJ.Out -notmatch '\[FAIL\] OVERALL: \d+ test\(s\) FAILED') -and $rJ2.Exit -eq 0) `
     ("ran={0}; exit={1}; control exit={2}; {3} || control: {4}" -f (Get-RanCount $rJ 'RAN'), $rJ.Exit, $rJ2.Exit, (Tail $rJ), (Tail $rJ2))
+
+# --- Run K: Init is blocked unattended (GitHub Actions) but still runs attended (coverage not removed) -----------
+$rK1 = Invoke-Sandbox 'runK1' @($tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
+$rK2 = Invoke-Sandbox 'runK2' @($tInit, $tRo) -AllSupportedEnabled
+tc_check 'TEST-HILGATE-039-init-blocked-unattended-but-runs-attended' `
+    (((Get-RanCount $rK1 '^RAN test_sbfake_init ') -eq 0) -and ((Get-RanCount $rK1 '^RAN test_sbfake_ro ') -eq 1) -and
+     (Test-FailureCase $rK1 'TC-SAFETY-GATE-001: [^"]*test_sbfake_init[^"]*not approved for unattended HIL') -and $rK1.Exit -eq 1 -and
+     ((Get-RanCount $rK2 '^RAN test_sbfake_init ') -eq 1) -and ((Get-RanCount $rK2 '^RAN test_sbfake_ro ') -eq 1) -and $rK2.Exit -eq 0) `
+    ("unattended: ran={0} exit={1} | attended: ran={2} exit={3} | {4}" -f ($rK1.Ran -join '/'), $rK1.Exit, ($rK2.Ran -join '/'), $rK2.Exit, (Tail $rK1))
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

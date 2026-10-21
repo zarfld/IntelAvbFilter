@@ -1006,6 +1006,9 @@ else {
     $azRun = "$(@($az['steps'])[0]['run'])"
     if ($azRun -notmatch [regex]::Escape("DEPLOY_JOB = '$DeployName'")) { $azIssues += 'authorize script does not look up the deploy-staging job by its exact name' }
     if ($azRun -notmatch [regex]::Escape("CI_PATH = '$ciRel'")) { $azIssues += 'authorize script does not pin the CI workflow path' }
+    if ($azRun -notmatch [regex]::Escape("METADATA_PATHS = {'README.md'}")) { $azIssues += 'authorize metadata allow-list is not exactly README.md' }
+    $rb = Join-Path $RepoRoot '.github\workflows\update-readme-status.yml'
+    if (Test-Path -LiteralPath $rb) { $adds = @([regex]::Matches([IO.File]::ReadAllText($rb), '(?m)^\s*git add\s+(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value }); if (($adds -join ',') -ne 'README.md') { $azIssues += "update-readme-status.yml commits [$($adds -join ',')], not only README.md (metadata allow-list coupling)" } }
 }
 foreach ($jid in $hilJobIds) {
     $j = $hilJobs[$jid]
@@ -1216,7 +1219,7 @@ srv.serve_forever()
                           path = $ciRel; name = 'CI - Standards Compliance & Quality Gates'; repository = [ordered]@{ full_name = $RepoName }; head_repository = [ordered]@{ full_name = $RepoName } }
         $run = [ordered]@{}; foreach ($k in $wr.Keys) { $run[$k] = $wr[$k] }
         $run['repository'] = [ordered]@{ full_name = $RepoName }; $run['head_repository'] = [ordered]@{ full_name = $RepoName }
-        return @{ Action = 'completed'; Wr = $wr; Run = $run; RunStatus = 200; Protected = $true; Tip = $sha; Paged = $false
+        return @{ Action = 'completed'; Wr = $wr; Run = $run; RunStatus = 200; Protected = $true; Tip = $sha; Compare = $null; Paged = $false
                   Jobs = @([ordered]@{ name = 'Unit Tests (windows-latest, Debug)'; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid; run_attempt = 1 },
                            [ordered]@{ name = $DeployName; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid; run_attempt = 1 })
                   Env = @{ GITHUB_REPOSITORY = $RepoName; GITHUB_EVENT_NAME = 'workflow_run'; GITHUB_RUN_ATTEMPT = '1' } }
@@ -1240,7 +1243,15 @@ srv.serve_forever()
         'API head_sha differs (wrong SHA)' = @{ Mod = { param($s) $s.Run.head_sha = ('f' * 40) }; Why = 'API run head_sha' }
         'stale attempt (CI re-run)'       = @{ Mod = { param($s) $s.Run.run_attempt = 2 }; Why = 'API run run_attempt' }
         'master not protected'            = @{ Mod = { param($s) $s.Protected = $false }; Why = 'not a protected branch' }
-        'SHA superseded on master'        = @{ Mod = { param($s) $s.Tip = ('d' * 40) }; Why = 'is not the current master tip' }
+        'interleaving 1: README bot commit landed before authorize' = @{ Mod = { param($s) $s.Tip = ('b0' * 20); $s.Compare = @{ status = 'ahead'; ahead_by = 1; commits = @(@{ sha = ('b0' * 20) }); files = @(@{ filename = 'README.md'; status = 'modified' }) } }; Allow = $true }
+        'interleaving 2: README bot commit lands after authorize' = @{ Mod = { param($s) $s.Tip = $sha }; Allow = $true }
+        'two metadata-only commits on top' = @{ Mod = { param($s) $s.Tip = ('b1' * 20); $s.Compare = @{ status = 'ahead'; ahead_by = 2; commits = @(@{ sha = ('b0' * 20) }, @{ sha = ('b1' * 20) }); files = @(@{ filename = 'README.md'; status = 'modified' }) } }; Allow = $true }
+        'superseded by unauthorized code'  = @{ Mod = { param($s) $s.Tip = ('d' * 40); $s.Compare = @{ status = 'ahead'; ahead_by = 2; commits = @(@{ sha = ('c' * 40) }, @{ sha = ('d' * 40) }); files = @(@{ filename = 'README.md'; status = 'modified' }, @{ filename = 'src/filter.c'; status = 'modified' }) } }; Why = 'superseded on master by a non-metadata change' }
+        'bot-authored workflow change'     = @{ Mod = { param($s) $s.Tip = ('d' * 40); $s.Compare = @{ status = 'ahead'; ahead_by = 1; commits = @(@{ sha = ('d' * 40); author = @{ login = 'github-actions[bot]' } }); files = @(@{ filename = '.github/workflows/hil.yml'; status = 'modified' }) } }; Why = '.github/workflows/hil.yml' }
+        'README renamed from a code file'  = @{ Mod = { param($s) $s.Tip = ('d' * 40); $s.Compare = @{ status = 'ahead'; ahead_by = 1; commits = @(@{ sha = ('d' * 40) }); files = @(@{ filename = 'README.md'; previous_filename = 'src/filter.c'; status = 'renamed' }) } }; Why = 'src/filter.c' }
+        'head_sha not an ancestor of the tip (force push)' = @{ Mod = { param($s) $s.Tip = ('d' * 40); $s.Compare = @{ status = 'diverged'; ahead_by = 1; commits = @(@{ sha = ('d' * 40) }); files = @() } }; Why = 'is not an ancestor of the master tip' }
+        'incomplete compare'               = @{ Mod = { param($s) $s.Tip = ('d' * 40); $s.Compare = @{ status = 'ahead'; ahead_by = 3; commits = @(@{ sha = ('d' * 40) }); files = @(@{ filename = 'README.md' }) } }; Why = 'incomplete compare' }
+        'master tip unreadable'            = @{ Mod = { param($s) $s.Tip = $null }; Why = 'is unreadable' }
         'staging success carried over from attempt 1 into attempt 2' = @{ Mod = { param($s) & $both $s 'run_attempt' 2 }; Why = '0 jobs named' }
         'attempt 2 with its own staging job' = @{ Mod = { param($s) & $both $s 'run_attempt' 2; $s.Jobs[1].run_attempt = 2 }; Allow = $true }
         'attempt 2 lists a failed attempt-1 staging and a successful attempt-2 staging' = @{ Mod = { param($s) & $both $s 'run_attempt' 2; $s.Jobs[0] = [ordered]@{ name = $DeployName; status = 'completed'; conclusion = 'failure'; head_sha = $sha; run_id = $rid; run_attempt = 1 }; $s.Jobs[1].run_attempt = 2 }; Allow = $true }
@@ -1267,6 +1278,7 @@ srv.serve_forever()
             $routes["$base/attempts/$($s.Wr.run_attempt)/jobs?per_page=100&page=1"] = @{ body = [ordered]@{ total_count = @($s.Jobs).Count; jobs = @($s.Jobs) } }
         }
         $routes["/repos/$RepoName/branches/master"] = @{ body = @{ protected = $s.Protected; commit = @{ sha = $s.Tip } } }
+        if ($null -ne $s.Compare) { $routes["/repos/$RepoName/compare/$sha...$($s.Tip)"] = @{ body = $s.Compare } }
         [System.IO.File]::WriteAllText($routesFile, ($routes | ConvertTo-Json -Depth 12))
         $evFile = Join-Path $script:Tmp "event_$i.json"; $outFile = Join-Path $script:Tmp "out_$i.txt"; $sumFile = Join-Path $script:Tmp "sum_$i.md"
         [System.IO.File]::WriteAllText($evFile, ([ordered]@{ action = $s.Action; workflow_run = $s.Wr } | ConvertTo-Json -Depth 12))
@@ -1321,7 +1333,7 @@ srv.serve_forever()
                 foreach ($cfg in 'Debug', 'Release') {
                     $b = Join-Path $Root "hil-evidence-$($st.S)-$cfg"
                     New-Item -ItemType Directory -Path $b -Force | Out-Null
-                    $id = [ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'; job = $st.J; configuration = $cfg; installedDriverSha256 = $stagedHash; stagedDriverSha256 = $stagedHash }
+                    $id = [ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'; job = $st.J; configuration = $cfg; installedDriverSha256 = $stagedHash; stagedDriverSha256 = $stagedHash; authorizedDriverSha256 = $stagedHash; imagePathSha256 = $stagedHash; runningImageEvidence = 'on-disk image unchanged since boot' }
                     [System.IO.File]::WriteAllText((Join-Path $b 'hil-run-identity.json'), ($id | ConvertTo-Json), $bom)
                     foreach ($su in $st.Su) { New-Item -ItemType Directory -Path (Join-Path $b $su) -Force | Out-Null; [System.IO.File]::WriteAllText((Join-Path $b "$su\junit-$su-$cfg-20261020.xml"), $junitPass); [System.IO.File]::WriteAllText((Join-Path $b "$su\traceability-summary-20261020.md"), '| Requirement |') }
                 }
@@ -1343,7 +1355,10 @@ srv.serve_forever()
             'failing JUnit'                   = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-unit-Release\HardwareUnit\junit-HardwareUnit-Release-20261020.xml'), $junitFail) }; Exit = 1; Why = '1 failed' }
             'skip-only JUnit'                 = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-integration-Debug\HardwareIntegration\junit-HardwareIntegration-Debug-20261020.xml'), $junitSkip) }; Exit = 1; Why = '0 passed' }
             'suite JUnit missing'             = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-unit-Debug\HardwareUnit\junit-HardwareUnit-Debug-20261020.xml') -Force }; Exit = 1; Why = '0 JUnit file(s) for HardwareUnit' }
-            'installed driver is not the staged build' = @{ Mod = { param($r) foreach ($bb in Get-ChildItem $r -Directory) { Set-Identity $r $bb.Name 'installedDriverSha256' ('E' * 64) } }; Exit = 0; Out = 'is NOT the staged build' }
+            'installed driver is not the staged build' = @{ Mod = { param($r) foreach ($bb in Get-ChildItem $r -Directory) { Set-Identity $r $bb.Name 'installedDriverSha256' ('E' * 64); Set-Identity $r $bb.Name 'authorizedDriverSha256' ('E' * 64); Set-Identity $r $bb.Name 'imagePathSha256' ('E' * 64) } }; Exit = 1; Why = 'HIL acceptance: STAGED_BUILD_NOT_TESTED' }
+            'operator-authorized hash differs' = @{ Mod = { param($r) foreach ($bb in Get-ChildItem $r -Directory) { Set-Identity $r $bb.Name 'authorizedDriverSha256' ('C' * 64) } }; Exit = 1; Why = 'STAGED_BUILD_NOT_TESTED: staged=' }
+            'service ImagePath file differs'   = @{ Mod = { param($r) foreach ($bb in Get-ChildItem $r -Directory) { Set-Identity $r $bb.Name 'imagePathSha256' ('D' * 64) } }; Exit = 1; Why = 'ImagePath file=DDDD' }
+            'running image unproven (reported, not gated)' = @{ Mod = { param($r) Set-Identity $r 'hil-evidence-unit-Debug' 'runningImageEvidence' 'UNPROVEN: service ImagePath is another file or the driver file changed after boot' }; Exit = 0; Out = 'UNPROVEN: service ImagePath' }
             'driver changed during the run'   = @{ Mod = { param($r) Set-Identity $r 'hil-evidence-integration-Release' 'installedDriverSha256' ('E' * 64) }; Exit = 1; Why = 'installed driver changed or unknown' }
             'bundle reports another staged build' = @{ Mod = { param($r) Set-Identity $r 'hil-evidence-unit-Debug' 'stagedDriverSha256' ('E' * 64) }; Exit = 1; Why = 'stagedDriverSha256=' }
             'evidence of a HIL re-run attempt' = @{ Mod = { param($r) Set-Identity $r 'hil-evidence-unit-Release' 'runAttempt' '2' }; Exit = 1; Why = "runAttempt='2'" }
@@ -1363,7 +1378,7 @@ srv.serve_forever()
             $r = Invoke-Py $accPy @{ GITHUB_RUN_ID = '777'; HIL_HEAD_SHA = $sha; HIL_UPSTREAM_RUN_ID = "$rid"; HIL_UNIT = $unit; HIL_INTEGRATION = $integ
                                     HIL_EVIDENCE_DIR = $root; GITHUB_STEP_SUMMARY = (Join-Path $script:Tmp "acc_$k.md"); HIL_STAGED_DRIVER_SHA256 = $stagedHash
                                     GITHUB_RUN_ATTEMPT = $(if ($c.ContainsKey('Attempt')) { $c.Attempt } else { '1' }) }
-            if ($r.Exit -ne $c.Exit -or ($c.Exit -ne 0 -and $r.Out.IndexOf($c.Why) -lt 0) -or ($c.Exit -eq 0 -and ($r.Out -notmatch 'HIL acceptance: PASSED' -or $r.Out.IndexOf($(if ($c.ContainsKey('Out')) { $c.Out } else { 'IS the staged build' })) -lt 0))) {
+            if ($r.Exit -ne $c.Exit -or ($c.Exit -ne 0 -and $r.Out.IndexOf($c.Why) -lt 0) -or ($c.Exit -eq 0 -and ($r.Out -notmatch 'HIL acceptance: PASSED' -or $r.Out.IndexOf($(if ($c.ContainsKey('Out')) { $c.Out } else { 'staged == installed == authorized == ImagePath file' })) -lt 0))) {
                 $x12 += "acceptance '$n': exit $($r.Exit) (expected $($c.Exit)$(if ($c.Exit) { ", '$($c.Why)'" })): $($r.Out -replace '\s+', ' ')"
             }
         }
