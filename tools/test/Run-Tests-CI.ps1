@@ -452,18 +452,18 @@ $HardwareIntegrationTests = @(
 # Reasons must not end in a parenthesis (the JUnit converter strips a trailing "(...)" from case names).
 $HardwareMandatoryCoverageGaps = [ordered]@{
     'test_ioctl_routing'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - classified Init; execution path sends no INIT_DEVICE, only ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG; ReadOnly reclassification under evaluation; OPEN_ADAPTER re-points the global default adapter'
-    'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
+    'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
     'ptp_clock_control_test'     = 'Mutating: TC-5b ADJUST_FREQUENCY writes TIMINCA, plus SET_TIMESTAMP and INIT_DEVICE; contradicts the non-mutating Mandatory contract; split into read-only and mutating executables tracked in #340'
     'test_rx_timestamp'          = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
     'test_rx_timestamp_complete' = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
 }
 $HardwareUnitCoverageGaps = [ordered]@{
     'test_ioctl_routing'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - classified Init; execution path sends no INIT_DEVICE, only ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG; ReadOnly reclassification under evaluation; OPEN_ADAPTER re-points the global default adapter'
-    'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
-    'test_clock_config'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
-    'test_clock_working'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
-    'test_direct_clock'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
-    'test_dev_lifecycle'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten; post-test check misses the PHC time discontinuity; INIT on unbound handles hits the global default adapter, which depends on the previous test'
+    'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
+    'test_clock_config'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
+    'test_clock_working'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
+    'test_direct_clock'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
+    'test_dev_lifecycle'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on unbound handles hits the global default adapter, which depends on the previous test'
     'test_ptp_freq'               = 'Mutating:Target: ADJUST_FREQUENCY and TIMINCA writes with restore; restore not verifiable unattended, see test_ptp_freq_complete'
     'test_ptp_freq_complete'      = 'Mutating:Target: TIMINCA restore failed on I226 on 2026-10-20, CLEANUP_FAILED 0x18000000 to 0x08000000, investigations/issue-328-unload-hang-20261020.md'
     'test_qav_cbs'                = 'Mutating:Target: WRITE_REGISTER and SETUP_QAV on the target adapter'
@@ -493,7 +493,7 @@ $HardwareUnitCoverageGaps = [ordered]@{
     'test_error_recovery'         = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
 }
 $HardwareIntegrationCoverageGaps = [ordered]@{
-    'test_hw_state_machine'        = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten; post-test check misses the PHC time discontinuity; up to five INIT calls on unbound and bound handles'
+    'test_hw_state_machine'        = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; up to five INIT calls on unbound and bound handles'
     'avb_test_i219'                 = 'Mutating:Target: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE on the target adapter; I219 compatibility, #261'
     'avb_test_portability'          = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; QA-SC-PORT-001, #114'
     'avb_test_i217'                 = 'Mutating:Target: SETUP_TAS, SETUP_FP, WRITE_REGISTER; TSN configuration change; #114'
@@ -1085,7 +1085,7 @@ function Get-AvbHilGateDecision {
         'Init' {
             if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
             if ($UnderGitHubActions -and -not $InitUnattendedApproved) {
-                return @{ Action = 'Block'; Reason = 'Init (INIT_DEVICE re-initializes the adapter PHC: I226 SYSTIM reset and TIMINCA rewrite, I219 TIMINCA rewrite; target may depend on the previous test) is not approved for unattended HIL --- run it attended, outside GitHub Actions' }
+                return @{ Action = 'Block'; Reason = 'Init (INIT_DEVICE re-initializes the adapter PHC: I226 SYSTIM reset and TIMINCA rewrite, I219 TIMINCA rewrite; target may depend on the previous test) is not approved for unattended HIL (effects source-derived, UNVERIFIED on hardware) --- run it attended, outside GitHub Actions' }
             }
             return @{ Action = 'Run'; Reason = '' }
         }
