@@ -39,6 +39,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($SkipTrustCheck -and $env:GITHUB_ACTIONS -eq 'true') { Write-Host "[HIL-DEPLOY] -SkipTrustCheck is an offline-test seam and is refused under GitHub Actions" -ForegroundColor Red; exit 1 }
 $RepoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 foreach ($lib in 'NativeExit.ps1', 'HilLock.ps1', 'HilMachineHealth.ps1', 'DriverPackage.ps1') { . (Join-Path $RepoRoot "tools\lib\$lib") }
 if (-not $InstallScript)     { $InstallScript = Join-Path $RepoRoot 'tools\setup\Install-Driver.ps1' }

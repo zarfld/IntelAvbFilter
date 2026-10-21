@@ -38,6 +38,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')
+. (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')   # machine-wide serialization shared with automatic HIL (hil.yml)
 
 $Suites = @('HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory')
 
@@ -146,6 +147,14 @@ function Invoke-AvbPreFlight {
     } finally { $env:BUILD_DRIVER_SHA256 = $saveB; $env:HIL_REQUIRE_DEPLOYED_SHA = $saveR }
 }
 
+$HilLock = Enter-AvbHilLock -Kind 'local' -Label "LocalSuites $($Configurations -join '+')"
+if (-not $HilLock.Ok) {
+    Write-Host "[STOPPED] HIL machine busy: $($HilLock.Why) --- nothing built, installed or executed" -ForegroundColor Red
+    exit 1
+}
+if ($HilLock.PreviousOwner) { Write-Host "[INFO] took over a stale HIL lock: $($HilLock.PreviousOwner.why)" -ForegroundColor Yellow }
+$Report.lock = [ordered]@{ owner = $HilLock.Owner; previousOwner = $HilLock.PreviousOwner }
+
 try {
     foreach ($Configuration in $Configurations) {
         $cfg = [ordered]@{ configuration = $Configuration; head = $null; builtDriverSha256 = $null; testManifest = $null
@@ -218,6 +227,8 @@ try {
         }
     }
 } finally {
+    $rel = Exit-AvbHilLock -Owner $HilLock.Owner
+    if (-not $rel.Ok) { Write-Host "[WARN] HIL lock not released: $($rel.Why)" -ForegroundColor Yellow }
     $Report.finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
     $Report.stopped = $(if ($Stop) { $Stop } else { $null })
     $Report.inventory = @($AllInventory)
