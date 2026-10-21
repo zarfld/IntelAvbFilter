@@ -252,8 +252,9 @@ function Parse-TestLog {
             if ($caseNames.Add($caseName)) {
                 $cases.Add(@{ Name = $caseName; Verdict = 'FAIL'; Failed = $true; Skipped = $false; FailMsg = $stripped })
             }
-        } elseif ($stripped -match "^\[(INFRA_FAILURE|BLOCKED|CLEANUP_FAILED)\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)") {
-            # INFRA_FAILURE, BLOCKED, and CLEANUP_FAILED are all hard failures in JUnit.
+        } elseif ($stripped -match "^\[(INFRA_FAILURE|BLOCKED|CLEANUP_FAILED|INCONCLUSIVE_RESTORATION|FAILED_SETUP)\]\s+($adapterPrefix(?:TC|IT|VV|UT|REG|TEST)-[A-Z0-9_-]+.*)") {
+            # INFRA_FAILURE, BLOCKED, CLEANUP_FAILED, INCONCLUSIVE_RESTORATION and FAILED_SETUP are all hard failures
+            # in JUnit; the exact label stays in the message.
             # They must never appear as <skipped/> — doing so masks infrastructure breakage.
             $infStatus = $Matches[1].Trim()
             $caseName  = ($Matches[2] -replace '\s*\(.*\)\s*$', '').Trim()

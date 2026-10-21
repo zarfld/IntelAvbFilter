@@ -271,7 +271,7 @@ $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=Init;test_sbfake_mut=Mutating;' +
            'test_sbfake_tgt=Mutating:Target;test_sbfake_unsafe=Unsafe;test_sbfake_disabler=ReadOnly;' +
            'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
-           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly'
+           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -538,13 +538,14 @@ $pTo  = New-PriorDir 'priorTimeout' 'FAILED(TIMEOUT)'
 $pHl  = New-PriorDir 'priorHalt' 'PASSED' -Halt 'adapter state not observable at baseline'
 $pMk  = New-PriorDir 'priorKilled' '' -Marker
 $pOk  = New-PriorDir 'priorClean' 'PASSED'
+$pUv  = New-PriorDir 'priorUnverified' 'INCONCLUSIVE_RESTORATION'
 $kRes = [ordered]@{}
-$kDirs = [ordered]@{ cleanup = $pCf; timeout = $pTo; halt = $pHl; killed = $pMk; clean = $pOk }
+$kDirs = [ordered]@{ cleanup = $pCf; timeout = $pTo; halt = $pHl; killed = $pMk; unverified = $pUv; clean = $pOk }
 foreach ($k in $kDirs.GetEnumerator()) {
     $kRes[$k.Key] = Invoke-Sandbox ("runK_" + $k.Key) @($tInit, $tRo) -Suite 'HardwareMutation' -PriorResultsDir $k.Value -AllSupportedEnabled
 }
 $kBad = @()
-foreach ($k in 'cleanup', 'timeout', 'halt', 'killed') {
+foreach ($k in 'cleanup', 'timeout', 'halt', 'killed', 'unverified') {
     $r = $kRes[$k]
     if ((Get-RanCount $r '^RAN test_sbfake_init ') -ne 0 -or (Get-RanCount $r '^RAN test_sbfake_ro ') -ne 1 -or
         $r.Out -notmatch '\[BLOCKED\] TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_init\.ps1: state-integrity halt \(prior suite') { $kBad += "${k}: " + (Tail $r) }
@@ -570,14 +571,30 @@ tc_check 'TEST-HILGATE-041-tsauxc-and-link-changes-are-cleanup-failed-and-halt-n
 # --- Run M: a state-changing test whose restoration the runner cannot fully verify is never PASSED -------------
 # The runner verifies adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC, NOT PHC time continuity, rate or
 # offset (and none of TAS/FP/Qav/EEE/PFC/VLAN/MDIO/timestamp-control state).  Until it does, every executed
-# Init/Mutating/Mutating:Target/Unsafe test gets an INCONCLUSIVE state-unverified record (nonpassing, no halt).
-$rM = Invoke-Sandbox 'runM' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x125B' }
-$mUnv = @([regex]::Matches($rM.Out, '\[INCONCLUSIVE\] TC-INFRA-STATE-002: after (test_sbfake_\w+)\.ps1')) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
-tc_check 'TEST-HILGATE-042-unverifiable-restoration-of-state-changing-test-is-inconclusive-never-passed' `
+# Init/Mutating/Mutating:Target/Unsafe test gets an INCONCLUSIVE_RESTORATION record (missing evidence, distinct from
+# CLEANUP_FAILED = observed damage) and - "stop subsequent mutating tests if restoration cannot be verified" (Q P0
+# 2026-10-21, refined the same day) - halts every later non-ReadOnly test; ReadOnly tests continue.
+$rM = Invoke-Sandbox 'runM' @($tTgt, $tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x125B' }
+$mUnv = @([regex]::Matches($rM.Out, '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after (test_sbfake_\w+)\.ps1')) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+$mJson = @(Get-ChildItem (Join-Path $rM.Dir 'logs') -Filter 'results-*.json' -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
+$mRec = @($mJson | ForEach-Object { @($_.records) } | Where-Object { $_.name -match 'STATE-UNVERIFIED' })
+tc_check 'TEST-HILGATE-042-unverifiable-restoration-is-inconclusive-restoration-halts-later-mutation-never-passed' `
     ((Get-RanCount $rM '^RAN test_sbfake_tgt ') -ge 1 -and (@($mUnv) -join ',') -eq 'test_sbfake_tgt' -and
      ($rM.Out -match 'TC-INFRA-STATE-002: [^\r\n]*PHC time') -and (Test-FailureCase $rM 'TC-INFRA-STATE-002') -and $rM.Exit -eq 1 -and
-     ($rM.Out -notmatch '\[HALT\]')) `
-    ("unverified records for: [{0}] exit={1}; {2}" -f (@($mUnv) -join ','), $rM.Exit, (Tail $rM))
+     ($rM.Out -match '\[HALT\][^\r\n]*restoration not verified') -and (Get-RanCount $rM '^RAN test_sbfake_init ') -eq 0 -and
+     (Get-RanCount $rM '^RAN test_sbfake_ro ') -eq 1 -and $mRec.Count -ge 1 -and @($mRec | Where-Object { $_.verdict -ne 'INCONCLUSIVE_RESTORATION' }).Count -eq 0 -and
+     ($rM.Out -notmatch '\[CLEANUP_FAILED\] TC-INFRA-STATE')) `
+    ("unverified records for: [{0}] json verdicts=[{1}] exit={2}; {3}" -f (@($mUnv) -join ','), (@($mRec | ForEach-Object { $_.verdict }) -join ','), $rM.Exit, (Tail $rM))
+
+# 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
+# distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).
+$tSetup = New-Fake 'test_sbfake_setup' "Write-Host '  [FAILED_SETUP] TC-SBFAKE-SETUP-001: target adapter not uniquely identified'"
+$rS = Invoke-Sandbox 'runS' @($tSetup, $tRo) -AllSupportedEnabled
+$sRec = @(Get-ChildItem (Join-Path $rS.Dir 'logs') -Filter 'results-*.json' -ErrorAction SilentlyContinue | ForEach-Object { @((Get-Content $_.FullName -Raw | ConvertFrom-Json).records) } | Where-Object { $_.name -match 'test_sbfake_setup' })
+tc_check 'TEST-HILGATE-045-failed-setup-is-nonpassing-and-distinct-in-json-and-junit' `
+    ($rS.Exit -eq 1 -and $sRec.Count -eq 1 -and $sRec[0].verdict -eq 'FAILED_SETUP' -and
+     ($rS.Xml -match '(?s)<testcase name="TC-SBFAKE-SETUP-001[^"]*"[^>]*><failure[^>]*message="\[FAILED_SETUP\]')) `
+    ("exit={0} verdict={1}; {2}" -f $rS.Exit, $(if ($sRec.Count) { $sRec[0].verdict }), (Tail $rS))
 
 # --- Run N: decision A - UT-CORR-005/006 are attended-only; under GitHub Actions they are NOT EXECUTED gaps -------
 # Their executable also contains the UT-CORR-009 driver lifecycle path (process creation; TEST-HILSUITE-REAL-003).
@@ -616,7 +633,7 @@ tc_check 'TEST-HILGATE-039-init-blocked-unattended-but-runs-attended' `
      ((Get-RanCount $rK2 '^RAN test_sbfake_init ') -eq 1) -and ((Get-RanCount $rK2 '^RAN test_sbfake_ro ') -eq 1) -and
      # Attended: executed; nonpassing ONLY because its PHC restoration is not independently verified (TEST-HILGATE-042;
      # expectation changed 2026-10-21 from exit 0 by the P0 rule "no mutation accepted without verified restoration").
-     $rK2.Exit -eq 1 -and ($rK2.Out -match '\[INCONCLUSIVE\] TC-INFRA-STATE-002: after test_sbfake_init\.ps1 \(Init\)') -and
+     $rK2.Exit -eq 1 -and ($rK2.Out -match '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after test_sbfake_init\.ps1 \(Init\)') -and
      ($rK2.Out -match 'Failed : 1\b') -and ($rK2.Out -notmatch '\[(FAIL|BLOCKED|CLEANUP_FAILED)\] TC-')) `
     ("unattended: ran={0} exit={1} | attended: ran={2} exit={3} | {4}" -f ($rK1.Ran -join '/'), $rK1.Exit, ($rK2.Ran -join '/'), $rK2.Exit, (Tail $rK1))
 

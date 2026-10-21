@@ -1089,6 +1089,8 @@ function ConvertTo-AvbRunnerVerdict {
         'FAILED(BUILD)'               { return 'INFRA_FAILURE' }
         'INFRA_FAILURE'               { return 'INFRA_FAILURE' }
         'CLEANUP_FAILED'              { return 'CLEANUP_FAILED' }
+        'INCONCLUSIVE_RESTORATION'    { return 'INCONCLUSIVE_RESTORATION' }
+        'FAILED_SETUP'                { return 'FAILED_SETUP' }
         'BLOCKED'                     { return 'BLOCKED(SAFETY)' }
         'BLOCKED(SAFETY)'             { return 'BLOCKED(SAFETY)' }
         'BLOCKED(PROVENANCE)'         { return 'BLOCKED(PROVENANCE)' }
@@ -1127,7 +1129,7 @@ function Write-AvbResultsJson {
     $records = @($script:AvbResultRecords)
     $counts = [ordered]@{}
     foreach ($v in 'PASSED', 'FAILED', 'FAILED(TIMEOUT)', 'BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)', 'SKIPPED', 'COVERAGE-GAP',
-                   'INCOMPLETE', 'INCONCLUSIVE', 'INFRA_FAILURE', 'CLEANUP_FAILED') {
+                   'INCOMPLETE', 'INCONCLUSIVE', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION', 'FAILED_SETUP') {
         $counts[$v] = @($records | Where-Object { $_.verdict -eq $v }).Count
     }
     $src = $script:SourceIdentity
@@ -1202,7 +1204,7 @@ function Get-AvbPriorHalt {
         try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
         if ($d.stateHalt) { $why += "$($d.suite): state-integrity halt ($($d.stateHalt))" }
         foreach ($r in @($d.records)) {
-            if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE', 'CLEANUP_FAILED')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
+            if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
         }
     }
     return ($why -join '; ')
@@ -1609,10 +1611,12 @@ function Invoke-HilPostTestCheck {
         } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
             Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself"
         }
-        # The runner's independent snapshot does not cover everything a state-changing test may modify; until it
-        # does, its restoration is not verified and the test cannot be green (no halt: nothing observed changed).
-        Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'FAILED(INCONCLUSIVE)' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
-            -Line ("[INCONCLUSIVE] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" -f $Display, $Class)
+        # The runner's independent snapshot does not cover everything a state-changing test may modify: missing
+        # evidence (INCONCLUSIVE_RESTORATION), distinct from observed damage (CLEANUP_FAILED above).  Restoration
+        # that cannot be verified stops every later non-ReadOnly test (Q P0 2026-10-21 sec. 2 item 7).
+        Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
+            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" -f $Display, $Class)
+        Set-HilHalt "$Display ($Class): restoration not verified (INCONCLUSIVE_RESTORATION)"
     }
 }
 
@@ -1882,6 +1886,16 @@ foreach ($WorkItem in $WorkItems) {
     if ($timedOut) {
         $failedTests++
         Add-AvbResult -Name $exeName -Status "FAILED(TIMEOUT)" -Exit -999
+    } elseif ($vc.FailedSetup -gt 0) {
+        # Required initial conditions not established (any exit code): kept distinct from a test failure.
+        $failedTests++
+        Write-Fail "$exeName FAILED_SETUP ($($vc.FailedSetup) testcase(s)) --- required initial conditions not established"
+        Add-AvbResult -Name $exeName -Status "FAILED_SETUP" -Exit $exitCode
+    } elseif ($vc.InconclusiveRestoration -gt 0) {
+        $failedTests++
+        Write-Fail "$exeName INCONCLUSIVE_RESTORATION ($($vc.InconclusiveRestoration) testcase(s)) --- the test could not verify its own restoration"
+        Add-AvbResult -Name $exeName -Status "INCONCLUSIVE_RESTORATION" -Exit $exitCode
+        Set-HilHalt "$exeName reported INCONCLUSIVE_RESTORATION itself"
     } elseif (($exitCode -eq 0) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
         $failedTests++
         Write-Fail "$exeName INCONCLUSIVE ($($vc.Inconclusive) testcase(s)) --- insufficient evidence on mandatory verification"
