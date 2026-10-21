@@ -565,9 +565,7 @@ function Install-Driver {
         Write-Host "  Command: netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter" -ForegroundColor DarkGray
         
         Reset-AvbExitCode
-        
         netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter
-        
         $installRc = Get-AvbExitCode
         Pop-Location
 
@@ -601,9 +599,7 @@ function Install-Driver {
         Write-Host "  Command: pnputil /add-driver `"$infPath`" /install" -ForegroundColor DarkGray
         
         Reset-AvbExitCode
-        
         pnputil /add-driver "$infPath" /install
-        
         $installRc = Get-AvbExitCode
 
         if (-not (Test-AvbExitSuccess $installRc)) {
