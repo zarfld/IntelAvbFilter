@@ -282,6 +282,7 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_hil_binary_provenance.ps1",         # TEST-HILPROV: build manifest + dispatch provenance gate (sandboxed, no driver; #328 F23)
     "ps1:tests/unit/ci/test_runner_results_json.ps1",           # TEST-RESULTSJSON: machine-readable runner results (sandboxed, no driver)
     "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
+    "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)
     "ps1:tests/unit/ci/test_local_suites.ps1",                  # TEST-LOCALSUITES: local pre-commit HIL orchestration + DbgView reproduction contract (offline)
     "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
@@ -328,6 +329,13 @@ $HardwareDependentTests = @(
 # None can pass on a CI runner without the driver installed.
 # Listed in $HardwareDependentTests below; $IntegrationTests is intentionally empty.
 $IntegrationTests = @()
+
+# Build targets (Build-Tests.ps1 Output name) and tests/unit test scripts that are deliberately NOT runner entries
+# (tests/unit/ci/test_artifact_completeness.ps1).  Value: 'Diagnostic: <justification>' | 'Supporting: <consumer ...>' |
+# 'Obsolete: <evidence ...>'.  Anything neither listed here nor a runner entry is Unknown and fails the gate.
+# Never execute a diagnostic tool merely because it is built.  Empty 2026-10-21: every artifact still needs review.
+$TestArtifactClassification = [ordered]@{
+}
 
 # ===========================
 # HardwareMandatory --- safe mandatory quality gate (self-hosted runner)
