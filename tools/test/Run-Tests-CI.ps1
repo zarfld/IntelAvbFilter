@@ -58,13 +58,26 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$LogsDir = "",
 
-    # Start DebugView kernel capture around the test run and save to a log file.
-    # Requires .github\skills\DbgView\DebugView\Dbgview.exe (run tools\setup\Install-DbgView.ps1 once).
+    # Machine-readable results document (schema avb-runner-results/1): one record per result row with verdict,
+    # exit code, artifact, arguments, class, target, log path and per-testcase verdicts.  Written atomically when
+    # the run completes.  Default: <logs>\results-<Suite>-<Configuration>-<timestamp>.json.
+    [Parameter(Mandatory=$false)]
+    [string]$ResultsJson = "",
+
+    # NOT SUPPORTED here: this runner never captured DebugView output although it accepted the switch.  Kernel
+    # capture for one test is tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView.  The switch is
+    # kept only to reject it loudly instead of silently running without a capture.
     [Parameter(Mandatory=$false)]
     [switch]$CaptureDbgView
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($CaptureDbgView) {
+    Write-Host "[FAIL] Run-Tests-CI.ps1 does not capture DebugView output (-CaptureDbgView is not supported here)." -ForegroundColor Red
+    Write-Host "       Use: .\tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView -Configuration $Configuration" -ForegroundColor Red
+    exit 1
+}
 
 # ===========================
 # No admin check here -- by design.
@@ -1523,7 +1536,7 @@ function Invoke-HilPostTestCheck {
     }
     foreach ($w in @($cmp.Warn)) { Write-Host "  [WARN:STATE] after ${Display}: $w (observed, not enforced)" -ForegroundColor Yellow }
     if (@($cmp.Diffs).Count -gt 0) {
-        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' `
+        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' -Check `
             -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change" -f $Display, (@($cmp.Diffs) -join '; '))
         Set-HilHalt "CLEANUP_FAILED after $Display"
         $script:HilBaseline = $cur   # later differences are attributed to later tests
@@ -1550,6 +1563,10 @@ $failedTests  = 0
 $skippedTests = 0
 $incompleteTests = 0   # exit 0 but SKIP_NOT_IMPLEMENTED reported on mandatory verification
 $results      = @()
+$AvbResultRecords = @()
+$AvbRunStartedUtc = (Get-Date).ToUniversalTime().ToString('o')
+$ResultsJsonPath  = if ($ResultsJson) { [System.IO.Path]::GetFullPath($ResultsJson) }
+                    else { Join-Path $logsDir ("results-{0}-{1}-{2}.json" -f $Suite, $Configuration, (Get-Date -Format 'yyyyMMdd_HHmmss_fff')) }
 
 # Expose driver build type to test_perf_regression and other tests that key
 # their baseline on (device_id x driver_build)
