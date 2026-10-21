@@ -52,10 +52,7 @@ foreach ($Configuration in $Configurations) {
         Start-Transcript -Path $SuiteLog -Force | Out-Null
         try {
             $LASTEXITCODE = $null
-            .\tools\test\Run-Tests-CI.ps1 `
-                -Suite $Suite `
-                -CaptureDbgView `
-                -Configuration $Configuration
+            .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -Configuration $Configuration
 
             $SuiteExit = $LASTEXITCODE
         }
