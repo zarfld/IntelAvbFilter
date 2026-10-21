@@ -1,3 +1,7 @@
+
+# .\tools\archive\deprecated\LocalSuites.ps1 *>&1 | Tee-Object -FilePath ".\logs\FullSuite_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+
+
 $Configurations = @("Debug", "Release")
 $CISuiteFailed = @()
 
