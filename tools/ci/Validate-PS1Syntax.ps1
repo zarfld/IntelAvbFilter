@@ -44,6 +44,13 @@ if ($Files.Count -eq 0) {
         "tools\lib\TestVerdict.ps1",
         "tools\lib\NativeExit.ps1",
         "tools\lib\SourceDigest.ps1",
+        "tools\lib\DriverPackage.ps1",
+        "tools\lib\DriverDeploy.ps1",
+        "tools\lib\HilLock.ps1",
+        "tools\lib\HilMachineHealth.ps1",
+        "tools\ci\Invoke-HilDeployment.ps1",
+        "tools\setup\Install-Driver.ps1",
+        "tools\build\Build-Driver.ps1",
         "tools\ci\Validate-PS1Syntax.ps1"
     )
 }

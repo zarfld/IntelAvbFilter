@@ -400,3 +400,62 @@ Regression: hilgate 38/38, sentinel 7/7, verdict 13/13, syntax gate 9/9.
 CI-safe installer mode; signed Debug+Release staging packages + manifest; hil.yml install/pre/post verification,
 testable serialization, removal of HIL_AUTHORIZED_DRIVER_SHA256 / HIL_HALT / HIL_BUGCHECK_ACK, crash-evidence
 handling, HIL_NOT_EXECUTED; master-protection policy; the 16 CI RED/GREEN cases. Needs Q decisions (see report).
+
+---
+
+## Iteration 9 (2026-10-21) - automatic staged-driver HIL CI (offline implementation; Q decisions 1-7)
+
+Boundary kept by the agent: no driver operation, no physical HIL, no runner/Windows/GitHub change, no dispatch, no
+commit/push. (Q committed and pushed the work to branch fix/hil-ci-suite-20261021; 5 files of the final fixes are
+uncommitted.) Everything below is offline orchestration evidence; driver/hardware behaviour is UNVERIFIED.
+
+### Facts established (read-only)
+- master: classic protection disabled; repository ruleset `protect-default-branch` (id 25536988, active, created
+  2026-10-21 09:42Z): no deletion, no force push, linear history, pull request required (0 approvals). Bypass list not
+  visible unauthenticated. -> README bot direct pushes are rejected (its `git push || exit 0` hid that); local commits
+  reach master only via PR.
+- Signing: local builds are signed by the machine-specific `WDKTestCert User,134201267570487980` (275C2424...), trusted
+  here; hosted staging created a NEW WDKTestCert and a NEW self-signed cert per job -> no stable signer existed.
+- Former blocker: staging uploaded the whole build dir (two IntelAvbFilter.sys + obj/) -> `authorize` ("exactly one
+  .sys") would have denied every run once the operator variables were set.
+- Install-Driver.ps1 attended path: STOP_PENDING -> Read-Host -> Restart-Computer; downgrade Read-Host; DriverStore
+  Remove-Item; Disable-NetAdapter on every filter-bound adapter (may include the management NIC); PendingFileRename
+  reboot replacement reported as success; EventLog service restart; netcfg -u failure returns $true.
+  PRE-EXISTING DEFECT (not changed, Q decision): `sc stop IntelAvbFilter` / `sc query ...` call the Set-Content alias,
+  writing files `stop` (2026-10-21 11:48) and `query` in the repository root; the attended "Step 1: Stopping service"
+  never stopped anything.
+
+### Implementation
+| Concern | Files |
+|---|---|
+| Stable signer | Build-Driver.ps1 `-SigningPfx` (re-sign .sys, regenerate + sign catalog, verify thumbprints); tools/ci/signing/README.md (one-time setup); pinned `tools/ci/signing/hil-test-signer.cer` (NOT yet created) |
+| Package identity | tools/lib/DriverPackage.ps1 (manifest avb-driver-package/1; verification incl. pinned signer + local trust) |
+| Staging | ci-standards-compliance.yml deploy-staging: Debug+Release matrix, secrets HIL_TEST_SIGNING_PFX_BASE64/_PASSWORD (fail loudly if absent), manifest + self-check, upload exactly the package; tag release ships the signer .cer |
+| Unattended install | Install-Driver.ps1 `-NonInteractive -PackageDir -ExpectedSysSha256 -StepTimeoutSeconds -ResultJson` -> tools/lib/DriverDeploy.ps1 (same netcfg/ETW mechanism; bounded; no prompt/reboot/adapter disable/DriverStore delete/EventLog restart; timeouts leave netcfg running; exit 0/1/3) |
+| Serialization | tools/lib/HilLock.ps1 (%ProgramData%\IntelAvbFilter-hil.lock; CI + LocalSuites); hil-release needs hil-debug |
+| Crash evidence | tools/lib/HilMachineHealth.ps1 (HISTORICAL / PREVIOUS_RUN_CRASHED / CURRENT_RUN_INTERRUPTED; minidumps copied) |
+| Runner orchestration | tools/ci/Invoke-HilDeployment.ps1 (lock -> crash evidence -> package -> install -> pre-flight; in-flight record next to the lock) |
+| Workflow | hil.yml: authorize downloads both packages of the upstream run, checks manifests, hands them over; hil-debug / hil-release atomic (preflight -> checkout -> deploy -> build tests -> verify -> identity -> Mandatory/Unit/Integration -> lock release); acceptance per configuration; no `vars.*` |
+| README bot | update-readme-status.yml: bot branch automation/readme-status + PR; never pushes master; failures are loud |
+
+### Connectivity loss during deployment (#328 risk)
+netcfg -u/-l restart the NDIS stack of every adapter bound to MS_IntelAvbFilter; the deployment records whether the
+default-route (management) adapter is bound (`managementRisk`). If the runner loses its connection: the job may be
+failed server-side while the local process continues or is lost; RUNNER_TEMP evidence does not survive the next job,
+so the record is persisted first to `%ProgramData%\IntelAvbFilter-hil.lock.inflight.json` (verdict IN_FLIGHT before
+the installer runs). The next HIL run takes over the stale lock (owner recorded), attaches the in-flight record and
+the crash evidence, re-checks STOP_PENDING / pending replacement (NEEDS_OPERATOR, no reboot) and otherwise redeploys.
+A netcfg that does not finish within the bound is left running (never killed) -> NEEDS_OPERATOR. Nothing claims a
+recovery; nothing restarts the PC. UNVERIFIED on the real machine: whether netcfg briefly drops the management
+connection, and how the GitHub runner reacts to that.
+
+### Offline results (all GREEN; RED shown against the pre-iteration code)
+syntax 16/16; native-exit 11/11; provenance 52/52; results-json 16/16; local-suites 16/16; ci-driver-deploy 27/27
+(baseline: libraries absent; mutation probes M1-M3 killed); trust boundary 40/40 (pre-iteration workflows 32/40 -
+REAL-007..013, 016 RED; FX + REAL-001..006/014/015 invariant; workflow mutants M1-M4 killed); suite safety 18/18;
+identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
+
+### Unavoidable manual administration (once)
+1. Create the HIL test-signing certificate; secrets HIL_TEST_SIGNING_PFX_BASE64 / _PASSWORD; commit the public
+   `tools/ci/signing/hil-test-signer.cer` (PR).  2. Trust it on the HIL machine (LocalMachine Root + TrustedPublisher).
+3. Optionally allow GitHub Actions to create pull requests (README bot), otherwise merge the bot branch manually.

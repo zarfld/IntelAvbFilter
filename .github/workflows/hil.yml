@@ -437,7 +437,7 @@ jobs:
         run: |
           $f = Join-Path $env:RUNNER_TEMP 'hil-evidence\deployment.json'
           $v = if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).verdict } else { 'NONE' }
-          $ok = if ($v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY') { 'false' } else { 'true' }
+          $ok = if ($v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT') { 'false' } else { 'true' }
           "machine_ok=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "deployment verdict $v -> machine_ok=$ok"
 
@@ -634,7 +634,7 @@ jobs:
         run: |
           $f = Join-Path $env:RUNNER_TEMP 'hil-evidence\deployment.json'
           $v = if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).verdict } else { 'NONE' }
-          $ok = if ($v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY') { 'false' } else { 'true' }
+          $ok = if ($v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT') { 'false' } else { 'true' }
           "machine_ok=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "deployment verdict $v -> machine_ok=$ok"
 

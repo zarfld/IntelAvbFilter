@@ -974,7 +974,8 @@ $DeployName = 'Deploy to Staging (Phase 08 - Transition)'
 if ($null -eq $dep) { $laneIssues += 'deploy-staging missing' }
 else {
     if ("$($dep['name'])" -cne "$DeployName (`${{ matrix.config }})") { $laneIssues += "deploy-staging name '$($dep['name'])' (hil.yml authorize looks up '$DeployName (Debug|Release)')" }
-    if ((@($dep['strategy']['matrix']['config']) -join ',') -ne 'Debug,Release') { $laneIssues += "deploy-staging configurations [$(@($dep['strategy']['matrix']['config']) -join ',')] (Debug,Release required)" }
+    $depCfgs = if ($dep.Contains('strategy') -and $dep['strategy'] -is [System.Collections.IDictionary] -and $dep['strategy'].Contains('matrix')) { @($dep['strategy']['matrix']['config']) } else { @() }
+    if (($depCfgs -join ',') -ne 'Debug,Release') { $laneIssues += "deploy-staging configurations [$($depCfgs -join ',')] (Debug,Release required)" }
     $signStep = @(@($dep['steps']) | Where-Object { "$($_['run'])" -match 'Build-Driver\.ps1 -Configuration \$\{\{ matrix\.config \}\} -SigningPfx' })
     if ($signStep.Count -ne 1 -or "$($signStep[0]['env']['AVB_SIGNING_PFX_BASE64'])" -ne '${{ secrets.HIL_TEST_SIGNING_PFX_BASE64 }}' -or "$($signStep[0]['run'])" -notmatch 'Stable signer not configured') { $laneIssues += 'deploy-staging does not sign with the stable signer from secrets (fail-closed when absent)' }
     if (@(@($dep['steps']) | Where-Object { "$($_['run'])" -match 'Test-AvbDriverPackage' -and "$($_['run'])" -match 'hil-test-signer\.cer' }).Count -ne 1) { $laneIssues += 'deploy-staging does not self-check the package manifest against the pinned signer' }
@@ -1046,6 +1047,7 @@ foreach ($v in 'HIL_AUTHORIZED_DRIVER_SHA256', 'HIL_BUGCHECK_ACK', 'HIL_HALT') {
 if ($hilJobs.Contains('hil-debug') -and $hilJobs.Contains('hil-release') -and
     "$(@($hilJobs['hil-debug']['steps'])[0]['run'])" -cne "$(@($hilJobs['hil-release']['steps'])[0]['run'])") { $azIssues += 'hil-debug and hil-release preflights differ' }
 foreach ($jc in @(@{ J = 'hil-debug'; C = 'Debug'; S = 'staged_debug_sha256' }, @{ J = 'hil-release'; C = 'Release'; S = 'staged_release_sha256' })) {
+    if (-not $hilJobs.Contains($jc.J) -or -not $hilJobs[$jc.J].Contains('env')) { $azIssues += "$($jc.J): missing (or no env)"; continue }
     $e = $hilJobs[$jc.J]['env']
     if ("$($e['HIL_CONFIGURATION'])" -cne $jc.C -or "$($e['HIL_STAGED_DRIVER_SHA256'])" -ne "`${{ needs.authorize.outputs.$($jc.S) }}") { $azIssues += "$($jc.J): configuration / staged SHA256 not bound to $($jc.C)" }
 }

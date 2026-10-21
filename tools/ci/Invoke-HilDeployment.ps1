@@ -11,6 +11,10 @@
 #                    -> <EvidenceDir>\deployment.json; exit 0 only for DEPLOYED.
 #   -Action Release  releases the lock taken by this CI job (always() step).
 #
+# Local evidence that survives a lost job: before the installer runs (netcfg can interrupt the runner's network
+# connection, #328), the record so far is written next to the lock (<lock>.inflight.json) and replaced by the final
+# record afterwards.  RUNNER_TEMP is emptied when the next job starts; this file is not.  The next deployment attaches
+# it as previousDeployment, together with the stale-lock owner and the crash evidence.
 # Verdicts: DEPLOYED | NOT_EXECUTED_BUSY | REJECTED_PACKAGE | DEPLOY_FAILED | NEEDS_OPERATOR.  A deployment is
 # "pre-deployment absent driver" tolerant: an absent or different installed driver is replaced, never a failure.
 # The running image is not hashed: after deployment "loaded image == installed file" rests on the observed
@@ -46,6 +50,7 @@ if (-not $InstallScript)     { $InstallScript = Join-Path $RepoRoot 'tools\setup
 if (-not $PreFlightScript)   { $PreFlightScript = Join-Path $RepoRoot 'tools\test\Test-DriverPreFlight.ps1' }
 if (-not $LockPath)          { $LockPath = Get-AvbHilLockPath }
 if (-not $PinnedCertificate) { $PinnedCertificate = Join-Path $RepoRoot 'tools\ci\signing\hil-test-signer.cer' }
+$inflightFile = "$LockPath.inflight.json"
 New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
 $ownerFile = Join-Path $EvidenceDir 'hil-lock-owner.json'
 
@@ -64,10 +69,12 @@ $record = [ordered]@{
     runStartUtc = (Get-Date).ToUniversalTime().ToString('o'); lock = $null; crashEvidence = $null; package = $null
     install = $null; installExitCode = $null; preflightExitCode = $null; finishedUtc = $null
     loadedImageEvidence = 'not hashed; DEPLOYED requires the service to be released (unloaded) and to reach RUNNING again during this deployment'
+    previousDeployment = $null
 }
 function Complete-Deployment([string]$Verdict, [string]$Reason, [int]$Code) {
     $record.verdict = $Verdict; $record.reason = $Reason; $record.finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
     ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $EvidenceDir 'deployment.json') -Encoding UTF8
+    if ($record.lock -and $record.lock.ok) { ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $inflightFile -Encoding UTF8 }
     $c = if ($Code -eq 0) { 'Green' } else { 'Red' }
     Write-Host "[HIL-DEPLOY] $Configuration $Verdict - $Reason" -ForegroundColor $c
     exit $Code
@@ -78,6 +85,9 @@ $lock = Enter-AvbHilLock -Kind 'ci' -Label "hil $Configuration" -Path $LockPath 
 $record.lock = [ordered]@{ path = $LockPath; ok = $lock.Ok; why = $lock.Why; waitedSeconds = $lock.Waited; previousOwner = $lock.PreviousOwner }
 if (-not $lock.Ok) { Complete-Deployment 'NOT_EXECUTED_BUSY' "HIL machine busy: $($lock.Why)" 1 }
 ($lock.Owner | ConvertTo-Json) | Set-Content -LiteralPath $ownerFile -Encoding UTF8
+if (Test-Path -LiteralPath $inflightFile) {
+    try { $record.previousDeployment = Get-Content -LiteralPath $inflightFile -Raw | ConvertFrom-Json } catch { $record.previousDeployment = "unreadable: $($_.Exception.Message)" }
+}
 
 # 2. Crash evidence (automatic; never an operator acknowledgement)
 try {
@@ -96,7 +106,10 @@ $reasons = @($pv.Reasons); if (-not $pin.Ok) { $reasons = @($pin.Error) + $reaso
 $record.package = [ordered]@{ dir = $PackageDir; ok = ($pv.Ok -and $pin.Ok); reasons = $reasons; driverSha256 = $pv.DriverSha256; pinnedThumbprint = $pin.Thumbprint }
 if (-not ($pv.Ok -and $pin.Ok)) { Complete-Deployment 'REJECTED_PACKAGE' ("staged package rejected (installed driver untouched): " + ($reasons -join '; ')) 1 }
 
-# 4. Unattended installation through the canonical installer
+# 4. Unattended installation through the canonical installer (evidence persisted locally first)
+$record.verdict = 'IN_FLIGHT'; $record.reason = 'installation started; if this is the last record, the job was lost during installation'
+($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $inflightFile -Encoding UTF8
+($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $EvidenceDir 'deployment.json') -Encoding UTF8
 $installJson = Join-Path $EvidenceDir 'install.json'
 Reset-AvbExitCode
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File $InstallScript -Configuration $Configuration -Reinstall -NonInteractive `

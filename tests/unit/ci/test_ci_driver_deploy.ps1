@@ -44,7 +44,7 @@ function New-Package([string]$Dir, [string]$SysContent = 'MZ staged driver') {
     Set-Content -LiteralPath (Join-Path $Dir 'IntelAvbFilter.man') -Value '<manifest/>' -Encoding ASCII
     return (Get-FileHash -LiteralPath (Join-Path $Dir 'IntelAvbFilter.sys')).Hash
 }
-$Pin = ('AB' * 20); $Other = ('CD' * 20)
+$Pin = ('AB' * 20)
 $sigPinned  = { param($p) @{ Status = 'Valid'; Thumbprint = ('AB' * 20); Subject = 'CN=IntelAvbFilter HIL Test Signing' } }
 $sigOther   = { param($p) @{ Status = 'Valid'; Thumbprint = ('CD' * 20); Subject = 'CN="WDKTestCert runneradmin,1"' } }
 $sigUntrust = { param($p) @{ Status = 'UnknownError'; Thumbprint = ('AB' * 20); Subject = 'CN=IntelAvbFilter HIL Test Signing' } }
@@ -162,7 +162,7 @@ tc_check 'TEST-CIDEPLOY-014-success-requires-running-identity-and-etw-and-a-bad-
     (($dNoRun.R.outcome -eq 'FAILED') -and ($dNoRun.R.reason -match 'not RUNNING') -and ($dEtw.R.outcome -eq 'FAILED') -and ($dEtw.R.reason -match 'ETW provider') -and
      ($dBadPkg.R.outcome -eq 'FAILED') -and ($dBadPkg.Log.Count -eq 0)) ("stopped={0} | etw={1} | badpkg={2}" -f (Show-D $dNoRun), (Show-D $dEtw), (Show-D $dBadPkg))
 $dMgmt = Invoke-Deploy @{ Bindings = @('Ethernet I226', 'Ethernet Mgmt') }
-tc_check 'TEST-CIDEPLOY-015-management-connection-risk-is-reported' (($dMgmt.R.managementRisk -match "management adapter 'Ethernet Mgmt' is bound") -and ($dOk = $dMgmt.R.outcome -eq 'DEPLOYED')) $dMgmt.R.managementRisk
+tc_check 'TEST-CIDEPLOY-015-management-connection-risk-is-reported' (($dMgmt.R.managementRisk -match "management adapter 'Ethernet Mgmt' is bound") -and ($dMgmt.R.outcome -eq 'DEPLOYED')) $dMgmt.R.managementRisk
 
 $dd = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\lib\DriverDeploy.ps1'))
 $code = ($dd -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
@@ -278,6 +278,21 @@ $oBusy = Invoke-Orch 'busy' $pOk -LockFile $busy
 $null = Exit-AvbHilLock -Owner $hold.Owner -Path $busy
 tc_check 'TEST-CIDEPLOY-042-busy-machine-is-hil-not-executed-and-touches-nothing' `
     (($oBusy.Exit -eq 1) -and ($oBusy.Dep.verdict -eq 'NOT_EXECUTED_BUSY') -and ($oBusy.Calls.Count -eq 0)) ("verdict={0} calls={1}" -f $(if ($oBusy.Dep) { $oBusy.Dep.verdict }), ($oBusy.Calls -join '|'))
+
+# A job lost during installation (runner connection interrupted by netcfg, #328): its lock and IN_FLIGHT record stay
+# on the machine (RUNNER_TEMP does not survive the next job); the next deployment attributes both.
+$lostLock = Join-Path $Tmp 'lost.lock'
+[System.IO.File]::WriteAllText($lostLock, ([ordered]@{ kind = 'ci'; label = 'hil Debug'; host = $env:COMPUTERNAME; pid = 1; runId = '590'; runAttempt = '1'; job = 'hil-debug'; acquiredUtc = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o') } | ConvertTo-Json))
+[System.IO.File]::WriteAllText("$lostLock.inflight.json", ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = 'Debug'; verdict = 'IN_FLIGHT'; reason = 'installation started' } | ConvertTo-Json))
+$oLost = Invoke-Orch 'afterlost' $pOk -LockFile $lostLock
+$after = Get-Content -LiteralPath "$lostLock.inflight.json" -Raw | ConvertFrom-Json
+tc_check 'TEST-CIDEPLOY-044-lost-job-lock-and-in-flight-record-are-attributed-by-the-next-deployment' `
+    (($null -ne $oLost.Dep) -and ($oLost.Dep.previousDeployment.verdict -eq 'IN_FLIGHT') -and ($oLost.Dep.lock.previousOwner.owner.runId -eq '590') -and
+     ($after.verdict -eq $oLost.Dep.verdict) -and ($after.verdict -ne 'IN_FLIGHT')) `
+    ("prev={0} prevOwner={1} inflight-now={2}" -f $(if ($oLost.Dep) { $oLost.Dep.previousDeployment.verdict }), $(if ($oLost.Dep) { $oLost.Dep.lock.previousOwner.owner.runId }), $after.verdict)
+$hilSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
+tc_check 'TEST-CIDEPLOY-045-in-flight-or-operator-states-stop-the-next-configuration' `
+    ([regex]::Matches($hilSrc, [regex]::Escape("`$v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT'")).Count -eq 2) 'machine_ok does not treat IN_FLIGHT/NEEDS_OPERATOR/BUSY as unusable in both physical jobs'
 
 # Signed-path orchestration: replace the real signature reader through a package signed by the pinned thumbprint is
 # not possible offline without a trusted test root; the deployment/pre-flight ordering is exercised with a package

@@ -278,6 +278,7 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_runner_results_json.ps1",           # TEST-RESULTSJSON: machine-readable runner results (sandboxed, no driver)
     "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
     "ps1:tests/unit/ci/test_local_suites.ps1",                  # TEST-LOCALSUITES: local pre-commit HIL orchestration + DbgView reproduction contract (offline)
+    "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
     "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator
