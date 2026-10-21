@@ -17,9 +17,11 @@
 #      tools\test\Run-Tests-Elevated.ps1 -CaptureDbgView -Suite <suite> (same runner gates); ReadOnly tests only
 #   8. combined report (JSON + text) in -ReportDir
 #
-# Stops (no further suite, no reproduction, no next configuration) after a timeout, an infrastructure failure, a
-# cleanup failure / state-integrity halt, a missing or inconsistent results document, or any build/install/verify
-# failure.  Never reboots, never retries an installation, never repairs adapters.
+# Stops (no further suite, no reproduction, no next configuration) after a driver/device infrastructure failure, a
+# missing or inconsistent results document, or any build/install/verify failure.  A safety halt (timeout, cleanup
+# failure, unverified restoration, state-integrity halt) does NOT stop it: every later suite and configuration of this
+# run gets -PriorResultsDir <ReportDir>, so Init/Mutating tests stay BLOCKED and ReadOnly tests continue; the run is
+# nonpassing.  Never reboots, never retries an installation, never repairs adapters.
 #
 # Evidence class: LOCAL (pre-commit when the working tree is dirty).  It is never clean-commit CI evidence.
 # Exit codes: tools\lib\NativeExit.ps1 ($global:LASTEXITCODE only; a missing exit code is a failure).
@@ -82,13 +84,25 @@ function Get-AvbFailureInventory {
     return ,$rows
 }
 
-# '' = continue; otherwise the reason this run must stop after the suite (hardware state uncertain or evidence missing).
+# '' = continue; otherwise the reason this run must stop after the suite: global driver/device infrastructure loss only
+# (Q 2026-10-21: then even ReadOnly tests are reported blocked, not run).
 function Get-AvbStopReason {
     param($Doc)
-    $bad = @(@($Doc.records) | Where-Object { $_.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE', 'CLEANUP_FAILED') })
-    if ($bad.Count -gt 0) { return ("hardware state requires inspection: {0}" -f (($bad | ForEach-Object { "$($_.name)=$($_.verdict)" }) -join ', ')) }
-    if ($Doc.stateHalt) { return "state-integrity halt: $($Doc.stateHalt)" }
+    $bad = @(@($Doc.records) | Where-Object { $_.verdict -eq 'INFRA_FAILURE' })
+    if ($bad.Count -gt 0) { return ("driver/device infrastructure unusable: {0}" -f (($bad | ForEach-Object { "$($_.name)=$($_.verdict)" }) -join ', ')) }
     return ''
+}
+
+# '' or the safety halt this suite raised (TIMEOUT / CLEANUP_FAILED / INCONCLUSIVE_RESTORATION / state halt).  It does
+# not stop the run: later suites run with -PriorResultsDir <ReportDir>, so Run-Tests-CI blocks every Init/Mutating test
+# and still executes eligible ReadOnly tests (same as hil.yml).  The run stays nonpassing.
+function Get-AvbSafetyHalt {
+    param($Doc)
+    $bad = @(@($Doc.records) | Where-Object { $_.verdict -in @('FAILED(TIMEOUT)', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION') })
+    $why = @()
+    if ($bad.Count -gt 0) { $why += ("hardware state not verified: {0}" -f (($bad | ForEach-Object { "$($_.name)=$($_.verdict)" }) -join ', ')) }
+    if ($Doc.stateHalt) { $why += "state-integrity halt: $($Doc.stateHalt)" }
+    return ($why -join '; ')
 }
 
 # Reproduction candidates of ONE configuration: executed ReadOnly failures without an exact target, deduplicated by
@@ -135,6 +149,7 @@ $Report = [ordered]@{
 }
 $AllInventory = @()
 $Stop = ''
+$SafetyHalt = ''   # first safety halt of this run; carried to every later suite/configuration through -PriorResultsDir
 
 function Invoke-AvbStep {
     param([string]$Label, [scriptblock]$Call)
@@ -201,7 +216,7 @@ try {
             $transcript = Join-Path $ReportDir ("console-{0}-{1}.log" -f $Configuration, $Suite)
             $t0 = Get-Date
             Start-Transcript -Path $transcript -Force | Out-Null
-            try { $rc = Invoke-AvbStep "Run-Tests-CI $Suite $Configuration" { & $RunCI -Suite $Suite -Configuration $Configuration -ResultsJson $json } }
+            try { $rc = Invoke-AvbStep "Run-Tests-CI $Suite $Configuration" { & $RunCI -Suite $Suite -Configuration $Configuration -ResultsJson $json -PriorResultsDir $ReportDir } }
             finally { Stop-Transcript | Out-Null }
             $res = Read-AvbSuiteResults -Path $json -Suite $Suite -Configuration $Configuration -ObservedExit $rc
             $s = [ordered]@{ suite = $Suite; exitCode = $rc; resultsJson = $json; console = $transcript; durationSeconds = [Math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
@@ -213,6 +228,11 @@ try {
             $cfgInventory += $inv
             $nf = @($inv | Where-Object { $_.Category -eq 'Failure' }).Count; $nb = @($inv | Where-Object { $_.Category -eq 'Blocked' }).Count
             Write-Host ("`n{0} / {1}: exit {2}, overall {3}, executed {4}, failures {5}, blocked {6}" -f $Configuration, $Suite, (Format-AvbExitCode $rc), $res.Doc.overall, $res.Doc.executedCount, $nf, $nb)
+            $h = Get-AvbSafetyHalt $res.Doc
+            if ($h) {
+                Write-Host "[HALT] $Configuration/${Suite}: $h --- later Init/Mutating tests BLOCKED (also in later suites and configurations of this run); ReadOnly tests continue" -ForegroundColor Red
+                if (-not $SafetyHalt) { $SafetyHalt = "$Configuration/${Suite}: $h" }
+            }
             $why = Get-AvbStopReason $res.Doc
             if ($why) { $Stop = "$Configuration/${Suite}: $why"; break }
         }
@@ -239,6 +259,7 @@ try {
     if (-not $rel.Ok) { Write-Host "[WARN] HIL lock not released: $($rel.Why)" -ForegroundColor Yellow }
     $Report.finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
     $Report.stopped = $(if ($Stop) { $Stop } else { $null })
+    $Report.safetyHalt = $(if ($SafetyHalt) { $SafetyHalt } else { $null })
     $Report.inventory = @($AllInventory)
     ($Report | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $ReportDir 'local-suites-report.json') -Encoding UTF8
 
@@ -257,10 +278,11 @@ try {
     $gap = @($AllInventory | Where-Object { $_.Category -eq 'NotExecuted' })
     Write-Host "Required but NOT executed - coverage gaps, run is INCOMPLETE ($($gap.Count)):"
     $gap | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Reason -AutoSize | Out-String -Width 250 | Write-Host
+    if ($SafetyHalt) { Write-Host "[HALT] $SafetyHalt --- Init/Mutating tests after it were BLOCKED; the run is nonpassing" -ForegroundColor Red }
     if ($Stop) { Write-Host "[STOPPED] $Stop" -ForegroundColor Red }
     Write-Host "Report: $(Join-Path $ReportDir 'local-suites-report.json')"
 }
 
 $executed = @($AllInventory | Where-Object { $_.Executed }).Count
-if ($Stop -or @($AllInventory | Where-Object { $_.Category -ne 'NotFailure' }).Count -gt 0 -or $executed -eq 0) { exit 1 }
+if ($Stop -or $SafetyHalt -or @($AllInventory | Where-Object { $_.Category -ne 'NotFailure' }).Count -gt 0 -or $executed -eq 0) { exit 1 }
 exit 0

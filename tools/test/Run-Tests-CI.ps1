@@ -1679,8 +1679,9 @@ if ($IsHardwareSuite) {
         $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnLogsDir $logsDir
         if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
     }
-    # Left behind only if this process dies before Complete-AvbRun; a later suite then halts (Get-AvbPriorHalt).
-    $RunMarkerPath = Join-Path $logsDir 'run-in-progress.json'
+    # Left behind only if this process dies before Complete-AvbRun; a later suite then halts (Get-AvbPriorHalt).  Next to
+    # the results document: hil.yml per-suite LogsDir, LocalSuites' report directory (its -PriorResultsDir).
+    $RunMarkerPath = Join-Path (Split-Path -Parent $ResultsJsonPath) 'run-in-progress.json'
     ([ordered]@{ suite = $Suite; configuration = $Configuration; pid = $PID; startedUtc = $AvbRunStartedUtc } | ConvertTo-Json) |
         Set-Content -LiteralPath $RunMarkerPath -Encoding UTF8
 }
