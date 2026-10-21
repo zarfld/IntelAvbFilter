@@ -28,11 +28,12 @@ $tempScript     = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.ps1'
 # Lines using double quotes expand $scriptPath/$transcriptPath/$Configuration/$Action here.
 $tempLines = @(
     "Start-Transcript -Path '$transcriptPath' -Force | Out-Null",
-    '$_installExitCode = 0',
+    '$_installExitCode = 1',
     'try {',
+    '    $global:LASTEXITCODE = $null',
     "    & '$scriptPath' -Configuration $Configuration -$Action",
-    '    $_installExitCode = $LASTEXITCODE',
-    '    if ($null -eq $_installExitCode) { $_installExitCode = 0 }',
+    '    $_installExitCode = $global:LASTEXITCODE',
+    '    if ($null -eq $_installExitCode) { Write-Host "Install-Driver.ps1 ended without an exit code - treated as failure" -ForegroundColor Red; $_installExitCode = 1 }',
     '} catch {',
     '    Write-Host "EXCEPTION during Install-Driver.ps1: $_" -ForegroundColor Red',
     '    $_installExitCode = 1',

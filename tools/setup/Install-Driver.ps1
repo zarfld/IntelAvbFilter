@@ -756,7 +756,11 @@ try {
         Write-Host "  .\Setup-Driver.ps1 -Configuration Debug -EnableTestSigning -InstallDriver" -ForegroundColor Cyan
         Write-Host "  .\Setup-Driver.ps1 -Configuration Release -InstallDriver" -ForegroundColor Cyan
     }
-    
+
+    # Explicit success: without it the process exit code is whatever the LAST native command left behind (e.g.
+    # sc.exe query 1060), and callers (Install-Driver-Elevated.ps1, LocalSuites.ps1) would misread the result.
+    exit 0
+
 } catch {
     Write-Failure "Error: $($_.Exception.Message)"
     Write-Host $_.ScriptStackTrace -ForegroundColor Red

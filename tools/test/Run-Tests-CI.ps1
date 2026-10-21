@@ -231,6 +231,7 @@ function Invoke-DriverHealthCheck {
 
 # Canonical verdict vocabulary (PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE),
 # shared with Parse-TestResults.ps1 and Convert-Logs-To-JUnit.ps1.  See docs/testing/test-verdict-contract.md
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')    # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
 . (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
 
 # ===========================
@@ -1204,10 +1205,12 @@ function Get-AvbSourceIdentity {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
+        Reset-AvbExitCode
         $rev = & git -C $script:repoRoot rev-parse HEAD 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $rev) { $res.Error = 'git rev-parse HEAD failed'; return $res }
+        if (-not (Test-AvbExitSuccess (Get-AvbExitCode)) -or -not $rev) { $res.Error = 'git rev-parse HEAD failed'; return $res }
+        Reset-AvbExitCode
         $st = & git -C $script:repoRoot status --porcelain --untracked-files=no 2>$null
-        if ($LASTEXITCODE -ne 0) { $res.Error = 'git status failed'; return $res }
+        if (-not (Test-AvbExitSuccess (Get-AvbExitCode))) { $res.Error = 'git status failed'; return $res }
         $res.Revision = ([string]$rev).Trim()
         $res.Dirty = [bool]$st
         # Under GitHub Actions the checkout must be exactly the authorized commit.  .github/workflows/hil.yml runs on
@@ -1746,8 +1749,9 @@ if (Test-Path $junitScript) {
     $junitArgs = @{ LogsDir = $logsDir; RunDate = $runDateStr; OutputFile = $junitOut
                     Configuration = $Configuration; SuiteName = $Suite }
     if ($IsOptionalVerification) { $junitArgs.OptionalVerification = $true }
+    Reset-AvbExitCode
     & $junitScript @junitArgs -ErrorAction SilentlyContinue
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-AvbExitSuccess (Get-AvbExitCode))) {
         Write-Note "JUnit conversion returned non-zero (may be no logs yet -- skipped tests only)"
     }
     if (Test-Path $junitOut) {
