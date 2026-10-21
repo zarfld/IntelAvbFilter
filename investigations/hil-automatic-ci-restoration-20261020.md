@@ -1,4 +1,92 @@
-# HIL orchestration: CI → deploy-staging → hil.yml (2026-10-20, iteration 6: review corrections)
+# HIL orchestration: CI → deploy-staging → hil.yml
+
+## Iteration 7 (2026-10-21): final automatic-HIL safety corrections
+
+Offline only; no HIL execution, driver operation, runner change or workflow dispatch by the agent. Baseline at start:
+`ef23036` (= `a86a791` + README bot commit). Q committed the agent's work in progress as `93079b2` and `df1ce24`
+(pushed). Tested tree: `df1ce24` + uncommitted `tests/unit/ci/test_hil_suite_safety.ps1`
+(blob `5df164d6`, SHA256 `50741501…bcd5cf`). **All results below are offline/synthetic — no hardware verification.**
+
+### A — Init excluded from unattended HIL (registrations kept)
+
+- `Run-Tests-CI.ps1`: the seven Init entries (test_ioctl_routing, test_minimal_ioctl, test_clock_config,
+  test_clock_working, test_direct_clock, test_dev_lifecycle, test_hw_state_machine) moved from the automatic lists to
+  `$Hardware*CoverageGaps` as dated `TEMPORARY POLICY EXCLUSION 2026-10-21` (reported as skipped
+  TC-HIL-COVERAGE-GAP-001); `$HilTestSafety` classes unchanged.
+- Gate (defence in depth): `Get-AvbHilGateDecision -InitUnattendedApproved` (default `$false`); under GitHub Actions an
+  Init entry is BLOCKED (`$HilInitUnattendedApproved = $false`); attended runs outside GitHub Actions still run it.
+- Real-pass requirement unchanged (zero-pass Hardware* run exits 1); every automatic suite keeps ReadOnly entries
+  (Mandatory 12, Unit 33, Integration 11).
+- Effects of INIT_DEVICE are **source-derived, UNVERIFIED on hardware** (now stated in the gap reasons and gate reason).
+- RED/GREEN: test_hil_safety_gate 34/38 on `ef23036` (032, 038, 016, 039 fail; HEAD executed the Init fake
+  unattended, exit 0) → 38/38. test_hil_suite_safety FX-009 (Init fixture issuing SETUP_TAS) RED on `ef23036`
+  (reachable) → GREEN; FX-002's fixture class changed Init→ReadOnly because it tests helper scanning in a runnable entry.
+- test_ioctl_routing evaluation (execution path, not name): sends only ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER,
+  GET_CLOCK_CONFIG; INIT_DEVICE appears only in a name table. Qualifications: OPEN_ADAPTER re-points the driver's
+  global default context (initializes an adapter only below PTP_READY — AvbEnsureDeviceReady guard, #343) and the
+  test deletes `HKLM\Software\IntelAvb\LastIOCTL`. Eligible for ReadOnly with a documented exception; **not
+  reclassified** (Q to decide); stays excluded.
+
+### B — Driver identity
+
+- Physical jobs record `authorizedDriverSha256` (job env from `vars.HIL_AUTHORIZED_DRIVER_SHA256`), the service
+  `ImagePath` and its file SHA256, driver-file LastWriteTimeUtc, last boot time and `runningImageEvidence`.
+- hil-acceptance PASSED only if staged == installed == operator-authorized == ImagePath file (64-hex, one value for
+  all bundles); otherwise verdict **STAGED_BUILD_NOT_TESTED** (exit 1). No reinstall/restart is attempted.
+- Running-driver identity limitation: the driver reports no build identity (`IOCTL_VERSION` = Major/Minor/Build/
+  Revision, Revision default 0, plus a debug flag); the loaded image is not hashed. Best available evidence:
+  ImagePath file == hashed file and file unchanged since boot (reported, not gated); a driver file replaced after load
+  without a restart is not detectable this way.
+
+### C — workflow_run vs update-readme-status.yml race
+
+update-readme-status.yml runs on the same CI completion and pushes a README-only commit with GITHUB_TOKEN (no CI of
+its own). authorize now accepts head_sha ≠ tip only if head_sha is an ancestor of the tip, the compare is complete and
+the aggregate diff touches only `README.md` (rename sources included); authorship is not trusted. Covered offline:
+both interleavings, two metadata commits (granted); superseding code, bot-authored workflow change, rename from code,
+non-ancestor, incomplete compare, unreadable tip (denied). **Live:** hil.yml run #4 (39553368697, upstream CI #501
+`333a993`) was denied with "master is not a protected branch; head_sha is superseded on master by a non-metadata change
+in df1ce242…: tools/test/Run-Tests-CI.ps1" — the real compare API shape and the attempt-specific staging lookup
+(run_attempt present for attempt 1) behaved as modelled. The metadata-only grant path has not occurred live yet.
+Second-order: protecting master will block the README bot's direct push (needs PR flow or a bypass).
+
+### D — CI evidence
+
+- CI #499 (39544188625, `a86a791`, attempt 1): **success** — Unit ×4 (windows-latest/2022 × Debug/Release), Integration
+  ×4, Acceptance, Traceability Coverage, Compliance Report and **Deploy to Staging** all pass; artifact
+  `intel-avb-filter-driver-release` present; `traceability-unit-*` artifacts are 1,399 bytes each (single current-run
+  summary).
+- Per-test evidence for the two corrected failures is **not** publicly available: job logs (403) and artifacts (401)
+  need authentication and no test-reporter check runs exist. "Run hardware-independent unit tests = success" on all
+  four legs proves test_health_sentinel ran and passed; for test_scripts_consolidate it is consistent with PASS or a
+  silently SKIPPED missing binary (non-mandatory suites skip missing binaries). Confirm with `gh run view 39544188625
+  --log`.
+- CI #501 (`333a993`) success; #500 (`93079b2`) and #502 (`df1ce24`) were running at the time of writing.
+- hil.yml #3 (after #499) denied: master unprotected only; #4 see C. No physical job ran.
+
+### Mutation campaign (offline trust-boundary/safety tests — not hardware evidence)
+
+27 workflow mutations: 26 killed by the intended test, 1 (M6 extra dispatch trigger) killed by REAL-009 instead of
+REAL-014 (the job guard still keeps dispatch off the runner); 0 survived, 0 timeout, 0 inconclusive. Runner Init gate:
+2/2 killed (G1 → 016, 039; G2 → 032, 033). No leftover processes afterwards.
+
+### Regression (offline, `df1ce24` + suite-safety fixture change)
+
+Syntax gate OK; hosted-Unit ps1 tests 12/12 suites green (hil_safety_gate 38/38, hil_binary_provenance 41/41,
+health_sentinel 7/7, …); test_hil_trust_boundary 40/40; test_hil_suite_safety 18/18; test_scripts_consolidate Debug and
+Release 16/16; test_hil_dispatch_paths 3/10 (unchanged characterization).
+
+### Remaining activation blockers
+
+master protection (and README bot push path); `HIL_AUTHORIZED_DRIVER_SHA256`, `HIL_BUGCHECK_ACK`, `HIL_HALT=false`;
+staged build must be installed by the operator for a PASSED staging verdict; runner credential ACL
+(`CodexSandboxUsers` → `actions-runner\.credentials*`); unresolved #328 send-path risk; inline hil.yml authorization is
+not a runner-wide boundary for the elevated runner; Init approval and test_ioctl_routing classification (Q);
+controlled targeted-HIL path (claude.md rule 10) vs "no manually dispatched HIL workflow" — conflict for Q.
+
+---
+
+## Iteration 6 (2026-10-20): review corrections
 
 Offline only. Not committed, not pushed. No driver operation, runner change, HIL execution or workflow dispatch.
 Base: HEAD `d4de77d` (= iteration 5 working tree, committed by Q). The two-workflow design is accepted; this

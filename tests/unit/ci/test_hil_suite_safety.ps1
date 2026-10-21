@@ -227,6 +227,7 @@ int main(){ return 0; }'
     'fx_spawn'    = New-Src 'src\fx_spawn.c'    'int main(){ CreateProcessA(0,"other.exe",0,0,0,0,0,0,0,0); }'
     'fx_spawnhlp' = New-Src 'src\fx_spawnhlp.c' 'int main(){ return FxRun(); }'
     'fx_mutblk'   = New-Src 'src\fx_mutblk.c'   'int main(){ DeviceIoControl(h, IOCTL_AVB_SETUP_TAS, 0,0,0,0,0,0); }'
+    'fx_initblk'  = New-Src 'src\fx_initblk.c'  'int main(){ DeviceIoControl(h, IOCTL_AVB_SETUP_TAS, 0,0,0,0,0,0); }'
     'fx_uncl'     = New-Src 'src\fx_uncl.c'     'int main(){ DeviceIoControl(h, IOCTL_AVB_SETUP_FP, 0,0,0,0,0,0); }'
     'fx_clean'    = New-Src 'src\fx_clean.c'    '/* IOCTL_AVB_SETUP_TAS in a comment only */ int main(){ printf("IOCTL_AVB_SETUP_TAS"); return FxRead(h); }'
     'fx_abi'      = New-Src 'src\fx_abi.c'      'static const unsigned codes[] = { IOCTL_AVB_SETUP_TAS, IOCTL_AVB_SETUP_FP }; int main(){ return codes[0] != 0; }'
@@ -250,8 +251,8 @@ $ps1Exec = New-Src 'src\fx_exec.ps1' '& $exePath --all'
 $ps1Ok   = New-Src 'src\fx_ok.ps1'   '# & $exe in a comment only
 Write-Host ok'
 $fxMap = @{}; foreach ($k in $fxSrc.Keys) { $fxMap[$k] = @($fxSrc[$k]) }
-$fxReg = @{ fx_direct = 'ReadOnly'; fx_helper = 'Init'; fx_fnnum = 'Mutating:Target'; fx_rawcode = 'ReadOnly'; fx_include = 'ReadOnly'
-            fx_spawn = 'ReadOnly'; fx_spawnhlp = 'ReadOnly'; fx_mutblk = 'Mutating'; fx_clean = 'ReadOnly'; fx_abi = 'ReadOnly'
+$fxReg = @{ fx_direct = 'ReadOnly'; fx_helper = 'ReadOnly'; fx_fnnum = 'Mutating:Target'; fx_rawcode = 'ReadOnly'; fx_include = 'ReadOnly'
+            fx_spawn = 'ReadOnly'; fx_spawnhlp = 'ReadOnly'; fx_mutblk = 'Mutating'; fx_initblk = 'Init'; fx_clean = 'ReadOnly'; fx_abi = 'ReadOnly'
             fx_qavstub = 'Mutating:Target'; fx_ltmiss = 'Mutating:Target'; fx_wprok = 'ReadOnly'; fx_wprbad = 'ReadOnly'
             "ps1:$ps1Tsn" = 'ReadOnly'; "ps1:$ps1Exec" = 'ReadOnly'; "ps1:$ps1Ok" = 'ReadOnly' }   # fx_uncl: unclassified
 $SpawnExceptions['fx_wprok']  = $SpawnExceptions['test_zero_polling_overhead']
@@ -268,7 +269,8 @@ tc_check 'TEST-HILSUITE-FX-007-process-creation-through-helper' ((Get-KindCount 
 tc_check 'TEST-HILSUITE-FX-008-ps1-entry-tsn-code-and-nested-binary' `
     (((Get-KindCount (FxRun1 "ps1:$ps1Tsn") 'Tsn') -ge 1) -and ((Get-KindCount (FxRun1 "ps1:$ps1Exec") 'Spawn') -ge 1) -and (@(FxRun1 "ps1:$ps1Ok").Count -eq 0)) `
     ("tsn: {0} | exec: {1} | ok: {2}" -f (Show (FxRun1 "ps1:$ps1Tsn")), (Show (FxRun1 "ps1:$ps1Exec")), (Show (FxRun1 "ps1:$ps1Ok")))
-tc_check 'TEST-HILSUITE-FX-009-gate-blocked-mutating-and-unclassified-entries-are-not-reachable' ((@(FxRun1 'fx_mutblk').Count -eq 0) -and (@(FxRun1 'fx_uncl').Count -eq 0)) ("{0} | {1}" -f (Show (FxRun1 'fx_mutblk')), (Show (FxRun1 'fx_uncl')))
+# Init is gate-blocked unattended (temporary policy exclusion 2026-10-21), so even a TSN-issuing Init entry is unreachable.
+tc_check 'TEST-HILSUITE-FX-009-gate-blocked-mutating-unattended-init-and-unclassified-entries-are-not-reachable' ((@(FxRun1 'fx_mutblk').Count -eq 0) -and (@(FxRun1 'fx_initblk').Count -eq 0) -and (@(FxRun1 'fx_uncl').Count -eq 0)) ("{0} | {1} | {2}" -f (Show (FxRun1 'fx_mutblk')), (Show (FxRun1 'fx_initblk')), (Show (FxRun1 'fx_uncl')))
 tc_check 'TEST-HILSUITE-FX-010-comments-strings-and-read-only-helpers-are-clean' (@(FxRun1 'fx_clean').Count -eq 0) (Show (FxRun1 'fx_clean'))
 tc_check 'TEST-HILSUITE-FX-011-code-table-without-deviceiocontrol-is-info-only' (((Get-KindCount (FxRun1 'fx_abi') 'Tsn') -eq 0) -and ((Get-KindCount (FxRun1 'fx_abi') 'Info') -ge 1)) (Show (FxRun1 'fx_abi'))
 tc_check 'TEST-HILSUITE-FX-012-verified-driver-stub-is-info-and-missing-handler-fails-closed' `
