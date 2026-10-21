@@ -392,6 +392,7 @@ $HardwareUnitTests = @(
     "test_ioctl_phc_epoch",        # PHC epoch management -- (#196)
     "test_ioctl_xstamp",           # cross-timestamp (PTP/system correlation) -- (#198)
     "test_ioctl_xstamp_v2",        # V2 ABI + HIL reachability (#340)
+    "test_ioctl_phc_crosstimestamp_v2",  # PHC cross-timestamp V2 ABI (#340)
     "test_ioctl_abi",              # IOCTL ABI backward-compatibility
     # test_tsn_ioctl_handlers removed (#328 F23): its build entry is Disabled (KM placeholder); a stale binary
     # of it ran here as ReadOnly and issued SETUP_TAS/FP/PTM.  The UM test test_tsn_ioctl_handlers_um stays

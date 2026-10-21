@@ -274,11 +274,24 @@ $BenchmarkTests = @(
     foreach ($t in $BenchmarkTests) { 
 #    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     }
+
+
+    $CISuiteFailed = @()
     # tools\test\Run-Tests-CI.ps1
-    $CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
+    #$CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
+    #
+    $CISuite = @("HardwareUnit", "HardwareIntegration", "HardwareMutation", "HardwareMandatory")
     #$CISuite =@("All")
     foreach ($Suite in $CISuite) { 
-    .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
+        $SuiteStartTime = Get-Date
+        .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
+        $SuiteEndTime = Get-Date
+
+        # find failed tests in .\logs for this suite and add names of tests that failed to $CISuiteFailed
+    } 
+
+    foreach ($t in $CISuiteFailed) { 
+        .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     } 
 
     #$FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
