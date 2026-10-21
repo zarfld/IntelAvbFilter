@@ -315,7 +315,8 @@ function New-StateFile([string]$Path, [switch]$AllSupportedEnabled) {
 
 function Invoke-Sandbox {
     param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [int]$Timeout = 60,
-          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled, [string]$PriorResultsDir = '', [string]$SafetyFile = '')
+          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled, [string]$PriorResultsDir = '', [string]$SafetyFile = '',
+          [string]$LockFile = '', [string]$RunnerArgs = '')
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -341,7 +342,8 @@ function Invoke-Sandbox {
         ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $mDir 'test-build-manifest.json') -Encoding UTF8
     $envs = [ordered]@{
         AVB_TEST_SANDBOX = '1'; AVB_TEST_ADAPTER_STATE_FILE = $stateFile; AVB_TEST_SANDBOX_CLASSES = $Classes
-        AVB_TEST_SANDBOX_MUTATES = $Mutates; AVB_TEST_HIL_SAFETY_FILE = $SafetyFile
+        AVB_TEST_SANDBOX_MUTATES = $Mutates; AVB_TEST_HIL_SAFETY_FILE = $SafetyFile; AVB_TEST_HIL_LOCK_FILE = $LockFile
+        GITHUB_RUN_ID = ''; GITHUB_RUN_ATTEMPT = ''; GITHUB_JOB = ''
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = 'sandbox-rev'; AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
@@ -355,6 +357,14 @@ function Invoke-Sandbox {
     $testsLit = ($Tests | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', '
     $logsArg = if ($NoLogsDir) { '' } else { "-LogsDir '$logs'" }
     if ($PriorResultsDir) { $logsArg += " -PriorResultsDir '$PriorResultsDir'" }
+    if ($RunnerArgs) { $logsArg += " $RunnerArgs" }
+    # Unattended sandbox runs own a CI lock exactly like a hil.yml job (deploy step took it); everything else lets the
+    # runner acquire its own sandbox lock.
+    if ($envs['GITHUB_ACTIONS'] -eq 'true' -and -not $LockFile) {
+        $lf = Join-Path $dir 'ci-hil.lock'
+        ([ordered]@{ kind = 'ci'; label = 'sandbox job'; host = $env:COMPUTERNAME; pid = 1; runId = 'sbx-run'; runAttempt = '1'; job = 'sbx-job'; acquiredUtc = '2026-10-21T00:00:00Z' } | ConvertTo-Json) | Set-Content -LiteralPath $lf -Encoding UTF8
+        $lines += "`$env:AVB_TEST_HIL_LOCK_FILE = '$lf'"; $lines += "`$env:GITHUB_RUN_ID = 'sbx-run'"; $lines += "`$env:GITHUB_RUN_ATTEMPT = '1'"; $lines += "`$env:GITHUB_JOB = 'sbx-job'"
+    }
     $lines += "& '$TreeRunner' -Suite $Suite -Tests @($testsLit) -TestTimeoutSeconds $Timeout -Configuration Debug $logsArg"
     $lines += 'exit $LASTEXITCODE'
     $wrapper = Join-Path $dir 'wrapper.ps1'
@@ -655,6 +665,38 @@ tc_check 'TEST-HILGATE-050-safety-halt-persists-to-a-later-run-with-a-clean-base
      $eP3.trigger.suite -eq 'HardwareUnit' -and $null -ne $eP3.initialState -and $null -ne $eP3.lastKnownState -and @($eP3.evidence).Count -ge 1 -and
      (Get-RanCount $rP4 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP4 '^RAN test_sbfake_ro ') -eq 1 -and $rP4.Out -match 'machine safety record HALTED') `
     ("record={0} verdict={1} trigger={2}; run2: {3}" -f $sP3.State, $(if ($eP3) { $eP3.verdict }), $(if ($eP3) { $eP3.trigger.executable }), (Tail $rP4))
+
+# --- Run Q: exclusive hardware access = lock OWNED by this execution (tools/lib/HilLock.ps1; Q 2026-10-21) --------
+$tLockDrop = New-Fake 'test_sbfake_lockdrop' "Remove-Item -LiteralPath `$env:AVB_TEST_HIL_LOCK_FILE -Force"
+function New-LockFile([string]$Name, $Owner) { $p = Join-Path $Tmp $Name; ($Owner | ConvertTo-Json) | Set-Content -LiteralPath $p -Encoding UTF8; return $p }
+# 051: another live owner (PID 4 = System: alive, never an ancestor) -> bounded wait, then Init BLOCKED; ReadOnly runs; lock untouched
+$lfOther = New-LockFile 'other.lock' ([ordered]@{ kind = 'local'; label = 'another operator run'; host = $env:COMPUTERNAME; pid = 4; acquiredUtc = '2026-10-21T00:00:00Z' })
+$rQ1 = Invoke-Sandbox 'runQ1' @($tInit, $tRo) -AllSupportedEnabled -LockFile $lfOther -RunnerArgs '-HilLockWaitSeconds 0'
+tc_check 'TEST-HILGATE-051-lock-owned-by-another-process-blocks-mutation-readonly-continues' `
+    ((Get-RanCount $rQ1 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rQ1 '^RAN test_sbfake_ro ') -eq 1 -and
+     $rQ1.Out -match 'state-integrity halt \(machine lock not owned by this execution' -and ((Get-Content $lfOther -Raw) -match 'another operator run')) (Tail $rQ1)
+# 052: lock absent -> the runner acquires it before mutation and releases it at completion
+$lfAbsent = Join-Path $Tmp 'absent.lock'
+$rQ2 = Invoke-Sandbox 'runQ2' @($tInit, $tRo) -AllSupportedEnabled -LockFile $lfAbsent
+tc_check 'TEST-HILGATE-052-absent-lock-is-acquired-before-mutation-and-released' `
+    ((Get-RanCount $rQ2 '^RAN test_sbfake_init ') -eq 1 -and $rQ2.Out -match 'machine lock acquired by this run' -and -not (Test-Path $lfAbsent)) (Tail $rQ2)
+# 053: lock lost during execution -> no further mutation, LOCK_LOST persisted in the machine safety record
+$sfLost = Join-Path $Tmp 'safety_lost.json'; $null = Initialize-AvbHilSafetyRecord -Path $sfLost -Operator 'test' -Reason 'TEST-HILGATE-053'
+$rQ3 = Invoke-Sandbox 'runQ3' @($tLockDrop, $tInit, $tRo2) -AllSupportedEnabled -LockFile (Join-Path $Tmp 'lost.lock') -SafetyFile $sfLost
+$sQ3 = Read-AvbHilSafetyState -Path $sfLost
+tc_check 'TEST-HILGATE-053-lock-lost-stops-mutation-and-is-recorded' `
+    ((Get-RanCount $rQ3 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rQ3 '^RAN test_sbfake_ro2 ') -eq 1 -and $rQ3.Out -match 'machine lock lost' -and
+     $sQ3.State -ne 'CLEAR' -and @(@($sQ3.Record.events) | Where-Object { $_.verdict -eq 'LOCK_LOST' }).Count -eq 1) ("record={0}; {1}" -f $sQ3.State, (Tail $rQ3))
+# 054: unattended (GitHub Actions): owned only by the same run/attempt/job; absent lock is NOT acquired (fail closed)
+$lfCiOther = New-LockFile 'ci_other.lock' ([ordered]@{ kind = 'ci'; label = 'other job'; host = $env:COMPUTERNAME; pid = 1; runId = 'sbx-run'; runAttempt = '1'; job = 'other-job'; acquiredUtc = '2026-10-21T00:00:00Z' })
+$ghEnv = @{ GITHUB_ACTIONS = 'true'; GITHUB_RUN_ID = 'sbx-run'; GITHUB_RUN_ATTEMPT = '1'; GITHUB_JOB = 'sbx-job' }
+$rQ4 = Invoke-Sandbox 'runQ4' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $ghEnv -LockFile $lfCiOther
+$lfCiAbsent = Join-Path $Tmp 'ci_absent.lock'
+$rQ5 = Invoke-Sandbox 'runQ5' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $ghEnv -LockFile $lfCiAbsent
+tc_check 'TEST-HILGATE-054-unattended-run-needs-its-own-job-lock-and-never-acquires-one' `
+    ((Get-RanCount $rQ4 '^RAN test_sbfake_tgt ') -eq 0 -and $rQ4.Out -match 'not owned by this execution[^\r\n]*other-job' -and
+     (Get-RanCount $rQ5 '^RAN test_sbfake_tgt ') -eq 0 -and -not (Test-Path $lfCiAbsent) -and (Get-RanCount $rQ5 '^RAN test_sbfake_ro ') -eq 1) `
+    ("otherJob: {0} ### absent: {1}" -f (Tail $rQ4), (Tail $rQ5))
 
 # 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
 # distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).

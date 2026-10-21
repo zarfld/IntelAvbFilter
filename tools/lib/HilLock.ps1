@@ -106,6 +106,40 @@ function Exit-AvbHilLock {
     return @{ Ok = $true; Why = '' }
 }
 
+# Process ancestry from the OS (parent chain, nearest first); bounded, cycle-safe.
+function Get-AvbProcessAncestors {
+    param([int]$ProcessId = $PID)
+    $out = @(); $seen = @{}; $id = $ProcessId
+    for ($i = 0; $i -lt 32; $i++) {
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+        if ($null -eq $p -or $p.ParentProcessId -eq 0 -or $seen.ContainsKey([int]$p.ParentProcessId)) { break }
+        $id = [int]$p.ParentProcessId; $seen[$id] = $true; $out += $id
+    }
+    return ,$out
+}
+
+# Does the CURRENT execution context own the machine lock?  @{ Owned; How = self|ancestor|ci-job; Owner; Why }.
+# Never inferred from the lock's existence: CI = this process's own run/attempt/job (GitHub Actions environment);
+# local = the owner's PID is this process (in-process call, e.g. LocalSuites -> Run-Tests-CI) or one of its OS
+# ancestors (child launched by the owner, e.g. Run-Tests-Elevated).  $GitHub: @{ runId; runAttempt; job } or $null.
+function Resolve-AvbHilLockContext {
+    param([string]$Path = (Get-AvbHilLockPath), [int]$ProcessId = $PID, [int[]]$Ancestors = $null, $GitHub = $null)
+    $owner = Read-AvbHilLock -Path $Path
+    if ($null -eq $owner) { return @{ Owned = $false; How = ''; Owner = $null; Why = 'machine lock absent' } }
+    if ($owner.kind -eq 'unreadable' -or -not $owner.kind) { return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock ownership cannot be verified ($($owner.label))" } }
+    if ($owner.host -and $owner.host -ne $env:COMPUTERNAME) { return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock written by host '$($owner.host)'" } }
+    if ($owner.kind -eq 'ci') {
+        if ($null -ne $GitHub -and [string]$owner.runId -eq [string]$GitHub.runId -and [string]$owner.runAttempt -eq [string]$GitHub.runAttempt -and [string]$owner.job -eq [string]$GitHub.job) {
+            return @{ Owned = $true; How = 'ci-job'; Owner = $owner; Why = '' } }
+        return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock held by CI job $($owner.runId)/$($owner.runAttempt)/$($owner.job), not by this execution" }
+    }
+    if ($null -ne $GitHub) { return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock held by a $($owner.kind) owner '$($owner.label)', not by this CI job" } }
+    if ([string]$owner.pid -eq [string]$ProcessId) { return @{ Owned = $true; How = 'self'; Owner = $owner; Why = '' } }
+    if ($null -eq $Ancestors) { $Ancestors = Get-AvbProcessAncestors -ProcessId $ProcessId }
+    if (@($Ancestors) -contains [int]$owner.pid) { return @{ Owned = $true; How = 'ancestor'; Owner = $owner; Why = '' } }
+    return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock held by $($owner.kind) '$($owner.label)' (pid $($owner.pid)), which is not this process or one of its ancestors" }
+}
+
 # ---------------------------------------------------------------------------------------------------------
 # Machine-wide HIL safety record (Q 2026-10-21): %ProgramData%\IntelAvbFilter-hil-safety.json, schema avb-hil-safety/1.
 # Shared by every process, configuration and run on this machine (Debug, Release, LocalSuites, CI).

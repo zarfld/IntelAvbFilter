@@ -125,6 +125,31 @@ $p12 = Join-Path $Tmp 'none.json'
 $a12 = Add-AvbHilSafetyEvent -Path $p12 -Event (New-Event 'FAILED(TIMEOUT)')
 tc_check 'TEST-SAFETYREC-012-event-without-record-creates-halted-record' ($a12.Ok -and (Read-AvbHilSafetyState -Path $p12).State -eq 'HALTED') ("ok={0}" -f $a12.Ok)
 
+# 013-016: lock OWNERSHIP of the current execution context (Q 2026-10-21) - never "a lock exists".
+# Resolve-AvbHilLockContext: @{ Owned; How; Owner; Why }.  Ancestry injected (OS parent chain in production).
+$have = [bool](Get-Command Resolve-AvbHilLockContext -ErrorAction SilentlyContinue)
+if (-not $have) { tc_check 'TEST-SAFETYREC-013-lock-context-function-present' $false 'Resolve-AvbHilLockContext missing in tools/lib/HilLock.ps1' }
+else {
+    $cur = Read-AvbHilLock -Path $lockPath                                   # held by this test process (local, our PID)
+    $self   = Resolve-AvbHilLockContext -Path $lockPath -ProcessId $PID -Ancestors @() -GitHub $null
+    $child  = Resolve-AvbHilLockContext -Path $lockPath -ProcessId 999999 -Ancestors @(4242, [int]$cur.pid, 1) -GitHub $null
+    $alien  = Resolve-AvbHilLockContext -Path $lockPath -ProcessId 999999 -Ancestors @(4242, 1) -GitHub $null
+    $none   = Resolve-AvbHilLockContext -Path (Join-Path $Tmp 'nolock.lock') -ProcessId $PID -Ancestors @() -GitHub $null
+    tc_check 'TEST-SAFETYREC-013-local-lock-owned-by-self-or-ancestor-only-never-by-discovery' `
+        ($self.Owned -and $self.How -eq 'self' -and $child.Owned -and $child.How -eq 'ancestor' -and -not $alien.Owned -and -not $none.Owned -and $none.Why -match 'absent') `
+        ("self={0}/{1} child={2}/{3} alien={4}:{5} none={6}:{7}" -f $self.Owned, $self.How, $child.Owned, $child.How, $alien.Owned, $alien.Why, $none.Owned, $none.Why)
+    $ciLock = Join-Path $Tmp 'ci.lock'
+    ([ordered]@{ kind = 'ci'; label = 'hil Debug'; host = $env:COMPUTERNAME; pid = 1; runId = '77'; runAttempt = '1'; job = 'hil-debug'; acquiredUtc = '2026-10-21T00:00:00Z' } | ConvertTo-Json) | Set-Content -LiteralPath $ciLock
+    $ciSame  = Resolve-AvbHilLockContext -Path $ciLock -ProcessId 5 -Ancestors @() -GitHub @{ runId = '77'; runAttempt = '1'; job = 'hil-debug' }
+    $ciOther = Resolve-AvbHilLockContext -Path $ciLock -ProcessId 5 -Ancestors @() -GitHub @{ runId = '77'; runAttempt = '1'; job = 'hil-release' }
+    $ciLocal = Resolve-AvbHilLockContext -Path $ciLock -ProcessId 1 -Ancestors @() -GitHub $null
+    tc_check 'TEST-SAFETYREC-014-ci-lock-owned-only-by-the-same-run-attempt-and-job' `
+        ($ciSame.Owned -and $ciSame.How -eq 'ci-job' -and -not $ciOther.Owned -and -not $ciLocal.Owned) ("same={0} otherJob={1} localWithSamePid={2}:{3}" -f $ciSame.Owned, $ciOther.Owned, $ciLocal.Owned, $ciLocal.Why)
+    $badLock = Join-Path $Tmp 'bad.lock'; '{ garbage' | Set-Content -LiteralPath $badLock
+    $bad = Resolve-AvbHilLockContext -Path $badLock -ProcessId $PID -Ancestors @() -GitHub $null
+    tc_check 'TEST-SAFETYREC-015-unverifiable-lock-is-not-owned' (-not $bad.Owned -and $bad.Why -match 'unreadable|cannot be verified') ("owned={0} why={1}" -f $bad.Owned, $bad.Why)
+}
+
 $null = Exit-AvbHilLock -Owner $lock.Owner -Path $lockPath
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""; Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan

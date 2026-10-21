@@ -69,6 +69,11 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$PriorResultsDir = "",
 
+    # Bounded wait for the machine lock when no owner context of this execution holds it (attended runs only; under
+    # GitHub Actions the job's deploy step must already own it - never acquired here).
+    [Parameter(Mandatory=$false)]
+    [int]$HilLockWaitSeconds = 60,
+
     # NOT SUPPORTED here: this runner never captured DebugView output although it accepted the switch.  Kernel
     # capture for one test is tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView.  The switch is
     # kept only to reject it loudly instead of silently running without a capture.
@@ -1187,6 +1192,10 @@ function Write-AvbResultsJson {
 function Complete-AvbRun {
     param([int]$Code, [string]$Overall)
     if ($script:RunMarkerPath) { Remove-Item -LiteralPath $script:RunMarkerPath -Force -ErrorAction SilentlyContinue }
+    if ($script:HilLockAcquired) {
+        $rel = Exit-AvbHilLock -Owner $script:HilLockAcquired -Path $script:HilLockPath
+        if ($rel.Ok) { Write-Note "Machine lock released" } else { Write-Fail "machine lock NOT released: $($rel.Why)" }
+    }
     try {
         $p = Write-AvbResultsJson -ExitCode $Code -Overall $Overall
         Write-Note "Results JSON: $p"
@@ -1709,6 +1718,31 @@ if ($IsHardwareSuite) {
     } else { $HilSafetyPath = Get-AvbHilSafetyPath }
     $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
     Write-Note "Machine safety record: $($HilSafetyState.State) ($HilSafetyPath) $($HilSafetyState.Why)"
+
+    # Exclusive hardware access: the machine lock must be OWNED by this execution (Resolve-AvbHilLockContext: same CI
+    # run/attempt/job, or this process / an OS ancestor holds it) - its mere existence never authorizes.  Attended:
+    # acquire it (bounded wait) when no owner context holds it, release it at completion.  GitHub Actions: never acquired
+    # here (the job's deploy step owns it); otherwise fail closed.  Not owned -> every Init/Mutating test BLOCKED.
+    $HilLockPath = if ($IsSandbox -and $env:AVB_TEST_HIL_LOCK_FILE) { $env:AVB_TEST_HIL_LOCK_FILE } elseif ($IsSandbox) { Join-Path $logsDir 'sandbox-hil.lock' } else { Get-AvbHilLockPath }
+    $HilGitHubContext = if ($UnderGitHubActions) { @{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB } } else { $null }
+    $HilLockAcquired = $null
+    $lockCtx = Resolve-AvbHilLockContext -Path $HilLockPath -GitHub $HilGitHubContext
+    if ($lockCtx.Owned) {
+        Write-Note "Machine lock owned by this execution ($($lockCtx.How): $($lockCtx.Owner.kind) '$($lockCtx.Owner.label)')"
+    } elseif (-not $UnderGitHubActions) {
+        $acq = Enter-AvbHilLock -Kind 'local' -Label "Run-Tests-CI $Suite $Configuration" -Path $HilLockPath -WaitSeconds $HilLockWaitSeconds
+        if ($acq.Ok) { $HilLockAcquired = $acq.Owner; Write-Note "Machine lock acquired by this run ($HilLockPath); released at completion" }
+        else { Set-HilHalt "machine lock not owned by this execution: $($lockCtx.Why); not acquired within ${HilLockWaitSeconds}s: $($acq.Why)" }
+    } else {
+        Set-HilHalt "machine lock not owned by this execution: $($lockCtx.Why) (an unattended run never acquires it)"
+    }
+}
+
+# Before every non-ReadOnly item: the lock must still be owned by this execution.
+function Test-AvbHilLockStillOwned {
+    if ($script:HilLockAcquired) { return (Test-AvbHilLockHeld -Owner $script:HilLockAcquired -Path $script:HilLockPath) }
+    $c = Resolve-AvbHilLockContext -Path $script:HilLockPath -GitHub $script:HilGitHubContext
+    return @{ Ok = $c.Owned; Why = $c.Why }
 }
 
 if ($IsHardwareSuite) {
@@ -1874,6 +1908,10 @@ foreach ($WorkItem in $WorkItems) {
     if ($IsHardwareSuite) {
         $hilClass = Get-AvbHilTestClass $TestName
         $script:AvbItem.Class = $hilClass
+        if ($hilClass -ne 'ReadOnly' -and -not $stateHalt) {
+            $still = Test-AvbHilLockStillOwned
+            if (-not $still.Ok) { Set-HilHalt "machine lock lost during execution before ${exeName}: $($still.Why)" -Verdict 'LOCK_LOST' }
+        }
         $gate = Get-AvbHilGateDecision -Entry $TestName -Class $hilClass -Target $targetDid -Halt $stateHalt `
                     -TargetCount $HilTargets.Count -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions `
                     -InitUnattendedApproved $HilInitUnattendedApproved
