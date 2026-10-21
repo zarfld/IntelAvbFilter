@@ -83,3 +83,24 @@ function Get-AvbVerdictCounts {
     }
     return $counts
 }
+
+# Per-testcase verdict lines in raw test output (same line grammar as Get-AvbVerdictCounts), for the runner's
+# machine-readable results: @{ Id; Verdict; AdapterIndex; AdapterDid; AdapterLabel; Detail }.
+# Adapter tags: "[Adapter0[VEN_8086:DEV_125B]] TC-X-001" or "TC-X-001/adapter:0"; absent = $null (not guessed).
+function Get-AvbTestcaseVerdicts {
+    param([string[]]$Lines)
+    $rx = '^\s*\[(' + $script:AvbVerdictTagPattern + ')\]\s+(?:\[Adapter(\d+)\[([^\]]*)\]\]\s+)?((?:TC|IT|VV|UT|REG|TEST)-[\w-]+)(?:/adapter:(\d+))?\s*(.*)$'
+    $out = @()
+    foreach ($line in $Lines) {
+        if ($line -notmatch $rx) { continue }
+        $g = @($Matches[1], $Matches[2], $Matches[3], $Matches[4], $Matches[5], $Matches[6])   # before any further -match
+        $idx = $null
+        if ($g[1]) { $idx = [int]$g[1] } elseif ($g[4]) { $idx = [int]$g[4] }
+        $label = if ($g[2]) { $g[2] } else { $null }
+        $did = $null
+        if ($label -and $label -match 'DEV_([0-9A-Fa-f]{4})') { $did = '0x' + $Matches[1].ToUpperInvariant() }
+        $out += ,([ordered]@{ Id = $g[3]; Verdict = (Resolve-AvbVerdict -Tag $g[0] -Reason $g[5])
+                              AdapterIndex = $idx; AdapterDid = $did; AdapterLabel = $label; Detail = ([string]$g[5] -replace '^[\s:]+', '').Trim() })
+    }
+    return ,$out
+}

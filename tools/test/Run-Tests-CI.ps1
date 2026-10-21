@@ -1029,17 +1029,126 @@ function Compare-AvbHilState {
 
 # Records a failure-class verdict that the runner itself determined (counted, shown, and written as a log
 # the JUnit converter turns into a <failure>).
+# ---------------------------------------------------------------------------------------------------------
+# Machine-readable results (-ResultsJson).  Every result row keeps the console columns Name/Status/Exit and adds
+# what a consumer needs without parsing console text: entry, artifact + SHA256, exact arguments, safety class,
+# target DID, whether the process was started, the observed exit code ($null = none observed, never success),
+# log path, reason and the per-testcase verdict lines (testcase ID + adapter).  Work-item context comes from
+# $script:AvbItem (set by the dispatch loop; $null outside it).
+# ---------------------------------------------------------------------------------------------------------
+$script:AvbItem = $null
+
+# Runner status -> results verdict.  Distinct categories are kept distinct; an unknown status throws (a silent
+# default would turn a new status into a pass).
+function ConvertTo-AvbRunnerVerdict {
+    param([string]$Status)
+    switch -Exact ($Status) {
+        'PASSED'                      { return 'PASSED' }
+        'FAILED'                      { return 'FAILED' }
+        'FAILED(SKIP_ONLY)'           { return 'FAILED' }
+        'FAILED(TIMEOUT)'             { return 'FAILED(TIMEOUT)' }
+        'FAILED(INCONCLUSIVE)'        { return 'INCONCLUSIVE' }
+        'INCOMPLETE(NOT_IMPLEMENTED)' { return 'INCOMPLETE' }
+        'FAILED(INFRA)'               { return 'INFRA_FAILURE' }
+        'FAILED(BUILD)'               { return 'INFRA_FAILURE' }
+        'INFRA_FAILURE'               { return 'INFRA_FAILURE' }
+        'CLEANUP_FAILED'              { return 'CLEANUP_FAILED' }
+        'BLOCKED'                     { return 'BLOCKED(SAFETY)' }
+        'BLOCKED(SAFETY)'             { return 'BLOCKED(SAFETY)' }
+        'BLOCKED(PROVENANCE)'         { return 'BLOCKED(PROVENANCE)' }
+        'SKIPPED'                     { return 'SKIPPED' }
+        'SKIPPED(INFRA)'              { return 'SKIPPED' }
+        'COVERAGE-GAP'                { return 'COVERAGE-GAP' }
+    }
+    throw "Unknown runner status '$Status' - map it in ConvertTo-AvbRunnerVerdict (tools/test/Run-Tests-CI.ps1)"
+}
+
+# -Check: a runner check attributed to the current item (post-test state, driver health); not a test execution.
+function Add-AvbResult {
+    param([string]$Name, [string]$Status, $Exit, [string]$Reason = '', [string]$LogPath = '', [string[]]$Lines = @(), [switch]$Check)
+    $script:results += [PSCustomObject]@{ Name = $Name; Status = $Status; Exit = $Exit }
+    $it = $script:AvbItem
+    $executed = ($null -ne $it -and $it.Executed -and -not $Check)
+    $r = [ordered]@{
+        name = $Name; entry = $(if ($it) { $it.Entry } else { $Name }); suite = $Suite; configuration = $Configuration
+        verdict = (ConvertTo-AvbRunnerVerdict $Status); status = $Status; executed = $executed; check = [bool]$Check
+        exitCode = $(if ($executed) { $it.ProcessExit } else { $null })
+        artifact = $(if ($it) { $it.Artifact } else { $null }); artifactSha256 = $(if ($it) { $it.Sha256 } else { $null })
+        arguments = $(if ($it) { $it.Arguments } else { '' }); safetyClass = $(if ($it) { $it.Class } else { '' })
+        targetDid = $(if ($it -and $it.Target) { $it.Target } else { $null })
+        reason = $Reason; logPath = $(if ($LogPath) { $LogPath } elseif ($executed) { $it.LogPath } else { $null })
+        startedUtc = $(if ($executed) { $it.StartedUtc } else { $null }); durationSeconds = $(if ($executed) { $it.DurationSeconds } else { $null })
+        testcases = @()
+    }
+    $tcLines = if ($Lines.Count -gt 0) { $Lines } elseif ($executed -and $null -ne $it.Output) { @($it.Output -split "`r?`n") } else { @() }
+    $r.testcases = @(Get-AvbTestcaseVerdicts -Lines $tcLines)
+    $script:AvbResultRecords += ,$r
+}
+
+# Atomic write (temp file + rename) of the results document; returns the path.
+function Write-AvbResultsJson {
+    param([int]$ExitCode, [string]$Overall)
+    $records = @($script:AvbResultRecords)
+    $counts = [ordered]@{}
+    foreach ($v in 'PASSED', 'FAILED', 'FAILED(TIMEOUT)', 'BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)', 'SKIPPED', 'COVERAGE-GAP',
+                   'INCOMPLETE', 'INCONCLUSIVE', 'INFRA_FAILURE', 'CLEANUP_FAILED') {
+        $counts[$v] = @($records | Where-Object { $_.verdict -eq $v }).Count
+    }
+    $src = $script:SourceIdentity
+    $evidence = if ($script:UnderGitHubActions -and -not $script:IsSandbox) { 'ci' }
+                elseif ($script:IsSandbox) { 'sandbox' }
+                elseif ($src -and $src.Mode -eq 'local' -and $src.Dirty) { 'local-pre-commit' }
+                else { 'local' }
+    $adapters = @()
+    if ($script:HilBaseline -and $script:HilBaseline.Adapters) {
+        $adapters = @($script:HilBaseline.Adapters | ForEach-Object { [ordered]@{ instanceId = $_.InstanceId; did = $_.Did; name = $_.Name; filterBound = $_.FilterBound } })
+    }
+    $doc = [ordered]@{
+        schema = 'avb-runner-results/1'; producer = 'tools/test/Run-Tests-CI.ps1'
+        suite = $Suite; configuration = $Configuration; evidenceClass = $evidence; host = $env:COMPUTERNAME
+        startedUtc = $script:AvbRunStartedUtc; finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
+        github = $(if ($script:UnderGitHubActions) { [ordered]@{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; sha = $env:GITHUB_SHA
+                                                                 expectedRevision = $env:AVB_HIL_EXPECTED_REVISION; workflow = $env:GITHUB_WORKFLOW } } else { $null })
+        source = $(if ($src) { [ordered]@{ ok = $src.Ok; revision = $src.Revision; dirty = $src.Dirty; mode = $src.Mode; digest = $src.Digest; error = $src.Error } } else { $null })
+        buildManifest = $(if ($script:BuildManifest) { [ordered]@{ ok = $script:BuildManifest.Ok; path = $script:BuildManifest.Path; error = $script:BuildManifest.Error } } else { $null })
+        driverIdentity = [ordered]@{ source = 'environment (HIL_DRIVER_*), not verified by this runner'; version = $env:HIL_DRIVER_VERSION; sha256 = $env:HIL_DRIVER_SHA256 }
+        adapters = $adapters; stateHalt = $script:stateHalt
+        executedCount = @($records | Where-Object { $_.executed }).Count; notExecutedCount = @($records | Where-Object { -not $_.executed -and -not $_.check }).Count
+        counts = $counts; overall = $Overall; exitCode = $ExitCode; records = $records
+    }
+    $dir = Split-Path -Parent $script:ResultsJsonPath
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $tmp = "$($script:ResultsJsonPath).tmp-$PID"
+    ($doc | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $script:ResultsJsonPath -Force
+    return $script:ResultsJsonPath
+}
+
+# Final exit of a completed run: results document first, then the exit code it records.
+function Complete-AvbRun {
+    param([int]$Code, [string]$Overall)
+    try {
+        $p = Write-AvbResultsJson -ExitCode $Code -Overall $Overall
+        Write-Note "Results JSON: $p"
+        if ($ExportGitHubEnv) { "AVB_RESULTS_JSON=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+    } catch {
+        Write-Fail "results JSON could not be written: $($_.Exception.Message) --- run reported as failed"
+        exit 1
+    }
+    exit $Code
+}
+
 function Add-HilFailureRecord {
-    param([string]$Display, [string]$Status, [string]$Stem, [string]$Line)
+    param([string]$Display, [string]$Status, [string]$Stem, [string]$Line, [switch]$Check)
     $script:failedTests++
     $script:totalTests++
-    $script:results += [PSCustomObject]@{ Name = $Display; Status = $Status; Exit = 'N/A' }
     Write-Host "  $Line" -ForegroundColor Red
     $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
     $p = Join-Path $script:logsDir ("{0}.exe_{1}.log" -f $Stem, $ts)
     $i = 2
     while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Stem, $i, $ts); $i++ }
     $Line | Set-Content -LiteralPath $p -Encoding utf8
+    Add-AvbResult -Name $Display -Status $Status -Exit 'N/A' -Reason $Line -LogPath $p -Lines @($Line) -Check:$Check
 }
 
 function Set-HilHalt {
@@ -1131,7 +1240,6 @@ function Add-HilCoverageGap {
     param([string]$Entry, [string]$Reason)
     $script:skippedTests++
     $script:coverageGapTests++
-    $script:results += [PSCustomObject]@{ Name = $Entry; Status = 'COVERAGE-GAP'; Exit = 'N/A' }
     $line = "[SKIP] TC-HIL-COVERAGE-GAP-001: {0} excluded from automatic HIL --- {1}" -f $Entry, $Reason
     Write-Host "  $line" -ForegroundColor DarkYellow
     $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -1139,6 +1247,7 @@ function Add-HilCoverageGap {
     $i = 2
     while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Entry, $i, $ts); $i++ }
     $line | Set-Content -LiteralPath $p -Encoding utf8
+    Add-AvbResult -Name $Entry -Status 'COVERAGE-GAP' -Exit 'N/A' -Reason $Reason -LogPath $p -Lines @($line)
 }
 
 # ---------------------------------------------------------------------------------------------------------
