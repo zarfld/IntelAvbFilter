@@ -199,7 +199,8 @@ tc_check 'TEST-RESULTSJSON-011-passed-record-carries-exit-artifact-hash-log-and-
      $recPass.logPath -and (Test-Path -LiteralPath $recPass.logPath) -and ($recPass.safetyClass -eq 'ReadOnly') -and ($recPass.configuration -eq 'Debug') -and
      (@($recPass.testcases).Count -eq 2) -and (@($recPass.testcases)[0].AdapterDid -eq '0x125B') -and (@($recPass.testcases)[1].AdapterIndex -eq 1)) (Show-Rec $recPass)
 tc_check 'TEST-RESULTSJSON-012-failure-keeps-the-exact-exit-code-and-failing-testcase' `
-    (($recFail.verdict -eq 'FAILED') -and ($recFail.exitCode -eq 3) -and (@($recFail.testcases | Where-Object { $_.Id -eq 'TC-RJ-010' -and $_.Verdict -eq 'FAIL' -and $_.AdapterDid -eq '0x1533' }).Count -eq 1)) (Show-Rec $recFail)
+    (($recFail.verdict -eq 'FAILED') -and ($recFail.exitCode -eq 3) -and (@($recFail.testcases).Count -eq 1) -and (@($recFail.testcases)[0] -isnot [array]) -and
+     (@($recFail.testcases)[0].Id -eq 'TC-RJ-010') -and (@($recFail.testcases)[0].Verdict -eq 'FAIL') -and (@($recFail.testcases)[0].AdapterDid -eq '0x1533')) (Show-Rec $recFail)
 tc_check 'TEST-RESULTSJSON-013-timeout-is-executed-with-no-observed-exit-code' `
     (($recTime.verdict -eq 'FAILED(TIMEOUT)') -and $recTime.executed -and ($null -eq $recTime.exitCode)) (Show-Rec $recTime)
 tc_check 'TEST-RESULTSJSON-014-incomplete-and-inconclusive-are-distinct-categories' `
@@ -212,6 +213,7 @@ tc_check 'TEST-RESULTSJSON-016-blocked-items-are-recorded-as-not-executed-with-t
      ($rA.Out -notmatch 'MUST NOT RUN')) ("mutating: {0} | noprov: {1}" -f (Show-Rec $recMut), (Show-Rec $recNoProv))
 tc_check 'TEST-RESULTSJSON-017-cleanup-failure-is-a-check-record-separate-from-the-test-verdict' `
     (($recClean.verdict -eq 'PASSED') -and ($recState.Count -eq 1) -and -not $recState[0].executed -and ($recState[0].name -match 'rj_cleanup') -and
+     (@($recState[0].testcases).Count -eq 1) -and (@($recState[0].testcases)[0] -isnot [array]) -and
      (@($recState[0].testcases)[0].Id -eq 'TC-INFRA-STATE-001')) ("test: {0} | state records: {1}" -f (Show-Rec $recClean), $recState.Count)
 $c = $rA.Doc.counts
 tc_check 'TEST-RESULTSJSON-018-summary-counts-executed-vs-not-executed-and-overall-matches-exit' `

@@ -275,6 +275,9 @@ $UnitTests = @(
     "ps1:tests/unit/ioctl/test_health_sentinel.ps1",            # TEST-SENTINEL-001..006: #328 behavioral health sentinel
     "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1",            # TEST-HILGATE-001..031: HIL safety gate + state integrity (sandboxed, no driver; #343)
     "ps1:tests/unit/ci/test_hil_binary_provenance.ps1",         # TEST-HILPROV: build manifest + dispatch provenance gate (sandboxed, no driver; #328 F23)
+    "ps1:tests/unit/ci/test_runner_results_json.ps1",           # TEST-RESULTSJSON: machine-readable runner results (sandboxed, no driver)
+    "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
+    "ps1:tests/unit/ci/test_local_suites.ps1",                  # TEST-LOCALSUITES: local pre-commit HIL orchestration + DbgView reproduction contract (offline)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
     "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator
@@ -1094,7 +1097,7 @@ function Add-AvbResult {
         testcases = @()
     }
     $tcLines = if ($Lines.Count -gt 0) { $Lines } elseif ($executed -and $null -ne $it.Output) { @($it.Output -split "`r?`n") } else { @() }
-    $r.testcases = @(Get-AvbTestcaseVerdicts -Lines $tcLines)
+    $r.testcases = Get-AvbTestcaseVerdicts -Lines $tcLines   # already an array (unary-comma return); @() would nest it
     $script:AvbResultRecords += ,$r
 }
 

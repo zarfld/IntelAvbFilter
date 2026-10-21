@@ -100,7 +100,8 @@ tc_check 'TEST-NATIVE-EXIT-009-vs-compile-temp-files-unique-per-invocation' `
 # assigns it unqualified, or ends with an exit code that may be $null.
 # ---------------------------------------------------------------------------------------------------------
 $chain = @('tools\archive\deprecated\LocalSuites.ps1', 'tools\build\Build-Driver.ps1', 'tools\build\Build-Tests.ps1', 'tools\vs_compile.ps1',
-           'tools\setup\Install-Driver.ps1', 'tools\setup\Install-Driver-Elevated.ps1', 'tools\test\Run-Tests-CI.ps1', 'tools\test\Run-Tests-Elevated.ps1')
+           'tools\setup\Install-Driver.ps1', 'tools\setup\Install-Driver-Elevated.ps1', 'tools\test\Run-Tests-CI.ps1', 'tools\test\Run-Tests-Elevated.ps1',
+           'tools\test\Test-DriverPreFlight.ps1')
 $unq = @(); $nullExit = @()
 foreach ($rel in $chain) {
     $path = Join-Path $RepoRoot $rel
