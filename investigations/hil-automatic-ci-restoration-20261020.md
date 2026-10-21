@@ -358,3 +358,45 @@ master run). Automatic HIL: **NO-GO** until Q decides/sets:
 4. Accept the runner-wide residual risk of section 5 (or move to an organization runner group).
 5. #328 send-path issue remains open; IntelAvbFilter service observed **Stopped** on this workstation (read-only
    observation during this iteration, see section 8).
+
+---
+
+## Iteration 8 (2026-10-21) — P0 addendum: LocalSuites + pre-commit HIL-TDD (offline only)
+
+Boundary kept: no build/install of the driver, no HIL, no runner/Windows/GitHub change, no commit/push by the agent
+(Q committed the agent's edits locally while they landed: 18 commits after 6f666d8, none pushed).
+
+### Root cause of FullSuite_20261021_095005.log (blank exit codes)
+- Immediate: `LocalSuites.ps1` assigned an unqualified `$LASTEXITCODE = $null`. Run as documented
+  (`& LocalSuites.ps1 *>&1 | Tee-Object`), that is a script-scope variable shadowing the automatic one for every child
+  script; native calls write only `$global:LASTEXITCODE`, so callers read `$null` (printed blank).
+  Reproduced only with `&` invocation, not with `powershell -File` (global scope).
+- Systemic: each script treated a missing exit code as success (`-ne 0 -and $null -ne`, `exit $null` = 0,
+  Install-Driver-Elevated mapped null to 0, Run-Tests-CI counted `$null` exit as PASSED).
+- Fix: `tools/lib/NativeExit.ps1` (global-only reads, missing = failure) in the whole chain; static AST guard.
+
+### Delivered (all offline RED -> GREEN)
+| Area | Files | Tests |
+|---|---|---|
+| Exit codes | lib/NativeExit.ps1; vs_compile (unique temp files), Build-Driver, Build-Tests, Install-Driver(-Elevated), Run-Tests-CI, Run-Tests-Elevated, Test-DriverPreFlight | test_native_exit_codes 11/11 (HEAD: 1/11) |
+| Local pre-commit provenance | lib/SourceDigest.ps1; Build-Tests manifest (provenanceMode, sourceDigest, builtUtc injected); Run-Tests-CI local mode | test_hil_binary_provenance 52/52 (042-052 new; baseline RED for 042-045, 047, 048, 050, 051; 046/052 invariance) |
+| Results JSON | Run-Tests-CI `-ResultsJson` (avb-runner-results/1), TestVerdict `Get-AvbTestcaseVerdicts`; `-CaptureDbgView` now rejected (was silently ignored) | test_runner_results_json 16/16 (baseline: functions absent) |
+| LocalSuites | rewritten; order unchanged; preflight `installed == built`; results JSON inventory; stop rules; per-configuration operator-confirmed reproduction | test_local_suites 16/16 (baseline: functions absent) |
+| DbgView | Run-Tests-Elevated: `-Suite` routes through Run-Tests-CI gates; capture confirmed before test (else test not run); per-PID stop verified; MISSING/EMPTY/CAPTURED; sidecar `.capture.json`; bounded child timeout | test_local_suites 013-015 |
+Regression: hilgate 38/38, sentinel 7/7, verdict 13/13, syntax gate 9/9.
+
+### Defects found in the agent's own work this iteration (fixed, for the record)
+- Commit 8e76ddd contains a dangling line-continuation backtick in Build-Tests.ps1 (manifest call swallowed the
+  following `if` block; parser accepted it); fixed in c58b139. Not a usable bisect point.
+- `@(f)` around a unary-comma return nests arrays (results `testcases`, test inventory) - fixed; tests tightened.
+
+### Limitations (UNVERIFIED until physical validation)
+- Nothing here ran against hardware, a real build, a real install or a real DebugView; all evidence is synthetic.
+- Loaded driver image is not hashed: after Reinstall without reboot, "running image == installed file" is UNPROVEN.
+- DbgView `/l` creating the log promptly and `Stop-Process` not losing buffered lines: UNVERIFIED.
+- Results document is written only when Run-Tests-CI completes; early exits leave none (LocalSuites treats that as stop).
+
+### NOT started (P0 "Restore fully automatic staged-driver HIL CI")
+CI-safe installer mode; signed Debug+Release staging packages + manifest; hil.yml install/pre/post verification,
+testable serialization, removal of HIL_AUTHORIZED_DRIVER_SHA256 / HIL_HALT / HIL_BUGCHECK_ACK, crash-evidence
+handling, HIL_NOT_EXECUTED; master-protection policy; the 16 CI RED/GREEN cases. Needs Q decisions (see report).
