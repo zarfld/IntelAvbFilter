@@ -165,6 +165,7 @@ foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1','Lib-AvbLifecycle.
 }
 New-Item -ItemType Directory -Path (Join-Path $Sandbox 'tools\lib') -Force | Out-Null
 Copy-Item $VerdictLib (Join-Path $Sandbox 'tools\lib\TestVerdict.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Sandbox 'tools\lib\NativeExit.ps1')
 # Replace the lifecycle library (it opens \\.\IntelAvbFilter) with inert stubs.
 @'
 function Get-AvbLifecycleSnapshot { return $null }

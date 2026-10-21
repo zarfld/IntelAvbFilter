@@ -291,6 +291,7 @@ foreach ($f in 'Run-Tests-CI.ps1', 'Convert-Logs-To-JUnit.ps1') {
 }
 New-Item -ItemType Directory -Path (Join-Path $Tree 'tools\lib') -Force | Out-Null
 Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $Tree 'tools\lib\TestVerdict.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Tree 'tools\lib\NativeExit.ps1')
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
