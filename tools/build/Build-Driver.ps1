@@ -73,6 +73,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
 
 # Helper functions
 function Write-Step {
@@ -241,6 +242,7 @@ if (-not $SkipDriver) {
     Write-Host "  SDK TargetPlatformVersion: $targetPlatformVersion" -ForegroundColor Gray
     Write-Host "  SDK bin path (mc.exe): $sdkBinPath" -ForegroundColor Gray
 
+    Reset-AvbExitCode
     & $msbuildPath $solutionFile `
         /t:$buildCmd `
         /p:Configuration=$Configuration `
@@ -252,9 +254,10 @@ if (-not $SkipDriver) {
         /m `
         /verbosity:minimal
     
-    if ($LASTEXITCODE -ne 0) {
-        Write-Failure "Driver build failed! Exit code: $LASTEXITCODE"
-        exit $LASTEXITCODE
+    $rc = Get-AvbExitCode
+    if (-not (Test-AvbExitSuccess $rc)) {
+        Write-Failure "Driver build failed! Exit code: $(Format-AvbExitCode $rc)"
+        exit (Get-AvbFailureExitCode $rc)
     }
     
     Write-Success "Driver build completed"
@@ -298,11 +301,13 @@ if ($Sign -and -not $SkipDriver) {
         # $outputDir, to avoid the obj\ stamped-INF/missing-sys issue.
         $infCatDir = if (Test-Path $wdkPkgDir) { $wdkPkgDir } else { $outputDir }
         Write-Host "Generating CAT file from: $infCatDir" -ForegroundColor Gray
+        Reset-AvbExitCode
         & $inf2catPath /driver:"$infCatDir" /os:10_X64
+        $rc = Get-AvbExitCode
 
-        if ($LASTEXITCODE -ne 0) {
-            Write-Failure "CAT generation failed! Exit code: $LASTEXITCODE"
-            exit $LASTEXITCODE
+        if (-not (Test-AvbExitSuccess $rc)) {
+            Write-Failure "CAT generation failed! Exit code: $(Format-AvbExitCode $rc)"
+            exit (Get-AvbFailureExitCode $rc)
         }
 
         $catFile = Get-ChildItem $infCatDir -Filter "*.cat" -ErrorAction SilentlyContinue |
@@ -335,11 +340,13 @@ if ($Sign -and -not $SkipDriver) {
     
     # Sign CAT file
     Write-Host "Signing CAT file..." -ForegroundColor Gray
+    Reset-AvbExitCode
     & $signtoolPath sign /v /fd SHA256 /s My /n $certName /t http://timestamp.digicert.com $catFile
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Failure "Signing failed! Exit code: $LASTEXITCODE"
-        exit $LASTEXITCODE
+    $rc = Get-AvbExitCode
+
+    if (-not (Test-AvbExitSuccess $rc)) {
+        Write-Failure "Signing failed! Exit code: $(Format-AvbExitCode $rc)"
+        exit (Get-AvbFailureExitCode $rc)
     }
     
     Write-Success "Driver signed successfully"
@@ -385,13 +392,15 @@ if ($BuildTests) {
         $testBuildCmd = 'call "{0}" && pushd "{1}" && nmake -f "{2}" && popd' -f $vcvarsPath, $makefileDir, $makefileLeaf
 
         try {
+            Reset-AvbExitCode
             & cmd.exe /d /s /c $testBuildCmd | Out-Null
-            
-            if ($LASTEXITCODE -eq 0) {
+            $rc = Get-AvbExitCode
+
+            if (Test-AvbExitSuccess $rc) {
                 Write-Success "$testName build succeeded"
                 $successCount++
             } else {
-                Write-Failure "$testName build failed (Exit code: $LASTEXITCODE)"
+                Write-Failure "$testName build failed (Exit code: $(Format-AvbExitCode $rc))"
                 $failCount++
             }
         } catch {

@@ -50,6 +50,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
 
 # Calculate repository root from script location
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -2181,19 +2182,20 @@ foreach ($Test in $TestsToBuild) {
         }
         
         # Execute build
+        Reset-AvbExitCode
         $result = & $BuildScript -BuildCmd $BuildCmd 2>&1
         
-        $compileExit = $LASTEXITCODE
-        if ($compileExit -eq 0 -and (Test-Path $OutputPath)) {
+        $compileExit = Get-AvbExitCode
+        if ((Test-AvbExitSuccess $compileExit) -and (Test-Path $OutputPath)) {
             Write-Host "  SUCCESS: $OutputPath created" -ForegroundColor Green
             $SucceededTests += $Test.Name
             $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $OutputPath }
         } else {
-            Write-Host "  FAILED: Compiler returned error code $compileExit" -ForegroundColor Red
+            Write-Host "  FAILED: Compiler returned error code $(Format-AvbExitCode $compileExit)" -ForegroundColor Red
             # Print compiler output so CI logs show the actual errors
             $result | Where-Object { $_ -match "error|warning" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
             $FailedTests += $Test.Name
-            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "compiler exit code $compileExit or output missing"; OutputPath = $null }
+            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "compiler exit code $(Format-AvbExitCode $compileExit) or output missing"; OutputPath = $null }
         }
         
     } elseif ($Test.Type -eq "nmake") {
@@ -2254,8 +2256,9 @@ foreach ($Test in $TestsToBuild) {
             $ErrorActionPreference = 'SilentlyContinue'
             $output = @()
             try {
+                Reset-AvbExitCode
                 $output = @(nmake /f $MakeFile 2>&1)
-                $buildExitCode = $LASTEXITCODE
+                $buildExitCode = Get-AvbExitCode
             } finally {
                 $ErrorActionPreference = $prevErrorPref
             }
@@ -2264,19 +2267,19 @@ foreach ($Test in $TestsToBuild) {
                 $output | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
             }
             
-            if ($buildExitCode -eq 0) {
+            if (Test-AvbExitSuccess $buildExitCode) {
                 Write-Host "  SUCCESS: nmake build completed" -ForegroundColor Green
                 $SucceededTests += $Test.Name
                 $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $null }
             } else {
-                Write-Host "  FAILED: nmake returned error code $buildExitCode" -ForegroundColor Red
+                Write-Host "  FAILED: nmake returned error code $(Format-AvbExitCode $buildExitCode)" -ForegroundColor Red
                 if (-not $ShowDetails -and $output -and $output.Count -gt 0) {
                     Write-Host "  nmake output (tail):" -ForegroundColor DarkYellow
                     $tailStart = [Math]::Max(0, $output.Count - 30)
                     $output[$tailStart..($output.Count - 1)] | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
                 }
                 $FailedTests += $Test.Name
-                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "nmake exit code $buildExitCode"; OutputPath = $null }
+                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "nmake exit code $(Format-AvbExitCode $buildExitCode)"; OutputPath = $null }
             }
         } finally {
             Pop-Location
@@ -2334,11 +2337,13 @@ $srcRevision = $null; $srcDirty = $null
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
+    Reset-AvbExitCode
     $rev = & git -C $RepoRoot rev-parse HEAD 2>$null
-    if ($LASTEXITCODE -eq 0 -and $rev) {
+    if ((Test-AvbExitSuccess (Get-AvbExitCode)) -and $rev) {
         $srcRevision = ([string]$rev).Trim()
+        Reset-AvbExitCode
         $dirty = & git -C $RepoRoot status --porcelain --untracked-files=no 2>$null
-        if ($LASTEXITCODE -eq 0) { $srcDirty = [bool]$dirty }
+        if (Test-AvbExitSuccess (Get-AvbExitCode)) { $srcDirty = [bool]$dirty }
     } else {
         Write-Host "[MANIFEST] WARNING: git revision unavailable -- sourceRevision recorded as null" -ForegroundColor Yellow
     }
