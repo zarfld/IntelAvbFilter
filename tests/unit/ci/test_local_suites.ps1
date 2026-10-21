@@ -92,7 +92,9 @@ function Get-InvCategory([string]$n) { return @($inv | Where-Object { $_.Name -e
 tc_check 'TEST-LOCALSUITES-002-failed-timeout-infra-incomplete-inconclusive-and-unknown-are-failures' `
     (@(@('t_fail', 't_time', 't_infra', 't_incomplete', 't_inconcl', 't_new') | Where-Object { (Get-InvCategory $_) -ne 'Failure' }).Count -eq 0) `
     (($inv | ForEach-Object { "$($_.Name)=$($_.Category)" }) -join ' ')
-tc_check 'TEST-LOCALSUITES-003-skipped-and-coverage-gap-are-not-converted-to-failures' (((Get-InvCategory 't_skip') -eq 'NotFailure') -and ((Get-InvCategory 't_gap') -eq 'NotFailure') -and ((Get-InvCategory 't_pass') -eq 'NotFailure')) `
+# Requirement changed 2026-10-21 (P0 full HIL coverage): a coverage gap is a required test NOT executed - its own
+# nonpassing category (never NotFailure, never conflated with an executed failure or a safety block).
+tc_check 'TEST-LOCALSUITES-003-skipped-stays-nonfailure-coverage-gap-is-required-not-executed' (((Get-InvCategory 't_skip') -eq 'NotFailure') -and ((Get-InvCategory 't_gap') -eq 'NotExecuted') -and ((Get-InvCategory 't_pass') -eq 'NotFailure')) `
     ("skip={0} gap={1} pass={2}" -f (Get-InvCategory 't_skip'), (Get-InvCategory 't_gap'), (Get-InvCategory 't_pass'))
 $rowF = @($inv | Where-Object { $_.Name -eq 't_fail.exe' })[0]
 tc_check 'TEST-LOCALSUITES-004-testcase-adapter-configuration-and-exit-code-survive' `

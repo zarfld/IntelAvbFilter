@@ -289,7 +289,7 @@ function New-StateFile([string]$Path, [switch]$AllSupportedEnabled) {
 
 function Invoke-Sandbox {
     param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [int]$Timeout = 60,
-          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled)
+          [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled, [string]$PriorResultsDir = '')
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -327,6 +327,7 @@ function Invoke-Sandbox {
     }
     $testsLit = ($Tests | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', '
     $logsArg = if ($NoLogsDir) { '' } else { "-LogsDir '$logs'" }
+    if ($PriorResultsDir) { $logsArg += " -PriorResultsDir '$PriorResultsDir'" }
     $lines += "& '$TreeRunner' -Suite $Suite -Tests @($testsLit) -TestTimeoutSeconds $Timeout -Configuration Debug $logsArg"
     $lines += 'exit $LASTEXITCODE'
     $wrapper = Join-Path $dir 'wrapper.ps1'
@@ -467,16 +468,72 @@ tc_check 'TEST-HILGATE-030-sandbox-requires-isolated-logs-dir' `
     (($rH.Exit -eq 1) -and ($rH.Out -match 'AVB_TEST_SANDBOX=1 requires -LogsDir') -and (Get-RanCount $rH 'RAN') -eq 0 -and
      -not (Test-Path (Join-Path $Tree 'logs'))) (Tail $rH)
 
-# --- Run I: the suite's own list (no -Tests) reports every declared coverage gap as a skipped case -----------
-# Sandbox mode refuses every real binary (TEST-HILGATE-028), so nothing from the real list executes.
+# --- Run I: the suite's own list (no -Tests) reports every declared coverage gap as a FAILING case -----------
+# Requirement changed 2026-10-21 (P0 full HIL coverage): a required test that is not executed (fixture/restoration or
+# infrastructure missing) is never a skip and never green.  Sandbox mode refuses every real binary (TEST-HILGATE-028),
+# so nothing from the real list executes.
 $rI = Invoke-Sandbox 'runI' @() -Suite 'HardwareMandatory'
 $gapI = @(if ($null -ne $gapTables['HardwareMandatory']) { $gapTables['HardwareMandatory'].Keys })
-$gapMissing = @($gapI | Where-Object { $rI.Xml -notmatch ('<testcase name="TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($_) + ' excluded from automatic HIL[^"]*"[^>]*><skipped') })
+$gapMissing = @($gapI | Where-Object { $rI.Xml -notmatch ('<testcase name="TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($_) + ' NOT EXECUTED by automatic HIL[^"]*"[^>]*><failure') })
 $gapCases = [regex]::Matches($rI.Xml, '<testcase name="TC-HIL-COVERAGE-GAP-001: ').Count
-tc_check 'TEST-HILGATE-035-coverage-gaps-reported-as-skipped-junit-cases-never-executed' `
-    (($gapI.Count -gt 0) -and $gapMissing.Count -eq 0 -and $gapCases -eq $gapI.Count -and (Get-RanCount $rI 'RAN') -eq 0 -and
-     ($rI.Out -match ('Coverage gaps \(declared, not executed; included in Skipped\): ' + $gapI.Count)) -and $rI.Exit -eq 1) `
-    ("gaps={0}; cases={1}; missing: {2}; exit={3}; {4}" -f $gapI.Count, $gapCases, ($gapMissing -join ','), $rI.Exit, (Tail $rI))
+$gapSkipped = [regex]::Matches($rI.Xml, '<testcase name="TC-HIL-COVERAGE-GAP-001: [^"]*"[^>]*><skipped').Count
+tc_check 'TEST-HILGATE-035-coverage-gaps-reported-as-failing-junit-cases-never-executed-never-skipped' `
+    (($gapI.Count -gt 0) -and $gapMissing.Count -eq 0 -and $gapCases -eq $gapI.Count -and $gapSkipped -eq 0 -and (Get-RanCount $rI 'RAN') -eq 0 -and
+     ($rI.Out -match ('Coverage gaps \(required, NOT executed\): ' + $gapI.Count)) -and ($rI.Out -notmatch 'included in Skipped') -and $rI.Exit -eq 1) `
+    ("gaps={0}; cases={1}; skipped={2}; missing: {3}; exit={4}; {5}" -f $gapI.Count, $gapCases, $gapSkipped, ($gapMissing -join ','), $rI.Exit, (Tail $rI))
+
+# 035b: overall decision (pure, AST-extracted): no failure but a coverage gap or INCOMPLETE testcase -> INCOMPLETE, exit 1.
+$ovFn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbRunOverall' }, $true)
+if ($null -eq $ovFn) { tc_fail 'TEST-HILGATE-035b-unexecuted-required-test-makes-the-run-incomplete-never-passed' 'Get-AvbRunOverall not found in Run-Tests-CI.ps1' }
+else {
+    . ([scriptblock]::Create($ovFn.Extent.Text))
+    $ov = @(
+        @(@{ IsHardwareSuite = $true;  Passed = 5; Failed = 0; Incomplete = 0; CoverageGaps = 3 }, 'INCOMPLETE',   1),
+        @(@{ IsHardwareSuite = $true;  Passed = 5; Failed = 0; Incomplete = 2; CoverageGaps = 0 }, 'INCOMPLETE',   1),
+        @(@{ IsHardwareSuite = $true;  Passed = 5; Failed = 1; Incomplete = 0; CoverageGaps = 3 }, 'FAILED',       1),
+        @(@{ IsHardwareSuite = $true;  Passed = 0; Failed = 0; Incomplete = 0; CoverageGaps = 3 }, 'INCOMPLETE',   1),
+        @(@{ IsHardwareSuite = $true;  Passed = 0; Failed = 0; Incomplete = 0; CoverageGaps = 0 }, 'NOT_VERIFIED', 1),
+        @(@{ IsHardwareSuite = $false; Passed = 0; Failed = 0; Incomplete = 0; CoverageGaps = 0 }, 'NO_TESTS',     0),
+        @(@{ IsHardwareSuite = $true;  Passed = 5; Failed = 0; Incomplete = 0; CoverageGaps = 0 }, 'PASSED',       0))
+    $ovBad = @(); foreach ($c in $ov) { $p = $c[0]; $o = Get-AvbRunOverall @p; if ($o.Overall -ne $c[1] -or $o.Code -ne $c[2]) { $ovBad += ("{0} -> {1}/{2}, expected {3}/{4}" -f (($p.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ','), $o.Overall, $o.Code, $c[1], $c[2]) } }
+    tc_check 'TEST-HILGATE-035b-unexecuted-required-test-makes-the-run-incomplete-never-passed' ($ovBad.Count -eq 0) ($ovBad -join '; ')
+}
+
+# --- Run K: a halt of an EARLIER suite of the same HIL job carries over (-PriorResultsDir) -------------------
+# hil.yml runs the suites as separate runner processes; each takes a fresh baseline.  Without the carry-over a
+# CLEANUP_FAILED / TIMEOUT / INFRA / state halt in one suite (or a suite killed mid-run: its in-progress marker is
+# left behind) would let the next suite adopt the damaged state as baseline and mutate again (P0 2026-10-21 sec. 2).
+function New-PriorDir([string]$Name, [string]$Verdict, [string]$Halt = '', [switch]$Marker) {
+    $d = Join-Path $Tmp $Name; $s = Join-Path $d 'HardwareUnit'; New-Item -ItemType Directory -Path $s -Force | Out-Null
+    if ($Verdict) {
+        ([ordered]@{ schema = 'avb-runner-results/1'; suite = 'HardwareUnit'; configuration = 'Debug'; overall = 'FAILED'; exitCode = 1; stateHalt = $Halt
+                     records = @([ordered]@{ name = 'test_prior.exe'; verdict = $Verdict }) } | ConvertTo-Json -Depth 5) |
+            Set-Content -LiteralPath (Join-Path $s 'results-HardwareUnit-Debug-20261021_120000_000.json') -Encoding UTF8
+    }
+    if ($Marker) { '{"suite":"HardwareUnit"}' | Set-Content -LiteralPath (Join-Path $s 'run-in-progress.json') -Encoding UTF8 }
+    return $d
+}
+$pCf  = New-PriorDir 'priorCleanup' 'CLEANUP_FAILED'
+$pTo  = New-PriorDir 'priorTimeout' 'FAILED(TIMEOUT)'
+$pHl  = New-PriorDir 'priorHalt' 'PASSED' -Halt 'adapter state not observable at baseline'
+$pMk  = New-PriorDir 'priorKilled' '' -Marker
+$pOk  = New-PriorDir 'priorClean' 'PASSED'
+$kRes = [ordered]@{}
+$kDirs = [ordered]@{ cleanup = $pCf; timeout = $pTo; halt = $pHl; killed = $pMk; clean = $pOk }
+foreach ($k in $kDirs.GetEnumerator()) {
+    $kRes[$k.Key] = Invoke-Sandbox ("runK_" + $k.Key) @($tInit, $tRo) -Suite 'HardwareMutation' -PriorResultsDir $k.Value -AllSupportedEnabled
+}
+$kBad = @()
+foreach ($k in 'cleanup', 'timeout', 'halt', 'killed') {
+    $r = $kRes[$k]
+    if ((Get-RanCount $r '^RAN test_sbfake_init ') -ne 0 -or (Get-RanCount $r '^RAN test_sbfake_ro ') -ne 1 -or
+        $r.Out -notmatch '\[BLOCKED\] TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_init\.ps1: state-integrity halt \(prior suite') { $kBad += "${k}: " + (Tail $r) }
+}
+$rKc = $kRes['clean']
+if ((Get-RanCount $rKc '^RAN test_sbfake_init ') -ne 1 -or $rKc.Out -match 'prior suite') { $kBad += 'clean prior results must not halt: ' + (Tail $rKc) }
+$leftMarker = @(Get-ChildItem (Join-Path $rKc.Dir 'logs') -Filter 'run-in-progress.json' -Recurse -ErrorAction SilentlyContinue).Count
+if ($leftMarker -ne 0) { $kBad += 'a completed run left its run-in-progress.json marker behind' }
+tc_check 'TEST-HILGATE-040-earlier-suite-halt-or-killed-run-blocks-later-mutation-readonly-continues' ($kBad.Count -eq 0) ($kBad -join ' ### ')
 
 # --- Run J: a Hardware* suite in which nothing passed (skip-only) is a failure, not hardware verification ----
 $tSkip = Join-Path $Fakes 'test_sbfake_skiponly.ps1'

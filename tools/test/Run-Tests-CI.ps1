@@ -680,9 +680,8 @@ if ($Tests.Count -gt 0) {
 # This must be determined by Suite alone - not by whether -Tests was used.
 $IsMandatorySuite = ($Suite -eq "HardwareMandatory")
 
-# Verification class (not a new lane): every suite is mandatory verification except the
-# explicitly experimental HardwareMutation lane.  Mandatory + SKIP_NOT_IMPLEMENTED = INCOMPLETE,
-# mandatory + INCONCLUSIVE = nonpassing.  Optional keeps the labels but does not fail the run.
+# Verification class (not a new lane): every suite, HardwareMutation included, is mandatory verification
+# (tools/lib/TestVerdict.ps1).  Mandatory + SKIP_NOT_IMPLEMENTED = INCOMPLETE, mandatory + INCONCLUSIVE = nonpassing.
 $IsOptionalVerification = ((Get-AvbSuiteVerificationClass -Suite $Suite) -eq 'optional')
 
 # Apply default timeout per suite class when not explicitly set.
@@ -1168,6 +1167,19 @@ function Add-HilFailureRecord {
     Add-AvbResult -Name $Display -Status $Status -Exit 'N/A' -Reason $Line -LogPath $p -Lines @($Line) -Check:$Check
 }
 
+# Pure overall decision.  A required test not executed (coverage gap) or a testcase INCOMPLETE (SKIP_NOT_IMPLEMENTED)
+# without any failure is INCOMPLETE, never PASSED; failures stay FAILED.
+function Get-AvbRunOverall {
+    param([bool]$IsHardwareSuite, [int]$Passed, [int]$Failed, [int]$Incomplete, [int]$CoverageGaps)
+    if ($Failed -gt 0) { return @{ Overall = 'FAILED'; Code = 1 } }
+    if ($Incomplete -gt 0 -or $CoverageGaps -gt 0) { return @{ Overall = 'INCOMPLETE'; Code = 1 } }
+    if ($Passed -eq 0) {
+        if ($IsHardwareSuite) { return @{ Overall = 'NOT_VERIFIED'; Code = 1 } }   # skipped-only is not hardware verification
+        return @{ Overall = 'NO_TESTS'; Code = 0 }
+    }
+    return @{ Overall = 'PASSED'; Code = 0 }
+}
+
 function Set-HilHalt {
     param([string]$Reason)
     if ($script:stateHalt) { return }
@@ -1252,13 +1264,14 @@ function Add-HilBlocked {
         -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed" -f $Entry, $Reason)
 }
 
-# A declared automatic-HIL coverage gap ($Hardware*CoverageGaps): never executed, shown as a skipped case.
+# A declared automatic-HIL coverage gap ($Hardware*CoverageGaps): a REQUIRED test that is not executed because its
+# fixture/restoration or infrastructure is missing.  Never a skip, never green: BLOCKED (JUnit failure) and the run is
+# INCOMPLETE (Get-AvbRunOverall).  P0 full HIL coverage, 2026-10-21.
 function Add-HilCoverageGap {
     param([string]$Entry, [string]$Reason)
-    $script:skippedTests++
     $script:coverageGapTests++
-    $line = "[SKIP] TC-HIL-COVERAGE-GAP-001: {0} excluded from automatic HIL --- {1}" -f $Entry, $Reason
-    Write-Host "  $line" -ForegroundColor DarkYellow
+    $line = "[BLOCKED] TC-HIL-COVERAGE-GAP-001: {0} NOT EXECUTED by automatic HIL (required coverage missing) --- {1}" -f $Entry, $Reason
+    Write-Host "  $line" -ForegroundColor Red
     $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
     $p = Join-Path $script:logsDir ("{0}.exe_{1}.log" -f $Entry, $ts)
     $i = 2
@@ -1903,7 +1916,7 @@ Write-Host "  Failed : $failedTests" -ForegroundColor $(if ($failedTests -gt 0) 
 Write-Host "  Incomplete (SKIP_NOT_IMPLEMENTED): $incompleteTests" -ForegroundColor $(if ($incompleteTests -gt 0) { "Red" } else { "Green" })
 Write-Host "  Skipped: $skippedTests" -ForegroundColor DarkGray
 if ($coverageGapTests -gt 0) {
-    Write-Host "  Coverage gaps (declared, not executed; included in Skipped): $coverageGapTests" -ForegroundColor DarkYellow
+    Write-Host "  Coverage gaps (required, NOT executed): $coverageGapTests" -ForegroundColor Red
 }
 Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
 Write-Host ""
@@ -1933,22 +1946,13 @@ if (Test-Path $junitScript) {
     }
 }
 
-if ($IsHardwareSuite -and $failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
-    # Skipped-only must not read as hardware verification.
-    Write-Fail "OVERALL: no hardware test PASSED in $Suite --- this is not hardware verification"
-    Complete-AvbRun -Code 1 -Overall 'NOT_VERIFIED'
+$ov = Get-AvbRunOverall -IsHardwareSuite $IsHardwareSuite -Passed $passedTests -Failed $failedTests -Incomplete $incompleteTests -CoverageGaps $coverageGapTests
+if ($failedTests -gt 0)      { Write-Fail "OVERALL: $failedTests test(s) FAILED" }
+if ($incompleteTests -gt 0)  { Write-Fail "OVERALL: $incompleteTests test(s) INCOMPLETE (SKIP_NOT_IMPLEMENTED on mandatory verification)" }
+if ($coverageGapTests -gt 0) { Write-Fail "OVERALL: $coverageGapTests required test(s) NOT EXECUTED (coverage gap) --- $Suite is INCOMPLETE" }
+switch ($ov.Overall) {
+    'NOT_VERIFIED' { Write-Fail "OVERALL: no hardware test PASSED in $Suite --- this is not hardware verification" }
+    'NO_TESTS'     { Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)" }
+    'PASSED'       { Write-Ok "OVERALL: All $passedTests test(s) PASSED" }
 }
-
-if ($failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
-    Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)"
-    Complete-AvbRun -Code 0 -Overall 'NO_TESTS'
-}
-
-if ($failedTests -gt 0 -or $incompleteTests -gt 0) {
-    if ($failedTests -gt 0)     { Write-Fail "OVERALL: $failedTests test(s) FAILED" }
-    if ($incompleteTests -gt 0) { Write-Fail "OVERALL: $incompleteTests test(s) INCOMPLETE (SKIP_NOT_IMPLEMENTED on mandatory verification)" }
-    Complete-AvbRun -Code 1 -Overall 'FAILED'
-}
-
-Write-Ok "OVERALL: All $passedTests test(s) PASSED"
-Complete-AvbRun -Code 0 -Overall 'PASSED'
+Complete-AvbRun -Code $ov.Code -Overall $ov.Overall

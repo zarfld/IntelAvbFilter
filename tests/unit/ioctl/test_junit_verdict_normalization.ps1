@@ -238,8 +238,9 @@ foreach ($s in 'Unit','Integration','All','HardwareUnit','HardwareIntegration','
     $cls[$s] = Get-AvbSuiteVerificationClass -Suite $s
 }
 $optionals = @($cls.GetEnumerator() | Where-Object { $_.Value -eq 'optional' } | ForEach-Object { $_.Key })
-if ($optionals.Count -eq 1 -and $optionals[0] -eq 'HardwareMutation') { tc_pass 'TEST-VERDICT-010-only-hardwaremutation-is-optional' }
-else { tc_fail 'TEST-VERDICT-010-only-hardwaremutation-is-optional' ("optional suites: " + ($optionals -join ',')) }
+# Requirement changed 2026-10-21 (P0 full HIL coverage): HardwareMutation is mandatory verification; no suite is optional.
+if ($optionals.Count -eq 0) { tc_pass 'TEST-VERDICT-010-no-suite-is-optional-hardwaremutation-is-mandatory' }
+else { tc_fail 'TEST-VERDICT-010-no-suite-is-optional-hardwaremutation-is-mandatory' ("optional suites: " + ($optionals -join ',')) }
 
 $threw = $false
 try { Get-AvbVerdictClass -Verdict 'SKIP_NOT_A_THING' | Out-Null } catch { $threw = $true }

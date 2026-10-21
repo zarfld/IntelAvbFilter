@@ -63,13 +63,14 @@ function Read-AvbSuiteResults {
     return @{ Ok = $true; Doc = $doc; Error = '' }
 }
 
-# Inventory rows: one per result record, Category = Failure | Blocked | NotFailure (verdict kept verbatim).
-# An unknown verdict is a failure (never silently dropped).
+# Inventory rows: one per result record, Category = Failure | Blocked | NotExecuted | NotFailure (verdict kept verbatim).
+# NotExecuted = declared coverage gap: a required test not executed (nonpassing).  An unknown verdict is a failure.
 function Get-AvbFailureInventory {
     param($Doc, [string]$Configuration, [string]$Suite)
     $rows = @()
     foreach ($r in @($Doc.records)) {
-        $cat = if ($r.verdict -in @('PASSED', 'SKIPPED', 'COVERAGE-GAP')) { 'NotFailure' } elseif ($r.verdict -in @('BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)')) { 'Blocked' } else { 'Failure' }
+        $cat = if ($r.verdict -in @('PASSED', 'SKIPPED')) { 'NotFailure' } elseif ($r.verdict -eq 'COVERAGE-GAP') { 'NotExecuted' }
+               elseif ($r.verdict -in @('BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)')) { 'Blocked' } else { 'Failure' }
         $failing = @($r.testcases | Where-Object { $_.Verdict -notin @('PASS', 'SKIP', 'SKIP_UNSUPPORTED') } | ForEach-Object {
             if ($_.AdapterDid) { "$($_.Id)@$($_.AdapterDid)" } elseif ($null -ne $_.AdapterIndex) { "$($_.Id)/adapter:$($_.AdapterIndex)" } else { $_.Id } })
         $rows += [pscustomobject]@{
@@ -253,6 +254,9 @@ try {
     $fail | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, ExitCode, Testcases -AutoSize | Out-String -Width 250 | Write-Host
     Write-Host "Not executed - blocked ($($blk.Count)):"
     $blk | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, Reason -AutoSize | Out-String -Width 250 | Write-Host
+    $gap = @($AllInventory | Where-Object { $_.Category -eq 'NotExecuted' })
+    Write-Host "Required but NOT executed - coverage gaps, run is INCOMPLETE ($($gap.Count)):"
+    $gap | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Reason -AutoSize | Out-String -Width 250 | Write-Host
     if ($Stop) { Write-Host "[STOPPED] $Stop" -ForegroundColor Red }
     Write-Host "Report: $(Join-Path $ReportDir 'local-suites-report.json')"
 }

@@ -60,11 +60,11 @@ function Test-AvbVerdictIncomplete {
     return ($Verdict -eq 'SKIP_NOT_IMPLEMENTED')
 }
 
-# HardwareMutation is the only explicitly optional/experimental lane; every other
-# suite is mandatory verification (fail-closed default).  No new lane is introduced.
+# Every suite is mandatory verification, HardwareMutation included (P0 full HIL coverage, 2026-10-21: the mutation
+# lane must not be an optional lane whose failures acceptance can ignore).  'optional' is kept as a class only for
+# the -OptionalVerification switches of the JUnit converters; no suite maps to it.
 function Get-AvbSuiteVerificationClass {
     param([string]$Suite)
-    if ($Suite -eq 'HardwareMutation') { return 'optional' }
     return 'mandatory'
 }
 

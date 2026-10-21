@@ -9,7 +9,8 @@
 #     CLEANUP_FAILED), raw runner status, executed yes/no, the observed exit code ($null = none observed),
 #     artifact path + SHA256, exact arguments, safety class, target DID, log path, configuration, and the
 #     per-testcase verdict lines with adapter index/DID;
-#   - categories stay distinct: SKIPPED / COVERAGE-GAP are not failures, BLOCKED is not "not run", a run in which
+#   - categories stay distinct: SKIPPED is not a failure, COVERAGE-GAP is a required test not executed (nonpassing,
+#     run INCOMPLETE - P0 full HIL coverage 2026-10-21), BLOCKED is not "not run", a run in which
 #     everything was blocked is not success and reports zero executed tests;
 #   - a missing exit code never counts as success; an unknown runner status throws instead of defaulting;
 #   - -CaptureDbgView is rejected by this runner (it never captured); written atomically to -ResultsJson.
