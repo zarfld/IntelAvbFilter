@@ -2372,6 +2372,7 @@ if (-not $BuildInputDigestBefore.Ok -or -not $BuildInputDigestAfter.Ok) {
 }
 $testManifest = New-TestBuildManifest -Configuration $Configuration -Platform $Platform -Tests $AllTests -Outcomes $BuildOutcomes `
                     -SourceRevision $srcRevision -SourceDirty $srcDirty -SourceDigest $srcDigest -SourceDigestFiles $srcDigestFiles `
+                    -BuiltUtc ((Get-Date).ToUniversalTime().ToString('o'))
 if ($srcDirty -ne $false) {
     if ($srcDigest) {
         Write-Host "[MANIFEST] LOCAL PRE-COMMIT BUILD: uncommitted working tree, build-input digest $srcDigest ($srcDigestFiles inputs) -- Run-Tests-CI.ps1 authorizes these artifacts for LOCAL Hardware* runs only while the inputs are unchanged; never as clean-commit CI evidence" -ForegroundColor Yellow
