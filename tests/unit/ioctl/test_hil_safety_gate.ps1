@@ -271,7 +271,12 @@ $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=Init;test_sbfake_mut=Mutating;' +
            'test_sbfake_tgt=Mutating:Target;test_sbfake_unsafe=Unsafe;test_sbfake_disabler=ReadOnly;' +
            'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
-           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly'
+           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target'
+# Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
+# modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
+# TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: INCONCLUSIVE_RESTORATION.
+# Undeclared non-ReadOnly fakes (init, mut, ...) are treated as modifying unknown state.
+$Mutates = 'test_sbfake_tgt=TIMINCA;test_sbfake_timinca=TIMINCA;test_sbfake_tgtphc=TIMINCA,PHC_TIME'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -335,6 +340,7 @@ function Invoke-Sandbox {
         ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $mDir 'test-build-manifest.json') -Encoding UTF8
     $envs = [ordered]@{
         AVB_TEST_SANDBOX = '1'; AVB_TEST_ADAPTER_STATE_FILE = $stateFile; AVB_TEST_SANDBOX_CLASSES = $Classes
+        AVB_TEST_SANDBOX_MUTATES = $Mutates
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = 'sandbox-rev'; AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
@@ -574,17 +580,51 @@ tc_check 'TEST-HILGATE-041-tsauxc-and-link-changes-are-cleanup-failed-and-halt-n
 # Init/Mutating/Mutating:Target/Unsafe test gets an INCONCLUSIVE_RESTORATION record (missing evidence, distinct from
 # CLEANUP_FAILED = observed damage) and - "stop subsequent mutating tests if restoration cannot be verified" (Q P0
 # 2026-10-21, refined the same day) - halts every later non-ReadOnly test; ReadOnly tests continue.
-$rM = Invoke-Sandbox 'runM' @($tTgt, $tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x125B' }
+$tTgtPhc = New-Fake 'test_sbfake_tgtphc'
+$rM = Invoke-Sandbox 'runM' @($tTgtPhc, $tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x125B' }
 $mUnv = @([regex]::Matches($rM.Out, '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after (test_sbfake_\w+)\.ps1')) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
 $mJson = @(Get-ChildItem (Join-Path $rM.Dir 'logs') -Filter 'results-*.json' -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
 $mRec = @($mJson | ForEach-Object { @($_.records) } | Where-Object { $_.name -match 'STATE-UNVERIFIED' })
 tc_check 'TEST-HILGATE-042-unverifiable-restoration-is-inconclusive-restoration-halts-later-mutation-never-passed' `
-    ((Get-RanCount $rM '^RAN test_sbfake_tgt ') -ge 1 -and (@($mUnv) -join ',') -eq 'test_sbfake_tgt' -and
+    ((Get-RanCount $rM '^RAN test_sbfake_tgtphc ') -ge 1 -and (@($mUnv) -join ',') -eq 'test_sbfake_tgtphc' -and
      ($rM.Out -match 'TC-INFRA-STATE-002: [^\r\n]*PHC time') -and (Test-FailureCase $rM 'TC-INFRA-STATE-002') -and $rM.Exit -eq 1 -and
      ($rM.Out -match '\[HALT\][^\r\n]*restoration not verified') -and (Get-RanCount $rM '^RAN test_sbfake_init ') -eq 0 -and
      (Get-RanCount $rM '^RAN test_sbfake_ro ') -eq 1 -and $mRec.Count -ge 1 -and @($mRec | Where-Object { $_.verdict -ne 'INCONCLUSIVE_RESTORATION' }).Count -eq 0 -and
      ($rM.Out -notmatch '\[CLEANUP_FAILED\] TC-INFRA-STATE')) `
     ("unverified records for: [{0}] json verdicts=[{1}] exit={2}; {3}" -f (@($mUnv) -join ','), (@($mRec | ForEach-Object { $_.verdict }) -join ','), $rM.Exit, (Tail $rM))
+
+# 046 (negative counterpart of the positive fan-out tests 015/016/026; option 1, Q 2026-10-21): restoration that the
+# runner cannot verify on the FIRST target halts every later mutation globally - the remaining targets are BLOCKED,
+# each record naming its intended adapter - while ReadOnly tests continue.  Per-adapter isolation (option 2) is not
+# enabled until isolation is hardware-verified.
+$rF = Invoke-Sandbox 'runF46' @($tTgtPhc, $tRo) -AllSupportedEnabled
+$fRan = @($rF.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgtphc ' })
+$fBlk = @([regex]::Matches($rF.Out, '\[BLOCKED\] TC-SAFETY-GATE-001: test_sbfake_tgtphc\.ps1@(0x[0-9A-F]{4}): state-integrity halt[^\r\n]*restoration not verified') | ForEach-Object { $_.Groups[1].Value })
+tc_check 'TEST-HILGATE-046-unverified-restoration-blocks-remaining-targets-globally-readonly-continues' `
+    ($fRan.Count -eq 1 -and $fBlk.Count -ge 1 -and @($fBlk | Where-Object { $fRan[0] -match $_ }).Count -eq 0 -and
+     (Get-RanCount $rF '^RAN test_sbfake_ro ') -eq 1 -and $rF.Exit -eq 1) `
+    ("ran=[{0}] blocked targets=[{1}] exit={2}; {3}" -f ($fRan -join ' / '), ($fBlk -join ','), $rF.Exit, (Tail $rF))
+
+# 047: the mutation matrix uses the fixed state vocabulary and only classified non-ReadOnly entries; the runner verifies
+# exactly ADAPTER, TIMINCA, TSAUXC itself (anything else needs a new independent check, never a declaration).
+$mmBad = @()
+$vocab = @('ADAPTER', 'TIMINCA', 'TSAUXC', 'PHC_TIME', 'PHC_RATE', 'TAS', 'FP', 'PTM', 'QAV', 'PFC', 'EEE', 'VLAN', 'MDIO', 'TS_CONTROL', 'TARGET_TIME', 'DRIVER_LIFECYCLE')
+$vsAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$HilVerifiableState' }, $true) | Select-Object -First 1
+$vs = if ($vsAst) { @($vsAst.Right.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value }) } else { @() }
+if (($vs -join ',') -ne 'ADAPTER,TIMINCA,TSAUXC') { $mmBad += "runner-verifiable state is [$($vs -join ',')], expected [ADAPTER,TIMINCA,TSAUXC]" }
+$msAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$HilMutatedState' }, $true) | Select-Object -First 1
+if ($null -eq $msAst) { $mmBad += '$HilMutatedState missing' }
+else {
+    $msHt = $msAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+    foreach ($kv in @($msHt.KeyValuePairs)) {
+        $e = $kv.Item1.Value
+        if (-not $registry[$e] -or $registry[$e] -eq 'ReadOnly') { $mmBad += "$e declared but classified '$($registry[$e])'" }
+        foreach ($s in @($kv.Item2.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })) {
+            if ($vocab -notcontains $s) { $mmBad += "${e}: unknown state '$s'" }
+        }
+    }
+}
+tc_check 'TEST-HILGATE-047-mutation-matrix-vocabulary-and-runner-verifiable-state' ($mmBad.Count -eq 0) ($mmBad -join '; ')
 
 # 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
 # distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).
