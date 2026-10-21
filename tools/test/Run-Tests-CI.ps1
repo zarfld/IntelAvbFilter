@@ -1660,6 +1660,8 @@ foreach ($WorkItem in $WorkItems) {
         $exeName  = "$exeName@$targetDid"
         $itemStem = "$itemStem@$($targetDid.Substring(2))"
     }
+    $script:AvbItem = @{ Entry = $TestName; Artifact = $exePath; Arguments = $testArgs; Target = $targetDid; Class = ''; Sha256 = $null
+                         Executed = $false; ProcessExit = $null; LogPath = $null; StartedUtc = $null; DurationSeconds = $null; Output = $null }
 
     # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
     if ($driverLost) {
@@ -1667,11 +1669,11 @@ foreach ($WorkItem in $WorkItems) {
             Write-Fail "$exeName [INFRA-FAIL] driver lost --- #328 sentinel: remaining mandatory tests FAIL"
             $failedTests++
             $totalTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(INFRA)"; Exit = -1 }
+            Add-AvbResult -Name $exeName -Status "FAILED(INFRA)" -Exit -1
         } else {
             Write-Skip "$exeName (INFRA: driver lost -- skipping to prevent cascade failures)"
             $skippedTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED(INFRA)"; Exit = "N/A" }
+            Add-AvbResult -Name $exeName -Status "SKIPPED(INFRA)" -Exit "N/A"
         }
         continue
     }
@@ -1691,11 +1693,11 @@ foreach ($WorkItem in $WorkItems) {
             Write-Fail "$exeName [BUILD-FAIL] binary not found at $exePath --- mandatory test suite requires this binary"
             $failedTests++
             $totalTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(BUILD)"; Exit = "N/A" }
+            Add-AvbResult -Name $exeName -Status "FAILED(BUILD)" -Exit "N/A"
         } else {
             Write-Skip "$exeName (binary not found -- not built or not applicable)"
             $skippedTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = "N/A" }
+            Add-AvbResult -Name $exeName -Status "SKIPPED" -Exit "N/A"
         }
         continue
     }
@@ -1714,6 +1716,7 @@ foreach ($WorkItem in $WorkItems) {
     $hilClass = ''
     if ($IsHardwareSuite) {
         $hilClass = Get-AvbHilTestClass $TestName
+        $script:AvbItem.Class = $hilClass
         $gate = Get-AvbHilGateDecision -Entry $TestName -Class $hilClass -Target $targetDid -Halt $stateHalt `
                     -TargetCount $HilTargets.Count -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions `
                     -InitUnattendedApproved $HilInitUnattendedApproved
@@ -1755,7 +1758,12 @@ foreach ($WorkItem in $WorkItems) {
     # Exact target only for Mutating:Target work items; never inherited by any other test.
     $psi.EnvironmentVariables.Remove('AVB_HIL_TARGET_DID')
     if ($targetDid) { $psi.EnvironmentVariables['AVB_HIL_TARGET_DID'] = $targetDid }
+    $script:AvbItem.Sha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
+    $script:AvbItem.LogPath = $logFile
+    $script:AvbItem.StartedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    $avbStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $proc = [System.Diagnostics.Process]::Start($psi)
+    $script:AvbItem.Executed = $true
 
     # Capture output in background threads, stream to console and log.
     $outLines = [System.Collections.Generic.List[string]]::new()
@@ -1775,6 +1783,9 @@ foreach ($WorkItem in $WorkItems) {
 
     # Write captured output to log and display on console.
     $combined = if ($errText) { $outText + "`n" + $errText } else { $outText }
+    $script:AvbItem.ProcessExit = $(if ($timedOut) { $null } else { $proc.ExitCode })
+    $script:AvbItem.DurationSeconds = [Math]::Round($avbStopwatch.Elapsed.TotalSeconds, 3)
+    $script:AvbItem.Output = $combined
     $combined | Out-File -FilePath $logFile -Encoding utf8
     $combined -split "`n" | ForEach-Object { Write-Host "    $_" }
 
@@ -1791,40 +1802,40 @@ foreach ($WorkItem in $WorkItems) {
 
     if ($timedOut) {
         $failedTests++
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(TIMEOUT)"; Exit = -999 }
-    } elseif (($exitCode -eq 0 -or $null -eq $exitCode) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
+        Add-AvbResult -Name $exeName -Status "FAILED(TIMEOUT)" -Exit -999
+    } elseif (($exitCode -eq 0) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
         $failedTests++
         Write-Fail "$exeName INCONCLUSIVE ($($vc.Inconclusive) testcase(s)) --- insufficient evidence on mandatory verification"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(INCONCLUSIVE)"; Exit = 0 }
-    } elseif (($exitCode -eq 0 -or $null -eq $exitCode) -and -not $IsOptionalVerification -and $vc.NotImplemented -gt 0) {
+        Add-AvbResult -Name $exeName -Status "FAILED(INCONCLUSIVE)" -Exit 0
+    } elseif (($exitCode -eq 0) -and -not $IsOptionalVerification -and $vc.NotImplemented -gt 0) {
         $incompleteTests++
         Write-Fail "$exeName INCOMPLETE ($($vc.NotImplemented) testcase(s) SKIP_NOT_IMPLEMENTED) --- driver operation missing on mandatory verification"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "INCOMPLETE(NOT_IMPLEMENTED)"; Exit = 0 }
-    } elseif ($exitCode -eq 0 -or $null -eq $exitCode) {
+        Add-AvbResult -Name $exeName -Status "INCOMPLETE(NOT_IMPLEMENTED)" -Exit 0
+    } elseif ($exitCode -eq 0) {
         $passedTests++
         Write-Ok "$exeName PASSED"
         if ($vc.NotImplemented -gt 0 -or $vc.Inconclusive -gt 0) {
             Write-Note "$exeName (optional verification): $($vc.NotImplemented) SKIP_NOT_IMPLEMENTED, $($vc.Inconclusive) INCONCLUSIVE --- reported, not verified"
         }
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "PASSED"; Exit = 0 }
+        Add-AvbResult -Name $exeName -Status "PASSED" -Exit 0
     } elseif ($exitCode -eq 2 -and $IsMandatorySuite) {
         # Exit 2 = SKIP_ONLY from test_tx_timestamp_provenance (driver absent / all H tests skipped).
         # On a mandatory HIL suite the driver MUST be present --- SKIP_ONLY means
         # Section H never ran, so V1/V2 canary, cross-handle isolation, etc. were not exercised.
         Write-Fail "$exeName [HIL-FAIL] exit=2 SKIP_ONLY on mandatory suite --- driver not accessible or Section H not exercised"
         $failedTests++
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(SKIP_ONLY)"; Exit = $exitCode }
+        Add-AvbResult -Name $exeName -Status "FAILED(SKIP_ONLY)" -Exit $exitCode
     } elseif ($exitCode -eq 2) {
         # Exit 2 = SKIP_ONLY on a non-mandatory suite (Unit/Integration/HardwareUnit).
         # Section L passed; Section H skipped because driver is absent.
         # Expected on GitHub-hosted runners and any machine without the driver installed.
         $skippedTests++
         Write-Skip "$exeName (exit=2 SKIP_ONLY: Section L passed, Section H skipped -- driver absent)"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = $exitCode }
+        Add-AvbResult -Name $exeName -Status "SKIPPED" -Exit $exitCode
     } else {
         $failedTests++
-        Write-Fail "$exeName FAILED (exit $exitCode)"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED"; Exit = $exitCode }
+        Write-Fail "$exeName FAILED (exit $(Format-AvbExitCode $exitCode))"
+        Add-AvbResult -Name $exeName -Status "FAILED" -Exit $exitCode
 
         if ($FailFast) {
             Write-Note "-FailFast: stopping after first failure (after the health and state checks)"
@@ -1851,7 +1862,7 @@ foreach ($WorkItem in $WorkItems) {
         } else {
             Write-Fail "INFRA: $infraMsg --- remaining tests will be skipped"
         }
-        $results += [PSCustomObject]@{ Name = "$exeName[INFRA-HEALTH]"; Status = "FAILED(INFRA)"; Exit = -2 }
+        Add-AvbResult -Name "$exeName[INFRA-HEALTH]" -Status "FAILED(INFRA)" -Exit -2 -Check
 
         # Write a synthetic log file so Convert-Logs-To-JUnit / Parse-TestResults
         # can emit a <failure> element for this infrastructure failure in the JUnit XML.
@@ -1869,6 +1880,7 @@ foreach ($WorkItem in $WorkItems) {
     }
     if ($failFastStop) { break }
 }
+$script:AvbItem = $null
 
 # ===========================
 # Summary
@@ -1920,19 +1932,19 @@ if (Test-Path $junitScript) {
 if ($IsHardwareSuite -and $failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
     # Skipped-only must not read as hardware verification.
     Write-Fail "OVERALL: no hardware test PASSED in $Suite --- this is not hardware verification"
-    exit 1
+    Complete-AvbRun -Code 1 -Overall 'NOT_VERIFIED'
 }
 
 if ($failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
     Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)"
-    exit 0
+    Complete-AvbRun -Code 0 -Overall 'NO_TESTS'
 }
 
 if ($failedTests -gt 0 -or $incompleteTests -gt 0) {
     if ($failedTests -gt 0)     { Write-Fail "OVERALL: $failedTests test(s) FAILED" }
     if ($incompleteTests -gt 0) { Write-Fail "OVERALL: $incompleteTests test(s) INCOMPLETE (SKIP_NOT_IMPLEMENTED on mandatory verification)" }
-    exit 1
+    Complete-AvbRun -Code 1 -Overall 'FAILED'
 }
 
 Write-Ok "OVERALL: All $passedTests test(s) PASSED"
-exit 0
+Complete-AvbRun -Code 0 -Overall 'PASSED'
