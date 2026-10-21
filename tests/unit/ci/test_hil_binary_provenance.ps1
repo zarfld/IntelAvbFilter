@@ -126,6 +126,7 @@ function Get-FunctionText([string]$Path, [string[]]$Names) {
 $fnMissing = ''
 try {
     . ([scriptblock]::Create((Get-FunctionText $BuildPath @('Get-TestBuildArtifactName', 'New-TestBuildManifest', 'Write-TestBuildManifest'))))
+    . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')   # the runner's exit-code library (used by Get-AvbSourceIdentity)
     . ([scriptblock]::Create((Get-FunctionText $RunCIPath @('Get-AvbManifestProp', 'Read-AvbBuildManifest', 'Get-AvbHilProvenanceDecision', 'Test-AvbHilNeedsProvenance', 'Get-AvbSourceIdentity'))))
 } catch { $fnMissing = $_.Exception.Message }
 tc_check 'TEST-HILPROV-019-provenance-functions-present' ($fnMissing -eq '') $fnMissing
