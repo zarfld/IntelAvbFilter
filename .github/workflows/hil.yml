@@ -734,6 +734,9 @@ jobs:
               for s in SUITES:
                   files = glob.glob(os.path.join(b, s, 'junit-%s-%s-*.xml' % (s, cfg)))
                   res = glob.glob(os.path.join(b, s, 'results-%s-%s-*.json' % (s, cfg)))
+                  trace = glob.glob(os.path.join(b, s, 'traceability-summary-*.md'))
+                  if len(trace) != 1:
+                      bad.append('%s: %d traceability summary file(s) for %s' % (cfg, len(trace), s))
                   if len(files) != 1 or len(res) != 1:
                       not_executed.append('%s %s: %d JUnit / %d results file(s) (suite not executed to completion)' % (cfg, s, len(files), len(res))); continue
                   with open(res[0], encoding='utf-8-sig') as fh:
@@ -748,7 +751,7 @@ jobs:
                   rows.append('| %s | %s | %d | %d | %d | %d | %s |' % (cfg, s, n - f - sk, f, sk, n, rd.get('overall')))
                   if f > 0 or n - f - sk <= 0 or rd.get('overall') != 'PASSED':
                       bad.append('%s %s: %d passed, %d failed, overall %s' % (cfg, s, n - f - sk, f, rd.get('overall')))
-          for x in glob.glob(os.path.join(root, '**', 'junit-*.xml'), recursive=True):
+          for x in glob.glob(os.path.join(root, '**', 'junit-*.xml'), recursive=True) + glob.glob(os.path.join(root, '**', 'traceability-summary-*.md'), recursive=True):
               if not any(os.path.normpath(x).startswith(k + os.sep) for k in known):
                   bad.append('evidence outside an identified bundle: %s' % x)
           if not_executed:
