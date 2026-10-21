@@ -51,6 +51,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
+. (Join-Path $PSScriptRoot '..\lib\SourceDigest.ps1') # build-input digest (local pre-commit provenance)
 
 # Calculate repository root from script location
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -200,6 +201,10 @@ if ($BuildDiagnosticTools) {
     Write-Host "Diagnostic tools build complete." -ForegroundColor Cyan
     Write-Host ""
 }
+
+# Build inputs BEFORE compiling; compared again when the manifest is written (inputs edited during the build make the
+# artifacts unattributable).
+$BuildInputDigestBefore = Get-AvbBuildInputDigest -RepoRoot $RepoRoot
 
 # Change to repository root
 Push-Location $RepoRoot
@@ -1977,7 +1982,9 @@ function Get-TestBuildArtifactName {
 
 function New-TestBuildManifest {
     param([string]$Configuration, [string]$Platform, [object[]]$Tests, [hashtable]$Outcomes,
-          $SourceRevision, $SourceDirty)
+          $SourceRevision, $SourceDirty, $SourceDigest = $null, $SourceDigestFiles = $null)
+    # sourceDigest (tools/lib/SourceDigest.ps1): the build inputs this run compiled - the only attribution a binary
+    # built from an uncommitted working tree has (local pre-commit evidence; Run-Tests-CI.ps1 re-verifies it).
     # No carry-over: a record from an earlier run cannot be attributed to the current source without ambiguity
     # (new commit, edited sources/headers, toolchain).  Entries not built by THIS run are `not-built`.
     $entries = @()
@@ -1988,7 +1995,7 @@ function New-TestBuildManifest {
         $e = [ordered]@{
             name = $tName; type = [string]$t['Type']; enabled = (-not $t['Disabled']); prerequisites = $prereq
             status = 'not-built'; reason = ''; artifact = $artifact; sha256 = $null
-            sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
+            sourceRevision = $SourceRevision; sourceDirty = $SourceDirty; sourceDigest = $SourceDigest
         }
         if ($Outcomes.ContainsKey($tName)) {
             $o = $Outcomes[$tName]
@@ -2013,8 +2020,11 @@ function New-TestBuildManifest {
         }
         $entries += ,$e
     }
+    $mode = if ($SourceDirty -eq $false) { 'clean-commit' } elseif ($SourceDigest) { 'local-worktree' } else { 'unattributable' }
     return [ordered]@{ schemaVersion = 1; producer = 'tools/build/Build-Tests.ps1'; configuration = $Configuration
-                       platform = $Platform; entries = $entries }
+                       platform = $Platform; builtUtc = (Get-Date).ToUniversalTime().ToString('o')
+                       provenanceMode = $mode; sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
+                       sourceDigest = $SourceDigest; sourceDigestFiles = $SourceDigestFiles; entries = $entries }
 }
 
 # Atomic write: complete file in the same directory, then rename over the previous manifest.
@@ -2350,10 +2360,23 @@ try {
 } finally {
     $ErrorActionPreference = $prevEap
 }
+$srcDigest = $null; $srcDigestFiles = $null
+$BuildInputDigestAfter = Get-AvbBuildInputDigest -RepoRoot $RepoRoot
+if (-not $BuildInputDigestBefore.Ok -or -not $BuildInputDigestAfter.Ok) {
+    Write-Host "[MANIFEST] WARNING: build-input digest unavailable ($($BuildInputDigestBefore.Error)$($BuildInputDigestAfter.Error)) -- sourceDigest recorded as null" -ForegroundColor Yellow
+} elseif ($BuildInputDigestBefore.Digest -ne $BuildInputDigestAfter.Digest) {
+    Write-Host "[MANIFEST] WARNING: build inputs changed DURING the build -- sourceDigest recorded as null; rebuild before testing" -ForegroundColor Yellow
+} else {
+    $srcDigest = $BuildInputDigestAfter.Digest; $srcDigestFiles = $BuildInputDigestAfter.Files
+}
 $testManifest = New-TestBuildManifest -Configuration $Configuration -Platform $Platform -Tests $AllTests -Outcomes $BuildOutcomes `
-                    -SourceRevision $srcRevision -SourceDirty $srcDirty
+                    -SourceRevision $srcRevision -SourceDirty $srcDirty -SourceDigest $srcDigest -SourceDigestFiles $srcDigestFiles
 if ($srcDirty -ne $false) {
-    Write-Host "[MANIFEST] NOTE: built from an uncommitted or unknown source state -- Run-Tests-CI.ps1 will not authorize these artifacts for Hardware* suites" -ForegroundColor Yellow
+    if ($srcDigest) {
+        Write-Host "[MANIFEST] LOCAL PRE-COMMIT BUILD: uncommitted working tree, build-input digest $srcDigest ($srcDigestFiles inputs) -- Run-Tests-CI.ps1 authorizes these artifacts for LOCAL Hardware* runs only while the inputs are unchanged; never as clean-commit CI evidence" -ForegroundColor Yellow
+    } else {
+        Write-Host "[MANIFEST] NOTE: built from an uncommitted or unknown source state without a build-input digest -- Run-Tests-CI.ps1 will not authorize these artifacts" -ForegroundColor Yellow
+    }
 }
 Write-TestBuildManifest -Manifest $testManifest -Path $TestManifestPath
 Write-Host ("[MANIFEST] {0} ({1} entries, {2} built with SHA256)" -f $TestManifestPath, @($testManifest.entries).Count,

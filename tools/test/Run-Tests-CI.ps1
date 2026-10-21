@@ -232,6 +232,7 @@ function Invoke-DriverHealthCheck {
 # Canonical verdict vocabulary (PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE),
 # shared with Parse-TestResults.ps1 and Convert-Logs-To-JUnit.ps1.  See docs/testing/test-verdict-contract.md
 . (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')    # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
+. (Join-Path $PSScriptRoot '..\lib\SourceDigest.ps1')  # build-input digest (local pre-commit provenance)
 . (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
 
 # ===========================
@@ -1187,11 +1188,13 @@ function Read-AvbBuildManifest {
     return $res
 }
 
-# Source identity of the checkout under test, computed once per suite: @{ Ok; Revision; Dirty; Error }.
-# Dirty = tracked modifications (untracked files are not considered).  Sandbox runs take it from
-# AVB_TEST_SANDBOX_SOURCE_REVISION / AVB_TEST_SANDBOX_SOURCE_DIRTY ('0' | '1'); the variables are ignored otherwise.
+# Source identity of the checkout under test, computed once per suite: @{ Ok; Revision; Dirty; Mode; Digest; DigestError; Error }.
+# Dirty = tracked modifications.  Mode 'ci' (GitHub Actions: clean authorized commit only) or 'local' (operator runs:
+# the build-input digest, tools/lib/SourceDigest.ps1, also covers untracked inputs and attributes uncommitted builds).
+# Sandbox runs take it from AVB_TEST_SANDBOX_SOURCE_REVISION / _DIRTY ('0' | '1') / _MODE (default 'ci') / _DIGEST;
+# the variables are ignored otherwise.
 function Get-AvbSourceIdentity {
-    $res = @{ Ok = $false; Revision = $null; Dirty = $null; Error = '' }
+    $res = @{ Ok = $false; Revision = $null; Dirty = $null; Mode = 'ci'; Digest = $null; DigestError = ''; Error = '' }
     if ($script:IsSandbox) {
         if (-not $env:AVB_TEST_SANDBOX_SOURCE_REVISION -or $env:AVB_TEST_SANDBOX_SOURCE_DIRTY -notmatch '^[01]$') {
             $res.Error = 'sandbox source identity not provided (AVB_TEST_SANDBOX_SOURCE_REVISION / _DIRTY)'
@@ -1199,6 +1202,8 @@ function Get-AvbSourceIdentity {
         }
         $res.Revision = $env:AVB_TEST_SANDBOX_SOURCE_REVISION
         $res.Dirty = ($env:AVB_TEST_SANDBOX_SOURCE_DIRTY -eq '1')
+        if ($env:AVB_TEST_SANDBOX_SOURCE_MODE -eq 'local') { $res.Mode = 'local' }
+        if ($env:AVB_TEST_SANDBOX_SOURCE_DIGEST) { $res.Digest = $env:AVB_TEST_SANDBOX_SOURCE_DIGEST } else { $res.DigestError = 'sandbox digest not provided' }
         $res.Ok = $true
         return $res
     }
@@ -1213,6 +1218,11 @@ function Get-AvbSourceIdentity {
         if (-not (Test-AvbExitSuccess (Get-AvbExitCode))) { $res.Error = 'git status failed'; return $res }
         $res.Revision = ([string]$rev).Trim()
         $res.Dirty = [bool]$st
+        if ($env:GITHUB_ACTIONS -ne 'true') {
+            $res.Mode = 'local'
+            $d = Get-AvbBuildInputDigest -RepoRoot $script:repoRoot
+            if ($d.Ok) { $res.Digest = $d.Digest } else { $res.DigestError = $d.Error }
+        }
         # Under GitHub Actions the checkout must be exactly the authorized commit.  .github/workflows/hil.yml runs on
         # workflow_run, where GITHUB_SHA is the default-branch tip, not the CI run that was verified; it passes the
         # authorized upstream head_sha as AVB_HIL_EXPECTED_REVISION, and a workflow_run without it fails closed.
@@ -1242,15 +1252,19 @@ function Get-AvbSourceIdentity {
 }
 
 # Pure decision on an existing artifact: 'Run' | 'Block' (+ Reason).
-# A matching SHA256 is necessary but never sufficient: the artifact must have been built from the clean,
-# committed revision that is checked out now, and the checkout must still be clean.
+# A matching SHA256 is necessary but never sufficient.  CI (GitHub Actions, the default): the artifact must have been
+# built from the clean, committed revision that is checked out now, and the checkout must still be clean.  Local
+# operator runs ($Source.Mode 'local'): the artifact must have been built at the same HEAD from EXACTLY the current
+# build inputs (build-input digest, tools/lib/SourceDigest.ps1) - uncommitted changes are allowed, any change after
+# the build blocks.  Local evidence is never clean-commit CI evidence.
 function Get-AvbHilProvenanceDecision {
     param([string]$ArtifactPath, $Manifest, $Source)
     if (-not $Manifest.Ok) { return @{ Action = 'Block'; Reason = $Manifest.Error } }
     if ($null -eq $Source -or -not $Source.Ok) {
         return @{ Action = 'Block'; Reason = "current source revision unavailable ($(if ($Source) { $Source.Error } else { 'not computed' })); artifacts cannot be attributed" }
     }
-    if ($Source.Dirty) {
+    $localMode = ($Source.ContainsKey('Mode') -and $Source.Mode -eq 'local')
+    if ($Source.Dirty -and -not $localMode) {
         return @{ Action = 'Block'; Reason = "checkout $($Source.Revision) has uncommitted tracked changes; test binaries cannot be attributed to a source revision" }
     }
     $leaf = [System.IO.Path]::GetFileName($ArtifactPath)
@@ -1272,7 +1286,18 @@ function Get-AvbHilProvenanceDecision {
     $sha = [string](Get-AvbManifestProp $e 'sha256')
     if (-not $sha) { return @{ Action = 'Block'; Reason = "build entry '$name' records no SHA256 for '$leaf'" } }
     $bRev = [string](Get-AvbManifestProp $e 'sourceRevision')
-    if ((Get-AvbManifestProp $e 'sourceDirty') -ne $false) {
+    if ($localMode) {
+        $bDigest = [string](Get-AvbManifestProp $e 'sourceDigest')
+        if (-not $bDigest) {
+            return @{ Action = 'Block'; Reason = "artifact '$leaf' has no build-input digest in the manifest (rebuild with tools/build/Build-Tests.ps1)" }
+        }
+        if (-not $Source.Digest) {
+            return @{ Action = 'Block'; Reason = "current build-input digest unavailable ($($Source.DigestError)); artifact '$leaf' cannot be attributed" }
+        }
+        if ($bDigest -ne $Source.Digest) {
+            return @{ Action = 'Block'; Reason = "build inputs changed after artifact '$leaf' was built (digest $bDigest at build, $($Source.Digest) now); rebuild before testing" }
+        }
+    } elseif ((Get-AvbManifestProp $e 'sourceDirty') -ne $false) {
         return @{ Action = 'Block'; Reason = "artifact '$leaf' was built from an uncommitted or unknown source state (revision '$bRev')" }
     }
     if (-not $bRev -or $bRev -ne $Source.Revision) {
@@ -1437,7 +1462,11 @@ if ($IsHardwareSuite) {
     }
     $SourceIdentity = Get-AvbSourceIdentity
     if ($SourceIdentity.Ok) {
-        Write-Note ("Source identity: {0} (tracked changes: {1})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty)
+        Write-Note ("Source identity: {0} (tracked changes: {1}; provenance mode: {2}; build-input digest: {3})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty,
+                    $SourceIdentity.Mode, $(if ($SourceIdentity.Digest) { $SourceIdentity.Digest } else { "n/a $($SourceIdentity.DigestError)" }))
+        if ($SourceIdentity.Mode -eq 'local' -and $SourceIdentity.Dirty) {
+            Write-Host "  [LOCAL-EVIDENCE] uncommitted working tree: results are LOCAL pre-commit evidence bound to the build-input digest, NOT clean-commit CI evidence" -ForegroundColor Yellow
+        }
     } else {
         Write-Host "  [BLOCKED] source identity unavailable: $($SourceIdentity.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
     }
