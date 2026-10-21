@@ -46,7 +46,7 @@ function Import-Functions([string]$Path, [string[]]$Names) {
 $missing = ''
 try {
     . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')
-    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult')
+    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult', 'Get-AvbSafetyHalt')
     Import-Functions $ElevPath @('ConvertTo-AvbPsLiteral', 'New-AvbElevatedCommand', 'Wait-AvbDbgViewStarted', 'Get-AvbDbgViewCaptureResult')
 } catch { $missing = $_.Exception.Message }
 tc_check 'TEST-LOCALSUITES-000-decision-functions-present' ($missing -eq '') $missing
@@ -110,10 +110,19 @@ $stopT = Get-AvbStopReason $doc
 $docClean = Write-Doc (Join-Path $Tmp 'clean.json') 'HardwareUnit' 'Debug' 1 @((New-Rec 't_fail' 'FAILED' $true -Exit 3), (New-Rec 't_blk' 'BLOCKED(SAFETY)' $false))
 $docHalt  = Write-Doc (Join-Path $Tmp 'halt.json') 'HardwareUnit' 'Debug' 1 @((New-Rec 't_fail' 'FAILED' $true -Exit 3)) -Halt 'CLEANUP_FAILED after x'
 $docClean2 = Write-Doc (Join-Path $Tmp 'cleanup.json') 'HardwareUnit' 'Debug' 1 @((New-Rec 't_pass' 'PASSED' $true -Exit 0), (New-Rec 't_pass[STATE]' 'CLEANUP_FAILED' $false -Check $true))
-tc_check 'TEST-LOCALSUITES-006-timeout-infra-cleanup-and-halt-stop-the-run' `
-    (($stopT -match 'FAILED\(TIMEOUT\)') -and ($stopT -match 'INFRA_FAILURE') -and ((Get-AvbStopReason $docClean) -eq '') -and
-     ((Get-AvbStopReason $docHalt) -match 'state-integrity halt') -and ((Get-AvbStopReason $docClean2) -match 'CLEANUP_FAILED')) `
-    ("timeout/infra='{0}' clean='{1}' halt='{2}' cleanup='{3}'" -f $stopT, (Get-AvbStopReason $docClean), (Get-AvbStopReason $docHalt), (Get-AvbStopReason $docClean2))
+# Contract changed 2026-10-21 (Q): a safety halt (TIMEOUT / CLEANUP_FAILED / INCONCLUSIVE_RESTORATION / stateHalt) no
+# longer stops the run - later suites still execute their eligible ReadOnly tests while every Init/Mutating test stays
+# BLOCKED (the halt is carried by Run-Tests-CI -PriorResultsDir <ReportDir>, same as hil.yml) and the run stays
+# nonpassing.  Only global driver/device infrastructure loss (INFRA_FAILURE) stops it.
+$docUnv = Write-Doc (Join-Path $Tmp 'unverified.json') 'HardwareMutation' 'Debug' 1 @((New-Rec 't_tgt' 'PASSED' $true -Exit 0), (New-Rec 't_tgt[STATE-UNVERIFIED]' 'INCONCLUSIVE_RESTORATION' $false -Check $true)) -Halt 't_tgt: restoration not verified'
+$halts = [ordered]@{ timeout = (Get-AvbSafetyHalt $doc); halt = (Get-AvbSafetyHalt $docHalt); cleanup = (Get-AvbSafetyHalt $docClean2); unverified = (Get-AvbSafetyHalt $docUnv); clean = (Get-AvbSafetyHalt $docClean) }
+tc_check 'TEST-LOCALSUITES-006-only-infrastructure-loss-stops-the-run-safety-halts-are-carried-not-stopping' `
+    (($stopT -match 'INFRA_FAILURE') -and ($stopT -notmatch 'TIMEOUT') -and ((Get-AvbStopReason $docClean) -eq '') -and ((Get-AvbStopReason $docHalt) -eq '') -and
+     ((Get-AvbStopReason $docClean2) -eq '') -and ((Get-AvbStopReason $docUnv) -eq '') -and
+     ($halts.timeout -match 'FAILED\(TIMEOUT\)') -and ($halts.halt -match 'state-integrity halt') -and ($halts.cleanup -match 'CLEANUP_FAILED') -and
+     ($halts.unverified -match 'INCONCLUSIVE_RESTORATION|restoration not verified') -and ($halts.clean -eq '') -and
+     ([System.IO.File]::ReadAllText($LocalPath) -match '-PriorResultsDir \$ReportDir')) `
+    ("stop: infra/timeout='{0}' halt='{1}' cleanup='{2}' unverified='{3}'; carried: {4}" -f $stopT, (Get-AvbStopReason $docHalt), (Get-AvbStopReason $docClean2), (Get-AvbStopReason $docUnv), (($halts.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ' '))
 
 # --- Reproduction queue (addendum case 13 + Debug/Release separation) ----------------------------------------
 $dU = Write-Doc (Join-Path $Tmp 'u.json') 'HardwareUnit' 'Debug' 1 @(
