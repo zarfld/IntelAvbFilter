@@ -51,6 +51,8 @@ $map = [ordered]@{
     'FAILED(BUILD)' = 'INFRA_FAILURE'; 'INFRA_FAILURE' = 'INFRA_FAILURE'; 'CLEANUP_FAILED' = 'CLEANUP_FAILED'
     'BLOCKED' = 'BLOCKED(SAFETY)'; 'BLOCKED(SAFETY)' = 'BLOCKED(SAFETY)'; 'BLOCKED(PROVENANCE)' = 'BLOCKED(PROVENANCE)'
     'SKIPPED' = 'SKIPPED'; 'SKIPPED(INFRA)' = 'SKIPPED'; 'COVERAGE-GAP' = 'COVERAGE-GAP'
+    # Q 2026-10-21: missing evidence vs observed damage vs unmet initial conditions stay distinct (all nonpassing).
+    'INCONCLUSIVE_RESTORATION' = 'INCONCLUSIVE_RESTORATION'; 'FAILED_SETUP' = 'FAILED_SETUP'
 }
 $bad = @(foreach ($k in $map.Keys) { $v = ConvertTo-AvbRunnerVerdict $k; if ($v -ne $map[$k]) { "$k -> $v" } })
 tc_check 'TEST-RESULTSJSON-001-every-runner-status-maps-to-a-distinct-results-verdict' ($bad.Count -eq 0) ($bad -join '; ')
