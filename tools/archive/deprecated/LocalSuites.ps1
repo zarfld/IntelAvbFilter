@@ -108,6 +108,13 @@ function Get-AvbReproductionQueue {
     return ,$q
 }
 
+# Report text of a step result: 'NOT_RUN' = never reached (the run stopped earlier); $null = ran, no exit code (failure).
+function Format-AvbStepResult {
+    param($Result)
+    if ($Result -is [string] -and $Result -eq 'NOT_RUN') { return 'NOT_RUN' }
+    return (Format-AvbExitCode $Result)
+}
+
 # ---------------------------------------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------------------------------------
@@ -158,7 +165,7 @@ $Report.lock = [ordered]@{ owner = $HilLock.Owner; previousOwner = $HilLock.Prev
 try {
     foreach ($Configuration in $Configurations) {
         $cfg = [ordered]@{ configuration = $Configuration; head = $null; builtDriverSha256 = $null; testManifest = $null
-                           provenanceMode = $null; buildInputDigest = $null; install = $null; preflight = $null; suites = @(); reproductions = @() }
+                           provenanceMode = $null; buildInputDigest = $null; install = 'NOT_RUN'; preflight = 'NOT_RUN'; suites = @(); reproductions = @() }
         $Report.configurations += $cfg
         $cfg.head = ([string](& git -C $RepoRoot rev-parse HEAD)).Trim()
 
@@ -237,7 +244,7 @@ try {
     Write-Host "`n================ LOCAL SUITES REPORT (LOCAL evidence, never CI evidence) ================" -ForegroundColor Cyan
     foreach ($c in $Report.configurations) {
         Write-Host ("{0}: HEAD {1}, provenance {2}, digest {3}, built driver {4}, install {5}, pre-flight {6}" -f $c.configuration, $c.head, $c.provenanceMode,
-                    $c.buildInputDigest, $c.builtDriverSha256, (Format-AvbExitCode $c.install), (Format-AvbExitCode $c.preflight))
+                    $c.buildInputDigest, $c.builtDriverSha256, (Format-AvbStepResult $c.install), (Format-AvbStepResult $c.preflight))
         foreach ($s in $c.suites) { Write-Host ("  {0,-20} exit {1,-4} overall {2,-13} executed {3}{4}" -f $s.suite, (Format-AvbExitCode $s.exitCode), $s.overall, $s.executed, $(if ($s.error) { "  ERROR: $($s.error)" } else { '' })) }
         foreach ($r in $c.reproductions) { Write-Host ("  reproduction {0} {1}: exit {2} ({3})" -f $r.entry, $r.arguments, (Format-AvbExitCode $r.exitCode), $r.resultsJson) }
     }

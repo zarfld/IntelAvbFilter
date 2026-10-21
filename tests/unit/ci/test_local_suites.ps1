@@ -46,7 +46,7 @@ function Import-Functions([string]$Path, [string[]]$Names) {
 $missing = ''
 try {
     . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')
-    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue')
+    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult')
     Import-Functions $ElevPath @('ConvertTo-AvbPsLiteral', 'New-AvbElevatedCommand', 'Wait-AvbDbgViewStarted', 'Get-AvbDbgViewCaptureResult')
 } catch { $missing = $_.Exception.Message }
 tc_check 'TEST-LOCALSUITES-000-decision-functions-present' ($missing -eq '') $missing
@@ -147,6 +147,15 @@ $iInstall = $ls.IndexOf('Install-Driver-Elevated $Configuration'); $iPre = $ls.I
 tc_check 'TEST-LOCALSUITES-011-installed-driver-must-equal-the-locally-built-driver-before-any-suite' `
     (($iInstall -gt 0) -and ($iPre -gt $iInstall) -and ($iSuites -gt $iPre) -and ($ls -match "HIL_REQUIRE_DEPLOYED_SHA = '1'") -and ($ls -match 'BUILD_DRIVER_SHA256 = \$BuiltSha256')) `
     ("install@{0} preflight@{1} suites@{2}" -f $iInstall, $iPre, $iSuites)
+# 016: a step never reached is NOT_RUN, distinct from a step that ran without an exit code (a failure);
+# LocalSuite_20261021_143840.log reported the unreached pre-flight as "<none: no exit code observed>".
+$cfgInit = $lsAst.Find({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$cfg' }, $true)
+$cfgInitText = if ($cfgInit) { $cfgInit.Right.Extent.Text } else { '' }
+tc_check 'TEST-LOCALSUITES-016-unreached-step-reported-not-run-distinct-from-missing-exit-code' `
+    (((Format-AvbStepResult 'NOT_RUN') -eq 'NOT_RUN') -and ((Format-AvbStepResult $null) -eq '<none: no exit code observed>') -and ((Format-AvbStepResult 0) -eq '0') -and
+     ((Format-AvbStepResult 3) -eq '3') -and ($cfgInitText -match "install = 'NOT_RUN'") -and ($cfgInitText -match "preflight = 'NOT_RUN'") -and
+     ($ls -match 'Format-AvbStepResult \$c\.install') -and ($ls -match 'Format-AvbStepResult \$c\.preflight')) `
+    ("NOT_RUN->[{0}] null->[{1}] init: {2}" -f (Format-AvbStepResult 'NOT_RUN'), (Format-AvbStepResult $null), ($cfgInitText -replace '\s+', ' '))
 tc_check 'TEST-LOCALSUITES-012-never-reboots-or-retries-installation' `
     (($ls -notmatch '(?i)Restart-Computer|shutdown(\.exe)?\s+/r|bcdedit') -and ([regex]::Matches($ls, 'Install-Driver-Elevated \$Configuration').Count -eq 1)) 'reboot command or repeated install found'
 

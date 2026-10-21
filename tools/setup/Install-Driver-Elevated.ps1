@@ -130,6 +130,9 @@ try {
         }
         exit 1
     }
+    # Explicit success: callers (LocalSuites Invoke-AvbStep) reset $global:LASTEXITCODE before this step, so falling off
+    # the end reads as "no exit code observed" = failure (LocalSuite_20261021_143840.log; TEST-NATIVE-EXIT-012/013).
+    exit 0
 
 } catch {
     Write-Host "ERROR: Failed to launch elevated install script" -ForegroundColor Red

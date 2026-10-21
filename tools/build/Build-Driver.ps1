@@ -463,7 +463,11 @@ if ($BuildTests) {
     Write-Host "`nTest Build Summary:" -ForegroundColor Cyan
     Write-Host "  Successful: $successCount" -ForegroundColor Green
     Write-Host "  Failed: $failCount" -ForegroundColor $(if ($failCount -gt 0) { "Red" } else { "Green" })
-    
+    if ($failCount -gt 0) {
+        Write-Failure "$failCount test build(s) failed"
+        exit 1
+    }
+
     # List built executables
     $testExeDir = Join-Path $repoRoot "build\tools\avb_test\$Platform\$Configuration"
     if (Test-Path $testExeDir) {
@@ -498,3 +502,5 @@ if (-not $SkipDriver) {
     Write-Host "  1. Install driver: .\tools\Setup-Driver.ps1 -Configuration $Configuration -InstallDriver" -ForegroundColor Cyan
     Write-Host "  2. Run tests: .\tools\Test-Driver.ps1 -Configuration $Configuration" -ForegroundColor Cyan
 }
+# Explicit success (every failure above exits nonzero); never inherit the last native command's exit code.
+exit 0
