@@ -48,13 +48,14 @@ if (-not $LogFile) {
 # CRITICAL: The exit code of Run-Tests.ps1 must be captured BEFORE Stop-Transcript
 # is called.  PowerShell -Command exits with the return value of the last expression.
 # If Stop-Transcript is the last expression its return value (a TranscriptLog object)
-# would overwrite the test result.  Capture via $LASTEXITCODE then exit explicitly.
+# would overwrite the test result.  Capture via $global:LASTEXITCODE (reset first; no exit code = failure) then exit
+# explicitly.
 if ($LogFile) {
     $command = "Start-Transcript -Path '$LogFile' -Force | Out-Null; "
 } else {
     $command = ""
 }
-$command += "`$_innerCode = 0; "
+$command += "`$_innerCode = 1; `$global:LASTEXITCODE = `$null; "
 $command += "try { & '$scriptPath' -Configuration $Configuration"
 if ($Full) {
     $command += " -Full"
@@ -78,7 +79,7 @@ if ($LogFile) {
     $command += " -CollectLogs"
 }
 # Close the try block, capture exit code, then Stop-Transcript before exit
-$command += "; `$_innerCode = `$LASTEXITCODE } catch { `$_innerCode = 1 } finally { "
+$command += "; `$_innerCode = `$global:LASTEXITCODE; if (`$null -eq `$_innerCode) { `$_innerCode = 1 } } catch { `$_innerCode = 1 } finally { "
 if ($LogFile) {
     $command += "Stop-Transcript | Out-Null"
 } else {

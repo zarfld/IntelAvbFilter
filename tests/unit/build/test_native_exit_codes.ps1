@@ -114,9 +114,10 @@ foreach ($rel in $chain) {
         $t = $x.Pipeline.Extent.Text
         if ($t -match '^\$(global:)?LASTEXITCODE$|^\$ec$|^\$null$') { $nullExit += ("{0}:{1} exit {2}" -f $rel, $x.Extent.StartLineNumber, $t) }
     }
-    # Generated child scripts (here-strings) must read the global variable too.
-    foreach ($s in $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.ExpandableStringExpressionAst] -or $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
-        if ($s.Extent.Text -match '`\$LASTEXITCODE') { $unq += ("{0}:{1} (generated script)" -f $rel, $s.Extent.StartLineNumber) }
+    # Generated child scripts (here-strings, single-quoted lines, escaped `$) must read the global variable too.
+    foreach ($s in $ast.FindAll({ param($x) ($x -is [System.Management.Automation.Language.ExpandableStringExpressionAst] -or $x -is [System.Management.Automation.Language.StringConstantExpressionAst]) -and
+                                  $x.Parent -isnot [System.Management.Automation.Language.CommandAst] -or $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
+        if ($s.Extent.Text -match '(?<![\w:])`?\$LASTEXITCODE\b') { $unq += ("{0}:{1} (generated script)" -f $rel, $s.Extent.StartLineNumber) }
     }
 }
 tc_check 'TEST-NATIVE-EXIT-010-no-unqualified-lastexitcode-in-the-build-install-test-chain' ($unq.Count -eq 0) ("{0} site(s): {1}" -f $unq.Count, (($unq | Select-Object -First 25) -join ', '))
