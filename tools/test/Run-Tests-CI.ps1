@@ -367,6 +367,7 @@ $TestArtifactClassification = [ordered]@{
 $HardwareMandatoryTests = @(
     # Connectivity + device contract
     "test_ioctl_version",              # IOCTL_AVB_GET_VERSION handshake --- driver reachable
+    "test_ioctl_routing",              # IOCTL routing through the filter (read-only IOCTLs)
     "test_ioctl_simple",               # basic open/close cycle
     "test_ioctl_abi",                  # IOCTL ABI backward-compat (TEST-ABI-001)
     # TX timestamp provenance + V1/V2 ABI (REQ-F-PTP-007, #199, #317)
@@ -427,20 +428,47 @@ $HardwareMutationAttendedOnly = [ordered]@{
 $HardwareUnitTests = @(
     "test_cleanup_archive",        # checks build output against installed driver
     "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
+    "test_ioctl_routing",          # IOCTL routing through the filter (ENUM/OPEN/READ_REGISTER/GET_CLOCK_CONFIG)
     "test_ioctl_trace",            # DeviceIoControl trace IOCTLs
+    "test_minimal_ioctl.exe",
+    "test_clock_config.exe",
+    "test_clock_working",
+    "test_direct_clock",
+
     "test_hal_performance",        # HAL timer/DMA performance -- needs NIC
     "test_atdecc_event",           # ATDECC event subscription via driver IOCTL
     "test_atdecc_aen_protocol",    # ATDECC AEN protocol -- driver IOCTL path
     "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
+    "test_mdio_phy",
+    "test_dev_lifecycle",
+    "test_ts_event_sub",
+    "test_ptp_getset",
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
     "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
                                      # Section H SKIPs gracefully when driver is absent.
+    "test_ptp_freq",
+    "test_ptp_freq_complete",
+    "test_hw_ts_ctrl",
+    "test_rx_timestamp",
+    "test_rx_timestamp_complete",
+    "test_ioctl_target_time",       # IOCTL target time management -- (#199)
+    "test_qav_cbs",
+    "test_ioctl_tas",
+    "test_ioctl_fp_ptm",
     # Phase A: IOCTL functional tests (REQ #2-#13, previously missing from CI)
     "test_tx_timestamp_retrieval", # TX timestamp retrieval -- REQ-F-IOCTL-TS-001 (#35)
     "test_ioctl_phc_query",        # PHC query IOCTL -- REQ-F-PTP-PHC (#192)
+    "test_ioctl_offset",
     "test_ioctl_phc_epoch",        # PHC epoch management -- (#196)
+    "test_ioctl_phc_monotonicity",  # PHC monotonicity check -- (#197)
     "test_ioctl_xstamp",           # cross-timestamp (PTP/system correlation) -- (#198)
     "test_ioctl_xstamp_v2",        # V2 ABI + HIL reachability (#340)
+    "test_ioctl_abi",
+    "test_ioctl_access_control",    # IOCTL access control enforcement -- (#341)
+    "test_ioctl_buffer_fuzz",       # IOCTL buffer fuzzing -- (#342)
+    "test_tsn_ioctl_handlers",
+    "ptp_clock_control_test",
+    "test_ptp_crosstimestamp",
     "test_ioctl_phc_crosstimestamp_v2",  # PHC cross-timestamp V2 ABI (#340)
     "test_ioctl_abi",              # IOCTL ABI backward-compatibility
     # test_tsn_ioctl_handlers removed (#328 F23): its build entry is Disabled (KM placeholder); a stale binary
@@ -449,21 +477,33 @@ $HardwareUnitTests = @(
     # Phase B: PHC/QPC coherence + VV coverage (added 2026-03-29)
     "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
     "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
+    "test_lifecycle_coverage",
     # Phase C: Additional unit tests registered 2026-04-01 (built but previously absent from CI)
     "test_hw_state",               # hardware state enum/OID query -- REQ-F-HWCTX-001 (#18)
     "test_statistics_counters",    # IOCTL statistics counters -- REQ-NF-DIAG-001 (#270)
+    "test_event_log",
     "test_build_sign",             # build & code-signing verification -- (#243)
     "test_compat_win11",           # Windows 11 compatibility smoke -- (#256)
     "test_win7_stub",              # OS compat Win10+ assertion -- (#258)
+    "test_eee_lpi",
+    "test_pfc_pause",
+    "test_srp_interface",
+    "test_vlan_tag",                # VLAN tag handling -- (#343)
+    "test_vlan_pcp_tc_mapping",     # VLAN PCP to TC mapping -- (#344)
+    "test_security_validation",
+    "test_ioctl_launch_time",
     "test_avtp_tu_bit_events",     # AVTP TU-bit change events -- (#175)
     "test_ptp_event_latency",      # PTP event ring-buffer latency -- (#177)
     "test_event_latency_4ch",      # 4-channel multi-observer event latency -- (#179)
     "test_event_nf_zero_polling",  # NF CPU-overhead budget quantification -- (#241, TEST-EVENT-NF-002)
     "test_event_nf_latency",       # NF IOCTL-path latency P99 under adversarial load -- (#245, TEST-EVENT-NF-001)
+    "test_gptp_phc_interface",
     "test_send_ptp_debug",         # IOCTL_AVB_TEST_SEND_PTP diagnostic -- (#51)
     "test_timestamp_latency",      # TX/RX timestamp latency <1us -- (#272)
     "test_perf_regression",        # performance regression baseline -- (#225)
     "test_ndis_fastpath_latency",  # NDIS IOCTL fast-path latency P99<10us -- (#286)
+    "test_hot_plug",
+    "test_error_recovery",
     "test_multi_adapter_phc_sync",  # multi-adapter PHC sync/independence -- (#208)
     # Provenance regression (TEST-PROV-L01..L05 logic + TEST-PROV-H01..H05 device contract)
     "test_tx_timestamp_provenance"  # V1/V2 IOCTL ABI, FastIo canary, cross-handle isolation
@@ -472,19 +512,36 @@ $HardwareUnitTests = @(
 # Integration-level tests that require the driver device node or Intel NIC.
 # Safe to run on an automated self-hosted runner.
 $HardwareIntegrationTests = @(
+    "ssot_register_validation_test",
+    "test_tsn_ioctl_handlers_um",
+
     "test_all_adapters",              # enumerates all Intel AVB adapters
     "test_multidev_adapter_enum",     # multi-device adapter enumeration
     "test_device_register_access",    # direct device register read/write
     "test_ndis_send_path",            # NDIS send path -- needs NIC
     "test_ndis_receive_path",         # NDIS receive path -- needs NIC
+    "test_hw_state_machine",
     "test_lazy_initialization",       # lazy init via driver device open
     "test_registry_diagnostics",      # registry diagnostics -- driver service required
+    "test_ptp_corr_extended",
     # Phase B: extended cross-domain / correlation tests (added 2026-03-29)
     "test_vv_corr_003_crossdomain",   # cross-domain V&V validation -- VV-CORR-003
     # Phase C: Additional integration tests registered 2026-04-01 (built but previously absent from CI)
     "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
     "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
-    # test_ptp_phc_stability: temporary policy exclusion, see $HardwareIntegrationCoverageGaps
+    "test_ptp_phc_stability",         # UT-CORR-007/008 TX-PHC correlation (#149 #317); no args -> UT-CORR-009 reinstall unreachable
+    "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
+    "ptp_clock_control_production",
+    "ptp_ioctl_latency_test",
+    "hw_timestamping_control",
+    "rx_timestamping",
+    "tsauxc_toggle_test",
+    "test_gptp_daemon_coexist",
+    "avb_test_i219",
+    "avb_test_portability",
+    "avb_test_i217",
+    "avb_test_i225",
+    "avb_test_i226_um"
     # Phase D/E/F (avb_test_i219, avb_test_portability, avb_test_i217/i225/i226_um): see $HardwareIntegrationCoverageGaps
     "test_hardware_detection"         # HW capability detection & register access safety -- (#44 #45, #287 #288)
 )
@@ -501,14 +558,12 @@ $HardwareIntegrationTests = @(
 # The entries stay classified in $HilTestSafety and run only through an explicit -Tests list on an attended run.
 # Reasons must not end in a parenthesis (the JUnit converter strips a trailing "(...)" from case names).
 $HardwareMandatoryCoverageGaps = [ordered]@{
-    'test_ioctl_routing'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - classified Init; execution path sends no INIT_DEVICE, only ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG; ReadOnly reclassification under evaluation; OPEN_ADAPTER re-points the global default adapter'
     'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
     'ptp_clock_control_test'     = 'Mutating: TC-5b ADJUST_FREQUENCY writes TIMINCA, plus SET_TIMESTAMP and INIT_DEVICE; contradicts the non-mutating Mandatory contract; split into read-only and mutating executables tracked in #340'
     'test_rx_timestamp'          = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
     'test_rx_timestamp_complete' = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
 }
 $HardwareUnitCoverageGaps = [ordered]@{
-    'test_ioctl_routing'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - classified Init; execution path sends no INIT_DEVICE, only ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG; ReadOnly reclassification under evaluation; OPEN_ADAPTER re-points the global default adapter'
     'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
     'test_clock_config'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
     'test_clock_working'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
@@ -557,7 +612,6 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'rx_timestamping'               = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
     'tsauxc_toggle_test'            = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
     'test_gptp_daemon_coexist'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ptp_phc_stability'        = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-20 - the default run is UT-CORR-007/008 only, but the binary contains the UT-CORR-009 driver reinstall path, ControlService STOP plus system Install-Driver-Elevated.ps1 -Action Reinstall, reachable only with --case UT-CORR-009 or --allow-lifecycle; coverage gap: UT-CORR-007/008 TX-PHC correlation, #149 #317'
     'ssot_register_validation_test' = 'Unknown: not yet classified from its source; built by Build-Tests.ps1 entry ssot_register_validation, Output ssot_register_validation_test.exe, source tests/integration/tsn/ssot_register_validation_test.c - the earlier claim of no build entry was wrong, the entry name differs from the output name'
     # Formerly only commented out of every list (silently absent); declared so every run reports them NOT EXECUTED.
     'test_vv_corr_001_stability'    = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-21 - VV-CORR-001 requires a 24-hour run, default --hours 24; no long-duration HIL lane exists and shortening the run would change its acceptance criterion; #317 Track E'
@@ -639,7 +693,7 @@ $HilTestSafety = @{
     'test_direct_clock'                = 'Init'
     'test_dev_lifecycle'               = 'Init'       # "devcon" appears only in a SKIP message
     'test_minimal_ioctl'               = 'Init'
-    'test_ioctl_routing'               = 'Init'
+    'test_ioctl_routing'               = 'ReadOnly'   # INIT_DEVICE only a GetIoctlName() case label; sends ENUM/OPEN/READ_REGISTER/GET_CLOCK_CONFIG
     'test_hw_state_machine'            = 'Init'
     # --- Mutating, exact-target-aware ---
     'test_ptp_freq'                    = 'Mutating:Target'   # AvbTestSelectTarget
