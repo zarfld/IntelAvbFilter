@@ -135,19 +135,28 @@ $notGap = @()
 foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) { if ($null -eq $gapTables[$s] -or -not $gapTables[$s].Contains($e)) { $notGap += "${s}: $e" } } }
 tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-declared-gaps' ($notGap.Count -eq 0) ("not declared: {0}" -f ($notGap -join ', '))
 
-# test_ptp_phc_stability: excluded from unattended HIL by policy (driver-reinstall code in the binary), while the
-# classifier keeps its evidence-based ReadOnly class for the no-argument entry.
+# Coverage restored (Q 2026-10-22: repair, do not exclude).  test_ptp_phc_stability without arguments runs only
+# UT-CORR-007/008 (main(): run_009 needs --case UT-CORR-009 or --allow-lifecycle, both runner-controlled); the
+# driver-reinstall code in the binary is unreachable from the registered entry.  It executes, ReadOnly, not a gap.
 $psGap = $gapTables['HardwareIntegration']
-tc_check 'TEST-HILGATE-037-phc-stability-policy-excluded-classifier-unchanged' `
-    (($null -ne $psGap) -and $psGap.Contains('test_ptp_phc_stability') -and ($registry['test_ptp_phc_stability'] -eq 'ReadOnly') -and
-     (@($hwLists['HardwareIntegrationTests']) -notcontains 'test_ptp_phc_stability') -and ("$($psGap['test_ptp_phc_stability'])" -match 'UT-CORR-007/008')) `
+tc_check 'TEST-HILGATE-037-phc-stability-default-entry-executes-readonly' `
+    (($registry['test_ptp_phc_stability'] -eq 'ReadOnly') -and (@($hwLists['HardwareIntegrationTests']) -contains 'test_ptp_phc_stability') -and
+     -not (($null -ne $psGap) -and $psGap.Contains('test_ptp_phc_stability'))) `
     ("gap={0}; class={1}; listed={2}" -f $(if ($null -ne $psGap) { $psGap.Contains('test_ptp_phc_stability') } else { 'no table' }), $registry['test_ptp_phc_stability'], (@($hwLists['HardwareIntegrationTests']) -contains 'test_ptp_phc_stability'))
+# test_ioctl_routing: INIT_DEVICE occurs only in the GetIoctlName() name table and is never issued; it sends
+# ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG -> ReadOnly; executed in HardwareUnit and HardwareMandatory.
+$rtGap = @('HardwareUnit', 'HardwareMandatory' | Where-Object { $null -ne $gapTables[$_] -and $gapTables[$_].Contains('test_ioctl_routing') })
+tc_check 'TEST-HILGATE-039-ioctl-routing-is-readonly-and-executes' `
+    (($registry['test_ioctl_routing'] -eq 'ReadOnly') -and (@($hwLists['HardwareUnitTests']) -contains 'test_ioctl_routing') -and
+     (@($hwLists['HardwareMandatoryTests']) -contains 'test_ioctl_routing') -and $rtGap.Count -eq 0) `
+    ("class={0}; unit={1}; mandatory={2}; still a gap in: [{3}]" -f $registry['test_ioctl_routing'], (@($hwLists['HardwareUnitTests']) -contains 'test_ioctl_routing'),
+     (@($hwLists['HardwareMandatoryTests']) -contains 'test_ioctl_routing'), ($rtGap -join ','))
 # Init coverage is retained, not removed: every Init registration stays classified and is a declared gap; each
 # automatic suite keeps at least one ReadOnly entry, so the real-pass requirement (TEST-HILGATE-036) stays satisfiable.
 $initKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Init' } | Sort-Object)
 $initNotGap = @($initKeys | Where-Object { $gapEntries -notcontains $_ })
 $noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$_]]); @($sl | Where-Object { $registry[$_] -eq 'ReadOnly' }).Count -eq 0 })
-$expectInit = @('test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_ioctl_routing', 'test_minimal_ioctl')
+$expectInit = @('test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
 tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suites-keep-readonly-entries' `
     ((($initKeys -join ',') -eq ($expectInit -join ',')) -and $initNotGap.Count -eq 0 -and $noReadOnly.Count -eq 0) `
     ("init keys: [{0}]; not declared as gap: [{1}]; suites without a ReadOnly entry: [{2}]" -f ($initKeys -join ','), ($initNotGap -join ','), ($noReadOnly -join ','))
@@ -204,7 +213,8 @@ function Get-StrippedSource([string]$bin, [bool]$keepStrings) {
 $mutRx  = '\bIOCTL_AVB_(WRITE_REGISTER|SET_TIMESTAMP|SETUP_TAS|SETUP_FP|SETUP_PTM|MDIO_WRITE|SETUP_QAV|ADJUST_FREQUENCY|SET_HW_TIMESTAMPING|SET_RX_TIMESTAMP|SET_QUEUE_TIMESTAMP|SET_TARGET_TIME|PHC_OFFSET_ADJUST|SET_PORT_LATENCY|SET_LAUNCH_TIME|DISARM_TAS|RESET_STATISTICS|VLAN_ENABLE|VLAN_DISABLE|EEE_ENABLE|EEE_DISABLE|PFC_ENABLE|SRP_REGISTER_STREAM|SRP_DEREGISTER_STREAM)\b|\b(AvbWriteReg|AvbWriteRegVerified|AvbTestAdjustFrequency|AvbTestI210RestoreVerified|AvbTestI210ExpectRejectedUnchanged)\s*\('
 $nicRx  = 'CM_Disable_DevNode|CM_Enable_DevNode|CM_Reenumerate_DevNode|SetupDiCallClassInstaller|DIF_PROPERTYCHANGE|SetSuspendState|ControlService|\bdevcon\b|\bpnputil\b|Disable-NetAdapter|Enable-NetAdapter|Restart-NetAdapter'
 # Documented exceptions (each states why the hit is not executed by the registered entry).
-$roExceptions  = @{ 'test_ioctl_abi' = 'sizeof/code checks only'; 'test_ptp_phc_stability' = 'no args runs UT-CORR-007/008 only; 005/006/009 need --case' }
+$roExceptions  = @{ 'test_ioctl_abi' = 'sizeof/code checks only'; 'test_ptp_phc_stability' = 'no args runs UT-CORR-007/008 only; 005/006/009 need --case'
+                    'test_ioctl_routing' = 'IOCTL_AVB_INIT_DEVICE only as a case label of GetIoctlName(); never passed to DeviceIoControl' }
 $nicExceptions = @{ 'test_dev_lifecycle' = 'devcon appears only in a SKIP message'; 'test_statistics_counters' = 'devcon appears only in a SKIP message'
                     'test_ptp_phc_stability' = 'ControlService/system only in UT-CORR-009 (--case UT-CORR-009 / --allow-lifecycle)'
                     'test_ptp_phc_stability --case UT-CORR-005' = 'UT-CORR-009 not selected'; 'test_ptp_phc_stability --case UT-CORR-006' = 'UT-CORR-009 not selected' }
