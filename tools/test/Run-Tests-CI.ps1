@@ -298,6 +298,7 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_hil_baseline_evidence.ps1",         # TEST-HILBASE: baseline evidence producer, verdict rules, never writes the safety record (offline, synthetic; D3)
     "ps1:tests/unit/ci/test_tx_timestamp_probe.ps1",            # TEST-TXPROBE: TC-CORR-TX-RX-001 phase-1 probe interpretation + non-destructive construction (offline; D4)
     "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
+    "ps1:tests/unit/ci/test_agent_testing_guidance.ps1",        # TEST-AGENTGUIDE: agent testing-contract wiring, skill frontmatter, runner params in guidance (offline, static; not agent-behaviour evidence)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
     "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator

@@ -762,6 +762,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_PHC_CROSSTIMESTAMP_V2:     // Implements #340 (PHC provenance, code 67)
         case IOCTL_AVB_GET_TAS_STATE:             // Fix #328: test-state-restoration readback (code 65)
         case IOCTL_AVB_DISARM_TAS:                // Fix #328: test-state-restoration disarm (code 66)
+        case IOCTL_AVB_QUERY_HW_SNAPSHOT:         // HIL restoration verification (code 70); bound handles only, see gate
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
@@ -775,6 +776,12 @@ IntelAvbFilterDeviceIoControl(
                  * per-handle contract test to fail. */
                 if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_GET_CLOCK_CONFIG) {
                     Status = STATUS_UNSUCCESSFUL;
+                    break;
+                }
+                /* QUERY_HW_SNAPSHOT is exact-target only: an unbound handle is refused, never served by whichever
+                 * adapter the fallback below would pick (HIL restoration verification, Q 2026-10-22). */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_QUERY_HW_SNAPSHOT) {
+                    Status = STATUS_INVALID_DEVICE_STATE;
                     break;
                 }
                 // Fall back to searching for any Intel filter (single-adapter mode)
@@ -1168,6 +1175,94 @@ IntelAvbFilterDeviceIoControl(
 
             if (Status != STATUS_PENDING) {
                 InfoLength = sizeof(AVB_OPEN_REQUEST);
+            }
+            break;
+        }
+
+        /* HIL exact targeting by stable identity (Q 2026-10-22).  Same adapter predicate and order as
+         * IOCTL_AVB_ENUM_ADAPTERS (context with Intel VID and a non-zero DID); evaluated entirely under FilterListLock
+         * (no PnP query, no lock drop).  The index is only a cursor; the NET_LUID is the identity. */
+        case IOCTL_AVB_GET_ADAPTER_IDENTITY:
+        {
+            InputBuffer = OutputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
+            InputBufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+            OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+            if (InputBufferLength < sizeof(AVB_ADAPTER_IDENTITY_REQUEST) || OutputBufferLength < sizeof(AVB_ADAPTER_IDENTITY_REQUEST)) {
+                Status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            {
+                PAVB_ADAPTER_IDENTITY_REQUEST idr = (PAVB_ADAPTER_IDENTITY_REQUEST)OutputBuffer;
+                AVB_ADAPTER_IDENTITY_REQUEST res;
+                UINT32 want = idr->index, pos = 0;
+                BOOLEAN found = FALSE;
+                if (idr->version != AVB_ADAPTER_IDENTITY_VERSION) { Status = STATUS_REVISION_MISMATCH; break; }
+                RtlZeroMemory(&res, sizeof(res));
+                res.version = AVB_ADAPTER_IDENTITY_VERSION;
+                res.index = want;
+                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                for (Link = FilterModuleList.Flink; Link != &FilterModuleList; Link = Link->Flink) {
+                    PMS_FILTER f = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                    PAVB_DEVICE_CONTEXT c = (PAVB_DEVICE_CONTEXT)f->AvbContext;
+                    if (c == NULL || c->intel_device.pci_vendor_id != INTEL_VENDOR_ID || c->intel_device.pci_device_id == 0) { continue; }
+                    if (pos == want) {
+                        res.net_luid = f->MiniportNetLuid.Value;
+                        res.if_index = (avb_u32)f->MiniportIfIndex;
+                        res.vendor_id = (avb_u16)c->intel_device.pci_vendor_id;
+                        res.device_id = (avb_u16)c->intel_device.pci_device_id;
+                        res.capabilities = c->intel_device.capabilities;
+                        RtlCopyMemory(res.mac, f->MiniportMac, sizeof(res.mac));
+                        found = TRUE;
+                    }
+                    pos++;
+                }
+                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                res.count = pos;
+                res.status = found ? (avb_u32)NDIS_STATUS_SUCCESS : (avb_u32)NDIS_STATUS_ADAPTER_NOT_FOUND;
+                RtlCopyMemory(idr, &res, sizeof(res));
+                InfoLength = sizeof(res);
+                Status = STATUS_SUCCESS;   /* res.status carries "no adapter at this position" */
+            }
+            break;
+        }
+
+        /* Binds this handle to the ONE adapter whose base-miniport NET_LUID matches; nothing else.  Unlike
+         * OPEN_ADAPTER it switches no global context and runs no PTP initialization (an observer handle must not
+         * change the adapter it observes).  0 matches -> STATUS_NO_SUCH_DEVICE, >1 -> STATUS_INVALID_DEVICE_STATE;
+         * in both cases the handle's previous binding is left unchanged.  Later IOCTLs on the handle re-validate
+         * that the bound context is still live (detached / re-enumerated adapter -> STATUS_DEVICE_NOT_READY). */
+        case IOCTL_AVB_OPEN_ADAPTER_BY_LUID:
+        {
+            InputBuffer = OutputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
+            InputBufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+            OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+            if (InputBufferLength < sizeof(AVB_OPEN_BY_LUID_REQUEST) || OutputBufferLength < sizeof(AVB_OPEN_BY_LUID_REQUEST)) {
+                Status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            {
+                PAVB_OPEN_BY_LUID_REQUEST lr = (PAVB_OPEN_BY_LUID_REQUEST)OutputBuffer;
+                PAVB_DEVICE_CONTEXT bound = NULL;
+                UINT32 matches = 0;
+                if (lr->version != AVB_OPEN_BY_LUID_VERSION) { Status = STATUS_REVISION_MISMATCH; break; }
+                FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
+                for (Link = FilterModuleList.Flink; Link != &FilterModuleList; Link = Link->Flink) {
+                    PMS_FILTER f = CONTAINING_RECORD(Link, MS_FILTER, FilterModuleLink);
+                    PAVB_DEVICE_CONTEXT c = (PAVB_DEVICE_CONTEXT)f->AvbContext;
+                    if (c == NULL || c->intel_device.pci_vendor_id != INTEL_VENDOR_ID || c->intel_device.pci_device_id == 0) { continue; }
+                    if (f->MiniportNetLuid.Value == lr->net_luid) { matches++; bound = c; }
+                }
+                FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
+                lr->matches = matches;
+                if (matches == 1) {
+                    IrpSp->FileObject->FsContext = bound;
+                    lr->status = (avb_u32)NDIS_STATUS_SUCCESS;
+                    InfoLength = sizeof(*lr);
+                    Status = STATUS_SUCCESS;
+                } else {
+                    lr->status = (matches == 0) ? (avb_u32)NDIS_STATUS_ADAPTER_NOT_FOUND : (avb_u32)NDIS_STATUS_FAILURE;
+                    Status = (matches == 0) ? STATUS_NO_SUCH_DEVICE : STATUS_INVALID_DEVICE_STATE;
+                }
             }
             break;
         }

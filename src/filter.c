@@ -554,6 +554,13 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                         pFilter->MiniportName.Length);
 
         pFilter->MiniportIfIndex = AttachParameters->BaseMiniportIfIndex;
+        /* Stable physical identity for HIL exact targeting (Q 2026-10-22): the base miniport's NET_LUID does not
+         * depend on the filter-list order that ENUM_ADAPTERS indices follow. */
+        pFilter->MiniportNetLuid = AttachParameters->BaseMiniportNetLuid;
+        NdisZeroMemory(pFilter->MiniportMac, sizeof(pFilter->MiniportMac));
+        if (AttachParameters->MacAddressLength >= sizeof(pFilter->MiniportMac)) {
+            NdisMoveMemory(pFilter->MiniportMac, AttachParameters->CurrentMacAddress, sizeof(pFilter->MiniportMac));
+        }
         /* Store the physical PCI PDO (NDIS 6.20+ field) for AvbGetPdoFromFilter.
          * This is the actual PCI PDO used by pci.sys, not the NDIS binding device.
          * Required to correctly read DevicePropertyHardwareID for PCH-integrated
