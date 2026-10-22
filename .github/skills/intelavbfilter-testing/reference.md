@@ -1,3 +1,15 @@
+# HISTORICAL REFERENCE — NOT NORMATIVE
+
+> The normative testing contract is [`SKILL.md`](./SKILL.md) in this directory; runner invocation is [`run-tests`](../run-tests/SKILL.md).
+> Everything below the fence is the previous skill text, preserved unchanged for its rationale and examples.
+> Where it differs from `SKILL.md`, `SKILL.md` wins. Known superseded content below:
+>
+> - "CI / headless → `Run-Tests-CI.ps1 -Suite Unit` — hardware tests are skipped": CI also runs the self-hosted HIL workflow `.github/workflows/hil.yml` (HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory; Debug and Release).
+> - Plain `SKIP` on `STATUS_NOT_SUPPORTED`: the current taxonomy is `SKIP_UNSUPPORTED` (capability evidenced absent), `FAIL` (capability advertised), `INCONCLUSIVE` (undeterminable), `SKIP_NOT_IMPLEMENTED` for `STATUS_NOT_IMPLEMENTED` — see `docs/testing/test-verdict-contract.md`.
+> - Family-specific binaries (`avb_test_i210_um`, `avb_test_i219`, `avb_test_i226`) as examples or default commands: hardware tests run through `Run-Tests-Elevated.ps1 -Suite <Hardware*>` / `Run-Tests-CI.ps1`, which apply the safety registry and provenance gates; the legacy `-TestName` path does not.
+> - Output examples carrying model names and fixed DIDs: identity is for targeting/reporting only; never an expectation.
+> - "Driver installed: Status=Running" as a sufficient prerequisite: a running service proves neither device access nor driver identity.
+
 ````skill
 ---
 name: intelavbfilter-testing
