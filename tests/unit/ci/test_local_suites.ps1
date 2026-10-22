@@ -208,7 +208,7 @@ $docOutsideElse = if ($null -ne $elseText) { [regex]::Matches($loopText.Replace(
 $breaks = @([regex]::Matches($loopText, '(?m)^.*\bbreak\b.*$') | ForEach-Object { $_.Value })
 tc_check 'TEST-LOCALSUITES-019-untrusted-results-document-is-a-failure-row-and-the-matrix-continues' `
     ($ur.Category -eq 'Failure' -and $ur.Verdict -eq 'RESULTS_UNTRUSTED' -and -not $ur.Executed -and $ur.Suite -eq 'HardwareUnit' -and $ur.Configuration -eq 'Release' -and
-     $ur.Reason -match 'no results document' -and @(Get-AvbReproductionQueue -Inventory @($ur) -Configuration 'Release').Count -eq 0 -and
+     $ur.Reason -match 'no results document' -and (Get-AvbReproductionQueue -Inventory @($ur) -Configuration 'Release').Count -eq 0 -and
      $null -ne $notOk -and ($thenText -match 'New-AvbUntrustedSuiteRow') -and ($thenText -match '\$cfgInventory \+=') -and $docOutsideElse -eq 0 -and
      $breaks.Count -eq 1 -and $breaks[0] -match 'operator stop') `
     ("row={0}/{1}/executed={2} notOk-branch={3} res.Doc outside trusted branch={4} breaks=[{5}]" -f $ur.Category, $ur.Verdict, $ur.Executed, [bool]$notOk, $docOutsideElse, ($breaks -join ' || '))

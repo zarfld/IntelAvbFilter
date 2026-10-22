@@ -13,12 +13,17 @@
 #        HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory
 #      via tools\test\Run-Tests-CI.ps1 -ResultsJson (machine-readable; never console-table parsing)
 #   6. failure inventory from the results documents (executed failures vs. blocked vs. skipped kept apart)
-#   7. operator-confirmed reproduction of selected failures of THIS configuration (its driver is installed) with
-#      tools\test\Run-Tests-Elevated.ps1 -CaptureDbgView -Suite <suite> (same runner gates); ReadOnly tests only
+#   7. reproduction of failures of THIS configuration (its driver is installed) with
+#      tools\test\Run-Tests-Elevated.ps1 -CaptureDbgView -Suite <suite> (same runner gates); ReadOnly tests only;
+#      per item a 30 s window (N declines, default yes; noninteractive: yes at once); -NoReproduce disables it
 #   8. combined report (JSON + text) in -ReportDir
 #
-# Stops (no further suite, no reproduction, no next configuration) after a driver/device infrastructure failure, a
-# missing or inconsistent results document, or any build/install/verify failure.  A safety halt (timeout, cleanup
+# The suite matrix is always attempted completely (Q 2026-10-22): a missing or inconsistent results document is one
+# RESULTS_UNTRUSTED failure row and the next suite runs; a driver/device infrastructure failure is recorded per suite
+# (suites[].infrastructure) and the next suite runs [open question to Q: TEST-LOCALSUITES-006 / Q 2026-10-21 said
+# infrastructure loss stops the run]; after a suite with failures a 30 s window lets the operator stop (default
+# continue).  Stops (no next configuration) after any build/install/verify failure or that explicit operator stop.
+# A safety halt (timeout, cleanup
 # failure, unverified restoration, state-integrity halt) does NOT stop it: every later suite and configuration of this
 # run gets -PriorResultsDir <ReportDir>, so Init/Mutating tests stay BLOCKED and ReadOnly tests continue; the run is
 # nonpassing.  Never reboots, never retries an installation, never repairs adapters.
