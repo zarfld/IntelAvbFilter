@@ -43,6 +43,7 @@
 #include <math.h>
 #include "external/intel_avb/lib/intel_windows.h"
 #include "devices/intel_device_interface.h"
+#include "src/avb_hw_snapshot.h"   /* QUERY_HW_SNAPSHOT builder (I-010..I-014) */
 
 extern const intel_device_ops_t i210_ops;
 
@@ -808,6 +809,60 @@ int main(void)
     printf("\n[I-009] NULL device\n");
     hw_fresh();
     CHECK("init(NULL) fails without MMIO", i210_ops.init(NULL) != 0 && hw.reads == 0 && hw.writes == 0);
+
+    /* I-010..I-014: QUERY_HW_SNAPSHOT (Q 2026-10-22) - Release-available, read-only observation of every register HIL
+     * tests modify, with the production I210 SSOT offset map.  Synthetic register values (host shim), not hardware. */
+    printf("\n[I-010] HW snapshot: SSOT offsets, values, zero writes\n");
+    CHECK("hil_register_offset is implemented", i210_ops.hil_register_offset != NULL);
+    if (i210_ops.hil_register_offset) {
+        AVB_HW_SNAPSHOT_REQUEST s;
+        hw_configured(); hw.tx = 0x00000010u; hw.rx = 0x0000001Au; hw.timinca = 0x08000000u; hw.tsauxc = 0x00000004u;
+        memset(&s, 0xA5, sizeof(s));
+        AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s);
+        CHECK("count == AVB_HWREG_COUNT, entries in id order",
+              s.count == AVB_HWREG_COUNT && s.entries[0].id == AVB_HWREG_TIMINCA && s.entries[AVB_HWREG_COUNT - 1].id == AVB_HWREG_RAH0);
+        CHECK("TSYNCTXCTL VALID at SSOT 0xB614 with the register value",
+              s.entries[AVB_HWREG_TSYNCTXCTL - 1].state == AVB_HWREG_STATE_VALID && s.entries[AVB_HWREG_TSYNCTXCTL - 1].offset == I210_TSYNCTXCTL &&
+              s.entries[AVB_HWREG_TSYNCTXCTL - 1].value == 0x00000010u);
+        CHECK("TSYNCRXCTL / TIMINCA / TSAUXC VALID with their values",
+              s.entries[AVB_HWREG_TSYNCRXCTL - 1].value == 0x0000001Au && s.entries[AVB_HWREG_TIMINCA - 1].value == 0x08000000u &&
+              s.entries[AVB_HWREG_TSAUXC - 1].value == 0x00000004u && s.entries[AVB_HWREG_TSAUXC - 1].offset == I210_TSAUXC);
+        CHECK("RXPBSIZE, TRGTTIML0, TQAVCTRL, RAL0 at their I210 SSOT offsets",
+              s.entries[AVB_HWREG_RXPBSIZE - 1].offset == I210_RXPBSIZE && s.entries[AVB_HWREG_TRGTTIML0 - 1].offset == I210_TRGTTIML0 &&
+              s.entries[AVB_HWREG_TQAVCTRL - 1].offset == I210_TQAVCTRL && s.entries[AVB_HWREG_RAL0 - 1].offset == I210_RAL0);
+        CHECK("SRRCTL0..3 NOT_IN_SSOT (intel-ethernet-regs defines no SRRCTL for I210), offset 0, value 0",
+              s.entries[AVB_HWREG_SRRCTL0 - 1].state == AVB_HWREG_STATE_NOT_IN_SSOT && s.entries[AVB_HWREG_SRRCTL3 - 1].state == AVB_HWREG_STATE_NOT_IN_SSOT &&
+              s.entries[AVB_HWREG_SRRCTL0 - 1].offset == 0 && s.entries[AVB_HWREG_SRRCTL0 - 1].value == 0);
+        CHECK("snapshot is read-only: zero register writes", hw.writes == 0);
+
+        printf("\n[I-011] one register unreadable -> only that entry READ_FAILED\n");
+        hw_configured(); hw.have_fail_read_off = 1; hw.fail_read_off = I210_TSYNCRXCTL;
+        AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s);
+        CHECK("TSYNCRXCTL READ_FAILED with its offset, TSYNCTXCTL still VALID, zero writes",
+              s.entries[AVB_HWREG_TSYNCRXCTL - 1].state == AVB_HWREG_STATE_READ_FAILED && s.entries[AVB_HWREG_TSYNCRXCTL - 1].offset == I210_TSYNCRXCTL &&
+              s.entries[AVB_HWREG_TSYNCTXCTL - 1].state == AVB_HWREG_STATE_VALID && hw.writes == 0);
+
+        printf("\n[I-012] adapter without MMIO access -> every entry NO_MMIO, no register touched\n");
+        hw_configured();
+        AvbFillHwSnapshot(&i210_ops, &dev, 0u, ndis_platform_ops.mmio_read, &s);
+        CHECK("all NO_MMIO, zero reads, zero writes",
+              s.entries[0].state == AVB_HWREG_STATE_NO_MMIO && s.entries[AVB_HWREG_COUNT - 1].state == AVB_HWREG_STATE_NO_MMIO && hw.reads == 0 && hw.writes == 0);
+
+        printf("\n[I-013] family without an SSOT offset map -> every entry NO_HAL\n");
+        {
+            intel_device_ops_t noHal = i210_ops; noHal.hil_register_offset = NULL;
+            hw_configured();
+            AvbFillHwSnapshot(&noHal, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s);
+            CHECK("all NO_HAL, zero reads", s.entries[0].state == AVB_HWREG_STATE_NO_HAL && s.entries[AVB_HWREG_COUNT - 1].state == AVB_HWREG_STATE_NO_HAL && hw.reads == 0);
+        }
+
+        printf("\n[I-014] unknown register id -> not defined\n");
+        {
+            uint32_t off = 0x12345u;
+            CHECK("id 0 and id AVB_HWREG_COUNT+1 are not defined, offset untouched",
+                  i210_ops.hil_register_offset(0u, &off) != 0 && i210_ops.hil_register_offset(AVB_HWREG_COUNT + 1u, &off) != 0 && off == 0x12345u);
+        }
+    }
 
     printf("\n PASS: %d / %d\n FAIL: %d / %d\n", g_run - g_fail, g_run, g_fail, g_run);
     if (g_fail) { printf("[RESULT] FAILURE\n"); return 1; }

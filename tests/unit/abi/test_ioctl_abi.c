@@ -114,6 +114,9 @@ static void test_ioctl_uniqueness(void)
         IOCTL_AVB_SET_PORT_LATENCY,
         IOCTL_AVB_GET_STATISTICS,
         IOCTL_AVB_RESET_STATISTICS,
+        IOCTL_AVB_GET_ADAPTER_IDENTITY,
+        IOCTL_AVB_OPEN_ADAPTER_BY_LUID,
+        IOCTL_AVB_QUERY_HW_SNAPSHOT,
     };
     int n = (int)(sizeof(codes) / sizeof(codes[0]));
     int duplicates = 0;
@@ -300,6 +303,25 @@ static void test_struct_sizes(void)
         TEST_ASSERT(sizeof(probe.current_increment) == 4,
                     "sizeof(current_increment) == 4  (raw 32-bit TIMINCA)");
     }
+
+    /* TC-ABI-020..023: HIL state verification ABI (Q 2026-10-22).  No implicit padding: identical layout in user mode
+     * and kernel; the NET_LUID is the stable identity, the codes are new function numbers 68..70. */
+    TEST_CASE("TC-ABI-020: sizeof(AVB_ADAPTER_IDENTITY_REQUEST) == 48, net_luid at 8, status at 40");
+    TEST_ASSERT(sizeof(AVB_ADAPTER_IDENTITY_REQUEST) == 48, "sizeof(AVB_ADAPTER_IDENTITY_REQUEST) == 48");
+    TEST_ASSERT(offsetof(AVB_ADAPTER_IDENTITY_REQUEST, net_luid) == 8, "offsetof(net_luid) == 8");
+    TEST_ASSERT(offsetof(AVB_ADAPTER_IDENTITY_REQUEST, mac) == 32, "offsetof(mac) == 32");
+    TEST_ASSERT(offsetof(AVB_ADAPTER_IDENTITY_REQUEST, status) == 40, "offsetof(status) == 40");
+    TEST_CASE("TC-ABI-021: sizeof(AVB_OPEN_BY_LUID_REQUEST) == 24, net_luid at 8");
+    TEST_ASSERT(sizeof(AVB_OPEN_BY_LUID_REQUEST) == 24, "sizeof(AVB_OPEN_BY_LUID_REQUEST) == 24");
+    TEST_ASSERT(offsetof(AVB_OPEN_BY_LUID_REQUEST, net_luid) == 8, "offsetof(net_luid) == 8");
+    TEST_CASE("TC-ABI-022: sizeof(AVB_HWREG_ENTRY) == 16, sizeof(AVB_HW_SNAPSHOT_REQUEST) == 24 + 16 * AVB_HWREG_COUNT");
+    TEST_ASSERT(sizeof(AVB_HWREG_ENTRY) == 16, "sizeof(AVB_HWREG_ENTRY) == 16");
+    TEST_ASSERT(sizeof(AVB_HW_SNAPSHOT_REQUEST) == 24 + 16 * AVB_HWREG_COUNT, "sizeof(AVB_HW_SNAPSHOT_REQUEST) == 280");
+    TEST_ASSERT(offsetof(AVB_HW_SNAPSHOT_REQUEST, entries) == 24, "offsetof(entries) == 24");
+    TEST_CASE("TC-ABI-023: HIL state IOCTL function numbers 68/69/70");
+    TEST_ASSERT(IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110u, "IOCTL_AVB_GET_ADAPTER_IDENTITY == 0x00170110");
+    TEST_ASSERT(IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114u, "IOCTL_AVB_OPEN_ADAPTER_BY_LUID == 0x00170114");
+    TEST_ASSERT(IOCTL_AVB_QUERY_HW_SNAPSHOT == 0x00170118u, "IOCTL_AVB_QUERY_HW_SNAPSHOT == 0x00170118");
 }
 
 int main(void)

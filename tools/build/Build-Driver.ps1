@@ -69,10 +69,22 @@ param(
     [switch]$SkipDriver,
     
     [Parameter(Mandatory=$false)]
-    [switch]$Clean
+    [switch]$Clean,
+
+    # Controlled, stable signer (CI staging): PFX of the HIL test-signing certificate.  Implies -Sign.  The .sys is
+    # re-signed with it, the catalog is regenerated from the re-signed package and signed with it, and both signer
+    # thumbprints are verified.  Password from the environment variable named by -SigningPfxPasswordEnv (never a
+    # parameter value).  Without -SigningPfx the local behaviour is unchanged (WDK test certificate).
+    [Parameter(Mandatory=$false)]
+    [string]$SigningPfx,
+
+    [Parameter(Mandatory=$false)]
+    [string]$SigningPfxPasswordEnv = 'AVB_SIGNING_PFX_PASSWORD'
 )
+if ($SigningPfx) { $Sign = [switch]$true }
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
 
 # Helper functions
 function Write-Step {
@@ -241,6 +253,7 @@ if (-not $SkipDriver) {
     Write-Host "  SDK TargetPlatformVersion: $targetPlatformVersion" -ForegroundColor Gray
     Write-Host "  SDK bin path (mc.exe): $sdkBinPath" -ForegroundColor Gray
 
+    Reset-AvbExitCode
     & $msbuildPath $solutionFile `
         /t:$buildCmd `
         /p:Configuration=$Configuration `
@@ -252,9 +265,10 @@ if (-not $SkipDriver) {
         /m `
         /verbosity:minimal
     
-    if ($LASTEXITCODE -ne 0) {
-        Write-Failure "Driver build failed! Exit code: $LASTEXITCODE"
-        exit $LASTEXITCODE
+    $rc = Get-AvbExitCode
+    if (-not (Test-AvbExitSuccess $rc)) {
+        Write-Failure "Driver build failed! Exit code: $(Format-AvbExitCode $rc)"
+        exit (Get-AvbFailureExitCode $rc)
     }
     
     Write-Success "Driver build completed"
@@ -298,11 +312,13 @@ if ($Sign -and -not $SkipDriver) {
         # $outputDir, to avoid the obj\ stamped-INF/missing-sys issue.
         $infCatDir = if (Test-Path $wdkPkgDir) { $wdkPkgDir } else { $outputDir }
         Write-Host "Generating CAT file from: $infCatDir" -ForegroundColor Gray
+        Reset-AvbExitCode
         & $inf2catPath /driver:"$infCatDir" /os:10_X64
+        $rc = Get-AvbExitCode
 
-        if ($LASTEXITCODE -ne 0) {
-            Write-Failure "CAT generation failed! Exit code: $LASTEXITCODE"
-            exit $LASTEXITCODE
+        if (-not (Test-AvbExitSuccess $rc)) {
+            Write-Failure "CAT generation failed! Exit code: $(Format-AvbExitCode $rc)"
+            exit (Get-AvbFailureExitCode $rc)
         }
 
         $catFile = Get-ChildItem $infCatDir -Filter "*.cat" -ErrorAction SilentlyContinue |
@@ -314,7 +330,47 @@ if ($Sign -and -not $SkipDriver) {
     }
 
     Write-Success "CAT file: $(Get-Item $catFile | Select-Object -ExpandProperty Length) bytes"
-    
+
+    if ($SigningPfx) {
+        # Stable signer: .sys (embedded) and catalog both signed by the controlled certificate.
+        $pfxPassword = [Environment]::GetEnvironmentVariable($SigningPfxPasswordEnv)
+        if (-not (Test-Path -LiteralPath $SigningPfx)) { Write-Failure "Signing PFX not found: $SigningPfx"; exit 1 }
+        if (-not $pfxPassword) { Write-Failure "Signing PFX password environment variable '$SigningPfxPasswordEnv' is empty"; exit 1 }
+        try {
+            $signer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $SigningPfx, $pfxPassword
+        } catch { Write-Failure "Signing PFX unreadable: $($_.Exception.Message)"; exit 1 }
+        $signerThumb = $signer.Thumbprint.ToUpperInvariant()
+        Write-Info "Stable signer: $($signer.Subject) ($signerThumb)"
+        $pkgSys = Join-Path $wdkPkgDir 'IntelAvbFilter.sys'
+        foreach ($target in @($pkgSys)) {
+            Reset-AvbExitCode
+            & $signtoolPath sign /fd SHA256 /f $SigningPfx /p $pfxPassword $target
+            $rc = Get-AvbExitCode
+            if (-not (Test-AvbExitSuccess $rc)) { Write-Failure "Signing $target failed! Exit code: $(Format-AvbExitCode $rc)"; exit (Get-AvbFailureExitCode $rc) }
+        }
+        Copy-Item -LiteralPath $pkgSys -Destination (Join-Path $outputDir 'IntelAvbFilter.sys') -Force
+        # The WDK catalog was made from the WDK-signed .sys; regenerate it from the re-signed package.
+        Remove-Item -LiteralPath $catFile -Force
+        Reset-AvbExitCode
+        & $inf2catPath /driver:"$wdkPkgDir" /os:10_X64
+        $rc = Get-AvbExitCode
+        $catFile = Get-ChildItem $wdkPkgDir -Filter "*.cat" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+        if (-not (Test-AvbExitSuccess $rc) -or -not $catFile) { Write-Failure "Catalog regeneration failed! Exit code: $(Format-AvbExitCode $rc)"; exit (Get-AvbFailureExitCode $rc) }
+        Reset-AvbExitCode
+        & $signtoolPath sign /fd SHA256 /f $SigningPfx /p $pfxPassword $catFile
+        $rc = Get-AvbExitCode
+        if (-not (Test-AvbExitSuccess $rc)) { Write-Failure "Signing catalog failed! Exit code: $(Format-AvbExitCode $rc)"; exit (Get-AvbFailureExitCode $rc) }
+        # Catalog coverage of the .sys (signature trust is not evaluated on the build machine: /pa would need the
+        # test root trusted there; the HIL runner verifies trust, the install verifies coverage again).
+        foreach ($f in @($pkgSys, $catFile)) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $f
+            $t = if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint.ToUpperInvariant() } else { '' }
+            if ($t -ne $signerThumb) { Write-Failure "$f is signed by '$t', expected the stable signer $signerThumb"; exit 1 }
+        }
+        Write-Success "Driver package signed by the stable signer $signerThumb (.sys + catalog)"
+    }
+}
+if ($Sign -and -not $SkipDriver -and -not $SigningPfx) {
     # Check for test certificate
     $certName = "Intel AVB Filter Test Certificate"
     $cert = Get-ChildItem -Path "Cert:\CurrentUser\My" | Where-Object {$_.Subject -like "*$certName*"} | Select-Object -First 1
@@ -335,11 +391,13 @@ if ($Sign -and -not $SkipDriver) {
     
     # Sign CAT file
     Write-Host "Signing CAT file..." -ForegroundColor Gray
+    Reset-AvbExitCode
     & $signtoolPath sign /v /fd SHA256 /s My /n $certName /t http://timestamp.digicert.com $catFile
-    
-    if ($LASTEXITCODE -ne 0) {
-        Write-Failure "Signing failed! Exit code: $LASTEXITCODE"
-        exit $LASTEXITCODE
+    $rc = Get-AvbExitCode
+
+    if (-not (Test-AvbExitSuccess $rc)) {
+        Write-Failure "Signing failed! Exit code: $(Format-AvbExitCode $rc)"
+        exit (Get-AvbFailureExitCode $rc)
     }
     
     Write-Success "Driver signed successfully"
@@ -385,13 +443,15 @@ if ($BuildTests) {
         $testBuildCmd = 'call "{0}" && pushd "{1}" && nmake -f "{2}" && popd' -f $vcvarsPath, $makefileDir, $makefileLeaf
 
         try {
+            Reset-AvbExitCode
             & cmd.exe /d /s /c $testBuildCmd | Out-Null
-            
-            if ($LASTEXITCODE -eq 0) {
+            $rc = Get-AvbExitCode
+
+            if (Test-AvbExitSuccess $rc) {
                 Write-Success "$testName build succeeded"
                 $successCount++
             } else {
-                Write-Failure "$testName build failed (Exit code: $LASTEXITCODE)"
+                Write-Failure "$testName build failed (Exit code: $(Format-AvbExitCode $rc))"
                 $failCount++
             }
         } catch {
@@ -403,7 +463,11 @@ if ($BuildTests) {
     Write-Host "`nTest Build Summary:" -ForegroundColor Cyan
     Write-Host "  Successful: $successCount" -ForegroundColor Green
     Write-Host "  Failed: $failCount" -ForegroundColor $(if ($failCount -gt 0) { "Red" } else { "Green" })
-    
+    if ($failCount -gt 0) {
+        Write-Failure "$failCount test build(s) failed"
+        exit 1
+    }
+
     # List built executables
     $testExeDir = Join-Path $repoRoot "build\tools\avb_test\$Platform\$Configuration"
     if (Test-Path $testExeDir) {
@@ -438,3 +502,5 @@ if (-not $SkipDriver) {
     Write-Host "  1. Install driver: .\tools\Setup-Driver.ps1 -Configuration $Configuration -InstallDriver" -ForegroundColor Cyan
     Write-Host "  2. Run tests: .\tools\Test-Driver.ps1 -Configuration $Configuration" -ForegroundColor Cyan
 }
+# Explicit success (every failure above exits nonzero); never inherit the last native command's exit code.
+exit 0

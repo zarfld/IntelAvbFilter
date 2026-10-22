@@ -50,6 +50,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
+. (Join-Path $PSScriptRoot '..\lib\SourceDigest.ps1') # build-input digest (local pre-commit provenance)
 
 # Calculate repository root from script location
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -199,6 +201,10 @@ if ($BuildDiagnosticTools) {
     Write-Host "Diagnostic tools build complete." -ForegroundColor Cyan
     Write-Host ""
 }
+
+# Build inputs BEFORE compiling; compared again when the manifest is written (inputs edited during the build make the
+# artifacts unattributable).
+$BuildInputDigestBefore = Get-AvbBuildInputDigest -RepoRoot $RepoRoot
 
 # Change to repository root
 Push-Location $RepoRoot
@@ -835,7 +841,16 @@ $AllTests = @(
         Output = "test_ptp_phc_stability.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Libs = "advapi32.lib"
-        Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..009, Track A closes #317)"
+        Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..008, Track A closes #317; UT-CORR-009 = test_ptp_phc_lifecycle)"
+    },
+    @{
+        Name = "test_ptp_phc_lifecycle"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_phc_lifecycle.c"
+        Output = "test_ptp_phc_lifecycle.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "advapi32.lib"
+        Description = "Integration: UT-CORR-009 driver lifecycle (reinstalls the driver; split from test_ptp_phc_stability, Unsafe in Run-Tests-CI)"
     },
     @{
         Name = "test_vv_corr_001_stability"
@@ -1976,7 +1991,10 @@ function Get-TestBuildArtifactName {
 
 function New-TestBuildManifest {
     param([string]$Configuration, [string]$Platform, [object[]]$Tests, [hashtable]$Outcomes,
-          $SourceRevision, $SourceDirty)
+          $SourceRevision, $SourceDirty, $SourceDigest = $null, $SourceDigestFiles = $null, $BuiltUtc = $null)
+    # sourceDigest (tools/lib/SourceDigest.ps1): the build inputs this run compiled - the only attribution a binary
+    # built from an uncommitted working tree has (local pre-commit evidence; Run-Tests-CI.ps1 re-verifies it).
+    # BuiltUtc is passed in by the caller so the function stays a pure function of its inputs (deterministic manifest).
     # No carry-over: a record from an earlier run cannot be attributed to the current source without ambiguity
     # (new commit, edited sources/headers, toolchain).  Entries not built by THIS run are `not-built`.
     $entries = @()
@@ -1987,7 +2005,7 @@ function New-TestBuildManifest {
         $e = [ordered]@{
             name = $tName; type = [string]$t['Type']; enabled = (-not $t['Disabled']); prerequisites = $prereq
             status = 'not-built'; reason = ''; artifact = $artifact; sha256 = $null
-            sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
+            sourceRevision = $SourceRevision; sourceDirty = $SourceDirty; sourceDigest = $SourceDigest
         }
         if ($Outcomes.ContainsKey($tName)) {
             $o = $Outcomes[$tName]
@@ -2012,8 +2030,11 @@ function New-TestBuildManifest {
         }
         $entries += ,$e
     }
+    $mode = if ($SourceDirty -eq $false) { 'clean-commit' } elseif ($SourceDigest) { 'local-worktree' } else { 'unattributable' }
     return [ordered]@{ schemaVersion = 1; producer = 'tools/build/Build-Tests.ps1'; configuration = $Configuration
-                       platform = $Platform; entries = $entries }
+                       platform = $Platform; builtUtc = $BuiltUtc
+                       provenanceMode = $mode; sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
+                       sourceDigest = $SourceDigest; sourceDigestFiles = $SourceDigestFiles; entries = $entries }
 }
 
 # Atomic write: complete file in the same directory, then rename over the previous manifest.
@@ -2181,19 +2202,20 @@ foreach ($Test in $TestsToBuild) {
         }
         
         # Execute build
+        Reset-AvbExitCode
         $result = & $BuildScript -BuildCmd $BuildCmd 2>&1
         
-        $compileExit = $LASTEXITCODE
-        if ($compileExit -eq 0 -and (Test-Path $OutputPath)) {
+        $compileExit = Get-AvbExitCode
+        if ((Test-AvbExitSuccess $compileExit) -and (Test-Path $OutputPath)) {
             Write-Host "  SUCCESS: $OutputPath created" -ForegroundColor Green
             $SucceededTests += $Test.Name
             $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $OutputPath }
         } else {
-            Write-Host "  FAILED: Compiler returned error code $compileExit" -ForegroundColor Red
+            Write-Host "  FAILED: Compiler returned error code $(Format-AvbExitCode $compileExit)" -ForegroundColor Red
             # Print compiler output so CI logs show the actual errors
             $result | Where-Object { $_ -match "error|warning" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
             $FailedTests += $Test.Name
-            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "compiler exit code $compileExit or output missing"; OutputPath = $null }
+            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "compiler exit code $(Format-AvbExitCode $compileExit) or output missing"; OutputPath = $null }
         }
         
     } elseif ($Test.Type -eq "nmake") {
@@ -2254,8 +2276,9 @@ foreach ($Test in $TestsToBuild) {
             $ErrorActionPreference = 'SilentlyContinue'
             $output = @()
             try {
+                Reset-AvbExitCode
                 $output = @(nmake /f $MakeFile 2>&1)
-                $buildExitCode = $LASTEXITCODE
+                $buildExitCode = Get-AvbExitCode
             } finally {
                 $ErrorActionPreference = $prevErrorPref
             }
@@ -2264,19 +2287,19 @@ foreach ($Test in $TestsToBuild) {
                 $output | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
             }
             
-            if ($buildExitCode -eq 0) {
+            if (Test-AvbExitSuccess $buildExitCode) {
                 Write-Host "  SUCCESS: nmake build completed" -ForegroundColor Green
                 $SucceededTests += $Test.Name
                 $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $null }
             } else {
-                Write-Host "  FAILED: nmake returned error code $buildExitCode" -ForegroundColor Red
+                Write-Host "  FAILED: nmake returned error code $(Format-AvbExitCode $buildExitCode)" -ForegroundColor Red
                 if (-not $ShowDetails -and $output -and $output.Count -gt 0) {
                     Write-Host "  nmake output (tail):" -ForegroundColor DarkYellow
                     $tailStart = [Math]::Max(0, $output.Count - 30)
                     $output[$tailStart..($output.Count - 1)] | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
                 }
                 $FailedTests += $Test.Name
-                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "nmake exit code $buildExitCode"; OutputPath = $null }
+                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "nmake exit code $(Format-AvbExitCode $buildExitCode)"; OutputPath = $null }
             }
         } finally {
             Pop-Location
@@ -2334,21 +2357,37 @@ $srcRevision = $null; $srcDirty = $null
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
+    Reset-AvbExitCode
     $rev = & git -C $RepoRoot rev-parse HEAD 2>$null
-    if ($LASTEXITCODE -eq 0 -and $rev) {
+    if ((Test-AvbExitSuccess (Get-AvbExitCode)) -and $rev) {
         $srcRevision = ([string]$rev).Trim()
+        Reset-AvbExitCode
         $dirty = & git -C $RepoRoot status --porcelain --untracked-files=no 2>$null
-        if ($LASTEXITCODE -eq 0) { $srcDirty = [bool]$dirty }
+        if (Test-AvbExitSuccess (Get-AvbExitCode)) { $srcDirty = [bool]$dirty }
     } else {
         Write-Host "[MANIFEST] WARNING: git revision unavailable -- sourceRevision recorded as null" -ForegroundColor Yellow
     }
 } finally {
     $ErrorActionPreference = $prevEap
 }
+$srcDigest = $null; $srcDigestFiles = $null
+$BuildInputDigestAfter = Get-AvbBuildInputDigest -RepoRoot $RepoRoot
+if (-not $BuildInputDigestBefore.Ok -or -not $BuildInputDigestAfter.Ok) {
+    Write-Host "[MANIFEST] WARNING: build-input digest unavailable ($($BuildInputDigestBefore.Error)$($BuildInputDigestAfter.Error)) -- sourceDigest recorded as null" -ForegroundColor Yellow
+} elseif ($BuildInputDigestBefore.Digest -ne $BuildInputDigestAfter.Digest) {
+    Write-Host "[MANIFEST] WARNING: build inputs changed DURING the build -- sourceDigest recorded as null; rebuild before testing" -ForegroundColor Yellow
+} else {
+    $srcDigest = $BuildInputDigestAfter.Digest; $srcDigestFiles = $BuildInputDigestAfter.Files
+}
 $testManifest = New-TestBuildManifest -Configuration $Configuration -Platform $Platform -Tests $AllTests -Outcomes $BuildOutcomes `
-                    -SourceRevision $srcRevision -SourceDirty $srcDirty
+                    -SourceRevision $srcRevision -SourceDirty $srcDirty -SourceDigest $srcDigest -SourceDigestFiles $srcDigestFiles `
+                    -BuiltUtc ((Get-Date).ToUniversalTime().ToString('o'))
 if ($srcDirty -ne $false) {
-    Write-Host "[MANIFEST] NOTE: built from an uncommitted or unknown source state -- Run-Tests-CI.ps1 will not authorize these artifacts for Hardware* suites" -ForegroundColor Yellow
+    if ($srcDigest) {
+        Write-Host "[MANIFEST] LOCAL PRE-COMMIT BUILD: uncommitted working tree, build-input digest $srcDigest ($srcDigestFiles inputs) -- Run-Tests-CI.ps1 authorizes these artifacts for LOCAL Hardware* runs only while the inputs are unchanged; never as clean-commit CI evidence" -ForegroundColor Yellow
+    } else {
+        Write-Host "[MANIFEST] NOTE: built from an uncommitted or unknown source state without a build-input digest -- Run-Tests-CI.ps1 will not authorize these artifacts" -ForegroundColor Yellow
+    }
 }
 Write-TestBuildManifest -Manifest $testManifest -Path $TestManifestPath
 Write-Host ("[MANIFEST] {0} ({1} entries, {2} built with SHA256)" -f $TestManifestPath, @($testManifest.entries).Count,

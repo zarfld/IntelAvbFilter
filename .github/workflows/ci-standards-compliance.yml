@@ -1579,7 +1579,8 @@ jobs:
 
   # Deployment (Phase 08) - only on master branch
   deploy-staging:
-    name: Deploy to Staging (Phase 08 - Transition)
+    # hil.yml authorize requires exactly one successful job per configuration with exactly this name.
+    name: Deploy to Staging (Phase 08 - Transition) (${{ matrix.config }})
     runs-on: windows-latest
     needs:
       [
@@ -1594,6 +1595,11 @@ jobs:
       (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     permissions:
       contents: write
+    # One signed, separately identified package per configuration (hil.yml deploys and tests both).
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
 
     steps:
       - name: Checkout code
@@ -1612,22 +1618,55 @@ jobs:
       - name: Install Windows Driver Kit (WDK)
         uses: ./.github/actions/install-wdk
 
-      - name: Build and sign ESP32 firmware
+      - name: Build and sign the driver package with the stable HIL signer
+        # The controlled test-signing identity (repository secrets; never available to pull requests or forks).
+        # Without it there is no deployable package: staging fails loudly instead of using an ephemeral signer
+        # the HIL machine does not trust.
+        shell: pwsh
+        env:
+          AVB_SIGNING_PFX_BASE64: ${{ secrets.HIL_TEST_SIGNING_PFX_BASE64 }}
+          AVB_SIGNING_PFX_PASSWORD: ${{ secrets.HIL_TEST_SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:AVB_SIGNING_PFX_BASE64 -or -not $env:AVB_SIGNING_PFX_PASSWORD) {
+            Write-Host "::error title=Stable signer not configured::secrets HIL_TEST_SIGNING_PFX_BASE64 / HIL_TEST_SIGNING_PFX_PASSWORD are required (tools/ci/signing/README.md)"
+            exit 1
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'hil-signer.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:AVB_SIGNING_PFX_BASE64))
+            .\tools\build\Build-Driver.ps1 -Configuration ${{ matrix.config }} -SigningPfx $pfx
+            $rc = $LASTEXITCODE
+          } finally { Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue }
+          exit $rc
+
+      - name: Create and self-check the package manifest
         shell: pwsh
         run: |
-          Write-Host " Building and signing Windows KMDF driver (Release)..." -ForegroundColor Cyan
-          .\tools\build\Build-Driver.ps1 -Configuration Release -Sign
-          Write-Host " Driver build and signing complete" -ForegroundColor Green
+          $ErrorActionPreference = 'Stop'
+          . .\tools\lib\DriverPackage.ps1
+          $pkg = "build\x64\${{ matrix.config }}\IntelAvbFilter\IntelAvbFilter"
+          $m = New-AvbDriverPackageManifest -PackageDir $pkg -Configuration '${{ matrix.config }}' -SourceRevision $env:GITHUB_SHA `
+                   -Repository $env:GITHUB_REPOSITORY -Workflow '.github/workflows/ci-standards-compliance.yml' -RunId $env:GITHUB_RUN_ID -RunAttempt $env:GITHUB_RUN_ATTEMPT
+          $pin = Get-AvbPinnedSigner -CertificatePath 'tools\ci\signing\hil-test-signer.cer'
+          if (-not $pin.Ok) { Write-Host "::error title=Pinned signer::$($pin.Error)"; exit 1 }
+          # Trust is not evaluated here (the hosted builder does not trust the test root); the HIL machine does.
+          $v = Test-AvbDriverPackage -PackageDir $pkg -Configuration '${{ matrix.config }}' -ExpectedRevision $env:GITHUB_SHA -ExpectedRepository $env:GITHUB_REPOSITORY `
+                   -ExpectedRunId $env:GITHUB_RUN_ID -ExpectedRunAttempt $env:GITHUB_RUN_ATTEMPT -ExpectedDriverSha256 $m.driverSha256 -PinnedThumbprint $pin.Thumbprint
+          if (-not $v.Ok) { Write-Host "::error title=Package self-check failed::$($v.Reasons -join '; ')"; exit 1 }
+          Write-Host "Package ${{ matrix.config }}: driver $($m.driverSha256), signer $($m.signer.catThumbprint)"
+          "## Staged driver package ${{ matrix.config }}`n`n- driver SHA256: $($m.driverSha256)`n- signer: $($m.signer.subject) ($($m.signer.catThumbprint))`n- revision: $env:GITHUB_SHA (run $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
-      - name: Upload firmware artifacts
+      - name: Upload the staged driver package
+        # Exactly the package (inf/sys/cat/man) + avb-driver-package.json; hil.yml verifies it file by file.
         uses: actions/upload-artifact@v6
         with:
-          name: intel-avb-filter-driver-release
-          path: build\x64\Release\IntelAvbFilter\
+          name: intel-avb-filter-driver-${{ matrix.config == 'Debug' && 'debug' || 'release' }}
+          path: build\x64\${{ matrix.config }}\IntelAvbFilter\IntelAvbFilter\
+          if-no-files-found: error
           retention-days: 90
 
       - name: Package driver for release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.config == 'Release'
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
@@ -1639,8 +1678,9 @@ jobs:
           $staging = New-Item -ItemType Directory -Path "release-staging" -Force
           # WDK package files (includes the .cat required by pnputil)
           Get-ChildItem $wdkPkgDir -File | Copy-Item -Destination $staging
-          # Test certificate (needed to import into Trusted Publishers for test-signed driver)
-          Get-ChildItem $buildRoot -Filter "*.cer" -File | Copy-Item -Destination $staging
+          # Public certificate of the stable signer that signed this package (import into Trusted Root + Trusted
+          # Publishers for the test-signed driver); the WDK-exported .cer of the build machine did not sign it.
+          Copy-Item "tools\ci\signing\hil-test-signer.cer" (Join-Path $staging "IntelAvbFilter.cer")
 
           Write-Host "Staged files:"
           Get-ChildItem $staging | ForEach-Object { Write-Host "  $($_.Name)" }
@@ -1651,7 +1691,7 @@ jobs:
           Write-Host "Created $zipName (SHA256: $hash)"
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.config == 'Release'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -1694,7 +1734,7 @@ jobs:
         run: |
           Write-Host " Driver Build: ${{ job.status }}" -ForegroundColor Cyan
           Write-Host "Phase 08: Windows KMDF driver packaged and ready for deployment"
-          $DriverFiles = Get-ChildItem -Path "build\x64\Release\IntelAvbFilter" -ErrorAction SilentlyContinue
+          $DriverFiles = Get-ChildItem -Path "build\x64\${{ matrix.config }}\IntelAvbFilter\IntelAvbFilter" -ErrorAction SilentlyContinue
           if ($DriverFiles) {
             Write-Host " Driver artifacts:"
             $DriverFiles | ForEach-Object { Write-Host "  - $($_.Name) ($([Math]::Round($_.Length/1KB, 1)) KB)" }

@@ -58,13 +58,36 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$LogsDir = "",
 
-    # Start DebugView kernel capture around the test run and save to a log file.
-    # Requires .github\skills\DbgView\DebugView\Dbgview.exe (run tools\setup\Install-DbgView.ps1 once).
+    # Machine-readable results document (schema avb-runner-results/1): one record per result row with verdict,
+    # exit code, artifact, arguments, class, target, log path and per-testcase verdicts.  Written atomically when
+    # the run completes.  Default: <logs>\results-<Suite>-<Configuration>-<timestamp>.json.
+    [Parameter(Mandatory=$false)]
+    [string]$ResultsJson = "",
+
+    # Evidence root of earlier suites of the same HIL job (hil.yml: RUNNER_TEMP\hil-evidence).  A halt there
+    # (TIMEOUT / INFRA / CLEANUP_FAILED / stateHalt / a run that died) halts this run: Init/Mutating/Unsafe BLOCKED.
+    [Parameter(Mandatory=$false)]
+    [string]$PriorResultsDir = "",
+
+    # Bounded wait for the machine lock when no owner context of this execution holds it (attended runs only; under
+    # GitHub Actions the job's deploy step must already own it - never acquired here).
+    [Parameter(Mandatory=$false)]
+    [int]$HilLockWaitSeconds = 60,
+
+    # NOT SUPPORTED here: this runner never captured DebugView output although it accepted the switch.  Kernel
+    # capture for one test is tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView.  The switch is
+    # kept only to reject it loudly instead of silently running without a capture.
     [Parameter(Mandatory=$false)]
     [switch]$CaptureDbgView
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($CaptureDbgView) {
+    Write-Host "[FAIL] Run-Tests-CI.ps1 does not capture DebugView output (-CaptureDbgView is not supported here)." -ForegroundColor Red
+    Write-Host "       Use: .\tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView -Configuration $Configuration" -ForegroundColor Red
+    exit 1
+}
 
 # ===========================
 # No admin check here -- by design.
@@ -231,7 +254,11 @@ function Invoke-DriverHealthCheck {
 
 # Canonical verdict vocabulary (PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE),
 # shared with Parse-TestResults.ps1 and Convert-Logs-To-JUnit.ps1.  See docs/testing/test-verdict-contract.md
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')    # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
+. (Join-Path $PSScriptRoot '..\lib\SourceDigest.ps1')  # build-input digest (local pre-commit provenance)
 . (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
+. (Join-Path $PSScriptRoot '..\lib\HilLock.ps1')       # machine lock + machine-wide HIL safety record
+. (Join-Path $PSScriptRoot '..\lib\PhcRestoration.ps1') # pure PHC/QPC restoration evaluator (D1 no-mutation verification)
 
 # ===========================
 # Built-in hardware-independent test lists
@@ -260,6 +287,18 @@ $UnitTests = @(
     "ps1:tests/unit/ioctl/test_health_sentinel.ps1",            # TEST-SENTINEL-001..006: #328 behavioral health sentinel
     "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1",            # TEST-HILGATE-001..031: HIL safety gate + state integrity (sandboxed, no driver; #343)
     "ps1:tests/unit/ci/test_hil_binary_provenance.ps1",         # TEST-HILPROV: build manifest + dispatch provenance gate (sandboxed, no driver; #328 F23)
+    "ps1:tests/unit/ci/test_runner_results_json.ps1",           # TEST-RESULTSJSON: machine-readable runner results (sandboxed, no driver)
+    "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
+    "ps1:tests/unit/ci/test_hil_suite_safety.ps1",              # TEST-HILSUITE: automatic HIL suites cannot reach TSN configuration or nested execution (was never run by CI - TEST-COMPLETE-003)
+    "ps1:tests/unit/ci/test_hil_trust_boundary.ps1",            # TEST-HILTRUST: HIL workflow trust boundary, acceptance verdicts (was never run by CI - TEST-COMPLETE-003; needs python)
+    "ps1:tests/unit/ci/test_hil_safety_record.ps1",
+    "ps1:tests/unit/ci/test_phc_restoration_evaluator.ps1",    # TEST-PHCEVAL: pure PHC/QPC restoration evaluator (synthetic characterization; not hardware evidence)             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
+    "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)
+    "ps1:tests/unit/ci/test_local_suites.ps1",                  # TEST-LOCALSUITES: local pre-commit HIL orchestration + DbgView reproduction contract (offline)
+    "ps1:tests/unit/ci/test_hil_baseline_evidence.ps1",         # TEST-HILBASE: baseline evidence producer, verdict rules, never writes the safety record (offline, synthetic; D3)
+    "ps1:tests/unit/ci/test_tx_timestamp_probe.ps1",            # TEST-TXPROBE: TC-CORR-TX-RX-001 phase-1 probe interpretation + non-destructive construction (offline; D4)
+    "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
+    "ps1:tests/unit/ci/test_agent_testing_guidance.ps1",        # TEST-AGENTGUIDE: agent testing-contract wiring, skill frontmatter, runner params in guidance (offline, static; not agent-behaviour evidence)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
     "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator
@@ -305,6 +344,13 @@ $HardwareDependentTests = @(
 # Listed in $HardwareDependentTests below; $IntegrationTests is intentionally empty.
 $IntegrationTests = @()
 
+# Build targets (Build-Tests.ps1 Output name) and tests/unit test scripts that are deliberately NOT runner entries
+# (tests/unit/ci/test_artifact_completeness.ps1).  Value: 'Diagnostic: <justification>' | 'Supporting: <consumer ...>' |
+# 'Obsolete: <evidence ...>'.  Anything neither listed here nor a runner entry is Unknown and fails the gate.
+# Never execute a diagnostic tool merely because it is built.  Empty 2026-10-21: every artifact still needs review.
+$TestArtifactClassification = [ordered]@{
+}
+
 # ===========================
 # HardwareMandatory --- safe mandatory quality gate (self-hosted runner)
 # ===========================
@@ -322,6 +368,7 @@ $IntegrationTests = @()
 $HardwareMandatoryTests = @(
     # Connectivity + device contract
     "test_ioctl_version",              # IOCTL_AVB_GET_VERSION handshake --- driver reachable
+    "test_ioctl_routing",              # IOCTL routing through the filter (read-only IOCTLs)
     "test_ioctl_simple",               # basic open/close cycle
     "test_ioctl_abi",                  # IOCTL ABI backward-compat (TEST-ABI-001)
     # TX timestamp provenance + V1/V2 ABI (REQ-F-PTP-007, #199, #317)
@@ -352,11 +399,18 @@ $HardwareMandatoryTests = @(
 #
 # EXCLUDED: driver reinstall (UT-CORR-009), system sleep (test_s3_sleep_wake).
 $HardwareMutationTests = @(
-    # PHC epoch reset and frequency adjustment (UT-CORR-005/006)
-    # --case ensures only the mutation sub-test runs, not the full stability suite.
-    "test_ptp_phc_stability --case UT-CORR-005",  # SET_TIMESTAMP(1ms) + restore
-    "test_ptp_phc_stability --case UT-CORR-006"   # ADJUST_FREQUENCY(+1ns) + restore
+    # Every eligible automatic mutation entry.  Empty until UT-CORR-005/006 are hardware-verified in their own
+    # executable (decision B); the suite is then INCOMPLETE under GitHub Actions, never PASSED.
 )
+# Attended-only (decision A, Q 2026-10-21): PHC epoch reset and frequency adjustment.  --case selects the sub-test,
+# but the executable also contains the UT-CORR-009 driver lifecycle path (process creation), so under GitHub Actions
+# each entry is a declared coverage gap (NOT EXECUTED, run INCOMPLETE; TEST-HILSUITE-REAL-003 unchanged); outside it
+# the entry is appended to the HardwareMutation run.  Removed only after B: UT-CORR-009 split out and 005/006
+# hardware-verified including restoration.  Reasons must not end in a parenthesis.
+$HardwareMutationAttendedOnly = [ordered]@{
+    'test_ptp_phc_stability --case UT-CORR-005' = 'Mutating:Target: SET_TIMESTAMP 1 ms plus restore; UT-CORR-009 split into test_ptp_phc_lifecycle 2026-10-22, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-005 is hardware-verified, decision B'
+    'test_ptp_phc_stability --case UT-CORR-006' = 'Mutating:Target: ADJUST_FREQUENCY +1 ns plus restore; UT-CORR-009 split into test_ptp_phc_lifecycle 2026-10-22, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-006 is hardware-verified, decision B'
+}
 
 # ===========================
 # Hardware-dependent test lists (self-hosted runner only)
@@ -364,34 +418,58 @@ $HardwareMutationTests = @(
 # Unit-level tests that require the driver device node (\\.\.\IntelAvbFilter) or Intel NIC.
 # Safe to run on an automated self-hosted runner -- none of these hibernate or sleep the PC.
 #
-# EXCLUDED from ALL automated suites (unsafe or long-running):
-#   test_s3_sleep_wake          -- TC-S3-002 calls SetSuspendState (hibernates host, needs button press).
-#   test_vv_corr_001_stability  -- VV-CORR-001 24-hour PHC stability monitor. Run manually on
-#                                  a dedicated lab machine only. See Issue #317 Track E.
-#   test_hot_plug               -- disables/enables the NIC through devcon (#262).  NIC administration:
-#                                  classified Unsafe in $HilTestSafety (#343).
-#   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  NIC
-#                                  administration: classified Unsafe in $HilTestSafety (#343).
+# NOT EXECUTED yet, declared in $HardwareIntegrationCoverageGaps (every run reports them as required, NOT EXECUTED):
+#   test_s3_sleep_wake          -- TC-S3-002 calls SetSuspendState (host S3; no unattended wake / recovery facility yet).
+#   test_vv_corr_001_stability  -- VV-CORR-001 24-hour PHC stability monitor (no long-duration lane yet; #317 Track E).
+#   test_hot_plug               -- disables/enables the NIC through devcon (#262).  Unsafe in $HilTestSafety (#343).
+#   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  Unsafe (#343).
 #   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
 #   entry, outside GitHub Actions, on an operator-attended machine.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
 $HardwareUnitTests = @(
     "test_cleanup_archive",        # checks build output against installed driver
     "test_ioctl_simple",           # opens \\.\IntelAvbFilter via CreateFile
+    "test_ioctl_routing",          # IOCTL routing through the filter (ENUM/OPEN/READ_REGISTER/GET_CLOCK_CONFIG)
     "test_ioctl_trace",            # DeviceIoControl trace IOCTLs
+    "test_minimal_ioctl.exe",
+    "test_clock_config.exe",
+    "test_clock_working",
+    "test_direct_clock",
+
     "test_hal_performance",        # HAL timer/DMA performance -- needs NIC
     "test_atdecc_event",           # ATDECC event subscription via driver IOCTL
     "test_atdecc_aen_protocol",    # ATDECC AEN protocol -- driver IOCTL path
     "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
+    "test_mdio_phy",
+    "test_dev_lifecycle",
+    "test_ts_event_sub",
+    "test_ptp_getset",
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
     "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
                                      # Section H SKIPs gracefully when driver is absent.
+    "test_ptp_freq",
+    "test_ptp_freq_complete",
+    "test_hw_ts_ctrl",
+    "test_rx_timestamp",
+    "test_rx_timestamp_complete",
+    "test_ioctl_target_time",       # IOCTL target time management -- (#199)
+    "test_qav_cbs",
+    "test_ioctl_tas",
+    "test_ioctl_fp_ptm",
     # Phase A: IOCTL functional tests (REQ #2-#13, previously missing from CI)
     "test_tx_timestamp_retrieval", # TX timestamp retrieval -- REQ-F-IOCTL-TS-001 (#35)
     "test_ioctl_phc_query",        # PHC query IOCTL -- REQ-F-PTP-PHC (#192)
+    "test_ioctl_offset",
     "test_ioctl_phc_epoch",        # PHC epoch management -- (#196)
+    "test_ioctl_phc_monotonicity",  # PHC monotonicity check -- (#197)
     "test_ioctl_xstamp",           # cross-timestamp (PTP/system correlation) -- (#198)
     "test_ioctl_xstamp_v2",        # V2 ABI + HIL reachability (#340)
+    "test_ioctl_abi",
+    "test_ioctl_access_control",    # IOCTL access control enforcement -- (#341)
+    "test_ioctl_buffer_fuzz",       # IOCTL buffer fuzzing -- (#342)
+    "test_tsn_ioctl_handlers",
+    "ptp_clock_control_test",
+    "test_ptp_crosstimestamp",
     "test_ioctl_phc_crosstimestamp_v2",  # PHC cross-timestamp V2 ABI (#340)
     "test_ioctl_abi",              # IOCTL ABI backward-compatibility
     # test_tsn_ioctl_handlers removed (#328 F23): its build entry is Disabled (KM placeholder); a stale binary
@@ -400,21 +478,33 @@ $HardwareUnitTests = @(
     # Phase B: PHC/QPC coherence + VV coverage (added 2026-03-29)
     "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
     "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
+    "test_lifecycle_coverage",
     # Phase C: Additional unit tests registered 2026-04-01 (built but previously absent from CI)
     "test_hw_state",               # hardware state enum/OID query -- REQ-F-HWCTX-001 (#18)
     "test_statistics_counters",    # IOCTL statistics counters -- REQ-NF-DIAG-001 (#270)
+    "test_event_log",
     "test_build_sign",             # build & code-signing verification -- (#243)
     "test_compat_win11",           # Windows 11 compatibility smoke -- (#256)
     "test_win7_stub",              # OS compat Win10+ assertion -- (#258)
+    "test_eee_lpi",
+    "test_pfc_pause",
+    "test_srp_interface",
+    "test_vlan_tag",                # VLAN tag handling -- (#343)
+    "test_vlan_pcp_tc_mapping",     # VLAN PCP to TC mapping -- (#344)
+    "test_security_validation",
+    "test_ioctl_launch_time",
     "test_avtp_tu_bit_events",     # AVTP TU-bit change events -- (#175)
     "test_ptp_event_latency",      # PTP event ring-buffer latency -- (#177)
     "test_event_latency_4ch",      # 4-channel multi-observer event latency -- (#179)
     "test_event_nf_zero_polling",  # NF CPU-overhead budget quantification -- (#241, TEST-EVENT-NF-002)
     "test_event_nf_latency",       # NF IOCTL-path latency P99 under adversarial load -- (#245, TEST-EVENT-NF-001)
+    "test_gptp_phc_interface",
     "test_send_ptp_debug",         # IOCTL_AVB_TEST_SEND_PTP diagnostic -- (#51)
     "test_timestamp_latency",      # TX/RX timestamp latency <1us -- (#272)
     "test_perf_regression",        # performance regression baseline -- (#225)
     "test_ndis_fastpath_latency",  # NDIS IOCTL fast-path latency P99<10us -- (#286)
+    "test_hot_plug",
+    "test_error_recovery",
     "test_multi_adapter_phc_sync",  # multi-adapter PHC sync/independence -- (#208)
     # Provenance regression (TEST-PROV-L01..L05 logic + TEST-PROV-H01..H05 device contract)
     "test_tx_timestamp_provenance"  # V1/V2 IOCTL ABI, FastIo canary, cross-handle isolation
@@ -423,19 +513,36 @@ $HardwareUnitTests = @(
 # Integration-level tests that require the driver device node or Intel NIC.
 # Safe to run on an automated self-hosted runner.
 $HardwareIntegrationTests = @(
+    "ssot_register_validation_test",
+    "test_tsn_ioctl_handlers_um",
+
     "test_all_adapters",              # enumerates all Intel AVB adapters
     "test_multidev_adapter_enum",     # multi-device adapter enumeration
     "test_device_register_access",    # direct device register read/write
     "test_ndis_send_path",            # NDIS send path -- needs NIC
     "test_ndis_receive_path",         # NDIS receive path -- needs NIC
+    "test_hw_state_machine",
     "test_lazy_initialization",       # lazy init via driver device open
     "test_registry_diagnostics",      # registry diagnostics -- driver service required
+    "test_ptp_corr_extended",
     # Phase B: extended cross-domain / correlation tests (added 2026-03-29)
     "test_vv_corr_003_crossdomain",   # cross-domain V&V validation -- VV-CORR-003
     # Phase C: Additional integration tests registered 2026-04-01 (built but previously absent from CI)
     "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
     "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
-    # test_ptp_phc_stability: temporary policy exclusion, see $HardwareIntegrationCoverageGaps
+    "test_ptp_phc_stability",         # UT-CORR-007/008 TX-PHC correlation (#149 #317); no args -> UT-CORR-009 reinstall unreachable
+    "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
+    "ptp_clock_control_production",
+    "ptp_ioctl_latency_test",
+    "hw_timestamping_control",
+    "rx_timestamping",
+    "tsauxc_toggle_test",
+    "test_gptp_daemon_coexist",
+    "avb_test_i219",
+    "avb_test_portability",
+    "avb_test_i217",
+    "avb_test_i225",
+    "avb_test_i226_um"
     # Phase D/E/F (avb_test_i219, avb_test_portability, avb_test_i217/i225/i226_um): see $HardwareIntegrationCoverageGaps
     "test_hardware_detection"         # HW capability detection & register access safety -- (#44 #45, #287 #288)
 )
@@ -452,64 +559,20 @@ $HardwareIntegrationTests = @(
 # The entries stay classified in $HilTestSafety and run only through an explicit -Tests list on an attended run.
 # Reasons must not end in a parenthesis (the JUnit converter strips a trailing "(...)" from case names).
 $HardwareMandatoryCoverageGaps = [ordered]@{
-    'test_ioctl_routing'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - classified Init; execution path sends no INIT_DEVICE, only ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG; ReadOnly reclassification under evaluation; OPEN_ADAPTER re-points the global default adapter'
     'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
     'ptp_clock_control_test'     = 'Mutating: TC-5b ADJUST_FREQUENCY writes TIMINCA, plus SET_TIMESTAMP and INIT_DEVICE; contradicts the non-mutating Mandatory contract; split into read-only and mutating executables tracked in #340'
     'test_rx_timestamp'          = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
     'test_rx_timestamp_complete' = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
 }
 $HardwareUnitCoverageGaps = [ordered]@{
-    'test_ioctl_routing'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - classified Init; execution path sends no INIT_DEVICE, only ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG; ReadOnly reclassification under evaluation; OPEN_ADAPTER re-points the global default adapter'
-    'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
-    'test_clock_config'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
-    'test_clock_working'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
-    'test_direct_clock'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
-    'test_dev_lifecycle'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on unbound handles hits the global default adapter, which depends on the previous test'
-    'test_ptp_freq'               = 'Mutating:Target: ADJUST_FREQUENCY and TIMINCA writes with restore; restore not verifiable unattended, see test_ptp_freq_complete'
-    'test_ptp_freq_complete'      = 'Mutating:Target: TIMINCA restore failed on I226 on 2026-10-20, CLEANUP_FAILED 0x18000000 to 0x08000000, investigations/issue-328-unload-hang-20261020.md'
-    'test_qav_cbs'                = 'Mutating:Target: WRITE_REGISTER and SETUP_QAV on the target adapter'
-    'ptp_clock_control_test'      = 'Mutating: SET_TIMESTAMP, ADJUST_FREQUENCY, INIT_DEVICE; not exact-target-aware; #340'
-    'test_mdio_phy'               = 'Mutating: MDIO_WRITE; not exact-target-aware'
-    'test_ts_event_sub'           = 'Mutating: SET_HW/RX/QUEUE_TIMESTAMP, SET_TARGET_TIME; not exact-target-aware'
-    'test_ptp_getset'             = 'Mutating: SET_TIMESTAMP, SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_hw_ts_ctrl'             = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_rx_timestamp'           = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-    'test_rx_timestamp_complete'  = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-    'test_ioctl_target_time'      = 'Mutating: SET_TARGET_TIME, SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_ioctl_tas'              = 'Mutating: SETUP_TAS, DISARM_TAS; TSN configuration change; not exact-target-aware'
-    'test_ioctl_fp_ptm'           = 'Mutating: SETUP_FP, SETUP_PTM; TSN configuration change; not exact-target-aware'
-    'test_ioctl_offset'           = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ioctl_phc_monotonicity' = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ioctl_access_control'   = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ioctl_buffer_fuzz'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_event_log'              = 'Mutating: ADJUST_FREQUENCY; not exact-target-aware'
-    'test_eee_lpi'                = 'Mutating: EEE_ENABLE/DISABLE; not exact-target-aware'
-    'test_pfc_pause'              = 'Mutating: PFC_ENABLE; not exact-target-aware'
-    'test_srp_interface'          = 'Mutating: SRP_REGISTER/DEREGISTER_STREAM; not exact-target-aware'
-    'test_vlan_tag'               = 'Mutating: VLAN_ENABLE/DISABLE; not exact-target-aware'
-    'test_vlan_pcp_tc_mapping'    = 'Mutating: SETUP_QAV; not exact-target-aware'
-    'test_security_validation'    = 'Mutating: SET_TIMESTAMP; not exact-target-aware'
-    'test_ioctl_launch_time'      = 'Mutating: SET_LAUNCH_TIME; not exact-target-aware'
-    'test_gptp_phc_interface'     = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_error_recovery'         = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
 }
 $HardwareIntegrationCoverageGaps = [ordered]@{
-    'test_hw_state_machine'        = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; up to five INIT calls on unbound and bound handles'
-    'avb_test_i219'                 = 'Mutating:Target: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE on the target adapter; I219 compatibility, #261'
-    'avb_test_portability'          = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; QA-SC-PORT-001, #114'
-    'avb_test_i217'                 = 'Mutating:Target: SETUP_TAS, SETUP_FP, WRITE_REGISTER; TSN configuration change; #114'
-    'avb_test_i225'                 = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; #114'
-    'avb_test_i226_um'              = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; #114'
-    'test_tsn_ioctl_handlers_um'    = 'Mutating: SETUP_TAS/FP/PTM, INIT_DEVICE; TSN configuration change; not exact-target-aware'
-    'test_ptp_corr_extended'        = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'ptp_clock_control_production'  = 'Mutating: SET_TIMESTAMP, ADJUST_FREQUENCY; not exact-target-aware'
-    'ptp_ioctl_latency_test'        = 'Mutating: SET_TIMESTAMP, INIT_DEVICE; not exact-target-aware'
-    'hw_timestamping_control'       = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'rx_timestamping'               = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-    'tsauxc_toggle_test'            = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_gptp_daemon_coexist'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ptp_phc_stability'        = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-20 - the default run is UT-CORR-007/008 only, but the binary contains the UT-CORR-009 driver reinstall path, ControlService STOP plus system Install-Driver-Elevated.ps1 -Action Reinstall, reachable only with --case UT-CORR-009 or --allow-lifecycle; coverage gap: UT-CORR-007/008 TX-PHC correlation, #149 #317'
-    'ssot_register_validation_test' = 'Unknown: no build entry or source mapping in Build-Tests.ps1'
+    # Formerly only commented out of every list (silently absent); declared so every run reports them NOT EXECUTED.
+    'test_vv_corr_001_stability'    = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-21 - VV-CORR-001 requires a 24-hour run, default --hours 24; no long-duration HIL lane exists and shortening the run would change its acceptance criterion; #317 Track E'
+    'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
+    'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
+    'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; #149 #317'
+    'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
 }
 
 # ===========================
@@ -531,6 +594,20 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
 # rewritten), unbound-handle callers hit whichever adapter the previous test opened, and the post-test state check
 # does not detect a PHC time discontinuity.  Attended runs (outside GitHub Actions) keep running Init entries.
 $HilInitUnattendedApproved = $false
+
+# Hazard holds (Q 2026-10-22: lists are authoritative; an unresolved, evidenced unsafe hardware condition blocks only
+# the affected entries, visibly, at dispatch).  Key = registry key.  Removed only when the defect is hardware-verified fixed.
+$Hold328Tsn = '#328 SETUP_TAS/FP/PTM put the e2fn-owned I226 into TSN transmit mode without a restorable gate schedule, driver setup_tas defect, TQAVCTRL 0x00000009 read back 2026-10-22 13:44 before I226 send completions stopped and the next driver unload hung, investigations/issue-328-release-reinstall-hang-20261022.md; leaving TSN mode needs an adapter reset, held until the driver TAS/FP restore is fixed and hardware-verified'
+$HilHazardHolds = @{
+    'avb_test_portability'       = $Hold328Tsn
+    'avb_test_i217'              = $Hold328Tsn
+    'avb_test_i225'              = $Hold328Tsn
+    'avb_test_i226_um'           = $Hold328Tsn
+    'test_ioctl_tas'             = $Hold328Tsn
+    'test_ioctl_fp_ptm'          = $Hold328Tsn
+    'test_tsn_ioctl_handlers_um' = $Hold328Tsn
+    'test_tsn_ioctl_handlers'    = $Hold328Tsn
+}
 
 $HilTestSafety = @{
     # --- ReadOnly ---
@@ -577,7 +654,7 @@ $HilTestSafety = @{
     'test_vv_corr_003_crossdomain'     = 'ReadOnly'
     'test_ptp_001'                     = 'ReadOnly'   # ADJUST_FREQUENCY appears only in comments/printf text
     'test_ptp_corr'                    = 'ReadOnly'
-    'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006/009 need --case
+    'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006 need --case; UT-CORR-009 is test_ptp_phc_lifecycle
     'test_hardware_detection'          = 'ReadOnly'
     # --- Init (IOCTL_AVB_INIT_DEVICE) ---
     'test_clock_config'                = 'Init'
@@ -585,7 +662,7 @@ $HilTestSafety = @{
     'test_direct_clock'                = 'Init'
     'test_dev_lifecycle'               = 'Init'       # "devcon" appears only in a SKIP message
     'test_minimal_ioctl'               = 'Init'
-    'test_ioctl_routing'               = 'Init'
+    'test_ioctl_routing'               = 'ReadOnly'   # INIT_DEVICE only a GetIoctlName() case label; sends ENUM/OPEN/READ_REGISTER/GET_CLOCK_CONFIG
     'test_hw_state_machine'            = 'Init'
     # --- Mutating, exact-target-aware ---
     'test_ptp_freq'                    = 'Mutating:Target'   # AvbTestSelectTarget
@@ -624,6 +701,7 @@ $HilTestSafety = @{
     'test_gptp_phc_interface'          = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_error_recovery'              = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_tsn_ioctl_handlers_um'       = 'Mutating'   # SETUP_TAS/FP/PTM, INIT_DEVICE
+    'test_tsn_ioctl_handlers'          = 'Unknown'    # Build-Tests entry Disabled, source a 9-line KM placeholder; the only binary is the stale 2026-04-08 one (#328 F23); also hazard-held
     'test_ptp_corr_extended'           = 'Mutating'   # SET_HW_TIMESTAMPING
     'ptp_clock_control_production'     = 'Mutating'   # SET_TIMESTAMP, ADJUST_FREQUENCY
     'ptp_ioctl_latency_test'           = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE
@@ -634,8 +712,12 @@ $HilTestSafety = @{
     # --- Unsafe (NIC administration; removed from every suite list) ---
     'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
     'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
+    'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
+    'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
+    # --- ReadOnly (24-hour run; declared gap) ---
+    'test_vv_corr_001_stability'       = 'ReadOnly'   # ENUM/OPEN_ADAPTER, GET_TIMESTAMP, GET_HW_STATE, TEST_SEND_PTP
     # --- Unknown ---
-    'ssot_register_validation_test'    = 'Unknown'    # no build entry / source mapping in Build-Tests.ps1
+    'ssot_register_validation_test'    = 'Unknown'    # built as Build-Tests Name ssot_register_validation; source not yet classified
 }
 
 # ===========================
@@ -661,9 +743,8 @@ if ($Tests.Count -gt 0) {
 # This must be determined by Suite alone - not by whether -Tests was used.
 $IsMandatorySuite = ($Suite -eq "HardwareMandatory")
 
-# Verification class (not a new lane): every suite is mandatory verification except the
-# explicitly experimental HardwareMutation lane.  Mandatory + SKIP_NOT_IMPLEMENTED = INCOMPLETE,
-# mandatory + INCONCLUSIVE = nonpassing.  Optional keeps the labels but does not fail the run.
+# Verification class (not a new lane): every suite, HardwareMutation included, is mandatory verification
+# (tools/lib/TestVerdict.ps1).  Mandatory + SKIP_NOT_IMPLEMENTED = INCOMPLETE, mandatory + INCONCLUSIVE = nonpassing.
 $IsOptionalVerification = ((Get-AvbSuiteVerificationClass -Suite $Suite) -eq 'optional')
 
 # Apply default timeout per suite class when not explicitly set.
@@ -678,6 +759,15 @@ if ($TestTimeoutSeconds -eq 0) {
         "HardwareMutation"  { 300 }
         default             { 120 }
     }
+}
+# Per-entry timeout (Get-AvbTestTimeoutSeconds) where a test's own bounded waits exceed the suite default; it never
+# lowers the suite timeout and never changes the test's acceptance criteria.  Every value is derived from the test source.
+$HilTestTimeoutSeconds = [ordered]@{
+    # Per adapter: TC-AEN-002 30 s + TC-AEN-005 60 s + TC-AEN-006 31 s of deadlines/sleeps (tests/atdecc/
+    # test_atdecc_aen_protocol.c) = 121 s; 3 adapters on the HIL host = 363 s, killed at 300 s on adapter 3 in
+    # LocalSuites_20261021_173805 .. 20261022_094632.  420 s = 363 s + 16 %.  TC-AEN-001 adds 80 s per adapter only with
+    # AVB_TEST_HAS_ATDECC_CONTROLLER=1 (not set on the HIL host; it would need 603 s).
+    'test_atdecc_aen_protocol' = 420
 }
 
 # ===========================
@@ -798,8 +888,22 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 #              lifecycle snapshot already performs).
 #   gate       before every Hardware* test, from $HilTestSafety (see the table above the suite resolution).
 #   post-test  after every executed test, also after a timeout kill: compare with the baseline (settle up to
-#              $HilSettleSeconds); a difference is CLEANUP_FAILED and halts every later non-ReadOnly test.
-#              Link state and TSAUXC differences are reported as [WARN:STATE] (not enforced).
+#              $HilSettleSeconds); a difference - link state and TSAUXC included (P0 2026-10-21; previously only
+#              warnings) - is CLEANUP_FAILED and halts every later non-ReadOnly test.  After a non-ReadOnly test the
+#              restoration of what the runner cannot observe (PHC time/rate/offset, TSN/PHY/timestamp-control state)
+#              is INCONCLUSIVE (TC-INFRA-STATE-002): nonpassing, never assumed restored.
+# Per-entry mutation matrix (P0 2026-10-21): the hardware/system state a non-ReadOnly entry may modify, from its source
+# and hardware evidence.  Vocabulary: ADAPTER TIMINCA TSAUXC PHC_TIME PHC_RATE TAS FP PTM QAV PFC EEE VLAN MDIO
+# TS_CONTROL TARGET_TIME DRIVER_LIFECYCLE.  The runner itself re-reads only $HilVerifiableState; an entry whose declared
+# state is a subset of it and re-reads equal to the baseline has VERIFIED restoration.  Undeclared entries, or state the
+# runner cannot observe, are INCONCLUSIVE_RESTORATION and halt every later mutation (option 1, global).  Widen
+# $HilVerifiableState only together with a new independent check; never declare less than an entry really modifies.
+$HilVerifiableState = @('ADAPTER', 'TIMINCA', 'TSAUXC')
+$HilPhcReads = 5            # paired PHC/QPC reads per adapter in a pre-/post-test PHC window (evaluator minimum: 3)
+$HilPhcTolerance = @{}      # DID -> hardware-derived tolerance (Get-AvbHilPhcTolerances); empty = PHC never verified
+$HilMutatedState = [ordered]@{
+    # none declared yet: every real non-ReadOnly entry is treated as modifying unobserved state
+}
 $IsHardwareSuite     = ($Suite -like 'Hardware*')
 $HilSettleSeconds    = 10
 if ($IsSandbox -and $env:AVB_TEST_STATE_SETTLE_SECONDS -match '^\d+$') { $HilSettleSeconds = [int]$env:AVB_TEST_STATE_SETTLE_SECONDS }
@@ -815,9 +919,15 @@ if ($env:AVB_HIL_AUTHORIZE_UNSAFE) {
 
 function Format-AvbDid { param([int]$Value) return ('0x{0:X4}' -f $Value) }
 
+# A number is the device id itself: an unquoted 0x125B on a command line arrives as the integer 4699 and must not be
+# re-read as the hex text '4699' (2026-10-22 baseline/TX-probe runs targeted 0x4699/0x5427/0x5563).  Text is hex.
 function ConvertTo-AvbDid {
-    param([string]$Text)
-    if ($Text -match '^\s*(0x)?([0-9A-Fa-f]{1,4})\s*$') { return (Format-AvbDid ([Convert]::ToInt32($Matches[2], 16))) }
+    param([object]$Text)
+    if ($Text -is [int] -or $Text -is [long] -or $Text -is [uint16] -or $Text -is [uint32]) {
+        if ([long]$Text -ge 0 -and [long]$Text -le 0xFFFF) { return (Format-AvbDid ([int]$Text)) }
+        throw "invalid PCI device id $Text (outside 0x0000..0xFFFF)"
+    }
+    if ([string]$Text -match '^\s*(0x)?([0-9A-Fa-f]{1,4})\s*$') { return (Format-AvbDid ([Convert]::ToInt32($Matches[2], 16))) }
     throw "invalid PCI device id '$Text'"
 }
 
@@ -854,8 +964,12 @@ function New-AvbHilAdapter {
                               AdminStatus = $AdminStatus; MediaStatus = $MediaStatus; FilterBound = $FilterBound; Name = $Name }
 }
 
-# Per-adapter TIMINCA/TSAUXC: ENUM_ADAPTERS -> OPEN_ADAPTER -> GET_CLOCK_CONFIG (all read-only).
+# Per-adapter TIMINCA/TSAUXC: ENUM_ADAPTERS -> OPEN_ADAPTER -> GET_CLOCK_CONFIG (read IOCTLs; OPEN_ADAPTER side effects:
+# issue #343, documented at IOCTL_AVB_OPEN_ADAPTER in src/avb_integration_fixed.c).  -PhcReads N: N GET_CLOCK_CONFIG reads
+# per adapter, each SYSTIM read (ops->get_systime) bracketed by QPC - the paired reads of a PHC window for
+# tools/lib/PhcRestoration.ps1 (Samples: qpcBefore, qpcAfter, phcNs).  TIMINCA/TSAUXC are those of the first read.
 function Get-AvbHilClockState {
+    param([int]$PhcReads = 1)
     $res = @{ Ok = $false; Error = ''; Entries = @() }
     if (-not ([System.Management.Automation.PSTypeName]'AvbHilIoctl').Type) {
         Add-Type -TypeDefinition @'
@@ -904,19 +1018,25 @@ public static class AvbHilIoctl {
                                                Error = "OPEN_ADAPTER failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
                 continue
             }
-            $c = New-Object byte[] 24   # AVB_CLOCK_CONFIG: systim u64, timinca, tsauxc, clock_rate_mhz, status
-            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)) {
-                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0
-                                               Error = "GET_CLOCK_CONFIG failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
-                continue
+            $samples = @(); $first = $null; $readErr = ''
+            for ($r = 0; $r -lt [Math]::Max(1, $PhcReads); $r++) {
+                $c = New-Object byte[] 24   # AVB_CLOCK_CONFIG: systim u64, timinca, tsauxc, clock_rate_mhz, status
+                $q0 = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                $clockOk = [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)
+                $q1 = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                if (-not $clockOk) { $readErr = "GET_CLOCK_CONFIG failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"; break }
+                $status = [System.BitConverter]::ToUInt32($c, 20)
+                if ($status -ne 0) { $readErr = ("GET_CLOCK_CONFIG status 0x{0:X8}" -f $status); break }
+                if ($null -eq $first) { $first = $c }
+                $samples += ,([ordered]@{ qpcBefore = [long]$q0; qpcAfter = [long]$q1; phcNs = [long][System.BitConverter]::ToUInt64($c, 0) })
             }
-            $status = [System.BitConverter]::ToUInt32($c, 20)
-            if ($status -ne 0) {
-                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = ("GET_CLOCK_CONFIG status 0x{0:X8}" -f $status) }
+            if ($readErr) {
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = $readErr; Samples = @() }
                 continue
             }
             $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $true; Error = ''
-                                           Timinca = [System.BitConverter]::ToUInt32($c, 8); Tsauxc = [System.BitConverter]::ToUInt32($c, 12) }
+                                           Timinca = [System.BitConverter]::ToUInt32($first, 8); Tsauxc = [System.BitConverter]::ToUInt32($first, 12)
+                                           Samples = $samples }
         }
         $res.Entries = $entries
         $res.Ok = $true
@@ -927,6 +1047,7 @@ public static class AvbHilIoctl {
 }
 
 function Get-AvbHilSandboxState {
+    param([int]$PhcReads = 1)
     $st = @{ Ok = $true; Error = ''; Adapters = @(); ClockOk = $true; ClockError = ''; Clock = @() }
     $sf = $env:AVB_TEST_ADAPTER_STATE_FILE
     if (-not $sf -or -not (Test-Path -LiteralPath $sf)) {
@@ -937,15 +1058,27 @@ function Get-AvbHilSandboxState {
     $st.Adapters = @(foreach ($a in @($j.adapters)) {
         New-AvbHilAdapter ([string]$a.InstanceId) ([string]$a.PnpStatus) ([int]$a.Problem) ([string]$a.AdminStatus) ([string]$a.MediaStatus) ([string]$a.FilterBound) ([string]$a.Name)
     })
+    # Optional PhcOffsetNs: the sandbox PHC runs at the QPC rate with that offset (a fake "sets the PHC" by changing it);
+    # absent = no PHC samples, i.e. no PHC window (exactly like a hardware read that returned no SYSTIM).
+    $f = [double][System.Diagnostics.Stopwatch]::Frequency
     $st.Clock = @(foreach ($c in @($j.clock)) {
+        $samples = @()
+        if ($c.PSObject.Properties['PhcOffsetNs']) {
+            for ($r = 0; $r -lt [Math]::Max(1, $PhcReads); $r++) {
+                if ($r -gt 0) { Start-Sleep -Milliseconds 2 }
+                $q0 = [System.Diagnostics.Stopwatch]::GetTimestamp(); $q1 = $q0 + 10
+                $samples += ,([ordered]@{ qpcBefore = [long]$q0; qpcAfter = [long]$q1; phcNs = [long]([double]($q0 + 5) * 1e9 / $f) + [long]$c.PhcOffsetNs })
+            }
+        }
         [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
-                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = '' }
+                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples }
     })
     return $st
 }
 
 function Get-AvbHilState {
-    if ($script:IsSandbox) { return (Get-AvbHilSandboxState) }
+    param([int]$PhcReads = 1)
+    if ($script:IsSandbox) { return (Get-AvbHilSandboxState -PhcReads $PhcReads) }
     $st = @{ Ok = $true; Error = ''; Adapters = @(); ClockOk = $false; ClockError = ''; Clock = @() }
     $pnp = @()
     try {
@@ -974,74 +1107,315 @@ function Get-AvbHilState {
         $list += New-AvbHilAdapter ([string]$d.InstanceId) ([string]$d.Status) $problem $admin $media $fb $name
     }
     $st.Adapters = $list
-    $ck = Get-AvbHilClockState
+    $ck = Get-AvbHilClockState -PhcReads $PhcReads
     $st.ClockOk = $ck.Ok; $st.ClockError = $ck.Error; $st.Clock = $ck.Entries
     return $st
 }
 
-# Returns @{ Diffs = enforced differences; Warn = observed-only differences }.
+# Returns @{ Diffs = enforced differences (text, unchanged semantics); Warn = observed-only differences;
+#           Items = the same findings structured: Kind diff|unobservable, Key (incident key = adapter|component|expected|observed),
+#           Adapter, Component, Expected, Observed, IdentityVerified, Text }.
+# Adapter identity: PnP instance id for adapter state; 'drv:<DID>#<driver index>' for clock registers - NOT a verified
+# physical identity (IdentityVerified = $false; global safety semantics apply).
 function Compare-AvbHilState {
     param($Base, $Cur)
-    $diffs = @(); $warn = @()
+    $diffs = @(); $warn = @(); $items = @()
+    $add = { param($Kind, $Adapter, $Comp, $Exp, $Obs, $Text, $Verified)
+             $script:__cmpItems += ,([pscustomobject]@{ Kind = $Kind; Key = ("{0}|{1}|{2}|{3}" -f $Adapter, $Comp, $Exp, $Obs); Adapter = $Adapter; Component = $Comp
+                                                        Expected = $Exp; Observed = $Obs; IdentityVerified = $Verified; Text = $Text }) }
+    $script:__cmpItems = @()
     if (-not $Cur.Ok) {
         $diffs += "adapter state not observable: $($Cur.Error)"
+        & $add 'unobservable' 'all-adapters' 'adapter-state' 'observable' 'unobservable' $diffs[-1] $false
     } else {
         $bMap = @{}; foreach ($a in $Base.Adapters) { $bMap[$a.InstanceId] = $a }
         $cMap = @{}; foreach ($a in $Cur.Adapters)  { $cMap[$a.InstanceId] = $a }
         foreach ($k in @($bMap.Keys)) {
-            if (-not $cMap.ContainsKey($k)) { $diffs += "${k}: adapter no longer present"; continue }
+            if (-not $cMap.ContainsKey($k)) { $diffs += "${k}: adapter no longer present"; & $add 'diff' "pnp:$k" 'presence' 'present' 'absent' $diffs[-1] $true; continue }
             foreach ($f in 'PnpStatus', 'Problem', 'AdminStatus', 'FilterBound') {
-                if ([string]$bMap[$k].$f -ne [string]$cMap[$k].$f) { $diffs += ("{0}: {1} {2} -> {3}" -f $k, $f, $bMap[$k].$f, $cMap[$k].$f) }
+                if ([string]$bMap[$k].$f -ne [string]$cMap[$k].$f) { $diffs += ("{0}: {1} {2} -> {3}" -f $k, $f, $bMap[$k].$f, $cMap[$k].$f); & $add 'diff' "pnp:$k" $f ([string]$bMap[$k].$f) ([string]$cMap[$k].$f) $diffs[-1] $true }
             }
+            # Enforced (P0 2026-10-21): a link that does not return within the settle window is a state change.
             if ([string]$bMap[$k].MediaStatus -ne [string]$cMap[$k].MediaStatus) {
-                $warn += ("{0}: link {1} -> {2}" -f $k, $bMap[$k].MediaStatus, $cMap[$k].MediaStatus)
+                $diffs += ("{0}: link {1} -> {2}" -f $k, $bMap[$k].MediaStatus, $cMap[$k].MediaStatus)
+                & $add 'diff' "pnp:$k" 'MediaStatus' ([string]$bMap[$k].MediaStatus) ([string]$cMap[$k].MediaStatus) $diffs[-1] $true
             }
         }
-        foreach ($k in @($cMap.Keys)) { if (-not $bMap.ContainsKey($k)) { $diffs += "${k}: adapter appeared" } }
+        foreach ($k in @($cMap.Keys)) { if (-not $bMap.ContainsKey($k)) { $diffs += "${k}: adapter appeared"; & $add 'diff' "pnp:$k" 'presence' 'absent' 'present' $diffs[-1] $true } }
     }
     if ($Base.ClockOk) {
         if (-not $Cur.ClockOk) {
             $diffs += "PHC clock state not observable: $($Cur.ClockError)"
+            & $add 'unobservable' 'all-adapters' 'clock-state' 'observable' 'unobservable' $diffs[-1] $false
         } else {
             $bc = @{}; foreach ($c in $Base.Clock) { $bc["$($c.Did)#$($c.Index)"] = $c }
             $cc = @{}; foreach ($c in $Cur.Clock)  { $cc["$($c.Did)#$($c.Index)"] = $c }
             foreach ($k in @($bc.Keys)) {
                 $b = $bc[$k]
-                if (-not $cc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): no longer enumerated by the driver" -f $b.Did, $b.Index); continue }
+                if (-not $cc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): no longer enumerated by the driver" -f $b.Did, $b.Index); & $add 'diff' "drv:$k" 'enumeration' 'enumerated' 'absent' $diffs[-1] $false; continue }
                 $c = $cc[$k]
-                if ($b.Ok -and -not $c.Ok) { $diffs += ("DID {0} (driver index {1}): clock config no longer readable ({2})" -f $b.Did, $b.Index, $c.Error); continue }
+                if ($b.Ok -and -not $c.Ok) { $diffs += ("DID {0} (driver index {1}): clock config no longer readable ({2})" -f $b.Did, $b.Index, $c.Error); & $add 'unobservable' "drv:$k" 'clock-config' 'readable' 'unreadable' $diffs[-1] $false; continue }
                 if ($b.Ok -and $c.Ok -and $b.Timinca -ne $c.Timinca) {
                     $diffs += ("DID {0} (driver index {1}): TIMINCA 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Timinca, $c.Timinca)
+                    & $add 'diff' "drv:$k" 'TIMINCA' ('0x{0:X8}' -f [uint32]$b.Timinca) ('0x{0:X8}' -f [uint32]$c.Timinca) $diffs[-1] $false
                 }
                 if ($b.Ok -and $c.Ok -and $b.Tsauxc -ne $c.Tsauxc) {
-                    $warn += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
+                    $diffs += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
+                    & $add 'diff' "drv:$k" 'TSAUXC' ('0x{0:X8}' -f [uint32]$b.Tsauxc) ('0x{0:X8}' -f [uint32]$c.Tsauxc) $diffs[-1] $false
                 }
             }
             foreach ($k in @($cc.Keys)) {
-                if (-not $bc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): newly enumerated by the driver" -f $cc[$k].Did, $cc[$k].Index) }
+                if (-not $bc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): newly enumerated by the driver" -f $cc[$k].Did, $cc[$k].Index); & $add 'diff' "drv:$k" 'enumeration' 'absent' 'enumerated' $diffs[-1] $false }
             }
         }
     }
-    return @{ Diffs = $diffs; Warn = $warn }
+    $items = @($script:__cmpItems); $script:__cmpItems = @()
+    return @{ Diffs = $diffs; Warn = $warn; Items = $items }
+}
+
+# Incident resolution (pure).  $Open: ordered map incident key -> @{ IncidentId; Key; observations }.  An item whose key
+# matches an OPEN incident is an additional observation of it ('confirmed'); otherwise a new incident ('opened').
+# Closed (verified-restored) incidents are never in $Open, so a recurrence opens a new incident.
+function Resolve-AvbHilIncident {
+    param($Open, $Item, [string]$Check, [string]$Record, [string]$IncidentId = '')
+    $obs = [ordered]@{ check = $Check; record = $Record; utc = (Get-Date).ToUniversalTime().ToString('o'); observed = $Item.Observed }
+    if ($Open.Contains($Item.Key)) {
+        $inc = $Open[$Item.Key]; $inc.observations = @(@($inc.observations) + @($obs))
+        return @{ IncidentId = $inc.IncidentId; Role = 'confirmed'; Key = $Item.Key }
+    }
+    $id = if ($IncidentId) { $IncidentId } else { [guid]::NewGuid().ToString() }
+    $Open[$Item.Key] = @{ IncidentId = $id; Key = $Item.Key; Adapter = $Item.Adapter; Component = $Item.Component; Expected = $Item.Expected
+                          Observed = $Item.Observed; IdentityVerified = $Item.IdentityVerified; observations = @($obs) }
+    return @{ IncidentId = $id; Role = 'opened'; Key = $Item.Key }
 }
 
 # Records a failure-class verdict that the runner itself determined (counted, shown, and written as a log
 # the JUnit converter turns into a <failure>).
+# ---------------------------------------------------------------------------------------------------------
+# Machine-readable results (-ResultsJson).  Every result row keeps the console columns Name/Status/Exit and adds
+# what a consumer needs without parsing console text: entry, artifact + SHA256, exact arguments, safety class,
+# target DID, whether the process was started, the observed exit code ($null = none observed, never success),
+# log path, reason and the per-testcase verdict lines (testcase ID + adapter).  Work-item context comes from
+# $script:AvbItem (set by the dispatch loop; $null outside it).
+# ---------------------------------------------------------------------------------------------------------
+$script:AvbItem = $null
+
+# Runner status -> results verdict.  Distinct categories are kept distinct; an unknown status throws (a silent
+# default would turn a new status into a pass).
+function ConvertTo-AvbRunnerVerdict {
+    param([string]$Status)
+    switch -Exact ($Status) {
+        'PASSED'                      { return 'PASSED' }
+        'FAILED'                      { return 'FAILED' }
+        'FAILED(SKIP_ONLY)'           { return 'FAILED' }
+        'FAILED(TIMEOUT)'             { return 'FAILED(TIMEOUT)' }
+        'FAILED(INCONCLUSIVE)'        { return 'INCONCLUSIVE' }
+        'INCOMPLETE(NOT_IMPLEMENTED)' { return 'INCOMPLETE' }
+        'FAILED(INFRA)'               { return 'INFRA_FAILURE' }
+        'FAILED(BUILD)'               { return 'INFRA_FAILURE' }
+        'INFRA_FAILURE'               { return 'INFRA_FAILURE' }
+        'CLEANUP_FAILED'              { return 'CLEANUP_FAILED' }
+        'INCONCLUSIVE_RESTORATION'    { return 'INCONCLUSIVE_RESTORATION' }
+        'FAILED_SETUP'                { return 'FAILED_SETUP' }
+        'BLOCKED'                     { return 'BLOCKED(SAFETY)' }
+        'BLOCKED(SAFETY)'             { return 'BLOCKED(SAFETY)' }
+        'BLOCKED(PROVENANCE)'         { return 'BLOCKED(PROVENANCE)' }
+        'SKIPPED'                     { return 'SKIPPED' }
+        'SKIPPED(INFRA)'              { return 'SKIPPED' }
+        'COVERAGE-GAP'                { return 'COVERAGE-GAP' }
+    }
+    throw "Unknown runner status '$Status' - map it in ConvertTo-AvbRunnerVerdict (tools/test/Run-Tests-CI.ps1)"
+}
+
+# -Check: a runner check attributed to the current item (post-test state, driver health); not a test execution.
+function Add-AvbResult {
+    param([string]$Name, [string]$Status, $Exit, [string]$Reason = '', [string]$LogPath = '', [string[]]$Lines = @(), [switch]$Check, [object[]]$Incidents = @())
+    $script:results += [PSCustomObject]@{ Name = $Name; Status = $Status; Exit = $Exit }
+    $it = $script:AvbItem
+    $executed = ($null -ne $it -and $it.Executed -and -not $Check)
+    $r = [ordered]@{
+        name = $Name; entry = $(if ($it) { $it.Entry } else { $Name }); suite = $Suite; configuration = $Configuration
+        verdict = (ConvertTo-AvbRunnerVerdict $Status); status = $Status; executed = $executed; check = [bool]$Check
+        exitCode = $(if ($executed) { $it.ProcessExit } else { $null })
+        artifact = $(if ($it) { $it.Artifact } else { $null }); artifactSha256 = $(if ($it) { $it.Sha256 } else { $null })
+        arguments = $(if ($it) { $it.Arguments } else { '' }); safetyClass = $(if ($it) { $it.Class } else { '' })
+        targetDid = $(if ($it -and $it.Target) { $it.Target } else { $null })
+        reason = $Reason; logPath = $(if ($LogPath) { $LogPath } elseif ($executed) { $it.LogPath } else { $null })
+        startedUtc = $(if ($executed) { $it.StartedUtc } else { $null }); durationSeconds = $(if ($executed) { $it.DurationSeconds } else { $null })
+        testcases = @()
+        incidents = @($Incidents | ForEach-Object { [ordered]@{ incidentId = $_.IncidentId; role = $_.Role; key = $_.Key } })
+    }
+    $tcLines = if ($Lines.Count -gt 0) { $Lines } elseif ($executed -and $null -ne $it.Output) { @($it.Output -split "`r?`n") } else { @() }
+    $r.testcases = Get-AvbTestcaseVerdicts -Lines $tcLines   # already an array (unary-comma return); @() would nest it
+    $script:AvbResultRecords += ,$r
+}
+
+# Atomic write (temp file + rename) of the results document; returns the path.
+function Write-AvbResultsJson {
+    param([int]$ExitCode, [string]$Overall)
+    $records = @($script:AvbResultRecords)
+    $counts = [ordered]@{}
+    foreach ($v in 'PASSED', 'FAILED', 'FAILED(TIMEOUT)', 'BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)', 'SKIPPED', 'COVERAGE-GAP',
+                   'INCOMPLETE', 'INCONCLUSIVE', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION', 'FAILED_SETUP') {
+        $counts[$v] = @($records | Where-Object { $_.verdict -eq $v }).Count
+    }
+    # One persistent discrepancy = one incident, whatever number of independent checks observed it (Decision B).
+    $cleanRecs = @($records | Where-Object { $_.verdict -eq 'CLEANUP_FAILED' })
+    $incIds = @($cleanRecs | ForEach-Object { @($_.incidents) } | Where-Object { $_ } | ForEach-Object { $_.incidentId } | Sort-Object -Unique)
+    $counts['CLEANUP_FAILED'] = $incIds.Count + @($cleanRecs | Where-Object { @($_.incidents).Count -eq 0 }).Count
+    $cleanupIncidents = @(foreach ($id in $incIds) {
+        $obsRecs = @($cleanRecs | Where-Object { @($_.incidents | Where-Object { $_.incidentId -eq $id }).Count -gt 0 })
+        [ordered]@{ incidentId = $id; key = @(@($obsRecs[0].incidents) | Where-Object { $_.incidentId -eq $id })[0].key
+                    observations = @($obsRecs | ForEach-Object { $r = $_; [ordered]@{ record = $r.name; role = @(@($r.incidents) | Where-Object { $_.incidentId -eq $id })[0].role } }) } })
+    $src = $script:SourceIdentity
+    $evidence = if ($script:UnderGitHubActions -and -not $script:IsSandbox) { 'ci' }
+                elseif ($script:IsSandbox) { 'sandbox' }
+                elseif ($src -and $src.Mode -eq 'local' -and $src.Dirty) { 'local-pre-commit' }
+                else { 'local' }
+    $adapters = @()
+    if ($script:HilBaseline -and $script:HilBaseline.Adapters) {
+        $adapters = @($script:HilBaseline.Adapters | ForEach-Object { [ordered]@{ instanceId = $_.InstanceId; did = $_.Did; name = $_.Name; filterBound = $_.FilterBound } })
+    }
+    $doc = [ordered]@{
+        schema = 'avb-runner-results/1'; producer = 'tools/test/Run-Tests-CI.ps1'
+        suite = $Suite; configuration = $Configuration; evidenceClass = $evidence; host = $env:COMPUTERNAME
+        startedUtc = $script:AvbRunStartedUtc; finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
+        github = $(if ($script:UnderGitHubActions) { [ordered]@{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; sha = $env:GITHUB_SHA
+                                                                 expectedRevision = $env:AVB_HIL_EXPECTED_REVISION; workflow = $env:GITHUB_WORKFLOW } } else { $null })
+        source = $(if ($src) { [ordered]@{ ok = $src.Ok; revision = $src.Revision; dirty = $src.Dirty; mode = $src.Mode; digest = $src.Digest; error = $src.Error } } else { $null })
+        buildManifest = $(if ($script:BuildManifest) { [ordered]@{ ok = $script:BuildManifest.Ok; path = $script:BuildManifest.Path; error = $script:BuildManifest.Error } } else { $null })
+        driverIdentity = [ordered]@{ source = 'environment (HIL_DRIVER_*), not verified by this runner'; version = $env:HIL_DRIVER_VERSION; sha256 = $env:HIL_DRIVER_SHA256 }
+        adapters = $adapters; stateHalt = $script:stateHalt
+        machineSafety = $(if ($script:HilSafetyState) { [ordered]@{ path = $script:HilSafetyPath; stateAtStart = $script:HilSafetyState.State; why = $script:HilSafetyState.Why } } else { $null })
+        executedCount = @($records | Where-Object { $_.executed }).Count; notExecutedCount = @($records | Where-Object { -not $_.executed -and -not $_.check }).Count
+        counts = $counts; cleanupObservations = $cleanRecs.Count; cleanupIncidents = $cleanupIncidents
+        overall = $Overall; exitCode = $ExitCode; records = $records
+    }
+    $dir = Split-Path -Parent $script:ResultsJsonPath
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $tmp = "$($script:ResultsJsonPath).tmp-$PID"
+    ($doc | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $script:ResultsJsonPath -Force
+    return $script:ResultsJsonPath
+}
+
+# Final exit of a completed run: results document first, then the exit code it records.
+function Complete-AvbRun {
+    param([int]$Code, [string]$Overall)
+    if ($script:RunMarkerPath) { Remove-Item -LiteralPath $script:RunMarkerPath -Force -ErrorAction SilentlyContinue }
+    if ($script:HilLockAcquired) {
+        $rel = Exit-AvbHilLock -Owner $script:HilLockAcquired -Path $script:HilLockPath
+        if ($rel.Ok) { Write-Note "Machine lock released" } else { Write-Fail "machine lock NOT released: $($rel.Why)" }
+    }
+    try {
+        $p = Write-AvbResultsJson -ExitCode $Code -Overall $Overall
+        Write-Note "Results JSON: $p"
+        if ($ExportGitHubEnv) { "AVB_RESULTS_JSON=$p" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+    } catch {
+        Write-Fail "results JSON could not be written: $($_.Exception.Message) --- run reported as failed"
+        exit 1
+    }
+    exit $Code
+}
+
 function Add-HilFailureRecord {
-    param([string]$Display, [string]$Status, [string]$Stem, [string]$Line)
+    param([string]$Display, [string]$Status, [string]$Stem, [string]$Line, [switch]$Check, [object[]]$Incidents = @())
     $script:failedTests++
     $script:totalTests++
-    $script:results += [PSCustomObject]@{ Name = $Display; Status = $Status; Exit = 'N/A' }
     Write-Host "  $Line" -ForegroundColor Red
     $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
     $p = Join-Path $script:logsDir ("{0}.exe_{1}.log" -f $Stem, $ts)
     $i = 2
     while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Stem, $i, $ts); $i++ }
     $Line | Set-Content -LiteralPath $p -Encoding utf8
+    Add-AvbResult -Name $Display -Status $Status -Exit 'N/A' -Reason $Line -LogPath $p -Lines @($Line) -Check:$Check -Incidents $Incidents
+}
+
+# Halt carried over from earlier suites of the same HIL job: '' or the reason.  Same stop rule as LocalSuites
+# (Get-AvbStopReason): FAILED(TIMEOUT) / INFRA_FAILURE / CLEANUP_FAILED record, a stateHalt, plus an unreadable results
+# document or a run-in-progress.json marker (that suite's runner died before completing: state unverified).
+# Only this run's own results document is excluded - never a directory: LocalSuites' -PriorResultsDir lies inside the
+# runner's logs directory (TEST-HILGATE-069).  A run-in-progress.json found here is never this run's own: it is written
+# after this check, so it belongs to an earlier suite whose runner died.
+function Get-AvbPriorHalt {
+    param([string]$Dir, [string]$OwnResultsPath = '')
+    if (-not (Test-Path -LiteralPath $Dir)) { return '' }
+    $own = if ($OwnResultsPath) { [System.IO.Path]::GetFullPath($OwnResultsPath) } else { $null }
+    $why = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -Include 'results-*.json', 'run-in-progress.json' -ErrorAction Stop)) {
+        if ($own -and [string]::Equals($f.FullName, $own, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($f.Name -eq 'run-in-progress.json') { $why += "$($f.Directory.Name) did not complete (runner process ended without results; hardware state unverified)"; continue }
+        try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
+        if ($d.stateHalt) { $why += "$($d.suite): state-integrity halt ($($d.stateHalt))" }
+        foreach ($r in @($d.records)) {
+            # D2: a ReadOnly timeout whose process tree terminated and whose state was verified unchanged stays FAILED
+            # in its own suite but is no halt; a record without that disposition (any other case, older runner) is.
+            if ($r.verdict -eq 'FAILED(TIMEOUT)' -and $r.PSObject.Properties['safetyClass'] -and $r.safetyClass -eq 'ReadOnly' -and
+                $r.PSObject.Properties['timeoutDisposition'] -and $r.timeoutDisposition -eq 'TERMINATED_STATE_VERIFIED') { continue }
+            if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
+        }
+    }
+    return ($why -join '; ')
+}
+
+# Pure overall decision.  A required test not executed (coverage gap) or a testcase INCOMPLETE (SKIP_NOT_IMPLEMENTED)
+# without any failure is INCOMPLETE, never PASSED; failures stay FAILED.
+function Get-AvbRunOverall {
+    param([bool]$IsHardwareSuite, [int]$Passed, [int]$Failed, [int]$Incomplete, [int]$CoverageGaps)
+    if ($Failed -gt 0) { return @{ Overall = 'FAILED'; Code = 1 } }
+    if ($Incomplete -gt 0 -or $CoverageGaps -gt 0) { return @{ Overall = 'INCOMPLETE'; Code = 1 } }
+    if ($Passed -eq 0) {
+        if ($IsHardwareSuite) { return @{ Overall = 'NOT_VERIFIED'; Code = 1 } }   # skipped-only is not hardware verification
+        return @{ Overall = 'NO_TESTS'; Code = 0 }
+    }
+    return @{ Overall = 'PASSED'; Code = 0 }
+}
+
+# Registers every 'diff' item of a check as an incident observation (Resolve-AvbHilIncident) and persists it in the
+# machine-wide safety record: a new incident = a new event (id = incident id); a confirmation = one more observation of
+# the existing open event.  Returns the references for the result record.
+function Register-HilIncidents {
+    param([object[]]$Items, [string]$Check, [string]$Record, $Last = $null)
+    $refs = @()
+    foreach ($it in @($Items | Where-Object { $_.Kind -eq 'diff' })) {
+        $r = Resolve-AvbHilIncident -Open $script:HilIncidents -Item $it -Check $Check -Record $Record
+        if ($script:HilSafetyPath) {
+            $ev = [ordered]@{ verdict = 'CLEANUP_FAILED'; scope = 'GLOBAL'
+                hardware = [ordered]@{ adapter = $it.Adapter; identityVerified = [bool]$it.IdentityVerified }
+                trigger = [ordered]@{ check = $Check; record = $Record; testcase = $(if ($script:AvbItem) { $script:AvbItem.Entry })
+                                      executable = $(if ($script:AvbItem) { Split-Path -Leaf ([string]$script:AvbItem.Artifact) }); arguments = $(if ($script:AvbItem) { $script:AvbItem.Arguments })
+                                      suite = $Suite; configuration = $Configuration
+                                      runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB; pid = $PID; discrepancy = $it.Text }
+                initialState = $script:HilBaseline; lastKnownState = $Last
+                evidence = @(@($(if ($script:AvbItem) { $script:AvbItem.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ }) }
+            $pr = Add-AvbHilSafetyEvent -Path $script:HilSafetyPath -SafetyEvent $ev -IncidentKey $it.Key -EventId $r.IncidentId
+            if (-not $pr.Ok) { Write-Host "  [SAFETY-RECORD] incident $($r.IncidentId) NOT persisted in the record: $($pr.Why)" -ForegroundColor Red }
+        }
+        $refs += ,$r
+    }
+    return ,$refs
+}
+function Format-HilIncidentRefs([object[]]$Refs) {
+    if (@($Refs).Count -eq 0) { return '' }
+    return (' --- ' + ((@($Refs) | ForEach-Object { "incident $($_.IncidentId) $($_.Role)" }) -join '; '))
 }
 
 function Set-HilHalt {
-    param([string]$Reason)
+    # -Verdict: a safety event caused by the current item; it is persisted in the machine-wide safety record
+    # (tools/lib/HilLock.ps1) so every later run on this machine stays halted until an explicit verified recovery.
+    param([string]$Reason, [string]$Verdict = '', $Last = $null)
+    if ($Verdict -and $script:IsHardwareSuite -and $script:HilSafetyPath) {
+        $it = $script:AvbItem
+        $ev = [ordered]@{ verdict = $Verdict; scope = 'GLOBAL'
+            hardware = [ordered]@{ did = $(if ($it) { $it.Target }); identityVerified = $false; note = 'adapter identity by DID only (no MAC/PCI correlation yet)' }
+            trigger  = [ordered]@{ testcase = $(if ($it) { $it.Entry }); executable = $(if ($it) { Split-Path -Leaf ([string]$it.Artifact) }); arguments = $(if ($it) { $it.Arguments })
+                                   suite = $Suite; configuration = $Configuration; runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB; pid = $PID; reason = $Reason }
+            initialState = $script:HilBaseline; lastKnownState = $Last
+            evidence = @(@($(if ($it) { $it.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ }) }
+        $pr = Add-AvbHilSafetyEvent -Path $script:HilSafetyPath -SafetyEvent $ev
+        if ($pr.Ok) { Write-Host "  [SAFETY-RECORD] $Verdict persisted (event $($pr.EventId)); Init/Mutating stay BLOCKED on this machine until a verified recovery clears it" -ForegroundColor Red }
+        else { Write-Host "  [SAFETY-RECORD] NOT persisted in the record: $($pr.Why)" -ForegroundColor Red }
+    }
     if ($script:stateHalt) { return }
     $script:stateHalt = $Reason
     Write-Host "  [HALT] state-integrity halt: $Reason --- every later Init/Mutating/Unsafe test is BLOCKED; ReadOnly tests continue" -ForegroundColor Red
@@ -1051,6 +1425,29 @@ function Get-HilBinName {
     param([string]$Entry)
     if ($Entry.StartsWith('ps1:')) { return [System.IO.Path]::GetFileNameWithoutExtension($Entry.Substring(4)) }
     return (($Entry -split '\s+', 2)[0] -replace '\.exe$', '')
+}
+
+# The suite lists are authoritative (Q 2026-10-22): a listed 'x.exe' is the test 'x'.  Registry/mutation-matrix key =
+# binary name without '.exe' plus the arguments, so a spelling never makes a listed test unclassified (BLOCKED).
+function ConvertTo-AvbHilEntryKey {
+    param([string]$Entry)
+    if ($Entry.StartsWith('ps1:')) { return $Entry }
+    $p = $Entry -split '\s+', 2
+    $b = $p[0] -replace '\.exe$', ''
+    if ($p.Count -gt 1) { return "$b $($p[1])" }
+    return $b
+}
+
+# Built artifact of a listed entry: the Build-Tests Output recorded under that Name in the test-build manifest
+# (hw_timestamping_control -> hw_timestamping_control_test.exe); without a manifest record '<name>.exe'.
+function Resolve-AvbHilArtifactName {
+    param([string]$BinName, $Manifest)
+    $n = $BinName -replace '\.exe$', ''
+    if ($null -ne $Manifest -and $null -ne $Manifest.ByName -and $Manifest.ByName.ContainsKey($n)) {
+        $a = [string]$Manifest.ByName[$n].artifact
+        if ($a) { return $a }
+    }
+    return "$n.exe"
 }
 
 # Sandbox: only ps1 fakes outside the repository may execute; their class comes from AVB_TEST_SANDBOX_CLASSES.
@@ -1063,6 +1460,126 @@ function Test-HilSandboxFake {
     return (-not [System.IO.Path]::GetFullPath($p).StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase))
 }
 
+# Declared mutated state of an entry (sandbox: AVB_TEST_SANDBOX_MUTATES 'bin=STATE,STATE;...'); @() = undeclared.
+function Get-AvbHilMutatedState {
+    param([string]$Entry)
+    if ($script:IsSandbox) {
+        $bin = Get-HilBinName $Entry
+        foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_MUTATES) -split ';')) {
+            if ($pair -match '^\s*([^=]+?)\s*=\s*(\S+)\s*$' -and $Matches[1] -eq $bin) { return @($Matches[2] -split ',') }
+        }
+        return @()
+    }
+    $k = ConvertTo-AvbHilEntryKey $Entry
+    if ($HilMutatedState.Contains($k)) { return @($HilMutatedState[$k]) }
+    return @()
+}
+
+# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] (never lowers it).  Sandbox:
+# AVB_TEST_SANDBOX_TIMEOUTS ('bin=seconds;...').
+function Get-AvbTestTimeoutSeconds {
+    param([string]$Entry, [int]$SuiteSeconds)
+    $own = 0
+    if ($script:IsSandbox) {
+        $bin = Get-HilBinName $Entry
+        foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_TIMEOUTS) -split ';')) {
+            if ($pair -match '^\s*([^=]+?)\s*=\s*(\d+)\s*$' -and $Matches[1] -eq $bin) { $own = [int]$Matches[2] }
+        }
+    } elseif ($HilTestTimeoutSeconds.Contains($Entry)) { $own = [int]$HilTestTimeoutSeconds[$Entry] }
+    return [Math]::Max($SuiteSeconds, $own)
+}
+
+# Kills a timed-out test and every descendant process (PowerShell 5.1 Process.Kill() ends only the root) and waits for
+# each to exit.  A process has exited only after all of its I/O requests completed or were cancelled, so Ok = every
+# process of the tree gone = no outstanding driver operation of the test.  @{ Ok; Detail }.
+function Stop-AvbProcessTree {
+    param([System.Diagnostics.Process]$Process, [int]$WaitSeconds = 30)
+    $tree = @(); $todo = @($Process.Id)
+    while ($todo.Count -gt 0) {
+        $next = @()
+        foreach ($p in $todo) {
+            foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$p" -ErrorAction SilentlyContinue)) {
+                if ($tree -notcontains [int]$c.ProcessId) { $tree += [int]$c.ProcessId; $next += [int]$c.ProcessId }
+            }
+        }
+        $todo = $next
+    }
+    try { $Process.Kill() } catch { }
+    foreach ($id in $tree) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+    $rootGone = $Process.WaitForExit($WaitSeconds * 1000)
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    $alive = @($tree)
+    while ($alive.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $alive = @($alive | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
+        if ($alive.Count -gt 0) { Start-Sleep -Milliseconds 200 }
+    }
+    $detail = "root pid $($Process.Id) $(if ($rootGone) { 'exited' } else { "still running after ${WaitSeconds}s" }); descendants: " +
+              $(if ($tree.Count -eq 0) { 'none' } elseif ($alive.Count -eq 0) { "$($tree -join ',') terminated" } else { "STILL RUNNING $($alive -join ',')" })
+    return @{ Ok = ($rootGone -and $alive.Count -eq 0); Detail = $detail }
+}
+
+# PHC window of one adapter (Get-AvbHilState -PhcReads N) in the input format of tools/lib/PhcRestoration.ps1.  Adapter
+# identity = driver enumeration (DID + driver index): the same identity Compare-AvbHilState uses for clock registers.
+function ConvertTo-AvbHilPhcWindow {
+    param($Entry)
+    return [ordered]@{
+        provenance = [ordered]@{ source = $(if ($script:IsSandbox) { 'synthetic' } else { 'hardware' }); host = $env:COMPUTERNAME; did = $Entry.Did
+                                 adapterIdentity = ("drv:{0}#{1}" -f $Entry.Did, $Entry.Index); capturedUtc = (Get-Date).ToUniversalTime().ToString('o')
+                                 driverSha256 = $env:HIL_DRIVER_SHA256 }
+        qpcFrequency = [System.Diagnostics.Stopwatch]::Frequency; timinca = [uint32]$Entry.Timinca; tsauxc = [uint32]$Entry.Tsauxc
+        tsControl = $null   # timestamp-control state is not observed by the runner
+        samples = @($Entry.Samples)
+    }
+}
+
+# Hardware-derived PHC tolerances (DID -> tolerance object for Get-AvbPhcRestorationVerdict) from the evidence document of
+# the machine safety record's operator-approved baseline (phcTolerance[]).  None defined = empty: every PHC judgement is
+# then INCONCLUSIVE_RESTORATION (the evaluator never invents a threshold).
+function Get-AvbHilPhcTolerances {
+    param($SafetyRecord)
+    $map = @{}
+    if ($null -eq $SafetyRecord -or -not $SafetyRecord.PSObject.Properties['baseline'] -or $null -eq $SafetyRecord.baseline) { return $map }
+    $ev = [string]$SafetyRecord.baseline.evidence
+    if (-not $ev -or -not (Test-Path -LiteralPath $ev -PathType Leaf)) { return $map }
+    try { $doc = Get-Content -LiteralPath $ev -Raw | ConvertFrom-Json } catch { return $map }
+    if (-not $doc.PSObject.Properties['phcTolerance']) { return $map }
+    foreach ($t in @($doc.phcTolerance)) { if ($t -and $t.did) { $map[[string]$t.did] = $t } }
+    return $map
+}
+
+# D1 (Q 2026-10-22): a non-ReadOnly test that stopped at a failed precondition is NOT a restoration case when the runner
+# itself verifies that nothing changed (observable adapter/TIMINCA/TSAUXC equality is checked by the caller first).
+# Requires: no timeout; no cleanup-failure output; every testcase line FAILED_SETUP claiming "no state modified"; and the
+# PHC of every adapter RESTORATION_VERIFIED by tools/lib/PhcRestoration.ps1 between the pre-test and post-test windows
+# against its hardware-derived tolerance (a SET_TIMESTAMP, an offset or rate change, a PTP re-initialization by
+# OPEN_ADAPTER - issue #343, SYSTIM reset - breaks it; I210 TSAUXC bit 31 clearing by OPEN_ADAPTER is caught by the
+# TSAUXC comparison).  Not observable and therefore not claimed: the driver-global g_AvbContext switch of OPEN_ADAPTER
+# (the runner's own observation does it too) and the last_ndis_tx_record of TEST_SEND_PTP (volatile driver state,
+# rewritten by every send).  @{ Ok; Claimed; Why }.
+function Test-AvbHilNoMutation {
+    param([string]$Output, [bool]$TimedOut, $PreState, $PostState, [hashtable]$Tolerances = @{})
+    $tcs = Get-AvbTestcaseVerdicts -Lines @($Output -split "`r?`n")   # already an array (unary-comma return); @() would nest it
+    $claimed = ($tcs.Count -gt 0 -and @($tcs | Where-Object { $_.Verdict -ne 'FAILED_SETUP' -or $_.Detail -notmatch 'no state modified' }).Count -eq 0)
+    if (-not $claimed) { return @{ Ok = $false; Claimed = $false; Why = '' } }
+    if ($TimedOut) { return @{ Ok = $false; Claimed = $true; Why = 'timed out' } }
+    if ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') { return @{ Ok = $false; Claimed = $true; Why = 'cleanup failure reported' } }
+    if ($null -eq $PreState -or -not $PreState.ClockOk -or $null -eq $PostState -or -not $PostState.ClockOk) {
+        return @{ Ok = $false; Claimed = $true; Why = 'PHC clock state not observable before and after the test' }
+    }
+    $after = @{}; foreach ($c in @($PostState.Clock)) { $after["$($c.Did)#$($c.Index)"] = $c }
+    $parts = @(); $ok = $true; $n = 0
+    foreach ($b in @($PreState.Clock | Where-Object { $_.Ok })) {
+        $a = $after["$($b.Did)#$($b.Index)"]
+        if ($null -eq $a -or -not $a.Ok) { $ok = $false; $parts += "$($b.Did): clock config not readable after the test"; continue }
+        $v = Get-AvbPhcRestorationVerdict -Before (ConvertTo-AvbHilPhcWindow $b) -After (ConvertTo-AvbHilPhcWindow $a) -Tolerance $Tolerances[[string]$b.Did] -Testcase 'TC-INFRA-STATE-003'
+        $n++
+        if ($v.Verdict -ne 'RESTORATION_VERIFIED') { $ok = $false }
+        $parts += ("{0}: {1} ({2})" -f $b.Did, $v.Verdict, (@($v.Reasons) -join '; '))
+    }
+    if ($n -eq 0) { $ok = $false; $parts += 'no adapter with a readable clock' }
+    return @{ Ok = $ok; Claimed = $true; Why = ($parts -join ' | ') }
+}
+
 function Get-AvbHilTestClass {
     param([string]$Entry)
     if ($script:IsSandbox) {
@@ -1072,14 +1589,17 @@ function Get-AvbHilTestClass {
         }
         return ''
     }
-    if ($HilTestSafety.ContainsKey($Entry)) { return $HilTestSafety[$Entry] }
+    $k = ConvertTo-AvbHilEntryKey $Entry
+    if ($HilTestSafety.ContainsKey($k)) { return $HilTestSafety[$k] }
     return ''
 }
 
 # Pure decision: 'Run' | 'Block' (+ Reason).  A Mutating:Target item runs only with an exact target DID.
 function Get-AvbHilGateDecision {
     param([string]$Entry, [string]$Class, [string]$Target, [string]$Halt, [int]$TargetCount,
-          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions, [bool]$InitUnattendedApproved = $false)
+          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions, [bool]$InitUnattendedApproved = $false, [hashtable]$HazardHolds = @{})
+    # Evidence-referenced hardware hazard: never executed, whatever class, target, attendance or authorization.
+    if ($null -ne $HazardHolds -and $HazardHolds.ContainsKey($Entry)) { return @{ Action = 'Block'; Reason = "hazard hold: $($HazardHolds[$Entry])" } }
     $haltReason = "state-integrity halt ($Halt)"
     switch ($Class) {
         'ReadOnly' { return @{ Action = 'Run'; Reason = '' } }
@@ -1120,23 +1640,36 @@ function Get-AvbHilGateDecision {
 
 function Add-HilBlocked {
     param([string]$Entry, [string]$Display, [string]$Stem, [string]$Reason)
+    # Every blocked item names its intended adapter (a fanned-out Mutating:Target item is one per exact target DID).
+    $tgt = if ($script:AvbItem -and $script:AvbItem.Target) { "; intended target $($script:AvbItem.Target)" } else { '' }
     Add-HilFailureRecord -Display $Display -Status 'BLOCKED(SAFETY)' -Stem $Stem `
-        -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed" -f $Entry, $Reason)
+        -Line ("[BLOCKED] TC-SAFETY-GATE-001: {0}: {1} --- not executed{2}" -f $Entry, $Reason, $tgt)
 }
 
-# A declared automatic-HIL coverage gap ($Hardware*CoverageGaps): never executed, shown as a skipped case.
+# A declared automatic-HIL coverage gap ($Hardware*CoverageGaps): a REQUIRED test that is not executed because its
+# fixture/restoration or infrastructure is missing.  Never a skip, never green: BLOCKED (JUnit failure) and the run is
+# INCOMPLETE (Get-AvbRunOverall).  P0 full HIL coverage, 2026-10-21.
+# Gap rows that still apply to this run: a listed entry (spelling normalized) is executed or gate-blocked with its own
+# reason, never ALSO a NOT EXECUTED coverage gap (the suite lists are authoritative, Q 2026-10-22).
+function Get-AvbHilEffectiveGaps {
+    param($GapTable, [string[]]$TestList)
+    $listed = @($TestList | ForEach-Object { ConvertTo-AvbHilEntryKey $_ })
+    $eff = [ordered]@{}
+    foreach ($g in @($GapTable.Keys)) { if ($listed -notcontains (ConvertTo-AvbHilEntryKey $g)) { $eff[$g] = $GapTable[$g] } }
+    return $eff
+}
+
 function Add-HilCoverageGap {
     param([string]$Entry, [string]$Reason)
-    $script:skippedTests++
     $script:coverageGapTests++
-    $script:results += [PSCustomObject]@{ Name = $Entry; Status = 'COVERAGE-GAP'; Exit = 'N/A' }
-    $line = "[SKIP] TC-HIL-COVERAGE-GAP-001: {0} excluded from automatic HIL --- {1}" -f $Entry, $Reason
-    Write-Host "  $line" -ForegroundColor DarkYellow
+    $line = "[BLOCKED] TC-HIL-COVERAGE-GAP-001: {0} NOT EXECUTED by automatic HIL (required coverage missing) --- {1}" -f $Entry, $Reason
+    Write-Host "  $line" -ForegroundColor Red
     $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
     $p = Join-Path $script:logsDir ("{0}.exe_{1}.log" -f $Entry, $ts)
     $i = 2
     while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Entry, $i, $ts); $i++ }
     $line | Set-Content -LiteralPath $p -Encoding utf8
+    Add-AvbResult -Name $Entry -Status 'COVERAGE-GAP' -Exit 'N/A' -Reason $Reason -LogPath $p -Lines @($line)
 }
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1158,7 +1691,7 @@ function Get-AvbManifestProp {
 
 function Read-AvbBuildManifest {
     param([string]$Path, [string]$Configuration)
-    $res = @{ Ok = $false; Error = ''; ByArtifact = @{}; Path = $Path; Revision = $null }
+    $res = @{ Ok = $false; Error = ''; ByArtifact = @{}; ByName = @{}; Path = $Path; Revision = $null }
     if (-not (Test-Path -LiteralPath $Path)) {
         $res.Error = "test build manifest not found: $Path (build with tools/build/Build-Tests.ps1 -Configuration $Configuration)"
         return $res
@@ -1180,17 +1713,21 @@ function Read-AvbBuildManifest {
         if (-not $a) { continue }
         $k = $a.ToLowerInvariant()
         if ($res.ByArtifact.ContainsKey($k)) { $ambiguous += $k } else { $res.ByArtifact[$k] = $e }
+        $nm = [string](Get-AvbManifestProp $e 'name')
+        if ($nm) { $res.ByName[$nm] = $e }   # entry name -> artifact (Resolve-AvbHilArtifactName); authorization stays ByArtifact
     }
     foreach ($k in $ambiguous) { $res.ByArtifact[$k] = $null }   # recorded by two entries -> never authorized
     $res.Ok = $true
     return $res
 }
 
-# Source identity of the checkout under test, computed once per suite: @{ Ok; Revision; Dirty; Error }.
-# Dirty = tracked modifications (untracked files are not considered).  Sandbox runs take it from
-# AVB_TEST_SANDBOX_SOURCE_REVISION / AVB_TEST_SANDBOX_SOURCE_DIRTY ('0' | '1'); the variables are ignored otherwise.
+# Source identity of the checkout under test, computed once per suite: @{ Ok; Revision; Dirty; Mode; Digest; DigestError; Error }.
+# Dirty = tracked modifications.  Mode 'ci' (GitHub Actions: clean authorized commit only) or 'local' (operator runs:
+# the build-input digest, tools/lib/SourceDigest.ps1, also covers untracked inputs and attributes uncommitted builds).
+# Sandbox runs take it from AVB_TEST_SANDBOX_SOURCE_REVISION / _DIRTY ('0' | '1') / _MODE (default 'ci') / _DIGEST;
+# the variables are ignored otherwise.
 function Get-AvbSourceIdentity {
-    $res = @{ Ok = $false; Revision = $null; Dirty = $null; Error = '' }
+    $res = @{ Ok = $false; Revision = $null; Dirty = $null; Mode = 'ci'; Digest = $null; DigestError = ''; Error = '' }
     if ($script:IsSandbox) {
         if (-not $env:AVB_TEST_SANDBOX_SOURCE_REVISION -or $env:AVB_TEST_SANDBOX_SOURCE_DIRTY -notmatch '^[01]$') {
             $res.Error = 'sandbox source identity not provided (AVB_TEST_SANDBOX_SOURCE_REVISION / _DIRTY)'
@@ -1198,18 +1735,27 @@ function Get-AvbSourceIdentity {
         }
         $res.Revision = $env:AVB_TEST_SANDBOX_SOURCE_REVISION
         $res.Dirty = ($env:AVB_TEST_SANDBOX_SOURCE_DIRTY -eq '1')
+        if ($env:AVB_TEST_SANDBOX_SOURCE_MODE -eq 'local') { $res.Mode = 'local' }
+        if ($env:AVB_TEST_SANDBOX_SOURCE_DIGEST) { $res.Digest = $env:AVB_TEST_SANDBOX_SOURCE_DIGEST } else { $res.DigestError = 'sandbox digest not provided' }
         $res.Ok = $true
         return $res
     }
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
+        Reset-AvbExitCode
         $rev = & git -C $script:repoRoot rev-parse HEAD 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $rev) { $res.Error = 'git rev-parse HEAD failed'; return $res }
+        if (-not (Test-AvbExitSuccess (Get-AvbExitCode)) -or -not $rev) { $res.Error = 'git rev-parse HEAD failed'; return $res }
+        Reset-AvbExitCode
         $st = & git -C $script:repoRoot status --porcelain --untracked-files=no 2>$null
-        if ($LASTEXITCODE -ne 0) { $res.Error = 'git status failed'; return $res }
+        if (-not (Test-AvbExitSuccess (Get-AvbExitCode))) { $res.Error = 'git status failed'; return $res }
         $res.Revision = ([string]$rev).Trim()
         $res.Dirty = [bool]$st
+        if ($env:GITHUB_ACTIONS -ne 'true') {
+            $res.Mode = 'local'
+            $d = Get-AvbBuildInputDigest -RepoRoot $script:repoRoot
+            if ($d.Ok) { $res.Digest = $d.Digest } else { $res.DigestError = $d.Error }
+        }
         # Under GitHub Actions the checkout must be exactly the authorized commit.  .github/workflows/hil.yml runs on
         # workflow_run, where GITHUB_SHA is the default-branch tip, not the CI run that was verified; it passes the
         # authorized upstream head_sha as AVB_HIL_EXPECTED_REVISION, and a workflow_run without it fails closed.
@@ -1239,15 +1785,19 @@ function Get-AvbSourceIdentity {
 }
 
 # Pure decision on an existing artifact: 'Run' | 'Block' (+ Reason).
-# A matching SHA256 is necessary but never sufficient: the artifact must have been built from the clean,
-# committed revision that is checked out now, and the checkout must still be clean.
+# A matching SHA256 is necessary but never sufficient.  CI (GitHub Actions, the default): the artifact must have been
+# built from the clean, committed revision that is checked out now, and the checkout must still be clean.  Local
+# operator runs ($Source.Mode 'local'): the artifact must have been built at the same HEAD from EXACTLY the current
+# build inputs (build-input digest, tools/lib/SourceDigest.ps1) - uncommitted changes are allowed, any change after
+# the build blocks.  Local evidence is never clean-commit CI evidence.
 function Get-AvbHilProvenanceDecision {
     param([string]$ArtifactPath, $Manifest, $Source)
     if (-not $Manifest.Ok) { return @{ Action = 'Block'; Reason = $Manifest.Error } }
     if ($null -eq $Source -or -not $Source.Ok) {
         return @{ Action = 'Block'; Reason = "current source revision unavailable ($(if ($Source) { $Source.Error } else { 'not computed' })); artifacts cannot be attributed" }
     }
-    if ($Source.Dirty) {
+    $localMode = ($Source.ContainsKey('Mode') -and $Source.Mode -eq 'local')
+    if ($Source.Dirty -and -not $localMode) {
         return @{ Action = 'Block'; Reason = "checkout $($Source.Revision) has uncommitted tracked changes; test binaries cannot be attributed to a source revision" }
     }
     $leaf = [System.IO.Path]::GetFileName($ArtifactPath)
@@ -1269,7 +1819,18 @@ function Get-AvbHilProvenanceDecision {
     $sha = [string](Get-AvbManifestProp $e 'sha256')
     if (-not $sha) { return @{ Action = 'Block'; Reason = "build entry '$name' records no SHA256 for '$leaf'" } }
     $bRev = [string](Get-AvbManifestProp $e 'sourceRevision')
-    if ((Get-AvbManifestProp $e 'sourceDirty') -ne $false) {
+    if ($localMode) {
+        $bDigest = [string](Get-AvbManifestProp $e 'sourceDigest')
+        if (-not $bDigest) {
+            return @{ Action = 'Block'; Reason = "artifact '$leaf' has no build-input digest in the manifest (rebuild with tools/build/Build-Tests.ps1)" }
+        }
+        if (-not $Source.Digest) {
+            return @{ Action = 'Block'; Reason = "current build-input digest unavailable ($($Source.DigestError)); artifact '$leaf' cannot be attributed" }
+        }
+        if ($bDigest -ne $Source.Digest) {
+            return @{ Action = 'Block'; Reason = "build inputs changed after artifact '$leaf' was built (digest $bDigest at build, $($Source.Digest) now); rebuild before testing" }
+        }
+    } elseif ((Get-AvbManifestProp $e 'sourceDirty') -ne $false) {
         return @{ Action = 'Block'; Reason = "artifact '$leaf' was built from an uncommitted or unknown source state (revision '$bRev')" }
     }
     if (-not $bRev -or $bRev -ne $Source.Revision) {
@@ -1386,21 +1947,58 @@ function Invoke-HilPostTestCheck {
     }
     foreach ($w in @($cmp.Warn)) { Write-Host "  [WARN:STATE] after ${Display}: $w (observed, not enforced)" -ForegroundColor Yellow }
     if (@($cmp.Diffs).Count -gt 0) {
-        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' `
-            -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change" -f $Display, (@($cmp.Diffs) -join '; '))
-        Set-HilHalt "CLEANUP_FAILED after $Display"
+        $refs = Register-HilIncidents -Items $cmp.Items -Check 'per-test' -Record "$Display[STATE]" -Last $cur
+        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' -Check -Incidents $refs `
+            -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change{2}" -f $Display, (@($cmp.Diffs) -join '; '), (Format-HilIncidentRefs $refs))
+        # Discrepancies are persisted as incidents above; only a finding without a diff item (state unobservable) is a
+        # separate safety event.
+        if (@($refs).Count -gt 0) { Set-HilHalt "CLEANUP_FAILED after $Display" } else { Set-HilHalt "CLEANUP_FAILED after $Display" -Verdict 'CLEANUP_FAILED' -Last $cur }
         $script:HilBaseline = $cur   # later differences are attributed to later tests
+        if ($TimedOut -and $script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = 'HALT' }
         return
     }
     if ($first.Count -gt 0) {
         Write-Host ("  [WARN:STATE] after {0}: transient difference settled back to the baseline within {1}s: {2}" -f $Display, $waited, ($first -join '; ')) -ForegroundColor Yellow
     }
+    # D2 (Q 2026-10-22): a ReadOnly timeout stays FAILED(TIMEOUT); it halts nothing (in this run or, through
+    # timeoutDisposition, a later suite - Get-AvbPriorHalt) only when the whole process tree terminated (no outstanding
+    # driver operation) and the observable state equals the baseline (checked above).  Otherwise: safety halt.
+    if ($Class -eq 'ReadOnly' -and $TimedOut) {
+        $term = if ($script:AvbItem) { $script:AvbItem.Termination } else { $null }
+        $disp = if ($term -and $term.Ok) { 'TERMINATED_STATE_VERIFIED' } else { 'HALT' }
+        if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = $disp }
+        if ($disp -eq 'HALT') {
+            Set-HilHalt ("$Display (ReadOnly) timed out and its process tree did not terminate: {0}" -f $(if ($term) { $term.Detail } else { 'termination not observed' })) -Verdict 'FAILED(TIMEOUT)' -Last $cur
+        } else {
+            Write-Host ("  [STATE] after {0} (ReadOnly): FAILED(TIMEOUT) kept; process tree terminated ({1}) and state verified unchanged --- later tests not halted" -f $Display, $term.Detail) -ForegroundColor Yellow
+        }
+    }
     if ($Class -ne 'ReadOnly') {
         if ($TimedOut) {
-            Set-HilHalt "$Display ($Class) was killed after a timeout; state it may have left behind is not fully observable"
+            if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = 'HALT' }
+            Set-HilHalt "$Display ($Class) was killed after a timeout; state it may have left behind is not fully observable" -Verdict 'FAILED(TIMEOUT)' -Last $cur
         } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
-            Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself"
+            Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself" -Verdict 'CLEANUP_FAILED' -Last $cur
         }
+        # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
+        # baseline.  Otherwise missing evidence (INCONCLUSIVE_RESTORATION), distinct from observed damage
+        # (CLEANUP_FAILED above); it stops every later non-ReadOnly test (Q P0 2026-10-21 sec. 2 item 7, option 1).
+        $declared = @(if ($script:AvbItem) { Get-AvbHilMutatedState $script:AvbItem.Entry })
+        $unobserved = @($declared | Where-Object { $HilVerifiableState -notcontains $_ })
+        if ($declared.Count -gt 0 -and $unobserved.Count -eq 0 -and -not $TimedOut) {
+            Write-Host ("  [STATE] after {0}: restoration verified by independent re-read ({1})" -f $Display, ($declared -join ', ')) -ForegroundColor Green
+            return
+        }
+        # D1: not a restoration case when the test stopped at a failed precondition and the runner verifies no change.
+        $nm = Test-AvbHilNoMutation -Output $Output -TimedOut $TimedOut -PreState $script:HilPreTest -PostState (Get-AvbHilState -PhcReads $HilPhcReads) -Tolerances $script:HilPhcTolerance
+        if ($nm.Ok) {
+            Write-Host ("  [STATE] after {0} ({1}): no state change --- FAILED_SETUP before any mutation (test claim) independently verified: adapter/TIMINCA/TSAUXC equal to the baseline, PHC restoration evaluator per adapter: {2}" -f $Display, $Class, $nm.Why) -ForegroundColor Yellow
+            return
+        }
+        Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
+            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed{2}" -f $Display, $Class,
+                    $(if ($nm.Claimed) { " --- the test's FAILED_SETUP no-mutation claim is NOT verified: $($nm.Why)" } else { '' }))
+        Set-HilHalt "$Display ($Class): restoration not verified (INCONCLUSIVE_RESTORATION)" -Verdict 'INCONCLUSIVE_RESTORATION' -Last $cur
     }
 }
 
@@ -1413,14 +2011,147 @@ $failedTests  = 0
 $skippedTests = 0
 $incompleteTests = 0   # exit 0 but SKIP_NOT_IMPLEMENTED reported on mandatory verification
 $results      = @()
+$AvbResultRecords = @()
+$AvbRunStartedUtc = (Get-Date).ToUniversalTime().ToString('o')
+$ResultsJsonPath  = if ($ResultsJson) { [System.IO.Path]::GetFullPath($ResultsJson) }
+                    else { Join-Path $logsDir ("results-{0}-{1}-{2}.json" -f $Suite, $Configuration, (Get-Date -Format 'yyyyMMdd_HHmmss_fff')) }
 
 # Expose driver build type to test_perf_regression and other tests that key
 # their baseline on (device_id x driver_build)
 $env:AVB_DRIVER_BUILD = $Configuration
 Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
 
+$HilSafetyPath = $null; $HilSafetyState = $null
+if ($IsHardwareSuite) {
+    # Machine-wide safety record: HALTED or UNAVAILABLE (missing/corrupt/foreign/inaccessible) = fail closed for every
+    # Init/Mutating test of this run; ReadOnly tests continue.  Sandbox: AVB_TEST_HIL_SAFETY_FILE if set (exactly that
+    # file), else a CLEAR fixture record in the sandbox logs directory; the %ProgramData% record is never touched.
+    if ($IsSandbox) {
+        $HilSafetyPath = if ($env:AVB_TEST_HIL_SAFETY_FILE) { $env:AVB_TEST_HIL_SAFETY_FILE } else {
+            $sp = Join-Path $logsDir 'sandbox-hil-safety.json'
+            if (-not (Test-Path -LiteralPath $sp)) {   # sandbox fixture only: a CLEAR record with a synthetic, labelled baseline
+                ([ordered]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'CLEAR'; events = @()
+                             baseline = [ordered]@{ evidence = 'SANDBOX FIXTURE - not hardware evidence'; operator = 'sandbox'; authorization = 'offline sandbox'; via = 'SANDBOX' }
+                             history = @([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); operation = 'SANDBOX_FIXTURE'; operator = 'sandbox' }) } |
+                    ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $sp -Encoding UTF8 }
+            $sp }
+    } else { $HilSafetyPath = Get-AvbHilSafetyPath }
+    $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
+    Write-Note "Machine safety record: $($HilSafetyState.State) ($HilSafetyPath) $($HilSafetyState.Why)"
+    $HilPhcTolerance = Get-AvbHilPhcTolerances -SafetyRecord $HilSafetyState.Record
+    Write-Note ("PHC restoration tolerances (hardware-derived, approved baseline evidence): {0}" -f $(if ($HilPhcTolerance.Count) { ($HilPhcTolerance.Keys | Sort-Object) -join ', ' } else { 'none - a PHC judgement is INCONCLUSIVE_RESTORATION' }))
+
+    # Elevation is verified on this process's own token (sandbox: AVB_TEST_SANDBOX_ELEVATED, '0' = not elevated).
+    # Necessary, never sufficient: lock ownership, the CLEAR safety record and the session baseline are checked independently.
+    $HilElevated = if ($IsSandbox) { $env:AVB_TEST_SANDBOX_ELEVATED -ne '0' } else {
+        ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+    if (-not $HilElevated) { Set-HilHalt 'not elevated: this process token is not an elevated Administrator (elevation is necessary, never sufficient)' }
+
+    # Exclusive hardware access: the machine lock must be OWNED by this execution (Resolve-AvbHilLockContext: same CI
+    # run/attempt/job, or this process / an OS ancestor holds it) - its mere existence never authorizes.  Attended:
+    # acquire it (bounded wait) when no owner context holds it, release it at completion.  GitHub Actions: never acquired
+    # here (the job's deploy step owns it); otherwise fail closed.  Not owned -> every Init/Mutating test BLOCKED.
+    $HilLockPath = if ($IsSandbox -and $env:AVB_TEST_HIL_LOCK_FILE) { $env:AVB_TEST_HIL_LOCK_FILE } elseif ($IsSandbox) { Join-Path $logsDir 'sandbox-hil.lock' } else { Get-AvbHilLockPath }
+    $HilGitHubContext = if ($UnderGitHubActions) { @{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB } } else { $null }
+    $HilLockAcquired = $null
+    $lockCtx = Resolve-AvbHilLockContext -Path $HilLockPath -GitHub $HilGitHubContext
+    if ($lockCtx.Owned) {
+        Write-Note "Machine lock owned by this execution ($($lockCtx.How): $($lockCtx.Owner.kind) '$($lockCtx.Owner.label)')"
+    } elseif (-not $UnderGitHubActions) {
+        $acq = Enter-AvbHilLock -Kind 'local' -Label "Run-Tests-CI $Suite $Configuration" -Path $HilLockPath -WaitSeconds $HilLockWaitSeconds
+        if ($acq.Ok) { $HilLockAcquired = $acq.Owner; Write-Note "Machine lock acquired by this run ($HilLockPath); released at completion" }
+        else { Set-HilHalt "machine lock not owned by this execution: $($lockCtx.Why); not acquired within ${HilLockWaitSeconds}s: $($acq.Why)" }
+    } else {
+        Set-HilHalt "machine lock not owned by this execution: $($lockCtx.Why) (an unattended run never acquires it)"
+    }
+}
+
+# One session comparison (start or end of a suite): every check stays a visible record.  Differences are incident
+# observations (TC-INFRA-SESSION-001 start / -002 end, CLEANUP_FAILED, referencing opened/confirmed incidents);
+# components the check could not read are an explicit INCONCLUSIVE_RESTORATION (TC-INFRA-SESSION-003) - they never
+# hide or close an open incident.
+function Invoke-HilSessionCheck {
+    param($Cmp, [string]$Phase, $Last)
+    $diffItems = @($Cmp.Items | Where-Object { $_.Kind -eq 'diff' }); $unobs = @($Cmp.Items | Where-Object { $_.Kind -eq 'unobservable' })
+    $null = Add-AvbHilSessionCheck -Path $script:HilSessionPath -Check ([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); suite = $Suite; configuration = $Configuration; phase = $Phase
+                                                                                   diffs = @($diffItems | ForEach-Object { $_.Text }); unobservable = @($unobs | ForEach-Object { $_.Text }) })
+    $tc = if ($Phase -eq 'start') { 'TC-INFRA-SESSION-001' } else { 'TC-INFRA-SESSION-002' }
+    $disp = "HIL-SESSION[$Suite/$Configuration $Phase]"
+    if ($diffItems.Count -gt 0) {
+        $refs = Register-HilIncidents -Items $diffItems -Check "session-$Phase" -Record $disp -Last $Last
+        Add-HilFailureRecord -Display $disp -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-SESSION' -Check -Incidents $refs `
+            -Line ("[CLEANUP_FAILED] {0}: at {1} of {2}/{3}: state differs from the original session baseline ({4}, captured {5}): {6}{7}" -f $tc, $Phase, $Suite, $Configuration, $script:HilSession.sessionId, $script:HilSession.createdUtc, (@($diffItems | ForEach-Object { $_.Text }) -join '; '), (Format-HilIncidentRefs $refs))
+        Set-HilHalt "state at $Phase of $Suite/$Configuration differs from the original session baseline"
+    }
+    if ($unobs.Count -gt 0) {
+        Add-HilFailureRecord -Display "$disp[UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-SESSION' -Check `
+            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-SESSION-003: at {0} of {1}/{2}: session check could not read: {3} --- open incidents stay open" -f $Phase, $Suite, $Configuration, (@($unobs | ForEach-Object { $_.Text }) -join '; '))
+        Set-HilHalt "session check at $Phase of $Suite/$Configuration could not read the state" -Verdict 'INCONCLUSIVE_RESTORATION' -Last $Last
+    }
+}
+
+# Before every non-ReadOnly item: the lock must still be owned by this execution.
+function Test-AvbHilLockStillOwned {
+    if ($script:HilLockAcquired) { return (Test-AvbHilLockHeld -Owner $script:HilLockAcquired -Path $script:HilLockPath) }
+    $c = Resolve-AvbHilLockContext -Path $script:HilLockPath -GitHub $script:HilGitHubContext
+    return @{ Ok = $c.Owned; Why = $c.Why }
+}
+
 if ($IsHardwareSuite) {
     Invoke-HilBaseline
+    if ($HilSafetyState.State -ne 'CLEAR') { Set-HilHalt "machine safety record $($HilSafetyState.State): $($HilSafetyState.Why)" }
+    # A halt of an earlier suite of the same HIL job carries over: its damaged state must not become this run's
+    # clean baseline for further mutation (P0 2026-10-21 sec. 2).  ReadOnly tests continue (same as an in-run halt).
+    if ($PriorResultsDir) {
+        $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnResultsPath $ResultsJsonPath
+        if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
+    }
+    # Open incidents of this machine (unrecovered events with an incident key): a discrepancy that persists into this
+    # run confirms the SAME incident instead of opening a new one.
+    $HilIncidents = [ordered]@{}
+    if ($HilSafetyState.Record) {
+        foreach ($ev in @($HilSafetyState.Record.events)) {
+            if ($null -ne $ev -and $ev.PSObject.Properties['incidentKey'] -and $ev.incidentKey -and $ev.recovery.status -in @('PENDING', 'ATTEMPTED')) {
+                $HilIncidents[[string]$ev.incidentKey] = @{ IncidentId = [string]$ev.eventId; Key = [string]$ev.incidentKey; observations = @() }
+            }
+        }
+    }
+
+    # Original SESSION baseline (tools/lib/HilLock.ps1): read / compared / created only by a run that OWNS the lock.
+    # Created only on a CLEAR machine without any halt (a snapshot never establishes a clean state after an unresolved
+    # failure); an unusable file is FAILED_SETUP and preserved; a different session's file is archived, never overwritten.
+    $HilSessionPath = if ($IsSandbox -and $env:AVB_TEST_HIL_SESSION_FILE) { $env:AVB_TEST_HIL_SESSION_FILE } elseif ($IsSandbox) { Join-Path $logsDir 'sandbox-hil-session.json' } else { Get-AvbHilSessionPath }
+    $HilSession = $null; $HilSessionNote = ''
+    $sessOwner = if ($HilLockAcquired) { $HilLockAcquired } elseif ($lockCtx.Owned) { $lockCtx.Owner } else { $null }
+    if ($null -eq $sessOwner) {
+        $HilSessionNote = 'no session baseline: this run does not own the machine lock (session baseline not read or written)'
+    } else {
+        $sid = Get-AvbHilSessionId -LockOwner $sessOwner -GitHub $HilGitHubContext
+        $rs = Read-AvbHilSession -Path $HilSessionPath
+        if ($rs.State -eq 'UNAVAILABLE') {
+            Add-HilFailureRecord -Display 'HIL-SESSION' -Status 'FAILED_SETUP' -Stem 'TC-INFRA-SESSION' `
+                -Line ("[FAILED_SETUP] TC-INFRA-SESSION-000: session baseline {0} unusable: {1} --- preserved unchanged; Init/Mutating BLOCKED" -f $HilSessionPath, $rs.Why)
+            Set-HilHalt "session baseline unusable: $($rs.Why)"
+        } elseif ($rs.State -eq 'OK' -and $rs.Session.sessionId -eq $sid) {
+            $HilSession = $rs.Session
+            $cmpS = Compare-AvbHilState $HilSession.baseline $script:HilBaseline
+            Invoke-HilSessionCheck -Cmp $cmpS -Phase 'start' -Last $script:HilBaseline
+        } elseif ($HilSafetyState.State -eq 'CLEAR' -and -not $stateHalt -and $script:HilBaseline -and $script:HilBaseline.Ok) {
+            $HilSession = New-AvbHilSession -Path $HilSessionPath -SessionId $sid -Owner $sessOwner -Baseline $script:HilBaseline `
+                -Provenance ([ordered]@{ suite = $Suite; configuration = $Configuration; runner = 'tools/test/Run-Tests-CI.ps1'; pid = $PID; driverSha256 = $env:HIL_DRIVER_SHA256
+                                         previousSession = $(if ($rs.State -eq 'OK') { $rs.Session.sessionId } else { $null }) })
+            Write-Note "Original session baseline captured ($sid) at $HilSessionPath$(if ($rs.State -eq 'OK') { "; previous session $($rs.Session.sessionId) archived" })"
+        } else {
+            $HilSessionNote = "no session baseline established: machine safety $($HilSafetyState.State)$(if ($stateHalt) { "; halt: $stateHalt" }) - a snapshot never establishes a clean state after an unresolved failure"
+        }
+    }
+    if ($HilSessionNote) { Write-Note $HilSessionNote }
+
+    # Left behind only if this process dies before Complete-AvbRun; a later suite then halts (Get-AvbPriorHalt).  Next to
+    # the results document: hil.yml per-suite LogsDir, LocalSuites' report directory (its -PriorResultsDir).
+    $RunMarkerPath = Join-Path (Split-Path -Parent $ResultsJsonPath) 'run-in-progress.json'
+    ([ordered]@{ suite = $Suite; configuration = $Configuration; pid = $PID; startedUtc = $AvbRunStartedUtc } | ConvertTo-Json) |
+        Set-Content -LiteralPath $RunMarkerPath -Encoding UTF8
 }
 
 $BuildManifest = $null
@@ -1434,7 +2165,11 @@ if ($IsHardwareSuite) {
     }
     $SourceIdentity = Get-AvbSourceIdentity
     if ($SourceIdentity.Ok) {
-        Write-Note ("Source identity: {0} (tracked changes: {1})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty)
+        Write-Note ("Source identity: {0} (tracked changes: {1}; provenance mode: {2}; build-input digest: {3})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty,
+                    $SourceIdentity.Mode, $(if ($SourceIdentity.Digest) { $SourceIdentity.Digest } else { "n/a $($SourceIdentity.DigestError)" }))
+        if ($SourceIdentity.Mode -eq 'local' -and $SourceIdentity.Dirty) {
+            Write-Host "  [LOCAL-EVIDENCE] uncommitted working tree: results are LOCAL pre-commit evidence bound to the build-input digest, NOT clean-commit CI evidence" -ForegroundColor Yellow
+        }
     } else {
         Write-Host "  [BLOCKED] source identity unavailable: $($SourceIdentity.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
     }
@@ -1448,7 +2183,15 @@ if ($IsHardwareSuite -and $Tests.Count -eq 0) {
     elseif ($Suite -eq 'HardwareUnit')        { $gapTable = $HardwareUnitCoverageGaps }
     elseif ($Suite -eq 'HardwareIntegration') { $gapTable = $HardwareIntegrationCoverageGaps }
     if ($null -ne $gapTable) {
-        foreach ($g in @($gapTable.Keys)) { Add-HilCoverageGap -Entry $g -Reason $gapTable[$g] }
+        $effGaps = Get-AvbHilEffectiveGaps -GapTable $gapTable -TestList $TestList
+        foreach ($g in @($effGaps.Keys)) { Add-HilCoverageGap -Entry $g -Reason $effGaps[$g] }
+    }
+    # Attended-only mutation entries: NOT EXECUTED gap under GitHub Actions, executed on an attended run.
+    if ($Suite -eq 'HardwareMutation') {
+        foreach ($g in @($HardwareMutationAttendedOnly.Keys)) {
+            if ($UnderGitHubActions) { Add-HilCoverageGap -Entry $g -Reason $HardwareMutationAttendedOnly[$g] }
+            else { $TestList = @($TestList) + @($g) }
+        }
     }
 }
 
@@ -1494,7 +2237,7 @@ foreach ($WorkItem in $WorkItems) {
         $parts   = $TestName -split '\s+', 2
         $binName = $parts[0]
         $testArgs = if ($parts.Count -gt 1) { $parts[1] } else { '' }
-        $exeName = if ($binName.EndsWith(".exe")) { $binName } else { "$binName.exe" }
+        $exeName = Resolve-AvbHilArtifactName -BinName $binName -Manifest $BuildManifest
     }
     $exePath = if ($isPsTest) { $psScriptPath } else { Join-Path $testExeDir $exeName }
     $itemStem = $binName -replace '\.(exe|ps1)$',''
@@ -1502,6 +2245,8 @@ foreach ($WorkItem in $WorkItems) {
         $exeName  = "$exeName@$targetDid"
         $itemStem = "$itemStem@$($targetDid.Substring(2))"
     }
+    $script:AvbItem = @{ Entry = $TestName; Artifact = $exePath; Arguments = $testArgs; Target = $targetDid; Class = ''; Sha256 = $null
+                         Executed = $false; ProcessExit = $null; LogPath = $null; StartedUtc = $null; DurationSeconds = $null; Output = $null }
 
     # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
     if ($driverLost) {
@@ -1509,17 +2254,17 @@ foreach ($WorkItem in $WorkItems) {
             Write-Fail "$exeName [INFRA-FAIL] driver lost --- #328 sentinel: remaining mandatory tests FAIL"
             $failedTests++
             $totalTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(INFRA)"; Exit = -1 }
+            Add-AvbResult -Name $exeName -Status "FAILED(INFRA)" -Exit -1
         } else {
             Write-Skip "$exeName (INFRA: driver lost -- skipping to prevent cascade failures)"
             $skippedTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED(INFRA)"; Exit = "N/A" }
+            Add-AvbResult -Name $exeName -Status "SKIPPED(INFRA)" -Exit "N/A"
         }
         continue
     }
 
     # A known hardware entry never runs outside a Hardware* suite: there is no baseline or gate there.
-    if (-not $IsHardwareSuite -and $HilTestSafety.ContainsKey($TestName) -and (($UnitTests + $IntegrationTests) -notcontains $TestName)) {
+    if (-not $IsHardwareSuite -and $HilTestSafety.ContainsKey((ConvertTo-AvbHilEntryKey $TestName)) -and (($UnitTests + $IntegrationTests) -notcontains $TestName)) {
         Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason 'hardware test requested outside a Hardware* suite (no adapter baseline or safety gate)'
         continue
     }
@@ -1533,11 +2278,11 @@ foreach ($WorkItem in $WorkItems) {
             Write-Fail "$exeName [BUILD-FAIL] binary not found at $exePath --- mandatory test suite requires this binary"
             $failedTests++
             $totalTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(BUILD)"; Exit = "N/A" }
+            Add-AvbResult -Name $exeName -Status "FAILED(BUILD)" -Exit "N/A"
         } else {
             Write-Skip "$exeName (binary not found -- not built or not applicable)"
             $skippedTests++
-            $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = "N/A" }
+            Add-AvbResult -Name $exeName -Status "SKIPPED" -Exit "N/A"
         }
         continue
     }
@@ -1556,9 +2301,14 @@ foreach ($WorkItem in $WorkItems) {
     $hilClass = ''
     if ($IsHardwareSuite) {
         $hilClass = Get-AvbHilTestClass $TestName
-        $gate = Get-AvbHilGateDecision -Entry $TestName -Class $hilClass -Target $targetDid -Halt $stateHalt `
+        $script:AvbItem.Class = $hilClass
+        if ($hilClass -ne 'ReadOnly' -and -not $stateHalt) {
+            $still = Test-AvbHilLockStillOwned
+            if (-not $still.Ok) { Set-HilHalt "machine lock lost during execution before ${exeName}: $($still.Why)" -Verdict 'LOCK_LOST' }
+        }
+        $gate = Get-AvbHilGateDecision -Entry (ConvertTo-AvbHilEntryKey $TestName) -Class $hilClass -Target $targetDid -Halt $stateHalt `
                     -TargetCount $HilTargets.Count -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions `
-                    -InitUnattendedApproved $HilInitUnattendedApproved
+                    -InitUnattendedApproved $HilInitUnattendedApproved -HazardHolds $HilHazardHolds
         if ($gate.Action -ne 'Run') {
             Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason $gate.Reason
             continue
@@ -1571,6 +2321,9 @@ foreach ($WorkItem in $WorkItems) {
     $logFile = Join-Path $logsDir "${logStem}.exe_${timestamp}.log"
 
     Write-Host "`n  => $exeName$(if ($testArgs) { " $testArgs" } else { '' })$(if ($hilClass) { "  [$hilClass]" } else { '' })" -ForegroundColor Cyan
+
+    # Pre-test state of a non-ReadOnly test: the PHC continuity reference for a verified no-mutation result (D1).
+    $script:HilPreTest = if ($IsHardwareSuite -and $hilClass -ne 'ReadOnly' -and $null -ne $script:HilBaseline) { Get-AvbHilState -PhcReads $HilPhcReads } else { $null }
 
     # --- Lifecycle snapshot BEFORE ---
     $lcyBefore = if ($IsSandbox) { $null } else { Get-AvbLifecycleSnapshot }
@@ -1597,7 +2350,12 @@ foreach ($WorkItem in $WorkItems) {
     # Exact target only for Mutating:Target work items; never inherited by any other test.
     $psi.EnvironmentVariables.Remove('AVB_HIL_TARGET_DID')
     if ($targetDid) { $psi.EnvironmentVariables['AVB_HIL_TARGET_DID'] = $targetDid }
+    $script:AvbItem.Sha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
+    $script:AvbItem.LogPath = $logFile
+    $script:AvbItem.StartedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    $avbStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $proc = [System.Diagnostics.Process]::Start($psi)
+    $script:AvbItem.Executed = $true
 
     # Capture output in background threads, stream to console and log.
     $outLines = [System.Collections.Generic.List[string]]::new()
@@ -1605,11 +2363,13 @@ foreach ($WorkItem in $WorkItems) {
     $errJob = $proc.StandardError.ReadToEndAsync()
 
     $timedOut  = $false
-    $timeoutMs = $TestTimeoutSeconds * 1000
+    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds
+    if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
+    $timeoutMs = $itemTimeoutSeconds * 1000
     if (-not $proc.WaitForExit($timeoutMs)) {
-        $proc.Kill()
+        $script:AvbItem.Termination = Stop-AvbProcessTree -Process $proc
         $timedOut = $true
-        Write-Fail "$exeName TIMEOUT after ${TestTimeoutSeconds}s"
+        Write-Fail "$exeName TIMEOUT after ${itemTimeoutSeconds}s --- $($script:AvbItem.Termination.Detail)"
     }
     $outText  = $outJob.Result
     $errText  = $errJob.Result
@@ -1617,6 +2377,9 @@ foreach ($WorkItem in $WorkItems) {
 
     # Write captured output to log and display on console.
     $combined = if ($errText) { $outText + "`n" + $errText } else { $outText }
+    $script:AvbItem.ProcessExit = $(if ($timedOut) { $null } else { $proc.ExitCode })
+    $script:AvbItem.DurationSeconds = [Math]::Round($avbStopwatch.Elapsed.TotalSeconds, 3)
+    $script:AvbItem.Output = $combined
     $combined | Out-File -FilePath $logFile -Encoding utf8
     $combined -split "`n" | ForEach-Object { Write-Host "    $_" }
 
@@ -1633,40 +2396,51 @@ foreach ($WorkItem in $WorkItems) {
 
     if ($timedOut) {
         $failedTests++
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(TIMEOUT)"; Exit = -999 }
-    } elseif (($exitCode -eq 0 -or $null -eq $exitCode) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
+        Add-AvbResult -Name $exeName -Status "FAILED(TIMEOUT)" -Exit -999
+        $script:AvbItem.TimeoutRecord = $script:AvbResultRecords[-1]   # timeoutDisposition set by Invoke-HilPostTestCheck
+    } elseif ($vc.FailedSetup -gt 0) {
+        # Required initial conditions not established (any exit code): kept distinct from a test failure.
+        $failedTests++
+        Write-Fail "$exeName FAILED_SETUP ($($vc.FailedSetup) testcase(s)) --- required initial conditions not established"
+        Add-AvbResult -Name $exeName -Status "FAILED_SETUP" -Exit $exitCode
+    } elseif ($vc.InconclusiveRestoration -gt 0) {
+        $failedTests++
+        Write-Fail "$exeName INCONCLUSIVE_RESTORATION ($($vc.InconclusiveRestoration) testcase(s)) --- the test could not verify its own restoration"
+        Add-AvbResult -Name $exeName -Status "INCONCLUSIVE_RESTORATION" -Exit $exitCode
+        Set-HilHalt "$exeName reported INCONCLUSIVE_RESTORATION itself" -Verdict 'INCONCLUSIVE_RESTORATION'
+    } elseif (($exitCode -eq 0) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
         $failedTests++
         Write-Fail "$exeName INCONCLUSIVE ($($vc.Inconclusive) testcase(s)) --- insufficient evidence on mandatory verification"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(INCONCLUSIVE)"; Exit = 0 }
-    } elseif (($exitCode -eq 0 -or $null -eq $exitCode) -and -not $IsOptionalVerification -and $vc.NotImplemented -gt 0) {
+        Add-AvbResult -Name $exeName -Status "FAILED(INCONCLUSIVE)" -Exit 0
+    } elseif (($exitCode -eq 0) -and -not $IsOptionalVerification -and $vc.NotImplemented -gt 0) {
         $incompleteTests++
         Write-Fail "$exeName INCOMPLETE ($($vc.NotImplemented) testcase(s) SKIP_NOT_IMPLEMENTED) --- driver operation missing on mandatory verification"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "INCOMPLETE(NOT_IMPLEMENTED)"; Exit = 0 }
-    } elseif ($exitCode -eq 0 -or $null -eq $exitCode) {
+        Add-AvbResult -Name $exeName -Status "INCOMPLETE(NOT_IMPLEMENTED)" -Exit 0
+    } elseif ($exitCode -eq 0) {
         $passedTests++
         Write-Ok "$exeName PASSED"
         if ($vc.NotImplemented -gt 0 -or $vc.Inconclusive -gt 0) {
             Write-Note "$exeName (optional verification): $($vc.NotImplemented) SKIP_NOT_IMPLEMENTED, $($vc.Inconclusive) INCONCLUSIVE --- reported, not verified"
         }
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "PASSED"; Exit = 0 }
+        Add-AvbResult -Name $exeName -Status "PASSED" -Exit 0
     } elseif ($exitCode -eq 2 -and $IsMandatorySuite) {
         # Exit 2 = SKIP_ONLY from test_tx_timestamp_provenance (driver absent / all H tests skipped).
         # On a mandatory HIL suite the driver MUST be present --- SKIP_ONLY means
         # Section H never ran, so V1/V2 canary, cross-handle isolation, etc. were not exercised.
         Write-Fail "$exeName [HIL-FAIL] exit=2 SKIP_ONLY on mandatory suite --- driver not accessible or Section H not exercised"
         $failedTests++
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED(SKIP_ONLY)"; Exit = $exitCode }
+        Add-AvbResult -Name $exeName -Status "FAILED(SKIP_ONLY)" -Exit $exitCode
     } elseif ($exitCode -eq 2) {
         # Exit 2 = SKIP_ONLY on a non-mandatory suite (Unit/Integration/HardwareUnit).
         # Section L passed; Section H skipped because driver is absent.
         # Expected on GitHub-hosted runners and any machine without the driver installed.
         $skippedTests++
         Write-Skip "$exeName (exit=2 SKIP_ONLY: Section L passed, Section H skipped -- driver absent)"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "SKIPPED"; Exit = $exitCode }
+        Add-AvbResult -Name $exeName -Status "SKIPPED" -Exit $exitCode
     } else {
         $failedTests++
-        Write-Fail "$exeName FAILED (exit $exitCode)"
-        $results += [PSCustomObject]@{ Name = $exeName; Status = "FAILED"; Exit = $exitCode }
+        Write-Fail "$exeName FAILED (exit $(Format-AvbExitCode $exitCode))"
+        Add-AvbResult -Name $exeName -Status "FAILED" -Exit $exitCode
 
         if ($FailFast) {
             Write-Note "-FailFast: stopping after first failure (after the health and state checks)"
@@ -1693,7 +2467,7 @@ foreach ($WorkItem in $WorkItems) {
         } else {
             Write-Fail "INFRA: $infraMsg --- remaining tests will be skipped"
         }
-        $results += [PSCustomObject]@{ Name = "$exeName[INFRA-HEALTH]"; Status = "FAILED(INFRA)"; Exit = -2 }
+        Add-AvbResult -Name "$exeName[INFRA-HEALTH]" -Status "FAILED(INFRA)" -Exit -2 -Check
 
         # Write a synthetic log file so Convert-Logs-To-JUnit / Parse-TestResults
         # can emit a <failure> element for this infrastructure failure in the JUnit XML.
@@ -1710,6 +2484,14 @@ foreach ($WorkItem in $WorkItems) {
         Invoke-HilPostTestCheck -Display $exeName -Class $hilClass -TimedOut $timedOut -Output $combined
     }
     if ($failFastStop) { break }
+}
+$script:AvbItem = $null
+
+# End of suite: compare with the ORIGINAL session baseline (detects changes that escaped per-test cleanup).
+if ($IsHardwareSuite -and $HilSession) {
+    $endState = Get-AvbHilState
+    $cmpE = Compare-AvbHilState $HilSession.baseline $endState
+    Invoke-HilSessionCheck -Cmp $cmpE -Phase 'end' -Last $endState
 }
 
 # ===========================
@@ -1729,7 +2511,7 @@ Write-Host "  Failed : $failedTests" -ForegroundColor $(if ($failedTests -gt 0) 
 Write-Host "  Incomplete (SKIP_NOT_IMPLEMENTED): $incompleteTests" -ForegroundColor $(if ($incompleteTests -gt 0) { "Red" } else { "Green" })
 Write-Host "  Skipped: $skippedTests" -ForegroundColor DarkGray
 if ($coverageGapTests -gt 0) {
-    Write-Host "  Coverage gaps (declared, not executed; included in Skipped): $coverageGapTests" -ForegroundColor DarkYellow
+    Write-Host "  Coverage gaps (required, NOT executed): $coverageGapTests" -ForegroundColor Red
 }
 Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
 Write-Host ""
@@ -1746,8 +2528,9 @@ if (Test-Path $junitScript) {
     $junitArgs = @{ LogsDir = $logsDir; RunDate = $runDateStr; OutputFile = $junitOut
                     Configuration = $Configuration; SuiteName = $Suite }
     if ($IsOptionalVerification) { $junitArgs.OptionalVerification = $true }
+    Reset-AvbExitCode
     & $junitScript @junitArgs -ErrorAction SilentlyContinue
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-AvbExitSuccess (Get-AvbExitCode))) {
         Write-Note "JUnit conversion returned non-zero (may be no logs yet -- skipped tests only)"
     }
     if (Test-Path $junitOut) {
@@ -1758,22 +2541,13 @@ if (Test-Path $junitScript) {
     }
 }
 
-if ($IsHardwareSuite -and $failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
-    # Skipped-only must not read as hardware verification.
-    Write-Fail "OVERALL: no hardware test PASSED in $Suite --- this is not hardware verification"
-    exit 1
+$ov = Get-AvbRunOverall -IsHardwareSuite $IsHardwareSuite -Passed $passedTests -Failed $failedTests -Incomplete $incompleteTests -CoverageGaps $coverageGapTests
+if ($failedTests -gt 0)      { Write-Fail "OVERALL: $failedTests test(s) FAILED" }
+if ($incompleteTests -gt 0)  { Write-Fail "OVERALL: $incompleteTests test(s) INCOMPLETE (SKIP_NOT_IMPLEMENTED on mandatory verification)" }
+if ($coverageGapTests -gt 0) { Write-Fail "OVERALL: $coverageGapTests required test(s) NOT EXECUTED (coverage gap) --- $Suite is INCOMPLETE" }
+switch ($ov.Overall) {
+    'NOT_VERIFIED' { Write-Fail "OVERALL: no hardware test PASSED in $Suite --- this is not hardware verification" }
+    'NO_TESTS'     { Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)" }
+    'PASSED'       { Write-Ok "OVERALL: All $passedTests test(s) PASSED" }
 }
-
-if ($failedTests -eq 0 -and $incompleteTests -eq 0 -and $passedTests -eq 0) {
-    Write-Note "No tests ran (all skipped -- check that Build-Tests.ps1 ran first)"
-    exit 0
-}
-
-if ($failedTests -gt 0 -or $incompleteTests -gt 0) {
-    if ($failedTests -gt 0)     { Write-Fail "OVERALL: $failedTests test(s) FAILED" }
-    if ($incompleteTests -gt 0) { Write-Fail "OVERALL: $incompleteTests test(s) INCOMPLETE (SKIP_NOT_IMPLEMENTED on mandatory verification)" }
-    exit 1
-}
-
-Write-Ok "OVERALL: All $passedTests test(s) PASSED"
-exit 0
+Complete-AvbRun -Code $ov.Code -Overall $ov.Overall

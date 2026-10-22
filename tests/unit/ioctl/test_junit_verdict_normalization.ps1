@@ -98,7 +98,8 @@ Assert-Xml 'TEST-VERDICT-003b-converter-inconclusive-optional-labelled-skip' $r 
     -Match @('<skipped message="\[INCONCLUSIVE\]', 'failures="0"') -NoMatch @('<failure')
 
 # --- TEST-VERDICT-004: converter and parser agree for every verdict, both modes -----------------------
-$verdicts = 'PASS','FAIL','SKIP','SKIP_UNSUPPORTED','SKIP_NOT_IMPLEMENTED','BLOCKED','INCONCLUSIVE','INFRA_FAILURE','CLEANUP_FAILED'
+$verdicts = 'PASS','FAIL','SKIP','SKIP_UNSUPPORTED','SKIP_NOT_IMPLEMENTED','BLOCKED','INCONCLUSIVE','INFRA_FAILURE','CLEANUP_FAILED',
+            'INCONCLUSIVE_RESTORATION','FAILED_SETUP'
 $logText = ($verdicts | ForEach-Object { "  [$_] TC-AGREE-$($_ -replace '_','-')/adapter:0: r" }) -join "`n"
 function Class-Of([string]$xml, [string]$tc) {
     $m = [regex]::Match($xml, '(?s)<testcase name="' + [regex]::Escape($tc) + '[^"]*"[^>]*?(/>|>(.*?)</testcase>)')
@@ -165,6 +166,10 @@ foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1','Lib-AvbLifecycle.
 }
 New-Item -ItemType Directory -Path (Join-Path $Sandbox 'tools\lib') -Force | Out-Null
 Copy-Item $VerdictLib (Join-Path $Sandbox 'tools\lib\TestVerdict.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Sandbox 'tools\lib\NativeExit.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $Sandbox 'tools\lib\SourceDigest.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $Sandbox 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
+Copy-Item (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1') (Join-Path $Sandbox 'tools\lib\PhcRestoration.ps1')   # PHC evaluator (Run-Tests-CI dot-sources it)
 # Replace the lifecycle library (it opens \\.\IntelAvbFilter) with inert stubs.
 @'
 function Get-AvbLifecycleSnapshot { return $null }
@@ -236,8 +241,23 @@ foreach ($s in 'Unit','Integration','All','HardwareUnit','HardwareIntegration','
     $cls[$s] = Get-AvbSuiteVerificationClass -Suite $s
 }
 $optionals = @($cls.GetEnumerator() | Where-Object { $_.Value -eq 'optional' } | ForEach-Object { $_.Key })
-if ($optionals.Count -eq 1 -and $optionals[0] -eq 'HardwareMutation') { tc_pass 'TEST-VERDICT-010-only-hardwaremutation-is-optional' }
-else { tc_fail 'TEST-VERDICT-010-only-hardwaremutation-is-optional' ("optional suites: " + ($optionals -join ',')) }
+# Requirement changed 2026-10-21 (P0 full HIL coverage): HardwareMutation is mandatory verification; no suite is optional.
+if ($optionals.Count -eq 0) { tc_pass 'TEST-VERDICT-010-no-suite-is-optional-hardwaremutation-is-mandatory' }
+else { tc_fail 'TEST-VERDICT-010-no-suite-is-optional-hardwaremutation-is-mandatory' ("optional suites: " + ($optionals -join ',')) }
+
+# --- TEST-VERDICT-012: restoration / setup verdicts (P0 2026-10-21) are distinct and always failures ---------
+# INCONCLUSIVE_RESTORATION = relevant state could not be measured; CLEANUP_FAILED = restoration demonstrably failed;
+# FAILED_SETUP = required initial conditions could not be established.  Never skipped, not even -Optional.
+$v12 = @()
+foreach ($v in 'INCONCLUSIVE_RESTORATION', 'FAILED_SETUP', 'CLEANUP_FAILED') {
+    foreach ($o in $false, $true) { $c = Get-AvbVerdictClass -Verdict $v -Optional:$o; if ($c -ne 'failure') { $v12 += "$v optional=$o -> $c" } }
+}
+$r12 = Invoke-Converter 'v012' "  [INCONCLUSIVE_RESTORATION] TC-R12-001: PHC time not observed`n  [FAILED_SETUP] TC-R12-002: target adapter not identified`n  [CLEANUP_FAILED] TC-R12-003: TIMINCA differs"
+foreach ($p in @(@('TC-R12-001', 'INCONCLUSIVE_RESTORATION'), @('TC-R12-002', 'FAILED_SETUP'), @('TC-R12-003', 'CLEANUP_FAILED'))) {
+    if ($r12.Xml -notmatch ('(?s)<testcase name="' + $p[0] + '[^"]*"[^>]*><failure[^>]*message="\[' + $p[1] + '\]')) { $v12 += "converter lost the $($p[1]) label of $($p[0])" }
+}
+if ($v12.Count -eq 0) { tc_pass 'TEST-VERDICT-012-restoration-and-setup-verdicts-distinct-and-always-failures' }
+else { tc_fail 'TEST-VERDICT-012-restoration-and-setup-verdicts-distinct-and-always-failures' ($v12 -join '; ') }
 
 $threw = $false
 try { Get-AvbVerdictClass -Verdict 'SKIP_NOT_A_THING' | Out-Null } catch { $threw = $true }
