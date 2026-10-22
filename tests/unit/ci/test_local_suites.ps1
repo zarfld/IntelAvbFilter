@@ -198,16 +198,20 @@ tc_check 'TEST-LOCALSUITES-010-reproduction-offer-is-bounded-default-continues-n
 # 019: a missing/untrusted results document must not silently remove a suite from the run (861e318 removed the stop
 # without a replacement: the suite then contributed no inventory row and the run could exit 0 without it).  It is a
 # Failure row (never reproduced: not executed) and the matrix continues with the next suite.
-$ur = New-AvbUntrustedSuiteRow -Configuration 'Release' -Suite 'HardwareUnit' -Error 'no results document at x'
+$ur = New-AvbUntrustedSuiteRow -Configuration 'Release' -Suite 'HardwareUnit' -Why 'no results document at x'
 $loop = $lsAst.Find({ param($x) $x -is [System.Management.Automation.Language.ForEachStatementAst] -and $x.Variable.Extent.Text -eq '$Suite' }, $true)
+$notOk = if ($loop) { $loop.Body.Find({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '-not $res.Ok' }, $false) } else { $null }
 $loopText = if ($loop) { (($loop.Body.Extent.Text -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n" } else { '' }
-$iNotOk = $loopText.IndexOf('if (-not $res.Ok)'); $iDoc = $loopText.IndexOf('$res.Doc.')
+$thenText = if ($notOk) { $notOk.Clauses[0].Item2.Extent.Text } else { '' }
+$elseText = if ($notOk -and $notOk.ElseClause) { (($notOk.ElseClause.Extent.Text -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n" } else { $null }
+$docOutsideElse = if ($null -ne $elseText) { [regex]::Matches($loopText.Replace($elseText, ''), '\$res\.Doc\b').Count } else { -1 }
+$breaks = @([regex]::Matches($loopText, '(?m)^.*\bbreak\b.*$') | ForEach-Object { $_.Value })
 tc_check 'TEST-LOCALSUITES-019-untrusted-results-document-is-a-failure-row-and-the-matrix-continues' `
     ($ur.Category -eq 'Failure' -and $ur.Verdict -eq 'RESULTS_UNTRUSTED' -and -not $ur.Executed -and $ur.Suite -eq 'HardwareUnit' -and $ur.Configuration -eq 'Release' -and
      $ur.Reason -match 'no results document' -and @(Get-AvbReproductionQueue -Inventory @($ur) -Configuration 'Release').Count -eq 0 -and
-     $iNotOk -ge 0 -and $iDoc -gt $iNotOk -and ($loopText -match 'New-AvbUntrustedSuiteRow') -and
-     ($loopText.Substring([Math]::Max(0, $iNotOk)) -match '(?s)^if \(-not \$res\.Ok\) \{[^}]*continue') -and ($loopText -notmatch '(?m)^\s*break\b')) `
-    ("row={0}/{1}/executed={2} notOk@{3} doc@{4} loop has break={5}" -f $ur.Category, $ur.Verdict, $ur.Executed, $iNotOk, $iDoc, ($loopText -match '(?m)^\s*break\b'))
+     $null -ne $notOk -and ($thenText -match 'New-AvbUntrustedSuiteRow') -and ($thenText -match '\$cfgInventory \+=') -and $docOutsideElse -eq 0 -and
+     $breaks.Count -eq 1 -and $breaks[0] -match 'operator stop') `
+    ("row={0}/{1}/executed={2} notOk-branch={3} res.Doc outside trusted branch={4} breaks=[{5}]" -f $ur.Category, $ur.Verdict, $ur.Executed, [bool]$notOk, $docOutsideElse, ($breaks -join ' || '))
 
 # 020: after a suite with failures/blocked items: optional bounded operator stop window, default CONTINUE; only the
 # explicit stop choice ends the run (intent Q 2026-10-22).

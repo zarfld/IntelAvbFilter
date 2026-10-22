@@ -137,6 +137,38 @@ function Get-AvbReproductionQueue {
     return ,$q
 }
 
+# A suite whose results document is missing or untrusted: one Failure row, so the suite can never silently drop out of
+# the inventory (and the run can never pass without it).  Not executed -> never a reproduction candidate.
+function New-AvbUntrustedSuiteRow {
+    param([string]$Configuration, [string]$Suite, [string]$Why)
+    return [pscustomobject]@{
+        Configuration = $Configuration; Suite = $Suite; Name = "$Suite results"; Entry = ''; Arguments = ''
+        Verdict = 'RESULTS_UNTRUSTED'; Category = 'Failure'; Executed = $false; Check = $false; ExitCode = $null
+        SafetyClass = ''; TargetDid = ''; Testcases = ''; Reason = $Why; LogPath = ''; Incidents = ''
+    }
+}
+
+# Bounded operator choice (intent Q 2026-10-22: the run never waits indefinitely for an operator).  Returns the value
+# of the first key of -Keys pressed within -Seconds, else -Default.  Noninteractive (redirected input, no user session,
+# GitHub Actions): -Default at once; the console key buffer is never touched ([Console]::KeyAvailable throws there).
+function Read-AvbTimedChoice {
+    param([string]$Prompt, [int]$Seconds, [string]$Default, [hashtable]$Keys, [object]$Interactive = $null, [scriptblock]$ReadKey = $null)
+    if ($null -eq $Interactive) {
+        $Interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and $env:GITHUB_ACTIONS -ne 'true'
+    }
+    Write-Host -NoNewline "$Prompt "
+    if (-not $Interactive) { Write-Host "$Default (noninteractive)"; return $Default }
+    if (-not $ReadKey) { $ReadKey = { if ([Console]::KeyAvailable) { return [Console]::ReadKey($true).Key.ToString() }; return $null } }
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $k = & $ReadKey
+        if ($k -and $Keys.ContainsKey([string]$k)) { Write-Host $Keys[[string]$k]; return $Keys[[string]$k] }
+        Start-Sleep -Milliseconds 100
+    }
+    Write-Host "$Default (timeout)"
+    return $Default
+}
+
 # Report text of a step result: 'NOT_RUN' = never reached (the run stopped earlier); $null = ran, no exit code (failure).
 function Format-AvbStepResult {
     param($Result)
@@ -240,19 +272,28 @@ try {
             $s = [ordered]@{ suite = $Suite; exitCode = $rc; resultsJson = $json; console = $transcript; durationSeconds = [Math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
                              overall = $null; executed = $null; counts = $null; error = $res.Error }
             $cfg.suites += $s
-            # no break!!!  if (-not $res.Ok) { $Stop = "$Configuration/${Suite}: $($res.Error)"; break }
-            $s.overall = $res.Doc.overall; $s.executed = $res.Doc.executedCount; $s.counts = $res.Doc.counts
-            $inv = Get-AvbFailureInventory -Doc $res.Doc -Configuration $Configuration -Suite $Suite
-            $cfgInventory += $inv
-            $nf = @($inv | Where-Object { $_.Category -eq 'Failure' }).Count; $nb = @($inv | Where-Object { $_.Category -eq 'Blocked' }).Count
-            Write-Host ("`n{0} / {1}: exit {2}, overall {3}, executed {4}, failures {5}, blocked {6}" -f $Configuration, $Suite, (Format-AvbExitCode $rc), $res.Doc.overall, $res.Doc.executedCount, $nf, $nb)
-            $h = Get-AvbSafetyHalt $res.Doc
-            if ($h) {
-                Write-Host "[HALT] $Configuration/${Suite}: $h --- later Init/Mutating tests BLOCKED (also in later suites and configurations of this run); ReadOnly tests continue" -ForegroundColor Red
-                if (-not $SafetyHalt) { $SafetyHalt = "$Configuration/${Suite}: $h" }
+            if (-not $res.Ok) {
+                # No trusted document: the suite is one Failure row (never silently absent); the matrix continues.
+                Write-Host "[FAIL] $Configuration/${Suite}: $($res.Error) --- recorded as RESULTS_UNTRUSTED; the next suite runs" -ForegroundColor Red
+                $inv = @(New-AvbUntrustedSuiteRow -Configuration $Configuration -Suite $Suite -Why $res.Error)
+                $cfgInventory += $inv
+            } else {
+                $s.overall = $res.Doc.overall; $s.executed = $res.Doc.executedCount; $s.counts = $res.Doc.counts
+                $inv = Get-AvbFailureInventory -Doc $res.Doc -Configuration $Configuration -Suite $Suite
+                $cfgInventory += $inv
+                $nf = @($inv | Where-Object { $_.Category -eq 'Failure' }).Count; $nb = @($inv | Where-Object { $_.Category -eq 'Blocked' }).Count
+                Write-Host ("`n{0} / {1}: exit {2}, overall {3}, executed {4}, failures {5}, blocked {6}" -f $Configuration, $Suite, (Format-AvbExitCode $rc), $res.Doc.overall, $res.Doc.executedCount, $nf, $nb)
+                $h = Get-AvbSafetyHalt $res.Doc
+                if ($h) {
+                    Write-Host "[HALT] $Configuration/${Suite}: $h --- later Init/Mutating tests BLOCKED (also in later suites and configurations of this run); ReadOnly tests continue" -ForegroundColor Red
+                    if (-not $SafetyHalt) { $SafetyHalt = "$Configuration/${Suite}: $h" }
+                }
+                # Infrastructure loss is recorded, not a stop (861e318: only an explicit operator stop ends the matrix).
+                $why = Get-AvbStopReason $res.Doc
+                if ($why) { $s.infrastructure = $why; Write-Host "[INFRA] $Configuration/${Suite}: $why --- recorded; the next suite runs" -ForegroundColor Red }
             }
-            $why = Get-AvbStopReason $res.Doc
-           # no break!!! if ($why) { $Stop = "$Configuration/${Suite}: $why"; break }
+            if (@($inv | Where-Object { $_.Category -in @('Failure', 'Blocked') }).Count -gt 0 -and
+                (Read-AvbTimedChoice -Prompt "$Configuration/${Suite} has failures. Press S to stop the run, Enter to continue (30 s, default continue):" -Seconds 30 -Default 'continue' -Keys @{ S = 'stop'; C = 'continue'; Enter = 'continue' }) -eq 'stop') { $Stop = "operator stop after $Configuration/$Suite"; break }
         }
         $AllInventory += $cfgInventory
         if ($Stop) { break }
@@ -261,33 +302,7 @@ try {
         if (-not $NoReproduce) {
             foreach ($item in (Get-AvbReproductionQueue -Inventory $cfgInventory -Configuration $Configuration)) {
                 Write-Host "`n$Configuration / $($item.Suite) / $($item.Entry) $($item.Arguments)  [$($item.Verdict)] $($item.Testcases)"
-
-                # Default: Y after 30 seconds
-                $answer = 'y'
-                $deadline = [DateTime]::UtcNow.AddSeconds(30)
-
-                Write-Host -NoNewline "Reproduce with Run-Tests-Elevated.ps1 -CaptureDbgView? (Y/n) [30s timeout, default Y]: "
-
-                while ([DateTime]::UtcNow -lt $deadline) {
-                    if ([Console]::KeyAvailable) {
-                        $key = [Console]::ReadKey($true).Key
-
-                        if ($key -eq [ConsoleKey]::N) {
-                            $answer = 'n'
-                            break
-                        }
-
-                        if ($key -eq [ConsoleKey]::Y -or $key -eq [ConsoleKey]::Enter) {
-                            break
-                        }
-                    }
-
-                    Start-Sleep -Milliseconds 100
-                }
-
-                Write-Host $answer
-
-                if ($answer -ne 'y') { continue }
+                if ((Read-AvbTimedChoice -Prompt "Reproduce with Run-Tests-Elevated.ps1 -CaptureDbgView? (Y/n, 30 s, default Y):" -Seconds 30 -Default 'y' -Keys @{ Y = 'y'; Enter = 'y'; N = 'n' }) -ne 'y') { continue }
 
                 if (-not (Test-AvbExitSuccess (Invoke-AvbPreFlight $cfg.builtDriverSha256))) { $Stop = "pre-flight failed before reproduction ($Configuration)"; break }
                 $repJson = Join-Path $ReportDir ("repro-{0}-{1}-{2}.json" -f $Configuration, ($item.Entry -replace '[^\w.-]', '_'), (Get-Date -Format 'HHmmss'))
