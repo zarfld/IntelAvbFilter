@@ -46,7 +46,8 @@ function Import-Functions([string]$Path, [string[]]$Names) {
 $missing = ''
 try {
     . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')
-    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult', 'Get-AvbSafetyHalt', 'Get-AvbCleanupIncidentSummary')
+    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult', 'Get-AvbSafetyHalt', 'Get-AvbCleanupIncidentSummary',
+                                  'Read-AvbTimedChoice', 'New-AvbUntrustedSuiteRow')
     Import-Functions $ElevPath @('ConvertTo-AvbPsLiteral', 'New-AvbElevatedCommand', 'Wait-AvbDbgViewStarted', 'Get-AvbDbgViewCaptureResult')
 } catch { $missing = $_.Exception.Message }
 tc_check 'TEST-LOCALSUITES-000-decision-functions-present' ($missing -eq '') $missing
@@ -176,10 +177,43 @@ $order = if ($suitesAssign) { @($suitesAssign.Right.FindAll({ param($x) $x -is [
 tc_check 'TEST-LOCALSUITES-008-suite-order-unchanged-mandatory-last' ($order -eq 'HardwareUnit,HardwareIntegration,HardwareMutation,HardwareMandatory') "order: $order"
 tc_check 'TEST-LOCALSUITES-009-results-come-from-results-json-not-console-table-parsing' `
     (($ls -match '-ResultsJson \$json') -and ($ls -notmatch 'CI Test Summary --') -and ($ls -notmatch '\(\?<Status>FAILED')) 'LocalSuites still parses console output or does not request -ResultsJson'
-$iRead = $ls.IndexOf('Read-Host "Reproduce'); $iRepro = $ls.IndexOf('& $RunElevated')
-tc_check 'TEST-LOCALSUITES-010-reproduction-is-operator-confirmed-with-dbgview-through-the-runner-gates' `
-    (($iRead -gt 0) -and ($iRepro -gt $iRead) -and ($ls -match '-not \$NoReproduce') -and ($ls -match '& \$RunElevated -TestName \$item\.Entry -Suite \$item\.Suite -Configuration \$Configuration -CaptureDbgView')) `
-    ("read-host@{0} call@{1}" -f $iRead, $iRepro)
+# 010 (intent Q 2026-10-22, LocalSuites.ps1 suite comment): the run never waits indefinitely for an operator.  The
+# reproduction offer is a bounded window with a default; with redirected input (noninteractive) it returns the default
+# at once and never touches the console key buffer ([Console]::KeyAvailable throws there and ended the run after Debug).
+$rk = 0; $keyN = { $script:rk++; return 'N' }; $keyNone = { $script:rk++; return $null }
+$t0 = [Diagnostics.Stopwatch]::StartNew(); $cRed = Read-AvbTimedChoice -Prompt 'p' -Seconds 30 -Default 'y' -Keys @{ N = 'n'; Y = 'y'; Enter = 'y' } -Interactive $false -ReadKey $keyN; $msRed = $t0.ElapsedMilliseconds
+$rkRed = $rk; $cN = Read-AvbTimedChoice -Prompt 'p' -Seconds 30 -Default 'y' -Keys @{ N = 'n'; Y = 'y' } -Interactive $true -ReadKey $keyN
+$t0 = [Diagnostics.Stopwatch]::StartNew(); $cT = Read-AvbTimedChoice -Prompt 'p' -Seconds 1 -Default 'y' -Keys @{ N = 'n' } -Interactive $true -ReadKey $keyNone; $msT = $t0.ElapsedMilliseconds
+$code = (($ls -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+$iOffer = $code.IndexOf('Read-AvbTimedChoice -Prompt "Reproduce'); $iRepro = $code.IndexOf('& $RunElevated')
+$fnTimed = $lsAst.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Read-AvbTimedChoice' }, $true)
+$keyAvailOutside = [regex]::Matches($code, 'KeyAvailable').Count - $(if ($fnTimed) { [regex]::Matches($fnTimed.Extent.Text, 'KeyAvailable').Count } else { 0 })
+tc_check 'TEST-LOCALSUITES-010-reproduction-offer-is-bounded-default-continues-noninteractive-and-runs-through-the-runner-gates' `
+    ($cRed -eq 'y' -and $rkRed -eq 0 -and $msRed -lt 1000 -and $cN -eq 'n' -and $cT -eq 'y' -and $msT -ge 900 -and $msT -lt 5000 -and
+     ($code -notmatch '(?i)Read-Host') -and $keyAvailOutside -eq 0 -and $iOffer -gt 0 -and $iRepro -gt $iOffer -and ($code -match '-not \$NoReproduce') -and
+     ($code -match '& \$RunElevated -TestName \$item\.Entry -Suite \$item\.Suite -Configuration \$Configuration -CaptureDbgView')) `
+    ("redirected->{0} ({1} key reads, {2} ms) key N->{3} timeout->{4} ({5} ms) read-host={6} KeyAvailable outside helper={7} offer@{8} call@{9}" -f
+     $cRed, $rkRed, $msRed, $cN, $cT, $msT, ($code -match '(?i)Read-Host'), $keyAvailOutside, $iOffer, $iRepro)
+
+# 019: a missing/untrusted results document must not silently remove a suite from the run (861e318 removed the stop
+# without a replacement: the suite then contributed no inventory row and the run could exit 0 without it).  It is a
+# Failure row (never reproduced: not executed) and the matrix continues with the next suite.
+$ur = New-AvbUntrustedSuiteRow -Configuration 'Release' -Suite 'HardwareUnit' -Error 'no results document at x'
+$loop = $lsAst.Find({ param($x) $x -is [System.Management.Automation.Language.ForEachStatementAst] -and $x.Variable.Extent.Text -eq '$Suite' }, $true)
+$loopText = if ($loop) { (($loop.Body.Extent.Text -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n" } else { '' }
+$iNotOk = $loopText.IndexOf('if (-not $res.Ok)'); $iDoc = $loopText.IndexOf('$res.Doc.')
+tc_check 'TEST-LOCALSUITES-019-untrusted-results-document-is-a-failure-row-and-the-matrix-continues' `
+    ($ur.Category -eq 'Failure' -and $ur.Verdict -eq 'RESULTS_UNTRUSTED' -and -not $ur.Executed -and $ur.Suite -eq 'HardwareUnit' -and $ur.Configuration -eq 'Release' -and
+     $ur.Reason -match 'no results document' -and @(Get-AvbReproductionQueue -Inventory @($ur) -Configuration 'Release').Count -eq 0 -and
+     $iNotOk -ge 0 -and $iDoc -gt $iNotOk -and ($loopText -match 'New-AvbUntrustedSuiteRow') -and
+     ($loopText.Substring([Math]::Max(0, $iNotOk)) -match '(?s)^if \(-not \$res\.Ok\) \{[^}]*continue') -and ($loopText -notmatch '(?m)^\s*break\b')) `
+    ("row={0}/{1}/executed={2} notOk@{3} doc@{4} loop has break={5}" -f $ur.Category, $ur.Verdict, $ur.Executed, $iNotOk, $iDoc, ($loopText -match '(?m)^\s*break\b'))
+
+# 020: after a suite with failures/blocked items: optional bounded operator stop window, default CONTINUE; only the
+# explicit stop choice ends the run (intent Q 2026-10-22).
+tc_check 'TEST-LOCALSUITES-020-failed-suite-offers-a-bounded-stop-window-default-continue' `
+    (($loopText -match "Read-AvbTimedChoice -Prompt `"[^`"]*stop[^`"]*`" -Seconds 30 -Default 'continue'") -and ($loopText -match "-eq 'stop'\) \{ \`$Stop = `"operator stop")) `
+    'no bounded default-continue stop window after a failed suite'
 $iInstall = $ls.IndexOf('Install-Driver-Elevated $Configuration'); $iPre = $ls.IndexOf('Invoke-AvbPreFlight $cfg.builtDriverSha256'); $iSuites = $ls.IndexOf('foreach ($Suite in $Suites)')
 tc_check 'TEST-LOCALSUITES-011-installed-driver-must-equal-the-locally-built-driver-before-any-suite' `
     (($iInstall -gt 0) -and ($iPre -gt $iInstall) -and ($iSuites -gt $iPre) -and ($ls -match "HIL_REQUIRE_DEPLOYED_SHA = '1'") -and ($ls -match 'BUILD_DRIVER_SHA256 = \$BuiltSha256')) `
