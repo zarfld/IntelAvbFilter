@@ -46,7 +46,7 @@ function Import-Functions([string]$Path, [string[]]$Names) {
 $missing = ''
 try {
     . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')
-    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult', 'Get-AvbSafetyHalt')
+    Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult', 'Get-AvbSafetyHalt', 'Get-AvbCleanupIncidentSummary')
     Import-Functions $ElevPath @('ConvertTo-AvbPsLiteral', 'New-AvbElevatedCommand', 'Wait-AvbDbgViewStarted', 'Get-AvbDbgViewCaptureResult')
 } catch { $missing = $_.Exception.Message }
 tc_check 'TEST-LOCALSUITES-000-decision-functions-present' ($missing -eq '') $missing
@@ -104,6 +104,20 @@ $blocked = @($inv | Where-Object { $_.Category -eq 'Blocked' })
 tc_check 'TEST-LOCALSUITES-005-blocked-items-are-reported-as-not-executed' `
     (($blocked.Count -eq 2) -and (@($blocked | Where-Object { $_.Executed }).Count -eq 0) -and (@($inv | Where-Object { $_.Executed }).Count -eq 7)) `
     ("blocked={0} executed={1}" -f $blocked.Count, @($inv | Where-Object { $_.Executed }).Count)
+
+# 017 (Decision B, Q 2026-10-22): two observations of ONE cleanup incident stay two visible failure rows, but the
+# inventory carries the incident references and counts unique incidents separately from observations.
+$docInc = Write-Doc (Join-Path $Tmp 'incidents.json') 'HardwareUnit' 'Debug' 1 @(
+    (New-Rec 't_x[STATE]' 'CLEANUP_FAILED' $false -Check $true), (New-Rec 'HIL-SESSION[end]' 'CLEANUP_FAILED' $false -Check $true), (New-Rec 't_y[STATE]' 'CLEANUP_FAILED' $false -Check $true))
+$j = Get-Content (Join-Path $Tmp 'incidents.json') -Raw | ConvertFrom-Json
+$j.records[0] | Add-Member -NotePropertyName incidents -NotePropertyValue @([pscustomobject]@{ incidentId = 'inc-1'; role = 'opened'; key = 'k1' })
+$j.records[1] | Add-Member -NotePropertyName incidents -NotePropertyValue @([pscustomobject]@{ incidentId = 'inc-1'; role = 'confirmed'; key = 'k1' })
+$j.records[2] | Add-Member -NotePropertyName incidents -NotePropertyValue @([pscustomobject]@{ incidentId = 'inc-2'; role = 'opened'; key = 'k2' })
+$invInc = Get-AvbFailureInventory -Doc $j -Configuration 'Debug' -Suite 'HardwareUnit'
+$sumInc = Get-AvbCleanupIncidentSummary -Inventory $invInc
+tc_check 'TEST-LOCALSUITES-017-cleanup-observations-stay-visible-incidents-counted-once' `
+    (@($invInc | Where-Object { $_.Category -eq 'Failure' }).Count -eq 3 -and (@($invInc)[1].Incidents -eq 'inc-1:confirmed') -and $sumInc.Incidents -eq 2 -and $sumInc.Observations -eq 3) `
+    ("rows={0} row2='{1}' incidents={2} observations={3}" -f @($invInc).Count, @($invInc)[1].Incidents, $sumInc.Incidents, $sumInc.Observations)
 
 # --- Stop rules ---------------------------------------------------------------------------------------------
 $stopT = Get-AvbStopReason $doc

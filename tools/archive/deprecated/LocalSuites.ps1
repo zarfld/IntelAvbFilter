@@ -79,9 +79,19 @@ function Get-AvbFailureInventory {
             Configuration = $Configuration; Suite = $Suite; Name = $r.name; Entry = $r.entry; Arguments = $r.arguments
             Verdict = $r.verdict; Category = $cat; Executed = [bool]$r.executed; Check = [bool]$r.check; ExitCode = $r.exitCode
             SafetyClass = $r.safetyClass; TargetDid = $r.targetDid; Testcases = ($failing -join ' '); Reason = $r.reason; LogPath = $r.logPath
+            Incidents = $(if ($r.PSObject.Properties['incidents']) { (@($r.incidents) | Where-Object { $_ } | ForEach-Object { "$($_.incidentId):$($_.role)" }) -join ' ' } else { '' })
         }
     }
     return ,$rows
+}
+
+# Cleanup incidents (Decision B): every CLEANUP_FAILED row is an observation; rows referencing the same incident id are
+# ONE incident.  Rows without an incident reference count as one incident each.  @{ Incidents; Observations }
+function Get-AvbCleanupIncidentSummary {
+    param([object[]]$Inventory)
+    $rows = @($Inventory | Where-Object { $_.Verdict -eq 'CLEANUP_FAILED' })
+    $ids = @($rows | ForEach-Object { if ($_.Incidents) { $_.Incidents -split ' ' | ForEach-Object { ($_ -split ':')[0] } } } | Where-Object { $_ } | Sort-Object -Unique)
+    return @{ Incidents = $ids.Count + @($rows | Where-Object { -not $_.Incidents }).Count; Observations = $rows.Count }
 }
 
 # '' = continue; otherwise the reason this run must stop after the suite: global driver/device infrastructure loss only
@@ -272,7 +282,9 @@ try {
     }
     $fail = @($AllInventory | Where-Object { $_.Category -eq 'Failure' }); $blk = @($AllInventory | Where-Object { $_.Category -eq 'Blocked' })
     Write-Host "`nExecuted failures ($($fail.Count)):"
-    $fail | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, ExitCode, Testcases -AutoSize | Out-String -Width 250 | Write-Host
+    $fail | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, ExitCode, Testcases, Incidents -AutoSize | Out-String -Width 250 | Write-Host
+    $ci = Get-AvbCleanupIncidentSummary -Inventory $AllInventory
+    if ($ci.Observations -gt 0) { Write-Host ("Cleanup incidents: {0} unique hardware discrepancy incident(s), {1} verification observation(s)" -f $ci.Incidents, $ci.Observations) -ForegroundColor Red }
     Write-Host "Not executed - blocked ($($blk.Count)):"
     $blk | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, Reason -AutoSize | Out-String -Width 250 | Write-Host
     $gap = @($AllInventory | Where-Object { $_.Category -eq 'NotExecuted' })
