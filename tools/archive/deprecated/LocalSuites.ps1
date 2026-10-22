@@ -220,6 +220,10 @@ try {
         Write-Host "[INFO] Installed driver file == locally built driver (on-disk SHA256 $($cfg.builtDriverSha256)). The loaded image is not hashed; after a reinstall without reboot it is UNPROVEN that the running image is this file." -ForegroundColor Yellow
 
         # 5-6. Suites
+        # LocalSuites.ps1 must always attempt the complete configured test matrix, regardless of preceding test or suite failures. Failures affect verdicts and final exit status, not scheduling. Only an explicit operator stop may terminate an otherwise executable test sequence.
+        #After a failed suite, provide an optional 30-second stop window. Default action is CONTINUE. In noninteractive CI, continue automatically.
+        #Every test must establish its prerequisites and enforce hardware-state restoration. Failed restoration is an explicit test failure and must never be hidden or reclassified as success. A subsequent test with unmet prerequisites must be reported as BLOCKED, while other tests continue.
+        #Preserve complete Debug/Release execution, the failure inventory, JSON evidence, DbgView capture, and nonzero final exit status if any mandatory test failed or was blocked.
         $cfgInventory = @()
         foreach ($Suite in $Suites) {
             $json = Join-Path $ReportDir ("results-{0}-{1}.json" -f $Configuration, $Suite)
@@ -232,7 +236,7 @@ try {
             $s = [ordered]@{ suite = $Suite; exitCode = $rc; resultsJson = $json; console = $transcript; durationSeconds = [Math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
                              overall = $null; executed = $null; counts = $null; error = $res.Error }
             $cfg.suites += $s
-            if (-not $res.Ok) { $Stop = "$Configuration/${Suite}: $($res.Error)"; break }
+            # no break!!!  if (-not $res.Ok) { $Stop = "$Configuration/${Suite}: $($res.Error)"; break }
             $s.overall = $res.Doc.overall; $s.executed = $res.Doc.executedCount; $s.counts = $res.Doc.counts
             $inv = Get-AvbFailureInventory -Doc $res.Doc -Configuration $Configuration -Suite $Suite
             $cfgInventory += $inv
@@ -244,7 +248,7 @@ try {
                 if (-not $SafetyHalt) { $SafetyHalt = "$Configuration/${Suite}: $h" }
             }
             $why = Get-AvbStopReason $res.Doc
-            if ($why) { $Stop = "$Configuration/${Suite}: $why"; break }
+           # no break!!! if ($why) { $Stop = "$Configuration/${Suite}: $why"; break }
         }
         $AllInventory += $cfgInventory
         if ($Stop) { break }
@@ -253,7 +257,34 @@ try {
         if (-not $NoReproduce) {
             foreach ($item in (Get-AvbReproductionQueue -Inventory $cfgInventory -Configuration $Configuration)) {
                 Write-Host "`n$Configuration / $($item.Suite) / $($item.Entry) $($item.Arguments)  [$($item.Verdict)] $($item.Testcases)"
-                if ((Read-Host "Reproduce with Run-Tests-Elevated.ps1 -CaptureDbgView? (y/N)") -ne 'y') { continue }
+
+                # Default: Y after 30 seconds
+                $answer = 'y'
+                $deadline = [DateTime]::UtcNow.AddSeconds(30)
+
+                Write-Host -NoNewline "Reproduce with Run-Tests-Elevated.ps1 -CaptureDbgView? (Y/n) [30s timeout, default Y]: "
+
+                while ([DateTime]::UtcNow -lt $deadline) {
+                    if ([Console]::KeyAvailable) {
+                        $key = [Console]::ReadKey($true).Key
+
+                        if ($key -eq [ConsoleKey]::N) {
+                            $answer = 'n'
+                            break
+                        }
+
+                        if ($key -eq [ConsoleKey]::Y -or $key -eq [ConsoleKey]::Enter) {
+                            break
+                        }
+                    }
+
+                    Start-Sleep -Milliseconds 100
+                }
+
+                Write-Host $answer
+
+                if ($answer -ne 'y') { continue }
+
                 if (-not (Test-AvbExitSuccess (Invoke-AvbPreFlight $cfg.builtDriverSha256))) { $Stop = "pre-flight failed before reproduction ($Configuration)"; break }
                 $repJson = Join-Path $ReportDir ("repro-{0}-{1}-{2}.json" -f $Configuration, ($item.Entry -replace '[^\w.-]', '_'), (Get-Date -Format 'HHmmss'))
                 $rrc = Invoke-AvbStep "reproduce $($item.Entry)" {
