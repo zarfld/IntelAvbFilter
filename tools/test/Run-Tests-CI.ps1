@@ -1044,51 +1044,81 @@ function Get-AvbHilState {
     return $st
 }
 
-# Returns @{ Diffs = enforced differences; Warn = observed-only differences }.
+# Returns @{ Diffs = enforced differences (text, unchanged semantics); Warn = observed-only differences;
+#           Items = the same findings structured: Kind diff|unobservable, Key (incident key = adapter|component|expected|observed),
+#           Adapter, Component, Expected, Observed, IdentityVerified, Text }.
+# Adapter identity: PnP instance id for adapter state; 'drv:<DID>#<driver index>' for clock registers - NOT a verified
+# physical identity (IdentityVerified = $false; global safety semantics apply).
 function Compare-AvbHilState {
     param($Base, $Cur)
-    $diffs = @(); $warn = @()
+    $diffs = @(); $warn = @(); $items = @()
+    $add = { param($Kind, $Adapter, $Comp, $Exp, $Obs, $Text, $Verified)
+             $script:__cmpItems += ,([pscustomobject]@{ Kind = $Kind; Key = ("{0}|{1}|{2}|{3}" -f $Adapter, $Comp, $Exp, $Obs); Adapter = $Adapter; Component = $Comp
+                                                        Expected = $Exp; Observed = $Obs; IdentityVerified = $Verified; Text = $Text }) }
+    $script:__cmpItems = @()
     if (-not $Cur.Ok) {
         $diffs += "adapter state not observable: $($Cur.Error)"
+        & $add 'unobservable' 'all-adapters' 'adapter-state' 'observable' 'unobservable' $diffs[-1] $false
     } else {
         $bMap = @{}; foreach ($a in $Base.Adapters) { $bMap[$a.InstanceId] = $a }
         $cMap = @{}; foreach ($a in $Cur.Adapters)  { $cMap[$a.InstanceId] = $a }
         foreach ($k in @($bMap.Keys)) {
-            if (-not $cMap.ContainsKey($k)) { $diffs += "${k}: adapter no longer present"; continue }
+            if (-not $cMap.ContainsKey($k)) { $diffs += "${k}: adapter no longer present"; & $add 'diff' "pnp:$k" 'presence' 'present' 'absent' $diffs[-1] $true; continue }
             foreach ($f in 'PnpStatus', 'Problem', 'AdminStatus', 'FilterBound') {
-                if ([string]$bMap[$k].$f -ne [string]$cMap[$k].$f) { $diffs += ("{0}: {1} {2} -> {3}" -f $k, $f, $bMap[$k].$f, $cMap[$k].$f) }
+                if ([string]$bMap[$k].$f -ne [string]$cMap[$k].$f) { $diffs += ("{0}: {1} {2} -> {3}" -f $k, $f, $bMap[$k].$f, $cMap[$k].$f); & $add 'diff' "pnp:$k" $f ([string]$bMap[$k].$f) ([string]$cMap[$k].$f) $diffs[-1] $true }
             }
             # Enforced (P0 2026-10-21): a link that does not return within the settle window is a state change.
             if ([string]$bMap[$k].MediaStatus -ne [string]$cMap[$k].MediaStatus) {
                 $diffs += ("{0}: link {1} -> {2}" -f $k, $bMap[$k].MediaStatus, $cMap[$k].MediaStatus)
+                & $add 'diff' "pnp:$k" 'MediaStatus' ([string]$bMap[$k].MediaStatus) ([string]$cMap[$k].MediaStatus) $diffs[-1] $true
             }
         }
-        foreach ($k in @($cMap.Keys)) { if (-not $bMap.ContainsKey($k)) { $diffs += "${k}: adapter appeared" } }
+        foreach ($k in @($cMap.Keys)) { if (-not $bMap.ContainsKey($k)) { $diffs += "${k}: adapter appeared"; & $add 'diff' "pnp:$k" 'presence' 'absent' 'present' $diffs[-1] $true } }
     }
     if ($Base.ClockOk) {
         if (-not $Cur.ClockOk) {
             $diffs += "PHC clock state not observable: $($Cur.ClockError)"
+            & $add 'unobservable' 'all-adapters' 'clock-state' 'observable' 'unobservable' $diffs[-1] $false
         } else {
             $bc = @{}; foreach ($c in $Base.Clock) { $bc["$($c.Did)#$($c.Index)"] = $c }
             $cc = @{}; foreach ($c in $Cur.Clock)  { $cc["$($c.Did)#$($c.Index)"] = $c }
             foreach ($k in @($bc.Keys)) {
                 $b = $bc[$k]
-                if (-not $cc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): no longer enumerated by the driver" -f $b.Did, $b.Index); continue }
+                if (-not $cc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): no longer enumerated by the driver" -f $b.Did, $b.Index); & $add 'diff' "drv:$k" 'enumeration' 'enumerated' 'absent' $diffs[-1] $false; continue }
                 $c = $cc[$k]
-                if ($b.Ok -and -not $c.Ok) { $diffs += ("DID {0} (driver index {1}): clock config no longer readable ({2})" -f $b.Did, $b.Index, $c.Error); continue }
+                if ($b.Ok -and -not $c.Ok) { $diffs += ("DID {0} (driver index {1}): clock config no longer readable ({2})" -f $b.Did, $b.Index, $c.Error); & $add 'unobservable' "drv:$k" 'clock-config' 'readable' 'unreadable' $diffs[-1] $false; continue }
                 if ($b.Ok -and $c.Ok -and $b.Timinca -ne $c.Timinca) {
                     $diffs += ("DID {0} (driver index {1}): TIMINCA 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Timinca, $c.Timinca)
+                    & $add 'diff' "drv:$k" 'TIMINCA' ('0x{0:X8}' -f [uint32]$b.Timinca) ('0x{0:X8}' -f [uint32]$c.Timinca) $diffs[-1] $false
                 }
                 if ($b.Ok -and $c.Ok -and $b.Tsauxc -ne $c.Tsauxc) {
                     $diffs += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
+                    & $add 'diff' "drv:$k" 'TSAUXC' ('0x{0:X8}' -f [uint32]$b.Tsauxc) ('0x{0:X8}' -f [uint32]$c.Tsauxc) $diffs[-1] $false
                 }
             }
             foreach ($k in @($cc.Keys)) {
-                if (-not $bc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): newly enumerated by the driver" -f $cc[$k].Did, $cc[$k].Index) }
+                if (-not $bc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): newly enumerated by the driver" -f $cc[$k].Did, $cc[$k].Index); & $add 'diff' "drv:$k" 'enumeration' 'absent' 'enumerated' $diffs[-1] $false }
             }
         }
     }
-    return @{ Diffs = $diffs; Warn = $warn }
+    $items = @($script:__cmpItems); $script:__cmpItems = @()
+    return @{ Diffs = $diffs; Warn = $warn; Items = $items }
+}
+
+# Incident resolution (pure).  $Open: ordered map incident key -> @{ IncidentId; Key; observations }.  An item whose key
+# matches an OPEN incident is an additional observation of it ('confirmed'); otherwise a new incident ('opened').
+# Closed (verified-restored) incidents are never in $Open, so a recurrence opens a new incident.
+function Resolve-AvbHilIncident {
+    param($Open, $Item, [string]$Check, [string]$Record, [string]$IncidentId = '')
+    $obs = [ordered]@{ check = $Check; record = $Record; utc = (Get-Date).ToUniversalTime().ToString('o'); observed = $Item.Observed }
+    if ($Open.Contains($Item.Key)) {
+        $inc = $Open[$Item.Key]; $inc.observations = @(@($inc.observations) + @($obs))
+        return @{ IncidentId = $inc.IncidentId; Role = 'confirmed'; Key = $Item.Key }
+    }
+    $id = if ($IncidentId) { $IncidentId } else { [guid]::NewGuid().ToString() }
+    $Open[$Item.Key] = @{ IncidentId = $id; Key = $Item.Key; Adapter = $Item.Adapter; Component = $Item.Component; Expected = $Item.Expected
+                          Observed = $Item.Observed; IdentityVerified = $Item.IdentityVerified; observations = @($obs) }
+    return @{ IncidentId = $id; Role = 'opened'; Key = $Item.Key }
 }
 
 # Records a failure-class verdict that the runner itself determined (counted, shown, and written as a log
@@ -1131,7 +1161,7 @@ function ConvertTo-AvbRunnerVerdict {
 
 # -Check: a runner check attributed to the current item (post-test state, driver health); not a test execution.
 function Add-AvbResult {
-    param([string]$Name, [string]$Status, $Exit, [string]$Reason = '', [string]$LogPath = '', [string[]]$Lines = @(), [switch]$Check)
+    param([string]$Name, [string]$Status, $Exit, [string]$Reason = '', [string]$LogPath = '', [string[]]$Lines = @(), [switch]$Check, [object[]]$Incidents = @())
     $script:results += [PSCustomObject]@{ Name = $Name; Status = $Status; Exit = $Exit }
     $it = $script:AvbItem
     $executed = ($null -ne $it -and $it.Executed -and -not $Check)
@@ -1145,6 +1175,7 @@ function Add-AvbResult {
         reason = $Reason; logPath = $(if ($LogPath) { $LogPath } elseif ($executed) { $it.LogPath } else { $null })
         startedUtc = $(if ($executed) { $it.StartedUtc } else { $null }); durationSeconds = $(if ($executed) { $it.DurationSeconds } else { $null })
         testcases = @()
+        incidents = @($Incidents | ForEach-Object { [ordered]@{ incidentId = $_.IncidentId; role = $_.Role; key = $_.Key } })
     }
     $tcLines = if ($Lines.Count -gt 0) { $Lines } elseif ($executed -and $null -ne $it.Output) { @($it.Output -split "`r?`n") } else { @() }
     $r.testcases = Get-AvbTestcaseVerdicts -Lines $tcLines   # already an array (unary-comma return); @() would nest it
@@ -1160,6 +1191,14 @@ function Write-AvbResultsJson {
                    'INCOMPLETE', 'INCONCLUSIVE', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION', 'FAILED_SETUP') {
         $counts[$v] = @($records | Where-Object { $_.verdict -eq $v }).Count
     }
+    # One persistent discrepancy = one incident, whatever number of independent checks observed it (Decision B).
+    $cleanRecs = @($records | Where-Object { $_.verdict -eq 'CLEANUP_FAILED' })
+    $incIds = @($cleanRecs | ForEach-Object { @($_.incidents) } | Where-Object { $_ } | ForEach-Object { $_.incidentId } | Sort-Object -Unique)
+    $counts['CLEANUP_FAILED'] = $incIds.Count + @($cleanRecs | Where-Object { @($_.incidents).Count -eq 0 }).Count
+    $cleanupIncidents = @(foreach ($id in $incIds) {
+        $obsRecs = @($cleanRecs | Where-Object { @($_.incidents | Where-Object { $_.incidentId -eq $id }).Count -gt 0 })
+        [ordered]@{ incidentId = $id; key = @(@($obsRecs[0].incidents) | Where-Object { $_.incidentId -eq $id })[0].key
+                    observations = @($obsRecs | ForEach-Object { $r = $_; [ordered]@{ record = $r.name; role = @(@($r.incidents) | Where-Object { $_.incidentId -eq $id })[0].role } }) } })
     $src = $script:SourceIdentity
     $evidence = if ($script:UnderGitHubActions -and -not $script:IsSandbox) { 'ci' }
                 elseif ($script:IsSandbox) { 'sandbox' }
@@ -1181,7 +1220,8 @@ function Write-AvbResultsJson {
         adapters = $adapters; stateHalt = $script:stateHalt
         machineSafety = $(if ($script:HilSafetyState) { [ordered]@{ path = $script:HilSafetyPath; stateAtStart = $script:HilSafetyState.State; why = $script:HilSafetyState.Why } } else { $null })
         executedCount = @($records | Where-Object { $_.executed }).Count; notExecutedCount = @($records | Where-Object { -not $_.executed -and -not $_.check }).Count
-        counts = $counts; overall = $Overall; exitCode = $ExitCode; records = $records
+        counts = $counts; cleanupObservations = $cleanRecs.Count; cleanupIncidents = $cleanupIncidents
+        overall = $Overall; exitCode = $ExitCode; records = $records
     }
     $dir = Split-Path -Parent $script:ResultsJsonPath
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -1211,7 +1251,7 @@ function Complete-AvbRun {
 }
 
 function Add-HilFailureRecord {
-    param([string]$Display, [string]$Status, [string]$Stem, [string]$Line, [switch]$Check)
+    param([string]$Display, [string]$Status, [string]$Stem, [string]$Line, [switch]$Check, [object[]]$Incidents = @())
     $script:failedTests++
     $script:totalTests++
     Write-Host "  $Line" -ForegroundColor Red
@@ -1220,7 +1260,7 @@ function Add-HilFailureRecord {
     $i = 2
     while (Test-Path -LiteralPath $p) { $p = Join-Path $script:logsDir ("{0}~{1}.exe_{2}.log" -f $Stem, $i, $ts); $i++ }
     $Line | Set-Content -LiteralPath $p -Encoding utf8
-    Add-AvbResult -Name $Display -Status $Status -Exit 'N/A' -Reason $Line -LogPath $p -Lines @($Line) -Check:$Check
+    Add-AvbResult -Name $Display -Status $Status -Exit 'N/A' -Reason $Line -LogPath $p -Lines @($Line) -Check:$Check -Incidents $Incidents
 }
 
 # Halt carried over from earlier suites of the same HIL job: '' or the reason.  Same stop rule as LocalSuites
@@ -1254,6 +1294,35 @@ function Get-AvbRunOverall {
         return @{ Overall = 'NO_TESTS'; Code = 0 }
     }
     return @{ Overall = 'PASSED'; Code = 0 }
+}
+
+# Registers every 'diff' item of a check as an incident observation (Resolve-AvbHilIncident) and persists it in the
+# machine-wide safety record: a new incident = a new event (id = incident id); a confirmation = one more observation of
+# the existing open event.  Returns the references for the result record.
+function Register-HilIncidents {
+    param([object[]]$Items, [string]$Check, [string]$Record, $Last = $null)
+    $refs = @()
+    foreach ($it in @($Items | Where-Object { $_.Kind -eq 'diff' })) {
+        $r = Resolve-AvbHilIncident -Open $script:HilIncidents -Item $it -Check $Check -Record $Record
+        if ($script:HilSafetyPath) {
+            $ev = [ordered]@{ verdict = 'CLEANUP_FAILED'; scope = 'GLOBAL'
+                hardware = [ordered]@{ adapter = $it.Adapter; identityVerified = [bool]$it.IdentityVerified }
+                trigger = [ordered]@{ check = $Check; record = $Record; testcase = $(if ($script:AvbItem) { $script:AvbItem.Entry })
+                                      executable = $(if ($script:AvbItem) { Split-Path -Leaf ([string]$script:AvbItem.Artifact) }); arguments = $(if ($script:AvbItem) { $script:AvbItem.Arguments })
+                                      suite = $Suite; configuration = $Configuration
+                                      runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB; pid = $PID; discrepancy = $it.Text }
+                initialState = $script:HilBaseline; lastKnownState = $Last
+                evidence = @(@($(if ($script:AvbItem) { $script:AvbItem.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ }) }
+            $pr = Add-AvbHilSafetyEvent -Path $script:HilSafetyPath -SafetyEvent $ev -IncidentKey $it.Key -EventId $r.IncidentId
+            if (-not $pr.Ok) { Write-Host "  [SAFETY-RECORD] incident $($r.IncidentId) NOT persisted in the record: $($pr.Why)" -ForegroundColor Red }
+        }
+        $refs += ,$r
+    }
+    return ,$refs
+}
+function Format-HilIncidentRefs([object[]]$Refs) {
+    if (@($Refs).Count -eq 0) { return '' }
+    return (' --- ' + ((@($Refs) | ForEach-Object { "incident $($_.IncidentId) $($_.Role)" }) -join '; '))
 }
 
 function Set-HilHalt {
@@ -1659,9 +1728,12 @@ function Invoke-HilPostTestCheck {
     }
     foreach ($w in @($cmp.Warn)) { Write-Host "  [WARN:STATE] after ${Display}: $w (observed, not enforced)" -ForegroundColor Yellow }
     if (@($cmp.Diffs).Count -gt 0) {
-        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' -Check `
-            -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change" -f $Display, (@($cmp.Diffs) -join '; '))
-        Set-HilHalt "CLEANUP_FAILED after $Display" -Verdict 'CLEANUP_FAILED' -Last $cur
+        $refs = Register-HilIncidents -Items $cmp.Items -Check 'per-test' -Record "$Display[STATE]" -Last $cur
+        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' -Check -Incidents $refs `
+            -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change{2}" -f $Display, (@($cmp.Diffs) -join '; '), (Format-HilIncidentRefs $refs))
+        # Discrepancies are persisted as incidents above; only a finding without a diff item (state unobservable) is a
+        # separate safety event.
+        if (@($refs).Count -gt 0) { Set-HilHalt "CLEANUP_FAILED after $Display" } else { Set-HilHalt "CLEANUP_FAILED after $Display" -Verdict 'CLEANUP_FAILED' -Last $cur }
         $script:HilBaseline = $cur   # later differences are attributed to later tests
         return
     }
@@ -1751,6 +1823,30 @@ if ($IsHardwareSuite) {
     }
 }
 
+# One session comparison (start or end of a suite): every check stays a visible record.  Differences are incident
+# observations (TC-INFRA-SESSION-001 start / -002 end, CLEANUP_FAILED, referencing opened/confirmed incidents);
+# components the check could not read are an explicit INCONCLUSIVE_RESTORATION (TC-INFRA-SESSION-003) - they never
+# hide or close an open incident.
+function Invoke-HilSessionCheck {
+    param($Cmp, [string]$Phase, $Last)
+    $diffItems = @($Cmp.Items | Where-Object { $_.Kind -eq 'diff' }); $unobs = @($Cmp.Items | Where-Object { $_.Kind -eq 'unobservable' })
+    $null = Add-AvbHilSessionCheck -Path $script:HilSessionPath -Check ([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); suite = $Suite; configuration = $Configuration; phase = $Phase
+                                                                                   diffs = @($diffItems | ForEach-Object { $_.Text }); unobservable = @($unobs | ForEach-Object { $_.Text }) })
+    $tc = if ($Phase -eq 'start') { 'TC-INFRA-SESSION-001' } else { 'TC-INFRA-SESSION-002' }
+    $disp = "HIL-SESSION[$Suite/$Configuration $Phase]"
+    if ($diffItems.Count -gt 0) {
+        $refs = Register-HilIncidents -Items $diffItems -Check "session-$Phase" -Record $disp -Last $Last
+        Add-HilFailureRecord -Display $disp -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-SESSION' -Check -Incidents $refs `
+            -Line ("[CLEANUP_FAILED] {0}: at {1} of {2}/{3}: state differs from the original session baseline ({4}, captured {5}): {6}{7}" -f $tc, $Phase, $Suite, $Configuration, $script:HilSession.sessionId, $script:HilSession.createdUtc, (@($diffItems | ForEach-Object { $_.Text }) -join '; '), (Format-HilIncidentRefs $refs))
+        Set-HilHalt "state at $Phase of $Suite/$Configuration differs from the original session baseline"
+    }
+    if ($unobs.Count -gt 0) {
+        Add-HilFailureRecord -Display "$disp[UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-SESSION' -Check `
+            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-SESSION-003: at {0} of {1}/{2}: session check could not read: {3} --- open incidents stay open" -f $Phase, $Suite, $Configuration, (@($unobs | ForEach-Object { $_.Text }) -join '; '))
+        Set-HilHalt "session check at $Phase of $Suite/$Configuration could not read the state" -Verdict 'INCONCLUSIVE_RESTORATION' -Last $Last
+    }
+}
+
 # Before every non-ReadOnly item: the lock must still be owned by this execution.
 function Test-AvbHilLockStillOwned {
     if ($script:HilLockAcquired) { return (Test-AvbHilLockHeld -Owner $script:HilLockAcquired -Path $script:HilLockPath) }
@@ -1767,6 +1863,17 @@ if ($IsHardwareSuite) {
         $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnLogsDir $logsDir
         if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
     }
+    # Open incidents of this machine (unrecovered events with an incident key): a discrepancy that persists into this
+    # run confirms the SAME incident instead of opening a new one.
+    $HilIncidents = [ordered]@{}
+    if ($HilSafetyState.Record) {
+        foreach ($ev in @($HilSafetyState.Record.events)) {
+            if ($null -ne $ev -and $ev.PSObject.Properties['incidentKey'] -and $ev.incidentKey -and $ev.recovery.status -in @('PENDING', 'ATTEMPTED')) {
+                $HilIncidents[[string]$ev.incidentKey] = @{ IncidentId = [string]$ev.eventId; Key = [string]$ev.incidentKey; observations = @() }
+            }
+        }
+    }
+
     # Original SESSION baseline (tools/lib/HilLock.ps1): read / compared / created only by a run that OWNS the lock.
     # Created only on a CLEAR machine without any halt (a snapshot never establishes a clean state after an unresolved
     # failure); an unusable file is FAILED_SETUP and preserved; a different session's file is archived, never overwritten.
@@ -1785,12 +1892,7 @@ if ($IsHardwareSuite) {
         } elseif ($rs.State -eq 'OK' -and $rs.Session.sessionId -eq $sid) {
             $HilSession = $rs.Session
             $cmpS = Compare-AvbHilState $HilSession.baseline $script:HilBaseline
-            $null = Add-AvbHilSessionCheck -Path $HilSessionPath -Check ([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); suite = $Suite; configuration = $Configuration; phase = 'start'; diffs = @($cmpS.Diffs) })
-            if (@($cmpS.Diffs).Count -gt 0) {
-                Add-HilFailureRecord -Display "HIL-SESSION[$Suite/$Configuration start]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-SESSION' -Check `
-                    -Line ("[CLEANUP_FAILED] TC-INFRA-SESSION-001: at start of {0}/{1}: state differs from the original session baseline ({2}, captured {3}): {4} --- a change escaped per-test cleanup; Init/Mutating BLOCKED" -f $Suite, $Configuration, $sid, $HilSession.createdUtc, (@($cmpS.Diffs) -join '; '))
-                Set-HilHalt "state at start of $Suite/$Configuration differs from the original session baseline" -Verdict 'CLEANUP_FAILED' -Last $script:HilBaseline
-            }
+            Invoke-HilSessionCheck -Cmp $cmpS -Phase 'start' -Last $script:HilBaseline
         } elseif ($HilSafetyState.State -eq 'CLEAR' -and -not $stateHalt -and $script:HilBaseline -and $script:HilBaseline.Ok) {
             $HilSession = New-AvbHilSession -Path $HilSessionPath -SessionId $sid -Owner $sessOwner -Baseline $script:HilBaseline `
                 -Provenance ([ordered]@{ suite = $Suite; configuration = $Configuration; runner = 'tools/test/Run-Tests-CI.ps1'; pid = $PID; driverSha256 = $env:HIL_DRIVER_SHA256
@@ -2139,12 +2241,7 @@ $script:AvbItem = $null
 if ($IsHardwareSuite -and $HilSession) {
     $endState = Get-AvbHilState
     $cmpE = Compare-AvbHilState $HilSession.baseline $endState
-    $null = Add-AvbHilSessionCheck -Path $HilSessionPath -Check ([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); suite = $Suite; configuration = $Configuration; phase = 'end'; diffs = @($cmpE.Diffs) })
-    if (@($cmpE.Diffs).Count -gt 0) {
-        Add-HilFailureRecord -Display "HIL-SESSION[$Suite/$Configuration end]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-SESSION' -Check `
-            -Line ("[CLEANUP_FAILED] TC-INFRA-SESSION-002: at end of {0}/{1}: state differs from the original session baseline ({2}): {3}" -f $Suite, $Configuration, $HilSession.sessionId, (@($cmpE.Diffs) -join '; '))
-        Set-HilHalt "state at end of $Suite/$Configuration differs from the original session baseline" -Verdict 'CLEANUP_FAILED' -Last $endState
-    }
+    Invoke-HilSessionCheck -Cmp $cmpE -Phase 'end' -Last $endState
 }
 
 # ===========================

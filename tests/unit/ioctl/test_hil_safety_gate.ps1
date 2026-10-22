@@ -798,10 +798,18 @@ $rR11a = Invoke-Sandbox 'runR11a' @($tTim, $tRo) -AllSupportedEnabled -ExtraEnv 
 $s11a = Read-Session $ss11
 $rR11b = Invoke-Sandbox 'runR11b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss11 -SafetyFile $sf11 -StateEdit $timChg -Suite 'HardwareIntegration'
 $s11b = Read-Session $ss11
+# Decision B: every check stays visible (STATE-001 + SESSION-002 in run A, SESSION-001 in run B) but the damage is ONE
+# incident: run A opens it per test and confirms it at suite end; run B confirms the SAME incident id (loaded from the
+# machine record) - one machine-record event with all observations, never re-baselined.
+$a11St = @([regex]::Matches($rR11a.Out, '\[CLEANUP_FAILED\] TC-INFRA-STATE-001[^\r\n]*incident ([0-9a-f-]{36}) opened') | ForEach-Object { $_.Groups[1].Value })
+$a11Se = @([regex]::Matches($rR11a.Out, '\[CLEANUP_FAILED\] TC-INFRA-SESSION-002[^\r\n]*incident ([0-9a-f-]{36}) confirmed') | ForEach-Object { $_.Groups[1].Value })
+$b11S1 = @([regex]::Matches($rR11b.Out, '\[CLEANUP_FAILED\] TC-INFRA-SESSION-001[^\r\n]*TIMINCA[^\r\n]*incident ([0-9a-f-]{36}) confirmed') | ForEach-Object { $_.Groups[1].Value })
+$ev11 = @(@((Read-AvbHilSafetyState -Path $sf11).Record.events) | Where-Object { $_.PSObject.Properties['incidentKey'] -and $_.incidentKey -match '\|TIMINCA\|' })
 tc_check 'TEST-HILGATE-064-failed-restoration-stays-visible-against-the-original-baseline-in-the-next-suite' `
-    (@(Get-SessFail $rR11a | Where-Object { $_ -match 'TC-INFRA-SESSION-002' }).Count -eq 1 -and @(Get-SessFail $rR11b | Where-Object { $_ -match 'TC-INFRA-SESSION-001[^\r\n]*TIMINCA' }).Count -eq 1 -and
+    ($a11St.Count -eq 1 -and $a11Se.Count -eq 1 -and $b11S1.Count -eq 1 -and $a11Se[0] -eq $a11St[0] -and $b11S1[0] -eq $a11St[0] -and
+     $ev11.Count -eq 1 -and $ev11[0].eventId -eq $a11St[0] -and @($ev11[0].observations).Count -eq 3 -and
      $s11a -and $s11b.createdUtc -eq $s11a.createdUtc -and (Get-RanCount $rR11b '^RAN test_sbfake_tgt ') -eq 0) `
-    ("a: {0} ### b: {1}" -f ((Get-SessFail $rR11a) -join ' | '), ((Get-SessFail $rR11b) -join ' | '))
+    ("a: state=[{0}] session-end=[{1}] ### b: session-start=[{2}] ### events={3} observations={4}" -f ($a11St -join ','), ($a11Se -join ','), ($b11S1 -join ','), $ev11.Count, $(if ($ev11.Count) { @($ev11[0].observations).Count }))
 
 # --- Run S: elevation and unambiguous identity are verified independently before mutation (Q 2026-10-21) -----------
 # 065: a non-elevated token never mutates (elevation is necessary, never sufficient); ReadOnly continues

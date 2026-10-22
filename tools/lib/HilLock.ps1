@@ -230,7 +230,9 @@ function Read-AvbHilSafetyState {
     }
     if ($r.status -eq 'HALTED') {
         if ($open.Count -eq 0) { return (& $un 'safety record inconsistent: HALTED without an unrecovered event') }
-        return @{ State = 'HALTED'; Why = ("{0} unrecovered safety event(s), first: {1} {2} at {3}" -f $open.Count, $open[0].verdict, $open[0].trigger.executable, $open[0].utc); Record = $r }
+        $tr = $open[0].trigger
+        $what = if ($null -eq $tr) { '' } else { @(foreach ($n in 'executable', 'record', 'testcase') { if ($tr.PSObject.Properties[$n] -and $tr.$n) { $tr.$n } })[0] }
+        return @{ State = 'HALTED'; Why = ("{0} unrecovered safety event(s), first: {1} {2} at {3}" -f $open.Count, $open[0].verdict, $what, $open[0].utc); Record = $r }
     }
     if ($r.status -eq 'CLEAR') {
         if ($open.Count -gt 0) { return (& $un 'safety record inconsistent: CLEAR with unrecovered events') }
@@ -253,12 +255,17 @@ function Initialize-AvbHilSafetyRecord {
 
 # $SafetyEvent (-Event): verdict, scope, hardware, trigger, initialState, lastKnownState, evidence (eventId/utc/host/recovery are added).
 function Add-AvbHilSafetyEvent {
-    param([string]$Path = (Get-AvbHilSafetyPath), [Alias('Event')]$SafetyEvent)
+    # -IncidentKey: a hardware discrepancy (adapter|component|expected|observed).  An OPEN event with the same key gets an
+    # appended observation (one incident, many observations; history append-only); otherwise a new event whose id is
+    # -EventId when given (the runner's incident id).
+    param([string]$Path = (Get-AvbHilSafetyPath), [Alias('Event')]$SafetyEvent, [string]$IncidentKey = '', [string]$EventId = '')
     $now = (Get-Date).ToUniversalTime().ToString('o')
     # StrictMode-safe: callers may omit optional fields.
     $f = { param($n) if ($SafetyEvent -is [System.Collections.IDictionary]) { if ($SafetyEvent.Contains($n)) { $SafetyEvent[$n] } } elseif ($null -ne $SafetyEvent -and $SafetyEvent.PSObject.Properties[$n]) { $SafetyEvent.$n } }
     $scope = & $f 'scope'
-    $e = [ordered]@{ eventId = [guid]::NewGuid().ToString(); utc = $now; host = $env:COMPUTERNAME
+    $obs = [ordered]@{ utc = $now; trigger = (& $f 'trigger'); lastKnownState = (& $f 'lastKnownState') }
+    $e = [ordered]@{ eventId = $(if ($EventId) { $EventId } else { [guid]::NewGuid().ToString() }); utc = $now; host = $env:COMPUTERNAME
+                     incidentKey = $(if ($IncidentKey) { $IncidentKey } else { $null }); observations = @($obs)
                      scope = $(if ($scope) { $scope } else { 'GLOBAL' }); hardware = (& $f 'hardware'); trigger = (& $f 'trigger')
                      verdict = (& $f 'verdict'); initialState = (& $f 'initialState'); lastKnownState = (& $f 'lastKnownState')
                      evidence = @(& $f 'evidence'); recovery = [ordered]@{ status = 'PENDING' } }
@@ -272,9 +279,18 @@ function Add-AvbHilSafetyEvent {
     $rec = if ($st.Record) { $st.Record } else {
         [pscustomobject]@{ schema = 'avb-hil-safety/1'; host = $env:COMPUTERNAME; status = 'HALTED'; baseline = $null; events = @()
                            history = @([ordered]@{ utc = $now; operation = 'CREATED_BY_EVENT'; operator = ''; reason = 'no record existed when a safety event occurred' }) } }
+    if ($IncidentKey) {
+        $same = @(@($rec.events) | Where-Object { $null -ne $_ -and $_.PSObject.Properties['incidentKey'] -and $_.incidentKey -eq $IncidentKey -and $_.recovery.status -in @('PENDING', 'ATTEMPTED') })
+        if ($same.Count -gt 0) {   # same open incident: one more observation, never a second event
+            $ev = $same[0]
+            if ($ev.PSObject.Properties['observations']) { $ev.observations = @(@($ev.observations) + @($obs)) } else { $ev | Add-Member -NotePropertyName observations -NotePropertyValue @($obs) }
+            Write-AvbHilSafetyFile $Path $rec
+            return @{ Ok = $true; Why = ''; EventId = $ev.eventId; Merged = $true }
+        }
+    }
     $rec.events = @(@($rec.events) + @($e)); $rec.status = 'HALTED'
     Write-AvbHilSafetyFile $Path $rec
-    return @{ Ok = $true; Why = ''; EventId = $e.eventId }
+    return @{ Ok = $true; Why = ''; EventId = $e.eventId; Merged = $false }
 }
 
 function Clear-AvbHilSafetyHalt {
