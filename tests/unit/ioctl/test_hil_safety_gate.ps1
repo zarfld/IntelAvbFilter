@@ -804,10 +804,14 @@ $s11b = Read-Session $ss11
 $a11St = @([regex]::Matches($rR11a.Out, '\[CLEANUP_FAILED\] TC-INFRA-STATE-001[^\r\n]*incident ([0-9a-f-]{36}) opened') | ForEach-Object { $_.Groups[1].Value })
 $a11Se = @([regex]::Matches($rR11a.Out, '\[CLEANUP_FAILED\] TC-INFRA-SESSION-002[^\r\n]*incident ([0-9a-f-]{36}) confirmed') | ForEach-Object { $_.Groups[1].Value })
 $b11S1 = @([regex]::Matches($rR11b.Out, '\[CLEANUP_FAILED\] TC-INFRA-SESSION-001[^\r\n]*TIMINCA[^\r\n]*incident ([0-9a-f-]{36}) confirmed') | ForEach-Object { $_.Groups[1].Value })
+$b11S2 = @([regex]::Matches($rR11b.Out, '\[CLEANUP_FAILED\] TC-INFRA-SESSION-002[^
+]*TIMINCA[^
+]*incident ([0-9a-f-]{36}) confirmed') | ForEach-Object { $_.Groups[1].Value })
 $ev11 = @(@((Read-AvbHilSafetyState -Path $sf11).Record.events) | Where-Object { $_.PSObject.Properties['incidentKey'] -and $_.incidentKey -match '\|TIMINCA\|' })
+# four independent observations of the one incident: A per-test (opened), A session end, B session start, B session end
 tc_check 'TEST-HILGATE-064-failed-restoration-stays-visible-against-the-original-baseline-in-the-next-suite' `
-    ($a11St.Count -eq 1 -and $a11Se.Count -eq 1 -and $b11S1.Count -eq 1 -and $a11Se[0] -eq $a11St[0] -and $b11S1[0] -eq $a11St[0] -and
-     $ev11.Count -eq 1 -and $ev11[0].eventId -eq $a11St[0] -and @($ev11[0].observations).Count -eq 3 -and
+    ($a11St.Count -eq 1 -and $a11Se.Count -eq 1 -and $b11S1.Count -eq 1 -and $b11S2.Count -eq 1 -and $a11Se[0] -eq $a11St[0] -and $b11S1[0] -eq $a11St[0] -and
+     $b11S2[0] -eq $a11St[0] -and $ev11.Count -eq 1 -and $ev11[0].eventId -eq $a11St[0] -and @($ev11[0].observations).Count -eq 4 -and
      $s11a -and $s11b.createdUtc -eq $s11a.createdUtc -and (Get-RanCount $rR11b '^RAN test_sbfake_tgt ') -eq 0) `
     ("a: state=[{0}] session-end=[{1}] ### b: session-start=[{2}] ### events={3} observations={4}" -f ($a11St -join ','), ($a11Se -join ','), ($b11S1 -join ','), $ev11.Count, $(if ($ev11.Count) { @($ev11[0].observations).Count }))
 

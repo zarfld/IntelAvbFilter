@@ -219,8 +219,8 @@ tc_check 'TEST-RESULTSJSON-016-blocked-items-are-recorded-as-not-executed-with-t
 # confirms the SAME incident - two observations, one incident, both non-executed check records.
 $recPer = @($recState | Where-Object { @($_.testcases).Count -eq 1 -and @($_.testcases)[0].Id -eq 'TC-INFRA-STATE-001' })
 $recSes = @($recState | Where-Object { @($_.testcases).Count -eq 1 -and @($_.testcases)[0].Id -eq 'TC-INFRA-SESSION-002' })
-$incPer = if ($recPer.Count -eq 1) { @($recPer[0].incidents) } else { @() }
-$incSes = if ($recSes.Count -eq 1) { @($recSes[0].incidents) } else { @() }
+$incPer = @(if ($recPer.Count -eq 1) { @($recPer[0].incidents) })
+$incSes = @(if ($recSes.Count -eq 1) { @($recSes[0].incidents) })
 tc_check 'TEST-RESULTSJSON-017-cleanup-failure-is-a-check-record-separate-from-the-test-verdict' `
     (($recClean.verdict -eq 'PASSED') -and ($recPer.Count -eq 1) -and ($recSes.Count -eq 1) -and -not $recPer[0].executed -and -not $recSes[0].executed -and
      ($recPer[0].name -match 'rj_cleanup') -and (@($recPer[0].testcases)[0] -isnot [array]) -and
