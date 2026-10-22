@@ -91,6 +91,16 @@ static void tc_blocked(const char *reason)
     printf("  [BLOCKED] %s\n", reason);
 }
 
+/* FAILED_SETUP = the test's precondition was not established; a failure-class verdict, never PASS/SKIP.  Used only
+ * BEFORE the test's first state-modifying IOCTL: the line claims "no state modified", which Run-Tests-CI.ps1 verifies
+ * independently (adapter/TIMINCA/TSAUXC equality, PHC timeline continuity) before it treats the run as no mutation. */
+static void tc_failed_setup(const char *id, uint32_t adapter_idx, const char *why)
+{
+    s_total++;
+    s_failed++;
+    printf("  [FAILED_SETUP] %s/adapter:%u: %s --- no state modified\n", id, adapter_idx, why);
+}
+
 /* -------------------------------------------------------------------------
  * QPC helper — user-mode QueryPerformanceCounter wrapper
  * -------------------------------------------------------------------------*/
@@ -245,10 +255,11 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     printf("  Verifies: #149 (REQ-F-PTP-007) | Traces to: #48 , Spec: issue #199\n");
 
     /* --- Step 1: Verify TX-PHC correlation before reset --- */
+    /* Step 1-2 are the precondition (TX-PHC correlated before the reset).  Every exit here happens before the first
+     * SET_TIMESTAMP: FAILED_SETUP (not SKIP, not a test FAIL), so the epoch-reset coverage stays visibly missing. */
     uint64_t phc_before = 0;
     if (!read_phc(hDev, adapter_idx, &phc_before)) {
-        printf("  [SKIP] PHC read failed — adapter not ready\n");
-        tc_skip("UT-CORR-005 Epoch Reset: adapter not ready");
+        tc_failed_setup("UT-CORR-005", adapter_idx, "PHC read failed - adapter not ready; SET_TIMESTAMP not issued");
         return;
     }
     printf("  phc_before = %llu ns\n", (unsigned long long)phc_before);
@@ -256,20 +267,26 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     uint64_t tx_before = 0;
     uint64_t phc_before_send = 0;  /* atomic PHC ref from kernel IOCTL entry */
     bool tx_before_ok = send_ptp_get_tx(hDev, adapter_idx, 0x500U, &tx_before, &phc_before_send);
-    bool corr_before_ok = true;
-    if (tx_before_ok) {
+    if (!tx_before_ok) {
+        /* Previously only a NOTE and the reset ran anyway: the procedure's step 2 (correlation before reset) was then
+         * never established, and the epoch-reset result could not be attributed to TX timestamping. */
+        tc_failed_setup("UT-CORR-005", adapter_idx,
+                        "TX timestamp not available before reset (link down / HW ts disabled); SET_TIMESTAMP not issued");
+        return;
+    }
+    {
         int64_t d = (int64_t)(tx_before - phc_before_send);
         printf("  tx_before  = %llu ns  (delta = %lld ns)\n",
                (unsigned long long)tx_before, (long long)d);
         if (d < 0 || (uint64_t)d >= DELTA_1US_NS) {
-            printf("  FAIL: |tx_before - phc_before_send| = %lld ns >= 1 us\n", (long long)d);
-            tc_result("UT-CORR-005 TX-PHC correlation valid before reset", false);
+            char why[200];
+            snprintf(why, sizeof(why),
+                     "TX-PHC correlation before reset %lld ns not in [0, 1000) ns (tx=%llu phc_at_send=%llu); SET_TIMESTAMP not issued",
+                     (long long)d, (unsigned long long)tx_before, (unsigned long long)phc_before_send);
+            tc_failed_setup("UT-CORR-005", adapter_idx, why);
             return;
         }
-    } else {
-        printf("  NOTE: TX timestamp not available before reset (link down / HW ts disabled)\n");
     }
-    (void)corr_before_ok;  /* suppress unused-variable warning */
 
     /* --- Step 2: Reset PHC --- */
     AVB_TIMESTAMP_REQUEST set_req = {0};

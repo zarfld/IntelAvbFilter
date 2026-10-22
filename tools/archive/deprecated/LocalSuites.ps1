@@ -108,7 +108,11 @@ function Get-AvbStopReason {
 # and still executes eligible ReadOnly tests (same as hil.yml).  The run stays nonpassing.
 function Get-AvbSafetyHalt {
     param($Doc)
-    $bad = @(@($Doc.records) | Where-Object { $_.verdict -in @('FAILED(TIMEOUT)', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION') })
+    # A ReadOnly timeout with a terminated process tree and verified unchanged state (Run-Tests-CI timeoutDisposition
+    # TERMINATED_STATE_VERIFIED) stays FAILED in the inventory but is no halt - same rule as Get-AvbPriorHalt (D2).
+    $bad = @(@($Doc.records) | Where-Object { $_.verdict -in @('FAILED(TIMEOUT)', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION') -and -not (
+                $_.verdict -eq 'FAILED(TIMEOUT)' -and $_.PSObject.Properties['safetyClass'] -and $_.safetyClass -eq 'ReadOnly' -and
+                $_.PSObject.Properties['timeoutDisposition'] -and $_.timeoutDisposition -eq 'TERMINATED_STATE_VERIFIED') })
     $why = @()
     if ($bad.Count -gt 0) { $why += ("hardware state not verified: {0}" -f (($bad | ForEach-Object { "$($_.name)=$($_.verdict)" }) -join ', ')) }
     if ($Doc.stateHalt) { $why += "state-integrity halt: $($Doc.stateHalt)" }

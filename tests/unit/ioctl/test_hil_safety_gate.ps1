@@ -261,6 +261,7 @@ Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $Tree 'to
 Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Tree 'tools\lib\NativeExit.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $Tree 'tools\lib\SourceDigest.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $Tree 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
+Copy-Item (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1') (Join-Path $Tree 'tools\lib\PhcRestoration.ps1')   # PHC evaluator (D1)
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
@@ -272,7 +273,8 @@ $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=Init;test_sbfake_mut=Mutating;' +
            'test_sbfake_tgt=Mutating:Target;test_sbfake_unsafe=Unsafe;test_sbfake_disabler=ReadOnly;' +
            'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
-           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target'
+           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target;' +
+           'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
 # TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: INCONCLUSIVE_RESTORATION.
@@ -346,7 +348,7 @@ function Invoke-Sandbox {
         AVB_TEST_SANDBOX_MUTATES = $Mutates; AVB_TEST_HIL_SAFETY_FILE = $SafetyFile; AVB_TEST_HIL_LOCK_FILE = $LockFile; AVB_TEST_HIL_SESSION_FILE = $SessionFile
         GITHUB_RUN_ID = ''; GITHUB_RUN_ATTEMPT = ''; GITHUB_JOB = ''
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
-        AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
+        AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''; AVB_TEST_SANDBOX_TIMEOUTS = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = 'sandbox-rev'; AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
     }
     foreach ($k in $ExtraEnv.Keys) { $envs[$k] = $ExtraEnv[$k] }
@@ -683,11 +685,13 @@ tc_check 'TEST-HILGATE-052-absent-lock-is-acquired-before-mutation-and-released'
     ((Get-RanCount $rQ2 '^RAN test_sbfake_init ') -eq 1 -and $rQ2.Out -match 'machine lock acquired by this run' -and -not (Test-Path $lfAbsent)) (Tail $rQ2)
 # 053: lock lost during execution -> no further mutation, LOCK_LOST persisted in the machine safety record
 # A CLEAR record through the real bootstrap path: initialize (UNBASELINED) + authorized baseline under the lock.
-function New-ClearSafetyFile([string]$Name) {
+function New-ClearSafetyFile([string]$Name, [object[]]$PhcTolerance = @()) {
     $f = Join-Path $Tmp $Name; $null = Initialize-AvbHilSafetyRecord -Path $f -Operator 'test' -Reason $Name
     $bl = Join-Path $Tmp "$Name.baseline.json"
-    ([ordered]@{ schema = 'avb-hil-baseline-authorization/1'; host = $env:COMPUTERNAME; verdict = 'BASELINE_VERIFIED'
-                 inventory = @([ordered]@{ did = '0x125B'; mac = '00-11-22-33-44-55' }); measurements = @([ordered]@{ name = 'TIMINCA'; value = '0x08000000' }) } | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $bl -Encoding UTF8
+    $doc = [ordered]@{ schema = 'avb-hil-baseline-authorization/1'; host = $env:COMPUTERNAME; verdict = 'BASELINE_VERIFIED'
+                       inventory = @([ordered]@{ did = '0x125B'; mac = '00-11-22-33-44-55' }); measurements = @([ordered]@{ name = 'TIMINCA'; value = '0x08000000' }) }
+    if ($PhcTolerance.Count -gt 0) { $doc.phcTolerance = $PhcTolerance }
+    ($doc | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $bl -Encoding UTF8
     $lp = Join-Path $Tmp "$Name.lock"; $lk = Enter-AvbHilLock -Kind 'local' -Label 'test bootstrap' -Path $lp
     $a = Approve-AvbHilSafetyBaseline -Path $f -Operator 'test' -Authorization 'synthetic sandbox baseline' -LockOwner $lk.Owner -LockPath $lp -BaselineEvidence $bl
     $null = Exit-AvbHilLock -Owner $lk.Owner -Path $lp
@@ -955,6 +959,112 @@ tc_check 'TEST-HILGATE-039-init-blocked-unattended-but-runs-attended' `
      $rK2.Exit -eq 1 -and ($rK2.Out -match '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after test_sbfake_init\.ps1 \(Init\)') -and
      ($rK2.Out -match 'Failed : 1\b') -and ($rK2.Out -notmatch '\[(FAIL|BLOCKED|CLEANUP_FAILED)\] TC-')) `
     ("unattended: ran={0} exit={1} | attended: ran={2} exit={3} | {4}" -f ($rK1.Ran -join '/'), $rK1.Exit, ($rK2.Ran -join '/'), $rK2.Exit, (Tail $rK1))
+
+# --- D2 (Q 2026-10-22): a genuinely ReadOnly timeout stays FAILED(TIMEOUT) but halts no later mutation once the process
+# tree has terminated (outstanding I/O resolved) and the state is verified unchanged; otherwise the halt stays.
+function Get-ExecRecords($r, [string]$rx) {
+    return @(Get-ChildItem (Join-Path $r.Dir 'logs') -Filter 'results-*.json' -ErrorAction SilentlyContinue |
+        ForEach-Object { @((Get-Content $_.FullName -Raw | ConvertFrom-Json).records) } | Where-Object { $_.executed -and $_.name -match $rx })
+}
+function Get-Disposition($rec) { if ($rec -and $rec.PSObject.Properties['timeoutDisposition']) { return [string]$rec.timeoutDisposition }; return '(none)' }
+$tRoSlp = New-Fake 'test_sbfake_rosleep' 'Start-Sleep -Seconds 120'
+$rTo1 = Invoke-Sandbox 'runTO1' @($tRoSlp, $tInit) -Timeout 3 -AllSupportedEnabled
+$to1 = @(Get-ExecRecords $rTo1 'test_sbfake_rosleep')
+tc_check 'TEST-HILGATE-070-readonly-timeout-terminated-state-verified-stays-failed-but-does-not-halt' `
+    ($to1.Count -eq 1 -and $to1[0].verdict -eq 'FAILED(TIMEOUT)' -and (Get-Disposition $to1[0]) -eq 'TERMINATED_STATE_VERIFIED' -and
+     (Get-RanCount $rTo1 '^RAN test_sbfake_init ') -eq 1 -and $rTo1.Out -notmatch '\[HALT\][^\r\n]*test_sbfake_rosleep' -and $rTo1.Exit -eq 1) `
+    ("records={0} verdict={1} disposition={2} exit={3}; ran: {4}; {5}" -f $to1.Count, $(if ($to1.Count) { $to1[0].verdict }), (Get-Disposition $(if ($to1.Count) { $to1[0] })), $rTo1.Exit, ($rTo1.Ran -join ' / '), (Tail $rTo1))
+
+# 071: cross-suite - only a ReadOnly FAILED(TIMEOUT) with a verified disposition is not a prior halt; a record without
+# the disposition (older runner) or a non-ReadOnly timeout still halts (fail closed).
+function New-TimeoutPrior([string]$Name, [string]$Class, [string]$Disposition) {
+    $d = Join-Path $Tmp $Name; New-Item -ItemType Directory -Path $d -Force | Out-Null
+    $rec = [ordered]@{ name = 'test_prior.exe'; verdict = 'FAILED(TIMEOUT)'; executed = $true; safetyClass = $Class }
+    if ($Disposition) { $rec.timeoutDisposition = $Disposition }
+    ([ordered]@{ schema = 'avb-runner-results/1'; suite = 'HardwareUnit'; configuration = 'Debug'; overall = 'FAILED'; exitCode = 1; stateHalt = ''; records = @($rec) } |
+        ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $d 'results-Debug-HardwareUnit.json') -Encoding UTF8
+    return $d
+}
+$rTo2a = Invoke-Sandbox 'runTO2a' @($tInit, $tRo) -AllSupportedEnabled -PriorResultsDir (New-TimeoutPrior 'priorRoVerified' 'ReadOnly' 'TERMINATED_STATE_VERIFIED')
+$rTo2b = Invoke-Sandbox 'runTO2b' @($tInit, $tRo) -AllSupportedEnabled -PriorResultsDir (New-TimeoutPrior 'priorRoLegacy' 'ReadOnly' '')
+$rTo2c = Invoke-Sandbox 'runTO2c' @($tInit, $tRo) -AllSupportedEnabled -PriorResultsDir (New-TimeoutPrior 'priorInitTimeout' 'Init' 'TERMINATED_STATE_VERIFIED')
+tc_check 'TEST-HILGATE-071-only-a-verified-readonly-timeout-is-not-a-prior-halt' `
+    ((Get-RanCount $rTo2a '^RAN test_sbfake_init ') -eq 1 -and $rTo2a.Out -notmatch 'prior suite' -and
+     (Get-RanCount $rTo2b '^RAN test_sbfake_init ') -eq 0 -and $rTo2b.Out -match 'state-integrity halt \(prior suite' -and
+     (Get-RanCount $rTo2c '^RAN test_sbfake_init ') -eq 0 -and $rTo2c.Out -match 'state-integrity halt \(prior suite' -and
+     (Get-RanCount $rTo2b '^RAN test_sbfake_ro ') -eq 1 -and (Get-RanCount $rTo2c '^RAN test_sbfake_ro ') -eq 1) `
+    ("verified: ran={0} | legacy: ran={1} | init: ran={2} || {3}" -f ($rTo2a.Ran -join '/'), ($rTo2b.Ran -join '/'), ($rTo2c.Ran -join '/'), (Tail $rTo2a))
+
+# 072: a child process of a timed-out ReadOnly test is terminated by the runner and verified gone before the disposition.
+$childPidFile = Join-Path $Tmp 'rochild.pid'
+$tRoChild = New-Fake 'test_sbfake_rochild' ("`$cp = Start-Process powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 120' -WindowStyle Hidden -PassThru; " +
+    "Set-Content -LiteralPath '$($childPidFile.Replace("'", "''"))' -Value `$cp.Id; Start-Sleep -Seconds 120")
+$rTo3 = Invoke-Sandbox 'runTO3' @($tRoChild, $tInit) -Timeout 4 -AllSupportedEnabled
+$childPid = if (Test-Path $childPidFile) { [int](Get-Content $childPidFile -Raw).Trim() } else { 0 }
+$childAlive = ($childPid -gt 0) -and ($null -ne (Get-Process -Id $childPid -ErrorAction SilentlyContinue))
+if ($childAlive) { Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue }   # never leave the fixture child behind
+$to3 = @(Get-ExecRecords $rTo3 'test_sbfake_rochild')
+tc_check 'TEST-HILGATE-072-timed-out-readonly-child-processes-are-terminated-and-verified' `
+    ($childPid -gt 0 -and -not $childAlive -and $to3.Count -eq 1 -and (Get-Disposition $to3[0]) -eq 'TERMINATED_STATE_VERIFIED' -and
+     (Get-RanCount $rTo3 '^RAN test_sbfake_init ') -eq 1) `
+    ("child pid={0} aliveAfterRun={1} disposition={2}; ran: {3}; {4}" -f $childPid, $childAlive, (Get-Disposition $(if ($to3.Count) { $to3[0] })), ($rTo3.Ran -join ' / '), (Tail $rTo3))
+
+# 073: per-test timeout ($HilTestTimeoutSeconds; sandbox: AVB_TEST_SANDBOX_TIMEOUTS) replaces a shorter suite timeout for
+# that entry only; the runner's table gives test_atdecc_aen_protocol 420 s (3 adapters x (30+60+31) s of test waits).
+$tRoSlow = New-Fake 'test_sbfake_roslow' 'Start-Sleep -Seconds 6'
+$rTo4 = Invoke-Sandbox 'runTO4' @($tRoSlow, $tRoSlp) -Timeout 3 -AllSupportedEnabled -ExtraEnv @{ AVB_TEST_SANDBOX_TIMEOUTS = 'test_sbfake_roslow=30' }
+$toAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.Left.VariablePath.UserPath -eq 'HilTestTimeoutSeconds' }, $true) | Select-Object -First 1
+$atdecc = $null
+if ($toAst) { foreach ($kv in @($toAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs)) { if ($kv.Item1.Value -eq 'test_atdecc_aen_protocol') { $atdecc = $kv.Item2.Extent.Text } } }
+tc_check 'TEST-HILGATE-073-per-test-timeout-applies-to-that-entry-only' `
+    ($rTo4.Out -notmatch 'test_sbfake_roslow\.ps1 TIMEOUT' -and $rTo4.Out -match 'test_sbfake_roslow\.ps1 PASSED' -and $rTo4.Out -match 'test_sbfake_rosleep\.ps1 TIMEOUT after 3s' -and
+     $atdecc -eq '420') `
+    ("atdecc table value={0}; {1}" -f $atdecc, (Tail $rTo4))
+
+# --- D1 (Q 2026-10-22): a Mutating test that reports FAILED_SETUP before any state change ("no state modified") is not
+# INCONCLUSIVE_RESTORATION from its static class alone - only when the runner independently verifies that nothing changed:
+# adapter/TIMINCA/TSAUXC equal and the PHC timeline continuous (pre-test vs post-test sample) on every adapter.
+$phcObservable = 'param($s) foreach ($c in $s.clock) { $c | Add-Member -NotePropertyName PhcOffsetNs -NotePropertyValue 0 -Force }'
+$setupLine = "Write-Host '  [FAILED_SETUP] TC-SBFAKE-SETUP-002/adapter:0: precondition not established --- no state modified'; exit 1"
+$tTgtSetup = New-Fake 'test_sbfake_tgtsetup' $setupLine
+# Synthetic, labelled tolerance (sandbox PHC windows are provenance 'synthetic'; the evaluator rejects a synthetic tolerance
+# for hardware measurements).  No hardware tolerance exists yet: on the HIL host the D1 path stays INCONCLUSIVE (077).
+$synTol = @(foreach ($d in '0x125B', '0x1533') { [ordered]@{ did = $d; source = 'hardware-characterization'; offsetNs = 5000000; rateChangePpb = 1000000
+                                                          evidence = 'SYNTHETIC TEST FIXTURE - not a measured tolerance' } })
+$rD1a = Invoke-Sandbox 'runD1a' @($tTgtSetup, $tTgt) -AllSupportedEnabled -StateEdit $phcObservable -SafetyFile (New-ClearSafetyFile 'safety_d1a.json' $synTol)
+$d1a = @(Get-ExecRecords $rD1a 'test_sbfake_tgtsetup')
+tc_check 'TEST-HILGATE-074-failed-setup-without-observed-change-is-not-inconclusive-restoration' `
+    ($rD1a.Out -notmatch '\[INCONCLUSIVE_RESTORATION\][^\r\n]*test_sbfake_tgtsetup' -and @([regex]::Matches($rD1a.Out, '\[STATE\] after test_sbfake_tgtsetup[^\r\n]*no state change')).Count -eq 2 -and
+     $d1a.Count -eq 2 -and @($d1a | Where-Object { $_.verdict -eq 'FAILED_SETUP' }).Count -eq 2 -and
+     (Get-RanCount $rD1a '^RAN test_sbfake_tgt ') -eq 2 -and $rD1a.Exit -eq 1) `
+    ("records={0} verdicts={1} ran: {2}; state lines: {3}" -f $d1a.Count, (($d1a | ForEach-Object { $_.verdict }) -join ','), ($rD1a.Ran -join ' / '),
+     ((@([regex]::Matches($rD1a.Out, '(?m)^.*(\[STATE\]|\[INCONCLUSIVE_RESTORATION\]|\[HALT\]).*$') | ForEach-Object { $_.Value.Trim() })) -join ' || '))
+
+# 075: the same claim while the PHC timeline jumped (a SET_TIMESTAMP the test did not admit) -> INCONCLUSIVE_RESTORATION
+# stays and halts later mutation.
+$tTgtSetupPhc = New-Fake 'test_sbfake_tgtsetupphc' ("if (`$env:AVB_HIL_TARGET_DID -eq '0x125B') { " +
+    (Edit-StateSnippet "`$c = @(`$s.clock | Where-Object { `$_.Did -eq '0x125B' })[0]; `$c.PhcOffsetNs = -300000000000") + " }`r`n" + $setupLine)
+$rD1b = Invoke-Sandbox 'runD1b' @($tTgtSetupPhc, $tTgt) -AllSupportedEnabled -StateEdit $phcObservable -SafetyFile (New-ClearSafetyFile 'safety_d1b.json' $synTol)
+tc_check 'TEST-HILGATE-075-failed-setup-claim-contradicted-by-a-phc-jump-stays-inconclusive-and-halts' `
+    ($rD1b.Out -match '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after test_sbfake_tgtsetupphc[^\r\n]*no-mutation claim is NOT verified[^\r\n]*0x125B: CLEANUP_FAILED[^\r\n]*outside tolerance' -and
+     (Get-RanCount $rD1b '^RAN test_sbfake_tgtsetupphc ') -ge 1 -and (Get-RanCount $rD1b '^RAN test_sbfake_tgt ') -eq 0) `
+    ("ran: {0}; {1}" -f ($rD1b.Ran -join ' / '), (Tail $rD1b))
+
+# 076: the claim cannot be verified when the PHC timeline is not observable -> INCONCLUSIVE_RESTORATION stays (fail closed).
+$rD1c = Invoke-Sandbox 'runD1c' @($tTgtSetup, $tTgt) -AllSupportedEnabled -SafetyFile (New-ClearSafetyFile 'safety_d1c.json' $synTol)
+tc_check 'TEST-HILGATE-076-failed-setup-claim-without-phc-observation-stays-inconclusive' `
+    ($rD1c.Out -match '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after test_sbfake_tgtsetup[^\r\n]*no-mutation claim is NOT verified[^\r\n]*0x125B: FAILED_SETUP[^\r\n]*paired read' -and (Get-RanCount $rD1c '^RAN test_sbfake_tgt ') -eq 0) `
+    ("ran: {0}; state lines: {1}" -f ($rD1c.Ran -join ' / '),
+     ((@([regex]::Matches($rD1c.Out, '(?m)^.*(\[STATE\]|\[INCONCLUSIVE_RESTORATION\]|\[HALT\]).*$') | ForEach-Object { $_.Value.Trim() })) -join ' || '))
+
+# 077: no hardware-derived tolerance (the current HIL state: none characterized) -> the claim is NOT verified and
+# INCONCLUSIVE_RESTORATION stays; the evaluator never invents a threshold.
+$rD1d = Invoke-Sandbox 'runD1d' @($tTgtSetup, $tTgt) -AllSupportedEnabled -StateEdit $phcObservable
+tc_check 'TEST-HILGATE-077-failed-setup-claim-without-hardware-tolerance-stays-inconclusive' `
+    ($rD1d.Out -match '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after test_sbfake_tgtsetup[^\r\n]*NOT verified[^\r\n]*no hardware-derived tolerance' -and
+     (Get-RanCount $rD1d '^RAN test_sbfake_tgt ') -eq 0) `
+    ("ran: {0}; state lines: {1}" -f ($rD1d.Ran -join ' / '), ((@([regex]::Matches($rD1d.Out, '(?m)^.*(\[STATE\]|\[INCONCLUSIVE_RESTORATION\]).*$') | ForEach-Object { $_.Value.Trim() })) -join ' || '))
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

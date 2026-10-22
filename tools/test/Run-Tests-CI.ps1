@@ -258,6 +258,7 @@ function Invoke-DriverHealthCheck {
 . (Join-Path $PSScriptRoot '..\lib\SourceDigest.ps1')  # build-input digest (local pre-commit provenance)
 . (Join-Path $PSScriptRoot '..\lib\TestVerdict.ps1')   # shared verdict vocabulary (library; tools/lib)
 . (Join-Path $PSScriptRoot '..\lib\HilLock.ps1')       # machine lock + machine-wide HIL safety record
+. (Join-Path $PSScriptRoot '..\lib\PhcRestoration.ps1') # pure PHC/QPC restoration evaluator (D1 no-mutation verification)
 
 # ===========================
 # Built-in hardware-independent test lists
@@ -732,6 +733,15 @@ if ($TestTimeoutSeconds -eq 0) {
         default             { 120 }
     }
 }
+# Per-entry timeout (Get-AvbTestTimeoutSeconds) where a test's own bounded waits exceed the suite default; it never
+# lowers the suite timeout and never changes the test's acceptance criteria.  Every value is derived from the test source.
+$HilTestTimeoutSeconds = [ordered]@{
+    # Per adapter: TC-AEN-002 30 s + TC-AEN-005 60 s + TC-AEN-006 31 s of deadlines/sleeps (tests/atdecc/
+    # test_atdecc_aen_protocol.c) = 121 s; 3 adapters on the HIL host = 363 s, killed at 300 s on adapter 3 in
+    # LocalSuites_20261021_173805 .. 20261022_094632.  420 s = 363 s + 16 %.  TC-AEN-001 adds 80 s per adapter only with
+    # AVB_TEST_HAS_ATDECC_CONTROLLER=1 (not set on the HIL host; it would need 603 s).
+    'test_atdecc_aen_protocol' = 420
+}
 
 # ===========================
 # Paths
@@ -862,6 +872,8 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 # runner cannot observe, are INCONCLUSIVE_RESTORATION and halt every later mutation (option 1, global).  Widen
 # $HilVerifiableState only together with a new independent check; never declare less than an entry really modifies.
 $HilVerifiableState = @('ADAPTER', 'TIMINCA', 'TSAUXC')
+$HilPhcReads = 5            # paired PHC/QPC reads per adapter in a pre-/post-test PHC window (evaluator minimum: 3)
+$HilPhcTolerance = @{}      # DID -> hardware-derived tolerance (Get-AvbHilPhcTolerances); empty = PHC never verified
 $HilMutatedState = [ordered]@{
     # none declared yet: every real non-ReadOnly entry is treated as modifying unobserved state
 }
@@ -919,8 +931,12 @@ function New-AvbHilAdapter {
                               AdminStatus = $AdminStatus; MediaStatus = $MediaStatus; FilterBound = $FilterBound; Name = $Name }
 }
 
-# Per-adapter TIMINCA/TSAUXC: ENUM_ADAPTERS -> OPEN_ADAPTER -> GET_CLOCK_CONFIG (all read-only).
+# Per-adapter TIMINCA/TSAUXC: ENUM_ADAPTERS -> OPEN_ADAPTER -> GET_CLOCK_CONFIG (read IOCTLs; OPEN_ADAPTER side effects:
+# issue #343, documented at IOCTL_AVB_OPEN_ADAPTER in src/avb_integration_fixed.c).  -PhcReads N: N GET_CLOCK_CONFIG reads
+# per adapter, each SYSTIM read (ops->get_systime) bracketed by QPC - the paired reads of a PHC window for
+# tools/lib/PhcRestoration.ps1 (Samples: qpcBefore, qpcAfter, phcNs).  TIMINCA/TSAUXC are those of the first read.
 function Get-AvbHilClockState {
+    param([int]$PhcReads = 1)
     $res = @{ Ok = $false; Error = ''; Entries = @() }
     if (-not ([System.Management.Automation.PSTypeName]'AvbHilIoctl').Type) {
         Add-Type -TypeDefinition @'
@@ -969,19 +985,25 @@ public static class AvbHilIoctl {
                                                Error = "OPEN_ADAPTER failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
                 continue
             }
-            $c = New-Object byte[] 24   # AVB_CLOCK_CONFIG: systim u64, timinca, tsauxc, clock_rate_mhz, status
-            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)) {
-                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0
-                                               Error = "GET_CLOCK_CONFIG failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
-                continue
+            $samples = @(); $first = $null; $readErr = ''
+            for ($r = 0; $r -lt [Math]::Max(1, $PhcReads); $r++) {
+                $c = New-Object byte[] 24   # AVB_CLOCK_CONFIG: systim u64, timinca, tsauxc, clock_rate_mhz, status
+                $q0 = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                $clockOk = [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)
+                $q1 = [System.Diagnostics.Stopwatch]::GetTimestamp()
+                if (-not $clockOk) { $readErr = "GET_CLOCK_CONFIG failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"; break }
+                $status = [System.BitConverter]::ToUInt32($c, 20)
+                if ($status -ne 0) { $readErr = ("GET_CLOCK_CONFIG status 0x{0:X8}" -f $status); break }
+                if ($null -eq $first) { $first = $c }
+                $samples += ,([ordered]@{ qpcBefore = [long]$q0; qpcAfter = [long]$q1; phcNs = [long][System.BitConverter]::ToUInt64($c, 0) })
             }
-            $status = [System.BitConverter]::ToUInt32($c, 20)
-            if ($status -ne 0) {
-                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = ("GET_CLOCK_CONFIG status 0x{0:X8}" -f $status) }
+            if ($readErr) {
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = $readErr; Samples = @() }
                 continue
             }
             $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $true; Error = ''
-                                           Timinca = [System.BitConverter]::ToUInt32($c, 8); Tsauxc = [System.BitConverter]::ToUInt32($c, 12) }
+                                           Timinca = [System.BitConverter]::ToUInt32($first, 8); Tsauxc = [System.BitConverter]::ToUInt32($first, 12)
+                                           Samples = $samples }
         }
         $res.Entries = $entries
         $res.Ok = $true
@@ -992,6 +1014,7 @@ public static class AvbHilIoctl {
 }
 
 function Get-AvbHilSandboxState {
+    param([int]$PhcReads = 1)
     $st = @{ Ok = $true; Error = ''; Adapters = @(); ClockOk = $true; ClockError = ''; Clock = @() }
     $sf = $env:AVB_TEST_ADAPTER_STATE_FILE
     if (-not $sf -or -not (Test-Path -LiteralPath $sf)) {
@@ -1002,15 +1025,27 @@ function Get-AvbHilSandboxState {
     $st.Adapters = @(foreach ($a in @($j.adapters)) {
         New-AvbHilAdapter ([string]$a.InstanceId) ([string]$a.PnpStatus) ([int]$a.Problem) ([string]$a.AdminStatus) ([string]$a.MediaStatus) ([string]$a.FilterBound) ([string]$a.Name)
     })
+    # Optional PhcOffsetNs: the sandbox PHC runs at the QPC rate with that offset (a fake "sets the PHC" by changing it);
+    # absent = no PHC samples, i.e. no PHC window (exactly like a hardware read that returned no SYSTIM).
+    $f = [double][System.Diagnostics.Stopwatch]::Frequency
     $st.Clock = @(foreach ($c in @($j.clock)) {
+        $samples = @()
+        if ($c.PSObject.Properties['PhcOffsetNs']) {
+            for ($r = 0; $r -lt [Math]::Max(1, $PhcReads); $r++) {
+                if ($r -gt 0) { Start-Sleep -Milliseconds 2 }
+                $q0 = [System.Diagnostics.Stopwatch]::GetTimestamp(); $q1 = $q0 + 10
+                $samples += ,([ordered]@{ qpcBefore = [long]$q0; qpcAfter = [long]$q1; phcNs = [long]([double]($q0 + 5) * 1e9 / $f) + [long]$c.PhcOffsetNs })
+            }
+        }
         [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
-                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = '' }
+                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples }
     })
     return $st
 }
 
 function Get-AvbHilState {
-    if ($script:IsSandbox) { return (Get-AvbHilSandboxState) }
+    param([int]$PhcReads = 1)
+    if ($script:IsSandbox) { return (Get-AvbHilSandboxState -PhcReads $PhcReads) }
     $st = @{ Ok = $true; Error = ''; Adapters = @(); ClockOk = $false; ClockError = ''; Clock = @() }
     $pnp = @()
     try {
@@ -1039,7 +1074,7 @@ function Get-AvbHilState {
         $list += New-AvbHilAdapter ([string]$d.InstanceId) ([string]$d.Status) $problem $admin $media $fb $name
     }
     $st.Adapters = $list
-    $ck = Get-AvbHilClockState
+    $ck = Get-AvbHilClockState -PhcReads $PhcReads
     $st.ClockOk = $ck.Ok; $st.ClockError = $ck.Error; $st.Clock = $ck.Entries
     return $st
 }
@@ -1280,6 +1315,10 @@ function Get-AvbPriorHalt {
         try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
         if ($d.stateHalt) { $why += "$($d.suite): state-integrity halt ($($d.stateHalt))" }
         foreach ($r in @($d.records)) {
+            # D2: a ReadOnly timeout whose process tree terminated and whose state was verified unchanged stays FAILED
+            # in its own suite but is no halt; a record without that disposition (any other case, older runner) is.
+            if ($r.verdict -eq 'FAILED(TIMEOUT)' -and $r.PSObject.Properties['safetyClass'] -and $r.safetyClass -eq 'ReadOnly' -and
+                $r.PSObject.Properties['timeoutDisposition'] -and $r.timeoutDisposition -eq 'TERMINATED_STATE_VERIFIED') { continue }
             if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
         }
     }
@@ -1377,6 +1416,111 @@ function Get-AvbHilMutatedState {
     }
     if ($HilMutatedState.Contains($Entry)) { return @($HilMutatedState[$Entry]) }
     return @()
+}
+
+# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] (never lowers it).  Sandbox:
+# AVB_TEST_SANDBOX_TIMEOUTS ('bin=seconds;...').
+function Get-AvbTestTimeoutSeconds {
+    param([string]$Entry, [int]$SuiteSeconds)
+    $own = 0
+    if ($script:IsSandbox) {
+        $bin = Get-HilBinName $Entry
+        foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_TIMEOUTS) -split ';')) {
+            if ($pair -match '^\s*([^=]+?)\s*=\s*(\d+)\s*$' -and $Matches[1] -eq $bin) { $own = [int]$Matches[2] }
+        }
+    } elseif ($HilTestTimeoutSeconds.Contains($Entry)) { $own = [int]$HilTestTimeoutSeconds[$Entry] }
+    return [Math]::Max($SuiteSeconds, $own)
+}
+
+# Kills a timed-out test and every descendant process (PowerShell 5.1 Process.Kill() ends only the root) and waits for
+# each to exit.  A process has exited only after all of its I/O requests completed or were cancelled, so Ok = every
+# process of the tree gone = no outstanding driver operation of the test.  @{ Ok; Detail }.
+function Stop-AvbProcessTree {
+    param([System.Diagnostics.Process]$Process, [int]$WaitSeconds = 30)
+    $tree = @(); $todo = @($Process.Id)
+    while ($todo.Count -gt 0) {
+        $next = @()
+        foreach ($p in $todo) {
+            foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$p" -ErrorAction SilentlyContinue)) {
+                if ($tree -notcontains [int]$c.ProcessId) { $tree += [int]$c.ProcessId; $next += [int]$c.ProcessId }
+            }
+        }
+        $todo = $next
+    }
+    try { $Process.Kill() } catch { }
+    foreach ($id in $tree) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+    $rootGone = $Process.WaitForExit($WaitSeconds * 1000)
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    $alive = @($tree)
+    while ($alive.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        $alive = @($alive | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
+        if ($alive.Count -gt 0) { Start-Sleep -Milliseconds 200 }
+    }
+    $detail = "root pid $($Process.Id) $(if ($rootGone) { 'exited' } else { "still running after ${WaitSeconds}s" }); descendants: " +
+              $(if ($tree.Count -eq 0) { 'none' } elseif ($alive.Count -eq 0) { "$($tree -join ',') terminated" } else { "STILL RUNNING $($alive -join ',')" })
+    return @{ Ok = ($rootGone -and $alive.Count -eq 0); Detail = $detail }
+}
+
+# PHC window of one adapter (Get-AvbHilState -PhcReads N) in the input format of tools/lib/PhcRestoration.ps1.  Adapter
+# identity = driver enumeration (DID + driver index): the same identity Compare-AvbHilState uses for clock registers.
+function ConvertTo-AvbHilPhcWindow {
+    param($Entry)
+    return [ordered]@{
+        provenance = [ordered]@{ source = $(if ($script:IsSandbox) { 'synthetic' } else { 'hardware' }); host = $env:COMPUTERNAME; did = $Entry.Did
+                                 adapterIdentity = ("drv:{0}#{1}" -f $Entry.Did, $Entry.Index); capturedUtc = (Get-Date).ToUniversalTime().ToString('o')
+                                 driverSha256 = $env:HIL_DRIVER_SHA256 }
+        qpcFrequency = [System.Diagnostics.Stopwatch]::Frequency; timinca = [uint32]$Entry.Timinca; tsauxc = [uint32]$Entry.Tsauxc
+        tsControl = $null   # timestamp-control state is not observed by the runner
+        samples = @($Entry.Samples)
+    }
+}
+
+# Hardware-derived PHC tolerances (DID -> tolerance object for Get-AvbPhcRestorationVerdict) from the evidence document of
+# the machine safety record's operator-approved baseline (phcTolerance[]).  None defined = empty: every PHC judgement is
+# then INCONCLUSIVE_RESTORATION (the evaluator never invents a threshold).
+function Get-AvbHilPhcTolerances {
+    param($SafetyRecord)
+    $map = @{}
+    if ($null -eq $SafetyRecord -or -not $SafetyRecord.PSObject.Properties['baseline'] -or $null -eq $SafetyRecord.baseline) { return $map }
+    $ev = [string]$SafetyRecord.baseline.evidence
+    if (-not $ev -or -not (Test-Path -LiteralPath $ev -PathType Leaf)) { return $map }
+    try { $doc = Get-Content -LiteralPath $ev -Raw | ConvertFrom-Json } catch { return $map }
+    if (-not $doc.PSObject.Properties['phcTolerance']) { return $map }
+    foreach ($t in @($doc.phcTolerance)) { if ($t -and $t.did) { $map[[string]$t.did] = $t } }
+    return $map
+}
+
+# D1 (Q 2026-10-22): a non-ReadOnly test that stopped at a failed precondition is NOT a restoration case when the runner
+# itself verifies that nothing changed (observable adapter/TIMINCA/TSAUXC equality is checked by the caller first).
+# Requires: no timeout; no cleanup-failure output; every testcase line FAILED_SETUP claiming "no state modified"; and the
+# PHC of every adapter RESTORATION_VERIFIED by tools/lib/PhcRestoration.ps1 between the pre-test and post-test windows
+# against its hardware-derived tolerance (a SET_TIMESTAMP, an offset or rate change, a PTP re-initialization by
+# OPEN_ADAPTER - issue #343, SYSTIM reset - breaks it; I210 TSAUXC bit 31 clearing by OPEN_ADAPTER is caught by the
+# TSAUXC comparison).  Not observable and therefore not claimed: the driver-global g_AvbContext switch of OPEN_ADAPTER
+# (the runner's own observation does it too) and the last_ndis_tx_record of TEST_SEND_PTP (volatile driver state,
+# rewritten by every send).  @{ Ok; Claimed; Why }.
+function Test-AvbHilNoMutation {
+    param([string]$Output, [bool]$TimedOut, $PreState, $PostState, [hashtable]$Tolerances = @{})
+    $tcs = Get-AvbTestcaseVerdicts -Lines @($Output -split "`r?`n")   # already an array (unary-comma return); @() would nest it
+    $claimed = ($tcs.Count -gt 0 -and @($tcs | Where-Object { $_.Verdict -ne 'FAILED_SETUP' -or $_.Detail -notmatch 'no state modified' }).Count -eq 0)
+    if (-not $claimed) { return @{ Ok = $false; Claimed = $false; Why = '' } }
+    if ($TimedOut) { return @{ Ok = $false; Claimed = $true; Why = 'timed out' } }
+    if ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') { return @{ Ok = $false; Claimed = $true; Why = 'cleanup failure reported' } }
+    if ($null -eq $PreState -or -not $PreState.ClockOk -or $null -eq $PostState -or -not $PostState.ClockOk) {
+        return @{ Ok = $false; Claimed = $true; Why = 'PHC clock state not observable before and after the test' }
+    }
+    $after = @{}; foreach ($c in @($PostState.Clock)) { $after["$($c.Did)#$($c.Index)"] = $c }
+    $parts = @(); $ok = $true; $n = 0
+    foreach ($b in @($PreState.Clock | Where-Object { $_.Ok })) {
+        $a = $after["$($b.Did)#$($b.Index)"]
+        if ($null -eq $a -or -not $a.Ok) { $ok = $false; $parts += "$($b.Did): clock config not readable after the test"; continue }
+        $v = Get-AvbPhcRestorationVerdict -Before (ConvertTo-AvbHilPhcWindow $b) -After (ConvertTo-AvbHilPhcWindow $a) -Tolerance $Tolerances[[string]$b.Did] -Testcase 'TC-INFRA-STATE-003'
+        $n++
+        if ($v.Verdict -ne 'RESTORATION_VERIFIED') { $ok = $false }
+        $parts += ("{0}: {1} ({2})" -f $b.Did, $v.Verdict, (@($v.Reasons) -join '; '))
+    }
+    if ($n -eq 0) { $ok = $false; $parts += 'no adapter with a readable clock' }
+    return @{ Ok = $ok; Claimed = $true; Why = ($parts -join ' | ') }
 }
 
 function Get-AvbHilTestClass {
@@ -1738,13 +1882,28 @@ function Invoke-HilPostTestCheck {
         # separate safety event.
         if (@($refs).Count -gt 0) { Set-HilHalt "CLEANUP_FAILED after $Display" } else { Set-HilHalt "CLEANUP_FAILED after $Display" -Verdict 'CLEANUP_FAILED' -Last $cur }
         $script:HilBaseline = $cur   # later differences are attributed to later tests
+        if ($TimedOut -and $script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = 'HALT' }
         return
     }
     if ($first.Count -gt 0) {
         Write-Host ("  [WARN:STATE] after {0}: transient difference settled back to the baseline within {1}s: {2}" -f $Display, $waited, ($first -join '; ')) -ForegroundColor Yellow
     }
+    # D2 (Q 2026-10-22): a ReadOnly timeout stays FAILED(TIMEOUT); it halts nothing (in this run or, through
+    # timeoutDisposition, a later suite - Get-AvbPriorHalt) only when the whole process tree terminated (no outstanding
+    # driver operation) and the observable state equals the baseline (checked above).  Otherwise: safety halt.
+    if ($Class -eq 'ReadOnly' -and $TimedOut) {
+        $term = if ($script:AvbItem) { $script:AvbItem.Termination } else { $null }
+        $disp = if ($term -and $term.Ok) { 'TERMINATED_STATE_VERIFIED' } else { 'HALT' }
+        if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = $disp }
+        if ($disp -eq 'HALT') {
+            Set-HilHalt ("$Display (ReadOnly) timed out and its process tree did not terminate: {0}" -f $(if ($term) { $term.Detail } else { 'termination not observed' })) -Verdict 'FAILED(TIMEOUT)' -Last $cur
+        } else {
+            Write-Host ("  [STATE] after {0} (ReadOnly): FAILED(TIMEOUT) kept; process tree terminated ({1}) and state verified unchanged --- later tests not halted" -f $Display, $term.Detail) -ForegroundColor Yellow
+        }
+    }
     if ($Class -ne 'ReadOnly') {
         if ($TimedOut) {
+            if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = 'HALT' }
             Set-HilHalt "$Display ($Class) was killed after a timeout; state it may have left behind is not fully observable" -Verdict 'FAILED(TIMEOUT)' -Last $cur
         } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
             Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself" -Verdict 'CLEANUP_FAILED' -Last $cur
@@ -1758,8 +1917,15 @@ function Invoke-HilPostTestCheck {
             Write-Host ("  [STATE] after {0}: restoration verified by independent re-read ({1})" -f $Display, ($declared -join ', ')) -ForegroundColor Green
             return
         }
+        # D1: not a restoration case when the test stopped at a failed precondition and the runner verifies no change.
+        $nm = Test-AvbHilNoMutation -Output $Output -TimedOut $TimedOut -PreState $script:HilPreTest -PostState (Get-AvbHilState -PhcReads $HilPhcReads) -Tolerances $script:HilPhcTolerance
+        if ($nm.Ok) {
+            Write-Host ("  [STATE] after {0} ({1}): no state change --- FAILED_SETUP before any mutation (test claim) independently verified: adapter/TIMINCA/TSAUXC equal to the baseline, PHC restoration evaluator per adapter: {2}" -f $Display, $Class, $nm.Why) -ForegroundColor Yellow
+            return
+        }
         Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
-            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" -f $Display, $Class)
+            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed{2}" -f $Display, $Class,
+                    $(if ($nm.Claimed) { " --- the test's FAILED_SETUP no-mutation claim is NOT verified: $($nm.Why)" } else { '' }))
         Set-HilHalt "$Display ($Class): restoration not verified (INCONCLUSIVE_RESTORATION)" -Verdict 'INCONCLUSIVE_RESTORATION' -Last $cur
     }
 }
@@ -1800,6 +1966,8 @@ if ($IsHardwareSuite) {
     } else { $HilSafetyPath = Get-AvbHilSafetyPath }
     $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
     Write-Note "Machine safety record: $($HilSafetyState.State) ($HilSafetyPath) $($HilSafetyState.Why)"
+    $HilPhcTolerance = Get-AvbHilPhcTolerances -SafetyRecord $HilSafetyState.Record
+    Write-Note ("PHC restoration tolerances (hardware-derived, approved baseline evidence): {0}" -f $(if ($HilPhcTolerance.Count) { ($HilPhcTolerance.Keys | Sort-Object) -join ', ' } else { 'none - a PHC judgement is INCONCLUSIVE_RESTORATION' }))
 
     # Elevation is verified on this process's own token (sandbox: AVB_TEST_SANDBOX_ELEVATED, '0' = not elevated).
     # Necessary, never sufficient: lock ownership, the CLEAR safety record and the session baseline are checked independently.
@@ -2081,6 +2249,9 @@ foreach ($WorkItem in $WorkItems) {
 
     Write-Host "`n  => $exeName$(if ($testArgs) { " $testArgs" } else { '' })$(if ($hilClass) { "  [$hilClass]" } else { '' })" -ForegroundColor Cyan
 
+    # Pre-test state of a non-ReadOnly test: the PHC continuity reference for a verified no-mutation result (D1).
+    $script:HilPreTest = if ($IsHardwareSuite -and $hilClass -ne 'ReadOnly' -and $null -ne $script:HilBaseline) { Get-AvbHilState -PhcReads $HilPhcReads } else { $null }
+
     # --- Lifecycle snapshot BEFORE ---
     $lcyBefore = if ($IsSandbox) { $null } else { Get-AvbLifecycleSnapshot }
 
@@ -2119,11 +2290,13 @@ foreach ($WorkItem in $WorkItems) {
     $errJob = $proc.StandardError.ReadToEndAsync()
 
     $timedOut  = $false
-    $timeoutMs = $TestTimeoutSeconds * 1000
+    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds
+    if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
+    $timeoutMs = $itemTimeoutSeconds * 1000
     if (-not $proc.WaitForExit($timeoutMs)) {
-        $proc.Kill()
+        $script:AvbItem.Termination = Stop-AvbProcessTree -Process $proc
         $timedOut = $true
-        Write-Fail "$exeName TIMEOUT after ${TestTimeoutSeconds}s"
+        Write-Fail "$exeName TIMEOUT after ${itemTimeoutSeconds}s --- $($script:AvbItem.Termination.Detail)"
     }
     $outText  = $outJob.Result
     $errText  = $errJob.Result
@@ -2151,6 +2324,7 @@ foreach ($WorkItem in $WorkItems) {
     if ($timedOut) {
         $failedTests++
         Add-AvbResult -Name $exeName -Status "FAILED(TIMEOUT)" -Exit -999
+        $script:AvbItem.TimeoutRecord = $script:AvbResultRecords[-1]   # timeoutDisposition set by Invoke-HilPostTestCheck
     } elseif ($vc.FailedSetup -gt 0) {
         # Required initial conditions not established (any exit code): kept distinct from a test failure.
         $failedTests++
