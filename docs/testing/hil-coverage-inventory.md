@@ -144,3 +144,7 @@ Each needs a decision with evidence from its source: required test (classify, ad
 diagnostic/investigation tool (explicit non-test list, not built as a test), or obsolete (removal needs separate
 approval). `ssot_register_validation` is built while the registered `ssot_register_validation_test` has no build entry -
 probably the same test under two names (UNVERIFIED).
+
+## Completeness gate
+
+The built-but-unaccounted targets, executable-name mismatches and unregistered test scripts are enforced by`ntests/unit/ci/test_artifact_completeness.ps1` (intentionally RED); its preserved RED output is`ninvestigations/completeness-gate-red-20261021.md`.

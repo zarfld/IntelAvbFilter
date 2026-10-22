@@ -894,6 +894,17 @@ tc_check 'TEST-HILGATE-068-persisting-discrepancy-confirmed-new-discrepancy-open
      ($t2Roles -join ' ') -match "incident $([regex]::Escape([string]$timEv[0].eventId)) confirmed" -and ($t2Roles -join ' ') -match 'incident [0-9a-f-]+ opened') `
     ("TIMINCA events={0} obs={1}; AdminStatus events={2}; run2: {3}" -f $timEv.Count, $(if ($timEv.Count) { @($timEv[0].observations).Count }), $admEv.Count, ($t2Roles -join ' | '))
 
+# 069: LocalSuites layout - the prior-results directory (logs\LocalSuites_<ts>) lies INSIDE the runner's logs directory.
+# Defect found in the physical run LocalSuites_20261021_173805: the atdecc FAILED(TIMEOUT) halt of HardwareUnit never
+# reached HardwareMutation (no 'prior suite' line) because Get-AvbPriorHalt skipped everything under its own logs dir.
+$lsPrior = Join-Path $Tmp 'runLS\logs\LocalSuites_x'; New-Item -ItemType Directory -Path $lsPrior -Force | Out-Null
+([ordered]@{ schema = 'avb-runner-results/1'; suite = 'HardwareUnit'; configuration = 'Debug'; overall = 'FAILED'; exitCode = 1; stateHalt = ''
+             records = @([ordered]@{ name = 'test_prior.exe'; verdict = 'CLEANUP_FAILED' }) } | ConvertTo-Json -Depth 5) |
+    Set-Content -LiteralPath (Join-Path $lsPrior 'results-Debug-HardwareUnit.json') -Encoding UTF8
+$rLS = Invoke-Sandbox 'runLS' @($tInit, $tRo) -Suite 'HardwareMutation' -AllSupportedEnabled -PriorResultsDir $lsPrior
+tc_check 'TEST-HILGATE-069-prior-halt-found-when-prior-results-lie-inside-the-runner-logs-dir' `
+    ((Get-RanCount $rLS '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rLS '^RAN test_sbfake_ro ') -eq 1 -and $rLS.Out -match 'state-integrity halt \(prior suite') (Tail $rLS)
+
 # 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
 # distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).
 $tSetup = New-Fake 'test_sbfake_setup' "Write-Host '  [FAILED_SETUP] TC-SBFAKE-SETUP-001: target adapter not uniquely identified'"
