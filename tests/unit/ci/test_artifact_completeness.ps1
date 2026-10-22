@@ -67,14 +67,22 @@ else {
 tc_check 'TEST-COMPLETE-000-classification-table-valid' ($clsBad.Count -eq 0) ($clsBad -join '; ')
 $clsKeys = if ($cls) { @($cls.Keys) } else { @() }
 
+# Runner resolution (Resolve-AvbHilArtifactName, Build-Tests Name -> Output): the artifact a runner entry executes.
+$resFn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Resolve-AvbHilArtifactName' }, $true)
+if ($resFn) { . ([scriptblock]::Create($resFn.Extent.Text)) }
+$byNameMan = @{ ByName = @{} }
+foreach ($t in $targets) { $byNameMan.ByName[$t.Name] = [pscustomobject]@{ name = $t.Name; artifact = "$($t.Out).exe" } }
+function Get-EntryOut([string]$e) { if ($resFn) { return [System.IO.Path]::GetFileNameWithoutExtension((Resolve-AvbHilArtifactName -BinName $e -Manifest $byNameMan)) }; return $e }
+$entryOuts = @($exeEntries | ForEach-Object { Get-EntryOut $_ })
+
 # 001: every build target is a runner entry (active test, in a suite or declared gap) or explicitly classified.
-$unknown = @($targets | Where-Object { $exeEntries -notcontains $_.Out -and $clsKeys -notcontains $_.Out } |
+$unknown = @($targets | Where-Object { $entryOuts -notcontains $_.Out -and $clsKeys -notcontains $_.Out } |
              ForEach-Object { if ($_.Name -ne $_.Out) { "$($_.Out) (Build-Tests Name '$($_.Name)')" } else { $_.Out } })
 tc_check 'TEST-COMPLETE-001-every-build-target-is-a-runner-entry-or-classified' ($unknown.Count -eq 0) `
     ("{0} of {1} build target(s) Unknown - neither executed, nor a declared gap, nor classified: {2}" -f $unknown.Count, $targets.Count, ($unknown -join ', '))
 
-# 002: every registered executable entry is produced by a build target (the runner looks for <entry>.exe).
-$unbuilt = @($exeEntries | Where-Object { $outs -notcontains $_ } | ForEach-Object {
+# 002: every registered executable entry resolves (runner resolution above) to an artifact a build target produces.
+$unbuilt = @($exeEntries | Where-Object { $outs -notcontains (Get-EntryOut $_) } | ForEach-Object {
     $e = $_; $byName = @($targets | Where-Object { $_.Name -eq $e })
     if ($byName.Count) { "$e (Build-Tests Name '$e' outputs '$($byName[0].Out).exe')" } else { "$e (no build target)" } })
 tc_check 'TEST-COMPLETE-002-every-registered-executable-is-built-under-its-entry-name' ($unbuilt.Count -eq 0) `

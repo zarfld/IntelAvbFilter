@@ -258,7 +258,7 @@ foreach ($Configuration in $Configurations){
         #test_hardware_detection.exe       PASSED     0
     )
     foreach ($t in $CIFailed) { 
-   # .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
+   .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     } 
 
 
@@ -277,18 +277,18 @@ $BenchmarkTests = @(
 
 
     $CISuiteFailed = @()
-    # tools\test\Run-Tests-CI.ps1
-    #$CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
-    #
+     tools\test\Run-Tests-CI.ps1
+    $CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
+    
     $CISuite = @("HardwareUnit", "HardwareIntegration", "HardwareMutation", "HardwareMandatory")
-    #$CISuite =@("All")
-   # foreach ($Suite in $CISuite) { 
-   #     $SuiteStartTime = Get-Date
-   #     .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
-   #     $SuiteEndTime = Get-Date
+    $CISuite =@("All")
+    foreach ($Suite in $CISuite) { 
+        $SuiteStartTime = Get-Date
+        .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
+        $SuiteEndTime = Get-Date
 
    #     find failed tests in .\logs for this suite and add names of tests that failed to $CISuiteFailed
-   # } 
+    } 
 
     #foreach ($t in $CISuiteFailed) { 
     #    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 

@@ -148,8 +148,13 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($RunCIPath, [re
 $gateFn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilGateDecision' }, $false)
 if ($null -eq $gateFn) { tc_fail 'TEST-HILSUITE-000-gate-decision-available' 'Get-AvbHilGateDecision not found'; exit 1 }
 . ([scriptblock]::Create($gateFn.Extent.Text))
+# The runner's dispatch-time hazard holds (keys from its AST) are part of "gate-runnable".
+$HazardHolds = @{}
+$hhAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $x.Left.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) | Select-Object -First 1
+if ($hhAst) { foreach ($kv in $hhAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) { $HazardHolds[$kv.Item1.Value] = 'runner hazard hold' } }
 function Test-Runnable([string]$Entry, [string]$Class) {
-    $d = Get-AvbHilGateDecision -Entry $Entry -Class $Class -Target '0x125B' -Halt '' -TargetCount 1 -AuthorizedUnsafe @() -UnderGitHubActions $true
+    $d = Get-AvbHilGateDecision -Entry (($Entry -split '\s+', 2)[0] -replace '\.exe$', '') -Class $Class -Target '0x125B' -Halt '' -TargetCount 1 -AuthorizedUnsafe @() -UnderGitHubActions $true -HazardHolds $HazardHolds
     return ($d.Action -eq 'Run')
 }
 tc_pass 'TEST-HILSUITE-000-gate-decision-available'

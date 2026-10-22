@@ -91,8 +91,13 @@ $disabledListed = @($staticDisabled.Keys | Where-Object { $suiteEntries.Contains
                     ForEach-Object { "{0} (listed in {1})" -f $_, (($suiteEntries[$_] | Sort-Object -Unique) -join ',') })
 tc_check 'TEST-HILPROV-010-no-suite-entry-resolves-to-a-disabled-build-entry' ($staticDisabled.Count -gt 0 -and $disabledListed.Count -eq 0) `
     ("statically Disabled yet dispatchable: {0}" -f ($disabledListed -join '; '))
-tc_check 'TEST-HILPROV-011-removed-entry-not-reclassified-and-um-variant-stays-mutating' `
-    ((-not $registry.ContainsKey('test_tsn_ioctl_handlers')) -and ($registry['test_tsn_ioctl_handlers_um'] -eq 'Mutating')) `
+# 011 (lists authoritative, Q 2026-10-22): the listed test_tsn_ioctl_handlers is classified (HILGATE-001) but never again
+# as a runnable class - #328 F23: as ReadOnly its stale binary issued SETUP_TAS/FP/PTM - and it is hazard-held at
+# dispatch; the UM variant stays Mutating.
+$hhLine = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1')), "(?m)^\s*'test_tsn_ioctl_handlers'\s*=\s*\`$Hold328Tsn")
+tc_check 'TEST-HILPROV-011-tsn-placeholder-never-runnable-class-hazard-held-um-variant-stays-mutating' `
+    (($registry.ContainsKey('test_tsn_ioctl_handlers') -and $registry['test_tsn_ioctl_handlers'] -notin @('ReadOnly', 'Init', 'Mutating:Target')) -and $hhLine.Success -and
+     ($registry['test_tsn_ioctl_handlers_um'] -eq 'Mutating')) `
     ("registry: test_tsn_ioctl_handlers={0}; test_tsn_ioctl_handlers_um={1}" -f $(if ($registry.ContainsKey('test_tsn_ioctl_handlers')) { $registry['test_tsn_ioctl_handlers'] } else { '<absent>' }), $registry['test_tsn_ioctl_handlers_um'])
 $self = 'ps1:tests/unit/ci/test_hil_binary_provenance.ps1'
 tc_check 'TEST-HILPROV-012-registered-in-hosted-unit-suite' (((Get-RunnerList 'UnitTests') -contains $self) -and (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\unit\ci\test_hil_binary_provenance.ps1'))) `

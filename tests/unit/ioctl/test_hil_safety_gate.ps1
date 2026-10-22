@@ -81,30 +81,108 @@ if ($null -ne $regAst) {
 }
 $validClasses = @('ReadOnly', 'Init', 'Mutating', 'Mutating:Target', 'Unsafe', 'Unknown')
 
-$missing = @($hwEntries | Where-Object { -not $registry.ContainsKey($_) })
+# The suite lists are authoritative (Q 2026-10-22): an entry written as 'x.exe' is the test 'x' - the runner must
+# normalize it for every registry lookup and resolve the built artifact through the build manifest (Build-Tests Name
+# -> Output), never report a listed test as unclassified or "binary missing" because of its spelling.
+$fnKey = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'ConvertTo-AvbHilEntryKey' }, $true)
+$fnArt = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Resolve-AvbHilArtifactName' }, $true)
+if ($fnKey) { . ([scriptblock]::Create($fnKey.Extent.Text)) }
+if ($fnArt) { . ([scriptblock]::Create($fnArt.Extent.Text)) }
+$keyCases = [ordered]@{ 'test_minimal_ioctl.exe' = 'test_minimal_ioctl'; 'test_clock_config' = 'test_clock_config'
+                        'test_ptp_phc_stability --case UT-CORR-005' = 'test_ptp_phc_stability --case UT-CORR-005'
+                        'x.exe --case A' = 'x --case A'; 'ps1:tests/unit/a.ps1' = 'ps1:tests/unit/a.ps1' }
+$keyBad = @(if ($fnKey) { $keyCases.Keys | Where-Object { (ConvertTo-AvbHilEntryKey $_) -ne $keyCases[$_] } | ForEach-Object { "$_ -> $(ConvertTo-AvbHilEntryKey $_)" } } else { 'ConvertTo-AvbHilEntryKey missing' })
+tc_check 'TEST-HILGATE-078-listed-entry-spelling-is-normalized-for-the-registry' ($keyBad.Count -eq 0) ($keyBad -join '; ')
+$man = @{ ByName = @{ 'hw_timestamping_control' = [pscustomobject]@{ name = 'hw_timestamping_control'; artifact = 'hw_timestamping_control_test.exe' }
+                      'test_ptp_freq' = [pscustomobject]@{ name = 'test_ptp_freq'; artifact = 'test_ptp_freq.exe' }
+                      'avb_capability_validation' = [pscustomobject]@{ name = 'avb_capability_validation'; artifact = $null } } }
+$artCases = [ordered]@{ 'hw_timestamping_control' = 'hw_timestamping_control_test.exe'; 'test_ptp_freq' = 'test_ptp_freq.exe'; 'test_unknown' = 'test_unknown.exe'
+                        'test_minimal_ioctl.exe' = 'test_minimal_ioctl.exe'; 'avb_capability_validation' = 'avb_capability_validation.exe' }
+$artBad = @(if ($fnArt) { $artCases.Keys | Where-Object { (Resolve-AvbHilArtifactName -BinName $_ -Manifest $man) -ne $artCases[$_] } | ForEach-Object { "$_ -> $(Resolve-AvbHilArtifactName -BinName $_ -Manifest $man)" } } else { 'Resolve-AvbHilArtifactName missing' })
+$noMan = if ($fnArt) { Resolve-AvbHilArtifactName -BinName 'hw_timestamping_control' -Manifest $null } else { '' }
+tc_check 'TEST-HILGATE-079-listed-entry-artifact-resolved-through-the-build-manifest-name' ($artBad.Count -eq 0 -and $noMan -eq 'hw_timestamping_control.exe') `
+    ("{0}; without manifest -> {1}" -f ($artBad -join '; '), $noMan)
+
+$missing = @($hwEntries | Where-Object { -not $registry.ContainsKey($(if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ })) })
 tc_check 'TEST-HILGATE-001-every-hardware-entry-classified' (($registry.Count -gt 0) -and ($missing.Count -eq 0)) `
     ("registry entries={0}; unclassified: {1}" -f $registry.Count, ($missing -join ', '))
 
 $badClass = @($registry.Keys | Where-Object { $validClasses -notcontains $registry[$_] } | ForEach-Object { "$_=$($registry[$_])" })
-$stale    = @($registry.Keys | Where-Object { ($hwEntries -notcontains $_) -and ($gapEntries -notcontains $_) -and ($registry[$_] -ne 'Unsafe') })
+$hwKeys0  = @($hwEntries | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } })
+$stale    = @($registry.Keys | Where-Object { ($hwKeys0 -notcontains $_) -and ($gapEntries -notcontains $_) -and ($registry[$_] -ne 'Unsafe') })
 tc_check 'TEST-HILGATE-002-registry-values-valid-no-stale-keys' (($registry.Count -gt 0) -and $badClass.Count -eq 0 -and $stale.Count -eq 0) `
     ("invalid: {0}; stale (not in any Hardware list or coverage-gap table): {1}" -f ($badClass -join ', '), ($stale -join ', '))
 
-# Automatic HIL suites (unattended) list only ReadOnly entries: Init is a temporary policy exclusion (2026-10-21).
+# The suite lists are authoritative (Q 2026-10-22): safety is enforced at DISPATCH, never by keeping a test out of a
+# list.  Runner gate + hazard holds, both from the runner AST.
+foreach ($n in 'Get-AvbHilGateDecision', 'Get-AvbHilEffectiveGaps') {
+    $f = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true)
+    if ($f) { . ([scriptblock]::Create($f.Extent.Text)) }
+}
+$holds = @{}
+$hAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                       $x.Left.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) | Select-Object -First 1
+function Get-AstStringValue($Node) {   # string literal, or a variable assigned a string literal in the runner
+    $s = $Node.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
+    if ($s) { return $s.Value }
+    $v = $Node.Find({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)
+    if (-not $v) { return '' }
+    $a = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $x.Left.VariablePath.UserPath -eq $v.VariablePath.UserPath }, $true) | Select-Object -First 1
+    if (-not $a) { return '' }
+    $s = $a.Right.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
+    if ($s) { return $s.Value } else { return '' }
+}
+if ($hAst) { foreach ($kv in $hAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) { $holds[$kv.Item1.Value] = Get-AstStringValue $kv.Item2 } }
+function Get-Cls([string]$e) { $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }; if ($registry.ContainsKey($k)) { return $registry[$k] }; return '' }
+function Get-Gate([string]$e, [string]$Target, [bool]$Gha, [string[]]$Auth = @()) {
+    $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }
+    return Get-AvbHilGateDecision -Entry $k -Class (Get-Cls $e) -Target $Target -Halt '' -TargetCount $(if ($Target) { 1 } else { 0 }) `
+        -AuthorizedUnsafe $Auth -UnderGitHubActions $Gha -HazardHolds $holds
+}
+# 032: unattended (GitHub Actions) without an exact target the gate executes ReadOnly entries only - the old list
+#      rule, now proven per listed entry by the runner's own decision; with a target only ReadOnly/Mutating:Target.
 $autoBad = @()
 foreach ($s in $autoSuites.Keys) {
-    foreach ($e in @($hwLists[$autoSuites[$s]])) { if ($registry[$e] -ne 'ReadOnly') { $autoBad += "${s}: $e=$($registry[$e])" } }
+    foreach ($e in @($hwLists[$autoSuites[$s]])) {
+        $c = Get-Cls $e
+        if ((Get-Gate $e '' $true).Action -eq 'Run' -and $c -ne 'ReadOnly') { $autoBad += "${s}: $e=$c runs without target" }
+        if ((Get-Gate $e '0x125B' $true).Action -eq 'Run' -and $c -notin @('ReadOnly', 'Mutating:Target')) { $autoBad += "${s}: $e=$c runs with target" }
+    }
 }
 $autoCount = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) }).Count
-tc_check 'TEST-HILGATE-032-automatic-hil-suites-readonly-only' (($autoCount -gt 0) -and $autoBad.Count -eq 0) `
-    ("automatic entries={0}; not ReadOnly: {1}" -f $autoCount, ($autoBad -join ', '))
+tc_check 'TEST-HILGATE-032-unattended-dispatch-runs-only-readonly-or-exact-target-entries' (($autoCount -gt 0) -and $autoBad.Count -eq 0 -and $null -ne (Get-Command Get-AvbHilGateDecision -ErrorAction SilentlyContinue)) `
+    ("automatic entries={0}; dispatched against the rule: {1}" -f $autoCount, ($autoBad -join ', '))
+
+# 081: #328 hazard hold.  An entry whose source can issue SETUP_TAS/SETUP_FP/SETUP_PTM is never executed - whatever its
+#      class, target, authorization or attendance - until the driver TAS/FP restore defect is hardware-verified fixed;
+#      the hold is visible (BLOCKED with the evidence reference), the entry stays listed.
+$tsnEntries = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_tsn_ioctl_handlers_um', 'test_tsn_ioctl_handlers')
+$holdBad = @()
+foreach ($e in $tsnEntries) {
+    if (-not $holds.ContainsKey($e) -or $holds[$e] -notmatch '#328') { $holdBad += "${e}: no #328 hold"; continue }
+    foreach ($tc in @(@('', $true), @('0x125B', $true), @('0x125B', $false))) {
+        $d = Get-Gate $e $tc[0] $tc[1] @($e)
+        if ($d.Action -ne 'Block' -or $d.Reason -notmatch '#328') { $holdBad += "${e}: target='$($tc[0])' gha=$($tc[1]) -> $($d.Action) $($d.Reason)" }
+    }
+}
+tc_check 'TEST-HILGATE-081-tsn-configuration-entries-are-hazard-held-visibly-not-delisted' ($holdBad.Count -eq 0) ($holdBad -join '; ')
+
+# 080: a listed entry is executed (or gate-blocked with its reason) - never ALSO reported as a NOT EXECUTED coverage gap.
+$effBad = @()
+if (Get-Command Get-AvbHilEffectiveGaps -ErrorAction SilentlyContinue) {
+    $fx = [ordered]@{ 'a' = 'Mutating: x'; 'b.exe' = 'Mutating: y'; 'c' = 'Init: z' }
+    $eff = Get-AvbHilEffectiveGaps -GapTable $fx -TestList @('a', 'b', 'd')
+    if ((@($eff.Keys) -join ',') -ne 'c') { $effBad += "fixture -> [$(@($eff.Keys) -join ',')] expected [c]" }
+} else { $effBad += 'Get-AvbHilEffectiveGaps missing' }
+tc_check 'TEST-HILGATE-080-listed-entries-are-never-reported-as-coverage-gaps' ($effBad.Count -eq 0) ($effBad -join '; ')
 
 # Every gap is classified, really excluded (not also listed), justified (non-ReadOnly/Init class, reason),
 # and its reason survives the JUnit case-name normalisation (no trailing parenthesis).
 $gapBad = @()
 foreach ($s in $autoSuites.Keys) {
     $t = $gapTables[$s]
-    if ($null -eq $t -or $t.Count -eq 0) { $gapBad += "${s}: gap table missing or empty"; continue }
+    if ($null -eq $t) { $gapBad += "${s}: gap table missing"; continue }   # empty = no exclusion left (the goal)
     foreach ($e in @($t.Keys)) {
         $cls = $registry[$e]; $why = [string]$t[$e]
         if (-not $cls)                                  { $gapBad += "${s}: $e unclassified" }
@@ -131,9 +209,18 @@ tc_check 'TEST-HILGATE-043-formerly-commented-out-tests-are-declared-gaps-never-
 # The TSN configuration entries (TAS/FP/PTM) and the observed irreversible PHC mutation are declared gaps.
 $mustGap = @{ HardwareUnit = @('test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_ptp_freq_complete')
               HardwareIntegration = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_tsn_ioctl_handlers_um') }
+# Lists are authoritative (Q 2026-10-22): each entry is either a declared gap or listed and then contained at dispatch -
+# TSN configuration by the #328 hazard hold (081); test_ptp_freq_complete (I226 TIMINCA CLEANUP_FAILED 2026-10-20) as
+# exact-target with TIMINCA among the runner-verified states, so a repeat is CLEANUP_FAILED + halt, never hidden.
 $notGap = @()
-foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) { if ($null -eq $gapTables[$s] -or -not $gapTables[$s].Contains($e)) { $notGap += "${s}: $e" } } }
-tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-declared-gaps' ($notGap.Count -eq 0) ("not declared: {0}" -f ($notGap -join ', '))
+$verifiable = @(Get-RunnerList 'HilVerifiableState')
+foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) {
+    $isGap = ($null -ne $gapTables[$s] -and $gapTables[$s].Contains($e))
+    $listed = (@($hwLists["${s}Tests"]) | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } }) -contains $e
+    $contained = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $holds.ContainsKey($e) }
+    if (-not ($isGap -or ($listed -and $contained))) { $notGap += "${s}: $e (gap=$isGap listed=$listed contained=$contained)" }
+} }
+tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-gaps-or-contained-at-dispatch' ($notGap.Count -eq 0) ("neither: {0}" -f ($notGap -join ', '))
 
 # Coverage restored (Q 2026-10-22: repair, do not exclude).  test_ptp_phc_stability without arguments runs only
 # UT-CORR-007/008 (main(): run_009 needs --case UT-CORR-009 or --allow-lifecycle, both runner-controlled); the
@@ -151,10 +238,12 @@ tc_check 'TEST-HILGATE-039-ioctl-routing-is-readonly-and-executes' `
      (@($hwLists['HardwareMandatoryTests']) -contains 'test_ioctl_routing') -and $rtGap.Count -eq 0) `
     ("class={0}; unit={1}; mandatory={2}; still a gap in: [{3}]" -f $registry['test_ioctl_routing'], (@($hwLists['HardwareUnitTests']) -contains 'test_ioctl_routing'),
      (@($hwLists['HardwareMandatoryTests']) -contains 'test_ioctl_routing'), ($rtGap -join ','))
-# Init coverage is retained, not removed: every Init registration stays classified and is a declared gap; each
-# automatic suite keeps at least one ReadOnly entry, so the real-pass requirement (TEST-HILGATE-036) stays satisfiable.
+# Init coverage is retained, not removed: every Init registration stays classified and is listed in a Hardware suite
+# or a declared gap (never silently absent); each automatic suite keeps at least one ReadOnly entry, so the real-pass
+# requirement (TEST-HILGATE-036) stays satisfiable.
 $initKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Init' } | Sort-Object)
-$initNotGap = @($initKeys | Where-Object { $gapEntries -notcontains $_ })
+$hwKeys = @($hwEntries | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } })
+$initNotGap = @($initKeys | Where-Object { $gapEntries -notcontains $_ -and $hwKeys -notcontains $_ })
 $noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$_]]); @($sl | Where-Object { $registry[$_] -eq 'ReadOnly' }).Count -eq 0 })
 $expectInit = @('test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
 tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suites-keep-readonly-entries' `
@@ -162,11 +251,16 @@ tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suit
     ("init keys: [{0}]; not declared as gap: [{1}]; suites without a ReadOnly entry: [{2}]" -f ($initKeys -join ','), ($initNotGap -join ','), ($noReadOnly -join ','))
 
 
+# 003: NIC/driver administration entries stay classified Unsafe; listed or not, dispatch never executes them under
+#      GitHub Actions or without AVB_HIL_AUTHORIZE_UNSAFE naming the exact entry (attended run).
 $unsafeKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Unsafe' })
-$unsafeListed = @($unsafeKeys | Where-Object { $hwEntries -contains $_ })
 $needUnsafe = @('test_hot_plug', 'test_lifecycle_coverage' | Where-Object { $registry[$_] -ne 'Unsafe' })
-tc_check 'TEST-HILGATE-003-nic-admin-tests-unsafe-and-not-in-unrestricted-suites' (($registry.Count -gt 0) -and $unsafeListed.Count -eq 0 -and $needUnsafe.Count -eq 0) `
-    ("Unsafe entries still listed in a Hardware suite: {0}; not classified Unsafe: {1}" -f ($unsafeListed -join ', '), ($needUnsafe -join ', '))
+$unsafeRuns = @(foreach ($e in $unsafeKeys) {
+    if ((Get-Gate $e '0x125B' $true @($e)).Action -ne 'Block') { "${e}: runs under GitHub Actions" }
+    if ((Get-Gate $e '0x125B' $false @()).Action -ne 'Block') { "${e}: runs attended without authorization" }
+})
+tc_check 'TEST-HILGATE-003-nic-admin-tests-unsafe-and-never-dispatched-unattended-or-unauthorized' (($registry.Count -gt 0) -and $unsafeRuns.Count -eq 0 -and $needUnsafe.Count -eq 0) `
+    ("dispatched: {0}; not classified Unsafe: {1}" -f ($unsafeRuns -join ', '), ($needUnsafe -join ', '))
 
 # The runner must never change adapter administration state (it only observes).
 $runnerCode = [regex]::Replace([System.IO.File]::ReadAllText($RunCIPath), '(?m)#.*$', '')

@@ -841,7 +841,16 @@ $AllTests = @(
         Output = "test_ptp_phc_stability.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Libs = "advapi32.lib"
-        Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..009, Track A closes #317)"
+        Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..008, Track A closes #317; UT-CORR-009 = test_ptp_phc_lifecycle)"
+    },
+    @{
+        Name = "test_ptp_phc_lifecycle"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_phc_lifecycle.c"
+        Output = "test_ptp_phc_lifecycle.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "advapi32.lib"
+        Description = "Integration: UT-CORR-009 driver lifecycle (reinstalls the driver; split from test_ptp_phc_stability, Unsafe in Run-Tests-CI)"
     },
     @{
         Name = "test_vv_corr_001_stability"

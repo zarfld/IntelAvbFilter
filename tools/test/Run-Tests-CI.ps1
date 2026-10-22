@@ -407,8 +407,8 @@ $HardwareMutationTests = @(
 # the entry is appended to the HardwareMutation run.  Removed only after B: UT-CORR-009 split out and 005/006
 # hardware-verified including restoration.  Reasons must not end in a parenthesis.
 $HardwareMutationAttendedOnly = [ordered]@{
-    'test_ptp_phc_stability --case UT-CORR-005' = 'Mutating:Target: SET_TIMESTAMP 1 ms plus restore; test_ptp_phc_stability.exe also contains the UT-CORR-009 driver lifecycle path, ControlService STOP and Install-Driver-Elevated.ps1 Reinstall by process creation, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-009 is split into its own executable and UT-CORR-005 is hardware-verified, decision B'
-    'test_ptp_phc_stability --case UT-CORR-006' = 'Mutating:Target: ADJUST_FREQUENCY +1 ns plus restore; test_ptp_phc_stability.exe also contains the UT-CORR-009 driver lifecycle path, ControlService STOP and Install-Driver-Elevated.ps1 Reinstall by process creation, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-009 is split into its own executable and UT-CORR-006 is hardware-verified, decision B'
+    'test_ptp_phc_stability --case UT-CORR-005' = 'Mutating:Target: SET_TIMESTAMP 1 ms plus restore; UT-CORR-009 split into test_ptp_phc_lifecycle 2026-10-22, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-005 is hardware-verified, decision B'
+    'test_ptp_phc_stability --case UT-CORR-006' = 'Mutating:Target: ADJUST_FREQUENCY +1 ns plus restore; UT-CORR-009 split into test_ptp_phc_lifecycle 2026-10-22, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-006 is hardware-verified, decision B'
 }
 
 # ===========================
@@ -564,59 +564,13 @@ $HardwareMandatoryCoverageGaps = [ordered]@{
     'test_rx_timestamp_complete' = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
 }
 $HardwareUnitCoverageGaps = [ordered]@{
-    'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
-    'test_clock_config'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
-    'test_clock_working'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on every enumerated adapter'
-    'test_direct_clock'            = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
-    'test_dev_lifecycle'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on unbound handles hits the global default adapter, which depends on the previous test'
-    'test_ptp_freq'               = 'Mutating:Target: ADJUST_FREQUENCY and TIMINCA writes with restore; restore not verifiable unattended, see test_ptp_freq_complete'
-    'test_ptp_freq_complete'      = 'Mutating:Target: TIMINCA restore failed on I226 on 2026-10-20, CLEANUP_FAILED 0x18000000 to 0x08000000, investigations/issue-328-unload-hang-20261020.md'
-    'test_qav_cbs'                = 'Mutating:Target: WRITE_REGISTER and SETUP_QAV on the target adapter'
-    'ptp_clock_control_test'      = 'Mutating: SET_TIMESTAMP, ADJUST_FREQUENCY, INIT_DEVICE; not exact-target-aware; #340'
-    'test_mdio_phy'               = 'Mutating: MDIO_WRITE; not exact-target-aware'
-    'test_ts_event_sub'           = 'Mutating: SET_HW/RX/QUEUE_TIMESTAMP, SET_TARGET_TIME; not exact-target-aware'
-    'test_ptp_getset'             = 'Mutating: SET_TIMESTAMP, SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_hw_ts_ctrl'             = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_rx_timestamp'           = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-    'test_rx_timestamp_complete'  = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-    'test_ioctl_target_time'      = 'Mutating: SET_TARGET_TIME, SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_ioctl_tas'              = 'Mutating: SETUP_TAS, DISARM_TAS; TSN configuration change; not exact-target-aware'
-    'test_ioctl_fp_ptm'           = 'Mutating: SETUP_FP, SETUP_PTM; TSN configuration change; not exact-target-aware'
-    'test_ioctl_offset'           = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ioctl_phc_monotonicity' = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ioctl_access_control'   = 'Mutating: PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_ioctl_buffer_fuzz'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_event_log'              = 'Mutating: ADJUST_FREQUENCY; not exact-target-aware'
-    'test_eee_lpi'                = 'Mutating: EEE_ENABLE/DISABLE; not exact-target-aware'
-    'test_pfc_pause'              = 'Mutating: PFC_ENABLE; not exact-target-aware'
-    'test_srp_interface'          = 'Mutating: SRP_REGISTER/DEREGISTER_STREAM; not exact-target-aware'
-    'test_vlan_tag'               = 'Mutating: VLAN_ENABLE/DISABLE; not exact-target-aware'
-    'test_vlan_pcp_tc_mapping'    = 'Mutating: SETUP_QAV; not exact-target-aware'
-    'test_security_validation'    = 'Mutating: SET_TIMESTAMP; not exact-target-aware'
-    'test_ioctl_launch_time'      = 'Mutating: SET_LAUNCH_TIME; not exact-target-aware'
-    'test_gptp_phc_interface'     = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
-    'test_error_recovery'         = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
 }
 $HardwareIntegrationCoverageGaps = [ordered]@{
-    'test_hw_state_machine'        = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; up to five INIT calls on unbound and bound handles'
-    'avb_test_i219'                 = 'Mutating:Target: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE on the target adapter; I219 compatibility, #261'
-    'avb_test_portability'          = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; QA-SC-PORT-001, #114'
-    'avb_test_i217'                 = 'Mutating:Target: SETUP_TAS, SETUP_FP, WRITE_REGISTER; TSN configuration change; #114'
-    'avb_test_i225'                 = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; #114'
-    'avb_test_i226_um'              = 'Mutating:Target: SETUP_TAS, SETUP_FP, SETUP_PTM, WRITE_REGISTER; TSN configuration change; #114'
-    'test_tsn_ioctl_handlers_um'    = 'Mutating: SETUP_TAS/FP/PTM, INIT_DEVICE; TSN configuration change; not exact-target-aware'
-    'test_ptp_corr_extended'        = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'ptp_clock_control_production'  = 'Mutating: SET_TIMESTAMP, ADJUST_FREQUENCY; not exact-target-aware'
-    'ptp_ioctl_latency_test'        = 'Mutating: SET_TIMESTAMP, INIT_DEVICE; not exact-target-aware'
-    'hw_timestamping_control'       = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'rx_timestamping'               = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-    'tsauxc_toggle_test'            = 'Mutating: SET_HW_TIMESTAMPING; not exact-target-aware'
-    'test_gptp_daemon_coexist'      = 'Mutating: ADJUST_FREQUENCY, PHC_OFFSET_ADJUST; not exact-target-aware'
-    'ssot_register_validation_test' = 'Unknown: not yet classified from its source; built by Build-Tests.ps1 entry ssot_register_validation, Output ssot_register_validation_test.exe, source tests/integration/tsn/ssot_register_validation_test.c - the earlier claim of no build entry was wrong, the entry name differs from the output name'
     # Formerly only commented out of every list (silently absent); declared so every run reports them NOT EXECUTED.
     'test_vv_corr_001_stability'    = 'ReadOnly: TEMPORARY POLICY EXCLUSION 2026-10-21 - VV-CORR-001 requires a 24-hour run, default --hours 24; no long-duration HIL lane exists and shortening the run would change its acceptance criterion; #317 Track E'
     'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
     'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
+    'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; #149 #317'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
 }
 
@@ -639,6 +593,20 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
 # rewritten), unbound-handle callers hit whichever adapter the previous test opened, and the post-test state check
 # does not detect a PHC time discontinuity.  Attended runs (outside GitHub Actions) keep running Init entries.
 $HilInitUnattendedApproved = $false
+
+# Hazard holds (Q 2026-10-22: lists are authoritative; an unresolved, evidenced unsafe hardware condition blocks only
+# the affected entries, visibly, at dispatch).  Key = registry key.  Removed only when the defect is hardware-verified fixed.
+$Hold328Tsn = '#328 SETUP_TAS/FP/PTM put the e2fn-owned I226 into TSN transmit mode without a restorable gate schedule, driver setup_tas defect, TQAVCTRL 0x00000009 read back 2026-10-22 13:44 before I226 send completions stopped and the next driver unload hung, investigations/issue-328-release-reinstall-hang-20261022.md; leaving TSN mode needs an adapter reset, held until the driver TAS/FP restore is fixed and hardware-verified'
+$HilHazardHolds = @{
+    'avb_test_portability'       = $Hold328Tsn
+    'avb_test_i217'              = $Hold328Tsn
+    'avb_test_i225'              = $Hold328Tsn
+    'avb_test_i226_um'           = $Hold328Tsn
+    'test_ioctl_tas'             = $Hold328Tsn
+    'test_ioctl_fp_ptm'          = $Hold328Tsn
+    'test_tsn_ioctl_handlers_um' = $Hold328Tsn
+    'test_tsn_ioctl_handlers'    = $Hold328Tsn
+}
 
 $HilTestSafety = @{
     # --- ReadOnly ---
@@ -685,7 +653,7 @@ $HilTestSafety = @{
     'test_vv_corr_003_crossdomain'     = 'ReadOnly'
     'test_ptp_001'                     = 'ReadOnly'   # ADJUST_FREQUENCY appears only in comments/printf text
     'test_ptp_corr'                    = 'ReadOnly'
-    'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006/009 need --case
+    'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006 need --case; UT-CORR-009 is test_ptp_phc_lifecycle
     'test_hardware_detection'          = 'ReadOnly'
     # --- Init (IOCTL_AVB_INIT_DEVICE) ---
     'test_clock_config'                = 'Init'
@@ -732,6 +700,7 @@ $HilTestSafety = @{
     'test_gptp_phc_interface'          = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_error_recovery'              = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_tsn_ioctl_handlers_um'       = 'Mutating'   # SETUP_TAS/FP/PTM, INIT_DEVICE
+    'test_tsn_ioctl_handlers'          = 'Unknown'    # Build-Tests entry Disabled, source a 9-line KM placeholder; the only binary is the stale 2026-04-08 one (#328 F23); also hazard-held
     'test_ptp_corr_extended'           = 'Mutating'   # SET_HW_TIMESTAMPING
     'ptp_clock_control_production'     = 'Mutating'   # SET_TIMESTAMP, ADJUST_FREQUENCY
     'ptp_ioctl_latency_test'           = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE
@@ -742,6 +711,7 @@ $HilTestSafety = @{
     # --- Unsafe (NIC administration; removed from every suite list) ---
     'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
     'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
+    'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
     'test_vv_corr_001_stability'       = 'ReadOnly'   # ENUM/OPEN_ADAPTER, GET_TIMESTAMP, GET_HW_STATE, TEST_SEND_PTP
@@ -1456,6 +1426,29 @@ function Get-HilBinName {
     return (($Entry -split '\s+', 2)[0] -replace '\.exe$', '')
 }
 
+# The suite lists are authoritative (Q 2026-10-22): a listed 'x.exe' is the test 'x'.  Registry/mutation-matrix key =
+# binary name without '.exe' plus the arguments, so a spelling never makes a listed test unclassified (BLOCKED).
+function ConvertTo-AvbHilEntryKey {
+    param([string]$Entry)
+    if ($Entry.StartsWith('ps1:')) { return $Entry }
+    $p = $Entry -split '\s+', 2
+    $b = $p[0] -replace '\.exe$', ''
+    if ($p.Count -gt 1) { return "$b $($p[1])" }
+    return $b
+}
+
+# Built artifact of a listed entry: the Build-Tests Output recorded under that Name in the test-build manifest
+# (hw_timestamping_control -> hw_timestamping_control_test.exe); without a manifest record '<name>.exe'.
+function Resolve-AvbHilArtifactName {
+    param([string]$BinName, $Manifest)
+    $n = $BinName -replace '\.exe$', ''
+    if ($null -ne $Manifest -and $null -ne $Manifest.ByName -and $Manifest.ByName.ContainsKey($n)) {
+        $a = [string]$Manifest.ByName[$n].artifact
+        if ($a) { return $a }
+    }
+    return "$n.exe"
+}
+
 # Sandbox: only ps1 fakes outside the repository may execute; their class comes from AVB_TEST_SANDBOX_CLASSES.
 function Test-HilSandboxFake {
     param([string]$Entry)
@@ -1476,7 +1469,8 @@ function Get-AvbHilMutatedState {
         }
         return @()
     }
-    if ($HilMutatedState.Contains($Entry)) { return @($HilMutatedState[$Entry]) }
+    $k = ConvertTo-AvbHilEntryKey $Entry
+    if ($HilMutatedState.Contains($k)) { return @($HilMutatedState[$k]) }
     return @()
 }
 
@@ -1594,14 +1588,17 @@ function Get-AvbHilTestClass {
         }
         return ''
     }
-    if ($HilTestSafety.ContainsKey($Entry)) { return $HilTestSafety[$Entry] }
+    $k = ConvertTo-AvbHilEntryKey $Entry
+    if ($HilTestSafety.ContainsKey($k)) { return $HilTestSafety[$k] }
     return ''
 }
 
 # Pure decision: 'Run' | 'Block' (+ Reason).  A Mutating:Target item runs only with an exact target DID.
 function Get-AvbHilGateDecision {
     param([string]$Entry, [string]$Class, [string]$Target, [string]$Halt, [int]$TargetCount,
-          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions, [bool]$InitUnattendedApproved = $false)
+          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions, [bool]$InitUnattendedApproved = $false, [hashtable]$HazardHolds = @{})
+    # Evidence-referenced hardware hazard: never executed, whatever class, target, attendance or authorization.
+    if ($null -ne $HazardHolds -and $HazardHolds.ContainsKey($Entry)) { return @{ Action = 'Block'; Reason = "hazard hold: $($HazardHolds[$Entry])" } }
     $haltReason = "state-integrity halt ($Halt)"
     switch ($Class) {
         'ReadOnly' { return @{ Action = 'Run'; Reason = '' } }
@@ -1651,6 +1648,16 @@ function Add-HilBlocked {
 # A declared automatic-HIL coverage gap ($Hardware*CoverageGaps): a REQUIRED test that is not executed because its
 # fixture/restoration or infrastructure is missing.  Never a skip, never green: BLOCKED (JUnit failure) and the run is
 # INCOMPLETE (Get-AvbRunOverall).  P0 full HIL coverage, 2026-10-21.
+# Gap rows that still apply to this run: a listed entry (spelling normalized) is executed or gate-blocked with its own
+# reason, never ALSO a NOT EXECUTED coverage gap (the suite lists are authoritative, Q 2026-10-22).
+function Get-AvbHilEffectiveGaps {
+    param($GapTable, [string[]]$TestList)
+    $listed = @($TestList | ForEach-Object { ConvertTo-AvbHilEntryKey $_ })
+    $eff = [ordered]@{}
+    foreach ($g in @($GapTable.Keys)) { if ($listed -notcontains (ConvertTo-AvbHilEntryKey $g)) { $eff[$g] = $GapTable[$g] } }
+    return $eff
+}
+
 function Add-HilCoverageGap {
     param([string]$Entry, [string]$Reason)
     $script:coverageGapTests++
@@ -1683,7 +1690,7 @@ function Get-AvbManifestProp {
 
 function Read-AvbBuildManifest {
     param([string]$Path, [string]$Configuration)
-    $res = @{ Ok = $false; Error = ''; ByArtifact = @{}; Path = $Path; Revision = $null }
+    $res = @{ Ok = $false; Error = ''; ByArtifact = @{}; ByName = @{}; Path = $Path; Revision = $null }
     if (-not (Test-Path -LiteralPath $Path)) {
         $res.Error = "test build manifest not found: $Path (build with tools/build/Build-Tests.ps1 -Configuration $Configuration)"
         return $res
@@ -1705,6 +1712,8 @@ function Read-AvbBuildManifest {
         if (-not $a) { continue }
         $k = $a.ToLowerInvariant()
         if ($res.ByArtifact.ContainsKey($k)) { $ambiguous += $k } else { $res.ByArtifact[$k] = $e }
+        $nm = [string](Get-AvbManifestProp $e 'name')
+        if ($nm) { $res.ByName[$nm] = $e }   # entry name -> artifact (Resolve-AvbHilArtifactName); authorization stays ByArtifact
     }
     foreach ($k in $ambiguous) { $res.ByArtifact[$k] = $null }   # recorded by two entries -> never authorized
     $res.Ok = $true
@@ -2173,7 +2182,8 @@ if ($IsHardwareSuite -and $Tests.Count -eq 0) {
     elseif ($Suite -eq 'HardwareUnit')        { $gapTable = $HardwareUnitCoverageGaps }
     elseif ($Suite -eq 'HardwareIntegration') { $gapTable = $HardwareIntegrationCoverageGaps }
     if ($null -ne $gapTable) {
-        foreach ($g in @($gapTable.Keys)) { Add-HilCoverageGap -Entry $g -Reason $gapTable[$g] }
+        $effGaps = Get-AvbHilEffectiveGaps -GapTable $gapTable -TestList $TestList
+        foreach ($g in @($effGaps.Keys)) { Add-HilCoverageGap -Entry $g -Reason $effGaps[$g] }
     }
     # Attended-only mutation entries: NOT EXECUTED gap under GitHub Actions, executed on an attended run.
     if ($Suite -eq 'HardwareMutation') {
@@ -2226,7 +2236,7 @@ foreach ($WorkItem in $WorkItems) {
         $parts   = $TestName -split '\s+', 2
         $binName = $parts[0]
         $testArgs = if ($parts.Count -gt 1) { $parts[1] } else { '' }
-        $exeName = if ($binName.EndsWith(".exe")) { $binName } else { "$binName.exe" }
+        $exeName = Resolve-AvbHilArtifactName -BinName $binName -Manifest $BuildManifest
     }
     $exePath = if ($isPsTest) { $psScriptPath } else { Join-Path $testExeDir $exeName }
     $itemStem = $binName -replace '\.(exe|ps1)$',''
@@ -2253,7 +2263,7 @@ foreach ($WorkItem in $WorkItems) {
     }
 
     # A known hardware entry never runs outside a Hardware* suite: there is no baseline or gate there.
-    if (-not $IsHardwareSuite -and $HilTestSafety.ContainsKey($TestName) -and (($UnitTests + $IntegrationTests) -notcontains $TestName)) {
+    if (-not $IsHardwareSuite -and $HilTestSafety.ContainsKey((ConvertTo-AvbHilEntryKey $TestName)) -and (($UnitTests + $IntegrationTests) -notcontains $TestName)) {
         Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason 'hardware test requested outside a Hardware* suite (no adapter baseline or safety gate)'
         continue
     }
@@ -2295,9 +2305,9 @@ foreach ($WorkItem in $WorkItems) {
             $still = Test-AvbHilLockStillOwned
             if (-not $still.Ok) { Set-HilHalt "machine lock lost during execution before ${exeName}: $($still.Why)" -Verdict 'LOCK_LOST' }
         }
-        $gate = Get-AvbHilGateDecision -Entry $TestName -Class $hilClass -Target $targetDid -Halt $stateHalt `
+        $gate = Get-AvbHilGateDecision -Entry (ConvertTo-AvbHilEntryKey $TestName) -Class $hilClass -Target $targetDid -Halt $stateHalt `
                     -TargetCount $HilTargets.Count -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions `
-                    -InitUnattendedApproved $HilInitUnattendedApproved
+                    -InitUnattendedApproved $HilInitUnattendedApproved -HazardHolds $HilHazardHolds
         if ($gate.Action -ne 'Run') {
             Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason $gate.Reason
             continue
