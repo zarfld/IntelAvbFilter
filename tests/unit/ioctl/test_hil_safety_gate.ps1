@@ -822,6 +822,66 @@ tc_check 'TEST-HILGATE-066-ambiguous-adapter-identity-is-never-a-mutation-target
     (($s2Ran -join ',') -eq '0x125B' -and $rS2.Out -match 'TC-INFRA-ADAPTER-003: DID 0x1533 is present more than once' -and ($s3Ran -join ',') -eq '0x125B') `
     ("fan-out ran=[{0}]; with operator AVB_HIL_TARGET_DID=0x1533 ran=[{1}]" -f ($s2Ran -join ','), ($s3Ran -join ','))
 
+# --- Run T: cleanup INCIDENTS vs verification OBSERVATIONS (Decision B, Q 2026-10-22) ------------------------------
+# One persistent discrepancy = one incident; every independent check (per-test TC-INFRA-STATE-001, session start
+# TC-INFRA-SESSION-001, session end TC-INFRA-SESSION-002) stays a separately visible observation referencing it.
+# Incident key = adapter identity | component | expected | observed.  Pure decision functions extracted from the runner.
+$fnCmp = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Compare-AvbHilState' }, $true)
+$fnRes = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Resolve-AvbHilIncident' }, $true)
+if ($null -eq $fnRes) { tc_check 'TEST-HILGATE-067-incident-resolution-pure-cases' $false 'Resolve-AvbHilIncident not found in Run-Tests-CI.ps1' }
+else {
+    . ([scriptblock]::Create($fnCmp.Extent.Text)); . ([scriptblock]::Create($fnRes.Extent.Text))
+    function New-St([uint32]$Tim1533 = 0, [uint32]$Aux1533 = 0, [uint32]$Tim125B = 0x08000000, [string]$Admin1533 = 'Up') {
+        return @{ Ok = $true; Error = ''; ClockOk = $true; ClockError = ''
+                  Adapters = @([pscustomobject]@{ InstanceId = 'PCI\VEN_8086&DEV_1533\SB02'; Did = '0x1533'; PnpStatus = 'OK'; Problem = 0; AdminStatus = $Admin1533; MediaStatus = 'Up'; FilterBound = 'True'; Name = 'I210' })
+                  Clock = @([pscustomobject]@{ Index = 0; Did = '0x125B'; Ok = $true; Timinca = $Tim125B; Tsauxc = 0; Error = '' },
+                            [pscustomobject]@{ Index = 1; Did = '0x1533'; Ok = $true; Timinca = $Tim1533; Tsauxc = $Aux1533; Error = '' }) }
+    }
+    $base = New-St
+    $c1 = Compare-AvbHilState $base (New-St -Tim1533 34)
+    $c2 = Compare-AvbHilState $base (New-St -Tim1533 34 -Aux1533 4)
+    $c6 = Compare-AvbHilState $base (New-St -Tim1533 34 -Tim125B 34)
+    $bad = @()
+    if (@($c1.Items).Count -ne 1 -or $c1.Items[0].Key -ne 'drv:0x1533#1|TIMINCA|0x00000000|0x00000022' -or $c1.Items[0].IdentityVerified) { $bad += "structured TIMINCA item: $(@($c1.Items | ForEach-Object { $_.Key }) -join ',')" }
+    # case 1: per-test failure confirmed at suite end -> one incident, two observations
+    $open = [ordered]@{}
+    $o1 = Resolve-AvbHilIncident -Open $open -Item $c1.Items[0] -Check 'per-test' -Record 'x[STATE]'
+    $o2 = Resolve-AvbHilIncident -Open $open -Item $c1.Items[0] -Check 'session-end' -Record 'HIL-SESSION[end]'
+    if ($o1.Role -ne 'opened' -or $o2.Role -ne 'confirmed' -or $o1.IncidentId -ne $o2.IncidentId -or @($open[$c1.Items[0].Key].observations).Count -ne 2) { $bad += "case1: $($o1.Role)/$($o2.Role) ids $($o1.IncidentId)/$($o2.IncidentId)" }
+    # case 2: TIMINCA plus an additional TSAUXC change -> two incidents
+    $open2 = [ordered]@{}; $ids2 = @($c2.Items | ForEach-Object { (Resolve-AvbHilIncident -Open $open2 -Item $_ -Check 'per-test' -Record 'x').IncidentId } | Sort-Object -Unique)
+    if ($ids2.Count -ne 2) { $bad += "case2: $($ids2.Count) incident(s) for TIMINCA+TSAUXC" }
+    # case 4: discrepancy persisting into the next suite (open incident loaded from the machine record) -> same incident
+    $open4 = [ordered]@{}; $open4[$c1.Items[0].Key] = @{ IncidentId = 'evt-persisted'; Key = $c1.Items[0].Key; observations = @() }
+    $o4 = Resolve-AvbHilIncident -Open $open4 -Item $c1.Items[0] -Check 'session-start' -Record 'HIL-SESSION[start]'
+    if ($o4.Role -ne 'confirmed' -or $o4.IncidentId -ne 'evt-persisted') { $bad += "case4: $($o4.Role) $($o4.IncidentId)" }
+    # case 5: verified restored earlier (event closed -> not loaded as open), recurs -> NEW incident
+    $o5 = Resolve-AvbHilIncident -Open ([ordered]@{}) -Item $c1.Items[0] -Check 'per-test' -Record 'y'
+    if ($o5.Role -ne 'opened' -or $o5.IncidentId -eq 'evt-persisted') { $bad += "case5: $($o5.Role) $($o5.IncidentId)" }
+    # case 6: same register changed on two distinct adapters -> separate incidents
+    $open6 = [ordered]@{}; $ids6 = @($c6.Items | ForEach-Object { (Resolve-AvbHilIncident -Open $open6 -Item $_ -Check 'per-test' -Record 'x').IncidentId } | Sort-Object -Unique)
+    if ($ids6.Count -ne 2) { $bad += "case6: $($ids6.Count) incident(s) for TIMINCA on two adapters" }
+    # case 8: an unreadable component is an explicit unobservable item, never a difference and never an incident
+    $c8 = Compare-AvbHilState $base @{ Ok = $true; Error = ''; ClockOk = $false; ClockError = 'GET_CLOCK_CONFIG failed'; Adapters = $base.Adapters; Clock = @() }
+    if (@($c8.Items | Where-Object { $_.Kind -eq 'unobservable' }).Count -lt 1 -or @($c8.Items | Where-Object { $_.Kind -eq 'diff' }).Count -ne 0) { $bad += "case8: kinds $(@($c8.Items | ForEach-Object { $_.Kind }) -join ',')" }
+    tc_check 'TEST-HILGATE-067-incident-resolution-pure-cases' ($bad.Count -eq 0) ($bad -join ' ### ')
+}
+
+# 068 (sandbox): a genuinely NEW discrepancy between suites opens a NEW incident (never folded into an older one),
+# while a persisting one only adds an observation to the existing machine-record event.
+$sf12 = New-ClearSafetyFile 'safety_incidents.json'; $ss12 = Join-Path $Tmp 'sess_incidents.json'
+$rT1 = Invoke-Sandbox 'runT1' @($tTim, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss12 -SafetyFile $sf12           # TIMINCA@1533 damaged
+$rT2 = Invoke-Sandbox 'runT2' @($tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss12 -SafetyFile $sf12 -Suite 'HardwareIntegration' `
+           -StateEdit ($timChg + "; `$a = @(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_125B' })[0]; `$a.AdminStatus = 'Down'")  # persists + NEW change
+$ev12 = @((Read-AvbHilSafetyState -Path $sf12).Record.events)
+$timEv = @($ev12 | Where-Object { $_.PSObject.Properties['incidentKey'] -and $_.incidentKey -match '\|TIMINCA\|' })
+$admEv = @($ev12 | Where-Object { $_.PSObject.Properties['incidentKey'] -and $_.incidentKey -match '\|AdminStatus\|' })
+$t2Roles = @([regex]::Matches($rT2.Out, '\[CLEANUP_FAILED\] TC-INFRA-SESSION-001[^\r\n]*') | ForEach-Object { $_.Value })
+tc_check 'TEST-HILGATE-068-persisting-discrepancy-confirmed-new-discrepancy-opens-new-incident' `
+    ($timEv.Count -eq 1 -and @($timEv[0].observations).Count -ge 3 -and $admEv.Count -eq 1 -and
+     ($t2Roles -join ' ') -match "incident $([regex]::Escape([string]$timEv[0].eventId)) confirmed" -and ($t2Roles -join ' ') -match 'incident [0-9a-f-]+ opened') `
+    ("TIMINCA events={0} obs={1}; AdminStatus events={2}; run2: {3}" -f $timEv.Count, $(if ($timEv.Count) { @($timEv[0].observations).Count }), $admEv.Count, ($t2Roles -join ' | '))
+
 # 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
 # distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).
 $tSetup = New-Fake 'test_sbfake_setup' "Write-Host '  [FAILED_SETUP] TC-SBFAKE-SETUP-001: target adapter not uniquely identified'"
