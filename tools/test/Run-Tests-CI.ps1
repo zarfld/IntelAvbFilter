@@ -295,6 +295,8 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_phc_restoration_evaluator.ps1",    # TEST-PHCEVAL: pure PHC/QPC restoration evaluator (synthetic characterization; not hardware evidence)             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
     "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)
     "ps1:tests/unit/ci/test_local_suites.ps1",                  # TEST-LOCALSUITES: local pre-commit HIL orchestration + DbgView reproduction contract (offline)
+    "ps1:tests/unit/ci/test_hil_baseline_evidence.ps1",         # TEST-HILBASE: baseline evidence producer, verdict rules, never writes the safety record (offline, synthetic; D3)
+    "ps1:tests/unit/ci/test_tx_timestamp_probe.ps1",            # TEST-TXPROBE: TC-CORR-TX-RX-001 phase-1 probe interpretation + non-destructive construction (offline; D4)
     "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)

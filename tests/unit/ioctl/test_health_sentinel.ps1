@@ -82,6 +82,7 @@ Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $tree 'to
 Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $tree 'tools\lib\NativeExit.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $tree 'tools\lib\SourceDigest.ps1')
 Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $tree 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
+Copy-Item (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1') (Join-Path $tree 'tools\lib\PhcRestoration.ps1')   # PHC evaluator (Run-Tests-CI dot-sources it)
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
