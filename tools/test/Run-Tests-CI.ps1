@@ -894,9 +894,15 @@ if ($env:AVB_HIL_AUTHORIZE_UNSAFE) {
 
 function Format-AvbDid { param([int]$Value) return ('0x{0:X4}' -f $Value) }
 
+# A number is the device id itself: an unquoted 0x125B on a command line arrives as the integer 4699 and must not be
+# re-read as the hex text '4699' (2026-10-22 baseline/TX-probe runs targeted 0x4699/0x5427/0x5563).  Text is hex.
 function ConvertTo-AvbDid {
-    param([string]$Text)
-    if ($Text -match '^\s*(0x)?([0-9A-Fa-f]{1,4})\s*$') { return (Format-AvbDid ([Convert]::ToInt32($Matches[2], 16))) }
+    param([object]$Text)
+    if ($Text -is [int] -or $Text -is [long] -or $Text -is [uint16] -or $Text -is [uint32]) {
+        if ([long]$Text -ge 0 -and [long]$Text -le 0xFFFF) { return (Format-AvbDid ([int]$Text)) }
+        throw "invalid PCI device id $Text (outside 0x0000..0xFFFF)"
+    }
+    if ([string]$Text -match '^\s*(0x)?([0-9A-Fa-f]{1,4})\s*$') { return (Format-AvbDid ([Convert]::ToInt32($Matches[2], 16))) }
     throw "invalid PCI device id '$Text'"
 }
 

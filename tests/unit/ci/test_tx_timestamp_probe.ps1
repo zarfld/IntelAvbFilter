@@ -44,6 +44,19 @@ tc_check 'TEST-TXPROBE-006-probe-is-non-destructive-by-construction' `
     ($hits.Count -eq 0 -and (@($codes | Where-Object { $_ -notin @('0X0017007C', '0X00170080', '0X00170058', '0X001700CC') }).Count -eq 0) -and $regs.Count -eq 1 -and $regs[0] -eq '0x0B614') `
     ("forbidden={0} ioctl codes={1} register={2}" -f ($hits -join ','), ($codes -join ','), ($regs -join ','))
 
+# 007: the documented command line (-TargetDids 0x125B,0x1533,0x15BB, unquoted) must target exactly those devices.
+#      2026-10-22 12:45 HIL run: PowerShell bound the numeric literals to [string[]] as '4699','5427','5563' and
+#      ConvertTo-AvbDid read them as hex -> 0x4699/0x5427/0x5563, so every target was BLOCKED (tx-probe-20261022_124541.json).
+$runnerAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1'), [ref]$null, [ref]$null)
+foreach ($n in 'Format-AvbDid', 'ConvertTo-AvbDid') {
+    . ([scriptblock]::Create($runnerAst.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true).Extent.Text))
+}
+$bind = [scriptblock]::Create($ast.ParamBlock.Extent.Text + "`n" + '@($TargetDids | ForEach-Object { ConvertTo-AvbDid $_ }) -join '',''')
+$asTyped  = & ([scriptblock]::Create('param($b) & $b -TargetDids 0x125B,0x1533,0x15BB')) $bind
+$asQuoted = & ([scriptblock]::Create("param(`$b) & `$b -TargetDids '0x125B','1533'")) $bind
+tc_check 'TEST-TXPROBE-007-unquoted-hex-target-dids-bind-to-the-intended-devices' `
+    ($asTyped -eq '0x125B,0x1533,0x15BB' -and $asQuoted -eq '0x125B,0x1533') ("unquoted -> [{0}] quoted -> [{1}]" -f $asTyped, $asQuoted)
+
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
 if ($failed -gt 0) { Write-Host "[FAIL] TEST-TXPROBE: probe contract violated" -ForegroundColor Red; exit 1 }

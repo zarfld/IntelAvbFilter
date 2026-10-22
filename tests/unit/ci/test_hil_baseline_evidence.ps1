@@ -105,6 +105,20 @@ $codeOnly = ($src -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' } | ForEa
 $hits = @($forbidden | Where-Object { $codeOnly -match [regex]::Escape($_) })
 tc_check 'TEST-HILBASE-009-producer-never-writes-the-safety-record-or-hardware' ($hits.Count -eq 0) ("forbidden calls: {0}" -f ($hits -join ', '))
 
+# 010: the documented command line (-ExpectDids 0x1533,0x15BB,0x125B, unquoted) must expect exactly those devices.
+#      2026-10-22 12:46 HIL run: [string[]] binding turned them into '5427','5563','4699' -> 0x5427/0x5563/0x4699 and
+#      every present adapter was reported "not present" (hil-baseline-evidence-20261022_124638.json).
+$pAst = [System.Management.Automation.Language.Parser]::ParseFile($Producer, [ref]$null, [ref]$null)
+$bind = [scriptblock]::Create($pAst.ParamBlock.Extent.Text + "`n" + '@($ExpectDids | ForEach-Object { ConvertTo-AvbDid $_ }) -join '',''')
+$asTyped = & ([scriptblock]::Create('param($b) & $b -ExpectDids 0x1533,0x15BB,0x125B')) $bind
+# ... and the bound values must survive the hand-over to New-AvbHilBaselineDocument (its own -ExpectDids parameter).
+$bound = & ([scriptblock]::Create($pAst.ParamBlock.Extent.Text + "`n" + ',$ExpectDids')) -ExpectDids 0x1533,0x15BB,0x125B
+$docE = New-AvbHilBaselineDocument -Passes @((New-Pass 100), (New-Pass 105), (New-Pass 110)) -Identity (New-Identity) -Driver $drv -Supported $supported `
+    -ExpectDids $bound -Safety $saf -IntervalSeconds 5 -HostName $env:COMPUTERNAME -CreatedUtc '2026-10-22T00:00:00Z'
+$notPresent = @($docE.findings | Where-Object { $_ -match 'not present' })
+tc_check 'TEST-HILBASE-010-unquoted-hex-expected-dids-bind-to-the-intended-devices' `
+    ($asTyped -eq '0x1533,0x15BB,0x125B' -and $notPresent.Count -eq 0) ("unquoted -> [{0}]; document findings: {1}" -f $asTyped, ($notPresent -join ' | '))
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan

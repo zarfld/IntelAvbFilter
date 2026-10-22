@@ -21,7 +21,8 @@
 #   .\tools\test\Invoke-AvbTxTimestampProbe.ps1 -TargetDids 0x125B,0x1533,0x15BB
 # Exit: 0 = characterization recorded for every target; 1 = some target BLOCKED / failed; 2 = not run.
 param(
-    [Parameter(Mandatory = $true)][string[]]$TargetDids,
+    # [object[]]: an unquoted 0x125B must reach ConvertTo-AvbDid as a number, not as the text '4699'.
+    [Parameter(Mandatory = $true)][object[]]$TargetDids,
     [int]$Sends = 3,
     [int]$PollMs = 200,
     [string]$OutPath = ''

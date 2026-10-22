@@ -16,7 +16,8 @@
 #   .\tools\test\New-AvbHilBaselineEvidence.ps1 -ExpectDids 0x1533,0x15BB,0x125B
 # Exit: 0 = BASELINE_VERIFIED document written; 1 = NOT_VERIFIED document written (findings listed); 2 = not run.
 param(
-    [string[]]$ExpectDids = @(),
+    # [object[]]: an unquoted 0x1533 must reach ConvertTo-AvbDid as a number, not as the text '5427'.
+    [object[]]$ExpectDids = @(),
     [int]$IntervalSeconds = 5,
     [string]$OutPath = ''
 )
@@ -40,7 +41,7 @@ function Get-AvbBaselinePhcCharacterization {
 
 # Pure: the evidence document and its verdict from observations (no I/O).  Any finding = NOT_VERIFIED.
 function New-AvbHilBaselineDocument {
-    param([object[]]$Passes, [hashtable]$Identity, $Driver, [hashtable]$Supported, [string[]]$ExpectDids = @(), $Safety,
+    param([object[]]$Passes, [hashtable]$Identity, $Driver, [hashtable]$Supported, [object[]]$ExpectDids = @(), $Safety,
           [int]$IntervalSeconds, [string]$HostName, [string]$CreatedUtc)
     $findings = @()
     if (@($Passes).Count -lt 2) { $findings += 'fewer than two observation passes' }
