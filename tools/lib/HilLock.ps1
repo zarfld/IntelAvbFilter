@@ -141,6 +141,58 @@ function Resolve-AvbHilLockContext {
 }
 
 # ---------------------------------------------------------------------------------------------------------
+# Original SESSION baseline (Q 2026-10-21): one per exclusive HIL session, beside the lock
+# (%ProgramData%\IntelAvbFilter-hil-session.json, schema avb-hil-session/1), independent of suite results.
+#   session id: ci:<runId>:<attempt> (spans the hil-debug AND hil-release jobs of one workflow run) or
+#               local:<host>:<owner pid>:<lock acquiredUtc> (spans every suite/configuration of one LocalSuites run).
+# Three distinct baselines - never conflated: the machine's APPROVED baseline (safety record), this SESSION baseline
+# (detects state changes that escape per-test cleanup), and the per-suite / per-test snapshots (test cleanup).
+# Never overwritten in place; a different, finished session's file is archived (.prev-*) when a new one starts.
+# ---------------------------------------------------------------------------------------------------------
+function Get-AvbHilSessionPath { return (Join-Path $env:ProgramData 'IntelAvbFilter-hil-session.json') }
+
+function Get-AvbHilSessionId {
+    param($LockOwner, $GitHub = $null)
+    if ($null -ne $GitHub) { return ("ci:{0}:{1}" -f $GitHub.runId, $GitHub.runAttempt) }
+    if ($null -eq $LockOwner) { return '' }
+    return ("local:{0}:{1}:{2}" -f $LockOwner.host, $LockOwner.pid, $LockOwner.acquiredUtc)
+}
+
+# @{ State = NONE|OK|UNAVAILABLE; Session; Why }
+function Read-AvbHilSession {
+    param([string]$Path = (Get-AvbHilSessionPath))
+    if (-not (Test-Path -LiteralPath $Path)) { return @{ State = 'NONE'; Session = $null; Why = 'no session baseline' } }
+    try { $s = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return @{ State = 'UNAVAILABLE'; Session = $null; Why = "session baseline unreadable or corrupt: $($_.Exception.Message)" } }
+    if ($null -eq $s -or $s.schema -ne 'avb-hil-session/1') { return @{ State = 'UNAVAILABLE'; Session = $null; Why = 'session baseline has an unknown schema' } }
+    if ($s.host -ne $env:COMPUTERNAME) { return @{ State = 'UNAVAILABLE'; Session = $s; Why = "session baseline belongs to host '$($s.host)', not '$($env:COMPUTERNAME)'" } }
+    if ($null -eq $s.baseline) { return @{ State = 'UNAVAILABLE'; Session = $s; Why = 'session baseline has no captured state' } }
+    return @{ State = 'OK'; Session = $s; Why = '' }
+}
+
+# Creates the session baseline; an existing file (another session) is archived first, never overwritten.
+function New-AvbHilSession {
+    param([string]$Path = (Get-AvbHilSessionPath), [string]$SessionId, $Owner, $Baseline, $Provenance)
+    if (Test-Path -LiteralPath $Path) {
+        $arch = "$Path.prev-$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfff')).json"
+        Move-Item -LiteralPath $Path -Destination $arch
+    }
+    $s = [ordered]@{ schema = 'avb-hil-session/1'; sessionId = $SessionId; host = $env:COMPUTERNAME; owner = $Owner
+                     createdUtc = (Get-Date).ToUniversalTime().ToString('o'); provenance = $Provenance; baseline = $Baseline; checks = @() }
+    Write-AvbHilSafetyFile $Path $s
+    return $s
+}
+
+# Appends a start/end comparison of one suite; never changes the captured baseline.
+function Add-AvbHilSessionCheck {
+    param([string]$Path = (Get-AvbHilSessionPath), $Check)
+    $r = Read-AvbHilSession -Path $Path
+    if ($r.State -ne 'OK') { return @{ Ok = $false; Why = $r.Why } }
+    $r.Session.checks = @(@($r.Session.checks) + @($Check))
+    Write-AvbHilSafetyFile $Path $r.Session
+    return @{ Ok = $true; Why = '' }
+}
+
+# ---------------------------------------------------------------------------------------------------------
 # Machine-wide HIL safety record (Q 2026-10-21): %ProgramData%\IntelAvbFilter-hil-safety.json, schema avb-hil-safety/1.
 # Shared by every process, configuration and run on this machine (Debug, Release, LocalSuites, CI).
 #   UNBASELINED record infrastructure exists, no authorized hardware baseline -> Init/Mutating BLOCKED

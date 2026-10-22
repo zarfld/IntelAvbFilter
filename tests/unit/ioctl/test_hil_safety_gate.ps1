@@ -272,12 +272,12 @@ $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=Init;test_sbfake_mut=Mutating;' +
            'test_sbfake_tgt=Mutating:Target;test_sbfake_unsafe=Unsafe;test_sbfake_disabler=ReadOnly;' +
            'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
-           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly'
+           'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
 # TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: INCONCLUSIVE_RESTORATION.
 # Undeclared non-ReadOnly fakes (init, mut, ...) are treated as modifying unknown state.
-$Mutates = 'test_sbfake_tgt=TIMINCA;test_sbfake_timinca=TIMINCA;test_sbfake_tgtphc=TIMINCA,PHC_TIME'
+$Mutates = 'test_sbfake_tgtsleep=TIMINCA;test_sbfake_tgt=TIMINCA;test_sbfake_timinca=TIMINCA;test_sbfake_tgtphc=TIMINCA,PHC_TIME'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -316,12 +316,13 @@ function New-StateFile([string]$Path, [switch]$AllSupportedEnabled) {
 function Invoke-Sandbox {
     param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [int]$Timeout = 60,
           [hashtable]$ExtraEnv = @{}, [switch]$NoLogsDir, [switch]$AllSupportedEnabled, [string]$PriorResultsDir = '', [string]$SafetyFile = '',
-          [string]$LockFile = '', [string]$RunnerArgs = '')
+          [string]$LockFile = '', [string]$RunnerArgs = '', [string]$SessionFile = '', [string]$StateEdit = '', [string]$Configuration = 'Debug')
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     $stateFile = Join-Path $dir 'state.json'
     New-StateFile $stateFile -AllSupportedEnabled:$AllSupportedEnabled
+    if ($StateEdit) { $s = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json; & ([scriptblock]::Create($StateEdit)) $s; ($s | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $stateFile -Encoding UTF8 }
     if (Test-Path $RanLog) { Remove-Item $RanLog -Force }
     # Hardware* suites dispatch only manifest-authorized artifacts (TEST-HILPROV, #328 F23); sandbox fakes are
     # artifacts, so record each existing fake as built by an enabled entry with its SHA256.
@@ -336,13 +337,13 @@ function Invoke-Sandbox {
                                    sha256 = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash
                                    sourceRevision = 'sandbox-rev'; sourceDirty = $false })
     }
-    $mDir = Join-Path $Tree 'build\tools\avb_test\x64\Debug'
+    $mDir = Join-Path $Tree "build\tools\avb_test\x64\$Configuration"
     New-Item -ItemType Directory -Path $mDir -Force | Out-Null
-    ([ordered]@{ schemaVersion = 1; producer = 'test_hil_safety_gate.ps1'; configuration = 'Debug'; platform = 'x64'; entries = $mEntries } |
+    ([ordered]@{ schemaVersion = 1; producer = 'test_hil_safety_gate.ps1'; configuration = $Configuration; platform = 'x64'; entries = $mEntries } |
         ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $mDir 'test-build-manifest.json') -Encoding UTF8
     $envs = [ordered]@{
         AVB_TEST_SANDBOX = '1'; AVB_TEST_ADAPTER_STATE_FILE = $stateFile; AVB_TEST_SANDBOX_CLASSES = $Classes
-        AVB_TEST_SANDBOX_MUTATES = $Mutates; AVB_TEST_HIL_SAFETY_FILE = $SafetyFile; AVB_TEST_HIL_LOCK_FILE = $LockFile
+        AVB_TEST_SANDBOX_MUTATES = $Mutates; AVB_TEST_HIL_SAFETY_FILE = $SafetyFile; AVB_TEST_HIL_LOCK_FILE = $LockFile; AVB_TEST_HIL_SESSION_FILE = $SessionFile
         GITHUB_RUN_ID = ''; GITHUB_RUN_ATTEMPT = ''; GITHUB_JOB = ''
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
@@ -365,7 +366,7 @@ function Invoke-Sandbox {
         ([ordered]@{ kind = 'ci'; label = 'sandbox job'; host = $env:COMPUTERNAME; pid = 1; runId = 'sbx-run'; runAttempt = '1'; job = 'sbx-job'; acquiredUtc = '2026-10-21T00:00:00Z' } | ConvertTo-Json) | Set-Content -LiteralPath $lf -Encoding UTF8
         $lines += "`$env:AVB_TEST_HIL_LOCK_FILE = '$lf'"; $lines += "`$env:GITHUB_RUN_ID = 'sbx-run'"; $lines += "`$env:GITHUB_RUN_ATTEMPT = '1'"; $lines += "`$env:GITHUB_JOB = 'sbx-job'"
     }
-    $lines += "& '$TreeRunner' -Suite $Suite -Tests @($testsLit) -TestTimeoutSeconds $Timeout -Configuration Debug $logsArg"
+    $lines += "& '$TreeRunner' -Suite $Suite -Tests @($testsLit) -TestTimeoutSeconds $Timeout -Configuration $Configuration $logsArg"
     $lines += 'exit $LASTEXITCODE'
     $wrapper = Join-Path $dir 'wrapper.ps1'
     $lines | Set-Content -LiteralPath $wrapper -Encoding UTF8
@@ -709,6 +710,117 @@ tc_check 'TEST-HILGATE-054-unattended-run-needs-its-own-job-lock-and-never-acqui
     ((Get-RanCount $rQ4 '^RAN test_sbfake_tgt ') -eq 0 -and $rQ4.Out -match 'not owned by this execution[^\r\n]*other-job' -and
      (Get-RanCount $rQ5 '^RAN test_sbfake_tgt ') -eq 0 -and -not (Test-Path $lfCiAbsent) -and (Get-RanCount $rQ5 '^RAN test_sbfake_ro ') -eq 1) `
     ("otherJob: {0} ### absent: {1}" -f (Tail $rQ4), (Tail $rQ5))
+
+# --- Run R: one original SESSION baseline per exclusive HIL session (Q 2026-10-21) -------------------------------
+# Session = ci:<run>:<attempt> (spans hil-debug AND hil-release) or local:<host>:<pid>:<lock acquired>.  Stored beside the
+# lock (sandbox: AVB_TEST_HIL_SESSION_FILE), independent of suite results; created only by a lock-owning run on a CLEAR
+# machine, never overwritten after a failure; every suite compares its start and end with it (configuration only - PHC
+# time progression is not a difference).  Distinct from the machine's approved baseline (safety record) and from the
+# per-suite / per-test snapshots.  Probe: test_sbfake_tgt (Mutating:Target, TIMINCA only) runs unattended when owned.
+$gh = @{ GITHUB_ACTIONS = 'true' }
+function Read-Session([string]$P) { if (Test-Path -LiteralPath $P) { try { return (Get-Content -LiteralPath $P -Raw | ConvertFrom-Json) } catch { return $null } }; return $null }
+function Get-SessFail($r) { return @([regex]::Matches($r.Out, '\[(CLEANUP_FAILED|FAILED_SETUP)\] TC-INFRA-SESSION-\d{3}[^\r\n]*') | ForEach-Object { $_.Value }) }
+$adminDown = "`$a = @(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_1533' })[0]; `$a.AdminStatus = 'Down'"
+$timChg   = "`$c = @(`$s.clock | Where-Object { `$_.Did -eq '0x1533' })[0]; `$c.Timinca = 34"
+
+# 055 unchanged configuration across suites: created once, later suites compare clean, mutation proceeds
+$ss1 = Join-Path $Tmp 'sess_unchanged.json'
+$rR1a = Invoke-Sandbox 'runR1a' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss1 -Suite 'HardwareUnit'
+$s1a = Read-Session $ss1
+$rR1b = Invoke-Sandbox 'runR1b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss1 -Suite 'HardwareIntegration'
+$s1b = Read-Session $ss1
+tc_check 'TEST-HILGATE-055-session-baseline-created-once-and-reused-across-suites' `
+    ($s1a -and $s1b -and $s1a.sessionId -eq 'ci:sbx-run:1' -and $s1b.createdUtc -eq $s1a.createdUtc -and ($s1b.checks | Measure-Object).Count -ge 3 -and
+     (@($s1b.checks) | Where-Object { ($_.diffs | Measure-Object).Count -gt 0 } | Measure-Object).Count -eq 0 -and
+     @(Get-SessFail $rR1a).Count -eq 0 -and @(Get-SessFail $rR1b).Count -eq 0 -and (Get-RanCount $rR1b '^RAN test_sbfake_tgt ') -ge 1) `
+    ("id={0} created a/b={1}/{2} checks={3}; {4}" -f $(if ($s1a) { $s1a.sessionId }), $(if ($s1a) { $s1a.createdUtc }), $(if ($s1b) { $s1b.createdUtc }), $(if ($s1b) { @($s1b.checks).Count }), (Tail $rR1b))
+# 056 unexpected change between suites
+$ss2 = Join-Path $Tmp 'sess_suites.json'
+$null = Invoke-Sandbox 'runR2a' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss2
+$rR2b = Invoke-Sandbox 'runR2b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss2 -StateEdit $adminDown -Suite 'HardwareIntegration'
+tc_check 'TEST-HILGATE-056-change-between-suites-is-cleanup-failed-against-the-session-baseline' `
+    (@(Get-SessFail $rR2b | Where-Object { $_ -match '^\[CLEANUP_FAILED\] TC-INFRA-SESSION-001[^\r\n]*DEV_1533[^\r\n]*AdminStatus Up -> Down' }).Count -eq 1 -and
+     (Get-RanCount $rR2b '^RAN test_sbfake_tgt ') -eq 0 -and (Get-RanCount $rR2b '^RAN test_sbfake_ro ') -eq 1) (((Get-SessFail $rR2b) -join ' | ') + ' ### ' + (Tail $rR2b))
+# 057 unexpected change between Debug and Release (same CI run, other job)
+$ss3 = Join-Path $Tmp 'sess_cfg.json'
+$null = Invoke-Sandbox 'runR3a' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss3 -Configuration 'Debug'
+$rR3b = Invoke-Sandbox 'runR3b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss3 -Configuration 'Release' -StateEdit $timChg
+tc_check 'TEST-HILGATE-057-change-between-debug-and-release-is-detected-against-the-same-session' `
+    (@(Get-SessFail $rR3b | Where-Object { $_ -match 'TC-INFRA-SESSION-001[^\r\n]*Release[^\r\n]*TIMINCA 0x00000000 -> 0x00000022' }).Count -eq 1 -and (Get-RanCount $rR3b '^RAN test_sbfake_tgt ') -eq 0) (((Get-SessFail $rR3b) -join ' | ') + ' ### ' + (Tail $rR3b))
+# 058 crash/timeout: the session baseline and the halt survive; the next suite uses the SAME baseline
+$tTgtSleep = New-Fake 'test_sbfake_tgtsleep' 'Start-Sleep -Seconds 120'
+$sf4 = New-ClearSafetyFile 'safety_sess_crash.json'; $ss4 = Join-Path $Tmp 'sess_crash.json'
+$null = Invoke-Sandbox 'runR4a' @($tTgtSleep) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss4 -SafetyFile $sf4 -Timeout 5
+$s4a = Read-Session $ss4
+$rR4b = Invoke-Sandbox 'runR4b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss4 -SafetyFile $sf4
+$s4b = Read-Session $ss4
+tc_check 'TEST-HILGATE-058-timeout-keeps-session-baseline-and-halt-for-the-next-suite' `
+    ($s4a -and $s4b.createdUtc -eq $s4a.createdUtc -and (Get-RanCount $rR4b '^RAN test_sbfake_tgt ') -eq 0 -and $rR4b.Out -match 'machine safety record HALTED') `
+    ("created a/b={0}/{1}; {2}" -f $(if ($s4a) { $s4a.createdUtc }), $(if ($s4b) { $s4b.createdUtc }), (Tail $rR4b))
+# 059 existing machine-wide halt: no session baseline is established from an unverified state
+$ss5 = Join-Path $Tmp 'sess_halted.json'
+$rR5 = Invoke-Sandbox 'runR5' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss5 -SafetyFile $sfHalted
+tc_check 'TEST-HILGATE-059-no-session-baseline-is-created-while-the-machine-is-halted' (-not (Test-Path $ss5) -and $rR5.Out -match 'no session baseline') (Tail $rR5)
+# 060 corrupt session baseline: FAILED_SETUP, mutation blocked, file preserved byte-identical
+$ss6 = Join-Path $Tmp 'sess_corrupt.json'; '{ corrupt' | Set-Content -LiteralPath $ss6
+$h6 = (Get-FileHash $ss6).Hash
+$rR6 = Invoke-Sandbox 'runR6' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss6
+tc_check 'TEST-HILGATE-060-corrupt-session-baseline-is-failed-setup-and-preserved' `
+    (@(Get-SessFail $rR6 | Where-Object { $_ -match '^\[FAILED_SETUP\] TC-INFRA-SESSION-000' }).Count -eq 1 -and (Get-RanCount $rR6 '^RAN test_sbfake_tgt ') -eq 0 -and (Get-FileHash $ss6).Hash -eq $h6) (((Get-SessFail $rR6) -join ' | ') + ' ### ' + (Tail $rR6))
+# 061 foreign host: blocked and preserved; a finished OTHER session on a CLEAR machine is archived, never overwritten
+$ss7 = Join-Path $Tmp 'sess_foreign.json'
+([ordered]@{ schema = 'avb-hil-session/1'; sessionId = 'ci:sbx-run:1'; host = 'OTHER-HOST'; createdUtc = 'x'; baseline = $null; checks = @() } | ConvertTo-Json) | Set-Content -LiteralPath $ss7
+$h7 = (Get-FileHash $ss7).Hash
+$rR7 = Invoke-Sandbox 'runR7' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss7
+$ss8 = Join-Path $Tmp 'sess_old.json'
+$null = Invoke-Sandbox 'runR8a' @($tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss8
+$o8 = Read-Session $ss8
+if ($o8) { $o8.sessionId = 'ci:older-run:1'; ($o8 | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $ss8 -Encoding UTF8 }
+$rR8 = Invoke-Sandbox 'runR8b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss8
+$arch = @(Get-ChildItem $Tmp -Filter 'sess_old.json.prev-*.json')
+$n8 = Read-Session $ss8
+tc_check 'TEST-HILGATE-061-foreign-session-blocked-preserved-other-session-archived-not-overwritten' `
+    (@(Get-SessFail $rR7 | Where-Object { $_ -match 'TC-INFRA-SESSION-000[^\r\n]*OTHER-HOST' }).Count -eq 1 -and (Get-FileHash $ss7).Hash -eq $h7 -and
+     $arch.Count -eq 1 -and ((Get-Content $arch[0].FullName -Raw) -match 'ci:older-run:1') -and $n8 -and $n8.sessionId -eq 'ci:sbx-run:1') `
+    ("foreign: {0} ### archived={1} new={2}" -f ((Get-SessFail $rR7) -join ' | '), $arch.Count, $(if ($n8) { $n8.sessionId }))
+# 062 concurrent access: a run that does not own the lock neither reads nor creates the session baseline
+$ss9 = Join-Path $Tmp 'sess_concurrent.json'
+$rR9 = Invoke-Sandbox 'runR9' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $ghEnv -LockFile $lfCiOther -SessionFile $ss9
+tc_check 'TEST-HILGATE-062-run-without-lock-ownership-never-touches-the-session-baseline' (-not (Test-Path $ss9) -and (Get-RanCount $rR9 '^RAN test_sbfake_tgt ') -eq 0) (Tail $rR9)
+# 063 legitimate PHC time progression is not a configuration difference
+$ss10 = Join-Path $Tmp 'sess_time.json'
+$null = Invoke-Sandbox 'runR10a' @($tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss10 -StateEdit "foreach (`$c in `$s.clock) { `$c | Add-Member -NotePropertyName Systim -NotePropertyValue 1000 -Force }"
+$rR10b = Invoke-Sandbox 'runR10b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss10 -StateEdit "foreach (`$c in `$s.clock) { `$c | Add-Member -NotePropertyName Systim -NotePropertyValue 987654321000 -Force }"
+tc_check 'TEST-HILGATE-063-phc-time-progression-is-not-a-session-difference' ((Test-Path $ss10) -and @(Get-SessFail $rR10b).Count -eq 0 -and (Get-RanCount $rR10b '^RAN test_sbfake_tgt ') -ge 1) (Tail $rR10b)
+# 064 failed restoration, then a new suite: the damage stays visible against the ORIGINAL baseline, never re-baselined
+$sf11 = New-ClearSafetyFile 'safety_sess_fail.json'; $ss11 = Join-Path $Tmp 'sess_fail.json'
+$rR11a = Invoke-Sandbox 'runR11a' @($tTim, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss11 -SafetyFile $sf11
+$s11a = Read-Session $ss11
+$rR11b = Invoke-Sandbox 'runR11b' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss11 -SafetyFile $sf11 -StateEdit $timChg -Suite 'HardwareIntegration'
+$s11b = Read-Session $ss11
+tc_check 'TEST-HILGATE-064-failed-restoration-stays-visible-against-the-original-baseline-in-the-next-suite' `
+    (@(Get-SessFail $rR11a | Where-Object { $_ -match 'TC-INFRA-SESSION-002' }).Count -eq 1 -and @(Get-SessFail $rR11b | Where-Object { $_ -match 'TC-INFRA-SESSION-001[^\r\n]*TIMINCA' }).Count -eq 1 -and
+     $s11a -and $s11b.createdUtc -eq $s11a.createdUtc -and (Get-RanCount $rR11b '^RAN test_sbfake_tgt ') -eq 0) `
+    ("a: {0} ### b: {1}" -f ((Get-SessFail $rR11a) -join ' | '), ((Get-SessFail $rR11b) -join ' | '))
+
+# --- Run S: elevation and unambiguous identity are verified independently before mutation (Q 2026-10-21) -----------
+# 065: a non-elevated token never mutates (elevation is necessary, never sufficient); ReadOnly continues
+$rS1 = Invoke-Sandbox 'runS1' @($tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_TEST_SANDBOX_ELEVATED = '0' }
+tc_check 'TEST-HILGATE-065-non-elevated-execution-never-mutates' `
+    ((Get-RanCount $rS1 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rS1 '^RAN test_sbfake_ro ') -eq 1 -and $rS1.Out -match 'state-integrity halt \(not elevated') (Tail $rS1)
+# 066: two present adapters with the target DID (e.g. 6x I226 lab machines): identity ambiguous -> that target refused,
+#      never "first match"; an unambiguous target still runs
+$dupDid = "`$s.adapters = @(@(`$s.adapters) + @([pscustomobject]@{ InstanceId = 'PCI\VEN_8086&DEV_1533&SUBSYS_00008086&REV_03\SB05'; PnpStatus = 'OK'; Problem = 0; AdminStatus = 'Up'; MediaStatus = 'Up'; FilterBound = 'True'; Name = 'SB I210 #2' }))"
+# Existing contract (characterized, unchanged): the baseline drops a duplicated DID from the exact targets
+# (TC-INFRA-ADAPTER-003) and the child's AVB_HIL_TARGET_DID comes only from that list - an operator-supplied
+# AVB_HIL_TARGET_DID never reaches the test, so an ambiguous adapter is never mutated.
+$rS2 = Invoke-Sandbox 'runS2' @($tTgt, $tRo) -AllSupportedEnabled -StateEdit $dupDid
+$s2Ran = @($rS2.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgt ' } | ForEach-Object { ($_ -split 'target=')[1].Trim() })
+$rS3 = Invoke-Sandbox 'runS3' @($tTgt, $tRo) -AllSupportedEnabled -StateEdit $dupDid -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x1533' }
+$s3Ran = @($rS3.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgt ' } | ForEach-Object { ($_ -split 'target=')[1].Trim() })
+tc_check 'TEST-HILGATE-066-ambiguous-adapter-identity-is-never-a-mutation-target' `
+    (($s2Ran -join ',') -eq '0x125B' -and $rS2.Out -match 'TC-INFRA-ADAPTER-003: DID 0x1533 is present more than once' -and ($s3Ran -join ',') -eq '0x125B') `
+    ("fan-out ran=[{0}]; with operator AVB_HIL_TARGET_DID=0x1533 ran=[{1}]" -f ($s2Ran -join ','), ($s3Ran -join ','))
 
 # 045: a test that cannot establish its initial conditions prints [FAILED_SETUP]: nonpassing even with exit 0, kept
 # distinct in the results document (FAILED_SETUP) and JUnit (<failure> labelled FAILED_SETUP).

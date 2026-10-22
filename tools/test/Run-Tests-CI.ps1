@@ -288,7 +288,10 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_hil_binary_provenance.ps1",         # TEST-HILPROV: build manifest + dispatch provenance gate (sandboxed, no driver; #328 F23)
     "ps1:tests/unit/ci/test_runner_results_json.ps1",           # TEST-RESULTSJSON: machine-readable runner results (sandboxed, no driver)
     "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
-    "ps1:tests/unit/ci/test_hil_safety_record.ps1",             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
+    "ps1:tests/unit/ci/test_hil_suite_safety.ps1",              # TEST-HILSUITE: automatic HIL suites cannot reach TSN configuration or nested execution (was never run by CI - TEST-COMPLETE-003)
+    "ps1:tests/unit/ci/test_hil_trust_boundary.ps1",            # TEST-HILTRUST: HIL workflow trust boundary, acceptance verdicts (was never run by CI - TEST-COMPLETE-003; needs python)
+    "ps1:tests/unit/ci/test_hil_safety_record.ps1",
+    "ps1:tests/unit/ci/test_phc_restoration_evaluator.ps1",    # TEST-PHCEVAL: pure PHC/QPC restoration evaluator (synthetic characterization; not hardware evidence)             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
     "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)
     "ps1:tests/unit/ci/test_local_suites.ps1",                  # TEST-LOCALSUITES: local pre-commit HIL orchestration + DbgView reproduction contract (offline)
     "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
@@ -1723,6 +1726,12 @@ if ($IsHardwareSuite) {
     $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
     Write-Note "Machine safety record: $($HilSafetyState.State) ($HilSafetyPath) $($HilSafetyState.Why)"
 
+    # Elevation is verified on this process's own token (sandbox: AVB_TEST_SANDBOX_ELEVATED, '0' = not elevated).
+    # Necessary, never sufficient: lock ownership, the CLEAR safety record and the session baseline are checked independently.
+    $HilElevated = if ($IsSandbox) { $env:AVB_TEST_SANDBOX_ELEVATED -ne '0' } else {
+        ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+    if (-not $HilElevated) { Set-HilHalt 'not elevated: this process token is not an elevated Administrator (elevation is necessary, never sufficient)' }
+
     # Exclusive hardware access: the machine lock must be OWNED by this execution (Resolve-AvbHilLockContext: same CI
     # run/attempt/job, or this process / an OS ancestor holds it) - its mere existence never authorizes.  Attended:
     # acquire it (bounded wait) when no owner context holds it, release it at completion.  GitHub Actions: never acquired
@@ -1758,6 +1767,41 @@ if ($IsHardwareSuite) {
         $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnLogsDir $logsDir
         if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
     }
+    # Original SESSION baseline (tools/lib/HilLock.ps1): read / compared / created only by a run that OWNS the lock.
+    # Created only on a CLEAR machine without any halt (a snapshot never establishes a clean state after an unresolved
+    # failure); an unusable file is FAILED_SETUP and preserved; a different session's file is archived, never overwritten.
+    $HilSessionPath = if ($IsSandbox -and $env:AVB_TEST_HIL_SESSION_FILE) { $env:AVB_TEST_HIL_SESSION_FILE } elseif ($IsSandbox) { Join-Path $logsDir 'sandbox-hil-session.json' } else { Get-AvbHilSessionPath }
+    $HilSession = $null; $HilSessionNote = ''
+    $sessOwner = if ($HilLockAcquired) { $HilLockAcquired } elseif ($lockCtx.Owned) { $lockCtx.Owner } else { $null }
+    if ($null -eq $sessOwner) {
+        $HilSessionNote = 'no session baseline: this run does not own the machine lock (session baseline not read or written)'
+    } else {
+        $sid = Get-AvbHilSessionId -LockOwner $sessOwner -GitHub $HilGitHubContext
+        $rs = Read-AvbHilSession -Path $HilSessionPath
+        if ($rs.State -eq 'UNAVAILABLE') {
+            Add-HilFailureRecord -Display 'HIL-SESSION' -Status 'FAILED_SETUP' -Stem 'TC-INFRA-SESSION' `
+                -Line ("[FAILED_SETUP] TC-INFRA-SESSION-000: session baseline {0} unusable: {1} --- preserved unchanged; Init/Mutating BLOCKED" -f $HilSessionPath, $rs.Why)
+            Set-HilHalt "session baseline unusable: $($rs.Why)"
+        } elseif ($rs.State -eq 'OK' -and $rs.Session.sessionId -eq $sid) {
+            $HilSession = $rs.Session
+            $cmpS = Compare-AvbHilState $HilSession.baseline $script:HilBaseline
+            $null = Add-AvbHilSessionCheck -Path $HilSessionPath -Check ([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); suite = $Suite; configuration = $Configuration; phase = 'start'; diffs = @($cmpS.Diffs) })
+            if (@($cmpS.Diffs).Count -gt 0) {
+                Add-HilFailureRecord -Display "HIL-SESSION[$Suite/$Configuration start]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-SESSION' -Check `
+                    -Line ("[CLEANUP_FAILED] TC-INFRA-SESSION-001: at start of {0}/{1}: state differs from the original session baseline ({2}, captured {3}): {4} --- a change escaped per-test cleanup; Init/Mutating BLOCKED" -f $Suite, $Configuration, $sid, $HilSession.createdUtc, (@($cmpS.Diffs) -join '; '))
+                Set-HilHalt "state at start of $Suite/$Configuration differs from the original session baseline" -Verdict 'CLEANUP_FAILED' -Last $script:HilBaseline
+            }
+        } elseif ($HilSafetyState.State -eq 'CLEAR' -and -not $stateHalt -and $script:HilBaseline -and $script:HilBaseline.Ok) {
+            $HilSession = New-AvbHilSession -Path $HilSessionPath -SessionId $sid -Owner $sessOwner -Baseline $script:HilBaseline `
+                -Provenance ([ordered]@{ suite = $Suite; configuration = $Configuration; runner = 'tools/test/Run-Tests-CI.ps1'; pid = $PID; driverSha256 = $env:HIL_DRIVER_SHA256
+                                         previousSession = $(if ($rs.State -eq 'OK') { $rs.Session.sessionId } else { $null }) })
+            Write-Note "Original session baseline captured ($sid) at $HilSessionPath$(if ($rs.State -eq 'OK') { "; previous session $($rs.Session.sessionId) archived" })"
+        } else {
+            $HilSessionNote = "no session baseline established: machine safety $($HilSafetyState.State)$(if ($stateHalt) { "; halt: $stateHalt" }) - a snapshot never establishes a clean state after an unresolved failure"
+        }
+    }
+    if ($HilSessionNote) { Write-Note $HilSessionNote }
+
     # Left behind only if this process dies before Complete-AvbRun; a later suite then halts (Get-AvbPriorHalt).  Next to
     # the results document: hil.yml per-suite LogsDir, LocalSuites' report directory (its -PriorResultsDir).
     $RunMarkerPath = Join-Path (Split-Path -Parent $ResultsJsonPath) 'run-in-progress.json'
@@ -2090,6 +2134,18 @@ foreach ($WorkItem in $WorkItems) {
     if ($failFastStop) { break }
 }
 $script:AvbItem = $null
+
+# End of suite: compare with the ORIGINAL session baseline (detects changes that escaped per-test cleanup).
+if ($IsHardwareSuite -and $HilSession) {
+    $endState = Get-AvbHilState
+    $cmpE = Compare-AvbHilState $HilSession.baseline $endState
+    $null = Add-AvbHilSessionCheck -Path $HilSessionPath -Check ([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); suite = $Suite; configuration = $Configuration; phase = 'end'; diffs = @($cmpE.Diffs) })
+    if (@($cmpE.Diffs).Count -gt 0) {
+        Add-HilFailureRecord -Display "HIL-SESSION[$Suite/$Configuration end]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-SESSION' -Check `
+            -Line ("[CLEANUP_FAILED] TC-INFRA-SESSION-002: at end of {0}/{1}: state differs from the original session baseline ({2}): {3}" -f $Suite, $Configuration, $HilSession.sessionId, (@($cmpE.Diffs) -join '; '))
+        Set-HilHalt "state at end of $Suite/$Configuration differs from the original session baseline" -Verdict 'CLEANUP_FAILED' -Last $endState
+    }
+}
 
 # ===========================
 # Summary
