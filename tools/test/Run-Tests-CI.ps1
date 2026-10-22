@@ -1266,13 +1266,16 @@ function Add-HilFailureRecord {
 # Halt carried over from earlier suites of the same HIL job: '' or the reason.  Same stop rule as LocalSuites
 # (Get-AvbStopReason): FAILED(TIMEOUT) / INFRA_FAILURE / CLEANUP_FAILED record, a stateHalt, plus an unreadable results
 # document or a run-in-progress.json marker (that suite's runner died before completing: state unverified).
+# Only this run's own results document is excluded - never a directory: LocalSuites' -PriorResultsDir lies inside the
+# runner's logs directory (TEST-HILGATE-069).  A run-in-progress.json found here is never this run's own: it is written
+# after this check, so it belongs to an earlier suite whose runner died.
 function Get-AvbPriorHalt {
-    param([string]$Dir, [string]$OwnLogsDir = '')
+    param([string]$Dir, [string]$OwnResultsPath = '')
     if (-not (Test-Path -LiteralPath $Dir)) { return '' }
-    $own = if ($OwnLogsDir) { [System.IO.Path]::GetFullPath($OwnLogsDir).TrimEnd('\') + '\' } else { $null }
+    $own = if ($OwnResultsPath) { [System.IO.Path]::GetFullPath($OwnResultsPath) } else { $null }
     $why = @()
     foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -Include 'results-*.json', 'run-in-progress.json' -ErrorAction Stop)) {
-        if ($own -and $f.FullName.StartsWith($own, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($own -and [string]::Equals($f.FullName, $own, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
         if ($f.Name -eq 'run-in-progress.json') { $why += "$($f.Directory.Name) did not complete (runner process ended without results; hardware state unverified)"; continue }
         try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
         if ($d.stateHalt) { $why += "$($d.suite): state-integrity halt ($($d.stateHalt))" }
@@ -1860,7 +1863,7 @@ if ($IsHardwareSuite) {
     # A halt of an earlier suite of the same HIL job carries over: its damaged state must not become this run's
     # clean baseline for further mutation (P0 2026-10-21 sec. 2).  ReadOnly tests continue (same as an in-run halt).
     if ($PriorResultsDir) {
-        $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnLogsDir $logsDir
+        $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnResultsPath $ResultsJsonPath
         if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
     }
     # Open incidents of this machine (unrecovered events with an incident key): a discrepancy that persists into this
