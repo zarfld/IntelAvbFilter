@@ -262,6 +262,7 @@ foreach ($Configuration in $Configurations){
     } 
 
 
+
 $BenchmarkTests = @(
 #    'test_ioctl_phc_crosstimestamp_v2.exe',
     'test_ioctl_xstamp_v2.exe',
@@ -293,6 +294,8 @@ $BenchmarkTests = @(
     #foreach ($t in $CISuiteFailed) { 
     #    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
     #} 
+
+        
 
     $FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
     $BlackList = @("test_s3_sleep_wake.exe","test_vv_corr_001_stability.exe")
