@@ -190,3 +190,62 @@ The 10-24 hang is therefore **in the netcfg filter install, with all three adapt
 - **10-22 14:25** ("Stopping service..." with a monotonic I226 `OutstandingSendNBLs`) remains a separate, unexplained stop-phase hang.
 
 **Discriminating experiment (requires Q's authorization; mutating):** reproduce difference 1 alone. That means `ControlService(STOP)` followed within about 5 s by the installer's adapter disable, under Release, with everything else equal. It would be done through the existing chain only once Q decides how. The corrected UT-CORR-009 no longer produces that timing.
+
+## RECONCILED 2026-10-27: the 10-24 13:04 event is a test/installer defect, not a driver-unload hang
+
+This supersedes the 10-24 interpretations above: "Signature matches", T-RACE, T-NETCFG, T-I226-HALT, and the 10-24 part of T-REL. Sources: System log, Kernel-PnP/Configuration, Kernel-Power, `C:\Windows\INF\setupapi.dev.log`, `%TEMP%\install-driver-*.log`, FullSuite logs. [HW] = OS/host log, [INF] = inference.
+
+| Time | Operation | Process | Evidence |
+|---|---|---|---|
+| 10-24 13:03:58 | old UT-CORR-009 (Release exe, hard-coded `-Configuration Debug`) starts | test exe ← Run-Tests.ps1 ← Run-Tests-Elevated PID 11000 | FullSuite log [HW] |
+| ≤ 13:04:04 | `ControlService(STOP)` of the Release driver **completes** | test exe | installer precondition `Driver service: Stopped` [HW] |
+| 13:04:04 | `Install-Driver.ps1 -Configuration Debug -Reinstall` starts | **visible RunAs PowerShell** ← Install-Driver-Elevated ← `system()` ← test exe | transcript `install-driver-20261024_130403.log` [HW] |
+| 13:04:09 | Ethernet, Ethernet 2 and Ethernet 3 disabled; I219/I210 event 27 | same | System, transcript [HW] |
+| 13:04:13.228–.298 | `netcfg -u MS_IntelAvbFilter`, exit SUCCESS | same | SetupAPI [HW] |
+| after 13:04:13 | "WARNING: Build is OLDER … Press Ctrl+C to cancel or Enter to continue" → `Read-Host` (`Install-Driver.ps1:438`) **waits**, with all adapters disabled | same | no SetupAPI install section until 10-26 [HW]; transcript order |
+| 13:04:09–13:37 | host without network (UCNET → 127.0.0.1, NTP DNS failure) | — | DbgView, System [HW] |
+| 13:33:58 | `[TIMEOUT]` kills only PID 11000; test exe, cmd and the RunAs window survive | Run-Tests-Elevated | FullSuite log 11754 [HW] |
+| 13:37:01–17 | LocalSuites install: `Driver service: not installed`, `netcfg -i` (SetupCopyOEMInf 13:37:09.075, install 13:37:09.435), PnP 420 at 13:37:11, 7045 at 13:37:10, Step 4 re-enable, I226 event 27 at 13:37:12, links up | LocalSuites | System, PnP, SetupAPI [HW] |
+| ~14:03 | LocalSuites Release test build: `LNK1168` on the orphaned exe | — | FullSuite log [HW] |
+| 10-26 20:56:07 | Kernel-Power 566, session change "InputHid" | user at the console | System [HW] |
+| 10-26 20:56:41–44 | orphan resumes: `netcfg -u` 20:56:41.010 (Step 2b), `netcfg -i` 20:56:41.546 / 20:56:43.663, PnP 420 20:56:44.888, 7045 20:56:44; transcript last write 20:56:41 | orphan RunAs window | SetupAPI, System, PnP, transcript mtime [HW] |
+| 10-26 (session) | installed driver `45A45636…` (the 10-24 13:35 Debug build): the orphan's Step 3 copied the then-current Debug output | — | [HW] (SHA observed 10-26), [INF] attribution |
+
+**Conclusions:**
+1. No driver-unload hang occurred on 10-24 [HW]. The stop completed before the installer started, so **the stop and the adapter disable did not overlap**.
+2. The outage was caused by the hard-coded Debug configuration (a downgrade over the Release driver). That reached the installer's downgrade `Read-Host` *after* the uninstall had disabled every adapter, inside an interactive RunAs window that nobody watched [HW]. The prompt being answered by a key press at 10-26 20:56 is **[INF], UNVERIFIED**; Q can confirm.
+3. **I226 link-down timing (correction):** in every install (10-24 11:36, 12:16, 12:26, 13:37; 10-27 09:19, 09:58, 10:08, 10:48) the I226 event 27 comes 1–2 s after the PnP 420 / 7045 of `netcfg -i`, i.e. at re-enable or rebind, not at its disable. Its absence at 13:04 means only that the I226 was never re-enabled. It is **not** evidence of a stuck I226 [HW, pattern over 8 installs].
+4. Already removed by the 2026-10-27 UT-CORR-009 correction: the hard-coded configuration, the interactive RunAs child and the unbounded wait.
+5. **Still present elsewhere (reported, not repaired):**
+   - `Install-Driver.ps1:438` downgrade `Read-Host` sits *after* the adapters are disabled. Interactive callers: unbounded wait with the network down. Under `-NonInteractive`: throw and exit 1 with the adapters left disabled.
+   - Run-Tests-Elevated kills only its wrapper on timeout.
+
+**#328 scope after reconciliation:** the only observed driver-unload hang is **2026-10-22 14:25** (Debug driver loaded; "Stopping service..."; I226 context in state 4 with PAUSE-DROP; `OutstandingSendNBLs` monotonic from 13:45:33; raw-MMIO TSN tools beforehand). Superseded for 10-24: T-REL as a stop hang, T-RACE, T-NETCFG and T-I226-HALT. Kept for 10-22: T1-TAS (TSN mode without a valid schedule stops I226 TX, so send NBLs never complete) and T1b (gauge accounting artifact).
+
+## UT-CORR-009 correction: verified results and unresolved branches (2026-10-27)
+
+**Hardware GREEN (real HIL; FullSuite_20261027_091718, Q-operated, legacy execution path Run-Tests-Elevated → Run-Tests.ps1):**
+
+| Config | Time | Driver (installed = loaded build flag) | Installer | Functional | Restoration | Evidence |
+|---|---|---|---|---|---|---|
+| Debug | 09:58:47 | `CB43F1FF…` = Debug source; GET_VERSION flags 0x0001 | exit 0, phase complete, "Build is newer" | PASS | verified (file, service, device, version/flags, adapter multiset) | `logs\test_ptp_phc_lifecycle.exe_20261027_095847.log`, `logs\ut_corr_009_install_Debug_20261027_095847.log`, DbgView `dbgview_test_ptp_phc_lifecycle.exe_20261027_095843.log` |
+| Release | 10:47:46 | `E516B4FE…` = Release source; flags 0x0000 | exit 0, phase complete, "Build is newer" | PASS | verified | `logs\test_ptp_phc_lifecycle.exe_20261027_104746.log`, `logs\ut_corr_009_install_Release_20261027_104750.log` |
+
+- In both runs the adapter enumeration order changed across the reload (15BB,1533,125B → 125B,1533,15BB). The multiset comparison is confirmed on hardware.
+- In both runs the I226 link-down/up followed the normal install pattern.
+
+**Missing runner-specific gate evidence (not a hardware result):** no gated Run-Tests-CI run of the Unsafe entry yet. It needs the machine safety record (Q-only) and `AVB_HIL_AUTHORIZE_UNSAFE=test_ptp_phc_lifecycle`. The runner's post-test adapter/TIMINCA/TSAUXC check and the results JSON therefore do not exist for this test yet.
+
+**Unverified on hardware (branches not reached):**
+- installer failure before mutation (FAILED, state verified);
+- installer failure after the stop (CLEANUP_FAILED);
+- installer failure with state restored;
+- installer failure with state changed;
+- restoration unobservable (INCONCLUSIVE_RESTORATION);
+- installer timeout with job termination and the `[#328]` line;
+- every BLOCKED precondition branch (provenance mismatch, loaded-build mismatch, service/device/enumeration not established);
+- `Install-Driver.ps1:438` downgrade `Read-Host` under `-NonInteractive`. Unreachable while the provenance gate holds (installed = build source, `.cat` newer than `.sys`, observed in both runs), but a throw with the adapters disabled if it is ever reached.
+
+**Offline:**
+- TEST-HILGATE-082 is a STATIC source contract (RED with 9 reasons, then GREEN); the suite is 83/83 in direct runs.
+- **Inside the chain, `test_hil_safety_gate.ps1` has ended FAILED(TIMEOUT) at the 60 s Unit limit in every run since at least 10-22** (8 runs; repair 1 pending). The chain itself has never confirmed it.
