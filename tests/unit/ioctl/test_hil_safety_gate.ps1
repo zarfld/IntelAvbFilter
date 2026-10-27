@@ -1183,7 +1183,8 @@ $lcBad = @()
 if ($lcCode -match '-Configuration (Debug|Release)') { $lcBad += "hard-coded reinstall configuration '$($Matches[0])'" }
 if ($lcCode -notmatch '-Configuration %s') { $lcBad += 'reinstall command does not take the configuration at run time (-Configuration %s)' }
 foreach ($cfg in 'Debug', 'Release') {
-    if ($lcCode.IndexOf("build\\\\x64\\\\$cfg\\\\IntelAvbFilter\\\\IntelAvbFilter\\\\IntelAvbFilter.sys") -lt 0) { $lcBad += "installer source for $cfg not compared" }
+    # PowerShell does not escape backslashes: this is the C source text L"build\\x64\\<cfg>\\...".
+    if ($lcCode.IndexOf("build\\x64\\$cfg\\IntelAvbFilter\\IntelAvbFilter\\IntelAvbFilter.sys") -lt 0) { $lcBad += "installer source for $cfg not compared" }
 }
 $iSel = $lcCode.IndexOf('select_restore_configuration(&'); $iRst = $lcCode.IndexOf('restart_service(SERVICE_NAME')
 if ($iSel -lt 0 -or $iRst -lt 0 -or $iSel -gt $iRst) { $lcBad += "restore configuration not selected before the service stop (select@$iSel restart@$iRst)" }

@@ -13,6 +13,81 @@
  *   0 = PASS, 1 = FAIL, 2 = SKIP_ONLY (no PASS result), 4 = CLEANUP_FAILED
  */
 #include "ptp_phc_common.h"
+#include <string.h>   /* memcmp */
+#include <bcrypt.h>   /* SHA-256 of the installed driver */
+#pragma comment(lib, "bcrypt.lib")
+
+/* =========================================================================
+ * Restoration identity (Q 2026-10-27, TEST-HILGATE-082): UT-CORR-009 reinstalls the driver it found.
+ * Before the service stop the installed System32 driver is matched byte-for-byte against the installer's source
+ * for each configuration (Install-Driver.ps1: build\x64\<cfg>\IntelAvbFilter\IntelAvbFilter); after the reinstall
+ * the installed driver must be that same file.  Evidence limit: a file hash proves neither the loaded image nor
+ * the build commit.  CWD is the repo root (see restart_service).
+ * =========================================================================*/
+typedef struct { const char *config; uint8_t sha256[32]; } restore_identity_t;
+
+static const struct { const char *config; const wchar_t *source; } k_restore_candidates[] = {
+    { "Debug",   L"build\\x64\\Debug\\IntelAvbFilter\\IntelAvbFilter\\IntelAvbFilter.sys" },
+    { "Release", L"build\\x64\\Release\\IntelAvbFilter\\IntelAvbFilter\\IntelAvbFilter.sys" },
+};
+
+static bool sha256_file(const wchar_t *path, uint8_t digest[32])
+{
+    static uint8_t buf[65536];
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    BCRYPT_ALG_HANDLE alg = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    bool ok = BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0)) &&
+              BCRYPT_SUCCESS(BCryptCreateHash(alg, &hash, NULL, 0, NULL, 0, 0));
+    while (ok) {
+        DWORD n = 0;
+        if (!ReadFile(h, buf, sizeof(buf), &n, NULL)) { ok = false; break; }   /* a read error is no hash */
+        if (n == 0) break;
+        ok = BCRYPT_SUCCESS(BCryptHashData(hash, buf, n, 0));
+    }
+    ok = ok && BCRYPT_SUCCESS(BCryptFinishHash(hash, digest, 32, 0));
+    if (hash) BCryptDestroyHash(hash);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    CloseHandle(h);
+    return ok;
+}
+
+static bool sha256_installed_driver(uint8_t digest[32])
+{
+    wchar_t path[MAX_PATH];
+    UINT n = GetSystemDirectoryW(path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    if (wcscat_s(path, MAX_PATH, L"\\drivers\\IntelAvbFilter.sys") != 0) return false;
+    return sha256_file(path, digest);
+}
+
+/* Exactly one candidate must be identical to the installed driver; otherwise the driver found cannot be restored
+ * and the caller must not stop the service. */
+static bool select_restore_configuration(restore_identity_t *out)
+{
+    if (!sha256_installed_driver(out->sha256)) {
+        printf("  [PRE] installed driver System32\\drivers\\IntelAvbFilter.sys cannot be hashed (error %lu)\n", GetLastError());
+        return false;
+    }
+    out->config = NULL;
+    int matches = 0;
+    for (size_t i = 0; i < sizeof(k_restore_candidates) / sizeof(k_restore_candidates[0]); i++) {
+        uint8_t d[32];
+        bool hashed = sha256_file(k_restore_candidates[i].source, d);
+        bool same = hashed && memcmp(d, out->sha256, sizeof(d)) == 0;
+        printf("  [PRE] %-7s installer source %S: %s\n", k_restore_candidates[i].config, k_restore_candidates[i].source,
+               !hashed ? "not readable" : (same ? "IDENTICAL to the installed driver" : "differs"));
+        if (same) { out->config = k_restore_candidates[i].config; matches++; }
+    }
+    if (matches != 1) {
+        printf("  [PRE] %d installer sources match the installed driver (exactly 1 required)\n", matches);
+        out->config = NULL;
+        return false;
+    }
+    return true;
+}
+
 /* =========================================================================
  * UT-CORR-009: Driver Reload — TX-PHC correlation restored after reload
  *
@@ -25,7 +100,7 @@
  * Requires elevated privileges (SCM service control is always granted when
  * run via Run-Tests-Elevated.ps1).
  * =========================================================================*/
-static bool restart_service(const char *svc_name, int timeout_ms)
+static bool restart_service(const char *svc_name, int timeout_ms, const char *config)
 {
     SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
     if (!hSCM) {
@@ -58,10 +133,11 @@ static bool restart_service(const char *svc_name, int timeout_ms)
      * the DriverStore .sys is transiently inaccessible; the install script handles
      * DriverStore lock detection, pnputil sequencing, and NDIS rebind correctly.
      * CWD is assumed to be the repo root (set by Run-Tests-Elevated.ps1). */
-    printf("  Reinstalling via Install-Driver-Elevated.ps1 -Action Reinstall...\n");
-    int rc = system("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass"
-                    " -File tools\\setup\\Install-Driver-Elevated.ps1"
-                    " -Configuration Debug -Action Reinstall");
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass"
+                               " -File tools\\setup\\Install-Driver-Elevated.ps1 -Configuration %s -Action Reinstall", config);
+    printf("  Reinstalling the driver found (%s) via Install-Driver-Elevated.ps1 -Action Reinstall...\n", config);
+    int rc = system(cmd);
     if (rc != 0) {
         printf("  [FAIL] Reinstall script returned exit code %d\n", rc);
         return false;
@@ -87,6 +163,14 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
     printf("  Verifies: #149 (REQ-F-PTP-007) | Traces to: #48 , Spec: issue #199\n");
     printf("  Requires elevated privileges for SCM service control.\n");
     printf("  NOTE: adapter configuration after reinstall may differ from pre-test state.\n");
+
+    /* --- Pre-condition: the driver found must be restorable (before any state change) --- */
+    restore_identity_t found;
+    if (!select_restore_configuration(&found)) {
+        tc_blocked("UT-CORR-009 installed driver matches no single installer source; it cannot be restored --- service not stopped, no state modified");
+        return;
+    }
+    printf("  [PRE] driver found = %s build; it is reinstalled after the stop\n", found.config);
 
     /* --- Pre-condition: record device-node accessibility and adapter identities --- */
     {
@@ -139,13 +223,23 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
     /* --- Step 2: Restart service --- */
     /* Delegates to Install-Driver-Elevated.ps1 -Action Reinstall which handles
      * DriverStore locking, pnputil sequencing, and NDIS rebind timing. */
-    bool svc_ok = restart_service(SERVICE_NAME, 120000);
+    bool svc_ok = restart_service(SERVICE_NAME, 120000, found.config);
     if (!svc_ok) {
         /* A failed service restart leaves the environment broken — not a non-fatal skip. */
         printf("  [FAIL] Service restart failed — driver environment requires recovery.\n");
         printf("  Run: tools\\setup\\manual_uninstall.ps1 then reboot, then reinstall.\n");
         tc_result("UT-CORR-009 Driver Reload (FAIL - service restart failed)", false);
         return;
+    }
+    {
+        uint8_t after[32];
+        if (!sha256_installed_driver(after) || memcmp(after, found.sha256, sizeof(after)) != 0) {
+            printf("  [CLEANUP_FAILED] UT-CORR-009: installed driver after the reinstall is not the %s driver found before it"
+                   " (or cannot be hashed) --- restoration NOT verified\n", found.config);
+            s_cleanup_failed++;
+        } else {
+            printf("  [POST] installed driver identical to the driver found (%s)\n", found.config);
+        }
     }
     Sleep(1000);  /* extra settle after service reaches RUNNING */
 
