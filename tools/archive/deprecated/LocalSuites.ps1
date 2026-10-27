@@ -341,8 +341,9 @@ try {
 
     Write-Host "`n================ LOCAL SUITES REPORT (LOCAL evidence, never CI evidence) ================" -ForegroundColor Cyan
     foreach ($c in $Report.configurations) {
-        Write-Host ("{0}: HEAD {1}, provenance {2}, digest {3}, built driver {4}, install {5}, pre-flight {6}" -f $c.configuration, $c.head, $c.provenanceMode,
-                    $c.buildInputDigest, $c.builtDriverSha256, (Format-AvbStepResult $c.install), (Format-AvbStepResult $c.preflight))
+        Write-Host ("{0}: HEAD {1}, provenance {2}, digest {3}, built driver {4}, test build {5}, install {6}, pre-flight {7}" -f $c.configuration, $c.head, $c.provenanceMode,
+                    $c.buildInputDigest, $c.builtDriverSha256, (Format-AvbStepResult $c.testBuild), (Format-AvbStepResult $c.install), (Format-AvbStepResult $c.preflight))
+        foreach ($f in @($c.testBuildFailed)) { Write-Host "  build FAILED: $f" -ForegroundColor Red }
         foreach ($s in $c.suites) { Write-Host ("  {0,-20} exit {1,-4} overall {2,-13} executed {3}{4}" -f $s.suite, (Format-AvbExitCode $s.exitCode), $s.overall, $s.executed, $(if ($s.error) { "  ERROR: $($s.error)" } else { '' })) }
         foreach ($r in $c.reproductions) { Write-Host ("  reproduction {0} {1}: exit {2} ({3})" -f $r.entry, $r.arguments, (Format-AvbExitCode $r.exitCode), $r.resultsJson) }
     }
