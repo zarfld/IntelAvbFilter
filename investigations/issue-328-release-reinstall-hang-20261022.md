@@ -90,3 +90,34 @@ Driver enumeration index ↔ DEV mapping changed during the run: at 13:46 `Adapt
 
 1. `C:\Windows\LiveKernelReports\**` and `C:\Windows\Minidump` listing for 2026-10-22 (NDIS `0x15E` STUCK_NBL live dump between 13:45 and 14:40?).
 2. I226 TSN registers **now** (after reboot + reinstall; expected reset values) — read-only `READ_REGISTER` of TQAVCTRL 0x3570, igc STQT(0..3) 0x3324+4i, ENDQT(0..3) 0x3334+4i, TXQCTL(0..3) 0x3344+4i, BASET 0x3314/0x3318, QBVCYCLET 0x331C — to establish the post-reset baseline for a later controlled reproduction.
+
+## Third reproduction: 2026-10-24 13:04, UT-CORR-009 service stop under FullSuite (`FullSuite_20261024_113438.log`)
+
+Analysed 2026-10-26 from logs and the System event log; no dumps examined. [HW] = host log / event observation, [SRC] = source inspection, [INF] = inference.
+
+**Trigger.** The FullSuite blind `*.exe` loop (`tools/archive/deprecated/FullSuite.ps1:300-305`, still active at `686450c`) ran the **Unsafe** `test_ptp_phc_lifecycle.exe`:
+- Debug at 12:16:19: completed in 31 s, UT-CORR-009 PASS.
+- Release at 13:03:58, through `Run-Tests-Elevated.ps1`, with no safety gate and no `AVB_HIL_AUTHORIZE_UNSAFE`. [HW]
+
+The loaded driver was Release `B286A621…6B4F` (capture metadata `installedDriverSha256`). UT-CORR-009 calls `ControlService(SERVICE_CONTROL_STOP)` and then `system("… Install-Driver-Elevated.ps1 -Configuration Debug -Action Reinstall")`. [SRC `test_ptp_phc_lifecycle.c:44,62-64`]
+
+| Time | Observation | Source |
+|---|---|---|
+| 13:04:09 | I219-LM (e1dexpress) and I210 (e1rexpress) event 27 "link disconnected": the filter detached from both | System log [HW] |
+| 13:04:09 – 13:37:12 | **No event at all from I226 (e2fnexpress)**; the host has no usable network (UCNET eth0 → 127.0.0.1 at 13:04:19, NTP DNS failure at 13:10:24) | System log, DbgView [HW] |
+| 13:33:58 | `[TIMEOUT] elevated test process PID=11000 still running after 1800s --- terminated` | FullSuite log line 11754 [HW] |
+| 13:33:58 – 13:35 | The legacy loop continued `test_ptp_phc_stability`, `test_qav_cbs`, `test_registry_diagnostics`, `test_rx_timestamp`, … against a driver in an unknown stop state. **These results are invalid.** | FullSuite log [HW] |
+| 13:37:01 | The LocalSuites Debug install precondition reports `Driver service: not installed`, so the service had already been deleted before its own uninstall step | FullSuite log ~13760 [HW] |
+| 13:37:10 – 13:37:17 | The install disables all Ethernet adapters (`MS_IntelAvbFilter binding not found`). I226 event 27, then link up on all three; service RUNNING with Debug `45A45636…` | System log, FullSuite log [HW] |
+| ~14:03 | The LocalSuites Release test build fails with `LNK1168` on `build\tools\avb_test\x64\Release\test_ptp_phc_lifecycle.exe` (cannot open for writing). The whole Release configuration was `[STOPPED] test build failed (Release)`, **no Release suite ran**. | FullSuite log 22274, 23458 [HW] |
+| 2026-10-26 | The exe is writable again and no test process is running | [HW] |
+
+**Signature matches 2026-10-22 (fact).** I219 and I210 detach promptly on the stop. I226 does not detach until its adapter is disabled. This is the third occurrence, now with a Release driver, no raw-MMIO TSN tool in the minutes before it, and a plain service stop as the trigger.
+
+**What the earlier TSN-mode history does not explain (open question).** The legacy loop's TSN tools (`avb_test_i226*`, `test_ioctl_tas`, …) ran earlier in this FullSuite under the 12:26 Release install. Whether they ran before 13:04 under that install, and whether TQAVCTRL was non-zero at 13:04, is **not yet determined**; the Release build has no DbgPrint. T1-TAS stays LIKELY, not proven.
+
+**Infrastructure defects exposed (all [SRC] unless marked).**
+1. `Run-Tests-Elevated.ps1:163` `Stop-Process -Id $childProc.Id` kills only the wrapper PowerShell. `Run-Tests.ps1`, the test exe and the test's own `Install-Driver-Elevated.ps1` child survive the timeout. [INF] An orphaned UT-CORR-009 chain deleting the service before 13:37 and holding the Release exe at ~14:03 explains both `Driver service: not installed` and `LNK1168`. This is UNVERIFIED: no process list was captured.
+2. `test_ptp_phc_lifecycle.c:62-64` hard-codes `-Configuration Debug`, so a Release UT-CORR-009 reinstalls the Debug driver.
+3. The FullSuite full `*.exe` loop is **intentional** (Q, 2026-10-26: FullSuite must always run every test, failing ones included). It therefore also runs Unsafe entries such as UT-CORR-009. The defect is in containment, not in the loop: a hanging test must not corrupt the results of later tests (see 1), and UT-CORR-009 must restore the driver it found (see 2).
+4. One locked artifact (`LNK1168`) aborts the entire Release configuration. This contradicts contract C ("a build or suite failure must not prevent later independent tests or suites from running"). LocalSuites behaviour, reported only.
