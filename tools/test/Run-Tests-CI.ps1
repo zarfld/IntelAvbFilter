@@ -760,14 +760,19 @@ if ($TestTimeoutSeconds -eq 0) {
         default             { 120 }
     }
 }
-# Per-entry timeout (Get-AvbTestTimeoutSeconds) where a test's own bounded waits exceed the suite default; it never
-# lowers the suite timeout and never changes the test's acceptance criteria.  Every value is derived from the test source.
+# Per-entry timeout (Get-AvbTestTimeoutSeconds) where a test's own bounded waits or its measured runtime exceed the suite
+# default; it never lowers the suite timeout and never changes the test's acceptance criteria.  Every value is derived
+# from the test source or from a recorded measurement.  Keys are the suite-list entries exactly as listed.
 $HilTestTimeoutSeconds = [ordered]@{
     # Per adapter: TC-AEN-002 30 s + TC-AEN-005 60 s + TC-AEN-006 31 s of deadlines/sleeps (tests/atdecc/
     # test_atdecc_aen_protocol.c) = 121 s; 3 adapters on the HIL host = 363 s, killed at 300 s on adapter 3 in
     # LocalSuites_20261021_173805 .. 20261022_094632.  420 s = 363 s + 16 %.  TC-AEN-001 adds 80 s per adapter only with
     # AVB_TEST_HAS_ATDECC_CONTROLLER=1 (not set on the HIL host; it would need 603 s).
     'test_atdecc_aen_protocol' = 420
+    # 83 sandboxed runner cases.  Killed at the 60 s Unit timeout (FAILED(TIMEOUT)) in every Unit run of 2026-10-22 ..
+    # 2026-10-27 (8 runs), so the suite never completed in the chain.  Measured on the HIL host 2026-10-27: 199.6 s and
+    # 202.3 s (83/83).  300 s = 202.3 s + 48 % for slower GitHub-hosted Unit runners (their runtime: UNVERIFIED).
+    'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 300
 }
 
 # ===========================
