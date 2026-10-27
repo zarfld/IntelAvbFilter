@@ -553,6 +553,24 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
   0x00000000 on every adapter -> the test prints no clock value and still exits 0.
 - No gated (runner) execution of test_minimal_ioctl exists: 2026-10-21 coverage gap, since 2026-10-22 safety-record
   BLOCKED.
+- PHC observation window (hardware, hil-baseline-evidence-20261022_214259.json): the runner's Get-AvbHilClockState
+  window is 5 back-to-back GET_CLOCK_CONFIG reads spanning 0.45-1.4 ms.  Pass-to-pass evaluator metrics without any
+  mutation: offset uncertainty U 1.1-116 ms, rate uncertainty U 1.4e6-2.8e8 ppb (residual sigma 41-4753 ns, read
+  latency 15-28 us).  With such windows no gPTP-justifiable tolerance can ever yield RESTORATION_VERIFIED:
+  restoration-observability defect of the runner's PHC window (not of the evaluator).
+- Undisturbed run counts: 6 Init + 29 Mutating + 18 Mutating:Target rows per configuration are safety-record BLOCKED;
+  further 17 hazard hold, 2 Unsafe BLOCKED + 4 Unsafe gap rows, 1 ReadOnly 24-h gap (test_vv_corr_001_stability) and
+  4 HardwareMandatory gap rows (entries also listed in HardwareUnit) = 81 not executed per configuration.
+
+### Operator decisions (Q 2026-10-27)
+- Order: repair the runner PHC observation window (cause 2) BEFORE the record is provisioned, so the fresh baseline
+  evidence carries usable PHC characterization.
+- #328 hazard hold: kept; its 17 rows per configuration are reported as operator-restricted residual.
+- Unsafe: attended execution authorized for the suite-listed Unsafe entries test_lifecycle_coverage (HardwareUnit) and
+  test_hot_plug (HardwareIntegration).
+- Correction: test_s3_sleep_wake, test_vv_corr_001_stability and test_ptp_phc_lifecycle are in no Run-Tests-CI suite
+  list (only $HardwareIntegrationCoverageGaps + registry) and were never run by the runner; they are not Phase 1
+  blockers.  Questions about S3 and a 24-h run were asked in error; nothing is changed for these entries.
 
 ### Conclusion
 - The missing record is an operator prerequisite (fail-closed by design), not a runner defect.
@@ -567,3 +585,5 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
 - B12-3 Driver enumeration order differs between driver loads (0x125B first on 2026-10-22, 0x15BB first on 2026-10-27).
 - B12-4 No producer of `avb-hil-recovery-verification/1`; no `phcTolerance` producer: a HALTED record can only be
   rebaselined, never cleared by verified recovery.
+- B12-5 I219 (0x15BB) PHC advanced 4640 ns in ~11 s across three undisturbed passes (2026-10-22 21:42 evidence):
+  functional clock defect (the known slow-I219 observation), outside restoration scope.

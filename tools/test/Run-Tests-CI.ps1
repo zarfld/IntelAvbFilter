@@ -976,8 +976,13 @@ function New-AvbHilAdapter {
 # issue #343, documented at IOCTL_AVB_OPEN_ADAPTER in src/avb_integration_fixed.c).  -PhcReads N: N GET_CLOCK_CONFIG reads
 # per adapter, each SYSTIM read (ops->get_systime) bracketed by QPC - the paired reads of a PHC window for
 # tools/lib/PhcRestoration.ps1 (Samples: qpcBefore, qpcAfter, phcNs).  TIMINCA/TSAUXC are those of the first read.
+# -PhcReadIntervalMs: spacing between the reads, so the window has a length over which a PHC rate and an extrapolated
+# offset can be bounded (docs/testing/phc-restoration-evaluator.md, open measurement requirements 2-4).  Back-to-back
+# reads spanned 0.45-1.4 ms on hardware (logs/hil-baseline/hil-baseline-evidence-20261022_214259.json): rate uncertainty
+# >= 1.4e6 ppb without any mutation, so no restoration could ever be verified.  The reads stay on the adapter this
+# handle opened (OPEN_ADAPTER binds FileObject->FsContext, src/device.c).
 function Get-AvbHilClockState {
-    param([int]$PhcReads = 1)
+    param([int]$PhcReads = 1, [int]$PhcReadIntervalMs = 250)
     $res = @{ Ok = $false; Error = ''; Entries = @() }
     if (-not ([System.Management.Automation.PSTypeName]'AvbHilIoctl').Type) {
         Add-Type -TypeDefinition @'
@@ -1028,6 +1033,7 @@ public static class AvbHilIoctl {
             }
             $samples = @(); $first = $null; $readErr = ''
             for ($r = 0; $r -lt [Math]::Max(1, $PhcReads); $r++) {
+                if ($r -gt 0) { Start-Sleep -Milliseconds $PhcReadIntervalMs }
                 $c = New-Object byte[] 24   # AVB_CLOCK_CONFIG: systim u64, timinca, tsauxc, clock_rate_mhz, status
                 $q0 = [System.Diagnostics.Stopwatch]::GetTimestamp()
                 $clockOk = [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)
