@@ -112,12 +112,18 @@ The loaded driver was Release `B286A621…6B4F` (capture metadata `installedDriv
 | ~14:03 | The LocalSuites Release test build fails with `LNK1168` on `build\tools\avb_test\x64\Release\test_ptp_phc_lifecycle.exe` (cannot open for writing). The whole Release configuration was `[STOPPED] test build failed (Release)`, **no Release suite ran**. | FullSuite log 22274, 23458 [HW] |
 | 2026-10-26 | The exe is writable again and no test process is running | [HW] |
 
-**Signature matches 2026-10-22 (fact).** I219 and I210 detach promptly on the stop. I226 does not detach until its adapter is disabled. This is the third occurrence, now with a Release driver, no raw-MMIO TSN tool in the minutes before it, and a plain service stop as the trigger.
+**CORRECTION 2026-10-27. This is NOT the 10-22 signature.** I earlier read it as the test blocking in its own service stop, the same as 10-22. That was wrong. The installer transcript `%TEMP%\install-driver-20261024_130403.log` (Debug, the hard-coded configuration; started 13:04:04, last write **2026-10-26 20:56:41**) shows:
+- the precondition check reports `Driver service: Stopped`, so the old test's `ControlService(STOP)` of the Release driver completed within about 5 s;
+- the uninstall then completed: ETW unregistered, `sc stop`, `sc delete`, `Disabling: Ethernet, Ethernet 2, Ethernet 3`, netcfg removal;
+- the install started: build "OLDER than installed" (a `Read-Host` that returned in the RunAs window), `.sys` copied, ETW registered;
+- the transcript **ends at `netcfg.exe -l IntelAvbFilter.inf -c s -i MS_IntelAvbFilter`**. Step 4 (re-enable adapters) was never reached.
+
+The 10-24 hang is therefore **in the netcfg filter install, with all three adapters disabled and the I226 never reporting its link-down**, and the Release driver already reported stopped. Mapping (adapters list, 10-24): Ethernet = I219 15BB, Ethernet 2 = I210 1533, Ethernet 3 = I226 125B. The I219/I210 link-down at 13:04:09 is their disable. The I226 disable did not complete: no event until 13:37:12.
 
 **What the earlier TSN-mode history does not explain (open question).** The legacy loop's TSN tools (`avb_test_i226*`, `test_ioctl_tas`, …) ran earlier in this FullSuite under the 12:26 Release install. Whether they ran before 13:04 under that install, and whether TQAVCTRL was non-zero at 13:04, is **not yet determined**; the Release build has no DbgPrint. T1-TAS stays LIKELY, not proven.
 
 **Infrastructure defects exposed (all [SRC] unless marked).**
-1. `Run-Tests-Elevated.ps1:163` `Stop-Process -Id $childProc.Id` kills only the wrapper PowerShell. `Run-Tests.ps1`, the test exe and the test's own `Install-Driver-Elevated.ps1` child survive the timeout. [INF] An orphaned UT-CORR-009 chain deleting the service before 13:37 and holding the Release exe at ~14:03 explains both `Driver service: not installed` and `LNK1168`. This is UNVERIFIED: no process list was captured.
+1. `Run-Tests-Elevated.ps1:163` `Stop-Process -Id $childProc.Id` kills only the wrapper PowerShell. `Run-Tests.ps1`, the test exe and the test's own `Install-Driver-Elevated.ps1` child survive the timeout. [INF] An orphaned UT-CORR-009 chain deleting the service before 13:37 and holding the Release exe at ~14:03 explains both `Driver service: not installed` and `LNK1168`. **Now supported by the transcript:** the chain ran `sc delete` at about 13:04 and stayed alive until 2026-10-26 20:56:41, its last transcript write.
 2. `test_ptp_phc_lifecycle.c:62-64` hard-coded `-Configuration Debug`, so a Release UT-CORR-009 reinstalled the Debug driver.
    - 2026-10-27: corrected in place in `test_ptp_phc_lifecycle.c`.
      - **Provenance:** the configuration comes from matching the installed file's SHA-256 against each installer source. The loaded build flag (`GET_VERSION`) must agree. Otherwise the test is BLOCKED and the installer is never started.
@@ -130,3 +136,30 @@ The loaded driver was Release `B286A621…6B4F` (capture metadata `installedDriv
      - Runtime behaviour: **HIL verification pending**.
 3. The FullSuite full `*.exe` loop is **intentional** (Q, 2026-10-26: FullSuite must always run every test, failing ones included). It therefore also runs Unsafe entries such as UT-CORR-009. The defect is in containment, not in the loop: a hanging test must not corrupt the results of later tests (see 1), and UT-CORR-009 must restore the driver it found (see 2).
 4. One locked artifact (`LNK1168`) aborts the entire Release configuration. This contradicts contract C ("a build or suite failure must not prevent later independent tests or suites from running"). LocalSuites behaviour, reported only.
+
+## Debug vs Release contrast, 2026-10-24 and 2026-10-27 (logs and System event log; analysed 2026-10-27)
+
+**Facts [HW]:**
+- **Same test sequence before each stop on 10-24.** The Debug stop (12:16:19, OK in 31 s) and the Release stop (13:03:58, hang) followed the same FullSuite loop sequence.
+  - TSN tools ran under each install: Debug 11:43–12:08, Release 12:32–12:56. That includes `avb_test_i226_um`, where SETUP_TAS, SETUP_FP and SETUP_PTM were all accepted on I226 0x125B. `test_ioctl_fp_ptm` ended with FP "TC0-TC2 preemptable" and PTM enabled at 8 ns. `test_ioctl_launch_time` also ran. `test_ioctl_tas` blocked itself. Under Debug, the raw-MMIO TAS tools `chatgpt5_i226_tas_validation`, `corrected_i226_tas_test` and `enhanced_tas_investigation` also ran, at 11:43–11:44.
+  - Then `test_lifecycle_coverage` disabled and re-enabled all three NICs. I226 link down/up at 12:09:36 (Debug) and 12:57:19 (Release).
+  - Then the same non-TSN tests ran until UT-CORR-009.
+  - No TSN-configuring tool ran after the NIC cycle in either window.
+- **Successful stops** (10-24 11:36, 12:16, 12:26; 10-27 09:19, 09:58, 10:08): I219/I210 report link-down first. The I226 follows **6–9 s later**, after the 7045 install event. In the 13:04 hang the I226 reported nothing until its adapter was disabled at 13:37.
+- **2026-10-27 09:58:47, corrected UT-CORR-009, Debug `CB43F1FF…`, FullSuite legacy path:**
+  - PASS, restoration verified, I226 down at +7 s.
+  - The adapter enumeration order changed across the reload (15BB,1533,125B → 125B,1533,15BB). This confirms the multiset comparison.
+  - Evidence class: LOCAL, legacy path (diagnostic, not gate evidence). Only the success path ran.
+
+**Theory update:**
+- **T1-TAS** (TSN state left by the tools blocks the I226 pause): **weakened for 10-24**, conditional on the 12:57 NIC disable/enable having reset the I226 TSN registers. That reset is UNVERIFIED: the I226 TQAVCTRL is not in the SSOT, and Release has no READ_REGISTER. The Debug window had the same or more TSN activity and its stop succeeded.
+- **T-REL** (a Release-specific driver path prevents the I226 module from completing pause/detach): **revised 2026-10-27 after the transcript correction above.** The 10-24 Release stop *reported* `Stopped`, and the hang came later, in the adapter disable / netcfg install. T-REL is UNSUPPORTED for 10-24 as a stop hang. It stays open for 10-22 14:25 ("Stopping service..."). Whether the Release driver image had actually unloaded and detached from the I226 by 13:04:04 is UNVERIFIED: Release prints nothing.
+- **T-RACE** (new): a filter detach still in progress on the I226 races the installer's PnP disable / netcfg binding change. In every successful stop the I226 reports link-down 6–9 s after the I219/I210, i.e. it is the slowest stack. In 10-24 13:04 the installer disabled all adapters about 5 s after the stop. Debug timing (DbgPrint) differs from Release, which would explain a Debug pass on the same sequence. Discriminator: the corrected UT-CORR-009 no longer issues its own stop. The installer's `sc stop` + 2 s sleep + `sc delete` precede the disable, so its timing differs again.
+- **T-NETCFG** (new): `netcfg -i` blocks on the I226's pending disable (the binding engine waits for the device stack) or on the INetCfg write lock. To discriminate: what the 10-24 13:37 install did differently (it also disabled adapters and ran `netcfg -i`, and succeeded while the 13:04 chain was still hung, so the write lock alone is unlikely).
+- **T-I226-HALT** (new): the e2fnexpress miniport halt/disable of the I226 blocks. Against it: the 12:57 `test_lifecycle_coverage` disable/enable of the I226 completed with the same TSN history.
+- Still to be determined: whether any Release-driver stop has ever completed *before* an adapter disable (pair 7045 events with `%TEMP%\install-driver-*.log` configurations: 40 transcripts since 10-21, 28 Debug and 12 Release).
+
+**Next evidence (read-only):**
+1. Pair every 7045 event since 10-08 with the configuration being replaced and the I226 link-down lag, to look for a completed Release stop.
+2. Diff the pause, send-complete and unload paths for `DBG` / `NDEBUG` conditionals.
+3. The Release UT-CORR-009 of the FullSuite run in progress (10-27, Release installed 10:09) is the next hardware data point. If it hangs, the corrected test must report `[#328]` after 300 s.

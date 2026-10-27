@@ -1189,8 +1189,9 @@ foreach ($cfg in 'Debug', 'Release') {
 $iSel = $lcCode.IndexOf('select_restore_configuration(&'); $iRun = $lcCode.IndexOf('run_installer(found.')   # the call, not the definition
 if ($iSel -lt 0 -or $iRun -lt 0 -or $iSel -gt $iRun) { $lcBad += "restore configuration not selected before the installer runs (select@$iSel installer@$iRun)" }
 # 2026-10-27 (Q: failure handling, #328). Defect observed on HIL by the existing chain (FullSuite_20261024_113438, Release
-# UT-CORR-009 13:03:58): the test blocked in its service stop, produced no verdict and no evidence, and was killed at
-# 1800 s. Its descendants kept mutating afterwards. The causes are in the source: an in-process ControlService(STOP)
+# UT-CORR-009 13:03:58): its installer chain hung in the netcfg install with every adapter disabled (transcript
+# %TEMP%\install-driver-20261024_130403.log). The test produced no verdict and no evidence, was killed at 1800 s, and
+# the chain stayed alive until 2026-10-26. The causes are in the source: an in-process ControlService(STOP)
 # with no bound, an unbounded system() wait, Install-Driver-Elevated.ps1, whose RunAs child is interactive
 # (Install-Driver.ps1 STOP_PENDING branch: Read-Host / Restart-Computer) and shows installer output only after it
 # exits, and a failed reinstall reported as FAIL without evaluating restoration.

@@ -9,8 +9,10 @@
  * Verifies: #149 (REQ-F-PTP-007) | Traces to: #48 (REQ-F-IOCTL-PHC-004) | Spec: issue #199 | Track A of #317
  *
  * Failure handling (Q 2026-10-27, #328; TEST-HILGATE-082 is the STATIC source contract, not runtime evidence).
- * FullSuite_20261024_113438 (Release, 13:03:58): the previous version blocked in its own ControlService(STOP), printed
- * no verdict, was killed at 1800 s, and its descendants kept mutating afterwards.  Now:
+ * FullSuite_20261024_113438 (Release, 13:03:58): the previous version's installer chain hung in the netcfg install with
+ * every adapter disabled (%TEMP%\install-driver-20261024_130403.log); the test printed no verdict, was killed at 1800 s
+ * and the chain lived until 2026-10-26.  Its own ControlService(STOP) is unbounded while a driver unload blocks
+ * (2026-10-22 14:25, "Stopping service...").  Now:
  *   - The installer is the only mutation path: Install-Driver.ps1 -NonInteractive (its STOP_PENDING prompt throws
  *     instead of waiting or offering a reboot), bounded by LC_INSTALL_TIMEOUT_MS, output preserved live in
  *     logs\ut_corr_009_install_<cfg>_<time>.log.  On timeout its process tree (job object) is terminated so that it
