@@ -907,7 +907,6 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 # runner cannot observe, are INCONCLUSIVE_RESTORATION and halt every later mutation (option 1, global).  Widen
 # $HilVerifiableState only together with a new independent check; never declare less than an entry really modifies.
 $HilVerifiableState = @('ADAPTER', 'TIMINCA', 'TSAUXC')
-$HilPhcNotJudgedState = @('PHC_TIME', 'PHC_RATE')   # Q 2026-10-27: recorded NOT_JUDGED, never a global halt (post-test check)
 $HilPhcReads = 5            # paired PHC/QPC reads per adapter in a pre-/post-test PHC window (evaluator minimum: 3)
 $HilPhcTolerance = @{}      # DID -> hardware-derived tolerance (Get-AvbHilPhcTolerances); empty = PHC never verified
 $HilMutatedState = [ordered]@{
@@ -1000,7 +999,6 @@ public static class AvbHilIoctl {
 '@
     }
     $IOCTL_ENUM = [uint32]0x0017007C; $IOCTL_OPEN = [uint32]0x00170080; $IOCTL_CLOCK = [uint32]0x001700B4   # fn 31 / 32 / 45
-    $IOCTL_SNAP = [uint32]0x00170118   # fn 70 QUERY_HW_SNAPSHOT: AVB_HW_SNAPSHOT_REQUEST (280 bytes), bound handle only
     $h = [AvbHilIoctl]::CreateFile('\\.\IntelAvbFilter', [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero)
     if ($h -eq [IntPtr](-1)) {
         $res.Error = "open \\.\IntelAvbFilter failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
@@ -1050,26 +1048,9 @@ public static class AvbHilIoctl {
                 $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = $readErr; Samples = @() }
                 continue
             }
-            # Raw register snapshot of this bound adapter (recorded, not judged yet): id, SSOT offset, value, AVB_HWREG_STATE_*.
-            $regs = @(); $regsErr = ''
-            $sn = New-Object byte[] 280
-            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]1), 0, $sn, 0, 4)   # AVB_HW_SNAPSHOT_VERSION
-            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_SNAP, $sn, 280, $sn, 280, [ref]$ret, [IntPtr]::Zero)) {
-                $regsErr = "QUERY_HW_SNAPSHOT failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
-            } elseif ([System.BitConverter]::ToUInt32($sn, 20) -ne 0) {
-                $regsErr = ("QUERY_HW_SNAPSHOT status 0x{0:X8}" -f [System.BitConverter]::ToUInt32($sn, 20))
-            } elseif ([System.BitConverter]::ToUInt16($sn, 18) -ne $didv) {
-                $regsErr = ("QUERY_HW_SNAPSHOT answered for DID {0}, not the opened {1}" -f (Format-AvbDid ([System.BitConverter]::ToUInt16($sn, 18))), $did)
-            } else {
-                for ($k = 0; $k -lt [Math]::Min([System.BitConverter]::ToUInt32($sn, 4), 16); $k++) {
-                    $o = 24 + 16 * $k
-                    $regs += ,([ordered]@{ id = [System.BitConverter]::ToUInt32($sn, $o); offset = [System.BitConverter]::ToUInt32($sn, $o + 4)
-                                           value = [System.BitConverter]::ToUInt32($sn, $o + 8); state = [System.BitConverter]::ToUInt32($sn, $o + 12) })
-                }
-            }
             $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $true; Error = ''
                                            Timinca = [System.BitConverter]::ToUInt32($first, 8); Tsauxc = [System.BitConverter]::ToUInt32($first, 12)
-                                           Samples = $samples; HwRegs = $regs; HwRegsError = $regsErr }
+                                           Samples = $samples }
         }
         $res.Entries = $entries
         $res.Ok = $true
@@ -1990,19 +1971,10 @@ function Invoke-HilPostTestCheck {
         # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
         # baseline.  Otherwise missing evidence (INCONCLUSIVE_RESTORATION), distinct from observed damage
         # (CLEANUP_FAILED above); it stops every later non-ReadOnly test (Q P0 2026-10-21 sec. 2 item 7, option 1).
-        # PHC time/rate (Q 2026-10-27): NOT_JUDGED by the runner and not a global safety criterion.  A declared PHC
-        # mutation gets a nonpassing record (the test owns its PHC restoration; the runner has no evidence of it) but
-        # never halts later tests; declared configuration must still be fully re-read and equal to the baseline.
         $declared = @(if ($script:AvbItem) { Get-AvbHilMutatedState $script:AvbItem.Entry })
-        $phcDeclared = @($declared | Where-Object { $HilPhcNotJudgedState -contains $_ })
-        $unobserved = @($declared | Where-Object { $HilVerifiableState -notcontains $_ -and $HilPhcNotJudgedState -notcontains $_ })
+        $unobserved = @($declared | Where-Object { $HilVerifiableState -notcontains $_ })
         if ($declared.Count -gt 0 -and $unobserved.Count -eq 0 -and -not $TimedOut) {
-            $cfg = @($declared | Where-Object { $HilPhcNotJudgedState -notcontains $_ })
-            if ($cfg.Count -gt 0) { Write-Host ("  [STATE] after {0}: restoration verified by independent re-read ({1})" -f $Display, ($cfg -join ', ')) -ForegroundColor Green }
-            if ($phcDeclared.Count -gt 0) {
-                Add-HilFailureRecord -Display "$Display[PHC-NOT-JUDGED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
-                    -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-004: after {0} ({1}): declared {2} NOT_JUDGED by the runner (operator decision 2026-10-27: PHC quality is not a global safety criterion) --- the test owns its PHC restoration, the runner has no evidence of it; later tests are not halted" -f $Display, $Class, ($phcDeclared -join ', '))
-            }
+            Write-Host ("  [STATE] after {0}: restoration verified by independent re-read ({1})" -f $Display, ($declared -join ', ')) -ForegroundColor Green
             return
         }
         # D1: not a restoration case when the test stopped at a failed precondition and the runner verifies no change.
