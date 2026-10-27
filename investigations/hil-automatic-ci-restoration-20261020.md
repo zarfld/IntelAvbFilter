@@ -518,3 +518,52 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
   #328 hold could ever be lifted.  Two registered entries now execute the same program.
 - Build-Driver.ps1 -BuildTests still overwrites five Debug nmake artifacts outside the manifest; the runner then
   blocks them visibly (SHA256 mismatch), never silently.
+
+### Correction (2026-10-27, Iteration 12)
+- The committed form (f10d6e0) did NOT remove the nmake entry `tsn_ioctl_test`: it is kept, links `tsn_ioctl_test.exe`,
+  is registered in HardwareIntegration (Mutating, #328 hazard hold).  Manifests at f10d6e0: 148 entries = 142 built /
+  6 disabled / 0 failed (Debug and Release).  Offline at f10d6e0: HILPROV 52/52, HILGATE 83/83, COMPLETE 001 38/148 and
+  003 2 scripts (pre-existing).
+
+## Iteration 12 (2026-10-27) - P0: machine safety record prerequisite and the first Init entry
+
+### Facts (verified)
+- LocalSuites_20261027_163938 (f10d6e0, clean-commit, Debug + Release): 72 BLOCKED(SAFETY) rows per configuration =
+  53 `machine safety record UNAVAILABLE: safety record missing` + 17 #328 hazard hold + 2 Unsafe without authorization.
+- `%ProgramData%\IntelAvbFilter-hil-safety.json` has never existed on DESKTOP-RSUO2LV: all 257 real-run runner notes
+  say UNAVAILABLE; all 28 CLEAR notes are the sandbox fixture (`%TEMP%\sentinel_test_*\sandbox-hil-safety.json`).
+  Missing in every LocalSuites run since 6583fec (2026-10-21 19:16).  Initialize-AvbHilSafetyRecord and
+  Approve-AvbHilSafetyBaseline were never executed.  New-AvbHilBaselineEvidence.ps1 produced NOT_VERIFIED
+  (2026-10-22 12:45, 12:46: DID double-hex) and BASELINE_VERIFIED (2026-10-22 21:42, driver 51DEDF..., now outdated).
+- No producer of `avb-hil-recovery-verification/1` exists; the baseline producer emits no `phcTolerance`;
+  `$HilMutatedState` is empty.  Hence (Run-Tests-CI.ps1 post-test check) every executed non-ReadOnly entry ends
+  INCONCLUSIVE_RESTORATION, persisted as a GLOBAL safety event (HALTED) - code reading + HILGATE-042, not HIL-observed.
+- First non-ReadOnly entry of the run: `test_minimal_ioctl.exe` (Init, HardwareUnit row 5).  Source
+  tests/unit/ioctl/test_minimal_ioctl.c: INIT_DEVICE on an unbound handle (driver-global default adapter), ENUM,
+  per adapter OPEN_ADAPTER(i) + GET_CLOCK_CONFIG; no baseline, no restoration, exit 0 whenever ENUM succeeds.
+- INIT_DEVICE (src/avb_integration_fixed.c:1930 -> AvbBringUpHardware:464) calls intel_init() WITHOUT the PTP_READY
+  idempotency guard that AvbEnsureDeviceReady:798 has.  Per device source (UNVERIFIED on hardware):
+  I226 init_ptp: SYSTIM := 1 unconditionally, TSAUXC RMW, TSYNCRXCTL/TSYNCTXCTL overwritten, ETQF(3) written,
+  TXSTMPL/H read-cleared, TIMINCA only if 0.  I219 init_ptp: TIMINCA := INTEL_TIMINCA_I219_INIT unconditionally,
+  TSAUXC RMW, ETQF0/ETQS0 written, software SYSTIM offset re-seeded from the system clock.  I210 init_ptp: observe
+  first; on a configured device no SYSTIM seed, TIMINCA repaired only outside the policy range.
+- Existing ungated hardware output (FullSuite legacy path, test_minimal_ioctl.exe_20261027_162442.log): INIT_DEVICE
+  TRUE; driver enumeration order 0=0x15BB 1=0x1533 2=0x125B (2026-10-22 baseline: 0=0x125B 1=0x1533 2=0x15BB, i.e.
+  order changes between driver loads, so the default adapter INIT hits is not fixed); GET_CLOCK_CONFIG cfg.status
+  0x00000000 on every adapter -> the test prints no clock value and still exits 0.
+- No gated (runner) execution of test_minimal_ioctl exists: 2026-10-21 coverage gap, since 2026-10-22 safety-record
+  BLOCKED.
+
+### Conclusion
+- The missing record is an operator prerequisite (fail-closed by design), not a runner defect.
+- The predicted halt after test_minimal_ioctl is not an observability false positive: per source the entry makes a
+  real, unrestored PHC/timestamp-control mutation on whichever adapter is the driver default.  Better observability
+  (PHC tolerance, TS_CONTROL/ETQF re-read) would turn it into CLEANUP_FAILED, not into verified restoration.
+
+### Backlog (recorded, NOT started - WIP 1)
+- B12-1 test_minimal_ioctl passes vacuously: cfg.status 0 ("Unknown") is never a failure; exit 0 always.
+- B12-2 INIT_DEVICE lacks the PTP_READY idempotency guard of AvbEnsureDeviceReady (re-seeds a running I226 PHC):
+  driver behaviour, needs an operator decision (driver change out of current P0 scope).
+- B12-3 Driver enumeration order differs between driver loads (0x125B first on 2026-10-22, 0x15BB first on 2026-10-27).
+- B12-4 No producer of `avb-hil-recovery-verification/1`; no `phcTolerance` producer: a HALTED record can only be
+  rebaselined, never cleared by verified recovery.
