@@ -201,6 +201,7 @@ $Report = [ordered]@{
 $AllInventory = @()
 $Stop = ''
 $SafetyHalt = ''   # first safety halt of this run; carried to every later suite/configuration through -PriorResultsDir
+$BuildFailures = @()   # failed test builds: never a stop (the runner BLOCKs those entries by provenance), always nonpassing
 
 function Invoke-AvbStep {
     param([string]$Label, [scriptblock]$Call)
@@ -232,7 +233,8 @@ $Report.lock = [ordered]@{ owner = $HilLock.Owner; previousOwner = $HilLock.Prev
 try {
     foreach ($Configuration in $Configurations) {
         $cfg = [ordered]@{ configuration = $Configuration; head = $null; builtDriverSha256 = $null; testManifest = $null
-                           provenanceMode = $null; buildInputDigest = $null; install = 'NOT_RUN'; preflight = 'NOT_RUN'; suites = @(); reproductions = @() }
+                           provenanceMode = $null; buildInputDigest = $null; testBuild = 'NOT_RUN'; testBuildFailed = @()
+                           install = 'NOT_RUN'; preflight = 'NOT_RUN'; suites = @(); reproductions = @() }
         $Report.configurations += $cfg
         $cfg.head = ([string](& git -C $RepoRoot rev-parse HEAD)).Trim()
 
@@ -242,10 +244,19 @@ try {
         if (-not (Test-Path -LiteralPath $sys)) { $Stop = "driver build reported success but '$sys' is missing ($Configuration)"; break }
         $cfg.builtDriverSha256 = (Get-FileHash -LiteralPath $sys -Algorithm SHA256).Hash
 
-        if (-not (Test-AvbExitSuccess (Invoke-AvbStep "Build-Tests $Configuration" { & $BuildTests -Configuration $Configuration }))) { $Stop = "test build failed ($Configuration)"; break }
+        # A failed individual test build does not stop the matrix (LocalSuites_20261024_133502: one LNK1168 skipped all of
+        # Release).  Build-Tests builds every other entry and records the failure in the manifest; Run-Tests-CI BLOCKs a
+        # not-built entry by provenance, so an older executable is never run in its place.  The run stays nonpassing.
+        $cfg.testBuild = Invoke-AvbStep "Build-Tests $Configuration" { & $BuildTests -Configuration $Configuration }
         $manPath = Join-Path $RepoRoot "build\tools\avb_test\x64\$Configuration\test-build-manifest.json"
         if (-not (Test-Path -LiteralPath $manPath)) { $Stop = "test build manifest missing: $manPath"; break }
         $man = Get-Content -LiteralPath $manPath -Raw | ConvertFrom-Json
+        if (-not (Test-AvbExitSuccess $cfg.testBuild)) {
+            $cfg.testBuildFailed = @($man.entries | Where-Object { $_.status -eq 'failed' } | ForEach-Object { "$($_.name): $($_.reason)" })
+            $BuildFailures += "$Configuration test build exit $(Format-AvbExitCode $cfg.testBuild): $(@($cfg.testBuildFailed).Count) failed entr(y/ies)"
+            Write-Host "[BUILD FAILED] $Configuration test build exit $(Format-AvbExitCode $cfg.testBuild) --- continuing; failed entries are BLOCKED(PROVENANCE), their old executables are not run:" -ForegroundColor Red
+            $cfg.testBuildFailed | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+        }
         $cfg.testManifest = $manPath; $cfg.provenanceMode = $man.provenanceMode; $cfg.buildInputDigest = $man.sourceDigest
         if ($man.provenanceMode -notin @('clean-commit', 'local-worktree')) {
             $Stop = "test build is not attributable (provenanceMode '$($man.provenanceMode)'); every Hardware* artifact would be BLOCKED"; break
@@ -345,11 +356,12 @@ try {
     $gap = @($AllInventory | Where-Object { $_.Category -eq 'NotExecuted' })
     Write-Host "Required but NOT executed - coverage gaps, run is INCOMPLETE ($($gap.Count)):"
     $gap | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Reason -AutoSize | Out-String -Width 250 | Write-Host
+    foreach ($b in $BuildFailures) { Write-Host "[BUILD FAILED] $b --- the run is nonpassing" -ForegroundColor Red }
     if ($SafetyHalt) { Write-Host "[HALT] $SafetyHalt --- Init/Mutating tests after it were BLOCKED; the run is nonpassing" -ForegroundColor Red }
     if ($Stop) { Write-Host "[STOPPED] $Stop" -ForegroundColor Red }
     Write-Host "Report: $(Join-Path $ReportDir 'local-suites-report.json')"
 }
 
 $executed = @($AllInventory | Where-Object { $_.Executed }).Count
-if ($Stop -or $SafetyHalt -or @($AllInventory | Where-Object { $_.Category -ne 'NotFailure' }).Count -gt 0 -or $executed -eq 0) { exit 1 }
+if ($Stop -or $SafetyHalt -or $BuildFailures.Count -gt 0 -or @($AllInventory | Where-Object { $_.Category -ne 'NotFailure' }).Count -gt 0 -or $executed -eq 0) { exit 1 }
 exit 0

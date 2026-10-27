@@ -234,12 +234,14 @@ $AllTests = @(
         Name = "avb_test_project"
         Type = "nmake"
         Makefile = "tests/integration/avb/avb_test.mak"
+        Output = "avb_test_i210.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "AVB Test (nmake project)"
     },
     @{
         Name = "avb_capability_validation"
         Type = "nmake"
         Makefile = "tests/integration/avb/avb_capability_validation.mak"
+        Output = "avb_capability_validation_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "AVB Capability Validation (nmake)"
     },
     
@@ -334,6 +336,7 @@ $AllTests = @(
         Name = "tsn_hardware_activation"
         Type = "nmake"
         Makefile = "tests/integration/tsn/tsn_hardware_activation_validation.mak"
+        Output = "tsn_hardware_activation_validation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "TSN Hardware Activation (nmake)"
     },
     
@@ -342,12 +345,14 @@ $AllTests = @(
         Name = "avb_multi_adapter"
         Type = "nmake"
         Makefile = "tests/integration/multi_adapter/avb_multi_adapter.mak"
+        Output = "avb_multi_adapter_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Multi-Adapter Test (nmake)"
     },
     @{
         Name = "avb_device_separation"
         Type = "nmake"
         Makefile = "tests/integration/multi_adapter/avb_device_separation_validation.mak"
+        Output = "avb_device_separation_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Device Separation Test (nmake)"
     },
     
@@ -392,30 +397,35 @@ $AllTests = @(
         Name = "avb_diagnostic"
         Type = "nmake"
         Makefile = "tests/diagnostic/avb_diagnostic.mak"
+        Output = "avb_diagnostic_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "AVB Diagnostic (nmake)"
     },
     @{
         Name = "avb_hw_state_test"
         Type = "nmake"
         Makefile = "tests/diagnostic/avb_hw_state_test.mak"
+        Output = "avb_hw_state_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "HW State Test (nmake)"
     },
     @{
         Name = "hardware_investigation"
         Type = "nmake"
         Makefile = "tests/diagnostic/hardware_investigation.mak"
+        Output = "hardware_investigation_tool.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Hardware Investigation (nmake)"
     },
     @{
         Name = "critical_prerequisites"
         Type = "nmake"
         Makefile = "tests/diagnostic/critical_prerequisites_investigation.mak"
+        Output = "critical_prerequisites_investigation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Prerequisites Investigation (nmake)"
     },
     @{
         Name = "enhanced_tas_investigation"
         Type = "nmake"
         Makefile = "tests/diagnostic/enhanced_tas_investigation.mak"
+        Output = "enhanced_tas_investigation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "TAS Investigation (nmake)"
     },
     
@@ -488,24 +498,28 @@ $AllTests = @(
         Name = "avb_i226_test"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/avb_i226_test.mak"
+        Output = "avb_i226_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 AVB Test (nmake)"
     },
     @{
         Name = "avb_i226_advanced"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/avb_i226_advanced.mak"
+        Output = "avb_i226_advanced_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 Advanced Test (nmake)"
     },
     @{
         Name = "chatgpt5_i226_tas"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/chatgpt5_i226_tas_validation.mak"
+        Output = "chatgpt5_i226_tas_validation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 TAS Validation (nmake)"
     },
     @{
         Name = "corrected_i226_tas"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/corrected_i226_tas_test.mak"
+        Output = "corrected_i226_tas_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 TAS Test (nmake)"
     },
     
@@ -2272,12 +2286,26 @@ foreach ($Test in $TestsToBuild) {
                 }
             }
 
+            # Declared artifact (Output): the build must WRITE it in this run.  The makefiles list only their .c file as a
+            # dependency, so after a header change (e.g. include/avb_ioctl.h) nmake reported "up to date" and exit 0 while
+            # build\tools\avb_test\x64\Debug kept 2026-04 binaries (FullSuite_20261027_091718 executed them); and without
+            # CFG/PLATFORM every makefile built into ...\Debug even for a Release build.  /A rebuilds unconditionally.
+            # A previous file is never deleted: it is logged (stale evidence) and only a file written now counts as built.
+            $declared = if ($Test.Output) { Join-Path $OutputDir ([System.IO.Path]::GetFileName([string]$Test.Output)) } else { $null }
+            $previous = $null
+            if ($declared -and (Test-Path -LiteralPath $declared)) {
+                $pi = Get-Item -LiteralPath $declared
+                $previous = "{0} ({1:yyyy-MM-dd HH:mm:ss}, SHA256 {2})" -f $pi.Name, $pi.LastWriteTime, (Get-FileHash -LiteralPath $declared -Algorithm SHA256).Hash
+                Write-Host "  Previous artifact (evidence, replaced only by a successful build): $previous" -ForegroundColor Gray
+            }
+            $buildStartUtc = (Get-Date).ToUniversalTime().AddSeconds(-2)   # file-time granularity
+
             $prevErrorPref = $ErrorActionPreference
             $ErrorActionPreference = 'SilentlyContinue'
             $output = @()
             try {
                 Reset-AvbExitCode
-                $output = @(nmake /f $MakeFile 2>&1)
+                $output = @(nmake /A /f $MakeFile "CFG=$Configuration" "PLATFORM=$Platform" 2>&1)
                 $buildExitCode = Get-AvbExitCode
             } finally {
                 $ErrorActionPreference = $prevErrorPref
@@ -2286,11 +2314,18 @@ foreach ($Test in $TestsToBuild) {
             if ($ShowDetails -and $output.Count -gt 0) {
                 $output | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
             }
-            
-            if (Test-AvbExitSuccess $buildExitCode) {
-                Write-Host "  SUCCESS: nmake build completed" -ForegroundColor Green
+
+            $produced = $declared -and (Test-Path -LiteralPath $declared) -and ((Get-Item -LiteralPath $declared).LastWriteTimeUtc -ge $buildStartUtc)
+            if ((Test-AvbExitSuccess $buildExitCode) -and $declared -and -not $produced) {
+                $why = "nmake exit 0 but $([System.IO.Path]::GetFileName($declared)) was not written by this build" +
+                       $(if ($previous) { "; existing file $previous is stale and not used" } else { '; the file does not exist' })
+                Write-Host "  FAILED: $why" -ForegroundColor Red
+                $FailedTests += $Test.Name
+                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = $why; OutputPath = $null }
+            } elseif (Test-AvbExitSuccess $buildExitCode) {
+                Write-Host "  SUCCESS: nmake build completed$(if ($declared) { " -> $declared" })" -ForegroundColor Green
                 $SucceededTests += $Test.Name
-                $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $null }
+                $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $declared }
             } else {
                 Write-Host "  FAILED: nmake returned error code $(Format-AvbExitCode $buildExitCode)" -ForegroundColor Red
                 if (-not $ShowDetails -and $output -and $output.Count -gt 0) {
