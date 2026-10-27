@@ -571,6 +571,25 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
 - Correction: test_s3_sleep_wake, test_vv_corr_001_stability and test_ptp_phc_lifecycle are in no Run-Tests-CI suite
   list (only $HardwareIntegrationCoverageGaps + registry) and were never run by the runner; they are not Phase 1
   blockers.  Questions about S3 and a 24-h run were asked in error; nothing is changed for these entries.
+- Approval: Q approves the 2026-10-27 18:41 evidence document now (no phcTolerance in it).
+- PHC (Q 2026-10-27): "no validation of phc quality for security relevant checks" - no PHC tolerance is defined;
+  PHC time/rate are not a safety criterion of the restoration check.  Interpretation submitted to Q for confirmation
+  before any runner change: the halt decision judges configuration/adapter state only; PHC windows stay recorded as
+  evidence labelled "not judged", never as restored.  Supersedes, for PHC only, the 2026-10-21 rule that unobservable
+  PHC state is INCONCLUSIVE_RESTORATION.
+
+### Cause 2 - runner PHC observation window (implemented, hardware GREEN pending)
+- Change: tools/test/Run-Tests-CI.ps1 Get-AvbHilClockState `-PhcReadIntervalMs` (default 250) sleeps between paired
+  reads; 5 reads -> ~1 s window.  Used unchanged by the runner pre/post check, New-AvbHilBaselineEvidence.ps1 and
+  Invoke-AvbTxTimestampProbe.ps1.  Sandbox observer unchanged.  Reads stay on the opened adapter (per-handle FsContext).
+- RED: existing hardware evidence (windows 0.45-1.4 ms, see facts above).
+- Offline regression (does not exercise the hardware read loop): HILGATE 83/83, evaluator 14/14, baseline evidence
+  11/11, safety record 15/15, HILPROV 52/52.
+- Hardware GREEN (Q, 2026-10-27 18:41, logs/hil-baseline/hil-baseline-evidence-20261027_184141.json, BASELINE_VERIFIED,
+  no findings; installed driver F6499699... = Release build of f10d6e0; record UNBASELINED after Q's Initialize):
+  all 9 windows span 1.00-1.05 s.  Undisturbed pass-to-pass uncertainty I226 offset 0.10-0.51 ms / rate 17-54k ppb,
+  I210 offset 0.06-0.16 ms / rate 12-16k ppb (before: 10-116 ms / 1.4e6-2.2e7 ppb); I219 offset 32-35 us.  Every
+  undisturbed change lies within or near its uncertainty.  Residual sigma rose to 1.4-22 us (spaced reads).
 
 ### Conclusion
 - The missing record is an operator prerequisite (fail-closed by design), not a runner defect.
@@ -586,4 +605,7 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
 - B12-4 No producer of `avb-hil-recovery-verification/1`; no `phcTolerance` producer: a HALTED record can only be
   rebaselined, never cleared by verified recovery.
 - B12-5 I219 (0x15BB) PHC advanced 4640 ns in ~11 s across three undisturbed passes (2026-10-22 21:42 evidence):
-  functional clock defect (the known slow-I219 observation), outside restoration scope.
+  functional clock defect (the known slow-I219 observation), outside restoration scope.  Confirmed 2026-10-27 18:41
+  with 1 s windows: rate 1-2e-6 s/s (about 2 us per 9 s).
+- B12-6 I226 (0x125B) PHC runs 2.93 % fast against QPC (rate 1.0293 in both 2026-10-22 and 2026-10-27 captures):
+  functional, outside restoration scope.
