@@ -181,6 +181,16 @@ function Format-AvbStepResult {
     return (Format-AvbExitCode $Result)
 }
 
+# Failed entries of a test build ("name: reason"); none when Build-Tests exited 0.  A nonzero (or missing) exit code
+# without a failed manifest entry is still a failure, never a silent pass (TEST-LOCALSUITES-021).
+function Get-AvbTestBuildFailures {
+    param($ExitCode, $Manifest)
+    if (Test-AvbExitSuccess $ExitCode) { return @() }
+    $failed = @(@($Manifest.entries) | Where-Object { $_.status -eq 'failed' } | ForEach-Object { "$($_.name): $($_.reason)" })
+    if ($failed.Count -eq 0) { $failed = @("Build-Tests exit $(Format-AvbExitCode $ExitCode) without a failed manifest entry") }
+    return $failed
+}
+
 # ---------------------------------------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------------------------------------
@@ -251,8 +261,8 @@ try {
         $manPath = Join-Path $RepoRoot "build\tools\avb_test\x64\$Configuration\test-build-manifest.json"
         if (-not (Test-Path -LiteralPath $manPath)) { $Stop = "test build manifest missing: $manPath"; break }
         $man = Get-Content -LiteralPath $manPath -Raw | ConvertFrom-Json
-        if (-not (Test-AvbExitSuccess $cfg.testBuild)) {
-            $cfg.testBuildFailed = @($man.entries | Where-Object { $_.status -eq 'failed' } | ForEach-Object { "$($_.name): $($_.reason)" })
+        $cfg.testBuildFailed = @(Get-AvbTestBuildFailures $cfg.testBuild $man)
+        if ($cfg.testBuildFailed.Count -gt 0) {
             $BuildFailures += "$Configuration test build exit $(Format-AvbExitCode $cfg.testBuild): $(@($cfg.testBuildFailed).Count) failed entr(y/ies)"
             Write-Host "[BUILD FAILED] $Configuration test build exit $(Format-AvbExitCode $cfg.testBuild) --- continuing; failed entries are BLOCKED(PROVENANCE), their old executables are not run:" -ForegroundColor Red
             $cfg.testBuildFailed | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }

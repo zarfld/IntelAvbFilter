@@ -268,6 +268,33 @@ tc_check 'TEST-LOCALSUITES-015-capture-never-claimed-without-a-log-and-test-not-
      ($el -match 'if \(\$captureFailed -and \$childExitCode -eq 0\) \{ exit 1 \}') -and ($el -match "'STOP_FAILED'") -and ($el -match "\`$outcome = 'TIMEOUT'")) `
     ("missing={0} empty={1} captured={2}/{3}" -f $c1.Status, $c2.Status, $c3.Status, $c3.Bytes)
 
+# 021: a failed test build never stops the matrix and never passes silently (repair 3b, Q 2026-10-27).  Defect observed in
+# LocalSuites_20261024_133502: one LNK1168 in the Release test build ended the whole run ("[STOPPED] test build failed
+# (Release)"), so no Release suite ran.  Build-Tests records each failure in the manifest and Run-Tests-CI BLOCKs a
+# not-built entry by provenance, so the matrix continues; the failure is listed and the run stays nonpassing.
+$tbBad = @()
+try { Import-Functions $LocalPath @('Get-AvbTestBuildFailures') } catch { $tbBad += $_.Exception.Message }
+if ($tbBad.Count -eq 0) {
+    $manTb = [pscustomobject]@{ entries = @(
+        [pscustomobject]@{ name = 't_ok';  status = 'built';  reason = '' },
+        [pscustomobject]@{ name = 't_lnk'; status = 'failed'; reason = 'compiler exit code 2 or output missing' },
+        [pscustomobject]@{ name = 't_nm';  status = 'failed'; reason = 'nmake exit 0 but x.exe was not written by this build' }) }
+    $tb0 = @(Get-AvbTestBuildFailures -ExitCode 0 -Manifest $manTb)
+    $tb1 = @(Get-AvbTestBuildFailures -ExitCode 1 -Manifest $manTb)
+    $tb2 = @(Get-AvbTestBuildFailures -ExitCode 1 -Manifest ([pscustomobject]@{ entries = @() }))
+    $tb3 = @(Get-AvbTestBuildFailures -ExitCode $null -Manifest ([pscustomobject]@{ entries = @() }))
+    if ($tb0.Count -ne 0) { $tbBad += "exit 0 reported failures: [$($tb0 -join '; ')]" }
+    if ($tb1.Count -ne 2 -or ($tb1 -join ' ') -notmatch 't_lnk: compiler' -or ($tb1 -join ' ') -notmatch 't_nm: nmake') { $tbBad += "exit 1: [$($tb1 -join '; ')]" }
+    if ($tb2.Count -ne 1 -or $tb2[0] -notmatch 'exit 1') { $tbBad += "nonzero exit without a failed entry passed silently: [$($tb2 -join '; ')]" }
+    if ($tb3.Count -ne 1) { $tbBad += "missing exit code passed silently: [$($tb3 -join '; ')]" }
+}
+# STATIC (script body): the Build-Tests step sets no $Stop, and build failures make the final exit nonzero.
+$lsTxt = [System.IO.File]::ReadAllText($LocalPath)
+if ($lsTxt -match '\$Stop = "test build failed') { $tbBad += 'a test build failure still stops the run' }
+if ($lsTxt -notmatch '\$BuildFailures\.Count -gt 0') { $tbBad += 'build failures do not make the run nonpassing' }
+if ($lsTxt -notmatch 'Get-AvbTestBuildFailures \$cfg\.testBuild \$man') { $tbBad += 'the Build-Tests step does not use Get-AvbTestBuildFailures' }
+tc_check 'TEST-LOCALSUITES-021-failed-test-build-continues-the-matrix-and-stays-nonpassing' ($tbBad.Count -eq 0) ($tbBad -join ' ### ')
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""

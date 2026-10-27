@@ -249,3 +249,13 @@ This supersedes the 10-24 interpretations above: "Signature matches", T-RACE, T-
 **Offline:**
 - TEST-HILGATE-082 is a STATIC source contract (RED with 9 reasons, then GREEN); the suite is 83/83 in direct runs.
 - **Inside the chain, `test_hil_safety_gate.ps1` has ended FAILED(TIMEOUT) at the 60 s Unit limit in every run since at least 10-22** (8 runs; repair 1 pending). The chain itself has never confirmed it.
+
+## Parked finding 2026-10-27 (P0 is CI execution; no implementation started)
+
+The I226 `OutstandingSendNBLs` LCY gauge (driver `stats_outstanding_send_nbls`, `src/avb_integration_fixed.c:4700`, a resettable statistic) was compared across the per-test logs of three Debug phases [HW]:
+- **Before `test_ioctl_offset`**, which resets the gauge to 0 on all three days, the trajectories are alike: 10-22 0→674, 10-24 0→794, 10-27 0→540. The "monotonic since 13:45:33" on 10-22 is therefore **not hang-specific**. This supports T1b (accounting / reset artifact) and weakens the evidential base of T1-TAS.
+- **After the reset:**
+  - 10-22 (hang): the gauge rises again, 0→52 between tests, then `tsn_ioctl_handlers_um` 52→55, **`ts_event_sub` 235→1645**, …, 2145 at 14:23.
+  - 10-24 / 10-27 (unloads OK): **no I226 gauge change**, although the same tests ran. `test_ts_event_sub` shows the identical I226 `IoctlCount +59` on all three days.
+
+This post-reset divergence under the same test sequence is the first hang-specific I226 send-path difference found. Still to determine: what differs between 14:07 and 14:17 on 10-22. Resume #328 here, once complete CI execution is demonstrated.
