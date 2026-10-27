@@ -43,6 +43,7 @@
 $scriptPath = Join-Path $PSScriptRoot 'Run-Tests.ps1'
 $runCiPath  = Join-Path $PSScriptRoot 'Run-Tests-CI.ps1'
 $repoRoot   = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # Stop-AvbProcessTree: timed-out child + descendants, verified
 
 function ConvertTo-AvbPsLiteral { param([string]$Text) return "'" + $Text.Replace("'", "''") + "'" }
 
@@ -142,7 +143,8 @@ if ($CaptureDbgView) {
     Write-Host "[DbgView] Capture confirmed: PID=$($dbgViewProc.Id), log $dbgLog" -ForegroundColor Green
     $capture = [ordered]@{ testName = $TestName; testArgs = $TestArgs; configuration = $Configuration; suite = $Suite; dbgViewPid = $dbgViewProc.Id
                            dbgViewLog = $dbgLog; startedUtc = (Get-Date).ToUniversalTime().ToString('o'); transcript = $LogFile; resultsJson = $ResultsJson
-                           installedDriverSha256 = $null; outcome = $null; testExitCode = $null; stoppedUtc = $null; stop = $null; logStatus = $null; logBytes = 0 }
+                           installedDriverSha256 = $null; outcome = $null; testExitCode = $null; stoppedUtc = $null; stop = $null; logStatus = $null; logBytes = 0
+                           terminationVerified = $null; termination = $null }
     $drv = Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys'
     if (Test-Path -LiteralPath $drv) { $capture.installedDriverSha256 = (Get-FileHash -LiteralPath $drv -Algorithm SHA256).Hash }
 }
@@ -159,8 +161,15 @@ if ($null -ne $childProc) {
         if ($null -eq $childExitCode) { $childExitCode = 1; $outcome = 'NO_EXIT_CODE' }
     } else {
         $outcome = 'TIMEOUT'
-        Write-Host "[TIMEOUT] elevated test process PID=$($childProc.Id) still running after ${TimeoutSeconds}s --- terminated; hardware state must be inspected" -ForegroundColor Red
-        Stop-Process -Id $childProc.Id -Force -ErrorAction SilentlyContinue
+        # The whole tree (the test and everything it started, e.g. an installer), then verified: killing only this root
+        # left the 2026-10-24 UT-CORR-009 installer chain running unnoticed for two days (#328 investigation).
+        $termination = Stop-AvbProcessTree -Process $childProc
+        if ($capture) { $capture.terminationVerified = [bool]$termination.Ok; $capture.termination = $termination.Detail }
+        if ($termination.Ok) {
+            Write-Host "[TIMEOUT] elevated test process PID=$($childProc.Id) still running after ${TimeoutSeconds}s --- process tree terminated and verified ($($termination.Detail)); hardware state must be inspected" -ForegroundColor Red
+        } else {
+            Write-Host "[TIMEOUT] elevated test process PID=$($childProc.Id) still running after ${TimeoutSeconds}s --- TERMINATION NOT VERIFIED ($($termination.Detail)); these processes may still change the machine; hardware state must be inspected" -ForegroundColor Red
+        }
         $childExitCode = 1
     }
 } else {
