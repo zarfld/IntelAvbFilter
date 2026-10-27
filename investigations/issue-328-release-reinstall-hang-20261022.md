@@ -163,3 +163,30 @@ The 10-24 hang is therefore **in the netcfg filter install, with all three adapt
 1. Pair every 7045 event since 10-08 with the configuration being replaced and the I226 link-down lag, to look for a completed Release stop.
 2. Diff the pause, send-complete and unload paths for `DBG` / `NDEBUG` conditionals.
 3. The Release UT-CORR-009 of the FullSuite run in progress (10-27, Release installed 10:09) is the next hardware data point. If it hangs, the corrected test must report `[#328]` after 300 s.
+
+## 2026-10-27 10:47:46: Release reinstall completes after the 10-24 TSN history is replicated (FullSuite_20261027_091718, legacy loop)
+
+**Facts [HW]:**
+- Release driver `E516B4FE…`, loaded build flag Release, identical to the Release installer source.
+- The same history as 10-24 13:04 under this Release install:
+  - `avb_test_i226_um` at 10:14:38/10:14:42, with SETUP_TAS, SETUP_FP and SETUP_PTM accepted on I226 0x125B;
+  - `test_hot_plug` 10:36:37, `test_ioctl_fp_ptm` 10:37:53, `test_ioctl_launch_time` 10:38:01, `test_ioctl_tas` 10:39:11;
+  - the `test_lifecycle_coverage` NIC cycle at 10:39:56.
+- Corrected UT-CORR-009: `Install-Driver.ps1 -NonInteractive -Reinstall`, exit 0, phase complete.
+  - Installer log: "Stopping service..." → "Disabling: Ethernet / Ethernet 2 / Ethernet 3" → netcfg removal → "Build is newer" → `netcfg -i` "[OK] netcfg installation completed" → Step 4 re-enable → "Installation complete!".
+  - PASS, restoration verified (`logs\test_ptp_phc_lifecycle.exe_20261027_104746.log`, `logs\ut_corr_009_install_Release_20261027_104750.log`).
+- System log: I219/I210 link-down 10:47:56, 7045 at 10:48:01, **I226 link-down 10:48:02 (+6 s)**, all three links up by 10:48:09. This is the normal signature.
+
+**Differences from 10-24 13:04 (the hang):**
+1. **Stop timing:** there, the stop came from the test's own `ControlService(STOP)`, and the installer disabled the adapters about 5 s later. Here, the installer's `sc stop` + 2 s sleep + `sc delete` + driver-store cleanup come before the disable.
+2. **Downgrade prompt:** there, a Debug build was installed over Release (hard-coded configuration), "Build is OLDER" triggered a `Read-Host` (which returned) in an interactive RunAs child. Here, the same Release build was reinstalled with no prompt.
+3. Elevated wrapper vs direct `-NonInteractive` child.
+
+**Theory status (one observation, an anecdote):**
+- **T-REL** as "a Release driver stop/reinstall hangs": **refuted as a universal claim** by this run. A Release-specific defect that is conditional on timing stays possible.
+- **T1-TAS** (TSN history alone): **further weakened**. The same TSN history and NIC cycle preceded a successful Release reinstall.
+- **T-RACE** (a still-detaching I226 stack meets the PnP disable / netcfg change): **consistent**, since difference 1 is exactly that timing. Not proven.
+- **T-NETCFG / downgrade path** (difference 2: a different package over the loaded driver, after a prompt): **open**.
+- **10-22 14:25** ("Stopping service..." with a monotonic I226 `OutstandingSendNBLs`) remains a separate, unexplained stop-phase hang.
+
+**Discriminating experiment (requires Q's authorization; mutating):** reproduce difference 1 alone. That means `ControlService(STOP)` followed within about 5 s by the installer's adapter disable, under Release, with everything else equal. It would be done through the existing chain only once Q decides how. The corrected UT-CORR-009 no longer produces that timing.
