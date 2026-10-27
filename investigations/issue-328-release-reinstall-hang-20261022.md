@@ -118,6 +118,9 @@ The loaded driver was Release `B286A621…6B4F` (capture metadata `installedDriv
 
 **Infrastructure defects exposed (all [SRC] unless marked).**
 1. `Run-Tests-Elevated.ps1:163` `Stop-Process -Id $childProc.Id` kills only the wrapper PowerShell. `Run-Tests.ps1`, the test exe and the test's own `Install-Driver-Elevated.ps1` child survive the timeout. [INF] An orphaned UT-CORR-009 chain deleting the service before 13:37 and holding the Release exe at ~14:03 explains both `Driver service: not installed` and `LNK1168`. This is UNVERIFIED: no process list was captured.
-2. `test_ptp_phc_lifecycle.c:62-64` hard-codes `-Configuration Debug`, so a Release UT-CORR-009 reinstalls the Debug driver.
+2. `test_ptp_phc_lifecycle.c:62-64` hard-coded `-Configuration Debug`, so a Release UT-CORR-009 reinstalled the Debug driver.
+   - 2026-10-27: repaired. The configuration is now chosen by matching the installed driver's SHA-256 against each installer source before the stop; with no unique match the test is BLOCKED and does not stop the service. After the reinstall, a different driver is CLEANUP_FAILED.
+   - OFFLINE-VERIFIED: TEST-HILGATE-082 went RED then GREEN, the suite is 83/83, and the file compiles at /W4.
+   - HIL verification pending.
 3. The FullSuite full `*.exe` loop is **intentional** (Q, 2026-10-26: FullSuite must always run every test, failing ones included). It therefore also runs Unsafe entries such as UT-CORR-009. The defect is in containment, not in the loop: a hanging test must not corrupt the results of later tests (see 1), and UT-CORR-009 must restore the driver it found (see 2).
 4. One locked artifact (`LNK1168`) aborts the entire Release configuration. This contradicts contract C ("a build or suite failure must not prevent later independent tests or suites from running"). LocalSuites behaviour, reported only.
