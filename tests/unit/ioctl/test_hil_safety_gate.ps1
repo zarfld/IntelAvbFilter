@@ -1170,6 +1170,26 @@ tc_check 'TEST-HILGATE-077-failed-setup-claim-without-hardware-tolerance-stays-i
      (Get-RanCount $rD1d '^RAN test_sbfake_tgt ') -eq 0) `
     ("ran: {0}; state lines: {1}" -f ($rD1d.Ran -join ' / '), ((@([regex]::Matches($rD1d.Out, '(?m)^.*(\[STATE\]|\[INCONCLUSIVE_RESTORATION\]).*$') | ForEach-Object { $_.Value.Trim() })) -join ' || '))
 
+# 082: UT-CORR-009 restores the driver it found (Q 2026-10-27). Defect from FullSuite_20261024_113438: the Release
+# executable ran 'Install-Driver-Elevated.ps1 -Configuration Debug', a hard-coded literal, so a Release run would
+# install the Debug driver, and no check compared the driver after the reinstall with the one found before it.
+# Required: before the service stop, the configuration to reinstall is chosen by matching the installed
+# System32\drivers\IntelAvbFilter.sys against the installer's source for each configuration
+# (Install-Driver.ps1: build\x64\<cfg>\IntelAvbFilter\IntelAvbFilter). After the reinstall, a different installed
+# driver is CLEANUP_FAILED. The check runs on comment-stripped source so that comments cannot satisfy it.
+$lcSrc = Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\integration\ptp_corr\test_ptp_phc_lifecycle.c') -Raw
+$lcCode = [regex]::Replace($lcSrc, '(?s)/\*.*?\*/|//[^\r\n]*', '')
+$lcBad = @()
+if ($lcCode -match '-Configuration (Debug|Release)') { $lcBad += "hard-coded reinstall configuration '$($Matches[0])'" }
+if ($lcCode -notmatch '-Configuration %s') { $lcBad += 'reinstall command does not take the configuration at run time (-Configuration %s)' }
+foreach ($cfg in 'Debug', 'Release') {
+    if ($lcCode.IndexOf("build\\\\x64\\\\$cfg\\\\IntelAvbFilter\\\\IntelAvbFilter\\\\IntelAvbFilter.sys") -lt 0) { $lcBad += "installer source for $cfg not compared" }
+}
+$iSel = $lcCode.IndexOf('select_restore_configuration(&'); $iRst = $lcCode.IndexOf('restart_service(SERVICE_NAME')
+if ($iSel -lt 0 -or $iRst -lt 0 -or $iSel -gt $iRst) { $lcBad += "restore configuration not selected before the service stop (select@$iSel restart@$iRst)" }
+if ($lcCode -notmatch 's_cleanup_failed\+\+') { $lcBad += 'no CLEANUP_FAILED path for a different driver after the reinstall' }
+tc_check 'TEST-HILGATE-082-ut-corr-009-reinstalls-the-driver-it-found-and-verifies-it' ($lcBad.Count -eq 0) ($lcBad -join ' ### ')
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
