@@ -329,6 +329,7 @@ $HardwareDependentTests = @(
     # Integration-level tests -- all require driver + hardware
     "ssot_register_validation_test",  # SSOT register validation via device access
     "test_tsn_ioctl_handlers_um",     # TSN IOCTL user-mode handlers -- driver required
+    "tsn_ioctl_test",                 # same source as test_tsn_ioctl_handlers_um, built by tsn_ioctl_test.mak
     "test_all_adapters",              # enumerates all Intel AVB adapters
     "test_multidev_adapter_enum",     # multi-device adapter enumeration
     "test_device_register_access",    # direct device register read/write
@@ -515,6 +516,7 @@ $HardwareUnitTests = @(
 $HardwareIntegrationTests = @(
     "ssot_register_validation_test",
     "test_tsn_ioctl_handlers_um",
+    "tsn_ioctl_test",                 # same source as test_tsn_ioctl_handlers_um, built by tsn_ioctl_test.mak
 
     "test_all_adapters",              # enumerates all Intel AVB adapters
     "test_multidev_adapter_enum",     # multi-device adapter enumeration
@@ -607,6 +609,7 @@ $HilHazardHolds = @{
     'test_ioctl_fp_ptm'          = $Hold328Tsn
     'test_tsn_ioctl_handlers_um' = $Hold328Tsn
     'test_tsn_ioctl_handlers'    = $Hold328Tsn
+    'tsn_ioctl_test'             = $Hold328Tsn
 }
 
 $HilTestSafety = @{
@@ -656,6 +659,7 @@ $HilTestSafety = @{
     'test_ptp_corr'                    = 'ReadOnly'
     'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006 need --case; UT-CORR-009 is test_ptp_phc_lifecycle
     'test_hardware_detection'          = 'ReadOnly'
+    'ssot_register_validation_test'    = 'ReadOnly'   # GET_DEVICE_INFO, GET_HW_STATE, READ_REGISTER on the default handle only; no write
     # --- Init (IOCTL_AVB_INIT_DEVICE) ---
     'test_clock_config'                = 'Init'
     'test_clock_working'               = 'Init'
@@ -701,7 +705,8 @@ $HilTestSafety = @{
     'test_gptp_phc_interface'          = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_error_recovery'              = 'Mutating'   # ADJUST_FREQUENCY, PHC_OFFSET_ADJUST
     'test_tsn_ioctl_handlers_um'       = 'Mutating'   # SETUP_TAS/FP/PTM, INIT_DEVICE
-    'test_tsn_ioctl_handlers'          = 'Unknown'    # Build-Tests entry Disabled, source a 9-line KM placeholder; the only binary is the stale 2026-04-08 one (#328 F23); also hazard-held
+    'test_tsn_ioctl_handlers'          = 'Mutating'   # same source as test_tsn_ioctl_handlers_um; hazard-held (#328 F23: stale 2026-04-08 binary issued SETUP_TAS/FP/PTM)
+    'tsn_ioctl_test'                   = 'Mutating'   # same source as test_tsn_ioctl_handlers_um (tsn_ioctl_test.mak); hazard-held
     'test_ptp_corr_extended'           = 'Mutating'   # SET_HW_TIMESTAMPING
     'ptp_clock_control_production'     = 'Mutating'   # SET_TIMESTAMP, ADJUST_FREQUENCY
     'ptp_ioctl_latency_test'           = 'Mutating'   # SET_TIMESTAMP, INIT_DEVICE
@@ -716,8 +721,6 @@ $HilTestSafety = @{
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
     'test_vv_corr_001_stability'       = 'ReadOnly'   # ENUM/OPEN_ADAPTER, GET_TIMESTAMP, GET_HW_STATE, TEST_SEND_PTP
-    # --- Unknown ---
-    'ssot_register_validation_test'    = 'Unknown'    # built as Build-Tests Name ssot_register_validation; source not yet classified
 }
 
 # ===========================

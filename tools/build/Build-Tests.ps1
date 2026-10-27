@@ -330,6 +330,8 @@ $AllTests = @(
         Name = "tsn_ioctl_test"
         Type = "nmake"
         Makefile = "tests/integration/tsn/tsn_ioctl_test.mak"
+        Source = "tests/integration/tsn/test_tsn_ioctl_handlers_um.c"   # the makefile's only compiled source (read by the HILGATE source checks, not by nmake)
+        Output = "tsn_ioctl_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "TSN IOCTL Test (nmake)"
     },
     @{
@@ -557,16 +559,15 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Unit: Minimal IOCTL Test"
     },
-    # DISABLED: test_tsn_ioctl_handlers - KM placeholder, needs UM implementation
-    # TODO: Create standalone UM version or use test_tsn_ioctl_handlers_um
+    # Sole producer of test_tsn_ioctl_handlers.exe: the user-mode source (tests/unit/ioctl/test_tsn_ioctl_handlers.c is a
+    # kernel-mode placeholder without main()).  tsn_ioctl_test.mak compiles the same source as tsn_ioctl_test.exe.
     @{
         Name = "test_tsn_ioctl_handlers"
         Type = "cl"
-        Source = "tests/unit/ioctl/test_tsn_ioctl_handlers.c"
+        Source = "tests/integration/tsn/test_tsn_ioctl_handlers_um.c"
         Output = "test_tsn_ioctl_handlers.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Unit: TSN IOCTL Handlers Test"
-        Disabled = $true  # KM placeholder only, use test_tsn_ioctl_handlers_um instead
     },
     
     # Unit Tests - Hardware (cl.exe)
@@ -679,7 +680,7 @@ $AllTests = @(
         Disabled = $true  # Needs update: AVB_CLOCK_CONFIG.systim is now u64
     },
     @{
-        Name = "ssot_register_validation"
+        Name = "ssot_register_validation_test"
         Type = "cl"
         Source = "tests/integration/tsn/ssot_register_validation_test.c"
         Output = "ssot_register_validation_test.exe"

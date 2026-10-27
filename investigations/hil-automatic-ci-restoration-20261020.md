@@ -459,3 +459,62 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
 1. Create the HIL test-signing certificate; secrets HIL_TEST_SIGNING_PFX_BASE64 / _PASSWORD; commit the public
    `tools/ci/signing/hil-test-signer.cer` (PR).  2. Trust it on the HIL machine (LocalMachine Root + TrustedPublisher).
 3. Optionally allow GitHub Actions to create pull requests (README bot), otherwise merge the bot branch manually.
+
+## Iteration 10 (2026-10-27) - P0 complete CI/HIL execution: classification of ssot_register_validation_test
+
+### Facts (verified)
+- Source `tests/integration/tsn/ssot_register_validation_test.c` issues only CreateFile, IOCTL_AVB_GET_DEVICE_INFO,
+  IOCTL_AVB_GET_HW_STATE and IOCTL_AVB_READ_REGISTER on the default handle (no ENUM/OPEN_ADAPTER); no write, no
+  INIT_DEVICE, no NIC administration.  Registry: Unknown -> ReadOnly.
+- The gate suite never checked this entry: its source mapping is keyed by Build-Tests Name, which was
+  `ssot_register_validation` (Output `ssot_register_validation_test.exe`).  RED: ReadOnly alone -> TEST-HILGATE-008
+  `ssot_register_validation_test: no build entry` (82/83, 231 s).  GREEN after renaming the Build-Tests Name to the
+  registered entry name: 83/83 (199 s); 006 (no mutating IOCTL) and 009 (no NIC administration) PASS on the source.
+  TEST-COMPLETE unchanged (001: 39/148, 003: 2 scripts - pre-existing).
+- Existing hardware evidence, FullSuite legacy path 2026-10-27 (logs/ssot_register_validation_test.exe_*):
+  Debug 09:28:07 and 12:34:43, Release 10:16:29 - each 19 passed / 0 failed; default handle = I219 (caps 0xC3);
+  only IoctlCount changed on the three adapters.  The I210 and I226 are never read by Phase 2.
+
+### Finding (driver security, NOT implemented - outside P0)
+- The Release driver is compiled WITHOUT NDEBUG: `build/x64/Release/IntelAvbFilter/obj/IntelAvbFilter.tlog/
+  CL.command.1.tlog` (10:06:50) defines _WIN64 _AMD64_ AMD64 _WIN32_WINNT WINVER WINNT NTDDI_VERSION NDIS_WDM NDIS630
+  AVB_VERSION_BUILD AVB_VERSION_REVISION only.  Every `#ifndef NDEBUG` block (src/device.c:720,
+  src/avb_integration_fixed.c:2190, include/avb_ioctl.h:87/260) is therefore compiled into Release, including
+  IOCTL_AVB_WRITE_REGISTER - contrary to ADR-SEC-001 ("NDEBUG defined automatically").  Consistent with the Release
+  10:16:29 run reading SYSTIM/TIMINCA/TSAUXC.  UNVERIFIED: that the driver loaded at 10:16:29 was the Release build.
+
+### Remaining execution gaps of this entry (not started)
+- Phase 2 covers the default adapter only, not every adapter advertising the PTP capability.
+- No `[TAG] ID` testcase lines (one overall verdict per run).
+- If ADR-SEC-001 is enforced, Release READ_REGISTER rejection would be reported as FAIL, not evidence-backed
+  NOT_SUPPORTED.
+## Iteration 11 (2026-10-27) - P0: single producer of test_tsn_ioctl_handlers.exe
+
+### Facts (verified)
+- Producers before the repair: (1) Build-Tests cl `test_tsn_ioctl_handlers`, Disabled, Source
+  tests/unit/ioctl/test_tsn_ioctl_handlers.c = 9-line kernel-mode placeholder (precomp.h, no main); (2) Build-Tests
+  nmake `tsn_ioctl_test` -> tests/integration/tsn/tsn_ioctl_test.mak, which compiles
+  tests/integration/tsn/test_tsn_ioctl_handlers_um.c and links it as test_tsn_ioctl_handlers.exe (no declared artifact,
+  no SHA); (3) out of chain: tools/build/Build-Driver.ps1 -BuildTests runs the same makefile without CFG (= Debug).
+  test_tsn_ioctl_handlers_um (cl) compiles the same _um.c source.
+- Flags: nmake adds /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_TEST_USERMODE /DWIN64 /D_WIN64 /I.;
+  the source has no preprocessor conditionals and calls CreateFileW explicitly; include/ does not reference
+  AVB_TEST_USERMODE or WIN32_LEAN_AND_MEAN.  Neither builder uses configuration-dependent flags.  Same program
+  (source-level analysis; binaries not compared at runtime).
+- Coverage (identical): INIT_DEVICE, then SETUP_TAS/FP/PTM once with a zeroed 1 KB buffer and once with a real
+  configuration, default handle only, no capability check, no restoration, no `[TAG] ID` lines, unconditional exit 0.
+- Canonical producer selected: cl `test_tsn_ioctl_handlers`, Source -> _um.c, enabled (manifest SHA, Source visible to
+  the HILGATE source checks, Name = registered entry).  nmake entry `tsn_ioctl_test` removed from Build-Tests (the
+  .mak stays: Build-Driver.ps1 and IntelAvbFilter.vcxproj reference it).  Registry: Unknown -> Mutating.
+  #328 hazard hold UNCHANGED (Q's explicit TAS/FP restriction).
+- RED: TEST-HILPROV-010 `statically Disabled yet dispatchable: test_tsn_ioctl_handlers (listed in HardwareUnitTests)`
+  51/52.  GREEN: HILPROV 52/52, HILGATE 83/83 (008 now checks the real source; 081 hold PASS), COMPLETE-001 39 -> 38.
+- Build (full Build-Tests, digest D6FC457D..., HEAD 8b33641 + working tree): Debug 136 s, Release 132 s, each
+  147 entries = 141 built / 6 disabled / 0 failed; test_tsn_ioctl_handlers.exe Debug 5E9FC876D2C3, Release
+  FACCA9E464DD (file = manifest).
+
+### Remaining (not started)
+- The program cannot fail (exit 0 always) and configures TAS/FP/PTM without restoration - must be repaired before the
+  #328 hold could ever be lifted.  Two registered entries now execute the same program.
+- Build-Driver.ps1 -BuildTests still overwrites five Debug nmake artifacts outside the manifest; the runner then
+  blocks them visibly (SHA256 mismatch), never silently.
