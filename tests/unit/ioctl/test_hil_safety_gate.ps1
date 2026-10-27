@@ -1186,10 +1186,28 @@ foreach ($cfg in 'Debug', 'Release') {
     # PowerShell does not escape backslashes: this is the C source text L"build\\x64\\<cfg>\\...".
     if ($lcCode.IndexOf("build\\x64\\$cfg\\IntelAvbFilter\\IntelAvbFilter\\IntelAvbFilter.sys") -lt 0) { $lcBad += "installer source for $cfg not compared" }
 }
-$iSel = $lcCode.IndexOf('select_restore_configuration(&'); $iRst = $lcCode.IndexOf('restart_service(SERVICE_NAME')
-if ($iSel -lt 0 -or $iRst -lt 0 -or $iSel -gt $iRst) { $lcBad += "restore configuration not selected before the service stop (select@$iSel restart@$iRst)" }
-if ($lcCode -notmatch 's_cleanup_failed\+\+') { $lcBad += 'no CLEANUP_FAILED path for a different driver after the reinstall' }
-tc_check 'TEST-HILGATE-082-ut-corr-009-reinstalls-the-driver-it-found-and-verifies-it' ($lcBad.Count -eq 0) ($lcBad -join ' ### ')
+$iSel = $lcCode.IndexOf('select_restore_configuration(&'); $iRun = $lcCode.IndexOf('run_installer(found.')   # the call, not the definition
+if ($iSel -lt 0 -or $iRun -lt 0 -or $iSel -gt $iRun) { $lcBad += "restore configuration not selected before the installer runs (select@$iSel installer@$iRun)" }
+# 2026-10-27 (Q: failure handling, #328). Defect observed on HIL by the existing chain (FullSuite_20261024_113438, Release
+# UT-CORR-009 13:03:58): the test blocked in its service stop, produced no verdict and no evidence, and was killed at
+# 1800 s. Its descendants kept mutating afterwards. The causes are in the source: an in-process ControlService(STOP)
+# with no bound, an unbounded system() wait, Install-Driver-Elevated.ps1, whose RunAs child is interactive
+# (Install-Driver.ps1 STOP_PENDING branch: Read-Host / Restart-Computer) and shows installer output only after it
+# exits, and a failed reinstall reported as FAIL without evaluating restoration.
+if ($lcCode -match '\bControlService\s*\(') { $lcBad += 'in-process ControlService(STOP) (unbounded while the driver unload blocks, #328)' }
+if ($lcCode -match '\bsystem\s*\(') { $lcBad += 'system() (unbounded wait, no evidence while it hangs)' }
+if ($lcCode -match 'Install-Driver-Elevated') { $lcBad += 'Install-Driver-Elevated.ps1 (interactive RunAs child; output only after exit)' }
+if ($lcCode -notmatch 'Install-Driver\.ps1 -Configuration %s -Reinstall' -or $lcCode -notmatch '-NonInteractive') { $lcBad += 'installer not run as Install-Driver.ps1 -NonInteractive ... -Reinstall' }
+if ($lcCode -notmatch 'WaitForSingleObject\s*\([^;]*LC_INSTALL_TIMEOUT_MS') { $lcBad += 'installer wait not bounded by LC_INSTALL_TIMEOUT_MS' }
+if ($lcCode -notmatch 'logs\\\\ut_corr_009_install_') { $lcBad += 'installer output not preserved under logs\ (live evidence)' }
+# Restoration verdict lines in the runner's grammar: Run-Tests-CI.ps1 halts later mutation on '^\s*\[CLEANUP_FAILED\]'
+# and on INCONCLUSIVE_RESTORATION testcase lines (tools/lib/TestVerdict.ps1, Get-AvbVerdictCounts).
+foreach ($tag in 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION') {
+    if ($lcCode -notmatch ('"\s*\[' + $tag + '\] UT-CORR-009 ')) { $lcBad += "no '[$tag] UT-CORR-009' restoration verdict line" }
+}
+# STATIC: this is a contract on the source text only. It is not runtime evidence; runtime behaviour is verified only by
+# HIL through Run-Tests-CI.ps1 (Unsafe entry, AVB_HIL_AUTHORIZE_UNSAFE naming it).
+tc_check 'TEST-HILGATE-082-ut-corr-009-reinstall-and-restoration-source-contract-STATIC-not-runtime-evidence' ($lcBad.Count -eq 0) ($lcBad -join ' ### ')
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

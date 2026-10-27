@@ -119,8 +119,14 @@ The loaded driver was Release `B286A621…6B4F` (capture metadata `installedDriv
 **Infrastructure defects exposed (all [SRC] unless marked).**
 1. `Run-Tests-Elevated.ps1:163` `Stop-Process -Id $childProc.Id` kills only the wrapper PowerShell. `Run-Tests.ps1`, the test exe and the test's own `Install-Driver-Elevated.ps1` child survive the timeout. [INF] An orphaned UT-CORR-009 chain deleting the service before 13:37 and holding the Release exe at ~14:03 explains both `Driver service: not installed` and `LNK1168`. This is UNVERIFIED: no process list was captured.
 2. `test_ptp_phc_lifecycle.c:62-64` hard-coded `-Configuration Debug`, so a Release UT-CORR-009 reinstalled the Debug driver.
-   - 2026-10-27: repaired. The configuration is now chosen by matching the installed driver's SHA-256 against each installer source before the stop; with no unique match the test is BLOCKED and does not stop the service. After the reinstall, a different driver is CLEANUP_FAILED.
-   - OFFLINE-VERIFIED: TEST-HILGATE-082 went RED then GREEN, the suite is 83/83, and the file compiles at /W4.
-   - HIL verification pending.
+   - 2026-10-27: corrected in place in `test_ptp_phc_lifecycle.c`.
+     - **Provenance:** the configuration comes from matching the installed file's SHA-256 against each installer source. The loaded build flag (`GET_VERSION`) must agree. Otherwise the test is BLOCKED and the installer is never started.
+     - **Single bounded mutation path:** the test's own `ControlService(STOP)` and the `system()` call are removed. `Install-Driver.ps1 -NonInteractive -Reinstall` runs in a kill-on-close job, bounded at 300 s, with its output preserved live in `logs\ut_corr_009_install_<cfg>_<ts>.log`. The previous route, Install-Driver-Elevated, starts its child with RunAs and that child is not `-NonInteractive`, so the STOP_PENDING branch (`Read-Host` / `Restart-Computer`) could wait unbounded and invisibly.
+     - **Separate verdicts:** the functional verdict (PASS/FAIL) and the restoration verdict are reported separately. Restoration comes from pre/post observation (file SHA-256, SCM state, control device, `GET_VERSION`, adapter multiset), never from the installer exit code: verified, `[CLEANUP_FAILED]` (observed difference), or `[INCONCLUSIVE_RESTORATION]` (not observable).
+     - **#328 condition:** a timeout after `Stopping service...` prints a `[#328]` line with the evidence paths. No retry, no forced unload, no reboot.
+   - Evidence classes:
+     - The defect was demonstrated by the existing chain on HIL (this section).
+     - TEST-HILGATE-082 is a **STATIC** source contract, not runtime evidence: RED with 9 reasons, then GREEN. The suite is 83/83; TEST-NOWAIT 1/1 and TEST-HILSUITE 18/18; the file compiles at /W4.
+     - Runtime behaviour: **HIL verification pending**.
 3. The FullSuite full `*.exe` loop is **intentional** (Q, 2026-10-26: FullSuite must always run every test, failing ones included). It therefore also runs Unsafe entries such as UT-CORR-009. The defect is in containment, not in the loop: a hanging test must not corrupt the results of later tests (see 1), and UT-CORR-009 must restore the driver it found (see 2).
 4. One locked artifact (`LNK1168`) aborts the entire Release configuration. This contradicts contract C ("a build or suite failure must not prevent later independent tests or suites from running"). LocalSuites behaviour, reported only.
