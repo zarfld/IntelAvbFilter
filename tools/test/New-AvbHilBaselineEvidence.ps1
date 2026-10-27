@@ -99,6 +99,17 @@ function New-AvbHilBaselineDocument {
             $measurements += ,([ordered]@{ pass = $p; did = $c.Did; driverIndex = $c.Index; name = 'TIMINCA'; value = ('0x{0:X8}' -f [uint32]$c.Timinca); source = $src })
             $measurements += ,([ordered]@{ pass = $p; did = $c.Did; driverIndex = $c.Index; name = 'TSAUXC'; value = ('0x{0:X8}' -f [uint32]$c.Tsauxc); source = $src })
             $measurements += ,([ordered]@{ pass = $p; did = $c.Did; driverIndex = $c.Index; name = 'PHC_SAMPLES'; value = @($c.Samples); qpcFrequency = [System.Diagnostics.Stopwatch]::Frequency; source = $src })
+            # QUERY_HW_SNAPSHOT, recorded raw and not judged (state = AVB_HWREG_STATE_* of include/avb_ioctl.h).
+            $snapSrc = "IOCTL QUERY_HW_SNAPSHOT after OPEN_ADAPTER(index $($c.Index)) - Get-AvbHilState, pass $p"
+            if ($c.PSObject.Properties['HwRegs']) {
+                foreach ($r in @($c.HwRegs)) {
+                    $measurements += ,([ordered]@{ pass = $p; did = $c.Did; driverIndex = $c.Index; name = 'HWREG'; id = [int]$r.id
+                                                   offset = ('0x{0:X8}' -f [uint32]$r.offset); value = ('0x{0:X8}' -f [uint32]$r.value); state = [int]$r.state; source = $snapSrc })
+                }
+            }
+            if ($c.PSObject.Properties['HwRegsError'] -and $c.HwRegsError) {
+                $measurements += ,([ordered]@{ pass = $p; did = $c.Did; driverIndex = $c.Index; name = 'HWREG_SNAPSHOT'; value = $null; error = [string]$c.HwRegsError; source = $snapSrc })
+            }
         }
     }
     return [ordered]@{
@@ -114,7 +125,8 @@ function New-AvbHilBaselineDocument {
             'OPEN_ADAPTER runs AvbBringUpHardware / AvbEnsureDeviceReady (PTP init: SYSTIM reset, TIMINCA rewrite) for an adapter below PTP_READY; detected only indirectly (PHC near its epoch finding)'
             'OPEN_ADAPTER clears I210 TSAUXC bit 31 (DISABLE_SYSTIM) at PTP_READY: the TSAUXC readback is the post-OPEN_ADAPTER value; a set bit 31 before the observation is not observable'
             'GET_CLOCK_CONFIG ignores the get_systime software-fallback indicator: whether a SYSTIM sample is a hardware read is UNVERIFIED per adapter')
-        limitations = @('PnP <-> driver enumeration mapping is by DID only (no driver-reported PCI location)', 'no PHC tolerance is derived: phcCharacterization is input for an operator decision')
+        limitations = @('PnP <-> driver enumeration mapping is by DID only (no driver-reported PCI location)', 'no PHC tolerance is derived: phcCharacterization is input for an operator decision'
+                        'HWREG measurements (QUERY_HW_SNAPSHOT) are recorded raw and not judged: hardware characterization for the runner configuration check')
         safetyRecordAtCapture = $Safety
     }
 }

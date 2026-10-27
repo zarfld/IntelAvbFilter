@@ -378,12 +378,14 @@ $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=In
            'test_sbfake_tgt=Mutating:Target;test_sbfake_unsafe=Unsafe;test_sbfake_disabler=ReadOnly;' +
            'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
            'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target;' +
-           'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target'
+           'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target;' +
+           'test_sbfake_tgtts=Mutating:Target'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
-# TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: INCONCLUSIVE_RESTORATION.
-# Undeclared non-ReadOnly fakes (init, mut, ...) are treated as modifying unknown state.
-$Mutates = 'test_sbfake_tgtsleep=TIMINCA;test_sbfake_tgt=TIMINCA;test_sbfake_timinca=TIMINCA;test_sbfake_tgtphc=TIMINCA,PHC_TIME'
+# TEST-HILGATE-015/016/026).  tgtts also changes timestamp-control configuration, which the runner cannot observe:
+# INCONCLUSIVE_RESTORATION and global halt.  tgtphc also sets the PHC time: NOT_JUDGED by the runner (Q 2026-10-27),
+# INCONCLUSIVE_RESTORATION without a global halt.  Undeclared non-ReadOnly fakes (init, mut, ...) modify unknown state.
+$Mutates = 'test_sbfake_tgtsleep=TIMINCA;test_sbfake_tgt=TIMINCA;test_sbfake_timinca=TIMINCA;test_sbfake_tgtphc=TIMINCA,PHC_TIME;test_sbfake_tgtts=TIMINCA,TS_CONTROL'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -697,14 +699,16 @@ tc_check 'TEST-HILGATE-041-tsauxc-and-link-changes-are-cleanup-failed-and-halt-n
 # offset (and none of TAS/FP/Qav/EEE/PFC/VLAN/MDIO/timestamp-control state).  Until it does, every executed
 # Init/Mutating/Mutating:Target/Unsafe test gets an INCONCLUSIVE_RESTORATION record (missing evidence, distinct from
 # CLEANUP_FAILED = observed damage) and - "stop subsequent mutating tests if restoration cannot be verified" (Q P0
-# 2026-10-21, refined the same day) - halts every later non-ReadOnly test; ReadOnly tests continue.
+# 2026-10-21, refined the same day) - halts every later non-ReadOnly test; ReadOnly tests continue.  The unverifiable
+# state here is configuration (TS_CONTROL); PHC time/rate alone no longer halt (TEST-HILGATE-083, Q 2026-10-27).
 $tTgtPhc = New-Fake 'test_sbfake_tgtphc'
-$rM = Invoke-Sandbox 'runM' @($tTgtPhc, $tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x125B' }
+$tTgtTs  = New-Fake 'test_sbfake_tgtts'
+$rM = Invoke-Sandbox 'runM' @($tTgtTs, $tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ AVB_HIL_TARGET_DID = '0x125B' }
 $mUnv = @([regex]::Matches($rM.Out, '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-002: after (test_sbfake_\w+)\.ps1')) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
 $mJson = @(Get-ChildItem (Join-Path $rM.Dir 'logs') -Filter 'results-*.json' -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
 $mRec = @($mJson | ForEach-Object { @($_.records) } | Where-Object { $_.name -match 'STATE-UNVERIFIED' })
 tc_check 'TEST-HILGATE-042-unverifiable-restoration-is-inconclusive-restoration-halts-later-mutation-never-passed' `
-    ((Get-RanCount $rM '^RAN test_sbfake_tgtphc ') -ge 1 -and (@($mUnv) -join ',') -eq 'test_sbfake_tgtphc' -and
+    ((Get-RanCount $rM '^RAN test_sbfake_tgtts ') -ge 1 -and (@($mUnv) -join ',') -eq 'test_sbfake_tgtts' -and
      ($rM.Out -match 'TC-INFRA-STATE-002: [^\r\n]*PHC time') -and (Test-FailureCase $rM 'TC-INFRA-STATE-002') -and $rM.Exit -eq 1 -and
      ($rM.Out -match '\[HALT\][^\r\n]*restoration not verified') -and (Get-RanCount $rM '^RAN test_sbfake_init ') -eq 0 -and
      (Get-RanCount $rM '^RAN test_sbfake_ro ') -eq 1 -and $mRec.Count -ge 1 -and @($mRec | Where-Object { $_.verdict -ne 'INCONCLUSIVE_RESTORATION' }).Count -eq 0 -and
@@ -715,14 +719,34 @@ tc_check 'TEST-HILGATE-042-unverifiable-restoration-is-inconclusive-restoration-
 # runner cannot verify on the FIRST target halts every later mutation globally - the remaining targets are BLOCKED,
 # each record naming its intended adapter - while ReadOnly tests continue.  Per-adapter isolation (option 2) is not
 # enabled until isolation is hardware-verified.
-$rF = Invoke-Sandbox 'runF46' @($tTgtPhc, $tRo) -AllSupportedEnabled
-$fRan = @($rF.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgtphc ' })
-$fBlk = @([regex]::Matches($rF.Out, '\[BLOCKED\] TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_tgtphc\.ps1: state-integrity halt[^\r\n]*restoration not verified[^\r\n]*--- not executed; intended target (0x[0-9A-F]{4})') | ForEach-Object { $_.Groups[1].Value })
+$rF = Invoke-Sandbox 'runF46' @($tTgtTs, $tRo) -AllSupportedEnabled
+$fRan = @($rF.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgtts ' })
+$fBlk = @([regex]::Matches($rF.Out, '\[BLOCKED\] TC-SAFETY-GATE-001: [^\r\n]*test_sbfake_tgtts\.ps1: state-integrity halt[^\r\n]*restoration not verified[^\r\n]*--- not executed; intended target (0x[0-9A-F]{4})') | ForEach-Object { $_.Groups[1].Value })
 tc_check 'TEST-HILGATE-046-unverified-restoration-blocks-remaining-targets-globally-readonly-continues' `
     ($fRan.Count -eq 1 -and $fBlk.Count -ge 1 -and @($fBlk | Where-Object { $fRan[0] -match $_ }).Count -eq 0 -and
      (Get-RanCount $rF '^RAN test_sbfake_ro ') -eq 1 -and $rF.Exit -eq 1) `
     ("ran=[{0}] blocked targets=[{1}] exit={2}; gate lines: {3}" -f ($fRan -join ' / '), ($fBlk -join ','), $rF.Exit,
-     (@([regex]::Matches($rF.Out, '(?m)^.*TC-SAFETY-GATE-001: .*tgtphc.*$') | ForEach-Object { $_.Value.Trim() }) -join ' | '))
+     (@([regex]::Matches($rF.Out, '(?m)^.*TC-SAFETY-GATE-001: .*tgtts.*$') | ForEach-Object { $_.Value.Trim() }) -join ' | '))
+
+# 083 (Q 2026-10-27): PHC time/rate are NOT_JUDGED by the runner and are not a global safety criterion.  An entry whose
+# declared state is verifiable configuration plus PHC_TIME/PHC_RATE gets a nonpassing INCONCLUSIVE_RESTORATION record
+# (TC-INFRA-STATE-004, never PASSED: restoration of the PHC is the test's own responsibility and is not evidenced by the
+# runner) but no halt and no safety event: every target and the following Init entry still run.
+$rP = Invoke-Sandbox 'runP83' @($tTgtPhc, $tInit, $tRo) -AllSupportedEnabled
+$pRan = @($rP.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgtphc ' })
+$pNj  = @([regex]::Matches($rP.Out, '\[INCONCLUSIVE_RESTORATION\] TC-INFRA-STATE-004: after test_sbfake_tgtphc\.ps1[^\r\n]*PHC_TIME[^\r\n]*NOT_JUDGED'))
+$pJson = @(Get-ChildItem (Join-Path $rP.Dir 'logs') -Filter 'results-*.json' -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json })
+$pRec = @($pJson | ForEach-Object { @($_.records) } | Where-Object { $_.name -match 'PHC-NOT-JUDGED' })
+$pSf  = Join-Path $rP.Dir 'logs\sandbox-hil-safety.json'
+$pEv  = @(if (Test-Path -LiteralPath $pSf) { @((Get-Content -LiteralPath $pSf -Raw | ConvertFrom-Json).events) | Where-Object { $_ -and [string]$_.trigger.executable -match 'tgtphc' } })
+tc_check 'TEST-HILGATE-083-phc-not-judged-is-inconclusive-restoration-without-global-halt-never-passed' `
+    ($pRan.Count -ge 2 -and $pNj.Count -eq $pRan.Count -and $pRec.Count -eq $pRan.Count -and
+     @($pRec | Where-Object { $_.verdict -ne 'INCONCLUSIVE_RESTORATION' }).Count -eq 0 -and
+     ($rP.Out -notmatch '\[HALT\][^\r\n]*tgtphc') -and $pEv.Count -eq 0 -and (Test-Path -LiteralPath $pSf) -and
+     ($rP.Out -notmatch 'TC-INFRA-STATE-002: after test_sbfake_tgtphc') -and
+     (Get-RanCount $rP '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rP '^RAN test_sbfake_ro ') -eq 1 -and $rP.Exit -eq 1) `
+    ("tgtphc ran=[{0}] not-judged lines={1} json=[{2}] init ran={3} exit={4}; {5}" -f ($pRan -join ' / '), $pNj.Count,
+     (@($pRec | ForEach-Object { $_.verdict }) -join ','), (Get-RanCount $rP '^RAN test_sbfake_init '), $rP.Exit, (Tail $rP))
 
 # 047: the mutation matrix uses the fixed state vocabulary and only classified non-ReadOnly entries; the runner verifies
 # exactly ADAPTER, TIMINCA, TSAUXC itself (anything else needs a new independent check, never a declaration).

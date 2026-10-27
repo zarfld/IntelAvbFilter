@@ -119,6 +119,23 @@ $notPresent = @($docE.findings | Where-Object { $_ -match 'not present' })
 tc_check 'TEST-HILBASE-010-unquoted-hex-expected-dids-bind-to-the-intended-devices' `
     ($asTyped -eq '0x1533,0x15BB,0x125B' -and $notPresent.Count -eq 0) ("unquoted -> [{0}]; document findings: {1}" -f $asTyped, ($notPresent -join ' | '))
 
+# 011 (cause 4b-i, 2026-10-27): the observer's per-adapter IOCTL_AVB_QUERY_HW_SNAPSHOT result is recorded raw in the
+#     document - every entry (id, offset, value, AVB_HWREG_STATE_* code) per pass and adapter, a failed snapshot as an
+#     explicit HWREG_SNAPSHOT error - and is not judged yet (hardware characterization precedes any comparison rule).
+#     Offsets/values below are synthetic placeholders, not register definitions.
+$pR = New-Pass 100
+$pR.Clock[0] | Add-Member -NotePropertyName HwRegs -NotePropertyValue @([ordered]@{ id = 1; offset = 0x100; value = 0x18000000; state = 1 }, [ordered]@{ id = 3; offset = 0x104; value = 0x10; state = 1 }, [ordered]@{ id = 5; offset = 0; value = 0; state = 2 })
+$pR.Clock[1] | Add-Member -NotePropertyName HwRegsError -NotePropertyValue 'QUERY_HW_SNAPSHOT failed (Win32 31)'
+$docR = New-Doc @($pR, (New-Pass 105))
+$hw = @($docR.measurements | Where-Object { $_.name -eq 'HWREG' })
+$he = @($docR.measurements | Where-Object { $_.name -eq 'HWREG_SNAPSHOT' })
+$hw3 = @($hw | Where-Object { $_.did -eq '0x125B' -and $_.id -eq 3 -and $_.pass -eq 0 })
+tc_check 'TEST-HILBASE-011-hw-snapshot-is-recorded-raw-per-pass-and-adapter-not-judged' `
+    ($hw.Count -eq 3 -and $hw3.Count -eq 1 -and $hw3[0].value -eq '0x00000010' -and $hw3[0].offset -eq '0x00000104' -and $hw3[0].state -eq 1 -and
+     @($hw | Where-Object { $_.id -eq 5 -and $_.state -eq 2 }).Count -eq 1 -and
+     $he.Count -eq 1 -and $he[0].did -eq '0x1533' -and $he[0].error -match 'failed' -and $docR.verdict -eq 'BASELINE_VERIFIED') `
+    ("HWREG={0} HWREG_SNAPSHOT={1} verdict={2} findings={3}" -f $hw.Count, $he.Count, $docR.verdict, (@($docR.findings) -join ' | '))
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan

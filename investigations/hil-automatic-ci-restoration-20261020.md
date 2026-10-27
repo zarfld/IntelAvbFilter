@@ -591,6 +591,53 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
   I210 offset 0.06-0.16 ms / rate 12-16k ppb (before: 10-116 ms / 1.4e6-2.2e7 ppb); I219 offset 32-35 us.  Every
   undisturbed change lies within or near its uncertainty.  Residual sigma rose to 1.4-22 us (spaced reads).
 
+### Cause 1 - machine safety record (resolved, verified)
+- Pre-approval check (read-only, 2026-10-27): evidence 18:41 BASELINE_VERIFIED, 0 findings; installed driver SHA256 =
+  document = F6499699... (service Running); 3/3 Intel NICs present, PnP OK, MAC and PCI location identical, filter bound,
+  admin/link Up.
+- Q approved (Approve-AvbHilSafetyBaseline under the machine lock).  Verified afterwards: state CLEAR, 0 events,
+  baseline.evidence = hil-baseline-evidence-20261027_184141.json (SHA256 5EFC9AC4CDDF1B17...), history INITIALIZE
+  17:41:17Z + APPROVE_BASELINE 18:34:49Z, machine lock released.  Q's 18:44 re-run (BASELINE_VERIFIED) is not referenced.
+- PHC rule confirmed by Q with conditions: global baseline records PHC time/rate as NOT_JUDGED, PHC measurement
+  uncertainty alone never triggers a global halt, adapter/configuration checks preserved; tests that modify PHC
+  time/rate/configuration stay responsible for verified restoration; no test assertion is weakened.
+
+### Cause 4a - PHC NOT_JUDGED in the post-test check (implemented, offline GREEN; HIL with 4c)
+- Global baseline/session comparison (Compare-AvbHilState) already judged no PHC value (adapter/PnP/link/binding,
+  TIMINCA, TSAUXC only): unchanged.
+- Run-Tests-CI.ps1: `$HilPhcNotJudgedState = PHC_TIME, PHC_RATE`.  Post-test check: declared PHC state is excluded from
+  the unobserved set; declared configuration must still be fully verifiable (else unchanged STATE-002 + halt).  Declared
+  PHC -> TC-INFRA-STATE-004 INCONCLUSIVE_RESTORATION record "[PHC-NOT-JUDGED]" (nonpassing), no Set-HilHalt, no
+  safety event.  No test-owned positive restoration tag exists yet, so such entries stay nonpassing (open design point).
+- test_hil_safety_gate.ps1: new fake test_sbfake_tgtts (TIMINCA,TS_CONTROL); 042/046 now use it (unchanged intent:
+  unverifiable configuration halts); new 083 (tgtphc TIMINCA,PHC_TIME: every target runs, one STATE-004 record each,
+  no tgtphc halt/event, next Init entry runs, exit 1).
+- RED 83/84 (083: tgtphc ran on 0x125B only, init not run).  GREEN 84/84.  Regressions: HILPROV 52/52, baseline
+  evidence 11/11, safety record 15/15, evaluator 14/14, local suites 22/22, COMPLETE unchanged (001 38/148, 003 2).
+- D1 no-mutation path (undeclared entries claiming FAILED_SETUP) still requires PHC RESTORATION_VERIFIED: unchanged.
+
+### Cause 4b-i - configuration observability: record QUERY_HW_SNAPSHOT raw (implemented, offline GREEN; HIL pending)
+- Existing driver interface IOCTL_AVB_QUERY_HW_SNAPSHOT (fn 70, 7e453fb 2026-10-22): read-only, bound handle only,
+  per-family SSOT offsets (hil_register_offset), explicit AVB_HWREG_STATE_*; Debug and Release.  Never called on
+  hardware before (logs: ABI checks TC-ABI-022 only).  TSYNCRXCTL/TSYNCTXCTL hold status bits (RXTT/TXTT) that change
+  with traffic, so no comparison rule before hardware characterization.
+- Run-Tests-CI.ps1 Get-AvbHilClockState: after the PHC window, one QUERY_HW_SNAPSHOT per bound adapter -> HwRegs
+  (id, offset, value, state) or HwRegsError (IOCTL failure, NDIS status, or snapshot DID != opened DID).  Not compared.
+- New-AvbHilBaselineEvidence.ps1: HWREG / HWREG_SNAPSHOT measurements per pass and adapter, not a finding.
+- RED: TEST-HILBASE-011 11/12.  GREEN 12/12.  Regressions: HILPROV 52/52, safety record 15/15, evaluator 14/14, local
+  suites 22/22, COMPLETE unchanged.
+- HILGATE 84/84 after the change.
+- Hardware characterization (Q, 2026-10-27 19:53, hil-baseline-evidence-20261027_195311.json, BASELINE_VERIFIED, no
+  findings, driver F6499699, record CLEAR): 144/144 HWREG entries (3 adapters x 3 passes x 16), 0 snapshot errors (every
+  answer's DID = opened DID).  Snapshot TIMINCA/TSAUXC = GET_CLOCK_CONFIG.  RAL0/RAH0 = the inventory MAC of each
+  adapter (I226 F0-B2-B9-31-55-DB, I210 C4-62-37-0B-B5-6E, I219 E4-54-E8-61-38-E3): first hardware proof of the
+  driver index <-> physical NIC mapping.  Volatile: I226 TSYNCRXCTL 0x19 -> 0x19 -> 0x18 (bit 0); all other VALID series
+  stable.  NOT_IN_SSOT: SRRCTL0-3 (all families), TQAVCTRL (I226), TRGTTIM*/TQAVCTRL/RXPBSIZE (I219).
+- SSOT for the volatile bit: I226/I225/I217 define TSYNCRXCTL_RXTT / TSYNCTXCTL_TXTT; I210 and I219 define neither.
+- Backlog B12-7: I226 TRGTTIML0 = 0x9F3 (nonzero target time left by an earlier test).  B12-8: TQAVCTRL not in the I226
+  HAL offset map although the #328 TAS hazard concerns I226 TQAVCTRL.  B12-9: SRRCTL not in any family's map, so
+  SET_QUEUE_TIMESTAMP state stays unobservable.
+
 ### Conclusion
 - The missing record is an operator prerequisite (fail-closed by design), not a runner defect.
 - The predicted halt after test_minimal_ioctl is not an observability false positive: per source the entry makes a
