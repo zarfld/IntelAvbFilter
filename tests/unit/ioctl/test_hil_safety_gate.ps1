@@ -815,7 +815,9 @@ tc_check 'TEST-HILGATE-047-mutation-matrix-vocabulary-and-runner-verifiable-stat
 . (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
 $sfHalted = Join-Path $Tmp 'safety_halted.json'
 $null = Initialize-AvbHilSafetyRecord -Path $sfHalted -Operator 'test' -Reason 'TEST-HILGATE-048'
-$null = Add-AvbHilSafetyEvent -Path $sfHalted -Event ([ordered]@{ verdict = 'CLEANUP_FAILED'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
+# Fixture history: CLEANUP_FAILED -> LOCK_LOST (Q 2026-10-29): a cleanup-only event is reclassified at runner start
+# (TEST-HILGATE-089), so the halted record must come from a genuine loss of controlled execution.
+$null = Add-AvbHilSafetyEvent -Path $sfHalted -Event ([ordered]@{ verdict = 'LOCK_LOST'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
 $rP1 = Invoke-Sandbox 'runP1' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sfHalted
 tc_check 'TEST-HILGATE-048-halted-machine-record-blocks-mutation-readonly-continues' `
     ((Get-RanCount $rP1 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rP1 '^RAN test_sbfake_ro ') -eq 1 -and
@@ -1121,6 +1123,36 @@ tc_check 'TEST-HILGATE-088-new-session-carries-open-cleanup-incidents-never-esta
      $c14.Count -eq $i14a.Count -and $c14[0].incidentId -eq $i14a[0].incidentId -and $c14[0].status -eq 'OPEN' -and
      $rV2.Out -match 'unresolved cleanup incident\(s\) carried from session ci:older-run:1' -and (Get-RanCount $rV2 '^RAN test_sbfake_tgt ') -ge 1) `
     ("A open={0}; B id={1} carried={2} archived={3}; {4}" -f $i14a.Count, $(if ($n14) { $n14.sessionId }), $c14.Count, $arch14.Count, (Tail $rV2))
+
+# 089: an obsolete cleanup-only safety event (persisted before b225bb4 as CLEANUP_FAILED / INCONCLUSIVE_RESTORATION) is
+# reclassified by the runner itself at start - only under verified lock ownership, before the record is read - attended
+# (lock acquired by the runner) and unattended (lock owned by the CI job).  Event and history kept, cleanup outcome stays
+# NOT_VERIFIED, idempotent across runs; with the lock owned by someone else the record is untouched (Q 2026-10-29).
+$obsolete89 = [ordered]@{ verdict = 'INCONCLUSIVE_RESTORATION'; trigger = [ordered]@{ executable = 'test_minimal_ioctl.exe'; reason = 'restoration not verified' } }
+$sf89 = New-ClearSafetyFile 'safety_obsolete_local.json';  $null = Add-AvbHilSafetyEvent -Path $sf89 -Event $obsolete89
+$sf89c = New-ClearSafetyFile 'safety_obsolete_ci.json';    $null = Add-AvbHilSafetyEvent -Path $sf89c -Event $obsolete89
+$sf89o = New-ClearSafetyFile 'safety_obsolete_other.json'; $null = Add-AvbHilSafetyEvent -Path $sf89o -Event $obsolete89
+$b89o = Get-Content -LiteralPath $sf89o -Raw
+$lf89 = New-LockFile 'other89.lock' ([ordered]@{ kind = 'local'; label = 'another operator run'; host = $env:COMPUTERNAME; pid = 4; acquiredUtc = '2026-10-29T00:00:00Z' })
+$rW1 = Invoke-Sandbox 'runW1' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sf89
+$rW2 = Invoke-Sandbox 'runW2' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sf89                      # repeated run
+$rW3 = Invoke-Sandbox 'runW3' @($tRo) -AllSupportedEnabled -SafetyFile $sf89c -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
+$rW4 = Invoke-Sandbox 'runW4' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sf89o -LockFile $lf89 -RunnerArgs '-HilLockWaitSeconds 0'
+$s89 = Read-AvbHilSafetyState -Path $sf89; $e89 = if ($s89.Record) { @($s89.Record.events) } else { @() }
+$h89 = if ($s89.Record) { @($s89.Record.history | Where-Object { $_.operation -eq 'RECLASSIFY_CLEANUP_ONLY' }) } else { @() }
+$s89c = Read-AvbHilSafetyState -Path $sf89c; $h89c = if ($s89c.Record) { @($s89c.Record.history | Where-Object { $_.operation -eq 'RECLASSIFY_CLEANUP_ONLY' }) } else { @() }
+tc_check 'TEST-HILGATE-089-runner-reclassifies-obsolete-cleanup-only-safety-event-under-owned-lock-attended-and-ci' `
+    ((Get-RanCount $rW1 '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rW2 '^RAN test_sbfake_init ') -eq 1 -and
+     $s89.State -eq 'CLEAR' -and $e89.Count -eq 1 -and $e89[0].verdict -eq 'INCONCLUSIVE_RESTORATION' -and $e89[0].recovery.status -eq 'RECLASSIFIED' -and
+     $e89[0].recovery.cleanupOutcome -eq 'NOT_VERIFIED' -and $e89[0].recovery.restorationVerified -eq $false -and
+     $h89.Count -eq 1 -and $h89[0].sourceRevision -match 'sandbox-rev' -and $rW1.Out -match 'reclassified 1 cleanup-only safety event' -and
+     $s89c.State -eq 'CLEAR' -and $h89c.Count -eq 1 -and $h89c[0].initiatedBy -match 'sbx-run' -and (Get-RanCount $rW3 '^RAN test_sbfake_ro ') -eq 1 -and
+     (Get-Content -LiteralPath $sf89o -Raw) -eq $b89o -and (Get-RanCount $rW4 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rW4 '^RAN test_sbfake_ro ') -eq 1 -and
+     $rW4.Out -match 'machine safety record HALTED') `
+    ("local: state={0} events={1} recovery={2}/{3} history={4} ran1={5} ran2={6} | ci: state={7} history={8} | other-owner untouched={9} init={10} || {11} || {12}" -f
+     $s89.State, $e89.Count, $(if ($e89.Count) { $e89[0].recovery.status }), $(if ($e89.Count) { $e89[0].recovery.cleanupOutcome }), $h89.Count,
+     (Get-RanCount $rW1 '^RAN test_sbfake_init '), (Get-RanCount $rW2 '^RAN test_sbfake_init '), $s89c.State, $h89c.Count,
+     ((Get-Content -LiteralPath $sf89o -Raw) -eq $b89o), (Get-RanCount $rW4 '^RAN test_sbfake_init '), (Tail $rW1), (Tail $rW3))
 
 # 069: LocalSuites layout - the prior-results directory (logs\LocalSuites_<ts>) lies INSIDE the runner's logs directory.
 # Defect found in the physical run LocalSuites_20261021_173805: the atdecc FAILED(TIMEOUT) halt of HardwareUnit never
