@@ -258,8 +258,9 @@ function Close-AvbHilSessionIncidents {
 #   UNAVAILABLE missing / unreadable / corrupt / wrong schema / other host /
 #               internally inconsistent                                       -> fail closed (as HALTED)
 # Events are appended, never removed.  Nothing clears a halt implicitly (reboot, reinstall, new run, new baseline);
-# only Clear-AvbHilSafetyHalt (verified recovery) or Invoke-AvbHilSafetyRebaseline (operator-approved) do, and only on a
-# HALTED record while holding the machine lock.  Scope is GLOBAL until physical adapter identity and isolation are
+# only Clear-AvbHilSafetyHalt (verified recovery), Invoke-AvbHilSafetyRebaseline (operator-approved) or
+# Invoke-AvbHilSafetyReclassification (events the current policy does not classify as safety events) do, and only while
+# holding the machine lock.  Scope is GLOBAL until physical adapter identity and isolation are
 # hardware-verified.  An accidental-damage safeguard, not a security boundary (the file can be edited).
 # ---------------------------------------------------------------------------------------------------------
 function Get-AvbHilSafetyPath { return (Join-Path $env:ProgramData 'IntelAvbFilter-hil-safety.json') }
@@ -429,4 +430,47 @@ function Invoke-AvbHilSafetyRebaseline {
     $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $now; operation = 'REBASELINE'; operator = $Operator; approval = $Approval; evidence = $BaselineEvidence; events = @($open | ForEach-Object { $_.eventId }) }))
     Write-AvbHilSafetyFile $Path $st.Record
     return @{ Ok = $true; Why = '' }
+}
+
+# Policy reconciliation (Q 2026-10-28): cleanup outcomes (SUCCESS / FAILED / NOT_VERIFIED) are never machine-safety
+# events (b225bb4); only loss of controlled execution is (FAILED(TIMEOUT) with a surviving process tree, LOCK_LOST).
+# The former rule also persisted CLEANUP_FAILED and INCONCLUSIVE_RESTORATION; such unrecovered events are reclassified,
+# chosen by their recorded verdict, as non-blocking cleanup diagnostics.  Not operator acceptance and not a restoration
+# claim: recovery RECLASSIFIED keeps the cleanup outcome (FAILED / NOT_VERIFIED, restorationVerified false) and the
+# previous recovery.  Ids, timestamps, verdict, trigger and evidence stay; the record before the change is copied beside
+# it.  FAILED(TIMEOUT), LOCK_LOST and any unknown verdict keep the halt; the status is recomputed from them.  Machine lock
+# required; idempotent (nothing to reclassify = no write).  @{ Ok; Why; Changed; Events; Remaining; State; Backup }
+$script:AvbHilCleanupOnlyVerdicts = @{ 'CLEANUP_FAILED' = 'FAILED'; 'INCONCLUSIVE_RESTORATION' = 'NOT_VERIFIED' }
+function Invoke-AvbHilSafetyReclassification {
+    param([string]$Path = (Get-AvbHilSafetyPath), $LockOwner, [string]$LockPath = (Get-AvbHilLockPath), [string]$SourceRevision, [string]$InitiatedBy)
+    $held = Test-AvbHilLockHeld -Owner $LockOwner -Path $LockPath
+    if (-not $held.Ok) { return @{ Ok = $false; Changed = $false; Why = "exclusive HIL control required: $($held.Why)" } }
+    if (-not $SourceRevision -or -not $InitiatedBy) { return @{ Ok = $false; Changed = $false; Why = 'source revision of the classification policy and initiator required' } }
+    $st = Read-AvbHilSafetyState -Path $Path
+    if ($st.State -eq 'UNAVAILABLE') { return @{ Ok = $false; Changed = $false; Why = "record is UNAVAILABLE ($($st.Why)) - an unavailable record is never rewritten" } }
+    $open = @(@($st.Record.events) | Where-Object { $null -ne $_ -and $_.recovery.status -in @('PENDING', 'ATTEMPTED') })
+    $targets = @($open | Where-Object { $script:AvbHilCleanupOnlyVerdicts.ContainsKey([string]$_.verdict) })
+    if ($targets.Count -eq 0) { return @{ Ok = $true; Changed = $false; Why = 'no unrecovered cleanup-only event'; Events = @(); Remaining = @($open | ForEach-Object { $_.eventId }); State = $st.State; Backup = $null } }
+    $now = (Get-Date).ToUniversalTime()
+    $backup = "$Path.pre-reclassify-$($now.ToString('yyyyMMddTHHmmssfff')).json"
+    try { Copy-Item -LiteralPath $Path -Destination $backup -ErrorAction Stop } catch { return @{ Ok = $false; Changed = $false; Why = "pre-image not preserved ($($_.Exception.Message)); record unchanged" } }
+    $utc = $now.ToString('o')
+    $policy = 'cleanup outcomes (SUCCESS / FAILED / NOT_VERIFIED) are not machine-safety events; only loss of controlled execution is'
+    $rationale = 'persisted by the former rule that escalated a cleanup outcome to a GLOBAL safety halt; no loss of controlled execution is recorded for it; the cleanup outcome stays as recorded and restoration is not claimed'
+    foreach ($e in $targets) {
+        $ev = @(foreach ($f in @($e.evidence) | Where-Object { $_ }) {
+            if (Test-Path -LiteralPath $f -PathType Leaf) { [ordered]@{ path = $f; sha256 = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash } }
+            else { [ordered]@{ path = $f; sha256 = $null; note = 'not present at reclassification' } } })
+        $e.recovery = [ordered]@{ status = 'RECLASSIFIED'; classification = 'CLEANUP_DIAGNOSTIC'; cleanupOutcome = $script:AvbHilCleanupOnlyVerdicts[[string]$e.verdict]
+                                  restorationVerified = $false; previous = $e.recovery; policy = $policy; sourceRevision = $SourceRevision
+                                  initiatedBy = $InitiatedBy; utc = $utc; evidence = $ev }
+    }
+    $ids = @($targets | ForEach-Object { $_.eventId })
+    $remaining = @($open | Where-Object { $ids -notcontains $_.eventId } | ForEach-Object { $_.eventId })
+    $hasBaseline = ($null -ne $st.Record.PSObject.Properties['baseline'] -and $null -ne $st.Record.baseline)
+    $st.Record.status = $(if ($remaining.Count -gt 0) { 'HALTED' } elseif ($hasBaseline) { 'CLEAR' } else { 'UNBASELINED' })
+    $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $utc; operation = 'RECLASSIFY_CLEANUP_ONLY'; initiatedBy = $InitiatedBy; sourceRevision = $SourceRevision
+        policy = $policy; rationale = $rationale; events = $ids; remaining = $remaining; resultingStatus = $st.Record.status; preImage = $backup }))
+    Write-AvbHilSafetyFile $Path $st.Record
+    return @{ Ok = $true; Changed = $true; Why = ''; Events = $ids; Remaining = $remaining; State = $st.Record.status; Backup = $backup }
 }

@@ -23,10 +23,11 @@
 # (suites[].infrastructure) and the next suite runs [open question to Q: TEST-LOCALSUITES-006 / Q 2026-10-21 said
 # infrastructure loss stops the run]; after a suite with failures a 30 s window lets the operator stop (default
 # continue).  Stops (no next configuration) after any build/install/verify failure or that explicit operator stop.
-# A safety halt (timeout, cleanup
-# failure, unverified restoration, state-integrity halt) does NOT stop it: every later suite and configuration of this
-# run gets -PriorResultsDir <ReportDir>, so Init/Mutating tests stay BLOCKED and ReadOnly tests continue; the run is
-# nonpassing.  Never reboots, never retries an installation, never repairs adapters.
+# A safety halt (loss of controlled execution: a timeout
+# whose process tree did not terminate, a lost machine lock, a state-integrity halt) does NOT stop it: every later suite
+# and configuration of this run gets -PriorResultsDir <ReportDir>, so Init/Mutating tests stay BLOCKED and ReadOnly tests
+# continue; the run is nonpassing.  Cleanup outcomes (FAILED / NOT_VERIFIED) are reported per suite and never halt.
+# Never reboots, never retries an installation, never repairs adapters.
 #
 # Evidence class: LOCAL (pre-commit when the working tree is dirty).  It is never clean-commit CI evidence.
 # Exit codes: tools\lib\NativeExit.ps1 ($global:LASTEXITCODE only; a missing exit code is a failure).

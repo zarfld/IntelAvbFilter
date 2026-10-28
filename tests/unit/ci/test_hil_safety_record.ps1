@@ -7,7 +7,8 @@
 # Safety events are appended, never removed.  Only an explicit operation clears a halt: machine lock held, record
 # HALTED (never UNAVAILABLE), operator named, verification document (RESTORATION_VERIFIED, this host, every pending
 # event, measured checks).  Rebaselining needs explicit approval text and marks events REBASELINED - original verdicts
-# stay.  A reboot, reinstall, new run or new baseline never clears anything.  Offline: temp files only.
+# stay.  A reboot, reinstall, new run or new baseline never clears anything.  Reclassification (Q 2026-10-28) ends only
+# events the current policy no longer counts as safety events (cleanup-only verdicts).  Offline: temp files only.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -154,6 +155,81 @@ tc_check 'TEST-SAFETYREC-011-event-on-corrupt-record-goes-to-sidecar-record-unto
 $p12 = Join-Path $Tmp 'none.json'
 $a12 = Add-AvbHilSafetyEvent -Path $p12 -Event (New-Event 'FAILED(TIMEOUT)')
 tc_check 'TEST-SAFETYREC-012-event-without-record-creates-halted-record' ($a12.Ok -and (Read-AvbHilSafetyState -Path $p12).State -eq 'HALTED') ("ok={0}" -f $a12.Ok)
+
+# 018-021: policy reconciliation (Q 2026-10-28).  Cleanup outcomes are never machine-safety events; events persisted by
+# the obsolete rule (CLEANUP_FAILED, INCONCLUSIVE_RESTORATION) are reclassified as non-blocking cleanup diagnostics,
+# chosen by their recorded verdict, never by id.  Original event kept, cleanup outcome stays truthful (never "restored"),
+# loss-of-control events (FAILED(TIMEOUT), LOCK_LOST) keep the halt, state recomputed, idempotent, under the machine lock.
+if (-not (Get-Command Invoke-AvbHilSafetyReclassification -ErrorAction SilentlyContinue)) {
+    tc_check 'TEST-SAFETYREC-018-reclassification-function-present' $false 'Invoke-AvbHilSafetyReclassification missing in tools/lib/HilLock.ps1'
+} else {
+    $rev = '0123456789abcdef0123456789abcdef01234567'
+    $pC = Join-Path $Tmp 'reclass_cleanup.json'
+    $null = Initialize-AvbHilSafetyRecord -Path $pC -Operator 'Q' -Reason 't'
+    $null = Approve-AvbHilSafetyBaseline -Path $pC -Operator 'Q' -Authorization 'baseline' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $bOk
+    $eInc = Add-AvbHilSafetyEvent -Path $pC -Event (New-Event 'INCONCLUSIVE_RESTORATION')
+    $eCln = Add-AvbHilSafetyEvent -Path $pC -Event (New-Event 'CLEANUP_FAILED')
+    $before = Get-Content -LiteralPath $pC -Raw
+    $orig = @((Get-Content -LiteralPath $pC -Raw | ConvertFrom-Json).events)
+
+    # 018: refused without lock, initiator or source revision, and on an unavailable record; nothing written
+    $r18 = @(
+        (Invoke-AvbHilSafetyReclassification -Path $pC -LockOwner $null -LockPath $lockPath -SourceRevision $rev -InitiatedBy 'Q'),
+        (Invoke-AvbHilSafetyReclassification -Path $pC -LockOwner $lock.Owner -LockPath $lockPath -SourceRevision '' -InitiatedBy 'Q'),
+        (Invoke-AvbHilSafetyReclassification -Path $pC -LockOwner $lock.Owner -LockPath $lockPath -SourceRevision $rev -InitiatedBy ''),
+        (Invoke-AvbHilSafetyReclassification -Path $p2 -LockOwner $lock.Owner -LockPath $lockPath -SourceRevision $rev -InitiatedBy 'Q'))
+    tc_check 'TEST-SAFETYREC-018-reclassification-refused-without-lock-initiator-revision-or-on-unavailable-record' `
+        (@($r18 | Where-Object { $_.Ok }).Count -eq 0 -and (Get-Content -LiteralPath $pC -Raw) -eq $before -and ((Get-Content $p2 -Raw) -match 'not json') -and
+         (Read-AvbHilSafetyState -Path $pC).State -eq 'HALTED') ("accepted={0} reasons: {1}" -f @($r18 | Where-Object { $_.Ok }).Count, (($r18 | ForEach-Object { $_.Why }) -join ' | '))
+
+    # 019: cleanup-only events -> CLEAR; every original field kept, cleanup outcome truthful, migration audited, pre-image kept
+    $r19 = Invoke-AvbHilSafetyReclassification -Path $pC -LockOwner $lock.Owner -LockPath $lockPath -SourceRevision $rev -InitiatedBy 'Q'
+    $s19 = Read-AvbHilSafetyState -Path $pC
+    $ev19 = @($s19.Record.events)
+    $kept = @(foreach ($o in $orig) { $n = $ev19 | Where-Object { $_.eventId -eq $o.eventId }
+        if ($n -and $n.utc -eq $o.utc -and $n.verdict -eq $o.verdict -and $n.host -eq $o.host -and $n.scope -eq $o.scope -and
+            ($n.trigger | ConvertTo-Json -Depth 6 -Compress) -eq ($o.trigger | ConvertTo-Json -Depth 6 -Compress) -and
+            ($n.evidence | ConvertTo-Json -Compress) -eq ($o.evidence | ConvertTo-Json -Compress) -and
+            ($n.lastKnownState | ConvertTo-Json -Depth 6 -Compress) -eq ($o.lastKnownState | ConvertTo-Json -Depth 6 -Compress)) { $n } })
+    $nInc = $ev19 | Where-Object { $_.eventId -eq $eInc.EventId }; $nCln = $ev19 | Where-Object { $_.eventId -eq $eCln.EventId }
+    $h19 = @($s19.Record.history | Where-Object { $_.operation -eq 'RECLASSIFY_CLEANUP_ONLY' })
+    $bak = @(Get-ChildItem $Tmp -Filter 'reclass_cleanup.json.pre-reclassify-*.json')
+    tc_check 'TEST-SAFETYREC-019-cleanup-only-events-reclassified-not-restored-record-clear-original-and-audit-kept' `
+        ($r19.Ok -and $r19.Changed -and $s19.State -eq 'CLEAR' -and $ev19.Count -eq 2 -and $kept.Count -eq 2 -and
+         $nInc.recovery.status -eq 'RECLASSIFIED' -and $nInc.recovery.cleanupOutcome -eq 'NOT_VERIFIED' -and $nInc.recovery.restorationVerified -eq $false -and $nInc.recovery.previous.status -eq 'PENDING' -and
+         $nCln.recovery.status -eq 'RECLASSIFIED' -and $nCln.recovery.cleanupOutcome -eq 'FAILED' -and $nCln.recovery.restorationVerified -eq $false -and
+         $h19.Count -eq 1 -and $h19[0].sourceRevision -eq $rev -and $h19[0].initiatedBy -eq 'Q' -and $h19[0].rationale -and @($h19[0].events).Count -eq 2 -and
+         $h19[0].resultingStatus -eq 'CLEAR' -and $bak.Count -eq 1 -and (Get-Content -LiteralPath $bak[0].FullName -Raw) -eq $before) `
+        ("ok={0}:{1} changed={2} state={3} kept={4}/2 inc={5}/{6} cln={7}/{8} history={9} backups={10}" -f $r19.Ok, $r19.Why, $r19.Changed, $s19.State, $kept.Count,
+         $nInc.recovery.status, $nInc.recovery.cleanupOutcome, $nCln.recovery.status, $nCln.recovery.cleanupOutcome, $h19.Count, $bak.Count)
+
+    # 020: idempotent - a repeated run changes nothing: same bytes, no second history entry, no second pre-image
+    $after19 = Get-Content -LiteralPath $pC -Raw
+    $r20 = Invoke-AvbHilSafetyReclassification -Path $pC -LockOwner $lock.Owner -LockPath $lockPath -SourceRevision $rev -InitiatedBy 'Q'
+    tc_check 'TEST-SAFETYREC-020-reclassification-is-idempotent' `
+        ($r20.Ok -and -not $r20.Changed -and (Get-Content -LiteralPath $pC -Raw) -eq $after19 -and @(Get-ChildItem $Tmp -Filter 'reclass_cleanup.json.pre-reclassify-*.json').Count -eq 1) `
+        ("ok={0}:{1} changed={2} bytesEqual={3}" -f $r20.Ok, $r20.Why, $r20.Changed, ((Get-Content -LiteralPath $pC -Raw) -eq $after19))
+
+    # 021: loss of controlled execution keeps the halt; only the cleanup-only event is reclassified.  A never-baselined
+    # record with only cleanup-only events returns to UNBASELINED, never CLEAR.
+    $pM = Join-Path $Tmp 'reclass_mixed.json'
+    $null = Initialize-AvbHilSafetyRecord -Path $pM -Operator 'Q' -Reason 't'
+    $null = Approve-AvbHilSafetyBaseline -Path $pM -Operator 'Q' -Authorization 'baseline' -LockOwner $lock.Owner -LockPath $lockPath -BaselineEvidence $bOk
+    $mC = Add-AvbHilSafetyEvent -Path $pM -Event (New-Event 'INCONCLUSIVE_RESTORATION')
+    $mL = Add-AvbHilSafetyEvent -Path $pM -Event (New-Event 'LOCK_LOST')
+    $mT = Add-AvbHilSafetyEvent -Path $pM -Event (New-Event 'FAILED(TIMEOUT)')
+    $r21 = Invoke-AvbHilSafetyReclassification -Path $pM -LockOwner $lock.Owner -LockPath $lockPath -SourceRevision $rev -InitiatedBy 'Q'
+    $s21 = Read-AvbHilSafetyState -Path $pM
+    $st21 = @{}; foreach ($e in @($s21.Record.events)) { $st21[$e.eventId] = $e.recovery.status }
+    $pU = Join-Path $Tmp 'reclass_unbaselined.json'
+    $null = Initialize-AvbHilSafetyRecord -Path $pU -Operator 'Q' -Reason 't'
+    $null = Add-AvbHilSafetyEvent -Path $pU -Event (New-Event 'CLEANUP_FAILED')
+    $r21u = Invoke-AvbHilSafetyReclassification -Path $pU -LockOwner $lock.Owner -LockPath $lockPath -SourceRevision $rev -InitiatedBy 'Q'
+    tc_check 'TEST-SAFETYREC-021-loss-of-control-events-keep-the-halt-state-recomputed-from-remaining-events' `
+        ($r21.Ok -and $r21.Changed -and $s21.State -eq 'HALTED' -and $st21[$mC.EventId] -eq 'RECLASSIFIED' -and $st21[$mL.EventId] -eq 'PENDING' -and $st21[$mT.EventId] -eq 'PENDING' -and
+         $r21u.Ok -and (Read-AvbHilSafetyState -Path $pU).State -eq 'UNBASELINED') `
+        ("mixed={0}:{1} state={2} cleanup={3} lock={4} timeout={5}; unbaselined={6}:{7}" -f $r21.Ok, $r21.Why, $s21.State, $st21[$mC.EventId], $st21[$mL.EventId], $st21[$mT.EventId], $r21u.Ok, (Read-AvbHilSafetyState -Path $pU).State)
+}
 
 # 013-016: lock OWNERSHIP of the current execution context (Q 2026-10-21) - never "a lock exists".
 # Resolve-AvbHilLockContext: @{ Owned; How; Owner; Why }.  Ancestry injected (OS parent chain in production).
