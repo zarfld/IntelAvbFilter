@@ -698,3 +698,35 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
   -> 97CF159F (13:xx) with HEAD, submodule HEADs (reflog) and `git status` clean throughout; same file count (485).
   Ruled out: Build-Driver MC regeneration (record diff empty after Build-Driver Release), submodule ignore settings,
   untracked-not-ignored files now.  Cause UNEXPLAINED (FA320381 record set not recoverable).
+
+## Iteration 15 (2026-10-28) - false global halts from cleanup observations (Q binding decisions 2026-10-28)
+
+### RED (hardware, existing evidence)
+- LocalSuites_20261028_110241: test_minimal_ioctl.exe PASSED, then the runner wrote INCONCLUSIVE_RESTORATION
+  (TC-INFRA-STATE-002), a global halt and safety event 8bae3cf7 -> record HALTED -> 143 BLOCKED(SAFETY) rows (both configs).
+
+### Correction (runner, uncommitted; developed in an isolated worktree, then copied)
+- Functional verdicts unchanged by cleanup.  Every executed Hardware* item gets a structured cleanup result
+  (required YES/NO/UNKNOWN, attempted UNKNOWN - the runner cannot observe test-internal cleanup -, outcome
+  SUCCESS/FAILED/NOT_VERIFIED/NOT_REQUIRED, adapters, observations, reason, evidence, incident refs); results document
+  `cleanup` + `cleanupCounts`, executed records `cleanup` + `precedingCleanup`.  No failure row, no halt, no safety event for:
+  unverifiable restoration, observed state differences, test-reported CLEANUP_FAILED/RESTORE FAILED, test-reported
+  INCONCLUSIVE_RESTORATION (kept as the test's own verdict), session differences / unreadable session state, an unusable
+  session record (FAILED_SETUP kept, preserved), timeouts whose process tree terminated (disposition TERMINATED).
+- Cleanup incidents (option b) in the SESSION record (HilLock.ps1 Add-AvbHilSessionIncident / Close-AvbHilSessionIncidents):
+  correlated only while OPEN, RESOLVED/SUPERSEDED only by session checks against the original session baseline and kept as
+  history; OPEN incidents carried into a new session (carriedFrom); a new session is announced as captured from the current
+  state, never as verified clean.  Never a dispatch gate.
+- Prior-suite carry-over (runner + LocalSuites): CLEANUP_FAILED / INCONCLUSIVE_RESTORATION rows no longer halt; a timeout
+  halts only without evidenced termination (no disposition, or HALT).
+- Kept (loss of controlled execution / infrastructure): process tree surviving a timeout, lock not owned / lost, record
+  HALTED/UNAVAILABLE, not elevated, baseline/adapter set not observable, prior suite killed (run-in-progress marker),
+  unreadable prior results, INFRA_FAILURE.
+
+### Offline GREEN (sandbox; not hardware evidence)
+- test_hil_safety_gate 89/89 (RED against the unchanged runner: 77/87 then 70/89 for the two sub-steps, exactly the
+  predicted cases); test_local_suites 23/23 (RED 006, 018, 022); test_runner_results_json 16/16; test_hil_binary_provenance
+  52/52 (fixture 000 now halts via a LOCK_LOST record); 11 further suites pass; test_artifact_completeness and
+  test_hil_dispatch_paths fail identically on the unchanged tree (pre-existing).
+- Hardware: PENDING (Debug + Release; also closes the Release gap of bb6bc76).  Record still HALTED by 8bae3cf7 (created
+  under the old rule) - operator rebaseline required once.

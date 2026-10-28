@@ -65,7 +65,8 @@ param(
     [string]$ResultsJson = "",
 
     # Evidence root of earlier suites of the same HIL job (hil.yml: RUNNER_TEMP\hil-evidence).  A halt there
-    # (TIMEOUT / INFRA / CLEANUP_FAILED / stateHalt / a run that died) halts this run: Init/Mutating/Unsafe BLOCKED.
+    # (TIMEOUT without terminated tree / INFRA / stateHalt / a run that died) halts this run: Init/Mutating/Unsafe
+    # BLOCKED.  Cleanup results of earlier suites never halt (Q 2026-10-28).
     [Parameter(Mandatory=$false)]
     [string]$PriorResultsDir = "",
 
@@ -396,7 +397,7 @@ $HardwareMandatoryTests = @(
 # Run in a SEPARATE CI job AFTER HardwareMandatory, with continue-on-error in CI
 # to avoid blocking on mutation instability.
 # Recovery: each mutation test must restore state before exit; CI records
-# cleanup failures and halts the mutation lane after any CLEANUP_FAILED result.
+# cleanup results separately; they never halt the mutation lane (Q 2026-10-28).
 #
 # EXCLUDED: driver reinstall (UT-CORR-009), system sleep (test_s3_sleep_wake).
 $HardwareMutationTests = @(
@@ -897,14 +898,15 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 #   gate       before every Hardware* test, from $HilTestSafety (see the table above the suite resolution).
 #   post-test  after every executed test, also after a timeout kill: compare with the baseline (settle up to
 #              $HilSettleSeconds); a difference - link state and TSAUXC included (P0 2026-10-21; previously only
-#              warnings) - is CLEANUP_FAILED and halts every later non-ReadOnly test.  After a non-ReadOnly test the
+#              warnings) - is cleanup FAILED (TC-INFRA-STATE-001), no halt (Q 2026-10-28).  After a non-ReadOnly test the
 #              restoration of what the runner cannot observe (PHC time/rate/offset, TSN/PHY/timestamp-control state)
-#              is INCONCLUSIVE (TC-INFRA-STATE-002): nonpassing, never assumed restored.
+#              is cleanup NOT_VERIFIED (TC-INFRA-STATE-002): never assumed restored, reported independently of the
+#              functional verdict, blocks no later test (Q 2026-10-28; Add-AvbCleanupResult).
 # Per-entry mutation matrix (P0 2026-10-21): the hardware/system state a non-ReadOnly entry may modify, from its source
 # and hardware evidence.  Vocabulary: ADAPTER TIMINCA TSAUXC PHC_TIME PHC_RATE TAS FP PTM QAV PFC EEE VLAN MDIO
 # TS_CONTROL TARGET_TIME DRIVER_LIFECYCLE.  The runner itself re-reads only $HilVerifiableState; an entry whose declared
 # state is a subset of it and re-reads equal to the baseline has VERIFIED restoration.  Undeclared entries, or state the
-# runner cannot observe, are INCONCLUSIVE_RESTORATION and halt every later mutation (option 1, global).  Widen
+# runner cannot observe, are cleanup NOT_VERIFIED (never a halt; Q 2026-10-28 superseded option 1).  Widen
 # $HilVerifiableState only together with a new independent check; never declare less than an entry really modifies.
 $HilVerifiableState = @('ADAPTER', 'TIMINCA', 'TSAUXC')
 $HilPhcReads = 5            # paired PHC/QPC reads per adapter in a pre-/post-test PHC window (evaluator minimum: 3)
@@ -1261,7 +1263,38 @@ function Add-AvbResult {
     }
     $tcLines = if ($Lines.Count -gt 0) { $Lines } elseif ($executed -and $null -ne $it.Output) { @($it.Output -split "`r?`n") } else { @() }
     $r.testcases = Get-AvbTestcaseVerdicts -Lines $tcLines   # already an array (unary-comma return); @() would nest it
+    if ($executed) {
+        # Unresolved cleanup of earlier tests of this run that this test followed: visible, never silently inherited; the
+        # test establishes its own setup (Q 2026-10-28).
+        $r['precedingCleanup'] = @($script:AvbCleanup | Where-Object { $_.outcome -in @('FAILED', 'NOT_VERIFIED') } |
+                                   ForEach-Object { [ordered]@{ record = $_.record; outcome = $_.outcome; reason = $_.reason } })
+        $it.Record = $r   # the post-test check attaches this test's cleanup result
+    }
     $script:AvbResultRecords += ,$r
+}
+
+# Cleanup is mandatory lifecycle work, reported independently of functional verdicts (Q 2026-10-28, binding): it never
+# changes a testcase verdict, never fails the functional suite result and never blocks a later test.  Outcome per executed
+# item: SUCCESS (restoration verified by independent re-read), FAILED (a difference was observed), NOT_VERIFIED (what may
+# have changed is not observable - never SUCCESS, never FAILED without evidence), NOT_REQUIRED (nothing to restore).
+# Attempted: the runner never restores anything; cleanup belongs to the test, which the runner does not observe.
+# -NoItem: a suite-level (session) check, attributed to no test.  -Incidents: session-record incident references.
+function Add-AvbCleanupResult {
+    param([string]$Display, [string]$Class, [string]$Required, [string]$Outcome, [string]$Reason, [string[]]$Observations = @(),
+          [string]$Testcase = 'TC-INFRA-STATE-002', [string]$Subject = '', [switch]$NoItem, [object[]]$Incidents = @())
+    $it = if ($NoItem) { $null } else { $script:AvbItem }
+    $c = [ordered]@{
+        record = $Display; entry = $(if ($it) { $it.Entry } else { $Display }); targetDid = $(if ($it -and $it.Target) { $it.Target } else { $null })
+        safetyClass = $Class; testcase = $Testcase; required = $Required; attempted = 'UNKNOWN'; attemptedBy = 'the test (not observed by the runner)'
+        outcome = $Outcome; adapters = @($(if ($it -and $it.Target) { $it.Target } elseif ($script:HilBaseline -and $script:HilBaseline.Clock) { @($script:HilBaseline.Clock | ForEach-Object { $_.Did }) }) | Where-Object { $_ })
+        observations = @($Observations); reason = $Reason; evidence = @(@($(if ($it) { $it.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ })
+        incidents = @($Incidents | ForEach-Object { [ordered]@{ incidentId = $_.IncidentId; role = $_.Role; key = $_.Key } })
+    }
+    $script:AvbCleanup += ,$c
+    if ($it -and $it.Record) { $it.Record['cleanup'] = $c }
+    $color = if ($Outcome -in @('FAILED', 'NOT_VERIFIED')) { 'Yellow' } else { 'DarkGray' }
+    Write-Host ("  [CLEANUP:{0}] {1}: {2} ({3}): {4}{5} --- reported separately; the functional verdict is unchanged and later tests are not blocked" -f $Outcome, $Testcase,
+                $(if ($Subject) { $Subject } else { "after $Display" }), $Class, $Reason, (Format-HilIncidentRefs $Incidents)) -ForegroundColor $color
 }
 
 # Atomic write (temp file + rename) of the results document; returns the path.
@@ -1273,14 +1306,14 @@ function Write-AvbResultsJson {
                    'INCOMPLETE', 'INCONCLUSIVE', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION', 'FAILED_SETUP') {
         $counts[$v] = @($records | Where-Object { $_.verdict -eq $v }).Count
     }
-    # One persistent discrepancy = one incident, whatever number of independent checks observed it (Decision B).
-    $cleanRecs = @($records | Where-Object { $_.verdict -eq 'CLEANUP_FAILED' })
+    # One persistent discrepancy = one incident, whatever number of independent checks observed it (Decision B).  Since
+    # Q 2026-10-28 the observations are cleanup results (Add-AvbCleanupResult), never CLEANUP_FAILED result rows.
+    $cleanRecs = @($script:AvbCleanup | Where-Object { $_.outcome -eq 'FAILED' })
     $incIds = @($cleanRecs | ForEach-Object { @($_.incidents) } | Where-Object { $_ } | ForEach-Object { $_.incidentId } | Sort-Object -Unique)
-    $counts['CLEANUP_FAILED'] = $incIds.Count + @($cleanRecs | Where-Object { @($_.incidents).Count -eq 0 }).Count
     $cleanupIncidents = @(foreach ($id in $incIds) {
         $obsRecs = @($cleanRecs | Where-Object { @($_.incidents | Where-Object { $_.incidentId -eq $id }).Count -gt 0 })
         [ordered]@{ incidentId = $id; key = @(@($obsRecs[0].incidents) | Where-Object { $_.incidentId -eq $id })[0].key
-                    observations = @($obsRecs | ForEach-Object { $r = $_; [ordered]@{ record = $r.name; role = @(@($r.incidents) | Where-Object { $_.incidentId -eq $id })[0].role } }) } })
+                    observations = @($obsRecs | ForEach-Object { $r = $_; [ordered]@{ record = $r.record; role = @(@($r.incidents) | Where-Object { $_.incidentId -eq $id })[0].role } }) } })
     $src = $script:SourceIdentity
     $evidence = if ($script:UnderGitHubActions -and -not $script:IsSandbox) { 'ci' }
                 elseif ($script:IsSandbox) { 'sandbox' }
@@ -1303,6 +1336,9 @@ function Write-AvbResultsJson {
         machineSafety = $(if ($script:HilSafetyState) { [ordered]@{ path = $script:HilSafetyPath; stateAtStart = $script:HilSafetyState.State; why = $script:HilSafetyState.Why } } else { $null })
         executedCount = @($records | Where-Object { $_.executed }).Count; notExecutedCount = @($records | Where-Object { -not $_.executed -and -not $_.check }).Count
         counts = $counts; cleanupObservations = $cleanRecs.Count; cleanupIncidents = $cleanupIncidents
+        # Independent of counts/overall (Q 2026-10-28): one cleanup result per executed Hardware* item.
+        cleanupCounts = $(& { $cc = [ordered]@{}; foreach ($o in 'SUCCESS', 'FAILED', 'NOT_VERIFIED', 'NOT_ATTEMPTED', 'NOT_REQUIRED') { $cc[$o] = @($script:AvbCleanup | Where-Object { $_.outcome -eq $o }).Count }; $cc })
+        cleanup = @($script:AvbCleanup)
         overall = $Overall; exitCode = $ExitCode; records = $records
     }
     $dir = Split-Path -Parent $script:ResultsJsonPath
@@ -1364,11 +1400,14 @@ function Get-AvbPriorHalt {
         try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
         if ($d.stateHalt) { $why += "$($d.suite): state-integrity halt ($($d.stateHalt))" }
         foreach ($r in @($d.records)) {
-            # D2: a ReadOnly timeout whose process tree terminated and whose state was verified unchanged stays FAILED
-            # in its own suite but is no halt; a record without that disposition (any other case, older runner) is.
-            if ($r.verdict -eq 'FAILED(TIMEOUT)' -and $r.PSObject.Properties['safetyClass'] -and $r.safetyClass -eq 'ReadOnly' -and
-                $r.PSObject.Properties['timeoutDisposition'] -and $r.timeoutDisposition -eq 'TERMINATED_STATE_VERIFIED') { continue }
-            if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
+            # D2, revised (Q 2026-10-28): a timeout whose process tree was terminated (TERMINATED_STATE_VERIFIED / TERMINATED,
+            # any class) stays FAILED in its own suite but is no halt; without a disposition (older runner, termination not
+            # evidenced) or with HALT (the tree did not terminate) it is.
+            if ($r.verdict -eq 'FAILED(TIMEOUT)' -and $r.PSObject.Properties['timeoutDisposition'] -and
+                $r.timeoutDisposition -in @('TERMINATED_STATE_VERIFIED', 'TERMINATED')) { continue }
+            # CLEANUP_FAILED / INCONCLUSIVE_RESTORATION rows (a test's own verdict, or an older runner's cleanup row) are
+            # cleanup observations, not loss of control: they never carry over (Q 2026-10-28).
+            if ($r.verdict -in @('FAILED(TIMEOUT)', 'INFRA_FAILURE')) { $why += "$($d.suite): $($r.name)=$($r.verdict)" }
         }
     }
     return ($why -join '; ')
@@ -1387,27 +1426,25 @@ function Get-AvbRunOverall {
     return @{ Overall = 'PASSED'; Code = 0 }
 }
 
-# Registers every 'diff' item of a check as an incident observation (Resolve-AvbHilIncident) and persists it in the
-# machine-wide safety record: a new incident = a new event (id = incident id); a confirmation = one more observation of
-# the existing open event.  Returns the references for the result record.
+# Correlates every 'diff' item of a check with the cleanup incidents of the SESSION record (Add-AvbHilSessionIncident; Q
+# 2026-10-28 option b) - never the machine safety record, never a gate.  Each observation keeps time, check, record,
+# suite/configuration, the observed value and the evidence; a new incident also keeps its origin (test, cleanup outcome).
+# Without a usable session record the correlation is kept in memory for this run only (said so).  Returns the references.
 function Register-HilIncidents {
-    param([object[]]$Items, [string]$Check, [string]$Record, $Last = $null)
+    param([object[]]$Items, [string]$Check, [string]$Record, [string]$Outcome = 'FAILED')
     $refs = @()
+    $evidence = @(@($(if ($script:AvbItem -and $Check -eq 'per-test') { $script:AvbItem.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ })
     foreach ($it in @($Items | Where-Object { $_.Kind -eq 'diff' })) {
-        $r = Resolve-AvbHilIncident -Open $script:HilIncidents -Item $it -Check $Check -Record $Record
-        if ($script:HilSafetyPath) {
-            $ev = [ordered]@{ verdict = 'CLEANUP_FAILED'; scope = 'GLOBAL'
-                hardware = [ordered]@{ adapter = $it.Adapter; identityVerified = [bool]$it.IdentityVerified }
-                trigger = [ordered]@{ check = $Check; record = $Record; testcase = $(if ($script:AvbItem) { $script:AvbItem.Entry })
-                                      executable = $(if ($script:AvbItem) { Split-Path -Leaf ([string]$script:AvbItem.Artifact) }); arguments = $(if ($script:AvbItem) { $script:AvbItem.Arguments })
-                                      suite = $Suite; configuration = $Configuration
-                                      runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB; pid = $PID; discrepancy = $it.Text }
-                initialState = $script:HilBaseline; lastKnownState = $Last
-                evidence = @(@($(if ($script:AvbItem) { $script:AvbItem.LogPath }), $script:ResultsJsonPath) | Where-Object { $_ }) }
-            $pr = Add-AvbHilSafetyEvent -Path $script:HilSafetyPath -SafetyEvent $ev -IncidentKey $it.Key -EventId $r.IncidentId
-            if (-not $pr.Ok) { Write-Host "  [SAFETY-RECORD] incident $($r.IncidentId) NOT persisted in the record: $($pr.Why)" -ForegroundColor Red }
+        $obs = [ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); check = $Check; record = $Record; suite = $Suite; configuration = $Configuration
+                           observed = $it.Observed; text = $it.Text; evidence = $evidence }
+        if ($script:HilSession) {
+            $origin = [ordered]@{ record = $Record; entry = $(if ($script:AvbItem -and $Check -eq 'per-test') { $script:AvbItem.Entry }); check = $Check
+                                  suite = $Suite; configuration = $Configuration; cleanupOutcome = $Outcome; evidence = $evidence }
+            $p = Add-AvbHilSessionIncident -Path $script:HilSessionPath -Item $it -Observation $obs -Origin $origin
+            if ($p.Ok) { $refs += ,@{ IncidentId = $p.IncidentId; Role = $p.Role; Key = $it.Key }; continue }
+            Write-Host "  [CLEANUP] incident for '$($it.Text)' not persisted in the session record: $($p.Why) --- kept for this run only" -ForegroundColor Yellow
         }
-        $refs += ,$r
+        $refs += ,(Resolve-AvbHilIncident -Open $script:HilIncidents -Item $it -Check $Check -Record $Record)
     }
     return ,$refs
 }
@@ -1557,17 +1594,18 @@ function Test-AvbHilNoMutation {
         return @{ Ok = $false; Claimed = $true; Why = 'PHC clock state not observable before and after the test' }
     }
     $after = @{}; foreach ($c in @($PostState.Clock)) { $after["$($c.Did)#$($c.Index)"] = $c }
-    $parts = @(); $ok = $true; $n = 0
+    $parts = @(); $ok = $true; $n = 0; $observed = $false
     foreach ($b in @($PreState.Clock | Where-Object { $_.Ok })) {
         $a = $after["$($b.Did)#$($b.Index)"]
         if ($null -eq $a -or -not $a.Ok) { $ok = $false; $parts += "$($b.Did): clock config not readable after the test"; continue }
         $v = Get-AvbPhcRestorationVerdict -Before (ConvertTo-AvbHilPhcWindow $b) -After (ConvertTo-AvbHilPhcWindow $a) -Tolerance $Tolerances[[string]$b.Did] -Testcase 'TC-INFRA-STATE-003'
         $n++
         if ($v.Verdict -ne 'RESTORATION_VERIFIED') { $ok = $false }
+        if ($v.Verdict -eq 'CLEANUP_FAILED') { $observed = $true }   # a change measured, not merely unobservable
         $parts += ("{0}: {1} ({2})" -f $b.Did, $v.Verdict, (@($v.Reasons) -join '; '))
     }
     if ($n -eq 0) { $ok = $false; $parts += 'no adapter with a readable clock' }
-    return @{ Ok = $ok; Claimed = $true; Why = ($parts -join ' | ') }
+    return @{ Ok = $ok; Claimed = $true; Why = ($parts -join ' | '); Observed = $observed }
 }
 
 function Get-AvbHilTestClass {
@@ -1921,6 +1959,21 @@ function Invoke-HilBaseline {
     Write-Note "HIL exact targets for Mutating:Target tests: $tlist"
 }
 
+# Timed-out item (D2, revised Q 2026-10-28): the only loss of controlled execution here is a process tree that did NOT
+# terminate (an operation may still be outstanding): disposition HALT, persisted halt.  A terminated tree keeps
+# FAILED(TIMEOUT) as the test's own verdict and blocks nothing (TERMINATED_STATE_VERIFIED: ReadOnly with the observable
+# state unchanged; TERMINATED: otherwise - its restoration is reported as cleanup).  Get-AvbPriorHalt reads the same value.
+function Set-HilTimeoutDisposition {
+    param([string]$Display, [string]$Class, [bool]$StateVerified, $Last)
+    $term = if ($script:AvbItem) { $script:AvbItem.Termination } else { $null }
+    $disp = if (-not ($term -and $term.Ok)) { 'HALT' } elseif ($Class -eq 'ReadOnly' -and $StateVerified) { 'TERMINATED_STATE_VERIFIED' } else { 'TERMINATED' }
+    if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = $disp }
+    if ($disp -eq 'HALT') {
+        Set-HilHalt ("$Display ($Class) timed out and its process tree did not terminate: {0}" -f $(if ($term) { $term.Detail } else { 'termination not observed' })) -Verdict 'FAILED(TIMEOUT)' -Last $Last
+    } else {
+        Write-Host ("  [STATE] after {0} ({1}): FAILED(TIMEOUT) kept; process tree terminated ({2}) --- later tests not halted" -f $Display, $Class, $term.Detail) -ForegroundColor Yellow
+    }
+}
 # After every executed test (also after a timeout kill).
 function Invoke-HilPostTestCheck {
     param([string]$Display, [string]$Class, [bool]$TimedOut, [string]$Output)
@@ -1937,58 +1990,53 @@ function Invoke-HilPostTestCheck {
     }
     foreach ($w in @($cmp.Warn)) { Write-Host "  [WARN:STATE] after ${Display}: $w (observed, not enforced)" -ForegroundColor Yellow }
     if (@($cmp.Diffs).Count -gt 0) {
-        $refs = Register-HilIncidents -Items $cmp.Items -Check 'per-test' -Record "$Display[STATE]" -Last $cur
-        Add-HilFailureRecord -Display "$Display[STATE]" -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-STATE' -Check -Incidents $refs `
-            -Line ("[CLEANUP_FAILED] TC-INFRA-STATE-001: after {0}: {1} --- the runner made no corrective change{2}" -f $Display, (@($cmp.Diffs) -join '; '), (Format-HilIncidentRefs $refs))
-        # Discrepancies are persisted as incidents above; only a finding without a diff item (state unobservable) is a
-        # separate safety event.
-        if (@($refs).Count -gt 0) { Set-HilHalt "CLEANUP_FAILED after $Display" } else { Set-HilHalt "CLEANUP_FAILED after $Display" -Verdict 'CLEANUP_FAILED' -Last $cur }
+        # An observed difference is a cleanup FAILED of the test that left it: reported separately with its evidence and
+        # correlated in the session record - never a functional failure row, a halt or a machine-safety event (Q 2026-10-28).
+        $refs = Register-HilIncidents -Items $cmp.Items -Check 'per-test' -Record $Display
+        Add-AvbCleanupResult -Display $Display -Class $Class -Required $(if ($Class -eq 'ReadOnly') { 'NO' } else { 'YES' }) -Outcome 'FAILED' -Testcase 'TC-INFRA-STATE-001' `
+            -Reason ("state differs from the baseline: {0}; the runner made no corrective change" -f (@($cmp.Diffs) -join '; ')) -Observations @($cmp.Diffs) -Incidents $refs
         $script:HilBaseline = $cur   # later differences are attributed to later tests
-        if ($TimedOut -and $script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = 'HALT' }
+        if ($TimedOut) { Set-HilTimeoutDisposition -Display $Display -Class $Class -StateVerified $false -Last $cur }
         return
     }
     if ($first.Count -gt 0) {
         Write-Host ("  [WARN:STATE] after {0}: transient difference settled back to the baseline within {1}s: {2}" -f $Display, $waited, ($first -join '; ')) -ForegroundColor Yellow
     }
-    # D2 (Q 2026-10-22): a ReadOnly timeout stays FAILED(TIMEOUT); it halts nothing (in this run or, through
-    # timeoutDisposition, a later suite - Get-AvbPriorHalt) only when the whole process tree terminated (no outstanding
-    # driver operation) and the observable state equals the baseline (checked above).  Otherwise: safety halt.
-    if ($Class -eq 'ReadOnly' -and $TimedOut) {
-        $term = if ($script:AvbItem) { $script:AvbItem.Termination } else { $null }
-        $disp = if ($term -and $term.Ok) { 'TERMINATED_STATE_VERIFIED' } else { 'HALT' }
-        if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = $disp }
-        if ($disp -eq 'HALT') {
-            Set-HilHalt ("$Display (ReadOnly) timed out and its process tree did not terminate: {0}" -f $(if ($term) { $term.Detail } else { 'termination not observed' })) -Verdict 'FAILED(TIMEOUT)' -Last $cur
+    if ($TimedOut) { Set-HilTimeoutDisposition -Display $Display -Class $Class -StateVerified $true -Last $cur }
+    if ($Class -eq 'ReadOnly') {
+        if ($TimedOut -and -not ($script:AvbItem -and $script:AvbItem.Termination -and $script:AvbItem.Termination.Ok)) {
+            Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_VERIFIED' -Reason 'process tree did not terminate after the timeout; later state changes cannot be excluded'
         } else {
-            Write-Host ("  [STATE] after {0} (ReadOnly): FAILED(TIMEOUT) kept; process tree terminated ({1}) and state verified unchanged --- later tests not halted" -f $Display, $term.Detail) -ForegroundColor Yellow
+            Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_REQUIRED' -Reason 'ReadOnly; observable state equals the baseline'
         }
     }
-    if ($Class -ne 'ReadOnly') {
-        if ($TimedOut) {
-            if ($script:AvbItem -and $script:AvbItem.TimeoutRecord) { $script:AvbItem.TimeoutRecord['timeoutDisposition'] = 'HALT' }
-            Set-HilHalt "$Display ($Class) was killed after a timeout; state it may have left behind is not fully observable" -Verdict 'FAILED(TIMEOUT)' -Last $cur
-        } elseif ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED') {
-            Set-HilHalt "$Display ($Class) reported CLEANUP_FAILED / RESTORE FAILED itself" -Verdict 'CLEANUP_FAILED' -Last $cur
-        }
-        # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
-        # baseline.  Otherwise missing evidence (INCONCLUSIVE_RESTORATION), distinct from observed damage
-        # (CLEANUP_FAILED above); it stops every later non-ReadOnly test (Q P0 2026-10-21 sec. 2 item 7, option 1).
+    if ($Class -ne 'ReadOnly') {        # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
+        # baseline.  Otherwise it is cleanup NOT_VERIFIED (missing evidence, distinct from an observed difference = FAILED):
+        # reported separately, never a functional failure, never a halt (Q 2026-10-28, binding; supersedes the 2026-10-21
+        # global halt, option 1).
+        $selfFail = (-not $TimedOut) -and ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
         $declared = @(if ($script:AvbItem) { Get-AvbHilMutatedState $script:AvbItem.Entry })
         $unobserved = @($declared | Where-Object { $HilVerifiableState -notcontains $_ })
+        $required = if ($declared.Count -gt 0) { 'YES' } else { 'UNKNOWN' }
+        $scope = if ($declared.Count -gt 0) { "declared modified state: $($declared -join ', ')$(if ($unobserved.Count) { "; not observable by the runner: $($unobserved -join ', ')" })" } else { 'modified state not declared (unknown)' }
         if ($declared.Count -gt 0 -and $unobserved.Count -eq 0 -and -not $TimedOut) {
             Write-Host ("  [STATE] after {0}: restoration verified by independent re-read ({1})" -f $Display, ($declared -join ', ')) -ForegroundColor Green
+            if ($selfFail) { Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome 'FAILED' -Reason "the test reported CLEANUP_FAILED / RESTORE FAILED itself ($scope)" }
+            else { Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome 'SUCCESS' -Reason "restoration verified by independent re-read ($scope)" }
             return
         }
         # D1: not a restoration case when the test stopped at a failed precondition and the runner verifies no change.
         $nm = Test-AvbHilNoMutation -Output $Output -TimedOut $TimedOut -PreState $script:HilPreTest -PostState (Get-AvbHilState -PhcReads $HilPhcReads) -Tolerances $script:HilPhcTolerance
         if ($nm.Ok) {
             Write-Host ("  [STATE] after {0} ({1}): no state change --- FAILED_SETUP before any mutation (test claim) independently verified: adapter/TIMINCA/TSAUXC equal to the baseline, PHC restoration evaluator per adapter: {2}" -f $Display, $Class, $nm.Why) -ForegroundColor Yellow
+            Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_REQUIRED' -Reason "FAILED_SETUP before any mutation, no change independently verified: $($nm.Why)"
             return
         }
-        Add-HilFailureRecord -Display "$Display[STATE-UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-STATE-UNVERIFIED' -Check `
-            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-STATE-002: after {0} ({1}): restoration not independently verified --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed{2}" -f $Display, $Class,
-                    $(if ($nm.Claimed) { " --- the test's FAILED_SETUP no-mutation claim is NOT verified: $($nm.Why)" } else { '' }))
-        Set-HilHalt "$Display ($Class): restoration not verified (INCONCLUSIVE_RESTORATION)" -Verdict 'INCONCLUSIVE_RESTORATION' -Last $cur
+        $why = "restoration not independently verified ($scope) --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" +
+               $(if ($nm.Claimed) { " --- the test's FAILED_SETUP no-mutation claim is NOT verified: $($nm.Why)" } else { '' }) +
+               $(if ($selfFail) { ' --- the test reported CLEANUP_FAILED / RESTORE FAILED itself' } else { '' })
+        $outcome = if ($selfFail -or $nm.Observed) { 'FAILED' } else { 'NOT_VERIFIED' }
+        Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome $outcome -Reason $why
     }
 }
 
@@ -2002,6 +2050,7 @@ $skippedTests = 0
 $incompleteTests = 0   # exit 0 but SKIP_NOT_IMPLEMENTED reported on mandatory verification
 $results      = @()
 $AvbResultRecords = @()
+$AvbCleanup       = @()   # one cleanup result per executed Hardware* item (Add-AvbCleanupResult), independent of verdicts
 $AvbRunStartedUtc = (Get-Date).ToUniversalTime().ToString('o')
 $ResultsJsonPath  = if ($ResultsJson) { [System.IO.Path]::GetFullPath($ResultsJson) }
                     else { Join-Path $logsDir ("results-{0}-{1}-{2}.json" -f $Suite, $Configuration, (Get-Date -Format 'yyyyMMdd_HHmmss_fff')) }
@@ -2056,10 +2105,11 @@ if ($IsHardwareSuite) {
     }
 }
 
-# One session comparison (start or end of a suite): every check stays a visible record.  Differences are incident
-# observations (TC-INFRA-SESSION-001 start / -002 end, CLEANUP_FAILED, referencing opened/confirmed incidents);
-# components the check could not read are an explicit INCONCLUSIVE_RESTORATION (TC-INFRA-SESSION-003) - they never
-# hide or close an open incident.
+# One session comparison (start or end of a suite) against the ORIGINAL session baseline: every check stays a visible,
+# recorded result.  Differences are cleanup FAILED observations (TC-INFRA-SESSION-001 start / -002 end) correlated with
+# the session record's incidents; components the check could not read are cleanup NOT_VERIFIED (TC-INFRA-SESSION-003)
+# and never hide or close an incident.  A fully observable comparison closes the incidents it no longer shows (RESOLVED /
+# SUPERSEDED, kept as history).  Never a functional failure row, a halt or a machine-safety event (Q 2026-10-28).
 function Invoke-HilSessionCheck {
     param($Cmp, [string]$Phase, $Last)
     $diffItems = @($Cmp.Items | Where-Object { $_.Kind -eq 'diff' }); $unobs = @($Cmp.Items | Where-Object { $_.Kind -eq 'unobservable' })
@@ -2067,19 +2117,22 @@ function Invoke-HilSessionCheck {
                                                                                    diffs = @($diffItems | ForEach-Object { $_.Text }); unobservable = @($unobs | ForEach-Object { $_.Text }) })
     $tc = if ($Phase -eq 'start') { 'TC-INFRA-SESSION-001' } else { 'TC-INFRA-SESSION-002' }
     $disp = "HIL-SESSION[$Suite/$Configuration $Phase]"
+    $where = "at $Phase of $Suite/$Configuration"
     if ($diffItems.Count -gt 0) {
-        $refs = Register-HilIncidents -Items $diffItems -Check "session-$Phase" -Record $disp -Last $Last
-        Add-HilFailureRecord -Display $disp -Status 'CLEANUP_FAILED' -Stem 'TC-INFRA-SESSION' -Check -Incidents $refs `
-            -Line ("[CLEANUP_FAILED] {0}: at {1} of {2}/{3}: state differs from the original session baseline ({4}, captured {5}): {6}{7}" -f $tc, $Phase, $Suite, $Configuration, $script:HilSession.sessionId, $script:HilSession.createdUtc, (@($diffItems | ForEach-Object { $_.Text }) -join '; '), (Format-HilIncidentRefs $refs))
-        Set-HilHalt "state at $Phase of $Suite/$Configuration differs from the original session baseline"
+        $refs = Register-HilIncidents -Items $diffItems -Check "session-$Phase" -Record $disp
+        Add-AvbCleanupResult -Display $disp -Class 'session' -Required 'YES' -Outcome 'FAILED' -Testcase $tc -Subject $where -NoItem -Incidents $refs -Observations @($diffItems | ForEach-Object { $_.Text }) `
+            -Reason ("state differs from the original session baseline ({0}, captured {1}): {2}" -f $script:HilSession.sessionId, $script:HilSession.createdUtc, (@($diffItems | ForEach-Object { $_.Text }) -join '; '))
     }
     if ($unobs.Count -gt 0) {
-        Add-HilFailureRecord -Display "$disp[UNVERIFIED]" -Status 'INCONCLUSIVE_RESTORATION' -Stem 'TC-INFRA-SESSION' -Check `
-            -Line ("[INCONCLUSIVE_RESTORATION] TC-INFRA-SESSION-003: at {0} of {1}/{2}: session check could not read: {3} --- open incidents stay open" -f $Phase, $Suite, $Configuration, (@($unobs | ForEach-Object { $_.Text }) -join '; '))
-        Set-HilHalt "session check at $Phase of $Suite/$Configuration could not read the state" -Verdict 'INCONCLUSIVE_RESTORATION' -Last $Last
+        Add-AvbCleanupResult -Display "$disp[UNVERIFIED]" -Class 'session' -Required 'UNKNOWN' -Outcome 'NOT_VERIFIED' -Testcase 'TC-INFRA-SESSION-003' -Subject $where -NoItem `
+            -Observations @($unobs | ForEach-Object { $_.Text }) -Reason ("session check could not read: {0} --- open incidents stay open" -f (@($unobs | ForEach-Object { $_.Text }) -join '; '))
+        return
+    }
+    $cl = Close-AvbHilSessionIncidents -Path $script:HilSessionPath -Items @($Cmp.Items) -Observation ([ordered]@{ utc = (Get-Date).ToUniversalTime().ToString('o'); check = "session-$Phase"; suite = $Suite; configuration = $Configuration })
+    foreach ($c in @($cl.Closed)) {
+        Write-Host ("  [CLEANUP:{0}] {1}: {2}: incident {3} {4} against the original session baseline ({5}); kept as history" -f $c.Status, $tc, $where, $c.IncidentId, $c.Status.ToLowerInvariant(), $c.Key) -ForegroundColor Green
     }
 }
-
 # Before every non-ReadOnly item: the lock must still be owned by this execution.
 function Test-AvbHilLockStillOwned {
     if ($script:HilLockAcquired) { return (Test-AvbHilLockHeld -Owner $script:HilLockAcquired -Path $script:HilLockPath) }
@@ -2096,20 +2149,13 @@ if ($IsHardwareSuite) {
         $priorHalt = Get-AvbPriorHalt -Dir $PriorResultsDir -OwnResultsPath $ResultsJsonPath
         if ($priorHalt) { Set-HilHalt "prior suite: $priorHalt" }
     }
-    # Open incidents of this machine (unrecovered events with an incident key): a discrepancy that persists into this
-    # run confirms the SAME incident instead of opening a new one.
+    # In-memory incident correlation, used only when no session record is available (Register-HilIncidents).
     $HilIncidents = [ordered]@{}
-    if ($HilSafetyState.Record) {
-        foreach ($ev in @($HilSafetyState.Record.events)) {
-            if ($null -ne $ev -and $ev.PSObject.Properties['incidentKey'] -and $ev.incidentKey -and $ev.recovery.status -in @('PENDING', 'ATTEMPTED')) {
-                $HilIncidents[[string]$ev.incidentKey] = @{ IncidentId = [string]$ev.eventId; Key = [string]$ev.incidentKey; observations = @() }
-            }
-        }
-    }
-
     # Original SESSION baseline (tools/lib/HilLock.ps1): read / compared / created only by a run that OWNS the lock.
-    # Created only on a CLEAR machine without any halt (a snapshot never establishes a clean state after an unresolved
-    # failure); an unusable file is FAILED_SETUP and preserved; a different session's file is archived, never overwritten.
+    # Created only on a CLEAR machine without any halt; a different session's file is archived, never overwritten, and its
+    # unresolved cleanup incidents are carried.  The session record is diagnostic evidence, never an authorization
+    # mechanism (Q 2026-10-28): an unusable file is FAILED_SETUP and preserved, but blocks nothing; a new record is
+    # announced as captured from the current state - never as verified clean hardware.
     $HilSessionPath = if ($IsSandbox -and $env:AVB_TEST_HIL_SESSION_FILE) { $env:AVB_TEST_HIL_SESSION_FILE } elseif ($IsSandbox) { Join-Path $logsDir 'sandbox-hil-session.json' } else { Get-AvbHilSessionPath }
     $HilSession = $null; $HilSessionNote = ''
     $sessOwner = if ($HilLockAcquired) { $HilLockAcquired } elseif ($lockCtx.Owned) { $lockCtx.Owner } else { $null }
@@ -2120,8 +2166,7 @@ if ($IsHardwareSuite) {
         $rs = Read-AvbHilSession -Path $HilSessionPath
         if ($rs.State -eq 'UNAVAILABLE') {
             Add-HilFailureRecord -Display 'HIL-SESSION' -Status 'FAILED_SETUP' -Stem 'TC-INFRA-SESSION' `
-                -Line ("[FAILED_SETUP] TC-INFRA-SESSION-000: session baseline {0} unusable: {1} --- preserved unchanged; Init/Mutating BLOCKED" -f $HilSessionPath, $rs.Why)
-            Set-HilHalt "session baseline unusable: $($rs.Why)"
+                -Line ("[FAILED_SETUP] TC-INFRA-SESSION-000: session baseline {0} unusable: {1} --- preserved unchanged; no session comparison and no persisted cleanup incidents in this run (diagnostic record, not a gate)" -f $HilSessionPath, $rs.Why)
         } elseif ($rs.State -eq 'OK' -and $rs.Session.sessionId -eq $sid) {
             $HilSession = $rs.Session
             $cmpS = Compare-AvbHilState $HilSession.baseline $script:HilBaseline
@@ -2130,7 +2175,11 @@ if ($IsHardwareSuite) {
             $HilSession = New-AvbHilSession -Path $HilSessionPath -SessionId $sid -Owner $sessOwner -Baseline $script:HilBaseline `
                 -Provenance ([ordered]@{ suite = $Suite; configuration = $Configuration; runner = 'tools/test/Run-Tests-CI.ps1'; pid = $PID; driverSha256 = $env:HIL_DRIVER_SHA256
                                          previousSession = $(if ($rs.State -eq 'OK') { $rs.Session.sessionId } else { $null }) })
-            Write-Note "Original session baseline captured ($sid) at $HilSessionPath$(if ($rs.State -eq 'OK') { "; previous session $($rs.Session.sessionId) archived" })"
+            Write-Note "Original session baseline ($sid) at $HilSessionPath$(if ($rs.State -eq 'OK') { "; previous session $($rs.Session.sessionId) archived" }): session baseline captured from the current state --- not a verification that the hardware is clean"
+            $carried = @($HilSession.cleanupIncidents)
+            if ($carried.Count -gt 0) {
+                Write-Host ("  [CLEANUP:OPEN] {0} unresolved cleanup incident(s) carried from session {1}: {2}" -f $carried.Count, $rs.Session.sessionId, (($carried | ForEach-Object { "$($_.incidentId) ($($_.key))" }) -join '; ')) -ForegroundColor Yellow
+            }
         } else {
             $HilSessionNote = "no session baseline established: machine safety $($HilSafetyState.State)$(if ($stateHalt) { "; halt: $stateHalt" }) - a snapshot never establishes a clean state after an unresolved failure"
         }
@@ -2396,8 +2445,9 @@ foreach ($WorkItem in $WorkItems) {
     } elseif ($vc.InconclusiveRestoration -gt 0) {
         $failedTests++
         Write-Fail "$exeName INCONCLUSIVE_RESTORATION ($($vc.InconclusiveRestoration) testcase(s)) --- the test could not verify its own restoration"
+        # The test's own testcase verdict (restoration asserted by the test itself) stays; it is no loss of control and
+        # blocks no later test (Q 2026-10-28).
         Add-AvbResult -Name $exeName -Status "INCONCLUSIVE_RESTORATION" -Exit $exitCode
-        Set-HilHalt "$exeName reported INCONCLUSIVE_RESTORATION itself" -Verdict 'INCONCLUSIVE_RESTORATION'
     } elseif (($exitCode -eq 0) -and -not $IsOptionalVerification -and $vc.Inconclusive -gt 0) {
         $failedTests++
         Write-Fail "$exeName INCONCLUSIVE ($($vc.Inconclusive) testcase(s)) --- insufficient evidence on mandatory verification"

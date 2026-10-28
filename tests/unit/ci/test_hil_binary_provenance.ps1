@@ -483,9 +483,15 @@ Write-Manifest @(
     (New-MEntry 'test_sbprov_halter' 'built' $true (Get-Sha $pHalter)),
     (New-MEntry 'test_sbprov_disabled' 'disabled' $false $null 'KM placeholder only (mirrors Build-Tests.ps1 test_tsn_ioctl_handlers)')
 )
+# Q 2026-10-28: a cleanup difference (the halter's adapter change) no longer halts, so the active halt of this replica
+# comes from a machine record HALTED by a genuine loss of controlled execution (LOCK_LOST), placed where the sandbox
+# runner reads its safety record (logs\sandbox-hil-safety.json).
+. (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
+$aLogs = Join-Path $Tmp 'runA\logs'; New-Item -ItemType Directory -Path $aLogs -Force | Out-Null
+$null = Initialize-AvbHilSafetyRecord -Path (Join-Path $aLogs 'sandbox-hil-safety.json') -Operator 'test' -Reason 'TEST-HILPROV-000'
+$null = Add-AvbHilSafetyEvent -Path (Join-Path $aLogs 'sandbox-hil-safety.json') -SafetyEvent ([ordered]@{ verdict = 'LOCK_LOST'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
 $rA = Invoke-Sandbox 'runA' @((Get-Entry $pHalter), (Get-Entry $pDisabled))
-tc_check 'TEST-HILPROV-000-fixture-reproduces-halt-before-readonly-item' `
-    (($rA.Out -match '\[CLEANUP_FAILED\] TC-INFRA-STATE-001: after test_sbprov_halter') -and ($rA.Out -match '\[HALT\] state-integrity halt')) (Tail $rA)
+tc_check 'TEST-HILPROV-000-fixture-reproduces-halt-before-readonly-item' ($rA.Out -match '\[HALT\] state-integrity halt') (Tail $rA)
 tc_check 'TEST-HILPROV-001-disabled-build-entry-blocks-dispatch-even-readonly-during-halt' (Test-ProvBlocked $rA 'test_sbprov_disabled' 'Disabled') (Show-Prov $rA 'test_sbprov_disabled')
 
 # --- Run B: provenance matrix ---------------------------------------------------------------------------

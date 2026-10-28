@@ -108,16 +108,16 @@ function Get-AvbStopReason {
     return ''
 }
 
-# '' or the safety halt this suite raised (TIMEOUT / CLEANUP_FAILED / INCONCLUSIVE_RESTORATION / state halt).  It does
+# '' or the safety halt this suite raised (a timeout without evidenced termination / state halt).  It does
 # not stop the run: later suites run with -PriorResultsDir <ReportDir>, so Run-Tests-CI blocks every Init/Mutating test
 # and still executes eligible ReadOnly tests (same as hil.yml).  The run stays nonpassing.
 function Get-AvbSafetyHalt {
     param($Doc)
-    # A ReadOnly timeout with a terminated process tree and verified unchanged state (Run-Tests-CI timeoutDisposition
-    # TERMINATED_STATE_VERIFIED) stays FAILED in the inventory but is no halt - same rule as Get-AvbPriorHalt (D2).
-    $bad = @(@($Doc.records) | Where-Object { $_.verdict -in @('FAILED(TIMEOUT)', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION') -and -not (
-                $_.verdict -eq 'FAILED(TIMEOUT)' -and $_.PSObject.Properties['safetyClass'] -and $_.safetyClass -eq 'ReadOnly' -and
-                $_.PSObject.Properties['timeoutDisposition'] -and $_.timeoutDisposition -eq 'TERMINATED_STATE_VERIFIED') })
+    # Same rule as Run-Tests-CI Get-AvbPriorHalt (D2, revised Q 2026-10-28): a timeout whose process tree was terminated
+    # (timeoutDisposition TERMINATED_STATE_VERIFIED / TERMINATED, any class) stays FAILED in the inventory but is no halt;
+    # CLEANUP_FAILED / INCONCLUSIVE_RESTORATION rows are cleanup observations, not loss of control: no halt.
+    $bad = @(@($Doc.records) | Where-Object { $_.verdict -eq 'FAILED(TIMEOUT)' -and -not (
+                $_.PSObject.Properties['timeoutDisposition'] -and $_.timeoutDisposition -in @('TERMINATED_STATE_VERIFIED', 'TERMINATED')) })
     $why = @()
     if ($bad.Count -gt 0) { $why += ("hardware state not verified: {0}" -f (($bad | ForEach-Object { "$($_.name)=$($_.verdict)" }) -join ', ')) }
     if ($Doc.stateHalt) { $why += "state-integrity halt: $($Doc.stateHalt)" }
@@ -305,10 +305,16 @@ try {
                 $cfgInventory += $inv
             } else {
                 $s.overall = $res.Doc.overall; $s.executed = $res.Doc.executedCount; $s.counts = $res.Doc.counts
+                # Cleanup results are reported separately from the functional inventory (Q 2026-10-28): visible, never a failure row.
+                $s.cleanupCounts = $(if ($res.Doc.PSObject.Properties['cleanupCounts']) { $res.Doc.cleanupCounts } else { $null })
                 $inv = Get-AvbFailureInventory -Doc $res.Doc -Configuration $Configuration -Suite $Suite
                 $cfgInventory += $inv
                 $nf = @($inv | Where-Object { $_.Category -eq 'Failure' }).Count; $nb = @($inv | Where-Object { $_.Category -eq 'Blocked' }).Count
                 Write-Host ("`n{0} / {1}: exit {2}, overall {3}, executed {4}, failures {5}, blocked {6}" -f $Configuration, $Suite, (Format-AvbExitCode $rc), $res.Doc.overall, $res.Doc.executedCount, $nf, $nb)
+                if ($s.cleanupCounts) {
+                    $cc = $s.cleanupCounts
+                    Write-Host ("{0} / {1}: cleanup (separate from functional results): FAILED {2}, NOT_VERIFIED {3}, SUCCESS {4}, NOT_REQUIRED {5} --- details: {6} 'cleanup'" -f $Configuration, $Suite, $cc.FAILED, $cc.NOT_VERIFIED, $cc.SUCCESS, $cc.NOT_REQUIRED, $json) -ForegroundColor $(if ($cc.FAILED -or $cc.NOT_VERIFIED) { 'Yellow' } else { 'Gray' })
+                }
                 $h = Get-AvbSafetyHalt $res.Doc
                 if ($h) {
                     Write-Host "[HALT] $Configuration/${Suite}: $h --- later Init/Mutating tests BLOCKED (also in later suites and configurations of this run); ReadOnly tests continue" -ForegroundColor Red

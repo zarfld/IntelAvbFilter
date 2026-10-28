@@ -134,22 +134,35 @@ $halts = [ordered]@{ timeout = (Get-AvbSafetyHalt $doc); halt = (Get-AvbSafetyHa
 tc_check 'TEST-LOCALSUITES-006-only-infrastructure-loss-stops-the-run-safety-halts-are-carried-not-stopping' `
     (($stopT -match 'INFRA_FAILURE') -and ($stopT -notmatch 'TIMEOUT') -and ((Get-AvbStopReason $docClean) -eq '') -and ((Get-AvbStopReason $docHalt) -eq '') -and
      ((Get-AvbStopReason $docClean2) -eq '') -and ((Get-AvbStopReason $docUnv) -eq '') -and
-     ($halts.timeout -match 'FAILED\(TIMEOUT\)') -and ($halts.halt -match 'state-integrity halt') -and ($halts.cleanup -match 'CLEANUP_FAILED') -and
+     # Q 2026-10-28: a CLEANUP_FAILED row alone (older runner) is a cleanup observation, not a halt (was: carried halt).
+     ($halts.timeout -match 'FAILED\(TIMEOUT\)') -and ($halts.halt -match 'state-integrity halt') -and ($halts.cleanup -eq '') -and
      ($halts.unverified -match 'INCONCLUSIVE_RESTORATION|restoration not verified') -and ($halts.clean -eq '') -and
      ([System.IO.File]::ReadAllText($LocalPath) -match '-PriorResultsDir \$ReportDir')) `
     ("stop: infra/timeout='{0}' halt='{1}' cleanup='{2}' unverified='{3}'; carried: {4}" -f $stopT, (Get-AvbStopReason $docHalt), (Get-AvbStopReason $docClean2), (Get-AvbStopReason $docUnv), (($halts.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join ' '))
 
-# D2 (Q 2026-10-22): the same rule as Run-Tests-CI Get-AvbPriorHalt - a ReadOnly FAILED(TIMEOUT) whose process tree
-# terminated and whose state was verified unchanged (timeoutDisposition TERMINATED_STATE_VERIFIED) is no safety halt;
-# without the disposition (older runner, HALT) or for a non-ReadOnly class it still is.
+# 022 (Q 2026-10-28, binding): an INCONCLUSIVE_RESTORATION record without a state halt - a test's own restoration verdict,
+# or an older runner's restoration row - is missing evidence, not loss of control: no safety halt (same rule as
+# Run-Tests-CI Get-AvbPriorHalt).  The record itself stays a non-passing inventory row.
+$docUnvOnly = Write-Doc (Join-Path $Tmp 'unverified_only.json') 'HardwareUnit' 'Debug' 1 @((New-Rec 't_rst' 'INCONCLUSIVE_RESTORATION' $true -Exit 1))
+$hUnvOnly = Get-AvbSafetyHalt $docUnvOnly
+$invUnvOnly = @(Get-AvbFailureInventory -Doc $docUnvOnly -Configuration 'Debug' -Suite 'HardwareUnit')
+tc_check 'TEST-LOCALSUITES-022-inconclusive-restoration-record-alone-is-no-safety-halt-but-stays-nonpassing' `
+    ($hUnvOnly -eq '' -and @($invUnvOnly | Where-Object { $_.Category -ne 'NotFailure' }).Count -eq 1) `
+    ("halt='{0}' inventory categories=[{1}]" -f $hUnvOnly, (@($invUnvOnly | ForEach-Object { $_.Category }) -join ','))
+
+# D2, revised (Q 2026-10-28): the same rule as Run-Tests-CI Get-AvbPriorHalt - a FAILED(TIMEOUT) whose process tree was
+# terminated (timeoutDisposition TERMINATED_STATE_VERIFIED or TERMINATED, any class) is no safety halt; without a
+# disposition (older runner, termination not evidenced) or with HALT (tree did not terminate) it still is.
 function New-TimeoutRec([string]$Class, [string]$Disp) { $r = New-Rec 't_to' 'FAILED(TIMEOUT)' $true -Class $Class; if ($Disp) { $r.timeoutDisposition = $Disp }; return $r }
 $toV = Get-AvbSafetyHalt (Write-Doc (Join-Path $Tmp 'to_v.json') 'HardwareUnit' 'Debug' 1 @(New-TimeoutRec 'ReadOnly' 'TERMINATED_STATE_VERIFIED'))
 $toH = Get-AvbSafetyHalt (Write-Doc (Join-Path $Tmp 'to_h.json') 'HardwareUnit' 'Debug' 1 @(New-TimeoutRec 'ReadOnly' 'HALT'))
 $toL = Get-AvbSafetyHalt (Write-Doc (Join-Path $Tmp 'to_l.json') 'HardwareUnit' 'Debug' 1 @(New-TimeoutRec 'ReadOnly' ''))
 $toI = Get-AvbSafetyHalt (Write-Doc (Join-Path $Tmp 'to_i.json') 'HardwareUnit' 'Debug' 1 @(New-TimeoutRec 'Init' 'TERMINATED_STATE_VERIFIED'))
-tc_check 'TEST-LOCALSUITES-018-verified-readonly-timeout-is-not-a-safety-halt' `
-    ($toV -eq '' -and $toH -match 'FAILED\(TIMEOUT\)' -and $toL -match 'FAILED\(TIMEOUT\)' -and $toI -match 'FAILED\(TIMEOUT\)') `
-    ("verified='{0}' halt='{1}' legacy='{2}' init='{3}'" -f $toV, $toH, $toL, $toI)
+$toT = Get-AvbSafetyHalt (Write-Doc (Join-Path $Tmp 'to_t.json') 'HardwareUnit' 'Debug' 1 @(New-TimeoutRec 'Init' 'TERMINATED'))
+$toIH = Get-AvbSafetyHalt (Write-Doc (Join-Path $Tmp 'to_ih.json') 'HardwareUnit' 'Debug' 1 @(New-TimeoutRec 'Init' 'HALT'))
+tc_check 'TEST-LOCALSUITES-018-only-a-timeout-without-evidenced-termination-is-a-safety-halt' `
+    ($toV -eq '' -and $toI -eq '' -and $toT -eq '' -and $toH -match 'FAILED\(TIMEOUT\)' -and $toL -match 'FAILED\(TIMEOUT\)' -and $toIH -match 'FAILED\(TIMEOUT\)') `
+    ("verified='{0}' halt='{1}' legacy='{2}' init-verified='{3}' init-terminated='{4}' init-halt='{5}'" -f $toV, $toH, $toL, $toI, $toT, $toIH)
 
 # --- Reproduction queue (addendum case 13 + Debug/Release separation) ----------------------------------------
 $dU = Write-Doc (Join-Path $Tmp 'u.json') 'HardwareUnit' 'Debug' 1 @(

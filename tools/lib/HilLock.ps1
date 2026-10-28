@@ -169,15 +169,25 @@ function Read-AvbHilSession {
     return @{ State = 'OK'; Session = $s; Why = '' }
 }
 
-# Creates the session baseline; an existing file (another session) is archived first, never overwritten.
+# Creates the session baseline; an existing file (another session) is archived first, never overwritten.  Its OPEN cleanup
+# incidents are carried into the new record (carriedFrom = that session): a session boundary never erases unresolved
+# cleanup evidence (Q 2026-10-28).  The archive keeps the full history.
 function New-AvbHilSession {
     param([string]$Path = (Get-AvbHilSessionPath), [string]$SessionId, $Owner, $Baseline, $Provenance)
+    $carried = @()
     if (Test-Path -LiteralPath $Path) {
+        $prev = Read-AvbHilSession -Path $Path
+        if ($prev.Session -and $prev.Session.PSObject.Properties['cleanupIncidents']) {
+            $carried = @(@($prev.Session.cleanupIncidents) | Where-Object { $null -ne $_ -and $_.status -eq 'OPEN' } | ForEach-Object {
+                if (-not $_.PSObject.Properties['carriedFrom']) { $_ | Add-Member -NotePropertyName carriedFrom -NotePropertyValue $prev.Session.sessionId }
+                $_ })
+        }
         $arch = "$Path.prev-$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfff')).json"
         Move-Item -LiteralPath $Path -Destination $arch
     }
     $s = [ordered]@{ schema = 'avb-hil-session/1'; sessionId = $SessionId; host = $env:COMPUTERNAME; owner = $Owner
-                     createdUtc = (Get-Date).ToUniversalTime().ToString('o'); provenance = $Provenance; baseline = $Baseline; checks = @() }
+                     createdUtc = (Get-Date).ToUniversalTime().ToString('o'); provenance = $Provenance; baseline = $Baseline; checks = @()
+                     cleanupIncidents = @($carried) }
     Write-AvbHilSafetyFile $Path $s
     return $s
 }
@@ -190,6 +200,53 @@ function Add-AvbHilSessionCheck {
     $r.Session.checks = @(@($r.Session.checks) + @($Check))
     Write-AvbHilSafetyFile $Path $r.Session
     return @{ Ok = $true; Why = '' }
+}
+
+# Cleanup incidents (Q 2026-10-28, option b): diagnostic evidence in the SESSION record - never in the machine safety
+# record, never a dispatch gate.  An observed difference whose key (adapter | component | expected | observed) matches an
+# OPEN incident is another observation of the same unresolved condition ('confirmed'); otherwise a new incident
+# ('opened').  RESOLVED / SUPERSEDED incidents stay as history: a recurrence after them opens a NEW incident, so equal
+# register values are never merged across a resolution.  @{ Ok; IncidentId; Role; Why }
+function Add-AvbHilSessionIncident {
+    param([string]$Path = (Get-AvbHilSessionPath), $Item, $Observation, $Origin)
+    $r = Read-AvbHilSession -Path $Path
+    if ($r.State -ne 'OK') { return @{ Ok = $false; Why = $r.Why } }
+    $incs = @(if ($r.Session.PSObject.Properties['cleanupIncidents']) { @($r.Session.cleanupIncidents) | Where-Object { $null -ne $_ } })
+    $open = @($incs | Where-Object { $_.status -eq 'OPEN' -and $_.key -eq $Item.Key }) | Select-Object -First 1
+    if ($open) {
+        $open.observations = @(@($open.observations) + @($Observation)); $id = $open.incidentId; $role = 'confirmed'
+    } else {
+        $id = [guid]::NewGuid().ToString(); $role = 'opened'
+        $incs += ,([ordered]@{ incidentId = $id; key = $Item.Key; adapter = $Item.Adapter; identityVerified = [bool]$Item.IdentityVerified
+                               component = $Item.Component; expected = $Item.Expected; observed = $Item.Observed; status = 'OPEN'
+                               openedUtc = $Observation.utc; origin = $Origin; observations = @($Observation); resolvedUtc = $null; resolution = $null })
+    }
+    Set-AvbRecordField $r.Session 'cleanupIncidents' @($incs)
+    Write-AvbHilSafetyFile $Path $r.Session
+    return @{ Ok = $true; IncidentId = $id; Role = $role; Why = '' }
+}
+
+# Closes this session's OPEN incidents that a comparison against the ORIGINAL session baseline no longer shows: RESOLVED
+# (the component equals the baseline again) or SUPERSEDED (it now differs in another way - a new incident).  Never when
+# the comparison could not read every component, never a carried incident (judged against another session's baseline).
+# Per-test comparisons use a moving baseline and must not call this.  @{ Ok; Closed = @(@{ IncidentId; Status; Key }); Why }
+function Close-AvbHilSessionIncidents {
+    param([string]$Path = (Get-AvbHilSessionPath), [object[]]$Items, $Observation)
+    if (@($Items | Where-Object { $_.Kind -eq 'unobservable' }).Count -gt 0) { return @{ Ok = $true; Closed = @(); Why = 'comparison incomplete' } }
+    $r = Read-AvbHilSession -Path $Path
+    if ($r.State -ne 'OK') { return @{ Ok = $false; Closed = @(); Why = $r.Why } }
+    if (-not $r.Session.PSObject.Properties['cleanupIncidents']) { return @{ Ok = $true; Closed = @(); Why = '' } }
+    $diffKeys = @($Items | Where-Object { $_.Kind -eq 'diff' } | ForEach-Object { $_.Key })
+    $diffComponents = @($diffKeys | ForEach-Object { (($_ -split '\|')[0..1]) -join '|' })
+    $closed = @()
+    foreach ($inc in @($r.Session.cleanupIncidents | Where-Object { $null -ne $_ -and $_.status -eq 'OPEN' -and -not $_.PSObject.Properties['carriedFrom'] })) {
+        if ($diffKeys -contains $inc.key) { continue }
+        $st = if ($diffComponents -contains ((($inc.key -split '\|')[0..1]) -join '|')) { 'SUPERSEDED' } else { 'RESOLVED' }
+        $inc.status = $st; $inc.resolvedUtc = $Observation.utc; $inc.resolution = $Observation
+        $closed += ,@{ IncidentId = $inc.incidentId; Status = $st; Key = $inc.key }
+    }
+    if ($closed.Count -gt 0) { Write-AvbHilSafetyFile $Path $r.Session }
+    return @{ Ok = $true; Closed = $closed; Why = '' }
 }
 
 # ---------------------------------------------------------------------------------------------------------

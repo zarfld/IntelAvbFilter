@@ -216,14 +216,16 @@ tc_check 'TEST-RESULTSJSON-016-blocked-items-are-recorded-as-not-executed-with-t
      ($rA.Out -notmatch 'MUST NOT RUN')) ("mutating: {0} | noprov: {1}" -f (Show-Rec $recMut), (Show-Rec $recNoProv))
 # Decision B (Q 2026-10-22): one persistent discrepancy = ONE incident; every independent check stays a visible record.
 # The per-test check (TC-INFRA-STATE-001) opens the incident; the end-of-suite session check (TC-INFRA-SESSION-002)
-# confirms the SAME incident - two observations, one incident, both non-executed check records.
-$recPer = @($recState | Where-Object { @($_.testcases).Count -eq 1 -and @($_.testcases)[0].Id -eq 'TC-INFRA-STATE-001' })
-$recSes = @($recState | Where-Object { @($_.testcases).Count -eq 1 -and @($_.testcases)[0].Id -eq 'TC-INFRA-SESSION-002' })
+# confirms the SAME incident - two observations, one incident.  Since Q 2026-10-28 both are cleanup results in the
+# document's 'cleanup' list (never result rows); the test's own functional verdict stays PASSED.
+$cln = @(if ($rA.Doc.PSObject.Properties['cleanup']) { @($rA.Doc.cleanup) })
+$recPer = @($cln | Where-Object { $_.testcase -eq 'TC-INFRA-STATE-001' -and $_.outcome -eq 'FAILED' })
+$recSes = @($cln | Where-Object { $_.testcase -eq 'TC-INFRA-SESSION-002' -and $_.outcome -eq 'FAILED' })
 $incPer = @(if ($recPer.Count -eq 1) { @($recPer[0].incidents) })
 $incSes = @(if ($recSes.Count -eq 1) { @($recSes[0].incidents) })
 tc_check 'TEST-RESULTSJSON-017-cleanup-failure-is-a-check-record-separate-from-the-test-verdict' `
-    (($recClean.verdict -eq 'PASSED') -and ($recPer.Count -eq 1) -and ($recSes.Count -eq 1) -and -not $recPer[0].executed -and -not $recSes[0].executed -and
-     ($recPer[0].name -match 'rj_cleanup') -and (@($recPer[0].testcases)[0] -isnot [array]) -and
+    (($recClean.verdict -eq 'PASSED') -and ($recPer.Count -eq 1) -and ($recSes.Count -eq 1) -and ($recState.Count -eq 0) -and
+     ($recPer[0].record -match 'rj_cleanup') -and ($recClean.cleanup.outcome -eq 'FAILED') -and
      ($incPer.Count -eq 1) -and ($incSes.Count -eq 1) -and ($incPer[0].role -eq 'opened') -and ($incSes[0].role -eq 'confirmed') -and
      ($incPer[0].incidentId -eq $incSes[0].incidentId)) `
     ("test: {0} | per-test records={1} session records={2} incidents per-test=[{3}] session=[{4}]" -f (Show-Rec $recClean), $recPer.Count, $recSes.Count,
@@ -231,8 +233,9 @@ tc_check 'TEST-RESULTSJSON-017-cleanup-failure-is-a-check-record-separate-from-t
 $c = $rA.Doc.counts
 tc_check 'TEST-RESULTSJSON-018-summary-counts-executed-vs-not-executed-and-overall-matches-exit' `
     (($rA.Doc.executedCount -eq 7) -and ($rA.Doc.notExecutedCount -eq 2) -and ($c.PASSED -eq 2) -and ($c.FAILED -eq 1) -and ($c.'FAILED(TIMEOUT)' -eq 1) -and
-     ($c.'BLOCKED(SAFETY)' -eq 1) -and ($c.'BLOCKED(PROVENANCE)' -eq 1) -and ($c.CLEANUP_FAILED -eq 1) -and
-     # CLEANUP_FAILED counts unique incidents; the two observations (per-test + session) are counted separately
+     # Q 2026-10-28: no CLEANUP_FAILED result row any more; the cleanup observations (per-test + session) and their one
+     # incident are summarized separately from the functional counts.
+     ($c.'BLOCKED(SAFETY)' -eq 1) -and ($c.'BLOCKED(PROVENANCE)' -eq 1) -and ($c.CLEANUP_FAILED -eq 0) -and
      ($rA.Doc.cleanupObservations -eq 2) -and (@($rA.Doc.cleanupIncidents).Count -eq 1) -and (@(@($rA.Doc.cleanupIncidents)[0].observations).Count -eq 2) -and
      ($rA.Doc.overall -eq 'FAILED') -and ($rA.Doc.exitCode -eq 1) -and ($rA.Exit -eq 1) -and ($rA.Doc.evidenceClass -eq 'sandbox')) `
     ("executed={0} notExecuted={1} counts={2} observations={6} incidents={7} overall={3} doc.exit={4} exit={5}" -f $rA.Doc.executedCount, $rA.Doc.notExecutedCount, ($c | ConvertTo-Json -Compress), $rA.Doc.overall, $rA.Doc.exitCode, $rA.Exit, $rA.Doc.cleanupObservations, @($rA.Doc.cleanupIncidents).Count)
