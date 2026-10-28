@@ -680,6 +680,27 @@ $leftMarker = @(Get-ChildItem (Join-Path $rKc.Dir 'logs') -Filter 'run-in-progre
 if ($leftMarker -ne 0) { $kBad += 'a completed run left its run-in-progress.json marker behind' }
 tc_check 'TEST-HILGATE-040-earlier-suite-halt-or-killed-run-blocks-later-mutation-readonly-continues' ($kBad.Count -eq 0) ($kBad -join ' ### ')
 
+# 083: LocalSuites writes its console transcripts (console-<Cfg>-<Suite>.log, including the CURRENT suite's, still being
+# written), local-suites-report.json and repro-*.json into the same -PriorResultsDir.  Only results-*.json documents and
+# run-in-progress.json markers are prior-suite evidence (LocalSuites_20261027_202832: every Init/Mutating test BLOCKED by
+# "prior suite: unreadable results document console-Debug-HardwareUnit.log" with a CLEAR safety record).  A genuinely
+# corrupt results-*.json stays a halt.
+$pLs = New-PriorDir 'priorLsLayout' 'PASSED'
+'console transcript, not a results document' | Set-Content -LiteralPath (Join-Path $pLs 'console-Debug-HardwareUnit.log') -Encoding UTF8
+'{"schema":"avb-local-suites/1","configurations":[]}' | Set-Content -LiteralPath (Join-Path $pLs 'local-suites-report.json') -Encoding UTF8
+'{"test":"repro"}' | Set-Content -LiteralPath (Join-Path $pLs 'repro-Debug-test_x-120000.json') -Encoding UTF8
+$pBad = New-PriorDir 'priorCorrupt' ''
+'{ not json' | Set-Content -LiteralPath (Join-Path $pBad 'HardwareUnit\results-HardwareUnit-Debug-20261021_120000_000.json') -Encoding UTF8
+'console transcript, not a results document' | Set-Content -LiteralPath (Join-Path $pBad 'console-Debug-HardwareUnit.log') -Encoding UTF8
+$rLsA = Invoke-Sandbox 'runK_lsLayout' @($tInit, $tRo) -Suite 'HardwareMutation' -PriorResultsDir $pLs -AllSupportedEnabled
+$rLsB = Invoke-Sandbox 'runK_corrupt' @($tInit, $tRo) -Suite 'HardwareMutation' -PriorResultsDir $pBad -AllSupportedEnabled
+tc_check 'TEST-HILGATE-083-only-results-documents-are-prior-suite-evidence-corrupt-results-still-halt' `
+    ((Get-RanCount $rLsA '^RAN test_sbfake_init ') -eq 1 -and $rLsA.Out -notmatch 'prior suite' -and
+     (Get-RanCount $rLsB '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rLsB '^RAN test_sbfake_ro ') -eq 1 -and
+     $rLsB.Out -match 'state-integrity halt \(prior suite: unreadable results document results-HardwareUnit-Debug-20261021_120000_000\.json' -and
+     $rLsB.Out -notmatch 'unreadable results document (console-|local-suites-report|repro-)') `
+    ("LocalSuites layout: init ran={0}; {1} ### corrupt results: init ran={2}; {3}" -f (Get-RanCount $rLsA '^RAN test_sbfake_init '), (Tail $rLsA), (Get-RanCount $rLsB '^RAN test_sbfake_init '), (Tail $rLsB))
+
 # --- Run L: TSAUXC and link changes are enforced (P0 2026-10-21 sec. 2: never downgraded to warnings) --------
 $tAux  = New-Fake 'test_sbfake_tsauxc' (Edit-StateSnippet "`$c = @(`$s.clock | Where-Object { `$_.Did -eq '0x1533' })[0]; `$c.Tsauxc = 4")
 $tLink = New-Fake 'test_sbfake_link' (Edit-StateSnippet "`$a = @(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_125B' })[0]; `$a.MediaStatus = 'Disconnected'")

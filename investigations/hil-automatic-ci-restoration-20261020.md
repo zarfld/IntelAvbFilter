@@ -656,3 +656,26 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
   with 1 s windows: rate 1-2e-6 s/s (about 2 us per 9 s).
 - B12-6 I226 (0x125B) PHC runs 2.93 % fast against QPC (rate 1.0293 in both 2026-10-22 and 2026-10-27 captures):
   functional, outside restoration scope.
+## Iteration 13 (2026-10-27) - P0: false prior-suite halt "unreadable results document console-*.log"
+
+### Facts (verified)
+- LocalSuites_20261027_202832 (c93399c, record CLEAR): 53 rows per configuration BLOCKED by "prior suite: unreadable
+  results document console-Debug-HardwareUnit.log" (106 total); further 17 hazard hold + 2 Unsafe per configuration.
+- Consumer Get-AvbPriorHalt (Run-Tests-CI.ps1, introduced f9cd138 2026-10-21 16:41) enumerated with
+  `Get-ChildItem -LiteralPath $Dir -Recurse -File -Include results-*.json, run-in-progress.json`.  Windows PowerShell
+  5.1.26100 ignores -Include with -LiteralPath: on the 20:28 report dir it returned 23 files (console logs, report,
+  repro-*.json) instead of the 8 results-*.json.  Every console-*.log (LocalSuites.ps1:292 writes them into the same
+  ReportDir it passes as -PriorResultsDir, :295; since 70a5364 2026-10-21 13:38), including the current suite's own
+  transcript, failed ConvertFrom-Json and became an "unreadable results document" halt.
+- Never worked under LocalSuites: masked by earlier halts (atdecc timeout, then safety record UNAVAILABLE - Set-HilHalt
+  keeps the first reason).  No other -LiteralPath/-Include use in tools/ or tests/; LocalSuites has no Get-ChildItem.
+
+### Correction
+- Get-AvbPriorHalt: same -LiteralPath enumeration, name filter in Where-Object (results-*.json, run-in-progress.json).
+- RED/GREEN: new TEST-HILGATE-083 (LocalSuites layout with console log, report, repro JSON -> Init runs; corrupt
+  results-*.json -> still halts, naming only that file).  RED 83/84 (init ran=0), GREEN 84/84.  Regressions: local
+  suites 22/22, trust boundary 40/40, HILPROV 52/52, safety record 15/15, HILBASE 11/11, evaluator 14/14, COMPLETE
+  unchanged (001 38/148, 003 2).  HIL verification pending (LocalSuites Debug + Release).
+- Expected next blocker (F3 kept, operator option i): the first executed Init/Mutating entry without test-owned
+  restoration (HardwareUnit row 5 test_minimal_ioctl.exe) ends INCONCLUSIVE_RESTORATION -> global halt, event persisted,
+  record HALTED (operator rebaseline required).

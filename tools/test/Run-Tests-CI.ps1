@@ -1356,7 +1356,9 @@ function Get-AvbPriorHalt {
     if (-not (Test-Path -LiteralPath $Dir)) { return '' }
     $own = if ($OwnResultsPath) { [System.IO.Path]::GetFullPath($OwnResultsPath) } else { $null }
     $why = @()
-    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -Include 'results-*.json', 'run-in-progress.json' -ErrorAction Stop)) {
+    # Name filter in Where-Object: Windows PowerShell 5.1 ignores -Include together with -LiteralPath, which made every
+    # file in the directory (LocalSuites' console-*.log transcripts, its report, repro-*.json) a "results document".
+    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Recurse -File -ErrorAction Stop | Where-Object { $_.Name -like 'results-*.json' -or $_.Name -eq 'run-in-progress.json' })) {
         if ($own -and [string]::Equals($f.FullName, $own, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
         if ($f.Name -eq 'run-in-progress.json') { $why += "$($f.Directory.Name) did not complete (runner process ended without results; hardware state unverified)"; continue }
         try { $d = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { $why += "unreadable results document $($f.Name)"; continue }
