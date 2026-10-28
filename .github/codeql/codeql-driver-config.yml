@@ -1,0 +1,25 @@
+# CodeQL configuration for the `analyze` job of .github/workflows/codeql-driver.yml (CI quality gate).
+#
+# Derived from microsoft/Windows-Driver-Developer-Supplemental-Tools (MSDT) config/codeql-config.yml at f7bceed497
+# (last state that resolved; runs up to 38608078366, 2026-10-14) with every pack pinned to an exact version:
+#   microsoft/windows-drivers 1.10.0  - newest published release (GHCR, built from MSDT d9374fbb7c, CLI 2.25.5);
+#                                       its suites mustfix.qls / recommended.qls require microsoft/cpp-queries 0.0.5
+#                                       (`from: microsoft/cpp-queries, version: 0.0.5`; codeql-pack.lock.yml likewise).
+#   microsoft/cpp-queries     0.0.5   - the version those suites require; must be downloaded by this config because
+#                                       suite `from:` references resolve only from the package cache.
+# Why pinned: MSDT 878c2db5b2 (2026-10-16) moved its config to cpp-queries 0.0.6 without publishing a matching
+# windows-drivers release, so `@development` + `windows-drivers@1.x` broke CodeQL init from 2026-10-17.
+#
+# Selected queries are recorded in codeql-driver-inventory.txt (reviewed SSOT, compared exactly by
+# tools/ci/Test-CodeQLDriverPacks.ps1).  Upgrades follow the controlled update procedure in
+# 07-verification-validation/test-plans/TEST-PLAN-NDIS-LWF-COVERAGE.md (Pillar 1) -- never float a version here.
+# Forward slashes in query paths: MSDT uses backslashes; both select the same files (verified by inventory equality).
+name: "IntelAvbFilter driver CodeQL (pinned MSDT packs)"
+disable-default-queries: true
+
+packs:
+  - microsoft/cpp-queries@0.0.5:codeql-suites/cpp-code-scanning.qls
+  - microsoft/windows-drivers@1.10.0:windows-driver-suites/recommended.qls
+  - microsoft/windows-drivers@1.10.0:drivers/general/queries/experimental/DriverIsolationZwViolation1/DriverIsolationZwViolation1.ql
+  - microsoft/windows-drivers@1.10.0:drivers/general/queries/experimental/DriverIsolationZwViolation2/DriverIsolationZwViolation2.ql
+  - microsoft/windows-drivers@1.10.0:drivers/general/queries/experimental/DriverIsolationRtlViolation/DriverIsolationRtlViolation.ql
