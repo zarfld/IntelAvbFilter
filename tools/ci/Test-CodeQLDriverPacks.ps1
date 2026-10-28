@@ -74,10 +74,17 @@ function Assert-CodeQL($r, [string]$Name) {
     Complete $f.Category ("codeql {0} exited {1}" -f $Name, $r.Code)
 }
 
+# Any unexpected exception is a categorized, non-passing TOOL_FAILURE (never a bare exit 1 without a verdict).
+trap { Complete 'TOOL_FAILURE' ("unexpected error: {0}" -f $_.Exception.Message) }
+
 Write-Host ""
 Write-Host "=== CodeQL driver pack validation ($Mode) ===" -ForegroundColor Cyan
-if (Test-Path -LiteralPath $WorkDir) { Remove-Item -LiteralPath $WorkDir -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+# New run directory per invocation: guarantees an empty package cache and keeps earlier attempts' evidence
+# (no recursive delete -- cache paths can exceed MAX_PATH).
+$WorkDir = Join-Path $WorkDir ('run-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))
+if (Test-Path -LiteralPath $WorkDir) { Complete 'TOOL_FAILURE' "run directory already exists: $WorkDir" }
+New-Item -ItemType Directory -Path $WorkDir | Out-Null
+Write-Host "  run directory: $WorkDir"
 
 # Offline preconditions (same contract as tier 1).
 foreach ($f in @($ConfigPath, $InventoryPath)) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { Complete 'CONFIG_INVALID' "missing $f" } }
@@ -126,7 +133,8 @@ $resolved = ConvertFrom-Json ([System.IO.File]::ReadAllText($res.Out))   # argum
 foreach ($q in $resolved) {
     $k = ConvertTo-AvbQueryKey ([string]$q)
     if ($null -eq $k) { $foreign += [string]$q; continue }
-    $k.Id = Get-AvbQueryMetadataId ([System.IO.File]::ReadAllText([string]$q))
+    # \\?\ + provider: package-cache paths can exceed MAX_PATH, which .NET Framework file APIs under PS 5.1 reject.
+    $k.Id = Get-AvbQueryMetadataId (Get-Content -LiteralPath ('\\?\' + ([string]$q -replace '/', '\')) -Raw)
     $actual += $k
 }
 if ($foreign.Count -gt 0) { Complete 'TOOL_FAILURE' ("resolved queries outside the package cache: {0}" -f ($foreign -join ' | ')) }
