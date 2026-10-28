@@ -471,6 +471,10 @@ function Invoke-AvbHilSafetyReclassification {
     $st.Record.status = $(if ($remaining.Count -gt 0) { 'HALTED' } elseif ($hasBaseline) { 'CLEAR' } else { 'UNBASELINED' })
     $st.Record.history = @(@($st.Record.history) + @([ordered]@{ utc = $utc; operation = 'RECLASSIFY_CLEANUP_ONLY'; initiatedBy = $InitiatedBy; sourceRevision = $SourceRevision
         policy = $policy; rationale = $rationale; events = $ids; remaining = $remaining; resultingStatus = $st.Record.status; preImage = $backup }))
-    Write-AvbHilSafetyFile $Path $st.Record
+    try { Write-AvbHilSafetyFile $Path $st.Record }
+    catch {   # the atomic move did not happen: the record is unchanged
+        Remove-Item -LiteralPath "$Path.tmp-$PID" -Force -ErrorAction SilentlyContinue
+        return @{ Ok = $false; Changed = $false; Why = "record not written ($($_.Exception.Message)); unchanged, pre-image $backup kept" }
+    }
     return @{ Ok = $true; Changed = $true; Why = ''; Events = $ids; Remaining = $remaining; State = $st.Record.status; Backup = $backup }
 }

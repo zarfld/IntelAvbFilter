@@ -2066,7 +2066,7 @@ $ResultsJsonPath  = if ($ResultsJson) { [System.IO.Path]::GetFullPath($ResultsJs
 $env:AVB_DRIVER_BUILD = $Configuration
 Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
 
-$HilSafetyPath = $null; $HilSafetyState = $null
+$HilSafetyPath = $null; $HilSafetyState = $null; $SourceIdentity = $null
 if ($IsHardwareSuite) {
     # Machine-wide safety record: HALTED or UNAVAILABLE (missing/corrupt/foreign/inaccessible) = fail closed for every
     # Init/Mutating test of this run; ReadOnly tests continue.  Sandbox: AVB_TEST_HIL_SAFETY_FILE if set (exactly that
@@ -2081,10 +2081,6 @@ if ($IsHardwareSuite) {
                     ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $sp -Encoding UTF8 }
             $sp }
     } else { $HilSafetyPath = Get-AvbHilSafetyPath }
-    $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
-    Write-Note "Machine safety record: $($HilSafetyState.State) ($HilSafetyPath) $($HilSafetyState.Why)"
-    $HilPhcTolerance = Get-AvbHilPhcTolerances -SafetyRecord $HilSafetyState.Record
-    Write-Note ("PHC restoration tolerances (hardware-derived, approved baseline evidence): {0}" -f $(if ($HilPhcTolerance.Count) { ($HilPhcTolerance.Keys | Sort-Object) -join ', ' } else { 'none - a PHC judgement is INCONCLUSIVE_RESTORATION' }))
 
     # Elevation is verified on this process's own token (sandbox: AVB_TEST_SANDBOX_ELEVATED, '0' = not elevated).
     # Necessary, never sufficient: lock ownership, the CLEAR safety record and the session baseline are checked independently.
@@ -2109,6 +2105,26 @@ if ($IsHardwareSuite) {
     } else {
         Set-HilHalt "machine lock not owned by this execution: $($lockCtx.Why) (an unattended run never acquires it)"
     }
+
+    # Policy reconciliation before the record is read (Q 2026-10-29): safety events persisted by the former rule for a
+    # cleanup outcome (CLEANUP_FAILED / INCONCLUSIVE_RESTORATION) are reclassified as cleanup diagnostics - idempotent,
+    # history and cleanup outcome kept (tools/lib/HilLock.ps1).  Only with verified lock ownership and elevation; loss-of-
+    # control events keep the halt.  Same step for LocalSuites and hil.yml, both of which run this script.
+    $HilLockOwner = if ($lockCtx.Owned) { $lockCtx.Owner } else { $HilLockAcquired }
+    if ($HilLockOwner -and $HilElevated) {
+        $SourceIdentity = Get-AvbSourceIdentity
+        if ($SourceIdentity.Ok) {
+            $reBy = "Run-Tests-CI $Suite/$Configuration pid $PID" + $(if ($UnderGitHubActions) { " GitHub run $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT job $env:GITHUB_JOB" } else { ' (attended)' })
+            $reRev = $SourceIdentity.Revision + $(if ($SourceIdentity.Dirty) { " + tracked changes (build-input digest $($SourceIdentity.Digest))" } else { '' })
+            $rc = Invoke-AvbHilSafetyReclassification -Path $HilSafetyPath -LockOwner $HilLockOwner -LockPath $HilLockPath -SourceRevision $reRev -InitiatedBy $reBy
+            if ($rc.Changed) { Write-Host ("  [SAFETY-RECORD] reclassified {0} cleanup-only safety event(s) as cleanup diagnostics (cleanup outcome kept, restoration not claimed): {1}; pre-image {2}; status {3}" -f @($rc.Events).Count, (@($rc.Events) -join ', '), $rc.Backup, $rc.State) -ForegroundColor Yellow }
+            elseif (-not $rc.Ok) { Write-Host "  [SAFETY-RECORD] reclassification not applied: $($rc.Why)" -ForegroundColor Yellow }
+        } else { Write-Note "Safety-record reclassification not attempted: source identity unavailable ($($SourceIdentity.Error))" }
+    }
+    $HilSafetyState = Read-AvbHilSafetyState -Path $HilSafetyPath
+    Write-Note "Machine safety record: $($HilSafetyState.State) ($HilSafetyPath) $($HilSafetyState.Why)"
+    $HilPhcTolerance = Get-AvbHilPhcTolerances -SafetyRecord $HilSafetyState.Record
+    Write-Note ("PHC restoration tolerances (hardware-derived, approved baseline evidence): {0}" -f $(if ($HilPhcTolerance.Count) { ($HilPhcTolerance.Keys | Sort-Object) -join ', ' } else { 'none - a PHC judgement is INCONCLUSIVE_RESTORATION' }))
 }
 
 # One session comparison (start or end of a suite) against the ORIGINAL session baseline: every check stays a visible,
@@ -2203,7 +2219,6 @@ if ($IsHardwareSuite) {
 }
 
 $BuildManifest = $null
-$SourceIdentity = $null
 if ($IsHardwareSuite) {
     $BuildManifest = Read-AvbBuildManifest -Path (Join-Path $testExeDir 'test-build-manifest.json') -Configuration $Configuration
     if ($BuildManifest.Ok) {
@@ -2211,7 +2226,7 @@ if ($IsHardwareSuite) {
     } else {
         Write-Host "  [BLOCKED] build provenance unavailable: $($BuildManifest.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
     }
-    $SourceIdentity = Get-AvbSourceIdentity
+    if (-not $SourceIdentity) { $SourceIdentity = Get-AvbSourceIdentity }   # already determined for the reclassification step
     if ($SourceIdentity.Ok) {
         Write-Note ("Source identity: {0} (tracked changes: {1}; provenance mode: {2}; build-input digest: {3})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty,
                     $SourceIdentity.Mode, $(if ($SourceIdentity.Digest) { $SourceIdentity.Digest } else { "n/a $($SourceIdentity.DigestError)" }))
