@@ -679,3 +679,22 @@ identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
 - Expected next blocker (F3 kept, operator option i): the first executed Init/Mutating entry without test-owned
   restoration (HardwareUnit row 5 test_minimal_ioctl.exe) ends INCONCLUSIVE_RESTORATION -> global halt, event persisted,
   record HALTED (operator rebaseline required).
+
+## Iteration 14 (2026-10-28) - HIL verification of bb6bc76 (prior-suite fix)
+
+### Facts (verified, hardware)
+- Debug VERIFIED: PriorSuiteVerify_bb6bc76_20261028_110027 (driver EE6149B0..., pre-flight 0, record CLEAR before/after):
+  HardwareUnit and HardwareIntegration (-Tests test_ioctl_version, LocalSuites layout: console transcripts + valid
+  results-*.json in the -PriorResultsDir) both PASSED 1/1, exit 0, stateHalt empty, no prior-suite halt.
+  LocalSuites_20261028_110241 Debug/HardwareUnit (record CLEAR, own transcript in the dir): no prior-suite halt, Init
+  entry test_minimal_ioctl.exe executed (PASSED) -> F3 INCONCLUSIVE_RESTORATION, event 8bae3cf7 persisted, record HALTED.
+  No "unreadable results document" in any of the 8 transcripts.
+- Release NOT verified: 11:00 run BLOCKED(PROVENANCE) (manifest digest 97CF159F..., runtime digest FA320381...);
+  LocalSuites Release suites all start with record HALTED, which masks the prior-suite check (Set-HilHalt keeps the
+  first reason).
+- 10:41 attempt: Debug pre-flight INFRA_FAILURE (service STOP_PENDING) - driver reinstalled while FullSuite_20261028_102414
+  was running test_atdecc_aen_protocol (10:38-10:42) concurrently.
+- Build-input digest flipped 97CF159F (10:1x) -> FA320381 (FullSuite build ~10:25, 11:01, LocalSuites builds 11:04/11:38)
+  -> 97CF159F (13:xx) with HEAD, submodule HEADs (reflog) and `git status` clean throughout; same file count (485).
+  Ruled out: Build-Driver MC regeneration (record diff empty after Build-Driver Release), submodule ignore settings,
+  untracked-not-ignored files now.  Cause UNEXPLAINED (FA320381 record set not recoverable).
