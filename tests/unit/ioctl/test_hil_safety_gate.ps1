@@ -379,7 +379,7 @@ $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=In
            'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
            'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target;' +
            'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target;' +
-           'test_sbfake_init2=Init;test_sbfake_initsetup=Init;test_sbfake_initrestinc=Init'
+           'test_sbfake_init2=Init;test_sbfake_initsetup=Init;test_sbfake_initrestinc=Init;test_sbfake_initselfcln=Init;test_sbfake_initselfnv=Init'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
 # TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: cleanup NOT_VERIFIED.
@@ -942,13 +942,17 @@ tc_check 'TEST-HILGATE-058-terminated-timeout-keeps-session-baseline-machine-sta
 $ss5 = Join-Path $Tmp 'sess_halted.json'
 $rR5 = Invoke-Sandbox 'runR5' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss5 -SafetyFile $sfHalted
 tc_check 'TEST-HILGATE-059-no-session-baseline-is-created-while-the-machine-is-halted' (-not (Test-Path $ss5) -and $rR5.Out -match 'no session baseline') (Tail $rR5)
-# 060 corrupt session record: FAILED_SETUP (visible, non-passing), file preserved byte-identical.  The session record is
+# 060 corrupt session record: reported as cleanup NOT_VERIFIED TC-INFRA-SESSION-000 (infrastructure: no session comparison
+# possible; never described as clean), no functional row or count (was until Q 2026-10-28 second correction: a FAILED_SETUP
+# result row that made the suite non-passing), file preserved byte-identical.  The session record is
 # diagnostic evidence, never an authorization mechanism (Q 2026-10-28): mutation still runs (was: blocked).
 $ss6 = Join-Path $Tmp 'sess_corrupt.json'; '{ corrupt' | Set-Content -LiteralPath $ss6
 $h6 = (Get-FileHash $ss6).Hash
-$rR6 = Invoke-Sandbox 'runR6' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss6
-tc_check 'TEST-HILGATE-060-corrupt-session-record-is-failed-setup-and-preserved-never-a-gate' `
-    (@(Get-SessFail $rR6 | Where-Object { $_ -match '^\[FAILED_SETUP\] TC-INFRA-SESSION-000' }).Count -eq 1 -and (Get-RanCount $rR6 '^RAN test_sbfake_tgt ') -ge 1 -and
+$rR6 = Invoke-Sandbox 'runR6' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss6; $d6 = @(Get-ResultsDocs $rR6)
+tc_check 'TEST-HILGATE-060-corrupt-session-record-is-reported-cleanup-not-verified-no-functional-row-preserved-never-a-gate' `
+    (@(Get-SessFail $rR6 | Where-Object { $_ -match '^\[CLEANUP:NOT_VERIFIED\] TC-INFRA-SESSION-000[^\r\n]*unusable' }).Count -eq 1 -and $rR6.Out -notmatch '\[FAILED_SETUP\] TC-INFRA-SESSION' -and
+     @($d6 | Where-Object { (Get-Prop $_.counts 'FAILED_SETUP') -ne 0 -or @(@($_.records) | Where-Object { $_.name -eq 'HIL-SESSION' }).Count -gt 0 }).Count -eq 0 -and
+     @($d6 | ForEach-Object { @($_.cleanup) } | Where-Object { $_.testcase -eq 'TC-INFRA-SESSION-000' -and $_.outcome -eq 'NOT_VERIFIED' }).Count -eq 1 -and $rR6.Exit -eq 0 -and (Get-RanCount $rR6 '^RAN test_sbfake_tgt ') -ge 1 -and
      $rR6.Out -notmatch '\[HALT\]' -and (Get-FileHash $ss6).Hash -eq $h6) (((Get-SessFail $rR6) -join ' | ') + ' ### ' + (Tail $rR6))
 # 061 foreign host: blocked and preserved; a finished OTHER session on a CLEAR machine is archived, never overwritten
 $ss7 = Join-Path $Tmp 'sess_foreign.json'
@@ -1334,16 +1338,27 @@ tc_check 'TEST-HILGATE-085-case-b-dependent-setup-failure-reported-only-for-that
     ("init={0} initsetup={1} preceding={2} ran: {3}; {4}" -f (Get-Prop $i85 'verdict'), (Get-Prop $u85 'verdict'), ($p85 | ConvertTo-Json -Compress), ($r85.Ran -join ' / '), (Tail $r85))
 
 # 086: a test that reports INCONCLUSIVE_RESTORATION itself (cleanup asserted by its own testcase: the requirement exception)
-# keeps that functional verdict; it is no machine-safety event and does not block the next test.
+# keeps that functional verdict; it is no machine-safety event and does not block the next test.  Contrast (Q 2026-10-28,
+# second correction): a test that reports its own cleanup ONLY as a cleanup line ([CLEANUP:FAILED] / [CLEANUP:NOT_VERIFIED],
+# the form of test_ptp_phc_lifecycle / test_ptp_phc_stability / test_ioctl_tas) keeps functional PASS; the runner records
+# the reported outcome and line as that test's cleanup result (was: [CLEANUP:FAILED] not recognised -> NOT_VERIFIED, line lost).
 $tRestInc = New-Fake 'test_sbfake_initrestinc' "Write-Host '  [INCONCLUSIVE_RESTORATION] TC-SBFAKE-RST-001: own restoration could not be verified'"
+$tSelfCln = New-Fake 'test_sbfake_initselfcln' "Write-Host '  [CLEANUP:FAILED] TC-SBFAKE-CLN-001: own restore failed (cleanup only)'"
+$tSelfNv = New-Fake 'test_sbfake_initselfnv' "Write-Host '  [CLEANUP:NOT_VERIFIED] TC-SBFAKE-CLN-002: own restoration not observable (cleanup only)'"
 $sf86 = New-ClearSafetyFile 'safety_086.json'
-$r86 = Invoke-Sandbox 'run86' @($tRestInc, $t2Init) -AllSupportedEnabled -SafetyFile $sf86
+$r86 = Invoke-Sandbox 'run86' @($tRestInc, $tSelfCln, $tSelfNv, $t2Init) -AllSupportedEnabled -SafetyFile $sf86
 $rec86 = @(Get-ExecRecords $r86 'test_sbfake_initrestinc')
+$cln86 = @(Get-ExecRecords $r86 'test_sbfake_initselfcln'); $nv86 = @(Get-ExecRecords $r86 'test_sbfake_initselfnv')
+$cc86 = Get-CleanupOf ($cln86 | Select-Object -First 1); $nc86 = Get-CleanupOf ($nv86 | Select-Object -First 1)
 $s86 = Read-AvbHilSafetyState -Path $sf86
-tc_check 'TEST-HILGATE-086-test-reported-inconclusive-restoration-keeps-its-verdict-no-halt-next-test-runs' `
+tc_check 'TEST-HILGATE-086-test-reported-inconclusive-restoration-keeps-its-verdict-cleanup-only-report-keeps-pass-no-halt-next-test-runs' `
     ($rec86.Count -eq 1 -and $rec86[0].verdict -eq 'INCONCLUSIVE_RESTORATION' -and (Get-RanCount $r86 '^RAN test_sbfake_init2 ') -eq 1 -and
+     $cln86.Count -eq 1 -and $cln86[0].verdict -eq 'PASSED' -and (Get-Prop $cc86 'outcome') -eq 'FAILED' -and @(Get-Prop $cc86 'observations') -match 'TC-SBFAKE-CLN-001' -and
+     $nv86.Count -eq 1 -and $nv86[0].verdict -eq 'PASSED' -and (Get-Prop $nc86 'outcome') -eq 'NOT_VERIFIED' -and @(Get-Prop $nc86 'observations') -match 'TC-SBFAKE-CLN-002' -and
      $r86.Out -notmatch '\[HALT\]|state-integrity halt' -and $s86.State -eq 'CLEAR' -and @($s86.Record.events).Count -eq 0 -and $r86.Exit -eq 1) `
-    ("verdict={0} ran: {1}; safety={2}; {3}" -f (@($rec86 | ForEach-Object { $_.verdict }) -join ','), ($r86.Ran -join ' / '), $s86.State, (Tail $r86))
+    ("verdict={0} selfcln={1}/{2} selfnv={3}/{4} ran: {5}; safety={6}; {7}" -f (@($rec86 | ForEach-Object { $_.verdict }) -join ','),
+     (@($cln86 | ForEach-Object { $_.verdict }) -join ','), ($cc86 | ConvertTo-Json -Compress -Depth 4), (@($nv86 | ForEach-Object { $_.verdict }) -join ','),
+     ($nc86 | ConvertTo-Json -Compress -Depth 4), ($r86.Ran -join ' / '), $s86.State, (Tail $r86))
 
 # 082: UT-CORR-009 restores the driver it found (Q 2026-10-27). Defect from FullSuite_20261024_113438: the Release
 # executable ran 'Install-Driver-Elevated.ps1 -Configuration Debug', a hard-coded literal, so a Release run would
@@ -1351,7 +1366,7 @@ tc_check 'TEST-HILGATE-086-test-reported-inconclusive-restoration-keeps-its-verd
 # Required: before the service stop, the configuration to reinstall is chosen by matching the installed
 # System32\drivers\IntelAvbFilter.sys against the installer's source for each configuration
 # (Install-Driver.ps1: build\x64\<cfg>\IntelAvbFilter\IntelAvbFilter). After the reinstall, a different installed
-# driver is CLEANUP_FAILED. The check runs on comment-stripped source so that comments cannot satisfy it.
+# driver is cleanup FAILED. The check runs on comment-stripped source so that comments cannot satisfy it.
 $lcSrc = Get-Content -LiteralPath (Join-Path $RepoRoot 'tests\integration\ptp_corr\test_ptp_phc_lifecycle.c') -Raw
 $lcCode = [regex]::Replace($lcSrc, '(?s)/\*.*?\*/|//[^\r\n]*', '')
 $lcBad = @()
@@ -1376,11 +1391,15 @@ if ($lcCode -match 'Install-Driver-Elevated') { $lcBad += 'Install-Driver-Elevat
 if ($lcCode -notmatch 'Install-Driver\.ps1 -Configuration %s -Reinstall' -or $lcCode -notmatch '-NonInteractive') { $lcBad += 'installer not run as Install-Driver.ps1 -NonInteractive ... -Reinstall' }
 if ($lcCode -notmatch 'WaitForSingleObject\s*\([^;]*LC_INSTALL_TIMEOUT_MS') { $lcBad += 'installer wait not bounded by LC_INSTALL_TIMEOUT_MS' }
 if ($lcCode -notmatch 'logs\\\\ut_corr_009_install_') { $lcBad += 'installer output not preserved under logs\ (live evidence)' }
-# Restoration verdict lines in the runner's grammar: Run-Tests-CI.ps1 halts later mutation on '^\s*\[CLEANUP_FAILED\]'
-# and on INCONCLUSIVE_RESTORATION testcase lines (tools/lib/TestVerdict.ps1, Get-AvbVerdictCounts).
-foreach ($tag in 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION') {
-    if ($lcCode -notmatch ('"\s*\[' + $tag + '\] UT-CORR-009 ')) { $lcBad += "no '[$tag] UT-CORR-009' restoration verdict line" }
+# Restoration of the driver found is cleanup, not REQ-F-PTP-007 (Q 2026-10-28, second correction): reported as
+# '[CLEANUP:FAILED] UT-CORR-009' / '[CLEANUP:NOT_VERIFIED] UT-CORR-009' lines that Run-Tests-CI.ps1 records as the cleanup
+# outcome.  Was: [CLEANUP_FAILED] / [INCONCLUSIVE_RESTORATION] testcase verdict tags plus exit code 4, which the runner
+# counted as a functional failure even when "UT-CORR-009 Driver Lifecycle" passed.
+foreach ($tag in 'CLEANUP:FAILED', 'CLEANUP:NOT_VERIFIED') {
+    if ($lcCode -notmatch ('"\s*\[' + $tag + '\] UT-CORR-009\b')) { $lcBad += "no '[$tag] UT-CORR-009' cleanup line" }
 }
+if ($lcCode -match '"\s*\[(CLEANUP_FAILED|INCONCLUSIVE_RESTORATION)\] UT-CORR-009') { $lcBad += "restoration reported as testcase verdict '[$($Matches[1])]' (functional) instead of a cleanup line" }
+if ($lcCode -match '\breturn\s+4\s*;') { $lcBad += 'cleanup outcome changes the exit code (return 4)' }
 # STATIC: this is a contract on the source text only. It is not runtime evidence; runtime behaviour is verified only by
 # HIL through Run-Tests-CI.ps1 (Unsafe entry, AVB_HIL_AUTHORIZE_UNSAFE naming it).
 tc_check 'TEST-HILGATE-082-ut-corr-009-reinstall-and-restoration-source-contract-STATIC-not-runtime-evidence' ($lcBad.Count -eq 0) ($lcBad -join ' ### ')
