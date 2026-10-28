@@ -1150,7 +1150,7 @@ tc_check 'TEST-HILGATE-089-runner-reclassifies-obsolete-cleanup-only-safety-even
      (Get-Content -LiteralPath $sf89o -Raw) -eq $b89o -and (Get-RanCount $rW4 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rW4 '^RAN test_sbfake_ro ') -eq 1 -and
      $rW4.Out -match 'machine safety record HALTED') `
     ("local: state={0} events={1} recovery={2}/{3} history={4} ran1={5} ran2={6} | ci: state={7} history={8} | other-owner untouched={9} init={10} || {11} || {12}" -f
-     $s89.State, $e89.Count, $(if ($e89.Count) { $e89[0].recovery.status }), $(if ($e89.Count) { $e89[0].recovery.cleanupOutcome }), $h89.Count,
+     $s89.State, $e89.Count, $(if ($e89.Count) { $e89[0].recovery.status }), $(if ($e89.Count -and $e89[0].recovery.PSObject.Properties['cleanupOutcome']) { $e89[0].recovery.cleanupOutcome }), $h89.Count,
      (Get-RanCount $rW1 '^RAN test_sbfake_init '), (Get-RanCount $rW2 '^RAN test_sbfake_init '), $s89c.State, $h89c.Count,
      ((Get-Content -LiteralPath $sf89o -Raw) -eq $b89o), (Get-RanCount $rW4 '^RAN test_sbfake_init '), (Tail $rW1), (Tail $rW3))
 
