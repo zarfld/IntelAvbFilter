@@ -2014,14 +2014,19 @@ function Invoke-HilPostTestCheck {
         # baseline.  Otherwise it is cleanup NOT_VERIFIED (missing evidence, distinct from an observed difference = FAILED):
         # reported separately, never a functional failure, never a halt (Q 2026-10-28, binding; supersedes the 2026-10-21
         # global halt, option 1).
-        $selfFail = (-not $TimedOut) -and ($Output -match '(?m)^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
+        # The test's own cleanup report: a cleanup line ([CLEANUP:FAILED] / [CLEANUP:NOT_VERIFIED]; test_ptp_phc_lifecycle,
+        # test_ptp_phc_stability, test_ioctl_tas) or the older CLEANUP_FAILED / RESTORE FAILED text.  Kept as observations.
+        $selfLines = @(if (-not $TimedOut) { [regex]::Matches([string]$Output, '(?m)^\s*(\[CLEANUP:(FAILED|NOT_VERIFIED)\]|\[CLEANUP_FAILED\]).*$|^.*RESTORE FAILED.*$') | ForEach-Object { $_.Value.Trim() } })
+        $selfFail = (-not $TimedOut) -and ($Output -match '(?m)^\s*\[CLEANUP:FAILED\]|^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
+        $selfNotVerified = (-not $TimedOut) -and -not $selfFail -and ($Output -match '(?m)^\s*\[CLEANUP:NOT_VERIFIED\]')
         $declared = @(if ($script:AvbItem) { Get-AvbHilMutatedState $script:AvbItem.Entry })
         $unobserved = @($declared | Where-Object { $HilVerifiableState -notcontains $_ })
         $required = if ($declared.Count -gt 0) { 'YES' } else { 'UNKNOWN' }
         $scope = if ($declared.Count -gt 0) { "declared modified state: $($declared -join ', ')$(if ($unobserved.Count) { "; not observable by the runner: $($unobserved -join ', ')" })" } else { 'modified state not declared (unknown)' }
         if ($declared.Count -gt 0 -and $unobserved.Count -eq 0 -and -not $TimedOut) {
             Write-Host ("  [STATE] after {0}: restoration verified by independent re-read ({1})" -f $Display, ($declared -join ', ')) -ForegroundColor Green
-            if ($selfFail) { Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome 'FAILED' -Reason "the test reported CLEANUP_FAILED / RESTORE FAILED itself ($scope)" }
+            if ($selfFail) { Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome 'FAILED' -Observations $selfLines -Reason "the test reported its own cleanup as failed ($scope)" }
+            elseif ($selfNotVerified) { Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome 'NOT_VERIFIED' -Observations $selfLines -Reason "the runner's re-read is equal, but the test reported its own restoration as not verified ($scope)" }
             else { Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome 'SUCCESS' -Reason "restoration verified by independent re-read ($scope)" }
             return
         }
@@ -2034,9 +2039,9 @@ function Invoke-HilPostTestCheck {
         }
         $why = "restoration not independently verified ($scope) --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" +
                $(if ($nm.Claimed) { " --- the test's FAILED_SETUP no-mutation claim is NOT verified: $($nm.Why)" } else { '' }) +
-               $(if ($selfFail) { ' --- the test reported CLEANUP_FAILED / RESTORE FAILED itself' } else { '' })
+               $(if ($selfFail) { ' --- the test reported its own cleanup as failed' } elseif ($selfNotVerified) { ' --- the test reported its own restoration as not verified' } else { '' })
         $outcome = if ($selfFail -or $nm.Observed) { 'FAILED' } else { 'NOT_VERIFIED' }
-        Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome $outcome -Reason $why
+        Add-AvbCleanupResult -Display $Display -Class $Class -Required $required -Outcome $outcome -Observations $selfLines -Reason $why
     }
 }
 
@@ -2154,7 +2159,7 @@ if ($IsHardwareSuite) {
     # Original SESSION baseline (tools/lib/HilLock.ps1): read / compared / created only by a run that OWNS the lock.
     # Created only on a CLEAR machine without any halt; a different session's file is archived, never overwritten, and its
     # unresolved cleanup incidents are carried.  The session record is diagnostic evidence, never an authorization
-    # mechanism (Q 2026-10-28): an unusable file is FAILED_SETUP and preserved, but blocks nothing; a new record is
+    # mechanism (Q 2026-10-28): an unusable file is preserved and reported as cleanup NOT_VERIFIED, blocks nothing; a new record is
     # announced as captured from the current state - never as verified clean hardware.
     $HilSessionPath = if ($IsSandbox -and $env:AVB_TEST_HIL_SESSION_FILE) { $env:AVB_TEST_HIL_SESSION_FILE } elseif ($IsSandbox) { Join-Path $logsDir 'sandbox-hil-session.json' } else { Get-AvbHilSessionPath }
     $HilSession = $null; $HilSessionNote = ''
@@ -2165,8 +2170,11 @@ if ($IsHardwareSuite) {
         $sid = Get-AvbHilSessionId -LockOwner $sessOwner -GitHub $HilGitHubContext
         $rs = Read-AvbHilSession -Path $HilSessionPath
         if ($rs.State -eq 'UNAVAILABLE') {
-            Add-HilFailureRecord -Display 'HIL-SESSION' -Status 'FAILED_SETUP' -Stem 'TC-INFRA-SESSION' `
-                -Line ("[FAILED_SETUP] TC-INFRA-SESSION-000: session baseline {0} unusable: {1} --- preserved unchanged; no session comparison and no persisted cleanup incidents in this run (diagnostic record, not a gate)" -f $HilSessionPath, $rs.Why)
+            # Infrastructure: session-level restoration cannot be verified in this run.  Reported, never "clean", never a
+            # functional row or count (Q 2026-10-28, second correction; was a FAILED_SETUP result row).
+            Add-AvbCleanupResult -Display "HIL-SESSION[$Suite/$Configuration start]" -Class 'session' -Required 'UNKNOWN' -Outcome 'NOT_VERIFIED' -Testcase 'TC-INFRA-SESSION-000' `
+                -Subject "at start of $Suite/$Configuration" -NoItem -Observations @($rs.Why) `
+                -Reason ("infrastructure: session baseline {0} unusable: {1} --- preserved unchanged; no session comparison and no persisted cleanup incidents in this run, so session-level restoration is not verified (never assumed clean)" -f $HilSessionPath, $rs.Why)
         } elseif ($rs.State -eq 'OK' -and $rs.Session.sessionId -eq $sid) {
             $HilSession = $rs.Session
             $cmpS = Compare-AvbHilState $HilSession.baseline $script:HilBaseline

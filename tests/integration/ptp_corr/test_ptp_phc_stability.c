@@ -110,7 +110,7 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
         set_req.timestamp = phc_before + 200000000ULL;
         if (!DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
                         &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL)) {
-            printf("  [CLEANUP_FAILED] PHC restore IOCTL failed on early exit (error %lu)\n", GetLastError());
+            printf("  [CLEANUP:FAILED] UT-CORR-005/adapter:%u: PHC restore IOCTL failed on early exit (error %lu)\n", adapter_idx, GetLastError());
             s_cleanup_failed++;
         }
         return;
@@ -134,7 +134,7 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
         set_req.timestamp = phc_before + 500000000ULL;
         if (!DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
                         &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL)) {
-            printf("  [CLEANUP_FAILED] PHC restore IOCTL failed on early exit (error %lu)\n", GetLastError());
+            printf("  [CLEANUP:FAILED] UT-CORR-005/adapter:%u: PHC restore IOCTL failed on early exit (error %lu)\n", adapter_idx, GetLastError());
             s_cleanup_failed++;
         }
         return;
@@ -177,8 +177,8 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     printf("  PHC restored to ~%llu ns (restore_ok=%d)\n",
            (unsigned long long)set_req.timestamp, (int)phc_restore_ok);
     if (!phc_restore_ok) {
-        printf("  [CLEANUP_FAILED] PHC restore IOCTL failed (error %lu) — PHC epoch left at reset value\n",
-               GetLastError());
+        printf("  [CLEANUP:FAILED] UT-CORR-005/adapter:%u: PHC restore IOCTL failed (error %lu) — PHC epoch left at reset value\n",
+               adapter_idx, GetLastError());
         s_cleanup_failed++;
     }
 
@@ -327,7 +327,7 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     BOOL restore_ok;
     if (corr6_i210) {
         /* verified by readback against the saved RAW baseline (exact inside the policy, else nominal) */
-        restore_ok = (AvbTestI210RestoreVerified(hDev, cfg.timinca, "UT-CORR-006 restore") == 1);
+        restore_ok = (AvbTestI210RestoreVerifiedAs(hDev, cfg.timinca, "UT-CORR-006 restore", "[CLEANUP:FAILED]", "[CLEANUP:SUCCESS]") == 1);
     } else {
     freq_req.increment_ns   = increment_ns;
     freq_req.increment_frac = increment_frac;
@@ -337,13 +337,13 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     printf("  Restored increment to %u ns (ok=%d)\n", increment_ns, (int)restore_ok);
     }
     if (!restore_ok) {
-        printf("  [CLEANUP_FAILED] Frequency restore IOCTL failed (error %lu) — TIMINCA left at adjusted value\n",
-               GetLastError());
+        if (!corr6_i210)   /* the I210 helper has printed its own [CLEANUP:FAILED] line with the readback */
+            printf("  [CLEANUP:FAILED] UT-CORR-006/adapter:%u: frequency restore IOCTL failed (error %lu) — TIMINCA left at adjusted value\n",
+                   adapter_idx, GetLastError());
         s_cleanup_failed++;
-        passed = false;  /* restore failure overrides test result */
+        /* Cleanup only (Q 2026-10-28): the functional verdict below is unchanged (was: passed = false). */
     }
 
-    /* Report result AFTER restore so restore outcome is included in verdict */
     tc_result("UT-CORR-006 Freq Adj: IOCTL OK, PHC advancing, TX-PHC correlated", passed);
 }
 
@@ -609,7 +609,8 @@ static void test_ut_corr_008(HANDLE hDev, uint32_t adapter_idx)
  *   0 = PASS         — all selected tests passed
  *   1 = FAIL         — at least one test failed
  *   2 = SKIP_ONLY    — no test produced a PASS result (no capable hardware)
- *   4 = CLEANUP_FAILED — restore step failed; hardware state uncertain
+ *   A failed restore is cleanup ([CLEANUP:FAILED] line, recorded by Run-Tests-CI.ps1): it changes neither a functional
+ *   verdict nor the exit code and stops no later testcase (Q 2026-10-28; was exit 4 and a halt of UT-CORR-006).
  * =========================================================================*/
 int main(int argc, char *argv[])
 {
@@ -774,8 +775,8 @@ int main(int argc, char *argv[])
     /* UT-CORR-005 and UT-CORR-006: state-modifying tests on exactly ONE operator-named adapter (issue #343).
      * Previously "adapter 0" = whichever adapter the driver enumerated first: the I210 in the Debug pass and the I226 in
      * the Release pass of the FullSuite run of 2026-10-19.  Now: AVB_HIL_TARGET_DID selects the adapter (unique DID, no
-     * default), and a dedicated handle is bound to it with OPEN_ADAPTER.  Halt subsequent mutation tests if a restore
-     * step fails. */
+     * default), and a dedicated handle is bound to it with OPEN_ADAPTER.  Each testcase establishes its own preconditions
+     * (UT-CORR-006 reads the clock config and the PHC itself); a failed UT-CORR-005 restore is cleanup and stops nothing. */
     if (run_005 || run_006) {
         char target_value[32];
         int  ti  = -1;
@@ -813,13 +814,7 @@ int main(int argc, char *argv[])
         } else {
             printf("\n--- Adapter %d DID=0x%04X (state-modifying tests, exact target via %s) ---\n",
                    ti, (unsigned)enum_dids[ti], AVB_TEST_TARGET_ENV);
-            if (run_005) {
-                test_ut_corr_005(hTarget, (uint32_t)ti);
-                if (s_cleanup_failed > 0) {
-                    printf("[HALT] CLEANUP_FAILED after UT-CORR-005 — skipping remaining mutation tests\n");
-                    run_006 = false;
-                }
-            }
+            if (run_005) test_ut_corr_005(hTarget, (uint32_t)ti);
             if (run_006) test_ut_corr_006(hTarget, (uint32_t)ti);
             CloseHandle(hTarget);
         }
@@ -838,12 +833,11 @@ int main(int argc, char *argv[])
     /* Summary */
     printf("\n========================================================================\n");
     printf("Test Summary -- PHC Stability Under State Changes (#317 Track A)\n");
-    printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d  CleanupFailed: %d\n",
-           s_total, s_passed, s_failed, s_skipped, s_cleanup_failed);
-    if (s_cleanup_failed > 0) {
-        printf("  STATUS: CLEANUP_FAILED — hardware state uncertain after restore failure\n");
-        printf("  Recovery: tools\\setup\\Install-Driver-Elevated.ps1 -Action Reinstall\n");
-    } else if (s_failed > 0) {
+    printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d\n", s_total, s_passed, s_failed, s_skipped);
+    printf("  Cleanup (separate from the functional result and the exit code): FAILED %d\n", s_cleanup_failed);
+    if (s_cleanup_failed > 0)
+        printf("  Cleanup: hardware state uncertain after a restore failure; recovery: tools\\setup\\Install-Driver-Elevated.ps1 -Action Reinstall\n");
+    if (s_failed > 0) {
         printf("  STATUS: FAIL\n");
         printf("  See output above for root cause details.\n");
     } else if (s_passed == 0 && s_failed == 0) {
@@ -853,7 +847,6 @@ int main(int argc, char *argv[])
     }
     printf("========================================================================\n");
 
-    if (s_cleanup_failed > 0) return 4;
     if (s_failed > 0)         return 1;
     if (s_passed == 0)        return 2;  /* all skipped, no PASS */
     return 0;

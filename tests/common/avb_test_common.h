@@ -352,8 +352,10 @@ static __inline int AvbTestI210ExpectRejectedUnchanged(HANDLE h, unsigned ns, un
 
 /* SAFE RESTORE of a previously saved raw TIMINCA, verified by readback.  A value inside the provisional policy is
  * restored exactly; anything else (e.g. the legacy 0x08000000, +3906 ppm) is restored to NOMINAL, never re-applied.
- * Returns 1 = restored and verified, 0 = FAIL (the PHC frequency is NOT restored: manual intervention needed). */
-static __inline int AvbTestI210RestoreVerified(HANDLE h, unsigned saved_raw, const char *what)
+ * Returns 1 = restored and verified, 0 = FAIL (the PHC frequency is NOT restored: manual intervention needed).
+ * AvbTestI210RestoreVerifiedAs: same, reported with the caller's tags.  A test whose restore is cleanup (not its
+ * requirement) passes "[CLEANUP:FAILED]" / "[CLEANUP:SUCCESS]" so the outcome is no testcase verdict (Q 2026-10-28). */
+static __inline int AvbTestI210RestoreVerifiedAs(HANDLE h, unsigned saved_raw, const char *what, const char *fail_tag, const char *pass_tag)
 {
     unsigned want = ((saved_raw & AVB_TEST_I210_TIMINCA_INCVALUE) == 0u) ? 0u : (AvbTestI210RawInPolicy(saved_raw) ? saved_raw : 0u);
     unsigned ns = 0, frac = 0, prev = 0, st = 0, now = 0;
@@ -368,16 +370,21 @@ static __inline int AvbTestI210RestoreVerified(HANDLE h, unsigned saved_raw, con
     if (!adj_ok || !rd_ok || now != want) {
         if (rd_ok) _snprintf_s(rb, sizeof(rb), _TRUNCATE, "readback 0x%08X", now);
         else       _snprintf_s(rb, sizeof(rb), _TRUNCATE, "readback UNREAD (gle=%lu)", rd_gle);
-        AVB_TEST_LOG("  [FAIL] %s: RESTORE FAILED (saved 0x%08X, wanted 0x%08X, restore request %s (status=0x%08X gle=%lu), %s)"
+        AVB_TEST_LOG("  %s %s: RESTORE FAILED (saved 0x%08X, wanted 0x%08X, restore request %s (status=0x%08X gle=%lu), %s)"
                      " - the PHC frequency is NOT verified as restored\n",
-                     what, saved_raw, want, adj_ok ? "ok" : "FAILED", st, adj_gle, rb);
+                     fail_tag, what, saved_raw, want, adj_ok ? "ok" : "FAILED", st, adj_gle, rb);
         return 0;
     }
     if (want != saved_raw)
         AVB_TEST_LOG("  [INFO] %s: saved TIMINCA 0x%08X is outside the +/-%u ppb policy; restored to nominal 0x%08X\n",
                what, saved_raw, (unsigned)AVB_TEST_I210_POLICY_PPB, want);
-    AVB_TEST_LOG("  [PASS] %s: restored TIMINCA 0x%08X (verified by readback)\n", what, now);
+    AVB_TEST_LOG("  %s %s: restored TIMINCA 0x%08X (verified by readback)\n", pass_tag, what, now);
     return 1;
+}
+
+static __inline int AvbTestI210RestoreVerified(HANDLE h, unsigned saved_raw, const char *what)
+{
+    return AvbTestI210RestoreVerifiedAs(h, saved_raw, what, "[FAIL]", "[PASS]");
 }
 
 /* Device ID of the adapter bound to this handle (IOCTL_AVB_GET_HW_STATE reports the actual PCI IDs). */

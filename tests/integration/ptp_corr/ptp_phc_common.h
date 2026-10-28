@@ -41,7 +41,7 @@ static int s_total    = 0;
 static int s_passed   = 0;
 static int s_failed   = 0;
 static int s_skipped  = 0;  /* SKIP: hardware not ready, capability absent */
-static int s_cleanup_failed = 0;  /* CLEANUP_FAILED: restore step failed */
+static int s_cleanup_failed = 0;  /* cleanup FAILED: restore step failed (not a testcase verdict, not in the exit code) */
 
 static void tc_result(const char *name, bool passed)
 {

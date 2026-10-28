@@ -17,20 +17,22 @@
  *     instead of waiting or offering a reboot), bounded by LC_INSTALL_TIMEOUT_MS, output preserved live in
  *     logs\ut_corr_009_install_<cfg>_<time>.log.  On timeout its process tree (job object) is terminated so that it
  *     cannot keep mutating after this test has reported.  No retry, forced unload, reboot or safety-record change.
- *   - The functional verdict ("UT-CORR-009 Driver Lifecycle" PASS/FAIL) and the restoration verdict are separate.
+ *   - The functional verdict ("UT-CORR-009 Driver Lifecycle" PASS/FAIL) and the restoration outcome are separate.
+ *     Restoring the driver found is cleanup, not REQ-F-PTP-007 (Q 2026-10-28): it never changes the functional verdict
+ *     or the exit code and is reported as a cleanup line that Run-Tests-CI.ps1 records as this test's cleanup outcome.
  *     Restoration is decided from observations taken before and after, never from the installer exit code:
  *       verified                     every required observation equals the state found ([POST] line, no verdict tag)
- *       [CLEANUP_FAILED]             an observed required property differs from the state found
- *       [INCONCLUSIVE_RESTORATION]   a required property cannot be observed afterwards and none observed differs
+ *       [CLEANUP:FAILED]             an observed required property differs from the state found
+ *       [CLEANUP:NOT_VERIFIED]       a required property cannot be observed afterwards and none observed differs
  *     Required observations: installed driver file SHA-256, SCM service state, control device, IOCTL_AVB_GET_VERSION
  *     (version and build flags of the LOADED driver), adapter enumeration (VID/DID/capabilities as a multiset: the
  *     index order is not stable across reloads).  Run-Tests-CI.ps1 additionally re-reads the adapters, TIMINCA and
  *     TSAUXC after the test.  Evidence limit: no observation hashes the loaded image.
  *   - BLOCKED (installer never started): driver provenance or a precondition is not established.
  *
- * Exit codes (same contract as test_ptp_phc_stability.exe; the printed verdict line names the restoration case):
- *   0 = PASS, 1 = FAIL or BLOCKED, 2 = SKIP_ONLY (no PASS result),
- *   4 = restoration not verified (CLEANUP_FAILED or INCONCLUSIVE_RESTORATION)
+ * Exit codes (same contract as test_ptp_phc_stability.exe; functional verdicts only, cleanup is in the cleanup line):
+ *   0 = PASS, 1 = FAIL or BLOCKED, 2 = SKIP_ONLY (no PASS result)
+ *   (until 2026-10-28: 4 = restoration not verified, which turned a functional PASS into a suite failure)
  */
 #include "ptp_phc_common.h"
 #include <string.h>   /* memcmp, strstr, strcmp */
@@ -44,7 +46,7 @@
 #define LC_SETTLE_TIMEOUT_MS   (30u * 1000u)   /* service RUNNING + control device after the installer */
 #define LC_SETTLE_STEP_MS      1000u
 
-static int s_inconclusive_restoration = 0;     /* INCONCLUSIVE_RESTORATION: restoration not establishable */
+static int s_inconclusive_restoration = 0;     /* cleanup NOT_VERIFIED: restoration not establishable */
 
 /* =========================================================================
  * Restoration identity (Q 2026-10-27): UT-CORR-009 reinstalls the driver it found.  Before any mutation the installed
@@ -446,7 +448,7 @@ static void test_ut_corr_009(void)
     tc_result("UT-CORR-009 Driver Lifecycle: re-open, PHC reachable, adapter count maintained", fwhy[0] == '\0');
     tc_skip("UT-CORR-009 Hardware TX-PHC correlation after reload: VERIFIED_HARDWARE_TX unavailable (not #328/#199 close criteria)");
 
-    /* --- 4. Restoration verdict, independent of the functional verdict and of the installer exit code --- */
+    /* --- 4. Restoration (cleanup), independent of the functional verdict and of the installer exit code --- */
     char rwhy[512];
     switch (lc_compare(&pre, &post, rwhy, sizeof(rwhy))) {
     case LC_REST_VERIFIED:
@@ -454,13 +456,13 @@ static void test_ut_corr_009(void)
                " and adapter set equal the state found\n");
         break;
     case LC_REST_DIFFERS:
-        printf("  [CLEANUP_FAILED] UT-CORR-009 original state NOT restored: %s--- evidence %s; later driver-mutating tests"
-               " must not run against this state\n", rwhy, inst.log);
+        printf("  [CLEANUP:FAILED] UT-CORR-009: original state NOT restored: %s--- evidence %s; cleanup only, the functional"
+               " verdict above is unchanged\n", rwhy, inst.log);
         s_cleanup_failed++;
         break;
     default:
-        printf("  [INCONCLUSIVE_RESTORATION] UT-CORR-009 restoration cannot be established: %s--- evidence %s; later"
-               " driver-mutating tests must not run against this state\n", rwhy, inst.log);
+        printf("  [CLEANUP:NOT_VERIFIED] UT-CORR-009: restoration cannot be established: %s--- evidence %s; cleanup only,"
+               " the functional verdict above is unchanged\n", rwhy, inst.log);
         s_inconclusive_restoration++;
         break;
     }
@@ -478,10 +480,10 @@ int main(void)
 
     printf("\n========================================================================\n");
     printf("Test Summary -- UT-CORR-009 Driver Lifecycle (#317 Track A)\n");
-    printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d  CleanupFailed: %d  InconclusiveRestoration: %d\n",
-           s_total, s_passed, s_failed, s_skipped, s_cleanup_failed, s_inconclusive_restoration);
+    printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d\n", s_total, s_passed, s_failed, s_skipped);
+    printf("  Cleanup (separate from the functional result and the exit code): FAILED %d  NOT_VERIFIED %d\n",
+           s_cleanup_failed, s_inconclusive_restoration);
     printf("========================================================================\n");
-    if (s_cleanup_failed > 0 || s_inconclusive_restoration > 0) return 4;
     if (s_failed > 0)         return 1;
     if (s_passed == 0)        return 2;
     return 0;
