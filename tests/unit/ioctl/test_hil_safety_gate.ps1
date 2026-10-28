@@ -1138,9 +1138,9 @@ $rW1 = Invoke-Sandbox 'runW1' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $
 $rW2 = Invoke-Sandbox 'runW2' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sf89                      # repeated run
 $rW3 = Invoke-Sandbox 'runW3' @($tRo) -AllSupportedEnabled -SafetyFile $sf89c -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
 $rW4 = Invoke-Sandbox 'runW4' @($tInit, $tRo) -AllSupportedEnabled -SafetyFile $sf89o -LockFile $lf89 -RunnerArgs '-HilLockWaitSeconds 0'
-$s89 = Read-AvbHilSafetyState -Path $sf89; $e89 = if ($s89.Record) { @($s89.Record.events) } else { @() }
-$h89 = if ($s89.Record) { @($s89.Record.history | Where-Object { $_.operation -eq 'RECLASSIFY_CLEANUP_ONLY' }) } else { @() }
-$s89c = Read-AvbHilSafetyState -Path $sf89c; $h89c = if ($s89c.Record) { @($s89c.Record.history | Where-Object { $_.operation -eq 'RECLASSIFY_CLEANUP_ONLY' }) } else { @() }
+$s89 = Read-AvbHilSafetyState -Path $sf89; $e89 = @(if ($s89.Record) { $s89.Record.events })
+$h89 = @(if ($s89.Record) { $s89.Record.history | Where-Object { $_.operation -eq 'RECLASSIFY_CLEANUP_ONLY' } })
+$s89c = Read-AvbHilSafetyState -Path $sf89c; $h89c = @(if ($s89c.Record) { $s89c.Record.history | Where-Object { $_.operation -eq 'RECLASSIFY_CLEANUP_ONLY' } })
 tc_check 'TEST-HILGATE-089-runner-reclassifies-obsolete-cleanup-only-safety-event-under-owned-lock-attended-and-ci' `
     ((Get-RanCount $rW1 '^RAN test_sbfake_init ') -eq 1 -and (Get-RanCount $rW2 '^RAN test_sbfake_init ') -eq 1 -and
      $s89.State -eq 'CLEAR' -and $e89.Count -eq 1 -and $e89[0].verdict -eq 'INCONCLUSIVE_RESTORATION' -and $e89[0].recovery.status -eq 'RECLASSIFIED' -and
