@@ -1057,39 +1057,58 @@ public static class AvbHilIoctl {
 }
 '@
     }
-    $IOCTL_ENUM = [uint32]0x0017007C; $IOCTL_OPEN = [uint32]0x00170080; $IOCTL_CLOCK = [uint32]0x001700B4   # fn 31 / 32 / 45
+    # Observer only: GET_ADAPTER_IDENTITY (NET_LUID per enumeration cursor) + OPEN_ADAPTER_BY_LUID, which binds a handle
+    # without switching the driver's global context and without PTP initialization.  Never OPEN_ADAPTER: it runs
+    # AvbEnsureDeviceReady on the adapter it opens (I210: clears TSAUXC bit 31; after a filter re-attach: full intel_init)
+    # and makes it the global context - the observer would repair or rewrite the state it reports and change which
+    # adapter an unbound test handle reaches (TEST-HILGATE-091).  No fallback: an identity failure is unobservable state.
+    $IOCTL_IDENT = [uint32]0x00170110; $IOCTL_BYLUID = [uint32]0x00170114; $IOCTL_CLOCK = [uint32]0x001700B4   # fn 68 / 69 / 45
     $IOCTL_SNAP = [uint32]0x00170118   # fn 70 IOCTL_AVB_QUERY_HW_SNAPSHOT (TC-ABI-022)
     $regNames = Get-AvbHwRegNames
-    $h = [AvbHilIoctl]::CreateFile('\\.\IntelAvbFilter', [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+    $openDev = { [AvbHilIoctl]::CreateFile('\\.\IntelAvbFilter', [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero) }
+    $h = & $openDev
     if ($h -eq [IntPtr](-1)) {
         $res.Error = "open \\.\IntelAvbFilter failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
         return $res
     }
     try {
         $ret = [uint32]0
-        $e = New-Object byte[] 20
-        if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_ENUM, $e, 20, $e, 20, [ref]$ret, [IntPtr]::Zero)) {
-            $res.Error = "ENUM_ADAPTERS failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
-            return $res
-        }
-        $count = [System.BitConverter]::ToUInt32($e, 4)
-        $entries = @()
+        # AVB_ADAPTER_IDENTITY_REQUEST (48 bytes): version@0 index@4 net_luid@8 if_index@16 count@20 vendor@24 device@26 mac@32 status@40
+        $idents = @(); $count = 1
         for ($i = 0; $i -lt $count; $i++) {
-            $e = New-Object byte[] 20
-            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]$i), 0, $e, 0, 4)
-            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_ENUM, $e, 20, $e, 20, [ref]$ret, [IntPtr]::Zero)) {
-                $entries += [pscustomobject]@{ Index = $i; Did = '?'; Ok = $false; Timinca = 0; Tsauxc = 0; Error = "ENUM_ADAPTERS($i) failed" }
+            $q = New-Object byte[] 48
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]1), 0, $q, 0, 4)   # AVB_ADAPTER_IDENTITY_VERSION
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]$i), 0, $q, 4, 4)
+            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_IDENT, $q, 48, $q, 48, [ref]$ret, [IntPtr]::Zero)) {
+                $res.Error = "GET_ADAPTER_IDENTITY($i) failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+                return $res
+            }
+            $count = [System.BitConverter]::ToUInt32($q, 20)
+            if ($count -eq 0) { break }
+            $st = [System.BitConverter]::ToUInt32($q, 40)
+            if ($st -ne 0) { $res.Error = ("GET_ADAPTER_IDENTITY({0}) status 0x{1:X8} (adapter count {2}; enumeration changed while observing)" -f $i, $st, $count); return $res }
+            $idents += [pscustomobject]@{ Index = $i; LuidValue = [System.BitConverter]::ToUInt64($q, 8); IfIndex = [System.BitConverter]::ToUInt32($q, 16)
+                                          Didv = [System.BitConverter]::ToUInt16($q, 26); Mac = (@($q[32..37] | ForEach-Object { '{0:X2}' -f $_ }) -join '-') }
+        }
+        $dupLuid = @($idents | Group-Object LuidValue | Where-Object { $_.Count -gt 1 })
+        if ($dupLuid.Count -gt 0) { $res.Error = "GET_ADAPTER_IDENTITY: NET_LUID reported for more than one adapter ($(($dupLuid | ForEach-Object { '0x{0:X16}' -f [uint64]$_.Name }) -join ', '))"; return $res }
+        $entries = @()
+        foreach ($idn in $idents) {
+            $i = $idn.Index; $didv = $idn.Didv; $did = Format-AvbDid $didv; $luid = ('0x{0:X16}' -f $idn.LuidValue)
+            $hb = & $openDev
+            if ($hb -eq [IntPtr](-1)) {
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Luid = $luid; IfIndex = $idn.IfIndex; Mac = $idn.Mac; Ok = $false; Timinca = 0; Tsauxc = 0
+                                               Error = "open \\.\IntelAvbFilter for LUID $luid failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
                 continue
             }
-            $vid = [System.BitConverter]::ToUInt16($e, 8); $didv = [System.BitConverter]::ToUInt16($e, 10)
-            $did = Format-AvbDid $didv
-            $o = New-Object byte[] 12
-            [System.Array]::Copy([System.BitConverter]::GetBytes([uint16]$vid), 0, $o, 0, 2)
-            [System.Array]::Copy([System.BitConverter]::GetBytes([uint16]$didv), 0, $o, 2, 2)
-            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]$i), 0, $o, 4, 4)
-            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_OPEN, $o, 12, $o, 12, [ref]$ret, [IntPtr]::Zero)) {
-                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0
-                                               Error = "OPEN_ADAPTER failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
+            try {
+            # AVB_OPEN_BY_LUID_REQUEST (24 bytes): version@0 net_luid@8 matches@16 status@20
+            $o = New-Object byte[] 24
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]1), 0, $o, 0, 4)   # AVB_OPEN_BY_LUID_VERSION
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint64]$idn.LuidValue), 0, $o, 8, 8)
+            if (-not [AvbHilIoctl]::DeviceIoControl($hb, $IOCTL_BYLUID, $o, 24, $o, 24, [ref]$ret, [IntPtr]::Zero)) {
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Luid = $luid; IfIndex = $idn.IfIndex; Mac = $idn.Mac; Ok = $false; Timinca = 0; Tsauxc = 0
+                                               Error = "OPEN_ADAPTER_BY_LUID($luid) failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()), matches $([System.BitConverter]::ToUInt32($o, 16)))" }
                 continue
             }
             $samples = @(); $first = $null; $readErr = ''
@@ -1097,7 +1116,7 @@ public static class AvbHilIoctl {
                 if ($r -gt 0) { Start-Sleep -Milliseconds $PhcReadIntervalMs }
                 $c = New-Object byte[] 24   # AVB_CLOCK_CONFIG: systim u64, timinca, tsauxc, clock_rate_mhz, status
                 $q0 = [System.Diagnostics.Stopwatch]::GetTimestamp()
-                $clockOk = [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)
+                $clockOk = [AvbHilIoctl]::DeviceIoControl($hb, $IOCTL_CLOCK, $c, 24, $c, 24, [ref]$ret, [IntPtr]::Zero)
                 $q1 = [System.Diagnostics.Stopwatch]::GetTimestamp()
                 if (-not $clockOk) { $readErr = "GET_CLOCK_CONFIG failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"; break }
                 $status = [System.BitConverter]::ToUInt32($c, 20)
