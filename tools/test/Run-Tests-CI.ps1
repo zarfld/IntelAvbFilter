@@ -1190,9 +1190,12 @@ function Get-AvbHilSandboxState {
                 $samples += ,([ordered]@{ qpcBefore = [long]$q0; qpcAfter = [long]$q1; phcNs = [long]([double]($q0 + 5) * 1e9 / $f) + [long]$c.PhcOffsetNs })
             }
         }
-        [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
-                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples
-                           Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' }) }
+        $sc = [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
+                                 Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples
+                                 Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' }) }
+        # Optional identity (as the hardware observer reports it): Luid, InstanceId.  Absent = enumeration position only.
+        foreach ($f in 'Luid', 'InstanceId') { if ($c.PSObject.Properties[$f]) { $sc | Add-Member -NotePropertyName $f -NotePropertyValue ([string]$c.$f) } }
+        $sc
     })
     return $st
 }
@@ -1229,6 +1232,19 @@ function Get-AvbHilState {
     }
     $st.Adapters = $list
     $ck = Get-AvbHilClockState -PhcReads $PhcReads
+    # Physical identity: the driver's base-miniport NET_LUID mapped to exactly one Intel PnP instance (Get-NetAdapter
+    # NetLuid).  No or several matches -> no InstanceId -> IdentityVerified stays false (never guessed from the DID).
+    $byLuid = @{}
+    foreach ($n in @($na.Values)) {
+        $lk = '0x{0:X16}' -f [uint64]$n.NetLuid
+        if (-not $byLuid.ContainsKey($lk)) { $byLuid[$lk] = @() }
+        $byLuid[$lk] += [string]$n.PnPDeviceID
+    }
+    foreach ($e in @($ck.Entries)) {
+        $inst = ''
+        if ($e.Luid -and $byLuid.ContainsKey($e.Luid) -and @($byLuid[$e.Luid]).Count -eq 1) { $inst = @($byLuid[$e.Luid])[0] }
+        $e | Add-Member -NotePropertyName InstanceId -NotePropertyValue $inst -Force
+    }
     $st.ClockOk = $ck.Ok; $st.ClockError = $ck.Error; $st.Clock = $ck.Entries
     return $st
 }
@@ -1686,12 +1702,13 @@ function Get-AvbTestTimeoutSeconds {
 # Run-Tests-Elevated.ps1.
 
 # PHC window of one adapter (Get-AvbHilState -PhcReads N) in the input format of tools/lib/PhcRestoration.ps1.  Adapter
-# identity = driver enumeration (DID + driver index): the same identity Compare-AvbHilState uses for clock registers.
+# identity = Get-AvbHilAdapterKey (NET_LUID, or the enumeration position without one): the same identity
+# Compare-AvbHilState uses for clock registers.
 function ConvertTo-AvbHilPhcWindow {
     param($Entry)
     return [ordered]@{
         provenance = [ordered]@{ source = $(if ($script:IsSandbox) { 'synthetic' } else { 'hardware' }); host = $env:COMPUTERNAME; did = $Entry.Did
-                                 adapterIdentity = ("drv:{0}#{1}" -f $Entry.Did, $Entry.Index); capturedUtc = (Get-Date).ToUniversalTime().ToString('o')
+                                 adapterIdentity = (Get-AvbHilAdapterKey $Entry); capturedUtc = (Get-Date).ToUniversalTime().ToString('o')
                                  driverSha256 = $env:HIL_DRIVER_SHA256 }
         qpcFrequency = [System.Diagnostics.Stopwatch]::Frequency; timinca = [uint32]$Entry.Timinca; tsauxc = [uint32]$Entry.Tsauxc
         tsControl = $null   # timestamp-control state is not observed by the runner
