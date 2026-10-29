@@ -447,7 +447,7 @@ $AllTests = @(
         Type = "cl"
         Source = "tests/device_specific/i210/avb_test_i210_um.c"
         ExtraSources = "tests/common/avb_test_common.c"
-        Output = "avb_test_i210.exe"
+        Output = "avb_test_i210_device.exe"   # was avb_test_i210.exe, also linked by avb_test_project (avb_test.mak) - TEST-COMPLETE-004
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "I210 Device-Specific Test"
     },

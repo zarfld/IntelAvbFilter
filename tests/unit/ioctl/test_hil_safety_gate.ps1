@@ -245,7 +245,8 @@ $initKeys = @($registry.Keys | Where-Object { $registry[$_] -eq 'Init' } | Sort-
 $hwKeys = @($hwEntries | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } })
 $initNotGap = @($initKeys | Where-Object { $gapEntries -notcontains $_ -and $hwKeys -notcontains $_ })
 $noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$_]]); @($sl | Where-Object { $registry[$_] -eq 'ReadOnly' }).Count -eq 0 })
-$expectInit = @('test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
+$expectInit = @('avb_comprehensive_test', 'avb_hw_state_test_um',   # registered 2026-10-29 (TEST-COMPLETE-001)
+                'test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
 tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suites-keep-readonly-entries' `
     ((($initKeys -join ',') -eq ($expectInit -join ',')) -and $initNotGap.Count -eq 0 -and $noReadOnly.Count -eq 0) `
     ("init keys: [{0}]; not declared as gap: [{1}]; suites without a ReadOnly entry: [{2}]" -f ($initKeys -join ','), ($initNotGap -join ','), ($noReadOnly -join ','))
@@ -279,6 +280,18 @@ for ($i = 0; $i -lt $buildLines.Count; $i++) {
         for ($j = $i + 1; $j -lt [Math]::Min($i + 14, $buildLines.Count); $j++) {
             if ($buildLines[$j] -match '^\s*Name\s*=') { break }
             if ($buildLines[$j] -match '^\s*(Source|ExtraSources)\s*=\s*"([^"]+)"') { $srcs += ($Matches[2] -split '\s+') }
+            # nmake target: the makefile itself (it may generate the program text with echo) + every C/C++ file it
+            # names that exists relative to it (TEST-HILGATE-092).
+            if ($buildLines[$j] -match '^\s*Makefile\s*=\s*"([^"]+)"') {
+                $mk = $Matches[1]; $mkFull = Join-Path $RepoRoot ($mk -replace '/', '\')
+                $srcs += $mk
+                if (Test-Path -LiteralPath $mkFull) {
+                    foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($mkFull), '[\w.\\/-]+\.c(pp)?\b')) {
+                        $cand = [System.IO.Path]::GetFullPath((Join-Path (Split-Path $mkFull) $m.Value))
+                        if ((Test-Path -LiteralPath $cand) -and $cand.StartsWith($RepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) { $srcs += $cand.Substring($RepoRoot.Length + 1) }
+                    }
+                }
+            }
         }
         if (-not $buildMap.ContainsKey($nm)) { $buildMap[$nm] = $srcs }
     }
@@ -335,10 +348,28 @@ foreach ($k in @($registry.Keys)) {
     if (($cls -eq 'Mutating' -or $cls -eq 'Mutating:Target') -and -not $mut) { $bad008 += $k }
     if ($cls -ne 'Unsafe' -and [regex]::IsMatch($codeS, $nicRx) -and -not $nicExceptions.ContainsKey($k)) { $bad009 += $k }
 }
+# 092: a class is only as good as the source it was checked against.  Every classified entry must resolve to
+#      reviewable program text with an entry point - an empty source set (e.g. an nmake target whose makefile was
+#      not read) would let 006 pass a ReadOnly label without inspecting anything.
+$noSrc = @(foreach ($k in @($registry.Keys)) {
+    if ($registry[$k] -eq 'Unknown') { continue }
+    $c = Get-StrippedSource (($k -split '\s+', 2)[0]) $false
+    if ([string]::IsNullOrWhiteSpace($c) -or -not [regex]::IsMatch($c, '\b(w?main|_tmain)\s*\(|\b(BEGIN_)?TEST_METHOD\s*\(')) { $k }
+})
+tc_check 'TEST-HILGATE-092-every-classified-entry-is-checked-against-real-program-source' ($noSrc.Count -eq 0) ("no reviewable program source: {0}" -f ($noSrc -join ', '))
 tc_check 'TEST-HILGATE-005-target-aware-entries-select-the-exact-target' ($registry.Count -gt 0 -and $bad005.Count -eq 0) ("not exact-target-aware: {0}" -f ($bad005 -join ', '))
 tc_check 'TEST-HILGATE-006-readonly-entries-contain-no-mutating-ioctl' ($registry.Count -gt 0 -and $bad006.Count -eq 0) ("mutating code in ReadOnly: {0}" -f ($bad006 -join ', '))
 tc_check 'TEST-HILGATE-007-init-entries-only-init' ($registry.Count -gt 0 -and $bad007.Count -eq 0) ("Init misclassified: {0}" -f ($bad007 -join ', '))
 tc_check 'TEST-HILGATE-008-mutating-entries-really-mutate' ($registry.Count -gt 0 -and $bad008.Count -eq 0) ("Mutating without mutating code: {0}" -f ($bad008 -join ', '))
+# 093: the #328 hold derived from the source, not from a fixed name list (081): every classified entry whose
+#      program can issue SETUP_TAS / SETUP_FP / SETUP_PTM carries the #328 hold, so a newly registered TSN
+#      configuration program cannot be dispatched before the TAS/FP restore defect is hardware-verified fixed.
+$tsnNoHold = @(foreach ($k in @($registry.Keys)) {
+    if ($roExceptions.ContainsKey($k)) { continue }   # documented: the codes are data, never passed to DeviceIoControl
+    $c = Get-StrippedSource (($k -split '\s+', 2)[0]) $false
+    if ($c -and [regex]::IsMatch($c, '\bIOCTL_AVB_(SETUP_TAS|SETUP_FP|SETUP_PTM)\b') -and -not ($holds.ContainsKey($k) -and $holds[$k] -match '#328')) { $k }
+})
+tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-hazard-held' ($tsnNoHold.Count -eq 0) ("SETUP_TAS/FP/PTM in source without a #328 hold: {0}" -f ($tsnNoHold -join ', '))
 tc_check 'TEST-HILGATE-009-nic-admin-only-in-unsafe-entries' ($registry.Count -gt 0 -and $bad009.Count -eq 0) ("NIC/driver administration outside Unsafe: {0}" -f ($bad009 -join ', '))
 
 $commonC = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\common\avb_test_common.c'))

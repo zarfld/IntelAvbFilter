@@ -95,6 +95,15 @@ $orphan = @($scripts | Where-Object { $ps1Entries -notcontains $_.ToLowerInvaria
 tc_check 'TEST-COMPLETE-003-every-unit-test-script-is-registered-or-classified' ($orphan.Count -eq 0) `
     ("{0} of {1} test script(s) never executed by any runner list: {2}" -f $orphan.Count, $scripts.Count, ($orphan -join ', '))
 
+# 004: one build target per output executable.  Two targets linking the same <Output>.exe into the shared test
+#      directory make the executed program depend on build order (avb_test_project's avb_test_um.c vs.
+#      avb_test_i210_device's device_specific/i210 source, 2026-10-29) - the runner and its provenance cannot tell
+#      which source a result belongs to.
+$dupOut = @($targets | Group-Object Out | Where-Object { $_.Count -gt 1 } |
+            ForEach-Object { "$($_.Name).exe <- $((@($_.Group | ForEach-Object { $_.Name })) -join ' + ')" })
+tc_check 'TEST-COMPLETE-004-every-output-executable-has-exactly-one-build-target' ($dupOut.Count -eq 0) `
+    ("{0} output(s) produced by more than one build target: {1}" -f $dupOut.Count, ($dupOut -join '; '))
+
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
 if ($failed -gt 0) { Write-Host "[FAIL] TEST-COMPLETE: artifacts disappear from verification" -ForegroundColor Red; exit 1 }

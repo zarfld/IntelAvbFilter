@@ -321,6 +321,17 @@ for ($i = 0; $i -lt $buildLines.Count; $i++) {
         for ($j = $i + 1; $j -lt [Math]::Min($i + 16, $buildLines.Count); $j++) {
             if ($buildLines[$j] -match '^\s*Name\s*=') { break }
             if ($buildLines[$j] -match '^\s*(Source|ExtraSources)\s*=\s*"([^"]+)"') { $srcs += ($Matches[2] -split '\s+') }
+            # nmake target: the makefile (may generate the program text) + every C/C++ file it names (TEST-HILGATE-092).
+            if ($buildLines[$j] -match '^\s*Makefile\s*=\s*"([^"]+)"') {
+                $mk = $Matches[1]; $mkFull = Join-Path $RepoRoot ($mk -replace '/', '\')
+                $srcs += $mk
+                if (Test-Path -LiteralPath $mkFull) {
+                    foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($mkFull), '[\w.\\/-]+\.c(pp)?\b')) {
+                        $cand = [System.IO.Path]::GetFullPath((Join-Path (Split-Path $mkFull) $m.Value))
+                        if ((Test-Path -LiteralPath $cand) -and $cand.StartsWith($RepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) { $srcs += $cand.Substring($RepoRoot.Length + 1) }
+                    }
+                }
+            }
         }
         if (-not $buildMap.ContainsKey($nm)) { $buildMap[$nm] = @($srcs | Where-Object { $_ -notmatch 'avb_test_common\.c$' }) }
     }
