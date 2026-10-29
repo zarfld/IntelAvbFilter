@@ -288,6 +288,30 @@ tc_check 'TEST-RESULTSJSON-025-blocked-testcase-and-inconclusive-keep-the-run-no
      ($rE.Doc.overall -eq 'FAILED') -and ($rE.Doc.exitCode -ne 0) -and ($rE.Exit -ne 0)) `
     ("counts={0} overall={1} exit={2}" -f $(if ($rE.Doc) { $rE.Doc.counts | ConvertTo-Json -Compress }), $(if ($rE.Doc) { $rE.Doc.overall }), $rE.Exit)
 
+# --- Run F: the suite JUnit is attributable to THIS run only ------------------------------------------------------
+# LocalSuites_20261029_065141: every suite JUnit (Mutation: 6 records) reported "Found 160 test log(s)" - the converter
+# took every *.exe_<date>_*.log of the shared logs directory (other suites, the other configuration, earlier aborted
+# runs).  A same-date log that is not a record of this run must never appear; every record's log must; each suite
+# carries the run identity.
+$dirF = Join-Path $Tmp 'runF'; $logsF = Join-Path $dirF 'logs'; New-Item -ItemType Directory -Path $logsF -Force | Out-Null
+$foreign = Join-Path $logsF ("rj_foreign_suite.exe_{0}_000001.log" -f (Get-Date -Format 'yyyyMMdd'))
+"  [FAIL] TC-FOREIGN-001: result of another suite / an earlier run" | Set-Content -LiteralPath $foreign -Encoding UTF8
+Write-Manifest @($pPass, $pFail) 'Debug'
+$rF = Invoke-Sandbox 'runF' @((Get-Entry $pPass), (Get-Entry $pFail))
+$junitF = @(Get-ChildItem -LiteralPath $logsF -Filter 'junit-HardwareUnit-Debug-*.xml' -ErrorAction SilentlyContinue)
+$xF = $null; if ($junitF.Count -eq 1) { [xml]$xF = Get-Content -LiteralPath $junitF[0].FullName -Raw }
+$suitesF = @(if ($xF) { @($xF.testsuites.testsuite) })
+$propF = { param($s, [string]$n) @(@($s.properties.property) | Where-Object { $_.name -eq $n } | ForEach-Object { $_.value })[0] }
+$junitLogs = @($suitesF | ForEach-Object { [System.IO.Path]::GetFullPath((& $propF $_ 'log_file')) } | Sort-Object)
+$recLogs = @(if ($rF.Doc) { @($rF.Doc.records) | Where-Object { $_.logPath } | ForEach-Object { [System.IO.Path]::GetFullPath($_.logPath) } | Sort-Object -Unique })
+$idOk = ($suitesF.Count -gt 0) -and (@($suitesF | Where-Object { (& $propF $_ 'source_revision') -ne 'sandbox-rev' -or (& $propF $_ 'run_started_utc') -ne [string]$rF.Doc.startedUtc -or
+                                                                    -not (& $propF $_ 'results_json') -or (& $propF $_ 'suite') -ne 'HardwareUnit' }).Count -eq 0)
+tc_check 'TEST-RESULTSJSON-026-suite-junit-contains-exactly-the-logs-of-this-runs-records-with-run-identity' `
+    (($junitF.Count -eq 1) -and ($recLogs.Count -ge 2) -and ((Compare-Object $junitLogs $recLogs | Measure-Object).Count -eq 0) -and
+     ($xF.OuterXml -notmatch 'TC-FOREIGN-001') -and $idOk) `
+    ("junit files={0} junit logs=[{1}] record logs=[{2}] foreign present={3} identity ok={4}" -f $junitF.Count, ($junitLogs -join ','), ($recLogs -join ','),
+     $(if ($xF) { $xF.OuterXml -match 'TC-FOREIGN-001' }), $idOk)
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
