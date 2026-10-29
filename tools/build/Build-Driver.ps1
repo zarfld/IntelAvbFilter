@@ -115,6 +115,16 @@ Write-Host @"
 ================================================================
 "@ -ForegroundColor Cyan
 
+# Build exclusion (tools/lib/HilLock.ps1): never overwrite artifacts a HIL run of another execution verifies and runs.
+. (Join-Path $PSScriptRoot '..\lib\HilLock.ps1')
+$BuildLockCtx = Enter-AvbHilBuildExclusion -Label "Build-Driver $Configuration" -GitHub $(if ($env:GITHUB_ACTIONS -eq 'true') { @{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB } } else { $null })
+if (-not $BuildLockCtx.Ok) {
+    Write-Failure "Build-Driver: $($BuildLockCtx.Why)"
+    exit 1
+}
+if ($BuildLockCtx.Owner) { Write-Info "Machine lock held by this build until it finishes ($(Get-AvbHilLockPath))" }
+try {   # body not re-indented; the finally block at the end of this file releases a lock this build acquired
+
 # Calculate paths
 $scriptDir = $PSScriptRoot  # tools/build
 $toolsDir = Split-Path $scriptDir -Parent  # tools
@@ -504,3 +514,6 @@ if (-not $SkipDriver) {
 }
 # Explicit success (every failure above exits nonzero); never inherit the last native command's exit code.
 exit 0
+} finally {
+    if ($BuildLockCtx.Owner) { $null = Exit-AvbHilLock -Owner $BuildLockCtx.Owner }
+}

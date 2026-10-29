@@ -140,6 +140,27 @@ function Resolve-AvbHilLockContext {
     return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock held by $($owner.kind) '$($owner.label)' (pid $($owner.pid)), which is not this process or one of its ancestors" }
 }
 
+# Build exclusion (Build-Tests.ps1, Build-Driver.ps1).  A build writes the artifacts a HIL run verifies (manifest SHA256,
+# build-input digest) and executes, so it never runs beside a HIL execution it does not belong to
+# (LocalSuites_20261029_005219: an outside build overwrote them mid-run - 12 SHA256 mismatches, a failed relink of a
+# running test).  Inside the owner's context (LocalSuites in-process, a child of the owner, the hil.yml job) the build
+# proceeds and acquires nothing.  Any other lock - live, stale or unreadable - refuses the build: a stale lock is taken
+# over (and its interrupted run attributed) only by the next HIL run, never by a build.  No lock: an attended build holds
+# the lock itself for its duration; under GitHub Actions nothing is acquired (absent lock = no HIL execution here).
+# @{ Ok; Owner (acquired here - release it with Exit-AvbHilLock; $null otherwise); How = self|ancestor|ci-job|acquired|none; Why }
+function Enter-AvbHilBuildExclusion {
+    param([string]$Label, [string]$Path = (Get-AvbHilLockPath), $GitHub = $null, [int]$ProcessId = $PID, [int[]]$Ancestors = $null)
+    $ctx = Resolve-AvbHilLockContext -Path $Path -ProcessId $ProcessId -Ancestors $Ancestors -GitHub $GitHub
+    if ($ctx.Owned) { return @{ Ok = $true; Owner = $null; How = $ctx.How; Why = '' } }
+    $refuse = 'building now would overwrite the test and driver artifacts that execution verifies and runs; build after it has released the lock'
+    if ($null -ne $ctx.Owner) { return @{ Ok = $false; Owner = $null; How = ''; Why = "machine lock not owned by this build ($($ctx.Why)): $refuse" } }
+    if ($null -ne $GitHub) { return @{ Ok = $true; Owner = $null; How = 'none'; Why = '' } }
+    # Nothing is ever stale here (no takeover); CreateNew keeps a HIL run that starts now from entering.
+    $e = Enter-AvbHilLock -Kind 'local' -Label $Label -Path $Path -WaitSeconds 0 -IsProcessAlive { param([int]$Id) $true } -IsCiJobActive { $true } -Sleep { param([int]$s) }
+    if ($e.Ok) { return @{ Ok = $true; Owner = $e.Owner; How = 'acquired'; Why = '' } }
+    return @{ Ok = $false; Owner = $null; How = ''; Why = "machine lock taken by another execution ($($e.Why)): $refuse" }
+}
+
 # ---------------------------------------------------------------------------------------------------------
 # Original SESSION baseline (Q 2026-10-21): one per exclusive HIL session, beside the lock
 # (%ProgramData%\IntelAvbFilter-hil-session.json, schema avb-hil-session/1), independent of suite results.

@@ -206,6 +206,65 @@ foreach ($p in $procs) { $p.WaitForExit(60000) | Out-Null }
 $codes = @($procs | ForEach-Object { $_.ExitCode } | Sort-Object)
 tc_check 'TEST-CIDEPLOY-024-concurrent-processes-exactly-one-acquires' (($codes -join ',') -eq '0,7,7,7') "exit codes: $($codes -join ',')"
 
+# Build exclusion: a build writes the artifacts a HIL run verifies and executes (LocalSuites_20261029_005219: a build
+# outside the run overwrote them mid-run - 12 SHA256 mismatches, a failed relink of a running test).
+$bl = Join-Path $Tmp 'build.lock'
+$haveBx = [bool](Get-Command Enter-AvbHilBuildExclusion -ErrorAction SilentlyContinue)
+tc_check 'TEST-CIDEPLOY-025a-build-exclusion-function-present' $haveBx 'Enter-AvbHilBuildExclusion missing in tools/lib/HilLock.ps1'
+if ($haveBx) {
+    $env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''
+    $bx = Enter-AvbHilBuildExclusion -Label 'Build-Tests Debug' -Path $bl -Ancestors @()
+    $held = Read-AvbHilLock -Path $bl
+    $rel = Exit-AvbHilLock -Owner $bx.Owner -Path $bl
+    tc_check 'TEST-CIDEPLOY-025b-attended-build-without-owner-context-holds-the-lock-for-its-duration' `
+        ($bx.Ok -and $bx.How -eq 'acquired' -and $null -ne $held -and $held.kind -eq 'local' -and $held.label -eq 'Build-Tests Debug' -and $rel.Ok -and -not (Test-Path -LiteralPath $bl)) `
+        ("ok={0} how={1} held={2} released={3}" -f $bx.Ok, $bx.How, $(if ($held) { $held.label }), $rel.Ok)
+
+    # Foreign live owner (a LocalSuites run), stale owner and unreadable lock: refused, lock bytes untouched, no takeover.
+    $refused = @()
+    foreach ($case in @(
+            @{ Name = 'foreign-live-local'; Json = '{"kind":"local","label":"LocalSuites Debug+Release","host":"' + $env:COMPUTERNAME + '","pid":4,"acquiredUtc":"2026-10-28T23:52:19Z"}' },
+            @{ Name = 'stale-dead-local';   Json = '{"kind":"local","label":"LocalSuites Debug","host":"' + $env:COMPUTERNAME + '","pid":999999,"acquiredUtc":"2026-10-28T23:52:19Z"}' },
+            @{ Name = 'foreign-ci-job';     Json = '{"kind":"ci","label":"hil Debug","host":"' + $env:COMPUTERNAME + '","pid":4,"runId":"77","runAttempt":"1","job":"hil-debug","acquiredUtc":"2026-10-28T23:52:19Z"}' },
+            @{ Name = 'unreadable';         Json = '{not json' })) {
+        Set-Content -LiteralPath $bl -Value $case.Json -Encoding UTF8 -NoNewline
+        $before = [IO.File]::ReadAllBytes($bl)
+        $r = Enter-AvbHilBuildExclusion -Label 'Build-Tests Debug' -Path $bl -Ancestors @(1234)
+        $after = [IO.File]::ReadAllBytes($bl)
+        if ($r.Ok -or $null -ne $r.Owner -or -not $r.Why -or ([Convert]::ToBase64String($before) -ne [Convert]::ToBase64String($after))) { $refused += "$($case.Name): ok=$($r.Ok) why=$($r.Why)" }
+        Remove-Item -LiteralPath $bl -Force
+    }
+    tc_check 'TEST-CIDEPLOY-025c-build-refused-while-another-execution-or-a-stale-or-unreadable-lock-holds-the-machine-lock-untouched' ($refused.Count -eq 0) ($refused -join '; ')
+
+    # Inside the owner's context (LocalSuites in-process = self, child of the owner = ancestor, the hil.yml job = ci-job):
+    # the build proceeds and acquires nothing (the owner releases).
+    $ownJson = '{"kind":"local","label":"LocalSuites Debug+Release","host":"' + $env:COMPUTERNAME + '","pid":4321,"acquiredUtc":"2026-10-28T23:52:19Z"}'
+    Set-Content -LiteralPath $bl -Value $ownJson -Encoding UTF8 -NoNewline
+    $self = Enter-AvbHilBuildExclusion -Label 'b' -Path $bl -ProcessId 4321 -Ancestors @()
+    $anc  = Enter-AvbHilBuildExclusion -Label 'b' -Path $bl -ProcessId 99 -Ancestors @(55, 4321)
+    $ownKept = ((Get-Content -LiteralPath $bl -Raw) -eq $ownJson)
+    Set-Content -LiteralPath $bl -Value ('{"kind":"ci","label":"hil Debug","host":"' + $env:COMPUTERNAME + '","pid":4,"runId":"77","runAttempt":"1","job":"hil-debug","acquiredUtc":"2026-10-28T23:52:19Z"}') -Encoding UTF8 -NoNewline
+    $job   = Enter-AvbHilBuildExclusion -Label 'b' -Path $bl -GitHub @{ runId = '77'; runAttempt = '1'; job = 'hil-debug' }
+    $other = Enter-AvbHilBuildExclusion -Label 'b' -Path $bl -GitHub @{ runId = '77'; runAttempt = '1'; job = 'hil-release' }
+    Remove-Item -LiteralPath $bl -Force
+    $hosted = Enter-AvbHilBuildExclusion -Label 'b' -Path $bl -GitHub @{ runId = '78'; runAttempt = '1'; job = 'unit-tests' }
+    tc_check 'TEST-CIDEPLOY-025d-build-inside-the-owner-context-proceeds-without-acquiring-hosted-ci-writes-no-lock' `
+        ($self.Ok -and $self.How -eq 'self' -and $null -eq $self.Owner -and $anc.Ok -and $anc.How -eq 'ancestor' -and $ownKept -and
+         $job.Ok -and $job.How -eq 'ci-job' -and -not $other.Ok -and $hosted.Ok -and $null -eq $hosted.Owner -and -not (Test-Path -LiteralPath $bl)) `
+        ("self={0}/{1} anc={2}/{3} kept={4} job={5}/{6} other={7} hosted={8} lockfile={9}" -f $self.Ok, $self.How, $anc.Ok, $anc.How, $ownKept, $job.Ok, $job.How, $other.Ok, $hosted.Ok, (Test-Path -LiteralPath $bl))
+}
+# STATIC (source order, not runtime evidence): both build scripts take the exclusion before any build step and release
+# a lock they acquired in a finally block (every exit path, including exit inside the body).
+$staticBx = @()
+foreach ($bs in 'Build-Tests.ps1', 'Build-Driver.ps1') {
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot "tools\build\$bs") -Raw
+    $iBx = $src.IndexOf('Enter-AvbHilBuildExclusion'); $iTry = $src.IndexOf("`ntry {", [Math]::Max(0, $iBx))
+    $iWork = [regex]::Match($src, '(?m)^# =+\s*\r?\n# (Build Diagnostic Tools|STEP 1: Find MSBuild)').Index
+    $iFin = $src.LastIndexOf('} finally {'); $iExit = $src.IndexOf('Exit-AvbHilLock', [Math]::Max(0, $iFin))
+    if ($iBx -lt 0 -or $iTry -lt 0 -or $iWork -le 0 -or $iBx -gt $iWork -or $iTry -gt $iWork -or $iFin -lt $iWork -or $iExit -lt 0) { $staticBx += "${bs}: exclusion=$iBx try=$iTry firstStep=$iWork finally=$iFin release=$iExit" }
+}
+tc_check 'TEST-CIDEPLOY-025e-STATIC-build-scripts-take-the-exclusion-before-building-and-release-in-finally' ($staticBx.Count -eq 0) ($staticBx -join '; ')
+
 # ---------------------------------------------------------------------------------------------------------
 # Crash evidence (CI cases 12, 13)
 # ---------------------------------------------------------------------------------------------------------

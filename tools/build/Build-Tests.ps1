@@ -84,6 +84,16 @@ if ($TestName) {
 }
 Write-Host ""
 
+# Build exclusion (tools/lib/HilLock.ps1): never overwrite artifacts a HIL run of another execution verifies and runs.
+. (Join-Path $PSScriptRoot '..\lib\HilLock.ps1')
+$BuildLockCtx = Enter-AvbHilBuildExclusion -Label "Build-Tests $Configuration" -GitHub $(if ($env:GITHUB_ACTIONS -eq 'true') { @{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB } } else { $null })
+if (-not $BuildLockCtx.Ok) {
+    Write-Host "[BLOCKED] Build-Tests: $($BuildLockCtx.Why)" -ForegroundColor Red
+    exit 1
+}
+if ($BuildLockCtx.Owner) { Write-Host "Machine lock held by this build until it finishes ($(Get-AvbHilLockPath))" -ForegroundColor DarkGray }
+try {   # body not re-indented; the finally block at the end of this file releases a lock this build acquired
+
 # =============================================================================
 # Build Diagnostic Tools (Moved from Run-Tests.ps1 -CompileDiagnostics)
 # Separation of Concerns: BUILD logic belongs in Build-Tests.ps1
@@ -2471,3 +2481,6 @@ if ($FailCount -gt 0) {
 }
 
 exit 0
+} finally {
+    if ($BuildLockCtx.Owner) { $null = Exit-AvbHilLock -Owner $BuildLockCtx.Owner }
+}
