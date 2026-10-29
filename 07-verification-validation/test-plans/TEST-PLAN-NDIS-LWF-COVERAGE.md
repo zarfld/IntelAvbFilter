@@ -61,6 +61,7 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 | Exit gate | `suites/windows_driver_mustfix.qls` violations → fail (local path, MSDT WHCP_22H2 clone) | Violations block WHCP certification |
 
 **CI CodeQL dependency set** (`analyze` job; reproducible production analysis — independent of the WHCP matrix above):
+
 | Component | Pinned | Source of truth / provenance |
 |---|---|---|
 | `microsoft/windows-drivers` pack | 1.10.0 | `.github/codeql/codeql-driver-config.yml`; newest published release (GHCR, built from MSDT `d9374fbb7c`) |
@@ -70,11 +71,13 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 | Analysis CLI | bundled with `github/codeql-action@v4` (not pinned) | recorded per run in the SARIF |
 
 **CI CodeQL verification tiers** (failures are never converted to success; each tier is separate evidence):
+
 1. Offline contract — `tests/unit/ci/test_codeql_driver_config.ps1` (TEST-CODEQLCFG, `-Suite Unit`): exact pins, required entries, inventory ↔ pins, workflow wiring, failure classification. Static only.
 2. Dependency resolution — `tools/ci/Test-CodeQLDriverPacks.ps1 -Mode Resolve`, **before** `codeql-action/init`: fresh package cache, `codeql database init --codescanning-config`, exact inventory comparison. Exit 3 INFRA_FAILURE (registry/network) · 4 DEPENDENCY_FAILURE · 5 INVENTORY_MISMATCH · 2 CONFIG_INVALID · 6 TOOL_FAILURE.
 3. Full analysis — traced Release|x64 build, `codeql-action/analyze`, then `Test-CodeQLDriverPacks.ps1 -Mode Analysis` on the produced SARIF.
 
 **Controlled upstream update** (never float a version in production; no automatic upgrades):
+
 1. Check for a newer `microsoft/windows-drivers` / `microsoft/cpp-queries` release (MSDT CHANGELOG, GHCR tags) — e.g. at the weekly scheduled run review.
 2. Write a candidate config with the new exact versions (all packs the new suites require, including suite `from:` references).
 3. Run `tools/ci/Test-CodeQLDriverPacks.ps1 -Mode Resolve -CodeQL <cli> -ConfigPath <candidate> -ProposedInventoryOut <file>`; a DEPENDENCY_FAILURE means the candidate set is incompatible — do not adopt.
