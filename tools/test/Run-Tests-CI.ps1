@@ -2111,7 +2111,8 @@ function Invoke-HilPostTestCheck {
         $selfFail = (-not $TimedOut) -and ($Output -match '(?m)^\s*\[CLEANUP:FAILED\]|^\s*\[CLEANUP_FAILED\]|RESTORE FAILED')
         $selfNotVerified = (-not $TimedOut) -and -not $selfFail -and ($Output -match '(?m)^\s*\[CLEANUP:NOT_VERIFIED\]')
         $declared = @(if ($script:AvbItem) { Get-AvbHilMutatedState $script:AvbItem.Entry })
-        $unobserved = @($declared | Where-Object { $HilVerifiableState -notcontains $_ })
+        $verifiableNow = @(Get-AvbHilVerifiableState -Base $script:HilBaseline -Cur $cur -Target $(if ($script:AvbItem -and $script:AvbItem.Target) { [string]$script:AvbItem.Target } else { '' }))
+        $unobserved = @($declared | Where-Object { $verifiableNow -notcontains $_ })
         $required = if ($declared.Count -gt 0) { 'YES' } else { 'UNKNOWN' }
         $scope = if ($declared.Count -gt 0) { "declared modified state: $($declared -join ', ')$(if ($unobserved.Count) { "; not observable by the runner: $($unobserved -join ', ')" })" } else { 'modified state not declared (unknown)' }
         if ($declared.Count -gt 0 -and $unobserved.Count -eq 0 -and -not $TimedOut) {
@@ -2128,7 +2129,7 @@ function Invoke-HilPostTestCheck {
             Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_REQUIRED' -Reason "FAILED_SETUP before any mutation, no change independently verified: $($nm.Why)"
             return
         }
-        $why = "restoration not independently verified ($scope) --- the runner observes adapter presence/PnP/admin/link/binding and TIMINCA/TSAUXC only; PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/timestamp-control/target-time state are not observed" +
+        $why = "restoration not independently verified ($scope) --- the runner observes adapter presence/PnP/admin/link/binding, TIMINCA/TSAUXC and the QUERY_HW_SNAPSHOT registers read VALID (verifiable groups now: $($verifiableNow -join ', ')); PHC time continuity, rate and offset and TAS/FP/PTM/Qav/CBS/PFC/EEE/VLAN/MDIO/target-time state are not observed" +
                $(if ($nm.Claimed) { " --- the test's FAILED_SETUP no-mutation claim is NOT verified: $($nm.Why)" } else { '' }) +
                $(if ($selfFail) { ' --- the test reported its own cleanup as failed' } elseif ($selfNotVerified) { ' --- the test reported its own restoration as not verified' } else { '' })
         $outcome = if ($selfFail -or $nm.Observed) { 'FAILED' } else { 'NOT_VERIFIED' }
