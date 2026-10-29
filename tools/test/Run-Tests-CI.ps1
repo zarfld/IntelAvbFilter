@@ -1125,21 +1125,23 @@ public static class AvbHilIoctl {
                 $samples += ,([ordered]@{ qpcBefore = [long]$q0; qpcAfter = [long]$q1; phcNs = [long][System.BitConverter]::ToUInt64($c, 0) })
             }
             if ($readErr) {
-                $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = $readErr; Samples = @() }
+                $entries += [pscustomobject]@{ Index = $i; Did = $did; Luid = $luid; IfIndex = $idn.IfIndex; Mac = $idn.Mac; Ok = $false; Timinca = 0; Tsauxc = 0; Error = $readErr; Samples = @() }
                 continue
             }
-            # Register snapshot of the SAME bound adapter.  Only VALID entries of this adapter (device ID echoed) are kept;
-            # TIMINCA/TSAUXC come from GET_CLOCK_CONFIG above.  Any failure leaves Registers empty: nothing built on a register
-            # can then be verified (fail closed), and RegistersError says why.
+            # Register snapshot of the SAME bound adapter.  Only VALID entries of this adapter (device ID and NET_LUID
+            # echoed) are kept; TIMINCA/TSAUXC come from GET_CLOCK_CONFIG above.  Any failure leaves Registers empty:
+            # nothing built on a register can then be verified (fail closed), and RegistersError says why.
             $regs = [ordered]@{}; $regErr = ''
             $sn = New-Object byte[] 280   # AVB_HW_SNAPSHOT_REQUEST: 24-byte header + 16 x AVB_HWREG_ENTRY (id, offset, value, state)
             [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]1), 0, $sn, 0, 4)   # AVB_HW_SNAPSHOT_VERSION
-            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_SNAP, $sn, 280, $sn, 280, [ref]$ret, [IntPtr]::Zero)) {
+            if (-not [AvbHilIoctl]::DeviceIoControl($hb, $IOCTL_SNAP, $sn, 280, $sn, 280, [ref]$ret, [IntPtr]::Zero)) {
                 $regErr = "QUERY_HW_SNAPSHOT failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
             } elseif ([System.BitConverter]::ToUInt32($sn, 20) -ne 0) {
                 $regErr = ("QUERY_HW_SNAPSHOT status 0x{0:X8}" -f [System.BitConverter]::ToUInt32($sn, 20))
             } elseif ([System.BitConverter]::ToUInt16($sn, 18) -ne $didv) {
                 $regErr = ("QUERY_HW_SNAPSHOT reports DID 0x{0:X4}, bound DID {1}" -f [System.BitConverter]::ToUInt16($sn, 18), $did)
+            } elseif ([System.BitConverter]::ToUInt64($sn, 8) -ne $idn.LuidValue) {
+                $regErr = ("QUERY_HW_SNAPSHOT: snapshot net_luid 0x{0:X16} is not the bound LUID {1} (handle re-bound or adapter re-enumerated)" -f [System.BitConverter]::ToUInt64($sn, 8), $luid)
             } else {
                 for ($k = 0; $k -lt [Math]::Min(16, [System.BitConverter]::ToUInt32($sn, 4)); $k++) {
                     $at = 24 + 16 * $k
@@ -1149,9 +1151,12 @@ public static class AvbHilIoctl {
                     $regs[$regNames[$rid]] = [System.BitConverter]::ToUInt32($sn, $at + 8)
                 }
             }
-            $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $true; Error = ''
+            $entries += [pscustomobject]@{ Index = $i; Did = $did; Luid = $luid; IfIndex = $idn.IfIndex; Mac = $idn.Mac; Ok = $true; Error = ''
                                            Timinca = [System.BitConverter]::ToUInt32($first, 8); Tsauxc = [System.BitConverter]::ToUInt32($first, 12)
                                            Samples = $samples; Registers = $regs; RegistersError = $regErr }
+            } finally {
+                [void][AvbHilIoctl]::CloseHandle($hb)
+            }
         }
         $res.Entries = $entries
         $res.Ok = $true
