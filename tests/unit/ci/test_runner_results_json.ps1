@@ -301,7 +301,7 @@ $rF = Invoke-Sandbox 'runF' @((Get-Entry $pPass), (Get-Entry $pFail))
 $junitF = @(Get-ChildItem -LiteralPath $logsF -Filter 'junit-HardwareUnit-Debug-*.xml' -ErrorAction SilentlyContinue)
 $xF = $null; if ($junitF.Count -eq 1) { [xml]$xF = Get-Content -LiteralPath $junitF[0].FullName -Raw }
 $suitesF = @(if ($xF) { @($xF.testsuites.testsuite) })
-$propF = { param($s, [string]$n) @(@($s.properties.property) | Where-Object { $_.name -eq $n } | ForEach-Object { $_.value })[0] }
+$propF = { param($s, [string]$n) @($s.properties.property) | Where-Object { $_.name -eq $n } | ForEach-Object { $_.value } | Select-Object -First 1 }
 $junitLogs = @($suitesF | ForEach-Object { [System.IO.Path]::GetFullPath((& $propF $_ 'log_file')) } | Sort-Object)
 $recLogs = @(if ($rF.Doc) { @($rF.Doc.records) | Where-Object { $_.logPath } | ForEach-Object { [System.IO.Path]::GetFullPath($_.logPath) } | Sort-Object -Unique })
 $idOk = ($suitesF.Count -gt 0) -and (@($suitesF | Where-Object { (& $propF $_ 'source_revision') -ne 'sandbox-rev' -or (& $propF $_ 'run_started_utc') -ne [string]$rF.Doc.startedUtc -or
