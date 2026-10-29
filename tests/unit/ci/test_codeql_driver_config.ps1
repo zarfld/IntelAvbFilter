@@ -120,6 +120,14 @@ if ($null -ne $analyze) {
     tc_check 'TEST-CODEQLCFG-006a-dependency-validation-before-init' ($iResolve -ge 0 -and $iInit -gt $iResolve) "expected '$ToolRel -Mode Resolve' step before codeql-action/init (resolve=$iResolve init=$iInit)"
     tc_check 'TEST-CODEQLCFG-006b-analysis-check-after-analyze' ($iAnalyze -ge 0 -and $iCheck -gt $iAnalyze) "expected '$ToolRel -Mode Analysis' step after codeql-action/analyze (analyze=$iAnalyze check=$iCheck)"
     tc_check 'TEST-CODEQLCFG-006c-no-continue-on-error' ($analyze -notmatch 'continue-on-error') 'continue-on-error in analyze job'
+    # 006f: production analysis CLI pinned to the same version as the validation CLI (one toolchain version set;
+    #       an update must change both and pass all tiers).
+    $valVer  = [regex]::Match($analyze, '(?m)^\s*\$Version\s*=\s*"(\d+\.\d+\.\d+)"').Groups[1].Value
+    $toolVer = [regex]::Match($analyze, '(?m)^\s*tools:\s*https://github\.com/github/codeql-action/releases/download/codeql-bundle-v(\d+\.\d+\.\d+)/codeql-bundle-win64\.tar\.(zst|gz)\s*$').Groups[1].Value
+    tc_check 'TEST-CODEQLCFG-006f-analysis-cli-pinned-to-validation-cli' ($valVer -ne '' -and $toolVer -eq $valVer) ("validation CLI '{0}', init tools bundle '{1}'" -f $valVer, $toolVer)
+    # 006g: SARIF + validation report preserved as a run artifact even on failure (evidence must be inspectable).
+    $up = [regex]::Match($analyze, '(?ms)uses:\s*actions/upload-artifact@\S+\s*\n\s*if:\s*always\(\)\s*\n(.*?)(?=\n\s{6}- name:|\z)')
+    tc_check 'TEST-CODEQLCFG-006g-results-uploaded-always' ($up.Success -and $up.Groups[1].Value -match 'build/codeql-results') 'analyze job must upload build/codeql-results with if: always()'
 }
 if ($null -ne $wf) {
     $trig = @('.github/codeql/**', $ToolRel, $LibRel) | Where-Object { ([regex]::Matches($wf, '(?m)^\s*-\s*"' + [regex]::Escape($_) + '"\s*$')).Count -lt 2 }

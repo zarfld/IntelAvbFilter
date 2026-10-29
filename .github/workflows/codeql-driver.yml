@@ -126,6 +126,11 @@ jobs:
           # pinned to exact versions; see the config header for provenance.
           # NOT a WHCP-certified configuration — use the analyze-whcp job below for that.
           config-file: ./.github/codeql/codeql-driver-config.yml
+          # Analysis CLI pinned to the validation CLI version (supported `tools` input: URL of a CodeQL
+          # Bundle release asset).  codeql-bundle-v2.27.3 = bundle linked by codeql-action v4 on 2026-10-29;
+          # published asset digest sha256:9e723b6bb6d70857457704a6ef7419c19de956b24ac9e44ad81e775b4e4296dd.
+          # Change together with $Version in the validation step (TEST-CODEQLCFG-006f).
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.3/codeql-bundle-win64.tar.zst
 
       - name: Build driver for CodeQL tracing (Release|x64)
         shell: pwsh
@@ -155,6 +160,14 @@ jobs:
           # Output SARIF alongside driver binary in the build tree for local inspection.
           output: build/codeql-results
           upload: true
+
+      - name: Upload CodeQL evidence (SARIF + pack validation report)
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: codeql-driver-results-${{ github.run_number }}
+          path: build/codeql-results/
+          retention-days: 90
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 2: WHCP certification-grade CodeQL analysis.

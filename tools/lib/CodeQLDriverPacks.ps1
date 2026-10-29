@@ -61,13 +61,16 @@ function Get-AvbQueryMetadataId([string]$QueryText) {
     return $(if ($id.Success) { $id.Groups[1].Value } else { '' })
 }
 
-# Exact comparison by query key; Changed = same key, different @id.
+# Exact (ordinal, case-sensitive) comparison by query key; Changed = same key, different @id.
+# PowerShell @{} keys and -ne are case-insensitive, which would hide a case-only change.
 function Compare-AvbCodeQLInventory($Expected, $Actual) {
-    $e = @{}; foreach ($x in @($Expected)) { $e[$x.Key] = $x.Id }
-    $a = @{}; foreach ($x in @($Actual))   { $a[$x.Key] = $x.Id }
-    $removed = @($e.Keys | Where-Object { -not $a.ContainsKey($_) } | Sort-Object)
-    $added   = @($a.Keys | Where-Object { -not $e.ContainsKey($_) } | Sort-Object)
-    $changed = @($e.Keys | Where-Object { $a.ContainsKey($_) -and $a[$_] -ne $e[$_] } | Sort-Object)
+    $e = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($x in @($Expected)) { $e[$x.Key] = $x.Id }
+    $a = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($x in @($Actual))   { $a[$x.Key] = $x.Id }
+    $removed = @($e.Keys | Where-Object { -not $a.ContainsKey($_) } | Sort-Object -CaseSensitive)
+    $added   = @($a.Keys | Where-Object { -not $e.ContainsKey($_) } | Sort-Object -CaseSensitive)
+    $changed = @($e.Keys | Where-Object { $a.ContainsKey($_) -and $a[$_] -cne $e[$_] } | Sort-Object -CaseSensitive)
     return @{ Removed = $removed; Added = $added; Changed = $changed; Equal = (($removed.Count + $added.Count + $changed.Count) -eq 0) }
 }
 
