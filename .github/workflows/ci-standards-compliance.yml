@@ -1475,90 +1475,72 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
 
+      # Every status is the result of a required job of THIS run for THIS commit (Q 2026-10-29, TEST-VERDICT-014):
+      # nothing is hard-coded as passed; skipped/cancelled/missing results are reported as such and are never a pass.
+      # Generating the report is separate from the compliance verdict; the final step fails the job on NOT COMPLIANT.
       - name: Generate compliance report
+        env:
+          R_SPEC_VALIDATION: ${{ needs.spec-validation.result }}
+          R_CODE_QUALITY: ${{ needs.code-quality.result }}
+          R_UNIT_TESTS: ${{ needs.unit-tests.result }}
+          R_INTEGRATION_TESTS: ${{ needs.integration-tests.result }}
+          R_REQUIREMENTS_TRACEABILITY: ${{ needs.requirements-traceability.result }}
+          R_ACCEPTANCE_TESTS: ${{ needs.acceptance-tests.result }}
+          R_ARCHITECTURE_VALIDATION: ${{ needs.architecture-validation.result }}
+          R_SECURITY_SCAN: ${{ needs.security-scan.result }}
         run: |
-          echo "📋 Generating standards compliance report..."
-
-          cat > compliance-report.md << 'EOF'
-          # Standards Compliance Report
-
-          **Generated**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          **Branch**: ${{ github.ref_name }}
-          **Commit**: ${{ github.sha }}
-
-          ## ISO/IEC/IEEE 12207:2017 - Software Life Cycle Processes
-
-          - [x] Phase 01: Stakeholder Requirements Definition
-          - [x] Phase 02: Requirements Analysis
-          - [x] Phase 03: Architecture Design
-          - [x] Phase 04: Detailed Design
-          - [x] Phase 05: Implementation (TDD)
-          - [x] Phase 06: Integration (CI)
-          - [x] Phase 07: Verification & Validation
-          - [ ] Phase 08: Transition (manual)
-          - [ ] Phase 09: Operation & Maintenance (manual)
-
-          ## ISO/IEC/IEEE 29148:2018 - Requirements Engineering (GitHub Issues)
-
-          - ✅ Requirements traceability (GitHub Issues): ${{ needs.requirements-traceability.result }}
-          - ✅ Stakeholder requirements documented (StR Issues)
-          - ✅ System requirements specified (REQ-F/REQ-NF Issues)
-          - ✅ Acceptance criteria defined (in issue bodies)
-          - ✅ Bidirectional traceability enforced (StR↔REQ↔TEST↔CODE)
-
-          ## IEEE 1016-2009 - Software Design Descriptions
-
-          - ✅ Architecture documented
-          - ✅ Design decisions recorded (ADRs)
-          - ✅ Component designs specified
-
-          ## ISO/IEC/IEEE 42010:2011 - Architecture Description
-
-          - ✅ Architecture validation: ${{ needs.architecture-validation.result }}
-          - ✅ Stakeholder concerns addressed
-          - ✅ Architecture viewpoints defined
-          - ✅ Architecture views documented
-
-          ## IEEE 1012-2016 - Verification and Validation
-
-          - ✅ Unit tests: ${{ needs.unit-tests.result }}
-          - ✅ Integration tests: ${{ needs.integration-tests.result }}
-          - ✅ Acceptance tests: ${{ needs.acceptance-tests.result }}
-          - ✅ Test coverage: >=${{ env.MIN_TEST_COVERAGE }}%
-
-          ## XP Practices Compliance
-
-          - ✅ Test-Driven Development: 136 tests, Red-Green-Refactor cycles
-          - ✅ Continuous Integration: All tests passing before merge
-          - ✅ Coding Standards: C++11, embedded best practices
-          - ✅ Simple Design: Minimal footprint (192B RAM, 85% coverage)
-          - ⚠️ Pair Programming: Manual (AI-assisted development)
-          - ✅ Collective Ownership: Standards-compliant codebase
-          - ✅ Refactoring: Continuous (9 refactor cycles documented)
-
-          ## Quality Metrics
-
-          | Metric | Target | Status |
-          |--------|--------|--------|
-          | Test Coverage | ≥80% | ${{ needs.unit-tests.result == 'success' && '✅' || '❌' }} |
-          | Cyclomatic Complexity | ≤10 | ${{ needs.code-quality.result == 'success' && '✅' || '❌' }} |
-          | Linting | 0 errors | ${{ needs.code-quality.result == 'success' && '✅' || '❌' }} |
-          | Security Vulnerabilities | 0 high/critical | ${{ needs.security-scan.result == 'success' && '✅' || '⚠️' }} |
-          | Requirements Traceability | 100% | ${{ needs.requirements-traceability.result == 'success' && '✅' || '❌' }} |
-
-          ## Overall Status
-
-          - Code Quality: ${{ needs.code-quality.result }}
-          - Unit Tests: ${{ needs.unit-tests.result }}
-          - Integration Tests: ${{ needs.integration-tests.result }}
-          - Acceptance Tests: ${{ needs.acceptance-tests.result }}
-          - Architecture: ${{ needs.architecture-validation.result }}
-          - Security: ${{ needs.security-scan.result }}
-          - Traceability: ${{ needs.requirements-traceability.result }}
-
-          **Build Status**: ${{ needs.code-quality.result == 'success' && needs.unit-tests.result == 'success' && needs.integration-tests.result == 'success' && '✅ PASSED' || '❌ FAILED' }}
-          EOF
-
+          set -euo pipefail
+          label() {
+            case "$1" in
+              success)   echo "PASSED" ;;
+              failure)   echo "FAILED" ;;
+              cancelled) echo "CANCELLED (not a pass)" ;;
+              skipped)   echo "NOT EXECUTED (skipped, not a pass)" ;;
+              "")        echo "UNAVAILABLE (no result, not a pass)" ;;
+              *)         echo "UNAVAILABLE ($1, not a pass)" ;;
+            esac
+          }
+          gates="spec-validation|R_SPEC_VALIDATION|Specification validation
+          code-quality|R_CODE_QUALITY|Code quality (IEEE 1016, XP practices)
+          unit-tests|R_UNIT_TESTS|Unit tests (IEEE 1012)
+          integration-tests|R_INTEGRATION_TESTS|Integration tests (IEEE 1012)
+          acceptance-tests|R_ACCEPTANCE_TESTS|Acceptance tests (IEEE 1012)
+          requirements-traceability|R_REQUIREMENTS_TRACEABILITY|Requirements traceability (ISO/IEC/IEEE 29148)
+          architecture-validation|R_ARCHITECTURE_VALIDATION|Architecture compliance (ISO/IEC/IEEE 42010)
+          security-scan|R_SECURITY_SCAN|Security scan"
+          notpassed=""
+          rows=""
+          while IFS='|' read -r job var title; do
+            job="$(echo "$job" | tr -d '[:space:]')"
+            res="${!var:-}"
+            rows="${rows}| ${title} | \`${job}\` | $(label "$res") |"$'\n'
+            if [ "$res" != "success" ]; then notpassed="${notpassed} ${job}"; fi
+          done <<< "$gates"
+          {
+            echo "# Standards Compliance Report"
+            echo ""
+            echo "- Generated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo "- Repository: ${GITHUB_REPOSITORY}"
+            echo "- Branch: ${GITHUB_REF_NAME}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Workflow run: ${GITHUB_RUN_ID} (attempt ${GITHUB_RUN_ATTEMPT})"
+            echo ""
+            echo "Each status is the result of a required job of this run for this commit. A skipped, cancelled or missing job is not a pass."
+            echo "Test-level verdicts (FAILED, BLOCKED, INCONCLUSIVE, SKIPPED cases) are in the JUnit reports of the test jobs; they are not summarized here."
+            echo ""
+            echo "| Required gate | Job | Result |"
+            echo "|---|---|---|"
+            printf '%s' "$rows"
+            echo ""
+            if [ -z "$notpassed" ]; then
+              echo "## Compliance verdict: COMPLIANT - every required gate passed"
+            else
+              echo "## Compliance verdict: NOT COMPLIANT - not passed:${notpassed}"
+            fi
+            echo ""
+            echo "Generating this report is independent of the verdict; the job fails in its final step when the verdict is NOT COMPLIANT."
+          } > compliance-report.md
+          printf '%s\n' "${notpassed# }" > noncompliant-gates.txt
           cat compliance-report.md
 
       # Published without a write token (TEST-VERDICT-013): the former PR comment (issues.createComment) failed with
@@ -1573,6 +1555,15 @@ jobs:
           name: compliance-report
           path: compliance-report.md
           if-no-files-found: error
+
+      - name: Fail when a required gate did not pass
+        run: |
+          gates="$(tr -d '\r\n' < noncompliant-gates.txt)"
+          if [ -n "$gates" ]; then
+            echo "::error::Standards compliance NOT COMPLIANT - required gates not passed: ${gates}"
+            exit 1
+          fi
+          echo "Standards compliance: COMPLIANT - every required gate passed"
 
   # Deployment (Phase 08) - only on master branch
   deploy-staging:
