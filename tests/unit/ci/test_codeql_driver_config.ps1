@@ -11,8 +11,8 @@
 #   - the analyze job uses the repository-controlled config, never a remote/moving one;
 #   - every pack reference is an exact version; required coverage entries are present;
 #   - the reviewed query inventory parses and is consistent with the pinned versions;
-#   - the real-CodeQL dependency validation (tools/ci/Test-CodeQLDriverPacks.ps1) runs BEFORE init and the analysis
-#     check after analyze, with no continue-on-error, and config/inventory changes trigger the workflow;
+#   - the real-CodeQL dependency validation (tools/ci/Test-CodeQLDriverPacks.ps1) runs BEFORE init and analyze runs
+#     after init, with no continue-on-error, and config/inventory changes trigger the workflow;
 #   - the WHCP job stays independent of the new config;
 #   - the failure classifier separates registry/network failures from dependency incompatibility on observed messages.
 # A pass is NOT evidence that the packs resolve or that analysis runs: that is tier 2/3 (tools/ci/Test-CodeQLDriverPacks.ps1
@@ -110,15 +110,17 @@ if ($libOk -and $null -ne $invText) {
     }
 }
 
-# 006: workflow wiring -- dependency validation before init, analysis check after analyze, nothing may swallow failures,
+# 006: workflow wiring -- dependency validation before init, analyze after init, nothing may swallow failures,
 #      and changes to the config / inventory / tool trigger the workflow.
 if ($null -ne $analyze) {
     $iResolve = $analyze.IndexOf('Test-CodeQLDriverPacks.ps1 -Mode Resolve')
     $iInit    = $analyze.IndexOf('github/codeql-action/init@')
     $iAnalyze = $analyze.IndexOf('github/codeql-action/analyze@')
-    $iCheck   = $analyze.IndexOf('Test-CodeQLDriverPacks.ps1 -Mode Analysis')
     tc_check 'TEST-CODEQLCFG-006a-dependency-validation-before-init' ($iResolve -ge 0 -and $iInit -gt $iResolve) "expected '$ToolRel -Mode Resolve' step before codeql-action/init (resolve=$iResolve init=$iInit)"
-    tc_check 'TEST-CODEQLCFG-006b-analysis-check-after-analyze' ($iAnalyze -ge 0 -and $iCheck -gt $iAnalyze) "expected '$ToolRel -Mode Analysis' step after codeql-action/analyze (analyze=$iAnalyze check=$iCheck)"
+    # 006b (a '$ToolRel -Mode Analysis' step after analyze) removed 2026-10-29 (Q): no approved requirement demands a
+    # post-analysis SARIF check; it was introduced by dbd93d5/7ab62b9 only.  Its approved half -- the full analysis
+    # (tier 3) actually runs after init -- is kept as 006h; 006b is not reused.
+    tc_check 'TEST-CODEQLCFG-006h-analyze-after-init' ($iInit -ge 0 -and $iAnalyze -gt $iInit) "expected codeql-action/analyze step after codeql-action/init (init=$iInit analyze=$iAnalyze)"
     tc_check 'TEST-CODEQLCFG-006c-no-continue-on-error' ($analyze -notmatch 'continue-on-error') 'continue-on-error in analyze job'
     # 006f: production analysis CLI pinned to the same version as the validation CLI (one toolchain version set;
     #       an update must change both and pass all tiers).

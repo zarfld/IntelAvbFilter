@@ -74,7 +74,7 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 
 1. Offline contract — `tests/unit/ci/test_codeql_driver_config.ps1` (TEST-CODEQLCFG, `-Suite Unit`): exact pins, required entries, inventory ↔ pins, workflow wiring, failure classification. Static only.
 2. Dependency resolution — `tools/ci/Test-CodeQLDriverPacks.ps1 -Mode Resolve`, **before** `codeql-action/init`: fresh package cache, `codeql database init --codescanning-config`, exact inventory comparison. Exit 3 INFRA_FAILURE (registry/network) · 4 DEPENDENCY_FAILURE · 5 INVENTORY_MISMATCH · 2 CONFIG_INVALID · 6 TOOL_FAILURE.
-3. Full analysis — traced Release|x64 build, `codeql-action/analyze`, then `Test-CodeQLDriverPacks.ps1 -Mode Analysis` on the produced SARIF.
+3. Full analysis — traced Release|x64 build and `codeql-action/analyze`; SARIF and validation report kept as the `codeql-driver-results-*` run artifact. (A post-analysis `-Mode Analysis` SARIF check is not a requirement — Q 2026-10-29.)
 
 **Controlled upstream update** (never float a version in production; no automatic upgrades):
 
