@@ -247,11 +247,11 @@ function Invoke-DriverHealthCheck {
 }
 
 # ===========================
-# Lifecycle Metrics Snapshot --- SSOT: tools/test/Lib-AvbLifecycle.ps1
+# Lifecycle Metrics Snapshot --- SSOT: tools/lib/Lib-AvbLifecycle.ps1
 # ===========================
 # Gracefully skipped when driver is absent (Unit/Integration suites on GitHub-hosted runners).
 # Active on HardwareUnit/HardwareIntegration suites where the driver is installed.
-. (Join-Path $PSScriptRoot 'Lib-AvbLifecycle.ps1')
+. (Join-Path $PSScriptRoot '..\lib\Lib-AvbLifecycle.ps1')
 
 # Canonical verdict vocabulary (PASS/FAIL/SKIP_UNSUPPORTED/SKIP_NOT_IMPLEMENTED/BLOCKED/INCONCLUSIVE),
 # shared with Parse-TestResults.ps1 and Convert-Logs-To-JUnit.ps1.  See docs/testing/test-verdict-contract.md
@@ -279,6 +279,7 @@ $UnitTests = @(
     "ps1:tests/unit/ioctl/test_known_device_table.ps1",  # TEST-DEVTABLE-001..003: hw_state device table vs intel_pci_ids.h (#18)
     "ps1:tests/unit/ioctl/test_requirement_outcomes.ps1", # TEST-COVERAGE-VERDICT-001..007: requirement outcome classification (needs python)
     "test_tas_restore_contract", # TAS restore contract mock (#9 / #206): DISARM_TAS status classification (offline, no driver)
+    "test_exit_code_propagation", # TC-EXITCODE-MOCK (#328 P0): mock exit-code propagation (offline, no driver; was built but never run - TEST-COMPLETE-001)
 
     # PowerShell logic tests (suffix .ps1, run via powershell.exe not compiled .exe)
     "ps1:tests/unit/ioctl/test_parse_results_aggregation.ps1",  # TEST-PROV-L06 aggregation invariants
@@ -302,6 +303,7 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_agent_testing_guidance.ps1",        # TEST-AGENTGUIDE: agent testing-contract wiring, skill frontmatter, runner params in guidance (offline, static; not agent-behaviour evidence)
     "ps1:tests/unit/ci/test_codeql_driver_config.ps1",          # TEST-CODEQLCFG: pinned CodeQL driver config + inventory + workflow wiring (offline, static; not CodeQL resolution evidence)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
+    "ps1:tests/unit/ioctl/test_identity_contract.ps1",           # TEST-IDENTITY-001..: HIL driver identity audit classification (offline; was never run by CI - TEST-COMPLETE-003)
     "test_idle_verdict",                                          # TC-IDLE-UNIT-001..012: idle verdict truth table (#328)
     "ps1:tests/unit/lifecycle/test_evaluate_idle_transition.ps1"  # TEST-IDLEEVAL-001..018: #328 final-verdict evaluator
 )

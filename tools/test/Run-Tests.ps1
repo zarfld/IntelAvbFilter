@@ -73,9 +73,9 @@ function Write-Info {
 }
 
 # ===========================
-# Lifecycle Metrics Snapshot -- SSOT: tools/test/Lib-AvbLifecycle.ps1
+# Lifecycle Metrics Snapshot -- SSOT: tools/lib/Lib-AvbLifecycle.ps1
 # ===========================
-. (Join-Path $PSScriptRoot 'Lib-AvbLifecycle.ps1')
+. (Join-Path $PSScriptRoot '..\lib\Lib-AvbLifecycle.ps1')
 
 # Helper function to run tests and track results
 function Invoke-Test {

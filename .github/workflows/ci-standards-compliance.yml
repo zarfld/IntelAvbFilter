@@ -703,9 +703,9 @@ jobs:
         uses: dorny/test-reporter@v2
         with:
           name: 'Unit Tests (${{ matrix.os }}, ${{ matrix.config }})'
-          path: |
-            logs\junit-Unit-${{ matrix.config }}-*.xml
-            logs\junit-HardwareUnit-${{ matrix.config }}-*.xml
+          # Comma-separated: test-reporter does not split a multi-line value - the whole block was ONE pattern and
+          # matched nothing (run 40840781230: "No file matches path logs\junit-Unit-Debug-*.xml<LF>logs\junit-...").
+          path: 'logs/junit-Unit-${{ matrix.config }}-*.xml,logs/junit-HardwareUnit-${{ matrix.config }}-*.xml'
           reporter: java-junit
           fail-on-empty: 'false'
           path-replace-backslashes: 'true'
@@ -1160,9 +1160,8 @@ jobs:
         uses: dorny/test-reporter@v2
         with:
           name: 'Integration Tests (${{ matrix.os }}, ${{ matrix.config }})'
-          path: |
-            logs\junit-Integration-${{ matrix.config }}-*.xml
-            logs\junit-HardwareIntegration-${{ matrix.config }}-*.xml
+          # Comma-separated (a multi-line value is one pattern for test-reporter; see the Unit step).
+          path: 'logs/junit-Integration-${{ matrix.config }}-*.xml,logs/junit-HardwareIntegration-${{ matrix.config }}-*.xml'
           reporter: java-junit
           fail-on-empty: 'false'
           path-replace-backslashes: 'true'

@@ -86,7 +86,7 @@ Copy-Item (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1') (Join-Path $tree 
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
-'@ | Set-Content (Join-Path $tree 'tools\test\Lib-AvbLifecycle.ps1') -Encoding UTF8
+'@ | Set-Content (Join-Path $tree 'tools\lib\Lib-AvbLifecycle.ps1') -Encoding UTF8
 Copy-Item (Join-Path $RepoRoot 'src\avb_integration_fixed.c') (Join-Path $tree 'src\avb_integration_fixed.c')
 Copy-Item (Join-Path $RepoRoot 'include\intel_pci_ids.h') (Join-Path $tree 'include\intel_pci_ids.h')
 $treeRunner = Join-Path $tree 'tools\test\Run-Tests-CI.ps1'

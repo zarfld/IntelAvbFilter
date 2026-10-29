@@ -160,7 +160,7 @@ Assert-Xml 'TEST-VERDICT-006-configuration-and-suite-recorded' $r `
 $Sandbox = Join-Path $Tmp 'sandbox'
 $SbTools = Join-Path $Sandbox 'tools\test'
 New-Item -ItemType Directory -Path $SbTools -Force | Out-Null
-foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1','Lib-AvbLifecycle.ps1') {
+foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1') {
     $src = Join-Path $ToolsTest $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $SbTools $f) }
 }
@@ -174,7 +174,7 @@ Copy-Item (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1') (Join-Path $Sandb
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
-'@ | Set-Content (Join-Path $SbTools 'Lib-AvbLifecycle.ps1') -Encoding UTF8
+'@ | Set-Content (Join-Path $Sandbox 'tools\lib\Lib-AvbLifecycle.ps1') -Encoding UTF8
 
 function Invoke-SandboxRunner {
     param([string]$Name, [string]$FakeBody)
