@@ -302,8 +302,8 @@ $junitF = @(Get-ChildItem -LiteralPath $logsF -Filter 'junit-HardwareUnit-Debug-
 $xF = $null; if ($junitF.Count -eq 1) { [xml]$xF = Get-Content -LiteralPath $junitF[0].FullName -Raw }
 $suitesF = @(if ($xF) { @($xF.testsuites.testsuite) })
 $propF = { param($s, [string]$n) @($s.properties.property) | Where-Object { $_.name -eq $n } | ForEach-Object { $_.value } | Select-Object -First 1 }
-$junitLogs = @($suitesF | ForEach-Object { [System.IO.Path]::GetFullPath((& $propF $_ 'log_file')) } | Sort-Object)
-$recLogs = @(if ($rF.Doc) { @($rF.Doc.records) | Where-Object { $_.logPath } | ForEach-Object { [System.IO.Path]::GetFullPath($_.logPath) } | Sort-Object -Unique })
+$junitLogs = @($suitesF | ForEach-Object { [System.IO.Path]::GetFileName((& $propF $_ 'log_file')) } | Sort-Object)   # log_file = file name
+$recLogs = @(if ($rF.Doc) { @($rF.Doc.records) | Where-Object { $_.logPath } | ForEach-Object { [System.IO.Path]::GetFileName($_.logPath) } | Sort-Object -Unique })
 $idOk = ($suitesF.Count -gt 0) -and (@($suitesF | Where-Object { (& $propF $_ 'source_revision') -ne 'sandbox-rev' -or (& $propF $_ 'run_started_utc') -ne [string]$rF.Doc.startedUtc -or
                                                                     -not (& $propF $_ 'results_json') -or (& $propF $_ 'suite') -ne 'HardwareUnit' }).Count -eq 0)
 tc_check 'TEST-RESULTSJSON-026-suite-junit-contains-exactly-the-logs-of-this-runs-records-with-run-identity' `

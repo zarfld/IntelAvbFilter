@@ -2639,16 +2639,16 @@ foreach ($WorkItem in $WorkItems) {
         } else {
             Write-Fail "INFRA: $infraMsg --- remaining tests will be skipped"
         }
-        Add-AvbResult -Name "$exeName[INFRA-HEALTH]" -Status "FAILED(INFRA)" -Exit -2 -Check
-
         # Write a synthetic log file so Convert-Logs-To-JUnit / Parse-TestResults
         # can emit a <failure> element for this infrastructure failure in the JUnit XML.
         # TC-INFRA-HEALTH-001 matches the TC-* pattern accepted by Parse-TestResults.
+        # Written before the record and attached to it: the suite JUnit contains only record logs.
         $infraLogTs  = Get-Date -Format 'yyyyMMdd_HHmmss'
         $infraLogFile = Join-Path $logsDir ("TC-INFRA-HEALTH.exe_{0}.log" -f $infraLogTs)
         @"
 [INFRA_FAILURE] TC-INFRA-HEALTH-001: $infraMsg
 "@ | Set-Content $infraLogFile -Encoding utf8
+        Add-AvbResult -Name "$exeName[INFRA-HEALTH]" -Status "FAILED(INFRA)" -Exit -2 -Check -LogPath $infraLogFile
     }
 
     # Post-test adapter/PHC state integrity (#343) --- also after a timeout kill.
@@ -2697,8 +2697,19 @@ if (Test-Path $junitScript) {
     $junitOut   = Join-Path $logsDir "junit-${Suite}-${Configuration}-${runDateStr}.xml"
     Write-Host ""
     Write-Step "Generating JUnit XML report..."
+    # Exactly the logs of THIS run's records (never every same-date log of the logs directory) and the run identity the
+    # results document records, so every JUnit is attributable to one run, configuration, suite, revision and driver.
+    $runLogs = @($script:AvbResultRecords | ForEach-Object { $_.logPath } | Where-Object { $_ } | Sort-Object -Unique)
+    $srcId = $script:SourceIdentity
+    $runIdentity = [ordered]@{
+        run_started_utc = $script:AvbRunStartedUtc; host = $env:COMPUTERNAME
+        source_revision = $(if ($srcId) { $srcId.Revision } else { '' }); source_digest = $(if ($srcId) { $srcId.Digest } else { '' })
+        source_dirty = $(if ($srcId) { [string]$srcId.Dirty } else { '' })
+        driver_sha256 = [string]$env:HIL_DRIVER_SHA256; github_run = $(if ($script:UnderGitHubActions) { "$env:GITHUB_RUN_ID/$env:GITHUB_RUN_ATTEMPT" } else { '' })
+        results_json = [string]$script:ResultsJsonPath
+    }
     $junitArgs = @{ LogsDir = $logsDir; RunDate = $runDateStr; OutputFile = $junitOut
-                    Configuration = $Configuration; SuiteName = $Suite }
+                    Configuration = $Configuration; SuiteName = $Suite; LogFiles = $runLogs; RunIdentity = $runIdentity }
     if ($IsOptionalVerification) { $junitArgs.OptionalVerification = $true }
     Reset-AvbExitCode
     & $junitScript @junitArgs -ErrorAction SilentlyContinue

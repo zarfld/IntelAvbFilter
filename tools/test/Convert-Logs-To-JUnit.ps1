@@ -48,7 +48,19 @@ param(
     # SKIP_NOT_IMPLEMENTED is a labelled <skipped/> in both modes; the suite runner
     # decides whether it makes a mandatory run incomplete.  Used for HardwareMutation only.
     [Parameter(Mandatory=$false)]
-    [switch]$OptionalVerification
+    [switch]$OptionalVerification,
+
+    # Exact log files of ONE runner execution (Run-Tests-CI.ps1 passes the logs of its own result records).  When
+    # given, nothing is discovered by date: a same-date log of another suite, configuration or earlier run is never
+    # included, a test executed twice keeps both logs, and a listed file that does not exist is an error.
+    # (LocalSuites_20261029_065141: every suite JUnit reported "Found 160 test log(s)" from the shared logs directory.)
+    [Parameter(Mandatory=$false)]
+    [string[]]$LogFiles,
+
+    # Identity of that execution, written as <property> elements on every testsuite (run, revision, driver, results
+    # document) so each JUnit is attributable without the directory it was found in.
+    [Parameter(Mandatory=$false)]
+    [System.Collections.IDictionary]$RunIdentity
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,6 +90,16 @@ if (-not (Test-Path $logsPath)) {
 # Discover available test log files (individual per-test logs)
 # Format: <testname>.exe_<YYYYMMDD>_<HHMMSS>.log
 # ------------------------------------------------------------------
+if ($PSBoundParameters.ContainsKey('LogFiles')) {
+    $missingLogs = @($LogFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+    if ($missingLogs.Count -gt 0) {
+        Write-Error "Listed log file(s) not found: $($missingLogs -join ', ')"
+        exit 1
+    }
+    $targetLogs = @($LogFiles | Sort-Object -Unique | ForEach-Object { Get-Item -LiteralPath $_ })
+    if ($RunDate -eq "") { $RunDate = Get-Date -Format 'yyyyMMdd' }
+    Write-Host "[INFO] Using $($targetLogs.Count) listed log(s) of this run (no date discovery)" -ForegroundColor Cyan
+} else {
 $allTestLogs = Get-ChildItem $logsPath -Filter "*.exe_*.log" |
     Where-Object { $_.Name -notmatch "^full_test_suite|^test_logs" } |
     Sort-Object Name
@@ -115,6 +137,7 @@ foreach ($log in $runLogs) {
 $targetLogs = $latestByTest.Values | Sort-Object Name
 
 Write-Host "[INFO] Found $($targetLogs.Count) test log(s) for date $RunDate" -ForegroundColor Cyan
+}
 
 # ------------------------------------------------------------------
 # Also find the full suite log for metadata
@@ -396,6 +419,7 @@ foreach ($suite in $suites) {
     if ($Configuration) { [void]$sb.AppendLine('      <property name="configuration" value="' + (EscapeXml $Configuration) + '"/>') }
     if ($SuiteName)     { [void]$sb.AppendLine('      <property name="suite" value="' + (EscapeXml $SuiteName) + '"/>') }
     [void]$sb.AppendLine('      <property name="verification" value="' + $(if ($OptionalVerification) { 'optional' } else { 'mandatory' }) + '"/>')
+    if ($RunIdentity) { foreach ($k in @($RunIdentity.Keys)) { [void]$sb.AppendLine('      <property name="' + (EscapeXml ([string]$k)) + '" value="' + (EscapeXml ([string]$RunIdentity[$k])) + '"/>') } }
     foreach ($n in $suite.VerifiesNums) {
         [void]$sb.AppendLine('      <property name="verifies" value="' + $ghBase + $n + '"/>')
     }
