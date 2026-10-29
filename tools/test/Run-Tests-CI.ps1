@@ -857,7 +857,14 @@ $HilTestTimeoutSeconds = [ordered]@{
     # 83 sandboxed runner cases.  Killed at the 60 s Unit timeout (FAILED(TIMEOUT)) in every Unit run of 2026-10-22 ..
     # 2026-10-27 (8 runs), so the suite never completed in the chain.  Measured on the HIL host 2026-10-27: 199.6 s and
     # 202.3 s (83/83).  300 s = 202.3 s + 48 % for slower GitHub-hosted Unit runners (their runtime: UNVERIFIED).
-    'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 300
+    # 2026-10-29 (Q, provisional): 96 cases, 91 sandboxed runner invocations (85 call sites, was 65) - the runtime grew
+    # with the added coverage (about 3.1 s per invocation then and now, profiled: process start + required gates +
+    # JUnit/results, no redundant work found).  Measured on the HIL host: 270.3 s / 269.5 s / 277 s through the runner,
+    # 278 s and 297 s standalone; one Unit run timed out at 300.5 s.  Same rule: 297 s + 48 % = 440 s -> 450 s.  A hung
+    # run of this test is detected after 450 s instead of 300 s (each sandbox run keeps its own 300 s guard inside the
+    # test).  Test-specific only: the Unit suite timeout stays 60 s (TEST-HILGATE-095).  No issue-level requirement fixes
+    # this value; the testing contract requires every unattended process to be bounded.
+    'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 450
 }
 
 # ===========================
