@@ -301,6 +301,7 @@ $UnitTests = @(
     "ps1:tests/unit/ci/test_tx_timestamp_probe.ps1",            # TEST-TXPROBE: TC-CORR-TX-RX-001 phase-1 probe interpretation + non-destructive construction (offline; D4)
     "ps1:tests/unit/ci/test_ci_driver_deploy.ps1",              # TEST-CIDEPLOY: staged package / unattended install / lock / crash evidence orchestration (offline)
     "ps1:tests/unit/ci/test_agent_testing_guidance.ps1",        # TEST-AGENTGUIDE: agent testing-contract wiring, skill frontmatter, runner params in guidance (offline, static; not agent-behaviour evidence)
+    "ps1:tests/unit/ci/test_hil_dispatch_paths.ps1",            # TEST-HILPATH: every test-binary dispatch route passes the authoritative gates (offline, static; RED until the bypass routes are repaired - Q 2026-10-29)
     "ps1:tests/unit/ci/test_codeql_driver_config.ps1",          # TEST-CODEQLCFG: pinned CodeQL driver config + inventory + workflow wiring (offline, static; not CodeQL resolution evidence)
     "ps1:tests/unit/ioctl/test_preflight_sentinel.ps1",          # TEST-PREFLIGHT-001..005: preflight observational contract
     "ps1:tests/unit/ioctl/test_identity_contract.ps1",           # TEST-IDENTITY-001..: HIL driver identity audit classification (offline; was never run by CI - TEST-COMPLETE-003)
@@ -2565,6 +2566,14 @@ foreach ($WorkItem in $WorkItems) {
     # A known hardware entry never runs outside a Hardware* suite: there is no baseline or gate there.
     if (-not $IsHardwareSuite -and $HilTestSafety.ContainsKey((ConvertTo-AvbHilEntryKey $TestName)) -and (($UnitTests + $IntegrationTests) -notcontains $TestName)) {
         Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason 'hardware test requested outside a Hardware* suite (no adapter baseline or safety gate)'
+        continue
+    }
+    # Nor does an unregistered one (TEST-HILGATE-094): an unclassified binary (stale or unreviewed build output, a
+    # diagnostic tool) or repository script may need hardware and has no gate here.  External ps1 fixtures of the
+    # sandboxed runner tests are not repository tests.
+    if (-not $IsHardwareSuite -and (($UnitTests + $IntegrationTests) -notcontains $TestName) -and
+        (-not $isPsTest -or ([System.IO.Path]::GetFullPath($psScriptPath)).StartsWith($repoRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase))) {
+        Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason 'not registered in the UnitTests / IntegrationTests lists (review and register it, or run it in a Hardware* suite)'
         continue
     }
     if ($IsSandbox -and -not (Test-HilSandboxFake $TestName)) {

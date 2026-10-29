@@ -664,6 +664,21 @@ tc_check 'TEST-HILGATE-028-sandbox-refuses-real-test-binaries' `
     (($rG1.Out -match '\[BLOCKED\] TC-SAFETY-GATE-001: test_ioctl_version: sandbox mode') -and $rG1.Exit -eq 1) (Tail $rG1)
 tc_check 'TEST-HILGATE-029-hardware-entry-blocked-outside-hardware-suite' `
     (($rG2.Out -match '\[BLOCKED\] TC-SAFETY-GATE-001: test_hot_plug: hardware test requested outside a Hardware\* suite') -and $rG2.Exit -eq 1) (Tail $rG2)
+# 094: a hardware-independent suite runs only its registered entries.  An unclassified, unregistered binary (stale or
+#      unreviewed build output, a diagnostic tool) or repository script has no gate there either; it is refused by the
+#      registration rule before the sandbox refusal (in a real run nothing else would stop it).  External ps1 fixtures stay
+#      runnable (sandboxed runner tests).  Static-in-sandbox: proves the rule fires, not hardware behaviour.
+$repoPs = Join-Path $Tree 'tests\unit\test_sbfake_unregistered_repo.ps1'
+New-Item -ItemType Directory -Path (Split-Path $repoPs) -Force | Out-Null
+Set-Content -LiteralPath $repoPs -Value "Add-Content -LiteralPath '$($RanLog.Replace("'", "''"))' -Value 'RAN repo-script'; exit 0" -Encoding UTF8
+$rG3 = Invoke-Sandbox 'runG3' @('intel_avb_diagnostics', ('ps1:' + $repoPs.Replace('\', '/')), $tRo) -Suite 'Unit'
+$g3Bad = @()
+if ($rG3.Out -notmatch '\[BLOCKED\] TC-SAFETY-GATE-001: intel_avb_diagnostics: not registered in the UnitTests / IntegrationTests lists') { $g3Bad += 'unregistered binary not refused by the registration rule' }
+if ($rG3.Out -notmatch '\[BLOCKED\] TC-SAFETY-GATE-001: ps1:\S*test_sbfake_unregistered_repo\.ps1: not registered in the UnitTests / IntegrationTests lists') { $g3Bad += 'unregistered repository script not refused by the registration rule' }
+if (@($rG3.Ran | Where-Object { $_ -match 'repo-script' }).Count -ne 0) { $g3Bad += 'repository script executed' }
+if ((Get-RanCount $rG3 '^RAN test_sbfake_ro ') -ne 1) { $g3Bad += 'external fixture no longer runs in Unit' }
+if ($rG3.Exit -ne 1) { $g3Bad += "exit $($rG3.Exit)" }
+tc_check 'TEST-HILGATE-094-non-hardware-suite-runs-only-registered-entries' ($g3Bad.Count -eq 0) (($g3Bad -join '; ') + ' || ' + (Tail $rG3))
 
 # --- Run H: sandbox mode refuses the default (HIL evidence) logs directory ---------------------------------
 $rH = Invoke-Sandbox 'runH' @($tRo) -NoLogsDir
