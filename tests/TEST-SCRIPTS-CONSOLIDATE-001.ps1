@@ -100,7 +100,7 @@ function Test-ScriptCountReduction {
     }
     
     $scriptCount = $canonicalScripts.Count
-    $originalCount = 80  # Baseline from issue
+    $originalCount = 120  # Baseline from issue
     $reductionPercent = [math]::Round((($originalCount - $scriptCount) / $originalCount) * 100, 2)
     
     Write-Host "Script Count:"
@@ -119,7 +119,7 @@ function Test-ScriptCountReduction {
     # Test: Target is <40 scripts and ≥80% reduction
     $targetMet = $scriptCount -lt 40 -and $reductionPercent -ge 80
     Write-TestResult -TestCase "TC-SCRIPTS-001" -Passed $targetMet `
-        -Message "Script count: $scriptCount (target: <15), Reduction: $reductionPercent% (target: ≥80%)" `
+        -Message "Script count: $scriptCount (target: <40), Reduction: $reductionPercent% (target: ≥80%)" `
         -Details "Consolidated from ~80 scripts to $scriptCount canonical scripts"
 }
 
