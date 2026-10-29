@@ -304,7 +304,7 @@ $orch = Join-Path $RepoRoot 'tools\ci\Invoke-HilDeployment.ps1'
 $pinCer = Join-Path $Tmp 'pin.cer'
 # The orchestrator runs as an OFFLINE child (-SkipTrustCheck seam) whatever environment this test runs in: under GitHub
 # Actions the child would otherwise inherit GITHUB_ACTIONS=true and be refused by the seam guard before any scenario
-# (CI run 40824241990: abort at CIDEPLOY-040).  -GitHubActions 'true' exercises that guard itself (CIDEPLOY-043).
+# (CI run 40824241990: abort at CIDEPLOY-040).  -GitHubActions 'true' exercises that guard itself (CIDEPLOY-046).
 function Invoke-Orch([string]$Name, $Pkg, [string]$InstallRc = '0', [string]$PreRc = '0', [string]$Sha = $null, [string]$LockFile = (Join-Path $Tmp "$Name.lock"), [string]$GitHubActions = '') {
     if (Test-Path $calls) { Remove-Item $calls -Force }
     $evd = Join-Path $Tmp "ev_$Name"
@@ -344,7 +344,7 @@ $null = Exit-AvbHilLock -Owner $hold.Owner -Path $busy
 tc_check 'TEST-CIDEPLOY-042-busy-machine-is-hil-not-executed-and-touches-nothing' `
     (($oBusy.Exit -eq 1) -and ($oBusy.Dep.verdict -eq 'NOT_EXECUTED_BUSY') -and ($oBusy.Calls.Count -eq 0)) ("verdict={0} calls={1}" -f $(if ($oBusy.Dep) { $oBusy.Dep.verdict }), ($oBusy.Calls -join '|'))
 $oSeam = Invoke-Orch 'seam' $pOk -GitHubActions 'true'
-tc_check 'TEST-CIDEPLOY-043-skiptrustcheck-seam-is-refused-under-github-actions-before-anything-runs' `
+tc_check 'TEST-CIDEPLOY-046-skiptrustcheck-seam-is-refused-under-github-actions-before-anything-runs' `
     (($oSeam.Exit -eq 1) -and ($null -eq $oSeam.Dep) -and ($oSeam.Calls.Count -eq 0) -and ($oSeam.Out -match 'SkipTrustCheck is an offline-test seam and is refused under GitHub Actions')) `
     ("exit={0} deployment.json={1} calls={2} out={3}" -f $oSeam.Exit, ($null -ne $oSeam.Dep), ($oSeam.Calls -join '|'), (($oSeam.Out -split "`n" | Select-Object -Last 3) -join ' | '))
 

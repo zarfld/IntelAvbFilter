@@ -506,10 +506,16 @@ function Show-Findings($F) { return (@(@($F) | Where-Object { $null -ne $_ } | F
 # ---------------------------------------------------------------------------------------------------------
 $script:Tmp = Join-Path $env:TEMP ("hiltrust_{0}" -f (Get-Random))
 New-Item -ItemType Directory -Path $script:Tmp -Force | Out-Null
-$pyOk = $false
-if ($Python) { & $Python -I -c 'import yaml' 2>$null; $pyOk = ($LASTEXITCODE -eq 0) }
+$pyOk = $false; $pyWhy = 'no python on PATH'
+# The probe's stderr (ModuleNotFoundError) must not terminate the script under 'Stop' (PS 5.1 wraps native stderr in an
+# ErrorRecord): the missing parser is reported as the named failing case below, never as an unlabelled crash.
+if ($Python) {
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $null = & $Python -I -c 'import yaml' 2>&1; $pyOk = ($LASTEXITCODE -eq 0) } finally { $ErrorActionPreference = $eap }
+    $pyWhy = "'$Python' cannot import yaml (PyYAML not installed for this interpreter)"
+}
 if (-not $pyOk) {
-    tc_fail 'TEST-HILTRUST-000-yaml-parser-available' 'python with PyYAML is required (no silent pass)'
+    tc_fail 'TEST-HILTRUST-000-yaml-parser-available' "python with PyYAML is required (no silent pass): $pyWhy"
     Remove-Item $script:Tmp -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
     exit 1
