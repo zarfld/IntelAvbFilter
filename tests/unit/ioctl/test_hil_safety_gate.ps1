@@ -1037,7 +1037,9 @@ $fnRes = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.Fun
 if ($null -eq $fnRes) { tc_check 'TEST-HILGATE-067-incident-resolution-pure-cases' $false 'Resolve-AvbHilIncident not found in Run-Tests-CI.ps1' }
 else {
     . ([scriptblock]::Create($fnCmp.Extent.Text)); . ([scriptblock]::Create($fnRes.Extent.Text))
-    . ([scriptblock]::Create($ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilRegs' }, $true).Extent.Text))   # used by Compare-AvbHilState
+    foreach ($n in 'Get-AvbHilRegs', 'Get-AvbHilEntryField', 'Get-AvbHilAdapterKey', 'Get-AvbHilAdapterLabel', 'Test-AvbHilAdapterIdentityVerified') {   # used by Compare-AvbHilState
+        . ([scriptblock]::Create($ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true).Extent.Text))
+    }
     function New-St([uint32]$Tim1533 = 0, [uint32]$Aux1533 = 0, [uint32]$Tim125B = 0x08000000, [string]$Admin1533 = 'Up') {
         return @{ Ok = $true; Error = ''; ClockOk = $true; ClockError = ''
                   Adapters = @([pscustomobject]@{ InstanceId = 'PCI\VEN_8086&DEV_1533\SB02'; Did = '0x1533'; PnpStatus = 'OK'; Problem = 0; AdminStatus = $Admin1533; MediaStatus = 'Up'; FilterBound = 'True'; Name = 'I210' })
@@ -1472,7 +1474,7 @@ tc_check 'TEST-HILGATE-090-snapshot-registers-verify-ts-control-restoration-dete
 # enumerated" and compared NO register of either adapter (verification silently lost).  Keyed by the base-miniport
 # NET_LUID (IOCTL_AVB_GET_ADAPTER_IDENTITY), a reorder is no difference and a real change stays attributed to the
 # physical adapter; identity counts as verified only when the LUID maps to exactly one PnP instance.
-$idFns = 'Compare-AvbHilState', 'Get-AvbHilRegs', 'Get-AvbHilAdapterKey', 'Get-AvbHilAdapterLabel'
+$idFns = 'Compare-AvbHilState', 'Get-AvbHilRegs', 'Get-AvbHilEntryField', 'Get-AvbHilAdapterKey', 'Get-AvbHilAdapterLabel', 'Test-AvbHilAdapterIdentityVerified'
 $idMissing = @($idFns | Where-Object { $n = $_; $null -eq $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true) })
 $idBad = @()
 if ($idMissing.Count -gt 0) { $idBad += "runner functions missing: $($idMissing -join ', ')" }

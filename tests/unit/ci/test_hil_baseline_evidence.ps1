@@ -23,7 +23,8 @@ function Import-Functions([string]$Path, [string[]]$Names) {
     }
 }
 if (Test-Path -LiteralPath $Producer) { Import-Functions $Producer @('Get-AvbBaselinePhcCharacterization', 'New-AvbHilBaselineDocument') } else { $missing += $Producer }
-Import-Functions $Runner @('Format-AvbDid', 'ConvertTo-AvbDid', 'Compare-AvbHilState', 'ConvertTo-AvbHilPhcWindow', 'Get-AvbHilRegs')
+Import-Functions $Runner @('Format-AvbDid', 'ConvertTo-AvbDid', 'Compare-AvbHilState', 'ConvertTo-AvbHilPhcWindow', 'Get-AvbHilRegs',
+                           'Get-AvbHilEntryField', 'Get-AvbHilAdapterKey', 'Get-AvbHilAdapterLabel', 'Test-AvbHilAdapterIdentityVerified')
 . (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1')
 . (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
 tc_check 'TEST-HILBASE-000-producer-and-reused-functions-present' ($missing.Count -eq 0) ($missing -join ', ')
