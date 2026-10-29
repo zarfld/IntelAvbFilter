@@ -1194,7 +1194,7 @@ function Get-AvbHilSandboxState {
                                  Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples
                                  Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' }) }
         # Optional identity (as the hardware observer reports it): Luid, InstanceId.  Absent = enumeration position only.
-        foreach ($f in 'Luid', 'InstanceId') { if ($c.PSObject.Properties[$f]) { $sc | Add-Member -NotePropertyName $f -NotePropertyValue ([string]$c.$f) } }
+        foreach ($idField in 'Luid', 'InstanceId') { if ($c.PSObject.Properties[$idField]) { $sc | Add-Member -NotePropertyName $idField -NotePropertyValue ([string]$c.$idField) } }   # not $f: QPC frequency above
         $sc
     })
     return $st
