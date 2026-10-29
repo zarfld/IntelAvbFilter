@@ -1212,8 +1212,32 @@ function Get-AvbHilState {
 # Returns @{ Diffs = enforced differences (text, unchanged semantics); Warn = observed-only differences;
 #           Items = the same findings structured: Kind diff|unobservable, Key (incident key = adapter|component|expected|observed),
 #           Adapter, Component, Expected, Observed, IdentityVerified, Text }.
-# Adapter identity: PnP instance id for adapter state; 'drv:<DID>#<driver index>' for clock registers - NOT a verified
-# physical identity (IdentityVerified = $false; global safety semantics apply).
+# Adapter identity: PnP instance id for adapter state; for clock registers the base-miniport NET_LUID the observer read
+# with IOCTL_AVB_GET_ADAPTER_IDENTITY ('luid:<NET_LUID>'), verified when it maps to exactly one PnP instance.  An entry
+# without a LUID (sandbox fakes) keeps 'drv:<DID>#<driver index>' - an enumeration position, NOT a physical identity
+# (IdentityVerified = $false; global safety semantics apply).  Base and current in different modes never pair (fail closed).
+function Get-AvbHilEntryField {
+    param($Entry, [string]$Name)
+    if ($Entry -is [System.Collections.IDictionary]) { if ($Entry.Contains($Name)) { return $Entry[$Name] }; return $null }
+    if ($Entry.PSObject.Properties[$Name]) { return $Entry.$Name }
+    return $null
+}
+function Get-AvbHilAdapterKey {
+    param($Entry)
+    $l = Get-AvbHilEntryField $Entry 'Luid'
+    if ($l) { return "luid:$l" }
+    return ("drv:{0}#{1}" -f (Get-AvbHilEntryField $Entry 'Did'), (Get-AvbHilEntryField $Entry 'Index'))
+}
+function Get-AvbHilAdapterLabel {
+    param($Entry)
+    $l = Get-AvbHilEntryField $Entry 'Luid'; $inst = Get-AvbHilEntryField $Entry 'InstanceId'
+    if ($l) { return ("DID {0} (LUID {1}{2})" -f (Get-AvbHilEntryField $Entry 'Did'), $l, $(if ($inst) { ", $inst" } else { ', no unique PnP instance' })) }
+    return ("DID {0} (driver index {1})" -f (Get-AvbHilEntryField $Entry 'Did'), (Get-AvbHilEntryField $Entry 'Index'))
+}
+function Test-AvbHilAdapterIdentityVerified {
+    param($Entry)
+    return [bool]((Get-AvbHilEntryField $Entry 'Luid') -and (Get-AvbHilEntryField $Entry 'InstanceId'))
+}
 function Compare-AvbHilState {
     param($Base, $Cur)
     $diffs = @(); $warn = @(); $items = @()
@@ -1245,20 +1269,20 @@ function Compare-AvbHilState {
             $diffs += "PHC clock state not observable: $($Cur.ClockError)"
             & $add 'unobservable' 'all-adapters' 'clock-state' 'observable' 'unobservable' $diffs[-1] $false
         } else {
-            $bc = @{}; foreach ($c in $Base.Clock) { $bc["$($c.Did)#$($c.Index)"] = $c }
-            $cc = @{}; foreach ($c in $Cur.Clock)  { $cc["$($c.Did)#$($c.Index)"] = $c }
+            $bc = @{}; foreach ($c in $Base.Clock) { $bc[(Get-AvbHilAdapterKey $c)] = $c }
+            $cc = @{}; foreach ($c in $Cur.Clock)  { $cc[(Get-AvbHilAdapterKey $c)] = $c }
             foreach ($k in @($bc.Keys)) {
-                $b = $bc[$k]
-                if (-not $cc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): no longer enumerated by the driver" -f $b.Did, $b.Index); & $add 'diff' "drv:$k" 'enumeration' 'enumerated' 'absent' $diffs[-1] $false; continue }
-                $c = $cc[$k]
-                if ($b.Ok -and -not $c.Ok) { $diffs += ("DID {0} (driver index {1}): clock config no longer readable ({2})" -f $b.Did, $b.Index, $c.Error); & $add 'unobservable' "drv:$k" 'clock-config' 'readable' 'unreadable' $diffs[-1] $false; continue }
+                $b = $bc[$k]; $lb = Get-AvbHilAdapterLabel $b
+                if (-not $cc.ContainsKey($k)) { $diffs += "${lb}: no longer enumerated by the driver"; & $add 'diff' $k 'enumeration' 'enumerated' 'absent' $diffs[-1] (Test-AvbHilAdapterIdentityVerified $b); continue }
+                $c = $cc[$k]; $lc = Get-AvbHilAdapterLabel $c; $vf = (Test-AvbHilAdapterIdentityVerified $b) -and (Test-AvbHilAdapterIdentityVerified $c)
+                if ($b.Ok -and -not $c.Ok) { $diffs += ("{0}: clock config no longer readable ({1})" -f $lc, $c.Error); & $add 'unobservable' $k 'clock-config' 'readable' 'unreadable' $diffs[-1] $vf; continue }
                 if ($b.Ok -and $c.Ok -and $b.Timinca -ne $c.Timinca) {
-                    $diffs += ("DID {0} (driver index {1}): TIMINCA 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Timinca, $c.Timinca)
-                    & $add 'diff' "drv:$k" 'TIMINCA' ('0x{0:X8}' -f [uint32]$b.Timinca) ('0x{0:X8}' -f [uint32]$c.Timinca) $diffs[-1] $false
+                    $diffs += ("{0}: TIMINCA 0x{1:X8} -> 0x{2:X8}" -f $lc, $b.Timinca, $c.Timinca)
+                    & $add 'diff' $k 'TIMINCA' ('0x{0:X8}' -f [uint32]$b.Timinca) ('0x{0:X8}' -f [uint32]$c.Timinca) $diffs[-1] $vf
                 }
                 if ($b.Ok -and $c.Ok -and $b.Tsauxc -ne $c.Tsauxc) {
-                    $diffs += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
-                    & $add 'diff' "drv:$k" 'TSAUXC' ('0x{0:X8}' -f [uint32]$b.Tsauxc) ('0x{0:X8}' -f [uint32]$c.Tsauxc) $diffs[-1] $false
+                    $diffs += ("{0}: TSAUXC 0x{1:X8} -> 0x{2:X8}" -f $lc, $b.Tsauxc, $c.Tsauxc)
+                    & $add 'diff' $k 'TSAUXC' ('0x{0:X8}' -f [uint32]$b.Tsauxc) ('0x{0:X8}' -f [uint32]$c.Tsauxc) $diffs[-1] $vf
                 }
                 # Snapshot registers read VALID both times: a change is an observed difference.  A register read only once is
                 # no difference - it only keeps its group unverifiable (Get-AvbHilVerifiableState).
@@ -1266,13 +1290,13 @@ function Compare-AvbHilState {
                     $bR = Get-AvbHilRegs $b; $cR = Get-AvbHilRegs $c
                     foreach ($rn in @($bR.Keys)) {
                         if (-not $cR.Contains($rn) -or $bR[$rn] -eq $cR[$rn]) { continue }
-                        $diffs += ("DID {0} (driver index {1}): {2} 0x{3:X8} -> 0x{4:X8}" -f $b.Did, $b.Index, $rn, $bR[$rn], $cR[$rn])
-                        & $add 'diff' "drv:$k" $rn ('0x{0:X8}' -f $bR[$rn]) ('0x{0:X8}' -f $cR[$rn]) $diffs[-1] $false
+                        $diffs += ("{0}: {1} 0x{2:X8} -> 0x{3:X8}" -f $lc, $rn, $bR[$rn], $cR[$rn])
+                        & $add 'diff' $k $rn ('0x{0:X8}' -f $bR[$rn]) ('0x{0:X8}' -f $cR[$rn]) $diffs[-1] $vf
                     }
                 }
             }
             foreach ($k in @($cc.Keys)) {
-                if (-not $bc.ContainsKey($k)) { $diffs += ("DID {0} (driver index {1}): newly enumerated by the driver" -f $cc[$k].Did, $cc[$k].Index); & $add 'diff' "drv:$k" 'enumeration' 'absent' 'enumerated' $diffs[-1] $false }
+                if (-not $bc.ContainsKey($k)) { $diffs += ("{0}: newly enumerated by the driver" -f (Get-AvbHilAdapterLabel $cc[$k])); & $add 'diff' $k 'enumeration' 'absent' 'enumerated' $diffs[-1] (Test-AvbHilAdapterIdentityVerified $cc[$k]) }
             }
         }
     }

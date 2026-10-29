@@ -480,6 +480,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install PyYAML (HIL trust-boundary test parser)
+        # tests/unit/ci/test_hil_trust_boundary.ps1 (Unit suite) parses the workflows with PyYAML BaseLoader and fails
+        # closed without it (TEST-HILTRUST-000).  Pinned: the version the test was validated with.
+        if: runner.os == 'Windows' && matrix.hardware != true
+        run: python -m pip install --disable-pip-version-check pyyaml==6.0.3
+
       - name: Install CMake and Build Tools (Ubuntu)
         if: runner.os == 'Linux'
         run: |

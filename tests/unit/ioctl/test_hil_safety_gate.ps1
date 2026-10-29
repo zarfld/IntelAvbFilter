@@ -1466,6 +1466,50 @@ tc_check 'TEST-HILGATE-090-snapshot-registers-verify-ts-control-restoration-dete
      $x2.Count, $x2Ok.Count, (($x2 | ForEach-Object { "$($_.name)=$(Get-Prop (Get-CleanupOf $_) 'outcome')" }) -join ','),
      $x3.Count, $x3Nv.Count, (($x3 | ForEach-Object { "$($_.name)=$(Get-Prop (Get-CleanupOf $_) 'outcome')" }) -join ','), (Tail $rX1))
 
+# --- 091: adapter identity = NET_LUID, not the driver's enumeration position ------------------------------------------
+# LocalSuites_20261029_065141: after test_lifecycle_coverage (filter detach/attach) the driver re-enumerated 0x15BB and
+# 0x125B in swapped positions.  Keyed by 'DID#driver index', every later comparison reported "no longer / newly
+# enumerated" and compared NO register of either adapter (verification silently lost).  Keyed by the base-miniport
+# NET_LUID (IOCTL_AVB_GET_ADAPTER_IDENTITY), a reorder is no difference and a real change stays attributed to the
+# physical adapter; identity counts as verified only when the LUID maps to exactly one PnP instance.
+$idFns = 'Compare-AvbHilState', 'Get-AvbHilRegs', 'Get-AvbHilAdapterKey', 'Get-AvbHilAdapterLabel'
+$idMissing = @($idFns | Where-Object { $n = $_; $null -eq $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true) })
+$idBad = @()
+if ($idMissing.Count -gt 0) { $idBad += "runner functions missing: $($idMissing -join ', ')" }
+else {
+    foreach ($n in $idFns) { . ([scriptblock]::Create($ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true).Extent.Text)) }
+    $luidA = '0x0006008006000000'; $luidB = '0x0006008000000000'
+    function New-IdSt([int]$IdxA, [int]$IdxB, [uint32]$TxB = 0x1900, [string]$InstB = 'PCI\VEN_8086&DEV_15BB\ID02', [switch]$NoLuid) {
+        $mk = { param($i, $d, $l, $inst, $regs) $o = [ordered]@{ Index = $i; Did = $d; Ok = $true; Timinca = 0; Tsauxc = 0; Error = ''; Registers = $regs; RegistersError = '' }
+                if (-not $NoLuid) { $o.Luid = $l; $o.InstanceId = $inst }; [pscustomobject]$o }
+        return @{ Ok = $true; Error = ''; ClockOk = $true; ClockError = ''; Adapters = @()
+                  Clock = @((& $mk $IdxA '0x125B' $luidA 'PCI\VEN_8086&DEV_125B\ID01' ([ordered]@{ TSYNCRXCTL = [uint32]0x18 })),
+                            (& $mk $IdxB '0x15BB' $luidB $InstB ([ordered]@{ TSYNCTXCTL = $TxB }))) }
+    }
+    $cA = Compare-AvbHilState (New-IdSt 0 2) (New-IdSt 2 0)
+    if (@($cA.Diffs).Count -ne 0) { $idBad += "a) reorder with identical LUIDs reported: $($cA.Diffs -join '; ')" }
+    $cB = Compare-AvbHilState (New-IdSt 0 2) (New-IdSt 2 0 -TxB 0x10)
+    $iB = @($cB.Items)
+    if ($iB.Count -ne 1 -or $iB[0].Key -ne "luid:$luidB|TSYNCTXCTL|0x00001900|0x00000010" -or -not $iB[0].IdentityVerified -or
+        $iB[0].Text -notmatch "DID 0x15BB \(LUID $luidB") { $idBad += "b) reorder + change: $(@($iB | ForEach-Object { "$($_.Key) verified=$($_.IdentityVerified) '$($_.Text)'" }) -join ' ; ')" }
+    $cC = Compare-AvbHilState (New-IdSt 0 2 -InstB '') (New-IdSt 2 0 -TxB 0x10 -InstB '')
+    if (@($cC.Items).Count -ne 1 -or @($cC.Items)[0].IdentityVerified) { $idBad += "c) LUID without PnP mapping claimed verified: $(@($cC.Items | ForEach-Object { "$($_.Key)=$($_.IdentityVerified)" }) -join ',')" }
+    $cD = Compare-AvbHilState (New-IdSt 0 2 -NoLuid) (New-IdSt 0 2 -TxB 0x10 -NoLuid)
+    if (@($cD.Items).Count -ne 1 -or @($cD.Items)[0].Key -ne 'drv:0x15BB#2|TSYNCTXCTL|0x00001900|0x00000010' -or @($cD.Items)[0].IdentityVerified) { $idBad += "d) legacy key: $(@($cD.Items | ForEach-Object { $_.Key }) -join ',')" }
+    $cE = Compare-AvbHilState (New-IdSt 0 2) (New-IdSt 0 2 -NoLuid)
+    if (@($cE.Diffs | Where-Object { $_ -match 'no longer enumerated' }).Count -lt 2) { $idBad += "e) identity mode change not fail-closed: $($cE.Diffs -join '; ')" }
+}
+# STATIC (source contract, not hardware evidence): the hardware observer binds by NET_LUID and never by OPEN_ADAPTER,
+# which switches the driver's global context and runs PTP initialization on the adapter it observes (I210: clears
+# TSAUXC bit 31; after a filter re-attach: full intel_init) - the observer would repair or rewrite the state it reports.
+$obsFn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilClockState' }, $true)
+$obsTxt = if ($obsFn) { $obsFn.Extent.Text } else { '' }
+if ($obsTxt -match '0x00170080') { $idBad += 'STATIC: Get-AvbHilClockState still issues IOCTL_AVB_OPEN_ADAPTER (0x00170080)' }
+if ($obsTxt -notmatch '0x00170110' -or $obsTxt -notmatch '0x00170114') { $idBad += 'STATIC: Get-AvbHilClockState does not use GET_ADAPTER_IDENTITY (0x00170110) + OPEN_ADAPTER_BY_LUID (0x00170114)' }
+if ($obsTxt -notmatch 'snapshot net_luid') { $idBad += 'STATIC: snapshot net_luid is not checked against the bound LUID' }
+tc_check 'TEST-HILGATE-091-adapter-identity-is-the-net-luid-reorder-is-no-diff-changes-stay-attributed-observer-never-opens-adapter' `
+    ($idBad.Count -eq 0) ($idBad -join ' || ')
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
