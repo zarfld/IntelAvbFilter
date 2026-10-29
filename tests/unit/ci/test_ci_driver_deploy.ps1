@@ -302,15 +302,21 @@ exit ([int]`$env:FAKE_PRE_RC)
 "@ | Set-Content -LiteralPath $fakePre -Encoding UTF8
 $orch = Join-Path $RepoRoot 'tools\ci\Invoke-HilDeployment.ps1'
 $pinCer = Join-Path $Tmp 'pin.cer'
-function Invoke-Orch([string]$Name, $Pkg, [string]$InstallRc = '0', [string]$PreRc = '0', [string]$Sha = $null, [string]$LockFile = (Join-Path $Tmp "$Name.lock")) {
+# The orchestrator runs as an OFFLINE child (-SkipTrustCheck seam) whatever environment this test runs in: under GitHub
+# Actions the child would otherwise inherit GITHUB_ACTIONS=true and be refused by the seam guard before any scenario
+# (CI run 40824241990: abort at CIDEPLOY-040).  -GitHubActions 'true' exercises that guard itself (CIDEPLOY-043).
+function Invoke-Orch([string]$Name, $Pkg, [string]$InstallRc = '0', [string]$PreRc = '0', [string]$Sha = $null, [string]$LockFile = (Join-Path $Tmp "$Name.lock"), [string]$GitHubActions = '') {
     if (Test-Path $calls) { Remove-Item $calls -Force }
     $evd = Join-Path $Tmp "ev_$Name"
     $env:FAKE_INSTALL_RC = $InstallRc; $env:FAKE_PRE_RC = $PreRc
     $env:GITHUB_RUN_ID = '600'; $env:GITHUB_RUN_ATTEMPT = '1'; $env:GITHUB_JOB = "job-$Name"
-    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $orch -Action Deploy -Configuration Debug -PackageDir $Pkg.Dir -ExpectedRevision $Rev `
-               -ExpectedRepository 'zarfld/IntelAvbFilter' -ExpectedRunId '1234' -ExpectedRunAttempt '1' -ExpectedDriverSha256 $(if ($Sha) { $Sha } else { $Pkg.Sha }) `
-               -EvidenceDir $evd -PinnedCertificate $pinCer -LockWaitSeconds 0 -InstallScript $fakeInstall -PreFlightScript $fakePre -LockPath $LockFile -SkipTrustCheck 2>&1 | Out-String
-    $rc = $LASTEXITCODE
+    $ghPrev = $env:GITHUB_ACTIONS; $env:GITHUB_ACTIONS = $GitHubActions
+    try {
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $orch -Action Deploy -Configuration Debug -PackageDir $Pkg.Dir -ExpectedRevision $Rev `
+                   -ExpectedRepository 'zarfld/IntelAvbFilter' -ExpectedRunId '1234' -ExpectedRunAttempt '1' -ExpectedDriverSha256 $(if ($Sha) { $Sha } else { $Pkg.Sha }) `
+                   -EvidenceDir $evd -PinnedCertificate $pinCer -LockWaitSeconds 0 -InstallScript $fakeInstall -PreFlightScript $fakePre -LockPath $LockFile -SkipTrustCheck 2>&1 | Out-String
+        $rc = $LASTEXITCODE
+    } finally { $env:GITHUB_ACTIONS = $ghPrev }
     $env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''
     $dep = $null; $dj = Join-Path $evd 'deployment.json'; if (Test-Path $dj) { $dep = Get-Content $dj -Raw | ConvertFrom-Json }
     $cl = @(); if (Test-Path $calls) { $cl = @(Get-Content $calls) }
@@ -337,6 +343,10 @@ $oBusy = Invoke-Orch 'busy' $pOk -LockFile $busy
 $null = Exit-AvbHilLock -Owner $hold.Owner -Path $busy
 tc_check 'TEST-CIDEPLOY-042-busy-machine-is-hil-not-executed-and-touches-nothing' `
     (($oBusy.Exit -eq 1) -and ($oBusy.Dep.verdict -eq 'NOT_EXECUTED_BUSY') -and ($oBusy.Calls.Count -eq 0)) ("verdict={0} calls={1}" -f $(if ($oBusy.Dep) { $oBusy.Dep.verdict }), ($oBusy.Calls -join '|'))
+$oSeam = Invoke-Orch 'seam' $pOk -GitHubActions 'true'
+tc_check 'TEST-CIDEPLOY-043-skiptrustcheck-seam-is-refused-under-github-actions-before-anything-runs' `
+    (($oSeam.Exit -eq 1) -and ($null -eq $oSeam.Dep) -and ($oSeam.Calls.Count -eq 0) -and ($oSeam.Out -match 'SkipTrustCheck is an offline-test seam and is refused under GitHub Actions')) `
+    ("exit={0} deployment.json={1} calls={2} out={3}" -f $oSeam.Exit, ($null -ne $oSeam.Dep), ($oSeam.Calls -join '|'), (($oSeam.Out -split "`n" | Select-Object -Last 3) -join ' | '))
 
 # A job lost during installation (runner connection interrupted by netcfg, #328): its lock and IN_FLIGHT record stay
 # on the machine (RUNNER_TEMP does not survive the next job); the next deployment attributes both.
