@@ -1148,11 +1148,13 @@ tc_check 'TEST-HILGATE-089-runner-reclassifies-obsolete-cleanup-only-safety-even
      $h89.Count -eq 1 -and $h89[0].sourceRevision -match 'sandbox-rev' -and $rW1.Out -match 'reclassified 1 cleanup-only safety event' -and
      $s89c.State -eq 'CLEAR' -and $h89c.Count -eq 1 -and $h89c[0].initiatedBy -match 'sbx-run' -and (Get-RanCount $rW3 '^RAN test_sbfake_ro ') -eq 1 -and
      (Get-Content -LiteralPath $sf89o -Raw) -eq $b89o -and (Get-RanCount $rW4 '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rW4 '^RAN test_sbfake_ro ') -eq 1 -and
-     $rW4.Out -match 'machine safety record HALTED') `
-    ("local: state={0} events={1} recovery={2}/{3} history={4} ran1={5} ran2={6} | ci: state={7} history={8} | other-owner untouched={9} init={10} || {11} || {12}" -f
+     $rW4.Out -match 'machine safety record:? HALTED') `
+    ("local: state={0} events={1} recovery={2}/{3} history={4} rev={5} note={6} ran1={7} ran2={8} | ci: state={9} history={10} by={11} ro={12} | other-owner untouched={13} init={14} ro={15} halted={16} || {17}" -f
      $s89.State, $e89.Count, $(if ($e89.Count) { $e89[0].recovery.status }), $(if ($e89.Count -and $e89[0].recovery.PSObject.Properties['cleanupOutcome']) { $e89[0].recovery.cleanupOutcome }), $h89.Count,
-     (Get-RanCount $rW1 '^RAN test_sbfake_init '), (Get-RanCount $rW2 '^RAN test_sbfake_init '), $s89c.State, $h89c.Count,
-     ((Get-Content -LiteralPath $sf89o -Raw) -eq $b89o), (Get-RanCount $rW4 '^RAN test_sbfake_init '), (Tail $rW1), (Tail $rW3))
+     $(if ($h89.Count) { $h89[0].sourceRevision }), ($rW1.Out -match 'reclassified 1 cleanup-only safety event'),
+     (Get-RanCount $rW1 '^RAN test_sbfake_init '), (Get-RanCount $rW2 '^RAN test_sbfake_init '), $s89c.State, $h89c.Count, $(if ($h89c.Count) { $h89c[0].initiatedBy }),
+     (Get-RanCount $rW3 '^RAN test_sbfake_ro '), ((Get-Content -LiteralPath $sf89o -Raw) -eq $b89o), (Get-RanCount $rW4 '^RAN test_sbfake_init '),
+     (Get-RanCount $rW4 '^RAN test_sbfake_ro '), ($rW4.Out -match 'machine safety record:? HALTED'), (Tail $rW4))
 
 # 069: LocalSuites layout - the prior-results directory (logs\LocalSuites_<ts>) lies INSIDE the runner's logs directory.
 # Defect found in the physical run LocalSuites_20261021_173805: the atdecc FAILED(TIMEOUT) halt of HardwareUnit never
