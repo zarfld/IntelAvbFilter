@@ -71,14 +71,17 @@ function Read-AvbSuiteResults {
     return @{ Ok = $true; Doc = $doc; Error = '' }
 }
 
-# Inventory rows: one per result record, Category = Failure | Blocked | NotExecuted | NotFailure (verdict kept verbatim).
-# NotExecuted = declared coverage gap: a required test not executed (nonpassing).  An unknown verdict is a failure.
+# Inventory rows: one per result record, Category = Failure | Blocked | BlockedTestcases | NotExecuted | NotFailure
+# (verdict kept verbatim).  NotExecuted = declared coverage gap: a required test not executed (nonpassing).
+# BlockedTestcases = executed, no functional FAIL, testcases BLOCKED (runner BLOCKED(TESTCASE); nonpassing).  An unknown
+# verdict is a failure.
 function Get-AvbFailureInventory {
     param($Doc, [string]$Configuration, [string]$Suite)
     $rows = @()
     foreach ($r in @($Doc.records)) {
         $cat = if ($r.verdict -in @('PASSED', 'SKIPPED')) { 'NotFailure' } elseif ($r.verdict -eq 'COVERAGE-GAP') { 'NotExecuted' }
-               elseif ($r.verdict -in @('BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)')) { 'Blocked' } else { 'Failure' }
+               elseif ($r.verdict -in @('BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)')) { 'Blocked' }
+               elseif ($r.verdict -eq 'BLOCKED(TESTCASE)') { 'BlockedTestcases' } else { 'Failure' }
         $failing = @($r.testcases | Where-Object { $_.Verdict -notin @('PASS', 'SKIP', 'SKIP_UNSUPPORTED') } | ForEach-Object {
             if ($_.AdapterDid) { "$($_.Id)@$($_.AdapterDid)" } elseif ($null -ne $_.AdapterIndex) { "$($_.Id)/adapter:$($_.AdapterIndex)" } else { $_.Id } })
         $rows += [pscustomobject]@{
@@ -311,7 +314,8 @@ try {
                 $inv = Get-AvbFailureInventory -Doc $res.Doc -Configuration $Configuration -Suite $Suite
                 $cfgInventory += $inv
                 $nf = @($inv | Where-Object { $_.Category -eq 'Failure' }).Count; $nb = @($inv | Where-Object { $_.Category -eq 'Blocked' }).Count
-                Write-Host ("`n{0} / {1}: exit {2}, overall {3}, executed {4}, failures {5}, blocked {6}" -f $Configuration, $Suite, (Format-AvbExitCode $rc), $res.Doc.overall, $res.Doc.executedCount, $nf, $nb)
+                $nt = @($inv | Where-Object { $_.Category -eq 'BlockedTestcases' }).Count
+                Write-Host ("`n{0} / {1}: exit {2}, overall {3}, executed {4}, failures {5}, blocked {6}, executed with blocked testcases {7}" -f $Configuration, $Suite, (Format-AvbExitCode $rc), $res.Doc.overall, $res.Doc.executedCount, $nf, $nb, $nt)
                 if ($s.cleanupCounts) {
                     $cc = $s.cleanupCounts
                     Write-Host ("{0} / {1}: cleanup (separate from functional results): FAILED {2}, NOT_VERIFIED {3}, SUCCESS {4}, NOT_REQUIRED {5} --- details: {6} 'cleanup'" -f $Configuration, $Suite, $cc.FAILED, $cc.NOT_VERIFIED, $cc.SUCCESS, $cc.NOT_REQUIRED, $json) -ForegroundColor $(if ($cc.FAILED -or $cc.NOT_VERIFIED) { 'Yellow' } else { 'Gray' })
@@ -369,6 +373,9 @@ try {
     $fail | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, ExitCode, Testcases, Incidents -AutoSize | Out-String -Width 250 | Write-Host
     $ci = Get-AvbCleanupIncidentSummary -Inventory $AllInventory
     if ($ci.Observations -gt 0) { Write-Host ("Cleanup incidents: {0} unique hardware discrepancy incident(s), {1} verification observation(s)" -f $ci.Incidents, $ci.Observations) -ForegroundColor Red }
+    $btc = @($AllInventory | Where-Object { $_.Category -eq 'BlockedTestcases' })
+    Write-Host "Executed, no functional failure, testcases BLOCKED - nonpassing ($($btc.Count)):"
+    $btc | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, ExitCode, Testcases -AutoSize | Out-String -Width 250 | Write-Host
     Write-Host "Not executed - blocked ($($blk.Count)):"
     $blk | Sort-Object Configuration, Suite, Name | Format-Table Configuration, Suite, Name, Verdict, Reason -AutoSize | Out-String -Width 250 | Write-Host
     $gap = @($AllInventory | Where-Object { $_.Category -eq 'NotExecuted' })

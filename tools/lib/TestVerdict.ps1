@@ -76,7 +76,9 @@ function Get-AvbSuiteVerificationClass {
 # sees executable exit codes and would otherwise count "exit 0 + NOT_IMPLEMENTED" as PASSED.
 function Get-AvbVerdictCounts {
     param([string[]]$Lines)
-    $counts = @{ NotImplemented = 0; Inconclusive = 0; FailedSetup = 0; InconclusiveRestoration = 0 }
+    # Fail / Blocked / InfraFailure: the runner confirms an exit code 3 ("no functional FAIL, BLOCKED or INCONCLUSIVE
+    # testcases") against the lines - an exit code alone never moves a result out of FAILED.
+    $counts = @{ NotImplemented = 0; Inconclusive = 0; FailedSetup = 0; InconclusiveRestoration = 0; Fail = 0; Blocked = 0; InfraFailure = 0 }
     $rx = '^\s*\[(' + $script:AvbVerdictTagPattern + ')\]\s+(?:\[Adapter\d+\[[^\]]*\]\]\s+)?(?:TC|IT|VV|UT|REG|TEST)-[\w-]+(?:/adapter:\d+)?\s*(.*)$'
     foreach ($line in $Lines) {
         if ($line -match $rx) {
@@ -85,6 +87,9 @@ function Get-AvbVerdictCounts {
             elseif ($v -eq 'INCONCLUSIVE')             { $counts.Inconclusive++ }
             elseif ($v -eq 'FAILED_SETUP')             { $counts.FailedSetup++ }
             elseif ($v -eq 'INCONCLUSIVE_RESTORATION') { $counts.InconclusiveRestoration++ }
+            elseif ($v -eq 'FAIL')                     { $counts.Fail++ }
+            elseif ($v -eq 'BLOCKED')                  { $counts.Blocked++ }
+            elseif ($v -eq 'INFRA_FAILURE')            { $counts.InfraFailure++ }
         }
     }
     return $counts

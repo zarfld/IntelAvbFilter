@@ -1237,6 +1237,7 @@ function ConvertTo-AvbRunnerVerdict {
         'BLOCKED'                     { return 'BLOCKED(SAFETY)' }
         'BLOCKED(SAFETY)'             { return 'BLOCKED(SAFETY)' }
         'BLOCKED(PROVENANCE)'         { return 'BLOCKED(PROVENANCE)' }
+        'BLOCKED(TESTCASE)'           { return 'BLOCKED(TESTCASE)' }   # executed; no FAIL; BLOCKED testcases (exit 3, confirmed by the lines)
         'SKIPPED'                     { return 'SKIPPED' }
         'SKIPPED(INFRA)'              { return 'SKIPPED' }
         'COVERAGE-GAP'                { return 'COVERAGE-GAP' }
@@ -1303,7 +1304,7 @@ function Write-AvbResultsJson {
     param([int]$ExitCode, [string]$Overall)
     $records = @($script:AvbResultRecords)
     $counts = [ordered]@{}
-    foreach ($v in 'PASSED', 'FAILED', 'FAILED(TIMEOUT)', 'BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)', 'SKIPPED', 'COVERAGE-GAP',
+    foreach ($v in 'PASSED', 'FAILED', 'FAILED(TIMEOUT)', 'BLOCKED(PROVENANCE)', 'BLOCKED(SAFETY)', 'BLOCKED(TESTCASE)', 'SKIPPED', 'COVERAGE-GAP',
                    'INCOMPLETE', 'INCONCLUSIVE', 'INFRA_FAILURE', 'CLEANUP_FAILED', 'INCONCLUSIVE_RESTORATION', 'FAILED_SETUP') {
         $counts[$v] = @($records | Where-Object { $_.verdict -eq $v }).Count
     }
@@ -2501,6 +2502,22 @@ foreach ($WorkItem in $WorkItems) {
         $skippedTests++
         Write-Skip "$exeName (exit=2 SKIP_ONLY: Section L passed, Section H skipped -- driver absent)"
         Add-AvbResult -Name $exeName -Status "SKIPPED" -Exit $exitCode
+    } elseif ($exitCode -eq 3) {
+        # Exit 3 = no functional assertion failed, but BLOCKED and/or INCONCLUSIVE testcases (test_ioctl_tas,
+        # test_ptp_freq_complete; tests/common/avb_test_common.h AVB_TEST_EXIT_BLOCKED).  Confirmed against the testcase
+        # lines - a contradiction (a FAIL / INFRA_FAILURE line, or neither verdict) stays FAILED.  Always nonpassing.
+        $failedTests++
+        $x3 = "FAIL=$($vc.Fail) INFRA_FAILURE=$($vc.InfraFailure) BLOCKED=$($vc.Blocked) INCONCLUSIVE=$($vc.Inconclusive)"
+        if ($vc.Fail -eq 0 -and $vc.InfraFailure -eq 0 -and $vc.Blocked -gt 0) {
+            Write-Fail "$exeName BLOCKED ($($vc.Blocked) testcase(s) BLOCKED, $($vc.Inconclusive) INCONCLUSIVE, no functional FAIL) --- prerequisite or safety constraint prevented execution"
+            Add-AvbResult -Name $exeName -Status "BLOCKED(TESTCASE)" -Exit $exitCode -Reason "exit 3 confirmed by the testcase lines ($x3)"
+        } elseif ($vc.Fail -eq 0 -and $vc.InfraFailure -eq 0 -and $vc.Inconclusive -gt 0) {
+            Write-Fail "$exeName INCONCLUSIVE ($($vc.Inconclusive) testcase(s), no functional FAIL) --- insufficient evidence on mandatory verification"
+            Add-AvbResult -Name $exeName -Status "FAILED(INCONCLUSIVE)" -Exit $exitCode -Reason "exit 3 confirmed by the testcase lines ($x3)"
+        } else {
+            Write-Fail "$exeName FAILED (exit 3 claims no functional failure, contradicted by the testcase lines: $x3)"
+            Add-AvbResult -Name $exeName -Status "FAILED" -Exit $exitCode -Reason "exit 3 (no functional FAIL claimed) contradicted by the testcase lines ($x3)"
+        }
     } else {
         $failedTests++
         Write-Fail "$exeName FAILED (exit $(Format-AvbExitCode $exitCode))"

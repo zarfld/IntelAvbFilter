@@ -105,6 +105,18 @@ $blocked = @($inv | Where-Object { $_.Category -eq 'Blocked' })
 tc_check 'TEST-LOCALSUITES-005-blocked-items-are-reported-as-not-executed' `
     (($blocked.Count -eq 2) -and (@($blocked | Where-Object { $_.Executed }).Count -eq 0) -and (@($inv | Where-Object { $_.Executed }).Count -eq 7)) `
     ("blocked={0} executed={1}" -f $blocked.Count, @($inv | Where-Object { $_.Executed }).Count)
+# An EXECUTED test whose testcases were BLOCKED without a functional FAIL (runner verdict BLOCKED(TESTCASE), exit 3
+# confirmed by the lines; test_ptp_freq_complete in LocalSuites_20261029_005219 was listed as a failure): its own
+# nonpassing category - neither an executed functional failure nor a not-executed block; the failing testcases survive.
+$docBt = Write-Doc (Join-Path $Tmp 'inv-blktc.json') 'HardwareUnit' 'Debug' 1 @(
+    (New-Rec 't_blktc' 'BLOCKED(TESTCASE)' $true -Class 'Mutating:Target' -Exit 3 -Target '0x125B' -Tcs @((New-Tc 'UT-FREQ-001' 'PASS'), (New-Tc 'IT-FREQ-002' 'BLOCKED'), (New-Tc 'VV-FREQ-001' 'INCONCLUSIVE'))),
+    (New-Rec 't_fail2' 'FAILED' $true -Exit 1 -Tcs @((New-Tc 'TC-B-001' 'FAIL'))))
+$invBt = Get-AvbFailureInventory -Doc $docBt -Configuration 'Debug' -Suite 'HardwareUnit'
+$rowBt = @($invBt | Where-Object { $_.Name -eq 't_blktc.exe' })[0]
+tc_check 'TEST-LOCALSUITES-023-executed-blocked-testcases-are-their-own-nonpassing-category-not-a-failure' `
+    (($null -ne $rowBt) -and ($rowBt.Category -eq 'BlockedTestcases') -and $rowBt.Executed -and ($rowBt.Testcases -eq 'IT-FREQ-002 VV-FREQ-001') -and
+     (@($invBt | Where-Object { $_.Category -eq 'Failure' }).Count -eq 1) -and (@($invBt | Where-Object { $_.Category -eq 'NotFailure' }).Count -eq 0)) `
+    (($invBt | ForEach-Object { "$($_.Name)=$($_.Category) tcs='$($_.Testcases)'" }) -join ' | ')
 
 # 017 (Decision B, Q 2026-10-22): two observations of ONE cleanup incident stay two visible failure rows, but the
 # inventory carries the incident references and counts unique incidents separately from observations.

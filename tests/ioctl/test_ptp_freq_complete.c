@@ -34,6 +34,8 @@
 #define TEST_PASS 0
 #define TEST_FAIL 1
 #define TEST_SKIP 2
+#define TEST_BLOCKED      3   /* prerequisite / safety constraint prevented the case (nonpassing, not a functional FAIL) */
+#define TEST_INCONCLUSIVE 4   /* insufficient evidence (nonpassing, not a functional FAIL) */
 
 /* Frequency adjustment constants (parts per billion - ppb) */
 #define MAX_FREQ_ADJ_PPB  1000000000   /* ±1 second/second = ±1e9 ppb */
@@ -86,14 +88,17 @@ typedef struct {
     int pass_count;
     int fail_count;
     int skip_count;
+    int blocked_count;
+    int inconclusive_count;
 } TestContext;
 
 
 /* I210 (issue #343; Intel I210 datasheet 333016 v3.7 section 8.15.11): INC_TIME = 8 ns +/- Incvalue*2^-32 ns, NOMINAL raw
  * TIMINCA = 0, only +/-6.25 percent representable, provisional authorized range +/-100,000 ppb (#149).  #3 / #192 state
  * +/-999,999 ppb: the conflict is recorded in #326 / #343 and the stricter policy is applied to the I210. */
-static BOOL     g_adapterIsI210 = FALSE;
-static unsigned g_savedRaw      = 0;    /* raw TIMINCA read BEFORE the first frequency change (verified restore) */
+static BOOL           g_adapterIsI210 = FALSE;
+static unsigned short g_targetDid     = 0;    /* DID of the bound target (GET_HW_STATE) */
+static unsigned       g_savedRaw      = 0;    /* raw TIMINCA read BEFORE the first frequency change, EVERY adapter (verified restore) */
 
 
 /* Helper: Convert ppb to increment_ns/increment_frac */
@@ -396,7 +401,7 @@ static int Test_IT_FREQ_002_MultiAdapter(TestContext *ctx)
      * policy (AVB_HIL_TARGET_DID); a multi-adapter case needs a redesign with one bound handle and a verified restore per
      * named adapter.  Unmet prerequisite => BLOCKED (a failure-class verdict, never PASS/SKIP). */
     printf("  [BLOCKED] IT-FREQ-002: multi-adapter mutation not permitted (exact-target policy); needs redesign with bound handles per named adapter\n");
-    return TEST_FAIL;
+    return TEST_BLOCKED;
 }
 
 /* IT-FREQ-003: Frequency Adjustment During Active gPTP Sync */
@@ -564,7 +569,7 @@ static int Test_VV_FREQ_001_StabilityBenchmark(TestContext *ctx)
      * ("relaxed criteria").  It provided no evidence.  The 1-hour +/-1 ppb benchmark needs a long-run lane;
      * the physical rate check against the QPC is UT-FREQ-RATE-I210-001/002. */
     printf("  [INCONCLUSIVE] VV-FREQ-001: 1-hour +/-1 ppb stability benchmark not executed within the CI time budget; no evidence\n");
-    return TEST_FAIL;   /* INCONCLUSIVE is nonpassing on mandatory verification */
+    return TEST_INCONCLUSIVE;   /* nonpassing on mandatory verification */
 }
 
 /* VV-FREQ-002: Long-Term Frequency Drift (<1 ppm over 24 hours) */
@@ -576,7 +581,7 @@ static int Test_VV_FREQ_002_LongTermDrift(TestContext *ctx)
     /* NOT RUN (issue #343).  The previous quick check compared one PHC delta with a 1 s Sleep() and returned PASS on
      * both branches ("relaxed criteria"): no evidence.  The 24-hour drift measurement needs a long-run lane. */
     printf("  [INCONCLUSIVE] VV-FREQ-002: 24-hour <1 ppm drift measurement not executed within the CI time budget; no evidence\n");
-    return TEST_FAIL;   /* INCONCLUSIVE is nonpassing on mandatory verification */
+    return TEST_INCONCLUSIVE;   /* nonpassing on mandatory verification */
 }
 
 /* VV-FREQ-003: gPTP Synchronization Error Validation (<1 µs Sustained) */
@@ -590,7 +595,7 @@ static int Test_VV_FREQ_003_gPTPSyncError(TestContext *ctx)
      * PASS ("relaxed criteria").  It provided no evidence.  Two-adapter gPTP sync needs a real master/slave setup and a
      * redesign; until then this case is BLOCKED (failure-class), never PASS/SKIP. */
     printf("  [BLOCKED] VV-FREQ-003: two-adapter gPTP sync needs a real master/slave setup and bound handles; not run\n");
-    return TEST_FAIL;
+    return TEST_BLOCKED;
 }
 
 /*
@@ -626,7 +631,7 @@ int main(void)
         if (sel != AVB_TARGET_OK) {
             printf("[BLOCKED] UT-FREQ-001..008, IT-FREQ-001..003, VV-FREQ-001..003: exact target adapter required - %s=%s"
                    " (%d adapter(s) enumerated); no frequency change was made\n", AVB_TEST_TARGET_ENV, AvbTargetSelectionName(sel), n);
-            return TEST_FAIL;   /* BLOCKED is a failure-class verdict */
+            return AVB_TEST_EXIT_BLOCKED;   /* BLOCKED: nonpassing, no functional FAIL */
         }
         ctx.adapter = AvbOpenAdapter(&adapters[ti]);
         if (ctx.adapter == INVALID_HANDLE_VALUE) {
@@ -639,26 +644,36 @@ int main(void)
         g_targetIndex = adapters[ti].global_index;
     }
     
-    /* I210: identify the adapter and save the raw TIMINCA BEFORE the first frequency change, for a verified restore.
+    /* Identify the adapter and save the raw TIMINCA BEFORE the first frequency change, on EVERY adapter, for a verified
+     * restore (I210: AvbTestI210RestoreVerified; other families: exact re-apply, AvbTestLegacyRestoreVerified - the I226
+     * was left at 0x08000000 instead of its 0x18000000 baseline, LocalSuites_20261029_005219 Debug and Release).
      * No baseline => no mutation (a failing GET_CLOCK_CONFIG is an implementation FAIL; a not-ready device is BLOCKED). */
     {
-        unsigned short did = 0;
-        g_adapterIsI210 = AvbTestGetBoundDid(ctx.adapter, &did) && AvbTestIsI210Did(did);
-        if (g_adapterIsI210) {
-            DWORD gle = 0;
-            if (!AvbTestReadTimincaRawEx(ctx.adapter, &g_savedRaw, &gle)) {
-                if (gle == ERROR_NOT_READY)
-                    printf("[BLOCKED] I210 (DID 0x%04X) not ready (GLE=%lu): no baseline TIMINCA, frequency tests not run\n", did, gle);
-                else
-                    printf("[FAIL] I210 (DID 0x%04X): GET_CLOCK_CONFIG failed (GLE=%lu): no baseline TIMINCA, frequency tests not run\n", did, gle);
-                CloseHandle(ctx.adapter);
-                return TEST_FAIL;
-            }
-            printf("[INFO] I210 (DID 0x%04X) baseline TIMINCA raw=0x%08X (nominal is 0), saved for verified restore\n", did, g_savedRaw);
+        DWORD gle = 0;
+        if (!AvbTestGetBoundDid(ctx.adapter, &g_targetDid)) {
+            printf("[FAIL] Target adapter: GET_HW_STATE failed (GLE=%lu): family unknown, no baseline, frequency tests not run\n", GetLastError());
+            CloseHandle(ctx.adapter);
+            return TEST_FAIL;
         }
+        g_adapterIsI210 = AvbTestIsI210Did(g_targetDid);
+        if (!AvbTestReadTimincaRawEx(ctx.adapter, &g_savedRaw, &gle)) {
+            if (gle == ERROR_NOT_READY)
+                printf("[BLOCKED] UT-FREQ-001..008: DID 0x%04X not ready (GLE=%lu): no baseline TIMINCA, frequency tests not run\n", g_targetDid, gle);
+            else
+                printf("[FAIL] UT-FREQ-001..008: DID 0x%04X: GET_CLOCK_CONFIG failed (GLE=%lu): no baseline TIMINCA, frequency tests not run\n", g_targetDid, gle);
+            CloseHandle(ctx.adapter);
+            return (gle == ERROR_NOT_READY) ? AVB_TEST_EXIT_BLOCKED : TEST_FAIL;
+        }
+        if (g_adapterIsI210)
+            printf("[INFO] I210 (DID 0x%04X) baseline TIMINCA raw=0x%08X (nominal is 0), saved for verified restore\n", g_targetDid, g_savedRaw);
+        else
+            printf("[INFO] DID 0x%04X baseline TIMINCA raw=0x%08X, saved for verified exact restore\n", g_targetDid, g_savedRaw);
     }
 
     printf("Running PTP Frequency Adjustment Complete Test Suite...\n");
+    /* Every path after the first frequency change reaches the restore: normal completion and an SEH exception inside a
+     * test case (__finally).  A runner timeout kills the process: the runner's own TIMINCA comparison reports it. */
+    __try {
     /* Macro to run tests */
     #define RUN_TEST(test) do { \
         int result = test(&ctx); \
@@ -666,6 +681,9 @@ int main(void)
         if (result == TEST_PASS) ctx.pass_count++; \
         else if (result == TEST_FAIL) ctx.fail_count++; \
         else if (result == TEST_SKIP) ctx.skip_count++; \
+        else if (result == TEST_BLOCKED) ctx.blocked_count++; \
+        else if (result == TEST_INCONCLUSIVE) ctx.inconclusive_count++; \
+        else ctx.fail_count++;   /* unknown result: never a pass */ \
     } while(0)
     
     /* Level 1: Unit Tests (8 tests) */
@@ -716,14 +734,16 @@ int main(void)
     RUN_TEST(Test_VV_FREQ_002_LongTermDrift);       /* 10 minutes - run last */
     
     #undef RUN_TEST
-    
+    } __finally {
     if (g_adapterIsI210) {
         /* Verified restore of the baseline saved before the first change (exact inside the policy, else nominal). */
         ctx.test_count++;
         if (AvbTestI210RestoreVerified(ctx.adapter, g_savedRaw, "UT/IT/VV-FREQ restore") != 1) ctx.fail_count++; else ctx.pass_count++;
     } else {
-    /* Reset to nominal before cleanup (non-I210 adapters: unchanged behavior, restore NOT verified) */
-    AdjustFrequency(ctx.adapter, 0);
+        /* Exact re-apply of the saved baseline, verified by readback; cleanup only ([CLEANUP:SUCCESS|FAILED]), the
+         * functional verdict and exit code are unchanged (Q 2026-10-28).  Was AdjustFrequency(0) = 8 ns, unverified. */
+        (void)AvbTestLegacyRestoreVerified(ctx.adapter, g_targetDid, g_savedRaw, "UT/IT/VV-FREQ restore");
+    }
     }
     /* Cleanup */
     if (ctx.adapter != INVALID_HANDLE_VALUE) {
@@ -740,18 +760,26 @@ int main(void)
            ctx.pass_count, (100.0 * ctx.pass_count) / ctx.test_count);
     printf("║ Failed:  %2d tests                                             ║\n", ctx.fail_count);
     printf("║ Skipped: %2d tests                                             ║\n", ctx.skip_count);
+    printf("║ Blocked: %2d tests (not executed; not a functional failure)    ║\n", ctx.blocked_count);
+    printf("║ Inconclusive: %2d tests (no evidence; not a functional failure)║\n", ctx.inconclusive_count);
     printf("╠════════════════════════════════════════════════════════════════╣\n");
-    
-    if (ctx.fail_count == 0 && ctx.skip_count == 0) {
-        printf("║ ✅ ALL TESTS PASSED - Issue #192 COMPLETE                     ║\n");
-    } else if (ctx.fail_count == 0) {
-        printf("║ ⚠️  ALL EXECUTABLE TESTS PASSED (some skipped)                ║\n");
-    } else {
+
+    if (ctx.fail_count > 0) {
         printf("║ ❌ SOME TESTS FAILED - Review failures above                  ║\n");
+    } else if (ctx.blocked_count > 0 || ctx.inconclusive_count > 0) {
+        printf("║ NO FUNCTIONAL FAILURE - BLOCKED/INCONCLUSIVE cases: INCOMPLETE ║\n");
+    } else if (ctx.skip_count == 0) {
+        printf("║ ✅ ALL TESTS PASSED - Issue #192 COMPLETE                     ║\n");
+    } else {
+        printf("║ ⚠️  ALL EXECUTABLE TESTS PASSED (some skipped)                ║\n");
     }
-    
+
     printf("╚════════════════════════════════════════════════════════════════╝\n");
     printf("\n");
-    
-    return (ctx.fail_count > 0) ? TEST_FAIL : TEST_PASS;
+
+    /* 1 = a functional FAIL; 3 = no FAIL but BLOCKED/INCONCLUSIVE cases (nonpassing, confirmed by the runner against the
+     * lines); 0 = pass.  Cleanup is reported in [CLEANUP:*] lines and never changes this code (Q 2026-10-28). */
+    if (ctx.fail_count > 0) return TEST_FAIL;
+    if (ctx.blocked_count > 0 || ctx.inconclusive_count > 0) return AVB_TEST_EXIT_BLOCKED;
+    return TEST_PASS;
 }

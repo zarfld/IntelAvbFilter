@@ -53,6 +53,8 @@ $map = [ordered]@{
     'SKIPPED' = 'SKIPPED'; 'SKIPPED(INFRA)' = 'SKIPPED'; 'COVERAGE-GAP' = 'COVERAGE-GAP'
     # Q 2026-10-21: missing evidence vs observed damage vs unmet initial conditions stay distinct (all nonpassing).
     'INCONCLUSIVE_RESTORATION' = 'INCONCLUSIVE_RESTORATION'; 'FAILED_SETUP' = 'FAILED_SETUP'
+    # Executed test, no functional FAIL, BLOCKED testcases (exit 3 confirmed by the lines) - not a functional failure.
+    'BLOCKED(TESTCASE)' = 'BLOCKED(TESTCASE)'
 }
 $bad = @(foreach ($k in $map.Keys) { $v = ConvertTo-AvbRunnerVerdict $k; if ($v -ne $map[$k]) { "$k -> $v" } })
 tc_check 'TEST-RESULTSJSON-001-every-runner-status-maps-to-a-distinct-results-verdict' ($bad.Count -eq 0) ($bad -join '; ')
@@ -94,7 +96,8 @@ Copy-Item (Join-Path $RepoRoot 'include\intel_pci_ids.h')     (Join-Path $Tree '
 $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 
 $Classes = 'rj_pass=ReadOnly;rj_fail=ReadOnly;rj_timeout=ReadOnly;rj_incomplete=ReadOnly;rj_inconclusive=ReadOnly;rj_skip=ReadOnly;' +
-           'rj_mutating=Mutating;rj_noprov=ReadOnly;rj_cleanup=ReadOnly;rj_rel=ReadOnly'
+           'rj_mutating=Mutating;rj_noprov=ReadOnly;rj_cleanup=ReadOnly;rj_rel=ReadOnly;' +
+           'rj_x3_blocked=ReadOnly;rj_x3_inconclusive=ReadOnly;rj_x3_bare=ReadOnly;rj_x3_fail=ReadOnly'
 
 function New-Fake([string]$Name, [string]$Body) {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -260,6 +263,30 @@ tc_check 'TEST-RESULTSJSON-020-configuration-is-recorded-per-document-and-record
 $rD = Invoke-Sandbox 'runD' @((Get-Entry $pPass)) -Extra @('-CaptureDbgView')
 tc_check 'TEST-RESULTSJSON-021-capturedbgview-is-rejected-instead-of-silently-ignored' `
     (($rD.Exit -eq 1) -and ($rD.Out -match 'does not capture DebugView') -and ($rD.Out -match 'Run-Tests-Elevated\.ps1 -TestName') -and ($rD.Out -notmatch 'TC-RJ-001')) (Tail $rD)
+
+# --- Run E: exit 3 = no functional FAIL, BLOCKED / INCONCLUSIVE testcases (test_ioctl_tas, test_ptp_freq_complete) ----
+# The exit code alone never decides: the testcase lines must confirm it, and every outcome stays nonpassing.
+# (LocalSuites_20261029_005219: test_ptp_freq_complete, 2 BLOCKED + 2 INCONCLUSIVE + 0 FAIL, was recorded FAILED.)
+$pX3B = New-Fake 'rj_x3_blocked'      "Write-Host '  [PASS] TC-RJ-070: ok'`r`nWrite-Host '  [BLOCKED] TC-RJ-071: two-adapter setup required; not run'`r`nWrite-Host '  [INCONCLUSIVE] TC-RJ-072: no evidence'`r`nexit 3"
+$pX3I = New-Fake 'rj_x3_inconclusive' "Write-Host '  [PASS] TC-RJ-080: ok'`r`nWrite-Host '  [INCONCLUSIVE] TC-RJ-081: not measured within the CI budget'`r`nexit 3"
+$pX3N = New-Fake 'rj_x3_bare'         "Write-Host 'no verdict lines at all'`r`nexit 3"
+$pX3F = New-Fake 'rj_x3_fail'         "Write-Host '  [BLOCKED] TC-RJ-090: prerequisite missing'`r`nWrite-Host '  [FAIL] TC-RJ-091: register mismatch'`r`nexit 3"
+Write-Manifest @($pX3B, $pX3I, $pX3N, $pX3F) 'Debug'
+$rE = Invoke-Sandbox 'runE' @((Get-Entry $pX3B), (Get-Entry $pX3I), (Get-Entry $pX3N), (Get-Entry $pX3F))
+$recX3B = Get-Rec $rE 'rj_x3_blocked'; $recX3I = Get-Rec $rE 'rj_x3_inconclusive'; $recX3N = Get-Rec $rE 'rj_x3_bare'; $recX3F = Get-Rec $rE 'rj_x3_fail'
+tc_check 'TEST-RESULTSJSON-022-exit3-blocked-without-fail-is-blocked-testcase-not-a-functional-failure' `
+    (($null -ne $recX3B) -and ($recX3B.verdict -eq 'BLOCKED(TESTCASE)') -and $recX3B.executed -and ($recX3B.exitCode -eq 3) -and
+     (@($recX3B.testcases | Where-Object { $_.Verdict -eq 'BLOCKED' }).Count -eq 1) -and (@($recX3B.testcases | Where-Object { $_.Verdict -eq 'INCONCLUSIVE' }).Count -eq 1) -and
+     (@($recX3B.testcases | Where-Object { $_.Verdict -eq 'PASS' }).Count -eq 1)) (Show-Rec $recX3B)
+tc_check 'TEST-RESULTSJSON-023-exit3-inconclusive-without-fail-or-blocked-is-inconclusive' `
+    (($null -ne $recX3I) -and ($recX3I.verdict -eq 'INCONCLUSIVE') -and ($recX3I.exitCode -eq 3)) (Show-Rec $recX3I)
+tc_check 'TEST-RESULTSJSON-024-exit3-contradicted-by-the-lines-is-a-failure-with-the-reason' `
+    (($null -ne $recX3N) -and ($recX3N.verdict -eq 'FAILED') -and ($recX3N.reason -match 'exit 3') -and
+     ($null -ne $recX3F) -and ($recX3F.verdict -eq 'FAILED') -and ($recX3F.reason -match 'exit 3')) ("bare: {0} reason={1} | fail: {2} reason={3}" -f (Show-Rec $recX3N), $(if ($recX3N) { $recX3N.reason }), (Show-Rec $recX3F), $(if ($recX3F) { $recX3F.reason }))
+tc_check 'TEST-RESULTSJSON-025-blocked-testcase-and-inconclusive-keep-the-run-nonpassing-and-are-counted' `
+    (($null -ne $rE.Doc) -and ($rE.Doc.counts.'BLOCKED(TESTCASE)' -eq 1) -and ($rE.Doc.counts.INCONCLUSIVE -eq 1) -and ($rE.Doc.counts.FAILED -eq 2) -and
+     ($rE.Doc.overall -eq 'FAILED') -and ($rE.Doc.exitCode -ne 0) -and ($rE.Exit -ne 0)) `
+    ("counts={0} overall={1} exit={2}" -f $(if ($rE.Doc) { $rE.Doc.counts | ConvertTo-Json -Compress }), $(if ($rE.Doc) { $rE.Doc.overall }), $rE.Exit)
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

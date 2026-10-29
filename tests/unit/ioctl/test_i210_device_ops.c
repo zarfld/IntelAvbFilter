@@ -438,6 +438,44 @@ int main(void)
           AvbTestIsI210Did(INTEL_DEV_I210_IS) && AvbTestIsI210Did(INTEL_DEV_I210_IT) && AvbTestIsI210Did(INTEL_DEV_I210_CS) &&
           !AvbTestIsI210Did(INTEL_DEV_I211_AT) && !AvbTestIsI210Did(INTEL_DEV_I226_LM) && !AvbTestIsI210Did(INTEL_DEV_I219_LM));
 
+    /* Exact restore on the LEGACY ADJUST_FREQUENCY families (every family but the I210).  The expressions below mirror
+     * the legacy encoding in src/avb_integration_fixed.c (IOCTL_AVB_ADJUST_FREQUENCY, "Device-specific TIMINCA
+     * encoding"); HIL evidence for the direct-ns layout: I226 request ns=8 -> 0x08000000 (test_ptp_freq_complete),
+     * ns=24 -> 0x18000000 (test_ptp_freq restore), LocalSuites_20261029_005219.  Restore = re-apply the raw value read
+     * before the change; it claims nothing about the physical rate. */
+    {
+        static const unsigned direct_raw[] = { 0x18000000u, 0x08000000u, 0x1834ABCDu, 0x2FFFFFFFu, 0x01000001u };
+        static const unsigned i219_raw[]   = { 0x02F42400u, 0x021E8480u, 0x02F42401u, 0x02FFFFFFu, 0x022DC6C1u };
+        unsigned i, n = 0, f = 0;
+        int all_direct = 1, all_i219 = 1;
+        for (i = 0; i < sizeof(direct_raw) / sizeof(direct_raw[0]); i++) {
+            if (!AvbTestLegacyRawToRequest(INTEL_DEV_I226_LM, direct_raw[i], &n, &f) ||
+                ((((n & 0xFFu) << 24) | ((f >> 8) & 0x00FFFFFFu)) != direct_raw[i])) all_direct = 0;
+        }
+        for (i = 0; i < sizeof(i219_raw) / sizeof(i219_raw[0]); i++) {
+            unsigned long long iv;
+            if (!AvbTestLegacyRawToRequest(INTEL_DEV_I219_LM4, i219_raw[i], &n, &f)) { all_i219 = 0; continue; }
+            iv = 2000000ULL * n + ((2000000ULL * f) >> 32);
+            if (iv > 0x00FFFFFFULL || ((2u << 24) | (unsigned)iv) != i219_raw[i]) all_i219 = 0;
+        }
+        CHECK("legacy restore: I217/I225/I226 raw -> request re-encodes to the identical raw (incl. 0x18000000, 0x08000000)", all_direct);
+        CHECK("legacy restore: I219 raw (IP=2) -> request re-encodes to the identical raw (incl. nominal 0x02F42400)", all_i219);
+        AvbTestLegacyRawToRequest(INTEL_DEV_I226_LM, 0x18000000u, &n, &f);
+        CHECK("legacy restore: I226 0x18000000 is re-applied as (24 ns, 0)", n == 24u && f == 0u);
+        CHECK("legacy restore: values the ABI cannot produce are refused (I226 ns 0, I219 IP != 2 or IV < 2e6, I210, unknown DID)",
+              !AvbTestLegacyRawToRequest(INTEL_DEV_I226_LM, 0x00000000u, &n, &f) && !AvbTestLegacyRawToRequest(INTEL_DEV_I226_LM, 0x00FFFFFFu, &n, &f) &&
+              !AvbTestLegacyRawToRequest(INTEL_DEV_I219_LM4, 0x18000000u, &n, &f) && !AvbTestLegacyRawToRequest(INTEL_DEV_I219_LM4, 0x021E847Fu, &n, &f) &&
+              !AvbTestLegacyRawToRequest(INTEL_DEV_I210_AT, 0x00000000u, &n, &f) && !AvbTestLegacyRawToRequest(0xFFFFu, 0x18000000u, &n, &f));
+        CHECK("legacy restore: DID families match AvbGetIntelDeviceType (I217 LM/V, I225-V, I226-LM direct-ns; nine I219 IDs)",
+              AvbTestLegacyRawToRequest(INTEL_DEV_I217_LM, 0x08000000u, &n, &f) && AvbTestLegacyRawToRequest(INTEL_DEV_I217_V, 0x08000000u, &n, &f) &&
+              AvbTestLegacyRawToRequest(INTEL_DEV_I225_V, 0x18000000u, &n, &f) &&
+              AvbTestLegacyRawToRequest(INTEL_DEV_I219_LM, 0x02F42400u, &n, &f) && AvbTestLegacyRawToRequest(INTEL_DEV_I219_V, 0x02F42400u, &n, &f) &&
+              AvbTestLegacyRawToRequest(INTEL_DEV_I219_D0, 0x02F42400u, &n, &f) && AvbTestLegacyRawToRequest(INTEL_DEV_I219_D1, 0x02F42400u, &n, &f) &&
+              AvbTestLegacyRawToRequest(INTEL_DEV_I219_D2, 0x02F42400u, &n, &f) && AvbTestLegacyRawToRequest(INTEL_DEV_I219_LM_DC7, 0x02F42400u, &n, &f) &&
+              AvbTestLegacyRawToRequest(INTEL_DEV_I219_V6, 0x02F42400u, &n, &f) && AvbTestLegacyRawToRequest(INTEL_DEV_I219_LM6, 0x02F42400u, &n, &f) &&
+              !AvbTestLegacyRawToRequest(INTEL_DEV_I226_V, 0x18000000u, &n, &f));
+    }
+
     printf("\n[O-002] HIL-test helpers behave correctly against a fake driver backed by the PRODUCTION I210 ops\n");
     {
         HANDLE fh = (HANDLE)(ULONG_PTR)1;   /* opaque: the fake ignores it */
