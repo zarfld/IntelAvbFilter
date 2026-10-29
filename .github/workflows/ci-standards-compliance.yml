@@ -1561,26 +1561,18 @@ jobs:
 
           cat compliance-report.md
 
+      # Published without a write token (TEST-VERDICT-013): the former PR comment (issues.createComment) failed with
+      # HTTP 403 under the read-only default token (run 40840781230); no requirement mandates a PR comment.  The job
+      # summary shows the report on every run, the artifact keeps it (README links it); a missing report fails the job.
+      - name: Publish compliance report to the job summary
+        run: cat compliance-report.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload compliance report
         uses: actions/upload-artifact@v6
         with:
           name: compliance-report
           path: compliance-report.md
-
-      - name: Comment PR with report
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const report = fs.readFileSync('compliance-report.md', 'utf8');
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: report
-            });
+          if-no-files-found: error
 
   # Deployment (Phase 08) - only on master branch
   deploy-staging:

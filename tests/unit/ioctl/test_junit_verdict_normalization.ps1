@@ -263,6 +263,26 @@ $threw = $false
 try { Get-AvbVerdictClass -Verdict 'SKIP_NOT_A_THING' | Out-Null } catch { $threw = $true }
 if ($threw) { tc_pass 'TEST-VERDICT-011-unknown-verdict-throws' } else { tc_fail 'TEST-VERDICT-011-unknown-verdict-throws' 'unknown verdict was accepted silently' }
 
+# 013 (static workflow contract): the Standards Compliance report is published without a write token - job summary plus
+#      the compliance-report artifact (README links it) - and a missing report fails the job.  The former PR comment
+#      (issues.createComment) failed with HTTP 403 under the read-only default token (run 40840781230); no requirement
+#      mandates a PR comment (Q decision 3, 2026-10-29).
+$v13 = @()
+$wfLines = Get-Content -LiteralPath (Join-Path $RepoRoot '.github\workflows\ci-standards-compliance.yml')
+$jStart = [array]::IndexOf($wfLines, '  compliance-report:')
+if ($jStart -lt 0) { $v13 += 'compliance-report job not found' }
+else {
+    $jEnd = $wfLines.Count
+    for ($i = $jStart + 1; $i -lt $wfLines.Count; $i++) { if ($wfLines[$i] -match '^  [A-Za-z][\w-]*:\s*$') { $jEnd = $i; break } }
+    $job = ($wfLines[$jStart..($jEnd - 1)] | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    if ($job -notmatch 'compliance-report\.md\s*>>\s*"?\$GITHUB_STEP_SUMMARY"?') { $v13 += 'report not published to $GITHUB_STEP_SUMMARY' }
+    if ($job -notmatch '(?s)uses:\s*actions/upload-artifact@\S+\s+with:\s+name:\s*compliance-report\s+path:\s*compliance-report\.md\s+if-no-files-found:\s*error') { $v13 += 'compliance-report artifact upload does not fail on a missing report (if-no-files-found: error)' }
+    if ($job -match 'createComment|issues\.create|pulls\.create') { $v13 += 'job still writes a PR/issue comment' }
+    if ($job -match '(?m)^\s+(pull-requests|issues|contents):\s*write') { $v13 += 'job requests a write token permission' }
+}
+if ($v13.Count -eq 0) { tc_pass 'TEST-VERDICT-013-compliance-report-published-without-write-token-and-fails-when-missing' }
+else { tc_fail 'TEST-VERDICT-013-compliance-report-published-without-write-token-and-fails-when-missing' ($v13 -join '; ') }
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
