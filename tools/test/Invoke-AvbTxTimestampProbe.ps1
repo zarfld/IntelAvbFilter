@@ -52,7 +52,7 @@ $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $repoRoot 'tools\lib\HilLock.ps1')
 $runner = Join-Path $repoRoot 'tools\test\Run-Tests-CI.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($runner, [ref]$null, [ref]$null)
-foreach ($n in 'Format-AvbDid', 'ConvertTo-AvbDid', 'New-AvbHilAdapter', 'Get-AvbHilClockState', 'Get-AvbHilSandboxState', 'Get-AvbHilState') {
+foreach ($n in 'Format-AvbDid', 'ConvertTo-AvbDid', 'New-AvbHilAdapter', 'Get-AvbHilClockState', 'Get-AvbHilSandboxState', 'Get-AvbHilState', 'Get-AvbHwRegNames', 'Get-AvbHilRegs') {
     $fn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true)
     if (-not $fn) { Write-Host "[FAIL] $n not found in $runner" -ForegroundColor Red; exit 2 }
     . ([scriptblock]::Create($fn.Extent.Text))

@@ -991,7 +991,8 @@ function Get-AvbHwRegNames {
 
 # Snapshot registers of one clock entry as an ordered name -> uint32 map (hardware: ordered dictionary; sandbox / session
 # JSON: object properties).  Absent = nothing read.
-function Get-AvbHilRegs($Entry) {
+function Get-AvbHilRegs {
+    param($Entry)
     $m = [ordered]@{}
     if ($null -eq $Entry -or -not $Entry.PSObject.Properties['Registers'] -or $null -eq $Entry.Registers) { return $m }
     $r = $Entry.Registers

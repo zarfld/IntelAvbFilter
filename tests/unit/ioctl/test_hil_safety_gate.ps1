@@ -1037,6 +1037,7 @@ $fnRes = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.Fun
 if ($null -eq $fnRes) { tc_check 'TEST-HILGATE-067-incident-resolution-pure-cases' $false 'Resolve-AvbHilIncident not found in Run-Tests-CI.ps1' }
 else {
     . ([scriptblock]::Create($fnCmp.Extent.Text)); . ([scriptblock]::Create($fnRes.Extent.Text))
+    . ([scriptblock]::Create($ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilRegs' }, $true).Extent.Text))   # used by Compare-AvbHilState
     function New-St([uint32]$Tim1533 = 0, [uint32]$Aux1533 = 0, [uint32]$Tim125B = 0x08000000, [string]$Admin1533 = 'Up') {
         return @{ Ok = $true; Error = ''; ClockOk = $true; ClockError = ''
                   Adapters = @([pscustomobject]@{ InstanceId = 'PCI\VEN_8086&DEV_1533\SB02'; Did = '0x1533'; PnpStatus = 'OK'; Problem = 0; AdminStatus = $Admin1533; MediaStatus = 'Up'; FilterBound = 'True'; Name = 'I210' })
@@ -1459,7 +1460,7 @@ $x1Fail = @($x1 | Where-Object { (Get-Prop (Get-CleanupOf $_) 'outcome') -eq 'FA
 $x2Ok   = @($x2 | Where-Object { (Get-Prop (Get-CleanupOf $_) 'outcome') -eq 'SUCCESS' -and (Get-Prop (Get-CleanupOf $_) 'reason') -match 'TS_CONTROL' })
 $x3Nv   = @($x3 | Where-Object { (Get-Prop (Get-CleanupOf $_) 'outcome') -eq 'NOT_VERIFIED' })
 tc_check 'TEST-HILGATE-090-snapshot-registers-verify-ts-control-restoration-detect-leaks-and-fail-closed-without-the-read' `
-    ($x1.Count -ge 1 -and $x1Fail.Count -eq 1 -and $x2.Count -ge 2 -and $x2Ok.Count -eq $x2.Count -and $x3.Count -ge 2 -and $x3Nv.Count -eq $x3.Count) `
+    ($x1.Count -ge 2 -and $x1Fail.Count -eq $x1.Count -and $x2.Count -ge 2 -and $x2Ok.Count -eq $x2.Count -and $x3.Count -ge 2 -and $x3Nv.Count -eq $x3.Count) `
     ("leak: {0} rec, {1} FAILED with TSYNCRXCTL obs [{2}] | ok: {3} rec, {4} SUCCESS [{5}] | no snapshot: {6} rec, {7} NOT_VERIFIED [{8}] | {9}" -f
      $x1.Count, $x1Fail.Count, (($x1 | ForEach-Object { "$($_.name)=$(Get-Prop (Get-CleanupOf $_) 'outcome')" }) -join ','),
      $x2.Count, $x2Ok.Count, (($x2 | ForEach-Object { "$($_.name)=$(Get-Prop (Get-CleanupOf $_) 'outcome')" }) -join ','),
