@@ -910,6 +910,12 @@ if ($env:GITHUB_ACTIONS -eq "true") {
 # runner cannot observe, are cleanup NOT_VERIFIED (never a halt; Q 2026-10-28 superseded option 1).  Widen
 # $HilVerifiableState only together with a new independent check; never declare less than an entry really modifies.
 $HilVerifiableState = @('ADAPTER', 'TIMINCA', 'TSAUXC')
+# Register groups re-read through IOCTL_AVB_QUERY_HW_SNAPSHOT (bound adapter, read-only): a group is verifiable for an item
+# only when EVERY register of it was read VALID before and after on every adapter the item may touch (Get-AvbHilVerifiableState);
+# a changed register is always an observed difference.  TS_CONTROL = everything SET_HW_TIMESTAMPING (enable_packet_timestamping:
+# TSYNCRXCTL/TSYNCTXCTL; TSAUXC is re-read above), SET_RX_TIMESTAMP (RXPBSIZE) and SET_QUEUE_TIMESTAMP (SRRCTL0..3; queue >= 4 is
+# rejected) write.  TARGET_TIME is NOT a group: set_target_time also writes FREQOUT0 (I210), which the snapshot does not read.
+$HilRegisterGroups = [ordered]@{ TS_CONTROL = @('TSYNCTXCTL', 'TSYNCRXCTL', 'RXPBSIZE', 'SRRCTL0', 'SRRCTL1', 'SRRCTL2', 'SRRCTL3') }
 $HilPhcReads = 5            # paired PHC/QPC reads per adapter in a pre-/post-test PHC window (evaluator minimum: 3)
 $HilPhcTolerance = @{}      # DID -> hardware-derived tolerance (Get-AvbHilPhcTolerances); empty = PHC never verified
 $HilMutatedState = [ordered]@{
@@ -966,6 +972,55 @@ function Get-AvbHilSupportedDids {
     return $out
 }
 
+# AVB_HWREG_* id -> register name, from include/avb_ioctl.h (SSOT of the QUERY_HW_SNAPSHOT ids).  SRRCTL1/2 are the ids
+# between SRRCTL0 and SRRCTL3 ("queues 0..3 = 6..9" in the header).  A missing header or id throws: the runner never
+# guesses which register an entry describes.
+function Get-AvbHwRegNames {
+    $hdr = Join-Path $script:repoRoot 'include\avb_ioctl.h'
+    if (-not (Test-Path -LiteralPath $hdr)) { throw "SSOT file missing: $hdr" }
+    $out = @{}
+    foreach ($d in [regex]::Matches([System.IO.File]::ReadAllText($hdr), '(?m)^\s*#define\s+AVB_HWREG_([A-Z0-9]+)\s+(\d+)u\b')) {
+        if ($d.Groups[1].Value -eq 'COUNT') { continue }
+        $out[[int]$d.Groups[2].Value] = $d.Groups[1].Value
+    }
+    $q0 = @($out.Keys | Where-Object { $out[$_] -eq 'SRRCTL0' }); $q3 = @($out.Keys | Where-Object { $out[$_] -eq 'SRRCTL3' })
+    if ($q0.Count -ne 1 -or $q3.Count -ne 1 -or ($q3[0] - $q0[0]) -ne 3) { throw "AVB_HWREG_SRRCTL0/SRRCTL3 not parsed as a 4-queue range from $hdr" }
+    $out[$q0[0] + 1] = 'SRRCTL1'; $out[$q0[0] + 2] = 'SRRCTL2'
+    return $out
+}
+
+# Snapshot registers of one clock entry as an ordered name -> uint32 map (hardware: ordered dictionary; sandbox / session
+# JSON: object properties).  Absent = nothing read.
+function Get-AvbHilRegs($Entry) {
+    $m = [ordered]@{}
+    if ($null -eq $Entry -or -not $Entry.PSObject.Properties['Registers'] -or $null -eq $Entry.Registers) { return $m }
+    $r = $Entry.Registers
+    if ($r -is [System.Collections.IDictionary]) { foreach ($k in $r.Keys) { $m[[string]$k] = [uint32]$r[$k] } }
+    else { foreach ($p in $r.PSObject.Properties) { $m[$p.Name] = [uint32]$p.Value } }
+    return $m
+}
+
+# State groups this item's restoration can be verified for: $HilVerifiableState plus every $HilRegisterGroups group whose
+# registers were ALL read VALID in the baseline AND now on every adapter the item may touch (its target, else every
+# readable adapter).  Fail closed: no clock state, a different adapter set or one missing register -> group not verifiable.
+function Get-AvbHilVerifiableState {
+    param($Base, $Cur, [string]$Target)
+    $v = @($HilVerifiableState)
+    if ($null -eq $Base -or $null -eq $Cur -or -not $Base.ClockOk -or -not $Cur.ClockOk) { return $v }
+    $bl = @($Base.Clock | Where-Object { $_.Ok -and (-not $Target -or $_.Did -eq $Target) })
+    $cl = @($Cur.Clock  | Where-Object { $_.Ok -and (-not $Target -or $_.Did -eq $Target) })
+    if ($bl.Count -eq 0 -or $bl.Count -ne $cl.Count) { return $v }
+    foreach ($g in $HilRegisterGroups.Keys) {
+        $all = $true
+        foreach ($e in @($bl) + @($cl)) {
+            $r = Get-AvbHilRegs $e
+            foreach ($n in $HilRegisterGroups[$g]) { if (-not $r.Contains($n)) { $all = $false } }
+        }
+        if ($all) { $v += $g }
+    }
+    return $v
+}
+
 function New-AvbHilAdapter {
     param([string]$InstanceId, [string]$PnpStatus, [int]$Problem, [string]$AdminStatus, [string]$MediaStatus,
           [string]$FilterBound, [string]$Name)
@@ -1002,6 +1057,8 @@ public static class AvbHilIoctl {
 '@
     }
     $IOCTL_ENUM = [uint32]0x0017007C; $IOCTL_OPEN = [uint32]0x00170080; $IOCTL_CLOCK = [uint32]0x001700B4   # fn 31 / 32 / 45
+    $IOCTL_SNAP = [uint32]0x00170118   # fn 70 IOCTL_AVB_QUERY_HW_SNAPSHOT (TC-ABI-022)
+    $regNames = Get-AvbHwRegNames
     $h = [AvbHilIoctl]::CreateFile('\\.\IntelAvbFilter', [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero)
     if ($h -eq [IntPtr](-1)) {
         $res.Error = "open \\.\IntelAvbFilter failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
@@ -1051,9 +1108,30 @@ public static class AvbHilIoctl {
                 $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $false; Timinca = 0; Tsauxc = 0; Error = $readErr; Samples = @() }
                 continue
             }
+            # Register snapshot of the SAME bound adapter.  Only VALID entries of this adapter (device ID echoed) are kept;
+            # TIMINCA/TSAUXC come from GET_CLOCK_CONFIG above.  Any failure leaves Registers empty: nothing built on a register
+            # can then be verified (fail closed), and RegistersError says why.
+            $regs = [ordered]@{}; $regErr = ''
+            $sn = New-Object byte[] 280   # AVB_HW_SNAPSHOT_REQUEST: 24-byte header + 16 x AVB_HWREG_ENTRY (id, offset, value, state)
+            [System.Array]::Copy([System.BitConverter]::GetBytes([uint32]1), 0, $sn, 0, 4)   # AVB_HW_SNAPSHOT_VERSION
+            if (-not [AvbHilIoctl]::DeviceIoControl($h, $IOCTL_SNAP, $sn, 280, $sn, 280, [ref]$ret, [IntPtr]::Zero)) {
+                $regErr = "QUERY_HW_SNAPSHOT failed (Win32 $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+            } elseif ([System.BitConverter]::ToUInt32($sn, 20) -ne 0) {
+                $regErr = ("QUERY_HW_SNAPSHOT status 0x{0:X8}" -f [System.BitConverter]::ToUInt32($sn, 20))
+            } elseif ([System.BitConverter]::ToUInt16($sn, 18) -ne $didv) {
+                $regErr = ("QUERY_HW_SNAPSHOT reports DID 0x{0:X4}, bound DID {1}" -f [System.BitConverter]::ToUInt16($sn, 18), $did)
+            } else {
+                for ($k = 0; $k -lt [Math]::Min(16, [System.BitConverter]::ToUInt32($sn, 4)); $k++) {
+                    $at = 24 + 16 * $k
+                    $rid = [int][System.BitConverter]::ToUInt32($sn, $at)
+                    if ([System.BitConverter]::ToUInt32($sn, $at + 12) -ne 1 -or -not $regNames.Contains($rid)) { continue }   # AVB_HWREG_STATE_VALID only
+                    if ($regNames[$rid] -in @('TIMINCA', 'TSAUXC')) { continue }
+                    $regs[$regNames[$rid]] = [System.BitConverter]::ToUInt32($sn, $at + 8)
+                }
+            }
             $entries += [pscustomobject]@{ Index = $i; Did = $did; Ok = $true; Error = ''
                                            Timinca = [System.BitConverter]::ToUInt32($first, 8); Tsauxc = [System.BitConverter]::ToUInt32($first, 12)
-                                           Samples = $samples }
+                                           Samples = $samples; Registers = $regs; RegistersError = $regErr }
         }
         $res.Entries = $entries
         $res.Ok = $true
@@ -1088,7 +1166,8 @@ function Get-AvbHilSandboxState {
             }
         }
         [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
-                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples }
+                           Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples
+                           Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' }) }
     })
     return $st
 }
@@ -1179,6 +1258,16 @@ function Compare-AvbHilState {
                 if ($b.Ok -and $c.Ok -and $b.Tsauxc -ne $c.Tsauxc) {
                     $diffs += ("DID {0} (driver index {1}): TSAUXC 0x{2:X8} -> 0x{3:X8}" -f $b.Did, $b.Index, $b.Tsauxc, $c.Tsauxc)
                     & $add 'diff' "drv:$k" 'TSAUXC' ('0x{0:X8}' -f [uint32]$b.Tsauxc) ('0x{0:X8}' -f [uint32]$c.Tsauxc) $diffs[-1] $false
+                }
+                # Snapshot registers read VALID both times: a change is an observed difference.  A register read only once is
+                # no difference - it only keeps its group unverifiable (Get-AvbHilVerifiableState).
+                if ($b.Ok -and $c.Ok) {
+                    $bR = Get-AvbHilRegs $b; $cR = Get-AvbHilRegs $c
+                    foreach ($rn in @($bR.Keys)) {
+                        if (-not $cR.Contains($rn) -or $bR[$rn] -eq $cR[$rn]) { continue }
+                        $diffs += ("DID {0} (driver index {1}): {2} 0x{3:X8} -> 0x{4:X8}" -f $b.Did, $b.Index, $rn, $bR[$rn], $cR[$rn])
+                        & $add 'diff' "drv:$k" $rn ('0x{0:X8}' -f $bR[$rn]) ('0x{0:X8}' -f $cR[$rn]) $diffs[-1] $false
+                    }
                 }
             }
             foreach ($k in @($cc.Keys)) {

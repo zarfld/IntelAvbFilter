@@ -379,12 +379,14 @@ $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=In
            'test_sbfake_sleeper=Init;test_sbfake_sleepchg=Init;test_sbfake_timinca=Mutating:Target;test_sbfake_skiponly=ReadOnly;' +
            'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target;' +
            'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target;' +
-           'test_sbfake_init2=Init;test_sbfake_initsetup=Init;test_sbfake_initrestinc=Init;test_sbfake_initselfcln=Init;test_sbfake_initselfnv=Init'
+           'test_sbfake_init2=Init;test_sbfake_initsetup=Init;test_sbfake_initrestinc=Init;test_sbfake_initselfcln=Init;test_sbfake_initselfnv=Init;' +
+           'test_sbfake_tsleak=Mutating:Target;test_sbfake_tsok=Mutating:Target'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
 # TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: cleanup NOT_VERIFIED.
 # Undeclared non-ReadOnly fakes (init, mut, ...) are treated as modifying unknown state.
-$Mutates = 'test_sbfake_tgtsleep=TIMINCA;test_sbfake_tgt=TIMINCA;test_sbfake_timinca=TIMINCA;test_sbfake_tgtphc=TIMINCA,PHC_TIME'
+$Mutates = 'test_sbfake_tgtsleep=TIMINCA;test_sbfake_tgt=TIMINCA;test_sbfake_timinca=TIMINCA;test_sbfake_tgtphc=TIMINCA,PHC_TIME;' +
+           'test_sbfake_tsleak=TS_CONTROL;test_sbfake_tsok=TS_CONTROL'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -1437,6 +1439,31 @@ if ($lcCode -match '\breturn\s+4\s*;') { $lcBad += 'cleanup outcome changes the 
 # STATIC: this is a contract on the source text only. It is not runtime evidence; runtime behaviour is verified only by
 # HIL through Run-Tests-CI.ps1 (Unsafe entry, AVB_HIL_AUTHORIZE_UNSAFE naming it).
 tc_check 'TEST-HILGATE-082-ut-corr-009-reinstall-and-restoration-source-contract-STATIC-not-runtime-evidence' ($lcBad.Count -eq 0) ($lcBad -join ' ### ')
+
+# --- Run X: register snapshot (IOCTL_AVB_QUERY_HW_SNAPSHOT) widens the runner's independent restoration check ------------
+# Before: the runner re-read only adapter/TIMINCA/TSAUXC, so every mutating test that changes timestamp-control or
+# target-time state was cleanup NOT_VERIFIED at best, and a leaked TS_CONTROL change went unseen.  Now the snapshot
+# registers of the bound adapter are part of the baseline: a changed register is an observed difference (cleanup FAILED),
+# a group whose registers were all read VALID before and after is verifiable (TS_CONTROL, TARGET_TIME), and a missing or
+# non-VALID snapshot keeps the result NOT_VERIFIED (fail closed - never SUCCESS without the read).
+$regsEdit = '$s.clock | ForEach-Object { $_ | Add-Member -NotePropertyName Registers -NotePropertyValue ([pscustomobject][ordered]@{ ' +
+            'TSYNCTXCTL = 16; TSYNCRXCTL = 26; RXPBSIZE = 536870932; SRRCTL0 = 33555458; SRRCTL1 = 33555458; SRRCTL2 = 33555458; SRRCTL3 = 33555458; ' +
+            'TRGTTIML0 = 0; TRGTTIMH0 = 0; TRGTTIML1 = 0; TRGTTIMH1 = 0; TQAVCTRL = 0 }) -Force }'
+$tsLeak = New-Fake 'test_sbfake_tsleak' (Edit-StateSnippet '@($s.clock | Where-Object { $_.Did -eq $env:AVB_HIL_TARGET_DID })[0].Registers.TSYNCRXCTL = 0')
+$tsOk   = New-Fake 'test_sbfake_tsok'
+$rX1 = Invoke-Sandbox 'runX1' @($tsLeak) -AllSupportedEnabled -StateEdit $regsEdit
+$rX2 = Invoke-Sandbox 'runX2' @($tsOk)   -AllSupportedEnabled -StateEdit $regsEdit
+$rX3 = Invoke-Sandbox 'runX3' @($tsOk)   -AllSupportedEnabled
+$x1 = @(Get-ExecRecords $rX1 'test_sbfake_tsleak'); $x2 = @(Get-ExecRecords $rX2 'test_sbfake_tsok'); $x3 = @(Get-ExecRecords $rX3 'test_sbfake_tsok')
+$x1Fail = @($x1 | Where-Object { (Get-Prop (Get-CleanupOf $_) 'outcome') -eq 'FAILED' -and ((@((Get-CleanupOf $_).observations) -join ' ') -match 'TSYNCRXCTL 0x0000001A -> 0x00000000') })
+$x2Ok   = @($x2 | Where-Object { (Get-Prop (Get-CleanupOf $_) 'outcome') -eq 'SUCCESS' -and (Get-Prop (Get-CleanupOf $_) 'reason') -match 'TS_CONTROL' })
+$x3Nv   = @($x3 | Where-Object { (Get-Prop (Get-CleanupOf $_) 'outcome') -eq 'NOT_VERIFIED' })
+tc_check 'TEST-HILGATE-090-snapshot-registers-verify-ts-control-restoration-detect-leaks-and-fail-closed-without-the-read' `
+    ($x1.Count -ge 1 -and $x1Fail.Count -eq 1 -and $x2.Count -ge 2 -and $x2Ok.Count -eq $x2.Count -and $x3.Count -ge 2 -and $x3Nv.Count -eq $x3.Count) `
+    ("leak: {0} rec, {1} FAILED with TSYNCRXCTL obs [{2}] | ok: {3} rec, {4} SUCCESS [{5}] | no snapshot: {6} rec, {7} NOT_VERIFIED [{8}] | {9}" -f
+     $x1.Count, $x1Fail.Count, (($x1 | ForEach-Object { "$($_.name)=$(Get-Prop (Get-CleanupOf $_) 'outcome')" }) -join ','),
+     $x2.Count, $x2Ok.Count, (($x2 | ForEach-Object { "$($_.name)=$(Get-Prop (Get-CleanupOf $_) 'outcome')" }) -join ','),
+     $x3.Count, $x3Nv.Count, (($x3 | ForEach-Object { "$($_.name)=$(Get-Prop (Get-CleanupOf $_) 'outcome')" }) -join ','), (Tail $rX1))
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
