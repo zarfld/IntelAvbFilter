@@ -17,12 +17,14 @@
 #   INCONCLUSIVE          failure    insufficient evidence; mandatory verification
 #                         skipped    ... or label-preserving skip when -Optional
 #   SKIP                  skipped    runtime N/A (link down, requires restart); not a capability claim
-#   CLEANUP_FAILED, INFRA_FAILURE    failure
+#   CLEANUP_FAILED, INFRA_FAILURE    failure    (CLEANUP_FAILED: restoration demonstrably unsuccessful)
+#   INCONCLUSIVE_RESTORATION         failure    state the restoration depends on could not be measured
+#   FAILED_SETUP                     failure    required initial conditions could not be established
 #
 # Implements: test verdict taxonomy (see docs/testing/test-verdict-contract.md)
 
-# Longest alternatives first so SKIP does not shadow SKIP_*.
-$script:AvbVerdictTagPattern = 'PASS|FAIL|SKIP_UNSUPPORTED|SKIP_NOT_IMPLEMENTED|SKIP|BLOCKED|INCONCLUSIVE|INFRA_FAILURE|CLEANUP_FAILED'
+# Longest alternatives first so SKIP does not shadow SKIP_* (and INCONCLUSIVE not INCONCLUSIVE_RESTORATION).
+$script:AvbVerdictTagPattern = 'PASS|FAILED_SETUP|FAIL|SKIP_UNSUPPORTED|SKIP_NOT_IMPLEMENTED|SKIP|BLOCKED|INCONCLUSIVE_RESTORATION|INCONCLUSIVE|INFRA_FAILURE|CLEANUP_FAILED'
 
 # Some existing C tests print the verdict as text after a plain [SKIP] tag:
 #   [SKIP] TEST-PROV-H04: SKIP_UNSUPPORTED: adapter lacks INTEL_CAP_BASIC_1588
@@ -45,6 +47,8 @@ function Get-AvbVerdictClass {
         'FAIL'                 { return 'failure' }
         'BLOCKED'              { return 'failure' }
         'CLEANUP_FAILED'       { return 'failure' }
+        'INCONCLUSIVE_RESTORATION' { return 'failure' }   # never optional: unverified restoration is never a skip
+        'FAILED_SETUP'         { return 'failure' }
         'INFRA_FAILURE'        { return 'failure' }
         'INCONCLUSIVE'         { if ($Optional) { return 'skipped' } else { return 'failure' } }
         'SKIP'                 { return 'skipped' }
@@ -60,11 +64,11 @@ function Test-AvbVerdictIncomplete {
     return ($Verdict -eq 'SKIP_NOT_IMPLEMENTED')
 }
 
-# HardwareMutation is the only explicitly optional/experimental lane; every other
-# suite is mandatory verification (fail-closed default).  No new lane is introduced.
+# Every suite is mandatory verification, HardwareMutation included (P0 full HIL coverage, 2026-10-21: the mutation
+# lane must not be an optional lane whose failures acceptance can ignore).  'optional' is kept as a class only for
+# the -OptionalVerification switches of the JUnit converters; no suite maps to it.
 function Get-AvbSuiteVerificationClass {
     param([string]$Suite)
-    if ($Suite -eq 'HardwareMutation') { return 'optional' }
     return 'mandatory'
 }
 
@@ -72,14 +76,42 @@ function Get-AvbSuiteVerificationClass {
 # sees executable exit codes and would otherwise count "exit 0 + NOT_IMPLEMENTED" as PASSED.
 function Get-AvbVerdictCounts {
     param([string[]]$Lines)
-    $counts = @{ NotImplemented = 0; Inconclusive = 0 }
+    # Fail / Blocked / InfraFailure: the runner confirms an exit code 3 ("no functional FAIL, BLOCKED or INCONCLUSIVE
+    # testcases") against the lines - an exit code alone never moves a result out of FAILED.
+    $counts = @{ NotImplemented = 0; Inconclusive = 0; FailedSetup = 0; InconclusiveRestoration = 0; Fail = 0; Blocked = 0; InfraFailure = 0 }
     $rx = '^\s*\[(' + $script:AvbVerdictTagPattern + ')\]\s+(?:\[Adapter\d+\[[^\]]*\]\]\s+)?(?:TC|IT|VV|UT|REG|TEST)-[\w-]+(?:/adapter:\d+)?\s*(.*)$'
     foreach ($line in $Lines) {
         if ($line -match $rx) {
             $v = Resolve-AvbVerdict -Tag $Matches[1] -Reason $Matches[2]
-            if ($v -eq 'SKIP_NOT_IMPLEMENTED') { $counts.NotImplemented++ }
-            elseif ($v -eq 'INCONCLUSIVE')     { $counts.Inconclusive++ }
+            if ($v -eq 'SKIP_NOT_IMPLEMENTED')         { $counts.NotImplemented++ }
+            elseif ($v -eq 'INCONCLUSIVE')             { $counts.Inconclusive++ }
+            elseif ($v -eq 'FAILED_SETUP')             { $counts.FailedSetup++ }
+            elseif ($v -eq 'INCONCLUSIVE_RESTORATION') { $counts.InconclusiveRestoration++ }
+            elseif ($v -eq 'FAIL')                     { $counts.Fail++ }
+            elseif ($v -eq 'BLOCKED')                  { $counts.Blocked++ }
+            elseif ($v -eq 'INFRA_FAILURE')            { $counts.InfraFailure++ }
         }
     }
     return $counts
+}
+
+# Per-testcase verdict lines in raw test output (same line grammar as Get-AvbVerdictCounts), for the runner's
+# machine-readable results: @{ Id; Verdict; AdapterIndex; AdapterDid; AdapterLabel; Detail }.
+# Adapter tags: "[Adapter0[VEN_8086:DEV_125B]] TC-X-001" or "TC-X-001/adapter:0"; absent = $null (not guessed).
+function Get-AvbTestcaseVerdicts {
+    param([string[]]$Lines)
+    $rx = '^\s*\[(' + $script:AvbVerdictTagPattern + ')\]\s+(?:\[Adapter(\d+)\[([^\]]*)\]\]\s+)?((?:TC|IT|VV|UT|REG|TEST)-[\w-]+)(?:/adapter:(\d+))?\s*(.*)$'
+    $out = @()
+    foreach ($line in $Lines) {
+        if ($line -notmatch $rx) { continue }
+        $g = @($Matches[1], $Matches[2], $Matches[3], $Matches[4], $Matches[5], $Matches[6])   # before any further -match
+        $idx = $null
+        if ($g[1]) { $idx = [int]$g[1] } elseif ($g[4]) { $idx = [int]$g[4] }
+        $label = if ($g[2]) { $g[2] } else { $null }
+        $did = $null
+        if ($label -and $label -match 'DEV_([0-9A-Fa-f]{4})') { $did = '0x' + $Matches[1].ToUpperInvariant() }
+        $out += ,([ordered]@{ Id = $g[3]; Verdict = (Resolve-AvbVerdict -Tag $g[0] -Reason $g[5])
+                              AdapterIndex = $idx; AdapterDid = $did; AdapterLabel = $label; Detail = ([string]$g[5] -replace '^[\s:]+', '').Trim() })
+    }
+    return ,$out
 }

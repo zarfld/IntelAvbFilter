@@ -16,6 +16,6 @@ Moving the detailed guidance out of this auto-applied file is a context-routing 
 - `Traces to` remains a parent/lineage relationship where defined by the current templates/validator.
 - Test evidence must be reproducible and must not convert real failures or unmet prerequisites into false success.
 - Keep test IDs, requirement links, implementation evidence, and current issue/template syntax consistent with CI validators.
-- For hardware-dependent tests, apply the repository's multi-adapter and PASS/FAIL/SKIP semantics from the `intelavbfilter-testing` skill.
+- For any test, runner, HIL or verification work, apply the canonical testing contract `.github/skills/intelavbfilter-testing/SKILL.md` (multi-adapter execution, verdict taxonomy, inventory, restoration, provenance) and the `run-tests` skill for invocation. `.github/skills/intelavbfilter-testing/reference.md` is historical only.
 
 If preserved examples conflict with current `.github/ISSUE_TEMPLATE/07-test-case.yml`, current CI validators, or `lifecycle-traceability`, treat the current executable contract as authoritative and report the conflict.

@@ -23,6 +23,7 @@ Abstract:
 #include "external/intel_avb/lib/intel_private.h"
 #include "devices/intel_device_interface.h"  // For intel_device_ops_t and intel_get_device_ops()
 #include <ntstrsafe.h>
+#include "src/avb_hw_snapshot.h"  // IOCTL_AVB_QUERY_HW_SNAPSHOT builder (family-independent, read-only)
 
 // Generic register offsets (common across Intel devices)
 #define INTEL_GENERIC_CTRL_REG      0x00000  // Device control register (all Intel devices)
@@ -4089,6 +4090,31 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         break;
     
     // Implements #18 (REQ-F-HWCTX-001: Hardware State Machine)
+    case IOCTL_AVB_QUERY_HW_SNAPSHOT:
+        /* Read-only HIL restoration verification (Q 2026-10-22), Debug and Release.  device.c routes bound handles
+         * only.  One entry per AVB_HWREG_* id: the family's intel-ethernet-regs offset map (device HAL) selects the
+         * register; a register without SSOT definition, MMIO access or HAL map is reported as such, never read. */
+        if (inLen < sizeof(AVB_HW_SNAPSHOT_REQUEST) || outLen < sizeof(AVB_HW_SNAPSHOT_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else if (((PAVB_HW_SNAPSHOT_REQUEST)buf)->version != AVB_HW_SNAPSHOT_VERSION) {
+            status = STATUS_REVISION_MISMATCH;
+        } else {
+            PAVB_HW_SNAPSHOT_REQUEST snap = (PAVB_HW_SNAPSHOT_REQUEST)buf;
+            /* MMIO is usable only with a mapped BAR and INTEL_CAP_MMIO (same rule as GET_CLOCK_CONFIG). */
+            UINT32 mmioCaps = (currentContext->hw_state >= AVB_HW_BAR_MAPPED) ? (currentContext->intel_device.capabilities & INTEL_CAP_MMIO) : 0u;
+            RtlZeroMemory(snap, sizeof(*snap));
+            snap->version = AVB_HW_SNAPSHOT_VERSION;
+            snap->net_luid = (currentContext->filter_instance != NULL) ? currentContext->filter_instance->MiniportNetLuid.Value : 0u;
+            snap->vendor_id = (avb_u16)currentContext->intel_device.pci_vendor_id;
+            snap->device_id = (avb_u16)currentContext->intel_device.pci_device_id;
+            AvbFillHwSnapshot(intel_get_device_ops(currentContext->intel_device.device_type), &currentContext->intel_device,
+                              mmioCaps, ndis_platform_ops.mmio_read, snap);
+            snap->status = (avb_u32)NDIS_STATUS_SUCCESS;
+            info = sizeof(*snap);
+            status = STATUS_SUCCESS;
+        }
+        break;
+
     case IOCTL_AVB_GET_HW_STATE:
         DEBUGP(DL_TRACE, "? IOCTL_AVB_GET_HW_STATE: Hardware state query\n");
         DEBUGP(DL_TRACE, "   - Context: %p\n", AvbContext);

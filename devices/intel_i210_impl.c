@@ -14,6 +14,7 @@ Abstract:
 #include "precomp.h"
 #include "intel_device_interface.h"
 #include "avb_integration.h"
+#include "include/avb_ioctl.h"     // AVB_HWREG_* ids for hil_register_offset (explicit; host builds do not get it via avb_integration.h)
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 
@@ -745,6 +746,28 @@ static int i210_set_target_time(device_t *dev, uint8_t timer_index,
     return 0;
 }
 
+/* QUERY_HW_SNAPSHOT offset map: AVB_HWREG_* id -> I210 MMIO offset, only registers intel-ethernet-regs/gen/i210_regs.h
+ * defines.  Any other id (e.g. SRRCTL) is NOT_IN_SSOT - never a guessed address. */
+static int i210_hil_register_offset(uint32_t reg_id, uint32_t *offset)
+{
+    if (offset == NULL) { return -1; }
+    switch (reg_id) {
+    case AVB_HWREG_TIMINCA:    *offset = I210_TIMINCA; return 0;
+    case AVB_HWREG_TSAUXC:     *offset = I210_TSAUXC; return 0;
+    case AVB_HWREG_TSYNCTXCTL: *offset = I210_TSYNCTXCTL; return 0;
+    case AVB_HWREG_TSYNCRXCTL: *offset = I210_TSYNCRXCTL; return 0;
+    case AVB_HWREG_RXPBSIZE:   *offset = I210_RXPBSIZE; return 0;
+    case AVB_HWREG_TRGTTIML0:  *offset = I210_TRGTTIML0; return 0;
+    case AVB_HWREG_TRGTTIMH0:  *offset = I210_TRGTTIMH0; return 0;
+    case AVB_HWREG_TRGTTIML1:  *offset = I210_TRGTTIML1; return 0;
+    case AVB_HWREG_TRGTTIMH1:  *offset = I210_TRGTTIMH1; return 0;
+    case AVB_HWREG_TQAVCTRL:   *offset = I210_TQAVCTRL; return 0;
+    case AVB_HWREG_RAL0:       *offset = I210_RAL0; return 0;
+    case AVB_HWREG_RAH0:       *offset = I210_RAH0; return 0;
+    default: return -1;
+    }
+}
+
 /**
  * @brief I210 device operations structure - CORRECTED: No TSN support
  * I210 (2013) has excellent IEEE 1588 PTP but NO TSN features (TSN standard finalized 2015-2016)
@@ -808,5 +831,6 @@ const intel_device_ops_t i210_ops = {
     
     // Advanced features - None on I210
     .enable_advanced_features = NULL,
-    .validate_configuration = NULL
+    .validate_configuration = NULL,
+    .hil_register_offset = i210_hil_register_offset
 };

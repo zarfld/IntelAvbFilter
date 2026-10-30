@@ -73,134 +73,116 @@ function Write-Info {
 }
 
 # ===========================
-# Lifecycle Metrics Snapshot -- SSOT: tools/test/Lib-AvbLifecycle.ps1
+# Lifecycle Metrics Snapshot -- SSOT: tools/lib/Lib-AvbLifecycle.ps1
 # ===========================
-. (Join-Path $PSScriptRoot 'Lib-AvbLifecycle.ps1')
+. (Join-Path $PSScriptRoot '..\lib\Lib-AvbLifecycle.ps1')
 
-# Helper function to run tests and track results
-function Invoke-Test {
-    param(
-        [string]$TestName,
-        [string]$Description = "",
-        [string]$TestArgs = ""
-    )
-    
-    if (-not (Test-Path $logsDir)) {
-        New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
-    }
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $LogFile = Join-Path $logsDir "$TestName`_$timestamp.log"
+# ===========================
+# Authoritative dispatch (TEST-HILPATH-001, Q decision 1 2026-10-29)
+# ===========================
+# This script never starts a test program itself.  Every test runs through tools\test\Run-Tests-CI.ps1: machine lock,
+# build provenance, HIL safety class, #328 hazard holds, exact-target fan-out, adapter baseline, post-test state check
+# and results document.  An entry the runner registry does not know fails closed (inventory gap, TEST-COMPLETE).
+$runCi = Join-Path $PSScriptRoot 'Run-Tests-CI.ps1'
+$script:DispatchRuns = @()
 
+# Same normalization as Run-Tests-CI.ps1 ConvertTo-AvbHilEntryKey: 'x.exe args' -> 'x args'; ps1: entries unchanged.
+function ConvertTo-AvbEntryKey([string]$Entry) {
+    if ($Entry.StartsWith('ps1:')) { return $Entry }
+    $p = $Entry.Trim() -split '\s+', 2
+    $b = $p[0] -replace '\.exe$', ''
+    if ($p.Count -gt 1) { return "$b $($p[1])" }
+    return $b
+}
 
-    $testPath = Join-Path $testExeDir $TestName
-    if (-not (Test-Path $testPath)) {
-        Write-Host "`n  => $TestName" -ForegroundColor Cyan
-        if ($Description) {
-            Write-Host "     $Description" -ForegroundColor Gray
+# Runner registry (parsed from Run-Tests-CI.ps1, never executed): suite -> entries in its list, its declared coverage
+# gaps and (HardwareMutation) its attended-only table.
+function Get-AvbRunnerRegistry {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($runCi, [ref]$null, [ref]$null)
+    $reg = [ordered]@{}
+    foreach ($s in 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory', 'Unit', 'Integration') {
+        $names = @("${s}Tests", "${s}CoverageGaps"); if ($s -eq 'HardwareMutation') { $names += 'HardwareMutationAttendedOnly' }
+        $entries = @()
+        foreach ($n in $names) {
+            $a = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq "`$$n" }, $true) | Select-Object -First 1
+            if (-not $a) { continue }
+            $h = $a.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+            if ($h) { $entries += @($h.KeyValuePairs | ForEach-Object { $_.Item1.Value }) }
+            else { $entries += @($a.Right.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value }) }
         }
-        Write-Failure "Test not found: $testPath"
-        $script:totalTests++
-        $script:failedTests++
-        $script:testResults += [PSCustomObject]@{
-            Name = $TestName
-            Status = "NOT_FOUND"
-            ExitCode = -1
+        $reg[$s] = @($entries | ForEach-Object { ConvertTo-AvbEntryKey $_ } | Sort-Object -Unique)
+    }
+    return $reg
+}
+
+# Program name as typed (Build-Tests Output, e.g. avb_test_i210_um.exe, or a test script name) -> runner entry + suite.
+# Suite preference: HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory, Unit, Integration.
+function Resolve-AvbRunnerEntry {
+    param([string]$Name, [string]$Arguments, $Registry)
+    $n = $Name.Trim()
+    if ($n -match '(?i)\.ps1$' -and -not $n.StartsWith('ps1:')) {
+        $f = Get-ChildItem -Path (Join-Path $repoRoot 'tests') -Filter ([System.IO.Path]::GetFileName($n)) -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        $n = if ($f) { 'ps1:' + $f.FullName.Substring($repoRoot.Length + 1).Replace('\', '/') } else { "ps1:$n" }
+    } elseif (-not $n.StartsWith('ps1:')) {
+        $base = $n -replace '(?i)\.exe$', ''
+        $name = $null
+        foreach ($l in (Get-Content -LiteralPath (Join-Path $repoRoot 'tools\build\Build-Tests.ps1'))) {
+            if ($l -match '^\s*Name\s*=\s*"([^"]+)"') { $name = $Matches[1] }
+            elseif ($name -and $l -match '^\s*Output\s*=\s*"([^"]+)"' -and [System.IO.Path]::GetFileNameWithoutExtension($Matches[1]) -eq $base) { $base = $name; break }
         }
-        return
+        $n = $base
     }
-    
-    Write-Host "`n  => $TestName" -ForegroundColor Cyan
-    if ($Description) {
-        Write-Host "     $Description" -ForegroundColor Gray
-    }
+    $key = ConvertTo-AvbEntryKey $(if ($Arguments) { "$n $Arguments" } else { $n })
+    foreach ($s in $Registry.Keys) { if (@($Registry[$s]) -contains $key) { return @{ Entry = $key; Suite = $s } } }
+    return @{ Entry = $key; Suite = $null }
+}
 
-    # --- Lifecycle snapshot BEFORE ---
-    $lcyBefore = Get-AvbLifecycleSnapshot
-
-    # should log to $LogFile, but also show output in real time
-    # NOTE: Override ErrorActionPreference to Continue in a child scope.
-    # PS 5.1 with EAP=Stop converts any stderr output from a native .exe into a
-    # terminating NativeCommandError -- which would crash the entire test runner.
+# One Run-Tests-CI.ps1 invocation (in-process, like LocalSuites): results document + logs under $ReportDir; earlier
+# suites of this run are prior evidence (-PriorResultsDir), so a halt carries forward as in hil.yml.
+function Invoke-AvbDispatch {
+    param([string]$Label, [string]$Suite, [string[]]$Entries = @(), [string]$ReportDir)
+    $logs = Join-Path $ReportDir $Suite
+    New-Item -ItemType Directory -Path $logs -Force | Out-Null
+    $json = Join-Path $ReportDir ("results-{0}-{1}-{2}.json" -f $Suite, $Configuration, (Get-Date -Format 'HHmmss'))
+    $ciArgs = @{ Suite = $Suite; Configuration = $Configuration; LogsDir = $logs; ResultsJson = $json; PriorResultsDir = $ReportDir }
+    if (@($Entries).Count -gt 0) { $ciArgs.Tests = @($Entries) }
+    Write-Host ("`n  => Run-Tests-CI.ps1 -Suite {0}{1}" -f $Suite, $(if (@($Entries).Count) { ' -Tests ' + (@($Entries) -join ', ') } else { '' })) -ForegroundColor Cyan
+    $global:LASTEXITCODE = $null
+    & $runCi @ciArgs
+    $ec = $global:LASTEXITCODE
+    if ($null -eq $ec) { $ec = 1 }   # no exit code = failure
     $script:totalTests++
-    & {
-        $ErrorActionPreference = 'Continue'
-        if ($TestArgs) {
-            $argList = $TestArgs -split ' '
-            & $testPath @argList 2>&1 | Tee-Object -FilePath $LogFile
-        } else {
-            & $testPath 2>&1 | Tee-Object -FilePath $LogFile
-        }
-    }
-    $exitCode = $LASTEXITCODE
+    $st = if ($ec -eq 0) { 'PASSED' } else { 'FAILED' }
+    if ($ec -eq 0) { $script:passedTests++ } else { $script:failedTests++ }
+    $script:testResults += [PSCustomObject]@{ Name = "$Label [Run-Tests-CI $Suite]"; Status = $st; ExitCode = $ec }
+    $script:DispatchRuns += [PSCustomObject]@{ Label = $Label; Suite = $Suite; Exit = $ec; Results = $json }
+}
 
-    # --- Per-test-case JUnit XML (Parse-TestResults.ps1) ---
-    # Parses [PASS]/[FAIL]/[SKIP] TC-ID(/adapter:N): reason lines and emits
-    # JUnit XML with adapter-aware skip aggregation:
-    #   all-skip       → <skipped/>                  (genuine N/A)
-    #   any-fail       → <failure/>                   (CI-blocking)
-    #   partial-skip   → PASS + PARTIAL COVERAGE note (soft warning)
-    #   all-pass       → clean <testcase/>
-    $parserScript = Join-Path $PSScriptRoot 'Parse-TestResults.ps1'
-    if (Test-Path $parserScript) {
-        $parserOutput = & $parserScript -LogFile $LogFile 2>&1
-        $parserOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-        # If parser found TC-level failures but binary exited 0 (known bug in some
-        # test binaries), propagate the failure so CI is not blind to it.
-        if ($LASTEXITCODE -ne 0 -and ($exitCode -eq 0 -or $null -eq $exitCode)) {
-            Write-Host "  [WARN] Per-test-case failures detected despite exit code 0 -- see JUnit XML" -ForegroundColor Yellow
-            $exitCode = $LASTEXITCODE
-        }
+# Hardware-independent static verification scripts (no test program; CI runs them as workflow steps too).
+function Invoke-AvbStaticVerification([string[]]$Ids) {
+    $map = [ordered]@{
+        'TEST-SSOT-001' = @('tests\verification\ssot\Test-SSOT-001-NoDuplicates.ps1', $false)
+        'TEST-SSOT-003' = @('tests\verification\ssot\Test-SSOT-003-IncludePattern.ps1', $false)
+        'TEST-SSOT-004' = @('tests\verification\ssot\Test-SSOT-004-Completeness.ps1', $false)
+        'TEST-REGS-001' = @('tests\verification\regs\Test-REGS-001-BuildVerification.ps1', $true)
+        'TEST-REGS-003' = @('tests\verification\regs\Test-REGS-003-RegisterConstantVerification.ps1', $true)
     }
-
-    # --- Lifecycle snapshot AFTER + diff ---
-    $lcyAfter = Get-AvbLifecycleSnapshot
-    $lcyAnomalies = Write-LifecycleDiff -Before $lcyBefore -After $lcyAfter -Label $TestName
-    if ($lcyAnomalies) {
-        Write-Host "  [WARN:LCY] Lifecycle anomaly detected (underflow/error/OID imbalance) -- see [LCY] lines above" -ForegroundColor Yellow
-    }
-
-    if ($exitCode -eq 0 -or $null -eq $exitCode) {
-        $script:passedTests++
-        $script:testResults += [PSCustomObject]@{
-            Name = $TestName
-            Status = "PASSED"
-            ExitCode = 0
+    if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+    foreach ($id in $Ids) {
+        $script:totalTests++
+        $verificationScript = Join-Path $repoRoot $map[$id][0]
+        if (-not (Test-Path -LiteralPath $verificationScript)) {
+            $script:failedTests++; Write-Failure "$id script missing: $verificationScript"
+            $script:testResults += [PSCustomObject]@{ Name = $id; Status = 'FAILED'; ExitCode = 'N/A' }; continue
         }
-    } elseif ($exitCode -eq 2) {
-        # exit 2 = NO_TESTS_RAN: device absent, no adapter, or all tests skipped
-        Write-Host "  [SKIP] Test ran but produced no results (no device/all skipped, exit 2)" -ForegroundColor Yellow
-        $script:skippedTests++
-        $script:testResults += [PSCustomObject]@{
-            Name     = $TestName
-            Status   = "SKIP_NO_TESTS"
-            ExitCode = $exitCode
-        }
-    } elseif ($exitCode -eq 3) {
-        # exit 3 = BLOCKED: mandatory test cases could not run (restore capability absent)
-        Write-Host "  [BLOCKED] Mandatory test cases BLOCKED -- restore capability absent (exit 3)" -ForegroundColor Yellow
-        $script:failedTests++
-        $script:testResults += [PSCustomObject]@{
-            Name     = $TestName
-            Status   = "BLOCKED"
-            ExitCode = $exitCode
-        }
-    } elseif ($exitCode -eq 4) {
-        # exit 4 = CLEANUP_FAILED: hardware state unknown after restore failure
-        Write-Host "  [CLEANUP_FAILED] Hardware state UNKNOWN after restore failure (exit 4)" -ForegroundColor Red
-        $script:failedTests++
-        $script:testResults += [PSCustomObject]@{
-            Name     = $TestName
-            Status   = "CLEANUP_FAILED"
-            ExitCode = $exitCode
-        }
-    } else {
-        Write-Host "  [FAIL] Test exited with code $exitCode" -ForegroundColor Red
-        $script:failedTests++
-        $script:testResults += [PSCustomObject]@{
-            Name     = $TestName
-            Status   = "FAILED"
-            ExitCode = $exitCode
-        }
+        Write-Host "`n    => $id" -ForegroundColor Yellow
+        $logFile = Join-Path $logsDir "${id}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        $global:LASTEXITCODE = $null
+        if ($map[$id][1]) { & $verificationScript -Configuration $Configuration 2>&1 | Tee-Object -FilePath $logFile }
+        else { & $verificationScript 2>&1 | Tee-Object -FilePath $logFile }
+        $ec = $global:LASTEXITCODE
+        if ($ec -eq 0) { $script:passedTests++; Write-Success "$id PASSED"; $script:testResults += [PSCustomObject]@{ Name = $id; Status = 'PASSED'; ExitCode = 0 } }
+        else { $script:failedTests++; Write-Failure "$id FAILED (exit $ec)"; $script:testResults += [PSCustomObject]@{ Name = $id; Status = 'FAILED'; ExitCode = $ec } }
     }
 }
 
@@ -287,35 +269,11 @@ if ($SecureBootCheck) {
 # Feature: Hardware-Only Mode (from test_hardware_only.bat)
 # ===========================
 if ($HardwareOnly) {
-    Write-Step "Compiling Hardware-Only Test Application"
-    
-    # Check for Visual Studio compiler
-    $clPath = Get-Command cl.exe -ErrorAction SilentlyContinue
-    if (-not $clPath) {
-        Write-Failure "Visual Studio compiler (cl.exe) not found in PATH"
-        Write-Info "Run this from 'Developer Command Prompt for VS' or add VS tools to PATH"
-        exit 1
-    }
-    
-    # Compile with HARDWARE_ONLY=1 flag
-    $testSource = Join-Path $repoRoot "tests\device_specific\i219\avb_test_i219.c"
-    if (Test-Path $testSource) {
-        Write-Host "  Compiling with /DHARDWARE_ONLY=1 flag..." -ForegroundColor Gray
-        $hwOutput = Join-Path $repoRoot "avb_test_hardware_only.exe"
-        & cl.exe $testSource /DHARDWARE_ONLY=1 /Fe:$hwOutput 2>&1 | Out-Null
-        if (Test-Path $hwOutput) {
-            Write-Success "Hardware-Only test application compiled: avb_test_hardware_only.exe"
-            Write-Host "  NO SIMULATION - Real hardware or explicit failure" -ForegroundColor Yellow
-            
-            # Run the hardware-only test
-            Write-Host "`n  Running Hardware-Only test..." -ForegroundColor Cyan
-            & $hwOutput
-        } else {
-            Write-Failure "Compilation failed"
-        }
-    } else {
-        Write-Failure "Test source not found: $testSource"
-    }
+    # Legacy: compiled tests\device_specific\i219\avb_test_i219.c with /DHARDWARE_ONLY=1 into the repository root and
+    # started it directly.  The source never references HARDWARE_ONLY (checked 2026-10-29): the program is the
+    # registered entry avb_test_i219 (Mutating:Target, one run per supported adapter), run in Test 5 through
+    # Run-Tests-CI.ps1 before the selected mode.
+    Write-Step "Hardware-Only test requested: registered entry avb_test_i219 (runs in Test 5 through Run-Tests-CI.ps1)"
 }
 
 # ===========================
@@ -483,494 +441,61 @@ foreach ($test in $availableTests) {
 }
 
 # ===========================
-# Test 5: Execute Tests
+# Test 5: Execute Tests -- through tools\test\Run-Tests-CI.ps1 only
 # ===========================
-if ($TestExecutable) {
-    # Run specific test
-    Write-Step "Running Specific Test: $TestExecutable"
+#   -TestExecutable X [-TestArgs A]  the registered runner entry 'X A' in the suite that lists or declares it; an
+#                                    unregistered program fails closed (inventory gap, TEST-COMPLETE) and never runs
+#   -Quick                           PARTIAL / SMOKE run: the legacy quick list as registered entries, per suite in
+#                                    the HIL order; its success never satisfies HIL coverage
+#   -Full, or no mode switch         FULL run (the legacy default ran every test): static SSOT/REGS verification, then
+#                                    Unit, HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory (last,
+#                                    as in hil.yml and LocalSuites), chained through -PriorResultsDir
+# Not done here any more: the legacy EventLog subscription refresh before *event_log* tests (EventLog restart, which can
+# detach the filter, then an IntelAvbFilter service start) - an ungated service change outside the machine lock and
+# without restoration.  test_event_log is gate-BLOCKED (Mutating); its setup is an open requirement in $HilTestSafety.
+$ReportDir = Join-Path $logsDir ("RunTests_{0}_{1}" -f $Configuration, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+New-Item -ItemType Directory -Path $ReportDir -Force | Out-Null
+$runnerRegistry = Get-AvbRunnerRegistry
+$suiteOrder = @('Unit', 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory')
+Write-Info "Dispatcher: $runCi   Report: $ReportDir"
 
-    # ETW SUBSCRIPTION REFRESH (Implements #65 REQ-F-EVENT-LOG-001, TC-1 fix):
-    # For event-log tests, ensure the EventLog service has an active ETW subscription
-    # to the IntelAvbFilter provider.  Without this, EtwWriteTransfer returns STATUS_SUCCESS
-    # but delivers to 0 sessions -- the event never appears in Application.evtx.
-    # The restart forces McGenControlCallbackV2(ENABLE_PROVIDER) to fire on the loaded
-    # driver, setting IntelAvbFilterEnableBits[0] = 1.
-    # This mirrors Step 4b in Install-Driver.ps1 and is safe to repeat before any test run.
-    if ($TestExecutable -match 'event_log') {
-        Write-Host "`n[ETW] Refreshing EventLog subscription for IntelAvbFilter provider..." -ForegroundColor DarkGray
-        $providerCheck = wevtutil gp IntelAvbFilter 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Stop-Service -Name EventLog -Force -ErrorAction SilentlyContinue
-            Start-Service -Name EventLog -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3
-            Write-Host "  [ETW] EventLog restarted -- IntelAvbFilterEnableBits will be set by McGenControlCallbackV2" -ForegroundColor DarkGray
-
-            # Service health check: EventLog restart can cause NDIS filter detach.
-            # Verify IntelAvbFilter driver is still running; restart it if detached.
-            $avbSvc = Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
-            if ($null -eq $avbSvc) {
-                Write-Host "  [INFRA] IntelAvbFilter service not found -- driver may not be installed." -ForegroundColor Yellow
-            } elseif ($avbSvc.Status -ne 'Running') {
-                Write-Host "  [INFRA] IntelAvbFilter stopped after EventLog restart -- restarting driver..." -ForegroundColor Yellow
-                Start-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 5
-                $avbSvc = Get-Service -Name "IntelAvbFilter" -ErrorAction SilentlyContinue
-                if ($null -eq $avbSvc -or $avbSvc.Status -ne 'Running') {
-                    Write-Host "  [WARN] IntelAvbFilter failed to restart -- subsequent tests may fail with device error 2." -ForegroundColor Yellow
-                } else {
-                    Write-Host "  [INFRA] IntelAvbFilter restarted successfully." -ForegroundColor DarkGray
-                }
-            } else {
-                Write-Host "  [INFRA] IntelAvbFilter service confirmed running." -ForegroundColor DarkGray
-            }
-        } else {
-            Write-Host "  [WARN] IntelAvbFilter ETW provider not registered -- TC-1 may fail" -ForegroundColor Yellow
-            Write-Host "         Run: wevtutil im src\IntelAvbFilter.man /mf:<sys> /rf:<sys>" -ForegroundColor Yellow
-        }
-    }
-
-    if ($TestExecutable -match '\.ps1$') {
-        # PowerShell script test -- find it in tests\ tree and invoke directly
-        $ps1TestPath = $null
-        $searchRoots = @(
-            (Join-Path $repoRoot "tests"),
-            (Join-Path $repoRoot "tools\test")
-        )
-        foreach ($root in $searchRoots) {
-            $candidate = Get-ChildItem -Path $root -Filter $TestExecutable -Recurse -ErrorAction SilentlyContinue |
-                         Select-Object -First 1
-            if ($candidate) { $ps1TestPath = $candidate.FullName; break }
-        }
-        if (-not $ps1TestPath) {
-            # Try bare name without extension in tests/ tree (e.g. Test-DebugLevelVerbosity)
-            $bareName = [System.IO.Path]::GetFileNameWithoutExtension($TestExecutable) + '.ps1'
-            foreach ($root in $searchRoots) {
-                $candidate = Get-ChildItem -Path $root -Filter $bareName -Recurse -ErrorAction SilentlyContinue |
-                             Select-Object -First 1
-                if ($candidate) { $ps1TestPath = $candidate.FullName; break }
-            }
-        }
-        if ($ps1TestPath) {
-            Write-Host "`n  => $TestExecutable" -ForegroundColor Cyan
-            Write-Host "     Script: $ps1TestPath" -ForegroundColor Gray
-            $script:totalTests++
-            & {
-                $ErrorActionPreference = 'Continue'
-                if ($TestArgs) {
-                    $argList = $TestArgs -split ' '
-                    & $ps1TestPath @argList 2>&1
-                } else {
-                    & $ps1TestPath 2>&1
-                }
-            }
-            if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
-                $script:passedTests++
-                $script:testResults += [PSCustomObject]@{ Name = $TestExecutable; Status = "PASSED"; ExitCode = 0 }
-            } else {
-                $script:failedTests++
-                $script:testResults += [PSCustomObject]@{ Name = $TestExecutable; Status = "FAILED"; ExitCode = $LASTEXITCODE }
-            }
-        } else {
-            Write-Host "`n  => $TestExecutable" -ForegroundColor Cyan
-            Write-Failure "PS1 test script not found: $TestExecutable"
-            $script:totalTests++; $script:failedTests++
-            $script:testResults += [PSCustomObject]@{ Name = $TestExecutable; Status = "NOT_FOUND"; ExitCode = -1 }
-        }
-    } else {
-        Invoke-Test -TestName $TestExecutable -TestArgs $TestArgs
-    }
-
-} elseif ($Quick) {
-    Write-Step "Running Quick Verification Tests"
-    
-    # SSOT Quick Check (critical for code quality)
-    Write-Host "`n[Quick SSOT Check] Verifying Single Source of Truth Compliance..." -ForegroundColor Cyan
-    $ssotTestDir = Join-Path $repoRoot "tests\verification\ssot"
-    $ssotTest1 = Join-Path $ssotTestDir "Test-SSOT-001-NoDuplicates.ps1"
-    
-    if (Test-Path $ssotTest1) {
-        $script:totalTests++
-        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
-        $logFile = Join-Path $logsDir "TEST-SSOT-001_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-        & $ssotTest1 2>&1 | Tee-Object -FilePath $logFile
-        if ($LASTEXITCODE -eq 0) {
-            $script:passedTests++
-            Write-Host "[OK] SSOT validation passed - no duplicate IOCTLs" -ForegroundColor Green
-        } else {
-            $script:failedTests++
-            Write-Host "[FAIL] SSOT validation failed - duplicate IOCTLs detected!" -ForegroundColor Red
-            Write-Host "       Run full SSOT tests: .\tests\verification\ssot\Run-All-SSOT-Tests.ps1" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Info "SSOT tests not found (install from tests/verification/ssot/)"
-    }
-    Write-Host ""
-    
-    $quickTests = @(
-        "test_multidev_adapter_enum.exe",
-        "test_device_register_access.exe",
-        "test_ndis_send_path.exe",
-        "test_ndis_receive_path.exe",
-        "test_tx_timestamp_retrieval.exe",
-        "test_hw_state_machine.exe",
-        "test_lazy_initialization.exe",
-        "test_registry_diagnostics.exe",
-        "ptp_clock_control_test.exe",
-        "ptp_clock_control_production_test.exe",
-        "avb_capability_validation_test.exe",
-        "avb_diagnostic_test.exe"
-    )
-    
-    foreach ($testName in $quickTests) {
-        Invoke-Test -TestName $testName
-    }
-
-    # Test-DebugLevelVerbosity.ps1: DbgView sentinel check (#95/#247)
-    $verbosityTest = Get-ChildItem -Path (Join-Path $repoRoot "tests") -Filter "Test-DebugLevelVerbosity.ps1" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($verbosityTest) {
-        Write-Host "`n  => Test-DebugLevelVerbosity.ps1" -ForegroundColor Cyan
-        Write-Host "     Verify DebugLevel verbosity via DbgView log parsing (#95/#247 behavioral gap)" -ForegroundColor Gray
-        $script:totalTests++
-        & { $ErrorActionPreference = 'Continue'; & $verbosityTest.FullName -SkipReload 2>&1 }
-        if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
-            $script:passedTests++
-            $script:testResults += [PSCustomObject]@{ Name = "Test-DebugLevelVerbosity.ps1"; Status = "PASSED"; ExitCode = 0 }
-        } else {
-            $script:failedTests++
-            $script:testResults += [PSCustomObject]@{ Name = "Test-DebugLevelVerbosity.ps1"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
-        }
-    }
-    
-} elseif ($Full) {
-    # Full comprehensive test suite (phased execution from run_tests.ps1)
-    Write-Step "Running Full Comprehensive Test Suite"
-    
-    # Phase -1: Standards Compliance & Code Quality Verification
-    Write-Host "`n=== PHASE -1: Standards Compliance & Code Quality Verification ===" -ForegroundColor Green
-    Write-Host "Purpose: Verify ISO/IEC/IEEE standards compliance and architecture decisions" -ForegroundColor Gray
-    
-    # SSOT Verification Tests (Issue #24, ADR #123, TEST #301-303)
-    Write-Host "`n  [SSOT Tests] Single Source of Truth Verification" -ForegroundColor Cyan
-    Write-Host "  Verifies: Issue #24 (REQ-NF-SSOT-001), ADR #123 (ADR-SSOT-001)" -ForegroundColor Gray
-    
-    $ssotTestDir = Join-Path $repoRoot "tests\verification\ssot"
-    
-    # TEST-SSOT-001: No Duplicate IOCTL Definitions
-    $ssotTest1 = Join-Path $ssotTestDir "Test-SSOT-001-NoDuplicates.ps1"
-    if (Test-Path $ssotTest1) {
-        Write-Host "`n    => TEST-SSOT-001: Verify No Duplicate IOCTL Definitions (#301)" -ForegroundColor Yellow
-        $script:totalTests++
-        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
-        $logFile = Join-Path $logsDir "TEST-SSOT-001_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-        & $ssotTest1 2>&1 | Tee-Object -FilePath $logFile
-        if ($LASTEXITCODE -eq 0) {
-            $script:passedTests++
-            Write-Success "TEST-SSOT-001 PASSED"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-001"; Status = "PASSED"; ExitCode = 0 }
-        } else {
-            $script:failedTests++
-            Write-Failure "TEST-SSOT-001 FAILED - SSOT violations detected!"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-001"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
-        }
-    } else {
-        Write-Info "TEST-SSOT-001 script not found (skipping)"
-    }
-    
-    # TEST-SSOT-003: All Files Use SSOT Header Include
-    $ssotTest3 = Join-Path $ssotTestDir "Test-SSOT-003-IncludePattern.ps1"
-    if (Test-Path $ssotTest3) {
-        Write-Host "`n    => TEST-SSOT-003: Verify All Files Use SSOT Header (#302)" -ForegroundColor Yellow
-        $script:totalTests++
-        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
-        $logFile = Join-Path $logsDir "TEST-SSOT-003_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-        & $ssotTest3 2>&1 | Tee-Object -FilePath $logFile
-        if ($LASTEXITCODE -eq 0) {
-            $script:passedTests++
-            Write-Success "TEST-SSOT-003 PASSED"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-003"; Status = "PASSED"; ExitCode = 0 }
-        } else {
-            $script:failedTests++
-            Write-Failure "TEST-SSOT-003 FAILED - Include pattern violations detected!"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-003"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
-        }
-    } else {
-        Write-Info "TEST-SSOT-003 script not found (skipping)"
-    }
-    
-    # TEST-SSOT-004: SSOT Header Completeness
-    $ssotTest4 = Join-Path $ssotTestDir "Test-SSOT-004-Completeness.ps1"
-    if (Test-Path $ssotTest4) {
-        Write-Host "`n    => TEST-SSOT-004: Verify SSOT Header Completeness (#303)" -ForegroundColor Yellow
-        $script:totalTests++
-        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
-        $logFile = Join-Path $logsDir "TEST-SSOT-004_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-        & $ssotTest4 2>&1 | Tee-Object -FilePath $logFile
-        if ($LASTEXITCODE -eq 0) {
-            $script:passedTests++
-            Write-Success "TEST-SSOT-004 PASSED"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-004"; Status = "PASSED"; ExitCode = 0 }
-        } else {
-            $script:failedTests++
-            Write-Failure "TEST-SSOT-004 FAILED - SSOT header incomplete!"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-SSOT-004"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
-        }
-    } else {
-        Write-Info "TEST-SSOT-004 script not found (skipping)"
-    }
-    
-    Write-Host "`n  Note: TEST-SSOT-002 (CI Workflow Validation) requires manual negative testing" -ForegroundColor Gray
-    Write-Host "        See tests/verification/ssot/README.md for procedure" -ForegroundColor Gray
-    
-    # REGS Verification Tests (Issue #21, TEST #304-306)
-    Write-Host "`n  [REGS Tests] Register Magic Number Elimination Verification" -ForegroundColor Cyan
-    Write-Host "  Verifies: Issue #21 (REQ-NF-REGS-001: Eliminate Magic Numbers)" -ForegroundColor Gray
-    
-    $regsTestDir = Join-Path $repoRoot "tests\verification\regs"
-    
-    # TEST-REGS-001: Build Verification with Submodule Headers
-    $regsTest1 = Join-Path $regsTestDir "Test-REGS-001-BuildVerification.ps1"
-    if (Test-Path $regsTest1) {
-        Write-Host "`n    => TEST-REGS-001: Build Verification (#304)" -ForegroundColor Yellow
-        $script:totalTests++
-        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
-        $logFile = Join-Path $logsDir "TEST-REGS-001_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-        & $regsTest1 -Configuration $Configuration 2>&1 | Tee-Object -FilePath $logFile
-        if ($LASTEXITCODE -eq 0) {
-            $script:passedTests++
-            Write-Success "TEST-REGS-001 PASSED"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-001"; Status = "PASSED"; ExitCode = 0 }
-        } else {
-            $script:failedTests++
-            Write-Failure "TEST-REGS-001 FAILED - Build verification failed!"
-            $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-001"; Status = "FAILED"; ExitCode = $LASTEXITCODE }
-        }
-    } else {
-        Write-Info "TEST-REGS-001 script not found (skipping)"
-    }
-    
-    # TEST-REGS-002: Magic Number Detection (Static Analysis) - C EXE
-    Invoke-Test "test_magic_numbers.exe" "TEST-REGS-002: SSOT Magic Number Static Analysis (#305)"
-    
-    # TEST-REGS-003: Register Constant Verification (C_ASSERT)
-$regsTest3 = Join-Path $regsTestDir "Test-REGS-003-RegisterConstantVerification.ps1"
-if (Test-Path $regsTest3) {
-    Write-Host "`n    => TEST-REGS-003: Register Constant Verification (#306)" -ForegroundColor Yellow
-    $script:totalTests++
-    if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
-    $logFile = Join-Path $logsDir "TEST-REGS-003_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-    & $regsTest3 -Configuration $Configuration 2>&1 | Tee-Object -FilePath $logFile
-    if ($LASTEXITCODE -eq 0) {
-        $script:passedTests++
-        Write-Success "TEST-REGS-003 PASSED"
-        $script:testResults += [PSCustomObject]@{ Name = "TEST-REGS-003"; Status = "PASSED"; ExitCode = 0 }
-    } else {
-        $script:failedTests++
-        Write-Failure "TEST-REGS-003 FAILED - Build not found or verification failed!"
-        Write-Info "Run Build-Tests.ps1 -TestName test_register_constants to build first"
-        }
-    } else {
-        Write-Info "TEST-REGS-003 script not found (skipping)"
-    }
-
-    # SCRIPTS Consolidation Verification (Issue #27/#292, TEST-SCRIPTS-CONSOLIDATE-001)
-    Invoke-Test "test_scripts_consolidate.exe" "TEST-SCRIPTS-CONSOLIDATE-001: Script Consolidation Structure (#27/#292)"
-
-    # CLEANUP Archive Verification (Issue #293/#294, TEST-CLEANUP-ARCHIVE-001)
-    Invoke-Test "test_cleanup_archive.exe" "TEST-CLEANUP-ARCHIVE-001: Repo Archival & Organization (#293/#294)"
-
-    # Phase 0: Architecture Compliance Validation
-    Write-Host "`n=== PHASE 0: Architecture Compliance Validation ===" -ForegroundColor Green
-    Write-Host "Purpose: Verify core architectural requirements are met" -ForegroundColor Gray
-    
-    $phase0Tests = @(
-        @{Name="test_multidev_adapter_enum.exe"; Desc="Verify Multi-Adapter Enumeration (#15 REQ-F-MULTIDEV-001)"},
-        @{Name="test_device_register_access.exe"; Desc="Verify device abstraction layer register access (#40 REQ-F-DEVICE-ABS-003)"},
-        @{Name="test_ndis_send_path.exe"; Desc="Verify NDIS FilterSend packet processing (#42 REQ-F-NDIS-SEND-001)"},
-        @{Name="test_ndis_receive_path.exe"; Desc="Verify NDIS FilterReceive packet processing (#43 REQ-F-NDIS-RECEIVE-001)"},
-        @{Name="test_tx_timestamp_retrieval.exe"; Desc="Verify TX Timestamp Retrieval IOCTL (#35 REQ-F-IOCTL-TS-001)"},
-        @{Name="test_hw_state_machine.exe"; Desc="Verify Hardware State Machine IOCTL (#18 REQ-F-HWCTX-001)"},
-        @{Name="test_lazy_initialization.exe"; Desc="Verify Lazy Initialization (#16 REQ-F-LAZY-INIT-001)"},
-        @{Name="test_registry_diagnostics.exe"; Desc="Verify Registry Diagnostics (#17 REQ-NF-DIAG-REG-001)"},
-        @{Name="Test-DebugLevelVerbosity.ps1"; Desc="Verify DebugLevel verbosity via DbgView log parsing (#95/#247 behavioral gap)"},
-        @{Name="test_hal_unit.exe"; Desc="Verify HAL Unit Tests (#84 REQ-NF-PORTABILITY-001, #308 TEST-PORTABILITY-HAL-001)"},
-        @{Name="test_hal_errors.exe"; Desc="Verify HAL Error Scenario Tests (#84 REQ-NF-PORTABILITY-001, #309 TEST-PORTABILITY-HAL-002)"},
-        @{Name="test_hal_performance.exe"; Desc="Verify HAL Performance Metrics (#84 REQ-NF-PORTABILITY-001, #310 TEST-PORTABILITY-HAL-003)"},
-        @{Name="test_ioctl_abi.exe"; Desc="Verify IOCTL ABI stability: code uniqueness + struct sizes (TEST-ABI-001, #265)"},
-        @{Name="ptp_clock_control_test.exe"; Desc="Verify PTP Clock Control including GET_CLOCK_CONFIG (#4)"},
-        @{Name="ptp_clock_control_production_test.exe"; Desc="Verify PTP Clock Production IOCTLs (#4 P0 CRITICAL)"},
-        @{Name="avb_capability_validation_test.exe"; Desc="Verify realistic hardware capability reporting (no false advertising)"},
-        @{Name="avb_device_separation_test.exe"; Desc="Verify clean device separation architecture compliance"}
-    )
-    foreach ($test in $phase0Tests) {
-        if ($test.Name -match '\.ps1$') {
-            # PS1 test: find and invoke directly
-            $ps1Found = $null
-            foreach ($root in @((Join-Path $repoRoot "tests"), (Join-Path $repoRoot "tools\test"))) {
-                $ps1Found = Get-ChildItem -Path $root -Filter $test.Name -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($ps1Found) { break }
-            }
-            if ($ps1Found) {
-                Write-Host "`n  => $($test.Name)" -ForegroundColor Cyan
-                if ($test.Desc) { Write-Host "     $($test.Desc)" -ForegroundColor Gray }
-                $script:totalTests++
-                & { $ErrorActionPreference = 'Continue'; & $ps1Found.FullName 2>&1 }
-                if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
-                    $script:passedTests++
-                    $script:testResults += [PSCustomObject]@{ Name = $test.Name; Status = "PASSED"; ExitCode = 0 }
-                } else {
-                    $script:failedTests++
-                    $script:testResults += [PSCustomObject]@{ Name = $test.Name; Status = "FAILED"; ExitCode = $LASTEXITCODE }
-                }
-            } else {
-                Write-Host "`n  => $($test.Name)" -ForegroundColor Cyan
-                Write-Failure "PS1 test not found: $($test.Name)"
-                $script:totalTests++; $script:failedTests++
-                $script:testResults += [PSCustomObject]@{ Name = $test.Name; Status = "NOT_FOUND"; ExitCode = -1 }
-            }
-        } else {
-            Invoke-Test -TestName $test.Name -Description $test.Desc
-        }
-    }
-    
-    # Phase 1: Basic Hardware Diagnostics
-    Write-Host "`n=== PHASE 1: Basic Hardware Diagnostics ===" -ForegroundColor Green
-    Write-Host "Purpose: Comprehensive hardware analysis and troubleshooting" -ForegroundColor Gray
-    
-    $phase1Tests = @(
-        @{Name="avb_diagnostic_test.exe"; Desc="Comprehensive hardware diagnostics"},
-        @{Name="avb_hw_state_test.exe"; Desc="Hardware state transitions and management"}
-    )
-    foreach ($test in $phase1Tests) {
-        Invoke-Test -TestName $test.Name -Description $test.Desc
-    }
-    
-    # Phase 2: TSN IOCTL Handler Verification
-    Write-Host "`n=== PHASE 2: TSN IOCTL Handler Verification (Critical Fix Validation) ===" -ForegroundColor Green
-    Write-Host "Purpose: Verify TAS/FP/PTM IOCTLs no longer return ERROR_INVALID_FUNCTION" -ForegroundColor Gray
-    
-    $phase2Tests = @(
-        @{Name="test_tsn_ioctl_handlers.exe"; Desc="TSN IOCTL handler validation"},
-        @{Name="tsn_hardware_activation_validation.exe"; Desc="TSN features activate at hardware level"}
-    )
-    foreach ($test in $phase2Tests) {
-        Invoke-Test -TestName $test.Name -Description $test.Desc
-    }
-    
-    # Phase 2.5: SSOT IOCTL Batch 3 - User-Mode Integration Tests
-    Write-Host "`n  [Batch 3 IOCTL Tests] SSOT-Aligned User-Mode Integration" -ForegroundColor Cyan
-    Write-Host "  Verifies: Issues #207, #295, #296, #297, #298 (Batch 3 IOCTL coverage)" -ForegroundColor Gray
-    
-    $batch3IoctlTests = @(
-        @{Name="test_qav_cbs.exe"; Desc="QAV/CBS Configuration (IOCTL 35) - Issue #207"},
-        @{Name="test_ptp_getset.exe"; Desc="PTP Timestamp Get/Set (IOCTLs 24-25) - Issue #295"},
-        @{Name="test_ptp_freq.exe"; Desc="PTP Frequency Adjustment (IOCTL 38) - Issue #296"},
-        @{Name="test_hw_ts_ctrl.exe"; Desc="Hardware Timestamping Control (IOCTL 40) - Issue #297"},
-        @{Name="test_rx_timestamp.exe"; Desc="RX Timestamp Control (IOCTLs 41-42) - Issue #298"},
-        @{Name="test_ts_event_sub.exe"; Desc="Timestamp Event Subscription (IOCTLs 33-34) - Issue #314"},
-        @{Name="test_ioctl_phc_monotonicity.exe"; Desc="PHC Clock Monotonicity (IOCTL_AVB_GET_TIMESTAMP) - Issue #261"}
-    )
-    foreach ($test in $batch3IoctlTests) {
-        Invoke-Test -TestName $test.Name -Description $test.Desc
-    }
-    
-    # Phase 3: Multi-Adapter Hardware Testing
-    Write-Host "`n=== PHASE 3: Multi-Adapter Hardware Testing ===" -ForegroundColor Green
-    
-    Invoke-Test -TestName "avb_multi_adapter_test.exe"
-    
-    # Phase 4: I226 Advanced Feature Testing
-    Write-Host "`n=== PHASE 4: I226 Advanced Feature Testing ===" -ForegroundColor Green
-    
-    $phase4Tests = @("avb_i226_test.exe", "avb_i226_advanced_test.exe")
-    foreach ($testName in $phase4Tests) {
-        Invoke-Test -TestName $testName
-    }
-    
-    # Phase 5: Adapter-Specific Tests (I210 / I219 / I226)
-    # Each exe locates its target NIC via AvbEnumerateAdapters and SKIPs if not present;
-    # running all three here ensures every supported adapter is exercised individually
-    # in addition to the cross-NIC device-agnostic runs in Phase 2.5.
-    Write-Host "`n=== PHASE 5: Adapter-Specific Tests (I210 / I219 / I226) ===" -ForegroundColor Green
-    Write-Host "Purpose: Adapter-specific capabilities, variant matrix, and I219/I226 unique features" -ForegroundColor Gray
-    Write-Host "Note: device-agnostic tests (test_hw_ts_ctrl, test_ptp_getset) in Phase 2.5 already" -ForegroundColor Gray
-    Write-Host "      iterate all adapters and provide cross-NIC reference data." -ForegroundColor Gray
-
-    Invoke-Test -TestName "avb_test_i210.exe" -Description "I210 adapter-specific validation (caps, variant, basic IOCTLs)"
-    Invoke-Test -TestName "avb_test_i219.exe" -Description "I219 adapter-specific validation (caps 0xC3, variant matrix, monotonicity)"
-    Invoke-Test -TestName "avb_test_i226.exe" -Description "I226 adapter-specific validation (caps, TSN features, variant matrix)"
-    
-    # Phase 6: Specialized Investigation Tests
-    Write-Host "`n=== PHASE 6: Specialized Investigation Tests ===" -ForegroundColor Green
-    Write-Host "Purpose: Deep hardware investigation and TSN validation" -ForegroundColor Gray
-    
-    $phase6Tests = @(
-        "chatgpt5_i226_tas_validation.exe",
-        "corrected_i226_tas_test.exe",
-        "critical_prerequisites_investigation.exe",
-        "enhanced_tas_investigation.exe",
-        "hardware_investigation_tool.exe"
-    )
-    foreach ($testName in $phase6Tests) {
-        Invoke-Test -TestName $testName
-    }
-
-    # Phase 7: All Remaining Tests (catch-all)
-    # Run every discovered .exe that was not explicitly listed in Phases 0-6 above,
-    # so that -Full always equals or exceeds the default (no-flag) run.
-    Write-Host "`n=== PHASE 7: All Remaining Tests ===" -ForegroundColor Green
-    Write-Host "Purpose: Run every test executable not already covered by Phases 0-6" -ForegroundColor Gray
-
-    $coveredTests = @(
-        # Phase 0
-        "test_multidev_adapter_enum.exe", "test_device_register_access.exe",
-        "test_ndis_send_path.exe", "test_ndis_receive_path.exe",
-        "test_tx_timestamp_retrieval.exe", "test_hw_state_machine.exe",
-        "test_lazy_initialization.exe", "test_registry_diagnostics.exe",
-        "test_hal_unit.exe", "test_hal_errors.exe", "test_hal_performance.exe",
-        "test_ioctl_abi.exe",
-        "ptp_clock_control_test.exe", "ptp_clock_control_production_test.exe",
-        "avb_capability_validation_test.exe", "avb_device_separation_test.exe",
-        # Phase 1
-        "avb_diagnostic_test.exe", "avb_hw_state_test.exe",
-        # Phase 2
-        "test_tsn_ioctl_handlers.exe", "tsn_hardware_activation_validation.exe",
-        # Phase 2.5
-        "test_qav_cbs.exe", "test_ptp_getset.exe", "test_ptp_freq.exe",
-        "test_hw_ts_ctrl.exe", "test_rx_timestamp.exe", "test_ts_event_sub.exe",
-        "test_ioctl_phc_monotonicity.exe",
-        # Phase 3
-        "avb_multi_adapter_test.exe",
-        # Phase 4
-        "avb_i226_test.exe", "avb_i226_advanced_test.exe",
-        # Phase 5
-        "avb_test_i210.exe", "avb_test_i219.exe", "avb_test_i226.exe",
-        # Phase 6
-        "chatgpt5_i226_tas_validation.exe", "corrected_i226_tas_test.exe",
-        "critical_prerequisites_investigation.exe", "enhanced_tas_investigation.exe",
-        "hardware_investigation_tool.exe"
-    ) | ForEach-Object { $_.ToLower() }
-
-    $remainingTests = $availableTests | Where-Object { $coveredTests -notcontains $_.Name.ToLower() }
-
-    if ($remainingTests.Count -eq 0) {
-        Write-Host "  (no additional tests -- all executables already covered above)" -ForegroundColor Gray
-    } else {
-        Write-Info "Found $($remainingTests.Count) additional test(s) not in explicit phases"
-        foreach ($test in $remainingTests) {
-            Invoke-Test -TestName $test.Name -Description "Additional test (Phase 7)"
-        }
-    }
-
-} else {
-    # Default: Run ALL available tests
-    Write-Step "Running All Available Tests"
-    Write-Info "Found $($availableTests.Count) test(s) - executing all"
-    Write-Host ""
-    
-    foreach ($test in $availableTests) {
-        Invoke-Test -TestName $test.Name
-    }
+function Add-AvbUnregistered([string]$Entry) {
+    Write-Failure "[BLOCKED] '$Entry' is not a registered runner entry (no suite list, coverage gap or attended-only table in tools\test\Run-Tests-CI.ps1) - inventory gap, not executed"
+    $script:totalTests++; $script:failedTests++
+    $script:testResults += [PSCustomObject]@{ Name = $Entry; Status = 'BLOCKED(UNREGISTERED)'; ExitCode = 'N/A' }
 }
+
+if ($HardwareOnly) { Invoke-AvbDispatch -Label 'hardware-only' -Suite 'HardwareIntegration' -Entries @('avb_test_i219') -ReportDir $ReportDir }
+
+if ($TestExecutable) {
+    Write-Step "Running Specific Test: $TestExecutable $TestArgs (Run-Tests-CI.ps1)"
+    $r = Resolve-AvbRunnerEntry -Name $TestExecutable -Arguments $TestArgs -Registry $runnerRegistry
+    if ($r.Suite) { Invoke-AvbDispatch -Label $r.Entry -Suite $r.Suite -Entries @($r.Entry) -ReportDir $ReportDir }
+    else { Add-AvbUnregistered $r.Entry }
+} elseif ($Quick) {
+    Write-Step "Running Quick Verification Tests -- PARTIAL / SMOKE RUN (never satisfies HIL coverage)"
+    Invoke-AvbStaticVerification -Ids @('TEST-SSOT-001')
+    # The legacy quick list (program names as built), resolved to registered entries.
+    $quickPrograms = @('test_multidev_adapter_enum.exe', 'test_device_register_access.exe', 'test_ndis_send_path.exe',
+                       'test_ndis_receive_path.exe', 'test_tx_timestamp_retrieval.exe', 'test_hw_state_machine.exe',
+                       'test_lazy_initialization.exe', 'test_registry_diagnostics.exe', 'ptp_clock_control_test.exe',
+                       'ptp_clock_control_production_test.exe', 'avb_capability_validation_test.exe', 'avb_diagnostic_test.exe',
+                       'Test-DebugLevelVerbosity.ps1')
+    $bySuite = [ordered]@{}
+    foreach ($q in $quickPrograms) {
+        $r = Resolve-AvbRunnerEntry -Name $q -Arguments '' -Registry $runnerRegistry
+        if (-not $r.Suite) { Add-AvbUnregistered $r.Entry; continue }
+        if (-not $bySuite.Contains($r.Suite)) { $bySuite[$r.Suite] = @() }
+        $bySuite[$r.Suite] += $r.Entry
+    }
+    foreach ($s in $suiteOrder) { if ($bySuite.Contains($s)) { Invoke-AvbDispatch -Label 'quick (partial)' -Suite $s -Entries $bySuite[$s] -ReportDir $ReportDir } }
+    Write-Host "`n  [PARTIAL] Quick run only - HIL coverage requires the full run (-Full: Unit + all four hardware suites)" -ForegroundColor Yellow
+} else {
+    Write-Step "Running Full Test Suite: static verification + Unit + HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory"
+    Invoke-AvbStaticVerification -Ids @('TEST-SSOT-001', 'TEST-SSOT-003', 'TEST-SSOT-004', 'TEST-REGS-001', 'TEST-REGS-003')
+    foreach ($s in $suiteOrder) { Invoke-AvbDispatch -Label 'full' -Suite $s -ReportDir $ReportDir }
+}
+foreach ($d in $script:DispatchRuns) { Write-Info ("Run-Tests-CI {0} [{1}] exit {2}: {3}" -f $d.Suite, $d.Label, $d.Exit, $d.Results) }
 
 # ===========================
 # Optional: Collect Logs
@@ -1133,20 +658,9 @@ if ($infraOK -and $testsOK) {
 Write-Host "`n"
 
 # ===========================
-# Interactive Test Prompt
+# Interactive Test Prompt -- removed 2026-10-29 (TEST-HILPATH-001): it ran every *.exe of the test directory
+# directly.  Running this script without a mode switch now IS the full run (all registered suites, gated).
 # ===========================
-if ($hasDeviceNode -and $hasTests -and -not $Quick -and -not $Full -and -not $TestExecutable) {
-    $response = Read-Host "Would you like to run all available tests? (y/n)"
-    if ($response -eq 'y' -or $response -eq 'Y') {
-        Write-Host "`nRunning all available tests..." -ForegroundColor Cyan
-        $allTests = Get-ChildItem -Path $testExeDir -Filter "*.exe"
-        foreach ($test in $allTests) {
-            Write-Host "`n--- Running: $($test.Name) ---" -ForegroundColor Cyan
-            & $test.FullName
-            Write-Host ""
-        }
-    }
-}
 
 Write-Host "For detailed kernel debug output, use DebugView:" -ForegroundColor Cyan
 Write-Host "  https://docs.microsoft.com/en-us/sysinternals/downloads/debugview" -ForegroundColor White

@@ -11,7 +11,12 @@
       Build-Driver.ps1             — driver and test build
       Install-Driver-Elevated.ps1  — driver install/reinstall
       Test-DriverPreFlight.ps1     — device verification
-      Run-Tests.ps1                — test execution (called directly; already elevated)
+      Run-Tests-CI.ps1             — test execution: registered entries only (provenance, HIL safety gate, state check)
+
+    The whole matrix holds the HIL machine lock (tools\lib\HilLock.ps1); builds, installs and test runs started by
+    this script run inside it.  Since 2026-10-29 (TEST-HILPATH-003) no test program is started outside the dispatcher:
+    ptp_clock_control_test is Mutating (TC-5b ADJUST_FREQUENCY / SET_TIMESTAMP / INIT_DEVICE) and is reported
+    BLOCKED until its read-only/mutating split (#340) - a visible gap in this benchmark, never a silent skip.
 
 .NOTES
     NEVER run this script automatically in CI.
@@ -66,9 +71,9 @@ $buildTool = Join-Path $repoRoot 'tools\build\Build-Driver.ps1'
 $btestTool = Join-Path $repoRoot 'tools\build\Build-Tests.ps1'
 $instTool  = Join-Path $repoRoot 'tools\setup\Install-Driver-Elevated.ps1'
 $pftool    = Join-Path $repoRoot 'tools\test\Test-DriverPreFlight.ps1'
-$runTool   = Join-Path $repoRoot 'tools\test\Run-Tests.ps1'
+$runCi     = Join-Path $repoRoot 'tools\test\Run-Tests-CI.ps1'
 
-foreach ($t in @($buildTool, $btestTool, $instTool, $pftool, $runTool)) {
+foreach ($t in @($buildTool, $btestTool, $instTool, $pftool, $runCi)) {
     if (-not (Test-Path $t)) { Write-Error "Required tool not found: $t"; exit 1 }
 }
 
@@ -93,13 +98,14 @@ New-Item -ItemType Directory -Path $BenchmarkDir -Force | Out-Null
 #   test_ioctl_tas           — TAS requires specific hardware support
 #   test_lifecycle_coverage  — requires driver lifecycle; may leave state
 #   test_hw_state_machine    — DID whitelist defect (D-Z2, not yet fixed)
-$BenchmarkTests = @(
-    'ptp_clock_control_test.exe'      # TC-5b PHC/QPC coherence; TC-5b runs first in main()
-    'test_timestamp_latency.exe'      # P50/P95/P99 latency; no --case filter
-    'test_tx_timestamp_retrieval.exe' # TC-CORR-TX-RX-001 per adapter; no --case filter
-    'test_ptp_phc_stability.exe'      # UT-CORR-007+008 (PRE_SEND_PHC overhead); no --case needed
-    'test_ptp_001.exe'                # TC-PTP-001-CORR rate stability; no --case filter
-)
+# Registered runner entry -> the suite that lists it (tools\test\Run-Tests-CI.ps1).
+$BenchmarkTests = [ordered]@{
+    'ptp_clock_control_test'      = 'HardwareUnit'         # TC-5b PHC/QPC coherence; Mutating -> BLOCKED until #340
+    'test_timestamp_latency'      = 'HardwareUnit'         # P50/P95/P99 latency; no --case filter
+    'test_tx_timestamp_retrieval' = 'HardwareUnit'         # TC-CORR-TX-RX-001 per adapter; no --case filter
+    'test_ptp_phc_stability'      = 'HardwareIntegration'  # UT-CORR-007+008 (PRE_SEND_PHC overhead); no --case needed
+    'test_ptp_001'                = 'HardwareIntegration'  # TC-PTP-001-CORR rate stability; no --case filter
+}
 
 # Driver configs: Release first (already installed), then Debug
 $DriverConfigs = @('Release','Debug')
@@ -273,6 +279,19 @@ Write-Info "  1. Identify which build config produced SHA $preinstalledSHA"
 Write-Info "  2. Run: .\tools\setup\Install-Driver-Elevated.ps1 -Configuration (Debug or Release) -Action Reinstall"
 Write-Info "  3. Verify installed SHA = $preinstalledSHA"
 
+# ─── Machine lock for the whole matrix ───────────────────────────────────────
+# Builds, driver reinstalls and test runs below change what a HIL execution verifies; none may run beside another
+# execution.  Children (Build-*, Install-Driver*, Run-Tests-CI) run inside this owner's context.
+. (Join-Path $repoRoot 'tools\lib\HilLock.ps1')
+$benchLock = $null
+if (-not $DryRun) {
+    $benchLock = Enter-AvbHilLock -Kind 'local' -Label 'Run-DriverBenchmark' -WaitSeconds 0
+    if (-not $benchLock.Ok) { Write-Fail "Machine lock held by another execution ($($benchLock.Why)): not building, installing or testing."; exit 1 }
+    if ($benchLock.PreviousOwner) { Write-Warn "Took over a stale machine lock: $($benchLock.PreviousOwner.why)" }
+    Write-Info "Machine lock held: $(Get-AvbHilLockPath)"
+}
+try {
+
 # ─── Stage 1: Build ──────────────────────────────────────────────────────────
 if (-not $SkipBuild) {
     Write-Banner "Stage 1: Build"
@@ -386,20 +405,23 @@ Type YES to continue:
             Tests        = [ordered]@{}
         }
 
-        foreach ($testExe in $BenchmarkTests) {
-            $logFile = Join-Path $cellLogDir ("$($testExe -replace '\.exe$','')_$(Get-Date -Format 'HHmmss').log")
-            Write-Info "--- $testExe ---"
+        foreach ($testExe in @($BenchmarkTests.Keys)) {
+            $suite = $BenchmarkTests[$testExe]
+            $logFile = Join-Path $cellLogDir ("${testExe}_$(Get-Date -Format 'HHmmss').log")
+            $entryLogs = Join-Path $cellLogDir $testExe
+            Write-Info "--- $testExe ($suite) ---"
             Write-Info "    Log: $logFile"
 
             if ($DryRun) {
-                Write-Info "[DRY-RUN] Run-Tests.ps1 -Configuration $testConfig -TestExecutable $testExe -CollectLogs"
+                Write-Info "[DRY-RUN] Run-Tests-CI.ps1 -Suite $suite -Configuration $testConfig -Tests $testExe -LogsDir $entryLogs"
                 $cellSummary.Tests[$testExe] = @{ ExitCode = 0; LogFile = $logFile }
                 continue
             }
 
-            # Already elevated — call Run-Tests.ps1 directly (no second UAC hop needed)
+            # Already elevated and inside this script's machine lock (the child is a descendant of the owner).
             $inner = "Start-Transcript -Path '$logFile' -Force | Out-Null; " +
-                     "`$_ec=0; try { & '$runTool' -Configuration $testConfig -TestExecutable '$testExe' -CollectLogs; " +
+                     "`$_ec=0; try { & '$runCi' -Suite $suite -Configuration $testConfig -Tests @('$testExe') -LogsDir '$entryLogs' " +
+                     "-ResultsJson '$(Join-Path $entryLogs 'results.json')'; " +
                      "`$_ec=`$LASTEXITCODE } catch { `$_ec=1 } finally { Stop-Transcript | Out-Null }; exit `$_ec"
             $proc = Start-Process powershell `
                 -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$inner) `
@@ -453,3 +475,7 @@ Write-Info "  Extract from ptp_clock_control_test log:"
 Write-Info "    TC-5b PHC/QPC rate per adapter (w1/w2/w3)"
 Write-Info "  Extract from test_ptp_001 log:"
 Write-Info "    TC-PTP-001-CORR pass rate and mean ratio per adapter"
+
+} finally {
+    if ($benchLock -and $benchLock.Ok) { $null = Exit-AvbHilLock -Owner $benchLock.Owner }
+}

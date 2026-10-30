@@ -148,8 +148,13 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($RunCIPath, [re
 $gateFn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilGateDecision' }, $false)
 if ($null -eq $gateFn) { tc_fail 'TEST-HILSUITE-000-gate-decision-available' 'Get-AvbHilGateDecision not found'; exit 1 }
 . ([scriptblock]::Create($gateFn.Extent.Text))
+# The runner's dispatch-time hazard holds (keys from its AST) are part of "gate-runnable".
+$HazardHolds = @{}
+$hhAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $x.Left.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) | Select-Object -First 1
+if ($hhAst) { foreach ($kv in $hhAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) { $HazardHolds[$kv.Item1.Value] = 'runner hazard hold' } }
 function Test-Runnable([string]$Entry, [string]$Class) {
-    $d = Get-AvbHilGateDecision -Entry $Entry -Class $Class -Target '0x125B' -Halt '' -TargetCount 1 -AuthorizedUnsafe @() -UnderGitHubActions $true
+    $d = Get-AvbHilGateDecision -Entry (($Entry -split '\s+', 2)[0] -replace '\.exe$', '') -Class $Class -Target '0x125B' -Halt '' -TargetCount 1 -AuthorizedUnsafe @() -UnderGitHubActions $true -HazardHolds $HazardHolds
     return ($d.Action -eq 'Run')
 }
 tc_pass 'TEST-HILSUITE-000-gate-decision-available'
@@ -289,7 +294,8 @@ foreach ($wf in @(Get-ChildItem (Join-Path $RepoRoot '.github\workflows') -File 
     foreach ($mm in [regex]::Matches([System.IO.File]::ReadAllText($wf.FullName), 'Run-Tests-CI\.ps1[^\r\n]*?-Suite\s+(Hardware\w+)')) { $offered += $mm.Groups[1].Value }
 }
 $offered = @($offered | Sort-Object -Unique)
-$approved = @('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration')
+# HardwareMutation approved for automatic HIL 2026-10-21 (Q, P0 decision A); REAL-003 stays unchanged for it.
+$approved = @('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation')
 tc_check 'TEST-HILSUITE-REAL-001-workflows-dispatch-only-reviewed-hardware-suites' (($offered.Count -gt 0) -and (@($offered | Where-Object { $approved -notcontains $_ }).Count -eq 0)) `
     ("dispatched: [{0}]; approved: [{1}]" -f ($offered -join ','), ($approved -join ','))
 
@@ -315,6 +321,17 @@ for ($i = 0; $i -lt $buildLines.Count; $i++) {
         for ($j = $i + 1; $j -lt [Math]::Min($i + 16, $buildLines.Count); $j++) {
             if ($buildLines[$j] -match '^\s*Name\s*=') { break }
             if ($buildLines[$j] -match '^\s*(Source|ExtraSources)\s*=\s*"([^"]+)"') { $srcs += ($Matches[2] -split '\s+') }
+            # nmake target: the makefile (may generate the program text) + every C/C++ file it names (TEST-HILGATE-092).
+            if ($buildLines[$j] -match '^\s*Makefile\s*=\s*"([^"]+)"') {
+                $mk = $Matches[1]; $mkFull = Join-Path $RepoRoot ($mk -replace '/', '\')
+                $srcs += $mk
+                if (Test-Path -LiteralPath $mkFull) {
+                    foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($mkFull), '[\w.\\/-]+\.c(pp)?\b')) {
+                        $cand = [System.IO.Path]::GetFullPath((Join-Path (Split-Path $mkFull) $m.Value))
+                        if ((Test-Path -LiteralPath $cand) -and $cand.StartsWith($RepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) { $srcs += $cand.Substring($RepoRoot.Length + 1) }
+                    }
+                }
+            }
         }
         if (-not $buildMap.ContainsKey($nm)) { $buildMap[$nm] = @($srcs | Where-Object { $_ -notmatch 'avb_test_common\.c$' }) }
     }
