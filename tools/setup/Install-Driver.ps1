@@ -742,7 +742,18 @@ if ($NonInteractive) {
 }
 
 # Main execution
+$InstallLockCtx = $null
 try {
+    # Machine lock (TEST-HILPATH-018, 2026-10-29): an attended install / uninstall / test-signing change replaces what a
+    # HIL execution verifies, so it never runs beside an execution it does not belong to.  Inside the owner's context
+    # (LocalSuites, Run-DriverBenchmark, a hil.yml job) it proceeds and acquires nothing; no lock: held for this run.
+    if ($InstallDriver -or $UninstallDriver -or $Reinstall -or $EnableTestSigning) {
+        . (Join-Path $PSScriptRoot '..\lib\HilLock.ps1')
+        $InstallLockCtx = Enter-AvbHilBuildExclusion -Label "Install-Driver $Configuration" -GitHub $(if ($env:GITHUB_ACTIONS -eq 'true') { @{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB } } else { $null })
+        if (-not $InstallLockCtx.Ok) { Write-Host "[BLOCKED] $($InstallLockCtx.Why -replace 'building now', 'installing now' -replace 'build after', 'install after')" -ForegroundColor Red; exit 1 }
+        if ($InstallLockCtx.Owner) { Write-Host "Machine lock held by this installation until it finishes ($(Get-AvbHilLockPath))" -ForegroundColor DarkGray }
+    }
+
     # ─────────────────────────────────────────────────────────────────
     # Precondition check — run before any install/reinstall action
     # ─────────────────────────────────────────────────────────────────
@@ -817,4 +828,6 @@ try {
     Write-Failure "Error: $($_.Exception.Message)"
     Write-Host $_.ScriptStackTrace -ForegroundColor Red
     exit 1
+} finally {
+    if ($InstallLockCtx -and $InstallLockCtx.Owner) { $null = Exit-AvbHilLock -Owner $InstallLockCtx.Owner }
 }
