@@ -28,10 +28,12 @@ $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList @('-NoPr
 $c = if (Test-Path -LiteralPath $childOut) { Get-Content -LiteralPath $childOut -Raw | ConvertFrom-Json } else { $null }
 $res = [ordered]@{ schema = 'avb-uac-parent-probe/1'; host = $env:COMPUTERNAME; requesterPid = $PID; requesterToken = Get-Token
                    childExitCode = $(if ($p) { $p.ExitCode }); child = $c
-                   requesterIsParent = [bool]($c -and $c.parentPid -eq $PID); requesterIsAncestor = [bool]($c -and @($c.ancestors) -contains $PID)
+                   requesterIsParent = $(if ($c) { [bool]($c.parentPid -eq $PID) }); requesterIsAncestor = $(if ($c) { [bool](@($c.ancestors) -contains $PID) })
+                   # No child evidence (UAC cancelled, child failed) is INCONCLUSIVE, never "not an ancestor".
+                   verdict = $(if ($null -eq $c) { 'INCONCLUSIVE' } elseif (@($c.ancestors) -contains $PID) { 'ANCESTOR' } else { 'NOT_ANCESTOR' })
                    utc = (Get-Date).ToUniversalTime().ToString('o') }
 $f = Join-Path $logs ("uac-parent-probe-{0}.json" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 ($res | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $f -Encoding UTF8
-Write-Host ("requester PID {0}; elevated child PID {1}, parent {2}; requester is ancestor: {3}; child elevated: {4}" -f $PID, $(if ($c) { $c.pid }), $(if ($c) { $c.parentPid }), $res.requesterIsAncestor, $(if ($c) { $c.token.elevatedAdmin }))
+Write-Host ("requester PID {0} (elevated: {1}); elevated child PID {2}, parent {3}; verdict: {4}; child elevated: {5}" -f $PID, $res.requesterToken.elevatedAdmin, $(if ($c) { $c.pid }), $(if ($c) { $c.parentPid }), $res.verdict, $(if ($c) { $c.token.elevatedAdmin }))
 Write-Host "Evidence: $f"
 Remove-Item -LiteralPath $childOut -ErrorAction SilentlyContinue
