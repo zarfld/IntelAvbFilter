@@ -68,9 +68,11 @@ $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Ep
 $b = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($Backup, $pw, $flags)
 $pub = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2((Join-Path $Repo 'tools\ci\signing\hil-test-signer.cer'))
 $data = [Text.Encoding]::UTF8.GetBytes('hil-signer backup check')
-$sig = $b.GetRSAPrivateKey().SignData($data, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+# GetRSAPrivateKey/GetRSAPublicKey are extension methods on .NET Framework: PowerShell 5.1 must call them statically.
+$ext = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]
+$sig = $ext::GetRSAPrivateKey($b).SignData($data, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
 "backup thumbprint matches: $($b.Thumbprint -eq $pub.Thumbprint); has private key: $($b.HasPrivateKey); key pair matches: " +
-  $pub.GetRSAPublicKey().VerifyData($data, $sig, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+  $ext::GetRSAPublicKey($pub).VerifyData($data, $sig, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $b.Dispose()
 ```
 
