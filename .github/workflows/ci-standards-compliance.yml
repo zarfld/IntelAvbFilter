@@ -462,7 +462,8 @@ jobs:
         config: [Debug, Release]
         hardware: [false]
         # GitHub-hosted only.  Physical HIL runs in .github/workflows/hil.yml (workflow_run after this workflow and
-        # its deploy-staging job succeeded on a master push; #328 trust boundary, tests/unit/ci/test_hil_trust_boundary.ps1).
+        # its deploy-staging job succeeded on a master push or an OWNER-authored same-repository PR into master - the
+        # mandatory pre-merge gate; #328 trust boundary, tests/unit/ci/test_hil_trust_boundary.ps1).
         # Sleep/hibernate tests (test_s3_sleep_wake) remain absent from all automated suites.
 
     steps:

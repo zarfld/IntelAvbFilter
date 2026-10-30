@@ -6,14 +6,18 @@ name: HIL - Hardware-in-the-Loop
 # Starts automatically when "CI - Standards Compliance & Quality Gates" (ci-standards-compliance.yml) completes.
 # A workflow_run workflow always runs THIS file from the default branch (master), never from the triggering branch
 # or pull request.  Fully automatic: no operator variable (no driver SHA256, halt switch or bugcheck acknowledgement),
-# no manual installation.  Order:
-#   authorize    GitHub-hosted.  The triggering CI run must be a push to master of zarfld/IntelAvbFilter that
-#                completed successfully, the event payload must match the API (run id, attempt, head_sha, path,
-#                event, branch, conclusion), its deploy-staging job must have completed with conclusion success
-#                (skipped is not enough), master must be protected and head_sha reachable from master.  Downloads the
-#                signed Debug and Release packages of THAT run, checks each package manifest against the authorized
-#                revision / run / attempt / configuration, derives the staged driver SHA256 of each from the package
-#                itself and hands both packages to this run.
+# no manual installation.  Two paths (owner requirement 2026-10-30): the MANDATORY PRE-MERGE GATE for a same-repository
+# pull request, and the POST-MERGE CONFIRMATION for every master push.  Order:
+#   authorize    GitHub-hosted.  The triggering CI run must have completed successfully for zarfld/IntelAvbFilter as
+#                (a) a push to master (head_sha reachable from master, newer only by README metadata commits) or
+#                (b) a same-repository pull request whose PR (read from the API) is open, into master, OWNER-authored,
+#                    whose head is exactly the CI head (a newer push makes the run stale) and which contains everything
+#                    on master except README metadata commits (the tested tree is the merged tree).
+#                The event payload must match the API (run id, attempt, head_sha, path, event, branch, conclusion, PR),
+#                both deploy-staging legs of that attempt must have completed with conclusion success (skipped is not
+#                enough) and master must be protected.  Downloads the signed Debug and Release packages of THAT run,
+#                checks each package manifest against the authorized revision / run / attempt / configuration, derives
+#                the staged driver SHA256 of each from the package itself and hands both packages to this run.
 #   hil-debug    self-hosted, Debug, atomic: inline preflight (authorization context, elevation, machine readiness)
 #                BEFORE any repository code -> checkout of the authorized head_sha -> deployment of the Debug package
 #                (tools/ci/Invoke-HilDeployment.ps1: machine lock, crash evidence, package verification incl. pinned
@@ -23,9 +27,16 @@ name: HIL - Hardware-in-the-Loop
 #                other workflow runs and operator runs).  Skipped when hil-debug left the machine needing the operator.
 #   hil-acceptance GitHub-hosted: per configuration a DEPLOYED record of this run, staged == installed == ImagePath
 #                file, and every suite executed with real passes and no failure; otherwise FAILED / HIL_NOT_EXECUTED /
-#                STAGED_BUILD_NOT_TESTED.  Publishes JUnit and traceability.
-# Every non-eligible trigger (pull request, fork, other branch or tag, failed CI) skips every job; an eligible trigger
-# that fails verification fails `authorize` and nothing reaches the workstation.
+#                STAGED_BUILD_NOT_TESTED.  Publishes JUnit and traceability; its verdict is the job output `verdict`.
+#   hil-gate     GitHub-hosted, pull requests only, always: posts the commit status 'HIL / pre-merge gate' (the required
+#                check of the master ruleset) on the PR head - 'success' only for a PASSED acceptance of Debug AND
+#                Release of exactly that head, otherwise 'failure' with the first unmet prerequisite
+#                (hil-gate-verdict.json, schema avb-hil-gate/1).  No checkout; never runs repository code.
+# Every non-eligible trigger (fork PR, other branch or tag, failed CI) skips every physical job; an eligible trigger
+# that fails verification fails `authorize` and nothing reaches the workstation.  For any PR the gate still reports why.
+# External contributors: fork PRs and PRs by anyone but the OWNER never run on the workstation automatically; they
+# cannot obtain the required check themselves - the OWNER carries the reviewed change on an OWNER-authored
+# same-repository PR, which then runs the mandatory pre-merge HIL.
 # All four suites run here (HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory last).  A required
 # test that is not executed yet (fixture/restoration or infrastructure missing) is a failing TC-HIL-COVERAGE-GAP-001
 # case and makes the suite and the acceptance verdict INCOMPLETE - never PASSED (P0 full HIL coverage, 2026-10-21).
@@ -959,7 +970,8 @@ jobs:
               verdict, why = 'INCONSISTENT', 'authorized %r %r #%r is not this pull request CI head %s %r' % (E('AZ_MODE'), E('AZ_HEAD_SHA'), E('AZ_PR'), sha, prs)
           elif E('DEBUG_RESULT') != 'success' or E('RELEASE_RESULT') != 'success' or E('ACC_RESULT') != 'success' or E('ACC_VERDICT') != 'PASSED':
               av = E('ACC_VERDICT') or ''
-              verdict = av if av and av != 'PASSED' else 'HIL_NOT_EXECUTED'
+              # Closed vocabulary: hil-acceptance's non-passing verdicts pass through; none = not executed; else inconsistent.
+              verdict = av if av in ('FAILED', 'INCOMPLETE', 'HIL_NOT_EXECUTED', 'STAGED_BUILD_NOT_TESTED') else ('HIL_NOT_EXECUTED' if av in ('', 'PASSED') else 'INCONSISTENT')
               why = 'hil-debug %r, hil-release %r, hil-acceptance %r verdict %r (Debug and Release must both pass; skipped/blocked/incomplete is not verification)' % (
                   E('DEBUG_RESULT'), E('RELEASE_RESULT'), E('ACC_RESULT'), av)
           else:

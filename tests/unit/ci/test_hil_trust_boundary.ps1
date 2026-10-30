@@ -1697,8 +1697,8 @@ try {
         DEBUG_RESULT = '${{ needs.hil-debug.result }}'; RELEASE_RESULT = '${{ needs.hil-release.result }}'; ACC_RESULT = '${{ needs.hil-acceptance.result }}'; ACC_VERDICT = '${{ needs.hil-acceptance.outputs.verdict }}' }
     if (-not ($gvStep[0]['env'] -is [System.Collections.IDictionary]) -or -not ($gsStep[0]['env'] -is [System.Collections.IDictionary])) { throw 'hil-gate verdict/status steps have no env map' }
     foreach ($k in $gEnvWant.Keys) { if ("$($gvStep[0]['env'][$k])" -ne $gEnvWant[$k]) { $x17 += "gate env $k is '$($gvStep[0]['env'][$k])', not '$($gEnvWant[$k])'" } }
-    function New-GateEvent([string]$Conclusion = 'success', [string]$HeadRepo = 'zarfld/IntelAvbFilter', [string]$Event = 'pull_request', [string]$HeadSha = $gSha) {
-        return [ordered]@{ action = 'completed'; workflow_run = [ordered]@{ id = 4242; run_attempt = 1; head_sha = $HeadSha; event = $Event; conclusion = $Conclusion; head_branch = 'feature/x'
+    function New-GateEvent([string]$Conclusion = 'success', [string]$HeadRepo = 'zarfld/IntelAvbFilter', [string]$UpEvent = 'pull_request', [string]$HeadSha = $gSha) {
+        return [ordered]@{ action = 'completed'; workflow_run = [ordered]@{ id = 4242; run_attempt = 1; head_sha = $HeadSha; event = $UpEvent; conclusion = $Conclusion; head_branch = 'feature/x'
             head_repository = [ordered]@{ full_name = $HeadRepo }; pull_requests = @([ordered]@{ number = 344 }) } }
     }
     $okEnv = @{ AZ_RESULT = 'success'; AZ_AUTHORIZED = 'true'; AZ_MODE = 'pull_request'; AZ_HEAD_SHA = $gSha; AZ_PR = '344'; AZ_DENY = ''
@@ -1711,6 +1711,11 @@ try {
         'staged build not tested'                  = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'STAGED_BUILD_NOT_TESTED' }; State = 'failure'; Verdict = 'STAGED_BUILD_NOT_TESTED' }
         'acceptance skipped'                       = @{ Env = @{ ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
         'acceptance success without a verdict'     = @{ Env = @{ ACC_VERDICT = '' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
+        # The verdict alone decides as well (defence in depth against a mis-propagated job result).
+        'acceptance job success, verdict INCOMPLETE' = @{ Env = @{ ACC_VERDICT = 'INCOMPLETE' }; State = 'failure'; Verdict = 'INCOMPLETE' }
+        'acceptance job success, verdict FAILED'   = @{ Env = @{ ACC_VERDICT = 'FAILED' }; State = 'failure'; Verdict = 'FAILED' }
+        'acceptance job success, verdict passed (wrong case)' = @{ Env = @{ ACC_VERDICT = 'passed' }; State = 'failure'; Verdict = 'INCONSISTENT' }
+        'acceptance verdict outside the vocabulary' = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'MOSTLY_OK' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'verdict PASSED but acceptance job failed' = @{ Env = @{ ACC_RESULT = 'failure' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
         'hil-release skipped (PASSED forged)'      = @{ Env = @{ RELEASE_RESULT = 'skipped' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-release 'skipped'" }
         'hil-debug cancelled'                      = @{ Env = @{ DEBUG_RESULT = 'cancelled' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-debug 'cancelled'" }
@@ -1722,7 +1727,7 @@ try {
         'authorized head is not the CI head'       = @{ Env = @{ AZ_HEAD_SHA = ('e' * 40) }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'authorized as a master push'              = @{ Env = @{ AZ_MODE = 'push'; AZ_PR = '' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'authorized another pull request'          = @{ Env = @{ AZ_PR = '345' }; State = 'failure'; Verdict = 'INCONSISTENT' }
-        'upstream is a master push'                = @{ Event = (New-GateEvent -Event 'push'); State = 'failure'; Verdict = 'INCONSISTENT' }
+        'upstream is a master push'                = @{ Event = (New-GateEvent -UpEvent 'push'); State = 'failure'; Verdict = 'INCONSISTENT' }
     }
     $q = 0
     foreach ($n in $gCases.Keys) {
@@ -1739,7 +1744,7 @@ try {
         $j = if (Test-Path -LiteralPath $jf) { Get-Content -LiteralPath $jf -Raw | ConvertFrom-Json } else { $null }
         $why = if ($c.ContainsKey('Why')) { $c.Why } else { '' }
         if ($r.Exit -ne 0 -or $o['state'] -cne $c.State -or $o['verdict'] -cne $c.Verdict -or $o['sha'] -cne $gSha -or -not $o['description'] -or $o['description'].Length -gt 140 -or
-            ($c.State -eq 'success') -ne ($o['description'] -like 'PASSED*') -or $o['description'].IndexOf($why) -lt 0 -or
+            ($c.State -eq 'success') -ne ($o['description'] -clike 'PASSED*') -or $o['description'].IndexOf($why) -lt 0 -or
             $null -eq $j -or $j.schema -ne 'avb-hil-gate/1' -or $j.state -cne $c.State -or $j.verdict -cne $c.Verdict -or $j.headSha -cne $gSha -or $j.evidenceClass -ne 'ci' -or
             ($c.State -eq 'failure' -and @($j.reasons).Count -eq 0)) {
             $x17 += "gate '$n': expected $($c.State)/$($c.Verdict)$(if ($why) { " ('$why')" }), exit $($r.Exit), outputs $(($o.Keys | Sort-Object | ForEach-Object { "$_=$($o[$_])" }) -join '; ') $($r.Out -replace '\s+', ' ')"
