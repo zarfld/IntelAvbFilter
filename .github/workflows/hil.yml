@@ -42,11 +42,12 @@ permissions: {}
 jobs:
   authorize:
     name: Authorize HIL (GitHub-hosted)
-    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter'
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     outputs:
       authorized: ${{ steps.staged.outputs.authorized }}
       staged_debug_sha256: ${{ steps.staged.outputs.staged_debug_sha256 }}
@@ -54,6 +55,9 @@ jobs:
       head_sha: ${{ steps.authz.outputs.head_sha }}
       upstream_run_id: ${{ steps.authz.outputs.upstream_run_id }}
       upstream_run_attempt: ${{ steps.authz.outputs.upstream_run_attempt }}
+      mode: ${{ steps.authz.outputs.mode }}
+      pr_number: ${{ steps.authz.outputs.pr_number }}
+      deny_reasons: ${{ steps.authz.outputs.deny_reasons }}${{ steps.staged.outputs.deny_reasons }}
     steps:
       - name: Verify triggering CI run and its deploy-staging job
         id: authz
@@ -68,6 +72,7 @@ jobs:
           CI_PATH = '.github/workflows/ci-standards-compliance.yml'
           DEPLOY_JOBS = ['Deploy to Staging (Phase 08 - Transition) (Debug)', 'Deploy to Staging (Phase 08 - Transition) (Release)']   # name: of each deploy-staging leg
           METADATA_PATHS = {'README.md'}   # update-readme-status.yml writes only README.md
+          PR_AUTHOR_ASSOCIATIONS = {'OWNER'}   # owner decision 2026-10-30: automatic pre-merge HIL for OWNER-authored PRs only
           API = os.environ.get('GITHUB_API_URL') or 'https://api.github.com'
           reasons = []
 
@@ -83,7 +88,7 @@ jobs:
                   obj = obj.get(k) if isinstance(obj, dict) else None
               return obj
 
-          sha, run_id, attempt = '', 0, 0
+          sha, run_id, attempt, mode, pr_number = '', 0, 0, '', 0
           try:
               if os.environ.get('GITHUB_REPOSITORY') != REPO:
                   reasons.append('repository %r is not %s' % (os.environ.get('GITHUB_REPOSITORY'), REPO))
@@ -96,12 +101,23 @@ jobs:
               if ev.get('action') != 'completed':
                   reasons.append('workflow_run action %r is not completed' % ev.get('action'))
               wr = ev.get('workflow_run') if isinstance(ev.get('workflow_run'), dict) else {}
-              want = {'repository.full_name': REPO, 'head_repository.full_name': REPO, 'event': 'push',
-                      'head_branch': 'master', 'status': 'completed', 'conclusion': 'success', 'path': CI_PATH}
+              # Two paths: a master push (post-merge confirmation) or a same-repository pull request (mandatory
+              # pre-merge gate: the PR is verified against the API below).  Nothing else is ever authorized.
+              mode = wr.get('event') if wr.get('event') in ('push', 'pull_request') else ''
+              want = {'repository.full_name': REPO, 'head_repository.full_name': REPO, 'event': mode or 'push',
+                      'status': 'completed', 'conclusion': 'success', 'path': CI_PATH}
+              if mode != 'pull_request':
+                  want['head_branch'] = 'master'
               for k, v in want.items():
                   if field(wr, k) != v:
                       reasons.append('triggering run %s is %r, not %r' % (k, field(wr, k), v))
               sha, run_id, attempt = wr.get('head_sha'), wr.get('id'), wr.get('run_attempt')
+              if mode == 'pull_request':
+                  prs = wr.get('pull_requests') if isinstance(wr.get('pull_requests'), list) else []
+                  if len(prs) != 1 or not isinstance(prs[0], dict) or not isinstance(prs[0].get('number'), int) or isinstance(prs[0].get('number'), bool) or prs[0].get('number') <= 0:
+                      reasons.append('the pull_request CI run links %d pull request(s) in the event (exactly 1 required)' % len(prs))
+                  else:
+                      pr_number = prs[0]['number']
               if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
                   reasons.append('head_sha %r is not a 40-hex commit id' % (sha,))
               if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
@@ -114,6 +130,10 @@ jobs:
                             'repository.full_name', 'head_repository.full_name']:
                       if field(run, k) != field(wr, k):
                           reasons.append('API run %s=%r differs from the event %r (stale or re-run)' % (k, field(run, k), field(wr, k)))
+                  if mode == 'pull_request':
+                      api_prs = [p.get('number') for p in (run.get('pull_requests') or []) if isinstance(p, dict)]
+                      if api_prs != [pr_number]:
+                          reasons.append('API run pull_requests %r differ from the event #%d' % (api_prs, pr_number))
                   jobs, page = [], 1
                   while True:
                       j = get('/repos/%s/actions/runs/%d/attempts/%d/jobs?per_page=100&page=%d' % (REPO, run_id, attempt, page))
@@ -138,14 +158,52 @@ jobs:
                   br = get('/repos/%s/branches/master' % REPO)
                   if br.get('protected') is not True:
                       reasons.append('master is not a protected branch on GitHub')
+                  if mode == 'pull_request':
+                      # The pull request itself, from the API (never from the event alone): still open, into master of
+                      # this repository, its head is exactly the CI run's head (a newer push makes this run stale), and
+                      # it is OWNER-authored (no automatic elevated-runner access for anyone else).
+                      pr = get('/repos/%s/pulls/%d' % (REPO, pr_number))
+                      if pr.get('state') != 'open':
+                          reasons.append('pull request #%d state %r (open required)' % (pr_number, pr.get('state')))
+                      if field(pr, 'base.ref') != 'master' or field(pr, 'base.repo.full_name') != REPO:
+                          reasons.append('pull request #%d base %s:%s is not %s:master' % (pr_number, field(pr, 'base.repo.full_name'), field(pr, 'base.ref'), REPO))
+                      if field(pr, 'head.repo.full_name') != REPO:
+                          reasons.append('pull request #%d head repository %r is not %s (fork pull requests never reach the HIL runner)' % (pr_number, field(pr, 'head.repo.full_name'), REPO))
+                      if field(pr, 'head.sha') != sha:
+                          reasons.append('pull request #%d head %s is not the CI run head %s (stale: a newer push supersedes this CI run)' % (pr_number, field(pr, 'head.sha'), sha))
+                      if field(pr, 'head.ref') != wr.get('head_branch'):
+                          reasons.append('pull request #%d head branch %r is not the CI run head_branch %r' % (pr_number, field(pr, 'head.ref'), wr.get('head_branch')))
+                      if pr.get('author_association') not in PR_AUTHOR_ASSOCIATIONS:
+                          reasons.append('pull request #%d author_association %r: automatic pre-merge HIL is OWNER-only (an external contribution is carried on an OWNER-authored same-repository PR)' % (pr_number, pr.get('author_association')))
                   # Not stale: head_sha must still be the trusted master CODE revision.  The tip may be newer only by
                   # metadata-only commits: update-readme-status.yml runs on the same CI completion and pushes a README
                   # commit with GITHUB_TOKEN, which never gets a CI run of its own.  Proven from the aggregate diff
                   # head_sha...tip against a path allow-list (renames count both names) - never from authorship,
                   # which is spoofable.  Any other change supersedes head_sha: its own CI + staging triggers HIL.
+                  # Pull request: the tested tree must be the merged tree, so master may contain nothing the PR head
+                  # lacks except metadata-only commits (same diff proof; otherwise rebase and re-run CI).
                   tip = field(br, 'commit.sha')
                   if not isinstance(tip, str) or not re.fullmatch('[0-9a-f]{40}', tip):
                       reasons.append('master tip %r is unreadable' % (tip,))
+                  elif mode == 'pull_request' and tip != sha:
+                      cmp = get('/repos/%s/compare/%s...%s' % (REPO, sha, tip))
+                      files, commits = cmp.get('files'), cmp.get('commits')
+                      if cmp.get('status') == 'behind':
+                          print('master tip %s is an ancestor of the pull request head' % tip)
+                      elif cmp.get('status') not in ('ahead', 'diverged'):
+                          reasons.append('cannot relate the pull request head to the master tip %s (compare status %r)' % (tip, cmp.get('status')))
+                      elif not isinstance(files, list) or not isinstance(commits, list) or len(commits) != cmp.get('ahead_by') or len(files) >= 300:
+                          reasons.append('cannot prove that master %s differs from the pull request head only by metadata (incomplete compare: ahead_by=%r, %s commits, %s files)' % (
+                              tip, cmp.get('ahead_by'), len(commits) if isinstance(commits, list) else '?', len(files) if isinstance(files, list) else '?'))
+                      else:
+                          touched = set()
+                          for f in files:
+                              touched.update(p for p in (f.get('filename'), f.get('previous_filename')) if p)
+                          other = sorted(touched - METADATA_PATHS)
+                          if other:
+                              reasons.append('pull request head %s is not up to date with master %s: master changed %s since it branched (rebase required)' % (sha, tip, ', '.join(other[:10])))
+                          else:
+                              print('master tip %s is ahead of the pull request head only by metadata commits: %s' % (tip, ', '.join(c.get('sha', '')[:7] for c in commits)))
                   elif tip != sha:
                       cmp = get('/repos/%s/compare/%s...%s' % (REPO, sha, tip))
                       files, commits = cmp.get('files'), cmp.get('commits')
@@ -167,12 +225,17 @@ jobs:
               reasons.append('authorization error: %s: %s' % (type(e).__name__, e))
 
           ok = not reasons
+          # deny_reasons: one line, machine-readable for the pre-merge gate (hil-gate), empty when granted.
+          deny = ' '.join('; '.join(reasons).split())[:1000]
           lines = ['authorized=%s' % ('true' if ok else 'false'), 'head_sha=%s' % (sha if ok else ''),
-                   'upstream_run_id=%s' % (run_id if ok else ''), 'upstream_run_attempt=%s' % (attempt if ok else '')]
+                   'upstream_run_id=%s' % (run_id if ok else ''), 'upstream_run_attempt=%s' % (attempt if ok else ''),
+                   'mode=%s' % (mode if ok else ''), 'pr_number=%s' % (pr_number if ok and mode == 'pull_request' else ''),
+                   'deny_reasons=%s' % ('' if ok else deny)]
           if os.environ.get('GITHUB_OUTPUT'):
               with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
                   fh.write('\n'.join(lines) + '\n')
-          text = ('## HIL authorization: GRANTED - %s (CI run %s attempt %s)\n' % (sha, run_id, attempt) if ok else
+          what = 'pull request #%d' % pr_number if mode == 'pull_request' else 'master push'
+          text = ('## HIL authorization: GRANTED - %s, %s (CI run %s attempt %s)\n' % (what, sha, run_id, attempt) if ok else
                   '## HIL authorization: DENIED\n' + ''.join('- %s\n' % r for r in reasons))
           if os.environ.get('GITHUB_STEP_SUMMARY'):
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as fh:
@@ -237,10 +300,11 @@ jobs:
                   reasons.append('%s driver SHA256 %s differs from manifest %s' % (cfg, h, m.get('driverSha256')))
               out[cfg] = h
           ok = not reasons and len(out) == 2
+          deny = ' '.join('; '.join(reasons or ['staged packages incomplete']).split())[:1000]
           if os.environ.get('GITHUB_OUTPUT'):
               with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
-                  fh.write('authorized=%s\nstaged_debug_sha256=%s\nstaged_release_sha256=%s\n' % (
-                      'true' if ok else 'false', out.get('Debug', '') if ok else '', out.get('Release', '') if ok else ''))
+                  fh.write('authorized=%s\nstaged_debug_sha256=%s\nstaged_release_sha256=%s\ndeny_reasons=%s\n' % (
+                      'true' if ok else 'false', out.get('Debug', '') if ok else '', out.get('Release', '') if ok else '', '' if ok else deny))
           print('staged packages: %s' % (out if ok else 'DENIED'))
           if not ok:
               print('::error title=HIL authorization DENIED::' + '; '.join(reasons))
@@ -265,7 +329,7 @@ jobs:
   hil-debug:
     name: HIL Debug (self-hosted-hardware, deploy + Unit + Integration)
     needs: [authorize]
-    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && needs.authorize.outputs.authorized == 'true'
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true'
     runs-on: [self-hosted, Windows, i226]
     environment: hil
     timeout-minutes: 300
@@ -474,7 +538,7 @@ jobs:
   hil-release:
     name: HIL Release (self-hosted-hardware, deploy + Unit + Integration)
     needs: [authorize, hil-debug]
-    if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && needs.authorize.outputs.authorized == 'true' && needs.hil-debug.outputs.machine_ok == 'true' }}
+    if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true' && needs.hil-debug.outputs.machine_ok == 'true' }}
     runs-on: [self-hosted, Windows, i226]
     environment: hil
     timeout-minutes: 300
@@ -684,11 +748,13 @@ jobs:
     name: HIL Acceptance (current-run evidence)
     needs: [authorize, hil-debug, hil-release]
     # Runs whenever the HIL was authorized - also after a failed stage, so failures are published and judged.
-    if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && needs.authorize.outputs.authorized == 'true' }}
+    if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       checks: write
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
     steps:
       - name: Checkout the authorized upstream commit
         uses: actions/checkout@v5
@@ -703,6 +769,7 @@ jobs:
           path: hil-evidence
 
       - name: Hardware acceptance verdict (current-run evidence)
+        id: verdict
         env:
           HIL_DEBUG: ${{ needs.hil-debug.result }}
           HIL_RELEASE: ${{ needs.hil-release.result }}
@@ -801,6 +868,9 @@ jobs:
           text = '## HIL acceptance: %s (run %s, %s, CI run %s)\n\n%s\n\n| Config | Suite | Pass | Fail | Skip | Not executed / incomplete | Total | Overall |\n|---|---|---|---|---|---|---|---|\n%s\n' % (
               verdict, run_id, sha, up, '\n\n'.join(lines), '\n'.join(rows))
           text += ''.join('- %s\n' % x for x in not_executed + bad + incomplete)
+          if os.environ.get('GITHUB_OUTPUT'):
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+                  fh.write('verdict=%s\n' % verdict)
           if os.environ.get('GITHUB_STEP_SUMMARY'):
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as fh:
                   fh.write(text)
@@ -830,3 +900,134 @@ jobs:
             grep -ho 'TC-HIL-COVERAGE-GAP-001: [^ ]*' hil-evidence/hil-evidence-{Debug,Release}/*/junit-*.xml | sort | uniq -c || true
             for f in hil-evidence/hil-evidence-{Debug,Release}/*/traceability-summary-*.md; do echo ""; echo "### $f"; cat "$f"; done
           } >> "$GITHUB_STEP_SUMMARY"
+
+  hil-gate:
+    # Mandatory pre-merge gate (owner requirement 2026-10-30): the commit status 'HIL / pre-merge gate' on the PR HEAD
+    # commit is the required check of the master ruleset.  Runs for EVERY pull-request CI completion (also fork, failed
+    # CI, denied, skipped or failed HIL) so a missing HIL is always explained; GitHub-hosted, no checkout, never runs
+    # repository code; writes only the status.  'success' only for a PASSED acceptance of Debug AND Release for exactly
+    # the authorized head; a status is bound to one SHA, so a newer push carries no status and the merge stays blocked.
+    name: HIL pre-merge gate (commit status)
+    needs: [authorize, hil-debug, hil-release, hil-acceptance]
+    if: ${{ always() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Pre-merge gate verdict
+        id: gate
+        env:
+          AZ_RESULT: ${{ needs.authorize.result }}
+          AZ_AUTHORIZED: ${{ needs.authorize.outputs.authorized }}
+          AZ_MODE: ${{ needs.authorize.outputs.mode }}
+          AZ_HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          AZ_PR: ${{ needs.authorize.outputs.pr_number }}
+          AZ_DENY: ${{ needs.authorize.outputs.deny_reasons }}
+          DEBUG_RESULT: ${{ needs.hil-debug.result }}
+          RELEASE_RESULT: ${{ needs.hil-release.result }}
+          ACC_RESULT: ${{ needs.hil-acceptance.result }}
+          ACC_VERDICT: ${{ needs.hil-acceptance.outputs.verdict }}
+        shell: python3 -I {0}
+        run: |
+          # Inputs: the event file and the job results/outputs above only.  Always exits 0 with a verdict, except when
+          # the event is unreadable (then no status is posted: the required check stays missing = merge blocked).
+          import datetime, json, os, re, sys
+
+          REPO = 'zarfld/IntelAvbFilter'
+          E = os.environ.get
+          with open(E('GITHUB_EVENT_PATH'), encoding='utf-8') as fh:
+              wr = (json.load(fh) or {}).get('workflow_run') or {}
+          sha = wr.get('head_sha') if isinstance(wr.get('head_sha'), str) else ''
+          if not re.fullmatch('[0-9a-f]{40}', sha):
+              print('::error title=HIL pre-merge gate::event head_sha %r is not a commit id; no status can be posted' % (sha,))
+              sys.exit(1)
+          prs = [p.get('number') for p in (wr.get('pull_requests') or []) if isinstance(p, dict)]
+          head_repo = (wr.get('head_repository') or {}).get('full_name')
+          res = {'authorize': E('AZ_RESULT'), 'authorized': E('AZ_AUTHORIZED'), 'mode': E('AZ_MODE'), 'authorizedHead': E('AZ_HEAD_SHA'),
+                 'authorizedPullRequest': E('AZ_PR'), 'hil-debug': E('DEBUG_RESULT'), 'hil-release': E('RELEASE_RESULT'),
+                 'hil-acceptance': E('ACC_RESULT'), 'acceptanceVerdict': E('ACC_VERDICT')}
+          # First unmet prerequisite decides; every verdict except PASSED is 'failure'.
+          if wr.get('event') != 'pull_request':
+              verdict, why = 'INCONSISTENT', 'upstream event %r is not a pull request' % wr.get('event')
+          elif wr.get('conclusion') != 'success':
+              verdict, why = 'CI_NOT_SUCCESSFUL', 'upstream CI conclusion %r (all CI gates and staging must succeed before HIL)' % wr.get('conclusion')
+          elif head_repo != REPO:
+              verdict, why = 'NOT_ELIGIBLE', 'fork pull request (head repository %r) never reaches the HIL runner; the OWNER carries the change on a same-repository PR' % head_repo
+          elif E('AZ_RESULT') != 'success' or E('AZ_AUTHORIZED') != 'true':
+              verdict, why = 'NOT_AUTHORIZED', E('AZ_DENY') or 'authorize result %r, authorized %r' % (E('AZ_RESULT'), E('AZ_AUTHORIZED'))
+          elif E('AZ_MODE') != 'pull_request' or E('AZ_HEAD_SHA') != sha or not re.fullmatch('[1-9][0-9]*', E('AZ_PR') or '') or int(E('AZ_PR')) not in prs:
+              verdict, why = 'INCONSISTENT', 'authorized %r %r #%r is not this pull request CI head %s %r' % (E('AZ_MODE'), E('AZ_HEAD_SHA'), E('AZ_PR'), sha, prs)
+          elif E('DEBUG_RESULT') != 'success' or E('RELEASE_RESULT') != 'success' or E('ACC_RESULT') != 'success' or E('ACC_VERDICT') != 'PASSED':
+              av = E('ACC_VERDICT') or ''
+              verdict = av if av and av != 'PASSED' else 'HIL_NOT_EXECUTED'
+              why = 'hil-debug %r, hil-release %r, hil-acceptance %r verdict %r (Debug and Release must both pass; skipped/blocked/incomplete is not verification)' % (
+                  E('DEBUG_RESULT'), E('RELEASE_RESULT'), E('ACC_RESULT'), av)
+          else:
+              verdict, why = 'PASSED', ''
+          state = 'success' if verdict == 'PASSED' else 'failure'
+          run = '%s/%s/actions/runs/%s' % (E('GITHUB_SERVER_URL', 'https://github.com'), E('GITHUB_REPOSITORY', REPO), E('GITHUB_RUN_ID'))
+          desc = ('PASSED: Debug+Release physical HIL of %s' % sha[:12]) if state == 'success' else '%s: %s' % (verdict, why)
+          desc = ' '.join(desc.split())[:140]
+          doc = {'schema': 'avb-hil-gate/1', 'context': 'HIL / pre-merge gate', 'state': state, 'verdict': verdict,
+                 'reasons': [why] if why else [], 'headSha': sha, 'pullRequests': prs, 'upstreamRunId': wr.get('id'),
+                 'upstreamRunAttempt': wr.get('run_attempt'), 'hilRunId': E('GITHUB_RUN_ID'), 'hilRunAttempt': E('GITHUB_RUN_ATTEMPT'),
+                 'hilRunUrl': run, 'evidenceClass': 'ci', 'results': res,
+                 'recordedUtc': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          d = os.path.join(E('RUNNER_TEMP', '.'), 'hil-gate')
+          os.makedirs(d, exist_ok=True)
+          with open(os.path.join(d, 'hil-gate-verdict.json'), 'w', encoding='utf-8') as fh:
+              json.dump(doc, fh, indent=2)
+          with open(E('GITHUB_OUTPUT'), 'a', encoding='utf-8') as fh:
+              fh.write('state=%s\nverdict=%s\nsha=%s\ndescription=%s\n' % (state, verdict, sha, desc))
+          text = '## HIL pre-merge gate: %s (%s) for %s\n\n%s\n' % (state, verdict, sha, why or 'Debug and Release physical HIL PASSED for exactly this head.')
+          if E('GITHUB_STEP_SUMMARY'):
+              with open(E('GITHUB_STEP_SUMMARY'), 'a', encoding='utf-8') as fh:
+                  fh.write(text)
+          print(text)
+
+      - name: Post the commit status 'HIL / pre-merge gate'
+        id: post
+        env:
+          STATE: ${{ steps.gate.outputs.state }}
+          SHA: ${{ steps.gate.outputs.sha }}
+          DESCRIPTION: ${{ steps.gate.outputs.description }}
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 -I {0}
+        run: |
+          # Writes exactly one commit status on exactly the verdict's SHA; never 'pending', never without a verdict.
+          # Fails the job (after posting) for every state but success, and whenever the status cannot be written.
+          import json, os, re, sys, urllib.request
+          CONTEXT = 'HIL / pre-merge gate'
+          E = os.environ.get
+          state, sha = E('STATE') or '', E('SHA') or ''
+          if state not in ('success', 'failure') or not re.fullmatch('[0-9a-f]{40}', sha):
+              print('::error title=HIL pre-merge gate::no valid verdict (state %r, sha %r); no status posted' % (state, sha))
+              sys.exit(1)
+          repo = E('GITHUB_REPOSITORY')
+          body = {'state': state, 'context': CONTEXT, 'description': (E('DESCRIPTION') or state)[:140],
+                  'target_url': '%s/%s/actions/runs/%s' % (E('GITHUB_SERVER_URL', 'https://github.com'), repo, E('GITHUB_RUN_ID'))}
+          req = urllib.request.Request('%s/repos/%s/statuses/%s' % (E('GITHUB_API_URL') or 'https://api.github.com', repo, sha),
+                                       data=json.dumps(body).encode('utf-8'), method='POST', headers={
+              'Authorization': 'Bearer ' + (E('GH_TOKEN') or ''), 'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json', 'User-Agent': 'IntelAvbFilter-hil-gate'})
+          try:
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  code = r.status
+          except Exception as e:
+              print('::error title=HIL pre-merge gate::status not written: %s: %s' % (type(e).__name__, e))
+              sys.exit(1)
+          if code != 201:
+              print('::error title=HIL pre-merge gate::status API answered %s' % code)
+              sys.exit(1)
+          print('posted %s %r on %s: %s' % (CONTEXT, state, sha, body['description']))
+          if state != 'success':
+              print('::error title=HIL pre-merge gate %s::%s' % (state, body['description']))
+              sys.exit(1)
+
+      - name: Upload the gate verdict
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: hil-gate-verdict
+          path: ${{ runner.temp }}/hil-gate/
+          if-no-files-found: ignore

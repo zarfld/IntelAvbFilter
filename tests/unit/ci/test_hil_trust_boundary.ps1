@@ -13,8 +13,10 @@
 #       pull_request(_target/_review/_review_comment): a FORK PR and a SAME-REPOSITORY PR  -> Reachable;
 #       issue_comment                                                                     -> Reachable;
 #       workflow_run, by triggering run: push to master of zarfld/IntelAvbFilter that succeeded (Authorized,
-#             informational - the only HIL path); fork PR / same-repository PR (Reachable); failed upstream
-#             (UpstreamFailed); feature branch / tag (UnauthorizedRef); fork repository (ForeignRepo);
+#             informational - post-merge confirmation); same-repository PR that succeeded (AuthorizedPR,
+#             informational - the mandatory pre-merge gate; only hil.yml's physical stages, behind authorize, whose PR
+#             checks REAL-012 executes); fork PR (Reachable); failed upstream (UpstreamFailed); feature branch / tag
+#             (UnauthorizedRef); fork repository (ForeignRepo);
 #       workflow_dispatch on any ref                                    -> Dispatch (no manual HIL path);
 #       any other event (push, schedule, release, ...) on master and on a feature branch  -> Automatic (a direct
 #             push would bypass the CI + deploy-staging gate).
@@ -23,7 +25,9 @@
 #     persisted credentials (Governance); missing = violation.
 #   - REAL-011 simulates the job graph (GitHub needs/skip semantics); REAL-012 executes hil.yml's authorization
 #     script against a localhost fixture API and its acceptance script against fixture evidence, so a failed CI, a
-#     skipped deploy-staging, a PR, a foreign repository, a wrong ref/SHA or stale evidence cannot pass.
+#     skipped deploy-staging, a fork / non-OWNER / stale / closed / out-of-date PR, a foreign repository, a wrong
+#     ref/SHA or stale evidence cannot pass; REAL-017 executes the pre-merge gate's verdict and status scripts, so
+#     only a PASSED acceptance of both configurations for exactly the authorized PR head posts 'success'.
 #   - a job leg is "self-hosted" if any runs-on label is 'self-hosted' or is not a GitHub-hosted image label,
 #     or if runs-on cannot be evaluated.
 #   - a job is reachable unless its job-level `if:` evaluates to false for that context; an expression the
@@ -337,14 +341,19 @@ function Get-EventContexts([string]$EventName, $Leg) {
         $c += @{ Kind = 'Reachable'; Label = 'fork-pr';      Ctx = (New-Ctx $EventName $Leg 'fork') }
         $c += @{ Kind = 'Reachable'; Label = 'same-repo-pr'; Ctx = (New-Ctx $EventName $Leg 'same-repo') }
     } elseif ($EventName -eq 'workflow_run') {
-        # The only HIL path: the upstream CI completed successfully for a push to master of this repository (the
-        # deploy-staging check lives in the authorize job and is exercised by REAL-012).
+        # The two HIL paths: the upstream CI completed successfully (a) for a push to master of this repository
+        # (post-merge confirmation) or (b) for a same-repository pull request (mandatory pre-merge gate; owner
+        # requirement 2026-10-30).  The deploy-staging, PR (open, base master, head == CI head, OWNER author, up to date)
+        # and staged-package checks live in the authorize job and are exercised by REAL-012.
         $c += @{ Kind = 'Authorized';      Label = 'upstream-master-push-success'; Ctx = (New-WrCtx $Leg 'push' 'master' 'success') }
         $c += @{ Kind = 'Reachable';       Label = 'upstream-fork-pr';             Ctx = (New-WrCtx $Leg 'pull_request' 'master' 'success' $fork) }
-        $c += @{ Kind = 'Reachable';       Label = 'upstream-same-repo-pr';        Ctx = (New-WrCtx $Leg 'pull_request' 'feature/x' 'success') }
-        # A same-repository PR FROM master (e.g. master -> develop) has head_branch 'master' and this head repository.
-        $c += @{ Kind = 'Reachable';       Label = 'upstream-same-repo-pr-from-master'; Ctx = (New-WrCtx $Leg 'pull_request' 'master' 'success') }
+        $c += @{ Kind = 'Reachable';       Label = 'upstream-fork-pr-feature';     Ctx = (New-WrCtx $Leg 'pull_request' 'feature/x' 'success' $fork) }
+        $c += @{ Kind = 'AuthorizedPR';    Label = 'upstream-same-repo-pr';        Ctx = (New-WrCtx $Leg 'pull_request' 'feature/x' 'success') }
+        # A same-repository PR FROM master (e.g. master -> develop) has head_branch 'master' and this head repository;
+        # only authorize (base must be master) separates it from (a).
+        $c += @{ Kind = 'AuthorizedPR';    Label = 'upstream-same-repo-pr-from-master'; Ctx = (New-WrCtx $Leg 'pull_request' 'master' 'success') }
         $c += @{ Kind = 'UpstreamFailed';  Label = 'upstream-master-push-failure'; Ctx = (New-WrCtx $Leg 'push' 'master' 'failure') }
+        $c += @{ Kind = 'UpstreamFailed';  Label = 'upstream-same-repo-pr-failure'; Ctx = (New-WrCtx $Leg 'pull_request' 'feature/x' 'failure') }
         $c += @{ Kind = 'UnauthorizedRef'; Label = 'upstream-feature-push';        Ctx = (New-WrCtx $Leg 'push' 'feature/x' 'success') }
         $c += @{ Kind = 'UnauthorizedRef'; Label = 'upstream-tag-push';            Ctx = (New-WrCtx $Leg 'push' 'v1.0.0' 'success') }
         $c += @{ Kind = 'ForeignRepo';     Label = 'fork-repository';              Ctx = (New-WrCtx $Leg 'push' 'master' 'success' $fork $fork) }
@@ -476,7 +485,18 @@ function Get-WorkflowFindings([string]$Root, [string]$Rel, [string[]]$InheritedE
                     foreach ($g0 in @($CallerJob, $job)) {
                         if ($null -ne $g0 -and $g0.Contains('if')) { $g = Invoke-Expr "$($g0['if'])" $c.Ctx; if (-not ((Test-Unk $g) -or (Test-Truthy $g))) { $reach = $false } }
                     }
-                    if ($reach) { if (-not $byKind.Contains($c.Kind)) { $byKind[$c.Kind] = @() }; $byKind[$c.Kind] += $c.Label }
+                    $kind = $c.Kind
+                    if ($reach -and $kind -eq 'AuthorizedPR') {
+                        # A same-repository PR is authorized only BEHIND authorize: with authorize denying
+                        # (authorized == '') the job must provably not run; otherwise the PR reaches the runner directly.
+                        $deny = @{ Vars = @{}; Leg = $c.Ctx.Leg }; foreach ($k in $c.Ctx.Vars.Keys) { $deny.Vars[$k] = $c.Ctx.Vars[$k] }
+                        $deny.Vars['needs.authorize.outputs.authorized'] = ''
+                        foreach ($g0 in @($CallerJob, $job)) {
+                            if ($null -ne $g0 -and $g0.Contains('if')) { $g = Invoke-Expr "$($g0['if'])" $deny; if (-not ((Test-Unk $g) -or (Test-Truthy $g))) { $kind = $null } }
+                        }
+                        $kind = if ($null -eq $kind) { 'AuthorizedPR' } else { 'Reachable' }
+                    }
+                    if ($reach) { if (-not $byKind.Contains($kind)) { $byKind[$kind] = @() }; $byKind[$kind] += $c.Label }
                 }
                 foreach ($k in $byKind.Keys) {
                     $findings += [pscustomobject]@{ Kind = $k; Job = $jobName; Leg = $legDesc; Event = ("{0}[{1}]" -f $ev, ($byKind[$k] -join ',')); Detail = "runs-on [$lbl]" }
@@ -600,6 +620,52 @@ jobs:
   hil:
     if: github.repository == 'zarfld/IntelAvbFilter' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter'
     runs-on: [self-hosted, Windows, i226]
+    steps:
+$preflightStep
+"@
+$wrGuardPr = "github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request')"
+$fx24 = New-Fx 'fx24_workflow_run_same_repo_pr_behind_authorize.yml' @"
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  hil:
+    if: $wrGuardPr && needs.authorize.outputs.authorized == 'true'
+    runs-on: [self-hosted, Windows, i226]
+    environment: hil
+    steps:
+$preflightStep
+"@
+$fx25 = New-Fx 'fx25_workflow_run_pr_without_head_repository_guard.yml' @"
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  hil:
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' && needs.authorize.outputs.authorized == 'true'
+    runs-on: [self-hosted, Windows, i226]
+    environment: hil
+    steps:
+$preflightStep
+"@
+$fx26 = New-Fx 'fx26_workflow_run_same_repo_pr_not_behind_authorize.yml' @"
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  hil:
+    if: $wrGuardPr || needs.authorize.outputs.authorized == 'true'
+    runs-on: [self-hosted, Windows, i226]
+    environment: hil
     steps:
 $preflightStep
 "@
@@ -832,7 +898,7 @@ $preflightStep
 
 function Get-Kind($F, [string]$Kind) { return ,@(@($F) | Where-Object { $null -ne $_ -and $_.Kind -eq $Kind }) }
 
-function Get-Violations($F) { return ,@(@($F) | Where-Object { $null -ne $_ -and $_.Kind -ne 'Authorized' }) }
+function Get-Violations($F) { return ,@(@($F) | Where-Object { $null -ne $_ -and $_.Kind -notin 'Authorized', 'AuthorizedPR' }) }
 
 $f = Get-WorkflowFindings $Fx $fx01
 tc_check 'TEST-HILTRUST-FX-001-guarded-governed-workflow-run-with-trusted-preflight-first-has-no-violations' `
@@ -881,6 +947,19 @@ tc_check 'TEST-HILTRUST-FX-022-workflow-run-branch-guard-without-event-guard-is-
 $f = Get-WorkflowFindings $Fx $fx23
 tc_check 'TEST-HILTRUST-FX-023-workflow-run-without-conclusion-guard-runs-after-failed-ci' `
     (((Get-Kind $f 'UpstreamFailed').Count -eq 1) -and ((Get-Kind $f 'Reachable').Count -eq 0)) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx24
+$a24 = Get-Kind $f 'AuthorizedPR'
+tc_check 'TEST-HILTRUST-FX-024-same-repo-pr-behind-authorize-is-authorized-pr-fork-and-failed-ci-excluded' `
+    (((Get-Violations $f).Count -eq 0) -and ($a24.Count -eq 1) -and ($a24[0].Event -eq 'workflow_run[upstream-same-repo-pr,upstream-same-repo-pr-from-master]') -and
+     ((Get-Kind $f 'Authorized').Count -eq 1)) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx25
+$r25 = Get-Kind $f 'Reachable'
+tc_check 'TEST-HILTRUST-FX-025-pr-guard-without-head-repository-guard-is-reachable-from-fork-prs' `
+    (($r25.Count -eq 1) -and ($r25[0].Event -eq 'workflow_run[upstream-fork-pr,upstream-fork-pr-feature]')) (Show-Findings $f)
+$f = Get-WorkflowFindings $Fx $fx26
+$r26 = Get-Kind $f 'Reachable'
+tc_check 'TEST-HILTRUST-FX-026-same-repo-pr-not-behind-authorize-is-reachable' `
+    (($r26.Count -eq 1) -and ($r26[0].Event -match 'upstream-same-repo-pr\b') -and ((Get-Kind $f 'AuthorizedPR').Count -eq 0)) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx16
 tc_check 'TEST-HILTRUST-FX-016-schedule-guarded-only-by-repository-is-still-automatic' ((Get-Kind $f 'Automatic').Count -eq 1) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx17
@@ -925,6 +1004,7 @@ $realAuto   = Get-Kind $realFindings 'Automatic'
 $realRef    = @((Get-Kind $realFindings 'UnauthorizedRef') + (Get-Kind $realFindings 'ForeignRepo'))
 $realGov    = Get-Kind $realFindings 'Governance'
 $realAuth   = Get-Kind $realFindings 'Authorized'
+$realAuthPr = Get-Kind $realFindings 'AuthorizedPR'
 $realDisp   = Get-Kind $realFindings 'Dispatch'
 $realUpFail = Get-Kind $realFindings 'UpstreamFailed'
 
@@ -944,7 +1024,8 @@ tc_check 'TEST-HILTRUST-REAL-006-self-hosted-jobs-least-privilege-environment-se
 tc_check 'TEST-HILTRUST-REAL-014-no-manual-dispatch-reaches-the-hil-runner' ($realDisp.Count -eq 0) (Show-Findings $realDisp)
 tc_check 'TEST-HILTRUST-REAL-015-failed-upstream-ci-cannot-reach-the-hil-runner' ($realUpFail.Count -eq 0) (Show-Findings $realUpFail)
 
-# Only hil.yml's two physical stages reach a self-hosted runner, each leg only after a successful master push CI.
+# Only hil.yml's two physical stages reach a self-hosted runner, each leg only after a successful master push CI
+# (post-merge confirmation) or a successful same-repository PR CI behind authorize (mandatory pre-merge gate).
 $ciRel  = '.github/workflows/ci-standards-compliance.yml'
 $hilRel = '.github/workflows/hil.yml'
 # One atomic physical job per configuration (deploy -> Mandatory/Unit/Integration), no matrix legs.
@@ -954,12 +1035,14 @@ foreach ($jid in $hilJobIds) {
     $a = @($realAuth | Where-Object { $_.Job -eq "$hilRel/$jid" })
     if ($a.Count -ne 1) { $authIssues += "${jid}: $($a.Count) authorized execution context(s) (expected exactly 1, no matrix legs)" }
     if (@($a | Where-Object { $_.Event -ne 'workflow_run[upstream-master-push-success]' }).Count -gt 0) { $authIssues += "${jid}: authorized on $(@($a | ForEach-Object { $_.Event }) -join ',')" }
+    $ap = @($realAuthPr | Where-Object { $_.Job -eq "$hilRel/$jid" })
+    if ($ap.Count -ne 1 -or $ap[0].Event -ne 'workflow_run[upstream-same-repo-pr,upstream-same-repo-pr-from-master]') { $authIssues += "${jid}: pre-merge contexts $(@($ap | ForEach-Object { $_.Event }) -join ',') (expected exactly the same-repository PR contexts behind authorize)" }
 }
-$selfHostedJobs = @($realFindings | Where-Object { $_.Kind -in 'Authorized', 'Reachable', 'Automatic', 'UpstreamFailed', 'UnauthorizedRef', 'ForeignRepo', 'Dispatch', 'Order', 'Governance' } | ForEach-Object { ($_.Job -split ' -> ')[0] } | Sort-Object -Unique)
+$selfHostedJobs = @($realFindings | Where-Object { $_.Kind -in 'Authorized', 'AuthorizedPR', 'Reachable', 'Automatic', 'UpstreamFailed', 'UnauthorizedRef', 'ForeignRepo', 'Dispatch', 'Order', 'Governance' } | ForEach-Object { ($_.Job -split ' -> ')[0] } | Sort-Object -Unique)
 $expectedSelfHosted = @($hilJobIds | ForEach-Object { "$hilRel/$_" } | Sort-Object)
 if (($selfHostedJobs -join ',') -ne ($expectedSelfHosted -join ',')) { $authIssues += "self-hosted jobs: [$($selfHostedJobs -join ',')] (expected [$($expectedSelfHosted -join ',')])" }
-tc_check 'TEST-HILTRUST-REAL-007-only-hil-yml-stages-reach-the-hil-runner-and-only-after-successful-master-push-ci' ($authIssues.Count -eq 0) `
-    ("{0} || authorized: {1}" -f ($authIssues -join '; '), (Show-Findings $realAuth))
+tc_check 'TEST-HILTRUST-REAL-007-only-hil-yml-stages-reach-the-hil-runner-and-only-after-successful-master-push-or-authorized-same-repo-pr-ci' ($authIssues.Count -eq 0) `
+    ("{0} || authorized: {1} || pre-merge: {2}" -f ($authIssues -join '; '), (Show-Findings $realAuth), (Show-Findings $realAuthPr))
 
 # Hosted CI lanes, triggers and deploy-staging preserved; the upstream workflow knows nothing about HIL.
 $ci = Read-Yaml (Join-Path $RepoRoot '.github\workflows\ci-standards-compliance.yml')
@@ -986,7 +1069,23 @@ else {
     if ($signStep.Count -ne 1 -or "$($signStep[0]['env']['AVB_SIGNING_PFX_BASE64'])" -ne '${{ secrets.HIL_TEST_SIGNING_PFX_BASE64 }}' -or "$($signStep[0]['run'])" -notmatch 'Stable signer not configured') { $laneIssues += 'deploy-staging does not sign with the stable signer from secrets (fail-closed when absent)' }
     if (@(@($dep['steps']) | Where-Object { "$($_['run'])" -match 'Test-AvbDriverPackage' -and "$($_['run'])" -match 'hil-test-signer\.cer' }).Count -ne 1) { $laneIssues += 'deploy-staging does not self-check the package manifest against the pinned signer' }
     if (@($dep['needs']) -notcontains 'acceptance-tests' -or @($dep['needs']) -notcontains 'unit-tests' -or @($dep['needs']) -notcontains 'integration-tests') { $laneIssues += "deploy-staging needs [$(@($dep['needs']) -join ',')]" }
-    if ("$($dep['if'])" -notmatch "github\.event_name == 'push'" -or "$($dep['if'])" -notmatch "refs/heads/master") { $laneIssues += "deploy-staging condition changed: $($dep['if'])" }
+    # Staged: master pushes and v* tags (post-merge) and same-repository OWNER PRs into master (pre-merge candidate).
+    $depIfWant = "(github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'master' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.author_association == 'OWNER')"
+    if ((("$($dep['if'])" -replace '\s+', ' ').Trim()) -cne $depIfWant) { $laneIssues += "deploy-staging condition is not '$depIfWant': $($dep['if'])" }
+    # The package is built from, and stamped with, exactly the candidate revision: the PR HEAD commit (never the
+    # synthetic refs/pull/N/merge commit that GITHUB_SHA names on pull_request), verified after checkout.
+    $depSteps = @($dep['steps'])
+    $depCo = @($depSteps | Where-Object { "$($_['uses'])" -match '^actions/checkout@' })
+    $revWant = "`${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+    if ($depCo.Count -ne 1 -or "$($depCo[0]['with']['ref'])" -ne $revWant) { $laneIssues += "deploy-staging checkout ref is not $revWant" }
+    $revStep = @($depSteps | Where-Object { "$($_['id'])" -eq 'staged-revision' })
+    if ($revStep.Count -ne 1 -or "$($revStep[0]['env']['AVB_EXPECTED_STAGED_REVISION'])" -ne $revWant -or "$($revStep[0]['run'])" -notmatch 'git rev-parse HEAD' -or
+        "$($revStep[0]['run'])" -notmatch 'AVB_STAGED_REVISION=' -or "$($revStep[0]['run'])" -notmatch 'exit 1' -or
+        [array]::IndexOf($depSteps, $revStep[0]) -lt [array]::IndexOf($depSteps, $depCo[0])) { $laneIssues += 'deploy-staging has no staged-revision step after checkout that verifies HEAD == the candidate revision and exports AVB_STAGED_REVISION' }
+    $manStep = @($depSteps | Where-Object { "$($_['run'])" -match 'New-AvbDriverPackageManifest' })
+    if ($manStep.Count -ne 1 -or "$($manStep[0]['run'])" -match 'GITHUB_SHA' -or "$($manStep[0]['run'])" -notmatch '-SourceRevision \$env:AVB_STAGED_REVISION' -or
+        "$($manStep[0]['run'])" -notmatch '-ExpectedRevision \$env:AVB_STAGED_REVISION') { $laneIssues += 'deploy-staging manifest is not stamped and self-checked with AVB_STAGED_REVISION (GITHUB_SHA is the merge commit on pull_request)' }
+    foreach ($s in $depSteps) { if ($s -is [System.Collections.IDictionary] -and $s.Contains('run') -and "$($s['run'])" -match '\$\{\{\s*github\.(event|head_ref)') { $laneIssues += "deploy-staging run script interpolates $($Matches[0])... (script injection; use env)" } }
     $up = @(@($dep['steps']) | Where-Object { "$($_['uses'])" -match '^actions/upload-artifact@' })
     if ($up.Count -ne 1 -or "$($up[0]['with']['name'])" -ne "intel-avb-filter-driver-`${{ matrix.config == 'Debug' && 'debug' || 'release' }}" -or
         "$($up[0]['with']['path'])" -ne 'build\x64\${{ matrix.config }}\IntelAvbFilter\IntelAvbFilter\' -or "$($up[0]['with']['if-no-files-found'])" -ne 'error') {
@@ -999,7 +1098,9 @@ tc_check 'TEST-HILTRUST-REAL-008-hosted-ci-lanes-triggers-and-deploy-staging-pre
 # hil.yml authorization structure.
 $hil = Read-Yaml (Join-Path $RepoRoot '.github\workflows\hil.yml')
 $hilJobs = $hil['jobs']
-$wrGuardReal = "github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter'"
+# Successful upstream CI of this repository: a master push (post-merge) or a same-repository PR (pre-merge; the PR
+# itself - open, base master, head == CI head, OWNER, up to date - is verified by authorize against the API).
+$wrGuardReal = "github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request')"
 $azIssues = @()
 $hilEvents = @(Get-Events $hil)
 if (($hilEvents -join ',') -ne 'workflow_run') { $azIssues += "hil.yml triggers [$($hilEvents -join ',')] (exactly workflow_run; no dispatch, push or workflow_call)" }
@@ -1014,14 +1115,17 @@ if ($null -eq $az) { $azIssues += 'authorize job missing' }
 else {
     if ("$($az['runs-on'])" -ne 'ubuntu-latest') { $azIssues += "authorize runs on '$($az['runs-on'])' (must be GitHub-hosted)" }
     $p = $az['permissions']
-    if (-not ($p -is [System.Collections.IDictionary]) -or (@($p.Keys | Sort-Object) -join ',') -ne 'actions,contents' -or "$($p['actions'])" -ne 'read' -or "$($p['contents'])" -ne 'read') { $azIssues += 'authorize permissions must be exactly actions: read, contents: read' }
+    if (-not ($p -is [System.Collections.IDictionary]) -or (@($p.Keys | Sort-Object) -join ',') -ne 'actions,contents,pull-requests' -or "$($p['actions'])" -ne 'read' -or "$($p['contents'])" -ne 'read' -or "$($p['pull-requests'])" -ne 'read') { $azIssues += 'authorize permissions must be exactly actions: read, contents: read, pull-requests: read' }
     if ("$($az['if'])".Trim() -cne $wrGuardReal) { $azIssues += "authorize if is not the workflow_run guard: $($az['if'])" }
-    foreach ($o in 'head_sha', 'upstream_run_id', 'upstream_run_attempt') { if ("$($az['outputs'][$o])" -ne "`${{ steps.authz.outputs.$o }}") { $azIssues += "authorize output $o" } }
+    foreach ($o in 'head_sha', 'upstream_run_id', 'upstream_run_attempt', 'mode', 'pr_number') { if ("$($az['outputs'][$o])" -ne "`${{ steps.authz.outputs.$o }}") { $azIssues += "authorize output $o" } }
+    if ("$($az['outputs']['deny_reasons'])" -ne '${{ steps.authz.outputs.deny_reasons }}${{ steps.staged.outputs.deny_reasons }}') { $azIssues += 'authorize output deny_reasons does not carry both denial sources (the pre-merge gate reports it)' }
     foreach ($o in 'authorized', 'staged_debug_sha256', 'staged_release_sha256') { if ("$($az['outputs'][$o])" -ne "`${{ steps.staged.outputs.$o }}") { $azIssues += "authorize output $o is not set by the staged-package step" } }
     $azRun = "$(@($az['steps'])[0]['run'])"
     if ($azRun -notmatch [regex]::Escape("DEPLOY_JOBS = ['$DeployName (Debug)', '$DeployName (Release)']")) { $azIssues += 'authorize script does not look up both deploy-staging legs by their exact names' }
     if ($azRun -notmatch [regex]::Escape("CI_PATH = '$ciRel'")) { $azIssues += 'authorize script does not pin the CI workflow path' }
     if ($azRun -notmatch [regex]::Escape("METADATA_PATHS = {'README.md'}")) { $azIssues += 'authorize metadata allow-list is not exactly README.md' }
+    # Owner decision 2026-10-30: automatic pre-merge HIL only for OWNER-authored pull requests (never broader).
+    if ($azRun -notmatch [regex]::Escape("PR_AUTHOR_ASSOCIATIONS = {'OWNER'}")) { $azIssues += 'authorize does not pin the pre-merge PR author association to exactly OWNER' }
     $rb = Join-Path $RepoRoot '.github\workflows\update-readme-status.yml'
     if (Test-Path -LiteralPath $rb) { $adds = @([regex]::Matches([IO.File]::ReadAllText($rb), '(?m)^\s*git add\s+(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value }); if (($adds -join ',') -ne 'README.md') { $azIssues += "update-readme-status.yml commits [$($adds -join ',')], not only README.md (metadata allow-list coupling)" } }
 }
@@ -1063,6 +1167,23 @@ else {
     if ("$($acc['runs-on'])" -ne 'ubuntu-latest') { $azIssues += 'hil-acceptance must be GitHub-hosted' }
     if ((@($acc['needs']) -join ',') -ne 'authorize,hil-debug,hil-release') { $azIssues += "hil-acceptance needs [$(@($acc['needs']) -join ',')]" }
     if ("$($acc['if'])" -notmatch '!cancelled\(\)' -or "$($acc['if'])" -notmatch "needs\.authorize\.outputs\.authorized == 'true'") { $azIssues += 'hil-acceptance condition' }
+    if (-not ($acc['outputs'] -is [System.Collections.IDictionary]) -or "$($acc['outputs']['verdict'])" -ne '${{ steps.verdict.outputs.verdict }}') { $azIssues += 'hil-acceptance does not publish its verdict as output (the pre-merge gate requires it)' }
+}
+# Pre-merge gate: GitHub-hosted, never checks out or runs repository code, writes only a commit status.
+$gate = $hilJobs['hil-gate']
+if ($null -eq $gate) { $azIssues += 'hil-gate missing' }
+else {
+    if ("$($gate['runs-on'])" -ne 'ubuntu-latest') { $azIssues += 'hil-gate must be GitHub-hosted' }
+    if ((@($gate['needs']) -join ',') -ne 'authorize,hil-debug,hil-release,hil-acceptance') { $azIssues += "hil-gate needs [$(@($gate['needs']) -join ',')]" }
+    $gIf = "github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'"
+    if ("$($gate['if'])".Trim() -cne "`${{ always() && $gIf }}") { $azIssues += "hil-gate if is not always() && $gIf (it must report every PR CI outcome, including skips): $($gate['if'])" }
+    $gp = $gate['permissions']
+    if (-not ($gp -is [System.Collections.IDictionary]) -or (@($gp.Keys) -join ',') -ne 'statuses' -or "$($gp['statuses'])" -ne 'write') { $azIssues += 'hil-gate permissions must be exactly statuses: write' }
+    $gSteps = @($gate['steps'])
+    if (@($gSteps | Where-Object { $_.Contains('uses') -and "$($_['uses'])" -notmatch '^actions/upload-artifact@' }).Count -gt 0) { $azIssues += 'hil-gate uses actions other than upload-artifact (no checkout: never runs repository code)' }
+    $gv = @($gSteps | Where-Object { "$($_['id'])" -eq 'gate' }); $gs = @($gSteps | Where-Object { "$($_['id'])" -eq 'post' })
+    if ($gv.Count -ne 1 -or $gs.Count -ne 1 -or [array]::IndexOf($gSteps, $gv[0]) -gt [array]::IndexOf($gSteps, $gs[0])) { $azIssues += 'hil-gate needs a verdict step (id gate) followed by a status step (id post)' }
+    elseif ("$($gs[0]['run'])" -notmatch [regex]::Escape("CONTEXT = 'HIL / pre-merge gate'")) { $azIssues += "hil-gate status context is not 'HIL / pre-merge gate'" }
 }
 foreach ($jid in $hilJobs.Keys) {
     foreach ($s in @($hilJobs[$jid]['steps'])) {
@@ -1166,20 +1287,35 @@ function New-WrVars([string]$UpEvent, [string]$UpBranch, [string]$UpConclusion, 
     $v['needs.hil-debug.outputs.machine_ok'] = $(if ($Authorized -eq 'true') { 'true' } else { '' })
     return $v
 }
+function New-PrRunVars([string]$Base, [string]$HeadRepo, [string]$Association) {
+    $v = New-RunVars 'pull_request' 'refs/pull/1/merge'
+    $v['github.base_ref'] = $Base; $v['github.event.pull_request.head.repo.full_name'] = $HeadRepo
+    $v['github.event.pull_request.author_association'] = $Association
+    return $v
+}
 function Set-Var([hashtable]$V, [string]$K, [string]$X) { $V[$K] = $X; return $V }
 $forkR = 'untrusted-fork/IntelAvbFilter'
-$allSkipped = @{ 'authorize' = 'skipped'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped' }
+$allSkipped = @{ 'authorize' = 'skipped'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'skipped' }
+# Every PR CI completion is reported by the pre-merge gate (always), whether or not anything reached the HIL runner.
+$prNotRun = @{ 'authorize' = 'skipped'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' }
 $hilScen = [ordered]@{
     'authorized master push CI' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{}
-        Expect = @{ 'authorize' = 'success'; 'hil-debug' = 'success'; 'hil-release' = 'success'; 'hil-acceptance' = 'success' } }
+        Expect = @{ 'authorize' = 'success'; 'hil-debug' = 'success'; 'hil-release' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'skipped' } }
+    'authorized OWNER same-repository PR CI' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{}
+        Expect = @{ 'authorize' = 'success'; 'hil-debug' = 'success'; 'hil-release' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'success' } }
+    'same-repository PR, authorization denied (non-OWNER, stale head, closed, behind master, staging skipped)' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' ''); Out = @{ 'authorize' = 'failure' }
+        Expect = @{ 'authorize' = 'failure'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' } }
+    'authorized PR, Release fails: acceptance runs and fails, gate reports' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{ 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil-debug' = 'success'; 'hil-acceptance' = 'failure'; 'hil-gate' = 'success' } }
+    'upstream same-repository PR CI failed' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'failure' ''); Out = @{}; Expect = $prNotRun }
     'eligible, authorization denied (deploy-staging skipped, wrong SHA, stale, unprotected)' = @{ Vars = (New-WrVars 'push' 'master' 'success' ''); Out = @{ 'authorize' = 'failure' }
         Expect = @{ 'authorize' = 'failure'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped' } }
     'Debug tests fail, machine healthy: Release still deployed and tested' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
         Expect = @{ 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
     'Debug deployment left the machine needing the operator: Release not attempted' = @{ Vars = (Set-Var (New-WrVars 'push' 'master' 'success' 'true') 'needs.hil-debug.outputs.machine_ok' 'false'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
         Expect = @{ 'hil-release' = 'skipped'; 'hil-acceptance' = 'failure' } }
-    'upstream fork PR from its master' = @{ Vars = (New-WrVars 'pull_request' 'master' 'success' '' $forkR); Out = @{}; Expect = $allSkipped }
-    'upstream same-repository PR'      = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' ''); Out = @{}; Expect = $allSkipped }
+    'upstream fork PR from its master' = @{ Vars = (New-WrVars 'pull_request' 'master' 'success' '' $forkR); Out = @{}; Expect = $prNotRun }
+    'upstream fork PR, authorize output forged true' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true' $forkR); Out = @{}; Expect = $prNotRun }
     'upstream CI failed on master'     = @{ Vars = (New-WrVars 'push' 'master' 'failure' ''); Out = @{}; Expect = $allSkipped }
     'upstream CI cancelled on master'  = @{ Vars = (New-WrVars 'push' 'master' 'cancelled' ''); Out = @{}; Expect = $allSkipped }
     'upstream feature push'            = @{ Vars = (New-WrVars 'push' 'feature/x' 'success' ''); Out = @{}; Expect = $allSkipped }
@@ -1198,7 +1334,11 @@ $ciScen = [ordered]@{
     'master push, all pass'      = @{ Vars = (New-RunVars 'push' 'refs/heads/master'); Out = @{}; Expect = @{ 'acceptance-tests' = 'success'; 'deploy-staging' = 'success' } }
     'master push, unit fails'    = @{ Vars = (New-RunVars 'push' 'refs/heads/master'); Out = @{ 'unit-tests' = 'failure' }; Expect = @{ 'deploy-staging' = 'skipped' } }
     'master push, accept. fails' = @{ Vars = (New-RunVars 'push' 'refs/heads/master'); Out = @{ 'acceptance-tests' = 'failure' }; Expect = @{ 'deploy-staging' = 'skipped' } }
-    'pull request'               = @{ Vars = (New-RunVars 'pull_request' 'refs/pull/1/merge'); Out = @{}; Expect = @{ 'acceptance-tests' = 'success'; 'deploy-staging' = 'skipped' } }
+    'OWNER same-repo PR to master' = @{ Vars = (New-PrRunVars 'master' 'zarfld/IntelAvbFilter' 'OWNER'); Out = @{}; Expect = @{ 'acceptance-tests' = 'success'; 'deploy-staging' = 'success' } }
+    'OWNER PR, unit fails'       = @{ Vars = (New-PrRunVars 'master' 'zarfld/IntelAvbFilter' 'OWNER'); Out = @{ 'unit-tests' = 'failure' }; Expect = @{ 'deploy-staging' = 'skipped' } }
+    'collaborator same-repo PR'  = @{ Vars = (New-PrRunVars 'master' 'zarfld/IntelAvbFilter' 'COLLABORATOR'); Out = @{}; Expect = @{ 'acceptance-tests' = 'success'; 'deploy-staging' = 'skipped' } }
+    'fork PR'                    = @{ Vars = (New-PrRunVars 'master' 'untrusted-fork/IntelAvbFilter' 'OWNER'); Out = @{}; Expect = @{ 'acceptance-tests' = 'success'; 'deploy-staging' = 'skipped' } }
+    'OWNER PR to develop'        = @{ Vars = (New-PrRunVars 'develop' 'zarfld/IntelAvbFilter' 'OWNER'); Out = @{}; Expect = @{ 'deploy-staging' = 'skipped' } }
     'feature push'               = @{ Vars = (New-RunVars 'push' 'refs/heads/feature/x'); Out = @{}; Expect = @{ 'deploy-staging' = 'skipped' } }
 }
 foreach ($sn in $ciScen.Keys) {
@@ -1276,6 +1416,19 @@ srv.serve_forever()
                            [ordered]@{ name = "$DeployName (Release)"; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid; run_attempt = 1 })
                   Env = @{ GITHUB_REPOSITORY = $RepoName; GITHUB_EVENT_NAME = 'workflow_run'; GITHUB_RUN_ATTEMPT = '1' } }
     }
+    # Pre-merge: CI of the same-repository PR #344 (head feature/x at $sha), OWNER-authored, open, into master; the
+    # master tip is an ancestor of the head (compare head...tip 'behind': nothing on master the PR lacks).
+    $prNo = 344; $prTip = ('a1' * 20)
+    function New-PrAzState {
+        $s = New-AzState
+        foreach ($o in $s.Wr, $s.Run) { $o['event'] = 'pull_request'; $o['head_branch'] = 'feature/x'; $o['pull_requests'] = @([ordered]@{ number = $prNo; head = [ordered]@{ sha = $sha; ref = 'feature/x' }; base = [ordered]@{ ref = 'master' } }) }
+        $s.Pr = [ordered]@{ number = $prNo; state = 'open'; author_association = 'OWNER'
+                            head = [ordered]@{ sha = $sha; ref = 'feature/x'; repo = [ordered]@{ full_name = $RepoName } }
+                            base = [ordered]@{ ref = 'master'; repo = [ordered]@{ full_name = $RepoName } } }
+        $s.PrStatus = 200; $s.Tip = $prTip
+        $s.Compare = @{ status = 'behind'; ahead_by = 0; behind_by = 3; commits = @(); files = @() }
+        return $s
+    }
     $both = { param($s, $k, $v) $s.Wr[$k] = $v; $s.Run[$k] = $v }
     $azCases = [ordered]@{
         'all checks pass'                 = @{ Mod = {}; Allow = $true }
@@ -1289,7 +1442,37 @@ srv.serve_forever()
         'only the Debug staging leg ran'  = @{ Mod = { param($s) $s.Jobs = @($s.Jobs[0], $s.Jobs[1]) }; Why = "0 jobs named '$DeployName (Release)'" }
         'Release staging leg failed'      = @{ Mod = { param($s) $s.Jobs[2].conclusion = 'failure' }; Why = "(Release) status='completed' conclusion='failure'" }
         'unsuffixed legacy staging job'   = @{ Mod = { param($s) $s.Jobs = @($s.Jobs[0], [ordered]@{ name = $DeployName; status = 'completed'; conclusion = 'success'; head_sha = $sha; run_id = $rid; run_attempt = 1 }) }; Why = '0 jobs named' }
-        'upstream pull request'           = @{ Mod = { param($s) & $both $s 'event' 'pull_request' }; Why = "event is 'pull_request'" }
+        'upstream pull request without PR linkage' = @{ Mod = { param($s) & $both $s 'event' 'pull_request' }; Why = 'exactly 1 required' }
+        # ---- pre-merge: same-repository pull request CI ----
+        'PR: OWNER, open, into master, up to date' = @{ Pr = $true; Mod = {}; Allow = $true; Mode = 'pull_request' }
+        'PR: staging legs on jobs page 2'          = @{ Pr = $true; Mod = { param($s) $s.Paged = $true }; Allow = $true; Mode = 'pull_request' }
+        'PR: master ahead only by README bot commits' = @{ Pr = $true; Mod = { param($s) $s.Compare = @{ status = 'diverged'; ahead_by = 1; behind_by = 3; commits = @(@{ sha = ('b0' * 20) }); files = @(@{ filename = 'README.md'; status = 'modified' }) } }; Allow = $true; Mode = 'pull_request' }
+        'PR: master tip is the PR head'            = @{ Pr = $true; Mod = { param($s) $s.Tip = $sha; $s.Compare = $null }; Allow = $true; Mode = 'pull_request' }
+        'PR: CI failed'                            = @{ Pr = $true; Mod = { param($s) & $both $s 'conclusion' 'failure' }; Why = "conclusion is 'failure'" }
+        'PR: Debug staging skipped'                = @{ Pr = $true; Mod = { param($s) $s.Jobs[1].conclusion = 'skipped' }; Why = 'skipped is not enough' }
+        'PR: Release staging failed'               = @{ Pr = $true; Mod = { param($s) $s.Jobs[2].conclusion = 'failure' }; Why = "(Release) status='completed' conclusion='failure'" }
+        'PR: staging absent'                       = @{ Pr = $true; Mod = { param($s) $s.Jobs = @($s.Jobs[0]) }; Why = '0 jobs named' }
+        'PR: staging built another commit (merge ref)' = @{ Pr = $true; Mod = { param($s) $s.Jobs[1].head_sha = ('e' * 40) }; Why = '(Debug) belongs to' }
+        'PR: fork head repository (event)'         = @{ Pr = $true; Mod = { param($s) $s.Wr.head_repository.full_name = 'untrusted-fork/IntelAvbFilter' }; Why = 'head_repository.full_name' }
+        'PR: fork head repository (API PR)'        = @{ Pr = $true; Mod = { param($s) $s.Pr.head.repo.full_name = 'untrusted-fork/IntelAvbFilter' }; Why = 'head repository' }
+        'PR: COLLABORATOR author'                  = @{ Pr = $true; Mod = { param($s) $s.Pr.author_association = 'COLLABORATOR' }; Why = 'OWNER-only' }
+        'PR: MEMBER author'                        = @{ Pr = $true; Mod = { param($s) $s.Pr.author_association = 'MEMBER' }; Why = 'OWNER-only' }
+        'PR: author association missing'           = @{ Pr = $true; Mod = { param($s) $s.Pr.Remove('author_association') }; Why = 'OWNER-only' }
+        'PR: head moved after CI (stale head)'     = @{ Pr = $true; Mod = { param($s) $s.Pr.head.sha = ('e' * 40) }; Why = 'is not the CI run head' }
+        'PR: head branch differs from CI run'      = @{ Pr = $true; Mod = { param($s) $s.Pr.head.ref = 'feature/y' }; Why = 'head branch' }
+        'PR: closed'                               = @{ Pr = $true; Mod = { param($s) $s.Pr.state = 'closed' }; Why = "state 'closed'" }
+        'PR: targets develop'                      = @{ Pr = $true; Mod = { param($s) $s.Pr.base.ref = 'develop' }; Why = 'not zarfld/IntelAvbFilter:master' }
+        'PR: base in another repository'           = @{ Pr = $true; Mod = { param($s) $s.Pr.base.repo.full_name = 'untrusted-fork/IntelAvbFilter' }; Why = 'not zarfld/IntelAvbFilter:master' }
+        'PR: two linked pull requests'             = @{ Pr = $true; Mod = { param($s) foreach ($o in $s.Wr, $s.Run) { $o['pull_requests'] = @($o['pull_requests'][0], [ordered]@{ number = 345 }) } }; Why = 'exactly 1 required' }
+        'PR: API run links another pull request'   = @{ Pr = $true; Mod = { param($s) $s.Run['pull_requests'] = @([ordered]@{ number = 345 }) }; Why = 'API run pull_requests' }
+        'PR: behind master by a code change'       = @{ Pr = $true; Mod = { param($s) $s.Compare = @{ status = 'diverged'; ahead_by = 2; behind_by = 3; commits = @(@{ sha = ('c' * 40) }, @{ sha = ('d' * 40) }); files = @(@{ filename = 'README.md' }, @{ filename = 'src/filter.c' }) } }; Why = 'is not up to date with master' }
+        'PR: behind master, README renamed from code' = @{ Pr = $true; Mod = { param($s) $s.Compare = @{ status = 'ahead'; ahead_by = 1; behind_by = 0; commits = @(@{ sha = ('d' * 40) }); files = @(@{ filename = 'README.md'; previous_filename = 'src/filter.c' }) } }; Why = 'src/filter.c' }
+        'PR: behind master, incomplete compare'    = @{ Pr = $true; Mod = { param($s) $s.Compare = @{ status = 'diverged'; ahead_by = 3; behind_by = 1; commits = @(@{ sha = ('d' * 40) }); files = @(@{ filename = 'README.md' }) } }; Why = 'incomplete compare' }
+        'PR: master tip unreadable'                = @{ Pr = $true; Mod = { param($s) $s.Tip = $null; $s.Compare = $null }; Why = 'is unreadable' }
+        'PR: master not protected'                 = @{ Pr = $true; Mod = { param($s) $s.Protected = $false }; Why = 'not a protected branch' }
+        'PR: pulls API error'                      = @{ Pr = $true; Mod = { param($s) $s.PrStatus = 500 }; Why = 'authorization error' }
+        'PR: API head_sha differs (wrong SHA)'     = @{ Pr = $true; Mod = { param($s) $s.Run.head_sha = ('f' * 40) }; Why = 'API run head_sha' }
+        'PR: HIL re-run (attempt 2)'               = @{ Pr = $true; Mod = { param($s) $s.Env.GITHUB_RUN_ATTEMPT = '2' }; Why = 'HIL re-run' }
         'fork PR from its master'         = @{ Mod = { param($s) & $both $s 'event' 'pull_request'; $s.Wr.head_repository.full_name = 'untrusted-fork/IntelAvbFilter' }; Why = 'head_repository.full_name' }
         'feature branch push'             = @{ Mod = { param($s) & $both $s 'head_branch' 'feature/x' }; Why = "head_branch is 'feature/x'" }
         'tag push'                        = @{ Mod = { param($s) & $both $s 'head_branch' 'v1.0.0' }; Why = "head_branch is 'v1.0.0'" }
@@ -1320,7 +1503,7 @@ srv.serve_forever()
     $i = 0
     foreach ($n in $azCases.Keys) {
         $i++
-        $s = New-AzState
+        $s = if ($azCases[$n].ContainsKey('Pr')) { New-PrAzState } else { New-AzState }
         & $azCases[$n].Mod $s
         $base = "/repos/$RepoName/actions/runs/$rid"
         $routes = [ordered]@{}
@@ -1334,6 +1517,7 @@ srv.serve_forever()
         }
         $routes["/repos/$RepoName/branches/master"] = @{ body = @{ protected = $s.Protected; commit = @{ sha = $s.Tip } } }
         if ($null -ne $s.Compare) { $routes["/repos/$RepoName/compare/$sha...$($s.Tip)"] = @{ body = $s.Compare } }
+        if ($s.ContainsKey('Pr')) { $routes["/repos/$RepoName/pulls/$prNo"] = @{ status = $s.PrStatus; body = $s.Pr } }
         [System.IO.File]::WriteAllText($routesFile, ($routes | ConvertTo-Json -Depth 12))
         $evFile = Join-Path $script:Tmp "event_$i.json"; $outFile = Join-Path $script:Tmp "out_$i.txt"; $sumFile = Join-Path $script:Tmp "sum_$i.md"
         [System.IO.File]::WriteAllText($evFile, ([ordered]@{ action = $s.Action; workflow_run = $s.Wr } | ConvertTo-Json -Depth 12))
@@ -1342,9 +1526,13 @@ srv.serve_forever()
         $r = Invoke-Py $azPy $envs
         $outTxt = if (Test-Path -LiteralPath $outFile) { Get-Content -LiteralPath $outFile -Raw } else { '' }
         if ($azCases[$n].ContainsKey('Allow')) {
-            if ($r.Exit -ne 0 -or $outTxt -notmatch 'authorized=true' -or $outTxt -notmatch "head_sha=$sha" -or $outTxt -notmatch "upstream_run_id=$rid") { $x12 += "authorize '$n': expected GRANTED, exit $($r.Exit): $(($r.Out + $outTxt) -replace '\s+', ' ')" }
+            $wantMode = if ($azCases[$n].ContainsKey('Mode')) { $azCases[$n].Mode } else { 'push' }
+            $wantPr = if ($wantMode -eq 'pull_request') { "$prNo" } else { '' }
+            if ($r.Exit -ne 0 -or $outTxt -notmatch 'authorized=true' -or $outTxt -notmatch "head_sha=$sha" -or $outTxt -notmatch "upstream_run_id=$rid" -or
+                $outTxt -notmatch "(?m)^mode=$wantMode\r?$" -or $outTxt -notmatch "(?m)^pr_number=$wantPr\r?$" -or $outTxt -notmatch '(?m)^deny_reasons=\r?$') { $x12 += "authorize '$n': expected GRANTED ($wantMode $wantPr), exit $($r.Exit): $(($r.Out + $outTxt) -replace '\s+', ' ')" }
         } else {
-            if ($r.Exit -ne 1 -or $outTxt -notmatch 'authorized=false' -or $outTxt -match 'head_sha=[0-9a-f]' -or $r.Out.IndexOf($azCases[$n].Why) -lt 0) { $x12 += "authorize '$n': expected DENIED with '$($azCases[$n].Why)', exit $($r.Exit): $(($r.Out + $outTxt) -replace '\s+', ' ')" }
+            if ($r.Exit -ne 1 -or $outTxt -notmatch 'authorized=false' -or $outTxt -match 'head_sha=[0-9a-f]' -or $outTxt -notmatch '(?m)^mode=\r?$' -or
+                $outTxt -notmatch '(?m)^deny_reasons=\S' -or $r.Out.IndexOf($azCases[$n].Why) -lt 0) { $x12 += "authorize '$n': expected DENIED with '$($azCases[$n].Why)', exit $($r.Exit): $(($r.Out + $outTxt) -replace '\s+', ' ')" }
         }
     }
 
@@ -1393,8 +1581,8 @@ srv.serve_forever()
             $r = Invoke-Py $stPy @{ PRE_AUTHORIZED = $(if ($c.ContainsKey('Pre')) { $c.Pre } else { 'true' }); HEAD_SHA = $sha; UP_RUN = "$rid"; UP_ATTEMPT = '1'; RUNNER_TEMP = $rt; GITHUB_OUTPUT = $outFile }
             $outTxt = if (Test-Path -LiteralPath $outFile) { (Get-Content -LiteralPath $outFile -Raw) -replace "`r", '' } else { '' }
             if ($c.ContainsKey('Allow')) {
-                if ($r.Exit -ne 0 -or $outTxt -ne "authorized=true`nstaged_debug_sha256=$hd`nstaged_release_sha256=$hr`n") { $x12 += "staged '$n': expected GRANTED, exit $($r.Exit), output '$($outTxt -replace '\s+', ' ')' $($r.Out -replace '\s+', ' ')" }
-            } elseif ($r.Exit -ne 1 -or $outTxt -ne "authorized=false`nstaged_debug_sha256=`nstaged_release_sha256=`n" -or $r.Out.IndexOf($c.Why) -lt 0) {
+                if ($r.Exit -ne 0 -or $outTxt -ne "authorized=true`nstaged_debug_sha256=$hd`nstaged_release_sha256=$hr`ndeny_reasons=`n") { $x12 += "staged '$n': expected GRANTED, exit $($r.Exit), output '$($outTxt -replace '\s+', ' ')' $($r.Out -replace '\s+', ' ')" }
+            } elseif ($r.Exit -ne 1 -or $outTxt -notmatch "^authorized=false`nstaged_debug_sha256=`nstaged_release_sha256=`ndeny_reasons=\S[^`n]*`n$" -or $outTxt.IndexOf($c.Why) -lt 0 -or $r.Out.IndexOf($c.Why) -lt 0) {
                 $x12 += "staged '$n': expected DENIED '$($c.Why)', exit $($r.Exit), output '$($outTxt -replace '\s+', ' ')' $($r.Out -replace '\s+', ' ')"
             }
         }
@@ -1469,8 +1657,12 @@ srv.serve_forever()
             $r = Invoke-Py $accPy @{ GITHUB_RUN_ID = '777'; HIL_HEAD_SHA = $sha; HIL_UPSTREAM_RUN_ID = "$rid"
                                     HIL_DEBUG = $(if ($c.ContainsKey('Debug')) { $c.Debug } else { 'success' }); HIL_RELEASE = $(if ($c.ContainsKey('Release')) { $c.Release } else { 'success' })
                                     HIL_STAGED_DEBUG = $stagedOf['Debug']; HIL_STAGED_RELEASE = $stagedOf['Release']
-                                    HIL_EVIDENCE_DIR = $root; GITHUB_STEP_SUMMARY = (Join-Path $script:Tmp "acc_$k.md")
+                                    HIL_EVIDENCE_DIR = $root; GITHUB_STEP_SUMMARY = (Join-Path $script:Tmp "acc_$k.md"); GITHUB_OUTPUT = (Join-Path $script:Tmp "acc_out_$k.txt")
                                     GITHUB_RUN_ATTEMPT = $(if ($c.ContainsKey('Attempt')) { $c.Attempt } else { '1' }) }
+            # The verdict is published as the job output the pre-merge gate consumes, identical to the summary verdict.
+            $accOut = if (Test-Path -LiteralPath (Join-Path $script:Tmp "acc_out_$k.txt")) { (Get-Content -LiteralPath (Join-Path $script:Tmp "acc_out_$k.txt") -Raw) -replace "`r", '' } else { '' }
+            $shown = if ($r.Out -match 'HIL acceptance: (\w+)') { $Matches[1] } else { '<none>' }
+            if ($accOut -ne "verdict=$shown`n" -or ($c.Exit -eq 0) -ne ($shown -eq 'PASSED')) { $x12 += "acceptance '$n': output '$($accOut -replace '\s+', ' ')' does not publish exactly the verdict '$shown' (exit $($r.Exit))" }
             if ($r.Exit -ne $c.Exit -or ($c.Exit -ne 0 -and $r.Out.IndexOf($c.Why) -lt 0) -or ($c.Exit -eq 0 -and ($r.Out -notmatch 'HIL acceptance: PASSED' -or $r.Out.IndexOf('staged == installed == ImagePath file') -lt 0 -or ($c.ContainsKey('Out') -and $r.Out.IndexOf($c.Out) -lt 0)))) {
                 $x12 += "acceptance '$n': exit $($r.Exit) (expected $($c.Exit)$(if ($c.Exit) { ", '$($c.Why)'" })): $($r.Out -replace '\s+', ' ')"
             }
@@ -1481,7 +1673,136 @@ srv.serve_forever()
 } finally {
     if ($null -ne $srv -and -not $srv.HasExited) { $srv.Kill() }
 }
-tc_check 'TEST-HILTRUST-REAL-012-authorization-requires-successful-master-ci-with-deploy-staging-and-acceptance-requires-current-run-evidence' ($x12.Count -eq 0) ($x12 -join ' || ')
+tc_check 'TEST-HILTRUST-REAL-012-authorization-requires-successful-master-or-owner-pr-ci-with-deploy-staging-and-acceptance-requires-current-run-evidence' ($x12.Count -eq 0) ($x12 -join ' || ')
+
+# ---------------------------------------------------------------------------------------------------------
+# REAL-017: the pre-merge gate (hil-gate).  (a) verdict: python -I against fixture job results; only a PASSED
+# acceptance of both configurations for exactly the authorized PR head yields 'success', everything else 'failure'
+# with a machine-readable reason (hil-gate-verdict.json).  (b) status: python -I against a localhost API that records
+# the POST - the commit status 'HIL / pre-merge gate' is written on exactly that SHA; an invalid verdict posts nothing.
+# ---------------------------------------------------------------------------------------------------------
+$x17 = @()
+$psrv = $null
+try {
+    $gateJob = $hilJobs['hil-gate']
+    $gvStep = @(if ($null -ne $gateJob) { @($gateJob['steps']) | Where-Object { "$($_['id'])" -eq 'gate' } })
+    $gsStep = @(if ($null -ne $gateJob) { @($gateJob['steps']) | Where-Object { "$($_['id'])" -eq 'post' } })
+    if ($gvStep.Count -ne 1 -or $gsStep.Count -ne 1) { throw 'hil-gate has no verdict step (id gate) and status step (id post)' }
+    $gPy = Join-Path $script:Tmp 'gate.py'; [System.IO.File]::WriteAllText($gPy, ("$($gvStep[0]['run'])" -replace "`r`n", "`n"))
+    $pPy = Join-Path $script:Tmp 'post.py'; [System.IO.File]::WriteAllText($pPy, ("$($gsStep[0]['run'])" -replace "`r`n", "`n"))
+    $gSha = '0123456789abcdef0123456789abcdef01234567'
+    # The verdict step's inputs are exactly the job results and authorize/acceptance outputs named in its env.
+    $gEnvWant = [ordered]@{ AZ_RESULT = '${{ needs.authorize.result }}'; AZ_AUTHORIZED = '${{ needs.authorize.outputs.authorized }}'; AZ_MODE = '${{ needs.authorize.outputs.mode }}'
+        AZ_HEAD_SHA = '${{ needs.authorize.outputs.head_sha }}'; AZ_PR = '${{ needs.authorize.outputs.pr_number }}'; AZ_DENY = '${{ needs.authorize.outputs.deny_reasons }}'
+        DEBUG_RESULT = '${{ needs.hil-debug.result }}'; RELEASE_RESULT = '${{ needs.hil-release.result }}'; ACC_RESULT = '${{ needs.hil-acceptance.result }}'; ACC_VERDICT = '${{ needs.hil-acceptance.outputs.verdict }}' }
+    if (-not ($gvStep[0]['env'] -is [System.Collections.IDictionary]) -or -not ($gsStep[0]['env'] -is [System.Collections.IDictionary])) { throw 'hil-gate verdict/status steps have no env map' }
+    foreach ($k in $gEnvWant.Keys) { if ("$($gvStep[0]['env'][$k])" -ne $gEnvWant[$k]) { $x17 += "gate env $k is '$($gvStep[0]['env'][$k])', not '$($gEnvWant[$k])'" } }
+    function New-GateEvent([string]$Conclusion = 'success', [string]$HeadRepo = 'zarfld/IntelAvbFilter', [string]$Event = 'pull_request', [string]$HeadSha = $gSha) {
+        return [ordered]@{ action = 'completed'; workflow_run = [ordered]@{ id = 4242; run_attempt = 1; head_sha = $HeadSha; event = $Event; conclusion = $Conclusion; head_branch = 'feature/x'
+            head_repository = [ordered]@{ full_name = $HeadRepo }; pull_requests = @([ordered]@{ number = 344 }) } }
+    }
+    $okEnv = @{ AZ_RESULT = 'success'; AZ_AUTHORIZED = 'true'; AZ_MODE = 'pull_request'; AZ_HEAD_SHA = $gSha; AZ_PR = '344'; AZ_DENY = ''
+                DEBUG_RESULT = 'success'; RELEASE_RESULT = 'success'; ACC_RESULT = 'success'; ACC_VERDICT = 'PASSED' }
+    $gCases = [ordered]@{
+        'both configurations PASSED for the authorized head' = @{ Env = @{}; State = 'success'; Verdict = 'PASSED' }
+        'acceptance INCOMPLETE (coverage gap)'     = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'INCOMPLETE' }; State = 'failure'; Verdict = 'INCOMPLETE' }
+        'acceptance FAILED'                        = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'FAILED'; RELEASE_RESULT = 'failure' }; State = 'failure'; Verdict = 'FAILED' }
+        'acceptance HIL_NOT_EXECUTED'              = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'HIL_NOT_EXECUTED' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
+        'staged build not tested'                  = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'STAGED_BUILD_NOT_TESTED' }; State = 'failure'; Verdict = 'STAGED_BUILD_NOT_TESTED' }
+        'acceptance skipped'                       = @{ Env = @{ ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
+        'acceptance success without a verdict'     = @{ Env = @{ ACC_VERDICT = '' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
+        'verdict PASSED but acceptance job failed' = @{ Env = @{ ACC_RESULT = 'failure' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
+        'hil-release skipped (PASSED forged)'      = @{ Env = @{ RELEASE_RESULT = 'skipped' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-release 'skipped'" }
+        'hil-debug cancelled'                      = @{ Env = @{ DEBUG_RESULT = 'cancelled' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-debug 'cancelled'" }
+        'authorize denied (stale head)'            = @{ Env = @{ AZ_RESULT = 'failure'; AZ_AUTHORIZED = ''; AZ_DENY = 'pull request #344 head eeee is not the CI run head'; ACC_RESULT = 'skipped'; ACC_VERDICT = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED'; Why = 'is not the CI run head' }
+        'authorize success but not authorized'     = @{ Env = @{ AZ_AUTHORIZED = '' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED' }
+        'authorized output true but job failed'    = @{ Env = @{ AZ_RESULT = 'failure' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED' }
+        'fork pull request'                        = @{ Event = (New-GateEvent -HeadRepo 'untrusted-fork/IntelAvbFilter'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'NOT_ELIGIBLE'; Why = 'fork' }
+        'upstream CI failed'                       = @{ Event = (New-GateEvent -Conclusion 'failure'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'CI_NOT_SUCCESSFUL'; Why = "'failure'" }
+        'authorized head is not the CI head'       = @{ Env = @{ AZ_HEAD_SHA = ('e' * 40) }; State = 'failure'; Verdict = 'INCONSISTENT' }
+        'authorized as a master push'              = @{ Env = @{ AZ_MODE = 'push'; AZ_PR = '' }; State = 'failure'; Verdict = 'INCONSISTENT' }
+        'authorized another pull request'          = @{ Env = @{ AZ_PR = '345' }; State = 'failure'; Verdict = 'INCONSISTENT' }
+        'upstream is a master push'                = @{ Event = (New-GateEvent -Event 'push'); State = 'failure'; Verdict = 'INCONSISTENT' }
+    }
+    $q = 0
+    foreach ($n in $gCases.Keys) {
+        $q++; $c = $gCases[$n]
+        $tmpG = Join-Path $script:Tmp "gate_$q"; New-Item -ItemType Directory -Path $tmpG -Force | Out-Null
+        $evF = Join-Path $tmpG 'event.json'; $outF = Join-Path $tmpG 'out.txt'
+        [System.IO.File]::WriteAllText($evF, ($(if ($c.ContainsKey('Event')) { $c.Event } else { New-GateEvent }) | ConvertTo-Json -Depth 8))
+        $e = @{}; foreach ($k in $okEnv.Keys) { $e[$k] = $okEnv[$k] }; foreach ($k in $c.Env.Keys) { $e[$k] = $c.Env[$k] }
+        $e['GITHUB_EVENT_PATH'] = $evF; $e['GITHUB_OUTPUT'] = $outF; $e['RUNNER_TEMP'] = $tmpG; $e['GITHUB_STEP_SUMMARY'] = (Join-Path $tmpG 'sum.md')
+        $e['GITHUB_REPOSITORY'] = 'zarfld/IntelAvbFilter'; $e['GITHUB_RUN_ID'] = '777'; $e['GITHUB_RUN_ATTEMPT'] = '1'; $e['GITHUB_SERVER_URL'] = 'https://github.com'
+        $r = Invoke-Py $gPy $e
+        $o = @{}; if (Test-Path -LiteralPath $outF) { foreach ($l in (Get-Content -LiteralPath $outF)) { if ($l -match '^(\w+)=(.*)$') { $o[$Matches[1]] = $Matches[2] } } }
+        $jf = Join-Path $tmpG 'hil-gate\hil-gate-verdict.json'
+        $j = if (Test-Path -LiteralPath $jf) { Get-Content -LiteralPath $jf -Raw | ConvertFrom-Json } else { $null }
+        $why = if ($c.ContainsKey('Why')) { $c.Why } else { '' }
+        if ($r.Exit -ne 0 -or $o['state'] -cne $c.State -or $o['verdict'] -cne $c.Verdict -or $o['sha'] -cne $gSha -or -not $o['description'] -or $o['description'].Length -gt 140 -or
+            ($c.State -eq 'success') -ne ($o['description'] -like 'PASSED*') -or $o['description'].IndexOf($why) -lt 0 -or
+            $null -eq $j -or $j.schema -ne 'avb-hil-gate/1' -or $j.state -cne $c.State -or $j.verdict -cne $c.Verdict -or $j.headSha -cne $gSha -or $j.evidenceClass -ne 'ci' -or
+            ($c.State -eq 'failure' -and @($j.reasons).Count -eq 0)) {
+            $x17 += "gate '$n': expected $($c.State)/$($c.Verdict)$(if ($why) { " ('$why')" }), exit $($r.Exit), outputs $(($o.Keys | Sort-Object | ForEach-Object { "$_=$($o[$_])" }) -join '; ') $($r.Out -replace '\s+', ' ')"
+        }
+    }
+
+    # (b) status post against a recording localhost API.
+    $postSrv = Join-Path $script:Tmp 'post_api.py'; $postLog = Join-Path $script:Tmp 'posts.jsonl'; $postCfg = Join-Path $script:Tmp 'post_cfg.json'
+    [System.IO.File]::WriteAllText($postSrv, @'
+import json, sys, http.server
+LOG, CFG = sys.argv[1], sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length') or 0)).decode('utf-8')
+        with open(LOG, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps({'path': self.path, 'auth': self.headers.get('Authorization'), 'body': json.loads(body)}) + '\n')
+        with open(CFG, encoding='utf-8') as fh:
+            code = json.load(fh).get('status', 201)
+        data = json.dumps({'state': 'ok'}).encode('utf-8')
+        self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+    def log_message(self, *a):
+        pass
+srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+'@)
+    [System.IO.File]::WriteAllText($postCfg, '{"status": 201}')
+    $ppsi = New-Object System.Diagnostics.ProcessStartInfo
+    $ppsi.FileName = $Python; $ppsi.Arguments = "-I `"$postSrv`" `"$postLog`" `"$postCfg`""
+    $ppsi.UseShellExecute = $false; $ppsi.RedirectStandardOutput = $true; $ppsi.RedirectStandardError = $true
+    $psrv = [System.Diagnostics.Process]::Start($ppsi)
+    $pport = $psrv.StandardOutput.ReadLine()
+    if ($pport -notmatch '^\d+$') { throw "status fixture API did not start: $pport" }
+    $pEnvWant = @{ STATE = '${{ steps.gate.outputs.state }}'; SHA = '${{ steps.gate.outputs.sha }}'; DESCRIPTION = '${{ steps.gate.outputs.description }}'; GH_TOKEN = '${{ github.token }}' }
+    foreach ($k in $pEnvWant.Keys) { if ("$($gsStep[0]['env'][$k])" -ne $pEnvWant[$k]) { $x17 += "post env $k is '$($gsStep[0]['env'][$k])', not '$($pEnvWant[$k])'" } }
+    $pCases = [ordered]@{
+        'success is posted on exactly the head SHA' = @{ State = 'success'; Sha = $gSha; Api = 201; Exit = 0; Posted = $true }
+        'failure is posted and fails the job'       = @{ State = 'failure'; Sha = $gSha; Api = 201; Exit = 1; Posted = $true }
+        'status API error fails the job'            = @{ State = 'success'; Sha = $gSha; Api = 500; Exit = 1; Posted = $true }
+        'pending is never posted'                   = @{ State = 'pending'; Sha = $gSha; Api = 201; Exit = 1; Posted = $false }
+        'empty verdict is never posted'             = @{ State = ''; Sha = $gSha; Api = 201; Exit = 1; Posted = $false }
+        'malformed SHA is never posted'             = @{ State = 'success'; Sha = 'master'; Api = 201; Exit = 1; Posted = $false }
+    }
+    foreach ($n in $pCases.Keys) {
+        $c = $pCases[$n]
+        if (Test-Path -LiteralPath $postLog) { Remove-Item -LiteralPath $postLog -Force }
+        [System.IO.File]::WriteAllText($postCfg, "{`"status`": $($c.Api)}")
+        $r = Invoke-Py $pPy @{ STATE = $c.State; SHA = $c.Sha; DESCRIPTION = 'PASSED: test'; GH_TOKEN = 'offline-test-token'; GITHUB_API_URL = "http://127.0.0.1:$pport"
+                                GITHUB_REPOSITORY = 'zarfld/IntelAvbFilter'; GITHUB_RUN_ID = '777'; GITHUB_SERVER_URL = 'https://github.com' }
+        $posts = @(if (Test-Path -LiteralPath $postLog) { Get-Content -LiteralPath $postLog | ForEach-Object { $_ | ConvertFrom-Json } })
+        $ok = ($r.Exit -eq $c.Exit)
+        if ($c.Posted) {
+            $ok = $ok -and $posts.Count -eq 1 -and $posts[0].path -eq "/repos/zarfld/IntelAvbFilter/statuses/$gSha" -and $posts[0].body.state -ceq $c.State -and
+                  $posts[0].body.context -ceq 'HIL / pre-merge gate' -and $posts[0].body.target_url -eq 'https://github.com/zarfld/IntelAvbFilter/actions/runs/777' -and $posts[0].auth -eq 'Bearer offline-test-token'
+        } else { $ok = $ok -and $posts.Count -eq 0 }
+        if (-not $ok) { $x17 += "post '$n': exit $($r.Exit) (expected $($c.Exit)), $($posts.Count) POST(s): $(($posts | ConvertTo-Json -Compress -Depth 5)) $($r.Out -replace '\s+', ' ')" }
+    }
+} catch {
+    $x17 += "REAL-017 harness error: $($_.Exception.Message)"
+} finally {
+    if ($null -ne $psrv -and -not $psrv.HasExited) { $psrv.Kill() }
+}
+tc_check 'TEST-HILTRUST-REAL-017-pre-merge-gate-posts-success-only-for-passed-debug-and-release-hil-of-the-authorized-pr-head' ($x17.Count -eq 0) ($x17 -join ' || ')
 
 # ---------------------------------------------------------------------------------------------------------
 # REAL-016: the physical jobs' inline preflight, executed with stubbed read-only cmdlets (no machine query).

@@ -1578,9 +1578,15 @@ jobs:
         acceptance-tests,
         security-scan,
       ]
+    # Master pushes and v* tags (post-merge confirmation / release) and same-repository OWNER pull requests into master
+    # (the mandatory pre-merge HIL candidate; owner requirement 2026-10-30).  Fork and non-OWNER PRs are never staged.
     if: |
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) ||
+      (github.event_name == 'pull_request' &&
+       github.base_ref == 'master' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.author_association == 'OWNER')
     permissions:
       contents: write
     # One signed, separately identified package per configuration (hil.yml deploys and tests both).
@@ -1590,10 +1596,27 @@ jobs:
         config: [Debug, Release]
 
     steps:
-      - name: Checkout code
+      - name: Checkout the candidate revision
+        # On pull_request GITHUB_SHA is the synthetic refs/pull/N/merge commit; the candidate HIL tests (and the merge
+        # lands) is the PR HEAD commit, so exactly that commit is built, stamped and handed to hil.yml.
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
+
+      - name: Verify the checked-out candidate revision
+        id: staged-revision
+        shell: pwsh
+        env:
+          AVB_EXPECTED_STAGED_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $head = ([string](git rev-parse HEAD)).Trim()
+          if ($env:AVB_EXPECTED_STAGED_REVISION -cnotmatch '^[0-9a-f]{40}$' -or $head -cne $env:AVB_EXPECTED_STAGED_REVISION) {
+            Write-Host "::error title=Staged revision::checked-out HEAD '$head' is not the candidate revision '$env:AVB_EXPECTED_STAGED_REVISION'"
+            exit 1
+          }
+          "AVB_STAGED_REVISION=$head" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Staging candidate revision $head ($env:GITHUB_EVENT_NAME)"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -1633,16 +1656,16 @@ jobs:
           $ErrorActionPreference = 'Stop'
           . .\tools\lib\DriverPackage.ps1
           $pkg = "build\x64\${{ matrix.config }}\IntelAvbFilter\IntelAvbFilter"
-          $m = New-AvbDriverPackageManifest -PackageDir $pkg -Configuration '${{ matrix.config }}' -SourceRevision $env:GITHUB_SHA `
+          $m = New-AvbDriverPackageManifest -PackageDir $pkg -Configuration '${{ matrix.config }}' -SourceRevision $env:AVB_STAGED_REVISION `
                    -Repository $env:GITHUB_REPOSITORY -Workflow '.github/workflows/ci-standards-compliance.yml' -RunId $env:GITHUB_RUN_ID -RunAttempt $env:GITHUB_RUN_ATTEMPT
           $pin = Get-AvbPinnedSigner -CertificatePath 'tools\ci\signing\hil-test-signer.cer'
           if (-not $pin.Ok) { Write-Host "::error title=Pinned signer::$($pin.Error)"; exit 1 }
           # Trust is not evaluated here (the hosted builder does not trust the test root); the HIL machine does.
-          $v = Test-AvbDriverPackage -PackageDir $pkg -Configuration '${{ matrix.config }}' -ExpectedRevision $env:GITHUB_SHA -ExpectedRepository $env:GITHUB_REPOSITORY `
+          $v = Test-AvbDriverPackage -PackageDir $pkg -Configuration '${{ matrix.config }}' -ExpectedRevision $env:AVB_STAGED_REVISION -ExpectedRepository $env:GITHUB_REPOSITORY `
                    -ExpectedRunId $env:GITHUB_RUN_ID -ExpectedRunAttempt $env:GITHUB_RUN_ATTEMPT -ExpectedDriverSha256 $m.driverSha256 -PinnedThumbprint $pin.Thumbprint
           if (-not $v.Ok) { Write-Host "::error title=Package self-check failed::$($v.Reasons -join '; ')"; exit 1 }
           Write-Host "Package ${{ matrix.config }}: driver $($m.driverSha256), signer $($m.signer.catThumbprint)"
-          "## Staged driver package ${{ matrix.config }}`n`n- driver SHA256: $($m.driverSha256)`n- signer: $($m.signer.subject) ($($m.signer.catThumbprint))`n- revision: $env:GITHUB_SHA (run $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "## Staged driver package ${{ matrix.config }}`n`n- driver SHA256: $($m.driverSha256)`n- signer: $($m.signer.subject) ($($m.signer.catThumbprint))`n- revision: $env:AVB_STAGED_REVISION (run $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload the staged driver package
         # Exactly the package (inf/sys/cat/man) + avb-driver-package.json; hil.yml verifies it file by file.
