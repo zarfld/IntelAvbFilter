@@ -115,11 +115,25 @@ $TestBins = @($TestBins | Sort-Object -Unique | Where-Object { $Diagnostic -notc
 $BinExeRx  = '(?i)(?<![\w-])(' + (($TestBins | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\.exe\b'
 $TestDirRx = '(?i)avb_test[\\/]|\$testExeDir\b|-Filter\s+["'']?\*\.exe'
 # Built once (same patterns, same options as the static [regex]::IsMatch calls they replace - performance only).
-# RegexOptions.Compiled changes only how .NET executes the pattern, never what matches (performance, 2026-10-30:
-# Test-TestTarget scanned 46 MB of expanded text for test_hil_trust_boundary.ps1 alone - 29 s interpreted).
-$BinExeRegex  = New-Object System.Text.RegularExpressions.Regex ($BinExeRx, [System.Text.RegularExpressions.RegexOptions]::Compiled)
-$TestDirRegex = New-Object System.Text.RegularExpressions.Regex ($TestDirRx, [System.Text.RegularExpressions.RegexOptions]::Compiled)
-function Test-TestTarget([string]$Text) { return ($BinExeRegex.IsMatch($Text) -or $TestDirRegex.IsMatch($Text)) }
+$TestDirRegex = New-Object System.Text.RegularExpressions.Regex $TestDirRx
+# $BinExeRx evaluated only around each ".exe" (performance, 2026-10-30, same result as [regex]::IsMatch($Text, $BinExeRx)): the
+# lookbehind + ~100-name alternation is tried at every position, 29 s for the 46 MB that the 15 command targets of
+# test_hil_trust_boundary.ps1 expand to (0.2 s windowed; RegexOptions.Compiled measured 2x SLOWER on PowerShell 5.1).
+# Every match contains a ".exe" found by the same (?i) semantics; for the one at index i the window [i-L-1, i+5) holds
+# the name (<= L chars), the lookbehind character and the \b character.  The tail pattern ($BinExeRx + "(?:\W)?\z")
+# accepts only a match ending at that ".exe" (optionally followed by the one non-word character that satisfied \b);
+# a name starting at the window's first character would need L+1 chars, so the window edge never fakes the lookbehind.
+$ExeTokenRegex = New-Object System.Text.RegularExpressions.Regex '(?i)\.exe'
+$BinExeTailRegex = New-Object System.Text.RegularExpressions.Regex ($BinExeRx + '(?:\W)?\z')
+$BinNameMax = [int](@($TestBins | ForEach-Object { $_.Length }) | Measure-Object -Maximum).Maximum
+function Test-BinExeTarget([string]$Text) {
+    foreach ($m in $ExeTokenRegex.Matches($Text)) {
+        $a = [Math]::Max(0, $m.Index - $BinNameMax - 1); $b = [Math]::Min($Text.Length, $m.Index + 5)
+        if ($BinExeTailRegex.IsMatch($Text.Substring($a, $b - $a))) { return $true }
+    }
+    return $false
+}
+function Test-TestTarget([string]$Text) { return ((Test-BinExeTarget $Text) -or $TestDirRegex.IsMatch($Text)) }
 
 # ---------------------------------------------------------------------------------------------------------
 # Launch detection per file type -> @{ Direct = [string[]] target texts; Refs = [string[]] command texts }
