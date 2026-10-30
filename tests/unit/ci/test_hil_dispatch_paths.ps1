@@ -115,8 +115,10 @@ $TestBins = @($TestBins | Sort-Object -Unique | Where-Object { $Diagnostic -notc
 $BinExeRx  = '(?i)(?<![\w-])(' + (($TestBins | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\.exe\b'
 $TestDirRx = '(?i)avb_test[\\/]|\$testExeDir\b|-Filter\s+["'']?\*\.exe'
 # Built once (same patterns, same options as the static [regex]::IsMatch calls they replace - performance only).
-$BinExeRegex  = New-Object System.Text.RegularExpressions.Regex $BinExeRx
-$TestDirRegex = New-Object System.Text.RegularExpressions.Regex $TestDirRx
+# RegexOptions.Compiled changes only how .NET executes the pattern, never what matches (performance, 2026-10-30:
+# Test-TestTarget scanned 46 MB of expanded text for test_hil_trust_boundary.ps1 alone - 29 s interpreted).
+$BinExeRegex  = New-Object System.Text.RegularExpressions.Regex ($BinExeRx, [System.Text.RegularExpressions.RegexOptions]::Compiled)
+$TestDirRegex = New-Object System.Text.RegularExpressions.Regex ($TestDirRx, [System.Text.RegularExpressions.RegexOptions]::Compiled)
 function Test-TestTarget([string]$Text) { return ($BinExeRegex.IsMatch($Text) -or $TestDirRegex.IsMatch($Text)) }
 
 # ---------------------------------------------------------------------------------------------------------
@@ -146,15 +148,19 @@ function Get-PsLaunches([string]$Path) {
     }
     $expand = $null
     $expMemo = @{}   # (depth, text) -> expansion: a pure function of this file's assignments (performance, same result)
+    # The expansion is appended in a StringBuilder: the same text, in the same order, as the former "$out += ' ' + ..."
+    # (performance, 2026-10-30: that repeated copying was quadratic - 30 s for test_hil_trust_boundary.ps1, whose 15
+    # command targets expand to 46 MB).
     $expand = { param([string]$t, [int]$d)
         if ($d -le 0) { return $t }
         $mk = "$d|$t"
         if ($expMemo.ContainsKey($mk)) { return $expMemo[$mk] }
-        $out = $t
+        $sb = [System.Text.StringBuilder]::new([string]$t)
         foreach ($m in [regex]::Matches($t, '\$\{?(\w+)')) {
             $k = ('$' + $m.Groups[1].Value).ToLowerInvariant()
-            if ($defs.ContainsKey($k)) { foreach ($v in $defs[$k]) { $out += ' ' + (& $expand $v ($d - 1)) } }
+            if ($defs.ContainsKey($k)) { foreach ($v in $defs[$k]) { [void]$sb.Append(' ').Append([string](& $expand $v ($d - 1))) } }
         }
+        $out = $sb.ToString()
         $expMemo[$mk] = $out
         return $out }
     $direct = @(); $refs = @()
