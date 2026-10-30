@@ -52,6 +52,26 @@ The infrastructure is therefore not separable from #344's driver change without 
 - Evidence: RED 38/44 (REAL-007/008/009/011/012/017) → GREEN 44/44; 8/8 single-safeguard mutations caught; all 14
   `tests/unit/ci/*.ps1` + `test_hil_safety_gate.ps1` + `test_native_exit_codes.ps1` exit 0; no testcase ID removed.
 
+## Pre-run findings for the bootstrap HIL (2026-10-30, read-only)
+
+- **Staged artifacts cannot be tested locally with supported tooling.** `Invoke-HilDeployment.ps1` takes a `ci`
+  lock owned by GITHUB_RUN_ID/ATTEMPT/JOB; a local `Run-Tests-CI.ps1` / `Build-Tests.ps1` is then refused
+  (`HilLock.ps1` Resolve-AvbHilLockContext / Enter-AvbHilBuildExclusion).  Only spoofing the job identity would
+  work - rejected.  LocalSuites tests a LOCAL build of the exact revision; local and CI-staged binaries differ
+  (different signer, signature embedded in the .sys) and are never claimed identical.  The first test of a
+  CI-staged package is the post-merge master HIL.
+- **PASS is impossible by construction at the candidate:** declared coverage gaps HardwareMandatory 4,
+  HardwareIntegration 13 (`Run-Tests-CI.ps1` 602-623) -> suites INCOMPLETE; 15 #328 hazard holds -> BLOCKED.
+  Under GitHub Actions the two attended-only HardwareMutation entries are gaps too (2496-2501), so the automated
+  pre-merge gate cannot post `success` for ANY PR until these are resolved.
+- **Latest real evidence** `logs/LocalSuites_20261029_092109` (clean `9ba1979`, Debug+Release): all 8 suites
+  FAILED (24 FAILED, 6 FAILED_SETUP, 92 BLOCKED(SAFETY), 18 COVERAGE-GAP records; cleanup FAILED in every suite).
+  0 driver-source files changed `9ba1979..efb4bff`.  Historical - not evidence for the candidate.
+- LocalSuites' exit code is insufficient: record verdict `SKIPPED` (incl. `SKIPPED(INFRA)`) and cleanup
+  FAILED/NOT_VERIFIED do not make it exit nonzero.  Evaluation: `C:\Users\User\cqv\Test-BootstrapHilEvidence.ps1`
+  (read-only; validated on the 10-29 run: NOT PASS, 599 conditions; synthetic all-PASS control: only the 2 real
+  gap conditions remain).
+
 ## Designed pre-merge path (as investigated)
 
 - CI (PR-side): deploy-staging also for same-repo `pull_request`; checkout `pull_request.head.sha`, verify HEAD, stamp that SHA.
