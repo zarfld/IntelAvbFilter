@@ -1730,12 +1730,12 @@ try {
         $tmpG = Join-Path $script:Tmp "gate_$q"; New-Item -ItemType Directory -Path $tmpG -Force | Out-Null
         $evF = Join-Path $tmpG 'event.json'; $outF = Join-Path $tmpG 'out.txt'
         [System.IO.File]::WriteAllText($evF, ($(if ($c.ContainsKey('Event')) { $c.Event } else { New-GateEvent }) | ConvertTo-Json -Depth 8))
-        $e = @{}; foreach ($k in $okEnv.Keys) { $e[$k] = $okEnv[$k] }; foreach ($k in $c.Env.Keys) { $e[$k] = $c.Env[$k] }
+        $e = @{}; foreach ($k in $okEnv.Keys) { $e[$k] = $okEnv[$k] }; if ($c.ContainsKey('Env')) { foreach ($k in $c.Env.Keys) { $e[$k] = $c.Env[$k] } }
         $e['GITHUB_EVENT_PATH'] = $evF; $e['GITHUB_OUTPUT'] = $outF; $e['RUNNER_TEMP'] = $tmpG; $e['GITHUB_STEP_SUMMARY'] = (Join-Path $tmpG 'sum.md')
         $e['GITHUB_REPOSITORY'] = 'zarfld/IntelAvbFilter'; $e['GITHUB_RUN_ID'] = '777'; $e['GITHUB_RUN_ATTEMPT'] = '1'; $e['GITHUB_SERVER_URL'] = 'https://github.com'
         $r = Invoke-Py $gPy $e
         $o = @{}; if (Test-Path -LiteralPath $outF) { foreach ($l in (Get-Content -LiteralPath $outF)) { if ($l -match '^(\w+)=(.*)$') { $o[$Matches[1]] = $Matches[2] } } }
-        $jf = Join-Path $tmpG 'hil-gate\hil-gate-verdict.json'
+        $jf = Join-Path $tmpG 'hil-evidence\hil-gate-verdict.json'
         $j = if (Test-Path -LiteralPath $jf) { Get-Content -LiteralPath $jf -Raw | ConvertFrom-Json } else { $null }
         $why = if ($c.ContainsKey('Why')) { $c.Why } else { '' }
         if ($r.Exit -ne 0 -or $o['state'] -cne $c.State -or $o['verdict'] -cne $c.Verdict -or $o['sha'] -cne $gSha -or -not $o['description'] -or $o['description'].Length -gt 140 -or

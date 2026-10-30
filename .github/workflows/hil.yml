@@ -973,7 +973,7 @@ jobs:
                  'upstreamRunAttempt': wr.get('run_attempt'), 'hilRunId': E('GITHUB_RUN_ID'), 'hilRunAttempt': E('GITHUB_RUN_ATTEMPT'),
                  'hilRunUrl': run, 'evidenceClass': 'ci', 'results': res,
                  'recordedUtc': datetime.datetime.now(datetime.timezone.utc).isoformat()}
-          d = os.path.join(E('RUNNER_TEMP', '.'), 'hil-gate')
+          d = os.path.join(E('RUNNER_TEMP', '.'), 'hil-evidence')
           os.makedirs(d, exist_ok=True)
           with open(os.path.join(d, 'hil-gate-verdict.json'), 'w', encoding='utf-8') as fh:
               json.dump(doc, fh, indent=2)
@@ -1029,5 +1029,5 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: hil-gate-verdict
-          path: ${{ runner.temp }}/hil-gate/
+          path: ${{ runner.temp }}/hil-evidence/
           if-no-files-found: ignore
