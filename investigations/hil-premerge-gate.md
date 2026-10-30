@@ -1,6 +1,9 @@
 # Pre-merge HIL gate for PR #344 — investigation (2026-10-30)
 
-Status: **BLOCKED at bootstrap stage 1/2** — nothing implemented, committed, merged or changed on GitHub.
+Status (updated 2026-10-30): owner chose **Option A** (PR #344 is the bootstrap). Pre-merge path + regression tests
+implemented in #344 and verified OFFLINE only (see "Implementation" below). **Physical HIL of the final candidate:
+NOT RUN (pending, operator-executed).** Ruleset unchanged, nothing merged.  The "Blocker" section below records why
+PR #344 itself must be the bootstrap.
 
 ## FACTS (verified this session; master = 6f666d8, PR #344 head = c7b759c, 146 ahead / 0 behind)
 
@@ -37,7 +40,19 @@ evidence (driver identity/SHA256, cleanup/restoration evidence):
 
 The infrastructure is therefore not separable from #344's driver change without building a new hybrid runner revision.
 
-## Designed (not implemented) pre-merge path
+## Implementation (offline-verified; physical HIL pending)
+
+- `ci-standards-compliance.yml` deploy-staging: also for same-repository OWNER PRs into master; checks out
+  `pull_request.head.sha`, verifies HEAD (step `staged-revision`), stamps/self-checks the manifest with that SHA.
+- `hil.yml`: guards accept master push or same-repo PR; authorize PR branch (`PR_AUTHOR_ASSOCIATIONS = {'OWNER'}`,
+  open, base master, API head == CI head, head ref, API PR linkage, up to date except README); outputs `mode`,
+  `pr_number`, `deny_reasons`; acceptance output `verdict`; new hosted `hil-gate` posting `HIL / pre-merge gate`.
+- `test_hil_trust_boundary.ps1`: AuthorizedPR only behind authorize (FX-024..026), REAL-007/008/009/011 updated,
+  REAL-012 +30 PR authorization cases, REAL-017 gate verdict (24 cases) + status post (6 cases).
+- Evidence: RED 38/44 (REAL-007/008/009/011/012/017) → GREEN 44/44; 8/8 single-safeguard mutations caught; all 14
+  `tests/unit/ci/*.ps1` + `test_hil_safety_gate.ps1` + `test_native_exit_codes.ps1` exit 0; no testcase ID removed.
+
+## Designed pre-merge path (as investigated)
 
 - CI (PR-side): deploy-staging also for same-repo `pull_request`; checkout `pull_request.head.sha`, verify HEAD, stamp that SHA.
 - hil.yml (master-side) authorize, PR branch: exactly one linked PR; open; base master/this repo; head repo = this repo;
