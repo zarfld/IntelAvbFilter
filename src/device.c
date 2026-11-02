@@ -1262,6 +1262,7 @@ IntelAvbFilterDeviceIoControl(
                 } else {
                     lr->status = (matches == 0) ? (avb_u32)NDIS_STATUS_ADAPTER_NOT_FOUND : (avb_u32)NDIS_STATUS_FAILURE;
                     Status = (matches == 0) ? STATUS_NO_SUCH_DEVICE : STATUS_INVALID_DEVICE_STATE;
+                    InfoLength = sizeof(*lr);
                 }
             }
             break;
