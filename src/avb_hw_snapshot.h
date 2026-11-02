@@ -17,6 +17,37 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
                               PAVB_HW_SNAPSHOT_REQUEST out)
 {
     uint32_t id;
+
+    if (out == NULL) {
+        return;
+    }
+
+#ifdef INTEL_WIN32_KERNEL_MODE
+    __try {
+        ProbeForWrite(out, sizeof(*out), sizeof(avb_u32));
+        out->count = AVB_HWREG_COUNT;
+        for (id = 1u; id <= AVB_HWREG_COUNT; id++) {
+            AVB_HWREG_ENTRY *e = &out->entries[id - 1u];
+            uint32_t off = 0u, val = 0u;
+            e->id = id; e->offset = 0u; e->value = 0u;
+            if (ops == NULL || ops->hil_register_offset == NULL) { e->state = AVB_HWREG_STATE_NO_HAL; continue; }
+            if (!(capabilities & INTEL_CAP_MMIO))               { e->state = AVB_HWREG_STATE_NO_MMIO; continue; }
+            if (ops->hil_register_offset(id, &off) != 0)         { e->state = AVB_HWREG_STATE_NOT_IN_SSOT; continue; }
+            e->offset = off;
+            if (mmio_read == NULL || dev == NULL || mmio_read(dev, off, &val) != 0) { e->state = AVB_HWREG_STATE_READ_FAILED; continue; }
+            e->value = val;
+            e->state = AVB_HWREG_STATE_VALID;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (out != NULL) {
+            __try {
+                RtlZeroMemory(out, sizeof(*out));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                /* fail closed: do not dereference a poisoned or user-mode pointer again */
+            }
+        }
+    }
+#else
     out->count = AVB_HWREG_COUNT;
     for (id = 1u; id <= AVB_HWREG_COUNT; id++) {
         AVB_HWREG_ENTRY *e = &out->entries[id - 1u];
@@ -30,6 +61,7 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
         e->value = val;
         e->state = AVB_HWREG_STATE_VALID;
     }
+#endif
 }
 
 #endif /* AVB_HW_SNAPSHOT_H */
