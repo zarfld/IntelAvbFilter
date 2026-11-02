@@ -27,46 +27,57 @@ pull requests by anyone but the OWNER are never staged and never receive these s
 GitHub secrets are **not** a backup: their values cannot be read back. Never destroy the only recoverable copy of the
 private key. Required order:
 
-1. Generate (or recover) the identity.
-2. Export the PFX and the public certificate.
-3. Store an encrypted, access-controlled backup of the PFX.
-4. Protect its password separately from the backup.
+1. Generate the identity in memory (it never enters a certificate store; no key container is persisted).
+2. Export the password-protected PFX and the public certificate directly into the encrypted backup location.
+3. The backup location is encrypted (BitLocker volume or EFS directory), NTFS and access-controlled (no access for
+   Everyone / Users / Authenticated Users), outside the repository.
+4. Protect the PFX password separately from the backup (at least 16 characters).
 5. Verify that the backup opens with that password, holds the private key and matches the public certificate.
 6. Configure the GitHub secrets.
-7. Only then remove temporary working copies (the working PFX and the key in the certificate store).
+7. There is no working copy to remove: the PFX exists only in the backup location. Clear the clipboard if it was used.
 
-Never print a private key, the password or the PFX Base64 text (logs, transcripts, chat, reports), and avoid the
-clipboard.
+Never print a private key, the password or the PFX Base64 text (logs, transcripts, chat, reports). Never use the PFX
+with `signtool /f` on a persistent machine: signtool imports the key and leaves it under
+`%APPDATA%\Microsoft\Crypto\Keys` (observed 2026-10-30). The PFX signs only on the ephemeral GitHub-hosted runners of
+`deploy-staging`.
 
-## Creating the identity (offline, on an administrator's machine)
+## Creating the identity (offline, Windows PowerShell 5.1)
 
-Run **outside** the repository. Only the public certificate is written into the checkout; the PFX stays in a private
-working folder.
+Run outside the repository. `$Backup` must already exist on the encrypted, access-controlled location (custody step 3);
+an unencrypted local folder is not acceptable. Only the public certificate is written into the checkout. Existing
+certificates, keys and local signing (WDK test signing, `Build-Driver.ps1 -Sign`) are not touched.
 
 ```powershell
-$Repo = 'C:\path\to\IntelAvbFilter'                   # repository checkout: receives ONLY the public .cer
-$Work = Join-Path $env:USERPROFILE 'hil-signer-work'   # private temporary folder, never inside the repository
-New-Item -ItemType Directory -Path $Work -Force | Out-Null
-$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=IntelAvbFilter HIL Test Signing' `
-          -KeyUsage DigitalSignature -KeyExportPolicy Exportable -NotAfter (Get-Date).AddYears(3) `
-          -CertStoreLocation Cert:\CurrentUser\My -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
-$pw = Read-Host -AsSecureString 'PFX password'
-$pfx = Join-Path $Work 'hil-signer.pfx'
-Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $pw | Out-Null
-Export-Certificate -Cert $cert -FilePath (Join-Path $Repo 'tools\ci\signing\hil-test-signer.cer') | Out-Null   # public part -> commit (PR)
+$Repo   = 'C:\path\to\IntelAvbFilter'          # receives ONLY the public certificate
+$Backup = 'X:\path\to\encrypted\backup'         # existing, encrypted, access-controlled, outside the repository
+$pw = Read-Host -AsSecureString 'PFX password (input hidden, at least 16 characters)'
+# In-memory identity: ephemeral RSA 3072 key, SHA-256, end entity (CA=false), DigitalSignature, Code Signing.
+$rsa = New-Object System.Security.Cryptography.RSACng 3072
+$req = New-Object System.Security.Cryptography.X509Certificates.CertificateRequest('CN=IntelAvbFilter HIL Test Signing', $rsa,
+         [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension($false, $false, 0, $true)))
+$req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509KeyUsageExtension([Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, $true)))
+$eku = New-Object System.Security.Cryptography.OidCollection; [void]$eku.Add((New-Object System.Security.Cryptography.Oid '1.3.6.1.5.5.7.3.3'))
+$req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($eku, $false)))
+$req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509SubjectKeyIdentifierExtension($req.PublicKey, $false)))
+$cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5), [DateTimeOffset]::UtcNow.AddYears(3))
+$pfx = Join-Path $Backup "IntelAvbFilter-HIL-Test-Signing-$($cert.Thumbprint).pfx"
+$cer = Join-Path $Backup "IntelAvbFilter-HIL-Test-Signing-$($cert.Thumbprint).cer"
+[IO.File]::WriteAllBytes($pfx, $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $pw))
+[IO.File]::WriteAllBytes($cer, $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
 "thumbprint $($cert.Thumbprint), valid $($cert.NotBefore.ToString('u')) .. $($cert.NotAfter.ToString('u'))"
+$cert.Dispose(); $rsa.Dispose()
 ```
 
-Copy `$pfx` to the encrypted backup location and store the password separately (custody steps 3-4). Then verify the
-**backup copy** (step 5) - it must open with the password, hold the private key, and be the key pair of the committed
-certificate (a signature made with the backup's private key verifies with the committed public key):
+Verify the **backup** (custody step 5): it must open with the password, hold the private key, and be the key pair of
+the public certificate (a signature made with the backup's private key verifies with the public key). Managed
+cryptography only - no signtool:
 
 ```powershell
-# Same PowerShell session as the creation step ($Repo, $pw, $pfx, $cert).
-$Backup = 'X:\path\to\backup\hil-signer.pfx'          # the backup copy, not the working copy
+# Same PowerShell session ($Repo, $pw, $pfx, $cer).
 $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-$b = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($Backup, $pw, $flags)
-$pub = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2((Join-Path $Repo 'tools\ci\signing\hil-test-signer.cer'))
+$b = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfx, $pw, $flags)
+$pub = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cer)
 $data = [Text.Encoding]::UTF8.GetBytes('hil-signer backup check')
 # GetRSAPrivateKey/GetRSAPublicKey are extension methods on .NET Framework: PowerShell 5.1 must call them statically.
 $ext = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]
@@ -76,28 +87,53 @@ $sig = $ext::GetRSAPrivateKey($b).SignData($data, [Security.Cryptography.HashAlg
 $b.Dispose()
 ```
 
-All three must be `True`. Then configure the **repository** secrets without the clipboard and without printing them
-(GitHub CLI, step 6; `gh secret set` reads the value from standard input, or prompts with masked input):
+All three must be `True`. Only then copy the public certificate into the checkout (commit it via pull request):
+
+```powershell
+Copy-Item -LiteralPath $cer -Destination (Join-Path $Repo 'tools\ci\signing\hil-test-signer.cer')
+```
+
+## Configuring the repository secrets (custody step 6)
+
+Both are **repository** secrets (Settings > Secrets and variables > Actions > Secrets > Repository secrets > New
+repository secret), never environment secrets: `HIL_TEST_SIGNING_PFX_BASE64` (the PFX file as Base64) and
+`HIL_TEST_SIGNING_PFX_PASSWORD` (typed, never copied).
+
+With the GitHub CLI (no clipboard): `gh secret set` reads the value from standard input or a masked prompt.
 
 ```powershell
 [Convert]::ToBase64String([IO.File]::ReadAllBytes($pfx)) | gh secret set HIL_TEST_SIGNING_PFX_BASE64 -R zarfld/IntelAvbFilter
 gh secret set HIL_TEST_SIGNING_PFX_PASSWORD -R zarfld/IntelAvbFilter    # type the PFX password at the masked prompt
-gh secret list -R zarfld/IntelAvbFilter                                 # names and dates only
 ```
 
-Only after the backup verification succeeded and both secrets are set, remove the temporary working copies (step 7):
+With the web UI the Base64 has to pass through the clipboard. Before: Settings > System > Clipboard - "Clipboard
+history" off and sharing across devices off; no remote-desktop session and no clipboard manager running. Then copy,
+paste into the secret value, save, and clear the clipboard at once:
 
 ```powershell
-Remove-Item -LiteralPath $pfx
-Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey
+Set-Clipboard -Value ([Convert]::ToBase64String([IO.File]::ReadAllBytes($pfx)))
+# ... paste into HIL_TEST_SIGNING_PFX_BASE64, "Add secret" ...
+Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::Clear()
+"clipboard empty: $([string]::IsNullOrEmpty((Get-Clipboard -Raw)))"
 ```
 
-## Trusting it on the HIL machine (elevated, once)
+Residual risk: had clipboard history or cross-device sharing been on, the entry stays in Win+V history (clear it there)
+or may have been synchronized; any process watching the clipboard could have read it. The Base64 is the
+password-protected PFX, so it is not usable without the separately typed password.
+
+## Trusting it on the HIL machine (elevated, once, additive)
+
+Adds the public certificate only; existing trust entries are never removed or replaced. Kept separate from any driver
+installation or HIL run.
 
 ```powershell
 $Repo = 'C:\path\to\IntelAvbFilter'
-Import-Certificate -FilePath (Join-Path $Repo 'tools\ci\signing\hil-test-signer.cer') -CertStoreLocation Cert:\LocalMachine\Root
-Import-Certificate -FilePath (Join-Path $Repo 'tools\ci\signing\hil-test-signer.cer') -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
+$cerPath = Join-Path $Repo 'tools\ci\signing\hil-test-signer.cer'
+$tp = (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cerPath)).Thumbprint
+foreach ($store in 'Root', 'TrustedPublisher') {
+    if (Test-Path "Cert:\LocalMachine\$store\$tp") { "${store}: $tp already present - unchanged" }
+    else { $null = Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\LocalMachine\$store"; "${store}: imported $tp" }
+}
 ```
 
 ## Chain of custody (enforced, `tools/lib/DriverPackage.ps1`)
