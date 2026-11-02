@@ -33,8 +33,12 @@ clean:
 	@if exist *.pdb del /Q *.pdb
 	@if exist *.ilk del /Q *.ilk
 
-# Run test
-run: $(TARGET)
-	.\$(TARGET)
+# Run test: the registered entry through the authoritative dispatcher (build provenance, HIL safety gate, adapter
+# state check; TEST-HILPATH-014).  It runs the Build-Tests artifact, never the local $(TARGET) of this makefile.
+!IFNDEF AVB_RUN_CFG
+AVB_RUN_CFG = Debug
+!ENDIF
+run:
+	powershell -NoProfile -ExecutionPolicy Bypass -File ..\..\..\tools\test\Run-Tests-CI.ps1 -Suite HardwareUnit -Configuration $(AVB_RUN_CFG) -Tests test_tx_timestamp_retrieval
 
 .PHONY: all clean run

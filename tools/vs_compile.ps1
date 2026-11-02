@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory=$true)][string]$BuildCmd
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
 Write-Host "[vs_compile] Resolving Visual Studio environment..."
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 if(!(Test-Path $vswhere)) { Write-Host '[vs_compile] ERROR: vswhere.exe not found (install VS Build Tools)' -ForegroundColor Red; exit 1 }
@@ -18,10 +19,11 @@ if(!(Test-Path $shortPath)) { $shortPath = $launchVsDevShell }
 
 Write-Host "[vs_compile] Executing: $BuildCmd"
 
-# Create temp PowerShell script to execute build command in VS environment
-# Use ultra-short name to minimize command line length
-$tempScript = Join-Path $env:TEMP 'vc.ps1'
-$tempCmd = Join-Path $env:TEMP 'vc.cmd'
+# Create temp PowerShell script to execute build command in VS environment.
+# Unique names per invocation: a fixed %TEMP%\vc.ps1 / vc.cmd let concurrent or stale compiles overwrite each other.
+$tempId = [System.IO.Path]::GetRandomFileName().Replace('.', '')
+$tempScript = Join-Path $env:TEMP "vc_$tempId.ps1"
+$tempCmd = Join-Path $env:TEMP "vc_$tempId.cmd"
 
 # Write build command to separate file to avoid embedding it in script
 $BuildCmd | Out-File -FilePath $tempCmd -Encoding ASCII -NoNewline
@@ -32,21 +34,28 @@ if (-not $env:VSCMD_VER) {
     $devShellInit = "& '$shortPath' -Arch amd64 -SkipAutomaticLocation | Out-Null`r`n"
 }
 
+# The child reads $global:LASTEXITCODE (reset first, so an earlier command's code is never reused); a command that
+# runs no native program leaves no exit code, which is a failure, never success.
 @"
 $devShellInit`$cmd = Get-Content '$tempCmd' -Raw
+`$global:LASTEXITCODE = `$null
 Invoke-Expression `$cmd
-`$ec = `$LASTEXITCODE
+`$ec = `$global:LASTEXITCODE
 Remove-Item '$tempCmd' -ErrorAction SilentlyContinue
+if (`$null -eq `$ec) { Write-Host '[vs_compile] no exit code observed (the command ran no native program)'; exit 1 }
 exit `$ec
 "@ | Out-File -FilePath $tempScript -Encoding ASCII
 
-# Execute directly in current PowerShell session (not via nested powershell.exe)
-& $tempScript
-$ec = $LASTEXITCODE
+# Execute directly in current PowerShell session (not via nested powershell.exe).  A PowerShell error in the child is
+# a failure with no exit code, never success.
+Reset-AvbExitCode
+try { & $tempScript }
+catch { Write-Host "[vs_compile] PowerShell error: $($_.Exception.Message)" -ForegroundColor Red; Reset-AvbExitCode }
+$ec = Get-AvbExitCode
 
-# Cleanup temp script (keep it if build failed for debugging)
-if($ec -eq 0){ Remove-Item $tempScript -ErrorAction SilentlyContinue }
-else { Write-Host "[vs_compile] Temp script preserved for debugging: $tempScript" }
-
-if($ec -ne 0){ Write-Host "[vs_compile] Command failed with exit code $ec" -ForegroundColor Red }
-exit $ec
+# Cleanup temp files (keep the script if the build failed, for debugging)
+Remove-Item $tempCmd -ErrorAction SilentlyContinue
+if (Test-AvbExitSuccess $ec) { Remove-Item $tempScript -ErrorAction SilentlyContinue; exit 0 }
+Write-Host "[vs_compile] Temp script preserved for debugging: $tempScript"
+Write-Host "[vs_compile] Command failed with exit code $(Format-AvbExitCode $ec)" -ForegroundColor Red
+exit (Get-AvbFailureExitCode $ec)

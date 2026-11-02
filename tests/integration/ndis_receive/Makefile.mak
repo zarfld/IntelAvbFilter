@@ -47,9 +47,14 @@ clean:
 	@if exist *.ilk del /Q *.ilk
 	@echo Cleaned build artifacts
 
-run: $(TARGET)
+# Run test: the registered entry through the authoritative dispatcher (build provenance, HIL safety gate, adapter
+# state check; TEST-HILPATH-014).  It runs the Build-Tests artifact, never the local $(TARGET) of this makefile.
+!IFNDEF AVB_RUN_CFG
+AVB_RUN_CFG = Debug
+!ENDIF
+run:
 	@echo.
 	@echo ============================================================
-	@echo   Running NDIS FilterReceive Tests
+	@echo   Running NDIS FilterReceive Tests (Run-Tests-CI.ps1, gated)
 	@echo ============================================================
-	@.\$(TARGET)
+	powershell -NoProfile -ExecutionPolicy Bypass -File ..\..\..\tools\test\Run-Tests-CI.ps1 -Suite HardwareIntegration -Configuration $(AVB_RUN_CFG) -Tests test_ndis_receive_path

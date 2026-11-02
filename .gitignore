@@ -385,6 +385,9 @@ test_script*.txt
 test_baseline_*.txt
 # WDK / MSVC intermediate files in root
 *.cer
+# Pinned PUBLIC HIL signer, tracked on purpose (tools/ci/signing/README.md). Only this exact path; every other
+# certificate stays ignored, and private keys (*.pfx) are never tracked.
+!tools/ci/signing/hil-test-signer.cer
 .github/skills/notebooklm-experts/data/profiles/default/auth_info.json
 .github/skills/notebooklm-experts/data/profiles.json
 .github/skills/notebooklm-experts/data/profiles/default/auth_info.json

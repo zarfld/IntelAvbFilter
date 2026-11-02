@@ -9,7 +9,7 @@
  *                  delta[i] = tx[i] - phc[i]; stddev(delta) < 100 ns (per issue #199)
  *   UT-CORR-008  Burst consistency: 100 (PHC,TX) pairs at ~1ms intervals —
  *                  all |delta[i]| < 1 µs; variance(delta) < 10000 (stddev < 100 ns)
- *   UT-CORR-009  Driver reload: service restart — PHC-TX correlation restored post-reload
+ *   UT-CORR-009  Driver reload: moved to test_ptp_phc_lifecycle.c (own executable, Unsafe)
  *
  * Architecture compliance:
  *   - No device-specific register offsets (HAL rule)
@@ -29,200 +29,7 @@
  *   IOCTL_AVB_ENUM_ADAPTERS       (code 31) — adapter enumeration
  */
 
-#include <windows.h>
-#include <winioctl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
-#define _USE_MATH_DEFINES
-#include <math.h>    /* sqrt */
-
-#ifndef NDIS_STATUS_SUCCESS
-#define NDIS_STATUS_SUCCESS  ((NDIS_STATUS)0x00000000L)
-#endif
-typedef ULONG NDIS_STATUS;
-
-#include "../../../include/avb_ioctl.h"
-#include "../../common/avb_test_common.h"   /* I210 TIMINCA oracle (datasheet 8.15.11), verified restore (#343) */
-
-/* -------------------------------------------------------------------------
- * Configuration
- * -------------------------------------------------------------------------*/
-#define DEVICE_PATH_W       L"\\\\.\\IntelAvbFilter"
-#define DELTA_1US_NS        1000ULL     /* 1 microsecond in nanoseconds */
-#define DELTA_JITTER_NS     100ULL      /* stddev threshold per issue #199 (100 ns) */
-#define JITTER_SAMPLES      1000        /* sample count for UT-CORR-007 */
-#define BURST_COUNT         100         /* burst packet count for UT-CORR-008 */
-#define TX_RETRY_COUNT      10          /* retries to poll TX timestamp FIFO */
-#define TX_RETRY_SLEEP_MS   2           /* ms between TX FIFO read retries */
-#define SERVICE_NAME        "IntelAvbFilter"
-
-/* -------------------------------------------------------------------------
- * Test result counters
- * -------------------------------------------------------------------------*/
-static int s_total    = 0;
-static int s_passed   = 0;
-static int s_failed   = 0;
-static int s_skipped  = 0;  /* SKIP: hardware not ready, capability absent */
-static int s_cleanup_failed = 0;  /* CLEANUP_FAILED: restore step failed */
-
-static void tc_result(const char *name, bool passed)
-{
-    s_total++;
-    if (passed) { s_passed++; printf("  [PASS] %s\n", name); }
-    else        { s_failed++; printf("  [FAIL] %s\n", name); }
-}
-
-/* Use tc_skip instead of tc_result(name, true) for non-applicable conditions.
- * SKIP is distinct from PASS in the summary and does not contribute to s_passed. */
-static void tc_skip(const char *reason)
-{
-    s_total++;
-    s_skipped++;
-    printf("  [SKIP] %s\n", reason);
-}
-
-/* BLOCKED = unmet safety prerequisite; a failure-class verdict (docs/testing/test-verdict-contract.md), never PASS/SKIP. */
-static void tc_blocked(const char *reason)
-{
-    s_total++;
-    s_failed++;
-    printf("  [BLOCKED] %s\n", reason);
-}
-
-/* -------------------------------------------------------------------------
- * QPC helper — user-mode QueryPerformanceCounter wrapper
- * -------------------------------------------------------------------------*/
-static LARGE_INTEGER QPC(LARGE_INTEGER *freq)
-{
-    LARGE_INTEGER qpc = {0};
-    if (freq) QueryPerformanceFrequency(freq);
-    QueryPerformanceCounter(&qpc);
-    return qpc;
-}
-
-/* Convert QPC tick delta to nanoseconds */
-static uint64_t qpc_delta_to_ns(LARGE_INTEGER t0, LARGE_INTEGER t1, LARGE_INTEGER freq)
-{
-    int64_t ticks = t1.QuadPart - t0.QuadPart;
-    if (ticks <= 0 || freq.QuadPart == 0) return 0;
-    return (uint64_t)((double)ticks / (double)freq.QuadPart * 1e9);
-}
-
-/* -------------------------------------------------------------------------
- * PHC read helper
- * -------------------------------------------------------------------------*/
-static bool read_phc(HANDLE hDev, uint32_t adapter_idx, uint64_t *out_ns)
-{
-    AVB_TIMESTAMP_REQUEST r = {0};
-    r.clock_id = adapter_idx;
-    DWORD br = 0;
-    BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_GET_TIMESTAMP,
-                              &r, sizeof(r), &r, sizeof(r), &br, NULL);
-    if (!ok || r.status != NDIS_STATUS_SUCCESS || r.timestamp == 0) return false;
-    *out_ns = r.timestamp;
-    return true;
-}
-
-/* -------------------------------------------------------------------------
- * Open device helper — FILE_SHARE_READ|WRITE allows concurrent handles from
- * the same process (needed for per-adapter handle isolation tests).
- * -------------------------------------------------------------------------*/
-static HANDLE open_device(void)
-{
-    return CreateFileW(
-        DEVICE_PATH_W,
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
-}
-
-/* -------------------------------------------------------------------------
- * TX timestamp helper — poll hardware FIFO with retry
- *
- * Returns true if a valid TX timestamp is available.  The FIFO may not be
- * populated immediately after IOCTL_AVB_TEST_SEND_PTP if the miniport has
- * not yet physically transmitted the frame, so we retry up to TX_RETRY_COUNT
- * times with TX_RETRY_SLEEP_MS between attempts.
- * -------------------------------------------------------------------------*/
-static bool get_tx_timestamp_retry(HANDLE hDev, uint32_t adapter_idx, uint64_t *out_ns)
-{
-    int attempt;
-    for (attempt = 0; attempt < TX_RETRY_COUNT; attempt++) {
-        if (attempt > 0) Sleep(TX_RETRY_SLEEP_MS);
-        AVB_TX_TIMESTAMP_REQUEST r = {0};
-        r.adapter_index = adapter_idx;
-        DWORD br = 0;
-        BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_GET_TX_TIMESTAMP,
-                                  &r, sizeof(r), &r, sizeof(r), &br, NULL);
-        if (!ok) return false;                  /* IOCTL dispatch error */
-        if (r.status != NDIS_STATUS_SUCCESS) return false;
-        if (r.valid && r.timestamp_ns != 0) {
-            *out_ns = r.timestamp_ns;
-            return true;
-        }
-    }
-    return false;  /* FIFO empty after all retries (link down or HW ts disabled) */
-}
-
-/* -------------------------------------------------------------------------
- * Send PTP test packet and return provenance-tagged result.
- *
- * Injects a PTP Sync frame via IOCTL_AVB_TEST_SEND_PTP (kernel-mode).
- * Both timestamp_ns (pre-send) and phc_at_send_ns (IOCTL-entry) are now
- * DISTINCT snapshots; their delta represents kernel IOCTL setup overhead
- * (~100-500 ns) NOT hardware egress latency.
- *
- * ts_provenance is always PRE_SEND_PHC or SOFTWARE_FALLBACK — never
- * VERIFIED_HARDWARE_TX.  Callers that need hardware TX-PHC correlation
- * must use IOCTL_AVB_GET_TX_TIMESTAMP after the send and verify that
- * ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX before claiming PASS.
- *
- * Returns false if the IOCTL fails or packets_sent == 0.
- * -------------------------------------------------------------------------*/
-static bool send_ptp_get_tx(HANDLE hDev, uint32_t adapter_idx,
-                             uint32_t seq_id, uint64_t *out_tx_ns,
-                             uint64_t *out_phc_ns)  /* may be NULL */
-{
-    AVB_TEST_SEND_PTP_REQUEST send_req = {0};
-    send_req.adapter_index = adapter_idx;
-    send_req.sequence_id   = seq_id;
-    DWORD br = 0;
-    BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_TEST_SEND_PTP,
-                              &send_req, sizeof(send_req),
-                              &send_req, sizeof(send_req), &br, NULL);
-    if (!ok || send_req.status != NDIS_STATUS_SUCCESS || send_req.packets_sent == 0)
-        return false;
-    if (out_phc_ns) *out_phc_ns = send_req.phc_at_send_ns;  /* IOCTL-entry PHC snapshot */
-    *out_tx_ns = send_req.timestamp_ns;                       /* pre-send SYSTIM snapshot */
-    return (*out_tx_ns > 0);
-}
-
-/* Returns true only when the SEND_PTP result carries provenance that confirms
- * it came from hardware SYSTIM (not QPC fallback).  Currently always returns
- * false because SEND_PTP never yields VERIFIED_HARDWARE_TX. */
-static bool send_ptp_is_hw_verified(HANDLE hDev, uint32_t adapter_idx, uint32_t seq_id,
-                                     uint64_t *out_tx_ns, uint64_t *out_phc_ns)
-{
-    AVB_TEST_SEND_PTP_REQUEST send_req = {0};
-    send_req.adapter_index = adapter_idx;
-    send_req.sequence_id   = seq_id;
-    DWORD br = 0;
-    BOOL ok = DeviceIoControl(hDev, IOCTL_AVB_TEST_SEND_PTP,
-                              &send_req, sizeof(send_req),
-                              &send_req, sizeof(send_req), &br, NULL);
-    if (!ok || send_req.status != NDIS_STATUS_SUCCESS || send_req.packets_sent == 0)
-        return false;
-    if (out_phc_ns) *out_phc_ns = send_req.phc_at_send_ns;
-    if (out_tx_ns)  *out_tx_ns  = send_req.timestamp_ns;
-    /* Only VERIFIED_HARDWARE_TX qualifies for TX-PHC correlation claims.
-     * PRE_SEND_PHC and SOFTWARE_FALLBACK always return false here. */
-    return (send_req.ts_provenance == AVB_TX_PROV_VERIFIED_HARDWARE_TX);
-}
+#include "ptp_phc_common.h"   /* shared helpers (verbatim from this file), also used by test_ptp_phc_lifecycle.c */
 
 /* =========================================================================
  * UT-CORR-005: Epoch Reset — TX timestamps track new PHC epoch
@@ -245,10 +52,11 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     printf("  Verifies: #149 (REQ-F-PTP-007) | Traces to: #48 , Spec: issue #199\n");
 
     /* --- Step 1: Verify TX-PHC correlation before reset --- */
+    /* Step 1-2 are the precondition (TX-PHC correlated before the reset).  Every exit here happens before the first
+     * SET_TIMESTAMP: FAILED_SETUP (not SKIP, not a test FAIL), so the epoch-reset coverage stays visibly missing. */
     uint64_t phc_before = 0;
     if (!read_phc(hDev, adapter_idx, &phc_before)) {
-        printf("  [SKIP] PHC read failed — adapter not ready\n");
-        tc_skip("UT-CORR-005 Epoch Reset: adapter not ready");
+        tc_failed_setup("UT-CORR-005", adapter_idx, "PHC read failed - adapter not ready; SET_TIMESTAMP not issued");
         return;
     }
     printf("  phc_before = %llu ns\n", (unsigned long long)phc_before);
@@ -256,20 +64,26 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     uint64_t tx_before = 0;
     uint64_t phc_before_send = 0;  /* atomic PHC ref from kernel IOCTL entry */
     bool tx_before_ok = send_ptp_get_tx(hDev, adapter_idx, 0x500U, &tx_before, &phc_before_send);
-    bool corr_before_ok = true;
-    if (tx_before_ok) {
+    if (!tx_before_ok) {
+        /* Previously only a NOTE and the reset ran anyway: the procedure's step 2 (correlation before reset) was then
+         * never established, and the epoch-reset result could not be attributed to TX timestamping. */
+        tc_failed_setup("UT-CORR-005", adapter_idx,
+                        "TX timestamp not available before reset (link down / HW ts disabled); SET_TIMESTAMP not issued");
+        return;
+    }
+    {
         int64_t d = (int64_t)(tx_before - phc_before_send);
         printf("  tx_before  = %llu ns  (delta = %lld ns)\n",
                (unsigned long long)tx_before, (long long)d);
         if (d < 0 || (uint64_t)d >= DELTA_1US_NS) {
-            printf("  FAIL: |tx_before - phc_before_send| = %lld ns >= 1 us\n", (long long)d);
-            tc_result("UT-CORR-005 TX-PHC correlation valid before reset", false);
+            char why[200];
+            snprintf(why, sizeof(why),
+                     "TX-PHC correlation before reset %lld ns not in [0, 1000) ns (tx=%llu phc_at_send=%llu); SET_TIMESTAMP not issued",
+                     (long long)d, (unsigned long long)tx_before, (unsigned long long)phc_before_send);
+            tc_failed_setup("UT-CORR-005", adapter_idx, why);
             return;
         }
-    } else {
-        printf("  NOTE: TX timestamp not available before reset (link down / HW ts disabled)\n");
     }
-    (void)corr_before_ok;  /* suppress unused-variable warning */
 
     /* --- Step 2: Reset PHC --- */
     AVB_TIMESTAMP_REQUEST set_req = {0};
@@ -296,7 +110,7 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
         set_req.timestamp = phc_before + 200000000ULL;
         if (!DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
                         &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL)) {
-            printf("  [CLEANUP_FAILED] PHC restore IOCTL failed on early exit (error %lu)\n", GetLastError());
+            printf("  [CLEANUP:FAILED] UT-CORR-005/adapter:%u: PHC restore IOCTL failed on early exit (error %lu)\n", adapter_idx, GetLastError());
             s_cleanup_failed++;
         }
         return;
@@ -320,7 +134,7 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
         set_req.timestamp = phc_before + 500000000ULL;
         if (!DeviceIoControl(hDev, IOCTL_AVB_SET_TIMESTAMP,
                         &set_req, sizeof(set_req), &set_req, sizeof(set_req), &br, NULL)) {
-            printf("  [CLEANUP_FAILED] PHC restore IOCTL failed on early exit (error %lu)\n", GetLastError());
+            printf("  [CLEANUP:FAILED] UT-CORR-005/adapter:%u: PHC restore IOCTL failed on early exit (error %lu)\n", adapter_idx, GetLastError());
             s_cleanup_failed++;
         }
         return;
@@ -363,8 +177,8 @@ static void test_ut_corr_005(HANDLE hDev, uint32_t adapter_idx)
     printf("  PHC restored to ~%llu ns (restore_ok=%d)\n",
            (unsigned long long)set_req.timestamp, (int)phc_restore_ok);
     if (!phc_restore_ok) {
-        printf("  [CLEANUP_FAILED] PHC restore IOCTL failed (error %lu) — PHC epoch left at reset value\n",
-               GetLastError());
+        printf("  [CLEANUP:FAILED] UT-CORR-005/adapter:%u: PHC restore IOCTL failed (error %lu) — PHC epoch left at reset value\n",
+               adapter_idx, GetLastError());
         s_cleanup_failed++;
     }
 
@@ -513,7 +327,7 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     BOOL restore_ok;
     if (corr6_i210) {
         /* verified by readback against the saved RAW baseline (exact inside the policy, else nominal) */
-        restore_ok = (AvbTestI210RestoreVerified(hDev, cfg.timinca, "UT-CORR-006 restore") == 1);
+        restore_ok = (AvbTestI210RestoreVerifiedAs(hDev, cfg.timinca, "UT-CORR-006 restore", "[CLEANUP:FAILED]", "[CLEANUP:SUCCESS]") == 1);
     } else {
     freq_req.increment_ns   = increment_ns;
     freq_req.increment_frac = increment_frac;
@@ -523,13 +337,13 @@ static void test_ut_corr_006(HANDLE hDev, uint32_t adapter_idx)
     printf("  Restored increment to %u ns (ok=%d)\n", increment_ns, (int)restore_ok);
     }
     if (!restore_ok) {
-        printf("  [CLEANUP_FAILED] Frequency restore IOCTL failed (error %lu) — TIMINCA left at adjusted value\n",
-               GetLastError());
+        if (!corr6_i210)   /* the I210 helper has printed its own [CLEANUP:FAILED] line with the readback */
+            printf("  [CLEANUP:FAILED] UT-CORR-006/adapter:%u: frequency restore IOCTL failed (error %lu) — TIMINCA left at adjusted value\n",
+                   adapter_idx, GetLastError());
         s_cleanup_failed++;
-        passed = false;  /* restore failure overrides test result */
+        /* Cleanup only (Q 2026-10-28): the functional verdict below is unchanged (was: passed = false). */
     }
 
-    /* Report result AFTER restore so restore outcome is included in verdict */
     tc_result("UT-CORR-006 Freq Adj: IOCTL OK, PHC advancing, TX-PHC correlated", passed);
 }
 
@@ -772,229 +586,6 @@ static void test_ut_corr_008(HANDLE hDev, uint32_t adapter_idx)
 }
 
 /* =========================================================================
- * UT-CORR-009: Driver Reload — TX-PHC correlation restored after reload
- *
- * Procedure (per issue #199):
- *   1. Open device; read phc1, send PTP → tx1; verify |tx1 - phc1| < 1 µs
- *   2. Close handle; restart IntelAvbFilter service
- *   3. Re-open device; verify adapter count matches pre-reload
- *   4. Read phc2, send PTP → tx2; verify |tx2 - phc2| < 1 µs
- *
- * Requires elevated privileges (SCM service control is always granted when
- * run via Run-Tests-Elevated.ps1).
- * =========================================================================*/
-static bool restart_service(const char *svc_name, int timeout_ms)
-{
-    SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
-    if (!hSCM) {
-        printf("  [SKIP] OpenSCManager failed (error %lu) -- elevated?\n", GetLastError());
-        return false;
-    }
-    SC_HANDLE hSvc = OpenServiceA(hSCM, svc_name,
-                                   SERVICE_STOP | SERVICE_QUERY_STATUS);
-    if (!hSvc) {
-        printf("  [SKIP] OpenService('%s') failed (error %lu)\n", svc_name, GetLastError());
-        CloseServiceHandle(hSCM);
-        return false;
-    }
-
-    SERVICE_STATUS ss = {0};
-    ControlService(hSvc, SERVICE_CONTROL_STOP, &ss);
-
-    int waited = 0;
-    while (waited < timeout_ms) {
-        Sleep(500); waited += 500;
-        if (!QueryServiceStatus(hSvc, &ss)) break;
-        if (ss.dwCurrentState == SERVICE_STOPPED) break;
-    }
-    printf("  Service stop: state=%lu (waited %d ms)\n", ss.dwCurrentState, waited);
-    CloseServiceHandle(hSvc);
-    CloseServiceHandle(hSCM);
-
-    /* Delegate restart to the established install infrastructure.
-     * Direct StartServiceA fails during NDIS's double pause/detach cycle because
-     * the DriverStore .sys is transiently inaccessible; the install script handles
-     * DriverStore lock detection, pnputil sequencing, and NDIS rebind correctly.
-     * CWD is assumed to be the repo root (set by Run-Tests-Elevated.ps1). */
-    printf("  Reinstalling via Install-Driver-Elevated.ps1 -Action Reinstall...\n");
-    int rc = system("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass"
-                    " -File tools\\setup\\Install-Driver-Elevated.ps1"
-                    " -Configuration Debug -Action Reinstall");
-    if (rc != 0) {
-        printf("  [FAIL] Reinstall script returned exit code %d\n", rc);
-        return false;
-    }
-
-    hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
-    if (!hSCM) return false;
-    hSvc = OpenServiceA(hSCM, svc_name, SERVICE_QUERY_STATUS);
-    bool running = false;
-    if (hSvc) {
-        QueryServiceStatus(hSvc, &ss);
-        printf("  Service state after reinstall: %lu\n", ss.dwCurrentState);
-        running = (ss.dwCurrentState == SERVICE_RUNNING);
-        CloseServiceHandle(hSvc);
-    }
-    CloseServiceHandle(hSCM);
-    return running;
-}
-
-static void test_ut_corr_009(uint32_t adapter_count_before)
-{
-    printf("\n[UT-CORR-009] Driver Reload: TX-PHC correlation restored after service restart\n");
-    printf("  Verifies: #149 (REQ-F-PTP-007) | Traces to: #48 , Spec: issue #199\n");
-    printf("  Requires elevated privileges for SCM service control.\n");
-    printf("  NOTE: adapter configuration after reinstall may differ from pre-test state.\n");
-
-    /* --- Pre-condition: record device-node accessibility and adapter identities --- */
-    {
-        HANDLE hProbe = CreateFileW(L"\\\\.\\IntelAvbFilter",
-                                    GENERIC_READ | GENERIC_WRITE,
-                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hProbe == INVALID_HANDLE_VALUE) {
-            printf("  [PRE] \\\\.\\ IntelAvbFilter inaccessible before reload (Win32 error %lu)\n",
-                   GetLastError());
-            tc_result("UT-CORR-009 Device node accessible before reload", false);
-            return;
-        }
-        printf("  [PRE] \\\\.\\ IntelAvbFilter accessible before reload\n");
-        CloseHandle(hProbe);
-    }
-
-    /* --- Step 1: Verify PHC accessibility before reload (lifecycle check only).
-     * We do NOT check TX-PHC correlation before reload because send_ptp_get_tx
-     * returns a PRE_SEND_PHC snapshot, not a hardware egress timestamp.
-     * Checking |tx1 - phc1_send| < 1µs would measure kernel overhead, not
-     * hardware correlation, and is not a meaningful pre-reload baseline. --- */
-    HANDLE hDev1 = open_device();
-    if (hDev1 == INVALID_HANDLE_VALUE) {
-        printf("  FAIL: Cannot open device before reload (error %lu)\n", GetLastError());
-        tc_result("UT-CORR-009 Device open before reload", false);
-        return;
-    }
-
-    uint64_t phc1 = 0;
-    bool phc1_ok  = read_phc(hDev1, 0, &phc1);
-    if (phc1_ok) {
-        printf("  Before reload: phc1 = %llu ns (PHC reachable)\n", (unsigned long long)phc1);
-    } else {
-        printf("  Before reload: PHC not readable (adapter may not be PTP-ready)\n");
-    }
-    /* TX availability is noted but not required as a pre-reload baseline. */
-    {
-        uint64_t tx1 = 0, phc1_send = 0;
-        bool tx1_ok = send_ptp_get_tx(hDev1, 0, 0x900U, &tx1, &phc1_send);
-        if (tx1_ok) {
-            printf("  Before reload: TX SEND_PTP OK (prov=PRE_SEND_PHC, delta=%lld ns)\n",
-                   (long long)(tx1 - phc1_send));
-        } else {
-            printf("  Before reload: TX SEND_PTP not available (link down / not ready)\n");
-        }
-    }
-    CloseHandle(hDev1);
-
-    /* --- Step 2: Restart service --- */
-    /* Delegates to Install-Driver-Elevated.ps1 -Action Reinstall which handles
-     * DriverStore locking, pnputil sequencing, and NDIS rebind timing. */
-    bool svc_ok = restart_service(SERVICE_NAME, 120000);
-    if (!svc_ok) {
-        /* A failed service restart leaves the environment broken — not a non-fatal skip. */
-        printf("  [FAIL] Service restart failed — driver environment requires recovery.\n");
-        printf("  Run: tools\\setup\\manual_uninstall.ps1 then reboot, then reinstall.\n");
-        tc_result("UT-CORR-009 Driver Reload (FAIL - service restart failed)", false);
-        return;
-    }
-    Sleep(1000);  /* extra settle after service reaches RUNNING */
-
-    /* --- Step 3: Re-open device and verify adapter count --- */
-    HANDLE hDev2 = open_device();
-    if (hDev2 == INVALID_HANDLE_VALUE) {
-        DWORD openErr = GetLastError();
-        printf("  FAIL: Cannot re-open \\\\.\\ IntelAvbFilter after reload (Win32 error %lu)\n",
-               openErr);
-        printf("  NOTE: This is the device-node availability failure (#328 Defect C)\n");
-        printf("        Service may be running but control device not yet registered\n");
-        tc_result("UT-CORR-009 Device node accessible after reload", false);
-        return;
-    }
-    printf("  [POST] \\\\.\\ IntelAvbFilter accessible after reload\n");
-
-    /* --- Step 3b: Record and compare adapter identities after reload ---
-     * Count alone is insufficient — verify each VID/DID matches.
-     * An adapter may rebind as a different index or disappear entirely. */
-    uint16_t vids_after[8] = {0}, dids_after[8] = {0};
-    int count_after = 0;
-    int k;
-    for (k = 0; k < 8; k++) {
-        AVB_ENUM_REQUEST r = {0};
-        r.index = k;
-        DWORD br = 0;
-        BOOL ok = DeviceIoControl(hDev2, IOCTL_AVB_ENUM_ADAPTERS,
-                                   &r, sizeof(r), &r, sizeof(r), &br, NULL);
-        if (!ok || r.status != NDIS_STATUS_SUCCESS) break;
-        vids_after[count_after] = r.vendor_id;
-        dids_after[count_after] = r.device_id;
-        printf("  [POST] Adapter %d: VID=0x%04X DID=0x%04X\n", k, r.vendor_id, r.device_id);
-        count_after++;
-    }
-    printf("  Adapter count: before=%u  after=%d\n", adapter_count_before, count_after);
-    /* Strict: adapter count must not decrease after reload.
-     * A reduced set means at least one adapter did not rebind successfully. */
-    if (count_after < (int)adapter_count_before) {
-        printf("  FAIL: Adapter count decreased after reload (%u -> %d) — rebind incomplete\n",
-               adapter_count_before, count_after);
-        CloseHandle(hDev2);
-        tc_result("UT-CORR-009 Driver Reload (FAIL - adapter count decreased)", false);
-        return;
-    }
-
-    /* --- Step 4: Verify PHC accessibility and adapter count after reload.
-     * Hardware TX-PHC correlation cannot be verified with PRE_SEND_PHC timestamps.
-     * The lifecycle test reports:
-     *   PASS  — device reachable, adapter count maintained, PHC readable.
-     *   FAIL  — device unreachable, adapter count decreased, or PHC not readable.
-     *   SKIP  — TX SEND_PTP is reported separately for information only.
-     * --- */
-    (void)vids_after; (void)dids_after;
-    uint64_t phc2 = 0;
-    bool phc2_ok  = read_phc(hDev2, 0, &phc2);
-
-    if (phc2_ok) {
-        printf("  After reload: phc2 = %llu ns (PHC reachable)\n", (unsigned long long)phc2);
-    } else {
-        printf("  After reload: PHC not readable\n");
-    }
-
-    /* Record TX availability for information; do not gate lifecycle verdict on it. */
-    {
-        uint64_t tx2 = 0, phc2_send = 0;
-        bool tx2_ok = phc2_ok && send_ptp_get_tx(hDev2, 0, 0x901U, &tx2, &phc2_send);
-        if (tx2_ok) {
-            printf("  After reload: TX SEND_PTP OK (prov=PRE_SEND_PHC, delta=%lld ns)\n",
-                   (long long)(tx2 - phc2_send));
-        } else {
-            printf("  After reload: TX SEND_PTP not available (link down / not ready)\n");
-        }
-    }
-
-    CloseHandle(hDev2);
-
-    /* Lifecycle verdict — independent of TX correlation claim. */
-    bool lifecycle_passed = phc2_ok && ((int)count_after >= (int)adapter_count_before);
-    if (!phc2_ok)
-        printf("  FAIL: PHC not readable after reload\n");
-    if ((int)count_after < (int)adapter_count_before)
-        printf("  FAIL: Adapter count decreased after reload (%u → %d)\n",
-               adapter_count_before, count_after);
-    tc_result("UT-CORR-009 Driver Lifecycle: re-open, PHC reachable, adapter count maintained",
-              lifecycle_passed);
-
-    /* Hardware TX-PHC correlation: SKIP — requires VERIFIED_HARDWARE_TX. */
-    tc_skip("UT-CORR-009 Hardware TX-PHC correlation after reload: VERIFIED_HARDWARE_TX unavailable (not #328/#199 close criteria)");
-}
-
-/* =========================================================================
  * main — case selection and result reporting
  *
  * Usage:
@@ -1018,7 +609,8 @@ static void test_ut_corr_009(uint32_t adapter_count_before)
  *   0 = PASS         — all selected tests passed
  *   1 = FAIL         — at least one test failed
  *   2 = SKIP_ONLY    — no test produced a PASS result (no capable hardware)
- *   4 = CLEANUP_FAILED — restore step failed; hardware state uncertain
+ *   A failed restore is cleanup ([CLEANUP:FAILED] line, recorded by Run-Tests-CI.ps1): it changes neither a functional
+ *   verdict nor the exit code and stops no later testcase (Q 2026-10-28; was exit 4 and a halt of UT-CORR-006).
  * =========================================================================*/
 int main(int argc, char *argv[])
 {
@@ -1042,8 +634,8 @@ int main(int argc, char *argv[])
                 "  --case UT-CORR-008   active TX/PHC correlation burst  (transmits packets)\n"
                 "  --case UT-CORR-005   PHC epoch reset (mutation; approximate restore)\n"
                 "  --case UT-CORR-006   PHC freq adjust (mutation; restores TIMINCA)\n"
-                "  --case UT-CORR-009   driver reload   (lifecycle; reinstalls driver; not a baseline)\n"
-                "  --allow-lifecycle    add UT-CORR-009 to the default suite run\n"
+                "  --case UT-CORR-009   moved to test_ptp_phc_lifecycle.exe (driver reinstall)\n"
+                "  --allow-lifecycle    moved: UT-CORR-009 is test_ptp_phc_lifecycle.exe\n"
                 "  (no args)            run UT-CORR-007 + 008 only (active, not read-only)\n", argv[0]);
             return 0;
         }
@@ -1051,12 +643,12 @@ int main(int argc, char *argv[])
     (void)mutation_explicit; /* mutation tests run when selected; no additional gate needed */
 
     printf("========================================================================\n");
-    printf("PHC Stability Under State Changes -- UT-CORR-005..009\n");
+    printf("PHC Stability Under State Changes -- UT-CORR-005..008 (UT-CORR-009: test_ptp_phc_lifecycle.exe)\n");
     if (selected_case) {
         printf("Selected case: %s\n", selected_case);
     } else {
         printf("Default suite: UT-CORR-007 + UT-CORR-008 (read-only correlation)\n");
-        if (lifecycle_auth) printf("Lifecycle authorized: UT-CORR-009 will run\n");
+        if (lifecycle_auth) printf("UT-CORR-009 requested: it is test_ptp_phc_lifecycle.exe now (not run here)\n");
     }
     printf("Verifies: #149 (REQ-F-PTP-007) -- TX-PHC correlation under state changes\n");
     printf("Spec: issue #199 per-test procedures | Closes: Track A of #317\n");
@@ -1183,8 +775,8 @@ int main(int argc, char *argv[])
     /* UT-CORR-005 and UT-CORR-006: state-modifying tests on exactly ONE operator-named adapter (issue #343).
      * Previously "adapter 0" = whichever adapter the driver enumerated first: the I210 in the Debug pass and the I226 in
      * the Release pass of the FullSuite run of 2026-10-19.  Now: AVB_HIL_TARGET_DID selects the adapter (unique DID, no
-     * default), and a dedicated handle is bound to it with OPEN_ADAPTER.  Halt subsequent mutation tests if a restore
-     * step fails. */
+     * default), and a dedicated handle is bound to it with OPEN_ADAPTER.  Each testcase establishes its own preconditions
+     * (UT-CORR-006 reads the clock config and the PHC itself); a failed UT-CORR-005 restore is cleanup and stops nothing. */
     if (run_005 || run_006) {
         char target_value[32];
         int  ti  = -1;
@@ -1222,32 +814,16 @@ int main(int argc, char *argv[])
         } else {
             printf("\n--- Adapter %d DID=0x%04X (state-modifying tests, exact target via %s) ---\n",
                    ti, (unsigned)enum_dids[ti], AVB_TEST_TARGET_ENV);
-            if (run_005) {
-                test_ut_corr_005(hTarget, (uint32_t)ti);
-                if (s_cleanup_failed > 0) {
-                    printf("[HALT] CLEANUP_FAILED after UT-CORR-005 — skipping remaining mutation tests\n");
-                    run_006 = false;
-                }
-            }
+            if (run_005) test_ut_corr_005(hTarget, (uint32_t)ti);
             if (run_006) test_ut_corr_006(hTarget, (uint32_t)ti);
             CloseHandle(hTarget);
         }
     }
 
-    /* UT-CORR-009: driver lifecycle — explicit authorization required.
-     * Closes the device handle before service stop; not recoverable via
-     * --case selection of a read-only test. */
+    /* UT-CORR-009 (driver reinstall) lives in test_ptp_phc_lifecycle.exe (Unsafe) since 2026-10-22; this binary
+     * contains no service control or process creation.  An explicit request here is reported, never ignored. */
     if (run_009) {
-        printf("\n--- Driver Lifecycle Test (UT-CORR-009) ---\n");
-        printf("  NOTE: This test reinstalls the driver. Adapter configuration\n");
-        printf("  may not match pre-test state after reinstall.\n");
-        printf("  Recovery: tools\\setup\\Install-Driver-Elevated.ps1 -Action Reinstall\n");
-        CloseHandle(hDev);
-        hDev = INVALID_HANDLE_VALUE;
-        test_ut_corr_009((uint32_t)adapter_count);
-    } else if (!selected_case && !lifecycle_auth) {
-        tc_skip("UT-CORR-009 Driver Reload: requires --allow-lifecycle or --case UT-CORR-009");
-        /* Device handle remains open; no reinstall occurs */
+        tc_blocked("UT-CORR-009 Driver Reload: not in this executable - run test_ptp_phc_lifecycle.exe (Unsafe, attended, AVB_HIL_AUTHORIZE_UNSAFE)");
     }
 
     if (hDev != INVALID_HANDLE_VALUE) {
@@ -1257,12 +833,11 @@ int main(int argc, char *argv[])
     /* Summary */
     printf("\n========================================================================\n");
     printf("Test Summary -- PHC Stability Under State Changes (#317 Track A)\n");
-    printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d  CleanupFailed: %d\n",
-           s_total, s_passed, s_failed, s_skipped, s_cleanup_failed);
-    if (s_cleanup_failed > 0) {
-        printf("  STATUS: CLEANUP_FAILED — hardware state uncertain after restore failure\n");
-        printf("  Recovery: tools\\setup\\Install-Driver-Elevated.ps1 -Action Reinstall\n");
-    } else if (s_failed > 0) {
+    printf("  Total: %d  Passed: %d  Failed: %d  Skipped: %d\n", s_total, s_passed, s_failed, s_skipped);
+    printf("  Cleanup (separate from the functional result and the exit code): FAILED %d\n", s_cleanup_failed);
+    if (s_cleanup_failed > 0)
+        printf("  Cleanup: hardware state uncertain after a restore failure; recovery: tools\\setup\\Install-Driver-Elevated.ps1 -Action Reinstall\n");
+    if (s_failed > 0) {
         printf("  STATUS: FAIL\n");
         printf("  See output above for root cause details.\n");
     } else if (s_passed == 0 && s_failed == 0) {
@@ -1272,7 +847,6 @@ int main(int argc, char *argv[])
     }
     printf("========================================================================\n");
 
-    if (s_cleanup_failed > 0) return 4;
     if (s_failed > 0)         return 1;
     if (s_passed == 0)        return 2;  /* all skipped, no PASS */
     return 0;

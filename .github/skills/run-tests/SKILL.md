@@ -1,257 +1,109 @@
 ---
 name: run-tests
-description: "Use when running, executing, or invoking any test in IntelAvbFilter — avb_test_i210_um, avb_test_i219, ptp_clock_control_test, tsauxc_toggle_test, quick_diagnostics, or any .exe under build/tools/. Also when reading, interpreting, or claiming test results."
+description: "Use when running, executing, or invoking any IntelAvbFilter test, suite or test runner (Run-Tests-CI.ps1, Run-Tests-Elevated.ps1, Run-Tests.ps1, LocalSuites.ps1, Build-Tests.ps1), or any .exe under build/tools/; also when reading, interpreting, or claiming test results. Testing semantics and verdict rules live in intelavbfilter-testing."
 ---
 
-# Running Tests in the IntelAvbFilter Repo
+# Running Tests in IntelAvbFilter
 
-## When to Use
+Invocation mechanics only. What a verdict **means**, which tests apply, multi-adapter rules, restoration and evidence requirements are defined by the canonical contract [`intelavbfilter-testing`](../intelavbfilter-testing/SKILL.md). Every parameter below exists in the script's current `param()` block — re-check the script before using anything not listed here.
 
-- About to run `avb_test_i210_um`, `avb_test_i219`, `ptp_clock_control_test`, `tsauxc_toggle_test`, `quick_diagnostics`, or any `.exe` under `build/tools/`
-- Typing a path like `build\tools\avb_test\x64\Debug\*.exe`
-- Asked to "run the tests", "verify with tests", "check if tests pass"
-- Reading or reporting results from a test log
-- Investigating a test failure
+## Hard rules
 
-**NOT for:** building (use `Build-Tests.ps1`), driver installation (use `Install-Driver-Elevated.ps1`).
+- **Never run a test `.exe` directly** from `build\tools\avb_test\x64\<Config>\`. That bypasses build provenance, the HIL safety registry, adapter baseline, post-test state check, timeouts and logging.
+- **Never claim a result without reading the results document or log** produced by this run.
+- **Hardware execution, driver install/reinstall and anything elevated are run by Q** unless Q has explicitly authorized you. Give the exact command, prerequisites, expected mutations, stop conditions and evidence paths; wait for the output.
 
----
+## Execution paths
 
-## HARD STOP — Read This Before Touching Any Test
+| Context | Entry point | Hardware | Gates applied |
+|---|---|---|---|
+| GitHub-hosted CI (`ci-standards-compliance.yml`, `windows-latest`, Debug + Release) | `Run-Tests-CI.ps1 -Suite Unit` / `-Suite Integration` | none — hardware-independent tests only | build provenance, verdict contract |
+| Self-hosted HIL CI (`hil.yml`, `[self-hosted, Windows, i226]`, `hil-debug` then `hil-release`) | `Run-Tests-CI.ps1 -Suite HardwareUnit / HardwareIntegration / HardwareMutation / HardwareMandatory` after authorized deployment of the staged driver package | real NICs + deployed driver | provenance, deployment identity, safety registry, baseline/state check, halt propagation (`-PriorResultsDir`) |
+| Local complete run, Debug **and** Release | `tools\archive\deprecated\LocalSuites.ps1` (elevated; builds, reinstalls driver, preflight, four suites per configuration) | real NICs | same runner gates; evidence class `local` / `local-pre-commit` |
+| Local single entry, gated | `Run-Tests-Elevated.ps1 -Suite <Hardware*> -TestName '<entry>'` | real NICs | same runner gates as HIL CI |
+| Local single binary, legacy | `Run-Tests-Elevated.ps1 -TestName <name>` → `Run-Tests.ps1 -TestExecutable` | real NICs | **none of the HIL gates** — diagnostic use only, never gate or GREEN evidence for a hardware test |
 
-**If you are about to type any of these, STOP:**
-- `.\build\tools\avb_test\x64\Debug\<anything>.exe`
-- `& ".\build\...\<test>.exe"`
-- `cd build\...; .\test_something.exe`
+`Run-Tests-CI.ps1` is **not** "hardware-independent only": `-Suite Unit/Integration/All` are; the four `Hardware*` suites are the HIL gates.
 
-**The correct invocations are:**
+## Parameters (verified against the scripts)
 
-| Context | Correct command |
-|---------|----------------|
-| Local dev (interactive) | `.\tools\test\Run-Tests-Elevated.ps1 -TestName <test>.exe` |
-| Local dev (interactive) with DbugViewLogging | `.\tools\test\Run-Tests-Elevated.ps1 -TestName <test>.exe -CaptureDbgView` |
-| CI workflow (GitHub Actions) | `.\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Unit` |
+`tools/test/Run-Tests-CI.ps1` — runs unattended; for `Hardware*` suites start it from an elevated shell.
 
-Running the `.exe` directly bypasses elevation, device enumeration, logging, and transcript capture. The terminal output shows nothing useful. **You will get wrong or no results and not know it.**
+| Parameter | Notes |
+|---|---|
+| `-Configuration Debug\|Release` | default `Debug` |
+| `-Suite Unit\|Integration\|All\|HardwareUnit\|HardwareIntegration\|HardwareMandatory\|HardwareMutation` | default `Unit` |
+| `-Tests <entry>[,...]` | overrides the suite list; names **without** `.exe`; an entry may carry args, e.g. `'test_ptp_phc_stability --case UT-CORR-005'` |
+| `-TestTimeoutSeconds <n>` | default per suite (Unit 60, Integration 120, HardwareUnit 300, HardwareIntegration 600, Mandatory/Mutation 300); per-entry overrides never lower it |
+| `-ResultsJson <path>` | machine-readable results (`avb-runner-results/1`); default `logs\results-<Suite>-<Config>-<timestamp>.json` |
+| `-PriorResultsDir <dir>` | carries an earlier halt so later Init/Mutating entries stay BLOCKED |
+| `-HilLockWaitSeconds <n>` | attended runs only; default 60 |
+| `-FailFast` | stops after the first failure — **not** for gate or completeness evidence |
+| `-LogsDir` | sandbox/self-test use only; ordinary HIL runs must not pass it |
+| `-CaptureDbgView` | rejected on purpose; use `Run-Tests-Elevated.ps1 -CaptureDbgView` |
 
----
+`tools/test/Run-Tests-Elevated.ps1` — local wrapper; elevates via UAC, transcript to `logs\`, caller terminal shows almost nothing.
 
-## The Iron Law
+| Parameter | Notes |
+|---|---|
+| `-Suite HardwareUnit\|HardwareIntegration\|HardwareMandatory\|HardwareMutation` | routes `-TestName` through `Run-Tests-CI.ps1` with all gates; requires `-TestName` |
+| `-TestName <entry>` | with `-Suite`: the runner entry; without: legacy single binary (`.exe` appended if missing) |
+| `-TestArgs <args>` | appended to the entry |
+| `-Configuration Debug\|Release` | default `Debug` |
+| `-ResultsJson <path>` | with `-Suite` only |
+| `-CaptureDbgView` | DebugView kernel capture; the test does not run if the capture cannot be confirmed |
+| `-TimeoutSeconds <n>` | bound for the elevated child, default 1800; expiry = TIMEOUT |
+| `-LogFile <path>` | default `logs\<TestName>_<timestamp>.log` |
+| `-Full` | legacy `Run-Tests.ps1 -Full` (no HIL gates) |
 
-```
-NEVER claim a test passed or failed without reading the log file output.
+`tools/archive/deprecated/LocalSuites.ps1` — despite the folder name, the current operator-driven complete local run: `-Configurations Debug,Release` (default both), `-NoReproduce`, `-ReportDir`.
 
-NEVER run the .exe directly from the build output directory.
-ALWAYS use the correct entry point for the context:
-  - Local dev:  Run-Tests-Elevated.ps1
-  - CI/Headless: Run-Tests-CI.ps1
-```
+`tools/build/Build-Tests.ps1` — `-Configuration`, `-TestName <target>`, `-ShowDetails`, `-BuildDiagnosticTools`, `-RequireDriverSha256`.
 
----
+`tools/test/Run-Tests.ps1` (legacy dispatcher) — `-Configuration`, `-Quick`, `-Full`, `-SkipHardwareCheck`, `-CollectLogs`, `-TestExecutable`, `-TestArgs`, `-HardwareOnly`, `-SecureBootCheck`. It applies no safety registry and no provenance gate.
 
-## Script Architecture
+## Commands
 
-```
-tools/test/Run-Tests-Elevated.ps1   ← LOCAL DEV entry point — elevation via Start-Process -Verb RunAs -Wait
-                                      Interactive UAC required; caller terminal shows NOTHING useful.
-                                      Transcript captured to logs/ — you MUST read the log file.
-                                      NOT suitable for headless CI.
-
-tools/test/Run-Tests.ps1            ← CANONICAL RUNNER — requires Admin + driver + Intel hardware.
-                                      Checks driver service, Intel NIC, device node \\.\IntelAvbFilter.
-                                      Use for full integration/hardware testing from an elevated terminal.
-
-tools/test/Run-Tests-CI.ps1         ← CI ENTRY POINT — GitHub Actions / headless CI only.
-                                      Runner is already Administrator; NO hardware/driver expected.
-                                      Hardware-independent tests only; no interactive prompts.
-                                      Correct invocation from CI workflow:
-                                        .\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Unit
-                                        .\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Integration
-
-tools/build/Build-Tests.ps1         ← BUILD (compile test executables)
-build/tools/avb_test/x64/Debug/     ← TEST BINARIES (.exe files)
-logs/                               ← LOG FILES (written by all three runners)
-```
-
-### Which runner to use?
-
-| Context                              | Correct entry point           | Admin needed?  |
-|--------------------------------------|-------------------------------|----------------|
-| Local dev, interactive terminal      | `Run-Tests-Elevated.ps1`      | Yes (auto-UAC) |
-| Local dev, already in elevated shell | `Run-Tests.ps1`               | Yes            |
-| GitHub Actions / headless CI         | `Run-Tests-CI.ps1`            | No (hw-independent tests only) |
-| CI workflow YAML step                | `Run-Tests-CI.ps1`            | No             |
-
-`Run-Tests-Elevated.ps1` spawns a new elevated PowerShell via `Start-Process
-powershell -Verb RunAs -Wait`. The test output is captured in a transcript log
-under `logs/`. The caller's stdout only shows `Output will be logged to:` and
-`Log file created:`.  **The caller terminal shows nothing about test results.**
-You MUST read the log file.
-
----
-
-## Step-by-Step: Run a Specific Test
-
-### Step 1 — Build if needed
+Offline (any Windows dev box, no driver, no elevation):
 
 ```powershell
-# Only needed when source has changed since last build.
-# Use the test name as it appears in Build-Tests.ps1 -TestName listing:
-powershell -NoProfile -ExecutionPolicy Bypass -File "tools/build/Build-Tests.ps1" -TestName "test_ptp_getset"
+.\tools\build\Build-Tests.ps1 -Configuration Debug
+.\tools\test\Run-Tests-CI.ps1 -Configuration Debug -Suite Unit
 ```
 
-Known test names (pass to `-TestName`):
-`test_ptp_getset`, `test_ptp_freq`, `test_hw_ts_ctrl`, `test_rx_timestamp`,
-`test_statistics_counters`, `test_timestamp_latency`, `test_qav_cbs`,
-`test_ioctl_target_time`, `test_ioctl_phc_query`, `test_ioctl_offset`, …
-
-### Step 2 — Run via the elevated wrapper
+Single hardware entry through the gates (Q runs it; UAC prompt):
 
 ```powershell
-# From the repo root. Note: -TestName, NOT -TestExecutable
-.\tools\test\Run-Tests-Elevated.ps1 -TestName test_ptp_getset.exe
+.\tools\build\Build-Tests.ps1 -Configuration Debug -TestName test_ptp_phc_stability
+.\tools\test\Run-Tests-Elevated.ps1 -Configuration Debug -Suite HardwareIntegration -TestName 'test_ptp_phc_stability' -ResultsJson .\logs\results-single.json -CaptureDbgView
 ```
 
-Parameter notes:
-- `-TestName <name.exe>` — Run one specific test; `.exe` suffix is optional
-- `-Full`                — Run the full test suite (all registered tests)
-- `-Configuration Release` — Default is `Debug`
-
-The wrapper prints:
-```
-Output will be logged to: C:\...\logs\test_ptp_getset.exe_20260306_092040.log
-Log file created: C:\...\logs\test_ptp_getset.exe_20260306_092040.log
-```
-
-### Step 3 — Read the log file (MANDATORY)
+Complete Debug and Release HIL run (Q runs it from an elevated shell at the repository root; reinstalls the driver per configuration):
 
 ```powershell
-# Get the most recent log for this test
-$log = Get-ChildItem logs -Filter "test_ptp_getset*" |
-       Sort-Object LastWriteTime -Descending |
-       Select-Object -First 1
-
-Get-Content $log.FullName
+.\tools\archive\deprecated\LocalSuites.ps1 *>&1 | Tee-Object -FilePath ".\logs\FullSuite_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 ```
 
-Or read a specific file from the path printed in Step 2.
+## Reading results
 
-### Step 4 — Extract pass/fail counts
-
-Look for the `Test Summary` block near the end of the log:
-
-```
-====================================================================
- Test Summary
-====================================================================
- Passed:  N tests
- Failed:  M tests
- Skipped: K tests
-====================================================================
-```
-
-And individual test lines:
-```
-  [PASS] UT-PTP-GETSET-001: ...
-  [FAIL] UT-PTP-GETSET-002: ... (reason)
-  [SKIP] UT-PTP-GETSET-009: ...
-```
-
-**Only after reading these lines can you claim anything about test results.**
-
----
-
-## Step-by-Step: Run the Full Test Suite
+1. Prefer the **results document** (`-ResultsJson` / `results-*.json`, LocalSuites report in `logs\LocalSuites_<timestamp>\`): top level `schema`, `evidenceClass`, `overall`, `exitCode`, `counts`, `adapters`, `cleanupIncidents`, `records[]`; per record `verdict`, `executed`, `exitCode`, `artifactSha256`, `safetyClass`, `targetDid`, `logPath`, and per-testcase `testcases[]` with adapter index/DID.
+2. Otherwise read the transcript/log in `logs\`; testcase lines are `[VERDICT] TC-ID/adapter:N: …` (tags parsed by `tools/lib/TestVerdict.ps1`).
+3. State counts for **every** verdict category (PASSED, FAILED, FAILED(TIMEOUT), INFRA_FAILURE, CLEANUP_FAILED, INCONCLUSIVE(_RESTORATION), INCOMPLETE, BLOCKED(SAFETY/PROVENANCE), COVERAGE-GAP, SKIPPED) and the overall verdict (`PASSED`, `FAILED`, `INCOMPLETE`, `NOT_VERIFIED`, `NO_TESTS`).
+4. Exit code 0 alone proves nothing; an `INCOMPLETE` or `NOT_VERIFIED` hardware suite is non-passing.
 
 ```powershell
-.\tools\test\Run-Tests-Elevated.ps1 -Full
-
-# Then read the log:
-$log = Get-ChildItem logs -Filter "full_test_suite*" |
-       Sort-Object LastWriteTime -Descending |
-       Select-Object -First 1
-Get-Content $log.FullName
+$r = Get-ChildItem .\logs -Filter 'results-*.json' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$doc = Get-Content $r.FullName -Raw | ConvertFrom-Json
+$doc.overall; $doc.evidenceClass; $doc.counts
+$doc.records | Select-Object name, verdict, executed, exitCode, targetDid, logPath
 ```
 
----
+If a document's shape differs from this (schema change), trust the document and say so.
 
-## Common Mistakes (Never Do)
+## Driver identity before hardware runs
 
-| Wrong | Right |
-|-------|-------|
-| `cd build\tools\avb_test\x64\Debug ; .\test_ptp_getset.exe` | `.\tools\test\Run-Tests-Elevated.ps1 -TestName test_ptp_getset.exe` |
-| Reading only the terminal output (it shows nothing useful) | Read the log file from `logs/` |
-| Claiming pass/fail from build success alone | Run the test, read the log |
-| Using `-TestExecutable` on `Run-Tests-Elevated.ps1` | Use `-TestName` on the elevated wrapper |
-| Saying "tests should pass now" | Run → read log → state actual counts |
+Hardware results count only for the driver build under test. Before claiming anything, establish installed == intended driver SHA256 (`tools\test\Test-DriverPreFlight.ps1`; HIL CI: `hil-run-identity.json`). `Get-Service IntelAvbFilter` = Running or a file timestamp is **not** identity evidence. Driver (re)installation (`tools\setup\Install-Driver-Elevated.ps1`) is an elevated, state-changing action — Q runs it.
 
----
+## Failure triage
 
-## Quick Reference
-
-```powershell
-# Build one test
-powershell -File tools/build/Build-Tests.ps1 -TestName test_ptp_getset
-
-# Run one test and capture log path
-.\tools\test\Run-Tests-Elevated.ps1 -TestName test_ptp_getset.exe
-
-# Read the log (most recent)
-Get-ChildItem logs -Filter "test_ptp_getset*" | Sort-Object LastWriteTime -Desc | Select-Object -First 1 | Get-Content
-
-# Full suite
-.\tools\test\Run-Tests-Elevated.ps1 -Full
-Get-ChildItem logs -Filter "full_test_suite*" | Sort-Object LastWriteTime -Desc | Select-Object -First 1 | Get-Content
-
-# Check if terminal is already elevated (Run-Tests.ps1 direct option)  
-([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrator')
-# If $true → can call: powershell -File tools/test/Run-Tests.ps1 -TestExecutable test_ptp_getset.exe
-```
-
----
-
-## Reading a Summarized Log
-
-When the tool returns a summarized/truncated log, the critical lines are:
-1. Each `[PASS]`, `[FAIL]`, `[SKIP]` line — individual test verdict
-2. The `Test Summary` block — aggregate counts
-3. Any `[ERROR]` or exception lines before the summary
-
-If these are omitted by summarization, re-read the raw file with targeted grep:
-
-```powershell
-$log = Get-ChildItem logs -Filter "test_ptp_getset*" | Sort-Object LastWriteTime -Desc | Select-Object -First 1
-Select-String -Path $log.FullName -Pattern "\[PASS\]|\[FAIL\]|\[SKIP\]|Test Summary|Passed:|Failed:|Skipped:"
-```
-
----
-
-## Driver Install Before Tests
-
-If testing driver-side changes, install the new driver first:
-
-```powershell
-# Install / reinstall (requires elevation — wrapper handles it)
-.\tools\setup\Install-Driver-Elevated.ps1 -Configuration Debug -Action Reinstall
-
-# Verify running
-Get-Service IntelAvbFilter | Select-Object Name, Status
-
-# Verify it is the new binary
-Get-Item "C:\Windows\System32\drivers\IntelAvbFilter.sys" | Select-Object LastWriteTime, Length
-```
-
-Then run the tests.
-
----
-
-## Failure Triage
-
-After reading the log, for each `[FAIL]` line:
-1. Note the exact failure message (diff values, "rejected", "accepted", etc.)
-2. Map to the test case (`UT-PTP-*`, `UT-FREQ-*`, `UT-HW-TS-*`, etc.)
-3. Identify whether it is a **driver bug**, **test tolerance bug**, or **env issue**
-4. State actual counts: "N passed, M failed: [list the failing test IDs]"
-
-Never say "most tests pass" — cite the numbers.
-````
+For each non-passing row: exact message, testcase + adapter, configuration, classification (driver defect / test defect / infrastructure / provenance / safety block / coverage gap), and whether restoration was verified. Never "most tests pass" — cite numbers and the artifact you read.

@@ -358,3 +358,375 @@ master run). Automatic HIL: **NO-GO** until Q decides/sets:
 4. Accept the runner-wide residual risk of section 5 (or move to an organization runner group).
 5. #328 send-path issue remains open; IntelAvbFilter service observed **Stopped** on this workstation (read-only
    observation during this iteration, see section 8).
+
+---
+
+## Iteration 8 (2026-10-21) — P0 addendum: LocalSuites + pre-commit HIL-TDD (offline only)
+
+Boundary kept: no build/install of the driver, no HIL, no runner/Windows/GitHub change, no commit/push by the agent
+(Q committed the agent's edits locally while they landed: 18 commits after 6f666d8, none pushed).
+
+### Root cause of FullSuite_20261021_095005.log (blank exit codes)
+- Immediate: `LocalSuites.ps1` assigned an unqualified `$LASTEXITCODE = $null`. Run as documented
+  (`& LocalSuites.ps1 *>&1 | Tee-Object`), that is a script-scope variable shadowing the automatic one for every child
+  script; native calls write only `$global:LASTEXITCODE`, so callers read `$null` (printed blank).
+  Reproduced only with `&` invocation, not with `powershell -File` (global scope).
+- Systemic: each script treated a missing exit code as success (`-ne 0 -and $null -ne`, `exit $null` = 0,
+  Install-Driver-Elevated mapped null to 0, Run-Tests-CI counted `$null` exit as PASSED).
+- Fix: `tools/lib/NativeExit.ps1` (global-only reads, missing = failure) in the whole chain; static AST guard.
+
+### Delivered (all offline RED -> GREEN)
+| Area | Files | Tests |
+|---|---|---|
+| Exit codes | lib/NativeExit.ps1; vs_compile (unique temp files), Build-Driver, Build-Tests, Install-Driver(-Elevated), Run-Tests-CI, Run-Tests-Elevated, Test-DriverPreFlight | test_native_exit_codes 11/11 (HEAD: 1/11) |
+| Local pre-commit provenance | lib/SourceDigest.ps1; Build-Tests manifest (provenanceMode, sourceDigest, builtUtc injected); Run-Tests-CI local mode | test_hil_binary_provenance 52/52 (042-052 new; baseline RED for 042-045, 047, 048, 050, 051; 046/052 invariance) |
+| Results JSON | Run-Tests-CI `-ResultsJson` (avb-runner-results/1), TestVerdict `Get-AvbTestcaseVerdicts`; `-CaptureDbgView` now rejected (was silently ignored) | test_runner_results_json 16/16 (baseline: functions absent) |
+| LocalSuites | rewritten; order unchanged; preflight `installed == built`; results JSON inventory; stop rules; per-configuration operator-confirmed reproduction | test_local_suites 16/16 (baseline: functions absent) |
+| DbgView | Run-Tests-Elevated: `-Suite` routes through Run-Tests-CI gates; capture confirmed before test (else test not run); per-PID stop verified; MISSING/EMPTY/CAPTURED; sidecar `.capture.json`; bounded child timeout | test_local_suites 013-015 |
+Regression: hilgate 38/38, sentinel 7/7, verdict 13/13, syntax gate 9/9.
+
+### Defects found in the agent's own work this iteration (fixed, for the record)
+- Commit 8e76ddd contains a dangling line-continuation backtick in Build-Tests.ps1 (manifest call swallowed the
+  following `if` block; parser accepted it); fixed in c58b139. Not a usable bisect point.
+- `@(f)` around a unary-comma return nests arrays (results `testcases`, test inventory) - fixed; tests tightened.
+
+### Limitations (UNVERIFIED until physical validation)
+- Nothing here ran against hardware, a real build, a real install or a real DebugView; all evidence is synthetic.
+- Loaded driver image is not hashed: after Reinstall without reboot, "running image == installed file" is UNPROVEN.
+- DbgView `/l` creating the log promptly and `Stop-Process` not losing buffered lines: UNVERIFIED.
+- Results document is written only when Run-Tests-CI completes; early exits leave none (LocalSuites treats that as stop).
+
+### NOT started (P0 "Restore fully automatic staged-driver HIL CI")
+CI-safe installer mode; signed Debug+Release staging packages + manifest; hil.yml install/pre/post verification,
+testable serialization, removal of HIL_AUTHORIZED_DRIVER_SHA256 / HIL_HALT / HIL_BUGCHECK_ACK, crash-evidence
+handling, HIL_NOT_EXECUTED; master-protection policy; the 16 CI RED/GREEN cases. Needs Q decisions (see report).
+
+---
+
+## Iteration 9 (2026-10-21) - automatic staged-driver HIL CI (offline implementation; Q decisions 1-7)
+
+Boundary kept by the agent: no driver operation, no physical HIL, no runner/Windows/GitHub change, no dispatch, no
+commit/push. (Q committed and pushed the work to branch fix/hil-ci-suite-20261021; 5 files of the final fixes are
+uncommitted.) Everything below is offline orchestration evidence; driver/hardware behaviour is UNVERIFIED.
+
+### Facts established (read-only)
+- master: classic protection disabled; repository ruleset `protect-default-branch` (id 25536988, active, created
+  2026-10-21 09:42Z): no deletion, no force push, linear history, pull request required (0 approvals). Bypass list not
+  visible unauthenticated. -> README bot direct pushes are rejected (its `git push || exit 0` hid that); local commits
+  reach master only via PR.
+- Signing: local builds are signed by the machine-specific `WDKTestCert User,134201267570487980` (275C2424...), trusted
+  here; hosted staging created a NEW WDKTestCert and a NEW self-signed cert per job -> no stable signer existed.
+- Former blocker: staging uploaded the whole build dir (two IntelAvbFilter.sys + obj/) -> `authorize` ("exactly one
+  .sys") would have denied every run once the operator variables were set.
+- Install-Driver.ps1 attended path: STOP_PENDING -> Read-Host -> Restart-Computer; downgrade Read-Host; DriverStore
+  Remove-Item; Disable-NetAdapter on every filter-bound adapter (may include the management NIC); PendingFileRename
+  reboot replacement reported as success; EventLog service restart; netcfg -u failure returns $true.
+  PRE-EXISTING DEFECT (not changed, Q decision): `sc stop IntelAvbFilter` / `sc query ...` call the Set-Content alias,
+  writing files `stop` (2026-10-21 11:48) and `query` in the repository root; the attended "Step 1: Stopping service"
+  never stopped anything.
+
+### Implementation
+| Concern | Files |
+|---|---|
+| Stable signer | Build-Driver.ps1 `-SigningPfx` (re-sign .sys, regenerate + sign catalog, verify thumbprints); tools/ci/signing/README.md (one-time setup); pinned `tools/ci/signing/hil-test-signer.cer` (NOT yet created) |
+| Package identity | tools/lib/DriverPackage.ps1 (manifest avb-driver-package/1; verification incl. pinned signer + local trust) |
+| Staging | ci-standards-compliance.yml deploy-staging: Debug+Release matrix, secrets HIL_TEST_SIGNING_PFX_BASE64/_PASSWORD (fail loudly if absent), manifest + self-check, upload exactly the package; tag release ships the signer .cer |
+| Unattended install | Install-Driver.ps1 `-NonInteractive -PackageDir -ExpectedSysSha256 -StepTimeoutSeconds -ResultJson` -> tools/lib/DriverDeploy.ps1 (same netcfg/ETW mechanism; bounded; no prompt/reboot/adapter disable/DriverStore delete/EventLog restart; timeouts leave netcfg running; exit 0/1/3) |
+| Serialization | tools/lib/HilLock.ps1 (%ProgramData%\IntelAvbFilter-hil.lock; CI + LocalSuites); hil-release needs hil-debug |
+| Crash evidence | tools/lib/HilMachineHealth.ps1 (HISTORICAL / PREVIOUS_RUN_CRASHED / CURRENT_RUN_INTERRUPTED; minidumps copied) |
+| Runner orchestration | tools/ci/Invoke-HilDeployment.ps1 (lock -> crash evidence -> package -> install -> pre-flight; in-flight record next to the lock) |
+| Workflow | hil.yml: authorize downloads both packages of the upstream run, checks manifests, hands them over; hil-debug / hil-release atomic (preflight -> checkout -> deploy -> build tests -> verify -> identity -> Mandatory/Unit/Integration -> lock release); acceptance per configuration; no `vars.*` |
+| README bot | update-readme-status.yml: bot branch automation/readme-status + PR; never pushes master; failures are loud |
+
+### Connectivity loss during deployment (#328 risk)
+netcfg -u/-l restart the NDIS stack of every adapter bound to MS_IntelAvbFilter; the deployment records whether the
+default-route (management) adapter is bound (`managementRisk`). If the runner loses its connection: the job may be
+failed server-side while the local process continues or is lost; RUNNER_TEMP evidence does not survive the next job,
+so the record is persisted first to `%ProgramData%\IntelAvbFilter-hil.lock.inflight.json` (verdict IN_FLIGHT before
+the installer runs). The next HIL run takes over the stale lock (owner recorded), attaches the in-flight record and
+the crash evidence, re-checks STOP_PENDING / pending replacement (NEEDS_OPERATOR, no reboot) and otherwise redeploys.
+A netcfg that does not finish within the bound is left running (never killed) -> NEEDS_OPERATOR. Nothing claims a
+recovery; nothing restarts the PC. UNVERIFIED on the real machine: whether netcfg briefly drops the management
+connection, and how the GitHub runner reacts to that.
+
+### Offline results (all GREEN; RED shown against the pre-iteration code)
+syntax 16/16; native-exit 11/11; provenance 52/52; results-json 16/16; local-suites 16/16; ci-driver-deploy 27/27
+(baseline: libraries absent; mutation probes M1-M3 killed); trust boundary 40/40 (pre-iteration workflows 32/40 -
+REAL-007..013, 016 RED; FX + REAL-001..006/014/015 invariant; workflow mutants M1-M4 killed); suite safety 18/18;
+identity 9/9; hilgate 38/38; sentinel 7/7; verdict 13/13.
+
+### Unavoidable manual administration (once)
+1. Create the HIL test-signing certificate; secrets HIL_TEST_SIGNING_PFX_BASE64 / _PASSWORD; commit the public
+   `tools/ci/signing/hil-test-signer.cer` (PR).  2. Trust it on the HIL machine (LocalMachine Root + TrustedPublisher).
+3. Optionally allow GitHub Actions to create pull requests (README bot), otherwise merge the bot branch manually.
+
+## Iteration 10 (2026-10-27) - P0 complete CI/HIL execution: classification of ssot_register_validation_test
+
+### Facts (verified)
+- Source `tests/integration/tsn/ssot_register_validation_test.c` issues only CreateFile, IOCTL_AVB_GET_DEVICE_INFO,
+  IOCTL_AVB_GET_HW_STATE and IOCTL_AVB_READ_REGISTER on the default handle (no ENUM/OPEN_ADAPTER); no write, no
+  INIT_DEVICE, no NIC administration.  Registry: Unknown -> ReadOnly.
+- The gate suite never checked this entry: its source mapping is keyed by Build-Tests Name, which was
+  `ssot_register_validation` (Output `ssot_register_validation_test.exe`).  RED: ReadOnly alone -> TEST-HILGATE-008
+  `ssot_register_validation_test: no build entry` (82/83, 231 s).  GREEN after renaming the Build-Tests Name to the
+  registered entry name: 83/83 (199 s); 006 (no mutating IOCTL) and 009 (no NIC administration) PASS on the source.
+  TEST-COMPLETE unchanged (001: 39/148, 003: 2 scripts - pre-existing).
+- Existing hardware evidence, FullSuite legacy path 2026-10-27 (logs/ssot_register_validation_test.exe_*):
+  Debug 09:28:07 and 12:34:43, Release 10:16:29 - each 19 passed / 0 failed; default handle = I219 (caps 0xC3);
+  only IoctlCount changed on the three adapters.  The I210 and I226 are never read by Phase 2.
+
+### Finding (driver security, NOT implemented - outside P0)
+- The Release driver is compiled WITHOUT NDEBUG: `build/x64/Release/IntelAvbFilter/obj/IntelAvbFilter.tlog/
+  CL.command.1.tlog` (10:06:50) defines _WIN64 _AMD64_ AMD64 _WIN32_WINNT WINVER WINNT NTDDI_VERSION NDIS_WDM NDIS630
+  AVB_VERSION_BUILD AVB_VERSION_REVISION only.  Every `#ifndef NDEBUG` block (src/device.c:720,
+  src/avb_integration_fixed.c:2190, include/avb_ioctl.h:87/260) is therefore compiled into Release, including
+  IOCTL_AVB_WRITE_REGISTER - contrary to ADR-SEC-001 ("NDEBUG defined automatically").  Consistent with the Release
+  10:16:29 run reading SYSTIM/TIMINCA/TSAUXC.  UNVERIFIED: that the driver loaded at 10:16:29 was the Release build.
+
+### Remaining execution gaps of this entry (not started)
+- Phase 2 covers the default adapter only, not every adapter advertising the PTP capability.
+- No `[TAG] ID` testcase lines (one overall verdict per run).
+- If ADR-SEC-001 is enforced, Release READ_REGISTER rejection would be reported as FAIL, not evidence-backed
+  NOT_SUPPORTED.
+## Iteration 11 (2026-10-27) - P0: single producer of test_tsn_ioctl_handlers.exe
+
+### Facts (verified)
+- Producers before the repair: (1) Build-Tests cl `test_tsn_ioctl_handlers`, Disabled, Source
+  tests/unit/ioctl/test_tsn_ioctl_handlers.c = 9-line kernel-mode placeholder (precomp.h, no main); (2) Build-Tests
+  nmake `tsn_ioctl_test` -> tests/integration/tsn/tsn_ioctl_test.mak, which compiles
+  tests/integration/tsn/test_tsn_ioctl_handlers_um.c and links it as test_tsn_ioctl_handlers.exe (no declared artifact,
+  no SHA); (3) out of chain: tools/build/Build-Driver.ps1 -BuildTests runs the same makefile without CFG (= Debug).
+  test_tsn_ioctl_handlers_um (cl) compiles the same _um.c source.
+- Flags: nmake adds /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_TEST_USERMODE /DWIN64 /D_WIN64 /I.;
+  the source has no preprocessor conditionals and calls CreateFileW explicitly; include/ does not reference
+  AVB_TEST_USERMODE or WIN32_LEAN_AND_MEAN.  Neither builder uses configuration-dependent flags.  Same program
+  (source-level analysis; binaries not compared at runtime).
+- Coverage (identical): INIT_DEVICE, then SETUP_TAS/FP/PTM once with a zeroed 1 KB buffer and once with a real
+  configuration, default handle only, no capability check, no restoration, no `[TAG] ID` lines, unconditional exit 0.
+- Canonical producer selected: cl `test_tsn_ioctl_handlers`, Source -> _um.c, enabled (manifest SHA, Source visible to
+  the HILGATE source checks, Name = registered entry).  nmake entry `tsn_ioctl_test` removed from Build-Tests (the
+  .mak stays: Build-Driver.ps1 and IntelAvbFilter.vcxproj reference it).  Registry: Unknown -> Mutating.
+  #328 hazard hold UNCHANGED (Q's explicit TAS/FP restriction).
+- RED: TEST-HILPROV-010 `statically Disabled yet dispatchable: test_tsn_ioctl_handlers (listed in HardwareUnitTests)`
+  51/52.  GREEN: HILPROV 52/52, HILGATE 83/83 (008 now checks the real source; 081 hold PASS), COMPLETE-001 39 -> 38.
+- Build (full Build-Tests, digest D6FC457D..., HEAD 8b33641 + working tree): Debug 136 s, Release 132 s, each
+  147 entries = 141 built / 6 disabled / 0 failed; test_tsn_ioctl_handlers.exe Debug 5E9FC876D2C3, Release
+  FACCA9E464DD (file = manifest).
+
+### Remaining (not started)
+- The program cannot fail (exit 0 always) and configures TAS/FP/PTM without restoration - must be repaired before the
+  #328 hold could ever be lifted.  Two registered entries now execute the same program.
+- Build-Driver.ps1 -BuildTests still overwrites five Debug nmake artifacts outside the manifest; the runner then
+  blocks them visibly (SHA256 mismatch), never silently.
+
+### Correction (2026-10-27, Iteration 12)
+- The committed form (f10d6e0) did NOT remove the nmake entry `tsn_ioctl_test`: it is kept, links `tsn_ioctl_test.exe`,
+  is registered in HardwareIntegration (Mutating, #328 hazard hold).  Manifests at f10d6e0: 148 entries = 142 built /
+  6 disabled / 0 failed (Debug and Release).  Offline at f10d6e0: HILPROV 52/52, HILGATE 83/83, COMPLETE 001 38/148 and
+  003 2 scripts (pre-existing).
+
+## Iteration 12 (2026-10-27) - P0: machine safety record prerequisite and the first Init entry
+
+### Facts (verified)
+- LocalSuites_20261027_163938 (f10d6e0, clean-commit, Debug + Release): 72 BLOCKED(SAFETY) rows per configuration =
+  53 `machine safety record UNAVAILABLE: safety record missing` + 17 #328 hazard hold + 2 Unsafe without authorization.
+- `%ProgramData%\IntelAvbFilter-hil-safety.json` has never existed on DESKTOP-RSUO2LV: all 257 real-run runner notes
+  say UNAVAILABLE; all 28 CLEAR notes are the sandbox fixture (`%TEMP%\sentinel_test_*\sandbox-hil-safety.json`).
+  Missing in every LocalSuites run since 6583fec (2026-10-21 19:16).  Initialize-AvbHilSafetyRecord and
+  Approve-AvbHilSafetyBaseline were never executed.  New-AvbHilBaselineEvidence.ps1 produced NOT_VERIFIED
+  (2026-10-22 12:45, 12:46: DID double-hex) and BASELINE_VERIFIED (2026-10-22 21:42, driver 51DEDF..., now outdated).
+- No producer of `avb-hil-recovery-verification/1` exists; the baseline producer emits no `phcTolerance`;
+  `$HilMutatedState` is empty.  Hence (Run-Tests-CI.ps1 post-test check) every executed non-ReadOnly entry ends
+  INCONCLUSIVE_RESTORATION, persisted as a GLOBAL safety event (HALTED) - code reading + HILGATE-042, not HIL-observed.
+- First non-ReadOnly entry of the run: `test_minimal_ioctl.exe` (Init, HardwareUnit row 5).  Source
+  tests/unit/ioctl/test_minimal_ioctl.c: INIT_DEVICE on an unbound handle (driver-global default adapter), ENUM,
+  per adapter OPEN_ADAPTER(i) + GET_CLOCK_CONFIG; no baseline, no restoration, exit 0 whenever ENUM succeeds.
+- INIT_DEVICE (src/avb_integration_fixed.c:1930 -> AvbBringUpHardware:464) calls intel_init() WITHOUT the PTP_READY
+  idempotency guard that AvbEnsureDeviceReady:798 has.  Per device source (UNVERIFIED on hardware):
+  I226 init_ptp: SYSTIM := 1 unconditionally, TSAUXC RMW, TSYNCRXCTL/TSYNCTXCTL overwritten, ETQF(3) written,
+  TXSTMPL/H read-cleared, TIMINCA only if 0.  I219 init_ptp: TIMINCA := INTEL_TIMINCA_I219_INIT unconditionally,
+  TSAUXC RMW, ETQF0/ETQS0 written, software SYSTIM offset re-seeded from the system clock.  I210 init_ptp: observe
+  first; on a configured device no SYSTIM seed, TIMINCA repaired only outside the policy range.
+- Existing ungated hardware output (FullSuite legacy path, test_minimal_ioctl.exe_20261027_162442.log): INIT_DEVICE
+  TRUE; driver enumeration order 0=0x15BB 1=0x1533 2=0x125B (2026-10-22 baseline: 0=0x125B 1=0x1533 2=0x15BB, i.e.
+  order changes between driver loads, so the default adapter INIT hits is not fixed); GET_CLOCK_CONFIG cfg.status
+  0x00000000 on every adapter -> the test prints no clock value and still exits 0.
+- No gated (runner) execution of test_minimal_ioctl exists: 2026-10-21 coverage gap, since 2026-10-22 safety-record
+  BLOCKED.
+- PHC observation window (hardware, hil-baseline-evidence-20261022_214259.json): the runner's Get-AvbHilClockState
+  window is 5 back-to-back GET_CLOCK_CONFIG reads spanning 0.45-1.4 ms.  Pass-to-pass evaluator metrics without any
+  mutation: offset uncertainty U 1.1-116 ms, rate uncertainty U 1.4e6-2.8e8 ppb (residual sigma 41-4753 ns, read
+  latency 15-28 us).  With such windows no gPTP-justifiable tolerance can ever yield RESTORATION_VERIFIED:
+  restoration-observability defect of the runner's PHC window (not of the evaluator).
+- Undisturbed run counts: 6 Init + 29 Mutating + 18 Mutating:Target rows per configuration are safety-record BLOCKED;
+  further 17 hazard hold, 2 Unsafe BLOCKED + 4 Unsafe gap rows, 1 ReadOnly 24-h gap (test_vv_corr_001_stability) and
+  4 HardwareMandatory gap rows (entries also listed in HardwareUnit) = 81 not executed per configuration.
+
+### Operator decisions (Q 2026-10-27)
+- Order: repair the runner PHC observation window (cause 2) BEFORE the record is provisioned, so the fresh baseline
+  evidence carries usable PHC characterization.
+- #328 hazard hold: kept; its 17 rows per configuration are reported as operator-restricted residual.
+- Unsafe: attended execution authorized for the suite-listed Unsafe entries test_lifecycle_coverage (HardwareUnit) and
+  test_hot_plug (HardwareIntegration).
+- Correction: test_s3_sleep_wake, test_vv_corr_001_stability and test_ptp_phc_lifecycle are in no Run-Tests-CI suite
+  list (only $HardwareIntegrationCoverageGaps + registry) and were never run by the runner; they are not Phase 1
+  blockers.  Questions about S3 and a 24-h run were asked in error; nothing is changed for these entries.
+- Approval: Q approves the 2026-10-27 18:41 evidence document now (no phcTolerance in it).
+- PHC (Q 2026-10-27): "no validation of phc quality for security relevant checks" - no PHC tolerance is defined;
+  PHC time/rate are not a safety criterion of the restoration check.  Interpretation submitted to Q for confirmation
+  before any runner change: the halt decision judges configuration/adapter state only; PHC windows stay recorded as
+  evidence labelled "not judged", never as restored.  Supersedes, for PHC only, the 2026-10-21 rule that unobservable
+  PHC state is INCONCLUSIVE_RESTORATION.
+
+### Cause 2 - runner PHC observation window (implemented, hardware GREEN pending)
+- Change: tools/test/Run-Tests-CI.ps1 Get-AvbHilClockState `-PhcReadIntervalMs` (default 250) sleeps between paired
+  reads; 5 reads -> ~1 s window.  Used unchanged by the runner pre/post check, New-AvbHilBaselineEvidence.ps1 and
+  Invoke-AvbTxTimestampProbe.ps1.  Sandbox observer unchanged.  Reads stay on the opened adapter (per-handle FsContext).
+- RED: existing hardware evidence (windows 0.45-1.4 ms, see facts above).
+- Offline regression (does not exercise the hardware read loop): HILGATE 83/83, evaluator 14/14, baseline evidence
+  11/11, safety record 15/15, HILPROV 52/52.
+- Hardware GREEN (Q, 2026-10-27 18:41, logs/hil-baseline/hil-baseline-evidence-20261027_184141.json, BASELINE_VERIFIED,
+  no findings; installed driver F6499699... = Release build of f10d6e0; record UNBASELINED after Q's Initialize):
+  all 9 windows span 1.00-1.05 s.  Undisturbed pass-to-pass uncertainty I226 offset 0.10-0.51 ms / rate 17-54k ppb,
+  I210 offset 0.06-0.16 ms / rate 12-16k ppb (before: 10-116 ms / 1.4e6-2.2e7 ppb); I219 offset 32-35 us.  Every
+  undisturbed change lies within or near its uncertainty.  Residual sigma rose to 1.4-22 us (spaced reads).
+
+### Cause 1 - machine safety record (resolved, verified)
+- Pre-approval check (read-only, 2026-10-27): evidence 18:41 BASELINE_VERIFIED, 0 findings; installed driver SHA256 =
+  document = F6499699... (service Running); 3/3 Intel NICs present, PnP OK, MAC and PCI location identical, filter bound,
+  admin/link Up.
+- Q approved (Approve-AvbHilSafetyBaseline under the machine lock).  Verified afterwards: state CLEAR, 0 events,
+  baseline.evidence = hil-baseline-evidence-20261027_184141.json (SHA256 5EFC9AC4CDDF1B17...), history INITIALIZE
+  17:41:17Z + APPROVE_BASELINE 18:34:49Z, machine lock released.  Q's 18:44 re-run (BASELINE_VERIFIED) is not referenced.
+- PHC rule confirmed by Q with conditions: global baseline records PHC time/rate as NOT_JUDGED, PHC measurement
+  uncertainty alone never triggers a global halt, adapter/configuration checks preserved; tests that modify PHC
+  time/rate/configuration stay responsible for verified restoration; no test assertion is weakened.
+
+### Cause 4a - PHC NOT_JUDGED in the post-test check (implemented, offline GREEN; HIL with 4c)
+- Global baseline/session comparison (Compare-AvbHilState) already judged no PHC value (adapter/PnP/link/binding,
+  TIMINCA, TSAUXC only): unchanged.
+- Run-Tests-CI.ps1: `$HilPhcNotJudgedState = PHC_TIME, PHC_RATE`.  Post-test check: declared PHC state is excluded from
+  the unobserved set; declared configuration must still be fully verifiable (else unchanged STATE-002 + halt).  Declared
+  PHC -> TC-INFRA-STATE-004 INCONCLUSIVE_RESTORATION record "[PHC-NOT-JUDGED]" (nonpassing), no Set-HilHalt, no
+  safety event.  No test-owned positive restoration tag exists yet, so such entries stay nonpassing (open design point).
+- test_hil_safety_gate.ps1: new fake test_sbfake_tgtts (TIMINCA,TS_CONTROL); 042/046 now use it (unchanged intent:
+  unverifiable configuration halts); new 083 (tgtphc TIMINCA,PHC_TIME: every target runs, one STATE-004 record each,
+  no tgtphc halt/event, next Init entry runs, exit 1).
+- RED 83/84 (083: tgtphc ran on 0x125B only, init not run).  GREEN 84/84.  Regressions: HILPROV 52/52, baseline
+  evidence 11/11, safety record 15/15, evaluator 14/14, local suites 22/22, COMPLETE unchanged (001 38/148, 003 2).
+- D1 no-mutation path (undeclared entries claiming FAILED_SETUP) still requires PHC RESTORATION_VERIFIED: unchanged.
+
+### Cause 4b-i - configuration observability: record QUERY_HW_SNAPSHOT raw (implemented, offline GREEN; HIL pending)
+- Existing driver interface IOCTL_AVB_QUERY_HW_SNAPSHOT (fn 70, 7e453fb 2026-10-22): read-only, bound handle only,
+  per-family SSOT offsets (hil_register_offset), explicit AVB_HWREG_STATE_*; Debug and Release.  Never called on
+  hardware before (logs: ABI checks TC-ABI-022 only).  TSYNCRXCTL/TSYNCTXCTL hold status bits (RXTT/TXTT) that change
+  with traffic, so no comparison rule before hardware characterization.
+- Run-Tests-CI.ps1 Get-AvbHilClockState: after the PHC window, one QUERY_HW_SNAPSHOT per bound adapter -> HwRegs
+  (id, offset, value, state) or HwRegsError (IOCTL failure, NDIS status, or snapshot DID != opened DID).  Not compared.
+- New-AvbHilBaselineEvidence.ps1: HWREG / HWREG_SNAPSHOT measurements per pass and adapter, not a finding.
+- RED: TEST-HILBASE-011 11/12.  GREEN 12/12.  Regressions: HILPROV 52/52, safety record 15/15, evaluator 14/14, local
+  suites 22/22, COMPLETE unchanged.
+- HILGATE 84/84 after the change.
+- Hardware characterization (Q, 2026-10-27 19:53, hil-baseline-evidence-20261027_195311.json, BASELINE_VERIFIED, no
+  findings, driver F6499699, record CLEAR): 144/144 HWREG entries (3 adapters x 3 passes x 16), 0 snapshot errors (every
+  answer's DID = opened DID).  Snapshot TIMINCA/TSAUXC = GET_CLOCK_CONFIG.  RAL0/RAH0 = the inventory MAC of each
+  adapter (I226 F0-B2-B9-31-55-DB, I210 C4-62-37-0B-B5-6E, I219 E4-54-E8-61-38-E3): first hardware proof of the
+  driver index <-> physical NIC mapping.  Volatile: I226 TSYNCRXCTL 0x19 -> 0x19 -> 0x18 (bit 0); all other VALID series
+  stable.  NOT_IN_SSOT: SRRCTL0-3 (all families), TQAVCTRL (I226), TRGTTIM*/TQAVCTRL/RXPBSIZE (I219).
+- SSOT for the volatile bit: I226/I225/I217 define TSYNCRXCTL_RXTT / TSYNCTXCTL_TXTT; I210 and I219 define neither.
+- Backlog B12-7: I226 TRGTTIML0 = 0x9F3 (nonzero target time left by an earlier test).  B12-8: TQAVCTRL not in the I226
+  HAL offset map although the #328 TAS hazard concerns I226 TQAVCTRL.  B12-9: SRRCTL not in any family's map, so
+  SET_QUEUE_TIMESTAMP state stays unobservable.
+
+### Conclusion
+- The missing record is an operator prerequisite (fail-closed by design), not a runner defect.
+- The predicted halt after test_minimal_ioctl is not an observability false positive: per source the entry makes a
+  real, unrestored PHC/timestamp-control mutation on whichever adapter is the driver default.  Better observability
+  (PHC tolerance, TS_CONTROL/ETQF re-read) would turn it into CLEANUP_FAILED, not into verified restoration.
+
+### Backlog (recorded, NOT started - WIP 1)
+- B12-1 test_minimal_ioctl passes vacuously: cfg.status 0 ("Unknown") is never a failure; exit 0 always.
+- B12-2 INIT_DEVICE lacks the PTP_READY idempotency guard of AvbEnsureDeviceReady (re-seeds a running I226 PHC):
+  driver behaviour, needs an operator decision (driver change out of current P0 scope).
+- B12-3 Driver enumeration order differs between driver loads (0x125B first on 2026-10-22, 0x15BB first on 2026-10-27).
+- B12-4 No producer of `avb-hil-recovery-verification/1`; no `phcTolerance` producer: a HALTED record can only be
+  rebaselined, never cleared by verified recovery.
+- B12-5 I219 (0x15BB) PHC advanced 4640 ns in ~11 s across three undisturbed passes (2026-10-22 21:42 evidence):
+  functional clock defect (the known slow-I219 observation), outside restoration scope.  Confirmed 2026-10-27 18:41
+  with 1 s windows: rate 1-2e-6 s/s (about 2 us per 9 s).
+- B12-6 I226 (0x125B) PHC runs 2.93 % fast against QPC (rate 1.0293 in both 2026-10-22 and 2026-10-27 captures):
+  functional, outside restoration scope.
+## Iteration 13 (2026-10-27) - P0: false prior-suite halt "unreadable results document console-*.log"
+
+### Facts (verified)
+- LocalSuites_20261027_202832 (c93399c, record CLEAR): 53 rows per configuration BLOCKED by "prior suite: unreadable
+  results document console-Debug-HardwareUnit.log" (106 total); further 17 hazard hold + 2 Unsafe per configuration.
+- Consumer Get-AvbPriorHalt (Run-Tests-CI.ps1, introduced f9cd138 2026-10-21 16:41) enumerated with
+  `Get-ChildItem -LiteralPath $Dir -Recurse -File -Include results-*.json, run-in-progress.json`.  Windows PowerShell
+  5.1.26100 ignores -Include with -LiteralPath: on the 20:28 report dir it returned 23 files (console logs, report,
+  repro-*.json) instead of the 8 results-*.json.  Every console-*.log (LocalSuites.ps1:292 writes them into the same
+  ReportDir it passes as -PriorResultsDir, :295; since 70a5364 2026-10-21 13:38), including the current suite's own
+  transcript, failed ConvertFrom-Json and became an "unreadable results document" halt.
+- Never worked under LocalSuites: masked by earlier halts (atdecc timeout, then safety record UNAVAILABLE - Set-HilHalt
+  keeps the first reason).  No other -LiteralPath/-Include use in tools/ or tests/; LocalSuites has no Get-ChildItem.
+
+### Correction
+- Get-AvbPriorHalt: same -LiteralPath enumeration, name filter in Where-Object (results-*.json, run-in-progress.json).
+- RED/GREEN: new TEST-HILGATE-083 (LocalSuites layout with console log, report, repro JSON -> Init runs; corrupt
+  results-*.json -> still halts, naming only that file).  RED 83/84 (init ran=0), GREEN 84/84.  Regressions: local
+  suites 22/22, trust boundary 40/40, HILPROV 52/52, safety record 15/15, HILBASE 11/11, evaluator 14/14, COMPLETE
+  unchanged (001 38/148, 003 2).  HIL verification pending (LocalSuites Debug + Release).
+- Expected next blocker (F3 kept, operator option i): the first executed Init/Mutating entry without test-owned
+  restoration (HardwareUnit row 5 test_minimal_ioctl.exe) ends INCONCLUSIVE_RESTORATION -> global halt, event persisted,
+  record HALTED (operator rebaseline required).
+
+## Iteration 14 (2026-10-28) - HIL verification of bb6bc76 (prior-suite fix)
+
+### Facts (verified, hardware)
+- Debug VERIFIED: PriorSuiteVerify_bb6bc76_20261028_110027 (driver EE6149B0..., pre-flight 0, record CLEAR before/after):
+  HardwareUnit and HardwareIntegration (-Tests test_ioctl_version, LocalSuites layout: console transcripts + valid
+  results-*.json in the -PriorResultsDir) both PASSED 1/1, exit 0, stateHalt empty, no prior-suite halt.
+  LocalSuites_20261028_110241 Debug/HardwareUnit (record CLEAR, own transcript in the dir): no prior-suite halt, Init
+  entry test_minimal_ioctl.exe executed (PASSED) -> F3 INCONCLUSIVE_RESTORATION, event 8bae3cf7 persisted, record HALTED.
+  No "unreadable results document" in any of the 8 transcripts.
+- Release NOT verified: 11:00 run BLOCKED(PROVENANCE) (manifest digest 97CF159F..., runtime digest FA320381...);
+  LocalSuites Release suites all start with record HALTED, which masks the prior-suite check (Set-HilHalt keeps the
+  first reason).
+- 10:41 attempt: Debug pre-flight INFRA_FAILURE (service STOP_PENDING) - driver reinstalled while FullSuite_20261028_102414
+  was running test_atdecc_aen_protocol (10:38-10:42) concurrently.
+- Build-input digest flipped 97CF159F (10:1x) -> FA320381 (FullSuite build ~10:25, 11:01, LocalSuites builds 11:04/11:38)
+  -> 97CF159F (13:xx) with HEAD, submodule HEADs (reflog) and `git status` clean throughout; same file count (485).
+  Ruled out: Build-Driver MC regeneration (record diff empty after Build-Driver Release), submodule ignore settings,
+  untracked-not-ignored files now.  Cause UNEXPLAINED (FA320381 record set not recoverable).
+
+## Iteration 15 (2026-10-28) - false global halts from cleanup observations (Q binding decisions 2026-10-28)
+
+### RED (hardware, existing evidence)
+- LocalSuites_20261028_110241: test_minimal_ioctl.exe PASSED, then the runner wrote INCONCLUSIVE_RESTORATION
+  (TC-INFRA-STATE-002), a global halt and safety event 8bae3cf7 -> record HALTED -> 143 BLOCKED(SAFETY) rows (both configs).
+
+### Correction (runner, uncommitted; developed in an isolated worktree, then copied)
+- Functional verdicts unchanged by cleanup.  Every executed Hardware* item gets a structured cleanup result
+  (required YES/NO/UNKNOWN, attempted UNKNOWN - the runner cannot observe test-internal cleanup -, outcome
+  SUCCESS/FAILED/NOT_VERIFIED/NOT_REQUIRED, adapters, observations, reason, evidence, incident refs); results document
+  `cleanup` + `cleanupCounts`, executed records `cleanup` + `precedingCleanup`.  No failure row, no halt, no safety event for:
+  unverifiable restoration, observed state differences, test-reported CLEANUP_FAILED/RESTORE FAILED, test-reported
+  INCONCLUSIVE_RESTORATION (kept as the test's own verdict), session differences / unreadable session state, an unusable
+  session record (FAILED_SETUP kept, preserved), timeouts whose process tree terminated (disposition TERMINATED).
+- Cleanup incidents (option b) in the SESSION record (HilLock.ps1 Add-AvbHilSessionIncident / Close-AvbHilSessionIncidents):
+  correlated only while OPEN, RESOLVED/SUPERSEDED only by session checks against the original session baseline and kept as
+  history; OPEN incidents carried into a new session (carriedFrom); a new session is announced as captured from the current
+  state, never as verified clean.  Never a dispatch gate.
+- Prior-suite carry-over (runner + LocalSuites): CLEANUP_FAILED / INCONCLUSIVE_RESTORATION rows no longer halt; a timeout
+  halts only without evidenced termination (no disposition, or HALT).
+- Kept (loss of controlled execution / infrastructure): process tree surviving a timeout, lock not owned / lost, record
+  HALTED/UNAVAILABLE, not elevated, baseline/adapter set not observable, prior suite killed (run-in-progress marker),
+  unreadable prior results, INFRA_FAILURE.
+
+### Offline GREEN (sandbox; not hardware evidence)
+- test_hil_safety_gate 89/89 (RED against the unchanged runner: 77/87 then 70/89 for the two sub-steps, exactly the
+  predicted cases); test_local_suites 23/23 (RED 006, 018, 022); test_runner_results_json 16/16; test_hil_binary_provenance
+  52/52 (fixture 000 now halts via a LOCK_LOST record); 11 further suites pass; test_artifact_completeness and
+  test_hil_dispatch_paths fail identically on the unchanged tree (pre-existing).
+- Hardware: PENDING (Debug + Release; also closes the Release gap of bb6bc76).  Record still HALTED by 8bae3cf7 (created
+  under the old rule) - operator rebaseline required once.

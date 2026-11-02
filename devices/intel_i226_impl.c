@@ -16,6 +16,7 @@ Abstract:
 #include "precomp.h"
 #include "intel_device_interface.h"
 #include "avb_integration.h"
+#include "include/avb_ioctl.h"     // AVB_HWREG_* ids for hil_register_offset (explicit; host builds do not get it via avb_integration.h)
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 #include "intel-ethernet-regs/gen/i226_regs.h"  // SSOT register definitions
@@ -1564,6 +1565,27 @@ static int i226_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
     return ndis_platform_ops.mmio_write(dev, I226_TSAUXC, tsauxc_value);
 }
 
+/* QUERY_HW_SNAPSHOT offset map: AVB_HWREG_* id -> I226 MMIO offset, only registers intel-ethernet-regs/gen/i226_regs.h
+ * defines.  Any other id (e.g. SRRCTL, TQAVCTRL) is NOT_IN_SSOT - never a guessed address. */
+static int i226_hil_register_offset(uint32_t reg_id, uint32_t *offset)
+{
+    if (offset == NULL) { return -1; }
+    switch (reg_id) {
+    case AVB_HWREG_TIMINCA:    *offset = I226_TIMINCA; return 0;
+    case AVB_HWREG_TSAUXC:     *offset = I226_TSAUXC; return 0;
+    case AVB_HWREG_TSYNCTXCTL: *offset = I226_TSYNCTXCTL; return 0;
+    case AVB_HWREG_TSYNCRXCTL: *offset = I226_TSYNCRXCTL; return 0;
+    case AVB_HWREG_RXPBSIZE:   *offset = I226_RXPBSIZE; return 0;
+    case AVB_HWREG_TRGTTIML0:  *offset = I226_TRGTTIML0; return 0;
+    case AVB_HWREG_TRGTTIMH0:  *offset = I226_TRGTTIMH0; return 0;
+    case AVB_HWREG_TRGTTIML1:  *offset = I226_TRGTTIML1; return 0;
+    case AVB_HWREG_TRGTTIMH1:  *offset = I226_TRGTTIMH1; return 0;
+    case AVB_HWREG_RAL0:       *offset = I226_RAL0; return 0;
+    case AVB_HWREG_RAH0:       *offset = I226_RAH0; return 0;
+    default: return -1;
+    }
+}
+
 // I226 device operations structure - using generic function names
 const intel_device_ops_t i226_ops = {
     /* Capabilities per Intel I226 datasheet:
@@ -1619,5 +1641,6 @@ const intel_device_ops_t i226_ops = {
     
     // Advanced features
     .enable_advanced_features = NULL,
-    .validate_configuration = NULL
+    .validate_configuration = NULL,
+    .hil_register_offset = i226_hil_register_offset
 };

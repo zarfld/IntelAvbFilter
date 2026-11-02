@@ -126,6 +126,11 @@ typedef struct _intel_device_ops {
     int (*adjust_frequency)(device_t *dev, uint32_t increment_ns, uint32_t increment_frac,
                             uint32_t *previous_increment);
 
+    /* QUERY_HW_SNAPSHOT (HIL restoration verification, Q 2026-10-22): MMIO offset of AVB_HWREG_* id (include/avb_ioctl.h)
+     * for this family, taken from intel-ethernet-regs/gen.  0 = defined (*offset set); -1 = the family's SSOT defines no
+     * such register (*offset untouched).  Pure lookup, no register access.  Optional: NULL = family has no offset map. */
+    int (*hil_register_offset)(uint32_t reg_id, uint32_t *offset);
+
 } intel_device_ops_t;
 
 /**

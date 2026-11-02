@@ -52,7 +52,7 @@ static int g_passed         = 0;
 static int g_failed         = 0;
 static int g_skipped        = 0;  /* SKIP: hardware/driver lacks feature for this test */
 static int g_blocked        = 0;  /* BLOCKED_UNRESTORABLE: safe restore path absent */
-static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify failed; hw state unknown */
+static int g_cleanup_failed = 0;  /* cleanup FAILED: restore/verify failed; hw state unknown (not a testcase outcome) */
 
 /* TC_SKIP = 4 is defined in tas_restore.h alongside TC_PASS/FAIL/CLEANUP_FAILED/BLOCKED */
 
@@ -68,9 +68,8 @@ static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify failed; hw s
 /* Run one hardware-mutating TAS case with full snapshot/restore lifecycle.
  *
  * Return codes (from tas_restore.h):
- *   TC_PASS (0)           — fn() produced exactly one g_passed++ AND restore succeeded
+ *   TC_PASS (0)           — fn() produced exactly one g_passed++
  *   TC_FAIL (1)           — fn() produced a FAIL outcome (g_failed++)
- *   TC_CLEANUP_FAILED (2) — restore/verify failed; hardware state UNKNOWN; halt sequence
  *   TC_BLOCKED (3)        — preflight refused; test not executed (g_blocked++)
  *   TC_SKIP (4)           — fn() skipped (g_skipped++); restore ran; no mutation verified
  *
@@ -78,6 +77,9 @@ static int g_cleanup_failed = 0;  /* CLEANUP_FAILED: restore/verify failed; hw s
  *   - fn() always increments exactly one of g_passed, g_failed, or g_skipped.
  *   - run_with_restore reads the delta and maps it to the TC_* taxonomy.
  *   - run_with_restore never increments g_passed (prevents double-counting).
+ * Restore/verify is cleanup (Q 2026-10-28): a failure is a [CLEANUP:FAILED] line and g_cleanup_failed, recorded by
+ * Run-Tests-CI.ps1 as the cleanup outcome; it never replaces the testcase outcome (was: TC_CLEANUP_FAILED, which also
+ * halted every later case).  The next case establishes its own preconditions in its own snapshot (tas_capture_state).
  */
 static int run_with_restore(HANDLE hDevice, const char *case_name,
                             void (*fn)(HANDLE)) {
@@ -101,10 +103,9 @@ static int run_with_restore(HANDLE hDevice, const char *case_name,
     BOOL verify_ok  = restore_ok ? tas_verify_restore(hDevice, &snap) : FALSE;
 
     if (!restore_ok || !verify_ok) {
-        printf("  [CLEANUP_FAILED] %s: restore/verify failed — hardware state UNKNOWN; halting\n",
+        printf("  [CLEANUP:FAILED] %s: restore/verify failed — hardware state UNKNOWN; cleanup only, the testcase outcome is unchanged\n",
                case_name);
         g_cleanup_failed++;
-        return TC_CLEANUP_FAILED;
     }
 
     /* Map fn() outcome to TC_* — exactly one code returned */
@@ -201,19 +202,11 @@ static void run_tas_case_sequence(HANDLE hDevice, const char *selected_case) {
         return;
     }
 
+    /* Every case runs and establishes its own preconditions (snapshot / preflight): a BLOCKED or a failed cleanup of one
+     * case is reported for that case only (was: [ABORT] and the remaining cases counted BLOCKED without a verdict line). */
     printf("[INFO] Running all TAS cases with per-case snapshot/restore\n");
     for (size_t i = 0; i < sizeof(hw_cases) / sizeof(hw_cases[0]); ++i) {
-        int rc = run_with_restore(hDevice, hw_cases[i].name, hw_cases[i].fn);
-        if (rc == TC_CLEANUP_FAILED) {
-            printf("[ABORT] CLEANUP_FAILED — hardware state UNKNOWN; halting mutating cases\n");
-            g_blocked += (int)(sizeof(hw_cases) / sizeof(hw_cases[0]) - i - 1);
-            break;
-        }
-        if (rc == TC_BLOCKED) {
-            printf("[ABORT] BLOCKED — restore capability absent; all remaining hw cases blocked\n");
-            g_blocked += (int)(sizeof(hw_cases) / sizeof(hw_cases[0]) - i - 1);
-            break;
-        }
+        (void)run_with_restore(hDevice, hw_cases[i].name, hw_cases[i].fn);
     }
     for (size_t i = 0; i < sizeof(neg_cases) / sizeof(neg_cases[0]); ++i) {
         neg_cases[i].fn(hDevice);
@@ -931,22 +924,16 @@ print_summary:
     printf(" FAIL:             %d\n", g_failed);
     printf(" SKIP (no cap):    %d\n", g_skipped);
     printf(" BLOCKED:          %d  (restore capability absent)\n", g_blocked);
-    printf(" CLEANUP_FAILED:   %d  (hardware state UNKNOWN)\n", g_cleanup_failed);
-    printf(" TOTAL:            %d\n", g_passed + g_failed + g_skipped + g_blocked + g_cleanup_failed);
+    printf(" TOTAL:            %d\n", g_passed + g_failed + g_skipped + g_blocked);
+    printf(" Cleanup FAILED:   %d  (hardware state UNKNOWN; separate from the results above and the exit code)\n", g_cleanup_failed);
     printf("=======================================================================\n");
 
-    /* Exit codes:
-     *   4 = CLEANUP_FAILED — hardware state UNKNOWN after at least one restore failure
+    /* Exit codes (functional outcomes only; cleanup is reported in [CLEANUP:FAILED] lines, Q 2026-10-28 - was 4):
      *   1 = FAIL           — at least one test produced FAIL
      *   3 = BLOCKED        — mandatory hw tests blocked (restore capability absent)
      *   2 = NO TESTS RAN   — device absent, no adapter, or all tests skipped with zero passes
-     *   0 = PASS           — all executed tests passed; no failures, no blocked, no cleanup issues
+     *   0 = PASS           — all executed tests passed; no failures, no blocked
      */
-    if (g_cleanup_failed > 0) {
-        printf("\n[RESULT] CLEANUP_FAILED — hardware state UNKNOWN after %d case(s)\n",
-               g_cleanup_failed);
-        return 4;
-    }
     if (g_failed > 0) {
         printf("\n[RESULT] FAILURE — %d test(s) failed\n", g_failed);
         return 1;

@@ -166,7 +166,7 @@ static int run_case(HANDLE h, int *blocked, int *cleanup_failed) {
     /* Simulate mutation: noop — result accounting stays clean */
     BOOL restore_ok = tas_restore_state(h, &snap);
     BOOL verify_ok  = restore_ok ? tas_verify_restore(h, &snap) : FALSE;
-    if (!restore_ok || !verify_ok) { (*cleanup_failed)++; return TC_CLEANUP_FAILED; }
+    if (!restore_ok || !verify_ok) (*cleanup_failed)++;   /* cleanup only (Q 2026-10-28): the case outcome is unchanged */
     return TC_PASS;
 }
 

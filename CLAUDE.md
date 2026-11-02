@@ -1,5 +1,11 @@
 # Working with Q — Coding Agent Protocol
 
+@AGENTS.md
+
+## Claude Code: repository testing contract
+
+For any task involving tests, TDD, bugfix verification, HIL, test runners, CI test gates, driver regression testing, test failures, hardware-state cleanup, adapter capabilities or interpreting test results, invoke the `intelavbfilter-testing` skill (`.claude/skills/intelavbfilter-testing/SKILL.md`) **before acting**. It loads the canonical cross-agent contract `.github/skills/intelavbfilter-testing/SKILL.md`. Claude Code does not auto-discover `.github/skills/`; read the skills that `AGENTS.md` routes to by path.
+
 ## What This Is
 
 Applied rationality for a coding agent. Defensive epistemology: minimize false beliefs, catch errors early, avoid compounding mistakes.

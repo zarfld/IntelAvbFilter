@@ -328,6 +328,8 @@ typedef struct _MS_FILTER
     NDIS_STRING                     MiniportFriendlyName;
     NDIS_STRING                     MiniportName;
     NET_IFINDEX                     MiniportIfIndex;
+    NET_LUID                        MiniportNetLuid;      /* stable identity (IOCTL_AVB_GET_ADAPTER_IDENTITY / OPEN_ADAPTER_BY_LUID) */
+    UCHAR                           MiniportMac[6];       /* CurrentMacAddress at FilterAttach (identity corroboration) */
 
     NDIS_STATUS                     Status;
     NDIS_EVENT                      Event;

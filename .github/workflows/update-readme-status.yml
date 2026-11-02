@@ -10,7 +10,7 @@ name: Update README CI Status
 #               scripts are executed, never code from the triggering CI run.
 # API access:   reads only GitHub Actions job metadata via GITHUB_TOKEN.
 #               No artifact download, no untrusted code execution.
-# Permissions:  contents:write (push README), actions:read (job metadata).
+# Permissions:  contents:write (push the bot branch), pull-requests:write (open the PR), actions:read.
 #               GITHUB_TOKEN only; no PAT required.
 # Repo guard:   if-condition checks head_branch, event type, and repository
 #               full_name to exclude PRs, schedule, and forks.
@@ -30,10 +30,14 @@ name: Update README CI Status
 # The concurrency group serialises updates; a push conflict is handled by
 # exiting 0 — the next CI completion will regenerate with correct data.
 #
-# ── Branch-protection compatibility ─────────────────────────────────────────
-# If direct push to master is protected, replace the git push step with a
-# step that calls `gh pr create --fill --base master` and enables auto-merge.
-# Add pull-requests:write to permissions in that case.
+# ── Branch protection: no direct push ───────────────────────────────────────
+# master is protected by the repository ruleset "protect-default-branch"
+# (pull request required, linear history).  This workflow NEVER pushes to
+# master: it commits README.md to the bot branch automation/readme-status
+# (recreated from master each time; force-push only on that branch) and opens
+# or reuses a pull request into master.  Merging stays a reviewed action.
+# A failed push or PR creation fails this job (never silently exit 0).
+# README-only commits remain metadata for hil.yml authorize (allow-list).
 #
 # ── workflow_dispatch behaviour ──────────────────────────────────────────────
 # With run_id:    renders the specified CI run.
@@ -61,6 +65,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
   actions: read
 
 jobs:
@@ -98,8 +103,16 @@ jobs:
           MASTER_SHA: ${{ github.sha }}
         run: python scripts/generate-readme-status.py
 
-      - name: Commit and push updated README (if changed)
+      - name: Commit README to the bot branch and open a pull request (if changed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha || 'manual' }}
+          CI_RUN: ${{ github.event.workflow_run.run_number || inputs.run_id || 'manual' }}
+          CI_ATT: ${{ github.event.workflow_run.run_attempt || 1 }}
+          CI_CONC: ${{ github.event.workflow_run.conclusion || 'n/a' }}
+          DOCS_SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -108,26 +121,30 @@ jobs:
             exit 0
           fi
 
-          CI_SHA="${{ github.event.workflow_run.head_sha || 'manual' }}"
-          CI_RUN="${{ github.event.workflow_run.run_number || inputs.run_id || 'manual' }}"
-          CI_ATT="${{ github.event.workflow_run.run_attempt || 1 }}"
-          CI_CONC="${{ github.event.workflow_run.conclusion || 'n/a' }}"
-
+          BRANCH="automation/readme-status"
+          git checkout -B "$BRANCH"
           git add README.md
           git commit -m "docs: update CI status block
 
           CI run    : #${CI_RUN} (attempt ${CI_ATT})
           Conclusion: ${CI_CONC}
           Tested SHA: ${CI_SHA}
-          Docs SHA  : ${{ github.sha }}
+          Docs SHA  : ${DOCS_SHA}"
 
-          Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+          # Only the bot branch is force-updated (it is recreated from master on every run); master is never pushed.
+          git push --force origin "HEAD:refs/heads/$BRANCH"
 
-          # A push conflict (another commit on master between checkout and push)
-          # is handled gracefully: exit 0 and let the next CI run regenerate.
-          git push || {
-            echo "Push rejected — a newer commit arrived on master."
-            echo "The next CI completion will regenerate the status block."
+          API="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls"
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          open=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$API?state=open&head=$OWNER:$BRANCH&base=master" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          if [ "$open" != "0" ]; then
+            echo "Pull request for $BRANCH already open - updated by the push above"
             exit 0
-          }
-          echo "README.md pushed to master"
+          fi
+          body=$(python3 -c 'import json,os; print(json.dumps({"title": "docs: update CI status block", "head": "automation/readme-status", "base": "master", "body": "Automated README CI status update (CI run #%s, attempt %s, tested %s). README.md only." % (os.environ["CI_RUN"], os.environ["CI_ATT"], os.environ["CI_SHA"])}))')
+          code=$(curl -sS -o /tmp/pr.json -w '%{http_code}' -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$API" -d "$body")
+          if [ "$code" != "201" ]; then
+            echo "::error title=README status PR not created::HTTP $code: $(cat /tmp/pr.json). If Actions may not create pull requests, enable 'Allow GitHub Actions to create and approve pull requests' (Settings > Actions > General) or merge $BRANCH manually."
+            exit 1
+          fi
+          echo "Opened pull request: $(python3 -c 'import json; print(json.load(open("/tmp/pr.json"))["html_url"])')"

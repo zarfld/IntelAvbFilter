@@ -46,7 +46,7 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 |---|---|---|
 | MSVC `/analyze` (PREfast) in CI | ✅ Added | `static-analysis-prefast` job in `ci-standards-compliance.yml` (`/p:RunCodeAnalysis=true`, `continue-on-error: true` phase-in) |
 | SDV run + DVL artifact | ❌ Not in CI | Manual only; no committed DVL file |
-| CodeQL CI quality gate | ✅ Added | `analyze` job in `codeql-driver.yml` — MSDT `@development` branch, bundled CodeQL, uploads SARIF to GitHub Security tab; good for PR feedback, **NOT valid for WHCP DVL** |
+| CodeQL CI quality gate | ⚠️ Repair pending CI verification | `analyze` job in `codeql-driver.yml` — repository config `.github/codeql/codeql-driver-config.yml` (MSDT packs pinned, see table below), bundled CodeQL of the action for analysis, uploads SARIF to GitHub Security tab; good for PR feedback, **NOT valid for WHCP DVL**. Broken 2026-10-17 … 2026-10-28 (runs 38997424025 … 40782452229: `microsoft/cpp-queries@0.0.5` referenced from `windows-drivers/1.10.0/…/mustfix.qls` not found) because the former MSDT `config/codeql-config.yml@development` + `windows-drivers@1.x` floated onto an unreleased dependency change (MSDT 878c2db5b2) |
 | CodeQL WHCP certification job | ✅ Added 2026-04-01 | `analyze-whcp` job in `codeql-driver.yml` — pinned CodeQL 2.15.4 + MSDT WHCP_22H2 clone + `codeql/windows-drivers` local suites; runs `suites/windows_driver_recommended.qls` + `suites/windows_driver_mustfix.qls` from cloned WHCP_22H2 repo (pack 1.0.13 distribution lacks `.qls` files); generates DVL via `msbuild /t:dvl`; triggers on `master`/`release/*` and `workflow_dispatch` |
 | CodeQL on submodules | ✅ Partial | `external/windows_driver_samples` + `external/intel_mfd` have own workflows |
 
@@ -60,10 +60,34 @@ clean or are explicitly triaged; DVL is clean for the release certification stan
 | Query suite | `suites/windows_driver_recommended.qls` (local path from MSDT WHCP_22H2 clone) | Superset; pack 1.0.13 distribution has no `.qls` files — local clone required per MSDT CI |
 | Exit gate | `suites/windows_driver_mustfix.qls` violations → fail (local path, MSDT WHCP_22H2 clone) | Violations block WHCP certification |
 
+**CI CodeQL dependency set** (`analyze` job; reproducible production analysis — independent of the WHCP matrix above):
+
+| Component | Pinned | Source of truth / provenance |
+|---|---|---|
+| `microsoft/windows-drivers` pack | 1.10.0 | `.github/codeql/codeql-driver-config.yml`; newest published release (GHCR, built from MSDT `d9374fbb7c`) |
+| `microsoft/cpp-queries` pack | 0.0.5 | same file; required by the 1.10.0 suites (`from: microsoft/cpp-queries, version: 0.0.5`) and its lock file |
+| Selected queries | 155 (88 cpp-queries + 67 windows-drivers: `cpp-code-scanning.qls`, `recommended.qls` incl. `mustfix.qls`, 3 experimental DriverIsolation queries) | `.github/codeql/codeql-driver-inventory.txt` — identical to the last working MSDT config (`f7bceed497`) |
+| Validation CLI | 2.27.3 (`codeql-cli-binaries`, SHA256 `6cd0f634…ba424061`) | pinned in the validation step of `codeql-driver.yml` |
+| Analysis CLI | bundled with `github/codeql-action@v4` (not pinned) | recorded per run in the SARIF |
+
+**CI CodeQL verification tiers** (failures are never converted to success; each tier is separate evidence):
+
+1. Offline contract — `tests/unit/ci/test_codeql_driver_config.ps1` (TEST-CODEQLCFG, `-Suite Unit`): exact pins, required entries, inventory ↔ pins, workflow wiring, failure classification. Static only.
+2. Dependency resolution — `tools/ci/Test-CodeQLDriverPacks.ps1 -Mode Resolve`, **before** `codeql-action/init`: fresh package cache, `codeql database init --codescanning-config`, exact inventory comparison. Exit 3 INFRA_FAILURE (registry/network) · 4 DEPENDENCY_FAILURE · 5 INVENTORY_MISMATCH · 2 CONFIG_INVALID · 6 TOOL_FAILURE.
+3. Full analysis — traced Release|x64 build and `codeql-action/analyze`; SARIF and validation report kept as the `codeql-driver-results-*` run artifact. (A post-analysis `-Mode Analysis` SARIF check is not a requirement — Q 2026-10-29.)
+
+**Controlled upstream update** (never float a version in production; no automatic upgrades):
+
+1. Check for a newer `microsoft/windows-drivers` / `microsoft/cpp-queries` release (MSDT CHANGELOG, GHCR tags) — e.g. at the weekly scheduled run review.
+2. Write a candidate config with the new exact versions (all packs the new suites require, including suite `from:` references).
+3. Run `tools/ci/Test-CodeQLDriverPacks.ps1 -Mode Resolve -CodeQL <cli> -ConfigPath <candidate> -ProposedInventoryOut <file>`; a DEPENDENCY_FAILURE means the candidate set is incompatible — do not adopt.
+4. Diff the proposed inventory against `codeql-driver-inventory.txt`; every **removed** query needs an explicit justification and approval; added/changed queries are listed in the change.
+5. Adopt config + inventory in one reviewed PR; the CodeQL workflow (triggered by `.github/codeql/**`) must pass all three tiers before merge.
+
 **Acceptance Criteria**:
 - [x] `msbuild /p:RunCodeAnalysis=true` CI job added (`static-analysis-prefast`); baseline findings surfaced — resolve before removing `continue-on-error`
 - [ ] SDV run completes with no `Defect` findings; results committed to `test-evidence/sdv-results-*.xml`
-- [x] `analyze` job: `codeql-driver.yml` CI quality gate using MSDT `codeql-config.yml@development` (PR feedback)
+- [ ] `analyze` job: `codeql-driver.yml` CI quality gate with the pinned repository config passes all three verification tiers in CI (was `[x]` with MSDT `codeql-config.yml@development`; failing since 2026-10-17)
 - [x] `analyze-whcp` job: WHCP-grade analysis added 2026-04-01; clones MSDT WHCP_22H2 and runs `suites/windows_driver_recommended.qls` + `suites/windows_driver_mustfix.qls` (local paths) with pinned CLI 2.15.4; generates DVL
 - [x] `suites/windows_driver_mustfix.qls` violations fail the `analyze-whcp` job (blocks WHCP cert on any blocking finding)
 - [ ] DVL artifact (from `whcp-codeql-artifacts-N`) committed to `test-evidence/dvl-YYYYMMDD.DVL.XML` before each release cut

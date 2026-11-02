@@ -1,7 +1,14 @@
+# Read-only system diagnostics.  Never starts a test program itself (TEST-HILPATH-009, 2026-10-29): it used to run
+# avb_test_i226.exe (avb_test_um.c, SETUP_TAS/FP/PTM-capable, #328 hold) as an incidental device check.
+#   -RunDeviceTest  run the registered ReadOnly test test_all_adapters through tools\test\Run-Tests-CI.ps1
+#                   (machine lock, provenance, safety gate, adapter baseline and state check apply).
+param([switch]$RunDeviceTest, [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug')
+
 Write-Host "=== Intel AVB Driver Debug Analysis ===" -ForegroundColor Cyan
 Write-Host ""
 
 $ErrorActionPreference = 'Continue'  # Allow script to continue on errors for diagnostics
+$repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 
 try {
 
@@ -85,35 +92,30 @@ if (-not $isAdmin) {
     Write-Host "         Device interface test requires admin rights" -ForegroundColor Gray
     Write-Host "         Rerun this script as Administrator to test device access" -ForegroundColor Gray
 } else {
-    # Try to find test executable in common locations
-    $testPaths = @(
-        "build\tools\avb_test\x64\Debug\avb_test_i226.exe",
-        "build\tools\avb_test\x64\Release\avb_test_i226.exe",
-        "tools\avb_test\x64\Debug\avb_test.exe",
-        ".\avb_test_i226.exe"
-    )
-    $testExe = $null
-    foreach ($path in $testPaths) {
-        if (Test-Path $path) { $testExe = $path; break }
+    # Read-only: open and close the control device (no IOCTL), as the old test-program check did first.
+    if (-not ('AvbCheckSystemNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class AvbCheckSystemNative {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr h);
+}
+'@
     }
-    if ($testExe) {
-        $testResult = & $testExe 2>&1
-        if ($testResult -match "Capabilities") {
-            Write-Host "  [OK] Device interface working" -ForegroundColor Green
-            $testResult | Select-String -Pattern "Capabilities" | ForEach-Object { Write-Host "  $_" }
-        } elseif ($testResult -match "Open.*failed.*5") {
-            Write-Host "  [!] Access Denied (Error 5)" -ForegroundColor Red
-            Write-Host "      This script must run as Administrator" -ForegroundColor Yellow
-        } elseif ($testResult -match "Open.*failed") {
-            Write-Host "  [!] Device interface test failed" -ForegroundColor Red
-            $testResult | Select-String -Pattern "Open.*failed" | ForEach-Object { Write-Host "  $_" }
-        } else {
-            Write-Host "  [?] Test result unclear" -ForegroundColor Yellow
-            Write-Host "  $($testResult | Select-Object -First 3)"
-        }
+    $h = [AvbCheckSystemNative]::CreateFileW('\\.\IntelAvbFilter', 0x80000000, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+    $openErr = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    $deviceOpen = ($h -ne [IntPtr]::Zero -and $h -ne [IntPtr](-1))
+    if ($deviceOpen) { [void][AvbCheckSystemNative]::CloseHandle($h); Write-Host "  [OK] \\.\IntelAvbFilter opens (read-only check, no IOCTL)" -ForegroundColor Green }
+    elseif ($openErr -eq 5) { Write-Host "  [!] Access Denied (Error 5)" -ForegroundColor Red }
+    else { Write-Host "  [!] \\.\IntelAvbFilter does not open (Win32 error $openErr)" -ForegroundColor Red }
+    if ($RunDeviceTest) {
+        # Adapter enumeration + capabilities through the authoritative dispatcher (registered ReadOnly entry).
+        & (Join-Path $repoRoot 'tools\test\Run-Tests-CI.ps1') -Suite HardwareMandatory -Configuration $Configuration -Tests @('test_all_adapters')
+        $deviceTestExit = $LASTEXITCODE
+        Write-Host ("  test_all_adapters via Run-Tests-CI.ps1: exit {0}" -f $deviceTestExit) -ForegroundColor $(if ($deviceTestExit -eq 0) { 'Green' } else { 'Red' })
     } else {
-        Write-Host "  [SKIP] Test executable not found" -ForegroundColor Yellow
-        Write-Host "         Build tests with: .\tools\build\Build-Tests.ps1 -TestName avb_test_i226" -ForegroundColor Gray
+        Write-Host "  Adapter capabilities: rerun with -RunDeviceTest (registered test test_all_adapters, gated)" -ForegroundColor Gray
     }
 }
 
@@ -134,21 +136,21 @@ Write-Host "=== Analysis Summary ===" -ForegroundColor Cyan
 
 # Check device test status
 $deviceTestPassed = $false
-if ($isAdmin -and $testExe -and $testResult) {
-    $deviceTestPassed = $testResult -match "Capabilities"
+if ($isAdmin) {
+    $deviceTestPassed = [bool]$deviceOpen -and (-not $RunDeviceTest -or $deviceTestExit -eq 0)
 }
 
 # Determine the issue
 if ($driverFiles -and $localBuild -and $latest.LastWriteTime -lt $localBuild.LastWriteTime) {
     Write-Host ""
     Write-Host "ACTION REQUIRED: Your installed driver is outdated!" -ForegroundColor Red
-    Write-Host "1. Run: .\Smart-Update-Driver.bat (as Administrator)"
-    Write-Host "2. This will handle the stuck service and install the new driver"
+    Write-Host "1. Run: .\tools\setup\Install-Driver-Elevated.ps1 -Configuration Debug -Action Reinstall"
+    Write-Host "2. The installer takes the HIL machine lock; it refuses while another run owns the machine"
 } elseif (-not $isAdmin) {
     Write-Host ""
     Write-Host "RECOMMENDATION: Rerun as Administrator for full diagnostics" -ForegroundColor Yellow
     Write-Host "Device interface test was skipped (requires admin rights)"
-} elseif (-not $deviceTestPassed -and $testExe) {
+} elseif (-not $deviceTestPassed) {
     Write-Host ""
     Write-Host "ACTION REQUIRED: Device interface test failed!" -ForegroundColor Red
     Write-Host "Check that the driver is properly installed and bound to your network adapter"
@@ -158,7 +160,7 @@ if ($driverFiles -and $localBuild -and $latest.LastWriteTime -lt $localBuild.Las
     Write-Host "1. Download DebugView from Sysinternals"
     Write-Host "2. Run as Administrator"
     Write-Host "3. Enable: Capture > Capture Kernel"
-    Write-Host "4. Run test again: .\avb_test_i226.exe selftest"
+    Write-Host "4. Reproduce a registered test with capture: .\tools\test\Run-Tests-Elevated.ps1 -Suite HardwareMandatory -TestName test_all_adapters -CaptureDbgView"
     Write-Host "5. Look for messages about SYSTIM, TIMINCA, and PTP clock"
 } else {
     Write-Host ""

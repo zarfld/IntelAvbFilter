@@ -164,6 +164,90 @@ typedef struct _IOCTL_VERSION {
 /* Function 0x80A → value 0x00172028 */
 #define IOCTL_AVB_RESET_STATISTICS      _NDIS_CONTROL_CODE(0x80A, METHOD_BUFFERED)  /* 0x00172028 */
 
+/* ---------------------------------------------------------------------------------------------------------------
+ * HIL hardware-state verification (Q 2026-10-22).  Available in Debug AND Release.
+ *   GET_ADAPTER_IDENTITY  stable physical identity of the adapter at an enumeration position (NET_LUID of the base
+ *                         miniport: user mode maps it to the Interface GUID / PnP instance; the position is only a
+ *                         cursor and may change between calls).
+ *   OPEN_ADAPTER_BY_LUID  binds the handle to the ONE adapter with that NET_LUID; no enumeration index involved.
+ *                         0 or >1 matching adapters -> not bound, explicit status (never a fallback adapter).
+ *   QUERY_HW_SNAPSHOT     read-only snapshot of every register HIL tests modify, on the handle's bound adapter, with
+ *                         the bound NET_LUID so a caller detects a re-bound/re-enumerated handle.  Offsets per family
+ *                         come from intel-ethernet-regs/gen through the device HAL; a register the family's SSOT does
+ *                         not define is reported AVB_HWREG_STATE_NOT_IN_SSOT, never guessed.
+ * Each request starts with a version; a driver without these IOCTLs fails them with STATUS_INVALID_DEVICE_REQUEST. */
+#define IOCTL_AVB_GET_ADAPTER_IDENTITY  _NDIS_CONTROL_CODE(68, METHOD_BUFFERED)  /* 0x00170110 */
+#define IOCTL_AVB_OPEN_ADAPTER_BY_LUID  _NDIS_CONTROL_CODE(69, METHOD_BUFFERED)  /* 0x00170114 */
+#define IOCTL_AVB_QUERY_HW_SNAPSHOT     _NDIS_CONTROL_CODE(70, METHOD_BUFFERED)  /* 0x00170118 */
+
+#define AVB_ADAPTER_IDENTITY_VERSION 1u
+typedef struct AVB_ADAPTER_IDENTITY_REQUEST {
+    avb_u32 version;       /* in: AVB_ADAPTER_IDENTITY_VERSION */
+    avb_u32 index;         /* in: enumeration position, same order as IOCTL_AVB_ENUM_ADAPTERS */
+    avb_u64 net_luid;      /* out: NET_LUID.Value of the base miniport */
+    avb_u32 if_index;      /* out: NET_IFINDEX of the base miniport */
+    avb_u32 count;         /* out: number of supported Intel adapters */
+    avb_u16 vendor_id;     /* out */
+    avb_u16 device_id;     /* out */
+    avb_u32 capabilities;  /* out: INTEL_CAP_* */
+    avb_u8  mac[6];        /* out: current MAC address NDIS reported at FilterAttach */
+    avb_u16 reserved0;
+    avb_u32 status;        /* out: NDIS_STATUS */
+    avb_u32 reserved1;
+} AVB_ADAPTER_IDENTITY_REQUEST, *PAVB_ADAPTER_IDENTITY_REQUEST;   /* 48 bytes */
+
+#define AVB_OPEN_BY_LUID_VERSION 1u
+typedef struct AVB_OPEN_BY_LUID_REQUEST {
+    avb_u32 version;       /* in: AVB_OPEN_BY_LUID_VERSION */
+    avb_u32 reserved0;
+    avb_u64 net_luid;      /* in: NET_LUID.Value from GET_ADAPTER_IDENTITY */
+    avb_u32 matches;       /* out: supported adapters with this NET_LUID (bound only when exactly 1) */
+    avb_u32 status;        /* out: NDIS_STATUS_SUCCESS when bound.  Not bound: the IOCTL fails - 0 matches with
+                                    STATUS_NO_SUCH_DEVICE, >1 (ambiguous) with STATUS_INVALID_DEVICE_STATE; the
+                                    handle's previous binding is unchanged */
+} AVB_OPEN_BY_LUID_REQUEST, *PAVB_OPEN_BY_LUID_REQUEST;           /* 24 bytes */
+
+/* Stable wire identifiers of the registers HIL tests modify (vocabulary of Run-Tests-CI.ps1 $HilMutatedState). */
+#define AVB_HWREG_TIMINCA      1u
+#define AVB_HWREG_TSAUXC       2u
+#define AVB_HWREG_TSYNCTXCTL   3u   /* TS_CONTROL */
+#define AVB_HWREG_TSYNCRXCTL   4u   /* TS_CONTROL */
+#define AVB_HWREG_RXPBSIZE     5u   /* TS_CONTROL (SET_RX_TIMESTAMP) */
+#define AVB_HWREG_SRRCTL0      6u   /* TS_CONTROL (SET_QUEUE_TIMESTAMP), queues 0..3 = 6..9 */
+#define AVB_HWREG_SRRCTL3      9u
+#define AVB_HWREG_TRGTTIML0   10u   /* TARGET_TIME */
+#define AVB_HWREG_TRGTTIMH0   11u
+#define AVB_HWREG_TRGTTIML1   12u
+#define AVB_HWREG_TRGTTIMH1   13u
+#define AVB_HWREG_TQAVCTRL    14u   /* TAS / QAV */
+#define AVB_HWREG_RAL0        15u   /* identity corroboration (MAC address filter 0) */
+#define AVB_HWREG_RAH0        16u
+#define AVB_HWREG_COUNT       16u
+
+#define AVB_HWREG_STATE_VALID        1u   /* value read from the family's SSOT offset */
+#define AVB_HWREG_STATE_NOT_IN_SSOT  2u   /* intel-ethernet-regs defines no such register for this family */
+#define AVB_HWREG_STATE_READ_FAILED  3u   /* the family register read returned an error */
+#define AVB_HWREG_STATE_NO_MMIO      4u   /* the adapter has no MMIO access (INTEL_CAP_MMIO clear) */
+#define AVB_HWREG_STATE_NO_HAL       5u   /* the device family implements no SSOT offset map */
+
+typedef struct AVB_HWREG_ENTRY {
+    avb_u32 id;            /* AVB_HWREG_* */
+    avb_u32 offset;        /* SSOT offset used (0 when not VALID/READ_FAILED) */
+    avb_u32 value;         /* register value when VALID */
+    avb_u32 state;         /* AVB_HWREG_STATE_* */
+} AVB_HWREG_ENTRY;                                               /* 16 bytes */
+
+#define AVB_HW_SNAPSHOT_VERSION 1u
+typedef struct AVB_HW_SNAPSHOT_REQUEST {
+    avb_u32 version;       /* in: AVB_HW_SNAPSHOT_VERSION */
+    avb_u32 count;         /* out: entries filled (AVB_HWREG_COUNT) */
+    avb_u64 net_luid;      /* out: NET_LUID.Value of the adapter this handle is bound to */
+    avb_u16 vendor_id;     /* out */
+    avb_u16 device_id;     /* out */
+    avb_u32 status;        /* out: NDIS_STATUS */
+    AVB_HWREG_ENTRY entries[AVB_HWREG_COUNT];   /* out: one per AVB_HWREG_* id 1..AVB_HWREG_COUNT, in id order */
+} AVB_HW_SNAPSHOT_REQUEST, *PAVB_HW_SNAPSHOT_REQUEST;           /* 24 + 16*16 = 280 bytes */
+
 /* Request/response structures (mirror of avb_integration.h) */
 #define AVB_DEVICE_INFO_MAX 1024u
 

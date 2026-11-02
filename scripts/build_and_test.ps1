@@ -12,7 +12,15 @@
 .PARAMETER Solution
   Path to solution file. Default: IntelAvbFilter.sln in script root.
 .PARAMETER RestartAdapter
-  If set, attempts to restart Intel adapter via devcon (must be in PATH).
+  RETIRED 2026-10-29: refused.  It ran "devcon restart *VEN_8086*" - every Intel device, including the NIC that may
+  carry the runner connection, outside the machine lock and without recovery.  Adapter administration is the Unsafe
+  class: attended runs only, through Run-Tests-Elevated.ps1 with AVB_HIL_AUTHORIZE_UNSAFE naming the exact entry.
+.NOTES
+  Gated since 2026-10-29 (TEST-HILPATH-012): builds through tools\build\Build-Driver.ps1 / Build-Tests.ps1 (machine
+  build exclusion + test build manifest), tests through tools\test\Run-Tests-CI.ps1 (provenance, HIL safety gate,
+  #328 hazard hold, adapter state check).  The four avb_test_um.c commands run as the entries
+  'avb_test_project <command>'; they are not classified per command yet, so the dispatcher BLOCKs them (visible,
+  non-passing) until each command is classified from source evidence.  x64 only (the test runner directory).
 .PARAMETER SkipDriver
   Skip building the driver (only user tool).
 .PARAMETER SkipUserTool
@@ -33,6 +41,7 @@
 )
 
 $ErrorActionPreference = 'Stop'
+$script:TestExit = 0
 
 function Write-Info($m){ Write-Host "[INFO] $m" -ForegroundColor Cyan }
 function Write-Warn($m){ Write-Host "[WARN] $m" -ForegroundColor Yellow }
@@ -67,38 +76,33 @@ function Load-VCTools {
 function Build-Driver {
   param([string]$SolutionPath)
   if($SkipDriver){ Write-Info 'SkipDriver set - skipping driver build.'; return }
-  if(!(Test-Path $SolutionPath)){ throw "Solution not found: $SolutionPath" }
-  Write-Info "Building driver: $SolutionPath ($Configuration|$Platform)"
-  & msbuild $SolutionPath /m /p:Configuration=$Configuration /p:Platform=$Platform /warnaserror:false /nologo | Write-Host
+  Write-Info "Building driver through tools\build\Build-Driver.ps1 ($Configuration|$Platform; machine build exclusion)"
+  & .\tools\build\Build-Driver.ps1 -Configuration $Configuration -Platform $Platform
+  if($LASTEXITCODE -ne 0){ throw "Build-Driver.ps1 failed (exit $LASTEXITCODE)" }
 }
 
 function Build-UserTool {
   if($SkipUserTool){ Write-Info 'SkipUserTool set - skipping user tool build.'; return }
-  $mk = 'tests\integration\avb\avb_test.mak'
-  if(!(Test-Path $mk)){ throw "Makefile not found: $mk" }
-  Write-Info "Building user tool via nmake ($Configuration|$Platform)"
-  & nmake /nologo -f $mk CFG=$Configuration PLATFORM=$Platform | Write-Host
+  Write-Info "Building avb_test_project (tests\integration\avb\avb_test.mak) through tools\build\Build-Tests.ps1 ($Configuration; manifest + build exclusion)"
+  & .\tools\build\Build-Tests.ps1 -Configuration $Configuration -TestName avb_test_project
+  if($LASTEXITCODE -ne 0){ throw "Build-Tests.ps1 failed (exit $LASTEXITCODE)" }
 }
 
 function Restart-IntelAdapter {
   if(-not $RestartAdapter){ return }
-  if(-not (Get-Command devcon -ErrorAction SilentlyContinue)) { Write-Warn 'devcon.exe not found in PATH; skipping adapter restart.'; return }
-  Write-Info 'Attempting adapter restart (devcon restart *VEN_8086*)'
-  try { & devcon restart *VEN_8086* | Write-Host } catch { Write-Warn "devcon restart failed: $_" }
+  throw ('-RestartAdapter is retired (2026-10-29): it restarted every Intel device (devcon restart *VEN_8086*) outside the ' +
+         'machine lock and without recovery. Adapter administration runs only as an attended Unsafe entry through ' +
+         'tools\test\Run-Tests-Elevated.ps1 with AVB_HIL_AUTHORIZE_UNSAFE naming the exact entry.')
 }
 
 function Run-Tests {
-  $exe = Join-Path -Path (Join-Path build/tools/avb_test $Platform) -ChildPath "$Configuration/avb_test_i210.exe"
-  if(!(Test-Path $exe)){ throw "Test executable missing: $exe" }
-  Write-Info "Running tests using $exe"
-  if($SelfTestOnly){
-    & $exe selftest | Write-Host
-    return
-  }
-  & $exe caps      | Write-Host
-  & $exe ptp-probe | Write-Host
-  & $exe snapshot  | Write-Host
-  & $exe selftest  | Write-Host
+  if($Platform -ne 'x64'){ throw "Run-Tests-CI.ps1 runs x64 test builds only (requested $Platform)" }
+  $cmds = if($SelfTestOnly){ @('selftest') } else { @('caps', 'ptp-probe', 'snapshot', 'selftest') }
+  $entries = @($cmds | ForEach-Object { "avb_test_project $_" })
+  Write-Info "Running $($entries -join ', ') through tools\test\Run-Tests-CI.ps1 (HardwareIntegration; gated)"
+  & .\tools\test\Run-Tests-CI.ps1 -Suite HardwareIntegration -Configuration $Configuration -Tests $entries
+  $script:TestExit = $LASTEXITCODE
+  if($script:TestExit -ne 0){ Write-Err "Run-Tests-CI.ps1 exit $($script:TestExit) (blocked or failed entries are non-passing)" }
 }
 
 function Show-Summary {
@@ -115,12 +119,13 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location (Split-Path -Parent $scriptRoot)  # project root assumed one level up (scripts/)
 try {
   Require-Admin
+  Restart-IntelAdapter   # retired switch: refuses before anything is built
   Load-VCTools
   Build-Driver -SolutionPath $Solution
   Build-UserTool
-  Restart-IntelAdapter
   Run-Tests
   Show-Summary
+  if($script:TestExit -ne 0){ exit $script:TestExit }
   Write-Info 'All done.'
 } catch {
   Write-Err $_

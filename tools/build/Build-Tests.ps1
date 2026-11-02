@@ -50,6 +50,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '..\lib\NativeExit.ps1')   # exit codes via $global:LASTEXITCODE (immune to caller shadowing)
+. (Join-Path $PSScriptRoot '..\lib\SourceDigest.ps1') # build-input digest (local pre-commit provenance)
 
 # Calculate repository root from script location
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -81,6 +83,16 @@ if ($TestName) {
     Write-Host "Test: ALL tests" -ForegroundColor Yellow
 }
 Write-Host ""
+
+# Build exclusion (tools/lib/HilLock.ps1): never overwrite artifacts a HIL run of another execution verifies and runs.
+. (Join-Path $PSScriptRoot '..\lib\HilLock.ps1')
+$BuildLockCtx = Enter-AvbHilBuildExclusion -Label "Build-Tests $Configuration" -GitHub $(if ($env:GITHUB_ACTIONS -eq 'true') { @{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB } } else { $null })
+if (-not $BuildLockCtx.Ok) {
+    Write-Host "[BLOCKED] Build-Tests: $($BuildLockCtx.Why)" -ForegroundColor Red
+    exit 1
+}
+if ($BuildLockCtx.Owner) { Write-Host "Machine lock held by this build until it finishes ($(Get-AvbHilLockPath))" -ForegroundColor DarkGray }
+try {   # body not re-indented; the finally block at the end of this file releases a lock this build acquired
 
 # =============================================================================
 # Build Diagnostic Tools (Moved from Run-Tests.ps1 -CompileDiagnostics)
@@ -200,6 +212,10 @@ if ($BuildDiagnosticTools) {
     Write-Host ""
 }
 
+# Build inputs BEFORE compiling; compared again when the manifest is written (inputs edited during the build make the
+# artifacts unattributable).
+$BuildInputDigestBefore = Get-AvbBuildInputDigest -RepoRoot $RepoRoot
+
 # Change to repository root
 Push-Location $RepoRoot
 
@@ -228,12 +244,14 @@ $AllTests = @(
         Name = "avb_test_project"
         Type = "nmake"
         Makefile = "tests/integration/avb/avb_test.mak"
+        Output = "avb_test_i210.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "AVB Test (nmake project)"
     },
     @{
         Name = "avb_capability_validation"
         Type = "nmake"
         Makefile = "tests/integration/avb/avb_capability_validation.mak"
+        Output = "avb_capability_validation_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "AVB Capability Validation (nmake)"
     },
     
@@ -322,12 +340,15 @@ $AllTests = @(
         Name = "tsn_ioctl_test"
         Type = "nmake"
         Makefile = "tests/integration/tsn/tsn_ioctl_test.mak"
+        Source = "tests/integration/tsn/test_tsn_ioctl_handlers_um.c"   # the makefile's only compiled source (read by the HILGATE source checks, not by nmake)
+        Output = "tsn_ioctl_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "TSN IOCTL Test (nmake)"
     },
     @{
         Name = "tsn_hardware_activation"
         Type = "nmake"
         Makefile = "tests/integration/tsn/tsn_hardware_activation_validation.mak"
+        Output = "tsn_hardware_activation_validation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "TSN Hardware Activation (nmake)"
     },
     
@@ -336,12 +357,14 @@ $AllTests = @(
         Name = "avb_multi_adapter"
         Type = "nmake"
         Makefile = "tests/integration/multi_adapter/avb_multi_adapter.mak"
+        Output = "avb_multi_adapter_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Multi-Adapter Test (nmake)"
     },
     @{
         Name = "avb_device_separation"
         Type = "nmake"
         Makefile = "tests/integration/multi_adapter/avb_device_separation_validation.mak"
+        Output = "avb_device_separation_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Device Separation Test (nmake)"
     },
     
@@ -386,30 +409,35 @@ $AllTests = @(
         Name = "avb_diagnostic"
         Type = "nmake"
         Makefile = "tests/diagnostic/avb_diagnostic.mak"
+        Output = "avb_diagnostic_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "AVB Diagnostic (nmake)"
     },
     @{
         Name = "avb_hw_state_test"
         Type = "nmake"
         Makefile = "tests/diagnostic/avb_hw_state_test.mak"
+        Output = "avb_hw_state_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "HW State Test (nmake)"
     },
     @{
         Name = "hardware_investigation"
         Type = "nmake"
         Makefile = "tests/diagnostic/hardware_investigation.mak"
+        Output = "hardware_investigation_tool.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Hardware Investigation (nmake)"
     },
     @{
         Name = "critical_prerequisites"
         Type = "nmake"
         Makefile = "tests/diagnostic/critical_prerequisites_investigation.mak"
+        Output = "critical_prerequisites_investigation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "Prerequisites Investigation (nmake)"
     },
     @{
         Name = "enhanced_tas_investigation"
         Type = "nmake"
         Makefile = "tests/diagnostic/enhanced_tas_investigation.mak"
+        Output = "enhanced_tas_investigation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "TAS Investigation (nmake)"
     },
     
@@ -419,7 +447,7 @@ $AllTests = @(
         Type = "cl"
         Source = "tests/device_specific/i210/avb_test_i210_um.c"
         ExtraSources = "tests/common/avb_test_common.c"
-        Output = "avb_test_i210.exe"
+        Output = "avb_test_i210_device.exe"   # was avb_test_i210.exe, also linked by avb_test_project (avb_test.mak) - TEST-COMPLETE-004
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "I210 Device-Specific Test"
     },
@@ -482,24 +510,28 @@ $AllTests = @(
         Name = "avb_i226_test"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/avb_i226_test.mak"
+        Output = "avb_i226_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 AVB Test (nmake)"
     },
     @{
         Name = "avb_i226_advanced"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/avb_i226_advanced.mak"
+        Output = "avb_i226_advanced_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 Advanced Test (nmake)"
     },
     @{
         Name = "chatgpt5_i226_tas"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/chatgpt5_i226_tas_validation.mak"
+        Output = "chatgpt5_i226_tas_validation.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 TAS Validation (nmake)"
     },
     @{
         Name = "corrected_i226_tas"
         Type = "nmake"
         Makefile = "tests/device_specific/i226/corrected_i226_tas_test.mak"
+        Output = "corrected_i226_tas_test.exe"   # linked by the makefile into build\tools\avb_test\<platform>\<cfg>
         Description = "i226 TAS Test (nmake)"
     },
     
@@ -537,16 +569,15 @@ $AllTests = @(
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Unit: Minimal IOCTL Test"
     },
-    # DISABLED: test_tsn_ioctl_handlers - KM placeholder, needs UM implementation
-    # TODO: Create standalone UM version or use test_tsn_ioctl_handlers_um
+    # Sole producer of test_tsn_ioctl_handlers.exe: the user-mode source (tests/unit/ioctl/test_tsn_ioctl_handlers.c is a
+    # kernel-mode placeholder without main()).  tsn_ioctl_test.mak compiles the same source as tsn_ioctl_test.exe.
     @{
         Name = "test_tsn_ioctl_handlers"
         Type = "cl"
-        Source = "tests/unit/ioctl/test_tsn_ioctl_handlers.c"
+        Source = "tests/integration/tsn/test_tsn_ioctl_handlers_um.c"
         Output = "test_tsn_ioctl_handlers.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Description = "Unit: TSN IOCTL Handlers Test"
-        Disabled = $true  # KM placeholder only, use test_tsn_ioctl_handlers_um instead
     },
     
     # Unit Tests - Hardware (cl.exe)
@@ -659,7 +690,7 @@ $AllTests = @(
         Disabled = $true  # Needs update: AVB_CLOCK_CONFIG.systim is now u64
     },
     @{
-        Name = "ssot_register_validation"
+        Name = "ssot_register_validation_test"
         Type = "cl"
         Source = "tests/integration/tsn/ssot_register_validation_test.c"
         Output = "ssot_register_validation_test.exe"
@@ -835,7 +866,16 @@ $AllTests = @(
         Output = "test_ptp_phc_stability.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
         Libs = "advapi32.lib"
-        Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..009, Track A closes #317)"
+        Description = "Integration: PHC Stability Under State Changes (UT-CORR-005..008, Track A closes #317; UT-CORR-009 = test_ptp_phc_lifecycle)"
+    },
+    @{
+        Name = "test_ptp_phc_lifecycle"
+        Type = "cl"
+        Source = "tests/integration/ptp_corr/test_ptp_phc_lifecycle.c"
+        Output = "test_ptp_phc_lifecycle.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "advapi32.lib"
+        Description = "Integration: UT-CORR-009 driver lifecycle (reinstalls the driver; split from test_ptp_phc_stability, Unsafe in Run-Tests-CI)"
     },
     @{
         Name = "test_vv_corr_001_stability"
@@ -1976,7 +2016,10 @@ function Get-TestBuildArtifactName {
 
 function New-TestBuildManifest {
     param([string]$Configuration, [string]$Platform, [object[]]$Tests, [hashtable]$Outcomes,
-          $SourceRevision, $SourceDirty)
+          $SourceRevision, $SourceDirty, $SourceDigest = $null, $SourceDigestFiles = $null, $BuiltUtc = $null)
+    # sourceDigest (tools/lib/SourceDigest.ps1): the build inputs this run compiled - the only attribution a binary
+    # built from an uncommitted working tree has (local pre-commit evidence; Run-Tests-CI.ps1 re-verifies it).
+    # BuiltUtc is passed in by the caller so the function stays a pure function of its inputs (deterministic manifest).
     # No carry-over: a record from an earlier run cannot be attributed to the current source without ambiguity
     # (new commit, edited sources/headers, toolchain).  Entries not built by THIS run are `not-built`.
     $entries = @()
@@ -1987,7 +2030,7 @@ function New-TestBuildManifest {
         $e = [ordered]@{
             name = $tName; type = [string]$t['Type']; enabled = (-not $t['Disabled']); prerequisites = $prereq
             status = 'not-built'; reason = ''; artifact = $artifact; sha256 = $null
-            sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
+            sourceRevision = $SourceRevision; sourceDirty = $SourceDirty; sourceDigest = $SourceDigest
         }
         if ($Outcomes.ContainsKey($tName)) {
             $o = $Outcomes[$tName]
@@ -2012,8 +2055,11 @@ function New-TestBuildManifest {
         }
         $entries += ,$e
     }
+    $mode = if ($SourceDirty -eq $false) { 'clean-commit' } elseif ($SourceDigest) { 'local-worktree' } else { 'unattributable' }
     return [ordered]@{ schemaVersion = 1; producer = 'tools/build/Build-Tests.ps1'; configuration = $Configuration
-                       platform = $Platform; entries = $entries }
+                       platform = $Platform; builtUtc = $BuiltUtc
+                       provenanceMode = $mode; sourceRevision = $SourceRevision; sourceDirty = $SourceDirty
+                       sourceDigest = $SourceDigest; sourceDigestFiles = $SourceDigestFiles; entries = $entries }
 }
 
 # Atomic write: complete file in the same directory, then rename over the previous manifest.
@@ -2181,19 +2227,20 @@ foreach ($Test in $TestsToBuild) {
         }
         
         # Execute build
+        Reset-AvbExitCode
         $result = & $BuildScript -BuildCmd $BuildCmd 2>&1
         
-        $compileExit = $LASTEXITCODE
-        if ($compileExit -eq 0 -and (Test-Path $OutputPath)) {
+        $compileExit = Get-AvbExitCode
+        if ((Test-AvbExitSuccess $compileExit) -and (Test-Path $OutputPath)) {
             Write-Host "  SUCCESS: $OutputPath created" -ForegroundColor Green
             $SucceededTests += $Test.Name
             $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $OutputPath }
         } else {
-            Write-Host "  FAILED: Compiler returned error code $compileExit" -ForegroundColor Red
+            Write-Host "  FAILED: Compiler returned error code $(Format-AvbExitCode $compileExit)" -ForegroundColor Red
             # Print compiler output so CI logs show the actual errors
             $result | Where-Object { $_ -match "error|warning" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
             $FailedTests += $Test.Name
-            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "compiler exit code $compileExit or output missing"; OutputPath = $null }
+            $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "compiler exit code $(Format-AvbExitCode $compileExit) or output missing"; OutputPath = $null }
         }
         
     } elseif ($Test.Type -eq "nmake") {
@@ -2250,12 +2297,27 @@ foreach ($Test in $TestsToBuild) {
                 }
             }
 
+            # Declared artifact (Output): the build must WRITE it in this run.  The makefiles list only their .c file as a
+            # dependency, so after a header change (e.g. include/avb_ioctl.h) nmake reported "up to date" and exit 0 while
+            # build\tools\avb_test\x64\Debug kept 2026-04 binaries (FullSuite_20261027_091718 executed them); and without
+            # CFG/PLATFORM every makefile built into ...\Debug even for a Release build.  /A rebuilds unconditionally.
+            # A previous file is never deleted: it is logged (stale evidence) and only a file written now counts as built.
+            $declared = if ($Test.Output) { Join-Path $OutputDir ([System.IO.Path]::GetFileName([string]$Test.Output)) } else { $null }
+            $previous = $null
+            if ($declared -and (Test-Path -LiteralPath $declared)) {
+                $pi = Get-Item -LiteralPath $declared
+                $previous = "{0} ({1:yyyy-MM-dd HH:mm:ss}, SHA256 {2})" -f $pi.Name, $pi.LastWriteTime, (Get-FileHash -LiteralPath $declared -Algorithm SHA256).Hash
+                Write-Host "  Previous artifact (evidence, replaced only by a successful build): $previous" -ForegroundColor Gray
+            }
+            $buildStartUtc = (Get-Date).ToUniversalTime().AddSeconds(-2)   # file-time granularity
+
             $prevErrorPref = $ErrorActionPreference
             $ErrorActionPreference = 'SilentlyContinue'
             $output = @()
             try {
-                $output = @(nmake /f $MakeFile 2>&1)
-                $buildExitCode = $LASTEXITCODE
+                Reset-AvbExitCode
+                $output = @(nmake /A /f $MakeFile "CFG=$Configuration" "PLATFORM=$Platform" 2>&1)
+                $buildExitCode = Get-AvbExitCode
             } finally {
                 $ErrorActionPreference = $prevErrorPref
             }
@@ -2263,20 +2325,27 @@ foreach ($Test in $TestsToBuild) {
             if ($ShowDetails -and $output.Count -gt 0) {
                 $output | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
             }
-            
-            if ($buildExitCode -eq 0) {
-                Write-Host "  SUCCESS: nmake build completed" -ForegroundColor Green
+
+            $produced = $declared -and (Test-Path -LiteralPath $declared) -and ((Get-Item -LiteralPath $declared).LastWriteTimeUtc -ge $buildStartUtc)
+            if ((Test-AvbExitSuccess $buildExitCode) -and $declared -and -not $produced) {
+                $why = "nmake exit 0 but $([System.IO.Path]::GetFileName($declared)) was not written by this build" +
+                       $(if ($previous) { "; existing file $previous is stale and not used" } else { '; the file does not exist' })
+                Write-Host "  FAILED: $why" -ForegroundColor Red
+                $FailedTests += $Test.Name
+                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = $why; OutputPath = $null }
+            } elseif (Test-AvbExitSuccess $buildExitCode) {
+                Write-Host "  SUCCESS: nmake build completed$(if ($declared) { " -> $declared" })" -ForegroundColor Green
                 $SucceededTests += $Test.Name
-                $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $null }
+                $BuildOutcomes[$Test.Name] = @{ Status = 'built'; Reason = ''; OutputPath = $declared }
             } else {
-                Write-Host "  FAILED: nmake returned error code $buildExitCode" -ForegroundColor Red
+                Write-Host "  FAILED: nmake returned error code $(Format-AvbExitCode $buildExitCode)" -ForegroundColor Red
                 if (-not $ShowDetails -and $output -and $output.Count -gt 0) {
                     Write-Host "  nmake output (tail):" -ForegroundColor DarkYellow
                     $tailStart = [Math]::Max(0, $output.Count - 30)
                     $output[$tailStart..($output.Count - 1)] | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
                 }
                 $FailedTests += $Test.Name
-                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "nmake exit code $buildExitCode"; OutputPath = $null }
+                $BuildOutcomes[$Test.Name] = @{ Status = 'failed'; Reason = "nmake exit code $(Format-AvbExitCode $buildExitCode)"; OutputPath = $null }
             }
         } finally {
             Pop-Location
@@ -2334,21 +2403,37 @@ $srcRevision = $null; $srcDirty = $null
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
+    Reset-AvbExitCode
     $rev = & git -C $RepoRoot rev-parse HEAD 2>$null
-    if ($LASTEXITCODE -eq 0 -and $rev) {
+    if ((Test-AvbExitSuccess (Get-AvbExitCode)) -and $rev) {
         $srcRevision = ([string]$rev).Trim()
+        Reset-AvbExitCode
         $dirty = & git -C $RepoRoot status --porcelain --untracked-files=no 2>$null
-        if ($LASTEXITCODE -eq 0) { $srcDirty = [bool]$dirty }
+        if (Test-AvbExitSuccess (Get-AvbExitCode)) { $srcDirty = [bool]$dirty }
     } else {
         Write-Host "[MANIFEST] WARNING: git revision unavailable -- sourceRevision recorded as null" -ForegroundColor Yellow
     }
 } finally {
     $ErrorActionPreference = $prevEap
 }
+$srcDigest = $null; $srcDigestFiles = $null
+$BuildInputDigestAfter = Get-AvbBuildInputDigest -RepoRoot $RepoRoot
+if (-not $BuildInputDigestBefore.Ok -or -not $BuildInputDigestAfter.Ok) {
+    Write-Host "[MANIFEST] WARNING: build-input digest unavailable ($($BuildInputDigestBefore.Error)$($BuildInputDigestAfter.Error)) -- sourceDigest recorded as null" -ForegroundColor Yellow
+} elseif ($BuildInputDigestBefore.Digest -ne $BuildInputDigestAfter.Digest) {
+    Write-Host "[MANIFEST] WARNING: build inputs changed DURING the build -- sourceDigest recorded as null; rebuild before testing" -ForegroundColor Yellow
+} else {
+    $srcDigest = $BuildInputDigestAfter.Digest; $srcDigestFiles = $BuildInputDigestAfter.Files
+}
 $testManifest = New-TestBuildManifest -Configuration $Configuration -Platform $Platform -Tests $AllTests -Outcomes $BuildOutcomes `
-                    -SourceRevision $srcRevision -SourceDirty $srcDirty
+                    -SourceRevision $srcRevision -SourceDirty $srcDirty -SourceDigest $srcDigest -SourceDigestFiles $srcDigestFiles `
+                    -BuiltUtc ((Get-Date).ToUniversalTime().ToString('o'))
 if ($srcDirty -ne $false) {
-    Write-Host "[MANIFEST] NOTE: built from an uncommitted or unknown source state -- Run-Tests-CI.ps1 will not authorize these artifacts for Hardware* suites" -ForegroundColor Yellow
+    if ($srcDigest) {
+        Write-Host "[MANIFEST] LOCAL PRE-COMMIT BUILD: uncommitted working tree, build-input digest $srcDigest ($srcDigestFiles inputs) -- Run-Tests-CI.ps1 authorizes these artifacts for LOCAL Hardware* runs only while the inputs are unchanged; never as clean-commit CI evidence" -ForegroundColor Yellow
+    } else {
+        Write-Host "[MANIFEST] NOTE: built from an uncommitted or unknown source state without a build-input digest -- Run-Tests-CI.ps1 will not authorize these artifacts" -ForegroundColor Yellow
+    }
 }
 Write-TestBuildManifest -Manifest $testManifest -Path $TestManifestPath
 Write-Host ("[MANIFEST] {0} ({1} entries, {2} built with SHA256)" -f $TestManifestPath, @($testManifest.entries).Count,
@@ -2396,3 +2481,6 @@ if ($FailCount -gt 0) {
 }
 
 exit 0
+} finally {
+    if ($BuildLockCtx.Owner) { $null = Exit-AvbHilLock -Owner $BuildLockCtx.Owner }
+}

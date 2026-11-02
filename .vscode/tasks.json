@@ -241,8 +241,12 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"./avb_test_i210_um.exe"
+				"-File",
+				"tools/test/Run-Tests-Elevated.ps1",
+				"-Suite",
+				"HardwareIntegration",
+				"-TestName",
+				"avb_test_i210"
 			],
 			"presentation": {
 				"reveal": "always"
@@ -259,8 +263,12 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"./avb_test_i219.exe"
+				"-File",
+				"tools/test/Run-Tests-Elevated.ps1",
+				"-Suite",
+				"HardwareIntegration",
+				"-TestName",
+				"avb_test_i219"
 			],
 			"presentation": {
 				"reveal": "always"
@@ -277,8 +285,12 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"./avb_test_i350.exe"
+				"-File",
+				"tools/test/Run-Tests-Elevated.ps1",
+				"-Suite",
+				"HardwareIntegration",
+				"-TestName",
+				"avb_test_i350"
 			],
 			"presentation": {
 				"reveal": "always"
@@ -385,8 +397,12 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"./tsauxc_toggle_test.exe"
+				"-File",
+				"tools/test/Run-Tests-Elevated.ps1",
+				"-Suite",
+				"HardwareIntegration",
+				"-TestName",
+				"tsauxc_toggle_test"
 			],
 			"presentation": {
 				"reveal": "always"
@@ -420,8 +436,12 @@
 				"-NoProfile",
 				"-ExecutionPolicy",
 				"Bypass",
-				"-Command",
-				"./ptp_clock_control_test.exe"
+				"-File",
+				"tools/test/Run-Tests-Elevated.ps1",
+				"-Suite",
+				"HardwareUnit",
+				"-TestName",
+				"ptp_clock_control_test"
 			],
 			"presentation": {
 				"reveal": "always"

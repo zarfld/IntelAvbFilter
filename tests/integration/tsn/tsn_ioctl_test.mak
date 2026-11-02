@@ -18,7 +18,7 @@ CFLAGS=/nologo /W4 /Zi /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DAVB_TE
 LDFLAGS=/nologo /DEBUG /MACHINE:X64
 LIBS=kernel32.lib user32.lib advapi32.lib
 
-all: dirs $(OUTDIR)\test_tsn_ioctl_handlers.exe
+all: dirs $(OUTDIR)\tsn_ioctl_test.exe
 
 dirs:
 	@if not exist $(OUTDIR) mkdir $(OUTDIR)
@@ -28,10 +28,10 @@ OBJS=$(OUTDIR)\test_tsn_ioctl_handlers_um.obj
 $(OUTDIR)\test_tsn_ioctl_handlers_um.obj: test_tsn_ioctl_handlers_um.c
 	$(CC) $(CFLAGS) /Fo$(OUTDIR)\ /c test_tsn_ioctl_handlers_um.c
 
-$(OUTDIR)\test_tsn_ioctl_handlers.exe: $(OBJS)
-	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\test_tsn_ioctl_handlers.exe $(OBJS) $(LIBS)
+$(OUTDIR)\tsn_ioctl_test.exe: $(OBJS)
+	$(LD) $(LDFLAGS) /OUT:$(OUTDIR)\tsn_ioctl_test.exe $(OBJS) $(LIBS)
 
 clean:
-	@if exist "$(OUTDIR)\test_tsn_ioctl_handlers.*" del /Q "$(OUTDIR)\test_tsn_ioctl_handlers.*"
+	@if exist "$(OUTDIR)\tsn_ioctl_test.*" del /Q "$(OUTDIR)\tsn_ioctl_test.*"
 
 .PHONY: all dirs clean

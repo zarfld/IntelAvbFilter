@@ -91,8 +91,13 @@ $disabledListed = @($staticDisabled.Keys | Where-Object { $suiteEntries.Contains
                     ForEach-Object { "{0} (listed in {1})" -f $_, (($suiteEntries[$_] | Sort-Object -Unique) -join ',') })
 tc_check 'TEST-HILPROV-010-no-suite-entry-resolves-to-a-disabled-build-entry' ($staticDisabled.Count -gt 0 -and $disabledListed.Count -eq 0) `
     ("statically Disabled yet dispatchable: {0}" -f ($disabledListed -join '; '))
-tc_check 'TEST-HILPROV-011-removed-entry-not-reclassified-and-um-variant-stays-mutating' `
-    ((-not $registry.ContainsKey('test_tsn_ioctl_handlers')) -and ($registry['test_tsn_ioctl_handlers_um'] -eq 'Mutating')) `
+# 011 (lists authoritative, Q 2026-10-22): the listed test_tsn_ioctl_handlers is classified (HILGATE-001) but never again
+# as a runnable class - #328 F23: as ReadOnly its stale binary issued SETUP_TAS/FP/PTM - and it is hazard-held at
+# dispatch; the UM variant stays Mutating.
+$hhLine = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1')), "(?m)^\s*'test_tsn_ioctl_handlers'\s*=\s*\`$Hold328Tsn")
+tc_check 'TEST-HILPROV-011-tsn-placeholder-never-runnable-class-hazard-held-um-variant-stays-mutating' `
+    (($registry.ContainsKey('test_tsn_ioctl_handlers') -and $registry['test_tsn_ioctl_handlers'] -notin @('ReadOnly', 'Init', 'Mutating:Target')) -and $hhLine.Success -and
+     ($registry['test_tsn_ioctl_handlers_um'] -eq 'Mutating')) `
     ("registry: test_tsn_ioctl_handlers={0}; test_tsn_ioctl_handlers_um={1}" -f $(if ($registry.ContainsKey('test_tsn_ioctl_handlers')) { $registry['test_tsn_ioctl_handlers'] } else { '<absent>' }), $registry['test_tsn_ioctl_handlers_um'])
 $self = 'ps1:tests/unit/ci/test_hil_binary_provenance.ps1'
 tc_check 'TEST-HILPROV-012-registered-in-hosted-unit-suite' (((Get-RunnerList 'UnitTests') -contains $self) -and (Test-Path -LiteralPath (Join-Path $RepoRoot 'tests\unit\ci\test_hil_binary_provenance.ps1'))) `
@@ -126,6 +131,8 @@ function Get-FunctionText([string]$Path, [string[]]$Names) {
 $fnMissing = ''
 try {
     . ([scriptblock]::Create((Get-FunctionText $BuildPath @('Get-TestBuildArtifactName', 'New-TestBuildManifest', 'Write-TestBuildManifest'))))
+    . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')   # the runner's exit-code library (used by Get-AvbSourceIdentity)
+    . (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') # build-input digest (local pre-commit provenance)
     . ([scriptblock]::Create((Get-FunctionText $RunCIPath @('Get-AvbManifestProp', 'Read-AvbBuildManifest', 'Get-AvbHilProvenanceDecision', 'Test-AvbHilNeedsProvenance', 'Get-AvbSourceIdentity'))))
 } catch { $fnMissing = $_.Exception.Message }
 tc_check 'TEST-HILPROV-019-provenance-functions-present' ($fnMissing -eq '') $fnMissing
@@ -275,6 +282,69 @@ if ($fnMissing -eq '') {
     $pb = @($mPartial.entries | Where-Object { $_.name -eq 't_built' })[0]; $pr = @($mPartial.entries | Where-Object { $_.name -eq 't_reenabled' })[0]
     tc_check 'TEST-HILPROV-036-failed-partial-rebuild-and-reenabled-entry-authorize-nothing' `
         (($pb.status -eq 'failed') -and ($null -eq $pb.sha256) -and ($pr.status -eq 'not-built') -and ($null -eq $pr.sha256)) ("failed: {0} | re-enabled: {1}" -f (Show-E $pb), (Show-E $pr))
+
+    # --- Local pre-commit provenance (tools/lib/SourceDigest.ps1): uncommitted builds are attributable by build-input digest;
+    # CI keeps the strict clean-commit rule. -------------------------------------------------------------------------
+    $dg = ('A' * 64); $dgOther = ('B' * 64)
+    $mL = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -SourceRevision 'rev-now' -SourceDirty $true -SourceDigest $dg -SourceDigestFiles 7 -BuiltUtc '2026-10-21T08:00:00.0000000Z'
+    $mpL = Join-Path $U 'manifest-local.json'; Write-TestBuildManifest -Manifest $mL -Path $mpL
+    $rmL = Read-AvbBuildManifest -Path $mpL -Configuration 'Debug'
+    $mN = New-TestBuildManifest -Configuration 'Debug' -Platform 'x64' -Tests $tests -Outcomes $outcomes -SourceRevision 'rev-now' -SourceDirty $true
+    $mpN = Join-Path $U 'manifest-nodigest.json'; Write-TestBuildManifest -Manifest $mN -Path $mpN
+    $rmN = Read-AvbBuildManifest -Path $mpN -Configuration 'Debug'
+    $srcLocal = @{ Ok = $true; Revision = 'rev-now'; Dirty = $true; Mode = 'local'; Digest = $dg; DigestError = ''; Error = '' }
+    $l1 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rmL -Source $srcLocal
+    tc_check 'TEST-HILPROV-042-local-dirty-build-runs-when-build-inputs-are-unchanged' ($l1.Action -eq 'Run') ("{0}: {1}" -f $l1.Action, $l1.Reason)
+    $l2 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rmL -Source ($srcLocal.Clone() | ForEach-Object { $_.Digest = $dgOther; $_ })
+    tc_check 'TEST-HILPROV-043-source-change-after-build-invalidates-local-provenance' (($l2.Action -eq 'Block') -and ($l2.Reason -match 'build inputs changed after')) ("{0}: {1}" -f $l2.Action, $l2.Reason)
+    $l3 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rmN -Source $srcLocal
+    tc_check 'TEST-HILPROV-044-local-build-without-digest-is-blocked' (($l3.Action -eq 'Block') -and ($l3.Reason -match 'no build-input digest')) ("{0}: {1}" -f $l3.Action, $l3.Reason)
+    $srcLocalNoDg = @{ Ok = $true; Revision = 'rev-now'; Dirty = $true; Mode = 'local'; Digest = $null; DigestError = 'git ls-files failed'; Error = '' }
+    $l4 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rmL -Source $srcLocalNoDg
+    tc_check 'TEST-HILPROV-045-unavailable-current-digest-fails-closed' (($l4.Action -eq 'Block') -and ($l4.Reason -match 'digest unavailable')) ("{0}: {1}" -f $l4.Action, $l4.Reason)
+    $srcCiDirty = @{ Ok = $true; Revision = 'rev-now'; Dirty = $true; Mode = 'ci'; Digest = $dg; DigestError = ''; Error = '' }
+    $srcCiClean = @{ Ok = $true; Revision = 'rev-now'; Dirty = $false; Mode = 'ci'; Digest = $dg; DigestError = ''; Error = '' }
+    $c1 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rmL -Source $srcCiDirty
+    $c2 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rmL -Source $srcCiClean
+    $c3 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rm -Source $srcOk
+    tc_check 'TEST-HILPROV-046-ci-strict-provenance-unchanged-dirty-tree-or-dirty-build-blocks-even-with-matching-digest' `
+        (($c1.Action -eq 'Block') -and ($c1.Reason -match 'uncommitted tracked changes') -and ($c2.Action -eq 'Block') -and ($c2.Reason -match 'uncommitted or unknown source state') -and ($c3.Action -eq 'Run')) `
+        ("dirty tree: {0} {1} | dirty build: {2} {3} | clean: {4}" -f $c1.Action, $c1.Reason, $c2.Action, $c2.Reason, $c3.Action)
+    $srcLocalRev = @{ Ok = $true; Revision = 'rev-next'; Dirty = $true; Mode = 'local'; Digest = $dg; DigestError = ''; Error = '' }
+    $l5 = Get-AvbHilProvenanceDecision -ArtifactPath $exeBuilt -Manifest $rmL -Source $srcLocalRev
+    $l6 = Get-AvbHilProvenanceDecision -ArtifactPath $exeStaleD -Manifest $rmL -Source $srcLocal
+    tc_check 'TEST-HILPROV-047-local-mode-still-requires-same-head-and-a-current-enabled-build-entry' `
+        (($l5.Action -eq 'Block') -and ($l5.Reason -match "built from revision 'rev-now'") -and ($l6.Action -eq 'Block')) ("rev: {0} {1} | stale/disabled: {2} {3}" -f $l5.Action, $l5.Reason, $l6.Action, $l6.Reason)
+    tc_check 'TEST-HILPROV-048-manifest-records-provenance-mode-digest-and-build-time' `
+        (($mL.provenanceMode -eq 'local-worktree') -and ($mL.sourceDigest -eq $dg) -and ($mL.sourceDigestFiles -eq 7) -and ($mL.builtUtc -eq '2026-10-21T08:00:00.0000000Z') -and ((Get-Content -LiteralPath $BuildPath -Raw) -match '-BuiltUtc \(\(Get-Date\)\.ToUniversalTime\(\)') -and
+         (@($mL.entries | Where-Object { $_.sourceDigest -ne $dg }).Count -eq 0) -and ($m.provenanceMode -eq 'clean-commit') -and ($mN.provenanceMode -eq 'unattributable')) `
+        ("modes: local={0} clean={1} nodigest={2}" -f $mL.provenanceMode, $m.provenanceMode, $mN.provenanceMode)
+
+    # Real digest function on a throw-away git repository (no repository files touched).
+    $G = Join-Path $U 'digest_repo'
+    New-Item -ItemType Directory -Path (Join-Path $G 'include'), (Join-Path $G 'tests'), (Join-Path $G 'docs') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $G 'include\a.h') -Value '#define A 1' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $G 'tests\t.c') -Value 'int main(void){return 0;}' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $G 'docs\readme.md') -Value 'docs' -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $G '.gitignore') -Value '*.obj' -Encoding ASCII
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & git -C $G init -q 2>$null | Out-Null; & git -C $G -c user.email=t@t -c user.name=t add -A 2>$null | Out-Null
+    & git -C $G -c user.email=t@t -c user.name=t -c core.autocrlf=false commit -q -m init 2>$null | Out-Null
+    $ErrorActionPreference = $prevEap
+    function DG { return (Get-AvbBuildInputDigest -RepoRoot $G -Roots @('include', 'tests') -Submodules @()) }
+    $g0 = DG
+    Set-Content -LiteralPath (Join-Path $G 'tests\t.c') -Value 'int main(void){return 1;}' -Encoding ASCII; $g1 = DG
+    Set-Content -LiteralPath (Join-Path $G 'tests\t.c') -Value 'int main(void){return 0;}' -Encoding ASCII; $g2 = DG
+    Set-Content -LiteralPath (Join-Path $G 'tests\new_helper.h') -Value '#define NEW 1' -Encoding ASCII; $g3 = DG
+    Remove-Item -LiteralPath (Join-Path $G 'tests\new_helper.h'); Set-Content -LiteralPath (Join-Path $G 'tests\x.obj') -Value 'obj' -Encoding ASCII; $g4 = DG
+    Set-Content -LiteralPath (Join-Path $G 'docs\readme.md') -Value 'docs changed' -Encoding ASCII; $g5 = DG
+    Remove-Item -LiteralPath (Join-Path $G 'include\a.h'); $g6 = DG
+    $gSub = Get-AvbBuildInputDigest -RepoRoot $G -Roots @('include', 'tests') -Submodules @('missing_submodule')
+    tc_check 'TEST-HILPROV-049-build-input-digest-tracks-edits-new-and-deleted-inputs-and-is-deterministic' `
+        ($g0.Ok -and ($g1.Digest -ne $g0.Digest) -and ($g2.Digest -eq $g0.Digest) -and ($g3.Digest -ne $g0.Digest) -and ($g4.Digest -eq $g0.Digest) -and
+         ($g5.Digest -eq $g0.Digest) -and ($g6.Digest -ne $g0.Digest) -and -not $gSub.Ok) `
+        ("ok={0} edit={1} revert={2} new={3} ignored={4} outside={5} deleted={6} missingSubmodule.Ok={7} {8}" -f $g0.Ok, ($g1.Digest -ne $g0.Digest), ($g2.Digest -eq $g0.Digest),
+         ($g3.Digest -ne $g0.Digest), ($g4.Digest -eq $g0.Digest), ($g5.Digest -eq $g0.Digest), ($g6.Digest -ne $g0.Digest), $gSub.Ok, $g0.Error)
 }
 
 # ---------------------------------------------------------------------------------------------------------
@@ -291,10 +361,14 @@ foreach ($f in 'Run-Tests-CI.ps1', 'Convert-Logs-To-JUnit.ps1') {
 }
 New-Item -ItemType Directory -Path (Join-Path $Tree 'tools\lib') -Force | Out-Null
 Copy-Item (Join-Path $RepoRoot 'tools\lib\TestVerdict.ps1') (Join-Path $Tree 'tools\lib\TestVerdict.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Tree 'tools\lib\NativeExit.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $Tree 'tools\lib\SourceDigest.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $Tree 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
+Copy-Item (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1') (Join-Path $Tree 'tools\lib\PhcRestoration.ps1')   # PHC evaluator (Run-Tests-CI dot-sources it)
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
-'@ | Set-Content (Join-Path $Tree 'tools\test\Lib-AvbLifecycle.ps1') -Encoding UTF8
+'@ | Set-Content (Join-Path $Tree 'tools\lib\Lib-AvbLifecycle.ps1') -Encoding UTF8
 Copy-Item (Join-Path $RepoRoot 'src\avb_integration_fixed.c') (Join-Path $Tree 'src\avb_integration_fixed.c')
 Copy-Item (Join-Path $RepoRoot 'include\intel_pci_ids.h')     (Join-Path $Tree 'include\intel_pci_ids.h')
 $TreeRunner   = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
@@ -319,9 +393,9 @@ function Get-ShaOfText([string]$Text) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try { return (($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('X2') }) -join '') } finally { $sha.Dispose() }
 }
-function New-MEntry([string]$Name, [string]$Status, [bool]$Enabled = $true, [string]$Sha = $null, [string]$Reason = '') {
+function New-MEntry([string]$Name, [string]$Status, [bool]$Enabled = $true, [string]$Sha = $null, [string]$Reason = '', $Dirty = $false, $Digest = $null) {
     return [ordered]@{ name = $Name; type = 'sandbox-fake'; enabled = $Enabled; status = $Status; reason = $Reason; artifact = "$Name.ps1"; sha256 = $Sha
-                       sourceRevision = 'sandbox-rev'; sourceDirty = $false }
+                       sourceRevision = 'sandbox-rev'; sourceDirty = $Dirty; sourceDigest = $Digest }
 }
 function Write-Manifest([object[]]$Entries, [string]$Configuration = 'Debug') {
     $m = [ordered]@{ schemaVersion = 1; producer = 'test_hil_binary_provenance.ps1'; configuration = $Configuration; platform = 'x64'; entries = $Entries }
@@ -347,7 +421,8 @@ function Edit-StateSnippet([string]$Edit) {
 }
 
 function Invoke-Sandbox {
-    param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [string]$SourceRevision = 'sandbox-rev', [string]$SourceDirty = '0')
+    param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [string]$SourceRevision = 'sandbox-rev', [string]$SourceDirty = '0',
+          [string]$SourceMode = '', [string]$SourceDigest = '')
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -359,6 +434,7 @@ function Invoke-Sandbox {
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = $SourceRevision; AVB_TEST_SANDBOX_SOURCE_DIRTY = $SourceDirty
+        AVB_TEST_SANDBOX_SOURCE_MODE = $SourceMode; AVB_TEST_SANDBOX_SOURCE_DIGEST = $SourceDigest
     }
     $lines = @()
     foreach ($k in $envs.Keys) {
@@ -407,9 +483,15 @@ Write-Manifest @(
     (New-MEntry 'test_sbprov_halter' 'built' $true (Get-Sha $pHalter)),
     (New-MEntry 'test_sbprov_disabled' 'disabled' $false $null 'KM placeholder only (mirrors Build-Tests.ps1 test_tsn_ioctl_handlers)')
 )
+# Q 2026-10-28: a cleanup difference (the halter's adapter change) no longer halts, so the active halt of this replica
+# comes from a machine record HALTED by a genuine loss of controlled execution (LOCK_LOST), placed where the sandbox
+# runner reads its safety record (logs\sandbox-hil-safety.json).
+. (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')
+$aLogs = Join-Path $Tmp 'runA\logs'; New-Item -ItemType Directory -Path $aLogs -Force | Out-Null
+$null = Initialize-AvbHilSafetyRecord -Path (Join-Path $aLogs 'sandbox-hil-safety.json') -Operator 'test' -Reason 'TEST-HILPROV-000'
+$null = Add-AvbHilSafetyEvent -Path (Join-Path $aLogs 'sandbox-hil-safety.json') -SafetyEvent ([ordered]@{ verdict = 'LOCK_LOST'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
 $rA = Invoke-Sandbox 'runA' @((Get-Entry $pHalter), (Get-Entry $pDisabled))
-tc_check 'TEST-HILPROV-000-fixture-reproduces-halt-before-readonly-item' `
-    (($rA.Out -match '\[CLEANUP_FAILED\] TC-INFRA-STATE-001: after test_sbprov_halter') -and ($rA.Out -match '\[HALT\] state-integrity halt')) (Tail $rA)
+tc_check 'TEST-HILPROV-000-fixture-reproduces-halt-before-readonly-item' ($rA.Out -match '\[HALT\] state-integrity halt') (Tail $rA)
 tc_check 'TEST-HILPROV-001-disabled-build-entry-blocks-dispatch-even-readonly-during-halt' (Test-ProvBlocked $rA 'test_sbprov_disabled' 'Disabled') (Show-Prov $rA 'test_sbprov_disabled')
 
 # --- Run B: provenance matrix ---------------------------------------------------------------------------
@@ -472,6 +554,19 @@ tc_check 'TEST-HILPROV-038-dirty-checkout-at-same-head-is-blocked' `
 $rH = Invoke-Sandbox 'runH' @((Get-Entry $pRev))
 tc_check 'TEST-HILPROV-039-same-clean-revision-control-runs' ((Get-RanCount $rH 'test_sbprov_wrongcfg') -eq 1) (Show-Prov $rH 'test_sbprov_wrongcfg')
 
+# --- Run L: local pre-commit provenance end to end (uncommitted working tree, build-input digest) -----------
+$dgL = ('C' * 64)
+$pLoc = New-Fake 'test_sbprov_wrongcfg'
+Write-Manifest @((New-MEntry 'test_sbprov_wrongcfg' 'built' $true (Get-Sha $pLoc) '' $true $dgL))
+$rL1 = Invoke-Sandbox 'runL1' @((Get-Entry $pLoc)) -SourceDirty '1' -SourceMode 'local' -SourceDigest $dgL
+tc_check 'TEST-HILPROV-050-local-uncommitted-build-runs-and-is-labelled-local-evidence' `
+    (((Get-RanCount $rL1 'test_sbprov_wrongcfg') -eq 1) -and ($rL1.Out -match '\[LOCAL-EVIDENCE\]') -and ($rL1.Out -match "provenance mode: local; build-input digest: $dgL")) (Show-Prov $rL1 'test_sbprov_wrongcfg')
+$rL2 = Invoke-Sandbox 'runL2' @((Get-Entry $pLoc)) -SourceDirty '1' -SourceMode 'local' -SourceDigest ('D' * 64)
+tc_check 'TEST-HILPROV-051-local-edit-after-build-blocks-the-binary-and-fails-the-suite' `
+    ((Test-ProvBlocked $rL2 'test_sbprov_wrongcfg' 'build inputs changed after') -and $rL2.Exit -eq 1) (Show-Prov $rL2 'test_sbprov_wrongcfg')
+$rL3 = Invoke-Sandbox 'runL3' @((Get-Entry $pLoc)) -SourceDigest $dgL
+tc_check 'TEST-HILPROV-052-ci-mode-rejects-a-local-worktree-build-despite-matching-digest' `
+    ((Test-ProvBlocked $rL3 'test_sbprov_wrongcfg' 'uncommitted or unknown source state') -and $rL3.Exit -eq 1 -and ($rL3.Out -notmatch '\[LOCAL-EVIDENCE\]')) (Show-Prov $rL3 'test_sbprov_wrongcfg')
 # --- Run E: hosted Unit suite is not subject to the HIL provenance gate -----------------------------------
 $pHosted = New-Fake 'test_sbprov_hosted'
 Remove-Item -LiteralPath $ManifestPath -Force

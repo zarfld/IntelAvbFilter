@@ -98,7 +98,8 @@ Assert-Xml 'TEST-VERDICT-003b-converter-inconclusive-optional-labelled-skip' $r 
     -Match @('<skipped message="\[INCONCLUSIVE\]', 'failures="0"') -NoMatch @('<failure')
 
 # --- TEST-VERDICT-004: converter and parser agree for every verdict, both modes -----------------------
-$verdicts = 'PASS','FAIL','SKIP','SKIP_UNSUPPORTED','SKIP_NOT_IMPLEMENTED','BLOCKED','INCONCLUSIVE','INFRA_FAILURE','CLEANUP_FAILED'
+$verdicts = 'PASS','FAIL','SKIP','SKIP_UNSUPPORTED','SKIP_NOT_IMPLEMENTED','BLOCKED','INCONCLUSIVE','INFRA_FAILURE','CLEANUP_FAILED',
+            'INCONCLUSIVE_RESTORATION','FAILED_SETUP'
 $logText = ($verdicts | ForEach-Object { "  [$_] TC-AGREE-$($_ -replace '_','-')/adapter:0: r" }) -join "`n"
 function Class-Of([string]$xml, [string]$tc) {
     $m = [regex]::Match($xml, '(?s)<testcase name="' + [regex]::Escape($tc) + '[^"]*"[^>]*?(/>|>(.*?)</testcase>)')
@@ -159,17 +160,21 @@ Assert-Xml 'TEST-VERDICT-006-configuration-and-suite-recorded' $r `
 $Sandbox = Join-Path $Tmp 'sandbox'
 $SbTools = Join-Path $Sandbox 'tools\test'
 New-Item -ItemType Directory -Path $SbTools -Force | Out-Null
-foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1','Lib-AvbLifecycle.ps1') {
+foreach ($f in 'Run-Tests-CI.ps1','Convert-Logs-To-JUnit.ps1') {
     $src = Join-Path $ToolsTest $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $SbTools $f) }
 }
 New-Item -ItemType Directory -Path (Join-Path $Sandbox 'tools\lib') -Force | Out-Null
 Copy-Item $VerdictLib (Join-Path $Sandbox 'tools\lib\TestVerdict.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1') (Join-Path $Sandbox 'tools\lib\NativeExit.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\SourceDigest.ps1') (Join-Path $Sandbox 'tools\lib\SourceDigest.ps1')
+Copy-Item (Join-Path $RepoRoot 'tools\lib\HilLock.ps1') (Join-Path $Sandbox 'tools\lib\HilLock.ps1')   # machine safety record (Run-Tests-CI dot-sources it)
+Copy-Item (Join-Path $RepoRoot 'tools\lib\PhcRestoration.ps1') (Join-Path $Sandbox 'tools\lib\PhcRestoration.ps1')   # PHC evaluator (Run-Tests-CI dot-sources it)
 # Replace the lifecycle library (it opens \\.\IntelAvbFilter) with inert stubs.
 @'
 function Get-AvbLifecycleSnapshot { return $null }
 function Write-LifecycleDiff { param($Before, $After, $Label) return $false }
-'@ | Set-Content (Join-Path $SbTools 'Lib-AvbLifecycle.ps1') -Encoding UTF8
+'@ | Set-Content (Join-Path $Sandbox 'tools\lib\Lib-AvbLifecycle.ps1') -Encoding UTF8
 
 function Invoke-SandboxRunner {
     param([string]$Name, [string]$FakeBody)
@@ -236,12 +241,98 @@ foreach ($s in 'Unit','Integration','All','HardwareUnit','HardwareIntegration','
     $cls[$s] = Get-AvbSuiteVerificationClass -Suite $s
 }
 $optionals = @($cls.GetEnumerator() | Where-Object { $_.Value -eq 'optional' } | ForEach-Object { $_.Key })
-if ($optionals.Count -eq 1 -and $optionals[0] -eq 'HardwareMutation') { tc_pass 'TEST-VERDICT-010-only-hardwaremutation-is-optional' }
-else { tc_fail 'TEST-VERDICT-010-only-hardwaremutation-is-optional' ("optional suites: " + ($optionals -join ',')) }
+# Requirement changed 2026-10-21 (P0 full HIL coverage): HardwareMutation is mandatory verification; no suite is optional.
+if ($optionals.Count -eq 0) { tc_pass 'TEST-VERDICT-010-no-suite-is-optional-hardwaremutation-is-mandatory' }
+else { tc_fail 'TEST-VERDICT-010-no-suite-is-optional-hardwaremutation-is-mandatory' ("optional suites: " + ($optionals -join ',')) }
+
+# --- TEST-VERDICT-012: restoration / setup verdicts (P0 2026-10-21) are distinct and always failures ---------
+# INCONCLUSIVE_RESTORATION = relevant state could not be measured; CLEANUP_FAILED = restoration demonstrably failed;
+# FAILED_SETUP = required initial conditions could not be established.  Never skipped, not even -Optional.
+$v12 = @()
+foreach ($v in 'INCONCLUSIVE_RESTORATION', 'FAILED_SETUP', 'CLEANUP_FAILED') {
+    foreach ($o in $false, $true) { $c = Get-AvbVerdictClass -Verdict $v -Optional:$o; if ($c -ne 'failure') { $v12 += "$v optional=$o -> $c" } }
+}
+$r12 = Invoke-Converter 'v012' "  [INCONCLUSIVE_RESTORATION] TC-R12-001: PHC time not observed`n  [FAILED_SETUP] TC-R12-002: target adapter not identified`n  [CLEANUP_FAILED] TC-R12-003: TIMINCA differs"
+foreach ($p in @(@('TC-R12-001', 'INCONCLUSIVE_RESTORATION'), @('TC-R12-002', 'FAILED_SETUP'), @('TC-R12-003', 'CLEANUP_FAILED'))) {
+    if ($r12.Xml -notmatch ('(?s)<testcase name="' + $p[0] + '[^"]*"[^>]*><failure[^>]*message="\[' + $p[1] + '\]')) { $v12 += "converter lost the $($p[1]) label of $($p[0])" }
+}
+if ($v12.Count -eq 0) { tc_pass 'TEST-VERDICT-012-restoration-and-setup-verdicts-distinct-and-always-failures' }
+else { tc_fail 'TEST-VERDICT-012-restoration-and-setup-verdicts-distinct-and-always-failures' ($v12 -join '; ') }
 
 $threw = $false
 try { Get-AvbVerdictClass -Verdict 'SKIP_NOT_A_THING' | Out-Null } catch { $threw = $true }
 if ($threw) { tc_pass 'TEST-VERDICT-011-unknown-verdict-throws' } else { tc_fail 'TEST-VERDICT-011-unknown-verdict-throws' 'unknown verdict was accepted silently' }
+
+# 013 (static workflow contract): the Standards Compliance report is published without a write token - job summary plus
+#      the compliance-report artifact (README links it) - and a missing report fails the job.  The former PR comment
+#      (issues.createComment) failed with HTTP 403 under the read-only default token (run 40840781230); no requirement
+#      mandates a PR comment (Q decision 3, 2026-10-29).
+$v13 = @()
+$wfLines = Get-Content -LiteralPath (Join-Path $RepoRoot '.github\workflows\ci-standards-compliance.yml')
+$jStart = [array]::IndexOf($wfLines, '  compliance-report:')
+if ($jStart -lt 0) { $v13 += 'compliance-report job not found' }
+else {
+    $jEnd = $wfLines.Count
+    for ($i = $jStart + 1; $i -lt $wfLines.Count; $i++) { if ($wfLines[$i] -match '^  [A-Za-z][\w-]*:\s*$') { $jEnd = $i; break } }
+    $job = ($wfLines[$jStart..($jEnd - 1)] | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    if ($job -notmatch 'compliance-report\.md\s*>>\s*"?\$GITHUB_STEP_SUMMARY"?') { $v13 += 'report not published to $GITHUB_STEP_SUMMARY' }
+    if ($job -notmatch '(?s)uses:\s*actions/upload-artifact@\S+\s+with:\s+name:\s*compliance-report\s+path:\s*compliance-report\.md\s+if-no-files-found:\s*error') { $v13 += 'compliance-report artifact upload does not fail on a missing report (if-no-files-found: error)' }
+    if ($job -match 'createComment|issues\.create|pulls\.create') { $v13 += 'job still writes a PR/issue comment' }
+    if ($job -match '(?m)^\s+(pull-requests|issues|contents):\s*write') { $v13 += 'job requests a write token permission' }
+}
+if ($v13.Count -eq 0) { tc_pass 'TEST-VERDICT-013-compliance-report-published-without-write-token-and-fails-when-missing' }
+else { tc_fail 'TEST-VERDICT-013-compliance-report-published-without-write-token-and-fails-when-missing' ($v13 -join '; ') }
+
+# 014: the compliance report states only what this run established (Q 2026-10-29).  Static: no hard-coded success claims,
+#      every required job's real result is reported, a final step fails the job when a required gate did not pass.
+#      Behavioural: the generation script, extracted from the workflow, run in Git Bash with fixture job results.
+$v14 = @()
+if ($jStart -lt 0) { $v14 += 'compliance-report job not found' }
+else {
+    foreach ($bad in @('136 tests', '85% coverage', '192B', 'All tests passing', '- [x] Phase', "<< 'EOF'")) { if ($job.Contains($bad)) { $v14 += "unsupported or literal claim: '$bad'" } }
+    if ($job -match '✅[^\r\n]*\$\{\{\s*needs\.') { $v14 += 'a fixed success mark is printed next to a job result' }
+    $needsIds = @([regex]::Matches(($wfLines[$jStart..($jStart + 14)] -join "`n"), '(?m)^\s+([a-z][a-z0-9-]+),\s*$') | ForEach-Object { $_.Groups[1].Value })
+    foreach ($n in $needsIds) { if ($job -notmatch ('needs\.' + [regex]::Escape($n) + '\.result')) { $v14 += "required job '$n' not reported" } }
+    $iUp = $job.IndexOf('actions/upload-artifact'); $iFail = $job.IndexOf('Fail when a required gate did not pass')
+    if ($iFail -lt 0 -or $iFail -lt $iUp -or $job.Substring([Math]::Max(0, $iFail)) -notmatch 'exit 1') { $v14 += 'no final step after the artifact upload that fails the job when a required gate did not pass' }
+    # Behavioural: extract the run block of "Generate compliance report".
+    $gs = [array]::IndexOf($wfLines, '      - name: Generate compliance report')
+    $script = @(); if ($gs -ge 0) { $inRun = $false
+        for ($i = $gs + 1; $i -lt $jEnd; $i++) { $l = $wfLines[$i]; if ($l -match '^      - name:') { break }; if ($l -match '^        run: \|') { $inRun = $true; continue }; if ($inRun -and $l.Trim() -and $l -notmatch '^ {10}') { break }; if ($inRun) { $script +=($(if ($l.Length -ge 10) { $l.Substring(10) } else { '' })) } } }
+    $bash = @("$env:ProgramFiles\Git\bin\bash.exe", "${env:ProgramFiles(x86)}\Git\bin\bash.exe") | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if ($script.Count -eq 0) { $v14 += 'generation script not found' }
+    elseif (-not $bash) { $v14 += 'Git Bash not found - behavioural report check NOT EXECUTED' }
+    else {
+        $sh = Join-Path $Tmp 'gen-report.sh'; [System.IO.File]::WriteAllText($sh, (($script -join "`n") + "`n"))
+        $cases = @(
+            @{ Name = 'all-pass'; Env = @{ R_SPEC_VALIDATION = 'success'; R_CODE_QUALITY = 'success'; R_UNIT_TESTS = 'success'; R_INTEGRATION_TESTS = 'success'; R_REQUIREMENTS_TRACEABILITY = 'success'; R_ACCEPTANCE_TESTS = 'success'; R_ARCHITECTURE_VALIDATION = 'success'; R_SECURITY_SCAN = 'success' }; Want = 'COMPLIANT'; Rx = @('\| Unit tests[^|]*\| `unit-tests` \| PASSED \|') }
+            @{ Name = 'unit-failed'; Env = @{ R_SPEC_VALIDATION = 'success'; R_CODE_QUALITY = 'success'; R_UNIT_TESTS = 'failure'; R_INTEGRATION_TESTS = 'skipped'; R_REQUIREMENTS_TRACEABILITY = 'success'; R_ACCEPTANCE_TESTS = 'skipped'; R_ARCHITECTURE_VALIDATION = 'success'; R_SECURITY_SCAN = 'cancelled' }; Want = 'NOT COMPLIANT'; Rx = @('`unit-tests` \| FAILED \|', '`integration-tests` \| NOT EXECUTED', '`security-scan` \| CANCELLED') }
+            @{ Name = 'missing'; Env = @{ R_SPEC_VALIDATION = 'success'; R_CODE_QUALITY = 'success'; R_UNIT_TESTS = 'success'; R_INTEGRATION_TESTS = 'success'; R_REQUIREMENTS_TRACEABILITY = 'success'; R_ACCEPTANCE_TESTS = 'success'; R_ARCHITECTURE_VALIDATION = 'success' }; Want = 'NOT COMPLIANT'; Rx = @('`security-scan` \| UNAVAILABLE') }
+        )
+        foreach ($c in $cases) {
+            $cd = Join-Path $Tmp ("report-" + $c.Name); New-Item -ItemType Directory -Path $cd -Force | Out-Null
+            $psi = New-Object System.Diagnostics.ProcessStartInfo $bash, ('"' + $sh.Replace('\', '/') + '"')
+            $psi.WorkingDirectory = $cd; $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+            foreach ($k in 'R_SPEC_VALIDATION', 'R_CODE_QUALITY', 'R_UNIT_TESTS', 'R_INTEGRATION_TESTS', 'R_REQUIREMENTS_TRACEABILITY', 'R_ACCEPTANCE_TESTS', 'R_ARCHITECTURE_VALIDATION', 'R_SECURITY_SCAN') { $psi.EnvironmentVariables.Remove($k) }
+            foreach ($k in $c.Env.Keys) { $psi.EnvironmentVariables[$k] = $c.Env[$k] }
+            foreach ($k in @{ GITHUB_REPOSITORY = 'o/r'; GITHUB_REF_NAME = 'b'; GITHUB_SHA = 'f00d'; GITHUB_RUN_ID = '1'; GITHUB_RUN_ATTEMPT = '1' }.GetEnumerator()) { $psi.EnvironmentVariables[$k.Key] = $k.Value }
+            $p = [System.Diagnostics.Process]::Start($psi); $null = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd(); $p.WaitForExit()
+            $rp = Join-Path $cd 'compliance-report.md'
+            if ($p.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $rp)) { $v14 += "$($c.Name): generation exit $($p.ExitCode) $err"; continue }
+            $rep = [System.IO.File]::ReadAllText($rp)
+            $verdict = if ($rep -match 'Compliance verdict: NOT COMPLIANT') { 'NOT COMPLIANT' } elseif ($rep -match 'Compliance verdict: COMPLIANT') { 'COMPLIANT' } else { '' }
+            if ($verdict -ne $c.Want) { $v14 += "$($c.Name): verdict '$verdict', expected '$($c.Want)'" }
+            foreach ($rx in $c.Rx) { if ($rep -notmatch $rx) { $v14 += "$($c.Name): report lacks /$rx/" } }
+            if ($rep -match '\$\(date') { $v14 += "$($c.Name): literal shell syntax in the report" }
+            $nc = Join-Path $cd 'noncompliant-gates.txt'
+            $ncText = if (Test-Path -LiteralPath $nc) { ([System.IO.File]::ReadAllText($nc)).Trim() } else { $null }
+            if ($null -eq $ncText) { $v14 += "$($c.Name): noncompliant-gates.txt missing (the final gate step has no input)" }
+            elseif (($c.Want -eq 'COMPLIANT') -ne ($ncText -eq '')) { $v14 += "$($c.Name): noncompliant-gates.txt '$ncText' disagrees with verdict $($c.Want)" }
+        }
+    }
+}
+if ($v14.Count -eq 0) { tc_pass 'TEST-VERDICT-014-compliance-report-states-only-measured-results-and-fails-on-a-failed-gate' }
+else { tc_fail 'TEST-VERDICT-014-compliance-report-states-only-measured-results-and-fails-on-a-failed-gate' ($v14 -join '; ') }
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

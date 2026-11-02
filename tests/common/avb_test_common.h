@@ -201,6 +201,11 @@ int AvbPrintSummary(const AvbTestStats *stats);
 #define AVB_TEST_LOG printf
 #endif
 
+/* Process exit code: no functional assertion FAILED, but BLOCKED and/or INCONCLUSIVE testcases were reported (nonpassing).
+ * 0 = pass, 1 = at least one FAIL, 2 = SKIP_ONLY, 3 = this (test_ioctl_tas convention).  Run-Tests-CI.ps1 accepts it only
+ * when the testcase lines confirm it (no FAIL line, >= 1 BLOCKED or INCONCLUSIVE); otherwise the result stays FAILED. */
+#define AVB_TEST_EXIT_BLOCKED 3
+
 #define AVB_TEST_I210_TIMINCA_ISGN       0x80000000u
 #define AVB_TEST_I210_TIMINCA_INCVALUE   0x7FFFFFFFu
 #define AVB_TEST_I210_CYCLE_NS           8u
@@ -352,8 +357,10 @@ static __inline int AvbTestI210ExpectRejectedUnchanged(HANDLE h, unsigned ns, un
 
 /* SAFE RESTORE of a previously saved raw TIMINCA, verified by readback.  A value inside the provisional policy is
  * restored exactly; anything else (e.g. the legacy 0x08000000, +3906 ppm) is restored to NOMINAL, never re-applied.
- * Returns 1 = restored and verified, 0 = FAIL (the PHC frequency is NOT restored: manual intervention needed). */
-static __inline int AvbTestI210RestoreVerified(HANDLE h, unsigned saved_raw, const char *what)
+ * Returns 1 = restored and verified, 0 = FAIL (the PHC frequency is NOT restored: manual intervention needed).
+ * AvbTestI210RestoreVerifiedAs: same, reported with the caller's tags.  A test whose restore is cleanup (not its
+ * requirement) passes "[CLEANUP:FAILED]" / "[CLEANUP:SUCCESS]" so the outcome is no testcase verdict (Q 2026-10-28). */
+static __inline int AvbTestI210RestoreVerifiedAs(HANDLE h, unsigned saved_raw, const char *what, const char *fail_tag, const char *pass_tag)
 {
     unsigned want = ((saved_raw & AVB_TEST_I210_TIMINCA_INCVALUE) == 0u) ? 0u : (AvbTestI210RawInPolicy(saved_raw) ? saved_raw : 0u);
     unsigned ns = 0, frac = 0, prev = 0, st = 0, now = 0;
@@ -368,16 +375,21 @@ static __inline int AvbTestI210RestoreVerified(HANDLE h, unsigned saved_raw, con
     if (!adj_ok || !rd_ok || now != want) {
         if (rd_ok) _snprintf_s(rb, sizeof(rb), _TRUNCATE, "readback 0x%08X", now);
         else       _snprintf_s(rb, sizeof(rb), _TRUNCATE, "readback UNREAD (gle=%lu)", rd_gle);
-        AVB_TEST_LOG("  [FAIL] %s: RESTORE FAILED (saved 0x%08X, wanted 0x%08X, restore request %s (status=0x%08X gle=%lu), %s)"
+        AVB_TEST_LOG("  %s %s: RESTORE FAILED (saved 0x%08X, wanted 0x%08X, restore request %s (status=0x%08X gle=%lu), %s)"
                      " - the PHC frequency is NOT verified as restored\n",
-                     what, saved_raw, want, adj_ok ? "ok" : "FAILED", st, adj_gle, rb);
+                     fail_tag, what, saved_raw, want, adj_ok ? "ok" : "FAILED", st, adj_gle, rb);
         return 0;
     }
     if (want != saved_raw)
         AVB_TEST_LOG("  [INFO] %s: saved TIMINCA 0x%08X is outside the +/-%u ppb policy; restored to nominal 0x%08X\n",
                what, saved_raw, (unsigned)AVB_TEST_I210_POLICY_PPB, want);
-    AVB_TEST_LOG("  [PASS] %s: restored TIMINCA 0x%08X (verified by readback)\n", what, now);
+    AVB_TEST_LOG("  %s %s: restored TIMINCA 0x%08X (verified by readback)\n", pass_tag, what, now);
     return 1;
+}
+
+static __inline int AvbTestI210RestoreVerified(HANDLE h, unsigned saved_raw, const char *what)
+{
+    return AvbTestI210RestoreVerifiedAs(h, saved_raw, what, "[FAIL]", "[PASS]");
 }
 
 /* Device ID of the adapter bound to this handle (IOCTL_AVB_GET_HW_STATE reports the actual PCI IDs). */
@@ -389,6 +401,65 @@ static __inline BOOL AvbTestGetBoundDid(HANDLE h, unsigned short *did)
     if (!DeviceIoControl(h, IOCTL_AVB_GET_HW_STATE, &q, sizeof(q), &q, sizeof(q), &br, NULL)) return FALSE;
     *did = q.device_id;
     return TRUE;
+}
+
+/* EXACT RESTORE of a saved raw TIMINCA on the families that still use the LEGACY ADJUST_FREQUENCY encoding of
+ * src/avb_integration_fixed.c (every family without device frequency ops, i.e. all but the I210; family by DID as
+ * AvbGetIntelDeviceType maps it):
+ *   I217 / I225 / I226:  raw = increment_ns << 24 | increment_frac >> 8
+ *   I219:                raw = 2 << 24 | IV,  IV = 2,000,000 * increment_ns + (2,000,000 * increment_frac) >> 32
+ * It only RE-APPLIES the value read from this adapter before the test changed it and claims nothing about the physical
+ * rate (I226: 0x18000000, the driver's init value, measures PHC/QPC 1.0293 - a separate functional finding).
+ * FALSE = the value cannot be produced through the ABI (unknown family, increment_ns 0, I219 IP != 2 or IV < 2e6):
+ * the caller writes nothing and reports the restoration as failed. */
+static __inline BOOL AvbTestLegacyRawToRequest(unsigned short did, unsigned raw, unsigned *ns, unsigned *frac)
+{
+    switch (did) {
+    case INTEL_DEV_I217_LM: case INTEL_DEV_I217_V: case INTEL_DEV_I225_V: case INTEL_DEV_I226_LM:
+        if ((raw >> 24) == 0u) return FALSE;   /* increment_ns 0 is always rejected by the driver */
+        *ns   = raw >> 24;
+        *frac = (raw & 0x00FFFFFFu) << 8;
+        return TRUE;
+    case INTEL_DEV_I219_LM: case INTEL_DEV_I219_V: case INTEL_DEV_I219_D0: case INTEL_DEV_I219_D1: case INTEL_DEV_I219_D2:
+    case INTEL_DEV_I219_LM_DC7: case INTEL_DEV_I219_V6: case INTEL_DEV_I219_LM6: case INTEL_DEV_I219_LM4: {
+        unsigned iv = raw & 0x00FFFFFFu, rem;
+        if ((raw >> 24) != 2u || iv < 2000000u) return FALSE;
+        *ns   = iv / 2000000u;
+        rem   = iv % 2000000u;
+        /* ceil(rem * 2^32 / 2e6): then (2e6 * frac) >> 32 == rem exactly, and frac < 2^32 because rem < 2e6 */
+        *frac = (unsigned)((((unsigned long long)rem << 32) + 1999999ULL) / 2000000ULL);
+        return TRUE; }
+    default:
+        return FALSE;
+    }
+}
+
+/* Verified exact restore through the legacy encoding.  Cleanup, not a testcase (Q 2026-10-28): reported as
+ * [CLEANUP:SUCCESS] / [CLEANUP:FAILED], which Run-Tests-CI.ps1 records independently of the functional verdict.
+ * The readback is always attempted.  Returns 1 = restored and verified, 0 = NOT restored. */
+static __inline int AvbTestLegacyRestoreVerified(HANDLE h, unsigned short did, unsigned saved_raw, const char *what)
+{
+    unsigned ns = 0, frac = 0, prev = 0, st = 0, now = 0;
+    DWORD adj_gle = 0, rd_gle = 0;
+    BOOL adj_ok, rd_ok;
+    if (!AvbTestLegacyRawToRequest(did, saved_raw, &ns, &frac)) {
+        AVB_TEST_LOG("  [CLEANUP:FAILED] %s: saved TIMINCA 0x%08X of DID 0x%04X cannot be re-applied through ADJUST_FREQUENCY"
+                     " - nothing written, the PHC frequency is NOT restored\n", what, saved_raw, (unsigned)did);
+        return 0;
+    }
+    adj_ok = AvbTestAdjustFrequency(h, ns, frac, &prev, &st, &adj_gle);
+    rd_ok  = AvbTestReadTimincaRawEx(h, &now, &rd_gle);
+    if (!adj_ok || !rd_ok || now != saved_raw) {
+        if (rd_ok)
+            AVB_TEST_LOG("  [CLEANUP:FAILED] %s: RESTORE FAILED (DID 0x%04X saved 0x%08X, request ns=%u frac=0x%08X %s (status=0x%08X gle=%lu), readback 0x%08X)"
+                         " - the PHC frequency is NOT verified as restored\n", what, (unsigned)did, saved_raw, ns, frac, adj_ok ? "ok" : "FAILED", st, adj_gle, now);
+        else
+            AVB_TEST_LOG("  [CLEANUP:FAILED] %s: RESTORE FAILED (DID 0x%04X saved 0x%08X, request ns=%u frac=0x%08X %s (status=0x%08X gle=%lu), readback UNREAD (gle=%lu))"
+                         " - the PHC frequency is NOT verified as restored\n", what, (unsigned)did, saved_raw, ns, frac, adj_ok ? "ok" : "FAILED", st, adj_gle, rd_gle);
+        return 0;
+    }
+    AVB_TEST_LOG("  [CLEANUP:SUCCESS] %s: restored TIMINCA 0x%08X on DID 0x%04X (verified by readback)\n", what, now, (unsigned)did);
+    return 1;
 }
 
 /* =========================================================

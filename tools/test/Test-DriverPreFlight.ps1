@@ -99,8 +99,9 @@ if (Test-Path $drvPath) {
 }
 
 try {
+    $global:LASTEXITCODE = $null   # native exit codes live in $global:LASTEXITCODE (a caller may shadow the unqualified name)
     $sha = & git -C $PSScriptRoot rev-parse HEAD 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    if ($global:LASTEXITCODE -eq 0) {
         Write-Ok "Checkout SHA               : $sha"
         if ($env:GITHUB_ACTIONS -eq 'true') {
             "HIL_CHECKOUT_SHA=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

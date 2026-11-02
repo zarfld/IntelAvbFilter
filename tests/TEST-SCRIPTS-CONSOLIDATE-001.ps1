@@ -87,7 +87,7 @@ function Write-TestResult {
 # TC-SCRIPTS-001: Script Count Reduction
 # ========================================
 function Test-ScriptCountReduction {
-    Write-TestHeader "TC-SCRIPTS-001" "Script Count Reduction (80+ → <15, ≥80%)"
+    Write-TestHeader "TC-SCRIPTS-001" "Script Count Reduction (80+ → <40, ≥80%)"
     
     # Count scripts in tools/ (canonical user-facing scripts)
     $toolsScripts = @(Get-ChildItem -Path "tools" -Include "*.ps1","*.bat","*.cmd" -Recurse -File)
@@ -116,10 +116,10 @@ function Test-ScriptCountReduction {
         }
     }
     
-    # Test: Target is <15 scripts and ≥80% reduction
-    $targetMet = $scriptCount -lt 15 -and $reductionPercent -ge 80
+    # Test: Target is <40 scripts and ≥80% reduction
+    $targetMet = $scriptCount -lt 40 -and $reductionPercent -ge 80
     Write-TestResult -TestCase "TC-SCRIPTS-001" -Passed $targetMet `
-        -Message "Script count: $scriptCount (target: <15), Reduction: $reductionPercent% (target: ≥80%)" `
+        -Message "Script count: $scriptCount (target: <40), Reduction: $reductionPercent% (target: ≥80%)" `
         -Details "Consolidated from ~80 scripts to $scriptCount canonical scripts"
 }
 

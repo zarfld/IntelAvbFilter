@@ -7,7 +7,14 @@ name: "Pillar 1 — CodeQL Driver Analysis (C/C++)"
 #
 # TWO JOBS:
 #   analyze       — General-use / CI quality gate.
-#                   Uses MSDT @development branch (latest driver queries).
+#                   Uses the repository-controlled config .github/codeql/codeql-driver-config.yml:
+#                   MSDT packs pinned to exact versions (microsoft/windows-drivers@1.10.0 +
+#                   microsoft/cpp-queries@0.0.5), selected queries recorded in
+#                   .github/codeql/codeql-driver-inventory.txt and validated with a pinned CLI
+#                   BEFORE init (tools/ci/Test-CodeQLDriverPacks.ps1).  Upstream updates are
+#                   adopted only through the reviewed procedure in TEST-PLAN-NDIS-LWF-COVERAGE.md.
+#                   (Previously MSDT config@development + windows-drivers@1.x; that floating pair
+#                   broke init from 2026-10-17 — runs 38997424025..40782452229.)
 #                   Runs on every push/PR. Fast feedback; NOT valid for WHCP DVL.
 #
 #   analyze-whcp  — WHCP certification-grade analysis.
@@ -33,6 +40,9 @@ on:
       - "IntelAvbFilter.vcxproj"
       - "IntelAvbFilter.vcxproj.filters"
       - ".github/workflows/codeql-driver.yml"
+      - ".github/codeql/**"
+      - "tools/ci/Test-CodeQLDriverPacks.ps1"
+      - "tools/lib/CodeQLDriverPacks.ps1"
   pull_request:
     branches: [master, develop]
     paths:
@@ -41,6 +51,9 @@ on:
       - "IntelAvbFilter.vcxproj"
       - "IntelAvbFilter.vcxproj.filters"
       - ".github/workflows/codeql-driver.yml"
+      - ".github/codeql/**"
+      - "tools/ci/Test-CodeQLDriverPacks.ps1"
+      - "tools/lib/CodeQLDriverPacks.ps1"
   schedule:
     # Saturday 03:00 UTC — weekly baseline scan
     - cron: "0 3 * * 6"
@@ -56,12 +69,15 @@ permissions:
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 1: General-use / CI quality gate.
-  # Uses MSDT @development branch (latest driver queries, bundled CodeQL version).
+  # Pinned MSDT packs (.github/codeql/), bundled CodeQL version of the action for analysis.
+  #   1. Validate pinned packs with a pinned CLI, fresh cache, exact inventory   (before init)
+  #   2. init → traced Release|x64 build → analyze (SARIF upload unchanged)
+  #   3. Verify the SARIF is a complete, successful analysis of the driver sources
   # Results surfaced in GitHub Security tab for PR feedback.
   # ⚠ NOT valid for WHCP DVL generation — see analyze-whcp job below.
   # ─────────────────────────────────────────────────────────────────────────────
   analyze:
-    name: CodeQL — C/C++ Driver Analysis (MSDT dev-branch, CI quality gate)
+    name: CodeQL — C/C++ Driver Analysis (pinned MSDT packs, CI quality gate)
     runs-on: windows-2022
 
     steps:
@@ -80,16 +96,41 @@ jobs:
         # matching SDK/WDK headers the build tracer fails to capture the compilation.
         uses: ./.github/actions/install-wdk
 
-      - name: Initialize CodeQL (MSDT driver config — development branch)
+      - name: Validate pinned CodeQL query packs (before init, pinned CLI 2.27.3)
+        shell: pwsh
+        run: |
+          # Runs independently of codeql-action/init: a missing/incompatible pack must be reported
+          # here as DEPENDENCY_FAILURE (exit 4), a registry/network problem as INFRA_FAILURE (exit 3),
+          # a changed query selection as INVENTORY_MISMATCH (exit 5).  Fresh package cache per run.
+          # Validation CLI provenance: github/codeql-cli-binaries v2.27.3 codeql-win64.zip, SHA256 below
+          # (the CLI the 2026-10-29 baseline and RED/GREEN evidence were produced with).
+          $Version = "2.27.3"
+          $Sha256  = "6cd0f634400a950843e64056b3c73545af09c20afbb3a7f2d05df810ba424061"
+          $ZipPath = "$env:RUNNER_TEMP\codeql-validate-$Version.zip"
+          $Dest    = "$env:RUNNER_TEMP\codeql-validate-$Version"
+          Invoke-WebRequest -Uri "https://github.com/github/codeql-cli-binaries/releases/download/v$Version/codeql-win64.zip" -OutFile $ZipPath -UseBasicParsing
+          $actual = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $Sha256) { Write-Error "CodeQL CLI $Version SHA256 mismatch: $actual (expected $Sha256)"; exit 1 }
+          Expand-Archive -Path $ZipPath -DestinationPath $Dest -Force
+          New-Item -ItemType Directory -Force -Path build/codeql-results | Out-Null
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci\Test-CodeQLDriverPacks.ps1 -Mode Resolve `
+            -CodeQL "$Dest\codeql\codeql.exe" -ReportPath build/codeql-results/pack-validation.json
+          exit $LASTEXITCODE
+
+      - name: Initialize CodeQL (pinned MSDT driver packs — repository config)
         uses: github/codeql-action/init@v4
         with:
           languages: c-cpp
           build-mode: manual
-          # MSDT config enables Windows Driver DDI-safety queries + NDIS rules on
-          # top of the standard cpp library queries.
-          # NOTE: @development = general-use, NOT a WHCP-certified branch.
-          # For WHCP-grade analysis use the analyze-whcp job below.
-          config-file: microsoft/Windows-Driver-Developer-Supplemental-Tools/config/codeql-config.yml@development
+          # MSDT packs: Windows Driver DDI-safety queries + NDIS rules + cpp-code-scanning,
+          # pinned to exact versions; see the config header for provenance.
+          # NOT a WHCP-certified configuration — use the analyze-whcp job below for that.
+          config-file: ./.github/codeql/codeql-driver-config.yml
+          # Analysis CLI pinned to the validation CLI version (supported `tools` input: URL of a CodeQL
+          # Bundle release asset).  codeql-bundle-v2.27.3 = bundle linked by codeql-action v4 on 2026-10-29;
+          # published asset digest sha256:9e723b6bb6d70857457704a6ef7419c19de956b24ac9e44ad81e775b4e4296dd.
+          # Change together with $Version in the validation step (TEST-CODEQLCFG-006f).
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.3/codeql-bundle-win64.tar.zst
 
       - name: Build driver for CodeQL tracing (Release|x64)
         shell: pwsh
@@ -119,6 +160,14 @@ jobs:
           # Output SARIF alongside driver binary in the build tree for local inspection.
           output: build/codeql-results
           upload: true
+
+      - name: Upload CodeQL evidence (SARIF + pack validation report)
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: codeql-driver-results-${{ github.run_number }}
+          path: build/codeql-results/
+          retention-days: 90
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 2: WHCP certification-grade CodeQL analysis.

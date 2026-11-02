@@ -48,7 +48,9 @@ jobs:
         runs-on: ubuntu-latest
 
         permissions:
-            contents: write # Required for pushing to gh-pages branch
+            contents: write       # Required for pushing to gh-pages branch
+            pull-requests: write  # Required for commenting on PRs
+            issues: write         # Required for github-script PR/issue comment API
 
         steps:
             - name: Checkout repository

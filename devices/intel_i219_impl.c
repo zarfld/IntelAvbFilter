@@ -16,6 +16,7 @@ Abstract:
 #include "precomp.h"
 #include "intel_device_interface.h"
 #include "avb_integration.h"
+#include "include/avb_ioctl.h"     // AVB_HWREG_* ids for hil_register_offset (explicit; host builds do not get it via avb_integration.h)
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops
 #include "external/intel_avb/lib/intel_private.h"  // SSOT TIMINCA/EtherType constants
 #include "intel-ethernet-regs/gen/i219_regs.h"  // SSOT register definitions
@@ -906,6 +907,22 @@ static int i219_write_tsauxc(device_t *dev, uint32_t tsauxc_value)
     return 0;
 }
 
+/* QUERY_HW_SNAPSHOT offset map: AVB_HWREG_* id -> I219 MMIO offset, only registers intel-ethernet-regs/gen/i219_regs.h
+ * defines.  Any other id (e.g. SRRCTL, RXPBSIZE, TRGTTIM*, TQAVCTRL) is NOT_IN_SSOT - never a guessed address. */
+static int i219_hil_register_offset(uint32_t reg_id, uint32_t *offset)
+{
+    if (offset == NULL) { return -1; }
+    switch (reg_id) {
+    case AVB_HWREG_TIMINCA:    *offset = I219_TIMINCA; return 0;
+    case AVB_HWREG_TSAUXC:     *offset = I219_TSAUXC; return 0;
+    case AVB_HWREG_TSYNCTXCTL: *offset = I219_TSYNCTXCTL; return 0;
+    case AVB_HWREG_TSYNCRXCTL: *offset = I219_TSYNCRXCTL; return 0;
+    case AVB_HWREG_RAL0:       *offset = I219_RAL0; return 0;
+    case AVB_HWREG_RAH0:       *offset = I219_RAH0; return 0;
+    default: return -1;
+    }
+}
+
 /**
  * @brief I219 device operations structure using clean generic function names
  *
@@ -961,5 +978,6 @@ const intel_device_ops_t i219_ops = {
 
     /* MDIO operations — I219 uses SSOT MDIC register definitions */
     .mdio_read  = mdio_read,
-    .mdio_write = mdio_write
+    .mdio_write = mdio_write,
+    .hil_register_offset = i219_hil_register_offset
 };
