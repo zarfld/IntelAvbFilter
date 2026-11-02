@@ -900,6 +900,10 @@ int main(void)
             CHECK("id 0 and id AVB_HWREG_COUNT+1 are not defined, offset untouched",
                   i210_ops.hil_register_offset(0u, &off) != 0 && i210_ops.hil_register_offset(AVB_HWREG_COUNT + 1u, &off) != 0 && off == 0x12345u);
         }
+
+        printf("\n[I-015] NULL output buffer is ignored safely\n");
+        AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, NULL);
+        CHECK("NULL snapshot output buffer is ignored without dereferencing", TRUE);
     }
 
     printf("\n PASS: %d / %d\n FAIL: %d / %d\n", g_run - g_fail, g_run, g_fail, g_run);
