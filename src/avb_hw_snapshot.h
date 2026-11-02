@@ -17,17 +17,21 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
                               PAVB_HW_SNAPSHOT_REQUEST out)
 {
     uint32_t id;
+    AVB_HW_SNAPSHOT_REQUEST snapshot;
 
     if (out == NULL) {
         return;
     }
 
+    RtlZeroMemory(&snapshot, sizeof(snapshot));
+    snapshot.version = AVB_HW_SNAPSHOT_VERSION;
+    snapshot.count = AVB_HWREG_COUNT;
+
 #ifdef INTEL_WIN32_KERNEL_MODE
     __try {
         ProbeForWrite(out, sizeof(*out), sizeof(avb_u32));
-        out->count = AVB_HWREG_COUNT;
         for (id = 1u; id <= AVB_HWREG_COUNT; id++) {
-            AVB_HWREG_ENTRY *e = &out->entries[id - 1u];
+            AVB_HWREG_ENTRY *e = &snapshot.entries[id - 1u];
             uint32_t off = 0u, val = 0u;
             e->id = id; e->offset = 0u; e->value = 0u;
             if (ops == NULL || ops->hil_register_offset == NULL) { e->state = AVB_HWREG_STATE_NO_HAL; continue; }
@@ -38,19 +42,17 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
             e->value = val;
             e->state = AVB_HWREG_STATE_VALID;
         }
+        RtlCopyMemory(out, &snapshot, sizeof(snapshot));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (out != NULL) {
-            __try {
-                RtlZeroMemory(out, sizeof(*out));
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                /* fail closed: do not dereference a poisoned or user-mode pointer again */
-            }
+        __try {
+            RtlZeroMemory(out, sizeof(*out));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            /* fail closed: do not dereference a poisoned or user-mode pointer again */
         }
     }
 #else
-    out->count = AVB_HWREG_COUNT;
     for (id = 1u; id <= AVB_HWREG_COUNT; id++) {
-        AVB_HWREG_ENTRY *e = &out->entries[id - 1u];
+        AVB_HWREG_ENTRY *e = &snapshot.entries[id - 1u];
         uint32_t off = 0u, val = 0u;
         e->id = id; e->offset = 0u; e->value = 0u;
         if (ops == NULL || ops->hil_register_offset == NULL) { e->state = AVB_HWREG_STATE_NO_HAL; continue; }
@@ -61,6 +63,7 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
         e->value = val;
         e->state = AVB_HWREG_STATE_VALID;
     }
+    RtlCopyMemory(out, &snapshot, sizeof(snapshot));
 #endif
 }
 
