@@ -105,7 +105,7 @@ $wrapperContent = @"
 `$env:AVB_TEST_SANDBOX_SOURCE_DIRTY = '0'
 `$env:AVB_TEST_ADAPTER_STATE_FILE = '$stateFile'
 `$env:AVB_TEST_STATE_SETTLE_SECONDS = '0'
-& '$treeRunner' -Suite HardwareMandatory -Tests @('ps1:$fakePsTestFwd') ``
+& '$treeRunner' -Suite HardwareUnit -Tests @('ps1:$fakePsTestFwd') ``
     -TestTimeoutSeconds 30 -Configuration Debug -LogsDir '$logsEsc'
 exit `$LASTEXITCODE
 "@
@@ -204,7 +204,7 @@ if ($xmlFiles.Count -eq 0) {
     $negDir = Join-Path $env:TEMP ("sentinel_neg_{0}" -f (Get-Random))
     New-Item -ItemType Directory -Path $negDir -Force | Out-Null
 
-    $negXmlPath  = Join-Path $negDir "junit-HardwareMandatory-Debug-20991231.xml"
+    $negXmlPath  = Join-Path $negDir "junit-HardwareUnit-Debug-20991231.xml"
     $negXmlContent = '<?xml version="1.0" encoding="utf-8"?><testsuites name="test" tests="1" failures="0" skipped="0"><testsuite name="TC-INFRA-HEALTH" tests="1" failures="0" skipped="1"><testcase name="TC-INFRA-HEALTH-001" classname="TC-INFRA-HEALTH" time="0"><skipped/></testcase></testsuite></testsuites>'
     Set-Content $negXmlPath -Value $negXmlContent -Encoding UTF8
 
@@ -229,7 +229,8 @@ if ($xmlFiles.Count -eq 0) {
 
 # TEST-SENTINEL-005: IsMandatorySuite by Suite alone
 $src = Get-Content $RunCIPath -Raw
-$decoupled = $src -match '(?ms)\$IsMandatorySuite\s*=\s*\(\$Suite\s*-eq\s*"HardwareMandatory"\)'
+# Q 2026-11-03: both hardware suites are mandatory verification; still decided by $Suite alone, never by -Tests.
+$decoupled = $src -match '(?ms)\$IsMandatorySuite\s*=\s*\(\$Suite\s*-in\s*@\(''HardwareUnit'',\s*''HardwareIntegration''\)\)'
 if ($decoupled) {
     tc_pass "TEST-SENTINEL-005: IsMandatorySuite determined by Suite alone (not gated on -Tests override)"
 } else {

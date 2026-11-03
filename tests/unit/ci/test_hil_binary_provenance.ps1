@@ -532,8 +532,9 @@ tc_check 'TEST-HILPROV-003-artifact-sha256-mismatch-is-blocked' (Test-ProvBlocke
 tc_check 'TEST-HILPROV-004-newer-mtime-does-not-authorize-a-mismatched-artifact' (Test-ProvBlocked $rB 'test_sbprov_newmtime' 'SHA256 mismatch') (Show-Prov $rB 'test_sbprov_newmtime')
 tc_check 'TEST-HILPROV-005-authorized-current-build-artifact-runs' ((Get-RanCount $rB 'test_sbprov_current') -eq 1) (Show-Prov $rB 'test_sbprov_current')
 tc_check 'TEST-HILPROV-006-old-mtime-does-not-block-an-authorized-artifact' ((Get-RanCount $rB 'test_sbprov_oldmtime') -eq 1) (Show-Prov $rB 'test_sbprov_oldmtime')
+# Hardware suites are mandatory verification (Q 2026-11-03): a missing binary is [BUILD-FAIL], no longer a skip.
 tc_check 'TEST-HILPROV-007-missing-artifact-is-not-executed' `
-    (((Get-RanCount $rB 'test_sbprov_missing') -eq 0) -and ($rB.Out -match 'test_sbprov_missing\.ps1 \(binary not found|TC-SAFETY-GATE-00[12]: [^\r\n]*test_sbprov_missing')) (Show-Prov $rB 'test_sbprov_missing')
+    (((Get-RanCount $rB 'test_sbprov_missing') -eq 0) -and ($rB.Out -match 'test_sbprov_missing\.ps1 \[BUILD-FAIL\] binary not found|TC-SAFETY-GATE-00[12]: [^\r\n]*test_sbprov_missing')) (Show-Prov $rB 'test_sbprov_missing')
 tc_check 'TEST-HILPROV-008-provenance-blocks-fail-the-suite' ($rB.Exit -eq 1) ("expected exit 1; observed exit {0}" -f $rB.Exit)
 tc_check 'TEST-HILPROV-015-failed-build-entry-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_failed' "status is 'failed'") (Show-Prov $rB 'test_sbprov_failed')
 tc_check 'TEST-HILPROV-016-skipped-build-entry-is-blocked' (Test-ProvBlocked $rB 'test_sbprov_skipped' "status is 'skipped'") (Show-Prov $rB 'test_sbprov_skipped')

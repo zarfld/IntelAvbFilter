@@ -19,7 +19,7 @@ These scenarios describe the **expected** agent behaviour. They are not evidence
 | 9 | HIL results came from a stale driver. | Not evidence for the change: compare intended vs deployed SHA256 (`Test-DriverPreFlight.ps1`, `hil-run-identity.json`); report BLOCKED(PROVENANCE)/unverified; request redeploy from Q (G). |
 | 10 | A test or script contains fixed DIDs (e.g. `if (device_id == 0x1533)`). | Flag as contract violation; propose capability-driven replacement; do not extend the list of IDs; keep identity only for targeting/reporting (A). |
 | 11 | "Fix this bug in the PHC code." | Activates via TDD/bugfix verification: failing test first, hardware RED/GREEN, regression suites (D). |
-| 12 | "Why is HardwareMandatory INCOMPLETE?" | Read results document; explain coverage-gap / NOT_IMPLEMENTED / zero-pass rules from `Get-AvbRunOverall`; never propose de-listing (B, C). |
+| 12 | "Why is HardwareIntegration INCOMPLETE?" | Read results document; explain coverage-gap / NOT_IMPLEMENTED / zero-pass rules from `Get-AvbRunOverall`; never propose de-listing (B, C). |
 
 ## Negative activation (skill should not be needed)
 

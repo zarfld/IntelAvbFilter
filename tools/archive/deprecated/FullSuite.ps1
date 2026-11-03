@@ -2,12 +2,34 @@
 
 
 $Configurations = @("Debug", "Release")
+# Canonical suite sequence (TEST-LOCALSUITES-025/026): every registered runner entry of every suite, nothing enumerated
+# from the output directory.  The only hardware suites (Q 2026-11-03), in the LocalSuites.ps1 / hil.yml order.
+$OfflineSuites  = @('Unit', 'Integration')
+$HardwareSuites = @('HardwareUnit', 'HardwareIntegration')
+# Bound for one elevated Hardware* suite (Run-Tests-Elevated.ps1 -TimeoutSeconds; its default 1800 s is sized for one
+# test); per-test timeouts stay with Run-Tests-CI.ps1.
+$SuiteTimeoutSeconds = 21600
+. .\tools\lib\NativeExit.ps1
+# One directory per run: results documents of both configurations; -PriorResultsDir carries a halt forward.
+$RunDir = Join-Path (Resolve-Path .\logs).Path ("FullSuite_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+$SuiteRuns = @()
 $Configuration = "Debug"
 foreach ($Configuration in $Configurations){
 
-    .\tools\build\Build-Driver.ps1 -Configuration $Configuration    
-    .\tools\build\Build-Tests.ps1 -Configuration $Configuration    
-    .\tools\setup\Install-Driver-Elevated.ps1 -Configuration $Configuration -Action Reinstall -CaptureDbgView 
+    $global:LASTEXITCODE = $null
+    .\tools\build\Build-Driver.ps1 -Configuration $Configuration
+    $DriverBuildExit = $global:LASTEXITCODE
+    .\tools\build\Build-Tests.ps1 -Configuration $Configuration
+    $InstallExit = $null
+    if (Test-AvbExitSuccess $DriverBuildExit) {
+        $global:LASTEXITCODE = $null
+        .\tools\setup\Install-Driver-Elevated.ps1 -Configuration $Configuration -Action Reinstall -CaptureDbgView
+        $InstallExit = $global:LASTEXITCODE
+    }
+    # Hardware* suites only against this configuration's freshly installed driver (as LocalSuites.ps1); otherwise they are
+    # reported NOT_EXECUTED, never run against whatever driver happens to be installed.
+    $DriverReady = (Test-AvbExitSuccess $DriverBuildExit) -and (Test-AvbExitSuccess $InstallExit)
 
     $scriptDir = $PSScriptRoot  #  .\tools\archive\deprecated\
     $ArchiveDir = Split-Path $scriptDir -Parent  # .\tools\archive\
@@ -277,25 +299,26 @@ $BenchmarkTests = @(
     }
 
 
-    $CISuiteFailed = @()
-     tools\test\Run-Tests-CI.ps1
-    $CISuite = @("Unit", "Integration",  "HardwareUnit", "HardwareIntegration", "HardwareMandatory", "HardwareMutation")
-    
-    #$CISuite = @("HardwareUnit", "HardwareIntegration", "HardwareMutation", "HardwareMandatory")
-    $CISuite =@("All")
-    foreach ($Suite in $CISuite) { 
-        $SuiteStartTime = Get-Date
-        .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -CaptureDbgView -Configuration $Configuration 
-        $SuiteEndTime = Get-Date
-
-   #     find failed tests in .\logs for this suite and add names of tests that failed to $CISuiteFailed
-    } 
-
-    #foreach ($t in $CISuiteFailed) { 
-    #    .\tools\test\Run-Tests-Elevated.ps1 -TestName $t -CaptureDbgView -Configuration $Configuration 
-    #} 
-
-        
+    # Offline suites in this shell (Run-Tests-CI.ps1 rejects -CaptureDbgView; it never captured DebugView).
+    foreach ($Suite in $OfflineSuites) {
+        $json = Join-Path $RunDir ("results-{0}-{1}.json" -f $Configuration, $Suite)
+        $global:LASTEXITCODE = $null
+        .\tools\test\Run-Tests-CI.ps1 -Suite $Suite -Configuration $Configuration -ResultsJson $json -PriorResultsDir $RunDir -LocalDiagnostic
+        $SuiteRuns += [pscustomobject]@{ Configuration = $Configuration; Suite = $Suite; Exit = $global:LASTEXITCODE; Results = $json; Note = '' }
+    }
+    # Hardware* suites elevated, whole registered suite each, DebugView capture around each suite run; every suite runs
+    # even after a failed one (a functional FAIL is evidence; a halt keeps later Init/Mutating tests BLOCKED).
+    foreach ($Suite in $HardwareSuites) {
+        $json = Join-Path $RunDir ("results-{0}-{1}.json" -f $Configuration, $Suite)
+        if (-not $DriverReady) {
+            $SuiteRuns += [pscustomobject]@{ Configuration = $Configuration; Suite = $Suite; Exit = $null; Results = $json
+                                             Note = "NOT_EXECUTED: driver build exit $(Format-AvbExitCode $DriverBuildExit), install exit $(Format-AvbExitCode $InstallExit)" }
+            continue
+        }
+        $global:LASTEXITCODE = $null
+        .\tools\test\Run-Tests-Elevated.ps1 -Suite $Suite -Configuration $Configuration -CaptureDbgView -ResultsJson $json -PriorResultsDir $RunDir -TimeoutSeconds $SuiteTimeoutSeconds
+        $SuiteRuns += [pscustomobject]@{ Configuration = $Configuration; Suite = $Suite; Exit = $global:LASTEXITCODE; Results = $json; Note = '' }
+    }
 
     $FullSuite = Get-ChildItem -Path $testExeDir -Filter "*.exe" -ErrorAction SilentlyContinue
     $BlackList = @("test_s3_sleep_wake.exe","test_vv_corr_001_stability.exe")
@@ -306,3 +329,22 @@ $BenchmarkTests = @(
     } 
 
 }
+
+# Per-suite outcome from the results documents (never console text).  A missing document is a failure, not a pass.
+Write-Host "`n================================================================" -ForegroundColor Cyan
+Write-Host "  FullSuite summary ($RunDir) --- evidence LOCAL_DIAGNOSTIC, never CI" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+$NonPassing = 0
+foreach ($r in $SuiteRuns) {
+    $doc = $null
+    if (Test-Path -LiteralPath $r.Results) { try { $doc = Get-Content -LiteralPath $r.Results -Raw | ConvertFrom-Json } catch { $doc = $null } }
+    $detail = if ($r.Note) { $r.Note } elseif ($doc) {
+        $c = $doc.counts; "overall $($doc.overall), executed $($doc.executedCount), not executed $($doc.notExecutedCount), evidence $($doc.evidenceClass), counts: " + (($c.PSObject.Properties | Where-Object { $_.Value } | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' ')
+    } else { 'NO RESULTS DOCUMENT --- outcome unknown, treated as failure' }
+    $ok = (-not $r.Note) -and (Test-AvbExitSuccess $r.Exit) -and $doc
+    if (-not $ok) { $NonPassing++ }
+    Write-Host ("  {0,-8} {1,-20} exit {2,-6} {3}" -f $r.Configuration, $r.Suite, (Format-AvbExitCode $r.Exit), $detail) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+}
+if ($NonPassing -gt 0) { Write-Host "[FAIL] FullSuite: $NonPassing of $($SuiteRuns.Count) suite run(s) not passing" -ForegroundColor Red; exit 1 }
+Write-Host "[PASS] FullSuite: all $($SuiteRuns.Count) suite runs passed" -ForegroundColor Green
+exit 0

@@ -1193,8 +1193,8 @@ foreach ($jid in $hilJobs.Keys) {
 tc_check 'TEST-HILTRUST-REAL-009-hil-starts-only-via-workflow-run-and-hosted-authorization-before-any-physical-job' ($azIssues.Count -eq 0) ($azIssues -join ' || ')
 
 # Each physical stage builds and tests exactly the authorized upstream commit, in order, with isolated evidence.
-# P0 2026-10-21: all four suites, HardwareMutation included, in the LocalSuites order with HardwareMandatory last.
-$expectedSuites = @{ 'hil-debug' = 'HardwareUnit,HardwareIntegration,HardwareMutation,HardwareMandatory'; 'hil-release' = 'HardwareUnit,HardwareIntegration,HardwareMutation,HardwareMandatory' }
+# Q 2026-11-03: exactly the two hardware suites, in the LocalSuites order.
+$expectedSuites = @{ 'hil-debug' = 'HardwareUnit,HardwareIntegration'; 'hil-release' = 'HardwareUnit,HardwareIntegration' }
 $idIssues = @()
 foreach ($jid in $hilJobIds) {
     if (-not $hilJobs.Contains($jid)) { $idIssues += "$jid missing"; continue }
@@ -1608,11 +1608,11 @@ srv.serve_forever()
                 Write-J (Join-Path $b 'hil-run-identity.json') ([ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'
                     job = "hil-$($cfg.ToLower())"; configuration = $cfg; deploymentVerdict = 'DEPLOYED'; stagedDriverSha256 = $stagedOf[$cfg]; installedDriverSha256 = $stagedOf[$cfg]
                     imagePathSha256 = $stagedOf[$cfg]; runningImageEvidence = 'reloaded during this deployment' })
-                foreach ($su in 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory') {
+                foreach ($su in 'HardwareUnit', 'HardwareIntegration') {
                     $sd = Join-Path $b $su; New-Item -ItemType Directory -Path $sd -Force | Out-Null
                     [System.IO.File]::WriteAllText((Join-Path $sd "junit-$su-$cfg-20261021.xml"), $junitPass)
                     [System.IO.File]::WriteAllText((Join-Path $sd 'traceability-summary-20261021.md'), '| Requirement |')
-                    Write-J (Join-Path $sd "results-$su-$cfg-20261021_120000_000.json") ([ordered]@{ schema = 'avb-runner-results/1'; executedCount = 3; overall = 'PASSED'; counts = @{ PASSED = 3 } })
+                    Write-J (Join-Path $sd "results-$su-$cfg-20261021_120000_000.json") ([ordered]@{ schema = 'avb-runner-results/1'; evidenceClass = 'ci'; provenanceEnforced = $true; executedCount = 3; overall = 'PASSED'; counts = @{ PASSED = 3 } })
                 }
             }
         }
@@ -1634,8 +1634,8 @@ srv.serve_forever()
                                                                    $f = 'hil-evidence-Debug\HardwareUnit\results-HardwareUnit-Debug-20261021_120000_000.json'
                                                                    Set-J $r $f 'overall' 'INCOMPLETE'; Set-J $r $f 'counts' @{ PASSED = 3; 'COVERAGE-GAP' = 1 } }; Exit = 1; Why = 'HIL acceptance: INCOMPLETE' }
             'coverage gap reported as a skip (pre-P0 runner)' = @{ Mod = { param($r) [System.IO.File]::WriteAllText((Join-Path $r 'hil-evidence-Release\HardwareIntegration\junit-HardwareIntegration-Release-20261021.xml'), $junitOldGap) }; Exit = 1; Why = 'required test(s) NOT EXECUTED' }
-            'HardwareMutation never ran'         = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-Release\HardwareMutation') -Recurse -Force }; Exit = 1; Why = 'Release HardwareMutation: 0 JUnit' }
-            'runner overall not PASSED'          = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\HardwareMandatory\results-HardwareMandatory-Debug-20261021_120000_000.json' 'overall' 'NOT_VERIFIED' }; Exit = 1; Why = 'overall NOT_VERIFIED' }
+            'HardwareIntegration never ran'      = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-Release\HardwareIntegration') -Recurse -Force }; Exit = 1; Why = 'Release HardwareIntegration: 0 JUnit' }
+            'runner overall not PASSED'          = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\HardwareIntegration\results-HardwareIntegration-Debug-20261021_120000_000.json' 'overall' 'NOT_VERIFIED' }; Exit = 1; Why = 'overall NOT_VERIFIED' }
             'leftover evidence of another run'   = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\hil-run-identity.json' 'runId' '776' }; Exit = 1; Why = "runId='776'" }
             'evidence of another revision'       = @{ Mod = { param($r) Set-J $r 'hil-evidence-Release\hil-run-identity.json' 'sha' ('b' * 40) }; Exit = 1; Why = 'identity sha=' }
             'evidence of another CI run'         = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\hil-run-identity.json' 'upstreamRunId' '4241' }; Exit = 1; Why = "upstreamRunId='4241'" }
@@ -1644,7 +1644,11 @@ srv.serve_forever()
             'service ImagePath file differs'     = @{ Mod = { param($r) Set-J $r 'hil-evidence-Release\hil-run-identity.json' 'imagePathSha256' ('D' * 64) }; Exit = 1; Why = 'ImagePath file=DDDD' }
             'machine rebooted during this run'   = @{ Mod = { param($r) Set-J $r 'hil-evidence-Release\deployment.json' 'crashEvidence' ([ordered]@{ classification = 'CURRENT_RUN_INTERRUPTED' }) }; Exit = 1; Why = 'results of this run are void' }
             'acceptance in a HIL re-run'         = @{ Mod = {}; Attempt = '2'; Exit = 1; Why = 'HIL re-run attempt' }
-            'traceability summary missing'       = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-Debug\HardwareMandatory\traceability-summary-20261021.md') -Force }; Exit = 1; Why = '0 traceability summary file(s) for HardwareMandatory' }
+            # CI-HIL evidence only: a manual local diagnostic document (provenance reported, not enforced) is never acceptance.
+            'results of a local diagnostic run'  = @{ Mod = { param($r) $f = 'hil-evidence-Release\HardwareIntegration\results-HardwareIntegration-Release-20261021_120000_000.json'
+                                                                   Set-J $r $f 'evidenceClass' 'LOCAL_DIAGNOSTIC'; Set-J $r $f 'provenanceEnforced' $false }; Exit = 1; Why = "evidenceClass='LOCAL_DIAGNOSTIC'" }
+            'provenance not enforced'            = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\HardwareUnit\results-HardwareUnit-Debug-20261021_120000_000.json' 'provenanceEnforced' $false }; Exit = 1; Why = 'provenanceEnforced=False' }
+            'traceability summary missing'       = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-Debug\HardwareIntegration\traceability-summary-20261021.md') -Force }; Exit = 1; Why = '0 traceability summary file(s) for HardwareIntegration' }
             'stray JUnit outside a bundle'       = @{ Mod = { param($r) New-Item -ItemType Directory -Path (Join-Path $r 'stale\HardwareUnit') -Force | Out-Null; [System.IO.File]::WriteAllText((Join-Path $r 'stale\HardwareUnit\junit-HardwareUnit-Debug-20250101.xml'), $junitPass) }; Exit = 1; Why = 'outside an identified bundle' }
         }
         $k = 0
@@ -1923,8 +1927,9 @@ $wantSites = (@($hilJobIds | ForEach-Object { "hil.yml/$_" } | Sort-Object) -joi
 foreach ($kk in $sites.Keys) {
     if ((@($sites[$kk] | Sort-Object) -join ',') -ne $wantSites) { $evIssues += "suite $kk dispatched from [$($sites[$kk] -join ', ')] (expected exactly [$wantSites])" }
 }
-# P0 2026-10-21: HardwareMutation is mandatory automatic HIL (it was previously required NOT to be dispatched).
-foreach ($kk in 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory') { if (-not $sites.ContainsKey($kk)) { $evIssues += "suite $kk is not dispatched by any workflow" } }
+# Q 2026-11-03: HardwareUnit and HardwareIntegration are the only hardware suites - both dispatched, nothing else.
+foreach ($kk in 'HardwareUnit', 'HardwareIntegration') { if (-not $sites.ContainsKey($kk)) { $evIssues += "suite $kk is not dispatched by any workflow" } }
+foreach ($kk in @($sites.Keys | Where-Object { $_ -notin 'HardwareUnit', 'HardwareIntegration' })) { $evIssues += "unauthorized hardware suite $kk dispatched from [$($sites[$kk] -join ', ')]" }
 tc_check 'TEST-HILTRUST-REAL-013-current-run-evidence-only-and-one-dispatch-site-per-hardware-suite-and-configuration' ($evIssues.Count -eq 0) ($evIssues -join ' || ')
 
 Remove-Item $script:Tmp -Recurse -Force -ErrorAction SilentlyContinue

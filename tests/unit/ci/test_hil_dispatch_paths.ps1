@@ -528,8 +528,8 @@ else {
 tc_check 'TEST-HILPATH-018-attended-driver-installation-takes-the-machine-lock' ($instBad.Count -eq 0) ("STATIC tools/setup/Install-Driver.ps1: {0}" -f ($instBad -join '; '))
 
 # 019: the Run-Tests.ps1 frontend (Q decision 1 2026-10-29) resolves a typed program to its registered runner entry
-#      and suite, fails closed for anything unregistered, and its full run is Unit + all four hardware suites with
-#      HardwareMandatory last.  Its own functions are loaded from its syntax tree and called offline (nothing executed
+#      and suite, fails closed for anything unregistered, and its full run is Unit + both hardware suites
+#      (HardwareUnit, HardwareIntegration - the only ones, Q 2026-11-03).  Its own functions are loaded from its syntax tree and called offline (nothing executed
 #      besides them; the dispatch itself is Run-Tests-CI.ps1, covered by TEST-HILGATE).
 $feBad = @()
 $fePath = Join-Path $RepoRoot 'tools\test\Run-Tests.ps1'
@@ -545,7 +545,7 @@ if ($feBad.Count -eq 0) {
         @('avb_test_i210_um.exe', '', 'avb_test_i210', 'HardwareIntegration'),
         @('ptp_clock_control_production_test.exe', '', 'ptp_clock_control_production', 'HardwareIntegration'),
         @('ptp_clock_control_test.exe', '', 'ptp_clock_control_test', 'HardwareUnit'),
-        @('test_ptp_phc_stability.exe', '--case UT-CORR-005', 'test_ptp_phc_stability --case UT-CORR-005', 'HardwareMutation'),
+        @('test_ptp_phc_stability.exe', '--case UT-CORR-005', 'test_ptp_phc_stability --case UT-CORR-005', 'HardwareIntegration'),
         @('test_hot_plug', '', 'test_hot_plug', 'HardwareUnit'),   # listed there (Unsafe, gate-blocked) besides its Integration gap
         @('test_device_idle_regression', '', 'test_device_idle_regression', 'HardwareIntegration'),   # declared gap only
         @('test_magic_numbers.exe', '', 'test_magic_numbers', 'Unit'),
@@ -560,7 +560,7 @@ if ($feBad.Count -eq 0) {
 }
 $orderAsg = $feAst.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$suiteOrder' }, $true) | Select-Object -First 1
 $order = if ($orderAsg) { @($orderAsg.Right.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value }) } else { @() }
-if (($order -join ',') -ne 'Unit,HardwareUnit,HardwareIntegration,HardwareMutation,HardwareMandatory') { $feBad += "full-run order [$($order -join ',')]" }
+if (($order -join ',') -ne 'Unit,HardwareUnit,HardwareIntegration') { $feBad += "full-run order [$($order -join ',')]" }
 $feText = [System.IO.File]::ReadAllText($fePath)
 if ($feText -notmatch 'PARTIAL / SMOKE') { $feBad += '-Quick not labelled as a partial run' }
 if ($feText -match 'Read-Host') { $feBad += 'interactive prompt still present' }

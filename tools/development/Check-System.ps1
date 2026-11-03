@@ -111,7 +111,7 @@ public static class AvbCheckSystemNative {
     else { Write-Host "  [!] \\.\IntelAvbFilter does not open (Win32 error $openErr)" -ForegroundColor Red }
     if ($RunDeviceTest) {
         # Adapter enumeration + capabilities through the authoritative dispatcher (registered ReadOnly entry).
-        & (Join-Path $repoRoot 'tools\test\Run-Tests-CI.ps1') -Suite HardwareMandatory -Configuration $Configuration -Tests @('test_all_adapters')
+        & (Join-Path $repoRoot 'tools\test\Run-Tests-CI.ps1') -Suite HardwareIntegration -Configuration $Configuration -Tests @('test_all_adapters')
         $deviceTestExit = $LASTEXITCODE
         Write-Host ("  test_all_adapters via Run-Tests-CI.ps1: exit {0}" -f $deviceTestExit) -ForegroundColor $(if ($deviceTestExit -eq 0) { 'Green' } else { 'Red' })
     } else {
@@ -160,7 +160,7 @@ if ($driverFiles -and $localBuild -and $latest.LastWriteTime -lt $localBuild.Las
     Write-Host "1. Download DebugView from Sysinternals"
     Write-Host "2. Run as Administrator"
     Write-Host "3. Enable: Capture > Capture Kernel"
-    Write-Host "4. Reproduce a registered test with capture: .\tools\test\Run-Tests-Elevated.ps1 -Suite HardwareMandatory -TestName test_all_adapters -CaptureDbgView"
+    Write-Host "4. Reproduce a registered test with capture: .\tools\test\Run-Tests-Elevated.ps1 -Suite HardwareIntegration -TestName test_all_adapters -CaptureDbgView"
     Write-Host "5. Look for messages about SYSTIM, TIMINCA, and PTP clock"
 } else {
     Write-Host ""

@@ -96,12 +96,12 @@ function ConvertTo-AvbEntryKey([string]$Entry) {
 }
 
 # Runner registry (parsed from Run-Tests-CI.ps1, never executed): suite -> entries in its list, its declared coverage
-# gaps and (HardwareMutation) its attended-only table.
+# gaps and (HardwareIntegration) its attended-only table.  Only two hardware suites exist (Q 2026-11-03).
 function Get-AvbRunnerRegistry {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($runCi, [ref]$null, [ref]$null)
     $reg = [ordered]@{}
-    foreach ($s in 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory', 'Unit', 'Integration') {
-        $names = @("${s}Tests", "${s}CoverageGaps"); if ($s -eq 'HardwareMutation') { $names += 'HardwareMutationAttendedOnly' }
+    foreach ($s in 'HardwareUnit', 'HardwareIntegration', 'Unit', 'Integration') {
+        $names = @("${s}Tests", "${s}CoverageGaps"); if ($s -eq 'HardwareIntegration') { $names += 'HardwareIntegrationAttendedOnly' }
         $entries = @()
         foreach ($n in $names) {
             $a = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq "`$$n" }, $true) | Select-Object -First 1
@@ -115,8 +115,23 @@ function Get-AvbRunnerRegistry {
     return $reg
 }
 
+# Build targets that are deliberately NOT runner entries ($TestArtifactClassification in Run-Tests-CI.ps1, parsed, never
+# executed): name -> 'Diagnostic: ...' | 'Supporting: ...' | 'Obsolete: ...'.
+function Get-AvbArtifactClassification {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($runCi, [ref]$null, [ref]$null)
+    $a = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$TestArtifactClassification' }, $true) | Select-Object -First 1
+    $cls = [ordered]@{}
+    if ($a) {
+        foreach ($kv in $a.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) {
+            $s = $kv.Item2.Find({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)
+            $cls[$kv.Item1.Value] = if ($s) { $s.Value } else { $kv.Item2.Extent.Text }
+        }
+    }
+    return $cls
+}
+
 # Program name as typed (Build-Tests Output, e.g. avb_test_i210_um.exe, or a test script name) -> runner entry + suite.
-# Suite preference: HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory, Unit, Integration.
+# Suite preference: HardwareUnit, HardwareIntegration, Unit, Integration.
 function Resolve-AvbRunnerEntry {
     param([string]$Name, [string]$Arguments, $Registry)
     $n = $Name.Trim()
@@ -452,21 +467,31 @@ foreach ($test in $availableTests) {
 #   -Quick                           PARTIAL / SMOKE run: the legacy quick list as registered entries, per suite in
 #                                    the HIL order; its success never satisfies HIL coverage
 #   -Full, or no mode switch         FULL run (the legacy default ran every test): static SSOT/REGS verification, then
-#                                    Unit, HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory (last,
-#                                    as in hil.yml and LocalSuites), chained through -PriorResultsDir
+#                                    Unit, HardwareUnit, HardwareIntegration (the only hardware suites, as in hil.yml
+#                                    and LocalSuites), chained through -PriorResultsDir
 # Not done here any more: the legacy EventLog subscription refresh before *event_log* tests (EventLog restart, which can
 # detach the filter, then an IntelAvbFilter service start) - an ungated service change outside the machine lock and
 # without restoration.  test_event_log is gate-BLOCKED (Mutating); its setup is an open requirement in $HilTestSafety.
 $ReportDir = Join-Path $logsDir ("RunTests_{0}_{1}" -f $Configuration, (Get-Date -Format 'yyyyMMdd_HHmmss'))
 New-Item -ItemType Directory -Path $ReportDir -Force | Out-Null
 $runnerRegistry = Get-AvbRunnerRegistry
-$suiteOrder = @('Unit', 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory')
+$suiteOrder = @('Unit', 'HardwareUnit', 'HardwareIntegration')
 Write-Info "Dispatcher: $runCi   Report: $ReportDir"
 
 function Add-AvbUnregistered([string]$Entry) {
-    Write-Failure "[BLOCKED] '$Entry' is not a registered runner entry (no suite list, coverage gap or attended-only table in tools\test\Run-Tests-CI.ps1) - inventory gap, not executed"
+    # A classified non-test program (e.g. a Diagnostic tool) is not an inventory gap: report its classification.
+    # Never executed and never a pass either way.
+    $c = (Get-AvbArtifactClassification)[(($Entry -split '\s+')[0])]
+    if ($c) {
+        $kind = ($c -split ':')[0].Trim().ToUpperInvariant()
+        Write-Failure "[NOT_EXECUTED] '$Entry' is classified '$c' (`$TestArtifactClassification in tools\test\Run-Tests-CI.ps1): not a test program, never executed by the runners"
+        $status = "NOT_EXECUTED($kind)"
+    } else {
+        Write-Failure "[BLOCKED] '$Entry' is not a registered runner entry (no suite list, coverage gap or attended-only table in tools\test\Run-Tests-CI.ps1) - inventory gap, not executed"
+        $status = 'BLOCKED(UNREGISTERED)'
+    }
     $script:totalTests++; $script:failedTests++
-    $script:testResults += [PSCustomObject]@{ Name = $Entry; Status = 'BLOCKED(UNREGISTERED)'; ExitCode = 'N/A' }
+    $script:testResults += [PSCustomObject]@{ Name = $Entry; Status = $status; ExitCode = 'N/A' }
 }
 
 if ($HardwareOnly) { Invoke-AvbDispatch -Label 'hardware-only' -Suite 'HardwareIntegration' -Entries @('avb_test_i219') -ReportDir $ReportDir }
@@ -495,7 +520,7 @@ if ($TestExecutable) {
     foreach ($s in $suiteOrder) { if ($bySuite.Contains($s)) { Invoke-AvbDispatch -Label 'quick (partial)' -Suite $s -Entries $bySuite[$s] -ReportDir $ReportDir } }
     Write-Host "`n  [PARTIAL] Quick run only - HIL coverage requires the full run (-Full: Unit + all four hardware suites)" -ForegroundColor Yellow
 } else {
-    Write-Step "Running Full Test Suite: static verification + Unit + HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory"
+    Write-Step "Running Full Test Suite: static verification + Unit + HardwareUnit, HardwareIntegration"
     Invoke-AvbStaticVerification -Ids @('TEST-SSOT-001', 'TEST-SSOT-003', 'TEST-SSOT-004', 'TEST-REGS-001', 'TEST-REGS-003')
     foreach ($s in $suiteOrder) { Invoke-AvbDispatch -Label 'full' -Suite $s -ReportDir $ReportDir }
 }
