@@ -332,7 +332,7 @@ try {
                 if ($why) { $s.infrastructure = $why; Write-Host "[INFRA] $Configuration/${Suite}: $why --- recorded; the next suite runs" -ForegroundColor Red }
             }
             if (@($inv | Where-Object { $_.Category -in @('Failure', 'Blocked') }).Count -gt 0 -and
-                (Read-AvbTimedChoice -Prompt "$Configuration/${Suite} has failures. Press S to stop the run, Enter to continue (30 s, default continue):" -Seconds 30 -Default 'continue' -Keys @{ S = 'stop'; C = 'continue'; Enter = 'continue' }) -eq 'stop') { $Stop = "operator stop after $Configuration/$Suite"; break }
+                (Read-AvbTimedChoice -Prompt "$Configuration/${Suite} has failures. Press S to stop the run, Enter to continue (3 s, default continue):" -Seconds 3 -Default 'continue' -Keys @{ S = 'stop'; C = 'continue'; Enter = 'continue' }) -eq 'stop') { $Stop = "operator stop after $Configuration/$Suite"; break }
         }
         $AllInventory += $cfgInventory
         if ($Stop) { break }
@@ -341,7 +341,7 @@ try {
         if (-not $NoReproduce) {
             foreach ($item in (Get-AvbReproductionQueue -Inventory $cfgInventory -Configuration $Configuration)) {
                 Write-Host "`n$Configuration / $($item.Suite) / $($item.Entry) $($item.Arguments)  [$($item.Verdict)] $($item.Testcases)"
-                if ((Read-AvbTimedChoice -Prompt "Reproduce with Run-Tests-Elevated.ps1 -CaptureDbgView? (Y/n, 30 s, default Y):" -Seconds 30 -Default 'y' -Keys @{ Y = 'y'; Enter = 'y'; N = 'n' }) -ne 'y') { continue }
+                if ((Read-AvbTimedChoice -Prompt "Reproduce with Run-Tests-Elevated.ps1 -CaptureDbgView? (Y/n, 3 s, default Y):" -Seconds 3 -Default 'y' -Keys @{ Y = 'y'; Enter = 'y'; N = 'n' }) -ne 'y') { continue }
 
                 if (-not (Test-AvbExitSuccess (Invoke-AvbPreFlight $cfg.builtDriverSha256))) { $Stop = "pre-flight failed before reproduction ($Configuration)"; break }
                 $repJson = Join-Path $ReportDir ("repro-{0}-{1}-{2}.json" -f $Configuration, ($item.Entry -replace '[^\w.-]', '_'), (Get-Date -Format 'HHmmss'))
