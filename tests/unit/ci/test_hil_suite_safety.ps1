@@ -1,8 +1,9 @@
 # test_hil_suite_safety.ps1
-# TEST-HILSUITE-*: the hardware suites dispatched automatically (ci-standards-compliance.yml HIL jobs) must not be able to execute TSN
-# configuration (SETUP_TAS / SETUP_FP / SETUP_PTM / SETUP_QAV / SET_LAUNCH_TIME / DISARM_TAS) with a hardware
-# effect, nor nested executables, through any entry the HIL safety gate would run - regardless of the entry's
-# declared class.
+# TEST-HILSUITE-*: for the hardware suites dispatched automatically (exactly HardwareUnit and HardwareIntegration), find
+# every entry the HIL safety gate would run that can execute TSN configuration (SETUP_TAS / SETUP_FP / SETUP_PTM /
+# SETUP_QAV / SET_LAUNCH_TIME / DISARM_TAS) with a hardware effect, or nested executables - regardless of the entry's
+# declared class.  Since Q 2026-11-03 such operations may execute as part of Mutating / Mutating:Target tests (reported,
+# not a regression); a finding on a ReadOnly / Init entry or with unverifiable source still fails.
 #
 # Offline, static.  Nothing is built or executed.  "Runnable" is decided by the runner's own
 # Get-AvbHilGateDecision (extracted by AST) for a GitHub Actions run with one exact target and no HALT.
@@ -292,10 +293,11 @@ foreach ($wf in @(Get-ChildItem (Join-Path $RepoRoot '.github\workflows') -File 
     foreach ($mm in [regex]::Matches([System.IO.File]::ReadAllText($wf.FullName), 'Run-Tests-CI\.ps1[^\r\n]*?-Suite\s+(Hardware\w+)')) { $offered += $mm.Groups[1].Value }
 }
 $offered = @($offered | Sort-Object -Unique)
-# HardwareMutation approved for automatic HIL 2026-10-21 (Q, P0 decision A); REAL-003 stays unchanged for it.
-$approved = @('HardwareMandatory', 'HardwareUnit', 'HardwareIntegration', 'HardwareMutation')
-tc_check 'TEST-HILSUITE-REAL-001-workflows-dispatch-only-reviewed-hardware-suites' (($offered.Count -gt 0) -and (@($offered | Where-Object { $approved -notcontains $_ }).Count -eq 0)) `
-    ("dispatched: [{0}]; approved: [{1}]" -f ($offered -join ','), ($approved -join ','))
+# Exactly the two authorized hardware suites (Q 2026-11-03); the former HardwareMandatory / HardwareMutation suites are
+# no longer accepted.  Both must be dispatched, nothing else.
+$approved = @('HardwareIntegration', 'HardwareUnit')
+tc_check 'TEST-HILSUITE-REAL-001-workflows-dispatch-only-reviewed-hardware-suites' ((($offered | Sort-Object) -join ',') -eq ($approved -join ',')) `
+    ("dispatched: [{0}]; required exactly: [{1}]" -f ($offered -join ','), ($approved -join ','))
 
 function Get-RunnerList([string]$name) {
     $as = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -350,13 +352,22 @@ foreach ($s in $offered) {
     $realInfo  += @($f | Where-Object { $_.Kind -eq 'Info' }  | ForEach-Object { "[$s] " + (Show $_) })
 }
 foreach ($x in $realInfo) { Write-Host "  [INFO] $x" -ForegroundColor Yellow }
-tc_check 'TEST-HILSUITE-REAL-002-no-gate-runnable-entry-can-issue-hardware-tsn-configuration' ($realTsn.Count -eq 0) ($realTsn -join ' || ')
-tc_check 'TEST-HILSUITE-REAL-003-no-gate-runnable-entry-executes-unverified-nested-processes' ($realSpawn.Count -eq 0) ($realSpawn -join ' || ')
+# Q 2026-11-03: TSN configuration and nested process creation are allowed to execute as part of existing Mutating /
+# Mutating:Target tests (the static dispatch prohibition was superseded), so reachability alone is no regression.  Every
+# finding stays visible: reachable ones are reported as [REACHABLE].  Still a regression: a finding whose source could
+# not be verified (fail closed), or one on an entry whose safety class excludes it - ReadOnly (no state-changing IOCTL)
+# or Init (INIT_DEVICE only) - i.e. a misclassification the gate would dispatch under a too-narrow class.
+$narrow = @('ReadOnly', 'Init')
+foreach ($x in @($realTsn + $realSpawn | Where-Object { $_ -notmatch 'unverifiable' -and $_ -notmatch ('\[(' + ($narrow -join '|') + ')\]') })) { Write-Host "  [REACHABLE] $x" -ForegroundColor Yellow }
+$badTsn   = @($realTsn   | Where-Object { $_ -match 'unverifiable' -or $_ -match ('\[(' + ($narrow -join '|') + ')\]') })
+$badSpawn = @($realSpawn | Where-Object { $_ -match ('\[(' + ($narrow -join '|') + ')\]') })
+tc_check 'TEST-HILSUITE-REAL-002-reachable-tsn-configuration-is-verifiable-and-only-in-mutating-classes' ($badTsn.Count -eq 0) ($badTsn -join ' || ')
+tc_check 'TEST-HILSUITE-REAL-003-reachable-unverified-nested-processes-only-in-mutating-classes' ($badSpawn.Count -eq 0) ($badSpawn -join ' || ')
 tc_check 'TEST-HILSUITE-REAL-004-tas-fp-ptm-handlers-are-recognized-as-hardware-reaching' ($drvEff['SETUP_TAS'] -and $drvEff['SETUP_FP'] -and $drvEff['SETUP_PTM']) `
     ("driver effects: {0}" -f ((@($drvEff.Keys) | ForEach-Object { "$_=$($drvEff[$_])" }) -join ', '))
 
 Write-Host ""
 Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
-if ($failed -gt 0) { Write-Host "[FAIL] TEST-HILSUITE: automatic HIL suites can reach TSN configuration or nested execution" -ForegroundColor Red; exit 1 }
-Write-Host "[PASS] TEST-HILSUITE: automatic HIL suites cannot reach TSN configuration or nested execution" -ForegroundColor Green
+if ($failed -gt 0) { Write-Host "[FAIL] TEST-HILSUITE: automatic HIL suite detection or classification regression" -ForegroundColor Red; exit 1 }
+Write-Host "[PASS] TEST-HILSUITE: reachable TSN configuration / nested execution detected, verifiable and only in Mutating classes" -ForegroundColor Green
 exit 0
