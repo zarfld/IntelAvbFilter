@@ -138,36 +138,43 @@ if ($hAst) { foreach ($kv in $hAst.Right.Find({ param($x) $x -is [System.Managem
 function Get-Cls([string]$e) { $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }; if ($registry.ContainsKey($k)) { return $registry[$k] }; return '' }
 function Get-Gate([string]$e, [string]$Target, [bool]$Gha, [string[]]$Auth = @()) {
     $k = if ($fnKey) { ConvertTo-AvbHilEntryKey $e } else { $e }
-    return Get-AvbHilGateDecision -Entry $k -Class (Get-Cls $e) -Target $Target -Halt '' -TargetCount $(if ($Target) { 1 } else { 0 }) `
-        -AuthorizedUnsafe $Auth -UnderGitHubActions $Gha -HazardHolds $holds
+    return Get-AvbHilGateDecision -Entry $k -Class (Get-Cls $e) -Target $Target -Halt '' -AuthorizedUnsafe $Auth -UnderGitHubActions $Gha
 }
-# 032: unattended (GitHub Actions) without an exact target the gate executes ReadOnly entries only - the old list
-#      rule, now proven per listed entry by the runner's own decision; with a target only ReadOnly/Mutating:Target.
+# 032: no static pre-execution block (Q 2026-11-03).  Unattended (GitHub Actions), with or without an exact target, the
+#      gate dispatches every ReadOnly, Init, Mutating and Mutating:Target entry; only Unsafe and unclassified/Unknown
+#      entries are blocked.  Proven per listed entry by the runner's own decision.
 $autoBad = @()
 foreach ($s in $autoSuites.Keys) {
     foreach ($e in @($hwLists[$autoSuites[$s]])) {
         $c = Get-Cls $e
-        if ((Get-Gate $e '' $true).Action -eq 'Run' -and $c -ne 'ReadOnly') { $autoBad += "${s}: $e=$c runs without target" }
-        if ((Get-Gate $e '0x125B' $true).Action -eq 'Run' -and $c -notin @('ReadOnly', 'Mutating:Target')) { $autoBad += "${s}: $e=$c runs with target" }
+        $want = if ($c -in @('ReadOnly', 'Init', 'Mutating', 'Mutating:Target')) { 'Run' } else { 'Block' }
+        foreach ($t in '', '0x125B') {
+            $d = Get-Gate $e $t $true
+            if ($d.Action -ne $want) { $autoBad += "${s}: $e=$c target='$t' -> $($d.Action) (expected $want) $($d.Reason)" }
+        }
     }
 }
 $autoCount = @($autoSuites.Values | ForEach-Object { @($hwLists[$_]) }).Count
-tc_check 'TEST-HILGATE-032-unattended-dispatch-runs-only-readonly-or-exact-target-entries' (($autoCount -gt 0) -and $autoBad.Count -eq 0 -and $null -ne (Get-Command Get-AvbHilGateDecision -ErrorAction SilentlyContinue)) `
-    ("automatic entries={0}; dispatched against the rule: {1}" -f $autoCount, ($autoBad -join ', '))
+tc_check 'TEST-HILGATE-032-unattended-dispatch-runs-every-entry-except-unsafe-and-unclassified' (($autoCount -gt 0) -and $autoBad.Count -eq 0 -and $null -ne (Get-Command Get-AvbHilGateDecision -ErrorAction SilentlyContinue)) `
+    ("automatic entries={0}; decided against the rule: {1}" -f $autoCount, ($autoBad -join ', '))
 
-# 081: #328 hazard hold.  An entry whose source can issue SETUP_TAS/SETUP_FP/SETUP_PTM is never executed - whatever its
-#      class, target, authorization or attendance - until the driver TAS/FP restore defect is hardware-verified fixed;
-#      the hold is visible (BLOCKED with the evidence reference), the entry stays listed.
+# 081: #328 hazard annotations (Q 2026-11-03): an entry whose source can issue SETUP_TAS/SETUP_FP/SETUP_PTM keeps its
+#      #328 record in $HilHazardHolds and stays listed, but the record no longer prohibits dispatch - the runner never
+#      reads the table at dispatch, and the gate runs the entry whatever its target or attendance.
 $tsnEntries = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_tsn_ioctl_handlers_um', 'test_tsn_ioctl_handlers')
 $holdBad = @()
 foreach ($e in $tsnEntries) {
-    if (-not $holds.ContainsKey($e) -or $holds[$e] -notmatch '#328') { $holdBad += "${e}: no #328 hold"; continue }
+    if (-not $holds.ContainsKey($e) -or $holds[$e] -notmatch '#328') { $holdBad += "${e}: no #328 hazard record"; continue }
+    if ($hwKeys0 -notcontains $e) { $holdBad += "${e}: no longer listed" }
     foreach ($tc in @(@('', $true), @('0x125B', $true), @('0x125B', $false))) {
-        $d = Get-Gate $e $tc[0] $tc[1] @($e)
-        if ($d.Action -ne 'Block' -or $d.Reason -notmatch '#328') { $holdBad += "${e}: target='$($tc[0])' gha=$($tc[1]) -> $($d.Action) $($d.Reason)" }
+        $d = Get-Gate $e $tc[0] $tc[1]
+        if ($d.Action -ne 'Run') { $holdBad += "${e}: target='$($tc[0])' gha=$($tc[1]) -> $($d.Action) $($d.Reason)" }
     }
 }
-tc_check 'TEST-HILGATE-081-tsn-configuration-entries-are-hazard-held-visibly-not-delisted' ($holdBad.Count -eq 0) ($holdBad -join '; ')
+$holdReads = @($ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] -and $x.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) |
+               Where-Object { -not ($_.Parent -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Parent.Left -eq $_) })
+if ($holdReads.Count -gt 0) { $holdBad += "runner reads `$HilHazardHolds at line(s) $(@($holdReads | ForEach-Object { $_.Extent.StartLineNumber }) -join ',')" }
+tc_check 'TEST-HILGATE-081-hazard-annotated-entries-keep-their-328-record-and-are-dispatched' ($holdBad.Count -eq 0) ($holdBad -join '; ')
 
 # 080: a listed entry is executed (or gate-blocked with its reason) - never ALSO reported as a NOT EXECUTED coverage gap.
 $effBad = @()
@@ -429,7 +436,7 @@ $Classes = 'test_sbfake_ro=ReadOnly;test_sbfake_ro2=ReadOnly;test_sbfake_init=In
            'test_sbfake_tsauxc=ReadOnly;test_sbfake_link=ReadOnly;test_sbfake_setup=ReadOnly;test_sbfake_tgtphc=Mutating:Target;test_sbfake_lockdrop=ReadOnly;test_sbfake_tgtsleep=Mutating:Target;' +
            'test_sbfake_rosleep=ReadOnly;test_sbfake_rochild=ReadOnly;test_sbfake_roslow=ReadOnly;test_sbfake_tgtsetup=Mutating:Target;test_sbfake_tgtsetupphc=Mutating:Target;' +
            'test_sbfake_init2=Init;test_sbfake_initsetup=Init;test_sbfake_initrestinc=Init;test_sbfake_initselfcln=Init;test_sbfake_initselfnv=Init;' +
-           'test_sbfake_tsleak=Mutating:Target;test_sbfake_tsok=Mutating:Target'
+           'test_sbfake_tsleak=Mutating:Target;test_sbfake_tsok=Mutating:Target;test_sbfake_mutfail=Mutating;test_sbfake_mutcln=Mutating'
 # Declared mutated state of the sandbox fakes (the runner's per-entry mutation matrix, $HilMutatedState).  tgt / timinca
 # modify only TIMINCA, which the runner re-reads itself: restoration verified, fan-out continues (positive coverage of
 # TEST-HILGATE-015/016/026).  tgtphc also sets the PHC time, which the runner cannot observe: cleanup NOT_VERIFIED.
@@ -551,8 +558,8 @@ function Test-FailureCase($r, [string]$idRx) { return ($r.Xml -match ('<testcase
 # that from an offline test.  Fail every behavioral case instead of executing it.
 $behavioralIds = @('010-disabled-supported-adapter-blocked-not-enabled', '011-unsupported-adapter-informational-only',
     '012-unclassified-blocked-not-executed', '013-unsafe-blocked-authorization-ignored-under-github-actions',
-    '014-mutating-without-exact-targeting-blocked-not-executed', '015-target-aware-mutating-fans-out-per-enabled-supported-did',
-    '016-readonly-and-init-run-once-without-target-env', '017-blocked-entries-fail-the-suite',
+    '014-mutating-without-exact-targeting-is-dispatched-without-target-env', '015-target-aware-mutating-fans-out-per-enabled-supported-did',
+    '016-readonly-and-init-run-once-without-target-env-also-unattended', '017-blocked-entries-fail-the-suite',
     '018-sandbox-never-exports-hil-identity-or-junit-to-github-env',
     '020-state-change-is-cleanup-failed', '021-halt-blocks-later-non-readonly-but-not-readonly',
     '022-runner-never-restores-or-enables-the-adapter', '023-timeout-kill-still-verifies-post-state',
@@ -560,7 +567,9 @@ $behavioralIds = @('010-disabled-supported-adapter-blocked-not-enabled', '011-un
     '026-timinca-change-is-cleanup-failed-for-that-target-only', '027-unsafe-runs-only-with-exact-entry-authorization',
     '028-sandbox-refuses-real-test-binaries', '029-hardware-entry-blocked-outside-hardware-suite',
     '030-sandbox-requires-isolated-logs-dir', '035-coverage-gaps-reported-as-skipped-junit-cases-never-executed',
-    '036-hardware-suite-without-a-pass-fails', '039-init-blocked-unattended-but-runs-attended')
+    '036-hardware-suite-without-a-pass-fails', '039-init-runs-unattended-and-attended',
+    '096-mutating-target-without-an-exact-target-is-dispatched-once-without-target-env',
+    '097-dispatched-mutating-functional-and-cleanup-failures-stay-nonpassing-class-kept')
 if ([System.IO.File]::ReadAllText($TreeRunner) -notmatch '\$env:AVB_TEST_SANDBOX\b') {
     foreach ($id in $behavioralIds) { tc_fail "TEST-HILGATE-$id" 'runner has no sandbox mode - behavioral case NOT executed (it would open the real device)' }
     Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -591,16 +600,20 @@ tc_check 'TEST-HILGATE-012-unclassified-blocked-not-executed' `
 tc_check 'TEST-HILGATE-013-unsafe-blocked-authorization-ignored-under-github-actions' `
     ((Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_unsafe') -and ($rA.Out -match 'ignored under GitHub Actions') -and
      (@($rA.Ran | Where-Object { $_ -match 'test_sbfake_unsafe' }).Count -eq 0)) (Tail $rA)
-tc_check 'TEST-HILGATE-014-mutating-without-exact-targeting-blocked-not-executed' `
-    ((Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_mut[^_]') -and (@($rA.Ran | Where-Object { $_ -match 'RAN test_sbfake_mut ' }).Count -eq 0)) (Tail $rA)
+# Q 2026-11-03: missing exact-target support is no reason to refuse execution; the test runs with its own adapter
+# selection (no AVB_HIL_TARGET_DID), also unattended.
+tc_check 'TEST-HILGATE-014-mutating-without-exact-targeting-is-dispatched-without-target-env' `
+    ((-not (Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_mut[^_]')) -and (@($rA.Ran | Where-Object { $_ -match '^RAN test_sbfake_mut target=$' }).Count -eq 1)) ("ran: {0}; {1}" -f ($rA.Ran -join ' / '), (Tail $rA))
 $tgtRuns = @($rA.Ran | Where-Object { $_ -match '^RAN test_sbfake_tgt ' } | ForEach-Object { ($_ -split 'target=')[1].Trim() } | Sort-Object)
 tc_check 'TEST-HILGATE-015-target-aware-mutating-fans-out-per-enabled-supported-did' `
     ((($tgtRuns -join ',') -eq '0x125B,0x1533') -and (@($rA.Logs | Where-Object { $_ -match '^test_sbfake_tgt@125B\.exe_' }).Count -eq 1) -and
      (@($rA.Logs | Where-Object { $_ -match '^test_sbfake_tgt@1533\.exe_' }).Count -eq 1)) ("targets run: [{0}]; logs: {1}; {2}" -f ($tgtRuns -join ','), ($rA.Logs -join ','), (Tail $rA))
 $roRuns = @($rA.Ran | Where-Object { $_ -match '^RAN test_sbfake_(ro|init) ' })
-# Run A is unattended (GITHUB_ACTIONS=true): ReadOnly runs once without a target; Init is blocked by policy (039).
-tc_check 'TEST-HILGATE-016-readonly-runs-once-without-target-env-init-blocked-unattended' `
-    (($roRuns.Count -eq 1) -and ($roRuns[0] -match '^RAN test_sbfake_ro target=$') -and (Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_init[^"]*not approved for unattended HIL')) ("ran: {0}; {1}" -f ($rA.Ran -join ' / '), (Tail $rA))
+# Run A is unattended (GITHUB_ACTIONS=true): ReadOnly and Init each run once without a target (Init no longer blocked
+# unattended, Q 2026-11-03; 039).
+tc_check 'TEST-HILGATE-016-readonly-and-init-run-once-without-target-env-also-unattended' `
+    (($roRuns.Count -eq 2) -and @($roRuns | Where-Object { $_ -match '^RAN test_sbfake_ro target=$' }).Count -eq 1 -and
+     @($roRuns | Where-Object { $_ -match '^RAN test_sbfake_init target=$' }).Count -eq 1 -and -not (Test-FailureCase $rA 'TC-SAFETY-GATE-001: [^"]*test_sbfake_init')) ("ran: {0}; {1}" -f ($rA.Ran -join ' / '), (Tail $rA))
 tc_check 'TEST-HILGATE-017-blocked-entries-fail-the-suite' ($rA.Exit -eq 1) ("exit={0}" -f $rA.Exit)
 $ghText = ''; if (Test-Path -LiteralPath $ghEnv) { $ghText = [System.IO.File]::ReadAllText($ghEnv) }
 tc_check 'TEST-HILGATE-018-sandbox-never-exports-hil-identity-or-junit-to-github-env' ($ghText.Trim() -eq '') ("GITHUB_ENV received: {0}" -f ($ghText -replace "`r?`n", ' | '))
@@ -1282,12 +1295,13 @@ tc_check 'TEST-HILGATE-036-hardware-suite-without-a-pass-fails' `
      ($rJ.Out -match 'OVERALL: 1 test\(s\) FAILED') -and $rJ2.Exit -eq 0) `
     ("ran={0}; exit={1}; control exit={2}; {3} || control: {4}" -f (Get-RanCount $rJ 'RAN'), $rJ.Exit, $rJ2.Exit, (Tail $rJ), (Tail $rJ2))
 
-# --- Run K: Init is blocked unattended (GitHub Actions) but still runs attended (coverage not removed) -----------
+# --- Run K: Init runs unattended (GitHub Actions) and attended (Q 2026-11-03: INIT_DEVICE is a valid prerequisite,
+# not a reason to block; was: blocked unattended by a temporary policy exclusion 2026-10-21) -----------------------
 $rK1 = Invoke-Sandbox 'runK1' @($tInit, $tRo) -AllSupportedEnabled -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
 $rK2 = Invoke-Sandbox 'runK2' @($tInit, $tRo) -AllSupportedEnabled
-tc_check 'TEST-HILGATE-039-init-blocked-unattended-but-runs-attended' `
-    (((Get-RanCount $rK1 '^RAN test_sbfake_init ') -eq 0) -and ((Get-RanCount $rK1 '^RAN test_sbfake_ro ') -eq 1) -and
-     (Test-FailureCase $rK1 'TC-SAFETY-GATE-001: [^"]*test_sbfake_init[^"]*not approved for unattended HIL') -and $rK1.Exit -eq 1 -and
+tc_check 'TEST-HILGATE-039-init-runs-unattended-and-attended' `
+    (((Get-RanCount $rK1 '^RAN test_sbfake_init target=$') -eq 1) -and ((Get-RanCount $rK1 '^RAN test_sbfake_ro ') -eq 1) -and
+     -not (Test-FailureCase $rK1 'TC-SAFETY-GATE-001: [^"]*test_sbfake_init') -and $rK1.Exit -eq 0 -and
      ((Get-RanCount $rK2 '^RAN test_sbfake_init ') -eq 1) -and ((Get-RanCount $rK2 '^RAN test_sbfake_ro ') -eq 1) -and
      # Attended: executed and PASSED; its unverifiable restoration is a separate cleanup record (TEST-HILGATE-042).
      # Expectation history: exit 0 -> exit 1 (2026-10-21, "no mutation accepted without verified restoration") -> exit 0
@@ -1295,6 +1309,28 @@ tc_check 'TEST-HILGATE-039-init-blocked-unattended-but-runs-attended' `
      $rK2.Exit -eq 0 -and ($rK2.Out -match '\[CLEANUP:NOT_VERIFIED\] TC-INFRA-STATE-002: after test_sbfake_init\.ps1 \(Init\)') -and
      ($rK2.Out -match 'Failed : 0\b') -and ($rK2.Out -notmatch '\[(FAIL|BLOCKED|CLEANUP_FAILED|INCONCLUSIVE_RESTORATION)\] TC-')) `
     ("unattended: ran={0} exit={1} | attended: ran={2} exit={3} | {4}" -f ($rK1.Ran -join '/'), $rK1.Exit, ($rK2.Ran -join '/'), $rK2.Exit, (Tail $rK1))
+
+# --- Run X (Q 2026-11-03): no exact target available -> a Mutating:Target entry is dispatched once with its own adapter
+# selection (no AVB_HIL_TARGET_DID), unattended; was: BLOCKED "no supported, enabled adapter is available as exact target".
+# Every driver-enumerated clock unreadable = no exact target (TC-INFRA-ADAPTER-004 stays reported per adapter).
+$rX = Invoke-Sandbox 'runX' @($tTgt, $tRo) -AllSupportedEnabled -ExtraEnv @{ GITHUB_ACTIONS = 'true' } -StateEdit 'param($s) foreach ($c in @($s.clock)) { $c.Ok = $false }'
+tc_check 'TEST-HILGATE-096-mutating-target-without-an-exact-target-is-dispatched-once-without-target-env' `
+    (((Get-RanCount $rX '^RAN test_sbfake_tgt target=$') -eq 1) -and ((Get-RanCount $rX '^RAN test_sbfake_tgt ') -eq 1) -and
+     -not (Test-FailureCase $rX 'TC-SAFETY-GATE-001: [^"]*test_sbfake_tgt') -and ($rX.Out -match 'HIL exact targets for Mutating:Target tests: \(none\)') -and
+     ($rX.Out -match '\[BLOCKED\] TC-INFRA-ADAPTER-004')) ("ran: {0}; {1}" -f ($rX.Ran -join ' / '), (Tail $rX))
+
+# --- Run Y (Q 2026-11-03): a dispatched Mutating test keeps its real results - a functional failure stays FAILED and a
+# reported cleanup failure stays a FAILED cleanup result; its safety class stays in the evidence.  Unattended.
+$tMutFail = New-Fake 'test_sbfake_mutfail' "Write-Host '  [FAIL] TC-SBFAKE-009: functional failure'; exit 1"
+$tMutCln  = New-Fake 'test_sbfake_mutcln' "Write-Host '[CLEANUP:FAILED] TC-SBFAKE-010: restore of the changed setting failed'"
+$rY = Invoke-Sandbox 'runY' @($tMutFail, $tMutCln, $tRo) -AllSupportedEnabled -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
+$yFail = @(Get-ExecRecords $rY 'test_sbfake_mutfail'); $yCln = @(Get-ExecRecords $rY 'test_sbfake_mutcln')
+tc_check 'TEST-HILGATE-097-dispatched-mutating-functional-and-cleanup-failures-stay-nonpassing-class-kept' `
+    (((Get-RanCount $rY '^RAN test_sbfake_mutfail target=$') -eq 1) -and ((Get-RanCount $rY '^RAN test_sbfake_mutcln target=$') -eq 1) -and
+     $yFail.Count -eq 1 -and (Get-Prop $yFail[0] 'verdict') -eq 'FAILED' -and (Get-Prop $yFail[0] 'safetyClass') -eq 'Mutating' -and
+     $yCln.Count -eq 1 -and (Get-Prop (Get-CleanupOf $yCln[0]) 'outcome') -eq 'FAILED' -and (Get-Prop $yCln[0] 'safetyClass') -eq 'Mutating' -and
+     $rY.Exit -eq 1) ("ran: {0}; exit={1}; fail verdict={2}; cleanup={3}; {4}" -f ($rY.Ran -join ' / '), $rY.Exit,
+     $(if ($yFail.Count) { Get-Prop $yFail[0] 'verdict' }), $(if ($yCln.Count) { Get-Prop (Get-CleanupOf $yCln[0]) 'outcome' }), (Tail $rY))
 
 # --- D2 (Q 2026-10-22): a genuinely ReadOnly timeout stays FAILED(TIMEOUT) but halts no later mutation once the process
 # tree has terminated (outstanding I/O resolved) and the state is verified unchanged; otherwise the halt stays.

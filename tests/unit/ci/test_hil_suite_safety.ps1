@@ -148,13 +148,10 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($RunCIPath, [re
 $gateFn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilGateDecision' }, $false)
 if ($null -eq $gateFn) { tc_fail 'TEST-HILSUITE-000-gate-decision-available' 'Get-AvbHilGateDecision not found'; exit 1 }
 . ([scriptblock]::Create($gateFn.Extent.Text))
-# The runner's dispatch-time hazard holds (keys from its AST) are part of "gate-runnable".
-$HazardHolds = @{}
-$hhAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                        $x.Left.VariablePath.UserPath -eq 'HilHazardHolds' }, $true) | Select-Object -First 1
-if ($hhAst) { foreach ($kv in $hhAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true).KeyValuePairs) { $HazardHolds[$kv.Item1.Value] = 'runner hazard hold' } }
+# The #328 hazard annotations ($HilHazardHolds) are no longer read at dispatch (Q 2026-11-03), so they are not part of
+# "gate-runnable".
 function Test-Runnable([string]$Entry, [string]$Class) {
-    $d = Get-AvbHilGateDecision -Entry (($Entry -split '\s+', 2)[0] -replace '\.exe$', '') -Class $Class -Target '0x125B' -Halt '' -TargetCount 1 -AuthorizedUnsafe @() -UnderGitHubActions $true -HazardHolds $HazardHolds
+    $d = Get-AvbHilGateDecision -Entry (($Entry -split '\s+', 2)[0] -replace '\.exe$', '') -Class $Class -Target '0x125B' -Halt '' -AuthorizedUnsafe @() -UnderGitHubActions $true
     return ($d.Action -eq 'Run')
 }
 tc_pass 'TEST-HILSUITE-000-gate-decision-available'
@@ -274,8 +271,9 @@ tc_check 'TEST-HILSUITE-FX-007-process-creation-through-helper' ((Get-KindCount 
 tc_check 'TEST-HILSUITE-FX-008-ps1-entry-tsn-code-and-nested-binary' `
     (((Get-KindCount (FxRun1 "ps1:$ps1Tsn") 'Tsn') -ge 1) -and ((Get-KindCount (FxRun1 "ps1:$ps1Exec") 'Spawn') -ge 1) -and (@(FxRun1 "ps1:$ps1Ok").Count -eq 0)) `
     ("tsn: {0} | exec: {1} | ok: {2}" -f (Show (FxRun1 "ps1:$ps1Tsn")), (Show (FxRun1 "ps1:$ps1Exec")), (Show (FxRun1 "ps1:$ps1Ok")))
-# Init is gate-blocked unattended (temporary policy exclusion 2026-10-21), so even a TSN-issuing Init entry is unreachable.
-tc_check 'TEST-HILSUITE-FX-009-gate-blocked-mutating-unattended-init-and-unclassified-entries-are-not-reachable' ((@(FxRun1 'fx_mutblk').Count -eq 0) -and (@(FxRun1 'fx_initblk').Count -eq 0) -and (@(FxRun1 'fx_uncl').Count -eq 0)) ("{0} | {1} | {2}" -f (Show (FxRun1 'fx_mutblk')), (Show (FxRun1 'fx_initblk')), (Show (FxRun1 'fx_uncl')))
+# Q 2026-11-03: Mutating and Init entries are dispatched (no static block), so their TSN configuration is reachable and
+# reported; an unclassified entry is still blocked, so it is not.
+tc_check 'TEST-HILSUITE-FX-009-mutating-and-init-entries-are-reachable-unclassified-is-not' (((Get-KindCount (FxRun1 'fx_mutblk') 'Tsn') -ge 1) -and ((Get-KindCount (FxRun1 'fx_initblk') 'Tsn') -ge 1) -and (@(FxRun1 'fx_uncl').Count -eq 0)) ("{0} | {1} | {2}" -f (Show (FxRun1 'fx_mutblk')), (Show (FxRun1 'fx_initblk')), (Show (FxRun1 'fx_uncl')))
 tc_check 'TEST-HILSUITE-FX-010-comments-strings-and-read-only-helpers-are-clean' (@(FxRun1 'fx_clean').Count -eq 0) (Show (FxRun1 'fx_clean'))
 tc_check 'TEST-HILSUITE-FX-011-code-table-without-deviceiocontrol-is-info-only' (((Get-KindCount (FxRun1 'fx_abi') 'Tsn') -eq 0) -and ((Get-KindCount (FxRun1 'fx_abi') 'Info') -ge 1)) (Show (FxRun1 'fx_abi'))
 tc_check 'TEST-HILSUITE-FX-012-verified-driver-stub-is-info-and-missing-handler-fails-closed' `
