@@ -148,6 +148,9 @@ function Invoke-Sandbox {
         else { $lines += ("`$env:{0} = '{1}'" -f $k, $envs[$k].Replace("'", "''")) }
     }
     $testsLit = ($Tests | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', '
+    # The sandbox clears GITHUB_ACTIONS: a bare call would be a manual local run (provenance reported, not enforced,
+    # Q 2026-11-03).  These runs record the enforced verdicts, including BLOCKED(PROVENANCE) of the 'noprov' fixture.
+    if ($Extra -notcontains '-LocalDiagnostic') { $Extra = @($Extra) + '-EnforceProvenance' }
     $lines += "& '$TreeRunner' -Suite HardwareUnit -Tests @($testsLit) -TestTimeoutSeconds $Timeout -Configuration $Configuration -LogsDir '$logs' -ResultsJson '$json' $($Extra -join ' ')"
     $lines += 'exit $global:LASTEXITCODE'
     $wrapper = Join-Path $dir 'wrapper.ps1'

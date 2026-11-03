@@ -424,7 +424,11 @@ function Edit-StateSnippet([string]$Edit) {
 
 function Invoke-Sandbox {
     param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [string]$SourceRevision = 'sandbox-rev', [string]$SourceDirty = '0',
-          [string]$SourceMode = '', [string]$SourceDigest = '', [string]$RunnerArgs = '', [hashtable]$ExtraEnv = @{})
+          [string]$SourceMode = '', [string]$SourceDigest = '', [string]$RunnerArgs = '', [hashtable]$ExtraEnv = @{}, [switch]$DefaultMode)
+    # The sandbox clears GITHUB_ACTIONS / AVB_HIL_EXPECTED_REVISION (CI provenance is emulated by the SOURCE_* variables), so
+    # a bare call is a manual local run, which reports provenance without enforcing it (Q 2026-11-03).  Every rule test
+    # here asks for enforcement explicitly; -DefaultMode runs the bare call (TEST-HILPROV-069/070).
+    if (-not $DefaultMode -and $RunnerArgs -notmatch '-LocalDiagnostic|-EnforceProvenance') { $RunnerArgs = "$RunnerArgs -EnforceProvenance" }
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -699,6 +703,31 @@ foreach ($wf in @(Get-ChildItem (Join-Path $RepoRoot '.github\workflows') -Filte
     if ([System.IO.File]::ReadAllText($wf.FullName) -match 'LocalDiagnostic') { $sBad += "workflow $($wf.Name) mentions LocalDiagnostic" }
 }
 tc_check 'TEST-HILPROV-068-static-manual-entry-points-request-local-diagnostic-no-workflow-does' ($sBad.Count -eq 0) ($sBad -join '; ')
+
+# Direct dispatcher invocation (Q 2026-11-03): outside CI a bare Run-Tests-CI.ps1 call (Check-System.ps1,
+# Run-DriverBenchmark.ps1, scripts/build_and_test.ps1, an operator) is a manual local run - provenance reported, not enforced.
+$rDef = Invoke-Sandbox 'runDef' $diagEntries -SourceRevision 'sandbox-rev-NEXT' -SourceDirty '1' -SourceMode 'local' -SourceDigest ('E' * 64) -DefaultMode
+$dBad = @()
+foreach ($n in $diagNames) {
+    $rec = Get-Rec $rDef $n
+    if ((Get-RanCount $rDef $n) -ne 1 -or $null -eq $rec -or (P (P $rec 'provenance') 'verified') -ne $false) { $dBad += "${n}: ran=$(Get-RanCount $rDef $n) $(Show-Prov $rDef $n)" }
+}
+tc_check 'TEST-HILPROV-069-bare-local-runner-call-reports-provenance-and-executes-without-blocking' `
+    (($dBad.Count -eq 0) -and ($rDef.Exit -eq 0) -and ((P $rDef.Doc 'provenanceEnforced') -eq $false) -and ($rDef.Out -notmatch '\[BLOCKED\] TC-SAFETY-GATE-002')) `
+    ("exit={0} provenanceEnforced={1}; {2}" -f $rDef.Exit, (P $rDef.Doc 'provenanceEnforced'), ($dBad -join '; '))
+
+# The same bare call under CI (GITHUB_ACTIONS=true or an authorized HIL revision) stays enforced: no CI-accessible bypass.
+$rDefCi = Invoke-Sandbox 'runDefCi' $diagEntries -SourceRevision 'sandbox-rev-NEXT' -DefaultMode -ExtraEnv @{ AVB_HIL_EXPECTED_REVISION = ('a' * 40) }
+$ciBad = @(foreach ($n in $diagNames) { if (-not (Test-ProvBlocked $rDefCi $n)) { "${n}: $(Show-Prov $rDefCi $n)" } })
+tc_check 'TEST-HILPROV-070-bare-runner-call-under-ci-enforces-provenance' `
+    (($ciBad.Count -eq 0) -and ($rDefCi.Exit -eq 1) -and ((P $rDefCi.Doc 'provenanceEnforced') -eq $true)) `
+    ("exit={0} provenanceEnforced={1}; {2} | {3}" -f $rDefCi.Exit, (P $rDefCi.Doc 'provenanceEnforced'), ($ciBad -join '; '), (Tail $rDefCi))
+
+# Contradictory request: refused before anything runs.
+$rBoth = Invoke-Sandbox 'runBoth' @((Get-Entry $pDRev)) -RunnerArgs '-LocalDiagnostic -EnforceProvenance'
+tc_check 'TEST-HILPROV-071-local-diagnostic-together-with-enforce-provenance-is-refused' `
+    (($rBoth.Exit -eq 1) -and ($rBoth.Ran.Count -eq 0) -and ($rBoth.DocCount -eq 0) -and ($rBoth.Out -match '\[FAIL\] -LocalDiagnostic and -EnforceProvenance')) `
+    ("exit={0} ran={1} docs={2} | {3}" -f $rBoth.Exit, $rBoth.Ran.Count, $rBoth.DocCount, (Tail $rBoth))
 
 # --- Run E: hosted Unit suite is not subject to the HIL provenance gate -----------------------------------
 $pHosted = New-Fake 'test_sbprov_hosted'
