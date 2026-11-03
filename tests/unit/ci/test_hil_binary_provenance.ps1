@@ -378,7 +378,9 @@ New-Item -ItemType Directory -Path $ManifestDir -Force | Out-Null
 
 $Classes = 'test_sbprov_halter=Init;test_sbprov_disabled=ReadOnly;test_sbprov_current=ReadOnly;test_sbprov_stale=ReadOnly;' +
            'test_sbprov_mismatch=ReadOnly;test_sbprov_newmtime=ReadOnly;test_sbprov_oldmtime=ReadOnly;test_sbprov_missing=ReadOnly;' +
-           'test_sbprov_failed=ReadOnly;test_sbprov_skipped=ReadOnly;test_sbprov_nomanifest=ReadOnly;test_sbprov_wrongcfg=ReadOnly'
+           'test_sbprov_failed=ReadOnly;test_sbprov_skipped=ReadOnly;test_sbprov_nomanifest=ReadOnly;test_sbprov_wrongcfg=ReadOnly;' +
+           'test_sbprov_diag_rev=ReadOnly;test_sbprov_diag_stale=ReadOnly;test_sbprov_diag_mismatch=ReadOnly;test_sbprov_diag_failed=ReadOnly;' +
+           'test_sbprov_diag_disabled=ReadOnly;test_sbprov_diag_init=Init'
 
 function New-Fake([string]$Name, [string]$Action = '') {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -422,7 +424,7 @@ function Edit-StateSnippet([string]$Edit) {
 
 function Invoke-Sandbox {
     param([string]$Name, [string[]]$Tests, [string]$Suite = 'HardwareUnit', [string]$SourceRevision = 'sandbox-rev', [string]$SourceDirty = '0',
-          [string]$SourceMode = '', [string]$SourceDigest = '')
+          [string]$SourceMode = '', [string]$SourceDigest = '', [string]$RunnerArgs = '', [hashtable]$ExtraEnv = @{})
     $dir  = Join-Path $Tmp $Name
     $logs = Join-Path $dir 'logs'
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -434,15 +436,16 @@ function Invoke-Sandbox {
         AVB_TEST_STATE_SETTLE_SECONDS = '1'; GITHUB_ACTIONS = ''; GITHUB_ENV = ''; AVB_HIL_TARGET_DID = ''
         AVB_HIL_AUTHORIZE_UNSAFE = ''; AVB_TEST_HEALTH_FAIL_AFTER = ''
         AVB_TEST_SANDBOX_SOURCE_REVISION = $SourceRevision; AVB_TEST_SANDBOX_SOURCE_DIRTY = $SourceDirty
-        AVB_TEST_SANDBOX_SOURCE_MODE = $SourceMode; AVB_TEST_SANDBOX_SOURCE_DIGEST = $SourceDigest
+        AVB_TEST_SANDBOX_SOURCE_MODE = $SourceMode; AVB_TEST_SANDBOX_SOURCE_DIGEST = $SourceDigest; AVB_HIL_EXPECTED_REVISION = ''
     }
+    foreach ($k in $ExtraEnv.Keys) { $envs[$k] = $ExtraEnv[$k] }
     $lines = @()
     foreach ($k in $envs.Keys) {
         if ($envs[$k] -eq '') { $lines += "Remove-Item Env:$k -ErrorAction SilentlyContinue" }
         else { $lines += ("`$env:{0} = '{1}'" -f $k, $envs[$k].Replace("'", "''")) }
     }
     $testsLit = ($Tests | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ', '
-    $lines += "& '$TreeRunner' -Suite $Suite -Tests @($testsLit) -TestTimeoutSeconds 60 -Configuration Debug -LogsDir '$logs'"
+    $lines += "& '$TreeRunner' -Suite $Suite -Tests @($testsLit) -TestTimeoutSeconds 60 -Configuration Debug -LogsDir '$logs' $RunnerArgs"
     $lines += 'exit $LASTEXITCODE'
     $wrapper = Join-Path $dir 'wrapper.ps1'
     $lines | Set-Content -LiteralPath $wrapper -Encoding UTF8
@@ -456,8 +459,11 @@ function Invoke-Sandbox {
     if (-not $p.WaitForExit(300000)) { $p.Kill(); return @{ Exit = -999; Out = 'TIMEOUT'; Xml = ''; Ran = @() } }
     $xml = (Get-ChildItem $logs -Filter 'junit-*.xml' -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
     $ran = @(); if (Test-Path $RanLog) { $ran = @(Get-Content $RanLog) }
-    return @{ Exit = $p.ExitCode; Out = ($o.Result + "`n" + $e.Result); Xml = $xml; Ran = $ran }
+    $docs = @(Get-ChildItem $logs -Filter 'results-*.json' -ErrorAction SilentlyContinue)
+    $doc = if ($docs.Count -eq 1) { Get-Content -LiteralPath $docs[0].FullName -Raw | ConvertFrom-Json } else { $null }
+    return @{ Exit = $p.ExitCode; Out = ($o.Result + "`n" + $e.Result); Xml = $xml; Ran = $ran; Doc = $doc; DocCount = $docs.Count }
 }
+function Get-Rec($r, [string]$Name) { if ($null -eq $r.Doc) { return $null }; return @($r.Doc.records | Where-Object { $_.name -match [regex]::Escape($Name) -and -not $_.check })[0] }
 function Tail($r) { return (($r.Out -split "`n" | Select-Object -Last 20) -join ' | ') }
 function Get-RanCount($r, [string]$Name) { return @($r.Ran | Where-Object { $_ -eq "RAN $Name" }).Count }
 function Test-ProvBlocked($r, [string]$Name, [string]$ReasonRx = '.') {
@@ -567,6 +573,133 @@ tc_check 'TEST-HILPROV-051-local-edit-after-build-blocks-the-binary-and-fails-th
 $rL3 = Invoke-Sandbox 'runL3' @((Get-Entry $pLoc)) -SourceDigest $dgL
 tc_check 'TEST-HILPROV-052-ci-mode-rejects-a-local-worktree-build-despite-matching-digest' `
     ((Test-ProvBlocked $rL3 'test_sbprov_wrongcfg' 'uncommitted or unknown source state') -and $rL3.Exit -eq 1 -and ($rL3.Out -notmatch '\[LOCAL-EVIDENCE\]')) (Show-Prov $rL3 'test_sbprov_wrongcfg')
+# --- Run M..S: manual LOCAL_DIAGNOSTIC mode (Run-Tests-CI.ps1 -LocalDiagnostic) vs. trusted CI -------------------------
+# Incident 2026-11-02 (logs\FullSuite_20261102_195810.log): Debug test binaries built at e6f7326 (another branch) were
+# BLOCKED(PROVENANCE) after the checkout moved to 9c2f228 - 21 manually started runs, nothing executed.  Q 2026-11-02:
+# manually initiated local runs are diagnostic; they execute existing binaries whatever their revision, build-input digest
+# or manifest record, report the unverified provenance per item and are evidence class LOCAL_DIAGNOSTIC.  Without the
+# switch nothing changes; under CI the switch is refused before anything runs.
+function P($o, [string]$n) { if ($null -ne $o -and $o.PSObject.Properties[$n]) { return $o.$n }; return $null }
+$pDRev = New-Fake 'test_sbprov_diag_rev'; $pDStale = New-Fake 'test_sbprov_diag_stale'; $pDMis = New-Fake 'test_sbprov_diag_mismatch'
+$pDFail = New-Fake 'test_sbprov_diag_failed'; $pDDis = New-Fake 'test_sbprov_diag_disabled'
+$diagManifest = @(
+    (New-MEntry 'test_sbprov_diag_rev'      'built' $true (Get-Sha $pDRev)),
+    (New-MEntry 'test_sbprov_diag_mismatch' 'built' $true (Get-ShaOfText 'content produced by another build')),
+    (New-MEntry 'test_sbprov_diag_failed'   'failed' $true $null 'compiler exit code 2 or output missing'),
+    (New-MEntry 'test_sbprov_diag_disabled' 'disabled' $false $null 'entry is Disabled in Build-Tests.ps1')
+)   # test_sbprov_diag_stale deliberately absent from the manifest
+$diagEntries = @((Get-Entry $pDRev), (Get-Entry $pDStale), (Get-Entry $pDMis), (Get-Entry $pDFail), (Get-Entry $pDDis))
+$diagNames = @('test_sbprov_diag_rev', 'test_sbprov_diag_stale', 'test_sbprov_diag_mismatch', 'test_sbprov_diag_failed', 'test_sbprov_diag_disabled')
+Write-Manifest $diagManifest
+# Checkout moved (other revision), tracked edits, different build-input digest: every provenance rule is violated.
+$rM = Invoke-Sandbox 'runM' $diagEntries -SourceRevision 'sandbox-rev-NEXT' -SourceDirty '1' -SourceMode 'local' -SourceDigest ('E' * 64) -RunnerArgs '-LocalDiagnostic'
+$mBad = @()
+foreach ($n in $diagNames) {
+    if ((Get-RanCount $rM $n) -ne 1) { $mBad += "$n ran $(Get-RanCount $rM $n)x" }
+    $rec = Get-Rec $rM $n
+    if ($null -eq $rec) { $mBad += "${n}: no results record"; continue }
+    $pv = P $rec 'provenance'
+    if (-not $rec.executed -or $rec.verdict -ne 'PASSED') { $mBad += "${n}: executed=$($rec.executed) verdict=$($rec.verdict)" }
+    if ((P $pv 'verified') -ne $false -or -not (P $pv 'reason')) { $mBad += "${n}: provenance=$(if ($pv) { $pv | ConvertTo-Json -Compress } else { '<none>' })" }
+}
+tc_check 'TEST-HILPROV-060-local-diagnostic-executes-existing-binaries-of-another-revision-digest-or-build' `
+    (($mBad.Count -eq 0) -and ($rM.Out -notmatch '\[BLOCKED\] TC-SAFETY-GATE-002') -and ($rM.Exit -eq 0)) ("exit={0}; {1}" -f $rM.Exit, ($mBad -join '; '))
+# Exact replica of the 2026-11-02 block: local mode, clean checkout, build-input digest unchanged, only the revision moved
+# (log: "provenance mode: local; build-input digest: 49E13..." = manifest digest; built at e6f7326, checkout 9c2f228).
+$dgR = ('F' * 64)
+Write-Manifest @((New-MEntry 'test_sbprov_diag_rev' 'built' $true (Get-Sha $pDRev) '' $false $dgR))
+$rR = Invoke-Sandbox 'runR' @((Get-Entry $pDRev)) -SourceRevision 'sandbox-rev-NEXT' -SourceDirty '0' -SourceMode 'local' -SourceDigest $dgR -RunnerArgs '-LocalDiagnostic'
+$recRev = Get-Rec $rR 'test_sbprov_diag_rev'
+tc_check 'TEST-HILPROV-061-local-diagnostic-reports-why-provenance-is-unverified-per-item' `
+    (((Get-RanCount $rR 'test_sbprov_diag_rev') -eq 1) -and ($rR.Exit -eq 0) -and
+     ((P (P $recRev 'provenance') 'reason') -match "built from revision 'sandbox-rev' but the checkout is 'sandbox-rev-NEXT'") -and
+     ($rR.Out -match "\[LOCAL_DIAGNOSTIC\] TC-SAFETY-GATE-002: [^\r\n]*test_sbprov_diag_rev[^\r\n]*provenance NOT verified: [^\r\n]*built from revision")) `
+    ("ran={0} exit={1} recorded reason='{2}' | line={3}" -f (Get-RanCount $rR 'test_sbprov_diag_rev'), $rR.Exit, (P (P $recRev 'provenance') 'reason'),
+     ((($rR.Out -split "`n") | Where-Object { $_ -match 'LOCAL_DIAGNOSTIC\] TC-SAFETY-GATE-002[^\r\n]*diag_rev' } | Select-Object -First 1)))
+Write-Manifest $diagManifest
+# Evidence class: the real decision function (outside the sandbox a diagnostic run is LOCAL_DIAGNOSTIC, never ci/local);
+# a sandbox run stays 'sandbox' whatever it requested, and its document records that provenance was not enforced.
+$ecErr = ''; $ec = @{}
+try {
+    . ([scriptblock]::Create((Get-FunctionText $RunCIPath @('Get-AvbEvidenceClass'))))
+    $srcClean = @{ Mode = 'local'; Dirty = $false }; $srcDirty = @{ Mode = 'local'; Dirty = $true }
+    $ec.diagClean = Get-AvbEvidenceClass -UnderGitHubActions $false -IsSandbox $false -LocalDiagnostic $true -Source $srcClean
+    $ec.diagDirty = Get-AvbEvidenceClass -UnderGitHubActions $false -IsSandbox $false -LocalDiagnostic $true -Source $srcDirty
+    $ec.diagSandbox = Get-AvbEvidenceClass -UnderGitHubActions $false -IsSandbox $true -LocalDiagnostic $true -Source $srcDirty
+    $ec.strictDirty = Get-AvbEvidenceClass -UnderGitHubActions $false -IsSandbox $false -LocalDiagnostic $false -Source $srcDirty
+    $ec.strictClean = Get-AvbEvidenceClass -UnderGitHubActions $false -IsSandbox $false -LocalDiagnostic $false -Source $srcClean
+    $ec.ci = Get-AvbEvidenceClass -UnderGitHubActions $true -IsSandbox $false -LocalDiagnostic $false -Source @{ Mode = 'ci'; Dirty = $false }
+} catch { $ecErr = $_.Exception.Message }
+tc_check 'TEST-HILPROV-062-local-diagnostic-evidence-class-is-never-ci-or-local' `
+    (($ecErr -eq '') -and $ec.diagClean -eq 'LOCAL_DIAGNOSTIC' -and $ec.diagDirty -eq 'LOCAL_DIAGNOSTIC' -and $ec.diagSandbox -eq 'sandbox' -and
+     $ec.strictDirty -eq 'local-pre-commit' -and $ec.strictClean -eq 'local' -and $ec.ci -eq 'ci' -and
+     ((P $rM.Doc 'evidenceClass') -eq 'sandbox') -and ((P $rM.Doc 'provenanceEnforced') -eq $false)) `
+    ("err={0} classes={1} | sandbox doc: docs={2} evidenceClass={3} provenanceEnforced={4}" -f $ecErr, (($ec.Keys | Sort-Object | ForEach-Object { "$_=$($ec[$_])" }) -join ','),
+     $rM.DocCount, (P $rM.Doc 'evidenceClass'), (P $rM.Doc 'provenanceEnforced'))
+
+# Verified artifact in diagnostic mode: provenance recorded as verified, evidence still LOCAL_DIAGNOSTIC.
+$rN = Invoke-Sandbox 'runN' @((Get-Entry $pDRev)) -RunnerArgs '-LocalDiagnostic'
+$recN = Get-Rec $rN 'test_sbprov_diag_rev'
+tc_check 'TEST-HILPROV-063-local-diagnostic-records-verified-provenance-without-upgrading-the-evidence' `
+    (((Get-RanCount $rN 'test_sbprov_diag_rev') -eq 1) -and ((P (P $recN 'provenance') 'verified') -eq $true) -and ((P $rN.Doc 'provenanceEnforced') -eq $false) -and
+     ($rN.Out -notmatch 'provenance NOT verified')) ("ran={0} verified={1} provenanceEnforced={2}" -f (Get-RanCount $rN 'test_sbprov_diag_rev'), (P (P $recN 'provenance') 'verified'), (P $rN.Doc 'provenanceEnforced'))
+
+# Hardware safety is not relaxed: during a halt an Init item of unverified provenance stays BLOCKED(SAFETY); ReadOnly runs.
+$pDInit = New-Fake 'test_sbprov_diag_init'
+$sLogs = Join-Path $Tmp 'runS\logs'; New-Item -ItemType Directory -Path $sLogs -Force | Out-Null
+$null = Initialize-AvbHilSafetyRecord -Path (Join-Path $sLogs 'sandbox-hil-safety.json') -Operator 'test' -Reason 'TEST-HILPROV-064'
+$null = Add-AvbHilSafetyEvent -Path (Join-Path $sLogs 'sandbox-hil-safety.json') -SafetyEvent ([ordered]@{ verdict = 'LOCK_LOST'; trigger = [ordered]@{ executable = 'earlier_run.exe' } })
+$rS = Invoke-Sandbox 'runS' @((Get-Entry $pDInit), (Get-Entry $pDStale)) -SourceRevision 'sandbox-rev-NEXT' -RunnerArgs '-LocalDiagnostic'
+$recSI = Get-Rec $rS 'test_sbprov_diag_init'
+tc_check 'TEST-HILPROV-064-local-diagnostic-keeps-safety-class-and-halt-rules' `
+    (((Get-RanCount $rS 'test_sbprov_diag_init') -eq 0) -and ((P $recSI 'verdict') -eq 'BLOCKED(SAFETY)') -and ((Get-RanCount $rS 'test_sbprov_diag_stale') -eq 1) -and ($rS.Exit -ne 0)) `
+    ("init: ran={0} verdict={1} | readonly ran={2} | exit={3}" -f (Get-RanCount $rS 'test_sbprov_diag_init'), (P $recSI 'verdict'), (Get-RanCount $rS 'test_sbprov_diag_stale'), $rS.Exit)
+
+# Trusted CI: the switch is refused before anything runs (no item, no results document).
+$rCiG = Invoke-Sandbox 'runCiG' @((Get-Entry $pDRev)) -SourceRevision 'sandbox-rev-NEXT' -RunnerArgs '-LocalDiagnostic' -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
+$rCiE = Invoke-Sandbox 'runCiE' @((Get-Entry $pDRev)) -SourceRevision 'sandbox-rev-NEXT' -RunnerArgs '-LocalDiagnostic' -ExtraEnv @{ AVB_HIL_EXPECTED_REVISION = ('a' * 40) }
+tc_check 'TEST-HILPROV-065-local-diagnostic-requested-under-ci-fails-closed' `
+    (($rCiG.Exit -eq 1) -and ($rCiG.Ran.Count -eq 0) -and ($rCiG.DocCount -eq 0) -and ($rCiG.Out -match '\[FAIL\] -LocalDiagnostic is refused') -and
+     ($rCiE.Exit -eq 1) -and ($rCiE.Ran.Count -eq 0) -and ($rCiE.DocCount -eq 0) -and ($rCiE.Out -match '\[FAIL\] -LocalDiagnostic is refused')) `
+    ("GITHUB_ACTIONS: exit={0} ran={1} docs={2} | AVB_HIL_EXPECTED_REVISION: exit={3} ran={4} docs={5} | {6}" -f $rCiG.Exit, $rCiG.Ran.Count, $rCiG.DocCount, $rCiE.Exit, $rCiE.Ran.Count, $rCiE.DocCount, (Tail $rCiG))
+
+# Without the switch the same binaries stay blocked: CI (default) and the strict local mode, unchanged.
+$rP = Invoke-Sandbox 'runP' $diagEntries -SourceRevision 'sandbox-rev-NEXT'
+$rO = Invoke-Sandbox 'runO' $diagEntries -SourceRevision 'sandbox-rev-NEXT' -SourceDirty '1' -SourceMode 'local' -SourceDigest ('E' * 64)
+$pBad = @()
+foreach ($r in @(@{ N = 'ci'; R = $rP }, @{ N = 'local'; R = $rO })) {
+    foreach ($n in $diagNames) { if (-not (Test-ProvBlocked $r.R $n)) { $pBad += "$($r.N): $(Show-Prov $r.R $n)" } }
+    if ($r.R.Exit -ne 1 -or (P $r.R.Doc 'provenanceEnforced') -ne $true) {
+        $pBad += "$($r.N): exit=$($r.R.Exit) provenanceEnforced=$(P $r.R.Doc 'provenanceEnforced')" }
+}
+tc_check 'TEST-HILPROV-066-without-local-diagnostic-the-same-binaries-stay-blocked-ci-and-strict-local' ($pBad.Count -eq 0) ($pBad -join '; ')
+
+# A test that was never started is reported as not started, never as a run test or an executed functional failure.
+tc_check 'TEST-HILPROV-067-summary-separates-not-started-items-from-executed-failures' `
+    (($rP.Out -match 'Total\s+: 5 \(0 executed, 5 not started\)') -and ($rP.Out -match 'OVERALL: 5 item\(s\) NOT STARTED') -and
+     ($rP.Out -notmatch 'OVERALL: \d+ test\(s\) FAILED') -and ($rP.Out -notmatch '\b5 ran\b') -and
+     ($rM.Out -match 'Total\s+: 5 \(5 executed, 0 not started\)')) `
+    ("ci: {0}" -f ((($rP.Out -split "`n") | Where-Object { $_ -match 'Total|OVERALL' }) -join ' | '))
+
+# STATIC: every manually initiated entry point requests LOCAL_DIAGNOSTIC; no workflow does.
+$sBad = @()
+$rtTxt   = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\test\Run-Tests.ps1'))
+$lsTxt   = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\archive\deprecated\LocalSuites.ps1'))
+try {
+    . ([scriptblock]::Create((Get-FunctionText (Join-Path $RepoRoot 'tools\test\Run-Tests-Elevated.ps1') @('ConvertTo-AvbPsLiteral', 'New-AvbElevatedCommand'))))
+    foreach ($rj in '', 'C:\r\x.json') {
+        $cmdE = New-AvbElevatedCommand -Configuration 'Debug' -TestName 'test_x' -TestArgs '' -TestExecutable '' -Full $false -LogFile '' `
+                    -Suite 'HardwareUnit' -ResultsJson $rj -LegacyScript 'C:\t\Run-Tests.ps1' -RunCiScript 'C:\t\Run-Tests-CI.ps1'
+        if ($cmdE -notmatch "& 'C:\\t\\Run-Tests-CI\.ps1' [^;]*-LocalDiagnostic") { $sBad += "Run-Tests-Elevated -Suite command lacks -LocalDiagnostic (ResultsJson '$rj'): $cmdE" }
+    }
+} catch { $sBad += "Run-Tests-Elevated functions: $($_.Exception.Message)" }
+if ($rtTxt -notmatch '\$ciArgs = @\{[^}]*LocalDiagnostic = \$true') { $sBad += 'Run-Tests.ps1 Invoke-AvbDispatch does not pass -LocalDiagnostic' }
+if ($lsTxt -notmatch '& \$RunCI -Suite \$Suite -Configuration \$Configuration -ResultsJson \$json -PriorResultsDir \$ReportDir -LocalDiagnostic') { $sBad += 'LocalSuites does not pass -LocalDiagnostic' }
+foreach ($wf in @(Get-ChildItem (Join-Path $RepoRoot '.github\workflows') -Filter '*.yml')) {
+    if ([System.IO.File]::ReadAllText($wf.FullName) -match 'LocalDiagnostic') { $sBad += "workflow $($wf.Name) mentions LocalDiagnostic" }
+}
+tc_check 'TEST-HILPROV-068-static-manual-entry-points-request-local-diagnostic-no-workflow-does' ($sBad.Count -eq 0) ($sBad -join '; ')
+
 # --- Run E: hosted Unit suite is not subject to the HIL provenance gate -----------------------------------
 $pHosted = New-Fake 'test_sbprov_hosted'
 Remove-Item -LiteralPath $ManifestPath -Force

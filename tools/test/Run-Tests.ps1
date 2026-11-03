@@ -138,21 +138,25 @@ function Resolve-AvbRunnerEntry {
 }
 
 # One Run-Tests-CI.ps1 invocation (in-process, like LocalSuites): results document + logs under $ReportDir; earlier
-# suites of this run are prior evidence (-PriorResultsDir), so a halt carries forward as in hil.yml.
+# suites of this run are prior evidence (-PriorResultsDir), so a halt carries forward as in hil.yml.  Manually started:
+# -LocalDiagnostic (provenance reported, not enforced; evidence LOCAL_DIAGNOSTIC; refused by the runner under CI).
 function Invoke-AvbDispatch {
     param([string]$Label, [string]$Suite, [string[]]$Entries = @(), [string]$ReportDir)
     $logs = Join-Path $ReportDir $Suite
     New-Item -ItemType Directory -Path $logs -Force | Out-Null
     $json = Join-Path $ReportDir ("results-{0}-{1}-{2}.json" -f $Suite, $Configuration, (Get-Date -Format 'HHmmss'))
-    $ciArgs = @{ Suite = $Suite; Configuration = $Configuration; LogsDir = $logs; ResultsJson = $json; PriorResultsDir = $ReportDir }
+    $ciArgs = @{ Suite = $Suite; Configuration = $Configuration; LogsDir = $logs; ResultsJson = $json; PriorResultsDir = $ReportDir; LocalDiagnostic = $true }
     if (@($Entries).Count -gt 0) { $ciArgs.Tests = @($Entries) }
-    Write-Host ("`n  => Run-Tests-CI.ps1 -Suite {0}{1}" -f $Suite, $(if (@($Entries).Count) { ' -Tests ' + (@($Entries) -join ', ') } else { '' })) -ForegroundColor Cyan
+    Write-Host ("`n  => Run-Tests-CI.ps1 -Suite {0}{1} -LocalDiagnostic" -f $Suite, $(if (@($Entries).Count) { ' -Tests ' + (@($Entries) -join ', ') } else { '' })) -ForegroundColor Cyan
     $global:LASTEXITCODE = $null
     & $runCi @ciArgs
     $ec = $global:LASTEXITCODE
     if ($null -eq $ec) { $ec = 1 }   # no exit code = failure
     $script:totalTests++
-    $st = if ($ec -eq 0) { 'PASSED' } else { 'FAILED' }
+    # A dispatch whose results document shows no started process failed without a functional result: NOT_STARTED.
+    $executed = $null
+    try { if (Test-Path -LiteralPath $json) { $executed = [int](Get-Content -LiteralPath $json -Raw | ConvertFrom-Json).executedCount } } catch { $executed = $null }
+    $st = if ($ec -eq 0) { 'PASSED' } elseif ($executed -eq 0) { 'NOT_STARTED' } else { 'FAILED' }
     if ($ec -eq 0) { $script:passedTests++ } else { $script:failedTests++ }
     $script:testResults += [PSCustomObject]@{ Name = "$Label [Run-Tests-CI $Suite]"; Status = $st; ExitCode = $ec }
     $script:DispatchRuns += [PSCustomObject]@{ Label = $Label; Suite = $Suite; Exit = $ec; Results = $json }
@@ -599,6 +603,8 @@ if ($script:totalTests -gt 0) {
     }
     if ($script:failedTests -gt 0) {
         Write-Host "  X Failed:          $($script:failedTests)" -ForegroundColor Red
+        $notStarted = @($script:testResults | Where-Object { $_.Status -eq 'NOT_STARTED' }).Count
+        if ($notStarted -gt 0) { Write-Host "    of which NOT STARTED (no process started, no functional result): $notStarted" -ForegroundColor Red }
     }
     if ($script:skippedTests -gt 0) {
         Write-Host "  o Skipped:         $($script:skippedTests)" -ForegroundColor Yellow
@@ -612,7 +618,7 @@ if ($script:totalTests -gt 0) {
     if ($script:failedTests -gt 0) {
         Write-Host "`n  Failed Tests:" -ForegroundColor Red
         $script:testResults | Where-Object { $_.Status -ne "PASSED" } | ForEach-Object {
-            Write-Host "    - $($_.Name) (Exit code: $($_.ExitCode))" -ForegroundColor Red
+            Write-Host "    - $($_.Name) [$($_.Status)] (Exit code: $($_.ExitCode))" -ForegroundColor Red
         }
     }
 }

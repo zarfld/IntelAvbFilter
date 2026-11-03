@@ -29,7 +29,8 @@
 # continue; the run is nonpassing.  Cleanup outcomes (FAILED / NOT_VERIFIED) are reported per suite and never halt.
 # Never reboots, never retries an installation, never repairs adapters.
 #
-# Evidence class: LOCAL (pre-commit when the working tree is dirty).  It is never clean-commit CI evidence.
+# Evidence class: LOCAL_DIAGNOSTIC (Run-Tests-CI -LocalDiagnostic: build provenance reported per item, never enforced;
+# Q 2026-11-02).  It is never CI evidence.
 # Exit codes: tools\lib\NativeExit.ps1 ($global:LASTEXITCODE only; a missing exit code is a failure).
 
 param(
@@ -209,7 +210,7 @@ $RunCI         = Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1'
 $RunElevated   = Join-Path $RepoRoot 'tools\test\Run-Tests-Elevated.ps1'
 
 $Report = [ordered]@{
-    schema = 'avb-local-suites/1'; evidenceClass = 'LOCAL (never clean-commit CI evidence)'; host = $env:COMPUTERNAME
+    schema = 'avb-local-suites/1'; evidenceClass = 'LOCAL_DIAGNOSTIC (never CI evidence)'; host = $env:COMPUTERNAME
     startedUtc = (Get-Date).ToUniversalTime().ToString('o'); finishedUtc = $null; stopped = $null; configurations = @()
 }
 $AllInventory = @()
@@ -259,8 +260,9 @@ try {
         $cfg.builtDriverSha256 = (Get-FileHash -LiteralPath $sys -Algorithm SHA256).Hash
 
         # A failed individual test build does not stop the matrix (LocalSuites_20261024_133502: one LNK1168 skipped all of
-        # Release).  Build-Tests builds every other entry and records the failure in the manifest; Run-Tests-CI BLOCKs a
-        # not-built entry by provenance, so an older executable is never run in its place.  The run stays nonpassing.
+        # Release).  Build-Tests builds every other entry and records the failure in the manifest.  This is a manual local
+        # diagnostic run (Run-Tests-CI -LocalDiagnostic, Q 2026-11-02): an older executable of a failed entry still runs,
+        # its record says provenance NOT verified.  The build failure keeps the run nonpassing.
         $cfg.testBuild = Invoke-AvbStep "Build-Tests $Configuration" { & $BuildTests -Configuration $Configuration }
         $manPath = Join-Path $RepoRoot "build\tools\avb_test\x64\$Configuration\test-build-manifest.json"
         if (-not (Test-Path -LiteralPath $manPath)) { $Stop = "test build manifest missing: $manPath"; break }
@@ -268,12 +270,12 @@ try {
         $cfg.testBuildFailed = @(Get-AvbTestBuildFailures $cfg.testBuild $man)
         if ($cfg.testBuildFailed.Count -gt 0) {
             $BuildFailures += "$Configuration test build exit $(Format-AvbExitCode $cfg.testBuild): $(@($cfg.testBuildFailed).Count) failed entr(y/ies)"
-            Write-Host "[BUILD FAILED] $Configuration test build exit $(Format-AvbExitCode $cfg.testBuild) --- continuing; failed entries are BLOCKED(PROVENANCE), their old executables are not run:" -ForegroundColor Red
+            Write-Host "[BUILD FAILED] $Configuration test build exit $(Format-AvbExitCode $cfg.testBuild) --- continuing; an existing older executable of a failed entry runs as LOCAL_DIAGNOSTIC with provenance NOT verified:" -ForegroundColor Red
             $cfg.testBuildFailed | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
         }
         $cfg.testManifest = $manPath; $cfg.provenanceMode = $man.provenanceMode; $cfg.buildInputDigest = $man.sourceDigest
         if ($man.provenanceMode -notin @('clean-commit', 'local-worktree')) {
-            $Stop = "test build is not attributable (provenanceMode '$($man.provenanceMode)'); every Hardware* artifact would be BLOCKED"; break
+            Write-Host "[LOCAL_DIAGNOSTIC] test build is not attributable (provenanceMode '$($man.provenanceMode)') --- tests still run; their provenance is reported NOT verified" -ForegroundColor Yellow
         }
 
         # 3. Install (existing operator script; UAC prompt)
@@ -296,7 +298,7 @@ try {
             $transcript = Join-Path $ReportDir ("console-{0}-{1}.log" -f $Configuration, $Suite)
             $t0 = Get-Date
             Start-Transcript -Path $transcript -Force | Out-Null
-            try { $rc = Invoke-AvbStep "Run-Tests-CI $Suite $Configuration" { & $RunCI -Suite $Suite -Configuration $Configuration -ResultsJson $json -PriorResultsDir $ReportDir } }
+            try { $rc = Invoke-AvbStep "Run-Tests-CI $Suite $Configuration" { & $RunCI -Suite $Suite -Configuration $Configuration -ResultsJson $json -PriorResultsDir $ReportDir -LocalDiagnostic } }
             finally { Stop-Transcript | Out-Null }
             $res = Read-AvbSuiteResults -Path $json -Suite $Suite -Configuration $Configuration -ObservedExit $rc
             $s = [ordered]@{ suite = $Suite; exitCode = $rc; resultsJson = $json; console = $transcript; durationSeconds = [Math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
@@ -360,7 +362,7 @@ try {
     $Report.inventory = @($AllInventory)
     ($Report | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $ReportDir 'local-suites-report.json') -Encoding UTF8
 
-    Write-Host "`n================ LOCAL SUITES REPORT (LOCAL evidence, never CI evidence) ================" -ForegroundColor Cyan
+    Write-Host "`n================ LOCAL SUITES REPORT (LOCAL_DIAGNOSTIC evidence, never CI evidence) ================" -ForegroundColor Cyan
     foreach ($c in $Report.configurations) {
         Write-Host ("{0}: HEAD {1}, provenance {2}, digest {3}, built driver {4}, test build {5}, install {6}, pre-flight {7}" -f $c.configuration, $c.head, $c.provenanceMode,
                     $c.buildInputDigest, $c.builtDriverSha256, (Format-AvbStepResult $c.testBuild), (Format-AvbStepResult $c.install), (Format-AvbStepResult $c.preflight))

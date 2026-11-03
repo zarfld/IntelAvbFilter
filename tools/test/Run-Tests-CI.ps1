@@ -75,6 +75,15 @@ param(
     [Parameter(Mandatory=$false)]
     [int]$HilLockWaitSeconds = 60,
 
+    # Manually initiated local diagnostic run (Q 2026-11-02): build provenance (revision, build-input digest, manifest
+    # record, SHA256) is evaluated and reported per item but never blocks execution, so existing test binaries run after
+    # a branch switch or source edit without a rebuild.  Safety class, hazard holds, halts, machine lock, baseline and
+    # post-test checks are unchanged.  Evidence class LOCAL_DIAGNOSTIC, never CI.  Refused under GitHub Actions or an
+    # authorized HIL revision (AVB_HIL_EXPECTED_REVISION).  Passed by the local entry points only (Run-Tests-Elevated.ps1,
+    # Run-Tests.ps1, LocalSuites.ps1); never by a workflow (TEST-HILPROV-068).
+    [Parameter(Mandatory=$false)]
+    [switch]$LocalDiagnostic,
+
     # NOT SUPPORTED here: this runner never captured DebugView output although it accepted the switch.  Kernel
     # capture for one test is tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView.  The switch is
     # kept only to reject it loudly instead of silently running without a capture.
@@ -87,6 +96,11 @@ $ErrorActionPreference = 'Stop'
 if ($CaptureDbgView) {
     Write-Host "[FAIL] Run-Tests-CI.ps1 does not capture DebugView output (-CaptureDbgView is not supported here)." -ForegroundColor Red
     Write-Host "       Use: .\tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView -Configuration $Configuration" -ForegroundColor Red
+    exit 1
+}
+# Trusted CI evidence always enforces build provenance: a diagnostic request there fails closed before anything runs.
+if ($LocalDiagnostic -and ($env:GITHUB_ACTIONS -eq 'true' -or $env:AVB_HIL_EXPECTED_REVISION)) {
+    Write-Host "[FAIL] -LocalDiagnostic is refused under CI (GITHUB_ACTIONS='$env:GITHUB_ACTIONS', AVB_HIL_EXPECTED_REVISION='$env:AVB_HIL_EXPECTED_REVISION'): CI-HIL evidence always enforces build provenance --- no test executed" -ForegroundColor Red
     exit 1
 }
 
@@ -1499,6 +1513,7 @@ function Add-AvbResult {
         artifact = $(if ($it) { $it.Artifact } else { $null }); artifactSha256 = $(if ($it) { $it.Sha256 } else { $null })
         arguments = $(if ($it) { $it.Arguments } else { '' }); safetyClass = $(if ($it) { $it.Class } else { '' })
         targetDid = $(if ($it -and $it.Target) { $it.Target } else { $null })
+        provenance = $(if ($it) { $it.Provenance } else { $null })   # @{ verified; enforced; reason } when the provenance gate applied
         reason = $Reason; logPath = $(if ($LogPath) { $LogPath } elseif ($executed) { $it.LogPath } else { $null })
         startedUtc = $(if ($executed) { $it.StartedUtc } else { $null }); durationSeconds = $(if ($executed) { $it.DurationSeconds } else { $null })
         testcases = @()
@@ -1540,6 +1555,17 @@ function Add-AvbCleanupResult {
                 $(if ($Subject) { $Subject } else { "after $Display" }), $Class, $Reason, (Format-HilIncidentRefs $Incidents)) -ForegroundColor $color
 }
 
+# Evidence class of a results document.  A -LocalDiagnostic run (provenance reported, not enforced) is LOCAL_DIAGNOSTIC:
+# never 'ci', never 'local' / 'local-pre-commit'.  A sandbox run stays 'sandbox' whatever it requested.
+function Get-AvbEvidenceClass {
+    param([bool]$UnderGitHubActions, [bool]$IsSandbox, [bool]$LocalDiagnostic, $Source)
+    if ($UnderGitHubActions -and -not $IsSandbox) { return 'ci' }
+    if ($IsSandbox) { return 'sandbox' }
+    if ($LocalDiagnostic) { return 'LOCAL_DIAGNOSTIC' }
+    if ($Source -and $Source.Mode -eq 'local' -and $Source.Dirty) { return 'local-pre-commit' }
+    return 'local'
+}
+
 # Atomic write (temp file + rename) of the results document; returns the path.
 function Write-AvbResultsJson {
     param([int]$ExitCode, [string]$Overall)
@@ -1558,17 +1584,14 @@ function Write-AvbResultsJson {
         [ordered]@{ incidentId = $id; key = @(@($obsRecs[0].incidents) | Where-Object { $_.incidentId -eq $id })[0].key
                     observations = @($obsRecs | ForEach-Object { $r = $_; [ordered]@{ record = $r.record; role = @(@($r.incidents) | Where-Object { $_.incidentId -eq $id })[0].role } }) } })
     $src = $script:SourceIdentity
-    $evidence = if ($script:UnderGitHubActions -and -not $script:IsSandbox) { 'ci' }
-                elseif ($script:IsSandbox) { 'sandbox' }
-                elseif ($src -and $src.Mode -eq 'local' -and $src.Dirty) { 'local-pre-commit' }
-                else { 'local' }
+    $evidence = Get-AvbEvidenceClass -UnderGitHubActions $script:UnderGitHubActions -IsSandbox $script:IsSandbox -LocalDiagnostic ([bool]$LocalDiagnostic) -Source $src
     $adapters = @()
     if ($script:HilBaseline -and $script:HilBaseline.Adapters) {
         $adapters = @($script:HilBaseline.Adapters | ForEach-Object { [ordered]@{ instanceId = $_.InstanceId; did = $_.Did; name = $_.Name; filterBound = $_.FilterBound } })
     }
     $doc = [ordered]@{
         schema = 'avb-runner-results/1'; producer = 'tools/test/Run-Tests-CI.ps1'
-        suite = $Suite; configuration = $Configuration; evidenceClass = $evidence; host = $env:COMPUTERNAME
+        suite = $Suite; configuration = $Configuration; evidenceClass = $evidence; provenanceEnforced = (-not $LocalDiagnostic); host = $env:COMPUTERNAME
         startedUtc = $script:AvbRunStartedUtc; finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
         github = $(if ($script:UnderGitHubActions) { [ordered]@{ runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; sha = $env:GITHUB_SHA
                                                                  expectedRevision = $env:AVB_HIL_EXPECTED_REVISION; workflow = $env:GITHUB_WORKFLOW } } else { $null })
@@ -2464,21 +2487,25 @@ if ($IsHardwareSuite) {
 
 $BuildManifest = $null
 if ($IsHardwareSuite) {
+    $provConsequence = if ($LocalDiagnostic) { 'reported per item, not enforced (-LocalDiagnostic)' } else { 'every non-repository test artifact is BLOCKED' }
+    if ($LocalDiagnostic) {
+        Write-Host "  [LOCAL_DIAGNOSTIC] manual local diagnostic run: build provenance is reported per item but NOT enforced; existing test binaries run whatever revision they were built from. Evidence class LOCAL_DIAGNOSTIC --- never CI evidence" -ForegroundColor Yellow
+    }
     $BuildManifest = Read-AvbBuildManifest -Path (Join-Path $testExeDir 'test-build-manifest.json') -Configuration $Configuration
     if ($BuildManifest.Ok) {
         Write-Note ("Build provenance: {0} ({1} artifact record(s))" -f $BuildManifest.Path, $BuildManifest.ByArtifact.Count)
     } else {
-        Write-Host "  [BLOCKED] build provenance unavailable: $($BuildManifest.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
+        Write-Host "  [$(if ($LocalDiagnostic) { 'LOCAL_DIAGNOSTIC' } else { 'BLOCKED' })] build provenance unavailable: $($BuildManifest.Error) --- $provConsequence" -ForegroundColor $(if ($LocalDiagnostic) { 'Yellow' } else { 'Red' })
     }
     if (-not $SourceIdentity) { $SourceIdentity = Get-AvbSourceIdentity }   # already determined for the reclassification step
     if ($SourceIdentity.Ok) {
         Write-Note ("Source identity: {0} (tracked changes: {1}; provenance mode: {2}; build-input digest: {3})" -f $SourceIdentity.Revision, $SourceIdentity.Dirty,
                     $SourceIdentity.Mode, $(if ($SourceIdentity.Digest) { $SourceIdentity.Digest } else { "n/a $($SourceIdentity.DigestError)" }))
-        if ($SourceIdentity.Mode -eq 'local' -and $SourceIdentity.Dirty) {
+        if ($SourceIdentity.Mode -eq 'local' -and $SourceIdentity.Dirty -and -not $LocalDiagnostic) {
             Write-Host "  [LOCAL-EVIDENCE] uncommitted working tree: results are LOCAL pre-commit evidence bound to the build-input digest, NOT clean-commit CI evidence" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "  [BLOCKED] source identity unavailable: $($SourceIdentity.Error) --- every non-repository test artifact is BLOCKED" -ForegroundColor Red
+        Write-Host "  [$(if ($LocalDiagnostic) { 'LOCAL_DIAGNOSTIC' } else { 'BLOCKED' })] source identity unavailable: $($SourceIdentity.Error) --- $provConsequence" -ForegroundColor $(if ($LocalDiagnostic) { 'Yellow' } else { 'Red' })
     }
 }
 
@@ -2552,7 +2579,7 @@ foreach ($WorkItem in $WorkItems) {
         $exeName  = "$exeName@$targetDid"
         $itemStem = "$itemStem@$($targetDid.Substring(2))"
     }
-    $script:AvbItem = @{ Entry = $TestName; Artifact = $exePath; Arguments = $testArgs; Target = $targetDid; Class = ''; Sha256 = $null
+    $script:AvbItem = @{ Entry = $TestName; Artifact = $exePath; Arguments = $testArgs; Target = $targetDid; Class = ''; Sha256 = $null; Provenance = $null
                          Executed = $false; ProcessExit = $null; LogPath = $null; StartedUtc = $null; DurationSeconds = $null; Output = $null }
 
     # MANDATORY SUITE: driver loss = hard FAIL for #328 sentinel, not cascade SKIP.
@@ -2603,12 +2630,18 @@ foreach ($WorkItem in $WorkItems) {
     }
 
     # Build provenance gate (#328 F23): before the safety class and HALT rules, never by executing the artifact.
+    # -LocalDiagnostic: the same decision is made and recorded, but an unverified artifact still runs (the safety gate
+    # below decides as always) and the run is LOCAL_DIAGNOSTIC evidence.
     if ($IsHardwareSuite -and (Test-AvbHilNeedsProvenance -Entry $TestName -ArtifactPath $exePath)) {
         $prov = Get-AvbHilProvenanceDecision -ArtifactPath $exePath -Manifest $BuildManifest -Source $SourceIdentity
+        $script:AvbItem.Provenance = [ordered]@{ verified = ($prov.Action -eq 'Run'); enforced = (-not $LocalDiagnostic); reason = $prov.Reason }
         if ($prov.Action -ne 'Run') {
-            Add-HilFailureRecord -Display $exeName -Status 'BLOCKED(PROVENANCE)' -Stem $itemStem `
-                -Line ("[BLOCKED] TC-SAFETY-GATE-002: {0}: provenance: {1} --- not executed" -f $TestName, $prov.Reason)
-            continue
+            if (-not $LocalDiagnostic) {
+                Add-HilFailureRecord -Display $exeName -Status 'BLOCKED(PROVENANCE)' -Stem $itemStem `
+                    -Line ("[BLOCKED] TC-SAFETY-GATE-002: {0}: provenance: {1} --- not executed" -f $TestName, $prov.Reason)
+                continue
+            }
+            Write-Host ("  [LOCAL_DIAGNOSTIC] TC-SAFETY-GATE-002: {0}: provenance NOT verified: {1} --- not enforced (manual local diagnostic run); result is LOCAL_DIAGNOSTIC evidence only" -f $TestName, $prov.Reason) -ForegroundColor Yellow
         }
     }
 
@@ -2838,14 +2871,18 @@ Write-Host @"
 
 $results | Format-Table -AutoSize
 
+# Rows counted as failed although no process was started (blocked, missing artifact, runner infrastructure): reported as
+# NOT STARTED, never as executed functional failures.  Counts, overall verdict and exit code are unchanged by this split.
+$runExecuted   = @($AvbResultRecords | Where-Object { $_.executed }).Count
+$runNotStarted = @($AvbResultRecords | Where-Object { -not $_.executed -and -not $_.check -and $_.verdict -notin @('SKIPPED', 'COVERAGE-GAP') }).Count
 Write-Host "  Passed : $passedTests" -ForegroundColor Green
-Write-Host "  Failed : $failedTests" -ForegroundColor $(if ($failedTests -gt 0) { "Red" } else { "Green" })
+Write-Host "  Failed : $failedTests$(if ($runNotStarted -gt 0) { " (of which NOT STARTED: $runNotStarted)" })" -ForegroundColor $(if ($failedTests -gt 0) { "Red" } else { "Green" })
 Write-Host "  Incomplete (SKIP_NOT_IMPLEMENTED): $incompleteTests" -ForegroundColor $(if ($incompleteTests -gt 0) { "Red" } else { "Green" })
 Write-Host "  Skipped: $skippedTests" -ForegroundColor DarkGray
 if ($coverageGapTests -gt 0) {
     Write-Host "  Coverage gaps (required, NOT executed): $coverageGapTests" -ForegroundColor Red
 }
-Write-Host "  Total  : $totalTests ran" -ForegroundColor Cyan
+Write-Host "  Total  : $totalTests ($runExecuted executed, $runNotStarted not started)" -ForegroundColor Cyan
 Write-Host ""
 
 # ===========================
@@ -2865,6 +2902,8 @@ if (Test-Path $junitScript) {
         run_started_utc = $script:AvbRunStartedUtc; host = $env:COMPUTERNAME
         source_revision = $(if ($srcId) { $srcId.Revision } else { '' }); source_digest = $(if ($srcId) { $srcId.Digest } else { '' })
         source_dirty = $(if ($srcId) { [string]$srcId.Dirty } else { '' })
+        evidence_class = (Get-AvbEvidenceClass -UnderGitHubActions $script:UnderGitHubActions -IsSandbox $script:IsSandbox -LocalDiagnostic ([bool]$LocalDiagnostic) -Source $srcId)
+        provenance_enforced = [string](-not $LocalDiagnostic)
         driver_sha256 = [string]$env:HIL_DRIVER_SHA256; github_run = $(if ($script:UnderGitHubActions) { "$env:GITHUB_RUN_ID/$env:GITHUB_RUN_ATTEMPT" } else { '' })
         results_json = [string]$script:ResultsJsonPath
     }
@@ -2885,7 +2924,8 @@ if (Test-Path $junitScript) {
 }
 
 $ov = Get-AvbRunOverall -IsHardwareSuite $IsHardwareSuite -Passed $passedTests -Failed $failedTests -Incomplete $incompleteTests -CoverageGaps $coverageGapTests
-if ($failedTests -gt 0)      { Write-Fail "OVERALL: $failedTests test(s) FAILED" }
+if ($failedTests - $runNotStarted -gt 0) { Write-Fail "OVERALL: $($failedTests - $runNotStarted) test(s) FAILED" }
+if ($runNotStarted -gt 0)    { Write-Fail "OVERALL: $runNotStarted item(s) NOT STARTED (blocked / missing artifact / runner infrastructure) --- no functional result" }
 if ($incompleteTests -gt 0)  { Write-Fail "OVERALL: $incompleteTests test(s) INCOMPLETE (SKIP_NOT_IMPLEMENTED on mandatory verification)" }
 if ($coverageGapTests -gt 0) { Write-Fail "OVERALL: $coverageGapTests required test(s) NOT EXECUTED (coverage gap) --- $Suite is INCOMPLETE" }
 switch ($ov.Overall) {
