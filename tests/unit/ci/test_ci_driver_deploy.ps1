@@ -169,6 +169,46 @@ $code = ($dd -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
 tc_check 'TEST-CIDEPLOY-016-unattended-path-never-prompts-reboots-disables-adapters-deletes-driverstore-or-restarts-eventlog' `
     ($code -notmatch '(?i)Read-Host|Restart-Computer|shutdown|Disable-NetAdapter|Enable-NetAdapter|DriverStore|Restart-Service|Stop-Service|PendingFileRenameOperations"\s*-Value|Set-ItemProperty|\.Kill\(') 'forbidden operation found in tools/lib/DriverDeploy.ps1'
 
+# --- Service state from codes, never from localized text (CI run 41500818916: German Windows prints
+#     "OpenService FEHLER 1060", the old parser expected "FAILED 1060" and reported UNKNOWN instead of NOT_FOUND) ---
+$haveSvc = [bool](Get-Command ConvertTo-AvbServiceState -ErrorAction SilentlyContinue) -and [bool](Get-Command Get-AvbServiceState -ErrorAction SilentlyContinue)
+if ($haveSvc) {
+    $map = [ordered]@{
+        'absent (Win32 1060)'        = @(@{ Win32Error = 1060; Status = $null }, '^NOT_FOUND$')
+        'RUNNING (4)'                = @(@{ Win32Error = $null; Status = 4 }, '^RUNNING$')
+        'STOPPED (1)'                = @(@{ Win32Error = $null; Status = 1 }, '^STOPPED$')
+        'STOP_PENDING (3)'           = @(@{ Win32Error = $null; Status = 3 }, '^STOP_PENDING$')
+        'START_PENDING (2)'          = @(@{ Win32Error = $null; Status = 2 }, '^START_PENDING$')
+        'access denied (Win32 5)'    = @(@{ Win32Error = 5; Status = $null }, '^UNKNOWN:ACCESS_DENIED')
+        'other Win32 error'          = @(@{ Win32Error = 1062; Status = $null }, '^UNKNOWN:WIN32_ERROR_1062')
+        'malformed status code'      = @(@{ Win32Error = $null; Status = 99 }, '^UNKNOWN:MALFORMED')
+        'error and status together'  = @(@{ Win32Error = 1060; Status = 4 }, '^UNKNOWN:MALFORMED')
+        'unresolved (no code at all)'= @(@{ Win32Error = $null; Status = $null }, '^UNKNOWN:UNRESOLVED')
+    }
+    $bad = @(foreach ($k in $map.Keys) { $s = ConvertTo-AvbServiceState -Probe $map[$k][0]; if ($s -notmatch $map[$k][1]) { "$k -> '$s'" } })
+    tc_check 'TEST-CIDEPLOY-017-service-state-is-derived-from-scm-codes-for-every-case' ($bad.Count -eq 0) ($bad -join '; ')
+    # Real, read-only probe on this machine (any UI language; the HIL runner is German).
+    $absent = Get-AvbServiceState -Name ('AvbNoSuchService_' + (Get-Random))
+    $evlog = Get-AvbServiceState -Name 'EventLog'
+    $realSs = ([regex]::Match($dd, '(?s)ServiceState\s*=\s*\{.*?\n\s{8}\}')).Value
+    tc_check 'TEST-CIDEPLOY-018-real-probe-reports-an-absent-service-as-not-found-without-parsing-localized-text' `
+        (($absent -eq 'NOT_FOUND') -and ($evlog -eq 'RUNNING') -and ($realSs -match 'Get-AvbServiceState') -and ($code -notmatch 'FAILED 1060') -and ($code -notmatch 'sc\.exe')) `
+        ("absent={0} EventLog={1} realServiceState={2}" -f $absent, $evlog, ($realSs -replace '\s+', ' '))
+} else {
+    tc_fail 'TEST-CIDEPLOY-017-service-state-is-derived-from-scm-codes-for-every-case' 'ConvertTo-AvbServiceState / Get-AvbServiceState missing in tools/lib/DriverDeploy.ps1'
+    tc_fail 'TEST-CIDEPLOY-018-real-probe-reports-an-absent-service-as-not-found-without-parsing-localized-text' 'Get-AvbServiceState missing in tools/lib/DriverDeploy.ps1'
+}
+
+# --- netcfg -u must be confirmed (exit 0, service released, no binding) before the image is replaced; the state after a
+#     failed deployment is recorded for the machine_ok decision ---
+$dRc = Invoke-Deploy @{ Bindings = @(); UninstallResult = @{ Completed = $true; ExitCode = 1; Service = 'NOT_FOUND' } }
+$dUnk = Invoke-Deploy @{ UninstallResult = @{ Completed = $true; ExitCode = 0; Service = 'UNKNOWN:UNRESOLVED (probe)' } }
+$noTouch = { param($d) @($d.Log | Where-Object { $_ -match '^copy|^netcfg\.exe -l' }).Count -eq 0 }
+tc_check 'TEST-CIDEPLOY-019-nonzero-netcfg-exit-or-unresolved-state-after-uninstall-never-reaches-installation-and-records-post-state' `
+    (($dRc.R.outcome -eq 'FAILED') -and ($dRc.R.reason -match 'netcfg -u returned rc 1') -and (& $noTouch $dRc) -and ($null -ne $dRc.R.postState) -and ($dRc.R.postState.service -eq 'NOT_FOUND') -and
+     ($dUnk.R.outcome -eq 'FAILED') -and ($dUnk.R.reason -match 'UNKNOWN') -and (& $noTouch $dUnk) -and ($null -ne $dUnk.R.postState) -and ($dUnk.R.postState.service -match '^UNKNOWN')) `
+    ("rc1={0} post={1} | unknown={2} post={3}" -f (Show-D $dRc), $(if ($dRc.R.postState) { $dRc.R.postState.service }), (Show-D $dUnk), $(if ($dUnk.R.postState) { $dUnk.R.postState.service }))
+
 # ---------------------------------------------------------------------------------------------------------
 # Serialization (CI case 10)
 # ---------------------------------------------------------------------------------------------------------
@@ -360,8 +400,42 @@ tc_check 'TEST-CIDEPLOY-044-lost-job-lock-and-in-flight-record-are-attributed-by
      ($after.verdict -eq $oLost.Dep.verdict) -and ($after.verdict -ne 'IN_FLIGHT')) `
     ("prev={0} prevOwner={1} inflight-now={2}" -f $(if ($oLost.Dep) { $oLost.Dep.previousDeployment.verdict }), $(if ($oLost.Dep) { $oLost.Dep.lock.previousOwner.owner.runId }), $after.verdict)
 $hilSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
+# Both physical jobs take machine_ok from the record's machineOk (Get-AvbMachineOk, TEST-CIDEPLOY-047), never from the
+# verdict name alone; a record without machineOk (IN_FLIGHT: job lost during installation) is not usable.
+$mokLine = "elseif (`$d.PSObject.Properties['machineOk'] -and `$d.machineOk -eq `$true) { 'true' } else { 'false' }"
+$mokStates = @(if (Get-Command Get-AvbMachineOk -ErrorAction SilentlyContinue) { foreach ($v in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT') { if ((Get-AvbMachineOk -Record ([pscustomobject]@{ verdict = $v })).Ok) { $v } } } else { 'Get-AvbMachineOk missing' })
 tc_check 'TEST-CIDEPLOY-045-in-flight-or-operator-states-stop-the-next-configuration' `
-    ([regex]::Matches($hilSrc, [regex]::Escape("`$v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT'")).Count -eq 2) 'machine_ok does not treat IN_FLIGHT/NEEDS_OPERATOR/BUSY as unusable in both physical jobs'
+    (([regex]::Matches($hilSrc, [regex]::Escape($mokLine)).Count -eq 2) -and ($hilSrc -notmatch [regex]::Escape("`$v -in 'NEEDS_OPERATOR'")) -and ($mokStates.Count -eq 0)) `
+    "machine_ok not derived from the recorded machineOk in both physical jobs, or usable after: $($mokStates -join ', ')"
+
+# machine_ok after a partially completed deployment: a failed deployment leaves the machine usable for the next
+# configuration only when the state recorded after the failure is settled and known (CI run 41500818916 recorded
+# DEPLOY_FAILED -> machine_ok=true without looking at the state netcfg -u had left).
+if (Get-Command Get-AvbMachineOk -ErrorAction SilentlyContinue) {
+    $st = { param([string]$Svc, [object[]]$Pend = @()) [pscustomobject]@{ verdict = 'DEPLOY_FAILED'; install = [pscustomobject]@{ outcome = 'FAILED'; postState = [pscustomobject]@{ service = $Svc; bindings = @(); pendingRenames = $Pend } } } }
+    $mo = [ordered]@{
+        'DEPLOYED'                           = @([pscustomobject]@{ verdict = 'DEPLOYED' }, $true)
+        'REJECTED_PACKAGE (untouched)'       = @([pscustomobject]@{ verdict = 'REJECTED_PACKAGE' }, $true)
+        'NOT_EXECUTED_BUSY'                  = @([pscustomobject]@{ verdict = 'NOT_EXECUTED_BUSY' }, $false)
+        'NEEDS_OPERATOR'                     = @([pscustomobject]@{ verdict = 'NEEDS_OPERATOR' }, $false)
+        'IN_FLIGHT (job lost)'               = @([pscustomobject]@{ verdict = 'IN_FLIGHT' }, $false)
+        'no record'                          = @($null, $false)
+        'DEPLOY_FAILED, no install record'   = @([pscustomobject]@{ verdict = 'DEPLOY_FAILED'; install = $null }, $false)
+        'DEPLOY_FAILED, post NOT_FOUND'      = @((& $st 'NOT_FOUND'), $true)
+        'DEPLOY_FAILED, post RUNNING'        = @((& $st 'RUNNING'), $true)
+        'DEPLOY_FAILED, post UNKNOWN'        = @((& $st 'UNKNOWN:UNRESOLVED (probe)'), $false)
+        'DEPLOY_FAILED, post STOP_PENDING'   = @((& $st 'STOP_PENDING'), $false)
+        'DEPLOY_FAILED, reboot rename'       = @((& $st 'NOT_FOUND' @('\??\C:\x\IntelAvbFilter.sys')), $false)
+    }
+    $wrong = @(foreach ($k in $mo.Keys) { $m = Get-AvbMachineOk -Record $mo[$k][0]; if ([bool]$m.Ok -ne $mo[$k][1] -or -not $m.Reason) { "$k -> ok=$($m.Ok) reason='$($m.Reason)'" } })
+    tc_check 'TEST-CIDEPLOY-047-machine-ok-after-a-failed-deployment-requires-a-recorded-settled-known-state' ($wrong.Count -eq 0) ($wrong -join '; ')
+} else {
+    tc_fail 'TEST-CIDEPLOY-047-machine-ok-after-a-failed-deployment-requires-a-recorded-settled-known-state' 'Get-AvbMachineOk missing in tools/lib/DriverDeploy.ps1'
+}
+$pv = { param($o, [string]$n) if ($o -and $o.PSObject.Properties[$n]) { $o.PSObject.Properties[$n].Value } else { '<absent>' } }
+tc_check 'TEST-CIDEPLOY-048-deployment-record-carries-the-machine-ok-decision' `
+    (((& $pv $oUnsigned.Dep 'machineOk') -eq $true) -and [bool](& $pv $oUnsigned.Dep 'machineOkReason') -and ((& $pv $oBusy.Dep 'machineOk') -eq $false)) `
+    ("rejected: machineOk={0} ({1}) | busy: machineOk={2}" -f (& $pv $oUnsigned.Dep 'machineOk'), (& $pv $oUnsigned.Dep 'machineOkReason'), (& $pv $oBusy.Dep 'machineOk'))
 
 # Signed-path orchestration: replace the real signature reader through a package signed by the pinned thumbprint is
 # not possible offline without a trusted test root; the deployment/pre-flight ordering is exercised with a package

@@ -45,7 +45,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($SkipTrustCheck -and $env:GITHUB_ACTIONS -eq 'true') { Write-Host "[HIL-DEPLOY] -SkipTrustCheck is an offline-test seam and is refused under GitHub Actions" -ForegroundColor Red; exit 1 }
 $RepoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-foreach ($lib in 'NativeExit.ps1', 'HilLock.ps1', 'HilMachineHealth.ps1', 'DriverPackage.ps1') { . (Join-Path $RepoRoot "tools\lib\$lib") }
+foreach ($lib in 'NativeExit.ps1', 'HilLock.ps1', 'HilMachineHealth.ps1', 'DriverPackage.ps1', 'DriverDeploy.ps1') { . (Join-Path $RepoRoot "tools\lib\$lib") }
 if (-not $InstallScript)     { $InstallScript = Join-Path $RepoRoot 'tools\setup\Install-Driver.ps1' }
 if (-not $PreFlightScript)   { $PreFlightScript = Join-Path $RepoRoot 'tools\test\Test-DriverPreFlight.ps1' }
 if (-not $LockPath)          { $LockPath = Get-AvbHilLockPath }
@@ -69,10 +69,12 @@ $record = [ordered]@{
     runStartUtc = (Get-Date).ToUniversalTime().ToString('o'); lock = $null; crashEvidence = $null; package = $null
     install = $null; installExitCode = $null; preflightExitCode = $null; finishedUtc = $null
     loadedImageEvidence = 'not hashed; DEPLOYED requires the service to be released (unloaded) and to reach RUNNING again during this deployment'
-    previousDeployment = $null
+    previousDeployment = $null; machineOk = $null; machineOkReason = ''
 }
 function Complete-Deployment([string]$Verdict, [string]$Reason, [int]$Code) {
     $record.verdict = $Verdict; $record.reason = $Reason; $record.finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    # Re-evaluated from the record (state after a partial deployment), not from the verdict name alone.
+    $m = Get-AvbMachineOk -Record $record; $record.machineOk = [bool]$m.Ok; $record.machineOkReason = $m.Reason
     ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $EvidenceDir 'deployment.json') -Encoding UTF8
     if ($record.lock -and $record.lock.ok) { ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $inflightFile -Encoding UTF8 }
     $c = if ($Code -eq 0) { 'Green' } else { 'Red' }
