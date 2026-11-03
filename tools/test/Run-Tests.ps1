@@ -81,7 +81,7 @@ function Write-Info {
 # Authoritative dispatch (TEST-HILPATH-001, Q decision 1 2026-10-29)
 # ===========================
 # This script never starts a test program itself.  Every test runs through tools\test\Run-Tests-CI.ps1: machine lock,
-# build provenance, HIL safety class, #328 hazard holds, exact-target fan-out, adapter baseline, post-test state check
+# build provenance, HIL safety class, exact-target fan-out, adapter baseline, post-test state check
 # and results document.  An entry the runner registry does not know fails closed (inventory gap, TEST-COMPLETE).
 $runCi = Join-Path $PSScriptRoot 'Run-Tests-CI.ps1'
 $script:DispatchRuns = @()

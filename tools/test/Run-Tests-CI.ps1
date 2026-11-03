@@ -73,7 +73,7 @@ param(
 
     # Manually initiated local diagnostic run (Q 2026-11-02): build provenance (revision, build-input digest, manifest
     # record, SHA256) is evaluated and reported per item but never blocks execution, so existing test binaries run after
-    # a branch switch or source edit without a rebuild.  Safety class, hazard holds, halts, machine lock, baseline and
+    # a branch switch or source edit without a rebuild.  Safety class, halts, machine lock, baseline and
     # post-test checks are unchanged.  Evidence class LOCAL_DIAGNOSTIC, never CI.  Refused under GitHub Actions or an
     # authorized HIL revision (AVB_HIL_EXPECTED_REVISION).  Passed by the local entry points only (Run-Tests-Elevated.ps1,
     # Run-Tests.ps1, LocalSuites.ps1); never by a workflow (TEST-HILPROV-068).
@@ -468,7 +468,7 @@ $HardwareUnitTests = @(
     "test_ioctl_phc_crosstimestamp_v2",  # PHC cross-timestamp V2 ABI (#340)
     # test_tsn_ioctl_handlers removed (#328 F23): its build entry is Disabled (KM placeholder); a stale binary
     # of it ran here as ReadOnly and issued SETUP_TAS/FP/PTM.  The UM test test_tsn_ioctl_handlers_um stays
-    # classified Mutating (not exact-target-aware -> BLOCKED by the safety gate).
+    # classified Mutating (not exact-target-aware; dispatched with its own adapter selection since 2026-11-03).
     # Phase B: PHC/QPC coherence + VV coverage (added 2026-03-29)
     "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
     "test_lifecycle_coverage",
@@ -599,21 +599,24 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
 # Classes (from the comment- and string-stripped source, including local headers):
 #   ReadOnly        no IOCTL that changes adapter/PHC/TSN state (may open, read, timestamp, transmit)
 #   Init            IOCTL_AVB_INIT_DEVICE only (re-runs device init; I226 reseeds SYSTIM) --- runs, state verified
-#   Mutating        changes PHC/TSN/PHY state but cannot be pointed at one exact adapter --- BLOCKED
+#   Mutating        changes PHC/TSN/PHY state but cannot be pointed at one exact adapter --- runs with the test's own
+#                   adapter selection (Q 2026-11-03: missing exact-target support is no reason to refuse execution)
 #   Mutating:Target changes state only on the adapter named by AVB_HIL_TARGET_DID (AvbTestSelectTarget or the
-#                   shared AvbEnumerateAdapters filter) --- run once per supported, enabled adapter
+#                   shared AvbEnumerateAdapters filter) --- run once per supported, enabled adapter; once with the
+#                   test's own selection when no exact target is available
 #   Unsafe          NIC / driver administration (disable, enable, restart, reinstall) --- BLOCKED unless
 #                   AVB_HIL_AUTHORIZE_UNSAFE names the exact entry; never under GitHub Actions
 #   Unknown         no reviewable source --- BLOCKED
+# Init, Mutating and Mutating:Target are blocked only by the runtime state-integrity halt (Set-HilHalt).
 # The table is checked against the suite lists and the sources by tests/unit/ioctl/test_hil_safety_gate.ps1.
-# Init entries under GitHub Actions (unattended HIL): temporary policy exclusion 2026-10-21 (Q, Decision A).
-# INIT_DEVICE re-initializes the targeted adapter's PTP block (I226: SYSTIM := 1, TIMINCA rewritten; I219: TIMINCA
-# rewritten), unbound-handle callers hit whichever adapter the previous test opened, and the post-test state check
-# does not detect a PHC time discontinuity.  Attended runs (outside GitHub Actions) keep running Init entries.
-$HilInitUnattendedApproved = $false
+# Init entries run unattended too (Q 2026-11-03: INIT_DEVICE is a valid prerequisite; the 2026-10-21 temporary policy
+# exclusion for GitHub Actions is removed).  INIT_DEVICE re-initializes the targeted adapter's PTP block (I226:
+# SYSTIM := 1, TIMINCA rewritten; I219: TIMINCA rewritten), unbound-handle callers hit whichever adapter the previous
+# test opened, and the post-test state check does not detect a PHC time discontinuity.
 
-# Hazard holds (Q 2026-10-22: lists are authoritative; an unresolved, evidenced unsafe hardware condition blocks only
-# the affected entries, visibly, at dispatch).  Key = registry key.  Removed only when the defect is hardware-verified fixed.
+# #328 hazard annotations (Q 2026-11-03: retained as hazard descriptions, no longer a dispatch block - these entries
+# execute to expose and reproduce their real failures; the runner does not read this table at dispatch).
+# Key = registry key.  Removed only when the defect is hardware-verified fixed.
 $Hold328Tsn = '#328 SETUP_TAS/FP/PTM put the e2fn-owned I226 into TSN transmit mode without a restorable gate schedule, driver setup_tas defect, TQAVCTRL 0x00000009 read back 2026-10-22 13:44 before I226 send completions stopped and the next driver unload hung, investigations/issue-328-release-reinstall-hang-20261022.md; leaving TSN mode needs an adapter reset, held until the driver TAS/FP restore is fixed and hardware-verified'
 $HilHazardHolds = @{
     'avb_test_portability'       = $Hold328Tsn
@@ -700,7 +703,7 @@ $HilTestSafety = @{
     'avb_test_i225'                    = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
     'avb_test_i226_um'                 = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
     'avb_test_portability'             = 'Mutating:Target'   # shared AvbEnumerateAdapters/AvbOpenAdapter only
-    # --- Mutating, not target-aware (BLOCKED until they honour AVB_HIL_TARGET_DID) ---
+    # --- Mutating, not target-aware (dispatched with their own adapter selection; they do not honour AVB_HIL_TARGET_DID) ---
     'test_mdio_phy'                    = 'Mutating'   # MDIO_WRITE
     'test_ts_event_sub'                = 'Mutating'   # SET_HW/RX/QUEUE_TIMESTAMP, SET_TARGET_TIME
     'test_ptp_getset'                  = 'Mutating'   # SET_TIMESTAMP, SET_HW_TIMESTAMPING
@@ -1860,33 +1863,17 @@ function Get-AvbHilTestClass {
     return ''
 }
 
-# Pure decision: 'Run' | 'Block' (+ Reason).  A Mutating:Target item runs only with an exact target DID.
+# Pure decision: 'Run' | 'Block' (+ Reason).  Q 2026-11-03: no static pre-execution block for Init, Mutating or a
+# Mutating:Target item without an exact target (it runs with its own adapter selection); only the runtime halt blocks them.
 function Get-AvbHilGateDecision {
-    param([string]$Entry, [string]$Class, [string]$Target, [string]$Halt, [int]$TargetCount,
-          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions, [bool]$InitUnattendedApproved = $false, [hashtable]$HazardHolds = @{})
-    # Evidence-referenced hardware hazard: never executed, whatever class, target, attendance or authorization.
-    if ($null -ne $HazardHolds -and $HazardHolds.ContainsKey($Entry)) { return @{ Action = 'Block'; Reason = "hazard hold: $($HazardHolds[$Entry])" } }
+    param([string]$Entry, [string]$Class, [string]$Target, [string]$Halt,
+          [string[]]$AuthorizedUnsafe, [bool]$UnderGitHubActions)
     $haltReason = "state-integrity halt ($Halt)"
     switch ($Class) {
         'ReadOnly' { return @{ Action = 'Run'; Reason = '' } }
-        'Init' {
+        { $_ -in @('Init', 'Mutating', 'Mutating:Target') } {
             if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
-            if ($UnderGitHubActions -and -not $InitUnattendedApproved) {
-                return @{ Action = 'Block'; Reason = 'Init (INIT_DEVICE re-initializes the adapter PHC: I226 SYSTIM reset and TIMINCA rewrite, I219 TIMINCA rewrite; target may depend on the previous test) is not approved for unattended HIL (effects source-derived, UNVERIFIED on hardware) --- run it attended, outside GitHub Actions' }
-            }
             return @{ Action = 'Run'; Reason = '' }
-        }
-        'Mutating:Target' {
-            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
-            if (-not $Target) {
-                if ($TargetCount -eq 0) { return @{ Action = 'Block'; Reason = 'no supported, enabled adapter is available as exact target (see TC-INFRA-ADAPTER-*)' } }
-                return @{ Action = 'Block'; Reason = 'Mutating:Target entry without an exact target DID' }
-            }
-            return @{ Action = 'Run'; Reason = '' }
-        }
-        'Mutating' {
-            if ($Halt) { return @{ Action = 'Block'; Reason = $haltReason } }
-            return @{ Action = 'Block'; Reason = 'Mutating test is not exact-target-aware (does not honour AVB_HIL_TARGET_DID); it would change PHC/TSN/PHY state on whichever adapter the driver routes it to' }
         }
         'Unsafe' {
             if ($UnderGitHubActions) {
@@ -2636,8 +2623,7 @@ foreach ($WorkItem in $WorkItems) {
             if (-not $still.Ok) { Set-HilHalt "machine lock lost during execution before ${exeName}: $($still.Why)" -Verdict 'LOCK_LOST' }
         }
         $gate = Get-AvbHilGateDecision -Entry (ConvertTo-AvbHilEntryKey $TestName) -Class $hilClass -Target $targetDid -Halt $stateHalt `
-                    -TargetCount $HilTargets.Count -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions `
-                    -InitUnattendedApproved $HilInitUnattendedApproved -HazardHolds $HilHazardHolds
+                    -AuthorizedUnsafe $HilAuthorizedUnsafe -UnderGitHubActions $UnderGitHubActions
         if ($gate.Action -ne 'Run') {
             Add-HilBlocked -Entry $TestName -Display $exeName -Stem $itemStem -Reason $gate.Reason
             continue
