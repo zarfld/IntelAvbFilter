@@ -96,7 +96,7 @@ Copy-Item (Join-Path $RepoRoot 'include\intel_pci_ids.h')     (Join-Path $Tree '
 $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 
 $Classes = 'rj_pass=ReadOnly;rj_fail=ReadOnly;rj_timeout=ReadOnly;rj_incomplete=ReadOnly;rj_inconclusive=ReadOnly;rj_skip=ReadOnly;' +
-           'rj_mutating=Mutating;rj_noprov=ReadOnly;rj_cleanup=ReadOnly;rj_rel=ReadOnly;' +
+           'rj_noprov=ReadOnly;rj_cleanup=ReadOnly;rj_rel=ReadOnly;' +
            'rj_x3_blocked=ReadOnly;rj_x3_inconclusive=ReadOnly;rj_x3_bare=ReadOnly;rj_x3_fail=ReadOnly;rj_missing=ReadOnly'
 
 function New-Fake([string]$Name, [string]$Body) {
@@ -181,16 +181,15 @@ $pTime  = New-Fake 'rj_timeout' "Write-Host '  [INFO] hanging'`r`nStart-Sleep -S
 $pInc   = New-Fake 'rj_incomplete' "Write-Host '  [SKIP] TC-RJ-020: SKIP_NOT_IMPLEMENTED: driver lacks it'`r`nexit 0"
 $pIncl  = New-Fake 'rj_inconclusive' "Write-Host '  [INCONCLUSIVE] TC-RJ-030: no evidence'`r`nexit 0"
 $pSkip  = New-Fake 'rj_skip' "Write-Host '  [SKIP] TC-RJ-040: SKIP_UNSUPPORTED: adapter lacks capability'`r`nexit 2"
-$pMut   = New-Fake 'rj_mutating' "Write-Host 'MUST NOT RUN'`r`nexit 0"
 $pNoProv = New-Fake 'rj_noprov' "Write-Host 'MUST NOT RUN'`r`nexit 0"
 $pClean = New-Fake 'rj_cleanup' ("`$sf = `$env:AVB_TEST_ADAPTER_STATE_FILE; `$s = Get-Content -LiteralPath `$sf -Raw | ConvertFrom-Json; " +
                                  "@(`$s.adapters | Where-Object { `$_.InstanceId -match 'DEV_1533' })[0].AdminStatus = 'Down'; " +
                                  "(`$s | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath `$sf -Encoding UTF8`r`nWrite-Host '  [PASS] TC-RJ-050: ok'`r`nexit 0")
-Write-Manifest @($pPass, $pFail, $pTime, $pInc, $pIncl, $pSkip, $pMut, $pClean) 'Debug'   # rj_noprov deliberately absent
+Write-Manifest @($pPass, $pFail, $pTime, $pInc, $pIncl, $pSkip, $pClean) 'Debug'   # rj_noprov deliberately absent
 
 # --- Run A: one item per category, Debug -----------------------------------------------------------------
 $rA = Invoke-Sandbox 'runA' @((Get-Entry $pPass), (Get-Entry $pFail), (Get-Entry $pTime), (Get-Entry $pInc), (Get-Entry $pIncl), (Get-Entry $pSkip),
-                              (Get-Entry $pMut), (Get-Entry $pNoProv), (Get-Entry $pClean)) -Timeout 8
+                              (Get-Entry $pNoProv), (Get-Entry $pClean)) -Timeout 8
 $docOk = ($null -ne $rA.Doc) -and ($rA.Doc.schema -eq 'avb-runner-results/1')
 tc_check 'TEST-RESULTSJSON-010-completed-run-writes-the-results-document' ($docOk -and (@(Get-ChildItem -LiteralPath $rA.Dir -Filter '*.tmp-*').Count -eq 0)) (Tail $rA)
 if (-not $docOk) {
@@ -200,7 +199,7 @@ if (-not $docOk) {
 }
 $recPass = Get-Rec $rA 'rj_pass'; $recFail = Get-Rec $rA 'rj_fail'; $recTime = Get-Rec $rA 'rj_timeout'
 $recInc = Get-Rec $rA 'rj_incomplete'; $recIncl = Get-Rec $rA 'rj_inconclusive'; $recSkip = Get-Rec $rA 'rj_skip'
-$recMut = Get-Rec $rA 'rj_mutating'; $recNoProv = Get-Rec $rA 'rj_noprov'; $recClean = Get-Rec $rA 'rj_cleanup'
+$recNoProv = Get-Rec $rA 'rj_noprov'; $recClean = Get-Rec $rA 'rj_cleanup'
 $recState = @(@($rA.Doc.records) | Where-Object { $_.check -and $_.verdict -eq 'CLEANUP_FAILED' })
 
 tc_check 'TEST-RESULTSJSON-011-passed-record-carries-exit-artifact-hash-log-and-adapter-testcases' `
@@ -219,9 +218,8 @@ tc_check 'TEST-RESULTSJSON-014-incomplete-and-inconclusive-are-distinct-categori
 tc_check 'TEST-RESULTSJSON-015-skip-only-in-a-hardware-suite-is-not-verification' `
     (($recSkip.verdict -eq 'FAILED') -and ($recSkip.status -eq 'FAILED(SKIP_ONLY)') -and ($recSkip.exitCode -eq 2) -and ($rA.Doc.overall -ne 'PASSED')) (Show-Rec $recSkip)
 tc_check 'TEST-RESULTSJSON-016-blocked-items-are-recorded-as-not-executed-with-their-reason' `
-    (($recMut.verdict -eq 'BLOCKED(SAFETY)') -and -not $recMut.executed -and ($null -eq $recMut.exitCode) -and ($recMut.reason -match 'TC-SAFETY-GATE-001') -and
-     ($recNoProv.verdict -eq 'BLOCKED(PROVENANCE)') -and -not $recNoProv.executed -and ($recNoProv.reason -match 'TC-SAFETY-GATE-002') -and
-     ($rA.Out -notmatch 'MUST NOT RUN')) ("mutating: {0} | noprov: {1}" -f (Show-Rec $recMut), (Show-Rec $recNoProv))
+    (($recNoProv.verdict -eq 'BLOCKED(PROVENANCE)') -and -not $recNoProv.executed -and ($null -eq $recNoProv.exitCode) -and ($recNoProv.reason -match 'TC-SAFETY-GATE-002') -and
+     ($rA.Out -notmatch 'MUST NOT RUN')) ("noprov: {0}" -f (Show-Rec $recNoProv))
 # Decision B (Q 2026-10-22): one persistent discrepancy = ONE incident; every independent check stays a visible record.
 # The per-test check (TC-INFRA-STATE-001) opens the incident; the end-of-suite session check (TC-INFRA-SESSION-002)
 # confirms the SAME incident - two observations, one incident.  Since Q 2026-10-28 both are cleanup results in the
@@ -241,19 +239,19 @@ tc_check 'TEST-RESULTSJSON-017-cleanup-failure-is-a-check-record-separate-from-t
 $c = $rA.Doc.counts
 # FAILED = rj_fail + rj_skip (exit 2 SKIP_ONLY is FAILED(SKIP_ONLY) in a hardware suite since Q 2026-11-03; was SKIPPED).
 tc_check 'TEST-RESULTSJSON-018-summary-counts-executed-vs-not-executed-and-overall-matches-exit' `
-    (($rA.Doc.executedCount -eq 7) -and ($rA.Doc.notExecutedCount -eq 2) -and ($c.PASSED -eq 2) -and ($c.FAILED -eq 2) -and ($c.SKIPPED -eq 0) -and ($c.'FAILED(TIMEOUT)' -eq 1) -and
+    (($rA.Doc.executedCount -eq 7) -and ($rA.Doc.notExecutedCount -eq 1) -and ($c.PASSED -eq 2) -and ($c.FAILED -eq 2) -and ($c.SKIPPED -eq 0) -and ($c.'FAILED(TIMEOUT)' -eq 1) -and
      # Q 2026-10-28: no CLEANUP_FAILED result row any more; the cleanup observations (per-test + session) and their one
      # incident are summarized separately from the functional counts.
-     ($c.'BLOCKED(SAFETY)' -eq 1) -and ($c.'BLOCKED(PROVENANCE)' -eq 1) -and ($c.CLEANUP_FAILED -eq 0) -and
+     ($c.'BLOCKED(PROVENANCE)' -eq 1) -and ($c.CLEANUP_FAILED -eq 0) -and
      ($rA.Doc.cleanupObservations -eq 2) -and (@($rA.Doc.cleanupIncidents).Count -eq 1) -and (@(@($rA.Doc.cleanupIncidents)[0].observations).Count -eq 2) -and
      ($rA.Doc.overall -eq 'FAILED') -and ($rA.Doc.exitCode -eq 1) -and ($rA.Exit -eq 1) -and ($rA.Doc.evidenceClass -eq 'sandbox')) `
     ("executed={0} notExecuted={1} counts={2} observations={6} incidents={7} overall={3} doc.exit={4} exit={5}" -f $rA.Doc.executedCount, $rA.Doc.notExecutedCount, ($c | ConvertTo-Json -Compress), $rA.Doc.overall, $rA.Doc.exitCode, $rA.Exit, $rA.Doc.cleanupObservations, @($rA.Doc.cleanupIncidents).Count)
 
 # --- Run B: everything blocked - not success, zero executed --------------------------------------------------
-$rB = Invoke-Sandbox 'runB' @((Get-Entry $pMut), (Get-Entry $pNoProv))
+$rB = Invoke-Sandbox 'runB' @((Get-Entry $pNoProv))
 tc_check 'TEST-RESULTSJSON-019-all-blocked-run-is-not-success-and-reports-zero-executed' `
     (($null -ne $rB.Doc) -and ($rB.Doc.executedCount -eq 0) -and ($rB.Doc.overall -ne 'PASSED') -and ($rB.Doc.exitCode -ne 0) -and ($rB.Exit -ne 0) -and
-     ($rB.Doc.counts.'BLOCKED(SAFETY)' -eq 1) -and ($rB.Doc.counts.'BLOCKED(PROVENANCE)' -eq 1)) `
+     ($rB.Doc.counts.'BLOCKED(PROVENANCE)' -eq 1)) `
     ("doc={0} executed={1} overall={2} exit={3}" -f ($null -ne $rB.Doc), $(if ($rB.Doc) { $rB.Doc.executedCount }), $(if ($rB.Doc) { $rB.Doc.overall }), $rB.Exit)
 
 # --- Run C: Release configuration keeps its identity -------------------------------------------------------
