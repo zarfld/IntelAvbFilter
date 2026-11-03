@@ -56,7 +56,7 @@ param(
     # Verification is MANDATORY unless this switch is given (fail-closed default).
     #   mandatory: SKIP_NOT_IMPLEMENTED is incomplete -> exit 1; INCONCLUSIVE -> <failure/>
     #   optional : both keep their label as <skipped/> and do not fail the run
-    # Used for the experimental HardwareMutation lane only.
+    # No suite uses it (the former HardwareMutation lane no longer exists, Q 2026-11-03).
     [Parameter(Mandatory=$false)]
     [switch]$OptionalVerification
 )

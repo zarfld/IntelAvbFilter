@@ -199,7 +199,8 @@ $ls = [System.IO.File]::ReadAllText($LocalPath)
 $lsAst = [System.Management.Automation.Language.Parser]::ParseFile($LocalPath, [ref]$null, [ref]$null)
 $suitesAssign = $lsAst.Find({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$Suites' }, $true)
 $order = if ($suitesAssign) { @($suitesAssign.Right.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value }) -join ',' } else { '' }
-tc_check 'TEST-LOCALSUITES-008-suite-order-unchanged-mandatory-last' ($order -eq 'HardwareUnit,HardwareIntegration,HardwareMutation,HardwareMandatory') "order: $order"
+# Q 2026-11-03: the only hardware suites, in this order (was: ...,HardwareMutation,HardwareMandatory last).
+tc_check 'TEST-LOCALSUITES-008-suite-order-the-two-hardware-suites' ($order -eq 'HardwareUnit,HardwareIntegration') "order: $order"
 tc_check 'TEST-LOCALSUITES-009-results-come-from-results-json-not-console-table-parsing' `
     (($ls -match '-ResultsJson \$json') -and ($ls -notmatch 'CI Test Summary --') -and ($ls -notmatch '\(\?<Status>FAILED')) 'LocalSuites still parses console output or does not request -ResultsJson'
 # 010 (intent Q 2026-10-22, LocalSuites.ps1 suite comment): the run never waits indefinitely for an operator.  The
@@ -319,6 +320,144 @@ if ($lsTxt -match '\$Stop = "test build failed') { $tbBad += 'a test build failu
 if ($lsTxt -notmatch '\$BuildFailures\.Count -gt 0') { $tbBad += 'build failures do not make the run nonpassing' }
 if ($lsTxt -notmatch 'Get-AvbTestBuildFailures \$cfg\.testBuild \$man') { $tbBad += 'the Build-Tests step does not use Get-AvbTestBuildFailures' }
 tc_check 'TEST-LOCALSUITES-021-failed-test-build-continues-the-matrix-and-stays-nonpassing' ($tbBad.Count -eq 0) ($tbBad -join ' ### ')
+
+# --- 024: Run-Tests-Elevated -Suite without -TestName runs the WHOLE registered suite through Run-Tests-CI.ps1
+#     (elevated; the DbgView handling around the child is unchanged) and carries earlier halts (-PriorResultsDir) ---
+$cmdW = $null; $wErr = ''
+try {
+    $cmdW = New-AvbElevatedCommand -Configuration 'Release' -TestName '' -TestArgs '' -TestExecutable '' -Full $false -LogFile 'C:\l\s.log' `
+                -Suite 'HardwareIntegration' -ResultsJson 'C:\r\w.json' -PriorResultsDir 'C:\r' -LegacyScript 'C:\t\Run-Tests.ps1' -RunCiScript 'C:\t\Run-Tests-CI.ps1'
+} catch { $wErr = $_.Exception.Message }
+$wPsErr = $null; if ($cmdW) { [void][System.Management.Automation.Language.Parser]::ParseInput($cmdW, [ref]$null, [ref]$wPsErr) }
+$elSrc = [System.IO.File]::ReadAllText($ElevPath)
+tc_check 'TEST-LOCALSUITES-024-elevated-whole-suite-runs-every-registered-entry-through-run-tests-ci-with-prior-halts' `
+    (($null -ne $cmdW) -and ($cmdW -match [regex]::Escape("& 'C:\t\Run-Tests-CI.ps1' -Suite HardwareIntegration -Configuration Release -ResultsJson 'C:\r\w.json' -PriorResultsDir 'C:\r' -LocalDiagnostic")) -and
+     ($cmdW -notmatch ' -Tests ') -and ($cmdW -notmatch 'Run-Tests\.ps1') -and (@($wPsErr).Count -eq 0) -and ($elSrc -notmatch '-Suite requires -TestName')) `
+    $(if ($wErr) { "error: $wErr" } else { "cmd: $cmdW" })
+
+# --- 025 (STATIC): FullSuite.ps1 dispatches the canonical suite sequence through the runner gates -------------------
+# Defects in FullSuite_20261103_063836.log: a bare Run-Tests-CI.ps1 call (default Unit/Debug in both configurations),
+# the suite list overwritten by @("All") and -CaptureDbgView passed to Run-Tests-CI.ps1 (rejected, nothing ran).  The
+# per-program *.exe loop is the operator's authoritative path (Q 2026-11-03) and stays, verbatim, beside the suite runs.
+$fsPath = Join-Path $RepoRoot 'tools\archive\deprecated\FullSuite.ps1'
+$fsAst = [System.Management.Automation.Language.Parser]::ParseFile($fsPath, [ref]$null, [ref]$null)
+$lsAst = [System.Management.Automation.Language.Parser]::ParseFile($LocalPath, [ref]$null, [ref]$null)
+$fsCmds = @($fsAst.FindAll({ param($x) $x -is [System.Management.Automation.Language.CommandAst] }, $true))
+$hasParam = { param($c, [string]$p) @($c.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq $p }).Count -gt 0 }
+$listOf = { param($a, [string]$var) @($a.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq $var }, $true)) }
+$valuesOf = { param($asg) @($asg.Right.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value }) }
+$fsBad = @()
+$ciCalls = @($fsCmds | Where-Object { [string]$_.GetCommandName() -match 'Run-Tests-CI\.ps1$' })
+$elCalls = @($fsCmds | Where-Object { [string]$_.GetCommandName() -match 'Run-Tests-Elevated\.ps1$' })
+foreach ($c in $ciCalls) {
+    if (-not (& $hasParam $c 'Suite')) { $fsBad += "Run-Tests-CI.ps1 without -Suite: $($c.Extent.Text)" }
+    if (& $hasParam $c 'CaptureDbgView') { $fsBad += "Run-Tests-CI.ps1 with -CaptureDbgView (rejected by the runner): $($c.Extent.Text)" }
+}
+# Two kinds of elevated calls: the whole-suite runs, and the operator's per-program loop over the built *.exe (restored
+# verbatim, Q 2026-11-03: authoritative, per-test elevation and DebugView capture; its blacklist of the 24 h and S3 tests
+# stays until their infrastructure exists).  Both go through Run-Tests-Elevated.ps1 -> Run-Tests-CI.ps1 (all gates).
+$elSuite = @($elCalls | Where-Object { & $hasParam $_ 'Suite' })
+$elProg  = @($elCalls | Where-Object { -not (& $hasParam $_ 'Suite') })
+foreach ($c in $elSuite) {
+    foreach ($p in 'PriorResultsDir', 'ResultsJson', 'CaptureDbgView') { if (-not (& $hasParam $c $p)) { $fsBad += "Run-Tests-Elevated.ps1 -Suite without -${p}: $($c.Extent.Text)" } }
+    if (& $hasParam $c 'TestName') { $fsBad += "whole-suite call restricted by -TestName: $($c.Extent.Text)" }
+}
+foreach ($c in $elProg) {
+    foreach ($p in 'TestName', 'CaptureDbgView') { if (-not (& $hasParam $c $p)) { $fsBad += "per-program Run-Tests-Elevated.ps1 call without -${p}: $($c.Extent.Text)" } }
+}
+if ($ciCalls.Count -eq 0 -or $elSuite.Count -eq 0) { $fsBad += "expected Run-Tests-CI.ps1 (offline suites) and Run-Tests-Elevated.ps1 -Suite (hardware suites) calls; found $($ciCalls.Count) / $($elSuite.Count)" }
+if ($elProg.Count -eq 0) { $fsBad += 'the per-program Run-Tests-Elevated.ps1 -TestName -CaptureDbgView loop is missing (authoritative, Q 2026-11-03)' }
+$fsHw = @(& $listOf $fsAst '$HardwareSuites'); $fsOff = @(& $listOf $fsAst '$OfflineSuites'); $lsSuites = @(& $listOf $lsAst '$Suites')
+if ($fsHw.Count -ne 1 -or $fsOff.Count -ne 1) { $fsBad += "suite lists must be assigned exactly once (HardwareSuites x$($fsHw.Count), OfflineSuites x$($fsOff.Count))" }
+elseif ($lsSuites.Count -ne 1 -or ((& $valuesOf $fsHw[0]) -join ',') -ne ((& $valuesOf $lsSuites[0]) -join ',')) { $fsBad += "HardwareSuites '$((& $valuesOf $fsHw[0]) -join ',')' is not the LocalSuites order" }
+elseif (((& $valuesOf $fsOff[0]) -join ',') -ne 'Unit,Integration') { $fsBad += "OfflineSuites '$((& $valuesOf $fsOff[0]) -join ',')'" }
+tc_check 'TEST-LOCALSUITES-025-STATIC-fullsuite-runs-the-suites-and-the-per-program-loop-through-the-gates-without-invalid-arguments' ($fsBad.Count -eq 0) ($fsBad -join ' ### ')
+
+# --- 026 (STATIC): complete enumeration - every suite that has a registry list in Run-Tests-CI.ps1 is dispatched by
+#     FullSuite.ps1, every non-empty one by Run-Tests.ps1 -Full, and the documentation-only $HardwareDependentTests are
+#     all inside a dispatched suite (removing the *.exe loop drops no registered test) ---
+$rcAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1'), [ref]$null, [ref]$null)
+# List/table literals only: the runner's counters ($totalTests = 0, $failedTests ...) share the name suffix.
+$regVars = @($rcAst.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Parent -is [System.Management.Automation.Language.NamedBlockAst] -and
+                              $x.Left.Extent.Text -match '^\$(\w+?)(Tests|CoverageGaps|AttendedOnly)$' -and $x.Right.Extent.Text -match '^(\[ordered\])?@[\(\{]' }, $true))
+$entryKey = { param([string]$e) (($e.Trim() -split '\s+')[0]) -replace '(?i)\.exe$', '' }
+$regSuites = [ordered]@{}
+foreach ($v in $regVars) {
+    $null = $v.Left.Extent.Text -match '^\$(\w+?)(Tests|CoverageGaps|AttendedOnly)$'; $s = $Matches[1]
+    if ($s -eq 'HardwareDependent') { continue }
+    $h = $v.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+    $vals = if ($h) { @($h.KeyValuePairs | ForEach-Object { $_.Item1.Value }) } else { & $valuesOf $v }
+    if (-not $regSuites.Contains($s)) { $regSuites[$s] = @() }
+    $regSuites[$s] += @($vals)
+}
+$fsSuites = @(if ($fsHw.Count -eq 1) { & $valuesOf $fsHw[0] }) + @(if ($fsOff.Count -eq 1) { & $valuesOf $fsOff[0] })
+$rtAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools\test\Run-Tests.ps1'), [ref]$null, [ref]$null)
+$rtOrder = @(& $listOf $rtAst '$suiteOrder' | ForEach-Object { & $valuesOf $_ })
+$dispatched = @($regSuites.Values | ForEach-Object { $_ } | ForEach-Object { & $entryKey $_ } | Sort-Object -Unique)
+$hwDep = @(& $listOf $rcAst '$HardwareDependentTests' | ForEach-Object { & $valuesOf $_ } | ForEach-Object { & $entryKey $_ })
+$enBad = @()
+foreach ($s in $regSuites.Keys) {
+    if ($fsSuites -notcontains $s) { $enBad += "FullSuite does not dispatch suite '$s' ($(@($regSuites[$s]).Count) registered entries)" }
+    if (@($regSuites[$s]).Count -gt 0 -and $rtOrder -notcontains $s) { $enBad += "Run-Tests.ps1 -Full does not dispatch suite '$s' ($(@($regSuites[$s]).Count) registered entries)" }
+}
+$orphan = @($hwDep | Where-Object { $dispatched -notcontains $_ })
+if ($orphan.Count -gt 0) { $enBad += "HardwareDependentTests outside every suite: $($orphan -join ', ')" }
+# Q 2026-11-03: exactly two hardware suites (HardwareUnit, HardwareIntegration) besides the offline Unit/Integration.
+if ((@($regSuites.Keys | Sort-Object) -join ',') -ne 'HardwareIntegration,HardwareUnit,Integration,Unit') { $enBad += "registry suites are '$((@($regSuites.Keys | Sort-Object)) -join ',')', expected exactly Unit, Integration, HardwareUnit, HardwareIntegration" }
+tc_check 'TEST-LOCALSUITES-026-STATIC-every-registered-suite-is-dispatched-no-registered-test-left-out' ($enBad.Count -eq 0) ($enBad -join ' ### ')
+
+# --- 027: a program classified Diagnostic/Supporting/Obsolete ($TestArtifactClassification) requested through
+#     Run-Tests.ps1 is reported NOT_EXECUTED with its classification - not mislabelled as an inventory gap, never run ---
+$rtSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tools\test\Run-Tests.ps1'))
+$clsFn = $rtAst.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbArtifactClassification' }, $true)
+$clsBad = @()
+if ($clsFn) {
+    $runCi = Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1'
+    . ([scriptblock]::Create($clsFn.Extent.Text))
+    $cls = Get-AvbArtifactClassification
+    foreach ($n in 'quick_diagnostics', 'intel_avb_diagnostics') { if (-not ($cls.Contains($n) -and [string]$cls[$n] -match '^Diagnostic:')) { $clsBad += "$n not classified Diagnostic" } }
+    if ($rtSrc -notmatch "NOT_EXECUTED\(") { $clsBad += 'no NOT_EXECUTED(<classification>) status in Run-Tests.ps1' }
+} else { $clsBad += 'Get-AvbArtifactClassification missing in tools/test/Run-Tests.ps1' }
+tc_check 'TEST-LOCALSUITES-027-classified-non-test-program-is-not-executed-and-reported-with-its-classification' ($clsBad.Count -eq 0) ($clsBad -join ' ### ')
+
+# --- 028 (STATIC): only HardwareUnit and HardwareIntegration are hardware suites (Q 2026-11-03).  HardwareMandatory and
+#     HardwareMutation are no suite, list, lane, step or acceptance bundle in any executable script or workflow ---
+$twoBad = @()
+$codeFiles = @('tools\test\Run-Tests-CI.ps1', 'tools\test\Run-Tests.ps1', 'tools\test\Run-Tests-Elevated.ps1', 'tools\archive\deprecated\LocalSuites.ps1',
+               'tools\archive\deprecated\FullSuite.ps1', 'tools\development\Check-System.ps1', 'tools\lib\TestVerdict.ps1', '.github\workflows\hil.yml')
+foreach ($rel in $codeFiles) {
+    $lines = [System.IO.File]::ReadAllLines((Join-Path $RepoRoot $rel))
+    $n = 0
+    foreach ($l in $lines) { $n++; if ($l -notmatch '^\s*#' -and $l -match '\bHardware(Mandatory|Mutation)\w*') { $twoBad += "${rel}:${n}: $($l.Trim())" } }
+}
+$lsVals = @(& $listOf $lsAst '$Suites' | ForEach-Object { & $valuesOf $_ }) -join ','
+if ($lsVals -ne 'HardwareUnit,HardwareIntegration') { $twoBad += "LocalSuites `$Suites = '$lsVals'" }
+$fsVals = @(& $listOf $fsAst '$HardwareSuites' | ForEach-Object { & $valuesOf $_ }) -join ','
+if ($fsVals -ne 'HardwareUnit,HardwareIntegration') { $twoBad += "FullSuite `$HardwareSuites = '$fsVals'" }
+$hilTxt = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
+if ($hilTxt -notmatch [regex]::Escape("SUITES = ['HardwareUnit', 'HardwareIntegration']")) { $twoBad += 'hil.yml acceptance SUITES is not exactly HardwareUnit, HardwareIntegration' }
+tc_check 'TEST-LOCALSUITES-028-STATIC-only-hardwareunit-and-hardwareintegration-are-hardware-suites' ($twoBad.Count -eq 0) (($twoBad | Select-Object -First 12) -join ' ### ')
+
+# --- 029 (STATIC): every former HardwareMandatory / HardwareMutation entry is dispatched by HardwareUnit or
+#     HardwareIntegration with identical arguments, and no entry is dispatched twice (investigations/hil-suite-migration-2026-11-03.md) ---
+$rcAst2 = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'tools\test\Run-Tests-CI.ps1'), [ref]$null, [ref]$null)
+$keyOf = { param([string]$e) $p = $e.Trim() -split '\s+', 2; (($p[0] -replace '(?i)\.exe$', '') + $(if ($p.Count -gt 1) { ' ' + $p[1] } else { '' })) }
+$entriesOf = { param([string]$var)
+    $a = @(& $listOf $rcAst2 $var)
+    if ($a.Count -eq 0) { return @() }
+    $h = $a[0].Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true)
+    if ($h) { @($h.KeyValuePairs | ForEach-Object { & $keyOf $_.Item1.Value }) } else { @(& $valuesOf $a[0] | ForEach-Object { & $keyOf $_ }) } }
+$hwDispatch = @(& $entriesOf '$HardwareUnitTests') + @(& $entriesOf '$HardwareIntegrationTests') + @(& $entriesOf '$HardwareIntegrationAttendedOnly')
+$migBad = @()
+$dups = @($hwDispatch | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { "$($_.Name) x$($_.Count)" })
+if ($dups.Count -gt 0) { $migBad += "dispatched more than once: $($dups -join ', ')" }
+$migrated = @('test_ioctl_version', 'test_ioctl_routing', 'test_ioctl_simple', 'test_ioctl_abi', 'test_tx_timestamp_provenance', 'test_tx_timestamp_retrieval',
+              'test_ioctl_phc_query', 'test_ioctl_xstamp', 'test_ioctl_phc_crosstimestamp_v2', 'test_all_adapters', 'test_multidev_adapter_enum',
+              'test_multi_adapter_phc_sync', 'test_send_ptp_debug', 'test_minimal_ioctl', 'ptp_clock_control_test', 'test_rx_timestamp',
+              'test_rx_timestamp_complete', 'test_ptp_phc_stability --case UT-CORR-005', 'test_ptp_phc_stability --case UT-CORR-006')
+$lost = @($migrated | Where-Object { $hwDispatch -notcontains $_ })
+if ($lost.Count -gt 0) { $migBad += "former HardwareMandatory/HardwareMutation entries not dispatched by a hardware suite: $($lost -join ', ')" }
+tc_check 'TEST-LOCALSUITES-029-STATIC-every-migrated-entry-dispatched-exactly-once-by-a-hardware-suite' ($migBad.Count -eq 0) ($migBad -join ' ### ')
 
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 

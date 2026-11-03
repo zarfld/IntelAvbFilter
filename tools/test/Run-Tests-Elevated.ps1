@@ -28,13 +28,19 @@
     # baseline and post-test state check apply; build provenance is reported, not enforced) instead of the legacy
     # dispatcher Run-Tests.ps1.
     # -TestName is then the runner entry, e.g. 'test_ptp_phc_stability --case UT-CORR-005' or 'ps1:tests/...'.
+    # -Suite without -TestName runs every registered entry of the suite (tools\archive\deprecated\FullSuite.ps1).
     [Parameter(Mandatory=$false)]
-    [ValidateSet('', 'HardwareUnit', 'HardwareIntegration', 'HardwareMandatory', 'HardwareMutation')]
+    [ValidateSet('', 'HardwareUnit', 'HardwareIntegration')]
     [string]$Suite = '',
 
     # With -Suite: machine-readable results document of the run (Run-Tests-CI.ps1 -ResultsJson).
     [Parameter(Mandatory=$false)]
     [string]$ResultsJson = '',
+
+    # With -Suite: results documents of earlier suites of the same run (Run-Tests-CI.ps1 -PriorResultsDir), so a halt
+    # keeps later Init/Mutating tests BLOCKED as in LocalSuites.ps1 and hil.yml.
+    [Parameter(Mandatory=$false)]
+    [string]$PriorResultsDir = '',
 
     # Bound for the elevated child; on expiry it is terminated and the run reported as TIMEOUT.
     [Parameter(Mandatory=$false)]
@@ -53,13 +59,17 @@ function ConvertTo-AvbPsLiteral { param([string]$Text) return "'" + $Text.Replac
 # Captured via $global:LASTEXITCODE (reset first; no exit code = failure), then exit explicitly.
 function New-AvbElevatedCommand {
     param([string]$Configuration, [string]$TestName, [string]$TestArgs, [string]$TestExecutable, [bool]$Full,
-          [string]$LogFile, [string]$Suite, [string]$ResultsJson, [string]$LegacyScript, [string]$RunCiScript)
+          [string]$LogFile, [string]$Suite, [string]$ResultsJson, [string]$PriorResultsDir = '', [string]$LegacyScript, [string]$RunCiScript)
     $command = if ($LogFile) { "Start-Transcript -Path $(ConvertTo-AvbPsLiteral $LogFile) -Force | Out-Null; " } else { '' }
     $command += "`$_innerCode = 1; `$global:LASTEXITCODE = `$null; "
     if ($Suite) {
-        $entry = if ($TestArgs) { "$TestName $TestArgs" } else { $TestName }
-        $command += "try { & $(ConvertTo-AvbPsLiteral $RunCiScript) -Suite $Suite -Configuration $Configuration -Tests @($(ConvertTo-AvbPsLiteral $entry))"
+        $command += "try { & $(ConvertTo-AvbPsLiteral $RunCiScript) -Suite $Suite -Configuration $Configuration"
+        if ($TestName) {
+            $entry = if ($TestArgs) { "$TestName $TestArgs" } else { $TestName }
+            $command += " -Tests @($(ConvertTo-AvbPsLiteral $entry))"
+        }
         if ($ResultsJson) { $command += " -ResultsJson $(ConvertTo-AvbPsLiteral $ResultsJson)" }
+        if ($PriorResultsDir) { $command += " -PriorResultsDir $(ConvertTo-AvbPsLiteral $PriorResultsDir)" }
         $command += " -LocalDiagnostic"   # manual run: provenance reported, not enforced (the legacy path gets it from Run-Tests.ps1)
     } else {
         $command += "try { & $(ConvertTo-AvbPsLiteral $LegacyScript) -Configuration $Configuration"
@@ -104,19 +114,20 @@ function Get-AvbDbgViewCaptureResult {
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $logsDir = Join-Path $repoRoot "logs"
 if (-not $LogFile) {
-    if ($TestName -or $Full) {
+    if ($TestName -or $Full -or $Suite) {
         if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
         if ($TestName) {
             $LogFile = Join-Path $logsDir (("{0}_{1}.log" -f $TestName, $timestamp) -replace '[^\w.\-\\:]', '_')
+        } elseif ($Suite) {
+            $LogFile = Join-Path $logsDir ("{0}_{1}_{2}.log" -f $Suite, $Configuration, $timestamp)
         } elseif ($Full) {
             $LogFile = Join-Path $logsDir "full_test_suite_$timestamp.log"
         }
     }
 }
-if ($Suite -and -not $TestName) { Write-Host "[FAIL] -Suite requires -TestName (the runner entry)" -ForegroundColor Red; exit 1 }
 
 $command = New-AvbElevatedCommand -Configuration $Configuration -TestName $TestName -TestArgs $TestArgs -TestExecutable $TestExecutable `
-               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -LegacyScript $scriptPath -RunCiScript $runCiPath
+               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -LegacyScript $scriptPath -RunCiScript $runCiPath
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
 
 if ($LogFile) {
@@ -129,7 +140,7 @@ $dbgLog = $null
 $capture = $null
 if ($CaptureDbgView) {
     $dbgViewScript = Join-Path $repoRoot '.github\skills\DbgView\Start-DbgViewCapture.ps1'
-    $stem = if ($TestName) { "dbgview_$TestName" } elseif ($Full) { 'dbgview_full_test_suite' } else { 'dbgview_tests' }
+    $stem = if ($TestName) { "dbgview_$TestName" } elseif ($Suite) { "dbgview_${Suite}_$Configuration" } elseif ($Full) { 'dbgview_full_test_suite' } else { 'dbgview_tests' }
     $dbgLog = Join-Path $logsDir ((("{0}_{1}" -f $stem, $timestamp) -replace '[^\w.\-]', '_') + '.log')
     $started = @{ Ok = $false; Error = "start script not found at '$dbgViewScript'" }
     if (Test-Path $dbgViewScript) {

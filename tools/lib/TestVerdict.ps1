@@ -64,8 +64,8 @@ function Test-AvbVerdictIncomplete {
     return ($Verdict -eq 'SKIP_NOT_IMPLEMENTED')
 }
 
-# Every suite is mandatory verification, HardwareMutation included (P0 full HIL coverage, 2026-10-21: the mutation
-# lane must not be an optional lane whose failures acceptance can ignore).  'optional' is kept as a class only for
+# Every suite is mandatory verification (P0 full HIL coverage, 2026-10-21; Q 2026-11-03: only HardwareUnit and
+# HardwareIntegration are hardware suites, no optional lane exists).  'optional' is kept as a class only for
 # the -OptionalVerification switches of the JUnit converters; no suite maps to it.
 function Get-AvbSuiteVerificationClass {
     param([string]$Suite)

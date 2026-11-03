@@ -9,8 +9,8 @@
 #   3. reinstall the driver        tools\setup\Install-Driver-Elevated.ps1 -Action Reinstall (operator script, UAC)
 #   4. verify driver + hardware    tools\test\Test-DriverPreFlight.ps1 with the SHA256 of the driver built in step 1
 #                                  (installed file != built file -> stop; STOP_PENDING / not Running -> stop)
-#   5. suites, in this order (HardwareMandatory intentionally last - do not reorder without approval):
-#        HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory
+#   5. suites, in this order (the only hardware suites, Q 2026-11-03):
+#        HardwareUnit, HardwareIntegration
 #      via tools\test\Run-Tests-CI.ps1 -ResultsJson (machine-readable; never console-table parsing)
 #   6. failure inventory from the results documents (executed failures vs. blocked vs. skipped kept apart)
 #   7. reproduction of failures of THIS configuration (its driver is installed) with
@@ -49,7 +49,7 @@ $RepoRoot = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -
 . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')
 . (Join-Path $RepoRoot 'tools\lib\HilLock.ps1')   # machine-wide serialization shared with automatic HIL (hil.yml)
 
-$Suites = @('HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory')
+$Suites = @('HardwareUnit', 'HardwareIntegration')
 
 # ---------------------------------------------------------------------------------------------------------
 # Decision functions (pure; tests/unit/ci/test_local_suites.ps1)

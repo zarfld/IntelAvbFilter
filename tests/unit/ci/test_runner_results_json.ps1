@@ -97,7 +97,7 @@ $TreeRunner = Join-Path $Tree 'tools\test\Run-Tests-CI.ps1'
 
 $Classes = 'rj_pass=ReadOnly;rj_fail=ReadOnly;rj_timeout=ReadOnly;rj_incomplete=ReadOnly;rj_inconclusive=ReadOnly;rj_skip=ReadOnly;' +
            'rj_mutating=Mutating;rj_noprov=ReadOnly;rj_cleanup=ReadOnly;rj_rel=ReadOnly;' +
-           'rj_x3_blocked=ReadOnly;rj_x3_inconclusive=ReadOnly;rj_x3_bare=ReadOnly;rj_x3_fail=ReadOnly'
+           'rj_x3_blocked=ReadOnly;rj_x3_inconclusive=ReadOnly;rj_x3_bare=ReadOnly;rj_x3_fail=ReadOnly;rj_missing=ReadOnly'
 
 function New-Fake([string]$Name, [string]$Body) {
     $p = Join-Path $Fakes "$Name.ps1"
@@ -214,8 +214,10 @@ tc_check 'TEST-RESULTSJSON-013-timeout-is-executed-with-no-observed-exit-code' `
     (($recTime.verdict -eq 'FAILED(TIMEOUT)') -and $recTime.executed -and ($null -eq $recTime.exitCode)) (Show-Rec $recTime)
 tc_check 'TEST-RESULTSJSON-014-incomplete-and-inconclusive-are-distinct-categories' `
     (($recInc.verdict -eq 'INCOMPLETE') -and ($recIncl.verdict -eq 'INCONCLUSIVE') -and ($recInc.exitCode -eq 0)) ("incomplete: {0} | inconclusive: {1}" -f (Show-Rec $recInc), (Show-Rec $recIncl))
-tc_check 'TEST-RESULTSJSON-015-skipped-is-not-converted-to-a-failure' `
-    (($recSkip.verdict -eq 'SKIPPED') -and ($recSkip.exitCode -eq 2) -and ($rA.Doc.counts.SKIPPED -ge 1)) (Show-Rec $recSkip)
+# Q 2026-11-03: every hardware suite is mandatory verification - exit 2 (SKIP_ONLY: nothing verified) is a failure, never a
+# skipped-but-passing run (was: "skipped is not converted to a failure", the HardwareUnit rule before the two-suite contract).
+tc_check 'TEST-RESULTSJSON-015-skip-only-in-a-hardware-suite-is-not-verification' `
+    (($recSkip.verdict -eq 'FAILED') -and ($recSkip.status -eq 'FAILED(SKIP_ONLY)') -and ($recSkip.exitCode -eq 2) -and ($rA.Doc.overall -ne 'PASSED')) (Show-Rec $recSkip)
 tc_check 'TEST-RESULTSJSON-016-blocked-items-are-recorded-as-not-executed-with-their-reason' `
     (($recMut.verdict -eq 'BLOCKED(SAFETY)') -and -not $recMut.executed -and ($null -eq $recMut.exitCode) -and ($recMut.reason -match 'TC-SAFETY-GATE-001') -and
      ($recNoProv.verdict -eq 'BLOCKED(PROVENANCE)') -and -not $recNoProv.executed -and ($recNoProv.reason -match 'TC-SAFETY-GATE-002') -and
@@ -237,8 +239,9 @@ tc_check 'TEST-RESULTSJSON-017-cleanup-failure-is-a-check-record-separate-from-t
     ("test: {0} | per-test records={1} session records={2} incidents per-test=[{3}] session=[{4}]" -f (Show-Rec $recClean), $recPer.Count, $recSes.Count,
      (($incPer | ForEach-Object { "$($_.incidentId):$($_.role)" }) -join ','), (($incSes | ForEach-Object { "$($_.incidentId):$($_.role)" }) -join ','))
 $c = $rA.Doc.counts
+# FAILED = rj_fail + rj_skip (exit 2 SKIP_ONLY is FAILED(SKIP_ONLY) in a hardware suite since Q 2026-11-03; was SKIPPED).
 tc_check 'TEST-RESULTSJSON-018-summary-counts-executed-vs-not-executed-and-overall-matches-exit' `
-    (($rA.Doc.executedCount -eq 7) -and ($rA.Doc.notExecutedCount -eq 2) -and ($c.PASSED -eq 2) -and ($c.FAILED -eq 1) -and ($c.'FAILED(TIMEOUT)' -eq 1) -and
+    (($rA.Doc.executedCount -eq 7) -and ($rA.Doc.notExecutedCount -eq 2) -and ($c.PASSED -eq 2) -and ($c.FAILED -eq 2) -and ($c.SKIPPED -eq 0) -and ($c.'FAILED(TIMEOUT)' -eq 1) -and
      # Q 2026-10-28: no CLEANUP_FAILED result row any more; the cleanup observations (per-test + session) and their one
      # incident are summarized separately from the functional counts.
      ($c.'BLOCKED(SAFETY)' -eq 1) -and ($c.'BLOCKED(PROVENANCE)' -eq 1) -and ($c.CLEANUP_FAILED -eq 0) -and
@@ -261,6 +264,42 @@ $recRel = Get-Rec $rC 'rj_rel'
 tc_check 'TEST-RESULTSJSON-020-configuration-is-recorded-per-document-and-record' `
     (($null -ne $recRel) -and ($rC.Doc.configuration -eq 'Release') -and ($recRel.configuration -eq 'Release') -and ($recRel.verdict -eq 'PASSED') -and ($rC.Exit -eq 0) -and ($rC.Doc.overall -eq 'PASSED')) `
     ("{0} | doc cfg={1}" -f (Show-Rec $recRel), $(if ($rC.Doc) { $rC.Doc.configuration }))
+
+# --- 028: a registered hardware test whose binary is missing fails the hardware suite (FAILED(BUILD)), never SKIPPED ---
+$rMiss = Invoke-Sandbox 'runMiss' @((Get-Entry (Join-Path $Fakes 'rj_missing.ps1')))
+$recMiss = Get-Rec $rMiss 'rj_missing'
+tc_check 'TEST-RESULTSJSON-028-missing-binary-in-a-hardware-suite-is-a-build-failure' `
+    (($null -ne $recMiss) -and ($recMiss.status -eq 'FAILED(BUILD)') -and (-not $recMiss.executed) -and ($rMiss.Exit -eq 1) -and ($rMiss.Doc.overall -eq 'FAILED')) `
+    ("{0} | exit={1} overall={2}" -f (Show-Rec $recMiss), $rMiss.Exit, $(if ($rMiss.Doc) { $rMiss.Doc.overall }))
+
+# --- 027: the installed driver is identified by SHA256 (local Debug/Release build or the staged CI package) and
+#     recorded per run; a runner never installs or replaces a driver ---------------------------------------------
+$fnId = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbInstalledDriverIdentity' }, $true)
+if ($fnId) {
+    . ([scriptblock]::Create($fnId.Extent.Text))
+    $idRoot = Join-Path $Tmp 'drvid'
+    foreach ($c in 'Debug', 'Release') { New-Item -ItemType Directory -Path (Join-Path $idRoot "build\x64\$c\IntelAvbFilter") -Force | Out-Null; Set-Content -LiteralPath (Join-Path $idRoot "build\x64\$c\IntelAvbFilter\IntelAvbFilter.sys") -Value "image $c" -Encoding ASCII }
+    $inst = Join-Path $idRoot 'installed.sys'
+    Set-Content -LiteralPath $inst -Value 'image Release' -Encoding ASCII
+    $iRelAsDbg = Get-AvbInstalledDriverIdentity -InstalledPath $inst -RepoRoot $idRoot -Configuration 'Debug' -StagedSha256 ''
+    $iRel = Get-AvbInstalledDriverIdentity -InstalledPath $inst -RepoRoot $idRoot -Configuration 'Release' -StagedSha256 ''
+    $iNone = Get-AvbInstalledDriverIdentity -InstalledPath (Join-Path $idRoot 'absent.sys') -RepoRoot $idRoot -Configuration 'Debug' -StagedSha256 ''
+    Set-Content -LiteralPath $inst -Value 'image other' -Encoding ASCII
+    $otherSha = (Get-FileHash -LiteralPath $inst -Algorithm SHA256).Hash
+    $iOther = Get-AvbInstalledDriverIdentity -InstalledPath $inst -RepoRoot $idRoot -Configuration 'Debug' -StagedSha256 ''
+    $iStaged = Get-AvbInstalledDriverIdentity -InstalledPath $inst -RepoRoot $idRoot -Configuration 'Debug' -StagedSha256 $otherSha
+    $idBad = @()
+    if (-not ($iRelAsDbg.identifiedAs -eq 'Release' -and $iRelAsDbg.matchesConfiguration -eq $false -and $iRelAsDbg.sha256 -match '^[0-9A-F]{64}$')) { $idBad += "release-as-debug: $($iRelAsDbg | ConvertTo-Json -Compress)" }
+    if (-not ($iRel.identifiedAs -eq 'Release' -and $iRel.matchesConfiguration -eq $true)) { $idBad += "release: $($iRel | ConvertTo-Json -Compress)" }
+    if (-not ($iNone.identifiedAs -eq 'NOT_INSTALLED' -and $iNone.matchesConfiguration -eq $false -and $null -eq $iNone.sha256)) { $idBad += "absent: $($iNone | ConvertTo-Json -Compress)" }
+    if (-not ($iOther.identifiedAs -eq 'UNIDENTIFIED' -and $iOther.matchesConfiguration -eq $false)) { $idBad += "other: $($iOther | ConvertTo-Json -Compress)" }
+    if (-not ($iStaged.identifiedAs -eq 'STAGED' -and $iStaged.matchesConfiguration -eq $true)) { $idBad += "staged: $($iStaged | ConvertTo-Json -Compress)" }
+    if ($fnId.Extent.Text -match '(?i)netcfg|pnputil|Install-Driver|Copy-Item|sc\.exe|Start-Service|Stop-Service') { $idBad += 'identification function changes driver state' }
+    if (-not ($rA.Doc -and $rA.Doc.PSObject.Properties['installedDriver'] -and $rA.Doc.installedDriver.PSObject.Properties['identifiedAs'])) { $idBad += 'results document has no installedDriver.identifiedAs' }
+    tc_check 'TEST-RESULTSJSON-027-installed-driver-configuration-is-identified-by-hash-without-installing' ($idBad.Count -eq 0) ($idBad -join ' ### ')
+} else {
+    tc_fail 'TEST-RESULTSJSON-027-installed-driver-configuration-is-identified-by-hash-without-installing' 'Get-AvbInstalledDriverIdentity missing in tools/test/Run-Tests-CI.ps1'
+}
 
 # --- Run D: -CaptureDbgView is rejected, nothing executes ---------------------------------------------------
 $rD = Invoke-Sandbox 'runD' @((Get-Entry $pPass)) -Extra @('-CaptureDbgView')

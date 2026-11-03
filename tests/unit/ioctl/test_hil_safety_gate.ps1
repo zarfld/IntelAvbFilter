@@ -41,14 +41,15 @@ function Get-RunnerList([string]$name) {
     return @($as.Right.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })
 }
 $hwLists = [ordered]@{}
-foreach ($n in 'HardwareUnitTests', 'HardwareIntegrationTests', 'HardwareMandatoryTests', 'HardwareMutationTests') { $hwLists[$n] = Get-RunnerList $n }
+# The only hardware suites (Q 2026-11-03): HardwareUnit and HardwareIntegration.
+foreach ($n in 'HardwareUnitTests', 'HardwareIntegrationTests') { $hwLists[$n] = Get-RunnerList $n }
 $hwEntries = @($hwLists.Values | ForEach-Object { $_ } | Sort-Object -Unique)
-# Attended-only HardwareMutation entries (decision A 2026-10-21): executed outside GitHub Actions, a declared
-# coverage gap under it.  Keys from the AST (hashtable keys are not string constants of the right side).
+# Attended-only HardwareIntegration entries (decision A 2026-10-21; moved from the former HardwareMutation lane
+# 2026-11-03): executed outside GitHub Actions, a failing NOT EXECUTED blocker under it.  Keys from the AST.
 $attendedOnly = @()
 $aoAst = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and
                         $x.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                        $x.Left.VariablePath.UserPath -eq 'HardwareMutationAttendedOnly' }, $true) | Select-Object -First 1
+                        $x.Left.VariablePath.UserPath -eq 'HardwareIntegrationAttendedOnly' }, $true) | Select-Object -First 1
 if ($null -ne $aoAst) { $aoHt = $aoAst.Right.Find({ param($x) $x -is [System.Management.Automation.Language.HashtableAst] }, $true); $attendedOnly = @($aoHt.KeyValuePairs | ForEach-Object { $_.Item1.Value }) }
 $hwEntries = @(@($hwEntries) + @($attendedOnly) | Sort-Object -Unique)
 
@@ -66,7 +67,7 @@ function Get-RunnerGapTable([string]$name) {
     }
     return $t
 }
-$autoSuites = [ordered]@{ HardwareMandatory = 'HardwareMandatoryTests'; HardwareUnit = 'HardwareUnitTests'; HardwareIntegration = 'HardwareIntegrationTests' }
+$autoSuites = [ordered]@{ HardwareUnit = 'HardwareUnitTests'; HardwareIntegration = 'HardwareIntegrationTests' }
 $gapTables = [ordered]@{}
 foreach ($s in $autoSuites.Keys) { $gapTables[$s] = Get-RunnerGapTable "${s}CoverageGaps" }
 $gapEntries = @($gapTables.Values | Where-Object { $null -ne $_ } | ForEach-Object { @($_.Keys) } | Sort-Object -Unique)
@@ -231,13 +232,12 @@ tc_check 'TEST-HILGATE-037-phc-stability-default-entry-executes-readonly' `
      -not (($null -ne $psGap) -and $psGap.Contains('test_ptp_phc_stability'))) `
     ("gap={0}; class={1}; listed={2}" -f $(if ($null -ne $psGap) { $psGap.Contains('test_ptp_phc_stability') } else { 'no table' }), $registry['test_ptp_phc_stability'], (@($hwLists['HardwareIntegrationTests']) -contains 'test_ptp_phc_stability'))
 # test_ioctl_routing: INIT_DEVICE occurs only in the GetIoctlName() name table and is never issued; it sends
-# ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG -> ReadOnly; executed in HardwareUnit and HardwareMandatory.
-$rtGap = @('HardwareUnit', 'HardwareMandatory' | Where-Object { $null -ne $gapTables[$_] -and $gapTables[$_].Contains('test_ioctl_routing') })
+# ENUM_ADAPTERS, OPEN_ADAPTER, READ_REGISTER, GET_CLOCK_CONFIG -> ReadOnly; executed in HardwareUnit (mandatory
+# verification like every hardware entry since Q 2026-11-03; the former HardwareMandatory list is gone).
+$rtGap = @('HardwareUnit', 'HardwareIntegration' | Where-Object { $null -ne $gapTables[$_] -and $gapTables[$_].Contains('test_ioctl_routing') })
 tc_check 'TEST-HILGATE-039-ioctl-routing-is-readonly-and-executes' `
-    (($registry['test_ioctl_routing'] -eq 'ReadOnly') -and (@($hwLists['HardwareUnitTests']) -contains 'test_ioctl_routing') -and
-     (@($hwLists['HardwareMandatoryTests']) -contains 'test_ioctl_routing') -and $rtGap.Count -eq 0) `
-    ("class={0}; unit={1}; mandatory={2}; still a gap in: [{3}]" -f $registry['test_ioctl_routing'], (@($hwLists['HardwareUnitTests']) -contains 'test_ioctl_routing'),
-     (@($hwLists['HardwareMandatoryTests']) -contains 'test_ioctl_routing'), ($rtGap -join ','))
+    (($registry['test_ioctl_routing'] -eq 'ReadOnly') -and (@($hwLists['HardwareUnitTests']) -contains 'test_ioctl_routing') -and $rtGap.Count -eq 0) `
+    ("class={0}; unit={1}; still a gap in: [{2}]" -f $registry['test_ioctl_routing'], (@($hwLists['HardwareUnitTests']) -contains 'test_ioctl_routing'), ($rtGap -join ','))
 # Init coverage is retained, not removed: every Init registration stays classified and is listed in a Hardware suite
 # or a declared gap (never silently absent); each automatic suite keeps at least one ReadOnly entry, so the real-pass
 # requirement (TEST-HILGATE-036) stays satisfiable.
@@ -708,8 +708,10 @@ tc_check 'TEST-HILGATE-030-sandbox-requires-isolated-logs-dir' `
 # Requirement changed 2026-10-21 (P0 full HIL coverage): a required test that is not executed (fixture/restoration or
 # infrastructure missing) is never a skip and never green.  Sandbox mode refuses every real binary (TEST-HILGATE-028),
 # so nothing from the real list executes.
-$rI = Invoke-Sandbox 'runI' @() -Suite 'HardwareMandatory'
-$gapI = @(if ($null -ne $gapTables['HardwareMandatory']) { $gapTables['HardwareMandatory'].Keys })
+# HardwareIntegration (the former HardwareMandatory gap table is gone, Q 2026-11-03): its effective gaps (listed entries
+# execute, TEST-HILGATE-080) must each be a failing case.
+$rI = Invoke-Sandbox 'runI' @() -Suite 'HardwareIntegration'
+$gapI = @(if ($null -ne $gapTables['HardwareIntegration']) { (Get-AvbHilEffectiveGaps -GapTable $gapTables['HardwareIntegration'] -TestList @($hwLists['HardwareIntegrationTests'])).Keys })
 $gapMissing = @($gapI | Where-Object { $rI.Xml -notmatch ('<testcase name="TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($_) + ' NOT EXECUTED by automatic HIL[^"]*"[^>]*><failure') })
 $gapCases = [regex]::Matches($rI.Xml, '<testcase name="TC-HIL-COVERAGE-GAP-001: ').Count
 $gapSkipped = [regex]::Matches($rI.Xml, '<testcase name="TC-HIL-COVERAGE-GAP-001: [^"]*"[^>]*><skipped').Count
@@ -758,7 +760,7 @@ $pUv  = New-PriorDir 'priorUnverified' 'INCONCLUSIVE_RESTORATION'
 $kRes = [ordered]@{}
 $kDirs = [ordered]@{ cleanup = $pCf; timeout = $pTo; halt = $pHl; killed = $pMk; unverified = $pUv; clean = $pOk }
 foreach ($k in $kDirs.GetEnumerator()) {
-    $kRes[$k.Key] = Invoke-Sandbox ("runK_" + $k.Key) @($tInit, $tRo) -Suite 'HardwareMutation' -PriorResultsDir $k.Value -AllSupportedEnabled
+    $kRes[$k.Key] = Invoke-Sandbox ("runK_" + $k.Key) @($tInit, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $k.Value -AllSupportedEnabled
 }
 $kBad = @()
 foreach ($k in 'timeout', 'halt', 'killed') {
@@ -793,8 +795,8 @@ $pLs = New-PriorDir 'priorLsLayout' 'PASSED'
 $pBad = New-PriorDir 'priorCorrupt' ''
 '{ not json' | Set-Content -LiteralPath (Join-Path $pBad 'HardwareUnit\results-HardwareUnit-Debug-20261021_120000_000.json') -Encoding UTF8
 'console transcript, not a results document' | Set-Content -LiteralPath (Join-Path $pBad 'console-Debug-HardwareUnit.log') -Encoding UTF8
-$rLsA = Invoke-Sandbox 'runK_lsLayout' @($tInit, $tRo) -Suite 'HardwareMutation' -PriorResultsDir $pLs -AllSupportedEnabled
-$rLsB = Invoke-Sandbox 'runK_corrupt' @($tInit, $tRo) -Suite 'HardwareMutation' -PriorResultsDir $pBad -AllSupportedEnabled
+$rLsA = Invoke-Sandbox 'runK_lsLayout' @($tInit, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $pLs -AllSupportedEnabled
+$rLsB = Invoke-Sandbox 'runK_corrupt' @($tInit, $tRo) -Suite 'HardwareIntegration' -PriorResultsDir $pBad -AllSupportedEnabled
 tc_check 'TEST-HILGATE-083-only-results-documents-are-prior-suite-evidence-corrupt-results-still-halt' `
     ((Get-RanCount $rLsA '^RAN test_sbfake_init ') -eq 1 -and $rLsA.Out -notmatch 'prior suite' -and
      (Get-RanCount $rLsB '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rLsB '^RAN test_sbfake_ro ') -eq 1 -and
@@ -1164,7 +1166,7 @@ $ss13 = Join-Path $Tmp 'sess_resolve.json'
 $rU1 = Invoke-Sandbox 'runU1' @($tTim, $tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss13                         # damage -> OPEN
 $rU2 = Invoke-Sandbox 'runU2' @($tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss13 -Suite 'HardwareIntegration'     # restored -> RESOLVED
 $i13a = @(Get-SessIncidents $ss13 | Where-Object { $_.key -match '\|TIMINCA\|' })
-$rU3 = Invoke-Sandbox 'runU3' @($tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss13 -Suite 'HardwareMandatory' -StateEdit $timChg   # recurs -> NEW
+$rU3 = Invoke-Sandbox 'runU3' @($tRo) -AllSupportedEnabled -ExtraEnv $gh -SessionFile $ss13 -Suite 'HardwareUnit' -StateEdit $timChg   # recurs -> NEW
 $i13b = @(Get-SessIncidents $ss13 | Where-Object { $_.key -match '\|TIMINCA\|' })
 $res13 = @($i13b | Where-Object { $_.status -eq 'RESOLVED' }); $open13 = @($i13b | Where-Object { $_.status -eq 'OPEN' })
 tc_check 'TEST-HILGATE-087-resolved-cleanup-incident-kept-as-history-recurrence-opens-new-incident' `
@@ -1227,14 +1229,14 @@ tc_check 'TEST-HILGATE-089-runner-reclassifies-obsolete-cleanup-only-safety-even
 
 # 069: LocalSuites layout - the prior-results directory (logs\LocalSuites_<ts>) lies INSIDE the runner's logs directory.
 # Defect found in the physical run LocalSuites_20261021_173805: the atdecc FAILED(TIMEOUT) halt of HardwareUnit never
-# reached HardwareMutation (no 'prior suite' line) because Get-AvbPriorHalt skipped everything under its own logs dir.
+# reached the next suite (no 'prior suite' line) because Get-AvbPriorHalt skipped everything under its own logs dir.
 $lsPrior = Join-Path $Tmp 'runLS\logs\LocalSuites_x'; New-Item -ItemType Directory -Path $lsPrior -Force | Out-Null
 ([ordered]@{ schema = 'avb-runner-results/1'; suite = 'HardwareUnit'; configuration = 'Debug'; overall = 'FAILED'; exitCode = 1; stateHalt = ''
              # FAILED(TIMEOUT) without a termination disposition, as in the original defect (a CLEANUP_FAILED row is no
              # longer a carried halt since Q 2026-10-28; this case tests where prior results are found, not which verdict halts).
              records = @([ordered]@{ name = 'test_prior.exe'; verdict = 'FAILED(TIMEOUT)' }) } | ConvertTo-Json -Depth 5) |
     Set-Content -LiteralPath (Join-Path $lsPrior 'results-Debug-HardwareUnit.json') -Encoding UTF8
-$rLS = Invoke-Sandbox 'runLS' @($tInit, $tRo) -Suite 'HardwareMutation' -AllSupportedEnabled -PriorResultsDir $lsPrior
+$rLS = Invoke-Sandbox 'runLS' @($tInit, $tRo) -Suite 'HardwareIntegration' -AllSupportedEnabled -PriorResultsDir $lsPrior
 tc_check 'TEST-HILGATE-069-prior-halt-found-when-prior-results-lie-inside-the-runner-logs-dir' `
     ((Get-RanCount $rLS '^RAN test_sbfake_init ') -eq 0 -and (Get-RanCount $rLS '^RAN test_sbfake_ro ') -eq 1 -and $rLS.Out -match 'state-integrity halt \(prior suite') (Tail $rLS)
 
@@ -1250,18 +1252,20 @@ tc_check 'TEST-HILGATE-045-failed-setup-is-nonpassing-and-distinct-in-json-and-j
 
 # --- Run N: decision A - UT-CORR-005/006 are attended-only; under GitHub Actions they are NOT EXECUTED gaps -------
 # Their executable also contains the UT-CORR-009 driver lifecycle path (process creation; TEST-HILSUITE-REAL-003).
+# Part of HardwareIntegration since the former HardwareMutation lane was removed (Q 2026-11-03).  The real
+# HardwareIntegration entries are refused in sandbox mode (TEST-HILGATE-028), so the GHA run is nonpassing (exit 1).
 $want = @('test_ptp_phc_stability --case UT-CORR-005', 'test_ptp_phc_stability --case UT-CORR-006')
-$rN1 = Invoke-Sandbox 'runN1' @() -Suite 'HardwareMutation' -AllSupportedEnabled -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
-$rN2 = Invoke-Sandbox 'runN2' @() -Suite 'HardwareMutation' -AllSupportedEnabled
+$rN1 = Invoke-Sandbox 'runN1' @() -Suite 'HardwareIntegration' -AllSupportedEnabled -ExtraEnv @{ GITHUB_ACTIONS = 'true' }
+$rN2 = Invoke-Sandbox 'runN2' @() -Suite 'HardwareIntegration' -AllSupportedEnabled
 $nBad = @()
 if ((@($attendedOnly | Sort-Object) -join '|') -ne ($want -join '|')) { $nBad += "attended-only table: [$($attendedOnly -join ', ')]" }
 foreach ($e in $want) {
-    if (@($hwLists['HardwareMutationTests']) -contains $e) { $nBad += "$e still in `$HardwareMutationTests (gate-runnable under GitHub Actions)" }
+    foreach ($l in 'HardwareUnitTests', 'HardwareIntegrationTests') { if (@($hwLists[$l]) -contains $e) { $nBad += "$e in `$$l (gate-runnable under GitHub Actions)" } }
     if ($rN1.Out -notmatch ('\[BLOCKED\] TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($e) + ' NOT EXECUTED by automatic HIL[^\r\n]*UT-CORR-009')) { $nBad += "GHA: no NOT EXECUTED gap naming UT-CORR-009 for $e" }
     if ($rN2.Out -notmatch ('TC-SAFETY-GATE-001: ' + [regex]::Escape($e) + ': sandbox mode')) { $nBad += "attended: $e not dispatched" }
     if ($rN2.Out -match ('TC-HIL-COVERAGE-GAP-001: ' + [regex]::Escape($e))) { $nBad += "attended: $e reported as a gap" }
 }
-if ((Get-RanCount $rN1 'RAN') -ne 0 -or $rN1.Exit -ne 1 -or $rN1.Out -notmatch 'HardwareMutation is INCOMPLETE') { $nBad += "GHA run: ran=$(Get-RanCount $rN1 'RAN') exit=$($rN1.Exit) " + (Tail $rN1) }
+if ((Get-RanCount $rN1 'RAN') -ne 0 -or $rN1.Exit -ne 1) { $nBad += "GHA run: ran=$(Get-RanCount $rN1 'RAN') exit=$($rN1.Exit) " + (Tail $rN1) }
 tc_check 'TEST-HILGATE-044-ut-corr-005-006-attended-only-not-executed-gaps-under-github-actions' ($nBad.Count -eq 0) ($nBad -join ' ### ')
 
 # --- Run J: a Hardware* suite in which nothing passed (skip-only) is a failure, not hardware verification ----
@@ -1271,9 +1275,11 @@ Set-Content -LiteralPath $tSkip -Encoding UTF8 -Value ("Add-Content -LiteralPath
 $rJ = Invoke-Sandbox 'runJ' @('ps1:' + $tSkip.Replace('\', '/')) -AllSupportedEnabled
 # Control: the same fixture with one passing fake exits 0, so the failure above comes from "no pass" alone.
 $rJ2 = Invoke-Sandbox 'runJ2' @($tRo) -AllSupportedEnabled
+# Q 2026-11-03: every hardware suite is mandatory verification - the skip-only program itself is FAILED(SKIP_ONLY)
+# (was: SKIPPED, the run then NOT_VERIFIED via "no hardware test PASSED").  Either way the run fails.
 tc_check 'TEST-HILGATE-036-hardware-suite-without-a-pass-fails' `
-    (((Get-RanCount $rJ '^RAN test_sbfake_skiponly ') -eq 1) -and $rJ.Exit -eq 1 -and ($rJ.Out -match 'no hardware test PASSED in HardwareUnit') -and
-     ($rJ.Out -notmatch '\[FAIL\] OVERALL: \d+ test\(s\) FAILED') -and $rJ2.Exit -eq 0) `
+    (((Get-RanCount $rJ '^RAN test_sbfake_skiponly ') -eq 1) -and $rJ.Exit -eq 1 -and ($rJ.Out -match '\[HIL-FAIL\] exit=2 SKIP_ONLY') -and
+     ($rJ.Out -match 'OVERALL: 1 test\(s\) FAILED') -and $rJ2.Exit -eq 0) `
     ("ran={0}; exit={1}; control exit={2}; {3} || control: {4}" -f (Get-RanCount $rJ 'RAN'), $rJ.Exit, $rJ2.Exit, (Tail $rJ), (Tail $rJ2))
 
 # --- Run K: Init is blocked unattended (GitHub Actions) but still runs attended (coverage not removed) -----------

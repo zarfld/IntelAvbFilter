@@ -22,7 +22,7 @@ name: HIL - Hardware-in-the-Loop
 #                BEFORE any repository code -> checkout of the authorized head_sha -> deployment of the Debug package
 #                (tools/ci/Invoke-HilDeployment.ps1: machine lock, crash evidence, package verification incl. pinned
 #                signer + local trust, unattended Install-Driver.ps1, post-deployment pre-flight) -> build tests ->
-#                run identity -> HardwareMandatory, HardwareUnit, HardwareIntegration -> lock release + evidence.
+#                run identity -> HardwareUnit, HardwareIntegration -> lock release + evidence.
 #   hil-release  the same for Release, strictly after hil-debug (never concurrently; the machine lock also excludes
 #                other workflow runs and operator runs).  Skipped when hil-debug left the machine needing the operator.
 #   hil-acceptance GitHub-hosted: per configuration a DEPLOYED record of this run, staged == installed == ImagePath
@@ -37,7 +37,7 @@ name: HIL - Hardware-in-the-Loop
 # External contributors: fork PRs and PRs by anyone but the OWNER never run on the workstation automatically; they
 # cannot obtain the required check themselves - the OWNER carries the reviewed change on an OWNER-authored
 # same-repository PR, which then runs the mandatory pre-merge HIL.
-# All four suites run here (HardwareUnit, HardwareIntegration, HardwareMutation, HardwareMandatory last).  A required
+# Both hardware suites run here (HardwareUnit, HardwareIntegration - the only hardware suites, Q 2026-11-03).  A required
 # test that is not executed yet (fixture/restoration or infrastructure missing) is a failing TC-HIL-COVERAGE-GAP-001
 # case and makes the suite and the acceptance verdict INCOMPLETE - never PASSED (P0 full HIL coverage, 2026-10-21).
 # Serialization: hil-release needs hil-debug; one runner instance; machine-wide lock file (tools/lib/HilLock.ps1)
@@ -486,7 +486,7 @@ jobs:
           ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
           Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
 
-      # Suites in the LocalSuites order, HardwareMandatory last.  Each runs whenever the deployment succeeded (a
+      # Both hardware suites in the LocalSuites order.  Each runs whenever the deployment succeeded (a
       # failure in one suite never hides the evidence of the next); -PriorResultsDir carries a halt of an earlier
       # suite of this job (TIMEOUT / INFRA / CLEANUP_FAILED / state halt / killed run) so a damaged state never becomes
       # a clean baseline: later Init/Mutating/Unsafe tests are BLOCKED, ReadOnly tests continue.
@@ -502,20 +502,6 @@ jobs:
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Run HardwareMutation
-        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMutation -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMutation') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Run HardwareMandatory (mandatory HIL gate)
-        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMandatory -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMandatory') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
           exit $LASTEXITCODE
 
       - name: Machine state for the next configuration
@@ -699,7 +685,7 @@ jobs:
           ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
           Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
 
-      # Suites in the LocalSuites order, HardwareMandatory last.  Each runs whenever the deployment succeeded (a
+      # Both hardware suites in the LocalSuites order.  Each runs whenever the deployment succeeded (a
       # failure in one suite never hides the evidence of the next); -PriorResultsDir carries a halt of an earlier
       # suite of this job (TIMEOUT / INFRA / CLEANUP_FAILED / state halt / killed run) so a damaged state never becomes
       # a clean baseline: later Init/Mutating/Unsafe tests are BLOCKED, ReadOnly tests continue.
@@ -715,20 +701,6 @@ jobs:
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Run HardwareMutation
-        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMutation -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMutation') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Run HardwareMandatory (mandatory HIL gate)
-        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareMandatory -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareMandatory') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
           exit $LASTEXITCODE
 
       - name: Machine state for the next configuration
@@ -804,7 +776,7 @@ jobs:
           # passes and no failure.  Skipped is never a pass; a missing deployment or suite is HIL_NOT_EXECUTED.
           import glob, json, os, re, sys, xml.etree.ElementTree as ET
 
-          SUITES = ['HardwareUnit', 'HardwareIntegration', 'HardwareMutation', 'HardwareMandatory']
+          SUITES = ['HardwareUnit', 'HardwareIntegration']
           GAP = 'TC-HIL-COVERAGE-GAP-001'
           incomplete = []
           root = os.environ.get('HIL_EVIDENCE_DIR', 'hil-evidence')
@@ -856,6 +828,9 @@ jobs:
                       rd = json.load(fh)
                   if int(rd.get('executedCount') or 0) <= 0:
                       not_executed.append('%s %s: no test executed (%s)' % (cfg, s, rd.get('counts')))
+                  # CI-HIL evidence only: a document whose provenance was not enforced (manual LOCAL_DIAGNOSTIC run) never counts.
+                  if rd.get('evidenceClass') != 'ci' or rd.get('provenanceEnforced') is not True:
+                      bad.append('%s %s: results evidenceClass=%r provenanceEnforced=%r (CI-HIL evidence requires ci with enforced provenance)' % (cfg, s, rd.get('evidenceClass'), rd.get('provenanceEnforced')))
                   n = f = sk = gap = 0
                   for c in ET.parse(files[0]).getroot().iter('testcase'):
                       n += 1

@@ -31,9 +31,10 @@ restart). It is not a capability claim and never replaces the verdicts above.
   is `INCONCLUSIVE`, not `SKIP_UNSUPPORTED`.
 * `NOT_SUPPORTED` returned by an adapter that advertises the capability is a
   contract violation: `FAIL`.
-* Mandatory verification = every suite, `HardwareMutation` included (P0 full HIL
-  coverage, 2026-10-21; it was previously an optional experimental lane). No
-  separate lane or gate exists for the new verdicts.
+* Mandatory verification = every suite (P0 full HIL coverage, 2026-10-21). Since
+  Q 2026-11-03 the only hardware suites are `HardwareUnit` and
+  `HardwareIntegration`; the former `HardwareMandatory` / `HardwareMutation`
+  lanes no longer exist. No separate lane or gate exists for the new verdicts.
 * A declared coverage gap (`TC-HIL-COVERAGE-GAP-001`, a required test not
   executed because its fixture/restoration or infrastructure is missing) is
   `BLOCKED` (JUnit failure) and makes the suite `INCOMPLETE`; it is never a skip.

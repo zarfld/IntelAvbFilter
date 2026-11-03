@@ -23,18 +23,14 @@ param(
     # "All"               = Unit + Integration combined
     # "HardwareUnit"      = unit-level tests that need Intel NIC + driver (self-hosted runner only)
     # "HardwareIntegration" = integration-level tests that need Intel NIC + driver (self-hosted runner only)
-    # "HardwareMandatory" = safe subset of HardwareUnit that MUST pass on every supported HIL runner.
-    #                       Missing binary = FAIL.  Driver loss mid-suite = FAIL (not cascading SKIP).
-    #                       Use this suite for the mandatory CI quality gate.
-    # "HardwareMutation"  = PHC/TAS mutation tests (epoch-reset, freq-adj) that modify hardware state.
-    #                       Run in an isolated lane after HardwareMandatory; continue-on-error in CI.
+    # The ONLY hardware suites (Q 2026-11-03).  Both are mandatory verification: every registered entry is required;
+    # missing binary = FAILED(BUILD), driver lost mid-suite = FAILED(INFRA), exit 2 SKIP_ONLY = FAILED(SKIP_ONLY).
+    # Safety class ($HilTestSafety) is independent of the suite.
     #
-    # SAFETY NOTE: test_s3_sleep_wake (TC-S3-002) sends the machine into S3 sleep via
-    # SetSuspendState. It is intentionally absent from ALL automated suites including
-    # HardwareMandatory and HardwareMutation. Run it manually on a dedicated test machine.
+    # SAFETY NOTE: test_s3_sleep_wake (TC-S3-002) sends the machine into S3 sleep via SetSuspendState (Unsafe); it is a
+    # required test reported NOT EXECUTED with its blocker until an unattended wake facility exists.
     [Parameter(Mandatory=$false)]
-    [ValidateSet("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration",
-                 "HardwareMandatory", "HardwareMutation")]
+    [ValidateSet("Unit", "Integration", "All", "HardwareUnit", "HardwareIntegration")]
     [string]$Suite = "Unit",
 
     # Override the test list entirely (names without .exe extension).
@@ -159,8 +155,7 @@ function Write-Note   { param([string]$m) Write-Host "[INFO] $m" -ForegroundColo
 #  - Never retry: a failure here must be surfaced immediately.
 #  - ACCESS_DENIED = hard $false (privilege problem, not transient).
 #
-# Callers: invoked before the HardwareMandatory suite and after every test
-# in Hardware* suites.
+# Callers: invoked before and after every test in the hardware suites.
 function Test-AvbDriverHealth {
     param([string]$AfterTest = '')
     $tag = if ($AfterTest) { " after $AfterTest" } else { '' }
@@ -393,62 +388,20 @@ $TestArtifactClassification = [ordered]@{
 }
 
 # ===========================
-# HardwareMandatory --- safe mandatory quality gate (self-hosted runner)
+# Hardware suites (Q 2026-11-03): HardwareUnit and HardwareIntegration ONLY, both mandatory verification
 # ===========================
-# Tests that MUST pass on every supported HIL runner against every commit.
-# Properties:
-#   - No PHC/TAS hardware state mutation (safe to run back-to-back).
-#   - Missing binary = FAIL (not SKIP) --- caller broke the build.
-#   - Driver lost mid-suite = hard FAIL (not cascading SKIP) --- #328 sentinel.
-#   - Exit code 2 (SKIP_ONLY from test_tx_timestamp_provenance Section H on a
-#     no-hardware runner) is treated as infrastructure failure here --- Section H
-#     must exercise the actual driver on a HIL runner.
+# The former HardwareMandatory list (13 ReadOnly entries) and its coverage-gap table (test_minimal_ioctl,
+# ptp_clock_control_test, test_rx_timestamp, test_rx_timestamp_complete) were already HardwareUnit / HardwareIntegration
+# entries with identical arguments; the former HardwareMutation list was empty.  Migration matrix:
+# investigations/hil-suite-migration-2026-11-03.md (TEST-LOCALSUITES-029).  The former mandatory hard-failure rules
+# (missing binary, driver loss, SKIP_ONLY) apply to every hardware entry; the safety class stays in $HilTestSafety.
 #
-# EXCLUDED: PHC mutation, TAS mutation, driver reinstall, power states.
-# Run those in the HardwareMutation lane below.
-$HardwareMandatoryTests = @(
-    # Connectivity + device contract
-    "test_ioctl_version",              # IOCTL_AVB_GET_VERSION handshake --- driver reachable
-    "test_ioctl_routing",              # IOCTL routing through the filter (read-only IOCTLs)
-    "test_ioctl_simple",               # basic open/close cycle
-    "test_ioctl_abi",                  # IOCTL ABI backward-compat (TEST-ABI-001)
-    # TX timestamp provenance + V1/V2 ABI (REQ-F-PTP-007, #199, #317)
-    "test_tx_timestamp_provenance",    # Section L (logic) + Section H (FastIo V1/V2 canary,
-                                       # self-comparison, masquerade, cross-handle isolation)
-    "test_tx_timestamp_retrieval",     # TX timestamp FIFO retrieval; per-adapter results
-    # PHC query / availability
-    "test_ioctl_phc_query",            # IOCTL_AVB_GET_TIMESTAMP read-only
-    "test_ioctl_xstamp",               # cross-timestamp PHC---QPC (VV-CORR-003)
-    "test_ioctl_phc_crosstimestamp_v2", # V2 provenance per adapter; INCONCLUSIVE=FAIL (#340)
-    # ptp_clock_control_test, test_rx_timestamp, test_rx_timestamp_complete: see $HardwareMandatoryCoverageGaps
-    # Multi-adapter isolation
-    "test_all_adapters",               # enumerate + open all adapters
-    "test_multidev_adapter_enum",      # per-adapter VID/DID identity
-    "test_multi_adapter_phc_sync",     # independent PHC per adapter
-    # Send-path + provenance
-    "test_send_ptp_debug"              # IOCTL_AVB_TEST_SEND_PTP diagnostic (PRE_SEND_PHC)
-)
-
-# ===========================
-# HardwareMutation --- PHC/TAS hardware-mutating tests (isolated lane)
-# ===========================
-# These tests write to PHC epoch, clock increment, or TAS GCL registers.
-# Run in a SEPARATE CI job AFTER HardwareMandatory, with continue-on-error in CI
-# to avoid blocking on mutation instability.
-# Recovery: each mutation test must restore state before exit; CI records
-# cleanup results separately; they never halt the mutation lane (Q 2026-10-28).
-#
-# EXCLUDED: driver reinstall (UT-CORR-009), system sleep (test_s3_sleep_wake).
-$HardwareMutationTests = @(
-    # Every eligible automatic mutation entry.  Empty until UT-CORR-005/006 are hardware-verified in their own
-    # executable (decision B); the suite is then INCOMPLETE under GitHub Actions, never PASSED.
-)
-# Attended-only (decision A, Q 2026-10-21): PHC epoch reset and frequency adjustment.  --case selects the sub-test,
-# but the executable also contains the UT-CORR-009 driver lifecycle path (process creation), so under GitHub Actions
-# each entry is a declared coverage gap (NOT EXECUTED, run INCOMPLETE; TEST-HILSUITE-REAL-003 unchanged); outside it
-# the entry is appended to the HardwareMutation run.  Removed only after B: UT-CORR-009 split out and 005/006
-# hardware-verified including restoration.  Reasons must not end in a parenthesis.
-$HardwareMutationAttendedOnly = [ordered]@{
+# Attended-only HardwareIntegration entries (decision A, Q 2026-10-21; moved from the former HardwareMutation lane
+# 2026-11-03): PHC epoch reset and frequency adjustment whose restoration is not hardware-verified yet (decision B).
+# Required tests, never accepted coverage: under GitHub Actions each is reported NOT EXECUTED with this blocker and
+# makes the run INCOMPLETE (nonpassing; TEST-HILSUITE-REAL-003 unchanged); outside it the entry is appended to the
+# HardwareIntegration run and executes.  Reasons must not end in a parenthesis.
+$HardwareIntegrationAttendedOnly = [ordered]@{
     'test_ptp_phc_stability --case UT-CORR-005' = 'Mutating:Target: SET_TIMESTAMP 1 ms plus restore; UT-CORR-009 split into test_ptp_phc_lifecycle 2026-10-22, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-005 is hardware-verified, decision B'
     'test_ptp_phc_stability --case UT-CORR-006' = 'Mutating:Target: ADJUST_FREQUENCY +1 ns plus restore; UT-CORR-009 split into test_ptp_phc_lifecycle 2026-10-22, TEST-HILSUITE-REAL-003; attended runs only until UT-CORR-006 is hardware-verified, decision B'
 }
@@ -486,8 +439,9 @@ $HardwareUnitTests = @(
     "test_ts_event_sub",
     "test_ptp_getset",
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
-    "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (no device needed)
-                                     # Section H SKIPs gracefully when driver is absent.
+    "test_tx_timestamp_provenance",  # Section L: pure logic + ABI static_assert (TEST-PROV-L01..L05); Section H: V1/V2 IOCTL
+                                     # ABI, FastIo canary, cross-handle isolation (TEST-PROV-H01..H05).  Listed once
+                                     # (duplicate dispatch removed 2026-11-03, TEST-LOCALSUITES-029); exit 2 = FAILED(SKIP_ONLY).
     "test_ptp_freq",
     "test_ptp_freq_complete",
     "test_hw_ts_ctrl",
@@ -505,19 +459,17 @@ $HardwareUnitTests = @(
     "test_ioctl_phc_monotonicity",  # PHC monotonicity check -- (#197)
     "test_ioctl_xstamp",           # cross-timestamp (PTP/system correlation) -- (#198)
     "test_ioctl_xstamp_v2",        # V2 ABI + HIL reachability (#340)
-    "test_ioctl_abi",
+    "test_ioctl_abi",              # IOCTL ABI backward-compatibility (listed once since 2026-11-03)
     "test_ioctl_access_control",    # IOCTL access control enforcement -- (#341)
     "test_ioctl_buffer_fuzz",       # IOCTL buffer fuzzing -- (#342)
     "test_tsn_ioctl_handlers",
     "ptp_clock_control_test",
-    "test_ptp_crosstimestamp",
+    "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003 (listed once since 2026-11-03)
     "test_ioctl_phc_crosstimestamp_v2",  # PHC cross-timestamp V2 ABI (#340)
-    "test_ioctl_abi",              # IOCTL ABI backward-compatibility
     # test_tsn_ioctl_handlers removed (#328 F23): its build entry is Disabled (KM placeholder); a stale binary
     # of it ran here as ReadOnly and issued SETUP_TAS/FP/PTM.  The UM test test_tsn_ioctl_handlers_um stays
     # classified Mutating (not exact-target-aware -> BLOCKED by the safety gate).
     # Phase B: PHC/QPC coherence + VV coverage (added 2026-03-29)
-    "test_ptp_crosstimestamp",     # cross-domain timestamp correlation -- VV-CORR-003
     "test_zero_polling_overhead",  # interrupt-driven delivery, zero-poll -- #310
     "test_lifecycle_coverage",
     # Phase C: Additional unit tests registered 2026-04-01 (built but previously absent from CI)
@@ -558,9 +510,7 @@ $HardwareUnitTests = @(
     "hardware_investigation",      # nmake: raw WRITE_REGISTER investigation
     "critical_prerequisites",      # nmake: raw WRITE_REGISTER (TAS prerequisites)
     "enhanced_tas_investigation",  # nmake: raw WRITE_REGISTER (TAS enable patterns)
-    "diagnose_ptp",                # raw WRITE_REGISTER (PTP bring-up)
-    # Provenance regression (TEST-PROV-L01..L05 logic + TEST-PROV-H01..H05 device contract)
-    "test_tx_timestamp_provenance"  # V1/V2 IOCTL ABI, FastIo canary, cross-handle isolation
+    "diagnose_ptp"                 # raw WRITE_REGISTER (PTP bring-up)
 )
 
 # Integration-level tests that require the driver device node or Intel NIC.
@@ -585,7 +535,6 @@ $HardwareIntegrationTests = @(
     "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
     "test_ptp_corr",                  # PTP HW correlation IT-CORR-001..004 -- (#199)
     "test_ptp_phc_stability",         # UT-CORR-007/008 TX-PHC correlation (#149 #317); no args -> UT-CORR-009 reinstall unreachable
-    "test_ptp_001",                   # TEST-PTP-001 HW timestamp correlation for gPTP -- (#238 #149)
     "ptp_clock_control_production",
     "ptp_ioctl_latency_test",
     "hw_timestamping_control",
@@ -617,22 +566,15 @@ $HardwareIntegrationTests = @(
 )
 
 # ===========================
-# Automatic HIL coverage gaps
+# Declared execution blockers of the hardware suites (failing, never accepted coverage)
 # ===========================
-# HardwareMandatory, HardwareUnit and HardwareIntegration run unattended on every trusted master push
-# (.github/workflows/hil.yml, after CI and its deploy-staging succeeded).  They list ReadOnly and Init entries only:
-# a Mutating entry would be BLOCKED (a failure on every run), and a Mutating:Target entry changes adapter state
-# that an unattended runner cannot restore when cleanup fails (test_ptp_freq_complete left I226 TIMINCA changed
-# on 2026-10-20).  Every entry removed for that reason is listed here with its reason; the runner reports each
-# one as a skipped TC-HIL-COVERAGE-GAP-001 case, so the gap is visible in JUnit and never counted as a pass.
-# The entries stay classified in $HilTestSafety and run only through an explicit -Tests list on an attended run.
+# HardwareUnit and HardwareIntegration run unattended on every trusted master push (.github/workflows/hil.yml, after CI
+# and its deploy-staging succeeded).  Every registered hardware test is required (Q 2026-11-03).  An entry here is a
+# required test that cannot execute yet, with its specific blocker; the runner reports it as a FAILING
+# TC-HIL-COVERAGE-GAP-001 case and the run is INCOMPLETE - never PASSED, never a permanent substitute for execution.
+# The fix is to remove the blocker (prerequisites, targeting, restoration, infrastructure), not the entry.
+# The former HardwareMandatory gap table is gone: its four entries are plain HardwareUnit entries (Q 2026-11-03).
 # Reasons must not end in a parenthesis (the JUnit converter strips a trailing "(...)" from case names).
-$HardwareMandatoryCoverageGaps = [ordered]@{
-    'test_minimal_ioctl'           = 'Init: TEMPORARY POLICY EXCLUSION 2026-10-21 - INIT_DEVICE re-initializes the targeted adapter PTP block, I226 SYSTIM := 1 and TIMINCA rewritten, I219 TIMINCA rewritten per driver source, UNVERIFIED on hardware; post-test check misses the PHC time discontinuity; INIT on an unbound handle hits the global default adapter, which depends on the previous test'
-    'ptp_clock_control_test'     = 'Mutating: TC-5b ADJUST_FREQUENCY writes TIMINCA, plus SET_TIMESTAMP and INIT_DEVICE; contradicts the non-mutating Mandatory contract; split into read-only and mutating executables tracked in #340'
-    'test_rx_timestamp'          = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-    'test_rx_timestamp_complete' = 'Mutating: SET_RX_TIMESTAMP, SET_QUEUE_TIMESTAMP; not exact-target-aware'
-}
 $HardwareUnitCoverageGaps = [ordered]@{
 }
 $HardwareIntegrationCoverageGaps = [ordered]@{
@@ -838,9 +780,8 @@ $HilTestSafety = @{
 # ===========================
 if ($Tests.Count -gt 0) {
     $TestList = $Tests
-    # $IsMandatorySuite is determined solely by $Suite, even when -Tests overrides the list.
-    # This allows the behavioral sentinel integration test to inject a custom test list
-    # while still exercising the HardwareMandatory control flow.
+    # $IsMandatorySuite is determined solely by $Suite, even when -Tests overrides the list (the behavioral sentinel
+    # test injects a custom list while exercising the hardware-suite control flow).
 } else {
     $TestList = switch ($Suite) {
         "Unit"                  { $UnitTests }
@@ -848,15 +789,13 @@ if ($Tests.Count -gt 0) {
         "All"                   { $UnitTests + $IntegrationTests }
         "HardwareUnit"          { $HardwareUnitTests }
         "HardwareIntegration"   { $HardwareIntegrationTests }
-        "HardwareMandatory"     { $HardwareMandatoryTests }
-        "HardwareMutation"      { $HardwareMutationTests }
     }
 }
-# HardwareMandatory enforces hard failures: binary missing = FAIL, driver loss = FAIL.
-# This must be determined by Suite alone - not by whether -Tests was used.
-$IsMandatorySuite = ($Suite -eq "HardwareMandatory")
+# Every hardware suite is mandatory verification (Q 2026-11-03): binary missing = FAILED(BUILD), driver loss =
+# FAILED(INFRA), exit 2 SKIP_ONLY = FAILED(SKIP_ONLY).  Determined by Suite alone - not by whether -Tests was used.
+$IsMandatorySuite = ($Suite -in @('HardwareUnit', 'HardwareIntegration'))
 
-# Verification class (not a new lane): every suite, HardwareMutation included, is mandatory verification
+# Verification class (not a new lane): every suite is mandatory verification
 # (tools/lib/TestVerdict.ps1).  Mandatory + SKIP_NOT_IMPLEMENTED = INCOMPLETE, mandatory + INCONCLUSIVE = nonpassing.
 $IsOptionalVerification = ((Get-AvbSuiteVerificationClass -Suite $Suite) -eq 'optional')
 
@@ -868,8 +807,6 @@ if ($TestTimeoutSeconds -eq 0) {
         "All"               { 120 }
         "HardwareUnit"      { 300 }
         "HardwareIntegration" { 600 }
-        "HardwareMandatory" { 300 }
-        "HardwareMutation"  { 300 }
         default             { 120 }
     }
 }
@@ -2558,17 +2495,16 @@ if ($IsHardwareSuite) {
 $coverageGapTests = 0
 if ($IsHardwareSuite -and $Tests.Count -eq 0) {
     $gapTable = $null
-    if ($Suite -eq 'HardwareMandatory')       { $gapTable = $HardwareMandatoryCoverageGaps }
-    elseif ($Suite -eq 'HardwareUnit')        { $gapTable = $HardwareUnitCoverageGaps }
+    if ($Suite -eq 'HardwareUnit')            { $gapTable = $HardwareUnitCoverageGaps }
     elseif ($Suite -eq 'HardwareIntegration') { $gapTable = $HardwareIntegrationCoverageGaps }
     if ($null -ne $gapTable) {
         $effGaps = Get-AvbHilEffectiveGaps -GapTable $gapTable -TestList $TestList
         foreach ($g in @($effGaps.Keys)) { Add-HilCoverageGap -Entry $g -Reason $effGaps[$g] }
     }
-    # Attended-only mutation entries: NOT EXECUTED gap under GitHub Actions, executed on an attended run.
-    if ($Suite -eq 'HardwareMutation') {
-        foreach ($g in @($HardwareMutationAttendedOnly.Keys)) {
-            if ($UnderGitHubActions) { Add-HilCoverageGap -Entry $g -Reason $HardwareMutationAttendedOnly[$g] }
+    # Attended-only HardwareIntegration entries: failing NOT EXECUTED blocker under GitHub Actions, executed outside it.
+    if ($Suite -eq 'HardwareIntegration') {
+        foreach ($g in @($HardwareIntegrationAttendedOnly.Keys)) {
+            if ($UnderGitHubActions) { Add-HilCoverageGap -Entry $g -Reason $HardwareIntegrationAttendedOnly[$g] }
             else { $TestList = @($TestList) + @($g) }
         }
     }
@@ -2593,7 +2529,7 @@ foreach ($WorkItem in $WorkItems) {
     $targetDid = $WorkItem.Target
     $failFastStop = $false
     # Separate the binary name from any arguments embedded in the test name.
-    # HardwareMutation entries like "test_ptp_phc_stability --case UT-CORR-005"
+    # Entries like "test_ptp_phc_stability --case UT-CORR-005"
     # embed arguments after the binary name. Split them here so the path lookup
     # uses only the binary name and arguments are passed correctly.
     #
@@ -2825,7 +2761,7 @@ foreach ($WorkItem in $WorkItems) {
         $failedTests++
         Add-AvbResult -Name $exeName -Status "FAILED(SKIP_ONLY)" -Exit $exitCode
     } elseif ($exitCode -eq 2) {
-        # Exit 2 = SKIP_ONLY on a non-mandatory suite (Unit/Integration/HardwareUnit).
+        # Exit 2 = SKIP_ONLY on an offline suite (Unit/Integration; hardware suites: FAILED(SKIP_ONLY) above).
         # Section L passed; Section H skipped because driver is absent.
         # Expected on GitHub-hosted runners and any machine without the driver installed.
         $skippedTests++

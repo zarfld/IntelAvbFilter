@@ -18,7 +18,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | Context | Entry point | Hardware | Gates applied |
 |---|---|---|---|
 | GitHub-hosted CI (`ci-standards-compliance.yml`, `windows-latest`, Debug + Release) | `Run-Tests-CI.ps1 -Suite Unit` / `-Suite Integration` | none — hardware-independent tests only | build provenance, verdict contract |
-| Self-hosted HIL CI (`hil.yml`, `[self-hosted, Windows, i226]`, `hil-debug` then `hil-release`) | `Run-Tests-CI.ps1 -Suite HardwareUnit / HardwareIntegration / HardwareMutation / HardwareMandatory` after authorized deployment of the staged driver package | real NICs + deployed driver | provenance, deployment identity, safety registry, baseline/state check, halt propagation (`-PriorResultsDir`) |
+| Self-hosted HIL CI (`hil.yml`, `[self-hosted, Windows, i226]`, `hil-debug` then `hil-release`) | `Run-Tests-CI.ps1 -Suite HardwareUnit / HardwareIntegration` (the only hardware suites, Q 2026-11-03) after authorized deployment of the staged driver package | real NICs + deployed driver | provenance, deployment identity, safety registry, baseline/state check, halt propagation (`-PriorResultsDir`) |
 | Local complete run, Debug **and** Release | `tools\archive\deprecated\LocalSuites.ps1` (elevated; builds, reinstalls driver, preflight, four suites per configuration) | real NICs | `Run-Tests-CI.ps1 -LocalDiagnostic`: safety gates as HIL CI, build provenance reported per item but not enforced; evidence class `LOCAL_DIAGNOSTIC` |
 | Local single entry | `Run-Tests-Elevated.ps1 -Suite <Hardware*> -TestName '<entry>'` | real NICs | same as above (`-LocalDiagnostic`) |
 | Local single program | `Run-Tests-Elevated.ps1 -TestName <name>` → `Run-Tests.ps1 -TestExecutable` → its registered runner entry | real NICs | same as above (`-LocalDiagnostic`); unregistered programs fail closed |
@@ -32,7 +32,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | Parameter | Notes |
 |---|---|
 | `-Configuration Debug\|Release` | default `Debug` |
-| `-Suite Unit\|Integration\|All\|HardwareUnit\|HardwareIntegration\|HardwareMandatory\|HardwareMutation` | default `Unit` |
+| `-Suite Unit\|Integration\|All\|HardwareUnit\|HardwareIntegration` | default `Unit`. Both hardware suites are mandatory verification: missing binary = `FAILED(BUILD)`, driver lost = `FAILED(INFRA)`, exit 2 = `FAILED(SKIP_ONLY)` |
 | `-Tests <entry>[,...]` | overrides the suite list; names **without** `.exe`; an entry may carry args, e.g. `'test_ptp_phc_stability --case UT-CORR-005'` |
 | `-TestTimeoutSeconds <n>` | default per suite (Unit 60, Integration 120, HardwareUnit 300, HardwareIntegration 600, Mandatory/Mutation 300); per-entry overrides never lower it |
 | `-ResultsJson <path>` | machine-readable results (`avb-runner-results/1`); default `logs\results-<Suite>-<Config>-<timestamp>.json` |
@@ -40,24 +40,28 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | `-HilLockWaitSeconds <n>` | attended runs only; default 60 |
 | `-FailFast` | stops after the first failure — **not** for gate or completeness evidence |
 | `-LogsDir` | sandbox/self-test use only; ordinary HIL runs must not pass it |
-| `-LocalDiagnostic` | manual local runs only: existing binaries run even if built from another revision / changed sources / not in the manifest; provenance recorded per item, evidence `LOCAL_DIAGNOSTIC`. Refused (exit 1, nothing runs) under `GITHUB_ACTIONS=true` or with `AVB_HIL_EXPECTED_REVISION` set. Without it, provenance is enforced as before |
+| `-LocalDiagnostic` | manual local runs: existing binaries run even if built from another revision / changed sources / not in the manifest; provenance recorded per item, evidence `LOCAL_DIAGNOSTIC`. **Default outside CI** (no `GITHUB_ACTIONS=true`, no `AVB_HIL_EXPECTED_REVISION`), so a direct call is never blocked by provenance. Refused (exit 1, nothing runs) under CI |
+| `-EnforceProvenance` | strict local provenance outside CI (clean committed revision = HEAD, or the local build-input digest; otherwise `BLOCKED(PROVENANCE)`). Under CI provenance is always enforced. Refused together with `-LocalDiagnostic` |
 | `-CaptureDbgView` | rejected on purpose; use `Run-Tests-Elevated.ps1 -CaptureDbgView` |
 
 `tools/test/Run-Tests-Elevated.ps1` — local wrapper; elevates via UAC, transcript to `logs\`, caller terminal shows almost nothing.
 
 | Parameter | Notes |
 |---|---|
-| `-Suite HardwareUnit\|HardwareIntegration\|HardwareMandatory\|HardwareMutation` | routes `-TestName` through `Run-Tests-CI.ps1` with all gates; requires `-TestName` |
+| `-Suite HardwareUnit\|HardwareIntegration` | routes through `Run-Tests-CI.ps1 -LocalDiagnostic` with all gates: with `-TestName` that one entry, without it every registered entry of the suite |
 | `-TestName <entry>` | with `-Suite`: the runner entry; without: legacy single binary (`.exe` appended if missing) |
 | `-TestArgs <args>` | appended to the entry |
 | `-Configuration Debug\|Release` | default `Debug` |
 | `-ResultsJson <path>` | with `-Suite` only |
+| `-PriorResultsDir <dir>` | with `-Suite` only: earlier results documents of the same run, so a halt keeps later Init/Mutating tests BLOCKED |
 | `-CaptureDbgView` | DebugView kernel capture; the test does not run if the capture cannot be confirmed |
 | `-TimeoutSeconds <n>` | bound for the elevated child, default 1800; expiry = TIMEOUT |
 | `-LogFile <path>` | default `logs\<TestName>_<timestamp>.log` |
 | `-Full` | legacy `Run-Tests.ps1 -Full` (no HIL gates) |
 
 `tools/archive/deprecated/LocalSuites.ps1` — despite the folder name, the current operator-driven complete local run: `-Configurations Debug,Release` (default both), `-NoReproduce`, `-ReportDir`.
+
+`tools/archive/deprecated/FullSuite.ps1` — operator script, no parameters: per configuration build driver + tests, reinstall, then `Unit`, `Integration` (`Run-Tests-CI.ps1`) and the two hardware suites HardwareUnit, HardwareIntegration (`Run-Tests-Elevated.ps1 -Suite <suite> -CaptureDbgView`, whole suite), chained through `-PriorResultsDir logs\FullSuite_<timestamp>`; summary from the results documents. Then, per configuration, the operator's authoritative per-program loop: every built `*.exe` through `Run-Tests-Elevated.ps1 -TestName <exe> -CaptureDbgView` (per-test elevation and DebugView; same runner gates), except `test_s3_sleep_wake` and `test_vv_corr_001_stability` until their infrastructure exists. Hardware* suites are NOT_EXECUTED for a configuration whose driver build or installation failed.
 
 `tools/build/Build-Tests.ps1` — `-Configuration`, `-TestName <target>`, `-ShowDetails`, `-BuildDiagnosticTools`, `-RequireDriverSha256`.
 
