@@ -18,6 +18,59 @@
 # All system access goes through the $Sys adapter (New-AvbRealSystem); tests/unit/ci/test_ci_driver_deploy.ps1
 # drives the same code with a scripted fake.
 
+# Service state from Service Control Manager codes only, never from command output text: German Windows prints
+# "OpenService FEHLER 1060" where the former sc.exe parser expected "FAILED 1060" and reported UNKNOWN instead of
+# NOT_FOUND (CI run 41500818916).  $Probe: @{ Win32Error = <int|$null>; Status = <SERVICE_* state 1..7|$null> }.
+# NOT_FOUND only for ERROR_SERVICE_DOES_NOT_EXIST (1060); anything else unresolved is UNKNOWN:<cause>.
+function ConvertTo-AvbServiceState {
+    param([hashtable]$Probe)
+    $err = $Probe['Win32Error']; $st = $Probe['Status']; $detail = $Probe['Detail']   # indexer: no throw under StrictMode
+    if ($null -ne $err -and $null -ne $st) { return "UNKNOWN:MALFORMED (Win32 error $err together with status $st)" }
+    if ($null -ne $err) {
+        if ($err -eq 1060) { return 'NOT_FOUND' }
+        if ($err -eq 5) { return 'UNKNOWN:ACCESS_DENIED (Win32 error 5)' }
+        return "UNKNOWN:WIN32_ERROR_$err"
+    }
+    if ($null -eq $st) { return "UNKNOWN:UNRESOLVED (no status and no Win32 error$(if ($detail) { ": $detail" }))" }
+    $names = @{ 1 = 'STOPPED'; 2 = 'START_PENDING'; 3 = 'STOP_PENDING'; 4 = 'RUNNING'; 5 = 'CONTINUE_PENDING'; 6 = 'PAUSE_PENDING'; 7 = 'PAUSED' }
+    if ($st -is [int] -and $names.ContainsKey($st)) { return $names[$st] }
+    return "UNKNOWN:MALFORMED (status $st)"
+}
+
+# Real probe.  get_Status() as a METHOD: reading the .Status property of an absent service returns $null in PowerShell
+# (property-getter exceptions are swallowed) instead of surfacing Win32 error 1060.
+function Get-AvbServiceState {
+    param([string]$Name)
+    $p = @{ Win32Error = $null; Status = $null; Detail = '' }
+    Add-Type -AssemblyName System.ServiceProcess
+    $sc = New-Object System.ServiceProcess.ServiceController($Name)
+    try { $p.Status = [int]$sc.get_Status() }
+    catch {
+        $w = $_.Exception; while ($w -and -not ($w -is [System.ComponentModel.Win32Exception])) { $w = $w.InnerException }
+        if ($w) { $p.Win32Error = $w.NativeErrorCode } else { $p.Detail = $_.Exception.Message }
+    } finally { $sc.Dispose() }
+    return (ConvertTo-AvbServiceState -Probe $p)
+}
+
+# Whether the next configuration may deploy on this machine after this deployment record (hil.yml machine_ok).
+# A failed deployment leaves the machine usable only when the state recorded after the failure is settled and known.
+# $Record: avb-hil-deployment/1 (deployment.json).  @{ Ok; Reason }
+function Get-AvbMachineOk {
+    param($Record)
+    if ($null -eq $Record) { return @{ Ok = $false; Reason = 'no deployment record: machine state unknown' } }
+    switch ([string]$Record.verdict) {
+        'DEPLOYED'         { return @{ Ok = $true; Reason = 'staged driver deployed and verified' } }
+        'REJECTED_PACKAGE' { return @{ Ok = $true; Reason = 'package rejected before the installer ran: installed driver untouched' } }
+        'DEPLOY_FAILED'    { }
+        default            { return @{ Ok = $false; Reason = "deployment verdict '$($Record.verdict)' needs the operator or left the machine in an unknown state" } }
+    }
+    $post = if ($Record.install) { $Record.install.postState } else { $null }
+    if ($null -eq $post) { return @{ Ok = $false; Reason = 'deployment failed without a recorded post-failure state: machine state unknown' } }
+    if ([string]$post.service -notin @('NOT_FOUND', 'STOPPED', 'RUNNING')) { return @{ Ok = $false; Reason = "deployment failed leaving service state '$($post.service)' (not settled/known)" } }
+    if (@($post.pendingRenames).Count -gt 0) { return @{ Ok = $false; Reason = 'deployment failed with a reboot-time replacement of IntelAvbFilter pending' } }
+    return @{ Ok = $true; Reason = "deployment failed; recorded post-failure state is settled (service $($post.service), no pending replacement): the next deployment replaces it" }
+}
+
 function New-AvbRealSystem {
     $drivers = Join-Path $env:SystemRoot 'System32\drivers'
     return @{
@@ -39,13 +92,14 @@ function New-AvbRealSystem {
         }
         # NOT_FOUND | RUNNING | STOPPED | STOP_PENDING | START_PENDING | UNKNOWN:<text>
         ServiceState = {
-            $q = (& sc.exe query IntelAvbFilter 2>&1 | Out-String)
-            if ($q -match 'FAILED 1060') { return 'NOT_FOUND' }
-            if ($q -match 'STATE\s*:\s*\d+\s+(\w+)') { return $Matches[1] }
-            return "UNKNOWN:$($q.Trim())"
+            Get-AvbServiceState -Name 'IntelAvbFilter'
         }
-        # @( @{ Name; Enabled } ) of MS_IntelAvbFilter bindings
-        Bindings = { @(Get-NetAdapterBinding -ComponentID 'MS_IntelAvbFilter' -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object { @{ Name = [string]$_.Name; Enabled = [bool]$_.Enabled } }) }
+        # @( @{ Name; Enabled } ) of MS_IntelAvbFilter bindings.  Only "component not found" means no binding; any other
+        # query error throws instead of looking like a completed removal.
+        Bindings = {
+            try { @(Get-NetAdapterBinding -ComponentID 'MS_IntelAvbFilter' -IncludeHidden -ErrorAction Stop | ForEach-Object { @{ Name = [string]$_.Name; Enabled = [bool]$_.Enabled } }) }
+            catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { @() } else { throw } }
+        }
         # Adapter carrying the IPv4/IPv6 default route (the runner's likely management connection) or $null
         ManagementAdapter = {
             $r = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0', '::/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1)
@@ -94,6 +148,11 @@ function Invoke-AvbCiDriverDeployment {
     $step = { param([string]$Name, [bool]$Ok, [string]$Detail) $res.steps += ,([ordered]@{ step = $Name; ok = $Ok; detail = $Detail }) }
     $finish = { param([string]$Outcome, [string]$Reason)
         $res.outcome = $Outcome; $res.reason = $Reason
+        # The state a failure left behind (read-only queries) decides machine_ok.  Not after NEEDS_OPERATOR: netcfg may
+        # still be running and hold the INetCfg lock.
+        if ($Outcome -eq 'FAILED' -and $null -eq $res.postState) {
+            try { $res.postState = Get-AvbDeployState $Sys } catch { $res.postState = [ordered]@{ service = "UNKNOWN:UNRESOLVED (post-state query failed: $($_.Exception.Message))" } }
+        }
         $res.exitCode = switch ($Outcome) { 'DEPLOYED' { 0 } 'NEEDS_OPERATOR' { 3 } default { 1 } }
         return $res }
     $drivers = $Sys.DriversDir
@@ -128,6 +187,7 @@ function Invoke-AvbCiDriverDeployment {
         $u = & $Sys.Invoke 'netcfg.exe' @('-u', 'MS_IntelAvbFilter') $StepTimeoutSeconds ''
         & $step 'netcfg-uninstall' ($u.Completed -and $u.ExitCode -eq 0) "completed=$($u.Completed) rc=$($u.ExitCode) $($u.Output)"
         if (-not $u.Completed) { return (& $finish 'NEEDS_OPERATOR' "netcfg -u did not finish in ${StepTimeoutSeconds}s (left running; #328 hang signature)") }
+        if ($u.ExitCode -ne 0) { return (& $finish 'FAILED' ("netcfg -u returned rc {0} (0x{1:X8}): removal of MS_IntelAvbFilter not confirmed, nothing installed: {2}" -f $u.ExitCode, $u.ExitCode, $u.Output)) }
         $w = Wait-AvbServiceState -Sys $Sys -Want @('NOT_FOUND', 'STOPPED') -TimeoutSeconds $StepTimeoutSeconds
         & $step 'service-released' $w.Ok "state $($w.State) after $($w.Waited)s"
         if (-not $w.Ok) {

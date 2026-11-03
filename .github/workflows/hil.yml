@@ -523,11 +523,15 @@ jobs:
         if: always()
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
+          # machineOk is decided by the deployment from its recorded state (tools/lib/DriverDeploy.ps1 Get-AvbMachineOk):
+          # a failed deployment counts only with a settled, known post-failure state; IN_FLIGHT (job lost) has no machineOk.
+          # No record: no deployment touched the machine (blocked before it), the next job's own preflight decides.
           $f = Join-Path $env:RUNNER_TEMP 'hil-evidence\deployment.json'
-          $v = if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).verdict } else { 'NONE' }
-          $ok = if ($v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT') { 'false' } else { 'true' }
+          $d = if (Test-Path -LiteralPath $f) { Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } else { $null }
+          $v = if ($d) { $d.verdict } else { 'NONE' }
+          $ok = if ($null -eq $d) { 'true' } elseif ($d.PSObject.Properties['machineOk'] -and $d.machineOk -eq $true) { 'true' } else { 'false' }
           "machine_ok=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "deployment verdict $v -> machine_ok=$ok"
+          Write-Host "deployment verdict $v -> machine_ok=$ok ($(if ($d -and $d.PSObject.Properties['machineOkReason']) { $d.machineOkReason } else { 'no machineOk in the record' }))"
 
       - name: Release the HIL machine lock
         if: always()
@@ -732,11 +736,15 @@ jobs:
         if: always()
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
+          # machineOk is decided by the deployment from its recorded state (tools/lib/DriverDeploy.ps1 Get-AvbMachineOk):
+          # a failed deployment counts only with a settled, known post-failure state; IN_FLIGHT (job lost) has no machineOk.
+          # No record: no deployment touched the machine (blocked before it), the next job's own preflight decides.
           $f = Join-Path $env:RUNNER_TEMP 'hil-evidence\deployment.json'
-          $v = if (Test-Path -LiteralPath $f) { (Get-Content -LiteralPath $f -Raw | ConvertFrom-Json).verdict } else { 'NONE' }
-          $ok = if ($v -in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT') { 'false' } else { 'true' }
+          $d = if (Test-Path -LiteralPath $f) { Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } else { $null }
+          $v = if ($d) { $d.verdict } else { 'NONE' }
+          $ok = if ($null -eq $d) { 'true' } elseif ($d.PSObject.Properties['machineOk'] -and $d.machineOk -eq $true) { 'true' } else { 'false' }
           "machine_ok=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "deployment verdict $v -> machine_ok=$ok"
+          Write-Host "deployment verdict $v -> machine_ok=$ok ($(if ($d -and $d.PSObject.Properties['machineOkReason']) { $d.machineOkReason } else { 'no machineOk in the record' }))"
 
       - name: Release the HIL machine lock
         if: always()
