@@ -81,8 +81,15 @@ param(
     # post-test checks are unchanged.  Evidence class LOCAL_DIAGNOSTIC, never CI.  Refused under GitHub Actions or an
     # authorized HIL revision (AVB_HIL_EXPECTED_REVISION).  Passed by the local entry points only (Run-Tests-Elevated.ps1,
     # Run-Tests.ps1, LocalSuites.ps1); never by a workflow (TEST-HILPROV-068).
+    # Since Q 2026-11-03 also the DEFAULT outside CI (no GITHUB_ACTIONS=true, no AVB_HIL_EXPECTED_REVISION): a direct
+    # call of this runner is a manual local run (TEST-HILPROV-069).
     [Parameter(Mandatory=$false)]
     [switch]$LocalDiagnostic,
+
+    # Strict local provenance (clean committed revision = HEAD, or the local build-input digest) outside CI.  Under CI
+    # provenance is always enforced, with or without this switch.
+    [Parameter(Mandatory=$false)]
+    [switch]$EnforceProvenance,
 
     # NOT SUPPORTED here: this runner never captured DebugView output although it accepted the switch.  Kernel
     # capture for one test is tools\test\Run-Tests-Elevated.ps1 -TestName <test> -CaptureDbgView.  The switch is
@@ -103,6 +110,13 @@ if ($LocalDiagnostic -and ($env:GITHUB_ACTIONS -eq 'true' -or $env:AVB_HIL_EXPEC
     Write-Host "[FAIL] -LocalDiagnostic is refused under CI (GITHUB_ACTIONS='$env:GITHUB_ACTIONS', AVB_HIL_EXPECTED_REVISION='$env:AVB_HIL_EXPECTED_REVISION'): CI-HIL evidence always enforces build provenance --- no test executed" -ForegroundColor Red
     exit 1
 }
+if ($LocalDiagnostic -and $EnforceProvenance) {
+    Write-Host "[FAIL] -LocalDiagnostic and -EnforceProvenance contradict each other --- no test executed" -ForegroundColor Red
+    exit 1
+}
+# Provenance contract (Q 2026-11-03): enforced under CI and with -EnforceProvenance; any other run is manually initiated
+# and local - provenance reported per item, not enforced (LOCAL_DIAGNOSTIC).  Everything below reads $LocalDiagnostic.
+if (-not ($env:GITHUB_ACTIONS -eq 'true' -or $env:AVB_HIL_EXPECTED_REVISION -or $EnforceProvenance)) { $LocalDiagnostic = [switch]$true }
 
 # ===========================
 # No admin check here -- by design.
@@ -1557,6 +1571,25 @@ function Add-AvbCleanupResult {
 
 # Evidence class of a results document.  A -LocalDiagnostic run (provenance reported, not enforced) is LOCAL_DIAGNOSTIC:
 # never 'ci', never 'local' / 'local-pre-commit'.  A sandbox run stays 'sandbox' whatever it requested.
+# Identity of the installed driver for this run (results document 'installedDriver').  Read-only SHA256 comparison with
+# the local driver builds (build\x64\<Config>\IntelAvbFilter\IntelAvbFilter.sys) and, in CI, the staged package SHA256.
+# A runner never installs, replaces or starts a driver (LocalSuites.ps1 / FullSuite.ps1 and the CI deployment do).
+function Get-AvbInstalledDriverIdentity {
+    param([string]$InstalledPath, [string]$RepoRoot, [string]$Configuration, [string]$StagedSha256)
+    $id = [ordered]@{ path = $InstalledPath; sha256 = $null; identifiedAs = 'NOT_INSTALLED'; requestedConfiguration = $Configuration; matchesConfiguration = $false; builds = [ordered]@{} }
+    foreach ($c in 'Debug', 'Release') {
+        $p = Join-Path $RepoRoot "build\x64\$c\IntelAvbFilter\IntelAvbFilter.sys"
+        $id.builds[$c] = if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } else { $null }
+    }
+    if (-not (Test-Path -LiteralPath $InstalledPath)) { return $id }
+    $id.sha256 = (Get-FileHash -LiteralPath $InstalledPath -Algorithm SHA256).Hash
+    if ($StagedSha256 -and $id.sha256 -eq $StagedSha256.ToUpperInvariant()) { $id.identifiedAs = 'STAGED'; $id.matchesConfiguration = $true; return $id }
+    $hit = @($id.builds.Keys | Where-Object { $id.builds[$_] -eq $id.sha256 })
+    $id.identifiedAs = if ($hit.Count -eq 1) { $hit[0] } else { 'UNIDENTIFIED' }
+    $id.matchesConfiguration = ($id.identifiedAs -eq $Configuration)
+    return $id
+}
+
 function Get-AvbEvidenceClass {
     param([bool]$UnderGitHubActions, [bool]$IsSandbox, [bool]$LocalDiagnostic, $Source)
     if ($UnderGitHubActions -and -not $IsSandbox) { return 'ci' }
@@ -1598,6 +1631,7 @@ function Write-AvbResultsJson {
         source = $(if ($src) { [ordered]@{ ok = $src.Ok; revision = $src.Revision; dirty = $src.Dirty; mode = $src.Mode; digest = $src.Digest; error = $src.Error } } else { $null })
         buildManifest = $(if ($script:BuildManifest) { [ordered]@{ ok = $script:BuildManifest.Ok; path = $script:BuildManifest.Path; error = $script:BuildManifest.Error } } else { $null })
         driverIdentity = [ordered]@{ source = 'environment (HIL_DRIVER_*), not verified by this runner'; version = $env:HIL_DRIVER_VERSION; sha256 = $env:HIL_DRIVER_SHA256 }
+        installedDriver = $script:InstalledDriver
         adapters = $adapters; stateHalt = $script:stateHalt
         machineSafety = $(if ($script:HilSafetyState) { [ordered]@{ path = $script:HilSafetyPath; stateAtStart = $script:HilSafetyState.State; why = $script:HilSafetyState.Why } } else { $null })
         executedCount = @($records | Where-Object { $_.executed }).Count; notExecutedCount = @($records | Where-Object { -not $_.executed -and -not $_.check }).Count
@@ -2332,6 +2366,17 @@ $ResultsJsonPath  = if ($ResultsJson) { [System.IO.Path]::GetFullPath($ResultsJs
 # their baseline on (device_id x driver_build)
 $env:AVB_DRIVER_BUILD = $Configuration
 Write-Note "AVB_DRIVER_BUILD=$Configuration (baseline context for perf regression)"
+
+# Which driver this run tests: identified, recorded, never installed here.  A mismatch does not block (the results
+# describe the installed driver); installation belongs to LocalSuites.ps1 / FullSuite.ps1 and the CI deployment.
+$InstalledDriver = Get-AvbInstalledDriverIdentity -InstalledPath (Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys') `
+                       -RepoRoot $repoRoot -Configuration $Configuration -StagedSha256 $env:HIL_STAGED_DRIVER_SHA256
+$drvShort = if ($InstalledDriver.sha256) { $InstalledDriver.sha256.Substring(0, 16) + '...' } else { 'none' }
+if ($InstalledDriver.matchesConfiguration) {
+    Write-Note "Installed driver: $drvShort = $($InstalledDriver.identifiedAs) build (requested -Configuration $Configuration)"
+} else {
+    Write-Host "[WARN] Installed driver: $drvShort is $($InstalledDriver.identifiedAs), requested -Configuration $Configuration --- results describe the installed driver; this runner never installs one" -ForegroundColor Yellow
+}
 
 $HilSafetyPath = $null; $HilSafetyState = $null; $SourceIdentity = $null
 if ($IsHardwareSuite) {
