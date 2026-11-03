@@ -240,9 +240,10 @@ tc_check 'TEST-LOCALSUITES-019-untrusted-results-document-is-a-failure-row-and-t
     ("row={0}/{1}/executed={2} notOk-branch={3} res.Doc outside trusted branch={4} breaks=[{5}]" -f $ur.Category, $ur.Verdict, $ur.Executed, [bool]$notOk, $docOutsideElse, ($breaks -join ' || '))
 
 # 020: after a suite with failures/blocked items: optional bounded operator stop window, default CONTINUE; only the
-# explicit stop choice ends the run (intent Q 2026-10-22).
+# explicit stop choice ends the run (intent Q 2026-10-22).  Window length: the operator's committed 3 s (16be977,
+# Q 2026-11-03; was 30 s).
 tc_check 'TEST-LOCALSUITES-020-failed-suite-offers-a-bounded-stop-window-default-continue' `
-    (($loopText -match "Read-AvbTimedChoice -Prompt `"[^`"]*stop[^`"]*`" -Seconds 30 -Default 'continue'") -and ($loopText -match "-eq 'stop'\) \{ \`$Stop = `"operator stop")) `
+    (($loopText -match "Read-AvbTimedChoice -Prompt `"[^`"]*stop[^`"]*`" -Seconds 3 -Default 'continue'") -and ($loopText -match "-eq 'stop'\) \{ \`$Stop = `"operator stop")) `
     'no bounded default-continue stop window after a failed suite'
 $iInstall = $ls.IndexOf('Install-Driver-Elevated $Configuration'); $iPre = $ls.IndexOf('Invoke-AvbPreFlight $cfg.builtDriverSha256'); $iSuites = $ls.IndexOf('foreach ($Suite in $Suites)')
 tc_check 'TEST-LOCALSUITES-011-installed-driver-must-equal-the-locally-built-driver-before-any-suite' `

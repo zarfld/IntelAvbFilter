@@ -214,21 +214,25 @@ foreach ($e in $wantCls.Keys) {
 }
 tc_check 'TEST-HILGATE-043-formerly-commented-out-tests-are-declared-gaps-never-silently-absent' ($silent.Count -eq 0) ($silent -join '; ')
 
-# The TSN configuration entries (TAS/FP/PTM) and the observed irreversible PHC mutation are declared gaps.
+# The TSN configuration entries (TAS/FP/PTM) and the observed irreversible PHC mutation: declared gaps or listed (below).
 $mustGap = @{ HardwareUnit = @('test_ioctl_tas', 'test_ioctl_fp_ptm', 'test_ptp_freq_complete')
               HardwareIntegration = @('avb_test_portability', 'avb_test_i217', 'avb_test_i225', 'avb_test_i226_um', 'test_tsn_ioctl_handlers_um') }
-# Lists are authoritative (Q 2026-10-22): each entry is either a declared gap or listed and then contained at dispatch -
-# TSN configuration by the #328 hazard hold (081); test_ptp_freq_complete (I226 TIMINCA CLEANUP_FAILED 2026-10-20) as
-# exact-target with TIMINCA among the runner-verified states, so a repeat is CLEANUP_FAILED + halt, never hidden.
+# Lists are authoritative (Q 2026-10-22): each entry is either a declared gap or listed and dispatched.  Since the static
+# dispatch blocks were removed (Q 2026-11-03) nothing contains the TSN configuration entries at dispatch: they execute
+# unattended (actual gate decision, no target, GitHub Actions) and keep their #328 hazard record only as documentation
+# (081) - it is no containment and the runner does not observe TAS/FP/PTM restoration.  test_ptp_freq_complete (I226
+# TIMINCA CLEANUP_FAILED 2026-10-20) is exact-target with TIMINCA among the runner-verified states, so a repeat is an
+# observed cleanup FAILED, never hidden.
 $notGap = @()
 $verifiable = @(Get-RunnerList 'HilVerifiableState')
 foreach ($s in $mustGap.Keys) { foreach ($e in $mustGap[$s]) {
     $isGap = ($null -ne $gapTables[$s] -and $gapTables[$s].Contains($e))
     $listed = (@($hwLists["${s}Tests"]) | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey $_ } else { $_ } }) -contains $e
-    $contained = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $holds.ContainsKey($e) }
-    if (-not ($isGap -or ($listed -and $contained))) { $notGap += "${s}: $e (gap=$isGap listed=$listed contained=$contained)" }
+    $dispatched = (Get-Gate $e '' $true).Action -eq 'Run'
+    $accounted = if ($e -eq 'test_ptp_freq_complete') { (Get-Cls $e) -eq 'Mutating:Target' -and $verifiable -contains 'TIMINCA' } else { $holds.ContainsKey($e) -and $holds[$e] -match '#328' }
+    if (-not ($isGap -or ($listed -and $dispatched -and $accounted))) { $notGap += "${s}: $e (gap=$isGap listed=$listed dispatched=$dispatched accounted=$accounted)" }
 } }
-tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-gaps-or-contained-at-dispatch' ($notGap.Count -eq 0) ("neither: {0}" -f ($notGap -join ', '))
+tc_check 'TEST-HILGATE-034-tsn-and-irreversible-phc-entries-are-gaps-or-dispatched-with-hazard-record-or-observed-restoration' ($notGap.Count -eq 0) ("neither: {0}" -f ($notGap -join ', '))
 
 # Coverage restored (Q 2026-10-22: repair, do not exclude).  test_ptp_phc_stability without arguments runs only
 # UT-CORR-007/008 (main(): run_009 needs --case UT-CORR-009 or --allow-lifecycle, both runner-controlled); the
