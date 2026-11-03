@@ -24,8 +24,9 @@
     [Parameter(Mandatory=$false)]
     [switch]$CaptureDbgView,
 
-    # Run -TestName through tools\test\Run-Tests-CI.ps1 in this Hardware* suite (build provenance, safety class,
-    # adapter baseline and post-test state check apply) instead of the legacy dispatcher Run-Tests.ps1.
+    # Run -TestName through tools\test\Run-Tests-CI.ps1 -LocalDiagnostic in this Hardware* suite (safety class, adapter
+    # baseline and post-test state check apply; build provenance is reported, not enforced) instead of the legacy
+    # dispatcher Run-Tests.ps1.
     # -TestName is then the runner entry, e.g. 'test_ptp_phc_stability --case UT-CORR-005' or 'ps1:tests/...'.
     [Parameter(Mandatory=$false)]
     [ValidateSet('', 'HardwareUnit', 'HardwareIntegration', 'HardwareMandatory', 'HardwareMutation')]
@@ -59,6 +60,7 @@ function New-AvbElevatedCommand {
         $entry = if ($TestArgs) { "$TestName $TestArgs" } else { $TestName }
         $command += "try { & $(ConvertTo-AvbPsLiteral $RunCiScript) -Suite $Suite -Configuration $Configuration -Tests @($(ConvertTo-AvbPsLiteral $entry))"
         if ($ResultsJson) { $command += " -ResultsJson $(ConvertTo-AvbPsLiteral $ResultsJson)" }
+        $command += " -LocalDiagnostic"   # manual run: provenance reported, not enforced (the legacy path gets it from Run-Tests.ps1)
     } else {
         $command += "try { & $(ConvertTo-AvbPsLiteral $LegacyScript) -Configuration $Configuration"
         if ($Full) { $command += " -Full" }

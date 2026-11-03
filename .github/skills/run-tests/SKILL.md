@@ -19,9 +19,9 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 |---|---|---|---|
 | GitHub-hosted CI (`ci-standards-compliance.yml`, `windows-latest`, Debug + Release) | `Run-Tests-CI.ps1 -Suite Unit` / `-Suite Integration` | none — hardware-independent tests only | build provenance, verdict contract |
 | Self-hosted HIL CI (`hil.yml`, `[self-hosted, Windows, i226]`, `hil-debug` then `hil-release`) | `Run-Tests-CI.ps1 -Suite HardwareUnit / HardwareIntegration / HardwareMutation / HardwareMandatory` after authorized deployment of the staged driver package | real NICs + deployed driver | provenance, deployment identity, safety registry, baseline/state check, halt propagation (`-PriorResultsDir`) |
-| Local complete run, Debug **and** Release | `tools\archive\deprecated\LocalSuites.ps1` (elevated; builds, reinstalls driver, preflight, four suites per configuration) | real NICs | same runner gates; evidence class `local` / `local-pre-commit` |
-| Local single entry, gated | `Run-Tests-Elevated.ps1 -Suite <Hardware*> -TestName '<entry>'` | real NICs | same runner gates as HIL CI |
-| Local single binary, legacy | `Run-Tests-Elevated.ps1 -TestName <name>` → `Run-Tests.ps1 -TestExecutable` | real NICs | **none of the HIL gates** — diagnostic use only, never gate or GREEN evidence for a hardware test |
+| Local complete run, Debug **and** Release | `tools\archive\deprecated\LocalSuites.ps1` (elevated; builds, reinstalls driver, preflight, four suites per configuration) | real NICs | `Run-Tests-CI.ps1 -LocalDiagnostic`: safety gates as HIL CI, build provenance reported per item but not enforced; evidence class `LOCAL_DIAGNOSTIC` |
+| Local single entry | `Run-Tests-Elevated.ps1 -Suite <Hardware*> -TestName '<entry>'` | real NICs | same as above (`-LocalDiagnostic`) |
+| Local single program | `Run-Tests-Elevated.ps1 -TestName <name>` → `Run-Tests.ps1 -TestExecutable` → its registered runner entry | real NICs | same as above (`-LocalDiagnostic`); unregistered programs fail closed |
 
 `Run-Tests-CI.ps1` is **not** "hardware-independent only": `-Suite Unit/Integration/All` are; the four `Hardware*` suites are the HIL gates.
 
@@ -40,6 +40,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 | `-HilLockWaitSeconds <n>` | attended runs only; default 60 |
 | `-FailFast` | stops after the first failure — **not** for gate or completeness evidence |
 | `-LogsDir` | sandbox/self-test use only; ordinary HIL runs must not pass it |
+| `-LocalDiagnostic` | manual local runs only: existing binaries run even if built from another revision / changed sources / not in the manifest; provenance recorded per item, evidence `LOCAL_DIAGNOSTIC`. Refused (exit 1, nothing runs) under `GITHUB_ACTIONS=true` or with `AVB_HIL_EXPECTED_REVISION` set. Without it, provenance is enforced as before |
 | `-CaptureDbgView` | rejected on purpose; use `Run-Tests-Elevated.ps1 -CaptureDbgView` |
 
 `tools/test/Run-Tests-Elevated.ps1` — local wrapper; elevates via UAC, transcript to `logs\`, caller terminal shows almost nothing.
@@ -60,7 +61,7 @@ Invocation mechanics only. What a verdict **means**, which tests apply, multi-ad
 
 `tools/build/Build-Tests.ps1` — `-Configuration`, `-TestName <target>`, `-ShowDetails`, `-BuildDiagnosticTools`, `-RequireDriverSha256`.
 
-`tools/test/Run-Tests.ps1` (legacy dispatcher) — `-Configuration`, `-Quick`, `-Full`, `-SkipHardwareCheck`, `-CollectLogs`, `-TestExecutable`, `-TestArgs`, `-HardwareOnly`, `-SecureBootCheck`. It applies no safety registry and no provenance gate.
+`tools/test/Run-Tests.ps1` (front end) — `-Configuration`, `-Quick`, `-Full`, `-SkipHardwareCheck`, `-CollectLogs`, `-TestExecutable`, `-TestArgs`, `-HardwareOnly`, `-SecureBootCheck`. It starts no test itself: every entry runs through `Run-Tests-CI.ps1 -LocalDiagnostic`.
 
 ## Commands
 
