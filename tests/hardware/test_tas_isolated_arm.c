@@ -93,6 +93,34 @@ static const DWORD g_armed_marks[] = {0, 1000, 2000, 5000, 10000, 30000};
 
 static int g_failed, g_blocked, g_ran;
 
+/* Non-negative while the adapter is armed and restoration has not reported */
+static volatile LONG g_pending_adapter = -1;
+static volatile LONG g_pending_did;
+
+static void report_abort(void)
+{
+    LONG adapter = InterlockedExchange(&g_pending_adapter, -1);
+    if (adapter >= 0) {
+        printf("[INCONCLUSIVE_RESTORATION] TC-TASARM-003/adapter:%ld did=0x%04lX: test aborted after SETUP_TAS, restoration not run; "
+               "run a NIC cycle, then TC-TSNREG-001\n", adapter, g_pending_did);
+        fflush(stdout);
+    }
+}
+
+static BOOL WINAPI on_console_ctrl(DWORD type)
+{
+    (void)type;
+    report_abort();
+    return FALSE;
+}
+
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *info)
+{
+    (void)info;
+    report_abort();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static void verdict(const char *tag, const char *tc, UINT32 adapter, avb_u16 did, const char *reason)
 {
     printf("[%s] %s/adapter:%u did=0x%04X%s%s\n", tag, tc, adapter, did, reason ? ": " : "", reason ? reason : "");
@@ -419,12 +447,17 @@ static void restore_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
 
     ZeroMemory(&e, sizeof(e));
     printf("\n  --- Restoration: NIC cycle ---\n");
+    fflush(stdout);
     if (find_devinst(id->net_luid, &inst)) {
         CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
         h = INVALID_HANDLE_VALUE;
         e.cycle_completed = cm_bounded(inst, FALSE, DISABLE_BOUND_MS);
-        Sleep(3000);
-        e.cycle_completed &= cm_bounded(inst, TRUE, ENABLE_BOUND_MS);
+        if (e.cycle_completed) {
+            Sleep(3000);
+            e.cycle_completed = cm_bounded(inst, TRUE, ENABLE_BOUND_MS);
+        } else {
+            printf("    enable not attempted: the disable did not complete and may still be pending in Windows\n");
+        }
     }
     if (h != INVALID_HANDLE_VALUE) {
         CloseHandle(h);
@@ -452,14 +485,24 @@ static void restore_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
             printf("    IoctlCount %llu -> %llu, FilterAttachCount %llu -> %llu\n", stats_before->IoctlCount, stats_after.IoctlCount,
                    stats_before->FilterAttachCount, stats_after.FilterAttachCount);
         }
-        e.driver_disarmed = read_armed(fresh, &armed) && armed == 0;
-        printf("    tasArmed=%u\n", armed);
+        if (read_armed(fresh, &armed)) {
+            e.driver_disarmed = (armed == 0);
+            printf("    tasArmed=%u\n", armed);
+        } else {
+            e.armed_unreadable = TRUE;
+            printf("    tasArmed unreadable\n");
+        }
 
         printf("  --- Registers after the cycle ---\n");
+        memset(after, 0xFF, sizeof(after));   /* ALL_ONES = not read, reported through regs_unreadable */
         e.regs_unreadable = read_regs(fresh, after);
+        e.tsn_mode_clear = TRUE;              /* TQAVCTRL unreadable is unmeasured, not a failure */
         e.regs_compared = (unsigned)REG_COUNT;
         for (i = 0; i < REG_COUNT; i++) {
-            if (after[i] != baseline[i] && after[i] != ALL_ONES) {
+            if (after[i] == ALL_ONES) {
+                continue;
+            }
+            if (after[i] != baseline[i]) {
                 printf("    CHANGED %-12s 0x%08X -> 0x%08X\n", g_regs[i].name, baseline[i], after[i]);
                 e.regs_changed++;
             }
@@ -489,10 +532,11 @@ static void restore_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
         CloseHandle(fresh);
     }
 
-    printf("    evidence: cycle=%d returned=%d attach=%d disarmed=%d tsnClear=%d compared=%u unreadable=%u changed=%u "
+    printf("    evidence: cycle=%d returned=%d attach=%d disarmed=%d armedUnreadable=%d tsnClear=%d compared=%u unreadable=%u changed=%u "
            "phcObserved=%d phcContinuous=%d link=%d txProbed=%d txHealthy=%d\n",
-           e.cycle_completed, e.adapter_returned, e.attach_observed, e.driver_disarmed, e.tsn_mode_clear, e.regs_compared,
+           e.cycle_completed, e.adapter_returned, e.attach_observed, e.driver_disarmed, e.armed_unreadable, e.tsn_mode_clear, e.regs_compared,
            e.regs_unreadable, e.regs_changed, e.phc_observed, e.phc_continuous, e.link_up, e.tx_probed, e.tx_healthy);
+    InterlockedExchange(&g_pending_adapter, -1);
     switch (tas_restoration_outcome(&e)) {
     case TAS_RESTORATION_VERIFIED:
         verdict("PASS", "TC-TASARM-003", index, id->device_id, "observed state restored; internal scheduler and FIFO state are not observable");
@@ -502,7 +546,7 @@ static void restore_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
         g_failed++;
         break;
     default:
-        verdict("CLEANUP_FAILED", "TC-TASARM-003", index, id->device_id, "restoration demonstrably incomplete; see evidence line. Recovery: operator NIC cycle, then TC-TSNREG-001; reboot is an operator decision");
+        verdict("CLEANUP_FAILED", "TC-TASARM-003", index, id->device_id, "restoration demonstrably incomplete; see evidence line. A timed-out disable may still be pending in Windows. Recovery: operator NIC cycle once it ends, then TC-TSNREG-001; reboot is an operator decision");
         g_failed++;
         break;
     }
@@ -580,6 +624,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
 
     /* First mutation.  From here restoration always runs, also when SETUP_TAS reports failure. */
     printf("\n  --- SETUP_TAS ---\n");
+    g_pending_did = id->device_id;
+    InterlockedExchange(&g_pending_adapter, (LONG)index);
     arm_ok = arm_tas(h, &arm_error);
     printf("    SETUP_TAS ok=%d win32=%lu\n", arm_ok, arm_error);
     take_sample(h, id->net_luid, 0, &now);
@@ -608,6 +654,8 @@ int main(void)
     BOOL debug_build;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+    SetConsoleCtrlHandler(on_console_ctrl, TRUE);
+    SetUnhandledExceptionFilter(on_crash);
     printf("=== IntelAvbFilter - isolated SETUP_TAS on real hardware (#328) ===\n");
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("[BLOCKED] TC-TASARM-001: Winsock unavailable\n");

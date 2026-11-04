@@ -25,6 +25,7 @@ typedef struct {
     BOOL adapter_returned;    /* same NET_LUID, device ID and MAC bound again */
     BOOL attach_observed;     /* FilterAttach ran, so a cycle really happened */
     BOOL driver_disarmed;     /* driver reports tasArmed = 0 */
+    BOOL armed_unreadable;    /* tasArmed could not be read: unmeasured, not a failure */
     BOOL tsn_mode_clear;      /* TQAVCTRL.TRANSMIT_MODE reads legacy */
     unsigned regs_compared;   /* registers compared with the baseline */
     unsigned regs_unreadable; /* registers that could not be read back */
@@ -39,12 +40,12 @@ typedef struct {
 static __inline TAS_RESTORATION_OUTCOME tas_restoration_outcome(const TAS_RESTORATION_EVIDENCE *e)
 {
     /* Demonstrated failures first: they outrank anything still unknown. */
-    if (!e->cycle_completed || !e->adapter_returned || !e->driver_disarmed || !e->tsn_mode_clear ||
-        e->regs_changed != 0 || (e->phc_observed && !e->phc_continuous) ||
+    if (!e->cycle_completed || !e->adapter_returned || (!e->driver_disarmed && !e->armed_unreadable) ||
+        !e->tsn_mode_clear || e->regs_changed != 0 || (e->phc_observed && !e->phc_continuous) ||
         (e->tx_probed && !e->tx_healthy)) {
         return TAS_RESTORATION_CLEANUP_FAILED;
     }
-    if (!e->attach_observed || e->regs_compared == 0 || e->regs_unreadable != 0 ||
+    if (!e->attach_observed || e->armed_unreadable || e->regs_compared == 0 || e->regs_unreadable != 0 ||
         !e->phc_observed || !e->link_up || !e->tx_probed) {
         return TAS_RESTORATION_INCONCLUSIVE;
     }

@@ -459,6 +459,10 @@ static void test_12_restoration_outcome(void) {
     e = full_restoration_evidence(); e.link_up = FALSE; e.tx_probed = FALSE; e.tx_healthy = FALSE;
     EXPECT_EQ("link down, no probe => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
 
+    /* Armed state that could not be read is unmeasured, not a demonstrated failure */
+    e = full_restoration_evidence(); e.driver_disarmed = FALSE; e.armed_unreadable = TRUE;
+    EXPECT_EQ("armed state unreadable => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
+
     /* A demonstrated failure outranks missing evidence */
     e = full_restoration_evidence(); e.regs_changed = 1; e.regs_unreadable = 1;
     EXPECT_EQ("failure outranks unknown", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
