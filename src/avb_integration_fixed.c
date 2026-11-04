@@ -1284,6 +1284,21 @@ VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext)
  * Called from IRP_MJ_CLEANUP handler when application closes device handle
  * Implements: Issue #13 (REQ-F-TS-SUB-001) Task 5 - Option B (implicit cleanup)
  */
+VOID AvbTraceTxState(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ const char *Stage)
+{
+#if DBG
+    if (Ctx != NULL && AVB_READ_HW_STATE(Ctx) >= AVB_HW_BAR_MAPPED) {
+        const intel_device_ops_t *ops = intel_get_device_ops(Ctx->intel_device.device_type);
+        if (ops != NULL && ops->trace_tx_state != NULL) {
+            ops->trace_tx_state(&Ctx->intel_device, Stage);
+        }
+    }
+#else
+    UNREFERENCED_PARAMETER(Ctx);
+    UNREFERENCED_PARAMETER(Stage);
+#endif
+}
+
 VOID AvbCleanupFileSubscriptionsForContext(_In_ PFILE_OBJECT FileObject,
                                            _In_ PAVB_DEVICE_CONTEXT AvbContext)
 {
