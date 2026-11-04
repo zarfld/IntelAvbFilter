@@ -263,6 +263,150 @@ static BOOL validate_tsauxc_hw(HANDLE hDevice, const char* device_name)
     return TRUE;
 }
 
+/**
+ * @brief Report one TC-TSNREG-001 per-adapter verdict
+ */
+static void report_tsn_registers(const char* tag, UINT32 adapter, avb_u16 did, const char* reason)
+{
+    printf("[%s] TC-TSNREG-001/adapter:%u did=0x%04X%s%s\n", tag, adapter, did, reason ? ": " : "", reason ? reason : "");
+}
+
+/**
+ * @brief Read the TSN registers of one adapter and check them against the driver's TAS state
+ * @return NULL on success, otherwise the failure reason (in reason)
+ */
+static const char* check_tsn_registers(HANDLE hBound, const AVB_ADAPTER_IDENTITY_REQUEST* id, char* reason, size_t reasonSize)
+{
+    static const struct { const char* name; uint32_t offset; } regs[] = {
+        {"TQAVCTRL", I226_TQAVCTRL}, {"TXPBSIZE", I226_TXPBSIZE}, {"DTXMXPKTSZ", I226_DTXMXPKTSZ}, {"TXARB", I226_TXARB},
+        {"RETX_CTL", I226_RETX_CTL}, {"GTXOFFSET", I226_GTXOFFSET}, {"BASET_L", I226_BASET_L}, {"BASET_H", I226_BASET_H},
+        {"QBVCYCLET", I226_QBVCYCLET}, {"QBVCYCLET_S", I226_QBVCYCLET_S},
+        {"STQT0", I226_STQT0}, {"STQT1", I226_STQT1}, {"STQT2", I226_STQT2}, {"STQT3", I226_STQT3},
+        {"ENDQT0", I226_ENDQT0}, {"ENDQT1", I226_ENDQT1}, {"ENDQT2", I226_ENDQT2}, {"ENDQT3", I226_ENDQT3},
+        {"TXQCTL0", I226_TXQCTL0}, {"TXQCTL1", I226_TXQCTL1}, {"TXQCTL2", I226_TXQCTL2}, {"TXQCTL3", I226_TXQCTL3},
+        {"TQAVCC0", I226_TQAVCC0}, {"TQAVCC1", I226_TQAVCC1}, {"TQAVHC0", I226_TQAVHC0}, {"TQAVHC1", I226_TQAVHC1},
+        {"TDLEN0", I226_TDLEN0}, {"TDLEN1", I226_TDLEN1}, {"TDLEN2", I226_TDLEN2}, {"TDLEN3", I226_TDLEN3},
+        {"TXDCTL0", I226_TXDCTL0}, {"TXDCTL1", I226_TXDCTL1}, {"TXDCTL2", I226_TXDCTL2}, {"TXDCTL3", I226_TXDCTL3},
+    };
+    AVB_OPEN_BY_LUID_REQUEST bind = {0};
+    AVB_TAS_STATE tas = {0};
+    DWORD bytesReturned;
+    uint32_t value, tqavctrl = 0;
+    int i;
+
+    bind.version = AVB_OPEN_BY_LUID_VERSION;
+    bind.net_luid = id->net_luid;
+    if (!DeviceIoControl(hBound, IOCTL_AVB_OPEN_ADAPTER_BY_LUID, &bind, sizeof(bind), &bind, sizeof(bind), &bytesReturned, NULL)) {
+        sprintf_s(reason, reasonSize, "OPEN_ADAPTER_BY_LUID failed (Win32 %lu)", GetLastError());
+        return reason;
+    }
+    if (!DeviceIoControl(hBound, IOCTL_AVB_GET_TAS_STATE, &tas, sizeof(tas), &tas, sizeof(tas), &bytesReturned, NULL)) {
+        sprintf_s(reason, reasonSize, "GET_TAS_STATE failed (Win32 %lu)", GetLastError());
+        return reason;
+    }
+    printf("    tasArmed=%u\n", tas.armed);
+
+    for (i = 0; i < (int)(sizeof(regs) / sizeof(regs[0])); i++) {
+        if (!read_register_hw(hBound, regs[i].offset, &value)) {
+            sprintf_s(reason, reasonSize, "%s read failed", regs[i].name);
+            return reason;
+        }
+        printf("    %-12s 0x%05X = 0x%08X\n", regs[i].name, regs[i].offset, value);
+        if (value == 0xFFFFFFFFu) {
+            sprintf_s(reason, reasonSize, "%s reads all ones, device inaccessible", regs[i].name);
+            return reason;
+        }
+        if (regs[i].offset == I226_TQAVCTRL) {
+            tqavctrl = value;
+        }
+    }
+
+    // Ring pointers over time. TDH shows fetch progress only, not completion (manual section 8.11.13).
+    for (i = 0; i < 5; i++) {
+        uint32_t head[4], tail[4];
+        if (!read_register_hw(hBound, I226_TDH0, &head[0]) || !read_register_hw(hBound, I226_TDH1, &head[1]) ||
+            !read_register_hw(hBound, I226_TDH2, &head[2]) || !read_register_hw(hBound, I226_TDH3, &head[3]) ||
+            !read_register_hw(hBound, I226_TDT0, &tail[0]) || !read_register_hw(hBound, I226_TDT1, &tail[1]) ||
+            !read_register_hw(hBound, I226_TDT2, &tail[2]) || !read_register_hw(hBound, I226_TDT3, &tail[3])) {
+            sprintf_s(reason, reasonSize, "TDH/TDT read failed");
+            return reason;
+        }
+        printf("    sample %d TDH/TDT q0=%u/%u q1=%u/%u q2=%u/%u q3=%u/%u\n", i,
+               head[0], tail[0], head[1], tail[1], head[2], tail[2], head[3], tail[3]);
+        Sleep(1000);
+    }
+
+    if (((tqavctrl & I226_TQAVCTRL_TRANSMIT_MODE_MASK) != 0) != (tas.armed != 0)) {
+        sprintf_s(reason, reasonSize, "TQAVCTRL 0x%08X disagrees with tasArmed=%u", tqavctrl, tas.armed);
+        return reason;
+    }
+    return NULL;
+}
+
+/**
+ * @brief TC-TSNREG-001: TSN registers are readable and match the driver's TAS state on every TAS adapter
+ *
+ * Applicability comes from the advertised INTEL_CAP_TSN_TAS, never from a device ID. Values are printed as
+ * evidence and not asserted, since the miniport owns and may program them; only the transmit mode is compared
+ * with tasArmed. Read-only: GET_VERSION, GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID, GET_TAS_STATE, READ_REGISTER.
+ *
+ * Verifies: #328
+ */
+static void validate_tsn_registers_all_adapters(HANDLE hDevice)
+{
+    IOCTL_VERSION version = {0};
+    DWORD bytesReturned;
+    UINT32 index, count = 1;
+    BOOL debugBuild = FALSE;
+
+    if (DeviceIoControl(hDevice, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &bytesReturned, NULL)) {
+        debugBuild = (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) != 0;
+    }
+
+    for (index = 0; index < count; index++) {
+        AVB_ADAPTER_IDENTITY_REQUEST id = {0};
+        char reason[128];
+        const char* failure;
+        HANDLE hBound;
+
+        id.version = AVB_ADAPTER_IDENTITY_VERSION;
+        id.index = index;
+        if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_ADAPTER_IDENTITY, &id, sizeof(id), &id, sizeof(id), &bytesReturned, NULL)) {
+            sprintf_s(reason, sizeof(reason), "GET_ADAPTER_IDENTITY failed (Win32 %lu)", GetLastError());
+            report_tsn_registers("FAIL", index, 0, reason);
+            tests_failed++;
+            return;
+        }
+        count = id.count;
+        if (!(id.capabilities & INTEL_CAP_TSN_TAS)) {
+            report_tsn_registers("SKIP_UNSUPPORTED", index, id.device_id, "adapter does not advertise INTEL_CAP_TSN_TAS");
+            continue;
+        }
+        if (!debugBuild) {
+            report_tsn_registers("SKIP", index, id.device_id, "READ_REGISTER exists only in Debug drivers; no Release TSN register evidence");
+            continue;
+        }
+
+        printf("  adapter:%u did=0x%04X luid=0x%016llX ifIndex=%u\n", index, id.device_id, id.net_luid, id.if_index);
+        hBound = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hBound == INVALID_HANDLE_VALUE) {
+            sprintf_s(reason, sizeof(reason), "open failed (Win32 %lu)", GetLastError());
+            report_tsn_registers("FAIL", index, id.device_id, reason);
+            tests_failed++;
+            continue;
+        }
+        failure = check_tsn_registers(hBound, &id, reason, sizeof(reason));
+        CloseHandle(hBound);
+        report_tsn_registers(failure ? "FAIL" : "PASS", index, id.device_id, failure);
+        if (failure) {
+            tests_failed++;
+        } else {
+            tests_passed++;
+        }
+    }
+}
+
 int main(void)
 {
     HANDLE hDevice;
@@ -350,6 +494,10 @@ int main(void)
     validate_ptp_block_hw(hDevice, "Current Device");
     validate_timinca_hw(hDevice, "Current Device");
     validate_tsauxc_hw(hDevice, "Current Device");
+
+    // Phase 3: TSN registers on every adapter advertising TAS
+    printf("\n=== Phase 3: TSN Registers On Every TAS Adapter ===\n");
+    validate_tsn_registers_all_adapters(hDevice);
 
     // Summary
     printf("\n=== Test Summary ===\n");
