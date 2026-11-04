@@ -33,6 +33,31 @@
 #define GOLDEN_AUXSTMPL0 0x0B65C
 #define GOLDEN_AUXSTMPH0 0x0B660
 
+// Documented I226 TSN definitions (I225 Software Manual Rev 1.3 section 8.12 and upstream igc).
+// Not a golden reference: not yet confirmed on I226 hardware.
+#define DOC_TQAVCC0       0x03004
+#define DOC_TQAVHC0       0x0300C
+#define DOC_TQAVCC1       0x03044
+#define DOC_TQAVHC1       0x0304C
+#define DOC_GTXOFFSET     0x03310
+#define DOC_BASET_L       0x03314
+#define DOC_BASET_H       0x03318
+#define DOC_QBVCYCLET     0x0331C
+#define DOC_QBVCYCLET_S   0x03320
+#define DOC_STQT0         0x03324
+#define DOC_ENDQT0        0x03334
+#define DOC_TXQCTL0       0x03344
+#define DOC_TXARB         0x03354
+#define DOC_TXPBSIZE      0x03404
+#define DOC_DTXMXPKTSZ    0x0355C
+#define DOC_TQAVCTRL      0x03570
+#define DOC_RETX_CTL      0x0041C
+#define DOC_TDLEN0        0x0E008
+#define DOC_TDH0          0x0E010
+#define DOC_TDT0          0x0E018
+#define DOC_TXDCTL0       0x0E028
+#define DOC_TX_QUEUE_STRIDE 0x40
+
 // Test counters
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -51,6 +76,57 @@ static void validate_register_address(const char* reg_name, uint32_t ssot_addr, 
         printf("[FAIL] ADDRESS MISMATCH!\n");
         tests_failed++;
     }
+}
+
+/**
+ * @brief Compare the SSOT I226 TSN definitions with the documented addresses and bit masks
+ *
+ * Verifies: #328
+ */
+static void validate_i226_tsn_definitions(void)
+{
+    printf("\nI226 TSN Registers (documented, not hardware-confirmed):\n");
+    validate_register_address("I226_TQAVCC0", I226_TQAVCC0, DOC_TQAVCC0);
+    validate_register_address("I226_TQAVHC0", I226_TQAVHC0, DOC_TQAVHC0);
+    validate_register_address("I226_TQAVCC1", I226_TQAVCC1, DOC_TQAVCC1);
+    validate_register_address("I226_TQAVHC1", I226_TQAVHC1, DOC_TQAVHC1);
+    validate_register_address("I226_GTXOFFSET", I226_GTXOFFSET, DOC_GTXOFFSET);
+    validate_register_address("I226_BASET_L", I226_BASET_L, DOC_BASET_L);
+    validate_register_address("I226_BASET_H", I226_BASET_H, DOC_BASET_H);
+    validate_register_address("I226_QBVCYCLET", I226_QBVCYCLET, DOC_QBVCYCLET);
+    validate_register_address("I226_QBVCYCLET_S", I226_QBVCYCLET_S, DOC_QBVCYCLET_S);
+    validate_register_address("I226_STQT0", I226_STQT0, DOC_STQT0);
+    validate_register_address("I226_STQT3", I226_STQT3, DOC_STQT0 + 3 * 4);
+    validate_register_address("I226_ENDQT0", I226_ENDQT0, DOC_ENDQT0);
+    validate_register_address("I226_ENDQT3", I226_ENDQT3, DOC_ENDQT0 + 3 * 4);
+    validate_register_address("I226_TXQCTL0", I226_TXQCTL0, DOC_TXQCTL0);
+    validate_register_address("I226_TXQCTL3", I226_TXQCTL3, DOC_TXQCTL0 + 3 * 4);
+    validate_register_address("I226_TXARB", I226_TXARB, DOC_TXARB);
+    validate_register_address("I226_TXPBSIZE", I226_TXPBSIZE, DOC_TXPBSIZE);
+    validate_register_address("I226_DTXMXPKTSZ", I226_DTXMXPKTSZ, DOC_DTXMXPKTSZ);
+    validate_register_address("I226_TQAVCTRL", I226_TQAVCTRL, DOC_TQAVCTRL);
+    validate_register_address("I226_RETX_CTL", I226_RETX_CTL, DOC_RETX_CTL);
+    validate_register_address("I226_TDLEN0", I226_TDLEN0, DOC_TDLEN0);
+    validate_register_address("I226_TDLEN3", I226_TDLEN3, DOC_TDLEN0 + 3 * DOC_TX_QUEUE_STRIDE);
+    validate_register_address("I226_TDH0", I226_TDH0, DOC_TDH0);
+    validate_register_address("I226_TDH3", I226_TDH3, DOC_TDH0 + 3 * DOC_TX_QUEUE_STRIDE);
+    validate_register_address("I226_TDT0", I226_TDT0, DOC_TDT0);
+    validate_register_address("I226_TDT3", I226_TDT3, DOC_TDT0 + 3 * DOC_TX_QUEUE_STRIDE);
+    validate_register_address("I226_TXDCTL0", I226_TXDCTL0, DOC_TXDCTL0);
+    validate_register_address("I226_TXDCTL3", I226_TXDCTL3, DOC_TXDCTL0 + 3 * DOC_TX_QUEUE_STRIDE);
+
+    printf("\nI226 TSN bit masks (documented, not hardware-confirmed):\n");
+    validate_register_address("TRANSMIT_MODE", (uint32_t)I226_TQAVCTRL_TRANSMIT_MODE_MASK, 0x00001);
+    validate_register_address("PREEMPT_ENA", (uint32_t)I226_TQAVCTRL_PREEMPT_ENA_MASK, 0x00002);
+    validate_register_address("ENHANCED_QAV", (uint32_t)I226_TQAVCTRL_ENHANCED_QAV_MASK, 0x00008);
+    validate_register_address("FUTSCDDIS", (uint32_t)I226_TQAVCTRL_FUTSCDDIS_MASK, 0x00080);
+    validate_register_address("MIN_FRAG", (uint32_t)I226_TQAVCTRL_MIN_FRAG_MASK, 0x0C000);
+    validate_register_address("QUEUE_MODE", (uint32_t)I226_TXQCTL_QUEUE_MODE_MASK, 0x00001);
+    validate_register_address("STRICT_CYCLE", (uint32_t)I226_TXQCTL_STRICT_CYCLE_MASK, 0x00002);
+    validate_register_address("STRICT_END", (uint32_t)I226_TXQCTL_STRICT_END_MASK, 0x00004);
+    validate_register_address("PREEMPTABLE", (uint32_t)I226_TXQCTL_PREEMPTABLE_MASK, 0x00008);
+    validate_register_address("QAV_SEL", (uint32_t)I226_TXQCTL_QAV_SEL_MASK, 0x000C0);
+    validate_register_address("TXDCTL_ENABLE", (uint32_t)I226_TXDCTL_ENABLE_MASK, 0x02000000);
 }
 
 /**
@@ -265,7 +341,8 @@ int main(void)
     validate_register_address("I226_TRGTTIMH0", I226_TRGTTIMH0, GOLDEN_TRGTTIMH0);
     validate_register_address("I226_AUXSTMPL0", I226_AUXSTMPL0, GOLDEN_AUXSTMPL0);
     validate_register_address("I226_AUXSTMPH0", I226_AUXSTMPH0, GOLDEN_AUXSTMPH0);
-    
+    validate_i226_tsn_definitions();
+
     // Phase 2: Hardware validation (requires real Intel NIC)
     printf("\n=== Phase 2: Hardware Register Accessibility Test ===\n");
     printf("Reading actual hardware registers to verify SSOT addresses work:\n");
@@ -273,7 +350,7 @@ int main(void)
     validate_ptp_block_hw(hDevice, "Current Device");
     validate_timinca_hw(hDevice, "Current Device");
     validate_tsauxc_hw(hDevice, "Current Device");
-    
+
     // Summary
     printf("\n=== Test Summary ===\n");
     printf("Tests Passed: %d\n", tests_passed);

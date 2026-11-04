@@ -33,11 +33,6 @@ Abstract:
 
 // I226 TSN Register Definitions - Evidence-Based from Linux IGC Driver
 // TODO: Add these to i226.yaml and regenerate SSOT header
-#define I226_TQAVCTRL           0x3570  // TSN control register
-#define I226_BASET_L            0x3314  // Base time low 
-#define I226_BASET_H            0x3318  // Base time high
-#define I226_QBVCYCLET          0x331C  // Cycle time register
-#define I226_QBVCYCLET_S        0x3320  // Cycle time shadow register
 #define I226_STQT(i)            (0x3340 + (i)*4)  // Start time for queue i
 #define I226_ENDQT(i)           (0x3380 + (i)*4)  // End time for queue i  
 #define I226_TXQCTL(i)          (0x3300 + (i)*4)  // Queue control for queue i
