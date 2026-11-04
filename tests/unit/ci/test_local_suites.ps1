@@ -309,6 +309,12 @@ foreach ($c in $a31) {
 }
 tc_check 'TEST-LOCALSUITES-031-named-entry-is-authorized-by-default-on-manual-runs-and-the-existing-list-is-kept' ($bad31.Count -eq 0) ($bad31 -join ' || ')
 
+# STATIC, not runtime evidence: a literal at the call site passed every check above while the child received '1' (2026-11-04).
+$elevSrc = Get-Content -LiteralPath $ElevPath -Raw
+tc_check 'TEST-LOCALSUITES-032-STATIC-the-wrapper-passes-the-computed-authorization-to-the-elevated-command' `
+    (($elevSrc -match 'New-AvbElevatedCommand[\s\S]{0,400}-AuthorizeUnsafe \$authorizeUnsafe\b') -and ($elevSrc -match '\$authorizeUnsafe = Get-AvbElevatedAuthorization')) `
+    'Run-Tests-Elevated.ps1 does not pass $authorizeUnsafe to New-AvbElevatedCommand'
+
 # --- Run-Tests-Elevated: routing and DbgView capture --------------------------------------------------------
 $cmdS = New-AvbElevatedCommand -Configuration 'Debug' -TestName "test_x --case TC-O'1" -TestArgs '' -TestExecutable '' -Full $false -LogFile 'C:\l\t.log' `
             -Suite 'HardwareUnit' -ResultsJson 'C:\r\x.json' -LegacyScript 'C:\t\Run-Tests.ps1' -RunCiScript 'C:\t\Run-Tests-CI.ps1'
