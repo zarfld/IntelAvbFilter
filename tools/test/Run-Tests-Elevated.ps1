@@ -141,7 +141,7 @@ if (-not $LogFile) {
         }
     }
 }
-#AVB_HIL_AUTHORIZE_UNSAFE always actvie!! no blocks for local tests!!!
+# -AuthorizeUnsafe 1 always actvie!! no blocks for local tests!!!
 $authorizeUnsafe = Get-AvbElevatedAuthorization -Existing $env:AVB_HIL_AUTHORIZE_UNSAFE -TestName $TestName -TestArgs $TestArgs
 $command = New-AvbElevatedCommand -Configuration $Configuration -TestName $TestName -TestArgs $TestArgs -TestExecutable $TestExecutable `
                -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -AuthorizeUnsafe 1 -LegacyScript $scriptPath -RunCiScript $runCiPath
