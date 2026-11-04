@@ -141,10 +141,10 @@ if (-not $LogFile) {
         }
     }
 }
-# -AuthorizeUnsafe 1 always actvie!! no blocks for local tests!!!
+# Always active on local runs, no parameter to set (Q 2026-11-04): no local blocks.
 $authorizeUnsafe = Get-AvbElevatedAuthorization -Existing $env:AVB_HIL_AUTHORIZE_UNSAFE -TestName $TestName -TestArgs $TestArgs
 $command = New-AvbElevatedCommand -Configuration $Configuration -TestName $TestName -TestArgs $TestArgs -TestExecutable $TestExecutable `
-               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -AuthorizeUnsafe 1 -LegacyScript $scriptPath -RunCiScript $runCiPath
+               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -AuthorizeUnsafe $authorizeUnsafe -LegacyScript $scriptPath -RunCiScript $runCiPath
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
 if ($authorizeUnsafe) { Write-Host "Forwarding AVB_HIL_AUTHORIZE_UNSAFE=$authorizeUnsafe to the elevated runner" -ForegroundColor Cyan }
 
