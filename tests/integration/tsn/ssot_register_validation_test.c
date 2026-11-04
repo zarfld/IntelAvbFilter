@@ -52,6 +52,7 @@
 #define DOC_DTXMXPKTSZ    0x0355C
 #define DOC_TQAVCTRL      0x03570
 #define DOC_RETX_CTL      0x0041C
+#define DOC_TCTL          0x00400
 #define DOC_TDLEN0        0x0E008
 #define DOC_TDH0          0x0E010
 #define DOC_TDT0          0x0E018
@@ -106,6 +107,7 @@ static void validate_i226_tsn_definitions(void)
     validate_register_address("I226_DTXMXPKTSZ", I226_DTXMXPKTSZ, DOC_DTXMXPKTSZ);
     validate_register_address("I226_TQAVCTRL", I226_TQAVCTRL, DOC_TQAVCTRL);
     validate_register_address("I226_RETX_CTL", I226_RETX_CTL, DOC_RETX_CTL);
+    validate_register_address("I226_TCTL", I226_TCTL, DOC_TCTL);
     validate_register_address("I226_TDLEN0", I226_TDLEN0, DOC_TDLEN0);
     validate_register_address("I226_TDLEN3", I226_TDLEN3, DOC_TDLEN0 + 3 * DOC_TX_QUEUE_STRIDE);
     validate_register_address("I226_TDH0", I226_TDH0, DOC_TDH0);
@@ -127,6 +129,7 @@ static void validate_i226_tsn_definitions(void)
     validate_register_address("PREEMPTABLE", (uint32_t)I226_TXQCTL_PREEMPTABLE_MASK, 0x00008);
     validate_register_address("QAV_SEL", (uint32_t)I226_TXQCTL_QAV_SEL_MASK, 0x000C0);
     validate_register_address("TXDCTL_ENABLE", (uint32_t)I226_TXDCTL_ENABLE_MASK, 0x02000000);
+    validate_register_address("TCTL_EN", (uint32_t)I226_TCTL_EN_MASK, 0x00002);
 }
 
 /**
