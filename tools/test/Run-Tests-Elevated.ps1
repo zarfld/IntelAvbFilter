@@ -54,14 +54,30 @@ $repoRoot   = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 
 function ConvertTo-AvbPsLiteral { param([string]$Text) return "'" + $Text.Replace("'", "''") + "'" }
 
+# Manual runs are operator-attended (Q 2026-11-04): naming an entry here authorizes exactly that entry, on by default, on top of
+# any list already set.  The gate in Run-Tests-CI.ps1 still decides and still ignores this under GitHub Actions.
+function Get-AvbElevatedAuthorization {
+    param([string]$Existing, [string]$TestName, [string]$TestArgs)
+    $list = @($Existing -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($TestName -and $TestName -notmatch '\.ps1$') {
+        $entry = $TestName -replace '\.exe$', ''
+        if ($TestArgs) { $entry = "$entry $TestArgs" }
+        if ($list -cnotcontains $entry) { $list += $entry }
+    }
+    return ($list -join ',')
+}
+
 # Command for the elevated child.  The exit code of the dispatcher is captured BEFORE Stop-Transcript: PowerShell
 # -Command exits with the value of the last expression, and Stop-Transcript's return value would overwrite it.
 # Captured via $global:LASTEXITCODE (reset first; no exit code = failure), then exit explicitly.
 function New-AvbElevatedCommand {
     param([string]$Configuration, [string]$TestName, [string]$TestArgs, [string]$TestExecutable, [bool]$Full,
-          [string]$LogFile, [string]$Suite, [string]$ResultsJson, [string]$PriorResultsDir = '', [string]$LegacyScript, [string]$RunCiScript)
+          [string]$LogFile, [string]$Suite, [string]$ResultsJson, [string]$PriorResultsDir = '', [string]$LegacyScript, [string]$RunCiScript,
+          [string]$AuthorizeUnsafe = '')
     $command = if ($LogFile) { "Start-Transcript -Path $(ConvertTo-AvbPsLiteral $LogFile) -Force | Out-Null; " } else { '' }
     $command += "`$_innerCode = 1; `$global:LASTEXITCODE = `$null; "
+    # -Verb RunAs builds a new environment.  The operator's authorization is carried across it; the gate in Run-Tests-CI.ps1 decides.
+    if ($AuthorizeUnsafe) { $command += "`$env:AVB_HIL_AUTHORIZE_UNSAFE = $(ConvertTo-AvbPsLiteral $AuthorizeUnsafe); " }
     if ($Suite) {
         $command += "try { & $(ConvertTo-AvbPsLiteral $RunCiScript) -Suite $Suite -Configuration $Configuration"
         if ($TestName) {
@@ -125,10 +141,12 @@ if (-not $LogFile) {
         }
     }
 }
-
+#AVB_HIL_AUTHORIZE_UNSAFE always actvie!! no blocks for local tests!!!
+$authorizeUnsafe = Get-AvbElevatedAuthorization -Existing $env:AVB_HIL_AUTHORIZE_UNSAFE -TestName $TestName -TestArgs $TestArgs
 $command = New-AvbElevatedCommand -Configuration $Configuration -TestName $TestName -TestArgs $TestArgs -TestExecutable $TestExecutable `
-               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -LegacyScript $scriptPath -RunCiScript $runCiPath
+               -Full ([bool]$Full) -LogFile $LogFile -Suite $Suite -ResultsJson $ResultsJson -PriorResultsDir $PriorResultsDir -AuthorizeUnsafe 1 -LegacyScript $scriptPath -RunCiScript $runCiPath
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
+if ($authorizeUnsafe) { Write-Host "Forwarding AVB_HIL_AUTHORIZE_UNSAFE=$authorizeUnsafe to the elevated runner" -ForegroundColor Cyan }
 
 if ($LogFile) {
     Write-Host "Output will be logged to: $LogFile" -ForegroundColor Cyan
