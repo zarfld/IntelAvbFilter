@@ -446,3 +446,26 @@ First-frame delay against loss:
 Every frame sent before frame 0 arrived was lost, and none after it. Delays of 43.6 and 44.4 ms appeared with no idle. One observer cannot say where. EEE is enabled on the I226 and advertised on the I210; no evidence links it.
 
 Restoration: exit 2, 2, 1. PHC no step across any replacement, drift 2.930 %, then reset by the NIC cycle. Post-cycle TX 49 of 49, 49 of 49, 47 of 48.
+
+### Windows-only replacement and first schedule with a future `BaseT`, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B REV_04, I210 capture, 1 s cycle, one run each.
+
+`--move-windows-future`: windows and `BaseT` = 408 s written at PHC 406.36 s, no shadow or cycle write. Arrivals at 407 were only 200-400 ms and from 408 on only 600-800 ms, 0 of 193 lost. So for an unchanged cycle, windows and a future `BaseT` are enough. That makes 6 of 6 future-`BaseT` replacements.
+
+| First schedule | `TQAVCTRL` | Frames already held from `SETUP_TAS` | Frames before `BaseT` | From `BaseT` | Lost |
+|---|---|---|---|---|---|
+| `--future-base`, `BaseT` 22 s, written at 20.01 s | 0x09 | Held until 22.200 s, up to 4.76 s | Held | Window 200-400 ms | 0 of 218 |
+| `--future-base-futscd`, `BaseT` 20 s, written at 18.08 s | 0x89 | Released at 18.081 to 18.083 s | Passed with no gating | Window 200-400 ms | 0 of 218 |
+
+Without `FutScdDis`, 59 frames left in one release at the first window after `BaseT`. With it, the 25 frames held since `SETUP_TAS` left at about the time of the programming, and traffic flowed until `BaseT`. This matches upstream's description. The moment of release cannot be tied to one write: `FutScdDis` went in before the `BaseT` writes, and the mapping uncertainty is about 6 ms. The hold stayed under 5 s, so this says nothing about a hang.
+
+`BaseT` visibility differs: on a first schedule `BASET_H` read the future value after the write (0x16, 0x14). On a running schedule it did not.
+
+Correction on `TSYNCRXCTL` bit 6: it does not track slow link-up alone. Before link it read 0x58 in 3 of 8 timeline runs: the two slow link-ups and one normal, `--future-base-futscd`, at 3.46 s. All slow link-ups so far showed it. It stays undocumented and unclassified. Slow link-ups are now 3 of 39 cycles today. One was the first case of a batch, so the third-in-batch observation does not hold.
+
+Exit 1 in `--move-windows-future`: first read 6.03 s after enable, link-up 7.15 s, same `TCTL` and `TSYNCRXCTL` values, and all 42 registers matched after the post-cycle TX. The verdict stands as recorded.
+
+Frame loss: frame 0 206.1 ms late with seq 1 to 3 lost, all sent before it arrived; seq 4 was sent after and arrived. That makes 4 of 4 cases with a delay beyond the send period. Delays of 58.9, 44.4 and 46.3 ms lost nothing.
+
+Restoration: exit 1, 2, 2. Post-cycle TX 49 of 49 in all three. All 42 registers matched after the post-cycle TX. `TQAVCTRL` 0x89 was cleared by the NIC cycle. PHC no step across the replacement, drift 2.930 %.

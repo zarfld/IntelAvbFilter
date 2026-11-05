@@ -49,6 +49,12 @@
  * 100-300 ms window, a value in the manual's cycle table. --pattern ... --move-windows-future writes only windows and a future
  * BaseT, to show whether the shadow and cycle writes are needed when the cycle stays the same.
  *
+ * --pattern <startMs> <endMs> --short-cycle uses a 125 ms cycle, a value in the manual's cycle table.
+ *
+ * --pattern ... --move-strict-end narrows the window to 400 ns, shorter than one frame on the wire, by a future BaseT. Without
+ * Strict_End a frame may start and overrun; with it a frame that cannot finish must not start, so frames per cycle separate the
+ * two. A last replacement reopens 200-400 ms with the flag cleared to release what was held, up to about 200 frames.
+ *
  * --pattern ... --future-base starts the first schedule from a BaseT 1 to 2 s ahead, without FutScdDis, and
  * --pattern ... --future-base-futscd does the same with FutScdDis and the BASET_L zero write, as upstream does for a first
  * schedule. Upstream's comments say a future BaseT holds packets until then and that this causes TX hangs. The hold here
@@ -119,6 +125,11 @@
 #define NEW_CYCLE_NS         500000000u
 #define NEW_CYCLE_START_NS   100000000u
 #define NEW_CYCLE_END_NS     300000000u
+#define SHORT_CYCLE_NS       125000000u
+#define NARROW_START_NS      200000000u
+#define NARROW_WINDOW_NS     400u
+#define WIDE_START_NS        200000000u
+#define WIDE_END_NS          400000000u
 #define FILETIME_TO_UNIX_US  11644473600000000LL
 #define DRAIN_MS             1000
 #define WIRE_MIN_PERCENT     90
@@ -148,6 +159,7 @@ static const REG g_regs[] = {
 
 static const uint32_t g_stqt[QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
 static const uint32_t g_endqt[QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
+static const uint32_t g_txqctl[QUEUES] = {I226_TXQCTL0, I226_TXQCTL1, I226_TXQCTL2, I226_TXQCTL3};
 
 static unsigned g_next_seq;
 static volatile LONG g_armed;
@@ -662,6 +674,33 @@ static BOOL replace_schedule(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t
     return pattern_run(h, luid, sock, baseline, g_next_seq, capture_alive) != 0;
 }
 
+static BOOL set_strict_end(HANDLE h, BOOL on)
+{
+    int q;
+
+    for (q = 0; q < QUEUES; q++) {
+        if (!write_reg(h, g_txqctl[q], on ? (uint32_t)I226_TXQCTL_STRICT_END_MASK : 0, "TXQCTL")) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/** A window too short for a frame, without and with Strict_End, then a wide one to release what was held */
+static void strict_end_run(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
+{
+    printf("  --- narrow window, Strict_End clear ---\n");
+    (void)replace_schedule(h, luid, sock, baseline, NARROW_START_NS, NARROW_START_NS + NARROW_WINDOW_NS, capture_alive);
+    printf("  --- narrow window, Strict_End set ---\n");
+    if (set_strict_end(h, TRUE)) {
+        (void)replace_schedule(h, luid, sock, baseline, NARROW_START_NS, NARROW_START_NS + NARROW_WINDOW_NS, capture_alive);
+    }
+    printf("  --- wide window, Strict_End clear ---\n");
+    if (set_strict_end(h, FALSE)) {
+        (void)replace_schedule(h, luid, sock, baseline, WIDE_START_NS, WIDE_END_NS, capture_alive);
+    }
+}
+
 /** Moves a running schedule to a different window, by the route named in g_move */
 static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
 {
@@ -674,6 +713,10 @@ static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *bas
         if (replace_schedule(h, luid, sock, baseline, 0, g_cycle_ns, capture_alive)) {
             (void)replace_schedule(h, luid, sock, baseline, SOFT_REOPEN_START_NS, SOFT_REOPEN_END_NS, capture_alive);
         }
+        return;
+    }
+    if (strcmp(g_move, "--move-strict-end") == 0) {
+        strict_end_run(h, luid, sock, baseline, capture_alive);
         return;
     }
     if (strcmp(g_move, "--move-cycle-future") == 0) {
@@ -963,9 +1006,13 @@ int main(int argc, char **argv)
             strcmp(argv[4], "--toggle-only") != 0 && strcmp(argv[4], "--soft-disarm") != 0 && strcmp(argv[4], "--move-cycle") != 0 &&
             strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-future") != 0 && strcmp(argv[4], "--move-futscd") != 0 &&
             strcmp(argv[4], "--move-toggle") != 0 && strcmp(argv[4], "--move-open-future") != 0 && strcmp(argv[4], "--move-cycle-future") != 0 &&
-            strcmp(argv[4], "--move-windows-future") != 0 &&
+            strcmp(argv[4], "--move-windows-future") != 0 && strcmp(argv[4], "--move-strict-end") != 0 && strcmp(argv[4], "--short-cycle") != 0 &&
             strcmp(argv[4], "--future-base") != 0 && strcmp(argv[4], "--future-base-futscd") != 0) {
-            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-futscd, --move-toggle, --move-open-future, --move-cycle-future, --move-windows-future, --future-base or --future-base-futscd\n");
+            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-futscd, --move-toggle, --move-open-future, --move-cycle-future, --move-windows-future, --move-strict-end, --short-cycle, --future-base or --future-base-futscd\n");
+            return 3;
+        }
+        if (argc == 5 && strcmp(argv[4], "--short-cycle") == 0 && (uint32_t)end_ms * 1000000u >= SHORT_CYCLE_NS) {
+            printf(TAG " not run: --short-cycle needs end < %u ms\n", SHORT_CYCLE_NS / 1000000u);
             return 3;
         }
         g_futscd = argc == 5 && strcmp(argv[4], "--future-base-futscd") == 0;
@@ -980,7 +1027,7 @@ int main(int argc, char **argv)
         letters = (argc == 5 && strcmp(argv[4], "--no-shadow") == 0) ? "wcb" : "wsb";
         if (!g_after_rearm) {
             g_pattern = TRUE;
-            g_cycle_ns = (uint32_t)NS_PER_SEC;
+            g_cycle_ns = (argc == 5 && strcmp(argv[4], "--short-cycle") == 0) ? SHORT_CYCLE_NS : (uint32_t)NS_PER_SEC;
             g_open_start_ns = pattern_start_ns;
             g_open_end_ns = pattern_end_ns;
         }
