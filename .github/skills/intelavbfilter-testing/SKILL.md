@@ -76,8 +76,8 @@ Use the repository taxonomy exactly; do not invent parallel schemes. Mapping of 
 | Driver returns `STATUS_NOT_IMPLEMENTED` | `SKIP_NOT_IMPLEMENTED` → runner `INCOMPLETE` | non-passing; implementation gap stays visible |
 | Unmet prerequisite / unsafe precondition | `BLOCKED` / `FAILED_SETUP` | red |
 | Missing executable, deployment, permissions, driver interface, runner error | `INFRA_FAILURE`, `FAILED(BUILD)`, `BLOCKED(PROVENANCE)` | red — **never** hardware unsupported |
-| Timeout | `FAILED(TIMEOUT)` | red, halts later mutations |
-| Cleanup failed / restoration unverifiable | `CLEANUP_FAILED` / `INCONCLUSIVE_RESTORATION` | red, halts later mutations |
+| Timeout | `FAILED(TIMEOUT)` | red; verify process termination and affected hardware state |
+| Cleanup failed / restoration unverifiable | `CLEANUP_FAILED` / `INCONCLUSIVE_RESTORATION` | red; subsequent tests establish their own prerequisites |
 | Required test not executed | `COVERAGE-GAP` (`TC-HIL-COVERAGE-GAP-001`) | suite `INCOMPLETE` |
 | Hardware suite with zero passes | overall `NOT_VERIFIED` | non-passing |
 
@@ -122,6 +122,14 @@ Every state-changing test must:
 - restore the relevant state on success, failure, exception and timeout;
 - verify restoration **independently against hardware**, preserving cleanup evidence even when the primary assertion failed.
 
+Responsibilities:
+
+- **Driver/HAL:** Implement advertised operations correctly, maintain a healthy operating state, and provide the required disable/disarm/restore mechanisms.
+- **Testcase:** Independently establish prerequisites, capture the baseline, execute the operation, invoke cleanup, and verify restoration.
+- **Runner:** Execute and account for tests, preserve verdicts and evidence, and continue independently executable tests.
+
+Every testcase must establish its own prerequisites and must not depend on the execution order, adapter selection, initialization or cleanup performed by preceding tests.
+
 Use invariants that fit time-varying state (PHC keeps running, counters move, some registers reset): compare rate/offset/configuration, not equality of a running clock. The runner currently re-reads only adapter enumeration, `TIMINCA` and `TSAUXC`, and `$HilMutatedState` is empty — so any other mutated state is **unobserved**, and restoration of it cannot be claimed. That is an interface/design gap needing an explicit engineering decision, not a pass.
 
 Distinguish and report exactly one of:
@@ -130,7 +138,7 @@ Distinguish and report exactly one of:
 2. failed, restoration **verified** → ordinary failure;
 3. cleanup failed or restoration uncertain → `CLEANUP_FAILED` / `INCONCLUSIVE_RESTORATION`.
 
-After (1) or (2), continue independent tests. After (3), later unsafe mutations are blocked (runner `stateHalt`, `-PriorResultsDir`, machine safety record `%ProgramData%\IntelAvbFilter-hil-safety.json` via `tools/lib/HilLock.ps1`); every blocked case stays accounted for. Never convert a cleanup failure into PASS/SKIP or clear the safety record without verified evidence and Q's authorization. An UNBASELINED record means "state unknown", not "hardware damaged".
+After (1) or (2), continue independent tests. After (3), preserve the failure verdict and restoration evidence; do not impose an automatic global halt solely because of `CLEANUP_FAILED` or `INCONCLUSIVE_RESTORATION`. Every subsequent testcase must independently establish and verify its prerequisites and baseline. If those prerequisites cannot be established, report the applicable failure for that testcase. Continue other independently executable tests. Never convert a cleanup failure into PASS/SKIP or clear the safety record without verified evidence and Q's authorization. An UNBASELINED record means "state unknown", not "hardware damaged".
 
 ## F. Timeouts and unattended execution
 
@@ -154,6 +162,7 @@ Never claim GREEN without evidence identifying: source commit and worktree state
 - Reuse the current scripts, fixtures, capability contract, verdict taxonomy, results documents and traceability outputs. Do not add another framework, matrix, runner, lane, skip policy or source of truth.
 - `intel-ethernet-regs` (submodule, `gen/*_regs.h`) is the only register-definition source; no register constants in tests (`Test-REGS-002-MagicNumberDetection.ps1`).
 - GitHub Issues are the lifecycle SSOT. TEST → requirement is `Verifies: #N`; parent lineage is `Traces to: #N`; backward links are `Verified by: #N` and are added append-only (`github-issue-integrity`).
+- Confirmed defects in tests or test infrastructure (including setup, cleanup, restoration, multi-adapter discovery, capability handling and verdict correctness) require a separate GitHub issue and repair in a separate branch/PR. Preserve the original issue, test scope and acceptance criteria. Do not silently repair unrelated test defects within a driver-fix branch.
 
 ## I. Elevated execution and hardware authorization
 
@@ -161,6 +170,7 @@ Never claim GREEN without evidence identifying: source commit and worktree state
 - Give Q exact, copy-paste-ready PowerShell, plus prerequisites, expected mutations, cleanup behaviour, timeout/stop conditions and evidence paths.
 - Let Q run elevated commands when elevation is needed; wait for the real results before claiming anything.
 - Never initiate, without explicit authorization: driver install/replace/restart, adapter disable/enable, firmware change, `AVB_HIL_AUTHORIZE_UNSAFE`, S3/reboot, or safety-record clearing.
+- `Unsafe` is a hardware-mutation classification, not a general prohibition against HIL testing. Required hardware-mutating tests remain part of normal HIL-TDD. Use existing authorization mechanisms without introducing additional per-test approval gates solely because a test modifies hardware. Do not bypass safety mechanisms or reclassify mutating tests as ReadOnly.
 
 ## Anti-patterns (observed failures → required behaviour)
 
@@ -173,7 +183,7 @@ Never claim GREEN without evidence identifying: source commit and worktree state
 | Timestamp assertion on stale/identical values | Assert a real new transaction (fresh sample, provenance) | `test_tx_corr_verdict` (TX provenance only) |
 | Cleanup declared unsafe although failure preceded mutation and state was shown unchanged | Classify per E(1) | runner state check (limited observables) |
 | "Read-only" assumed without reading IOCTL/init effects | Classify from IOCTLs actually sent | `test_hil_safety_gate.ps1` (registry vs sources) |
-| Results lost through PowerShell exit-code handling | `NativeExit.ps1`; missing code = failure | `test_native_exit_codes.ps1` |
+| Results lost through PowerShell exit-code handling | `NativeExit.ps1`; missing code is failure | `test_native_exit_codes.ps1` |
 | Old logs reported as new passes | Evidence class + timestamps + identity | results document `evidence` field |
 | Tests excluded because cleanup/execution needs repair | Repair, or keep a visible gap row | `test_artifact_completeness.ps1`, gap tables |
 | Hardware tests disabled / separate lane for green CI | Forbidden | review only |
