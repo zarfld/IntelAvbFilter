@@ -1,8 +1,8 @@
 # DES-REVIEW-002: TAS IOCTL contract against the GitHub Issues SSOT
 
-**Date**: 2026-11-05. **Reviewed**: `04-design/components/DES-C-TAS-010-tas-ioctl-contract.md`, v0.2 and v0.3. v0.2 is accepted as a review baseline only.
+**Date**: 2026-11-05, updated after filing the same day. **Reviewed**: `04-design/components/DES-C-TAS-010-tas-ioctl-contract.md`, v0.2 and v0.3. v0.2 is accepted as a review baseline only.
 
-**Status**: derived report. GitHub Issues are authoritative. **Nothing here has been filed or changed on GitHub, so no governance change is complete.** This session has no `gh` and no token, and read issues through the public API only. Issue bodies ready for filing are held locally for Q.
+**Status**: derived report. GitHub Issues are authoritative. Q filed the package on 2026-11-05 as #348 to #384, with 30 follow-up actions; section 7 records the check. **Filed is not accepted:** no requirement or ADR below is accepted, implemented or hardware verified.
 
 Issues read for this review: #1, #9, #29, #30, #33, #41, #44, #45, #50, #52, #56, #64, #91, #92, #100, #113, #122, #133, #134, #142, #206, #281. Numbers below are as read on 2026-11-05 and must be re-read immediately before any edit.
 
@@ -30,47 +30,72 @@ Issues read for this review: #1, #9, #29, #30, #33, #41, #44, #45, #50, #52, #56
 | C18 | Code | `devices/intel_i226_impl.c` defines `STQT`, `ENDQT`, `TXQCTL` offsets and `FUTSCDDIS` differently from the SSOT | A new implementation would write the wrong registers | Use the SSOT only. Local draft Issue 6 |
 | C19 | #31, #44, #64 | #44 and #64 cite #31 as StR-004 NDIS integration, but #31 is StR-005, Windows Management Service | Parent links unreliable | Comment only. New drafts do not use #31 |
 
-## 2. Proposed requirement issues
+### 1.1 State after filing, 2026-11-05
 
-IDs below did not appear as issue titles when searched on 2026-11-05. Re-check before filing. **Filing order matters:** requirements first, then ADRs, then test issues, because each traces to the one before.
+The table above is the review as written. This is where each conflict stands now.
 
-| Draft | Proposed ID | Scope | Traces to | Blocks on |
-|---|---|---|---|---|
-| R1 | REQ-F-TAS-ACTIVATE-001 | First schedule on a clean adapter, explicit pre-activation behaviour | #33, #1, #50 | ADR-TSN-002, EG-02 |
-| R2 | REQ-F-TAS-REPLACE-001 | Replace a schedule by a future boundary, without a NIC cycle | #33, #1, #50 | ADR-TSN-002 |
-| R3 | REQ-F-TAS-OPENALL-001 | Open every gate, stated as not restoration | #33, #50 | R2 |
-| R4 | REQ-F-TAS-DISABLE-001 | Leave TSN mode in place, if ADR-TSN-002 accepts it | #33, #50 | ADR-TSN-002 |
-| R5 | REQ-F-TAS-RESTORE-001 | Report restoration from hardware, complete or partial | #33, #50 | R6 |
-| R6 | REQ-F-TAS-STATE-001 | Programmed, pending, inferred, verified, inconsistent, unknown | #33, #1, #50 | None |
-| R7 | REQ-F-TAS-VALIDATE-001 | Validation and support tiers | #33, #44, #56, #50 | None |
-| R8 | REQ-F-TAS-ERROR-001 | Operation identity, failure retrieval, concurrency | #33, #52, #50 | None |
-| R9 | REQ-NF-TAS-OBSERVE-001 | Release observability without raw register access | #33, #122 | None |
-| R10 | REQ-NF-TAS-BUFFER-001 | Buffer configuration before any production-ready claim | #33, #50 | EG-03 |
-| R11 | REQ-F-TAS-LEGACY-001 | Existing ABI preserved; legacy client cannot overwrite a managed schedule | #33, #64, #50 | None |
-| R12 | REQ-F-TAS-NDIS-001 | TAS behaviour across Attach, Pause, Restart, Detach, Unload, power | #33, #36, #50 | EG-13, EG-18 |
-| D1 | DES-C-TAS-010 | Design issue for the contract, as with other DES-C issues | #142, #100, A1, A2 | Filed after the ADRs |
-| T | TEST-TAS-API-001..019 | One per TC-TASAPI case | The requirement each verifies | Filed after requirements |
+| Conflicts | State |
+|---|---|
+| C1, C5 | New issues use unique IDs. Duplicates stay and are cited by number; recorded in the `#9` comment and the `#50` Amendment Record |
+| C3, C4 | Governed by #351; `#50` Amendment Record rows 3 and 4 |
+| C6 | **Open.** `#206` still says `Verifies: #8`; the `#206` comment records the mismatch. Editing needs Q's direction |
+| C7, C8, C9 | Per-criterion comments posted; `#9`, `#206`, `#281` reopened, `status:backlog` |
+| C10 | Comment on `#91`. #362 proposes the extension. **Not resolved until #362 is accepted** |
+| C11, C16, C19 | Comments on `#142`, `#113`, `#44`, `#64`. No body edits |
+| C13 | **Open.** #352 constrains the commit to the per-device lock. Check at implementation |
+| C14 | New structures carry a version; applies at implementation |
+| C15 | **Open.** #362 OPEN item 3 |
+| C17 | No edit to `#133`. #362 links it as `Related to` |
+| C2, C12 | **Open.** Derived documents not corrected: D12 |
+| C18 | **Open.** No issue filed: D11 |
+
+## 2. Requirement issues, as filed
+
+All of these are filed and `status:backlog`. No requirement is accepted. Dependencies are copied from the issue bodies and those govern; the blockers proposed in this review before filing live on as the evidence gaps in DES-C-TAS-010 section 14.
+
+| Draft | Issue | ID | Scope | Traces to | Dependencies as filed |
+|---|---|---|---|---|---|
+| B8 | #348 | BUG: `init_ptp` overwrites `SYSTIM` | PHC reseed | #2 | None listed |
+| B16 | #349 | BUG: schedule survived a NIC cycle | Surviving schedule | #50 | None listed |
+| R1 | #357 | REQ-F-TAS-ACTIVATE-001 | First schedule on a clean adapter, explicit pre-activation behaviour | #33, #1, #50 | #350, #351, #362, #363 |
+| R2 | #358 | REQ-F-TAS-REPLACE-001 | Replace a schedule by a future boundary, without a NIC cycle | #33, #1, #50 | #350, #351, #352, #362 |
+| R3 | #359 | REQ-F-TAS-OPENALL-001 | Open every gate, stated as not restoration | #33, #50 | #358 |
+| R4 | #360 | REQ-F-TAS-DISABLE-001 | Leave TSN mode in place, if ADR-TSN-002 accepts it | #33, #50 | #350, #362 |
+| R5 | #361 | REQ-F-TAS-RESTORE-001 | Report restoration from hardware, complete or partial | #33, #50 | #350 |
+| R6 | #350 | REQ-F-TAS-STATE-001 | Programmed, pending, inferred, verified, inconsistent, unknown | #33, #1, #50 | #351, #362 |
+| R7 | #351 | REQ-F-TAS-VALIDATE-001 | Validation and support tiers | #33, #44, #56, #50 | #44, #56 |
+| R8 | #352 | REQ-F-TAS-ERROR-001 | Operation identity, failure retrieval, concurrency | #33, #52, #50 | #45, #52 |
+| R9 | #353 | REQ-NF-TAS-OBSERVE-001 | Release observability without raw register access | #33, #122, #50 | None listed |
+| R10 | #354 | REQ-NF-TAS-BUFFER-001 | Buffer configuration before any production-ready claim | #33, #50 | None listed |
+| R11 | #355 | REQ-F-TAS-LEGACY-001 | Existing ABI preserved; legacy client cannot overwrite a managed schedule | #33, #64, #50 | #350, #352, #362 |
+| R12 | #356 | REQ-F-TAS-NDIS-001 | TAS behaviour across Attach, Pause, Restart, Detach, Unload, power | #33, #36, #50 | #348, #350, #362 |
+| EG18 | #364 | INV-TAS-EG18 | Effect of Pause and Restart on TAS, PHC and sends | #356 | None listed |
+| D1 | #365 | DES-C-TAS-010 | Design issue for the contract, review baseline | #142, #100, #362, #363, #357, #358, #350, #355, #356 | Implementation blocked until accepted |
+| T | #366 to #384 | TEST-TAS-API-001..019 | One per TC-TASAPI case, number = 365 + case | The requirement each verifies | Designed only |
 
 ### Links to existing issues
 
 Relationship verbs follow the existing vocabulary: `Traces to`, `Verified by`, `Verifies`, `Related to`, and the ADR `Superseded By` field. Requirement templates define no supersession verb, and **none is invented here**.
 
-| Issue | Action | Rule |
+| Issue | Action | State |
 |---|---|---|
-| #50 | Keep open as the parent. Append `- Related to: #N (…)` lines under Traceability for each new REQ, and add a comment listing which statements are amended | `github-issue-integrity`: fetch immediately before, append only, compare, change nothing else |
-| #9 | Comment only: closed historical record of IOCTL 26 as implemented; the ID is shared with #50, cite by number | No body edit |
-| #113 | Comment noting the new REQ issues | No body edit |
-| #206, #281 | Comment recording what was verified (C9) | No body edit |
-| #142, #100 | Add links when the design is accepted | Fetch first |
+| #50 | Stays open as the parent. Traceability links and an Amendment Record appended | Done. Original text retained |
+| #9 | Verification scope comment, then reopened by Q's later decision (section 5) | Done |
+| #113 | Comment noting the new REQ issues | Done |
+| #206, #281 | Verification scope comment, then reopened (section 5) | Done |
+| #91, #44, #64, #142 | Comments only | Done |
+| #142, #100 | Add links when the design is accepted | Not due: #365 is not accepted. #365 already traces to both |
 
-**Decided by Q:** #50 stays open as the parent. The exact edit, a 17-row table of outdated, contradicted and unverified statements, is drafted for filing. Nothing in #50 is removed.
+**Decided by Q:** #50 stays open as the parent. Its Amendment Record of 2026-11-05 holds a 17-row table of outdated, contradicted and unverified statements. Nothing in #50 is removed.
 
-## 3. Proposed ADR issues
+## 3. ADR issues, as filed
 
-| Draft | ID | Decision | Traces to | Relation to existing ADRs |
-|---|---|---|---|---|
-| A1 | ADR-TSN-002 | Filter-side TSN ownership, hardware-state authority, lifecycle responsibilities | R1 to R12, #50 | Explicitly extends #91 for TSN registers; refines #133; depends on #92, #122 |
-| A2 | ADR-TSN-003 | Pre-activation behaviour and `FutScdDis` compatibility | R1 | Depends on A1 |
+Both are filed with Decision Status **Proposed**. Neither is accepted.
+
+| Draft | Issue | ID | Decision | Traces to | Relation to existing ADRs |
+|---|---|---|---|---|---|
+| A1 | #362 | ADR-TSN-002 | Filter-side TSN ownership, hardware-state authority, lifecycle responsibilities. OPEN at acceptance: IOCTL surface, return to legacy mode, `FILE_WRITE_ACCESS` | #350 to #361, #50 | Extends #91 for TSN registers, does not supersede it. `Related to` #133, #92, #122 |
+| A2 | #363 | ADR-TSN-003 | Pre-activation behaviour and `FutScdDis` compatibility. Decided after the activation sequence is measured | #357 | `Related to` #362 |
 
 `Superseded By` fits #91 only if it is fully replaced. It is not, since its PTP decision stands. A1 is an explicit extension, stating what stays valid and what is extended, and #91 gets a comment.
 
@@ -102,14 +127,14 @@ Relationship verbs follow the existing vocabulary: `Traces to`, `Verified by`, `
 | #206 | 10 of 10 passed | IOCTL path. TC-TAS cases are not the UT-TAS cases specified; all 8 boxes unticked | Gate timing, isolation, integration, V&V | **Reopen**, or close as not verified |
 | #281 | Verified, all criteria covered | IOCTL path. Closure cites IOCTLs that do not exist and a readback the test does not do | Validation, atomic commit, readback | **Reopen** |
 
-**Q decided to reopen all three**, after the per-criterion comments are posted. Historical results are preserved. Not yet done: nothing is recorded in GitHub. The TC-TAS tests stay valid for the IOCTL path and are not changed. Some criteria cannot be met as written, such as 256 entries, and are retired through the new TEST issues.
+**Q decided to reopen all three.** Done 2026-11-05: per-criterion comments posted, then all three reopened, now `status:backlog`. Historical results are preserved. The TC-TAS tests stay valid for the IOCTL path and are not changed. Some criteria cannot be met as written, such as 256 entries, and are retired through the new TEST issues.
 
 ## 6. v0.3 review results
 
 | Point | Result | Open item |
 |---|---|---|
-| Requirement → ADR → Design → Test | Complete on paper for R1 to R12: DES-C-TAS-010 section 11 | **Not real until issues exist**: every link is a `#TBD` |
-| Unique identifiers | New IDs did not appear in issue titles when searched. TEST IDs avoid both TEST-TAS-CONFIG-001 issues | Re-check immediately before filing |
+| Requirement → ADR → Design → Test | Real on GitHub. DES-C-TAS-010 section 11 now carries issue numbers. #350 to #361 and #366 to #384 agree in both directions; #354 has no TEST by design | D3 to D7 |
+| Unique identifiers | Across all 373 issues on 2026-11-05 each new ID appears once. The only duplicate TAS IDs are the known REQ-F-TAS-001 and TEST-TAS-CONFIG-001 | D13, for this document's own ID |
 | Existing IOCTL compatibility | Codes 26, 65, 66, 70 keep their ABI. Refusal applies only in states a legacy-only client cannot reach, decided from record, windows and shadow | None. O7 closed: `BaseT` is reported only. `--rearm`, `--after-rearm` stay allowed |
 | Concurrency and generation | Per-adapter claim, generation, epoch, operation store defined; `SETUP_TAS` joins the claim | Lock placement to confirm against #45 |
 | Adapter capability | Tiers per feature, device, revision; hardware range separate from tested values | `revision_id` source to confirm |
@@ -119,6 +144,41 @@ Relationship verbs follow the existing vocabulary: `Traces to`, `Verified by`, `
 
 No change is made to HIL tests, runner behaviour or global blocking. No production code is written in this phase.
 
-## 7. Filing status
+## 7. Filing result
 
-The package is held locally at `C:\Users\User\cqv\i328\tas-governance-filing\`. **None of it is filed.** This report stops being a proposal only once the issues exist.
+Checked 2026-11-05 through the public API against the filing manifest, `C:\Users\User\cqv\i328\tas-governance-filing\manifest.json`.
+
+| Item | Result |
+|---|---|
+| 37 new issues | #348 to #384. Each body equals the manifest with its placeholders replaced by real numbers, plus only the planned appends |
+| 30 follow-up actions | All found: 6 dependency appends, 11 `Verified by` appends, 2 edits of #50, 8 comments, 3 reopens |
+| Placeholders | None left in issue bodies, comments, this file or DES-C-TAS-010 |
+| Reopened | #9, #206, #281, open, `status:backlog` |
+| Lifecycle state | #350 to #361 `status:backlog`; #362, #363 Proposed; #365 review baseline; #366 to #384 designed only |
+
+**Not run:** the CI traceability jobs need `GITHUB_TOKEN`, so they did not run locally. The check above is a separate static comparison.
+
+## 8. Open discrepancies after filing
+
+Reported, not resolved. Nothing here reinterprets a requirement, and no issue was edited for this report.
+
+| # | Where | Finding | Needs |
+|---|---|---|---|
+| D1 | #365 | Label `status:completed` while the body says "Review baseline, not approved". `project-sync.yml` matches the substring `approved`, so the label returns on every sync. Six sync comments so far. The label is not acceptance | Q: reword the body, or a separate fix to the workflow |
+| D2 | #366 to #384, #281 | Bot posted "Test Requirements Missing". `issue-validation.yml` matches `Verifies: #N` but not the template's `**Verifies**: #N`, so all 19 links read as absent. The links exist | Separate fix to the regex |
+| D3 | #358, #357 | #358 does not list #357, but #371 to #373 start with "Activate" and DES-C-TAS-010 section 7 requires `origin = CONTRACT`. REPLACE cannot run on hardware before ACTIVATE | Q: add the dependency |
+| D4 | #357, #352 | #357 does not list #352, but ACTIVATE uses the operation id, claim and generation in DES-C-TAS-010 section 9 | Q: add the dependency, or defer those fields |
+| D5 | #351, #352, #353, #354, #359, #361 | List no dependency on #362, which traces to all of them. DES-C-TAS-010 section 11.2 assigns ADR-TSN-002 to all. #365 blocks implementation until accepted. #354 is not blocked by its own text | Q: confirm the #365 rule governs |
+| D6 | #353, #366 | Only #366 verifies #353. The design also names TC-TASAPI-004, 006 in Release. #366's steps do not cover an unbound handle or the absence of raw register IOCTLs in Release. #367 covers the unbound handle but verifies #351 only | Q: add `Verifies` links or a test step |
+| D7 | #354 | No TEST issue. Expected until EG-03 defines one | TEST issue after EG-03 |
+| D8 | #365 | Traces to 5 of the 12 requirements. #362 traces to all 12 | Q: add links if intended |
+| D9 | #366 to #384, #361, #348 | All 19 tests share one cleanup: NIC cycle, then measured PHC, including the read-only #366. A NIC cycle resets the PHC (E12). #348 says `CLEANUP_FAILED` is correct for that, while #361 reports the PHC separately and still reads complete. As written, every test may end `CLEANUP_FAILED`, and a read-only test performs a mutation | Q: decide what restoration means for the PHC after a NIC cycle. Do not weaken either text silently |
+| D10 | #348 | Title names FilterAttach and FilterRestart. Source also reaches `init_ptp` from `IOCTL_AVB_INIT_DEVICE` on an initialized context: `AvbBringUpHardware`, `intel_init`, `init`, with no guard. `Run-Tests-CI.ps1` records the same. Not observed on hardware in this review | Q: confirm scope of #348 |
+| D11 | C18 | Draft Issue 6 in `C:\Users\User\cqv\i328\github-drafts.md` was not filed. Confirmed in source: `I226_STQT`, `I226_ENDQT`, `I226_TXQCTL` and `I226_TQAVCTRL_FUTSCDDIS` differ from the SSOT and are unused by the driver | New issue |
+| D12 | C2, C12 | `02-requirements/COMPLETENESS-AUDIT-REPORT.md` and `DES-C-IOCTL-005` still carry the wrong labels | Separate correction |
+| D13 | This file | The ID DES-REVIEW-002 was already used for the Phase 04 review in `DESIGN-REVIEW-SUMMARY.md`, `DESIGN-REVIEW-ACTION-ITEMS.md` and `DEVICE-SUPPORT-MATRIX.md`. No issue cites either. The name is kept here until Q decides | Q: rename or keep |
+| D14 | #357, DES-C-TAS-010 | #357 lists #363 for the whole requirement, and section 11.2 lists it for TC-TASAPI-004. Section 11.1 says only TC-TASAPI-005 waits on it | Q: can HOLD proceed before #363 is accepted |
+| D15 | #359, #360 | Body priority Medium, label `priority:high` | Q |
+| D16 | #349 | Reporting acceptance relies on `HW_ARMED_NO_RECORD` and `BASE_FAR_AHEAD`, which section 11.2 lists as mock-only until EG-04 finds a trigger. It cannot be closed on hardware as things stand | Q: closure rule |
+
+No causal link between any TAS finding and #328 is established. #348, #349 and #364 each state this.

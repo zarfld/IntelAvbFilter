@@ -3,12 +3,13 @@ specType: component-design
 standard: IEEE 1016-2009
 component: TAS lifecycle IOCTL contract (proposed)
 phase: 04-design
-version: 0.4.0
+version: 0.5.0
 author: Claude Code, for Q
 date: "2026-11-05"
-status: DRAFT, derived artifact. v0.2 accepted as review baseline only. Not approved, not implemented
+status: DRAFT, derived artifact. Review baseline only, see #365. Requirements and ADRs are filed, not accepted. Not implemented, not hardware verified
 review: 04-design/reviews/DES-REVIEW-002-tas-ioctl-issue-ssot.md
 traceability:
+  design_issue: "#365 (DES-C-TAS-010), body status: review baseline, not approved"
   architecture:
     - "#142 (ARC-C-IOCTL-005: IOCTL Dispatcher)"
     - "#100 (ARC-C-I225-008: Intel i225/i226 Device Implementation)"
@@ -17,25 +18,51 @@ traceability:
     - "#92 (ADR-ARCH-003: Strategy Pattern)"
     - "#122 (ADR-SEC-001: Debug vs Release boundaries)"
     - "#133 (ADR-TSN-001: TSN Feature Prioritization)"
+    - "#362 (ADR-TSN-002), Proposed"
+    - "#363 (ADR-TSN-003), Proposed"
   requirements:
     - "#50 (REQ-F-TAS-001: Time-Aware Shaper Configuration), open"
-    - "#9 (REQ-F-TAS-001: Time-Aware Scheduler, IOCTL 26), closed"
+    - "#9 (REQ-F-TAS-001: Time-Aware Scheduler, IOCTL 26), reopened 2026-11-05, status:backlog"
     - "#64 (REQ-F-IOCTL-VERSIONING-001)"
     - "#45, #52 (register and device-op locking)"
     - "#113 (QA-SC-PERF-002)"
-  proposed_not_filed:
-    - "REQ-F-TAS-ACTIVATE-001 and the others in DES-REVIEW-002"
-    - "DES-C-TAS-010 design issue"
-    - "ADR-TSN-002, ADR-TSN-003"
+    - "#350 (REQ-F-TAS-STATE-001), status:backlog"
+    - "#351 (REQ-F-TAS-VALIDATE-001), status:backlog"
+    - "#352 (REQ-F-TAS-ERROR-001), status:backlog"
+    - "#353 (REQ-NF-TAS-OBSERVE-001), status:backlog"
+    - "#354 (REQ-NF-TAS-BUFFER-001), status:backlog"
+    - "#355 (REQ-F-TAS-LEGACY-001), status:backlog"
+    - "#356 (REQ-F-TAS-NDIS-001), status:backlog"
+    - "#357 (REQ-F-TAS-ACTIVATE-001), status:backlog"
+    - "#358 (REQ-F-TAS-REPLACE-001), status:backlog"
+    - "#359 (REQ-F-TAS-OPENALL-001), status:backlog"
+    - "#360 (REQ-F-TAS-DISABLE-001), status:backlog"
+    - "#361 (REQ-F-TAS-RESTORE-001), status:backlog"
+  defects:
+    - "#348 (BUG: I226 init_ptp overwrites SYSTIM)"
+    - "#349 (BUG: TAS schedule survived a NIC cycle)"
+  investigations:
+    - "#364 (INV-TAS-EG18)"
+  tests:
+    - "#366 to #384 (TEST-TAS-API-001 to 019, cases TC-TASAPI-001 to 019), designed only"
 ---
 
 # DES-C-TAS-010: TAS lifecycle IOCTL contract
 
 **Design only.** This document changes no driver code, test, runner entry, existing IOCTL or governance file.
 
-**GitHub Issues are authoritative.** This file is derived from them. It defines no requirement and takes no architecture decision. Everything here that would bind implementation is a proposal until the issues in `04-design/reviews/DES-REVIEW-002-tas-ioctl-issue-ssot.md` are filed and reviewed. `TAS-DR-nn` are design rules, not requirements. IOCTL codes are candidates, not reservations.
+**GitHub Issues are authoritative.** This file is derived from them. It defines no requirement and takes no architecture decision. Everything here that would bind implementation is a proposal until the governing issues are accepted. They were filed on 2026-11-05; `04-design/reviews/DES-REVIEW-002-tas-ioctl-issue-ssot.md` records the review and its filing. `TAS-DR-nn` are design rules, not requirements. IOCTL codes are candidates, not reservations.
 
-Implementation stays blocked until the governing requirements and ADRs are reviewed.
+Implementation stays blocked until the governing requirements and ADRs are accepted (#365).
+
+| Stage | State on 2026-11-05 |
+|---|---|
+| Proposed | #350 to #361 (`status:backlog`), #362 and #363 (Decision Status: Proposed), #365 (review baseline, not approved) |
+| Accepted | None |
+| Implemented | None |
+| Hardware Verified | None. #366 to #384 record Hardware RED and GREEN as not verified |
+
+#365 carries the label `status:completed`, set by automation. That label is not acceptance: DES-REVIEW-002, D1.
 
 | Tag | Meaning |
 |---|---|
@@ -76,7 +103,7 @@ Logs are in `C:\Users\User\cqv\i328\evidence\tasarm-20261105`, with full hashes 
 | E9 | `TQAVCTRL` 9→0→9 passes frames at 0 and resumes the same schedule | 1 run | `305a5ef3` |
 | E10 | In-place disarm: frames pass, windows, shadow, cycle and mode can be written back, `BaseT` writes are ignored and it keeps advancing | 1 run, plus 3 cycles | `c4009a76`, `1f355629` |
 | E11 | PHC shows no step across schedule writes, replacements or `TQAVCTRL` changes | Observed cases | as E1, E9, E10 |
-| E12 | A NIC cycle resets the PHC. Driver `init_ptp` reseeds `SYSTIM` | Every cycle | Issue 8 draft |
+| E12 | A NIC cycle resets the PHC. Driver `init_ptp` reseeds `SYSTIM` | Every cycle | #348 |
 | E13 | A NIC cycle clears schedule registers | 40 of 41 comparisons | Register logs |
 | E14 | One cycle left the full schedule with `tasArmed=0`. TX held about 11 minutes until the PHC reached the surviving `BaseT`. `Disable-NetAdapter` then recovered it | 1 case, 1 recovery | `d9ad1e0d`, `949a8c0d`, `558451d5`, `c9f1d2f7` |
 | E15 | Whole-cycle windows by future `BaseT` pass frames at low rate; a later replacement re-gates | 1 run | `6aff008e` |
@@ -92,11 +119,11 @@ The full report is in `DES-REVIEW-002`. Four conflicts directly constrain the de
 
 | Issue | Says | Effect here |
 |---|---|---|
-| `#91` ADR-PERF-002, accepted | Conflict with the miniport is mitigated by restricting the filter to PTP registers `0x0B600-0x0B700` | **All TAS registers lie outside that range.** Filter-side TSN programming needs a superseding decision: proposed ADR-TSN-002 |
-| `#50` | 256 gate entries, 1 ms margin, disable before reconfiguring, atomic spin-lock commit | Differs from evidence; amended through new REQ issues, not here |
+| `#91` ADR-PERF-002, accepted | Conflict with the miniport is mitigated by restricting the filter to PTP registers `0x0B600-0x0B700` | **All TAS registers lie outside that range.** Filter-side TSN programming needs an explicit decision: #362 ADR-TSN-002, Proposed, extends `#91` and does not supersede it |
+| `#50` | 256 gate entries, 1 ms margin, disable before reconfiguring, atomic spin-lock commit | Differs from evidence; amended by the `#50` Amendment Record and #350 to #361, not here |
 | `#9` | Up to 64 entries, cycle 1 µs to 1 s | Differs from `#50` and **DOC** |
 | `#45`, `#52` | All device ops inside spin locks | Section 9.4 |
-| `#9`, `#206`, `#281` | Closed as verified on a test with no traffic or wire check | Not used as evidence of gating. See DES-REVIEW-002 |
+| `#9`, `#206`, `#281` | Were closed as verified on a test with no traffic or wire check. Reopened 2026-11-05, `status:backlog` | Not used as evidence of gating. See DES-REVIEW-002 |
 
 **Local definitions must not be used.** `devices/intel_i226_impl.c` defines `I226_STQT(i)`, `I226_ENDQT(i)`, `I226_TXQCTL(i)` and `I226_TQAVCTRL_FUTSCDDIS` at values that differ from the SSOT (`0x3324`, `0x3334`, `0x3344`, bit 7). Implementation must use `intel-ethernet-regs/gen/i226_regs.h` only.
 
@@ -549,7 +576,7 @@ Current behaviour comes from `src/filter.c`. Proposed rules are for ADR-TSN-002.
 | `FilterAttach` | New context, so `tas_armed` is 0; `AvbBringUpHardware` | Read TSN registers read-only. Non-baseline: `origin = FOUND_AT_ATTACH`. No write, no automatic cleanup | E14 is the case this catches |
 | `FilterPause` | Stops timers because MMIO on powered-down hardware risks a bugcheck; no wait on NBLs | No TSN write. Mutating operations fail `NOT_READY` until Running. `TAS_QUERY` does **no MMIO** unless Running: `hw_mode = UNREADABLE`, slots `UNKNOWN` | Rule UNVERIFIED |
 | Held frames during Pause | Passthrough, so NDIS completes the pause when sends return | **Unknown** whether closed gates or a `Strict_End` block delay pause. No automatic gate opening. EG-13 | UNVERIFIED; link to #328 unproven |
-| `FilterRestart` | `AvbBringUpHardware`, and `init_ptp` reseeds `SYSTIM` | **Hazard:** the context survives, but the PHC can jump back under a live schedule, recreating the E14 hold with no NIC cycle. Reconcile before any operation: PHC moved back gives `PHC_RESET`, `INCONSISTENT`. Fix belongs to the Issue 8 draft | Hazard by source reading, EG-18 |
+| `FilterRestart` | `AvbBringUpHardware`, and `init_ptp` reseeds `SYSTIM` | **Hazard:** the context survives, but the PHC can jump back under a live schedule, recreating the E14 hold with no NIC cycle. Reconcile before any operation: PHC moved back gives `PHC_RESET`, `INCONSISTENT`. Fix belongs to #348 | Hazard by source reading, EG-18 |
 | `FilterDetach` | Removal lock drains in-flight IOCTLs, then context freed | Detach cannot fail and writes no TSN register. Contract record and operation store are lost, and `context_epoch` changes | Source |
 | `FilterUnload` | Sets `g_FilterStopping`, deregisters | No TSN write. Unload never claims restoration. Source comment says TAS state survives unload; not verified | EG-13 |
 | S3/S4 resume | Restart path re-initialises the PHC | Reconcile: registers may be lost. Baseline with a contract record gives `DRIVER_ARMED_HW_OFF` | EG-12 |
@@ -656,39 +683,39 @@ All tests are **hardware** tests using dedicated IOCTLs only, with no `READ_REGI
 
 | Stage | Meaning | State of all 19 today |
 |---|---|---|
-| Designed | Specified here and in a TEST issue draft | **Yes** |
+| Designed | Specified here and in TEST issues #366 to #384 | **Yes** |
 | RED pending | Test not yet run against the unimplemented or failing behaviour | **Yes** |
 | Hardware RED verified | Test ran on hardware and failed for the expected reason, with log and driver SHA256 | **No** |
 | GREEN pending | Implementation or passing run outstanding | **Yes** |
 | Hardware GREEN verified | Test passed on real hardware, Debug and Release, with installed SHA256 | **No** |
 
-Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011 on ADR-TSN-002, and TC-TASAPI-019 on the EG-18 findings.
+Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011 on ADR-TSN-002, and TC-TASAPI-019 on the EG-18 findings (#364).
 
 ### 11.2 Matrix
 
-| Proposed requirement | ADR | Design | Operation | HIL test | Hardware behaviour to prove | Prior characterisation, not RED |
+| Requirement, filed, not accepted | ADR, Proposed | Design | Operation | TEST issue and case | Hardware behaviour to prove | Prior characterisation, not RED |
 |---|---|---|---|---|---|---|
-| REQ-F-TAS-STATE-001 | ADR-TSN-002 | 4, 12 | `TAS_QUERY` | TC-TASAPI-001 | Clean adapter reads `NONE`, `OFF`, `COMPLETE`; read-only | None |
-| REQ-F-TAS-VALIDATE-001 | ADR-TSN-002 | 5 | All | TC-TASAPI-002 | Non-TAS adapter `SKIP_UNSUPPORTED`; unbound handle refused; tiers reported | None |
-| REQ-F-TAS-VALIDATE-001 | ADR-TSN-002 | 5.2 | ACTIVATE, REPLACE | TC-TASAPI-003 | Each invalid request refused, `TAS_QUERY` and TX unchanged | None |
-| REQ-F-TAS-ACTIVATE-001 | ADR-TSN-002, 003 | 6 | ACTIVATE, hold | TC-TASAPI-004 | Frames held to first window after `BaseT`, then gated; `PENDING` then `INFERRED_ACTIVE` | E6, EG-02 |
-| REQ-F-TAS-ACTIVATE-001 | ADR-TSN-003 | 6.2 | ACTIVATE, pass | TC-TASAPI-005 | Frames flow until `BaseT`, then gated. **After ADR-TSN-003 only** | E6, EG-02 |
-| REQ-F-TAS-REPLACE-001 | ADR-TSN-002 | 7 | REPLACE, same cycle | TC-TASAPI-006 | Wire moves at target, not before | E1, E2 |
-| REQ-F-TAS-REPLACE-001 | ADR-TSN-002 | 7 | REPLACE, changed cycle | TC-TASAPI-007 | New cycle on the wire at target | E3 |
-| REQ-F-TAS-REPLACE-001 | ADR-TSN-002 | 7.3 | REPLACE, too near | TC-TASAPI-008 | Refused, schedule unchanged on the wire | E4 |
-| REQ-F-TAS-VALIDATE-001 | ADR-TSN-002 | 5 | ACTIVATE, Strict_End | TC-TASAPI-009 | Fitting frame passes; frame above declared size held, released on a wider window | E8 |
-| REQ-F-TAS-OPENALL-001 | ADR-TSN-002 | 8 | REPLACE, `OPEN_ALL` | TC-TASAPI-010 | Flat arrivals, no PHC step, `OPEN_ALL` and TSN mode reported, later REPLACE re-gates | E15 |
-| REQ-F-TAS-DISABLE-001 | ADR-TSN-002 | 8 | `TAS_DISABLE_TO_LEGACY` | TC-TASAPI-011 | Frames pass at once, PHC continuous, `RESIDUE`. **After ADR-TSN-002 only** | E10 |
-| REQ-F-TAS-RESTORE-001 | ADR-TSN-002 | 8 | Restoration | TC-TASAPI-012 | After NIC cycle: `COMPLETE`, TX on the wire, PHC reset reported | E13 |
-| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 3.6 | Interplay | TC-TASAPI-013 | After `SETUP_TAS`: `LEGACY_ARMED`, contract operations refused | None |
-| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 3.6 | `SETUP_TAS` decision table | TC-TASAPI-017 | Rows 1, 2, 6, 7, 8: refused with exact NTSTATUS while managed, wire unchanged, `legacy_conflicts` up, generation unchanged. Clean and residue cases behave as today | E9, E10 |
-| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 4.5 | `GET_TAS_STATE` | TC-TASAPI-018 | `armed` follows the table in 4.5 for each reachable state | None |
-| REQ-F-TAS-ERROR-001 | ADR-TSN-002 | 9.1, 9.2 | Failure detail | TC-TASAPI-014 | Real refused call: record found on the same handle, `NOT_FOUND` on a second handle and on an I210-bound handle | None |
-| REQ-F-TAS-ERROR-001 | ADR-TSN-002 | 9.3 | Concurrency | TC-TASAPI-015 | Two threads race REPLACE: one wins, the other `BUSY` or `STATE_CONFLICT`, wire shows one schedule | None |
-| REQ-F-TAS-STATE-001 | ADR-TSN-002 | 4.1 | All | TC-TASAPI-016 | `HARDWARE_VERIFIED` never returned in any test, with PHC past `BaseT` | None |
-| REQ-F-TAS-NDIS-001 | ADR-TSN-002 | 8.1 | Pause, Restart | TC-TASAPI-019 | Mutating refused while Paused, no MMIO in `TAS_QUERY`, reconcile after Restart reports what hardware shows | None. Depends on EG-18 |
-| REQ-NF-TAS-OBSERVE-001 | ADR-TSN-002 | 12 | `TAS_QUERY` | TC-TASAPI-001, 004, 006 in Release | Same results, Release driver SHA256 recorded | None |
-| REQ-NF-TAS-BUFFER-001 | ADR-TSN-002 | EG-03 | Buffer configuration | To be defined after EG-03 | Buffer values reported, behaviour at sustained load | EG-03 |
+| #350 REQ-F-TAS-STATE-001 | #362 | 4, 12 | `TAS_QUERY` | #366 TC-TASAPI-001 | Clean adapter reads `NONE`, `OFF`, `COMPLETE`; read-only | None |
+| #351 REQ-F-TAS-VALIDATE-001 | #362 | 5 | All | #367 TC-TASAPI-002 | Non-TAS adapter `SKIP_UNSUPPORTED`; unbound handle refused; tiers reported | None |
+| #351 REQ-F-TAS-VALIDATE-001 | #362 | 5.2 | ACTIVATE, REPLACE | #368 TC-TASAPI-003 | Each invalid request refused, `TAS_QUERY` and TX unchanged | None |
+| #357 REQ-F-TAS-ACTIVATE-001 | #362, #363 | 6 | ACTIVATE, hold | #369 TC-TASAPI-004 | Frames held to first window after `BaseT`, then gated; `PENDING` then `INFERRED_ACTIVE` | E6, EG-02 |
+| #357 REQ-F-TAS-ACTIVATE-001 | #363 | 6.2 | ACTIVATE, pass | #370 TC-TASAPI-005 | Frames flow until `BaseT`, then gated. **After ADR-TSN-003 only** | E6, EG-02 |
+| #358 REQ-F-TAS-REPLACE-001 | #362 | 7 | REPLACE, same cycle | #371 TC-TASAPI-006 | Wire moves at target, not before | E1, E2 |
+| #358 REQ-F-TAS-REPLACE-001 | #362 | 7 | REPLACE, changed cycle | #372 TC-TASAPI-007 | New cycle on the wire at target | E3 |
+| #358 REQ-F-TAS-REPLACE-001 | #362 | 7.3 | REPLACE, too near | #373 TC-TASAPI-008 | Refused, schedule unchanged on the wire | E4 |
+| #351 REQ-F-TAS-VALIDATE-001 | #362 | 5 | ACTIVATE, Strict_End | #374 TC-TASAPI-009 | Fitting frame passes; frame above declared size held, released on a wider window | E8 |
+| #359 REQ-F-TAS-OPENALL-001 | #362 | 8 | REPLACE, `OPEN_ALL` | #375 TC-TASAPI-010 | Flat arrivals, no PHC step, `OPEN_ALL` and TSN mode reported, later REPLACE re-gates | E15 |
+| #360 REQ-F-TAS-DISABLE-001 | #362 | 8 | `TAS_DISABLE_TO_LEGACY` | #376 TC-TASAPI-011 | Frames pass at once, PHC continuous, `RESIDUE`. **After ADR-TSN-002 only** | E10 |
+| #361 REQ-F-TAS-RESTORE-001 | #362 | 8 | Restoration | #377 TC-TASAPI-012 | After NIC cycle: `COMPLETE`, TX on the wire, PHC reset reported | E13 |
+| #355 REQ-F-TAS-LEGACY-001 | #362 | 3.6 | Interplay | #378 TC-TASAPI-013 | After `SETUP_TAS`: `LEGACY_ARMED`, contract operations refused | None |
+| #355 REQ-F-TAS-LEGACY-001 | #362 | 3.6 | `SETUP_TAS` decision table | #382 TC-TASAPI-017 | Rows 1, 2, 6, 7, 8: refused with exact NTSTATUS while managed, wire unchanged, `legacy_conflicts` up, generation unchanged. Clean and residue cases behave as today | E9, E10 |
+| #355 REQ-F-TAS-LEGACY-001 | #362 | 4.5 | `GET_TAS_STATE` | #383 TC-TASAPI-018 | `armed` follows the table in 4.5 for each reachable state | None |
+| #352 REQ-F-TAS-ERROR-001 | #362 | 9.1, 9.2 | Failure detail | #379 TC-TASAPI-014 | Real refused call: record found on the same handle, `NOT_FOUND` on a second handle and on an I210-bound handle | None |
+| #352 REQ-F-TAS-ERROR-001 | #362 | 9.3 | Concurrency | #380 TC-TASAPI-015 | Two threads race REPLACE: one wins, the other `BUSY` or `STATE_CONFLICT`, wire shows one schedule | None |
+| #350 REQ-F-TAS-STATE-001 | #362 | 4.1 | All | #381 TC-TASAPI-016 | `HARDWARE_VERIFIED` never returned in any test, with PHC past `BaseT` | None |
+| #356 REQ-F-TAS-NDIS-001 | #362 | 8.1 | Pause, Restart | #384 TC-TASAPI-019 | Mutating refused while Paused, no MMIO in `TAS_QUERY`, reconcile after Restart reports what hardware shows | None. Depends on EG-18 |
+| #353 REQ-NF-TAS-OBSERVE-001 | #362 | 12 | `TAS_QUERY` | #366 TC-TASAPI-001; TC-TASAPI-004, 006 in Release, not linked to #353 on GitHub (DES-REVIEW-002, D6) | Same results, Release driver SHA256 recorded | None |
+| #354 REQ-NF-TAS-BUFFER-001 | #362 | EG-03 | Buffer configuration | No TEST issue. To be defined after EG-03 | Buffer values reported, behaviour at sustained load | EG-03 |
 
 **Mock-only paths stay UNVERIFIED.** These cannot be driven on hardware by dedicated IOCTLs today: `READBACK_MISMATCH`, `MMIO_FAILED`, `ROLLBACK_*`, the race in `ACTIVATION_AMBIGUOUS`, `HW_ARMED_NO_RECORD`, `BASE_FAR_AHEAD`, and rows 3, 4 and 5 of the `SETUP_TAS` table. Their mocks must reproduce E14's recorded register values, cannot establish HIL GREEN, and must be labelled UNVERIFIED in test output and in the issue. `HW_ARMED_NO_RECORD` gains HIL evidence only if EG-04 finds a trigger.
 
@@ -724,28 +751,28 @@ Priority order. **Blocks** names only the operation or claim affected. Everythin
 
 | ID, priority | Governing issue | Existing | Missing | Experiment | Expected | Acceptance | Blocks |
 |---|---|---|---|---|---|---|---|
-| EG-03, P0 | REQ-NF-TAS-BUFFER-001 | Default `TXPBSIZE`, `DTXMXPKTSZ` throughout. **DOC** and **LINUX**: 5 KB per queue, 1600 bytes, `RXPBSIZE` changed too | Behaviour under the documented configuration; whether a filter may change it | (1) Read-only: adapter settings and miniport behaviour. (2) `LOCAL_DIAGNOSTIC`: EG-02 and EG-06 under default and documented values, if (1) finds a safe way | Same gating with no stall, or a measured difference | Measured comparison at sustained rate; decision recorded | **Any production-ready claim** (D5). Not diagnostics or contract review |
-| EG-02, P1 | REQ-F-TAS-ACTIVATE-001, ADR-TSN-003 | Future base always after `SETUP_TAS` | Section 6.1 from a clean adapter; M1, M2 compared | `LOCAL_DIAGNOSTIC`: exact order, `HOLD`, M1, M2 | HOLD held to first window; PASS flows, then gated | 3 runs each, 0 lost, 0 outside window after `BaseT`, clean restoration | **ACTIVATE** |
-| EG-09, P1 | REQ-NF-TAS-OBSERVE-001 | Debug only | Release behaviour | All TC-TASAPI in Release after implementation | Same verdicts | Debug and Release GREEN with installed SHA256 | **Contract acceptance** |
-| EG-04, P1 | Issue 16 draft | 40 of 41 clean, 1 survival, 1 recovery | Trigger; recovery repeatability | Instrumented only; no blind repeats without a trigger hypothesis | Rare reproduction with timeline, or a trigger | Trigger or bound; recovery shown 3 times | `COMPLETE` guarantee only. Reporting covers it |
-| EG-01, P2 | REQ-F-TAS-REPLACE-001, `#113` | Lowest 0.935 s | Lower margin; in-kernel commit time | Step margin 500, 200, 100, 50 ms, 10 replacements each, via dedicated IOCTL | At target down to a limit, then refused or missed | 10 of 10 at chosen margin; hold time measured | Margins below 1 s only |
-| EG-05, P2 | REQ-F-TAS-STATE-001 | Only the wire proves it. `TEST_SEND_PTP` timestamps are pre-send | A hardware signal | (a) Hardware TX timestamp of a kernel-sent frame against the window. (b) Commit off-grid and see whether `BaseT` adopts the new grid after target | Signal changes only when the schedule did | Agrees with the I210 in 20 of 20, including a deliberately missed commit | `HARDWARE_VERIFIED` only |
-| EG-06, P2 | REQ-F-TAS-OPENALL-001 | Whole-cycle at low rate. **LINUX** cites a specification-update item and `RETX_CTL` | Behaviour at load | Sustained MTU frames, with `end == cycle` and with a gap | No loss or stall with the chosen gap | 0 lost, TDH keeps moving, 10 minutes | `OPEN_ALL` at load; gap value |
-| EG-07, P2 | REQ-F-TAS-VALIDATE-001 | None | `Strict_Cycle` effect | Matrix with windows that respect TAS-DR-05 | Frame finishing past cycle end held | 2 runs, fitting controls pass | `Strict_Cycle` tier only |
-| EG-08, P2 | REQ-F-TAS-VALIDATE-001 | 125 ms, ±30 ms host uncertainty | Accuracy; shorter cycles | Hardware RX timestamps on the I210 with PHC correlation | Uncertainty below 10 % of window | Stated uncertainty, 0 outside window | Tier of other cycles; any accuracy claim |
-| EG-10, P2 | REQ-F-TAS-VALIDATE-001 | `REV_04` only | I226-V, I226-IT, other steppings, I225 | EG-02 and replace tests on each | Same, or a recorded difference | Per-device GREEN | Those devices' tier |
-| EG-17, P2 | REQ-NF-TAS-OBSERVE-001, `#142` | `FILE_ANY_ACCESS`; default device ACL; no check found in `device.c` | Who can open and mutate | Review with `test_ioctl_access_control`; unelevated open test | ACL behaviour known | Decision O6 | Mutating codes' final definition |
-| EG-11, P3 | REQ-F-TAS-VALIDATE-001 | Identical windows; only ring 0 carries traffic | Independence | Needs traffic on a second ring; feasibility unknown | Queues gate separately | 2 runs | Per-queue tier only |
-| EG-12, P3 | REQ-F-TAS-STATE-001 | None | Link flap, speed change, miniport reset, S3 with a live schedule | Each event, then `TAS_QUERY` and wire | Report matches hardware | Each event classified | Nothing. Reports `UNKNOWN` |
-| EG-13, P2 | REQ-F-TAS-NDIS-001 | Source comment only; cycles so far came after a drain | Pause, Detach and Unload with frames held. Link to #328 unproven | Under a Scenario B test plan: NIC cycle with frames held behind closed gates, bounded | Characterised: completes or stalls | Recorded outcome, Debug and Release | Unload and Pause guarantees only |
-| EG-18, P2 | REQ-F-TAS-NDIS-001, its own issue | Source only: `FilterRestart` reaches `init_ptp`. No hardware observation | Five questions below | Cases A to E below | Competing outcomes below | Cases A to D, 3 runs each; each question answered yes, no or unknown per case | Any claim that a schedule survives Pause/Restart |
-| EG-14, P3 | REQ-F-TAS-DISABLE-001 | Past-`BaseT` re-arm kept the old schedule | Future `BaseT` after mode off | `DISABLE_TO_LEGACY`, future `BaseT`, then mode on | New schedule applies | 2 runs | `ACTIVATE` after legacy |
-| EG-15, P3 | REQ-F-TAS-REPLACE-001 | None | Overlapping, off-grid and changed-cycle-miss effects | Each case separately | Characterised | Recorded outcome | Those cases only |
+| EG-03, P0 | #354 REQ-NF-TAS-BUFFER-001 | Default `TXPBSIZE`, `DTXMXPKTSZ` throughout. **DOC** and **LINUX**: 5 KB per queue, 1600 bytes, `RXPBSIZE` changed too | Behaviour under the documented configuration; whether a filter may change it | (1) Read-only: adapter settings and miniport behaviour. (2) `LOCAL_DIAGNOSTIC`: EG-02 and EG-06 under default and documented values, if (1) finds a safe way | Same gating with no stall, or a measured difference | Measured comparison at sustained rate; decision recorded | **Any production-ready claim** (D5). Not diagnostics or contract review |
+| EG-02, P1 | #357 REQ-F-TAS-ACTIVATE-001, #363 ADR-TSN-003 | Future base always after `SETUP_TAS` | Section 6.1 from a clean adapter; M1, M2 compared | `LOCAL_DIAGNOSTIC`: exact order, `HOLD`, M1, M2 | HOLD held to first window; PASS flows, then gated | 3 runs each, 0 lost, 0 outside window after `BaseT`, clean restoration | **ACTIVATE** |
+| EG-09, P1 | #353 REQ-NF-TAS-OBSERVE-001 | Debug only | Release behaviour | All TC-TASAPI in Release after implementation | Same verdicts | Debug and Release GREEN with installed SHA256 | **Contract acceptance** |
+| EG-04, P1 | #349 | 40 of 41 clean, 1 survival, 1 recovery | Trigger; recovery repeatability | Instrumented only; no blind repeats without a trigger hypothesis | Rare reproduction with timeline, or a trigger | Trigger or bound; recovery shown 3 times | `COMPLETE` guarantee only. Reporting covers it |
+| EG-01, P2 | #358 REQ-F-TAS-REPLACE-001, `#113` | Lowest 0.935 s | Lower margin; in-kernel commit time | Step margin 500, 200, 100, 50 ms, 10 replacements each, via dedicated IOCTL | At target down to a limit, then refused or missed | 10 of 10 at chosen margin; hold time measured | Margins below 1 s only |
+| EG-05, P2 | #350 REQ-F-TAS-STATE-001 | Only the wire proves it. `TEST_SEND_PTP` timestamps are pre-send | A hardware signal | (a) Hardware TX timestamp of a kernel-sent frame against the window. (b) Commit off-grid and see whether `BaseT` adopts the new grid after target | Signal changes only when the schedule did | Agrees with the I210 in 20 of 20, including a deliberately missed commit | `HARDWARE_VERIFIED` only |
+| EG-06, P2 | #359 REQ-F-TAS-OPENALL-001 | Whole-cycle at low rate. **LINUX** cites a specification-update item and `RETX_CTL` | Behaviour at load | Sustained MTU frames, with `end == cycle` and with a gap | No loss or stall with the chosen gap | 0 lost, TDH keeps moving, 10 minutes | `OPEN_ALL` at load; gap value |
+| EG-07, P2 | #351 REQ-F-TAS-VALIDATE-001 | None | `Strict_Cycle` effect | Matrix with windows that respect TAS-DR-05 | Frame finishing past cycle end held | 2 runs, fitting controls pass | `Strict_Cycle` tier only |
+| EG-08, P2 | #351 REQ-F-TAS-VALIDATE-001 | 125 ms, ±30 ms host uncertainty | Accuracy; shorter cycles | Hardware RX timestamps on the I210 with PHC correlation | Uncertainty below 10 % of window | Stated uncertainty, 0 outside window | Tier of other cycles; any accuracy claim |
+| EG-10, P2 | #351 REQ-F-TAS-VALIDATE-001 | `REV_04` only | I226-V, I226-IT, other steppings, I225 | EG-02 and replace tests on each | Same, or a recorded difference | Per-device GREEN | Those devices' tier |
+| EG-17, P2 | #353 REQ-NF-TAS-OBSERVE-001, `#142` | `FILE_ANY_ACCESS`; default device ACL; no check found in `device.c` | Who can open and mutate | Review with `test_ioctl_access_control`; unelevated open test | ACL behaviour known | Decision O6 | Mutating codes' final definition |
+| EG-11, P3 | #351 REQ-F-TAS-VALIDATE-001 | Identical windows; only ring 0 carries traffic | Independence | Needs traffic on a second ring; feasibility unknown | Queues gate separately | 2 runs | Per-queue tier only |
+| EG-12, P3 | #350 REQ-F-TAS-STATE-001 | None | Link flap, speed change, miniport reset, S3 with a live schedule | Each event, then `TAS_QUERY` and wire | Report matches hardware | Each event classified | Nothing. Reports `UNKNOWN` |
+| EG-13, P2 | #356 REQ-F-TAS-NDIS-001 | Source comment only; cycles so far came after a drain | Pause, Detach and Unload with frames held. Link to #328 unproven | Under a Scenario B test plan: NIC cycle with frames held behind closed gates, bounded | Characterised: completes or stalls | Recorded outcome, Debug and Release | Unload and Pause guarantees only |
+| EG-18, P2 | #356 REQ-F-TAS-NDIS-001, #364 | Source only: `FilterRestart` reaches `init_ptp`. No hardware observation | Five questions below | Cases A to E below | Competing outcomes below | Cases A to D, 3 runs each; each question answered yes, no or unknown per case | Any claim that a schedule survives Pause/Restart |
+| EG-14, P3 | #360 REQ-F-TAS-DISABLE-001 | Past-`BaseT` re-arm kept the old schedule | Future `BaseT` after mode off | `DISABLE_TO_LEGACY`, future `BaseT`, then mode on | New schedule applies | 2 runs | `ACTIVATE` after legacy |
+| EG-15, P3 | #358 REQ-F-TAS-REPLACE-001 | None | Overlapping, off-grid and changed-cycle-miss effects | Each case separately | Characterised | Recorded outcome | Those cases only |
 | EG-16, P3 | Various | 1 run each: E2, E3, E9, E15 | Repeatability | Covered by TC-TASAPI | Same | GREEN | Nothing beyond those tests |
 
 ### 14.1 EG-18 investigation
 
-A separate hardware evidence gap with its own issue. **No relationship to #328 is claimed without hardware evidence.**
+A separate hardware evidence gap with its own issue, #364. **No relationship to #328 is claimed without hardware evidence.**
 
 | # | Question | Measured by |
 |---|---|---|
