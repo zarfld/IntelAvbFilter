@@ -1,8 +1,8 @@
 # DES-REVIEW-002: TAS IOCTL contract against the GitHub Issues SSOT
 
-**Date**: 2026-11-05. **Reviewed**: `04-design/components/DES-C-TAS-010-tas-ioctl-contract.md`.
+**Date**: 2026-11-05. **Reviewed**: `04-design/components/DES-C-TAS-010-tas-ioctl-contract.md`, v0.2 and v0.3. v0.2 is accepted as a review baseline only.
 
-**Status**: derived report. GitHub Issues are authoritative. **Nothing here has been filed or changed on GitHub.** This session has no `gh` and no token, and read issues through the public API only. Issue bodies ready for filing are held locally for Q.
+**Status**: derived report. GitHub Issues are authoritative. **Nothing here has been filed or changed on GitHub, so no governance change is complete.** This session has no `gh` and no token, and read issues through the public API only. Issue bodies ready for filing are held locally for Q.
 
 Issues read for this review: #1, #9, #29, #30, #33, #41, #44, #45, #50, #52, #56, #64, #91, #92, #100, #113, #122, #133, #134, #142, #206, #281. Numbers below are as read on 2026-11-05 and must be re-read immediately before any edit.
 
@@ -27,6 +27,8 @@ Issues read for this review: #1, #9, #29, #30, #33, #41, #44, #45, #50, #52, #56
 | C15 | #50, code | #50 specifies `FILE_WRITE_ACCESS`; `_NDIS_CONTROL_CODE` uses `FILE_ANY_ACCESS` for all codes | Access model undefined | EG-17 |
 | C16 | #113 | Target "8-slot schedule" assumes a gate list | Scenario wording does not fit one window per queue | Comment; scenario stays valid as a latency target |
 | C17 | #133 | Status Proposed with TAS "Not Started", while #9 is closed completed | Status drift | ADR-TSN-002 traces to it; no edit |
+| C18 | Code | `devices/intel_i226_impl.c` defines `STQT`, `ENDQT`, `TXQCTL` offsets and `FUTSCDDIS` differently from the SSOT | A new implementation would write the wrong registers | Use the SSOT only. Local draft Issue 6 |
+| C19 | #31, #44, #64 | #44 and #64 cite #31 as StR-004 NDIS integration, but #31 is StR-005, Windows Management Service | Parent links unreliable | Comment only. New drafts do not use #31 |
 
 ## 2. Proposed requirement issues
 
@@ -44,6 +46,10 @@ IDs below did not appear as issue titles when searched on 2026-11-05. Re-check b
 | R8 | REQ-F-TAS-ERROR-001 | Operation identity, failure retrieval, concurrency | #33, #52, #50 | None |
 | R9 | REQ-NF-TAS-OBSERVE-001 | Release observability without raw register access | #33, #122 | None |
 | R10 | REQ-NF-TAS-BUFFER-001 | Buffer configuration before any production-ready claim | #33, #50 | EG-03 |
+| R11 | REQ-F-TAS-LEGACY-001 | Existing ABI preserved; legacy client cannot overwrite a managed schedule | #33, #64, #50 | None |
+| R12 | REQ-F-TAS-NDIS-001 | TAS behaviour across Attach, Pause, Restart, Detach, Unload, power | #33, #36, #50 | EG-13, EG-18 |
+| D1 | DES-C-TAS-010 | Design issue for the contract, as with other DES-C issues | #142, #100, A1, A2 | Filed after the ADRs |
+| T | TEST-TAS-API-001..019 | One per TC-TASAPI case | The requirement each verifies | Filed after requirements |
 
 ### Links to existing issues
 
@@ -57,16 +63,16 @@ Relationship verbs follow the existing vocabulary: `Traces to`, `Verified by`, `
 | #206, #281 | Comment recording what was verified (C9) | No body edit |
 | #142, #100 | Add links when the design is accepted | Fetch first |
 
-**Decision needed from Q:** D1 asks for supersession or amendment links. This review proposes **amendment**, since #50 still states the parent capability and #281 cites it. If Q prefers supersession, #50 could close when the new REQs are verified.
+**Decided by Q:** #50 stays open as the parent. The exact edit, a 17-row table of outdated, contradicted and unverified statements, is drafted for filing. Nothing in #50 is removed.
 
 ## 3. Proposed ADR issues
 
 | Draft | ID | Decision | Traces to | Relation to existing ADRs |
 |---|---|---|---|---|
-| A1 | ADR-TSN-002 | Filter-side TSN ownership, hardware-state authority, lifecycle responsibilities | R1 to R9, #50 | Narrows #91 for TSN registers; refines #133; depends on #92, #122 |
+| A1 | ADR-TSN-002 | Filter-side TSN ownership, hardware-state authority, lifecycle responsibilities | R1 to R12, #50 | Explicitly extends #91 for TSN registers; refines #133; depends on #92, #122 |
 | A2 | ADR-TSN-003 | Pre-activation behaviour and `FutScdDis` compatibility | R1 | Depends on A1 |
 
-The ADR template's `Superseded By` field fits #91 only if #91 is fully replaced. It is not, since its PTP decision stands. So A1 states the exception and #91 gets a comment. If Q prefers, a new ADR could supersede #91.
+`Superseded By` fits #91 only if it is fully replaced. It is not, since its PTP decision stands. A1 is an explicit extension, stating what stays valid and what is extended, and #91 gets a comment.
 
 ## 4. Review of the contract
 
@@ -85,3 +91,30 @@ The ADR template's `Superseded By` field fits #91 only if #91 is fully replaced.
 | Locking | Not addressed | Reconciled with #45, #52 |
 
 **Corrected claim:** v0.1 used the 34 ms `BaseT` write to size a commit guard. That figure came from user-mode diagnostics issuing separate IOCTLs with logging on.
+
+## 5. Historical verification scope
+
+`test_ioctl_tas.c` has no traffic, wire or register reads. It binds a TAS-capable adapter, submits configurations and checks status. The driver path reads neither the gate list nor the base time (0 matches in `devices/intel_i226_impl.c` and `src/intel_kernel_real.c`).
+
+| Issue | Closure says | Actual scope | Criteria not met | Recommendation |
+|---|---|---|---|---|
+| #9 | Completed | IOCTL 26 reaches the device, sets mode and cycle | `BASET`, windows, activation at base time, gates opening, validation scenarios | **Reopen** |
+| #206 | 10 of 10 passed | IOCTL path. TC-TAS cases are not the UT-TAS cases specified; all 8 boxes unticked | Gate timing, isolation, integration, V&V | **Reopen**, or close as not verified |
+| #281 | Verified, all criteria covered | IOCTL path. Closure cites IOCTLs that do not exist and a readback the test does not do | Validation, atomic commit, readback | **Reopen** |
+
+Reopening is Q's decision. The drafted comments state this per criterion and change no state. The TC-TAS tests stay valid for the IOCTL path and are not changed. Some criteria cannot be met as written, such as 256 entries, and are retired through the new TEST issues.
+
+## 6. v0.3 review results
+
+| Point | Result | Open item |
+|---|---|---|
+| Requirement → ADR → Design → Test | Complete on paper for R1 to R12: DES-C-TAS-010 section 11 | **Not real until issues exist**: every link is a `#TBD` |
+| Unique identifiers | New IDs did not appear in issue titles when searched. TEST IDs avoid both TEST-TAS-CONFIG-001 issues | Re-check immediately before filing |
+| Existing IOCTL compatibility | Codes 26, 65, 66, 70 keep their ABI. A clean-adapter `SETUP_TAS` is unchanged. Refusal applies only in states no automated test reaches | `--rearm`, `--after-rearm` diagnostics would be refused. O7 open |
+| Concurrency and generation | Per-adapter claim, generation, epoch, operation store defined; `SETUP_TAS` joins the claim | Lock placement to confirm against #45 |
+| Adapter capability | Tiers per feature, device, revision; hardware range separate from tested values | `revision_id` source to confirm |
+| Setup, cleanup, restoration | Section 10; NDIS rules in 8.1 | EG-13, EG-18 |
+| Release observability | `TAS_QUERY`; no raw access; `#122` respected | Paused-state rule untested |
+| RED/GREEN acceptance | 19 tests, each with RED evidence, Debug and Release; mock-only paths stay UNVERIFIED | Runner rows added only at implementation |
+
+No change is made to HIL tests, runner behaviour or global blocking. No production code is written in this phase.
