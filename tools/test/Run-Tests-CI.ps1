@@ -584,6 +584,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
     'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
     'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; #149 #317'
+    'test_tas_isolated_arm --armed-period-ms 200' = 'Unsafe: same SETUP_TAS and NIC cycle at a 200 ms armed send period, separating a stall that follows time from one that follows frames, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm'         = 'Unsafe: SETUP_TAS alone on every TAS adapter, then a NIC cycle as the only restoration path, #328; requires an independent management link and an attended operator, the test BLOCKS without that link'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
     # Built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29): not runnable by this runner yet.
@@ -627,6 +628,7 @@ $HilHazardHolds = @{
     'avb_test_i226_um'           = $Hold328Tsn
     'test_ioctl_tas'             = $Hold328Tsn
     'test_tas_isolated_arm'      = $Hold328Tsn
+    'test_tas_isolated_arm --armed-period-ms 200' = $Hold328Tsn
     'test_ioctl_fp_ptm'          = $Hold328Tsn
     'test_tsn_ioctl_handlers_um' = $Hold328Tsn
     'test_tsn_ioctl_handlers'    = $Hold328Tsn
@@ -745,6 +747,7 @@ $HilTestSafety = @{
     'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
     'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
     'test_tas_isolated_arm'            = 'Unsafe'     # SETUP_TAS plus CM_Disable_DevNode / CM_Enable_DevNode
+    'test_tas_isolated_arm --armed-period-ms 200' = 'Unsafe'
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
@@ -824,6 +827,7 @@ $HilTestTimeoutSeconds = [ordered]@{
     # Worst case from its own bounds: 40 s TX windows + 120 s disable + 60 s enable + 60 s return + 60 s link + 25 s settle and
     # probe = 365 s for one TAS adapter.  480 s = 365 s + 30 %, so a stalled NIC cycle ends in the test's verdict, not a kill.
     'test_tas_isolated_arm' = 480
+    'test_tas_isolated_arm --armed-period-ms 200' = 480
     # Per adapter: TC-AEN-002 30 s + TC-AEN-005 60 s + TC-AEN-006 31 s of deadlines/sleeps (tests/atdecc/
     # test_atdecc_aen_protocol.c) = 121 s; 3 adapters on the HIL host = 363 s, killed at 300 s on adapter 3 in
     # LocalSuites_20261021_173805 .. 20261022_094632.  420 s = 363 s + 16 %.  TC-AEN-001 adds 80 s per adapter only with

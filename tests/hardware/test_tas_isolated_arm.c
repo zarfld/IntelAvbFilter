@@ -17,6 +17,10 @@
  * progress only (manual section 8.11.13); completions are the adapter-wide OutstandingSendNBLs gauge, a lower bound on
  * forwarded NBLs not completed back to the filter. READ_REGISTER exists only in Debug drivers, so a Release driver is BLOCKED.
  *
+ * Armed TX stalled about 5 s after SETUP_TAS on 2026-11-05 (0x125B, driver F3CC845E). The armed window samples densely
+ * across that time and all registers are dumped before and after it. --armed-period-ms N changes the send period of
+ * the armed window only, which separates a stall that follows time from one that follows the frame count.
+ *
  * Exit: 0 all passed, 1 any failure or restoration verdict, 2 no adapter ran, 3 only BLOCKED.
  *
  * Verifies: #328
@@ -41,6 +45,7 @@
 #define TX_QUEUES            4
 #define TX_SOCKETS           8
 #define TX_PERIOD_MS         50
+#define MAX_ARMED_PERIOD_MS  1000
 #define TX_DISCARD_PORT      9
 #define TX_DRAIN_MS          5000
 #define GAUGE_SLACK          2u
@@ -76,8 +81,8 @@ static const uint32_t g_tdt[TX_QUEUES] = {I226_TDT0, I226_TDT1, I226_TDT2, I226_
 
 typedef struct {
     uint32_t tdh[TX_QUEUES], tdt[TX_QUEUES];
-    uint32_t tqavctrl, baset_l, baset_h, cycle, cycle_s;
-    unsigned long long gauge, os_out, os_discards, os_errors;
+    uint32_t tqavctrl, baset_l, baset_h, cycle, cycle_s, txdctl0, tctl;
+    unsigned long long systim, gauge, os_out, os_discards, os_errors;
     BOOL ok;
 } SAMPLE;
 
@@ -88,10 +93,13 @@ typedef struct {
 } TX_RESULT;
 
 static const DWORD g_baseline_marks[] = {0, 1000, 2000, 5000};
-static const DWORD g_armed_marks[] = {0, 1000, 2000, 5000, 10000, 30000};
+static const DWORD g_armed_marks[] = {0, 1000, 2000, 3000, 4000, 4250, 4500, 4750, 5000, 5250, 5500, 5750, 6000, 6250, 6500,
+                                      6750, 7000, 7250, 7500, 7750, 8000, 8250, 8500, 8750, 9000, 9250, 9500, 9750, 10000,
+                                      12000, 14000, 16000, 18000, 20000, 22000, 24000, 26000, 28000, 30000};
 #define MARK_COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
 static int g_failed, g_blocked, g_ran;
+static DWORD g_armed_period_ms = TX_PERIOD_MS;
 
 /* Non-negative while the adapter is armed and restoration has not reported */
 static volatile LONG g_pending_adapter = -1;
@@ -238,6 +246,7 @@ static BOOL find_addressing(avb_u64 luid, IN_ADDR *ipv4, BOOL *other_link)
 static void take_sample(HANDLE h, avb_u64 luid, DWORD at_ms, SAMPLE *s)
 {
     AVB_DRIVER_STATISTICS st;
+    AVB_CLOCK_CONFIG clock_cfg;
     MIB_IF_ROW2 row;
     int q;
 
@@ -252,6 +261,10 @@ static void take_sample(HANDLE h, avb_u64 luid, DWORD at_ms, SAMPLE *s)
     s->ok &= read_reg(h, I226_BASET_H, &s->baset_h);
     s->ok &= read_reg(h, I226_QBVCYCLET, &s->cycle);
     s->ok &= read_reg(h, I226_QBVCYCLET_S, &s->cycle_s);
+    s->ok &= read_reg(h, I226_TXDCTL0, &s->txdctl0);
+    s->ok &= read_reg(h, I226_TCTL, &s->tctl);
+    s->ok &= read_clock(h, &clock_cfg);
+    s->systim = clock_cfg.systim;
     s->ok &= read_stats(h, &st);
     s->gauge = st.OutstandingSendNBLs;
     s->ok &= read_if(luid, &row);
@@ -259,14 +272,16 @@ static void take_sample(HANDLE h, avb_u64 luid, DWORD at_ms, SAMPLE *s)
     s->os_discards = row.OutDiscards;
     s->os_errors = row.OutErrors;
     printf("    t=%-6lu TDH/TDT q0=%u/%u q1=%u/%u q2=%u/%u q3=%u/%u TQAVCTRL=0x%08X BaseT=0x%08X:%08X cycle=%u shadow=%u "
-           "gauge=%llu osOut=%llu osDisc=%llu osErr=%llu ok=%d\n", at_ms,
+           "TXDCTL0=0x%08X TCTL=0x%08X phc=%llu gauge=%llu osOut=%llu osDisc=%llu osErr=%llu ok=%d\n", at_ms,
            s->tdh[0], s->tdt[0], s->tdh[1], s->tdt[1], s->tdh[2], s->tdt[2], s->tdh[3], s->tdt[3],
-           s->tqavctrl, s->baset_h, s->baset_l, s->cycle, s->cycle_s, s->gauge, s->os_out, s->os_discards, s->os_errors, s->ok);
+           s->tqavctrl, s->baset_h, s->baset_l, s->cycle, s->cycle_s, s->txdctl0, s->tctl, s->systim,
+           s->gauge, s->os_out, s->os_discards, s->os_errors, s->ok);
     fflush(stdout);
 }
 
 /** Bounded broadcast from several source ports, with samples at the given marks, then a drain */
-static BOOL tx_window(HANDLE h, avb_u64 luid, IN_ADDR ipv4, const DWORD *marks, size_t mark_count, const char *label, TX_RESULT *r)
+static BOOL tx_window(HANDLE h, avb_u64 luid, IN_ADDR ipv4, const DWORD *marks, size_t mark_count, DWORD period_ms,
+                      const char *label, TX_RESULT *r)
 {
     SOCKET sock[TX_SOCKETS];
     SOCKADDR_IN local = {0}, peer = {0};
@@ -307,7 +322,7 @@ static BOOL tx_window(HANDLE h, avb_u64 luid, IN_ADDR ipv4, const DWORD *marks, 
         } else {
             r->sent++;
         }
-        Sleep(TX_PERIOD_MS);
+        Sleep(period_ms);
     } while (next_mark < mark_count);
 
     Sleep(TX_DRAIN_MS);
@@ -526,7 +541,7 @@ static void restore_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
 
         if (e.link_up) {
             TX_RESULT tx;
-            e.tx_probed = tx_window(fresh, id->net_luid, ipv4, g_baseline_marks, MARK_COUNT(g_baseline_marks), "after restoration", &tx);
+            e.tx_probed = tx_window(fresh, id->net_luid, ipv4, g_baseline_marks, MARK_COUNT(g_baseline_marks), TX_PERIOD_MS, "after restoration", &tx);
             e.tx_healthy = tx.healthy;
         }
         CloseHandle(fresh);
@@ -560,6 +575,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
     LARGE_INTEGER qpc;
     MIB_IF_ROW2 row;
     TX_RESULT before, armed_tx;
+    uint32_t armed_regs[REG_COUNT];
     IN_ADDR ipv4;
     SAMPLE now;
     BOOL other_link = FALSE, arm_ok, schedule_ok;
@@ -608,7 +624,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
         CloseHandle(h);
         return;
     }
-    if (!tx_window(h, id->net_luid, ipv4, g_baseline_marks, MARK_COUNT(g_baseline_marks), "before SETUP_TAS", &before) || !before.healthy) {
+    if (!tx_window(h, id->net_luid, ipv4, g_baseline_marks, MARK_COUNT(g_baseline_marks), TX_PERIOD_MS, "before SETUP_TAS", &before) || !before.healthy) {
         verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "the TX probe is not healthy before arming, so it could not detect a change");
         g_blocked++;
         CloseHandle(h);
@@ -629,10 +645,15 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
     arm_ok = arm_tas(h, &arm_error);
     printf("    SETUP_TAS ok=%d win32=%lu\n", arm_ok, arm_error);
     take_sample(h, id->net_luid, 0, &now);
+    printf("  --- Registers right after SETUP_TAS ---\n");
+    (void)read_regs(h, armed_regs);
 
     schedule_ok = arm_ok && now.ok && (now.tqavctrl & I226_TQAVCTRL_TRANSMIT_MODE_MASK) != 0 &&
                   now.cycle == 1000000u && now.cycle_s != 0 && (now.baset_l != 0 || now.baset_h != 0);
-    (void)tx_window(h, id->net_luid, ipv4, g_armed_marks, MARK_COUNT(g_armed_marks), "while armed", &armed_tx);
+    printf("  armed send period %lu ms\n", g_armed_period_ms);
+    (void)tx_window(h, id->net_luid, ipv4, g_armed_marks, MARK_COUNT(g_armed_marks), g_armed_period_ms, "while armed", &armed_tx);
+    printf("  --- Registers at the end of the armed window ---\n");
+    (void)read_regs(h, armed_regs);
     verdict(schedule_ok ? "PASS" : "FAIL", "TC-TASARM-001", index, id->device_id,
             schedule_ok ? NULL : "the requested schedule is not in the adapter: needs TSN mode, QBVCYCLET 1 ms, a shadow cycle and a base time");
     if (!schedule_ok) { g_failed++; }
@@ -643,7 +664,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
     restore_and_verify(h, index, id, ipv4, baseline, &stats, &clock_cfg, qpc);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     AVB_ADAPTER_IDENTITY_REQUEST ids[8];
     IOCTL_VERSION version = {0};
@@ -657,6 +678,14 @@ int main(void)
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
     SetUnhandledExceptionFilter(on_crash);
     printf("=== IntelAvbFilter - isolated SETUP_TAS on real hardware (#328) ===\n");
+    if (argc == 3 && strcmp(argv[1], "--armed-period-ms") == 0) {
+        g_armed_period_ms = strtoul(argv[2], NULL, 10);
+    }
+    if ((argc != 1 && argc != 3) || (argc == 3 && strcmp(argv[1], "--armed-period-ms") != 0) ||
+        g_armed_period_ms == 0 || g_armed_period_ms > MAX_ARMED_PERIOD_MS) {
+        printf("[BLOCKED] TC-TASARM-001: usage: test_tas_isolated_arm [--armed-period-ms 1..%d]\n", MAX_ARMED_PERIOD_MS);
+        return 3;
+    }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("[BLOCKED] TC-TASARM-001: Winsock unavailable\n");
         return 3;
