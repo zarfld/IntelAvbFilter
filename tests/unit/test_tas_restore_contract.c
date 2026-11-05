@@ -33,6 +33,8 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #define IOCTL_CALL mock_ioctl
 #define IOCTL_NTSTATUS_CALL mock_ioctl_ntstatus
 #include "../ioctl/tas_restore.h"
+#include "../ioctl/tas_restoration_eval.h"
+#include "../ioctl/tas_wire_match.h"
 
 /* =========================================================================
  * Mock infrastructure
@@ -403,6 +405,116 @@ static void test_11_skip_distinct_from_pass(void) {
     EXPECT_EQ("TC_BLOCKED != TC_SKIP", TC_BLOCKED != TC_SKIP, 1);
 }
 
+/* Evidence of a fully verified restoration; each case below breaks exactly one item. */
+static TAS_RESTORATION_EVIDENCE full_restoration_evidence(void) {
+    TAS_RESTORATION_EVIDENCE e;
+    memset(&e, 0, sizeof(e));
+    e.cycle_completed = TRUE; e.adapter_returned = TRUE; e.attach_observed = TRUE;
+    e.driver_disarmed = TRUE; e.tsn_mode_clear = TRUE;
+    e.regs_compared = 40; e.regs_unreadable = 0; e.regs_changed = 0;
+    e.phc_observed = TRUE; e.phc_continuous = TRUE;
+    e.link_up = TRUE; e.tx_probed = TRUE; e.tx_healthy = TRUE;
+    return e;
+}
+
+/*
+ * TC-MOCK-012: NIC-cycle restoration outcome.  CLEANUP_FAILED = restoration demonstrably
+ * unsuccessful, INCONCLUSIVE_RESTORATION = state it depends on could not be measured.
+ * Pure logic only: this is not evidence that a NIC cycle restores any hardware.
+ */
+static void test_12_restoration_outcome(void) {
+    TAS_RESTORATION_EVIDENCE e;
+    printf("\n[TC-MOCK-012] NIC-cycle restoration outcome from the evidence\n");
+
+    e = full_restoration_evidence();
+    EXPECT_EQ("all evidence => VERIFIED", tas_restoration_outcome(&e), TAS_RESTORATION_VERIFIED);
+
+    /* The essential rule: returning link and traffic alone are never success */
+    memset(&e, 0, sizeof(e));
+    e.link_up = TRUE; e.tx_probed = TRUE; e.tx_healthy = TRUE;
+    EXPECT_FALSE("link and traffic alone are not VERIFIED", tas_restoration_outcome(&e) == TAS_RESTORATION_VERIFIED);
+
+    e = full_restoration_evidence(); e.cycle_completed = FALSE;
+    EXPECT_EQ("cycle failed => CLEANUP_FAILED", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+    e = full_restoration_evidence(); e.adapter_returned = FALSE;
+    EXPECT_EQ("adapter gone => CLEANUP_FAILED", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+    e = full_restoration_evidence(); e.driver_disarmed = FALSE;
+    EXPECT_EQ("driver still armed => CLEANUP_FAILED", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+    e = full_restoration_evidence(); e.tsn_mode_clear = FALSE;
+    EXPECT_EQ("TSN mode still set => CLEANUP_FAILED", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+    e = full_restoration_evidence(); e.regs_changed = 1;
+    EXPECT_EQ("register differs => CLEANUP_FAILED", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+    e = full_restoration_evidence(); e.phc_continuous = FALSE;
+    EXPECT_EQ("PHC discontinuity => CLEANUP_FAILED", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+    e = full_restoration_evidence(); e.tx_healthy = FALSE;
+    EXPECT_EQ("TX unhealthy => CLEANUP_FAILED", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+
+    e = full_restoration_evidence(); e.attach_observed = FALSE;
+    EXPECT_EQ("cycle unproven => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
+    e = full_restoration_evidence(); e.regs_unreadable = 1;
+    EXPECT_EQ("unreadable register => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
+    e = full_restoration_evidence(); e.regs_compared = 0;
+    EXPECT_EQ("nothing compared => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
+    e = full_restoration_evidence(); e.phc_observed = FALSE; e.phc_continuous = FALSE;
+    EXPECT_EQ("PHC unmeasured => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
+    e = full_restoration_evidence(); e.link_up = FALSE; e.tx_probed = FALSE; e.tx_healthy = FALSE;
+    EXPECT_EQ("link down, no probe => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
+
+    /* Armed state that could not be read is unmeasured, not a demonstrated failure */
+    e = full_restoration_evidence(); e.driver_disarmed = FALSE; e.armed_unreadable = TRUE;
+    EXPECT_EQ("armed state unreadable => INCONCLUSIVE", tas_restoration_outcome(&e), TAS_RESTORATION_INCONCLUSIVE);
+
+    /* A demonstrated failure outranks missing evidence */
+    e = full_restoration_evidence(); e.regs_changed = 1; e.regs_unreadable = 1;
+    EXPECT_EQ("failure outranks unknown", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
+}
+
+/* A frame as seen by the capturing NIC: broadcast UDP to the discard port with the tagged payload */
+static size_t wire_frame(unsigned char *f, const unsigned char *mac, unsigned nonce, unsigned seq)
+{
+    size_t udp = 14 + 20, payload = udp + 8;
+    memset(f, 0, 128);
+    memset(f, 0xFF, 6);
+    memcpy(f + 6, mac, 6);
+    f[12] = 0x08;
+    f[14] = 0x45;
+    f[14 + 9] = 17;
+    f[udp + 3] = TAS_WIRE_UDP_PORT;
+    tas_wire_fill(f + payload, 64, nonce, seq);
+    return payload + 64;
+}
+
+/*
+ * TC-MOCK-013: only this run's frames from this adapter count as seen on the wire.
+ */
+static void test_13_wire_match(void) {
+    static const unsigned char mac[6] = {0xF0, 0xB2, 0xB9, 0x31, 0x55, 0xDB};
+    unsigned char f[128];
+    unsigned seq = 0;
+    size_t n;
+
+    printf("\n[TC-MOCK-013] wire frame match: source MAC, broadcast, UDP port, run nonce, sequence\n");
+    n = wire_frame(f, mac, 0x1234u, 77u);
+    EXPECT_TRUE("tagged frame matches", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    EXPECT_EQ("sequence recovered", (int)seq, 77);
+    EXPECT_FALSE("truncated frame", tas_wire_match(f, n - 60, mac, 0x1234u, &seq));
+    EXPECT_FALSE("other run", tas_wire_match(f, n, mac, 0x1235u, &seq));
+    f[11] ^= 1;
+    EXPECT_FALSE("other source MAC", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[0] = 0x01;
+    EXPECT_FALSE("not broadcast", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[13] = 0x06;
+    EXPECT_FALSE("not IPv4", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 9] = 1;
+    EXPECT_FALSE("not UDP", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 20 + 3] = 10;
+    EXPECT_FALSE("other UDP port", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 7] = 1;
+    EXPECT_FALSE("IP fragment", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 20 + 8] ^= 1;
+    EXPECT_FALSE("payload not tagged", tas_wire_match(f, n, mac, 0x1234u, &seq));
+}
+
 /*
  * TC-MOCK-007: Two adapters — both BLOCKED — no cross-contamination.
  */
@@ -482,6 +594,8 @@ int main(void) {
     test_09_negative_tests_always_executable();
     test_10_no_device_exit_code();
     test_11_skip_distinct_from_pass();
+    test_12_restoration_outcome();
+    test_13_wire_match();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

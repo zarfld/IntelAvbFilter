@@ -33,11 +33,6 @@ Abstract:
 
 // I226 TSN Register Definitions - Evidence-Based from Linux IGC Driver
 // TODO: Add these to i226.yaml and regenerate SSOT header
-#define I226_TQAVCTRL           0x3570  // TSN control register
-#define I226_BASET_L            0x3314  // Base time low 
-#define I226_BASET_H            0x3318  // Base time high
-#define I226_QBVCYCLET          0x331C  // Cycle time register
-#define I226_QBVCYCLET_S        0x3320  // Cycle time shadow register
 #define I226_STQT(i)            (0x3340 + (i)*4)  // Start time for queue i
 #define I226_ENDQT(i)           (0x3380 + (i)*4)  // End time for queue i  
 #define I226_TXQCTL(i)          (0x3300 + (i)*4)  // Queue control for queue i
@@ -1586,6 +1581,21 @@ static int i226_hil_register_offset(uint32_t reg_id, uint32_t *offset)
     }
 }
 
+#if DBG
+/* #328: shows whether transmit is already enabled when the filter gets control.  igc programs TSN after the MAC reset,
+ * before the rings start; whether Windows offers the same window is not documented, so it is measured.  Read-only. */
+static void trace_tx_state(device_t *dev, const char *stage)
+{
+    uint32_t tctl = 0, txdctl0 = 0, tdlen0 = 0, tqavctrl = 0;
+    int rc = ndis_platform_ops.mmio_read(dev, I226_TCTL, &tctl);
+    rc |= ndis_platform_ops.mmio_read(dev, I226_TXDCTL0, &txdctl0);
+    rc |= ndis_platform_ops.mmio_read(dev, I226_TDLEN0, &tdlen0);
+    rc |= ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &tqavctrl);
+    DEBUGP(DL_ERROR, "!!! [#328-TX-WINDOW] %s: rc=%d TCTL=0x%08X TXDCTL0=0x%08X TDLEN0=0x%08X TQAVCTRL=0x%08X\n",
+           stage, rc, tctl, txdctl0, tdlen0, tqavctrl);
+}
+#endif
+
 // I226 device operations structure - using generic function names
 const intel_device_ops_t i226_ops = {
     /* Capabilities per Intel I226 datasheet:
@@ -1628,6 +1638,9 @@ const intel_device_ops_t i226_ops = {
     // TSN operations - clean generic names
     .setup_tas = setup_tas,
     .disable_tas = disable_tas,
+#if DBG
+    .trace_tx_state = trace_tx_state,
+#endif
     .setup_frame_preemption = setup_frame_preemption,
     .setup_ptm = setup_ptm,
     

@@ -48,7 +48,7 @@ try {
     . (Join-Path $RepoRoot 'tools\lib\NativeExit.ps1')
     Import-Functions $LocalPath @('Read-AvbSuiteResults', 'Get-AvbFailureInventory', 'Get-AvbStopReason', 'Get-AvbReproductionQueue', 'Format-AvbStepResult', 'Get-AvbSafetyHalt', 'Get-AvbCleanupIncidentSummary',
                                   'Read-AvbTimedChoice', 'New-AvbUntrustedSuiteRow')
-    Import-Functions $ElevPath @('ConvertTo-AvbPsLiteral', 'New-AvbElevatedCommand', 'Wait-AvbDbgViewStarted', 'Get-AvbDbgViewCaptureResult')
+    Import-Functions $ElevPath @('ConvertTo-AvbPsLiteral', 'Get-AvbElevatedAuthorization', 'New-AvbElevatedCommand', 'Wait-AvbDbgViewStarted', 'Get-AvbDbgViewCaptureResult')
 } catch { $missing = $_.Exception.Message }
 tc_check 'TEST-LOCALSUITES-000-decision-functions-present' ($missing -eq '') $missing
 if ($missing) { Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue; Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total); exit 1 }
@@ -260,6 +260,60 @@ tc_check 'TEST-LOCALSUITES-016-unreached-step-reported-not-run-distinct-from-mis
     ("NOT_RUN->[{0}] null->[{1}] init: {2}" -f (Format-AvbStepResult 'NOT_RUN'), (Format-AvbStepResult $null), ($cfgInitText -replace '\s+', ' '))
 tc_check 'TEST-LOCALSUITES-012-never-reboots-or-retries-installation' `
     (($ls -notmatch '(?i)Restart-Computer|shutdown(\.exe)?\s+/r|bcdedit') -and ([regex]::Matches($ls, 'Install-Driver-Elevated \$Configuration').Count -eq 1)) 'reboot command or repeated install found'
+
+# --- Run-Tests-Elevated: the operator's Unsafe authorization survives the relaunch -------------------------------
+# Start-Process -Verb RunAs builds a new environment, so the runner's safety gate never saw a variable set by the operator
+# and every Unsafe entry stayed BLOCKED(SAFETY).  The wrapper only carries the value; the gate in Run-Tests-CI.ps1 decides.
+$authIssues = @()
+try {
+    $fwTmp = Join-Path $env:TEMP ("avb_elev_auth_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $fwTmp -Force | Out-Null
+    $fakeCi = Join-Path $fwTmp 'fake-ci.ps1'; $seen = Join-Path $fwTmp 'seen.txt'
+    Set-Content -LiteralPath $fakeCi -Encoding ASCII -Value @"
+param([string]`$Suite, [string]`$Configuration, [string[]]`$Tests, [string]`$ResultsJson, [switch]`$LocalDiagnostic)
+Set-Content -LiteralPath '$seen' -Value "[`$env:AVB_HIL_AUTHORIZE_UNSAFE]" -Encoding ASCII
+`$global:LASTEXITCODE = 0
+"@
+    $fwArgs = @{ Configuration = 'Debug'; TestName = 'test_x'; TestArgs = ''; TestExecutable = ''; Full = $false; LogFile = ''; Suite = 'HardwareIntegration'
+                 ResultsJson = ''; LegacyScript = 'C:\t\Run-Tests.ps1'; RunCiScript = $fakeCi }
+    foreach ($case in @(@{ Value = "test_o'x"; Want = "[test_o'x]" }, @{ Value = ''; Want = '[]' })) {
+        $cmdA = New-AvbElevatedCommand @fwArgs -AuthorizeUnsafe $case.Value
+        $parseErr = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($cmdA, [ref]$null, [ref]$parseErr)
+        if ($parseErr.Count -ne 0) { $authIssues += "generated command does not parse for '$($case.Value)'" }
+        Remove-Item -LiteralPath $seen -ErrorAction SilentlyContinue
+        $saved = $env:AVB_HIL_AUTHORIZE_UNSAFE; $env:AVB_HIL_AUTHORIZE_UNSAFE = $null
+        try { & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $cmdA | Out-Null } finally { $env:AVB_HIL_AUTHORIZE_UNSAFE = $saved }
+        $got = if (Test-Path -LiteralPath $seen) { (Get-Content -LiteralPath $seen -Raw).Trim() } else { '<stand-in never ran>' }
+        if ($got -cne $case.Want) { $authIssues += "for '$($case.Value)' the elevated child saw $got, expected $($case.Want)" }
+    }
+    Remove-Item -LiteralPath $fwTmp -Recurse -Force -ErrorAction SilentlyContinue
+} catch { $authIssues += $_.Exception.Message }
+tc_check 'TEST-LOCALSUITES-030-unsafe-authorization-reaches-the-elevated-runner-unchanged-and-is-absent-when-not-set' ($authIssues.Count -eq 0) ($authIssues -join ' || ')
+
+# Manual runs are operator-attended (Q 2026-11-04): naming an entry here authorizes exactly that entry, on by default.
+# The gate in Run-Tests-CI.ps1 is unchanged and still ignores the variable under GitHub Actions.
+$a31 = @(
+    @{ Existing = ''; Name = 'test_x'; Args = ''; Want = 'test_x' }
+    @{ Existing = ''; Name = 'test_x.exe'; Args = ''; Want = 'test_x' }
+    @{ Existing = ''; Name = 'test_x'; Args = '--case TC-1'; Want = 'test_x --case TC-1' }
+    @{ Existing = 'test_a,test_b'; Name = 'test_x'; Args = ''; Want = 'test_a,test_b,test_x' }
+    @{ Existing = 'test_x'; Name = 'test_x'; Args = ''; Want = 'test_x' }
+    @{ Existing = 'test_a'; Name = ''; Args = ''; Want = 'test_a' }
+    @{ Existing = ''; Name = ''; Args = ''; Want = '' }
+    @{ Existing = ''; Name = 'scan.ps1'; Args = ''; Want = '' }
+)
+$bad31 = @()
+foreach ($c in $a31) {
+    $got = try { Get-AvbElevatedAuthorization -Existing $c.Existing -TestName $c.Name -TestArgs $c.Args } catch { "threw: $($_.Exception.Message)" }
+    if ("$got" -cne $c.Want) { $bad31 += "existing='$($c.Existing)' name='$($c.Name)' args='$($c.Args)': got '$got', want '$($c.Want)'" }
+}
+tc_check 'TEST-LOCALSUITES-031-named-entry-is-authorized-by-default-on-manual-runs-and-the-existing-list-is-kept' ($bad31.Count -eq 0) ($bad31 -join ' || ')
+
+# STATIC, not runtime evidence: a literal at the call site passed every check above while the child received '1' (2026-11-04).
+$elevSrc = Get-Content -LiteralPath $ElevPath -Raw
+tc_check 'TEST-LOCALSUITES-032-STATIC-the-wrapper-passes-the-computed-authorization-to-the-elevated-command' `
+    (($elevSrc -match 'New-AvbElevatedCommand[\s\S]{0,400}-AuthorizeUnsafe \$authorizeUnsafe\b') -and ($elevSrc -match '\$authorizeUnsafe = Get-AvbElevatedAuthorization')) `
+    'Run-Tests-Elevated.ps1 does not pass $authorizeUnsafe to New-AvbElevatedCommand'
 
 # --- Run-Tests-Elevated: routing and DbgView capture --------------------------------------------------------
 $cmdS = New-AvbElevatedCommand -Configuration 'Debug' -TestName "test_x --case TC-O'1" -TestArgs '' -TestExecutable '' -Full $false -LogFile 'C:\l\t.log' `

@@ -637,6 +637,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
                            &pFilter->MiniportFriendlyName, AvbHwStateName(avbCtx->hw_state), pFilter->MiniportIfIndex, avbCtx);
                     /* BUG FIX: stats_filter_attach_count was declared but never incremented (ABI 2.0) */
                     InterlockedIncrement64(&avbCtx->stats_filter_attach_count);
+                    AvbTraceTxState(avbCtx, "FilterAttach");
                 } else {
                     DEBUGP(DL_TRACE, "*** AVB CONTEXT IS NULL *** after successful init for %wZ\n", 
                            &pFilter->MiniportFriendlyName);
@@ -1046,6 +1047,7 @@ FilterRestart(
      * the PHC.  Must run before AvbRestartTimers so the DPC finds a running clock.
      * Verifies: TC-S3-004 (PHC non-zero post-wake). */
     if (pFilter->AvbContext != NULL) {
+        AvbTraceTxState((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, "FilterRestart");
         (void)AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
     }
 

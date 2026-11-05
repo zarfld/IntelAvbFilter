@@ -389,6 +389,15 @@ $AllTests = @(
         Description = "Quick Diagnostic Tool"
     },
     @{
+        Name = "tas_gate_investigation"
+        Type = "cl"
+        Source = "tests/diagnostic/tas_gate_investigation.c"
+        Output = "tas_gate_investigation.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib"
+        Description = "Exploratory, Debug only: what opens I226 egress after SETUP_TAS (#328); never a runner entry"
+    },
+    @{
         Name = "intel_avb_diagnostics"
         Type = "cl"
         Source = "tests/diagnostic/intel_avb_diagnostics.c"
@@ -1902,6 +1911,20 @@ $AllTests = @(
     # Proves lifecycle callbacks actually ran (not just compiled) by asserting
     # delta-counter expectations via IOCTL_AVB_GET_STATISTICS snapshots.
     # =========================================================================
+
+    @{
+        Name = "test_tas_isolated_arm"
+        Type = "cl"
+        Source = "tests\hardware\test_tas_isolated_arm.c"
+        Output = "test_tas_isolated_arm.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "Isolated SETUP_TAS: schedule state, per-queue TX health, NIC-cycle restoration"
+        Issue = "#328"
+        TestCases = 3
+    },
 
     @{
         Name = "test_lifecycle_coverage"

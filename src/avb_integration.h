@@ -402,6 +402,9 @@ VOID AvbCleanupDevice(
     _In_opt_ PAVB_DEVICE_CONTEXT AvbContext
 );
 
+/** @brief Debug trace of the adapter's transmit enable state at a lifecycle stage; read-only, no-op in Release (#328). */
+VOID AvbTraceTxState(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ const char *Stage);
+
 /** * @brief Cleanup timestamp subscriptions for a file object in one adapter context.
  * @param FileObject File object being closed.
  * @param AvbContext Adapter context to clean (caller holds its ioctl_remove_lock).

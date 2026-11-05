@@ -131,6 +131,9 @@ typedef struct _intel_device_ops {
      * such register (*offset untouched).  Pure lookup, no register access.  Optional: NULL = family has no offset map. */
     int (*hil_register_offset)(uint32_t reg_id, uint32_t *offset);
 
+    /* Debug trace of the transmit enable state at a lifecycle stage; read-only.  NULL where not implemented (#328). */
+    void (*trace_tx_state)(device_t *dev, const char *stage);
+
 } intel_device_ops_t;
 
 /**
