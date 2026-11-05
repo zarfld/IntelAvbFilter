@@ -756,6 +756,166 @@ static void test_17_snapshot_compare(void) {
     EXPECT_EQ("an empty snapshot is unmeasured", unreadable, AVB_HWREG_COUNT);
 }
 
+/* Feeds one poll whose read happened somewhere inside [start, end] */
+static void poll_at(TAS_WINDOW_TRACK *t, LONGLONG start, LONGLONG end, ULONGLONG pause, ULONGLONG restart) {
+    TAS_POLL p;
+    p.qpc_start = start;
+    p.qpc_end = end;
+    p.pause = pause;
+    p.restart = restart;
+    tas_window_feed(t, &p);
+}
+
+/*
+ * TC-MOCK-018: bounds on the Pause-to-Restart interval from bracketed polls (#364, #384).
+ * All timings are synthetic. They test the arithmetic and say nothing about a real interval.
+ */
+static void test_18_window_bounds(void) {
+    TAS_WINDOW_TRACK t;
+    LONGLONG lower = -1, upper = -1;
+
+    printf("\n[TC-MOCK-018] Pause-to-Restart bounds from polls\n");
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 6, 6);
+    poll_at(&t, 140, 150, 6, 6);
+    poll_at(&t, 160, 170, 6, 6);
+    poll_at(&t, 180, 190, 6, 6);
+    poll_at(&t, 200, 210, 6, 7);
+    EXPECT_EQ("both edges apart", tas_window_result(&t, &lower, &upper), TAS_WINDOW_BOUNDED);
+    EXPECT_EQ("lower: restart's last old read minus pause's first new read", (int)lower, 50);
+    EXPECT_EQ("upper: restart's first new read minus pause's last old read", (int)upper, 110);
+    EXPECT_EQ("pause entry known only to its bracket", (int)(t.pause.first_new - t.pause.last_old), 30);
+    EXPECT_EQ("worst gap between polls", (int)t.max_gap, 20);
+    EXPECT_EQ("calls proven inside need an open poll on each side", (int)tas_window_proven_calls(&t), 2);
+
+    /* The essential rule: a window the polls fell between is not a window that did not exist */
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 6, 7);
+    EXPECT_EQ("both edges in one poll: not resolved, never absent", tas_window_result(&t, &lower, &upper), TAS_WINDOW_NOT_RESOLVED);
+    EXPECT_EQ("no lower bound", (int)lower, 0);
+    EXPECT_EQ("the upper bound still holds", (int)upper, 30);
+    EXPECT_EQ("nothing proven inside", (int)tas_window_proven_calls(&t), 0);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 6, 6);
+    poll_at(&t, 140, 150, 6, 7);
+    EXPECT_EQ("one open poll overlaps both brackets: not resolved", tas_window_result(&t, &lower, &upper), TAS_WINDOW_NOT_RESOLVED);
+    EXPECT_EQ("that poll did see the window open", (int)t.inside_samples, 1);
+    EXPECT_EQ("but it cannot prove a whole call inside", (int)tas_window_proven_calls(&t), 0);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 6, 6);
+    poll_at(&t, 140, 150, 6, 6);
+    poll_at(&t, 160, 170, 6, 7);
+    EXPECT_EQ("two open polls prove nothing whole", (int)tas_window_proven_calls(&t), 0);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 5, 6);
+    EXPECT_EQ("no counter moved: unmeasured", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 6, 6);
+    poll_at(&t, 140, 150, 6, 6);
+    EXPECT_EQ("Pause without Restart: unmeasured, however long it was", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 5, 7);
+    poll_at(&t, 140, 150, 6, 7);
+    EXPECT_EQ("Restart before Pause cannot be attributed", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 7, 8);
+    EXPECT_EQ("two cycles cannot be attributed", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 0, 0);
+    EXPECT_EQ("fallen counters are a new context", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
+
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 6, 7);
+    EXPECT_EQ("an edge in the first poll has no old read to bound it", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
+}
+
+/* TC-MOCK-019: entry is observed, completion is inferred, and neither is claimed for what cannot be attributed */
+static void test_19_claims(void) {
+    TAS_LIFECYCLE_EVIDENCE e;
+
+    printf("\n[TC-MOCK-019] Observed entry and inferred completion stay separate\n");
+    e = full_lifecycle_evidence();
+    EXPECT_EQ("Pause completion follows from a Restart entry", tas_pause_claim(&e), TAS_CLAIM_COMPLETION_INFERRED);
+    EXPECT_EQ("Restart completion follows from traffic", tas_restart_claim(&e), TAS_CLAIM_COMPLETION_INFERRED);
+
+    e = full_lifecycle_evidence(); e.traffic_shown = FALSE;
+    EXPECT_EQ("Restart entered, no traffic: entry only", tas_restart_claim(&e), TAS_CLAIM_ENTRY_OBSERVED);
+    EXPECT_EQ("Pause is still inferred from that entry", tas_pause_claim(&e), TAS_CLAIM_COMPLETION_INFERRED);
+
+    e = full_lifecycle_evidence(); e.restart_delta = 0; e.traffic_shown = FALSE;
+    EXPECT_EQ("Pause entered only", tas_pause_claim(&e), TAS_CLAIM_ENTRY_OBSERVED);
+    EXPECT_EQ("Restart not seen", tas_restart_claim(&e), TAS_CLAIM_NONE);
+
+    memset(&e, 0, sizeof(e));
+    EXPECT_EQ("nothing moved: no Pause claim", tas_pause_claim(&e), TAS_CLAIM_NONE);
+    EXPECT_EQ("nothing moved: no Restart claim", tas_restart_claim(&e), TAS_CLAIM_NONE);
+
+    e = full_lifecycle_evidence(); e.detach_delta = 1;
+    EXPECT_EQ("new context: no Pause claim", tas_pause_claim(&e), TAS_CLAIM_NONE);
+    EXPECT_EQ("new context: no Restart claim", tas_restart_claim(&e), TAS_CLAIM_NONE);
+
+    e = full_lifecycle_evidence(); e.pause_delta = 2; e.generation_delta = 2; e.restart_delta = 2;
+    EXPECT_EQ("overlapped: no Pause claim", tas_pause_claim(&e), TAS_CLAIM_NONE);
+    EXPECT_EQ("overlapped: no Restart claim", tas_restart_claim(&e), TAS_CLAIM_NONE);
+}
+
+static TAS_LIFECYCLE_CLEANUP clean_lifecycle_cleanup(void) {
+    TAS_LIFECYCLE_CLEANUP c;
+    memset(&c, 0, sizeof(c));
+    c.lifecycle_shown = TRUE;
+    c.phc = TAS_PHC_NOT_JUDGED;
+    c.tx_probed = TRUE;
+    c.tx_shown = TRUE;
+    c.consistent = TRUE;
+    return c;
+}
+
+/* TC-MOCK-020: every way out of Case A leaves a cleanup verdict, and restoration is never verified without a tolerance */
+static void test_20_cleanup_verdict(void) {
+    TAS_LIFECYCLE_CLEANUP c;
+
+    printf("\n[TC-MOCK-020] Case A cleanup verdict\n");
+    c = clean_lifecycle_cleanup();
+    EXPECT_EQ("all fine but continuity unjudged", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+
+    c = clean_lifecycle_cleanup(); c.phc = TAS_PHC_DISCONTINUOUS;
+    EXPECT_EQ("PHC reset, even with registers and TX fine", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+    c = clean_lifecycle_cleanup(); c.regs_changed = 1;
+    EXPECT_EQ("a register differs", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+    c = clean_lifecycle_cleanup(); c.consistent = FALSE;
+    EXPECT_EQ("driver and hardware disagree", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+    c = clean_lifecycle_cleanup(); c.others_changed = 1;
+    EXPECT_EQ("another adapter changed", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+    c = clean_lifecycle_cleanup(); c.tx_shown = FALSE;
+    EXPECT_EQ("TX probed and not on the wire", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+
+    /* A run that stopped before MMIO has measured nothing, and that is not a pass */
+    memset(&c, 0, sizeof(c));
+    EXPECT_EQ("stopped before any measurement", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+    c.others_changed = 1;
+    EXPECT_EQ("a demonstrated failure outranks the unknown", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+    memset(&c, 0, sizeof(c));
+    c.tx_probed = TRUE;
+    EXPECT_EQ("stopped after a TX probe that failed", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+}
+
 /* =========================================================================
  * Main
  * ========================================================================= */
@@ -786,6 +946,9 @@ int main(void) {
     test_15_lifecycle_outcome();
     test_16_phc_fact();
     test_17_snapshot_compare();
+    test_18_window_bounds();
+    test_19_claims();
+    test_20_cleanup_verdict();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

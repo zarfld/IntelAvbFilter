@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <wchar.h>
 #include "../../include/avb_ioctl.h"
+#include "tas_restoration_eval.h"
 
 typedef enum {
     TAS_INSTANCE_FOUND = 0,
@@ -188,5 +189,198 @@ static __inline void tas_snapshot_compare(const AVB_HW_SNAPSHOT_REQUEST *before,
                 (*changed)++;
             }
         }
+    }
+}
+
+/*
+ * Timing of the Pause-to-Restart interval from statistics polls.
+ *
+ * Each poll is bracketed by QPC reads, and the counter was read somewhere inside that bracket, so an edge is an interval,
+ * never a moment: it lies after the start of the last poll that read the old value and before the end of the first that
+ * read the new one. These counters mark entry only, so this bounds entry to entry, not the Paused state itself: it starts
+ * at FilterPause entry, while the filter is still Pausing.
+ *
+ * Counters are cumulative, so an interval the polls fell between still shows in the deltas. NOT_RESOLVED therefore never
+ * means there was no interval.
+ *
+ * #384 rule: a call counts as inside the interval only when a poll that finished before it started shows the interval open,
+ * and a poll that started after it finished shows it still open. A call without that proof says nothing about Paused
+ * behaviour, whatever it returned. tas_window_proven_calls() applies the rule to the polls themselves, so a run shows
+ * whether the interval is reachable at all before any assertion depends on it.
+ */
+typedef struct {
+    LONGLONG qpc_start, qpc_end;   /* QPC just before and just after the statistics call */
+    ULONGLONG pause, restart;      /* FilterPauseCount, FilterRestartCount */
+} TAS_POLL;
+
+typedef struct {
+    BOOL seen;
+    LONGLONG last_old;   /* start of the last poll that read the old value */
+    LONGLONG first_new;  /* end of the first poll that read the new value */
+} TAS_EDGE;
+
+typedef enum {
+    TAS_WINDOW_UNMEASURED = 0,  /* no attributable pair of edges */
+    TAS_WINDOW_NOT_RESOLVED,    /* the edges overlap, so only an upper bound exists. Never means absent */
+    TAS_WINDOW_BOUNDED          /* the edges are apart: a lower and an upper bound */
+} TAS_WINDOW_CLASS;
+
+typedef struct {
+    ULONGLONG base_pause, base_restart;
+    TAS_POLL last;
+    BOOL have_last, unattributable;
+    TAS_EDGE pause, restart;
+    unsigned polls;
+    unsigned inside_samples;   /* polls that read the interval open */
+    LONGLONG max_gap;          /* worst start-to-start gap between polls */
+} TAS_WINDOW_TRACK;
+
+static __inline void tas_window_init(TAS_WINDOW_TRACK *t, ULONGLONG base_pause, ULONGLONG base_restart)
+{
+    ZeroMemory(t, sizeof(*t));
+    t->base_pause = base_pause;
+    t->base_restart = base_restart;
+}
+
+static __inline void tas_edge_note(TAS_WINDOW_TRACK *t, TAS_EDGE *edge, const TAS_POLL *p)
+{
+    if (!t->have_last) {
+        t->unattributable = TRUE;   /* no old read bounds it */
+    } else {
+        edge->last_old = t->last.qpc_start;
+    }
+    edge->seen = TRUE;
+    edge->first_new = p->qpc_end;
+}
+
+static __inline void tas_window_feed(TAS_WINDOW_TRACK *t, const TAS_POLL *p)
+{
+    LONGLONG pause_delta = (LONGLONG)(p->pause - t->base_pause);
+    LONGLONG restart_delta = (LONGLONG)(p->restart - t->base_restart);
+
+    t->polls++;
+    if (t->have_last && p->qpc_start - t->last.qpc_start > t->max_gap) {
+        t->max_gap = p->qpc_start - t->last.qpc_start;
+    }
+    if (pause_delta < 0 || restart_delta < 0 || pause_delta > 1 || restart_delta > 1) {
+        t->unattributable = TRUE;
+    }
+    if (!t->pause.seen && pause_delta >= 1) {
+        tas_edge_note(t, &t->pause, p);
+    }
+    if (!t->restart.seen && restart_delta >= 1) {
+        tas_edge_note(t, &t->restart, p);
+    }
+    if (t->restart.seen && !t->pause.seen) {
+        t->unattributable = TRUE;
+    }
+    if (pause_delta == 1 && restart_delta == 0) {
+        t->inside_samples++;
+    }
+    t->last = *p;
+    t->have_last = TRUE;
+}
+
+static __inline TAS_WINDOW_CLASS tas_window_result(const TAS_WINDOW_TRACK *t, LONGLONG *lower, LONGLONG *upper)
+{
+    LONGLONG gap;
+
+    *lower = *upper = 0;
+    if (t->unattributable || !t->pause.seen || !t->restart.seen) {
+        return TAS_WINDOW_UNMEASURED;
+    }
+    *upper = t->restart.first_new - t->pause.last_old;
+    gap = t->restart.last_old - t->pause.first_new;
+    if (gap <= 0) {
+        return TAS_WINDOW_NOT_RESOLVED;
+    }
+    *lower = gap;
+    return TAS_WINDOW_BOUNDED;
+}
+
+static __inline const char *tas_window_name(TAS_WINDOW_CLASS c)
+{
+    switch (c) {
+    case TAS_WINDOW_BOUNDED:      return "BOUNDED";
+    case TAS_WINDOW_NOT_RESOLVED: return "NOT_RESOLVED_NEVER_ABSENT";
+    default:                      return "UNMEASURED";
+    }
+}
+
+/* Polls proven wholly inside, by the rule above: each needs an open poll on either side of it */
+static __inline unsigned tas_window_proven_calls(const TAS_WINDOW_TRACK *t)
+{
+    return t->inside_samples > 2 ? t->inside_samples - 2 : 0;
+}
+
+/*
+ * What a run may say about each transition. Entry comes from counters. Completion is inferred: Pause because NDIS restarts
+ * only from Paused, Restart because traffic passed the whole stack. OBSERVED completion is not a value here, because this
+ * tool cannot see it: only an NDIS state event read on this instance can establish it.
+ */
+typedef enum {
+    TAS_CLAIM_NONE = 0,
+    TAS_CLAIM_ENTRY_OBSERVED,
+    TAS_CLAIM_COMPLETION_INFERRED
+} TAS_CLAIM;
+
+static __inline TAS_CLAIM tas_pause_claim(const TAS_LIFECYCLE_EVIDENCE *e)
+{
+    switch (tas_lifecycle_outcome(e)) {
+    case TAS_LIFECYCLE_PAUSE_ONLY:      return TAS_CLAIM_ENTRY_OBSERVED;
+    case TAS_LIFECYCLE_RESTART_ENTERED:
+    case TAS_LIFECYCLE_RESUMED:         return TAS_CLAIM_COMPLETION_INFERRED;
+    default:                            return TAS_CLAIM_NONE;
+    }
+}
+
+static __inline TAS_CLAIM tas_restart_claim(const TAS_LIFECYCLE_EVIDENCE *e)
+{
+    switch (tas_lifecycle_outcome(e)) {
+    case TAS_LIFECYCLE_RESTART_ENTERED: return TAS_CLAIM_ENTRY_OBSERVED;
+    case TAS_LIFECYCLE_RESUMED:         return TAS_CLAIM_COMPLETION_INFERRED;
+    default:                            return TAS_CLAIM_NONE;
+    }
+}
+
+static __inline const char *tas_claim_name(TAS_CLAIM c)
+{
+    switch (c) {
+    case TAS_CLAIM_ENTRY_OBSERVED:      return "ENTRY_OBSERVED";
+    case TAS_CLAIM_COMPLETION_INFERRED: return "COMPLETION_INFERRED";
+    default:                            return "NONE";
+    }
+}
+
+/*
+ * The cleanup verdict of a Case A run, on every way out, kept beside the lifecycle outcome and never replacing it.
+ * Demonstrated failures outrank the unknown, as in tas_restoration_outcome. Anything else is inconclusive: with no
+ * hardware-derived tolerance, PHC continuity cannot be judged, so VERIFIED cannot be reached yet.
+ */
+typedef struct {
+    BOOL lifecycle_shown;     /* so the facts below were measured */
+    unsigned regs_changed;
+    TAS_PHC_FACT phc;
+    BOOL tx_probed;           /* frames were sent with the observer alive */
+    BOOL tx_shown;
+    BOOL consistent;          /* meaningful only with lifecycle_shown */
+    unsigned others_changed;
+} TAS_LIFECYCLE_CLEANUP;
+
+static __inline TAS_RESTORATION_OUTCOME tas_lifecycle_cleanup(const TAS_LIFECYCLE_CLEANUP *c)
+{
+    if (c->regs_changed != 0 || c->phc == TAS_PHC_DISCONTINUOUS || c->others_changed != 0 || (c->tx_probed && !c->tx_shown) ||
+        (c->lifecycle_shown && !c->consistent)) {
+        return TAS_RESTORATION_CLEANUP_FAILED;
+    }
+    return TAS_RESTORATION_INCONCLUSIVE;
+}
+
+static __inline const char *tas_cleanup_name(TAS_RESTORATION_OUTCOME o)
+{
+    switch (o) {
+    case TAS_RESTORATION_CLEANUP_FAILED: return "CLEANUP_FAILED";
+    case TAS_RESTORATION_INCONCLUSIVE:   return "INCONCLUSIVE_RESTORATION";
+    default:                             return "RESTORATION_VERIFIED";
     }
 }

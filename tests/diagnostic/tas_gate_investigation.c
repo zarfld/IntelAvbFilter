@@ -82,11 +82,19 @@
  * Exit: 0 registers, TX and PHC all restored; 1 registers differ, TX unhealthy or the cycle failed; 2 registers and TX
  * restored but the PHC is not continuous; 3 not run (nothing mutated).
  *
- * --lifecycle-a --observer <did> [--dry-run] is Case A of #364: one FilterPause and FilterRestart of the adapter named by
+ * --lifecycle-a --observer <did> [--dry-run | --passive] is Case A of #364: one FilterPause and FilterRestart of the adapter named by
  * AVB_HIL_TARGET_DID, with no schedule, as the control for Cases B to E. It is a separate path from everything above: it
  * uses dedicated IOCTLs only, no READ_REGISTER or WRITE_REGISTER, so no register map decides what it does. Both identities
  * only select adapters; the target must advertise TAS, and the observer proves itself by seeing the baseline frames.
  * --dry-run stops before the trigger, so the instance name can be checked with nothing mutated.
+ *
+ * Timing: statistics are polled from before the trigger, each poll bracketed by QPC, so every edge is an interval with a
+ * known width. The trigger runs on its own thread and handle, so the polling never waits for it. Each poll takes the
+ * driver's FilterListLock and remove lock, which a normal FilterRestart does not touch, but a tight poll still costs CPU,
+ * so --passive polls once a second: the same run with NDIS events as the only timing, to show whether polling changed the
+ * transition. Markers go to a private ETW provider, stamped with QPC, so that polls and NDIS events can be placed on one
+ * clock in the same trace. --lifecycle-markers writes three markers and exits without opening the device, which proves
+ * the capture and decoding with no hardware involved. See tas_lifecycle_eval.h for what the timing can and cannot say.
  *
  * Case A mutations: the restart itself, which by source reseeds the PHC and rewrites timestamp configuration, and bounded
  * broadcast and ICMP. There is no NIC cycle: it would add a second PHC reset and a new context to the evidence. Recovery is
@@ -96,7 +104,8 @@
  *
  * Case A exit: 0 nothing demonstrably wrong, which does not claim PHC continuity; 1 lifecycle not shown, or register, TX,
  * consistency or another adapter differs; 2 all of those fine but the PHC is demonstrably discontinuous; 3 not run.
- * What each result may claim is in tas_lifecycle_eval.h.
+ * Every run past the trigger also prints a cleanup verdict beside that result, and neither replaces the other. It never
+ * reads RESTORATION_VERIFIED, as continuity cannot be judged. What each result may claim is in tas_lifecycle_eval.h.
  *
  * Verifies: #328, #364
  */
@@ -109,6 +118,7 @@
 #include <iphlpapi.h>
 #include <netioapi.h>
 #include <cfgmgr32.h>
+#include <evntprov.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -169,7 +179,10 @@ typedef int NDIS_PARAMETER_TYPE;   /* a kernel type in structures of filteruser.
 #define SETTLE_MS            5000
 #define TRIGGER_BOUND_MS     5000     /* the trigger only schedules, so it should return at once */
 #define LIFECYCLE_BOUND_MS   60000    /* a stop condition, not an acceptance criterion */
-#define LIFECYCLE_POLL_MS    10
+#define BASELINE_POLL_MS     200      /* undisturbed polling before the trigger, to state the resolution */
+#define PASSIVE_POLL_MS      1000
+#define MARKER_CHARS         96
+#define MARKER_SMOKE_MS      100
 #define INSTANCE_LIST_BYTES  16384
 #define GUID_TEXT_CHARS      39
 #define NET_CLASS_KEY        "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
@@ -210,6 +223,10 @@ static volatile LONG g_sampler_stop;
 static unsigned g_rearm_cycles;
 static LONGLONG g_send_us[WIRE_MAX_FRAMES];
 static BOOL g_dedicated_only;
+
+/* Private ETW provider of this tool, for markers beside the NDIS events. Enabled by the operator's trace session */
+static const GUID g_marker_provider = {0xB7E1F3C2, 0x6A54, 0x4D0E, {0x9C, 0x37, 0x36, 0x40, 0xE8, 0xA1, 0xD3, 0x64}};
+static REGHANDLE g_marker;
 
 typedef struct { DEVINST inst; BOOL enable; CONFIGRET result; } CM_CALL;
 
@@ -1143,6 +1160,55 @@ static TAS_INSTANCE_RESULT find_instance(HANDLE h, avb_u64 luid, const WCHAR **n
 
 typedef struct { HANDLE h; const WCHAR *name; USHORT bytes; BOOL ok; DWORD error; } TRIGGER_CALL;
 
+static LONGLONG qpc_now(void)
+{
+    LARGE_INTEGER q;
+
+    QueryPerformanceCounter(&q);
+    return q.QuadPart;
+}
+
+static double ticks_to_us(LONGLONG ticks)
+{
+    LARGE_INTEGER frequency;
+
+    QueryPerformanceFrequency(&frequency);
+    return (double)ticks * 1e6 / (double)frequency.QuadPart;
+}
+
+/** One marker in the trace. Its text carries the QPC taken just before it, and the line here its bracket, which bounds the correlation */
+static void marker(const char *label)
+{
+    WCHAR text[MARKER_CHARS];
+    LONGLONG before = qpc_now(), after;
+    ULONG status;
+
+    swprintf_s(text, MARKER_CHARS, L"i364 %hs qpc=%lld", label, before);
+    status = EventWriteString(g_marker, 0, 0, text);
+    after = qpc_now();
+    printf("    marker %s qpcBefore=%lld qpcAfter=%lld hostUs=%lld status=%lu\n", label, before, after, host_us(), status);
+}
+
+/** Proves the trace pipeline with no device, no NIC and no driver call */
+static int marker_smoke(void)
+{
+    LARGE_INTEGER frequency;
+    int i;
+
+    if (EventRegister(&g_marker_provider, NULL, NULL, &g_marker) != ERROR_SUCCESS) {
+        printf(TAG " not run: marker provider could not be registered\n");
+        return 3;
+    }
+    QueryPerformanceFrequency(&frequency);
+    printf("    qpcHz=%lld enabled=%d\n", frequency.QuadPart, EventProviderEnabled(g_marker, 0, 0));
+    for (i = 0; i < 3; i++) {
+        marker("smoke");
+        Sleep(MARKER_SMOKE_MS);
+    }
+    EventUnregister(g_marker);
+    return 0;
+}
+
 static DWORD WINAPI trigger_thread(LPVOID arg)
 {
     TRIGGER_CALL *call = (TRIGGER_CALL *)arg;
@@ -1153,59 +1219,127 @@ static DWORD WINAPI trigger_thread(LPVOID arg)
     return 0;
 }
 
-/** Issues the trigger on its own handle, so a blocked call cannot stop the statistics polling. Its result proves nothing */
-static BOOL trigger_restart(const WCHAR *name, USHORT bytes)
+static void poll_print_edge(const char *name, const TAS_EDGE *edge)
+{
+    if (edge->seen) {
+        printf("    edge %s entry between qpc=%lld and qpc=%lld widthUs=%.1f\n", name, edge->last_old, edge->first_new, ticks_to_us(edge->first_new - edge->last_old));
+    } else {
+        printf("    edge %s not seen by the polls\n", name);
+    }
+}
+
+/** Resolution, measured with nothing happening. Passive mode polls too rarely for it to mean anything, so it takes one read */
+static BOOL poll_baseline(HANDLE h, TAS_WINDOW_TRACK *track, BOOL passive)
+{
+    AVB_DRIVER_STATISTICS st;
+    LARGE_INTEGER frequency;
+    DWORD start = GetTickCount();
+    LONGLONG first = qpc_now();
+
+    QueryPerformanceFrequency(&frequency);
+    do {
+        TAS_POLL poll;
+
+        poll.qpc_start = qpc_now();
+        if (!read_stats(h, &st)) {
+            printf(TAG " statistics unreadable before the trigger (error %lu)\n", GetLastError());
+            return FALSE;
+        }
+        poll.qpc_end = qpc_now();
+        poll.pause = st.FilterPauseCount;
+        poll.restart = st.FilterRestartCount;
+        tas_window_feed(track, &poll);
+    } while (!passive && GetTickCount() - start < BASELINE_POLL_MS);
+    printf("    timing qpcHz=%lld passive=%d baselinePolls=%u meanGapUs=%.1f worstGapUs=%.1f\n", frequency.QuadPart, passive, track->polls,
+           ticks_to_us((qpc_now() - first) / (LONGLONG)track->polls), ticks_to_us(track->max_gap));
+    return TRUE;
+}
+
+/**
+ * Issues the trigger on its own thread and handle and polls statistics throughout, from before it. A trigger that blocks
+ * is reported and cannot stop the polling. Ends at the Restart entry, a sign of a new context, or the bound.
+ */
+static void lifecycle_measure(HANDLE h, const AVB_DRIVER_STATISTICS *before, const WCHAR *name, USHORT bytes, BOOL passive)
 {
     static TRIGGER_CALL call;   /* static: survives an abandoned, still blocked thread */
+    static TAS_WINDOW_TRACK track;
+    AVB_DRIVER_STATISTICS st, last = *before;
+    TAS_WINDOW_CLASS window;
     HANDLE thread;
-    DWORD wait;
+    LONGLONG lower = 0, upper = 0;
+    DWORD start;
+    BOOL returned = FALSE, ended = FALSE;
+
+    tas_window_init(&track, before->FilterPauseCount, before->FilterRestartCount);
+    if (!poll_baseline(h, &track, passive)) {
+        return;
+    }
 
     call.h = open_device();
     call.name = name;
     call.bytes = bytes;
     call.ok = FALSE;
     if (call.h == INVALID_HANDLE_VALUE) {
-        return FALSE;
+        printf(TAG " the trigger could not open a handle (error %lu)\n", GetLastError());
+        return;
     }
+    marker("trigger-issued");
     thread = CreateThread(NULL, 0, trigger_thread, &call, 0, NULL);
     if (thread == NULL) {
-        return FALSE;
+        printf(TAG " the trigger thread could not start (error %lu)\n", GetLastError());
+        return;
     }
-    wait = WaitForSingleObject(thread, TRIGGER_BOUND_MS);
-    CloseHandle(thread);
-    if (wait != WAIT_OBJECT_0) {
-        printf(TAG " the trigger did not return within %d ms\n", TRIGGER_BOUND_MS);
-        return FALSE;
-    }
-    printf(TAG " trigger returned ok=%d error=%lu; this proves nothing about the lifecycle\n", call.ok, call.error);
-    return call.ok;
-}
 
-/** Polls statistics until the Restart entry, a sign of a new context, or the bound. Each change is printed with its host time */
-static void lifecycle_wait(HANDLE h, const AVB_DRIVER_STATISTICS *before)
-{
-    AVB_DRIVER_STATISTICS st, last = *before;
-    DWORD start = GetTickCount();
+    start = GetTickCount();
+    while (!ended && GetTickCount() - start < LIFECYCLE_BOUND_MS) {
+        TAS_POLL poll;
 
-    while (GetTickCount() - start < LIFECYCLE_BOUND_MS) {
+        poll.qpc_start = qpc_now();
         if (!read_stats(h, &st)) {
             printf(TAG " statistics unreadable during the lifecycle (error %lu)\n", GetLastError());
-            return;
+            break;
         }
+        poll.qpc_end = qpc_now();
+        poll.pause = st.FilterPauseCount;
+        poll.restart = st.FilterRestartCount;
+        tas_window_feed(&track, &poll);
         if (st.FilterPauseCount != last.FilterPauseCount || st.FilterRestartCount != last.FilterRestartCount ||
             st.PauseRestartGeneration != last.PauseRestartGeneration || st.FilterDetachCount != last.FilterDetachCount ||
             st.FilterAttachCount != last.FilterAttachCount) {
-            printf("    lifecycle hostUs=%lld pause=%llu restart=%llu generation=%llu attach=%llu detach=%llu gauge=%llu\n", host_us(),
+            printf("    lifecycle hostUs=%lld qpcEnd=%lld pause=%llu restart=%llu generation=%llu attach=%llu detach=%llu gauge=%llu\n", host_us(), poll.qpc_end,
                    st.FilterPauseCount, st.FilterRestartCount, st.PauseRestartGeneration, st.FilterAttachCount, st.FilterDetachCount, st.OutstandingSendNBLs);
             last = st;
         }
-        if (st.FilterRestartCount != before->FilterRestartCount || st.FilterAttachCount != before->FilterAttachCount ||
-            st.FilterDetachCount != before->FilterDetachCount || st.FilterPauseCount < before->FilterPauseCount) {
-            return;
+        if (!returned && WaitForSingleObject(thread, 0) == WAIT_OBJECT_0) {
+            returned = TRUE;
+            printf(TAG " trigger returned ok=%d error=%lu at qpc=%lld; this proves nothing about the lifecycle\n", call.ok, call.error, qpc_now());
         }
-        Sleep(LIFECYCLE_POLL_MS);
+        ended = st.FilterRestartCount != before->FilterRestartCount || st.FilterAttachCount != before->FilterAttachCount ||
+                st.FilterDetachCount != before->FilterDetachCount || st.FilterPauseCount < before->FilterPauseCount;
+        if (passive) {
+            Sleep(PASSIVE_POLL_MS);
+        } else {
+            (void)SwitchToThread();
+        }
     }
-    printf(TAG " no Restart entry within %d ms; stopping here is a stop condition, not a result\n", LIFECYCLE_BOUND_MS);
+    marker("lifecycle-seen");
+    if (!ended) {
+        printf(TAG " no Restart entry within %d ms; stopping here is a stop condition, not a result\n", LIFECYCLE_BOUND_MS);
+    }
+    if (!returned && WaitForSingleObject(thread, TRIGGER_BOUND_MS) == WAIT_OBJECT_0) {
+        returned = TRUE;
+        printf(TAG " trigger returned ok=%d error=%lu at qpc=%lld, after the lifecycle ended; this proves nothing about it\n", call.ok, call.error, qpc_now());
+    }
+    if (!returned) {
+        printf(TAG " the trigger did not return within the bounds\n");
+    }
+    CloseHandle(thread);
+
+    window = tas_window_result(&track, &lower, &upper);
+    poll_print_edge("pause", &track.pause);
+    poll_print_edge("restart", &track.restart);
+    printf(TAG " window %s entryToEntry lowerUs=%.1f upperUs=%.1f polls=%u worstGapUs=%.1f insideReads=%u provenInsideCalls=%u; entry to entry only, which includes Pausing, and a poll-based bound never shows absence\n",
+           tas_window_name(window), ticks_to_us(lower), ticks_to_us(upper), track.polls, ticks_to_us(track.max_gap), track.inside_samples, tas_window_proven_calls(&track));
 }
 
 /** Lifecycle counters since before, optionally with traffic shown. Printed so that every way out leaves the same line */
@@ -1213,6 +1347,8 @@ static TAS_LIFECYCLE_OUTCOME lifecycle_read(HANDLE h, const AVB_DRIVER_STATISTIC
 {
     TAS_LIFECYCLE_EVIDENCE e;
     TAS_LIFECYCLE_OUTCOME outcome;
+
+    ZeroMemory(after, sizeof(*after));
 
     if (!read_stats(h, after)) {
         printf(TAG " statistics unreadable after the trigger (error %lu); counters read as zero, which is a new context\n", GetLastError());
@@ -1222,6 +1358,8 @@ static TAS_LIFECYCLE_OUTCOME lifecycle_read(HANDLE h, const AVB_DRIVER_STATISTIC
     printf(TAG " lifecycle %s pauseDelta=%lld restartDelta=%lld generationDelta=%lld attachDelta=%lld detachDelta=%lld statusDelta=%lld netPnpDelta=%lld gauge=%llu\n",
            tas_lifecycle_name(outcome), e.pause_delta, e.restart_delta, e.generation_delta, e.attach_delta, e.detach_delta,
            (LONGLONG)(after->FilterStatusCount - before->FilterStatusCount), (LONGLONG)(after->FilterNetPnPCount - before->FilterNetPnPCount), after->OutstandingSendNBLs);
+    printf(TAG " claims pause=%s restart=%s; observed completion needs an NDIS state event on this instance, which this tool cannot see\n",
+           tas_claim_name(tas_pause_claim(&e)), tas_claim_name(tas_restart_claim(&e)));
     return outcome;
 }
 
@@ -1250,7 +1388,7 @@ static unsigned report_others(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const HAN
 }
 
 /** Case A of #364. See the file header for what it does and what its exit codes mean */
-static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
+static int lifecycle_case_a(const char *observer_did, BOOL dry_run, BOOL passive)
 {
     AVB_ADAPTER_IDENTITY_REQUEST ids[AVB_MAX_ADAPTERS], id;
     unsigned short dids[AVB_MAX_ADAPTERS];
@@ -1259,6 +1397,7 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
     AVB_HW_SNAPSHOT_REQUEST snap_before, snap_after;
     AVB_HW_STATE_QUERY hw_before, hw_after;
     TAS_LIFECYCLE_OUTCOME outcome;
+    TAS_LIFECYCLE_CLEANUP cleanup;
     TAS_PHC_FACT phc_fact;
     IOCTL_VERSION version = {0};
     LARGE_INTEGER qpc_before;
@@ -1279,7 +1418,11 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
 
     g_dedicated_only = TRUE;
     ZeroMemory(others, sizeof(others));
-    printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart%s\n", dry_run ? " (dry run, no trigger)" : "");
+    ZeroMemory(&cleanup, sizeof(cleanup));
+    if (EventRegister(&g_marker_provider, NULL, NULL, &g_marker) != ERROR_SUCCESS) {
+        g_marker = 0;   /* EventWriteString then fails harmlessly, and the marker lines show its status */
+    }
+    printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart%s\n", dry_run ? " (dry run, no trigger)" : passive ? " (passive: no tight polling)" : "");
     printf(TAG " descFetched and occupancy below are not measured: dedicated IOCTLs only\n");
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf(TAG " not run: Winsock unavailable\n");
@@ -1363,7 +1506,13 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
         goto done;
     }
     if (dry_run) {
-        printf(TAG " dry run complete: instance and observer proved, nothing triggered\n");
+        static TAS_WINDOW_TRACK resolution;
+
+        if (read_stats(h, &before)) {
+            tas_window_init(&resolution, before.FilterPauseCount, before.FilterRestartCount);
+            (void)poll_baseline(h, &resolution, FALSE);
+        }
+        printf(TAG " dry run complete: instance and observer proved, polling resolution measured, nothing triggered\n");
         goto done;
     }
 
@@ -1377,10 +1526,9 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
         printf(TAG " not run: statistics or link changed before the trigger; nothing mutated\n");
         goto done;
     }
-    printf("    lifecycle hostUs=%lld trigger issued pause=%llu restart=%llu generation=%llu attach=%llu detach=%llu gauge=%llu\n", host_us(), before.FilterPauseCount,
+    printf("    lifecycle hostUs=%lld before trigger pause=%llu restart=%llu generation=%llu attach=%llu detach=%llu gauge=%llu\n", host_us(), before.FilterPauseCount,
            before.FilterRestartCount, before.PauseRestartGeneration, before.FilterAttachCount, before.FilterDetachCount, before.OutstandingSendNBLs);
-    (void)trigger_restart(name, name_bytes);
-    lifecycle_wait(h, &before);
+    lifecycle_measure(h, &before, name, name_bytes, passive);
     Sleep(SETTLE_MS);   /* FilterRestartCount moves on entry, before the bring-up, and no signal marks its end */
 
     /* #350: no MMIO unless the filter is Running. Frames come first: they need no MMIO, and they are the evidence for it */
@@ -1390,13 +1538,17 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
         seen = tx_step(h, ids[t].net_luid, sock, BASELINE_MS, "after the restart", g_next_seq, &capture_alive);
         traffic = capture_alive && g_next_seq != first && (unsigned long long)seen * 100 >= (unsigned long long)(g_next_seq - first) * WIRE_MIN_PERCENT;
         dump_baseline_head(first);
+        cleanup.tx_probed = capture_alive && g_next_seq != first;
+        cleanup.tx_shown = traffic;
         outcome = lifecycle_read(h, &before, &after, traffic);
     }
     other_differs = report_others(ids, others, other_before, n, t);
+    cleanup.others_changed = other_differs;
     if (outcome != TAS_LIFECYCLE_RESUMED) {
         printf(TAG " Running not shown: no MMIO, so register state, PHC and consistency stay unmeasured\n");
         rc = 1;
-        printf(TAG " result: exit=%d; recovery, if needed, is the operator's: this mode never cycles the adapter\n", rc);
+        printf(TAG " result: exit=%d lifecycle=%s cleanup=%s; recovery is owed, and it is the operator's: this mode never cycles the adapter\n", rc,
+               tas_lifecycle_name(outcome), tas_cleanup_name(tas_lifecycle_cleanup(&cleanup)));
         goto done;
     }
 
@@ -1438,9 +1590,18 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
     } else {
         rc = phc_fact == TAS_PHC_DISCONTINUOUS ? 2 : 0;
     }
-    printf(TAG " result: exit=%d; recovery, if needed, is the operator's: this mode never cycles the adapter\n", rc);
+    cleanup.lifecycle_shown = TRUE;
+    cleanup.regs_changed = changed;
+    cleanup.phc = phc_fact;
+    cleanup.consistent = consistent;
+    marker("run-end");
+    printf(TAG " result: exit=%d lifecycle=%s cleanup=%s; recovery, if needed, is the operator's: this mode never cycles the adapter\n", rc,
+           tas_lifecycle_name(outcome), tas_cleanup_name(tas_lifecycle_cleanup(&cleanup)));
 
 done:
+    if (g_marker != 0) {
+        EventUnregister(g_marker);
+    }
     if (wire_up) {
         wire_stop();
     }
@@ -1485,12 +1646,16 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
     printf("=== IntelAvbFilter - exploratory TAS gate investigation (#328), %s ===\n", TAG);
+    if (argc == 2 && strcmp(argv[1], "--lifecycle-markers") == 0) {
+        return marker_smoke();
+    }
     if (argc >= 2 && strcmp(argv[1], "--lifecycle-a") == 0) {
-        if ((argc != 4 && argc != 5) || strcmp(argv[2], "--observer") != 0 || (argc == 5 && strcmp(argv[4], "--dry-run") != 0)) {
-            printf(TAG " not run: usage: tas_gate_investigation --lifecycle-a --observer <did> [--dry-run], with " AVB_TEST_TARGET_ENV " set\n");
+        if ((argc != 4 && argc != 5) || strcmp(argv[2], "--observer") != 0 ||
+            (argc == 5 && strcmp(argv[4], "--dry-run") != 0 && strcmp(argv[4], "--passive") != 0)) {
+            printf(TAG " not run: usage: tas_gate_investigation --lifecycle-a --observer <did> [--dry-run | --passive], with " AVB_TEST_TARGET_ENV " set\n");
             return 3;
         }
-        return lifecycle_case_a(argv[3], argc == 5);
+        return lifecycle_case_a(argv[3], argc == 5 && strcmp(argv[4], "--dry-run") == 0, argc == 5 && strcmp(argv[4], "--passive") == 0);
     }
     if (argc == 3 && strcmp(argv[1], "--apply") == 0 && argv[2][0] != '\0' && strspn(argv[2], "wsb") == strlen(argv[2])) {
         letters = argv[2];
@@ -1540,7 +1705,7 @@ int main(int argc, char **argv)
         }
         letters = "wsb";
     } else if (argc != 1) {
-        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b> | --pattern <startMs> <endMs> | --disarm | --rearm <n> | --lifecycle-a --observer <did> [--dry-run]]\n");
+        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b> | --pattern <startMs> <endMs> | --disarm | --rearm <n> | --lifecycle-a --observer <did> [--dry-run | --passive] | --lifecycle-markers]\n");
         return 3;
     }
     for (n = 0; argc == 3 && letters != NULL && n < strlen(letters); n++) {

@@ -26,6 +26,7 @@ Source facts, read from the code, unless marked otherwise.
 | F16 | Instance names are `{interface GUID}-{filter GUID}-0000`. Seen once, on the I210: first GUID is its `InterfaceGuid`, second is `NetCfgInstanceId` in the INF. The I226 name has not been seen | `logs/dbgview_test_ptp_phc_stability.exe_20260430_123620.log` line 2014 |
 | F17 | `Install-Driver.ps1 -Action Reinstall` disables **every adapter with the filter bound**, runs `netcfg -u`, deletes all cached driver packages, and has a path that offers `Restart-Computer -Force` | `tools/setup/Install-Driver.ps1:249`, `:305-340` |
 | F18 | #350 requires no MMIO unless the filter is Running | #350 Technical Constraints |
+| F19 | Each AVB IOCTL, statistics included, briefly takes `FilterListLock` and the remove lock. FilterPause takes neither. FilterRestart takes `FilterListLock` only when the control device was destroyed, so not on a normal restart. Polling therefore shares no lock with the normal path, by source reading only, and still costs CPU | `src/device.c`, `src/filter.c:1016` |
 
 Documented NDIS behaviour, from Microsoft Learn, retrieved 2026-11-05:
 
@@ -97,11 +98,41 @@ A `RESUMED_BY_TRAFFIC` outcome alone is not lifecycle proof. It needs the NDIS e
 
 - Dedicated IOCTLs only: no `READ_REGISTER` or `WRITE_REGISTER`, so no I226 register map decides anything. Identity selects adapters and nothing else. TDH, TDT and occupancy are therefore not measured in Case A, so Q3 stands on the gauge and the wire here.
 - Pure logic in `tests/ioctl/tas_lifecycle_eval.h`, offline cases TC-MOCK-014 to 017 in `test_tas_restore_contract`. Those cases say nothing about hardware. The instance names in them are synthetic.
-- Every wait is bounded. The trigger runs on its own handle and thread, so a blocked call cannot stop the polling.
+- Every wait is bounded. The trigger runs on its own handle and thread, and polling starts before it, so a blocked or fast call cannot stop or outrun the polling.
+- Every way out after the trigger prints the lifecycle result and a cleanup verdict side by side. Neither replaces the other.
 - No MMIO from before the trigger until the lifecycle is shown (F11, F18). Statistics, which touch no hardware, are polled throughout. Frames follow only a Restart entry, and the clock and snapshot follow only those frames. Short of that the run stops with those facts unmeasured, which is never a pass.
 - PHC: the tool claims `DISCONTINUOUS` when the clock did not advance, and otherwise `NOT_JUDGED_NO_TOLERANCE`. Exit 0 never means continuity.
 - No NIC cycle: it would add a second PHC reset and a new context to the evidence.
 - No repetition count. One run, then the evidence decides what is next.
+
+## Timing: what a run may claim
+
+| Claim | Source | Status |
+|---|---|---|
+| Entry observed | `FilterPauseCount`, `FilterRestartCount` | Observed by the driver, not by NDIS |
+| Completion inferred | Pause: NDIS restarts only from Paused. Restart: frames through the whole stack on the observer | Inference from documented order |
+| Completion observed | NDIS state event on this `FilterInstanceName`, read against a rule written down before the run | Only this establishes it. The tool cannot see it |
+| Interval length | Bracketed polls: `lowerUs` and `upperUs`, entry to entry | Includes Pausing, so it overstates Paused |
+| Paused interval | NDIS state events, if they fire | Not available from polls |
+
+**Resolution and uncertainty.**
+- QPC here is 10 MHz, 0.1 us per tick, read 2026-11-05.
+- That is not the resolution of a measurement. An edge is known only to its bracket: `widthUs` in the `edge` lines, set by the poll gap, and printed for each run with the mean and worst gap.
+- The dry run measures the gap with nothing happening. A gap measured during the event can be worse, because the machine is busy then.
+- An ETW timestamp shares the trace clock with the markers. Placing a poll against an NDIS event carries the marker's own bracket, `qpcAfter - qpcBefore`, 6 to 38 us with no session attached on 2026-11-05, plus the poll's bracket. This must be re-read from a real trace.
+
+**A missed interval is not an absent one.** Counters are cumulative, so an interval the polls fell between still shows in the deltas. `NOT_RESOLVED_NEVER_ABSENT` gives an upper bound and says nothing else. If the deltas show no Pause, that is `NOT_TRIGGERED` within the bound, a statement about entry only.
+
+**Does the instrumentation change the transition?** By source, polling shares no lock with the normal path (F19). That is a reading, not a measurement, so `--passive` repeats the run with one poll a second. Comparing NDIS event spacing between the two runs is the only measurement of this, and it needs the events to fire. One pair of runs can show a large effect, not prove there is none.
+
+## #384: proving a call ran inside the Paused interval
+
+A failed Paused-state assertion is authoritative only if the test independently proves the operation ran inside the interval. An IOCTL response alone proves nothing, because the call may have run after Restart.
+
+- **Proof by counters:** a poll that finished before the call started shows Pause entered and Restart not, and a poll that started after the call finished shows the same. `provenInsideCalls` applies this rule to the polls themselves, so Case A shows whether the interval is reachable at all, using a harmless read.
+- **Limit:** that proves entry to entry, which includes Pausing. #356 says Paused, and DES-C-TAS-010 refuses mutating operations "until Running", which covers both. Proving strictly Paused needs an NDIS state event before the call starts.
+- **If the interval cannot be hit or measured:** report the evidence gap and propose a testability solution under #384 or #356. Do not weaken the assertion, and do not add a driver test hook without approval.
+- **Cleanup does not depend on any of this.** A test whose call landed outside the interval still owns cleanup, verifies restoration, and keeps both verdicts.
 
 ## Operator steps
 
@@ -128,7 +159,16 @@ Stop if the installed hash differs from the build.
 .\tools\test\Run-Tests-Elevated.ps1 -Suite HardwareIntegration -TestName ssot_register_validation_test -ResultsJson "$ev\tsnreg-before.json"
 ```
 
-**4. Dry run.** No trigger and no NIC administration. Effects: about 3 s of tagged broadcast and ICMP on the I226, and a promiscuous capture on the I210. Expected: every adapter listed, one instance for the target, `dry run complete`, exit 3.
+**4. Trace check.** No device, no NIC, no driver call. Expected: `enabled=1`, and three `i364 smoke qpc=` markers in the XML. If they are missing, stop: the correlation in step 6 does not exist.
+
+```powershell
+logman start AvbI364Smoke -p "{B7E1F3C2-6A54-4D0E-9C37-3640E8A1D364}" 0xffffffffffffffff 0x5 -o "$ev\smoke.etl" -ets -ct perf
+.\build\tools\avb_test\x64\Debug\tas_gate_investigation.exe --lifecycle-markers *>&1 | Tee-Object "$ev\smoke.log"
+logman stop AvbI364Smoke -ets
+tracerpt "$ev\smoke.etl" -o "$ev\smoke.xml" -of XML -y
+```
+
+**5. Dry run.** No trigger and no NIC administration. Effects: about 3 s of tagged broadcast and ICMP on the I226, a promiscuous capture on the I210, and 200 ms of statistics polling. Expected: every adapter listed, one instance for the target, a `timing` line, `dry run complete`, exit 3.
 
 ```powershell
 $env:AVB_HIL_TARGET_DID = '0x125B'
@@ -145,7 +185,7 @@ try {
 
 Stop on any other result. Hand back the log: that is the first real look at the instance names.
 
-**5. Case A.** Only after reviewing the dry run. Expected effects, from source: a short I226 datapath pause; `SYSTIM` reseeded; TSAUXC, TSYNCRXCTL, TSYNCTXCTL and ETQF(3) rewritten; stale TX timestamps dropped; timers stopped and restarted. Link is expected to stay up, UNVERIFIED. I219 and I210 are not targeted.
+**6. Case A.** Only after reviewing the dry run. Expected effects, from source: a short I226 datapath pause; `SYSTIM` reseeded; TSAUXC, TSYNCRXCTL, TSYNCTXCTL and ETQF(3) rewritten; stale TX timestamps dropped; timers stopped and restarted. Link is expected to stay up, UNVERIFIED. I219 and I210 are not targeted.
 
 ```powershell
 . .\tools\lib\HilLock.ps1
@@ -154,6 +194,7 @@ if (-not $lock.Ok) { throw "HIL lock busy: $($lock.Why)" }
 $dv = .\.github\skills\DbgView\Start-DbgViewCapture.ps1 -LogFile "$ev\dbgview.log"
 try {
     logman start AvbI364 -p Microsoft-Windows-NDIS 0x4316 0x5 -o "$ev\ndis.etl" -ets -ct perf
+    logman update trace AvbI364 -p "{B7E1F3C2-6A54-4D0E-9C37-3640E8A1D364}" 0xffffffffffffffff 0x5 -ets
     .\build\tools\avb_test\x64\Debug\tas_gate_investigation.exe --lifecycle-a --observer 0x1533 *>&1 | Tee-Object "$ev\case-a.log"
     "exit=$LASTEXITCODE" | Tee-Object -Append "$ev\case-a.log"
 } finally {
@@ -163,16 +204,17 @@ try {
 }
 ```
 
-**6. NDIS events.** Not hardware.
+**7. NDIS events.** Not hardware. Before reading them, write down how `State` values will be interpreted.
 
 ```powershell
+tracerpt "$ev\ndis.etl" -o "$ev\ndis.xml" -of XML -y
 Get-WinEvent -Path "$ev\ndis.etl" -Oldest -ErrorAction Continue |
     Where-Object { $_.Id -in 10007,10043,10050,10058,10103,10104,10105,10106,10107,10312 } |
     ForEach-Object { '{0:o} {1} {2}' -f $_.TimeCreated, $_.Id, $_.ToXml() } |
     Set-Content -Encoding utf8 "$ev\ndis-events.txt"
 ```
 
-**7. Registers after, then hand back the folder.**
+**8. Registers after, then hand back the folder.**
 
 ```powershell
 .\tools\test\Run-Tests-Elevated.ps1 -Suite HardwareIntegration -TestName ssot_register_validation_test -ResultsJson "$ev\tsnreg-after.json"
@@ -191,6 +233,12 @@ Open before any operator-controlled hardware execution:
 
 Not blockers, but limits on what any result may say: no PHC continuity claim until a hardware-derived tolerance exists; TDH, TDT and occupancy are unmeasured in Case A, so Q3 can be answered only from the gauge and the wire; the origin of a PHC reset stays open until the #348 measurement exists.
 
+**9. Control.** One `--passive` run the same way, only if the events fired and step 6 ended clean. It is a further trigger and a further PHC reset.
+
+## Case scope
+
+Case A is the control. Case B stays required by #364: it does not need to gate the first formulation of #384's Expected Results if Cases A, C and D supply enough evidence, but #364 is not closed, and its acceptance not claimed, while Case B or any other required case is outstanding.
+
 ## Stop conditions
 
 The tool ends on its own bounds. Stop the session on any of these, and do not start another case:
@@ -205,6 +253,7 @@ The tool ends on its own bounds. Stop the session on any of these, and do not st
 ## Recovery
 
 - Nothing restores the PHC. If it was reseeded, it stays reseeded, and later tests must prove their own prerequisites.
+- Cleanup is owed on every outcome. The tool prints the original result and the cleanup verdict together. Steps 7 and 8 verify state, and both results are kept. An unexpected result is never a reason to skip them.
 - Nothing here is automatic. The tool never administers a NIC, and an unexpected state is examined before any recovery is chosen.
 - If you choose a NIC cycle because TX did not recover: I226 only, `Disable-NetAdapter`, 5 s, `Enable-NetAdapter`, then TC-TSNREG-001 and TX on the I210. Never all adapters: VNC is on the I219. A NIC cycle adds its own PHC reset and a new context.
 - If disable blocks, do not enable. A reboot is your decision.
