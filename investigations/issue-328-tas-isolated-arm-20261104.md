@@ -124,3 +124,32 @@ Wire evidence limits: capture on another NIC in this host is supplementary. It n
 ### PHC restoration, separate defect
 
 `init_ptp` in `devices/intel_i226_impl.c` writes `SYSTIM=1` unconditionally on every `AvbBringUpHardware`, so on every `FilterAttach` and `FilterRestart`. The I210 path guards this. Source-confirmed for the filter; whether hardware or the miniport also resets the PHC is undetermined, because the write hides any earlier reset.
+
+## Stall probe result, 2026-11-05
+
+Commit 73773d4 (test code a5b786c), Debug driver FB64A096, I226 0x125B, one run per size. Local diagnostic evidence.
+
+| Payload | Frame bytes | Baseline wire seen | Armed frames sent | Armed wire seen | `TDH0` advance at stall | ICMP baseline | ICMP armed |
+|---|---|---|---|---|---|---|---|
+| 64 | 106 | 82 of 82 | 479 | 0 | 87 | 11/11 | 0/23 |
+| 512 | 554 | 81 of 81 | 484 | 0 | 22 | 11/11 | 0/23 |
+| 1400 | 1442 | 82 of 82 | 384 | 0 | 9 | 10/10 | 0/24 |
+
+Both observers matched every baseline frame. The first armed frame was already missing in every run, while `TDH` advanced and the gauge stayed 0.
+
+Against the predictions:
+
+| Hypothesis | Size scaling | Wire | Result |
+|---|---|---|---|
+| Closed or misprogrammed gates | Matches | Matches | Consistent |
+| Packet buffer not released | Matches | No frames seen | Refuted as the sole cause: nothing left the adapter to release |
+| Descriptor or ring limit | Stall changes 87, 22, 9 | No frames seen | Refuted |
+| Missing completion or miniport limit | Size-dependent | No frames seen | Refuted as the primary cause |
+
+Fit of `TDH` advance to `N * (frame + k) = C` from the two smaller sizes: k about 46 bytes, C about 13.2 KB, which predicts 8.9 descriptors at 1400 bytes against 9 observed. This treats one descriptor as one test frame; a few ICMP and background frames are mixed in, and per-frame buffer behaviour is unmeasured. It does not match the 20 KB TXPB0 field, and the reason is unknown.
+
+Frames counted by `osOut`, and sends completed back to the filter, include frames that never reached the wire.
+
+Limits: same-host capture is supplementary. Observer liveness during the armed window is not independently shown; it stands on ICMP agreeing. Which programming omission keeps egress closed is not established; `STQT`/`ENDQT` of 0, `BaseT` of 0 and shadow cycle 0 are candidates only.
+
+Correction: `TDT - TDH` is not a fixed 255. Four runs reached 255, the 64 byte probe reached 261. At 1400 bytes sends began failing (99 errors) after about 24 s, once the stack backed up.
