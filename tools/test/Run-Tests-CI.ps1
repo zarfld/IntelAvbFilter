@@ -378,6 +378,7 @@ $IntegrationTests = @()
 # 'Obsolete: <evidence ...>'.  Anything neither listed here nor a runner entry is Unknown and fails the gate.
 # Never execute a diagnostic tool merely because it is built.  Reviewed one by one 2026-10-29 (source + consumers).
 $TestArtifactClassification = [ordered]@{
+    'tas_gate_investigation' = 'Diagnostic: exploratory register investigation for #328 through the generic Debug-only WRITE_REGISTER; operator-started, LOCAL_DIAGNOSTIC evidence, never a suite entry; findings move to a dedicated IOCTL verified by hardware TDD'
     'quick_diagnostics'     = 'Diagnostic: never opens the driver; runs wmic PnP queries and ping 8.8.8.8, prints them and always returns 0 - no verdict, manual triage only'
     'intel_avb_diagnostics' = 'Diagnostic: informational by its own contract, main always returns 0 whatever it finds; no state-changing IOCTL; pings 8.8.8.8 - manual triage only'
     'avb_test_actual'       = 'Obsolete: evidence - kernel-mode build placeholder (one empty function, no main), Build-Tests target Disabled and never built; the source file stays, IntelAvbFilter.vcxproj compiles it'

@@ -163,3 +163,11 @@ Verified on this host: the I210 individually matched 245 of 245 tagged I226 broa
 Assumptions: switched unicast is not expected on the I210, so only broadcast is correlated, by source MAC, run nonce and sequence number. No switch setting is changed. The capture opens non-promiscuous. The capture is same-host supplementary evidence. The I219 reports `PromiscuousMode=True`; the source is unknown and it does not affect this experiment.
 
 The three probe runs captured on both the I219 and the I210, and each observer matched only baseline frames. Runs from this point capture on the I210 alone and count all captured frames and all I226-sourced frames per window, which closes the armed-window liveness gap.
+
+### Exploratory investigation versus regression evidence
+
+Decision 2026-11-05: generic Debug-only `WRITE_REGISTER` is available for investigating register behaviour before implementation. It is not used in automated HIL regression tests, test-only branches or registered Unsafe entries. Established behaviour is implemented through dedicated, purpose-specific IOCTLs and verified by hardware TDD.
+
+`tests/diagnostic/tas_gate_investigation.c` is that investigation. It is classified `Diagnostic`, has no runner entry and no testcase verdicts, and is started by the operator. Its output is `LOCAL_DIAGNOSTIC` evidence and never counts as Debug or Release HIL regression evidence. `test_tas_isolated_arm` contains no register writes.
+
+Candidates, applied in order until tagged frames reach the I210: A per-queue windows (`STQT=0`, `ENDQT=cycle`); B shadow cycle, cycle and base time at the next boundary. `FUTSCDDIS` and a future base are not used, because upstream warns of a TX hang on I226 around them. Each step stays below the observed fill level, so a stalled ring cannot hide an opening window.
