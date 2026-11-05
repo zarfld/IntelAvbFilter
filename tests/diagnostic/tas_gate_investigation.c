@@ -7,18 +7,23 @@
  * not do. What it establishes is implemented later through a dedicated IOCTL and verified by hardware TDD. Output is
  * LOCAL_DIAGNOSTIC evidence, never HIL regression evidence.
  *
- * Sequence: tagged broadcast baseline seen on the I210, SETUP_TAS, then one candidate at a time, stopping when frames
- * reach the wire:
- *   A  per-queue windows: STQT=0, ENDQT=cycle
- *   B  shadow cycle and base time, write order and past-base handling as upstream igc_tsn.c. FUTSCDDIS and a future base
- *      are deliberately not used: upstream warns of a TX hang on I226 around them.
+ * Sequence: tagged broadcast baseline seen on the I210, SETUP_TAS, then register groups, in this order:
+ *   w  per-queue windows: STQT=0, ENDQT=cycle
+ *   s  shadow cycle, then cycle
+ *   b  base time at the next cycle boundary after the measured PHC, as upstream igc_tsn.c does for a base in the past
+ * FUTSCDDIS and a far-future base are deliberately not used: upstream warns of a TX hang on I226 around them.
+ *
+ * Without arguments: w, then s and b together, stopping when frames reach the wire. Those groups are cumulative, so that
+ * run cannot say which register mattered. --apply <letters> writes only the named groups in one step, from a fresh NIC
+ * cycle, which separates them.
  *
  * Each step stays below the fill level seen on 2026-11-05, so a stalled ring cannot hide an opening window.
  *
- * Mutations: SETUP_TAS, the writes above, bounded broadcast and ICMP. Restoration is the NIC cycle of the I226 only. The
- * PHC restarts, a known defect, so this tool reports registers and not full restoration. Requires a Debug driver.
+ * Mutations: SETUP_TAS, the writes above, bounded broadcast and ICMP. Restoration is the NIC cycle of the I226 only.
+ * Requires a Debug driver. The tool takes no machine lock; the operator command holds it.
  *
- * Exit: 0 registers restored, 1 registers differ or the cycle failed, 3 not run (nothing mutated).
+ * Exit: 0 registers, TX and PHC all restored; 1 registers differ, TX unhealthy or the cycle failed; 2 registers and TX
+ * restored but the PHC is not continuous; 3 not run (nothing mutated).
  *
  * Verifies: #328
  */
@@ -45,6 +50,8 @@
 #define CYCLE_NS             1000000u
 #define NS_PER_SEC           1000000000ULL
 #define PAYLOAD_BYTES        64
+#define TX_DESCRIPTOR_BYTES  16
+#define PHC_TOLERANCE_NS     (2 * 1000000000LL)   /* the same unsupported constant as test_tas_isolated_arm; no hardware-derived tolerance exists */
 #define SEND_PERIOD_MS       50
 #define BASELINE_MS          3000
 #define ARMED_MS             1500
@@ -59,12 +66,19 @@
 
 typedef struct { const char *name; uint32_t offset; } REG;
 
-/* Everything this tool or SETUP_TAS writes */
+/* The same set as test_tas_isolated_arm, so a difference outside the written registers is seen too */
 static const REG g_regs[] = {
-    {"TQAVCTRL", I226_TQAVCTRL}, {"QBVCYCLET", I226_QBVCYCLET}, {"QBVCYCLET_S", I226_QBVCYCLET_S},
-    {"BASET_L", I226_BASET_L}, {"BASET_H", I226_BASET_H},
+    {"TQAVCTRL", I226_TQAVCTRL}, {"TXPBSIZE", I226_TXPBSIZE}, {"RXPBSIZE", I226_RXPBSIZE}, {"DTXMXPKTSZ", I226_DTXMXPKTSZ},
+    {"TXARB", I226_TXARB}, {"RETX_CTL", I226_RETX_CTL}, {"GTXOFFSET", I226_GTXOFFSET}, {"BASET_L", I226_BASET_L},
+    {"BASET_H", I226_BASET_H}, {"QBVCYCLET", I226_QBVCYCLET}, {"QBVCYCLET_S", I226_QBVCYCLET_S},
     {"STQT0", I226_STQT0}, {"STQT1", I226_STQT1}, {"STQT2", I226_STQT2}, {"STQT3", I226_STQT3},
     {"ENDQT0", I226_ENDQT0}, {"ENDQT1", I226_ENDQT1}, {"ENDQT2", I226_ENDQT2}, {"ENDQT3", I226_ENDQT3},
+    {"TXQCTL0", I226_TXQCTL0}, {"TXQCTL1", I226_TXQCTL1}, {"TXQCTL2", I226_TXQCTL2}, {"TXQCTL3", I226_TXQCTL3},
+    {"TQAVCC0", I226_TQAVCC0}, {"TQAVCC1", I226_TQAVCC1}, {"TQAVHC0", I226_TQAVHC0}, {"TQAVHC1", I226_TQAVHC1},
+    {"TCTL", I226_TCTL}, {"TDLEN0", I226_TDLEN0}, {"TDLEN1", I226_TDLEN1}, {"TDLEN2", I226_TDLEN2}, {"TDLEN3", I226_TDLEN3},
+    {"TXDCTL0", I226_TXDCTL0}, {"TXDCTL1", I226_TXDCTL1}, {"TXDCTL2", I226_TXDCTL2}, {"TXDCTL3", I226_TXDCTL3},
+    {"TIMINCA", I226_TIMINCA}, {"TSAUXC", I226_TSAUXC}, {"TSYNCTXCTL", I226_TSYNCTXCTL}, {"TSYNCRXCTL", I226_TSYNCRXCTL},
+    {"RAL0", I226_RAL0}, {"RAH0", I226_RAH0},
 };
 #define REG_COUNT (sizeof(g_regs) / sizeof(g_regs[0]))
 
@@ -75,6 +89,14 @@ static unsigned g_next_seq;
 static volatile LONG g_armed;
 
 typedef struct { DEVINST inst; BOOL enable; CONFIGRET result; } CM_CALL;
+
+/* Host-side quantities of one moment. None of them shows that a frame left the adapter. */
+typedef struct {
+    uint32_t tdh, tdt, ring;
+    unsigned long long os_out, gauge;
+    LONG captured, from_target;
+    BOOL ok;
+} SNAP;
 
 static BOOL WINAPI on_console_ctrl(DWORD type)
 {
@@ -122,32 +144,42 @@ static BOOL read_reg(HANDLE h, uint32_t offset, uint32_t *value)
     return TRUE;
 }
 
+/** Records the original value, the intended value, the operation status and the readback */
 static BOOL write_reg(HANDLE h, uint32_t offset, uint32_t value, const char *name)
 {
     AVB_REGISTER_REQUEST r = {0};
-    DWORD br = 0;
+    uint32_t before = 0, after = 0;
+    BOOL have_before = read_reg(h, offset, &before), have_after, wrote;
+    DWORD br = 0, error;
+
     r.offset = offset;
     r.value = value;
-    if (!DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL) || r.status != 0) {
-        printf(TAG " write %s failed (error %lu)\n", name, GetLastError());
-        return FALSE;
-    }
-    printf("    write %-12s 0x%05X = 0x%08X\n", name, offset, value);
-    return TRUE;
+    wrote = DeviceIoControl(h, IOCTL_AVB_WRITE_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL) && r.status == 0;
+    error = wrote ? ERROR_SUCCESS : GetLastError();
+    have_after = read_reg(h, offset, &after);
+    printf("    write %-12s 0x%05X before=%s0x%08X intended=0x%08X status=%s error=%lu readback=%s0x%08X%s\n", name, offset,
+           have_before ? "" : "unreadable ", before, value, wrote ? "ok" : "FAILED", error,
+           have_after ? "" : "unreadable ", after, (have_after && after == value) ? "" : " MISMATCH");
+    return wrote;
 }
 
-static unsigned read_regs(HANDLE h, uint32_t *values, const char *label)
+/** Prints every register, or with base only those that differ from it. Returns the unreadable count */
+static unsigned read_regs(HANDLE h, uint32_t *values, const char *label, const uint32_t *base)
 {
-    unsigned i, unreadable = 0;
+    unsigned i, unreadable = 0, shown = 0;
 
-    printf("  --- registers: %s ---\n", label);
+    printf("  --- registers: %s%s ---\n", label, base != NULL ? ", differences from baseline" : "");
     for (i = 0; i < REG_COUNT; i++) {
-        if (read_reg(h, g_regs[i].offset, &values[i])) {
-            printf("    %-12s 0x%05X = 0x%08X\n", g_regs[i].name, g_regs[i].offset, values[i]);
-        } else {
+        if (!read_reg(h, g_regs[i].offset, &values[i])) {
             printf("    %-12s 0x%05X unreadable\n", g_regs[i].name, g_regs[i].offset);
             unreadable++;
+        } else if (base == NULL || values[i] != base[i]) {
+            printf("    %-12s 0x%05X = 0x%08X\n", g_regs[i].name, g_regs[i].offset, values[i]);
+            shown++;
         }
+    }
+    if (base != NULL && shown == 0) {
+        printf("    none\n");
     }
     return unreadable;
 }
@@ -191,16 +223,39 @@ static BOOL arm_tas(HANDLE h)
     return DeviceIoControl(h, IOCTL_AVB_SETUP_TAS, &tas, sizeof(tas), &tas, sizeof(tas), &br, NULL) && tas.status == 0;
 }
 
-/** Sends tagged broadcast for ms, waits, and returns the frames of this window seen on the wire */
-static unsigned tx_step(HANDLE h, SOCKET sock, DWORD ms, const char *label, unsigned armed_first_seq)
+static void snap(HANDLE h, avb_u64 luid, SNAP *s)
+{
+    AVB_DRIVER_STATISTICS st;
+    MIB_IF_ROW2 row;
+    uint32_t tdlen = 0;
+    DWORD br = 0;
+
+    ZeroMemory(s, sizeof(*s));
+    ZeroMemory(&st, sizeof(st));
+    ZeroMemory(&row, sizeof(row));
+    row.InterfaceLuid.Value = luid;
+    s->ok = read_reg(h, I226_TDH0, &s->tdh) && read_reg(h, I226_TDT0, &s->tdt) && read_reg(h, I226_TDLEN0, &tdlen) &&
+            tdlen >= TX_DESCRIPTOR_BYTES &&
+            DeviceIoControl(h, IOCTL_AVB_GET_STATISTICS, &st, sizeof(st), &st, sizeof(st), &br, NULL) && GetIfEntry2(&row) == NO_ERROR;
+    s->ring = s->ok ? tdlen / TX_DESCRIPTOR_BYTES : 1;
+    s->gauge = st.OutstandingSendNBLs;
+    s->os_out = row.OutUcastPkts + row.OutNUcastPkts;
+    wire_counts(&s->captured, &s->from_target);
+}
+
+/** Sends tagged broadcast for ms, waits, and returns the frames of this window seen on the wire. Reports each quantity
+ *  separately: accepted by Windows, descriptors fetched, OS counter, outstanding sends, seen on the wire. */
+static unsigned tx_step(HANDLE h, avb_u64 luid, SOCKET sock, DWORD ms, const char *label, unsigned armed_first_seq, BOOL *capture_alive)
 {
     static unsigned char payload[PAYLOAD_BYTES];
     SOCKADDR_IN peer = {0};
-    unsigned first = g_next_seq, sent = 0, seen, all = 0;
-    long missing, last;
-    LONG captured, from_target;
-    uint32_t tdh = 0, tdt = 0;
-    DWORD start = GetTickCount();
+    unsigned first = g_next_seq, sent = 0, errors = 0, seen, all = 0;
+    long missing, last, m2, l2;
+    SNAP before, after;
+    DWORD start;
+
+    snap(h, luid, &before);
+    start = GetTickCount();
 
     peer.sin_family = AF_INET;
     peer.sin_port = htons(TAS_WIRE_UDP_PORT);
@@ -210,25 +265,29 @@ static unsigned tx_step(HANDLE h, SOCKET sock, DWORD ms, const char *label, unsi
         if (sendto(sock, (const char *)payload, sizeof(payload), 0, (SOCKADDR *)&peer, sizeof(peer)) != SOCKET_ERROR) {
             sent++;
             g_next_seq++;
+        } else {
+            errors++;
         }
         Sleep(SEND_PERIOD_MS);
     }
     Sleep(DRAIN_MS);
     seen = wire_seen(first, first + sent, &missing, &last);
-    if (armed_first_seq != g_next_seq) {
-        long m2, l2;
-        all = wire_seen(armed_first_seq, g_next_seq, &m2, &l2);
+    all = wire_seen(armed_first_seq, g_next_seq, &m2, &l2);
+    snap(h, luid, &after);
+    printf(TAG " %s: accepted=%u sendErrors=%u wireSeen=%u firstMissingSeq=%ld sinceArmSeen=%u/%u descFetched=%u occupancy=%u/%u osOutDelta=%llu "
+           "gauge=%llu capturedDelta=%ld fromTargetDelta=%ld icmp=%ld/%ld samplesOk=%d\n", label, sent, errors, seen, missing, all,
+           g_next_seq - armed_first_seq, (after.tdh + after.ring - before.tdh) % after.ring, (after.tdt + after.ring - after.tdh) % after.ring,
+           after.ring, after.os_out - before.os_out, after.gauge, after.captured - before.captured,
+           after.from_target - before.from_target, g_icmp_replied, g_icmp_sent, before.ok && after.ok);
+    if (after.captured == before.captured) {
+        *capture_alive = FALSE;
+        printf(TAG " %s: the capture saw nothing at all, so wireSeen=0 proves nothing here\n", label);
     }
-    wire_counts(&captured, &from_target);
-    (void)read_reg(h, I226_TDH0, &tdh);
-    (void)read_reg(h, I226_TDT0, &tdt);
-    printf(TAG " %s: sent=%u wireSeen=%u firstMissingSeq=%ld allArmedSeen=%u TDH0=%u TDT0=%u capturedTotal=%ld fromTargetTotal=%ld icmp=%ld/%ld\n",
-           label, sent, seen, missing, all, tdh, tdt, captured, from_target, g_icmp_replied, g_icmp_sent);
     fflush(stdout);
     return seen;
 }
 
-/** Candidate A: every queue window covers the whole cycle */
+/** w: every queue window covers the whole cycle */
 static BOOL step_windows(HANDLE h)
 {
     int q;
@@ -240,19 +299,36 @@ static BOOL step_windows(HANDLE h)
     return TRUE;
 }
 
-/** Candidate B: shadow cycle, cycle, then base time at the next boundary, as upstream does for a base in the past */
-static BOOL step_schedule(HANDLE h)
+/** s: shadow cycle first, then cycle, as upstream */
+static BOOL step_shadow(HANDLE h)
 {
-    unsigned long long systim = 0, base;
+    return write_reg(h, I226_QBVCYCLET_S, CYCLE_NS, "QBVCYCLET_S") && write_reg(h, I226_QBVCYCLET, CYCLE_NS, "QBVCYCLET");
+}
+
+/** b: next cycle boundary after the measured PHC. The second PHC read shows whether it was future or past on arrival. */
+static BOOL step_base(HANDLE h)
+{
+    unsigned long long systim = 0, base, after = 0;
+    BOOL ok;
 
     if (!read_systim(h, &systim)) {
-        printf(TAG " PHC unreadable, candidate B not applied\n");
+        printf(TAG " PHC unreadable, base time not written\n");
         return FALSE;
     }
     base = (systim / CYCLE_NS + 1) * CYCLE_NS;
-    return write_reg(h, I226_QBVCYCLET_S, CYCLE_NS, "QBVCYCLET_S") && write_reg(h, I226_QBVCYCLET, CYCLE_NS, "QBVCYCLET") &&
-           write_reg(h, I226_BASET_H, (uint32_t)(base / NS_PER_SEC), "BASET_H") &&
-           write_reg(h, I226_BASET_L, (uint32_t)(base % NS_PER_SEC), "BASET_L");
+    ok = write_reg(h, I226_BASET_H, (uint32_t)(base / NS_PER_SEC), "BASET_H") &&
+         write_reg(h, I226_BASET_L, (uint32_t)(base % NS_PER_SEC), "BASET_L");
+    if (read_systim(h, &after)) {
+        printf("    PHC before=%llu baseT=%llu after=%llu, baseT - PHC after write = %lld ns\n", systim, base, after, (long long)base - (long long)after);
+    }
+    return ok;
+}
+
+/** Writes the groups named in letters, in the order w, s, b */
+static BOOL apply_groups(HANDLE h, const char *letters)
+{
+    return (strchr(letters, 'w') == NULL || step_windows(h)) && (strchr(letters, 's') == NULL || step_shadow(h)) &&
+           (strchr(letters, 'b') == NULL || step_base(h));
 }
 
 static DWORD WINAPI cm_thread(LPVOID arg)
@@ -305,10 +381,14 @@ static BOOL find_devinst(avb_u64 luid, DEVINST *inst)
     return CM_Locate_DevNodeA(inst, pnp, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
 }
 
-/** Waits for the adapter to return and reports the registers against the baseline */
-static int restore(const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, const uint32_t *baseline)
+/** NIC cycle, then registers, armed state and PHC against the baseline, each reported separately. Exit code as in the header. */
+static int restore(const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, const uint32_t *baseline, unsigned long long phc_before,
+                   LARGE_INTEGER qpc_before, HANDLE *fresh)
 {
     uint32_t after[REG_COUNT];
+    LARGE_INTEGER qpc, frequency;
+    unsigned long long phc_after = 0;
+    long long wall_ns, drift_ns;
     DWORD start;
     unsigned i, differ = 0, armed = 1;
 
@@ -327,16 +407,24 @@ static int restore(const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, const u
         HANDLE h = open_device();
         if (h != INVALID_HANDLE_VALUE && bind_luid(h, id->net_luid)) {
             Sleep(SETTLE_MS);
-            if (read_regs(h, after, "after the cycle") == 0 && read_armed(h, &armed)) {
+            if (read_regs(h, after, "after the cycle", baseline) == 0 && read_armed(h, &armed) && read_systim(h, &phc_after)) {
+                QueryPerformanceCounter(&qpc);
+                QueryPerformanceFrequency(&frequency);
                 for (i = 0; i < REG_COUNT; i++) {
                     if (after[i] != baseline[i]) {
-                        printf(TAG " %s differs: 0x%08X, baseline 0x%08X\n", g_regs[i].name, after[i], baseline[i]);
                         differ++;
                     }
                 }
-                printf(TAG " registers differing=%u tasArmed=%u; the PHC restarted, not restored (known defect)\n", differ, armed);
-                CloseHandle(h);
-                return (differ == 0 && armed == 0) ? 0 : 1;
+                wall_ns = (long long)((double)(qpc.QuadPart - qpc_before.QuadPart) * 1e9 / (double)frequency.QuadPart);
+                drift_ns = ((long long)phc_after - (long long)phc_before) - wall_ns;
+                printf(TAG " registers compared=%u differing=%u tasArmed=%u\n", (unsigned)REG_COUNT, differ, armed);
+                printf(TAG " PHC before=%llu after=%llu wallNs=%lld driftNs=%lld continuous=%d\n", phc_before, phc_after, wall_ns, drift_ns,
+                       drift_ns > -PHC_TOLERANCE_NS && drift_ns < PHC_TOLERANCE_NS);
+                *fresh = h;
+                if (differ != 0 || armed != 0) {
+                    return 1;
+                }
+                return (drift_ns > -PHC_TOLERANCE_NS && drift_ns < PHC_TOLERANCE_NS) ? 0 : 2;
             }
         }
         if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); }
@@ -372,12 +460,38 @@ static BOOL find_addressing(avb_u64 luid, IN_ADDR *ipv4, BOOL *other_link)
     return found;
 }
 
-int main(void)
+/** The adapter's address comes back after the cycle at its own pace */
+static SOCKET open_tx_socket(IN_ADDR ipv4)
+{
+    SOCKADDR_IN local = {0};
+    BOOL on = TRUE;
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    DWORD start = GetTickCount();
+
+    local.sin_family = AF_INET;
+    local.sin_addr = ipv4;
+    if (sock == INVALID_SOCKET || setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (const char *)&on, sizeof(on)) != 0) {
+        return INVALID_SOCKET;
+    }
+    while (bind(sock, (SOCKADDR *)&local, sizeof(local)) != 0) {
+        if (GetTickCount() - start >= RETURN_BOUND_MS) {
+            closesocket(sock);
+            return INVALID_SOCKET;
+        }
+        Sleep(1000);
+    }
+    return sock;
+}
+
+int main(int argc, char **argv)
 {
     AVB_ADAPTER_IDENTITY_REQUEST target, id;
     IOCTL_VERSION version = {0};
     uint32_t baseline[REG_COUNT], now[REG_COUNT];
-    SOCKADDR_IN local = {0};
+    const char *letters = NULL;
+    LARGE_INTEGER qpc_before;
+    unsigned long long phc_before = 0;
+    MIB_IF_ROW2 row;
     WSADATA wsa;
     IN_ADDR ipv4;
     DEVINST inst;
@@ -385,14 +499,27 @@ int main(void)
     avb_u64 capture = 0;
     UINT32 i, count = 1;
     DWORD br = 0;
-    HANDLE h;
-    BOOL on = TRUE, have_target = FALSE, other_link = FALSE;
-    unsigned armed = 1, armed_first, seen, baseline_seq;
+    HANDLE h, fresh = INVALID_HANDLE_VALUE;
+    BOOL have_target = FALSE, other_link = FALSE, capture_alive = TRUE, tx_restored = FALSE;
+    unsigned armed = 1, armed_first, seen, baseline_seq, after_seq;
+    size_t n;
     int rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
     printf("=== IntelAvbFilter - exploratory TAS gate investigation (#328), %s ===\n", TAG);
+    if (argc == 3 && strcmp(argv[1], "--apply") == 0 && argv[2][0] != '\0' && strspn(argv[2], "wsb") == strlen(argv[2])) {
+        letters = argv[2];
+    } else if (argc != 1) {
+        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b>]\n");
+        return 3;
+    }
+    for (n = 0; letters != NULL && n < strlen(letters); n++) {
+        if (strchr(letters + n + 1, letters[n]) != NULL) {
+            printf(TAG " not run: --apply names a group twice\n");
+            return 3;
+        }
+    }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf(TAG " not run: Winsock unavailable\n");
         return 3;
@@ -413,27 +540,26 @@ int main(void)
         if (capture == 0 && id.device_id == INTEL_DEV_I210_AT) {
             capture = id.net_luid;
         }
-        if (!have_target && (id.capabilities & INTEL_CAP_TSN_TAS)) {
+        /* The register map below is the I226 one, so the capability alone is not enough */
+        if (!have_target && (id.capabilities & INTEL_CAP_TSN_TAS) &&
+            (id.device_id == INTEL_DEV_I226_LM || id.device_id == INTEL_DEV_I226_V || id.device_id == INTEL_DEV_I226_IT)) {
             target = id;
             have_target = TRUE;
         }
     }
     if (!have_target || capture == 0 || !bind_luid(h, target.net_luid) || !find_devinst(target.net_luid, &inst) ||
         !find_addressing(target.net_luid, &ipv4, &other_link) || !other_link || !read_armed(h, &armed) || armed != 0) {
-        printf(TAG " not run: needs a bound TAS adapter with link, an I210, a separate management link and tasArmed=0\n");
+        printf(TAG " not run: needs a bound TAS-capable I226 with link, an I210, a separate management link and tasArmed=0\n");
         CloseHandle(h);
         return 3;
     }
-    if (read_regs(h, baseline, "baseline") != 0) {
+    if (read_regs(h, baseline, "baseline", NULL) != 0) {
         printf(TAG " not run: baseline registers unreadable\n");
         CloseHandle(h);
         return 3;
     }
-    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    local.sin_family = AF_INET;
-    local.sin_addr = ipv4;
-    if (sock == INVALID_SOCKET || setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (const char *)&on, sizeof(on)) != 0 ||
-        bind(sock, (SOCKADDR *)&local, sizeof(local)) != 0) {
+    sock = open_tx_socket(ipv4);
+    if (sock == INVALID_SOCKET) {
         printf(TAG " not run: socket setup failed (%d)\n", WSAGetLastError());
         CloseHandle(h);
         return 3;
@@ -446,7 +572,7 @@ int main(void)
     }
 
     baseline_seq = g_next_seq;
-    seen = tx_step(h, sock, BASELINE_MS, "baseline", g_next_seq);
+    seen = tx_step(h, target.net_luid, sock, BASELINE_MS, "baseline", g_next_seq, &capture_alive);
     if ((unsigned long long)seen * 100 < (unsigned long long)(g_next_seq - baseline_seq) * WIRE_MIN_PERCENT) {
         printf(TAG " not run: the I210 did not see the baseline frames; nothing mutated\n");
         wire_stop();
@@ -454,36 +580,75 @@ int main(void)
         return 3;
     }
 
+    /* Checked again here: the state that matters is the one just before the first mutation */
+    ZeroMemory(&row, sizeof(row));
+    row.InterfaceLuid.Value = target.net_luid;
+    if (!read_armed(h, &armed) || armed != 0 || GetIfEntry2(&row) != NO_ERROR || row.OperStatus != IfOperStatusUp ||
+        !read_systim(h, &phc_before)) {
+        printf(TAG " not run: tasArmed, link or PHC changed or became unreadable before SETUP_TAS; nothing mutated\n");
+        wire_stop();
+        CloseHandle(h);
+        return 3;
+    }
+    QueryPerformanceCounter(&qpc_before);
+
     /* First mutation. From here the NIC cycle always runs. */
     InterlockedExchange(&g_armed, 1);
     printf("  --- SETUP_TAS ---\n");
-    if (!arm_tas(h)) {
-        printf(TAG " SETUP_TAS failed (error %lu)\n", GetLastError());
-    }
-    (void)read_regs(h, now, "after SETUP_TAS");
     armed_first = g_next_seq;
-    seen = tx_step(h, sock, ARMED_MS, "SETUP_TAS only", armed_first);
-
-    if (seen == 0) {
-        printf("  --- candidate A: per-queue windows ---\n");
-        if (step_windows(h)) {
-            (void)read_regs(h, now, "after candidate A");
-            seen = tx_step(h, sock, STEP_MS, "candidate A", armed_first);
+    if (!arm_tas(h)) {
+        printf(TAG " SETUP_TAS failed (error %lu); no register group applied\n", GetLastError());
+        seen = 0;
+    } else {
+        (void)read_regs(h, now, "after SETUP_TAS", baseline);
+        seen = tx_step(h, target.net_luid, sock, ARMED_MS, "SETUP_TAS only", armed_first, &capture_alive);
+        if (letters != NULL) {
+            printf("  --- applying %s ---\n", letters);
+            if (seen == 0 && apply_groups(h, letters)) {
+                (void)read_regs(h, now, "after --apply", baseline);
+                seen = tx_step(h, target.net_luid, sock, STEP_MS, letters, armed_first, &capture_alive);
+            }
+        } else {
+            if (seen == 0) {
+                printf("  --- candidate A: per-queue windows ---\n");
+                if (apply_groups(h, "w")) {
+                    (void)read_regs(h, now, "after candidate A", baseline);
+                    seen = tx_step(h, target.net_luid, sock, STEP_MS, "candidate A", armed_first, &capture_alive);
+                }
+            }
+            if (seen == 0) {
+                printf("  --- candidate B: shadow cycle and base time ---\n");
+                if (apply_groups(h, "sb")) {
+                    (void)read_regs(h, now, "after candidate B", baseline);
+                    seen = tx_step(h, target.net_luid, sock, STEP_MS, "candidate B", armed_first, &capture_alive);
+                }
+            }
         }
     }
-    if (seen == 0) {
-        printf("  --- candidate B: shadow cycle and base time ---\n");
-        if (step_schedule(h)) {
-            (void)read_regs(h, now, "after candidate B");
-            seen = tx_step(h, sock, STEP_MS, "candidate B", armed_first);
-        }
-    }
-    printf(TAG " egress %s\n", seen != 0 ? "opened: tagged frames reached the I210" : "stayed closed through both candidates");
+    printf(TAG " egress %s\n", seen != 0 ? "opened: tagged frames reached the I210" :
+           capture_alive ? "stayed closed: the capture was alive and saw no armed frame" : "unknown: the capture went silent");
 
-    wire_stop();
     closesocket(sock);
     CloseHandle(h);
-    rc = restore(&target, inst, baseline);
+    rc = restore(&target, inst, baseline, phc_before, qpc_before, &fresh);
+
+    /* Registers can match while TX is dead, so wire visibility is proven again. The capture on the I210 stayed up. */
+    if (fresh != INVALID_HANDLE_VALUE) {
+        sock = open_tx_socket(ipv4);
+        if (sock != INVALID_SOCKET) {
+            after_seq = g_next_seq;
+            seen = tx_step(fresh, target.net_luid, sock, BASELINE_MS, "after the cycle", after_seq, &capture_alive);
+            tx_restored = (unsigned long long)seen * 100 >= (unsigned long long)(g_next_seq - after_seq) * WIRE_MIN_PERCENT;
+            closesocket(sock);
+        }
+        CloseHandle(fresh);
+    }
+    wire_stop();
+    if (!tx_restored) {
+        printf(TAG " TX to the wire not shown after the cycle\n");
+        rc = 1;
+    }
+    printf(TAG " result: exit=%d (0 all restored, 1 registers/TX/cycle failed, 2 registers and TX restored, PHC not continuous)\n", rc);
     WSACleanup();
     return rc;
 }

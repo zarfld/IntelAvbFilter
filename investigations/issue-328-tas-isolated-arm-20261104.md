@@ -171,3 +171,39 @@ Decision 2026-11-05: generic Debug-only `WRITE_REGISTER` is available for invest
 `tests/diagnostic/tas_gate_investigation.c` is that investigation. It is classified `Diagnostic`, has no runner entry and no testcase verdicts, and is started by the operator. Its output is `LOCAL_DIAGNOSTIC` evidence and never counts as Debug or Release HIL regression evidence. `test_tas_isolated_arm` contains no register writes.
 
 Candidates, applied in order until tagged frames reach the I210: A per-queue windows (`STQT=0`, `ENDQT=cycle`); B shadow cycle, cycle and base time at the next boundary. `FUTSCDDIS` and a future base are not used, because upstream warns of a TX hang on I226 around them. Each step stays below the observed fill level, so a stalled ring cannot hide an opening window.
+
+### Gate investigation result, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Run of `tas_gate_investigation` at 60104b4, Debug driver FB64A096, I226 0x125B, I210 capture. One run. Not HIL regression evidence.
+
+| Step | Sent | Wire seen | Seen since arming | ICMP total |
+|---|---|---|---|---|
+| Baseline | 49 | 48 | - | 4/4 |
+| `SETUP_TAS` only | 24 | 0 | 0 | 4/6 |
+| A: `STQT=0`, `ENDQT=cycle` | 17 | 0 | 0 | 4/7 |
+| B: shadow cycle, cycle, base time, on top of A | 17 | 17 | 58 of 58 | 7/10 |
+
+After B, every frame held since arming reached the I210, so those frames were held and not dropped. The capture stayed alive throughout. TDH0 tracked TDT0 in every step, at a frame count below the fill level.
+
+Which register mattered is not established: B was written on top of A, in one step. `QBVCYCLET_S` and `BaseT` were written together, so the run cannot separate them, and it cannot show whether A is needed. Windows covered the whole cycle, so nothing here shows the adapter obeys a real gate pattern. The NIC cycle returned 13 compared registers to baseline; that run compared no others, and did not measure PHC or TX.
+
+`--apply <w,s,b>` writes chosen groups from a fresh NIC cycle, which removes carry-over between candidates. Run `wsb`, `sb`, `wb` and `ws` to separate them.
+
+### Register groups separated, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+`tas_gate_investigation --apply`, uncommitted tool on top of 60104b4, Debug driver FB64A096, I226 0x125B, I210 capture. One run per case, each from a fresh NIC cycle. `ws` has not run.
+
+| Case | Windows | Shadow | BaseT | Step frames on wire | Seen since arming |
+|---|---|---|---|---|---|
+| `wsb` | yes | yes | yes | 17 of 17 | 41 of 41 |
+| `wb` | yes | no | yes | 17 of 17 | 41 of 41 |
+| `sb` | no | yes | yes | 0 of 17 | 2 of 42 |
+| Candidate A of the earlier run | yes | no | no | 0 of 17 | 0 |
+
+Observed: with windows and `BaseT`, egress opened without the shadow cycle. Without windows it stayed closed, apart from 2 held frames that left. Windows alone stayed closed. `BASET_L` read back moving in exact multiples of the 1 ms cycle in all three cases, including `sb`. `BASET_H` read 0 until `BASET_L` was written.
+
+Inference: `BaseT` starts the schedule and the windows give it open time. Direct evidence for `BaseT` needs `ws`. Windows spanned the whole cycle, so obedience to a real gate pattern remains unproven. `baseT - PHC` after the writes was -200 to -365 us, so the base was at or just past the PHC by then; whether it was still ahead when written is unknown.
+
+Restoration: all 42 registers equal in `wsb` and `sb`, 49 of 49 frames on the wire after the cycle in all three cases, PHC not continuous in all three. In `wb` the only difference was `TSYNCRXCTL` 0x18 to 0x19: bit 0 is `RXTT`, a read-only status bit in the SSOT, and `EN` and `TYPE` did not change. That exit 1 is a comparison artefact, not a configuration change.
+
+Fresh NIC cycles raise background traffic: `descFetched` in the baseline step rose from 53 to 353 and 370. The fill assumption held only loosely, so `sb` reached its stall during the run. A full buffer did not stop `wb` flushing.
