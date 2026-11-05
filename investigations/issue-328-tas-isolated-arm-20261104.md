@@ -642,3 +642,12 @@ The only visible difference in the two cycles: in the survival cycle the first t
 Frame loss, separate track: frame 0 145.1 ms late with seq 1-2 lost, both sent before it arrived, seq 3 sent after arrived. 8 cases with delay beyond the send period, 7 where all such frames were lost.
 
 Evidence-gap update: `Strict_End` 2 valid runs; `TXQCTL` 3 of 3; NIC cycle restores schedule registers 40 of 41, not guaranteed, and `Disable-NetAdapter` recovered once. Repeating the matrix to chase a 1 in 41 event verifies no requirement until a trigger is proposed. The contract can treat it as a known failure mode: verify schedule registers after any cycle and report disagreement with `tasArmed`.
+
+### Design review findings affecting this record, 2026-11-05
+
+Found while drafting `04-design/components/DES-C-TAS-010-tas-ioctl-contract.md`.
+
+- The manual sets a minimum window of the greater of 512 bytes and the queue's largest expected packet, plus 10 %. The 400 ns window and the 5 us large-frame stages were below it. The observations stand as hardware behaviour but are not a supported configuration, and this was not noted when those runs were designed.
+- The manual and Linux `igc` set per-queue transmit buffers and a 1600-byte maximum packet in TSN mode. Every run here used default `TXPBSIZE` and `DTXMXPKTSZ`. The packet-buffer candidate for the stall was therefore measured outside the recommended configuration.
+- `TQAVCTRL` bit 7 is listed Reserved in the held manual.
+- All schedule registers list Software Reset as their reset source, a lead for the surviving schedule, no more.
