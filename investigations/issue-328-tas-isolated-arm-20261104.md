@@ -520,3 +520,88 @@ States, and what can honestly distinguish them:
 A silent failure exists: if the target has passed when the last write lands, windows read back as written and the schedule stays old (`--move-base`). So the driver must read the PHC after the write and report failure if the target is not still ahead. One `BaseT` write took 34 ms, so the margin must exceed that; the minimum safe margin is not measured. A cycle change has one extra check: `BaseT` steps at the new cycle once active.
 
 Candidate for hardware confirmation, not investigated: a transmit timestamp of a frame, read against the PHC. The filter does not own the miniport's descriptors, so feasibility is unknown.
+
+### `Strict_End` matrix, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Run 13:31:32 to 13:34:32, `--pattern 200 400 --move-strict-matrix`, log SHA256 d9ad1e0d3b3882be. I226-LM 0x125B REV_04, Debug driver FB64A0966D836CFB, I210 capture, 1 s cycle, tool built 13:31:25. One run. `TQAVCTRL` 9 and `BaseT` low 0 throughout, windows start at 200 ms, 2.5 frames per second, PHC rate 1.029311.
+
+| Stage | Frame time | Window | `Strict_End` | `BaseT` | Tagged seen | Frames per cycle | Max delay | Result |
+|---|---|---|---|---|---|---|---|---|
+| Small, control | 0.94 us | 5 us | Clear | 593 | 30 of 30 | 1-5, none at 594-598 | 5.96 s | Passed, with an unexplained 5 s gap |
+| Small | 0.94 us | 5 us | Set | 608 | 30 of 30 | 1-3 | 0.92 s | Control passed |
+| Large | 11.6 us | 50 us | Set | 624 | 30 of 30 | 1-4 | 2.0 s | Control passed |
+| Large | 11.6 us | 5 us | Clear | 639 | 15 in stage, rest held | Exactly 1, 14 of 14 cycles | 23.7 s | Passed one per cycle |
+| Large | 11.6 us | 5 us | Set | 654 | 0 in stage | 0, seconds 653-667 | 16.2 s | Held, not dropped |
+| Drain, small | 0.94 us | 200 ms | Clear | 669 | 30 of 30 | 46 at second 669 | 1.2 s | All held frames released |
+
+Segment counters for the held stage: `fromTargetDelta=0`, `descFetched=0`, `osOutDelta=0`, occupancy 143, gauge 112, ICMP stayed at 22. `capturedDelta=507` and `inNUcast` +518 in the same segment show the observer alive. Occupancy and gauge were 0 at the end of the drain.
+
+Every armed frame is accounted for: seq 45-438, 394 frames, 0 unseen, 0 reordered. Held frames seq 366-408 left at 668 and 669. So the 108-frame gap of the earlier run did not recur, with a burst of 46 against 259 then. `inDiscards` 2 and `inErrors` 1 did not change. These are Windows interface counters, inbound discards with no error, and whether the miniport maps ring overflow to them is not established.
+
+`Strict_End`: supported. The same window and frame size passed one frame per cycle with the flag clear and none with it set, and both fitting controls passed with it set. The large frame held at the head blocked everything behind it: no frame of any kind left the adapter. Rejected for the zero on the wire: closed gate (same window passes with the flag clear), general starvation (controls pass, TX resumes as soon as the flag clears), observer loss (alive, frames arrived later). Not separated: `descFetched=0` may come from the packet buffer already filled by the stage before, so descriptor movement is not evidence for `Strict_End`. Stage order was fixed, one run. A frame crossing the closing edge was not observed directly: this is a count per window. The earlier run with 400 ns passed 2 frames per cycle, so closing is not enforced at that resolution, count inference only.
+
+`TXQCTL` activation: effective by the first window after the write, without waiting for `BaseT`, 2 of 2 runs in both directions. Set at 652.53 s, `BaseT` 654: no frame at 653.2. Cleared at 667.97 s, `BaseT` 669: one large frame at second 668 under the 5 us window. Windows behaved differently: large frames waited through 622.2 and 623.2 until `BaseT` 624, and at 638 three large frames passed under the old 50 us window until `BaseT` 639. So windows activate at `BaseT` and `TXQCTL` does not.
+
+Unexplained in the first control stage: seq 262 waited 5.96 s, no tagged frame at seconds 594-598, and 50 non-tagged frames left in that stage. Candidate: a backlog of other traffic occupying the short windows. Non-tagged frames are not recorded individually, so this is unproven.
+
+Exit 1, and a new failure: **the schedule survived the NIC cycle.** Disable and enable returned 0, link down 13:33:24, up 13:33:27, link-up 3.19 s. At the first read, 2.84 s after link-up, 11 of 42 registers differed: `TQAVCTRL` 9, `BASET_H` 0x2AC, shadow, all `STQT` and `ENDQT`. `tasArmed` read 0, so driver and hardware disagree. `TXQCTL` was 0 and `QBVCYCLET` equals its baseline, so neither shows anything. PHC was reset to 6.04 s, about 678 s before that `BaseT`. Post-cycle TX never ran: no `tx-start` mark, so the socket did not bind within 60 s. No second register read exists, because that read sat behind the socket. This is 1 of 40 register comparisons in the logs on this machine. The cause is unknown. The statement that a NIC cycle always restores the schedule registers is withdrawn. Whether the state persisted later is not known from this log.
+
+The hold was then observed from outside the tool. PHC 684.2 s was predicted at 13:44:29, from the first read and the measured rate. Windows send counters for the I226 read every 5 s without elevation: sent bytes stayed 9898, 43 frames, from 13:41:55 to 13:44:26. At 13:44:31 they read 36154 bytes, 46 broadcast and 154 multicast more, 200 frames in one sample. Unicast then rose to 4 and traffic continued at its usual low level. So TX was held for about 11 minutes after a completed NIC cycle, with link Up, `tasArmed=0`, no error and an APIPA address, and released at the surviving `BaseT`. This is OS counter evidence, not wire evidence, one case. A register read has not confirmed the state; the same schedule is expected to be gating at 200-400 ms now.
+
+Earlier cycles did clear these registers, and this run's only known difference is the matrix itself, so no cause is proposed.
+
+Corrections:
+- Frame loss: "every frame sent before frame 0 arrived was lost" is withdrawn. Frame 0 was 336.4 ms late with seq 1-4 lost, but seq 5, sent 10.4 ms before frame 0 arrived, arrived with an identical capture time. So there were 7 cases with a delay beyond the send period, and in this one the last frame survived. The identical time suggests batching on the receive side, where it happens is still unknown.
+- Bit 6: 4 of 12 timeline runs.
+
+Tool changes after this run, evidence only: refuses to start unless `TQAVCTRL` and `BaseT` read 0, reads registers after the post-cycle step even if the socket fails, and adds `TQAVCTRL` and `BASET_H` to the timeline. Matrix conditions, thresholds and exit meanings are unchanged.
+
+### Evidence gaps for the dedicated TAS IOCTL contract, 2026-11-05
+
+Established on hardware, I226 REV_04 only, Debug driver, 1 Gbit/s, low frame rate, I210 same-host capture, one adapter:
+
+| Behaviour | Runs |
+|---|---|
+| First schedule needs windows, shadow, cycle and `BaseT`; `SETUP_TAS` alone holds frames | Repeated |
+| Replacement by windows and a future `BaseT`, at the intended boundary, no NIC cycle | 6 of 6 |
+| Past `BaseT`, window-only and `TQAVCTRL=0` routes do not replace | 0 of 6 |
+| New cycle by shadow, cycle and future `BaseT` | 1 run |
+| Whole-cycle windows pass frames, later replacement re-arms | 1 run |
+| `FutScdDis` lets frames flow until `BaseT`; without it they are held | 2 of 2, 1 of 1 |
+| Registers cannot show pending or active | Every run |
+| `TXQCTL` effective by the next window; windows at `BaseT` | 2 of 2 |
+| `Strict_End` holds a non-fitting frame and blocks the queue behind it; fitting frames pass | 1 valid run |
+| Gating at 1 s and 125 ms | Repeated at 1 s, 1 run at 125 ms |
+| NIC cycle restores schedule registers | 39 of 40, not guaranteed |
+
+Needs investigation, with the requirement each would verify:
+
+| Gap | Requirement it verifies |
+|---|---|
+| Why the schedule survived, and whether it persists | Disarm and recovery; cannot define recovery without it |
+| Whether a NIC cycle or other action recovers that state | Same |
+| Whether `TQAVCTRL=0` stops gating after schedule change, driver-owned | Disarm definition |
+| Minimum margin between last write and `BaseT` | Failure detection for replacement |
+| Hardware confirmation of activation, transmit timestamp feasibility | Active versus inferred reporting |
+| A frame crossing the cycle end with windows open to the cycle end | Whether whole-cycle disarm is allowed |
+| `Strict_Cycle` | Whether the driver sets it, upstream does |
+| Release build | Debug and Release acceptance |
+| Other steppings | Whether the contract can claim I226 generally |
+
+Intel documentation, paraphrased, confidential manual: transmit mode is set at initialisation and not during dynamic operation; Qbv needs both cycle registers non-zero; the explicit setup order is shadow, cycle, then `BaseT` high then low, future; a gap between window end and cycle end is required; permitted cycles are tabulated; `Strict_End` allows only frames expected to finish inside the window. Hardware conflicts: `TQAVCTRL` did change during operation, though against guidance, and the manual revision held does not describe `FutScdDis`.
+
+Linux igc behaviour, a reference and not a requirement: resets the adapter on mode change, sets both strict flags, uses `FutScdDis` only for a first future schedule with the `BASET_L` zero write, counts a past base on a running schedule as an error, infers activation with a timer. Hardware agrees on the running-schedule route. The disable path was not exercised.
+
+Contract consequences, candidates only: separate first activation and replacement; report programmed, pending and inferred active, never verified; reject a target not safely ahead after the last write, re-reading the PHC; reject a gate list where a window cannot hold the maximum frame if `Strict_End` is used, because such a frame blocks the queue; do not report restored from a NIC cycle without reading the schedule registers.
+
+No production implementation follows from this.
+
+### Register check after the surviving schedule, 2026-11-05
+
+TC-TSNREG-001, read-only, started 13:47:15, log SHA256 558451d5c56c0960, 13.5 minutes after the NIC cycle. Result FAIL on adapter 0x125B: `TQAVCTRL` 0x00000009 disagrees with `tasArmed=0`. That failure is correct and is the first test verdict for this state.
+
+Read: `TQAVCTRL` 0x9, `BASET_H` 0x358, `BASET_L` 0, both cycle registers 0x3B9ACA00, all `STQT` 0x0BEBC200, all `ENDQT` 0x17D78400, all `TXQCTL` 0. TDH and TDT equal at 369 in five samples, so the ring was idle.
+
+`BASET_H` 0x358 is 856 s. From the first post-cycle read and rate 1.029311, the PHC reaches 856 s at 13:47:16, so `BaseT` was within about a second of the PHC. `BaseT` therefore stayed frozen at 684 s while the PHC was behind it, then resumed advancing. The schedule that survived is the one running. Hold and release are now shown by registers and OS counters together, one case; no wire capture covered the release.
+
+Reading `TXQCTL`, `QBVCYCLET` and the windows from this test adds what the first post-cycle read could not: state persisted at least 13.5 minutes. Not known: why it survived, and whether another NIC cycle clears it.

@@ -812,7 +812,7 @@ static DWORD WINAPI sampler_thread(LPVOID arg)
 {
     avb_u64 luid = *(const avb_u64 *)arg;
     HANDLE h = INVALID_HANDLE_VALUE;
-    uint32_t tctl = 0, rx = 0, last_tctl = 0, last_rx = 0;
+    uint32_t tctl = 0, rx = 0, last_tctl = 0, last_rx = 0, mode = 0, base_h = 0, last_mode = 0;
     int connect, oper, last_connect = -2, last_oper = -2;
     BOOL have, had = FALSE, first = TRUE;
 
@@ -830,10 +830,11 @@ static DWORD WINAPI sampler_thread(LPVOID arg)
                 h = INVALID_HANDLE_VALUE;
             }
         }
-        have = h != INVALID_HANDLE_VALUE && read_reg(h, I226_TCTL, &tctl) && read_reg(h, I226_TSYNCRXCTL, &rx);
-        if (first || connect != last_connect || oper != last_oper || have != had || (have && (tctl != last_tctl || rx != last_rx))) {
-            printf("    postcycle hostUs=%lld mediaConnect=%d operStatus=%d regs=%d TCTL=0x%08X COLD=0x%03X TSYNCRXCTL=0x%08X\n", host_us(), connect, oper, have,
-                   have ? tctl : 0, have ? (tctl >> TCTL_COLD_SHIFT) & TCTL_COLD_FIELD : 0, have ? rx : 0);
+        have = h != INVALID_HANDLE_VALUE && read_reg(h, I226_TCTL, &tctl) && read_reg(h, I226_TSYNCRXCTL, &rx) &&
+               read_reg(h, I226_TQAVCTRL, &mode) && read_reg(h, I226_BASET_H, &base_h);
+        if (first || connect != last_connect || oper != last_oper || have != had || (have && (tctl != last_tctl || rx != last_rx || mode != last_mode))) {
+            printf("    postcycle hostUs=%lld mediaConnect=%d operStatus=%d regs=%d TCTL=0x%08X COLD=0x%03X TSYNCRXCTL=0x%08X TQAVCTRL=0x%08X BASET_H=0x%08X\n", host_us(), connect, oper, have,
+                   have ? tctl : 0, have ? (tctl >> TCTL_COLD_SHIFT) & TCTL_COLD_FIELD : 0, have ? rx : 0, have ? mode : 0, have ? base_h : 0);
             fflush(stdout);
         }
         first = FALSE;
@@ -842,6 +843,7 @@ static DWORD WINAPI sampler_thread(LPVOID arg)
         had = have;
         last_tctl = tctl;
         last_rx = rx;
+        last_mode = mode;
         Sleep(SAMPLE_MS);
     }
     if (h != INVALID_HANDLE_VALUE) {
@@ -1153,6 +1155,12 @@ int main(int argc, char **argv)
         CloseHandle(h);
         return 3;
     }
+    /* A schedule once survived a NIC cycle with tasArmed=0, and restoration is measured against this baseline */
+    if (baseline_of(baseline, I226_TQAVCTRL) != 0 || baseline_of(baseline, I226_BASET_H) != 0 || baseline_of(baseline, I226_BASET_L) != 0) {
+        printf(TAG " not run: the adapter is not in a clean pre-state: TQAVCTRL and BaseT must read 0\n");
+        CloseHandle(h);
+        return 3;
+    }
     sock = open_tx_socket(ipv4);
     if (sock == INVALID_SOCKET) {
         printf(TAG " not run: socket setup failed (%d)\n", WSAGetLastError());
@@ -1298,9 +1306,11 @@ int main(int argc, char **argv)
             tx_restored = (unsigned long long)seen * 100 >= (unsigned long long)(g_next_seq - after_seq) * WIRE_MIN_PERCENT;
             closesocket(sock);
             dump_baseline_head(after_seq);
-            /* Evidence only: rc keeps the first read, which may fall before link-up */
-            (void)read_regs(fresh, now, "after the post-cycle TX", baseline);
+        } else {
+            printf(TAG " post-cycle TX not attempted: the socket could not bind within %d ms (%d)\n", RETURN_BOUND_MS, WSAGetLastError());
         }
+        /* Evidence only: rc keeps the first read, which may fall before link-up */
+        (void)read_regs(fresh, now, "after the post-cycle TX", baseline);
         CloseHandle(fresh);
     }
     sampler_stop();
