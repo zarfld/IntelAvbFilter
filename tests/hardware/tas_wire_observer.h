@@ -42,6 +42,7 @@ typedef struct {
 static WIRE_OBSERVER g_observers[WIRE_MAX_OBSERVERS];
 static int g_observer_count;
 static volatile LONG g_wire_seen[WIRE_MAX_FRAMES];
+static volatile LONGLONG g_wire_rx_us[WIRE_MAX_FRAMES];   /* capture time of the first copy, host clock, software level */
 static volatile LONG g_wire_stop;
 static unsigned char g_wire_mac[6];
 static unsigned g_wire_nonce;
@@ -71,7 +72,9 @@ static DWORD WINAPI wire_thread(LPVOID context)
             }
         }
         if (rc == 1 && tas_wire_match(data, header->caplen, g_wire_mac, g_wire_nonce, &seq) && seq < WIRE_MAX_FRAMES) {
-            InterlockedExchange(&g_wire_seen[seq], 1);
+            if (InterlockedExchange(&g_wire_seen[seq], 1) == 0) {
+                g_wire_rx_us[seq] = (LONGLONG)header->tv_sec * 1000000 + header->tv_usec;
+            }
             InterlockedIncrement(&o->matched);
         }
     }

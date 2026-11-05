@@ -17,7 +17,39 @@
  * run cannot say which register mattered. --apply <letters> writes only the named groups in one step, from a fresh NIC
  * cycle, which separates them.
  *
- * Each step stays below the fill level seen on 2026-11-05, so a stalled ring cannot hide an opening window.
+ * --pattern <startMs> <endMs> asks whether the adapter obeys a real gate pattern. Capture times are host-side, so a 1 ms
+ * cycle cannot be resolved: this uses a 1 s cycle, permitted by the manual's cycle table, with one window. Every frame's
+ * send and capture time and bracketed PHC reads are printed for offline analysis. Shifting the window between runs is the
+ * control: arrivals must move with it, which needs no absolute time alignment. Window end leaves a gap before the cycle
+ * end, as the manual requires. BaseT is the latest cycle boundary, so slightly in the past: a boundary ahead would be up
+ * to 1 s in the future, which upstream warns about on I226.
+ *
+ * --pattern ... --no-shadow leaves QBVCYCLET_S at 0: frames passing outside the window would mean gating was off, not on.
+ * --pattern ... --after-rearm applies the pattern after an in-place disarm and a second SETUP_TAS. BaseT is then already
+ * running, so the analysis takes its phase from the register, not from the value written.
+ *
+ * --pattern ... --mode-last does not use SETUP_TAS: windows, shadow, cycle and BaseT go in while in Legacy mode, and
+ * TQAVCTRL is written last, so nothing is ever held by a half-programmed schedule. The driver is not told, so tasArmed stays 0.
+ *
+ * Both of these start from a verified pattern, because a pattern after an in-place disarm was seen ungated:
+ * --pattern ... --toggle-only writes TQAVCTRL to 0 and back and nothing else, to isolate the mode change.
+ * --pattern ... --soft-disarm never leaves TSN mode: it opens the windows over the whole cycle, then moves them to 600-800 ms.
+ * That would respect the manual's rule on the transmit mode, at the cost of the adapter staying in TSN mode until a NIC cycle.
+ *
+ * --soft-disarm showed that window writes alone read back but do not reach a running schedule. These ask what does, by
+ * moving a verified 200-400 ms pattern to 600-800 ms, where the wire answers regardless of what the registers say:
+ * --pattern ... --move-cycle writes windows, shadow and cycle. --pattern ... --move-base also writes BaseT, as upstream does
+ * for a running schedule. --pattern ... --move-toggle writes the windows with TQAVCTRL at 0, then restores TQAVCTRL.
+ *
+ * --disarm opens egress, then writes the original values back without a NIC cycle and checks TX, PHC and driver state.
+ * The manual says the transmit mode cannot change during dynamic operation, and upstream resets the adapter here, so this
+ * tests behaviour against that guideline and a good result is not a supported sequence. The NIC cycle still runs afterwards.
+ *
+ * --rearm <n> disarms in place and arms again n times without a NIC cycle. TQAVCTRL=0 alone proves nothing, so each cycle
+ * checks registers, driver state, TX past the fill level and PHC, then holds frames after SETUP_TAS long enough to reach the
+ * fill level again. That level is the only indirect view of internal buffer state.
+ *
+ * Except with --rearm, each step stays below the fill level seen on 2026-11-05, so a stalled ring cannot hide an opening window.
  *
  * Mutations: SETUP_TAS, the writes above, bounded broadcast and ICMP. Restoration is the NIC cycle of the I226 only.
  * Requires a Debug driver. The tool takes no machine lock; the operator command holds it.
@@ -56,6 +88,17 @@
 #define BASELINE_MS          3000
 #define ARMED_MS             1500
 #define STEP_MS              1000
+#define PATTERN_MS           12000
+#define PATTERN_SETTLE_MS    1500
+#define PATTERN_MAX_END_MS   900
+#define DISARM_TX_MS         6000
+#define REARM_FILL_MS        6000
+#define MAX_REARM_CYCLES     20
+#define PHC_PAIRS            5
+#define BASELINE_HEAD_FRAMES 5
+#define SOFT_REOPEN_START_NS 600000000u
+#define SOFT_REOPEN_END_NS   800000000u
+#define FILETIME_TO_UNIX_US  11644473600000000LL
 #define DRAIN_MS             1000
 #define WIRE_MIN_PERCENT     90
 #define DISABLE_BOUND_MS     120000
@@ -87,6 +130,11 @@ static const uint32_t g_endqt[QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, 
 
 static unsigned g_next_seq;
 static volatile LONG g_armed;
+static uint32_t g_cycle_ns = CYCLE_NS, g_open_start_ns = 0, g_open_end_ns = CYCLE_NS;
+static BOOL g_pattern, g_disarm, g_after_rearm, g_mode_last, g_toggle_only, g_soft_disarm;
+static const char *g_move;
+static unsigned g_rearm_cycles;
+static LONGLONG g_send_us[WIRE_MAX_FRAMES];
 
 typedef struct { DEVINST inst; BOOL enable; CONFIGRET result; } CM_CALL;
 
@@ -223,6 +271,18 @@ static BOOL arm_tas(HANDLE h)
     return DeviceIoControl(h, IOCTL_AVB_SETUP_TAS, &tas, sizeof(tas), &tas, sizeof(tas), &br, NULL) && tas.status == 0;
 }
 
+/** Host clock in the same epoch as the capture times */
+static LONGLONG host_us(void)
+{
+    FILETIME ft;
+    ULARGE_INTEGER t;
+
+    GetSystemTimePreciseAsFileTime(&ft);
+    t.LowPart = ft.dwLowDateTime;
+    t.HighPart = ft.dwHighDateTime;
+    return (LONGLONG)(t.QuadPart / 10) - FILETIME_TO_UNIX_US;
+}
+
 static void snap(HANDLE h, avb_u64 luid, SNAP *s)
 {
     AVB_DRIVER_STATISTICS st;
@@ -262,6 +322,9 @@ static unsigned tx_step(HANDLE h, avb_u64 luid, SOCKET sock, DWORD ms, const cha
     peer.sin_addr.s_addr = INADDR_BROADCAST;
     while (GetTickCount() - start < ms) {
         tas_wire_fill(payload, sizeof(payload), g_wire_nonce, g_next_seq);
+        if (g_next_seq < WIRE_MAX_FRAMES) {
+            g_send_us[g_next_seq] = host_us();
+        }
         if (sendto(sock, (const char *)payload, sizeof(payload), 0, (SOCKADDR *)&peer, sizeof(peer)) != SOCKET_ERROR) {
             sent++;
             g_next_seq++;
@@ -292,7 +355,7 @@ static BOOL step_windows(HANDLE h)
 {
     int q;
     for (q = 0; q < QUEUES; q++) {
-        if (!write_reg(h, g_stqt[q], 0, "STQT") || !write_reg(h, g_endqt[q], CYCLE_NS, "ENDQT")) {
+        if (!write_reg(h, g_stqt[q], g_open_start_ns, "STQT") || !write_reg(h, g_endqt[q], g_open_end_ns, "ENDQT")) {
             return FALSE;
         }
     }
@@ -302,7 +365,7 @@ static BOOL step_windows(HANDLE h)
 /** s: shadow cycle first, then cycle, as upstream */
 static BOOL step_shadow(HANDLE h)
 {
-    return write_reg(h, I226_QBVCYCLET_S, CYCLE_NS, "QBVCYCLET_S") && write_reg(h, I226_QBVCYCLET, CYCLE_NS, "QBVCYCLET");
+    return write_reg(h, I226_QBVCYCLET_S, g_cycle_ns, "QBVCYCLET_S") && write_reg(h, I226_QBVCYCLET, g_cycle_ns, "QBVCYCLET");
 }
 
 /** b: next cycle boundary after the measured PHC. The second PHC read shows whether it was future or past on arrival. */
@@ -315,7 +378,7 @@ static BOOL step_base(HANDLE h)
         printf(TAG " PHC unreadable, base time not written\n");
         return FALSE;
     }
-    base = (systim / CYCLE_NS + 1) * CYCLE_NS;
+    base = (systim / g_cycle_ns + (g_pattern ? 0 : 1)) * g_cycle_ns;
     ok = write_reg(h, I226_BASET_H, (uint32_t)(base / NS_PER_SEC), "BASET_H") &&
          write_reg(h, I226_BASET_L, (uint32_t)(base % NS_PER_SEC), "BASET_L");
     if (read_systim(h, &after)) {
@@ -324,11 +387,227 @@ static BOOL step_base(HANDLE h)
     return ok;
 }
 
-/** Writes the groups named in letters, in the order w, s, b */
+/** Writes the groups named in letters, in the order w, s, c, b. c is the cycle alone, for a run without the shadow */
 static BOOL apply_groups(HANDLE h, const char *letters)
 {
     return (strchr(letters, 'w') == NULL || step_windows(h)) && (strchr(letters, 's') == NULL || step_shadow(h)) &&
+           (strchr(letters, 'c') == NULL || write_reg(h, I226_QBVCYCLET, g_cycle_ns, "QBVCYCLET")) &&
            (strchr(letters, 'b') == NULL || step_base(h));
+}
+
+/** Bracketed PHC reads: the mid host time and half width give the host-to-PHC mapping and its uncertainty */
+static void phc_pairs(HANDLE h, const char *label)
+{
+    int i;
+
+    for (i = 0; i < PHC_PAIRS; i++) {
+        unsigned long long phc = 0;
+        LONGLONG t0 = host_us(), t1;
+        BOOL ok = read_systim(h, &phc);
+        t1 = host_us();
+        printf("    phcpair %s hostMidUs=%lld halfUs=%lld phcNs=%llu ok=%d\n", label, (t0 + t1) / 2, (t1 - t0) / 2, phc, ok);
+    }
+}
+
+/** Raw per-frame evidence; rxUs=-1 means not seen */
+static void dump_frames(void)
+{
+    unsigned seq;
+
+    for (seq = 0; seq < g_next_seq && seq < WIRE_MAX_FRAMES; seq++) {
+        printf("    frame seq=%u sendUs=%lld rxUs=%lld\n", seq, g_send_us[seq], g_wire_seen[seq] != 0 ? g_wire_rx_us[seq] : -1LL);
+    }
+}
+
+/** The first baseline frames, in every run: an early frame was seen missing or delayed after the machine sat idle */
+static void dump_baseline_head(unsigned first)
+{
+    unsigned seq;
+
+    for (seq = first; seq < first + BASELINE_HEAD_FRAMES && seq < g_next_seq; seq++) {
+        printf("    baseline frame seq=%u sendUs=%lld rxUs=%lld delayUs=%lld\n", seq, g_send_us[seq],
+               g_wire_seen[seq] != 0 ? g_wire_rx_us[seq] : -1LL, g_wire_seen[seq] != 0 ? g_wire_rx_us[seq] - g_send_us[seq] : -1LL);
+    }
+}
+
+static uint32_t baseline_of(const uint32_t *baseline, uint32_t offset)
+{
+    unsigned i;
+
+    for (i = 0; i < REG_COUNT; i++) {
+        if (g_regs[i].offset == offset) {
+            return baseline[i];
+        }
+    }
+    return 0;
+}
+
+/** Writes the original values back, in upstream's disable order. A fuller mode change would also reset; that is the question */
+static BOOL step_disarm(HANDLE h, const uint32_t *baseline)
+{
+    static const REG order[] = {
+        {"TQAVCTRL", I226_TQAVCTRL},
+        {"STQT0", I226_STQT0}, {"ENDQT0", I226_ENDQT0}, {"STQT1", I226_STQT1}, {"ENDQT1", I226_ENDQT1},
+        {"STQT2", I226_STQT2}, {"ENDQT2", I226_ENDQT2}, {"STQT3", I226_STQT3}, {"ENDQT3", I226_ENDQT3},
+        {"QBVCYCLET_S", I226_QBVCYCLET_S}, {"QBVCYCLET", I226_QBVCYCLET}, {"BASET_H", I226_BASET_H}, {"BASET_L", I226_BASET_L},
+    };
+    unsigned i;
+    BOOL ok = TRUE;
+
+    for (i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        ok &= write_reg(h, order[i].offset, baseline_of(baseline, order[i].offset), order[i].name);
+    }
+    return ok;
+}
+
+/** PHC against elapsed time since before arming, without any NIC cycle */
+static void report_phc(HANDLE h, unsigned long long phc_before, LARGE_INTEGER qpc_before, const char *label)
+{
+    LARGE_INTEGER qpc, frequency;
+    unsigned long long phc = 0;
+    long long wall_ns, drift_ns;
+
+    if (!read_systim(h, &phc)) {
+        printf(TAG " %s: PHC unreadable\n", label);
+        return;
+    }
+    QueryPerformanceCounter(&qpc);
+    QueryPerformanceFrequency(&frequency);
+    wall_ns = (long long)((double)(qpc.QuadPart - qpc_before.QuadPart) * 1e9 / (double)frequency.QuadPart);
+    drift_ns = ((long long)phc - (long long)phc_before) - wall_ns;
+    printf(TAG " %s: PHC before=%llu now=%llu wallNs=%lld driftNs=%lld\n", label, phc_before, phc, wall_ns, drift_ns);
+}
+
+/** The existing driver path, to record what it does today; no hardware write happens if it reports not supported */
+static void report_driver_disarm(HANDLE h)
+{
+    AVB_DISARM_TAS_REQUEST d = {0};
+    DWORD br = 0, error;
+    BOOL ok = DeviceIoControl(h, IOCTL_AVB_DISARM_TAS, &d, sizeof(d), &d, sizeof(d), &br, NULL);
+    unsigned armed = 99;
+
+    error = ok ? ERROR_SUCCESS : GetLastError();
+    (void)read_armed(h, &armed);
+    printf(TAG " driver DISARM_TAS: ok=%d error=%lu status=0x%08X; tasArmed=%u\n", ok, error, d.status, armed);
+}
+
+/** Disarm in place, prove Legacy TX past the fill level, arm again, hold to the fill level, reopen and prove the flush */
+static void rearm_cycles(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, unsigned long long phc_before,
+                         LARGE_INTEGER qpc_before, BOOL *capture_alive)
+{
+    uint32_t now[REG_COUNT];
+    char label[64];
+    unsigned i, armed, first;
+
+    for (i = 1; i <= g_rearm_cycles; i++) {
+        printf("  --- cycle %u: disarm in place ---\n", i);
+        (void)step_disarm(h, baseline);
+        sprintf_s(label, sizeof(label), "cycle %u after disarm", i);
+        (void)read_regs(h, now, label, baseline);
+        armed = 99;
+        (void)read_armed(h, &armed);
+        printf(TAG " %s: driver tasArmed=%u\n", label, armed);
+        sprintf_s(label, sizeof(label), "cycle %u legacy TX", i);
+        (void)tx_step(h, luid, sock, DISARM_TX_MS, label, g_next_seq, capture_alive);
+        report_phc(h, phc_before, qpc_before, label);
+
+        printf("  --- cycle %u: re-arm ---\n", i);
+        first = g_next_seq;
+        if (!arm_tas(h)) {
+            printf(TAG " cycle %u: SETUP_TAS failed (error %lu); stopping the cycles\n", i, GetLastError());
+            return;
+        }
+        sprintf_s(label, sizeof(label), "cycle %u after SETUP_TAS", i);
+        (void)read_regs(h, now, label, baseline);
+        sprintf_s(label, sizeof(label), "cycle %u held to fill level", i);
+        (void)tx_step(h, luid, sock, REARM_FILL_MS, label, first, capture_alive);
+        if (!apply_groups(h, "wsb")) {
+            printf(TAG " cycle %u: schedule writes failed; stopping the cycles\n", i);
+            return;
+        }
+        sprintf_s(label, sizeof(label), "cycle %u after schedule", i);
+        (void)read_regs(h, now, label, baseline);
+        sprintf_s(label, sizeof(label), "cycle %u reopened", i);
+        (void)tx_step(h, luid, sock, STEP_MS, label, first, capture_alive);
+        report_phc(h, phc_before, qpc_before, label);
+    }
+}
+
+/** The timed part of a pattern run, with its raw per-frame evidence */
+static unsigned pattern_run(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, unsigned armed_first, BOOL *capture_alive)
+{
+    uint32_t now[REG_COUNT];
+    unsigned seen;
+
+    printf(TAG " pattern: cycle=%u ns window=[%u,%u) ns patternFirstSeq=%u\n", g_cycle_ns, g_open_start_ns, g_open_end_ns, g_next_seq);
+    phc_pairs(h, "start");
+    seen = tx_step(h, luid, sock, PATTERN_MS, "pattern", armed_first, capture_alive);
+    Sleep(PATTERN_SETTLE_MS);
+    phc_pairs(h, "end");
+    (void)read_regs(h, now, "after the pattern", baseline);
+    dump_frames();
+    return seen;
+}
+
+/** The mode alone, leaving the schedule registers as they are */
+static void toggle_only(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
+{
+    uint32_t now[REG_COUNT], mode = 0;
+
+    printf("  --- TQAVCTRL only: to 0 and back ---\n");
+    if (!read_reg(h, I226_TQAVCTRL, &mode) || !write_reg(h, I226_TQAVCTRL, 0, "TQAVCTRL")) {
+        return;
+    }
+    (void)read_regs(h, now, "TQAVCTRL 0", baseline);
+    (void)tx_step(h, luid, sock, STEP_MS, "TQAVCTRL 0", g_next_seq, capture_alive);
+    if (write_reg(h, I226_TQAVCTRL, mode, "TQAVCTRL")) {
+        (void)read_regs(h, now, "TQAVCTRL restored", baseline);
+        (void)pattern_run(h, luid, sock, baseline, g_next_seq, capture_alive);
+    }
+}
+
+/** Stays in TSN mode: whole cycle open, then a different window */
+static void soft_disarm(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
+{
+    uint32_t now[REG_COUNT];
+
+    printf("  --- windows open over the whole cycle, TSN mode kept ---\n");
+    g_open_start_ns = 0;
+    g_open_end_ns = g_cycle_ns;
+    if (!step_windows(h)) {
+        return;
+    }
+    (void)read_regs(h, now, "soft disarmed", baseline);
+    (void)pattern_run(h, luid, sock, baseline, g_next_seq, capture_alive);
+    printf("  --- new window, TSN mode kept ---\n");
+    g_open_start_ns = SOFT_REOPEN_START_NS;
+    g_open_end_ns = SOFT_REOPEN_END_NS;
+    if (step_windows(h)) {
+        (void)read_regs(h, now, "soft re-armed", baseline);
+        (void)pattern_run(h, luid, sock, baseline, g_next_seq, capture_alive);
+    }
+}
+
+/** Moves a running schedule to a different window, by the route named in g_move */
+static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
+{
+    uint32_t now[REG_COUNT], mode = 0;
+    BOOL toggle = strcmp(g_move, "--move-toggle") == 0;
+    BOOL ok;
+
+    printf("  --- %s ---\n", g_move);
+    g_open_start_ns = SOFT_REOPEN_START_NS;
+    g_open_end_ns = SOFT_REOPEN_END_NS;
+    if (toggle) {
+        ok = read_reg(h, I226_TQAVCTRL, &mode) && write_reg(h, I226_TQAVCTRL, 0, "TQAVCTRL") && step_windows(h) &&
+             write_reg(h, I226_TQAVCTRL, mode, "TQAVCTRL");
+    } else {
+        ok = step_windows(h) && step_shadow(h) && (strcmp(g_move, "--move-cycle") == 0 || step_base(h));
+    }
+    if (ok) {
+        (void)read_regs(h, now, "after the move", baseline);
+        (void)pattern_run(h, luid, sock, baseline, g_next_seq, capture_alive);
+    }
 }
 
 static DWORD WINAPI cm_thread(LPVOID arg)
@@ -489,6 +768,7 @@ int main(int argc, char **argv)
     IOCTL_VERSION version = {0};
     uint32_t baseline[REG_COUNT], now[REG_COUNT];
     const char *letters = NULL;
+    uint32_t pattern_start_ns = 0, pattern_end_ns = 0;
     LARGE_INTEGER qpc_before;
     unsigned long long phc_before = 0;
     MIB_IF_ROW2 row;
@@ -510,11 +790,47 @@ int main(int argc, char **argv)
     printf("=== IntelAvbFilter - exploratory TAS gate investigation (#328), %s ===\n", TAG);
     if (argc == 3 && strcmp(argv[1], "--apply") == 0 && argv[2][0] != '\0' && strspn(argv[2], "wsb") == strlen(argv[2])) {
         letters = argv[2];
+    } else if ((argc == 4 || argc == 5) && strcmp(argv[1], "--pattern") == 0) {
+        unsigned long start_ms = strtoul(argv[2], NULL, 10), end_ms = strtoul(argv[3], NULL, 10);
+        if (start_ms >= end_ms || end_ms > PATTERN_MAX_END_MS) {
+            printf(TAG " not run: --pattern needs start < end <= %d ms\n", PATTERN_MAX_END_MS);
+            return 3;
+        }
+        if (argc == 5 && strcmp(argv[4], "--no-shadow") != 0 && strcmp(argv[4], "--after-rearm") != 0 && strcmp(argv[4], "--mode-last") != 0 &&
+            strcmp(argv[4], "--toggle-only") != 0 && strcmp(argv[4], "--soft-disarm") != 0 && strcmp(argv[4], "--move-cycle") != 0 &&
+            strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-toggle") != 0) {
+            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base or --move-toggle\n");
+            return 3;
+        }
+        g_move = (argc == 5 && strncmp(argv[4], "--move-", 7) == 0) ? argv[4] : NULL;
+        g_toggle_only = argc == 5 && strcmp(argv[4], "--toggle-only") == 0;
+        g_soft_disarm = argc == 5 && strcmp(argv[4], "--soft-disarm") == 0;
+        g_after_rearm = argc == 5 && strcmp(argv[4], "--after-rearm") == 0;
+        g_mode_last = argc == 5 && strcmp(argv[4], "--mode-last") == 0;
+        pattern_start_ns = (uint32_t)start_ms * 1000000u;
+        pattern_end_ns = (uint32_t)end_ms * 1000000u;
+        letters = (argc == 5 && strcmp(argv[4], "--no-shadow") == 0) ? "wcb" : "wsb";
+        if (!g_after_rearm) {
+            g_pattern = TRUE;
+            g_cycle_ns = (uint32_t)NS_PER_SEC;
+            g_open_start_ns = pattern_start_ns;
+            g_open_end_ns = pattern_end_ns;
+        }
+    } else if (argc == 2 && strcmp(argv[1], "--disarm") == 0) {
+        g_disarm = TRUE;
+        letters = "wsb";
+    } else if (argc == 3 && strcmp(argv[1], "--rearm") == 0) {
+        g_rearm_cycles = strtoul(argv[2], NULL, 10);
+        if (g_rearm_cycles == 0 || g_rearm_cycles > MAX_REARM_CYCLES) {
+            printf(TAG " not run: --rearm needs 1..%d\n", MAX_REARM_CYCLES);
+            return 3;
+        }
+        letters = "wsb";
     } else if (argc != 1) {
-        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b>]\n");
+        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b> | --pattern <startMs> <endMs> | --disarm | --rearm <n>]\n");
         return 3;
     }
-    for (n = 0; letters != NULL && n < strlen(letters); n++) {
+    for (n = 0; argc == 3 && letters != NULL && n < strlen(letters); n++) {
         if (strchr(letters + n + 1, letters[n]) != NULL) {
             printf(TAG " not run: --apply names a group twice\n");
             return 3;
@@ -573,6 +889,7 @@ int main(int argc, char **argv)
 
     baseline_seq = g_next_seq;
     seen = tx_step(h, target.net_luid, sock, BASELINE_MS, "baseline", g_next_seq, &capture_alive);
+    dump_baseline_head(baseline_seq);
     if ((unsigned long long)seen * 100 < (unsigned long long)(g_next_seq - baseline_seq) * WIRE_MIN_PERCENT) {
         printf(TAG " not run: the I210 did not see the baseline frames; nothing mutated\n");
         wire_stop();
@@ -596,17 +913,75 @@ int main(int argc, char **argv)
     InterlockedExchange(&g_armed, 1);
     printf("  --- SETUP_TAS ---\n");
     armed_first = g_next_seq;
-    if (!arm_tas(h)) {
+    if (g_mode_last) {
+        printf("  --- schedule first, TAS mode last ---\n");
+        seen = 0;
+        if (apply_groups(h, letters)) {
+            (void)read_regs(h, now, "schedule written, still Legacy", baseline);
+            if (write_reg(h, I226_TQAVCTRL, (uint32_t)(I226_TQAVCTRL_TRANSMIT_MODE_MASK | I226_TQAVCTRL_ENHANCED_QAV_MASK), "TQAVCTRL")) {
+                (void)read_regs(h, now, "after TQAVCTRL", baseline);
+                (void)read_armed(h, &armed);
+                printf(TAG " driver tasArmed=%u with hardware in TSN mode\n", armed);
+                seen = pattern_run(h, target.net_luid, sock, baseline, armed_first, &capture_alive);
+            }
+        }
+    } else if (!arm_tas(h)) {
         printf(TAG " SETUP_TAS failed (error %lu); no register group applied\n", GetLastError());
         seen = 0;
     } else {
         (void)read_regs(h, now, "after SETUP_TAS", baseline);
-        seen = tx_step(h, target.net_luid, sock, ARMED_MS, "SETUP_TAS only", armed_first, &capture_alive);
+        seen = tx_step(h, target.net_luid, sock, g_rearm_cycles != 0 ? REARM_FILL_MS : ARMED_MS, "SETUP_TAS only", armed_first, &capture_alive);
         if (letters != NULL) {
             printf("  --- applying %s ---\n", letters);
             if (seen == 0 && apply_groups(h, letters)) {
                 (void)read_regs(h, now, "after --apply", baseline);
-                seen = tx_step(h, target.net_luid, sock, STEP_MS, letters, armed_first, &capture_alive);
+                if (g_pattern) {
+                    seen = pattern_run(h, target.net_luid, sock, baseline, armed_first, &capture_alive);
+                } else {
+                    seen = tx_step(h, target.net_luid, sock, STEP_MS, letters, armed_first, &capture_alive);
+                }
+                if (g_toggle_only && seen != 0) {
+                    toggle_only(h, target.net_luid, sock, baseline, &capture_alive);
+                }
+                if (g_soft_disarm && seen != 0) {
+                    soft_disarm(h, target.net_luid, sock, baseline, &capture_alive);
+                }
+                if (g_move != NULL && seen != 0) {
+                    move_window(h, target.net_luid, sock, baseline, &capture_alive);
+                }
+                if ((g_toggle_only || g_soft_disarm || g_move != NULL) && seen != 0) {
+                    report_phc(h, phc_before, qpc_before, "after the transitions");
+                }
+                if (g_after_rearm && seen != 0) {
+                    printf("  --- disarm in place, then re-arm for the pattern ---\n");
+                    (void)step_disarm(h, baseline);
+                    (void)read_regs(h, now, "after disarm", baseline);
+                    (void)tx_step(h, target.net_luid, sock, STEP_MS, "legacy TX", g_next_seq, &capture_alive);
+                    if (arm_tas(h)) {
+                        (void)read_regs(h, now, "after second SETUP_TAS", baseline);
+                        g_pattern = TRUE;
+                        g_cycle_ns = (uint32_t)NS_PER_SEC;
+                        g_open_start_ns = pattern_start_ns;
+                        g_open_end_ns = pattern_end_ns;
+                        if (apply_groups(h, letters)) {
+                            (void)read_regs(h, now, "after the pattern writes", baseline);
+                            seen = pattern_run(h, target.net_luid, sock, baseline, g_next_seq, &capture_alive);
+                        }
+                    }
+                }
+                if (g_rearm_cycles != 0 && seen != 0) {
+                    rearm_cycles(h, target.net_luid, sock, baseline, phc_before, qpc_before, &capture_alive);
+                }
+                if (g_disarm && seen != 0) {
+                    printf("  --- disarm without a NIC cycle ---\n");
+                    report_phc(h, phc_before, qpc_before, "before disarm");
+                    (void)step_disarm(h, baseline);
+                    (void)read_regs(h, now, "after disarm", baseline);
+                    report_driver_disarm(h);
+                    (void)tx_step(h, target.net_luid, sock, DISARM_TX_MS, "after disarm", g_next_seq, &capture_alive);
+                    (void)read_regs(h, now, "after TX following disarm", baseline);
+                    report_phc(h, phc_before, qpc_before, "after disarm");
+                }
             }
         } else {
             if (seen == 0) {

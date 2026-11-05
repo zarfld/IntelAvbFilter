@@ -207,3 +207,117 @@ Inference: `BaseT` starts the schedule and the windows give it open time. Direct
 Restoration: all 42 registers equal in `wsb` and `sb`, 49 of 49 frames on the wire after the cycle in all three cases, PHC not continuous in all three. In `wb` the only difference was `TSYNCRXCTL` 0x18 to 0x19: bit 0 is `RXTT`, a read-only status bit in the SSOT, and `EN` and `TYPE` did not change. That exit 1 is a comparison artefact, not a configuration change.
 
 Fresh NIC cycles raise background traffic: `descFetched` in the baseline step rose from 53 to 353 and 370. The fill assumption held only loosely, so `sb` reached its stall during the run. A full buffer did not stop `wb` flushing.
+
+### `ws` result and documented requirements, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+`ws`: windows and shadow cycle written, `BaseT` not. `BASET` stayed 0. 0 of 16 step frames and 0 of 40 since arming reached the I210, with the capture alive. So with windows and a shadow cycle, egress stayed closed until `BaseT` was written, on one run. Combined with `wb` and `sb`, both windows and `BaseT` were needed in every case tried. One run per case.
+
+From the software manual (paraphrased, the manual is confidential):
+- The transmit mode is set at initialization and cannot change during dynamic operation. Upstream resets the adapter on any Legacy to TSN change and cites the same section. Today's `SETUP_TAS` and any in-place disarm both go against this.
+- TSN mode uses one packet buffer per enabled queue, which may relate to the 13 KB estimate. Not measured.
+- Qbv is enabled by both cycle registers being non-zero, yet egress opened with `QBVCYCLET_S=0`. Behaviour and documentation differ here; shadow programming stays required.
+- After `BaseT` low is written, the device advances `BaseT` by the cycle at each boundary, which matches the observed readbacks.
+- Explicit setting: shadow, cycle, read `SYSTIM`, write `BaseT` high then low for a time in the future, with `Copy_H` and `Auto_Set` clear. Autonomous setting exists for whole-second aligned cycles. The upstream comment restricts a future base on I226 to `FutScdDis`; the two sources differ.
+- A gap is required between `EndQT` of active queues and the end of the cycle.
+
+### Gate pattern and disarm experiments
+
+`--pattern <startMs> <endMs>`: capture times are host-side, so a 1 ms cycle cannot be resolved. A 1 s cycle with one window can. Two runs with the window moved by 400 ms are the control: arrivals must move with it, which needs no absolute alignment. Frames sent while closed must arrive near the window start and frames sent while open with little delay. Baseline frames calibrate capture latency and its spread. Sub-millisecond gate accuracy is out of scope and stays unverified.
+
+`--disarm`: writes the original values back in upstream's order, without a NIC cycle, then measures TX past the fill level, PHC, registers and driver state. A good result shows observed behaviour against the documented guideline, not a supported sequence.
+
+### Gate pattern and disarm results, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B, I210 capture, one run per case, uncommitted tool. Capture is same-host supplementary evidence.
+
+| Measure | Window 200-400 ms | Window 600-800 ms |
+|---|---|---|
+| Frames sent with the schedule running | 193 | 193 |
+| Arrived inside the window, within uncertainty | 193 | 193 |
+| Arrived outside | 0 | 0 |
+| Lost, reordered | 0, 0 | 0, 0 |
+| Arrival phase, ms | 200.05 to 401.95 | 600.06 to 795.34 |
+| Sent while open: median delay | 0.35 ms | 0.38 ms |
+| Sent while closed: frames, median delay | 151, 386.8 ms | 154, 399.0 ms |
+| Sent while closed: arrival after window start, median | 0.31 ms | 0.49 ms |
+| Uncertainty | 7.1 ms | 10.2 ms |
+
+Moving the window moved the arrivals. Frames sent while closed were held and released at the window start, and frames sent while open passed with little delay. So the adapter followed a periodic schedule at about 10 ms resolution, on a 1 s cycle with one window shared by all queues.
+
+Not verified: sub-millisecond gate accuracy, a 1 ms cycle with a real pattern, per-queue independence, the gate end edge beyond the uncertainty, `Strict_Cycle` and `Strict_End`, and any window taken from the `SETUP_TAS` gate list, which the driver ignores.
+
+Disarm without a NIC cycle: `TQAVCTRL`, `STQT`, `ENDQT`, `QBVCYCLET_S` and `QBVCYCLET` returned to baseline. Writes to `BASET_H` and `BASET_L` were ignored and `BaseT` kept changing. 97 of 97 frames reached the I210 over 6 s, past the fill level, with gauge 0 and occupancy 0. PHC rate stayed 1.02930 before and after, so no reset. `DISARM_TAS` returned not supported and `tasArmed` stayed 1. Legacy TX behaviour returned, on one run, but `BaseT` was not restored, buffer partitioning is unobservable, and re-arming was not tried. The manual does not allow this transition during dynamic operation.
+
+PHC rate: 1.029311 measured, 1.02931 in every run including across resets. The manual's mean hard-coded step is 3.2 ns at 312.5 MHz and `TIMINCA` adds to it, so 0x18000000 predicts 1.029297. Schedules therefore run 2.93 % fast in real time. Separate defect.
+
+The relationship between these results and the #328 unload hang is not established.
+
+### Re-arm after in-place disarm, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+`--rearm 3`, Debug driver FB64A096, one run, three cycles, no NIC cycle between them.
+
+Each cycle: disarm returned registers to baseline except `BaseT`, whose writes had no effect. Legacy TX 97 of 97 on the wire, gauge 0, occupancy 0. `SETUP_TAS` succeeded and `tasArmed` stayed 1 throughout. After the schedule, all frames reached the wire.
+
+Unlike the first arm, frames were not held after re-arm. With `ENDQT=0`, `QBVCYCLET_S=0` and `BaseT` live, 97 of 97 reached the wire in all three cycles, where the first arm held 0 of 97. So re-arm is not equivalent to a first arm. `BaseT` stayed live from the first schedule until the NIC cycle.
+
+PHC showed no step across three cycles: drift over wall time stayed 2.930 % at every check.
+
+Candidate model, inference only: `BaseT` unset holds TX; `BaseT` live with shadow 0 means no gating, so frames pass freely; both set applies the windows. It fits every case so far and matches the manual's condition of both cycle registers being non-zero. If it holds, `wb` opening meant gating was off, so the shadow is required for scheduling. Next: a pattern without the shadow, and a pattern after re-arm.
+
+Tagged frame sequence 1 was missing from two baselines; unexplained.
+
+Baseline sequence 1: missing in all 3 tool baselines after 18 minutes or more of idle, present in all 6 after under 10 minutes. After 9.5 minutes idle the first frame arrived 48 ms late instead of about 0.5 ms. Small sample, cause unknown, and one observer cannot say which side it is. These frames stay counted in the baseline. The tool now prints the first baseline frames of every run.
+
+### Pattern without shadow, after re-arm, and with mode last, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B, I210 capture, 1 s cycle, window 200-400 ms relative to `BaseT`, one run each. Phase uses the `BaseT` read from the register.
+
+| Run | Frames | Lost | Arrivals by 100 ms bin from `BaseT` | Frames in window | Sent closed, median delay |
+|---|---|---|---|---|---|
+| No shadow | 193 | 0 | 9, 2, 165, 17, 0, 0, 0, 0, 0, 0 | 182 | 382.4 ms |
+| After re-arm | 195 | 0 | 23, 19, 20, 22, 17, 19, 20, 19, 18, 18 | 43 | 0.4 ms |
+| Mode last | 194 | 0 | 5, 12, 155, 19, 0, 0, 0, 0, 0, 3 | 184 | 378.2 ms |
+
+No shadow: gating applied with `QBVCYCLET_S=0`. The earlier model is refuted: `wb` opening did not mean gating was off. Shadow programming stays required by the manual, but the measured effect is not established.
+
+After re-arm: arrivals are flat across the cycle and match the send phases, delay 0.4 ms. Registers read `TQAVCTRL=9`, windows and both cycle registers as programmed. `BaseT` writes had no effect and the old grid continued. So egress works, periodic scheduling does not, and neither the registers nor the driver show it. An in-place `TQAVCTRL=0` disarm therefore failed as a reversible operation in this run.
+
+Mode last: gating applied from a first arm without `SETUP_TAS`. `BaseT` written in Legacy was accepted and advanced before `TQAVCTRL` was written. Driver `tasArmed` stayed 0 with hardware in TSN mode. No frames were held before arming.
+
+In no-shadow and mode-last, the frames outside the window all belong to the first cycle and left near a cycle boundary instead of the window start. The cause is unknown.
+
+Sequence 1: the first frame after about 12 minutes idle was delayed 48.07 ms, matching 48.35 ms in the earlier run, and sequence 1 was present. All frames in these runs arrived.
+
+### Mode toggle alone and soft disarm, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B, I210 capture, 1 s cycle, one run each. `BaseT` low read 0 throughout, so phase is PHC modulo 1 s.
+
+| Run, segment | Registers say | Frames | Lost | Arrivals by 100 ms bin | Sent closed, median delay |
+|---|---|---|---|---|---|
+| Toggle-only, before | 200-400 | 193 | 0 | 0, 0, 173, 20, 0, 0, 0, 0, 0, 0 | 386.9 ms |
+| Toggle-only, after | 200-400 | 192 | 0 | 0, 0, 172, 20, 0, 0, 0, 0, 0, 0 | 393.6 ms |
+| Soft disarm, armed | 200-400 | 193 | 0 | 5, 1, 169, 18, 0, 0, 0, 0, 0, 0 | 379.6 ms |
+| Soft disarm, opened | 0-1000 | 192 | 0 | 0, 0, 173, 19, 0, 0, 0, 0, 0, 0 | 284.6 ms, max 777 ms |
+| Soft disarm, moved | 600-800 | 192 | 0 | 0, 0, 174, 18, 0, 0, 0, 0, 0, 0 | not meaningful, all still at 200-400 |
+
+Toggle-only: `TQAVCTRL` 9 to 0 to 9 alone kept the schedule, with the same phase, so the toggle by itself did not cause the ungated state seen after re-arm. Egress passed during the interval, 17 of 17.
+
+Soft disarm: window writes read back correctly and had no effect on a running schedule for at least 29 s. Frames were held up to 777 ms with registers reading fully open. So opening windows does not disarm, and the proposed soft disarm failed. Register readback of `STQT`/`ENDQT` does not show the schedule in force.
+
+Both predictions made before these runs were wrong: toggle-only was expected as the likely cause, and soft disarm as a working route.
+
+First cycle: in the armed segment of the soft-disarm run, frames sent before the boundary were held until 2.4 ms after it, then three frames sent at 34, 97 and 160 ms passed with about 0.5 ms delay, outside the window. That fits the first-cycle frames seen in the no-shadow and mode-last runs. Inference only: gates may be open from the first boundary until the first window ends.
+
+PHC: no step across the toggle or the window writes, drift 2.93 %. The NIC cycle reset it, exit 2 in both runs. Registers 42 of 42 equal. After the cycle, TX 49 of 49 and 48 of 49; `firstMissingSeq=651` is the second frame after the cycle, once.
+
+Sequence 1: present after 4791 s idle, frame 0 delayed 57.5 ms. This is a counterexample to the earlier pattern of sequence 1 missing after long idle. The first-frame delay after idle was seen at 48.35, 48.07 and 57.50 ms.
+
+Next: what makes a new window reach a running schedule: `--move-cycle`, `--move-base`, `--move-toggle`.
+
+### Correction: the after-rearm run, 2026-11-05
+
+The earlier reading of `--after-rearm` was wrong. The tool's first schedule in that run was the 1 ms cycle with windows open over the whole cycle, not the 1 s pattern, and it was never replaced.
+
+From the log: `BaseT` low stepped in whole milliseconds and tracked the PHC, 22.272 s at PHC 22.2721 s and 37.274 s at PHC 37.2727 s, while `QBVCYCLET` read 1 s. So the cycle in force stayed 1 ms for at least 15 s. The flat arrivals came from that schedule, and the phase of 274 ms reported earlier was not a 1 s grid. These statements above are withdrawn: that gating was lost after re-arm, and that an in-place `TQAVCTRL=0` disarm failed as a reversible operation. The two disarm hypotheses that followed are superseded.
+
+Candidate model, inference from one run per case: the first schedule started after a NIC cycle stays in force until the next NIC cycle. Writes to windows, shadow, cycle and `BaseT` read back but do not change it. `TQAVCTRL=0` passes frames freely, and `TQAVCTRL=9` resumes the same schedule. It fits toggle-only, soft disarm, after-rearm and `--rearm`. Not tested: moving a running schedule with the full upstream sequence, or with windows written at `TQAVCTRL=0`.
