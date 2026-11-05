@@ -321,3 +321,29 @@ The earlier reading of `--after-rearm` was wrong. The tool's first schedule in t
 From the log: `BaseT` low stepped in whole milliseconds and tracked the PHC, 22.272 s at PHC 22.2721 s and 37.274 s at PHC 37.2727 s, while `QBVCYCLET` read 1 s. So the cycle in force stayed 1 ms for at least 15 s. The flat arrivals came from that schedule, and the phase of 274 ms reported earlier was not a 1 s grid. These statements above are withdrawn: that gating was lost after re-arm, and that an in-place `TQAVCTRL=0` disarm failed as a reversible operation. The two disarm hypotheses that followed are superseded.
 
 Candidate model, inference from one run per case: the first schedule started after a NIC cycle stays in force until the next NIC cycle. Writes to windows, shadow, cycle and `BaseT` read back but do not change it. `TQAVCTRL=0` passes frames freely, and `TQAVCTRL=9` resumes the same schedule. It fits toggle-only, soft disarm, after-rearm and `--rearm`. Not tested: moving a running schedule with the full upstream sequence, or with windows written at `TQAVCTRL=0`.
+
+### Moving a running schedule, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B, I210 capture, 1 s cycle, one run each. Each run started a 200-400 ms schedule, then tried to move it to 600-800 ms. All register writes read back as intended, except `BaseT`.
+
+| Run | Before the move | After the move | In 600-800 ms |
+|---|---|---|---|
+| `--move-cycle`: windows, shadow, cycle | 191 frames, 9, 22, 141, 19, 0... | 193 frames, 0, 0, 174, 19, 0... | 0 |
+| `--move-base`: the same plus a past `BaseT` | 171 frames, 4, 12, 138, 17, 0... | 192 frames, 0, 0, 173, 19, 0... | 0 |
+| `--move-toggle`: windows at `TQAVCTRL=0` | 168 frames, 0, 0, 149, 18, 1, 0... | 193 frames, 0, 0, 173, 19, 1, 0... | 0 |
+
+No route moved the schedule, 0 lost in all segments. The 22 in the `--move-cycle` second bin are an edge effect: the median release was 0.10 ms after window start, inside the 1.09 ms uncertainty.
+
+`--move-base` wrote the latest past boundary. `BaseT` read back unchanged. Upstream writes the next boundary, so that route is not yet covered, nor upstream's TXQCTL writes.
+
+Host stalls: send gaps up to 405 ms in `--move-base` and 305 ms in `--move-toggle`, so accepted frames fell to 171 and 168, and uncertainty rose to 24 ms and 5.83 ms. One frame in each `--move-toggle` segment fell in the 400 ms bin, one of them at 406.1 ms, outside the uncertainty. The gate end edge stays unverified.
+
+Exit 1 in `--move-toggle`: after the NIC cycle `TCTL` read 0xA40400FA and `TSYNCRXCTL` 0x58, baseline 0xA403F0FA and 0x19. Neither value appears in any other log. `TCTL` differs only in `COLD`, 0x40 against 0x3F. 0x40 is the documented default and upstream programs 63 during link setup. Link-up took 8 s in this cycle, against 3 to 4 s in the other 15 today, and the tool reads about 5 s after the device returns, so that read fell at about link-up. Candidate, not proven: the read came before link setup finished. `TSYNCRXCTL` bit 6 is reserved in the manual and stays unexplained. The cause of the 8 s is unknown, and a link to `--move-toggle` is neither shown nor excluded. Next run reads again after the post-cycle TX.
+
+First-cycle frames outside the window appeared in 5 of 5 runs where the arm landed after the window end (write phases 551 to 847 ms), and in none of 4 where it landed before or inside the window (1, 133, 194, 741 ms). Inference only.
+
+After the NIC cycle, the second frame was missing in 3 of the last 4 runs and in none of the 12 before. It was always the second frame, and `tx_restored` accepts it. The tool now prints those frames.
+
+Sequence 1: present after 448 s idle, frame 0 delayed 51.94 ms. Delays after idle so far: 48.35, 48.07, 57.50, 51.94 ms.
+
+PHC: no step in any run, drift 2.930 %. The NIC cycle reset it.

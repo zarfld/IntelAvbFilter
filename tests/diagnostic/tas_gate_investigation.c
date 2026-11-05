@@ -38,8 +38,12 @@
  *
  * --soft-disarm showed that window writes alone read back but do not reach a running schedule. These ask what does, by
  * moving a verified 200-400 ms pattern to 600-800 ms, where the wire answers regardless of what the registers say:
- * --pattern ... --move-cycle writes windows, shadow and cycle. --pattern ... --move-base also writes BaseT, as upstream does
- * for a running schedule. --pattern ... --move-toggle writes the windows with TQAVCTRL at 0, then restores TQAVCTRL.
+ * --pattern ... --move-cycle writes windows, shadow and cycle. --pattern ... --move-base also writes the latest, past boundary
+ * to BaseT. --pattern ... --move-future writes a boundary ahead instead, which is closer to upstream's running-schedule path.
+ * --pattern ... --move-toggle writes the windows with TQAVCTRL at 0, then restores TQAVCTRL.
+ *
+ * --pattern ... --future-base starts the first schedule from a BaseT 1 to 2 s ahead, without FutScdDis. Upstream sets that bit
+ * for a first schedule on I226 and warns that TX can hang without it; the NIC cycle is the recovery.
  *
  * --disarm opens egress, then writes the original values back without a NIC cycle and checks TX, PHC and driver state.
  * The manual says the transmit mode cannot change during dynamic operation, and upstream resets the adapter here, so this
@@ -96,6 +100,7 @@
 #define MAX_REARM_CYCLES     20
 #define PHC_PAIRS            5
 #define BASELINE_HEAD_FRAMES 5
+#define FUTURE_BOUNDARIES    2
 #define SOFT_REOPEN_START_NS 600000000u
 #define SOFT_REOPEN_END_NS   800000000u
 #define FILETIME_TO_UNIX_US  11644473600000000LL
@@ -133,6 +138,7 @@ static volatile LONG g_armed;
 static uint32_t g_cycle_ns = CYCLE_NS, g_open_start_ns = 0, g_open_end_ns = CYCLE_NS;
 static BOOL g_pattern, g_disarm, g_after_rearm, g_mode_last, g_toggle_only, g_soft_disarm;
 static const char *g_move;
+static BOOL g_future_base;
 static unsigned g_rearm_cycles;
 static LONGLONG g_send_us[WIRE_MAX_FRAMES];
 
@@ -378,7 +384,7 @@ static BOOL step_base(HANDLE h)
         printf(TAG " PHC unreadable, base time not written\n");
         return FALSE;
     }
-    base = (systim / g_cycle_ns + (g_pattern ? 0 : 1)) * g_cycle_ns;
+    base = (systim / g_cycle_ns + (g_future_base ? FUTURE_BOUNDARIES : (g_pattern ? 0 : 1))) * g_cycle_ns;
     ok = write_reg(h, I226_BASET_H, (uint32_t)(base / NS_PER_SEC), "BASET_H") &&
          write_reg(h, I226_BASET_L, (uint32_t)(base % NS_PER_SEC), "BASET_L");
     if (read_systim(h, &after)) {
@@ -596,6 +602,7 @@ static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *bas
     BOOL ok;
 
     printf("  --- %s ---\n", g_move);
+    g_future_base = strcmp(g_move, "--move-future") == 0;
     g_open_start_ns = SOFT_REOPEN_START_NS;
     g_open_end_ns = SOFT_REOPEN_END_NS;
     if (toggle) {
@@ -798,10 +805,12 @@ int main(int argc, char **argv)
         }
         if (argc == 5 && strcmp(argv[4], "--no-shadow") != 0 && strcmp(argv[4], "--after-rearm") != 0 && strcmp(argv[4], "--mode-last") != 0 &&
             strcmp(argv[4], "--toggle-only") != 0 && strcmp(argv[4], "--soft-disarm") != 0 && strcmp(argv[4], "--move-cycle") != 0 &&
-            strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-toggle") != 0) {
-            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base or --move-toggle\n");
+            strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-future") != 0 && strcmp(argv[4], "--move-toggle") != 0 &&
+            strcmp(argv[4], "--future-base") != 0) {
+            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-toggle or --future-base\n");
             return 3;
         }
+        g_future_base = argc == 5 && strcmp(argv[4], "--future-base") == 0;
         g_move = (argc == 5 && strncmp(argv[4], "--move-", 7) == 0) ? argv[4] : NULL;
         g_toggle_only = argc == 5 && strcmp(argv[4], "--toggle-only") == 0;
         g_soft_disarm = argc == 5 && strcmp(argv[4], "--soft-disarm") == 0;
@@ -1015,6 +1024,9 @@ int main(int argc, char **argv)
             seen = tx_step(fresh, target.net_luid, sock, BASELINE_MS, "after the cycle", after_seq, &capture_alive);
             tx_restored = (unsigned long long)seen * 100 >= (unsigned long long)(g_next_seq - after_seq) * WIRE_MIN_PERCENT;
             closesocket(sock);
+            dump_baseline_head(after_seq);
+            /* Evidence only: rc keeps the first read, which may fall before link-up */
+            (void)read_regs(fresh, now, "after the post-cycle TX", baseline);
         }
         CloseHandle(fresh);
     }
