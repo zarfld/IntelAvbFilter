@@ -469,3 +469,54 @@ Exit 1 in `--move-windows-future`: first read 6.03 s after enable, link-up 7.15 
 Frame loss: frame 0 206.1 ms late with seq 1 to 3 lost, all sent before it arrived; seq 4 was sent after and arrived. That makes 4 of 4 cases with a delay beyond the send period. Delays of 58.9, 44.4 and 46.3 ms lost nothing.
 
 Restoration: exit 1, 2, 2. Post-cycle TX 49 of 49 in all three. All 42 registers matched after the post-cycle TX. `TQAVCTRL` 0x89 was cleared by the NIC cycle. PHC no step across the replacement, drift 2.930 %.
+
+### `FutScdDis` repeat, 125 ms cycle and first `Strict_End` run, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B REV_04, I210 capture, one run each. A running schedule can be replaced with new windows and a future `BaseT` without a NIC cycle: 6 of 6, `REV_04` only.
+
+`FutScdDis`, two runs, `TQAVCTRL` 0x89, windows 200-400 ms, 1 s cycle:
+
+| Class | Run 1, `BaseT` 20 s | Run 2, `BaseT` 410 s |
+|---|---|---|
+| Held since `SETUP_TAS`, released while waiting | 25, at 18.081-18.083 s | 24, at 408.370-408.376 s |
+| Passed before `BaseT`, ungated | 30, median delay 0.28 ms, last 19.941 s | 26, median delay 0.45 ms, last 409.950 s |
+| Sent before `BaseT`, arrived after | 0 | 0 |
+| After activation, in window | 163, first 20.200 s | 168, first 410.200 s |
+| After activation, outside window | 0 | 0 |
+| Lost | 0 of 218 | 0 of 218 |
+
+The behaviour repeated. Run 2 released about 9 ms after the writes with a 22 ms timing spread, so the release is not tied to one write. No frame was sent in the gap just before either `BaseT`, so that edge is bracketed only to 19.94-20.2 s and 409.95-410.2 s.
+
+125 ms cycle, `QBVCYCLET` and shadow 0x07735940, windows 0x017D7840 to 0x047868C0 on all queues, `BaseT` on a 125 ms grid, past when written. Phases are PHC-relative with the measured rate 1.029312, so 125 PHC ms is 121.44 ms of host time. 193 of 193 arrived. Arrival phases by 5 ms from 25 ms: 108, 14, 8, 11, 9, 7, 7, 7, 6, 13, 2, 1, none below 25 ms or above 85 ms. Sent evenly across the cycle. Sent-closed frames waited a median 39.08 ms and were released a median 0.39 ms after window start. 190 of 193 arrived inside 25-75 ms. Three arrived at 75-82.6 ms, inside the 30.09 ms uncertainty of this run, so this says nothing about the end edge. Periodic gating at 125 ms holds; edge accuracy is not measured.
+
+First `--move-strict-end` run: executed before the requested design review, so it is exploratory. A 400 ns window fits no frame.
+- `Strict_End` clear, seconds 36-49: 2 frames per cycle in 14 of 14 cycles, seq 276-303.
+- `Strict_End` written at 49.82 s, `BaseT` 51 s: no frame at seconds 50-64, including 50, before that `BaseT`. Cleared at 64.8 s: 2 frames at second 65, under the narrow window, before `BaseT` 66. So `TXQCTL` appeared to apply at once, not at `BaseT`. One run.
+- `descFetched=0` and `osOutDelta=0` through the strict segment, occupancy 273, gauge 285.
+- Drain at second 66: 259 frames seen, seq 306-560 then 669-672. Seq 561-668, 108 frames, were never seen. 255 frames were seen before the gap. The I210 has 256 receive descriptors, but its discard counter totals 2, so where these frames went is not established. Later frames arrived normally.
+- Not concluded: that `Strict_End` caused the zero frames. No fitting frame was tested under it.
+
+Bit 6 update: `TSYNCRXCTL` before link read 0x58 in 4 of 11 timeline runs, 0x18 in 7. Slow link-up with 0x18 occurred once, in the 125 ms run at 7.59 s, so the earlier statement that all slow link-ups showed it is withdrawn. 4 of 4 with 0x58 include both `FutScdDis` runs and two without it. Unclassified. Slow link-ups are 4 of 42 cycles today.
+
+Exit 1 in the 125 ms run: first read before link-up at 7.59 s, `TCTL` 0xA40400FA and `TSYNCRXCTL` 0x18, and all 42 registers matched after post-cycle TX. The verdict stands as recorded.
+
+Frame loss: frame 0 late by 150.69 and 141.03 ms with 2 lost each, all sent before it arrived, one in a baseline and one after a cycle. That makes 6 of 6. It is separate from the 108 drain frames.
+
+Restoration: exit 2, 1, 2. Post-cycle TX 49 of 49, 47 of 49, 49 of 49. All 42 registers matched after post-cycle TX. PHC no step in the transitions measured, drift 2.930 %, reset by the NIC cycle.
+
+### Driver contract preparation, 2026-11-05 (no implementation)
+
+Separate operations: initial activation and schedule replacement. Observed differences: `BaseT` readback shows a future value on a first schedule and not on a running one; `FutScdDis` applies only to the first; a replacement needs a future `BaseT`.
+
+States, and what can honestly distinguish them:
+
+| State | Evidence available to the driver | Strength |
+|---|---|---|
+| Programmed | Write status and readback | Shows written values only |
+| Pending | Driver-held target `BaseT` compared with a PHC read after the last write | Derived from time, no hardware confirmation |
+| Active | PHC at or past that target | Inferred, as upstream does with a timer (`igc_main.c:7082`) |
+| Verified active | Wire evidence | Only from an external observer |
+
+A silent failure exists: if the target has passed when the last write lands, windows read back as written and the schedule stays old (`--move-base`). So the driver must read the PHC after the write and report failure if the target is not still ahead. One `BaseT` write took 34 ms, so the margin must exceed that; the minimum safe margin is not measured. A cycle change has one extra check: `BaseT` steps at the new cycle once active.
+
+Candidate for hardware confirmation, not investigated: a transmit timestamp of a frame, read against the PHC. The filter does not own the miniport's descriptors, so feasibility is unknown.

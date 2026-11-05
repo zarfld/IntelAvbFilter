@@ -51,9 +51,15 @@
  *
  * --pattern <startMs> <endMs> --short-cycle uses a 125 ms cycle, a value in the manual's cycle table.
  *
- * --pattern ... --move-strict-end narrows the window to 400 ns, shorter than one frame on the wire, by a future BaseT. Without
- * Strict_End a frame may start and overrun; with it a frame that cannot finish must not start, so frames per cycle separate the
- * two. A last replacement reopens 200-400 ms with the flag cleared to release what was held, up to about 200 frames.
+ * --pattern ... --move-strict-end narrows the window to 400 ns by a future BaseT, without and with Strict_End. No frame fits
+ * that window, so it cannot tell Strict_End from a separate defect, and its drain of about 360 frames outruns the observer.
+ *
+ * --pattern ... --move-strict-matrix replaces it. Frame time at 1 Gbit/s is (payload + 54) * 8 ns: 0.94 us for 64 bytes,
+ * 11.6 us for 1400. A 5 us window fits the small frame only, and a 50 us window fits both. Stages: small in 5 us without and
+ * with Strict_End, large in 50 us with it, large in 5 us without and with it, then a wide window with the flag clear. The
+ * fitting stages under Strict_End are the control: if they stall too, the cause is not Strict_End. Sending at 2.5 frames per
+ * second keeps what is held near 50, far below the drain that outran the observer. Capture times are host-side, so this
+ * counts frames per window and cannot see a frame cross the closing edge.
  *
  * --pattern ... --future-base starts the first schedule from a BaseT 1 to 2 s ahead, without FutScdDis, and
  * --pattern ... --future-base-futscd does the same with FutScdDis and the BASET_L zero write, as upstream does for a first
@@ -128,6 +134,10 @@
 #define SHORT_CYCLE_NS       125000000u
 #define NARROW_START_NS      200000000u
 #define NARROW_WINDOW_NS     400u
+#define LARGE_PAYLOAD_BYTES  1400u
+#define WINDOW_SMALL_ONLY_NS 5000u
+#define WINDOW_BOTH_NS       50000u
+#define MATRIX_PERIOD_MS     400
 #define WIDE_START_NS        200000000u
 #define WIDE_END_NS          400000000u
 #define FILETIME_TO_UNIX_US  11644473600000000LL
@@ -167,6 +177,9 @@ static uint32_t g_cycle_ns = CYCLE_NS, g_open_start_ns = 0, g_open_end_ns = CYCL
 static BOOL g_pattern, g_disarm, g_after_rearm, g_mode_last, g_toggle_only, g_soft_disarm;
 static const char *g_move;
 static BOOL g_future_base, g_futscd;
+static unsigned g_payload_bytes = PAYLOAD_BYTES;
+static DWORD g_send_period_ms = SEND_PERIOD_MS;
+static avb_u64 g_capture_luid;
 static HANDLE g_sampler;
 static volatile LONG g_sampler_stop;
 static unsigned g_rearm_cycles;
@@ -343,7 +356,7 @@ static void snap(HANDLE h, avb_u64 luid, SNAP *s)
  *  separately: accepted by Windows, descriptors fetched, OS counter, outstanding sends, seen on the wire. */
 static unsigned tx_step(HANDLE h, avb_u64 luid, SOCKET sock, DWORD ms, const char *label, unsigned armed_first_seq, BOOL *capture_alive)
 {
-    static unsigned char payload[PAYLOAD_BYTES];
+    static unsigned char payload[LARGE_PAYLOAD_BYTES];
     SOCKADDR_IN peer = {0};
     unsigned first = g_next_seq, sent = 0, errors = 0, seen, all = 0;
     long missing, last, m2, l2;
@@ -357,17 +370,17 @@ static unsigned tx_step(HANDLE h, avb_u64 luid, SOCKET sock, DWORD ms, const cha
     peer.sin_port = htons(TAS_WIRE_UDP_PORT);
     peer.sin_addr.s_addr = INADDR_BROADCAST;
     while (GetTickCount() - start < ms) {
-        tas_wire_fill(payload, sizeof(payload), g_wire_nonce, g_next_seq);
+        tas_wire_fill(payload, g_payload_bytes, g_wire_nonce, g_next_seq);
         if (g_next_seq < WIRE_MAX_FRAMES) {
             g_send_us[g_next_seq] = host_us();
         }
-        if (sendto(sock, (const char *)payload, sizeof(payload), 0, (SOCKADDR *)&peer, sizeof(peer)) != SOCKET_ERROR) {
+        if (sendto(sock, (const char *)payload, (int)g_payload_bytes, 0, (SOCKADDR *)&peer, sizeof(peer)) != SOCKET_ERROR) {
             sent++;
             g_next_seq++;
         } else {
             errors++;
         }
-        Sleep(SEND_PERIOD_MS);
+        Sleep(g_send_period_ms);
     }
     Sleep(DRAIN_MS);
     seen = wire_seen(first, first + sent, &missing, &last);
@@ -602,6 +615,20 @@ static void schedule_line(HANDLE h, const char *label)
     printf("\n");
 }
 
+/** The observer adapter's own counters, which show whether frames reached it when the capture did not report them */
+static void observer_line(const char *label)
+{
+    MIB_IF_ROW2 row;
+
+    ZeroMemory(&row, sizeof(row));
+    row.InterfaceLuid.Value = g_capture_luid;
+    if (GetIfEntry2(&row) == NO_ERROR) {
+        printf("    observer %s inNUcast=%llu inDiscards=%llu inErrors=%llu\n", label, row.InNUcastPkts, row.InDiscards, row.InErrors);
+    } else {
+        printf("    observer %s counters unreadable\n", label);
+    }
+}
+
 /** The timed part of a pattern run, with its raw per-frame evidence */
 static unsigned pattern_run(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, unsigned armed_first, BOOL *capture_alive)
 {
@@ -610,10 +637,12 @@ static unsigned pattern_run(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t 
 
     printf(TAG " pattern: cycle=%u ns window=[%u,%u) ns patternFirstSeq=%u\n", g_cycle_ns, g_open_start_ns, g_open_end_ns, g_next_seq);
     schedule_line(h, "start");
+    observer_line("start");
     phc_pairs(h, "start");
     seen = tx_step(h, luid, sock, PATTERN_MS, "pattern", armed_first, capture_alive);
     Sleep(PATTERN_SETTLE_MS);
     phc_pairs(h, "end");
+    observer_line("end");
     schedule_line(h, "end");
     (void)read_regs(h, now, "after the pattern", baseline);
     dump_frames();
@@ -701,6 +730,37 @@ static void strict_end_run(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *
     }
 }
 
+typedef struct { const char *name; unsigned payload; uint32_t window_ns; BOOL strict; } STRICT_STAGE;
+
+/** Fitting and overrunning frames, with and without Strict_End, then a drain that accounts for every sequence number */
+static void strict_matrix(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
+{
+    static const STRICT_STAGE stages[] = {
+        {"small-fits-clear", PAYLOAD_BYTES, WINDOW_SMALL_ONLY_NS, FALSE},
+        {"small-fits-strict", PAYLOAD_BYTES, WINDOW_SMALL_ONLY_NS, TRUE},
+        {"large-fits-strict", LARGE_PAYLOAD_BYTES, WINDOW_BOTH_NS, TRUE},
+        {"large-overruns-clear", LARGE_PAYLOAD_BYTES, WINDOW_SMALL_ONLY_NS, FALSE},
+        {"large-overruns-strict", LARGE_PAYLOAD_BYTES, WINDOW_SMALL_ONLY_NS, TRUE},
+    };
+    unsigned i;
+
+    g_send_period_ms = MATRIX_PERIOD_MS;
+    for (i = 0; i < sizeof(stages) / sizeof(stages[0]); i++) {
+        printf(TAG " strict stage %s payload=%u windowNs=%u strictEnd=%d\n", stages[i].name, stages[i].payload, stages[i].window_ns, stages[i].strict);
+        g_payload_bytes = stages[i].payload;
+        if (!set_strict_end(h, stages[i].strict)) {
+            break;
+        }
+        (void)replace_schedule(h, luid, sock, baseline, NARROW_START_NS, NARROW_START_NS + stages[i].window_ns, capture_alive);
+    }
+    printf(TAG " strict stage drain payload=%u windowNs=%u strictEnd=0\n", PAYLOAD_BYTES, WIDE_END_NS - WIDE_START_NS);
+    g_payload_bytes = PAYLOAD_BYTES;
+    if (set_strict_end(h, FALSE)) {
+        (void)replace_schedule(h, luid, sock, baseline, WIDE_START_NS, WIDE_END_NS, capture_alive);
+    }
+    g_send_period_ms = SEND_PERIOD_MS;
+}
+
 /** Moves a running schedule to a different window, by the route named in g_move */
 static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
 {
@@ -713,6 +773,10 @@ static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *bas
         if (replace_schedule(h, luid, sock, baseline, 0, g_cycle_ns, capture_alive)) {
             (void)replace_schedule(h, luid, sock, baseline, SOFT_REOPEN_START_NS, SOFT_REOPEN_END_NS, capture_alive);
         }
+        return;
+    }
+    if (strcmp(g_move, "--move-strict-matrix") == 0) {
+        strict_matrix(h, luid, sock, baseline, capture_alive);
         return;
     }
     if (strcmp(g_move, "--move-strict-end") == 0) {
@@ -1006,9 +1070,9 @@ int main(int argc, char **argv)
             strcmp(argv[4], "--toggle-only") != 0 && strcmp(argv[4], "--soft-disarm") != 0 && strcmp(argv[4], "--move-cycle") != 0 &&
             strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-future") != 0 && strcmp(argv[4], "--move-futscd") != 0 &&
             strcmp(argv[4], "--move-toggle") != 0 && strcmp(argv[4], "--move-open-future") != 0 && strcmp(argv[4], "--move-cycle-future") != 0 &&
-            strcmp(argv[4], "--move-windows-future") != 0 && strcmp(argv[4], "--move-strict-end") != 0 && strcmp(argv[4], "--short-cycle") != 0 &&
+            strcmp(argv[4], "--move-windows-future") != 0 && strcmp(argv[4], "--move-strict-end") != 0 && strcmp(argv[4], "--move-strict-matrix") != 0 && strcmp(argv[4], "--short-cycle") != 0 &&
             strcmp(argv[4], "--future-base") != 0 && strcmp(argv[4], "--future-base-futscd") != 0) {
-            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-futscd, --move-toggle, --move-open-future, --move-cycle-future, --move-windows-future, --move-strict-end, --short-cycle, --future-base or --future-base-futscd\n");
+            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-futscd, --move-toggle, --move-open-future, --move-cycle-future, --move-windows-future, --move-strict-end, --move-strict-matrix, --short-cycle, --future-base or --future-base-futscd\n");
             return 3;
         }
         if (argc == 5 && strcmp(argv[4], "--short-cycle") == 0 && (uint32_t)end_ms * 1000000u >= SHORT_CYCLE_NS) {
@@ -1095,6 +1159,7 @@ int main(int argc, char **argv)
         CloseHandle(h);
         return 3;
     }
+    g_capture_luid = capture;
     if (wire_start(target.net_luid, capture, target.mac, GetTickCount() ^ GetCurrentProcessId(), ipv4) == 0) {
         printf(TAG " not run: the I210 capture could not be started\n");
         wire_stop();
