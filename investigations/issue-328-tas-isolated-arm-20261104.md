@@ -93,3 +93,34 @@ One run: I226 0x125B, Debug driver F3CC845E, commit 7512c10. Local diagnostic ev
 Limits: the armed registers beyond `TQAVCTRL`, `BaseT` and the cycle registers were not sampled. The gauge returning to 0 proves nothing about draining, because the cycle created a new context. A NIC disable with 668 outstanding sends did not stall, but it is not a driver unload, so Scenario B is not refuted. DbgView lost about 83 % of messages, so missing `[#328-TX-WINDOW]` lines prove nothing.
 
 Next: the default run repeats this with dense sampling and armed register dumps. `--armed-period-ms 200` lowers the rate. A stall near 5 s follows time; one near 17 s follows the frame count. Neither result names a mechanism on its own.
+
+## Frame-count result, 2026-11-05
+
+Same driver family, Debug, I226 0x125B. Two further runs at e8821bc, driver 4358F5A3, confirmed the stall.
+
+| Run | Period | Onset | `TDH0` advance | `osOut` advance |
+|---|---|---|---|---|
+| 7512c10 | 50 ms | about 5 s | 84 | 84 |
+| e8821bc | 50 ms | about 5 s | 87 | 85 |
+| e8821bc | 200 ms | about 17 s | 86 | 85 |
+
+The stall follows the count, not time. Arming changes `TQAVCTRL` and `QBVCYCLET` only. `STQT` and `ENDQT` stay 0 while armed. `TXDCTL0`, `TCTL` and the PHC rate show no change at the stall. `TDT - TDH` reached exactly 255 at 50 ms while the gauge kept rising. The stall count did not change at 5 frames per second, so whatever fills does not drain measurably.
+
+None of this shows whether the frames reached the wire. `TDH` and `osOut` are host-side.
+
+### Competing hypotheses and `--stall-probe` predictions
+
+| Hypothesis | Frames to stall as payload grows | Bytes to stall | Frames seen on the wire |
+|---|---|---|---|
+| Closed or misprogrammed gates | Fall | Constant after per-frame overhead | None after arming, at every size |
+| Packet buffer not released | Fall | Constant after per-frame overhead | All, up to the stall |
+| Descriptor or ring limit | Constant unless descriptors per frame change | Rise with size | All, up to the stall |
+| Missing completion or miniport limit | Not tied to size | Not tied to size | All; completions fall behind before fetching stops |
+
+Do not assume 85 descriptors means 85 frames in the 20 KB buffer: per-frame buffer overhead is unmeasured and 85 frames of 106 bytes is about 9 KB. Sizes 64, 512 and 1400 fit capacity and overhead and leave one point to check the fit.
+
+Wire evidence limits: capture on another NIC in this host is supplementary. It needs a baseline, enforced by the probe before `SETUP_TAS`. ICMP is supplementary only; it needs a verified route because all adapters have equal default routes, and each echo uses a descriptor.
+
+### PHC restoration, separate defect
+
+`init_ptp` in `devices/intel_i226_impl.c` writes `SYSTIM=1` unconditionally on every `AvbBringUpHardware`, so on every `FilterAttach` and `FilterRestart`. The I210 path guards this. Source-confirmed for the filter; whether hardware or the miniport also resets the PHC is undetermined, because the write hides any earlier reset.

@@ -21,6 +21,10 @@
  * across that time and all registers are dumped before and after it. --armed-period-ms N changes the send period of
  * the armed window only, which separates a stall that follows time from one that follows the frame count.
  *
+ * --stall-probe N tags every UDP frame with a sequence number in an N byte payload and reports frames, bytes, descriptors,
+ * ring occupancy and outstanding sends separately, with wire observers from tas_wire_observer.h. Without it nothing of this
+ * runs. A probe whose observers cannot see the baseline frames is BLOCKED before SETUP_TAS.
+ *
  * Exit: 0 all passed, 1 any failure or restoration verdict, 2 no adapter ran, 3 only BLOCKED.
  *
  * Verifies: #328
@@ -40,12 +44,17 @@
 #include "../../include/avb_ioctl.h"
 #include "../../intel-ethernet-regs/gen/i226_regs.h"
 #include "../ioctl/tas_restoration_eval.h"
+#include "tas_wire_observer.h"
 
 #define DEVICE_NAME          "\\\\.\\IntelAvbFilter"
 #define TX_QUEUES            4
 #define TX_SOCKETS           8
 #define TX_PERIOD_MS         50
 #define MAX_ARMED_PERIOD_MS  1000
+#define MAX_PROBE_PAYLOAD    1400
+#define FRAME_HEADER_BYTES   42
+#define TX_DESCRIPTOR_BYTES  16
+#define WIRE_BASELINE_MIN_PERCENT 90
 #define TX_DISCARD_PORT      9
 #define TX_DRAIN_MS          5000
 #define GAUGE_SLACK          2u
@@ -90,6 +99,8 @@ typedef struct {
     SAMPLE first, last;
     unsigned sent, send_errors;
     BOOL head_moved, settled, healthy;
+    unsigned first_seq, ring;
+    LONG icmp_sent, icmp_replied;
 } TX_RESULT;
 
 static const DWORD g_baseline_marks[] = {0, 1000, 2000, 5000};
@@ -100,6 +111,7 @@ static const DWORD g_armed_marks[] = {0, 1000, 2000, 3000, 4000, 4250, 4500, 475
 
 static int g_failed, g_blocked, g_ran;
 static DWORD g_armed_period_ms = TX_PERIOD_MS;
+static unsigned g_probe_payload, g_next_seq;
 
 /* Non-negative while the adapter is armed and restoration has not reported */
 static volatile LONG g_pending_adapter = -1;
@@ -279,6 +291,37 @@ static void take_sample(HANDLE h, avb_u64 luid, DWORD at_ms, SAMPLE *s)
     fflush(stdout);
 }
 
+/** Stall probe only: frames, bytes, descriptors, occupancy and outstanding sends are different quantities */
+static void probe_line(const TX_RESULT *r, const SAMPLE *s, DWORD at_ms)
+{
+    long missing, last;
+
+    if (g_probe_payload == 0) {
+        return;
+    }
+    if (r->ring == 0) {
+        printf("    probe t=%-6lu ring size unreadable\n", at_ms);
+        return;
+    }
+    printf("    probe t=%-6lu frames=%u bytes=%llu desc=%u occupancy=%u/%u gauge=%llu wire=%u icmp=%ld/%ld\n", at_ms, r->sent,
+           (unsigned long long)r->sent * (g_probe_payload + FRAME_HEADER_BYTES), (s->tdh[0] + r->ring - r->first.tdh[0]) % r->ring,
+           (s->tdt[0] + r->ring - s->tdh[0]) % r->ring, r->ring, s->gauge, wire_seen(r->first_seq, g_next_seq, &missing, &last),
+           g_icmp_replied - r->icmp_replied, g_icmp_sent - r->icmp_sent);
+}
+
+static void probe_summary(const TX_RESULT *r, const char *label)
+{
+    long missing, last;
+    unsigned seen = wire_seen(r->first_seq, r->first_seq + r->sent, &missing, &last);
+
+    printf("  [OBSERVATION] %s: payload=%u frames=%u bytes=%llu descFetched=%u occupancy=%u gauge=%llu wireSeen=%u firstMissingSeq=%ld "
+           "lastSeenSeq=%ld firstSeq=%u icmp=%ld/%ld\n", label, g_probe_payload, r->sent,
+           (unsigned long long)r->sent * (g_probe_payload + FRAME_HEADER_BYTES),
+           r->ring != 0 ? (r->last.tdh[0] + r->ring - r->first.tdh[0]) % r->ring : 0,
+           r->ring != 0 ? (r->last.tdt[0] + r->ring - r->last.tdh[0]) % r->ring : 0, r->last.gauge, seen, missing, last, r->first_seq,
+           g_icmp_replied - r->icmp_replied, g_icmp_sent - r->icmp_sent);
+}
+
 /** Bounded broadcast from several source ports, with samples at the given marks, then a drain */
 static BOOL tx_window(HANDLE h, avb_u64 luid, IN_ADDR ipv4, const DWORD *marks, size_t mark_count, DWORD period_ms,
                       const char *label, TX_RESULT *r)
@@ -286,6 +329,7 @@ static BOOL tx_window(HANDLE h, avb_u64 luid, IN_ADDR ipv4, const DWORD *marks, 
     SOCKET sock[TX_SOCKETS];
     SOCKADDR_IN local = {0}, peer = {0};
     static const char payload[64] = "IntelAvbFilter #328 TC-TASARM TX probe";
+    static unsigned char probe[MAX_PROBE_PAYLOAD];
     BOOL on = TRUE;
     u_long nonblocking = 1;
     size_t next_mark = 0;
@@ -310,23 +354,39 @@ static BOOL tx_window(HANDLE h, avb_u64 luid, IN_ADDR ipv4, const DWORD *marks, 
     }
 
     printf("  --- TX window: %s ---\n", label);
+    if (g_probe_payload != 0) {
+        uint32_t tdlen = 0;
+        r->first_seq = g_next_seq;
+        r->icmp_sent = g_icmp_sent;
+        r->icmp_replied = g_icmp_replied;
+        if (read_reg(h, I226_TDLEN0, &tdlen)) {
+            r->ring = tdlen / TX_DESCRIPTOR_BYTES;
+        }
+    }
     start = GetTickCount();
     do {
         now = GetTickCount() - start;
         if (next_mark < mark_count && now >= marks[next_mark]) {
             take_sample(h, luid, now, next_mark == 0 ? &r->first : &r->last);
+            probe_line(r, next_mark == 0 ? &r->first : &r->last, now);
             next_mark++;
         }
-        if (sendto(sock[turn++ % TX_SOCKETS], payload, sizeof(payload), 0, (SOCKADDR *)&peer, sizeof(peer)) == SOCKET_ERROR) {
+        if (g_probe_payload != 0) {
+            tas_wire_fill(probe, g_probe_payload, g_wire_nonce, g_next_seq);
+        }
+        if (sendto(sock[turn++ % TX_SOCKETS], g_probe_payload != 0 ? (const char *)probe : payload,
+                   g_probe_payload != 0 ? (int)g_probe_payload : (int)sizeof(payload), 0, (SOCKADDR *)&peer, sizeof(peer)) == SOCKET_ERROR) {
             r->send_errors++;
         } else {
             r->sent++;
+            if (g_probe_payload != 0) { g_next_seq++; }
         }
         Sleep(period_ms);
     } while (next_mark < mark_count);
 
     Sleep(TX_DRAIN_MS);
     take_sample(h, luid, GetTickCount() - start, &r->last);
+    probe_line(r, &r->last, GetTickCount() - start);
     for (i = 0; i < TX_SOCKETS; i++) {
         closesocket(sock[i]);
     }
@@ -624,13 +684,34 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
         CloseHandle(h);
         return;
     }
+    if (g_probe_payload != 0 && wire_start(id->net_luid, id->mac, GetTickCount() ^ GetCurrentProcessId(), ipv4) == 0) {
+        verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "no wire observer could be started, so the probe cannot answer its question");
+        g_blocked++;
+        wire_stop();
+        CloseHandle(h);
+        return;
+    }
     if (!tx_window(h, id->net_luid, ipv4, g_baseline_marks, MARK_COUNT(g_baseline_marks), TX_PERIOD_MS, "before SETUP_TAS", &before) || !before.healthy) {
+        if (g_probe_payload != 0) { wire_stop(); }
         verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "the TX probe is not healthy before arming, so it could not detect a change");
         g_blocked++;
         CloseHandle(h);
         return;
     }
+    if (g_probe_payload != 0) {
+        long missing, last;
+        unsigned seen = wire_seen(before.first_seq, before.first_seq + before.sent, &missing, &last);
+        probe_summary(&before, "before SETUP_TAS");
+        if ((unsigned long long)seen * 100 < (unsigned long long)before.sent * WIRE_BASELINE_MIN_PERCENT) {
+            wire_stop();
+            verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "the wire observers did not see the baseline frames; the capture proves nothing here");
+            g_blocked++;
+            CloseHandle(h);
+            return;
+        }
+    }
     if (!read_clock(h, &clock_cfg) || !read_stats(h, &stats)) {
+        if (g_probe_payload != 0) { wire_stop(); }
         verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "PHC or statistics unreadable before arming");
         g_blocked++;
         CloseHandle(h);
@@ -654,6 +735,10 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
     (void)tx_window(h, id->net_luid, ipv4, g_armed_marks, MARK_COUNT(g_armed_marks), g_armed_period_ms, "while armed", &armed_tx);
     printf("  --- Registers at the end of the armed window ---\n");
     (void)read_regs(h, armed_regs);
+    if (g_probe_payload != 0) {
+        probe_summary(&armed_tx, "while armed");
+        wire_stop();
+    }
     verdict(schedule_ok ? "PASS" : "FAIL", "TC-TASARM-001", index, id->device_id,
             schedule_ok ? NULL : "the requested schedule is not in the adapter: needs TSN mode, QBVCYCLET 1 ms, a shadow cycle and a base time");
     if (!schedule_ok) { g_failed++; }
@@ -680,10 +765,17 @@ int main(int argc, char **argv)
     printf("=== IntelAvbFilter - isolated SETUP_TAS on real hardware (#328) ===\n");
     if (argc == 3 && strcmp(argv[1], "--armed-period-ms") == 0) {
         g_armed_period_ms = strtoul(argv[2], NULL, 10);
+    } else if (argc == 3 && strcmp(argv[1], "--stall-probe") == 0) {
+        g_probe_payload = strtoul(argv[2], NULL, 10);
+        if (g_probe_payload < TAS_WIRE_TAG_BYTES || g_probe_payload > MAX_PROBE_PAYLOAD) {
+            g_armed_period_ms = 0;
+        }
+    } else if (argc != 1) {
+        g_armed_period_ms = 0;
     }
-    if ((argc != 1 && argc != 3) || (argc == 3 && strcmp(argv[1], "--armed-period-ms") != 0) ||
-        g_armed_period_ms == 0 || g_armed_period_ms > MAX_ARMED_PERIOD_MS) {
-        printf("[BLOCKED] TC-TASARM-001: usage: test_tas_isolated_arm [--armed-period-ms 1..%d]\n", MAX_ARMED_PERIOD_MS);
+    if (g_armed_period_ms == 0 || g_armed_period_ms > MAX_ARMED_PERIOD_MS) {
+        printf("[BLOCKED] TC-TASARM-001: usage: test_tas_isolated_arm [--armed-period-ms 1..%d | --stall-probe %d..%d]\n",
+               MAX_ARMED_PERIOD_MS, TAS_WIRE_TAG_BYTES, MAX_PROBE_PAYLOAD);
         return 3;
     }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {

@@ -34,6 +34,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #define IOCTL_NTSTATUS_CALL mock_ioctl_ntstatus
 #include "../ioctl/tas_restore.h"
 #include "../ioctl/tas_restoration_eval.h"
+#include "../ioctl/tas_wire_match.h"
 
 /* =========================================================================
  * Mock infrastructure
@@ -468,6 +469,52 @@ static void test_12_restoration_outcome(void) {
     EXPECT_EQ("failure outranks unknown", tas_restoration_outcome(&e), TAS_RESTORATION_CLEANUP_FAILED);
 }
 
+/* A frame as seen by the capturing NIC: broadcast UDP to the discard port with the tagged payload */
+static size_t wire_frame(unsigned char *f, const unsigned char *mac, unsigned nonce, unsigned seq)
+{
+    size_t udp = 14 + 20, payload = udp + 8;
+    memset(f, 0, 128);
+    memset(f, 0xFF, 6);
+    memcpy(f + 6, mac, 6);
+    f[12] = 0x08;
+    f[14] = 0x45;
+    f[14 + 9] = 17;
+    f[udp + 3] = TAS_WIRE_UDP_PORT;
+    tas_wire_fill(f + payload, 64, nonce, seq);
+    return payload + 64;
+}
+
+/*
+ * TC-MOCK-013: only this run's frames from this adapter count as seen on the wire.
+ */
+static void test_13_wire_match(void) {
+    static const unsigned char mac[6] = {0xF0, 0xB2, 0xB9, 0x31, 0x55, 0xDB};
+    unsigned char f[128];
+    unsigned seq = 0;
+    size_t n;
+
+    printf("\n[TC-MOCK-013] wire frame match: source MAC, broadcast, UDP port, run nonce, sequence\n");
+    n = wire_frame(f, mac, 0x1234u, 77u);
+    EXPECT_TRUE("tagged frame matches", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    EXPECT_EQ("sequence recovered", (int)seq, 77);
+    EXPECT_FALSE("truncated frame", tas_wire_match(f, n - 60, mac, 0x1234u, &seq));
+    EXPECT_FALSE("other run", tas_wire_match(f, n, mac, 0x1235u, &seq));
+    f[11] ^= 1;
+    EXPECT_FALSE("other source MAC", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[0] = 0x01;
+    EXPECT_FALSE("not broadcast", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[13] = 0x06;
+    EXPECT_FALSE("not IPv4", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 9] = 1;
+    EXPECT_FALSE("not UDP", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 20 + 3] = 10;
+    EXPECT_FALSE("other UDP port", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 7] = 1;
+    EXPECT_FALSE("IP fragment", tas_wire_match(f, n, mac, 0x1234u, &seq));
+    n = wire_frame(f, mac, 0x1234u, 77u); f[14 + 20 + 8] ^= 1;
+    EXPECT_FALSE("payload not tagged", tas_wire_match(f, n, mac, 0x1234u, &seq));
+}
+
 /*
  * TC-MOCK-007: Two adapters — both BLOCKED — no cross-contamination.
  */
@@ -548,6 +595,7 @@ int main(void) {
     test_10_no_device_exit_code();
     test_11_skip_distinct_from_pass();
     test_12_restoration_outcome();
+    test_13_wire_match();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
