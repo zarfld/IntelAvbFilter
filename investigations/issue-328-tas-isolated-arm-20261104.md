@@ -408,3 +408,41 @@ Post-cycle timeline, sampled every 50 ms:
 First-frame delay and loss: after 1787 s idle, frame 0 was 137.6 ms late and seq 1 and 2 were lost; both were sent before frame 0 arrived. Six earlier delays of 41.5 to 57.5 ms were below the 62 ms send period and lost nothing. Candidate only, from one case: frames sent during that delay are lost. Two post-cycle delays, 41.5 and 52.5 ms, came with link up for only seconds, so long idle is not required. One observer cannot say where it happens.
 
 First-cycle stray frames: 6 of 6 arms after the window end, 0 of 5 before or inside it. Inference.
+
+### Repeat, whole-cycle open, and cycle change by future `BaseT`, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B REV_04, I210 capture, no `FutScdDis`, no NIC cycle during the schedule changes, `TQAVCTRL` 9 throughout.
+
+| Run | Written at PHC | `BaseT` | New schedule | Last old arrivals | From the boundary | Lost |
+|---|---|---|---|---|---|---|
+| `--move-future` repeat | 437.41 s | 439 s | 600-800 ms | 438: 200-400 only | 439 on: 600-800 only | 0 of 193 |
+| `--move-open-future`, open | 33.05 s | 35 s | 0-1000 ms | 34: 200-400 only | 35 on: flat, median delay 0.57 ms | 0 of 194 |
+| `--move-open-future`, re-arm | 48.10 s | 50 s | 600-800 ms | 49: flat | 50 on: 600-800 only | 0 of 193 |
+| `--move-cycle-future` | 33.07 s | 34 s | 500 ms, 100-300 ms | 33: 200-400 only | 34 on: 100-300 and 600-800 of each second | 0 of 193 |
+
+With the first `--move-future`, 5 of 5 future-`BaseT` replacements took effect in 4 runs, each at the intended boundary. Routes without a future `BaseT` applied in 0 of 6 attempts: windows alone (2), windows with shadow and cycle (1), past `BaseT` (1), windows at `TQAVCTRL=0` (2).
+
+Activation time: frames held before the whole-cycle open were released 0.23 ms after 35.000 s, with a conservative mapping uncertainty of 14.24 ms. Released at new window starts: +0.39, +0.40, +0.36 ms at 600 ms edges, and +1.75 ms at the 100 ms edge.
+
+`--move-cycle-future`: `BASET_L` ended at 0x1DCD6500 and `BASET_H` at 0x30, so `BaseT` advanced in 500 ms steps. The value written, 34.000 s, equalled the running `BaseT` register at that moment, and it still applied.
+
+Disarm candidate: whole-cycle windows by future `BaseT` passed frames with no gating, and a later replacement re-armed, in one run. This is functional only: `TQAVCTRL` stays 9 and schedule registers stay non-baseline until a NIC cycle. It takes effect up to two cycles later. `ENDQT` equal to the cycle breaks the manual's end gap; nothing visible in about 10 cycles at low rate, and a frame crossing the cycle end was not tested. Driver `tasArmed` was not checked in these runs.
+
+Exit 1 in `--move-cycle-future`: the first read came 5.99 s after enable and link-up at 7.35 s, so `TCTL` read 0xA40400FA and `TSYNCRXCTL` 0x58 before link. Both returned at link-up without any tool write, and all 42 registers matched after the post-cycle TX. So this exit 1 came from the tool reading before link-up, not from TAS residue. The verdict stands as recorded. `test_tas_isolated_arm` is not exposed: it waits for link, then settles (`test_tas_isolated_arm.c:555-562`).
+
+`COLD` was 0x040 before link and 0x03F at link-up in 5 of 5 timeline runs.
+
+`TSYNCRXCTL` bit 6: 0x58 from the first sample, 60 ms after enable, in the one timeline run with slow link-up, 0x18 in the 4 with normal link-up. It cleared at link-up. The earlier exit 1 also read 0x58 in a slow link-up. It is correlated with slow link-up and remains undocumented and unclassified. Link-up took 7 s in 2 of 36 cycles today and 3 to 4 s in the others. Both slow cycles were the third case of a batch, but three other third cases took 3 s, so that is not an explanation.
+
+First-frame delay against loss:
+
+| Frame 0 delay | Frames sent before it arrived | Lost | Where |
+|---|---|---|---|
+| 197.1 ms | 3 | 3 (seq 1-3) | baseline, 380 s idle |
+| 137.6 ms | 2 | 2 (seq 1-2) | baseline, 1787 s idle |
+| 90.7 ms | 1 | 1 (seq 461) | 0.69 s after link-up |
+| 41.5 to 57.5 ms, 10 cases | 0 | 0 | various |
+
+Every frame sent before frame 0 arrived was lost, and none after it. Delays of 43.6 and 44.4 ms appeared with no idle. One observer cannot say where. EEE is enabled on the I226 and advertised on the I210; no evidence links it.
+
+Restoration: exit 2, 2, 1. PHC no step across any replacement, drift 2.930 %, then reset by the NIC cycle. Post-cycle TX 49 of 49, 49 of 49, 47 of 48.

@@ -46,7 +46,8 @@
  * --move-future moved a running schedule at the intended boundary, so these extend that route. --pattern ... --move-open-future
  * opens the whole cycle with a future BaseT, stays in TSN mode, then applies 600-800 ms the same way, which replaces a schedule
  * twice and tries it as an in-place disarm and re-arm. --pattern ... --move-cycle-future changes the cycle to 500 ms, with a
- * 100-300 ms window, a value in the manual's cycle table.
+ * 100-300 ms window, a value in the manual's cycle table. --pattern ... --move-windows-future writes only windows and a future
+ * BaseT, to show whether the shadow and cycle writes are needed when the cycle stays the same.
  *
  * --pattern ... --future-base starts the first schedule from a BaseT 1 to 2 s ahead, without FutScdDis, and
  * --pattern ... --future-base-futscd does the same with FutScdDis and the BASET_L zero write, as upstream does for a first
@@ -681,14 +682,14 @@ static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *bas
         return;
     }
     g_futscd = strcmp(g_move, "--move-futscd") == 0;
-    g_future_base = g_futscd || strcmp(g_move, "--move-future") == 0;
+    g_future_base = g_futscd || strcmp(g_move, "--move-future") == 0 || strcmp(g_move, "--move-windows-future") == 0;
     g_open_start_ns = SOFT_REOPEN_START_NS;
     g_open_end_ns = SOFT_REOPEN_END_NS;
     if (toggle) {
         ok = read_reg(h, I226_TQAVCTRL, &mode) && write_reg(h, I226_TQAVCTRL, 0, "TQAVCTRL") && step_windows(h) &&
              write_reg(h, I226_TQAVCTRL, mode, "TQAVCTRL");
     } else {
-        ok = apply_groups(h, strcmp(g_move, "--move-cycle") == 0 ? "ws" : "wsb");
+        ok = apply_groups(h, strcmp(g_move, "--move-cycle") == 0 ? "ws" : strcmp(g_move, "--move-windows-future") == 0 ? "wb" : "wsb");
     }
     if (ok) {
         (void)read_regs(h, now, "after the move", baseline);
@@ -962,8 +963,9 @@ int main(int argc, char **argv)
             strcmp(argv[4], "--toggle-only") != 0 && strcmp(argv[4], "--soft-disarm") != 0 && strcmp(argv[4], "--move-cycle") != 0 &&
             strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-future") != 0 && strcmp(argv[4], "--move-futscd") != 0 &&
             strcmp(argv[4], "--move-toggle") != 0 && strcmp(argv[4], "--move-open-future") != 0 && strcmp(argv[4], "--move-cycle-future") != 0 &&
+            strcmp(argv[4], "--move-windows-future") != 0 &&
             strcmp(argv[4], "--future-base") != 0 && strcmp(argv[4], "--future-base-futscd") != 0) {
-            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-futscd, --move-toggle, --move-open-future, --move-cycle-future, --future-base or --future-base-futscd\n");
+            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-futscd, --move-toggle, --move-open-future, --move-cycle-future, --move-windows-future, --future-base or --future-base-futscd\n");
             return 3;
         }
         g_futscd = argc == 5 && strcmp(argv[4], "--future-base-futscd") == 0;
