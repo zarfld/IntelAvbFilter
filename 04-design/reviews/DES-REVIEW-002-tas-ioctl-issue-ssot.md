@@ -102,7 +102,7 @@ Relationship verbs follow the existing vocabulary: `Traces to`, `Verified by`, `
 | #206 | 10 of 10 passed | IOCTL path. TC-TAS cases are not the UT-TAS cases specified; all 8 boxes unticked | Gate timing, isolation, integration, V&V | **Reopen**, or close as not verified |
 | #281 | Verified, all criteria covered | IOCTL path. Closure cites IOCTLs that do not exist and a readback the test does not do | Validation, atomic commit, readback | **Reopen** |
 
-Reopening is Q's decision. The drafted comments state this per criterion and change no state. The TC-TAS tests stay valid for the IOCTL path and are not changed. Some criteria cannot be met as written, such as 256 entries, and are retired through the new TEST issues.
+**Q decided to reopen all three**, after the per-criterion comments are posted. Historical results are preserved. Not yet done: nothing is recorded in GitHub. The TC-TAS tests stay valid for the IOCTL path and are not changed. Some criteria cannot be met as written, such as 256 entries, and are retired through the new TEST issues.
 
 ## 6. v0.3 review results
 
@@ -110,11 +110,15 @@ Reopening is Q's decision. The drafted comments state this per criterion and cha
 |---|---|---|
 | Requirement → ADR → Design → Test | Complete on paper for R1 to R12: DES-C-TAS-010 section 11 | **Not real until issues exist**: every link is a `#TBD` |
 | Unique identifiers | New IDs did not appear in issue titles when searched. TEST IDs avoid both TEST-TAS-CONFIG-001 issues | Re-check immediately before filing |
-| Existing IOCTL compatibility | Codes 26, 65, 66, 70 keep their ABI. A clean-adapter `SETUP_TAS` is unchanged. Refusal applies only in states no automated test reaches | `--rearm`, `--after-rearm` diagnostics would be refused. O7 open |
+| Existing IOCTL compatibility | Codes 26, 65, 66, 70 keep their ABI. Refusal applies only in states a legacy-only client cannot reach, decided from record, windows and shadow | None. O7 closed: `BaseT` is reported only. `--rearm`, `--after-rearm` stay allowed |
 | Concurrency and generation | Per-adapter claim, generation, epoch, operation store defined; `SETUP_TAS` joins the claim | Lock placement to confirm against #45 |
 | Adapter capability | Tiers per feature, device, revision; hardware range separate from tested values | `revision_id` source to confirm |
 | Setup, cleanup, restoration | Section 10; NDIS rules in 8.1 | EG-13, EG-18 |
 | Release observability | `TAS_QUERY`; no raw access; `#122` respected | Paused-state rule untested |
-| RED/GREEN acceptance | 19 tests, each with RED evidence, Debug and Release; mock-only paths stay UNVERIFIED | Runner rows added only at implementation |
+| RED/GREEN acceptance | 19 tests **designed only**. Hardware RED verified: 0. Hardware GREEN verified: 0. Mock-only paths stay UNVERIFIED | Earlier wording implying RED evidence is withdrawn |
 
 No change is made to HIL tests, runner behaviour or global blocking. No production code is written in this phase.
+
+## 7. Filing status
+
+The package is held locally at `C:\Users\User\cqv\i328\tas-governance-filing\`. **None of it is filed.** This report stops being a proposal only once the issues exist.

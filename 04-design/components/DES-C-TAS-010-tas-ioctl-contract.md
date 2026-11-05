@@ -3,7 +3,7 @@ specType: component-design
 standard: IEEE 1016-2009
 component: TAS lifecycle IOCTL contract (proposed)
 phase: 04-design
-version: 0.3.0
+version: 0.4.0
 author: Claude Code, for Q
 date: "2026-11-05"
 status: DRAFT, derived artifact. v0.2 accepted as review baseline only. Not approved, not implemented
@@ -140,7 +140,7 @@ Candidate codes 71 to 74 are free today. **They are not finalized:** a code is r
 | New client, old driver | Unknown code fails with `STATUS_INVALID_DEVICE_REQUEST`. Verdict `SKIP_NOT_IMPLEMENTED` from the raw NTSTATUS, because the Win32 mapping is lossy |
 | Discovery | `IOCTL_VERSION.Minor` and `AVB_IOCTL_ABI_VERSION` minor rise on addition, per `#64`. No major bump |
 | 32-bit and 64-bit clients | Fixed-width fields, no pointers, 8-byte natural alignment. Layouts pinned by `TC-ABI` at implementation |
-| `SETUP_TAS` while a schedule is live | Refused, section 3.6. ABI unchanged; behaviour differs only in a state that no existing client can reach |
+| `SETUP_TAS` while a schedule is managed or present | Refused, section 3.6. ABI unchanged; behaviour differs only in states a legacy-only client cannot reach |
 | `GET_TAS_STATE` during a contract schedule | `armed` is derived, section 4.5 |
 | `DISARM_TAS` during a contract schedule | Unchanged: `STATUS_NOT_SUPPORTED` on I226, writes nothing |
 | Dispatcher | `src/device.c` allowlist and `test_ioctl_abi.c` code list gain entries at implementation |
@@ -243,34 +243,56 @@ typedef struct AVB_TAS_QUERY_REQUEST {
 
 ### 3.6 Legacy `SETUP_TAS` interoperability
 
-`SETUP_TAS` writes `TQAVCTRL` and `QBVCYCLET`, so left alone it would silently change the cycle of a live schedule. The ABI stays; a new check runs before any write. **This is a design proposal: code 26 does not change until the governing requirement and ADR are accepted.**
+`SETUP_TAS` writes `TQAVCTRL` and `QBVCYCLET`, so left alone it could change the cycle of a live schedule, or resume a dormant one (E9). The ABI stays; a new check runs before any write. **This is a design proposal, governed by REQ-F-TAS-LEGACY-001: code 26 does not change until that requirement and ADR-TSN-002 are accepted.**
 
-| Condition at `SETUP_TAS` entry | Behaviour | Why |
+**`BaseT` is not a decision input.** It advances on its own and stays non-zero after an in-place disarm (E10), so it cannot show that a contract schedule exists. It is reported only.
+
+| Input | Role | Why |
 |---|---|---|
-| No contract schedule, `BaseT` reads 0 | **Exactly as today**, including repeated `SETUP_TAS` | `SETUP_TAS` never writes `BaseT`, so all existing flows stay here |
-| `origin = CONTRACT`, or a contract operation in progress | Refused, nothing written | The schedule is managed |
-| `BaseT` non-zero with no contract record | Refused, nothing written | `SETUP_TAS` cannot have written it. It may be a contract schedule whose record was lost at detach, as in E14 |
+| Operation claim | Decides | Closes the window between check and write |
+| Lifecycle record, `origin` and slots | Decides | The only proof a schedule is contract-managed |
+| `STQT`, `ENDQT` against the family baseline | Decides | `SETUP_TAS` never writes them, so a legacy-only client cannot change them |
+| `QBVCYCLET_S` | Decides | Same. A schedule always sets it |
+| `TQAVCTRL` | Names the class only | A dormant schedule at mode 0 resumes if mode returns (E9) |
+| `QBVCYCLET` | Not an input | `SETUP_TAS` itself writes it, so it cannot separate the cases |
+| `BaseT` | Reported only | Above |
+| Generation | Effect, not input | Legacy has no generation field. Success increments it, so a stale contract request fails |
 
-Conflict semantics:
+Taken under the per-adapter claim, before any write, first match wins:
+
+| # | Condition | Class | `SETUP_TAS` | NTSTATUS | Verdict if unexpected |
+|---|---|---|---|---|---|
+| 1 | Claim held by another operation | Operation in progress | Refused | `STATUS_DEVICE_BUSY` | `BLOCKED` |
+| 2 | Record shows a contract schedule, in any status, including `INCONSISTENT` or `UNKNOWN` | Managed | Refused | `STATUS_INVALID_DEVICE_STATE` | `BLOCKED` |
+| 3 | Filter not Running, or an input register unreadable | Unknown | Refused | `STATUS_DEVICE_NOT_READY` | `BLOCKED` |
+| 4 | Windows non-baseline **and** shadow non-zero, no record | Schedule present, running or dormant | Refused | `STATUS_INVALID_DEVICE_STATE` | `BLOCKED` |
+| 5 | Exactly one of those, no record | Indeterminate, perhaps a partial write | Refused | `STATUS_INVALID_DEVICE_STATE` | `BLOCKED` |
+| 6 | TSN on, windows baseline, shadow 0 | Legacy footprint | **As today** | As today | As today |
+| 7 | TSN off, windows baseline, shadow 0, `BaseT` non-zero | Residue after in-place disarm | **As today**; residue reported | As today | As today |
+| 8 | TSN off, all baseline | Clean | **As today** | As today | As today |
+
+Rows 6 to 8 are the only states a legacy-only client can reach, so existing clients see no change. Rows 4 and 5 exist for a schedule whose record was lost, as in E14. That is how one client is kept from overwriting another's schedule without trusting `BaseT`.
+
+Family baseline for windows accepts `STQT = 0` with `ENDQT` at 0 (seen on hardware) or the 1 s default (**DOC**, **LINUX**), so a miniport using the default does not fall into row 5.
 
 | Item | Definition |
 |---|---|
-| NTSTATUS | `STATUS_INVALID_DEVICE_STATE`. Verdict `BLOCKED`, an unmet prerequisite |
-| Detail | The legacy struct cannot carry it and error completions drop the output buffer. So the raw NTSTATUS is the signal |
-| Visibility to the schedule owner | `legacy_conflicts` in `TAS_QUERY` increments, and `generation` does not change |
-| Successful `SETUP_TAS` | `origin = SETUP_TAS`, `lifecycle = LEGACY_ARMED`, generation increments, so a stale contract request fails |
+| Detail | The legacy struct cannot carry it, and error completions drop the output buffer. The raw NTSTATUS is the signal |
+| Visibility to the owner | `legacy_conflicts` in `TAS_QUERY` increments. `generation` does not change on refusal |
+| Successful `SETUP_TAS` | `origin = SETUP_TAS`, `lifecycle = LEGACY_ARMED`, generation increments |
 | Reverse direction | `TAS_ACTIVATE` and `TAS_REPLACE` on `origin = SETUP_TAS` fail `STATE_CONFLICT` |
-| Race | `SETUP_TAS` takes the same per-adapter claim as contract operations (section 9.3) |
+| Exit from row 2 | The owner's contract operation, or a NIC cycle (a new context), verified by register reads. A schedule lost while its record remains (`DRIVER_ARMED_HW_OFF`) stays refused until then |
+| Exit from rows 4, 5 | A NIC cycle verified by register reads. No legacy override exists: that would need an ABI change |
 
 | Other path | Writes TSN registers today? | Treatment |
 |---|---|---|
 | `DISARM_TAS` | No on I226 | None needed |
-| `SETUP_QAV` | No, recorded stub | Joins the conflict check if it gains register writes |
+| `SETUP_QAV` | No, recorded stub | Joins this check if it gains register writes |
 | `SET_LAUNCH_TIME` | No, stub | Same |
 | `SETUP_FP` | `FP_CONFIG` only | Not a schedule register; preemption with Qbv is refused separately |
-| Debug `WRITE_REGISTER` | Yes, anything | Debug-only and not blocked. `TAS_QUERY` reports the mismatch as `INCONSISTENT` |
+| Debug `WRITE_REGISTER` | Yes, anything | Debug-only and not blocked. `TAS_QUERY` reports the mismatch |
 
-**Known effect on diagnostics:** `tas_gate_investigation --rearm` and `--after-rearm` call `SETUP_TAS` with a live `BaseT`, so they would be refused once this applies. No automated test does this: `SETUP_TAS` is the only automated path into this state, and it never writes `BaseT`. Test coverage and verdicts are unchanged.
+**Effect on diagnostics:** `tas_gate_investigation --rearm` and `--after-rearm` restore windows and shadow before `SETUP_TAS`, so they reach row 7 and stay allowed. **Automated tests are unaffected.**
 
 ## 4. State model
 
@@ -604,7 +626,7 @@ An error completion does not return the output buffer (`docs/testing/test-verdic
 | `MMIO_FAILED` | `STATUS_IO_DEVICE_ERROR` | Rolled back or `INCONSISTENT` | `FAIL` |
 | `ROLLBACK_PARTIAL`, `ROLLBACK_FAILED` | `STATUS_UNSUCCESSFUL` | `PARTIAL_RESIDUE` or `INCONSISTENT` | `CLEANUP_FAILED` in cleanup, else `FAIL` |
 | `INCONSISTENT_STATE` | `STATUS_INVALID_DEVICE_STATE` | `INCONSISTENT`, nothing written | `FAIL` |
-| Legacy conflict, on `SETUP_TAS` only | `STATUS_INVALID_DEVICE_STATE`, no record, `legacy_conflicts` increments | Unchanged, nothing written | `BLOCKED` |
+| Legacy conflict, on `SETUP_TAS` only | Per section 3.6, no record, `legacy_conflicts` increments | Unchanged, nothing written | `BLOCKED` |
 | `RESTORATION_INCOMPLETE` | `STATUS_UNSUCCESSFUL` | As reported | `CLEANUP_FAILED` |
 
 An unverifiable active schedule is not an error: `INFERRED_ACTIVE` states exactly that. `INCONCLUSIVE` and `NOT_HW_VERIFIED` use existing verdict semantics; no verdict changes.
@@ -626,13 +648,29 @@ An unverifiable active schedule is not an error: `INFERRED_ACTIVE` states exactl
 
 ## 11. Requirements, design and HIL traceability
 
-All tests are **hardware** tests using dedicated IOCTLs only, with no `READ_REGISTER` or `WRITE_REGISTER`. Each discovers capability, proves its pre-state, owns setup and NIC-cycle cleanup, and proves restoration by `TAS_QUERY`, measured PHC and TX on the wire. They reuse `tests/hardware/tas_wire_observer.h`; no new harness is proposed. Existing tests, classifications, verdicts and runner rows are unchanged, and nothing adds a gate or global blocking. Runner rows for the new tests are added at implementation. **Every implemented operation needs a hardware RED and a real HIL GREEN in Debug and Release.** RED evidence is the listed `LOCAL_DIAGNOSTIC` record plus the test failing against the unimplemented IOCTL.
+All tests are **hardware** tests using dedicated IOCTLs only, with no `READ_REGISTER` or `WRITE_REGISTER`. Each discovers capability, proves its pre-state, owns setup and NIC-cycle cleanup, and proves restoration by `TAS_QUERY`, measured PHC and TX on the wire. They reuse `tests/hardware/tas_wire_observer.h`; no new harness is proposed. Existing tests, classifications, verdicts and runner rows are unchanged, and nothing adds a gate or global blocking. Runner rows for the new tests are added at implementation. **Every implemented operation needs Hardware RED and Hardware GREEN in Debug and Release.** A mock or offline test is supplementary and cannot establish GREEN.
 
-| Proposed requirement | ADR | Design | Operation | HIL test | Hardware behaviour proved | RED evidence |
+### 11.1 Evidence status
+
+**All 19 tests are design artifacts. None exists as code, and none has run.** A `LOCAL_DIAGNOSTIC` characterisation is not RED: it used Debug register tools and not the dedicated IOCTL under test. These stages describe evidence. They are not runner verdicts and replace none.
+
+| Stage | Meaning | State of all 19 today |
+|---|---|---|
+| Designed | Specified here and in a TEST issue draft | **Yes** |
+| RED pending | Test not yet run against the unimplemented or failing behaviour | **Yes** |
+| Hardware RED verified | Test ran on hardware and failed for the expected reason, with log and driver SHA256 | **No** |
+| GREEN pending | Implementation or passing run outstanding | **Yes** |
+| Hardware GREEN verified | Test passed on real hardware, Debug and Release, with installed SHA256 | **No** |
+
+Three tests also wait on other work: TC-TASAPI-005 on ADR-TSN-003, TC-TASAPI-011 on ADR-TSN-002, and TC-TASAPI-019 on the EG-18 findings.
+
+### 11.2 Matrix
+
+| Proposed requirement | ADR | Design | Operation | HIL test | Hardware behaviour to prove | Prior characterisation, not RED |
 |---|---|---|---|---|---|---|
-| REQ-F-TAS-STATE-001 | ADR-TSN-002 | 4, 12 | `TAS_QUERY` | TC-TASAPI-001 | Clean adapter reads `NONE`, `OFF`, `COMPLETE`; read-only | Not implemented |
-| REQ-F-TAS-VALIDATE-001 | ADR-TSN-002 | 5 | All | TC-TASAPI-002 | Non-TAS adapter `SKIP_UNSUPPORTED`; unbound handle refused; tiers reported | Not implemented |
-| REQ-F-TAS-VALIDATE-001 | ADR-TSN-002 | 5.2 | ACTIVATE, REPLACE | TC-TASAPI-003 | Each invalid request refused, `TAS_QUERY` and TX unchanged | Not implemented |
+| REQ-F-TAS-STATE-001 | ADR-TSN-002 | 4, 12 | `TAS_QUERY` | TC-TASAPI-001 | Clean adapter reads `NONE`, `OFF`, `COMPLETE`; read-only | None |
+| REQ-F-TAS-VALIDATE-001 | ADR-TSN-002 | 5 | All | TC-TASAPI-002 | Non-TAS adapter `SKIP_UNSUPPORTED`; unbound handle refused; tiers reported | None |
+| REQ-F-TAS-VALIDATE-001 | ADR-TSN-002 | 5.2 | ACTIVATE, REPLACE | TC-TASAPI-003 | Each invalid request refused, `TAS_QUERY` and TX unchanged | None |
 | REQ-F-TAS-ACTIVATE-001 | ADR-TSN-002, 003 | 6 | ACTIVATE, hold | TC-TASAPI-004 | Frames held to first window after `BaseT`, then gated; `PENDING` then `INFERRED_ACTIVE` | E6, EG-02 |
 | REQ-F-TAS-ACTIVATE-001 | ADR-TSN-003 | 6.2 | ACTIVATE, pass | TC-TASAPI-005 | Frames flow until `BaseT`, then gated. **After ADR-TSN-003 only** | E6, EG-02 |
 | REQ-F-TAS-REPLACE-001 | ADR-TSN-002 | 7 | REPLACE, same cycle | TC-TASAPI-006 | Wire moves at target, not before | E1, E2 |
@@ -642,17 +680,17 @@ All tests are **hardware** tests using dedicated IOCTLs only, with no `READ_REGI
 | REQ-F-TAS-OPENALL-001 | ADR-TSN-002 | 8 | REPLACE, `OPEN_ALL` | TC-TASAPI-010 | Flat arrivals, no PHC step, `OPEN_ALL` and TSN mode reported, later REPLACE re-gates | E15 |
 | REQ-F-TAS-DISABLE-001 | ADR-TSN-002 | 8 | `TAS_DISABLE_TO_LEGACY` | TC-TASAPI-011 | Frames pass at once, PHC continuous, `RESIDUE`. **After ADR-TSN-002 only** | E10 |
 | REQ-F-TAS-RESTORE-001 | ADR-TSN-002 | 8 | Restoration | TC-TASAPI-012 | After NIC cycle: `COMPLETE`, TX on the wire, PHC reset reported | E13 |
-| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 3.6 | Interplay | TC-TASAPI-013 | After `SETUP_TAS`: `LEGACY_ARMED`, contract operations refused | Not implemented |
-| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 3.6 | `SETUP_TAS` on a live schedule | TC-TASAPI-017 | Refused with exact NTSTATUS, nothing written, wire unchanged, `legacy_conflicts` up. Plain `SETUP_TAS` on a clean adapter behaves as today | Not implemented |
-| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 4.5 | `GET_TAS_STATE` | TC-TASAPI-018 | `armed` follows the table in 4.5 for each reachable state | Not implemented |
-| REQ-F-TAS-ERROR-001 | ADR-TSN-002 | 9.1, 9.2 | Failure detail | TC-TASAPI-014 | Real refused call: record found on the same handle, `NOT_FOUND` on a second handle and on an I210-bound handle | Not implemented |
-| REQ-F-TAS-ERROR-001 | ADR-TSN-002 | 9.3 | Concurrency | TC-TASAPI-015 | Two threads race REPLACE: one wins, the other `BUSY` or `STATE_CONFLICT`, wire shows one schedule | Not implemented |
-| REQ-F-TAS-STATE-001 | ADR-TSN-002 | 4.1 | All | TC-TASAPI-016 | `HARDWARE_VERIFIED` never returned in any test, with PHC past `BaseT` | Not implemented |
-| REQ-F-TAS-NDIS-001 | ADR-TSN-002 | 8.1 | Pause, Restart | TC-TASAPI-019 | Mutating refused while Paused, no MMIO in `TAS_QUERY`, reconcile after Restart reports what hardware shows | EG-18 |
-| REQ-NF-TAS-OBSERVE-001 | ADR-TSN-002 | 12 | `TAS_QUERY` | TC-TASAPI-001, 004, 006 in Release | Same results, Release driver SHA256 recorded | Not implemented |
+| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 3.6 | Interplay | TC-TASAPI-013 | After `SETUP_TAS`: `LEGACY_ARMED`, contract operations refused | None |
+| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 3.6 | `SETUP_TAS` decision table | TC-TASAPI-017 | Rows 1, 2, 6, 7, 8: refused with exact NTSTATUS while managed, wire unchanged, `legacy_conflicts` up, generation unchanged. Clean and residue cases behave as today | E9, E10 |
+| REQ-F-TAS-LEGACY-001 | ADR-TSN-002 | 4.5 | `GET_TAS_STATE` | TC-TASAPI-018 | `armed` follows the table in 4.5 for each reachable state | None |
+| REQ-F-TAS-ERROR-001 | ADR-TSN-002 | 9.1, 9.2 | Failure detail | TC-TASAPI-014 | Real refused call: record found on the same handle, `NOT_FOUND` on a second handle and on an I210-bound handle | None |
+| REQ-F-TAS-ERROR-001 | ADR-TSN-002 | 9.3 | Concurrency | TC-TASAPI-015 | Two threads race REPLACE: one wins, the other `BUSY` or `STATE_CONFLICT`, wire shows one schedule | None |
+| REQ-F-TAS-STATE-001 | ADR-TSN-002 | 4.1 | All | TC-TASAPI-016 | `HARDWARE_VERIFIED` never returned in any test, with PHC past `BaseT` | None |
+| REQ-F-TAS-NDIS-001 | ADR-TSN-002 | 8.1 | Pause, Restart | TC-TASAPI-019 | Mutating refused while Paused, no MMIO in `TAS_QUERY`, reconcile after Restart reports what hardware shows | None. Depends on EG-18 |
+| REQ-NF-TAS-OBSERVE-001 | ADR-TSN-002 | 12 | `TAS_QUERY` | TC-TASAPI-001, 004, 006 in Release | Same results, Release driver SHA256 recorded | None |
 | REQ-NF-TAS-BUFFER-001 | ADR-TSN-002 | EG-03 | Buffer configuration | To be defined after EG-03 | Buffer values reported, behaviour at sustained load | EG-03 |
 
-**Mock-only paths stay UNVERIFIED.** These cannot be driven on hardware by dedicated IOCTLs today: `READBACK_MISMATCH`, `MMIO_FAILED`, `ROLLBACK_*`, the race in `ACTIVATION_AMBIGUOUS`, `HW_ARMED_NO_RECORD` and `BASE_FAR_AHEAD`. Their mocks must reproduce E14's recorded register values, cannot establish HIL GREEN, and must be labelled UNVERIFIED in test output and in the issue. `HW_ARMED_NO_RECORD` gains HIL evidence only if EG-04 finds a trigger.
+**Mock-only paths stay UNVERIFIED.** These cannot be driven on hardware by dedicated IOCTLs today: `READBACK_MISMATCH`, `MMIO_FAILED`, `ROLLBACK_*`, the race in `ACTIVATION_AMBIGUOUS`, `HW_ARMED_NO_RECORD`, `BASE_FAR_AHEAD`, and rows 3, 4 and 5 of the `SETUP_TAS` table. Their mocks must reproduce E14's recorded register values, cannot establish HIL GREEN, and must be labelled UNVERIFIED in test output and in the issue. `HW_ARMED_NO_RECORD` gains HIL evidence only if EG-04 finds a trigger.
 
 ## 12. Release observability
 
@@ -678,7 +716,7 @@ Register offsets come from `intel-ethernet-regs` through a new device op, per `#
 | O4 | Is `DISABLE_TO_LEGACY` allowed in production | Q, via ADR-TSN-002 | Open. Decide with EG-14 |
 | O5 | Pre-activation mechanism | Q, via ADR-TSN-003 | Open. Run EG-02 for M1 and M2 first |
 | O6 | Should mutating codes require `FILE_WRITE_ACCESS` | Q, after EG-17 | Open. Recommendation: yes |
-| O7 | Should `BaseT` non-zero alone refuse `SETUP_TAS` when no contract record exists | Q, via REQ-F-TAS-LEGACY-001 | Open. Recommendation: yes, or a lost schedule stays unprotected |
+| O7 | Should `BaseT` non-zero alone refuse `SETUP_TAS` | Q | **Decided: no.** `BaseT` is reported only. Section 3.6 uses windows, shadow and the record |
 
 ## 14. Evidence gaps
 
@@ -700,10 +738,36 @@ Priority order. **Blocks** names only the operation or claim affected. Everythin
 | EG-11, P3 | REQ-F-TAS-VALIDATE-001 | Identical windows; only ring 0 carries traffic | Independence | Needs traffic on a second ring; feasibility unknown | Queues gate separately | 2 runs | Per-queue tier only |
 | EG-12, P3 | REQ-F-TAS-STATE-001 | None | Link flap, speed change, miniport reset, S3 with a live schedule | Each event, then `TAS_QUERY` and wire | Report matches hardware | Each event classified | Nothing. Reports `UNKNOWN` |
 | EG-13, P2 | REQ-F-TAS-NDIS-001 | Source comment only; cycles so far came after a drain | Pause, Detach and Unload with frames held. Link to #328 unproven | Under a Scenario B test plan: NIC cycle with frames held behind closed gates, bounded | Characterised: completes or stalls | Recorded outcome, Debug and Release | Unload and Pause guarantees only |
-| EG-18, P2 | REQ-F-TAS-NDIS-001, Issue 8 draft | Source reading: `FilterRestart` reseeds the PHC | Whether Pause/Restart with a live schedule moves the PHC behind `BaseT` | Pause/Restart without device removal under a live schedule, then `TAS_QUERY` and wire | Hold reproduced, or none | Recorded outcome; reconcile reports it | Any claim that a schedule survives Pause/Restart |
+| EG-18, P2 | REQ-F-TAS-NDIS-001, its own issue | Source only: `FilterRestart` reaches `init_ptp`. No hardware observation | Five questions below | Cases A to E below | Competing outcomes below | Cases A to D, 3 runs each; each question answered yes, no or unknown per case | Any claim that a schedule survives Pause/Restart |
 | EG-14, P3 | REQ-F-TAS-DISABLE-001 | Past-`BaseT` re-arm kept the old schedule | Future `BaseT` after mode off | `DISABLE_TO_LEGACY`, future `BaseT`, then mode on | New schedule applies | 2 runs | `ACTIVATE` after legacy |
 | EG-15, P3 | REQ-F-TAS-REPLACE-001 | None | Overlapping, off-grid and changed-cycle-miss effects | Each case separately | Characterised | Recorded outcome | Those cases only |
 | EG-16, P3 | Various | 1 run each: E2, E3, E9, E15 | Repeatability | Covered by TC-TASAPI | Same | GREEN | Nothing beyond those tests |
+
+### 14.1 EG-18 investigation
+
+A separate hardware evidence gap with its own issue. **No relationship to #328 is claimed without hardware evidence.**
+
+| # | Question | Measured by |
+|---|---|---|
+| Q1 | Does a schedule survive Pause/Restart, with the same window and phase? | All TSN registers; arrival phase on the I210 before and after |
+| Q2 | Is the PHC continuous? | Paired PHC and QPC reads across the event; rate before and after; `BaseT` minus PHC |
+| Q3 | What happens to outstanding sends? | Gauge, TDH, TDT, occupancy, pause duration, per-frame arrival |
+| Q4 | Do hardware and driver state agree afterwards? | `tasArmed`, all TSN registers, TC-TSNREG-001 |
+| Q5 | Does a later unload behave differently? | Completion, duration, stage reached. Separately authorised |
+
+**Trigger:** `IOCTL_FILTER_RESTART_ONE_INSTANCE` (`NdisFRestartFilter`), an existing path with no device removal. First confirm through `FilterPauseCount` and `PauseRestartGeneration` that it reaches Pause and Restart and leaves the miniport unreset. If not, EG-18 is `BLOCKED` until another trigger is found.
+
+| Case | Setup | Purpose |
+|---|---|---|
+| A | No TAS | Control |
+| B | `SETUP_TAS` only, frames held | Legacy hold |
+| C | Schedule running, gauge 0 | Clean live schedule |
+| D | Schedule running, closed window, frames held, gauge above 0 | Outstanding sends |
+| E | Case A, C or D, then unload, one at a time | Q5. An unload stall may need an operator reboot |
+
+Competing outcomes: the PHC reseeds and the schedule stays, giving the E14 hold; the PHC reseeds and the miniport clears the schedule; the PHC does not reseed, because the path differs from source reading; Pause is delayed by held frames; none of these.
+
+Method: `LOCAL_DIAGNOSTIC`, Debug-only, extending `tests/diagnostic/tas_gate_investigation.c`, never a runner entry. Every step is bounded, and each run proves its pre-state and restoration. Nothing runs during this governance phase.
 
 ## 15. Not in this design
 
