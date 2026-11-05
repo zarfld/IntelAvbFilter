@@ -22,8 +22,9 @@
  * the armed window only, which separates a stall that follows time from one that follows the frame count.
  *
  * --stall-probe N tags every UDP frame with a sequence number in an N byte payload and reports frames, bytes, descriptors,
- * ring occupancy and outstanding sends separately, with wire observers from tas_wire_observer.h. Without it nothing of this
- * runs. A probe whose observers cannot see the baseline frames is BLOCKED before SETUP_TAS.
+ * ring occupancy, OS counts and outstanding sends separately, with the I210 as passive wire observer (tas_wire_observer.h).
+ * Without it nothing of this runs. A probe without an I210, or whose capture cannot see the baseline frames, is BLOCKED
+ * before SETUP_TAS. The capture is same-host supplementary evidence.
  *
  * Exit: 0 all passed, 1 any failure or restoration verdict, 2 no adapter ran, 3 only BLOCKED.
  *
@@ -42,6 +43,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../include/avb_ioctl.h"
+#include "../../include/intel_pci_ids.h"
 #include "../../intel-ethernet-regs/gen/i226_regs.h"
 #include "../ioctl/tas_restoration_eval.h"
 #include "tas_wire_observer.h"
@@ -100,7 +102,7 @@ typedef struct {
     unsigned sent, send_errors;
     BOOL head_moved, settled, healthy;
     unsigned first_seq, ring;
-    LONG icmp_sent, icmp_replied;
+    LONG icmp_sent, icmp_replied, captured, from_target;
 } TX_RESULT;
 
 static const DWORD g_baseline_marks[] = {0, 1000, 2000, 5000};
@@ -112,6 +114,7 @@ static const DWORD g_armed_marks[] = {0, 1000, 2000, 3000, 4000, 4250, 4500, 475
 static int g_failed, g_blocked, g_ran;
 static DWORD g_armed_period_ms = TX_PERIOD_MS;
 static unsigned g_probe_payload, g_next_seq;
+static avb_u64 g_capture_luid;
 
 /* Non-negative while the adapter is armed and restoration has not reported */
 static volatile LONG g_pending_adapter = -1;
@@ -313,9 +316,12 @@ static void probe_summary(const TX_RESULT *r, const char *label)
 {
     long missing, last;
     unsigned seen = wire_seen(r->first_seq, r->first_seq + r->sent, &missing, &last);
+    LONG captured, from_target;
 
-    printf("  [OBSERVATION] %s: payload=%u frames=%u bytes=%llu descFetched=%u occupancy=%u gauge=%llu wireSeen=%u firstMissingSeq=%ld "
-           "lastSeenSeq=%ld firstSeq=%u icmp=%ld/%ld\n", label, g_probe_payload, r->sent,
+    wire_counts(&captured, &from_target);
+    printf("  [OBSERVATION] evidence=same-host-supplementary %s: captured=%ld fromTarget=%ld osOut=%llu payload=%u frames=%u bytes=%llu "
+           "descFetched=%u occupancy=%u gauge=%llu wireSeen=%u firstMissingSeq=%ld lastSeenSeq=%ld firstSeq=%u icmp=%ld/%ld\n", label,
+           captured - r->captured, from_target - r->from_target, r->last.os_out - r->first.os_out, g_probe_payload, r->sent,
            (unsigned long long)r->sent * (g_probe_payload + FRAME_HEADER_BYTES),
            r->ring != 0 ? (r->last.tdh[0] + r->ring - r->first.tdh[0]) % r->ring : 0,
            r->ring != 0 ? (r->last.tdt[0] + r->ring - r->last.tdh[0]) % r->ring : 0, r->last.gauge, seen, missing, last, r->first_seq,
@@ -359,6 +365,7 @@ static BOOL tx_window(HANDLE h, avb_u64 luid, IN_ADDR ipv4, const DWORD *marks, 
         r->first_seq = g_next_seq;
         r->icmp_sent = g_icmp_sent;
         r->icmp_replied = g_icmp_replied;
+        wire_counts(&r->captured, &r->from_target);
         if (read_reg(h, I226_TDLEN0, &tdlen)) {
             r->ring = tdlen / TX_DESCRIPTOR_BYTES;
         }
@@ -684,8 +691,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
         CloseHandle(h);
         return;
     }
-    if (g_probe_payload != 0 && wire_start(id->net_luid, id->mac, GetTickCount() ^ GetCurrentProcessId(), ipv4) == 0) {
-        verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "no wire observer could be started, so the probe cannot answer its question");
+    if (g_probe_payload != 0 && wire_start(id->net_luid, g_capture_luid, id->mac, GetTickCount() ^ GetCurrentProcessId(), ipv4) == 0) {
+        verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "the I210 capture could not be started, so the probe cannot answer its question");
         g_blocked++;
         wire_stop();
         CloseHandle(h);
@@ -704,7 +711,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, BO
         probe_summary(&before, "before SETUP_TAS");
         if ((unsigned long long)seen * 100 < (unsigned long long)before.sent * WIRE_BASELINE_MIN_PERCENT) {
             wire_stop();
-            verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "the wire observers did not see the baseline frames; the capture proves nothing here");
+            verdict("BLOCKED", "TC-TASARM-001", index, id->device_id, "the I210 did not see the baseline broadcast frames; the capture proves nothing here");
             g_blocked++;
             CloseHandle(h);
             return;
@@ -797,6 +804,9 @@ int main(int argc, char **argv)
             break;
         }
         count = id.count;
+        if (g_capture_luid == 0 && id.device_id == INTEL_DEV_I210_AT) {
+            g_capture_luid = id.net_luid;
+        }
         if (id.capabilities & INTEL_CAP_TSN_TAS) {
             ids[stored++] = id;
         } else {

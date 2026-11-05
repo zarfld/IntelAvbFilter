@@ -153,3 +153,13 @@ Frames counted by `osOut`, and sends completed back to the filter, include frame
 Limits: same-host capture is supplementary. Observer liveness during the armed window is not independently shown; it stands on ICMP agreeing. Which programming omission keeps egress closed is not established; `STQT`/`ENDQT` of 0, `BaseT` of 0 and shadow cycle 0 are candidates only.
 
 Correction: `TDT - TDH` is not a fixed 255. Four runs reached 255, the 64 byte probe reached 261. At 1400 bytes sends began failing (99 errors) after about 24 s, once the stack backed up.
+
+### Capture topology, verified 2026-11-05
+
+The I226 is the device under test, the I210 the passive capture adapter, and the I219 stays out of the experiment for management. All three connect to one Milan-certified switch (operator statement).
+
+Verified on this host: the I210 individually matched 245 of 245 tagged I226 broadcast frames across the three probe baselines. Neither adapter has a VLAN ID set, there is no team or bridge, and the I210 has resolved the I226 MAC by ARP. The switch port configuration was not read; broadcast visibility is proven only by the baseline observation, which the probe repeats before every `SETUP_TAS`.
+
+Assumptions: switched unicast is not expected on the I210, so only broadcast is correlated, by source MAC, run nonce and sequence number. No switch setting is changed. The capture opens non-promiscuous. The capture is same-host supplementary evidence. The I219 reports `PromiscuousMode=True`; the source is unknown and it does not affect this experiment.
+
+The three probe runs captured on both the I219 and the I210, and each observer matched only baseline frames. Runs from this point capture on the I210 alone and count all captured frames and all I226-sourced frames per window, which closes the armed-window liveness gap.

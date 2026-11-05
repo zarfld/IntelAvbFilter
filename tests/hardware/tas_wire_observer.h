@@ -1,8 +1,10 @@
 /* tas_wire_observer.h - did the probe frames leave the adapter? (#328)
  *
- * Primary: capture on the other adapters of this host through Npcap, loaded at run time, matching the source MAC, run
- * nonce and sequence number (tas_wire_match.h). Same host, so this is supplementary to an independent capture system.
- * A broadcast seen here crossed the wire, but visibility depends on the switch, so a baseline must prove it first.
+ * Primary: passive capture on the I210 through Npcap, loaded at run time, matching the source MAC, run nonce and sequence
+ * number (tas_wire_match.h). The I219 stays untouched for management. On the HIL host all adapters share one switch, so
+ * only flooded broadcast is visible here; switched unicast is not expected. No switch setting is changed. Same host, so
+ * this is supplementary evidence. A broadcast seen here crossed the wire, but visibility depends on the switch, so a
+ * baseline must prove it first. All captured frames are counted too, so 0 matches can be told from a dead capture.
  *
  * Supplementary: ICMP echo to the adapter's gateway from its own address, once a second. Each echo also uses a transmit
  * descriptor. The route is checked, because every adapter here has an equal default route. Replies alone prove nothing
@@ -16,7 +18,7 @@
 
 #define WIRE_NPCAP_DLL        "C:\\Windows\\System32\\Npcap\\wpcap.dll"
 #define WIRE_NPCAP_PREFIX     "\\Device\\NPF_"
-#define WIRE_MAX_OBSERVERS    2
+#define WIRE_MAX_OBSERVERS    1
 #define WIRE_MAX_FRAMES       8192u
 #define WIRE_CAPTURE_BYTES    128
 #define WIRE_READ_TIMEOUT_MS  100
@@ -34,7 +36,7 @@ typedef void (__cdecl *wire_close_fn)(void *pcap);
 typedef struct {
     void *pcap;
     HANDLE thread;
-    volatile LONG matched;
+    volatile LONG matched, captured, from_target;
 } WIRE_OBSERVER;
 
 static WIRE_OBSERVER g_observers[WIRE_MAX_OBSERVERS];
@@ -61,6 +63,12 @@ static DWORD WINAPI wire_thread(LPVOID context)
         int rc = g_wire_next(o->pcap, &header, &data);
         if (rc < 0) {
             break;
+        }
+        if (rc == 1) {
+            InterlockedIncrement(&o->captured);
+            if (header->caplen >= 12 && memcmp(data + 6, g_wire_mac, sizeof(g_wire_mac)) == 0) {
+                InterlockedIncrement(&o->from_target);
+            }
         }
         if (rc == 1 && tas_wire_match(data, header->caplen, g_wire_mac, g_wire_nonce, &seq) && seq < WIRE_MAX_FRAMES) {
             InterlockedExchange(&g_wire_seen[seq], 1);
@@ -94,8 +102,8 @@ static DWORD WINAPI icmp_thread(LPVOID context)
     return 0;
 }
 
-/** Starts one capture on each other Ethernet adapter that is up, and ICMP towards this adapter's gateway if it has one */
-static int wire_start(avb_u64 luid, const unsigned char *mac, unsigned nonce, IN_ADDR source)
+/** Starts the passive capture on capture_luid, and ICMP towards the gateway of the adapter under test if it has one */
+static int wire_start(avb_u64 luid, avb_u64 capture_luid, const unsigned char *mac, unsigned nonce, IN_ADDR source)
 {
     char errbuf[WIRE_ERRBUF_BYTES];
     ULONG size = 32 * 1024;
@@ -132,12 +140,14 @@ static int wire_start(avb_u64 luid, const unsigned char *mac, unsigned nonce, IN
                 g_icmp_target = ((SOCKADDR_IN *)a->FirstGatewayAddress->Address.lpSockaddr)->sin_addr.s_addr;
                 have_gateway = TRUE;
             }
-        } else if (open_live != NULL && g_observer_count < WIRE_MAX_OBSERVERS && a->OperStatus == IfOperStatusUp &&
-                   a->IfType == IF_TYPE_ETHERNET_CSMACD && a->FirstUnicastAddress != NULL) {
+        } else if (open_live != NULL && g_observer_count < WIRE_MAX_OBSERVERS && a->Luid.Value == capture_luid &&
+                   a->OperStatus == IfOperStatusUp) {
             char device[128];
             WIRE_OBSERVER *o = &g_observers[g_observer_count];
             sprintf_s(device, sizeof(device), WIRE_NPCAP_PREFIX "%s", a->AdapterName);
             o->matched = 0;
+            o->captured = 0;
+            o->from_target = 0;
             o->pcap = open_live(device, WIRE_CAPTURE_BYTES, 0, WIRE_READ_TIMEOUT_MS, errbuf);
             if (o->pcap == NULL) {
                 printf("    [OBSERVATION] capture refused on %ls: %s\n", a->FriendlyName, errbuf);
@@ -186,7 +196,8 @@ static void wire_stop(void)
         } else {
             printf("    [OBSERVATION] wire observer %d did not stop\n", i);
         }
-        printf("    wire observer %d matched %ld frames\n", i, g_observers[i].matched);
+        printf("    wire observer %d matched %ld tagged frames, %ld from the adapter under test, %ld captured in total\n", i,
+               g_observers[i].matched, g_observers[i].from_target, g_observers[i].captured);
         CloseHandle(g_observers[i].thread);
     }
     if (g_icmp_thread != NULL) {
@@ -195,6 +206,19 @@ static void wire_stop(void)
         g_icmp_thread = NULL;
     }
     g_observer_count = 0;
+}
+
+/** Totals of the observers, to tell silence on the wire from a capture that stopped working */
+static void wire_counts(LONG *captured, LONG *from_target)
+{
+    int i;
+
+    *captured = 0;
+    *from_target = 0;
+    for (i = 0; i < g_observer_count; i++) {
+        *captured += g_observers[i].captured;
+        *from_target += g_observers[i].from_target;
+    }
 }
 
 /** Sequence numbers first..end-1 seen by any observer; the first missing and last seen are reported through the pointers */
