@@ -605,3 +605,40 @@ Read: `TQAVCTRL` 0x9, `BASET_H` 0x358, `BASET_L` 0, both cycle registers 0x3B9AC
 `BASET_H` 0x358 is 856 s. From the first post-cycle read and rate 1.029311, the PHC reaches 856 s at 13:47:16, so `BaseT` was within about a second of the PHC. `BaseT` therefore stayed frozen at 684 s while the PHC was behind it, then resumed advancing. The schedule that survived is the one running. Hold and release are now shown by registers and OS counters together, one case; no wire capture covered the release.
 
 Reading `TXQCTL`, `QBVCYCLET` and the windows from this test adds what the first post-cycle read could not: state persisted at least 13.5 minutes. Not known: why it survived, and whether another NIC cycle clears it.
+
+### Recovery of the surviving schedule, 2026-11-05
+
+`Disable-NetAdapter`, 5 s, `Enable-NetAdapter` on the I226, under the machine lock, then TC-TSNREG-001, read-only, log SHA256 c9f1d2f774d0efb3. Link Up. TC-TSNREG-001 PASS on 0x125B, 61 passed, 0 failed.
+
+All printed TSN registers read baseline: `TQAVCTRL` 0, `BASET_H` and `BASET_L` 0, `QBVCYCLET_S` 0, all `STQT`, `ENDQT` and `TXQCTL` 0, `QBVCYCLET` 0x3B9ACA00, `tasArmed=0`. So the second cycle cleared what the first left. TDH and TDT moved 904 to 961 over five samples and stayed equal, which shows descriptor progress only. The I226 then held a fresh DHCP lease, 157.247.2.12, about 70 s old at 13:50. A completed DHCP exchange needs frames to reach a server, so this is indirect evidence of TX. No I210 capture has shown it since recovery.
+
+During the hold the adapter had only APIPA 169.254.98.208. That fits DHCP frames being held and the tool's socket failing to bind its earlier address, though the log did not print that address.
+
+Not established: why the first cycle left the schedule and this one did not. They differ in call path, `CM_Disable_DevNode` against `Disable-NetAdapter`, in time disabled, and in that the first came straight after the matrix. One recovery is not a guarantee.
+
+### `Strict_End` matrix, second run, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Run 13:51:17, log SHA256 1e02a9652107253e, same stages, sizes, rates and tool sequence as the first; tool differed only in the evidence-only changes. I226-LM 0x125B REV_04, Debug driver FB64A0966D836CFB. Exit 2.
+
+| Stage | `BaseT` | Tagged | Per cycle | Max delay | First run |
+|---|---|---|---|---|---|
+| Small, 5 us, clear | 139 | 30 of 30 | 1-5, none at 147-151 | 6.42 s | Same, 5-cycle gap at 594-598 |
+| Small, 5 us, set | 154 | 30 of 30 | 1-5 | 2.57 s | Control passed |
+| Large, 50 us, set | 169 | 30 of 30 | 1-4 | 1.86 s | Control passed |
+| Large, 5 us, clear | 184 | 15 in stage | Exactly 1, 14 of 14 cycles | 24.0 s | Same |
+| Large, 5 us, set | 199 | 0 in stage | 0, seconds 198-212 | 16.1 s | Same |
+| Drain, 200 ms, clear | 214 | 30 of 30 | 47 at second 214 | 1.41 s | Same |
+
+In the held stage `fromTargetDelta=0`, `descFetched=0`, `osOutDelta=0`, occupancy 104, gauge 100, `capturedDelta=331`, ICMP steady at 25. Armed seq 45-446, 402 frames, 0 unseen, 0 reordered. `inDiscards` 2 and `inErrors` 1 did not change.
+
+`Strict_End` result repeated, 2 of 2 valid runs. `TXQCTL` by the next window, in both directions, is now 3 of 3 runs: set at 197.60 s with no frame at 198.2 and `BaseT` 199; cleared at 212.75 s with one large frame at 213 and `BaseT` 214. Fixed stage order remains, and `descFetched=0` still cannot be separated from the packet buffer.
+
+The 5-cycle gap in the first control repeated at a different point in the stage, 10 s in against 2 s in. Five cycles with no tagged frame, with non-tagged frames leaving in that stage, 38 here and 50 before, still fits other traffic using the short windows, unproven.
+
+Survival did not reproduce. After `CM_Disable_DevNode`: 42 of 42 equal at the first read and after post-cycle TX, `TQAVCTRL` 0 and `BASET_H` 0 from the first readable sample, TX 49 of 49 on the I210. That is the first wire evidence of TX since recovery. PHC reset, drift 2.930 %. So the matrix alone does not cause survival, and the `CM_Disable_DevNode` path does clear the schedule. Survival is 1 of 41 register comparisons.
+
+The only visible difference in the two cycles: in the survival cycle the first timeline sample was readable at 53 ms with `TCTL` 0xA40400F8, transmit enable clear. In 12 other timeline cycles that value never appeared; 11 were unreadable at 1-5 ms and then 0xA40400FA. This is a symptom, not a cause. A commit at 13:33:12, about 10 s before that cycle, is rejected as a cause: `tools/hooks/pre-commit.ps1` runs static source checks only. An earlier commit also landed at about a NIC cycle with no survival.
+
+Frame loss, separate track: frame 0 145.1 ms late with seq 1-2 lost, both sent before it arrived, seq 3 sent after arrived. 8 cases with delay beyond the send period, 7 where all such frames were lost.
+
+Evidence-gap update: `Strict_End` 2 valid runs; `TXQCTL` 3 of 3; NIC cycle restores schedule registers 40 of 41, not guaranteed, and `Disable-NetAdapter` recovered once. Repeating the matrix to chase a 1 in 41 event verifies no requirement until a trigger is proposed. The contract can treat it as a known failure mode: verify schedule registers after any cycle and report disagreement with `tasArmed`.
