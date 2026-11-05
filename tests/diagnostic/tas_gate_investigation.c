@@ -39,11 +39,19 @@
  * --soft-disarm showed that window writes alone read back but do not reach a running schedule. These ask what does, by
  * moving a verified 200-400 ms pattern to 600-800 ms, where the wire answers regardless of what the registers say:
  * --pattern ... --move-cycle writes windows, shadow and cycle. --pattern ... --move-base also writes the latest, past boundary
- * to BaseT. --pattern ... --move-future writes a boundary ahead instead, which is closer to upstream's running-schedule path.
- * --pattern ... --move-toggle writes the windows with TQAVCTRL at 0, then restores TQAVCTRL.
+ * to BaseT. --pattern ... --move-future writes a boundary ahead instead, which is upstream's path for a running schedule,
+ * without its TXQCTL strict flags. --pattern ... --move-futscd adds FutScdDis and the BASET_L zero write, which upstream uses only
+ * when no schedule is running. --pattern ... --move-toggle writes the windows with TQAVCTRL at 0, then restores TQAVCTRL.
  *
- * --pattern ... --future-base starts the first schedule from a BaseT 1 to 2 s ahead, without FutScdDis. Upstream sets that bit
- * for a first schedule on I226 and warns that TX can hang without it; the NIC cycle is the recovery.
+ * --move-future moved a running schedule at the intended boundary, so these extend that route. --pattern ... --move-open-future
+ * opens the whole cycle with a future BaseT, stays in TSN mode, then applies 600-800 ms the same way, which replaces a schedule
+ * twice and tries it as an in-place disarm and re-arm. --pattern ... --move-cycle-future changes the cycle to 500 ms, with a
+ * 100-300 ms window, a value in the manual's cycle table.
+ *
+ * --pattern ... --future-base starts the first schedule from a BaseT 1 to 2 s ahead, without FutScdDis, and
+ * --pattern ... --future-base-futscd does the same with FutScdDis and the BASET_L zero write, as upstream does for a first
+ * schedule. Upstream's comments say a future BaseT holds packets until then and that this causes TX hangs. The hold here
+ * stays under its 5 s watchdog, so these ask when the schedule starts and what happens to frames before it, not about a hang.
  *
  * --disarm opens egress, then writes the original values back without a NIC cycle and checks TX, PHC and driver state.
  * The manual says the transmit mode cannot change during dynamic operation, and upstream resets the adapter here, so this
@@ -101,8 +109,15 @@
 #define PHC_PAIRS            5
 #define BASELINE_HEAD_FRAMES 5
 #define FUTURE_BOUNDARIES    2
+#define SAMPLE_MS            50
+#define SAMPLER_JOIN_MS      5000
+#define TCTL_COLD_SHIFT      12
+#define TCTL_COLD_FIELD      0x3FFu
 #define SOFT_REOPEN_START_NS 600000000u
 #define SOFT_REOPEN_END_NS   800000000u
+#define NEW_CYCLE_NS         500000000u
+#define NEW_CYCLE_START_NS   100000000u
+#define NEW_CYCLE_END_NS     300000000u
 #define FILETIME_TO_UNIX_US  11644473600000000LL
 #define DRAIN_MS             1000
 #define WIRE_MIN_PERCENT     90
@@ -138,7 +153,9 @@ static volatile LONG g_armed;
 static uint32_t g_cycle_ns = CYCLE_NS, g_open_start_ns = 0, g_open_end_ns = CYCLE_NS;
 static BOOL g_pattern, g_disarm, g_after_rearm, g_mode_last, g_toggle_only, g_soft_disarm;
 static const char *g_move;
-static BOOL g_future_base;
+static BOOL g_future_base, g_futscd;
+static HANDLE g_sampler;
+static volatile LONG g_sampler_stop;
 static unsigned g_rearm_cycles;
 static LONGLONG g_send_us[WIRE_MAX_FRAMES];
 
@@ -386,6 +403,7 @@ static BOOL step_base(HANDLE h)
     }
     base = (systim / g_cycle_ns + (g_future_base ? FUTURE_BOUNDARIES : (g_pattern ? 0 : 1))) * g_cycle_ns;
     ok = write_reg(h, I226_BASET_H, (uint32_t)(base / NS_PER_SEC), "BASET_H") &&
+         (!g_futscd || write_reg(h, I226_BASET_L, 0, "BASET_L")) &&
          write_reg(h, I226_BASET_L, (uint32_t)(base % NS_PER_SEC), "BASET_L");
     if (read_systim(h, &after)) {
         printf("    PHC before=%llu baseT=%llu after=%llu, baseT - PHC after write = %lld ns\n", systim, base, after, (long long)base - (long long)after);
@@ -393,10 +411,18 @@ static BOOL step_base(HANDLE h)
     return ok;
 }
 
+/** Upstream's order: after the windows, before the cycle and BaseT */
+static BOOL step_futscd(HANDLE h)
+{
+    uint32_t mode = 0;
+
+    return read_reg(h, I226_TQAVCTRL, &mode) && write_reg(h, I226_TQAVCTRL, mode | (uint32_t)I226_TQAVCTRL_FUTSCDDIS_MASK, "TQAVCTRL");
+}
+
 /** Writes the groups named in letters, in the order w, s, c, b. c is the cycle alone, for a run without the shadow */
 static BOOL apply_groups(HANDLE h, const char *letters)
 {
-    return (strchr(letters, 'w') == NULL || step_windows(h)) && (strchr(letters, 's') == NULL || step_shadow(h)) &&
+    return (strchr(letters, 'w') == NULL || step_windows(h)) && (!g_futscd || step_futscd(h)) && (strchr(letters, 's') == NULL || step_shadow(h)) &&
            (strchr(letters, 'c') == NULL || write_reg(h, I226_QBVCYCLET, g_cycle_ns, "QBVCYCLET")) &&
            (strchr(letters, 'b') == NULL || step_base(h));
 }
@@ -539,6 +565,30 @@ static void rearm_cycles(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *ba
     }
 }
 
+/** The schedule registers as read, equal to baseline or not, beside the PHC. Reading them back does not show the schedule in force */
+static void schedule_line(HANDLE h, const char *label)
+{
+    static const REG fields[] = {
+        {"TQAVCTRL", I226_TQAVCTRL}, {"BASET_H", I226_BASET_H}, {"BASET_L", I226_BASET_L}, {"QBVCYCLET", I226_QBVCYCLET}, {"QBVCYCLET_S", I226_QBVCYCLET_S},
+        {"STQT0", I226_STQT0}, {"ENDQT0", I226_ENDQT0}, {"STQT1", I226_STQT1}, {"ENDQT1", I226_ENDQT1},
+        {"STQT2", I226_STQT2}, {"ENDQT2", I226_ENDQT2}, {"STQT3", I226_STQT3}, {"ENDQT3", I226_ENDQT3},
+    };
+    unsigned long long phc = 0;
+    uint32_t value;
+    unsigned i;
+
+    (void)read_systim(h, &phc);
+    printf("    schedule %s phcNs=%llu", label, phc);
+    for (i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        if (read_reg(h, fields[i].offset, &value)) {
+            printf(" %s=0x%08X", fields[i].name, value);
+        } else {
+            printf(" %s=unreadable", fields[i].name);
+        }
+    }
+    printf("\n");
+}
+
 /** The timed part of a pattern run, with its raw per-frame evidence */
 static unsigned pattern_run(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, unsigned armed_first, BOOL *capture_alive)
 {
@@ -546,10 +596,12 @@ static unsigned pattern_run(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t 
     unsigned seen;
 
     printf(TAG " pattern: cycle=%u ns window=[%u,%u) ns patternFirstSeq=%u\n", g_cycle_ns, g_open_start_ns, g_open_end_ns, g_next_seq);
+    schedule_line(h, "start");
     phc_pairs(h, "start");
     seen = tx_step(h, luid, sock, PATTERN_MS, "pattern", armed_first, capture_alive);
     Sleep(PATTERN_SETTLE_MS);
     phc_pairs(h, "end");
+    schedule_line(h, "end");
     (void)read_regs(h, now, "after the pattern", baseline);
     dump_frames();
     return seen;
@@ -594,6 +646,21 @@ static void soft_disarm(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *bas
     }
 }
 
+/** One replacement by a future BaseT, then a timed pattern */
+static BOOL replace_schedule(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, uint32_t start_ns, uint32_t end_ns, BOOL *capture_alive)
+{
+    uint32_t now[REG_COUNT];
+
+    g_future_base = TRUE;
+    g_open_start_ns = start_ns;
+    g_open_end_ns = end_ns;
+    if (!apply_groups(h, "wsb")) {
+        return FALSE;
+    }
+    (void)read_regs(h, now, "after the replacement", baseline);
+    return pattern_run(h, luid, sock, baseline, g_next_seq, capture_alive) != 0;
+}
+
 /** Moves a running schedule to a different window, by the route named in g_move */
 static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *baseline, BOOL *capture_alive)
 {
@@ -602,18 +669,103 @@ static void move_window(HANDLE h, avb_u64 luid, SOCKET sock, const uint32_t *bas
     BOOL ok;
 
     printf("  --- %s ---\n", g_move);
-    g_future_base = strcmp(g_move, "--move-future") == 0;
+    if (strcmp(g_move, "--move-open-future") == 0) {
+        if (replace_schedule(h, luid, sock, baseline, 0, g_cycle_ns, capture_alive)) {
+            (void)replace_schedule(h, luid, sock, baseline, SOFT_REOPEN_START_NS, SOFT_REOPEN_END_NS, capture_alive);
+        }
+        return;
+    }
+    if (strcmp(g_move, "--move-cycle-future") == 0) {
+        g_cycle_ns = NEW_CYCLE_NS;
+        (void)replace_schedule(h, luid, sock, baseline, NEW_CYCLE_START_NS, NEW_CYCLE_END_NS, capture_alive);
+        return;
+    }
+    g_futscd = strcmp(g_move, "--move-futscd") == 0;
+    g_future_base = g_futscd || strcmp(g_move, "--move-future") == 0;
     g_open_start_ns = SOFT_REOPEN_START_NS;
     g_open_end_ns = SOFT_REOPEN_END_NS;
     if (toggle) {
         ok = read_reg(h, I226_TQAVCTRL, &mode) && write_reg(h, I226_TQAVCTRL, 0, "TQAVCTRL") && step_windows(h) &&
              write_reg(h, I226_TQAVCTRL, mode, "TQAVCTRL");
     } else {
-        ok = step_windows(h) && step_shadow(h) && (strcmp(g_move, "--move-cycle") == 0 || step_base(h));
+        ok = apply_groups(h, strcmp(g_move, "--move-cycle") == 0 ? "ws" : "wsb");
     }
     if (ok) {
         (void)read_regs(h, now, "after the move", baseline);
         (void)pattern_run(h, luid, sock, baseline, g_next_seq, capture_alive);
+    }
+}
+
+/*
+ * Post-cycle timeline on its own handle, printed on every change with the host time the frames use. It starts after the
+ * enable and only observes, so the first read, the TX check and the exit code keep their timing and meaning.
+ */
+static DWORD WINAPI sampler_thread(LPVOID arg)
+{
+    avb_u64 luid = *(const avb_u64 *)arg;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    uint32_t tctl = 0, rx = 0, last_tctl = 0, last_rx = 0;
+    int connect, oper, last_connect = -2, last_oper = -2;
+    BOOL have, had = FALSE, first = TRUE;
+
+    while (InterlockedCompareExchange(&g_sampler_stop, 0, 0) == 0) {
+        MIB_IF_ROW2 row;
+
+        ZeroMemory(&row, sizeof(row));
+        row.InterfaceLuid.Value = luid;
+        connect = GetIfEntry2(&row) == NO_ERROR ? (int)row.MediaConnectState : -1;
+        oper = connect == -1 ? -1 : (int)row.OperStatus;
+        if (h == INVALID_HANDLE_VALUE) {
+            h = open_device();
+            if (h != INVALID_HANDLE_VALUE && !bind_luid(h, luid)) {
+                CloseHandle(h);
+                h = INVALID_HANDLE_VALUE;
+            }
+        }
+        have = h != INVALID_HANDLE_VALUE && read_reg(h, I226_TCTL, &tctl) && read_reg(h, I226_TSYNCRXCTL, &rx);
+        if (first || connect != last_connect || oper != last_oper || have != had || (have && (tctl != last_tctl || rx != last_rx))) {
+            printf("    postcycle hostUs=%lld mediaConnect=%d operStatus=%d regs=%d TCTL=0x%08X COLD=0x%03X TSYNCRXCTL=0x%08X\n", host_us(), connect, oper, have,
+                   have ? tctl : 0, have ? (tctl >> TCTL_COLD_SHIFT) & TCTL_COLD_FIELD : 0, have ? rx : 0);
+            fflush(stdout);
+        }
+        first = FALSE;
+        last_connect = connect;
+        last_oper = oper;
+        had = have;
+        last_tctl = tctl;
+        last_rx = rx;
+        Sleep(SAMPLE_MS);
+    }
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+    }
+    return 0;
+}
+
+static void postcycle_mark(const char *what)
+{
+    printf("    postcycle mark %s hostUs=%lld\n", what, host_us());
+    fflush(stdout);
+}
+
+static void sampler_start(const avb_u64 *luid)
+{
+    InterlockedExchange(&g_sampler_stop, 0);
+    g_sampler = CreateThread(NULL, 0, sampler_thread, (LPVOID)luid, 0, NULL);
+    if (g_sampler == NULL) {
+        printf(TAG " post-cycle timeline not available: thread error %lu\n", GetLastError());
+    }
+}
+
+static void sampler_stop(void)
+{
+    if (g_sampler != NULL) {
+        InterlockedExchange(&g_sampler_stop, 1);
+        if (WaitForSingleObject(g_sampler, SAMPLER_JOIN_MS) != WAIT_OBJECT_0) {
+            printf(TAG " post-cycle timeline did not stop within %d ms\n", SAMPLER_JOIN_MS);
+        }
+        CloseHandle(g_sampler);
+        g_sampler = NULL;
     }
 }
 
@@ -688,6 +840,8 @@ static int restore(const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, const u
         return 1;
     }
     InterlockedExchange(&g_armed, 0);
+    postcycle_mark("enable-returned");
+    sampler_start(&id->net_luid);
     start = GetTickCount();
     while (GetTickCount() - start < RETURN_BOUND_MS) {
         HANDLE h = open_device();
@@ -703,6 +857,7 @@ static int restore(const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, const u
                 }
                 wall_ns = (long long)((double)(qpc.QuadPart - qpc_before.QuadPart) * 1e9 / (double)frequency.QuadPart);
                 drift_ns = ((long long)phc_after - (long long)phc_before) - wall_ns;
+                postcycle_mark("first-read-done");
                 printf(TAG " registers compared=%u differing=%u tasArmed=%u\n", (unsigned)REG_COUNT, differ, armed);
                 printf(TAG " PHC before=%llu after=%llu wallNs=%lld driftNs=%lld continuous=%d\n", phc_before, phc_after, wall_ns, drift_ns,
                        drift_ns > -PHC_TOLERANCE_NS && drift_ns < PHC_TOLERANCE_NS);
@@ -805,12 +960,14 @@ int main(int argc, char **argv)
         }
         if (argc == 5 && strcmp(argv[4], "--no-shadow") != 0 && strcmp(argv[4], "--after-rearm") != 0 && strcmp(argv[4], "--mode-last") != 0 &&
             strcmp(argv[4], "--toggle-only") != 0 && strcmp(argv[4], "--soft-disarm") != 0 && strcmp(argv[4], "--move-cycle") != 0 &&
-            strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-future") != 0 && strcmp(argv[4], "--move-toggle") != 0 &&
-            strcmp(argv[4], "--future-base") != 0) {
-            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-toggle or --future-base\n");
+            strcmp(argv[4], "--move-base") != 0 && strcmp(argv[4], "--move-future") != 0 && strcmp(argv[4], "--move-futscd") != 0 &&
+            strcmp(argv[4], "--move-toggle") != 0 && strcmp(argv[4], "--move-open-future") != 0 && strcmp(argv[4], "--move-cycle-future") != 0 &&
+            strcmp(argv[4], "--future-base") != 0 && strcmp(argv[4], "--future-base-futscd") != 0) {
+            printf(TAG " not run: --pattern takes --no-shadow, --after-rearm, --mode-last, --toggle-only, --soft-disarm, --move-cycle, --move-base, --move-future, --move-futscd, --move-toggle, --move-open-future, --move-cycle-future, --future-base or --future-base-futscd\n");
             return 3;
         }
-        g_future_base = argc == 5 && strcmp(argv[4], "--future-base") == 0;
+        g_futscd = argc == 5 && strcmp(argv[4], "--future-base-futscd") == 0;
+        g_future_base = g_futscd || (argc == 5 && strcmp(argv[4], "--future-base") == 0);
         g_move = (argc == 5 && strncmp(argv[4], "--move-", 7) == 0) ? argv[4] : NULL;
         g_toggle_only = argc == 5 && strcmp(argv[4], "--toggle-only") == 0;
         g_soft_disarm = argc == 5 && strcmp(argv[4], "--soft-disarm") == 0;
@@ -1021,7 +1178,9 @@ int main(int argc, char **argv)
         sock = open_tx_socket(ipv4);
         if (sock != INVALID_SOCKET) {
             after_seq = g_next_seq;
+            postcycle_mark("tx-start");
             seen = tx_step(fresh, target.net_luid, sock, BASELINE_MS, "after the cycle", after_seq, &capture_alive);
+            postcycle_mark("tx-end");
             tx_restored = (unsigned long long)seen * 100 >= (unsigned long long)(g_next_seq - after_seq) * WIRE_MIN_PERCENT;
             closesocket(sock);
             dump_baseline_head(after_seq);
@@ -1030,6 +1189,7 @@ int main(int argc, char **argv)
         }
         CloseHandle(fresh);
     }
+    sampler_stop();
     wire_stop();
     if (!tx_restored) {
         printf(TAG " TX to the wire not shown after the cycle\n");

@@ -347,3 +347,64 @@ After the NIC cycle, the second frame was missing in 3 of the last 4 runs and in
 Sequence 1: present after 448 s idle, frame 0 delayed 51.94 ms. Delays after idle so far: 48.35, 48.07, 57.50, 51.94 ms.
 
 PHC: no step in any run, drift 2.930 %. The NIC cycle reset it.
+
+### Upstream review of future `BaseT` and `FutScdDis`, 2026-11-05 (SOURCE, no hardware evidence)
+
+Local copy of upstream `igc`, fetched 2026-11-04, and the netdev patches of 2023-01-03.
+
+- Hang warning: `igc_main.c:6366-6373`, in `validate_schedule`. A future `BaseT` holds all packets until then, "causing a lot of TX Hangs", so future schedules are rejected, with the note that this no longer applies to i226. The check still applies to i225.
+- `FutScdDis`: `igc_tsn.c:643-649`. Set only for a future base on i226 when `BASET_H` and `BASET_L` read zero, because "Tx won't hang if a GCL is already running".
+- `BASET_L` zero write: `igc_tsn.c:669-676`. "Future base time is only supported when FutScdDis bit is enabled and only active for re-configuration", so zero is written first to create that scenario.
+- Patch 1, Muhammad Husaini Zulkifli, "igc: remove I226 Qbv BaseTime restriction": bit 7 lets i226 schedule a future base without "the Tx hang timeout issue".
+- Patch 2, Tan Tee Min, "igc: enable Qbv configuration for 2nd GCL": lets i226 configure a second GCL without resetting the adapter. The cover letter says this is "for new i226 steps". Which steps is not stated. This adapter reports PCI REV_04.
+- `igc_main.c:6514-6516` counts a change with a past base on a running schedule as `qbv_config_change_errors`, so `--move-base` was outside upstream's supported path.
+- No upstream text found states what happens to a running schedule when `BaseT` is written.
+- The manual revision held here does not describe this bit. The section upstream cites covers the first packet of a cycle, so the upstream citation cannot be checked against it.
+
+Interpretation of "TX hang", not stated by upstream: Linux has a 5 s watchdog (`igc_main.c:7196`) and a software unit-hang check (`igc_main.c:3249-3261`), so the warning may mean software timeouts on held packets and not a hardware fault. Unproven.
+
+So the earlier statement that a NIC cycle is likely needed for a new schedule was premature. Three runs rule out neither a future `BaseT` on a running schedule nor `FutScdDis` with the zero write.
+
+`--future-base` review: it matches upstream's condition for the first schedule: `BaseT` zero, future base, no `FutScdDis`. It differs in that the hold is 1 to 2 s, under the 5 s watchdog, frames are already held from `SETUP_TAS`, upstream resets the adapter on the mode change and programs before traffic, and the miniport's hang logic is unknown. It can show when a first schedule starts. It cannot reproduce a hang. A comparison needs both `--future-base` and `--future-base-futscd`.
+
+Tool additions: `schedule` lines with all schedule registers and the PHC at each pattern start and end; a post-cycle timeline of link state, `COLD` and `TSYNCRXCTL` on its own handle, with host times and marks; `--move-futscd` and `--future-base-futscd`. Exit codes and thresholds are unchanged.
+
+### Replacing a running schedule with a future `BaseT`, 2026-11-05 (LOCAL_DIAGNOSTIC)
+
+Debug driver FB64A096, I226 0x125B REV_04, I210 capture, 1 s cycle, one run. Windows, shadow, cycle and `BaseT` = 1885.000000000 s written at PHC 1883.33 s, no `FutScdDis`, no `TXQCTL` flags, no NIC cycle.
+
+| PHC second | In 200-400 ms | In 600-800 ms | Elsewhere |
+|---|---|---|---|
+| 1883 | 2 | 0 | 0 |
+| 1884 | 15 | 0 | 0 |
+| 1885 | 0 | 22 | 0 |
+| 1886 to 1895 | 0 | 154 | 0 |
+
+The new schedule took effect. Nothing arrived in 600-800 ms at 1884 and nothing in 200-400 ms at 1885, so activation lies between 1884.8 and 1885.2 s, which contains the intended boundary. Host timing cannot bracket it closer in this schedule. 193 of 193 frames arrived, 0 reordered. The longest hold was 1151.9 ms, across the transition. The phase stayed on the old grid.
+
+Four separate facts:
+- Programmed: all writes returned ok.
+- Retained: windows, shadow and cycle read back as written from the moment of the write, about 1.7 s before they took effect.
+- `BaseT` readback: `BASET_H` read back the old 0x75C, not 0x75D, and kept advancing to 0x76B. The pending value was never visible.
+- Active: shown only by frame arrivals.
+
+So register reads cannot separate a pending schedule from an active one, or from a write that will never apply.
+
+The fixed-schedule model is refuted. The only difference from `--move-base` is `BaseT` in the future, not the past, which matches upstream. Stepping is not an obstacle for this route on REV_04. `FutScdDis` was not needed. Not isolated: whether the shadow and cycle writes are required, and whether a cycle change applies.
+
+`--move-toggle` repeat: 0 of 194 frames in 600-800 ms, 175 and 19 in the 200 and 300 bins. Same result in 2 of 2 runs. Exit 2 this time.
+
+Restoration in both runs: 42 of 42 registers equal at the first read and after the post-cycle TX, TX 49 of 49, PHC reset by the cycle as before, exit 2. PHC showed no step across the replacement, drift 2.930 %. Descriptors: fetched 206 and occupancy 0 in the moved segment; `SETUP_TAS` occupancy 16 and gauge 11 in the toggle run, the first nonzero values in that step in the runs reviewed.
+
+Post-cycle timeline, sampled every 50 ms:
+
+| Run | Before link | Link-up after enable | At link-up |
+|---|---|---|---|
+| `--move-future` | `COLD` 0x040, `TSYNCRXCTL` 0x18 | 3.15 s | `COLD` 0x03F, 0x19 |
+| `--move-toggle` repeat | `COLD` 0x040, `TSYNCRXCTL` 0x18 | 3.45 s | `COLD` 0x03F, 0x19 |
+
+`COLD` changed in the same sample as link-up in 2 of 2 runs, which supports the earlier exit 1 being a read before link setup. It was not reproduced, as link-up took 3 s in both, so that exit 1 stands as recorded. `TSYNCRXCTL` bit 6 was not seen in any sample and stays unexplained and unclassified. Bit 0 also changed during TX, 0x18 then 0x19 within 62 ms, once.
+
+First-frame delay and loss: after 1787 s idle, frame 0 was 137.6 ms late and seq 1 and 2 were lost; both were sent before frame 0 arrived. Six earlier delays of 41.5 to 57.5 ms were below the 62 ms send period and lost nothing. Candidate only, from one case: frames sent during that delay are lost. Two post-cycle delays, 41.5 and 52.5 ms, came with link up for only seconds, so long idle is not required. One observer cannot say where it happens.
+
+First-cycle stray frames: 6 of 6 arms after the window end, 0 of 5 before or inside it. Inference.
