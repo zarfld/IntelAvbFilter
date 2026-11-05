@@ -35,6 +35,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_restore.h"
 #include "../ioctl/tas_restoration_eval.h"
 #include "../ioctl/tas_wire_match.h"
+#include "../ioctl/tas_lifecycle_eval.h"
 
 /* =========================================================================
  * Mock infrastructure
@@ -570,6 +571,191 @@ static void test_09_negative_tests_always_executable(void) {
     EXPECT_EQ("negative test executes independently of restore capability", neg_test_result, TC_PASS);
 }
 
+/*
+ * TC-MOCK-014: which adapter a FilterPause/FilterRestart trigger may name (#364).
+ *
+ * Record layout (USHORT byte length, then UTF-16 name without terminator) is from IOCTL_FILTER_ENUERATE_ALL_INSTANCES in
+ * src/device.c. Name layout {interface GUID}-{filter GUID}-0000 was observed once, on the I210 instance, in
+ * logs/dbgview_test_ptp_phc_stability.exe_20260430_123620.log; its first GUID is that adapter's InterfaceGuid and its
+ * second is NetCfgInstanceId in the INF. The I226 record below is built on that layout and is UNVERIFIED. The driver
+ * matches by prefix (filterFindFilterModule), which is why a prefix counts as ambiguous.
+ */
+#define FILTER_GUID_TEXT L"{3F74AE86-14F9-4E79-9445-5B1E52CCD192}"
+#define I210_GUID_TEXT   L"{9F90590F-E0F0-46B7-A69E-BF0A45DEDB6C}"
+#define I226_GUID_TEXT   L"{5989BA55-D568-47A4-AFBF-B47F27E1B435}"
+
+static DWORD put_instance(BYTE *list, DWORD at, const WCHAR *name) {
+    USHORT bytes = (USHORT)(wcslen(name) * sizeof(WCHAR));
+    memcpy(list + at, &bytes, sizeof(bytes));
+    memcpy(list + at + sizeof(bytes), name, bytes);
+    return at + sizeof(bytes) + bytes;
+}
+
+static void test_14_instance_find(void) {
+    static const WCHAR i210[] = I210_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
+    static const WCHAR i226[] = I226_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
+    BYTE list[512];
+    const WCHAR *name = NULL;
+    USHORT bytes = 0;
+    DWORD used;
+
+    printf("\n[TC-MOCK-014] Exact instance for one adapter\n");
+    used = put_instance(list, 0, i210);
+    used = put_instance(list, used, i226);
+    EXPECT_EQ("the adapter's own record", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_FOUND);
+    EXPECT_EQ("name length is the record's own", bytes, (int)(wcslen(i226) * sizeof(WCHAR)));
+    EXPECT_TRUE("name points at that record", name != NULL && memcmp(name, i226, bytes) == 0);
+    EXPECT_EQ("GUID text in any case", tas_instance_find(list, used, L"{5989ba55-d568-47a4-afbf-b47f27e1b435}", &name, &bytes), TAS_INSTANCE_FOUND);
+
+    EXPECT_EQ("adapter not listed", tas_instance_find(list, used, L"{D44A7E27-72EE-480D-958C-558FACF2B105}", &name, &bytes), TAS_INSTANCE_NONE);
+    EXPECT_EQ("empty list", tas_instance_find(list, 0, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+    EXPECT_EQ("the filter GUID names no adapter", tas_instance_find(list, used, FILTER_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+
+    used = put_instance(list, 0, I226_GUID_TEXT L"X" FILTER_GUID_TEXT L"-0000");
+    EXPECT_EQ("the GUID must end at its separator", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+    used = put_instance(list, 0, I226_GUID_TEXT);
+    EXPECT_EQ("the GUID alone is not an instance", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+
+    used = put_instance(list, 0, i226);
+    used = put_instance(list, used, I226_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0001");
+    EXPECT_EQ("two records name the adapter", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+
+    /* The driver stops at the first prefix match, so the shorter record would be restarted instead */
+    used = put_instance(list, 0, L"{5989BA55");
+    used = put_instance(list, used, i226);
+    EXPECT_EQ("another record is a prefix of the name", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+    used = put_instance(list, 0, L"");
+    used = put_instance(list, used, i226);
+    EXPECT_EQ("an empty record is a prefix of everything", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+
+    used = put_instance(list, 0, i226);
+    EXPECT_EQ("list cut inside a name", tas_instance_find(list, used - 2, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+    EXPECT_EQ("list cut inside a length", tas_instance_find(list, 1, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+    list[0] = 3; list[1] = 0;
+    EXPECT_EQ("odd byte length is not UTF-16", tas_instance_find(list, 16, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+}
+
+static TAS_LIFECYCLE_EVIDENCE full_lifecycle_evidence(void) {
+    TAS_LIFECYCLE_EVIDENCE e;
+    memset(&e, 0, sizeof(e));
+    e.pause_delta = 1;
+    e.restart_delta = 1;
+    e.generation_delta = 1;
+    e.traffic_shown = TRUE;
+    return e;
+}
+
+/* TC-MOCK-015: a successful IOCTL and entry counters are never completion (#364) */
+static void test_15_lifecycle_outcome(void) {
+    TAS_LIFECYCLE_EVIDENCE e;
+    AVB_DRIVER_STATISTICS before, after;
+
+    printf("\n[TC-MOCK-015] Lifecycle outcome from the evidence\n");
+    e = full_lifecycle_evidence();
+    EXPECT_EQ("entries plus traffic through the stack", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESUMED);
+
+    e = full_lifecycle_evidence(); e.traffic_shown = FALSE;
+    EXPECT_EQ("entry counters alone are not completion", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESTART_ENTERED);
+
+    memset(&e, 0, sizeof(e));
+    EXPECT_EQ("no counter moved: the IOCTL's success means nothing", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_NOT_TRIGGERED);
+    e.traffic_shown = TRUE;
+    EXPECT_EQ("traffic without a lifecycle event", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_NOT_TRIGGERED);
+
+    e = full_lifecycle_evidence(); e.restart_delta = 0; e.traffic_shown = FALSE;
+    EXPECT_EQ("Pause entered, Restart not within the bound", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_PAUSE_ONLY);
+
+    e = full_lifecycle_evidence(); e.detach_delta = 1;
+    EXPECT_EQ("detach outranks everything", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+    e = full_lifecycle_evidence(); e.attach_delta = 1;
+    EXPECT_EQ("attach outranks everything", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+    e = full_lifecycle_evidence(); e.pause_delta = -7;
+    EXPECT_EQ("a counter ran backwards: new context", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+
+    e = full_lifecycle_evidence(); e.pause_delta = 2; e.restart_delta = 2; e.generation_delta = 2;
+    EXPECT_EQ("two cycles cannot be attributed to the trigger", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_OVERLAPPED);
+    e = full_lifecycle_evidence(); e.pause_delta = 0; e.generation_delta = 0;
+    EXPECT_EQ("Restart without Pause", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_OVERLAPPED);
+    e = full_lifecycle_evidence(); e.generation_delta = 0;
+    EXPECT_EQ("generation disagrees with Pause", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_OVERLAPPED);
+
+    /* Counters are unsigned and a new context restarts them, so a fall must arrive here as a negative delta */
+    memset(&before, 0, sizeof(before));
+    before.FilterPauseCount = 5; before.FilterRestartCount = 6; before.PauseRestartGeneration = 7;
+    before.FilterDetachCount = 2; before.FilterAttachCount = 3;
+    after = before;
+    after.FilterPauseCount++; after.FilterRestartCount++; after.PauseRestartGeneration++;
+    tas_lifecycle_evidence(&before, &after, TRUE, &e);
+    EXPECT_EQ("one cycle read from the counters", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESUMED);
+    tas_lifecycle_evidence(&before, &after, FALSE, &e);
+    EXPECT_EQ("the same counters without traffic", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_RESTART_ENTERED);
+    memset(&after, 0, sizeof(after));
+    tas_lifecycle_evidence(&before, &after, TRUE, &e);
+    EXPECT_TRUE("a fallen counter is a negative delta", e.pause_delta == -5);
+    EXPECT_EQ("fallen counters are a new context", tas_lifecycle_outcome(&e), TAS_LIFECYCLE_CONTEXT_REPLACED);
+}
+
+/* TC-MOCK-016: without a hardware-derived tolerance the only claim available is a clock that did not advance */
+static void test_16_phc_fact(void) {
+    printf("\n[TC-MOCK-016] PHC fact without a tolerance\n");
+    EXPECT_EQ("before unreadable", tas_phc_fact(FALSE, TRUE, 10, 20), TAS_PHC_UNMEASURED);
+    EXPECT_EQ("after unreadable", tas_phc_fact(TRUE, FALSE, 10, 20), TAS_PHC_UNMEASURED);
+    EXPECT_EQ("backwards is a demonstrated discontinuity", tas_phc_fact(TRUE, TRUE, 20, 10), TAS_PHC_DISCONTINUOUS);
+    EXPECT_EQ("a clock that stood still is discontinuous", tas_phc_fact(TRUE, TRUE, 10, 10), TAS_PHC_DISCONTINUOUS);
+    EXPECT_EQ("forwards is not continuity", tas_phc_fact(TRUE, TRUE, 10, 20), TAS_PHC_NOT_JUDGED);
+}
+
+/* TC-MOCK-017: snapshots compare per register and never count what the family does not define */
+static void test_17_snapshot_compare(void) {
+    AVB_HW_SNAPSHOT_REQUEST before, after;
+    unsigned changed, unreadable, compared;
+    unsigned i;
+
+    printf("\n[TC-MOCK-017] Dedicated register snapshot comparison\n");
+    memset(&before, 0, sizeof(before));
+    before.count = AVB_HWREG_COUNT;
+    for (i = 0; i < AVB_HWREG_COUNT; i++) {
+        before.entries[i].id = i + 1;
+        before.entries[i].state = AVB_HWREG_STATE_VALID;
+        before.entries[i].value = i;
+    }
+    after = before;
+    tas_snapshot_compare(&before, &after, &compared, &changed, &unreadable);
+    EXPECT_EQ("all compared", compared, AVB_HWREG_COUNT);
+    EXPECT_EQ("none changed", changed, 0);
+    EXPECT_EQ("none unreadable", unreadable, 0);
+
+    after.entries[2].value = 99;
+    tas_snapshot_compare(&before, &after, &compared, &changed, &unreadable);
+    EXPECT_EQ("value differs", changed, 1);
+
+    after = before;
+    before.entries[3].state = after.entries[3].state = AVB_HWREG_STATE_NOT_IN_SSOT;
+    tas_snapshot_compare(&before, &after, &compared, &changed, &unreadable);
+    EXPECT_EQ("not defined for this family: not compared", compared, AVB_HWREG_COUNT - 1);
+    EXPECT_EQ("not defined is not a change", changed, 0);
+    EXPECT_EQ("not defined is not unreadable", unreadable, 0);
+    before.entries[3].state = AVB_HWREG_STATE_VALID;
+
+    after = before;
+    after.entries[4].state = AVB_HWREG_STATE_READ_FAILED;
+    tas_snapshot_compare(&before, &after, &compared, &changed, &unreadable);
+    EXPECT_EQ("a failed read is unmeasured", unreadable, 1);
+    EXPECT_EQ("a failed read is no difference", changed, 0);
+
+    after = before;
+    after.entries[5].value = 99;
+    after.entries[5].state = AVB_HWREG_STATE_NO_MMIO;
+    tas_snapshot_compare(&before, &after, &compared, &changed, &unreadable);
+    EXPECT_EQ("losing MMIO is unmeasured", unreadable, 1);
+
+    after = before;
+    after.count = 0;
+    tas_snapshot_compare(&before, &after, &compared, &changed, &unreadable);
+    EXPECT_EQ("an empty snapshot compares nothing", compared, 0);
+    EXPECT_EQ("an empty snapshot is unmeasured", unreadable, AVB_HWREG_COUNT);
+}
+
 /* =========================================================================
  * Main
  * ========================================================================= */
@@ -596,6 +782,10 @@ int main(void) {
     test_11_skip_distinct_from_pass();
     test_12_restoration_outcome();
     test_13_wire_match();
+    test_14_instance_find();
+    test_15_lifecycle_outcome();
+    test_16_phc_fact();
+    test_17_snapshot_compare();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

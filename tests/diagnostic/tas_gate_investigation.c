@@ -82,7 +82,23 @@
  * Exit: 0 registers, TX and PHC all restored; 1 registers differ, TX unhealthy or the cycle failed; 2 registers and TX
  * restored but the PHC is not continuous; 3 not run (nothing mutated).
  *
- * Verifies: #328
+ * --lifecycle-a --observer <did> [--dry-run] is Case A of #364: one FilterPause and FilterRestart of the adapter named by
+ * AVB_HIL_TARGET_DID, with no schedule, as the control for Cases B to E. It is a separate path from everything above: it
+ * uses dedicated IOCTLs only, no READ_REGISTER or WRITE_REGISTER, so no register map decides what it does. Both identities
+ * only select adapters; the target must advertise TAS, and the observer proves itself by seeing the baseline frames.
+ * --dry-run stops before the trigger, so the instance name can be checked with nothing mutated.
+ *
+ * Case A mutations: the restart itself, which by source reseeds the PHC and rewrites timestamp configuration, and bounded
+ * broadcast and ICMP. There is no NIC cycle: it would add a second PHC reset and a new context to the evidence. Recovery is
+ * the operator's. No MMIO runs from before the trigger until the lifecycle is shown, as #350 requires of a filter that is not
+ * known to be Running: statistics are polled throughout, as they touch no hardware, frames follow only a Restart entry, and
+ * the clock and snapshot follow only those frames. Short of that the run stops, with those facts unmeasured.
+ *
+ * Case A exit: 0 nothing demonstrably wrong, which does not claim PHC continuity; 1 lifecycle not shown, or register, TX,
+ * consistency or another adapter differs; 2 all of those fine but the PHC is demonstrably discontinuous; 3 not run.
+ * What each result may claim is in tas_lifecycle_eval.h.
+ *
+ * Verifies: #328, #364
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -99,7 +115,11 @@
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
 #include "../../intel-ethernet-regs/gen/i226_regs.h"
+typedef int NDIS_PARAMETER_TYPE;   /* a kernel type in structures of filteruser.h that this tool does not use: only its IOCTL codes are */
+#include "../../src/filteruser.h"
+#include "../common/avb_test_common.h"
 #include "../hardware/tas_wire_observer.h"
+#include "../ioctl/tas_lifecycle_eval.h"
 
 #define DEVICE_NAME          "\\\\.\\IntelAvbFilter"
 #define TAG                  "[LOCAL_DIAGNOSTIC]"
@@ -147,6 +167,11 @@
 #define ENABLE_BOUND_MS      60000
 #define RETURN_BOUND_MS      60000
 #define SETTLE_MS            5000
+#define TRIGGER_BOUND_MS     5000     /* the trigger only schedules, so it should return at once */
+#define LIFECYCLE_BOUND_MS   60000    /* a stop condition, not an acceptance criterion */
+#define LIFECYCLE_POLL_MS    10
+#define INSTANCE_LIST_BYTES  16384
+#define GUID_TEXT_CHARS      39
 #define NET_CLASS_KEY        "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
 typedef struct { const char *name; uint32_t offset; } REG;
@@ -184,6 +209,7 @@ static HANDLE g_sampler;
 static volatile LONG g_sampler_stop;
 static unsigned g_rearm_cycles;
 static LONGLONG g_send_us[WIRE_MAX_FRAMES];
+static BOOL g_dedicated_only;
 
 typedef struct { DEVINST inst; BOOL enable; CONFIGRET result; } CM_CALL;
 
@@ -343,10 +369,10 @@ static void snap(HANDLE h, avb_u64 luid, SNAP *s)
     ZeroMemory(&st, sizeof(st));
     ZeroMemory(&row, sizeof(row));
     row.InterfaceLuid.Value = luid;
-    s->ok = read_reg(h, I226_TDH0, &s->tdh) && read_reg(h, I226_TDT0, &s->tdt) && read_reg(h, I226_TDLEN0, &tdlen) &&
-            tdlen >= TX_DESCRIPTOR_BYTES &&
+    s->ok = (g_dedicated_only || (read_reg(h, I226_TDH0, &s->tdh) && read_reg(h, I226_TDT0, &s->tdt) && read_reg(h, I226_TDLEN0, &tdlen) &&
+                                  tdlen >= TX_DESCRIPTOR_BYTES)) &&
             DeviceIoControl(h, IOCTL_AVB_GET_STATISTICS, &st, sizeof(st), &st, sizeof(st), &br, NULL) && GetIfEntry2(&row) == NO_ERROR;
-    s->ring = s->ok ? tdlen / TX_DESCRIPTOR_BYTES : 1;
+    s->ring = (s->ok && !g_dedicated_only) ? tdlen / TX_DESCRIPTOR_BYTES : 1;
     s->gauge = st.OutstandingSendNBLs;
     s->os_out = row.OutUcastPkts + row.OutNUcastPkts;
     wire_counts(&s->captured, &s->from_target);
@@ -1034,6 +1060,405 @@ static SOCKET open_tx_socket(IN_ADDR ipv4)
     return sock;
 }
 
+static BOOL read_stats(HANDLE h, AVB_DRIVER_STATISTICS *st)
+{
+    DWORD br = 0;
+
+    ZeroMemory(st, sizeof(*st));
+    return DeviceIoControl(h, IOCTL_AVB_GET_STATISTICS, st, sizeof(*st), st, sizeof(*st), &br, NULL);
+}
+
+static BOOL read_snapshot(HANDLE h, AVB_HW_SNAPSHOT_REQUEST *s)
+{
+    DWORD br = 0;
+
+    ZeroMemory(s, sizeof(*s));
+    s->version = AVB_HW_SNAPSHOT_VERSION;
+    return DeviceIoControl(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, s, sizeof(*s), s, sizeof(*s), &br, NULL) && s->status == 0;
+}
+
+static BOOL read_hw_state(HANDLE h, AVB_HW_STATE_QUERY *q)
+{
+    DWORD br = 0;
+
+    ZeroMemory(q, sizeof(*q));
+    return DeviceIoControl(h, IOCTL_AVB_GET_HW_STATE, q, sizeof(*q), q, sizeof(*q), &br, NULL);
+}
+
+static int oper_status(avb_u64 luid)
+{
+    MIB_IF_ROW2 row;
+
+    ZeroMemory(&row, sizeof(row));
+    row.InterfaceLuid.Value = luid;
+    return GetIfEntry2(&row) == NO_ERROR ? (int)row.OperStatus : -1;
+}
+
+static void print_clock(HANDLE h, const char *label)
+{
+    AVB_CLOCK_CONFIG c;
+    DWORD br = 0;
+
+    ZeroMemory(&c, sizeof(c));
+    if (DeviceIoControl(h, IOCTL_AVB_GET_CLOCK_CONFIG, &c, sizeof(c), &c, sizeof(c), &br, NULL)) {
+        printf("    clock %s systim=%llu timinca=0x%08X tsauxc=0x%08X rateMhz=%u\n", label, (unsigned long long)c.systim, c.timinca, c.tsauxc, c.clock_rate_mhz);
+    } else {
+        printf("    clock %s unreadable (error %lu)\n", label, GetLastError());
+    }
+}
+
+/** Every instance the driver lists, then the one record that names this adapter */
+static TAS_INSTANCE_RESULT find_instance(HANDLE h, avb_u64 luid, const WCHAR **name, USHORT *name_bytes)
+{
+    static BYTE list[INSTANCE_LIST_BYTES];   /* static: the trigger thread may outlive the call that started it */
+    WCHAR guid_text[GUID_TEXT_CHARS];
+    NET_LUID l;
+    GUID g;
+    DWORD br = 0, at;
+
+    l.Value = luid;
+    if (ConvertInterfaceLuidToGuid(&l, &g) != NO_ERROR) {
+        return TAS_INSTANCE_NONE;
+    }
+    swprintf_s(guid_text, GUID_TEXT_CHARS, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", g.Data1, g.Data2, g.Data3, g.Data4[0], g.Data4[1],
+               g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
+    if (!DeviceIoControl(h, IOCTL_FILTER_ENUERATE_ALL_INSTANCES, NULL, 0, list, sizeof(list), &br, NULL)) {
+        printf(TAG " instance list unreadable (error %lu)\n", GetLastError());
+        return TAS_INSTANCE_MALFORMED;
+    }
+    printf("    target adapter GUID %ls, instance list %lu bytes\n", guid_text, br);
+    for (at = 0; at + sizeof(USHORT) <= br;) {
+        USHORT bytes;
+
+        memcpy(&bytes, list + at, sizeof(bytes));
+        at += sizeof(USHORT);
+        if (bytes > br - at) {
+            break;
+        }
+        printf("    instance %.*ls\n", (int)(bytes / sizeof(WCHAR)), (const WCHAR *)(list + at));
+        at += bytes;
+    }
+    return tas_instance_find(list, br, guid_text, name, name_bytes);
+}
+
+typedef struct { HANDLE h; const WCHAR *name; USHORT bytes; BOOL ok; DWORD error; } TRIGGER_CALL;
+
+static DWORD WINAPI trigger_thread(LPVOID arg)
+{
+    TRIGGER_CALL *call = (TRIGGER_CALL *)arg;
+    DWORD br = 0;
+
+    call->ok = DeviceIoControl(call->h, IOCTL_FILTER_RESTART_ONE_INSTANCE, (LPVOID)call->name, call->bytes, NULL, 0, &br, NULL);
+    call->error = call->ok ? ERROR_SUCCESS : GetLastError();
+    return 0;
+}
+
+/** Issues the trigger on its own handle, so a blocked call cannot stop the statistics polling. Its result proves nothing */
+static BOOL trigger_restart(const WCHAR *name, USHORT bytes)
+{
+    static TRIGGER_CALL call;   /* static: survives an abandoned, still blocked thread */
+    HANDLE thread;
+    DWORD wait;
+
+    call.h = open_device();
+    call.name = name;
+    call.bytes = bytes;
+    call.ok = FALSE;
+    if (call.h == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+    thread = CreateThread(NULL, 0, trigger_thread, &call, 0, NULL);
+    if (thread == NULL) {
+        return FALSE;
+    }
+    wait = WaitForSingleObject(thread, TRIGGER_BOUND_MS);
+    CloseHandle(thread);
+    if (wait != WAIT_OBJECT_0) {
+        printf(TAG " the trigger did not return within %d ms\n", TRIGGER_BOUND_MS);
+        return FALSE;
+    }
+    printf(TAG " trigger returned ok=%d error=%lu; this proves nothing about the lifecycle\n", call.ok, call.error);
+    return call.ok;
+}
+
+/** Polls statistics until the Restart entry, a sign of a new context, or the bound. Each change is printed with its host time */
+static void lifecycle_wait(HANDLE h, const AVB_DRIVER_STATISTICS *before)
+{
+    AVB_DRIVER_STATISTICS st, last = *before;
+    DWORD start = GetTickCount();
+
+    while (GetTickCount() - start < LIFECYCLE_BOUND_MS) {
+        if (!read_stats(h, &st)) {
+            printf(TAG " statistics unreadable during the lifecycle (error %lu)\n", GetLastError());
+            return;
+        }
+        if (st.FilterPauseCount != last.FilterPauseCount || st.FilterRestartCount != last.FilterRestartCount ||
+            st.PauseRestartGeneration != last.PauseRestartGeneration || st.FilterDetachCount != last.FilterDetachCount ||
+            st.FilterAttachCount != last.FilterAttachCount) {
+            printf("    lifecycle hostUs=%lld pause=%llu restart=%llu generation=%llu attach=%llu detach=%llu gauge=%llu\n", host_us(),
+                   st.FilterPauseCount, st.FilterRestartCount, st.PauseRestartGeneration, st.FilterAttachCount, st.FilterDetachCount, st.OutstandingSendNBLs);
+            last = st;
+        }
+        if (st.FilterRestartCount != before->FilterRestartCount || st.FilterAttachCount != before->FilterAttachCount ||
+            st.FilterDetachCount != before->FilterDetachCount || st.FilterPauseCount < before->FilterPauseCount) {
+            return;
+        }
+        Sleep(LIFECYCLE_POLL_MS);
+    }
+    printf(TAG " no Restart entry within %d ms; stopping here is a stop condition, not a result\n", LIFECYCLE_BOUND_MS);
+}
+
+/** Lifecycle counters since before, optionally with traffic shown. Printed so that every way out leaves the same line */
+static TAS_LIFECYCLE_OUTCOME lifecycle_read(HANDLE h, const AVB_DRIVER_STATISTICS *before, AVB_DRIVER_STATISTICS *after, BOOL traffic)
+{
+    TAS_LIFECYCLE_EVIDENCE e;
+    TAS_LIFECYCLE_OUTCOME outcome;
+
+    if (!read_stats(h, after)) {
+        printf(TAG " statistics unreadable after the trigger (error %lu); counters read as zero, which is a new context\n", GetLastError());
+    }
+    tas_lifecycle_evidence(before, after, traffic, &e);
+    outcome = tas_lifecycle_outcome(&e);
+    printf(TAG " lifecycle %s pauseDelta=%lld restartDelta=%lld generationDelta=%lld attachDelta=%lld detachDelta=%lld statusDelta=%lld netPnpDelta=%lld gauge=%llu\n",
+           tas_lifecycle_name(outcome), e.pause_delta, e.restart_delta, e.generation_delta, e.attach_delta, e.detach_delta,
+           (LONGLONG)(after->FilterStatusCount - before->FilterStatusCount), (LONGLONG)(after->FilterNetPnPCount - before->FilterNetPnPCount), after->OutstandingSendNBLs);
+    return outcome;
+}
+
+/** Statistics and link of every adapter but the target. Touches no hardware. Returns how many changed */
+static unsigned report_others(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const HANDLE *others, const AVB_DRIVER_STATISTICS *before, int n, int t)
+{
+    AVB_DRIVER_STATISTICS st;
+    unsigned differs_count = 0;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        BOOL differs;
+
+        if (i == t) {
+            continue;
+        }
+        ZeroMemory(&st, sizeof(st));
+        differs = !read_stats(others[i], &st) || st.FilterPauseCount != before[i].FilterPauseCount || st.FilterRestartCount != before[i].FilterRestartCount ||
+                  st.FilterAttachCount != before[i].FilterAttachCount || st.FilterDetachCount != before[i].FilterDetachCount;
+        printf("    other adapter did=0x%04X pause=%llu restart=%llu attach=%llu detach=%llu oper=%d %s\n", ids[i].device_id, st.FilterPauseCount, st.FilterRestartCount,
+               st.FilterAttachCount, st.FilterDetachCount, oper_status(ids[i].net_luid), differs ? "CHANGED" : "unchanged");
+        differs_count += differs ? 1u : 0u;
+    }
+    printf(TAG " other adapters changed=%u of %d\n", differs_count, n - 1);
+    return differs_count;
+}
+
+/** Case A of #364. See the file header for what it does and what its exit codes mean */
+static int lifecycle_case_a(const char *observer_did, BOOL dry_run)
+{
+    AVB_ADAPTER_IDENTITY_REQUEST ids[AVB_MAX_ADAPTERS], id;
+    unsigned short dids[AVB_MAX_ADAPTERS];
+    HANDLE others[AVB_MAX_ADAPTERS];
+    AVB_DRIVER_STATISTICS other_before[AVB_MAX_ADAPTERS], before, after;
+    AVB_HW_SNAPSHOT_REQUEST snap_before, snap_after;
+    AVB_HW_STATE_QUERY hw_before, hw_after;
+    TAS_LIFECYCLE_OUTCOME outcome;
+    TAS_PHC_FACT phc_fact;
+    IOCTL_VERSION version = {0};
+    LARGE_INTEGER qpc_before;
+    WSADATA wsa;
+    IN_ADDR ipv4;
+    const WCHAR *name = NULL;
+    USHORT name_bytes = 0;
+    char value[32];
+    SOCKET sock = INVALID_SOCKET;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    unsigned long long phc_before = 0, phc_after = 0;
+    unsigned compared = 0, changed = 0, unreadable = 0, armed_before = 1, armed_after = 1, seen = 0, first, other_differs;
+    int t = -1, o = -1, target_oper, selection, rc = 3, n = 0, i;
+    UINT32 count = 1, index;
+    DWORD br = 0, length;
+    BOOL other_link = FALSE, capture_alive = TRUE, phc_before_ok, phc_after_ok, traffic = FALSE, consistent, wire_up = FALSE;
+    TAS_INSTANCE_RESULT instance;
+
+    g_dedicated_only = TRUE;
+    ZeroMemory(others, sizeof(others));
+    printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart%s\n", dry_run ? " (dry run, no trigger)" : "");
+    printf(TAG " descFetched and occupancy below are not measured: dedicated IOCTLs only\n");
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf(TAG " not run: Winsock unavailable\n");
+        return 3;
+    }
+    h = open_device();
+    if (h == INVALID_HANDLE_VALUE) {
+        printf(TAG " not run: cannot open %s (error %lu)\n", DEVICE_NAME, GetLastError());
+        goto done;
+    }
+    if (!DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) ||
+        (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) == 0) {
+        printf(TAG " not run: #364 is a Debug-only investigation\n");
+        goto done;
+    }
+    for (index = 0; index < count && n < AVB_MAX_ADAPTERS && identity_at(h, index, &id); index++) {
+        count = id.count;
+        ids[n] = id;
+        dids[n] = id.device_id;
+        printf("    adapter %d did=0x%04X caps=0x%08X luid=0x%016llX oper=%d\n", n, id.device_id, id.capabilities, id.net_luid, oper_status(id.net_luid));
+        n++;
+    }
+    length = GetEnvironmentVariableA(AVB_TEST_TARGET_ENV, value, (DWORD)sizeof(value));
+    selection = length >= sizeof(value) ? AVB_TARGET_BAD_VALUE : AvbTestSelectTargetIndex(dids, n, length == 0 ? NULL : value, &t);
+    if (selection != AVB_TARGET_OK) {
+        printf(TAG " not run: target %s\n", AvbTargetSelectionName(selection));
+        goto done;
+    }
+    selection = AvbTestSelectTargetIndex(dids, n, observer_did, &o);
+    if (selection != AVB_TARGET_OK || o == t) {
+        printf(TAG " not run: observer %s\n", o == t ? "is the target" : AvbTargetSelectionName(selection));
+        goto done;
+    }
+    if ((ids[t].capabilities & INTEL_CAP_TSN_TAS) == 0) {
+        printf(TAG " not run: the target does not advertise TAS, so this control has no cases to serve\n");
+        goto done;
+    }
+    if (!bind_luid(h, ids[t].net_luid) || !find_addressing(ids[t].net_luid, &ipv4, &other_link) || !other_link) {
+        printf(TAG " not run: needs a bound target with link and IPv4, and a separate management link\n");
+        goto done;
+    }
+    if (!read_armed(h, &armed_before) || armed_before != 0) {
+        printf(TAG " not run: Case A needs tasArmed=0\n");
+        goto done;
+    }
+    if (!read_snapshot(h, &snap_before) || snap_before.net_luid != ids[t].net_luid || !read_hw_state(h, &hw_before)) {
+        printf(TAG " not run: the register snapshot or hardware state is unreadable, or is not the target's\n");
+        goto done;
+    }
+    instance = find_instance(h, ids[t].net_luid, &name, &name_bytes);
+    if (instance != TAS_INSTANCE_FOUND) {
+        printf(TAG " not run: no unique instance for the target (result %d); the trigger would not be exact\n", (int)instance);
+        goto done;
+    }
+    printf(TAG " target did=0x%04X instance=%.*ls observer did=0x%04X\n", ids[t].device_id, (int)(name_bytes / sizeof(WCHAR)), name, ids[o].device_id);
+    for (i = 0; i < n; i++) {
+        if (i == t) {
+            continue;
+        }
+        others[i] = open_device();
+        if (others[i] == INVALID_HANDLE_VALUE || !bind_luid(others[i], ids[i].net_luid) || !read_stats(others[i], &other_before[i])) {
+            printf(TAG " not run: adapter did=0x%04X cannot be watched, so effects on it could not be excluded\n", ids[i].device_id);
+            goto done;
+        }
+    }
+    sock = open_tx_socket(ipv4);
+    if (sock == INVALID_SOCKET) {
+        printf(TAG " not run: socket setup failed (%d)\n", WSAGetLastError());
+        goto done;
+    }
+    g_capture_luid = ids[o].net_luid;
+    if (wire_start(ids[t].net_luid, g_capture_luid, ids[t].mac, GetTickCount() ^ GetCurrentProcessId(), ipv4) == 0) {
+        printf(TAG " not run: the observer capture could not be started\n");
+        goto done;
+    }
+    wire_up = TRUE;
+    first = g_next_seq;
+    seen = tx_step(h, ids[t].net_luid, sock, BASELINE_MS, "baseline", g_next_seq, &capture_alive);
+    if (!capture_alive || (unsigned long long)seen * 100 < (unsigned long long)(g_next_seq - first) * WIRE_MIN_PERCENT) {
+        printf(TAG " not run: the observer did not see the baseline frames, so it proves nothing here; nothing mutated\n");
+        goto done;
+    }
+    if (dry_run) {
+        printf(TAG " dry run complete: instance and observer proved, nothing triggered\n");
+        goto done;
+    }
+
+    /* The state that matters is the one just before the trigger */
+    print_clock(h, "before");
+    phc_pairs(h, "before");
+    observer_line("before");
+    phc_before_ok = read_systim(h, &phc_before);
+    QueryPerformanceCounter(&qpc_before);
+    if (!read_stats(h, &before) || oper_status(ids[t].net_luid) != IfOperStatusUp) {
+        printf(TAG " not run: statistics or link changed before the trigger; nothing mutated\n");
+        goto done;
+    }
+    printf("    lifecycle hostUs=%lld trigger issued pause=%llu restart=%llu generation=%llu attach=%llu detach=%llu gauge=%llu\n", host_us(), before.FilterPauseCount,
+           before.FilterRestartCount, before.PauseRestartGeneration, before.FilterAttachCount, before.FilterDetachCount, before.OutstandingSendNBLs);
+    (void)trigger_restart(name, name_bytes);
+    lifecycle_wait(h, &before);
+    Sleep(SETTLE_MS);   /* FilterRestartCount moves on entry, before the bring-up, and no signal marks its end */
+
+    /* #350: no MMIO unless the filter is Running. Frames come first: they need no MMIO, and they are the evidence for it */
+    outcome = lifecycle_read(h, &before, &after, FALSE);
+    first = g_next_seq;
+    if (outcome == TAS_LIFECYCLE_RESTART_ENTERED) {
+        seen = tx_step(h, ids[t].net_luid, sock, BASELINE_MS, "after the restart", g_next_seq, &capture_alive);
+        traffic = capture_alive && g_next_seq != first && (unsigned long long)seen * 100 >= (unsigned long long)(g_next_seq - first) * WIRE_MIN_PERCENT;
+        dump_baseline_head(first);
+        outcome = lifecycle_read(h, &before, &after, traffic);
+    }
+    other_differs = report_others(ids, others, other_before, n, t);
+    if (outcome != TAS_LIFECYCLE_RESUMED) {
+        printf(TAG " Running not shown: no MMIO, so register state, PHC and consistency stay unmeasured\n");
+        rc = 1;
+        printf(TAG " result: exit=%d; recovery, if needed, is the operator's: this mode never cycles the adapter\n", rc);
+        goto done;
+    }
+
+    print_clock(h, "after");
+    phc_pairs(h, "after");
+    observer_line("after");
+    phc_after_ok = read_systim(h, &phc_after);
+    if (phc_after_ok) {
+        printf("    implied PHC zero hostUs=%lld at the nominal rate, to place a reseed against the NDIS events\n", host_us() - (LONGLONG)(phc_after / 1000));
+    }
+    if (phc_before_ok && phc_after_ok) {
+        report_phc(h, phc_before, qpc_before, "across the lifecycle");
+    }
+
+    /* The four facts of #361, each on its own. Case A has no restoration event, so none of this is COMPLETE_RESTORATION */
+    ZeroMemory(&snap_after, sizeof(snap_after));
+    ZeroMemory(&hw_after, sizeof(hw_after));
+    (void)read_snapshot(h, &snap_after);
+    (void)read_hw_state(h, &hw_after);
+    (void)read_armed(h, &armed_after);
+    target_oper = oper_status(ids[t].net_luid);
+    tas_snapshot_compare(&snap_before, &snap_after, &compared, &changed, &unreadable);
+    for (i = 0; i < (int)AVB_HWREG_COUNT; i++) {
+        if (snap_before.entries[i].value != snap_after.entries[i].value || snap_before.entries[i].state != snap_after.entries[i].state) {
+            printf("    snapshot id=%u before=0x%08X state=%u after=0x%08X state=%u\n", snap_before.entries[i].id, snap_before.entries[i].value, snap_before.entries[i].state,
+                   snap_after.entries[i].value, snap_after.entries[i].state);
+        }
+    }
+    phc_fact = tas_phc_fact(phc_before_ok, phc_after_ok, phc_before, phc_after);
+    consistent = armed_after == 0 && hw_after.hw_state == hw_before.hw_state && hw_after.capabilities == hw_before.capabilities && snap_after.net_luid == ids[t].net_luid;
+    printf(TAG " fact register compared=%u changed=%u unreadable=%u\n", compared, changed, unreadable);
+    printf(TAG " fact tx onWire=%d framesSeen=%u of %u gauge=%llu\n", traffic, seen, g_next_seq - first, after.OutstandingSendNBLs);
+    printf(TAG " fact phc %s before=%llu after=%llu\n", tas_phc_fact_name(phc_fact), phc_before, phc_after);
+    printf(TAG " fact consistency %s tasArmed=%u hwState=%u to %u caps=0x%08X to 0x%08X oper=%d\n", consistent ? "agrees" : "DIFFERS", armed_after, hw_before.hw_state, hw_after.hw_state,
+           hw_before.capabilities, hw_after.capabilities, target_oper);
+
+    if (changed != 0 || unreadable != 0 || compared == 0 || !traffic || !consistent || other_differs != 0) {
+        rc = 1;
+    } else {
+        rc = phc_fact == TAS_PHC_DISCONTINUOUS ? 2 : 0;
+    }
+    printf(TAG " result: exit=%d; recovery, if needed, is the operator's: this mode never cycles the adapter\n", rc);
+
+done:
+    if (wire_up) {
+        wire_stop();
+    }
+    if (sock != INVALID_SOCKET) {
+        closesocket(sock);
+    }
+    for (i = 0; i < AVB_MAX_ADAPTERS; i++) {
+        if (others[i] != NULL && others[i] != INVALID_HANDLE_VALUE) {
+            CloseHandle(others[i]);
+        }
+    }
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+    }
+    WSACleanup();
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     AVB_ADAPTER_IDENTITY_REQUEST target, id;
@@ -1060,6 +1485,13 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
     printf("=== IntelAvbFilter - exploratory TAS gate investigation (#328), %s ===\n", TAG);
+    if (argc >= 2 && strcmp(argv[1], "--lifecycle-a") == 0) {
+        if ((argc != 4 && argc != 5) || strcmp(argv[2], "--observer") != 0 || (argc == 5 && strcmp(argv[4], "--dry-run") != 0)) {
+            printf(TAG " not run: usage: tas_gate_investigation --lifecycle-a --observer <did> [--dry-run], with " AVB_TEST_TARGET_ENV " set\n");
+            return 3;
+        }
+        return lifecycle_case_a(argv[3], argc == 5);
+    }
     if (argc == 3 && strcmp(argv[1], "--apply") == 0 && argv[2][0] != '\0' && strspn(argv[2], "wsb") == strlen(argv[2])) {
         letters = argv[2];
     } else if ((argc == 4 || argc == 5) && strcmp(argv[1], "--pattern") == 0) {
@@ -1108,7 +1540,7 @@ int main(int argc, char **argv)
         }
         letters = "wsb";
     } else if (argc != 1) {
-        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b> | --pattern <startMs> <endMs> | --disarm | --rearm <n>]\n");
+        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b> | --pattern <startMs> <endMs> | --disarm | --rearm <n> | --lifecycle-a --observer <did> [--dry-run]]\n");
         return 3;
     }
     for (n = 0; argc == 3 && letters != NULL && n < strlen(letters); n++) {
