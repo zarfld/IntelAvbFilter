@@ -36,6 +36,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_restoration_eval.h"
 #include "../ioctl/tas_wire_match.h"
 #include "../ioctl/tas_lifecycle_eval.h"
+#include "../../devices/i226_tas_activate.h"
 
 /* =========================================================================
  * Mock infrastructure
@@ -1222,6 +1223,226 @@ static void test_27_management(void) {
                 strcmp(tas_mgmt_name(TAS_MGMT_UNATTRIBUTED), "MANAGEMENT_UNATTRIBUTED") == 0);
 }
 
+/*
+ * TC-MOCK-028 to 033: first TAS activation (#357), the production sequence of devices/i226_tas_activate.h on a fake register
+ * file. The order matches what ran on I226 0x125B REV_04 through tas_gate_investigation. These cases test the code path and
+ * say nothing about what the hardware does with it.
+ */
+#define FAKE_REGS 0x4000u
+#define FAKE_LOG 128u
+typedef struct {
+    avb_u32 reg[FAKE_REGS / 4];
+    avb_u32 log_off[FAKE_LOG], log_val[FAKE_LOG];
+    unsigned writes, fail_write, stuck_after_fail;
+    BOOL read_fails, phc_fails;
+    avb_u64 phc_first, phc_later;
+    unsigned phc_reads;
+} FAKE_HW;
+
+static int fake_read(void *c, avb_u32 off, avb_u32 *v) {
+    FAKE_HW *f = (FAKE_HW *)c;
+    if (f->read_fails) return -1;
+    *v = f->reg[off / 4];
+    return 0;
+}
+
+static int fake_write(void *c, avb_u32 off, avb_u32 v) {
+    FAKE_HW *f = (FAKE_HW *)c;
+    f->writes++;
+    if (f->fail_write != 0 && f->writes >= f->fail_write && f->writes < f->fail_write + 1 + f->stuck_after_fail) return -1;
+    if (f->writes <= FAKE_LOG) {
+        f->log_off[f->writes - 1] = off;
+        f->log_val[f->writes - 1] = v;
+    }
+    f->reg[off / 4] = v;
+    return 0;
+}
+
+static int fake_phc(void *c, avb_u64 *ns) {
+    FAKE_HW *f = (FAKE_HW *)c;
+    if (f->phc_fails) return -1;
+    *ns = f->phc_reads++ == 0 ? f->phc_first : f->phc_later;
+    return 0;
+}
+
+static FAKE_HW g_hw;
+static AVB_TAS_ACTIVATE_REQUEST g_act;
+static const I226_TAS_IO g_io = {&g_hw, fake_read, fake_write, fake_phc};
+
+/* The verified schedule of the Case C and D design: 1 s cycle, 200 to 400 ms windows, BaseT 2 s ahead */
+static void act_setup(avb_u32 mode) {
+    unsigned q;
+
+    ZeroMemory(&g_hw, sizeof(g_hw));
+    ZeroMemory(&g_act, sizeof(g_act));
+    g_hw.reg[I226_QBVCYCLET / 4] = 0x3B9ACA00;   /* the clean value seen on I226 0x125B */
+    g_hw.phc_first = 5000000000ULL;
+    g_hw.phc_later = 5000100000ULL;
+    g_act.version = AVB_TAS_ACTIVATE_VERSION;
+    g_act.pre_activation = mode;
+    g_act.base_time_ns = 7000000000ULL;
+    g_act.cycle_ns = 1000000000u;
+    g_act.link_mbps = 1000;
+    g_act.max_frame_bytes = 1538;
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        g_act.window_start_ns[q] = 200000000u;
+        g_act.window_end_ns[q] = 400000000u;
+    }
+}
+
+static int act_order(const avb_u32 *want, unsigned n) {
+    unsigned i;
+
+    if (g_hw.writes != n) return 0;
+    for (i = 0; i < n; i++) {
+        if (g_hw.log_off[i] != want[i]) return 0;
+    }
+    return 1;
+}
+
+static void test_28_activate_validation(void) {
+    printf("\n[TC-MOCK-028] Every request is validated before any register write\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    EXPECT_EQ("the verified schedule is valid", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.version = 2;
+    EXPECT_EQ("unknown version", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(0);
+    EXPECT_EQ("no default pre-activation behaviour", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(3);
+    EXPECT_EQ("unknown pre-activation behaviour", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.cycle_ns = 0;
+    EXPECT_EQ("no cycle", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.cycle_ns = 0x40000000u;
+    EXPECT_EQ("cycle beyond the register field", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_end_ns[2] = g_act.window_start_ns[2];
+    EXPECT_EQ("empty window", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_end_ns[3] = g_act.cycle_ns + 1;
+    EXPECT_EQ("window past the cycle", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.link_mbps = 1234;
+    EXPECT_EQ("unknown link rate", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 0;
+    EXPECT_EQ("no frame size", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 9729;
+    EXPECT_EQ("frame beyond the buffer limit", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 13535;
+    EXPECT_EQ("13.535 us exceeds the minimum for 1538 bytes at 1 Gbit/s", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 13000;
+    EXPECT_EQ("13 us is below it", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 64; g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 4600;
+    EXPECT_EQ("the 512 byte floor governs small frames", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 64; g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 4500;
+    EXPECT_EQ("below the 512 byte floor", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.version = 2;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("an invalid request reports it", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("and writes nothing", g_hw.writes, 0);
+}
+
+static void test_29_activate_not_clean(void) {
+    static const avb_u32 dirty[] = {I226_TQAVCTRL, I226_BASET_L, I226_BASET_H, I226_STQT0, I226_STQT3, I226_ENDQT0, I226_ENDQT3};
+    unsigned i;
+
+    printf("\n[TC-MOCK-029] An adapter that is not clean is refused and nothing is written\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    i226_tas_activate(&g_io, &g_act, TRUE);
+    EXPECT_EQ("driver says armed", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("no write when armed", g_hw.writes, 0);
+    for (i = 0; i < sizeof(dirty) / sizeof(dirty[0]); i++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_hw.reg[dirty[i] / 4] = 1;
+        i226_tas_activate(&g_io, &g_act, FALSE);
+        EXPECT_EQ("left-over schedule state", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+        EXPECT_EQ("no write", g_hw.writes, 0);
+    }
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.read_fails = TRUE;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("unreadable state is never clean", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("no write when unreadable", g_hw.writes, 0);
+}
+
+static void test_30_activate_hold(void) {
+    static const avb_u32 want[] = {I226_TQAVCTRL, I226_STQT0, I226_ENDQT0, I226_STQT0 + 4, I226_ENDQT0 + 4, I226_STQT0 + 8, I226_ENDQT0 + 8, I226_STQT0 + 12, I226_ENDQT0 + 12,
+                                   I226_QBVCYCLET_S, I226_QBVCYCLET, I226_BASET_H, I226_BASET_L};
+
+    printf("\n[TC-MOCK-030] Hold: the sequence run on hardware, no reserved bit\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("committed", g_act.result, AVB_TAS_ACT_COMMITTED);
+    EXPECT_TRUE("register order", act_order(want, sizeof(want) / sizeof(want[0])));
+    EXPECT_EQ("TQAVCTRL is 0x09", g_hw.reg[I226_TQAVCTRL / 4], 0x09);
+    EXPECT_EQ("FutScdDis clear", g_hw.reg[I226_TQAVCTRL / 4] & (avb_u32)I226_TQAVCTRL_FUTSCDDIS_MASK, 0);
+    EXPECT_EQ("window start", g_hw.reg[(I226_STQT0 + 8) / 4], 200000000);
+    EXPECT_EQ("window end", g_hw.reg[(I226_ENDQT0 + 8) / 4], 400000000);
+    EXPECT_EQ("cycle", g_hw.reg[I226_QBVCYCLET / 4], 1000000000);
+    EXPECT_EQ("shadow cycle", g_hw.reg[I226_QBVCYCLET_S / 4], 1000000000);
+    EXPECT_EQ("BaseT seconds", g_hw.reg[I226_BASET_H / 4], 7);
+    EXPECT_EQ("BaseT nanoseconds", g_hw.reg[I226_BASET_L / 4], 0);
+    EXPECT_TRUE("PHC at commit reported", g_act.phc_at_commit_ns == g_hw.phc_later);
+
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 7250000000ULL;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("BaseT splits into seconds", g_hw.reg[I226_BASET_H / 4], 7);
+    EXPECT_EQ("and nanoseconds", g_hw.reg[I226_BASET_L / 4], 250000000);
+}
+
+static void test_31_activate_pass(void) {
+    static const avb_u32 want[] = {I226_TQAVCTRL, I226_STQT0, I226_ENDQT0, I226_STQT0 + 4, I226_ENDQT0 + 4, I226_STQT0 + 8, I226_ENDQT0 + 8, I226_STQT0 + 12, I226_ENDQT0 + 12,
+                                   I226_TQAVCTRL, I226_QBVCYCLET_S, I226_QBVCYCLET, I226_BASET_H, I226_BASET_L, I226_BASET_L};
+
+    printf("\n[TC-MOCK-031] Pass: FutScdDis from the SSOT, BaseT low word zero first\n");
+    act_setup(AVB_TAS_PRE_PASS); g_act.base_time_ns = 7250000000ULL;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("committed", g_act.result, AVB_TAS_ACT_COMMITTED);
+    EXPECT_TRUE("register order", act_order(want, sizeof(want) / sizeof(want[0])));
+    EXPECT_EQ("FutScdDis is bit 7", g_hw.reg[I226_TQAVCTRL / 4], 0x89);
+    EXPECT_EQ("BASET_L zero first", g_hw.log_val[13], 0);
+    EXPECT_EQ("BASET_L value last", g_hw.log_val[14], 250000000);
+}
+
+static void test_32_activate_failure(void) {
+    unsigned at, q, same;
+
+    printf("\n[TC-MOCK-032] Failure before commit restores the registers and says so\n");
+    for (at = 1; at <= 13; at++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_hw.fail_write = at;
+        i226_tas_activate(&g_io, &g_act, FALSE);
+        EXPECT_EQ("write failed, restored", g_act.result, AVB_TAS_ACT_FAILED_RESTORED);
+        same = g_hw.reg[I226_TQAVCTRL / 4] == 0 && g_hw.reg[I226_BASET_L / 4] == 0 && g_hw.reg[I226_BASET_H / 4] == 0 && g_hw.reg[I226_QBVCYCLET / 4] == 0x3B9ACA00;
+        for (q = 0; q < AVB_TAS_QUEUES; q++) {
+            same = same && g_hw.reg[(I226_STQT0 + 4 * q) / 4] == 0 && g_hw.reg[(I226_ENDQT0 + 4 * q) / 4] == 0;
+        }
+        EXPECT_TRUE("every register back at its value", same);
+    }
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.fail_write = 2;
+    g_hw.stuck_after_fail = 1;   /* the first restore write fails too */
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("a restore that fails says so", g_act.result, AVB_TAS_ACT_FAILED_NOT_RESTORED);
+}
+
+static void test_33_activate_time(void) {
+    printf("\n[TC-MOCK-033] BaseT must be in the future\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.phc_fails = TRUE;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("unreadable PHC", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("no write", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = g_hw.phc_first + AVB_TAS_MIN_LEAD_NS - 1;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("too close", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("no write when too close", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = g_hw.phc_first + AVB_TAS_MIN_LEAD_NS;
+    g_hw.phc_later = g_hw.phc_first + 1;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("exactly the lead is accepted", g_act.result, AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.phc_later = g_act.base_time_ns + 1;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("BaseT passed while writing", g_act.result, AVB_TAS_ACT_BASE_PASSED);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1258,6 +1479,12 @@ int main(void) {
     test_25_state_edges();
     test_26_state_claim();
     test_27_management();
+    test_28_activate_validation();
+    test_29_activate_not_clean();
+    test_30_activate_hold();
+    test_31_activate_pass();
+    test_32_activate_failure();
+    test_33_activate_time();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
