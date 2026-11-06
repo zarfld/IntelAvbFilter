@@ -577,12 +577,13 @@ static void test_09_negative_tests_always_executable(void) {
  * Record layout (USHORT byte length, then UTF-16 name without terminator) is from IOCTL_FILTER_ENUERATE_ALL_INSTANCES in
  * src/device.c. Name layout {interface GUID}-{filter GUID}-0000 was observed once, on the I210 instance, in
  * logs/dbgview_test_ptp_phc_stability.exe_20260430_123620.log; its first GUID is that adapter's InterfaceGuid and its
- * second is NetCfgInstanceId in the INF. The I226 record below is built on that layout and is UNVERIFIED. The driver
- * matches by prefix (filterFindFilterModule), which is why a prefix counts as ambiguous.
+ * second is NetCfgInstanceId in the INF. The target record below is built on that layout and is UNVERIFIED. The logic
+ * takes any adapter's GUID: these values select nothing. The driver matches by prefix (filterFindFilterModule), which is
+ * why a prefix counts as ambiguous.
  */
 #define FILTER_GUID_TEXT L"{3F74AE86-14F9-4E79-9445-5B1E52CCD192}"
-#define I210_GUID_TEXT   L"{9F90590F-E0F0-46B7-A69E-BF0A45DEDB6C}"
-#define I226_GUID_TEXT   L"{5989BA55-D568-47A4-AFBF-B47F27E1B435}"
+#define OBSERVED_GUID_TEXT L"{9F90590F-E0F0-46B7-A69E-BF0A45DEDB6C}"
+#define TARGET_GUID_TEXT   L"{5989BA55-D568-47A4-AFBF-B47F27E1B435}"
 
 static DWORD put_instance(BYTE *list, DWORD at, const WCHAR *name) {
     USHORT bytes = (USHORT)(wcslen(name) * sizeof(WCHAR));
@@ -592,47 +593,47 @@ static DWORD put_instance(BYTE *list, DWORD at, const WCHAR *name) {
 }
 
 static void test_14_instance_find(void) {
-    static const WCHAR i210[] = I210_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
-    static const WCHAR i226[] = I226_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
+    static const WCHAR observed[] = OBSERVED_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
+    static const WCHAR target[] = TARGET_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0000";
     BYTE list[512];
     const WCHAR *name = NULL;
     USHORT bytes = 0;
     DWORD used;
 
     printf("\n[TC-MOCK-014] Exact instance for one adapter\n");
-    used = put_instance(list, 0, i210);
-    used = put_instance(list, used, i226);
-    EXPECT_EQ("the adapter's own record", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_FOUND);
-    EXPECT_EQ("name length is the record's own", bytes, (int)(wcslen(i226) * sizeof(WCHAR)));
-    EXPECT_TRUE("name points at that record", name != NULL && memcmp(name, i226, bytes) == 0);
+    used = put_instance(list, 0, observed);
+    used = put_instance(list, used, target);
+    EXPECT_EQ("the adapter's own record", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_FOUND);
+    EXPECT_EQ("name length is the record's own", bytes, (int)(wcslen(target) * sizeof(WCHAR)));
+    EXPECT_TRUE("name points at that record", name != NULL && memcmp(name, target, bytes) == 0);
     EXPECT_EQ("GUID text in any case", tas_instance_find(list, used, L"{5989ba55-d568-47a4-afbf-b47f27e1b435}", &name, &bytes), TAS_INSTANCE_FOUND);
 
     EXPECT_EQ("adapter not listed", tas_instance_find(list, used, L"{D44A7E27-72EE-480D-958C-558FACF2B105}", &name, &bytes), TAS_INSTANCE_NONE);
-    EXPECT_EQ("empty list", tas_instance_find(list, 0, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+    EXPECT_EQ("empty list", tas_instance_find(list, 0, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
     EXPECT_EQ("the filter GUID names no adapter", tas_instance_find(list, used, FILTER_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
 
-    used = put_instance(list, 0, I226_GUID_TEXT L"X" FILTER_GUID_TEXT L"-0000");
-    EXPECT_EQ("the GUID must end at its separator", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
-    used = put_instance(list, 0, I226_GUID_TEXT);
-    EXPECT_EQ("the GUID alone is not an instance", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+    used = put_instance(list, 0, TARGET_GUID_TEXT L"X" FILTER_GUID_TEXT L"-0000");
+    EXPECT_EQ("the GUID must end at its separator", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
+    used = put_instance(list, 0, TARGET_GUID_TEXT);
+    EXPECT_EQ("the GUID alone is not an instance", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_NONE);
 
-    used = put_instance(list, 0, i226);
-    used = put_instance(list, used, I226_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0001");
-    EXPECT_EQ("two records name the adapter", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+    used = put_instance(list, 0, target);
+    used = put_instance(list, used, TARGET_GUID_TEXT L"-" FILTER_GUID_TEXT L"-0001");
+    EXPECT_EQ("two records name the adapter", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
 
     /* The driver stops at the first prefix match, so the shorter record would be restarted instead */
     used = put_instance(list, 0, L"{5989BA55");
-    used = put_instance(list, used, i226);
-    EXPECT_EQ("another record is a prefix of the name", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+    used = put_instance(list, used, target);
+    EXPECT_EQ("another record is a prefix of the name", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
     used = put_instance(list, 0, L"");
-    used = put_instance(list, used, i226);
-    EXPECT_EQ("an empty record is a prefix of everything", tas_instance_find(list, used, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
+    used = put_instance(list, used, target);
+    EXPECT_EQ("an empty record is a prefix of everything", tas_instance_find(list, used, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_AMBIGUOUS);
 
-    used = put_instance(list, 0, i226);
-    EXPECT_EQ("list cut inside a name", tas_instance_find(list, used - 2, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
-    EXPECT_EQ("list cut inside a length", tas_instance_find(list, 1, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+    used = put_instance(list, 0, target);
+    EXPECT_EQ("list cut inside a name", tas_instance_find(list, used - 2, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+    EXPECT_EQ("list cut inside a length", tas_instance_find(list, 1, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
     list[0] = 3; list[1] = 0;
-    EXPECT_EQ("odd byte length is not UTF-16", tas_instance_find(list, 16, I226_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
+    EXPECT_EQ("odd byte length is not UTF-16", tas_instance_find(list, 16, TARGET_GUID_TEXT, &name, &bytes), TAS_INSTANCE_MALFORMED);
 }
 
 static TAS_LIFECYCLE_EVIDENCE full_lifecycle_evidence(void) {
@@ -814,6 +815,14 @@ static void test_18_window_bounds(void) {
     poll_at(&t, 160, 170, 6, 7);
     EXPECT_EQ("two open polls prove nothing whole", (int)tas_window_proven_calls(&t), 0);
 
+    /* Boundary: the brackets touch, so nothing separates the edges */
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 6, 6);
+    poll_at(&t, 130, 140, 6, 6);
+    poll_at(&t, 150, 160, 6, 7);
+    EXPECT_EQ("brackets that touch are not apart", tas_window_result(&t, &lower, &upper), TAS_WINDOW_NOT_RESOLVED);
+
     tas_window_init(&t, 5, 6);
     poll_at(&t, 100, 110, 5, 6);
     poll_at(&t, 120, 130, 5, 6);
@@ -840,6 +849,15 @@ static void test_18_window_bounds(void) {
     poll_at(&t, 100, 110, 5, 6);
     poll_at(&t, 120, 130, 0, 0);
     EXPECT_EQ("fallen counters are a new context", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
+
+    /* Both edges were already seen, so only the fall itself can make this unattributable */
+    tas_window_init(&t, 5, 6);
+    poll_at(&t, 100, 110, 5, 6);
+    poll_at(&t, 120, 130, 6, 6);
+    poll_at(&t, 140, 150, 6, 6);
+    poll_at(&t, 160, 170, 6, 7);
+    poll_at(&t, 180, 190, 0, 0);
+    EXPECT_EQ("a fall after both edges still voids the interval", tas_window_result(&t, &lower, &upper), TAS_WINDOW_UNMEASURED);
 
     tas_window_init(&t, 5, 6);
     poll_at(&t, 100, 110, 6, 7);
@@ -880,7 +898,8 @@ static TAS_LIFECYCLE_CLEANUP clean_lifecycle_cleanup(void) {
     TAS_LIFECYCLE_CLEANUP c;
     memset(&c, 0, sizeof(c));
     c.lifecycle_shown = TRUE;
-    c.phc = TAS_PHC_NOT_JUDGED;
+    c.regs_compared = 3;
+    c.phc = TAS_PHC_CONTINUOUS;
     c.tx_probed = TRUE;
     c.tx_shown = TRUE;
     c.consistent = TRUE;
@@ -892,8 +911,23 @@ static void test_20_cleanup_verdict(void) {
     TAS_LIFECYCLE_CLEANUP c;
 
     printf("\n[TC-MOCK-020] Case A cleanup verdict\n");
+    /* #361: all four facts hold. Only a hardware-derived tolerance can supply CONTINUOUS, and tas_phc_fact never does */
     c = clean_lifecycle_cleanup();
-    EXPECT_EQ("all fine but continuity unjudged", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+    EXPECT_EQ("all four facts hold", tas_lifecycle_cleanup(&c), TAS_RESTORATION_VERIFIED);
+    EXPECT_FALSE("the tool's own PHC fact can never be continuous", tas_phc_fact(TRUE, TRUE, 10, 20) == TAS_PHC_CONTINUOUS);
+
+    c = clean_lifecycle_cleanup(); c.phc = TAS_PHC_NOT_JUDGED;
+    EXPECT_EQ("continuity unjudged", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+    c = clean_lifecycle_cleanup(); c.phc = TAS_PHC_UNMEASURED;
+    EXPECT_EQ("continuity unmeasured", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+    c = clean_lifecycle_cleanup(); c.regs_unreadable = 1;
+    EXPECT_EQ("a register unreadable", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+    c = clean_lifecycle_cleanup(); c.regs_compared = 0;
+    EXPECT_EQ("nothing compared", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+    c = clean_lifecycle_cleanup(); c.lifecycle_shown = FALSE;
+    EXPECT_EQ("lifecycle not shown", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
+    c = clean_lifecycle_cleanup(); c.tx_probed = FALSE;
+    EXPECT_EQ("TX not probed", tas_lifecycle_cleanup(&c), TAS_RESTORATION_INCONCLUSIVE);
 
     c = clean_lifecycle_cleanup(); c.phc = TAS_PHC_DISCONTINUOUS;
     EXPECT_EQ("PHC reset, even with registers and TX fine", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
@@ -914,6 +948,157 @@ static void test_20_cleanup_verdict(void) {
     memset(&c, 0, sizeof(c));
     c.tx_probed = TRUE;
     EXPECT_EQ("stopped after a TX probe that failed", tas_lifecycle_cleanup(&c), TAS_RESTORATION_CLEANUP_FAILED);
+}
+
+#define TAS_CAPS_HW     (INTEL_CAP_BASIC_1588 | INTEL_CAP_TSN_TAS | INTEL_CAP_MMIO)
+
+/* An adapter with everything Case A needs. Facts only: the type has no vendor, device or family field */
+static TAS_ADAPTER_FACTS able_adapter(avb_u64 luid) {
+    TAS_ADAPTER_FACTS f;
+    memset(&f, 0, sizeof(f));
+    f.net_luid = luid;
+    f.identity_ok = TRUE;
+    f.hw_state_ok = TRUE;
+    f.hw_caps = TAS_CAPS_HW;
+    f.driver_caps = TAS_CAPS_HW;
+    f.hw_state = AVB_HW_PTP_READY;
+    f.link_up = TRUE;
+    f.separate_management_link = TRUE;
+    return f;
+}
+
+/* TC-MOCK-021: eligibility comes from capabilities only, and no adapter leaves the plan unclassified (#364, #384) */
+static void test_21_eligibility(void) {
+    TAS_ADAPTER_FACTS f;
+
+    printf("\n[TC-MOCK-021] Eligibility from capabilities\n");
+    f = able_adapter(1);
+    EXPECT_EQ("hardware and driver both have TAS", tas_plan_classify(&f), TAS_PLAN_ELIGIBLE);
+
+    f = able_adapter(1); f.hw_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO; f.driver_caps = f.hw_caps;
+    EXPECT_EQ("hardware evidenced without TAS", tas_plan_classify(&f), TAS_PLAN_SKIP_UNSUPPORTED);
+
+    /* Rule 9: this is the case that must never read as unsupported */
+    f = able_adapter(1); f.driver_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
+    EXPECT_EQ("hardware has TAS, driver does not: not implemented", tas_plan_classify(&f), TAS_PLAN_SKIP_NOT_IMPLEMENTED);
+
+    /* The driver reports a partial set below these states, so a missing bit proves nothing there */
+    f = able_adapter(1); f.driver_caps = 0; f.hw_state = AVB_HW_BOUND;
+    EXPECT_EQ("driver support cannot be judged below PTP_READY", tas_plan_classify(&f), TAS_PLAN_INCONCLUSIVE);
+    f = able_adapter(1); f.driver_caps = 0; f.hw_state = AVB_HW_BAR_MAPPED;
+    EXPECT_EQ("nor at BAR_MAPPED", tas_plan_classify(&f), TAS_PLAN_INCONCLUSIVE);
+
+    f = able_adapter(1); f.hw_caps = 0;
+    EXPECT_EQ("an empty capability word is no evidence of absence", tas_plan_classify(&f), TAS_PLAN_INCONCLUSIVE);
+    f = able_adapter(1); f.identity_ok = FALSE;
+    EXPECT_EQ("identity unreadable", tas_plan_classify(&f), TAS_PLAN_INCONCLUSIVE);
+    f = able_adapter(1); f.hw_state_ok = FALSE;
+    EXPECT_EQ("driver capabilities unreadable", tas_plan_classify(&f), TAS_PLAN_INCONCLUSIVE);
+
+    f = able_adapter(1); f.driver_caps &= ~(avb_u32)INTEL_CAP_MMIO;
+    EXPECT_EQ("TAS but no way to measure registers or PHC", tas_plan_classify(&f), TAS_PLAN_BLOCKED);
+    f = able_adapter(1); f.driver_caps &= ~(avb_u32)INTEL_CAP_BASIC_1588;
+    EXPECT_EQ("TAS but no PHC", tas_plan_classify(&f), TAS_PLAN_BLOCKED);
+    f = able_adapter(1); f.separate_management_link = FALSE;
+    EXPECT_EQ("eligible by capability, unsafe to touch", tas_plan_classify(&f), TAS_PLAN_BLOCKED);
+    f = able_adapter(1); f.link_up = FALSE;
+    EXPECT_EQ("no link is a runtime skip", tas_plan_classify(&f), TAS_PLAN_SKIP_NO_LINK);
+
+    /* Capability outranks link, so an unsupported adapter never reads as a link problem */
+    f = able_adapter(1); f.hw_caps = INTEL_CAP_MMIO; f.driver_caps = INTEL_CAP_MMIO; f.link_up = FALSE;
+    EXPECT_EQ("unsupported and down is still unsupported", tas_plan_classify(&f), TAS_PLAN_SKIP_UNSUPPORTED);
+}
+
+/* TC-MOCK-022: every eligible adapter runs, in any enumeration order, with an observer proved by traffic */
+static void test_22_plan_and_observers(void) {
+    TAS_ADAPTER_FACTS a[TAS_MAX_ADAPTERS];
+    TAS_PLAN_CLASS c[TAS_MAX_ADAPTERS];
+    unsigned order[TAS_MAX_ADAPTERS];
+    unsigned i, m;
+
+    printf("\n[TC-MOCK-022] Every eligible adapter, observers by connectivity\n");
+    a[0] = able_adapter(30);
+    a[1] = able_adapter(10);
+    a[2] = able_adapter(20); a[2].hw_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO; a[2].driver_caps = a[2].hw_caps;
+    a[3] = able_adapter(40); a[3].driver_caps = INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO;
+    a[4] = able_adapter(50); a[4].link_up = FALSE;
+    EXPECT_EQ("two adapters eligible", (int)tas_plan_build(a, 5, c), 2);
+    EXPECT_EQ("first eligible, wherever it sits", c[0], TAS_PLAN_ELIGIBLE);
+    EXPECT_EQ("second eligible, wherever it sits", c[1], TAS_PLAN_ELIGIBLE);
+    EXPECT_EQ("every adapter classified: unsupported", c[2], TAS_PLAN_SKIP_UNSUPPORTED);
+    EXPECT_EQ("every adapter classified: not implemented", c[3], TAS_PLAN_SKIP_NOT_IMPLEMENTED);
+    EXPECT_EQ("every adapter classified: no link", c[4], TAS_PLAN_SKIP_NO_LINK);
+
+    /* An adapter that cannot be a target can still be an observer: observing needs link and traffic, not TAS */
+    m = tas_observer_candidates(a, 5, 0, order);
+    EXPECT_EQ("all others with link are candidates", (int)m, 3);
+    EXPECT_EQ("order follows the stable LUID, not enumeration", (int)order[0], 1);
+    EXPECT_EQ("a non-TAS adapter is a candidate", (int)order[1], 2);
+    EXPECT_EQ("and so is a not-implemented one", (int)order[2], 3);
+    for (i = 0; i < m; i++) {
+        EXPECT_FALSE("the target never observes itself", order[i] == 0);
+        EXPECT_FALSE("an adapter without link never observes", order[i] == 4);
+    }
+
+    /* LUIDs 30, then 20, then 40 in enumeration order: only sorting gives 20, 30, 40 */
+    m = tas_observer_candidates(a, 5, 1, order);
+    EXPECT_EQ("unsorted enumeration: three candidates", (int)m, 3);
+    EXPECT_EQ("lowest LUID first, though enumerated second", (int)order[0], 2);
+    EXPECT_EQ("then the next, though enumerated first", (int)order[1], 0);
+    EXPECT_EQ("then the highest", (int)order[2], 3);
+
+    /* Enumeration reversed: the same adapters, the same decisions */
+    {
+        TAS_ADAPTER_FACTS r[5];
+        unsigned k;
+        for (k = 0; k < 5; k++) { r[k] = a[4 - k]; }
+        EXPECT_EQ("reversed enumeration, same eligible count", (int)tas_plan_build(r, 5, c), 2);
+        EXPECT_EQ("reversed: eligible adapter found at its new position", c[4], TAS_PLAN_ELIGIBLE);
+        EXPECT_EQ("reversed: unsupported adapter stays unsupported", c[2], TAS_PLAN_SKIP_UNSUPPORTED);
+    }
+
+    /* Identical adapters are distinct by LUID, so duplicates are both tested, never merged */
+    a[0] = able_adapter(7);
+    a[1] = able_adapter(8);
+    EXPECT_EQ("two identical adapters both run", (int)tas_plan_build(a, 2, c), 2);
+
+    EXPECT_EQ("no adapters, nothing eligible", (int)tas_plan_build(a, 0, c), 0);
+    a[0].identity_ok = FALSE;
+    EXPECT_EQ("an unidentified adapter cannot be a candidate", (int)tas_observer_candidates(a, 2, 1, order), 0);
+}
+
+/* TC-MOCK-023: per-adapter results never collapse into success (contract section B) */
+static void test_23_plan_exit(void) {
+    TAS_PLAN_CLASS c[4];
+    int r[4];
+
+    printf("\n[TC-MOCK-023] Overall result from per-adapter results\n");
+    c[0] = TAS_PLAN_ELIGIBLE; r[0] = 0;
+    c[1] = TAS_PLAN_SKIP_UNSUPPORTED; r[1] = 3;
+    EXPECT_EQ("one proved, one unsupported", tas_plan_exit(c, r, 2), 0);
+
+    c[1] = TAS_PLAN_ELIGIBLE; r[1] = 1;
+    EXPECT_EQ("mixed results are never success", tas_plan_exit(c, r, 2), 1);
+    r[1] = 2;
+    EXPECT_EQ("a PHC reset on one adapter shows", tas_plan_exit(c, r, 2), 2);
+    r[1] = 3;
+    EXPECT_EQ("an adapter that did not run shows", tas_plan_exit(c, r, 2), 3);
+    r[0] = 1; r[1] = 3;
+    EXPECT_EQ("failure outranks not run", tas_plan_exit(c, r, 2), 1);
+
+    r[0] = 0;
+    c[1] = TAS_PLAN_SKIP_NOT_IMPLEMENTED; r[1] = 3;
+    EXPECT_EQ("not implemented is non-passing", tas_plan_exit(c, r, 2), 1);
+    c[1] = TAS_PLAN_INCONCLUSIVE;
+    EXPECT_EQ("inconclusive is non-passing", tas_plan_exit(c, r, 2), 1);
+    c[1] = TAS_PLAN_BLOCKED;
+    EXPECT_EQ("blocked is non-passing", tas_plan_exit(c, r, 2), 1);
+    c[1] = TAS_PLAN_SKIP_NO_LINK;
+    EXPECT_EQ("no link does not fail the others", tas_plan_exit(c, r, 2), 0);
+
+    c[0] = TAS_PLAN_SKIP_UNSUPPORTED; c[1] = TAS_PLAN_SKIP_NO_LINK; r[0] = r[1] = 3;
+    EXPECT_EQ("nothing eligible proves nothing", tas_plan_exit(c, r, 2), 3);
+    EXPECT_EQ("no adapters proves nothing", tas_plan_exit(c, r, 0), 3);
 }
 
 /* =========================================================================
@@ -949,6 +1134,9 @@ int main(void) {
     test_18_window_bounds();
     test_19_claims();
     test_20_cleanup_verdict();
+    test_21_eligibility();
+    test_22_plan_and_observers();
+    test_23_plan_exit();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

@@ -39,7 +39,8 @@ typedef enum {
 typedef enum {
     TAS_PHC_UNMEASURED = 0,
     TAS_PHC_DISCONTINUOUS,    /* did not advance: needs no tolerance to claim */
-    TAS_PHC_NOT_JUDGED        /* advanced: continuity needs a hardware-derived tolerance, and none exists */
+    TAS_PHC_NOT_JUDGED,       /* advanced: continuity needs a hardware-derived tolerance, and none exists */
+    TAS_PHC_CONTINUOUS        /* judged against a hardware-derived tolerance. tas_phc_fact() can never return this */
 } TAS_PHC_FACT;
 
 typedef struct {
@@ -354,12 +355,12 @@ static __inline const char *tas_claim_name(TAS_CLAIM c)
 
 /*
  * The cleanup verdict of a Case A run, on every way out, kept beside the lifecycle outcome and never replacing it.
- * Demonstrated failures outrank the unknown, as in tas_restoration_outcome. Anything else is inconclusive: with no
- * hardware-derived tolerance, PHC continuity cannot be judged, so VERIFIED cannot be reached yet.
+ * Demonstrated failures outrank the unknown, as in tas_restoration_outcome. VERIFIED needs all four facts of #361, so it
+ * cannot be reached yet: only a hardware-derived tolerance can supply TAS_PHC_CONTINUOUS, and none exists.
  */
 typedef struct {
     BOOL lifecycle_shown;     /* so the facts below were measured */
-    unsigned regs_changed;
+    unsigned regs_compared, regs_changed, regs_unreadable;
     TAS_PHC_FACT phc;
     BOOL tx_probed;           /* frames were sent with the observer alive */
     BOOL tx_shown;
@@ -373,7 +374,10 @@ static __inline TAS_RESTORATION_OUTCOME tas_lifecycle_cleanup(const TAS_LIFECYCL
         (c->lifecycle_shown && !c->consistent)) {
         return TAS_RESTORATION_CLEANUP_FAILED;
     }
-    return TAS_RESTORATION_INCONCLUSIVE;
+    if (!c->lifecycle_shown || c->regs_compared == 0 || c->regs_unreadable != 0 || !c->tx_probed || c->phc != TAS_PHC_CONTINUOUS) {
+        return TAS_RESTORATION_INCONCLUSIVE;
+    }
+    return TAS_RESTORATION_VERIFIED;
 }
 
 static __inline const char *tas_cleanup_name(TAS_RESTORATION_OUTCOME o)
@@ -383,4 +387,148 @@ static __inline const char *tas_cleanup_name(TAS_RESTORATION_OUTCOME o)
     case TAS_RESTORATION_INCONCLUSIVE:   return "INCONCLUSIVE_RESTORATION";
     default:                             return "RESTORATION_VERIFIED";
     }
+}
+
+/*
+ * Which adapters a Case A run covers. Every adapter the driver enumerates is classified, and every eligible one runs.
+ *
+ * TAS_ADAPTER_FACTS deliberately has no vendor, device or family field, so nothing here can depend on identity. The NET_LUID
+ * correlates results and sorts candidates. It selects nothing.
+ *
+ * Two capability sets are read, because they answer different questions. GET_ADAPTER_IDENTITY gives what the hardware has.
+ * GET_HW_STATE (AVB_HW_STATE_DRIVER_CAPABILITIES) gives what the driver implements. Hardware with TAS and a driver without it
+ * is NOT_IMPLEMENTED, never unsupported. Below PTP_READY the driver reports a partial set, and an empty hardware word may
+ * only mean bring-up has not run, so neither is evidence of absence: those are INCONCLUSIVE.
+ *
+ * INTEL_CAP_TSN_TAS in the driver set means only that a setup_tas operation exists. It says nothing about activating a
+ * schedule. That gap belongs to #350 and #351.
+ */
+#define TAS_MAX_ADAPTERS 8u
+#define TAS_CASE_A_DRIVER_CAPS ((avb_u32)(INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO))   /* PHC and registers must be measurable */
+
+typedef struct {
+    avb_u64 net_luid;
+    BOOL identity_ok;               /* GET_ADAPTER_IDENTITY answered for this adapter */
+    BOOL hw_state_ok;               /* GET_HW_STATE answered on a handle bound to it */
+    avb_u32 hw_caps;                /* what the hardware has */
+    avb_u32 driver_caps;            /* what the driver implements for it */
+    avb_u32 hw_state;               /* AVB_HW_STATE */
+    BOOL link_up;                   /* up, with an address to send from */
+    BOOL separate_management_link;  /* another adapter keeps the machine reachable */
+} TAS_ADAPTER_FACTS;
+
+typedef enum {
+    TAS_PLAN_ELIGIBLE = 0,
+    TAS_PLAN_SKIP_UNSUPPORTED,      /* hardware evidenced without TAS */
+    TAS_PLAN_SKIP_NOT_IMPLEMENTED,  /* hardware has it, the driver does not: the gap stays visible */
+    TAS_PLAN_SKIP_NO_LINK,          /* runtime not-applicable */
+    TAS_PLAN_INCONCLUSIVE,          /* capability not determinable */
+    TAS_PLAN_BLOCKED                /* applicable, but a prerequisite is unmet */
+} TAS_PLAN_CLASS;
+
+static __inline TAS_PLAN_CLASS tas_plan_classify(const TAS_ADAPTER_FACTS *f)
+{
+    if (!f->identity_ok || !f->hw_state_ok || f->hw_caps == 0) {
+        return TAS_PLAN_INCONCLUSIVE;
+    }
+    if ((f->hw_caps & INTEL_CAP_TSN_TAS) == 0) {
+        return TAS_PLAN_SKIP_UNSUPPORTED;
+    }
+    if ((int)f->hw_state < (int)AVB_HW_PTP_READY) {
+        return TAS_PLAN_INCONCLUSIVE;
+    }
+    if ((f->driver_caps & INTEL_CAP_TSN_TAS) == 0) {
+        return TAS_PLAN_SKIP_NOT_IMPLEMENTED;
+    }
+    if ((f->driver_caps & TAS_CASE_A_DRIVER_CAPS) != TAS_CASE_A_DRIVER_CAPS) {
+        return TAS_PLAN_BLOCKED;
+    }
+    if (!f->link_up) {
+        return TAS_PLAN_SKIP_NO_LINK;
+    }
+    return f->separate_management_link ? TAS_PLAN_ELIGIBLE : TAS_PLAN_BLOCKED;
+}
+
+static __inline const char *tas_plan_name(TAS_PLAN_CLASS c)
+{
+    switch (c) {
+    case TAS_PLAN_ELIGIBLE:             return "ELIGIBLE";
+    case TAS_PLAN_SKIP_UNSUPPORTED:     return "SKIP_UNSUPPORTED";
+    case TAS_PLAN_SKIP_NOT_IMPLEMENTED: return "SKIP_NOT_IMPLEMENTED";
+    case TAS_PLAN_SKIP_NO_LINK:         return "SKIP";
+    case TAS_PLAN_BLOCKED:              return "BLOCKED";
+    default:                            return "INCONCLUSIVE";
+    }
+}
+
+/* Classifies every adapter and returns how many are eligible */
+static __inline unsigned tas_plan_build(const TAS_ADAPTER_FACTS *a, unsigned n, TAS_PLAN_CLASS *classes)
+{
+    unsigned i, eligible = 0;
+
+    for (i = 0; i < n; i++) {
+        classes[i] = tas_plan_classify(&a[i]);
+        eligible += classes[i] == TAS_PLAN_ELIGIBLE ? 1u : 0u;
+    }
+    return eligible;
+}
+
+/*
+ * Who may be tried as the target's observer, lowest NET_LUID first, so the order does not follow enumeration. Observing needs
+ * a link and a host-side capture, so no capability bit applies, and an adapter unable to be a target can still observe.
+ * Being listed proves nothing: only seeing the target's baseline frames makes a candidate an observer.
+ */
+static __inline unsigned tas_observer_candidates(const TAS_ADAPTER_FACTS *a, unsigned n, unsigned target, unsigned *order)
+{
+    unsigned i, m = 0;
+
+    for (i = 0; i < n; i++) {
+        unsigned k;
+
+        if (i == target || !a[i].identity_ok || !a[i].link_up) {
+            continue;
+        }
+        for (k = m; k > 0 && a[order[k - 1]].net_luid > a[i].net_luid; k--) {
+            order[k] = order[k - 1];
+        }
+        order[k] = i;
+        m++;
+    }
+    return m;
+}
+
+/*
+ * The run's exit from every adapter's class and result: 0 proved or clean, 1 failed or non-passing, 2 PHC discontinuous,
+ * 3 not run. Mixed results are never collapsed into success, and a run with nothing eligible proves nothing.
+ * Results of adapters that were not eligible are not read.
+ */
+static __inline int tas_plan_exit(const TAS_PLAN_CLASS *classes, const int *results, unsigned n)
+{
+    unsigned i, eligible = 0;
+    BOOL failed = FALSE, not_run = FALSE, phc = FALSE;
+
+    for (i = 0; i < n; i++) {
+        switch (classes[i]) {
+        case TAS_PLAN_ELIGIBLE:
+            eligible++;
+            failed = failed || results[i] == 1;
+            phc = phc || results[i] == 2;
+            not_run = not_run || results[i] == 3;
+            break;
+        case TAS_PLAN_SKIP_NOT_IMPLEMENTED:
+        case TAS_PLAN_INCONCLUSIVE:
+        case TAS_PLAN_BLOCKED:
+            failed = TRUE;
+            break;
+        default:
+            break;
+        }
+    }
+    if (failed) {
+        return 1;
+    }
+    if (eligible == 0 || not_run) {
+        return 3;
+    }
+    return phc ? 2 : 0;
 }

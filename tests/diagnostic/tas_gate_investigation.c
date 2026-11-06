@@ -82,11 +82,13 @@
  * Exit: 0 registers, TX and PHC all restored; 1 registers differ, TX unhealthy or the cycle failed; 2 registers and TX
  * restored but the PHC is not continuous; 3 not run (nothing mutated).
  *
- * --lifecycle-a --observer <did> [--dry-run | --passive] is Case A of #364: one FilterPause and FilterRestart of the adapter named by
- * AVB_HIL_TARGET_DID, with no schedule, as the control for Cases B to E. It is a separate path from everything above: it
- * uses dedicated IOCTLs only, no READ_REGISTER or WRITE_REGISTER, so no register map decides what it does. Both identities
- * only select adapters; the target must advertise TAS, and the observer proves itself by seeing the baseline frames.
- * --dry-run stops before the trigger, so the instance name can be checked with nothing mutated.
+ * --lifecycle-a [--dry-run | --passive] is Case A of #364: one FilterPause and FilterRestart, with no schedule, of every
+ * adapter whose capabilities make it eligible, as the control for Cases B to E. It is a separate path from everything above:
+ * it uses dedicated IOCTLs only, no READ_REGISTER or WRITE_REGISTER, so no register map decides what it does. Every enumerated
+ * adapter is classified from its capabilities (tas_lifecycle_eval.h), and no device identity selects or changes anything:
+ * NET_LUID binds and correlates, and DIDs are printed for the reader. Each eligible adapter gets its own result and cleanup
+ * verdict. An observer is any other adapter that proves itself by seeing that target's baseline frames.
+ * --dry-run stops before the trigger, so instance, observer and polling resolution are shown per adapter with no lifecycle event.
  *
  * Timing: statistics are polled from before the trigger, each poll bracketed by QPC, so every edge is an interval with a
  * known width. The trigger runs on its own thread and handle, so the polling never waits for it. Each poll takes the
@@ -102,8 +104,9 @@
  * known to be Running: statistics are polled throughout, as they touch no hardware, frames follow only a Restart entry, and
  * the clock and snapshot follow only those frames. Short of that the run stops, with those facts unmeasured.
  *
- * Case A exit: 0 nothing demonstrably wrong, which does not claim PHC continuity; 1 lifecycle not shown, or register, TX,
- * consistency or another adapter differs; 2 all of those fine but the PHC is demonstrably discontinuous; 3 not run.
+ * Case A exit, per adapter and overall: 0 nothing demonstrably wrong, which does not claim PHC continuity; 1 lifecycle not
+ * shown, or register, TX, consistency or another adapter differs, or an adapter that could not be classified or is not
+ * implemented; 2 all of those fine but the PHC is demonstrably discontinuous; 3 not run.
  * Every run past the trigger also prints a cleanup verdict beside that result, and neither replaces the other. It never
  * reads RESTORATION_VERIFIED, as continuity cannot be judged. What each result may claim is in tas_lifecycle_eval.h.
  *
@@ -127,7 +130,6 @@
 #include "../../intel-ethernet-regs/gen/i226_regs.h"
 typedef int NDIS_PARAMETER_TYPE;   /* a kernel type in structures of filteruser.h that this tool does not use: only its IOCTL codes are */
 #include "../../src/filteruser.h"
-#include "../common/avb_test_common.h"
 #include "../hardware/tas_wire_observer.h"
 #include "../ioctl/tas_lifecycle_eval.h"
 
@@ -227,6 +229,7 @@ static BOOL g_dedicated_only;
 /* Private ETW provider of this tool, for markers beside the NDIS events. Enabled by the operator's trace session */
 static const GUID g_marker_provider = {0xB7E1F3C2, 0x6A54, 0x4D0E, {0x9C, 0x37, 0x36, 0x40, 0xE8, 0xA1, 0xD3, 0x64}};
 static REGHANDLE g_marker;
+static avb_u64 g_marker_luid;
 
 typedef struct { DEVINST inst; BOOL enable; CONFIGRET result; } CM_CALL;
 
@@ -1183,10 +1186,10 @@ static void marker(const char *label)
     LONGLONG before = qpc_now(), after;
     ULONG status;
 
-    swprintf_s(text, MARKER_CHARS, L"i364 %hs qpc=%lld", label, before);
+    swprintf_s(text, MARKER_CHARS, L"i364 %hs luid=0x%016llX qpc=%lld", label, g_marker_luid, before);
     status = EventWriteString(g_marker, 0, 0, text);
     after = qpc_now();
-    printf("    marker %s qpcBefore=%lld qpcAfter=%lld hostUs=%lld status=%lu\n", label, before, after, host_us(), status);
+    printf("    marker %s luid=0x%016llX qpcBefore=%lld qpcAfter=%lld hostUs=%lld status=%lu\n", label, g_marker_luid, before, after, host_us(), status);
 }
 
 /** Proves the trace pipeline with no device, no NIC and no driver call */
@@ -1379,88 +1382,67 @@ static unsigned report_others(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const HAN
         ZeroMemory(&st, sizeof(st));
         differs = !read_stats(others[i], &st) || st.FilterPauseCount != before[i].FilterPauseCount || st.FilterRestartCount != before[i].FilterRestartCount ||
                   st.FilterAttachCount != before[i].FilterAttachCount || st.FilterDetachCount != before[i].FilterDetachCount;
-        printf("    other adapter did=0x%04X pause=%llu restart=%llu attach=%llu detach=%llu oper=%d %s\n", ids[i].device_id, st.FilterPauseCount, st.FilterRestartCount,
-               st.FilterAttachCount, st.FilterDetachCount, oper_status(ids[i].net_luid), differs ? "CHANGED" : "unchanged");
+        printf("    other adapter luid=0x%016llX did=0x%04X pause=%llu restart=%llu attach=%llu detach=%llu oper=%d %s\n", ids[i].net_luid, ids[i].device_id, st.FilterPauseCount,
+               st.FilterRestartCount, st.FilterAttachCount, st.FilterDetachCount, oper_status(ids[i].net_luid), differs ? "CHANGED" : "unchanged");
         differs_count += differs ? 1u : 0u;
     }
     printf(TAG " other adapters changed=%u of %d\n", differs_count, n - 1);
     return differs_count;
 }
 
-/** Case A of #364. See the file header for what it does and what its exit codes mean */
-static int lifecycle_case_a(const char *observer_did, BOOL dry_run, BOOL passive)
+/** Tries each candidate until one sees this target's baseline frames. The capture of the proved observer stays running */
+static BOOL observer_prove(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_ADAPTER_FACTS *facts, int n, int t, HANDLE h, SOCKET sock, IN_ADDR ipv4, BOOL *capture_alive)
 {
-    AVB_ADAPTER_IDENTITY_REQUEST ids[AVB_MAX_ADAPTERS], id;
-    unsigned short dids[AVB_MAX_ADAPTERS];
-    HANDLE others[AVB_MAX_ADAPTERS];
-    AVB_DRIVER_STATISTICS other_before[AVB_MAX_ADAPTERS], before, after;
+    unsigned order[TAS_MAX_ADAPTERS];
+    unsigned m = tas_observer_candidates(facts, (unsigned)n, (unsigned)t, order), i;
+
+    for (i = 0; i < m; i++) {
+        unsigned first = g_next_seq, seen;
+
+        g_capture_luid = facts[order[i]].net_luid;
+        *capture_alive = TRUE;
+        printf("    observer candidate luid=0x%016llX did=0x%04X\n", ids[order[i]].net_luid, ids[order[i]].device_id);
+        if (wire_start(ids[t].net_luid, g_capture_luid, ids[t].mac, GetTickCount() ^ GetCurrentProcessId(), ipv4) != 0) {
+            seen = tx_step(h, ids[t].net_luid, sock, BASELINE_MS, "baseline", g_next_seq, capture_alive);
+            if (*capture_alive && g_next_seq != first && (unsigned long long)seen * 100 >= (unsigned long long)(g_next_seq - first) * WIRE_MIN_PERCENT) {
+                printf(TAG " observer proved luid=0x%016llX did=0x%04X frames=%u of %u\n", ids[order[i]].net_luid, ids[order[i]].device_id, seen, g_next_seq - first);
+                return TRUE;
+            }
+            printf("    candidate did not see the target's frames: not an observer here\n");
+        }
+        wire_stop();
+    }
+    return FALSE;
+}
+
+/** One eligible adapter, independent of every other. Everything it opens it closes, on every way out */
+static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_ADAPTER_FACTS *facts, int n, int t, BOOL dry_run, BOOL passive)
+{
+    HANDLE others[TAS_MAX_ADAPTERS];
+    AVB_DRIVER_STATISTICS other_before[TAS_MAX_ADAPTERS], before, after;
     AVB_HW_SNAPSHOT_REQUEST snap_before, snap_after;
     AVB_HW_STATE_QUERY hw_before, hw_after;
     TAS_LIFECYCLE_OUTCOME outcome;
     TAS_LIFECYCLE_CLEANUP cleanup;
     TAS_PHC_FACT phc_fact;
-    IOCTL_VERSION version = {0};
     LARGE_INTEGER qpc_before;
-    WSADATA wsa;
     IN_ADDR ipv4;
     const WCHAR *name = NULL;
     USHORT name_bytes = 0;
-    char value[32];
     SOCKET sock = INVALID_SOCKET;
-    HANDLE h = INVALID_HANDLE_VALUE;
+    HANDLE h;
     unsigned long long phc_before = 0, phc_after = 0;
     unsigned compared = 0, changed = 0, unreadable = 0, armed_before = 1, armed_after = 1, seen = 0, first, other_differs;
-    int t = -1, o = -1, target_oper, selection, rc = 3, n = 0, i;
-    UINT32 count = 1, index;
-    DWORD br = 0, length;
+    int target_oper, rc = 3, i;
     BOOL other_link = FALSE, capture_alive = TRUE, phc_before_ok, phc_after_ok, traffic = FALSE, consistent, wire_up = FALSE;
     TAS_INSTANCE_RESULT instance;
 
-    g_dedicated_only = TRUE;
     ZeroMemory(others, sizeof(others));
     ZeroMemory(&cleanup, sizeof(cleanup));
-    if (EventRegister(&g_marker_provider, NULL, NULL, &g_marker) != ERROR_SUCCESS) {
-        g_marker = 0;   /* EventWriteString then fails harmlessly, and the marker lines show its status */
-    }
-    printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart%s\n", dry_run ? " (dry run, no trigger)" : passive ? " (passive: no tight polling)" : "");
-    printf(TAG " descFetched and occupancy below are not measured: dedicated IOCTLs only\n");
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        printf(TAG " not run: Winsock unavailable\n");
-        return 3;
-    }
+    g_marker_luid = ids[t].net_luid;
+    printf(TAG " --- adapter luid=0x%016llX did=0x%04X ---\n", ids[t].net_luid, ids[t].device_id);
     h = open_device();
-    if (h == INVALID_HANDLE_VALUE) {
-        printf(TAG " not run: cannot open %s (error %lu)\n", DEVICE_NAME, GetLastError());
-        goto done;
-    }
-    if (!DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) ||
-        (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) == 0) {
-        printf(TAG " not run: #364 is a Debug-only investigation\n");
-        goto done;
-    }
-    for (index = 0; index < count && n < AVB_MAX_ADAPTERS && identity_at(h, index, &id); index++) {
-        count = id.count;
-        ids[n] = id;
-        dids[n] = id.device_id;
-        printf("    adapter %d did=0x%04X caps=0x%08X luid=0x%016llX oper=%d\n", n, id.device_id, id.capabilities, id.net_luid, oper_status(id.net_luid));
-        n++;
-    }
-    length = GetEnvironmentVariableA(AVB_TEST_TARGET_ENV, value, (DWORD)sizeof(value));
-    selection = length >= sizeof(value) ? AVB_TARGET_BAD_VALUE : AvbTestSelectTargetIndex(dids, n, length == 0 ? NULL : value, &t);
-    if (selection != AVB_TARGET_OK) {
-        printf(TAG " not run: target %s\n", AvbTargetSelectionName(selection));
-        goto done;
-    }
-    selection = AvbTestSelectTargetIndex(dids, n, observer_did, &o);
-    if (selection != AVB_TARGET_OK || o == t) {
-        printf(TAG " not run: observer %s\n", o == t ? "is the target" : AvbTargetSelectionName(selection));
-        goto done;
-    }
-    if ((ids[t].capabilities & INTEL_CAP_TSN_TAS) == 0) {
-        printf(TAG " not run: the target does not advertise TAS, so this control has no cases to serve\n");
-        goto done;
-    }
-    if (!bind_luid(h, ids[t].net_luid) || !find_addressing(ids[t].net_luid, &ipv4, &other_link) || !other_link) {
+    if (h == INVALID_HANDLE_VALUE || !bind_luid(h, ids[t].net_luid) || !find_addressing(ids[t].net_luid, &ipv4, &other_link) || !other_link) {
         printf(TAG " not run: needs a bound target with link and IPv4, and a separate management link\n");
         goto done;
     }
@@ -1477,7 +1459,7 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run, BOOL passive
         printf(TAG " not run: no unique instance for the target (result %d); the trigger would not be exact\n", (int)instance);
         goto done;
     }
-    printf(TAG " target did=0x%04X instance=%.*ls observer did=0x%04X\n", ids[t].device_id, (int)(name_bytes / sizeof(WCHAR)), name, ids[o].device_id);
+    printf(TAG " instance luid=0x%016llX name=%.*ls\n", ids[t].net_luid, (int)(name_bytes / sizeof(WCHAR)), name);
     for (i = 0; i < n; i++) {
         if (i == t) {
             continue;
@@ -1493,25 +1475,33 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run, BOOL passive
         printf(TAG " not run: socket setup failed (%d)\n", WSAGetLastError());
         goto done;
     }
-    g_capture_luid = ids[o].net_luid;
-    if (wire_start(ids[t].net_luid, g_capture_luid, ids[t].mac, GetTickCount() ^ GetCurrentProcessId(), ipv4) == 0) {
-        printf(TAG " not run: the observer capture could not be started\n");
+    if (!observer_prove(ids, facts, n, t, h, sock, ipv4, &capture_alive)) {
+        printf(TAG " not run: no other adapter saw this target's baseline frames, so nothing here could be proved; nothing mutated\n");
         goto done;
     }
     wire_up = TRUE;
-    first = g_next_seq;
-    seen = tx_step(h, ids[t].net_luid, sock, BASELINE_MS, "baseline", g_next_seq, &capture_alive);
-    if (!capture_alive || (unsigned long long)seen * 100 < (unsigned long long)(g_next_seq - first) * WIRE_MIN_PERCENT) {
-        printf(TAG " not run: the observer did not see the baseline frames, so it proves nothing here; nothing mutated\n");
-        goto done;
-    }
     if (dry_run) {
         static TAS_WINDOW_TRACK resolution;
 
-        if (read_stats(h, &before)) {
-            tas_window_init(&resolution, before.FilterPauseCount, before.FilterRestartCount);
-            (void)poll_baseline(h, &resolution, FALSE);
+        /* What observing itself changed: the same reads as the real run, with no lifecycle event */
+        ZeroMemory(&snap_after, sizeof(snap_after));
+        ZeroMemory(&before, sizeof(before));
+        (void)read_snapshot(h, &snap_after);
+        tas_snapshot_compare(&snap_before, &snap_after, &compared, &changed, &unreadable);
+        other_differs = report_others(ids, others, other_before, n, t);
+        print_clock(h, "dry run");
+        printf(TAG " fact register compared=%u changed=%u unreadable=%u\n", compared, changed, unreadable);
+        if (!read_stats(h, &before)) {
+            printf(TAG " statistics unreadable (error %lu)\n", GetLastError());
+            rc = 1;
+            goto done;
         }
+        tas_window_init(&resolution, before.FilterPauseCount, before.FilterRestartCount);
+        if (!poll_baseline(h, &resolution, FALSE) || changed != 0 || unreadable != 0 || compared == 0 || other_differs != 0) {
+            rc = 1;
+            goto done;
+        }
+        rc = 0;
         printf(TAG " dry run complete: instance and observer proved, polling resolution measured, nothing triggered\n");
         goto done;
     }
@@ -1591,7 +1581,9 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run, BOOL passive
         rc = phc_fact == TAS_PHC_DISCONTINUOUS ? 2 : 0;
     }
     cleanup.lifecycle_shown = TRUE;
+    cleanup.regs_compared = compared;
     cleanup.regs_changed = changed;
+    cleanup.regs_unreadable = unreadable;
     cleanup.phc = phc_fact;
     cleanup.consistent = consistent;
     marker("run-end");
@@ -1599,16 +1591,13 @@ static int lifecycle_case_a(const char *observer_did, BOOL dry_run, BOOL passive
            tas_lifecycle_name(outcome), tas_cleanup_name(tas_lifecycle_cleanup(&cleanup)));
 
 done:
-    if (g_marker != 0) {
-        EventUnregister(g_marker);
-    }
     if (wire_up) {
         wire_stop();
     }
     if (sock != INVALID_SOCKET) {
         closesocket(sock);
     }
-    for (i = 0; i < AVB_MAX_ADAPTERS; i++) {
+    for (i = 0; i < (int)TAS_MAX_ADAPTERS; i++) {
         if (others[i] != NULL && others[i] != INVALID_HANDLE_VALUE) {
             CloseHandle(others[i]);
         }
@@ -1616,7 +1605,108 @@ done:
     if (h != INVALID_HANDLE_VALUE) {
         CloseHandle(h);
     }
+    return rc;
+}
+
+/** What the plan may know about one adapter. Identity stays out of it, apart from the NET_LUID */
+static void adapter_facts(const AVB_ADAPTER_IDENTITY_REQUEST *id, TAS_ADAPTER_FACTS *f)
+{
+    AVB_HW_STATE_QUERY q;
+    IN_ADDR ipv4;
+    HANDLE bound = open_device();
+
+    ZeroMemory(f, sizeof(*f));
+    f->net_luid = id->net_luid;
+    f->identity_ok = TRUE;
+    f->hw_caps = id->capabilities;
+    if (bound != INVALID_HANDLE_VALUE) {
+        if (bind_luid(bound, id->net_luid) && read_hw_state(bound, &q)) {
+            f->hw_state_ok = TRUE;
+            f->driver_caps = AVB_HW_STATE_DRIVER_CAPABILITIES(q);
+            f->hw_state = q.hw_state;
+        }
+        CloseHandle(bound);
+    }
+    f->link_up = find_addressing(id->net_luid, &ipv4, &f->separate_management_link);
+}
+
+/** Case A of #364 on every eligible adapter. See the file header for what it does and what its exit codes mean */
+static int lifecycle_case_a(BOOL dry_run, BOOL passive)
+{
+    static AVB_ADAPTER_IDENTITY_REQUEST ids[TAS_MAX_ADAPTERS];
+    static TAS_ADAPTER_FACTS facts[TAS_MAX_ADAPTERS];
+    TAS_PLAN_CLASS classes[TAS_MAX_ADAPTERS];
+    int results[TAS_MAX_ADAPTERS];
+    AVB_ADAPTER_IDENTITY_REQUEST id;
+    IOCTL_VERSION version = {0};
+    WSADATA wsa;
+    HANDLE h;
+    UINT32 count = 1, index;
+    unsigned n = 0, i, eligible;
+    DWORD br = 0;
+    int rc;
+
+    g_dedicated_only = TRUE;
+    if (EventRegister(&g_marker_provider, NULL, NULL, &g_marker) != ERROR_SUCCESS) {
+        g_marker = 0;   /* EventWriteString then fails harmlessly, and the marker lines show its status */
+    }
+    printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart per eligible adapter%s\n", dry_run ? " (dry run, no trigger)" : passive ? " (passive: no tight polling)" : "");
+    printf(TAG " descFetched and occupancy below are not measured: dedicated IOCTLs only\n");
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf(TAG " not run: Winsock unavailable\n");
+        rc = 3;
+        goto unregister;
+    }
+    h = open_device();
+    if (h == INVALID_HANDLE_VALUE) {
+        printf(TAG " not run: cannot open %s (error %lu)\n", DEVICE_NAME, GetLastError());
+        rc = 3;
+        goto winsock;
+    }
+    if (!DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) ||
+        (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) == 0) {
+        printf(TAG " not run: #364 is a Debug-only investigation\n");
+        CloseHandle(h);
+        rc = 3;
+        goto winsock;
+    }
+    for (index = 0; index < count && n < TAS_MAX_ADAPTERS && identity_at(h, index, &id); index++) {
+        count = id.count;
+        ids[n++] = id;
+    }
+    CloseHandle(h);
+    if (n == 0 || n != count) {
+        printf(TAG " not run: %u of %u adapters enumerated, so the plan would not cover them all\n", n, count);
+        rc = 3;
+        goto winsock;
+    }
+    for (i = 0; i < n; i++) {
+        adapter_facts(&ids[i], &facts[i]);
+    }
+    eligible = tas_plan_build(facts, n, classes);
+    for (i = 0; i < n; i++) {
+        results[i] = 3;
+        printf(TAG " plan luid=0x%016llX did=0x%04X hwCaps=0x%08X driverCaps=0x%08X hwState=%u link=%d managementLink=%d class=%s\n", facts[i].net_luid, ids[i].device_id, facts[i].hw_caps,
+               facts[i].driver_caps, facts[i].hw_state, facts[i].link_up, facts[i].separate_management_link, tas_plan_name(classes[i]));
+    }
+    for (i = 0; i < n; i++) {
+        if (classes[i] == TAS_PLAN_ELIGIBLE) {
+            results[i] = lifecycle_target(ids, facts, (int)n, (int)i, dry_run, passive);
+        }
+    }
+    for (i = 0; i < n; i++) {
+        printf(TAG " adapter result luid=0x%016llX did=0x%04X class=%s %s\n", facts[i].net_luid, ids[i].device_id, tas_plan_name(classes[i]),
+               classes[i] == TAS_PLAN_ELIGIBLE ? (results[i] == 0 ? "exit=0" : results[i] == 1 ? "exit=1" : results[i] == 2 ? "exit=2" : "exit=3") : "not a target");
+    }
+    rc = tas_plan_exit(classes, results, n);
+    printf(TAG " summary adapters=%u eligible=%u exit=%d\n", n, eligible, rc);
+
+winsock:
     WSACleanup();
+unregister:
+    if (g_marker != 0) {
+        EventUnregister(g_marker);
+    }
     return rc;
 }
 
@@ -1650,12 +1740,11 @@ int main(int argc, char **argv)
         return marker_smoke();
     }
     if (argc >= 2 && strcmp(argv[1], "--lifecycle-a") == 0) {
-        if ((argc != 4 && argc != 5) || strcmp(argv[2], "--observer") != 0 ||
-            (argc == 5 && strcmp(argv[4], "--dry-run") != 0 && strcmp(argv[4], "--passive") != 0)) {
-            printf(TAG " not run: usage: tas_gate_investigation --lifecycle-a --observer <did> [--dry-run | --passive], with " AVB_TEST_TARGET_ENV " set\n");
+        if (argc > 3 || (argc == 3 && strcmp(argv[2], "--dry-run") != 0 && strcmp(argv[2], "--passive") != 0)) {
+            printf(TAG " not run: usage: tas_gate_investigation --lifecycle-a [--dry-run | --passive]\n");
             return 3;
         }
-        return lifecycle_case_a(argv[3], argc == 5 && strcmp(argv[4], "--dry-run") == 0, argc == 5 && strcmp(argv[4], "--passive") == 0);
+        return lifecycle_case_a(argc == 3 && strcmp(argv[2], "--dry-run") == 0, argc == 3 && strcmp(argv[2], "--passive") == 0);
     }
     if (argc == 3 && strcmp(argv[1], "--apply") == 0 && argv[2][0] != '\0' && strspn(argv[2], "wsb") == strlen(argv[2])) {
         letters = argv[2];
@@ -1705,7 +1794,7 @@ int main(int argc, char **argv)
         }
         letters = "wsb";
     } else if (argc != 1) {
-        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b> | --pattern <startMs> <endMs> | --disarm | --rearm <n> | --lifecycle-a --observer <did> [--dry-run | --passive] | --lifecycle-markers]\n");
+        printf(TAG " not run: usage: tas_gate_investigation [--apply <any of w, s, b> | --pattern <startMs> <endMs> | --disarm | --rearm <n> | --lifecycle-a [--dry-run | --passive] | --lifecycle-markers]\n");
         return 3;
     }
     for (n = 0; argc == 3 && letters != NULL && n < strlen(letters); n++) {
