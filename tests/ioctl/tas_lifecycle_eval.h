@@ -532,3 +532,103 @@ static __inline int tas_plan_exit(const TAS_PLAN_CLASS *classes, const int *resu
     }
     return phc ? 2 : 0;
 }
+
+/*
+ * The State rule of investigations/issue-364-filter-lifecycle-case-a.md: what the NDIS state events of one filter instance
+ * may say. Values are positions, never names: no document maps them. The driver counters anchor the sequence, because they
+ * are independent of ETW, and slack is the bracket of the marker that places the two against each other.
+ *
+ * An event alone proves no transition: a class is one input to tas_state_claim, which also needs the traffic-based lifecycle
+ * outcome and untouched other adapters. Offline cases TC-MOCK-024 to 026 say nothing about hardware.
+ */
+#define TAS_SEQ_MAX_EVENTS 16
+
+typedef enum {
+    TAS_SEQ_TRACE_SILENT = 0,   /* no provider event, or events lost: no ETW statement either way */
+    TAS_SEQ_NO_WINDOW,          /* no marker to place the events against */
+    TAS_SEQ_NOT_EMITTED,        /* provider live, nothing on this instance: completion stays inferred */
+    TAS_SEQ_CONSISTENT,         /* agrees with Running, Pausing, Paused, Restarting, Running */
+    TAS_SEQ_FAILED_RESTART,     /* ended on the Paused position, or the context went away */
+    TAS_SEQ_UNEXPECTED          /* anything else: the raw sequence is the result */
+} TAS_SEQ_CLASS;
+
+typedef struct {
+    unsigned provider_events;   /* events of the provider in this trace, on any adapter */
+    unsigned events_lost;
+    BOOL have_window;
+    unsigned count;             /* events on the instance inside the window; can exceed what value[] holds */
+    unsigned value[TAS_SEQ_MAX_EVENTS];
+    LONGLONG qpc[TAS_SEQ_MAX_EVENTS];
+    BOOL pause_edge, restart_edge;
+    TAS_EDGE pause, restart;
+    LONGLONG slack;
+    TAS_LIFECYCLE_OUTCOME outcome;
+} TAS_SEQ_EVIDENCE;
+
+static __inline TAS_SEQ_CLASS tas_seq_classify(const TAS_SEQ_EVIDENCE *e)
+{
+    if (e->provider_events == 0 || e->events_lost != 0) {
+        return TAS_SEQ_TRACE_SILENT;
+    }
+    if (!e->have_window) {
+        return TAS_SEQ_NO_WINDOW;
+    }
+    if (e->count == 0) {
+        return TAS_SEQ_NOT_EMITTED;
+    }
+    if (e->count > TAS_SEQ_MAX_EVENTS) {
+        return TAS_SEQ_UNEXPECTED;
+    }
+    if (e->outcome == TAS_LIFECYCLE_CONTEXT_REPLACED || (e->count >= 3 && e->value[e->count - 1] == e->value[1])) {
+        return TAS_SEQ_FAILED_RESTART;
+    }
+    if (e->count == 4 && e->value[0] != e->value[1] && e->value[1] != e->value[2] && e->value[2] != e->value[3] && e->value[0] != e->value[2] &&
+        e->pause_edge && e->restart_edge && e->pause.last_old <= e->qpc[2] + e->slack && e->pause.first_new >= e->qpc[0] - e->slack &&
+        e->restart.first_new >= e->qpc[1] - e->slack) {
+        return TAS_SEQ_CONSISTENT;
+    }
+    return TAS_SEQ_UNEXPECTED;
+}
+
+/* NDIS-reported time from the Paused position to the Restarting position. Meaningful only for TAS_SEQ_CONSISTENT */
+static __inline LONGLONG tas_seq_paused_ticks(const TAS_SEQ_EVIDENCE *e)
+{
+    return e->qpc[2] - e->qpc[1];
+}
+
+static __inline BOOL tas_state_claim(TAS_SEQ_CLASS sequence, TAS_LIFECYCLE_OUTCOME outcome, unsigned others_changed)
+{
+    return sequence == TAS_SEQ_CONSISTENT && outcome == TAS_LIFECYCLE_RESUMED && others_changed == 0;
+}
+
+static __inline const char *tas_seq_name(TAS_SEQ_CLASS c)
+{
+    switch (c) {
+    case TAS_SEQ_TRACE_SILENT:   return "TRACE_SILENT";
+    case TAS_SEQ_NO_WINDOW:      return "NO_WINDOW";
+    case TAS_SEQ_NOT_EMITTED:    return "NOT_EMITTED";
+    case TAS_SEQ_CONSISTENT:     return "SEQUENCE_CONSISTENT";
+    case TAS_SEQ_FAILED_RESTART: return "SEQUENCE_FAILED_RESTART";
+    default:                     return "SEQUENCE_UNEXPECTED";
+    }
+}
+
+/* Where the management session runs. Reported only: losing it is an accepted consequence, and no verdict reads this */
+typedef enum { TAS_MGMT_UNATTRIBUTED = 0, TAS_MGMT_ON_TARGET, TAS_MGMT_NOT_ON_TARGET } TAS_MGMT_CLASS;
+
+static __inline TAS_MGMT_CLASS tas_mgmt_class(unsigned local_addresses, unsigned on_target)
+{
+    if (local_addresses == 0) {
+        return TAS_MGMT_UNATTRIBUTED;
+    }
+    return on_target != 0 ? TAS_MGMT_ON_TARGET : TAS_MGMT_NOT_ON_TARGET;
+}
+
+static __inline const char *tas_mgmt_name(TAS_MGMT_CLASS c)
+{
+    switch (c) {
+    case TAS_MGMT_ON_TARGET:     return "MANAGEMENT_ON_TARGET";
+    case TAS_MGMT_NOT_ON_TARGET: return "MANAGEMENT_NOT_ON_TARGET";
+    default:                     return "MANAGEMENT_UNATTRIBUTED";
+    }
+}

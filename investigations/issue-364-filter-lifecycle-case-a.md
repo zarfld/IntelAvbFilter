@@ -431,6 +431,16 @@ None of the three prevents safe execution of Case A. Each only limits what a res
 
 ## Case A operator procedure
 
+**Case A is the compiled test `test_tas_lifecycle_case_a` (Q 2026-11-06): tests are compiled and live in the build folder, so the prepared runner finds them.** It is registered `Unsafe` in the coverage-gap table, and started by name:
+
+```powershell
+.\tools\test\Run-Tests-Elevated.ps1 -Suite HardwareIntegration -TestName test_tas_lifecycle_case_a -CaptureDbgView
+```
+
+The runner owns the machine lock, baseline, post-test state check, provenance and the DbgView capture. The test owns its ETW session, written to `logs\diag-i364-casea-<stamp>.etl`, and prints the `State` sequence, the management report and three verdicts per adapter: `TC-CASEA-001` lifecycle, `TC-CASEA-002` NDIS agreement, `TC-CASEA-003` restoration. A run exits 1 even when healthy, because restoration has no PHC tolerance and stays a restoration verdict. Run `ssot_register_validation_test` before and after it for the TSN register comparison, which uses registers this test does not read.
+
+Conversion, one script at a time: `Invoke-TasStage1DryRun.ps1`, its orchestration test and the `--lifecycle-a` mode of `tas_gate_investigation` are removed once this test has run on hardware. #364's Method section still says "Not a runner entry": that text needs a correction with the other #364 changes. The sections below describe the wrapper until then.
+
 The operator runs it. The wrapper mode is verified offline only: `tests/unit/ci/test_tas_stage1_orchestration.ps1`, 249 of 249, 77 of 77 mutants killed. That is no hardware evidence, and its trace fixtures stay UNVERIFIED until a real trace exists. Run that test from a process with a console: without one the interrupt cases fail, because the Ctrl+C never arrives.
 
 | # | State | Change to `Invoke-TasStage1DryRun.ps1` |

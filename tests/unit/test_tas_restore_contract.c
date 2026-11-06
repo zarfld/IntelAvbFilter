@@ -1105,6 +1105,122 @@ static void test_23_plan_exit(void) {
  * Main
  * ========================================================================= */
 
+/*
+ * TC-MOCK-024 to 026: the State rule of investigations/issue-364-filter-lifecycle-case-a.md (#364).
+ * UNVERIFIED: no event 10312 has been observed on this stack, so these values are positions from the documented order,
+ * not observed numbers. Replace them with real evidence after the first run. These cases say nothing about hardware.
+ */
+static void seq_good(TAS_SEQ_EVIDENCE *e)
+{
+    static const unsigned values[4] = {10, 20, 30, 40};
+    static const LONGLONG times[4] = {1000200, 1000400, 1000700, 1000900};
+    unsigned i;
+
+    ZeroMemory(e, sizeof(*e));
+    e->provider_events = 5;
+    e->have_window = TRUE;
+    e->count = 4;
+    for (i = 0; i < 4; i++) {
+        e->value[i] = values[i];
+        e->qpc[i] = times[i];
+    }
+    e->pause_edge = e->restart_edge = TRUE;
+    e->pause.last_old = 1000300;
+    e->pause.first_new = 1000310;
+    e->restart.last_old = 1000800;
+    e->restart.first_new = 1000810;
+    e->slack = 200;
+    e->outcome = TAS_LIFECYCLE_RESUMED;
+}
+
+static void test_24_state_sequence(void) {
+    TAS_SEQ_EVIDENCE e;
+
+    printf("\n[TC-MOCK-024] NDIS state sequence of one instance\n");
+    seq_good(&e);
+    EXPECT_EQ("documented order with both edges inside", tas_seq_classify(&e), TAS_SEQ_CONSISTENT);
+    EXPECT_EQ("paused interval is position 2 to position 3", (int)tas_seq_paused_ticks(&e), 300);
+
+    seq_good(&e); e.provider_events = 0; e.count = 0;
+    EXPECT_EQ("no provider event at all", tas_seq_classify(&e), TAS_SEQ_TRACE_SILENT);
+    seq_good(&e); e.events_lost = 3;
+    EXPECT_EQ("lost events void the sequence", tas_seq_classify(&e), TAS_SEQ_TRACE_SILENT);
+    seq_good(&e); e.have_window = FALSE;
+    EXPECT_EQ("no marker window", tas_seq_classify(&e), TAS_SEQ_NO_WINDOW);
+    seq_good(&e); e.count = 0;
+    EXPECT_EQ("provider live, nothing on the instance", tas_seq_classify(&e), TAS_SEQ_NOT_EMITTED);
+
+    seq_good(&e); e.value[3] = 20;
+    EXPECT_EQ("back on the Paused position", tas_seq_classify(&e), TAS_SEQ_FAILED_RESTART);
+    seq_good(&e); e.count = 3; e.value[2] = 20; e.value[1] = 20;
+    EXPECT_EQ("three events ending on the second value", tas_seq_classify(&e), TAS_SEQ_FAILED_RESTART);
+    seq_good(&e); e.outcome = TAS_LIFECYCLE_CONTEXT_REPLACED;
+    EXPECT_EQ("a replaced context is no restart", tas_seq_classify(&e), TAS_SEQ_FAILED_RESTART);
+
+    seq_good(&e); e.count = 3;
+    EXPECT_EQ("three events", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.count = 5; e.value[4] = 50;
+    EXPECT_EQ("five events", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.count = TAS_SEQ_MAX_EVENTS + 1;
+    EXPECT_EQ("more events than held", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.value[1] = e.value[0];
+    EXPECT_EQ("first two values repeat", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.value[2] = e.value[1];
+    EXPECT_EQ("middle values repeat", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.value[3] = e.value[2];
+    EXPECT_EQ("last two values repeat", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.value[2] = e.value[0];
+    EXPECT_EQ("Running position reused for Restarting", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+}
+
+static void test_25_state_edges(void) {
+    TAS_SEQ_EVIDENCE e;
+
+    printf("\n[TC-MOCK-025] Driver counters anchor the sequence\n");
+    seq_good(&e); e.pause_edge = FALSE;
+    EXPECT_EQ("no pause edge", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.restart_edge = FALSE;
+    EXPECT_EQ("no restart edge", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.pause.last_old = 1090000; e.pause.first_new = 1090010;
+    EXPECT_EQ("pause edge after position 3", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.pause.last_old = 1000000; e.pause.first_new = 1000001; e.slack = 0;
+    EXPECT_EQ("pause edge before position 1", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.restart.last_old = 1000100; e.restart.first_new = 1000110;
+    EXPECT_EQ("restart edge before position 2", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.pause.last_old = 1000850; e.pause.first_new = 1000860;
+    EXPECT_EQ("slack widens the pause bound by the marker bracket", tas_seq_classify(&e), TAS_SEQ_CONSISTENT);
+    seq_good(&e); e.pause.last_old = 1000901; e.pause.first_new = 1000905;
+    EXPECT_EQ("beyond the slack is outside", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+    seq_good(&e); e.restart.last_old = 1000190; e.restart.first_new = 1000200;
+    EXPECT_EQ("slack widens the restart bound by the marker bracket", tas_seq_classify(&e), TAS_SEQ_CONSISTENT);
+    seq_good(&e); e.restart.last_old = 1000190; e.restart.first_new = 1000199;
+    EXPECT_EQ("beyond the restart slack is outside", tas_seq_classify(&e), TAS_SEQ_UNEXPECTED);
+}
+
+static void test_26_state_claim(void) {
+    printf("\n[TC-MOCK-026] An NDIS event alone proves no transition\n");
+    EXPECT_TRUE("sequence, traffic and untouched adapters agree", tas_state_claim(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_RESUMED, 0));
+    EXPECT_FALSE("sequence without traffic", tas_state_claim(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_RESTART_ENTERED, 0));
+    EXPECT_FALSE("sequence after pause only", tas_state_claim(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_PAUSE_ONLY, 0));
+    EXPECT_FALSE("another adapter changed", tas_state_claim(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_RESUMED, 1));
+    EXPECT_FALSE("traffic without a sequence", tas_state_claim(TAS_SEQ_NOT_EMITTED, TAS_LIFECYCLE_RESUMED, 0));
+    EXPECT_FALSE("failed restart", tas_state_claim(TAS_SEQ_FAILED_RESTART, TAS_LIFECYCLE_RESUMED, 0));
+    EXPECT_FALSE("unexpected sequence", tas_state_claim(TAS_SEQ_UNEXPECTED, TAS_LIFECYCLE_RESUMED, 0));
+    EXPECT_TRUE("every class has a name", strcmp(tas_seq_name(TAS_SEQ_NO_WINDOW), "NO_WINDOW") == 0 && strcmp(tas_seq_name(TAS_SEQ_TRACE_SILENT), "TRACE_SILENT") == 0 &&
+                strcmp(tas_seq_name(TAS_SEQ_NOT_EMITTED), "NOT_EMITTED") == 0 && strcmp(tas_seq_name(TAS_SEQ_CONSISTENT), "SEQUENCE_CONSISTENT") == 0 &&
+                strcmp(tas_seq_name(TAS_SEQ_FAILED_RESTART), "SEQUENCE_FAILED_RESTART") == 0 && strcmp(tas_seq_name(TAS_SEQ_UNEXPECTED), "SEQUENCE_UNEXPECTED") == 0);
+}
+
+/* TC-MOCK-027: where the management session runs is a report: no answer is never "elsewhere" */
+static void test_27_management(void) {
+    printf("\n[TC-MOCK-027] Management session class\n");
+    EXPECT_EQ("no bound socket", tas_mgmt_class(0, 0), TAS_MGMT_UNATTRIBUTED);
+    EXPECT_EQ("one socket on the target", tas_mgmt_class(2, 1), TAS_MGMT_ON_TARGET);
+    EXPECT_EQ("sockets elsewhere", tas_mgmt_class(2, 0), TAS_MGMT_NOT_ON_TARGET);
+    EXPECT_TRUE("names", strcmp(tas_mgmt_name(TAS_MGMT_ON_TARGET), "MANAGEMENT_ON_TARGET") == 0 && strcmp(tas_mgmt_name(TAS_MGMT_NOT_ON_TARGET), "MANAGEMENT_NOT_ON_TARGET") == 0 &&
+                strcmp(tas_mgmt_name(TAS_MGMT_UNATTRIBUTED), "MANAGEMENT_UNATTRIBUTED") == 0);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1137,6 +1253,10 @@ int main(void) {
     test_21_eligibility();
     test_22_plan_and_observers();
     test_23_plan_exit();
+    test_24_state_sequence();
+    test_25_state_edges();
+    test_26_state_claim();
+    test_27_management();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

@@ -587,6 +587,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
     'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
     'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; #149 #317'
+    'test_tas_lifecycle_case_a'     = 'Unsafe: #364 Case A, one real FilterPause and FilterRestart through IOCTL_FILTER_RESTART_ONE_INSTANCE on every eligible adapter; the PHC may be reset and NDIS may hang, so it runs operator-attended and by name'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 64 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm --stall-probe 512' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 512 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 1400 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
@@ -755,6 +756,7 @@ $HilTestSafety = @{
     # --- Unsafe (NIC administration; removed from every suite list) ---
     'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
     'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
+    'test_tas_lifecycle_case_a'        = 'Unsafe'     # IOCTL_FILTER_RESTART_ONE_INSTANCE: NdisFRestartFilter (#364)
     'test_tas_isolated_arm'            = 'Unsafe'     # SETUP_TAS plus CM_Disable_DevNode / CM_Enable_DevNode
     'test_tas_isolated_arm --armed-period-ms 200' = 'Unsafe'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe'
