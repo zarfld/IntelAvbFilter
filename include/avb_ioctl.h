@@ -180,6 +180,40 @@ typedef struct _IOCTL_VERSION {
 #define IOCTL_AVB_OPEN_ADAPTER_BY_LUID  _NDIS_CONTROL_CODE(69, METHOD_BUFFERED)  /* 0x00170114 */
 #define IOCTL_AVB_QUERY_HW_SNAPSHOT     _NDIS_CONTROL_CODE(70, METHOD_BUFFERED)  /* 0x00170118 */
 
+/* First gate schedule on a clean adapter at a future PHC time (#357). Unlike IOCTL_AVB_SETUP_TAS, it applies a schedule.
+ * pre_activation has no default: the caller chooses HOLD or PASS. Written as a schedule of one window per queue per cycle.
+ * The IOCTL succeeds whenever it ran, and result says what happened, because METHOD_BUFFERED drops the output on an error
+ * status. Only COMMITTED and BASE_PASSED leave a schedule behind. */
+#define IOCTL_AVB_TAS_ACTIVATE          _NDIS_CONTROL_CODE(71, METHOD_BUFFERED)  /* 0x0017011C */
+
+#define AVB_TAS_ACTIVATE_VERSION 1u
+#define AVB_TAS_QUEUES           4u
+#define AVB_TAS_PRE_HOLD         1u   /* frames held until the first window after BaseT */
+#define AVB_TAS_PRE_PASS         2u   /* frames flow until BaseT, then gated */
+#define AVB_TAS_MIN_LEAD_NS      100000000ULL   /* BaseT must be at least this far ahead of the PHC when the writes start */
+
+#define AVB_TAS_ACT_COMMITTED           0u  /* schedule written, BaseT still ahead at the read after commit */
+#define AVB_TAS_ACT_INVALID             1u  /* refused: bad field, or BaseT not far enough ahead. Nothing written */
+#define AVB_TAS_ACT_NOT_CLEAN           2u  /* refused: armed, left-over schedule state or unreadable. Nothing written */
+#define AVB_TAS_ACT_FAILED_RESTORED     3u  /* a write failed before commit, every register read back at its old value */
+#define AVB_TAS_ACT_FAILED_NOT_RESTORED 4u  /* a write failed before commit and the restore did not complete */
+#define AVB_TAS_ACT_BASE_PASSED         5u  /* schedule written, but the PHC had passed BaseT at the read after commit */
+
+typedef struct AVB_TAS_ACTIVATE_REQUEST {
+    avb_u32 version;                          /* in: AVB_TAS_ACTIVATE_VERSION */
+    avb_u32 pre_activation;                   /* in: AVB_TAS_PRE_HOLD or AVB_TAS_PRE_PASS */
+    avb_u64 base_time_ns;                     /* in: BaseT, PHC time */
+    avb_u32 cycle_ns;                         /* in */
+    avb_u32 link_mbps;                        /* in: current link rate, for the minimum window */
+    avb_u32 max_frame_bytes;                  /* in: largest frame in the queues, on the wire */
+    avb_u32 reserved;                         /* in: 0 */
+    avb_u32 window_start_ns[AVB_TAS_QUEUES];  /* in: open time within the cycle, queues 0 to 3 */
+    avb_u32 window_end_ns[AVB_TAS_QUEUES];    /* in: close time within the cycle */
+    avb_u64 phc_at_commit_ns;                 /* out: PHC read after the commit write, 0 if none */
+    avb_u32 result;                           /* out: AVB_TAS_ACT_* */
+    avb_u32 status;                           /* out: NTSTATUS of the operation */
+} AVB_TAS_ACTIVATE_REQUEST, *PAVB_TAS_ACTIVATE_REQUEST;
+
 #define AVB_ADAPTER_IDENTITY_VERSION 1u
 typedef struct AVB_ADAPTER_IDENTITY_REQUEST {
     avb_u32 version;       /* in: AVB_ADAPTER_IDENTITY_VERSION */
