@@ -531,7 +531,7 @@ Sorted by what actually stops Case A.
 1. **Authorization.** Stage 2 is not authorized. Q decides after reviewing the recovery strategy.
 2. **Recovery understood.** Q knows what recovers the machine with all networking down (see "Management path (RealVNC)").
 3. **Session not on the target.** `-CaseA` enforces this at run time, and refuses otherwise.
-4. **Hardware check of the reporting correction** of `b836e5a`, which is still offline-only.
+4. **Hardware check of the reporting correction** of `b836e5a`. Its behaviour was observed on hardware on 2026-11-06 (`logs/ssot_register_validation_test_20261106_192202.log`, Debug driver `C1A98CF9...`, `LOCAL_DIAGNOSTIC`): 9/5, 10/4 and 4/10 observed and unobservable, `error: none`, registers compared 23 of 23, outcome `NOT_REQUIRED`. It is not GREEN: `provenance.verified` is false, because the test binary predates the current build inputs. It needs one targeted run after `Build-Tests.ps1` at a clean HEAD.
 
 **Resolved:** the driver; W1 to W7, offline. **Written, not yet exercised:** the `State` rule and the wrapper's Case A mode.
 
