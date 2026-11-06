@@ -163,17 +163,21 @@ function New-Etl {
 }
 
 $StandIn = @'
-using System; using System.IO; using System.Diagnostics; using System.Threading; using System.Runtime.InteropServices;
+using System; using System.IO; using System.Text; using System.Threading; using System.Runtime.InteropServices;
 class S {
   [DllImport("kernel32.dll")] static extern bool FreeConsole();
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint p);
   [DllImport("kernel32.dll")] static extern bool SetConsoleCtrlHandler(IntPtr h, bool add);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GenerateConsoleCtrlEvent(uint e, uint g);
+  // kernel32 directly: the Process class loads System.dll and walks the module list, and this runs four times per case.
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern uint GetModuleFileNameW(IntPtr h, StringBuilder b, uint n);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
   static string C;
   static void T(string s) { for (int i = 0; i < 50; i++) { try { File.AppendAllText(C + "\\trace.txt", s + "\r\n"); return; } catch (IOException) { Thread.Sleep(10); } } }
   static string R(string f) { string p = C + "\\" + f; return File.Exists(p) ? File.ReadAllText(p).Trim() : ""; }
   static int Main(string[] a) {
-    string me = Process.GetCurrentProcess().MainModule.FileName, n = Path.GetFileNameWithoutExtension(me).ToLowerInvariant();
+    StringBuilder mb = new StringBuilder(1024); GetModuleFileNameW(IntPtr.Zero, mb, 1024);
+    string me = mb.ToString(), n = Path.GetFileNameWithoutExtension(me).ToLowerInvariant();
     if (n == "inject") {
       FreeConsole(); if (!AttachConsole(uint.Parse(a[0]))) return 3;
       SetConsoleCtrlHandler(IntPtr.Zero, true); bool ok = GenerateConsoleCtrlEvent(0, 0); Thread.Sleep(150); FreeConsole(); return ok ? 0 : 4; }
@@ -190,7 +194,7 @@ class S {
       if (v == "query") { T("trace-query"); if (fi == "query-denied") return -2147024891; return File.Exists(flag) ? 0 : -2144337918; }
       if (v == "update") { T("trace-update:" + string.Join(" ", a)); return fi == "ca-marker-fail" ? 1 : 0; }
       return 9; }
-    T("tool:" + string.Join(" ", a)); T("tool-pid:" + Process.GetCurrentProcess().Id);
+    T("tool:" + string.Join(" ", a)); T("tool-pid:" + GetCurrentProcessId());
     Console.Write(R("tool.txt") + "\r\n"); Console.Out.Flush();
     string s = R("toolsleep.txt");
     if (s != "") { T("tool-wait"); Thread.Sleep(int.Parse(s)); T("tool-finished"); }
@@ -245,7 +249,7 @@ function global:tracerpt { CT 'decode'
     Set-Content "$($args[0]).xml" $body; $global:LASTEXITCODE = 0 }
 function global:CF([string]$n, [string]$d) { $p = "$global:CaseDir\$n"; if (Test-Path -LiteralPath $p) { (Get-Content -LiteralPath $p -Raw).Trim() } else { $d } }
 function global:Get-NetIPAddress { [CmdletBinding()] param([int]$InterfaceIndex, $AddressFamily)
-    CT "ifindex:$InterfaceIndex"; if ($global:FI -eq 'ca-no-target-ip') { return }; [pscustomobject]@{ IPAddress = '10.0.0.12' } }
+    CT "ifindex:$InterfaceIndex"; if ($global:FI -eq 'ca-management-check-throws') { throw 'address query failed' }; if ($global:FI -eq 'ca-no-target-ip') { return }; [pscustomobject]@{ IPAddress = '10.0.0.12' } }
 function global:Get-NetTCPConnection { [CmdletBinding()] param($OwningProcess, $State)
     $t = CF 'mgmt-tcp.txt' '10.0.0.71'; if ($t -ne 'none') { [pscustomobject]@{ LocalAddress = $t } } }
 function global:Get-NetUDPEndpoint { [CmdletBinding()] param($OwningProcess)
@@ -371,11 +375,18 @@ $cases = @(
  @{n='ca-resumed'; caseA=$true; g='PASS'; d='0'; k='OK'; v=$inc; x=0; deny=@('NO_CHANGE'); want=@('STATE SEQUENCE luid=0x0006008006000000 class=SEQUENCE_CONSISTENT values=a,b,c,d events=4 pausedNdisUs=30.0 bracketUs=20.0','STATE CLAIM luid=0x0006008006000000 sequence=SEQUENCE_CONSISTENT lifecycle=RESUMED_BY_TRAFFIC supported=True','stateEvents=4','toolCleanup=INCONCLUSIVE_RESTORATION','MANAGEMENT class=MANAGEMENT_NOT_ON_TARGET','CASE A COMPLETED'); trace=@('trace-update:update trace AvbI364S1 -p {B7E1F3C2-6A54-4D0E-9C37-3640E8A1D364} 0xffffffffffffffff 0x5 -ets','ifindex:8','dbgview-start','dbgview-stop'); checksums=$true}
  @{n='ca-phc-discontinuous'; caseA=$true; m={param($c) $c.toolRc=2; $c.tool=$c.tool.Replace('result: exit=0 lifecycle=RESUMED_BY_TRAFFIC cleanup=INCONCLUSIVE_RESTORATION','result: exit=2 lifecycle=RESUMED_BY_TRAFFIC cleanup=CLEANUP_FAILED').Replace('class=ELIGIBLE exit=0','class=ELIGIBLE exit=2').Replace('eligible=1 exit=0','eligible=1 exit=2')}; g='PASS'; d='2'; k='OK'; v=$cf; x=3; want=@('toolCleanup=CLEANUP_FAILED','STATE CLAIM luid=0x0006008006000000 sequence=SEQUENCE_CONSISTENT lifecycle=RESUMED_BY_TRAFFIC supported=True')}
  @{n='ca-tool-fail'; caseA=$true; m={param($c) $c.toolRc=1; $c.tool=$c.tool.Replace('result: exit=0 lifecycle=RESUMED_BY_TRAFFIC','result: exit=1 lifecycle=PAUSE_ONLY').Replace('class=ELIGIBLE exit=0','class=ELIGIBLE exit=1').Replace('eligible=1 exit=0','eligible=1 exit=1')}; g='PASS'; d='1'; k='OK'; v=$inc; x=3; want=@('lifecycle=PAUSE_ONLY supported=False'); deny=@('supported=True')}
- @{n='ca-management-udp-on-target'; caseA=$true; f=@{'mgmt-udp.txt'='10.0.0.12'}; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_ON_TARGET','STOP before the trigger','CASE A STOPPED BEFORE THE TRIGGER')}
- @{n='ca-management-tcp-on-target'; caseA=$true; f=@{'mgmt-tcp.txt'='10.0.0.12'}; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_ON_TARGET')}
- @{n='ca-management-no-socket'; caseA=$true; f=@{'mgmt-tcp.txt'='none'}; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED')}
- @{n='ca-no-process'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED')}
- @{n='ca-no-target-ip'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED')}
+ # A management session on a target is reported and never stops the run (Q 2026-11-06): losing it is an accepted consequence.
+ @{n='ca-management-udp-on-target'; caseA=$true; f=@{'mgmt-udp.txt'='10.0.0.12'}; g='PASS'; d='0'; k='OK'; v=$inc; x=0; want=@('MANAGEMENT class=MANAGEMENT_ON_TARGET','WARNING management session','CASE A COMPLETED'); deny=@('STOP before the trigger')}
+ @{n='ca-management-tcp-on-target'; caseA=$true; f=@{'mgmt-tcp.txt'='10.0.0.12'}; g='PASS'; d='0'; k='OK'; v=$inc; x=0; want=@('MANAGEMENT class=MANAGEMENT_ON_TARGET','WARNING management session')}
+ @{n='ca-management-no-socket'; caseA=$true; f=@{'mgmt-tcp.txt'='none'}; g='PASS'; d='0'; k='OK'; v=$inc; x=0; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED','WARNING management session')}
+ @{n='ca-no-process'; caseA=$true; g='PASS'; d='0'; k='OK'; v=$inc; x=0; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED','WARNING management session')}
+ @{n='ca-no-target-ip'; caseA=$true; g='PASS'; d='0'; k='OK'; v=$inc; x=0; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED','WARNING management session')}
+ @{n='ca-management-check-throws'; caseA=$true; g='PASS'; d='0'; k='OK'; v=$inc; x=0; want=@('check failed','WARNING management session')}
+ @{n='ca-management-clean-no-warning'; caseA=$true; g='PASS'; d='0'; k='OK'; v=$inc; x=0; want=@('MANAGEMENT class=MANAGEMENT_NOT_ON_TARGET'); deny=@('WARNING management session')}
+ # Negative: the warning changes no verdict.  A real failure with the session on the target stays that failure.
+ @{n='ca-management-tool-failure-stays'; caseA=$true; f=@{'mgmt-udp.txt'='10.0.0.12'}; m={param($c) $c.toolRc=1; $c.tool=$c.tool.Replace('result: exit=0 lifecycle=RESUMED_BY_TRAFFIC','result: exit=1 lifecycle=PAUSE_ONLY').Replace('class=ELIGIBLE exit=0','class=ELIGIBLE exit=1').Replace('eligible=1 exit=0','eligible=1 exit=1')}; g='PASS'; d='1'; k='OK'; v=$inc; x=3; want=@('lifecycle=PAUSE_ONLY supported=False'); deny=@('supported=True')}
+ @{n='ca-management-cleanup-failed-stays'; caseA=$true; f=@{'mgmt-udp.txt'='10.0.0.12'}; m={param($c) $c.toolRc=2; $c.tool=$c.tool.Replace('result: exit=0 lifecycle=RESUMED_BY_TRAFFIC cleanup=INCONCLUSIVE_RESTORATION','result: exit=2 lifecycle=RESUMED_BY_TRAFFIC cleanup=CLEANUP_FAILED').Replace('class=ELIGIBLE exit=0','class=ELIGIBLE exit=2').Replace('eligible=1 exit=0','eligible=1 exit=2')}; g='PASS'; d='2'; k='OK'; v=$cf; x=3; want=@('toolCleanup=CLEANUP_FAILED')}
+ @{n='ca-management-stop-gate-stays'; caseA=$true; f=@{'mgmt-udp.txt'='10.0.0.12'}; fi='ca-marker-fail'; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('marker provider not enabled','CASE A STOPPED BEFORE THE TRIGGER')}
  @{n='ca-marker-fail'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('marker provider not enabled')}
  @{n='ca-trace-fail'; caseA=$true; fi='trace-fail'; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('NDIS trace not running')}
  @{n='ca-dbgview-fail'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('DbgView capture not confirmed')}
@@ -452,7 +463,10 @@ $Mutants = @(
 # Case A: every guard in front of the trigger, every rule of the state reduction and every verdict path has a mutant.
 $Mutants += ,@('ca-default-trigger', "`$toolArgs = if (`$CaseA) { '--lifecycle-a' } else { '--lifecycle-a --dry-run' }", "`$toolArgs = '--lifecycle-a'", 'legacy-fail-clean')
 $Mutants += ,@('ca-switch-dry', "`$toolArgs = if (`$CaseA) { '--lifecycle-a' } else { '--lifecycle-a --dry-run' }", "`$toolArgs = '--lifecycle-a --dry-run'", 'ca-resumed')
-$Mutants += ,@('ca-mgmt-gate', "if (`$mgmtLine -notmatch 'class=MANAGEMENT_NOT_ON_TARGET ') { `$hold += 'management session is on a target adapter or not attributed' }", '', 'ca-management-udp-on-target')
+$Mutants += ,@('ca-mgmt-refuses', "if (`$mgmtLine -notmatch 'class=MANAGEMENT_NOT_ON_TARGET ') {", "if (`$mgmtLine -notmatch 'class=MANAGEMENT_NOT_ON_TARGET ') { `$hold += 'refused';", 'ca-management-udp-on-target')
+$Mutants += ,@('ca-mgmt-silent', "[void]`$problems.Add('WARNING management session is on a target adapter or not attributed: it may be interrupted, and this run does not depend on it')", '', 'ca-management-udp-on-target')
+$Mutants += ,@('ca-mgmt-always-warns', "if (`$mgmtLine -notmatch 'class=MANAGEMENT_NOT_ON_TARGET ') {", 'if ($true) {', 'ca-management-clean-no-warning')
+$Mutants += ,@('ca-mgmt-check-fatal', "try { `$mgmtLine = & `$mgmt `$pre.Ifs } catch { `$mgmtLine = `"MANAGEMENT class=MANAGEMENT_UNATTRIBUTED check failed: `$_`" }", "`$mgmtLine = & `$mgmt `$pre.Ifs", 'ca-management-check-throws')
 $Mutants += ,@('ca-mgmt-unattributed', "if (`$ips.Count -eq 0 -or `$locals.Count -eq 0) { 'MANAGEMENT_UNATTRIBUTED' } elseif", "if (`$false) { 'MANAGEMENT_UNATTRIBUTED' } elseif", 'ca-management-no-socket')
 $Mutants += ,@('ca-mgmt-udp', "`$locals += @(Get-NetUDPEndpoint -OwningProcess `$pr.Id -ErrorAction SilentlyContinue | ForEach-Object { `$_.LocalAddress })", '', 'ca-management-udp-on-target')
 $Mutants += ,@('ca-mgmt-tcp', "`$locals += @(Get-NetTCPConnection -OwningProcess `$pr.Id -State Established -ErrorAction SilentlyContinue | ForEach-Object { `$_.LocalAddress })", '', 'ca-management-tcp-on-target')
@@ -475,7 +489,7 @@ $Mutants += ,@('ca-restart-edge', " -and `$edge['restart'][1] -ge (`$q[1] - `$sl
 $Mutants += ,@('ca-failed-class', "(`$vals.Count -ge 3 -and `$vals[-1] -eq `$vals[1])", "`$false", 'ca-failed-restart')
 $Mutants += ,@('ca-claim-life', " -and `$life -eq 'RESUMED_BY_TRAFFIC' -and `$others", " -and `$others", 'ca-tool-fail')
 $Mutants += ,@('ca-checksum-path', "-LiteralPath `"`$root\logs`" -Filter", "-LiteralPath `$L -Filter", 'ca-resumed')
-$Mutants += ,@('ca-exit-hold', "if (`$hold.Count -gt 0) { 2 } elseif (-not `$completed) { 1 }", "if (-not `$completed) { 1 }", 'ca-management-udp-on-target')
+$Mutants += ,@('ca-exit-hold', "if (`$hold.Count -gt 0) { 2 } elseif (-not `$completed) { 1 }", "if (-not `$completed) { 1 }", 'ca-marker-fail')
 $Mutants += ,@('ca-exit-tool', "elseif (`"`$dryRc`" -eq '0') { 0 } else { 3 }", "else { 0 }", 'ca-phc-discontinuous')
 if ($ListOnly) {
     "cases=$(@($cases).Count) interrupts=$(@($InterruptNames).Count * $InterruptRepeats) mutants=$(@($Mutants).Count)"

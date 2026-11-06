@@ -1,6 +1,6 @@
 # #364 Case A: FilterPause and FilterRestart, no schedule
 
-Status 2026-11-06: **Stage 0 passed. Stage 1 reached the end of the dry run on the I226, with the official wrapper verdict `INCONCLUSIVE_RESTORATION`, exit 1, stamp `20261106_151348`. No FilterPause or FilterRestart has ever been triggered.** Stage 2 is not authorized: this file is its plan, for review. See "Results", "Case A plan" and "Blockers". Governing issue: #364. Evidence class of any run: `LOCAL_DIAGNOSTIC`, never hardware RED or GREEN. No relationship to #328 is claimed.
+Status 2026-11-06: **Stage 0 passed. Stage 1 reached the end of the dry run on the I226, with the official wrapper verdict `INCONCLUSIVE_RESTORATION`, exit 1, stamp `20261106_151348`. No FilterPause or FilterRestart has ever been triggered.** The operator starts Case A; see "Results", "Case A plan" and "Blockers". Governing issue: #364. Evidence class of any run: `LOCAL_DIAGNOSTIC`, never hardware RED or GREEN. No relationship to #328 is claimed.
 
 ## Facts
 
@@ -342,7 +342,7 @@ Not answered by Case A: Q1 (no schedule exists), most of Q3 (TDH, TDT and occupa
 | Aspect | Design |
 |---|---|
 | Applicability | Only after Case A ended, its evidence is written and checksummed, and Q reviewed it. Only for `PAUSE_ONLY` or a failed transmit probe. Never after `RESUMED_BY_TRAFFIC`, which would add a PHC reset for nothing. Started by a separate operator command under the HIL lock |
-| Target only | Identified by NET_LUID and interface GUID from that run's evidence. Refused if the management check does not read `MANAGEMENT_NOT_ON_TARGET`, or if the identity no longer resolves to exactly one adapter |
+| Target only | Identified by NET_LUID and interface GUID from that run's evidence. Refused if the identity no longer resolves to exactly one adapter. Where the management session runs is reported, as in W4 |
 | Bounded | `Disable-NetAdapter` in a separate process, with a wait bound. **A timeout only ends the waiting: it does not cancel a kernel operation, and killing the process may not return while the operation is blocked.** So the bound decides what happens next, nothing more |
 | If NDIS hangs | Record `BLOCKED`. No enable, no retry, no further NDIS operation on any adapter. A reboot is Q's decision. Direct precedent: on 2026-11-05 the transcript ends on disabling `Ethernet 3`, the I226 target. Its link never dropped, and that call was still blocked about 15 minutes later when the pipeline was terminated. The two adapters before it had dropped within a second |
 | Independent evidence | Before and after: `Get-NetAdapter` status, PnP status and problem code, driver counters, NDIS events 10058 and 10007, TC-TSNREG-001, TC-HWSNAP-001, and frames on a proved observer |
@@ -366,16 +366,16 @@ Read-only evidence from 2026-11-06. Addresses and connection identifiers stay in
 
 **INFERRED**
 
-- The active session's media flows through the I226: address binding, asymmetric traffic and a Reachable neighbor entry on ifIndex 8. The entry is also Reachable on ifIndex 16, so this is not conclusive. `vncserver`'s process I/O counters proved uninformative: they do not capture its socket sends here.
-- Case A on the I226 would therefore touch that session, and its media is background traffic during the transition, which Q3 has to treat as a confound.
-- The 2026-11-05 recovery did not use VNC. RealVNC could not resolve names until 07:05, NIC links returned at 07:08:37 to 07:08:43, the session was unlocked at 07:14:09, and the first VNC connection came at 07:32:50. What restored the adapters is not in these logs.
+- The active session's media flows through the I226: address binding, asymmetric traffic and a Reachable neighbor entry on ifIndex 8. **A bound socket is not observed traffic:** the entry is also Reachable on ifIndex 16, so this stays inferred until packets are seen. `vncserver`'s process I/O counters proved uninformative: they do not capture its socket sends here.
+- If so, Case A on the I226 would touch that session, and its media is background traffic during the transition, which Q3 has to treat as a confound.
 
 **UNRESOLVED**
 
 - Packet-level proof for one session (shortest diagnostic in "Case A operator procedure").
 - Which adapter the next session binds, and whether that choice can be steered. Bindings of earlier sessions were not recorded.
 - Whether a reconnect is automatic or by hand.
-- What exists outside the network: physical console, or any independent out-of-band management.
+- Physical console or out-of-band availability: **unknown**. Windows session events do not establish it, and no governing requirement mandates it, so nothing here depends on it.
+- What restored the adapters on 2026-11-06 at 07:08. It is not in these logs.
 
 **Failure domains, for Case A on the I226.** The session column depends on where that session is bound, so both are shown.
 
@@ -390,20 +390,18 @@ Read-only evidence from 2026-11-06. Addresses and connection identifiers stay in
 
 Another NIC is no independent recovery: all three carry the same filter in the same NDIS stack.
 
-**Recovery prerequisites.**
+**Recovery provisions.**
 
 | Class | Item |
 |---|---|
 | Verified provision | Reconnect after a transient interruption, usually within 90 s, 29 of 37 |
 | Verified provision | RealVNC restarts with the machine, Auto service, seen on 2026-11-05 |
-| Verified provision | `-CaseA` refuses when the session's own sockets are on a target adapter or cannot be attributed (W4, offline only) |
-| Unresolved | Recovery with all networking down: needs Q's answer on physical or out-of-band access |
-| Unresolved | Recovery from a stuck NDIS stack: needs a reboot, and whether one can be forced remotely is unknown |
-| Genuine blocker for the first disruptive run | Q's authorization after reviewing this strategy |
-| Genuine blocker for the first disruptive run | The session must not be on the target when the run starts. The session that was active at the reading would be refused, by design |
-| Not a blocker | Source work, offline tests, read-only hardware diagnostics, runbook and rule development |
+| Offline only | `-CaseA` reports where the session runs and continues (W4) |
+| Unknown, not required | Recovery with all networking down, or from a stuck NDIS stack |
 
-During a run nothing depends on the session: the tool and wrapper run on their bounds, write every artifact locally and release the lock. A lost session changes no step: no retry, no second trigger, and no administration of any adapter.
+**A lost RealVNC connection is an accepted consequence and is not a test failure (Q 2026-11-06).** It is no blocker, no stop condition and no verdict input. The run is a local process in the console session: it depends on no viewer, runs on its own bounds, writes every artifact locally and releases the lock, so results and original failures are there after reconnecting. A lost session changes no step: no retry, no second trigger, and no administration of any adapter.
+
+The reverse holds as well: **a session that returns proves nothing.** Failure of the target to recover stays a finding, failed cleanup stays `CLEANUP_FAILED`, unverifiable restoration stays inconclusive, and a driver or NDIS hang stays visible with whatever evidence exists. No verdict reads the management session.
 
 ## PHC effects and restoration
 
@@ -433,14 +431,14 @@ None of the three prevents safe execution of Case A. Each only limits what a res
 
 ## Case A operator procedure
 
-**Not authorized.** The wrapper mode exists and is verified offline only: `tests/unit/ci/test_tas_stage1_orchestration.ps1`, 241 of 241, 74 of 74 mutants killed, at commit `36e0124`. That is no hardware evidence, and its trace fixtures stay UNVERIFIED until a real trace exists. Run that test from a process with a console: without one the interrupt cases fail, because the Ctrl+C never arrives.
+The operator runs it. The wrapper mode is verified offline only: `tests/unit/ci/test_tas_stage1_orchestration.ps1`, 249 of 249, 77 of 77 mutants killed. That is no hardware evidence, and its trace fixtures stay UNVERIFIED until a real trace exists. Run that test from a process with a console: without one the interrupt cases fail, because the Ctrl+C never arrives.
 
 | # | State | Change to `Invoke-TasStage1DryRun.ps1` |
 |---|---|---|
 | W1 | Done | `-CaseA` switch. Without it the tool stays `--dry-run` |
 | W2 | Done | 10312 and 10103 are expected in this mode. 10007, 10058 and 10050 stay stop events |
 | W3 | Done | Correlation reads the tool's `result:` line. The tool's cleanup verdict stands beside the wrapper's, the worse one wins. A run with a trigger never reads `NO_CHANGE_OBSERVED` |
-| W4 | Done | Management check on `vncserver`'s own sockets, immediately before the trigger. Fails closed: `MANAGEMENT_ON_TARGET` and `MANAGEMENT_UNATTRIBUTED` both stop it |
+| W4 | Done, corrected | Management discovery on `vncserver`'s own sockets, immediately before the trigger. Reported, with a `WARNING` for `MANAGEMENT_ON_TARGET` and `MANAGEMENT_UNATTRIBUTED`. **Never a stop** (Q 2026-11-06): the first version refused, which was no requirement of Q's |
 | W5 | Done | DbgView through `.github\skills\DbgView\Start-DbgViewCapture.ps1` is required. No confirmed capture, no trigger |
 | W6 | Done | Marker provider enabled, or no trigger. The decoded trace is reduced to the rule's sequence, class and claim |
 | W7 | Done | SHA256 of every artifact, written last |
@@ -479,7 +477,7 @@ $s
 
 Use the configuration that install needs. Expected: 10312 on all three instances, in the documented attach and detach orders, which gives the binding of rule 4. If no 10312 appears on our instances, Case A will probably be `NOT_EMITTED`, and that is known before any trigger. This reinstall disables every bound adapter (F17), so it carries its own risk, whether or not it is traced.
 
-**Run, only after explicit authorization and with the conditions in "Blockers" met:**
+**Run, started by the operator.** The RealVNC connection may drop. If it does, reconnect and read the artifacts below:
 
 ```powershell
 Set-Location C:\Users\User\IntelAvbFilter
@@ -508,9 +506,9 @@ Issue state read 2026-11-06: #348, #349, #350, #351, #353, #356, #357, #361, #36
 
 | Step | Needs | Gives | Stops if |
 |---|---|---|---|
-| 1. Review the plan | Q: recovery strategy, session not on the target | A run Q can authorize | - |
+| 1. Wrapper ready | W1 to W7, offline | A run the operator can start | - |
 | 2. Calibration, optional | A reinstall already needed, never one done for this | `State` binding, emission | - |
-| 3. Case A, first run | Step 1, separate authorization | Trigger reach, T1 to T7, Q2, Q4, part of Q3, reachability of the interval through `provenInsideCalls` | `NOT_TRIGGERED`: #364 and therefore #384 are BLOCKED until another trigger exists |
+| 3. Case A, first run | Step 1 | Trigger reach, T1 to T7, Q2, Q4, part of Q3, reachability of the interval through `provenInsideCalls` | `NOT_TRIGGERED`: #364 and therefore #384 are BLOCKED until another trigger exists |
 | 4. Case A to 3 runs, plus a `--passive` pair | Step 3 reviewed | #364 acceptance for A, and whether polling changed the transition | - |
 | 5. Cases C and D | The seven-point safety analysis still owed, individual authorization, raw modes selecting by capability rather than DID | Q1 and Q3 under a schedule, which is what #384's scenario needs | - |
 | 6. Case B | Individual authorization | Required for #364, need not gate step 7 | - |
@@ -526,16 +524,11 @@ Branch scope (Q 2026-11-06): this branch stops at step 6 plus #364's acceptance.
 
 Sorted by what actually stops Case A.
 
-**True conditions for the first disruptive run:**
+**Conditions for a Case A run:** the operator starts it, and the wrapper's own gates hold (clean build at HEAD, driver equals the build, register gate, trace, markers, DbgView). Nothing about the management session is a condition.
 
-1. **Authorization.** Stage 2 is not authorized. Q decides after reviewing the recovery strategy.
-2. **Recovery understood.** Q knows what recovers the machine with all networking down (see "Management path (RealVNC)").
-3. **Session not on the target.** `-CaseA` enforces this at run time, and refuses otherwise.
-4. **Hardware check of the reporting correction** of `b836e5a`. Its behaviour was observed on hardware on 2026-11-06 (`logs/ssot_register_validation_test_20261106_192202.log`, Debug driver `C1A98CF9...`, `LOCAL_DIAGNOSTIC`): 9/5, 10/4 and 4/10 observed and unobservable, `error: none`, registers compared 23 of 23, outcome `NOT_REQUIRED`. It is not GREEN: `provenance.verified` is false, because the test binary predates the current build inputs. It needs one targeted run after `Build-Tests.ps1` at a clean HEAD.
+**Still owed:** **Hardware check of the reporting correction** of `b836e5a`. Its behaviour was observed on hardware on 2026-11-06 (`logs/ssot_register_validation_test_20261106_192202.log`, Debug driver `C1A98CF9...`, `LOCAL_DIAGNOSTIC`): 9/5, 10/4 and 4/10 observed and unobservable, `error: none`, registers compared 23 of 23, outcome `NOT_REQUIRED`. It is not GREEN: `provenance.verified` is false, because the test binary predates the current build inputs. It needs one targeted run after `Build-Tests.ps1` at a clean HEAD.
 
 **Resolved:** the driver; W1 to W7, offline. **Written, not yet exercised:** the `State` rule and the wrapper's Case A mode.
-
-**Not a condition for development:** the recovery question. Source work, offline tests, read-only diagnostics and runbook work continue without it (Q 2026-11-06).
 
 **Not blockers, but limits on what a result may say:** ETW emission (absent events give `NOT_EMITTED`, and completion stays inferred); F2, F8 and F9; no PHC continuity claim until a hardware-derived tolerance exists; TDH, TDT and occupancy unmeasured in Case A; the origin of a PHC reset, open until the #348 measurement exists; #389 and the transition it causes.
 
@@ -561,7 +554,6 @@ The tool ends on its own bounds. Stop the session on any of these, and do not st
 
 - no Restart entry within 60 s;
 - the trigger does not return within 5 s;
-- management connectivity lost;
 - the observer stops seeing frames;
 - `CONTEXT_REPLACED`, or event 10007 or 10058;
 - a bugcheck.

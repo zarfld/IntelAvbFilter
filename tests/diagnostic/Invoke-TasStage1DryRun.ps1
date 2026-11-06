@@ -5,9 +5,10 @@
 #
 # -CaseA runs the tool without --dry-run: one real FilterPause and FilterRestart on every eligible adapter.  It is the
 # operator's explicit authorization for that run and is never a default.  Before the trigger it requires the NDIS trace, the
-# tool's marker provider, a confirmed DbgView capture and a management session that is attributed and not on a target
-# adapter; if any is missing the trigger does not run and the exit is 2.  It never cycles an adapter and never claims
-# restoration: see "Case A plan" and "Cleanup and recovery" in investigations/issue-364-filter-lifecycle-case-a.md.
+# tool's marker provider and a confirmed DbgView capture; if any is missing the trigger does not run and the exit is 2.  Where
+# the management session runs is reported as a warning and stops nothing: the run depends on no session, writes everything
+# locally, and a session that drops or returns changes no verdict.  It never cycles an adapter and never claims restoration:
+# see "Case A plan" and "Cleanup and recovery" in investigations/issue-364-filter-lifecycle-case-a.md.
 #
 # Order: readiness (no CI job, preflight, installed driver equals the build, manifest equals HEAD and this tool), machine
 # lock, adapter state, register precheck, per-adapter gate, NDIS trace, dry run, then cleanup and post checks, lock release,
@@ -49,8 +50,8 @@ $markerProvider = '{B7E1F3C2-6A54-4D0E-9C37-3640E8A1D364}'   # g_marker_provider
 $dbgLog = "$L\diag-i364-dbgview-$Stamp.log"; $sumFile = "$L\diag-i364-checksums-$Stamp.txt"
 $hold = @(); $dbgProc = $null; $mgmtLine = ''; $seqLines = @(); $toolCleanup = @(); $stateEv = 'unknown'
 
-# Which adapter the management session is on.  A session binds per connection and may differ from the default route, so only
-# the process's own sockets count: established TCP and UDP bound to one address.  Fails closed: no answer is not "elsewhere".
+# Which adapter the management session is on, for the report.  A session binds per connection and may differ from the default
+# route, so only the process's own sockets count: established TCP and UDP bound to one address.  No answer is never "elsewhere".
 $mgmt = {
     param($ifs)
     $ips = @(); foreach ($i in @($ifs)) { $ips += @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress }) }
@@ -215,8 +216,10 @@ if (-not $Stamp) { 'STOP stamp is empty, nothing ran' } elseif (@(Get-ChildItem 
                             while ($dbgProc -and -not $dbgProc.HasExited -and -not (Test-Path -LiteralPath $dbgLog) -and $dbgWait.Elapsed.TotalSeconds -lt 10) { Start-Sleep -Milliseconds 250 }
                         } catch { [void]$problems.Add("DbgView start: $_") }
                         if (-not $dbgProc -or $dbgProc.HasExited -or -not (Test-Path -LiteralPath $dbgLog)) { $hold += 'DbgView capture not confirmed' }
-                        $mgmtLine = & $mgmt $pre.Ifs
-                        if ($mgmtLine -notmatch 'class=MANAGEMENT_NOT_ON_TARGET ') { $hold += 'management session is on a target adapter or not attributed' }
+                        # Reported, never a stop: losing the management session is an accepted consequence (Q 2026-11-06), and nothing here depends on it.
+                        try { $mgmtLine = & $mgmt $pre.Ifs } catch { $mgmtLine = "MANAGEMENT class=MANAGEMENT_UNATTRIBUTED check failed: $_" }
+                        $mgmtLine
+                        if ($mgmtLine -notmatch 'class=MANAGEMENT_NOT_ON_TARGET ') { [void]$problems.Add('WARNING management session is on a target adapter or not attributed: it may be interrupted, and this run does not depend on it') }
                     }
                     if ($hold.Count -eq 0) {
                         $p = Start-Process -FilePath $tool -ArgumentList $toolArgs -NoNewWindow -PassThru -RedirectStandardOutput $dry -RedirectStandardError "$dry.stderr"
