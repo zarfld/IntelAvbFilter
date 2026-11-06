@@ -100,7 +100,6 @@
 #include "../../include/intel_pci_ids.h"
 #include "../../intel-ethernet-regs/gen/i226_regs.h"
 #include "../hardware/tas_wire_observer.h"
-#include "../ioctl/tas_lifecycle_eval.h"
 
 #define DEVICE_NAME          "\\\\.\\IntelAvbFilter"
 #define TAG                  "[LOCAL_DIAGNOSTIC]"
@@ -148,14 +147,6 @@
 #define ENABLE_BOUND_MS      60000
 #define RETURN_BOUND_MS      60000
 #define SETTLE_MS            5000
-#define TRIGGER_BOUND_MS     5000     /* the trigger only schedules, so it should return at once */
-#define LIFECYCLE_BOUND_MS   60000    /* a stop condition, not an acceptance criterion */
-#define BASELINE_POLL_MS     200      /* undisturbed polling before the trigger, to state the resolution */
-#define PASSIVE_POLL_MS      1000
-#define MARKER_CHARS         96
-#define MARKER_SMOKE_MS      100
-#define INSTANCE_LIST_BYTES  16384
-#define GUID_TEXT_CHARS      39
 #define NET_CLASS_KEY        "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
 typedef struct { const char *name; uint32_t offset; } REG;
@@ -193,7 +184,6 @@ static HANDLE g_sampler;
 static volatile LONG g_sampler_stop;
 static unsigned g_rearm_cycles;
 static LONGLONG g_send_us[WIRE_MAX_FRAMES];
-
 
 typedef struct { DEVINST inst; BOOL enable; CONFIGRET result; } CM_CALL;
 
@@ -353,7 +343,8 @@ static void snap(HANDLE h, avb_u64 luid, SNAP *s)
     ZeroMemory(&st, sizeof(st));
     ZeroMemory(&row, sizeof(row));
     row.InterfaceLuid.Value = luid;
-    s->ok = read_reg(h, I226_TDH0, &s->tdh) && read_reg(h, I226_TDT0, &s->tdt) && read_reg(h, I226_TDLEN0, &tdlen) && tdlen >= TX_DESCRIPTOR_BYTES &&
+    s->ok = read_reg(h, I226_TDH0, &s->tdh) && read_reg(h, I226_TDT0, &s->tdt) && read_reg(h, I226_TDLEN0, &tdlen) &&
+            tdlen >= TX_DESCRIPTOR_BYTES &&
             DeviceIoControl(h, IOCTL_AVB_GET_STATISTICS, &st, sizeof(st), &st, sizeof(st), &br, NULL) && GetIfEntry2(&row) == NO_ERROR;
     s->ring = s->ok ? tdlen / TX_DESCRIPTOR_BYTES : 1;
     s->gauge = st.OutstandingSendNBLs;
@@ -1041,14 +1032,6 @@ static SOCKET open_tx_socket(IN_ADDR ipv4)
         Sleep(1000);
     }
     return sock;
-}
-
-static BOOL read_stats(HANDLE h, AVB_DRIVER_STATISTICS *st)
-{
-    DWORD br = 0;
-
-    ZeroMemory(st, sizeof(*st));
-    return DeviceIoControl(h, IOCTL_AVB_GET_STATISTICS, st, sizeof(*st), st, sizeof(*st), &br, NULL);
 }
 
 int main(int argc, char **argv)

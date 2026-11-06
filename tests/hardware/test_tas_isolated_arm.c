@@ -447,25 +447,37 @@ static DWORD WINAPI cm_thread(LPVOID arg)
 /** Runs one device-node call with a bound: a stalled disable must end in a verdict, not a hung test */
 static BOOL cm_bounded(DEVINST inst, BOOL enable, DWORD bound_ms)
 {
-    static CM_CALL call;   /* static: survives an abandoned, still blocked thread */
+    CM_CALL *call = (CM_CALL *)calloc(1, sizeof(*call));
     HANDLE thread;
     DWORD wait;
+    BOOL ok;
 
-    call.inst = inst;
-    call.enable = enable;
-    call.result = CR_FAILURE;
-    thread = CreateThread(NULL, 0, cm_thread, &call, 0, NULL);
-    if (thread == NULL) {
+    if (call == NULL) {
         return FALSE;
     }
+
+    call->inst = inst;
+    call->enable = enable;
+    call->result = CR_FAILURE;
+
+    thread = CreateThread(NULL, 0, cm_thread, call, 0, NULL);
+    if (thread == NULL) {
+        free(call);
+        return FALSE;
+    }
+
     wait = WaitForSingleObject(thread, bound_ms);
     CloseHandle(thread);
     if (wait != WAIT_OBJECT_0) {
+        /* call must outlive the worker thread; leak it intentionally on timeout */
         printf("    %s did not return within %lu ms\n", enable ? "CM_Enable_DevNode" : "CM_Disable_DevNode", bound_ms);
         return FALSE;
     }
-    printf("    %s result=0x%08X\n", enable ? "CM_Enable_DevNode" : "CM_Disable_DevNode", (unsigned)call.result);
-    return call.result == CR_SUCCESS;
+
+    printf("    %s result=0x%08X\n", enable ? "CM_Enable_DevNode" : "CM_Disable_DevNode", (unsigned)call->result);
+    ok = (call->result == CR_SUCCESS);
+    free(call);
+    return ok;
 }
 
 /** Maps NET_LUID to exactly this adapter's device node, never by model or name */
