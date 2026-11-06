@@ -614,6 +614,40 @@ static __inline const char *tas_seq_name(TAS_SEQ_CLASS c)
     }
 }
 
+/*
+ * A frame's capture time against a schedule. The capture is host software, so a frame within margin of a window edge can
+ * be either side of it: NEAR_EDGE stays out of both counts of evidence. Times are PHC ns.
+ */
+typedef enum { TAS_FRAME_BEFORE_BASE = 0, TAS_FRAME_INSIDE, TAS_FRAME_NEAR_EDGE, TAS_FRAME_OUTSIDE } TAS_FRAME_CLASS;
+
+static __inline TAS_FRAME_CLASS tas_frame_class(ULONGLONG t, ULONGLONG base, unsigned cycle, unsigned start, unsigned end, unsigned margin)
+{
+    ULONGLONG phase;
+
+    if (t < base) {
+        return TAS_FRAME_BEFORE_BASE;
+    }
+    phase = (t - base) % cycle;
+    if (phase >= start && phase < end) {
+        return TAS_FRAME_INSIDE;
+    }
+    if ((phase >= end && phase <= (ULONGLONG)end + margin) || (phase < start && phase + margin >= start)) {
+        return TAS_FRAME_NEAR_EDGE;
+    }
+    return TAS_FRAME_OUTSIDE;
+}
+
+typedef enum { TAS_ACTIVATE_INCONCLUSIVE = 0, TAS_ACTIVATE_PASS, TAS_ACTIVATE_FAIL } TAS_ACTIVATE_VERDICT;
+
+/* HOLD: no frame before BaseT. PASS: frames before BaseT. Both: gated after it. Frames sent after the activation only */
+static __inline TAS_ACTIVATE_VERDICT tas_activate_verdict(unsigned mode, unsigned before, unsigned inside, unsigned near_edge, unsigned outside)
+{
+    if (outside != 0 || (mode == AVB_TAS_PRE_HOLD && before != 0) || (mode == AVB_TAS_PRE_PASS && before == 0)) {
+        return TAS_ACTIVATE_FAIL;
+    }
+    return (inside == 0 || near_edge != 0) ? TAS_ACTIVATE_INCONCLUSIVE : TAS_ACTIVATE_PASS;
+}
+
 /* Where the management session runs. Reported only: losing it is an accepted consequence, and no verdict reads this */
 typedef enum { TAS_MGMT_UNATTRIBUTED = 0, TAS_MGMT_ON_TARGET, TAS_MGMT_NOT_ON_TARGET } TAS_MGMT_CLASS;
 

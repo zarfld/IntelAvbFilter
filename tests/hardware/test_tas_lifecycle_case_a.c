@@ -70,6 +70,15 @@ typedef int NDIS_PARAMETER_TYPE;   /* a kernel type in structures of filteruser.
 #define MAX_NDIS_EVENTS      4096
 #define MAX_MARKS            32
 #define NAME_CHARS           160
+/* --activate: the verified schedule of the Case C and D design, a 1 s cycle with a 200 to 400 ms window on every queue */
+#define ACTIVATE_NS_PER_SEC      1000000000ULL
+#define ACTIVATE_LEAD_S          3        /* seconds of PHC time ahead, so frames flow on both sides of BaseT */
+#define ACTIVATE_TX_MS           6000
+#define ACTIVATE_CYCLE_NS        1000000000u
+#define ACTIVATE_WINDOW_START_NS 200000000u
+#define ACTIVATE_WINDOW_END_NS   400000000u
+#define ACTIVATE_FRAME_OVERHEAD  38u      /* preamble, header, FCS and gap on top of the MTU */
+#define ACTIVATE_EDGE_MARGIN_NS  2000000u /* host capture latency: 656 us worst in Case A, doubled and rounded up */
 
 static unsigned g_next_seq;
 static unsigned g_payload_bytes = PAYLOAD_BYTES;
@@ -107,6 +116,7 @@ typedef struct {
 
 static CASE_RESULT g_case[TAS_MAX_ADAPTERS];
 static CASE_RESULT *g_now;
+static avb_u32 g_activate;   /* 0, or AVB_TAS_PRE_HOLD or AVB_TAS_PRE_PASS for --activate */
 
 
 
@@ -647,6 +657,86 @@ static BOOL observer_prove(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_AD
     return FALSE;
 }
 
+static void verdict(const char *tag, const char *tc, int adapter, avb_u16 did, const char *reason);
+
+/**
+ * --activate hold|pass: IOCTL_AVB_TAS_ACTIVATE at a future whole second, then tagged frames across BaseT, each capture time
+ * mapped to the PHC by two bracketed reads. The first hardware run of #357, and the schedule Cases C and D build on.
+ * Nothing removes a schedule but a NIC cycle, and this test does not cycle, so restoration stays owed and is reported.
+ */
+static int activate_target(HANDLE h, const AVB_ADAPTER_IDENTITY_REQUEST *id, int t, SOCKET sock, BOOL *capture_alive)
+{
+    static AVB_TAS_ACTIVATE_REQUEST r;
+    MIB_IF_ROW2 row;
+    unsigned long long phc0 = 0, phc1 = 0, base;
+    LONGLONG host0, host1;
+    unsigned first, seq, q, before = 0, inside = 0, near_edge = 0, outside = 0, missing = 0;
+    DWORD br = 0;
+    TAS_ACTIVATE_VERDICT result;
+    char why[200];
+
+    ZeroMemory(&row, sizeof(row));
+    row.InterfaceLuid.Value = id->net_luid;
+    if (GetIfEntry2(&row) != NO_ERROR || !read_systim(h, &phc0)) {
+        verdict("BLOCKED", "TC-ACT-001", t, id->device_id, "link rate or PHC unreadable, nothing written");
+        return 3;
+    }
+    base = (phc0 / ACTIVATE_NS_PER_SEC + ACTIVATE_LEAD_S) * ACTIVATE_NS_PER_SEC;
+    ZeroMemory(&r, sizeof(r));
+    r.version = AVB_TAS_ACTIVATE_VERSION;
+    r.pre_activation = g_activate;
+    r.base_time_ns = base;
+    r.cycle_ns = ACTIVATE_CYCLE_NS;
+    r.link_mbps = (avb_u32)(row.TransmitLinkSpeed / 1000000);
+    r.max_frame_bytes = row.Mtu + ACTIVATE_FRAME_OVERHEAD;
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        r.window_start_ns[q] = ACTIVATE_WINDOW_START_NS;
+        r.window_end_ns[q] = ACTIVATE_WINDOW_END_NS;
+    }
+    if (!DeviceIoControl(h, IOCTL_AVB_TAS_ACTIVATE, &r, sizeof(r), &r, sizeof(r), &br, NULL)) {
+        sprintf_s(why, sizeof(why), "IOCTL failed with error %lu, the driver may predate #357", GetLastError());
+        verdict("BLOCKED", "TC-ACT-001", t, id->device_id, why);
+        return 3;
+    }
+    printf(TAG " activate mode=%s baseT=%llu phcBefore=%llu phcAtCommit=%llu leadNs=%lld result=%u link=%u frame=%u\n", g_activate == AVB_TAS_PRE_HOLD ? "HOLD" : "PASS", base, phc0,
+           (unsigned long long)r.phc_at_commit_ns, (long long)(base - r.phc_at_commit_ns), r.result, r.link_mbps, r.max_frame_bytes);
+    if (r.result != AVB_TAS_ACT_COMMITTED) {
+        sprintf_s(why, sizeof(why), "activation result %u: nothing below applies", r.result);
+        verdict(r.result == AVB_TAS_ACT_NOT_CLEAN ? "BLOCKED" : "FAIL", "TC-ACT-001", t, id->device_id, why);
+        return r.result == AVB_TAS_ACT_NOT_CLEAN ? 3 : 1;
+    }
+
+    host0 = host_us();
+    (void)read_systim(h, &phc0);
+    first = g_next_seq;
+    (void)tx_step(h, id->net_luid, sock, ACTIVATE_TX_MS, "across BaseT", first, capture_alive);
+    host1 = host_us();
+    if (!read_systim(h, &phc1) || host1 <= host0 || !*capture_alive) {
+        verdict("INCONCLUSIVE", "TC-ACT-001", t, id->device_id, "no PHC mapping or no capture, so no frame can be judged");
+        return 1;
+    }
+    for (seq = first; seq < g_next_seq && seq < WIRE_MAX_FRAMES; seq++) {
+        ULONGLONG at;
+
+        if (g_wire_rx_us[seq] == 0) {
+            missing++;
+            continue;
+        }
+        at = phc0 + (ULONGLONG)((double)(g_wire_rx_us[seq] - host0) * (double)(phc1 - phc0) / (double)(host1 - host0));
+        switch (tas_frame_class(at, base, ACTIVATE_CYCLE_NS, ACTIVATE_WINDOW_START_NS, ACTIVATE_WINDOW_END_NS, ACTIVATE_EDGE_MARGIN_NS)) {
+        case TAS_FRAME_BEFORE_BASE: before++; break;
+        case TAS_FRAME_INSIDE:      inside++; break;
+        case TAS_FRAME_NEAR_EDGE:   near_edge++; break;
+        default:                    outside++; break;
+        }
+    }
+    result = tas_activate_verdict(g_activate, before, inside, near_edge, outside);
+    sprintf_s(why, sizeof(why), "beforeBaseT=%u inWindow=%u nearEdge=%u outside=%u notSeen=%u sent=%u", before, inside, near_edge, outside, missing, g_next_seq - first);
+    verdict(result == TAS_ACTIVATE_PASS ? "PASS" : result == TAS_ACTIVATE_FAIL ? "FAIL" : "INCONCLUSIVE", "TC-ACT-001", t, id->device_id, why);
+    verdict("INCONCLUSIVE_RESTORATION", "TC-ACT-002", t, id->device_id, "the schedule stays in hardware: a NIC cycle or reinstall is owed before the next activation");
+    return result == TAS_ACTIVATE_PASS ? 0 : 1;
+}
+
 /** Where the management session runs, from its own sockets: established TCP and UDP bound to one address. Stops nothing */
 static void management_report(IN_ADDR target)
 {
@@ -773,6 +863,10 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
         goto done;
     }
     wire_up = TRUE;
+    if (g_activate != 0) {
+        rc = activate_target(h, &ids[t], t, sock, &capture_alive);
+        goto done;
+    }
     if (dry_run) {
         static TAS_WINDOW_TRACK resolution;
 
@@ -1284,7 +1378,10 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
     trace_stop();
     decoded = traced && trace_decode();
     for (i = 0; i < n; i++) {
-        if (classes[i] == TAS_PLAN_ELIGIBLE) {
+        if (classes[i] == TAS_PLAN_ELIGIBLE && g_activate != 0) {
+            bad |= results[i] != 0;
+            ran++;
+        } else if (classes[i] == TAS_PLAN_ELIGIBLE) {
             ran += g_case[i].triggered;
             if (g_case[i].triggered) {
                 bad |= report_case(&g_case[i], decoded);
@@ -1318,8 +1415,11 @@ int main(int argc, char **argv)
 {
     BOOL dry_run = argc == 2 && strcmp(argv[1], "--dry-run") == 0, passive = argc == 2 && strcmp(argv[1], "--passive") == 0;
 
-    if (argc > 2 || (argc == 2 && !dry_run && !passive)) {
-        printf("[BLOCKED] TC-CASEA-001: usage: test_tas_lifecycle_case_a [--dry-run | --passive]\n");
+    if (argc == 3 && strcmp(argv[1], "--activate") == 0) {
+        g_activate = strcmp(argv[2], "hold") == 0 ? AVB_TAS_PRE_HOLD : strcmp(argv[2], "pass") == 0 ? AVB_TAS_PRE_PASS : 0;
+    }
+    if ((argc == 3 && g_activate == 0) || argc > 3 || (argc == 2 && !dry_run && !passive)) {
+        printf("[BLOCKED] TC-CASEA-001: usage: test_tas_lifecycle_case_a [--dry-run | --passive | --activate hold|pass]\n");
         return 3;
     }
     return lifecycle_case_a(dry_run, passive);

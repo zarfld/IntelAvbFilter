@@ -416,7 +416,9 @@ try {
     $NewTree = {
         param($name, $text)
         $d = "$Tmp\$name"
-        foreach ($x in 'tests\unit', 'tests\ioctl', 'tests\common', 'include', 'external\intel_avb\lib') { [void][IO.Directory]::CreateDirectory("$d\$x") }
+        foreach ($x in 'tests\unit', 'tests\ioctl', 'tests\common', 'include', 'external\intel_avb\lib', 'devices', 'intel-ethernet-regs\gen') { [void][IO.Directory]::CreateDirectory("$d\$x") }
+        [IO.File]::Copy("$RepoRoot\devices\i226_tas_activate.h", "$d\devices\i226_tas_activate.h")
+        [IO.File]::Copy("$RepoRoot\intel-ethernet-regs\gen\i226_regs.h", "$d\intel-ethernet-regs\gen\i226_regs.h")
         foreach ($f in [IO.Directory]::GetFiles("$RepoRoot\tests\common", '*.h')) { [IO.File]::Copy($f, "$d\tests\common\$([IO.Path]::GetFileName($f))") }
         foreach ($f in [IO.Directory]::GetFiles("$RepoRoot\external\intel_avb\lib", '*.h')) { [IO.File]::Copy($f, "$d\external\intel_avb\lib\$([IO.Path]::GetFileName($f))") }
         [IO.File]::Copy("$RepoRoot\tests\unit\test_tas_restore_contract.c", "$d\tests\unit\test_tas_restore_contract.c")
