@@ -1,5 +1,6 @@
 # test_tas_stage1_orchestration.ps1
-# TEST-TAS-STAGE1-*: orchestration of tests/diagnostic/Invoke-TasStage1DryRun.ps1 (#364 Stage 1, capability-driven dry run).
+# TEST-TAS-STAGE1-*: orchestration of tests/diagnostic/Invoke-TasStage1DryRun.ps1 (#364 Stage 1 dry run, and its -CaseA mode).
+# Run the interrupt cases from a process with a console: under the Bash tool the Ctrl+C never arrives and they fail.
 #
 # Offline.  Nothing here touches a driver, an adapter, a trace session or the machine lock: the runner, logman, the tool,
 # the preflight and the adapter queries are stand-ins, and HilLock.ps1 is the real file pointed at a per-case lock path.
@@ -120,6 +121,47 @@ $T adapter result luid=0x0006008001000000 did=0x15BB class=SKIP_UNSUPPORTED not 
 $T summary adapters=3 eligible=1 exit=0
 "@
 
+# Case A fixtures.  UNVERIFIED: no FilterPause, FilterRestart or event 10312 has ever been observed on this stack.  The tool
+# lines follow printf formats in tests/diagnostic/tas_gate_investigation.c, and the trace layout follows Stage 0 and the
+# provider metadata (logs/diag-i364-stage0-20261105_204526.etl.xml, Microsoft-Windows-NDIS on build 26300).  Replace them
+# with real evidence after the first run; if the two differ, investigate before changing an expectation.
+$FxInstance = '{5989BA55-D568-47A4-AFBF-B47F27E1B435}-{3F74AE86-14F9-4E79-9445-5B1E52CCD192}-0000'
+$FxToolA = @"
+$T plan luid=0x0006008006000000 did=0x125B hwCaps=0x000001FF driverCaps=0x000000FF hwState=3 link=1 managementLink=1 class=ELIGIBLE
+$T plan luid=0x0006008000000000 did=0x1533 hwCaps=0x000000C3 driverCaps=0x000000C3 hwState=3 link=1 managementLink=1 class=SKIP_UNSUPPORTED
+$T plan luid=0x0006008001000000 did=0x15BB hwCaps=0x000000C3 driverCaps=0x000000C3 hwState=3 link=1 managementLink=1 class=SKIP_UNSUPPORTED
+$T --- adapter luid=0x0006008006000000 did=0x125B ---
+$T instance luid=0x0006008006000000 name=$FxInstance
+$T observer proved luid=0x0006008000000000 did=0x1533 frames=10 of 10
+    timing qpcHz=10000000 passive=0 baselinePolls=100 meanGapUs=1.1 worstGapUs=48.4
+    marker trigger-issued luid=0x0006008006000000 qpcBefore=1000000 qpcAfter=1000200 hostUs=1 status=0
+    edge pause entry between qpc=1000300 and qpc=1000310 widthUs=1.0
+    edge restart entry between qpc=1000800 and qpc=1000810 widthUs=1.0
+$T other adapters changed=0 of 2
+$T fact register compared=11 changed=0 unreadable=0
+    marker run-end luid=0x0006008006000000 qpcBefore=2000000 qpcAfter=2000200 hostUs=2 status=0
+$T result: exit=0 lifecycle=RESUMED_BY_TRAFFIC cleanup=INCONCLUSIVE_RESTORATION; recovery, if needed, is the operator's: this mode never cycles the adapter
+$T adapter result luid=0x0006008006000000 did=0x125B class=ELIGIBLE exit=0
+$T adapter result luid=0x0006008000000000 did=0x1533 class=SKIP_UNSUPPORTED not a target
+$T adapter result luid=0x0006008001000000 did=0x15BB class=SKIP_UNSUPPORTED not a target
+$T summary adapters=3 eligible=1 exit=0
+"@
+function New-Etl {
+    param([string[]]$Values = @('a', 'b', 'c', 'd'), [int[]]$At = @(200, 400, 700, 900), [string]$Name = $FxInstance, [switch]$NoMarkers, [int]$Lost = 0, [switch]$NoOther, [int]$Id = 10312)
+    $ns = 'xmlns="http://schemas.microsoft.com/win/2004/08/events/event"'
+    $time = { param([int]$ticks) '2026-11-06T16:00:{0:00}.{1:0000000}00+00:59' -f [Math]::Floor($ticks / 10000000), ($ticks % 10000000) }
+    $sys = { param($g, $e, $t) "<System><Provider Guid=`"$g`" /><EventID>$e</EventID><TimeCreated SystemTime=`"$(& $time $t)`" /></System>" }
+    $mark = '{b7e1f3c2-6a54-4d0e-9c37-3640e8a1d364}'; $ndis = '{cdead503-17f5-4a3e-b7ae-df8cc2902eb9}'
+    $e = @("<Event $ns>$(& $sys '{9e814aad-3204-11d2-9a82-006008a86939}' 0 0)<EventData><Data Name=`"EventsLost`">  $Lost</Data></EventData></Event>")
+    if (-not $NoMarkers) { $e += "<Event $ns>$(& $sys $mark 0 0)<Data>i364 trigger-issued luid=0x0006008006000000 qpc=1000000</Data></Event>" }
+    if (-not $NoOther) { $e += "<Event $ns>$(& $sys $ndis 10302 100)<EventData><Data Name=`"NetLuidIndex`">32774</Data></EventData></Event>" }
+    for ($i = 0; $i -lt $Values.Count; $i++) {
+        $e += "<Event $ns>$(& $sys $ndis $Id $At[$i])<EventData><Data Name=`"State`">$($Values[$i])</Data><Data Name=`"MiniportIfGuid`">{5989BA55-D568-47A4-AFBF-B47F27E1B435}</Data><Data Name=`"FilterInstanceName`">$Name</Data></EventData></Event>"
+    }
+    if (-not $NoMarkers) { $e += "<Event $ns>$(& $sys $mark 0 5000)<Data>i364 run-end luid=0x0006008006000000 qpc=1005000</Data></Event>" }
+    "<Events>$($e -join '')</Events>"
+}
+
 $StandIn = @'
 using System; using System.IO; using System.Diagnostics; using System.Threading; using System.Runtime.InteropServices;
 class S {
@@ -146,6 +188,7 @@ class S {
         if (fi == "still-running") return 0;
         if (File.Exists(flag)) File.Delete(flag); return 0; }
       if (v == "query") { T("trace-query"); if (fi == "query-denied") return -2147024891; return File.Exists(flag) ? 0 : -2144337918; }
+      if (v == "update") { T("trace-update:" + string.Join(" ", a)); return fi == "ca-marker-fail" ? 1 : 0; }
       return 9; }
     T("tool:" + string.Join(" ", a)); T("tool-pid:" + Process.GetCurrentProcess().Id);
     Console.Write(R("tool.txt") + "\r\n"); Console.Out.Flush();
@@ -198,7 +241,16 @@ function global:tracerpt { CT 'decode'
     if ($global:FI -eq 'decode-throw') { throw 'decode failed' }
     if ($global:FI -eq 'decode-rc') { $global:LASTEXITCODE = 1; return }
     $body = if ($global:FI -eq 'lifecycle-event') { '<EventID>10312</EventID>' } else { '<EventID>0</EventID>' }
+    if (Test-Path -LiteralPath "$global:CaseDir\etl.xml") { $body = Get-Content -LiteralPath "$global:CaseDir\etl.xml" -Raw }
     Set-Content "$($args[0]).xml" $body; $global:LASTEXITCODE = 0 }
+function global:CF([string]$n, [string]$d) { $p = "$global:CaseDir\$n"; if (Test-Path -LiteralPath $p) { (Get-Content -LiteralPath $p -Raw).Trim() } else { $d } }
+function global:Get-NetIPAddress { [CmdletBinding()] param([int]$InterfaceIndex, $AddressFamily)
+    CT "ifindex:$InterfaceIndex"; if ($global:FI -eq 'ca-no-target-ip') { return }; [pscustomobject]@{ IPAddress = '10.0.0.12' } }
+function global:Get-NetTCPConnection { [CmdletBinding()] param($OwningProcess, $State)
+    $t = CF 'mgmt-tcp.txt' '10.0.0.71'; if ($t -ne 'none') { [pscustomobject]@{ LocalAddress = $t } } }
+function global:Get-NetUDPEndpoint { [CmdletBinding()] param($OwningProcess)
+    [pscustomobject]@{ LocalAddress = '0.0.0.0' }; [pscustomobject]@{ LocalAddress = '::' }
+    $u = CF 'mgmt-udp.txt' 'none'; if ($u -ne 'none') { [pscustomobject]@{ LocalAddress = $u } } }
 function global:Get-NetAdapter { $global:gn++; CT "state-$global:gn"
     if ($global:FI -eq 'state-pre-throw' -and $global:gn -eq 1) { throw 'state failed' }
     if ($global:FI -eq 'state-post-throw' -and $global:gn -eq 2) { throw 'state failed' }
@@ -209,6 +261,7 @@ function global:Get-CimInstance { [CmdletBinding()] param($ClassName, $Filter)
     [pscustomobject]@{ State = $(if ($global:FI -eq 'stop-driver-stopped') { 'Stopped' } else { 'Running' }); PathName = "\??\$global:CaseDir\installed.sys" } }
 function global:Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id)
     if ($Name -eq 'Runner.Worker') { if ($global:FI -eq 'stop-ci-job') { return [pscustomobject]@{ Id = 1 } }; return }
+    if ($Name -eq 'vncserver') { if ($global:FI -eq 'ca-no-process') { return }; return [pscustomobject]@{ Id = 7 } }
     if ($Id) { Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction SilentlyContinue } }
 function global:Start-Transcript { param($Path) }
 function global:Stop-Transcript { }
@@ -314,8 +367,38 @@ $cases = @(
  @{n='ctrlc-twice'; cc='tool-wait'; cc2='runner-post-wait'; f=@{'toolsleep.txt'='15000'; 'sleep.txt'='post'}; g='PASS'; dAny=@('-1073741510','INTERRUPTED'); k='FAIL'; vAny=$true; gone=$true; want=@('stateDifferences=0')}
  @{n='tool-killed-externally'; killTool=$true; f=@{'toolsleep.txt'='15000'}; g='PASS'; d='-1'; k='FAIL'; v=$ok}
  @{n='host-killed'; killHost=$true; f=@{'toolsleep.txt'='15000'}}
+ # Case A (-CaseA).  ca=@{...}: file name -> content in the case directory; tool stays the Case A fixture unless m changes it.
+ @{n='ca-resumed'; caseA=$true; g='PASS'; d='0'; k='OK'; v=$inc; x=0; deny=@('NO_CHANGE'); want=@('STATE SEQUENCE luid=0x0006008006000000 class=SEQUENCE_CONSISTENT values=a,b,c,d events=4 pausedNdisUs=30.0 bracketUs=20.0','STATE CLAIM luid=0x0006008006000000 sequence=SEQUENCE_CONSISTENT lifecycle=RESUMED_BY_TRAFFIC supported=True','stateEvents=4','toolCleanup=INCONCLUSIVE_RESTORATION','MANAGEMENT class=MANAGEMENT_NOT_ON_TARGET','CASE A COMPLETED'); trace=@('trace-update:update trace AvbI364S1 -p {B7E1F3C2-6A54-4D0E-9C37-3640E8A1D364} 0xffffffffffffffff 0x5 -ets','ifindex:8','dbgview-start','dbgview-stop'); checksums=$true}
+ @{n='ca-phc-discontinuous'; caseA=$true; m={param($c) $c.toolRc=2; $c.tool=$c.tool.Replace('result: exit=0 lifecycle=RESUMED_BY_TRAFFIC cleanup=INCONCLUSIVE_RESTORATION','result: exit=2 lifecycle=RESUMED_BY_TRAFFIC cleanup=CLEANUP_FAILED').Replace('class=ELIGIBLE exit=0','class=ELIGIBLE exit=2').Replace('eligible=1 exit=0','eligible=1 exit=2')}; g='PASS'; d='2'; k='OK'; v=$cf; x=3; want=@('toolCleanup=CLEANUP_FAILED','STATE CLAIM luid=0x0006008006000000 sequence=SEQUENCE_CONSISTENT lifecycle=RESUMED_BY_TRAFFIC supported=True')}
+ @{n='ca-tool-fail'; caseA=$true; m={param($c) $c.toolRc=1; $c.tool=$c.tool.Replace('result: exit=0 lifecycle=RESUMED_BY_TRAFFIC','result: exit=1 lifecycle=PAUSE_ONLY').Replace('class=ELIGIBLE exit=0','class=ELIGIBLE exit=1').Replace('eligible=1 exit=0','eligible=1 exit=1')}; g='PASS'; d='1'; k='OK'; v=$inc; x=3; want=@('lifecycle=PAUSE_ONLY supported=False'); deny=@('supported=True')}
+ @{n='ca-management-udp-on-target'; caseA=$true; f=@{'mgmt-udp.txt'='10.0.0.12'}; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_ON_TARGET','STOP before the trigger','CASE A STOPPED BEFORE THE TRIGGER')}
+ @{n='ca-management-tcp-on-target'; caseA=$true; f=@{'mgmt-tcp.txt'='10.0.0.12'}; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_ON_TARGET')}
+ @{n='ca-management-no-socket'; caseA=$true; f=@{'mgmt-tcp.txt'='none'}; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED')}
+ @{n='ca-no-process'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED')}
+ @{n='ca-no-target-ip'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('MANAGEMENT class=MANAGEMENT_UNATTRIBUTED')}
+ @{n='ca-marker-fail'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('marker provider not enabled')}
+ @{n='ca-trace-fail'; caseA=$true; fi='trace-fail'; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('NDIS trace not running')}
+ @{n='ca-dbgview-fail'; caseA=$true; g='PASS'; d='NOT_RUN'; noTool=$true; x=2; want=@('DbgView capture not confirmed')}
+ @{n='ca-gate-fail'; caseA=$true; m={param($c) $c.preJ=Set-V $c.preJ 'FAIL'}; g='FAIL'; d='NOT_RUN'; noTool=$true; v=$inc; x=1}
+ @{n='ca-no-events'; caseA=$true; etl=@{Values=@()}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=NOT_EMITTED','supported=False')}
+ @{n='ca-trace-silent'; caseA=$true; etl=@{Values=@(); NoOther=$true}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=TRACE_SILENT')}
+ @{n='ca-lost-events'; caseA=$true; etl=@{Lost=3}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=TRACE_SILENT'); deny=@('supported=True')}
+ @{n='ca-no-markers'; caseA=$true; etl=@{NoMarkers=$true}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=NO_WINDOW'); deny=@('supported=True')}
+ @{n='ca-failed-restart'; caseA=$true; etl=@{Values=@('a','b','c','b')}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=SEQUENCE_FAILED_RESTART values=a,b,c,b'); deny=@('supported=True')}
+ @{n='ca-context-replaced'; caseA=$true; m={param($c) $c.tool=$c.tool.Replace('lifecycle=RESUMED_BY_TRAFFIC','lifecycle=CONTEXT_REPLACED')}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=SEQUENCE_FAILED_RESTART'); deny=@('supported=True')}
+ @{n='ca-unexpected-count'; caseA=$true; etl=@{Values=@('a','b','c'); At=@(200,400,700)}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=SEQUENCE_UNEXPECTED values=a,b,c'); deny=@('supported=True')}
+ @{n='ca-adjacent-repeat'; caseA=$true; etl=@{Values=@('a','a','c','d')}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=SEQUENCE_UNEXPECTED'); deny=@('supported=True')}
+ @{n='ca-pause-edge-outside'; caseA=$true; m={param($c) $c.tool=$c.tool.Replace('edge pause entry between qpc=1000300 and qpc=1000310','edge pause entry between qpc=1090000 and qpc=1090010')}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=SEQUENCE_UNEXPECTED'); deny=@('supported=True')}
+ @{n='ca-restart-edge-early'; caseA=$true; m={param($c) $c.tool=$c.tool.Replace('edge restart entry between qpc=1000800 and qpc=1000810','edge restart entry between qpc=1000100 and qpc=1000110')}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=SEQUENCE_UNEXPECTED'); deny=@('supported=True')}
+ @{n='ca-other-instance'; caseA=$true; etl=@{Name='{5989BA55-D568-47A4-AFBF-B47F27E1B435}-{FFFFFFFF-14F9-4E79-9445-5B1E52CCD192}-0000'}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=NOT_EMITTED')}
+ @{n='ca-outside-window'; caseA=$true; etl=@{At=@(60000,60100,60200,60300)}; g='PASS'; d='0'; k='OK'; v=$inc; want=@('class=NOT_EMITTED','outsideWindow=4')}
+ @{n='ca-stop-event'; caseA=$true; etl=@{Id=10058}; g='PASS'; d='0'; k='OK'; v=$cf}
+ @{n='ca-no-result-line'; caseA=$true; m={param($c) $c.tool=($c.tool -split "`n" | Where-Object { $_ -notmatch ' result: exit=' }) -join "`n"}; g='PASS'; d='0'; k='FAIL'; v=$inc; x=1}
+ @{n='ca-post-register-changed'; caseA=$true; m={param($c) $c.post=$c.post.Replace('TQAVCTRL     0x03570 = 0x00000000','TQAVCTRL     0x03570 = 0x00000009')}; g='PASS'; d='0'; k='OK'; v=$cf}
+ @{n='ca-post-clean-to-fail'; caseA=$true; m={param($c) $c.pre=$c.pre -replace '\[FAIL - PTP clock not running\]','[PASS]'; $c.post=$c.pre; $c.preRc=0; $c.postRc=1}; g='PASS'; d='0'; k='OK'; v=$cf}
+ @{n='ca-ctrlc-tool'; caseA=$true; cc='tool-wait'; f=@{'toolsleep.txt'='15000'}; g='PASS'; dAny=@('-1073741510','INTERRUPTED'); k='FAIL'; vAny=$true; gone=$true; want=@('stateDifferences=0'); trace=@('dbgview-stop')}
 )
-$InterruptNames = 'ctrlc-pre', 'ctrlc-tool', 'ctrlc-cleanup', 'ctrlc-post', 'ctrlc-twice', 'tool-killed-externally', 'host-killed'
+$InterruptNames = 'ctrlc-pre', 'ctrlc-tool', 'ctrlc-cleanup', 'ctrlc-post', 'ctrlc-twice', 'tool-killed-externally', 'host-killed', 'ca-ctrlc-tool'
 $InterruptRepeats = 5
 $Mutants = @(
  ,@('phase1', "if (@(`$lines[`$at['Phase 1']..`$at['Phase 2']] | Where-Object { `$_ -match '\[FAIL' }).Count -gt 0) { `$r.Why += 'Phase 1 SSOT failure' }", '', 'phase1-fail')
@@ -366,6 +449,34 @@ $Mutants = @(
  ,@('hide-fail', "[void]`$report.Add(`"FAILED LINE `$(`$x[0]): `$f`")", '', 'legacy-fail-clean')
  ,@('hide-adapter', "[void]`$report.Add(`"REGISTER CHECK `$(`$x[0]) adapter:`$(`$t.AdapterIndex) verdict=`$(`$t.Verdict) `$(`$t.Detail)`")", '', 'legacy-fail-clean')
 )
+# Case A: every guard in front of the trigger, every rule of the state reduction and every verdict path has a mutant.
+$Mutants += ,@('ca-default-trigger', "`$toolArgs = if (`$CaseA) { '--lifecycle-a' } else { '--lifecycle-a --dry-run' }", "`$toolArgs = '--lifecycle-a'", 'legacy-fail-clean')
+$Mutants += ,@('ca-switch-dry', "`$toolArgs = if (`$CaseA) { '--lifecycle-a' } else { '--lifecycle-a --dry-run' }", "`$toolArgs = '--lifecycle-a --dry-run'", 'ca-resumed')
+$Mutants += ,@('ca-mgmt-gate', "if (`$mgmtLine -notmatch 'class=MANAGEMENT_NOT_ON_TARGET ') { `$hold += 'management session is on a target adapter or not attributed' }", '', 'ca-management-udp-on-target')
+$Mutants += ,@('ca-mgmt-unattributed', "if (`$ips.Count -eq 0 -or `$locals.Count -eq 0) { 'MANAGEMENT_UNATTRIBUTED' } elseif", "if (`$false) { 'MANAGEMENT_UNATTRIBUTED' } elseif", 'ca-management-no-socket')
+$Mutants += ,@('ca-mgmt-udp', "`$locals += @(Get-NetUDPEndpoint -OwningProcess `$pr.Id -ErrorAction SilentlyContinue | ForEach-Object { `$_.LocalAddress })", '', 'ca-management-udp-on-target')
+$Mutants += ,@('ca-mgmt-tcp', "`$locals += @(Get-NetTCPConnection -OwningProcess `$pr.Id -State Established -ErrorAction SilentlyContinue | ForEach-Object { `$_.LocalAddress })", '', 'ca-management-tcp-on-target')
+$Mutants += ,@('ca-marker', "if (`$LASTEXITCODE -ne 0) { `$hold += 'marker provider not enabled' }", '', 'ca-marker-fail')
+$Mutants += ,@('ca-dbgview', "{ `$hold += 'DbgView capture not confirmed' }", '{ }', 'ca-dbgview-fail')
+$Mutants += ,@('ca-trace', "if (-not `$traced) { `$hold += 'NDIS trace not running' } else {", "if (`$false) { } else {", 'ca-trace-fail')
+$Mutants += ,@('ca-life-all', "if (`$CaseA) { '10007|10058|10050' } else {", "if (`$false) { '10007|10058|10050' } else {", 'ca-resumed')
+$Mutants += ,@('ca-life-none', "if (`$CaseA) { '10007|10058|10050' } else {", "if (`$CaseA) { '99999' } else {", 'ca-stop-event')
+$Mutants += ,@('ca-tool-cleanup', "if (@(`$toolCleanup) -contains 'CLEANUP_FAILED') { `$changed = `$true }", '', 'ca-phc-discontinuous')
+$Mutants += ,@('ca-no-change', "if (`$CaseA -and `$p -and -not `$changed) { `$cleanup = 'INCONCLUSIVE_RESTORATION' }", '', 'ca-resumed')
+$Mutants += ,@('ca-result-corr', "{ `$corrWhy += 'tool result not shown for every eligible adapter' }", '{ }', 'ca-no-result-line')
+$Mutants += ,@('ca-instance', " -and (& `$field `$_ 'FilterInstanceName') -ieq `$name", '', 'ca-other-instance')
+$Mutants += ,@('ca-window-end', " -and `$w -le `$t1", '', 'ca-outside-window')
+$Mutants += ,@('ca-lost', " -or `$lost -gt 0", '', 'ca-lost-events')
+$Mutants += ,@('ca-no-window', "elseif (`$start.Count -ne 1 -or `$hz -le 0) { `$class = 'NO_WINDOW' }", '', 'ca-no-markers')
+$Mutants += ,@('ca-count', "`$vals.Count -eq 4 -and `$vals[0] -ne", "`$vals.Count -ge 3 -and `$vals[0] -ne", 'ca-unexpected-count')
+$Mutants += ,@('ca-adjacent', "`$vals[0] -ne `$vals[1] -and ", '', 'ca-adjacent-repeat')
+$Mutants += ,@('ca-pause-edge', "`$edge['pause'][0] -le (`$q[2] + `$slack) -and ", '', 'ca-pause-edge-outside')
+$Mutants += ,@('ca-restart-edge', " -and `$edge['restart'][1] -ge (`$q[1] - `$slack)", '', 'ca-restart-edge-early')
+$Mutants += ,@('ca-failed-class', "(`$vals.Count -ge 3 -and `$vals[-1] -eq `$vals[1])", "`$false", 'ca-failed-restart')
+$Mutants += ,@('ca-claim-life', " -and `$life -eq 'RESUMED_BY_TRAFFIC' -and `$others", " -and `$others", 'ca-tool-fail')
+$Mutants += ,@('ca-checksum-path', "-LiteralPath `"`$root\logs`" -Filter", "-LiteralPath `$L -Filter", 'ca-resumed')
+$Mutants += ,@('ca-exit-hold', "if (`$hold.Count -gt 0) { 2 } elseif (-not `$completed) { 1 }", "if (-not `$completed) { 1 }", 'ca-management-udp-on-target')
+$Mutants += ,@('ca-exit-tool', "elseif (`"`$dryRc`" -eq '0') { 0 } else { 3 }", "else { 0 }", 'ca-phc-discontinuous')
 if ($ListOnly) {
     "cases=$(@($cases).Count) interrupts=$(@($InterruptNames).Count * $InterruptRepeats) mutants=$(@($Mutants).Count)"
     $cases | ForEach-Object { "case $($_.n)" }
@@ -434,11 +545,20 @@ try {
         param($spec, $label, $text)
         $dir = Join-Path $Tmp $label
         foreach ($d in 'tests\diagnostic', 'tools\lib', 'tools\test', 'logs', 'bin', 'build\tools\avb_test\x64\Debug', 'build\x64\Debug\IntelAvbFilter') { [void][IO.Directory]::CreateDirectory("$dir\$d") }
-        $st = @{ pre = $FxLog; post = $FxLog; preJ = $FxJson; postJ = $FxJson; tool = $FxTool; preRc = 1; postRc = 1; toolRc = 0 }
+        $isA = $spec.ContainsKey('caseA')
+        $baseTool = if ($isA) { $FxToolA } else { $FxTool }
+        $st = @{ pre = $FxLog; post = $FxLog; preJ = $FxJson; postJ = $FxJson; tool = $baseTool; preRc = 1; postRc = 1; toolRc = 0 }
         $vac = $false
         if ($spec.ContainsKey('m')) {
             & $spec.m $st
-            $vac = ($st.pre -ceq $FxLog -and $st.post -ceq $FxLog -and $st.preJ -ceq $FxJson -and $st.postJ -ceq $FxJson -and $st.tool -ceq $FxTool -and $st.preRc -eq 1 -and $st.postRc -eq 1 -and $st.toolRc -eq 0)
+            $vac = ($st.pre -ceq $FxLog -and $st.post -ceq $FxLog -and $st.preJ -ceq $FxJson -and $st.postJ -ceq $FxJson -and $st.tool -ceq $baseTool -and $st.preRc -eq 1 -and $st.postRc -eq 1 -and $st.toolRc -eq 0)
+        }
+        if ($isA) {
+            $etlArgs = if ($spec.ContainsKey('etl')) { $spec.etl } else { @{} }
+            [IO.File]::WriteAllText("$dir\etl.xml", (New-Etl @etlArgs))
+            [void][IO.Directory]::CreateDirectory("$dir\.github\skills\DbgView")
+            [IO.File]::WriteAllText("$dir\.github\skills\DbgView\Start-DbgViewCapture.ps1", "param(`$LogFile)`nCT 'dbgview-start'`nif (`$global:FI -ne 'ca-dbgview-fail') { [IO.File]::WriteAllText(`$LogFile, 'kernel log') }`n[pscustomobject]@{ Id = 1; HasExited = (`$global:FI -eq 'ca-dbgview-fail') }")
+            [IO.File]::WriteAllText("$dir\.github\skills\DbgView\Stop-DbgViewCapture.ps1", "param(`$ProcessId)`nCT 'dbgview-stop'")
         }
         if ($null -ne $st.pre) { [IO.File]::WriteAllText("$dir\pre.txt", $st.pre) }
         [IO.File]::WriteAllText("$dir\post.txt", $st.post)
@@ -446,7 +566,8 @@ try {
         if ($null -ne $st.postJ) { [IO.File]::WriteAllText("$dir\post.json", $st.postJ) }
         [IO.File]::WriteAllText("$dir\pre.rc", "$($st.preRc)"); [IO.File]::WriteAllText("$dir\post.rc", "$($st.postRc)")
         [IO.File]::WriteAllText("$dir\tool.txt", $st.tool); [IO.File]::WriteAllText("$dir\tool.rc", "$($st.toolRc)")
-        [IO.File]::WriteAllText("$dir\fi.txt", $spec.n); [IO.File]::WriteAllText("$dir\trace.txt", '')
+        $fiName = if ($spec.ContainsKey('fi')) { $spec.fi } else { $spec.n }
+        [IO.File]::WriteAllText("$dir\fi.txt", $fiName); [IO.File]::WriteAllText("$dir\trace.txt", '')
         if ($spec.ContainsKey('f')) { foreach ($k in $spec.f.Keys) { [IO.File]::WriteAllText("$dir\$k", $spec.f[$k]) } }
         [IO.File]::WriteAllText("$dir\tests\diagnostic\Invoke-TasStage1DryRun.ps1", $text)
         [IO.File]::WriteAllText("$dir\tools\test\Run-Tests-CI.ps1", $StubRunner)
@@ -465,8 +586,9 @@ try {
         $stampArg = if ($spec.ContainsKey('stamp')) { "''" } else { "'t'" }
         $limit = if ($spec.ContainsKey('limit')) { $spec.limit } else { 300 }
         $extra = if ($spec.n -eq 'kill-throw') { $KillFake } elseif ($spec.n -eq 'stop-throw') { 'function global:Invoke-TasLogman { if ($args[0] -eq "stop") { throw "stop failed" }; & "' + "$dir\bin\.\logman.exe" + '" @args }' + "`nSet-Alias -Scope Global -Name '$dir\bin\logman.exe' -Value Invoke-TasLogman" } else { '' }
-        $tail = "& '$dir\tests\diagnostic\Invoke-TasStage1DryRun.ps1' -Stamp $stampArg -ToolTimeoutSeconds $limit -Logman '$dir\bin\logman.exe'`n[IO.File]::WriteAllText('$dir\exit.txt', `"`$LASTEXITCODE`")`n"
-        $head = "`$global:CaseDir = '$dir'; `$global:FI = '$($spec.n)'; `$global:gn = 0`n" + $Prelude.Replace('__REV__', $Rev) + "`n$extra`n"
+        $caseSwitch = if ($isA) { ' -CaseA' } else { '' }
+        $tail = "& '$dir\tests\diagnostic\Invoke-TasStage1DryRun.ps1' -Stamp $stampArg -ToolTimeoutSeconds $limit -Logman '$dir\bin\logman.exe'$caseSwitch`n[IO.File]::WriteAllText('$dir\exit.txt', `"`$LASTEXITCODE`")`n"
+        $head = "`$global:CaseDir = '$dir'; `$global:FI = '$fiName'; `$global:gn = 0`n" + $Prelude.Replace('__REV__', $Rev) + "`n$extra`n"
         [IO.File]::WriteAllText("$dir\run.ps1", $head + $tail)
         return @{ Dir = $dir; Spec = $spec; Label = $label; Vac = $vac; St = $st; Out = ''; Pre = @(); Host = $null }
     }
@@ -509,7 +631,7 @@ try {
             if ($hasWant) { foreach ($x in $c.want) { if ($res -notmatch [regex]::Escape($x)) { [void]$checks.Add("want $x") } } }
             if ($res -match 'CLEANUP_FAILED' -and $c.ContainsKey('vAny')) { [void]$checks.Add('false CLEANUP_FAILED after interrupt') }
             if (@($t | Where-Object { $_ -like 'state-*' }).Count -lt 2) { [void]$checks.Add('state check not attempted twice') }
-            if (($t -contains 'trace-start') -and ($c.n -ne 'trace-fail') -and ($t -notcontains 'trace-stop')) { [void]$checks.Add('trace not stopped') }
+            if (($t -contains 'trace-start') -and ($c.n -notlike '*trace-fail') -and ($t -notcontains 'trace-stop')) { [void]$checks.Add('trace not stopped') }
             foreach ($j in @($t | Where-Object { $_ -like 'json:*' })) { if ($j -notmatch '^json:[A-Za-z]:\\') { [void]$checks.Add("relative JSON path $j") } }
             if (@(Get-ChildItem -LiteralPath $Elsewhere -Recurse -File).Count -gt 0) { [void]$checks.Add('file written outside logs') }
             foreach ($k in @(@('gate=', 'g'), @('dryRun=', 'd'), @('correlation=', 'k'), @('verdict=', 'v'))) { if ($c.ContainsKey($k[1]) -and $res -notmatch ([regex]::Escape($k[0] + $c[$k[1]]))) { [void]$checks.Add("want $($k[0])$($c[$k[1]])") } }
@@ -525,8 +647,22 @@ try {
             if ($c.ContainsKey('gone')) { foreach ($q in $toolPid) { if (& $Mine $q $dir) { [void]$checks.Add('tool still alive') } } }
             if ($c.ContainsKey('x') -and $exit -ne "$($c.x)") { [void]$checks.Add("exit=$exit, want $($c.x)") }
             if ($c.n -eq 'legacy-fail-clean') { foreach ($x in 'REGISTER CHECK pre adapter:0 verdict=PASS', 'REGISTER CHECK pre adapter:1 verdict=SKIP_UNSUPPORTED', 'REGISTER CHECK post adapter:2 verdict=SKIP_UNSUPPORTED') { if ($res -notmatch [regex]::Escape($x)) { [void]$checks.Add("lost: $x") } } }
+            if ($c.ContainsKey('noTool') -and @($t | Where-Object { $_ -like 'tool:*' }).Count -gt 0) { [void]$checks.Add('the trigger ran although it had to stop') }
+            if ($c.ContainsKey('deny')) { foreach ($x in $c.deny) { if ($res -match [regex]::Escape($x)) { [void]$checks.Add("must not say $x") } } }
+            if ($c.ContainsKey('trace')) { foreach ($x in $c.trace) { if ($t -notcontains $x) { [void]$checks.Add("trace lacks $x") } } }
+            if ($c.ContainsKey('checksums')) {
+                $sumF = "$dir\logs\diag-i364-checksums-t.txt"
+                if (-not (Test-Path -LiteralPath $sumF)) { [void]$checks.Add('no checksum file') } else {
+                    $sum = @(Get-Content -LiteralPath $sumF)
+                    if ($sum.Count -lt 5) { [void]$checks.Add("checksum file lists $($sum.Count) files") }
+                    foreach ($n in @(Get-ChildItem -LiteralPath "$dir\logs" -File | Where-Object { $_.Name -ne 'diag-i364-checksums-t.txt' } | ForEach-Object { $_.Name })) {
+                        $h = (Get-FileHash -LiteralPath "$dir\logs\$n" -Algorithm SHA256).Hash
+                        if ($sum -notcontains "$h  $n") { [void]$checks.Add("checksum missing or wrong: $n") } }
+                }
+            }
         }
-        if (@($t | Where-Object { $_ -like 'tool:*' -and $_ -ne 'tool:--lifecycle-a --dry-run' }).Count -gt 0) { [void]$checks.Add('tool arguments changed') }
+        $wantArgs = if ($c.ContainsKey('caseA')) { 'tool:--lifecycle-a' } else { 'tool:--lifecycle-a --dry-run' }
+        if (@($t | Where-Object { $_ -like 'tool:*' -and $_ -ne $wantArgs }).Count -gt 0) { [void]$checks.Add('tool arguments changed') }
         foreach ($q in $toolPid) { $o = & $Mine $q $dir; if ($o) { $o | Stop-Process -Force -ErrorAction SilentlyContinue } }
         # Assertions on what the script did, kept apart from what stopped the run from being judged at all.
         $interrupted = ($c.ContainsKey('cc') -or $c.ContainsKey('killTool') -or $c.ContainsKey('killHost'))
@@ -605,7 +741,7 @@ try {
     $wantInts = @($InterruptNames | Where-Object { $Only.Count -eq 0 -or $Only -contains $_ }).Count * $InterruptRepeats
     $wantMuts = @($Mutants | Where-Object { $Only.Count -eq 0 -or $Only -contains $_[3] }).Count
     $haveCases = @($work | Where-Object { $_.Kind -eq 'case' }).Count; $haveInts = @($work | Where-Object { $_.Kind -eq 'interrupt' }).Count; $haveMuts = @($work | Where-Object { $_.Kind -eq 'mutant' }).Count
-    tc_check 'TEST-TAS-STAGE1-002-all-defined-work-ran' ($work.Count -gt 0 -and $haveCases -eq $wantCases -and $haveInts -eq $wantInts -and $haveMuts -eq $wantMuts -and ($Only.Count -gt 0 -or ($haveCases -eq 82 -and $haveInts -eq 35 -and $haveMuts -eq 47))) "cases $haveCases/$wantCases interrupts $haveInts/$wantInts mutants $haveMuts/$wantMuts"
+    tc_check 'TEST-TAS-STAGE1-002-all-defined-work-ran' ($work.Count -gt 0 -and $haveCases -eq $wantCases -and $haveInts -eq $wantInts -and $haveMuts -eq $wantMuts -and ($Only.Count -gt 0 -or ($haveCases -ge 82 -and $haveInts -ge 35 -and $haveMuts -ge 47))) "cases $haveCases/$wantCases interrupts $haveInts/$wantInts mutants $haveMuts/$wantMuts"
     if ($Only.Count -gt 0) { Write-Host "  [NOTE] -Only is a development filter: this run is partial and proves nothing about the rest" }
 
     $iss = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -662,7 +798,7 @@ try {
         }
     }
     Write-Host ("  [MUTATION] killed={0} survived={1} infra_failure={2} inconclusive={3} of {4}" -f $Verdicts.KILLED, $Verdicts.SURVIVED, $Verdicts.INFRA_FAILURE, $Verdicts.INCONCLUSIVE, $haveMuts)
-    if ($Only.Count -eq 0) { tc_check 'TEST-TAS-STAGE1-MUT-complete-mutation-coverage' ($Verdicts.KILLED -eq 47) "not complete: killed $($Verdicts.KILLED) of 47" }
+    if ($Only.Count -eq 0) { tc_check 'TEST-TAS-STAGE1-MUT-complete-mutation-coverage' ($Verdicts.KILLED -eq @($Mutants).Count) "not complete: killed $($Verdicts.KILLED) of $(@($Mutants).Count)" }
     tc_check 'TEST-TAS-STAGE1-MUT-all-patterns-present' ($mutantProblems.Count -eq 0) ("mutation target text not found, the mutant did not run: " + ($mutantProblems -join ', '))
     $RealLockAfter = if (Test-Path -LiteralPath $RealLock) { (Get-Item -LiteralPath $RealLock).LastWriteTimeUtc.Ticks } else { 0 }
     tc_check 'TEST-TAS-STAGE1-001-real-machine-lock-untouched' ($RealLockAfter -eq $RealLockBefore) "the sandbox reached $RealLock"
