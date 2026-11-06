@@ -1107,12 +1107,13 @@ static void test_23_plan_exit(void) {
 
 /*
  * TC-MOCK-024 to 026: the State rule of investigations/issue-364-filter-lifecycle-case-a.md (#364).
- * UNVERIFIED: no event 10312 has been observed on this stack, so these values are positions from the documented order,
- * not observed numbers. Replace them with real evidence after the first run. These cases say nothing about hardware.
+ * The values are hardware-observed: 5, 2, 3, 4 rendered by the provider as Pausing, Paused, Restarting, Running on all four
+ * filter instances of the I226 0x125B, driver C1A98CF9F62D2400, commit d203b85, logs/diag-i364-casea-20261106_203827.etl.
+ * The times are synthetic and shaped like that run. These cases test the rule and say nothing about hardware.
  */
 static void seq_good(TAS_SEQ_EVIDENCE *e)
 {
-    static const unsigned values[4] = {10, 20, 30, 40};
+    static const unsigned values[4] = {5, 2, 3, 4};
     static const LONGLONG times[4] = {1000200, 1000400, 1000700, 1000900};
     unsigned i;
 
@@ -1150,9 +1151,9 @@ static void test_24_state_sequence(void) {
     seq_good(&e); e.count = 0;
     EXPECT_EQ("provider live, nothing on the instance", tas_seq_classify(&e), TAS_SEQ_NOT_EMITTED);
 
-    seq_good(&e); e.value[3] = 20;
+    seq_good(&e); e.value[3] = 2;
     EXPECT_EQ("back on the Paused position", tas_seq_classify(&e), TAS_SEQ_FAILED_RESTART);
-    seq_good(&e); e.count = 3; e.value[2] = 20; e.value[1] = 20;
+    seq_good(&e); e.count = 3; e.value[2] = 2;
     EXPECT_EQ("three events ending on the second value", tas_seq_classify(&e), TAS_SEQ_FAILED_RESTART);
     seq_good(&e); e.outcome = TAS_LIFECYCLE_CONTEXT_REPLACED;
     EXPECT_EQ("a replaced context is no restart", tas_seq_classify(&e), TAS_SEQ_FAILED_RESTART);

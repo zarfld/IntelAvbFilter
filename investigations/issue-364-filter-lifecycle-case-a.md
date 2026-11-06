@@ -175,6 +175,49 @@ Evidence: `logs\diag-i364-*-20261105_204526*`, `LOCAL_DIAGNOSTIC`, driver `5BA3F
 
 **Stage 0: PASS.** `enabled=1`, three markers, `status=0`, and all three in the trace with the exact QPC values and ETW timestamps. Bracket 21.3 to 24.8 us with a session attached, and ETW time within 2 us of the tool's host time. The trace reported 0 events lost. No NDIS events occurred, so this proves the pipeline, not that NDIS emits for a restart.
 
+**Case A, first run, 2026-11-06 20:38, `test_tas_lifecycle_case_a`, commit `d203b85`, Debug driver `C1A98CF9F62D2400...`, I226 0x125B REV_04, 1 Gbit/s, `LOCAL_DIAGNOSTIC`, `provenance.verified` true.** Evidence: `logs/test_tas_lifecycle_case_a_20261106_203816.log`, its DbgView log, `logs/diag-i364-casea-20261106_203827.etl`. One run of the three #364 requires. Never #384 RED or GREEN.
+
+| Verdict | Result |
+|---|---|
+| `TC-CASEA-001` lifecycle | PASS: `RESUMED_BY_TRAFFIC`, other adapters changed 0 of 2 |
+| `TC-CASEA-002` NDIS agreement | PASS: `SEQUENCE_CONSISTENT` |
+| `TC-CASEA-003` restoration | **`CLEANUP_FAILED`**: PHC reset, and one register changed |
+| Runner | FAILED, exit 1. `TC-INFRA-STATE-001` and `TC-INFRA-SESSION-002` cleanup FAILED on `TRGTTIML0` |
+
+**Hardware-observed:**
+
+- The trigger reached the filter: `FilterPauseCount` +1, `FilterRestartCount` +1, generation +1, attach and detach 0. The IOCTL returned after 0.8 ms and the first NDIS event followed at +4.2 ms, so the call only schedules, as documented. T5 is refuted.
+- `State` has names: the provider renders 5 Pausing, 2 Paused, 3 Restarting, 4 Running, with `Location` 1, 2, 3 and 5. The earlier statement that no value map exists was wrong: `wevtutil gp` simply does not export it.
+- **One restart moves four filters.** All four on the I226 went 5, 2, 3, 4: pause top-down (WFP, QoS, Npcap, IntelAvbFilter), restart bottom-up, all inside 19.9 ms. The other adapters' filters did not move.
+- No 10007, 10058, 10050 or 10043, no link event, attach and detach 0: no miniport reset, halt or failed restart was reported. That supports T4 over T3 and T6. NDIS emits nothing here that shows the miniport itself was untouched, so this is absence of evidence.
+
+| Time from `trigger-issued` | Event |
+|---|---|
+| +0.8 ms | Trigger returned |
+| +4.21 ms | First Pausing (WFP) |
+| +4.26 ms, +4.28 ms | IntelAvbFilter Pausing, Paused |
+| +4.23 to +4.28 ms | FilterPause entry, by polls |
+| +4.30 ms | IntelAvbFilter Restarting |
+| +4.31 ms | FilterRestart entry, by polls |
+| +19.48 ms | IntelAvbFilter Running |
+| +19.85 ms | Last filter Running (WFP) |
+
+- **NDIS-reported Paused interval: 24.1 us**, bracket 13.1 us. The polled entry-to-entry window was 33.4 to 83.4 us, as expected wider. 22 polls read the interval open, and `provenInsideCalls` is 20, so a read can be proven inside it (#384).
+- Restarting took 15.2 ms, and the kernel log shows it as `AvbPlatformInit`, entered at 20:38:32.124 and returned at .139. Filters above ours stayed paused until then, so this bring-up holds the whole adapter's stack for 15 ms.
+- Traffic resumed: 49 of 49 frames on the observer, `sendErrors=0`, gauge 0. Frames follow the restart only, so nothing shows frame behaviour inside the interval.
+- **PHC reset, in Case A: 21165.57 s before, 9.30 s after.** `DISCONTINUOUS`. T2 is refuted and T1's prediction holds. TIMINCA and TSAUXC unchanged.
+- **`TRGTTIML0` changed, 0x00000B1B to 0x00000CE9,** not predicted, and stable in the register checks either side. The only writer found in the source is `SET_TARGET_TIME`, which was not called. Earlier incidents show the same register moving, so this is not new, and the mechanism is unknown.
+- All other 81 values compared before and after in the register checks are equal.
+- **RealVNC, session on the target (`MANAGEMENT_ON_TARGET`, 1 of 2 bound sockets): no disconnect in the RealVNC log.** One run, a 24 us interval. It says nothing about a stuck pause.
+- I219 line (#389): passed in both register checks, 32 ms each. No transition this time.
+- Reporting correction of `b836e5a`: verified on hardware with `provenance.verified` true, 23 of 23 registers compared. Debug only.
+
+**Inferred:**
+
+- The reseed is the filter's own `init_ptp` write. With the measured rate the seed falls at about +19 ms, inside `AvbPlatformInit`, with no reset reported. The placement moves by several ms within the plausible rate, and #348's decisive read of SYSTIM before the seed is still missing.
+
+**New finding, outside #364: the I226 PHC runs 2.9 % fast.** Measured without any assumption about a seed: 1.02932 over 26.6 s between two runner samples, and 1.02923 over about 5.4 h between two logged clock reads, with the host clock as reference, at `TIMINCA` 0x18000000. #343 covers the I210 only and #320 is an open test, so no issue covers it. It explains why the implied PHC zero lies 245 ms before the trigger. No cause is claimed.
+
 **Stage 1, 2026-11-05: did not run.** Preflight, both register checks and the dry run all stopped at `\\.\IntelAvbFilter` not found (error 2), the `#328 sentinel`, with the service `Running`. No adapter was discovered and nothing was mutated. "Adapter state unchanged" and "0 lifecycle events" therefore prove nothing. That run also used the DID-based commands this design replaces, so it cannot be repeated as it was.
 
 **Stage 1, 2026-11-06 14:07 and 14:16, stamps `20261106_140738` and `20261106_141612`:** stopped at the unreadable snapshot, `QUERY_HW_SNAPSHOT` Win32 998. That defect is fixed and HIL GREEN in Debug only (`logs/ssot_register_validation_test_20261106_151202.log`); Release is not verified.
@@ -260,22 +303,22 @@ Pass means only that the picture is complete. It restores nothing, and the expec
 
 ## State interpretation rule
 
-Written before any run, so the evidence cannot shape its own reading. Not yet exercised: no trace on this machine holds event 10312.
+Written before any run, so the evidence could not shape its own reading. First exercised by Case A on 2026-11-06, where it held.
 
 | Source | Gives | Does not give |
 |---|---|---|
 | Microsoft Learn, *Filter Module States and Operations*, *Pausing a Filter Module*, *Starting a Filter Module*, retrieved 2026-11-06 | Six states: Detached, Attaching, Paused, Restarting, Running, Pausing. Transitions: Detached to Attaching to Paused to Restarting to Running, Running to Pausing to Paused, Paused to Detached. Paused means the pause is complete, Running means the restart is complete | Any numeric value, any ETW behaviour, whether overlying drivers or the miniport pause too |
 | Microsoft Learn, `NdisFRestartFilter`, retrieved 2026-11-06 | "schedules a pause and then a restart operation for the specified filter module" | What follows a failed restart |
 | Provider metadata, build 26300 | Event 10312: "Filter %1 entering state %2", `State` a UInt8, plus `FilterInstanceName`, `MiniportIfGuid` | A value map, and whether "entering" is logged before or after the transition |
-| Hardware | Nothing yet | Everything above still needs observation |
+| Hardware, Case A 2026-11-06 | 5 Pausing, 2 Paused, 3 Restarting, 4 Running, rendered by the provider, on all four filters of the I226 | Attach and detach values, and whether "entering" precedes the transition |
 
 The documents conflict on one point, and it is not resolved here: the states page says a failed restart returns the module to Paused, while *Starting a Filter Module* says NDIS detaches a module that does not restart.
 
 **Rule.**
 
 1. **Scope.** Only event 10312, with `FilterInstanceName` exactly equal to the tool's `instance` line and `MiniportIfGuid` equal to the target's interface GUID. Other instances on the target are recorded, never counted. 10103 has no instance name, so it can support and never establish. Event 10302 is excluded.
-2. **Window.** From the tool's `trigger-issued` marker to `run-end`, ordered by ETW timestamp. Events on the target outside the window are reported as a finding (`outsideWindow`). The markers come from the tool's own provider. Stage 1 never enabled it, so all four Stage 1 traces hold none, against three in Stage 0; `-CaseA` enables it and refuses to trigger if that fails.
-3. **Values are positions, never names.** No number is read as a state from a document or from memory. Values are written `a`, `b`, `c`, `d` in order of appearance until a binding exists.
+2. **Window.** From the tool's `trigger-issued` marker to `run-end`, ordered by ETW timestamp. Events on the target outside the window are reported as a finding (`outsideWindow`). The markers come from the tool's own provider. Stage 1 never enabled it, so all four Stage 1 traces hold none, against three in Stage 0; `test_tas_lifecycle_case_a` enables it and does not trigger if that fails.
+3. **Names come from the provider, not from a document or from memory.** The trace renders them. The rule still compares positions, so an unknown build cannot change the result.
 4. **Binding a value to a state name** needs an observed sequence on our own instance, on one Windows build, in which the documented transitions place it: attach gives Attaching, Paused, Restarting, Running, and detach gives Pausing, Paused, Detached. All instances of our filter in that trace must agree, and the binding is recorded with its build as `OBSERVED_BINDING`, never as a published map. Without it a run can be consistent with the documented order, but it names no state.
 5. **Anchors.** The driver counters are independent of ETW and place the sequence. Each ETW time is converted through the markers, so it carries the marker bracket, 21.3 to 24.8 us with a session attached (Stage 0), plus the poll's `widthUs`.
 6. **Classes.**
@@ -321,7 +364,7 @@ Not answered by Case A: Q1 (no schedule exists), most of Q3 (TDH, TDT and occupa
 
 **What Case A can leave behind.** No schedule and no register write are involved. The tool owns its handles, socket and capture, and the operating system releases them when it exits. What remains is what NDIS and the driver did: a reseeded PHC, a filter stuck short of Running, a detached filter (F14: Optional, so NDIS keeps the stack without it, per the documents), a stalled transmit path, or an effect on another adapter.
 
-**Invariants.** The original result and the cleanup verdict are always both reported. Nothing restores the PHC. `COMPLETE_RESTORATION` is out of reach today, because it needs PHC continuity. A NIC cycle is never restoration by itself and adds its own PHC reset and a new context. The lock is held from before the first check until after the last. Every cleanup step runs in the `finally` of the one before it, as in Stage 1.
+**Invariants.** The original result and the cleanup verdict are always both reported. Nothing restores the PHC. `COMPLETE_RESTORATION` is out of reach today, because it needs PHC continuity. A NIC cycle is never restoration by itself and adds its own PHC reset and a new context. The lock is held from before the first check until after the last.
 
 | Outcome | Detected by | Test-owned action | Cleanup verdict |
 |---|---|---|---|
@@ -332,9 +375,9 @@ Not answered by Case A: Q1 (no schedule exists), most of Q3 (TDH, TDT and occupa
 | `CONTEXT_REPLACED` | Attach, detach or a falling counter | Read-only post-checks. Stop the session | By the checks. Whether to rebind or reinstall is Q's decision |
 | `OVERLAPPED` | Deltas not attributable | Read-only post-checks. Stop the session | `INCONCLUSIVE_RESTORATION` at best |
 | Another adapter changed | `other adapters changed` above 0 | Read-only post-checks. Stop the session. Never touch that adapter | `CLEANUP_FAILED` |
-| Tool timeout or crash | Exit code, no `result` line | Wrapper kills the tool and runs every later step. NDIS may still finish | `INCONCLUSIVE_RESTORATION` or worse. The lifecycle outcome stays unknown |
-| Ctrl+C | Same | Same chain, as proved by the Stage 1 interrupt cases offline | Same |
-| Wrapper killed outright | No `DRY RUN` line, lock left | The tool ends on its own bounds, about 80 s. The next HIL run takes over the lock and stops. `logman stop AvbI364S1 -ets` closes the trace | `INCONCLUSIVE_RESTORATION` |
+| Tool timeout or crash | Exit code, no `result` line | The runner ends the process tree at its timeout and runs its post-test check. NDIS may still finish | `INCONCLUSIVE_RESTORATION` or worse. The lifecycle outcome stays unknown |
+| Ctrl+C | Same | The console handler closes the trace. The runner post-test check still runs | Same |
+| Runner killed outright | No results document, lock left | The next HIL run takes over the lock and stops. The next Case A closes a trace left open | `INCONCLUSIVE_RESTORATION` |
 | Bugcheck or hang | Session lost | None possible. Evidence up to the last flushed file. A reboot is Q's | Unknown |
 
 **Adapter cycling is a separate operation, prepared here and not authorized (Q 2026-11-06).** Automatic cycling after `PAUSE_ONLY` or a failed transmit probe was refused: the failure may be the evidence Case A exists to capture. No Case A code path cycles an adapter, and W8 stays unimplemented. If it is ever authorized:
@@ -396,7 +439,7 @@ Another NIC is no independent recovery: all three carry the same filter in the s
 |---|---|
 | Verified provision | Reconnect after a transient interruption, usually within 90 s, 29 of 37 |
 | Verified provision | RealVNC restarts with the machine, Auto service, seen on 2026-11-05 |
-| Offline only | `-CaseA` reports where the session runs and continues (W4) |
+| Hardware-observed | The test reports where the session runs and continues |
 | Unknown, not required | Recovery with all networking down, or from a stuck NDIS stack |
 
 **A lost RealVNC connection is an accepted consequence and is not a test failure (Q 2026-11-06).** It is no blocker, no stop condition and no verdict input. The run is a local process in the console session: it depends on no viewer, runs on its own bounds, writes every artifact locally and releases the lock, so results and original failures are there after reconnecting. A lost session changes no step: no retry, no second trigger, and no administration of any adapter.
@@ -439,24 +482,7 @@ None of the three prevents safe execution of Case A. Each only limits what a res
 
 The runner owns the machine lock, baseline, post-test state check, provenance and the DbgView capture. The test owns its ETW session, written to `logs\diag-i364-casea-<stamp>.etl`, and prints the `State` sequence, the management report and three verdicts per adapter: `TC-CASEA-001` lifecycle, `TC-CASEA-002` NDIS agreement, `TC-CASEA-003` restoration. A run exits 1 even when healthy, because restoration has no PHC tolerance and stays a restoration verdict. Run `ssot_register_validation_test` before and after it for the TSN register comparison, which uses registers this test does not read.
 
-Conversion, one script at a time: `Invoke-TasStage1DryRun.ps1`, its orchestration test and the `--lifecycle-a` mode of `tas_gate_investigation` are removed once this test has run on hardware. #364's Method section still says "Not a runner entry": that text needs a correction with the other #364 changes. The sections below describe the wrapper until then.
-
-The operator runs it. The wrapper mode is verified offline only: `tests/unit/ci/test_tas_stage1_orchestration.ps1`, 249 of 249, 77 of 77 mutants killed. That is no hardware evidence, and its trace fixtures stay UNVERIFIED until a real trace exists. Run that test from a process with a console: without one the interrupt cases fail, because the Ctrl+C never arrives.
-
-| # | State | Change to `Invoke-TasStage1DryRun.ps1` |
-|---|---|---|
-| W1 | Done | `-CaseA` switch. Without it the tool stays `--dry-run` |
-| W2 | Done | 10312 and 10103 are expected in this mode. 10007, 10058 and 10050 stay stop events |
-| W3 | Done | Correlation reads the tool's `result:` line. The tool's cleanup verdict stands beside the wrapper's, the worse one wins. A run with a trigger never reads `NO_CHANGE_OBSERVED` |
-| W4 | Done, corrected | Management discovery on `vncserver`'s own sockets, immediately before the trigger. Reported, with a `WARNING` for `MANAGEMENT_ON_TARGET` and `MANAGEMENT_UNATTRIBUTED`. **Never a stop** (Q 2026-11-06): the first version refused, which was no requirement of Q's |
-| W5 | Done | DbgView through `.github\skills\DbgView\Start-DbgViewCapture.ps1` is required. No confirmed capture, no trigger |
-| W6 | Done | Marker provider enabled, or no trigger. The decoded trace is reduced to the rule's sequence, class and claim |
-| W7 | Done | SHA256 of every artifact, written last |
-| W8 | **Not implemented** | Adapter cycling was refused as proposed. See "Cleanup and recovery" |
-
-A stop before the trigger still runs every post-check, and exits 2.
-
-The pre and post failure-transition rule stays as it is. Because the I219 line flips, a run can read `INCONCLUSIVE_RESTORATION` as Stage 1 did, or `CLEANUP_FAILED` for a pass then a fail (lines 192 and 193, read from the code, not yet seen on hardware). The `FAILED LINE` output shows which line caused it, and that verdict stands with its cause recorded.
+Conversion: `Invoke-TasStage1DryRun.ps1`, its orchestration test and the `--lifecycle-a` mode of `tas_gate_investigation` were removed after this test ran on hardware. Their history is in git. #364's Method section still says "Not a runner entry": that text needs a correction with the other #364 changes.
 
 **Packet-level management check, read-only, optional.** Elevated, while connected through the session in question. It only counts packets on the session's own UDP port, per component. `pktmon filter remove` clears every filter, so skip this if `pktmon filter list` shows any.
 
@@ -487,27 +513,6 @@ $s
 
 Use the configuration that install needs. Expected: 10312 on all three instances, in the documented attach and detach orders, which gives the binding of rule 4. If no 10312 appears on our instances, Case A will probably be `NOT_EMITTED`, and that is known before any trigger. This reinstall disables every bound adapter (F17), so it carries its own risk, whether or not it is traced.
 
-**Run, started by the operator.** The RealVNC connection may drop. If it does, reconnect and read the artifacts below:
-
-```powershell
-Set-Location C:\Users\User\IntelAvbFilter
-.\tools\build\Build-Tests.ps1 -Configuration Debug
-.\tests\diagnostic\Invoke-TasStage1DryRun.ps1 -CaseA
-"case a exit=$LASTEXITCODE"
-```
-
-Do not rebuild the driver. The tree must be clean at the commit that was built. Exit: 0 tool exit 0; 3 tool exit 1 or 2; 1 evidence incomplete; 2 trigger not issued. Return the `evidence stamp` line.
-
-| Artifact, `logs\diag-i364-*-<stamp>.*` | Holds |
-|---|---|
-| `result` .txt | Per-adapter lines, lifecycle, cleanup, sequence class, verdict |
-| `dryrun` .log and .stderr | Full tool output, including `edge`, `window`, `fact` and `claims` lines |
-| `stage1` .etl and .etl.xml | Raw and decoded NDIS trace, markers |
-| `tsnreg-pre`, `tsnreg-post` .log and .json | Register checks and runner results |
-| `state-pre`, `state-post` .txt | Adapter state |
-| `dbgview` .log, `transcript` .txt | Kernel log, full session |
-| `checksums` .txt | SHA256 of everything above |
-
 Read the result per adapter. A lifecycle outcome, a cleanup verdict and a sequence class are three separate results, and none replaces another. Stop conditions apply, and no second case or repeat follows without review.
 
 ## From Case A to #384
@@ -516,7 +521,7 @@ Issue state read 2026-11-06: #348, #349, #350, #351, #353, #356, #357, #361, #36
 
 | Step | Needs | Gives | Stops if |
 |---|---|---|---|
-| 1. Wrapper ready | W1 to W7, offline | A run the operator can start | - |
+| 1. Compiled test | `test_tas_lifecycle_case_a` | A run the operator starts by name | - |
 | 2. Calibration, optional | A reinstall already needed, never one done for this | `State` binding, emission | - |
 | 3. Case A, first run | Step 1 | Trigger reach, T1 to T7, Q2, Q4, part of Q3, reachability of the interval through `provenInsideCalls` | `NOT_TRIGGERED`: #364 and therefore #384 are BLOCKED until another trigger exists |
 | 4. Case A to 3 runs, plus a `--passive` pair | Step 3 reviewed | #364 acceptance for A, and whether polling changed the transition | - |
@@ -534,11 +539,11 @@ Branch scope (Q 2026-11-06): this branch stops at step 6 plus #364's acceptance.
 
 Sorted by what actually stops Case A.
 
-**Conditions for a Case A run:** the operator starts it, and the wrapper's own gates hold (clean build at HEAD, driver equals the build, register gate, trace, markers, DbgView). Nothing about the management session is a condition.
+**Conditions for a Case A run:** the operator starts it by name. The runner gates it, and the test stops before the trigger without a trace. Nothing about the management session is a condition.
 
-**Still owed:** **Hardware check of the reporting correction** of `b836e5a`. Its behaviour was observed on hardware on 2026-11-06 (`logs/ssot_register_validation_test_20261106_192202.log`, Debug driver `C1A98CF9...`, `LOCAL_DIAGNOSTIC`): 9/5, 10/4 and 4/10 observed and unobservable, `error: none`, registers compared 23 of 23, outcome `NOT_REQUIRED`. It is not GREEN: `provenance.verified` is false, because the test binary predates the current build inputs. It needs one targeted run after `Build-Tests.ps1` at a clean HEAD.
+**Done:** the reporting correction of `b836e5a` is hardware-verified in Debug with `provenance.verified` true (`logs/results-HardwareIntegration-Debug-20261106_203759_742.json`).
 
-**Resolved:** the driver; W1 to W7, offline. **Written, not yet exercised:** the `State` rule and the wrapper's Case A mode.
+**Resolved:** the driver; the first Case A run; the `State` rule, exercised once.
 
 **Not blockers, but limits on what a result may say:** ETW emission (absent events give `NOT_EMITTED`, and completion stays inferred); F2, F8 and F9; no PHC continuity claim until a hardware-derived tolerance exists; TDH, TDT and occupancy unmeasured in Case A; the origin of a PHC reset, open until the #348 measurement exists; #389 and the transition it causes.
 

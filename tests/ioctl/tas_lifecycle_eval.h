@@ -535,8 +535,9 @@ static __inline int tas_plan_exit(const TAS_PLAN_CLASS *classes, const int *resu
 
 /*
  * The State rule of investigations/issue-364-filter-lifecycle-case-a.md: what the NDIS state events of one filter instance
- * may say. Values are positions, never names: no document maps them. The driver counters anchor the sequence, because they
- * are independent of ETW, and slack is the bracket of the marker that places the two against each other.
+ * may say. The rule compares positions in the sequence. The provider renders the names itself, and on build 26300 they were
+ * 5 Pausing, 2 Paused, 3 Restarting, 4 Running. The driver counters anchor the sequence, because they are independent of
+ * ETW, and slack is the bracket of the marker that places the two against each other.
  *
  * An event alone proves no transition: a class is one input to tas_state_claim, which also needs the traffic-based lifecycle
  * outcome and untouched other adapters. Offline cases TC-MOCK-024 to 026 say nothing about hardware.
