@@ -175,7 +175,42 @@ Evidence: `logs\diag-i364-*-20261105_204526*`, `LOCAL_DIAGNOSTIC`, driver `5BA3F
 
 **Stage 0: PASS.** `enabled=1`, three markers, `status=0`, and all three in the trace with the exact QPC values and ETW timestamps. Bracket 21.3 to 24.8 us with a session attached, and ETW time within 2 us of the tool's host time. The trace reported 0 events lost. No NDIS events occurred, so this proves the pipeline, not that NDIS emits for a restart.
 
-**Case A, first run, 2026-11-06 20:38, `test_tas_lifecycle_case_a`, commit `d203b85`, Debug driver `C1A98CF9F62D2400...`, I226 0x125B REV_04, 1 Gbit/s, `LOCAL_DIAGNOSTIC`, `provenance.verified` true.** Evidence: `logs/test_tas_lifecycle_case_a_20261106_203816.log`, its DbgView log, `logs/diag-i364-casea-20261106_203827.etl`. One run of the three #364 requires. Never #384 RED or GREEN.
+**Case A, 3 runs, 2026-11-06, Debug driver `C1A98CF9F62D2400...`, `LOCAL_DIAGNOSTIC`, `provenance.verified` true on every run.** Checksums: `logs/i364-casea-checksums-20261106.txt`, 28 files.
+
+| | Run 1, 20:38 | Run 2, 20:58 | Run 3, 20:59 |
+|---|---|---|---|
+| Commit | `d203b85` | `1a93f56` | `1a93f56` |
+| Lifecycle | `RESUMED_BY_TRAFFIC` | same | same |
+| Sequence | 5, 2, 3, 4 | same | same |
+| Trigger to first NDIS event | 4.22 ms | 7.36 ms | 0.75 ms |
+| Pausing to Paused | 14.0 us | 15.2 us | 12.2 us |
+| **Paused to Restarting** | **24.1 us** | **24.7 us** | **13.7 us** |
+| Restarting to Running | 15.19 ms | 16.05 ms | 13.71 ms |
+| Polled entry to entry | 33.4 to 83.4 us | 40.2 to 45.1 us | 25.2 to 29.9 us |
+| `provenInsideCalls` | 20 | 29 | 19 |
+| Frames after restart | 49 of 49 | 49 of 49 | 49 of 49 |
+| PHC before, after | 21165.57 s, 9.30 s | 1220.80 s, 9.29 s | 45.07 s, 9.31 s |
+| `TRGTTIML0` | 0xB1B to 0xCE9 | 0xCE9 to 0x9DF | **unchanged**, 0x9DF |
+| Tool exit | 1 | 1 | 2 |
+| `TC-CASEA-001`, `002`, `003` | PASS, PASS, `CLEANUP_FAILED` | same | same |
+
+Every run had 0 lost events, 0 reset, halt or failed-restart events, other adapters unchanged and gauge 0. No NIC link event occurred in any of them.
+
+| #364 question, Case A | Answer |
+|---|---|
+| Q1 schedule survives | Not applicable: no schedule |
+| Q2 PHC continuous | **No**, 3 of 3 |
+| Q3 outstanding sends | Gauge 0 before and after, traffic resumed, Paused 13.7 to 24.7 us. TDH, TDT and occupancy during the interval: unknown |
+| Q4 hardware and driver agree | tasArmed 0, capabilities and `hw_state` unchanged, 3 of 3. Limited by F9, and `TRGTTIML0` changed in 2 of 3 |
+
+Three-run conclusions:
+
+- The PHC rate between runs on one epoch is 1.02932 over 1177 s and 1.02934 over 35 s, so 2.93 % fast reproduces.
+- The computed seed sits within about a millisecond of Running in all three runs, while the delay before NDIS started varied from 0.75 to 7.36 ms. So it follows the bring-up, not the trigger. Still inferred: #348's read before the seed is missing.
+- `TRGTTIML0` does not change on every restart, so it is not a fixed effect of the bring-up. Mechanism unknown.
+- RealVNC logged one dropped RTP datagram at 20:59:02.386, inside run 3's restart (FilterPause 20:59:02.376, `intel_init` returned .390). This is the first observation independent of the socket tables that links the media path to the I226. The session stayed connected in all three runs.
+
+**First run in detail, 2026-11-06 20:38, `test_tas_lifecycle_case_a`, commit `d203b85`, Debug driver `C1A98CF9F62D2400...`, I226 0x125B REV_04, 1 Gbit/s, `LOCAL_DIAGNOSTIC`, `provenance.verified` true.** Evidence: `logs/test_tas_lifecycle_case_a_20261106_203816.log`, its DbgView log, `logs/diag-i364-casea-20261106_203827.etl`. One run of the three #364 requires. Never #384 RED or GREEN.
 
 | Verdict | Result |
 |---|---|
