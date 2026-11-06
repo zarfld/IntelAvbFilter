@@ -1638,6 +1638,81 @@ if ($obsTxt -notmatch 'snapshot net_luid') { $idBad += 'STATIC: snapshot net_lui
 tc_check 'TEST-HILGATE-091-adapter-identity-is-the-net-luid-reorder-is-no-diff-changes-stay-attributed-observer-never-opens-adapter' `
     ($idBad.Count -eq 0) ($idBad -join ' || ')
 
+# --- 099: a ReadOnly cleanup line says what it compared ------------------------------------------------------------------
+# Sessions 2026-11-05/06: QUERY_HW_SNAPSHOT failed on every adapter (Win32 998), RegistersError stayed in the session file
+# and every ReadOnly item still read "observable state equals the baseline".  Zero compared registers must never read as
+# registers verified unchanged.  Reporting only: outcome and verdict stay exactly what they were.
+$covFns = 'Get-AvbHilRegisterCoverage', 'Format-AvbHilCoverageReason', 'Format-AvbHilRegisterObservation'
+$covMissing = @($covFns | Where-Object { $n = $_; $null -eq $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true) })
+$covBad = @()
+if ($covMissing.Count -gt 0) { $covBad += "runner functions missing: $($covMissing -join ', ')" }
+else {
+    foreach ($n in $covFns) { . ([scriptblock]::Create($ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq $n }, $true).Extent.Text)) }
+    $cL = @('0x0006008006000000', '0x0006008005000000', '0x0006008000000000')
+    $cR = { param([int]$N) $m = [ordered]@{}; for ($i = 0; $i -lt $N; $i++) { $m["R$i"] = [uint32]$i }; $m }
+    $cE = { param([int]$I, [string]$D, [int]$N, $U, [string]$Err = '') [pscustomobject][ordered]@{ Index = $I; Did = $D; Luid = $cL[$I]; Ok = $true; Timinca = 0; Tsauxc = 0; Error = ''
+                                                                                                  Registers = (& $cR $N); RegistersError = $Err; RegistersUnobservable = $U } }
+    $cS = { param($Entries, [bool]$ClockOk = $true, [string]$Why = '') @{ Ok = $true; Error = ''; Adapters = @(); ClockOk = $ClockOk; ClockError = $Why; Clock = @($Entries) } }
+    $w998 = 'QUERY_HW_SNAPSHOT failed (Win32 998)'
+    $full = & $cS @((& $cE 0 '0x125B' 9 5), (& $cE 1 '0x1533' 10 4), (& $cE 2 '0x15BB' 4 10))
+    $none = & $cS @((& $cE 0 '0x125B' 0 14 $w998), (& $cE 1 '0x1533' 0 14 $w998), (& $cE 2 '0x15BB' 0 14 $w998))
+    $part = & $cS @((& $cE 0 '0x125B' 9 5), (& $cE 1 '0x1533' 0 14 $w998))
+    $once = & $cS @((& $cE 0 '0x125B' 8 6))
+    $base = & $cS @((& $cE 0 '0x125B' 9 5))
+    $dark = & $cS @() $false 'device node missing'
+
+    $a = Get-AvbHilRegisterCoverage -Base $full -Cur $full; $t = Format-AvbHilCoverageReason $a
+    if ($a.Compared -ne 23 -or $a.Observed -ne 23 -or $a.Unobservable -ne 19 -or $a.Adapters -ne 3 -or @($a.NotCompared).Count -ne 0) { $covBad += "a) counts: $($a.Compared)/$($a.Observed)/$($a.Unobservable)/$($a.Adapters)" }
+    if ($t -ne 'ReadOnly; observable state equals the baseline (registers compared 23 of 23 observed, unobservable 19, adapters without a full comparison 0 of 3)') { $covBad += "a) text: $t" }
+
+    $b = Get-AvbHilRegisterCoverage -Base $none -Cur $none; $t = Format-AvbHilCoverageReason $b
+    if ($b.Compared -ne 0 -or $b.Unobservable -ne 42 -or @($b.NotCompared).Count -ne 3) { $covBad += "b) counts: $($b.Compared)/$($b.Unobservable)/$(@($b.NotCompared).Count)" }
+    if ($t -match 'equals? the baseline') { $covBad += "b) zero registers read as unchanged: $t" }
+    foreach ($need in 'no difference observed, registers NOT verified unchanged', 'registers compared 0 of 0 observed', 'adapters without a full comparison 3 of 3', 'Win32 998', $cL[0], $cL[2]) { if (-not $t.Contains($need)) { $covBad += "b) lacks '$need': $t" } }
+
+    $c = Get-AvbHilRegisterCoverage -Base $part -Cur $part; $t = Format-AvbHilCoverageReason $c
+    if ($t -match 'equals? the baseline' -or -not $t.Contains('registers verified only in part') -or -not $t.Contains('registers compared 9 of 9 observed') -or -not $t.Contains($cL[1]) -or $t.Contains("$($cL[0])")) { $covBad += "c) partial: $t" }
+
+    $d = Get-AvbHilRegisterCoverage -Base $base -Cur $once; $t = Format-AvbHilCoverageReason $d
+    if ($d.Compared -ne 8 -or $d.Observed -ne 9 -or $t -match 'equals? the baseline' -or -not $t.Contains('registers compared 8 of 9 observed') -or -not $t.Contains('1 register(s) not read again')) { $covBad += "d) read once: $t" }
+
+    $e = Get-AvbHilRegisterCoverage -Base $dark -Cur $dark; $t = Format-AvbHilCoverageReason $e
+    if ($t -match 'equals? the baseline' -or -not $t.Contains('registers NOT verified unchanged') -or -not $t.Contains('device node missing')) { $covBad += "e) no clock state: $t" }
+
+    $f = Get-AvbHilRegisterCoverage -Base (& $cS @((& $cE 0 '0x125B' 9 $null))) -Cur (& $cS @((& $cE 0 '0x125B' 9 $null))); $t = Format-AvbHilCoverageReason $f
+    if ($null -ne $f.Unobservable -or -not $t.Contains('unobservable unknown')) { $covBad += "f) an unknown count was invented: $t" }
+
+    # Exact register comparison must still be the runner's: the coverage reads the same adapter key as Compare-AvbHilState.
+    $g = Get-AvbHilRegisterCoverage -Base (& $cS @((& $cE 0 '0x125B' 9 5), (& $cE 2 '0x15BB' 4 10))) -Cur (& $cS @((& $cE 2 '0x15BB' 4 10), (& $cE 0 '0x125B' 9 5)))
+    if ($g.Compared -ne 13) { $covBad += "g) reordered enumeration lost registers: $($g.Compared)" }
+
+    $l1 = Format-AvbHilRegisterObservation (& $cE 0 '0x125B' 9 5)
+    if ($l1 -ne "Registers observed DID 0x125B (LUID $($cL[0]), no unique PnP instance): 9, unobservable 5, error: none") { $covBad += "line ok: $l1" }
+    $l2 = Format-AvbHilRegisterObservation (& $cE 1 '0x1533' 0 14 $w998)
+    if ($l2 -ne "Registers observed DID 0x1533 (LUID $($cL[1]), no unique PnP instance): 0, unobservable 14, error: $w998") { $covBad += "line failed read: $l2" }
+    $l3 = Format-AvbHilRegisterObservation ([pscustomobject]@{ Index = 2; Did = '0x15BB'; Luid = $cL[2]; Ok = $false; Timinca = 0; Tsauxc = 0; Error = 'OPEN_ADAPTER_BY_LUID failed' })
+    if ($l3 -ne "Registers observed DID 0x15BB (LUID $($cL[2]), no unique PnP instance): 0, unobservable unknown, error: OPEN_ADAPTER_BY_LUID failed") { $covBad += "line unreadable adapter: $l3" }
+
+    # Sandbox runs: the wording changes, the outcome and the functional verdict do not.
+    $roFake = New-Fake 'test_sbfake_ro'
+    $rZ1 = Invoke-Sandbox 'runZ1' @($roFake) -AllSupportedEnabled -StateEdit ($regsEdit + '; $s.clock | ForEach-Object { $_ | Add-Member -NotePropertyName RegistersUnobservable -NotePropertyValue 2 -Force }')
+    $rZ2 = Invoke-Sandbox 'runZ2' @($roFake) -AllSupportedEnabled
+    $z1 = @(Get-ExecRecords $rZ1 'test_sbfake_ro'); $z2 = @(Get-ExecRecords $rZ2 'test_sbfake_ro')
+    if ($z1.Count -lt 1 -or $z2.Count -lt 1) { $covBad += "sandbox records: $($z1.Count) $($z2.Count) | $(Tail $rZ2)" }
+    foreach ($q in @($z1) + @($z2)) {
+        if ($q.verdict -ne 'PASSED' -or (Get-Prop (Get-CleanupOf $q) 'outcome') -ne 'NOT_REQUIRED') { $covBad += "verdict or outcome moved: $($q.verdict) $(Get-Prop (Get-CleanupOf $q) 'outcome')" }
+    }
+    $z1r = [string](Get-Prop (Get-CleanupOf $z1[0]) 'reason'); $z2r = [string](Get-Prop (Get-CleanupOf $z2[0]) 'reason')
+    if ($z1r -notmatch '^ReadOnly; observable state equals the baseline \(registers compared (\d+) of \1 observed, unobservable \d+, adapters without a full comparison 0 of \d+\)$') { $covBad += "sandbox with registers: $z1r" }
+    if ($z2r -match 'equals? the baseline' -or -not $z2r.Contains('registers NOT verified unchanged') -or -not $z2r.Contains('sandbox: no snapshot registers')) { $covBad += "sandbox without registers: $z2r" }
+    if ($rZ1.Out -notmatch '\[INFO\] Registers observed DID 0x[0-9A-F]{4} [^\r\n]*: 12, unobservable 2, error: none') { $covBad += "baseline line with registers missing: $(Tail $rZ1)" }
+    if ($rZ2.Out -notmatch '\[INFO\] Registers observed DID 0x[0-9A-F]{4} [^\r\n]*: 0, unobservable unknown, error: sandbox: no snapshot registers') { $covBad += "baseline line without registers missing: $(Tail $rZ2)" }
+}
+# STATIC, not runtime evidence: the hardware observer records the unobservable count from the id map.
+$obsFn2 = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbHilClockState' }, $true)
+if (-not $obsFn2 -or $obsFn2.Extent.Text -notmatch 'RegistersUnobservable\s*=\s*\$unobservable' -or $obsFn2.Extent.Text -notmatch '\$unobservable\s*=\s*\$regNames\.Count\s*-\s*\$clockRegs\.Count\s*-\s*\$regs\.Count') { $covBad += 'STATIC: Get-AvbHilClockState does not record RegistersUnobservable from the id map' }
+tc_check 'TEST-HILGATE-099-readonly-cleanup-states-register-coverage-zero-compared-never-reads-as-unchanged-outcome-unchanged' ($covBad.Count -eq 0) ($covBad -join ' || ')
+
 Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""

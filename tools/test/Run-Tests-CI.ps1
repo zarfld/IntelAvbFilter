@@ -1146,6 +1146,7 @@ public static class AvbHilIoctl {
     $IOCTL_IDENT = [uint32]0x00170110; $IOCTL_BYLUID = [uint32]0x00170114; $IOCTL_CLOCK = [uint32]0x001700B4   # fn 68 / 69 / 45
     $IOCTL_SNAP = [uint32]0x00170118   # fn 70 IOCTL_AVB_QUERY_HW_SNAPSHOT (TC-ABI-022)
     $regNames = Get-AvbHwRegNames
+    $clockRegs = @('TIMINCA', 'TSAUXC')   # read through GET_CLOCK_CONFIG, not kept as snapshot registers
     $openDev = { [AvbHilIoctl]::CreateFile('\\.\IntelAvbFilter', [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero) }
     $h = & $openDev
     if ($h -eq [IntPtr](-1)) {
@@ -1228,13 +1229,14 @@ public static class AvbHilIoctl {
                     $at = 24 + 16 * $k
                     $rid = [int][System.BitConverter]::ToUInt32($sn, $at)
                     if ([System.BitConverter]::ToUInt32($sn, $at + 12) -ne 1 -or -not $regNames.Contains($rid)) { continue }   # AVB_HWREG_STATE_VALID only
-                    if ($regNames[$rid] -in @('TIMINCA', 'TSAUXC')) { continue }
+                    if ($regNames[$rid] -in $clockRegs) { continue }
                     $regs[$regNames[$rid]] = [System.BitConverter]::ToUInt32($sn, $at + 8)
                 }
             }
+            $unobservable = $regNames.Count - $clockRegs.Count - $regs.Count   # reported only: ids of this map not read VALID, whatever the reason
             $entries += [pscustomobject]@{ Index = $i; Did = $did; Luid = $luid; IfIndex = $idn.IfIndex; Mac = $idn.Mac; Ok = $true; Error = ''
                                            Timinca = [System.BitConverter]::ToUInt32($first, 8); Tsauxc = [System.BitConverter]::ToUInt32($first, 12)
-                                           Samples = $samples; Registers = $regs; RegistersError = $regErr }
+                                           Samples = $samples; Registers = $regs; RegistersError = $regErr; RegistersUnobservable = $unobservable }
             } finally {
                 [void][AvbHilIoctl]::CloseHandle($hb)
             }
@@ -1273,7 +1275,8 @@ function Get-AvbHilSandboxState {
         }
         $sc = [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
                                  Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples
-                                 Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' }) }
+                                 Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' })
+                                 RegistersUnobservable = (Get-AvbHilEntryField $c 'RegistersUnobservable') }
         # Optional identity (as the hardware observer reports it): Luid, InstanceId.  Absent = enumeration position only.
         foreach ($idField in 'Luid', 'InstanceId') { if ($c.PSObject.Properties[$idField]) { $sc | Add-Member -NotePropertyName $idField -NotePropertyValue ([string]$c.$idField) } }   # not $f: QPC frequency above
         $sc
@@ -1359,6 +1362,59 @@ function Test-AvbHilAdapterIdentityVerified {
     param($Entry)
     return [bool]((Get-AvbHilEntryField $Entry 'Luid') -and (Get-AvbHilEntryField $Entry 'InstanceId'))
 }
+# Register coverage of one comparison (pure, reporting only; decides no outcome).  Compared: registers read VALID both times
+# on the same adapter, keyed as Compare-AvbHilState keys them.  Unobservable: the observer's count, $null when none was given,
+# never invented.  NotCompared: why an adapter's registers were not fully compared.
+function Get-AvbHilRegisterCoverage {
+    param($Base, $Cur)
+    $cov = @{ Compared = 0; Observed = 0; Unobservable = 0; Adapters = 0; NotCompared = @(); Note = '' }
+    if (-not $Base.ClockOk -or -not $Cur.ClockOk) {
+        $cov.Unobservable = $null
+        $cov.Note = "clock state not observable: $(if (-not $Base.ClockOk) { $Base.ClockError } else { $Cur.ClockError })"
+        return $cov
+    }
+    $cc = @{}; foreach ($c in @($Cur.Clock)) { $cc[(Get-AvbHilAdapterKey $c)] = $c }
+    foreach ($b in @($Base.Clock)) {
+        $cov.Adapters++
+        $key = Get-AvbHilAdapterKey $b; $lb = Get-AvbHilAdapterLabel $b
+        $c = if ($cc.ContainsKey($key)) { $cc[$key] } else { $null }
+        $bR = Get-AvbHilRegs $b; $cR = Get-AvbHilRegs $c
+        $same = @($bR.Keys | Where-Object { $cR.Contains($_) }).Count
+        $cov.Observed += $bR.Count; $cov.Compared += $same
+        $u = Get-AvbHilEntryField $b 'RegistersUnobservable'
+        if ($null -eq $u) { $cov.Unobservable = $null } elseif ($null -ne $cov.Unobservable) { $cov.Unobservable += [int]$u }
+        if ($bR.Count -eq 0) {
+            $err = Get-AvbHilEntryField $b 'RegistersError'; if (-not $err) { $err = Get-AvbHilEntryField $b 'Error' }
+            $cov.NotCompared += "${lb}: $(if ($err) { $err } else { 'no register read' })"
+        } elseif ($same -lt $bR.Count) {
+            $err = if ($c) { Get-AvbHilEntryField $c 'RegistersError' } else { 'not enumerated' }
+            $cov.NotCompared += "${lb}: $($bR.Count - $same) register(s) not read again$(if ($err) { " ($err)" })"
+        }
+    }
+    return $cov
+}
+
+# ReadOnly cleanup reason.  "equals the baseline" is said only when every adapter's registers were compared in full: zero
+# compared registers must never read as registers verified unchanged.  The outcome stays the caller's.
+function Format-AvbHilCoverageReason {
+    param($Cov)
+    $u = if ($null -eq $Cov.Unobservable) { 'unknown' } else { $Cov.Unobservable }
+    $counts = "registers compared $($Cov.Compared) of $($Cov.Observed) observed, unobservable $u, adapters without a full comparison $(@($Cov.NotCompared).Count) of $($Cov.Adapters)"
+    $detail = @(@($Cov.Note) + @($Cov.NotCompared) | Where-Object { $_ }) -join '; '
+    if ($detail) { $counts = "${counts}: $detail" }
+    if ($Cov.Compared -eq 0) { return "ReadOnly; no difference observed, registers NOT verified unchanged ($counts)" }
+    if (@($Cov.NotCompared).Count -gt 0) { return "ReadOnly; no difference observed, registers verified only in part ($counts)" }
+    return "ReadOnly; observable state equals the baseline ($counts)"
+}
+
+# One baseline line per adapter: what the session can and cannot compare, RegistersError included.
+function Format-AvbHilRegisterObservation {
+    param($Entry)
+    $u = Get-AvbHilEntryField $Entry 'RegistersUnobservable'
+    $err = Get-AvbHilEntryField $Entry 'RegistersError'; if (-not $err) { $err = Get-AvbHilEntryField $Entry 'Error' }
+    return ("Registers observed {0}: {1}, unobservable {2}, error: {3}" -f (Get-AvbHilAdapterLabel $Entry), (Get-AvbHilRegs $Entry).Count, $(if ($null -eq $u) { 'unknown' } else { $u }), $(if ($err) { $err } else { 'none' }))
+}
+
 function Compare-AvbHilState {
     param($Base, $Cur)
     $diffs = @(); $warn = @(); $items = @()
@@ -2151,6 +2207,7 @@ function Invoke-HilBaseline {
             -Line "[INFRA_FAILURE] TC-INFRA-STATE-000: PHC clock state not observable at baseline: $($b.ClockError)"
         Set-HilHalt 'PHC clock state not observable at baseline'
     }
+    if ($b.ClockOk) { foreach ($c in @($b.Clock)) { Write-Note (Format-AvbHilRegisterObservation $c) } }
     $healthy = @()
     $n = 0
     $supportedPresent = 0
@@ -2258,7 +2315,7 @@ function Invoke-HilPostTestCheck {
         if ($TimedOut -and -not ($script:AvbItem -and $script:AvbItem.Termination -and $script:AvbItem.Termination.Ok)) {
             Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_VERIFIED' -Reason 'process tree did not terminate after the timeout; later state changes cannot be excluded'
         } else {
-            Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_REQUIRED' -Reason 'ReadOnly; observable state equals the baseline'
+            Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_REQUIRED' -Reason (Format-AvbHilCoverageReason (Get-AvbHilRegisterCoverage -Base $script:HilBaseline -Cur $cur))
         }
     }
     if ($Class -ne 'ReadOnly') {        # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
