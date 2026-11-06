@@ -4115,9 +4115,9 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             status = STATUS_BUFFER_TOO_SMALL;
         } else {
             __try {
+                /* METHOD_BUFFERED: buf is the IRP SystemBuffer, kernel memory, and the request holds no pointers.  It must
+                 * not be probed: ProbeForRead/Write raise on a kernel address. */
                 PAVB_HW_SNAPSHOT_REQUEST snap = (PAVB_HW_SNAPSHOT_REQUEST)buf;
-                ProbeForWrite(snap, sizeof(*snap), sizeof(avb_u32));
-                ProbeForRead(snap, sizeof(*snap), sizeof(avb_u32));
                 if (snap->version != AVB_HW_SNAPSHOT_VERSION) {
                     status = STATUS_REVISION_MISMATCH;
                 } else {

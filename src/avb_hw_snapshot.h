@@ -29,7 +29,7 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
 
 #ifdef INTEL_WIN32_KERNEL_MODE
     __try {
-        ProbeForWrite(out, sizeof(*out), sizeof(avb_u32));
+        /* out is the IOCTL's SystemBuffer (METHOD_BUFFERED), kernel memory: it must not be probed. */
         for (id = 1u; id <= AVB_HWREG_COUNT; id++) {
             AVB_HWREG_ENTRY *e = &snapshot.entries[id - 1u];
             uint32_t off = 0u, val = 0u;
@@ -42,7 +42,10 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
             e->value = val;
             e->state = AVB_HWREG_STATE_VALID;
         }
-        RtlCopyMemory(out, &snapshot, sizeof(snapshot));
+        /* Not the whole structure: net_luid, vendor_id and device_id are the caller's. */
+        out->version = snapshot.version;
+        out->count = snapshot.count;
+        RtlCopyMemory(out->entries, snapshot.entries, sizeof(out->entries));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         __try {
             RtlZeroMemory(out, sizeof(*out));
@@ -63,7 +66,9 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
         e->value = val;
         e->state = AVB_HWREG_STATE_VALID;
     }
-    RtlCopyMemory(out, &snapshot, sizeof(snapshot));
+    out->version = snapshot.version;
+    out->count = snapshot.count;
+    RtlCopyMemory(out->entries, snapshot.entries, sizeof(out->entries));
 #endif
 }
 

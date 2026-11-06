@@ -904,6 +904,18 @@ int main(void)
         printf("\n[I-015] NULL output buffer is ignored safely\n");
         AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, NULL);
         CHECK("NULL snapshot output buffer is ignored without dereferencing", TRUE);
+
+        /* The IOCTL handler sets the identity before calling the builder, and clients reject a snapshot whose LUID or
+         * device ID is not the bound adapter's.  Synthetic values, host shim. */
+        printf("\n[I-016] the identity set by the IOCTL handler survives the builder\n");
+        hw_configured();
+        memset(&s, 0, sizeof(s));
+        s.net_luid = 0x0006008006000000ULL; s.vendor_id = 0x8086u; s.device_id = 0x125Bu;
+        AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s);
+        CHECK("net_luid, vendor_id and device_id are unchanged",
+              s.net_luid == 0x0006008006000000ULL && s.vendor_id == 0x8086u && s.device_id == 0x125Bu);
+        CHECK("version, count and entries are still filled",
+              s.version == AVB_HW_SNAPSHOT_VERSION && s.count == AVB_HWREG_COUNT && s.entries[AVB_HWREG_TSYNCTXCTL - 1].state == AVB_HWREG_STATE_VALID);
     }
 
     printf("\n PASS: %d / %d\n FAIL: %d / %d\n", g_run - g_fail, g_run, g_fail, g_run);

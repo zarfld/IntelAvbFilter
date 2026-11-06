@@ -1553,6 +1553,22 @@ if ($lcCode -match '\breturn\s+4\s*;') { $lcBad += 'cleanup outcome changes the 
 # HIL through Run-Tests-CI.ps1 (Unsafe entry, AVB_HIL_AUTHORIZE_UNSAFE naming it).
 tc_check 'TEST-HILGATE-082-ut-corr-009-reinstall-and-restoration-source-contract-STATIC-not-runtime-evidence' ($lcBad.Count -eq 0) ($lcBad -join ' ### ')
 
+# STATIC, not runtime evidence.  QUERY_HW_SNAPSHOT is METHOD_BUFFERED: its buffer is the IRP SystemBuffer, kernel memory.  A
+# ProbeFor* call there raises, the IOCTL fails with ERROR_NOACCESS, and every session baseline then held zero registers
+# (Win32 998 on every adapter, HIL evidence stamp 20261106_140738).  The kernel branch does not compile on the host, so the
+# offline I-010..I-016 cannot see this.  The handler's own validation must stay.
+$snapStrip = { param($t) [regex]::Replace([regex]::Replace($t, '(?s)/\*.*?\*/', ''), '(?m)//.*$', '') }
+$snapHdr = & $snapStrip ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src\avb_hw_snapshot.h')))
+$snapCase = [regex]::Match((& $snapStrip ([IO.File]::ReadAllText((Join-Path $RepoRoot 'src\avb_integration_fixed.c')))), '(?s)case IOCTL_AVB_QUERY_HW_SNAPSHOT:.*?case IOCTL_AVB_GET_HW_STATE:')
+$snapBad = @()
+if (-not $snapCase.Success) { $snapBad += 'handler not found' }
+if ($snapHdr -match 'ProbeFor(Read|Write)') { $snapBad += 'src/avb_hw_snapshot.h probes the SystemBuffer' }
+if ($snapCase.Value -match 'ProbeFor(Read|Write)') { $snapBad += 'the handler probes the SystemBuffer' }
+foreach ($need in 'buf == NULL', 'inLen < sizeof(AVB_HW_SNAPSHOT_REQUEST)', 'outLen < sizeof(AVB_HW_SNAPSHOT_REQUEST)', 'snap->version != AVB_HW_SNAPSHOT_VERSION', 'INTEL_CAP_MMIO') {
+    if (-not $snapCase.Value.Contains($need)) { $snapBad += "handler lost: $need" }
+}
+tc_check 'TEST-HILGATE-098-hw-snapshot-no-probe-on-systembuffer-validation-kept-STATIC-not-runtime-evidence' ($snapBad.Count -eq 0) ($snapBad -join '; ')
+
 # --- Run X: register snapshot (IOCTL_AVB_QUERY_HW_SNAPSHOT) widens the runner's independent restoration check ------------
 # Before: the runner re-read only adapter/TIMINCA/TSAUXC, so every mutating test that changes timestamp-control or
 # target-time state was cleanup NOT_VERIFIED at best, and a leaked TS_CONTROL change went unseen.  Now the snapshot
