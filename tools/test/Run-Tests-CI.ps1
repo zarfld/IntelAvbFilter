@@ -697,7 +697,7 @@ $HilTestSafety = @{
     'test_ptp_corr'                    = 'ReadOnly'
     'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006 need --case; UT-CORR-009 is test_ptp_phc_lifecycle
     'test_hardware_detection'          = 'ReadOnly'
-    'ssot_register_validation_test'    = 'ReadOnly'   # GET_DEVICE_INFO, GET_HW_STATE, READ_REGISTER on the default handle; GET_VERSION, GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID, GET_TAS_STATE, READ_REGISTER on own per-adapter handles; no write
+    'ssot_register_validation_test'    = 'ReadOnly'   # GET_DEVICE_INFO, GET_HW_STATE, READ_REGISTER on the default handle; GET_VERSION, GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID, GET_TAS_STATE, READ_REGISTER, QUERY_HW_SNAPSHOT on own per-adapter handles; no write
     # --- Init (IOCTL_AVB_INIT_DEVICE) ---
     'test_clock_config'                = 'Init'
     'test_clock_working'               = 'Init'

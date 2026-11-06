@@ -4115,8 +4115,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
             status = STATUS_BUFFER_TOO_SMALL;
         } else {
             __try {
-                /* METHOD_BUFFERED: buf is the IRP SystemBuffer, kernel memory, and the request holds no pointers.  It must
-                 * not be probed: ProbeForRead/Write raise on a kernel address. */
+                /* METHOD_BUFFERED: buf is the kernel system buffer.  ProbeFor* accepts user addresses only and would
+                 * raise an access violation here, so this IOCTL must never probe it. */
                 PAVB_HW_SNAPSHOT_REQUEST snap = (PAVB_HW_SNAPSHOT_REQUEST)buf;
                 if (snap->version != AVB_HW_SNAPSHOT_VERSION) {
                     status = STATUS_REVISION_MISMATCH;

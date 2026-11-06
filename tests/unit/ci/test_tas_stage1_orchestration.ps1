@@ -85,6 +85,11 @@ $FxLog = @'
     [SKIP_UNSUPPORTED] TC-TSNREG-001/adapter:1 did=0x1533: adapter does not advertise INTEL_CAP_TSN_TAS
     [SKIP_UNSUPPORTED] TC-TSNREG-001/adapter:2 did=0x15BB: adapter does not advertise INTEL_CAP_TSN_TAS
 
+    === Phase 4: QUERY_HW_SNAPSHOT On Every Adapter ===
+      snapshot adapter:0 did=0x125B luid=0x0006008006000000 ifIndex=8
+        id=1  offset=0x0B608 value=0x02F42400 state=1
+    [PASS] TC-HWSNAP-001/adapter:0 did=0x125B
+
     === Test Summary ===
     Tests Passed: 60
     Tests Failed: 1

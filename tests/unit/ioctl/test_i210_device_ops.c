@@ -905,17 +905,17 @@ int main(void)
         AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, NULL);
         CHECK("NULL snapshot output buffer is ignored without dereferencing", TRUE);
 
-        /* The IOCTL handler sets the identity before calling the builder, and clients reject a snapshot whose LUID or
-         * device ID is not the bound adapter's.  Synthetic values, host shim. */
-        printf("\n[I-016] the identity set by the IOCTL handler survives the builder\n");
+        /* The IOCTL handler writes the identity first: a builder that replaced the whole struct returned did=0 luid=0
+         * on real hardware (2026-11-05, 0x125B, 0x1533, 0x15BB, Debug and Release). */
+        printf("\n[I-016] the adapter identity written by the caller survives the builder\n");
         hw_configured();
         memset(&s, 0, sizeof(s));
-        s.net_luid = 0x0006008006000000ULL; s.vendor_id = 0x8086u; s.device_id = 0x125Bu;
+        s.net_luid = 0x0006008006000000ULL; s.vendor_id = 0x8086; s.device_id = 0x125B;
         AvbFillHwSnapshot(&i210_ops, &dev, INTEL_CAP_MMIO, ndis_platform_ops.mmio_read, &s);
-        CHECK("net_luid, vendor_id and device_id are unchanged",
-              s.net_luid == 0x0006008006000000ULL && s.vendor_id == 0x8086u && s.device_id == 0x125Bu);
-        CHECK("version, count and entries are still filled",
-              s.version == AVB_HW_SNAPSHOT_VERSION && s.count == AVB_HWREG_COUNT && s.entries[AVB_HWREG_TSYNCTXCTL - 1].state == AVB_HWREG_STATE_VALID);
+        CHECK("net_luid, vendor_id and device_id unchanged",
+              s.net_luid == 0x0006008006000000ULL && s.vendor_id == 0x8086 && s.device_id == 0x125B);
+        CHECK("version, count and entries still written",
+              s.version == AVB_HW_SNAPSHOT_VERSION && s.count == AVB_HWREG_COUNT && s.entries[0].id == AVB_HWREG_TIMINCA);
     }
 
     printf("\n PASS: %d / %d\n FAIL: %d / %d\n", g_run - g_fail, g_run, g_fail, g_run);

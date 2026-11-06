@@ -4,7 +4,8 @@
  * (intel-ethernet-regs/gen through the device HAL); this file contains no register offsets.  Read-only: it only calls
  * the supplied MMIO reader (the kernel passes ndis_platform_ops.mmio_read; host unit tests pass a fake register file).
  * Every id 1..AVB_HWREG_COUNT gets one entry, in id order, with an explicit state - nothing is skipped or guessed.
- * Verified offline by tests/unit/ioctl/test_i210_device_ops.c I-010..I-014.
+ * Writes version, count and entries only: net_luid, vendor_id, device_id and status belong to the caller.
+ * Verified offline by tests/unit/ioctl/test_i210_device_ops.c I-010..I-016.
  */
 #ifndef AVB_HW_SNAPSHOT_H
 #define AVB_HW_SNAPSHOT_H
@@ -29,7 +30,6 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
 
 #ifdef INTEL_WIN32_KERNEL_MODE
     __try {
-        /* out is the IOCTL's SystemBuffer (METHOD_BUFFERED), kernel memory: it must not be probed. */
         for (id = 1u; id <= AVB_HWREG_COUNT; id++) {
             AVB_HWREG_ENTRY *e = &snapshot.entries[id - 1u];
             uint32_t off = 0u, val = 0u;
@@ -42,10 +42,9 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
             e->value = val;
             e->state = AVB_HWREG_STATE_VALID;
         }
-        /* Not the whole structure: net_luid, vendor_id and device_id are the caller's. */
         out->version = snapshot.version;
         out->count = snapshot.count;
-        RtlCopyMemory(out->entries, snapshot.entries, sizeof(out->entries));
+        RtlCopyMemory(out->entries, snapshot.entries, sizeof(snapshot.entries));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         __try {
             RtlZeroMemory(out, sizeof(*out));
@@ -68,7 +67,7 @@ static void AvbFillHwSnapshot(const intel_device_ops_t *ops, device_t *dev, uint
     }
     out->version = snapshot.version;
     out->count = snapshot.count;
-    RtlCopyMemory(out->entries, snapshot.entries, sizeof(out->entries));
+    RtlCopyMemory(out->entries, snapshot.entries, sizeof(snapshot.entries));
 #endif
 }
 
