@@ -621,6 +621,26 @@ If disable blocks or the block stops, do nothing further to the adapter: a reboo
 
 **Machine state before the first run, 2026-11-07 09:06.** CI HIL run 42343612433, for `a237029`, failed at `Run HardwareUnit`, `Run HardwareIntegration` and the Release deploy. Afterwards `MS_IntelAvbFilter` was absent from the bindings and network components, against positive controls on the Microsoft filters; `\\.\IntelAvbFilter` did not exist; SCM still reported the service Running on the CI build `3CD50DC5A32CA6C5`. No netcfg process, no HIL lock, no pending rename, adapters Up. The Worker log inspects a `netcfg` process at job end on this run and on 42298562266, and does not show what became of it. Whether the image stays loaded is unknown: the unelevated module list failed its control. The canonical reinstall ran from the same stage at 05:19 and finished in 22 s, 1 of 1.
 
+### Case B run 1
+
+`LOCAL_DIAGNOSTIC`, `ef7d682`, Debug driver `1B4F299C7E70AA68`, I226 0x125B REV_04, stamp `20261107_091050`, runner exit 1. Evidence: `logs/i364-evidence/caseb-run1/`.
+
+| Test | Verdict |
+|---|---|
+| TC-CASEB-001 | PASS: 129 accepted, 0 on the wire, tasArmed 1, observer alive |
+| TC-CASEB-002 | BLOCKED: no counter moved. Its reason text then said no trigger exists, which was wrong for this case and is corrected; the verdict is unchanged |
+| TC-CASEB-003 | INCONCLUSIVE: no NDIS state event |
+| TC-CASEB-004 | CLEANUP_FAILED |
+| TC-INFRA-STATE-001, SESSION-002 | CLEANUP_FAILED: `TSYNCRXCTL` 0x18 to 0x19 |
+
+With gauge 62, `FilterPause` was not entered in 60 s and no filter on the stack changed state. Case A's first `Pausing` comes 2 ms after the same trigger. 9 s later 0 of 49 probe frames reached the wire, gauge 228, 0 of 129 held frames released. No NDIS reset or halt event. So the read gate stayed closed, and Q1, Q2 and Q4 are unknown for this run. Q3: Pause not entered within the bound, held frames not released. Cause unknown: the handler discards the status of `NdisFRestartFilter`, and the trace keywords excluded Protocol, which this run's successor adds.
+
+**Post-cycle, operator NIC cycle, `--dry-run` at 09:18:** 0 of 40 TSN registers differ from the pre-state; tasArmed 0; 49 of 49 tagged frames on the observer, gauge 0, ring idle. PHC 290.18 s, where continuous running from 167.19 s gives about 600 s, so the cycle reset it. Registers, TAS and TX returned; PHC continuity did not, so restoration is not verified and TC-CASEB-004 stands. This is one cycle.
+
+**Evidence incident.** The two per-test logs `test_tas_lifecycle_case_a.exe_20261107_091059.log` and `..._091810.log` read normally until 09:15, appeared empty at 09:18:55 and were gone at 09:19:25. The first is listed in the run's checksum manifest as `DDD435D9...`, so that row can no longer be verified. Their output survives in the runner logs. Cause unknown: nothing in the runner, its libraries or scheduled tasks removes them. Later evidence is copied to `logs/i364-evidence/` at once.
+
+`--case-b-drained` holds about 24 frames, so the gauge is 0 at the trigger, and has that as setup. If Pause then runs, outstanding sends are the reason, and Q1, Q2 and Q4 become measurable under `SETUP_TAS`. If it does not, the driver's status is needed.
+
 ## Activation runs for #357
 
 Made on `4ed976e`, Debug driver `6FB73E9E392C0499`, I226 0x125B, one run each. They are #357 evidence, kept here until that issue resumes. Checksums: `logs/i357-activate-checksums-20261107.txt`.
@@ -650,7 +670,7 @@ Allowed as explicitly approved `LOCAL_DIAGNOSTIC` investigations, using raw regi
 
 ## Stop conditions
 
-The tool ends on its own bounds. Stop the session on any of these, and do not start another case:
+The tool ends on its own bounds. On any of these the run stops, and the state is examined before the next step. This is no global halt (Q 2026-11-07): each later run proves its own prerequisites.
 
 - no Restart entry within 60 s;
 - the trigger does not return within 5 s;

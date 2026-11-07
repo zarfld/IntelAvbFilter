@@ -11,6 +11,9 @@
  *
  *   TC-CASEB-001  setup: armed, frames accepted, none on the wire, observer alive. Otherwise FAILED_SETUP and no trigger
  *
+ * --case-b-drained holds about 24 frames, so the gauge is 0 at the trigger, and needs that as setup. It separates outstanding sends
+ * from TSN mode as the reason run 1 of --case-b saw no Pause entry in 60 s, and otherwise the same test cases apply.
+ *
  * SETUP_TAS is the dedicated IOCTL, registers are read through READ_REGISTER only, and nothing here can release the hold: the
  * operator recovers the target by NIC cycle after every run.
  *
@@ -75,12 +78,14 @@ typedef int NDIS_PARAMETER_TYPE;   /* a kernel type in structures of filteruser.
 #define GUID_TEXT_CHARS      39
 #define TRACE_NAME           L"AvbI364CaseA"
 #define NDIS_KEYWORDS        0x4316ULL  /* filter, miniport and power keywords, as in the Stage 0 and Stage 1 sessions */
+#define NDIS_KEYWORD_PROTOCOL 0x800ULL  /* Case B: its first run saw no filter state at all, and this is where a protocol pause would show */
 #define MANAGEMENT_PROCESS   L"vncserver.exe"
 #define MAX_NDIS_EVENTS      4096
 #define MAX_MARKS            32
 #define NAME_CHARS           160
 #define ALL_ONES             0xFFFFFFFFu
 #define CASE_B_HOLD_MS       8000     /* past the 84 to 87 frames at 64 bytes after which the ring stalled, 3 of 3 on 2026-11-05 */
+#define CASE_B_DRAINED_MS    1500     /* about 24 frames: held, with descriptors still completing, so nothing stays outstanding */
 #define CASE_B_EVIDENCE_DID  INTEL_DEV_I226_LM   /* the register map is hardware-observed here only, REV_04. It limits evidence, never eligibility */
 #define TX_QUEUES            4
 
@@ -120,7 +125,7 @@ typedef struct {
 
 static CASE_RESULT g_case[TAS_MAX_ADAPTERS];
 static CASE_RESULT *g_now;
-static BOOL g_case_b;
+static BOOL g_case_b, g_case_b_drained;
 static const char *g_tc_run = "TC-CASEA-001", *g_tc_state = "TC-CASEA-002", *g_tc_clean = "TC-CASEA-003";
 
 /* The table of test_tas_isolated_arm without the MAC address. TDH and TDT move with traffic and are read apart */
@@ -845,7 +850,7 @@ static int case_b_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, int n, int t, 
     armed_ok = arm_tas(h, &error);
     printf(TAG " SETUP_TAS ok=%d error=%lu\n", armed_ok, error);
     armed_ok = armed_ok && read_armed(h, &armed) && armed != 0;
-    hold_seen = armed_ok ? tx_step(h, ids[t].net_luid, sock, CASE_B_HOLD_MS, "hold", g_next_seq, capture_alive) : 0;
+    hold_seen = armed_ok ? tx_step(h, ids[t].net_luid, sock, g_case_b_drained ? CASE_B_DRAINED_MS : CASE_B_HOLD_MS, "hold", g_next_seq, capture_alive) : 0;
     hold_sent = g_next_seq - hold_first;
     hold = tas_hold_class(armed_ok, *capture_alive, hold_sent, hold_seen);
     sprintf_s(why, sizeof(why), "%s accepted=%u seen=%u tasArmed=%u observerAlive=%d", tas_hold_name(hold), hold_sent, hold_seen, armed, *capture_alive);
@@ -871,6 +876,13 @@ static int case_b_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, int n, int t, 
     QueryPerformanceCounter(&qpc_before);
     if (!read_stats(h, &before) || !read_hw_state(h, &hw_before) || oper_status(ids[t].net_luid) != IfOperStatusUp) {
         printf(TAG " no trigger: statistics or link changed\n");
+        g_now->failed_setup = TRUE;
+        g_now->cleanup = tas_lifecycle_cleanup(&cleanup);
+        return 1;
+    }
+    if (g_case_b_drained && before.OutstandingSendNBLs != 0) {
+        sprintf_s(why, sizeof(why), "the drained variant needs gauge 0 at the trigger, and it is %llu", before.OutstandingSendNBLs);
+        verdict("FAILED_SETUP", "TC-CASEB-001", t, ids[t].device_id, why);
         g_now->failed_setup = TRUE;
         g_now->cleanup = tas_lifecycle_cleanup(&cleanup);
         return 1;
@@ -1277,7 +1289,7 @@ static BOOL trace_start(void)
     }
     InterlockedExchange(&g_session_open, 1);
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
-    status = EnableTraceEx2(g_session, &g_ndis_provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, NDIS_KEYWORDS, 0, 0, NULL);
+    status = EnableTraceEx2(g_session, &g_ndis_provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, g_case_b ? NDIS_KEYWORDS | NDIS_KEYWORD_PROTOCOL : NDIS_KEYWORDS, 0, 0, NULL);
     if (status != ERROR_SUCCESS) {
         printf(TAG " NDIS provider not enabled (error %lu)\n", status);
         trace_stop();
@@ -1490,7 +1502,8 @@ static int report_case(const CASE_RESULT *c, BOOL decoded)
 
     sprintf_s(why, sizeof(why), "lifecycle=%s othersChanged=%u", tas_lifecycle_name(c->outcome), c->others_changed);
     if (c->outcome == TAS_LIFECYCLE_NOT_TRIGGERED) {
-        verdict("BLOCKED", g_tc_run, c->index, c->did, "the trigger reached nothing: #364 is BLOCKED until another trigger exists");
+        verdict("BLOCKED", g_tc_run, c->index, c->did, g_case_b ? "no Pause entry within the bound under SETUP_TAS: this path ran in Case A, and the status of NdisFRestartFilter is not visible"
+                                                                 : "the trigger reached nothing: #364 is BLOCKED until another trigger exists");
         bad = 1;
     } else if (c->outcome == TAS_LIFECYCLE_RESUMED && c->others_changed == 0) {
         verdict("PASS", g_tc_run, c->index, c->did, why);
@@ -1538,7 +1551,7 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
         g_marker = 0;   /* EventWriteString then fails harmlessly, and the trace shows no window */
     }
     if (g_case_b) {
-        printf(TAG " #364 Case B: SETUP_TAS only, frames held, one FilterPause and FilterRestart per eligible adapter\n");
+        printf(TAG " #364 Case B: SETUP_TAS only, frames held%s, one FilterPause and FilterRestart per eligible adapter\n", g_case_b_drained ? ", gauge 0 at the trigger" : "");
     } else {
         printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart per eligible adapter%s\n", dry_run ? " (dry run, no trigger)" : passive ? " (passive polling)" : "");
     }
@@ -1636,14 +1649,15 @@ int main(int argc, char **argv)
 {
     BOOL dry_run = argc == 2 && strcmp(argv[1], "--dry-run") == 0, passive = argc == 2 && strcmp(argv[1], "--passive") == 0;
 
-    g_case_b = argc == 2 && strcmp(argv[1], "--case-b") == 0;
+    g_case_b_drained = argc == 2 && strcmp(argv[1], "--case-b-drained") == 0;
+    g_case_b = g_case_b_drained || (argc == 2 && strcmp(argv[1], "--case-b") == 0);
     if (g_case_b) {
         g_tc_run = "TC-CASEB-002";
         g_tc_state = "TC-CASEB-003";
         g_tc_clean = "TC-CASEB-004";
     }
     if (argc > 2 || (argc == 2 && !dry_run && !passive && !g_case_b)) {
-        printf("[BLOCKED] %s: usage: test_tas_lifecycle_case_a [--dry-run | --passive | --case-b]\n", g_tc_run);
+        printf("[BLOCKED] %s: usage: test_tas_lifecycle_case_a [--dry-run | --passive | --case-b | --case-b-drained]\n", g_tc_run);
         return 3;
     }
     return lifecycle_case_a(dry_run, passive);
