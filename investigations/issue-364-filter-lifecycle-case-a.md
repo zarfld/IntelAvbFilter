@@ -600,13 +600,26 @@ With the reads open, the ring tail is read before and after the probe frames. Fr
 
 **Stop conditions** are those below. No Restart entry within 60 s closes the reads.
 
-**Recovery after every run, by the operator.** `Ethernet 3` is the I226 and does not carry management on this host:
+**Recovery after a run, by the operator.** `Ethernet 3` is the I226 and does not carry management on this host. The block stops at the first failure, so enable never follows a failed disable:
 
 ```powershell
-Disable-NetAdapter -Name 'Ethernet 3' -Confirm:$false; Start-Sleep 5; Enable-NetAdapter -Name 'Ethernet 3' -Confirm:$false
+& {
+    $a = 'Ethernet 3'
+    Disable-NetAdapter -Name $a -Confirm:$false -ErrorAction Stop
+    if ((Get-NetAdapter -Name $a).Status -ne 'Disabled') { throw "$a is not Disabled: stopping, not enabling" }
+    Start-Sleep 5
+    Enable-NetAdapter -Name $a -Confirm:$false -ErrorAction Stop
+    $end = (Get-Date).AddSeconds(30)
+    while ((Get-NetAdapter -Name $a).Status -ne 'Up' -and (Get-Date) -lt $end) { Start-Sleep 1 }
+    Get-NetAdapter -Name $a | Format-List Name, Status, LinkSpeed
+}
 ```
 
-A NIC cycle restored TX after `SETUP_TAS` in the #328 runs. It has not been run after a Restart under a hold. If disable blocks, do not enable, and a reboot is your decision. The next run proves its own pre-state and refuses a set TSN mode.
+If disable blocks or the block stops, do nothing further to the adapter: a reboot is your decision. A NIC cycle restored TX after `SETUP_TAS` in the #328 runs, but it has not been run after a Restart under a hold, so it is not presumed to restore anything.
+
+**Post-cycle evidence.** `test_tas_lifecycle_case_a --dry-run` records registers, PHC pairs, tasArmed and tagged traffic on the observer, and issues no trigger. It reports a nonzero tasArmed instead of refusing. It judges nothing: the values are compared with the run's pre-state in analysis, and TC-CASEB-004 stands as reported. No global halt follows: the next run proves its own pre-state and refuses a set TSN mode.
+
+**Machine state before the first run, 2026-11-07 09:06.** CI HIL run 42343612433, for `a237029`, failed at `Run HardwareUnit`, `Run HardwareIntegration` and the Release deploy. Afterwards `MS_IntelAvbFilter` was absent from the bindings and network components, against positive controls on the Microsoft filters; `\\.\IntelAvbFilter` did not exist; SCM still reported the service Running on the CI build `3CD50DC5A32CA6C5`. No netcfg process, no HIL lock, no pending rename, adapters Up. The Worker log inspects a `netcfg` process at job end on this run and on 42298562266, and does not show what became of it. Whether the image stays loaded is unknown: the unelevated module list failed its control. The canonical reinstall ran from the same stage at 05:19 and finished in 22 s, 1 of 1.
 
 ## Activation runs for #357
 

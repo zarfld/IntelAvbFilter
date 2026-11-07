@@ -986,7 +986,8 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
         printf(TAG " not run: needs a bound target with link and IPv4, and a separate management link\n");
         goto done;
     }
-    if (!read_armed(h, &armed_before) || armed_before != 0) {
+    /* A dry run mutates nothing, and after a NIC cycle a nonzero value is the fact it is there to record */
+    if (!read_armed(h, &armed_before) || (armed_before != 0 && !dry_run)) {
         printf(TAG " not run: needs tasArmed=0\n");
         goto done;
     }
@@ -1029,6 +1030,16 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
     }
     if (dry_run) {
         static TAS_WINDOW_TRACK resolution;
+        static avb_u32 tsn[TSN_COUNT];
+        avb_u32 tail;
+
+        /* Post-cycle evidence for Case B: registers, PHC and TAS state here, traffic from the observer line above. Nothing judged */
+        printf(TAG " fact tasArmed=%u\n", armed_before);
+        phc_pairs(h, "dry run");
+        if (ids[t].device_id == CASE_B_EVIDENCE_DID) {
+            (void)read_tsn(h, tsn, "dry run");
+            (void)read_ring(h, "dry run", &tail);
+        }
 
         /* What observing itself changed: the same reads as the real run, with no lifecycle event */
         ZeroMemory(&snap_after, sizeof(snap_after));
