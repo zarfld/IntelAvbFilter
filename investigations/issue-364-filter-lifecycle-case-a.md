@@ -560,8 +560,8 @@ Issue state read 2026-11-06: #348, #349, #350, #351, #353, #356, #357, #361, #36
 | 2. Calibration, optional | A reinstall already needed, never one done for this | `State` binding, emission | - |
 | 3. Case A, first run | Step 1 | Trigger reach, T1 to T7, Q2, Q4, part of Q3, reachability of the interval through `provenInsideCalls` | `NOT_TRIGGERED`: #364 and therefore #384 are BLOCKED until another trigger exists |
 | 4. Case A to 3 runs, plus a `--passive` pair | Step 3 reviewed | #364 acceptance for A, and whether polling changed the transition | - |
-| 5. Cases C and D | The seven-point safety analysis still owed, individual authorization, raw modes selecting by capability rather than DID | Q1 and Q3 under a schedule, which is what #384's scenario needs | - |
-| 6. Case B | Individual authorization | Required for #364, need not gate step 7 | - |
+| 5. Cases C and D | The seven-point safety analysis still owed, `tas_gate_investigation` under the orchestration, raw modes selecting by capability rather than DID | Q1 and Q3 under a schedule, which is what #384's scenario needs | - |
+| 6. Case B | `test_tas_lifecycle_case_a --case-b`, see "Case B" | Required for #364, need not gate step 7 | - |
 | 7. #384 Expected Results | Findings of A, C and D; Q's SSOT write | The Expected Results #384 defers to #364, and feeds #356, #362, #348 | - |
 | 8. #384 test, RED | TAS query (#350, #353) and activation (#357), governed by #362 and #363; #384 forbids raw registers | Authoritative hardware RED. Case A results can never serve as it | Interval not provably reachable: report the gap and propose a testability solution under #384 or #356, without weakening the assertion |
 | 9. #384 GREEN | #356 behaviour, a decision on F9, restoration from #361, the PHC outcome of #348, Debug and Release | Hardware GREEN | - |
@@ -583,6 +583,43 @@ Sorted by what actually stops Case A.
 **Not blockers, but limits on what a result may say:** ETW emission (absent events give `NOT_EMITTED`, and completion stays inferred); F2, F8 and F9; no PHC continuity claim until a hardware-derived tolerance exists; TDH, TDT and occupancy unmeasured in Case A; the origin of a PHC reset, open until the #348 measurement exists; #389 and the transition it causes.
 
 **For Q to decide, not a safety matter:** whether the #364 correction and observer wording must be published before the first run, or may follow it.
+
+## Case B
+
+Q decided on 2026-11-07: Case B uses the dedicated `SETUP_TAS` IOCTL, in the compiled test. No `WRITE_REGISTER`. `IOCTL_AVB_TAS_ACTIVATE` stays out of #364, on `feat/357-tas-activate`.
+
+**Setup.** `test_tas_lifecycle_case_a --case-b`, on eligible adapters. Pre-state as in Case A, plus every TSN register readable and TSN transmit mode clear. The I226-LM register map is the only one with evidence, so another eligible adapter is BLOCKED with no register access. `SETUP_TAS` uses the same request as `test_tas_isolated_arm`, because the evidence that it holds frames came from that request. Then 8 s of tagged frames, past the 84 to 87 frames after which the ring stalled at 64 bytes.
+
+**TC-CASEB-001.** Armed, frames accepted, none on the wire, observer alive. Anything else is `FAILED_SETUP` and the trigger is not issued.
+
+**What differs from Case A after the trigger.** Case A takes Running from frames on the wire, which a hold withholds. The gauge cannot stand in: `FilterSendNetBufferLists` raises it before it checks the filter state, and the Debug path for a paused filter completes the frames without lowering it. So the run stops its trace after the settle time, decodes it, and reads registers only with a consistent NDIS sequence, anchored by the driver counters, with Restart entered and no other adapter moved. That permits a read and claims no transition. A second trace covers the rest, and both go to the same verdicts.
+
+With the reads open, the ring tail is read before and after the probe frames. Frames on the wire or a moved tail count as traffic through the stack. That the tail shows this is an inference, and it is the only evidence available while the hold lasts. Without either, TC-CASEB-002 is INCONCLUSIVE, never PASS.
+
+**Answers.** Q1: TSN mode and `registersKept`, held against after. Q2: PHC pairs. Q3: `releasedOnWire`, gauge before and after, TDH and TDT, NDIS Paused time. Q4: tasArmed against TSN mode. Restoration compares with the pre-state, and the test cannot release a hold, so TC-CASEB-004 is expected to be `CLEANUP_FAILED`.
+
+**Stop conditions** are those below. No Restart entry within 60 s closes the reads.
+
+**Recovery after every run, by the operator.** `Ethernet 3` is the I226 and does not carry management on this host:
+
+```powershell
+Disable-NetAdapter -Name 'Ethernet 3' -Confirm:$false; Start-Sleep 5; Enable-NetAdapter -Name 'Ethernet 3' -Confirm:$false
+```
+
+A NIC cycle restored TX after `SETUP_TAS` in the #328 runs. It has not been run after a Restart under a hold. If disable blocks, do not enable, and a reboot is your decision. The next run proves its own pre-state and refuses a set TSN mode.
+
+## Activation runs for #357
+
+Made on `4ed976e`, Debug driver `6FB73E9E392C0499`, I226 0x125B, one run each. They are #357 evidence, kept here until that issue resumes. Checksums: `logs/i357-activate-checksums-20261107.txt`.
+
+| Mode | Lead | Before BaseT | In window | Near edge, outside, not seen | Frames |
+|---|---|---|---|---|---|
+| HOLD | 2.77 s | 0 | 96 | 0 | 96 |
+| PASS | 2.13 s | 34 | 63 | 0 | 97 |
+
+Each ran on a fresh reinstall, and PASS's activation required a clean adapter, so the reinstall cleared HOLD's schedule, 1 of 1. A fourth Case A followed through the runner, same driver: `RESUMED_BY_TRAFFIC`, sequence 5, 2, 3, 4, Paused 15.0 us, PHC 103.34 to 9.33 s. The reseed value is now 9.29 to 9.33 s in 4 of 4, which bounds a BaseT hold for Cases C and D when the PHC is small. That bound is a measurement, not a guarantee.
+
+When #357 resumes: the #364 branch reverted the merge, so merging `feat/357-tas-activate` alone brings nothing back. Revert `fd7ac2a` and `8ac01dd` on that branch after merging master.
 
 ## Case scope
 

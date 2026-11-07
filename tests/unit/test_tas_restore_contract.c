@@ -1222,6 +1222,38 @@ static void test_27_management(void) {
                 strcmp(tas_mgmt_name(TAS_MGMT_UNATTRIBUTED), "MANAGEMENT_UNATTRIBUTED") == 0);
 }
 
+/* TC-MOCK-036: Case B of #364 reaches its trigger only with frames held: 0 on the wire, with an observer that is alive */
+static void test_36_hold(void) {
+    printf("\n[TC-MOCK-036] Case B setup: frames held\n");
+    EXPECT_EQ("armed, frames accepted, none seen", tas_hold_class(TRUE, TRUE, 120, 0), TAS_HOLD_PROVEN);
+    EXPECT_EQ("SETUP_TAS did not arm", tas_hold_class(FALSE, TRUE, 120, 0), TAS_HOLD_NOT_ARMED);
+    EXPECT_EQ("a dead observer sees nothing, which shows no hold", tas_hold_class(TRUE, FALSE, 120, 0), TAS_HOLD_NO_OBSERVER);
+    EXPECT_EQ("nothing sent", tas_hold_class(TRUE, TRUE, 0, 0), TAS_HOLD_NO_FRAMES);
+    EXPECT_EQ("one frame on the wire", tas_hold_class(TRUE, TRUE, 120, 1), TAS_HOLD_LEAKED);
+    EXPECT_TRUE("names", strcmp(tas_hold_name(TAS_HOLD_PROVEN), "HOLD_PROVEN") == 0 && strcmp(tas_hold_name(TAS_HOLD_NOT_ARMED), "NOT_ARMED") == 0 &&
+                strcmp(tas_hold_name(TAS_HOLD_NO_OBSERVER), "OBSERVER_LOST") == 0 && strcmp(tas_hold_name(TAS_HOLD_NO_FRAMES), "NO_FRAMES") == 0 &&
+                strcmp(tas_hold_name(TAS_HOLD_LEAKED), "FRAMES_ON_WIRE") == 0);
+}
+
+/* TC-MOCK-037: under a hold no frame shows Running, so the NDIS sequence opens register reads and the ring tail shows the stack carried frames */
+static void test_37_hold_gate(void) {
+    printf("\n[TC-MOCK-037] Case B: register reads after the lifecycle\n");
+    EXPECT_TRUE("consistent sequence, Restart entered", tas_hold_may_read(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_RESTART_ENTERED, 0));
+    EXPECT_TRUE("consistent sequence, frames seen", tas_hold_may_read(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_RESUMED, 0));
+    EXPECT_TRUE("no NDIS sequence: no read", !tas_hold_may_read(TAS_SEQ_NOT_EMITTED, TAS_LIFECYCLE_RESTART_ENTERED, 0));
+    EXPECT_TRUE("a failed restart: no read", !tas_hold_may_read(TAS_SEQ_FAILED_RESTART, TAS_LIFECYCLE_RESTART_ENTERED, 0));
+    EXPECT_TRUE("the sequence alone: Pause only, no read", !tas_hold_may_read(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_PAUSE_ONLY, 0));
+    EXPECT_TRUE("the sequence alone: context replaced, no read", !tas_hold_may_read(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_CONTEXT_REPLACED, 0));
+    EXPECT_TRUE("another adapter moved: no read", !tas_hold_may_read(TAS_SEQ_CONSISTENT, TAS_LIFECYCLE_RESTART_ENTERED, 1));
+
+    EXPECT_TRUE("frames on the wire", tas_hold_stack_carried(TRUE, FALSE, 10, 0, 0));
+    EXPECT_TRUE("the tail moved under the hold", tas_hold_stack_carried(FALSE, TRUE, 10, 300, 320));
+    EXPECT_TRUE("the tail wrapped", tas_hold_stack_carried(FALSE, TRUE, 10, 2040, 12));
+    EXPECT_TRUE("the tail did not move", !tas_hold_stack_carried(FALSE, TRUE, 10, 300, 300));
+    EXPECT_TRUE("the tail is unread", !tas_hold_stack_carried(FALSE, FALSE, 10, 300, 320));
+    EXPECT_TRUE("nothing sent, so a moved tail is someone else's", !tas_hold_stack_carried(FALSE, TRUE, 0, 300, 320));
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1258,6 +1290,8 @@ int main(void) {
     test_25_state_edges();
     test_26_state_claim();
     test_27_management();
+    test_36_hold();
+    test_37_hold_gate();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

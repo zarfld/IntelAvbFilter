@@ -1,10 +1,18 @@
 /**
  * @file test_tas_lifecycle_case_a.c
- * @brief #364 Case A: one real FilterPause and FilterRestart, with no schedule, on every eligible adapter
+ * @brief #364 Cases A and B: one real FilterPause and FilterRestart on every eligible adapter, with no schedule or under SETUP_TAS
  *
  *   TC-CASEA-001  the lifecycle ran: Pause and Restart entered once on the target only, then traffic through the stack
  *   TC-CASEA-002  NDIS state events on this filter instance agree with it (an event alone proves nothing)
  *   TC-CASEA-003  restoration, from register, TX, PHC and consistency facts, never from the lifecycle result
+ *
+ * --case-b adds SETUP_TAS and held frames before the same trigger. No frame reaches the wire there, so TC-CASEB-002 to 004 repeat
+ * the three above with the NDIS sequence opening the register reads and the ring tail standing in for frames on the wire:
+ *
+ *   TC-CASEB-001  setup: armed, frames accepted, none on the wire, observer alive. Otherwise FAILED_SETUP and no trigger
+ *
+ * SETUP_TAS is the dedicated IOCTL, registers are read through READ_REGISTER only, and nothing here can release the hold: the
+ * operator recovers the target by NIC cycle after every run.
  *
  * Mutation: IOCTL_FILTER_RESTART_ONE_INSTANCE, so NdisFRestartFilter on the exact instance. Unsafe in the runner: it runs
  * only on an operator-attended run that names this entry. Dedicated IOCTLs only, no NIC cycle. A filter restart cannot be
@@ -39,6 +47,7 @@
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
+#include "../../intel-ethernet-regs/gen/i226_regs.h"
 typedef int NDIS_PARAMETER_TYPE;   /* a kernel type in structures of filteruser.h that this test does not use */
 #include "../../src/filteruser.h"
 #include "tas_wire_observer.h"
@@ -70,6 +79,10 @@ typedef int NDIS_PARAMETER_TYPE;   /* a kernel type in structures of filteruser.
 #define MAX_NDIS_EVENTS      4096
 #define MAX_MARKS            32
 #define NAME_CHARS           160
+#define ALL_ONES             0xFFFFFFFFu
+#define CASE_B_HOLD_MS       8000     /* past the 84 to 87 frames at 64 bytes after which the ring stalled, 3 of 3 on 2026-11-05 */
+#define CASE_B_EVIDENCE_DID  INTEL_DEV_I226_LM   /* the register map is hardware-observed here only, REV_04. It limits evidence, never eligibility */
+#define TX_QUEUES            4
 
 static unsigned g_next_seq;
 static unsigned g_payload_bytes = PAYLOAD_BYTES;
@@ -92,7 +105,7 @@ typedef struct {
 
 /* What one eligible adapter leaves for the verdicts, which need the closed trace */
 typedef struct {
-    BOOL ran, triggered;
+    BOOL ran, triggered, failed_setup;
     avb_u64 luid;
     int index;
     avb_u16 did;
@@ -107,12 +120,31 @@ typedef struct {
 
 static CASE_RESULT g_case[TAS_MAX_ADAPTERS];
 static CASE_RESULT *g_now;
+static BOOL g_case_b;
+static const char *g_tc_run = "TC-CASEA-001", *g_tc_state = "TC-CASEA-002", *g_tc_clean = "TC-CASEA-003";
 
+/* The table of test_tas_isolated_arm without the MAC address. TDH and TDT move with traffic and are read apart */
+typedef struct { const char *name; avb_u32 offset; } TSN_REG;
 
+static const TSN_REG g_tsn[] = {
+    {"TQAVCTRL", I226_TQAVCTRL}, {"TXPBSIZE", I226_TXPBSIZE}, {"RXPBSIZE", I226_RXPBSIZE}, {"DTXMXPKTSZ", I226_DTXMXPKTSZ},
+    {"TXARB", I226_TXARB}, {"RETX_CTL", I226_RETX_CTL}, {"GTXOFFSET", I226_GTXOFFSET}, {"BASET_L", I226_BASET_L},
+    {"BASET_H", I226_BASET_H}, {"QBVCYCLET", I226_QBVCYCLET}, {"QBVCYCLET_S", I226_QBVCYCLET_S},
+    {"STQT0", I226_STQT0}, {"STQT1", I226_STQT1}, {"STQT2", I226_STQT2}, {"STQT3", I226_STQT3},
+    {"ENDQT0", I226_ENDQT0}, {"ENDQT1", I226_ENDQT1}, {"ENDQT2", I226_ENDQT2}, {"ENDQT3", I226_ENDQT3},
+    {"TXQCTL0", I226_TXQCTL0}, {"TXQCTL1", I226_TXQCTL1}, {"TXQCTL2", I226_TXQCTL2}, {"TXQCTL3", I226_TXQCTL3},
+    {"TQAVCC0", I226_TQAVCC0}, {"TQAVCC1", I226_TQAVCC1}, {"TQAVHC0", I226_TQAVHC0}, {"TQAVHC1", I226_TQAVHC1},
+    {"TCTL", I226_TCTL}, {"TDLEN0", I226_TDLEN0}, {"TDLEN1", I226_TDLEN1}, {"TDLEN2", I226_TDLEN2}, {"TDLEN3", I226_TDLEN3},
+    {"TXDCTL0", I226_TXDCTL0}, {"TXDCTL1", I226_TXDCTL1}, {"TXDCTL2", I226_TXDCTL2}, {"TXDCTL3", I226_TXDCTL3},
+    {"TIMINCA", I226_TIMINCA}, {"TSAUXC", I226_TSAUXC}, {"TSYNCTXCTL", I226_TSYNCTXCTL}, {"TSYNCRXCTL", I226_TSYNCRXCTL},
+};
+#define TSN_COUNT (sizeof(g_tsn) / sizeof(g_tsn[0]))
+#define TSN_TQAVCTRL 0u   /* its index in g_tsn */
 
+static const avb_u32 g_tdh[TX_QUEUES] = {I226_TDH0, I226_TDH1, I226_TDH2, I226_TDH3};
+static const avb_u32 g_tdt[TX_QUEUES] = {I226_TDT0, I226_TDT1, I226_TDT2, I226_TDT3};
 
-
-
+static void verdict(const char *tag, const char *tc, int adapter, avb_u16 did, const char *reason);
 
 static HANDLE open_device(void)
 {
@@ -356,6 +388,75 @@ static BOOL read_hw_state(HANDLE h, AVB_HW_STATE_QUERY *q)
 
     ZeroMemory(q, sizeof(*q));
     return DeviceIoControl(h, IOCTL_AVB_GET_HW_STATE, q, sizeof(*q), q, sizeof(*q), &br, NULL);
+}
+
+static BOOL read_reg(HANDLE h, avb_u32 offset, avb_u32 *value)
+{
+    AVB_REGISTER_REQUEST r = {0};
+    DWORD br = 0;
+
+    r.offset = offset;
+    if (!DeviceIoControl(h, IOCTL_AVB_READ_REGISTER, &r, sizeof(r), &r, sizeof(r), &br, NULL) || r.status != 0) {
+        return FALSE;
+    }
+    *value = r.value;
+    return *value != ALL_ONES;
+}
+
+/** Every TSN register, printed. Returns how many were unreadable */
+static unsigned read_tsn(HANDLE h, avb_u32 *values, const char *label)
+{
+    unsigned i, unreadable = 0;
+
+    printf("    tsn %s", label);
+    for (i = 0; i < TSN_COUNT; i++) {
+        if (read_reg(h, g_tsn[i].offset, &values[i])) {
+            printf(" %s=0x%08X", g_tsn[i].name, values[i]);
+        } else {
+            values[i] = ALL_ONES;
+            unreadable++;
+            printf(" %s=unreadable", g_tsn[i].name);
+        }
+    }
+    printf("\n");
+    return unreadable;
+}
+
+/** The transmit rings. Only queue 0 was configured in the #328 baseline, so its tail is returned and all four are printed */
+static BOOL read_ring(HANDLE h, const char *label, avb_u32 *tail0)
+{
+    avb_u32 tdh[TX_QUEUES], tdt[TX_QUEUES];
+    BOOL ok = TRUE;
+    int q;
+
+    for (q = 0; q < TX_QUEUES; q++) {
+        ok &= read_reg(h, g_tdh[q], &tdh[q]);
+        ok &= read_reg(h, g_tdt[q], &tdt[q]);
+    }
+    printf("    ring %s ok=%d TDH/TDT q0=%u/%u q1=%u/%u q2=%u/%u q3=%u/%u\n", label, ok, tdh[0], tdt[0], tdh[1], tdt[1], tdh[2], tdt[2], tdh[3], tdt[3]);
+    *tail0 = tdt[0];
+    return ok;
+}
+
+/** Same request as test_tas_isolated_arm: the evidence that SETUP_TAS holds frames was taken with it */
+static BOOL arm_tas(HANDLE h, DWORD *error)
+{
+    AVB_TAS_REQUEST tas;
+    DWORD br = 0;
+
+    ZeroMemory(&tas, sizeof(tas));
+    tas.config.base_time_ns = 1000000;
+    tas.config.cycle_time_ns = 1000000;
+    tas.config.gate_states[0] = 0xFF;
+    tas.config.gate_durations[0] = 500000;
+    tas.config.gate_states[1] = 0x01;
+    tas.config.gate_durations[1] = 500000;
+    *error = ERROR_SUCCESS;
+    if (!DeviceIoControl(h, IOCTL_AVB_SETUP_TAS, &tas, sizeof(tas), &tas, sizeof(tas), &br, NULL)) {
+        *error = GetLastError();
+        return FALSE;
+    }
+    return tas.status == 0;
 }
 
 static int oper_status(avb_u64 luid)
@@ -702,6 +803,155 @@ static void management_report(IN_ADDR target)
     fflush(stdout);
 }
 
+static BOOL trace_gate(const CASE_RESULT *c);
+
+/** Case B from the proved observer on. Returns 3 when nothing was armed, else 1: restoration is always owed here */
+static int case_b_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, int n, int t, HANDLE h, SOCKET sock, const WCHAR *name, USHORT name_bytes, const HANDLE *others,
+                         const AVB_DRIVER_STATISTICS *other_before, BOOL *capture_alive)
+{
+    static avb_u32 base[TSN_COUNT], held[TSN_COUNT], now[TSN_COUNT];
+    AVB_DRIVER_STATISTICS before, after;
+    AVB_HW_STATE_QUERY hw_before, hw_after;
+    TAS_LIFECYCLE_CLEANUP cleanup;
+    TAS_LIFECYCLE_OUTCOME outcome;
+    TAS_HOLD_CLASS hold;
+    TAS_PHC_FACT phc_fact;
+    LARGE_INTEGER qpc_before;
+    unsigned long long phc_before = 0, phc_after = 0;
+    unsigned armed = 0, armed_after = 1, hold_first = g_next_seq, hold_sent, hold_seen, released, first, sent, seen, kept = 0, i;
+    avb_u32 tail_before = 0, tail_after = 0, unused;
+    long missing, last;
+    DWORD error;
+    BOOL armed_ok, gate, wire, traffic, tail_read = FALSE, phc_before_ok, phc_after_ok, mode_after, consistent;
+    char why[160];
+
+    ZeroMemory(&cleanup, sizeof(cleanup));
+    if (ids[t].device_id != CASE_B_EVIDENCE_DID) {
+        printf(TAG " layout applicable=no evidence=none did=0x%04X: eligible, but this register map has no evidence here, so no register access and nothing armed\n", ids[t].device_id);
+        return 3;
+    }
+    printf(TAG " layout applicable=yes evidence=I226-LM scope=REV_04,1Gbit,Debug revision=from the runner's PCI instance\n");
+    if (read_tsn(h, base, "pre-state") != 0) {
+        printf(TAG " not run: a TSN register is unreadable, so the pre-state is not proved; nothing armed\n");
+        return 3;
+    }
+    if ((base[TSN_TQAVCTRL] & I226_TQAVCTRL_TRANSMIT_MODE_MASK) != 0) {
+        printf(TAG " not run: TSN transmit mode is already set, so the adapter is not clean; nothing armed\n");
+        return 3;
+    }
+    (void)read_ring(h, "pre-state", &unused);
+
+    /* Setup. Whatever happens from here on, the adapter is the operator's to recover */
+    armed_ok = arm_tas(h, &error);
+    printf(TAG " SETUP_TAS ok=%d error=%lu\n", armed_ok, error);
+    armed_ok = armed_ok && read_armed(h, &armed) && armed != 0;
+    hold_seen = armed_ok ? tx_step(h, ids[t].net_luid, sock, CASE_B_HOLD_MS, "hold", g_next_seq, capture_alive) : 0;
+    hold_sent = g_next_seq - hold_first;
+    hold = tas_hold_class(armed_ok, *capture_alive, hold_sent, hold_seen);
+    sprintf_s(why, sizeof(why), "%s accepted=%u seen=%u tasArmed=%u observerAlive=%d", tas_hold_name(hold), hold_sent, hold_seen, armed, *capture_alive);
+    verdict(hold == TAS_HOLD_PROVEN ? "PASS" : "FAILED_SETUP", "TC-CASEB-001", t, ids[t].device_id, why);
+    (void)read_tsn(h, held, "held");
+    (void)read_ring(h, "held", &unused);
+    if (hold != TAS_HOLD_PROVEN) {
+        cleanup.regs_compared = TSN_COUNT;
+        for (i = 0; i < TSN_COUNT; i++) {
+            cleanup.regs_changed += held[i] != base[i];
+        }
+        g_now->failed_setup = TRUE;
+        g_now->cleanup = tas_lifecycle_cleanup(&cleanup);
+        printf(TAG " no trigger: the setup of Case B was not reached\n");
+        return 1;
+    }
+
+    /* The state that matters is the one just before the trigger */
+    print_clock(h, "before");
+    phc_pairs(h, "before");
+    observer_line("before");
+    phc_before_ok = read_systim(h, &phc_before);
+    QueryPerformanceCounter(&qpc_before);
+    if (!read_stats(h, &before) || !read_hw_state(h, &hw_before) || oper_status(ids[t].net_luid) != IfOperStatusUp) {
+        printf(TAG " no trigger: statistics or link changed\n");
+        g_now->failed_setup = TRUE;
+        g_now->cleanup = tas_lifecycle_cleanup(&cleanup);
+        return 1;
+    }
+    printf("    lifecycle hostUs=%lld before trigger pause=%llu restart=%llu generation=%llu attach=%llu detach=%llu gauge=%llu\n", host_us(), before.FilterPauseCount,
+           before.FilterRestartCount, before.PauseRestartGeneration, before.FilterAttachCount, before.FilterDetachCount, before.OutstandingSendNBLs);
+    lifecycle_measure(h, &before, name, name_bytes, FALSE);
+    Sleep(SETTLE_MS);   /* FilterRestartCount moves on entry, before the bring-up, and no signal marks its end */
+
+    outcome = lifecycle_read(h, &before, &after, FALSE);
+    g_now->outcome = outcome;
+    g_now->others_changed = report_others(ids, others, other_before, n, t);
+    gate = trace_gate(g_now);
+
+    /* #350: no MMIO unless the filter is Running. Frames need no MMIO, so they go out either way */
+    if (gate) {
+        tail_read = read_ring(h, "after the restart", &tail_before);
+    }
+    first = g_next_seq;
+    seen = tx_step(h, ids[t].net_luid, sock, BASELINE_MS, "after the restart", g_next_seq, capture_alive);
+    sent = g_next_seq - first;
+    wire = *capture_alive && sent != 0 && (unsigned long long)seen * 100 >= (unsigned long long)sent * WIRE_MIN_PERCENT;
+    if (gate) {
+        tail_read = read_ring(h, "after the probe", &tail_after) && tail_read;
+    }
+    traffic = tas_hold_stack_carried(wire, tail_read, sent, tail_before, tail_after);
+    released = wire_seen(hold_first, hold_first + hold_sent, &missing, &last);
+    outcome = lifecycle_read(h, &before, &after, traffic);
+    g_now->outcome = outcome;
+    g_now->others_changed = report_others(ids, others, other_before, n, t);
+    cleanup.others_changed = g_now->others_changed;
+    cleanup.tx_probed = *capture_alive && sent != 0;
+    cleanup.tx_shown = wire;
+    g_now->cleanup = tas_lifecycle_cleanup(&cleanup);
+    printf(TAG " fact q3 held=%u releasedOnWire=%u firstUnseenSeq=%ld probeSeen=%u of %u tailMoved=%d gaugeBefore=%llu gaugeAfter=%llu\n", hold_sent, released, missing, seen, sent,
+           tail_read && tail_before != tail_after, before.OutstandingSendNBLs, after.OutstandingSendNBLs);
+    if (!gate) {
+        printf(TAG " Running not shown: no MMIO, so register state, PHC and consistency stay unmeasured\n");
+        marker("run-end");
+        return 1;
+    }
+
+    print_clock(h, "after");
+    phc_pairs(h, "after");
+    observer_line("after");
+    phc_after_ok = read_systim(h, &phc_after);
+    if (phc_after_ok) {
+        printf("    implied PHC zero hostUs=%lld at the nominal rate, to place a reseed against the NDIS events\n", host_us() - (LONGLONG)(phc_after / 1000));
+    }
+    if (phc_before_ok && phc_after_ok) {
+        report_phc(h, phc_before, qpc_before, "across the lifecycle");
+    }
+    cleanup.regs_unreadable = read_tsn(h, now, "after");
+    (void)read_armed(h, &armed_after);
+    ZeroMemory(&hw_after, sizeof(hw_after));
+    (void)read_hw_state(h, &hw_after);
+    for (i = 0; i < TSN_COUNT; i++) {
+        kept += now[i] == held[i];
+        cleanup.regs_changed += now[i] != base[i];
+        if (now[i] != held[i]) {
+            printf("    tsn change %s held=0x%08X after=0x%08X base=0x%08X\n", g_tsn[i].name, held[i], now[i], base[i]);
+        }
+    }
+    mode_after = (now[TSN_TQAVCTRL] & I226_TQAVCTRL_TRANSMIT_MODE_MASK) != 0;
+    consistent = (armed_after != 0) == mode_after && hw_after.hw_state == hw_before.hw_state && hw_after.capabilities == hw_before.capabilities;
+    phc_fact = tas_phc_fact(phc_before_ok, phc_after_ok, phc_before, phc_after);
+    printf(TAG " fact q1 tsnModeAfter=%d registersKept=%u of %u\n", mode_after, kept, (unsigned)TSN_COUNT);
+    printf(TAG " fact q2 phc %s before=%llu after=%llu\n", tas_phc_fact_name(phc_fact), phc_before, phc_after);
+    printf(TAG " fact q4 consistency %s tasArmed=%u tsnMode=%d hwState=%u to %u caps=0x%08X to 0x%08X oper=%d\n", consistent ? "agrees" : "DIFFERS", armed_after, mode_after, hw_before.hw_state,
+           hw_after.hw_state, hw_before.capabilities, hw_after.capabilities, oper_status(ids[t].net_luid));
+    printf(TAG " fact restoration registers changed from the pre-state=%u of %u, tx onWire=%d\n", cleanup.regs_changed, (unsigned)TSN_COUNT, wire);
+    cleanup.lifecycle_shown = TRUE;
+    cleanup.regs_compared = TSN_COUNT;
+    cleanup.phc = phc_fact;
+    cleanup.consistent = consistent;
+    g_now->cleanup = tas_lifecycle_cleanup(&cleanup);
+    marker("run-end");
+    printf(TAG " result: lifecycle=%s cleanup=%s; a NIC cycle on the target is owed, and it is the operator's\n", tas_lifecycle_name(outcome), tas_cleanup_name(g_now->cleanup));
+    return 1;
+}
+
 static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_ADAPTER_FACTS *facts, int n, int t, BOOL dry_run, BOOL passive)
 {
     HANDLE others[TAS_MAX_ADAPTERS];
@@ -737,7 +987,7 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
         goto done;
     }
     if (!read_armed(h, &armed_before) || armed_before != 0) {
-        printf(TAG " not run: Case A needs tasArmed=0\n");
+        printf(TAG " not run: needs tasArmed=0\n");
         goto done;
     }
     if (!read_snapshot(h, &snap_before) || snap_before.net_luid != ids[t].net_luid || !read_hw_state(h, &hw_before)) {
@@ -773,6 +1023,10 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
         goto done;
     }
     wire_up = TRUE;
+    if (g_case_b) {
+        rc = case_b_target(ids, n, t, h, sock, name, name_bytes, others, other_before, &capture_alive);
+        goto done;
+    }
     if (dry_run) {
         static TAS_WINDOW_TRACK resolution;
 
@@ -934,6 +1188,8 @@ typedef struct { EVENT_TRACE_PROPERTIES p; WCHAR logger[64]; WCHAR file[MAX_PATH
 static NDIS_EVENT g_ndis[MAX_NDIS_EVENTS];
 static MARK g_marks[MAX_MARKS];
 static unsigned g_ndis_count, g_ndis_dropped, g_mark_count, g_provider_events, g_stop_events;
+static unsigned g_ndis_printed;
+static BOOL g_decoded;
 static ULONG g_events_lost;
 static TRACE_PROPS g_props;
 static TRACEHANDLE g_session;
@@ -1120,10 +1376,12 @@ static BOOL trace_decode(void)
     CloseTrace(h);
     printf(TAG " trace status=%lu providerEvents=%u state10312=%u dropped=%u stopEvents=%u lost=%lu markers=%u\n", status, g_provider_events, g_ndis_count, g_ndis_dropped,
            g_stop_events, g_events_lost, g_mark_count);
-    for (i = 0; i < g_ndis_count && i < 64; i++) {
+    for (i = g_ndis_printed; i < g_ndis_count && i < 64; i++) {
         printf("    ndis 10312 ts=%lld state=%u instance=%ls miniport=%ls\n", g_ndis[i].ts, g_ndis[i].state, g_ndis[i].instance, g_ndis[i].miniport);
     }
-    return status == ERROR_SUCCESS;
+    g_ndis_printed = g_ndis_count;
+    g_decoded = status == ERROR_SUCCESS;
+    return g_decoded;
 }
 
 static void verdict(const char *tag, const char *tc, int adapter, avb_u16 did, const char *reason)
@@ -1132,49 +1390,83 @@ static void verdict(const char *tag, const char *tc, int adapter, avb_u16 did, c
     fflush(stdout);
 }
 
-/** The three results of one adapter, kept apart. Returns nonzero when any is not a pass */
-static int report_case(const CASE_RESULT *c, BOOL decoded)
+/** The NDIS events of one instance against its markers and counters. outside counts those beyond the window */
+static TAS_SEQ_CLASS case_sequence(const CASE_RESULT *c, BOOL decoded, TAS_SEQ_EVIDENCE *ev, LONGLONG *marker_offset, unsigned *events_outside)
 {
-    static TAS_SEQ_EVIDENCE e;
-    TAS_SEQ_CLASS sequence;
     LONGLONG start = 0, end = MAXLONGLONG, offset = 0;
-    BOOL claim;
-    char why[256];
     unsigned i, outside = 0;
-    int bad = 0;
 
-    ZeroMemory(&e, sizeof(e));
-    e.provider_events = decoded ? g_provider_events : 0;
-    e.events_lost = g_events_lost + g_ndis_dropped;
+    ZeroMemory(ev, sizeof(*ev));
+    ev->provider_events = decoded ? g_provider_events : 0;
+    ev->events_lost = g_events_lost + g_ndis_dropped;
     for (i = 0; i < g_mark_count; i++) {
         if (g_marks[i].luid == c->luid && g_marks[i].run_end) {
             end = g_marks[i].ts;
         } else if (g_marks[i].luid == c->luid) {
             start = g_marks[i].ts;
             offset = g_marks[i].qpc - g_marks[i].ts;
-            e.have_window = TRUE;
+            ev->have_window = TRUE;
         }
     }
     for (i = 0; i < g_ndis_count; i++) {
         if (_wcsicmp(g_ndis[i].instance, c->instance) == 0 && _wcsicmp(g_ndis[i].miniport, c->if_guid) == 0) {
-            if (e.have_window && g_ndis[i].ts >= start && g_ndis[i].ts <= end) {
-                if (e.count < TAS_SEQ_MAX_EVENTS) {
-                    e.value[e.count] = g_ndis[i].state;
-                    e.qpc[e.count] = g_ndis[i].ts + offset;
+            if (ev->have_window && g_ndis[i].ts >= start && g_ndis[i].ts <= end) {
+                if (ev->count < TAS_SEQ_MAX_EVENTS) {
+                    ev->value[ev->count] = g_ndis[i].state;
+                    ev->qpc[ev->count] = g_ndis[i].ts + offset;
                 }
-                e.count++;
+                ev->count++;
             } else {
                 outside++;
             }
         }
     }
-    e.pause_edge = c->track.pause.seen;
-    e.restart_edge = c->track.restart.seen;
-    e.pause = c->track.pause;
-    e.restart = c->track.restart;
-    e.slack = c->marker_bracket;
-    e.outcome = c->outcome;
-    sequence = tas_seq_classify(&e);
+    ev->pause_edge = c->track.pause.seen;
+    ev->restart_edge = c->track.restart.seen;
+    ev->pause = c->track.pause;
+    ev->restart = c->track.restart;
+    ev->slack = c->marker_bracket;
+    ev->outcome = c->outcome;
+    *marker_offset = offset;
+    *events_outside = outside;
+    return tas_seq_classify(ev);
+}
+
+/**
+ * Case B reads registers only once NDIS has shown Running, so its trace ends here and a second one covers the rest of the run. The
+ * events of both go to the same verdicts. Returns whether the reads may go ahead: this permits a read and claims no transition.
+ */
+static BOOL trace_gate(const CASE_RESULT *c)
+{
+    static TAS_SEQ_EVIDENCE e;
+    LONGLONG offset = 0;
+    unsigned outside = 0;
+    TAS_SEQ_CLASS sequence;
+    BOOL decoded, gate;
+
+    trace_stop();
+    decoded = trace_decode();
+    sequence = case_sequence(c, decoded, &e, &offset, &outside);
+    gate = tas_hold_may_read(sequence, c->outcome, c->others_changed);
+    printf(TAG " read gate %s sequence=%s lifecycle=%s othersChanged=%u\n", gate ? "open" : "closed", tas_seq_name(sequence), tas_lifecycle_name(c->outcome), c->others_changed);
+    if (!trace_start()) {
+        printf(TAG " no trace for the rest of the run, so a later NDIS reset would not be seen\n");
+    }
+    return gate;
+}
+
+/** The three results of one adapter, kept apart. Returns nonzero when any is not a pass */
+static int report_case(const CASE_RESULT *c, BOOL decoded)
+{
+    static TAS_SEQ_EVIDENCE e;
+    TAS_SEQ_CLASS sequence;
+    LONGLONG offset = 0;
+    BOOL claim;
+    char why[256];
+    unsigned i, outside = 0;
+    int bad = 0;
+
+    sequence = case_sequence(c, decoded, &e, &offset, &outside);
     claim = tas_state_claim(sequence, c->outcome, c->others_changed);
     printf(TAG " state sequence luid=0x%016llX class=%s events=%u outsideWindow=%u markerOffsetTicks=%lld values=", c->luid, tas_seq_name(sequence), e.count, outside, offset);
     for (i = 0; i < e.count && i < TAS_SEQ_MAX_EVENTS; i++) {
@@ -1187,24 +1479,28 @@ static int report_case(const CASE_RESULT *c, BOOL decoded)
 
     sprintf_s(why, sizeof(why), "lifecycle=%s othersChanged=%u", tas_lifecycle_name(c->outcome), c->others_changed);
     if (c->outcome == TAS_LIFECYCLE_NOT_TRIGGERED) {
-        verdict("BLOCKED", "TC-CASEA-001", c->index, c->did, "the trigger reached nothing: #364 is BLOCKED until another trigger exists");
+        verdict("BLOCKED", g_tc_run, c->index, c->did, "the trigger reached nothing: #364 is BLOCKED until another trigger exists");
         bad = 1;
     } else if (c->outcome == TAS_LIFECYCLE_RESUMED && c->others_changed == 0) {
-        verdict("PASS", "TC-CASEA-001", c->index, c->did, why);
+        verdict("PASS", g_tc_run, c->index, c->did, why);
+    } else if (g_case_b && c->outcome == TAS_LIFECYCLE_RESTART_ENTERED && c->others_changed == 0) {
+        verdict("INCONCLUSIVE", g_tc_run, c->index, c->did, why);   /* a hold keeps frames off the wire, so a missing frame shows nothing */
+        bad = 1;
     } else {
-        verdict("FAIL", "TC-CASEA-001", c->index, c->did, why);
+        verdict("FAIL", g_tc_run, c->index, c->did, why);
         bad = 1;
     }
     sprintf_s(why, sizeof(why), "sequence=%s lifecycle=%s", tas_seq_name(sequence), tas_lifecycle_name(c->outcome));
-    verdict(claim ? "PASS" : "INCONCLUSIVE", "TC-CASEA-002", c->index, c->did, why);
+    verdict(claim ? "PASS" : "INCONCLUSIVE", g_tc_state, c->index, c->did, why);
     bad |= !claim;
     if (g_stop_events != 0) {
-        verdict("CLEANUP_FAILED", "TC-CASEA-003", c->index, c->did, "NDIS reported a reset, a halt or a failed restart");
+        verdict("CLEANUP_FAILED", g_tc_clean, c->index, c->did, "NDIS reported a reset, a halt or a failed restart");
         bad = 1;
     } else if (c->cleanup == TAS_RESTORATION_VERIFIED) {
-        verdict("PASS", "TC-CASEA-003", c->index, c->did, "every restoration fact holds");
+        verdict("PASS", g_tc_clean, c->index, c->did, "every restoration fact holds");
     } else {
-        verdict(tas_cleanup_name(c->cleanup), "TC-CASEA-003", c->index, c->did, "restoration facts above; the PHC has no hardware-derived tolerance");
+        verdict(tas_cleanup_name(c->cleanup), g_tc_clean, c->index, c->did,
+                g_case_b ? "restoration facts above; this test cannot release a hold, so a NIC cycle on the target is owed" : "restoration facts above; the PHC has no hardware-derived tolerance");
         bad = 1;
     }
     return bad;
@@ -1224,27 +1520,31 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
     UINT32 count = 1, index;
     unsigned n = 0, i, eligible, ran = 0;
     DWORD br = 0;
-    BOOL traced = FALSE, decoded = FALSE;
+    BOOL traced = FALSE, decoded = FALSE, pending, setup_failed = FALSE;
     int rc, bad = 0;
 
     if (EventRegister(&g_marker_provider, NULL, NULL, &g_marker) != ERROR_SUCCESS) {
         g_marker = 0;   /* EventWriteString then fails harmlessly, and the trace shows no window */
     }
-    printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart per eligible adapter%s\n", dry_run ? " (dry run, no trigger)" : passive ? " (passive polling)" : "");
+    if (g_case_b) {
+        printf(TAG " #364 Case B: SETUP_TAS only, frames held, one FilterPause and FilterRestart per eligible adapter\n");
+    } else {
+        printf(TAG " #364 Case A: no schedule, one FilterPause and FilterRestart per eligible adapter%s\n", dry_run ? " (dry run, no trigger)" : passive ? " (passive polling)" : "");
+    }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        printf("[BLOCKED] TC-CASEA-001: Winsock unavailable\n");
+        printf("[BLOCKED] %s: Winsock unavailable\n", g_tc_run);
         rc = 3;
         goto unregister;
     }
     h = open_device();
     if (h == INVALID_HANDLE_VALUE) {
-        printf("[BLOCKED] TC-CASEA-001: cannot open %s (error %lu)\n", DEVICE_NAME, GetLastError());
+        printf("[BLOCKED] %s: cannot open %s (error %lu)\n", g_tc_run, DEVICE_NAME, GetLastError());
         rc = 3;
         goto winsock;
     }
     if (!DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) ||
         (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) == 0) {
-        printf("[BLOCKED] TC-CASEA-001: #364 is a Debug-only investigation\n");
+        printf("[BLOCKED] %s: #364 is a Debug-only investigation\n", g_tc_run);
         CloseHandle(h);
         rc = 3;
         goto winsock;
@@ -1255,7 +1555,7 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
     }
     CloseHandle(h);
     if (n == 0 || n != count) {
-        printf("[BLOCKED] TC-CASEA-001: %u of %u adapters enumerated, so the plan would not cover them all\n", n, count);
+        printf("[BLOCKED] %s: %u of %u adapters enumerated, so the plan would not cover them all\n", g_tc_run, n, count);
         rc = 3;
         goto winsock;
     }
@@ -1270,26 +1570,33 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
     }
     traced = trace_start();
     if (!traced && !dry_run) {
-        printf("[BLOCKED] TC-CASEA-001: no NDIS trace, so the trigger is not issued\n");
+        printf("[BLOCKED] %s: no NDIS trace, so the trigger is not issued\n", g_tc_run);
         rc = 3;
         goto winsock;
     }
     for (i = 0; i < n; i++) {
-        if (classes[i] == TAS_PLAN_ELIGIBLE) {
+        if (classes[i] == TAS_PLAN_ELIGIBLE && g_case_b && g_session_open == 0) {
+            printf(TAG " not run: the trace of an earlier target did not restart, so nothing here could be proved\n");
+        } else if (classes[i] == TAS_PLAN_ELIGIBLE) {
             results[i] = lifecycle_target(ids, facts, (int)n, (int)i, dry_run, passive);
         } else {
-            verdict(tas_plan_name(classes[i]), "TC-CASEA-001", (int)i, ids[i].device_id, "not a target");
+            verdict(tas_plan_name(classes[i]), g_tc_run, (int)i, ids[i].device_id, "not a target");
         }
     }
+    pending = g_session_open != 0;
     trace_stop();
-    decoded = traced && trace_decode();
+    decoded = traced && (pending ? trace_decode() : g_decoded);   /* Case B may have decoded its only trace at the read gate */
     for (i = 0; i < n; i++) {
         if (classes[i] == TAS_PLAN_ELIGIBLE) {
             ran += g_case[i].triggered;
             if (g_case[i].triggered) {
                 bad |= report_case(&g_case[i], decoded);
+            } else if (g_case[i].failed_setup) {
+                setup_failed = TRUE;
+                bad = 1;
+                verdict(tas_cleanup_name(g_case[i].cleanup), g_tc_clean, (int)i, ids[i].device_id, "SETUP_TAS may have changed the adapter and no trigger followed; a NIC cycle on the target is owed");
             } else {
-                verdict(dry_run ? "PASS" : "BLOCKED", "TC-CASEA-001", (int)i, ids[i].device_id, dry_run ? "dry run, nothing triggered" : "stopped before the trigger, see the lines above");
+                verdict(dry_run ? "PASS" : "BLOCKED", g_tc_run, (int)i, ids[i].device_id, dry_run ? "dry run, nothing triggered" : "stopped before the trigger, see the lines above");
                 bad |= !dry_run;
             }
         }
@@ -1298,7 +1605,7 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
     printf(TAG " summary adapters=%u eligible=%u triggered=%u toolExit=%d\n", n, eligible, ran, rc);
     if (eligible == 0) {
         rc = 2;
-    } else if (ran == 0 && !dry_run) {
+    } else if (ran == 0 && !dry_run && !setup_failed) {
         rc = 3;
     } else if (bad || rc != 0) {
         rc = 1;
@@ -1318,8 +1625,14 @@ int main(int argc, char **argv)
 {
     BOOL dry_run = argc == 2 && strcmp(argv[1], "--dry-run") == 0, passive = argc == 2 && strcmp(argv[1], "--passive") == 0;
 
-    if (argc > 2 || (argc == 2 && !dry_run && !passive)) {
-        printf("[BLOCKED] TC-CASEA-001: usage: test_tas_lifecycle_case_a [--dry-run | --passive]\n");
+    g_case_b = argc == 2 && strcmp(argv[1], "--case-b") == 0;
+    if (g_case_b) {
+        g_tc_run = "TC-CASEB-002";
+        g_tc_state = "TC-CASEB-003";
+        g_tc_clean = "TC-CASEB-004";
+    }
+    if (argc > 2 || (argc == 2 && !dry_run && !passive && !g_case_b)) {
+        printf("[BLOCKED] %s: usage: test_tas_lifecycle_case_a [--dry-run | --passive | --case-b]\n", g_tc_run);
         return 3;
     }
     return lifecycle_case_a(dry_run, passive);

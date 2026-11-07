@@ -6,7 +6,7 @@
 # test_tas_restore_contract source, compiled against the mutated header, reports a failed assertion through its normal path:
 # `[FAIL]` lines, complete totals, `[RESULT] FAILURE`, exit 1.  Get-MutantVerdict decides, and its negative controls prove that
 # a launch failure, missing or wrong exit code, timeout, missing output, compile failure or crash is never a kill.
-# Acceptance: the unmutated code passes; every operator matches exactly once; 65 of 65 KILLED.  Each mutant keeps its own verdict.
+# Acceptance: the unmutated code passes; every operator matches exactly once; 77 of 77 KILLED.  Each mutant keeps its own verdict.
 #
 # Works on copies under $env:TEMP.  The repository is not touched, no driver or adapter is involved.  Offline logic only,
 # never HIL evidence.  The compiler comes from tools\vs_compile.ps1.
@@ -357,12 +357,72 @@ $OperatorsJson = @'
 "exit: not run outranks failure",
 "    if (failed) {\n        return 1;\n    }\n    if (eligible == 0 || not_run) {\n        return 3;\n    }\n",
 "    if (eligible == 0 || not_run) {\n        return 3;\n    }\n    if (failed) {\n        return 1;\n    }\n"
+],
+[
+"hold: arming not required",
+"if (!armed) {",
+"if (FALSE) {"
+],
+[
+"hold: dead observer accepted",
+"if (!observer_alive) {",
+"if (FALSE) {"
+],
+[
+"hold: no frames accepted",
+"if (accepted == 0) {",
+"if (FALSE) {"
+],
+[
+"hold: frames on the wire ignored",
+"return seen != 0 ? TAS_HOLD_LEAKED : TAS_HOLD_PROVEN;",
+"return TAS_HOLD_PROVEN;"
+],
+[
+"read gate: sequence not required",
+"return sequence == TAS_SEQ_CONSISTENT && others_changed == 0 && (outcome",
+"return others_changed == 0 && (outcome"
+],
+[
+"read gate: other adapters ignored",
+"TAS_SEQ_CONSISTENT && others_changed == 0 && (outcome",
+"TAS_SEQ_CONSISTENT && (outcome"
+],
+[
+"read gate: Restart entered refused",
+"(outcome == TAS_LIFECYCLE_RESTART_ENTERED || outcome == TAS_LIFECYCLE_RESUMED)",
+"outcome == TAS_LIFECYCLE_RESUMED"
+],
+[
+"read gate: lifecycle not required",
+"(outcome == TAS_LIFECYCLE_RESTART_ENTERED || outcome == TAS_LIFECYCLE_RESUMED)",
+"TRUE"
+],
+[
+"carried: wire evidence ignored",
+"return wire_shown || (tail_read",
+"return (tail_read"
+],
+[
+"carried: unread tail accepted",
+"(tail_read && sent != 0 && ",
+"(sent != 0 && "
+],
+[
+"carried: tail counts with nothing sent",
+"tail_read && sent != 0 && tail_before",
+"tail_read && tail_before"
+],
+[
+"carried: unmoved tail accepted",
+"sent != 0 && tail_before != tail_after",
+"sent != 0"
 ]
 ]
 '@
 $raw = ConvertFrom-Json $OperatorsJson          # through a variable: Windows PowerShell keeps a JSON array as one pipeline object
 $Operators = @($raw)
-tc_check 'TEST-TAS-LIFE-MUT-000-operator-count' ($Operators.Count -eq 65) "expected 65 operators, found $($Operators.Count)"
+tc_check 'TEST-TAS-LIFE-MUT-000-operator-count' ($Operators.Count -eq 77) "expected 77 operators, found $($Operators.Count)"
 
 # The verdict of one run.  KILLED means an assertion of test_tas_restore_contract failed and its normal failure path ended
 # the run: `[FAIL] label`, ` FAIL: n / m`, `[RESULT] FAILURE`, return 1 (tests/unit/test_tas_restore_contract.c).
@@ -489,8 +549,8 @@ exit 0
     }
     Write-Host ("  [TIME] compile {0:N1} s, total {1:N1} s" -f $tCompile, $Clock.Elapsed.TotalSeconds)
     Write-Host ("  [MUTATION] killed={0} survived={1} infra_failure={2} inconclusive={3} of {4}" -f $Verdicts.KILLED, $Verdicts.SURVIVED, $Verdicts.INFRA_FAILURE, $Verdicts.INCONCLUSIVE, $names.Count)
-    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq 65 -and $Verdicts.KILLED -eq 65)
-    tc_check 'TEST-TAS-LIFE-MUT-003-complete-mutation-coverage' $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of 65"
+    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq 77 -and $Verdicts.KILLED -eq 77)
+    tc_check 'TEST-TAS-LIFE-MUT-003-complete-mutation-coverage' $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of 77"
 } finally {
     Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$Tmp.worker.ps1" -Force -ErrorAction SilentlyContinue

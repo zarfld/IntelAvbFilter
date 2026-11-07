@@ -316,7 +316,7 @@ $UnitTests = @(
     "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
     "ps1:tests/unit/ci/test_hil_suite_safety.ps1",              # TEST-HILSUITE: automatic HIL suites cannot reach TSN configuration or nested execution (was never run by CI - TEST-COMPLETE-003)
     "ps1:tests/unit/ci/test_hil_trust_boundary.ps1",            # TEST-HILTRUST: HIL workflow trust boundary, acceptance verdicts (was never run by CI - TEST-COMPLETE-003; needs python)
-    "ps1:tests/unit/ioctl/test_tas_lifecycle_eval_mutation.ps1", # TEST-TAS-LIFE-MUT: every condition of tas_lifecycle_eval.h is seen by an assertion (65 mutants, offline, needs the VS toolset)
+    "ps1:tests/unit/ioctl/test_tas_lifecycle_eval_mutation.ps1", # TEST-TAS-LIFE-MUT: every condition of tas_lifecycle_eval.h is seen by an assertion (77 mutants, offline, needs the VS toolset)
     "ps1:tests/unit/ci/test_hil_safety_record.ps1",
     "ps1:tests/unit/ci/test_phc_restoration_evaluator.ps1",    # TEST-PHCEVAL: pure PHC/QPC restoration evaluator (synthetic characterization; not hardware evidence)             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
     "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)
@@ -587,6 +587,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
     'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; #149 #317'
     'test_tas_lifecycle_case_a'     = 'Unsafe: #364 Case A, one real FilterPause and FilterRestart through IOCTL_FILTER_RESTART_ONE_INSTANCE on every eligible adapter; the PHC may be reset and NDIS may hang, so it runs operator-attended and by name'
+    'test_tas_lifecycle_case_a --case-b' = 'Unsafe: #364 Case B, the same trigger under SETUP_TAS with frames held; Pause may stall on held frames, TX stays held until an operator NIC cycle, so it runs operator-attended and by name'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 64 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm --stall-probe 512' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 512 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 1400 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
@@ -633,6 +634,8 @@ $HilHazardHolds = @{
     'avb_test_i225'              = $Hold328Tsn
     'avb_test_i226_um'           = $Hold328Tsn
     'test_ioctl_tas'             = $Hold328Tsn
+    'test_tas_lifecycle_case_a'  = $Hold328Tsn     # the binary holds SETUP_TAS; only --case-b issues it
+    'test_tas_lifecycle_case_a --case-b' = $Hold328Tsn
     'test_tas_isolated_arm'      = $Hold328Tsn
     'test_tas_isolated_arm --armed-period-ms 200' = $Hold328Tsn
     'test_tas_isolated_arm --stall-probe 64' = $Hold328Tsn
@@ -756,6 +759,7 @@ $HilTestSafety = @{
     'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
     'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
     'test_tas_lifecycle_case_a'        = 'Unsafe'     # IOCTL_FILTER_RESTART_ONE_INSTANCE: NdisFRestartFilter (#364)
+    'test_tas_lifecycle_case_a --case-b' = 'Unsafe'   # the same trigger under SETUP_TAS with frames held; nothing here releases the hold (#364)
     'test_tas_isolated_arm'            = 'Unsafe'     # SETUP_TAS plus CM_Disable_DevNode / CM_Enable_DevNode
     'test_tas_isolated_arm --armed-period-ms 200' = 'Unsafe'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe'

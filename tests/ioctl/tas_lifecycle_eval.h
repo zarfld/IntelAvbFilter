@@ -614,6 +614,63 @@ static __inline const char *tas_seq_name(TAS_SEQ_CLASS c)
     }
 }
 
+/*
+ * Case B of #364: SETUP_TAS alone, frames held. A dead observer also sees no frame, so it can never show a hold, and one frame
+ * on the wire means the setup this case is about was not reached. Anything but PROVEN is FAILED_SETUP and the trigger is not issued.
+ */
+typedef enum {
+    TAS_HOLD_PROVEN = 0,
+    TAS_HOLD_NOT_ARMED,      /* SETUP_TAS failed, or the driver does not report it armed */
+    TAS_HOLD_NO_OBSERVER,    /* the observer stopped seeing anything */
+    TAS_HOLD_NO_FRAMES,      /* nothing was accepted, so nothing can be held */
+    TAS_HOLD_LEAKED          /* frames reached the wire */
+} TAS_HOLD_CLASS;
+
+static __inline TAS_HOLD_CLASS tas_hold_class(BOOL armed, BOOL observer_alive, unsigned accepted, unsigned seen)
+{
+    if (!armed) {
+        return TAS_HOLD_NOT_ARMED;
+    }
+    if (!observer_alive) {
+        return TAS_HOLD_NO_OBSERVER;
+    }
+    if (accepted == 0) {
+        return TAS_HOLD_NO_FRAMES;
+    }
+    return seen != 0 ? TAS_HOLD_LEAKED : TAS_HOLD_PROVEN;
+}
+
+static __inline const char *tas_hold_name(TAS_HOLD_CLASS c)
+{
+    switch (c) {
+    case TAS_HOLD_PROVEN:      return "HOLD_PROVEN";
+    case TAS_HOLD_NOT_ARMED:   return "NOT_ARMED";
+    case TAS_HOLD_NO_OBSERVER: return "OBSERVER_LOST";
+    case TAS_HOLD_NO_FRAMES:   return "NO_FRAMES";
+    default:                   return "FRAMES_ON_WIRE";
+    }
+}
+
+/*
+ * Whether Case B may read registers after the trigger. Case A takes its Running evidence from frames on the wire, which a hold
+ * withholds, and the gauge cannot stand in for them: FilterSendNetBufferLists raises it before it checks the filter state. So
+ * the NDIS sequence, anchored by the driver counters, opens the reads. This only permits a read. It claims no transition.
+ */
+static __inline BOOL tas_hold_may_read(TAS_SEQ_CLASS sequence, TAS_LIFECYCLE_OUTCOME outcome, unsigned others_changed)
+{
+    return sequence == TAS_SEQ_CONSISTENT && others_changed == 0 && (outcome == TAS_LIFECYCLE_RESTART_ENTERED || outcome == TAS_LIFECYCLE_RESUMED);
+}
+
+/*
+ * Whether frames sent after the Restart entry came through the whole stack, for tas_lifecycle_evidence. Either they reached the
+ * observer, or the miniport moved the ring tail while they were sent. Background traffic can move the tail too, and that also
+ * came through the stack, so frames must have been sent for the tail to count. That the tail shows this is an inference.
+ */
+static __inline BOOL tas_hold_stack_carried(BOOL wire_shown, BOOL tail_read, unsigned sent, avb_u32 tail_before, avb_u32 tail_after)
+{
+    return wire_shown || (tail_read && sent != 0 && tail_before != tail_after);
+}
+
 /* Where the management session runs. Reported only: losing it is an accepted consequence, and no verdict reads this */
 typedef enum { TAS_MGMT_UNATTRIBUTED = 0, TAS_MGMT_ON_TARGET, TAS_MGMT_NOT_ON_TARGET } TAS_MGMT_CLASS;
 
