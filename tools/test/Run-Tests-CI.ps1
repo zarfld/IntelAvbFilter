@@ -316,6 +316,7 @@ $UnitTests = @(
     "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
     "ps1:tests/unit/ci/test_hil_suite_safety.ps1",              # TEST-HILSUITE: automatic HIL suites cannot reach TSN configuration or nested execution (was never run by CI - TEST-COMPLETE-003)
     "ps1:tests/unit/ci/test_hil_trust_boundary.ps1",            # TEST-HILTRUST: HIL workflow trust boundary, acceptance verdicts (was never run by CI - TEST-COMPLETE-003; needs python)
+    "ps1:tests/unit/ioctl/test_tas_lifecycle_eval_mutation.ps1", # TEST-TAS-LIFE-MUT: every condition of tas_lifecycle_eval.h is seen by an assertion (77 mutants, offline, needs the VS toolset)
     "ps1:tests/unit/ci/test_hil_safety_record.ps1",
     "ps1:tests/unit/ci/test_phc_restoration_evaluator.ps1",    # TEST-PHCEVAL: pure PHC/QPC restoration evaluator (synthetic characterization; not hardware evidence)             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
     "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)
@@ -585,6 +586,10 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_s3_sleep_wake'            = 'Unsafe: TC-S3-002 calls SetSuspendState, host S3 transition; no unattended wake facility such as an RTC wake timer or remote power control, and no recovery path if the host does not resume'
     'test_hot_plug'                 = 'Unsafe: disables and re-enables the NIC through an external device-manager tool, #262; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
     'test_ptp_phc_lifecycle'        = 'Unsafe: UT-CORR-009 stops the IntelAvbFilter service and reinstalls the driver by process creation, split from test_ptp_phc_stability 2026-10-22; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; #149 #317'
+    'test_tas_lifecycle_case_a'     = 'Unsafe: #364 Case A, one real FilterPause and FilterRestart through IOCTL_FILTER_RESTART_ONE_INSTANCE on every eligible adapter; the PHC may be reset and NDIS may hang, so it runs operator-attended and by name'
+    'test_tas_lifecycle_case_a --case-b' = 'Unsafe: #364 Case B, the same trigger under SETUP_TAS with frames held; Pause may stall on held frames, TX stays held until an operator NIC cycle, so it runs operator-attended and by name'
+    'test_tas_lifecycle_case_a --case-b-drained' = 'Unsafe: #364 Case B with about 24 frames, so gauge 0 at the trigger, separating outstanding sends from TSN mode; TX stays held until an operator NIC cycle, so it runs operator-attended and by name'
+    'test_tas_lifecycle_case_a --dry-run' = 'Unsafe: #364 no trigger in this mode, but the binary carries the Case A and B mutations; records registers, PHC, TAS state and tagged traffic on the observer after a NIC cycle, attended and by name'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 64 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm --stall-probe 512' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 512 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 1400 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
@@ -631,6 +636,10 @@ $HilHazardHolds = @{
     'avb_test_i225'              = $Hold328Tsn
     'avb_test_i226_um'           = $Hold328Tsn
     'test_ioctl_tas'             = $Hold328Tsn
+    'test_tas_lifecycle_case_a'  = $Hold328Tsn     # the binary holds SETUP_TAS; only --case-b issues it
+    'test_tas_lifecycle_case_a --case-b' = $Hold328Tsn
+    'test_tas_lifecycle_case_a --case-b-drained' = $Hold328Tsn
+    'test_tas_lifecycle_case_a --dry-run' = $Hold328Tsn
     'test_tas_isolated_arm'      = $Hold328Tsn
     'test_tas_isolated_arm --armed-period-ms 200' = $Hold328Tsn
     'test_tas_isolated_arm --stall-probe 64' = $Hold328Tsn
@@ -695,7 +704,7 @@ $HilTestSafety = @{
     'test_ptp_corr'                    = 'ReadOnly'
     'test_ptp_phc_stability'           = 'ReadOnly'   # no args = UT-CORR-007/008 only; 005/006 need --case; UT-CORR-009 is test_ptp_phc_lifecycle
     'test_hardware_detection'          = 'ReadOnly'
-    'ssot_register_validation_test'    = 'ReadOnly'   # GET_DEVICE_INFO, GET_HW_STATE, READ_REGISTER on the default handle; GET_VERSION, GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID, GET_TAS_STATE, READ_REGISTER on own per-adapter handles; no write
+    'ssot_register_validation_test'    = 'ReadOnly'   # GET_DEVICE_INFO, GET_HW_STATE, READ_REGISTER on the default handle; GET_VERSION, GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID, GET_TAS_STATE, READ_REGISTER, QUERY_HW_SNAPSHOT on own per-adapter handles; no write
     # --- Init (IOCTL_AVB_INIT_DEVICE) ---
     'test_clock_config'                = 'Init'
     'test_clock_working'               = 'Init'
@@ -753,6 +762,10 @@ $HilTestSafety = @{
     # --- Unsafe (NIC administration; removed from every suite list) ---
     'test_hot_plug'                    = 'Unsafe'     # devcon enable/disable via CreateProcess
     'test_lifecycle_coverage'          = 'Unsafe'     # CM_Disable_DevNode / CM_Enable_DevNode
+    'test_tas_lifecycle_case_a'        = 'Unsafe'     # IOCTL_FILTER_RESTART_ONE_INSTANCE: NdisFRestartFilter (#364)
+    'test_tas_lifecycle_case_a --case-b' = 'Unsafe'   # the same trigger under SETUP_TAS with frames held; nothing here releases the hold (#364)
+    'test_tas_lifecycle_case_a --case-b-drained' = 'Unsafe' # as --case-b, with gauge 0 at the trigger (#364)
+    'test_tas_lifecycle_case_a --dry-run' = 'Unsafe'  # no trigger in this mode; the class follows the binary, whose source holds the mutations (#364)
     'test_tas_isolated_arm'            = 'Unsafe'     # SETUP_TAS plus CM_Disable_DevNode / CM_Enable_DevNode
     'test_tas_isolated_arm --armed-period-ms 200' = 'Unsafe'
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe'
@@ -1144,6 +1157,7 @@ public static class AvbHilIoctl {
     $IOCTL_IDENT = [uint32]0x00170110; $IOCTL_BYLUID = [uint32]0x00170114; $IOCTL_CLOCK = [uint32]0x001700B4   # fn 68 / 69 / 45
     $IOCTL_SNAP = [uint32]0x00170118   # fn 70 IOCTL_AVB_QUERY_HW_SNAPSHOT (TC-ABI-022)
     $regNames = Get-AvbHwRegNames
+    $clockRegs = @('TIMINCA', 'TSAUXC')   # read through GET_CLOCK_CONFIG, not kept as snapshot registers
     $openDev = { [AvbHilIoctl]::CreateFile('\\.\IntelAvbFilter', [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero) }
     $h = & $openDev
     if ($h -eq [IntPtr](-1)) {
@@ -1226,13 +1240,14 @@ public static class AvbHilIoctl {
                     $at = 24 + 16 * $k
                     $rid = [int][System.BitConverter]::ToUInt32($sn, $at)
                     if ([System.BitConverter]::ToUInt32($sn, $at + 12) -ne 1 -or -not $regNames.Contains($rid)) { continue }   # AVB_HWREG_STATE_VALID only
-                    if ($regNames[$rid] -in @('TIMINCA', 'TSAUXC')) { continue }
+                    if ($regNames[$rid] -in $clockRegs) { continue }
                     $regs[$regNames[$rid]] = [System.BitConverter]::ToUInt32($sn, $at + 8)
                 }
             }
+            $unobservable = $regNames.Count - $clockRegs.Count - $regs.Count   # reported only: ids of this map not read VALID, whatever the reason
             $entries += [pscustomobject]@{ Index = $i; Did = $did; Luid = $luid; IfIndex = $idn.IfIndex; Mac = $idn.Mac; Ok = $true; Error = ''
                                            Timinca = [System.BitConverter]::ToUInt32($first, 8); Tsauxc = [System.BitConverter]::ToUInt32($first, 12)
-                                           Samples = $samples; Registers = $regs; RegistersError = $regErr }
+                                           Samples = $samples; Registers = $regs; RegistersError = $regErr; RegistersUnobservable = $unobservable }
             } finally {
                 [void][AvbHilIoctl]::CloseHandle($hb)
             }
@@ -1271,7 +1286,8 @@ function Get-AvbHilSandboxState {
         }
         $sc = [pscustomobject]@{ Index = [int]$c.Index; Did = (ConvertTo-AvbDid ([string]$c.Did)); Ok = [bool]$c.Ok
                                  Timinca = [uint32]$c.Timinca; Tsauxc = [uint32]$c.Tsauxc; Error = ''; Samples = $samples
-                                 Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' }) }
+                                 Registers = (Get-AvbHilRegs $c); RegistersError = $(if ($c.PSObject.Properties['Registers']) { '' } else { 'sandbox: no snapshot registers' })
+                                 RegistersUnobservable = (Get-AvbHilEntryField $c 'RegistersUnobservable') }
         # Optional identity (as the hardware observer reports it): Luid, InstanceId.  Absent = enumeration position only.
         foreach ($idField in 'Luid', 'InstanceId') { if ($c.PSObject.Properties[$idField]) { $sc | Add-Member -NotePropertyName $idField -NotePropertyValue ([string]$c.$idField) } }   # not $f: QPC frequency above
         $sc
@@ -1357,6 +1373,59 @@ function Test-AvbHilAdapterIdentityVerified {
     param($Entry)
     return [bool]((Get-AvbHilEntryField $Entry 'Luid') -and (Get-AvbHilEntryField $Entry 'InstanceId'))
 }
+# Register coverage of one comparison (pure, reporting only; decides no outcome).  Compared: registers read VALID both times
+# on the same adapter, keyed as Compare-AvbHilState keys them.  Unobservable: the observer's count, $null when none was given,
+# never invented.  NotCompared: why an adapter's registers were not fully compared.
+function Get-AvbHilRegisterCoverage {
+    param($Base, $Cur)
+    $cov = @{ Compared = 0; Observed = 0; Unobservable = 0; Adapters = 0; NotCompared = @(); Note = '' }
+    if (-not $Base.ClockOk -or -not $Cur.ClockOk) {
+        $cov.Unobservable = $null
+        $cov.Note = "clock state not observable: $(if (-not $Base.ClockOk) { $Base.ClockError } else { $Cur.ClockError })"
+        return $cov
+    }
+    $cc = @{}; foreach ($c in @($Cur.Clock)) { $cc[(Get-AvbHilAdapterKey $c)] = $c }
+    foreach ($b in @($Base.Clock)) {
+        $cov.Adapters++
+        $key = Get-AvbHilAdapterKey $b; $lb = Get-AvbHilAdapterLabel $b
+        $c = if ($cc.ContainsKey($key)) { $cc[$key] } else { $null }
+        $bR = Get-AvbHilRegs $b; $cR = Get-AvbHilRegs $c
+        $same = @($bR.Keys | Where-Object { $cR.Contains($_) }).Count
+        $cov.Observed += $bR.Count; $cov.Compared += $same
+        $u = Get-AvbHilEntryField $b 'RegistersUnobservable'
+        if ($null -eq $u) { $cov.Unobservable = $null } elseif ($null -ne $cov.Unobservable) { $cov.Unobservable += [int]$u }
+        if ($bR.Count -eq 0) {
+            $err = Get-AvbHilEntryField $b 'RegistersError'; if (-not $err) { $err = Get-AvbHilEntryField $b 'Error' }
+            $cov.NotCompared += "${lb}: $(if ($err) { $err } else { 'no register read' })"
+        } elseif ($same -lt $bR.Count) {
+            $err = if ($c) { Get-AvbHilEntryField $c 'RegistersError' } else { 'not enumerated' }
+            $cov.NotCompared += "${lb}: $($bR.Count - $same) register(s) not read again$(if ($err) { " ($err)" })"
+        }
+    }
+    return $cov
+}
+
+# ReadOnly cleanup reason.  "equals the baseline" is said only when every adapter's registers were compared in full: zero
+# compared registers must never read as registers verified unchanged.  The outcome stays the caller's.
+function Format-AvbHilCoverageReason {
+    param($Cov)
+    $u = if ($null -eq $Cov.Unobservable) { 'unknown' } else { $Cov.Unobservable }
+    $counts = "registers compared $($Cov.Compared) of $($Cov.Observed) observed, unobservable $u, adapters without a full comparison $(@($Cov.NotCompared).Count) of $($Cov.Adapters)"
+    $detail = @(@($Cov.Note) + @($Cov.NotCompared) | Where-Object { $_ }) -join '; '
+    if ($detail) { $counts = "${counts}: $detail" }
+    if ($Cov.Compared -eq 0) { return "ReadOnly; no difference observed, registers NOT verified unchanged ($counts)" }
+    if (@($Cov.NotCompared).Count -gt 0) { return "ReadOnly; no difference observed, registers verified only in part ($counts)" }
+    return "ReadOnly; observable state equals the baseline ($counts)"
+}
+
+# One baseline line per adapter: what the session can and cannot compare, RegistersError included.
+function Format-AvbHilRegisterObservation {
+    param($Entry)
+    $u = Get-AvbHilEntryField $Entry 'RegistersUnobservable'
+    $err = Get-AvbHilEntryField $Entry 'RegistersError'; if (-not $err) { $err = Get-AvbHilEntryField $Entry 'Error' }
+    return ("Registers observed {0}: {1}, unobservable {2}, error: {3}" -f (Get-AvbHilAdapterLabel $Entry), (Get-AvbHilRegs $Entry).Count, $(if ($null -eq $u) { 'unknown' } else { $u }), $(if ($err) { $err } else { 'none' }))
+}
+
 function Compare-AvbHilState {
     param($Base, $Cur)
     $diffs = @(); $warn = @(); $items = @()
@@ -2149,6 +2218,7 @@ function Invoke-HilBaseline {
             -Line "[INFRA_FAILURE] TC-INFRA-STATE-000: PHC clock state not observable at baseline: $($b.ClockError)"
         Set-HilHalt 'PHC clock state not observable at baseline'
     }
+    if ($b.ClockOk) { foreach ($c in @($b.Clock)) { Write-Note (Format-AvbHilRegisterObservation $c) } }
     $healthy = @()
     $n = 0
     $supportedPresent = 0
@@ -2256,7 +2326,7 @@ function Invoke-HilPostTestCheck {
         if ($TimedOut -and -not ($script:AvbItem -and $script:AvbItem.Termination -and $script:AvbItem.Termination.Ok)) {
             Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_VERIFIED' -Reason 'process tree did not terminate after the timeout; later state changes cannot be excluded'
         } else {
-            Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_REQUIRED' -Reason 'ReadOnly; observable state equals the baseline'
+            Add-AvbCleanupResult -Display $Display -Class $Class -Required 'NO' -Outcome 'NOT_REQUIRED' -Reason (Format-AvbHilCoverageReason (Get-AvbHilRegisterCoverage -Base $script:HilBaseline -Cur $cur))
         }
     }
     if ($Class -ne 'ReadOnly') {        # Restoration is verified only when everything the entry declares it modifies was re-read above and equals the
