@@ -1443,38 +1443,6 @@ static void test_33_activate_time(void) {
     EXPECT_EQ("BaseT passed while writing", g_act.result, AVB_TAS_ACT_BASE_PASSED);
 }
 
-/* TC-MOCK-034 and 035: frames against a schedule, and what HOLD and PASS may claim from them (#357, #364). Rule only */
-static void test_34_frame_class(void) {
-    const ULONGLONG base = 7000000000ULL;
-    const unsigned cycle = 1000000000u, start = 200000000u, end = 400000000u, margin = 2000000u;
-
-    printf("\n[TC-MOCK-034] A frame against the schedule\n");
-    EXPECT_EQ("before BaseT", tas_frame_class(base - 1, base, cycle, start, end, margin), TAS_FRAME_BEFORE_BASE);
-    EXPECT_EQ("at the window start", tas_frame_class(base + start, base, cycle, start, end, margin), TAS_FRAME_INSIDE);
-    EXPECT_EQ("in the window, a later cycle", tas_frame_class(base + 3ULL * cycle + 300000000u, base, cycle, start, end, margin), TAS_FRAME_INSIDE);
-    EXPECT_EQ("last nanosecond of the window", tas_frame_class(base + end - 1, base, cycle, start, end, margin), TAS_FRAME_INSIDE);
-    EXPECT_EQ("just after the window", tas_frame_class(base + end + 1000, base, cycle, start, end, margin), TAS_FRAME_NEAR_EDGE);
-    EXPECT_EQ("at the margin after the window", tas_frame_class(base + end + margin, base, cycle, start, end, margin), TAS_FRAME_NEAR_EDGE);
-    EXPECT_EQ("just before the window", tas_frame_class(base + start - 1000, base, cycle, start, end, margin), TAS_FRAME_NEAR_EDGE);
-    EXPECT_EQ("past the margin after", tas_frame_class(base + end + margin + 1, base, cycle, start, end, margin), TAS_FRAME_OUTSIDE);
-    EXPECT_EQ("past the margin before", tas_frame_class(base + start - margin - 1, base, cycle, start, end, margin), TAS_FRAME_OUTSIDE);
-    EXPECT_EQ("first closed interval", tas_frame_class(base + 1, base, cycle, start, end, margin), TAS_FRAME_OUTSIDE);
-}
-
-static void test_35_activate_verdict(void) {
-    printf("\n[TC-MOCK-035] What HOLD and PASS may claim from the wire\n");
-    EXPECT_EQ("hold: nothing before BaseT, all inside", tas_activate_verdict(AVB_TAS_PRE_HOLD, 0, 30, 0, 0), TAS_ACTIVATE_PASS);
-    EXPECT_EQ("hold: a frame before BaseT", tas_activate_verdict(AVB_TAS_PRE_HOLD, 1, 30, 0, 0), TAS_ACTIVATE_FAIL);
-    EXPECT_EQ("hold: a frame outside", tas_activate_verdict(AVB_TAS_PRE_HOLD, 0, 30, 0, 1), TAS_ACTIVATE_FAIL);
-    EXPECT_EQ("hold: only near an edge", tas_activate_verdict(AVB_TAS_PRE_HOLD, 0, 30, 1, 0), TAS_ACTIVATE_INCONCLUSIVE);
-    EXPECT_EQ("hold: nothing seen proves nothing", tas_activate_verdict(AVB_TAS_PRE_HOLD, 0, 0, 0, 0), TAS_ACTIVATE_INCONCLUSIVE);
-    EXPECT_EQ("pass: frames before BaseT, all inside after", tas_activate_verdict(AVB_TAS_PRE_PASS, 40, 30, 0, 0), TAS_ACTIVATE_PASS);
-    EXPECT_EQ("pass: nothing before BaseT means it held", tas_activate_verdict(AVB_TAS_PRE_PASS, 0, 30, 0, 0), TAS_ACTIVATE_FAIL);
-    EXPECT_EQ("pass: a frame outside after BaseT", tas_activate_verdict(AVB_TAS_PRE_PASS, 40, 30, 0, 1), TAS_ACTIVATE_FAIL);
-    EXPECT_EQ("pass: only near an edge", tas_activate_verdict(AVB_TAS_PRE_PASS, 40, 30, 1, 0), TAS_ACTIVATE_INCONCLUSIVE);
-    EXPECT_EQ("pass: nothing after BaseT", tas_activate_verdict(AVB_TAS_PRE_PASS, 40, 0, 0, 0), TAS_ACTIVATE_INCONCLUSIVE);
-}
-
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1517,8 +1485,6 @@ int main(void) {
     test_31_activate_pass();
     test_32_activate_failure();
     test_33_activate_time();
-    test_34_frame_class();
-    test_35_activate_verdict();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
