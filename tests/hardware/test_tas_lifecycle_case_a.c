@@ -1031,6 +1031,18 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
         printf(TAG " not run: socket setup failed (%d)\n", WSAGetLastError());
         goto done;
     }
+    if (dry_run) {
+        static avb_u32 tsn[TSN_COUNT];
+        avb_u32 tail;
+
+        /* Registers, PHC and TAS state, read before the frames: a held adapter fails the observer proof, and is when these matter most. Nothing judged */
+        printf(TAG " fact tasArmed=%u\n", armed_before);
+        phc_pairs(h, "dry run");
+        if (ids[t].device_id == CASE_B_EVIDENCE_DID) {
+            (void)read_tsn(h, tsn, "dry run");
+            (void)read_ring(h, "dry run", &tail);
+        }
+    }
     if (!observer_prove(ids, facts, n, t, h, sock, ipv4, &capture_alive)) {
         printf(TAG " not run: no other adapter saw this target's baseline frames, so nothing here could be proved; nothing mutated\n");
         goto done;
@@ -1042,16 +1054,6 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
     }
     if (dry_run) {
         static TAS_WINDOW_TRACK resolution;
-        static avb_u32 tsn[TSN_COUNT];
-        avb_u32 tail;
-
-        /* Post-cycle evidence for Case B: registers, PHC and TAS state here, traffic from the observer line above. Nothing judged */
-        printf(TAG " fact tasArmed=%u\n", armed_before);
-        phc_pairs(h, "dry run");
-        if (ids[t].device_id == CASE_B_EVIDENCE_DID) {
-            (void)read_tsn(h, tsn, "dry run");
-            (void)read_ring(h, "dry run", &tail);
-        }
 
         /* What observing itself changed: the same reads as the real run, with no lifecycle event */
         ZeroMemory(&snap_after, sizeof(snap_after));
@@ -1620,8 +1622,12 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
                 bad = 1;
                 verdict(tas_cleanup_name(g_case[i].cleanup), g_tc_clean, (int)i, ids[i].device_id, "SETUP_TAS may have changed the adapter and no trigger followed; a NIC cycle on the target is owed");
             } else {
-                verdict(dry_run ? "PASS" : "BLOCKED", g_tc_run, (int)i, ids[i].device_id, dry_run ? "dry run, nothing triggered" : "stopped before the trigger, see the lines above");
-                bad |= !dry_run;
+                /* A dry run passes on what it proved. That nothing was triggered is true of every way out, so it can never be the reason */
+                BOOL proved = dry_run && results[i] == 0;
+
+                verdict(proved ? "PASS" : dry_run ? "INCONCLUSIVE" : "BLOCKED", g_tc_run, (int)i, ids[i].device_id,
+                        proved ? "dry run: instance and observer proved, nothing triggered" : dry_run ? "dry run stopped early, see the lines above; nothing was triggered" : "stopped before the trigger, see the lines above");
+                bad |= !proved;
             }
         }
     }

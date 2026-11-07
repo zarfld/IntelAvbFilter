@@ -639,7 +639,29 @@ With gauge 62, `FilterPause` was not entered in 60 s and no filter on the stack 
 
 **Evidence incident.** The two per-test logs `test_tas_lifecycle_case_a.exe_20261107_091059.log` and `..._091810.log` read normally until 09:15, appeared empty at 09:18:55 and were gone at 09:19:25. The first is listed in the run's checksum manifest as `DDD435D9...`, so that row can no longer be verified. Their output survives in the runner logs. Cause unknown: nothing in the runner, its libraries or scheduled tasks removes them. Later evidence is copied to `logs/i364-evidence/` at once.
 
-`--case-b-drained` holds about 24 frames, so the gauge is 0 at the trigger, and has that as setup. If Pause then runs, outstanding sends are the reason, and Q1, Q2 and Q4 become measurable under `SETUP_TAS`. If it does not, the driver's status is needed.
+### Case B drained run 1
+
+`--case-b-drained` holds about 24 frames, so the gauge is 0 at the trigger, and has that as setup.
+
+`LOCAL_DIAGNOSTIC`, `ecc8348`, Debug driver `1B4F299C7E70AA68`, stamp `20261107_093615`. Evidence: `logs/i364-evidence/caseb-drained-run1/`. TC-CASEB-001 PASS, 002 PASS, 003 PASS, 004 `CLEANUP_FAILED`; TC-INFRA-STATE-001 and SESSION-002 `CLEANUP_FAILED` on `TRGTTIML0` 0x9EC to 0xC79.
+
+| | `--case-b`, run 1 | `--case-b-drained`, run 1 |
+|---|---|---|
+| Held, frames on the wire | 0 of 129 | 0 of 24 |
+| Gauge at the trigger | 62 | 0 |
+| Pause entered | no, 60 s | about 8 ms after the trigger |
+| NDIS sequence | none | 5, 2, 3, 4, Paused 28.7 us, Running about 15.7 ms after Pausing |
+
+| Q | Drained run 1 |
+|---|---|
+| Q1 | Yes: TSN mode kept, 40 of 40 registers kept. No schedule in the sense of Case C, and the hold outlasts the Restart: 0 of 48 probes and 0 of 24 held frames on the wire |
+| Q2 | No: 1417.92 to 9.32 s, DISCONTINUOUS. Seed now 9.29 to 9.33 s, 5 of 5, with and without `SETUP_TAS` |
+| Q3 | With gauge 0, Pause did not wait. Ring tail moved 762 to 823, so frames came through the stack; TDH stalled at 104 from the start here, 102 in the other run, despite the Restart |
+| Q4 | Yes: tasArmed 1, TSN mode 1, hwState 3, capabilities unchanged |
+
+So TSN mode alone does not stop the lifecycle, in this run. Outstanding sends are the leading explanation, not proved: frame count and PHC also differed between the runs, and that the tail stands for traffic is an inference. The Protocol keyword gave no events here, so the protocol-first theory is untested until `--case-b` repeats with it.
+
+**Dry run with no NIC cycle, 09:38.** About 80 s after the Restart: 0 of 96 frames on the wire, gauge 173 then 226. It exposed two defects in the dry run, both fixed: it stopped before printing registers, tasArmed and PHC, and it reported PASS with nothing proved. That PASS stands in the 09:38 log and is no evidence.
 
 ## Activation runs for #357
 
