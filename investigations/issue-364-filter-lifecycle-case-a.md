@@ -661,6 +661,31 @@ With gauge 62, `FilterPause` was not entered in 60 s and no filter on the stack 
 
 So TSN mode alone does not stop the lifecycle, in this run. Outstanding sends are the leading explanation, not proved: frame count and PHC also differed between the runs, and that the tail stands for traffic is an inference. The Protocol keyword gave no events here, so the protocol-first theory is untested until `--case-b` repeats with it.
 
+### Case B, three runs per variant
+
+`LOCAL_DIAGNOSTIC`, Debug driver `1B4F299C7E70AA68`, I226 0x125B REV_04, 2026-11-07, sources `ef7d682`, `ecc8348` and `81f89d2`. Evidence and checksums under `logs/i364-evidence/`.
+
+| | `--case-b`, runs 1 to 3 | `--case-b-drained`, runs 1 to 3 |
+|---|---|---|
+| Held, frames on the wire | 0 of 129, 128, 128 | 0 of 24, 24, 24 |
+| Gauge at the trigger | 62, 78, 76 | 0, 0, 0 |
+| Pause entered | none in 60 s, 3 of 3 | 8.1, 2.1, 17.2 ms after the trigger |
+| NDIS sequence | no event, 3 of 3 | 5, 2, 3, 4; Paused 28.7, 27.9, 15.4 us |
+| TC-CASEB-001 / 002 / 003 / 004 | PASS / BLOCKED / INCONCLUSIVE / CLEANUP_FAILED | PASS / PASS / PASS / CLEANUP_FAILED |
+
+| Q | Case B |
+|---|---|
+| Q1 | Yes, from the drained runs: TSN mode and 40 of 40 registers kept, identical in all three; the hold outlasts the Restart, 0 of 48 probes each time. Unknown for gauge above 0: no Pause happened |
+| Q2 | No, from the drained runs: reseeded to 9.32, 9.33, 9.34 s. Unknown for gauge above 0 |
+| Q3 | Pause ran 3 of 3 with gauge 0 and never entered 3 of 3 with gauge above 0. A correlation; the cause is unproven while the driver discards the status of `NdisFRestartFilter`. In 2 of 3 runs with gauge above 0, frames accepted after the trigger never reached this filter |
+| Q4 | Yes, from the drained runs, 3 of 3. Unknown for gauge above 0 |
+
+The Protocol keyword produced no event in any of the five runs that had it, held or not, so it cannot settle where the stall sits on this stack. `TRGTTIML0` changed in 3 of 3 drained runs: the runner's TC-INFRA-STATE-001 and SESSION-002 stand as failures and belong to the separate investigation.
+
+**Operator NIC cycle:** 5 of 5 times, 0 of 40 registers differ from the run's pre-state, tasArmed 0, tagged frames on the observer, PHC reset. Registers, TAS and TX return; PHC continuity does not, so restoration is never verified. The final dry run at 21:04 is not counted: CI and a reinstall came before it.
+
+**Incident, held adapter left to CI.** The operator blocks cycled the adapter before each run, not after, so drained run 3's hold stayed until 21:04. HIL run 42359406277, for `81f89d2`, took the free lock at 10:21 and its Debug job failed at the driver deploy after 3 min 14 s, with a leftover `netcfg` inspected at job end. Its unit and integration tests never ran, so that CI result says nothing about `81f89d2`. An uninstall during an I226 hold is the #328 hang signature; this is one occurrence, recorded for #328, not claimed. From now on a block runs the test first and recovers after it, so no hold outlives a block.
+
 **Dry run with no NIC cycle, 09:38.** About 80 s after the Restart: 0 of 96 frames on the wire, gauge 173 then 226. It exposed two defects in the dry run, both fixed: it stopped before printing registers, tasArmed and PHC, and it reported PASS with nothing proved. That PASS stands in the 09:38 log and is no evidence.
 
 ## Activation runs for #357
