@@ -724,7 +724,6 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_GET_TIMESTAMP:
         case IOCTL_AVB_SET_TIMESTAMP:
         case IOCTL_AVB_SETUP_TAS:
-        case IOCTL_AVB_TAS_ACTIVATE:      // Implements #357
         case IOCTL_AVB_SETUP_FP:
         case IOCTL_AVB_SETUP_PTM:
         case IOCTL_AVB_SETUP_QAV:         // Implements #8 (REQ-F-QAV-001: Credit-Based Shaper Configuration)

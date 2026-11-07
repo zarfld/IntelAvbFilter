@@ -4383,37 +4383,6 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         }
         break;
 
-    case IOCTL_AVB_TAS_ACTIVATE:
-        /* First gate schedule on a clean adapter (#357). A refusal completes with STATUS_SUCCESS and r->result, because
-         * METHOD_BUFFERED would drop the output on an error status. ADR-TSN-002 and ADR-TSN-003 govern this write path. */
-        if (buf == NULL || inLen < sizeof(AVB_TAS_ACTIVATE_REQUEST) || outLen < sizeof(AVB_TAS_ACTIVATE_REQUEST)) {
-            status = STATUS_BUFFER_TOO_SMALL;
-        } else {
-            PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* per-handle selected adapter */
-            PAVB_TAS_ACTIVATE_REQUEST r = (PAVB_TAS_ACTIVATE_REQUEST)buf;
-            const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
-
-            if (activeContext->hw_state < AVB_HW_PTP_READY) {
-                status = STATUS_DEVICE_NOT_READY;
-            } else if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
-                status = STATUS_NOT_SUPPORTED;
-            } else if (ops == NULL || ops->activate_tas == NULL) {
-                status = STATUS_NOT_IMPLEMENTED;
-            } else {
-                ops->activate_tas(&activeContext->intel_device, r, InterlockedCompareExchange(&activeContext->tas_armed, 0, 0) != 0);
-                r->status = (avb_u32)STATUS_SUCCESS;
-                if (r->result == AVB_TAS_ACT_COMMITTED || r->result == AVB_TAS_ACT_BASE_PASSED) {
-                    RtlZeroMemory(&activeContext->last_tas_config, sizeof(activeContext->last_tas_config));
-                    activeContext->last_tas_config.base_time_s = r->base_time_ns / 1000000000ULL;
-                    activeContext->last_tas_config.base_time_ns = (avb_u32)(r->base_time_ns % 1000000000ULL);
-                    activeContext->last_tas_config.cycle_time_ns = r->cycle_ns;
-                    InterlockedExchange(&activeContext->tas_armed, 1);
-                }
-                info = sizeof(*r);
-            }
-        }
-        break;
-
     case IOCTL_AVB_SETUP_FP:
         {
             DEBUGP(DL_ERROR, "!!! DIAG: IOCTL_AVB_SETUP_FP ENTERED - inLen=%lu outLen=%lu required=%lu\n",
