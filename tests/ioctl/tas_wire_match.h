@@ -29,6 +29,9 @@ static int tas_wire_match(const unsigned char *f, size_t len, const unsigned cha
         (((f[ip + 6] & 0x1F) << 8) | f[ip + 7]) != 0) {
         return 0;
     }
+    if ((f[ip] & 0x0F) < 5) {
+        return 0;
+    }
     udp = ip + (size_t)(f[ip] & 0x0F) * 4;
     tag = udp + 8;
     if (len < tag + TAS_WIRE_TAG_BYTES || f[udp + 2] != 0 || f[udp + 3] != TAS_WIRE_UDP_PORT ||
