@@ -867,6 +867,46 @@ static void test_48_activate_gcl(void) {
     EXPECT_EQ("before any write", g_hw.writes, 0);
 }
 
+/*
+ * TC-MOCK-049: the HIL fault path (#357, Q 2026-11-10). Debug drivers only: reserved word N fails schedule write N and the
+ * first restore write, so the registered HIL test can reach FAILED_NOT_RESTORED. A Release driver refuses any nonzero value.
+ */
+static void test_49_activate_fault(void) {
+    static const I226_TAS_IO release_io = {&g_hw, fake_read, fake_write, fake_phc, 0};
+    static const I226_TAS_IO debug_io = {&g_hw, fake_read, fake_write, fake_phc, 1};
+    unsigned n, count, all = 1, reached = 1, commit_kept_out = 1;
+
+    printf("\n[TC-MOCK-049] Debug-only fault injection through the reserved word\n");
+    act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 5;
+    i226_tas_activate(&release_io, &g_act, FALSE);
+    EXPECT_EQ("Release: a nonzero reserved word is refused", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("Release: before any write", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_HOLD);
+    i226_tas_activate(&debug_io, &g_act, FALSE);
+    EXPECT_EQ("Debug: reserved 0 activates normally", g_act.result, AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 14;
+    i226_tas_activate(&debug_io, &g_act, FALSE);
+    EXPECT_EQ("Debug: HOLD has 13 schedule writes, 14 is refused", g_act.result, AVB_TAS_ACT_INVALID);
+    EXPECT_EQ("Debug: refused before any write", g_hw.writes, 0);
+    act_setup(AVB_TAS_PRE_PASS); g_act.reserved = 16;
+    i226_tas_activate(&debug_io, &g_act, FALSE);
+    EXPECT_EQ("Debug: PASS has 15 schedule writes, 16 is refused", g_act.result, AVB_TAS_ACT_INVALID);
+    for (count = 13; count <= 15; count += 2) {
+        for (n = 1; n <= count; n++) {
+            act_setup(count == 13 ? AVB_TAS_PRE_HOLD : AVB_TAS_PRE_PASS);
+            g_act.reserved = n;
+            i226_tas_activate(&debug_io, &g_act, FALSE);
+            all = all && g_act.result == AVB_TAS_ACT_FAILED_NOT_RESTORED;
+            /* writes before N, then the 13 restore writes without the first one */
+            reached = reached && g_hw.writes == (n - 1) + (I226_TAS_SAVED_COUNT - 1);
+            commit_kept_out = commit_kept_out && g_hw.reg[I226_BASET_L / 4] == 0;
+        }
+    }
+    EXPECT_TRUE("Debug: every N in HOLD and PASS ends FAILED_NOT_RESTORED", all);
+    EXPECT_TRUE("Debug: neither injected write reaches the hardware", reached);
+    EXPECT_TRUE("Debug: the commit write never reaches the hardware", commit_kept_out);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -899,6 +939,7 @@ int main(void) {
     test_46_activate_untimed();
     test_47_activate_state();
     test_48_activate_gcl();
+    test_49_activate_fault();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

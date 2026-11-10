@@ -9,6 +9,10 @@
  * BaseT high, BaseT low. Writing BaseT low is the commit point. PASS adds FutScdDis after the windows and writes BaseT low
  * as zero first (ADR-TSN-003, M1). HOLD uses no reserved bit.
  *
+ * Fault path (Q 2026-11-10): when io->fault_injection is set, which only Debug drivers do, a nonzero reserved word N makes
+ * schedule write N and the first restore write fail without reaching the hardware. That is the only way a registered HIL
+ * test can reach FAILED_NOT_RESTORED. Without it, which is every Release driver, a nonzero reserved word is INVALID.
+ *
  * Restoring TQAVCTRL writes the old value back and checks the readback. A readback does not prove the transmit mode the
  * hardware is in: see disable_tas in intel_i226_impl.c. A failure after the mode write can therefore need a NIC cycle.
  */
@@ -23,6 +27,7 @@ typedef struct {
     int (*read)(void *ctx, avb_u32 offset, avb_u32 *value);
     int (*write)(void *ctx, avb_u32 offset, avb_u32 value);
     int (*phc)(void *ctx, avb_u64 *ns);
+    int fault_injection;   /* nonzero in Debug drivers only: the reserved word selects a failing write */
 } I226_TAS_IO;
 
 #define I226_TAS_QBV_CYCLE_MAX    0x3FFFFFFFu   /* I226_QBVCYCLET field width */
@@ -32,13 +37,20 @@ typedef struct {
 #define I226_TAS_WINDOW_FACTOR    8800u         /* 1.1 x 8 bits x 1000: ns x Mbit/s per byte */
 #define I226_TAS_NS_PER_SEC       1000000000ULL
 
-/* Every field of the request. Reads no hardware, so an invalid request changes nothing */
-static __inline avb_u32 i226_tas_validate(const AVB_TAS_ACTIVATE_REQUEST *r)
+#define I226_TAS_HOLD_WRITES  13u   /* mode, 8 window registers, shadow cycle, cycle, BaseT high, BaseT low */
+#define I226_TAS_PASS_WRITES  15u   /* plus FutScdDis and BaseT low as zero */
+
+/* Every field of the request. Reads no hardware, so an invalid request changes nothing. fault_injection: see the top */
+static __inline avb_u32 i226_tas_validate_with(const AVB_TAS_ACTIVATE_REQUEST *r, int fault_injection)
 {
     avb_u32 q, floor_bytes;
     struct tsn_tas_config gcl;
 
-    if (r->version != AVB_TAS_ACTIVATE_VERSION || r->reserved != 0 || (r->pre_activation != AVB_TAS_PRE_HOLD && r->pre_activation != AVB_TAS_PRE_PASS)) {
+    if (r->version != AVB_TAS_ACTIVATE_VERSION || (r->pre_activation != AVB_TAS_PRE_HOLD && r->pre_activation != AVB_TAS_PRE_PASS)) {
+        return AVB_TAS_ACT_INVALID;
+    }
+    if (r->reserved != 0 &&
+        (!fault_injection || r->reserved > (r->pre_activation == AVB_TAS_PRE_PASS ? I226_TAS_PASS_WRITES : I226_TAS_HOLD_WRITES))) {
         return AVB_TAS_ACT_INVALID;
     }
     if (r->cycle_ns == 0 || r->cycle_ns > I226_TAS_QBV_CYCLE_MAX ||
@@ -67,6 +79,44 @@ static __inline avb_u32 i226_tas_validate(const AVB_TAS_ACTIVATE_REQUEST *r)
         return AVB_TAS_ACT_INVALID;
     }
     return AVB_TAS_ACT_COMMITTED;
+}
+
+/* The rule every Release driver applies */
+static __inline avb_u32 i226_tas_validate(const AVB_TAS_ACTIVATE_REQUEST *r)
+{
+    return i226_tas_validate_with(r, 0);
+}
+
+/* The fault path: write number fail_at and the one after it fail. The schedule stops at its first failure, so the one
+ * after it is the first restore write */
+typedef struct {
+    const I226_TAS_IO *inner;
+    avb_u32 fail_at, writes;
+} I226_TAS_FAULT;
+
+static __inline int i226_tas_fault_read(void *ctx, avb_u32 offset, avb_u32 *value)
+{
+    const I226_TAS_FAULT *f = (const I226_TAS_FAULT *)ctx;
+
+    return f->inner->read(f->inner->ctx, offset, value);
+}
+
+static __inline int i226_tas_fault_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    I226_TAS_FAULT *f = (I226_TAS_FAULT *)ctx;
+
+    f->writes++;
+    if (f->writes == f->fail_at || f->writes == f->fail_at + 1u) {
+        return -1;
+    }
+    return f->inner->write(f->inner->ctx, offset, value);
+}
+
+static __inline int i226_tas_fault_phc(void *ctx, avb_u64 *ns)
+{
+    const I226_TAS_FAULT *f = (const I226_TAS_FAULT *)ctx;
+
+    return f->inner->phc(f->inner->ctx, ns);
 }
 
 typedef struct {
@@ -152,11 +202,24 @@ static __inline void i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_R
 {
     I226_TAS_SAVED saved[I226_TAS_SAVED_COUNT];
     avb_u64 phc = 0, after = 0;
+    I226_TAS_FAULT fault;
+    I226_TAS_IO faulty;
 
     r->phc_at_commit_ns = 0;
-    r->result = i226_tas_validate(r);
+    r->result = i226_tas_validate_with(r, io->fault_injection);
     if (r->result != AVB_TAS_ACT_COMMITTED) {
         return;
+    }
+    if (r->reserved != 0) {   /* validation allowed it, so this is a Debug driver */
+        fault.inner = io;
+        fault.fail_at = r->reserved;
+        fault.writes = 0;
+        faulty.ctx = &fault;
+        faulty.read = i226_tas_fault_read;
+        faulty.write = i226_tas_fault_write;
+        faulty.phc = i226_tas_fault_phc;
+        faulty.fault_injection = io->fault_injection;
+        io = &faulty;
     }
     if (armed || !i226_tas_read_clean(io, saved) || io->phc(io->ctx, &phc) != 0) {
         r->result = AVB_TAS_ACT_NOT_CLEAN;

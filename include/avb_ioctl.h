@@ -210,7 +210,7 @@ typedef struct AVB_TAS_ACTIVATE_REQUEST {
     avb_u32 cycle_ns;                         /* in */
     avb_u32 link_mbps;                        /* in: current link rate, for the minimum window */
     avb_u32 max_frame_bytes;                  /* in: largest frame in the queues, on the wire */
-    avb_u32 reserved;                         /* in: 0 */
+    avb_u32 reserved;                         /* in: 0. Debug drivers only: N fails write N and the first restore write (#357) */
     avb_u32 window_start_ns[AVB_TAS_QUEUES];  /* in: open time within the cycle, queues 0 to 3 */
     avb_u32 window_end_ns[AVB_TAS_QUEUES];    /* in: close time within the cycle */
     avb_u64 phc_at_commit_ns;                 /* out: PHC read after the commit write, 0 if none */

@@ -622,9 +622,15 @@ static void activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request
     io.read = activate_read;
     io.write = activate_write;
     io.phc = activate_phc;
+#if DBG
+    io.fault_injection = 1;   /* the #357 HIL fault path; a Release driver refuses a nonzero reserved word */
+#else
+    io.fault_injection = 0;
+#endif
     i226_tas_activate(&io, request, armed);
-    DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u result=%u phcAtCommit=%llu\n", request->pre_activation,
-           (unsigned long long)request->base_time_ns, request->cycle_ns, request->result, (unsigned long long)request->phc_at_commit_ns);
+    DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u fault=%u result=%u phcAtCommit=%llu\n", request->pre_activation,
+           (unsigned long long)request->base_time_ns, request->cycle_ns, request->reserved, request->result,
+           (unsigned long long)request->phc_at_commit_ns);
 }
 
 /**
