@@ -16,6 +16,7 @@
 
 #include "../include/avb_ioctl.h"
 #include "../intel-ethernet-regs/gen/i226_regs.h"
+#include "../src/avb_tas_activate_state.h"
 
 typedef struct {
     void *ctx;
@@ -35,8 +36,9 @@ typedef struct {
 static __inline avb_u32 i226_tas_validate(const AVB_TAS_ACTIVATE_REQUEST *r)
 {
     avb_u32 q, floor_bytes;
+    struct tsn_tas_config gcl;
 
-    if (r->version != AVB_TAS_ACTIVATE_VERSION || (r->pre_activation != AVB_TAS_PRE_HOLD && r->pre_activation != AVB_TAS_PRE_PASS)) {
+    if (r->version != AVB_TAS_ACTIVATE_VERSION || r->reserved != 0 || (r->pre_activation != AVB_TAS_PRE_HOLD && r->pre_activation != AVB_TAS_PRE_PASS)) {
         return AVB_TAS_ACT_INVALID;
     }
     if (r->cycle_ns == 0 || r->cycle_ns > I226_TAS_QBV_CYCLE_MAX ||
@@ -59,6 +61,10 @@ static __inline avb_u32 i226_tas_validate(const AVB_TAS_ACTIVATE_REQUEST *r)
         if ((avb_u64)(end - start) * r->link_mbps <= (avb_u64)floor_bytes * I226_TAS_WINDOW_FACTOR) {
             return AVB_TAS_ACT_INVALID;
         }
+    }
+    /* GET_TAS_STATE must be able to report what is written: more intervals than gate list entries is refused */
+    if (!avb_tas_gcl_from_windows(r, &gcl)) {
+        return AVB_TAS_ACT_INVALID;
     }
     return AVB_TAS_ACT_COMMITTED;
 }
@@ -164,10 +170,13 @@ static __inline void i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_R
         r->result = i226_tas_restore(io, saved);
         return;
     }
-    if (io->phc(io->ctx, &after) == 0) {
-        r->phc_at_commit_ns = after;
-        if (after >= r->base_time_ns) {
-            r->result = AVB_TAS_ACT_BASE_PASSED;
-        }
+    /* The schedule is written either way. A failed read only removes the timing evidence, and never triggers a rollback */
+    if (io->phc(io->ctx, &after) != 0) {
+        r->result = AVB_TAS_ACT_COMMITTED_UNTIMED;
+        return;
+    }
+    r->phc_at_commit_ns = after;
+    if (after >= r->base_time_ns) {
+        r->result = AVB_TAS_ACT_BASE_PASSED;
     }
 }

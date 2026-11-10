@@ -589,6 +589,7 @@ typedef struct {
     BOOL read_fails, phc_fails;
     avb_u64 phc_first, phc_later;
     unsigned phc_reads;
+    unsigned phc_fail_from;   /* nonzero: PHC reads from this number on fail, the first read is number 1 */
 } FAKE_HW;
 
 static int fake_read(void *c, avb_u32 off, avb_u32 *v) {
@@ -613,6 +614,7 @@ static int fake_write(void *c, avb_u32 off, avb_u32 v) {
 static int fake_phc(void *c, avb_u64 *ns) {
     FAKE_HW *f = (FAKE_HW *)c;
     if (f->phc_fails) return -1;
+    if (f->phc_fail_from != 0 && f->phc_reads + 1 >= f->phc_fail_from) { f->phc_reads++; return -1; }
     *ns = f->phc_reads++ == 0 ? f->phc_first : f->phc_later;
     return 0;
 }
@@ -795,6 +797,76 @@ static void test_33_activate_time(void) {
     EXPECT_EQ("BaseT passed while writing", g_act.result, AVB_TAS_ACT_BASE_PASSED);
 }
 
+/* TC-MOCK-045: the request is validated in full before anything is read or written, including the reserved word and the BaseT width */
+static void test_45_activate_fields(void) {
+    printf("\n[TC-MOCK-045] Reserved word and BaseT width\n");
+    act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 1;
+    EXPECT_EQ("reserved word not 0", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0xFFFFFFFFULL * 1000000000ULL + 999999999ULL;
+    EXPECT_EQ("BaseT seconds at the 32-bit field limit", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0x100000000ULL * 1000000000ULL;
+    EXPECT_EQ("BaseT seconds one past the field", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0xFFFFFFFFULL * 1000000000ULL + 7ULL;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("committed at the limit", g_act.result, AVB_TAS_ACT_COMMITTED);
+    EXPECT_EQ("BASET_H holds the full seconds", g_hw.reg[I226_BASET_H / 4], 0xFFFFFFFFu);
+    EXPECT_EQ("BASET_L the nanoseconds", g_hw.reg[I226_BASET_L / 4], 7);
+}
+
+/* TC-MOCK-046: a schedule written but not timed is reported as such, and stays written */
+static void test_46_activate_untimed(void) {
+    unsigned writes;
+
+    printf("\n[TC-MOCK-046] PHC unreadable after the commit\n");
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.phc_fail_from = 2;
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    writes = g_hw.writes;
+    EXPECT_EQ("committed without timing evidence", g_act.result, AVB_TAS_ACT_COMMITTED_UNTIMED);
+    EXPECT_TRUE("no PHC time claimed", g_act.phc_at_commit_ns == 0);
+    EXPECT_EQ("no rollback: the 13 schedule writes only", writes, 13);
+    EXPECT_EQ("the schedule stays in the registers", g_hw.reg[I226_TQAVCTRL / 4], 0x09);
+}
+
+/* TC-MOCK-047: what each activation result leaves the adapter's TAS state as */
+static void test_47_activate_state(void) {
+    printf("\n[TC-MOCK-047] Adapter TAS state after an activation result\n");
+    EXPECT_EQ("committed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("committed untimed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED_UNTIMED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("BaseT passed still arms: the schedule was written", avb_tas_state_after(AVB_TAS_ACT_BASE_PASSED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("a failed restore leaves the state unknown", avb_tas_state_after(AVB_TAS_ACT_FAILED_NOT_RESTORED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("a verified restore changes nothing", avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_CLEAN);
+    EXPECT_EQ("a refusal changes nothing", avb_tas_state_after(AVB_TAS_ACT_INVALID, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_CLEAN);
+    EXPECT_EQ("not clean changes nothing", avb_tas_state_after(AVB_TAS_ACT_NOT_CLEAN, AVB_TAS_STATE_ARMED), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("busy changes nothing", avb_tas_state_after(AVB_TAS_ACT_BUSY, AVB_TAS_STATE_DIRTY), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("an unknown result is never clean", avb_tas_state_after(99u, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_DIRTY);
+}
+
+/* TC-MOCK-048: the state query reports the programmed windows as a gate list, or the request is refused before any write */
+static void test_48_activate_gcl(void) {
+    struct tsn_tas_config c;
+
+    printf("\n[TC-MOCK-048] Windows as the gate list GET_TAS_STATE reports\n");
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 7250000000ULL;
+    EXPECT_TRUE("the shared schedule fits", avb_tas_gcl_from_windows(&g_act, &c));
+    EXPECT_TRUE("base and cycle", c.base_time_s == 7 && c.base_time_ns == 250000000 && c.cycle_time_s == 1 && c.cycle_time_ns == 0);
+    EXPECT_TRUE("closed, open on all four queues, closed",
+                c.gate_states[0] == 0x00 && c.gate_durations[0] == 200000000 && c.gate_states[1] == 0x0F && c.gate_durations[1] == 200000000 &&
+                c.gate_states[2] == 0x00 && c.gate_durations[2] == 600000000 && c.gate_durations[3] == 0);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.window_start_ns[0] = 0; g_act.window_end_ns[0] = 100000000;
+    EXPECT_TRUE("different windows per queue fit", avb_tas_gcl_from_windows(&g_act, &c));
+    EXPECT_TRUE("queue 0 alone, nothing, the other three, nothing",
+                c.gate_states[0] == 0x01 && c.gate_durations[0] == 100000000 && c.gate_states[1] == 0x00 && c.gate_durations[1] == 100000000 &&
+                c.gate_states[2] == 0x0E && c.gate_durations[2] == 200000000 && c.gate_states[3] == 0x00 && c.gate_durations[3] == 600000000);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.cycle_ns = 500000000u;
+    g_act.window_start_ns[0] = 10000000; g_act.window_end_ns[0] = 20000000; g_act.window_start_ns[1] = 30000000; g_act.window_end_ns[1] = 40000000;
+    g_act.window_start_ns[2] = 50000000; g_act.window_end_ns[2] = 60000000; g_act.window_start_ns[3] = 70000000; g_act.window_end_ns[3] = 80000000;
+    EXPECT_TRUE("nine intervals do not fit eight entries", !avb_tas_gcl_from_windows(&g_act, &c));
+    EXPECT_EQ("and validation refuses that request", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("before any write", g_hw.writes, 0);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -823,6 +895,10 @@ int main(void) {
     test_31_activate_pass();
     test_32_activate_failure();
     test_33_activate_time();
+    test_45_activate_fields();
+    test_46_activate_untimed();
+    test_47_activate_state();
+    test_48_activate_gcl();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

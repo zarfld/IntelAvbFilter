@@ -184,7 +184,9 @@ typedef struct _IOCTL_VERSION {
  * pre_activation has no default: the caller chooses HOLD or PASS. Written as a schedule of one window per queue per cycle.
  * The IOCTL succeeds whenever it ran, and result says what happened, because METHOD_BUFFERED drops the output on an error
  * status. Only COMMITTED and BASE_PASSED leave a schedule behind. */
-#define IOCTL_AVB_TAS_ACTIVATE          _NDIS_CONTROL_CODE(71, METHOD_BUFFERED)  /* 0x0017011C */
+/* A mutating operation, so FILE_WRITE_ACCESS: the I/O manager delivers it only on a handle opened with write access (CTL_CODE
+ * RequiredAccess, Microsoft "Defining I/O Control Codes"). Existing codes keep FILE_ANY_ACCESS, since changing one changes its value */
+#define IOCTL_AVB_TAS_ACTIVATE          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 71, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017811C (#357, #362) */
 
 #define AVB_TAS_ACTIVATE_VERSION 1u
 #define AVB_TAS_QUEUES           4u
@@ -198,6 +200,8 @@ typedef struct _IOCTL_VERSION {
 #define AVB_TAS_ACT_FAILED_RESTORED     3u  /* a write failed before commit, every register read back at its old value */
 #define AVB_TAS_ACT_FAILED_NOT_RESTORED 4u  /* a write failed before commit and the restore did not complete */
 #define AVB_TAS_ACT_BASE_PASSED         5u  /* schedule written, but the PHC had passed BaseT at the read after commit */
+#define AVB_TAS_ACT_COMMITTED_UNTIMED   6u  /* schedule written, but the PHC read after the commit failed: whether BaseT was still ahead is unknown */
+#define AVB_TAS_ACT_BUSY                7u  /* refused: another TAS operation holds this adapter. Nothing read or written */
 
 typedef struct AVB_TAS_ACTIVATE_REQUEST {
     avb_u32 version;                          /* in: AVB_TAS_ACTIVATE_VERSION */
@@ -518,8 +522,13 @@ typedef struct AVB_TAS_REQUEST {
 /* TAS state query response (IOCTL_AVB_GET_TAS_STATE).
  * Returns driver-tracked armed state and last programmed GCL parameters.
  * No input fields required; output only. */
+/* Values of AVB_TAS_STATE.armed. Any nonzero value means the adapter is not clean */
+#define AVB_TAS_STATE_CLEAN 0u   /* no TAS operation of this driver left state behind */
+#define AVB_TAS_STATE_ARMED 1u   /* a schedule was written: by IOCTL_AVB_SETUP_TAS, or by IOCTL_AVB_TAS_ACTIVATE (#357) */
+#define AVB_TAS_STATE_DIRTY 2u   /* a TAS operation failed and its restore did not complete: hardware state unknown, a NIC cycle is owed */
+
 typedef struct AVB_TAS_STATE {
-    avb_u32               armed;   /* out: 1=TAS was armed by IOCTL_AVB_SETUP_TAS, 0=not armed or disarmed */
+    avb_u32               armed;   /* out: AVB_TAS_STATE_CLEAN, _ARMED or _DIRTY */
     struct tsn_tas_config  config;  /* out: last programmed GCL (valid only when armed=1) */
     avb_u32               status;  /* out: NDIS_STATUS value */
 } AVB_TAS_STATE, *PAVB_TAS_STATE;

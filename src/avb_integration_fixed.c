@@ -24,6 +24,7 @@ Abstract:
 #include "devices/intel_device_interface.h"  // For intel_device_ops_t and intel_get_device_ops()
 #include <ntstrsafe.h>
 #include "src/avb_hw_snapshot.h"  // IOCTL_AVB_QUERY_HW_SNAPSHOT builder (family-independent, read-only)
+#include "src/avb_tas_activate_state.h"  // TAS state after IOCTL_AVB_TAS_ACTIVATE, shared with its offline cases (#357)
 
 // Generic register offsets (common across Intel devices)
 #define INTEL_GENERIC_CTRL_REG      0x00000  // Device control register (all Intel devices)
@@ -3115,6 +3116,10 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 if (AvbContext == NULL) {
                     disarm->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
                     status = STATUS_DEVICE_NOT_CONNECTED;
+                } else if (InterlockedCompareExchange(&AvbContext->tas_op_claim, 1, 0) != 0) {
+                    /* ADR-TSN-002: DISARM_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
+                    disarm->status = (avb_u32)STATUS_DEVICE_BUSY;
+                    status = STATUS_DEVICE_BUSY;
                 } else {
                     const intel_device_ops_t *ops =
                         intel_get_device_ops(AvbContext->intel_device.device_type);
@@ -3167,6 +3172,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         status = STATUS_NOT_SUPPORTED;
                         /* tas_armed NOT cleared — state is indeterminate */
                     }
+                    InterlockedExchange(&AvbContext->tas_op_claim, 0);
                 }
                 info = sizeof(AVB_DISARM_TAS_REQUEST);
                 if (status == STATUS_SUCCESS) {
@@ -4313,9 +4319,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     DEBUGP(DL_ERROR, "? TAS SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
+                } else if (InterlockedCompareExchange(&activeContext->tas_op_claim, 1, 0) != 0) {
+                    /* ADR-TSN-002: SETUP_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
+                    status = STATUS_DEVICE_BUSY;
                 } else {
                     PAVB_TAS_REQUEST r = (PAVB_TAS_REQUEST)buf;
-                    
+
                     // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_TRACE, "?? TAS SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
@@ -4349,10 +4358,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                    (unsigned)r->config.cycle_time_s,
                                    (unsigned)r->config.cycle_time_ns);
                             DEBUGP(DL_TRACE, "? TAS configuration successful\n");
-                            /* Record armed state for test-state-restoration (fix #328 / A9) */
-                            InterlockedExchange(&activeContext->tas_armed, 1);
-                            /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
-                            RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
+                            /* Record armed state for test-state-restoration (fix #328 / A9). Arms from clean only: a dirty
+                             * adapter stays dirty (#357), since this write does not make an unknown state known */
+                            if (InterlockedCompareExchange(&activeContext->tas_armed, AVB_TAS_STATE_ARMED, AVB_TAS_STATE_CLEAN) != AVB_TAS_STATE_DIRTY) {
+                                /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
+                                RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
+                            }
                         } else {
                             DEBUGP(DL_ERROR, "? TAS setup failed: %d\n", rc);
                             
@@ -4376,8 +4387,9 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             }
                         }
                     }
-                    
+
                     info = sizeof(*r);
+                    InterlockedExchange(&activeContext->tas_op_claim, 0);
                 }
             }
         }
@@ -4399,16 +4411,28 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 status = STATUS_NOT_SUPPORTED;
             } else if (ops == NULL || ops->activate_tas == NULL) {
                 status = STATUS_NOT_IMPLEMENTED;
-            } else {
-                ops->activate_tas(&activeContext->intel_device, r, InterlockedCompareExchange(&activeContext->tas_armed, 0, 0) != 0);
+            } else if (InterlockedCompareExchange(&activeContext->tas_op_claim, 1, 0) != 0) {
+                /* Another TAS operation holds this adapter: refuse without reading or writing anything */
+                r->phc_at_commit_ns = 0;
+                r->result = AVB_TAS_ACT_BUSY;
                 r->status = (avb_u32)STATUS_SUCCESS;
-                if (r->result == AVB_TAS_ACT_COMMITTED || r->result == AVB_TAS_ACT_BASE_PASSED) {
+                info = sizeof(*r);
+            } else {
+                avb_u32 before = (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0);
+                avb_u32 after;
+
+                /* Armed and dirty are both not clean, so the device code refuses without writing */
+                ops->activate_tas(&activeContext->intel_device, r, before != AVB_TAS_STATE_CLEAN);
+                r->status = (avb_u32)STATUS_SUCCESS;
+                after = avb_tas_state_after(r->result, before);
+                if (after == AVB_TAS_STATE_ARMED && before != AVB_TAS_STATE_ARMED) {
+                    /* The full gate list of what was written; validation already refused anything that does not fit */
+                    (void)avb_tas_gcl_from_windows(r, &activeContext->last_tas_config);
+                } else if (after == AVB_TAS_STATE_DIRTY) {
                     RtlZeroMemory(&activeContext->last_tas_config, sizeof(activeContext->last_tas_config));
-                    activeContext->last_tas_config.base_time_s = r->base_time_ns / 1000000000ULL;
-                    activeContext->last_tas_config.base_time_ns = (avb_u32)(r->base_time_ns % 1000000000ULL);
-                    activeContext->last_tas_config.cycle_time_ns = r->cycle_ns;
-                    InterlockedExchange(&activeContext->tas_armed, 1);
                 }
+                InterlockedExchange(&activeContext->tas_armed, (LONG)after);
+                InterlockedExchange(&activeContext->tas_op_claim, 0);
                 info = sizeof(*r);
             }
         }

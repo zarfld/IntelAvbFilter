@@ -324,7 +324,12 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * for snapshot/restore verification.
      * Access: InterlockedExchange/InterlockedOr (may be read at DISPATCH_LEVEL).
      */
-    volatile LONG tas_armed;
+    volatile LONG tas_armed;   /* AVB_TAS_STATE_CLEAN, _ARMED or _DIRTY (include/avb_ioctl.h) */
+
+    /* One mutating TAS operation per adapter across all handles, claimed at entry without waiting (ADR-TSN-002, #357).
+     * Held by IOCTL_AVB_TAS_ACTIVATE, IOCTL_AVB_SETUP_TAS and IOCTL_AVB_DISARM_TAS from their state check to their published
+     * state, so two of them can never interleave register writes, rollbacks or state updates. 0 free, 1 held. */
+    volatile LONG tas_op_claim;
 
     /* Last programmed TAS GCL parameters (valid when tas_armed==1).
      * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */
