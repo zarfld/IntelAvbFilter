@@ -716,6 +716,8 @@ Written 2026-11-10, before any C or D code or run, as Q required, and corrected 
 
 Labels: **observed** is hardware evidence on I226-LM REV_04 with its count; **predicted** follows from observations and has not been seen; **unverified** is a mechanism with no hardware evidence for this use.
 
+Correction, 2026-11-10: this section first said the PHC reseed was observed 11 of 11. Counted from the run logs it is 9 of 9: six Case A runs and three drained Case B runs, 9.251 to 9.340 s. The other figures were not affected.
+
 ### Three phases, every way out
 
 | Phase | Kind | Contents | Ends with |
@@ -763,7 +765,7 @@ Conclusion: a usable test-owned recovery mechanism for C and D once explicitly a
 
 | Scenario | Status | Evidence | Consequence |
 |---|---|---|---|
-| Restart reseeds the PHC | Observed | 11 of 11 Restarts, to 9.25 to 9.34 s, with and without `SETUP_TAS` | Expected in every run |
+| Restart reseeds the PHC | Observed | 9 of 9 Restarts, to 9.25 to 9.34 s, with and without `SETUP_TAS` | Expected in every run |
 | The schedule survives Restart | Unverified for a schedule | Under `SETUP_TAS` all 40 TSN registers survived, 3 of 3 | Assumed for safety |
 | Reseed below BaseT with the schedule kept | Predicted | From the two rows above | TX held until the PHC reaches BaseT, as in #349 |
 | No reseed, or one above BaseT | Not observed | | The schedule runs on; no extra hold |
@@ -771,11 +773,11 @@ Conclusion: a usable test-owned recovery mechanism for C and D once explicitly a
 | A window write on a running schedule | Observed | Read back but did not apply, 29 s and more; only a future BaseT replaced a schedule, 6 of 6 | Readback never shows the schedule in force |
 | Schedule survives a NIC cycle | Observed | 1 of 41 cycles, #349; a second cycle cleared it, 1 of 1 | Recovery can need two cycles |
 
-**2. Upper bound on a hold, and its evidence. Predicted.** After a reseed to R with BaseT kept at B, frames are held until the PHC reaches B, then until the next window opens: at most (B − R) / 1.0293 + 1 s of host time. R is 9.25 to 9.34 s, 11 of 11; the rate 1.0293 is from 3 runs. B is set 2 to 3 s ahead of the PHC when the schedule is written, so the bound depends on the PHC at that moment. **Rule: the tool refuses to write a schedule when the PHC reads above 60 s**, which keeps the bound under (63 − 9.25) / 1.0293 + 1 ≈ 53 s. That is a prediction from 11 reseeds, not a guarantee: a reseed elsewhere invalidates it, which point 3 detects. A fresh NIC cycle leaves the PHC near 9.3 s, so a run started straight after one passes this rule.
+**2. Upper bound on a hold, and its evidence. Predicted.** After a reseed to R with BaseT kept at B, frames are held until the PHC reaches B, then until the next window opens: at most (B − R) / 1.0293 + 1 s of host time. R is 9.25 to 9.34 s, 9 of 9; the rate 1.0293 is from 3 runs. B is set 2 to 3 s ahead of the PHC when the schedule is written, so the bound depends on the PHC at that moment. **Rule: the tool refuses to write a schedule when the PHC reads above 60 s**, which keeps the bound under (63 − 9.25) / 1.0293 + 1 ≈ 53 s. That is a prediction from 9 reseeds, not a guarantee: a reseed elsewhere invalidates it, which point 3 detects. A fresh NIC cycle leaves the PHC near 9.3 s, so a run started straight after one passes this rule.
 
 **3. Detecting a stalled schedule.** After the trigger the tool sends tagged frames every 50 ms for at least the computed bound plus 2 s, and reports TX as stalled when none reaches the observer for longer than one cycle past the predicted release. Supporting, never deciding: gauge rising, TDH frozen while TDT moves, BASET_H and BASET_L against the PHC. The observer must keep capturing other frames meanwhile, or the run is INCONCLUSIVE rather than stalled.
 
-**4. Bounded test-owned cleanup on success, failure and timeout.** The three phases above, on every way out, with the trigger thread stopped within 5 s first. Phase 2 uses the operator block until another mechanism is approved. The verdict is `CLEANUP_FAILED` while TSN mode stays set, and at best `CLEANUP_FAILED` after a cycle, because the PHC is reset (D9, observed 11 of 11).
+**4. Bounded test-owned cleanup on success, failure and timeout.** The three phases above, on every way out, with the trigger thread stopped within 5 s first. Phase 2 uses the operator block until another mechanism is approved. The verdict is `CLEANUP_FAILED` while TSN mode stays set, and at best `CLEANUP_FAILED` after a cycle, because the PHC is reset (D9, observed 9 of 9).
 
 **5. A NIC or PnP operation that outlives its thread.** The operator block stops at the first failure, and a `Disable-NetAdapter` that does not return is never followed by enable. `restore()` behaves the same way through its bounded threads, if approved. In both, a timeout ends the waiting, not the kernel operation: further NDIS operations wait for Q, and a reboot is Q's decision.
 

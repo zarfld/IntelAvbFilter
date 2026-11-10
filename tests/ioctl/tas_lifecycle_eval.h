@@ -754,7 +754,7 @@ static __inline BOOL tas_cd_schedule_proven(unsigned inside, unsigned outside, u
 }
 
 /*
- * The hold bound. A Restart reseeded the PHC to 9.25 to 9.34 s, 11 of 11, and the PHC runs 1.0293 times fast, 3 runs. With
+ * The hold bound. A Restart reseeded the PHC to 9.25 to 9.34 s, 9 of 9, and the PHC runs 1.0293 times fast, 3 runs. With
  * BaseT kept above the reseed, frames wait until the PHC reaches BaseT and then until the window opens. A prediction from
  * those observations, never a guarantee: the run must still detect a stall (tas_cd_tx_state).
  */
