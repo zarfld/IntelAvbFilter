@@ -39,7 +39,8 @@ static __inline avb_u32 i226_tas_validate(const AVB_TAS_ACTIVATE_REQUEST *r)
     if (r->version != AVB_TAS_ACTIVATE_VERSION || (r->pre_activation != AVB_TAS_PRE_HOLD && r->pre_activation != AVB_TAS_PRE_PASS)) {
         return AVB_TAS_ACT_INVALID;
     }
-    if (r->cycle_ns == 0 || r->cycle_ns > I226_TAS_QBV_CYCLE_MAX) {
+    if (r->cycle_ns == 0 || r->cycle_ns > I226_TAS_QBV_CYCLE_MAX ||
+        r->base_time_ns / I226_TAS_NS_PER_SEC > 0xFFFFFFFFULL) {
         return AVB_TAS_ACT_INVALID;
     }
     if (r->link_mbps != 10 && r->link_mbps != 100 && r->link_mbps != 1000 && r->link_mbps != 2500) {
