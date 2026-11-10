@@ -712,29 +712,72 @@ The dry run after run 4's NIC cycle: tasArmed 0, 49 of 49 frames, 1 of 40 TSN re
 
 ## Cases C and D: safety analysis and plan
 
-Written 2026-11-10, before any C or D code or run, as Q required. Design basis: the shared schedule of `logs/tas-case-cd-design-20261106.md`, 1 s cycle, window 200 to 400 ms on every queue, future BaseT, TQAVCTRL 0x09, no FutScdDis, written through `tas_gate_investigation`'s Debug-only WRITE_REGISTER. Counts are hardware runs on I226-LM REV_04 unless marked otherwise.
+Written 2026-11-10, before any C or D code or run, as Q required, and corrected the same day: the first version imposed a read-only cleanup rule that the repository does not have. Testing skill section E requires every state-changing test to restore the state it changed, on success, failure, exception and timeout, and to verify restoration independently against hardware; the driver owns the disable, disarm and restore mechanisms. Design basis: the shared schedule of `logs/tas-case-cd-design-20261106.md`, 1 s cycle, window 200 to 400 ms on every queue, future BaseT, TQAVCTRL 0x09, no FutScdDis, written through `tas_gate_investigation`'s Debug-only WRITE_REGISTER.
+
+Labels: **observed** is hardware evidence on I226-LM REV_04 with its count; **predicted** follows from observations and has not been seen; **unverified** is a mechanism with no hardware evidence for this use.
+
+### Three phases, every way out
+
+| Phase | Kind | Contents | Ends with |
+|---|---|---|---|
+| 1. Evidence | Read-only | The original verdicts; registers, tasArmed, PHC pairs, ring, gauge and TX, each only where the read gate allows; NDIS trace closed and decoded | Every file written and checksummed **before** phase 2 starts |
+| 2. Cleanup and recovery | Mutating, classified Unsafe | Stop sending. Then the recovery mechanism, below. Its own outcome is recorded: done, failed, timed out, not attempted | Its record, kept whatever phase 3 finds |
+| 3. Restoration verification | Read-only | Against the phase 0 baseline: the 40 TSN registers, tasArmed, tagged TX on the proved observer, PHC continuity and driver-hardware agreement, each reported on its own | `RESTORATION_VERIFIED` only with all four facts of #361; else `CLEANUP_FAILED` or `INCONCLUSIVE_RESTORATION` |
+
+The original result never changes because of phase 2 or 3, and neither phase is skipped because phase 1 failed. No global halt follows a cleanup failure: the next run proves its own pre-state.
+
+**Recovery mechanism.** #364's established, operator-controlled procedure, the checked block of Case B, run straight after the test, followed by the dry run as phase 3. Another mechanism needs explicit approval: the two candidates are evaluated below.
+
+### `restore()` in `tas_gate_investigation`, evaluated
+
+| Aspect | Finding |
+|---|---|
+| What it does | Finds the target's devnode from its NET_LUID through the interface GUID and `PnPInstanceId`; `CM_Disable_DevNode`, then `CM_Enable_DevNode`, each on its own thread; then reads the 42-register table, tasArmed and the PHC and compares them with the baseline taken before the first write |
+| Bounds | Disable 120 s, enable 60 s, adapter return 60 s. A disable that does not return is never followed by enable, and says a reboot is the operator's decision. The abandoned call's state is static, so a late return cannot corrupt the stack |
+| Preconditions | Debug driver; a baseline taken before the first write, with TQAVCTRL and BaseT reading 0; the NET_LUID resolving to exactly one devnode; management on another adapter |
+| Evidence for the mechanism | **Observed** in the #328 runs: the cycle cleared `SETUP_TAS` holds and restored 42 registers, PHC reset each time; a schedule survived 1 of 41 cycles (#349) and a second cleared it, 1 of 1. **Observed** in Case B: the operator's `Disable-NetAdapter` path recovered 5 of 5 holds, gauge up to 954. **Unverified**: `CM_Disable_DevNode` after a Restart under a live schedule |
+| Risk 1 | A disable could block on a stack that cannot pause. Case B showed the restart path stalling under held frames; the disable path did not stall in 5 of 5, but under a schedule that is unverified. The bound limits the wait, not the kernel operation |
+| Risk 2 | An enable that times out leaves the target disabled. Management is elsewhere, so the host stays reachable; the adapter needs the operator |
+| Risk 3, verdict accuracy | It compares `TSYNCRXCTL` for equality, but bit 0 is a status bit the hardware sets and clears: a false difference, failing safe. And it judges the PHC with a fixed 2 s tolerance its own comment calls unsupported; after a cycle the PHC is always reset, so the false continuity it could claim is unlikely, but the rule is not hardware-derived. Under D9 its "restored" exit can never be complete restoration |
+| Risk 4 | It checks registers once after the cycle; a schedule that survives (#349) is reported, and nothing cycles again |
+| Classification | NIC administration: Unsafe, operator-started, inside a Diagnostic tool |
+
+Conclusion: a usable test-owned recovery mechanism for C and D once explicitly approved, provided its verdict feeds phase 3 rather than replacing it, and Risk 3 is reported, not trusted. Until approval the operator block is used, and the tool's phase 3 reads stay the same.
+
+**In-place release with an open schedule.** Writing a whole-cycle-open window with a new future BaseT replaced a running schedule 6 of 6 and released held frames (**observed**, without a Restart in between). After a reseed, whether a BaseT nearer than the kept one replaces it is **unverified**. TSN mode stays set and BaseT cannot be cleared in place, so it is never restoration; at most it ends a hold before the cycle. Not used without approval.
+
+### Cleanup capabilities the driver and hardware lack
+
+| Missing | Effect on C and D | Governing issue |
+|---|---|---|
+| Return to legacy transmit mode without a NIC cycle: I226 `disable_tas` returns `-ENOTSUP`, so `DISARM_TAS` is not supported | No in-place restoration; only a NIC cycle leaves TSN mode | #360 REQ-F-TAS-DISABLE-001, decided by #362 ADR-TSN-002 |
+| Open all gates through a dedicated IOCTL | An in-place release needs raw writes | #359 REQ-F-TAS-OPENALL-001 |
+| Replace a running schedule through a dedicated IOCTL | Same | #358 REQ-F-TAS-REPLACE-001 |
+| PHC kept across Restart: `init_ptp` writes SYSTIM | PHC continuity, so complete restoration, is unreachable | #348 |
+| Restoration reported from hardware | Phase 3 relies on Debug-only READ_REGISTER | #361 REQ-F-TAS-RESTORE-001, #353 REQ-NF-TAS-OBSERVE-001 |
+| A NIC cycle always clearing a schedule | Recovery can need a second cycle | #349, verified by #377 |
 
 ### The seven points
 
 **1. Failure scenarios: PHC reset, BaseT and an active gate.**
 
-| Scenario | Evidence | Consequence |
-|---|---|---|
-| Restart reseeds the PHC | 11 of 11 Restarts, to 9.25 to 9.34 s, with and without `SETUP_TAS` | Expected in every run |
-| The schedule survives Restart | Unknown for a schedule. Under `SETUP_TAS` all 40 TSN registers survived, 3 of 3 | Must be assumed |
-| Reseed below BaseT with the schedule kept | Not observed | TX held until the PHC reaches BaseT, as in #349 |
-| No reseed, or one above BaseT | Not observed | The schedule runs on; no extra hold |
-| Pause waits for held frames | Under `SETUP_TAS` with gauge above 0, no Pause in 60 s, 4 of 4, after NDIS accepted the restart (1 run) | Case D can stall before Pause. Under a running schedule the held frames leave at the next window, so a stall should end within one closed interval. That is the hypothesis Case D tests |
-| A window write on a running schedule | Writes read back but did not apply, 29 s and more; only a future BaseT replaced a schedule, 6 of 6 | Readback never shows the schedule in force |
-| Schedule survives a NIC cycle | 1 of 41 cycles, #349; a second cycle cleared it, 1 of 1 | Recovery can need two cycles |
+| Scenario | Status | Evidence | Consequence |
+|---|---|---|---|
+| Restart reseeds the PHC | Observed | 11 of 11 Restarts, to 9.25 to 9.34 s, with and without `SETUP_TAS` | Expected in every run |
+| The schedule survives Restart | Unverified for a schedule | Under `SETUP_TAS` all 40 TSN registers survived, 3 of 3 | Assumed for safety |
+| Reseed below BaseT with the schedule kept | Predicted | From the two rows above | TX held until the PHC reaches BaseT, as in #349 |
+| No reseed, or one above BaseT | Not observed | | The schedule runs on; no extra hold |
+| Pause waits for held frames | Observed under `SETUP_TAS`; predicted under a schedule | No Pause in 60 s with gauge above 0, 4 of 4, after NDIS accepted the restart, 1 of 1 | Under a running schedule the held frames should leave at the next window and the stall end within one closed interval. Case D tests this |
+| A window write on a running schedule | Observed | Read back but did not apply, 29 s and more; only a future BaseT replaced a schedule, 6 of 6 | Readback never shows the schedule in force |
+| Schedule survives a NIC cycle | Observed | 1 of 41 cycles, #349; a second cycle cleared it, 1 of 1 | Recovery can need two cycles |
 
-**2. Upper bound on a hold, and its evidence.** After a reseed to R with BaseT kept at B, frames are held until the PHC reaches B, then until the next window opens: at most (B − R) / 1.0293 + 1 s of host time. R is 9.25 to 9.34 s, 11 of 11; the rate 1.0293 is from 3 runs. B is set 2 to 3 s ahead of the PHC when the schedule is written, so the bound depends on the PHC at that moment. **Rule: the tool refuses to write a schedule when the PHC reads above 60 s**, which keeps the bound under (63 − 9.25) / 1.0293 + 1 ≈ 53 s. That is a prediction from 11 reseeds, not a guarantee: a reseed elsewhere invalidates it, which point 3 detects. A fresh NIC cycle leaves the PHC near 9.3 s, so a run started straight after one passes this rule.
+**2. Upper bound on a hold, and its evidence. Predicted.** After a reseed to R with BaseT kept at B, frames are held until the PHC reaches B, then until the next window opens: at most (B − R) / 1.0293 + 1 s of host time. R is 9.25 to 9.34 s, 11 of 11; the rate 1.0293 is from 3 runs. B is set 2 to 3 s ahead of the PHC when the schedule is written, so the bound depends on the PHC at that moment. **Rule: the tool refuses to write a schedule when the PHC reads above 60 s**, which keeps the bound under (63 − 9.25) / 1.0293 + 1 ≈ 53 s. That is a prediction from 11 reseeds, not a guarantee: a reseed elsewhere invalidates it, which point 3 detects. A fresh NIC cycle leaves the PHC near 9.3 s, so a run started straight after one passes this rule.
 
 **3. Detecting a stalled schedule.** After the trigger the tool sends tagged frames every 50 ms for at least the computed bound plus 2 s, and reports TX as stalled when none reaches the observer for longer than one cycle past the predicted release. Supporting, never deciding: gauge rising, TDH frozen while TDT moves, BASET_H and BASET_L against the PHC. The observer must keep capturing other frames meanwhile, or the run is INCONCLUSIVE rather than stalled.
 
-**4. Bounded test-owned cleanup on success, failure and timeout.** On every way out: stop sending, stop the trigger thread within 5 s, read registers, tasArmed, PHC and TX only when the read gate allows it, and print the original result next to the cleanup verdict. The verdict is `CLEANUP_FAILED` at best while TSN mode is set or the PHC was reset (D9). Whether the tool also releases a hold in place is the one open decision below.
+**4. Bounded test-owned cleanup on success, failure and timeout.** The three phases above, on every way out, with the trigger thread stopped within 5 s first. Phase 2 uses the operator block until another mechanism is approved. The verdict is `CLEANUP_FAILED` while TSN mode stays set, and at best `CLEANUP_FAILED` after a cycle, because the PHC is reset (D9, observed 11 of 11).
 
-**5. A NIC or PnP operation that outlives its thread.** No tool code path cycles an adapter in C or D. Recovery is the operator block of Case B, which stops at the first failure. A `Disable-NetAdapter` that does not return is never followed by enable, and further NDIS operations wait for Q. A reboot is Q's decision.
+**5. A NIC or PnP operation that outlives its thread.** The operator block stops at the first failure, and a `Disable-NetAdapter` that does not return is never followed by enable. `restore()` behaves the same way through its bounded threads, if approved. In both, a timeout ends the waiting, not the kernel operation: further NDIS operations wait for Q, and a reboot is Q's decision.
 
 **6. Recovery if the management session fails.** Management runs over the I219, `Ethernet`; only the I226, `Ethernet 3`, is mutated, and every run reports where the session runs. Nothing in the tool depends on the session, and all evidence is written locally. If the session drops, the run ends on its own bounds and the adapter stays as left until someone runs the recovery block. Physical access is UNKNOWN and is not assumed.
 
@@ -760,16 +803,11 @@ Written 2026-11-10, before any C or D code or run, as Q required. Design basis: 
 3. The lifecycle trigger and measurement restored from `1a93f56^`, the old `--lifecycle-a` path, for `--case-c` and `--case-d` only.
 4. The wrapper restored from `1a93f56^` for those two modes: readiness, lock, DbgView, NDIS trace, post checks and checksums. Its driver check must hash the service's `ImagePath`, which the runner does not.
 5. Its offline test restored without the 139 s: the interrupt cases waited on fixed sleeps, and those are the first thing to measure.
-6. Three runs each, test first and operator recovery after, as for Case B.
+6. Three runs each: the test, then the operator block as phase 2, then the dry run as phase 3. The tool itself implements phases 1 and 3 and records the outcome of phase 2.
 
-### Open decision
+### For approval
 
-The tool's existing `restore()` cycles the NIC through `CM_Disable_DevNode`, which conflicts with the read-only cleanup rule. Two ways to keep a test-owned cleanup without a cycle:
-
-- **A, read-only only:** facts and verdicts, then the operator block. Same as Case B.
-- **B, also release in place:** write a whole-cycle-open schedule with a new future BaseT before the read-only facts. That replaced a running schedule 5 of 5 times and releases held frames, but it is not restoration, TSN mode stays set, and after a reseed whether a nearer BaseT replaces a pending one is untested.
-
-Recommendation: A for the first runs, since B adds an untested transition to an already uncertain state.
+Using `restore()` as the in-tool phase 2 for C and D, with the conditions in its evaluation above. Until then, the operator block.
 
 ## Activation runs for #357
 
