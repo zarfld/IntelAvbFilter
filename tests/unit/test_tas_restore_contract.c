@@ -1019,6 +1019,71 @@ static void test_49_activate_fault(void) {
     EXPECT_TRUE("Debug: the commit write never reaches the hardware", commit_kept_out);
 }
 
+/* Every schedule write of one activation carries the request value it encodes. BASET_L: zeros before the last write */
+static int act_writes_carry_request(avb_u32 mode) {
+    static const avb_u32 start[AVB_TAS_QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
+    static const avb_u32 end[AVB_TAS_QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
+    avb_u32 base_ns = (avb_u32)(g_act.base_time_ns % NSEC_PER_SEC), base_s = (avb_u32)(g_act.base_time_ns / NSEC_PER_SEC);
+    unsigned i, q, ok;
+
+    i226_tas_activate(&g_io, &g_act, FALSE);
+    ok = g_act.result == AVB_TAS_ACT_COMMITTED &&
+         g_hw.writes == (mode == AVB_TAS_PRE_PASS ? I226_TAS_PASS_WRITES : I226_TAS_HOLD_WRITES) &&
+         g_hw.log_off[g_hw.writes - 1] == I226_BASET_L && g_hw.log_val[g_hw.writes - 1] == base_ns;
+    for (i = 0; ok && i + 1 < g_hw.writes; i++) {
+        avb_u32 off = g_hw.log_off[i], v = g_hw.log_val[i];
+
+        for (q = 0; q < AVB_TAS_QUEUES; q++) {
+            ok = ok && (off != start[q] || v == g_act.window_start_ns[q]) && (off != end[q] || v == g_act.window_end_ns[q]);
+        }
+        ok = ok && (off != I226_QBVCYCLET_S || v == g_act.cycle_ns) && (off != I226_QBVCYCLET || v == g_act.cycle_ns);
+        ok = ok && (off != I226_BASET_H || v == base_s) && (off != I226_BASET_L || v == 0);
+    }
+    return ok;
+}
+
+/*
+ * TC-MOCK-054: #357, #21. The STQT, ENDQT, QBVCYCLET_S, QBVCYCLET and BASET_L writes carry exactly the validated request
+ * value, with the bits outside the SSOT field (QBVCYCLET_S.PLUS1, BASET_L.AUTO_SET and COPY_H) clear, at the smallest and
+ * largest values validation accepts, in HOLD and in PASS
+ */
+static void test_54_activate_encoding(void) {
+    unsigned mode, edge, q;
+
+    printf("\n[TC-MOCK-054] Schedule writes carry the request value at the field limits\n");
+    for (mode = AVB_TAS_PRE_HOLD; mode <= AVB_TAS_PRE_PASS; mode++) {
+        for (edge = 0; edge < 2; edge++) {
+            act_setup(mode);
+            if (edge == 0) {
+                /* smallest: the shortest window validation accepts (64 byte frame, 2.5 Gbit/s) as the whole cycle, BaseT
+                 * nanoseconds 0 */
+                g_act.link_mbps = 2500;
+                g_act.max_frame_bytes = 64;
+                g_act.cycle_ns = 1803;
+                g_act.base_time_ns = 8000000000ULL;
+                for (q = 0; q < AVB_TAS_QUEUES; q++) {
+                    g_act.window_start_ns[q] = 0;
+                    g_act.window_end_ns[q] = 1803;
+                }
+            } else {
+                /* largest: the cycle at the QBVCYCLET field limit, windows ending there, BaseT at its last second and
+                 * nanosecond */
+                g_act.cycle_ns = (avb_u32)(I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT);
+                g_act.base_time_ns = 0xFFFFFFFFULL * 1000000000ULL + 999999999ULL;
+                for (q = 0; q < AVB_TAS_QUEUES; q++) {
+                    g_act.window_start_ns[q] = g_act.cycle_ns - 2000000u;
+                    g_act.window_end_ns[q] = g_act.cycle_ns;
+                }
+            }
+            EXPECT_EQ(edge == 0 ? "smallest values are valid" : "largest values are valid", i226_tas_validate(&g_act),
+                      AVB_TAS_ACT_COMMITTED);
+            EXPECT_TRUE(mode == AVB_TAS_PRE_HOLD ? "HOLD: every write carries its request value"
+                                                 : "PASS: every write carries its request value",
+                        act_writes_carry_request(mode));
+        }
+    }
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1056,6 +1121,7 @@ int main(void) {
     test_51_act_hold_wire();
     test_52_act_pass_wire();
     test_53_act_restore();
+    test_54_activate_encoding();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

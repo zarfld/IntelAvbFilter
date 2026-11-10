@@ -48,6 +48,10 @@ typedef struct {
 #define I226_TAS_HOLD_WRITES  I226_TAS_SAVED_COUNT
 #define I226_TAS_PASS_WRITES  (I226_TAS_HOLD_WRITES + 2u)
 
+/* The value written to a register whose one written field is FIELD: the SSOT field encoding, every other bit clear.
+ * Validation keeps each value inside its field, which TC-MOCK-054 checks at the field limits */
+#define I226_TAS_FIELD(REG, FIELD, value) ((avb_u32)REG##_SET(0, REG##_##FIELD##_MASK, REG##_##FIELD##_SHIFT, (value)))
+
 /* Every field of the request. Reads no hardware, so an invalid request changes nothing. fault_injection: see the top */
 static __inline avb_u32 i226_tas_validate_with(const AVB_TAS_ACTIVATE_REQUEST *r, int fault_injection)
 {
@@ -182,21 +186,23 @@ static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS
         return 1;
     }
     for (q = 0; q < AVB_TAS_QUEUES; q++) {
-        if (io->write(io->ctx, start[q], r->window_start_ns[q]) != 0 || io->write(io->ctx, end[q], r->window_end_ns[q]) != 0) {
+        if (io->write(io->ctx, start[q], I226_TAS_FIELD(I226_STQT, START_TIME, r->window_start_ns[q])) != 0 ||
+            io->write(io->ctx, end[q], I226_TAS_FIELD(I226_ENDQT, END_TIME, r->window_end_ns[q])) != 0) {
             return 1;
         }
     }
     if (r->pre_activation == AVB_TAS_PRE_PASS && io->write(io->ctx, I226_TQAVCTRL, mode | (avb_u32)I226_TQAVCTRL_FUTSCDDIS_MASK) != 0) {
         return 1;
     }
-    if (io->write(io->ctx, I226_QBVCYCLET_S, r->cycle_ns) != 0 || io->write(io->ctx, I226_QBVCYCLET, r->cycle_ns) != 0 ||
+    if (io->write(io->ctx, I226_QBVCYCLET_S, I226_TAS_FIELD(I226_QBVCYCLET_S, SHADOW_QBVCYCLE, r->cycle_ns)) != 0 ||
+        io->write(io->ctx, I226_QBVCYCLET, I226_TAS_FIELD(I226_QBVCYCLET, QBV_CYCLE_TIME, r->cycle_ns)) != 0 ||
         io->write(io->ctx, I226_BASET_H, (avb_u32)(r->base_time_ns / NSEC_PER_SEC)) != 0) {
         return 1;
     }
     if (r->pre_activation == AVB_TAS_PRE_PASS && io->write(io->ctx, I226_BASET_L, 0) != 0) {
         return 1;
     }
-    return io->write(io->ctx, I226_BASET_L, base_ns) != 0;
+    return io->write(io->ctx, I226_BASET_L, I226_TAS_FIELD(I226_BASET_L, BASE_TIME_L, base_ns)) != 0;
 }
 
 /* The whole operation. r->result always says what happened, and only a committed result leaves a schedule behind */
