@@ -721,8 +721,12 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     LONG captured = 0, from_target = 0;
 
     printf("\n=== adapter:%u did=0x%04X luid=0x%016llX ifIndex=%u ===\n", index, id->device_id, id->net_luid, id->if_index);
-    (void)find_devinst(id->net_luid, &inst);   /* the revision is evidence; selection is by capability */
     g_ran++;
+    if (!find_devinst(id->net_luid, &inst)) {
+        verdict("BLOCKED", "COMMIT", index, id->device_id,
+                "cannot resolve the adapter device node required for NIC-cycle cleanup");
+        return;
+    }
 
     /* Everything up to the activation is read-only or bounded TX: a BLOCKED here leaves the adapter untouched */
     h = open_bound(GENERIC_READ | GENERIC_WRITE, id->net_luid);
