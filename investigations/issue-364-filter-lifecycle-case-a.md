@@ -686,6 +686,24 @@ The Protocol keyword produced no event in any of the five runs that had it, held
 
 **Incident, held adapter left to CI.** The operator blocks cycled the adapter before each run, not after, so drained run 3's hold stayed until 21:04. HIL run 42359406277, for `81f89d2`, took the free lock at 10:21 and its Debug job failed at the driver deploy after 3 min 14 s, with a leftover `netcfg` inspected at job end. Its unit and integration tests never ran, so that CI result says nothing about `81f89d2`. An uninstall during an I226 hold is the #328 hang signature; this is one occurrence, recorded for #328, not claimed. From now on a block runs the test first and recovers after it, so no hold outlives a block.
 
+### Restart status, 2026-11-10
+
+The driver discarded the status of `NdisFRestartFilter` and reported success for a request that matched no instance. `--probe-restart-status`, TC-CASEA-004, sends one request for a name no instance has, after checking every instance with the driver's own matching rule, and requires not found with every adapter's counters unchanged.
+
+| Run | Source, driver | Result |
+|---|---|---|
+| RED, 2 runs | `a35c482`, Debug `1E064870` | FAIL: success for no instance, counters unchanged |
+| GREEN | `74bae7b`, Debug `2DAB5F08` | PASS: error 1168, counters unchanged |
+| GREEN | `74bae7b`, Release `C3950B3C` | PASS: error 1168, counters unchanged |
+| Case A | `74bae7b`, Debug | 001, 002 PASS, 003 CLEANUP_FAILED, as before; status word 0x00000000, 4 bytes |
+| Case B, run 4 | `74bae7b`, Debug | 001 PASS, 002 BLOCKED, 003 INCONCLUSIVE, 004 CLEANUP_FAILED; **`NdisFRestartFilter` returned NDIS_STATUS_SUCCESS**, then no Pause entry in 60 s, gauge 87 to 134 |
+
+So NDIS accepted the restart under a hold, one run, and the stall comes after that. The theory that the call failed is refuted for this run; why the stack does not pause stays open.
+
+The dry run after run 4's NIC cycle: tasArmed 0, 49 of 49 frames, 1 of 40 TSN registers different, `TSYNCRXCTL` 0x19 to 0x18, the receive timestamp status bit. Its INCONCLUSIVE came from one snapshot register changing during the dry run itself, with nothing written: the run did not say which, and its text wrongly said it stopped early. Both are fixed, and the dry run now names the register. That a register moves with nothing written bears on the `TRGTTIML0` investigation.
+
+**For #328, not this issue.** The canonical reinstall from Release back to Debug at 13:17 took 53 minutes, where every other reinstall today took about 20 s. The System log shows the adapters going down at 13:17:27 and nothing until the service install at 14:10:11, so the wait sits in the uninstall's `netcfg -u` of the Release driver, with all adapters disabled and no TAS armed under Release. One local occurrence of the symptom CI's Release deploys show.
+
 **Dry run with no NIC cycle, 09:38.** About 80 s after the Restart: 0 of 96 frames on the wire, gauge 173 then 226. It exposed two defects in the dry run, both fixed: it stopped before printing registers, tasArmed and PHC, and it reported PASS with nothing proved. That PASS stands in the 09:38 log and is no evidence.
 
 ## Activation runs for #357

@@ -1068,6 +1068,13 @@ static int lifecycle_target(const AVB_ADAPTER_IDENTITY_REQUEST *ids, const TAS_A
         ZeroMemory(&before, sizeof(before));
         (void)read_snapshot(h, &snap_after);
         tas_snapshot_compare(&snap_before, &snap_after, &compared, &changed, &unreadable);
+        for (i = 0; i < (int)AVB_HWREG_COUNT; i++) {
+            /* Nothing here writes, so a register that moves is the hardware's own: TRGTTIML0 did in Case A and in the runner */
+            if (snap_before.entries[i].value != snap_after.entries[i].value || snap_before.entries[i].state != snap_after.entries[i].state) {
+                printf("    snapshot id=%u before=0x%08X state=%u after=0x%08X state=%u\n", snap_before.entries[i].id, snap_before.entries[i].value, snap_before.entries[i].state,
+                       snap_after.entries[i].value, snap_after.entries[i].state);
+            }
+        }
         other_differs = report_others(ids, others, other_before, n, t);
         print_clock(h, "dry run");
         printf(TAG " fact register compared=%u changed=%u unreadable=%u\n", compared, changed, unreadable);
@@ -1634,7 +1641,7 @@ static int lifecycle_case_a(BOOL dry_run, BOOL passive)
                 BOOL proved = dry_run && results[i] == 0;
 
                 verdict(proved ? "PASS" : dry_run ? "INCONCLUSIVE" : "BLOCKED", g_tc_run, (int)i, ids[i].device_id,
-                        proved ? "dry run: instance and observer proved, nothing triggered" : dry_run ? "dry run stopped early, see the lines above; nothing was triggered" : "stopped before the trigger, see the lines above");
+                        proved ? "dry run: instance and observer proved, nothing triggered" : dry_run ? "dry run did not prove its facts, see the lines above; nothing was triggered" : "stopped before the trigger, see the lines above");
                 bad |= !proved;
             }
         }
