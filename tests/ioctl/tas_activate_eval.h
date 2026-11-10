@@ -147,3 +147,57 @@ static __inline const char *tas_act_wire_name(TAS_ACT_WIRE_CLASS w)
     default:                            return "NO_WINDOW";
     }
 }
+
+/*
+ * Restoration after the test's NIC cycle, as #361 states it: complete only when every schedule register reads its baseline and
+ * TSN mode is off, with TX shown on the wire; PHC discontinuity is a separate outcome and never decides restoration. Offline
+ * cases TC-MOCK-053. The older rule in tas_restoration_eval.h (#328, test_tas_isolated_arm) counts a PHC reset as a failed
+ * restoration and is not used here.
+ */
+typedef enum { TAS_ACT_PHC_UNMEASURED = 0, TAS_ACT_PHC_CONTINUOUS, TAS_ACT_PHC_DISCONTINUOUS } TAS_ACT_PHC_FACT;
+
+typedef struct {
+    BOOL cycle_completed;     /* disable and enable both returned success within their bounds */
+    BOOL adapter_returned;    /* same NET_LUID, device ID and MAC bound again */
+    BOOL driver_clean;        /* GET_TAS_STATE reports CLEAN */
+    BOOL regs_measured;       /* every schedule register was read back by a dedicated read-only query */
+    unsigned regs_differing;  /* schedule registers that differ from the pre-test baseline */
+    BOOL tsn_mode_off;        /* TQAVCTRL transmit mode reads legacy; meaningful only when regs_measured */
+    BOOL tx_probed;           /* tagged frames were sent and the observer was alive */
+    BOOL tx_on_wire;          /* the baseline share arrived, none held */
+    TAS_ACT_PHC_FACT phc;     /* reported, never used below */
+} TAS_ACT_RESTORE_EVIDENCE;
+
+typedef enum {
+    TAS_ACT_RESTORE_COMPLETE = 0,
+    TAS_ACT_RESTORE_INCOMPLETE,   /* an observed failure: residue, mode on, a dirty record, no TX, or no cycle */
+    TAS_ACT_RESTORE_UNVERIFIED    /* nothing observed failed, but the registers or the wire were not measured */
+} TAS_ACT_RESTORE_CLASS;
+
+static __inline TAS_ACT_RESTORE_CLASS tas_act_restore(const TAS_ACT_RESTORE_EVIDENCE *e)
+{
+    if (!e->cycle_completed || !e->adapter_returned || !e->driver_clean || (e->tx_probed && !e->tx_on_wire) ||
+        (e->regs_measured && (e->regs_differing != 0 || !e->tsn_mode_off))) {
+        return TAS_ACT_RESTORE_INCOMPLETE;
+    }
+    if (!e->regs_measured || !e->tx_probed) {
+        return TAS_ACT_RESTORE_UNVERIFIED;
+    }
+    return TAS_ACT_RESTORE_COMPLETE;
+}
+
+/* The PHC across the cycle against wall time. A NIC cycle reseeds it, which #361 reports as a discontinuity */
+static __inline TAS_ACT_PHC_FACT tas_act_phc(BOOL read, long long phc_delta_ns, long long wall_ns, long long tolerance_ns)
+{
+    long long drift = phc_delta_ns - wall_ns;
+
+    if (!read) {
+        return TAS_ACT_PHC_UNMEASURED;
+    }
+    return (drift > -tolerance_ns && drift < tolerance_ns) ? TAS_ACT_PHC_CONTINUOUS : TAS_ACT_PHC_DISCONTINUOUS;
+}
+
+static __inline const char *tas_act_phc_name(TAS_ACT_PHC_FACT p)
+{
+    return p == TAS_ACT_PHC_CONTINUOUS ? "CONTINUOUS" : (p == TAS_ACT_PHC_DISCONTINUOUS ? "DISCONTINUOUS" : "UNMEASURED");
+}

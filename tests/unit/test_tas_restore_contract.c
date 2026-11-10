@@ -941,6 +941,44 @@ static void test_52_act_pass_wire(void) {
     EXPECT_EQ("never gated: nothing sent after BaseT reached a window", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_NO_WINDOW);
 }
 
+/* TC-MOCK-053: #361. TAS restoration is judged from the schedule registers, TSN mode, the driver record and the wire; the PHC
+ * is a separate outcome and never decides it */
+static void test_53_act_restore(void) {
+    TAS_ACT_RESTORE_EVIDENCE e, ok;
+
+    printf("\n[TC-MOCK-053] TAS restoration and PHC continuity are separate outcomes (#361)\n");
+    ZeroMemory(&ok, sizeof(ok));
+    ok.cycle_completed = TRUE; ok.adapter_returned = TRUE; ok.driver_clean = TRUE; ok.regs_measured = TRUE; ok.regs_differing = 0;
+    ok.tsn_mode_off = TRUE; ok.tx_probed = TRUE; ok.tx_on_wire = TRUE;
+    EXPECT_EQ("registers at baseline, mode off, clean, TX on the wire: complete", tas_act_restore(&ok), TAS_ACT_RESTORE_COMPLETE);
+    e = ok; e.phc = TAS_ACT_PHC_DISCONTINUOUS;
+    EXPECT_EQ("a PHC reset alone does not make restoration incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_COMPLETE);
+    e = ok; e.regs_differing = 1;
+    EXPECT_EQ("a schedule register left behind: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.tsn_mode_off = FALSE;
+    EXPECT_EQ("TSN mode still on: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.driver_clean = FALSE;
+    EXPECT_EQ("the driver still records a schedule: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.tx_on_wire = FALSE;
+    EXPECT_EQ("TX not shown on the wire: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.cycle_completed = FALSE;
+    EXPECT_EQ("the NIC cycle did not complete: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.adapter_returned = FALSE;
+    EXPECT_EQ("the adapter did not come back: incomplete", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    e = ok; e.regs_measured = FALSE;
+    EXPECT_EQ("registers not measured: unverified, never complete", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.regs_measured = FALSE; e.tsn_mode_off = FALSE;
+    EXPECT_EQ("unmeasured registers say nothing about the mode either", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.tx_probed = FALSE;
+    EXPECT_EQ("TX not probed: unverified", tas_act_restore(&e), TAS_ACT_RESTORE_UNVERIFIED);
+    e = ok; e.regs_measured = FALSE; e.driver_clean = FALSE;
+    EXPECT_EQ("an observed failure outranks what is unmeasured", tas_act_restore(&e), TAS_ACT_RESTORE_INCOMPLETE);
+    EXPECT_EQ("PHC advanced with wall time: continuous", tas_act_phc(TRUE, 19000000000LL, 19001000000LL, 2000000000LL), TAS_ACT_PHC_CONTINUOUS);
+    /* the 18:25 HOLD run: PHC 92.25 s before, 9.23 s after, 19.34 s of wall time */
+    EXPECT_EQ("PHC moved back by the cycle: discontinuous", tas_act_phc(TRUE, 9230908065LL - 92247825218LL, 19344460900LL, 2000000000LL), TAS_ACT_PHC_DISCONTINUOUS);
+    EXPECT_EQ("PHC not read: unmeasured", tas_act_phc(FALSE, 0, 0, 2000000000LL), TAS_ACT_PHC_UNMEASURED);
+}
+
 /*
  * TC-MOCK-049: the HIL fault path (#357, Q 2026-11-10). Debug drivers only: reserved word N fails schedule write N and the
  * first restore write, so the registered HIL test can reach FAILED_NOT_RESTORED. A Release driver refuses any nonzero value.
@@ -1017,6 +1055,7 @@ int main(void) {
     test_50_act_mapping();
     test_51_act_hold_wire();
     test_52_act_pass_wire();
+    test_53_act_restore();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

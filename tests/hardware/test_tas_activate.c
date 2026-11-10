@@ -17,8 +17,10 @@
  *   WIRE     tagged broadcast seen by the I210 observer, judged by tests/ioctl/tas_activate_eval.h against BaseT and the window.
  *   STATUS   (#369 only) PENDING then INFERRED_ACTIVE: #350's status model is not implemented, so SKIP_NOT_IMPLEMENTED.
  *   CLEANUP  the test's own NIC cycle ran and the adapter came back: primary cleanup, owned by this test.
- *   RESTORE  restoration judged by tests/ioctl/tas_restoration_eval.h. No dedicated read-only snapshot of the TAS registers
- *            exists yet (#361), so the registers are UNVERIFIED and restoration is never claimed from GET_TAS_STATE.
+ *   RESTORE  restoration as #361 states it (tas_act_restore in tests/ioctl/tas_activate_eval.h): schedule registers at baseline,
+ *            TSN mode off, driver record clean, TX on the wire. The PHC across the cycle is a separate evidence line, never a
+ *            restoration failure. No dedicated read-only snapshot of the TAS registers exists yet (#361), so they are UNVERIFIED,
+ *            restoration is at best INCONCLUSIVE_RESTORATION, and it is never claimed from GET_TAS_STATE.
  *
  * Schedule: 1 s cycle, one window 200 to 400 ms on all four queues, BaseT the first cycle boundary at least 1.5 s after the
  * PHC. That is the verified set of the E6 characterisation (LOCAL_DIAGNOSTIC, I226 0x125B REV_04, Debug), within the
@@ -50,7 +52,6 @@
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
-#include "../ioctl/tas_restoration_eval.h"
 #include "../ioctl/tas_activate_eval.h"
 #include "tas_wire_observer.h"
 
@@ -573,17 +574,25 @@ static void check_access(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     }
 }
 
-/** Primary cleanup and restoration: NIC cycle, then everything this test can observe without raw register access. Closes h */
+/**
+ * Primary cleanup and restoration: NIC cycle, then everything this test can observe without raw register access. Closes h.
+ * Restoration follows #361 (tas_act_restore): schedule registers, TSN mode, driver record and the wire decide it; the PHC is
+ * reported separately and never decides it. The schedule registers have no dedicated read-only query yet (#361), so they are
+ * unmeasured and restoration cannot be COMPLETE.
+ */
 static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, IN_ADDR ipv4,
                                const AVB_DRIVER_STATISTICS *stats_before, long long phc_before, LARGE_INTEGER qpc_before)
 {
-    TAS_RESTORATION_EVIDENCE e;
+    TAS_ACT_RESTORE_EVIDENCE e;
     DEVINST inst = 0;
     HANDLE fresh;
     MIB_IF_ROW2 row;
     DWORD start;
+    BOOL link_up = FALSE, attach = FALSE;
+    long long phc_after = 0, wall_ns = 0;
 
     ZeroMemory(&e, sizeof(e));
+    e.phc = TAS_ACT_PHC_UNMEASURED;
     printf("\n  --- Primary cleanup: NIC cycle of this adapter ---\n");
     if (find_devinst(id->net_luid, &inst)) {
         CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
@@ -610,43 +619,41 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
     if (e.adapter_returned) {
         AVB_DRIVER_STATISTICS stats_after;
         AVB_TAS_STATE s;
-        long long phc_after;
 
         start = GetTickCount();
         while (GetTickCount() - start < RETURN_BOUND_MS) {
             if (read_if(id->net_luid, &row) && row.OperStatus == IfOperStatusUp) {
-                e.link_up = TRUE;
+                link_up = TRUE;
                 break;
             }
             Sleep(1000);
         }
         Sleep(SETTLE_MS);
         if (read_stats(fresh, &stats_after)) {   /* the statistics live in the adapter context: lower means a new one */
-            e.attach_observed = stats_after.IoctlCount < stats_before->IoctlCount;
+            attach = stats_after.IoctlCount < stats_before->IoctlCount;
             printf("    IoctlCount %llu -> %llu\n", stats_before->IoctlCount, stats_after.IoctlCount);
         }
         if (read_state(fresh, &s)) {
-            e.driver_disarmed = (s.armed == AVB_TAS_STATE_CLEAN);
+            e.driver_clean = (s.armed == AVB_TAS_STATE_CLEAN);
             print_state("after the cycle", &s);
         } else {
-            e.armed_unreadable = TRUE;
+            printf("    GET_TAS_STATE after the cycle: unreadable\n");
         }
         /* No dedicated read-only snapshot covers the TAS registers yet (#361): unmeasured, never assumed */
-        e.tsn_mode_clear = TRUE;
-        e.regs_compared = 0;
+        e.regs_measured = FALSE;
         printf("    [EVIDENCE] TAS registers after the cycle: UNVERIFIED, no dedicated read-only snapshot of them exists yet (#361)\n");
         if (read_phc(fresh, &phc_after)) {
             LARGE_INTEGER now, freq;
-            long long wall_ns, drift_ns;
             QueryPerformanceCounter(&now);
             QueryPerformanceFrequency(&freq);
             wall_ns = (long long)((double)(now.QuadPart - qpc_before.QuadPart) * 1e9 / (double)freq.QuadPart);
-            drift_ns = (phc_after - phc_before) - wall_ns;
-            e.phc_observed = TRUE;
-            e.phc_continuous = drift_ns > -PHC_TOLERANCE_NS && drift_ns < PHC_TOLERANCE_NS;
-            printf("    PHC before=%lld after=%lld wallNs=%lld drift=%lld\n", phc_before, phc_after, wall_ns, drift_ns);
+            e.phc = tas_act_phc(TRUE, phc_after - phc_before, wall_ns, PHC_TOLERANCE_NS);
         }
-        if (e.link_up) {
+        if (!link_up) {
+            e.tx_probed = TRUE;   /* the link was up before the test: no link now is an observed failure, not a gap */
+            e.tx_on_wire = FALSE;
+            printf("    TX after the cycle: link did not come back within %d ms\n", RETURN_BOUND_MS);
+        } else {
             SOCKET sock = open_tx_socket(ipv4);
             unsigned nonce = GetTickCount() ^ (GetCurrentProcessId() << 8), sent = 0, delayed = 0, seen;
             LONG captured = 0, from_target = 0;
@@ -656,7 +663,7 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
                 wire_counts(&captured, &from_target);
                 wire_stop();
                 e.tx_probed = captured != 0;
-                e.tx_healthy = (unsigned long long)seen * 100 >= (unsigned long long)sent * TAS_ACT_SEEN_MIN_PERCENT && delayed == 0;
+                e.tx_on_wire = (unsigned long long)seen * 100 >= (unsigned long long)sent * TAS_ACT_SEEN_MIN_PERCENT && delayed == 0;
                 printf("    TX after the cycle: sent=%u seen=%u delayedOver%lldms=%u captured=%ld\n", sent, seen, UNGATED_DELAY_US / 1000,
                        delayed, captured);
             } else {
@@ -666,21 +673,22 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
         }
         CloseHandle(fresh);
     }
-    printf("    evidence: cycle=%d returned=%d attach=%d disarmed=%d armedUnreadable=%d regsCompared=%u(UNVERIFIED, #361) "
-           "phcObserved=%d phcContinuous=%d link=%d txProbed=%d txHealthy=%d\n", e.cycle_completed, e.adapter_returned, e.attach_observed,
-           e.driver_disarmed, e.armed_unreadable, e.regs_compared, e.phc_observed, e.phc_continuous, e.link_up, e.tx_probed, e.tx_healthy);
-    switch (tas_restoration_outcome(&e)) {
-    case TAS_RESTORATION_VERIFIED:   /* unreachable while regs_compared is 0; kept so a future snapshot cannot skip this line */
-        verdict("PASS", "RESTORE", index, id->device_id, "observed state restored");
+    printf("    evidence: cycle=%d returned=%d attach=%d driverClean=%d regsMeasured=%d(#361) link=%d txProbed=%d txOnWire=%d\n",
+           e.cycle_completed, e.adapter_returned, attach, e.driver_clean, e.regs_measured, link_up, e.tx_probed, e.tx_on_wire);
+    /* A separate outcome (#361): the cycle reseeds the PHC, which is reported, not judged as restoration */
+    printf("    [EVIDENCE] PHC across the cleanup: %s (before=%lld after=%lld wallNs=%lld)\n", tas_act_phc_name(e.phc), phc_before,
+           phc_after, wall_ns);
+    switch (tas_act_restore(&e)) {
+    case TAS_ACT_RESTORE_COMPLETE:   /* unreachable while regs_measured is FALSE; kept so the snapshot cannot skip this line */
+        verdict("PASS", "RESTORE", index, id->device_id, "schedule registers at baseline, TSN mode off, TX on the wire (#361)");
         break;
-    case TAS_RESTORATION_INCONCLUSIVE:
+    case TAS_ACT_RESTORE_UNVERIFIED:
         verdict("INCONCLUSIVE_RESTORATION", "RESTORE", index, id->device_id,
-                "the TAS registers are UNVERIFIED (no dedicated read-only snapshot, #361); see the evidence line");
+                "nothing observed failed, but the TAS registers are UNVERIFIED (no dedicated read-only snapshot, #361); see the evidence line");
         break;
     default:
         verdict("CLEANUP_FAILED", "RESTORE", index, id->device_id,
-                "restoration demonstrably incomplete, see the evidence line (a PHC reset alone prevents it, D9); the TAS registers are "
-                "UNVERIFIED (#361)");
+                "restoration incomplete: see the evidence line (cycle, return, driver record or TX on the wire failed)");
         break;
     }
 }
