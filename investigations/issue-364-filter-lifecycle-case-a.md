@@ -710,6 +710,67 @@ The dry run after run 4's NIC cycle: tasArmed 0, 49 of 49 frames, 1 of 40 TSN re
 
 **Dry run with no NIC cycle, 09:38.** About 80 s after the Restart: 0 of 96 frames on the wire, gauge 173 then 226. It exposed two defects in the dry run, both fixed: it stopped before printing registers, tasArmed and PHC, and it reported PASS with nothing proved. That PASS stands in the 09:38 log and is no evidence.
 
+## Cases C and D: safety analysis and plan
+
+Written 2026-11-10, before any C or D code or run, as Q required. Design basis: the shared schedule of `logs/tas-case-cd-design-20261106.md`, 1 s cycle, window 200 to 400 ms on every queue, future BaseT, TQAVCTRL 0x09, no FutScdDis, written through `tas_gate_investigation`'s Debug-only WRITE_REGISTER. Counts are hardware runs on I226-LM REV_04 unless marked otherwise.
+
+### The seven points
+
+**1. Failure scenarios: PHC reset, BaseT and an active gate.**
+
+| Scenario | Evidence | Consequence |
+|---|---|---|
+| Restart reseeds the PHC | 11 of 11 Restarts, to 9.25 to 9.34 s, with and without `SETUP_TAS` | Expected in every run |
+| The schedule survives Restart | Unknown for a schedule. Under `SETUP_TAS` all 40 TSN registers survived, 3 of 3 | Must be assumed |
+| Reseed below BaseT with the schedule kept | Not observed | TX held until the PHC reaches BaseT, as in #349 |
+| No reseed, or one above BaseT | Not observed | The schedule runs on; no extra hold |
+| Pause waits for held frames | Under `SETUP_TAS` with gauge above 0, no Pause in 60 s, 4 of 4, after NDIS accepted the restart (1 run) | Case D can stall before Pause. Under a running schedule the held frames leave at the next window, so a stall should end within one closed interval. That is the hypothesis Case D tests |
+| A window write on a running schedule | Writes read back but did not apply, 29 s and more; only a future BaseT replaced a schedule, 6 of 6 | Readback never shows the schedule in force |
+| Schedule survives a NIC cycle | 1 of 41 cycles, #349; a second cycle cleared it, 1 of 1 | Recovery can need two cycles |
+
+**2. Upper bound on a hold, and its evidence.** After a reseed to R with BaseT kept at B, frames are held until the PHC reaches B, then until the next window opens: at most (B − R) / 1.0293 + 1 s of host time. R is 9.25 to 9.34 s, 11 of 11; the rate 1.0293 is from 3 runs. B is set 2 to 3 s ahead of the PHC when the schedule is written, so the bound depends on the PHC at that moment. **Rule: the tool refuses to write a schedule when the PHC reads above 60 s**, which keeps the bound under (63 − 9.25) / 1.0293 + 1 ≈ 53 s. That is a prediction from 11 reseeds, not a guarantee: a reseed elsewhere invalidates it, which point 3 detects. A fresh NIC cycle leaves the PHC near 9.3 s, so a run started straight after one passes this rule.
+
+**3. Detecting a stalled schedule.** After the trigger the tool sends tagged frames every 50 ms for at least the computed bound plus 2 s, and reports TX as stalled when none reaches the observer for longer than one cycle past the predicted release. Supporting, never deciding: gauge rising, TDH frozen while TDT moves, BASET_H and BASET_L against the PHC. The observer must keep capturing other frames meanwhile, or the run is INCONCLUSIVE rather than stalled.
+
+**4. Bounded test-owned cleanup on success, failure and timeout.** On every way out: stop sending, stop the trigger thread within 5 s, read registers, tasArmed, PHC and TX only when the read gate allows it, and print the original result next to the cleanup verdict. The verdict is `CLEANUP_FAILED` at best while TSN mode is set or the PHC was reset (D9). Whether the tool also releases a hold in place is the one open decision below.
+
+**5. A NIC or PnP operation that outlives its thread.** No tool code path cycles an adapter in C or D. Recovery is the operator block of Case B, which stops at the first failure. A `Disable-NetAdapter` that does not return is never followed by enable, and further NDIS operations wait for Q. A reboot is Q's decision.
+
+**6. Recovery if the management session fails.** Management runs over the I219, `Ethernet`; only the I226, `Ethernet 3`, is mutated, and every run reports where the session runs. Nothing in the tool depends on the session, and all evidence is written locally. If the session drops, the run ends on its own bounds and the adapter stays as left until someone runs the recovery block. Physical access is UNKNOWN and is not assumed.
+
+**7. STOP and FAILED_SETUP conditions.**
+
+| Condition | Verdict | Before any write? |
+|---|---|---|
+| Driver not Debug, by `GET_VERSION` | BLOCKED | Yes |
+| Eligible adapter without register evidence, not I226-LM | BLOCKED, no register access | Yes |
+| tasArmed set, TSN mode set, or BaseT nonzero | BLOCKED, adapter not clean | Yes |
+| Observer not proved | BLOCKED | Yes |
+| PHC above 60 s | FAILED_SETUP | Yes |
+| Phase 1 arrivals outside 200 to 400 ms, or a gap | FAILED_SETUP, no trigger | No: the schedule is written |
+| Case C: gauge not 0 after a quiet cycle | FAILED_SETUP, no trigger | No |
+| Case D: gauge 0, or a held frame seen, before the trigger | FAILED_SETUP, no trigger | No |
+| HIL lock held, or a CI job running | the wrapper does not start | Yes |
+| No Restart entry within 60 s, the trigger not back within 5 s, the observer silent, `CONTEXT_REPLACED`, NDIS 10007 or 10058 | the run stops and reports; no global halt | No |
+
+### Build plan
+
+1. Pure rules first, with offline cases and mutants: the PHC to window phase map, the hold bound and the PHC rule, the Case C and D precondition classes, and stall detection.
+2. `tas_gate_investigation`: adapter selection by capabilities, as `tas_plan_build` does, instead of the device IDs still in `main`; the register map limited to I226-LM as evidence.
+3. The lifecycle trigger and measurement restored from `1a93f56^`, the old `--lifecycle-a` path, for `--case-c` and `--case-d` only.
+4. The wrapper restored from `1a93f56^` for those two modes: readiness, lock, DbgView, NDIS trace, post checks and checksums. Its driver check must hash the service's `ImagePath`, which the runner does not.
+5. Its offline test restored without the 139 s: the interrupt cases waited on fixed sleeps, and those are the first thing to measure.
+6. Three runs each, test first and operator recovery after, as for Case B.
+
+### Open decision
+
+The tool's existing `restore()` cycles the NIC through `CM_Disable_DevNode`, which conflicts with the read-only cleanup rule. Two ways to keep a test-owned cleanup without a cycle:
+
+- **A, read-only only:** facts and verdicts, then the operator block. Same as Case B.
+- **B, also release in place:** write a whole-cycle-open schedule with a new future BaseT before the read-only facts. That replaced a running schedule 5 of 5 times and releases held frames, but it is not restoration, TSN mode stays set, and after a reseed whether a nearer BaseT replaces a pending one is untested.
+
+Recommendation: A for the first runs, since B adds an untested transition to an already uncertain state.
+
 ## Activation runs for #357
 
 Made on `4ed976e`, Debug driver `6FB73E9E392C0499`, I226 0x125B, one run each. They are #357 evidence, kept here until that issue resumes. Checksums: `logs/i357-activate-checksums-20261107.txt`.
