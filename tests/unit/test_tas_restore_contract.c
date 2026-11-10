@@ -1284,6 +1284,75 @@ static void test_39_probe_verdict(void) {
     EXPECT_EQ("refused for another reason", tas_probe_verdict(FALSE, ERROR_ACCESS_DENIED), TAS_PROBE_OTHER_ERROR);
 }
 
+/* TC-MOCK-040: Cases C and D place PHC times in the 1 s cycle of the shared schedule, window 200 to 400 ms */
+static void test_40_cd_phase(void) {
+    const unsigned long long s = 1000000000ULL, ms = 1000000ULL;
+    unsigned long long phase = 7;
+
+    printf("\n[TC-MOCK-040] Cases C and D: phase in the cycle and frame class\n");
+    EXPECT_TRUE("before BaseT has no phase", !tas_cd_phase(20 * s - 1, 20 * s, s, &phase) && phase == 7);
+    EXPECT_TRUE("at BaseT the phase is 0", tas_cd_phase(20 * s, 20 * s, s, &phase) && phase == 0);
+    EXPECT_TRUE("phase repeats each cycle", tas_cd_phase(23 * s + 250 * ms, 20 * s, s, &phase) && phase == 250 * ms);
+    EXPECT_TRUE("a zero cycle has no phase", !tas_cd_phase(23 * s, 20 * s, 0, &phase));
+    EXPECT_EQ("inside the window", tas_cd_frame_class(21 * s + 300 * ms, 20 * s, s, 200 * ms, 400 * ms, 2 * ms), TAS_CD_FRAME_INSIDE);
+    EXPECT_EQ("closed interval", tas_cd_frame_class(21 * s + 700 * ms, 20 * s, s, 200 * ms, 400 * ms, 2 * ms), TAS_CD_FRAME_OUTSIDE);
+    EXPECT_EQ("before the window start, within the margin", tas_cd_frame_class(21 * s + 199 * ms, 20 * s, s, 200 * ms, 400 * ms, 2 * ms), TAS_CD_FRAME_NEAR_EDGE);
+    EXPECT_EQ("after the window end, within the margin", tas_cd_frame_class(21 * s + 401 * ms, 20 * s, s, 200 * ms, 400 * ms, 2 * ms), TAS_CD_FRAME_NEAR_EDGE);
+    EXPECT_EQ("just inside the start, within the margin", tas_cd_frame_class(21 * s + 201 * ms, 20 * s, s, 200 * ms, 400 * ms, 2 * ms), TAS_CD_FRAME_NEAR_EDGE);
+    EXPECT_EQ("the window end itself is closed", tas_cd_frame_class(21 * s + 400 * ms + 3 * ms, 20 * s, s, 200 * ms, 400 * ms, 2 * ms), TAS_CD_FRAME_OUTSIDE);
+    EXPECT_EQ("before BaseT", tas_cd_frame_class(19 * s, 20 * s, s, 200 * ms, 400 * ms, 2 * ms), TAS_CD_FRAME_BEFORE_BASE);
+}
+
+/* TC-MOCK-041: the schedule counts as in force only from arrivals: some inside, none outside, none missing */
+static void test_41_cd_schedule_proven(void) {
+    printf("\n[TC-MOCK-041] Cases C and D: schedule proven by arrivals\n");
+    EXPECT_TRUE("arrivals inside, none outside, none missing", tas_cd_schedule_proven(40, 0, 3, 0));
+    EXPECT_TRUE("near the edge is allowed: held frames leave at the window start", tas_cd_schedule_proven(10, 0, 9, 0));
+    EXPECT_TRUE("one arrival outside disproves it", !tas_cd_schedule_proven(40, 1, 0, 0));
+    EXPECT_TRUE("one frame missing disproves it", !tas_cd_schedule_proven(40, 0, 0, 1));
+    EXPECT_TRUE("no arrival inside proves nothing", !tas_cd_schedule_proven(0, 0, 5, 0));
+}
+
+/* TC-MOCK-042: the PHC limit for writing a schedule, and the predicted hold after a reseed below BaseT */
+static void test_42_cd_hold(void) {
+    const unsigned long long s = 1000000000ULL, ms = 1000000ULL;
+
+    printf("\n[TC-MOCK-042] Cases C and D: PHC limit and predicted hold\n");
+    EXPECT_TRUE("PHC 9.3 s allows a schedule", tas_cd_phc_allows_write(9300 * ms));
+    EXPECT_TRUE("PHC exactly at the limit allows it", tas_cd_phc_allows_write(TAS_CD_PHC_WRITE_LIMIT_NS));
+    EXPECT_TRUE("PHC one ns above the limit refuses it", !tas_cd_phc_allows_write(TAS_CD_PHC_WRITE_LIMIT_NS + 1));
+    EXPECT_EQ("BaseT at or below the reseed: one cycle at most", tas_cd_hold_bound_ms(9 * s, 9250 * ms, s), 1000ULL);
+    EXPECT_EQ("BaseT 63 s, reseed 9.25 s: 52219 ms plus one cycle", tas_cd_hold_bound_ms(63 * s, 9250 * ms, s), 53219ULL);
+    EXPECT_EQ("BaseT 12 s, reseed 9.25 s: 2671 ms plus one cycle", tas_cd_hold_bound_ms(12 * s, 9250 * ms, s), 3671ULL);
+}
+
+/* TC-MOCK-043: when Cases C and D may trigger */
+static void test_43_cd_ready(void) {
+    printf("\n[TC-MOCK-043] Cases C and D: trigger preconditions\n");
+    EXPECT_EQ("C: proven, quiet a full cycle, gauge 0", tas_cd_c_ready(TRUE, 0, 1000, 1000), TAS_CD_READY);
+    EXPECT_EQ("C: schedule not proven", tas_cd_c_ready(FALSE, 0, 1000, 1000), TAS_CD_SCHEDULE_NOT_PROVEN);
+    EXPECT_EQ("C: gauge above 0", tas_cd_c_ready(TRUE, 1, 1000, 1000), TAS_CD_GAUGE_NOT_ZERO);
+    EXPECT_EQ("C: quiet less than a cycle", tas_cd_c_ready(TRUE, 0, 999, 1000), TAS_CD_NOT_QUIET);
+    EXPECT_EQ("D: proven, frames held, gauge above 0, closed interval", tas_cd_d_ready(TRUE, 5, 4, 0, TRUE), TAS_CD_READY);
+    EXPECT_EQ("D: schedule not proven", tas_cd_d_ready(FALSE, 5, 4, 0, TRUE), TAS_CD_SCHEDULE_NOT_PROVEN);
+    EXPECT_EQ("D: gauge 0", tas_cd_d_ready(TRUE, 0, 4, 0, TRUE), TAS_CD_GAUGE_ZERO);
+    EXPECT_EQ("D: nothing sent into the closed interval", tas_cd_d_ready(TRUE, 5, 0, 0, TRUE), TAS_CD_NO_HELD_FRAMES);
+    EXPECT_EQ("D: a held frame reached the wire", tas_cd_d_ready(TRUE, 5, 4, 1, TRUE), TAS_CD_HELD_FRAME_SEEN);
+    EXPECT_EQ("D: not in the closed interval", tas_cd_d_ready(TRUE, 5, 4, 0, FALSE), TAS_CD_NOT_CLOSED);
+    EXPECT_TRUE("names", strcmp(tas_cd_ready_name(TAS_CD_READY), "READY") == 0 && strcmp(tas_cd_ready_name(TAS_CD_HELD_FRAME_SEEN), "HELD_FRAME_SEEN") == 0 &&
+                strcmp(tas_cd_ready_name(TAS_CD_NOT_QUIET), "NOT_QUIET") == 0);
+}
+
+/* TC-MOCK-044: TX after the trigger: flowing, held as predicted, stalled, or not observable */
+static void test_44_cd_tx(void) {
+    printf("\n[TC-MOCK-044] Cases C and D: TX state after the trigger\n");
+    EXPECT_EQ("a tagged frame arrived", tas_cd_tx_state(TRUE, TRUE, 5000, 4000, 1000), TAS_CD_TX_FLOWING);
+    EXPECT_EQ("the observer saw nothing at all", tas_cd_tx_state(FALSE, FALSE, 99000, 4000, 1000), TAS_CD_TX_UNOBSERVABLE);
+    EXPECT_EQ("silent, within the predicted release and one cycle", tas_cd_tx_state(TRUE, FALSE, 5000, 4000, 1000), TAS_CD_TX_HELD_AS_PREDICTED);
+    EXPECT_EQ("silent, past the predicted release and one cycle", tas_cd_tx_state(TRUE, FALSE, 5001, 4000, 1000), TAS_CD_TX_STALLED);
+    EXPECT_TRUE("names", strcmp(tas_cd_tx_name(TAS_CD_TX_STALLED), "TX_STALLED") == 0 && strcmp(tas_cd_tx_name(TAS_CD_TX_UNOBSERVABLE), "TX_UNOBSERVABLE") == 0);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1324,6 +1393,11 @@ int main(void) {
     test_37_hold_gate();
     test_38_probe_name();
     test_39_probe_verdict();
+    test_40_cd_phase();
+    test_41_cd_schedule_proven();
+    test_42_cd_hold();
+    test_43_cd_ready();
+    test_44_cd_tx();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

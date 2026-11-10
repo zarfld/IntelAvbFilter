@@ -316,7 +316,7 @@ $UnitTests = @(
     "ps1:tests/unit/build/test_native_exit_codes.ps1",          # TEST-NATIVE-EXIT: exit codes survive nested script/native calls (FullSuite_20261021 blank codes)
     "ps1:tests/unit/ci/test_hil_suite_safety.ps1",              # TEST-HILSUITE: automatic HIL suites cannot reach TSN configuration or nested execution (was never run by CI - TEST-COMPLETE-003)
     "ps1:tests/unit/ci/test_hil_trust_boundary.ps1",            # TEST-HILTRUST: HIL workflow trust boundary, acceptance verdicts (was never run by CI - TEST-COMPLETE-003; needs python)
-    "ps1:tests/unit/ioctl/test_tas_lifecycle_eval_mutation.ps1", # TEST-TAS-LIFE-MUT: every condition of tas_lifecycle_eval.h is seen by an assertion (83 mutants, offline, needs the VS toolset)
+    "ps1:tests/unit/ioctl/test_tas_lifecycle_eval_mutation.ps1", # TEST-TAS-LIFE-MUT: every condition of tas_lifecycle_eval.h is seen by an assertion (107 mutants, offline, needs the VS toolset)
     "ps1:tests/unit/ci/test_hil_safety_record.ps1",
     "ps1:tests/unit/ci/test_phc_restoration_evaluator.ps1",    # TEST-PHCEVAL: pure PHC/QPC restoration evaluator (synthetic characterization; not hardware evidence)             # TEST-SAFETYREC: machine-wide HIL safety record, fail-closed, explicit verified clearing (offline)
     "ps1:tests/unit/ci/test_artifact_completeness.ps1",         # TEST-COMPLETE: every build target / test script is a runner entry or classified (offline; RED until classified)

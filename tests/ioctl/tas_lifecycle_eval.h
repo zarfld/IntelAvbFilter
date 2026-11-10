@@ -710,6 +710,153 @@ static __inline TAS_PROBE_CLASS tas_probe_verdict(BOOL ok, DWORD error)
     return error == ERROR_NOT_FOUND ? TAS_PROBE_REFUSED : TAS_PROBE_OTHER_ERROR;
 }
 
+/*
+ * Cases C and D of #364: a running schedule, a 1 s cycle with one window on every queue, BaseT in the future. Times are PHC
+ * nanoseconds. Pure rules, offline cases TC-MOCK-040 to 044; they say nothing about hardware. The design and its evidence are
+ * in "Cases C and D: safety analysis and plan" of investigations/issue-364-filter-lifecycle-case-a.md.
+ */
+
+/* The phase of a PHC time in the cycle. FALSE before BaseT, where the schedule has no phase yet, and for a zero cycle */
+static __inline BOOL tas_cd_phase(unsigned long long phc, unsigned long long base, unsigned long long cycle, unsigned long long *phase)
+{
+    if (cycle == 0 || phc < base) {
+        return FALSE;
+    }
+    *phase = cycle != 0 ? (phc - base) % cycle : 0;   /* defined even without the check above, so dropping it gives a wrong answer, not a crash */
+    return TRUE;
+}
+
+typedef enum { TAS_CD_FRAME_BEFORE_BASE = 0, TAS_CD_FRAME_INSIDE, TAS_CD_FRAME_NEAR_EDGE, TAS_CD_FRAME_OUTSIDE } TAS_CD_FRAME_CLASS;
+
+/*
+ * Where an arrival falls. The window is [start, end). Capture times carry host latency, so an arrival within the margin of
+ * either edge is near the edge and decides nothing: held frames leave right at the window start.
+ */
+static __inline TAS_CD_FRAME_CLASS tas_cd_frame_class(unsigned long long at, unsigned long long base, unsigned long long cycle, unsigned long long start,
+                                                     unsigned long long end, unsigned long long margin)
+{
+    unsigned long long phase;
+
+    if (!tas_cd_phase(at, base, cycle, &phase)) {
+        return TAS_CD_FRAME_BEFORE_BASE;
+    }
+    if ((phase + margin > start && phase < start + margin) || (phase + margin > end && phase < end + margin)) {
+        return TAS_CD_FRAME_NEAR_EDGE;
+    }
+    return (phase >= start && phase < end) ? TAS_CD_FRAME_INSIDE : TAS_CD_FRAME_OUTSIDE;
+}
+
+/* Register readback does not show a schedule in force; arrivals do. Some inside, none outside, none missing */
+static __inline BOOL tas_cd_schedule_proven(unsigned inside, unsigned outside, unsigned near_edge, unsigned missing)
+{
+    (void)near_edge;
+    return inside != 0 && outside == 0 && missing == 0;
+}
+
+/*
+ * The hold bound. A Restart reseeded the PHC to 9.25 to 9.34 s, 11 of 11, and the PHC runs 1.0293 times fast, 3 runs. With
+ * BaseT kept above the reseed, frames wait until the PHC reaches BaseT and then until the window opens. A prediction from
+ * those observations, never a guarantee: the run must still detect a stall (tas_cd_tx_state).
+ */
+#define TAS_CD_PHC_WRITE_LIMIT_NS 60000000000ULL
+#define TAS_CD_RATE_NUM           10000ULL   /* 1 / 1.0293 as a ratio */
+#define TAS_CD_RATE_DEN           10293ULL
+
+static __inline BOOL tas_cd_phc_allows_write(unsigned long long phc)
+{
+    return phc <= TAS_CD_PHC_WRITE_LIMIT_NS;
+}
+
+static __inline unsigned long long tas_cd_hold_bound_ms(unsigned long long base, unsigned long long reseed, unsigned long long cycle)
+{
+    unsigned long long wait_ms = base > reseed ? (base - reseed) * TAS_CD_RATE_NUM / TAS_CD_RATE_DEN / 1000000ULL : 0;
+
+    return wait_ms + cycle / 1000000ULL;
+}
+
+typedef enum {
+    TAS_CD_READY = 0,
+    TAS_CD_SCHEDULE_NOT_PROVEN,
+    TAS_CD_GAUGE_NOT_ZERO,     /* C */
+    TAS_CD_NOT_QUIET,          /* C: sends stopped for less than a cycle */
+    TAS_CD_NO_HELD_FRAMES,     /* D */
+    TAS_CD_HELD_FRAME_SEEN,    /* D: a frame sent into the closed interval reached the wire */
+    TAS_CD_GAUGE_ZERO,         /* D */
+    TAS_CD_NOT_CLOSED          /* D: the trigger would not land in the closed interval */
+} TAS_CD_READY_CLASS;
+
+/* Case C: a schedule in force and nothing outstanding when the trigger lands inside the window */
+static __inline TAS_CD_READY_CLASS tas_cd_c_ready(BOOL proven, unsigned long long gauge, unsigned quiet_ms, unsigned cycle_ms)
+{
+    if (!proven) {
+        return TAS_CD_SCHEDULE_NOT_PROVEN;
+    }
+    if (gauge != 0) {
+        return TAS_CD_GAUGE_NOT_ZERO;
+    }
+    return quiet_ms >= cycle_ms ? TAS_CD_READY : TAS_CD_NOT_QUIET;
+}
+
+/* Case D: a schedule in force, frames sent into this closed interval and none on the wire, outstanding sends, trigger in it */
+static __inline TAS_CD_READY_CLASS tas_cd_d_ready(BOOL proven, unsigned long long gauge, unsigned held_sent, unsigned held_seen, BOOL closed)
+{
+    if (!proven) {
+        return TAS_CD_SCHEDULE_NOT_PROVEN;
+    }
+    if (held_sent == 0) {
+        return TAS_CD_NO_HELD_FRAMES;
+    }
+    if (held_seen != 0) {
+        return TAS_CD_HELD_FRAME_SEEN;
+    }
+    if (gauge == 0) {
+        return TAS_CD_GAUGE_ZERO;
+    }
+    return closed ? TAS_CD_READY : TAS_CD_NOT_CLOSED;
+}
+
+static __inline const char *tas_cd_ready_name(TAS_CD_READY_CLASS c)
+{
+    switch (c) {
+    case TAS_CD_READY:               return "READY";
+    case TAS_CD_SCHEDULE_NOT_PROVEN: return "SCHEDULE_NOT_PROVEN";
+    case TAS_CD_GAUGE_NOT_ZERO:      return "GAUGE_NOT_ZERO";
+    case TAS_CD_NOT_QUIET:           return "NOT_QUIET";
+    case TAS_CD_NO_HELD_FRAMES:      return "NO_HELD_FRAMES";
+    case TAS_CD_HELD_FRAME_SEEN:     return "HELD_FRAME_SEEN";
+    case TAS_CD_GAUGE_ZERO:          return "GAUGE_ZERO";
+    default:                         return "NOT_CLOSED";
+    }
+}
+
+typedef enum { TAS_CD_TX_FLOWING = 0, TAS_CD_TX_HELD_AS_PREDICTED, TAS_CD_TX_STALLED, TAS_CD_TX_UNOBSERVABLE } TAS_CD_TX_CLASS;
+
+/*
+ * TX after the trigger. A tagged frame on the observer means it flows. Without one, silence means something only while the
+ * observer still captures other traffic; then it is held as predicted up to the bound plus one cycle, and stalled after that.
+ */
+static __inline TAS_CD_TX_CLASS tas_cd_tx_state(BOOL observer_alive, BOOL tagged_seen, unsigned long long now_ms, unsigned long long release_ms,
+                                                unsigned long long cycle_ms)
+{
+    if (tagged_seen) {
+        return TAS_CD_TX_FLOWING;
+    }
+    if (!observer_alive) {
+        return TAS_CD_TX_UNOBSERVABLE;
+    }
+    return now_ms <= release_ms + cycle_ms ? TAS_CD_TX_HELD_AS_PREDICTED : TAS_CD_TX_STALLED;
+}
+
+static __inline const char *tas_cd_tx_name(TAS_CD_TX_CLASS c)
+{
+    switch (c) {
+    case TAS_CD_TX_FLOWING:           return "TX_FLOWING";
+    case TAS_CD_TX_HELD_AS_PREDICTED: return "TX_HELD_AS_PREDICTED";
+    case TAS_CD_TX_STALLED:           return "TX_STALLED";
+    default:                          return "TX_UNOBSERVABLE";
+    }
+}
+
 /* Where the management session runs. Reported only: losing it is an accepted consequence, and no verdict reads this */
 typedef enum { TAS_MGMT_UNATTRIBUTED = 0, TAS_MGMT_ON_TARGET, TAS_MGMT_NOT_ON_TARGET } TAS_MGMT_CLASS;
 

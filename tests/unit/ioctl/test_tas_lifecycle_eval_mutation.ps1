@@ -6,7 +6,7 @@
 # test_tas_restore_contract source, compiled against the mutated header, reports a failed assertion through its normal path:
 # `[FAIL]` lines, complete totals, `[RESULT] FAILURE`, exit 1.  Get-MutantVerdict decides, and its negative controls prove that
 # a launch failure, missing or wrong exit code, timeout, missing output, compile failure or crash is never a kill.
-# Acceptance: the unmutated code passes; every operator matches exactly once; 83 of 83 KILLED.  Each mutant keeps its own verdict.
+# Acceptance: the unmutated code passes; every operator matches exactly once; 107 of 107 KILLED.  Each mutant keeps its own verdict.
 #
 # Works on copies under $env:TEMP.  The repository is not touched, no driver or adapter is involved.  Offline logic only,
 # never HIL evidence.  The compiler comes from tools\vs_compile.ps1.
@@ -365,8 +365,8 @@ $OperatorsJson = @'
 ],
 [
 "hold: dead observer accepted",
-"if (!observer_alive) {",
-"if (FALSE) {"
+"if (!observer_alive) {\n        return TAS_HOLD_NO_OBSERVER;",
+"if (FALSE) {\n        return TAS_HOLD_NO_OBSERVER;"
 ],
 [
 "hold: no frames accepted",
@@ -447,12 +447,132 @@ $OperatorsJson = @'
 "probe verdict: any error counted as refused",
 "return error == ERROR_NOT_FOUND ? TAS_PROBE_REFUSED : TAS_PROBE_OTHER_ERROR;",
 "return TAS_PROBE_REFUSED;"
+],
+[
+"cd phase: zero cycle accepted",
+"if (cycle == 0 || phc < base) {",
+"if (phc < base) {"
+],
+[
+"cd phase: before BaseT accepted",
+"if (cycle == 0 || phc < base) {",
+"if (cycle == 0) {"
+],
+[
+"cd frame: start edge ignored",
+"(phase + margin > start && phase < start + margin) || ",
+""
+],
+[
+"cd frame: end edge ignored",
+" || (phase + margin > end && phase < end + margin)",
+""
+],
+[
+"cd frame: closed interval counted inside",
+"return (phase >= start && phase < end) ? TAS_CD_FRAME_INSIDE : TAS_CD_FRAME_OUTSIDE;",
+"return TAS_CD_FRAME_INSIDE;"
+],
+[
+"cd proven: outside ignored",
+"return inside != 0 && outside == 0 && missing == 0;",
+"return inside != 0 && missing == 0;"
+],
+[
+"cd proven: missing ignored",
+"return inside != 0 && outside == 0 && missing == 0;",
+"return inside != 0 && outside == 0;"
+],
+[
+"cd proven: inside not required",
+"return inside != 0 && outside == 0 && missing == 0;",
+"return outside == 0 && missing == 0;"
+],
+[
+"cd PHC limit: limit itself refused",
+"return phc <= TAS_CD_PHC_WRITE_LIMIT_NS;",
+"return phc < TAS_CD_PHC_WRITE_LIMIT_NS;"
+],
+[
+"cd hold: PHC rate ignored",
+"(base - reseed) * TAS_CD_RATE_NUM / TAS_CD_RATE_DEN / 1000000ULL",
+"(base - reseed) / 1000000ULL"
+],
+[
+"cd hold: cycle not added",
+"return wait_ms + cycle / 1000000ULL;",
+"return wait_ms;"
+],
+[
+"cd hold: BaseT below the reseed not clamped",
+"base > reseed ? ",
+"TRUE ? "
+],
+[
+"c ready: proof not required",
+"unsigned quiet_ms, unsigned cycle_ms)\n{\n    if (!proven) {",
+"unsigned quiet_ms, unsigned cycle_ms)\n{\n    if (FALSE) {"
+],
+[
+"c ready: gauge ignored",
+"if (gauge != 0) {\n        return TAS_CD_GAUGE_NOT_ZERO;",
+"if (FALSE) {\n        return TAS_CD_GAUGE_NOT_ZERO;"
+],
+[
+"c ready: one full quiet cycle not enough",
+"return quiet_ms >= cycle_ms ? TAS_CD_READY : TAS_CD_NOT_QUIET;",
+"return quiet_ms > cycle_ms ? TAS_CD_READY : TAS_CD_NOT_QUIET;"
+],
+[
+"d ready: proof not required",
+"unsigned held_seen, BOOL closed)\n{\n    if (!proven) {",
+"unsigned held_seen, BOOL closed)\n{\n    if (FALSE) {"
+],
+[
+"d ready: nothing sent accepted",
+"if (held_sent == 0) {",
+"if (FALSE) {"
+],
+[
+"d ready: a held frame on the wire accepted",
+"if (held_seen != 0) {",
+"if (FALSE) {"
+],
+[
+"d ready: gauge 0 accepted",
+"if (gauge == 0) {\n        return TAS_CD_GAUGE_ZERO;",
+"if (FALSE) {\n        return TAS_CD_GAUGE_ZERO;"
+],
+[
+"d ready: closed interval not required",
+"return closed ? TAS_CD_READY : TAS_CD_NOT_CLOSED;",
+"return TAS_CD_READY;"
+],
+[
+"tx: a tagged arrival ignored",
+"if (tagged_seen) {",
+"if (FALSE) {"
+],
+[
+"tx: dead observer read as silence",
+"if (!observer_alive) {\n        return TAS_CD_TX_UNOBSERVABLE;",
+"if (FALSE) {\n        return TAS_CD_TX_UNOBSERVABLE;"
+],
+[
+"tx: release boundary itself stalled",
+"return now_ms <= release_ms + cycle_ms ?",
+"return now_ms < release_ms + cycle_ms ?"
+],
+[
+"tx: no cycle of grace",
+"return now_ms <= release_ms + cycle_ms ?",
+"return now_ms <= release_ms ?"
 ]
 ]
 '@
 $raw = ConvertFrom-Json $OperatorsJson          # through a variable: Windows PowerShell keeps a JSON array as one pipeline object
 $Operators = @($raw)
-tc_check 'TEST-TAS-LIFE-MUT-000-operator-count' ($Operators.Count -eq 83) "expected 83 operators, found $($Operators.Count)"
+tc_check 'TEST-TAS-LIFE-MUT-000-operator-count' ($Operators.Count -eq 107) "expected 107 operators, found $($Operators.Count)"
 
 # The verdict of one run.  KILLED means an assertion of test_tas_restore_contract failed and its normal failure path ended
 # the run: `[FAIL] label`, ` FAIL: n / m`, `[RESULT] FAILURE`, return 1 (tests/unit/test_tas_restore_contract.c).
@@ -596,8 +716,8 @@ exit 0
     }
     Write-Host ("  [TIME] compile {0:N1} s, total {1:N1} s" -f $tCompile, $Clock.Elapsed.TotalSeconds)
     Write-Host ("  [MUTATION] killed={0} survived={1} infra_failure={2} inconclusive={3} of {4}" -f $Verdicts.KILLED, $Verdicts.SURVIVED, $Verdicts.INFRA_FAILURE, $Verdicts.INCONCLUSIVE, $names.Count)
-    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq 83 -and $Verdicts.KILLED -eq 83)
-    tc_check 'TEST-TAS-LIFE-MUT-003-complete-mutation-coverage' $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of 83"
+    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq 107 -and $Verdicts.KILLED -eq 107)
+    tc_check 'TEST-TAS-LIFE-MUT-003-complete-mutation-coverage' $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of 107"
 } finally {
     Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$Tmp.worker.ps1" -Force -ErrorAction SilentlyContinue
