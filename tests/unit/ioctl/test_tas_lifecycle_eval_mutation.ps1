@@ -6,13 +6,20 @@
 # test_tas_restore_contract source, compiled against the mutated header, reports a failed assertion through its normal path:
 # `[FAIL]` lines, complete totals, `[RESULT] FAILURE`, exit 1.  Get-MutantVerdict decides, and its negative controls prove that
 # a launch failure, missing or wrong exit code, timeout, missing output, compile failure or crash is never a kill.
-# Acceptance: the unmutated code passes; every operator matches exactly once; 107 of 107 KILLED.  Each mutant keeps its own verdict.
+# Acceptance: the unmutated code passes; every operator matches exactly once; 107 of 107 KILLED across both parts, 54 in part 1
+# and 53 in part 2.  Each mutant keeps its own verdict.
 #
 # Works on copies under $env:TEMP.  The repository is not touched, no driver or adapter is involved.  Offline logic only,
 # never HIL evidence.  The compiler comes from tools\vs_compile.ps1.
 #
 # Operators recovered unchanged from the audit that gave 65 of 65 on 2026-11-06, which ran outside the repository.
 # Traces to: #364.  TEST issue: pending, drafted for Q's review.
+#
+# Two mandatory Unit entries share this audit, so each stays inside the unchanged 60 s Unit timeout (Q, 2026-11-10): this
+# script is part 1, mutants 1 to 54; test_tas_lifecycle_eval_mutation_part2.ps1 runs part 2, mutants 55 to the end.  Both
+# check that every one of the operators exists and matches once; each builds, runs and must kill only its own part.
+
+param([ValidateRange(1, 2)][int]$Part = 1)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -29,7 +36,8 @@ function tc_check { param([string]$n, [bool]$ok, [string]$why)
     else { $script:failed++; Write-Host ("  [FAIL] {0}: {1}" -f $n, $why) -ForegroundColor Red } }
 
 Write-Host ""
-Write-Host "TEST-TAS-LIFE-MUT: mutation audit of the lifecycle evaluator (offline, not HIL evidence)" -ForegroundColor Cyan
+Write-Host "TEST-TAS-LIFE-MUT: mutation audit of the lifecycle evaluator, part $Part of 2 (offline, not HIL evidence)" -ForegroundColor Cyan
+$PartSplit = 54   # mutants 1 to 54 in part 1, the rest in part 2
 
 $OperatorsJson = @'
 [
@@ -642,6 +650,7 @@ try {
         $i++
         $count = ([regex]::Matches($source, [regex]::Escape([string]$m[1]))).Count
         if ($count -ne 1) { [void]$bad.Add("$($m[0]) matched $count times"); continue }
+        if (($Part -eq 1) -ne ($i -le $PartSplit)) { continue }   # the other part builds and runs it
         $id = 'm{0:D2}' -f $i
         $names[$id] = [string]$m[0]
         $null = & $NewTree $id $source.Replace([string]$m[1], [string]$m[2])
@@ -716,8 +725,9 @@ exit 0
     }
     Write-Host ("  [TIME] compile {0:N1} s, total {1:N1} s" -f $tCompile, $Clock.Elapsed.TotalSeconds)
     Write-Host ("  [MUTATION] killed={0} survived={1} infra_failure={2} inconclusive={3} of {4}" -f $Verdicts.KILLED, $Verdicts.SURVIVED, $Verdicts.INFRA_FAILURE, $Verdicts.INCONCLUSIVE, $names.Count)
-    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq 107 -and $Verdicts.KILLED -eq 107)
-    tc_check 'TEST-TAS-LIFE-MUT-003-complete-mutation-coverage' $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of 107"
+    $partSize = if ($Part -eq 1) { $PartSplit } else { 107 - $PartSplit }
+    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq $partSize -and $Verdicts.KILLED -eq $partSize)
+    tc_check "TEST-TAS-LIFE-MUT-003-complete-mutation-coverage-part$Part" $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of $partSize in part $Part"
 } finally {
     Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$Tmp.worker.ps1" -Force -ErrorAction SilentlyContinue
@@ -725,6 +735,6 @@ exit 0
 }
 
 Write-Host ""
-Write-Host ("TEST-TAS-LIFE-MUT: {0} passed, {1} failed of {2} (offline, not HIL evidence)" -f $passed, $failed, $total) -ForegroundColor $(if ($failed) { 'Red' } else { 'Green' })
+Write-Host ("TEST-TAS-LIFE-MUT part {3}: {0} passed, {1} failed of {2} (offline, not HIL evidence)" -f $passed, $failed, $total, $Part) -ForegroundColor $(if ($failed) { 'Red' } else { 'Green' })
 if ($failed) { exit 1 }
 exit 0
