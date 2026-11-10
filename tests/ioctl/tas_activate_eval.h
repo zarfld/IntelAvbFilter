@@ -38,7 +38,8 @@ static __inline BOOL tas_act_phc_at(const TAS_ACT_ANCHOR *a, const TAS_ACT_ANCHO
         from < -TAS_ACT_ANCHOR_SPAN_MAX_US || b->phc_ns - a->phc_ns > 2 * span * 1000LL) {
         return FALSE;
     }
-    *phc_ns = a->phc_ns + from * (b->phc_ns - a->phc_ns) / span;
+    long long delta = b->phc_ns - a->phc_ns;
+    *phc_ns = a->phc_ns + from * (delta / span) + from * (delta % span) / span;
     return TRUE;
 }
 
