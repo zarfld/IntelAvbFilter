@@ -30,15 +30,23 @@ typedef struct {
     int fault_injection;   /* nonzero in Debug drivers only: the reserved word selects a failing write */
 } I226_TAS_IO;
 
-#define I226_TAS_QBV_CYCLE_MAX    0x3FFFFFFFu   /* I226_QBVCYCLET field width */
 #define I226_TAS_MIN_FRAME_BYTES  64u
 #define I226_TAS_MAX_FRAME_BYTES  9728u
 #define I226_TAS_WINDOW_FLOOR     512u          /* bytes: the window rule never goes below this frame size */
 #define I226_TAS_WINDOW_FACTOR    8800u         /* 1.1 x 8 bits x 1000: ns x Mbit/s per byte */
-#define I226_TAS_NS_PER_SEC       1000000000ULL
 
-#define I226_TAS_HOLD_WRITES  13u   /* mode, 8 window registers, shadow cycle, cycle, BaseT high, BaseT low */
-#define I226_TAS_PASS_WRITES  15u   /* plus FutScdDis and BaseT low as zero */
+typedef struct {
+    avb_u32 offset, old_value;
+} I226_TAS_SAVED;
+
+/* What the activation may overwrite, in write order: TQAVCTRL, STQT and ENDQT of every queue, QBVCYCLET_S, QBVCYCLET,
+ * BASET_H, BASET_L. i226_tas_read_clean fills saved[] in exactly this order */
+#define I226_TAS_SAVED_COUNT (1u + 2u * AVB_TAS_QUEUES + 4u)
+
+/* i226_tas_write_schedule writes each saved register once for HOLD; PASS adds its FutScdDis write and the BASET_L zero write.
+ * TC-MOCK-049 checks both counts against the writes that actually happen */
+#define I226_TAS_HOLD_WRITES  I226_TAS_SAVED_COUNT
+#define I226_TAS_PASS_WRITES  (I226_TAS_HOLD_WRITES + 2u)
 
 /* Every field of the request. Reads no hardware, so an invalid request changes nothing. fault_injection: see the top */
 static __inline avb_u32 i226_tas_validate_with(const AVB_TAS_ACTIVATE_REQUEST *r, int fault_injection)
@@ -53,8 +61,9 @@ static __inline avb_u32 i226_tas_validate_with(const AVB_TAS_ACTIVATE_REQUEST *r
         (!fault_injection || r->reserved > (r->pre_activation == AVB_TAS_PRE_PASS ? I226_TAS_PASS_WRITES : I226_TAS_HOLD_WRITES))) {
         return AVB_TAS_ACT_INVALID;
     }
-    if (r->cycle_ns == 0 || r->cycle_ns > I226_TAS_QBV_CYCLE_MAX ||
-        r->base_time_ns / I226_TAS_NS_PER_SEC > 0xFFFFFFFFULL) {
+    /* The cycle must fit QBVCYCLET.QBV_CYCLE_TIME, as the SSOT defines that field */
+    if (r->cycle_ns == 0 || r->cycle_ns > (I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) ||
+        r->base_time_ns / NSEC_PER_SEC > 0xFFFFFFFFULL) {
         return AVB_TAS_ACT_INVALID;
     }
     if (r->link_mbps != 10 && r->link_mbps != 100 && r->link_mbps != 1000 && r->link_mbps != 2500) {
@@ -119,13 +128,6 @@ static __inline int i226_tas_fault_phc(void *ctx, avb_u64 *ns)
     return f->inner->phc(f->inner->ctx, ns);
 }
 
-typedef struct {
-    avb_u32 offset, old_value;
-} I226_TAS_SAVED;
-
-/* What the activation may overwrite, in write order. tqavctrl comes first in saved[] */
-#define I226_TAS_SAVED_COUNT (1u + 2u * AVB_TAS_QUEUES + 4u)
-
 /* Clean means no schedule state at all, so nothing here overwrites one. Anything unreadable is not clean */
 static __inline int i226_tas_read_clean(const I226_TAS_IO *io, I226_TAS_SAVED *saved)
 {
@@ -174,7 +176,7 @@ static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS
     static const avb_u32 start[AVB_TAS_QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
     static const avb_u32 end[AVB_TAS_QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
     avb_u32 mode = tqavctrl | (avb_u32)I226_TQAVCTRL_TRANSMIT_MODE_MASK | (avb_u32)I226_TQAVCTRL_ENHANCED_QAV_MASK, q;
-    avb_u32 base_ns = (avb_u32)(r->base_time_ns % I226_TAS_NS_PER_SEC);
+    avb_u32 base_ns = (avb_u32)(r->base_time_ns % NSEC_PER_SEC);
 
     if (io->write(io->ctx, I226_TQAVCTRL, mode) != 0) {
         return 1;
@@ -188,7 +190,7 @@ static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS
         return 1;
     }
     if (io->write(io->ctx, I226_QBVCYCLET_S, r->cycle_ns) != 0 || io->write(io->ctx, I226_QBVCYCLET, r->cycle_ns) != 0 ||
-        io->write(io->ctx, I226_BASET_H, (avb_u32)(r->base_time_ns / I226_TAS_NS_PER_SEC)) != 0) {
+        io->write(io->ctx, I226_BASET_H, (avb_u32)(r->base_time_ns / NSEC_PER_SEC)) != 0) {
         return 1;
     }
     if (r->pre_activation == AVB_TAS_PRE_PASS && io->write(io->ctx, I226_BASET_L, 0) != 0) {

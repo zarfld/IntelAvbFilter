@@ -8,9 +8,13 @@
 #pragma once
 
 #include "../include/avb_ioctl.h"
+#include "../external/intel_avb/lib/intel_private.h"   /* NSEC_PER_SEC, the one shared ns-per-second definition */
 
-#define AVB_TAS_GCL_ENTRIES   8u               /* gate_states and gate_durations in struct tsn_tas_config */
-#define AVB_TAS_NS_PER_SEC    1000000000ULL
+/* The gate list GET_TAS_STATE can report: the length of AVB_TAS_STATE.config.gate_states, never a second copy of it */
+#define AVB_TAS_GCL_ENTRIES \
+    ((avb_u32)(sizeof(((AVB_TAS_STATE *)0)->config.gate_states) / sizeof(((AVB_TAS_STATE *)0)->config.gate_states[0])))
+C_ASSERT(sizeof(((AVB_TAS_STATE *)0)->config.gate_durations) / sizeof(((AVB_TAS_STATE *)0)->config.gate_durations[0]) ==
+         sizeof(((AVB_TAS_STATE *)0)->config.gate_states) / sizeof(((AVB_TAS_STATE *)0)->config.gate_states[0]));
 
 /*
  * The state after an activation result. A written schedule arms, timed or not and whether or not BaseT had passed. A restore
@@ -47,10 +51,10 @@ static __inline BOOLEAN avb_tas_gcl_from_windows(const AVB_TAS_ACTIVATE_REQUEST 
     avb_u32 edge[2u * AVB_TAS_QUEUES + 2u], n = 0, i, j, q, entries = 0;
 
     RtlZeroMemory(c, sizeof(*c));
-    c->base_time_s = r->base_time_ns / AVB_TAS_NS_PER_SEC;
-    c->base_time_ns = (avb_u32)(r->base_time_ns % AVB_TAS_NS_PER_SEC);
-    c->cycle_time_s = (avb_u32)(r->cycle_ns / AVB_TAS_NS_PER_SEC);
-    c->cycle_time_ns = (avb_u32)(r->cycle_ns % AVB_TAS_NS_PER_SEC);
+    c->base_time_s = r->base_time_ns / NSEC_PER_SEC;
+    c->base_time_ns = (avb_u32)(r->base_time_ns % NSEC_PER_SEC);
+    c->cycle_time_s = (avb_u32)(r->cycle_ns / NSEC_PER_SEC);
+    c->cycle_time_ns = (avb_u32)(r->cycle_ns % NSEC_PER_SEC);
 
     /* Every edge in [0, cycle], sorted, without duplicates */
     edge[n++] = 0;
