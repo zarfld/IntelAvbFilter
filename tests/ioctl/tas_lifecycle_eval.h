@@ -583,7 +583,7 @@ static __inline TAS_SEQ_CLASS tas_seq_classify(const TAS_SEQ_EVIDENCE *e)
     if (e->outcome == TAS_LIFECYCLE_CONTEXT_REPLACED || (e->count >= 3 && e->value[e->count - 1] == e->value[1])) {
         return TAS_SEQ_FAILED_RESTART;
     }
-    if (e->count == 4 && e->value[0] != e->value[1] && e->value[1] != e->value[2] && e->value[2] != e->value[3] && e->value[0] != e->value[2] &&
+    if (e->count == 4 && e->value[0] != e->value[1] && e->value[1] != e->value[2] && e->value[2] != e->value[3] && e->value[0] != e->value[2] && e->value[0] != e->value[3] &&
         e->pause_edge && e->restart_edge && e->pause.last_old <= e->qpc[2] + e->slack && e->pause.first_new >= e->qpc[0] - e->slack &&
         e->restart.first_new >= e->qpc[1] - e->slack) {
         return TAS_SEQ_CONSISTENT;
