@@ -4,5 +4,15 @@
 # unchanged 60 s Unit timeout (Q, 2026-11-10); part 1 is the other entry.  Offline logic only, never HIL evidence.
 # Traces to: #364.
 
-& (Join-Path $PSScriptRoot 'test_tas_lifecycle_eval_mutation.ps1') -Part 2
-exit $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '../../../tools/lib/NativeExit.ps1')
+Reset-AvbExitCode
+try {
+    & (Join-Path $PSScriptRoot 'test_tas_lifecycle_eval_mutation.ps1') -Part 2
+    $ec = Get-AvbExitCode
+} catch {
+    Write-Error $_ -ErrorAction Continue
+    exit 1
+}
+if (Test-AvbExitSuccess $ec) { exit 0 }
+exit (Get-AvbFailureExitCode $ec)
