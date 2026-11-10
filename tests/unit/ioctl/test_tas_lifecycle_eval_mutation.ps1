@@ -6,7 +6,7 @@
 # test_tas_restore_contract source, compiled against the mutated header, reports a failed assertion through its normal path:
 # `[FAIL]` lines, complete totals, `[RESULT] FAILURE`, exit 1.  Get-MutantVerdict decides, and its negative controls prove that
 # a launch failure, missing or wrong exit code, timeout, missing output, compile failure or crash is never a kill.
-# Acceptance: the unmutated code passes; every operator matches exactly once; 77 of 77 KILLED.  Each mutant keeps its own verdict.
+# Acceptance: the unmutated code passes; every operator matches exactly once; 83 of 83 KILLED.  Each mutant keeps its own verdict.
 #
 # Works on copies under $env:TEMP.  The repository is not touched, no driver or adapter is involved.  Offline logic only,
 # never HIL evidence.  The compiler comes from tools\vs_compile.ps1.
@@ -417,12 +417,42 @@ $OperatorsJson = @'
 "carried: unmoved tail accepted",
 "sent != 0 && tail_before != tail_after",
 "sent != 0"
+],
+[
+"probe name: truncated list is no match",
+"if (list_bytes - at < sizeof(USHORT)) {\n            return TRUE;",
+"if (list_bytes - at < sizeof(USHORT)) {\n            return FALSE;"
+],
+[
+"probe name: overlong record is no match",
+"if (bytes > list_bytes - at) {\n            return TRUE;",
+"if (bytes > list_bytes - at) {\n            return FALSE;"
+],
+[
+"probe name: request length ignored",
+"if (bytes <= name_bytes && memcmp(list + at, name, bytes) == 0) {",
+"if (memcmp(list + at, name, bytes) == 0) {"
+],
+[
+"probe name: a match is ignored",
+"memcmp(list + at, name, bytes) == 0) {\n            return TRUE;",
+"memcmp(list + at, name, bytes) == 0) {\n            return FALSE;"
+],
+[
+"probe verdict: success counted as refused",
+"if (ok) {\n        return TAS_PROBE_SUCCEEDED_FOR_NOTHING;",
+"if (FALSE) {\n        return TAS_PROBE_SUCCEEDED_FOR_NOTHING;"
+],
+[
+"probe verdict: any error counted as refused",
+"return error == ERROR_NOT_FOUND ? TAS_PROBE_REFUSED : TAS_PROBE_OTHER_ERROR;",
+"return TAS_PROBE_REFUSED;"
 ]
 ]
 '@
 $raw = ConvertFrom-Json $OperatorsJson          # through a variable: Windows PowerShell keeps a JSON array as one pipeline object
 $Operators = @($raw)
-tc_check 'TEST-TAS-LIFE-MUT-000-operator-count' ($Operators.Count -eq 77) "expected 77 operators, found $($Operators.Count)"
+tc_check 'TEST-TAS-LIFE-MUT-000-operator-count' ($Operators.Count -eq 83) "expected 83 operators, found $($Operators.Count)"
 
 # The verdict of one run.  KILLED means an assertion of test_tas_restore_contract failed and its normal failure path ended
 # the run: `[FAIL] label`, ` FAIL: n / m`, `[RESULT] FAILURE`, return 1 (tests/unit/test_tas_restore_contract.c).
@@ -518,17 +548,27 @@ exit 0
     $ErrorActionPreference = 'Stop'
     $tCompile = $Clock.Elapsed.TotalSeconds
 
-    # Collects what one run left behind.  Judgement is Get-MutantVerdict's alone.
-    $run = {
+    # A run is started, then collected: the same evidence a serial run gave, so judgement stays Get-MutantVerdict's alone.
+    # Runs go in batches of one per processor, as the compile does, each with its own 30 s from its own start.
+    $launch = {
         param($d)
-        $e = @{ Compiled = (Test-Path -LiteralPath "$d\t.exe"); Launched = $false; TimedOut = $false; ExitCode = $null; Output = $null; Launch = '' }
+        $e = @{ Compiled = (Test-Path -LiteralPath "$d\t.exe"); Launched = $false; TimedOut = $false; ExitCode = $null; Output = $null; Launch = ''; Dir = $d; Process = $null; Clock = $null }
         if (-not $e.Compiled) { return $e }
         try {
             # An explicit path: cmd may not search the current directory.  Not Start-Process: a fast exit can leave ExitCode empty.
-            $p = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{ FileName = 'cmd.exe'; Arguments = "/c `"`"$d\t.exe`" >`"$d\out.txt`" 2>`"$d\err.txt`"`""; UseShellExecute = $false; WorkingDirectory = $d; CreateNoWindow = $true })
+            $e.Process = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{ FileName = 'cmd.exe'; Arguments = "/c `"`"$d\t.exe`" >`"$d\out.txt`" 2>`"$d\err.txt`"`""; UseShellExecute = $false; WorkingDirectory = $d; CreateNoWindow = $true })
+            $e.Clock = [Diagnostics.Stopwatch]::StartNew()
             $e.Launched = $true
-            if (-not $p.WaitForExit(30000)) { $e.TimedOut = $true; $p.Kill(); return $e }
-            $e.ExitCode = $p.ExitCode
+        } catch { $e.Launch = "$_" }
+        return $e
+    }
+    $collect = {
+        param($e)
+        if (-not $e.Launched) { return $e }
+        $d = $e.Dir
+        try {
+            if (-not $e.Process.WaitForExit([Math]::Max(0, 30000 - [int]$e.Clock.ElapsedMilliseconds))) { $e.TimedOut = $true; $e.Process.Kill(); return $e }
+            $e.ExitCode = $e.Process.ExitCode
         } catch { $e.Launch = "$_"; return $e }
         if (Test-Path -LiteralPath "$d\err.txt") { $e.Launch = ([IO.File]::ReadAllText("$d\err.txt")).Trim() }
         if (Test-Path -LiteralPath "$d\out.txt") { $e.Output = [IO.File]::ReadAllText("$d\out.txt") }
@@ -536,21 +576,28 @@ exit 0
     }
 
     $Verdicts = @{ KILLED = 0; SURVIVED = 0; INFRA_FAILURE = 0; INCONCLUSIVE = 0 }
-    $baseEv = & $run "$Tmp\baseline"
+    $baseEv = & $collect (& $launch "$Tmp\baseline")
     $baseV = Get-MutantVerdict $baseEv
     $clLog = if (Test-Path -LiteralPath "$Tmp\baseline\cl.log") { (Get-Content -LiteralPath "$Tmp\baseline\cl.log" | Select-Object -First 6) -join ' | ' } else { $compiler.Trim() }
     Write-Host ("  [BASELINE] offline unmutated code: {0} ({1})" -f $baseV.Verdict, $baseV.Reason)
     tc_check 'TEST-TAS-LIFE-MUT-002-unmutated-code-passes' ($baseV.Verdict -eq 'SURVIVED') "baseline is $($baseV.Verdict): $($baseV.Reason).  $clLog  [$($baseEv.Launch)]"
-    foreach ($id in ($names.Keys | Sort-Object)) {
-        $v = Get-MutantVerdict (& $run "$Tmp\$id")
+    $ids = @($names.Keys | Sort-Object)
+    $cap = [Math]::Max(1, [Environment]::ProcessorCount)
+    $evidence = @{}
+    for ($i = 0; $i -lt $ids.Count; $i += $cap) {
+        $batch = @($ids[$i..([Math]::Min($i + $cap, $ids.Count) - 1)] | ForEach-Object { & $launch "$Tmp\$_" })
+        foreach ($e in $batch) { $evidence[[IO.Path]::GetFileName($e.Dir)] = & $collect $e }
+    }
+    foreach ($id in $ids) {
+        $v = Get-MutantVerdict $evidence[$id]
         $Verdicts[$v.Verdict]++
         Write-Host ("  [MUTANT] {0} {1}: {2} ({3})" -f $id, $v.Verdict, $names[$id], $v.Reason)
         tc_check "TEST-TAS-LIFE-MUT-$id $($names[$id])" ($v.Verdict -eq 'KILLED') "$($v.Verdict): $($v.Reason)"
     }
     Write-Host ("  [TIME] compile {0:N1} s, total {1:N1} s" -f $tCompile, $Clock.Elapsed.TotalSeconds)
     Write-Host ("  [MUTATION] killed={0} survived={1} infra_failure={2} inconclusive={3} of {4}" -f $Verdicts.KILLED, $Verdicts.SURVIVED, $Verdicts.INFRA_FAILURE, $Verdicts.INCONCLUSIVE, $names.Count)
-    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq 77 -and $Verdicts.KILLED -eq 77)
-    tc_check 'TEST-TAS-LIFE-MUT-003-complete-mutation-coverage' $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of 77"
+    $complete = ($baseV.Verdict -eq 'SURVIVED' -and $names.Count -eq 83 -and $Verdicts.KILLED -eq 83)
+    tc_check 'TEST-TAS-LIFE-MUT-003-complete-mutation-coverage' $complete "not complete: baseline $($baseV.Verdict), killed $($Verdicts.KILLED) of 83"
 } finally {
     Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$Tmp.worker.ps1" -Force -ErrorAction SilentlyContinue

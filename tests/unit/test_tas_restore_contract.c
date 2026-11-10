@@ -1254,6 +1254,36 @@ static void test_37_hold_gate(void) {
     EXPECT_TRUE("nothing sent, so a moved tail is someone else's", !tas_hold_stack_carried(FALSE, TRUE, 0, 300, 320));
 }
 
+/* TC-MOCK-038: the driver restarts the first instance whose whole name begins the request, so a probe is safe only if none does */
+static void test_38_probe_name(void) {
+    static const WCHAR a[] = L"{AA}-x", b[] = L"{BB}-y";
+    static BYTE list[64];
+    DWORD n = 0;
+    USHORT bytes;
+
+    printf("\n[TC-MOCK-038] Restart probe name against the instance list\n");
+    bytes = (USHORT)(sizeof(a) - sizeof(WCHAR));
+    memcpy(list + n, &bytes, sizeof(bytes)); n += sizeof(bytes); memcpy(list + n, a, bytes); n += bytes;
+    bytes = (USHORT)(sizeof(b) - sizeof(WCHAR));
+    memcpy(list + n, &bytes, sizeof(bytes)); n += sizeof(bytes); memcpy(list + n, b, bytes); n += bytes;
+    EXPECT_TRUE("an unrelated name matches nothing", !tas_name_matches_any(list, n, (const BYTE *)L"{FF}-z", 12));
+    EXPECT_TRUE("a name an instance begins matches", tas_name_matches_any(list, n, (const BYTE *)L"{BB}-y-more", 22));
+    EXPECT_TRUE("exactly an instance matches", tas_name_matches_any(list, n, (const BYTE *)L"{AA}-x", 12));
+    EXPECT_TRUE("shorter than every instance matches nothing, whatever lies beyond its length", !tas_name_matches_any(list, n, (const BYTE *)L"{AA}-x", 8));
+    EXPECT_TRUE("one differing character matches nothing", !tas_name_matches_any(list, n, (const BYTE *)L"{AA}-w", 12));
+    EXPECT_TRUE("a record running past the list counts as a match, so nothing is sent", tas_name_matches_any(list, n - 1, (const BYTE *)L"{FF}-z", 12));
+    list[n] = 0;
+    EXPECT_TRUE("a stray byte after the last record counts as a match, so nothing is sent", tas_name_matches_any(list, n + 1, (const BYTE *)L"{FF}-z", 12));
+}
+
+/* TC-MOCK-039: a request that matches no instance must be refused; success there says the driver reports nothing it did */
+static void test_39_probe_verdict(void) {
+    printf("\n[TC-MOCK-039] Restart probe verdict\n");
+    EXPECT_EQ("refused as not found", tas_probe_verdict(FALSE, ERROR_NOT_FOUND), TAS_PROBE_REFUSED);
+    EXPECT_EQ("success for nothing", tas_probe_verdict(TRUE, ERROR_SUCCESS), TAS_PROBE_SUCCEEDED_FOR_NOTHING);
+    EXPECT_EQ("refused for another reason", tas_probe_verdict(FALSE, ERROR_ACCESS_DENIED), TAS_PROBE_OTHER_ERROR);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1292,6 +1322,8 @@ int main(void) {
     test_27_management();
     test_36_hold();
     test_37_hold_gate();
+    test_38_probe_name();
+    test_39_probe_verdict();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

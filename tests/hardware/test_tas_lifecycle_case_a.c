@@ -11,6 +11,8 @@
  *
  *   TC-CASEB-001  setup: armed, frames accepted, none on the wire, observer alive. Otherwise FAILED_SETUP and no trigger
  *
+ * --probe-restart-status, TC-CASEA-004: a restart request for no instance is refused as not found, and nothing restarts. Release too
+ *
  * --case-b-drained holds about 24 frames, so the gauge is 0 at the trigger, and needs that as setup. It separates outstanding sends
  * from TSN mode as the reason run 1 of --case-b saw no Pause entry in 60 s, and otherwise the same test cases apply.
  *
@@ -519,7 +521,7 @@ static TAS_INSTANCE_RESULT find_instance(HANDLE h, avb_u64 luid, const WCHAR **n
     return tas_instance_find(list, br, guid_text, name, name_bytes);
 }
 
-typedef struct { HANDLE h; const WCHAR *name; USHORT bytes; BOOL ok; DWORD error; } TRIGGER_CALL;
+typedef struct { HANDLE h; const WCHAR *name; USHORT bytes; BOOL ok; DWORD error; ULONG ndis_status; DWORD out_bytes; } TRIGGER_CALL;
 
 static LONGLONG qpc_now(void)
 {
@@ -557,8 +559,10 @@ static DWORD WINAPI trigger_thread(LPVOID arg)
     TRIGGER_CALL *call = (TRIGGER_CALL *)arg;
     DWORD br = 0;
 
-    call->ok = DeviceIoControl(call->h, IOCTL_FILTER_RESTART_ONE_INSTANCE, (LPVOID)call->name, call->bytes, NULL, 0, &br, NULL);
+    /* The output word is filled only by a driver that reports the NDIS status of NdisFRestartFilter; older drivers leave 0 bytes */
+    call->ok = DeviceIoControl(call->h, IOCTL_FILTER_RESTART_ONE_INSTANCE, (LPVOID)call->name, call->bytes, &call->ndis_status, sizeof(call->ndis_status), &br, NULL);
     call->error = call->ok ? ERROR_SUCCESS : GetLastError();
+    call->out_bytes = br;
     return 0;
 }
 
@@ -617,6 +621,8 @@ static void lifecycle_measure(HANDLE h, const AVB_DRIVER_STATISTICS *before, con
     call.name = name;
     call.bytes = bytes;
     call.ok = FALSE;
+    call.ndis_status = 0;
+    call.out_bytes = 0;
     if (call.h == INVALID_HANDLE_VALUE) {
         printf(TAG " the trigger could not open a handle (error %lu)\n", GetLastError());
         return;
@@ -653,7 +659,8 @@ static void lifecycle_measure(HANDLE h, const AVB_DRIVER_STATISTICS *before, con
         }
         if (!returned && WaitForSingleObject(thread, 0) == WAIT_OBJECT_0) {
             returned = TRUE;
-            printf(TAG " trigger returned ok=%d error=%lu at qpc=%lld; this proves nothing about the lifecycle\n", call.ok, call.error, qpc_now());
+            printf(TAG " trigger returned ok=%d error=%lu ndisStatus=0x%08lX statusBytes=%lu at qpc=%lld; this proves nothing about the lifecycle\n", call.ok, call.error,
+                   call.ndis_status, call.out_bytes, qpc_now());
         }
         ended = st.FilterRestartCount != before->FilterRestartCount || st.FilterAttachCount != before->FilterAttachCount ||
                 st.FilterDetachCount != before->FilterDetachCount || st.FilterPauseCount < before->FilterPauseCount;
@@ -669,7 +676,8 @@ static void lifecycle_measure(HANDLE h, const AVB_DRIVER_STATISTICS *before, con
     }
     if (!returned && WaitForSingleObject(thread, TRIGGER_BOUND_MS) == WAIT_OBJECT_0) {
         returned = TRUE;
-        printf(TAG " trigger returned ok=%d error=%lu at qpc=%lld, after the lifecycle ended; this proves nothing about it\n", call.ok, call.error, qpc_now());
+        printf(TAG " trigger returned ok=%d error=%lu ndisStatus=0x%08lX statusBytes=%lu at qpc=%lld, after the lifecycle ended; this proves nothing about it\n", call.ok,
+               call.error, call.ndis_status, call.out_bytes, qpc_now());
     }
     if (!returned) {
         printf(TAG " the trigger did not return within the bounds\n");
@@ -1651,8 +1659,101 @@ unregister:
     return rc;
 }
 
+/**
+ * TC-CASEA-004: a restart request that matches no instance must be refused. Before the fix the driver reported success for it, and
+ * dropped the status of NdisFRestartFilter, so Case B's trigger could not say whether NDIS accepted it. The name is checked against
+ * every instance first, with the driver's own matching rule, and nothing is sent if one would match; the Pause and Restart counters of
+ * every adapter must stay unchanged. Needs no Debug-only IOCTL, so it runs against Debug and Release drivers.
+ */
+static int probe_restart_status(void)
+{
+    static const WCHAR probe[] = L"{FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF}-{FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF}-0000";
+    static BYTE list[INSTANCE_LIST_BYTES];
+    static AVB_ADAPTER_IDENTITY_REQUEST ids[TAS_MAX_ADAPTERS];
+    AVB_DRIVER_STATISTICS before[TAS_MAX_ADAPTERS], after;
+    HANDLE bound[TAS_MAX_ADAPTERS], h = open_device();
+    AVB_ADAPTER_IDENTITY_REQUEST id;
+    DWORD br = 0, bytes = (DWORD)(sizeof(probe) - sizeof(WCHAR));
+    ULONG ndis_status = 0;
+    UINT32 count = 1, index;
+    unsigned n = 0, i, moved = 0;
+    BOOL ok;
+    DWORD error;
+    TAS_PROBE_CLASS c;
+    int rc = 3;
+
+    ZeroMemory(bound, sizeof(bound));
+    printf(TAG " #364 restart status probe: one IOCTL_FILTER_RESTART_ONE_INSTANCE for a name no instance has\n");
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("[BLOCKED] TC-CASEA-004: cannot open %s (error %lu)\n", DEVICE_NAME, GetLastError());
+        return 3;
+    }
+    if (!DeviceIoControl(h, IOCTL_FILTER_ENUERATE_ALL_INSTANCES, NULL, 0, list, sizeof(list), &br, NULL) || br == 0) {
+        printf("[BLOCKED] TC-CASEA-004: instance list unreadable or empty (error %lu); nothing sent\n", GetLastError());
+        goto done;
+    }
+    if (tas_name_matches_any(list, br, (const BYTE *)probe, bytes)) {
+        printf("[BLOCKED] TC-CASEA-004: an instance begins the probe name or the list does not parse; nothing sent\n");
+        goto done;
+    }
+    for (index = 0; index < count && n < TAS_MAX_ADAPTERS && identity_at(h, index, &id); index++) {
+        count = id.count;
+        ids[n] = id;
+        bound[n] = open_device();
+        if (bound[n] == INVALID_HANDLE_VALUE || !bind_luid(bound[n], id.net_luid) || !read_stats(bound[n], &before[n])) {
+            printf("[BLOCKED] TC-CASEA-004: adapter did=0x%04X cannot be watched, so a restart could not be excluded; nothing sent\n", id.device_id);
+            n++;
+            goto done;
+        }
+        n++;
+    }
+    if (n == 0 || n != count) {
+        printf("[BLOCKED] TC-CASEA-004: %u of %u adapters watched; nothing sent\n", n, count);
+        goto done;
+    }
+    br = 0;
+    ok = DeviceIoControl(h, IOCTL_FILTER_RESTART_ONE_INSTANCE, (LPVOID)probe, bytes, &ndis_status, sizeof(ndis_status), &br, NULL);
+    error = ok ? ERROR_SUCCESS : GetLastError();
+    Sleep(SETTLE_MS);   /* a restart that did happen moves the counters within milliseconds in Case A */
+    for (i = 0; i < n; i++) {
+        BOOL changed;
+
+        ZeroMemory(&after, sizeof(after));
+        changed = !read_stats(bound[i], &after) || after.FilterPauseCount != before[i].FilterPauseCount || after.FilterRestartCount != before[i].FilterRestartCount;
+        moved += changed ? 1u : 0u;
+        printf("    adapter did=0x%04X pause=%llu restart=%llu %s\n", ids[i].device_id, after.FilterPauseCount, after.FilterRestartCount, changed ? "CHANGED" : "unchanged");
+    }
+    c = tas_probe_verdict(ok, error);
+    printf(TAG " probe returned ok=%d error=%lu ndisStatus=0x%08lX statusBytes=%lu adaptersChanged=%u\n", ok, error, ndis_status, br, moved);
+    if (moved != 0) {
+        printf("[FAIL] TC-CASEA-004: a request for no instance changed an adapter's lifecycle counters\n");
+        rc = 1;
+    } else if (c == TAS_PROBE_REFUSED) {
+        printf("[PASS] TC-CASEA-004: refused as not found, and nothing restarted\n");
+        rc = 0;
+    } else if (c == TAS_PROBE_SUCCEEDED_FOR_NOTHING) {
+        printf("[FAIL] TC-CASEA-004: the driver reported success for a request that matched no instance\n");
+        rc = 1;
+    } else {
+        printf("[FAIL] TC-CASEA-004: refused with error %lu, where not found (%lu) is required\n", error, (DWORD)ERROR_NOT_FOUND);
+        rc = 1;
+    }
+
+done:
+    for (i = 0; i < n; i++) {
+        if (bound[i] != NULL && bound[i] != INVALID_HANDLE_VALUE) {
+            CloseHandle(bound[i]);
+        }
+    }
+    CloseHandle(h);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--probe-restart-status") == 0) {
+        return probe_restart_status();
+    }
     BOOL dry_run = argc == 2 && strcmp(argv[1], "--dry-run") == 0, passive = argc == 2 && strcmp(argv[1], "--passive") == 0;
 
     g_case_b_drained = argc == 2 && strcmp(argv[1], "--case-b-drained") == 0;
@@ -1663,7 +1764,7 @@ int main(int argc, char **argv)
         g_tc_clean = "TC-CASEB-004";
     }
     if (argc > 2 || (argc == 2 && !dry_run && !passive && !g_case_b)) {
-        printf("[BLOCKED] %s: usage: test_tas_lifecycle_case_a [--dry-run | --passive | --case-b | --case-b-drained]\n", g_tc_run);
+        printf("[BLOCKED] %s: usage: test_tas_lifecycle_case_a [--dry-run | --passive | --case-b | --case-b-drained | --probe-restart-status]\n", g_tc_run);
         return 3;
     }
     return lifecycle_case_a(dry_run, passive);

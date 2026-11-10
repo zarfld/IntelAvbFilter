@@ -671,6 +671,45 @@ static __inline BOOL tas_hold_stack_carried(BOOL wire_shown, BOOL tail_read, uns
     return wire_shown || (tail_read && sent != 0 && tail_before != tail_after);
 }
 
+/*
+ * The restart status probe of #364. filterFindFilterModule in src/device.c restarts the first instance whose whole name begins
+ * the request, so a probe name is safe only if no record of IOCTL_FILTER_ENUERATE_ALL_INSTANCES does. A list that does not
+ * parse counts as a match, so nothing is sent.
+ */
+static __inline BOOL tas_name_matches_any(const BYTE *list, DWORD list_bytes, const BYTE *name, DWORD name_bytes)
+{
+    DWORD at;
+
+    for (at = 0; at < list_bytes;) {
+        USHORT bytes;
+
+        if (list_bytes - at < sizeof(USHORT)) {
+            return TRUE;
+        }
+        memcpy(&bytes, list + at, sizeof(bytes));
+        at += sizeof(USHORT);
+        if (bytes > list_bytes - at) {
+            return TRUE;
+        }
+        if (bytes <= name_bytes && memcmp(list + at, name, bytes) == 0) {
+            return TRUE;
+        }
+        at += bytes;
+    }
+    return FALSE;
+}
+
+typedef enum { TAS_PROBE_REFUSED = 0, TAS_PROBE_SUCCEEDED_FOR_NOTHING, TAS_PROBE_OTHER_ERROR } TAS_PROBE_CLASS;
+
+/* A request that matches no instance must fail as not found. Success says the driver reports something it did not do */
+static __inline TAS_PROBE_CLASS tas_probe_verdict(BOOL ok, DWORD error)
+{
+    if (ok) {
+        return TAS_PROBE_SUCCEEDED_FOR_NOTHING;
+    }
+    return error == ERROR_NOT_FOUND ? TAS_PROBE_REFUSED : TAS_PROBE_OTHER_ERROR;
+}
+
 /* Where the management session runs. Reported only: losing it is an accepted consequence, and no verdict reads this */
 typedef enum { TAS_MGMT_UNATTRIBUTED = 0, TAS_MGMT_ON_TARGET, TAS_MGMT_NOT_ON_TARGET } TAS_MGMT_CLASS;
 
