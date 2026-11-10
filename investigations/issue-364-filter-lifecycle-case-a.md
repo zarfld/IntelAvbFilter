@@ -805,9 +805,41 @@ Conclusion: a usable test-owned recovery mechanism for C and D once explicitly a
 5. Its offline test restored without the 139 s: the interrupt cases waited on fixed sleeps, and those are the first thing to measure.
 6. Three runs each: the test, then the operator block as phase 2, then the dry run as phase 3. The tool itself implements phases 1 and 3 and records the outcome of phase 2.
 
-### For approval
+### Layered cleanup, Q's decision of 2026-11-10
 
-Using `restore()` as the in-tool phase 2 for C and D, with the conditions in its evaluation above. Until then, the operator block.
+This replaces the operator block as phase 2 for C and D. The operator stays the final recovery path, never a silent substitute.
+
+| Layer | Owner | When | Mechanism | Record |
+|---|---|---|---|---|
+| Primary | `tas_gate_investigation` | Every executable exit path after its first register write: success, failed setup, stop condition, timeout inside the tool | `restore()`: `CM_Disable_DevNode` and `CM_Enable_DevNode` on the target devnode, bounded threads, no enable after a failed disable | A cleanup record file beside the log, written before and after the cycle, plus a `PRIMARY_CLEANUP` verdict line |
+| Fallback | The #364 wrapper | Only when the fallback rule below says so | `Disable-NetAdapter` and `Enable-NetAdapter` on the target only, bounded, no enable after a failed disable: the path that recovered 5 of 5 Case B holds | A `FALLBACK_CLEANUP` verdict, including `NOT_NEEDED` and `REFUSED` with the reason |
+| Verification | The wrapper, in a separate process | After the last cleanup layer, whatever it did | The read-only dry run through the runner, compared with the tool's pre-state record: TSN registers, tasArmed, tagged TX on the observer, PHC continuity, driver and hardware agreement | A `RESTORATION` verdict from the four facts of #361 |
+| Final | The operator | Only when both layers failed or a layer refused for safety | The Case B block, or a reboot, Q's decision | The wrapper's report names what is left |
+
+**Fallback rule.** One decision from the primary record and the adapter's state, as a pure function with offline cases and mutants:
+
+| Primary record | Adapter | Fallback |
+|---|---|---|
+| Cycle done, verification shows the pre-state | any | `NOT_NEEDED` |
+| Cycle done, verification shows TSN state left (#349) | Up | `RUN`: a second cycle cleared #349 once |
+| Disable or enable did not return | any | `REFUSED`: an NDIS operation may still be outstanding, so nothing overlaps it; operator |
+| No record, or a record without its closing line: the tool crashed, was killed or timed out | Disabled, in transition, or problem code set | `REFUSED`, same reason |
+| Same | Up, no problem code | `RUN` |
+| The tool never wrote a register | any | `NOT_NEEDED`: nothing to restore; verification still runs |
+
+**Verdicts, kept apart.** Test, the C or D test cases; `PRIMARY_CLEANUP` DONE, FAILED, TIMED_OUT or NOT_REACHED; `FALLBACK_CLEANUP` NOT_NEEDED, DONE, FAILED, TIMED_OUT or REFUSED; `RESTORATION` VERIFIED, `INCONCLUSIVE_RESTORATION` or `CLEANUP_FAILED`. With the PHC reset on every Restart and every cycle, `RESTORATION` cannot reach VERIFIED today (D9, #348); the other three facts are still reported.
+
+**Hardware verification of both layers, failure paths included.** Each needs its own run, all on the I226 with operator authorization per run:
+
+| Path | How it is reached | Expected |
+|---|---|---|
+| Primary succeeds | An ordinary C run | Primary DONE, fallback NOT_NEEDED, verification against the pre-state |
+| Primary skipped | A Debug-only `--inject-cleanup skip` in the tool: it writes its record as not reached and exits | Fallback RUN and DONE |
+| Tool killed mid-run | `--inject-cleanup crash`: the tool ends itself after the schedule write, leaving an open record | Fallback RUN when the adapter is Up |
+| Overlap refused | `--inject-cleanup hang`: the tool records a disable that did not return, without starting one | Fallback REFUSED, operator named |
+| Schedule left after the cycle | Cannot be forced: #349 appeared once in 41 cycles | Covered offline by the rule; on hardware only if it occurs |
+
+The injections exist only to exercise the cleanup layers; they never change a C or D test verdict, and each run reports which one was used.
 
 ## Activation runs for #357
 
