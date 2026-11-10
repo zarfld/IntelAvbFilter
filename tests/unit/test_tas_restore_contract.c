@@ -36,6 +36,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_restoration_eval.h"
 #include "../ioctl/tas_wire_match.h"
 #include "../../devices/i226_tas_activate.h"
+#include "../ioctl/tas_activate_eval.h"
 
 /* =========================================================================
  * Mock infrastructure
@@ -867,6 +868,79 @@ static void test_48_activate_gcl(void) {
     EXPECT_EQ("before any write", g_hw.writes, 0);
 }
 
+/* TC-MOCK-050: capture times are host times, the schedule is PHC time; the line through two bracketed reads maps them */
+static void test_50_act_mapping(void) {
+    TAS_ACT_ANCHOR a = {1000000, 408000000000LL}, b = {11000000, 418293000000LL}, same = {1000000, 409000000000LL};
+    long long phc = 0;
+
+    printf("\n[TC-MOCK-050] Host to PHC time through two anchors\n");
+    EXPECT_TRUE("maps the first anchor onto itself", tas_act_phc_at(&a, &b, 1000000, &phc) && phc == 408000000000LL);
+    EXPECT_TRUE("the PHC rate between the anchors applies, 1.0293", tas_act_phc_at(&a, &b, 2000000, &phc) && phc == 409029300000LL);
+    EXPECT_TRUE("also before the first anchor", tas_act_phc_at(&a, &b, 0, &phc) && phc == 406970700000LL);
+    EXPECT_FALSE("two anchors at one host time define no line", tas_act_phc_at(&a, &same, 2000000, &phc));
+    EXPECT_FALSE("anchors in reverse order are refused", tas_act_phc_at(&b, &a, 2000000, &phc));
+}
+
+#define ACT_MS 1000000LL
+#define ACT_BASE (10000LL * ACT_MS)
+static TAS_ACT_FRAME g_af[16];
+static unsigned g_afn;
+static void act_frame(long long sent_ms, long long arrival_ms) {   /* times relative to BaseT; arrival < -999999 means not seen */
+    g_af[g_afn].sent_ns = ACT_BASE + sent_ms * ACT_MS;
+    g_af[g_afn].seen = arrival_ms > -999999;
+    g_af[g_afn].arrival_ns = g_af[g_afn].seen ? ACT_BASE + arrival_ms * ACT_MS : 0;
+    g_afn++;
+}
+#define ACT_LOST (-1000000)
+static TAS_ACT_WIRE_CLASS act_eval(avb_u32 pre, BOOL alive, TAS_ACT_WIRE_COUNTS *c) {
+    return tas_act_wire(pre, g_af, g_afn, alive, ACT_BASE, 1000 * ACT_MS, 200 * ACT_MS, 400 * ACT_MS, TAS_ACT_EDGE_MARGIN_NS, c);
+}
+
+/* TC-MOCK-051: HOLD: nothing before the first window after BaseT, then only inside windows */
+static void test_51_act_hold_wire(void) {
+    TAS_ACT_WIRE_COUNTS c;
+
+    printf("\n[TC-MOCK-051] HOLD wire rules, 1 s cycle, window 200 to 400 ms, 20 ms margin\n");
+    g_afn = 0; act_frame(-1500, 200); act_frame(-500, 201); act_frame(100, 230); act_frame(500, 1250); act_frame(1300, 1300);
+    EXPECT_EQ("held, released in the first window, then gated", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_GATED);
+    EXPECT_TRUE("held frames leave at the window start: released, though at the edge", c.released == 2 && c.near_edge == 2 && c.inside == 3);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, 230); act_frame(500, 1250);
+    EXPECT_EQ("a frame before BaseT passed the hold", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_EARLY);
+    g_afn = 0; act_frame(-500, 100); act_frame(-400, 230); act_frame(500, 1250);
+    EXPECT_EQ("a frame after BaseT but before the first window", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_EARLY);
+    g_afn = 0; act_frame(-500, 230); act_frame(500, 700);
+    EXPECT_EQ("a frame outside a later window", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_OUTSIDE);
+    g_afn = 0; act_frame(-500, 1230); act_frame(500, 1250);
+    EXPECT_EQ("held frames released only in a later window", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_NOT_RELEASED);
+    g_afn = 0; act_frame(-500, 230); act_frame(500, ACT_LOST); act_frame(600, ACT_LOST);
+    EXPECT_EQ("frames missing on a live capture", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_LOST);
+    g_afn = 0; act_frame(-500, ACT_LOST); act_frame(500, ACT_LOST);
+    EXPECT_EQ("nothing seen on a live capture is lost, not unobserved", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_LOST);
+    EXPECT_EQ("nothing seen on a dead capture decides nothing", act_eval(AVB_TAS_PRE_HOLD, FALSE, &c), TAS_ACT_WIRE_UNOBSERVED);
+    g_afn = 0; act_frame(-500, 199); act_frame(-400, 399);
+    EXPECT_EQ("released, but arrivals only at the edges prove no gating", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_NO_WINDOW);
+    g_afn = 0;
+    EXPECT_EQ("no frame at all decides nothing", act_eval(AVB_TAS_PRE_HOLD, TRUE, &c), TAS_ACT_WIRE_UNOBSERVED);
+}
+
+/* TC-MOCK-052: PASS: frames flow until BaseT, then only inside windows */
+static void test_52_act_pass_wire(void) {
+    TAS_ACT_WIRE_COUNTS c;
+
+    printf("\n[TC-MOCK-052] PASS wire rules\n");
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, -499); act_frame(-10, 200); act_frame(500, 1250);
+    EXPECT_EQ("flowing before BaseT, gated after", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_GATED);
+    EXPECT_TRUE("two flowed, one sent at the BaseT edge", c.flowed == 2 && c.inside == 1 && c.near_edge == 1);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, 230); act_frame(500, 1250);
+    EXPECT_EQ("a frame sent well before BaseT was held", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_HELD_BEFORE_BASE);
+    g_afn = 0; act_frame(-10, 230); act_frame(500, 1250);
+    EXPECT_EQ("nothing flowed before BaseT", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_NOT_FLOWING);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(500, 600);
+    EXPECT_EQ("a frame outside the window after BaseT", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_OUTSIDE);
+    g_afn = 0; act_frame(-1500, -1499); act_frame(-500, -499);
+    EXPECT_EQ("never gated: nothing sent after BaseT reached a window", act_eval(AVB_TAS_PRE_PASS, TRUE, &c), TAS_ACT_WIRE_NO_WINDOW);
+}
+
 /*
  * TC-MOCK-049: the HIL fault path (#357, Q 2026-11-10). Debug drivers only: reserved word N fails schedule write N and the
  * first restore write, so the registered HIL test can reach FAILED_NOT_RESTORED. A Release driver refuses any nonzero value.
@@ -940,6 +1014,9 @@ int main(void) {
     test_47_activate_state();
     test_48_activate_gcl();
     test_49_activate_fault();
+    test_50_act_mapping();
+    test_51_act_hold_wire();
+    test_52_act_pass_wire();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
