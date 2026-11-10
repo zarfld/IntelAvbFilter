@@ -214,8 +214,13 @@ static BOOL take_anchor(HANDLE h, TAS_ACT_ANCHOR *a, const char *label)
             a->phc_ns = phc;
         }
     }
+    if (best < 0) {
+        ZeroMemory(a, sizeof(*a));
+        printf("    anchor %s: unavailable (all PHC reads failed)\n", label);
+        return FALSE;
+    }
     printf("    anchor %s: hostUs=%lld phcNs=%lld bracketUs=%lld\n", label, a->host_us, a->phc_ns, best);
-    return best >= 0;
+    return TRUE;
 }
 
 /** Finds the adapter's IPv4 address, and whether another adapter keeps the machine reachable */
