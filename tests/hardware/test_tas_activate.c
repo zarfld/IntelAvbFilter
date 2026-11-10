@@ -345,7 +345,12 @@ static void driver_provenance(void)
                       BCryptCreateHash(alg, &hash, NULL, 0, NULL, 0, 0) == 0;
             int k;
 
-            while (ok && ReadFile(f, buf, sizeof(buf), &got, NULL) && got != 0) {
+            while (ok) {
+                if (!ReadFile(f, buf, sizeof(buf), &got, NULL)) {
+                    ok = FALSE;
+                    break;
+                }
+                if (got == 0) { break; }
                 ok = BCryptHashData(hash, buf, got, 0) == 0;
             }
             ok = ok && BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0;
