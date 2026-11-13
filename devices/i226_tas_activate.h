@@ -65,9 +65,10 @@ static __inline avb_u32 i226_tas_validate_with(const AVB_TAS_ACTIVATE_REQUEST *r
         (!fault_injection || r->reserved > (r->pre_activation == AVB_TAS_PRE_PASS ? I226_TAS_PASS_WRITES : I226_TAS_HOLD_WRITES))) {
         return AVB_TAS_ACT_INVALID;
     }
-    /* The cycle must fit QBVCYCLET.QBV_CYCLE_TIME, as the SSOT defines that field */
+    /* The cycle must fit QBVCYCLET.QBV_CYCLE_TIME, as the SSOT defines that field; the BaseT seconds must fit the
+     * 32-bit BASET_H register (the SSOT defines its offset only, no field) */
     if (r->cycle_ns == 0 || r->cycle_ns > (I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) ||
-        r->base_time_ns / NSEC_PER_SEC > 0xFFFFFFFFULL) {
+        r->base_time_ns / NSEC_PER_SEC > (avb_u64)INTEL_MASK_32BIT) {
         return AVB_TAS_ACT_INVALID;
     }
     if (r->link_mbps != 10 && r->link_mbps != 100 && r->link_mbps != 1000 && r->link_mbps != 2500) {

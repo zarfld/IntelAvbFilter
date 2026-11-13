@@ -669,6 +669,10 @@ static void test_28_activate_validation(void) {
     EXPECT_EQ("no cycle", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
     act_setup(AVB_TAS_PRE_HOLD); g_act.cycle_ns = 0x40000000u;
     EXPECT_EQ("cycle beyond the register field", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 4294967296ULL * NSEC_PER_SEC;
+    EXPECT_EQ("BaseT seconds beyond the 32-bit BASET_H register", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
+    act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 4294967295ULL * NSEC_PER_SEC + (NSEC_PER_SEC - 1u);
+    EXPECT_EQ("the largest BaseT that fits BASET_H", i226_tas_validate(&g_act), AVB_TAS_ACT_COMMITTED);
     act_setup(AVB_TAS_PRE_HOLD); g_act.window_end_ns[2] = g_act.window_start_ns[2];
     EXPECT_EQ("empty window", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
     act_setup(AVB_TAS_PRE_HOLD); g_act.window_end_ns[3] = g_act.cycle_ns + 1;
