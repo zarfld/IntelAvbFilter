@@ -356,16 +356,20 @@ if ($fnMissing -eq '') {
     & git -C $G -c user.email=t@t -c user.name=t add -A 2>$null | Out-Null
     & git -C $G -c user.email=t@t -c user.name=t -c core.autocrlf=false commit -q -m non-ascii 2>$null | Out-Null
     $ErrorActionPreference = $prevEap
+    $naPath = Join-Path $G "tests\$naName"
     $encPrev = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(65001); $gUtf = DG
-        [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(850);   $gOem = DG
-        Set-Content -LiteralPath (Join-Path $G "tests\$naName") -Value '#define NA 2' -Encoding ASCII; $gOemEdit = DG
+        Set-Content -LiteralPath $naPath -Value '#define NA 2' -Encoding ASCII;    $gUtfEdit = DG
+        [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(850);   $gOemEdit = DG
+        Set-Content -LiteralPath $naPath -Value '#define NA 1' -Encoding ASCII;    $gOem = DG
     } finally { [Console]::OutputEncoding = $encPrev }
     tc_check 'TEST-HILPROV-072-build-input-digest-independent-of-console-encoding-non-ascii-input-hashed' `
-        ($gUtf.Ok -and $gOem.Ok -and $gOemEdit.Ok -and ($gOem.Digest -eq $gUtf.Digest) -and ($gOemEdit.Digest -ne $gOem.Digest)) `
-        ("ok={0}/{1}/{2} cp850==cp65001={3} cp850-content-edit-changes-digest={4} {5}{6}" -f $gUtf.Ok, $gOem.Ok, $gOemEdit.Ok,
-         ($gOem.Digest -eq $gUtf.Digest), ($gOemEdit.Digest -ne $gOem.Digest), $gUtf.Error, $gOem.Error)
+        ($gUtf.Ok -and $gUtfEdit.Ok -and $gOem.Ok -and $gOemEdit.Ok -and ($gOem.Digest -eq $gUtf.Digest) -and ($gOemEdit.Digest -eq $gUtfEdit.Digest) -and
+         ($gUtfEdit.Digest -ne $gUtf.Digest) -and ($gOemEdit.Digest -ne $gOem.Digest)) `
+        ("ok={0}/{1}/{2}/{3} cp850==cp65001={4} edited:cp850==cp65001={5} content-edit-changes-digest:cp65001={6} cp850={7} {8}{9}" -f
+         $gUtf.Ok, $gUtfEdit.Ok, $gOem.Ok, $gOemEdit.Ok, ($gOem.Digest -eq $gUtf.Digest), ($gOemEdit.Digest -eq $gUtfEdit.Digest),
+         ($gUtfEdit.Digest -ne $gUtf.Digest), ($gOemEdit.Digest -ne $gOem.Digest), $gUtf.Error, $gOem.Error)
 }
 
 # ---------------------------------------------------------------------------------------------------------
