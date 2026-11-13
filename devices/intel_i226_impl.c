@@ -614,7 +614,7 @@ static int activate_phc(void *ctx, avb_u64 *ns)
 }
 
 /** First gate schedule on a clean adapter (#357). The sequence and its refusals are in i226_tas_activate.h */
-static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed)
+static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed, int *tsn_mode_written)
 {
     I226_TAS_IO io;
     int outcome;
@@ -628,10 +628,10 @@ static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request,
 #else
     io.fault_injection = 0;
 #endif
-    outcome = i226_tas_activate(&io, request, armed);
-    DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u fault=%u outcome=%d result=%u phcAtCommit=%llu\n",
+    outcome = i226_tas_activate(&io, request, armed, tsn_mode_written);
+    DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u fault=%u outcome=%d result=%u modeWritten=%d phcAtCommit=%llu\n",
            request->pre_activation, (unsigned long long)request->base_time_ns, request->cycle_ns, request->reserved, outcome,
-           request->result, (unsigned long long)request->phc_at_commit_ns);
+           request->result, *tsn_mode_written, (unsigned long long)request->phc_at_commit_ns);
     return outcome;
 }
 

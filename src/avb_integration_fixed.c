@@ -4421,13 +4421,13 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 info = sizeof(*r);
             } else {
                 avb_u32 before = (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0);
-                int outcome;
+                int outcome, tsn_mode_written = 0;
 
                 /* Armed and dirty are both not clean, so the device code refuses without writing */
-                outcome = ops->activate_tas(&activeContext->intel_device, r, before != AVB_TAS_STATE_CLEAN);
+                outcome = ops->activate_tas(&activeContext->intel_device, r, before != AVB_TAS_STATE_CLEAN, &tsn_mode_written);
                 status = (NTSTATUS)avb_tas_activate_completion(outcome, &info);
                 if (outcome == AVB_TAS_ACTIVATE_RAN) {
-                    avb_u32 after = avb_tas_state_after(r->result, before);
+                    avb_u32 after = avb_tas_state_after(r->result, before, tsn_mode_written);
 
                     r->status = (avb_u32)STATUS_SUCCESS;
                     if (after == AVB_TAS_STATE_ARMED && before != AVB_TAS_STATE_ARMED) {

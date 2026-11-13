@@ -199,7 +199,9 @@ typedef struct _IOCTL_VERSION {
 #define AVB_TAS_ACT_COMMITTED           0u  /* schedule written, BaseT still ahead at the read after commit */
 #define AVB_TAS_ACT_INVALID             1u  /* refused: bad field, or BaseT not far enough ahead. Nothing written */
 #define AVB_TAS_ACT_NOT_CLEAN           2u  /* refused: armed, left-over schedule state or unreadable. Nothing written */
-#define AVB_TAS_ACT_FAILED_RESTORED     3u  /* a write failed before commit, every register read back at its old value */
+#define AVB_TAS_ACT_FAILED_RESTORED     3u  /* a write failed before commit, every register read back at its old value. Registers only:
+                                               if the transmit-mode write had reached the adapter, the state is DIRTY (readback does
+                                               not prove the transmit mode) */
 #define AVB_TAS_ACT_FAILED_NOT_RESTORED 4u  /* a write failed before commit and the restore did not complete */
 #define AVB_TAS_ACT_BASE_PASSED         5u  /* schedule written, but the PHC had passed BaseT at the read after commit */
 #define AVB_TAS_ACT_COMMITTED_UNTIMED   6u  /* schedule written, but the PHC read after the commit failed: whether BaseT was still ahead is unknown */
@@ -527,7 +529,10 @@ typedef struct AVB_TAS_REQUEST {
 /* Values of AVB_TAS_STATE.armed. Any nonzero value means the adapter is not clean */
 #define AVB_TAS_STATE_CLEAN 0u   /* no TAS operation of this driver left state behind */
 #define AVB_TAS_STATE_ARMED 1u   /* a schedule was written: by IOCTL_AVB_SETUP_TAS, or by IOCTL_AVB_TAS_ACTIVATE (#357) */
-#define AVB_TAS_STATE_DIRTY 2u   /* a TAS operation failed and its restore did not complete: hardware state unknown, a NIC cycle is owed */
+#define AVB_TAS_STATE_DIRTY 2u   /* a TAS operation failed and restoration is not established (its restore did not complete, or
+                                    TAS_ACTIVATE's transmit-mode write had reached the adapter, which a readback cannot prove
+                                    restored):
+                                    hardware state unknown, a NIC cycle is owed */
 
 typedef struct AVB_TAS_STATE {
     avb_u32               armed;   /* out: AVB_TAS_STATE_CLEAN, _ARMED or _DIRTY */

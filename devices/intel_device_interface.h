@@ -82,8 +82,9 @@ typedef struct _intel_device_ops {
     int (*setup_tas)(device_t *dev, struct tsn_tas_config *config);
     /* First gate schedule on a clean adapter (#357). Returns AVB_TAS_ACTIVATE_RAN when request->result says what happened,
      * AVB_TAS_ACTIVATE_NOT_IMPLEMENTED for a valid request it refused without any register access (src/avb_tas_activate_state.h).
+     * *tsn_mode_written: the transmit-mode write reached the adapter, for avb_tas_state_after.
      * NULL on TAS-capable hardware means not implemented, never unsupported. */
-    int (*activate_tas)(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed);
+    int (*activate_tas)(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed, int *tsn_mode_written);
         /* disable_tas: clear the hardware TSN transmit mode bit (TQAVCTRL.TRANSMIT_MODE_TSN on I226).
          * Returns 0 on success, -ENOTSUP if hardware has no TAS disable path, <0 on hardware error.
          * NULL means device never had TAS hardware (e.g. I219, I210). */

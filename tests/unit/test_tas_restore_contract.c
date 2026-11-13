@@ -623,6 +623,7 @@ static int fake_phc(void *c, avb_u64 *ns) {
 
 static FAKE_HW g_hw;
 static AVB_TAS_ACTIVATE_REQUEST g_act;
+static int g_mode_written;   /* i226_tas_activate: the transmit-mode write reached the fake adapter */
 static const I226_TAS_IO g_io = {&g_hw, fake_read, fake_write, fake_phc};
 
 /* The verified schedule of the Case C and D design: 1 s cycle, 200 to 400 ms windows, BaseT 2 s ahead */
@@ -693,7 +694,7 @@ static void test_28_activate_validation(void) {
     act_setup(AVB_TAS_PRE_HOLD); g_act.max_frame_bytes = 64; g_act.window_start_ns[1] = 0; g_act.window_end_ns[1] = 4500;
     EXPECT_EQ("below the 512 byte floor", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
     act_setup(AVB_TAS_PRE_HOLD); g_act.version = 2;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("an invalid request reports it", g_act.result, AVB_TAS_ACT_INVALID);
     EXPECT_EQ("and writes nothing", g_hw.writes, 0);
 }
@@ -704,19 +705,19 @@ static void test_29_activate_not_clean(void) {
 
     printf("\n[TC-MOCK-029] An adapter that is not clean is refused and nothing is written\n");
     act_setup(AVB_TAS_PRE_HOLD);
-    i226_tas_activate(&g_io, &g_act, TRUE);
+    i226_tas_activate(&g_io, &g_act, TRUE, &g_mode_written);
     EXPECT_EQ("driver says armed", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
     EXPECT_EQ("no write when armed", g_hw.writes, 0);
     for (i = 0; i < sizeof(dirty) / sizeof(dirty[0]); i++) {
         act_setup(AVB_TAS_PRE_HOLD);
         g_hw.reg[dirty[i] / 4] = 1;
-        i226_tas_activate(&g_io, &g_act, FALSE);
+        i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
         EXPECT_EQ("left-over schedule state", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
         EXPECT_EQ("no write", g_hw.writes, 0);
     }
     act_setup(AVB_TAS_PRE_HOLD);
     g_hw.read_fails = TRUE;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("unreadable state is never clean", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
     EXPECT_EQ("no write when unreadable", g_hw.writes, 0);
 }
@@ -727,7 +728,7 @@ static void test_30_activate_hold(void) {
 
     printf("\n[TC-MOCK-030] Hold: the sequence run on hardware, no reserved bit\n");
     act_setup(AVB_TAS_PRE_HOLD);
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("committed", g_act.result, AVB_TAS_ACT_COMMITTED);
     EXPECT_TRUE("register order", act_order(want, sizeof(want) / sizeof(want[0])));
     EXPECT_EQ("TQAVCTRL is 0x09", g_hw.reg[I226_TQAVCTRL / 4], 0x09);
@@ -741,7 +742,7 @@ static void test_30_activate_hold(void) {
     EXPECT_TRUE("PHC at commit reported", g_act.phc_at_commit_ns == g_hw.phc_later);
 
     act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 7250000000ULL;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("BaseT splits into seconds", g_hw.reg[I226_BASET_H / 4], 7);
     EXPECT_EQ("and nanoseconds", g_hw.reg[I226_BASET_L / 4], 250000000);
 }
@@ -753,7 +754,7 @@ static void test_31_activate_pass(void) {
 
     printf("\n[TC-MOCK-031] Pass: not implemented until ADR-TSN-003 is accepted, nothing read or written\n");
     act_setup(AVB_TAS_PRE_PASS); g_act.base_time_ns = 7250000000ULL;
-    outcome = i226_tas_activate(&g_io, &g_act, FALSE);
+    outcome = i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("refused as not implemented", outcome, AVB_TAS_ACTIVATE_NOT_IMPLEMENTED);
     EXPECT_EQ("no register write, FutScdDis included", g_hw.writes, 0);
     EXPECT_EQ("no register read", g_hw.reads, 0);
@@ -768,8 +769,10 @@ static void test_32_activate_failure(void) {
     for (at = 1; at <= 13; at++) {
         act_setup(AVB_TAS_PRE_HOLD);
         g_hw.fail_write = at;
-        i226_tas_activate(&g_io, &g_act, FALSE);
+        i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
         EXPECT_EQ("write failed, restored", g_act.result, AVB_TAS_ACT_FAILED_RESTORED);
+        EXPECT_EQ(at == 1 ? "the failed mode write never reached the adapter" : "the transmit-mode write had reached the adapter",
+                  g_mode_written, at == 1 ? 0 : 1);
         same = g_hw.reg[I226_TQAVCTRL / 4] == 0 && g_hw.reg[I226_BASET_L / 4] == 0 && g_hw.reg[I226_BASET_H / 4] == 0 && g_hw.reg[I226_QBVCYCLET / 4] == 0x3B9ACA00;
         for (q = 0; q < AVB_TAS_QUEUES; q++) {
             same = same && g_hw.reg[(I226_STQT0 + 4 * q) / 4] == 0 && g_hw.reg[(I226_ENDQT0 + 4 * q) / 4] == 0;
@@ -779,7 +782,7 @@ static void test_32_activate_failure(void) {
     act_setup(AVB_TAS_PRE_HOLD);
     g_hw.fail_write = 2;
     g_hw.stuck_after_fail = 1;   /* the first restore write fails too */
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("a restore that fails says so", g_act.result, AVB_TAS_ACT_FAILED_NOT_RESTORED);
 }
 
@@ -787,20 +790,20 @@ static void test_33_activate_time(void) {
     printf("\n[TC-MOCK-033] BaseT must be in the future\n");
     act_setup(AVB_TAS_PRE_HOLD);
     g_hw.phc_fails = TRUE;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("unreadable PHC", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
     EXPECT_EQ("no write", g_hw.writes, 0);
     act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = g_hw.phc_first + AVB_TAS_MIN_LEAD_NS - 1;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("too close", g_act.result, AVB_TAS_ACT_INVALID);
     EXPECT_EQ("no write when too close", g_hw.writes, 0);
     act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = g_hw.phc_first + AVB_TAS_MIN_LEAD_NS;
     g_hw.phc_later = g_hw.phc_first + 1;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("exactly the lead is accepted", g_act.result, AVB_TAS_ACT_COMMITTED);
     act_setup(AVB_TAS_PRE_HOLD);
     g_hw.phc_later = g_act.base_time_ns + 1;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("BaseT passed while writing", g_act.result, AVB_TAS_ACT_BASE_PASSED);
 }
 
@@ -814,7 +817,7 @@ static void test_45_activate_fields(void) {
     act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0x100000000ULL * 1000000000ULL;
     EXPECT_EQ("BaseT seconds one past the field", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
     act_setup(AVB_TAS_PRE_HOLD); g_act.base_time_ns = 0xFFFFFFFFULL * 1000000000ULL + 7ULL;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("committed at the limit", g_act.result, AVB_TAS_ACT_COMMITTED);
     EXPECT_EQ("BASET_H holds the full seconds", g_hw.reg[I226_BASET_H / 4], 0xFFFFFFFFu);
     EXPECT_EQ("BASET_L the nanoseconds", g_hw.reg[I226_BASET_L / 4], 7);
@@ -827,7 +830,7 @@ static void test_46_activate_untimed(void) {
     printf("\n[TC-MOCK-046] PHC unreadable after the commit\n");
     act_setup(AVB_TAS_PRE_HOLD);
     g_hw.phc_fail_from = 2;
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     writes = g_hw.writes;
     EXPECT_EQ("committed without timing evidence", g_act.result, AVB_TAS_ACT_COMMITTED_UNTIMED);
     EXPECT_TRUE("no PHC time claimed", g_act.phc_at_commit_ns == 0);
@@ -838,15 +841,19 @@ static void test_46_activate_untimed(void) {
 /* TC-MOCK-047: what each activation result leaves the adapter's TAS state as */
 static void test_47_activate_state(void) {
     printf("\n[TC-MOCK-047] Adapter TAS state after an activation result\n");
-    EXPECT_EQ("committed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_ARMED);
-    EXPECT_EQ("committed untimed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED_UNTIMED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_ARMED);
-    EXPECT_EQ("BaseT passed still arms: the schedule was written", avb_tas_state_after(AVB_TAS_ACT_BASE_PASSED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_ARMED);
-    EXPECT_EQ("a failed restore leaves the state unknown", avb_tas_state_after(AVB_TAS_ACT_FAILED_NOT_RESTORED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_DIRTY);
-    EXPECT_EQ("a verified restore changes nothing", avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_CLEAN);
-    EXPECT_EQ("a refusal changes nothing", avb_tas_state_after(AVB_TAS_ACT_INVALID, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_CLEAN);
-    EXPECT_EQ("not clean changes nothing", avb_tas_state_after(AVB_TAS_ACT_NOT_CLEAN, AVB_TAS_STATE_ARMED), AVB_TAS_STATE_ARMED);
-    EXPECT_EQ("busy changes nothing", avb_tas_state_after(AVB_TAS_ACT_BUSY, AVB_TAS_STATE_DIRTY), AVB_TAS_STATE_DIRTY);
-    EXPECT_EQ("an unknown result is never clean", avb_tas_state_after(99u, AVB_TAS_STATE_CLEAN), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("committed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("committed untimed arms", avb_tas_state_after(AVB_TAS_ACT_COMMITTED_UNTIMED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("BaseT passed still arms: the schedule was written", avb_tas_state_after(AVB_TAS_ACT_BASE_PASSED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("a failed restore leaves the state unknown", avb_tas_state_after(AVB_TAS_ACT_FAILED_NOT_RESTORED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("a failed restore leaves the state unknown, mode write or not", avb_tas_state_after(AVB_TAS_ACT_FAILED_NOT_RESTORED, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_DIRTY);
+    /* PR #397 R8: register readbacks do not prove the transmit mode. After the mode write reached the adapter, a restore whose
+     * readbacks all match leaves the hardware state unknown; only when nothing reached the adapter does it change nothing */
+    EXPECT_EQ("readbacks matched after the transmit-mode write: unknown, not CLEAN", avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN, 1), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("restored when no write reached the adapter: unchanged", avb_tas_state_after(AVB_TAS_ACT_FAILED_RESTORED, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_CLEAN);
+    EXPECT_EQ("a refusal changes nothing", avb_tas_state_after(AVB_TAS_ACT_INVALID, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_CLEAN);
+    EXPECT_EQ("not clean changes nothing", avb_tas_state_after(AVB_TAS_ACT_NOT_CLEAN, AVB_TAS_STATE_ARMED, 0), AVB_TAS_STATE_ARMED);
+    EXPECT_EQ("busy changes nothing", avb_tas_state_after(AVB_TAS_ACT_BUSY, AVB_TAS_STATE_DIRTY, 0), AVB_TAS_STATE_DIRTY);
+    EXPECT_EQ("an unknown result is never clean", avb_tas_state_after(99u, AVB_TAS_STATE_CLEAN, 0), AVB_TAS_STATE_DIRTY);
 }
 
 /* TC-MOCK-048: the state query reports the programmed windows as a gate list, or the request is refused before any write */
@@ -870,7 +877,7 @@ static void test_48_activate_gcl(void) {
     g_act.window_start_ns[2] = 50000000; g_act.window_end_ns[2] = 60000000; g_act.window_start_ns[3] = 70000000; g_act.window_end_ns[3] = 80000000;
     EXPECT_TRUE("nine intervals do not fit eight entries", !avb_tas_gcl_from_windows(&g_act, &c));
     EXPECT_EQ("and validation refuses that request", i226_tas_validate(&g_act), AVB_TAS_ACT_INVALID);
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("before any write", g_hw.writes, 0);
 }
 
@@ -996,31 +1003,31 @@ static void test_49_activate_fault(void) {
 
     printf("\n[TC-MOCK-049] Debug-only fault injection through the reserved word\n");
     act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 5;
-    i226_tas_activate(&release_io, &g_act, FALSE);
+    i226_tas_activate(&release_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("Release: a nonzero reserved word is refused", g_act.result, AVB_TAS_ACT_INVALID);
     EXPECT_EQ("Release: before any write", g_hw.writes, 0);
     act_setup(AVB_TAS_PRE_HOLD);
-    i226_tas_activate(&debug_io, &g_act, FALSE);
+    i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("Debug: reserved 0 activates normally", g_act.result, AVB_TAS_ACT_COMMITTED);
     act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 14;
-    i226_tas_activate(&debug_io, &g_act, FALSE);
+    i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("Debug: HOLD has 13 schedule writes, 14 is refused", g_act.result, AVB_TAS_ACT_INVALID);
     EXPECT_EQ("Debug: refused before any write", g_hw.writes, 0);
     act_setup(AVB_TAS_PRE_PASS); g_act.reserved = 16;
-    i226_tas_activate(&debug_io, &g_act, FALSE);
+    i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
     EXPECT_EQ("Debug: PASS has 15 schedule writes, 16 is refused", g_act.result, AVB_TAS_ACT_INVALID);
     EXPECT_EQ("Debug: refused before any write", g_hw.writes, 0);
     /* Option C: a PASS request with a valid fault selector is a valid PASS request, refused before any register access */
     for (n = 1; n <= I226_TAS_PASS_WRITES; n++) {
         act_setup(AVB_TAS_PRE_PASS); g_act.reserved = n;
-        pass_refused = pass_refused && i226_tas_activate(&debug_io, &g_act, FALSE) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED &&
+        pass_refused = pass_refused && i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED &&
                        g_hw.writes == 0 && g_hw.reads == 0;
     }
     EXPECT_TRUE("Debug: PASS with any valid fault selector is not implemented, nothing read or written", pass_refused);
     for (n = 1; n <= I226_TAS_HOLD_WRITES; n++) {
         act_setup(AVB_TAS_PRE_HOLD);
         g_act.reserved = n;
-        i226_tas_activate(&debug_io, &g_act, FALSE);
+        i226_tas_activate(&debug_io, &g_act, FALSE, &g_mode_written);
         all = all && g_act.result == AVB_TAS_ACT_FAILED_NOT_RESTORED;
         /* writes before N, then the 13 restore writes without the first one */
         reached = reached && g_hw.writes == (n - 1) + (I226_TAS_SAVED_COUNT - 1);
@@ -1038,7 +1045,7 @@ static int act_writes_carry_request(avb_u32 mode) {
     avb_u32 base_ns = (avb_u32)(g_act.base_time_ns % NSEC_PER_SEC), base_s = (avb_u32)(g_act.base_time_ns / NSEC_PER_SEC);
     unsigned i, q, ok;
 
-    i226_tas_activate(&g_io, &g_act, FALSE);
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
     ok = g_act.result == AVB_TAS_ACT_COMMITTED &&
          g_hw.writes == (mode == AVB_TAS_PRE_PASS ? I226_TAS_PASS_WRITES : I226_TAS_HOLD_WRITES) &&
          g_hw.log_off[g_hw.writes - 1] == I226_BASET_L && g_hw.log_val[g_hw.writes - 1] == base_ns;
@@ -1094,7 +1101,7 @@ static void test_54_activate_encoding(void) {
             } else {
                 /* Option C: valid at the limits, and still refused before any write */
                 EXPECT_TRUE("PASS: valid at the limits and not implemented, no write",
-                            i226_tas_activate(&g_io, &g_act, FALSE) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED && g_hw.writes == 0);
+                            i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED && g_hw.writes == 0);
             }
         }
     }
@@ -1120,7 +1127,7 @@ static void test_55_activate_pass_not_implemented(void) {
         for (armed = 0; armed < 2; armed++) {
             act_setup(AVB_TAS_PRE_PASS);
             info = 12345;
-            outcome = i226_tas_activate(io, &g_act, armed);
+            outcome = i226_tas_activate(io, &g_act, armed, &g_mode_written);
             st = avb_tas_activate_completion(outcome, &info);
             printf("    %s rule, %s: outcome=%d status=0x%08lX information=%lu writes=%u reads=%u phcReads=%u\n",
                    rule == 0 ? "Release" : "Debug", armed ? "armed" : "clean", outcome, (unsigned long)st, (unsigned long)info,
@@ -1134,39 +1141,84 @@ static void test_55_activate_pass_not_implemented(void) {
 
         /* Malformed PASS requests: validation as before */
         act_setup(AVB_TAS_PRE_PASS); g_act.version = 2;
-        outcome = i226_tas_activate(io, &g_act, FALSE);
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
         st = avb_tas_activate_completion(outcome, &info);
         EXPECT_TRUE("malformed PASS (version): STATUS_SUCCESS, INVALID, the request as output, nothing written",
                     st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && info == sizeof(AVB_TAS_ACTIVATE_REQUEST) &&
                     g_hw.writes == 0);
         act_setup(AVB_TAS_PRE_PASS); g_act.window_end_ns[1] = g_act.window_start_ns[1];
-        outcome = i226_tas_activate(io, &g_act, FALSE);
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
         st = avb_tas_activate_completion(outcome, &info);
         EXPECT_TRUE("malformed PASS (empty window): STATUS_SUCCESS, INVALID, nothing written",
                     st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
         act_setup(AVB_TAS_PRE_PASS); g_act.cycle_ns = 0;
-        outcome = i226_tas_activate(io, &g_act, FALSE);
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
         st = avb_tas_activate_completion(outcome, &info);
         EXPECT_TRUE("malformed PASS (no cycle): STATUS_SUCCESS, INVALID, nothing written",
                     st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
         act_setup(AVB_TAS_PRE_PASS); g_act.reserved = I226_TAS_PASS_WRITES + 1u;
-        outcome = i226_tas_activate(io, &g_act, FALSE);
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
         st = avb_tas_activate_completion(outcome, &info);
         EXPECT_TRUE("PASS with a reserved word out of range: STATUS_SUCCESS, INVALID, nothing written",
                     st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
 
         /* HOLD keeps its completion */
         act_setup(AVB_TAS_PRE_HOLD);
-        outcome = i226_tas_activate(io, &g_act, FALSE);
+        outcome = i226_tas_activate(io, &g_act, FALSE, &g_mode_written);
         st = avb_tas_activate_completion(outcome, &info);
         EXPECT_TRUE("HOLD: STATUS_SUCCESS, the request as output, COMMITTED",
                     st == STATUS_SUCCESS && info == sizeof(AVB_TAS_ACTIVATE_REQUEST) && g_act.result == AVB_TAS_ACT_COMMITTED);
     }
     act_setup(AVB_TAS_PRE_PASS); g_act.reserved = 1;
-    outcome = i226_tas_activate(&release_io, &g_act, FALSE);
+    outcome = i226_tas_activate(&release_io, &g_act, FALSE, &g_mode_written);
     st = avb_tas_activate_completion(outcome, &info);
     EXPECT_TRUE("Release rule: PASS with a nonzero reserved word stays INVALID with STATUS_SUCCESS, nothing written",
                 st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+}
+
+/*
+ * TC-MOCK-056: PR #397 R8. A failure after the transmit-mode write still reports FAILED_RESTORED when every register reads back
+ * at its old value, because that is what the result states. The adapter state becomes DIRTY (hardware state unknown, a NIC
+ * cycle is owed), since a readback does not prove the transmit mode, and a further activation is refused without any write.
+ * When only the first write failed nothing reached the adapter and the adapter stays CLEAN. This is state reporting only: it
+ * does not show that the transmit mode latches on our hardware, and it does not satisfy #357 AC4.
+ */
+static void test_56_activate_restore_state(void) {
+    unsigned at;
+    avb_u32 state;
+    int ok = 1;
+
+    printf("\n[TC-MOCK-056] Matching readbacks after the transmit-mode write do not make the adapter CLEAN\n");
+    for (at = 2; at <= I226_TAS_HOLD_WRITES; at++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_hw.fail_write = at;
+        i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+        state = avb_tas_state_after(g_act.result, AVB_TAS_STATE_CLEAN, g_mode_written);
+        ok = ok && g_act.result == AVB_TAS_ACT_FAILED_RESTORED && g_mode_written == 1 && state == AVB_TAS_STATE_DIRTY;
+    }
+    EXPECT_TRUE("writes 2 to 13: FAILED_RESTORED, transmit-mode write reached the adapter, state DIRTY", ok);
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.fail_write = 5;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    state = avb_tas_state_after(g_act.result, AVB_TAS_STATE_CLEAN, g_mode_written);
+    g_hw.fail_write = 0;
+    g_hw.writes = 0;
+    g_hw.reads = 0;
+    i226_tas_activate(&g_io, &g_act, state != AVB_TAS_STATE_CLEAN, &g_mode_written);
+    EXPECT_EQ("the next activation on that adapter is refused", g_act.result, AVB_TAS_ACT_NOT_CLEAN);
+    EXPECT_EQ("without any write", g_hw.writes, 0);
+    EXPECT_EQ("and leaves it DIRTY", avb_tas_state_after(g_act.result, state, g_mode_written), AVB_TAS_STATE_DIRTY);
+
+    act_setup(AVB_TAS_PRE_HOLD);
+    g_hw.fail_write = 1;
+    i226_tas_activate(&g_io, &g_act, FALSE, &g_mode_written);
+    state = avb_tas_state_after(g_act.result, AVB_TAS_STATE_CLEAN, g_mode_written);
+    EXPECT_TRUE("first write failed: FAILED_RESTORED, nothing reached the adapter, state CLEAN",
+                g_act.result == AVB_TAS_ACT_FAILED_RESTORED && g_mode_written == 0 && state == AVB_TAS_STATE_CLEAN);
+    g_hw.fail_write = 0;
+    g_hw.phc_reads = 0;
+    i226_tas_activate(&g_io, &g_act, state != AVB_TAS_STATE_CLEAN, &g_mode_written);
+    EXPECT_EQ("and a further activation proceeds", g_act.result, AVB_TAS_ACT_COMMITTED);
 }
 
 int main(void) {
@@ -1208,6 +1260,7 @@ int main(void) {
     test_53_act_restore();
     test_54_activate_encoding();
     test_55_activate_pass_not_implemented();
+    test_56_activate_restore_state();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

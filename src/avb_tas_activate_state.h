@@ -40,9 +40,15 @@ C_ASSERT(sizeof(((AVB_TAS_STATE *)0)->config.gate_durations) / sizeof(((AVB_TAS_
 /*
  * The state after an activation result. A written schedule arms, timed or not and whether or not BaseT had passed. A restore
  * that did not complete leaves the hardware state unknown, so the adapter is dirty and refuses further activation until a NIC
- * cycle gives it a new context. Refusals and a verified restore change nothing. An unknown result is never taken as clean.
+ * cycle gives it a new context. Refusals change nothing.
+ *
+ * FAILED_RESTORED says every register read back at its old value. A readback does not prove the transmit mode the adapter is
+ * in (see disable_tas in devices/intel_i226_impl.c), so once the transmit-mode write had reached the adapter
+ * (tsn_mode_written) its state is unknown as well: dirty (PR #397 R8). This is conservative reporting, not evidence that the
+ * mode latches on this hardware. Only when no write reached the adapter does FAILED_RESTORED change nothing. An unknown result
+ * is never taken as clean.
  */
-static __inline avb_u32 avb_tas_state_after(avb_u32 result, avb_u32 previous)
+static __inline avb_u32 avb_tas_state_after(avb_u32 result, avb_u32 previous, int tsn_mode_written)
 {
     switch (result) {
     case AVB_TAS_ACT_COMMITTED:
@@ -52,6 +58,7 @@ static __inline avb_u32 avb_tas_state_after(avb_u32 result, avb_u32 previous)
     case AVB_TAS_ACT_FAILED_NOT_RESTORED:
         return AVB_TAS_STATE_DIRTY;
     case AVB_TAS_ACT_FAILED_RESTORED:
+        return tsn_mode_written ? AVB_TAS_STATE_DIRTY : previous;
     case AVB_TAS_ACT_INVALID:
     case AVB_TAS_ACT_NOT_CLEAN:
     case AVB_TAS_ACT_BUSY:

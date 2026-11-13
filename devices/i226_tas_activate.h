@@ -14,7 +14,9 @@
  * test can reach FAILED_NOT_RESTORED. Without it, which is every Release driver, a nonzero reserved word is INVALID.
  *
  * Restoring TQAVCTRL writes the old value back and checks the readback. A readback does not prove the transmit mode the
- * hardware is in: see disable_tas in intel_i226_impl.c. A failure after the mode write can therefore need a NIC cycle.
+ * hardware is in: see disable_tas in intel_i226_impl.c. A failure after the mode write can therefore need a NIC cycle, so
+ * i226_tas_activate reports whether that write reached the adapter and the driver then records the adapter as dirty
+ * (avb_tas_state_after, PR #397 R8).
  */
 #pragma once
 
@@ -175,8 +177,9 @@ static __inline avb_u32 i226_tas_restore(const I226_TAS_IO *io, const I226_TAS_S
     return ok ? AVB_TAS_ACT_FAILED_RESTORED : AVB_TAS_ACT_FAILED_NOT_RESTORED;
 }
 
-/* The writes up to and including the commit point. Nonzero when one failed */
-static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS_ACTIVATE_REQUEST *r, avb_u32 tqavctrl)
+/* The writes up to and including the commit point. Nonzero when one failed. *mode_written: the TQAVCTRL transmit-mode write,
+ * always the first, was accepted by the adapter, so the transmit mode may have changed */
+static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS_ACTIVATE_REQUEST *r, avb_u32 tqavctrl, int *mode_written)
 {
     static const avb_u32 start[AVB_TAS_QUEUES] = {I226_STQT0, I226_STQT1, I226_STQT2, I226_STQT3};
     static const avb_u32 end[AVB_TAS_QUEUES] = {I226_ENDQT0, I226_ENDQT1, I226_ENDQT2, I226_ENDQT3};
@@ -186,6 +189,7 @@ static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS
     if (io->write(io->ctx, I226_TQAVCTRL, mode) != 0) {
         return 1;
     }
+    *mode_written = 1;
     for (q = 0; q < AVB_TAS_QUEUES; q++) {
         if (io->write(io->ctx, start[q], I226_TAS_FIELD(I226_STQT, START_TIME, r->window_start_ns[q])) != 0 ||
             io->write(io->ctx, end[q], I226_TAS_FIELD(I226_ENDQT, END_TIME, r->window_end_ns[q])) != 0) {
@@ -207,8 +211,8 @@ static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS
 }
 
 /* The whole operation. Returns AVB_TAS_ACTIVATE_RAN when r->result says what happened; only a committed result leaves a
- * schedule behind */
-static __inline int i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_REQUEST *r, int armed)
+ * schedule behind. *tsn_mode_written: the transmit-mode write reached the adapter (avb_tas_state_after, PR #397 R8) */
+static __inline int i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_REQUEST *r, int armed, int *tsn_mode_written)
 {
     I226_TAS_SAVED saved[I226_TAS_SAVED_COUNT];
     avb_u64 phc = 0, after = 0;
@@ -216,6 +220,7 @@ static __inline int i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_RE
     I226_TAS_IO faulty;
     avb_u32 valid;
 
+    *tsn_mode_written = 0;
     r->phc_at_commit_ns = 0;
     valid = i226_tas_validate_with(r, io->fault_injection);
     /* #357 AC2: PASS only once ADR-TSN-003 is accepted. Until then (#363 interim Option C, Q 2026-11-13) a valid PASS request
@@ -246,7 +251,7 @@ static __inline int i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_RE
         r->result = AVB_TAS_ACT_INVALID;
         return AVB_TAS_ACTIVATE_RAN;
     }
-    if (i226_tas_write_schedule(io, r, saved[0].old_value) != 0) {
+    if (i226_tas_write_schedule(io, r, saved[0].old_value, tsn_mode_written) != 0) {
         r->result = i226_tas_restore(io, saved);
         return AVB_TAS_ACTIVATE_RAN;
     }
