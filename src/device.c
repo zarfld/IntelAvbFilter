@@ -648,20 +648,36 @@ IntelAvbFilterDeviceIoControl(
             break;
 
         case IOCTL_FILTER_RESTART_ONE_INSTANCE:
+            {
+            NDIS_STATUS restartStatus;
+
             InputBuffer = OutputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;
             InputBufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+            OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
 
             pFilter = filterFindFilterModule (InputBuffer, InputBufferLength);
 
             if (pFilter == NULL)
             {
-                
+                /* #364 TC-CASEA-004: success here claimed a restart that no instance received */
+                Status = STATUS_NOT_FOUND;
                 break;
             }
 
-            NdisFRestartFilter(pFilter->FilterHandle);
+            restartStatus = NdisFRestartFilter(pFilter->FilterHandle);
+            DEBUGP(DL_ERROR, "!!! [#364] NdisFRestartFilter instance=%p status=0x%08X\n", pFilter, restartStatus);
+
+            /* The NDIS status itself, when the caller provides a word for it: it tells PENDING from SUCCESS, which
+             * the IRP status cannot carry. Callers passing no output buffer are unaffected. */
+            if (OutputBuffer != NULL && OutputBufferLength >= sizeof(ULONG))
+            {
+                *(PULONG)OutputBuffer = (ULONG)restartStatus;
+                InfoLength = sizeof(ULONG);
+            }
+            Status = (restartStatus == NDIS_STATUS_SUCCESS || restartStatus == NDIS_STATUS_PENDING) ? STATUS_SUCCESS : (NTSTATUS)restartStatus;
 
             break;
+            }
 
         case IOCTL_FILTER_ENUERATE_ALL_INSTANCES:
             

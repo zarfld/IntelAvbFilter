@@ -347,6 +347,123 @@ static const char* check_tsn_registers(HANDLE hBound, const AVB_ADAPTER_IDENTITY
 }
 
 /**
+ * @brief Report one TC-HWSNAP-001 per-adapter verdict (reason NULL = pass)
+ */
+static void report_hw_snapshot(UINT32 adapter, avb_u16 did, const char* reason)
+{
+    if (reason == NULL) {
+        printf("[PASS] TC-HWSNAP-001/adapter:%u did=0x%04X\n", adapter, did);
+        tests_passed++;
+    } else {
+        printf("[FAIL] TC-HWSNAP-001/adapter:%u did=0x%04X: %s\n", adapter, did, reason);
+        tests_failed++;
+    }
+}
+
+/**
+ * @brief Bind a handle to one adapter and validate its QUERY_HW_SNAPSHOT
+ * @return NULL on success, otherwise the failure reason (in reason)
+ */
+static const char* check_hw_snapshot(HANDLE hBound, const AVB_ADAPTER_IDENTITY_REQUEST* id, char* reason, size_t reasonSize)
+{
+    AVB_OPEN_BY_LUID_REQUEST bind = {0};
+    AVB_HW_SNAPSHOT_REQUEST snap = {0};
+    DWORD bytesReturned;
+    UINT32 i, valid = 0;
+
+    bind.version = AVB_OPEN_BY_LUID_VERSION;
+    bind.net_luid = id->net_luid;
+    if (!DeviceIoControl(hBound, IOCTL_AVB_OPEN_ADAPTER_BY_LUID, &bind, sizeof(bind), &bind, sizeof(bind), &bytesReturned, NULL)) {
+        sprintf_s(reason, reasonSize, "OPEN_ADAPTER_BY_LUID failed (Win32 %lu)", GetLastError());
+        return reason;
+    }
+
+    snap.version = AVB_HW_SNAPSHOT_VERSION;
+    if (!DeviceIoControl(hBound, IOCTL_AVB_QUERY_HW_SNAPSHOT, &snap, sizeof(snap), &snap, sizeof(snap), &bytesReturned, NULL)) {
+        sprintf_s(reason, reasonSize, "QUERY_HW_SNAPSHOT failed (Win32 %lu)", GetLastError());
+        return reason;
+    }
+    if (snap.status != 0u || snap.count != AVB_HWREG_COUNT) {
+        sprintf_s(reason, reasonSize, "status 0x%08X count %u, expected 0 and %u", snap.status, snap.count, AVB_HWREG_COUNT);
+        return reason;
+    }
+    if (snap.device_id != id->device_id || snap.net_luid != id->net_luid) {
+        sprintf_s(reason, reasonSize, "snapshot is of another adapter: did=0x%04X luid=0x%016llX", snap.device_id, snap.net_luid);
+        return reason;
+    }
+
+    for (i = 0; i < AVB_HWREG_COUNT; i++) {
+        const AVB_HWREG_ENTRY* e = &snap.entries[i];
+        printf("    id=%-2u offset=0x%05X value=0x%08X state=%u\n", e->id, e->offset, e->value, e->state);
+        if (e->id != i + 1u) {
+            sprintf_s(reason, reasonSize, "entry %u has id %u", i, e->id);
+            return reason;
+        }
+        if (e->state == AVB_HWREG_STATE_READ_FAILED) {
+            sprintf_s(reason, reasonSize, "register id %u read failed", e->id);
+            return reason;
+        }
+        if (e->state == AVB_HWREG_STATE_VALID) {
+            valid++;
+        }
+    }
+    if (valid == 0u) {
+        sprintf_s(reason, reasonSize, "no register read VALID");
+        return reason;
+    }
+    return NULL;
+}
+
+/**
+ * @brief TC-HWSNAP-001: QUERY_HW_SNAPSHOT answers on a handle bound to each adapter
+ *
+ * The runner's restoration check reads registers through this IOCTL. Each adapter gets its own handle, so
+ * the default-handle checks above are unaffected. Read-only: GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID
+ * (per-handle binding, no global switch, no PTP initialization), QUERY_HW_SNAPSHOT.
+ *
+ * Verifies: #328
+ */
+static void validate_hw_snapshot_all_adapters(HANDLE hDevice)
+{
+    UINT32 index, count = 1;
+
+    for (index = 0; index < count; index++) {
+        AVB_ADAPTER_IDENTITY_REQUEST id = {0};
+        DWORD bytesReturned;
+        char reason[128];
+        HANDLE hBound;
+
+        id.version = AVB_ADAPTER_IDENTITY_VERSION;
+        id.index = index;
+        if (!DeviceIoControl(hDevice, IOCTL_AVB_GET_ADAPTER_IDENTITY, &id, sizeof(id), &id, sizeof(id), &bytesReturned, NULL)) {
+            sprintf_s(reason, sizeof(reason), "GET_ADAPTER_IDENTITY failed (Win32 %lu)", GetLastError());
+            report_hw_snapshot(index, 0, reason);
+            return;
+        }
+        count = id.count;
+        if (id.status != 0u) {
+            sprintf_s(reason, sizeof(reason), "GET_ADAPTER_IDENTITY status 0x%08X", id.status);
+            report_hw_snapshot(index, id.device_id, reason);
+            continue;
+        }
+        printf("  snapshot adapter:%u did=0x%04X luid=0x%016llX ifIndex=%u\n", index, id.device_id, id.net_luid, id.if_index);
+
+        hBound = CreateFileA(DEVICE_NAME, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hBound == INVALID_HANDLE_VALUE) {
+            sprintf_s(reason, sizeof(reason), "open failed (Win32 %lu)", GetLastError());
+            report_hw_snapshot(index, id.device_id, reason);
+            continue;
+        }
+        report_hw_snapshot(index, id.device_id, check_hw_snapshot(hBound, &id, reason, sizeof(reason)));
+        CloseHandle(hBound);
+    }
+    if (count == 0u) {
+        report_hw_snapshot(0, 0, "no adapter enumerated");
+    }
+}
+
+/**
  * @brief TC-TSNREG-001: TSN registers are readable and match the driver's TAS state on every TAS adapter
  *
  * Applicability comes from the advertised INTEL_CAP_TSN_TAS, never from a device ID. Values are printed as
@@ -501,6 +618,10 @@ int main(void)
     // Phase 3: TSN registers on every adapter advertising TAS
     printf("\n=== Phase 3: TSN Registers On Every TAS Adapter ===\n");
     validate_tsn_registers_all_adapters(hDevice);
+
+    // Phase 4: Register snapshot on a handle bound to each adapter
+    printf("\n=== Phase 4: QUERY_HW_SNAPSHOT On Every Adapter ===\n");
+    validate_hw_snapshot_all_adapters(hDevice);
 
     // Summary
     printf("\n=== Test Summary ===\n");
