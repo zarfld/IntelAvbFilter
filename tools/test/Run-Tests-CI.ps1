@@ -848,12 +848,7 @@ $HilTestTimeoutSeconds = [ordered]@{
     'test_tas_isolated_arm --stall-probe 64' = 480
     'test_tas_isolated_arm --stall-probe 512' = 480
     'test_tas_isolated_arm --stall-probe 1400' = 480
-    # test_tas_activate, from its own bounds: 3.5 s baseline + 21.5 s send bound and drain + 120 s disable + 3 s + 60 s enable
-    # + 60 s return + 60 s link + 5 s settle + 60 s socket bind + 5.5 s TX probe and observer stop = 398 s for one TAS
-    # adapter. 520 s = 398 s + 30 %, the margin used for test_tas_isolated_arm.
-    'test_tas_activate --hold' = 520
-    'test_tas_activate --pass' = 520
-    'test_tas_activate --fault' = 520
+    # test_tas_activate: per adapter, see $HilTestTimeoutPerAdapter below.
     # Per adapter: TC-AEN-002 30 s + TC-AEN-005 60 s + TC-AEN-006 31 s of deadlines/sleeps (tests/atdecc/
     # test_atdecc_aen_protocol.c) = 121 s; 3 adapters on the HIL host = 363 s, killed at 300 s on adapter 3 in
     # LocalSuites_20261021_173805 .. 20261022_094632.  420 s = 363 s + 16 %.  TC-AEN-001 adds 80 s per adapter only with
@@ -870,6 +865,20 @@ $HilTestTimeoutSeconds = [ordered]@{
     # test).  Test-specific only: the Unit suite timeout stays 60 s (TEST-HILGATE-095).  No issue-level requirement fixes
     # this value; the testing contract requires every unattended process to be bounded.
     'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 450
+}
+# Per-adapter budget for an entry whose one process runs the adapters one after another (PR #397 R14).  Process timeout =
+# Seconds x the adapters the driver enumerated in the latest observed state (Get-AvbHilState, re-read after every test),
+# at least 1 and at most MaxAdapters, the entry's own adapter limit; MaxAdapters when no enumeration was observed.  No
+# device id or adapter count is assumed.  Like $HilTestTimeoutSeconds it never lowers the suite timeout.
+$HilTestTimeoutPerAdapter = [ordered]@{
+    # test_tas_activate, from its own bounds: 3.5 s baseline + 21.5 s send bound and drain + 120 s disable + 3 s + 60 s enable
+    # + 60 s return + 60 s link + 5 s settle + 60 s socket bind + 5.5 s TX probe and observer stop = 398 s for one TAS
+    # adapter. 520 s = 398 s + 30 %, the margin used for test_tas_isolated_arm.  It runs every enumerated adapter that
+    # advertises INTEL_CAP_TSN_TAS (the others are SKIP_UNSUPPORTED without a wait), so the enumerated count is an upper bound
+    # on its adapters; MaxAdapters = ARRAYSIZE(ids) in tests/hardware/test_tas_activate.c.
+    'test_tas_activate --hold'  = @{ Seconds = 520; MaxAdapters = 8 }
+    'test_tas_activate --pass'  = @{ Seconds = 520; MaxAdapters = 8 }
+    'test_tas_activate --fault' = @{ Seconds = 520; MaxAdapters = 8 }
 }
 
 # ===========================
@@ -1805,16 +1814,21 @@ function Get-AvbHilMutatedState {
     return @()
 }
 
-# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] (never lowers it).  Sandbox:
+# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] or the $HilTestTimeoutPerAdapter
+# budget for -AdapterCount enumerated adapters (negative = not observed) (never lowers it).  Sandbox:
 # AVB_TEST_SANDBOX_TIMEOUTS ('bin=seconds;...').
 function Get-AvbTestTimeoutSeconds {
-    param([string]$Entry, [int]$SuiteSeconds)
+    param([string]$Entry, [int]$SuiteSeconds, [int]$AdapterCount = -1)
     $own = 0
     if ($script:IsSandbox) {
         $bin = Get-HilBinName $Entry
         foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_TIMEOUTS) -split ';')) {
             if ($pair -match '^\s*([^=]+?)\s*=\s*(\d+)\s*$' -and $Matches[1] -eq $bin) { $own = [int]$Matches[2] }
         }
+    } elseif ($HilTestTimeoutPerAdapter.Contains($Entry)) {
+        $p = $HilTestTimeoutPerAdapter[$Entry]
+        $n = if ($AdapterCount -lt 0) { [int]$p.MaxAdapters } else { [Math]::Min([Math]::Max(1, $AdapterCount), [int]$p.MaxAdapters) }
+        $own = [int]$p.Seconds * $n
     } elseif ($HilTestTimeoutSeconds.Contains($Entry)) { $own = [int]$HilTestTimeoutSeconds[$Entry] }
     return [Math]::Max($SuiteSeconds, $own)
 }
@@ -2715,8 +2729,11 @@ foreach ($WorkItem in $WorkItems) {
     $errJob = $proc.StandardError.ReadToEndAsync()
 
     $timedOut  = $false
-    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds
+    # Adapters the driver enumerated in the latest observed state (-1: not observed), for per-adapter budgets (PR #397 R14)
+    $enumeratedAdapters = if ($script:HilBaseline -and $script:HilBaseline.ClockOk) { @($script:HilBaseline.Clock).Count } else { -1 }
+    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds -AdapterCount $enumeratedAdapters
     if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
+    if ($HilTestTimeoutPerAdapter.Contains($TestName)) { Write-Note "$exeName timeout budget per adapter, enumerated adapters: $enumeratedAdapters" }
     $timeoutMs = $itemTimeoutSeconds * 1000
     if (-not $proc.WaitForExit($timeoutMs)) {
         $script:AvbItem.Termination = Stop-AvbProcessTree -Process $proc
