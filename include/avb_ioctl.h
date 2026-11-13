@@ -183,7 +183,9 @@ typedef struct _IOCTL_VERSION {
 /* First gate schedule on a clean adapter at a future PHC time (#357). Unlike IOCTL_AVB_SETUP_TAS, it applies a schedule.
  * pre_activation has no default: the caller chooses HOLD or PASS. Written as a schedule of one window per queue per cycle.
  * The IOCTL succeeds whenever it ran, and result says what happened, because METHOD_BUFFERED drops the output on an error
- * status. COMMITTED, COMMITTED_UNTIMED and BASE_PASSED leave a schedule behind; FAILED_NOT_RESTORED leaves hardware state unknown. */
+ * status. COMMITTED, COMMITTED_UNTIMED and BASE_PASSED leave a schedule behind; FAILED_NOT_RESTORED leaves hardware state unknown.
+ * Exception: until ADR-TSN-003 is accepted (#357, #363 interim Option C), a valid PASS request completes with
+ * STATUS_NOT_IMPLEMENTED and no output, before any register access; a malformed one is still INVALID. */
 /* A mutating operation, so FILE_WRITE_ACCESS: the I/O manager delivers it only on a handle opened with write access (CTL_CODE
  * RequiredAccess, Microsoft "Defining I/O Control Codes"). Existing codes keep FILE_ANY_ACCESS, since changing one changes its value */
 #define IOCTL_AVB_TAS_ACTIVATE          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 71, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017811C (#357, #362) */
