@@ -10,6 +10,27 @@
 #include "../include/avb_ioctl.h"
 #include "../external/intel_avb/lib/intel_private.h"   /* NSEC_PER_SEC, the one shared ns-per-second definition */
 
+/* What the device code's activate_tas returns to the IOCTL handler. Driver-internal, never part of the request ABI.
+ * RAN: request->result says what happened. NOT_IMPLEMENTED: a valid request whose pre-activation behaviour is not
+ * implemented; nothing was read or written and request->result is not set */
+#define AVB_TAS_ACTIVATE_RAN             0
+#define AVB_TAS_ACTIVATE_NOT_IMPLEMENTED 1
+
+/*
+ * How IOCTL_AVB_TAS_ACTIVATE completes once the device code returned. When it ran: STATUS_SUCCESS with the whole request as
+ * output, because METHOD_BUFFERED drops the output on an error status and the caller needs request->result. When it refused
+ * a valid request as not implemented (PASS under the #363 interim Option C): STATUS_NOT_IMPLEMENTED and no output.
+ */
+static __inline LONG avb_tas_activate_completion(int outcome, ULONG_PTR *information)
+{
+    if (outcome == AVB_TAS_ACTIVATE_RAN) {
+        *information = sizeof(AVB_TAS_ACTIVATE_REQUEST);
+        return STATUS_SUCCESS;
+    }
+    *information = 0;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
 /* The gate list GET_TAS_STATE can report: the length of AVB_TAS_STATE.config.gate_states, never a second copy of it */
 #define AVB_TAS_GCL_ENTRIES \
     ((avb_u32)(sizeof(((AVB_TAS_STATE *)0)->config.gate_states) / sizeof(((AVB_TAS_STATE *)0)->config.gate_states[0])))

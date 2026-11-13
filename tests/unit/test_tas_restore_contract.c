@@ -586,7 +586,7 @@ static void test_09_negative_tests_always_executable(void) {
 typedef struct {
     avb_u32 reg[FAKE_REGS / 4];
     avb_u32 log_off[FAKE_LOG], log_val[FAKE_LOG];
-    unsigned writes, fail_write, stuck_after_fail;
+    unsigned writes, reads, fail_write, stuck_after_fail;
     BOOL read_fails, phc_fails;
     avb_u64 phc_first, phc_later;
     unsigned phc_reads;
@@ -595,6 +595,7 @@ typedef struct {
 
 static int fake_read(void *c, avb_u32 off, avb_u32 *v) {
     FAKE_HW *f = (FAKE_HW *)c;
+    f->reads++;
     if (f->read_fails) return -1;
     *v = f->reg[off / 4];
     return 0;
@@ -745,18 +746,19 @@ static void test_30_activate_hold(void) {
     EXPECT_EQ("and nanoseconds", g_hw.reg[I226_BASET_L / 4], 250000000);
 }
 
+/* TC-MOCK-031: #357 AC2 makes PASS depend on ADR-TSN-003, which is not accepted. Under the #363 interim Option C (Q
+ * 2026-11-13) a valid PASS request is refused as not implemented before any register access; TC-MOCK-055 checks the completion */
 static void test_31_activate_pass(void) {
-    static const avb_u32 want[] = {I226_TQAVCTRL, I226_STQT0, I226_ENDQT0, I226_STQT0 + 4, I226_ENDQT0 + 4, I226_STQT0 + 8, I226_ENDQT0 + 8, I226_STQT0 + 12, I226_ENDQT0 + 12,
-                                   I226_TQAVCTRL, I226_QBVCYCLET_S, I226_QBVCYCLET, I226_BASET_H, I226_BASET_L, I226_BASET_L};
+    int outcome;
 
-    printf("\n[TC-MOCK-031] Pass: FutScdDis from the SSOT, BaseT low word zero first\n");
+    printf("\n[TC-MOCK-031] Pass: not implemented until ADR-TSN-003 is accepted, nothing read or written\n");
     act_setup(AVB_TAS_PRE_PASS); g_act.base_time_ns = 7250000000ULL;
-    i226_tas_activate(&g_io, &g_act, FALSE);
-    EXPECT_EQ("committed", g_act.result, AVB_TAS_ACT_COMMITTED);
-    EXPECT_TRUE("register order", act_order(want, sizeof(want) / sizeof(want[0])));
-    EXPECT_EQ("FutScdDis is bit 7", g_hw.reg[I226_TQAVCTRL / 4], 0x89);
-    EXPECT_EQ("BASET_L zero first", g_hw.log_val[13], 0);
-    EXPECT_EQ("BASET_L value last", g_hw.log_val[14], 250000000);
+    outcome = i226_tas_activate(&g_io, &g_act, FALSE);
+    EXPECT_EQ("refused as not implemented", outcome, AVB_TAS_ACTIVATE_NOT_IMPLEMENTED);
+    EXPECT_EQ("no register write, FutScdDis included", g_hw.writes, 0);
+    EXPECT_EQ("no register read", g_hw.reads, 0);
+    EXPECT_EQ("no PHC read", g_hw.phc_reads, 0);
+    EXPECT_EQ("TQAVCTRL untouched", g_hw.reg[I226_TQAVCTRL / 4], 0);
 }
 
 static void test_32_activate_failure(void) {
@@ -990,7 +992,7 @@ static void test_53_act_restore(void) {
 static void test_49_activate_fault(void) {
     static const I226_TAS_IO release_io = {&g_hw, fake_read, fake_write, fake_phc, 0};
     static const I226_TAS_IO debug_io = {&g_hw, fake_read, fake_write, fake_phc, 1};
-    unsigned n, count, all = 1, reached = 1, commit_kept_out = 1;
+    unsigned n, all = 1, reached = 1, commit_kept_out = 1, pass_refused = 1;
 
     printf("\n[TC-MOCK-049] Debug-only fault injection through the reserved word\n");
     act_setup(AVB_TAS_PRE_HOLD); g_act.reserved = 5;
@@ -1007,18 +1009,24 @@ static void test_49_activate_fault(void) {
     act_setup(AVB_TAS_PRE_PASS); g_act.reserved = 16;
     i226_tas_activate(&debug_io, &g_act, FALSE);
     EXPECT_EQ("Debug: PASS has 15 schedule writes, 16 is refused", g_act.result, AVB_TAS_ACT_INVALID);
-    for (count = 13; count <= 15; count += 2) {
-        for (n = 1; n <= count; n++) {
-            act_setup(count == 13 ? AVB_TAS_PRE_HOLD : AVB_TAS_PRE_PASS);
-            g_act.reserved = n;
-            i226_tas_activate(&debug_io, &g_act, FALSE);
-            all = all && g_act.result == AVB_TAS_ACT_FAILED_NOT_RESTORED;
-            /* writes before N, then the 13 restore writes without the first one */
-            reached = reached && g_hw.writes == (n - 1) + (I226_TAS_SAVED_COUNT - 1);
-            commit_kept_out = commit_kept_out && g_hw.reg[I226_BASET_L / 4] == 0;
-        }
+    EXPECT_EQ("Debug: refused before any write", g_hw.writes, 0);
+    /* Option C: a PASS request with a valid fault selector is a valid PASS request, refused before any register access */
+    for (n = 1; n <= I226_TAS_PASS_WRITES; n++) {
+        act_setup(AVB_TAS_PRE_PASS); g_act.reserved = n;
+        pass_refused = pass_refused && i226_tas_activate(&debug_io, &g_act, FALSE) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED &&
+                       g_hw.writes == 0 && g_hw.reads == 0;
     }
-    EXPECT_TRUE("Debug: every N in HOLD and PASS ends FAILED_NOT_RESTORED", all);
+    EXPECT_TRUE("Debug: PASS with any valid fault selector is not implemented, nothing read or written", pass_refused);
+    for (n = 1; n <= I226_TAS_HOLD_WRITES; n++) {
+        act_setup(AVB_TAS_PRE_HOLD);
+        g_act.reserved = n;
+        i226_tas_activate(&debug_io, &g_act, FALSE);
+        all = all && g_act.result == AVB_TAS_ACT_FAILED_NOT_RESTORED;
+        /* writes before N, then the 13 restore writes without the first one */
+        reached = reached && g_hw.writes == (n - 1) + (I226_TAS_SAVED_COUNT - 1);
+        commit_kept_out = commit_kept_out && g_hw.reg[I226_BASET_L / 4] == 0;
+    }
+    EXPECT_TRUE("Debug: every N in HOLD ends FAILED_NOT_RESTORED", all);
     EXPECT_TRUE("Debug: neither injected write reaches the hardware", reached);
     EXPECT_TRUE("Debug: the commit write never reaches the hardware", commit_kept_out);
 }
@@ -1081,11 +1089,84 @@ static void test_54_activate_encoding(void) {
             }
             EXPECT_EQ(edge == 0 ? "smallest values are valid" : "largest values are valid", i226_tas_validate(&g_act),
                       AVB_TAS_ACT_COMMITTED);
-            EXPECT_TRUE(mode == AVB_TAS_PRE_HOLD ? "HOLD: every write carries its request value"
-                                                 : "PASS: every write carries its request value",
-                        act_writes_carry_request(mode));
+            if (mode == AVB_TAS_PRE_HOLD) {
+                EXPECT_TRUE("HOLD: every write carries its request value", act_writes_carry_request(mode));
+            } else {
+                /* Option C: valid at the limits, and still refused before any write */
+                EXPECT_TRUE("PASS: valid at the limits and not implemented, no write",
+                            i226_tas_activate(&g_io, &g_act, FALSE) == AVB_TAS_ACTIVATE_NOT_IMPLEMENTED && g_hw.writes == 0);
+            }
         }
     }
+}
+
+/*
+ * TC-MOCK-055: #357, #363 interim Option C (Q 2026-11-13). A valid PASS request completes with STATUS_NOT_IMPLEMENTED and
+ * IoStatus.Information 0, before any register access, with the Release rule and the Debug rule, on a clean and on an armed
+ * adapter. Malformed PASS requests are still refused by validation as before: STATUS_SUCCESS, the request as output, INVALID.
+ * A HOLD request still completes with STATUS_SUCCESS and the request as output.
+ */
+static void test_55_activate_pass_not_implemented(void) {
+    static const I226_TAS_IO release_io = {&g_hw, fake_read, fake_write, fake_phc, 0};
+    static const I226_TAS_IO debug_io = {&g_hw, fake_read, fake_write, fake_phc, 1};
+    const I226_TAS_IO *io;
+    ULONG_PTR info;
+    LONG st;
+    int outcome, rule, armed;
+
+    printf("\n[TC-MOCK-055] PASS: STATUS_NOT_IMPLEMENTED, Information 0, zero register access (Option C)\n");
+    for (rule = 0; rule < 2; rule++) {
+        io = rule == 0 ? &release_io : &debug_io;
+        for (armed = 0; armed < 2; armed++) {
+            act_setup(AVB_TAS_PRE_PASS);
+            info = 12345;
+            outcome = i226_tas_activate(io, &g_act, armed);
+            st = avb_tas_activate_completion(outcome, &info);
+            printf("    %s rule, %s: outcome=%d status=0x%08lX information=%lu writes=%u reads=%u phcReads=%u\n",
+                   rule == 0 ? "Release" : "Debug", armed ? "armed" : "clean", outcome, (unsigned long)st, (unsigned long)info,
+                   g_hw.writes, g_hw.reads, g_hw.phc_reads);
+            EXPECT_EQ("valid PASS: STATUS_NOT_IMPLEMENTED", st, STATUS_NOT_IMPLEMENTED);
+            EXPECT_TRUE("valid PASS: Information 0", info == 0);
+            EXPECT_EQ("valid PASS: zero register writes", g_hw.writes, 0);
+            EXPECT_EQ("valid PASS: zero register reads", g_hw.reads, 0);
+            EXPECT_EQ("valid PASS: zero PHC reads", g_hw.phc_reads, 0);
+        }
+
+        /* Malformed PASS requests: validation as before */
+        act_setup(AVB_TAS_PRE_PASS); g_act.version = 2;
+        outcome = i226_tas_activate(io, &g_act, FALSE);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("malformed PASS (version): STATUS_SUCCESS, INVALID, the request as output, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && info == sizeof(AVB_TAS_ACTIVATE_REQUEST) &&
+                    g_hw.writes == 0);
+        act_setup(AVB_TAS_PRE_PASS); g_act.window_end_ns[1] = g_act.window_start_ns[1];
+        outcome = i226_tas_activate(io, &g_act, FALSE);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("malformed PASS (empty window): STATUS_SUCCESS, INVALID, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+        act_setup(AVB_TAS_PRE_PASS); g_act.cycle_ns = 0;
+        outcome = i226_tas_activate(io, &g_act, FALSE);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("malformed PASS (no cycle): STATUS_SUCCESS, INVALID, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+        act_setup(AVB_TAS_PRE_PASS); g_act.reserved = I226_TAS_PASS_WRITES + 1u;
+        outcome = i226_tas_activate(io, &g_act, FALSE);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("PASS with a reserved word out of range: STATUS_SUCCESS, INVALID, nothing written",
+                    st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
+
+        /* HOLD keeps its completion */
+        act_setup(AVB_TAS_PRE_HOLD);
+        outcome = i226_tas_activate(io, &g_act, FALSE);
+        st = avb_tas_activate_completion(outcome, &info);
+        EXPECT_TRUE("HOLD: STATUS_SUCCESS, the request as output, COMMITTED",
+                    st == STATUS_SUCCESS && info == sizeof(AVB_TAS_ACTIVATE_REQUEST) && g_act.result == AVB_TAS_ACT_COMMITTED);
+    }
+    act_setup(AVB_TAS_PRE_PASS); g_act.reserved = 1;
+    outcome = i226_tas_activate(&release_io, &g_act, FALSE);
+    st = avb_tas_activate_completion(outcome, &info);
+    EXPECT_TRUE("Release rule: PASS with a nonzero reserved word stays INVALID with STATUS_SUCCESS, nothing written",
+                st == STATUS_SUCCESS && g_act.result == AVB_TAS_ACT_INVALID && g_hw.writes == 0);
 }
 
 int main(void) {
@@ -1126,6 +1207,7 @@ int main(void) {
     test_52_act_pass_wire();
     test_53_act_restore();
     test_54_activate_encoding();
+    test_55_activate_pass_not_implemented();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");

@@ -206,18 +206,26 @@ static __inline int i226_tas_write_schedule(const I226_TAS_IO *io, const AVB_TAS
     return io->write(io->ctx, I226_BASET_L, I226_TAS_FIELD(I226_BASET_L, BASE_TIME_L, base_ns)) != 0;
 }
 
-/* The whole operation. r->result always says what happened, and only a committed result leaves a schedule behind */
-static __inline void i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_REQUEST *r, int armed)
+/* The whole operation. Returns AVB_TAS_ACTIVATE_RAN when r->result says what happened; only a committed result leaves a
+ * schedule behind */
+static __inline int i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_REQUEST *r, int armed)
 {
     I226_TAS_SAVED saved[I226_TAS_SAVED_COUNT];
     avb_u64 phc = 0, after = 0;
     I226_TAS_FAULT fault;
     I226_TAS_IO faulty;
+    avb_u32 valid;
 
     r->phc_at_commit_ns = 0;
-    r->result = i226_tas_validate_with(r, io->fault_injection);
+    valid = i226_tas_validate_with(r, io->fault_injection);
+    /* #357 AC2: PASS only once ADR-TSN-003 is accepted. Until then (#363 interim Option C, Q 2026-11-13) a valid PASS request
+     * is refused here, before any register or PHC access, in Debug and Release alike. A malformed one is still INVALID */
+    if (valid == AVB_TAS_ACT_COMMITTED && r->pre_activation == AVB_TAS_PRE_PASS) {
+        return AVB_TAS_ACTIVATE_NOT_IMPLEMENTED;
+    }
+    r->result = valid;
     if (r->result != AVB_TAS_ACT_COMMITTED) {
-        return;
+        return AVB_TAS_ACTIVATE_RAN;
     }
     if (r->reserved != 0) {   /* validation allowed it, so this is a Debug driver */
         fault.inner = io;
@@ -232,23 +240,24 @@ static __inline void i226_tas_activate(const I226_TAS_IO *io, AVB_TAS_ACTIVATE_R
     }
     if (armed || !i226_tas_read_clean(io, saved) || io->phc(io->ctx, &phc) != 0) {
         r->result = AVB_TAS_ACT_NOT_CLEAN;
-        return;
+        return AVB_TAS_ACTIVATE_RAN;
     }
     if (r->base_time_ns < phc + AVB_TAS_MIN_LEAD_NS) {
         r->result = AVB_TAS_ACT_INVALID;
-        return;
+        return AVB_TAS_ACTIVATE_RAN;
     }
     if (i226_tas_write_schedule(io, r, saved[0].old_value) != 0) {
         r->result = i226_tas_restore(io, saved);
-        return;
+        return AVB_TAS_ACTIVATE_RAN;
     }
     /* The schedule is written either way. A failed read only removes the timing evidence, and never triggers a rollback */
     if (io->phc(io->ctx, &after) != 0) {
         r->result = AVB_TAS_ACT_COMMITTED_UNTIMED;
-        return;
+        return AVB_TAS_ACTIVATE_RAN;
     }
     r->phc_at_commit_ns = after;
     if (after >= r->base_time_ns) {
         r->result = AVB_TAS_ACT_BASE_PASSED;
     }
+    return AVB_TAS_ACTIVATE_RAN;
 }

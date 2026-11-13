@@ -4,7 +4,10 @@
  *
  * One mode per run, each its own registered runner entry:
  *   --hold   TEST-TAS-API-004 (#369, Verifies #357 and #350), case TC-TASAPI-004
- *   --pass   TEST-TAS-API-005 (#370, Verifies #357), case TC-TASAPI-005
+ *   --pass   TEST-TAS-API-005 (#370, Verifies #357), case TC-TASAPI-005. Until ADR-TSN-003 is accepted (#357 AC2) the driver
+ *            refuses a valid PASS request with STATUS_NOT_IMPLEMENTED and no output, before any register access (#363 interim
+ *            Option C, Q 2026-11-13). The run then records SKIP_NOT_IMPLEMENTED from the exact NTSTATUS, never a PASS, and
+ *            FAIL for any other completion; COMMIT, STATE, REFUSE and WIRE do not apply to it.
  *   --fault  the failed-rollback path of #357 (PR #397 review), case TC-TASACT-FAULT-001. Debug drivers fail schedule write
  *            13 and the first restore write on request (devices/i226_tas_activate.h); Release drivers must refuse that request.
  *
@@ -53,6 +56,7 @@
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
 #include "../ioctl/tas_activate_eval.h"
+#include "../common/avb_ntstatus.h"   /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
 #include "tas_wire_observer.h"
 
 #define DEVICE_NAME          "\\\\.\\IntelAvbFilter"
@@ -838,6 +842,30 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
                     id->device_id, ok2 && again.result == AVB_TAS_ACT_NOT_CLEAN && state_ok && s.armed == AVB_TAS_STATE_DIRTY ? NULL
                                    : "a dirty adapter must refuse activation as NOT_CLEAN and stay DIRTY until recovered");
         }
+        cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc);
+        return;
+    }
+
+    if (g_mode == MODE_PASS) {
+        /* #363 interim Option C: a valid PASS request completes with STATUS_NOT_IMPLEMENTED and no output, before any register
+         * access, and leaves the reported TAS state CLEAN. The cleanup below still runs, as after every TAS_ACTIVATE issued */
+        DWORD information = 0;
+        LONG st;
+        BOOL state_ok, refused;
+
+        wire_stop();
+        closesocket(sock);
+        CloseHandle(h2);
+        printf("\n  --- TAS_ACTIVATE with PASS (not implemented until ADR-TSN-003 is accepted) ---\n");
+        st = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_ACTIVATE, &req, sizeof(req), &req, sizeof(req), &information);
+        printf("    PASS request: ntstatus=0x%08lX information=%lu\n", (unsigned long)st, information);
+        state_ok = read_state(h, &s);
+        if (state_ok) { print_state("after the PASS request", &s); }
+        refused = st == STATUS_NOT_IMPLEMENTED && information == 0 && state_ok && s.armed == AVB_TAS_STATE_CLEAN;
+        verdict(refused ? "SKIP_NOT_IMPLEMENTED" : "FAIL", "COMMIT", index, id->device_id,
+                refused ? "PASS is not implemented until ADR-TSN-003 is accepted (#357 AC2, #363 interim Option C): "
+                          "STATUS_NOT_IMPLEMENTED, no output, TAS state CLEAN; #370 is not verified by this"
+                        : "expected STATUS_NOT_IMPLEMENTED, no output and a CLEAN TAS state; see the lines above");
         cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc);
         return;
     }

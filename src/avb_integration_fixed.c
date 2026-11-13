@@ -4397,7 +4397,9 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
 
     case IOCTL_AVB_TAS_ACTIVATE:
         /* First gate schedule on a clean adapter (#357). A refusal completes with STATUS_SUCCESS and r->result, because
-         * METHOD_BUFFERED would drop the output on an error status. ADR-TSN-002 and ADR-TSN-003 govern this write path. */
+         * METHOD_BUFFERED would drop the output on an error status. ADR-TSN-002 and ADR-TSN-003 govern this write path.
+         * Exception: a valid PASS request completes with STATUS_NOT_IMPLEMENTED and no output until ADR-TSN-003 is
+         * accepted (#363 interim Option C, avb_tas_activate_completion). */
         if (buf == NULL || inLen < sizeof(AVB_TAS_ACTIVATE_REQUEST) || outLen < sizeof(AVB_TAS_ACTIVATE_REQUEST)) {
             status = STATUS_BUFFER_TOO_SMALL;
         } else {
@@ -4419,21 +4421,26 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 info = sizeof(*r);
             } else {
                 avb_u32 before = (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0);
-                avb_u32 after;
+                int outcome;
 
                 /* Armed and dirty are both not clean, so the device code refuses without writing */
-                ops->activate_tas(&activeContext->intel_device, r, before != AVB_TAS_STATE_CLEAN);
-                r->status = (avb_u32)STATUS_SUCCESS;
-                after = avb_tas_state_after(r->result, before);
-                if (after == AVB_TAS_STATE_ARMED && before != AVB_TAS_STATE_ARMED) {
-                    /* The full gate list of what was written; validation already refused anything that does not fit */
-                    (void)avb_tas_gcl_from_windows(r, &activeContext->last_tas_config);
-                } else if (after == AVB_TAS_STATE_DIRTY) {
-                    RtlZeroMemory(&activeContext->last_tas_config, sizeof(activeContext->last_tas_config));
+                outcome = ops->activate_tas(&activeContext->intel_device, r, before != AVB_TAS_STATE_CLEAN);
+                status = (NTSTATUS)avb_tas_activate_completion(outcome, &info);
+                if (outcome == AVB_TAS_ACTIVATE_RAN) {
+                    avb_u32 after = avb_tas_state_after(r->result, before);
+
+                    r->status = (avb_u32)STATUS_SUCCESS;
+                    if (after == AVB_TAS_STATE_ARMED && before != AVB_TAS_STATE_ARMED) {
+                        /* The full gate list of what was written; validation already refused anything that does not fit */
+                        (void)avb_tas_gcl_from_windows(r, &activeContext->last_tas_config);
+                    } else if (after == AVB_TAS_STATE_DIRTY) {
+                        RtlZeroMemory(&activeContext->last_tas_config, sizeof(activeContext->last_tas_config));
+                    }
+                    InterlockedExchange(&activeContext->tas_armed, (LONG)after);
                 }
-                InterlockedExchange(&activeContext->tas_armed, (LONG)after);
+                /* Otherwise a valid request the device code refused without any register access (PASS, #363 interim
+                 * Option C): STATUS_NOT_IMPLEMENTED, no output, the adapter's TAS state unchanged */
                 InterlockedExchange(&activeContext->tas_op_claim, 0);
-                info = sizeof(*r);
             }
         }
         break;
