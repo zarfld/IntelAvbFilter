@@ -345,6 +345,31 @@ if ($fnMissing -eq '') {
          ($g5.Digest -eq $g0.Digest) -and ($g6.Digest -ne $g0.Digest) -and -not $gSub.Ok) `
         ("ok={0} edit={1} revert={2} new={3} ignored={4} outside={5} deleted={6} missingSubmodule.Ok={7} {8}" -f $g0.Ok, ($g1.Digest -ne $g0.Digest), ($g2.Digest -eq $g0.Digest),
          ($g3.Digest -ne $g0.Digest), ($g4.Digest -eq $g0.Digest), ($g5.Digest -eq $g0.Digest), ($g6.Digest -ne $g0.Digest), $gSub.Ok, $g0.Error)
+
+    # #426: the digest must not depend on the session's console output encoding.  A tracked input whose name holds a
+    # non-ASCII character ("(R)", UTF-8 C2 AE, as in the submodules' spec file names) must be hashed under code page 850
+    # as under 65001, never recorded as deleted.  The name is built from its code point so this file stays ASCII.
+    # Hashed vs deleted is observable: a content change alters the digest only for a hashed input.
+    $naName = 'spec_' + [char]0x00AE + '.h'
+    Set-Content -LiteralPath (Join-Path $G "tests\$naName") -Value '#define NA 1' -Encoding ASCII
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & git -C $G -c user.email=t@t -c user.name=t add -A 2>$null | Out-Null
+    & git -C $G -c user.email=t@t -c user.name=t -c core.autocrlf=false commit -q -m non-ascii 2>$null | Out-Null
+    $ErrorActionPreference = $prevEap
+    $naPath = Join-Path $G "tests\$naName"
+    $encPrev = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(65001); $gUtf = DG
+        Set-Content -LiteralPath $naPath -Value '#define NA 2' -Encoding ASCII;    $gUtfEdit = DG
+        [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(850);   $gOemEdit = DG
+        Set-Content -LiteralPath $naPath -Value '#define NA 1' -Encoding ASCII;    $gOem = DG
+    } finally { [Console]::OutputEncoding = $encPrev }
+    tc_check 'TEST-HILPROV-072-build-input-digest-independent-of-console-encoding-non-ascii-input-hashed' `
+        ($gUtf.Ok -and $gUtfEdit.Ok -and $gOem.Ok -and $gOemEdit.Ok -and ($gOem.Digest -eq $gUtf.Digest) -and ($gOemEdit.Digest -eq $gUtfEdit.Digest) -and
+         ($gUtfEdit.Digest -ne $gUtf.Digest) -and ($gOemEdit.Digest -ne $gOem.Digest)) `
+        ("ok={0}/{1}/{2}/{3} cp850==cp65001={4} edited:cp850==cp65001={5} content-edit-changes-digest:cp65001={6} cp850={7} {8}{9}" -f
+         $gUtf.Ok, $gUtfEdit.Ok, $gOem.Ok, $gOemEdit.Ok, ($gOem.Digest -eq $gUtf.Digest), ($gOemEdit.Digest -eq $gUtfEdit.Digest),
+         ($gUtfEdit.Digest -ne $gUtf.Digest), ($gOemEdit.Digest -ne $gOem.Digest), $gUtf.Error, $gOem.Error)
 }
 
 # ---------------------------------------------------------------------------------------------------------
