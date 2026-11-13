@@ -13,6 +13,34 @@
 $AvbBuildInputRoots      = @('include', 'src', 'devices', 'tests', 'tools/build/Build-Tests.ps1', 'tools/vs_compile.ps1')
 $AvbBuildInputSubmodules = @('external/intel_avb', 'intel-ethernet-regs')
 
+# File names are read with core.quotepath=on: git then prints every path holding a byte outside printable ASCII as a
+# C-style quoted string whose non-ASCII bytes are octal escapes of the UTF-8 name, so the captured text is ASCII and
+# its meaning does not depend on the session's console output encoding (#426: under code page 850 raw UTF-8 names
+# were decoded wrongly and recorded as deleted).  This decodes one such line back to the file name; an unquoted line
+# is returned unchanged.  Malformed quoting throws (the digest then fails closed).
+function ConvertFrom-AvbGitQuotedPath {
+    param([string]$Line)
+    if ($Line.Length -lt 2 -or $Line[0] -ne '"' -or $Line[$Line.Length - 1] -ne '"') { return $Line }
+    $s = $Line.Substring(1, $Line.Length - 2)
+    $bytes = [System.Collections.Generic.List[byte]]::new()
+    for ($i = 0; $i -lt $s.Length; $i++) {
+        $c = [int][char]$s[$i]
+        if ($c -gt 0x7E -or $c -lt 0x20) { throw "unexpected character U+$($c.ToString('X4')) in quoted git path: $Line" }
+        if ($c -ne 0x5C) { $bytes.Add([byte]$c); continue }
+        if (++$i -ge $s.Length) { throw "dangling escape in quoted git path: $Line" }
+        $e = [string]$s[$i]
+        switch -CaseSensitive ($e) {
+            'a' { $bytes.Add(7) } 'b' { $bytes.Add(8) } 't' { $bytes.Add(9) } 'n' { $bytes.Add(10) }
+            'v' { $bytes.Add(11) } 'f' { $bytes.Add(12) } 'r' { $bytes.Add(13) } '"' { $bytes.Add(34) } '\' { $bytes.Add(92) }
+            default {
+                if ($i + 2 -ge $s.Length -or $s.Substring($i, 3) -notmatch '^[0-7]{3}$') { throw "invalid escape in quoted git path: $Line" }
+                $bytes.Add([Convert]::ToByte($s.Substring($i, 3), 8)); $i += 2
+            }
+        }
+    }
+    return (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes.ToArray())
+}
+
 # @{ Ok; Digest (64 hex, upper); Files; Error }.  Any git failure or missing root fails closed (Ok = $false).
 function Get-AvbBuildInputDigest {
     param([string]$RepoRoot, [string[]]$Roots = $AvbBuildInputRoots, [string[]]$Submodules = $AvbBuildInputSubmodules)
@@ -32,9 +60,9 @@ function Get-AvbBuildInputDigest {
                 $records.Add(("submodule`t{0}`t{1}" -f $s.Prefix, ([string]$h[0]).Trim()))
             }
             $global:LASTEXITCODE = $null
-            $files = @(& git -C $s.Root -c core.quotepath=off ls-files -co --exclude-standard -- @($s.Paths) 2>$null)
+            $files = @(& git -C $s.Root -c core.quotepath=on ls-files -co --exclude-standard -- @($s.Paths) 2>$null)
             if ($global:LASTEXITCODE -ne 0) { $res.Error = "git ls-files failed in '$($s.Prefix)'"; return $res }
-            $files = @($files | Where-Object { $_ } | Sort-Object -Unique -CaseSensitive)
+            $files = @($files | Where-Object { $_ } | ForEach-Object { ConvertFrom-AvbGitQuotedPath $_ } | Sort-Object -Unique -CaseSensitive)
             $present = [System.Collections.Generic.List[string]]::new()
             foreach ($f in $files) {
                 if (Test-Path -LiteralPath (Join-Path $s.Root $f) -PathType Leaf) { $present.Add($f) }
