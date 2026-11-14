@@ -148,7 +148,10 @@ public static class AvbDriverModules {
     if ($null -eq $raw) {
         return [pscustomobject]@{ Available = $false; Modules = @(); Error = ('EnumDeviceDrivers failed (Win32 {0})' -f [AvbDriverModules]::LastError) }
     }
-    $mods = @($raw | Where-Object { $null -ne $_[0] } | ForEach-Object { [pscustomobject]@{ BaseName = $_[0]; FileName = $_[1] } })
+    if (@($raw | Where-Object { [string]::IsNullOrWhiteSpace($_[0]) }).Count -gt 0) {
+        return [pscustomobject]@{ Available = $false; Modules = @(); Error = 'kernel module list contains unreadable base names; running-driver uniqueness cannot be established' }
+    }
+    $mods = @($raw | ForEach-Object { [pscustomobject]@{ BaseName = $_[0]; FileName = $_[1] } })
     if ($mods.Count -eq 0) {
         return [pscustomobject]@{ Available = $false; Modules = @(); Error = ('no module name readable ({0} entries; kernel addresses may be withheld from this token)' -f @($raw).Count) }
     }
