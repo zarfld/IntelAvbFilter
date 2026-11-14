@@ -252,9 +252,17 @@ try {
     $r = Invoke-PfIdentity '017' $rawB @($other, @{ BaseName = 'IntelAvbFilter.sys'; FileName = $rawB }) @{}
     tc_check_pf 'TEST-PREFLIGHT-017: System32 copy different from the selected and running file fails without any expected hash' (Test-PfFails $r) (Get-PfTail $r)
 
-    # 018 (preservation): existing authorized-hash gate on the System32 copy still fails first, with its own marker.
+    # 018 (preservation): authorization fails, deployment enforcement fails, and non-deployment mismatch warns.
     $r = Invoke-PfIdentity '018' $rawA $runA @{ HIL_EXPECTED_DRIVER_SHA256 = $hB; HIL_REQUIRED_SHA256_GATE = '1' }
-    tc_check_pf 'TEST-PREFLIGHT-018: existing TEST-PROV-SHA256 gate unchanged (System32 copy not authorized -> exit 1)' ($r.Exit -eq 1 -and $r.Out -match 'TEST-PROV-SHA256' -and $r.Out -notmatch 'PF-FIXTURE-REACHED') (Get-PfTail $r)
+    $authorizedFails = $r.Exit -eq 1 -and $r.Out -match 'TEST-PROV-SHA256' -and $r.Out -notmatch 'PF-FIXTURE-REACHED'
+    $gateDetails = @('authorization: ' + (Get-PfTail $r))
+    $r = Invoke-PfIdentity '018-deployed' $rawA $runA @{ HIL_EXPECTED_DRIVER_SHA256 = $hA; BUILD_DRIVER_SHA256 = $hB; HIL_REQUIRE_DEPLOYED_SHA = '1' }
+    $deploymentFails = $r.Exit -eq 1 -and $r.Out -match 'INFRA_FAILURE' -and $r.Out -match 'HIL_REQUIRE_DEPLOYED_SHA=1' -and $r.Out -notmatch 'PF-FIXTURE-REACHED'
+    $gateDetails += 'deployment: ' + (Get-PfTail $r)
+    $r = Invoke-PfIdentity '018-warning' $rawA $runA @{ HIL_EXPECTED_DRIVER_SHA256 = $hA; BUILD_DRIVER_SHA256 = $hB; HIL_REQUIRE_DEPLOYED_SHA = '0' }
+    $mismatchWarns = (Test-PfPasses $r) -and $r.Out -match '\[WARN\].*BUILD SHA256 MISMATCH'
+    $gateDetails += 'warning: ' + (Get-PfTail $r)
+    tc_check_pf 'TEST-PREFLIGHT-018: authorization and deployment mismatches fail; non-deployment BUILD mismatch warns' ($authorizedFails -and $deploymentFails -and $mismatchWarns) ($gateDetails -join '; ')
 } catch {
     tc_check_pf 'TEST-PREFLIGHT-006..018' $false ("fixture error: {0}" -f $_.Exception.Message)
 } finally {
