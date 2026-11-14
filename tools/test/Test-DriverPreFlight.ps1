@@ -172,6 +172,10 @@ Write-Host "--- Selected and running driver identity ---"
 try {
     $identity = Test-AvbDriverIdentity -System32Path $drvPath -ImagePath (Get-AvbServiceImagePath -ServiceName 'IntelAvbFilter') `
                                        -ModuleList (Get-AvbLoadedDriverModules) -SystemRoot $env:SystemRoot
+    if ($identity.System32.Sha256 -ine $actualSha256) {
+        $identity.Ok = $false
+        $identity.Failures += 'System32 driver SHA256 changed since the authorization check.'
+    }
 } catch {
     Write-Err ("Driver identity could not be determined: {0}" -f $_.Exception.Message)
     Write-Host "  [INFRA_FAILURE] TEST-PROV-DRIVER-IDENTITY: identity evidence unavailable" -ForegroundColor Red
