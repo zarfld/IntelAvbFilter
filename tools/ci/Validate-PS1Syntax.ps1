@@ -48,6 +48,7 @@ if ($Files.Count -eq 0) {
         "tools\lib\DriverDeploy.ps1",
         "tools\lib\HilLock.ps1",
         "tools\lib\HilMachineHealth.ps1",
+        "tools\lib\DriverIdentity.ps1",
         "tools\ci\Invoke-HilDeployment.ps1",
         "tools\setup\Install-Driver.ps1",
         "tools\build\Build-Driver.ps1",

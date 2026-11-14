@@ -20,6 +20,7 @@ Abstract:
 #include "external/intel_avb/lib/intel_windows.h"  // Required for platform_ops struct definition
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 #include "intel-ethernet-regs/gen/i226_regs.h"  // SSOT register definitions
+#include "i226_tas_activate.h"                  // First TAS schedule, shared with its offline cases (#357)
 
 // Application-specific constants
 #define I226_FREQOUT0_1MHZ      1000        // 1 µs half-cycle (1 MHz clock) - application value
@@ -41,7 +42,6 @@ Abstract:
 // TODO: Add these to i226.yaml and regenerate SSOT header
 #define I226_TQAVCTRL_TRANSMIT_MODE_TSN  0x00000001  // TSN transmit mode
 #define I226_TQAVCTRL_ENHANCED_QAV       0x00000008  // Enhanced QAV mode
-#define I226_TQAVCTRL_FUTSCDDIS          0x00800000  // Future Schedule Disable (I226 specific)
 
 // I226 Queue Control Bits
 // TODO: Add these to i226.yaml and regenerate SSOT header
@@ -592,6 +592,47 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
         DEBUGP(DL_TRACE, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", regValue);
         return -1;
     }
+}
+
+static int activate_read(void *ctx, avb_u32 offset, avb_u32 *value)
+{
+    uint32_t read = 0;
+    int result = ndis_platform_ops.mmio_read((device_t *)ctx, offset, &read);
+
+    *value = read;
+    return result;
+}
+
+static int activate_write(void *ctx, avb_u32 offset, avb_u32 value)
+{
+    return ndis_platform_ops.mmio_write((device_t *)ctx, offset, value);
+}
+
+static int activate_phc(void *ctx, avb_u64 *ns)
+{
+    return get_systime((device_t *)ctx, ns);
+}
+
+/** First gate schedule on a clean adapter (#357). The sequence and its refusals are in i226_tas_activate.h */
+static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed, int *tsn_mode_written)
+{
+    I226_TAS_IO io;
+    int outcome;
+
+    io.ctx = dev;
+    io.read = activate_read;
+    io.write = activate_write;
+    io.phc = activate_phc;
+#if DBG
+    io.fault_injection = 1;   /* the #357 HIL fault path; a Release driver refuses a nonzero reserved word */
+#else
+    io.fault_injection = 0;
+#endif
+    outcome = i226_tas_activate(&io, request, armed, tsn_mode_written);
+    DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u fault=%u outcome=%d result=%u modeWritten=%d phcAtCommit=%llu\n",
+           request->pre_activation, (unsigned long long)request->base_time_ns, request->cycle_ns, request->reserved, outcome,
+           request->result, *tsn_mode_written, (unsigned long long)request->phc_at_commit_ns);
+    return outcome;
 }
 
 /**
@@ -1637,6 +1678,7 @@ const intel_device_ops_t i226_ops = {
     
     // TSN operations - clean generic names
     .setup_tas = setup_tas,
+    .activate_tas = activate_tas,
     .disable_tas = disable_tas,
 #if DBG
     .trace_tx_state = trace_tx_state,

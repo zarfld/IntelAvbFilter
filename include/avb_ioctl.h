@@ -180,6 +180,48 @@ typedef struct _IOCTL_VERSION {
 #define IOCTL_AVB_OPEN_ADAPTER_BY_LUID  _NDIS_CONTROL_CODE(69, METHOD_BUFFERED)  /* 0x00170114 */
 #define IOCTL_AVB_QUERY_HW_SNAPSHOT     _NDIS_CONTROL_CODE(70, METHOD_BUFFERED)  /* 0x00170118 */
 
+/* First gate schedule on a clean adapter at a future PHC time (#357). Unlike IOCTL_AVB_SETUP_TAS, it applies a schedule.
+ * pre_activation has no default: the caller chooses HOLD or PASS. Written as a schedule of one window per queue per cycle.
+ * The IOCTL succeeds whenever it ran, and result says what happened, because METHOD_BUFFERED drops the output on an error
+ * status. COMMITTED, COMMITTED_UNTIMED and BASE_PASSED leave a schedule behind; FAILED_NOT_RESTORED leaves hardware state unknown.
+ * Exception: until ADR-TSN-003 is accepted (#357, #363 interim Option C), a valid PASS request completes with
+ * STATUS_NOT_IMPLEMENTED and no output, before any register access; a malformed one is still INVALID. */
+/* A mutating operation, so FILE_WRITE_ACCESS: the I/O manager delivers it only on a handle opened with write access (CTL_CODE
+ * RequiredAccess, Microsoft "Defining I/O Control Codes"). Existing codes keep FILE_ANY_ACCESS, since changing one changes its value */
+#define IOCTL_AVB_TAS_ACTIVATE          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 71, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017811C (#357, #362) */
+
+#define AVB_TAS_ACTIVATE_VERSION 1u
+#define AVB_TAS_QUEUES           4u
+#define AVB_TAS_PRE_HOLD         1u   /* frames held until the first window after BaseT */
+#define AVB_TAS_PRE_PASS         2u   /* frames flow until BaseT, then gated */
+#define AVB_TAS_MIN_LEAD_NS      100000000ULL   /* BaseT must be at least this far ahead of the PHC when the writes start */
+
+#define AVB_TAS_ACT_COMMITTED           0u  /* schedule written, BaseT still ahead at the read after commit */
+#define AVB_TAS_ACT_INVALID             1u  /* refused: bad field, or BaseT not far enough ahead. Nothing written */
+#define AVB_TAS_ACT_NOT_CLEAN           2u  /* refused: armed, left-over schedule state or unreadable. Nothing written */
+#define AVB_TAS_ACT_FAILED_RESTORED     3u  /* a write failed before commit, every register read back at its old value. Registers only:
+                                               if the transmit-mode write had reached the adapter, the state is DIRTY (readback does
+                                               not prove the transmit mode) */
+#define AVB_TAS_ACT_FAILED_NOT_RESTORED 4u  /* a write failed before commit and the restore did not complete */
+#define AVB_TAS_ACT_BASE_PASSED         5u  /* schedule written, but the PHC had passed BaseT at the read after commit */
+#define AVB_TAS_ACT_COMMITTED_UNTIMED   6u  /* schedule written, but the PHC read after the commit failed: whether BaseT was still ahead is unknown */
+#define AVB_TAS_ACT_BUSY                7u  /* refused: another TAS operation holds this adapter. Nothing read or written */
+
+typedef struct AVB_TAS_ACTIVATE_REQUEST {
+    avb_u32 version;                          /* in: AVB_TAS_ACTIVATE_VERSION */
+    avb_u32 pre_activation;                   /* in: AVB_TAS_PRE_HOLD or AVB_TAS_PRE_PASS */
+    avb_u64 base_time_ns;                     /* in: BaseT, PHC time */
+    avb_u32 cycle_ns;                         /* in */
+    avb_u32 link_mbps;                        /* in: current link rate, for the minimum window */
+    avb_u32 max_frame_bytes;                  /* in: largest frame in the queues, on the wire */
+    avb_u32 reserved;                         /* in: 0. Debug drivers only: N fails write N and the first restore write (#357) */
+    avb_u32 window_start_ns[AVB_TAS_QUEUES];  /* in: open time within the cycle, queues 0 to 3 */
+    avb_u32 window_end_ns[AVB_TAS_QUEUES];    /* in: close time within the cycle */
+    avb_u64 phc_at_commit_ns;                 /* out: PHC read after the commit write, 0 if none */
+    avb_u32 result;                           /* out: AVB_TAS_ACT_* */
+    avb_u32 status;                           /* out: NTSTATUS of the operation */
+} AVB_TAS_ACTIVATE_REQUEST, *PAVB_TAS_ACTIVATE_REQUEST;
+
 #define AVB_ADAPTER_IDENTITY_VERSION 1u
 typedef struct AVB_ADAPTER_IDENTITY_REQUEST {
     avb_u32 version;       /* in: AVB_ADAPTER_IDENTITY_VERSION */
@@ -484,8 +526,16 @@ typedef struct AVB_TAS_REQUEST {
 /* TAS state query response (IOCTL_AVB_GET_TAS_STATE).
  * Returns driver-tracked armed state and last programmed GCL parameters.
  * No input fields required; output only. */
+/* Values of AVB_TAS_STATE.armed. Any nonzero value means the adapter is not clean */
+#define AVB_TAS_STATE_CLEAN 0u   /* no TAS operation of this driver left state behind */
+#define AVB_TAS_STATE_ARMED 1u   /* a schedule was written: by IOCTL_AVB_SETUP_TAS, or by IOCTL_AVB_TAS_ACTIVATE (#357) */
+#define AVB_TAS_STATE_DIRTY 2u   /* a TAS operation failed and restoration is not established (its restore did not complete, or
+                                    TAS_ACTIVATE's transmit-mode write had reached the adapter, which a readback cannot prove
+                                    restored):
+                                    hardware state unknown, a NIC cycle is owed */
+
 typedef struct AVB_TAS_STATE {
-    avb_u32               armed;   /* out: 1=TAS was armed by IOCTL_AVB_SETUP_TAS, 0=not armed or disarmed */
+    avb_u32               armed;   /* out: AVB_TAS_STATE_CLEAN, _ARMED or _DIRTY */
     struct tsn_tas_config  config;  /* out: last programmed GCL (valid only when armed=1) */
     avb_u32               status;  /* out: NDIS_STATUS value */
 } AVB_TAS_STATE, *PAVB_TAS_STATE;

@@ -1925,6 +1925,19 @@ $AllTests = @(
         Issue = "#328"
         TestCases = 3
     },
+    @{
+        Name = "test_tas_activate"
+        Type = "cl"
+        Source = "tests\hardware\test_tas_activate.c"
+        Output = "test_tas_activate.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "TAS_ACTIVATE (#357): HOLD #369, PASS #370, Debug-only rollback fault; wire, state, refusal, NIC-cycle cleanup"
+        Issue = "#357"
+        TestCases = 3
+    },
 
     @{
         Name = "test_lifecycle_coverage"

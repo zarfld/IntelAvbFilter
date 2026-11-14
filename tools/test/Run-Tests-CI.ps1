@@ -419,6 +419,7 @@ $HardwareIntegrationAttendedOnly = [ordered]@{
 #   test_hot_plug               -- disables/enables the NIC through devcon (#262).  Unsafe in $HilTestSafety (#343).
 #   test_lifecycle_coverage     -- CM_Disable_DevNode / CM_Enable_DevNode on the adapter.  Unsafe (#343).
 #   test_tas_isolated_arm       -- SETUP_TAS, restored by CM_Disable_DevNode / CM_Enable_DevNode.  Unsafe (#328).
+#   test_tas_activate           -- TAS_ACTIVATE (--hold #369, --pass #370, --fault), then its own NIC cycle.  Unsafe (#357).
 #   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
 #   entry, outside GitHub Actions, on an operator-attended machine.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
@@ -590,6 +591,9 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe: same SETUP_TAS and NIC cycle with tagged 1400 byte UDP frames and wire observers, separating packet buffer, ring, gate and completion causes of the armed TX stall, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm --armed-period-ms 200' = 'Unsafe: same SETUP_TAS and NIC cycle at a 200 ms armed send period, separating a stall that follows time from one that follows frames, #328; requires an independent management link and an attended operator'
     'test_tas_isolated_arm'         = 'Unsafe: SETUP_TAS alone on every TAS adapter, then a NIC cycle as the only restoration path, #328; requires an independent management link and an attended operator, the test BLOCKS without that link'
+    'test_tas_activate --hold'      = 'Unsafe: TAS_ACTIVATE with HOLD on every TAS adapter, TEST-TAS-API-004 #369, then the test owned NIC cycle as primary cleanup, #357; requires an independent management link, the I210 wire observer and an attended operator, the test BLOCKS without them; TAS register restoration UNVERIFIED until #361'
+    'test_tas_activate --pass'      = 'Unsafe: TAS_ACTIVATE with PASS on every TAS adapter, TEST-TAS-API-005 #370, then the test owned NIC cycle as primary cleanup, #357; requires an independent management link, the I210 wire observer and an attended operator, the test BLOCKS without them; TAS register restoration UNVERIFIED until #361'
+    'test_tas_activate --fault'     = 'Unsafe: TAS_ACTIVATE failed-rollback path, Debug drivers inject a failed write and a failed restore write, Release drivers must refuse the request, then the test owned NIC cycle, #357; requires an independent management link and an attended operator; TAS register restoration UNVERIFIED until #361'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
     # Built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29): not runnable by this runner yet.
     'test_control_device_lifecycle' = 'Unsafe: TC-LCY-328 stops and restarts the IntelAvbFilter service through ControlService and sc.exe; attended runs only, AVB_HIL_AUTHORIZE_UNSAFE naming this entry; needs an independent management link and verified service recovery, #328'
@@ -758,6 +762,9 @@ $HilTestSafety = @{
     'test_tas_isolated_arm --stall-probe 64' = 'Unsafe'
     'test_tas_isolated_arm --stall-probe 512' = 'Unsafe'
     'test_tas_isolated_arm --stall-probe 1400' = 'Unsafe'
+    'test_tas_activate --hold'         = 'Unsafe'     # TAS_ACTIVATE plus CM_Disable_DevNode / CM_Enable_DevNode (#357, #369)
+    'test_tas_activate --pass'         = 'Unsafe'     # TAS_ACTIVATE plus CM_Disable_DevNode / CM_Enable_DevNode (#357, #370)
+    'test_tas_activate --fault'        = 'Unsafe'     # TAS_ACTIVATE fault path plus CM_Disable_DevNode / CM_Enable_DevNode (#357)
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
@@ -841,6 +848,7 @@ $HilTestTimeoutSeconds = [ordered]@{
     'test_tas_isolated_arm --stall-probe 64' = 480
     'test_tas_isolated_arm --stall-probe 512' = 480
     'test_tas_isolated_arm --stall-probe 1400' = 480
+    # test_tas_activate: per adapter, see $HilTestTimeoutPerAdapter below.
     # Per adapter: TC-AEN-002 30 s + TC-AEN-005 60 s + TC-AEN-006 31 s of deadlines/sleeps (tests/atdecc/
     # test_atdecc_aen_protocol.c) = 121 s; 3 adapters on the HIL host = 363 s, killed at 300 s on adapter 3 in
     # LocalSuites_20261021_173805 .. 20261022_094632.  420 s = 363 s + 16 %.  TC-AEN-001 adds 80 s per adapter only with
@@ -857,6 +865,20 @@ $HilTestTimeoutSeconds = [ordered]@{
     # test).  Test-specific only: the Unit suite timeout stays 60 s (TEST-HILGATE-095).  No issue-level requirement fixes
     # this value; the testing contract requires every unattended process to be bounded.
     'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' = 450
+}
+# Per-adapter budget for an entry whose one process runs the adapters one after another (PR #397 R14).  Process timeout =
+# Seconds x the adapters the driver enumerated in the latest observed state (Get-AvbHilState, re-read after every test),
+# at least 1 and at most MaxAdapters, the entry's own adapter limit; MaxAdapters when no enumeration was observed.  No
+# device id or adapter count is assumed.  Like $HilTestTimeoutSeconds it never lowers the suite timeout.
+$HilTestTimeoutPerAdapter = [ordered]@{
+    # test_tas_activate, from its own bounds: 3.5 s baseline + 21.5 s send bound and drain + 120 s disable + 3 s + 60 s enable
+    # + 60 s return + 60 s link + 5 s settle + 60 s socket bind + 5.5 s TX probe and observer stop = 398 s for one TAS
+    # adapter. 520 s = 398 s + 30 %, the margin used for test_tas_isolated_arm.  It runs every enumerated adapter that
+    # advertises INTEL_CAP_TSN_TAS (the others are SKIP_UNSUPPORTED without a wait), so the enumerated count is an upper bound
+    # on its adapters; MaxAdapters = ARRAYSIZE(ids) in tests/hardware/test_tas_activate.c.
+    'test_tas_activate --hold'  = @{ Seconds = 520; MaxAdapters = 8 }
+    'test_tas_activate --pass'  = @{ Seconds = 520; MaxAdapters = 8 }
+    'test_tas_activate --fault' = @{ Seconds = 520; MaxAdapters = 8 }
 }
 
 # ===========================
@@ -1792,16 +1814,21 @@ function Get-AvbHilMutatedState {
     return @()
 }
 
-# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] (never lowers it).  Sandbox:
+# Per-entry timeout: the larger of the suite timeout and $HilTestTimeoutSeconds[entry] or the $HilTestTimeoutPerAdapter
+# budget for -AdapterCount enumerated adapters (negative = not observed) (never lowers it).  Sandbox:
 # AVB_TEST_SANDBOX_TIMEOUTS ('bin=seconds;...').
 function Get-AvbTestTimeoutSeconds {
-    param([string]$Entry, [int]$SuiteSeconds)
+    param([string]$Entry, [int]$SuiteSeconds, [int]$AdapterCount = -1)
     $own = 0
     if ($script:IsSandbox) {
         $bin = Get-HilBinName $Entry
         foreach ($pair in (([string]$env:AVB_TEST_SANDBOX_TIMEOUTS) -split ';')) {
             if ($pair -match '^\s*([^=]+?)\s*=\s*(\d+)\s*$' -and $Matches[1] -eq $bin) { $own = [int]$Matches[2] }
         }
+    } elseif ($HilTestTimeoutPerAdapter.Contains($Entry)) {
+        $p = $HilTestTimeoutPerAdapter[$Entry]
+        $n = if ($AdapterCount -lt 0) { [int]$p.MaxAdapters } else { [Math]::Min([Math]::Max(1, $AdapterCount), [int]$p.MaxAdapters) }
+        $own = [int]$p.Seconds * $n
     } elseif ($HilTestTimeoutSeconds.Contains($Entry)) { $own = [int]$HilTestTimeoutSeconds[$Entry] }
     return [Math]::Max($SuiteSeconds, $own)
 }
@@ -2702,8 +2729,11 @@ foreach ($WorkItem in $WorkItems) {
     $errJob = $proc.StandardError.ReadToEndAsync()
 
     $timedOut  = $false
-    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds
+    # Adapters the driver enumerated in the latest observed state (-1: not observed), for per-adapter budgets (PR #397 R14)
+    $enumeratedAdapters = if ($script:HilBaseline -and $script:HilBaseline.ClockOk) { @($script:HilBaseline.Clock).Count } else { -1 }
+    $itemTimeoutSeconds = Get-AvbTestTimeoutSeconds -Entry $TestName -SuiteSeconds $TestTimeoutSeconds -AdapterCount $enumeratedAdapters
     if ($itemTimeoutSeconds -ne $TestTimeoutSeconds) { Write-Note "$exeName per-test timeout ${itemTimeoutSeconds}s (suite ${TestTimeoutSeconds}s)" }
+    if ($HilTestTimeoutPerAdapter.Contains($TestName)) { Write-Note "$exeName timeout budget per adapter, enumerated adapters: $enumeratedAdapters" }
     $timeoutMs = $itemTimeoutSeconds * 1000
     if (-not $proc.WaitForExit($timeoutMs)) {
         $script:AvbItem.Termination = Stop-AvbProcessTree -Process $proc

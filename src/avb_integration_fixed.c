@@ -24,6 +24,7 @@ Abstract:
 #include "devices/intel_device_interface.h"  // For intel_device_ops_t and intel_get_device_ops()
 #include <ntstrsafe.h>
 #include "src/avb_hw_snapshot.h"  // IOCTL_AVB_QUERY_HW_SNAPSHOT builder (family-independent, read-only)
+#include "src/avb_tas_activate_state.h"  // TAS state after IOCTL_AVB_TAS_ACTIVATE, shared with its offline cases (#357)
 
 // Generic register offsets (common across Intel devices)
 #define INTEL_GENERIC_CTRL_REG      0x00000  // Device control register (all Intel devices)
@@ -3115,6 +3116,10 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 if (AvbContext == NULL) {
                     disarm->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
                     status = STATUS_DEVICE_NOT_CONNECTED;
+                } else if (InterlockedCompareExchange(&AvbContext->tas_op_claim, 1, 0) != 0) {
+                    /* ADR-TSN-002: DISARM_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
+                    disarm->status = (avb_u32)STATUS_DEVICE_BUSY;
+                    status = STATUS_DEVICE_BUSY;
                 } else {
                     const intel_device_ops_t *ops =
                         intel_get_device_ops(AvbContext->intel_device.device_type);
@@ -3167,6 +3172,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         status = STATUS_NOT_SUPPORTED;
                         /* tas_armed NOT cleared — state is indeterminate */
                     }
+                    InterlockedExchange(&AvbContext->tas_op_claim, 0);
                 }
                 info = sizeof(AVB_DISARM_TAS_REQUEST);
                 if (status == STATUS_SUCCESS) {
@@ -4313,9 +4319,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     DEBUGP(DL_ERROR, "? TAS SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
+                } else if (InterlockedCompareExchange(&activeContext->tas_op_claim, 1, 0) != 0) {
+                    /* ADR-TSN-002: SETUP_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
+                    status = STATUS_DEVICE_BUSY;
                 } else {
                     PAVB_TAS_REQUEST r = (PAVB_TAS_REQUEST)buf;
-                    
+
                     // Note: private_data already points to struct intel_private with platform_data set during initialization
                     
                     DEBUGP(DL_TRACE, "?? TAS SETUP: Phase 2 Enhanced Configuration on VID=0x%04X DID=0x%04X\n",
@@ -4349,10 +4358,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                    (unsigned)r->config.cycle_time_s,
                                    (unsigned)r->config.cycle_time_ns);
                             DEBUGP(DL_TRACE, "? TAS configuration successful\n");
-                            /* Record armed state for test-state-restoration (fix #328 / A9) */
-                            InterlockedExchange(&activeContext->tas_armed, 1);
-                            /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
-                            RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
+                            /* Record armed state for test-state-restoration (fix #328 / A9). Arms from clean only: a dirty
+                             * adapter stays dirty (#357), since this write does not make an unknown state known */
+                            if (InterlockedCompareExchange(&activeContext->tas_armed, AVB_TAS_STATE_ARMED, AVB_TAS_STATE_CLEAN) != AVB_TAS_STATE_DIRTY) {
+                                /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
+                                RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
+                            }
                         } else {
                             DEBUGP(DL_ERROR, "? TAS setup failed: %d\n", rc);
                             
@@ -4376,9 +4387,60 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             }
                         }
                     }
-                    
+
                     info = sizeof(*r);
+                    InterlockedExchange(&activeContext->tas_op_claim, 0);
                 }
+            }
+        }
+        break;
+
+    case IOCTL_AVB_TAS_ACTIVATE:
+        /* First gate schedule on a clean adapter (#357). A refusal completes with STATUS_SUCCESS and r->result, because
+         * METHOD_BUFFERED would drop the output on an error status. ADR-TSN-002 and ADR-TSN-003 govern this write path.
+         * Exception: a valid PASS request completes with STATUS_NOT_IMPLEMENTED and no output until ADR-TSN-003 is
+         * accepted (#363 interim Option C, avb_tas_activate_completion). */
+        if (buf == NULL || inLen < sizeof(AVB_TAS_ACTIVATE_REQUEST) || outLen < sizeof(AVB_TAS_ACTIVATE_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            PAVB_DEVICE_CONTEXT activeContext = AvbContext; /* per-handle selected adapter */
+            PAVB_TAS_ACTIVATE_REQUEST r = (PAVB_TAS_ACTIVATE_REQUEST)buf;
+            const intel_device_ops_t *ops = intel_get_device_ops(activeContext->intel_device.device_type);
+
+            if (activeContext->hw_state < AVB_HW_PTP_READY) {
+                status = STATUS_DEVICE_NOT_READY;
+            } else if (!(activeContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
+                status = STATUS_NOT_SUPPORTED;
+            } else if (ops == NULL || ops->activate_tas == NULL) {
+                status = STATUS_NOT_IMPLEMENTED;
+            } else if (InterlockedCompareExchange(&activeContext->tas_op_claim, 1, 0) != 0) {
+                /* Another TAS operation holds this adapter: refuse without reading or writing anything */
+                r->phc_at_commit_ns = 0;
+                r->result = AVB_TAS_ACT_BUSY;
+                r->status = (avb_u32)STATUS_SUCCESS;
+                info = sizeof(*r);
+            } else {
+                avb_u32 before = (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0);
+                int outcome, tsn_mode_written = 0;
+
+                /* Armed and dirty are both not clean, so the device code refuses without writing */
+                outcome = ops->activate_tas(&activeContext->intel_device, r, before != AVB_TAS_STATE_CLEAN, &tsn_mode_written);
+                status = (NTSTATUS)avb_tas_activate_completion(outcome, &info);
+                if (outcome == AVB_TAS_ACTIVATE_RAN) {
+                    avb_u32 after = avb_tas_state_after(r->result, before, tsn_mode_written);
+
+                    r->status = (avb_u32)STATUS_SUCCESS;
+                    if (after == AVB_TAS_STATE_ARMED && before != AVB_TAS_STATE_ARMED) {
+                        /* The full gate list of what was written; validation already refused anything that does not fit */
+                        (void)avb_tas_gcl_from_windows(r, &activeContext->last_tas_config);
+                    } else if (after == AVB_TAS_STATE_DIRTY) {
+                        RtlZeroMemory(&activeContext->last_tas_config, sizeof(activeContext->last_tas_config));
+                    }
+                    InterlockedExchange(&activeContext->tas_armed, (LONG)after);
+                }
+                /* Otherwise a valid request the device code refused without any register access (PASS, #363 interim
+                 * Option C): STATUS_NOT_IMPLEMENTED, no output, the adapter's TAS state unchanged */
+                InterlockedExchange(&activeContext->tas_op_claim, 0);
             }
         }
         break;

@@ -328,7 +328,7 @@ function Get-StrippedSource([string]$bin, [bool]$keepStrings) {
     }
     return $code
 }
-$mutRx  = '\bIOCTL_AVB_(WRITE_REGISTER|SET_TIMESTAMP|SETUP_TAS|SETUP_FP|SETUP_PTM|MDIO_WRITE|SETUP_QAV|ADJUST_FREQUENCY|SET_HW_TIMESTAMPING|SET_RX_TIMESTAMP|SET_QUEUE_TIMESTAMP|SET_TARGET_TIME|PHC_OFFSET_ADJUST|SET_PORT_LATENCY|SET_LAUNCH_TIME|DISARM_TAS|RESET_STATISTICS|VLAN_ENABLE|VLAN_DISABLE|EEE_ENABLE|EEE_DISABLE|PFC_ENABLE|SRP_REGISTER_STREAM|SRP_DEREGISTER_STREAM)\b|\b(AvbWriteReg|AvbWriteRegVerified|AvbTestAdjustFrequency|AvbTestI210RestoreVerified|AvbTestI210RestoreVerifiedAs|AvbTestI210ExpectRejectedUnchanged)\s*\('
+$mutRx  = '\bIOCTL_AVB_(WRITE_REGISTER|SET_TIMESTAMP|SETUP_TAS|SETUP_FP|SETUP_PTM|MDIO_WRITE|SETUP_QAV|ADJUST_FREQUENCY|SET_HW_TIMESTAMPING|SET_RX_TIMESTAMP|SET_QUEUE_TIMESTAMP|SET_TARGET_TIME|PHC_OFFSET_ADJUST|SET_PORT_LATENCY|SET_LAUNCH_TIME|DISARM_TAS|TAS_ACTIVATE|RESET_STATISTICS|VLAN_ENABLE|VLAN_DISABLE|EEE_ENABLE|EEE_DISABLE|PFC_ENABLE|SRP_REGISTER_STREAM|SRP_DEREGISTER_STREAM)\b|\b(AvbWriteReg|AvbWriteRegVerified|AvbTestAdjustFrequency|AvbTestI210RestoreVerified|AvbTestI210RestoreVerifiedAs|AvbTestI210ExpectRejectedUnchanged)\s*\('
 $nicRx  = 'CM_Disable_DevNode|CM_Enable_DevNode|CM_Reenumerate_DevNode|SetupDiCallClassInstaller|DIF_PROPERTYCHANGE|SetSuspendState|ControlService|\bdevcon\b|\bpnputil\b|Disable-NetAdapter|Enable-NetAdapter|Restart-NetAdapter'
 # Documented exceptions (each states why the hit is not executed by the registered entry).
 $roExceptions  = @{ 'test_ioctl_abi' = 'sizeof/code checks only'; 'test_ptp_phc_stability' = 'no args runs UT-CORR-007/008 only; 005/006/009 need --case'
@@ -387,9 +387,11 @@ tc_check 'TEST-HILGATE-093-every-tsn-configuration-capable-entry-is-hazard-held'
 $toBad = @()
 $toAsg = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$HilTestTimeoutSeconds' }, $true) | Select-Object -First 1
 $toFn  = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-AvbTestTimeoutSeconds' }, $true)
-if (-not $toAsg -or -not $toFn) { $toBad += 'timeout table or Get-AvbTestTimeoutSeconds missing' }
+$paAsg = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '$HilTestTimeoutPerAdapter' }, $true) | Select-Object -First 1
+if (-not $toAsg -or -not $toFn -or -not $paAsg) { $toBad += 'timeout table, per-adapter table or Get-AvbTestTimeoutSeconds missing' }
 else {
-    $toCheck = [scriptblock]::Create(('$script:IsSandbox = $false; $HilTestTimeoutSeconds = ' + $toAsg.Right.Extent.Text + "`n" + $toFn.Extent.Text + "`n" +
+    $toCheck = [scriptblock]::Create(('$script:IsSandbox = $false; $HilTestTimeoutSeconds = ' + $toAsg.Right.Extent.Text + "`n" +
+        '$HilTestTimeoutPerAdapter = ' + $paAsg.Right.Extent.Text + "`n" + $toFn.Extent.Text + "`n" +
         'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ioctl/test_hil_safety_gate.ps1" -SuiteSeconds 60' + "`n" +
         'Get-AvbTestTimeoutSeconds -Entry "ps1:tests/unit/ci/test_artifact_completeness.ps1" -SuiteSeconds 60'))
     $toVals = @(& $toCheck)
@@ -399,6 +401,50 @@ else {
 $toDef = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '$TestTimeoutSeconds -eq 0' }, $true)
 if (-not $toDef -or $toDef.Extent.Text -notmatch '"Unit"\s*\{\s*60\s*\}') { $toBad += 'global Unit default is no longer 60 s' }
 tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count -eq 0) ($toBad -join '; ')
+# 098: PR #397 R14.  test_tas_activate runs every adapter it enumerates in one process (per TAS adapter: 398 s of its own
+#      bounds, budget 520 s).  Its timeout is that budget times the adapters the driver enumerated at run time, at least 1,
+#      at most the test's own adapter limit (ARRAYSIZE(ids) in its source), that limit when nothing was observed; never a
+#      one-adapter value.  Other entries ignore the count.  Offline: the runner's tables and function from its syntax tree;
+#      the dispatch-site wiring is a static source check.
+$paBad = @()
+$tasSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\hardware\test_tas_activate.c'))
+$tasMax = [regex]::Match($tasSrc, '\bAVB_ADAPTER_IDENTITY_REQUEST\s+ids\s*\[\s*(\d+)\s*\]')
+if (-not $tasMax.Success) { $paBad += 'adapter limit ids[N] not found in tests/hardware/test_tas_activate.c' }
+if (-not $toAsg -or -not $toFn -or -not $paAsg) { $paBad += 'timeout table, per-adapter table or Get-AvbTestTimeoutSeconds missing' }
+if ($paBad.Count -eq 0) {
+    $lim = [int]$tasMax.Groups[1].Value
+    $paCheck = [scriptblock]::Create(('$script:IsSandbox = $false; $HilTestTimeoutSeconds = ' + $toAsg.Right.Extent.Text + "`n" +
+        '$HilTestTimeoutPerAdapter = ' + $paAsg.Right.Extent.Text + "`n" + $toFn.Extent.Text + "`n" + @'
+$o = [ordered]@{ Keys = (@($HilTestTimeoutPerAdapter.Keys) -join '|'); Plain = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_activate').Count }
+foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
+    foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
+    $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
+    $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
+}
+$o['atdecc@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_atdecc_aen_protocol' -SuiteSeconds 60 -AdapterCount 9
+$o['gate@9'] = Get-AvbTestTimeoutSeconds -Entry 'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' -SuiteSeconds 60 -AdapterCount 9
+$o['other@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_ptp_freq_complete' -SuiteSeconds 300 -AdapterCount 9
+$o
+'@))
+    $pa = & $paCheck
+    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries only" }
+    if ($pa.Plain -ne 0) { $paBad += 'test_tas_activate still has a fixed one-adapter timeout' }
+    foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
+        if ($pa["$e@limit"] -ne $lim) { $paBad += "$e adapter limit $($pa["$e@limit"]), the test's own limit is $lim" }
+        $want = [ordered]@{ '1' = 520; '2' = 1040; '3' = 1560; '8' = 520 * [Math]::Min(8, $lim); '20' = 520 * $lim; '0' = 520; '-1' = 520 * $lim }
+        foreach ($n in $want.Keys) { if ([int]$pa["$e@$n"] -ne [int]$want[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($want[$n]) s" } }
+        if ([int]$pa["$e@suite600"] -ne 600) { $paBad += "$e lowers the 600 s suite timeout to $($pa["$e@suite600"]) s" }
+    }
+    if ([int]$pa['atdecc@9'] -ne 420) { $paBad += "test_atdecc_aen_protocol depends on the adapter count ($($pa['atdecc@9']) s)" }
+    if ([int]$pa['gate@9'] -ne 450) { $paBad += "test_hil_safety_gate.ps1 depends on the adapter count ($($pa['gate@9']) s)" }
+    if ([int]$pa['other@9'] -ne 300) { $paBad += "an unlisted entry depends on the adapter count ($($pa['other@9']) s)" }
+    $runnerText = [System.IO.File]::ReadAllText($RunCIPath)
+    if ($runnerText -notmatch '\$enumeratedAdapters\s*=\s*if\s*\(\s*\$script:HilBaseline\s+-and\s+\$script:HilBaseline\.ClockOk\s*\)\s*\{\s*@\(\$script:HilBaseline\.Clock\)\.Count\s*\}\s*else\s*\{\s*-1\s*\}' -or
+        $runnerText -notmatch 'Get-AvbTestTimeoutSeconds\s+-Entry\s+\$TestName\s+-SuiteSeconds\s+\$TestTimeoutSeconds\s+-AdapterCount\s+\$enumeratedAdapters') {
+        $paBad += 'dispatch does not pass the enumerated adapter count of the latest observed state (static check)'
+    }
+}
+tc_check 'TEST-HILGATE-098-tas-activate-timeout-scales-with-enumerated-adapters' ($paBad.Count -eq 0) ($paBad -join '; ')
 tc_check 'TEST-HILGATE-009-nic-admin-only-in-unsafe-entries' ($registry.Count -gt 0 -and $bad009.Count -eq 0) ("NIC/driver administration outside Unsafe: {0}" -f ($bad009 -join ', '))
 
 $commonC = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\common\avb_test_common.c'))
