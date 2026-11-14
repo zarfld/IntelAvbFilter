@@ -16,10 +16,15 @@
 #   against a driver built from a different commit.
 #
 # HIL_REQUIRED_SHA256_GATE=1: fail if HIL_EXPECTED_DRIVER_SHA256 is absent/empty.
+# #428: the System32 copy hashed above, the file the service is configured to load (registry ImagePath) and the
+# running module (kernel module list) must be the same file content, and the running module must be the selected
+# file; otherwise TEST-PROV-DRIVER-IDENTITY fails (exit 1). Missing, ambiguous or unavailable evidence fails.
+# The running module is identified by path; its hash is that of the file at that path, not of the in-memory image.
 # Exit 0 = driver healthy; identity reported to GITHUB_ENV.
-# Exit 1 = driver down, device-node loss, or SHA256 gate failure.
+# Exit 1 = driver down, device-node loss, SHA256 gate failure, or driver-identity failure (#428).
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '..\lib\DriverIdentity.ps1')   # #428: System32 copy, service-selected image, running module
 
 function Write-Ok   { param([string]$m) Write-Host "[OK]  $m" -ForegroundColor Green }
 function Write-Warn { param([string]$m) Write-Host "[WARN] $m" -ForegroundColor Yellow }
@@ -158,6 +163,36 @@ if ($svcStatus -ne 'Running') {
 }
 
 Write-Ok "IntelAvbFilter service is Running."
+
+# --- 1b. Selected and running driver identity (#428) ---
+# A matching System32 copy does not show which file the service loads or which module is running (2026-11-11: System32
+# matched the authorized hash while a different DriverStore package was configured and loaded).
+Write-Host ""
+Write-Host "--- Selected and running driver identity ---"
+try {
+    $identity = Test-AvbDriverIdentity -System32Path $drvPath -ImagePath (Get-AvbServiceImagePath -ServiceName 'IntelAvbFilter') `
+                                       -ModuleList (Get-AvbLoadedDriverModules) -SystemRoot $env:SystemRoot
+} catch {
+    Write-Err ("Driver identity could not be determined: {0}" -f $_.Exception.Message)
+    Write-Host "  [INFRA_FAILURE] TEST-PROV-DRIVER-IDENTITY: identity evidence unavailable" -ForegroundColor Red
+    exit 1
+}
+Write-Host ("  System32 copy      : {0}  file SHA256 {1}" -f $identity.System32.Path, $identity.System32.Sha256)
+Write-Host ("  Service-selected   : {0} -> {1}  file SHA256 {2}" -f $identity.Selected.Raw, $identity.Selected.Path, $identity.Selected.Sha256)
+Write-Host ("  Running module     : {0} -> {1}  file SHA256 {2}" -f $identity.Running.Raw, $identity.Running.Path, $identity.Running.Sha256)
+Write-Host "  Running module evidence: path from the kernel module list; SHA256 of the file at that path at check time; the in-memory image is not hashed."
+if (-not $identity.Ok) {
+    foreach ($f in $identity.Failures) { Write-Err $f }
+    Write-Host "  [INFRA_FAILURE] TEST-PROV-DRIVER-IDENTITY: System32 copy, service-selected image and running module are not established as the same file" -ForegroundColor Red
+    exit 1
+}
+Write-Ok "Driver identity            : System32 copy, service-selected image and running module file are the same content"
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    "HIL_SELECTED_DRIVER_PATH=$($identity.Selected.Path)"           | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    "HIL_SELECTED_DRIVER_SHA256=$($identity.Selected.Sha256)"       | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    "HIL_RUNNING_DRIVER_PATH=$($identity.Running.Path)"             | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    "HIL_RUNNING_DRIVER_FILE_SHA256=$($identity.Running.Sha256)"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+}
 
 # --- 2. Device node accessibility check ---
 Add-Type -TypeDefinition @'
