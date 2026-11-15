@@ -407,7 +407,8 @@ tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count
 #      one-adapter value.  Other entries ignore the count.  Offline: the runner's tables and function from its syntax tree;
 #      the dispatch-site wiring is a static source check.
 #      #366: test_tas_query_clean is the fourth per-adapter entry (per TAS adapter: 438.5 s of its own bounds, budget 560 s);
-#      #381: test_tas_query_clean --hw-verified the fifth (about 390 s, same budget and inventory).
+#      #381: test_tas_query_clean --hw-verified the fifth (about 390 s, same budget and inventory);
+#      #367: test_tas_query_clean --tiers-unbound the sixth (at most 438.5 s, same budget and inventory).
 #      Its limit is its supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also
 #      caps the TAS adapters that process runs, so the budget always covers them.
 $paBad = @()
@@ -430,7 +431,7 @@ foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas
     $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
 }
 $o['PlainQuery'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_query_clean').Count
-foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified') {
+foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound') {
     foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
     $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
     $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
@@ -441,11 +442,11 @@ $o['other@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_ptp_freq_complete' -Suite
 $o
 '@))
     $pa = & $paCheck
-    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries and the two test_tas_query_clean entries only" }
+    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries and the three test_tas_query_clean entries only" }
     $qlim = [int]$qcMax.Groups[1].Value
     if ($pa.PlainQuery -ne 0) { $paBad += 'test_tas_query_clean has a fixed one-adapter timeout' }
     $qwant = [ordered]@{ '1' = 560; '2' = 1120; '3' = 1680; '8' = 560 * [Math]::Min(8, $qlim); '20' = 560 * $qlim; '0' = 560; '-1' = 560 * $qlim }
-    foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified') {   # #366 and #381: one process, one inventory
+    foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound') {   # #366, #381, #367: one process, one inventory
         if ($pa["$e@limit"] -ne $qlim) { $paBad += "$e adapter limit $($pa["$e@limit"]), its supported inventory is $qlim" }
         foreach ($n in $qwant.Keys) { if ([int]$pa["$e@$n"] -ne [int]$qwant[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($qwant[$n]) s" } }
         if ([int]$pa["$e@suite600"] -ne 600) { $paBad += "$e lowers the 600 s suite timeout to $($pa["$e@suite600"]) s" }
