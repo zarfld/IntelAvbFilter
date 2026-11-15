@@ -1320,6 +1320,10 @@ int main(int argc, char **argv)
                 check_capability_absent(all[i].index, &all[i]);
             }
         }
+        if (stored == 0) {
+            verdict_global("BLOCKED", "QUERY", "no TAS-capable adapter found; required TAS query coverage not executed (#367)");
+            verdict_global("BLOCKED", "TIERS", "requires a TAS-capable adapter (#367)");
+        }
     }
     for (i = 0; i < stored; i++) {
         if (i < TAS_QUERY_CLEAN_MAX_ADAPTERS) {
