@@ -477,6 +477,7 @@ $HardwareUnitTests = @(
     "test_lifecycle_coverage",
     # Phase C: Additional unit tests registered 2026-04-01 (built but previously absent from CI)
     "test_hw_state",               # hardware state enum/OID query -- REQ-F-HWCTX-001 (#18)
+    "test_tas_query_clean",        # TAS_QUERY_HW on a clean adapter, TEST-TAS-API-001 #366 (Verifies #350, #353); RED until the #350 handler
     "test_statistics_counters",    # IOCTL statistics counters -- REQ-NF-DIAG-001 (#270)
     "test_event_log",
     "test_build_sign",             # build & code-signing verification -- (#243)
@@ -672,6 +673,7 @@ $HilTestSafety = @{
     'test_ptp_crosstimestamp'          = 'ReadOnly'
     'test_zero_polling_overhead'       = 'ReadOnly'   # launches "wpr.exe -status" only
     'test_hw_state'                    = 'ReadOnly'
+    'test_tas_query_clean'             = 'ReadOnly'   # OPEN_ADAPTER_BY_LUID (binds only), TAS_QUERY_HW, GET_CLOCK_CONFIG/STATISTICS/TAS_STATE; bounded broadcast TX (#366)
     'test_statistics_counters'         = 'ReadOnly'   # "devcon restart" appears only in a SKIP message
     'test_build_sign'                  = 'ReadOnly'
     'test_compat_win11'                = 'ReadOnly'
