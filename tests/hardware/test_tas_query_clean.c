@@ -6,11 +6,15 @@
  * 12.4 status, 12.5 advisory restoration, 12.7 the #366 row). Layout: include/avb_ioctl.h (TC-ABI-026/027).
  *
  * --tiers-unbound: TEST-TAS-API-002 (#367, Verifies #351), case TC-TASAPI-002 (#365 12.1, 12.2, 12.7).
- *   UNBOUND     a handle that is never bound sends the query: exactly STATUS_INVALID_DEVICE_STATE (raw NTSTATUS), no output, and
- *               no adapter context reached (each adapter's IoctlCount moves as across two back-to-back reads).
- *   CAPABILITY  per adapter without INTEL_CAP_TSN_TAS, a bound query: STATUS_NOT_SUPPORTED gives SKIP_UNSUPPORTED (green);
- *               success there is FAIL. Only the query is exercised: a mutating operation on such an adapter would need a NIC
- *               cycle of it, the management link included, so it is a coverage gap of #367, not tested here.
+ *   UNBOUND     a handle that is never bound sends the query: exactly STATUS_INVALID_DEVICE_STATE (raw NTSTATUS), no output.
+ *   UNBOUND-COUNTERS  an observation kept apart from the status: each adapter's IoctlCount across the query against two
+ *               back-to-back reads, printed. PASS only with equal deltas on a complete, non-empty inventory; BLOCKED on an
+ *               incomplete or empty one; INCONCLUSIVE when a reading is missing or a delta differs (not attributable).
+ *   CAPABILITY  per adapter without INTEL_CAP_TSN_TAS, a bound query: STATUS_NOT_SUPPORTED with no output gives
+ *               SKIP_UNSUPPORTED (green); success, or an error with output, is FAIL. Only the query is exercised: a mutating
+ *               operation on such an adapter would need a NIC cycle of it, the management link included, so it is a coverage
+ *               gap of #367, not tested here.
+ *   TAS         BLOCKED when no adapter advertises INTEL_CAP_TSN_TAS: the TAS part was not exercised, so the case cannot pass.
  *   QUERY, TIERS per TAS adapter: the #351 tier table does not exist, so tiers read 0 (not reported) and TIERS is
  *               INCONCLUSIVE (incomplete). Asserted only: a reported tier is 1..4, tier_pass is NOT_IMPLEMENTED (#363 option
  *               C). Then the owned cleanup below.
@@ -926,15 +930,19 @@ done:
     }
 }
 
-/** --tiers-unbound, TC-TASAPI-002 UNBOUND (#367, #365 12.1 row 1): a handle that is never bound sends the v1 query. The raw
- *  NTSTATUS must be exactly STATUS_INVALID_DEVICE_STATE with no output. "No lazy initialization": each adapter's IoctlCount
- *  (statistics of its own context, read on a bound handle) moves by the same amount across the unbound query as across two
- *  back-to-back reads, so the query reached no adapter context. Missing statistics evidence is INCONCLUSIVE, never a pass. */
-static void check_unbound(const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 n)
+/** --tiers-unbound, TC-TASAPI-002 (#367, #365 12.1 row 1). Two separate lines:
+ *  UNBOUND           the raw NTSTATUS of the v1 query on a handle never bound: exactly STATUS_INVALID_DEVICE_STATE, no output.
+ *                    A wrong status is FAIL whatever the counters show.
+ *  UNBOUND-COUNTERS  an observation, not a proof of routing: each adapter's IoctlCount (statistics of its own context, read on a
+ *                    bound handle) across the unbound query against two back-to-back reads. Equal deltas on every adapter of a
+ *                    complete, non-empty inventory: PASS. An incomplete or empty inventory: BLOCKED. A reading unavailable, or a
+ *                    delta that differs (other requests or a statistics reset can move the counter, so the difference cannot
+ *                    be attributed to this query): INCONCLUSIVE. Every measured delta is printed. */
+static void check_unbound(const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 n, BOOL inventory_complete)
 {
     HANDLE *hs = (HANDLE *)calloc(n ? n : 1, sizeof(HANDLE)), hu;
     QUERY_READ r;
-    UINT32 i, reached = 0, unavailable = 0;
+    UINT32 i, drifted = 0, unavailable = 0;
     char reason[320];
 
     ZeroMemory(&r, sizeof(r));
@@ -978,10 +986,15 @@ static void check_unbound(const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 n)
                 printf("    [EVIDENCE] unbound check adapter:%u did=0x%04X: IoctlCount unavailable\n", all[i].index, all[i].device_id);
                 continue;
             }
-            printf("    [EVIDENCE] unbound check adapter:%u did=0x%04X: IoctlCount delta without query=%llu, across the unbound query=%llu\n",
-                   all[i].index, all[i].device_id, cal1[i].s.IoctlCount - cal0[i].s.IoctlCount, after[i].s.IoctlCount - before[i].s.IoctlCount);
-            if (after[i].s.IoctlCount - before[i].s.IoctlCount != cal1[i].s.IoctlCount - cal0[i].s.IoctlCount) {
-                reached++;
+            {
+                /* Signed deltas: a statistics reset makes one negative, and is then reported, never hidden */
+                long long dcal = (long long)(cal1[i].s.IoctlCount - cal0[i].s.IoctlCount);
+                long long dq = (long long)(after[i].s.IoctlCount - before[i].s.IoctlCount);
+                printf("    [EVIDENCE] unbound check adapter:%u did=0x%04X: IoctlCount delta without the query=%lld, across the "
+                       "unbound query=%lld\n", all[i].index, all[i].device_id, dcal, dq);
+                if (dq != dcal) {
+                    drifted++;
+                }
             }
         }
         free(before); free(after); free(cal0); free(cal1);
@@ -989,6 +1002,7 @@ static void check_unbound(const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 n)
     for (i = 0; i < n; i++) { if (hs[i] != INVALID_HANDLE_VALUE) { CloseHandle(hs[i]); } }
     free(hs);
 
+    /* UNBOUND: the raw status alone */
     printf("    [EVIDENCE] unbound query: ntstatus=0x%08lX information=%lu (expected 0x%08lX, information 0)\n",
            (unsigned long)r.status, r.got, (unsigned long)STATUS_INVALID_DEVICE_STATE);
     if (r.status == AVB_NTSTATUS_UNAVAILABLE) {
@@ -998,15 +1012,26 @@ static void check_unbound(const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 n)
                   (unsigned long)r.status, r.got, (unsigned long)STATUS_INVALID_DEVICE_STATE,
                   r.status == (LONG)STATUS_INVALID_DEVICE_REQUEST ? " (the driver does not serve IOCTL_AVB_TAS_QUERY_HW)" : "");
         verdict_global("FAIL", "UNBOUND", reason);
-    } else if (reached != 0) {
-        sprintf_s(reason, sizeof(reason), "refused with the exact status, but %u adapter context(s) counted an extra IOCTL: the query "
-                  "reached an adapter (fallback or lazy initialization)", reached);
-        verdict_global("FAIL", "UNBOUND", reason);
-    } else if (unavailable != 0) {
-        sprintf_s(reason, sizeof(reason), "refused with the exact status; no-initialization evidence unavailable for %u adapter(s)", unavailable);
-        verdict_global("INCONCLUSIVE", "UNBOUND", reason);
     } else {
-        verdict_global("PASS", "UNBOUND", "STATUS_INVALID_DEVICE_STATE, no output, no adapter context reached");
+        verdict_global("PASS", "UNBOUND", "STATUS_INVALID_DEVICE_STATE, no output");
+    }
+
+    /* UNBOUND-COUNTERS: the observation, judged only on a complete, non-empty inventory and never attributed beyond the data */
+    if (!inventory_complete || n == 0) {
+        sprintf_s(reason, sizeof(reason), "adapter inventory %s (%u adapter(s) observed); no counter observation can cover every context",
+                  n == 0 ? "empty" : "incomplete", n);
+        verdict_global("BLOCKED", "UNBOUND-COUNTERS", reason);
+    } else if (unavailable != 0) {
+        sprintf_s(reason, sizeof(reason), "IoctlCount unavailable for %u of %u adapter(s)", unavailable, n);
+        verdict_global("INCONCLUSIVE", "UNBOUND-COUNTERS", reason);
+    } else if (drifted != 0) {
+        sprintf_s(reason, sizeof(reason), "%u of %u adapter(s) moved differently across the query than in calibration; other requests or a "
+                  "statistics reset can do that, so the difference is not attributed to the query (see the deltas)", drifted, n);
+        verdict_global("INCONCLUSIVE", "UNBOUND-COUNTERS", reason);
+    } else {
+        sprintf_s(reason, sizeof(reason), "IoctlCount moved exactly as in calibration on all %u adapter(s) of a complete inventory "
+                  "(an observation, see the deltas)", n);
+        verdict_global("PASS", "UNBOUND-COUNTERS", reason);
     }
 }
 
@@ -1031,6 +1056,12 @@ static void check_capability_absent(UINT32 index, const AVB_ADAPTER_IDENTITY_REQ
            id->device_id, id->capabilities, (unsigned long)r.status, r.got);
     if (r.status >= 0 && r.status != AVB_NTSTATUS_UNAVAILABLE) {
         verdict("FAIL", "CAPABILITY", index, id->device_id, "the query was served on an adapter without INTEL_CAP_TSN_TAS");
+        return;
+    }
+    if (r.status != AVB_NTSTATUS_UNAVAILABLE && r.got != 0) {   /* #365 12.1: on any error, IoStatus.Information is 0 */
+        sprintf_s(reason, sizeof(reason), "error ntstatus=0x%08lX with information=%lu; every error must complete with no output",
+                  (unsigned long)r.status, r.got);
+        verdict("FAIL", "CAPABILITY", index, id->device_id, reason);
         return;
     }
     v = avb_verdict_from_status((NTSTATUS)r.status, AVB_CAP_ABSENT, FALSE, TRUE);
@@ -1310,11 +1341,16 @@ int main(int argc, char **argv)
         /* #367: the unbound handle first (read-only), then every adapter without the capability (read-only), then the TAS
          * adapters with their owned cleanup below. Operations other than the query are not exercised on non-TAS adapters:
          * a mutating call there would need a NIC cycle of that adapter, the management link included */
-        check_unbound(all, nall);
+        check_unbound(all, nall, complete);
         for (i = 0; i < nall; i++) {
             if (!(all[i].capabilities & INTEL_CAP_TSN_TAS)) {
                 check_capability_absent(all[i].index, &all[i]);
             }
+        }
+        if (stored == 0) {   /* #367 needs its TAS part: unbound and non-TAS results never stand in for it */
+            printf("[BLOCKED] %s-TAS: no discovered adapter advertises INTEL_CAP_TSN_TAS; QUERY and TIERS were not exercised, so "
+                   "TC-TASAPI-002 cannot pass\n", CASE_ID);
+            g_blocked++;
         }
     }
     for (i = 0; i < stored; i++) {
