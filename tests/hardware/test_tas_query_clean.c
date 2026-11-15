@@ -294,6 +294,11 @@ static void driver_provenance(void)
         printf("    [EVIDENCE] loaded driver image: unknown (EnumDeviceDrivers error %lu)\n", GetLastError());
         return;
     }
+    if (needed > sizeof(bases)) {
+        printf("    [EVIDENCE] loaded driver image: unknown (EnumDeviceDrivers requires %lu bytes; buffer holds %lu)\n",
+               needed, (unsigned long)sizeof(bases));
+        return;
+    }
     for (i = 0; i < needed / sizeof(bases[0]); i++) {
         if (GetDeviceDriverBaseNameA(bases[i], name, sizeof(name)) == 0 || _stricmp(name, DRIVER_IMAGE) != 0 ||
             GetDeviceDriverFileNameA(bases[i], name, sizeof(name)) == 0) {
