@@ -12,6 +12,11 @@
  * valid and reports a clean adapter. Schedule: the verified set of test_tas_activate.c (1 s cycle, window 200 to 400 ms on all
  * queues, BaseT the first cycle boundary at least 1.5 s ahead). The slot statuses are printed as evidence only; PENDING and
  * INFERRED_ACTIVE are #369's. Cleanup, CLEANUP and RESTORE as below (the restoration baseline is the clean query).
+ * A forbidden status fails a phase line before any timing judgement; PENDING passes only on a valid, ordered PHC bracket that
+ * ends before the retained target BaseT. The activation counts as committed only from its documented complete reply (all
+ * bytes, status STATUS_SUCCESS, result COMMITTED, PHC at commit before BaseT). REPLIES covers every answered query of the
+ * adapter run, polling and the cleanup's query after the cycle included: FAIL on any HARDWARE_VERIFIED, INCONCLUSIVE if no
+ * query was answered.
  *
  * Preconditions, checked before the first query (BLOCKED, nothing sent to the adapter, nothing to clean): the adapter's device
  * node resolves from its NET_LUID, another adapter keeps the host reachable (the cleanup cycles this one), the adapter is up
@@ -221,13 +226,26 @@ static void read_state(HANDLE h, STATE_READ *r)
     r->ok = DeviceIoControl(h, IOCTL_AVB_GET_TAS_STATE, &r->s, sizeof(r->s), &r->s, sizeof(r->s), &br, NULL) && r->s.status == 0;
 }
 
-/** One query: in = version, size, lookup id 0. Keeps the raw NTSTATUS and IoStatus.Information */
+/* --hw-verified (#381): every answered query of the current adapter run, the polling and cleanup replies included */
+static unsigned g_hwv_answered, g_hwv_forbidden;
+static BOOL query_valid(const QUERY_READ *r);
+
+/** One query: in = version, size, lookup id 0. Keeps the raw NTSTATUS and IoStatus.Information. With --hw-verified, every
+ *  answered reply is checked for HARDWARE_VERIFIED in either slot, whatever phase the query belongs to */
 static void query(HANDLE h, QUERY_READ *r)
 {
     ZeroMemory(r, sizeof(*r));
     r->q.version = AVB_TAS_QUERY_VERSION;
     r->q.size = (avb_u32)sizeof(r->q);
     r->status = avb_ioctl_ntstatus(h, IOCTL_AVB_TAS_QUERY_HW, &r->q, sizeof(r->q), &r->q, sizeof(r->q), &r->got);
+    if (g_hw_verified_mode && query_valid(r)) {
+        g_hwv_answered++;
+        if (r->q.current_status == AVB_TAS_ST_HARDWARE_VERIFIED || r->q.next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
+            g_hwv_forbidden++;
+            printf("    [EVIDENCE] HARDWARE_VERIFIED in an answered reply: current=%u next=%u (reply %u of this adapter run)\n",
+                   r->q.current_status, r->q.next_status, g_hwv_answered);
+        }
+    }
 }
 
 /** A reply whose fields mean something: STATUS_SUCCESS with the full v1 reply */
@@ -767,13 +785,15 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
     AVB_TAS_ACTIVATE_REQUEST req;
     HANDLE hw;
     DWORD br = 0, err = ERROR_SUCCESS, start;
-    BOOL ok, past = FALSE;
+    BOOL ok, past = FALSE, committed;
     long long base = 0;
     unsigned q;
     char reason[256];
 
     ZeroMemory(&q1, sizeof(q1));
     ZeroMemory(&q2, sizeof(q2));
+    g_hwv_answered = 0;
+    g_hwv_forbidden = 0;
     read_phc(h, &p0);
     query(h, &q0);
     print_query("clean", &q0);
@@ -781,15 +801,13 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
     if (!query_valid(&q0)) {
         verdict("BLOCKED", "PENDING", index, id->device_id, "requires a valid query of the clean adapter before any activation");
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "requires a valid query of the clean adapter before any activation");
-        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
-        return;
+        goto done;
     }
     if (!query_clean(&q0) || !p0.ok) {
         verdict("BLOCKED", "PENDING", index, id->device_id, !p0.ok ? "PHC unavailable: no BaseT can be placed" :
                 "the query does not report a clean adapter; no activation on it (#381 precondition)");
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "requires a clean adapter, the PHC and a committed schedule");
-        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
-        return;
+        goto done;
     }
 
     /* The schedule: IOCTL_AVB_TAS_ACTIVATE, HOLD, the verified set; needs a handle with write access (#362) */
@@ -810,50 +828,77 @@ static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_R
         if (hw != INVALID_HANDLE_VALUE) { CloseHandle(hw); }
         verdict("BLOCKED", "PENDING", index, id->device_id, "cannot bind a handle with write access for the activation");
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no committed schedule");
-        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
-        return;
+        goto done;
     }
+    /* COMMITTED is 0: the out fields start at values the driver never writes, so a reply it did not write cannot read as one */
+    req.result = 0xFFFFFFFFu;
+    req.status = 0xFFFFFFFFu;
     g_pending_did = id->device_id;
     InterlockedExchange(&g_pending_adapter, (LONG)index);   /* from here the cleanup owes a NIC cycle */
     ok = DeviceIoControl(hw, IOCTL_AVB_TAS_ACTIVATE, &req, sizeof(req), &req, sizeof(req), &br, NULL);
     if (!ok) { err = GetLastError(); }
     CloseHandle(hw);
-    printf("    [EVIDENCE] activation: base=%lld cycle=%lld window=[%lld, %lld) ok=%d win32=%lu result=%u status=0x%08X phcAtCommit=%llu\n",
-           base, CYCLE_NS, WINDOW_START_NS, WINDOW_END_NS, ok, err, ok ? req.result : 0u, ok ? req.status : 0u,
-           ok ? req.phc_at_commit_ns : 0ULL);
-    if (!ok || req.result != AVB_TAS_ACT_COMMITTED) {
-        sprintf_s(reason, sizeof(reason), "activation did not commit (ok=%d win32=%lu result=%u); no schedule to query", ok, err,
-                  ok ? req.result : 0u);
+    printf("    [EVIDENCE] activation: base=%lld cycle=%lld window=[%lld, %lld) ok=%d win32=%lu bytes=%lu result=0x%X status=0x%08X "
+           "phcAtCommit=%llu\n", base, CYCLE_NS, WINDOW_START_NS, WINDOW_END_NS, ok, err, br, req.result, req.status,
+           req.phc_at_commit_ns);
+    /* The documented reply of an activation that ran: the whole structure (IoStatus.Information = sizeof), status
+     * STATUS_SUCCESS, result COMMITTED, and COMMITTED means the PHC read after the commit was still before BaseT */
+    committed = ok && br == sizeof(req) && req.status == 0u && req.result == AVB_TAS_ACT_COMMITTED &&
+                req.phc_at_commit_ns != 0 && req.phc_at_commit_ns < (avb_u64)base;
+    if (!committed) {
+        sprintf_s(reason, sizeof(reason), "activation not established as COMMITTED (ok=%d win32=%lu bytes=%lu result=0x%X status=0x%08X "
+                  "phcAtCommit=%llu); no schedule to query", ok, err, br, req.result, req.status, req.phc_at_commit_ns);
         verdict("BLOCKED", "PENDING", index, id->device_id, reason);
         verdict("BLOCKED", "PAST_BASET", index, id->device_id, reason);
-        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
-        return;
+        goto done;
     }
 
+    /* PENDING: a forbidden status fails whatever the timing; a pass needs valid, ordered PHC readings before BaseT */
     query(h, &q1);
     print_query("committed, BaseT ahead", &q1);
-    if (query_valid(&q1) && phc_valid(&q1.q) && q1.q.phc_after_ns >= (avb_u64)base) {
-        verdict("BLOCKED", "PENDING", index, id->device_id, "the PHC had already passed BaseT at this query; the BaseT-ahead case was not observed");
-    } else {
+    if (!query_valid(&q1) || q1.q.current_status == AVB_TAS_ST_HARDWARE_VERIFIED || q1.q.next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
         verdict_not_hw_verified("PENDING", index, id->device_id, &q1, "committed, BaseT ahead");
+    } else if (!phc_valid(&q1.q) || q1.q.phc_before_ns > q1.q.phc_after_ns) {
+        verdict("BLOCKED", "PENDING", index, id->device_id, "the query's PHC bracket is invalid or unordered; it cannot show the query precedes BaseT");
+    } else if (q1.q.phc_after_ns >= (avb_u64)base) {
+        verdict("BLOCKED", "PENDING", index, id->device_id, "the PHC had already reached BaseT at this query; the BaseT-ahead case was not observed");
+    } else {
+        verdict_not_hw_verified("PENDING", index, id->device_id, &q1, "committed, query bracket before BaseT");
     }
 
-    /* Wait, bounded, until a valid query's own PHC bracket starts PAST_BASE_CYCLES cycles past BaseT */
+    /* Wait, bounded, until a valid query's own ordered PHC bracket starts PAST_BASE_CYCLES cycles past BaseT. Every polled reply
+     * is checked by query() for HARDWARE_VERIFIED; the REPLIES line below reports it */
     start = GetTickCount();
     do {
         Sleep(PAST_BASE_POLL_MS);
         query(h, &q2);
-        past = query_valid(&q2) && phc_valid(&q2.q) && q2.q.phc_before_ns >= (avb_u64)(base + PAST_BASE_CYCLES * CYCLE_NS);
-    } while (!past && query_valid(&q2) && GetTickCount() - start < PAST_BASE_BOUND_MS);
+        past = query_valid(&q2) && phc_valid(&q2.q) && q2.q.phc_before_ns <= q2.q.phc_after_ns &&
+               q2.q.phc_before_ns >= (avb_u64)(base + PAST_BASE_CYCLES * CYCLE_NS);
+        /* Stop at the first forbidden reply: it becomes PAST_BASET's FAIL, never overwritten by a later reply (PR #438) */
+    } while (!past && query_valid(&q2) && q2.q.current_status != AVB_TAS_ST_HARDWARE_VERIFIED &&
+             q2.q.next_status != AVB_TAS_ST_HARDWARE_VERIFIED && GetTickCount() - start < PAST_BASE_BOUND_MS);
     print_query("PHC past BaseT", &q2);
-    if (!query_valid(&q2)) {
+    if (!query_valid(&q2) || q2.q.current_status == AVB_TAS_ST_HARDWARE_VERIFIED || q2.q.next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
         verdict_not_hw_verified("PAST_BASET", index, id->device_id, &q2, "PHC past BaseT");
     } else if (!past) {
-        verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no valid query bracket past BaseT within the bound; the case was not observed");
+        verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no valid, ordered query bracket past BaseT within the bound; the case was not observed");
     } else {
-        verdict_not_hw_verified("PAST_BASET", index, id->device_id, &q2, "PHC past BaseT");
+        verdict_not_hw_verified("PAST_BASET", index, id->device_id, &q2, "query bracket two cycles past BaseT");
     }
+
+done:
     cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
+    /* REPLIES: every answered query of this adapter run, polling and the cleanup's query after the cycle included */
+    if (g_hwv_forbidden != 0) {
+        sprintf_s(reason, sizeof(reason), "%u of %u answered replies reported HARDWARE_VERIFIED; v1 must never return it",
+                  g_hwv_forbidden, g_hwv_answered);
+        verdict("FAIL", "REPLIES", index, id->device_id, reason);
+    } else if (g_hwv_answered == 0) {
+        verdict("INCONCLUSIVE", "REPLIES", index, id->device_id, "no query was answered in this run; an unexecuted query is never a pass");
+    } else {
+        sprintf_s(reason, sizeof(reason), "none of %u answered replies reported HARDWARE_VERIFIED", g_hwv_answered);
+        verdict("PASS", "REPLIES", index, id->device_id, reason);
+    }
 }
 
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
