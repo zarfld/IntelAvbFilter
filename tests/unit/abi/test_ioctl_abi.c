@@ -345,6 +345,125 @@ static void test_struct_sizes(void)
     TEST_ASSERT((IOCTL_AVB_TAS_QUERY_HW & 3u) == METHOD_BUFFERED, "IOCTL_AVB_TAS_QUERY_HW is METHOD_BUFFERED");
     TEST_ASSERT(((IOCTL_AVB_TAS_QUERY_HW >> 2) & 0xFFFu) == 0x80Bu && (IOCTL_AVB_TAS_QUERY_HW >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
                 "function 0x80B (vendor range), device type unchanged");
+
+    /* Verifies: #350 (REQ-F-TAS-STATE-001). The v1 query wire layout published in #365 ("Query v1 contract", 12.2):
+     * 536 bytes, explicit padding only, identical on x86 and x64. Provisional per #362 decision 1 until #365 is accepted:
+     * a change here is a version change (AVB_TAS_QUERY_VERSION), never a silent re-layout. Offline layout only; it proves
+     * nothing about the driver, which has no handler for the code yet. */
+    TEST_CASE("TC-ABI-026: AVB_TAS_QUERY_HW_REQUEST v1 layout, 536 bytes (#350, #365 12.2)");
+    TEST_ASSERT(AVB_TAS_QUERY_VERSION == 1u, "AVB_TAS_QUERY_VERSION == 1");
+    TEST_ASSERT(sizeof(AVB_TAS_QUEUE_WINDOW) == 16, "sizeof(AVB_TAS_QUEUE_WINDOW) == 16");
+    TEST_ASSERT(sizeof(AVB_TAS_SCHEDULE) == 80, "sizeof(AVB_TAS_SCHEDULE) == 80");
+    TEST_ASSERT(sizeof(AVB_TAS_REGS) == 80, "sizeof(AVB_TAS_REGS) == 80");
+    TEST_ASSERT(sizeof(AVB_TAS_LIMITS) == 48, "sizeof(AVB_TAS_LIMITS) == 48");
+    TEST_ASSERT(sizeof(AVB_TAS_OP_RECORD) == 72, "sizeof(AVB_TAS_OP_RECORD) == 72");
+    TEST_ASSERT(sizeof(AVB_TAS_COMMIT_INFO) == 24, "sizeof(AVB_TAS_COMMIT_INFO) == 24");
+    TEST_ASSERT(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536, "sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536");
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, version),             0, "version" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, size),                4, "size" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, lookup_client_op_id), 8, "lookup_client_op_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, net_luid),           16, "net_luid" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, vendor_id),          24, "vendor_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, device_id),          26, "device_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, revision_id),        28, "revision_id" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, revision_state),     30, "revision_state" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, hw_read),            32, "hw_read" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, hw_mode),            36, "hw_mode" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, origin),             40, "origin" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, gate_policy),        44, "gate_policy" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current_status),     48, "current_status" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current_reasons),    52, "current_reasons" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next_status),        56, "next_status" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next_reasons),       60, "next_reasons" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, snapshot_reasons),   64, "snapshot_reasons" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, restoration),        68, "restoration" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, flags),              72, "flags" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, lookup_result),      76, "lookup_result" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, link_speed_mbps),    80, "link_speed_mbps" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, legacy_conflicts),   84, "legacy_conflicts" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, context_epoch),      88, "context_epoch" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, generation),         96, "generation" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, phc_before_ns),     104, "phc_before_ns" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, phc_after_ns),      112, "phc_after_ns" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, dtx_max_frame_bytes), 120, "dtx_max_frame_bytes" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, dtx_max_frame_state), 124, "dtx_max_frame_state" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, limits),            128, "limits" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current),           176, "current" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next),              256, "next" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, regs),              336, "regs" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, lookup),            416, "lookup" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, current_commit),    488, "current_commit" },
+            { offsetof(AVB_TAS_QUERY_HW_REQUEST, next_commit),       512, "next_commit" },
+            { offsetof(AVB_TAS_SCHEDULE, base_time_ns),                0, "SCHEDULE.base_time_ns (retained target)" },
+            { offsetof(AVB_TAS_SCHEDULE, cycle_ns),                    8, "SCHEDULE.cycle_ns" },
+            { offsetof(AVB_TAS_SCHEDULE, queue),                      16, "SCHEDULE.queue" },
+            { offsetof(AVB_TAS_REGS, stqt),                           20, "REGS.stqt" },
+            { offsetof(AVB_TAS_REGS, endqt),                          36, "REGS.endqt" },
+            { offsetof(AVB_TAS_REGS, txqctl),                         52, "REGS.txqctl" },
+            { offsetof(AVB_TAS_REGS, dtxmxpktsz),                     68, "REGS.dtxmxpktsz" },
+            { offsetof(AVB_TAS_REGS, read_failed),                    72, "REGS.read_failed" },
+            { offsetof(AVB_TAS_REGS, consistency),                    76, "REGS.consistency" },
+            { offsetof(AVB_TAS_LIMITS, min_margin_ns),                16, "LIMITS.min_margin_ns" },
+            { offsetof(AVB_TAS_LIMITS, min_margin_state),             24, "LIMITS.min_margin_state" },
+            { offsetof(AVB_TAS_LIMITS, tier_per_queue),               44, "LIMITS.tier_per_queue" },
+            { offsetof(AVB_TAS_OP_RECORD, operation),                 48, "OP_RECORD.operation" },
+            { offsetof(AVB_TAS_OP_RECORD, op_flags),                  68, "OP_RECORD.op_flags" },
+            { offsetof(AVB_TAS_COMMIT_INFO, state),                   16, "COMMIT_INFO.state" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            (void)snprintf(msg, sizeof(msg), "offsetof(%s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
+
+    /* Verifies: #350. The published values of #365 12.2 / 12.5. 0 is never a state of an enumerated field (U1); where 0 is
+     * a meaningful count, "not reported" is 0xFFFFFFFF. HARDWARE_VERIFIED is defined, but no v1 path may return it (#381). */
+    TEST_CASE("TC-ABI-027: TAS query v1 published values (#350, #365 12.2, 12.5)");
+    TEST_ASSERT(AVB_TAS_HWREAD_READ == 1u && AVB_TAS_HWREAD_NOT_RUNNING == 2u && AVB_TAS_HWREAD_PARTIAL == 3u &&
+                AVB_TAS_HWREAD_NO_MMIO == 4u, "hw_read READ 1, NOT_RUNNING 2, PARTIAL 3, NO_MMIO 4");
+    TEST_ASSERT(AVB_TAS_HWMODE_OFF == 1u && AVB_TAS_HWMODE_TSN == 2u && AVB_TAS_HWMODE_UNREADABLE == 3u,
+                "hw_mode OFF 1, TSN 2, UNREADABLE 3");
+    TEST_ASSERT(AVB_TAS_ORIGIN_NONE == 1u && AVB_TAS_ORIGIN_SETUP_TAS == 2u && AVB_TAS_ORIGIN_CONTRACT == 3u &&
+                AVB_TAS_ORIGIN_FOUND_AT_ATTACH == 4u, "origin NONE 1, SETUP_TAS 2, CONTRACT 3, FOUND_AT_ATTACH 4");
+    TEST_ASSERT(AVB_TAS_GATE_NONE == 1u && AVB_TAS_GATE_SCHEDULED == 2u && AVB_TAS_GATE_OPEN_ALL == 3u,
+                "gate_policy NONE 1, SCHEDULED 2, OPEN_ALL 3");
+    TEST_ASSERT(AVB_TAS_ST_NONE == 1u && AVB_TAS_ST_PROGRAMMED == 2u && AVB_TAS_ST_PENDING == 3u &&
+                AVB_TAS_ST_INFERRED_ACTIVE == 4u && AVB_TAS_ST_HARDWARE_VERIFIED == 5u && AVB_TAS_ST_INCONSISTENT == 6u &&
+                AVB_TAS_ST_UNKNOWN == 7u, "status NONE 1 .. UNKNOWN 7, HARDWARE_VERIFIED 5");
+    TEST_ASSERT(AVB_TAS_RESTORE_COMPLETE == 1u && AVB_TAS_RESTORE_PARTIAL_OPEN_ALL == 2u && AVB_TAS_RESTORE_PARTIAL_RESIDUE == 3u &&
+                AVB_TAS_RESTORE_NONE == 4u && AVB_TAS_RESTORE_UNKNOWN == 5u && AVB_TAS_RESTORE_NO_SSOT_BASELINE == 6u,
+                "restoration COMPLETE 1 .. NO_SSOT_BASELINE 6 (advisory)");
+    TEST_ASSERT(AVB_TAS_FLAG_OP_IN_PROGRESS == 0x1u && AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE == 0x2u &&
+                AVB_TAS_FLAG_PHC_RESET_SEEN == 0x4u, "flags OP_IN_PROGRESS 0x1, UNVERIFIED_CONFIG_ACTIVE 0x2, PHC_RESET_SEEN 0x4");
+    TEST_ASSERT(AVB_TAS_LOOKUP_NOT_REQUESTED == 1u && AVB_TAS_LOOKUP_FOUND == 2u && AVB_TAS_LOOKUP_NOT_FOUND == 3u &&
+                AVB_TAS_LOOKUP_NOT_IMPLEMENTED == 4u, "lookup_result NOT_REQUESTED 1, FOUND 2, NOT_FOUND 3, NOT_IMPLEMENTED 4");
+    TEST_ASSERT(AVB_TAS_DTX_DECODED == 1u && AVB_TAS_DTX_READ_FAILED == 2u && AVB_TAS_DTX_NO_SSOT_SCALE == 3u &&
+                AVB_TAS_DTX_NOT_READ == 4u, "dtx_max_frame_state DECODED 1, READ_FAILED 2, NO_SSOT_SCALE 3, NOT_READ 4");
+    TEST_ASSERT(AVB_TAS_REV_VALID == 1u, "revision_state VALID 1");
+    TEST_ASSERT(AVB_TAS_CONS_BASET_TORN == 0x1u, "consistency BASET_TORN 0x1");
+    TEST_ASSERT(AVB_TAS_NOT_REPORTED_U32 == 0xFFFFFFFFu, "not-reported counter 0xFFFFFFFF");
+    TEST_ASSERT(AVB_TAS_TIER_HW_UNSUPPORTED == 1u && AVB_TAS_TIER_NOT_IMPLEMENTED == 2u &&
+                AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED == 3u && AVB_TAS_TIER_IMPLEMENTED_VERIFIED == 4u, "tiers 1..4");
+    TEST_ASSERT(AVB_TAS_COMMIT_NONE == 1u && AVB_TAS_COMMIT_RETAINED == 2u && AVB_TAS_COMMIT_PHC_DISCONTINUOUS == 3u &&
+                AVB_TAS_COMMIT_HW_MISMATCH == 4u && AVB_TAS_COMMIT_LOST == 5u, "commit state NONE 1 .. LOST 5");
+    TEST_ASSERT(AVB_TAS_LIMIT_NOT_ESTABLISHED == 1u && AVB_TAS_LIMIT_ESTABLISHED == 2u, "limit state NOT_ESTABLISHED 1, ESTABLISHED 2");
+    TEST_ASSERT(AVB_TAS_SNAP_RSN_NOT_RUNNING == 0x001u && AVB_TAS_SNAP_RSN_RESERVED_02 == 0x002u &&
+                AVB_TAS_SNAP_RSN_READ_FAILED == 0x004u && AVB_TAS_SNAP_RSN_READ_INCONSISTENT == 0x008u &&
+                AVB_TAS_SNAP_RSN_PHC_DISCONTINUITY == 0x010u && AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED == 0x020u &&
+                AVB_TAS_SNAP_RSN_NO_MMIO == 0x040u && AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID == 0x080u &&
+                AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID == 0x100u && AVB_TAS_SNAP_RSN_REG_UNMAPPED == 0x200u,
+                "snapshot reasons 0x001 .. 0x200");
+    TEST_ASSERT(AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD == 0x0001u && AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF == 0x0002u &&
+                AVB_TAS_SLOT_RSN_BASE_FAR_AHEAD == 0x0004u && AVB_TAS_SLOT_RSN_WINDOW_MISMATCH == 0x0008u &&
+                AVB_TAS_SLOT_RSN_CYCLE_MISMATCH == 0x0010u && AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH == 0x0020u &&
+                AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED == 0x0040u && AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT == 0x0080u &&
+                AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS == 0x0100u && AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST == 0x0200u &&
+                AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT == 0x0400u && AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED == 0x0800u &&
+                AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED == 0x1000u, "slot reasons 0x0001 .. 0x1000");
 }
 
 int main(void)
