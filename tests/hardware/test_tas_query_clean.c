@@ -14,7 +14,8 @@
  *               SKIP_UNSUPPORTED (green); success, or an error with output, is FAIL. Only the query is exercised: a mutating
  *               operation on such an adapter would need a NIC cycle of it, the management link included, so it is a coverage
  *               gap of #367, not tested here.
- *   TAS         BLOCKED when no adapter advertises INTEL_CAP_TSN_TAS: the TAS part was not exercised, so the case cannot pass.
+ *   With no adapter advertising INTEL_CAP_TSN_TAS, QUERY and TIERS are reported BLOCKED: the TAS part was not exercised, so the
+ *               case cannot pass on the unbound and capability lines alone.
  *   QUERY, TIERS per TAS adapter: the #351 tier table does not exist, so tiers read 0 (not reported) and TIERS is
  *               INCONCLUSIVE (incomplete). Asserted only: a reported tier is 1..4, tier_pass is NOT_IMPLEMENTED (#363 option
  *               C). Then the owned cleanup below.
@@ -1059,8 +1060,8 @@ static void check_capability_absent(UINT32 index, const AVB_ADAPTER_IDENTITY_REQ
         return;
     }
     if (r.status != AVB_NTSTATUS_UNAVAILABLE && r.got != 0) {   /* #365 12.1: on any error, IoStatus.Information is 0 */
-        sprintf_s(reason, sizeof(reason), "error ntstatus=0x%08lX with information=%lu; every error must complete with no output",
-                  (unsigned long)r.status, r.got);
+        sprintf_s(reason, sizeof(reason), "error ntstatus=0x%08lX with information=%lu; every error must complete with no output%s",
+                  (unsigned long)r.status, r.got, r.status == (LONG)STATUS_NOT_SUPPORTED ? " (STATUS_NOT_SUPPORTED with output)" : "");
         verdict("FAIL", "CAPABILITY", index, id->device_id, reason);
         return;
     }
@@ -1347,10 +1348,9 @@ int main(int argc, char **argv)
                 check_capability_absent(all[i].index, &all[i]);
             }
         }
-        if (stored == 0) {   /* #367 needs its TAS part: unbound and non-TAS results never stand in for it */
-            printf("[BLOCKED] %s-TAS: no discovered adapter advertises INTEL_CAP_TSN_TAS; QUERY and TIERS were not exercised, so "
-                   "TC-TASAPI-002 cannot pass\n", CASE_ID);
-            g_blocked++;
+        if (stored == 0) {   /* #367 needs its TAS part: unbound and non-TAS results never stand in for it (077ba64) */
+            verdict_global("BLOCKED", "QUERY", "no TAS-capable adapter found; required TAS query coverage not executed (#367)");
+            verdict_global("BLOCKED", "TIERS", "requires a TAS-capable adapter (#367)");
         }
     }
     for (i = 0; i < stored; i++) {
