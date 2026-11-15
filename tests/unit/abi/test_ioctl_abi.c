@@ -90,6 +90,7 @@ static void test_ioctl_uniqueness(void)
         IOCTL_AVB_SET_TIMESTAMP,
         IOCTL_AVB_SETUP_TAS,
         IOCTL_AVB_TAS_ACTIVATE,
+        IOCTL_AVB_TAS_QUERY_HW,
         IOCTL_AVB_SETUP_FP,
         IOCTL_AVB_SETUP_PTM,
         IOCTL_AVB_MDIO_READ,
@@ -333,6 +334,17 @@ static void test_struct_sizes(void)
     TEST_ASSERT(offsetof(AVB_TAS_ACTIVATE_REQUEST, base_time_ns) == 8, "offsetof(base_time_ns) == 8");
     TEST_ASSERT(offsetof(AVB_TAS_ACTIVATE_REQUEST, phc_at_commit_ns) == 64, "offsetof(phc_at_commit_ns) == 64");
     TEST_ASSERT(offsetof(AVB_TAS_ACTIVATE_REQUEST, result) == 72, "offsetof(result) == 72");
+    /* Verifies: #350 (REQ-F-TAS-STATE-001). The read-only TAS hardware query, allocated by #362 (ADR-TSN-002, accepted)
+     * decision 1: CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80B, METHOD_BUFFERED, FILE_READ_ACCESS) = 0x0017602C, in the
+     * vendor range 0x800-0xFFF. FILE_READ_ACCESS (not FILE_ANY_ACCESS) states the read-only contract in the code: the
+     * I/O manager serves it only on a handle holding read access. Only the code is pinned here; the request layout is
+     * provisional until DES-C-TAS-010 (#365) is accepted (#362 decision 1). */
+    TEST_CASE("TC-ABI-025: IOCTL_AVB_TAS_QUERY_HW function 0x80B, read access, buffered (#350, #362)");
+    TEST_ASSERT(IOCTL_AVB_TAS_QUERY_HW == 0x0017602Cu, "IOCTL_AVB_TAS_QUERY_HW == 0x0017602C");
+    TEST_ASSERT(((IOCTL_AVB_TAS_QUERY_HW >> 14) & 3u) == FILE_READ_ACCESS, "IOCTL_AVB_TAS_QUERY_HW requires FILE_READ_ACCESS");
+    TEST_ASSERT((IOCTL_AVB_TAS_QUERY_HW & 3u) == METHOD_BUFFERED, "IOCTL_AVB_TAS_QUERY_HW is METHOD_BUFFERED");
+    TEST_ASSERT(((IOCTL_AVB_TAS_QUERY_HW >> 2) & 0xFFFu) == 0x80Bu && (IOCTL_AVB_TAS_QUERY_HW >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
+                "function 0x80B (vendor range), device type unchanged");
 }
 
 int main(void)

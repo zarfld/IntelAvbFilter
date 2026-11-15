@@ -180,6 +180,12 @@ typedef struct _IOCTL_VERSION {
 #define IOCTL_AVB_OPEN_ADAPTER_BY_LUID  _NDIS_CONTROL_CODE(69, METHOD_BUFFERED)  /* 0x00170114 */
 #define IOCTL_AVB_QUERY_HW_SNAPSHOT     _NDIS_CONTROL_CODE(70, METHOD_BUFFERED)  /* 0x00170118 */
 
+/* Read-only TAS hardware query (#350 REQ-F-TAS-STATE-001, #361), allocated by #362 (ADR-TSN-002, accepted) decision 1:
+ * vendor-range function 0x800-0xFFF, FILE_READ_ACCESS so the I/O manager serves it only on a handle holding read access.
+ * Code only: the driver does not serve it yet (STATUS_INVALID_DEVICE_REQUEST), and its versioned request layout stays
+ * provisional until DES-C-TAS-010 (#365) is accepted. */
+#define IOCTL_AVB_TAS_QUERY_HW          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80B, METHOD_BUFFERED, FILE_READ_ACCESS)  /* 0x0017602C (#350, #362) */
+
 /* First gate schedule on a clean adapter at a future PHC time (#357). Unlike IOCTL_AVB_SETUP_TAS, it applies a schedule.
  * pre_activation has no default: the caller chooses HOLD or PASS. Written as a schedule of one window per queue per cycle.
  * The IOCTL succeeds whenever it ran, and result says what happened, because METHOD_BUFFERED drops the output on an error
