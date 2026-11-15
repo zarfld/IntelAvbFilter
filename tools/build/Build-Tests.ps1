@@ -1938,6 +1938,19 @@ $AllTests = @(
         Issue = "#357"
         TestCases = 3
     },
+    @{
+        Name = "test_tas_query_clean"
+        Type = "cl"
+        Source = "tests\hardware\test_tas_query_clean.c"
+        Output = "test_tas_query_clean.exe"
+        Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
+        Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
+        Enabled = $true
+        Priority = "P1"
+        Description = "TAS_QUERY_HW on a clean adapter (#366, TC-TASAPI-001): state, read-only, PHC bracket, TX unaffected, owned NIC-cycle cleanup"
+        Issue = "#366"
+        TestCases = 1
+    },
 
     @{
         Name = "test_lifecycle_coverage"
