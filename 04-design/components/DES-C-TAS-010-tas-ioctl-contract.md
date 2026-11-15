@@ -907,7 +907,7 @@ A semantic change to any field raises `AVB_TAS_QUERY_VERSION` (3.4).
 | Rule | Statement |
 |---|---|
 | Offsets | From `intel-ethernet-regs/gen/i226_regs.h` only, decoded through the generated helpers. No `READ_REGISTER`, no driver constants |
-| Pass | One bounded pass: `phc_before_ns`, the register block in a fixed order, `phc_after_ns`. The block is a sequence of reads inside that bracket, never an atomic state. Status rules compare `BaseT` with the bracket, never with one PHC value |
+| Pass | One bounded pass: `phc_before_ns`, the register block in a fixed order, `phc_after_ns`. The block is a sequence of reads inside that bracket, never an atomic state. Temporal progression compares the retained target `current.base_time_ns` with the bracket, never with one PHC value or the live `regs.baset_*` readback |
 | Tear check | Only `BASET` can tear. It is read H, L, H; a difference is repeated once. If it persists: `BASET_TORN` and `READ_INCONSISTENT` |
 | Read failure | The register's `read_failed` bit is set and its value is 0, with `hw_read` `PARTIAL`. Never filled from the record |
 | Not Running | No MMIO: `hw_read` `NOT_RUNNING`, hardware fields 0, `hw_mode` `UNREADABLE`, slots `UNKNOWN`. Record fields are still reported as record |
@@ -962,7 +962,7 @@ S4 detail:
 - **`PENDING`** needs all of the following:
   - `commit.state` = `RETAINED`;
   - the commit classified in time (7.3);
-  - `phc_after_ns` valid and below `BaseT`;
+  - `phc_after_ns` valid and below the retained target `current.base_time_ns`;
   - mode TSN;
   - no compared field contradicting the record.
 - **`INFERRED_ACTIVE`** needs every 4.1 condition. Otherwise the slot is `UNKNOWN` with its reason:
@@ -971,7 +971,7 @@ S4 detail:
   |---|---|
   | Commit timing missing | `COMMIT_INFO_LOST` |
   | Commit not classified in time | `ACTIVATION_AMBIGUOUS` |
-  | `BaseT` inside the bracket | `TRANSITION_DURING_SNAPSHOT` |
+  | Retained target `current.base_time_ns` inside the PHC bracket | `TRANSITION_DURING_SNAPSHOT` |
   | "No link or power event since commit" not established | `LINK_EVENTS_UNOBSERVED` |
 
   **While K8 is unverified, v1 never returns `INFERRED_ACTIVE`.**
