@@ -34,7 +34,8 @@
  *             is a separate evidence line (the cycle reseeds it, E12), never a restoration verdict.
  *
  * Adapters are chosen by INTEL_CAP_TSN_TAS; the observer is the I210, chosen by identity for targeting only. Discovery validates
- * every identity and has no fixed adapter limit; an incomplete inventory is BLOCKED (DISCOVERY), never a silent pass. The SHA256
+ * every identity and has no fixed adapter limit; an incomplete inventory is BLOCKED (DISCOVERY), never a silent pass. At most
+ * TAS_QUERY_CLEAN_MAX_ADAPTERS TAS adapters run per process (its runner time budget); any further one is BLOCKED. The SHA256
  * of the on-disk file at the loaded driver module's path is printed as evidence, never used for selection; it is not a hash of
  * the image in memory, whose identity stays unverified (the file can be replaced while the old image remains loaded).
  *
@@ -67,6 +68,7 @@
 #include "../ioctl/tas_activate_eval.h"   /* TAS_ACT_SEEN_MIN_PERCENT, restoration and PHC classification */
 #include "../common/avb_ntstatus.h"       /* exact NTSTATUS: STATUS_NOT_IMPLEMENTED and an unknown IOCTL share Win32 error 1 */
 #include "tas_wire_observer.h"
+#include "../ioctl/tas_query_tx_eval.h"   /* send-window accounting and TX verdict, checked offline by TC-MOCK-057 */
 
 #define CASE_ID            "TC-TASAPI-001"
 #define DEVICE_NAME        "\\\\.\\IntelAvbFilter"
@@ -84,6 +86,10 @@
 #define RETURN_BOUND_MS    60000
 #define SETTLE_MS          5000
 #define DRIVER_LIST_TRIES  3
+/* Supported inventory: TAS adapters this process runs. The runner budget is 560 s x min(enumerated adapters, this value)
+ * ($HilTestTimeoutPerAdapter, checked by TEST-HILGATE-098), so every TAS adapter run fits it; discovery stays complete and a
+ * TAS adapter beyond this value is reported BLOCKED, never left out silently. */
+#define TAS_QUERY_CLEAN_MAX_ADAPTERS 8
 #define NET_CLASS_KEY      "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
 /* One driver read with its validity: a value that was not read is never printed or compared as a measured zero */
@@ -352,52 +358,32 @@ static BOOL send_tagged(SOCKET sock, unsigned nonce)
     return TRUE;
 }
 
-/** One send window. attempted counts every send try, so failed sends never shrink the denominator of the seen share */
-typedef struct {
-    unsigned attempted, sent, errors, seen;   /* sends tried, accepted by the socket, refused, and seen by the observer */
-    unsigned queries, changed;                /* interleaved queries, and those that failed or reported other registers */
-} TX_WINDOW;
-
-/** Sends for WINDOW_MS, optionally querying every QUERY_EVERY_FRAMES send attempts against ref */
-static void send_window(SOCKET sock, unsigned nonce, HANDLE h, const AVB_TAS_REGS *ref, TX_WINDOW *w)
+/** Sends for WINDOW_MS, optionally querying every QUERY_EVERY_FRAMES send attempts against ref. Accounting and judgement are
+ *  tests/ioctl/tas_query_tx_eval.h (checked offline by TC-MOCK-057): every try counts, a refused send is an error */
+static void send_window(SOCKET sock, unsigned nonce, HANDLE h, const AVB_TAS_REGS *ref, TAS_TX_WINDOW *w)
 {
     unsigned first = g_next_seq, seq;
     DWORD start = GetTickCount();
 
     ZeroMemory(w, sizeof(*w));
     while (GetTickCount() - start < WINDOW_MS) {
-        w->attempted++;
-        if (send_tagged(sock, nonce)) {
-            w->sent++;
-        } else {
-            w->errors++;
-        }
+        tas_tx_record_send(w, send_tagged(sock, nonce));
         if (ref != NULL && (w->attempted % QUERY_EVERY_FRAMES) == 0) {
             QUERY_READ r;
             query(h, &r);
-            w->queries++;
-            if (!query_readable(&r) || schedule_regs_differing(ref, &r.q.regs) != 0) {
-                w->changed++;
-            }
+            tas_tx_record_query(w, query_readable(&r) && schedule_regs_differing(ref, &r.q.regs) == 0);
         }
         Sleep(SEND_PERIOD_MS);
     }
     Sleep(DRAIN_MS);
-    for (seq = first; seq < g_next_seq; seq++) {
+    for (seq = first; seq < g_next_seq; seq++) {   /* only accepted sends get a sequence number */
         if (g_wire_seen[seq] != 0) {
             w->seen++;
         }
     }
 }
 
-/** The observer saw the required share of every attempted send, and no send failed */
-static BOOL window_on_wire(const TX_WINDOW *w)
-{
-    return w->attempted != 0 && w->errors == 0 &&
-           (unsigned long long)w->seen * 100u >= (unsigned long long)w->attempted * TAS_ACT_SEEN_MIN_PERCENT;
-}
-
-static void print_window(const char *label, const TX_WINDOW *w)
+static void print_window(const char *label, const TAS_TX_WINDOW *w)
 {
     printf("    tx %s: attempted=%u sent=%u sendErrors=%u seen=%u queries=%u changedOrFailed=%u\n", label, w->attempted, w->sent,
            w->errors, w->seen, w->queries, w->changed);
@@ -567,7 +553,7 @@ static HANDLE wait_for_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *want)
 static void check_tx(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, HANDLE h, IN_ADDR ipv4, const AVB_TAS_REGS *ref)
 {
     SOCKET sock;
-    TX_WINDOW base, probe;
+    TAS_TX_WINDOW base, probe;
     unsigned nonce;
     char reason[256];
 
@@ -585,15 +571,17 @@ static void check_tx(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, HANDL
     closesocket(sock);
     print_window("baseline", &base);
     print_window("with queries", &probe);
-    if (!window_on_wire(&base)) {
+    switch (tas_tx_judge(&base, &probe, TAS_ACT_SEEN_MIN_PERCENT)) {
+    case TAS_TX_BLOCKED_BASELINE:
         sprintf_s(reason, sizeof(reason), "baseline not established: seen %u of %u attempted, %u send errors; the wire proves nothing here",
                   base.seen, base.attempted, base.errors);
         verdict("BLOCKED", "TX", index, id->device_id, reason);
         return;
-    }
-    if (window_on_wire(&probe) && probe.queries != 0 && probe.changed == 0) {
+    case TAS_TX_PASS:
         verdict("PASS", "TX", index, id->device_id, NULL);
         return;
+    default:
+        break;
     }
     sprintf_s(reason, sizeof(reason), "with queries interleaved: seen %u of %u attempted, %u send errors, %u of %u queries failed or "
               "reported other registers", probe.seen, probe.attempted, probe.errors, probe.changed, probe.queries);
@@ -683,14 +671,14 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
             SOCKET sock = open_tx_socket(ipv4);
             unsigned nonce = GetTickCount() ^ (GetCurrentProcessId() << 8);
             LONG captured = 0, from_target = 0;
-            TX_WINDOW w;
+            TAS_TX_WINDOW w;
 
             if (sock != INVALID_SOCKET && wire_start(id->net_luid, g_capture_luid, id->mac, nonce, ipv4) != 0) {
                 send_window(sock, nonce, fresh, NULL, &w);
                 wire_counts(&captured, &from_target);
                 wire_stop();
                 e.tx_probed = captured != 0;
-                e.tx_on_wire = window_on_wire(&w);   /* a send error is an observed failure, never a smaller denominator */
+                e.tx_on_wire = tas_tx_on_wire(&w, TAS_ACT_SEEN_MIN_PERCENT);   /* a send error fails it, never shrinks the denominator */
                 print_window("after the cycle", &w);
                 printf("    TX after the cycle: captured=%ld\n", captured);
             } else {
@@ -925,7 +913,13 @@ int main(void)
         g_blocked++;
     }
     for (i = 0; i < stored; i++) {
-        run_adapter(ids[i].index, &ids[i]);
+        if (i < TAS_QUERY_CLEAN_MAX_ADAPTERS) {
+            run_adapter(ids[i].index, &ids[i]);
+        } else {
+            printf("[BLOCKED] %s-QUERY/adapter:%u did=0x%04X: beyond the supported inventory of %d TAS adapters per run (runner time "
+                   "budget); not tested, not a pass\n", CASE_ID, ids[i].index, ids[i].device_id, TAS_QUERY_CLEAN_MAX_ADAPTERS);
+            g_blocked++;
+        }
     }
     free(ids);
     WSACleanup();

@@ -406,10 +406,17 @@ tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count
 #      at most the test's own adapter limit (ARRAYSIZE(ids) in its source), that limit when nothing was observed; never a
 #      one-adapter value.  Other entries ignore the count.  Offline: the runner's tables and function from its syntax tree;
 #      the dispatch-site wiring is a static source check.
+#      #366: test_tas_query_clean is the fourth per-adapter entry (per TAS adapter: 438.5 s of its own bounds, budget 560 s).
+#      Its limit is its supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also
+#      caps the TAS adapters that process runs, so the budget always covers them.
 $paBad = @()
 $tasSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\hardware\test_tas_activate.c'))
 $tasMax = [regex]::Match($tasSrc, '\bAVB_ADAPTER_IDENTITY_REQUEST\s+ids\s*\[\s*(\d+)\s*\]')
 if (-not $tasMax.Success) { $paBad += 'adapter limit ids[N] not found in tests/hardware/test_tas_activate.c' }
+$qcSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\hardware\test_tas_query_clean.c'))
+$qcMax = [regex]::Match($qcSrc, '(?m)^#define\s+TAS_QUERY_CLEAN_MAX_ADAPTERS\s+(\d+)\s*$')
+if (-not $qcMax.Success) { $paBad += 'supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS not found in tests/hardware/test_tas_query_clean.c' }
+elseif ($qcSrc -notmatch 'if\s*\(\s*i\s*<\s*TAS_QUERY_CLEAN_MAX_ADAPTERS\s*\)\s*\{\s*run_adapter\(') { $paBad += 'test_tas_query_clean.c does not cap the TAS adapters it runs at TAS_QUERY_CLEAN_MAX_ADAPTERS' }
 if (-not $toAsg -or -not $toFn -or -not $paAsg) { $paBad += 'timeout table, per-adapter table or Get-AvbTestTimeoutSeconds missing' }
 if ($paBad.Count -eq 0) {
     $lim = [int]$tasMax.Groups[1].Value
@@ -421,13 +428,23 @@ foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas
     $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
     $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
 }
+$o['PlainQuery'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_query_clean').Count
+foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["query@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean' -SuiteSeconds 60 -AdapterCount $n }
+$o['query@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean' -SuiteSeconds 600 -AdapterCount 1
+$o['query@limit'] = [int]$HilTestTimeoutPerAdapter['test_tas_query_clean'].MaxAdapters
 $o['atdecc@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_atdecc_aen_protocol' -SuiteSeconds 60 -AdapterCount 9
 $o['gate@9'] = Get-AvbTestTimeoutSeconds -Entry 'ps1:tests/unit/ioctl/test_hil_safety_gate.ps1' -SuiteSeconds 60 -AdapterCount 9
 $o['other@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_ptp_freq_complete' -SuiteSeconds 300 -AdapterCount 9
 $o
 '@))
     $pa = & $paCheck
-    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries only" }
+    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries and test_tas_query_clean only" }
+    $qlim = [int]$qcMax.Groups[1].Value
+    if ($pa.PlainQuery -ne 0) { $paBad += 'test_tas_query_clean has a fixed one-adapter timeout' }
+    if ($pa['query@limit'] -ne $qlim) { $paBad += "test_tas_query_clean adapter limit $($pa['query@limit']), its supported inventory is $qlim" }
+    $qwant = [ordered]@{ '1' = 560; '2' = 1120; '3' = 1680; '8' = 560 * [Math]::Min(8, $qlim); '20' = 560 * $qlim; '0' = 560; '-1' = 560 * $qlim }
+    foreach ($n in $qwant.Keys) { if ([int]$pa["query@$n"] -ne [int]$qwant[$n]) { $paBad += "test_tas_query_clean with $n enumerated adapter(s): $($pa["query@$n"]) s, expected $($qwant[$n]) s" } }
+    if ([int]$pa['query@suite600'] -ne 600) { $paBad += "test_tas_query_clean lowers the 600 s suite timeout to $($pa['query@suite600']) s" }
     if ($pa.Plain -ne 0) { $paBad += 'test_tas_activate still has a fixed one-adapter timeout' }
     foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
         if ($pa["$e@limit"] -ne $lim) { $paBad += "$e adapter limit $($pa["$e@limit"]), the test's own limit is $lim" }

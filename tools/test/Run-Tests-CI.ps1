@@ -884,7 +884,7 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     'test_tas_activate --fault' = @{ Seconds = 520; MaxAdapters = 8 }
     # test_tas_query_clean, from its own bounds per TAS adapter: 7 s TX windows + 2 x 60 s socket bind + 120 s disable + 3 s +
     # 60 s enable + 60 s return + 60 s link + 5 s settle + 3.5 s TX after the cycle = 438.5 s; 560 s = + 27 %.
-    # MaxAdapters = ARRAYSIZE(ids) in tests/hardware/test_tas_query_clean.c.
+    # MaxAdapters = TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also caps the TAS adapters it runs.
     'test_tas_query_clean'      = @{ Seconds = 560; MaxAdapters = 8 }
 }
 

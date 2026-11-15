@@ -11,6 +11,7 @@
  * only available through IOCTL_NTSTATUS_CALL (NtDeviceIoControlFile in production).
  *
  * Verifies: #9 (REQ-F-TAS-001), #206 (TAS test issue)
+ * TC-MOCK-057 checks the send-window accounting of TC-TASAPI-001 (#366): test logic only, no hardware TX claim.
  * Verdict contract: docs/testing/test-verdict-contract.md
  *
  * Build:
@@ -37,6 +38,7 @@ static LONG mock_ioctl_ntstatus(HANDLE h, DWORD code, LPVOID in_buf, DWORD in_sz
 #include "../ioctl/tas_wire_match.h"
 #include "../../devices/i226_tas_activate.h"
 #include "../ioctl/tas_activate_eval.h"
+#include "../ioctl/tas_query_tx_eval.h"   /* TC-MOCK-057: TC-TASAPI-001 send-window accounting (#366), test logic only */
 
 /* =========================================================================
  * Mock infrastructure
@@ -1221,6 +1223,83 @@ static void test_56_activate_restore_state(void) {
     EXPECT_EQ("and a further activation proceeds", g_act.result, AVB_TAS_ACT_COMMITTED);
 }
 
+/* Feeds n send results, `accepted` of them accepted, in the order given by fail_first */
+static void tx_feed(TAS_TX_WINDOW *w, unsigned n, unsigned accepted, BOOL fail_first) {
+    unsigned k;
+    for (k = 0; k < n; k++) {
+        tas_tx_record_send(w, fail_first ? (k >= n - accepted) : (k < accepted));
+    }
+}
+
+/* TC-MOCK-057: TC-TASAPI-001 send-window accounting and TX verdict (#366, PR #437 review r4579071534).
+ * The functions of tests/ioctl/tas_query_tx_eval.h that tests/hardware/test_tas_query_clean.c calls for every window.
+ * TEST-LOGIC EVIDENCE ONLY: no socket, observer or adapter; it never verifies TX on hardware. */
+static void test_57_query_tx_accounting(void) {
+    TAS_TX_WINDOW base, w;
+    const unsigned pct = TAS_ACT_SEEN_MIN_PERCENT;
+    unsigned k;
+
+    printf("\n[TC-MOCK-057] #366 TX window: every attempt counts, any send error fails, zero attempts never pass (test logic only)\n");
+
+    /* Passing control: 40 attempts, all accepted, all seen, 10 unchanged queries */
+    ZeroMemory(&base, sizeof(base));
+    tx_feed(&base, 40, 40, FALSE); base.seen = 40;
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 40;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_TRUE("control: counts attempted 40, sent 40, errors 0", w.attempted == 40 && w.sent == 40 && w.errors == 0);
+    EXPECT_TRUE("control: on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("control: PASS", tas_tx_judge(&base, &w, pct), TAS_TX_PASS);
+
+    /* The review's case: 1 accepted and seen, 39 refused; 10 queries still issued and unchanged */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 1, TRUE); w.seen = 1;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_TRUE("1 of 40 accepted: attempted 40, sent 1, errors 39", w.attempted == 40 && w.sent == 1 && w.errors == 39);
+    EXPECT_FALSE("1 of 40 accepted, the 1 seen: not on the wire (denominator is attempts)", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("1 of 40 accepted in the checked window: FAIL, never PASS", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    EXPECT_EQ("1 of 40 accepted in the baseline: BLOCKED", tas_tx_judge(&w, &base, pct), TAS_TX_BLOCKED_BASELINE);
+
+    /* Partial failure: one refused send in 40, every accepted one seen (97.5 % of attempts) */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 39, FALSE); w.seen = 39;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_FALSE("1 send error of 40, share met: not on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("1 send error in the checked window: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+
+    /* All sends failing */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 0, FALSE);
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_TRUE("all refused: attempted 40, sent 0, errors 40", w.attempted == 40 && w.sent == 0 && w.errors == 40);
+    EXPECT_FALSE("all refused: not on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("all refused in the checked window: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    EXPECT_EQ("all refused in the baseline: BLOCKED", tas_tx_judge(&w, &base, pct), TAS_TX_BLOCKED_BASELINE);
+
+    /* Zero attempts */
+    ZeroMemory(&w, sizeof(w));
+    EXPECT_FALSE("zero attempts: not on the wire", tas_tx_on_wire(&w, pct));
+    EXPECT_EQ("zero attempts in the checked window: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    EXPECT_EQ("zero attempts in the baseline: BLOCKED", tas_tx_judge(&w, &base, pct), TAS_TX_BLOCKED_BASELINE);
+
+    /* No send error, but the seen share is short: 35 of 40 = 87.5 % */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 35;
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, TRUE); }
+    EXPECT_FALSE("35 of 40 seen, no error: below the share", tas_tx_on_wire(&w, pct));
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 36;
+    EXPECT_TRUE("36 of 40 seen, no error: exactly the share", tas_tx_on_wire(&w, pct));
+
+    /* Queries: none issued, or one changed, fails a window that is otherwise on the wire */
+    ZeroMemory(&w, sizeof(w));
+    tx_feed(&w, 40, 40, FALSE); w.seen = 40;
+    EXPECT_EQ("no interleaved query: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+    for (k = 0; k < 10; k++) { tas_tx_record_query(&w, k != 4); }
+    EXPECT_TRUE("one changed query counted", w.queries == 10 && w.changed == 1);
+    EXPECT_EQ("one changed query: FAIL", tas_tx_judge(&base, &w, pct), TAS_TX_FAIL);
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1261,6 +1340,7 @@ int main(void) {
     test_54_activate_encoding();
     test_55_activate_pass_not_implemented();
     test_56_activate_restore_state();
+    test_57_query_tx_accounting();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
