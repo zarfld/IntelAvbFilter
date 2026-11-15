@@ -1033,6 +1033,10 @@ static void check_capability_absent(UINT32 index, const AVB_ADAPTER_IDENTITY_REQ
         verdict("FAIL", "CAPABILITY", index, id->device_id, "the query was served on an adapter without INTEL_CAP_TSN_TAS");
         return;
     }
+    if (r.status == (LONG)STATUS_NOT_SUPPORTED && r.got != 0) {
+        verdict("FAIL", "CAPABILITY", index, id->device_id, "STATUS_NOT_SUPPORTED returned nonzero IoStatus.Information; errors must return no output");
+        return;
+    }
     v = avb_verdict_from_status((NTSTATUS)r.status, AVB_CAP_ABSENT, FALSE, TRUE);
     sprintf_s(reason, sizeof(reason), "INTEL_CAP_TSN_TAS absent, ntstatus=0x%08lX%s", (unsigned long)r.status,
               r.status == (LONG)STATUS_INVALID_DEVICE_REQUEST ? " (the driver does not serve IOCTL_AVB_TAS_QUERY_HW; expected STATUS_NOT_SUPPORTED)" : "");
