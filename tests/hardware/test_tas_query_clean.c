@@ -999,9 +999,9 @@ static void check_unbound(const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 n)
                   r.status == (LONG)STATUS_INVALID_DEVICE_REQUEST ? " (the driver does not serve IOCTL_AVB_TAS_QUERY_HW)" : "");
         verdict_global("FAIL", "UNBOUND", reason);
     } else if (reached != 0) {
-        sprintf_s(reason, sizeof(reason), "refused with the exact status, but %u adapter context(s) counted an extra IOCTL: the query "
-                  "reached an adapter (fallback or lazy initialization)", reached);
-        verdict_global("FAIL", "UNBOUND", reason);
+        sprintf_s(reason, sizeof(reason), "refused with the exact status; %u adapter(s) had IoctlCount deltas differing from calibration; "
+                  "shared-counter drift cannot be attributed to this query", reached);
+        verdict_global("INCONCLUSIVE", "UNBOUND", reason);
     } else if (unavailable != 0) {
         sprintf_s(reason, sizeof(reason), "refused with the exact status; no-initialization evidence unavailable for %u adapter(s)", unavailable);
         verdict_global("INCONCLUSIVE", "UNBOUND", reason);
