@@ -1944,10 +1944,10 @@ $AllTests = @(
         Source = "tests\hardware\test_tas_query_clean.c"
         Output = "test_tas_query_clean.exe"
         Includes = "-I include -I external/intel_avb/lib -I intel-ethernet-regs/gen"
-        Libs = "iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
+        Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
         Enabled = $true
         Priority = "P1"
-        Description = "TAS_QUERY_HW on a clean adapter (#366, TC-TASAPI-001): state, read-only, PHC bracket, TX unaffected"
+        Description = "TAS_QUERY_HW on a clean adapter (#366, TC-TASAPI-001): state, read-only, PHC bracket, TX unaffected, owned NIC-cycle cleanup"
         Issue = "#366"
         TestCases = 1
     },
