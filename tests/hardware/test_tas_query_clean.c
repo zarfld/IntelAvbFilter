@@ -5,6 +5,14 @@
  * TEST-TAS-API-001 (#366), case TC-TASAPI-001. Contract: #365 "Query v1 contract" (12.1 validation, 12.2 layout and values,
  * 12.4 status, 12.5 advisory restoration, 12.7 the #366 row). Layout: include/avb_ioctl.h (TC-ABI-026/027).
  *
+ * --hw-verified: TEST-TAS-API-016 (#381), case TC-TASAPI-016. HARDWARE_VERIFIED is never returned (#365 12.4, 12.7): checked on
+ * the clean adapter (QUERY), after IOCTL_AVB_TAS_ACTIVATE HOLD committed a schedule while BaseT is still ahead (PENDING), and
+ * on a query whose own PHC bracket starts two cycles past BaseT (PAST_BASET). Each check needs a valid, executed query: an
+ * invalid or unexecuted one takes its raw-NTSTATUS verdict and is never a pass. Nothing is activated unless the first query is
+ * valid and reports a clean adapter. Schedule: the verified set of test_tas_activate.c (1 s cycle, window 200 to 400 ms on all
+ * queues, BaseT the first cycle boundary at least 1.5 s ahead). The slot statuses are printed as evidence only; PENDING and
+ * INFERRED_ACTIVE are #369's. Cleanup, CLEANUP and RESTORE as below (the restoration baseline is the clean query).
+ *
  * Preconditions, checked before the first query (BLOCKED, nothing sent to the adapter, nothing to clean): the adapter's device
  * node resolves from its NET_LUID, another adapter keeps the host reachable (the cleanup cycles this one), the adapter is up
  * with an IPv4 address, and the I210 observer exists (#366 "I210 observer alive").
@@ -42,12 +50,14 @@
  * IOCTLs sent: GET_VERSION, GET_ADAPTER_IDENTITY, OPEN_ADAPTER_BY_LUID (binds the handle only: no global context switch, no
  * PTP initialization, src/device.c), TAS_QUERY_HW, GET_CLOCK_CONFIG, GET_STATISTICS, GET_TAS_STATE. No READ_REGISTER, no
  * WRITE_REGISTER, no TAS write. Mutations: bounded broadcast UDP and ICMP on the adapter under test, and the owned NIC cycle of
- * that adapter, which resets its PHC. Safety class Unsafe.
+ * that adapter, which resets its PHC. --hw-verified also sends IOCTL_AVB_TAS_ACTIVATE (a TAS schedule) on a clean adapter,
+ * always followed by that NIC cycle. Safety class Unsafe.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
  *
  * Verifies: #350
  * Verifies: #353
+ * (--hw-verified, TC-TASAPI-016: Verifies #350 per #381)
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -70,8 +80,19 @@
 #include "tas_wire_observer.h"
 #include "../ioctl/tas_query_tx_eval.h"   /* send-window accounting and TX verdict, checked offline by TC-MOCK-057 */
 
-#define CASE_ID            "TC-TASAPI-001"
+#define CASE_ID            g_case                   /* TC-TASAPI-001 (#366) or, with --hw-verified, TC-TASAPI-016 (#381) */
 #define DEVICE_NAME        "\\\\.\\IntelAvbFilter"
+/* --hw-verified schedule: the verified set of tests/hardware/test_tas_activate.c (E6 characterisation, LOCAL_DIAGNOSTIC,
+ * I226 0x125B REV_04, Debug), within the window rule of #357 */
+#define NS_PER_MS          1000000LL
+#define CYCLE_NS           (1000LL * NS_PER_MS)
+#define WINDOW_START_NS    (200LL * NS_PER_MS)
+#define WINDOW_END_NS      (400LL * NS_PER_MS)
+#define BASE_LEAD_NS       (1500LL * NS_PER_MS)   /* BaseT is the first cycle boundary at least this far ahead */
+#define FRAME_OVERHEAD_BYTES 38u                   /* MTU plus header, FCS, preamble and gap: the frame on the wire */
+#define PAST_BASE_CYCLES   2                       /* the query bracket must start this many cycles past BaseT */
+#define PAST_BASE_BOUND_MS 15000                   /* bound on waiting for that, from the activation */
+#define PAST_BASE_POLL_MS  200
 #define DRIVER_IMAGE       "intelavbfilter.sys"
 #define NS_PER_SEC         1000000000LL
 #define SEND_PERIOD_MS     50
@@ -98,11 +119,13 @@ typedef struct { BOOL ok; AVB_DRIVER_STATISTICS s; } STATS_READ;
 typedef struct { BOOL ok; AVB_TAS_STATE s; } STATE_READ;
 typedef struct { LONG status; DWORD got; AVB_TAS_QUERY_HW_REQUEST q; } QUERY_READ;
 
+static const char *g_case = "TC-TASAPI-001";
+static BOOL g_hw_verified_mode;   /* --hw-verified: TC-TASAPI-016 (#381) */
 static int g_failed, g_blocked, g_ran;
 static avb_u64 g_capture_luid;
 static unsigned g_next_seq;
 
-/* Non-negative while the owned NIC cycle of this adapter is in progress */
+/* Non-negative from an activation (--hw-verified) or the start of the owned NIC cycle until the cycle has reported */
 static volatile LONG g_pending_adapter = -1;
 static volatile LONG g_pending_did;
 
@@ -110,8 +133,9 @@ static void report_abort(void)
 {
     LONG adapter = InterlockedExchange(&g_pending_adapter, -1);
     if (adapter >= 0) {
-        printf("[CLEANUP_FAILED] %s-CLEANUP/adapter:%ld did=0x%04lX: test aborted during its NIC cycle; the adapter may be disabled. "
-               "Operator: enable it, then check it with the TAS query\n", CASE_ID, adapter, g_pending_did);
+        printf("[CLEANUP_FAILED] %s-CLEANUP/adapter:%ld did=0x%04lX: test aborted after an activation or during its NIC cycle; the "
+               "adapter may hold a schedule or be disabled. Operator: NIC cycle (enable it), then check it with the TAS query\n",
+               CASE_ID, adapter, g_pending_did);
         fflush(stdout);
     }
 }
@@ -710,6 +734,128 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
     }
 }
 
+/** TC-TASAPI-016 assertion for one reply: a valid, executed query whose slots are not HARDWARE_VERIFIED (#381, #365 12.7).
+ *  An invalid or unexecuted query is never a pass: its verdict comes from its raw NTSTATUS (avb_verdict.h). */
+static void verdict_not_hw_verified(const char *check, UINT32 index, avb_u16 did, const QUERY_READ *r, const char *when)
+{
+    AVB_VERDICT v = avb_verdict_from_status((NTSTATUS)r->status, AVB_CAP_PRESENT, query_valid(r), TRUE);
+    char reason[256];
+
+    if (v != AVB_VERDICT_PASS) {
+        sprintf_s(reason, sizeof(reason), "%s: no valid query, ntstatus=0x%08lX information=%lu%s; an unexecuted query is never a pass",
+                  when, (unsigned long)r->status, r->got,
+                  r->status == (LONG)STATUS_INVALID_DEVICE_REQUEST ? " (the driver does not serve IOCTL_AVB_TAS_QUERY_HW)" : "");
+        verdict(avb_verdict_tag(v), check, index, did, reason);
+    } else if (r->q.current_status == AVB_TAS_ST_HARDWARE_VERIFIED || r->q.next_status == AVB_TAS_ST_HARDWARE_VERIFIED) {
+        sprintf_s(reason, sizeof(reason), "%s: HARDWARE_VERIFIED returned (current=%u next=%u); v1 must never return it", when,
+                  r->q.current_status, r->q.next_status);
+        verdict("FAIL", check, index, did, reason);
+    } else {
+        sprintf_s(reason, sizeof(reason), "%s: current=%u next=%u", when, r->q.current_status, r->q.next_status);
+        verdict("PASS", check, index, did, reason);
+    }
+}
+
+/** --hw-verified, TC-TASAPI-016 (#381): HARDWARE_VERIFIED is never returned, on a clean adapter, with a committed schedule
+ *  whose BaseT is still ahead, and with the PHC past BaseT. Only the verdicts on HARDWARE_VERIFIED belong to this case; the
+ *  slot statuses themselves (PENDING, INFERRED_ACTIVE) are #369's and are printed as evidence only. */
+static void run_hw_verified(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, IN_ADDR ipv4,
+                            const MIB_IF_ROW2 *row)
+{
+    QUERY_READ q0, q1, q2;
+    PHC_READ p0;
+    AVB_TAS_ACTIVATE_REQUEST req;
+    HANDLE hw;
+    DWORD br = 0, err = ERROR_SUCCESS, start;
+    BOOL ok, past = FALSE;
+    long long base = 0;
+    unsigned q;
+    char reason[256];
+
+    ZeroMemory(&q1, sizeof(q1));
+    ZeroMemory(&q2, sizeof(q2));
+    read_phc(h, &p0);
+    query(h, &q0);
+    print_query("clean", &q0);
+    verdict_not_hw_verified("QUERY", index, id->device_id, &q0, "clean adapter");
+    if (!query_valid(&q0)) {
+        verdict("BLOCKED", "PENDING", index, id->device_id, "requires a valid query of the clean adapter before any activation");
+        verdict("BLOCKED", "PAST_BASET", index, id->device_id, "requires a valid query of the clean adapter before any activation");
+        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
+        return;
+    }
+    if (!query_clean(&q0) || !p0.ok) {
+        verdict("BLOCKED", "PENDING", index, id->device_id, !p0.ok ? "PHC unavailable: no BaseT can be placed" :
+                "the query does not report a clean adapter; no activation on it (#381 precondition)");
+        verdict("BLOCKED", "PAST_BASET", index, id->device_id, "requires a clean adapter, the PHC and a committed schedule");
+        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
+        return;
+    }
+
+    /* The schedule: IOCTL_AVB_TAS_ACTIVATE, HOLD, the verified set; needs a handle with write access (#362) */
+    base = ((long long)p0.phc + BASE_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS * CYCLE_NS;
+    ZeroMemory(&req, sizeof(req));
+    req.version = AVB_TAS_ACTIVATE_VERSION;
+    req.pre_activation = AVB_TAS_PRE_HOLD;
+    req.base_time_ns = (avb_u64)base;
+    req.cycle_ns = (avb_u32)CYCLE_NS;
+    req.link_mbps = (avb_u32)(row->TransmitLinkSpeed / 1000000ULL);
+    req.max_frame_bytes = (avb_u32)row->Mtu + FRAME_OVERHEAD_BYTES;
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        req.window_start_ns[q] = (avb_u32)WINDOW_START_NS;
+        req.window_end_ns[q] = (avb_u32)WINDOW_END_NS;
+    }
+    hw = open_device(GENERIC_READ | GENERIC_WRITE);
+    if (hw == INVALID_HANDLE_VALUE || !bind_luid(hw, id->net_luid)) {
+        if (hw != INVALID_HANDLE_VALUE) { CloseHandle(hw); }
+        verdict("BLOCKED", "PENDING", index, id->device_id, "cannot bind a handle with write access for the activation");
+        verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no committed schedule");
+        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
+        return;
+    }
+    g_pending_did = id->device_id;
+    InterlockedExchange(&g_pending_adapter, (LONG)index);   /* from here the cleanup owes a NIC cycle */
+    ok = DeviceIoControl(hw, IOCTL_AVB_TAS_ACTIVATE, &req, sizeof(req), &req, sizeof(req), &br, NULL);
+    if (!ok) { err = GetLastError(); }
+    CloseHandle(hw);
+    printf("    [EVIDENCE] activation: base=%lld cycle=%lld window=[%lld, %lld) ok=%d win32=%lu result=%u status=0x%08X phcAtCommit=%llu\n",
+           base, CYCLE_NS, WINDOW_START_NS, WINDOW_END_NS, ok, err, ok ? req.result : 0u, ok ? req.status : 0u,
+           ok ? req.phc_at_commit_ns : 0ULL);
+    if (!ok || req.result != AVB_TAS_ACT_COMMITTED) {
+        sprintf_s(reason, sizeof(reason), "activation did not commit (ok=%d win32=%lu result=%u); no schedule to query", ok, err,
+                  ok ? req.result : 0u);
+        verdict("BLOCKED", "PENDING", index, id->device_id, reason);
+        verdict("BLOCKED", "PAST_BASET", index, id->device_id, reason);
+        cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
+        return;
+    }
+
+    query(h, &q1);
+    print_query("committed, BaseT ahead", &q1);
+    if (query_valid(&q1) && phc_valid(&q1.q) && q1.q.phc_after_ns >= (avb_u64)base) {
+        verdict("BLOCKED", "PENDING", index, id->device_id, "the PHC had already passed BaseT at this query; the BaseT-ahead case was not observed");
+    } else {
+        verdict_not_hw_verified("PENDING", index, id->device_id, &q1, "committed, BaseT ahead");
+    }
+
+    /* Wait, bounded, until a valid query's own PHC bracket starts PAST_BASE_CYCLES cycles past BaseT */
+    start = GetTickCount();
+    do {
+        Sleep(PAST_BASE_POLL_MS);
+        query(h, &q2);
+        past = query_valid(&q2) && phc_valid(&q2.q) && q2.q.phc_before_ns >= (avb_u64)(base + PAST_BASE_CYCLES * CYCLE_NS);
+    } while (!past && query_valid(&q2) && GetTickCount() - start < PAST_BASE_BOUND_MS);
+    print_query("PHC past BaseT", &q2);
+    if (!query_valid(&q2)) {
+        verdict_not_hw_verified("PAST_BASET", index, id->device_id, &q2, "PHC past BaseT");
+    } else if (!past) {
+        verdict("BLOCKED", "PAST_BASET", index, id->device_id, "no valid query bracket past BaseT within the bound; the case was not observed");
+    } else {
+        verdict_not_hw_verified("PAST_BASET", index, id->device_id, &q2, "PHC past BaseT");
+    }
+    cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
+}
+
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
     QUERY_READ q1, q2;
@@ -756,6 +902,10 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     h = open_bound_read(id->net_luid);
     if (h == INVALID_HANDLE_VALUE) {
         verdict("BLOCKED", "QUERY", index, id->device_id, "cannot open a read-only handle and bind it by NET_LUID");
+        return;
+    }
+    if (g_hw_verified_mode) {
+        run_hw_verified(h, index, id, inst, ipv4, &row);
         return;
     }
 
@@ -851,7 +1001,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     cleanup_and_verify(h, index, id, inst, ipv4, &q1, p3.ok ? &p3 : &p0);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     AVB_ADAPTER_IDENTITY_REQUEST *ids = NULL, first;
     IOCTL_VERSION version = {0};
@@ -865,7 +1015,15 @@ int main(void)
     setvbuf(stdout, NULL, _IONBF, 0);
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
     SetUnhandledExceptionFilter(on_crash);
-    printf("=== IntelAvbFilter - IOCTL_AVB_TAS_QUERY_HW on a clean adapter, %s (#366) ===\n", CASE_ID);
+    if (argc == 2 && strcmp(argv[1], "--hw-verified") == 0) {
+        g_hw_verified_mode = TRUE;
+        g_case = "TC-TASAPI-016";
+    } else if (argc != 1) {
+        printf("[BLOCKED] %s: usage: test_tas_query_clean [--hw-verified]\n", CASE_ID);
+        return 3;
+    }
+    printf("=== IntelAvbFilter - IOCTL_AVB_TAS_QUERY_HW, %s (%s) ===\n", CASE_ID,
+           g_hw_verified_mode ? "#381: HARDWARE_VERIFIED never returned, clean, BaseT ahead and PHC past BaseT" : "#366: clean adapter");
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("[BLOCKED] %s: Winsock unavailable\n", CASE_ID);
         return 3;
