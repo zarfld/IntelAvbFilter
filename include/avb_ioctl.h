@@ -228,6 +228,196 @@ typedef struct AVB_TAS_ACTIVATE_REQUEST {
     avb_u32 status;                           /* out: NTSTATUS of the operation */
 } AVB_TAS_ACTIVATE_REQUEST, *PAVB_TAS_ACTIVATE_REQUEST;
 
+/* ---- IOCTL_AVB_TAS_QUERY_HW v1 request (#350; layout and values published in #365 "Query v1 contract", 12.2) ----
+ * PROVISIONAL: #362 decision 1 keeps the 536-byte layout provisional until #365 is accepted. Any semantic change raises
+ * AVB_TAS_QUERY_VERSION. No handler serves the code yet: these are wire definitions only, no behaviour.
+ * In: version, size, lookup_client_op_id. Every other byte is output, valid only on STATUS_SUCCESS (#365 12.1).
+ * 0 never denotes a state in an enumerated out field; it means "not reported". Counters where 0 is meaningful use
+ * AVB_TAS_NOT_REPORTED_U32. Hardware fields are never filled from the driver record, nor record fields from hardware.
+ * Temporal progression compares the retained target current.base_time_ns with the PHC bracket (phc_before_ns,
+ * phc_after_ns); the live regs.baset_l/baset_h readback is diagnostic only (#365 12.3, 12.4).
+ * Not settled through this layout, with their "not reported" values in v1: lookup/context_epoch/generation (#352),
+ * limits.tier_* (#351), limits.min_margin_ns (lead time open, #362), origin/gate_policy/legacy_conflicts (#355, #359),
+ * next/next_commit (#358), revision_id (K9) and link_speed_mbps (K8) acquisition. Ring pointers (TDH, TDT) are not in v1:
+ * #353 and #392 stay open for them (#365 12.6). */
+#define AVB_TAS_QUERY_VERSION    1u
+#define AVB_TAS_NOT_REPORTED_U32 0xFFFFFFFFu   /* counters where 0 is a meaningful value (legacy_conflicts until #355) */
+
+#define AVB_TAS_HWREAD_READ        1u  /* every v1 register and both PHC reads valid */
+#define AVB_TAS_HWREAD_NOT_RUNNING 2u  /* filter not Running: no MMIO performed */
+#define AVB_TAS_HWREAD_PARTIAL     3u  /* MMIO performed; at least one register or PHC value invalid */
+#define AVB_TAS_HWREAD_NO_MMIO     4u  /* Running, but no MMIO access: nothing read, no initialization started */
+
+#define AVB_TAS_HWMODE_OFF        1u  /* from TQAVCTRL.TRANSMIT_MODE (SSOT field) */
+#define AVB_TAS_HWMODE_TSN        2u
+#define AVB_TAS_HWMODE_UNREADABLE 3u  /* TQAVCTRL invalid (regs.read_failed bit 0) */
+
+#define AVB_TAS_ORIGIN_NONE            1u  /* driver record facts */
+#define AVB_TAS_ORIGIN_SETUP_TAS       2u
+#define AVB_TAS_ORIGIN_CONTRACT        3u
+#define AVB_TAS_ORIGIN_FOUND_AT_ATTACH 4u
+#define AVB_TAS_GATE_NONE      1u
+#define AVB_TAS_GATE_SCHEDULED 2u
+#define AVB_TAS_GATE_OPEN_ALL  3u
+
+#define AVB_TAS_ST_NONE              1u  /* reached only from observed hardware */
+#define AVB_TAS_ST_PROGRAMMED        2u
+#define AVB_TAS_ST_PENDING           3u
+#define AVB_TAS_ST_INFERRED_ACTIVE   4u  /* not returned while link events are unobserved (K8) */
+#define AVB_TAS_ST_HARDWARE_VERIFIED 5u  /* never returned in v1; no v1 code path sets it (#381) */
+#define AVB_TAS_ST_INCONSISTENT      6u
+#define AVB_TAS_ST_UNKNOWN           7u
+
+/* restoration: ADVISORY, from the SSOT observed baselines only. Never proof of a clean adapter, restoration or TX (#361) */
+#define AVB_TAS_RESTORE_COMPLETE         1u  /* TSN off; restoration set at its baselines (ENDQT 0, or _ALT only under DES-C-TAS-010 3.6) */
+#define AVB_TAS_RESTORE_PARTIAL_OPEN_ALL 2u  /* TSN on; every window covers the cycle */
+#define AVB_TAS_RESTORE_PARTIAL_RESIDUE  3u  /* TSN off; a restoration-set register differs */
+#define AVB_TAS_RESTORE_NONE             4u  /* TSN on, otherwise */
+#define AVB_TAS_RESTORE_UNKNOWN          5u  /* an input register is invalid */
+#define AVB_TAS_RESTORE_NO_SSOT_BASELINE 6u  /* the family's SSOT has no observed baselines */
+
+#define AVB_TAS_FLAG_OP_IN_PROGRESS           0x00000001u
+#define AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE 0x00000002u  /* never set in v1: no opt-in exists */
+#define AVB_TAS_FLAG_PHC_RESET_SEEN           0x00000004u  /* sticky in the adapter context */
+
+#define AVB_TAS_LOOKUP_NOT_REQUESTED   1u
+#define AVB_TAS_LOOKUP_FOUND           2u
+#define AVB_TAS_LOOKUP_NOT_FOUND       3u  /* a #352 store exists and holds no such record */
+#define AVB_TAS_LOOKUP_NOT_IMPLEMENTED 4u  /* no #352 store: nothing searched. v1 answer to a non-zero id */
+
+#define AVB_TAS_DTX_DECODED       1u  /* DTXMXPKTSZ decoded with the SSOT mask and _SCALE; raw value stays in regs */
+#define AVB_TAS_DTX_READ_FAILED   2u
+#define AVB_TAS_DTX_NO_SSOT_SCALE 3u
+#define AVB_TAS_DTX_NOT_READ      4u  /* no MMIO performed */
+
+#define AVB_TAS_REV_VALID       1u           /* revision_state; 0 = not reported */
+#define AVB_TAS_CONS_BASET_TORN 0x00000001u  /* regs.consistency: BASET_H differed around BASET_L after one repeat */
+
+#define AVB_TAS_SNAP_RSN_NOT_RUNNING        0x00000001u
+#define AVB_TAS_SNAP_RSN_RESERVED_02        0x00000002u  /* never set */
+#define AVB_TAS_SNAP_RSN_READ_FAILED        0x00000004u
+#define AVB_TAS_SNAP_RSN_READ_INCONSISTENT  0x00000008u
+#define AVB_TAS_SNAP_RSN_PHC_DISCONTINUITY  0x00000010u  /* backward move in this context; forward jumps undetected (#348) */
+#define AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED 0x00000020u
+#define AVB_TAS_SNAP_RSN_NO_MMIO            0x00000040u
+#define AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID 0x00000080u
+#define AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID  0x00000100u
+#define AVB_TAS_SNAP_RSN_REG_UNMAPPED       0x00000200u
+
+#define AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD         0x00000001u
+#define AVB_TAS_SLOT_RSN_DRIVER_ARMED_HW_OFF        0x00000002u
+#define AVB_TAS_SLOT_RSN_BASE_FAR_AHEAD             0x00000004u
+#define AVB_TAS_SLOT_RSN_WINDOW_MISMATCH            0x00000008u
+#define AVB_TAS_SLOT_RSN_CYCLE_MISMATCH             0x00000010u
+#define AVB_TAS_SLOT_RSN_TXQCTL_MISMATCH            0x00000020u
+#define AVB_TAS_SLOT_RSN_LINK_SPEED_CHANGED         0x00000040u
+#define AVB_TAS_SLOT_RSN_PHC_RESET_SINCE_COMMIT     0x00000080u
+#define AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS       0x00000100u
+#define AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST           0x00000200u
+#define AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT 0x00000400u  /* retained target inside the PHC bracket */
+#define AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED     0x00000800u
+#define AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED          0x00001000u
+
+#define AVB_TAS_TIER_HW_UNSUPPORTED         1u  /* limits.tier_*: 0 = not reported until the #351 table */
+#define AVB_TAS_TIER_NOT_IMPLEMENTED        2u
+#define AVB_TAS_TIER_IMPLEMENTED_UNVERIFIED 3u
+#define AVB_TAS_TIER_IMPLEMENTED_VERIFIED   4u
+#define AVB_TAS_COMMIT_NONE              1u
+#define AVB_TAS_COMMIT_RETAINED          2u
+#define AVB_TAS_COMMIT_PHC_DISCONTINUOUS 3u
+#define AVB_TAS_COMMIT_HW_MISMATCH       4u
+#define AVB_TAS_COMMIT_LOST              5u
+#define AVB_TAS_LIMIT_NOT_ESTABLISHED    1u
+#define AVB_TAS_LIMIT_ESTABLISHED        2u
+
+typedef struct AVB_TAS_QUEUE_WINDOW {
+    avb_u32 start_ns, end_ns, max_frame_bytes, flags;
+} AVB_TAS_QUEUE_WINDOW;                                                       /* 16 */
+
+typedef struct AVB_TAS_SCHEDULE {           /* driver record of a schedule, never hardware readback */
+    avb_u64 base_time_ns;                   /* the retained target BaseT (PHC ns): the temporal progression input */
+    avb_u32 cycle_ns;
+    avb_u32 reserved;
+    AVB_TAS_QUEUE_WINDOW queue[AVB_TAS_QUEUES];
+} AVB_TAS_SCHEDULE;                                                           /* 80 */
+
+typedef struct AVB_TAS_REGS {               /* hardware: raw v1 register set, read once inside the PHC bracket */
+    avb_u32 tqavctrl, baset_l, baset_h, qbvcyclet, qbvcyclet_s;  /* read_failed bits 0-4; baset_* diagnostic readback */
+    avb_u32 stqt[4], endqt[4], txqctl[4];                         /* bits 5-8, 9-12, 13-16 */
+    avb_u32 dtxmxpktsz;                                           /* bit 17; read only, never substituted */
+    avb_u32 read_failed;                    /* bit set = value invalid (read failed or not attempted), value then 0 */
+    avb_u32 consistency;                    /* AVB_TAS_CONS_* */
+} AVB_TAS_REGS;                                                               /* 80 */
+
+typedef struct AVB_TAS_LIMITS {
+    avb_u32 queues, windows_per_queue;      /* 4; 1 */
+    avb_u32 hw_cycle_min_ns, hw_cycle_max_ns;  /* 0 = not reported */
+    avb_u64 min_margin_ns;                  /* the lead the driver enforces now */
+    avb_u32 min_margin_state;               /* AVB_TAS_LIMIT_*: NOT_ESTABLISHED in v1 */
+    avb_u32 tier_hold, tier_pass, tier_strict_end, tier_strict_cycle, tier_per_queue;  /* AVB_TAS_TIER_*, 0 = not reported */
+} AVB_TAS_LIMITS;                                                             /* 48 */
+
+typedef struct AVB_TAS_OP_RECORD {          /* #352 record wire format; production and storage are #352's */
+    avb_u64 client_op_id, net_luid, context_epoch, generation_after, phc_before_commit_ns, phc_after_commit_ns;
+    avb_u32 operation, result, ntstatus, stage, hw_effect, op_flags;
+} AVB_TAS_OP_RECORD;                                                          /* 72 */
+
+typedef struct AVB_TAS_COMMIT_INFO {        /* per-adapter commit timing, independent of the #352 store */
+    avb_u64 phc_before_commit_ns, phc_after_commit_ns;
+    avb_u32 state;                          /* AVB_TAS_COMMIT_* */
+    avb_u32 reserved;
+} AVB_TAS_COMMIT_INFO;                                                        /* 24 */
+
+typedef struct AVB_TAS_QUERY_HW_REQUEST {
+    avb_u32 version;              /*   0 in  AVB_TAS_QUERY_VERSION */
+    avb_u32 size;                 /*   4 in  sizeof(AVB_TAS_QUERY_HW_REQUEST) = 536 */
+    avb_u64 lookup_client_op_id;  /*   8 in  0 = no lookup */
+    avb_u64 net_luid;             /*  16 out bound adapter */
+    avb_u16 vendor_id;            /*  24 out */
+    avb_u16 device_id;            /*  26 out */
+    avb_u16 revision_id;          /*  28 out valid only if revision_state == AVB_TAS_REV_VALID */
+    avb_u16 revision_state;       /*  30 out 0 = not reported */
+    avb_u32 hw_read;              /*  32 out AVB_TAS_HWREAD_* */
+    avb_u32 hw_mode;              /*  36 out AVB_TAS_HWMODE_* */
+    avb_u32 origin;               /*  40 out AVB_TAS_ORIGIN_*, record */
+    avb_u32 gate_policy;          /*  44 out AVB_TAS_GATE_*, record */
+    avb_u32 current_status;       /*  48 out AVB_TAS_ST_* */
+    avb_u32 current_reasons;      /*  52 out AVB_TAS_SLOT_RSN_* */
+    avb_u32 next_status;          /*  56 out AVB_TAS_ST_*; never NONE without observed hardware */
+    avb_u32 next_reasons;         /*  60 out */
+    avb_u32 snapshot_reasons;     /*  64 out AVB_TAS_SNAP_RSN_* */
+    avb_u32 restoration;          /*  68 out AVB_TAS_RESTORE_*, advisory */
+    avb_u32 flags;                /*  72 out AVB_TAS_FLAG_* */
+    avb_u32 lookup_result;        /*  76 out AVB_TAS_LOOKUP_* */
+    avb_u32 link_speed_mbps;      /*  80 out 0 = unknown */
+    avb_u32 legacy_conflicts;     /*  84 out AVB_TAS_NOT_REPORTED_U32 until #355 */
+    avb_u64 context_epoch;        /*  88 out 0 = not reported */
+    avb_u64 generation;           /*  96 out 0 = not reported */
+    avb_u64 phc_before_ns;        /* 104 out valid iff AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID clear */
+    avb_u64 phc_after_ns;         /* 112 out valid iff AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID clear */
+    avb_u32 dtx_max_frame_bytes;  /* 120 out valid iff dtx_max_frame_state == AVB_TAS_DTX_DECODED */
+    avb_u32 dtx_max_frame_state;  /* 124 out AVB_TAS_DTX_* */
+    AVB_TAS_LIMITS limits;        /* 128 out */
+    AVB_TAS_SCHEDULE current;     /* 176 out record; valid iff current_commit.state is RETAINED, PHC_DISCONTINUOUS or HW_MISMATCH */
+    AVB_TAS_SCHEDULE next;        /* 256 out record; v1: all 0 */
+    AVB_TAS_REGS regs;            /* 336 out hardware */
+    AVB_TAS_OP_RECORD lookup;     /* 416 out valid iff lookup_result == AVB_TAS_LOOKUP_FOUND, else all 0 */
+    AVB_TAS_COMMIT_INFO current_commit;  /* 488 out */
+    AVB_TAS_COMMIT_INFO next_commit;     /* 512 out v1: state NONE */
+} AVB_TAS_QUERY_HW_REQUEST, *PAVB_TAS_QUERY_HW_REQUEST;                      /* 536 */
+
+/* Compile-time size pins (offsets: TC-ABI-026 in tests/unit/abi/test_ioctl_abi.c). Same pattern as the other requests. */
+#if defined(_KERNEL_MODE)
+C_ASSERT(sizeof(AVB_TAS_SCHEDULE) == 80);
+C_ASSERT(sizeof(AVB_TAS_REGS) == 80);
+C_ASSERT(sizeof(AVB_TAS_LIMITS) == 48);
+C_ASSERT(sizeof(AVB_TAS_OP_RECORD) == 72);
+C_ASSERT(sizeof(AVB_TAS_COMMIT_INFO) == 24);
+C_ASSERT(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536);
+#elif defined(__cplusplus)
+static_assert(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536, "TAS query v1 size changed");
+#endif
+
 #define AVB_ADAPTER_IDENTITY_VERSION 1u
 typedef struct AVB_ADAPTER_IDENTITY_REQUEST {
     avb_u32 version;       /* in: AVB_ADAPTER_IDENTITY_VERSION */
