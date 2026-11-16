@@ -332,10 +332,18 @@ typedef struct _AVB_DEVICE_CONTEXT {
     volatile LONG tas_op_claim;
 
     /* TAS operation sequence (#350): incremented right after a mutating TAS operation takes tas_op_claim and again right
-     * before it releases it (avb_tas_op_begin / avb_tas_op_end), so an odd value means one is running. The read-only
+     * before it releases it (avb_tas_op_claim / avb_tas_op_release), so an odd value means one is running. The read-only
      * IOCTL_AVB_TAS_QUERY_HW compares it before and after its register pass: any change, also an operation that started
      * and finished in between, reports OP_IN_PROGRESS and UNKNOWN slots. Interlocked access only. */
     volatile LONG tas_op_seq;
+
+    /* TAS register access (#45 REQ-F-REG-ACCESS-001, #52 REQ-F-DEVICE-ABS-005; #350): serialises every TAS register pass
+     * of this adapter together with the TAS record it reads or publishes. Held by IOCTL_AVB_TAS_QUERY_HW across its state
+     * samples and read pass, and by IOCTL_AVB_TAS_ACTIVATE, IOCTL_AVB_SETUP_TAS and IOCTL_AVB_DISARM_TAS across their device
+     * operation and record update, after they took tas_op_claim. No other lock is taken under it and nothing under it
+     * waits (DISPATCH_LEVEL); its hold time is measured (avb_tas_reg_unlock). Other register writers, such as PHC
+     * adjustment or the diagnostic register IOCTLs, do not take it (#45 is not implemented for them). */
+    NDIS_SPIN_LOCK tas_reg_lock;
 
     /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's MMIO pass (#350): the query holds it for its bounded pass only and
      * reads nothing when it cannot be acquired. FilterPause runs it down before the timers stop and the adapter may be
