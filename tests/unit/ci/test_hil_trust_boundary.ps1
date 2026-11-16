@@ -1131,13 +1131,13 @@ else {
 }
 $expectedIf = @{
     'hil-debug'   = "$wrGuardReal && needs.authorize.outputs.authorized == 'true'"
-    'hil-release' = "`${{ !cancelled() && $wrGuardReal && needs.authorize.outputs.authorized == 'true' && needs.hil-debug.outputs.machine_ok == 'true' }}"
+    'hil-release' = "$wrGuardReal && needs.authorize.outputs.authorized == 'true'"
 }
-$expectedNeeds = @{ 'hil-debug' = 'authorize'; 'hil-release' = 'authorize,hil-debug' }
+$expectedNeeds = @{ 'hil-debug' = 'authorize'; 'hil-release' = 'authorize' }
 foreach ($jid in $hilJobIds) {
     $j = $hilJobs[$jid]
     if ($null -eq $j) { $azIssues += "$jid missing"; continue }
-    if ((@($j['needs']) -join ',') -ne $expectedNeeds[$jid]) { $azIssues += "$jid needs [$(@($j['needs']) -join ',')] (expected [$($expectedNeeds[$jid])]; Release strictly after Debug)" }
+    if ((@($j['needs']) -join ',') -ne $expectedNeeds[$jid]) { $azIssues += "$jid needs [$(@($j['needs']) -join ',')] (expected [$($expectedNeeds[$jid])]; physical jobs independent)" }
     if ("$($j['if'])".Trim() -cne $expectedIf[$jid]) { $azIssues += "$jid if is not the expected guard: $($j['if'])" }
     if ($j.Contains('strategy')) { $azIssues += "${jid}: physical job has a matrix/strategy (configurations are separate serialized jobs)" }
     $first = @($j['steps'])[0]
@@ -1312,8 +1312,12 @@ $hilScen = [ordered]@{
         Expect = @{ 'authorize' = 'failure'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped' } }
     'Debug tests fail, machine healthy: Release still deployed and tested' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
         Expect = @{ 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
-    'Debug deployment left the machine needing the operator: Release not attempted' = @{ Vars = (Set-Var (New-WrVars 'push' 'master' 'success' 'true') 'needs.hil-debug.outputs.machine_ok' 'false'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-release' = 'skipped'; 'hil-acceptance' = 'failure' } }
+    'Debug deployment leaves its runner needing operator: Release uses its own machine state' = @{ Vars = (Set-Var (New-WrVars 'push' 'master' 'success' 'true') 'needs.hil-debug.outputs.machine_ok' 'false'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil-debug' = 'failure'; 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Debug job skipped: Release still independently executes; acceptance fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'skipped'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil-debug' = 'skipped'; 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Both configurations fail: acceptance still fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'failure'; 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil-debug' = 'failure'; 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' } }
     'upstream fork PR from its master' = @{ Vars = (New-WrVars 'pull_request' 'master' 'success' '' $forkR); Out = @{}; Expect = $prNotRun }
     'upstream fork PR, authorize output forged true' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true' $forkR); Out = @{}; Expect = $prNotRun }
     'upstream CI failed on master'     = @{ Vars = (New-WrVars 'push' 'master' 'failure' ''); Out = @{}; Expect = $allSkipped }
