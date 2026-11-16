@@ -1620,7 +1620,7 @@ srv.serve_forever()
                 $b = Join-Path $Root "hil-evidence-$cfg"; New-Item -ItemType Directory -Path $b -Force | Out-Null
                 Write-J (Join-Path $b 'deployment.json') ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = $cfg; verdict = 'DEPLOYED'; reason = 'ok'; crashEvidence = [ordered]@{ classification = 'NONE' } })
                 Write-J (Join-Path $b 'hil-run-identity.json') ([ordered]@{ runId = '777'; runAttempt = '1'; sha = $sha; headRevision = $sha; upstreamRunId = "$rid"; upstreamRunAttempt = '1'
-                    job = "hil-$($cfg.ToLower())"; configuration = $cfg; deploymentVerdict = 'DEPLOYED'; stagedDriverSha256 = $stagedOf[$cfg]; installedDriverSha256 = $stagedOf[$cfg]
+                    job = 'hil'; configuration = $cfg; deploymentVerdict = 'DEPLOYED'; stagedDriverSha256 = $stagedOf[$cfg]; installedDriverSha256 = $stagedOf[$cfg]
                     imagePathSha256 = $stagedOf[$cfg]; runningImageEvidence = 'reloaded during this deployment' })
                 foreach ($su in 'HardwareUnit', 'HardwareIntegration') {
                     $sd = Join-Path $b $su; New-Item -ItemType Directory -Path $sd -Force | Out-Null
@@ -1634,8 +1634,8 @@ srv.serve_forever()
         $acCases = [ordered]@{
             'complete current-run evidence, both configurations' = @{ Mod = {}; Exit = 0 }
             'previous run crashed (reported, attributed, not gated)' = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\deployment.json' 'crashEvidence' ([ordered]@{ classification = 'PREVIOUS_RUN_CRASHED' }) }; Exit = 0; Out = 'previous HIL run crashed the machine' }
-            'hil-debug failed'                   = @{ Mod = {}; Debug = 'failure'; Exit = 1; Why = "hil-debug result is 'failure'" }
-            'hil-release skipped'                = @{ Mod = {}; Release = 'skipped'; Exit = 1; Why = "hil-release result is 'skipped'" }
+            'matrix failed despite complete bundles'                   = @{ Mod = {}; Matrix = 'failure'; Exit = 1; Why = "hil matrix result is 'failure'" }
+            'matrix skipped despite complete bundles'                = @{ Mod = {}; Matrix = 'skipped'; Exit = 1; Why = "hil matrix result is 'skipped'" }
             'deployment failed: zero tests, not executed' = @{ Mod = { param($r) Set-J $r 'hil-evidence-Release\deployment.json' 'verdict' 'DEPLOY_FAILED' }; Exit = 1; Why = 'HIL acceptance: HIL_NOT_EXECUTED' }
             'machine needed the operator'        = @{ Mod = { param($r) Set-J $r 'hil-evidence-Debug\deployment.json' 'verdict' 'NEEDS_OPERATOR' }; Exit = 1; Why = 'Debug: deployment NEEDS_OPERATOR' }
             'no deployment record'               = @{ Mod = { param($r) Remove-Item (Join-Path $r 'hil-evidence-Debug\deployment.json') -Force }; Exit = 1; Why = 'no deployment record' }
@@ -1673,7 +1673,7 @@ srv.serve_forever()
             & $acCases[$n].Mod $root
             $c = $acCases[$n]
             $r = Invoke-Py $accPy @{ GITHUB_RUN_ID = '777'; HIL_HEAD_SHA = $sha; HIL_UPSTREAM_RUN_ID = "$rid"
-                                    HIL_DEBUG = $(if ($c.ContainsKey('Debug')) { $c.Debug } else { 'success' }); HIL_RELEASE = $(if ($c.ContainsKey('Release')) { $c.Release } else { 'success' })
+                                    HIL_MATRIX = $(if ($c.ContainsKey('Matrix')) { $c.Matrix } else { 'success' })
                                     HIL_STAGED_DEBUG = $stagedOf['Debug']; HIL_STAGED_RELEASE = $stagedOf['Release']
                                     HIL_EVIDENCE_DIR = $root; GITHUB_STEP_SUMMARY = (Join-Path $script:Tmp "acc_$k.md"); GITHUB_OUTPUT = (Join-Path $script:Tmp "acc_out_$k.txt")
                                     GITHUB_RUN_ATTEMPT = $(if ($c.ContainsKey('Attempt')) { $c.Attempt } else { '1' }) }
@@ -1712,7 +1712,7 @@ try {
     # The verdict step's inputs are exactly the job results and authorize/acceptance outputs named in its env.
     $gEnvWant = [ordered]@{ AZ_RESULT = '${{ needs.authorize.result }}'; AZ_AUTHORIZED = '${{ needs.authorize.outputs.authorized }}'; AZ_MODE = '${{ needs.authorize.outputs.mode }}'
         AZ_HEAD_SHA = '${{ needs.authorize.outputs.head_sha }}'; AZ_PR = '${{ needs.authorize.outputs.pr_number }}'; AZ_DENY = '${{ needs.authorize.outputs.deny_reasons }}'
-        DEBUG_RESULT = '${{ needs.hil-debug.result }}'; RELEASE_RESULT = '${{ needs.hil-release.result }}'; ACC_RESULT = '${{ needs.hil-acceptance.result }}'; ACC_VERDICT = '${{ needs.hil-acceptance.outputs.verdict }}' }
+        HIL_MATRIX_RESULT = '${{ needs.hil.result }}'; ACC_RESULT = '${{ needs.hil-acceptance.result }}'; ACC_VERDICT = '${{ needs.hil-acceptance.outputs.verdict }}' }
     if (-not ($gvStep[0]['env'] -is [System.Collections.IDictionary]) -or -not ($gsStep[0]['env'] -is [System.Collections.IDictionary])) { throw 'hil-gate verdict/status steps have no env map' }
     foreach ($k in $gEnvWant.Keys) { if ("$($gvStep[0]['env'][$k])" -ne $gEnvWant[$k]) { $x17 += "gate env $k is '$($gvStep[0]['env'][$k])', not '$($gEnvWant[$k])'" } }
     function New-GateEvent([string]$Conclusion = 'success', [string]$HeadRepo = 'zarfld/IntelAvbFilter', [string]$UpEvent = 'pull_request', [string]$HeadSha = $gSha) {
@@ -1720,11 +1720,11 @@ try {
             head_repository = [ordered]@{ full_name = $HeadRepo }; pull_requests = @([ordered]@{ number = 344 }) } }
     }
     $okEnv = @{ AZ_RESULT = 'success'; AZ_AUTHORIZED = 'true'; AZ_MODE = 'pull_request'; AZ_HEAD_SHA = $gSha; AZ_PR = '344'; AZ_DENY = ''
-                DEBUG_RESULT = 'success'; RELEASE_RESULT = 'success'; ACC_RESULT = 'success'; ACC_VERDICT = 'PASSED' }
+                HIL_MATRIX_RESULT = 'success'; ACC_RESULT = 'success'; ACC_VERDICT = 'PASSED' }
     $gCases = [ordered]@{
         'both configurations PASSED for the authorized head' = @{ Env = @{}; State = 'success'; Verdict = 'PASSED' }
         'acceptance INCOMPLETE (coverage gap)'     = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'INCOMPLETE' }; State = 'failure'; Verdict = 'INCOMPLETE' }
-        'acceptance FAILED'                        = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'FAILED'; RELEASE_RESULT = 'failure' }; State = 'failure'; Verdict = 'FAILED' }
+        'acceptance FAILED'                        = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'FAILED'; HIL_MATRIX_RESULT = 'failure' }; State = 'failure'; Verdict = 'FAILED' }
         'acceptance HIL_NOT_EXECUTED'              = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'HIL_NOT_EXECUTED' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
         'staged build not tested'                  = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'STAGED_BUILD_NOT_TESTED' }; State = 'failure'; Verdict = 'STAGED_BUILD_NOT_TESTED' }
         'acceptance skipped'                       = @{ Env = @{ ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
@@ -1735,13 +1735,14 @@ try {
         'acceptance job success, verdict passed (wrong case)' = @{ Env = @{ ACC_VERDICT = 'passed' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'acceptance verdict outside the vocabulary' = @{ Env = @{ ACC_RESULT = 'failure'; ACC_VERDICT = 'MOSTLY_OK' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'verdict PASSED but acceptance job failed' = @{ Env = @{ ACC_RESULT = 'failure' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED' }
-        'hil-release skipped (PASSED forged)'      = @{ Env = @{ RELEASE_RESULT = 'skipped' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-release 'skipped'" }
-        'hil-debug cancelled'                      = @{ Env = @{ DEBUG_RESULT = 'cancelled' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil-debug 'cancelled'" }
-        'authorize denied (stale head)'            = @{ Env = @{ AZ_RESULT = 'failure'; AZ_AUTHORIZED = ''; AZ_DENY = 'pull request #344 head eeee is not the CI run head'; ACC_RESULT = 'skipped'; ACC_VERDICT = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED'; Why = 'is not the CI run head' }
+        'matrix skipped (PASSED forged)'           = @{ Env = @{ HIL_MATRIX_RESULT = 'skipped' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil matrix 'skipped'" }
+        'matrix cancelled (PASSED forged)'         = @{ Env = @{ HIL_MATRIX_RESULT = 'cancelled' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil matrix 'cancelled'" }
+        'matrix failed (PASSED forged)'            = @{ Env = @{ HIL_MATRIX_RESULT = 'failure' }; State = 'failure'; Verdict = 'HIL_NOT_EXECUTED'; Why = "hil matrix 'failure'" }
+        'authorize denied (stale head)'            = @{ Env = @{ AZ_RESULT = 'failure'; AZ_AUTHORIZED = ''; AZ_DENY = 'pull request #344 head eeee is not the CI run head'; ACC_RESULT = 'skipped'; ACC_VERDICT = ''; HIL_MATRIX_RESULT = 'skipped' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED'; Why = 'is not the CI run head' }
         'authorize success but not authorized'     = @{ Env = @{ AZ_AUTHORIZED = '' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED' }
         'authorized output true but job failed'    = @{ Env = @{ AZ_RESULT = 'failure' }; State = 'failure'; Verdict = 'NOT_AUTHORIZED' }
-        'fork pull request'                        = @{ Event = (New-GateEvent -HeadRepo 'untrusted-fork/IntelAvbFilter'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'NOT_ELIGIBLE'; Why = 'fork' }
-        'upstream CI failed'                       = @{ Event = (New-GateEvent -Conclusion 'failure'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; DEBUG_RESULT = 'skipped'; RELEASE_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'CI_NOT_SUCCESSFUL'; Why = "'failure'" }
+        'fork pull request'                        = @{ Event = (New-GateEvent -HeadRepo 'untrusted-fork/IntelAvbFilter'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; HIL_MATRIX_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'NOT_ELIGIBLE'; Why = 'fork' }
+        'upstream CI failed'                       = @{ Event = (New-GateEvent -Conclusion 'failure'); Env = @{ AZ_RESULT = 'skipped'; AZ_AUTHORIZED = ''; HIL_MATRIX_RESULT = 'skipped'; ACC_RESULT = 'skipped'; ACC_VERDICT = '' }; State = 'failure'; Verdict = 'CI_NOT_SUCCESSFUL'; Why = "'failure'" }
         'authorized head is not the CI head'       = @{ Env = @{ AZ_HEAD_SHA = ('e' * 40) }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'authorized as a master push'              = @{ Env = @{ AZ_MODE = 'push'; AZ_PR = '' }; State = 'failure'; Verdict = 'INCONSISTENT' }
         'authorized another pull request'          = @{ Env = @{ AZ_PR = '345' }; State = 'failure'; Verdict = 'INCONSISTENT' }
