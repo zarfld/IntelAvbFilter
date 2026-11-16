@@ -124,7 +124,7 @@ function Enter-AvbHilLock {
         } catch [System.IO.IOException] {
             # Serialized reclaim protects against two contenders both deciding a former owner was stale,
             # then one deleting the other's NEW live lock. Re-read ownership inside the recovery mutex.
-            $gate = New-Object System.Threading.Mutex($false, 'Global\IntelAvbFilter-HIL-Lock-Recovery')
+            $gate = [System.Threading.Mutex]::new($false, 'Global\IntelAvbFilter-HIL-Lock-Recovery')
             $gateHeld = $false; $st = $null; $owner = $null; $reclaimed = $false
             try {
                 try { $gateHeld = $gate.WaitOne(30000) }
