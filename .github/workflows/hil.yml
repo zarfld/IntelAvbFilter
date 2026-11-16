@@ -538,8 +538,8 @@ jobs:
 
   hil-release:
     name: HIL Release (self-hosted-hardware, deploy + Unit + Integration)
-    needs: [authorize, hil-debug]
-    if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true' && needs.hil-debug.outputs.machine_ok == 'true' }}
+    needs: [authorize]
+    if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true'
     runs-on: [self-hosted, Windows, i226]
     environment: hil
     timeout-minutes: 300
