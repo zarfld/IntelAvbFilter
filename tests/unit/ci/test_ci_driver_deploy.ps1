@@ -400,67 +400,18 @@ tc_check 'TEST-CIDEPLOY-044-lost-job-lock-and-in-flight-record-are-attributed-by
      ($after.verdict -eq $oLost.Dep.verdict) -and ($after.verdict -ne 'IN_FLIGHT')) `
     ("prev={0} prevOwner={1} inflight-now={2}" -f $(if ($oLost.Dep) { $oLost.Dep.previousDeployment.verdict }), $(if ($oLost.Dep) { $oLost.Dep.lock.previousOwner.owner.runId }), $after.verdict)
 $hilSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
-# Each independent Debug/Release matrix leg must read the machine state of ITS OWN assigned runner.
-# The shared physical job definition therefore has exactly one record-derived decision; the matrix expands it
-# for both configurations.  A remote leg's machine_ok must not influence this leg's eligibility.
-# A recorded IN_FLIGHT / NEEDS_OPERATOR / BUSY verdict cannot be deemed safe by name alone.
-$hilStart = $hilSrc.IndexOf("`n  hil:`n")
-$hilEnd = $hilSrc.IndexOf("`n  hil-acceptance:`n")
-$hilPhysical = if ($hilStart -ge 0 -and $hilEnd -gt $hilStart) { $hilSrc.Substring($hilStart, $hilEnd - $hilStart) } else { '' }
+# Each Debug/Release matrix leg reads the machine state of ITS OWN assigned runner.
+# One physical job definition expands into two legs; a remote leg's machine_ok must never govern this leg.
+# IN_FLIGHT / NEEDS_OPERATOR / NOT_EXECUTED_BUSY must not become machineOk=true from verdict names alone.
+$hilLf = $hilSrc -replace "`r`n", "`n"
+$hilStart = $hilLf.IndexOf("`n  hil:`n")
+$hilEnd = $hilLf.IndexOf("`n  hil-acceptance:`n")
+$hilPhysical = if ($hilStart -ge 0 -and $hilEnd -gt $hilStart) { $hilLf.Substring($hilStart, $hilEnd - $hilStart) } else { '' }
 $mokLine = "elseif (`$d.PSObject.Properties['machineOk'] -and `$d.machineOk -eq `$true) { 'true' } else { 'false' }"
 $mokStates = @(if (Get-Command Get-AvbMachineOk -ErrorAction SilentlyContinue) { foreach ($v in 'NEEDS_OPERATOR', 'NOT_EXECUTED_BUSY', 'IN_FLIGHT') { if ((Get-AvbMachineOk -Record ([pscustomobject]@{ verdict = $v })).Ok) { $v } } } else { 'Get-AvbMachineOk missing' })
 $matrixLocalMachine = (
     $hilPhysical -match '(?m)^      matrix:\s*\r?\n        configuration: \[Debug, Release\]' -and
-    $hilPhysical -match '(?m)^    needs: \[authorize\]
-
-# machine_ok after a partially completed deployment: a failed deployment leaves the machine usable for the next
-# configuration only when the state recorded after the failure is settled and known (CI run 41500818916 recorded
-# DEPLOY_FAILED -> machine_ok=true without looking at the state netcfg -u had left).
-if (Get-Command Get-AvbMachineOk -ErrorAction SilentlyContinue) {
-    $st = { param([string]$Svc, [object[]]$Pend = @()) [pscustomobject]@{ verdict = 'DEPLOY_FAILED'; install = [pscustomobject]@{ outcome = 'FAILED'; postState = [pscustomobject]@{ service = $Svc; bindings = @(); pendingRenames = $Pend } } } }
-    $mo = [ordered]@{
-        'DEPLOYED'                           = @([pscustomobject]@{ verdict = 'DEPLOYED' }, $true)
-        'REJECTED_PACKAGE (untouched)'       = @([pscustomobject]@{ verdict = 'REJECTED_PACKAGE' }, $true)
-        'NOT_EXECUTED_BUSY'                  = @([pscustomobject]@{ verdict = 'NOT_EXECUTED_BUSY' }, $false)
-        'NEEDS_OPERATOR'                     = @([pscustomobject]@{ verdict = 'NEEDS_OPERATOR' }, $false)
-        'IN_FLIGHT (job lost)'               = @([pscustomobject]@{ verdict = 'IN_FLIGHT' }, $false)
-        'no record'                          = @($null, $false)
-        'DEPLOY_FAILED, no install record'   = @([pscustomobject]@{ verdict = 'DEPLOY_FAILED'; install = $null }, $false)
-        'DEPLOY_FAILED, post NOT_FOUND'      = @((& $st 'NOT_FOUND'), $true)
-        'DEPLOY_FAILED, post RUNNING'        = @((& $st 'RUNNING'), $true)
-        'DEPLOY_FAILED, post UNKNOWN'        = @((& $st 'UNKNOWN:UNRESOLVED (probe)'), $false)
-        'DEPLOY_FAILED, post STOP_PENDING'   = @((& $st 'STOP_PENDING'), $false)
-        'DEPLOY_FAILED, reboot rename'       = @((& $st 'NOT_FOUND' @('\??\C:\x\IntelAvbFilter.sys')), $false)
-    }
-    $wrong = @(foreach ($k in $mo.Keys) { $m = Get-AvbMachineOk -Record $mo[$k][0]; if ([bool]$m.Ok -ne $mo[$k][1] -or -not $m.Reason) { "$k -> ok=$($m.Ok) reason='$($m.Reason)'" } })
-    tc_check 'TEST-CIDEPLOY-047-machine-ok-after-a-failed-deployment-requires-a-recorded-settled-known-state' ($wrong.Count -eq 0) ($wrong -join '; ')
-} else {
-    tc_fail 'TEST-CIDEPLOY-047-machine-ok-after-a-failed-deployment-requires-a-recorded-settled-known-state' 'Get-AvbMachineOk missing in tools/lib/DriverDeploy.ps1'
-}
-$pv = { param($o, [string]$n) if ($o -and $o.PSObject.Properties[$n]) { $o.PSObject.Properties[$n].Value } else { '<absent>' } }
-tc_check 'TEST-CIDEPLOY-048-deployment-record-carries-the-machine-ok-decision' `
-    (((& $pv $oUnsigned.Dep 'machineOk') -eq $true) -and [bool](& $pv $oUnsigned.Dep 'machineOkReason') -and ((& $pv $oBusy.Dep 'machineOk') -eq $false)) `
-    ("rejected: machineOk={0} ({1}) | busy: machineOk={2}" -f (& $pv $oUnsigned.Dep 'machineOk'), (& $pv $oUnsigned.Dep 'machineOkReason'), (& $pv $oBusy.Dep 'machineOk'))
-
-# Signed-path orchestration: replace the real signature reader through a package signed by the pinned thumbprint is
-# not possible offline without a trusted test root; the deployment/pre-flight ordering is exercised with a package
-# whose manifest and files are valid and a pinned certificate whose thumbprint the orchestrator reads - signature
-# checks are covered by TEST-CIDEPLOY-003 (function level) and rejected here (TEST-CIDEPLOY-040) as they must be.
-$ordSrc = [System.IO.File]::ReadAllText($orch)
-$iLock = $ordSrc.IndexOf('Enter-AvbHilLock'); $iCrash = $ordSrc.IndexOf('Get-AvbCrashEvidence -Source'); $iPkg = $ordSrc.IndexOf('Test-AvbDriverPackage -PackageDir')
-$iInst = $ordSrc.IndexOf('-File $InstallScript'); $iPre = $ordSrc.IndexOf('-File $PreFlightScript')
-tc_check 'TEST-CIDEPLOY-043-order-lock-crash-evidence-package-install-preflight' `
-    (($iLock -gt 0) -and ($iCrash -gt $iLock) -and ($iPkg -gt $iCrash) -and ($iInst -gt $iPkg) -and ($iPre -gt $iInst) -and ($ordSrc -match "HIL_REQUIRE_DEPLOYED_SHA = '1'") -and
-     ($ordSrc -match '-RequireTrusted:\(-not \$SkipTrustCheck\)')) ("lock@{0} crash@{1} pkg@{2} install@{3} preflight@{4}" -f $iLock, $iCrash, $iPkg, $iInst, $iPre)
-
-Remove-Item Env:FAKE_INSTALL_RC, Env:FAKE_PRE_RC -ErrorAction SilentlyContinue
-Remove-Item $Tmp -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host ""
-Write-Host ("  Summary: {0} passed, {1} failed of {2} tests" -f $passed, $failed, $total) -ForegroundColor Cyan
-if ($failed -gt 0) { Write-Host "[FAIL] TEST-CIDEPLOY: unattended deployment contract violated" -ForegroundColor Red; exit 1 }
-Write-Host "[PASS] TEST-CIDEPLOY: unattended deployment orchestration holds (offline; hardware UNVERIFIED)" -ForegroundColor Green
-exit 0
- -and
+    $hilPhysical -match '(?m)^    needs: \[authorize\]$' -and
     $hilPhysical -match '(?m)^        id: machine\s*\r?\n        if: always\(\)' -and
     $hilPhysical.Contains("Join-Path `$env:RUNNER_TEMP 'hil-evidence\deployment.json'") -and
     $hilPhysical.Contains("`$d.PSObject.Properties['machineOk']") -and
@@ -471,8 +422,8 @@ exit 0
 )
 tc_check 'TEST-CIDEPLOY-045-in-flight-or-operator-states-remain-unsafe-per-independent-matrix-leg' `
     (($hilPhysical.Length -gt 0) -and ([regex]::Matches($hilPhysical, [regex]::Escape($mokLine)).Count -eq 1) -and
-     ([regex]::Matches($hilSrc, [regex]::Escape($mokLine)).Count -eq 1) -and
-     $matrixLocalMachine -and ($hilSrc -notmatch [regex]::Escape("`$v -in 'NEEDS_OPERATOR'")) -and ($mokStates.Count -eq 0)) `
+     ([regex]::Matches($hilLf, [regex]::Escape($mokLine)).Count -eq 1) -and
+     $matrixLocalMachine -and ($hilLf -notmatch [regex]::Escape("`$v -in 'NEEDS_OPERATOR'")) -and ($mokStates.Count -eq 0)) `
     "matrix-local machine_ok contract missing, bypassed, or unsafe record accepted: $($mokStates -join ', ')"
 
 # machine_ok after a partially completed deployment: a failed deployment leaves the machine usable for the next
