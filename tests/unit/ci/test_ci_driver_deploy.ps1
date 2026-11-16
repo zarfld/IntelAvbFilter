@@ -234,6 +234,15 @@ $alienCtx = Resolve-AvbHilLockContext -Path $lp -GitHub @{ runId = '500'; runAtt
 tc_check 'TEST-CIDEPLOY-021b-matrix-legs-with-the-same-job-name-have-distinct-lock-ownership' `
     (-not $alienCtx.Owned) ("foreign lock owned={0} how={1}" -f $alienCtx.Owned, $alienCtx.How)
 
+# Different workflow runs targeting the same physical host must also keep a live owner intact.
+$env:GITHUB_RUN_ID = '501'
+$crossRun = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release in other run' -Path $lp -WaitSeconds 0 -IsProcessAlive $alive -IsCiJobActive { param($owner) $true } -Sleep $noSleep
+tc_check 'TEST-CIDEPLOY-021d-a-second-workflow-run-cannot-steal-a-live-ci-lock' `
+    (-not $crossRun.Ok -and (Test-Path -LiteralPath $lp) -and
+     ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lp)) -eq [Convert]::ToBase64String($originalBytes))) `
+    ("stolen={0} reason={1}" -f $crossRun.Ok, $crossRun.Why)
+$env:GITHUB_RUN_ID = '500'
+
 # Proven interrupted owner: only a conclusive worker-exited check permits recorded stale takeover.
 $c = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release' -Path $lp -WaitSeconds 0 -IsProcessAlive $dead -IsCiJobActive { param($owner) $false } -Sleep $noSleep
 tc_check 'TEST-CIDEPLOY-021c-confirmed-dead-ci-owner-can-be-replaced-with-incident-evidence' `
