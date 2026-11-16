@@ -1314,12 +1314,12 @@ $hilScen = [ordered]@{
     'authorized OWNER same-repository PR CI' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{}
         Expect = @{ 'hil' = 'success'; 'authorize' = 'success'; 'hil[Debug]' = 'success'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'success' } }
     'same-repository PR, authorization denied (non-OWNER, stale head, closed, behind master, staging skipped)' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' ''); Out = @{ 'authorize' = 'failure' }
-        Expect = @{ 'hil' = 'failure'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' } }
+        Expect = @{ 'hil' = 'skipped'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' } }
     'authorized PR, Release fails: acceptance runs and fails, gate reports' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{ 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' }
         Expect = @{ 'hil[Debug]' = 'success'; 'hil-acceptance' = 'failure'; 'hil-gate' = 'success' } }
     'upstream same-repository PR CI failed' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'failure' ''); Out = @{}; Expect = $prNotRun }
     'eligible, authorization denied (deploy-staging skipped, wrong SHA, stale, unprotected)' = @{ Vars = (New-WrVars 'push' 'master' 'success' ''); Out = @{ 'authorize' = 'failure' }
-        Expect = @{ 'hil' = 'failure'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped' } }
+        Expect = @{ 'hil' = 'skipped'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped' } }
     'Debug tests fail: Release still independently deployed and tested' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil-acceptance' = 'failure' }
         Expect = @{ 'hil[Release]' = 'success'; 'hil-acceptance' = 'failure' } }
     'Debug deployment left its runner needing operator: Release independently executes' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil-acceptance' = 'failure' }
