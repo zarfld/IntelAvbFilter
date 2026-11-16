@@ -1927,6 +1927,20 @@ $AllTests = @(
     },
 
     @{
+        Name = "test_tas_lifecycle_case_a"
+        Type = "cl"
+        Source = "tests\hardware\test_tas_lifecycle_case_a.c"
+        Output = "test_tas_lifecycle_case_a.exe"
+        Includes = "-I include -I external/intel_avb/lib"
+        Libs = "iphlpapi.lib ws2_32.lib advapi32.lib tdh.lib"
+        Enabled = $true
+        Priority = "P0"
+        Description = "#364 Case A: one real FilterPause and FilterRestart, NDIS state sequence, PHC and restoration facts"
+        Issue = "#364"
+        TestCases = 3
+    },
+
+    @{
         Name = "test_lifecycle_coverage"
         Type = "cl"
         Source = "tests\hardware\test_lifecycle_coverage.c"

@@ -610,7 +610,7 @@ Reading `TXQCTL`, `QBVCYCLET` and the windows from this test adds what the first
 
 `Disable-NetAdapter`, 5 s, `Enable-NetAdapter` on the I226, under the machine lock, then TC-TSNREG-001, read-only, log SHA256 c9f1d2f774d0efb3. Link Up. TC-TSNREG-001 PASS on 0x125B, 61 passed, 0 failed.
 
-All printed TSN registers read baseline: `TQAVCTRL` 0, `BASET_H` and `BASET_L` 0, `QBVCYCLET_S` 0, all `STQT`, `ENDQT` and `TXQCTL` 0, `QBVCYCLET` 0x3B9ACA00, `tasArmed=0`. So the second cycle cleared what the first left. TDH and TDT moved 904 to 961 over five samples and stayed equal, which shows descriptor progress only. The I226 then held a fresh DHCP lease, 157.247.2.12, about 70 s old at 13:50. A completed DHCP exchange needs frames to reach a server, so this is indirect evidence of TX. No I210 capture has shown it since recovery.
+All printed TSN registers read baseline: `TQAVCTRL` 0, `BASET_H` and `BASET_L` 0, `QBVCYCLET_S` 0, all `STQT`, `ENDQT` and `TXQCTL` 0, `QBVCYCLET` 0x3B9ACA00, `tasArmed=0`. So the second cycle cleared what the first left. TDH and TDT moved 904 to 961 over five samples and stayed equal, which shows descriptor progress only. The I226 then held a fresh DHCP lease, about 70 s old at 13:50. A completed DHCP exchange needs frames to reach a server, so this is indirect evidence of TX. No I210 capture has shown it since recovery.
 
 During the hold the adapter had only APIPA 169.254.98.208. That fits DHCP frames being held and the tool's socket failing to bind its earlier address, though the log did not print that address.
 
