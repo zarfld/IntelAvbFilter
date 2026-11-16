@@ -9,8 +9,7 @@ on:
       - '.github/workflows/hil.yml'
       - '.github/workflows/hil-matrix-hosted-verification.yml'
       - 'tools/lib/HilLock.ps1'
-      - 'tests/unit/ci/test_ci_driver_deploy.ps1'
-      - 'tests/unit/ci/test_hil_trust_boundary.ps1'
+      - 'tests/unit/ci/*.ps1'
 
 permissions:
   contents: read
