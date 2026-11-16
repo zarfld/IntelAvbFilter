@@ -46,9 +46,9 @@ jobs:
               '    needs: [authorize]',
               '      fail-fast: false',
               '        configuration: [Debug, Release]',
-              '      HIL_CONFIGURATION: ${{ matrix.configuration }}',
-              'name: hil-staged-${{ matrix.configuration }}',
-              'name: hil-evidence-${{ matrix.configuration }}',
+              '      HIL_CONFIGURATION: ' + ' + '{{ matrix.configuration }}',
+              'name: hil-staged-' + ' + '{{ matrix.configuration }}',
+              'name: hil-evidence-' + ' + '{{ matrix.configuration }}',
           )
           for item in expected:
               if item not in job:
