@@ -21,6 +21,7 @@ Abstract:
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 #include "intel-ethernet-regs/gen/i226_regs.h"  // SSOT register definitions
 #include "i226_tas_activate.h"                  // First TAS schedule, shared with its offline cases (#357)
+#include "i226_tas_query.h"                     // Read-only TAS hardware query, contract #365 (#350)
 
 // Application-specific constants
 #define I226_FREQOUT0_1MHZ      1000        // 1 µs half-cycle (1 MHz clock) - application value
@@ -633,6 +634,26 @@ static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request,
            request->pre_activation, (unsigned long long)request->base_time_ns, request->cycle_ns, request->reserved, outcome,
            request->result, *tsn_mode_written, (unsigned long long)request->phc_at_commit_ns);
     return outcome;
+}
+
+/** Read-only TAS hardware query (#350, contract #365). Reads only: the I/O carries no write function */
+static int query_tas(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int running, int mmio, uint32_t record,
+                     int op_in_progress)
+{
+    I226_TAS_IO io;
+
+    io.ctx = dev;
+    io.read = activate_read;
+    io.write = NULL;
+    io.phc = activate_phc;
+    io.fault_injection = 0;
+    i226_tas_query(&io, running, mmio, (avb_u32)record, op_in_progress, reply);
+    DEBUGP(DL_ERROR, "!!! [#350] TAS query: running=%d mmio=%d record=%u busy=%d hw_read=%u mode=%u current=%u/0x%X next=%u/0x%X "
+           "restoration=%u snap=0x%X failed=0x%X dtx=%u/%u\n", running, mmio, record, op_in_progress, reply->hw_read,
+           reply->hw_mode, reply->current_status, reply->current_reasons, reply->next_status, reply->next_reasons,
+           reply->restoration, reply->snapshot_reasons, reply->regs.read_failed, reply->dtx_max_frame_bytes,
+           reply->dtx_max_frame_state);
+    return 0;
 }
 
 /**
@@ -1679,6 +1700,7 @@ const intel_device_ops_t i226_ops = {
     // TSN operations - clean generic names
     .setup_tas = setup_tas,
     .activate_tas = activate_tas,
+    .query_tas = query_tas,
     .disable_tas = disable_tas,
 #if DBG
     .trace_tx_state = trace_tx_state,

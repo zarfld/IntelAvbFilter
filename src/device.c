@@ -764,6 +764,7 @@ IntelAvbFilterDeviceIoControl(
         case IOCTL_AVB_GET_TAS_STATE:             // Fix #328: test-state-restoration readback (code 65)
         case IOCTL_AVB_DISARM_TAS:                // Fix #328: test-state-restoration disarm (code 66)
         case IOCTL_AVB_QUERY_HW_SNAPSHOT:         // HIL restoration verification (code 70); bound handles only, see gate
+        case IOCTL_AVB_TAS_QUERY_HW:              // Implements #350 (read-only TAS hardware query, 0x80B); bound handles only, see gate
         {
             // MULTI-ADAPTER: Use the adapter context stored in FsContext (set by OPEN_ADAPTER)
             // This ensures IOCTLs are routed to the correct adapter in multi-adapter scenarios
@@ -782,6 +783,12 @@ IntelAvbFilterDeviceIoControl(
                 /* QUERY_HW_SNAPSHOT is exact-target only: an unbound handle is refused, never served by whichever
                  * adapter the fallback below would pick (HIL restoration verification, Q 2026-10-22). */
                 if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_QUERY_HW_SNAPSHOT) {
+                    Status = STATUS_INVALID_DEVICE_STATE;
+                    break;
+                }
+                /* The TAS query is exact-target only (#365 12.1 row 1, #353, #367): an unbound handle is refused here,
+                 * before the fallback adapter search, lazy initialization, context use or MMIO */
+                if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AVB_TAS_QUERY_HW) {
                     Status = STATUS_INVALID_DEVICE_STATE;
                     break;
                 }

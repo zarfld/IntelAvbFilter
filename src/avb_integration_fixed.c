@@ -1877,7 +1877,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
     // On-demand initialization: only initialize on first IOCTL, not at driver load
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER)
+    /* IOCTL_AVB_TAS_QUERY_HW is an observation like GET_HW_STATE: never initializes, never STATUS_DEVICE_NOT_READY; an
+     * adapter it cannot read is reported in the reply (hw_read NOT_RUNNING / NO_MMIO, #365 12.1, 12.3) */
+    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER && code != IOCTL_AVB_TAS_QUERY_HW)
         return STATUS_DEVICE_NOT_READY;
 
     // Implements #270 (TEST-STATISTICS-001): count every IOCTL dispatch before
@@ -4111,6 +4113,52 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         break;
     
     // Implements #18 (REQ-F-HWCTX-001: Hardware State Machine)
+    case IOCTL_AVB_TAS_QUERY_HW:
+        /* Read-only TAS hardware query (#350), contract #365 "Query v1 contract". device.c routes bound handles only and
+         * refuses an unbound one with STATUS_INVALID_DEVICE_STATE before any fallback (12.1 row 1). Checks in the 12.1
+         * order; on any error IoStatus.Information is 0 and nothing is written. The system buffer is used directly: no
+         * ProbeForWrite. Never writes a register, never takes the TAS claim, never blocks: a held claim is reported as
+         * OP_IN_PROGRESS. Not reported in v1 (0 or their "not reported" value): origin, gate_policy, revision (K9), link
+         * speed (K8), context epoch and generation (#352), tiers other than PASS (#351), legacy conflicts (#355); the #352
+         * operation store does not exist, so a lookup is NOT_IMPLEMENTED, never NOT_FOUND. */
+        if (buf == NULL || inLen < sizeof(AVB_TAS_QUERY_HW_REQUEST) || outLen < sizeof(AVB_TAS_QUERY_HW_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            PAVB_TAS_QUERY_HW_REQUEST q = (PAVB_TAS_QUERY_HW_REQUEST)buf;
+            const intel_device_ops_t *ops = intel_get_device_ops(currentContext->intel_device.device_type);
+
+            if (q->version != AVB_TAS_QUERY_VERSION) {
+                status = STATUS_REVISION_MISMATCH;
+            } else if (q->size != (avb_u32)sizeof(AVB_TAS_QUERY_HW_REQUEST)) {
+                status = STATUS_INVALID_PARAMETER;
+            } else if (!(currentContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
+                status = STATUS_NOT_SUPPORTED;      /* capability evidenced absent for the bound adapter */
+            } else if (ops == NULL || ops->query_tas == NULL) {
+                status = STATUS_NOT_IMPLEMENTED;    /* TAS-capable, but the family has no query register map */
+            } else {
+                avb_u64 lookup = q->lookup_client_op_id;
+                int running = currentContext->filter_instance != NULL && currentContext->filter_instance->State == FilterRunning;
+                int mmio = currentContext->hw_state >= AVB_HW_BAR_MAPPED && (currentContext->intel_device.capabilities & INTEL_CAP_MMIO) != 0;
+                int busy = InterlockedCompareExchange(&currentContext->tas_op_claim, 0, 0) != 0;
+                avb_u32 record = (avb_u32)InterlockedCompareExchange(&currentContext->tas_armed, 0, 0);
+
+                RtlZeroMemory(q, sizeof(*q));
+                q->version = AVB_TAS_QUERY_VERSION;
+                q->size = (avb_u32)sizeof(*q);
+                q->lookup_client_op_id = lookup;
+                q->net_luid = (currentContext->filter_instance != NULL) ? currentContext->filter_instance->MiniportNetLuid.Value : 0u;
+                q->vendor_id = (avb_u16)currentContext->intel_device.pci_vendor_id;
+                q->device_id = (avb_u16)currentContext->intel_device.pci_device_id;
+                q->flags = busy ? AVB_TAS_FLAG_OP_IN_PROGRESS : 0u;
+                q->lookup_result = (lookup == 0) ? AVB_TAS_LOOKUP_NOT_REQUESTED : AVB_TAS_LOOKUP_NOT_IMPLEMENTED;
+                q->legacy_conflicts = AVB_TAS_NOT_REPORTED_U32;
+                (void)ops->query_tas(&currentContext->intel_device, q, running, mmio, record, busy);
+                info = sizeof(*q);
+                status = STATUS_SUCCESS;
+            }
+        }
+        break;
+
     case IOCTL_AVB_QUERY_HW_SNAPSHOT:
         /* Read-only HIL restoration verification (Q 2026-10-22), Debug and Release.  device.c routes bound handles
          * only.  One entry per AVB_HWREG_* id: the family's intel-ethernet-regs offset map (device HAL) selects the

@@ -1,0 +1,221 @@
+/*
+ * i226_tas_query.h - hardware part of IOCTL_AVB_TAS_QUERY_HW v1 on the I226 (#350; contract #365 "Query v1 contract").
+ *
+ * Read-only: only io->read and io->phc are called, never io->write. Every offset, field mask, scale and observed baseline
+ * comes from intel-ethernet-regs/gen/i226_regs.h (SSOT); this file contains no register constant of its own.
+ *
+ * One bounded pass (#365 12.3, decision 3A): PHC before, the v1 register set in AVB_TAS_REGS bit order with BASET read
+ * H, L, H (one repeat when the two H reads differ; still different: BASET_TORN), PHC after. A failed read leaves the value 0
+ * and sets its read_failed bit; nothing is filled from the driver record. Without a Running filter or without MMIO access
+ * nothing is read at all.
+ *
+ * Status (#365 12.4): S1 unobservable inputs give UNKNOWN. The driver record is the interim three-valued state of #362
+ * decision 5 (CLEAN, ARMED, DIRTY). This driver retains no commit timing yet (C6, fed by the activation of #357), and no
+ * record field is held for the field-specific reconciliation, so a record that is not CLEAN gives current UNKNOWN
+ * COMMIT_INFO_LOST and next UNKNOWN SLOT_UNATTRIBUTED: what cannot be established stays UNKNOWN. Without a record: R3
+ * (TSN on, windows off their baseline or shadow non-zero) gives current INCONSISTENT HW_ARMED_NO_RECORD and next UNKNOWN
+ * SLOT_UNATTRIBUTED; R4 gives NONE and NONE. BaseT is reported only; it is used for BASE_FAR_AHEAD in R3 and for
+ * BASET_TORN, never compared with a target. HARDWARE_VERIFIED is never set (#381).
+ *
+ * Restoration (#365 12.5) is advisory, from the SSOT observed baselines only; ENDQT accepts its _ALT value only as the
+ * DES-C-TAS-010 3.6 window alternative. DTXMXPKTSZ is read and decoded with its mask and _SCALE, never substituted.
+ */
+#pragma once
+#include "i226_tas_activate.h"   /* I226_TAS_IO, include/avb_ioctl.h, intel-ethernet-regs/gen/i226_regs.h */
+
+#define I226_TAS_QUERY_REGS      18u                 /* AVB_TAS_REGS read_failed bits 0 to 17 */
+#define I226_TAS_QUERY_ALL_REGS  ((1u << I226_TAS_QUERY_REGS) - 1u)
+#define I226_TAS_QUERY_SCHED     ((1u << 17) - 1u)   /* bits 0 to 16: every register but DTXMXPKTSZ, the status inputs */
+#define I226_TAS_QUERY_BIT_DTX   (1u << 17)
+
+#define I226_TAS_Q_FIELD(REG, FIELD, value) ((avb_u32)REG##_GET((value), REG##_##FIELD##_MASK, REG##_##FIELD##_SHIFT))
+
+/* Reads one register into *slot; on failure *slot is 0 and its read_failed bit is set */
+static __inline void i226_tas_query_read(const I226_TAS_IO *io, avb_u32 offset, avb_u32 bit, avb_u32 *slot, avb_u32 *failed)
+{
+    avb_u32 v = 0;
+    if (io->read(io->ctx, offset, &v) != 0) {
+        *slot = 0;
+        *failed |= (1u << bit);
+    } else {
+        *slot = v;
+    }
+}
+
+/** Windows at the family baseline on every queue: STQT at its baseline, ENDQT at its baseline or, only as the window
+ *  alternative of DES-C-TAS-010 3.6, at _ALT */
+static __inline int i226_tas_query_windows_baseline(const AVB_TAS_REGS *g)
+{
+    unsigned q;
+    for (q = 0; q < AVB_TAS_QUEUES; q++) {
+        if (g->stqt[q] != I226_STQT_BASELINE || (g->endqt[q] != I226_ENDQT_BASELINE && g->endqt[q] != I226_ENDQT_BASELINE_ALT)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/**
+ * Fills the hardware fields of q: hw_read, hw_mode, regs, phc bracket, dtx, limits, slot statuses and reasons,
+ * snapshot_reasons, restoration, current_commit and next_commit. The caller has zeroed q and set version, size,
+ * lookup_client_op_id, identity, flags, lookup_result and legacy_conflicts.
+ * running: the filter is Running. mmio: the BAR is mapped and INTEL_CAP_MMIO is set. record: AVB_TAS_STATE_*.
+ * op_in_progress: a TAS operation holds the adapter's claim (the slots are then not advanced, #362).
+ */
+static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio, avb_u32 record, int op_in_progress,
+                                    AVB_TAS_QUERY_HW_REQUEST *q)
+{
+    AVB_TAS_REGS *g = &q->regs;
+    avb_u32 failed = 0, snap = 0, h2 = 0, tries, k;
+    avb_u64 phc = 0;
+    int phc_before_ok = 0, phc_after_ok = 0, read_done = 0, tsn = 0, s1;
+
+    /* Constants of v1 (#365 12.2): one window per queue; cycle limits not reported (the SSOT field carries no units); the
+     * lead the driver enforces now, not established; tiers not reported until the #351 table, PASS not implemented (#363) */
+    q->limits.queues = AVB_TAS_QUEUES;
+    q->limits.windows_per_queue = 1u;
+    q->limits.min_margin_ns = AVB_TAS_MIN_LEAD_NS;
+    q->limits.min_margin_state = AVB_TAS_LIMIT_NOT_ESTABLISHED;
+    q->limits.tier_pass = AVB_TAS_TIER_NOT_IMPLEMENTED;
+    q->next_commit.state = AVB_TAS_COMMIT_NONE;
+
+    if (!running) {
+        q->hw_read = AVB_TAS_HWREAD_NOT_RUNNING;
+        snap |= AVB_TAS_SNAP_RSN_NOT_RUNNING;
+        failed = I226_TAS_QUERY_ALL_REGS;
+    } else if (!mmio) {
+        q->hw_read = AVB_TAS_HWREAD_NO_MMIO;
+        snap |= AVB_TAS_SNAP_RSN_NO_MMIO;
+        failed = I226_TAS_QUERY_ALL_REGS;
+    } else {
+        read_done = 1;
+        if (io->phc(io->ctx, &phc) == 0) {
+            q->phc_before_ns = phc;
+            phc_before_ok = 1;
+        }
+        i226_tas_query_read(io, I226_TQAVCTRL, 0, &g->tqavctrl, &failed);
+        /* BASET: H, L, H; one repeat when the H reads differ */
+        for (tries = 0; tries < 2u; tries++) {
+            avb_u32 f = 0;
+            i226_tas_query_read(io, I226_BASET_H, 2, &g->baset_h, &f);
+            i226_tas_query_read(io, I226_BASET_L, 1, &g->baset_l, &f);
+            i226_tas_query_read(io, I226_BASET_H, 2, &h2, &f);
+            if (f != 0) {
+                failed |= f;
+                g->baset_h = (f & (1u << 2)) ? 0 : g->baset_h;
+                g->baset_l = (f & (1u << 1)) ? 0 : g->baset_l;
+                break;
+            }
+            if (h2 == g->baset_h) {
+                break;
+            }
+            if (tries == 1u) {
+                g->consistency |= AVB_TAS_CONS_BASET_TORN;
+                snap |= AVB_TAS_SNAP_RSN_READ_INCONSISTENT;
+            }
+        }
+        i226_tas_query_read(io, I226_QBVCYCLET, 3, &g->qbvcyclet, &failed);
+        i226_tas_query_read(io, I226_QBVCYCLET_S, 4, &g->qbvcyclet_s, &failed);
+        i226_tas_query_read(io, I226_STQT0, 5, &g->stqt[0], &failed);
+        i226_tas_query_read(io, I226_STQT1, 6, &g->stqt[1], &failed);
+        i226_tas_query_read(io, I226_STQT2, 7, &g->stqt[2], &failed);
+        i226_tas_query_read(io, I226_STQT3, 8, &g->stqt[3], &failed);
+        i226_tas_query_read(io, I226_ENDQT0, 9, &g->endqt[0], &failed);
+        i226_tas_query_read(io, I226_ENDQT1, 10, &g->endqt[1], &failed);
+        i226_tas_query_read(io, I226_ENDQT2, 11, &g->endqt[2], &failed);
+        i226_tas_query_read(io, I226_ENDQT3, 12, &g->endqt[3], &failed);
+        i226_tas_query_read(io, I226_TXQCTL0, 13, &g->txqctl[0], &failed);
+        i226_tas_query_read(io, I226_TXQCTL1, 14, &g->txqctl[1], &failed);
+        i226_tas_query_read(io, I226_TXQCTL2, 15, &g->txqctl[2], &failed);
+        i226_tas_query_read(io, I226_TXQCTL3, 16, &g->txqctl[3], &failed);
+        i226_tas_query_read(io, I226_DTXMXPKTSZ, 17, &g->dtxmxpktsz, &failed);
+        if (io->phc(io->ctx, &phc) == 0) {
+            q->phc_after_ns = phc;
+            phc_after_ok = 1;
+        }
+        if (!phc_before_ok) { snap |= AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID; }
+        if (!phc_after_ok)  { snap |= AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID; }
+        if (failed != 0)    { snap |= AVB_TAS_SNAP_RSN_READ_FAILED; }
+        q->hw_read = (failed == 0 && phc_before_ok && phc_after_ok) ? AVB_TAS_HWREAD_READ : AVB_TAS_HWREAD_PARTIAL;
+    }
+    g->read_failed = failed;
+    q->snapshot_reasons = snap;
+
+    /* hw_mode from TQAVCTRL.TRANSMIT_MODE */
+    if (failed & 1u) {
+        q->hw_mode = AVB_TAS_HWMODE_UNREADABLE;
+    } else {
+        tsn = I226_TAS_Q_FIELD(I226_TQAVCTRL, TRANSMIT_MODE, g->tqavctrl) != 0;
+        q->hw_mode = tsn ? AVB_TAS_HWMODE_TSN : AVB_TAS_HWMODE_OFF;
+    }
+
+    /* DTXMXPKTSZ: read and decoded with the SSOT mask and _SCALE (#362 decision 1) */
+    if (!read_done) {
+        q->dtx_max_frame_state = AVB_TAS_DTX_NOT_READ;
+    } else if (failed & I226_TAS_QUERY_BIT_DTX) {
+        q->dtx_max_frame_state = AVB_TAS_DTX_READ_FAILED;
+    } else {
+        q->dtx_max_frame_bytes = I226_TAS_Q_FIELD(I226_DTXMXPKTSZ, MAX_TPKT_SIZE, g->dtxmxpktsz) * I226_DTXMXPKTSZ_MAX_TPKT_SIZE_SCALE;
+        q->dtx_max_frame_state = AVB_TAS_DTX_DECODED;
+    }
+
+    /* Restoration, advisory (#365 12.5): never a proof of a clean adapter, restoration or TX */
+    if ((failed & I226_TAS_QUERY_SCHED) != 0) {
+        q->restoration = AVB_TAS_RESTORE_UNKNOWN;
+    } else if (!tsn) {
+        int at_baseline = g->tqavctrl == I226_TQAVCTRL_BASELINE && g->baset_l == I226_BASET_L_BASELINE &&
+                          g->baset_h == I226_BASET_H_BASELINE && g->qbvcyclet == I226_QBVCYCLET_BASELINE &&
+                          g->qbvcyclet_s == I226_QBVCYCLET_S_BASELINE && i226_tas_query_windows_baseline(g);
+        for (k = 0; at_baseline && k < AVB_TAS_QUEUES; k++) {
+            at_baseline = g->txqctl[k] == I226_TXQCTL_BASELINE;
+        }
+        q->restoration = at_baseline ? AVB_TAS_RESTORE_COMPLETE : AVB_TAS_RESTORE_PARTIAL_RESIDUE;
+    } else {
+        avb_u32 cycle = I226_TAS_Q_FIELD(I226_QBVCYCLET, QBV_CYCLE_TIME, g->qbvcyclet);
+        int open_all = cycle != 0;
+        for (k = 0; open_all && k < AVB_TAS_QUEUES; k++) {
+            open_all = I226_TAS_Q_FIELD(I226_STQT, START_TIME, g->stqt[k]) == 0 &&
+                       I226_TAS_Q_FIELD(I226_ENDQT, END_TIME, g->endqt[k]) >= cycle;
+        }
+        q->restoration = open_all ? AVB_TAS_RESTORE_PARTIAL_OPEN_ALL : AVB_TAS_RESTORE_NONE;
+    }
+
+    /* Slot statuses (#365 12.4) */
+    s1 = !read_done || (failed & I226_TAS_QUERY_SCHED) != 0 || (snap & (AVB_TAS_SNAP_RSN_READ_INCONSISTENT |
+         AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID | AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID | AVB_TAS_SNAP_RSN_EVENT_UNRECONCILED)) != 0 ||
+         op_in_progress;
+    if (record != AVB_TAS_STATE_CLEAN) {
+        /* A record exists but no commit timing is retained (C6): the bracket stays 0 (#365 12.2) */
+        q->current_commit.state = AVB_TAS_COMMIT_LOST;
+    } else {
+        q->current_commit.state = AVB_TAS_COMMIT_NONE;
+    }
+    if (s1) {
+        q->current_status = AVB_TAS_ST_UNKNOWN;
+        q->next_status = AVB_TAS_ST_UNKNOWN;
+    } else if (record != AVB_TAS_STATE_CLEAN) {
+        q->current_status = AVB_TAS_ST_UNKNOWN;
+        q->current_reasons = AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST;
+        q->next_status = AVB_TAS_ST_UNKNOWN;
+        q->next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+    } else {
+        int windows_base = i226_tas_query_windows_baseline(g);
+        int shadow_zero = g->qbvcyclet_s == I226_QBVCYCLET_S_BASELINE;
+        if (tsn || !windows_base || !shadow_zero) {
+            /* R3: hardware state without a record */
+            avb_u32 cycle = I226_TAS_Q_FIELD(I226_QBVCYCLET, QBV_CYCLE_TIME, g->qbvcyclet);
+            avb_u64 baset = (avb_u64)g->baset_h * 1000000000ULL + I226_TAS_Q_FIELD(I226_BASET_L, BASE_TIME_L, g->baset_l);
+            q->current_status = AVB_TAS_ST_INCONSISTENT;
+            q->current_reasons = AVB_TAS_SLOT_RSN_HW_ARMED_NO_RECORD;
+            if (cycle != 0 && baset > q->phc_after_ns + 2ULL * cycle) {
+                q->current_reasons |= AVB_TAS_SLOT_RSN_BASE_FAR_AHEAD;
+            }
+            q->next_status = AVB_TAS_ST_UNKNOWN;
+            q->next_reasons = AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED;
+        } else {
+            /* R4: no record, TSN off, windows at baseline, shadow 0. BaseT may be non-zero: residue, reported only */
+            q->current_status = AVB_TAS_ST_NONE;
+            q->next_status = AVB_TAS_ST_NONE;
+        }
+    }
+}
