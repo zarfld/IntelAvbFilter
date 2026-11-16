@@ -408,12 +408,13 @@ tc_check 'TEST-CIDEPLOY-046-skiptrustcheck-seam-is-refused-under-github-actions-
 # A job lost during installation (runner connection interrupted by netcfg, #328): its lock and IN_FLIGHT record stay
 # on the machine (RUNNER_TEMP does not survive the next job); the next deployment attributes both.
 $lostLock = Join-Path $Tmp 'lost.lock'
-[System.IO.File]::WriteAllText($lostLock, ([ordered]@{ kind = 'ci'; label = 'hil Debug'; host = $env:COMPUTERNAME; pid = 1; runId = '590'; runAttempt = '1'; job = 'hil-debug'; acquiredUtc = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o') } | ConvertTo-Json))
+[System.IO.File]::WriteAllText($lostLock, ([ordered]@{ kind = 'ci'; label = 'hil Debug'; host = $env:COMPUTERNAME; pid = 1; runId = '590'; runAttempt = '1'; job = 'hil'; configuration = 'Debug'; runnerWorkerPid = 999999; runnerWorkerStartedUtc = '2026-10-28T23:52:19.0000000Z'; acquiredUtc = (Get-Date).AddHours(-1).ToUniversalTime().ToString('o') } | ConvertTo-Json))
 [System.IO.File]::WriteAllText("$lostLock.inflight.json", ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = 'Debug'; verdict = 'IN_FLIGHT'; reason = 'installation started' } | ConvertTo-Json))
 $oLost = Invoke-Orch 'afterlost' $pOk -LockFile $lostLock
 $after = Get-Content -LiteralPath "$lostLock.inflight.json" -Raw | ConvertFrom-Json
 tc_check 'TEST-CIDEPLOY-044-lost-job-lock-and-in-flight-record-are-attributed-by-the-next-deployment' `
     (($null -ne $oLost.Dep) -and ($oLost.Dep.previousDeployment.verdict -eq 'IN_FLIGHT') -and ($oLost.Dep.lock.previousOwner.owner.runId -eq '590') -and
+     ($oLost.Dep.lock.previousOwner.owner.runnerWorkerPid -eq 999999) -and
      ($after.verdict -eq $oLost.Dep.verdict) -and ($after.verdict -ne 'IN_FLIGHT')) `
     ("prev={0} prevOwner={1} inflight-now={2}" -f $(if ($oLost.Dep) { $oLost.Dep.previousDeployment.verdict }), $(if ($oLost.Dep) { $oLost.Dep.lock.previousOwner.owner.runId }), $after.verdict)
 $hilSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
