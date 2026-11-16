@@ -1024,19 +1024,19 @@ tc_check 'TEST-HILTRUST-REAL-006-self-hosted-jobs-least-privilege-environment-se
 tc_check 'TEST-HILTRUST-REAL-014-no-manual-dispatch-reaches-the-hil-runner' ($realDisp.Count -eq 0) (Show-Findings $realDisp)
 tc_check 'TEST-HILTRUST-REAL-015-failed-upstream-ci-cannot-reach-the-hil-runner' ($realUpFail.Count -eq 0) (Show-Findings $realUpFail)
 
-# Only hil.yml's two physical stages reach a self-hosted runner, each leg only after a successful master push CI
+# Only hil.yml's two physical matrix legs reach the self-hosted runner, each only after authorized CI.
 # (post-merge confirmation) or a successful same-repository PR CI behind authorize (mandatory pre-merge gate).
 $ciRel  = '.github/workflows/ci-standards-compliance.yml'
 $hilRel = '.github/workflows/hil.yml'
-# One atomic physical job per configuration (deploy -> Mandatory/Unit/Integration), no matrix legs.
-$hilJobIds = @('hil-debug', 'hil-release')
+# One atomic physical matrix job with exactly Debug and Release configuration legs.
+$hilJobIds = @('hil')
 $authIssues = @()
 foreach ($jid in $hilJobIds) {
     $a = @($realAuth | Where-Object { $_.Job -eq "$hilRel/$jid" })
-    if ($a.Count -ne 1) { $authIssues += "${jid}: $($a.Count) authorized execution context(s) (expected exactly 1, no matrix legs)" }
-    if (@($a | Where-Object { $_.Event -ne 'workflow_run[upstream-master-push-success]' }).Count -gt 0) { $authIssues += "${jid}: authorized on $(@($a | ForEach-Object { $_.Event }) -join ',')" }
+    if ($a.Count -ne 2 -or (@($a | ForEach-Object { $_.Leg } | Sort-Object) -join ',') -ne 'configuration=Debug,configuration=Release') { $authIssues += "${jid}: expected exactly two authorized physical matrix legs, found $($a.Count): $(@($a | ForEach-Object { $_.Leg }) -join ',')" }
+    if (@($a | Where-Object { $_.Event -ne 'workflow_run[upstream-master-push-success]' }).Count -gt 0) { $authIssues += "${jid}: unexpected authorized event" }
     $ap = @($realAuthPr | Where-Object { $_.Job -eq "$hilRel/$jid" })
-    if ($ap.Count -ne 1 -or $ap[0].Event -ne 'workflow_run[upstream-same-repo-pr,upstream-same-repo-pr-from-master]') { $authIssues += "${jid}: pre-merge contexts $(@($ap | ForEach-Object { $_.Event }) -join ',') (expected exactly the same-repository PR contexts behind authorize)" }
+    if ($ap.Count -ne 2 -or (@($ap | ForEach-Object { $_.Leg } | Sort-Object) -join ',') -ne 'configuration=Debug,configuration=Release' -or @($ap | Where-Object { $_.Event -ne 'workflow_run[upstream-same-repo-pr,upstream-same-repo-pr-from-master]' }).Count -gt 0) { $authIssues += "${jid}: two independently authorized PR matrix legs required" }
 }
 $selfHostedJobs = @($realFindings | Where-Object { $_.Kind -in 'Authorized', 'AuthorizedPR', 'Reachable', 'Automatic', 'UpstreamFailed', 'UnauthorizedRef', 'ForeignRepo', 'Dispatch', 'Order', 'Governance' } | ForEach-Object { ($_.Job -split ' -> ')[0] } | Sort-Object -Unique)
 $expectedSelfHosted = @($hilJobIds | ForEach-Object { "$hilRel/$_" } | Sort-Object)
@@ -1129,17 +1129,14 @@ else {
     $rb = Join-Path $RepoRoot '.github\workflows\update-readme-status.yml'
     if (Test-Path -LiteralPath $rb) { $adds = @([regex]::Matches([IO.File]::ReadAllText($rb), '(?m)^\s*git add\s+(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value }); if (($adds -join ',') -ne 'README.md') { $azIssues += "update-readme-status.yml commits [$($adds -join ',')], not only README.md (metadata allow-list coupling)" } }
 }
-$expectedIf = @{
-    'hil-debug'   = "$wrGuardReal && needs.authorize.outputs.authorized == 'true'"
-    'hil-release' = "$wrGuardReal && needs.authorize.outputs.authorized == 'true'"
-}
-$expectedNeeds = @{ 'hil-debug' = 'authorize'; 'hil-release' = 'authorize' }
+$expectedIf = @{ 'hil' = "$wrGuardReal && needs.authorize.outputs.authorized == 'true'" }
+$expectedNeeds = @{ 'hil' = 'authorize' }
 foreach ($jid in $hilJobIds) {
     $j = $hilJobs[$jid]
     if ($null -eq $j) { $azIssues += "$jid missing"; continue }
-    if ((@($j['needs']) -join ',') -ne $expectedNeeds[$jid]) { $azIssues += "$jid needs [$(@($j['needs']) -join ',')] (expected [$($expectedNeeds[$jid])]; physical jobs independent)" }
+    if ((@($j['needs']) -join ',') -ne $expectedNeeds[$jid]) { $azIssues += "$jid needs [$(@($j['needs']) -join ',')] (expected [$($expectedNeeds[$jid])]; physical matrix depends on authorization only)" }
     if ("$($j['if'])".Trim() -cne $expectedIf[$jid]) { $azIssues += "$jid if is not the expected guard: $($j['if'])" }
-    if ($j.Contains('strategy')) { $azIssues += "${jid}: physical job has a matrix/strategy (configurations are separate serialized jobs)" }
+    $strat = $j['strategy']; if (-not ($strat -is [System.Collections.IDictionary]) -or "$($strat['fail-fast'])" -ne 'false' -or "$($strat['max-parallel'])" -ne '1' -or -not ($strat['matrix'] -is [System.Collections.IDictionary]) -or (@($strat['matrix']['configuration']) -join ',') -cne 'Debug,Release' -or (@($strat['matrix'].Keys) -join ',') -ne 'configuration') { $azIssues += "${jid}: expected exact Debug/Release matrix with fail-fast=false and max-parallel=1" }
     $first = @($j['steps'])[0]
     $fr = "$($first['run'])"
     if ("$($first['id'])" -ne 'hil-trusted-preflight' -or $first.Contains('if') -or $first.Contains('continue-on-error')) { $azIssues += "${jid}: first step is not an unconditional hil-trusted-preflight" }
@@ -1154,18 +1151,19 @@ foreach ($jid in $hilJobIds) {
 $hilText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
 foreach ($v in @([regex]::Matches($hilText, '\bvars\.\w+') | ForEach-Object { $_.Value } | Sort-Object -Unique)) { $azIssues += "hil.yml reads operator variable $v" }
 foreach ($v in 'HIL_AUTHORIZED_DRIVER_SHA256', 'HIL_BUGCHECK_ACK', 'HIL_HALT') { if ($hilText -match "\b$v\b") { $azIssues += "hil.yml still references $v" } }
-if ($hilJobs.Contains('hil-debug') -and $hilJobs.Contains('hil-release') -and
-    "$(@($hilJobs['hil-debug']['steps'])[0]['run'])" -cne "$(@($hilJobs['hil-release']['steps'])[0]['run'])") { $azIssues += 'hil-debug and hil-release preflights differ' }
-foreach ($jc in @(@{ J = 'hil-debug'; C = 'Debug'; S = 'staged_debug_sha256' }, @{ J = 'hil-release'; C = 'Release'; S = 'staged_release_sha256' })) {
-    if (-not $hilJobs.Contains($jc.J) -or -not $hilJobs[$jc.J].Contains('env')) { $azIssues += "$($jc.J): missing (or no env)"; continue }
-    $e = $hilJobs[$jc.J]['env']
-    if ("$($e['HIL_CONFIGURATION'])" -cne $jc.C -or "$($e['HIL_STAGED_DRIVER_SHA256'])" -ne "`${{ needs.authorize.outputs.$($jc.S) }}") { $azIssues += "$($jc.J): configuration / staged SHA256 not bound to $($jc.C)" }
+if ($hilJobs.Contains('hil-debug') -or $hilJobs.Contains('hil-release')) { $azIssues += 'legacy duplicate physical HIL jobs still present' }
+$h = $hilJobs['hil']
+$expectedDriverHash = "`${{ matrix.configuration == 'Debug' && needs.authorize.outputs.staged_debug_sha256 || needs.authorize.outputs.staged_release_sha256 }}"
+if ($null -eq $h -or -not $h.Contains('env')) { $azIssues += 'hil: matrix environment missing' }
+else {
+    $e = $h['env']
+    if ("$($e['HIL_CONFIGURATION'])" -cne '${{ matrix.configuration }}' -or "$($e['HIL_STAGED_DRIVER_SHA256'])" -cne $expectedDriverHash) { $azIssues += 'hil: configuration and signed staged SHA must be bound per matrix leg' }
 }
 $acc = $hilJobs['hil-acceptance']
 if ($null -eq $acc) { $azIssues += 'hil-acceptance missing' }
 else {
     if ("$($acc['runs-on'])" -ne 'ubuntu-latest') { $azIssues += 'hil-acceptance must be GitHub-hosted' }
-    if ((@($acc['needs']) -join ',') -ne 'authorize,hil-debug,hil-release') { $azIssues += "hil-acceptance needs [$(@($acc['needs']) -join ',')]" }
+    if ((@($acc['needs']) -join ',') -ne 'authorize,hil') { $azIssues += "hil-acceptance needs [$(@($acc['needs']) -join ',')]" }
     if ("$($acc['if'])" -notmatch '!cancelled\(\)' -or "$($acc['if'])" -notmatch "needs\.authorize\.outputs\.authorized == 'true'") { $azIssues += 'hil-acceptance condition' }
     if (-not ($acc['outputs'] -is [System.Collections.IDictionary]) -or "$($acc['outputs']['verdict'])" -ne '${{ steps.verdict.outputs.verdict }}') { $azIssues += 'hil-acceptance does not publish its verdict as output (the pre-merge gate requires it)' }
 }
@@ -1174,7 +1172,7 @@ $gate = $hilJobs['hil-gate']
 if ($null -eq $gate) { $azIssues += 'hil-gate missing' }
 else {
     if ("$($gate['runs-on'])" -ne 'ubuntu-latest') { $azIssues += 'hil-gate must be GitHub-hosted' }
-    if ((@($gate['needs']) -join ',') -ne 'authorize,hil-debug,hil-release,hil-acceptance') { $azIssues += "hil-gate needs [$(@($gate['needs']) -join ',')]" }
+    if ((@($gate['needs']) -join ',') -ne 'authorize,hil,hil-acceptance') { $azIssues += "hil-gate needs [$(@($gate['needs']) -join ',')]" }
     $gIf = "github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'"
     if ("$($gate['if'])".Trim() -cne "`${{ always() && $gIf }}") { $azIssues += "hil-gate if is not always() && $gIf (it must report every PR CI outcome, including skips): $($gate['if'])" }
     $gp = $gate['permissions']
@@ -1194,7 +1192,7 @@ tc_check 'TEST-HILTRUST-REAL-009-hil-starts-only-via-workflow-run-and-hosted-aut
 
 # Each physical stage builds and tests exactly the authorized upstream commit, in order, with isolated evidence.
 # Q 2026-11-03: exactly the two hardware suites, in the LocalSuites order.
-$expectedSuites = @{ 'hil-debug' = 'HardwareUnit,HardwareIntegration'; 'hil-release' = 'HardwareUnit,HardwareIntegration' }
+$expectedSuites = @{ 'hil' = 'HardwareUnit,HardwareIntegration' }
 $idIssues = @()
 foreach ($jid in $hilJobIds) {
     if (-not $hilJobs.Contains($jid)) { $idIssues += "$jid missing"; continue }
@@ -1212,7 +1210,9 @@ foreach ($jid in $hilJobIds) {
     # The package comes only from this run's authorize hand-over (no run-id / token: never another run's artifact).
     $dl = @($hSteps | Where-Object { $_ -is [System.Collections.IDictionary] -and "$($_['uses'])" -match '^actions/download-artifact@' })
     $cfgName = "$($hilJobs[$jid]['env']['HIL_CONFIGURATION'])"
-    if ($dl.Count -ne 1 -or "$($dl[0]['with']['name'])" -ne "hil-staged-$cfgName" -or $dl[0]['with'].Contains('run-id') -or $dl[0]['with'].Contains('github-token')) { $idIssues += "${jid}: must download exactly this run's hil-staged-$cfgName (no run-id/github-token)" }
+    if ($cfgName -cne '${{ matrix.configuration }}') { $idIssues += "${jid}: configuration is not matrix-bound" }; if ($dl.Count -ne 1 -or "$($dl[0]['with']['name'])" -cne "hil-staged-$cfgName" -or $dl[0]['with'].Contains('run-id') -or $dl[0]['with'].Contains('github-token')) { $idIssues += "${jid}: must retrieve only this run's per-configuration staged package" }
+    $up = @($hSteps | Where-Object { $_ -is [System.Collections.IDictionary] -and "$($_['uses'])" -match '^actions/upload-artifact@' })
+    if ($up.Count -ne 1 -or "$($up[0]['with']['name'])" -cne "hil-evidence-$cfgName") { $idIssues += "${jid}: upload must be unique per matrix configuration" }
     $runs = @($hSteps | ForEach-Object { if ($_ -is [System.Collections.IDictionary] -and $_.Contains('run')) { "$($_['run'])" } else { '' } })
     $idx = [ordered]@{}
     foreach ($k in 'git rev-parse HEAD\)\)\.Trim\(\)\s*\r?\n\s*if \(\$head -cne \$env:AVB_HIL_EXPECTED_REVISION\)', 'Invoke-HilDeployment\.ps1 -Action Deploy', 'Build-Tests\.ps1', 'Test-DriverPreFlight\.ps1', 'hil-run-identity\.json', 'Run-Tests-CI\.ps1') { $idx[$k] = [array]::FindIndex([string[]]$runs, [Predicate[string]]{ param($x) $x -match $k }) }
@@ -1823,7 +1823,7 @@ tc_check 'TEST-HILTRUST-REAL-017-pre-merge-gate-posts-success-only-for-passed-de
 # block; an absent or stopped driver does not - the deployment replaces it); former operator variables are ignored.
 # ---------------------------------------------------------------------------------------------------------
 $x16 = @()
-$pfRun = if ($null -ne $hilJobs['hil-debug']) { "$(@($hilJobs['hil-debug']['steps'])[0]['run'])" } else { '' }
+$pfRun = if ($null -ne $hilJobs['hil']) { "$(@($hilJobs['hil']['steps'])[0]['run'])" } else { '' }
 $isAdmin = (New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 $pfStubs = @'
 # Load the modules first: an autoload triggered later (e.g. by New-Object) would replace these stubs with the real,
@@ -1868,7 +1868,7 @@ $pfCases = [ordered]@{
     'not workflow_run'                      = @{ Set = @{ GITHUB_EVENT_NAME = 'push' }; Why = 'is not workflow_run' }
     'malformed revision'                    = @{ Set = @{ AVB_HIL_EXPECTED_REVISION = 'master' }; Why = 'is not a 40-hex commit id' }
 }
-if (-not $pfRun) { $x16 += 'hil-debug preflight missing' }
+if (-not $pfRun) { $x16 += 'hil matrix preflight missing' }
 else {
     $pfFile = Join-Path $script:Tmp 'preflight.ps1'
     [System.IO.File]::WriteAllText($pfFile, $pfStubs + "`r`n" + ($pfRun -replace "`r?`n", "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
@@ -1926,7 +1926,7 @@ foreach ($wfFile in @(Get-ChildItem $wfDir -File | Where-Object { $_.Extension -
         }
     }
 }
-# One dispatch site per suite and configuration: exactly hil.yml/hil-debug and hil.yml/hil-release.
+# One physical dispatch site per suite shared by both matrix configurations: hil.yml/hil.
 $wantSites = (@($hilJobIds | ForEach-Object { "hil.yml/$_" } | Sort-Object) -join ',')
 foreach ($kk in $sites.Keys) {
     if ((@($sites[$kk] | Sort-Object) -join ',') -ne $wantSites) { $evIssues += "suite $kk dispatched from [$($sites[$kk] -join ', ')] (expected exactly [$wantSites])" }
