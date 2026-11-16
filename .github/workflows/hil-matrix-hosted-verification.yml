@@ -1,0 +1,121 @@
+name: HIL Matrix Scheduling Contract (hosted-only, no hardware)
+
+# Read-only PR verification of GitHub's real matrix expansion and aggregation.
+# This does NOT install a driver, access a NIC, or constitute physical HIL evidence for REQ-NF-HIL-EXEC-001 (#441).
+# The physical HIL workflow is a workflow_run loaded from master; its replacement requires post-merge HIL.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hil.yml'
+      - '.github/workflows/hil-matrix-hosted-verification.yml'
+      - 'tools/lib/HilLock.ps1'
+      - 'tests/unit/ci/test_ci_driver_deploy.ps1'
+      - 'tests/unit/ci/test_hil_trust_boundary.ps1'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-matrix-leg:
+    name: Hosted matrix contract ${{ matrix.configuration }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - name: Check out PR verification sources (no persisted credentials)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Confirm workflow contract and publish this leg receipt
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, sys
+          wf = pathlib.Path('.github/workflows/hil.yml').read_text(encoding='utf-8').replace('\r\n', '\n')
+          begin, end = '\n  hil:\n', '\n  hil-acceptance:\n'
+          if wf.count(begin) != 1 or wf.count(end) != 1:
+              sys.exit('HIL must define exactly one physical job and one acceptance job')
+          job = wf.split(begin, 1)[1].split(end, 1)[0]
+          expected = (
+              '    needs: [authorize]',
+              '      fail-fast: false',
+              '        configuration: [Debug, Release]',
+              '      HIL_CONFIGURATION: ${{ matrix.configuration }}',
+              'name: hil-staged-${{ matrix.configuration }}',
+              'name: hil-evidence-${{ matrix.configuration }}',
+          )
+          for item in expected:
+              if item not in job:
+                  sys.exit('missing HIL matrix invariant: %s' % item)
+          if '\n  hil-debug:\n' in wf or '\n  hil-release:\n' in wf:
+              sys.exit('obsolete duplicate physical jobs still defined')
+          cfg = os.environ['CONFIGURATION']
+          if cfg not in ('Debug', 'Release'):
+              sys.exit('unexpected hosted matrix configuration %r' % cfg)
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'hil-matrix-check'
+          root.mkdir(parents=True, exist_ok=True)
+          receipt = {
+              'schema': 'hil-matrix-hosted-contract/1',
+              'configuration': cfg,
+              'runId': os.environ['GITHUB_RUN_ID'],
+              'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'sha': os.environ['GITHUB_SHA'],
+              'evidenceClass': 'hosted-scheduling-only',
+              'hardwareVerified': False,
+          }
+          (root / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
+          print('Hosted matrix %s: scheduling and static workflow contract verified; hardware not exercised' % cfg)
+          PY
+
+      - name: Upload independent scheduling receipt
+        uses: actions/upload-artifact@v6
+        with:
+          name: hil-matrix-check-${{ matrix.configuration }}
+          path: ${{ runner.temp }}/hil-matrix-check/receipt.json
+          if-no-files-found: error
+
+  verify-matrix-aggregation:
+    name: Hosted matrix both-configurations gate (not HIL acceptance)
+    runs-on: ubuntu-latest
+    needs: [verify-matrix-leg]
+    if: ${{ always() }}
+    timeout-minutes: 10
+    steps:
+      - name: Download receipts from this run only
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hil-matrix-check-*
+          path: hil-matrix-check
+
+      - name: Require exactly Debug and Release scheduling receipts
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, sys
+          root = pathlib.Path('hil-matrix-check')
+          if not root.is_dir():
+              sys.exit('no hosted matrix receipts; both legs are required')
+          actual = sorted(p.name for p in root.iterdir())
+          expected = ['hil-matrix-check-Debug', 'hil-matrix-check-Release']
+          if actual != expected:
+              sys.exit('missing or unexpected matrix legs: %r expected %r' % (actual, expected))
+          for cfg in ('Debug', 'Release'):
+              p = root / ('hil-matrix-check-' + cfg) / 'receipt.json'
+              try:
+                  receipt = json.loads(p.read_text(encoding='utf-8'))
+              except Exception as exc:
+                  sys.exit('%s receipt missing/unreadable: %s' % (cfg, exc))
+              expect = {'schema': 'hil-matrix-hosted-contract/1', 'configuration': cfg,
+                        'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                        'sha': os.environ['GITHUB_SHA'], 'evidenceClass': 'hosted-scheduling-only',
+                        'hardwareVerified': False}
+              if receipt != expect:
+                  sys.exit('%s matrix receipt mismatch: %r' % (cfg, receipt))
+          print('Both hosted Debug and Release matrix legs verified; NOT physical HIL acceptance')
+          PY
