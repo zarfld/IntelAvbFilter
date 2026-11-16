@@ -214,19 +214,36 @@ tc_check 'TEST-CIDEPLOY-019-nonzero-netcfg-exit-or-unresolved-state-after-uninst
 # ---------------------------------------------------------------------------------------------------------
 $lp = Join-Path $Tmp 'hil.lock'
 $alive = { param($Id) $true }; $dead = { param($Id) $false }; $noSleep = { param($s) }
-$env:GITHUB_RUN_ID = '500'; $env:GITHUB_RUN_ATTEMPT = '1'; $env:GITHUB_JOB = 'hil-debug'
+$env:GITHUB_RUN_ID = '500'; $env:GITHUB_RUN_ATTEMPT = '1'; $env:GITHUB_JOB = 'hil'; $env:HIL_CONFIGURATION = 'Debug'
 $a = Enter-AvbHilLock -Kind 'ci' -Label 'hil Debug' -Path $lp -IsProcessAlive $alive -Sleep $noSleep
 $env:GITHUB_RUN_ID = ''; $env:GITHUB_JOB = ''
 $b = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites' -Path $lp -WaitSeconds 30 -IsProcessAlive $dead -IsCiJobActive { $true } -Sleep $noSleep
 tc_check 'TEST-CIDEPLOY-020-operator-run-cannot-enter-while-a-ci-job-holds-the-machine' ($a.Ok -and -not $b.Ok -and $b.Why -match 'is executing on this runner' -and $b.Waited -eq 30) ("ci={0} local={1} why={2} waited={3}" -f $a.Ok, $b.Ok, $b.Why, $b.Waited)
-$env:GITHUB_RUN_ID = '500'; $env:GITHUB_JOB = 'hil-release'
-$c = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release' -Path $lp -IsProcessAlive $alive -Sleep $noSleep
-tc_check 'TEST-CIDEPLOY-021-lock-left-by-a-dead-ci-job-is-taken-over-with-the-previous-owner-recorded' `
-    ($c.Ok -and $null -ne $c.PreviousOwner -and $c.PreviousOwner.owner.job -eq 'hil-debug' -and $c.PreviousOwner.why -match 'did not release') ("ok={0} prev={1}" -f $c.Ok, $(if ($c.PreviousOwner) { $c.PreviousOwner.why }))
+
+# RED regression: GitHub's matrix legs have the SAME GITHUB_JOB but must never share lock ownership.
+# A live worker on a second runner instance is not a stale CI owner, even on the same physical host.
+$env:GITHUB_RUN_ID = '500'; $env:GITHUB_JOB = 'hil'; $env:HIL_CONFIGURATION = 'Release'
+$originalBytes = [IO.File]::ReadAllBytes($lp)
+$live = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release' -Path $lp -WaitSeconds 0 -IsProcessAlive $alive -IsCiJobActive { param($owner) $true } -Sleep $noSleep
+$stillOwned = (Test-Path -LiteralPath $lp) -and
+    ([Convert]::ToBase64String([IO.File]::ReadAllBytes($lp)) -eq [Convert]::ToBase64String($originalBytes))
+tc_check 'TEST-CIDEPLOY-021a-live-matrix-leg-lock-cannot-be-stolen-by-another-leg' `
+    ($a.Ok -and -not $live.Ok -and $stillOwned -and $null -eq $live.PreviousOwner) `
+    ("acquired={0} stolen={1} unchanged={2} reason={3}" -f $a.Ok, $live.Ok, $stillOwned, $live.Why)
+$alienCtx = Resolve-AvbHilLockContext -Path $lp -GitHub @{ runId = '500'; runAttempt = '1'; job = 'hil'; configuration = 'Release' } -Ancestors @()
+tc_check 'TEST-CIDEPLOY-021b-matrix-legs-with-the-same-job-name-have-distinct-lock-ownership' `
+    (-not $alienCtx.Owned) ("foreign lock owned={0} how={1}" -f $alienCtx.Owned, $alienCtx.How)
+
+# Proven interrupted owner: only a conclusive worker-exited check permits recorded stale takeover.
+$c = Enter-AvbHilLock -Kind 'ci' -Label 'hil Release' -Path $lp -WaitSeconds 0 -IsProcessAlive $dead -IsCiJobActive { param($owner) $false } -Sleep $noSleep
+tc_check 'TEST-CIDEPLOY-021c-confirmed-dead-ci-owner-can-be-replaced-with-incident-evidence' `
+    ($c.Ok -and $null -ne $c.PreviousOwner -and $c.PreviousOwner.owner.job -eq 'hil' -and
+     $c.PreviousOwner.why -match 'did not release|no longer running|confirmed') `
+    ("ok={0} prev={1}" -f $c.Ok, $(if ($c.PreviousOwner) { $c.PreviousOwner.why }))
 $x = Exit-AvbHilLock -Owner $a.Owner -Path $lp
 $y = Exit-AvbHilLock -Owner $c.Owner -Path $lp
 tc_check 'TEST-CIDEPLOY-022-only-the-owner-releases' ((-not $x.Ok) -and $y.Ok -and -not (Test-Path -LiteralPath $lp)) ("foreign={0} own={1}" -f $x.Why, $y.Ok)
-$env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''
+$env:GITHUB_RUN_ID = ''; $env:GITHUB_RUN_ATTEMPT = ''; $env:GITHUB_JOB = ''; $env:HIL_CONFIGURATION = ''
 $l1 = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites A' -Path $lp -IsProcessAlive $alive -Sleep $noSleep
 $l2 = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites B' -Path $lp -WaitSeconds 0 -IsProcessAlive $alive -Sleep $noSleep
 $l3 = Enter-AvbHilLock -Kind 'local' -Label 'LocalSuites C' -Path $lp -WaitSeconds 0 -IsProcessAlive $dead -Sleep $noSleep
