@@ -331,6 +331,19 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * state, so two of them can never interleave register writes, rollbacks or state updates. 0 free, 1 held. */
     volatile LONG tas_op_claim;
 
+    /* TAS operation sequence (#350): incremented right after a mutating TAS operation takes tas_op_claim and again right
+     * before it releases it (avb_tas_op_begin / avb_tas_op_end), so an odd value means one is running. The read-only
+     * IOCTL_AVB_TAS_QUERY_HW compares it before and after its register pass: any change, also an operation that started
+     * and finished in between, reports OP_IN_PROGRESS and UNKNOWN slots. Interlocked access only. */
+    volatile LONG tas_op_seq;
+
+    /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's MMIO pass (#350): the query holds it for its bounded pass only and
+     * reads nothing when it cannot be acquired. FilterPause runs it down before the timers stop and the adapter may be
+     * powered down, so no query MMIO happens once a pause has begun; FilterRestart re-arms it on success. Run down from
+     * allocation until the first successful restart. */
+    EX_RUNDOWN_REF tas_query_rundown;
+    volatile LONG tas_query_armed;   /* 1 between a successful FilterRestart and the next FilterPause: rundown re-armed */
+
     /* Last programmed TAS GCL parameters (valid when tas_armed==1).
      * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */
     struct tsn_tas_config last_tas_config;

@@ -12,8 +12,11 @@ extern "C" {
 /* ABI versioning for coordination across components */
 /* ABI 2.0: AVB_DRIVER_STATISTICS extended from 13 fields (104 bytes) to
  *          24 fields (192 bytes) to support lifecycle/datapath coverage.
- *          Old clients (v1.x) must be recompiled against this header. */
-#define AVB_IOCTL_ABI_VERSION 0x00020000u
+ *          Old clients (v1.x) must be recompiled against this header.
+ * ABI 2.1: IOCTL_AVB_TAS_QUERY_HW (0x0017602C) is served (#350). A compatible addition, so the minor version rises
+ *          (#64, DES-C-TAS-010 3.3); no existing structure or code changes. The query's own structure stays at
+ *          AVB_TAS_QUERY_VERSION 1, 536 bytes. */
+#define AVB_IOCTL_ABI_VERSION 0x00020001u
 
 /* Bring in SSOT TSN/PTM types */
 /* Relative include path (header lives in include/, external path is sibling) */

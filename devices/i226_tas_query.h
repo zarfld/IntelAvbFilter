@@ -135,6 +135,9 @@ static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio
         }
         if (!phc_before_ok) { snap |= AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID; }
         if (!phc_after_ok)  { snap |= AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID; }
+        if (phc_before_ok && phc_after_ok && q->phc_after_ns < q->phc_before_ns) {
+            snap |= AVB_TAS_SNAP_RSN_PHC_DISCONTINUITY;   /* a backward PHC move observed within this pass */
+        }
         if (failed != 0)    { snap |= AVB_TAS_SNAP_RSN_READ_FAILED; }
         q->hw_read = (failed == 0 && phc_before_ok && phc_after_ok) ? AVB_TAS_HWREAD_READ : AVB_TAS_HWREAD_PARTIAL;
     }

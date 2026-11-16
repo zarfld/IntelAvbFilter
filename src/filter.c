@@ -740,6 +740,15 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     pFilter->State = FilterPausing;
     FILTER_RELEASE_LOCK(&pFilter->Lock, bFalse);
 
+    /* #350: no TAS query MMIO once a pause has begun. A query holds the rundown for one bounded register pass only (it never
+     * waits inside), so this returns after at most that pass; later queries read nothing and report NOT_RUNNING. */
+    if (pFilter->AvbContext != NULL) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        if (InterlockedExchange(&avbCtx->tas_query_armed, 0) != 0) {
+            ExWaitForRundownProtectionRelease(&avbCtx->tas_query_rundown);
+        }
+    }
+
     //
     // Do whatever work is required to bring the filter into the Paused state.
     //
@@ -1054,6 +1063,15 @@ FilterRestart(
     /* BUGFIX 0x9F: restart timers if subscriptions survived the Pause/Restart cycle. */
     if (pFilter->AvbContext != NULL) {
         AvbRestartTimers((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+    }
+
+    /* #350: TAS query MMIO allowed again only now, after the hardware bring-up above (PHC reseed) has finished; only on a
+     * Running filter, and only re-armed when the previous pause (or the allocation) ran it down */
+    if (pFilter->AvbContext != NULL && Status == NDIS_STATUS_SUCCESS && pFilter->State == FilterRunning) {
+        PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
+        if (InterlockedCompareExchange(&avbCtx->tas_query_armed, 1, 0) == 0) {
+            ExReInitializeRundownProtection(&avbCtx->tas_query_rundown);
+        }
     }
 
     DEBUGP(DL_TRACE, "<===FilterRestart:  FilterModuleContext %p, Status %x\n", FilterModuleContext, Status);

@@ -20,7 +20,7 @@
 
 /* API version (manually set when API changes) */
 #define AVB_VERSION_MAJOR 1
-#define AVB_VERSION_MINOR 0
+#define AVB_VERSION_MINOR 1   /* 1.1: IOCTL_AVB_TAS_QUERY_HW served (#350, #64, DES-C-TAS-010 3.3) */
 
 /* Build number (should be set by CI/CD or build script) */
 #ifndef AVB_VERSION_BUILD

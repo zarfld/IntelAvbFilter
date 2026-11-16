@@ -152,8 +152,8 @@ static void test_abi_version(void)
                 "AVB_IOCTL_ABI_VERSION is non-zero");
     TEST_ASSERT((AVB_IOCTL_ABI_VERSION & 0xFFFF0000u) != 0u,
                 "AVB_IOCTL_ABI_VERSION major field (high 16 bits) is non-zero");
-    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020000u,
-                "AVB_IOCTL_ABI_VERSION == 0x00020000 (v2.0 - stats struct extended to 192 bytes)");
+    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020001u,
+                "AVB_IOCTL_ABI_VERSION == 0x00020001 (v2.1 - IOCTL_AVB_TAS_QUERY_HW served, #350; v2.0 stats struct 192 bytes)");
 }
 
 /* ---------------------------------------------------------------------------
