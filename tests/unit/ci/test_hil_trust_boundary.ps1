@@ -1269,7 +1269,18 @@ function Get-SimulatedResults($Jobs, [hashtable]$Vars, [hashtable]$Outcome) {
                 if (Test-Unk $g) { throw "undecidable if of ${jid}: $txt" }
                 $run = if ($txt -match '\b(success|always|failure|cancelled)\s*\(') { Test-Truthy $g } else { $allOk -and (Test-Truthy $g) }
             }
-            $res[$jid] = if ($run) { if ($Outcome.ContainsKey($jid)) { $Outcome[$jid] } else { 'success' } } else { 'skipped' }
+            if ($jid -eq 'hil' -and $job.Contains('strategy') -and $job['strategy'].Contains('matrix')) {
+                $legResults = @()
+                foreach ($cfg in @($job['strategy']['matrix']['configuration'])) {
+                    $key = "hil[$cfg]"
+                    $r = if (-not $run) { 'skipped' } elseif ($Outcome.ContainsKey($key)) { $Outcome[$key] } else { 'success' }
+                    $res[$key] = $r
+                    $legResults += $r
+                }
+                $res[$jid] = if (-not $run) { 'skipped' } elseif ($legResults -contains 'failure') { 'failure' } elseif ($legResults -contains 'cancelled') { 'cancelled' } elseif ($legResults -contains 'skipped') { 'failure' } else { 'success' }
+            } else {
+                $res[$jid] = if ($run) { if ($Outcome.ContainsKey($jid)) { $Outcome[$jid] } else { 'success' } } else { 'skipped' }
+            }
             [void]$pending.Remove($jid); $progress = $true
         }
         if (-not $progress) { throw "needs cycle or unknown need among: $($pending -join ',')" }
@@ -1284,7 +1295,6 @@ function New-WrVars([string]$UpEvent, [string]$UpBranch, [string]$UpConclusion, 
     $v['github.event.workflow_run.event'] = $UpEvent; $v['github.event.workflow_run.head_branch'] = $UpBranch
     $v['github.event.workflow_run.conclusion'] = $UpConclusion; $v['github.event.workflow_run.head_repository.full_name'] = $HeadRepo
     $v['needs.authorize.outputs.authorized'] = $Authorized
-    $v['needs.hil-debug.outputs.machine_ok'] = $(if ($Authorized -eq 'true') { 'true' } else { '' })
     return $v
 }
 function New-PrRunVars([string]$Base, [string]$HeadRepo, [string]$Association) {
@@ -1295,29 +1305,29 @@ function New-PrRunVars([string]$Base, [string]$HeadRepo, [string]$Association) {
 }
 function Set-Var([hashtable]$V, [string]$K, [string]$X) { $V[$K] = $X; return $V }
 $forkR = 'untrusted-fork/IntelAvbFilter'
-$allSkipped = @{ 'authorize' = 'skipped'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'skipped' }
+$allSkipped = @{ 'authorize' = 'skipped'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'skipped' }
 # Every PR CI completion is reported by the pre-merge gate (always), whether or not anything reached the HIL runner.
-$prNotRun = @{ 'authorize' = 'skipped'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' }
+$prNotRun = @{ 'authorize' = 'skipped'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' }
 $hilScen = [ordered]@{
     'authorized master push CI' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{}
-        Expect = @{ 'authorize' = 'success'; 'hil-debug' = 'success'; 'hil-release' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'skipped' } }
+        Expect = @{ 'hil' = 'success'; 'authorize' = 'success'; 'hil[Debug]' = 'success'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'skipped' } }
     'authorized OWNER same-repository PR CI' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{}
-        Expect = @{ 'authorize' = 'success'; 'hil-debug' = 'success'; 'hil-release' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'success' } }
+        Expect = @{ 'hil' = 'success'; 'authorize' = 'success'; 'hil[Debug]' = 'success'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'success'; 'hil-gate' = 'success' } }
     'same-repository PR, authorization denied (non-OWNER, stale head, closed, behind master, staging skipped)' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' ''); Out = @{ 'authorize' = 'failure' }
-        Expect = @{ 'authorize' = 'failure'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' } }
-    'authorized PR, Release fails: acceptance runs and fails, gate reports' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{ 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-debug' = 'success'; 'hil-acceptance' = 'failure'; 'hil-gate' = 'success' } }
+        Expect = @{ 'hil' = 'failure'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped'; 'hil-gate' = 'success' } }
+    'authorized PR, Release fails: acceptance runs and fails, gate reports' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true'); Out = @{ 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil[Debug]' = 'success'; 'hil-acceptance' = 'failure'; 'hil-gate' = 'success' } }
     'upstream same-repository PR CI failed' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'failure' ''); Out = @{}; Expect = $prNotRun }
     'eligible, authorization denied (deploy-staging skipped, wrong SHA, stale, unprotected)' = @{ Vars = (New-WrVars 'push' 'master' 'success' ''); Out = @{ 'authorize' = 'failure' }
-        Expect = @{ 'authorize' = 'failure'; 'hil-debug' = 'skipped'; 'hil-release' = 'skipped'; 'hil-acceptance' = 'skipped' } }
-    'Debug tests fail, machine healthy: Release still deployed and tested' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
-    'Debug deployment leaves its runner needing operator: Release uses its own machine state' = @{ Vars = (Set-Var (New-WrVars 'push' 'master' 'success' 'true') 'needs.hil-debug.outputs.machine_ok' 'false'); Out = @{ 'hil-debug' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-debug' = 'failure'; 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
-    'Debug job skipped: Release still independently executes; acceptance fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'skipped'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-debug' = 'skipped'; 'hil-release' = 'success'; 'hil-acceptance' = 'failure' } }
-    'Both configurations fail: acceptance still fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-debug' = 'failure'; 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-debug' = 'failure'; 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' } }
+        Expect = @{ 'hil' = 'failure'; 'authorize' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'skipped'; 'hil-acceptance' = 'skipped' } }
+    'Debug tests fail: Release still independently deployed and tested' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil[Release]' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Debug deployment left its runner needing operator: Release independently executes' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil' = 'failure'; 'hil[Debug]' = 'failure'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Debug matrix leg skipped: Release still independently executes; acceptance fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'skipped'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil' = 'failure'; 'hil[Debug]' = 'skipped'; 'hil[Release]' = 'success'; 'hil-acceptance' = 'failure' } }
+    'Both configurations fail: acceptance still fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Debug]' = 'failure'; 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil' = 'failure'; 'hil[Debug]' = 'failure'; 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' } }
     'upstream fork PR from its master' = @{ Vars = (New-WrVars 'pull_request' 'master' 'success' '' $forkR); Out = @{}; Expect = $prNotRun }
     'upstream fork PR, authorize output forged true' = @{ Vars = (New-WrVars 'pull_request' 'feature/x' 'success' 'true' $forkR); Out = @{}; Expect = $prNotRun }
     'upstream CI failed on master'     = @{ Vars = (New-WrVars 'push' 'master' 'failure' ''); Out = @{}; Expect = $allSkipped }
@@ -1325,8 +1335,8 @@ $hilScen = [ordered]@{
     'upstream feature push'            = @{ Vars = (New-WrVars 'push' 'feature/x' 'success' ''); Out = @{}; Expect = $allSkipped }
     'upstream tag push'                = @{ Vars = (New-WrVars 'push' 'v1.0.0' 'success' ''); Out = @{}; Expect = $allSkipped }
     'foreign repository'               = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true' $forkR $forkR); Out = @{}; Expect = $allSkipped }
-    'HIL Release fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil-release' = 'failure'; 'hil-acceptance' = 'failure' }
-        Expect = @{ 'hil-debug' = 'success'; 'hil-acceptance' = 'failure' } }
+    'HIL Release fails' = @{ Vars = (New-WrVars 'push' 'master' 'success' 'true'); Out = @{ 'hil[Release]' = 'failure'; 'hil-acceptance' = 'failure' }
+        Expect = @{ 'hil[Debug]' = 'success'; 'hil-acceptance' = 'failure' } }
 }
 $simIssues = @()
 foreach ($sn in $hilScen.Keys) {
