@@ -21,10 +21,15 @@
  *   PRESTATE       an observer handle bound by NET_LUID (OPEN_ADAPTER_BY_LUID binds only) sees AVB_HW_PTP_READY, readable
  *                  PTP state and an advancing PHC. Otherwise the READY scenarios do not apply here: BLOCKED.
  *   UT-DEV-INIT-001          first INIT_DEVICE on a new instance (own handle, bound by NET_LUID): exactly STATUS_SUCCESS.
- *   UT-DEV-INIT-002          the same instance again after its success: exactly STATUS_INVALID_DEVICE_STATE, no output.
- *   UT-DEV-INIT-SECOND (provisional ID, #313 amendment "second open instance on a READY adapter"): STATUS_SUCCESS.
- *   UT-DEV-OPEN-READY  (provisional ID, #313 amendment "OPEN_ADAPTER without hardware change"): IOCTL 32 selects the adapter
- *                  (the binding is verified through QUERY_HW_SNAPSHOT's NET_LUID), STATUS_SUCCESS.
+ *   UT-DEV-INIT-002          the same instance again after its success: exactly STATUS_INVALID_DEVICE_STATE, no output. Sent only
+ *                  after UT-DEV-INIT-001 succeeded (its precondition); otherwise BLOCKED, never run under a failed precondition.
+ *   UT-DEV-INIT-SECOND (provisional ID, #313 amendment "second open instance on a READY adapter"): STATUS_SUCCESS. Sent only
+ *                  after a first instance succeeded and the adapter is still READY; otherwise BLOCKED.
+ *   UT-DEV-OPEN-READY  (provisional ID, #313 amendment "OPEN_ADAPTER without hardware change"): IOCTL 32 selects the adapter.
+ *                  -STATUS is the raw result against the expected STATUS_SUCCESS (an error is FAIL); -BINDING separately
+ *                  verifies through the handle's own QUERY_HW_SNAPSHOT NET_LUID which adapter it is bound to (no evidence:
+ *                  BLOCKED). QUERY_HW_SNAPSHOT is always recorded raw (NTSTATUS, length, header, entry states), never
+ *                  interpreted.
  * After each request, from the observer handle (GET_CLOCK_CONFIG and, independently, QUERY_HW_SNAPSHOT), two lines:
  *   <case>-PHC     a healthy PTP clock is not reset. A backward step of SYSTIM establishes a reset (FAIL). No PHC tolerance is
  *                  approved, so no step back cannot prove continuity: INCONCLUSIVE, with the measured values.
@@ -792,13 +797,23 @@ void Test_PnPRemoveAndReAdd(TestContext *ctx) {
  * --init-contract (#313 amendment 2026-11-12, #404)
  *============================================================================*/
 
+/* QUERY_HW_SNAPSHOT as observed: raw NTSTATUS, returned length, header and the TIMINCA/TSAUXC entry states. Recorded, never
+ * interpreted: why a snapshot is unavailable is not inferred here */
+typedef struct {
+    LONG st;
+    DWORD got;
+    avb_u32 version, count, status;
+    avb_u64 net_luid;
+    avb_u32 timinca_state, tsauxc_state;
+    avb_u32 timinca, tsauxc;
+    BOOL ok;                /* complete header and both entries VALID */
+} IC_SNAP;
+
 typedef struct {
     LONG clk_st;            /* raw NTSTATUS of GET_CLOCK_CONFIG */
     BOOL clk_ok;
     AVB_CLOCK_CONFIG clk;
-    BOOL snap_ok;
-    avb_u32 snap_timinca, snap_tsauxc;
-    avb_u64 bound_luid;
+    IC_SNAP snap;
     BOOL hw_ok;
     avb_u32 hw_state;
     LARGE_INTEGER qpc;
@@ -854,11 +869,43 @@ static HANDLE ic_open_bound(avb_u64 luid)
     return h;
 }
 
+/** QUERY_HW_SNAPSHOT on h with its raw NTSTATUS, returned length, header and entry states */
+static void ic_snapshot(HANDLE h, IC_SNAP *r)
+{
+    AVB_HW_SNAPSHOT_REQUEST s;
+
+    ZeroMemory(r, sizeof(*r));
+    ZeroMemory(&s, sizeof(s));
+    s.version = AVB_HW_SNAPSHOT_VERSION;
+    r->st = avb_ioctl_ntstatus(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, &s, sizeof(s), &s, sizeof(s), &r->got);
+    if (r->st == 0 && r->got >= (DWORD)FIELD_OFFSET(AVB_HW_SNAPSHOT_REQUEST, entries)) {
+        r->version = s.version;
+        r->count = s.count;
+        r->status = s.status;
+        r->net_luid = s.net_luid;
+    }
+    if (r->st == 0 && r->got == sizeof(s) && s.count >= AVB_HWREG_TSAUXC) {
+        r->timinca_state = s.entries[AVB_HWREG_TIMINCA - 1].state;
+        r->tsauxc_state = s.entries[AVB_HWREG_TSAUXC - 1].state;
+        r->timinca = s.entries[AVB_HWREG_TIMINCA - 1].value;
+        r->tsauxc = s.entries[AVB_HWREG_TSAUXC - 1].value;
+    }
+    r->ok = r->st == 0 && r->got == sizeof(s) && r->version == AVB_HW_SNAPSHOT_VERSION && r->status == 0 &&
+            r->timinca_state == AVB_HWREG_STATE_VALID && r->tsauxc_state == AVB_HWREG_STATE_VALID;
+}
+
+static void ic_print_snapshot(const char *label, const IC_SNAP *r)
+{
+    printf("    [EVIDENCE] %s snapshot: ntstatus=0x%08lX information=%lu (expected %lu) version=%u count=%u status=0x%08X "
+           "luid=0x%016llX TIMINCA state=%u value=0x%08X TSAUXC state=%u value=0x%08X -> %s\n", label, (unsigned long)r->st, r->got,
+           (unsigned long)sizeof(AVB_HW_SNAPSHOT_REQUEST), r->version, r->count, r->status, r->net_luid, r->timinca_state,
+           r->timinca, r->tsauxc_state, r->tsauxc, r->ok ? "valid" : "unavailable");
+}
+
 /** Read-only observation through the observer handle: hw_state, GET_CLOCK_CONFIG and, independently, QUERY_HW_SNAPSHOT */
 static void ic_observe(HANDLE h, IC_OBS *o)
 {
     AVB_HW_STATE_QUERY hs;
-    AVB_HW_SNAPSHOT_REQUEST s;
     DWORD br = 0;
 
     ZeroMemory(o, sizeof(*o));
@@ -868,20 +915,10 @@ static void ic_observe(HANDLE h, IC_OBS *o)
     o->clk_st = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_CLOCK_CONFIG, &o->clk, sizeof(o->clk), &o->clk, sizeof(o->clk), &br);
     QueryPerformanceCounter(&o->qpc);
     o->clk_ok = o->clk_st == 0 && br == sizeof(o->clk) && o->clk.status == 0;
-    ZeroMemory(&s, sizeof(s));
-    s.version = AVB_HW_SNAPSHOT_VERSION;
-    if (DeviceIoControl(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, &s, sizeof(s), &s, sizeof(s), &br, NULL) && br == sizeof(s) &&
-        s.count >= AVB_HWREG_TSAUXC && s.entries[AVB_HWREG_TIMINCA - 1].state == AVB_HWREG_STATE_VALID &&
-        s.entries[AVB_HWREG_TSAUXC - 1].state == AVB_HWREG_STATE_VALID) {
-        o->snap_ok = TRUE;
-        o->snap_timinca = s.entries[AVB_HWREG_TIMINCA - 1].value;
-        o->snap_tsauxc = s.entries[AVB_HWREG_TSAUXC - 1].value;
-        o->bound_luid = s.net_luid;
-    }
-    printf("    [EVIDENCE] observe: hw_state=%u%s clock ntstatus=0x%08lX systim=%llu timinca=0x%08X tsauxc=0x%08X; snapshot %s "
-           "timinca=0x%08X tsauxc=0x%08X\n", o->hw_state, o->hw_ok ? "" : "(unread)", (unsigned long)o->clk_st,
-           o->clk_ok ? o->clk.systim : 0ULL, o->clk.timinca, o->clk.tsauxc, o->snap_ok ? "valid" : "unavailable",
-           o->snap_timinca, o->snap_tsauxc);
+    ic_snapshot(h, &o->snap);
+    printf("    [EVIDENCE] observe: hw_state=%u%s clock ntstatus=0x%08lX systim=%llu timinca=0x%08X tsauxc=0x%08X\n", o->hw_state,
+           o->hw_ok ? "" : "(unread)", (unsigned long)o->clk_st, o->clk_ok ? o->clk.systim : 0ULL, o->clk.timinca, o->clk.tsauxc);
+    ic_print_snapshot("observe", &o->snap);
 }
 
 static long long ic_wall_ns(const IC_OBS *a, const IC_OBS *b)
@@ -912,17 +949,19 @@ static void ic_ptp_lines(const char *cs, UINT32 index, avb_u16 did, const IC_OBS
     }
 
     sprintf_s(check, sizeof(check), "%s-TIMINCA", cs);
-    if (!b->clk_ok || !a->clk_ok || !b->snap_ok || !a->snap_ok) {
-        sprintf_s(reason, sizeof(reason), "TIMINCA not read in both paths before and after (clock %d/%d, snapshot %d/%d)",
-                  b->clk_ok, a->clk_ok, b->snap_ok, a->snap_ok);
+    if (!b->clk_ok || !a->clk_ok || !b->snap.ok || !a->snap.ok) {
+        sprintf_s(reason, sizeof(reason), "TIMINCA not read in both paths before and after: clock %d/%d; snapshot ntstatus 0x%08lX/0x%08lX "
+                  "information %lu/%lu TIMINCA state %u/%u (see the snapshot evidence lines)", b->clk_ok, a->clk_ok,
+                  (unsigned long)b->snap.st, (unsigned long)a->snap.st, b->snap.got, a->snap.got, b->snap.timinca_state,
+                  a->snap.timinca_state);
         ic_verdict("BLOCKED", check, index, did, reason);
-    } else if (a->clk.timinca != b->clk.timinca || a->snap_timinca != b->snap_timinca) {
+    } else if (a->clk.timinca != b->clk.timinca || a->snap.timinca != b->snap.timinca) {
         sprintf_s(reason, sizeof(reason), "frequency rewritten: TIMINCA 0x%08X -> 0x%08X (clock), 0x%08X -> 0x%08X (snapshot)",
-                  b->clk.timinca, a->clk.timinca, b->snap_timinca, a->snap_timinca);
+                  b->clk.timinca, a->clk.timinca, b->snap.timinca, a->snap.timinca);
         ic_verdict("FAIL", check, index, did, reason);
     } else {
         sprintf_s(reason, sizeof(reason), "TIMINCA 0x%08X unchanged in both reads (a rewrite with the same value is not detectable); "
-                  "TSAUXC 0x%08X -> 0x%08X, hw_state %u -> %u (evidence)", a->clk.timinca, b->snap_tsauxc, a->snap_tsauxc,
+                  "TSAUXC 0x%08X -> 0x%08X, hw_state %u -> %u (evidence)", a->clk.timinca, b->snap.tsauxc, a->snap.tsauxc,
                   b->hw_state, a->hw_state);
         ic_verdict("PASS", check, index, did, reason);
     }
@@ -959,8 +998,9 @@ static void ic_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_ADA
     const avb_u16 did = id->device_id;
     IC_OBS o0, o0b, o1, o2, o3, o4;
     HANDLE hO, hA, hB, hC;
-    DWORD got = 0, br = 0;
+    DWORD got = 0;
     LONG st;
+    BOOL init_ok;
     UINT32 k, ordinal = 0;
     char reason[320];
 
@@ -995,17 +1035,31 @@ static void ic_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_ADA
     ic_observe(hO, &o1);
     ic_status_line("UT-DEV-INIT-001", index, did, st, got, (LONG)STATUS_SUCCESS, FALSE);
     ic_ptp_lines("UT-DEV-INIT-001", index, did, &o0b, &o1);
+    init_ok = st == (LONG)STATUS_SUCCESS;
 
-    /* UT-DEV-INIT-002: the same instance again after its success */
-    st = ic_init(hA, &got);
-    ic_observe(hO, &o2);
-    ic_status_line("UT-DEV-INIT-002", index, did, st, got, (LONG)STATUS_INVALID_DEVICE_STATE, TRUE);
-    ic_ptp_lines("UT-DEV-INIT-002", index, did, &o1, &o2);
+    /* UT-DEV-INIT-002: the same instance again after its success. Its precondition is that success: after a failed first
+     * initialization the duplicate case does not exist, and "retry after failure" is #412's, not this case */
+    if (!init_ok) {
+        sprintf_s(reason, sizeof(reason), "precondition not met: the instance's first INIT_DEVICE did not succeed (ntstatus=0x%08lX); "
+                  "not sent", (unsigned long)st);
+        ic_verdict("BLOCKED", "UT-DEV-INIT-002-STATUS", index, did, reason);
+        o2 = o1;
+    } else {
+        st = ic_init(hA, &got);
+        ic_observe(hO, &o2);
+        ic_status_line("UT-DEV-INIT-002", index, did, st, got, (LONG)STATUS_INVALID_DEVICE_STATE, TRUE);
+        ic_ptp_lines("UT-DEV-INIT-002", index, did, &o1, &o2);
+    }
     CloseHandle(hA);
 
-    /* UT-DEV-INIT-SECOND (provisional ID): a second open instance on the READY adapter */
-    hB = ic_open_bound(id->net_luid);
-    if (hB == INVALID_HANDLE_VALUE) {
+    /* UT-DEV-INIT-SECOND (provisional ID): a second open instance on the READY adapter, after a first instance succeeded */
+    hB = INVALID_HANDLE_VALUE;
+    if (!init_ok || !o2.hw_ok || o2.hw_state != AVB_HW_PTP_READY) {
+        sprintf_s(reason, sizeof(reason), "precondition not met: first instance initialized %d, adapter READY %d (hw_state %u); not sent",
+                  init_ok, o2.hw_ok && o2.hw_state == AVB_HW_PTP_READY, o2.hw_state);
+        ic_verdict("BLOCKED", "UT-DEV-INIT-SECOND-STATUS", index, did, reason);
+        o3 = o2;
+    } else if ((hB = ic_open_bound(id->net_luid)) == INVALID_HANDLE_VALUE) {
         ic_verdict("BLOCKED", "UT-DEV-INIT-SECOND-STATUS", index, did, "cannot open a second instance and bind it by NET_LUID");
         o3 = o2;
     } else {
@@ -1025,7 +1079,7 @@ static void ic_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_ADA
         ic_verdict("BLOCKED", "UT-DEV-OPEN-READY-STATUS", index, did, "cannot open a handle for OPEN_ADAPTER");
     } else {
         AVB_OPEN_REQUEST o;
-        AVB_HW_SNAPSHOT_REQUEST s;
+        IC_SNAP bs;
 
         ZeroMemory(&o, sizeof(o));
         o.vendor_id = id->vendor_id;
@@ -1033,14 +1087,28 @@ static void ic_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_ADA
         o.index = ordinal;
         st = avb_ioctl_ntstatus(hC, IOCTL_AVB_OPEN_ADAPTER, &o, sizeof(o), &o, sizeof(o), &got);
         ic_observe(hO, &o4);
-        ZeroMemory(&s, sizeof(s));
-        s.version = AVB_HW_SNAPSHOT_VERSION;
-        if (!DeviceIoControl(hC, IOCTL_AVB_QUERY_HW_SNAPSHOT, &s, sizeof(s), &s, sizeof(s), &br, NULL) || s.net_luid != id->net_luid) {
-            sprintf_s(reason, sizeof(reason), "OPEN_ADAPTER ntstatus=0x%08lX (instance ordinal %u), but the bound adapter is not verified "
-                      "as this one (snapshot NET_LUID 0x%016llX)", (unsigned long)st, ordinal, s.net_luid);
-            ic_verdict("BLOCKED", "UT-DEV-OPEN-READY-STATUS", index, did, reason);
+        printf("    [EVIDENCE] OPEN_ADAPTER vid=0x%04X did=0x%04X instance ordinal %u: ntstatus=0x%08lX information=%lu status=0x%08X\n",
+               id->vendor_id, id->device_id, ordinal, (unsigned long)st, got, o.status);
+        /* STATUS: the raw result against the expected STATUS_SUCCESS, kept apart from the binding evidence */
+        ic_status_line("UT-DEV-OPEN-READY", index, did, st, got, (LONG)STATUS_SUCCESS, FALSE);
+        /* BINDING: which adapter the handle is bound to, from the handle's own snapshot */
+        if (st != (LONG)STATUS_SUCCESS) {
+            sprintf_s(reason, sizeof(reason), "no binding to verify: OPEN_ADAPTER did not succeed (ntstatus=0x%08lX)", (unsigned long)st);
+            ic_verdict("BLOCKED", "UT-DEV-OPEN-READY-BINDING", index, did, reason);
         } else {
-            ic_status_line("UT-DEV-OPEN-READY", index, did, st, got, (LONG)STATUS_SUCCESS, FALSE);
+            ic_snapshot(hC, &bs);
+            ic_print_snapshot("OPEN_ADAPTER handle", &bs);
+            if (bs.st != 0 || bs.got < (DWORD)FIELD_OFFSET(AVB_HW_SNAPSHOT_REQUEST, entries)) {
+                sprintf_s(reason, sizeof(reason), "binding evidence unavailable: snapshot ntstatus=0x%08lX information=%lu",
+                          (unsigned long)bs.st, bs.got);
+                ic_verdict("BLOCKED", "UT-DEV-OPEN-READY-BINDING", index, did, reason);
+            } else if (bs.net_luid != id->net_luid) {
+                sprintf_s(reason, sizeof(reason), "the handle is bound to NET_LUID 0x%016llX, not to this adapter (0x%016llX)",
+                          bs.net_luid, id->net_luid);
+                ic_verdict("FAIL", "UT-DEV-OPEN-READY-BINDING", index, did, reason);
+            } else {
+                ic_verdict("PASS", "UT-DEV-OPEN-READY-BINDING", index, did, "the handle is bound to this adapter (snapshot NET_LUID)");
+            }
         }
         ic_ptp_lines("UT-DEV-OPEN-READY", index, did, &o3, &o4);
         CloseHandle(hC);
