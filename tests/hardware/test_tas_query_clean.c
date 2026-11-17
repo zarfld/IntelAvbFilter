@@ -47,9 +47,13 @@
  *   <case>-COMPLETION  conformance to the completion contract of the operation: the NTSTATUS the design requires (3.4, 9.5) with
  *                      no output. The interim STATUS_SUCCESS + result INVALID reply is reported as not conforming (K2, #352),
  *                      separately from REFUSED and UNCHANGED: a refusal that changed nothing is not completion conformance.
- * A case whose request was accepted, or after which the state changed or could not be measured, stops the remaining cases
- * (BLOCKED): the adapter is no longer the clean pre-state they need. TX: tagged frames seen by the I210 in a window before the
- * cases and a window after the field cases, with queries interleaved against the pre-test registers. END_EQ_CYCLE (TAS-DR-06,
+ * A case whose refusal was not established (REFUSED not PASS), or after which the state changed or could not be measured, stops
+ * the remaining cases (BLOCKED): a later request needs an established refusal and the clean pre-state. COMPLETION never stops.
+ * OBSERVER, before any request: the I226 under test, which runs TAS, sends tagged broadcast frames in a baseline window and the
+ * I210, the receiving wire observer (passive Npcap capture on this host, flooded broadcast only, tas_wire_observer.h), must
+ * receive them. Without a started capture or a received baseline, nothing is submitted (BLOCKED) and the cleanup still runs.
+ * TX: a window after the field cases, with queries interleaved against the pre-test registers, judged against that baseline;
+ * supplementary evidence that frames crossed the wire, no gate timing. END_EQ_CYCLE (TAS-DR-06,
  * end equal to the cycle) runs last, after that TX window: today's validation does not refuse it, so it can commit a schedule.
  * It gets its own TX-END_EQ_CYCLE window only when it was refused and nothing changed. Then CLEANUP and RESTORE as below.
  * Passes on the first hardware run are characterization of validation that existed before this test, never RED (12.7).
@@ -1264,7 +1268,7 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
     STATS_READ sa;
     DWORD got = 0, len = (DWORD)sizeof(req);
     LONG st;
-    BOOL reply, wrote = FALSE, measured, unchanged;
+    BOOL reply, wrote = FALSE, refused = FALSE, measured, unchanged;
     unsigned differing = 0, q;
     char check[48], reason[480], res[48];
 
@@ -1325,6 +1329,7 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         wrote = TRUE;   /* unknown: never assume nothing was written */
         verdict("INCONCLUSIVE", check, c->index, did, "raw NTSTATUS not captured; whether the request was refused is unknown");
     } else if (reply && req.result == AVB_TAS_ACT_INVALID) {
+        refused = TRUE;
         verdict("PASS", check, c->index, did, "refused: interim #357 reply STATUS_SUCCESS, result INVALID; characterization of "
                 "validation that predates this test, not RED");
     } else if (reply) {
@@ -1338,6 +1343,7 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         verdict("FAIL", check, c->index, did, reason);
     } else if (got == 0 && (st == t->required || st == (LONG)STATUS_INVALID_PARAMETER || st == (LONG)STATUS_REVISION_MISMATCH ||
                             st == (LONG)STATUS_BUFFER_TOO_SMALL)) {
+        refused = TRUE;
         sprintf_s(reason, sizeof(reason), "refused: error completion ntstatus=0x%08lX, no output; characterization of validation "
                   "that predates this test, not RED", (unsigned long)st);
         verdict("PASS", check, c->index, did, reason);
@@ -1392,10 +1398,11 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
                   "model K2/#352 not implemented)" : "");
         verdict("FAIL", check, c->index, did, reason);
     }
-    return measured && unchanged && !wrote;
+    /* A later request needs an established refusal, not only an unchanged snapshot (PR #451 review); COMPLETION never stops */
+    return refused && measured && unchanged && !wrote;
 }
 
-/** TX of the I210 observer: a checked window against the baseline window taken before the cases */
+/** TX of the I226 under test, received by the I210 wire observer: a checked window against the baseline before the cases */
 static void inv_tx_verdict(const char *check, UINT32 index, avb_u16 did, const TAS_TX_WINDOW *base, const TAS_TX_WINDOW *probe)
 {
     char reason[256];
@@ -1430,7 +1437,7 @@ static void run_invalid(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     SOCKET sock = INVALID_SOCKET;
     TAS_TX_WINDOW base, probe;
     unsigned nonce = 0;
-    BOOL wire = FALSE;
+    BOOL wire = FALSE, wire_started = FALSE;
     int k = 0;
     const char *stop = NULL;
     char reason[320];
@@ -1470,14 +1477,34 @@ static void run_invalid(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
             stop = "cannot bind a handle with write access for IOCTL_AVB_TAS_ACTIVATE";
         }
     }
+    /* OBSERVER (#368 "I210 observer alive"): an I210 identity is not a live observer. Before any request the capture must have
+     * started and must have received the baseline frames the I226 sent; otherwise nothing is submitted */
     if (stop == NULL) {
         sock = open_tx_socket(ipv4);
         nonce = GetTickCount() ^ GetCurrentProcessId();
-        if (sock != INVALID_SOCKET && wire_start(id->net_luid, g_capture_luid, id->mac, nonce, ipv4) != 0) {
-            wire = TRUE;
+        if (sock != INVALID_SOCKET) {
+            wire_started = TRUE;   /* wire_start can start its ICMP worker even when it returns 0 observers: stop it in every case */
+            wire = wire_start(id->net_luid, g_capture_luid, id->mac, nonce, ipv4) != 0;
+        }
+        if (wire) {
             send_window(sock, nonce, h, NULL, &base);
             print_window("before the cases", &base);
         }
+        if (!wire) {
+            verdict("BLOCKED", "OBSERVER", index, id->device_id, "no TX socket, or the I210 capture did not start: the receiving wire "
+                    "observer is not established (#368 precondition)");
+            stop = "the receiving wire observer was not established";
+        } else if (!tas_tx_on_wire(&base, TAS_ACT_SEEN_MIN_PERCENT)) {
+            sprintf_s(reason, sizeof(reason), "baseline window: the I210 received %u of %u frames the I226 sent, %u send errors; the "
+                      "receiving wire observer is not proven alive (#368 precondition)", base.seen, base.attempted, base.errors);
+            verdict("BLOCKED", "OBSERVER", index, id->device_id, reason);
+            stop = "the receiving wire observer did not receive the baseline window";
+        } else {
+            sprintf_s(reason, sizeof(reason), "the I210 received %u of %u baseline frames the I226 sent", base.seen, base.attempted);
+            verdict("PASS", "OBSERVER", index, id->device_id, reason);
+        }
+    }
+    if (stop == NULL) {
         c.h = h;
         c.index = index;
         c.id = id;
@@ -1496,7 +1523,7 @@ static void run_invalid(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     }
     for (; k < INV_END_EQ_CYCLE; k++) {   /* only after a stop: every case not submitted gets its own BLOCKED line */
         if (c.h != NULL) {
-            sprintf_s(reason, sizeof(reason), "not submitted: after case %s the adapter is no longer in its measured clean pre-state", stop);
+            sprintf_s(reason, sizeof(reason), "not submitted: after case %s a refusal or the measured clean pre-state was not established", stop);
         } else {
             sprintf_s(reason, sizeof(reason), "not submitted: %s", stop);
         }
@@ -1505,7 +1532,7 @@ static void run_invalid(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
 
     /* TX after the field cases, before END_EQ_CYCLE, which can commit a schedule */
     if (stop != NULL) {
-        sprintf_s(reason, sizeof(reason), "the field cases did not all complete in the clean pre-state (%s)", stop);
+        sprintf_s(reason, sizeof(reason), "the field cases were not all submitted and refused in the clean pre-state (%s)", stop);
         verdict("BLOCKED", "TX", index, id->device_id, reason);
     } else if (!wire) {
         verdict("BLOCKED", "TX", index, id->device_id, "no TX socket, or the I210 capture could not be started");
@@ -1531,7 +1558,7 @@ static void run_invalid(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
         inv_tx_verdict("TX-END_EQ_CYCLE", index, id->device_id, &base, &probe);
     }
 
-    if (wire) { wire_stop(); }
+    if (wire_started) { wire_stop(); }   /* also after 0 observers: the ICMP worker may run (PR #451 review) */
     if (sock != INVALID_SOCKET) { closesocket(sock); }
     if (c.hw != NULL && c.hw != INVALID_HANDLE_VALUE) { CloseHandle(c.hw); }
     cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
