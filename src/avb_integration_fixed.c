@@ -2056,7 +2056,20 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             DEBUGP(DL_TRACE, "   - Device type: %d (%s)\n", currentContext->intel_device.device_type,
                    currentContext->intel_device.device_type == INTEL_DEVICE_I210 ? "I210" :
                    currentContext->intel_device.device_type == INTEL_DEVICE_I226 ? "I226" : "OTHER");
-            
+
+            /* #404, #12/#313 amendment 2026-11-12 row 1: the first INIT_DEVICE on an open instance of an adapter that is already
+             * READY initializes that instance only. STATUS_SUCCESS, no hardware effect: running bring-up again re-runs the
+             * device PTP initialization, and on the I226 it reset a healthy clock (UT-DEV-INIT-001 and UT-DEV-INIT-SECOND RED,
+             * logs/issue313/evidence-313-*). READY here is the adapter's own published state with its BAR mapped; an adapter
+             * that reached PTP_READY without a hardware context (MDIO fallback) still takes the path below, as before. The
+             * other rows of the decided contract (busy, retry after failure, READY publication order) are not changed here */
+            if (currentContext->hw_state == AVB_HW_PTP_READY && currentContext->hardware_context != NULL) {
+                status = STATUS_SUCCESS;
+                DEBUGP(DL_ERROR, "!!! [#404] INIT_DEVICE: adapter VID=0x%04X DID=0x%04X already READY: open instance initialized, no "
+                       "hardware access\n", currentContext->intel_device.pci_vendor_id, currentContext->intel_device.pci_device_id);
+                break;
+            }
+
             // Force immediate BAR0 discovery if hardware context is missing,
             // regardless of hw_state.  OPEN_ADAPTER's MDIO-fallback may have
             // promoted I219/I217 to PTP_READY without actually mapping BAR0.
