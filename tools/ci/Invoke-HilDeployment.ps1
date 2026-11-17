@@ -71,12 +71,14 @@ $record = [ordered]@{
     loadedImageEvidence = 'not hashed; DEPLOYED requires the service to be released (unloaded) and to reach RUNNING again during this deployment'
     previousDeployment = $null; machineOk = $null; machineOkReason = ''
 }
+# Never replace an unsafe predecessor's machine-local evidence with a new nonmutating attempt.
+$preservePriorInflight = $false
 function Complete-Deployment([string]$Verdict, [string]$Reason, [int]$Code) {
     $record.verdict = $Verdict; $record.reason = $Reason; $record.finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
     # Re-evaluated from the record (state after a partial deployment), not from the verdict name alone.
     $m = Get-AvbMachineOk -Record $record; $record.machineOk = [bool]$m.Ok; $record.machineOkReason = $m.Reason
     ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $EvidenceDir 'deployment.json') -Encoding UTF8
-    if ($record.lock -and $record.lock.ok) { ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $inflightFile -Encoding UTF8 }
+    if ($record.lock -and $record.lock.ok -and -not $preservePriorInflight) { ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $inflightFile -Encoding UTF8 }
     $c = if ($Code -eq 0) { 'Green' } else { 'Red' }
     Write-Host "[HIL-DEPLOY] $Configuration $Verdict - $Reason" -ForegroundColor $c
     exit $Code
@@ -88,7 +90,22 @@ $record.lock = [ordered]@{ path = $LockPath; ok = $lock.Ok; why = $lock.Why; wai
 if (-not $lock.Ok) { Complete-Deployment 'NOT_EXECUTED_BUSY' "HIL machine busy: $($lock.Why)" 1 }
 ($lock.Owner | ConvertTo-Json) | Set-Content -LiteralPath $ownerFile -Encoding UTF8
 if (Test-Path -LiteralPath $inflightFile) {
-    try { $record.previousDeployment = Get-Content -LiteralPath $inflightFile -Raw | ConvertFrom-Json } catch { $record.previousDeployment = "unreadable: $($_.Exception.Message)" }
+    try { $record.previousDeployment = Get-Content -LiteralPath $inflightFile -Raw | ConvertFrom-Json }
+    catch { $record.previousDeployment = "unreadable: $($_.Exception.Message)" }
+
+    # The persisted record is machine-wide and outlives RUNNER_TEMP/CI jobs.
+    # In particular, a timed-out netcfg/wevtutil child may still be running after its CI worker and lock exit.
+    # A new Debug/Release leg must NOT infer recovery merely from owning a newly acquired lock.
+    $prior = $record.previousDeployment
+    $priorValid = ($null -ne $prior -and $prior -isnot [string] -and
+                   $null -ne $prior.PSObject.Properties['schema'] -and $prior.schema -ceq 'avb-hil-deployment/1' -and
+                   $null -ne $prior.PSObject.Properties['machineOk'])
+    $priorState = if ($priorValid) { Get-AvbMachineOk -Record $prior } else { @{ Ok = $false; Reason = 'unreadable or incomplete previous deployment record' } }
+    if (-not $priorValid -or $prior.machineOk -ne $true -or -not $priorState.Ok) {
+        $preservePriorInflight = $true
+        $oldVerdict = if ($priorValid) { [string]$prior.verdict } else { 'UNVERIFIABLE' }
+        Complete-Deployment 'NEEDS_OPERATOR' ("previous HIL deployment $oldVerdict remains unsafe/unverified; machine-local incident evidence preserved at $inflightFile; operator-verified recovery is required before any driver mutation: " + $priorState.Reason) 3
+    }
 }
 
 # 2. Crash evidence (automatic; never an operator acknowledgement)
