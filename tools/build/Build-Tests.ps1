@@ -1947,9 +1947,9 @@ $AllTests = @(
         Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
         Enabled = $true
         Priority = "P1"
-        Description = "TAS_QUERY_HW: clean adapter (#366, TC-TASAPI-001); --hw-verified HARDWARE_VERIFIED never returned past BaseT (#381, TC-TASAPI-016); --tiers-unbound unbound/capability/tiers (#367, TC-TASAPI-002); owned NIC-cycle cleanup"
-        Issue = "#366, #381, #367"
-        TestCases = 3
+        Description = "TAS_QUERY_HW: clean adapter (#366, TC-TASAPI-001); --hw-verified HARDWARE_VERIFIED never returned past BaseT (#381, TC-TASAPI-016); --tiers-unbound unbound/capability/tiers (#367, TC-TASAPI-002); --invalid invalid TAS_ACTIVATE requests refused, state and TX unchanged (#368, TC-TASAPI-003); owned NIC-cycle cleanup"
+        Issue = "#366, #381, #367, #368"
+        TestCases = 4
     },
 
     @{

@@ -423,6 +423,7 @@ $HardwareIntegrationAttendedOnly = [ordered]@{
 #   test_tas_query_clean        -- TAS_QUERY_HW checks (#366), then its own NIC cycle as cleanup.  Unsafe (#366).
 #   test_tas_query_clean --hw-verified -- TAS_ACTIVATE, queries past BaseT (#381), then its own NIC cycle.  Unsafe (#381).
 #   test_tas_query_clean --tiers-unbound -- unbound / non-TAS / tiers queries (#367), then its own NIC cycle.  Unsafe (#367).
+#   test_tas_query_clean --invalid -- invalid TAS_ACTIVATE requests (#368), then its own NIC cycle.  Unsafe (#368).
 #   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
 #   entry, outside GitHub Actions, on an operator-attended machine.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
@@ -599,6 +600,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_tas_activate --fault'     = 'Unsafe: TAS_ACTIVATE failed-rollback path, Debug drivers inject a failed write and a failed restore write, Release drivers must refuse the request, then the test owned NIC cycle, #357; requires an independent management link and an attended operator; TAS register restoration UNVERIFIED until #361'
     'test_tas_query_clean'          = 'Unsafe: TAS_QUERY_HW on every TAS adapter, TEST-TAS-API-001 #366, read-only checks, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
     'test_tas_query_clean --tiers-unbound' = 'Unsafe: TEST-TAS-API-002 #367, unbound handle refused with STATUS_INVALID_DEVICE_STATE, query on adapters without the TAS capability, support tiers per #351, then the test owned NIC cycle of each TAS adapter as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
+    'test_tas_query_clean --invalid' = 'Unsafe: TEST-TAS-API-003 #368, invalid TAS_ACTIVATE requests on a clean TAS adapter, each refused with the TAS query, record, counters and TX on the wire unchanged against the test pre-test capture; the end-equals-cycle case (TAS-DR-06) is not refused by current validation and can commit a schedule; then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
     'test_tas_query_clean --hw-verified' = 'Unsafe: TEST-TAS-API-016 #381, HARDWARE_VERIFIED never returned on a clean adapter, after TAS_ACTIVATE HOLD with BaseT ahead and with the PHC past BaseT, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
     # Built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29): not runnable by this runner yet.
@@ -774,6 +776,7 @@ $HilTestSafety = @{
     'test_tas_query_clean'             = 'Unsafe'     # read-only TAS_QUERY_HW checks plus the owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#366)
     'test_tas_query_clean --hw-verified' = 'Unsafe'   # TAS_ACTIVATE HOLD, TAS_QUERY_HW past BaseT, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#381)
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
+    'test_tas_query_clean --invalid' = 'Unsafe'       # invalid TAS_ACTIVATE requests (one can commit), owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#368)
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
@@ -898,6 +901,9 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     # --tiers-unbound (#367): a few read-only queries, then per TAS adapter the same cleanup bounds as above (at most 438.5 s
     # without the TX windows); the same 560 s budget and inventory.
     'test_tas_query_clean --tiers-unbound' = @{ Seconds = 560; MaxAdapters = 8 }
+    # --invalid (#368): per TAS adapter a 60 s socket bind, 3 TX windows of 3.5 s, 13 cases of a few IOCTLs each, then the same
+    # cleanup bounds (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind) = about 455 s; the same 560 s budget and inventory.
+    'test_tas_query_clean --invalid' = @{ Seconds = 560; MaxAdapters = 8 }
 }
 
 # ===========================
