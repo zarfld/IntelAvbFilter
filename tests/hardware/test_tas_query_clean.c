@@ -59,6 +59,33 @@
  * Passes on the first hardware run are characterization of validation that existed before this test, never RED (12.7).
  * REPLACE (#358) has no IOCTL: not exercised. EG-06 (whether the end-equals-cycle boundary stalls hardware) is not tested here.
  *
+ * --restore: TEST-TAS-API-012 (#377, Verifies #361), case TC-TASAPI-012 (DES-C-TAS-010 8, 12.5; #365 query contract). Two
+ * restoration facts are kept apart: the driver's advisory `restoration`, computed from the SSOT observed baselines, and the
+ * test's own restoration verdict (RESTORE), which needs its pre-test capture, TSN off, a clean record and received TX.
+ *   PRESTATE   the test's own query (clean, readable), GET_TAS_STATE CLEAN, statistics and PHC; otherwise nothing is activated.
+ *   OBSERVER   the I226 under test, which runs TAS, sends tagged broadcast frames in a baseline window and the I210, the
+ *              receiving wire observer (passive Npcap capture on this host, flooded broadcast only, tas_wire_observer.h),
+ *              must receive them before anything is activated.
+ *   RESIDUE    after IOCTL_AVB_TAS_ACTIVATE HOLD committed the verified set: a readable query observing TSN on must not report
+ *              restoration COMPLETE (#361 AC2). Only this TSN-on non-restored state is exercised.
+ *   CLEANUP, RESTORE   the owned NIC cycle and the test's own restoration verdict, as below.
+ *   REPORTED   a query after the cycle, judged only by generic relations of the contract, never by model or family (testing
+ *              contract A). DES 12.5 makes the advisory a function of the restoration set (v1 set without DTXMXPKTSZ, BASET_L/H
+ *              included; read_failed bits 0-16; hw_read READ or PARTIAL, since a DTXMXPKTSZ or PHC read failure is no input):
+ *              (1) COMPLETE needs a valid restoration set with TSN off, otherwise FAIL; (2) TSN on and not COMPLETE is PASS;
+ *              (3) a restoration set identical to the test's own clean pre-test observation must report the pre-test value,
+ *              otherwise FAIL; (4) a valid set that differs from it (an ENDQT at the qualified _ALT, for example) cannot be
+ *              decided generically, because the query exposes neither the baseline values nor per-register agreement: that is
+ *              a contract gap, reported INCONCLUSIVE, never FAIL. Set not observed: BLOCKED. The test applies no baseline
+ *              constants; the exact pre/post comparison stays with RESTORE.
+ *   PHC        the test's own GET_CLOCK_CONFIG reads just before and after the cycle, reported separately and never a
+ *              restoration verdict. No PHC tolerance is defined, so only a backward step establishes a discontinuity;
+ *              anything else, or a missing read, is INCONCLUSIVE. The cleanup's own PHC line is evidence only.
+ * Not exercised, printed as COVERAGE: TSN-off residue (PARTIAL_RESIDUE), PARTIAL_OPEN_ALL, unreadable registers (UNKNOWN),
+ * NO_SSOT_BASELINE, a cycle that leaves residue, PHC continuity, every other failure path; and, not decidable through the generic
+ * query, a restoration set that differs from the pre-test observation (REPORTED rule 4). A pass on the first hardware run is
+ * characterization of restoration reporting implemented under #350, never RED.
+ *
  * Preconditions, checked before the first query (BLOCKED, nothing sent to the adapter, nothing to clean): the adapter's device
  * node resolves from its NET_LUID, another adapter keeps the host reachable (the cleanup cycles this one), the adapter is up
  * with an IPv4 address, and the I210 observer exists (#366 "I210 observer alive").
@@ -98,7 +125,8 @@
  * WRITE_REGISTER, no TAS write. Mutations: bounded broadcast UDP and ICMP on the adapter under test, and the owned NIC cycle of
  * that adapter, which resets its PHC. --hw-verified also sends IOCTL_AVB_TAS_ACTIVATE (a TAS schedule) on a clean adapter,
  * always followed by that NIC cycle. --invalid sends invalid IOCTL_AVB_TAS_ACTIVATE requests (END_EQ_CYCLE can be accepted
- * and commit a schedule), always followed by that NIC cycle. Safety class Unsafe.
+ * and commit a schedule), always followed by that NIC cycle. --restore commits the verified HOLD schedule, always followed by
+ * that NIC cycle. Safety class Unsafe.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
  *
@@ -106,6 +134,7 @@
  * Verifies: #353
  * (--hw-verified, TC-TASAPI-016: Verifies #350 per #381)
  * Verifies: #351 (--tiers-unbound, TC-TASAPI-002, per #367; --invalid, TC-TASAPI-003, per #368)
+ * Verifies: #361 (--restore, TC-TASAPI-012, per #377)
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -129,7 +158,7 @@
 #include "../ioctl/tas_query_tx_eval.h"   /* send-window accounting and TX verdict, checked offline by TC-MOCK-057 */
 #include "../../intel-ethernet-regs/gen/i226_regs.h"   /* --invalid: the QBVCYCLET.QBV_CYCLE_TIME field width (SSOT) */
 
-#define CASE_ID            g_case                   /* TC-TASAPI-001 (#366), -016 (--hw-verified, #381), -002 (--tiers-unbound, #367), -003 (--invalid, #368) */
+#define CASE_ID            g_case                   /* TC-TASAPI-001 (#366), -016 (--hw-verified, #381), -002 (--tiers-unbound, #367), -003 (--invalid, #368), -012 (--restore, #377) */
 #define DEVICE_NAME        "\\\\.\\IntelAvbFilter"
 /* --hw-verified schedule: the verified set of tests/hardware/test_tas_activate.c (E6 characterisation, LOCAL_DIAGNOSTIC,
  * I226 0x125B REV_04, Debug), within the window rule of #357 */
@@ -172,6 +201,7 @@ static const char *g_case = "TC-TASAPI-001";
 static BOOL g_hw_verified_mode;   /* --hw-verified: TC-TASAPI-016 (#381) */
 static BOOL g_tiers_mode;         /* --tiers-unbound: TC-TASAPI-002 (#367) */
 static BOOL g_invalid_mode;       /* --invalid: TC-TASAPI-003 (#368) */
+static BOOL g_restore_mode;       /* --restore: TC-TASAPI-012 (#377) */
 static int g_failed, g_blocked, g_ran;
 static avb_u64 g_capture_luid;
 static unsigned g_next_seq;
@@ -1564,6 +1594,281 @@ static void run_invalid(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
     cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
 }
 
+/* --restore, TC-TASAPI-012 (#377). The restoration set of DES-C-TAS-010 12.5: the v1 register set without DTXMXPKTSZ, BASET_L
+ * and BASET_H included. Registers that differ between two replies */
+static unsigned restoration_set_differing(const AVB_TAS_REGS *a, const AVB_TAS_REGS *b)
+{
+    unsigned n = 0;
+    int i;
+
+    n += a->tqavctrl != b->tqavctrl;
+    n += a->baset_l != b->baset_l;
+    n += a->baset_h != b->baset_h;
+    n += a->qbvcyclet != b->qbvcyclet;
+    n += a->qbvcyclet_s != b->qbvcyclet_s;
+    for (i = 0; i < 4; i++) {
+        n += a->stqt[i] != b->stqt[i];
+        n += a->endqt[i] != b->endqt[i];
+        n += a->txqctl[i] != b->txqctl[i];
+    }
+    return n;
+}
+
+static const char *restoration_name(avb_u32 v)
+{
+    switch (v) {
+    case AVB_TAS_RESTORE_COMPLETE:         return "COMPLETE";
+    case AVB_TAS_RESTORE_PARTIAL_OPEN_ALL: return "PARTIAL_OPEN_ALL";
+    case AVB_TAS_RESTORE_PARTIAL_RESIDUE:  return "PARTIAL_RESIDUE";
+    case AVB_TAS_RESTORE_NONE:             return "NONE";
+    case AVB_TAS_RESTORE_UNKNOWN:          return "UNKNOWN";
+    case AVB_TAS_RESTORE_NO_SSOT_BASELINE: return "NO_SSOT_BASELINE";
+    default:                               return "not reported";
+    }
+}
+
+/* read_failed bits 0 to 16 of AVB_TAS_REGS (include/avb_ioctl.h): the restoration set of DES-C-TAS-010 12.5. DTXMXPKTSZ is
+ * bit 17 and not a restoration input; the PHC bracket is not an input either (PR #454 review) */
+#define TAS_RESTORATION_SET_BITS ((1u << 17) - 1u)
+
+/** The reply observed every restoration-set register: hw_read READ, or PARTIAL because only DTXMXPKTSZ or a PHC read failed */
+static BOOL restoration_set_valid(const QUERY_READ *r)
+{
+    return query_valid(r) && (r->q.hw_read == AVB_TAS_HWREAD_READ || r->q.hw_read == AVB_TAS_HWREAD_PARTIAL) &&
+           (r->q.regs.read_failed & TAS_RESTORATION_SET_BITS) == 0;
+}
+
+
+/** --restore, TC-TASAPI-012 (#377, Verifies #361): reported restoration against the test's own observations, PHC separately */
+static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, IN_ADDR ipv4,
+                        const MIB_IF_ROW2 *row)
+{
+    QUERY_READ q0, q1, qa;
+    STATS_READ s0;
+    STATE_READ t0;
+    PHC_READ p0, pc, pb, pa;
+    AVB_TAS_ACTIVATE_REQUEST req;
+    AVB_VERDICT v;
+    TAS_TX_WINDOW base;
+    SOCKET sock = INVALID_SOCKET;
+    HANDLE hw = INVALID_HANDLE_VALUE, hn = INVALID_HANDLE_VALUE;
+    DWORD br = 0, err = ERROR_SUCCESS;
+    unsigned nonce = 0;
+    BOOL ok = FALSE, wire = FALSE, wire_started = FALSE, committed = FALSE, observed = FALSE;
+    const char *stop = NULL;
+    const avb_u16 did = id->device_id;
+    char reason[400];
+
+    ZeroMemory(&q1, sizeof(q1));
+    ZeroMemory(&qa, sizeof(qa));
+    ZeroMemory(&base, sizeof(base));
+    ZeroMemory(&req, sizeof(req));
+    ZeroMemory(&pc, sizeof(pc));
+    ZeroMemory(&pb, sizeof(pb));
+    ZeroMemory(&pa, sizeof(pa));
+    read_phc(h, &p0);
+    read_stats(h, &s0);
+    read_state(h, &t0);
+    query(h, &q0);
+    print_query("pre-test", &q0);
+    printf("    [EVIDENCE] pre-test reported restoration=%s (%u), advisory\n", restoration_name(q0.q.restoration), q0.q.restoration);
+
+    /* PRESTATE: the test proves its own pre-state through the TAS query before it activates anything (#377) */
+    v = avb_verdict_from_status((NTSTATUS)q0.status, AVB_CAP_PRESENT, query_valid(&q0), TRUE);
+    if (v != AVB_VERDICT_PASS) {
+        sprintf_s(reason, sizeof(reason), "pre-test query ntstatus=0x%08lX information=%lu%s", (unsigned long)q0.status, q0.got,
+                  q0.status == (LONG)STATUS_INVALID_DEVICE_REQUEST ? " (the driver does not serve IOCTL_AVB_TAS_QUERY_HW)" : "");
+        verdict(avb_verdict_tag(v), "PRESTATE", index, did, reason);
+        stop = "no valid pre-test query";
+    } else if (!query_clean(&q0) || !t0.ok || t0.s.armed != AVB_TAS_STATE_CLEAN || !s0.ok || !p0.ok) {
+        sprintf_s(reason, sizeof(reason), "pre-state not established: clean query %d, TAS record %s, statistics %s, PHC %s",
+                  query_clean(&q0), t0.ok ? (t0.s.armed == AVB_TAS_STATE_CLEAN ? "CLEAN" : "not clean") : "unavailable",
+                  s0.ok ? "read" : "unavailable", p0.ok ? "read" : "unavailable");
+        verdict("BLOCKED", "PRESTATE", index, did, reason);
+        stop = "the clean pre-state was not established";
+    } else {
+        verdict("PASS", "PRESTATE", index, did, "clean, readable query; TAS record CLEAN; statistics and PHC read");
+    }
+
+    /* OBSERVER (#377 "I210 observer alive"): a started capture that received the baseline frames the I226 sent */
+    if (stop == NULL) {
+        sock = open_tx_socket(ipv4);
+        nonce = GetTickCount() ^ GetCurrentProcessId();
+        if (sock != INVALID_SOCKET) {
+            wire_started = TRUE;   /* wire_start can start its ICMP worker even when it returns 0 observers: stop it in every case */
+            wire = wire_start(id->net_luid, g_capture_luid, id->mac, nonce, ipv4) != 0;
+        }
+        if (wire) {
+            send_window(sock, nonce, h, NULL, &base);
+            print_window("before the activation", &base);
+        }
+        if (!wire) {
+            verdict("BLOCKED", "OBSERVER", index, did, "no TX socket, or the I210 capture did not start: the receiving wire observer is "
+                    "not established (#377 precondition)");
+            stop = "the receiving wire observer was not established";
+        } else if (!tas_tx_on_wire(&base, TAS_ACT_SEEN_MIN_PERCENT)) {
+            sprintf_s(reason, sizeof(reason), "baseline window: the I210 received %u of %u frames the I226 sent, %u send errors; the "
+                      "receiving wire observer is not proven alive (#377 precondition)", base.seen, base.attempted, base.errors);
+            verdict("BLOCKED", "OBSERVER", index, did, reason);
+            stop = "the receiving wire observer did not receive the baseline window";
+        } else {
+            sprintf_s(reason, sizeof(reason), "the I210 received %u of %u baseline frames the I226 sent", base.seen, base.attempted);
+            verdict("PASS", "OBSERVER", index, did, reason);
+        }
+    }
+    if (wire_started) { wire_stop(); }   /* the cleanup starts its own capture */
+    if (sock != INVALID_SOCKET) { closesocket(sock); }
+
+    /* The non-restored state: IOCTL_AVB_TAS_ACTIVATE HOLD with the verified set, BaseT from a fresh PHC read */
+    if (stop == NULL) {
+        read_phc(h, &pc);
+        if (!pc.ok) {
+            stop = "PHC unavailable: no BaseT can be placed";
+        } else {
+            inv_request(&req, row, pc.phc);
+            hw = open_device(GENERIC_READ | GENERIC_WRITE);   /* TAS_ACTIVATE is FILE_WRITE_ACCESS (#362) */
+            if (hw == INVALID_HANDLE_VALUE || !bind_luid(hw, id->net_luid)) {
+                if (hw != INVALID_HANDLE_VALUE) { CloseHandle(hw); }
+                stop = "cannot bind a handle with write access for the activation";
+            } else {
+                req.result = 0xFFFFFFFFu;   /* values the driver never writes: an unwritten reply cannot read as COMMITTED (0) */
+                req.status = 0xFFFFFFFFu;
+                g_pending_did = did;
+                InterlockedExchange(&g_pending_adapter, (LONG)index);   /* from here the cleanup owes a NIC cycle */
+                ok = DeviceIoControl(hw, IOCTL_AVB_TAS_ACTIVATE, &req, sizeof(req), &req, sizeof(req), &br, NULL);
+                if (!ok) { err = GetLastError(); }
+                CloseHandle(hw);
+                printf("    [EVIDENCE] activation: base=%llu (PHC %llu) cycle=%u window=[%u, %u) ok=%d win32=%lu bytes=%lu result=0x%X "
+                       "status=0x%08X phcAtCommit=%llu\n", req.base_time_ns, pc.phc, req.cycle_ns, req.window_start_ns[0],
+                       req.window_end_ns[0], ok, err, br, req.result, req.status, req.phc_at_commit_ns);
+                committed = ok && br == sizeof(req) && req.status == 0u && req.result == AVB_TAS_ACT_COMMITTED &&
+                            req.phc_at_commit_ns != 0 && req.phc_at_commit_ns < req.base_time_ns;
+                if (!committed) {
+                    stop = "the activation was not established as COMMITTED; no non-restored state was created";
+                }
+            }
+        }
+    }
+
+    /* RESIDUE: an observed non-restored state (TSN on) never reports COMPLETE (#361 AC2) */
+    if (stop != NULL) {
+        sprintf_s(reason, sizeof(reason), "not observed: %s", stop);
+        verdict("BLOCKED", "RESIDUE", index, did, reason);
+    } else {
+        query(h, &q1);
+        print_query("committed", &q1);
+        observed = restoration_set_valid(&q1) && q1.q.hw_mode == AVB_TAS_HWMODE_TSN;
+        if (query_valid(&q1) && q1.q.restoration == AVB_TAS_RESTORE_COMPLETE) {
+            sprintf_s(reason, sizeof(reason), "COMPLETE reported with a committed schedule (restoration set valid %d, hw_mode %u, %u "
+                      "restoration-set registers differ from the pre-test capture)", restoration_set_valid(&q1), q1.q.hw_mode,
+                      restoration_set_differing(&q0.q.regs, &q1.q.regs));
+            verdict("FAIL", "RESIDUE", index, did, reason);
+        } else if (observed) {
+            sprintf_s(reason, sizeof(reason), "TSN on observed (%u restoration-set registers differ from the pre-test capture); reported "
+                      "restoration=%s (%u), not COMPLETE", restoration_set_differing(&q0.q.regs, &q1.q.regs),
+                      restoration_name(q1.q.restoration), q1.q.restoration);
+            verdict("PASS", "RESIDUE", index, did, reason);
+        } else {
+            sprintf_s(reason, sizeof(reason), "the committed state was not observed as non-restored: query ntstatus=0x%08lX restoration "
+                      "set valid %d hw_mode %u", (unsigned long)q1.status, restoration_set_valid(&q1), q1.q.hw_mode);
+            verdict("BLOCKED", "RESIDUE", index, did, reason);
+        }
+    }
+
+    /* CLEANUP and RESTORE: the owned NIC cycle and the test's own restoration verdict against its pre-test capture */
+    read_phc(h, &pb);
+    cleanup_and_verify(h, index, id, inst, ipv4, &q0, pb.ok ? &pb : &p0);
+
+    /* After the cycle: a new handle, the PHC and the reported restoration, each read once */
+    hn = open_bound_read(id->net_luid);
+    if (hn != INVALID_HANDLE_VALUE) {
+        read_phc(hn, &pa);
+        query(hn, &qa);
+        CloseHandle(hn);
+        print_query("after the cycle, REPORTED", &qa);
+    }
+
+    /* REPORTED: the advisory value judged only by generic relations of the contract (DES 12.5: a function of the restoration
+     * set), never by model or family (testing contract A). No baseline constant is applied here (PR #454 thread 4599329980) */
+    if (!committed) {
+        sprintf_s(reason, sizeof(reason), "the #377 scenario did not run: %s", stop != NULL ? stop : "no committed activation");
+        verdict("BLOCKED", "REPORTED", index, did, reason);
+    } else if (hn == INVALID_HANDLE_VALUE || !query_valid(&qa)) {
+        sprintf_s(reason, sizeof(reason), "no valid query after the cycle (handle %s, ntstatus=0x%08lX information=%lu)",
+                  hn == INVALID_HANDLE_VALUE ? "not bound" : "bound", (unsigned long)qa.status, qa.got);
+        verdict("BLOCKED", "REPORTED", index, did, reason);
+    } else {
+        BOOL valid = restoration_set_valid(&qa);
+        BOOL pre_valid = restoration_set_valid(&q0);   /* PRESTATE established it clean, readable and COMPLETE */
+        unsigned diff = (valid && pre_valid) ? restoration_set_differing(&q0.q.regs, &qa.q.regs) : 0;
+        BOOL same = valid && pre_valid && diff == 0;
+
+        printf("    [EVIDENCE] after the cycle: reported restoration=%s (%u), pre-test %s (%u); hw_read %u, read_failed 0x%X (restoration "
+               "set valid %d), hw_mode %u, restoration-set registers differing from the pre-test observation %u\n",
+               restoration_name(qa.q.restoration), qa.q.restoration, restoration_name(q0.q.restoration), q0.q.restoration,
+               qa.q.hw_read, qa.q.regs.read_failed, valid, qa.q.hw_mode, diff);
+        if (qa.q.restoration == AVB_TAS_RESTORE_COMPLETE && (!valid || qa.q.hw_mode != AVB_TAS_HWMODE_OFF)) {
+            sprintf_s(reason, sizeof(reason), "COMPLETE reported although the reply's restoration set is not valid (%d) or TSN is not off "
+                      "(hw_mode %u); COMPLETE needs both (DES 12.5)", valid, qa.q.hw_mode);
+            verdict("FAIL", "REPORTED", index, did, reason);
+        } else if (valid && qa.q.hw_mode == AVB_TAS_HWMODE_TSN) {
+            sprintf_s(reason, sizeof(reason), "TSN on after the cycle and not reported COMPLETE (%s); see RESTORE",
+                      restoration_name(qa.q.restoration));
+            verdict("PASS", "REPORTED", index, did, reason);
+        } else if (same && qa.q.restoration != q0.q.restoration) {
+            sprintf_s(reason, sizeof(reason), "the restoration set equals the test's own pre-test observation, yet reported %s (%u) where "
+                      "the pre-test reply reported %s (%u); the advisory is a function of that set (DES 12.5)",
+                      restoration_name(qa.q.restoration), qa.q.restoration, restoration_name(q0.q.restoration), q0.q.restoration);
+            verdict("FAIL", "REPORTED", index, did, reason);
+        } else if (same) {
+            sprintf_s(reason, sizeof(reason), "reported %s, as for the identical clean pre-test observation; TSN off, restoration set "
+                      "valid", restoration_name(qa.q.restoration));
+            verdict("PASS", "REPORTED", index, did, reason);
+        } else if (!valid) {
+            sprintf_s(reason, sizeof(reason), "restoration set not observed after the cycle (hw_read %u, read_failed 0x%X): agreement "
+                      "not measurable; reported %s", qa.q.hw_read, qa.q.regs.read_failed, restoration_name(qa.q.restoration));
+            verdict("BLOCKED", "REPORTED", index, did, reason);
+        } else {
+            sprintf_s(reason, sizeof(reason), "TSN off, but %u restoration-set registers differ from the clean pre-test observation; the "
+                      "query exposes neither the baseline values nor per-register agreement, so whether %s is right cannot be decided "
+                      "through the generic interface (contract gap)", diff, restoration_name(qa.q.restoration));
+            verdict("INCONCLUSIVE", "REPORTED", index, did, reason);
+        }
+    }
+
+    /* PHC: measured and reported separately, never a restoration verdict, no tolerance assumed */
+    {
+        char b1[32], b2[32];
+        long long wall_ns = 0;
+
+        fmt_u64(b1, sizeof(b1), pb.ok, pb.phc);
+        fmt_u64(b2, sizeof(b2), pa.ok, pa.phc);
+        if (pb.ok && pa.ok) {
+            LARGE_INTEGER freq;
+            QueryPerformanceFrequency(&freq);
+            wall_ns = (long long)((double)(pa.qpc.QuadPart - pb.qpc.QuadPart) * 1e9 / (double)freq.QuadPart);
+        }
+        if (!committed) {
+            sprintf_s(reason, sizeof(reason), "the #377 scenario did not run (before=%s after=%s); not a restoration verdict", b1, b2);
+            verdict("INCONCLUSIVE", "PHC", index, did, reason);
+        } else if (!pb.ok || !pa.ok) {
+            sprintf_s(reason, sizeof(reason), "PHC not read before or after the cycle (before=%s after=%s); not a restoration verdict", b1, b2);
+            verdict("INCONCLUSIVE", "PHC", index, did, reason);
+        } else if (pa.phc < pb.phc) {
+            sprintf_s(reason, sizeof(reason), "discontinuity measured and reported separately: the PHC stepped back across the cycle "
+                      "(before=%s after=%s wallNs=%lld); not a restoration verdict", b1, b2, wall_ns);
+            verdict("PASS", "PHC", index, did, reason);
+        } else {
+            sprintf_s(reason, sizeof(reason), "no backward step (before=%s after=%s wallNs=%lld): without an approved tolerance neither "
+                      "continuity nor discontinuity is established; not a restoration verdict", b1, b2, wall_ns);
+            verdict("INCONCLUSIVE", "PHC", index, did, reason);
+        }
+    }
+    printf("    [COVERAGE] not exercised by this run: TSN-off residue (PARTIAL_RESIDUE), PARTIAL_OPEN_ALL, unreadable registers "
+           "(UNKNOWN), NO_SSOT_BASELINE, a NIC cycle that leaves residue, PHC continuity, and every other failure path. Not "
+           "decidable through the generic query: a restoration set that differs from the pre-test observation (e.g. ENDQT at _ALT)\n");
+}
+
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
     QUERY_READ q1, q2;
@@ -1622,6 +1927,10 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     }
     if (g_invalid_mode) {
         run_invalid(h, index, id, inst, ipv4, &row);
+        return;
+    }
+    if (g_restore_mode) {
+        run_restore(h, index, id, inst, ipv4, &row);
         return;
     }
 
@@ -1740,14 +2049,18 @@ int main(int argc, char **argv)
     } else if (argc == 2 && strcmp(argv[1], "--invalid") == 0) {
         g_invalid_mode = TRUE;
         g_case = "TC-TASAPI-003";
+    } else if (argc == 2 && strcmp(argv[1], "--restore") == 0) {
+        g_restore_mode = TRUE;
+        g_case = "TC-TASAPI-012";
     } else if (argc != 1) {
-        printf("[BLOCKED] %s: usage: test_tas_query_clean [--hw-verified | --tiers-unbound | --invalid]\n", CASE_ID);
+        printf("[BLOCKED] %s: usage: test_tas_query_clean [--hw-verified | --tiers-unbound | --invalid | --restore]\n", CASE_ID);
         return 3;
     }
     printf("=== IntelAvbFilter - IOCTL_AVB_TAS_QUERY_HW, %s (%s) ===\n", CASE_ID,
            g_hw_verified_mode ? "#381: HARDWARE_VERIFIED never returned, clean, BaseT ahead and PHC past BaseT" :
            g_tiers_mode ? "#367: unbound handle refused, capability, support tiers" :
-           g_invalid_mode ? "#368: invalid TAS_ACTIVATE requests refused, query, record and TX unchanged" : "#366: clean adapter");
+           g_invalid_mode ? "#368: invalid TAS_ACTIVATE requests refused, query, record and TX unchanged" :
+           g_restore_mode ? "#377: reported restoration against the test's own observations, PHC separately" : "#366: clean adapter");
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("[BLOCKED] %s: Winsock unavailable\n", CASE_ID);
         return 3;
