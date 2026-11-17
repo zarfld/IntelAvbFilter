@@ -745,9 +745,16 @@ Register offsets come from `intel-ethernet-regs` through a new device op, per `#
 
 ### 12.0 Status of the v1 query contract
 
-**Source of truth:** the "Query v1 contract" section of #365. Sections 12.0 to 12.9 mirror it; where they differ, #365 governs.
+**Source of truth:** the "Query v1 contract" section of #365. Sections 12.0 to 12.10 mirror it; where they differ, #365 governs.
 
 This is the frozen v1 contract of 2026-11-15. It completes the r5 proposal of 2026-11-11 for the query only, and keeps r5's layout and offsets.
+
+**Amendment 1 (2026-11-17, 12.10):**
+- `PARTIAL` is an incomplete hardware observation.
+- The register-lock case is defined.
+- `AVB_TAS_QUERY_VERSION` is 2.
+
+The layout, the 536-byte size, the offsets and every numeric enum value are unchanged. In this section "v1" names this contract generation and its register set (3C); it is not the value of the `version` field.
 
 | Part | State |
 |---|---|
@@ -779,7 +786,7 @@ Inputs are only `version`, `size` and `lookup_client_op_id`. Every other byte is
 | 0 | Driver without a handler for the code (today) | `STATUS_INVALID_DEVICE_REQUEST` | `src/device.c` default |
 | 1 | Open instance not bound by `OPEN_ADAPTER` or `OPEN_ADAPTER_BY_LUID`. Refused in `src/device.c` before the fallback adapter search, lazy initialization, context use or MMIO | `STATUS_INVALID_DEVICE_STATE` | #353 ("the query is refused"), #367 ("exact NTSTATUS"); same gate as code 70 (`src/device.c`) |
 | 2 | System buffer missing, or input or output length below 536 | `STATUS_BUFFER_TOO_SMALL` | 3.4 |
-| 3 | `version` not 1 | `STATUS_REVISION_MISMATCH` | 3.4 |
+| 3 | `version` not 2 (Amendment 1, 12.10). Version 1 is not served | `STATUS_REVISION_MISMATCH` | 3.4 |
 | 4 | `size` not 536 | `STATUS_INVALID_PARAMETER` | 3.4 |
 | 5 | The bound adapter's discovered capabilities lack `INTEL_CAP_TSN_TAS` | `STATUS_NOT_SUPPORTED` | 5.1, 9.5 ("only if the capability is known absent") |
 | 5 | Capability present, but the family's device ops provide no query register map. Today that is the I225: `i225_ops` is not registered (`devices/intel_device_registry.c`), and `gen/i225_regs.h` defines no v1 register. This follows from the implementation state, not from the I225 activation restriction | `STATUS_NOT_IMPLEMENTED` | 5.1 `NOT_IMPLEMENTED` |
@@ -788,7 +795,7 @@ Inputs are only `version`, `size` and `lookup_client_op_id`. Every other byte is
 
 - **No `STATUS_DEVICE_NOT_READY`:** the query joins the dispatch prologue's observation allow-list, as `GET_HW_STATE` does (`src/avb_integration_fixed.c`). It never initializes the adapter.
 - **No `ProbeForWrite`** on the system buffer.
-- **Never blocking:** while a mutating operation holds the per-adapter claim, `flags` carries `OP_IN_PROGRESS` and the slots are not advanced from a mid-sequence read (#362 concurrency).
+- **Never blocking:** while a mutating operation holds the per-adapter claim, `flags` carries `OP_IN_PROGRESS` and the slots are not advanced from a mid-sequence read (#362 concurrency). While a mutating operation holds the adapter's TAS register lock (#45, #52), the query does not wait for it and reads no register: it returns the incomplete observation of 12.3 "Register lock held" (Amendment 1, 12.10).
 - **Classification:** clients classify by the raw NTSTATUS. `STATUS_NOT_IMPLEMENTED` and `STATUS_INVALID_DEVICE_REQUEST` both map to Win32 1.
 - **Support** is decided from discovered state, never from the device model. Tests discover it from the reply and the `GET_HW_STATE` capabilities.
 
@@ -825,7 +832,7 @@ typedef struct AVB_TAS_COMMIT_INFO {           /* C6 */
 } AVB_TAS_COMMIT_INFO;                                            /* 24 */
 
 typedef struct AVB_TAS_QUERY_HW_REQUEST {
-    avb_u32 version;              /*   0 in  1 */
+    avb_u32 version;              /*   0 in  2 */
     avb_u32 size;                 /*   4 in  536 */
     avb_u64 lookup_client_op_id;  /*   8 in  0 = no lookup */
     avb_u64 net_luid;             /*  16 out */
@@ -854,11 +861,11 @@ Every out field is valid only on `STATUS_SUCCESS`.
 
 | Off | Field | Meaning | Valid when | Not reported or unavailable | Source or dependency |
 |---|---|---|---|---|---|
-| 0 | `version`, `size` | Echo: 1, 536 | Always | | #350 |
+| 0 | `version`, `size` | Echo: 2, 536 (Amendment 1) | Always | | #350 |
 | 16 | `net_luid` | Bound adapter | Always, never 0 | | Context |
 | 24 | `vendor_id`, `device_id` | Identity, for corroboration only | Always | | Context |
 | 28 | `revision_id` | PCI revision | `revision_state` = `VALID` (1) | 0, with `revision_state` 0 | **K9**: the acquisition path is designed only after a hardware observation |
-| 32 | `hw_read` | `READ` 1, `NOT_RUNNING` 2, `PARTIAL` 3, `NO_MMIO` 4 | Always | | #350, 3A |
+| 32 | `hw_read` | `READ` 1: complete observation, every v1 register and both PHC values valid. `NOT_RUNNING` 2. `PARTIAL` 3: incomplete hardware observation, at least one v1 register or PHC value invalid because its read failed or was not attempted (12.3); it does not state that any MMIO occurred (Amendment 1). `NO_MMIO` 4 | Always | | #350, 3A |
 | 36 | `hw_mode` | From `TQAVCTRL.TRANSMIT_MODE`: `OFF` 1, `TSN` 2, `UNREADABLE` 3 | Always | `UNREADABLE` when `TQAVCTRL` is invalid | #350 |
 | 40 | `origin` | Record: `NONE` 1, `SETUP_TAS` 2, `CONTRACT` 3, `FOUND_AT_ATTACH` 4 | Not 0 | 0 until the record tracks origin; today `tas_armed` does not separate code 26 from the activation | Per-adapter record; `FOUND_AT_ATTACH` needs the attach-time read (#362) |
 | 44 | `gate_policy` | Record: `NONE` 1, `SCHEDULED` 2, `OPEN_ALL` 3 | Not 0 | 0, as for `origin` | `OPEN_ALL` only through #359 |
@@ -879,7 +886,7 @@ Every out field is valid only on `STATUS_SUCCESS`.
 | 156 | `limits.tier_*` | Tier values of 5.1: `HW_UNSUPPORTED` 1, `NOT_IMPLEMENTED` 2, `IMPLEMENTED_UNVERIFIED` 3, `IMPLEMENTED_VERIFIED` 4 | Not 0 | 0 until the #351 table exists. `tier_pass` = 2 under #363 option C | **#351** |
 | 176 | `current` | Record of the committed schedule | `current_commit.state` is `RETAINED`, `PHC_DISCONTINUOUS` or `HW_MISMATCH` | All 0 | C6, fed by the activation (#357) |
 | 256 | `next` | As above, with `next_commit` | Same | v1: all 0 | #358 |
-| 336 | `regs` | Raw v1 register set (12.3) | Per `read_failed` bit | Bits set; values 0. `NOT_RUNNING` and `NO_MMIO` set bits 0-17 | #350, 3A |
+| 336 | `regs` | Raw v1 register set (12.3) | Per `read_failed` bit | Bits set; values 0. `NOT_RUNNING`, `NO_MMIO` and "Register lock held" (12.3) set bits 0-17 | #350, 3A |
 | 416 | `lookup` | #352 record | `lookup_result` = `FOUND` | All 0. v1 is never `FOUND` | Production and storage are #352's |
 | 488 | `current_commit` | Commit bracket and state: `NONE` 1, `RETAINED` 2, `PHC_DISCONTINUOUS` 3, `HW_MISMATCH` 4, `LOST` 5 | State not 0 | Bracket 0 when `NONE` or `LOST` | C6 storage under #350, fed by #357 |
 | 512 | `next_commit` | As above | | v1: `NONE` | #358 |
@@ -912,6 +919,7 @@ A semantic change to any field raises `AVB_TAS_QUERY_VERSION` (3.4).
 | Read failure | The register's `read_failed` bit is set and its value is 0, with `hw_read` `PARTIAL`. Never filled from the record |
 | Not Running | No MMIO: `hw_read` `NOT_RUNNING`, hardware fields 0, `hw_mode` `UNREADABLE`, slots `UNKNOWN`. Record fields are still reported as record |
 | No MMIO access | BAR not mapped or `INTEL_CAP_MMIO` clear: `hw_read` `NO_MMIO`. Nothing is read and no initialization is started |
+| Register lock held | Running with MMIO access, but a mutating TAS operation holds the adapter's TAS register lock (#45, #52), or waits for it. The query does not wait and reads no register and no PHC value: the reply of 12.10 (`hw_read` `PARTIAL`, `OP_IN_PROGRESS`). Amendment 1 |
 | Writes | None. No claim is taken, and the query never blocks |
 | v1 set | `TQAVCTRL`, `BASET_L`, `BASET_H`, `QBVCYCLET`, `QBVCYCLET_S`, `STQT0-3`, `ENDQT0-3`, `TXQCTL0-3`, `DTXMXPKTSZ` |
 | Excluded from v1 | `TDH`, `TDT`, `TXPBSIZE`, `TCTL`. They go to a separately versioned diagnostic extension (12.6) |
@@ -1076,6 +1084,55 @@ Their bytes are fixed and their "not reported" encodings are defined above. Thei
 | The opt-in for an unverified configuration | #363, #351 |
 | The activation request and the record shape of `current` and `next` | The coordinated #357 change |
 | `origin`, `gate_policy`, `legacy_conflicts` | #355, #359 |
+
+### 12.10 Amendment 1 (2026-11-17): incomplete observation, register-lock case, version 2
+
+**Why.** #350 serialises TAS register access with a per-adapter lock, as #45 and #52 require ("all hardware register access", "all device operations ... within acquired spin locks"):
+- Mutating TAS operations hold it exclusively.
+- The query tries it once and never waits (12.1 "Never blocking").
+- When the attempt fails, #45 and #52 forbid any register or PHC read.
+
+The contract before this amendment had no reply for that case:
+- `PARTIAL` was defined only through read failure (12.3).
+- The header text described it as "MMIO performed".
+- `NOT_RUNNING` and `NO_MMIO` state other conditions.
+
+**Change in meaning.** `hw_read` `PARTIAL` (3) is an **incomplete hardware observation**: at least one v1 register or PHC value is invalid because its read failed or was not attempted.
+- `PARTIAL` never states that MMIO occurred. Whether any read was attempted follows only from the validity bits and reasons below.
+- `READ` (1) keeps its meaning: a complete observation.
+- `NOT_RUNNING` (2) and `NO_MMIO` (4) keep their conditions and precedence. Their checks come first, so the register-lock case arises only for a Running adapter with MMIO access.
+
+**Reply in the register-lock case** (`STATUS_SUCCESS`, `Information` 536):
+
+| Field | Value |
+|---|---|
+| `version`, `size` | 2, 536 |
+| Identity, `net_luid`, `lookup_result`, `legacy_conflicts`, limits | As in every reply |
+| `hw_read` | `PARTIAL` (3) |
+| `flags` | `OP_IN_PROGRESS` (0x1) set |
+| `regs` | Every `read_failed` bit (0-17) set, every value 0: not attempted. `consistency` 0 |
+| `phc_before_ns`, `phc_after_ns` | 0, with `PHC_BEFORE_INVALID` (0x080) and `PHC_AFTER_INVALID` (0x100) set |
+| `snapshot_reasons` | Exactly `PHC_BEFORE_INVALID` and `PHC_AFTER_INVALID`. `READ_FAILED` (0x004) is **clear**, because no read failed. `NOT_RUNNING` and `NO_MMIO` are clear |
+| `hw_mode` | `UNREADABLE` (3): `TQAVCTRL` is invalid |
+| `dtx_max_frame_state` | `NOT_READ` (4), bytes 0 |
+| `current_status`, `next_status` | `UNKNOWN` (7) by S1 (an input register invalid, a PHC value invalid, `OP_IN_PROGRESS`). Reasons 0: S1 carries no slot reason |
+| `restoration` | `UNKNOWN` (5): an input register is invalid (12.5) |
+| Record fields (`current_commit`, `current`, `origin`, `gate_policy`) | Reported as record (U3), never filled from or into hardware fields. The record is sampled while an operation runs, so it may be the state before or after that operation |
+
+**Version.** Under 12.2 ("a semantic change to any field raises `AVB_TAS_QUERY_VERSION`") and 3.4:
+- `AVB_TAS_QUERY_VERSION` is **2**.
+- The layout, the 536-byte size, all offsets and every numeric enum value are unchanged.
+- The driver serves only version 2. A request with version 1 gets `STATUS_REVISION_MISMATCH` (12.1 row 3) and nothing is written. Version 1 was never served by a merged driver: its handler exists only on the unmerged #350 branch. And version 1 has no conforming reply for the register-lock case.
+- `IOCTL_VERSION` (1.1) and `AVB_IOCTL_ABI_VERSION` (0x00020001) are unchanged: no code is added and no other structure changes (3.3, #64).
+
+**Mirror.** DES-C-TAS-010 §1.1 and §12 mirror this amendment on #365's own branch. `include/avb_ioctl.h`, the handler, the TC-ABI pin and the clients follow under #350.
+
+**Verification state.** The register-lock reply is **UNVERIFIED** on hardware. Under 12.7 no existing TEST issue checks a query that overlaps a mutating operation:
+- #366, #381 and #367 run their queries serially.
+- #380 TC-TASAPI-015 races mutating operations for #352.
+- #287 and #279 are the generic #45 and #52 lock tests.
+
+Nothing in this amendment rests on a hardware observation of the case.
 
 ## 13. Open decisions
 
