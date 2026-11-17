@@ -107,6 +107,32 @@ function Test-AvbHilLockStale {
     return @{ Stale = $false; Why = "held by live $($Owner.kind) owner '$($Owner.label)' (PID $($Owner.pid)) since $($Owner.acquiredUtc)" }
 }
 
+# Creation, stale-lock validation/removal and release MUST participate in one host-wide mutex.
+# An unrelated owner can never replace an observed stale owner between validation and deletion.
+# A timeout or inaccessible mutex is unsafe: no lock-file mutation is permitted.
+function Enter-AvbHilMutationMutex {
+    $mutex = $null
+    try {
+        $mutex = [System.Threading.Mutex]::new($false, 'Global\IntelAvbFilter-HIL-Lock-Recovery')
+        $taken = $false
+        try { $taken = $mutex.WaitOne(30000) }
+        catch [System.Threading.AbandonedMutexException] { $taken = $true }
+        if (-not $taken) { throw 'timed out waiting for exclusive HIL lock mutation mutex' }
+        return $mutex
+    } catch {
+        if ($null -ne $mutex) { $mutex.Dispose() }
+        throw
+    }
+}
+
+function Exit-AvbHilMutationMutex {
+    param([System.Threading.Mutex]$Mutex)
+    if ($null -ne $Mutex) {
+        try { $Mutex.ReleaseMutex() }
+        finally { $Mutex.Dispose() }
+    }
+}
+
 # @{ Ok; Owner; PreviousOwner (stale lock taken over, or $null); Why; Waited }
 function Enter-AvbHilLock {
     param([string]$Kind, [string]$Label, [string]$Path = (Get-AvbHilLockPath), [int]$WaitSeconds = 0,
@@ -117,39 +143,46 @@ function Enter-AvbHilLock {
     $json = ($me | ConvertTo-Json -Compress)
     $waited = 0; $previous = $null
     while ($true) {
+        # Serialize all lock-file creation, inspection and deletion with Exit-AvbHilLock.
+        # Do not hold the mutex while waiting for a live owner's long-running operation.
+        $gate = $null
+        try { $gate = Enter-AvbHilMutationMutex }
+        catch {
+            return @{ Ok = $false; Owner = $null; PreviousOwner = $previous
+                      Why = "unable to establish exclusive HIL lock mutation control: $($_.Exception.Message)"; Waited = $waited }
+        }
+        $owner = $null; $st = $null; $retry = $false
         try {
-            $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try { $b = [System.Text.Encoding]::UTF8.GetBytes($json); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
-            return @{ Ok = $true; Owner = $me; PreviousOwner = $previous; Why = ''; Waited = $waited }
-        } catch [System.IO.IOException] {
-            # Serialized reclaim protects against two contenders both deciding a former owner was stale,
-            # then one deleting the other's NEW live lock. Re-read ownership inside the recovery mutex.
-            $gate = [System.Threading.Mutex]::new($false, 'Global\IntelAvbFilter-HIL-Lock-Recovery')
-            $gateHeld = $false; $st = $null; $owner = $null; $reclaimed = $false
             try {
-                try { $gateHeld = $gate.WaitOne(30000) }
-                catch [System.Threading.AbandonedMutexException] { $gateHeld = $true }
-                if (-not $gateHeld) {
-                    return @{ Ok = $false; Owner = $null; PreviousOwner = $previous; Why = 'HIL lock recovery mutex timeout; ownership unknown'; Waited = $waited }
-                }
+                $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                try {
+                    $b = [System.Text.Encoding]::UTF8.GetBytes($json)
+                    $fs.Write($b, 0, $b.Length)
+                } finally { $fs.Dispose() }
+                return @{ Ok = $true; Owner = $me; PreviousOwner = $previous; Why = ''; Waited = $waited }
+            } catch [System.IO.IOException] {
                 $owner = Read-AvbHilLock -Path $Path
-                if ($null -eq $owner) { $reclaimed = $true }
-                else {
+                if ($null -eq $owner) {
+                    # Another owner finished releasing between the initial file-create failure and read.
+                    $retry = $true
+                } else {
                     $st = Test-AvbHilLockStale -Owner $owner -Me $me -IsProcessAlive $IsProcessAlive -IsCiJobActive $IsCiJobActive
                     if ($st.Stale) {
                         $previous = [ordered]@{ owner = $owner; why = $st.Why; detectedUtc = (Get-Date).ToUniversalTime().ToString('o') }
                         Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
-                        $reclaimed = $true
+                        $retry = $true
                     }
                 }
-            } finally {
-                if ($gateHeld) { $gate.ReleaseMutex() }
-                $gate.Dispose()
             }
-            if ($reclaimed) { continue }
-            if ($waited -ge $WaitSeconds) { return @{ Ok = $false; Owner = $owner; PreviousOwner = $previous; Why = $st.Why; Waited = $waited } }
-            & $Sleep 10; $waited += 10
+        } finally {
+            Exit-AvbHilMutationMutex -Mutex $gate
         }
+        if ($retry) { continue }
+        if ($waited -ge $WaitSeconds) {
+            return @{ Ok = $false; Owner = $owner; PreviousOwner = $previous
+                      Why = $(if ($st) { $st.Why } else { 'HIL lock unavailable; state unresolved' }); Waited = $waited }
+        }
+        & $Sleep 10; $waited += 10
     }
 }
 
@@ -173,10 +206,18 @@ function Test-AvbHilLockHeld {
 
 function Exit-AvbHilLock {
     param($Owner, [string]$Path = (Get-AvbHilLockPath))
-    $held = Test-AvbHilLockHeld -Owner $Owner -Path $Path
-    if (-not $held.Ok) { return $held }
-    Remove-Item -LiteralPath $Path -Force
-    return @{ Ok = $true; Why = '' }
+    $gate = $null
+    try { $gate = Enter-AvbHilMutationMutex }
+    catch { return @{ Ok = $false; Why = "unable to verify lock ownership under exclusive mutation control: $($_.Exception.Message)" } }
+    try {
+        # Verify and remove within the SAME mutex used by creation and stale-lock reclamation.
+        $held = Test-AvbHilLockHeld -Owner $Owner -Path $Path
+        if (-not $held.Ok) { return $held }
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return @{ Ok = $true; Why = '' }
+    } finally {
+        Exit-AvbHilMutationMutex -Mutex $gate
+    }
 }
 
 # Process ancestry from the OS (parent chain, nearest first); bounded, cycle-safe.
