@@ -62,8 +62,9 @@ static __inline int i226_tas_query_windows_baseline(const AVB_TAS_REGS *g)
  * running: the filter is Running. mmio: the BAR is mapped and INTEL_CAP_MMIO is set. record: AVB_TAS_STATE_*.
  * op_in_progress: a TAS operation holds the adapter's claim (the slots are then not advanced, #362).
  * contended: the caller did not obtain the TAS register lock and never waits for it (#365 12.1 "Never blocking"; #45):
- * no register is read. Reported with the existing values: hw_read PARTIAL, every read_failed bit set (value not
- * attempted), both PHC values invalid, DTXMXPKTSZ not read; with op_in_progress the slots are UNKNOWN (S1).
+ * no register and no PHC value is read. The register-lock reply of #365 12.10 (Amendment 1): hw_read PARTIAL (incomplete
+ * observation, no MMIO implied), every read_failed bit set (not attempted), PHC_BEFORE_INVALID and PHC_AFTER_INVALID,
+ * READ_FAILED clear, DTXMXPKTSZ NOT_READ; with op_in_progress the slots are UNKNOWN (S1) and restoration UNKNOWN.
  */
 static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio, avb_u32 record, int op_in_progress,
                                     int contended, AVB_TAS_QUERY_HW_REQUEST *q)

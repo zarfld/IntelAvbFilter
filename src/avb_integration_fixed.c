@@ -4216,7 +4216,8 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
     
     // Implements #18 (REQ-F-HWCTX-001: Hardware State Machine)
     case IOCTL_AVB_TAS_QUERY_HW:
-        /* Read-only TAS hardware query (#350), contract #365 "Query v1 contract". device.c routes bound handles only and
+        /* Read-only TAS hardware query (#350), contract #365 "Query v1 contract" with Amendment 1 (12.10: version 2 only, a
+         * version 1 request is STATUS_REVISION_MISMATCH by the version check below). device.c routes bound handles only and
          * refuses an unbound one with STATUS_INVALID_DEVICE_STATE before any fallback (12.1 row 1). Checks in the 12.1
          * order; on any error IoStatus.Information is 0 and nothing is written. The system buffer is used directly: no
          * ProbeForWrite. Never writes a register, never takes the TAS claim, never blocks: a held claim is reported as
@@ -4264,8 +4265,9 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                  * blocking"). Obtained: it is held from the state samples to the end of the read pass, and since every TAS
                  * register write and record update holds it exclusively, the registers read and the record are one state.
                  * Not obtained: a TAS operation holds it or waits for it (queries share it, and every operation takes the
-                 * claim first), so nothing is read and the reply carries OP_IN_PROGRESS. That reply's hw_read is not settled
-                 * by #365 (PARTIAL is defined there through read failure): open design point, see PR #449 */
+                 * claim first), so nothing is read: the register-lock reply of #365 12.10 (Amendment 1), with hw_read PARTIAL
+                 * (an incomplete observation; no MMIO is implied), OP_IN_PROGRESS, every read_failed bit, both PHC values
+                 * invalid, READ_FAILED clear, slots and restoration UNKNOWN. UNVERIFIED on hardware: no test forces it */
                 if (held) {
                     locked = avb_tas_reg_try_shared_at_dpc(currentContext, &lock_t0);
                     contended = !locked;
