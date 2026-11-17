@@ -87,10 +87,11 @@ typedef struct _intel_device_ops {
     int (*activate_tas)(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request, int armed, int *tsn_mode_written);
     /* Read-only TAS hardware query (#350, contract #365 "Query v1 contract"): fills the hardware fields of reply (registers,
      * PHC bracket, decoding, slot statuses, advisory restoration) for this family. running: the filter is Running; mmio:
-     * BAR mapped and INTEL_CAP_MMIO; record: AVB_TAS_STATE_*; op_in_progress: the TAS claim is held. Never writes a
-     * register. Returns 0. NULL on TAS-capable hardware means the family has no query register map: not implemented. */
+     * BAR mapped and INTEL_CAP_MMIO; record: AVB_TAS_STATE_*; op_in_progress: the TAS claim is held; contended: the TAS
+     * register lock was not obtained, so no register may be read. Never writes a register. Returns 0. NULL on TAS-capable
+     * hardware means the family has no query register map: not implemented. */
     int (*query_tas)(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int running, int mmio, uint32_t record,
-                     int op_in_progress);
+                     int op_in_progress, int contended);
         /* disable_tas: clear the hardware TSN transmit mode bit (TQAVCTRL.TRANSMIT_MODE_TSN on I226).
          * Returns 0 on success, -ENOTSUP if hardware has no TAS disable path, <0 on hardware error.
          * NULL means device never had TAS hardware (e.g. I219, I210). */

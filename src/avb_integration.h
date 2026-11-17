@@ -337,20 +337,22 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * and finished in between, reports OP_IN_PROGRESS and UNKNOWN slots. Interlocked access only. */
     volatile LONG tas_op_seq;
 
-    /* TAS register access (#45 REQ-F-REG-ACCESS-001, #52 REQ-F-DEVICE-ABS-005; #350): serialises every TAS register pass
-     * of this adapter together with the TAS record it reads or publishes. Held by IOCTL_AVB_TAS_QUERY_HW across its state
-     * samples and read pass, and by IOCTL_AVB_TAS_ACTIVATE, IOCTL_AVB_SETUP_TAS and IOCTL_AVB_DISARM_TAS across their device
-     * operation and record update, after they took tas_op_claim. No other lock is taken under it and nothing under it
-     * waits (DISPATCH_LEVEL); its hold time is measured (avb_tas_reg_unlock). Other register writers, such as PHC
-     * adjustment or the diagnostic register IOCTLs, do not take it (#45 is not implemented for them). */
-    NDIS_SPIN_LOCK tas_reg_lock;
+    /* TAS register access (#45 REQ-F-REG-ACCESS-001, #52 REQ-F-DEVICE-ABS-005; #350): serialises every TAS register write
+     * pass of this adapter, together with the TAS record it publishes, against the read pass of IOCTL_AVB_TAS_QUERY_HW.
+     * IOCTL_AVB_TAS_ACTIVATE, IOCTL_AVB_SETUP_TAS and IOCTL_AVB_DISARM_TAS hold it exclusively across their device
+     * operation and record update, after they took tas_op_claim. The query tries it once in shared mode and never waits:
+     * not obtained, it reads nothing and reports OP_IN_PROGRESS. No other lock is taken under it and the code under it
+     * does not log; the hold time (from acquisition to release, without any wait for it) is logged after release
+     * (avb_tas_reg_unlock). Other register writers, such as PHC adjustment or the diagnostic register IOCTLs, do not take
+     * it (#45 is not implemented for them). */
+    EX_SPIN_LOCK tas_reg_lock;
 
-    /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's MMIO pass (#350): the query holds it for its bounded pass only and
-     * reads nothing when it cannot be acquired. FilterPause runs it down before the timers stop and the adapter may be
-     * powered down, so no query MMIO happens once a pause has begun; FilterRestart re-arms it on success. Run down from
-     * allocation until the first successful restart. */
+    /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's register pass (#350): the query reads registers only while it
+     * holds this rundown, and reads nothing when it cannot acquire it. FilterPause waits for the current holders before it
+     * publishes FilterPausing, so a query register pass happens only while the filter is FilterRunning. FilterRestart
+     * re-arms it only after a successful hardware bring-up. Run down from allocation until then. */
     EX_RUNDOWN_REF tas_query_rundown;
-    volatile LONG tas_query_armed;   /* 1 between a successful FilterRestart and the next FilterPause: rundown re-armed */
+    volatile LONG tas_query_armed;   /* 1 between a successful bring-up in FilterRestart and the next FilterPause */
 
     /* Last programmed TAS GCL parameters (valid when tas_armed==1).
      * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */

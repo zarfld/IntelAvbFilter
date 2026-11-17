@@ -6,8 +6,8 @@
  *
  * One bounded pass (#365 12.3, decision 3A): PHC before, the v1 register set in AVB_TAS_REGS bit order with BASET read
  * H, L, H (one repeat when the two H reads differ; still different: BASET_TORN), PHC after. A failed read leaves the value 0
- * and sets its read_failed bit; nothing is filled from the driver record. Without a Running filter or without MMIO access
- * nothing is read at all.
+ * and sets its read_failed bit; nothing is filled from the driver record. Without a Running filter, without MMIO access
+ * or without the TAS register lock (contended: a TAS operation holds it or waits for it) nothing is read at all.
  *
  * Status (#365 12.4): S1 unobservable inputs give UNKNOWN. The driver record is the interim three-valued state of #362
  * decision 5 (CLEAN, ARMED, DIRTY). This driver retains no commit timing yet (C6, fed by the activation of #357), and no
@@ -61,9 +61,12 @@ static __inline int i226_tas_query_windows_baseline(const AVB_TAS_REGS *g)
  * lookup_client_op_id, identity, flags, lookup_result and legacy_conflicts.
  * running: the filter is Running. mmio: the BAR is mapped and INTEL_CAP_MMIO is set. record: AVB_TAS_STATE_*.
  * op_in_progress: a TAS operation holds the adapter's claim (the slots are then not advanced, #362).
+ * contended: the caller did not obtain the TAS register lock and never waits for it (#365 12.1 "Never blocking"; #45):
+ * no register is read. Reported with the existing values: hw_read PARTIAL, every read_failed bit set (value not
+ * attempted), both PHC values invalid, DTXMXPKTSZ not read; with op_in_progress the slots are UNKNOWN (S1).
  */
 static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio, avb_u32 record, int op_in_progress,
-                                    AVB_TAS_QUERY_HW_REQUEST *q)
+                                    int contended, AVB_TAS_QUERY_HW_REQUEST *q)
 {
     AVB_TAS_REGS *g = &q->regs;
     avb_u32 failed = 0, snap = 0, h2 = 0, tries, k;
@@ -86,6 +89,10 @@ static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio
     } else if (!mmio) {
         q->hw_read = AVB_TAS_HWREAD_NO_MMIO;
         snap |= AVB_TAS_SNAP_RSN_NO_MMIO;
+        failed = I226_TAS_QUERY_ALL_REGS;
+    } else if (contended) {
+        q->hw_read = AVB_TAS_HWREAD_PARTIAL;
+        snap |= AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID | AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID;
         failed = I226_TAS_QUERY_ALL_REGS;
     } else {
         read_done = 1;

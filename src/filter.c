@@ -736,18 +736,21 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     //
     FILTER_ASSERT(pFilter->State == FilterRunning);
 
-    FILTER_ACQUIRE_LOCK(&pFilter->Lock, bFalse);
-    pFilter->State = FilterPausing;
-    FILTER_RELEASE_LOCK(&pFilter->Lock, bFalse);
-
-    /* #350: no TAS query MMIO once a pause has begun. A query holds the rundown for one bounded register pass only (it never
-     * waits inside), so this returns after at most that pass; later queries read nothing and report NOT_RUNNING. */
+    /* #350: TAS query register passes are drained BEFORE FilterPausing is published. From the wait on, no query can acquire
+     * the rundown (it then reads nothing and reports NOT_RUNNING), and the wait returns when every query that holds it has
+     * released it. So every query register pass both starts and ends while the filter is FilterRunning. A query never
+     * waits while it holds the rundown. Skipped when the rundown is already run down (no successful bring-up since the
+     * last pause or since allocation). */
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
         if (InterlockedExchange(&avbCtx->tas_query_armed, 0) != 0) {
             ExWaitForRundownProtectionRelease(&avbCtx->tas_query_rundown);
         }
     }
+
+    FILTER_ACQUIRE_LOCK(&pFilter->Lock, bFalse);
+    pFilter->State = FilterPausing;
+    FILTER_RELEASE_LOCK(&pFilter->Lock, bFalse);
 
     //
     // Do whatever work is required to bring the filter into the Paused state.
@@ -861,6 +864,7 @@ FilterRestart(
     PNDIS_RESTART_GENERAL_ATTRIBUTES NdisGeneralAttributes;
     PNDIS_RESTART_ATTRIBUTES         NdisRestartAttributes;
     NDIS_CONFIGURATION_OBJECT        ConfigObject;
+    NTSTATUS                         bringUpStatus = STATUS_UNSUCCESSFUL;   /* #350: gates the TAS query reopening */
 
     // BUGFIX: GitHub Issue #315 - Enhanced pointer validation to prevent crash
     if (pFilter == NULL || (ULONG_PTR)pFilter < FILTER_PTR_MIN_VALID || ((ULONG_PTR)pFilter & FILTER_PTR_KERNEL_MASK) != FILTER_PTR_KERNEL_MASK)
@@ -1055,9 +1059,11 @@ FilterRestart(
      * AvbPerformBasicInitialization returns immediately; intel_init/init_ptp then re-programs
      * the PHC.  Must run before AvbRestartTimers so the DPC finds a running clock.
      * Verifies: TC-S3-004 (PHC non-zero post-wake). */
+    /* The restart itself does not fail on a bring-up failure (the adapter stays enumerable); the status only decides
+     * whether the TAS query register gate reopens below (#350). */
     if (pFilter->AvbContext != NULL) {
         AvbTraceTxState((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, "FilterRestart");
-        (void)AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+        bringUpStatus = AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
     }
 
     /* BUGFIX 0x9F: restart timers if subscriptions survived the Pause/Restart cycle. */
@@ -1065,12 +1071,20 @@ FilterRestart(
         AvbRestartTimers((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
     }
 
-    /* #350: TAS query MMIO allowed again only now, after the hardware bring-up above (PHC reseed) has finished; only on a
-     * Running filter, and only re-armed when the previous pause (or the allocation) ran it down */
+    /* #350: TAS query register reads allowed again only now, and only after an actually successful hardware bring-up
+     * above: AvbBringUpHardware succeeded AND completed initialization (PTP_READY; it also returns success when it skipped
+     * intel_init with no BAR mapped). Only on a Running filter, and only re-armed when the previous pause (or the
+     * allocation) ran it down. Otherwise the gate stays closed and the query reports NOT_RUNNING until a restart whose
+     * bring-up succeeds. */
     if (pFilter->AvbContext != NULL && Status == NDIS_STATUS_SUCCESS && pFilter->State == FilterRunning) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
-        if (InterlockedCompareExchange(&avbCtx->tas_query_armed, 1, 0) == 0) {
-            ExReInitializeRundownProtection(&avbCtx->tas_query_rundown);
+        if (NT_SUCCESS(bringUpStatus) && avbCtx->hw_state >= AVB_HW_PTP_READY) {
+            if (InterlockedCompareExchange(&avbCtx->tas_query_armed, 1, 0) == 0) {
+                ExReInitializeRundownProtection(&avbCtx->tas_query_rundown);
+            }
+        } else {
+            DEBUGP(DL_ERROR, "!!! [#350] FilterRestart: TAS query gate stays closed: bring-up status=0x%08X hw_state=%d\n",
+                   bringUpStatus, (int)avbCtx->hw_state);
         }
     }
 
