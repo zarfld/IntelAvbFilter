@@ -9,16 +9,20 @@
  * releases FilterListLock before calling it, and the bring-up path holds no driver spin lock. The IOCTL path holds only the
  * per-context IO remove lock (not a spin lock). The registry and the HOLD are therefore used only when this code itself sees
  * PASSIVE_LEVEL; at any other IRQL the attempt is neither armed nor recorded, only counted (nonpassive_skipped). The
- * mechanism's own lock (an event, PASSIVE_LEVEL) covers the arm read-modify-write only and is released before any HOLD,
- * so a held attempt never blocks another attempt in this code.
+ * mechanism's own lock (an event, PASSIVE_LEVEL) covers the arm read-modify-write at entry and the session check, record
+ * write and arm update at exit; it is released before any HOLD, so a held attempt never blocks another attempt here.
+ *
+ * Session isolation (PR #462 review): the record of an attempt is published only while the arm it entered under is still
+ * present with the same session, checked and written under the lock at exit. A disarmed or re-armed session therefore
+ * never receives an old attempt's record, and record names carry the session.
  */
 #include "precomp.h"
 #include <ntstrsafe.h>
 
 /* Layout shared with the test (include/avb_init_fault_dbg.h); checked in every configuration */
 C_ASSERT(sizeof(AVB_INITFAULT_ACTION) == 16);
-C_ASSERT(sizeof(AVB_INITFAULT_ARM) == 160);
-C_ASSERT(sizeof(AVB_INITFAULT_RECORD) == 88);
+C_ASSERT(sizeof(AVB_INITFAULT_ARM) == 168);
+C_ASSERT(sizeof(AVB_INITFAULT_RECORD) == 96);
 
 #if DBG
 
@@ -54,7 +58,7 @@ static NTSTATUS IfOpenKey(_Out_ PHANDLE Key)
     return ZwOpenKey(Key, KEY_QUERY_VALUE | KEY_SET_VALUE, &oa);
 }
 
-/** The arm, exactly as the test wrote it (size, type and version checked); FALSE when absent or malformed */
+/** The arm, exactly as the test wrote it (size, type, version and a non-zero session checked); FALSE when absent or malformed */
 static BOOLEAN IfReadArm(_In_ HANDLE Key, _Out_ AVB_INITFAULT_ARM *Arm)
 {
     ULONG buf[(sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(AVB_INITFAULT_ARM) + sizeof(ULONG) - 1) / sizeof(ULONG)];
@@ -68,7 +72,25 @@ static BOOLEAN IfReadArm(_In_ HANDLE Key, _Out_ AVB_INITFAULT_ARM *Arm)
         return FALSE;
     }
     RtlCopyMemory(Arm, p->Data, sizeof(*Arm));
-    return Arm->version == AVB_INITFAULT_VERSION && Arm->count <= AVB_INITFAULT_MAX_ACTIONS;
+    return Arm->version == AVB_INITFAULT_VERSION && Arm->count <= AVB_INITFAULT_MAX_ACTIONS && Arm->session != 0;
+}
+
+static NTSTATUS IfWriteArm(_In_ HANDLE Key, _In_ AVB_INITFAULT_ARM *Arm)
+{
+    UNICODE_STRING name = RTL_CONSTANT_STRING(AVB_INITFAULT_ARM_VALUE);
+    return ZwSetValueKey(Key, &name, 0, REG_BINARY, Arm, sizeof(*Arm));
+}
+
+static VOID IfLock(VOID)
+{
+    KeEnterCriticalRegion();
+    (void)KeWaitForSingleObject(&g_IfLock, Executive, KernelMode, FALSE, NULL);
+}
+
+static VOID IfUnlock(VOID)
+{
+    (void)KeSetEvent(&g_IfLock, 0, FALSE);
+    KeLeaveCriticalRegion();
 }
 
 static BOOLEAN IfMayHold(ULONG Origin)
@@ -94,8 +116,7 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
         return AVB_INITFAULT_ACT_NONE;
     }
 
-    KeEnterCriticalRegion();
-    (void)KeWaitForSingleObject(&g_IfLock, Executive, KernelMode, FALSE, NULL);
+    IfLock();
     if (NT_SUCCESS(IfOpenKey(&key))) {
         if (IfReadArm(key, &arm)) {
             KeQuerySystemTime(&now);
@@ -106,6 +127,7 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
                 rec->version = AVB_INITFAULT_VERSION;
                 rec->seq = arm.next_seq;
                 rec->net_luid = arm.net_luid;
+                rec->session = arm.session;
                 rec->origin = Origin;
                 rec->site = Site;
                 rec->applied = AVB_INITFAULT_ACT_NONE;
@@ -115,6 +137,7 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
                 rec->thread_id = (unsigned __int32)(ULONG_PTR)PsGetCurrentThreadId();
                 rec->qpc_enter = KeQueryPerformanceCounter(NULL).QuadPart;
                 arm.next_seq++;
+                arm.inflight++;
                 if (Site == AVB_INITFAULT_SITE_BASIC) {   /* the fault point is the only consuming site */
                     for (i = 0; i < arm.count; i++) {
                         AVB_INITFAULT_ACTION *a = &arm.actions[i];
@@ -135,9 +158,9 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
                         break;
                     }
                 }
-                /* The consumption and the sequence number must be readable by the test before the action takes effect;
-                 * if the write fails the attempt is neither acted on nor recorded */
-                if (NT_SUCCESS(ZwSetValueKey(key, &armName, 0, REG_BINARY, &arm, sizeof(arm)))) {
+                /* The consumption, the sequence number and inflight must be readable by the test before the action takes
+                 * effect; if the write fails the attempt is neither acted on nor recorded */
+                if (NT_SUCCESS(IfWriteArm(key, &arm))) {
                     Call->active = TRUE;
                 } else {
                     holdMs = 0;
@@ -147,8 +170,7 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
         }
         ZwClose(key);
     }
-    (void)KeSetEvent(&g_IfLock, 0, FALSE);
-    KeLeaveCriticalRegion();
+    IfUnlock();
 
     if (!Call->active) {
         return AVB_INITFAULT_ACT_NONE;
@@ -161,17 +183,19 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
     }
     rec->qpc_hold_end = KeQueryPerformanceCounter(NULL).QuadPart;
     rec->nonpassive_skipped = (unsigned __int32)g_IfNonPassive;
-    DEBUGP(DL_ERROR, "!!! [#412] init attempt seq=%u luid=0x%016llX origin=%u site=%u applied=%u action=%d hold=%u ms\n",
-           rec->seq, rec->net_luid, rec->origin, rec->site, rec->applied, (int)rec->action_index, rec->hold_ms);
+    DEBUGP(DL_ERROR, "!!! [#412] init attempt session=0x%016llX seq=%u luid=0x%016llX origin=%u site=%u applied=%u action=%d hold=%u ms\n",
+           rec->session, rec->seq, rec->net_luid, rec->origin, rec->site, rec->applied, (int)rec->action_index, rec->hold_ms);
     return rec->applied;
 }
 
 VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL Call, _In_ int InitResult)
 {
-    WCHAR nameBuf[32];
+    WCHAR nameBuf[48];
     UNICODE_STRING name;
     HANDLE key = NULL;
+    AVB_INITFAULT_ARM arm;
     AVB_INITFAULT_RECORD *rec = &Call->rec;
+    BOOLEAN published = FALSE;
 
     if (!Call->active) {
         return;
@@ -184,18 +208,33 @@ VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL 
         InterlockedIncrement(&g_IfNonPassive);
         return;
     }
-    if (!NT_SUCCESS(RtlStringCbPrintfW(nameBuf, sizeof(nameBuf), L"%ls%02u", AVB_INITFAULT_LOG_PREFIX, rec->seq))) {
+    if (!NT_SUCCESS(RtlStringCbPrintfW(nameBuf, sizeof(nameBuf), L"%ls%016llX_%02u", AVB_INITFAULT_LOG_PREFIX, rec->session, rec->seq))) {
         return;
     }
     RtlInitUnicodeString(&name, nameBuf);
-    if (NT_SUCCESS(IfOpenKey(&key))) {   /* one value per sequence number: no read-modify-write, no lock needed */
-        if (!NT_SUCCESS(ZwSetValueKey(key, &name, 0, REG_BINARY, rec, sizeof(*rec)))) {
-            DEBUGP(DL_ERROR, "!!! [#412] init attempt seq=%u: record write failed\n", rec->seq);
+
+    IfLock();
+    if (NT_SUCCESS(IfOpenKey(&key))) {
+        /* Publish only into the session this attempt entered under, while it is still armed (checked under the lock) */
+        if (IfReadArm(key, &arm) && arm.session == rec->session && arm.net_luid == rec->net_luid) {
+            if (NT_SUCCESS(ZwSetValueKey(key, &name, 0, REG_BINARY, rec, sizeof(*rec)))) {
+                published = TRUE;
+            } else {
+                DEBUGP(DL_ERROR, "!!! [#412] init attempt seq=%u: record write failed\n", rec->seq);
+            }
+            if (arm.inflight != 0) {
+                arm.inflight--;
+            }
+            if (!NT_SUCCESS(IfWriteArm(key, &arm))) {
+                DEBUGP(DL_ERROR, "!!! [#412] init attempt seq=%u: inflight update failed\n", rec->seq);
+            }
         }
         ZwClose(key);
     }
-    DEBUGP(DL_ERROR, "!!! [#412] init attempt seq=%u result=%d hw_state %u -> %u\n", rec->seq, InitResult,
-           rec->hw_state_before, rec->hw_state_after);
+    IfUnlock();
+
+    DEBUGP(DL_ERROR, "!!! [#412] init attempt session=0x%016llX seq=%u result=%d hw_state %u -> %u %s\n", rec->session, rec->seq,
+           InitResult, rec->hw_state_before, rec->hw_state_after, published ? "recorded" : "NOT recorded (session disarmed or changed)");
 }
 
 #endif /* DBG */
