@@ -17,6 +17,7 @@ Abstract:
 #include "precomp.h"
 /* Share IOCTL ABI (codes and request structs) with user-mode */
 #include "include/avb_ioctl.h"
+#include "include/avb_init_fault_dbg.h"   /* #412: shared layout of the Debug-only initialization fault mechanism */
 
 // Intel constants
 #define INTEL_VENDOR_ID         0x8086
@@ -384,11 +385,14 @@ extern NDIS_SPIN_LOCK      g_AvbContextListLock;
  * @brief Initialize AVB device context and bind to an Intel miniport filter instance.
  * @param FilterModule Pointer to NDIS filter module instance.
  * @param AvbContext Pointer to receive allocated AVB device context.
+ * @param InitOrigin AVB_INITFAULT_ORIGIN_* of the caller (include/avb_init_fault_dbg.h): which path started the
+ *        initialization attempt. Used only by the Debug-only #412 fault mechanism; no effect on behaviour.
  * @return NTSTATUS STATUS_SUCCESS on success or appropriate NTSTATUS error.
  */
 NTSTATUS AvbInitializeDevice(
     _In_ PMS_FILTER FilterModule,
-    _Outptr_ PAVB_DEVICE_CONTEXT *AvbContext
+    _Outptr_ PAVB_DEVICE_CONTEXT *AvbContext,
+    _In_ ULONG InitOrigin
 );
 
 /**
@@ -398,11 +402,50 @@ NTSTATUS AvbInitializeDevice(
  * are reset to 0 by the hardware power cycle.
  * @note Runs at PASSIVE_LEVEL; intel_init/init_ptp perform MMIO and a short delay.
  * @param Ctx Device context.
+ * @param InitOrigin AVB_INITFAULT_ORIGIN_* of the caller; Debug-only #412 attribution, no effect on behaviour.
  * @return NTSTATUS STATUS_SUCCESS or error.
  */
 NTSTATUS AvbBringUpHardware(
-    _Inout_ PAVB_DEVICE_CONTEXT Ctx
+    _Inout_ PAVB_DEVICE_CONTEXT Ctx,
+    _In_ ULONG InitOrigin
 );
+
+/*========================================================================
+ * #412: Debug-only adapter-initialization fault mechanism (src/avb_init_fault_dbg.c, include/avb_init_fault_dbg.h)
+ * Every intel_init call site of the adapter lifecycle brackets the call with AvbInitFaultEnter / AvbInitFaultExit. Only
+ * AVB_INITFAULT_SITE_BASIC consumes armed actions; the other sites are recorded. In a Release build both are inline
+ * functions without effect, so the Release driver contains no arm, no registry access and no wait.
+ *=======================================================================*/
+typedef struct AVB_INITFAULT_CALL {
+    BOOLEAN active;                 /* the attempt is on the armed adapter and its record will be written */
+    AVB_INITFAULT_RECORD rec;
+} AVB_INITFAULT_CALL, *PAVB_INITFAULT_CALL;
+
+#if DBG
+/** DriverEntry, PASSIVE_LEVEL: remembers <RegistryPath>\Parameters; the mechanism is inert until this ran */
+VOID AvbInitFaultSetRegistryPath(_In_ PUNICODE_STRING RegistryPath);
+/** Before an intel_init call. Returns the AVB_INITFAULT_ACT_* applied; on ACT_FAIL the caller must not call intel_init and
+ *  must treat the attempt as failed (intel_init result -1). A HOLD has already been waited out when this returns */
+ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ ULONG Site, _Out_ PAVB_INITFAULT_CALL Call);
+/** After the intel_init call (or its replacement): writes the attempt's record for the test */
+VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL Call, _In_ int InitResult);
+/** IOCTL_AVB_DBG_INITFAULT_CONTROL (METHOD_BUFFERED, PASSIVE_LEVEL): ARM / DISARM / CLEAR_UNCONSUMED under the admission lock.
+ *  The handler does not wait for in-flight attempts to drain (the executable performs that bounded drain); it only takes the
+ *  admission lock. Code defined in include/avb_ioctl.h; a Release driver rejects it with STATUS_INVALID_DEVICE_REQUEST */
+NTSTATUS AvbInitFaultControl(_Inout_ PVOID Buffer, _In_ ULONG InLen, _In_ ULONG OutLen, _Out_ ULONG *Info);
+#else
+static __inline VOID AvbInitFaultSetRegistryPath(_In_ PUNICODE_STRING RegistryPath) { UNREFERENCED_PARAMETER(RegistryPath); }
+static __inline ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ ULONG Site, _Out_ PAVB_INITFAULT_CALL Call)
+{
+    UNREFERENCED_PARAMETER(Ctx); UNREFERENCED_PARAMETER(Origin); UNREFERENCED_PARAMETER(Site);
+    Call->active = FALSE;
+    return AVB_INITFAULT_ACT_NONE;
+}
+static __inline VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL Call, _In_ int InitResult)
+{
+    UNREFERENCED_PARAMETER(Ctx); UNREFERENCED_PARAMETER(Call); UNREFERENCED_PARAMETER(InitResult);
+}
+#endif
 
 /**
  * @brief Stop all periodic timers/DPCs for an AVB device context.

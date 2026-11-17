@@ -571,7 +571,10 @@ $HardwareIntegrationTests = @(
     "chatgpt5_i226_tas",              # nmake: raw TAS register programming
     "corrected_i226_tas",             # nmake: raw TAS register programming
     "avb_test_i210_device",           # device_specific/i210: register reads through the shared enumerator
-    "avb_test_i350"                   # device_specific/i350: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE
+    "avb_test_i350",                  # device_specific/i350: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE
+    "test_dev_lifecycle --init-retry-fault"   # #313 UT-DEV-LIFECYCLE-002 / #412: Debug-only initialization fault, owned NIC
+                                              # cycles, testcase-owned setup, cleanup and final state. Unsafe in $HilTestSafety;
+                                              # class-only dispatch policy is #458, not decided here
 )
 
 # ===========================
@@ -781,6 +784,7 @@ $HilTestSafety = @{
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
     'test_tas_query_clean --invalid' = 'Unsafe'       # invalid TAS_ACTIVATE requests (one can commit), owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#368)
     'test_tas_query_clean --restore' = 'Unsafe'       # TAS_ACTIVATE HOLD, owned CM_Disable_DevNode / CM_Enable_DevNode cycle, reported restoration (#377)
+    'test_dev_lifecycle --init-retry-fault' = 'Unsafe'  # Debug-only initialization fault, owned CM_Disable_DevNode / CM_Enable_DevNode cycles, INIT_DEVICE retry (#412)
     'test_dev_lifecycle --init-contract' = 'Init'     # INIT_DEVICE / OPEN_ADAPTER on READY adapters (#313 amendment, #404); a defective driver re-initializes and resets a healthy PHC: reported RED
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
@@ -912,6 +916,12 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     # --restore (#377): per TAS adapter a 60 s socket bind and a 3.5 s baseline window, one activation and query, then the same
     # cleanup bounds (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind) and one query = about 440 s; the same budget.
     'test_tas_query_clean --restore' = @{ Seconds = 560; MaxAdapters = 8 }
+    # test_dev_lifecycle --init-retry-fault (#412), from its own bounds per adapter: 60 s READY before + phase A (120 s disable +
+    # 60 s enable + 60 s return + 60 s READY) + phase B (120 + 60 + 60 s) + 60 s READY after the retry + cleanup (60 s READY, a
+    # 120 + 60 s cycle, 60 s READY) = 960 s; 1220 s = + 27 %. No MaxAdapters: the test runs every validated identity (no
+    # fixed inventory limit, PR #462 review), so the budget is 1220 s times the adapters enumerated in the latest observed
+    # state, uncapped; with no observed enumeration, one adapter's budget (a shorter budget ends in a recorded TIMEOUT).
+    'test_dev_lifecycle --init-retry-fault' = @{ Seconds = 1220 }
 }
 
 # ===========================
@@ -1860,7 +1870,9 @@ function Get-AvbTestTimeoutSeconds {
         }
     } elseif ($HilTestTimeoutPerAdapter.Contains($Entry)) {
         $p = $HilTestTimeoutPerAdapter[$Entry]
-        $n = if ($AdapterCount -lt 0) { [int]$p.MaxAdapters } else { [Math]::Min([Math]::Max(1, $AdapterCount), [int]$p.MaxAdapters) }
+        $n = if ($p.Contains('MaxAdapters')) {
+            if ($AdapterCount -lt 0) { [int]$p.MaxAdapters } else { [Math]::Min([Math]::Max(1, $AdapterCount), [int]$p.MaxAdapters) }
+        } else { [Math]::Max(1, $AdapterCount) }   # no inventory limit: the observed count, at least 1 (unknown = -1 -> 1)
         $own = [int]$p.Seconds * $n
     } elseif ($HilTestTimeoutSeconds.Contains($Entry)) { $own = [int]$HilTestTimeoutSeconds[$Entry] }
     return [Math]::Max($SuiteSeconds, $own)

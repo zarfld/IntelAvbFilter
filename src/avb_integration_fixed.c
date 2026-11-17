@@ -149,7 +149,7 @@ static VOID AvbContextListRemove(_In_ PAVB_DEVICE_CONTEXT Ctx)
 }
 
 /* Forward declarations */
-static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx);
+static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin);
 static VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext);
 /* Role-type forward declaration — carries _Function_class_(NDIS_TIMER_FUNCTION) so CodeQL
  * and SAL can verify this matches the PNDIS_TIMER_FUNCTION parameter of NdisInitializeTimer.
@@ -545,7 +545,7 @@ skip_test_pools:
  *        reopens, #350).  Success means initialization completed, NOT that the
  *        hardware clock has been shown to advance at the right rate.
  */
-NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
 {
     if (!Ctx) return STATUS_INVALID_PARAMETER;
     
@@ -603,7 +603,7 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     DEBUGP(DL_ERROR, "!!! DIAG: AvbBringUpHardware - AFTER assignment: capabilities=0x%08X\n", 
            Ctx->intel_device.capabilities);
     
-    NTSTATUS status = AvbPerformBasicInitialization(Ctx);
+    NTSTATUS status = AvbPerformBasicInitialization(Ctx, InitOrigin);
     if (!NT_SUCCESS(status)) {
         DEBUGP(DL_TRACE, "?? AvbBringUpHardware: basic init failed 0x%08X (keeping baseline capabilities=0x%08X)\n", 
                status, baseline_caps);
@@ -645,7 +645,10 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         // Use intel_init() which properly dispatches to device-specific operations
         // This calls i226_ops.init() → ndis_platform_ops.init() → AvbPlatformInit()
         // which initializes PTP clock
+        AVB_INITFAULT_CALL faultCall;   /* #412 (Debug only): this attempt is recorded, never armed (not the fault point) */
+        (void)AvbInitFaultEnter(Ctx, InitOrigin, AVB_INITFAULT_SITE_BRINGUP, &faultCall);
         int init_result = intel_init(&Ctx->intel_device);
+        AvbInitFaultExit(Ctx, &faultCall, init_result);
         
         DEBUGP(DL_ERROR, "!!! DEBUG: intel_init() returned: %d\n", init_result);
         
@@ -678,7 +681,7 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
  * @return STATUS_SUCCESS on success, error status on failure
  * @note Implements Intel datasheet generic initialization sequence
  */
-static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
 {
     DEBUGP(DL_TRACE, "? AvbPerformBasicInitialization: Starting for VID=0x%04X DID=0x%04X\n", 
            Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
@@ -817,7 +820,18 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
            Ctx->intel_device.private_data);
     
     // Now call device-specific initialization
-    if (intel_init(&Ctx->intel_device) != 0) {
+    /* #412 (Debug only): the fault point. No device register write of this initialization precedes it (PCI configuration
+     * reads, MmMapIoSpace and allocations only). An armed FAIL replaces the call and fails the attempt exactly as a
+     * non-zero intel_init return; an armed HOLD has waited inside AvbInitFaultEnter. Release: the call is unconditional */
+    AVB_INITFAULT_CALL faultCall;
+    int basic_init_result;
+    if (AvbInitFaultEnter(Ctx, InitOrigin, AVB_INITFAULT_SITE_BASIC, &faultCall) == AVB_INITFAULT_ACT_FAIL) {
+        basic_init_result = -1;
+    } else {
+        basic_init_result = intel_init(&Ctx->intel_device);
+    }
+    AvbInitFaultExit(Ctx, &faultCall, basic_init_result);
+    if (basic_init_result != 0) {
         DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
         return STATUS_UNSUCCESSFUL;
     }
@@ -910,7 +924,10 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
     
     // CLEAN ARCHITECTURE: Use Intel library device-specific initialization
     // No device-specific register access in generic integration layer
+    AVB_INITFAULT_CALL faultCall;   /* #412 (Debug only): recorded, never armed; reached from OPEN_ADAPTER */
+    (void)AvbInitFaultEnter(context, AVB_INITFAULT_ORIGIN_OPEN_HANDLER, AVB_INITFAULT_SITE_ENSURE, &faultCall);
     int init_result = intel_init(&context->intel_device);
+    AvbInitFaultExit(context, &faultCall, init_result);
     if (init_result != 0) {
         DEBUGP(DL_ERROR, "? AvbEnsureDeviceReady: intel_init failed: %d\n", init_result);
         return STATUS_DEVICE_HARDWARE_ERROR;
@@ -940,7 +957,7 @@ NTSTATUS AvbI210EnsureSystimRunning(PAVB_DEVICE_CONTEXT context)
 
 /* ======================================================================= */
 /* NDIS attach entry */
-NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CONTEXT *AvbContext)
+NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CONTEXT *AvbContext, _In_ ULONG InitOrigin)
 {
     if (!AvbContext) return STATUS_INVALID_PARAMETER;
     USHORT ven=0, dev=0;
@@ -975,7 +992,7 @@ NTSTATUS AvbInitializeDevice(_In_ PMS_FILTER FilterModule, _Out_ PAVB_DEVICE_CON
     /* Deliberately ignore a bring-up failure HERE: creating the context must succeed so that the adapter stays
      * enumerable even when its hardware initialization failed.  The failure is not hidden - hw_state stays below
      * PTP_READY and INIT_DEVICE / OPEN_ADAPTER (explicit recovery) report or retry it. */
-    (void)AvbBringUpHardware(*AvbContext);
+    (void)AvbBringUpHardware(*AvbContext, InitOrigin);
     return STATUS_SUCCESS;
 }
 
@@ -1961,7 +1978,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
     // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
     // On-demand initialization: only initialize on first IOCTL, not at driver load
-    if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
+    if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext, AVB_INITFAULT_ORIGIN_INIT_PRE);
     /* IOCTL_AVB_TAS_QUERY_HW is an observation like GET_HW_STATE: never initializes, never STATUS_DEVICE_NOT_READY; an
      * adapter it cannot read is reported in the reply (hw_read NOT_RUNNING / NO_MMIO, #365 12.1, 12.3) */
     if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER && code != IOCTL_AVB_TAS_QUERY_HW)
@@ -2086,7 +2103,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                         DEBUGP(DL_TRACE, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
                         
                         // Complete initialization sequence
-                        if (intel_init(&currentContext->intel_device) == 0) {
+                        AVB_INITFAULT_CALL faultCall;   /* #412 (Debug only): recorded, never armed */
+                        int forced_init_result;
+                        (void)AvbInitFaultEnter(currentContext, AVB_INITFAULT_ORIGIN_INIT_HANDLER, AVB_INITFAULT_SITE_FORCED, &faultCall);
+                        forced_init_result = intel_init(&currentContext->intel_device);
+                        AvbInitFaultExit(currentContext, &faultCall, forced_init_result);
+                        if (forced_init_result == 0) {
                             DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
                             
                             // Test MMIO sanity using generic register access
@@ -2113,7 +2135,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                 }
             }
             
-            status = AvbBringUpHardware(currentContext);
+            status = AvbBringUpHardware(currentContext, AVB_INITFAULT_ORIGIN_INIT_HANDLER);
             
             DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
             DEBUGP(DL_TRACE, "   - Final hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
@@ -4463,7 +4485,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     DEBUGP(DL_TRACE, "   - Current state: %s\n", AvbHwStateName(targetContext->hw_state));
                     DEBUGP(DL_TRACE, "   - Initialized: %s\n", targetContext->initialized ? "YES" : "NO");
                     
-                    NTSTATUS initStatus = AvbBringUpHardware(targetContext);
+                    NTSTATUS initStatus = AvbBringUpHardware(targetContext, AVB_INITFAULT_ORIGIN_OPEN_HANDLER);
                     if (!NT_SUCCESS(initStatus)) {
                         DEBUGP(DL_ERROR, "? OPEN_ADAPTER: Target adapter initialization failed: 0x%08X\n", initStatus);
                         // Continue anyway - some functionality may still work

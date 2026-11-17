@@ -185,6 +185,7 @@ Return Value:
      * Safe read-only call at PASSIVE_LEVEL — no spinlock, no BSOD risk.
      */
     FilterReadDebugSettings(RegistryPath);
+    AvbInitFaultSetRegistryPath(RegistryPath);   /* #412: Debug-only initialization fault mechanism; no-op in Release */
 
     DEBUGP(DL_TRACE, "===>DriverEntry...\n");
     /* #328 diagnostic: confirm whether module actually reloaded after service restart */
@@ -619,7 +620,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             DEBUGP(DL_TRACE, "FilterAttach: *** STARTING AVB INITIALIZATION *** for %wZ\n", 
                    &pFilter->MiniportFriendlyName);
                    
-            Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext);
+            Status = AvbInitializeDevice(pFilter, (PAVB_DEVICE_CONTEXT*)&pFilter->AvbContext, AVB_INITFAULT_ORIGIN_ATTACH);
             if (Status != STATUS_SUCCESS)
             {
                 DEBUGP(DL_TRACE, "FilterAttach: *** AVB INIT FAILED *** Intel NIC 0x%04x:0x%04x Status=0x%x for %wZ\n", 
@@ -1063,7 +1064,7 @@ FilterRestart(
      * whether the TAS query register gate reopens below (#350). */
     if (pFilter->AvbContext != NULL) {
         AvbTraceTxState((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, "FilterRestart");
-        bringUpStatus = AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext);
+        bringUpStatus = AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, AVB_INITFAULT_ORIGIN_RESTART);
     }
 
     /* BUGFIX 0x9F: restart timers if subscriptions survived the Pause/Restart cycle. */
