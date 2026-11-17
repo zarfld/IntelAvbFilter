@@ -7,20 +7,78 @@
 # Default path: %ProgramData%\IntelAvbFilter-hil.lock (an existing directory; no directory is created).
 #
 # Stale owners (never silently ignored; returned as evidence):
-#   local  : its PID is no longer alive on this host                        -> stale
-#   ci     : seen by a CI job: a different job's lock was left behind by a job that died (ONE runner instance on
-#            this machine executes one job at a time - precondition) -> stale.  Seen by an operator: stale only when
-#            no runner job is executing (no Runner.Worker process); the PID of a CI owner is a finished step process.
+#   local  : its PID is no longer alive on this host -> stale
+#   ci     : its recorded Runner.Worker PID and creation time prove the owner process exited -> stale.
+#            If the worker cannot be identified or queried, fail closed while it may still be active;
+#            never assume GitHub runs only one runner instance or matrix leg per physical host.
+#            All stale lock recovery is revalidated under a host-wide named mutex.
 # A live local owner is waited for up to -WaitSeconds, then the caller reports HIL_NOT_EXECUTED (busy).
 # Taking over a stale lock is recorded (PreviousOwner) so the caller can attribute an interrupted deployment and
 # collect its crash evidence; the machine state is then UNKNOWN and must pass the deployment pre-state checks.
 
 function Get-AvbHilLockPath { return (Join-Path $env:ProgramData 'IntelAvbFilter-hil.lock') }
 
+# Identify the CI job's own Runner.Worker ancestor (not a random worker elsewhere on the machine).
+# Worker PID + creation time identifies a live CI *job*, not its short-lived PowerShell step process.
+# No verifiable identity => recovery must fail closed while runner activity cannot be excluded.
+function Get-AvbHilCiWorkerIdentity {
+    param([int]$ProcessId = $PID)
+    $id = $ProcessId; $seen = @{}
+    for ($i = 0; $i -lt 32; $i++) {
+        if ($id -le 0 -or $seen.ContainsKey($id)) { break }
+        $seen[$id] = $true
+        try { $p = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop }
+        catch { return $null }
+        if ($null -eq $p) { break }
+        if ([string]$p.Name -ieq 'Runner.Worker.exe') {
+            try { return @{ pid = $id; startedUtc = ([datetime]$p.CreationDate).ToUniversalTime().ToString('o') } }
+            catch { return $null }
+        }
+        $id = [int]$p.ParentProcessId
+    }
+    return $null
+}
+
+function Get-AvbHilLockField {
+    param($Record, [string]$Name)
+    if ($null -eq $Record) { return $null }
+    if ($Record -is [System.Collections.IDictionary]) {
+        if ($Record.Contains($Name)) { return $Record[$Name] }
+        return $null
+    }
+    if ($Record.PSObject.Properties[$Name]) { return $Record.PSObject.Properties[$Name].Value }
+    return $null
+}
+
+# Query the precise recorded runner-worker process, never infer that a different CI job has died.
+# Legacy locks without a worker identity are treated conservatively: another live worker may own them.
+# Failures to verify process start time mean "possibly live", not permission to delete the lock.
+function Test-AvbHilCiWorkerActive {
+    param($Owner)
+    $workerId = Get-AvbHilLockField $Owner 'runnerWorkerPid'
+    $started = [string](Get-AvbHilLockField $Owner 'runnerWorkerStartedUtc')
+    if (-not $workerId -or -not $started) {
+        try { return [bool](Get-Process -Name 'Runner.Worker' -ErrorAction SilentlyContinue) }
+        catch { return $true }
+    }
+    try {
+        $p = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$workerId) -ErrorAction Stop
+        if ($null -eq $p) { return $false }
+        if ([string]$p.Name -ine 'Runner.Worker.exe') { return $false }
+        return (([datetime]$p.CreationDate).ToUniversalTime().ToString('o') -ceq $started)
+    } catch {
+        return $true  # A probe error is not proof the owner has exited.
+    }
+}
+
 function New-AvbHilLockOwner {
     param([string]$Kind, [string]$Label)
+    $worker = if ($Kind -eq 'ci') { Get-AvbHilCiWorkerIdentity } else { $null }
     return [ordered]@{ kind = $Kind; label = $Label; host = $env:COMPUTERNAME; pid = $PID
                        runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; job = $env:GITHUB_JOB
+                       configuration = $(if ($Kind -eq 'ci') { $env:HIL_CONFIGURATION } else { '' })
+                       runnerWorkerPid = $(if ($worker) { $worker.pid } else { $null })
+                       runnerWorkerStartedUtc = $(if ($worker) { $worker.startedUtc } else { $null })
                        acquiredUtc = (Get-Date).ToUniversalTime().ToString('o') }
 }
 
@@ -33,19 +91,15 @@ function Read-AvbHilLock {
 # $IsProcessAlive: scriptblock(pid) -> bool (injectable for tests).
 function Test-AvbHilLockStale {
     param($Owner, $Me, [scriptblock]$IsProcessAlive = { param([int]$Id) [bool](Get-Process -Id $Id -ErrorAction SilentlyContinue) },
-          [scriptblock]$IsCiJobActive = { [bool](Get-Process -Name 'Runner.Worker' -ErrorAction SilentlyContinue) })
+          [scriptblock]$IsCiJobActive = { param($ciOwner) Test-AvbHilCiWorkerActive -Owner $ciOwner })
     if ($null -eq $Owner) { return @{ Stale = $true; Why = 'no owner' } }
     if ($Owner.kind -eq 'unreadable') { return @{ Stale = $false; Why = $Owner.label } }   # never guess: operator decides
     if ($Owner.host -and $Owner.host -ne $Me.host) { return @{ Stale = $false; Why = "owned by another host $($Owner.host)" } }
-    if ($Owner.kind -eq 'ci' -and $Me.kind -eq 'ci') {
-        if ([string]$Owner.runId -eq [string]$Me.runId -and [string]$Owner.runAttempt -eq [string]$Me.runAttempt -and [string]$Owner.job -eq [string]$Me.job) {
-            return @{ Stale = $true; Why = 're-entry by the same CI job' }
-        }
-        return @{ Stale = $true; Why = "CI job run $($Owner.runId) attempt $($Owner.runAttempt) job $($Owner.job) did not release the lock (one runner executes one job at a time: that job died)" }
-    }
     if ($Owner.kind -eq 'ci') {
-        if (& $IsCiJobActive) { return @{ Stale = $false; Why = "CI job run $($Owner.runId) job $($Owner.job) is executing on this runner" } }
-        return @{ Stale = $true; Why = "CI job run $($Owner.runId) attempt $($Owner.runAttempt) job $($Owner.job) did not release the lock and no runner job is executing" }
+        if (& $IsCiJobActive $Owner) {
+            return @{ Stale = $false; Why = "CI job run $($Owner.runId) attempt $($Owner.runAttempt) job $($Owner.job) configuration $((Get-AvbHilLockField $Owner 'configuration')) may still own this runner" }
+        }
+        return @{ Stale = $true; Why = "CI job run $($Owner.runId) attempt $($Owner.runAttempt) job $($Owner.job) did not release the lock; recorded runner worker confirmed absent" }
     }
     if ($Owner.pid -and -not (& $IsProcessAlive ([int]$Owner.pid))) {
         return @{ Stale = $true; Why = "owner PID $($Owner.pid) ($($Owner.kind) '$($Owner.label)') is no longer running" }
@@ -53,31 +107,82 @@ function Test-AvbHilLockStale {
     return @{ Stale = $false; Why = "held by live $($Owner.kind) owner '$($Owner.label)' (PID $($Owner.pid)) since $($Owner.acquiredUtc)" }
 }
 
+# Creation, stale-lock validation/removal and release MUST participate in one host-wide mutex.
+# An unrelated owner can never replace an observed stale owner between validation and deletion.
+# A timeout or inaccessible mutex is unsafe: no lock-file mutation is permitted.
+function Enter-AvbHilMutationMutex {
+    $mutex = $null
+    try {
+        $mutex = [System.Threading.Mutex]::new($false, 'Global\IntelAvbFilter-HIL-Lock-Recovery')
+        $taken = $false
+        try { $taken = $mutex.WaitOne(30000) }
+        catch [System.Threading.AbandonedMutexException] { $taken = $true }
+        if (-not $taken) { throw 'timed out waiting for exclusive HIL lock mutation mutex' }
+        return $mutex
+    } catch {
+        if ($null -ne $mutex) { $mutex.Dispose() }
+        throw
+    }
+}
+
+function Exit-AvbHilMutationMutex {
+    param([System.Threading.Mutex]$Mutex)
+    if ($null -ne $Mutex) {
+        try { $Mutex.ReleaseMutex() }
+        finally { $Mutex.Dispose() }
+    }
+}
+
 # @{ Ok; Owner; PreviousOwner (stale lock taken over, or $null); Why; Waited }
 function Enter-AvbHilLock {
     param([string]$Kind, [string]$Label, [string]$Path = (Get-AvbHilLockPath), [int]$WaitSeconds = 0,
           [scriptblock]$IsProcessAlive = { param([int]$Id) [bool](Get-Process -Id $Id -ErrorAction SilentlyContinue) },
-          [scriptblock]$IsCiJobActive = { [bool](Get-Process -Name 'Runner.Worker' -ErrorAction SilentlyContinue) },
+          [scriptblock]$IsCiJobActive = { param($ciOwner) Test-AvbHilCiWorkerActive -Owner $ciOwner },
           [scriptblock]$Sleep = { param([int]$s) Start-Sleep -Seconds $s })
     $me = New-AvbHilLockOwner -Kind $Kind -Label $Label
     $json = ($me | ConvertTo-Json -Compress)
     $waited = 0; $previous = $null
     while ($true) {
-        try {
-            $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try { $b = [System.Text.Encoding]::UTF8.GetBytes($json); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
-            return @{ Ok = $true; Owner = $me; PreviousOwner = $previous; Why = ''; Waited = $waited }
-        } catch [System.IO.IOException] {
-            $owner = Read-AvbHilLock -Path $Path
-            $st = Test-AvbHilLockStale -Owner $owner -Me $me -IsProcessAlive $IsProcessAlive -IsCiJobActive $IsCiJobActive
-            if ($st.Stale) {
-                $previous = [ordered]@{ owner = $owner; why = $st.Why; detectedUtc = (Get-Date).ToUniversalTime().ToString('o') }
-                Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
-                continue
-            }
-            if ($waited -ge $WaitSeconds) { return @{ Ok = $false; Owner = $owner; PreviousOwner = $previous; Why = $st.Why; Waited = $waited } }
-            & $Sleep 10; $waited += 10
+        # Serialize all lock-file creation, inspection and deletion with Exit-AvbHilLock.
+        # Do not hold the mutex while waiting for a live owner's long-running operation.
+        $gate = $null
+        try { $gate = Enter-AvbHilMutationMutex }
+        catch {
+            return @{ Ok = $false; Owner = $null; PreviousOwner = $previous
+                      Why = "unable to establish exclusive HIL lock mutation control: $($_.Exception.Message)"; Waited = $waited }
         }
+        $owner = $null; $st = $null; $retry = $false
+        try {
+            try {
+                $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                try {
+                    $b = [System.Text.Encoding]::UTF8.GetBytes($json)
+                    $fs.Write($b, 0, $b.Length)
+                } finally { $fs.Dispose() }
+                return @{ Ok = $true; Owner = $me; PreviousOwner = $previous; Why = ''; Waited = $waited }
+            } catch [System.IO.IOException] {
+                $owner = Read-AvbHilLock -Path $Path
+                if ($null -eq $owner) {
+                    # Another owner finished releasing between the initial file-create failure and read.
+                    $retry = $true
+                } else {
+                    $st = Test-AvbHilLockStale -Owner $owner -Me $me -IsProcessAlive $IsProcessAlive -IsCiJobActive $IsCiJobActive
+                    if ($st.Stale) {
+                        $previous = [ordered]@{ owner = $owner; why = $st.Why; detectedUtc = (Get-Date).ToUniversalTime().ToString('o') }
+                        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+                        $retry = $true
+                    }
+                }
+            }
+        } finally {
+            Exit-AvbHilMutationMutex -Mutex $gate
+        }
+        if ($retry) { continue }
+        if ($waited -ge $WaitSeconds) {
+            return @{ Ok = $false; Owner = $owner; PreviousOwner = $previous
+                      Why = $(if ($st) { $st.Why } else { 'HIL lock unavailable; state unresolved' }); Waited = $waited }
+        }
+        & $Sleep 10; $waited += 10
     }
 }
 
@@ -90,9 +195,10 @@ function Test-AvbHilLockHeld {
     if ($null -eq $cur) { return @{ Ok = $false; Why = 'lock already absent' } }
     $same = ($cur.kind -eq $Owner.kind -and [string]$cur.pid -eq [string]$Owner.pid -and [string]$cur.runId -eq [string]$Owner.runId -and
              [string]$cur.runAttempt -eq [string]$Owner.runAttempt -and [string]$cur.job -eq [string]$Owner.job -and $cur.acquiredUtc -eq $Owner.acquiredUtc)
-    # A CI job releases from another step process: same run/attempt/job identifies the owner, the PID differs.
-    if (-not $same -and $Owner.kind -eq 'ci') {
-        $same = ($cur.kind -eq 'ci' -and [string]$cur.runId -eq [string]$Owner.runId -and [string]$cur.runAttempt -eq [string]$Owner.runAttempt -and [string]$cur.job -eq [string]$Owner.job)
+    # CI release uses the originally persisted owner JSON, including acquiredUtc and PID.
+    # Matrix legs have the same GITHUB_JOB: matching run/attempt/job alone would let one release another's lock.
+    if ($same -and $Owner.kind -eq 'ci') {
+        $same = ([string](Get-AvbHilLockField $cur 'configuration') -ceq [string](Get-AvbHilLockField $Owner 'configuration'))
     }
     if (-not $same) { return @{ Ok = $false; Why = "lock is held by another owner ($($cur.kind) '$($cur.label)')" } }
     return @{ Ok = $true; Why = '' }
@@ -100,10 +206,18 @@ function Test-AvbHilLockHeld {
 
 function Exit-AvbHilLock {
     param($Owner, [string]$Path = (Get-AvbHilLockPath))
-    $held = Test-AvbHilLockHeld -Owner $Owner -Path $Path
-    if (-not $held.Ok) { return $held }
-    Remove-Item -LiteralPath $Path -Force
-    return @{ Ok = $true; Why = '' }
+    $gate = $null
+    try { $gate = Enter-AvbHilMutationMutex }
+    catch { return @{ Ok = $false; Why = "unable to verify lock ownership under exclusive mutation control: $($_.Exception.Message)" } }
+    try {
+        # Verify and remove within the SAME mutex used by creation and stale-lock reclamation.
+        $held = Test-AvbHilLockHeld -Owner $Owner -Path $Path
+        if (-not $held.Ok) { return $held }
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return @{ Ok = $true; Why = '' }
+    } finally {
+        Exit-AvbHilMutationMutex -Mutex $gate
+    }
 }
 
 # Process ancestry from the OS (parent chain, nearest first); bounded, cycle-safe.
@@ -129,7 +243,9 @@ function Resolve-AvbHilLockContext {
     if ($owner.kind -eq 'unreadable' -or -not $owner.kind) { return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock ownership cannot be verified ($($owner.label))" } }
     if ($owner.host -and $owner.host -ne $env:COMPUTERNAME) { return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock written by host '$($owner.host)'" } }
     if ($owner.kind -eq 'ci') {
-        if ($null -ne $GitHub -and [string]$owner.runId -eq [string]$GitHub.runId -and [string]$owner.runAttempt -eq [string]$GitHub.runAttempt -and [string]$owner.job -eq [string]$GitHub.job) {
+        $contextCfg = if ($null -ne (Get-AvbHilLockField $GitHub 'configuration')) { [string](Get-AvbHilLockField $GitHub 'configuration') } else { [string]$env:HIL_CONFIGURATION }
+        if ($null -ne $GitHub -and [string]$owner.runId -eq [string]$GitHub.runId -and [string]$owner.runAttempt -eq [string]$GitHub.runAttempt -and [string]$owner.job -eq [string]$GitHub.job -and
+            [string](Get-AvbHilLockField $owner 'configuration') -ceq $contextCfg) {
             return @{ Owned = $true; How = 'ci-job'; Owner = $owner; Why = '' } }
         return @{ Owned = $false; How = ''; Owner = $owner; Why = "lock held by CI job $($owner.runId)/$($owner.runAttempt)/$($owner.job), not by this execution" }
     }

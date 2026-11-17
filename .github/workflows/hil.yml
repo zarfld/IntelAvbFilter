@@ -18,13 +18,14 @@ name: HIL - Hardware-in-the-Loop
 #                enough) and master must be protected.  Downloads the signed Debug and Release packages of THAT run,
 #                checks each package manifest against the authorized revision / run / attempt / configuration, derives
 #                the staged driver SHA256 of each from the package itself and hands both packages to this run.
-#   hil-debug    self-hosted, Debug, atomic: inline preflight (authorization context, elevation, machine readiness)
+#   hil          self-hosted matrix [Debug, Release], each leg atomic: inline preflight (authorization context, elevation, machine readiness)
 #                BEFORE any repository code -> checkout of the authorized head_sha -> deployment of the Debug package
 #                (tools/ci/Invoke-HilDeployment.ps1: machine lock, crash evidence, package verification incl. pinned
 #                signer + local trust, unattended Install-Driver.ps1, post-deployment pre-flight) -> build tests ->
 #                run identity -> HardwareUnit, HardwareIntegration -> lock release + evidence.
-#   hil-release  the same for Release, strictly after hil-debug (never concurrently; the machine lock also excludes
-#                other workflow runs and operator runs).  Skipped when hil-debug left the machine needing the operator.
+#                Each leg verifies the assigned host and its own signed package independently of the other.
+#                fail-fast=false prevents one failing matrix leg cancelling the other. Debug and Release may
+#                execute concurrently on different hosts; the machine-local HIL lock excludes same-host operations.
 #   hil-acceptance GitHub-hosted: per configuration a DEPLOYED record of this run, staged == installed == ImagePath
 #                file, and every suite executed with real passes and no failure; otherwise FAILED / HIL_NOT_EXECUTED /
 #                STAGED_BUILD_NOT_TESTED.  Publishes JUnit and traceability; its verdict is the job output `verdict`.
@@ -40,8 +41,8 @@ name: HIL - Hardware-in-the-Loop
 # Both hardware suites run here (HardwareUnit, HardwareIntegration - the only hardware suites, Q 2026-11-03).  A required
 # test that is not executed yet (fixture/restoration or infrastructure missing) is a failing TC-HIL-COVERAGE-GAP-001
 # case and makes the suite and the acceptance verdict INCOMPLETE - never PASSED (P0 full HIL coverage, 2026-10-21).
-# Serialization: hil-release needs hil-debug; one runner instance; machine-wide lock file (tools/lib/HilLock.ps1)
-# shared with LocalSuites.ps1.  No concurrency group (it would cancel pending runs).
+# Matrix concurrency: two independent legs both need only authorize and may run on separate physical hosts
+# concurrently. HilLock.ps1 protects machine-local mutations if assigned to one host. No cancelling concurrency group.
 
 on:
   workflow_run:
@@ -337,23 +338,25 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  hil-debug:
-    name: HIL Debug (self-hosted-hardware, deploy + Unit + Integration)
+  hil:
+    name: HIL ${{ matrix.configuration }} (self-hosted-hardware, deploy + Unit + Integration)
     needs: [authorize]
     if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
     runs-on: [self-hosted, Windows, i226]
     environment: hil
     timeout-minutes: 300
     permissions:
       contents: read
-    outputs:
-      machine_ok: ${{ steps.machine.outputs.machine_ok }}
     env:
-      HIL_CONFIGURATION: Debug
+      HIL_CONFIGURATION: ${{ matrix.configuration }}
       AVB_HIL_EXPECTED_REVISION: ${{ needs.authorize.outputs.head_sha }}
       HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
       HIL_UPSTREAM_RUN_ATTEMPT: ${{ needs.authorize.outputs.upstream_run_attempt }}
-      HIL_STAGED_DRIVER_SHA256: ${{ needs.authorize.outputs.staged_debug_sha256 }}
+      HIL_STAGED_DRIVER_SHA256: ${{ matrix.configuration == 'Debug' && needs.authorize.outputs.staged_debug_sha256 || needs.authorize.outputs.staged_release_sha256 }}
 
     steps:
       - name: Trusted HIL preflight (inline, before any repository code)
@@ -436,7 +439,7 @@ jobs:
       - name: Receive the verified staged package
         uses: actions/download-artifact@v4
         with:
-          name: hil-staged-Debug
+          name: hil-staged-${{ matrix.configuration }}
           path: ${{ runner.temp }}/hil-package
 
       - name: Deploy the staged driver (lock, crash evidence, package verification, unattended install, pre-flight)
@@ -504,14 +507,14 @@ jobs:
           .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
           exit $LASTEXITCODE
 
-      - name: Machine state for the next configuration
+      - name: Record this runner's post-deployment machine state
         id: machine
         if: always()
         shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
         run: |
           # machineOk is decided by the deployment from its recorded state (tools/lib/DriverDeploy.ps1 Get-AvbMachineOk):
           # a failed deployment counts only with a settled, known post-failure state; IN_FLIGHT (job lost) has no machineOk.
-          # No record: no deployment touched the machine (blocked before it), the next job's own preflight decides.
+          # No record: no deployment touched this runner; other matrix legs make their own preflight decisions.
           $f = Join-Path $env:RUNNER_TEMP 'hil-evidence\deployment.json'
           $d = if (Test-Path -LiteralPath $f) { Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } else { $null }
           $v = if ($d) { $d.verdict } else { 'NONE' }
@@ -532,212 +535,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: hil-evidence-Debug
+          name: hil-evidence-${{ matrix.configuration }}
           path: ${{ runner.temp }}/hil-evidence/
           if-no-files-found: ignore
-
-  hil-release:
-    name: HIL Release (self-hosted-hardware, deploy + Unit + Integration)
-    needs: [authorize, hil-debug]
-    if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true' && needs.hil-debug.outputs.machine_ok == 'true' }}
-    runs-on: [self-hosted, Windows, i226]
-    environment: hil
-    timeout-minutes: 300
-    permissions:
-      contents: read
-    outputs:
-      machine_ok: ${{ steps.machine.outputs.machine_ok }}
-    env:
-      HIL_CONFIGURATION: Release
-      AVB_HIL_EXPECTED_REVISION: ${{ needs.authorize.outputs.head_sha }}
-      HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
-      HIL_UPSTREAM_RUN_ATTEMPT: ${{ needs.authorize.outputs.upstream_run_attempt }}
-      HIL_STAGED_DRIVER_SHA256: ${{ needs.authorize.outputs.staged_release_sha256 }}
-
-    steps:
-      - name: Trusted HIL preflight (inline, before any repository code)
-        id: hil-trusted-preflight
-        # Defined by this file on master only (workflow_run).  The workspace may still hold an earlier job's files;
-        # nothing from it runs here.  Machine readiness is derived from the machine itself (no operator variable):
-        # an absent or different installed driver is NOT a failure (the deployment replaces it); STOP_PENDING or a
-        # pending reboot-time replacement of the driver blocks (only a reboot resolves it; never automatic).
-        env:
-          HIL_AUTHORIZED: ${{ needs.authorize.outputs.authorized }}
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          $r = @()
-          try {
-            if ($env:GITHUB_REPOSITORY -cne 'zarfld/IntelAvbFilter') { $r += "repository '$env:GITHUB_REPOSITORY'" }
-            if ($env:GITHUB_EVENT_NAME -cne 'workflow_run') { $r += "event '$env:GITHUB_EVENT_NAME' is not workflow_run" }
-            if ($env:GITHUB_WORKFLOW_REF -cne 'zarfld/IntelAvbFilter/.github/workflows/hil.yml@refs/heads/master') { $r += "workflow '$env:GITHUB_WORKFLOW_REF' is not hil.yml on master" }
-            if ($env:HIL_AUTHORIZED -cne 'true') { $r += 'authorize job did not grant this run' }
-            if ($env:AVB_HIL_EXPECTED_REVISION -cnotmatch '^[0-9a-f]{40}$') { $r += "authorized head_sha '$env:AVB_HIL_EXPECTED_REVISION' is not a 40-hex commit id" }
-            if ($env:GITHUB_RUN_ATTEMPT -cne '1') { $r += "HIL re-run (attempt '$env:GITHUB_RUN_ATTEMPT') is not authorized" }
-            if ($env:HIL_STAGED_DRIVER_SHA256 -cnotmatch '^[0-9A-F]{64}$') { $r += 'authorize did not identify the staged driver of the upstream run' }
-            if ($env:HIL_CONFIGURATION -cnotmatch '^(Debug|Release)$') { $r += "configuration '$env:HIL_CONFIGURATION'" }
-            $pr = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
-            if (-not $pr.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { $r += 'runner is not elevated: the IntelAvbFilter control device admits Administrators only (#73)' }
-            $svc = Get-Service -Name IntelAvbFilter -ErrorAction SilentlyContinue
-            if ($svc -and [string]$svc.Status -eq 'StopPending') { $r += 'service IntelAvbFilter is STOP_PENDING: reboot required (never automatic)' }
-            $pend = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
-            if (@($pend | Where-Object { $_ -match '(?i)IntelAvbFilter' }).Count -gt 0) { $r += 'reboot-time replacement of IntelAvbFilter pending: reboot required (never automatic)' }
-            foreach ($did in '125B', '1533', '15BB') {
-              $pnp = @(Get-PnpDevice -Class Net -ErrorAction Stop | Where-Object { $_.InstanceId -match "VEN_8086&DEV_$did" })
-              if ($pnp.Count -eq 0 -or @($pnp | Where-Object { [string]$_.Status -ne 'OK' }).Count -gt 0) { $r += "adapter DEV_$did PnP: $(@($pnp | ForEach-Object { [string]$_.Status }) -join ',')" }
-              $na = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.PnPDeviceID -match "VEN_8086&DEV_$did" })
-              if ($na.Count -eq 0 -or @($na | Where-Object { [string]$_.Status -ne 'Up' }).Count -gt 0) { $r += "adapter DEV_$did link: $(@($na | ForEach-Object { [string]$_.Status }) -join ',')" }
-            }
-          } catch { $r += "preflight error: $($_.Exception.Message)" }
-          if ($r.Count -gt 0) {
-            Write-Host "::error title=HIL BLOCKED::$($r -join '; ')"
-            foreach ($x in $r) { Write-Host "[HIL-PREFLIGHT] BLOCKED: $x" }
-            exit 1
-          }
-          Write-Host "[HIL-PREFLIGHT] AUTHORIZED: $env:HIL_CONFIGURATION $env:AVB_HIL_EXPECTED_REVISION (CI run $env:HIL_UPSTREAM_RUN_ID attempt $env:HIL_UPSTREAM_RUN_ATTEMPT, staged $env:HIL_STAGED_DRIVER_SHA256)"
-          exit 0
-
-      - name: Checkout the authorized upstream commit
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.authorize.outputs.head_sha }}
-          persist-credentials: 'false'
-          clean: 'true'
-          submodules: true
-
-      - name: Verify checkout is the authorized commit
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          $head = ([string](git rev-parse HEAD)).Trim()
-          if ($head -cne $env:AVB_HIL_EXPECTED_REVISION) { Write-Host "::error title=HIL BLOCKED::checked-out HEAD $head is not the authorized $env:AVB_HIL_EXPECTED_REVISION"; exit 1 }
-          Write-Host "HEAD = authorized $head"
-
-      - name: Verify prerequisites (self-hosted hardware runner)
-        # Never installs anything - it only reports missing prerequisites.
-        shell: 'powershell -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          $missing = @()
-          $wdkKm = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
-          $wdkFound = Get-ChildItem $wdkKm -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName 'km\ntddk.h') } | Select-Object -First 1
-          if ($wdkFound) { Write-Host "WDK km headers present: $($wdkFound.FullName)"; "WDK_VERSION=$($wdkFound.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
-          else { $missing += 'WDK km headers (ntddk.h not found under Windows Kits)' }
-          if (Test-Path 'C:\npcap-sdk-1.16\Include\pcap.h') { Write-Host 'Npcap SDK present' } else { $missing += 'Npcap SDK (expected at C:\npcap-sdk-1.16)' }
-          $taefInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\inc"
-          $taefLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Testing\Development\lib\x64"
-          if ((Test-Path "$taefInc\WexTestClass.h") -and (Test-Path "$taefLib\Wex.Common.lib")) {
-            "TAEF_INCLUDE=$taefInc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            "TAEF_LIB=$taefLib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          } else { Write-Host 'WARNING: TAEF/WEX headers not found -- taef_tests will be skipped' }
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere) -or -not (& $vswhere -latest -products * -property installationPath 2>$null)) { $missing += 'Visual Studio (vswhere)' }
-          if ($missing.Count -gt 0) { Write-Host 'ERROR: Missing prerequisites on self-hosted runner:'; $missing | ForEach-Object { Write-Host "   - $_" }; exit 1 }
-          Write-Host "All prerequisites verified on $env:RUNNER_NAME"
-
-      - name: Receive the verified staged package
-        uses: actions/download-artifact@v4
-        with:
-          name: hil-staged-Release
-          path: ${{ runner.temp }}/hil-package
-
-      - name: Deploy the staged driver (lock, crash evidence, package verification, unattended install, pre-flight)
-        id: deploy
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\ci\Invoke-HilDeployment.ps1 -Action Deploy -Configuration $env:HIL_CONFIGURATION -PackageDir (Join-Path $env:RUNNER_TEMP 'hil-package') -ExpectedRevision $env:AVB_HIL_EXPECTED_REVISION -ExpectedRepository $env:GITHUB_REPOSITORY -ExpectedRunId $env:HIL_UPSTREAM_RUN_ID -ExpectedRunAttempt $env:HIL_UPSTREAM_RUN_ATTEMPT -ExpectedDriverSha256 $env:HIL_STAGED_DRIVER_SHA256 -EvidenceDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Build test binaries from this revision (test-build-manifest.json)
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\build\Build-Tests.ps1 -Configuration $env:HIL_CONFIGURATION
-          exit $LASTEXITCODE
-
-      - name: Verify the deployed driver is the staged build
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          $env:BUILD_DRIVER_SHA256 = $env:HIL_STAGED_DRIVER_SHA256; $env:HIL_REQUIRE_DEPLOYED_SHA = '1'
-          .\tools\test\Test-DriverPreFlight.ps1
-          exit $LASTEXITCODE
-
-      - name: Record HIL run identity
-        # hil-acceptance rejects any bundle that is not this HIL run, this authorized revision and this upstream run.
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $dir = Join-Path $env:RUNNER_TEMP 'hil-evidence'
-          $drvFile = Join-Path $env:SystemRoot 'System32\drivers\IntelAvbFilter.sys'
-          $img = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\IntelAvbFilter').ImagePath
-          $imgPath = ($img -replace '^\\\?\?\\', '') -replace '^\\SystemRoot\\', ($env:SystemRoot + '\')
-          if ($imgPath -notmatch '^[A-Za-z]:\\') { $imgPath = Join-Path $env:SystemRoot $imgPath }
-          $dep = Get-Content -LiteralPath (Join-Path $dir 'deployment.json') -Raw | ConvertFrom-Json
-          $steps = @($dep.install.steps)
-          $released = @($steps | Where-Object { $_.step -in 'service-released', 'netcfg-uninstall' -and $_.ok }).Count -gt 0
-          $running = @($steps | Where-Object { $_.step -eq 'service-running' -and $_.ok }).Count -gt 0
-          $id = [ordered]@{
-            runId = $env:GITHUB_RUN_ID; runAttempt = $env:GITHUB_RUN_ATTEMPT; sha = $env:AVB_HIL_EXPECTED_REVISION
-            headRevision = ([string](git rev-parse HEAD)).Trim(); upstreamRunId = $env:HIL_UPSTREAM_RUN_ID; upstreamRunAttempt = $env:HIL_UPSTREAM_RUN_ATTEMPT
-            job = $env:GITHUB_JOB; configuration = $env:HIL_CONFIGURATION; runner = $env:RUNNER_NAME
-            deploymentVerdict = $dep.verdict; stagedDriverSha256 = $env:HIL_STAGED_DRIVER_SHA256
-            installedDriverSha256 = (Get-FileHash -LiteralPath $drvFile -Algorithm SHA256).Hash
-            serviceImagePath = $img; imagePathSha256 = (Get-FileHash -LiteralPath $imgPath -Algorithm SHA256).Hash
-            runningImageEvidence = $(if ($dep.verdict -eq 'DEPLOYED' -and $released -and $running) { 'reloaded during this deployment: previous image released (or absent), staged file installed, service then RUNNING (loaded image not hashed)' } else { 'UNPROVEN: no complete deployment in this job' })
-            recordedUtc = (Get-Date).ToUniversalTime().ToString('o')
-          }
-          ($id | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json') -Encoding utf8
-          Get-Content -LiteralPath (Join-Path $dir 'hil-run-identity.json')
-
-      # Both hardware suites in the LocalSuites order.  Each runs whenever the deployment succeeded (a
-      # failure in one suite never hides the evidence of the next); -PriorResultsDir carries a halt of an earlier
-      # suite of this job (TIMEOUT / INFRA / CLEANUP_FAILED / state halt / killed run) so a damaged state never becomes
-      # a clean baseline: later Init/Mutating/Unsafe tests are BLOCKED, ReadOnly tests continue.
-      - name: Run HardwareUnit
-        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareUnit -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareUnit') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Run HardwareIntegration
-        if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          .\tools\test\Run-Tests-CI.ps1 -Configuration $env:HIL_CONFIGURATION -Suite HardwareIntegration -LogsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence\HardwareIntegration') -PriorResultsDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Machine state for the next configuration
-        id: machine
-        if: always()
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          # machineOk is decided by the deployment from its recorded state (tools/lib/DriverDeploy.ps1 Get-AvbMachineOk):
-          # a failed deployment counts only with a settled, known post-failure state; IN_FLIGHT (job lost) has no machineOk.
-          # No record: no deployment touched the machine (blocked before it), the next job's own preflight decides.
-          $f = Join-Path $env:RUNNER_TEMP 'hil-evidence\deployment.json'
-          $d = if (Test-Path -LiteralPath $f) { Get-Content -LiteralPath $f -Raw | ConvertFrom-Json } else { $null }
-          $v = if ($d) { $d.verdict } else { 'NONE' }
-          $ok = if ($null -eq $d) { 'true' } elseif ($d.PSObject.Properties['machineOk'] -and $d.machineOk -eq $true) { 'true' } else { 'false' }
-          "machine_ok=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "deployment verdict $v -> machine_ok=$ok ($(if ($d -and $d.PSObject.Properties['machineOkReason']) { $d.machineOkReason } else { 'no machineOk in the record' }))"
-
-      - name: Release the HIL machine lock
-        if: always()
-        shell: 'powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command ". ''{0}''"'
-        run: |
-          if (-not (Test-Path -LiteralPath '.\tools\ci\Invoke-HilDeployment.ps1')) { Write-Host 'no checkout: no lock was taken'; exit 0 }
-          .\tools\ci\Invoke-HilDeployment.ps1 -Action Release -EvidenceDir (Join-Path $env:RUNNER_TEMP 'hil-evidence')
-          exit $LASTEXITCODE
-
-      - name: Upload HIL evidence (this run only)
-        # RUNNER_TEMP is emptied by the runner for every job: only this job's identity, deployment, logs and JUnit are here.
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: hil-evidence-Release
-          path: ${{ runner.temp }}/hil-evidence/
-          if-no-files-found: ignore
-
   hil-acceptance:
     name: HIL Acceptance (current-run evidence)
-    needs: [authorize, hil-debug, hil-release]
+    needs: [authorize, hil]
     # Runs whenever the HIL was authorized - also after a failed stage, so failures are published and judged.
     if: ${{ !cancelled() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true' }}
     runs-on: ubuntu-latest
@@ -762,8 +565,7 @@ jobs:
       - name: Hardware acceptance verdict (current-run evidence)
         id: verdict
         env:
-          HIL_DEBUG: ${{ needs.hil-debug.result }}
-          HIL_RELEASE: ${{ needs.hil-release.result }}
+          HIL_MATRIX: ${{ needs.hil.result }}
           HIL_HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           HIL_UPSTREAM_RUN_ID: ${{ needs.authorize.outputs.upstream_run_id }}
           HIL_STAGED_DEBUG: ${{ needs.authorize.outputs.staged_debug_sha256 }}
@@ -785,12 +587,12 @@ jobs:
           bad, not_executed, rows, lines, known, identity_ok = [], [], [], [], set(), True
           if os.environ.get('GITHUB_RUN_ATTEMPT') != '1':
               bad.append('HIL re-run attempt %r: evidence of attempt 1 only' % os.environ.get('GITHUB_RUN_ATTEMPT'))
-          for cfg, var in (('Debug', 'HIL_DEBUG'), ('Release', 'HIL_RELEASE')):
-              job = 'hil-' + cfg.lower()
+          if os.environ.get('HIL_MATRIX') != 'success':
+              bad.append('hil matrix result is %r (both Debug and Release legs must complete successfully)' % os.environ.get('HIL_MATRIX'))
+          for cfg in ('Debug', 'Release'):
+              job = 'hil'
               b = os.path.join(root, 'hil-evidence-%s' % cfg)
               known.add(os.path.normpath(b))
-              if os.environ.get(var) != 'success':
-                  bad.append('%s result is %r (success required; skipped/blocked/failed is not hardware verification)' % (job, os.environ.get(var)))
               dep_f, idf = os.path.join(b, 'deployment.json'), os.path.join(b, 'hil-run-identity.json')
               if not os.path.isfile(dep_f):
                   not_executed.append('%s: no deployment record (staged driver never deployed)' % cfg); continue
@@ -902,7 +704,7 @@ jobs:
     # repository code; writes only the status.  'success' only for a PASSED acceptance of Debug AND Release for exactly
     # the authorized head; a status is bound to one SHA, so a newer push carries no status and the merge stays blocked.
     name: HIL pre-merge gate (commit status)
-    needs: [authorize, hil-debug, hil-release, hil-acceptance]
+    needs: [authorize, hil, hil-acceptance]
     if: ${{ always() && github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
@@ -917,8 +719,7 @@ jobs:
           AZ_HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           AZ_PR: ${{ needs.authorize.outputs.pr_number }}
           AZ_DENY: ${{ needs.authorize.outputs.deny_reasons }}
-          DEBUG_RESULT: ${{ needs.hil-debug.result }}
-          RELEASE_RESULT: ${{ needs.hil-release.result }}
+          HIL_MATRIX_RESULT: ${{ needs.hil.result }}
           ACC_RESULT: ${{ needs.hil-acceptance.result }}
           ACC_VERDICT: ${{ needs.hil-acceptance.outputs.verdict }}
         shell: python3 -I {0}
@@ -938,7 +739,7 @@ jobs:
           prs = [p.get('number') for p in (wr.get('pull_requests') or []) if isinstance(p, dict)]
           head_repo = (wr.get('head_repository') or {}).get('full_name')
           res = {'authorize': E('AZ_RESULT'), 'authorized': E('AZ_AUTHORIZED'), 'mode': E('AZ_MODE'), 'authorizedHead': E('AZ_HEAD_SHA'),
-                 'authorizedPullRequest': E('AZ_PR'), 'hil-debug': E('DEBUG_RESULT'), 'hil-release': E('RELEASE_RESULT'),
+                 'authorizedPullRequest': E('AZ_PR'), 'hil': E('HIL_MATRIX_RESULT'),
                  'hil-acceptance': E('ACC_RESULT'), 'acceptanceVerdict': E('ACC_VERDICT')}
           # First unmet prerequisite decides; every verdict except PASSED is 'failure'.
           if wr.get('event') != 'pull_request':
@@ -951,12 +752,12 @@ jobs:
               verdict, why = 'NOT_AUTHORIZED', E('AZ_DENY') or 'authorize result %r, authorized %r' % (E('AZ_RESULT'), E('AZ_AUTHORIZED'))
           elif E('AZ_MODE') != 'pull_request' or E('AZ_HEAD_SHA') != sha or not re.fullmatch('[1-9][0-9]*', E('AZ_PR') or '') or int(E('AZ_PR')) not in prs:
               verdict, why = 'INCONSISTENT', 'authorized %r %r #%r is not this pull request CI head %s %r' % (E('AZ_MODE'), E('AZ_HEAD_SHA'), E('AZ_PR'), sha, prs)
-          elif E('DEBUG_RESULT') != 'success' or E('RELEASE_RESULT') != 'success' or E('ACC_RESULT') != 'success' or E('ACC_VERDICT') != 'PASSED':
+          elif E('HIL_MATRIX_RESULT') != 'success' or E('ACC_RESULT') != 'success' or E('ACC_VERDICT') != 'PASSED':
               av = E('ACC_VERDICT') or ''
               # Closed vocabulary: hil-acceptance's non-passing verdicts pass through; none = not executed; else inconsistent.
               verdict = av if av in ('FAILED', 'INCOMPLETE', 'HIL_NOT_EXECUTED', 'STAGED_BUILD_NOT_TESTED') else ('HIL_NOT_EXECUTED' if av in ('', 'PASSED') else 'INCONSISTENT')
-              why = 'hil-debug %r, hil-release %r, hil-acceptance %r verdict %r (Debug and Release must both pass; skipped/blocked/incomplete is not verification)' % (
-                  E('DEBUG_RESULT'), E('RELEASE_RESULT'), E('ACC_RESULT'), av)
+              why = 'hil matrix %r, hil-acceptance %r verdict %r (Debug and Release must both pass; missing/skipped/blocked/incomplete is not verification)' % (
+                  E('HIL_MATRIX_RESULT'), E('ACC_RESULT'), av)
           else:
               verdict, why = 'PASSED', ''
           state = 'success' if verdict == 'PASSED' else 'failure'
