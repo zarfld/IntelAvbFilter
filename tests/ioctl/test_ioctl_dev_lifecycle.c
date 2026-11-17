@@ -51,10 +51,11 @@
  *
  * --init-retry-fault: #313 UT-DEV-LIFECYCLE-002 "Initialization After Failed Start" (first attempt STATUS_DEVICE_HARDWARE_ERROR,
  * retry after the fault is cleared STATUS_SUCCESS, no lingering error state), executed with the Debug-only initialization fault
- * mechanism of #412 (include/avb_init_fault_dbg.h, src/avb_init_fault_dbg.c). On every enumerated adapter, at most
- * INIT_RETRY_FAULT_MAX_ADAPTERS; identity, device node and arm target by NET_LUID, never by model:
+ * mechanism of #412 (include/avb_init_fault_dbg.h, src/avb_init_fault_dbg.c). On every enumerated adapter (no fixed limit;
+ * per-adapter storage is sized from the validated inventory); identity, device node and arm target by NET_LUID, never by model:
  *   UT-DEV-LIFECYCLE-002-PRESTATE  setup before any mutation: device node, an independent management link (another adapter up
- *                  with a gateway; none: BLOCKED, the owned NIC cycle would isolate the host), the driver Parameters key, stale
+ *                  with a gateway; none: FAILED_SETUP without the NIC cycle, which would cut the host's only management path),
+ *                  the driver Parameters key, stale
  *                  fault values removed, the target READY with an advancing PHC, the other adapters' state recorded.
  *   UT-DEV-LIFECYCLE-002-REACH     phase A: OBSERVE armed for origin ATTACH, owned NIC cycle (fresh attach of the target only).
  *                  PASS needs the driver record that consumed it: target, origin ATTACH, site BASIC (the fault point), IRQL 0,
@@ -1282,7 +1283,7 @@ static int run_init_contract(void)
 /*==============================================================================
  * --init-retry-fault (#412: UT-DEV-LIFECYCLE-002 with the Debug-only initialization fault mechanism)
  *============================================================================*/
-#define INIT_RETRY_FAULT_MAX_ADAPTERS 8      /* supported inventory; Run-Tests-CI.ps1's per-adapter budget uses the same limit */
+static int g_irf_established, g_irf_completed;   /* adapters whose PRESTATE passed; adapters whose run reached its end */
 #define IRF_DISABLE_BOUND_MS   120000
 #define IRF_ENABLE_BOUND_MS    60000
 #define IRF_RETURN_BOUND_MS    60000         /* identity back, the expected attempts recorded, READY where expected */
@@ -1599,8 +1600,9 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     static BOOL present[AVB_INITFAULT_MAX_RECORDS];
     const UINT32 index = id->index;
     const avb_u16 did = id->device_id;
-    IC_OBS p0, p1, r0, r1, f0, f1, oth0[INIT_RETRY_FAULT_MAX_ADAPTERS], oth1[INIT_RETRY_FAULT_MAX_ADAPTERS];
-    BOOL oth_ready[INIT_RETRY_FAULT_MAX_ADAPTERS] = { 0 };
+    IC_OBS p0, p1, r0, r1, f0, f1;
+    IC_OBS *oth0 = NULL, *oth1 = NULL;   /* the other adapters' baseline, sized from the validated inventory (no fixed limit) */
+    BOOL *oth_ready = NULL;
     AVB_INITFAULT_ARM arm;
     DEVINST inst = 0;
     HKEY k = NULL;
@@ -1625,7 +1627,9 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         return;
     }
     if (!irf_other_link(id->net_luid)) {
-        ic_verdict("BLOCKED", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "no independent management link; the owned NIC cycle would isolate the host");
+        /* Executed and failed: the precondition was checked and does not hold. The NIC cycle is not run (it would cut the host's only
+         * management path), so the scenario is not established and nothing below is executed */
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "no independent management link; the owned NIC cycle would isolate the host, so the scenario was not established");
         ic_blocked_cases(index, did, "UT-DEV-LIFECYCLE-002-PRESTATE not established; nothing was sent", deps, (int)ARRAYSIZE(deps));
         return;
     }
@@ -1647,7 +1651,18 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     }
     CloseHandle(hO);
     hO = INVALID_HANDLE_VALUE;
-    for (j = 0; j < nall && j < INIT_RETRY_FAULT_MAX_ADAPTERS; j++) {   /* the other adapters' state, for the final check */
+    oth0 = (IC_OBS *)calloc(nall, sizeof(*oth0));
+    oth1 = (IC_OBS *)calloc(nall, sizeof(*oth1));
+    oth_ready = (BOOL *)calloc(nall, sizeof(*oth_ready));
+    if (oth0 == NULL || oth1 == NULL || oth_ready == NULL) {
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "cannot allocate the other adapters' baseline storage");
+        ic_blocked_cases(index, did, "UT-DEV-LIFECYCLE-002-PRESTATE not established; nothing was sent", deps, (int)ARRAYSIZE(deps));
+        free(oth0); free(oth1); free(oth_ready);
+        RegCloseKey(k);
+        if (created) { (void)RegDeleteKeyW(HKEY_LOCAL_MACHINE, AVB_INITFAULT_PARAMS_SUBKEY); }
+        return;
+    }
+    for (j = 0; j < nall; j++) {   /* the other adapters' state, for the final check */
         HANDLE h;
         if (all[j].net_luid == id->net_luid) { continue; }
         h = ic_open_bound(all[j].net_luid);
@@ -1658,6 +1673,7 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         printf("    [EVIDENCE] other adapter:%u did=0x%04X before: READY+advancing=%d\n", all[j].index, all[j].device_id, oth_ready[j]);
     }
     ic_verdict("PASS", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "device node, independent management link, Parameters key, target READY with an advancing PHC");
+    g_irf_established++;
 
     /* ---- Phase A, UT-DEV-LIFECYCLE-002-REACH: the fresh attach reaches the fault point (OBSERVE, no fault) ---- */
     mutated = TRUE;
@@ -1812,7 +1828,7 @@ cleanup:
                       (!have_ref || (f1.clk.timinca == r1.clk.timinca && f1.clk.tsauxc == r1.clk.tsauxc));
         BOOL oth_ok = TRUE, measured = hO != INVALID_HANDLE_VALUE && f0.hw_ok && f0.clk_ok && f1.clk_ok;
 
-        for (j = 0; j < nall && j < INIT_RETRY_FAULT_MAX_ADAPTERS; j++) {
+        for (j = 0; j < nall; j++) {
             HANDLE h;
             IC_OBS a0, a1;
             BOOL now_ok;
@@ -1840,6 +1856,10 @@ cleanup:
     if (hO != INVALID_HANDLE_VALUE) { CloseHandle(hO); }
     RegCloseKey(k);
     if (created) { (void)RegDeleteKeyW(HKEY_LOCAL_MACHINE, AVB_INITFAULT_PARAMS_SUBKEY); }
+    free(oth0);
+    free(oth1);
+    free(oth_ready);
+    g_irf_completed++;
 }
 
 static int run_init_retry_fault(void)
@@ -1876,15 +1896,11 @@ static int run_init_retry_fault(void)
         g_ic_failed++;
     }
     for (i = 0; i < nall; i++) {
-        if (i < INIT_RETRY_FAULT_MAX_ADAPTERS) { irf_run_adapter(&all[i], all, nall); }
-        else {
-            printf("[BLOCKED] UT-DEV-LIFECYCLE-002-PRESTATE/adapter:%u did=0x%04X: beyond the supported inventory of %d adapters\n",
-                   i, all[i].device_id, INIT_RETRY_FAULT_MAX_ADAPTERS);
-            g_ic_blocked++;
-        }
+        irf_run_adapter(&all[i], all, nall);   /* every validated identity; no fixed inventory limit */
     }
     free(all);
-    printf("\nadapters run=%d nonpassing verdicts=%d blocked=%d\n", g_ic_ran, g_ic_failed, g_ic_blocked);
+    printf("\nadapters enumerated=%u setup attempted=%d scenario established (PRESTATE PASS)=%d scenario run to its end=%d; "
+           "nonpassing verdicts=%d blocked=%d\n", nall, g_ic_ran, g_irf_established, g_irf_completed, g_ic_failed, g_ic_blocked);
     if (g_ic_ran == 0) { return 2; }
     if (g_ic_failed != 0) { return 1; }
     return g_ic_blocked != 0 ? 3 : 0;

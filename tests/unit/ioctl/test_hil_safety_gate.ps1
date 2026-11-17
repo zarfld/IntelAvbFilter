@@ -413,8 +413,8 @@ tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count
 #      #367: test_tas_query_clean --tiers-unbound the sixth (at most 438.5 s, same budget and inventory).
 #      #368: test_tas_query_clean --invalid the seventh (about 455 s, same budget and inventory).
 #      #377: test_tas_query_clean --restore the eighth (about 440 s, same budget and inventory).
-#      #412: test_dev_lifecycle --init-retry-fault the ninth (per adapter: 960 s of its own bounds, budget 1220 s); its limit
-#      is INIT_RETRY_FAULT_MAX_ADAPTERS in tests/ioctl/test_ioctl_dev_lifecycle.c, which also caps the adapters it runs.
+#      #412: test_dev_lifecycle --init-retry-fault the ninth (per adapter: 960 s of its own bounds, budget 1220 s). It has no
+#      inventory limit (PR #462 review): it runs every validated identity, and its budget scales with the enumerated count, uncapped.
 #      Its limit is its supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also
 #      caps the TAS adapters that process runs, so the budget always covers them.
 $paBad = @()
@@ -426,9 +426,8 @@ $qcMax = [regex]::Match($qcSrc, '(?m)^#define\s+TAS_QUERY_CLEAN_MAX_ADAPTERS\s+(
 if (-not $qcMax.Success) { $paBad += 'supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS not found in tests/hardware/test_tas_query_clean.c' }
 elseif ($qcSrc -notmatch 'if\s*\(\s*i\s*<\s*TAS_QUERY_CLEAN_MAX_ADAPTERS\s*\)\s*\{\s*run_adapter\(') { $paBad += 'test_tas_query_clean.c does not cap the TAS adapters it runs at TAS_QUERY_CLEAN_MAX_ADAPTERS' }
 $irfSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\ioctl\test_ioctl_dev_lifecycle.c'))
-$irfMax = [regex]::Match($irfSrc, '(?m)^#define\s+INIT_RETRY_FAULT_MAX_ADAPTERS\s+(\d+)\b')
-if (-not $irfMax.Success) { $paBad += 'supported inventory INIT_RETRY_FAULT_MAX_ADAPTERS not found in tests/ioctl/test_ioctl_dev_lifecycle.c' }
-elseif ($irfSrc -notmatch 'if\s*\(\s*i\s*<\s*INIT_RETRY_FAULT_MAX_ADAPTERS\s*\)\s*\{\s*irf_run_adapter\(') { $paBad += 'test_ioctl_dev_lifecycle.c does not cap the adapters --init-retry-fault runs at INIT_RETRY_FAULT_MAX_ADAPTERS' }
+if ($irfSrc -match '\bINIT_RETRY_FAULT_MAX_ADAPTERS\b') { $paBad += 'tests/ioctl/test_ioctl_dev_lifecycle.c still has a fixed --init-retry-fault inventory limit' }
+if ($irfSrc -notmatch 'for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*nall\s*;\s*i\+\+\s*\)\s*\{\s*irf_run_adapter\(') { $paBad += 'test_ioctl_dev_lifecycle.c --init-retry-fault does not run every validated identity' }
 if (-not $toAsg -or -not $toFn -or -not $paAsg) { $paBad += 'timeout table, per-adapter table or Get-AvbTestTimeoutSeconds missing' }
 if ($paBad.Count -eq 0) {
     $lim = [int]$tasMax.Groups[1].Value
@@ -444,7 +443,7 @@ $o['PlainQuery'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_query_clean
 $o['PlainRetry'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_dev_lifecycle').Count
 foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["irf@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-retry-fault' -SuiteSeconds 60 -AdapterCount $n }
 $o['irf@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-retry-fault' -SuiteSeconds 600 -AdapterCount 1
-$o['irf@limit'] = [int]$HilTestTimeoutPerAdapter['test_dev_lifecycle --init-retry-fault'].MaxAdapters
+$o['irf@hasLimit'] = $HilTestTimeoutPerAdapter['test_dev_lifecycle --init-retry-fault'].Contains('MaxAdapters')
 $o['lifecycle@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle' -SuiteSeconds 300 -AdapterCount 9
 foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore') {
     foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
@@ -458,10 +457,9 @@ $o
 '@))
     $pa = & $paCheck
     if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_dev_lifecycle --init-retry-fault') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries, the five test_tas_query_clean entries and test_dev_lifecycle --init-retry-fault only" }
-    $ilim = [int]$irfMax.Groups[1].Value
     if ($pa.PlainRetry -ne 0) { $paBad += 'a test_dev_lifecycle entry has a fixed timeout' }
-    if ($pa['irf@limit'] -ne $ilim) { $paBad += "test_dev_lifecycle --init-retry-fault adapter limit $($pa['irf@limit']), its supported inventory is $ilim" }
-    $iwant = [ordered]@{ '1' = 1220; '2' = 2440; '3' = 3660; '8' = 1220 * [Math]::Min(8, $ilim); '20' = 1220 * $ilim; '0' = 1220; '-1' = 1220 * $ilim }
+    if ($pa['irf@hasLimit']) { $paBad += 'test_dev_lifecycle --init-retry-fault declares MaxAdapters; it has no inventory limit' }
+    $iwant = [ordered]@{ '1' = 1220; '2' = 2440; '3' = 3660; '8' = 9760; '20' = 24400; '0' = 1220; '-1' = 1220 }   # uncapped; unknown (-1) = one adapter
     foreach ($n in $iwant.Keys) { if ([int]$pa["irf@$n"] -ne [int]$iwant[$n]) { $paBad += "test_dev_lifecycle --init-retry-fault with $n enumerated adapter(s): $($pa["irf@$n"]) s, expected $($iwant[$n]) s" } }
     if ([int]$pa['irf@suite600'] -ne 1220) { $paBad += "test_dev_lifecycle --init-retry-fault with one adapter under a 600 s suite: $($pa['irf@suite600']) s, expected its 1220 s budget" }
     if ([int]$pa['lifecycle@9'] -ne 300) { $paBad += "plain test_dev_lifecycle depends on the adapter count ($($pa['lifecycle@9']) s)" }
