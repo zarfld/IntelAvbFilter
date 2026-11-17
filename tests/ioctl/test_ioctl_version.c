@@ -16,7 +16,7 @@
 
 // Expected driver version (from #64 spec)
 #define EXPECTED_MAJOR_VERSION 1
-#define EXPECTED_MINOR_VERSION 0
+#define EXPECTED_MINOR_VERSION 1   /* 1.1: IOCTL_AVB_TAS_QUERY_HW served, a compatible addition (#350, DES-C-TAS-010 3.3) */
 
 /**
  * Test Case 1: Query Driver Version (Basic Functionality)

@@ -21,6 +21,7 @@ Abstract:
 #include "external/intel_avb/lib/intel_private.h"  // Required for struct intel_private definition
 #include "intel-ethernet-regs/gen/i226_regs.h"  // SSOT register definitions
 #include "i226_tas_activate.h"                  // First TAS schedule, shared with its offline cases (#357)
+#include "i226_tas_query.h"                     // Read-only TAS hardware query, contract #365 (#350)
 
 // Application-specific constants
 #define I226_FREQOUT0_1MHZ      1000        // 1 µs half-cycle (1 MHz clock) - application value
@@ -379,6 +380,41 @@ static int set_systime(device_t *dev, uint64_t systime)
  * @param systime Output 64-bit time value
  * @return 0 on success, <0 on error
  */
+/* SYSTIM read for the callers that hold the adapter's TAS register lock (#350): no logging, and coherent without any
+ * lock shared with other readers. The TAS query holds that lock in shared mode, so two queries' reads can overlap, and
+ * other SYSTIM readers (this driver's other paths, the miniport) do not take it at all. A SYSTIML read by any of them
+ * may re-trigger the SYSTIMH latch (the cross-CPU case confirmed on the I219, src/avb_hardware_access.c). Whichever read
+ * latched the SYSTIMH value returned here happened between L1 and L2, so when no seconds rollover happened between them
+ * (L2 >= L1, the pass being far shorter than one second at DISPATCH_LEVEL), that SYSTIMH is the seconds of L1. This
+ * does not rely on the I226 latch semantics, which are not established by evidence in this repository. A rollover is
+ * retried; one that persists returns failure (the caller reports the PHC value invalid). Nonblocking. */
+#define I226_SYSTIM_READ_TRIES 3
+
+static int read_systime(device_t *dev, uint64_t *systime)
+{
+    uint32_t ts_low = 0, ts_high = 0, ts_low2 = 0;
+    int result, tries;
+
+    if (dev == NULL || systime == NULL) {
+        return -1;
+    }
+    // I226/I225: SYSTIMH=seconds, SYSTIML=nanoseconds (split format, NOT flat 64-bit)
+    for (tries = 0; tries < I226_SYSTIM_READ_TRIES; tries++) {
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &ts_high);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low2);
+        if (result != 0) return result;
+        if (ts_low2 >= ts_low) {
+            // Reconstruct 64-bit nanosecond timestamp: seconds * 1e9 + nanoseconds
+            *systime = (uint64_t)ts_high * 1000000000ULL + (uint64_t)ts_low;
+            return 0;
+        }
+    }
+    return -1;   /* a seconds rollover inside every attempt: no coherent value */
+}
+
 static int get_systime(device_t *dev, uint64_t *systime)
 {
     uint32_t ts_low, ts_high;
@@ -532,66 +568,51 @@ static int setup_tas(device_t *dev, struct tsn_tas_config *config)
     PAVB_DEVICE_CONTEXT context;
     uint32_t regValue;
     int result;
-    
-    DEBUGP(DL_TRACE, "==>i226_setup_tas (I226-specific implementation)\n");
-    
+    uint64_t systim_current;
+    uint32_t cycle_time_ns;
+
+    /* Called with the adapter's TAS register lock held (IOCTL_AVB_SETUP_TAS, #350): no logging here. The caller logs the
+     * result and the configuration after the release; the step traces this function had were removed with that change */
     if (dev == NULL || config == NULL) {
-        DEBUGP(DL_TRACE, "i226_setup_tas: Invalid parameters\n");
         return -1;
     }
-    
+
     context = (PAVB_DEVICE_CONTEXT)dev->private_data;
     if (context == NULL) {
-        DEBUGP(DL_TRACE, "i226_setup_tas: No device context\n");
         return -1;
     }
-    
-    // Log device identification
-    DEBUGP(DL_TRACE, "I226 TAS Setup: VID:DID = 0x%04X:0x%04X\n", 
-           context->intel_device.pci_vendor_id, context->intel_device.pci_device_id);
-    
+
     // Verify PHC is running
-    uint64_t systim_current;
-    result = get_systime(dev, &systim_current);
+    result = read_systime(dev, &systim_current);
     if (result != 0 || systim_current == 0) {
-        DEBUGP(DL_TRACE, "I226 PHC not running - TAS requires active PTP clock\n");
-        return -1;
+        return -1;   /* I226 PHC not running - TAS requires active PTP clock */
     }
-    
-    DEBUGP(DL_TRACE, "? I226 PHC verified: SYSTIM=0x%llx\n", systim_current);
-    
+
     // Program TQAVCTRL register (I226-specific address)
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
     if (result != 0) return result;
-    
+
     // Set TSN mode and enhanced QAV
     regValue |= I226_TQAVCTRL_TRANSMIT_MODE_TSN | I226_TQAVCTRL_ENHANCED_QAV;
-    
+
     result = ndis_platform_ops.mmio_write(dev, I226_TQAVCTRL, regValue);
     if (result != 0) return result;
-    
-    DEBUGP(DL_TRACE, "? I226 TQAVCTRL programmed: 0x%08X\n", regValue);
-    
+
     // Program cycle time
-    uint32_t cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
+    cycle_time_ns = config->cycle_time_s * 1000000000UL + config->cycle_time_ns;
     if (cycle_time_ns == 0) {
         cycle_time_ns = 1000000;  // Default 1ms cycle
     }
-    
+
     result = ndis_platform_ops.mmio_write(dev, I226_QBVCYCLET, cycle_time_ns);
     if (result != 0) return result;
-    
-    DEBUGP(DL_TRACE, "? I226 cycle time programmed: %lu ns\n", cycle_time_ns);
-    
+
     // Final verification
     result = ndis_platform_ops.mmio_read(dev, I226_TQAVCTRL, &regValue);
     if (result == 0 && (regValue & I226_TQAVCTRL_TRANSMIT_MODE_TSN)) {
-        DEBUGP(DL_TRACE, "?? I226 TAS activation SUCCESS: TQAVCTRL=0x%08X\n", regValue);
         return 0;
-    } else {
-        DEBUGP(DL_TRACE, "? I226 TAS activation FAILED: TQAVCTRL=0x%08X\n", regValue);
-        return -1;
     }
+    return -1;
 }
 
 static int activate_read(void *ctx, avb_u32 offset, avb_u32 *value)
@@ -610,7 +631,7 @@ static int activate_write(void *ctx, avb_u32 offset, avb_u32 value)
 
 static int activate_phc(void *ctx, avb_u64 *ns)
 {
-    return get_systime((device_t *)ctx, ns);
+    return read_systime((device_t *)ctx, ns);   /* under the TAS register lock: no logging (#350) */
 }
 
 /** First gate schedule on a clean adapter (#357). The sequence and its refusals are in i226_tas_activate.h */
@@ -628,11 +649,27 @@ static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request,
 #else
     io.fault_injection = 0;
 #endif
+    /* Called with the adapter's TAS register lock held: no logging here; IOCTL_AVB_TAS_ACTIVATE logs the outcome after
+     * the release (#350) */
     outcome = i226_tas_activate(&io, request, armed, tsn_mode_written);
-    DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u fault=%u outcome=%d result=%u modeWritten=%d phcAtCommit=%llu\n",
-           request->pre_activation, (unsigned long long)request->base_time_ns, request->cycle_ns, request->reserved, outcome,
-           request->result, *tsn_mode_written, (unsigned long long)request->phc_at_commit_ns);
     return outcome;
+}
+
+/** Read-only TAS hardware query (#350, contract #365). Reads only: the I/O carries no write function. Called at
+ * DISPATCH_LEVEL with the adapter's TAS register lock held in shared mode, or with contended set and no register access
+ * allowed; the caller logs the reply after releasing it */
+static int query_tas(device_t *dev, struct AVB_TAS_QUERY_HW_REQUEST *reply, int running, int mmio, uint32_t record,
+                     int op_in_progress, int contended)
+{
+    I226_TAS_IO io;
+
+    io.ctx = dev;
+    io.read = activate_read;
+    io.write = NULL;
+    io.phc = activate_phc;
+    io.fault_injection = 0;
+    i226_tas_query(&io, running, mmio, (avb_u32)record, op_in_progress, contended, reply);
+    return 0;
 }
 
 /**
@@ -666,8 +703,8 @@ static int activate_tas(device_t *dev, struct AVB_TAS_ACTIVATE_REQUEST *request,
 static int disable_tas(device_t *dev)
 {
     UNREFERENCED_PARAMETER(dev);
-    DEBUGP(DL_ERROR, "!!! [#328] i226_disable_tas: BLOCKED — no safe NDIS-compatible "
-           "TAS disable path without adapter reset (see P0.2 analysis)\n");
+    /* Called with the adapter's TAS register lock held: no logging here. IOCTL_AVB_DISARM_TAS logs this -ENOTSUP
+     * (no safe NDIS-compatible TAS disable path without adapter reset, P0.2) after the release (#350) */
     return -ENOTSUP;
 }
 
@@ -1679,6 +1716,7 @@ const intel_device_ops_t i226_ops = {
     // TSN operations - clean generic names
     .setup_tas = setup_tas,
     .activate_tas = activate_tas,
+    .query_tas = query_tas,
     .disable_tas = disable_tas,
 #if DBG
     .trace_tx_state = trace_tx_state,

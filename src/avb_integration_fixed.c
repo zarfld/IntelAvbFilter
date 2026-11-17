@@ -26,6 +26,84 @@ Abstract:
 #include "src/avb_hw_snapshot.h"  // IOCTL_AVB_QUERY_HW_SNAPSHOT builder (family-independent, read-only)
 #include "src/avb_tas_activate_state.h"  // TAS state after IOCTL_AVB_TAS_ACTIVATE, shared with its offline cases (#357)
 
+/* The per-adapter TAS claim (ADR-TSN-002), taken without waiting. Taking it makes tas_op_seq odd and releasing it makes it
+ * even again, so the read-only IOCTL_AVB_TAS_QUERY_HW can see any operation that overlapped its register pass, also one
+ * that started and finished between two of its checks (#350). Same claim semantics as before. */
+static __inline BOOLEAN avb_tas_op_claim(PAVB_DEVICE_CONTEXT ctx)
+{
+    if (InterlockedCompareExchange(&ctx->tas_op_claim, 1, 0) != 0) {
+        return FALSE;
+    }
+    InterlockedIncrement(&ctx->tas_op_seq);
+    return TRUE;
+}
+
+static __inline void avb_tas_op_release(PAVB_DEVICE_CONTEXT ctx)
+{
+    InterlockedIncrement(&ctx->tas_op_seq);
+    InterlockedExchange(&ctx->tas_op_claim, 0);
+}
+
+/* Per-adapter TAS register lock (#45 REQ-F-REG-ACCESS-001, #52 REQ-F-DEVICE-ABS-005; #350). TAS operations hold it
+ * exclusively (avb_tas_reg_lock); the read-only query tries it once in shared mode and never waits for it
+ * (avb_tas_reg_try_shared). Both raise to DISPATCH_LEVEL: the code under it takes no other lock and does not log. The
+ * hold time is measured from acquisition to release, so it excludes any wait for the lock, and is logged after the
+ * release, as a warning above the #45 limit. A logged hold time is a sample, not a bound. */
+#define AVB_TAS_REG_HOLD_WARN_US 100u   /* #45: warn when a register lock is held longer than 100 us */
+#define AVB_US_PER_SECOND 1000000LL
+
+static ULONG avb_tas_reg_hold_us(LARGE_INTEGER start, LARGE_INTEGER end, LARGE_INTEGER freq, const char *op)
+{
+    ULONG us = (freq.QuadPart > 0) ? (ULONG)(((end.QuadPart - start.QuadPart) * AVB_US_PER_SECOND) / freq.QuadPart) : 0u;
+
+    if (us > AVB_TAS_REG_HOLD_WARN_US) {
+        DEBUGP(DL_ERROR, "!!! [#350] TAS register lock WARNING: op=%s held %lu us (limit %u us, #45)\n", op, us,
+               AVB_TAS_REG_HOLD_WARN_US);
+    } else {
+        DEBUGP(DL_ERROR, "!!! [#350] TAS register lock: op=%s held %lu us\n", op, us);
+    }
+    UNREFERENCED_PARAMETER(op);
+    return us;
+}
+
+/* TAS operations: exclusive; waits while a query holds the lock in shared mode */
+static __inline LARGE_INTEGER avb_tas_reg_lock(PAVB_DEVICE_CONTEXT ctx, KIRQL *irql)
+{
+    *irql = ExAcquireSpinLockExclusive(&ctx->tas_reg_lock);
+    return KeQueryPerformanceCounter(NULL);
+}
+
+static __inline ULONG avb_tas_reg_unlock(PAVB_DEVICE_CONTEXT ctx, KIRQL irql, LARGE_INTEGER start, const char *op)
+{
+    LARGE_INTEGER freq;
+    LARGE_INTEGER end = KeQueryPerformanceCounter(&freq);
+
+    ExReleaseSpinLockExclusive(&ctx->tas_reg_lock, irql);
+    return avb_tas_reg_hold_us(start, end, freq, op);
+}
+
+/* Query: one shared attempt at DISPATCH_LEVEL (the caller raised it), never waits. FALSE when a TAS operation holds the
+ * lock or waits for it; then nothing is held. The release returns the end time; the caller logs the hold time
+ * (avb_tas_reg_hold_us) only after it has lowered the IRQL */
+_IRQL_requires_(DISPATCH_LEVEL)
+static __inline BOOLEAN avb_tas_reg_try_shared_at_dpc(PAVB_DEVICE_CONTEXT ctx, LARGE_INTEGER *start)
+{
+    if (ExTryAcquireSpinLockSharedAtDpcLevel(&ctx->tas_reg_lock)) {
+        *start = KeQueryPerformanceCounter(NULL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+_IRQL_requires_(DISPATCH_LEVEL)
+static __inline LARGE_INTEGER avb_tas_reg_release_shared_at_dpc(PAVB_DEVICE_CONTEXT ctx, LARGE_INTEGER *freq)
+{
+    LARGE_INTEGER end = KeQueryPerformanceCounter(freq);
+
+    ExReleaseSpinLockSharedFromDpcLevel(&ctx->tas_reg_lock);
+    return end;
+}
+
 // Generic register offsets (common across Intel devices)
 #define INTEL_GENERIC_CTRL_REG      0x00000  // Device control register (all Intel devices)
 #define INTEL_GENERIC_STATUS_REG    0x00008  // Device status register (all Intel devices)
@@ -234,6 +312,9 @@ NTSTATUS AvbCreateMinimalContext(
         NT_ASSERT(NT_SUCCESS(lockSt));  /* Must always succeed on a fresh remove lock */
         (void)lockSt;
     }
+    /* TAS query MMIO protection (#350): starts run down (no holder yet, so this returns at once); FilterRestart re-arms it */
+    ExInitializeRundownProtection(&ctx->tas_query_rundown);
+    ExWaitForRundownProtectionRelease(&ctx->tas_query_rundown);
     
     ctx->filter_instance = FilterModule;
     ctx->intel_device.pci_vendor_id = VendorId;
@@ -244,6 +325,7 @@ NTSTATUS AvbCreateMinimalContext(
     /* Initialize timestamp event subscription management (Issue #13) */
     NdisAllocateSpinLock(&ctx->subscription_lock);
     NdisAllocateSpinLock(&ctx->systim_lock);
+    ctx->tas_reg_lock = 0;                       /* EX_SPIN_LOCK, free: TAS register access (#45, #52; #350) */
     ctx->next_ring_id = 1;  // Start ring_id allocation from 1
     for (int i = 0; i < MAX_TS_SUBSCRIPTIONS; i++) {
         ctx->subscriptions[i].ring_id = 0;      // 0 = unused
@@ -459,7 +541,8 @@ skip_test_pools:
  * @brief Attempt full HW bring-up (intel_init + MMIO sanity + optional PTP for i210).
  *        A failure is REPORTED through the returned status (and hw_state stays below PTP_READY); it is non-fatal
  *        for ENUMERATION: the context and baseline capabilities remain, and the callers that create contexts or
- *        restart a filter discard the status on purpose.  Success means initialization completed, NOT that the
+ *        restart a filter do not fail on it (FilterRestart uses it only to decide whether the TAS query register gate
+ *        reopens, #350).  Success means initialization completed, NOT that the
  *        hardware clock has been shown to advance at the right rate.
  */
 NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
@@ -526,7 +609,8 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
                status, baseline_caps);
         /* Initialization FAILED, and the caller is told so (INIT_DEVICE returns this status).  The context and the
          * baseline capabilities set above are kept, so the adapter stays ENUMERABLE; the callers that must not fail
-         * (AvbInitializeDevice, FilterRestart) deliberately discard this status.  hw_state stays below PTP_READY. */
+         * (AvbInitializeDevice, FilterRestart) do not fail on this status (FilterRestart keeps the TAS query register
+         * gate closed, #350).  hw_state stays below PTP_READY. */
         return status;
     }
 
@@ -1539,6 +1623,7 @@ VOID AvbCleanupDevice(_In_ PAVB_DEVICE_CONTEXT AvbContext)
     }
     NdisFreeSpinLock(&AvbContext->subscription_lock);
     NdisFreeSpinLock(&AvbContext->systim_lock);
+    /* tas_reg_lock is an EX_SPIN_LOCK: nothing to free */
 
     /* Release ATDECC subscription lock (no heap to free — queue is embedded) */
     NdisFreeSpinLock(&AvbContext->atdecc_sub_lock);
@@ -1877,7 +1962,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
     // On-demand initialization: only initialize on first IOCTL, not at driver load
     if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext);
-    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER)
+    /* IOCTL_AVB_TAS_QUERY_HW is an observation like GET_HW_STATE: never initializes, never STATUS_DEVICE_NOT_READY; an
+     * adapter it cannot read is reported in the reply (hw_read NOT_RUNNING / NO_MMIO, #365 12.1, 12.3) */
+    if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER && code != IOCTL_AVB_TAS_QUERY_HW)
         return STATUS_DEVICE_NOT_READY;
 
     // Implements #270 (TEST-STATISTICS-001): count every IOCTL dispatch before
@@ -3116,7 +3203,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 if (AvbContext == NULL) {
                     disarm->status = (avb_u32)STATUS_DEVICE_NOT_CONNECTED;
                     status = STATUS_DEVICE_NOT_CONNECTED;
-                } else if (InterlockedCompareExchange(&AvbContext->tas_op_claim, 1, 0) != 0) {
+                } else if (!avb_tas_op_claim(AvbContext)) {
                     /* ADR-TSN-002: DISARM_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
                     disarm->status = (avb_u32)STATUS_DEVICE_BUSY;
                     status = STATUS_DEVICE_BUSY;
@@ -3124,12 +3211,17 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     const intel_device_ops_t *ops =
                         intel_get_device_ops(AvbContext->intel_device.device_type);
                     int hw_result = 0;
+                    int path;   /* 1 device disable path, 2 no TAS hardware, 3 blocked: selects the log after release */
+                    KIRQL lock_irql;
+                    /* TAS register lock (#45, #52) from the device operation to the record update (#350). Nothing is
+                     * logged under it; the outcome is logged after the release */
+                    LARGE_INTEGER lock_t0 = avb_tas_reg_lock(AvbContext, &lock_irql);
 
                     if (ops && ops->disable_tas) {
                         /* Use device-specific hardware disable path with readback */
+                        path = 1;
                         hw_result = ops->disable_tas(&AvbContext->intel_device);
                         if (hw_result == 0) {
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] TQAVCTRL cleared on ctx=%p\n", AvbContext);
                             InterlockedExchange(&AvbContext->tas_armed, 0);
                             RtlZeroMemory(&AvbContext->last_tas_config,
                                           sizeof(AvbContext->last_tas_config));
@@ -3138,41 +3230,53 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                             /* P0.2: disable_tas intentionally returns -ENOTSUP (no safe in-place
                              * disable path for this device).  Map to STATUS_NOT_SUPPORTED so the
                              * caller receives a distinct, unambiguous status code. */
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] ENOTSUP: no disable path on ctx=%p\n", AvbContext);
                             disarm->status = (avb_u32)STATUS_NOT_SUPPORTED;
                             status = STATUS_NOT_SUPPORTED;
                             /* tas_armed NOT cleared — hardware state indeterminate */
                         } else if (hw_result == -2) {
                             /* Hardware refused to clear TRANSMIT_MODE_TSN */
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] HARDWARE REFUSED clear ctx=%p rc=%d\n",
-                                   AvbContext, hw_result);
                             disarm->status = (avb_u32)STATUS_UNSUCCESSFUL;
                             status = STATUS_UNSUCCESSFUL;
                             /* tas_armed NOT cleared — state is unknown/dirty */
                         } else {
                             /* MMIO error */
-                            DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] MMIO error ctx=%p rc=%d\n",
-                                   AvbContext, hw_result);
                             disarm->status = (avb_u32)STATUS_IO_DEVICE_ERROR;
                             status = STATUS_IO_DEVICE_ERROR;
                             /* tas_armed NOT cleared */
                         }
                     } else if (ops && ops->setup_tas == NULL) {
                         /* Device never had TAS hardware — driver flag only, no HW action needed */
-                        DEBUGP(DL_TRACE, "TAS disarm: no TAS hardware on ctx=%p (device has no setup_tas)\n", AvbContext);
+                        path = 2;
                         InterlockedExchange(&AvbContext->tas_armed, 0);
                         RtlZeroMemory(&AvbContext->last_tas_config, sizeof(AvbContext->last_tas_config));
                         disarm->status = (avb_u32)STATUS_SUCCESS;
                     } else {
                         /* Device has setup_tas but no disable_tas — hardware path unknown.
                          * Cannot safely disarm; block and require driver update. */
-                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] BLOCKED: device has setup_tas but no disable_tas path ctx=%p\n",
-                               AvbContext);
+                        path = 3;
                         disarm->status = (avb_u32)STATUS_NOT_SUPPORTED;
                         status = STATUS_NOT_SUPPORTED;
                         /* tas_armed NOT cleared — state is indeterminate */
                     }
-                    InterlockedExchange(&AvbContext->tas_op_claim, 0);
+                    (void)avb_tas_reg_unlock(AvbContext, lock_irql, lock_t0, "disarm");
+                    avb_tas_op_release(AvbContext);
+
+                    if (path == 1 && hw_result == 0) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] TQAVCTRL cleared on ctx=%p\n", AvbContext);
+                    } else if (path == 1 && hw_result == -ENOTSUP) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] ENOTSUP: no disable path on ctx=%p (no safe NDIS-compatible "
+                               "TAS disable without adapter reset, P0.2)\n", AvbContext);
+                    } else if (path == 1 && hw_result == -2) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] HARDWARE REFUSED clear ctx=%p rc=%d\n", AvbContext, hw_result);
+                    } else if (path == 1) {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] MMIO error ctx=%p rc=%d\n", AvbContext, hw_result);
+                    } else if (path == 2) {
+                        DEBUGP(DL_TRACE, "TAS disarm: no TAS hardware on ctx=%p (device has no setup_tas)\n", AvbContext);
+                    } else {
+                        DEBUGP(DL_ERROR, "!!! [#328-TAS-DISARM] BLOCKED: device has setup_tas but no disable_tas path ctx=%p\n",
+                               AvbContext);
+                    }
+                    UNREFERENCED_PARAMETER(path);
                 }
                 info = sizeof(AVB_DISARM_TAS_REQUEST);
                 if (status == STATUS_SUCCESS) {
@@ -4111,6 +4215,119 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
         break;
     
     // Implements #18 (REQ-F-HWCTX-001: Hardware State Machine)
+    case IOCTL_AVB_TAS_QUERY_HW:
+        /* Read-only TAS hardware query (#350), contract #365 "Query v1 contract" with Amendment 1 (12.10: version 2 only, a
+         * version 1 request is STATUS_REVISION_MISMATCH by the version check below). device.c routes bound handles only and
+         * refuses an unbound one with STATUS_INVALID_DEVICE_STATE before any fallback (12.1 row 1). Checks in the 12.1
+         * order; on any error IoStatus.Information is 0 and nothing is written. The system buffer is used directly: no
+         * ProbeForWrite. Never writes a register, never takes the TAS claim, never blocks: a held claim is reported as
+         * OP_IN_PROGRESS. Not reported in v1 (0 or their "not reported" value): origin, gate_policy, revision (K9), link
+         * speed (K8), context epoch and generation (#352), tiers other than PASS (#351), legacy conflicts (#355); the #352
+         * operation store does not exist, so a lookup is NOT_IMPLEMENTED, never NOT_FOUND. */
+        if (buf == NULL || inLen < sizeof(AVB_TAS_QUERY_HW_REQUEST) || outLen < sizeof(AVB_TAS_QUERY_HW_REQUEST)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            PAVB_TAS_QUERY_HW_REQUEST q = (PAVB_TAS_QUERY_HW_REQUEST)buf;
+            const intel_device_ops_t *ops = intel_get_device_ops(currentContext->intel_device.device_type);
+
+            if (q->version != AVB_TAS_QUERY_VERSION) {
+                status = STATUS_REVISION_MISMATCH;
+            } else if (q->size != (avb_u32)sizeof(AVB_TAS_QUERY_HW_REQUEST)) {
+                status = STATUS_INVALID_PARAMETER;
+            } else if (!(currentContext->intel_device.capabilities & INTEL_CAP_TSN_TAS)) {
+                status = STATUS_NOT_SUPPORTED;      /* capability evidenced absent for the bound adapter */
+            } else if (ops == NULL || ops->query_tas == NULL) {
+                status = STATUS_NOT_IMPLEMENTED;    /* TAS-capable, but the family has no query register map */
+            } else {
+                avb_u64 lookup = q->lookup_client_op_id;
+                BOOLEAN held, locked = FALSE;
+                int running, mmio, busy, contended = 0;
+                LONG seq0, seq1;
+                avb_u32 record;
+                ULONG hold_us = 0;
+                KIRQL irql;
+                LARGE_INTEGER lock_t0, lock_t1, lock_freq;
+                /* Holder discipline (#350): the IOCTL runs in the caller's thread at PASSIVE_LEVEL with APCs enabled, so no
+                 * caller guarantee keeps that thread from being suspended or preempted. The IRQL is therefore raised to
+                 * DISPATCH_LEVEL BEFORE the rundown is acquired and lowered only AFTER the lock and the rundown are released:
+                 * the whole holder interval runs without APC delivery or preemption, and FilterPause's wait for the holders
+                 * cannot be held up by a suspended query thread. The interval has no exit: both are released on every path
+                 * below, before the IRQL is lowered and before any logging */
+                lock_t0.QuadPart = 0;
+                lock_t1.QuadPart = 0;
+                lock_freq.QuadPart = 0;
+                KeRaiseIrql(DISPATCH_LEVEL, &irql);
+                /* Lifecycle: registers are read only while this rundown is held. FilterPause waits for its holders before
+                 * it publishes FilterPausing, and FilterRestart re-arms it only after a successful hardware bring-up. Not
+                 * acquired: nothing is read (NOT_RUNNING) and the register lock is not touched */
+                held = ExAcquireRundownProtection(&currentContext->tas_query_rundown);
+                /* Register access (#45, #52): one shared attempt at the TAS register lock, never a wait (#365 12.1 "Never
+                 * blocking"). Obtained: it is held from the state samples to the end of the read pass, and since every TAS
+                 * register write and record update holds it exclusively, the registers read and the record are one state.
+                 * Not obtained: a TAS operation holds it or waits for it (queries share it, and every operation takes the
+                 * claim first), so nothing is read: the register-lock reply of #365 12.10 (Amendment 1), with hw_read PARTIAL
+                 * (an incomplete observation; no MMIO is implied), OP_IN_PROGRESS, every read_failed bit, both PHC values
+                 * invalid, READ_FAILED clear, slots and restoration UNKNOWN. UNVERIFIED on hardware: no test forces it */
+                if (held) {
+                    locked = avb_tas_reg_try_shared_at_dpc(currentContext, &lock_t0);
+                    contended = !locked;
+                }
+
+                running = held && currentContext->filter_instance != NULL && currentContext->filter_instance->State == FilterRunning;
+                mmio = currentContext->hw_state >= AVB_HW_BAR_MAPPED && (currentContext->intel_device.capabilities & INTEL_CAP_MMIO) != 0;
+                /* TAS operations: tas_op_seq is odd while one runs and changes with every start and end, so comparing it
+                 * around the pass also catches an operation that started (claimed) and finished in between */
+                seq0 = InterlockedCompareExchange(&currentContext->tas_op_seq, 0, 0);
+                busy = (seq0 & 1) != 0 || InterlockedCompareExchange(&currentContext->tas_op_claim, 0, 0) != 0 || contended;
+                record = (avb_u32)InterlockedCompareExchange(&currentContext->tas_armed, 0, 0);
+
+                RtlZeroMemory(q, sizeof(*q));
+                q->version = AVB_TAS_QUERY_VERSION;
+                q->size = (avb_u32)sizeof(*q);
+                q->lookup_client_op_id = lookup;
+                q->net_luid = (currentContext->filter_instance != NULL) ? currentContext->filter_instance->MiniportNetLuid.Value : 0u;
+                q->vendor_id = (avb_u16)currentContext->intel_device.pci_vendor_id;
+                q->device_id = (avb_u16)currentContext->intel_device.pci_device_id;
+                q->flags = busy ? AVB_TAS_FLAG_OP_IN_PROGRESS : 0u;
+                q->lookup_result = (lookup == 0) ? AVB_TAS_LOOKUP_NOT_REQUESTED : AVB_TAS_LOOKUP_NOT_IMPLEMENTED;
+                q->legacy_conflicts = AVB_TAS_NOT_REPORTED_U32;
+                (void)ops->query_tas(&currentContext->intel_device, q, running, mmio, record, busy, contended);
+                seq1 = InterlockedCompareExchange(&currentContext->tas_op_seq, 0, 0);
+                if (locked) {
+                    lock_t1 = avb_tas_reg_release_shared_at_dpc(currentContext, &lock_freq);
+                }
+                if (held) {
+                    ExReleaseRundownProtection(&currentContext->tas_query_rundown);
+                }
+                KeLowerIrql(irql);
+                if (locked) {
+                    hold_us = avb_tas_reg_hold_us(lock_t0, lock_t1, lock_freq, "query");   /* logs; after the lowering */
+                }
+                if (seq1 != seq0) {
+                    /* An operation overlapped the pass: the registers and the record may belong to different states.
+                     * Conservative: OP_IN_PROGRESS, both slots UNKNOWN (#365 12.4 S1), restoration not established */
+                    q->flags |= AVB_TAS_FLAG_OP_IN_PROGRESS;
+                    q->current_status = AVB_TAS_ST_UNKNOWN;
+                    q->current_reasons = 0u;
+                    q->next_status = AVB_TAS_ST_UNKNOWN;
+                    q->next_reasons = 0u;
+                    q->restoration = AVB_TAS_RESTORE_UNKNOWN;
+                } else if (busy) {
+                    q->restoration = AVB_TAS_RESTORE_UNKNOWN;   /* an operation was running throughout the pass */
+                }
+                /* Logged after both releases, so the trace is not part of the measured hold */
+                DEBUGP(DL_ERROR, "!!! [#350] TAS query: running=%d mmio=%d record=%u busy=%d contended=%d seq=%ld/%ld hold_us=%lu "
+                       "hw_read=%u mode=%u current=%u/0x%X next=%u/0x%X restoration=%u snap=0x%X failed=0x%X dtx=%u/%u\n", running,
+                       mmio, record, busy, contended, seq0, seq1, hold_us, q->hw_read, q->hw_mode, q->current_status, q->current_reasons,
+                       q->next_status, q->next_reasons, q->restoration, q->snapshot_reasons, q->regs.read_failed,
+                       q->dtx_max_frame_bytes, q->dtx_max_frame_state);
+                UNREFERENCED_PARAMETER(hold_us);
+                info = sizeof(*q);
+                status = STATUS_SUCCESS;
+            }
+        }
+        break;
+
     case IOCTL_AVB_QUERY_HW_SNAPSHOT:
         /* Read-only HIL restoration verification (Q 2026-10-22), Debug and Release.  device.c routes bound handles
          * only.  One entry per AVB_HWREG_* id: the family's intel-ethernet-regs offset map (device HAL) selects the
@@ -4319,7 +4536,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     DEBUGP(DL_ERROR, "? TAS SETUP: PTP not ready (state=%s, need PTP_READY)\n", 
                            AvbHwStateName(activeContext->hw_state));
                     status = STATUS_DEVICE_NOT_READY;
-                } else if (InterlockedCompareExchange(&activeContext->tas_op_claim, 1, 0) != 0) {
+                } else if (!avb_tas_op_claim(activeContext)) {
                     /* ADR-TSN-002: SETUP_TAS takes the same per-adapter claim as IOCTL_AVB_TAS_ACTIVATE (#357) */
                     status = STATUS_DEVICE_BUSY;
                 } else {
@@ -4342,11 +4559,24 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                         // Call Intel library TAS setup function (standard implementation)
                         DEBUGP(DL_ERROR, "!!! DIAG: Calling intel_setup_time_aware_shaper...\n");
                         DEBUGP(DL_TRACE, "? TAS SETUP: Calling Intel library TAS implementation\n");
+                        /* TAS register lock (#45, #52) from the register writes to the record update (#350). Nothing is
+                         * logged under it; the outcome is logged after the release */
+                        KIRQL lock_irql;
+                        LARGE_INTEGER lock_t0 = avb_tas_reg_lock(activeContext, &lock_irql);
                         int rc = intel_setup_time_aware_shaper(&activeContext->intel_device, &r->config);
-                        DEBUGP(DL_ERROR, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
                         r->status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
                         status = (rc == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-                        
+                        if (rc == 0) {
+                            /* Record armed state for test-state-restoration (fix #328 / A9). Arms from clean only: a dirty
+                             * adapter stays dirty (#357), since this write does not make an unknown state known */
+                            if (InterlockedCompareExchange(&activeContext->tas_armed, AVB_TAS_STATE_ARMED, AVB_TAS_STATE_CLEAN) != AVB_TAS_STATE_DIRTY) {
+                                /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
+                                RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
+                            }
+                        }
+                        (void)avb_tas_reg_unlock(activeContext, lock_irql, lock_t0, "setup");
+                        DEBUGP(DL_ERROR, "!!! DIAG: intel_setup_time_aware_shaper returned: %d\n", rc);
+
                         if (rc == 0) {
                             /* [#328 probe-D] TAS armed -- show adapter id, base_time, cycle_time in DbgView.
                              * This hardware state survives driver unload and blocks reinstall. */
@@ -4358,12 +4588,6 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                                    (unsigned)r->config.cycle_time_s,
                                    (unsigned)r->config.cycle_time_ns);
                             DEBUGP(DL_TRACE, "? TAS configuration successful\n");
-                            /* Record armed state for test-state-restoration (fix #328 / A9). Arms from clean only: a dirty
-                             * adapter stays dirty (#357), since this write does not make an unknown state known */
-                            if (InterlockedCompareExchange(&activeContext->tas_armed, AVB_TAS_STATE_ARMED, AVB_TAS_STATE_CLEAN) != AVB_TAS_STATE_DIRTY) {
-                                /* Remember the config for readback via IOCTL_AVB_GET_TAS_STATE */
-                                RtlCopyMemory(&activeContext->last_tas_config, &r->config, sizeof(r->config));
-                            }
                         } else {
                             DEBUGP(DL_ERROR, "? TAS setup failed: %d\n", rc);
                             
@@ -4389,7 +4613,7 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                     }
 
                     info = sizeof(*r);
-                    InterlockedExchange(&activeContext->tas_op_claim, 0);
+                    avb_tas_op_release(activeContext);
                 }
             }
         }
@@ -4413,13 +4637,18 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 status = STATUS_NOT_SUPPORTED;
             } else if (ops == NULL || ops->activate_tas == NULL) {
                 status = STATUS_NOT_IMPLEMENTED;
-            } else if (InterlockedCompareExchange(&activeContext->tas_op_claim, 1, 0) != 0) {
+            } else if (!avb_tas_op_claim(activeContext)) {
                 /* Another TAS operation holds this adapter: refuse without reading or writing anything */
                 r->phc_at_commit_ns = 0;
                 r->result = AVB_TAS_ACT_BUSY;
                 r->status = (avb_u32)STATUS_SUCCESS;
                 info = sizeof(*r);
             } else {
+                /* TAS register lock (#45, #52) from the record read to the record update: a query sees the registers and
+                 * the record either both before or both after this activation, or reads nothing. Nothing is logged under
+                 * it; the outcome is logged after the release */
+                KIRQL lock_irql;
+                LARGE_INTEGER lock_t0 = avb_tas_reg_lock(activeContext, &lock_irql);
                 avb_u32 before = (avb_u32)InterlockedCompareExchange(&activeContext->tas_armed, 0, 0);
                 int outcome, tsn_mode_written = 0;
 
@@ -4440,7 +4669,12 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 }
                 /* Otherwise a valid request the device code refused without any register access (PASS, #363 interim
                  * Option C): STATUS_NOT_IMPLEMENTED, no output, the adapter's TAS state unchanged */
-                InterlockedExchange(&activeContext->tas_op_claim, 0);
+                (void)avb_tas_reg_unlock(activeContext, lock_irql, lock_t0, "activate");
+                avb_tas_op_release(activeContext);
+                /* Same trace as before, now emitted after the release (it was in the device wrapper, under the lock) */
+                DEBUGP(DL_ERROR, "!!! [#357] TAS activate: mode=%u base=%llu cycle=%u fault=%u outcome=%d result=%u modeWritten=%d phcAtCommit=%llu\n",
+                       r->pre_activation, (unsigned long long)r->base_time_ns, r->cycle_ns, r->reserved, outcome,
+                       r->result, tsn_mode_written, (unsigned long long)r->phc_at_commit_ns);
             }
         }
         break;

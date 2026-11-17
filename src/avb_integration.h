@@ -331,6 +331,29 @@ typedef struct _AVB_DEVICE_CONTEXT {
      * state, so two of them can never interleave register writes, rollbacks or state updates. 0 free, 1 held. */
     volatile LONG tas_op_claim;
 
+    /* TAS operation sequence (#350): incremented right after a mutating TAS operation takes tas_op_claim and again right
+     * before it releases it (avb_tas_op_claim / avb_tas_op_release), so an odd value means one is running. The read-only
+     * IOCTL_AVB_TAS_QUERY_HW compares it before and after its register pass: any change, also an operation that started
+     * and finished in between, reports OP_IN_PROGRESS and UNKNOWN slots. Interlocked access only. */
+    volatile LONG tas_op_seq;
+
+    /* TAS register access (#45 REQ-F-REG-ACCESS-001, #52 REQ-F-DEVICE-ABS-005; #350): serialises every TAS register write
+     * pass of this adapter, together with the TAS record it publishes, against the read pass of IOCTL_AVB_TAS_QUERY_HW.
+     * IOCTL_AVB_TAS_ACTIVATE, IOCTL_AVB_SETUP_TAS and IOCTL_AVB_DISARM_TAS hold it exclusively across their device
+     * operation and record update, after they took tas_op_claim. The query tries it once in shared mode and never waits:
+     * not obtained, it reads nothing and reports OP_IN_PROGRESS. No other lock is taken under it and the code under it
+     * does not log; the hold time (from acquisition to release, without any wait for it) is logged after release
+     * (avb_tas_reg_unlock). Other register writers, such as PHC adjustment or the diagnostic register IOCTLs, do not take
+     * it (#45 is not implemented for them). */
+    EX_SPIN_LOCK tas_reg_lock;
+
+    /* Lifecycle protection of IOCTL_AVB_TAS_QUERY_HW's register pass (#350): the query reads registers only while it
+     * holds this rundown, and reads nothing when it cannot acquire it. FilterPause waits for the current holders before it
+     * publishes FilterPausing, so a query register pass happens only while the filter is FilterRunning. FilterRestart
+     * re-arms it only after a successful hardware bring-up. Run down from allocation until then. */
+    EX_RUNDOWN_REF tas_query_rundown;
+    volatile LONG tas_query_armed;   /* 1 between a successful bring-up in FilterRestart and the next FilterPause */
+
     /* Last programmed TAS GCL parameters (valid when tas_armed==1).
      * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */
     struct tsn_tas_config last_tas_config;

@@ -12,8 +12,12 @@ extern "C" {
 /* ABI versioning for coordination across components */
 /* ABI 2.0: AVB_DRIVER_STATISTICS extended from 13 fields (104 bytes) to
  *          24 fields (192 bytes) to support lifecycle/datapath coverage.
- *          Old clients (v1.x) must be recompiled against this header. */
-#define AVB_IOCTL_ABI_VERSION 0x00020000u
+ *          Old clients (v1.x) must be recompiled against this header.
+ * ABI 2.1: IOCTL_AVB_TAS_QUERY_HW (0x0017602C) is served (#350). A compatible addition, so the minor version rises
+ *          (#64, DES-C-TAS-010 3.3); no existing structure or code changes. The query's own structure is
+ *          AVB_TAS_QUERY_VERSION 2 (#365 Amendment 1, a semantic change of hw_read PARTIAL), 536 bytes; it carries its
+ *          own version (3.4), so the ABI version does not change with it. */
+#define AVB_IOCTL_ABI_VERSION 0x00020001u
 
 /* Bring in SSOT TSN/PTM types */
 /* Relative include path (header lives in include/, external path is sibling) */
@@ -228,9 +232,11 @@ typedef struct AVB_TAS_ACTIVATE_REQUEST {
     avb_u32 status;                           /* out: NTSTATUS of the operation */
 } AVB_TAS_ACTIVATE_REQUEST, *PAVB_TAS_ACTIVATE_REQUEST;
 
-/* ---- IOCTL_AVB_TAS_QUERY_HW v1 request (#350; layout and values published in #365 "Query v1 contract", 12.2) ----
+/* ---- IOCTL_AVB_TAS_QUERY_HW request (#350; layout and values published in #365 "Query v1 contract", 12.2, and its
+ * Amendment 1, 12.10: version 2) ----
  * PROVISIONAL: #362 decision 1 keeps the 536-byte layout provisional until #365 is accepted. Any semantic change raises
- * AVB_TAS_QUERY_VERSION. No handler serves the code yet: these are wire definitions only, no behaviour.
+ * AVB_TAS_QUERY_VERSION. Version 2 is the only version served; a request with version 1 is refused with
+ * STATUS_REVISION_MISMATCH and nothing is written (#365 12.1 row 3). The layout, size and enum values are those of v1.
  * In: version, size, lookup_client_op_id. Every other byte is output, valid only on STATUS_SUCCESS (#365 12.1).
  * 0 never denotes a state in an enumerated out field; it means "not reported". Counters where 0 is meaningful use
  * AVB_TAS_NOT_REPORTED_U32. Hardware fields are never filled from the driver record, nor record fields from hardware.
@@ -240,12 +246,15 @@ typedef struct AVB_TAS_ACTIVATE_REQUEST {
  * limits.tier_* (#351), limits.min_margin_ns (lead time open, #362), origin/gate_policy/legacy_conflicts (#355, #359),
  * next/next_commit (#358), revision_id (K9) and link_speed_mbps (K8) acquisition. Ring pointers (TDH, TDT) are not in v1:
  * #353 and #392 stay open for them (#365 12.6). */
-#define AVB_TAS_QUERY_VERSION    1u
+#define AVB_TAS_QUERY_VERSION    2u   /* #365 Amendment 1 (12.10); 1 is no longer served */
 #define AVB_TAS_NOT_REPORTED_U32 0xFFFFFFFFu   /* counters where 0 is a meaningful value (legacy_conflicts until #355) */
 
-#define AVB_TAS_HWREAD_READ        1u  /* every v1 register and both PHC reads valid */
+#define AVB_TAS_HWREAD_READ        1u  /* complete observation: every v1 register and both PHC values valid */
 #define AVB_TAS_HWREAD_NOT_RUNNING 2u  /* filter not Running: no MMIO performed */
-#define AVB_TAS_HWREAD_PARTIAL     3u  /* MMIO performed; at least one register or PHC value invalid */
+/* Incomplete hardware observation: at least one v1 register or PHC value invalid because its read failed or was not
+ * attempted (#365 12.3, Amendment 1). Never implies that MMIO occurred: which values were read follows only from
+ * regs.read_failed and snapshot_reasons. Includes the register-lock case (12.10), where no register or PHC is read */
+#define AVB_TAS_HWREAD_PARTIAL     3u
 #define AVB_TAS_HWREAD_NO_MMIO     4u  /* Running, but no MMIO access: nothing read, no initialization started */
 
 #define AVB_TAS_HWMODE_OFF        1u  /* from TQAVCTRL.TRANSMIT_MODE (SSOT field) */
@@ -288,7 +297,7 @@ typedef struct AVB_TAS_ACTIVATE_REQUEST {
 #define AVB_TAS_DTX_DECODED       1u  /* DTXMXPKTSZ decoded with the SSOT mask and _SCALE; raw value stays in regs */
 #define AVB_TAS_DTX_READ_FAILED   2u
 #define AVB_TAS_DTX_NO_SSOT_SCALE 3u
-#define AVB_TAS_DTX_NOT_READ      4u  /* no MMIO performed */
+#define AVB_TAS_DTX_NOT_READ      4u  /* DTXMXPKTSZ not read (NOT_RUNNING, NO_MMIO, or the register-lock case, #365 12.10) */
 
 #define AVB_TAS_REV_VALID       1u           /* revision_state; 0 = not reported */
 #define AVB_TAS_CONS_BASET_TORN 0x00000001u  /* regs.consistency: BASET_H differed around BASET_L after one repeat */

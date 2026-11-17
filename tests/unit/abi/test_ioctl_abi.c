@@ -152,8 +152,8 @@ static void test_abi_version(void)
                 "AVB_IOCTL_ABI_VERSION is non-zero");
     TEST_ASSERT((AVB_IOCTL_ABI_VERSION & 0xFFFF0000u) != 0u,
                 "AVB_IOCTL_ABI_VERSION major field (high 16 bits) is non-zero");
-    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020000u,
-                "AVB_IOCTL_ABI_VERSION == 0x00020000 (v2.0 - stats struct extended to 192 bytes)");
+    TEST_ASSERT(AVB_IOCTL_ABI_VERSION == 0x00020001u,
+                "AVB_IOCTL_ABI_VERSION == 0x00020001 (v2.1 - IOCTL_AVB_TAS_QUERY_HW served, #350; v2.0 stats struct 192 bytes)");
 }
 
 /* ---------------------------------------------------------------------------
@@ -348,10 +348,11 @@ static void test_struct_sizes(void)
 
     /* Verifies: #350 (REQ-F-TAS-STATE-001). The v1 query wire layout published in #365 ("Query v1 contract", 12.2):
      * 536 bytes, explicit padding only, identical on x86 and x64. Provisional per #362 decision 1 until #365 is accepted:
-     * a change here is a version change (AVB_TAS_QUERY_VERSION), never a silent re-layout. Offline layout only; it proves
-     * nothing about the driver, which has no handler for the code yet. */
+     * a change here is a version change (AVB_TAS_QUERY_VERSION), never a silent re-layout. #365 Amendment 1 (12.10)
+     * raised the version to 2 for a semantic change of hw_read PARTIAL; layout, size and enum values are unchanged.
+     * Offline layout only; it proves nothing about the driver's behaviour. */
     TEST_CASE("TC-ABI-026: AVB_TAS_QUERY_HW_REQUEST v1 layout, 536 bytes (#350, #365 12.2)");
-    TEST_ASSERT(AVB_TAS_QUERY_VERSION == 1u, "AVB_TAS_QUERY_VERSION == 1");
+    TEST_ASSERT(AVB_TAS_QUERY_VERSION == 2u, "AVB_TAS_QUERY_VERSION == 2 (#365 Amendment 1)");
     TEST_ASSERT(sizeof(AVB_TAS_QUEUE_WINDOW) == 16, "sizeof(AVB_TAS_QUEUE_WINDOW) == 16");
     TEST_ASSERT(sizeof(AVB_TAS_SCHEDULE) == 80, "sizeof(AVB_TAS_SCHEDULE) == 80");
     TEST_ASSERT(sizeof(AVB_TAS_REGS) == 80, "sizeof(AVB_TAS_REGS) == 80");
