@@ -444,6 +444,7 @@ $HardwareUnitTests = @(
     "test_ioctl_version",          # IOCTL_AVB_GET_VERSION to driver
     "test_mdio_phy",
     "test_dev_lifecycle",
+    "test_dev_lifecycle --init-contract",  # #313 amendment 2026-11-12: INIT_DEVICE / OPEN_ADAPTER on READY adapters, PHC/TIMINCA before and after, final state (#404)
     "test_ts_event_sub",
     "test_ptp_getset",
     "test_power_management",       # open->PHC->close->200ms Sleep->reopen (no system sleep)
@@ -780,6 +781,7 @@ $HilTestSafety = @{
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
     'test_tas_query_clean --invalid' = 'Unsafe'       # invalid TAS_ACTIVATE requests (one can commit), owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#368)
     'test_tas_query_clean --restore' = 'Unsafe'       # TAS_ACTIVATE HOLD, owned CM_Disable_DevNode / CM_Enable_DevNode cycle, reported restoration (#377)
+    'test_dev_lifecycle --init-contract' = 'Init'     # INIT_DEVICE / OPEN_ADAPTER on READY adapters (#313 amendment, #404); a defective driver re-initializes and resets a healthy PHC: reported RED
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
