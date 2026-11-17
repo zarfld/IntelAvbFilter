@@ -24,8 +24,8 @@ name: HIL - Hardware-in-the-Loop
 #                signer + local trust, unattended Install-Driver.ps1, post-deployment pre-flight) -> build tests ->
 #                run identity -> HardwareUnit, HardwareIntegration -> lock release + evidence.
 #                Each leg verifies the assigned host and its own signed package independently of the other.
-#                fail-fast=false prevents a failing leg cancelling another; max-parallel=1 conservatively
-#                serializes legs while the machine-local HIL lock excludes unrelated operations.
+#                fail-fast=false prevents one failing matrix leg cancelling the other. Debug and Release may
+#                execute concurrently on different hosts; the machine-local HIL lock excludes same-host operations.
 #   hil-acceptance GitHub-hosted: per configuration a DEPLOYED record of this run, staged == installed == ImagePath
 #                file, and every suite executed with real passes and no failure; otherwise FAILED / HIL_NOT_EXECUTED /
 #                STAGED_BUILD_NOT_TESTED.  Publishes JUnit and traceability; its verdict is the job output `verdict`.
@@ -41,8 +41,8 @@ name: HIL - Hardware-in-the-Loop
 # Both hardware suites run here (HardwareUnit, HardwareIntegration - the only hardware suites, Q 2026-11-03).  A required
 # test that is not executed yet (fixture/restoration or infrastructure missing) is a failing TC-HIL-COVERAGE-GAP-001
 # case and makes the suite and the acceptance verdict INCOMPLETE - never PASSED (P0 full HIL coverage, 2026-10-21).
-# Serialization: two independent matrix legs both need only authorize; max-parallel=1 avoids same-host
-# contention; the HilLock.ps1 host-local lock also protects other workflows. No cancelling concurrency group.
+# Matrix concurrency: two independent legs both need only authorize and may run on separate physical hosts
+# concurrently. HilLock.ps1 protects machine-local mutations if assigned to one host. No cancelling concurrency group.
 
 on:
   workflow_run:
@@ -344,7 +344,6 @@ jobs:
     if: github.repository == 'zarfld/IntelAvbFilter' && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'zarfld/IntelAvbFilter' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master') || github.event.workflow_run.event == 'pull_request') && needs.authorize.outputs.authorized == 'true'
     strategy:
       fail-fast: false
-      max-parallel: 1  # Conservatively serialize legs even if assigned to the same physical host.
       matrix:
         configuration: [Debug, Release]
     runs-on: [self-hosted, Windows, i226]
