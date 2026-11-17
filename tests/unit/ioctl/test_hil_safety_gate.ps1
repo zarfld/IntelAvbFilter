@@ -257,7 +257,8 @@ $hwKeys = @($hwEntries | ForEach-Object { if ($fnKey) { ConvertTo-AvbHilEntryKey
 $initNotGap = @($initKeys | Where-Object { $gapEntries -notcontains $_ -and $hwKeys -notcontains $_ })
 $noReadOnly = @($autoSuites.Keys | Where-Object { $sl = @($hwLists[$autoSuites[$_]]); @($sl | Where-Object { $registry[$_] -eq 'ReadOnly' }).Count -eq 0 })
 $expectInit = @('avb_comprehensive_test', 'avb_hw_state_test_um',   # registered 2026-10-29 (TEST-COMPLETE-001)
-                'test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
+                'test_clock_config', 'test_clock_working', 'test_dev_lifecycle', 'test_dev_lifecycle --init-contract',   # --init-contract: #313 amendment, #404 (2026-11-17)
+                'test_direct_clock', 'test_hw_state_machine', 'test_minimal_ioctl')
 tc_check 'TEST-HILGATE-038-init-registrations-retained-as-declared-gaps-and-suites-keep-readonly-entries' `
     ((($initKeys -join ',') -eq ($expectInit -join ',')) -and $initNotGap.Count -eq 0 -and $noReadOnly.Count -eq 0) `
     ("init keys: [{0}]; not declared as gap: [{1}]; suites without a ReadOnly entry: [{2}]" -f ($initKeys -join ','), ($initNotGap -join ','), ($noReadOnly -join ','))
@@ -334,6 +335,7 @@ $nicRx  = 'CM_Disable_DevNode|CM_Enable_DevNode|CM_Reenumerate_DevNode|SetupDiCa
 $roExceptions  = @{ 'test_ioctl_abi' = 'sizeof/code checks only'; 'test_ptp_phc_stability' = 'no args runs UT-CORR-007/008 only; 005/006/009 need --case'
                     'test_ioctl_routing' = 'IOCTL_AVB_INIT_DEVICE only as a case label of GetIoctlName(); never passed to DeviceIoControl' }
 $nicExceptions = @{ 'test_dev_lifecycle' = 'devcon appears only in a SKIP message'; 'test_statistics_counters' = 'devcon appears only in a SKIP message'
+                    'test_dev_lifecycle --init-contract' = 'devcon appears only in a SKIP message of the default run, which --init-contract does not execute'
                     'test_ptp_phc_stability' = 'ControlService/system only in UT-CORR-009 (--case UT-CORR-009 / --allow-lifecycle)'
                     'test_ptp_phc_stability --case UT-CORR-005' = 'UT-CORR-009 not selected'; 'test_ptp_phc_stability --case UT-CORR-006' = 'UT-CORR-009 not selected' }
 
