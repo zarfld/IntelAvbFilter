@@ -11,9 +11,9 @@
  *               back-to-back reads, printed. PASS only with equal deltas on a complete, non-empty inventory; BLOCKED on an
  *               incomplete or empty one; INCONCLUSIVE when a reading is missing or a delta differs (not attributable).
  *   CAPABILITY  per adapter without INTEL_CAP_TSN_TAS, a bound query: STATUS_NOT_SUPPORTED with no output gives
- *               SKIP_UNSUPPORTED (green); success, or an error with output, is FAIL. Only the query is exercised: a mutating
- *               operation on such an adapter would need a NIC cycle of it, the management link included, so it is a coverage
- *               gap of #367, not tested here.
+ *               SKIP_UNSUPPORTED (green); success, or an error with output, is FAIL. Only the query is exercised here; mutating
+ *               operations on adapters without the capability are a coverage gap of #367 in this mode (network topology is not
+ *               a reason to omit them, #463).
  *   With no adapter advertising INTEL_CAP_TSN_TAS, QUERY and TIERS are reported BLOCKED: the TAS part was not exercised, so the
  *               case cannot pass on the unbound and capability lines alone.
  *   QUERY, TIERS per TAS adapter: the #351 tier table does not exist, so tiers read 0 (not reported) and TIERS is
@@ -1904,10 +1904,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         verdict("BLOCKED", "QUERY", index, id->device_id, "adapter link is down or it has no IPv4 address");
         return;
     }
-    if (!other_link) {
-        verdict("BLOCKED", "QUERY", index, id->device_id, "no independent management link; the owned NIC cycle would isolate the host");
-        return;
-    }
+    printf("    [EVIDENCE] another adapter up with a gateway: %s (diagnostic only, not a precondition: the owned NIC cycle may interrupt the host network; evidence is kept locally, #463)\n", other_link ? "yes" : "no");
     if (g_capture_luid == 0) {
         verdict("BLOCKED", "QUERY", index, id->device_id, "no I210 observer adapter; the wire cannot be observed (#366 precondition)");
         return;
@@ -2111,8 +2108,8 @@ int main(int argc, char **argv)
     }
     if (g_tiers_mode) {
         /* #367: the unbound handle first (read-only), then every adapter without the capability (read-only), then the TAS
-         * adapters with their owned cleanup below. Operations other than the query are not exercised on non-TAS adapters:
-         * a mutating call there would need a NIC cycle of that adapter, the management link included */
+         * adapters with their owned cleanup below. Operations other than the query are not exercised on non-TAS adapters in
+         * this mode: a coverage gap of #367 (network topology is not a reason to omit them, #463) */
         check_unbound(all, nall, complete);
         for (i = 0; i < nall; i++) {
             if (!(all[i].capabilities & INTEL_CAP_TSN_TAS)) {

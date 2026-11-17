@@ -751,11 +751,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         CloseHandle(h);
         return;
     }
-    if (!other_link) {
-        verdict("BLOCKED", "COMMIT", index, id->device_id, "no independent management link; the NIC cycle would isolate the host");
-        CloseHandle(h);
-        return;
-    }
+    printf("    [EVIDENCE] another adapter up with a gateway: %s (diagnostic only, not a precondition: the owned NIC cycle may interrupt the host network; evidence is kept locally, #463)\n", other_link ? "yes" : "no");
     mbps = (avb_u32)(row.TransmitLinkSpeed / 1000000ULL);
     frame = (avb_u32)row.Mtu + FRAME_OVERHEAD_BYTES;
     printf("    link=%u Mbit/s mtu=%lu frameOnWire=%u\n", mbps, row.Mtu, frame);
