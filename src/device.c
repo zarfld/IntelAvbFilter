@@ -826,7 +826,7 @@ IntelAvbFilterDeviceIoControl(
                                        &cand->MiniportFriendlyName, ven, dev);
                                 
 
-                                NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                                NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext, AVB_INITFAULT_ORIGIN_CREATE_IOCTL);
                                 if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
                                 {
                                     DEBUGP(DL_INFO, "? Successfully initialized AVB context for %wZ\n", 
@@ -955,7 +955,7 @@ IntelAvbFilterDeviceIoControl(
                         if (cand->AvbContext == NULL)
                         {
                             DEBUGP(DL_INFO, "ENUM_ADAPTERS: Initializing AVB context for requested adapter #%lu\n", adapterCount);
-                            NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext);
+                            NTSTATUS initSt = AvbInitializeDevice(cand, (PAVB_DEVICE_CONTEXT*)&cand->AvbContext, AVB_INITFAULT_ORIGIN_CREATE_ENUM);
                             if (NT_SUCCESS(initSt) && cand->AvbContext != NULL)
                             {
                                 DEBUGP(DL_INFO, "ENUM_ADAPTERS: Successfully initialized AVB context for requested adapter #%lu\n", 
@@ -1158,7 +1158,7 @@ IntelAvbFilterDeviceIoControl(
                 Status = STATUS_NO_SUCH_DEVICE;
             } else {
                 if (targetFilter->AvbContext == NULL) {
-                    AvbInitializeDevice(targetFilter, (PAVB_DEVICE_CONTEXT*)&targetFilter->AvbContext);
+                    AvbInitializeDevice(targetFilter, (PAVB_DEVICE_CONTEXT*)&targetFilter->AvbContext, AVB_INITFAULT_ORIGIN_CREATE_OPEN);
                 }
                 
                 if (targetFilter->AvbContext != NULL) {
