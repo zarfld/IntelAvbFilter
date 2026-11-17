@@ -54,9 +54,11 @@
  * mechanism of #412 (include/avb_init_fault_dbg.h, src/avb_init_fault_dbg.c). On every enumerated adapter (no fixed limit;
  * per-adapter storage is sized from the validated inventory); identity, device node and arm target by NET_LUID, never by model:
  *   UT-DEV-LIFECYCLE-002-PRESTATE  setup before any mutation: device node, an independent management link (another adapter up
- *                  with a gateway; none: FAILED_SETUP without the NIC cycle, which would cut the host's only management path),
- *                  the driver Parameters key, stale
- *                  fault values removed, the target READY with an advancing PHC, the other adapters' state recorded.
+ *                  with a gateway), the driver Parameters key, stale fault values drained, removed and verified absent, the
+ *                  target READY (the generic lifecycle state), the other adapters' state recorded. A precondition that is
+ *                  checked and does not hold is FAILED_SETUP: setup failed, no initialization is attempted (without a
+ *                  management link the NIC cycle is not run, it would cut the host's only path), the dependent lines stay
+ *                  BLOCKED and a [COVERAGE] line keeps the adapter's gap visible.
  *   UT-DEV-LIFECYCLE-002-REACH     phase A: OBSERVE armed for origin ATTACH, owned NIC cycle (fresh attach of the target only).
  *                  PASS needs the driver record that consumed it: target, origin ATTACH, site BASIC (the fault point), IRQL 0,
  *                  and READY afterwards (its TIMINCA/TSAUXC are the normal-attach reference). Otherwise FAILED_SETUP: the
@@ -69,15 +71,25 @@
  *   UT-DEV-LIFECYCLE-002-FIRST-NOT-READY  READY is not published after that failure.
  *   UT-DEV-LIFECYCLE-002-RETRY-STATUS   the fault is cleared (unconsumed actions marked cleared, recording continues), instance
  *                  A retries on the same handle: exactly STATUS_SUCCESS. Sent only after the first request observably failed.
- *   UT-DEV-LIFECYCLE-002-RETRY-READY    afterwards READY with an advancing PHC (no lingering error state).
+ *   UT-DEV-LIFECYCLE-002-RETRY-READY    afterwards READY (no lingering error state).
+ *   UT-DEV-LIFECYCLE-002-RETRY-PHC      the PHC advancing afterwards, only where INTEL_CAP_BASIC_1588 is advertised (else an
+ *                  evidence line); an invalid clock read is INCONCLUSIVE.
  *   UT-DEV-LIFECYCLE-002-OTHER-INSTANCE a new instance B on the READY adapter: STATUS_SUCCESS and no initialization attempt
- *                  recorded (#404 contract row 1).
- *   UT-DEV-LIFECYCLE-002-ATTRIBUTION    every driver record on the target at IRQL 0, no attempt skipped, every consumed action
- *                  attributed to a record with its origin, site BASIC, index and kind.
- *   UT-DEV-LIFECYCLE-002-FINAL          cleanup: handles closed, arm and records deleted (the arm first), an owned NIC cycle without
- *                  arm if the target is not READY or not as after a normal attach; then READY, advancing PHC, TIMINCA/TSAUXC as
- *                  the normal-attach reference, no fault value left, the other adapters READY with TIMINCA/TSAUXC unchanged.
- *                  Otherwise CLEANUP_FAILED (not measured: INCONCLUSIVE_RESTORATION).
+ *                  started (the driver's sequence numbers unchanged, history complete) (#404 contract row 1).
+ *   UT-DEV-LIFECYCLE-002-ATTRIBUTION    the session's history complete (a record for every sequence the driver reserved,
+ *                  none in flight, not saturated); every record on the target in this session at IRQL 0, no attempt skipped,
+ *                  every consumed action attributed to a record with its origin, site BASIC, index and kind.
+ *   UT-DEV-LIFECYCLE-002-FINAL          cleanup: handles closed, the session drained (no attempt in flight), disarmed and its
+ *                  values deleted, residue checked by enumeration; an owned NIC cycle without arm if the target is not READY or
+ *                  its registers differ from the normal-attach reference; then READY, no fault value left, the other adapters
+ *                  READY. Feature-specific parts are judged only where applicable: PHC advancing with INTEL_CAP_BASIC_1588,
+ *                  TIMINCA/TSAUXC with BASIC_1588 and INTEL_CAP_MMIO, each only from valid reads. A difference is
+ *                  CLEANUP_FAILED; an applicable part that could not be read, or an enumeration failure, is
+ *                  INCONCLUSIVE_RESTORATION.
+ * Sessions (PR #462 review): each arming has its own session id; the driver publishes an attempt's record only while that
+ * session is still armed, so an attempt from an earlier phase can never write into a later one. Phase A ends only after
+ * FilterRestart's attempt is recorded and nothing is in flight. No capability filter selects adapters: INIT_DEVICE is a
+ * lifecycle operation of every adapter.
  * Mutations: the target's owned NIC cycles (its PHC restarts with each attach), INIT_DEVICE on it, the fault values in the
  * Parameters key (removed by the cleanup). Safety class Unsafe (owned CM_Disable_DevNode / CM_Enable_DevNode). A Release driver
  * has no mechanism: REACH is then FAILED_SETUP, never a pass.
@@ -1287,6 +1299,7 @@ static int g_irf_established, g_irf_completed;   /* adapters whose PRESTATE pass
 #define IRF_DISABLE_BOUND_MS   120000
 #define IRF_ENABLE_BOUND_MS    60000
 #define IRF_RETURN_BOUND_MS    60000         /* identity back, the expected attempts recorded, READY where expected */
+#define IRF_DRAIN_BOUND_MS     (2 * AVB_INITFAULT_MAX_HOLD_MS + 5000)   /* an attempt in flight: at most one HOLD plus intel_init */
 #define IRF_ARM_LIFETIME_S     300           /* arm expiry from arming: one bounded cycle (240 s) plus the INIT_DEVICE requests */
 #define IRF_CLEARED            0xFFFFFFFFu   /* consumed_by of an action the test cleared before the retry */
 #define IRF_NET_CLASS_KEY      "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
@@ -1325,24 +1338,44 @@ static HKEY irf_params_open(BOOL *created)
     return k;
 }
 
-static void irf_log_name(WCHAR *buf, size_t n, unsigned seq)
+static void irf_log_name(WCHAR *buf, size_t n, unsigned __int64 session, unsigned seq)
 {
-    swprintf_s(buf, n, L"%ls%02u", AVB_INITFAULT_LOG_PREFIX, seq);
+    swprintf_s(buf, n, L"%ls%016llX_%02u", AVB_INITFAULT_LOG_PREFIX, session, seq);
 }
 
-/** Deletes the arm and every record; returns how many of them existed */
-static int irf_clear(HKEY k)
+/** Every value whose name starts with AVB_INITFAULT_NAME_PREFIX (arm and records of any session). Returns FALSE if the
+ *  enumeration itself failed: then residue is unknown, never "none" */
+static BOOL irf_residue(HKEY k, unsigned *count, BOOL del)
 {
-    WCHAR name[40];
-    unsigned i;
-    int n = 0;
+    WCHAR (*names)[64] = (WCHAR (*)[64])calloc(256, sizeof(*names));
+    DWORD i, n = 0, len;
+    LONG rc = ERROR_SUCCESS;
+    BOOL ok = TRUE;
+    size_t plen = wcslen(AVB_INITFAULT_NAME_PREFIX);
 
-    if (RegDeleteValueW(k, AVB_INITFAULT_ARM_VALUE) == ERROR_SUCCESS) { n++; }
-    for (i = 0; i < AVB_INITFAULT_MAX_RECORDS; i++) {
-        irf_log_name(name, ARRAYSIZE(name), i);
-        if (RegDeleteValueW(k, name) == ERROR_SUCCESS) { n++; }
+    *count = 0;
+    if (names == NULL) { return FALSE; }
+    for (i = 0; n < 256; i++) {
+        WCHAR name[64];
+        len = ARRAYSIZE(name);
+        rc = RegEnumValueW(k, i, name, &len, NULL, NULL, NULL, NULL);
+        if (rc == ERROR_NO_MORE_ITEMS) { break; }
+        if (rc == ERROR_MORE_DATA) { continue; }   /* a longer name: not one of ours (ours fit in 64) */
+        if (rc != ERROR_SUCCESS) { ok = FALSE; break; }
+        if (_wcsnicmp(name, AVB_INITFAULT_NAME_PREFIX, plen) == 0) { wcscpy_s(names[n++], 64, name); }
     }
-    return n;
+    *count = n;
+    if (ok && del) {
+        for (i = 0; i < n; i++) {
+            LONG d = RegDeleteValueW(k, names[i]);
+            if (d != ERROR_SUCCESS && d != ERROR_FILE_NOT_FOUND) {
+                printf("    [EVIDENCE] delete of fault value %ls failed: error %ld\n", names[i], d);
+                ok = FALSE;
+            }
+        }
+    }
+    free(names);
+    return ok;
 }
 
 static BOOL irf_read_arm(HKEY k, AVB_INITFAULT_ARM *a)
@@ -1350,7 +1383,7 @@ static BOOL irf_read_arm(HKEY k, AVB_INITFAULT_ARM *a)
     DWORD type = 0, size = sizeof(*a);
     ZeroMemory(a, sizeof(*a));
     return RegQueryValueExW(k, AVB_INITFAULT_ARM_VALUE, NULL, &type, (BYTE *)a, &size) == ERROR_SUCCESS && type == REG_BINARY &&
-           size == sizeof(*a);
+           size == sizeof(*a) && a->version == AVB_INITFAULT_VERSION;
 }
 
 static BOOL irf_write_arm(HKEY k, const AVB_INITFAULT_ARM *a)
@@ -1358,8 +1391,44 @@ static BOOL irf_write_arm(HKEY k, const AVB_INITFAULT_ARM *a)
     return RegSetValueExW(k, AVB_INITFAULT_ARM_VALUE, 0, REG_BINARY, (const BYTE *)a, sizeof(*a)) == ERROR_SUCCESS;
 }
 
-/** Arms (origin, action) pairs for the one target adapter, expiring IRF_ARM_LIFETIME_S from now */
-static BOOL irf_arm(HKEY k, avb_u64 luid, const unsigned (*acts)[2], unsigned n)
+/** Ends a session: waits until no attempt of it is in flight (bounded), disarms (deletes the arm; the driver then publishes
+ *  nothing more for the session), deletes every fault value and verifies by enumeration that none is left */
+static BOOL irf_drain_clear(HKEY k, const char *label)
+{
+    AVB_INITFAULT_ARM a;
+    DWORD start = GetTickCount();
+    unsigned left = 0;
+    BOOL drained = TRUE, ok;
+
+    while (irf_read_arm(k, &a) && a.inflight != 0) {
+        if (GetTickCount() - start >= IRF_DRAIN_BOUND_MS) {
+            drained = FALSE;
+            break;
+        }
+        Sleep(100);
+    }
+    if (!drained) {
+        printf("    [EVIDENCE] %s: %u attempt(s) still in flight after %d ms; disarming anyway (their records are discarded)\n", label,
+               a.inflight, IRF_DRAIN_BOUND_MS);
+    }
+    (void)RegDeleteValueW(k, AVB_INITFAULT_ARM_VALUE);   /* disarm first */
+    ok = irf_residue(k, &left, TRUE) && irf_residue(k, &left, FALSE) && left == 0;
+    printf("    [EVIDENCE] %s: drained %d, fault values left after clearing: %u (enumeration %s)\n", label, drained, left,
+           ok || left != 0 ? "complete" : "failed");
+    return ok && drained;
+}
+
+static unsigned __int64 irf_new_session(void)
+{
+    LARGE_INTEGER q;
+    unsigned __int64 s;
+    QueryPerformanceCounter(&q);
+    s = (unsigned __int64)q.QuadPart ^ ((unsigned __int64)GetCurrentProcessId() << 40) ^ ((unsigned __int64)GetTickCount() << 20);
+    return s != 0 ? s : 1;
+}
+
+/** Arms (origin, action) pairs for the one target adapter in a new session, expiring IRF_ARM_LIFETIME_S from now */
+static BOOL irf_arm(HKEY k, avb_u64 luid, const unsigned (*acts)[2], unsigned n, unsigned __int64 *session)
 {
     AVB_INITFAULT_ARM a;
     FILETIME ft;
@@ -1370,40 +1439,62 @@ static BOOL irf_arm(HKEY k, avb_u64 luid, const unsigned (*acts)[2], unsigned n)
     a.version = AVB_INITFAULT_VERSION;
     a.count = n;
     a.net_luid = luid;
+    a.session = irf_new_session();
     GetSystemTimeAsFileTime(&ft);
     t.LowPart = ft.dwLowDateTime;
     t.HighPart = ft.dwHighDateTime;
     a.expiry_100ns = t.QuadPart + (unsigned __int64)IRF_ARM_LIFETIME_S * 10000000ULL;
+    printf("    [EVIDENCE] arming session 0x%016llX\n", a.session);
     for (i = 0; i < n && i < AVB_INITFAULT_MAX_ACTIONS; i++) {
         a.actions[i].origin = acts[i][0];
         a.actions[i].action = acts[i][1];
         printf("    [EVIDENCE] armed action %u: origin=%s action=%s\n", i, irf_origin_name(acts[i][0]), irf_act_name(acts[i][1]));
     }
+    *session = a.session;
     return irf_write_arm(k, &a);
 }
 
-/** Every record present, in sequence order; present[i] tells which */
-static unsigned irf_read_records(HKEY k, AVB_INITFAULT_RECORD *r, BOOL *present)
+/** The session's records, by sequence; present[i] tells which exist and validate (version, sequence, session) */
+static unsigned irf_read_records(HKEY k, unsigned __int64 session, AVB_INITFAULT_RECORD *r, BOOL *present)
 {
-    WCHAR name[40];
+    WCHAR name[64];
     unsigned i, n = 0;
 
     for (i = 0; i < AVB_INITFAULT_MAX_RECORDS; i++) {
         DWORD type = 0, size = sizeof(r[i]);
-        irf_log_name(name, ARRAYSIZE(name), i);
+        irf_log_name(name, ARRAYSIZE(name), session, i);
         ZeroMemory(&r[i], sizeof(r[i]));
         present[i] = RegQueryValueExW(k, name, NULL, &type, (BYTE *)&r[i], &size) == ERROR_SUCCESS && type == REG_BINARY &&
-                     size == sizeof(r[i]) && r[i].version == AVB_INITFAULT_VERSION && r[i].seq == i;
+                     size == sizeof(r[i]) && r[i].version == AVB_INITFAULT_VERSION && r[i].seq == i && r[i].session == session;
         if (present[i]) { n++; }
     }
     return n;
 }
 
-static unsigned irf_print_records(HKEY k, const char *label, AVB_INITFAULT_RECORD *r, BOOL *present)
+/** The session's history is complete: the arm is readable, not saturated, no attempt is in flight, and every sequence the
+ *  driver reserved (below next_seq) has its record. A missing record is never read as "no attempt" */
+static BOOL irf_history_complete(HKEY k, unsigned __int64 session, AVB_INITFAULT_ARM *a, AVB_INITFAULT_RECORD *r, BOOL *present,
+                                 unsigned *missing)
 {
-    unsigned i, n = irf_read_records(k, r, present);
+    unsigned i;
+    BOOL arm_ok = irf_read_arm(k, a) && a->session == session;
 
-    printf("    [EVIDENCE] %s: %u driver record(s)\n", label, n);
+    (void)irf_read_records(k, session, r, present);
+    *missing = 0;
+    for (i = 0; arm_ok && i < a->next_seq && i < AVB_INITFAULT_MAX_RECORDS; i++) {
+        if (!present[i]) { (*missing)++; }
+    }
+    return arm_ok && a->next_seq < AVB_INITFAULT_MAX_RECORDS && a->inflight == 0 && *missing == 0;
+}
+
+static unsigned irf_print_records(HKEY k, unsigned __int64 session, const char *label, AVB_INITFAULT_RECORD *r, BOOL *present)
+{
+    AVB_INITFAULT_ARM a;
+    unsigned i, n = irf_read_records(k, session, r, present);
+    BOOL arm_ok = irf_read_arm(k, &a) && a.session == session;
+
+    printf("    [EVIDENCE] %s: %u driver record(s) of session 0x%016llX; arm %s next_seq=%u inflight=%u\n", label, n, session,
+           arm_ok ? "present" : "absent", arm_ok ? a.next_seq : 0u, arm_ok ? a.inflight : 0u);
     for (i = 0; i < AVB_INITFAULT_MAX_RECORDS; i++) {
         if (!present[i]) { continue; }
         printf("    [EVIDENCE] record seq=%u luid=0x%016llX origin=%s site=%s applied=%s action=%d irql=%u hw_state %u->%u "
@@ -1415,15 +1506,25 @@ static unsigned irf_print_records(HKEY k, const char *label, AVB_INITFAULT_RECOR
     return n;
 }
 
-/** Action i was consumed and its consumption is attributed: the consuming record exists, is on the target, at the fault
- *  point, with the action's origin, index and kind. Arm disappearance or consumed_by alone is not attribution */
+/** Action i was consumed and its consumption is attributed: the consuming record exists in the arm's session, is on the
+ *  target, at the fault point, with the action's origin, index and kind. Arm disappearance or consumed_by alone is not
+ *  attribution */
 static BOOL irf_attributed(const AVB_INITFAULT_ARM *a, unsigned i, avb_u64 luid, const AVB_INITFAULT_RECORD *r, const BOOL *present)
 {
     unsigned c = a->actions[i].consumed_by, s;
     if (c == 0 || c == IRF_CLEARED || c > AVB_INITFAULT_MAX_RECORDS) { return FALSE; }
     s = c - 1u;
-    return present[s] && r[s].net_luid == luid && r[s].site == AVB_INITFAULT_SITE_BASIC && r[s].origin == a->actions[i].origin &&
-           r[s].action_index == i && r[s].applied == a->actions[i].action && r[s].irql == 0;
+    return present[s] && r[s].session == a->session && r[s].net_luid == luid && r[s].site == AVB_INITFAULT_SITE_BASIC &&
+           r[s].origin == a->actions[i].origin && r[s].action_index == i && r[s].applied == a->actions[i].action && r[s].irql == 0;
+}
+
+static BOOL irf_has_origin(const AVB_INITFAULT_RECORD *r, const BOOL *present, unsigned origin)
+{
+    unsigned i;
+    for (i = 0; i < AVB_INITFAULT_MAX_RECORDS; i++) {
+        if (present[i] && r[i].origin == origin) { return TRUE; }
+    }
+    return FALSE;
 }
 
 /** NET_LUID to exactly this adapter's device node (never by model or name) */
@@ -1471,7 +1572,8 @@ static DWORD WINAPI irf_cm_thread(LPVOID arg)
     return 0;
 }
 
-/** One device-node call with a bound: a stalled call ends in a verdict, not a hung test */
+/** One device-node call with a bound: a stalled call ends in a verdict, not a hung test. Timeout ownership of the worker is
+ *  #461's (PR #462 review, tracked there) */
 static BOOL irf_cm_bounded(DEVINST inst, BOOL enable, DWORD bound_ms)
 {
     IRF_CM_CALL *call = (IRF_CM_CALL *)calloc(1, sizeof(*call));
@@ -1534,30 +1636,36 @@ static BOOL irf_hw_state(HANDLE h, avb_u32 *s)
     return TRUE;
 }
 
-/** After a cycle: until the identity is back and every action in want[] is consumed (bounded). The arm is re-read each time */
-static BOOL irf_wait_back(HKEY k, const AVB_ADAPTER_IDENTITY_REQUEST *id, const unsigned *want, unsigned nwant, AVB_INITFAULT_ARM *a)
+/** After a cycle: until the identity is back, every action in want[] is consumed, no attempt is in flight and, if
+ *  need_restart, FilterRestart's attempt is recorded too (the attach sequence is over). Bounded; the arm is re-read */
+static BOOL irf_wait_back(HKEY k, const AVB_ADAPTER_IDENTITY_REQUEST *id, unsigned __int64 session, const unsigned *want,
+                          unsigned nwant, BOOL need_restart, AVB_INITFAULT_ARM *a, AVB_INITFAULT_RECORD *r, BOOL *present)
 {
     DWORD start = GetTickCount();
     unsigned i;
 
     for (;;) {
-        BOOL all = irf_identity_present(id) && irf_read_arm(k, a);
+        BOOL all = irf_identity_present(id) && irf_read_arm(k, a) && a->session == session && a->inflight == 0;
         for (i = 0; all && i < nwant; i++) {
             if (a->actions[want[i]].consumed_by == 0) { all = FALSE; }
         }
+        if (all && need_restart) {
+            (void)irf_read_records(k, session, r, present);
+            all = irf_has_origin(r, present, AVB_INITFAULT_ORIGIN_RESTART);
+        }
         if (all) {
-            printf("    [EVIDENCE] adapter back with the expected consumption after %lu ms\n", GetTickCount() - start);
+            printf("    [EVIDENCE] adapter back with the expected attempts recorded after %lu ms\n", GetTickCount() - start);
             return TRUE;
         }
         if (GetTickCount() - start >= IRF_RETURN_BOUND_MS) {
-            printf("    [EVIDENCE] not back with the expected consumption within %d ms\n", IRF_RETURN_BOUND_MS);
+            printf("    [EVIDENCE] not back with the expected attempts recorded within %d ms\n", IRF_RETURN_BOUND_MS);
             return FALSE;
         }
-        Sleep(500);
+        Sleep(200);
     }
 }
 
-/** A bound observer handle seeing READY with an advancing PHC, within the bound; *obs receives the last observation */
+/** A bound observer handle; waits (bounded) for hw_state READY, then two observer reads (*first, *obs) */
 static HANDLE irf_wait_ready(avb_u64 luid, IC_OBS *first, IC_OBS *obs)
 {
     DWORD start = GetTickCount();
@@ -1578,10 +1686,34 @@ static HANDLE irf_wait_ready(avb_u64 luid, IC_OBS *first, IC_OBS *obs)
     return h;
 }
 
-static BOOL irf_ready(const IC_OBS *first, const IC_OBS *obs)
+/** Generic lifecycle condition: the adapter's published state is READY in both reads (no feature assumed) */
+static BOOL irf_hw_ready(const IC_OBS *first, const IC_OBS *obs)
 {
-    return first->hw_ok && obs->hw_ok && first->hw_state == AVB_HW_PTP_READY && obs->hw_state == AVB_HW_PTP_READY && first->clk_ok &&
-           obs->clk_ok && obs->clk.systim > first->clk.systim;
+    return first->hw_ok && obs->hw_ok && first->hw_state == AVB_HW_PTP_READY && obs->hw_state == AVB_HW_PTP_READY;
+}
+
+/* Feature-specific observations, qualified by the adapter's advertised capabilities and by read validity (never by model):
+ * a PHC exists with INTEL_CAP_BASIC_1588; the clock registers (TIMINCA/TSAUXC through GET_CLOCK_CONFIG) need BASIC_1588 and
+ * INTEL_CAP_MMIO. A read is valid when GET_CLOCK_CONFIG completed with STATUS_SUCCESS, a full reply and status 0 */
+static BOOL irf_phc_applicable(avb_u32 caps) { return (caps & INTEL_CAP_BASIC_1588) != 0; }
+static BOOL irf_regs_applicable(avb_u32 caps) { return (caps & (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO)) == (INTEL_CAP_BASIC_1588 | INTEL_CAP_MMIO); }
+
+/* 1 = advancing, 0 = not advancing, -1 = not judged (not applicable or read invalid; *why says which) */
+static int irf_phc_advancing(avb_u32 caps, const IC_OBS *a, const IC_OBS *b, const char **why)
+{
+    if (!irf_phc_applicable(caps)) { *why = "not applicable: INTEL_CAP_BASIC_1588 not advertised"; return -1; }
+    if (!a->clk_ok || !b->clk_ok) { *why = "PHC read invalid (GET_CLOCK_CONFIG did not complete with a valid reply)"; return -1; }
+    *why = "";
+    return b->clk.systim > a->clk.systim ? 1 : 0;
+}
+
+/* 1 = equal, 0 = different, -1 = not judged */
+static int irf_regs_equal(avb_u32 caps, BOOL ref_valid, const IC_OBS *ref, const IC_OBS *now, const char **why)
+{
+    if (!irf_regs_applicable(caps)) { *why = "not applicable: INTEL_CAP_BASIC_1588 and INTEL_CAP_MMIO not both advertised"; return -1; }
+    if (!ref_valid || !now->clk_ok) { *why = "register read invalid (reference or final GET_CLOCK_CONFIG)"; return -1; }
+    *why = "";
+    return now->clk.timinca == ref->clk.timinca && now->clk.tsauxc == ref->clk.tsauxc ? 1 : 0;
 }
 
 static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 nall)
@@ -1600,54 +1732,74 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     static BOOL present[AVB_INITFAULT_MAX_RECORDS];
     const UINT32 index = id->index;
     const avb_u16 did = id->device_id;
+    const avb_u32 caps = id->capabilities;
     IC_OBS p0, p1, r0, r1, f0, f1;
     IC_OBS *oth0 = NULL, *oth1 = NULL;   /* the other adapters' baseline, sized from the validated inventory (no fixed limit) */
     BOOL *oth_ready = NULL;
     AVB_INITFAULT_ARM arm;
+    unsigned __int64 session = 0;
     DEVINST inst = 0;
     HKEY k = NULL;
-    BOOL created = FALSE, have_ref = FALSE, mutated = FALSE;
+    BOOL created = FALSE, have_ref = FALSE, ref_valid = FALSE, mutated = FALSE, clear_ok = TRUE;
     HANDLE hO = INVALID_HANDLE_VALUE, hA = INVALID_HANDLE_VALUE, hB = INVALID_HANDLE_VALUE;
     avb_u32 hs = 0;
     DWORD got = 0;
     LONG st1 = 0, st2 = 0, st3 = 0;
     UINT32 j;
-    unsigned i, nrec;
-    char reason[400];
+    unsigned i, nrec, missing = 0;
+    const char *why = "";
+    char reason[480];
+    const char *not_run = "not executed: UT-DEV-LIFECYCLE-002-PRESTATE setup failed, no initialization was attempted on this adapter";
 
-    printf("\n=== adapter:%u did=0x%04X luid=0x%016llX ===\n", index, did, id->net_luid);
+    printf("\n=== adapter:%u did=0x%04X luid=0x%016llX caps=0x%08X ===\n", index, did, id->net_luid, caps);
     g_ic_ran++;
     ZeroMemory(&p0, sizeof(p0)); ZeroMemory(&p1, sizeof(p1)); ZeroMemory(&r0, sizeof(r0)); ZeroMemory(&r1, sizeof(r1));
     ZeroMemory(&f0, sizeof(f0)); ZeroMemory(&f1, sizeof(f1)); ZeroMemory(&arm, sizeof(arm));
 
-    /* ---- UT-DEV-LIFECYCLE-002-PRESTATE: everything the scenario needs, before any mutation ---- */
+    /* ---- UT-DEV-LIFECYCLE-002-PRESTATE: everything the scenario needs, before any mutation. A precondition that is checked
+     *      and does not hold is FAILED_SETUP: setup failed, no initialization is attempted, every dependent line stays BLOCKED
+     *      and the adapter's coverage gap is printed ---- */
     if (!irf_devinst(id->net_luid, &inst)) {
-        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "cannot resolve the device node the owned NIC cycle needs");
-        ic_blocked_cases(index, did, "UT-DEV-LIFECYCLE-002-PRESTATE not established; nothing was sent", deps, (int)ARRAYSIZE(deps));
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "setup failed: cannot resolve the device node the owned NIC cycle needs; no initialization was attempted");
+        ic_blocked_cases(index, did, not_run, deps, (int)ARRAYSIZE(deps));
+        printf("    [COVERAGE] UT-DEV-LIFECYCLE-002 not covered on adapter:%u did=0x%04X (setup failed)\n", index, did);
         return;
     }
     if (!irf_other_link(id->net_luid)) {
-        /* Executed and failed: the precondition was checked and does not hold. The NIC cycle is not run (it would cut the host's only
-         * management path), so the scenario is not established and nothing below is executed */
-        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "no independent management link; the owned NIC cycle would isolate the host, so the scenario was not established");
-        ic_blocked_cases(index, did, "UT-DEV-LIFECYCLE-002-PRESTATE not established; nothing was sent", deps, (int)ARRAYSIZE(deps));
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "setup failed: no independent management link (the owned NIC cycle would isolate the host, so it was not run); no initialization was attempted");
+        ic_blocked_cases(index, did, not_run, deps, (int)ARRAYSIZE(deps));
+        printf("    [COVERAGE] UT-DEV-LIFECYCLE-002 not covered on adapter:%u did=0x%04X (setup failed: this adapter carries the host's only management path)\n", index, did);
         return;
     }
     k = irf_params_open(&created);
     if (k == NULL) {
-        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "cannot open the driver Parameters key for the fault arm");
-        ic_blocked_cases(index, did, "UT-DEV-LIFECYCLE-002-PRESTATE not established; nothing was sent", deps, (int)ARRAYSIZE(deps));
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "setup failed: cannot open the driver Parameters key for the fault arm; no initialization was attempted");
+        ic_blocked_cases(index, did, not_run, deps, (int)ARRAYSIZE(deps));
+        printf("    [COVERAGE] UT-DEV-LIFECYCLE-002 not covered on adapter:%u did=0x%04X (setup failed)\n", index, did);
         return;
     }
-    i = (unsigned)irf_clear(k);
-    if (i != 0) { printf("    [EVIDENCE] removed %u stale fault value(s) left by an earlier run before arming\n", i); }
+    {
+        unsigned stale = 0;
+        if (irf_residue(k, &stale, FALSE) && stale != 0) {
+            printf("    [EVIDENCE] %u stale fault value(s) from an earlier run found before arming\n", stale);
+        }
+        clear_ok = irf_drain_clear(k, "stale values before arming");
+    }
     hO = irf_wait_ready(id->net_luid, &p0, &p1);
-    if (hO == INVALID_HANDLE_VALUE || !irf_ready(&p0, &p1)) {
-        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "the target is not READY with an advancing PHC before the scenario");
-        ic_blocked_cases(index, did, "UT-DEV-LIFECYCLE-002-PRESTATE not established; nothing was sent", deps, (int)ARRAYSIZE(deps));
+    if (!clear_ok || hO == INVALID_HANDLE_VALUE || !irf_hw_ready(&p0, &p1)) {
+        sprintf_s(reason, sizeof(reason), "setup failed: %s; no initialization was attempted",
+                  !clear_ok ? "stale fault values could not be removed and verified absent" : "the target is not READY before the scenario");
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, reason);
+        ic_blocked_cases(index, did, not_run, deps, (int)ARRAYSIZE(deps));
+        printf("    [COVERAGE] UT-DEV-LIFECYCLE-002 not covered on adapter:%u did=0x%04X (setup failed)\n", index, did);
         if (hO != INVALID_HANDLE_VALUE) { CloseHandle(hO); }
-        if (created) { RegCloseKey(k); RegDeleteKeyW(HKEY_LOCAL_MACHINE, AVB_INITFAULT_PARAMS_SUBKEY); } else { RegCloseKey(k); }
+        RegCloseKey(k);
+        if (created) { (void)RegDeleteKeyW(HKEY_LOCAL_MACHINE, AVB_INITFAULT_PARAMS_SUBKEY); }
         return;
+    }
+    {
+        int adv = irf_phc_advancing(caps, &p0, &p1, &why);
+        printf("    [EVIDENCE] before the scenario: READY; PHC advancing: %s\n", adv == 1 ? "yes" : adv == 0 ? "NO" : why);
     }
     CloseHandle(hO);
     hO = INVALID_HANDLE_VALUE;
@@ -1655,8 +1807,9 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     oth1 = (IC_OBS *)calloc(nall, sizeof(*oth1));
     oth_ready = (BOOL *)calloc(nall, sizeof(*oth_ready));
     if (oth0 == NULL || oth1 == NULL || oth_ready == NULL) {
-        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "cannot allocate the other adapters' baseline storage");
-        ic_blocked_cases(index, did, "UT-DEV-LIFECYCLE-002-PRESTATE not established; nothing was sent", deps, (int)ARRAYSIZE(deps));
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "setup failed: cannot allocate the other adapters' baseline storage; no initialization was attempted");
+        ic_blocked_cases(index, did, not_run, deps, (int)ARRAYSIZE(deps));
+        printf("    [COVERAGE] UT-DEV-LIFECYCLE-002 not covered on adapter:%u did=0x%04X (setup failed)\n", index, did);
         free(oth0); free(oth1); free(oth_ready);
         RegCloseKey(k);
         if (created) { (void)RegDeleteKeyW(HKEY_LOCAL_MACHINE, AVB_INITFAULT_PARAMS_SUBKEY); }
@@ -1667,49 +1820,57 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         if (all[j].net_luid == id->net_luid) { continue; }
         h = ic_open_bound(all[j].net_luid);
         if (h != INVALID_HANDLE_VALUE) {
-            oth_ready[j] = ic_ready_now(h, &oth0[j], &oth1[j]);
+            (void)ic_ready_now(h, &oth0[j], &oth1[j]);
+            oth_ready[j] = irf_hw_ready(&oth0[j], &oth1[j]);
             CloseHandle(h);
         }
-        printf("    [EVIDENCE] other adapter:%u did=0x%04X before: READY+advancing=%d\n", all[j].index, all[j].device_id, oth_ready[j]);
+        printf("    [EVIDENCE] other adapter:%u did=0x%04X before: READY=%d\n", all[j].index, all[j].device_id, oth_ready[j]);
     }
-    ic_verdict("PASS", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "device node, independent management link, Parameters key, target READY with an advancing PHC");
+    ic_verdict("PASS", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "device node, independent management link, Parameters key without fault values, target READY");
     g_irf_established++;
 
-    /* ---- Phase A, UT-DEV-LIFECYCLE-002-REACH: the fresh attach reaches the fault point (OBSERVE, no fault) ---- */
+    /* ---- Phase A, UT-DEV-LIFECYCLE-002-REACH: the fresh attach reaches the fault point (OBSERVE, no fault). The phase ends
+     *      only after FilterRestart's attempt is recorded and nothing is in flight, so no attempt of it outlives the session ---- */
     mutated = TRUE;
-    if (!irf_arm(k, id->net_luid, reach_act, ARRAYSIZE(reach_act)) || !irf_cycle(inst) ||
-        !irf_wait_back(k, id, want_reach, ARRAYSIZE(want_reach), &arm)) {
-        (void)irf_print_records(k, "phase A", rec, present);
-        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-REACH", index, did, "arm, owned NIC cycle or the return with the OBSERVE consumed did not complete");
+    if (!irf_arm(k, id->net_luid, reach_act, ARRAYSIZE(reach_act), &session) || !irf_cycle(inst) ||
+        !irf_wait_back(k, id, session, want_reach, ARRAYSIZE(want_reach), TRUE, &arm, rec, present)) {
+        (void)irf_print_records(k, session, "phase A", rec, present);
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-REACH", index, did, "arm, owned NIC cycle or the return with OBSERVE consumed and FilterRestart's attempt recorded did not complete");
         ic_blocked_cases(index, did, "the mechanism was not shown to reach the fault point", deps + 1, (int)ARRAYSIZE(deps) - 1);
         goto cleanup;
     }
-    (void)irf_print_records(k, "phase A", rec, present);
+    (void)irf_print_records(k, session, "phase A", rec, present);
     hO = irf_wait_ready(id->net_luid, &r0, &r1);
-    if (!irf_attributed(&arm, 0, id->net_luid, rec, present) || hO == INVALID_HANDLE_VALUE || !irf_ready(&r0, &r1)) {
-        sprintf_s(reason, sizeof(reason), "OBSERVE attributed to target/ATTACH/BASIC: %d; READY with an advancing PHC after the attach: %d",
-                  irf_attributed(&arm, 0, id->net_luid, rec, present), hO != INVALID_HANDLE_VALUE && irf_ready(&r0, &r1));
+    if (!irf_attributed(&arm, 0, id->net_luid, rec, present) || hO == INVALID_HANDLE_VALUE || !irf_hw_ready(&r0, &r1)) {
+        sprintf_s(reason, sizeof(reason), "OBSERVE attributed to target/ATTACH/BASIC in session 0x%016llX: %d; READY after the attach: %d",
+                  session, irf_attributed(&arm, 0, id->net_luid, rec, present), hO != INVALID_HANDLE_VALUE && irf_hw_ready(&r0, &r1));
         ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-REACH", index, did, reason);
         ic_blocked_cases(index, did, "the mechanism was not shown to reach the fault point", deps + 1, (int)ARRAYSIZE(deps) - 1);
         goto cleanup;
     }
     have_ref = TRUE;   /* r1: a normally attached adapter, the reference for the final state */
+    ref_valid = r1.clk_ok;
     sprintf_s(reason, sizeof(reason), "record seq=%u: target, origin ATTACH, site BASIC, OBSERVE consumed at IRQL 0; READY after the "
-              "attach, TIMINCA 0x%08X TSAUXC 0x%08X (reference)", arm.actions[0].consumed_by - 1u, r1.clk.timinca, r1.clk.tsauxc);
+              "attach; register reference %s (TIMINCA 0x%08X TSAUXC 0x%08X)", arm.actions[0].consumed_by - 1u,
+              !irf_regs_applicable(caps) ? "not applicable" : ref_valid ? "valid" : "read invalid", r1.clk.timinca, r1.clk.tsauxc);
     ic_verdict("PASS", "UT-DEV-LIFECYCLE-002-REACH", index, did, reason);
     CloseHandle(hO);
     hO = INVALID_HANDLE_VALUE;
 
     /* ---- Phase B setup, UT-DEV-LIFECYCLE-002-ATTACH-FAILED: attach and restart initialization fail, adapter below READY ---- */
-    (void)irf_clear(k);
-    if (!irf_arm(k, id->net_luid, fail_act, ARRAYSIZE(fail_act)) || !irf_cycle(inst) ||
-        !irf_wait_back(k, id, want_attach, ARRAYSIZE(want_attach), &arm)) {
-        (void)irf_print_records(k, "phase B attach", rec, present);
+    if (!irf_drain_clear(k, "end of phase A")) {
+        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-ATTACH-FAILED", index, did, "phase A's session could not be drained and cleared");
+        ic_blocked_cases(index, did, "phase B was not started", deps + 2, (int)ARRAYSIZE(deps) - 2);
+        goto cleanup;
+    }
+    if (!irf_arm(k, id->net_luid, fail_act, ARRAYSIZE(fail_act), &session) || !irf_cycle(inst) ||
+        !irf_wait_back(k, id, session, want_attach, ARRAYSIZE(want_attach), FALSE, &arm, rec, present)) {
+        (void)irf_print_records(k, session, "phase B attach", rec, present);
         ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-ATTACH-FAILED", index, did, "arm, owned NIC cycle or the return with ATTACH and RESTART consumed did not complete");
         ic_blocked_cases(index, did, "no failed adapter initialization was established", deps + 2, (int)ARRAYSIZE(deps) - 2);
         goto cleanup;
     }
-    (void)irf_print_records(k, "phase B attach", rec, present);
+    (void)irf_print_records(k, session, "phase B attach", rec, present);
     hO = ic_open_bound(id->net_luid);
     if (hO == INVALID_HANDLE_VALUE || !irf_hw_state(hO, &hs) || hs >= AVB_HW_PTP_READY || !irf_attributed(&arm, 0, id->net_luid, rec, present) ||
         !irf_attributed(&arm, 1, id->net_luid, rec, present)) {
@@ -1732,7 +1893,7 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         goto cleanup;
     }
     st1 = ic_init(hA, &got);
-    nrec = irf_print_records(k, "after instance A's first INIT_DEVICE", rec, present);
+    nrec = irf_print_records(k, session, "after instance A's first INIT_DEVICE", rec, present);
     (void)irf_read_arm(k, &arm);
     printf("    [EVIDENCE] instance A first INIT_DEVICE: ntstatus=0x%08lX information=%lu; INIT_PRE FAIL attributed %d, INIT_HANDLER FAIL "
            "attributed %d; %u record(s) so far\n", (unsigned long)st1, got, irf_attributed(&arm, 2, id->net_luid, rec, present),
@@ -1747,7 +1908,8 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     if (st1 == 0 || st1 == AVB_NTSTATUS_UNAVAILABLE) {
         ic_blocked_cases(index, did, "instance A's first INIT_DEVICE did not observably fail: no failed initialization to retry", deps + 4, 3);
     } else {
-        /* The fault is cleared before the retry: any action still unconsumed is marked cleared (recording continues) */
+        /* The fault is cleared before the retry: any action still unconsumed is marked cleared (recording continues). No attempt
+         * is in flight here: INIT_DEVICE is synchronous and the arm's inflight is checked */
         for (i = 0; i < arm.count; i++) {
             if (arm.actions[i].consumed_by == 0) {
                 arm.actions[i].consumed_by = IRF_CLEARED;
@@ -1755,49 +1917,72 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
                        irf_origin_name(arm.actions[i].origin), irf_act_name(arm.actions[i].action));
             }
         }
+        if (arm.inflight != 0) { printf("    [EVIDENCE] %u attempt(s) in flight before the retry\n", arm.inflight); }
         (void)irf_write_arm(k, &arm);
 
         /* ---- Instance A retries on the same handle: published expectation STATUS_SUCCESS ---- */
         st2 = ic_init(hA, &got);
-        (void)irf_print_records(k, "after instance A's retry", rec, present);
+        (void)irf_print_records(k, session, "after instance A's retry", rec, present);
         ic_status_line("UT-DEV-LIFECYCLE-002-RETRY", index, did, st2, got, (LONG)STATUS_SUCCESS, FALSE);
         CloseHandle(hO);
         hO = irf_wait_ready(id->net_luid, &f0, &f1);
-        sprintf_s(reason, sizeof(reason), "after the retry: hw_state %u, PHC advancing %d (no lingering error state requires READY)",
-                  f1.hw_state, f1.clk_ok && f0.clk_ok && f1.clk.systim > f0.clk.systim);
-        ic_verdict(irf_ready(&f0, &f1) ? "PASS" : "FAIL", "UT-DEV-LIFECYCLE-002-RETRY-READY", index, did, reason);
+        sprintf_s(reason, sizeof(reason), "after the retry: hw_state %u (no lingering error state requires READY)", f1.hw_state);
+        ic_verdict(irf_hw_ready(&f0, &f1) ? "PASS" : "FAIL", "UT-DEV-LIFECYCLE-002-RETRY-READY", index, did, reason);
+        {   /* feature-specific, only where the capability is advertised and the read is valid */
+            int adv = irf_phc_advancing(caps, &f0, &f1, &why);
+            if (adv < 0 && !irf_phc_applicable(caps)) {
+                printf("    [EVIDENCE] UT-DEV-LIFECYCLE-002-RETRY-PHC: %s\n", why);
+            } else {
+                sprintf_s(reason, sizeof(reason), "PHC after the retry: %s (SYSTIM %llu -> %llu)", adv == 1 ? "advancing" : adv == 0 ?
+                          "not advancing" : why, f0.clk.systim, f1.clk.systim);
+                ic_verdict(adv == 1 ? "PASS" : adv == 0 ? "FAIL" : "INCONCLUSIVE", "UT-DEV-LIFECYCLE-002-RETRY-PHC", index, did, reason);
+            }
+        }
 
-        /* ---- Instance B on the READY adapter: STATUS_SUCCESS without a hardware initialization attempt (#404) ---- */
-        if (!irf_ready(&f0, &f1)) {
-            ic_verdict("BLOCKED", "UT-DEV-LIFECYCLE-002-OTHER-INSTANCE", index, did, "the adapter is not READY after the retry");
+        /* ---- Instance B on the READY adapter: STATUS_SUCCESS without a hardware initialization attempt (#404). Attempts are
+         *      counted by the driver's sequence numbers (next_seq), not by readable records, and the history must be complete ---- */
+        if (!irf_hw_ready(&f0, &f1)) {
+            ic_verdict("BLOCKED", "UT-DEV-LIFECYCLE-002-OTHER-INSTANCE", index, did, "not executed: the adapter is not READY after the retry");
         } else {
-            unsigned before = irf_read_records(k, rec, present);
+            AVB_INITFAULT_ARM before, after;
+            BOOL b_ok = irf_history_complete(k, session, &before, rec, present, &missing);
+            BOOL a_ok;
             hB = ic_open_bound(id->net_luid);
             st3 = (hB != INVALID_HANDLE_VALUE) ? ic_init(hB, &got) : AVB_NTSTATUS_UNAVAILABLE;
-            nrec = irf_print_records(k, "after instance B's INIT_DEVICE", rec, present);
-            sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX (expected STATUS_SUCCESS), initialization attempts recorded by it: %u "
-                      "(expected 0)", (unsigned long)st3, nrec - before);
-            ic_verdict(st3 == STATUS_SUCCESS && nrec == before ? "PASS" : "FAIL", "UT-DEV-LIFECYCLE-002-OTHER-INSTANCE", index, did, reason);
+            a_ok = irf_history_complete(k, session, &after, rec, present, &missing);
+            (void)irf_print_records(k, session, "after instance B's INIT_DEVICE", rec, present);
+            sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX (expected STATUS_SUCCESS), initialization attempts started by it: %u "
+                      "(expected 0, from next_seq %u -> %u), history complete before %d after %d", (unsigned long)st3,
+                      after.next_seq - before.next_seq, before.next_seq, after.next_seq, b_ok, a_ok);
+            if (!b_ok || !a_ok) {
+                ic_verdict(st3 != STATUS_SUCCESS || after.next_seq != before.next_seq ? "FAIL" : "INCONCLUSIVE", "UT-DEV-LIFECYCLE-002-OTHER-INSTANCE", index, did, reason);
+            } else {
+                ic_verdict(st3 == STATUS_SUCCESS && after.next_seq == before.next_seq ? "PASS" : "FAIL", "UT-DEV-LIFECYCLE-002-OTHER-INSTANCE", index, did, reason);
+            }
         }
     }
 
-    /* ---- UT-DEV-LIFECYCLE-002-ATTRIBUTION: every record on the target at IRQL 0, every consumed action attributed ---- */
+    /* ---- UT-DEV-LIFECYCLE-002-ATTRIBUTION: the session's history is complete (a record for every reserved sequence, none in
+     *      flight, not saturated); every record is on the target in this session at IRQL 0; every consumed action attributed ---- */
     {
-        BOOL ok = irf_read_arm(k, &arm);
+        BOOL complete = irf_history_complete(k, session, &arm, rec, present, &missing);
         unsigned bad = 0, consumed = 0;
-        nrec = irf_read_records(k, rec, present);
+        nrec = 0;
         for (i = 0; i < AVB_INITFAULT_MAX_RECORDS; i++) {
-            if (present[i] && (rec[i].net_luid != id->net_luid || rec[i].irql != 0 || rec[i].nonpassive_skipped != 0)) { bad++; }
+            if (!present[i]) { continue; }
+            nrec++;
+            if (rec[i].net_luid != id->net_luid || rec[i].session != session || rec[i].irql != 0 || rec[i].nonpassive_skipped != 0) { bad++; }
         }
-        for (i = 0; ok && i < arm.count; i++) {
+        for (i = 0; i < arm.count; i++) {
             if (arm.actions[i].consumed_by != 0 && arm.actions[i].consumed_by != IRF_CLEARED) {
                 consumed++;
                 if (!irf_attributed(&arm, i, id->net_luid, rec, present)) { bad++; }
             }
         }
-        sprintf_s(reason, sizeof(reason), "%u record(s), %u consumed action(s), %u inconsistency(ies) (wrong adapter, IRQL, skipped "
-                  "attempt or unattributed consumption)", nrec, consumed, bad);
-        ic_verdict(ok && bad == 0 ? "PASS" : "FAIL", "UT-DEV-LIFECYCLE-002-ATTRIBUTION", index, did, reason);
+        sprintf_s(reason, sizeof(reason), "session 0x%016llX: next_seq %u, %u record(s), %u missing, inflight %u, %u consumed action(s), "
+                  "%u inconsistency(ies) (wrong adapter or session, IRQL, skipped attempt or unattributed consumption)", session,
+                  arm.next_seq, nrec, missing, arm.inflight, consumed, bad);
+        ic_verdict(complete && bad == 0 ? "PASS" : "FAIL", "UT-DEV-LIFECYCLE-002-ATTRIBUTION", index, did, reason);
     }
 
 cleanup:
@@ -1806,13 +1991,13 @@ cleanup:
     if (hB != INVALID_HANDLE_VALUE) { CloseHandle(hB); }
     if (hO != INVALID_HANDLE_VALUE) { CloseHandle(hO); }
     hO = INVALID_HANDLE_VALUE;
-    (void)irf_clear(k);   /* the arm first: nothing may act on the cleanup cycle */
+    clear_ok = irf_drain_clear(k, "cleanup");   /* drain, disarm, delete: nothing may act on the cleanup cycle */
     if (mutated) {
-        BOOL ref_ok;
+        int eq;
         hO = irf_wait_ready(id->net_luid, &f0, &f1);
-        ref_ok = have_ref && f1.clk_ok && f1.clk.timinca == r1.clk.timinca && f1.clk.tsauxc == r1.clk.tsauxc;
-        if (hO == INVALID_HANDLE_VALUE || !irf_ready(&f0, &f1) || (have_ref && !ref_ok)) {
-            printf("    [EVIDENCE] cleanup: target not READY or not as after a normal attach; owned NIC cycle without arm\n");
+        eq = have_ref ? irf_regs_equal(caps, ref_valid, &r1, &f1, &why) : -1;
+        if (hO == INVALID_HANDLE_VALUE || !irf_hw_ready(&f0, &f1) || eq == 0) {
+            printf("    [EVIDENCE] cleanup: target not READY or its registers not as after a normal attach; owned NIC cycle without arm\n");
             if (hO != INVALID_HANDLE_VALUE) { CloseHandle(hO); }
             (void)irf_cycle(inst);
             hO = irf_wait_ready(id->net_luid, &f0, &f1);
@@ -1821,34 +2006,48 @@ cleanup:
         hO = irf_wait_ready(id->net_luid, &f0, &f1);
     }
     {
-        AVB_INITFAULT_ARM left;
-        BOOL arm_left = irf_read_arm(k, &left);
-        unsigned rec_left = irf_read_records(k, rec, present);
-        BOOL tgt_ok = hO != INVALID_HANDLE_VALUE && irf_ready(&f0, &f1) &&
-                      (!have_ref || (f1.clk.timinca == r1.clk.timinca && f1.clk.tsauxc == r1.clk.tsauxc));
-        BOOL oth_ok = TRUE, measured = hO != INVALID_HANDLE_VALUE && f0.hw_ok && f0.clk_ok && f1.clk_ok;
+        unsigned left = 0;
+        BOOL enum_ok = irf_residue(k, &left, FALSE);
+        BOOL ready = hO != INVALID_HANDLE_VALUE && irf_hw_ready(&f0, &f1);
+        int adv = irf_phc_advancing(caps, &f0, &f1, &why);
+        const char *why_adv = why;
+        int eq = have_ref ? irf_regs_equal(caps, ref_valid, &r1, &f1, &why) : -1;
+        const char *why_eq = have_ref ? why : "no normal-attach reference";
+        BOOL oth_ok = TRUE, oth_unjudged = FALSE, measured = hO != INVALID_HANDLE_VALUE && f0.hw_ok && f1.hw_ok;
 
         for (j = 0; j < nall; j++) {
             HANDLE h;
             IC_OBS a0, a1;
-            BOOL now_ok;
-            if (all[j].net_luid == id->net_luid || !oth_ready[j]) { continue; }
+            BOOL now_ready;
+            const char *w1 = "", *w2 = "";
+            int oadv, oeq;
+            if (all[j].net_luid == id->net_luid || !oth_ready[j]) { continue; }   /* a missing baseline: #461 (PR #462 review) */
+            ZeroMemory(&a0, sizeof(a0));
+            ZeroMemory(&a1, sizeof(a1));
             h = ic_open_bound(all[j].net_luid);
-            now_ok = h != INVALID_HANDLE_VALUE && ic_ready_now(h, &a0, &a1) && a1.clk.timinca == oth1[j].clk.timinca &&
-                     a1.clk.tsauxc == oth1[j].clk.tsauxc;
-            if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); }
-            printf("    [EVIDENCE] other adapter:%u did=0x%04X after: READY, advancing, TIMINCA/TSAUXC as before: %d\n", all[j].index,
-                   all[j].device_id, now_ok);
-            oth_ok = oth_ok && now_ok;
+            if (h != INVALID_HANDLE_VALUE) {
+                (void)ic_ready_now(h, &a0, &a1);
+                CloseHandle(h);
+            }
+            now_ready = irf_hw_ready(&a0, &a1);
+            oadv = irf_phc_advancing(all[j].capabilities, &a0, &a1, &w1);
+            oeq = irf_regs_equal(all[j].capabilities, oth1[j].clk_ok, &oth1[j], &a1, &w2);
+            printf("    [EVIDENCE] other adapter:%u did=0x%04X after: READY %d; PHC advancing %s; TIMINCA/TSAUXC as before %s\n",
+                   all[j].index, all[j].device_id, now_ready, oadv == 1 ? "yes" : oadv == 0 ? "NO" : w1, oeq == 1 ? "yes" : oeq == 0 ? "NO" : w2);
+            if (!now_ready || oadv == 0 || oeq == 0) { oth_ok = FALSE; }
+            if ((oadv < 0 && irf_phc_applicable(all[j].capabilities)) || (oeq < 0 && irf_regs_applicable(all[j].capabilities))) { oth_unjudged = TRUE; }
         }
-        sprintf_s(reason, sizeof(reason), "target READY+advancing %d, TIMINCA 0x%08X TSAUXC 0x%08X vs %s 0x%08X/0x%08X, fault values left: "
-                  "arm %d records %u; other adapters unchanged %d", hO != INVALID_HANDLE_VALUE && irf_ready(&f0, &f1), f1.clk.timinca,
-                  f1.clk.tsauxc, have_ref ? "normal-attach reference" : "(no reference)", r1.clk.timinca, r1.clk.tsauxc, arm_left,
-                  rec_left, oth_ok);
-        if (!measured) {
+        sprintf_s(reason, sizeof(reason), "target READY %d; PHC advancing %s; TIMINCA 0x%08X TSAUXC 0x%08X vs normal-attach reference "
+                  "0x%08X/0x%08X: %s; fault values left %u (enumeration %s, clearing %s); other adapters unchanged %d%s",
+                  ready, adv == 1 ? "yes" : adv == 0 ? "NO" : why_adv, f1.clk.timinca, f1.clk.tsauxc, r1.clk.timinca, r1.clk.tsauxc,
+                  eq == 1 ? "equal" : eq == 0 ? "DIFFERENT" : why_eq, left, enum_ok ? "complete" : "FAILED", clear_ok ? "verified" : "not verified",
+                  oth_ok, oth_unjudged ? " (some applicable observations unread)" : "");
+        if (!measured || !enum_ok) {
             ic_verdict("INCONCLUSIVE_RESTORATION", "UT-DEV-LIFECYCLE-002-FINAL", index, did, reason);
-        } else if (!tgt_ok || arm_left || rec_left != 0 || !oth_ok) {
+        } else if (!ready || adv == 0 || eq == 0 || left != 0 || !oth_ok) {
             ic_verdict("CLEANUP_FAILED", "UT-DEV-LIFECYCLE-002-FINAL", index, did, reason);
+        } else if ((adv < 0 && irf_phc_applicable(caps)) || (eq < 0 && irf_regs_applicable(caps)) || oth_unjudged || !clear_ok) {
+            ic_verdict("INCONCLUSIVE_RESTORATION", "UT-DEV-LIFECYCLE-002-FINAL", index, did, reason);
         } else {
             ic_verdict("PASS", "UT-DEV-LIFECYCLE-002-FINAL", index, did, reason);
         }
@@ -1896,7 +2095,7 @@ static int run_init_retry_fault(void)
         g_ic_failed++;
     }
     for (i = 0; i < nall; i++) {
-        irf_run_adapter(&all[i], all, nall);   /* every validated identity; no fixed inventory limit */
+        irf_run_adapter(&all[i], all, nall);   /* every validated identity; no fixed inventory limit, no capability filter */
     }
     free(all);
     printf("\nadapters enumerated=%u setup attempted=%d scenario established (PRESTATE PASS)=%d scenario run to its end=%d; "
