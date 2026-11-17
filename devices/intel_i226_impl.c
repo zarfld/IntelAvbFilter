@@ -380,42 +380,67 @@ static int set_systime(device_t *dev, uint64_t systime)
  * @param systime Output 64-bit time value
  * @return 0 on success, <0 on error
  */
-/* SYSTIM read without logging, for callers that hold the adapter's TAS register lock (#350) */
+/* SYSTIM read for the callers that hold the adapter's TAS register lock (#350): no logging, and coherent without any
+ * lock shared with other readers. The TAS query holds that lock in shared mode, so two queries' reads can overlap, and
+ * other SYSTIM readers (this driver's other paths, the miniport) do not take it at all. A SYSTIML read by any of them
+ * may re-trigger the SYSTIMH latch (the cross-CPU case confirmed on the I219, src/avb_hardware_access.c). Whichever read
+ * latched the SYSTIMH value returned here happened between L1 and L2, so when no seconds rollover happened between them
+ * (L2 >= L1, the pass being far shorter than one second at DISPATCH_LEVEL), that SYSTIMH is the seconds of L1. This
+ * does not rely on the I226 latch semantics, which are not established by evidence in this repository. A rollover is
+ * retried; one that persists returns failure (the caller reports the PHC value invalid). Nonblocking. */
+#define I226_SYSTIM_READ_TRIES 3
+
 static int read_systime(device_t *dev, uint64_t *systime)
 {
-    uint32_t ts_low, ts_high;
-    int result;
+    uint32_t ts_low = 0, ts_high = 0, ts_low2 = 0;
+    int result, tries;
 
     if (dev == NULL || systime == NULL) {
         return -1;
     }
+    // I226/I225: SYSTIMH=seconds, SYSTIML=nanoseconds (split format, NOT flat 64-bit)
+    for (tries = 0; tries < I226_SYSTIM_READ_TRIES; tries++) {
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &ts_high);
+        if (result != 0) return result;
+        result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low2);
+        if (result != 0) return result;
+        if (ts_low2 >= ts_low) {
+            // Reconstruct 64-bit nanosecond timestamp: seconds * 1e9 + nanoseconds
+            *systime = (uint64_t)ts_high * 1000000000ULL + (uint64_t)ts_low;
+            return 0;
+        }
+    }
+    return -1;   /* a seconds rollover inside every attempt: no coherent value */
+}
 
+static int get_systime(device_t *dev, uint64_t *systime)
+{
+    uint32_t ts_low, ts_high;
+    int result;
+    
+    DEBUGP(DL_TRACE, "==>i226_get_systime\n");
+    
+    if (dev == NULL || systime == NULL) {
+        return -1;
+    }
+    
     // I226/I225: SYSTIMH=seconds, SYSTIML=nanoseconds (split format, NOT flat 64-bit)
     // Read order: SYSTIML first -- reading SYSTIML latches SYSTIMH into a shadow register,
     // ensuring both values correspond to the same instant (hardware-guaranteed atomic snapshot).
     result = ndis_platform_ops.mmio_read(dev, I226_SYSTIML, &ts_low);
     if (result != 0) return result;
-
+    
     result = ndis_platform_ops.mmio_read(dev, I226_SYSTIMH, &ts_high);
     if (result != 0) return result;
-
+    
     // Reconstruct 64-bit nanosecond timestamp: seconds * 1e9 + nanoseconds
     // NOT ((high << 32) | low) -- that would be the I210 flat format
     *systime = (uint64_t)ts_high * 1000000000ULL + (uint64_t)ts_low;
+    
+    DEBUGP(DL_TRACE, "<==i226_get_systime: sec=%u nsec=%u total=0x%llx\n", ts_high, ts_low, *systime);
     return 0;
-}
-
-static int get_systime(device_t *dev, uint64_t *systime)
-{
-    int result;
-
-    DEBUGP(DL_TRACE, "==>i226_get_systime\n");
-    result = read_systime(dev, systime);
-    if (result == 0) {
-        DEBUGP(DL_TRACE, "<==i226_get_systime: total=0x%llx (sec=%llu nsec=%llu)\n", *systime,
-               *systime / 1000000000ULL, *systime % 1000000000ULL);
-    }
-    return result;
 }
 
 /**

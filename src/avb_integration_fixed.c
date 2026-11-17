@@ -82,27 +82,26 @@ static __inline ULONG avb_tas_reg_unlock(PAVB_DEVICE_CONTEXT ctx, KIRQL irql, LA
     return avb_tas_reg_hold_us(start, end, freq, op);
 }
 
-/* Query: one shared attempt, never waits. FALSE when a TAS operation holds the lock or waits for it; then nothing is held
- * and the IRQL is unchanged */
-static __inline BOOLEAN avb_tas_reg_try_shared(PAVB_DEVICE_CONTEXT ctx, KIRQL *irql, LARGE_INTEGER *start)
+/* Query: one shared attempt at DISPATCH_LEVEL (the caller raised it), never waits. FALSE when a TAS operation holds the
+ * lock or waits for it; then nothing is held. The release returns the end time; the caller logs the hold time
+ * (avb_tas_reg_hold_us) only after it has lowered the IRQL */
+_IRQL_requires_(DISPATCH_LEVEL)
+static __inline BOOLEAN avb_tas_reg_try_shared_at_dpc(PAVB_DEVICE_CONTEXT ctx, LARGE_INTEGER *start)
 {
-    KeRaiseIrql(DISPATCH_LEVEL, irql);
     if (ExTryAcquireSpinLockSharedAtDpcLevel(&ctx->tas_reg_lock)) {
         *start = KeQueryPerformanceCounter(NULL);
         return TRUE;
     }
-    KeLowerIrql(*irql);
     return FALSE;
 }
 
-static __inline ULONG avb_tas_reg_unlock_shared(PAVB_DEVICE_CONTEXT ctx, KIRQL irql, LARGE_INTEGER start, const char *op)
+_IRQL_requires_(DISPATCH_LEVEL)
+static __inline LARGE_INTEGER avb_tas_reg_release_shared_at_dpc(PAVB_DEVICE_CONTEXT ctx, LARGE_INTEGER *freq)
 {
-    LARGE_INTEGER freq;
-    LARGE_INTEGER end = KeQueryPerformanceCounter(&freq);
+    LARGE_INTEGER end = KeQueryPerformanceCounter(freq);
 
     ExReleaseSpinLockSharedFromDpcLevel(&ctx->tas_reg_lock);
-    KeLowerIrql(irql);
-    return avb_tas_reg_hold_us(start, end, freq, op);
+    return end;
 }
 
 // Generic register offsets (common across Intel devices)
@@ -4240,25 +4239,35 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 status = STATUS_NOT_IMPLEMENTED;    /* TAS-capable, but the family has no query register map */
             } else {
                 avb_u64 lookup = q->lookup_client_op_id;
-                /* Lifecycle: registers are read only while this rundown is held. FilterPause waits for its holders before
-                 * it publishes FilterPausing, and FilterRestart re-arms it only after a successful hardware bring-up. Not
-                 * acquired: nothing is read (NOT_RUNNING) and the register lock is not touched */
-                BOOLEAN held = ExAcquireRundownProtection(&currentContext->tas_query_rundown);
-                BOOLEAN locked = FALSE;
+                BOOLEAN held, locked = FALSE;
                 int running, mmio, busy, contended = 0;
                 LONG seq0, seq1;
                 avb_u32 record;
                 ULONG hold_us = 0;
-                KIRQL lock_irql = PASSIVE_LEVEL;
-                LARGE_INTEGER lock_t0;
+                KIRQL irql;
+                LARGE_INTEGER lock_t0, lock_t1, lock_freq;
+                /* Holder discipline (#350): the IOCTL runs in the caller's thread at PASSIVE_LEVEL with APCs enabled, so no
+                 * caller guarantee keeps that thread from being suspended or preempted. The IRQL is therefore raised to
+                 * DISPATCH_LEVEL BEFORE the rundown is acquired and lowered only AFTER the lock and the rundown are released:
+                 * the whole holder interval runs without APC delivery or preemption, and FilterPause's wait for the holders
+                 * cannot be held up by a suspended query thread. The interval has no exit: both are released on every path
+                 * below, before the IRQL is lowered and before any logging */
+                lock_t0.QuadPart = 0;
+                lock_t1.QuadPart = 0;
+                lock_freq.QuadPart = 0;
+                KeRaiseIrql(DISPATCH_LEVEL, &irql);
+                /* Lifecycle: registers are read only while this rundown is held. FilterPause waits for its holders before
+                 * it publishes FilterPausing, and FilterRestart re-arms it only after a successful hardware bring-up. Not
+                 * acquired: nothing is read (NOT_RUNNING) and the register lock is not touched */
+                held = ExAcquireRundownProtection(&currentContext->tas_query_rundown);
                 /* Register access (#45, #52): one shared attempt at the TAS register lock, never a wait (#365 12.1 "Never
                  * blocking"). Obtained: it is held from the state samples to the end of the read pass, and since every TAS
                  * register write and record update holds it exclusively, the registers read and the record are one state.
                  * Not obtained: a TAS operation holds it or waits for it (queries share it, and every operation takes the
-                 * claim first), so nothing is read and the reply carries OP_IN_PROGRESS */
-                lock_t0.QuadPart = 0;
+                 * claim first), so nothing is read and the reply carries OP_IN_PROGRESS. That reply's hw_read is not settled
+                 * by #365 (PARTIAL is defined there through read failure): open design point, see PR #449 */
                 if (held) {
-                    locked = avb_tas_reg_try_shared(currentContext, &lock_irql, &lock_t0);
+                    locked = avb_tas_reg_try_shared_at_dpc(currentContext, &lock_t0);
                     contended = !locked;
                 }
 
@@ -4283,10 +4292,14 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 (void)ops->query_tas(&currentContext->intel_device, q, running, mmio, record, busy, contended);
                 seq1 = InterlockedCompareExchange(&currentContext->tas_op_seq, 0, 0);
                 if (locked) {
-                    hold_us = avb_tas_reg_unlock_shared(currentContext, lock_irql, lock_t0, "query");
+                    lock_t1 = avb_tas_reg_release_shared_at_dpc(currentContext, &lock_freq);
                 }
                 if (held) {
                     ExReleaseRundownProtection(&currentContext->tas_query_rundown);
+                }
+                KeLowerIrql(irql);
+                if (locked) {
+                    hold_us = avb_tas_reg_hold_us(lock_t0, lock_t1, lock_freq, "query");   /* logs; after the lowering */
                 }
                 if (seq1 != seq0) {
                     /* An operation overlapped the pass: the registers and the record may belong to different states.
