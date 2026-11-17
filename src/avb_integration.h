@@ -429,6 +429,10 @@ VOID AvbInitFaultSetRegistryPath(_In_ PUNICODE_STRING RegistryPath);
 ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ ULONG Site, _Out_ PAVB_INITFAULT_CALL Call);
 /** After the intel_init call (or its replacement): writes the attempt's record for the test */
 VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL Call, _In_ int InitResult);
+/** IOCTL_AVB_DBG_INITFAULT_CONTROL (METHOD_BUFFERED, PASSIVE_LEVEL): ARM / DISARM / CLEAR_UNCONSUMED under the admission lock.
+ *  The handler does not wait for in-flight attempts to drain (the executable performs that bounded drain); it only takes the
+ *  admission lock. Code defined in include/avb_ioctl.h; a Release driver rejects it with STATUS_INVALID_DEVICE_REQUEST */
+NTSTATUS AvbInitFaultControl(_Inout_ PVOID Buffer, _In_ ULONG InLen, _In_ ULONG OutLen, _Out_ ULONG *Info);
 #else
 static __inline VOID AvbInitFaultSetRegistryPath(_In_ PUNICODE_STRING RegistryPath) { UNREFERENCED_PARAMETER(RegistryPath); }
 static __inline ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ ULONG Site, _Out_ PAVB_INITFAULT_CALL Call)

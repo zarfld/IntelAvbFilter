@@ -200,6 +200,13 @@ typedef struct _IOCTL_VERSION {
  * RequiredAccess, Microsoft "Defining I/O Control Codes"). Existing codes keep FILE_ANY_ACCESS, since changing one changes its value */
 #define IOCTL_AVB_TAS_ACTIVATE          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 71, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017811C (#357, #362) */
 
+/* Debug-only test control of the #412 initialization fault mechanism (UT-DEV-LIFECYCLE-002): ARM, DISARM and
+ * CLEAR_UNCONSUMED, performed by a Debug (DBG) driver under the lock that admits an initialization attempt. Request layout,
+ * operations and semantics: AVB_INITFAULT_CONTROL in include/avb_init_fault_dbg.h. A Release driver does not implement it
+ * and rejects it with STATUS_INVALID_DEVICE_REQUEST. Vendor-range function 0x8F0 (the #362 decision 1 range 0x800-0xFFF),
+ * FILE_WRITE_ACCESS because it changes driver state. */
+#define IOCTL_AVB_DBG_INITFAULT_CONTROL CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x8F0, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017A3C0 (#412) */
+
 #define AVB_TAS_ACTIVATE_VERSION 1u
 #define AVB_TAS_QUEUES           4u
 #define AVB_TAS_PRE_HOLD         1u   /* frames held until the first window after BaseT */

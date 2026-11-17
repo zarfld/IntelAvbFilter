@@ -87,7 +87,9 @@
  *                  CLEANUP_FAILED; an applicable part that could not be read, or an enumeration failure, is
  *                  INCONCLUSIVE_RESTORATION.
  * Sessions (PR #462 review): each arming has its own session id; the driver publishes an attempt's record only while that
- * session is still armed, so an attempt from an earlier phase can never write into a later one. Phase A ends only after
+ * session is still armed, so an attempt from an earlier phase can never write into a later one. The test never writes or
+ * deletes a fault value: ARM, DISARM and the clearing before the retry are IOCTL_AVB_DBG_INITFAULT_CONTROL requests the
+ * driver performs under the lock that admits attempts; the test only reads the registry. Phase A ends only after
  * FilterRestart's attempt is recorded and nothing is in flight. No capability filter selects adapters: INIT_DEVICE is a
  * lifecycle operation of every adapter.
  * Mutations: the target's owned NIC cycles (its PHC restarts with each attach), INIT_DEVICE on it, the fault values in the
@@ -1301,7 +1303,7 @@ static int g_irf_established, g_irf_completed;   /* adapters whose PRESTATE pass
 #define IRF_RETURN_BOUND_MS    60000         /* identity back, the expected attempts recorded, READY where expected */
 #define IRF_DRAIN_BOUND_MS     (2 * AVB_INITFAULT_MAX_HOLD_MS + 5000)   /* an attempt in flight: at most one HOLD plus intel_init */
 #define IRF_ARM_LIFETIME_S     300           /* arm expiry from arming: one bounded cycle (240 s) plus the INIT_DEVICE requests */
-#define IRF_CLEARED            0xFFFFFFFFu   /* consumed_by of an action the test cleared before the retry */
+#define IRF_CLEARED            AVB_INITFAULT_CLEARED   /* consumed_by of an action cleared before the retry */
 #define IRF_NET_CLASS_KEY      "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
 static const char *irf_origin_name(unsigned o)
@@ -1330,7 +1332,7 @@ static HKEY irf_params_open(BOOL *created)
     DWORD disp = 0;
 
     *created = FALSE;
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, AVB_INITFAULT_PARAMS_SUBKEY, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &k,
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, AVB_INITFAULT_PARAMS_SUBKEY, 0, NULL, 0, KEY_QUERY_VALUE, NULL, &k,
                         &disp) != ERROR_SUCCESS) {
         return NULL;
     }
@@ -1343,39 +1345,45 @@ static void irf_log_name(WCHAR *buf, size_t n, unsigned __int64 session, unsigne
     swprintf_s(buf, n, L"%ls%016llX_%02u", AVB_INITFAULT_LOG_PREFIX, session, seq);
 }
 
-/** Every value whose name starts with AVB_INITFAULT_NAME_PREFIX (arm and records of any session). Returns FALSE if the
- *  enumeration itself failed: then residue is unknown, never "none" */
-static BOOL irf_residue(HKEY k, unsigned *count, BOOL del)
+/** Counts every value whose name starts with AVB_INITFAULT_NAME_PREFIX (arm and records of any session); read only, the
+ *  test never writes or deletes a fault value. Returns FALSE if the enumeration itself failed: residue unknown, never "none" */
+static BOOL irf_residue(HKEY k, unsigned *count)
 {
-    WCHAR (*names)[64] = (WCHAR (*)[64])calloc(256, sizeof(*names));
-    DWORD i, n = 0, len;
-    LONG rc = ERROR_SUCCESS;
-    BOOL ok = TRUE;
+    DWORD i, len;
+    LONG rc;
     size_t plen = wcslen(AVB_INITFAULT_NAME_PREFIX);
 
     *count = 0;
-    if (names == NULL) { return FALSE; }
-    for (i = 0; n < 256; i++) {
+    for (i = 0; i < 4096; i++) {
         WCHAR name[64];
         len = ARRAYSIZE(name);
         rc = RegEnumValueW(k, i, name, &len, NULL, NULL, NULL, NULL);
-        if (rc == ERROR_NO_MORE_ITEMS) { break; }
+        if (rc == ERROR_NO_MORE_ITEMS) { return TRUE; }
         if (rc == ERROR_MORE_DATA) { continue; }   /* a longer name: not one of ours (ours fit in 64) */
-        if (rc != ERROR_SUCCESS) { ok = FALSE; break; }
-        if (_wcsnicmp(name, AVB_INITFAULT_NAME_PREFIX, plen) == 0) { wcscpy_s(names[n++], 64, name); }
+        if (rc != ERROR_SUCCESS) { return FALSE; }
+        if (_wcsnicmp(name, AVB_INITFAULT_NAME_PREFIX, plen) == 0) { (*count)++; }
     }
-    *count = n;
-    if (ok && del) {
-        for (i = 0; i < n; i++) {
-            LONG d = RegDeleteValueW(k, names[i]);
-            if (d != ERROR_SUCCESS && d != ERROR_FILE_NOT_FOUND) {
-                printf("    [EVIDENCE] delete of fault value %ls failed: error %ld\n", names[i], d);
-                ok = FALSE;
-            }
-        }
-    }
-    free(names);
-    return ok;
+    return FALSE;
+}
+
+/** One control operation, performed by the driver under its attempt-admission lock (IOCTL_AVB_DBG_INITFAULT_CONTROL). The raw
+ *  NTSTATUS is returned; a Release driver (no mechanism) answers STATUS_INVALID_DEVICE_REQUEST */
+static LONG irf_ctl(unsigned op, unsigned __int64 session, const AVB_INITFAULT_ARM *arm, AVB_INITFAULT_CONTROL *out)
+{
+    DWORD got = 0;
+    LONG st;
+    HANDLE h = ic_open();
+
+    ZeroMemory(out, sizeof(*out));
+    out->version = AVB_INITFAULT_VERSION;
+    out->op = op;
+    out->session = session;
+    if (arm != NULL) { out->arm = *arm; }
+    if (h == INVALID_HANDLE_VALUE) { return AVB_NTSTATUS_UNAVAILABLE; }
+    st = avb_ioctl_ntstatus(h, IOCTL_AVB_DBG_INITFAULT_CONTROL, out, sizeof(*out), out, sizeof(*out), &got);
+    CloseHandle(h);
+    if (st == 0 && got != sizeof(*out)) { return AVB_NTSTATUS_UNAVAILABLE; }
+    return st;
 }
 
 static BOOL irf_read_arm(HKEY k, AVB_INITFAULT_ARM *a)
@@ -1386,19 +1394,17 @@ static BOOL irf_read_arm(HKEY k, AVB_INITFAULT_ARM *a)
            size == sizeof(*a) && a->version == AVB_INITFAULT_VERSION;
 }
 
-static BOOL irf_write_arm(HKEY k, const AVB_INITFAULT_ARM *a)
-{
-    return RegSetValueExW(k, AVB_INITFAULT_ARM_VALUE, 0, REG_BINARY, (const BYTE *)a, sizeof(*a)) == ERROR_SUCCESS;
-}
-
-/** Ends a session: waits until no attempt of it is in flight (bounded), disarms (deletes the arm; the driver then publishes
- *  nothing more for the session), deletes every fault value and verifies by enumeration that none is left */
+/** Ends a session: waits (bounded, reading the arm only) until no attempt of it is in flight, then asks the driver to disarm.
+ *  The driver deletes the arm and every fault value under the lock that admits attempts, so no attempt can write afterwards
+ *  until the next ARM. Then a read-only enumeration verifies that nothing is left */
 static BOOL irf_drain_clear(HKEY k, const char *label)
 {
     AVB_INITFAULT_ARM a;
+    AVB_INITFAULT_CONTROL c;
     DWORD start = GetTickCount();
     unsigned left = 0;
-    BOOL drained = TRUE, ok;
+    BOOL drained = TRUE, enum_ok;
+    LONG st;
 
     while (irf_read_arm(k, &a) && a.inflight != 0) {
         if (GetTickCount() - start >= IRF_DRAIN_BOUND_MS) {
@@ -1411,11 +1417,11 @@ static BOOL irf_drain_clear(HKEY k, const char *label)
         printf("    [EVIDENCE] %s: %u attempt(s) still in flight after %d ms; disarming anyway (their records are discarded)\n", label,
                a.inflight, IRF_DRAIN_BOUND_MS);
     }
-    (void)RegDeleteValueW(k, AVB_INITFAULT_ARM_VALUE);   /* disarm first */
-    ok = irf_residue(k, &left, TRUE) && irf_residue(k, &left, FALSE) && left == 0;
-    printf("    [EVIDENCE] %s: drained %d, fault values left after clearing: %u (enumeration %s)\n", label, drained, left,
-           ok || left != 0 ? "complete" : "failed");
-    return ok && drained;
+    st = irf_ctl(AVB_INITFAULT_OP_DISARM, 0, NULL, &c);
+    enum_ok = irf_residue(k, &left);
+    printf("    [EVIDENCE] %s: drained %d; driver DISARM ntstatus=0x%08lX inflight at disarm %u, values deleted %u; fault values left %u "
+           "(enumeration %s)\n", label, drained, (unsigned long)st, c.inflight_at_op, c.values_deleted, left, enum_ok ? "complete" : "FAILED");
+    return st == 0 && enum_ok && left == 0 && drained;
 }
 
 static unsigned __int64 irf_new_session(void)
@@ -1428,7 +1434,7 @@ static unsigned __int64 irf_new_session(void)
 }
 
 /** Arms (origin, action) pairs for the one target adapter in a new session, expiring IRF_ARM_LIFETIME_S from now */
-static BOOL irf_arm(HKEY k, avb_u64 luid, const unsigned (*acts)[2], unsigned n, unsigned __int64 *session)
+static BOOL irf_arm(avb_u64 luid, const unsigned (*acts)[2], unsigned n, unsigned __int64 *session)
 {
     AVB_INITFAULT_ARM a;
     FILETIME ft;
@@ -1451,7 +1457,12 @@ static BOOL irf_arm(HKEY k, avb_u64 luid, const unsigned (*acts)[2], unsigned n,
         printf("    [EVIDENCE] armed action %u: origin=%s action=%s\n", i, irf_origin_name(acts[i][0]), irf_act_name(acts[i][1]));
     }
     *session = a.session;
-    return irf_write_arm(k, &a);
+    {
+        AVB_INITFAULT_CONTROL c;
+        LONG st = irf_ctl(AVB_INITFAULT_OP_ARM, 0, &a, &c);
+        printf("    [EVIDENCE] driver ARM ntstatus=0x%08lX (values deleted before arming %u)\n", (unsigned long)st, c.values_deleted);
+        return st == 0;
+    }
 }
 
 /** The session's records, by sequence; present[i] tells which exist and validate (version, sequence, session) */
@@ -1780,7 +1791,7 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     }
     {
         unsigned stale = 0;
-        if (irf_residue(k, &stale, FALSE) && stale != 0) {
+        if (irf_residue(k, &stale) && stale != 0) {
             printf("    [EVIDENCE] %u stale fault value(s) from an earlier run found before arming\n", stale);
         }
         clear_ok = irf_drain_clear(k, "stale values before arming");
@@ -1832,7 +1843,7 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     /* ---- Phase A, UT-DEV-LIFECYCLE-002-REACH: the fresh attach reaches the fault point (OBSERVE, no fault). The phase ends
      *      only after FilterRestart's attempt is recorded and nothing is in flight, so no attempt of it outlives the session ---- */
     mutated = TRUE;
-    if (!irf_arm(k, id->net_luid, reach_act, ARRAYSIZE(reach_act), &session) || !irf_cycle(inst) ||
+    if (!irf_arm(id->net_luid, reach_act, ARRAYSIZE(reach_act), &session) || !irf_cycle(inst) ||
         !irf_wait_back(k, id, session, want_reach, ARRAYSIZE(want_reach), TRUE, &arm, rec, present)) {
         (void)irf_print_records(k, session, "phase A", rec, present);
         ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-REACH", index, did, "arm, owned NIC cycle or the return with OBSERVE consumed and FilterRestart's attempt recorded did not complete");
@@ -1863,7 +1874,7 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         ic_blocked_cases(index, did, "phase B was not started", deps + 2, (int)ARRAYSIZE(deps) - 2);
         goto cleanup;
     }
-    if (!irf_arm(k, id->net_luid, fail_act, ARRAYSIZE(fail_act), &session) || !irf_cycle(inst) ||
+    if (!irf_arm(id->net_luid, fail_act, ARRAYSIZE(fail_act), &session) || !irf_cycle(inst) ||
         !irf_wait_back(k, id, session, want_attach, ARRAYSIZE(want_attach), FALSE, &arm, rec, present)) {
         (void)irf_print_records(k, session, "phase B attach", rec, present);
         ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-ATTACH-FAILED", index, did, "arm, owned NIC cycle or the return with ATTACH and RESTART consumed did not complete");
@@ -1908,17 +1919,21 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     if (st1 == 0 || st1 == AVB_NTSTATUS_UNAVAILABLE) {
         ic_blocked_cases(index, did, "instance A's first INIT_DEVICE did not observably fail: no failed initialization to retry", deps + 4, 3);
     } else {
-        /* The fault is cleared before the retry: any action still unconsumed is marked cleared (recording continues). No attempt
-         * is in flight here: INIT_DEVICE is synchronous and the arm's inflight is checked */
-        for (i = 0; i < arm.count; i++) {
-            if (arm.actions[i].consumed_by == 0) {
-                arm.actions[i].consumed_by = IRF_CLEARED;
-                printf("    [EVIDENCE] action %u (%s %s) was not consumed; cleared before the retry\n", i,
-                       irf_origin_name(arm.actions[i].origin), irf_act_name(arm.actions[i].action));
+        /* The fault is cleared before the retry: the driver marks any unconsumed action cleared under its admission lock
+         * (recording continues) */
+        {
+            AVB_INITFAULT_CONTROL c;
+            LONG cst;
+            for (i = 0; i < arm.count; i++) {
+                if (arm.actions[i].consumed_by == 0) {
+                    printf("    [EVIDENCE] action %u (%s %s) was not consumed\n", i, irf_origin_name(arm.actions[i].origin),
+                           irf_act_name(arm.actions[i].action));
+                }
             }
+            cst = irf_ctl(AVB_INITFAULT_OP_CLEAR_UNCONSUMED, session, NULL, &c);
+            printf("    [EVIDENCE] driver CLEAR_UNCONSUMED ntstatus=0x%08lX actions cleared %u, inflight %u\n", (unsigned long)cst,
+                   c.actions_cleared, c.inflight_at_op);
         }
-        if (arm.inflight != 0) { printf("    [EVIDENCE] %u attempt(s) in flight before the retry\n", arm.inflight); }
-        (void)irf_write_arm(k, &arm);
 
         /* ---- Instance A retries on the same handle: published expectation STATUS_SUCCESS ---- */
         st2 = ic_init(hA, &got);
@@ -2007,7 +2022,7 @@ cleanup:
     }
     {
         unsigned left = 0;
-        BOOL enum_ok = irf_residue(k, &left, FALSE);
+        BOOL enum_ok = irf_residue(k, &left);
         BOOL ready = hO != INVALID_HANDLE_VALUE && irf_hw_ready(&f0, &f1);
         int adv = irf_phc_advancing(caps, &f0, &f1, &why);
         const char *why_adv = why;

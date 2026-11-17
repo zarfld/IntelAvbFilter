@@ -1239,6 +1239,16 @@ IntelAvbFilterDeviceIoControl(
          * change the adapter it observes).  0 matches -> STATUS_NO_SUCH_DEVICE, >1 -> STATUS_INVALID_DEVICE_STATE;
          * in both cases the handle's previous binding is left unchanged.  Later IOCTLs on the handle re-validate
          * that the bound context is still live (detached / re-enumerated adapter -> STATUS_DEVICE_NOT_READY). */
+#if DBG
+        /* #412 (Debug only): arm/disarm/clear of the initialization fault mechanism, performed by the driver under the same
+         * lock that admits an initialization attempt, so a disarm cannot be undone by an attempt in flight. Release: not
+         * handled (default: STATUS_INVALID_DEVICE_REQUEST) */
+        case IOCTL_AVB_DBG_INITFAULT_CONTROL:
+            Status = AvbInitFaultControl(Irp->AssociatedIrp.SystemBuffer, IrpSp->Parameters.DeviceIoControl.InputBufferLength,
+                                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength, &InfoLength);
+            break;
+#endif
+
         case IOCTL_AVB_OPEN_ADAPTER_BY_LUID:
         {
             InputBuffer = OutputBuffer = (PUCHAR)Irp->AssociatedIrp.SystemBuffer;

@@ -23,6 +23,7 @@
 C_ASSERT(sizeof(AVB_INITFAULT_ACTION) == 16);
 C_ASSERT(sizeof(AVB_INITFAULT_ARM) == 168);
 C_ASSERT(sizeof(AVB_INITFAULT_RECORD) == 96);
+C_ASSERT(sizeof(AVB_INITFAULT_CONTROL) == 200);
 
 #if DBG
 
@@ -186,6 +187,121 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
     DEBUGP(DL_ERROR, "!!! [#412] init attempt session=0x%016llX seq=%u luid=0x%016llX origin=%u site=%u applied=%u action=%d hold=%u ms\n",
            rec->session, rec->seq, rec->net_luid, rec->origin, rec->site, rec->applied, (int)rec->action_index, rec->hold_ms);
     return rec->applied;
+}
+
+/** Deletes the arm and every value named AVB_INITFAULT_NAME_PREFIX* (caller holds the lock). Bounded: at most a fixed number of
+ *  enumeration steps; *Inflight receives the deleted arm's inflight */
+static NTSTATUS IfDeleteAll(_In_ HANDLE Key, _Out_ ULONG *Deleted, _Out_ ULONG *Inflight)
+{
+    ULONG buf[(sizeof(KEY_VALUE_BASIC_INFORMATION) + 128 * sizeof(WCHAR)) / sizeof(ULONG) + 1];
+    PKEY_VALUE_BASIC_INFORMATION v = (PKEY_VALUE_BASIC_INFORMATION)buf;
+    const ULONG plen = (ULONG)(sizeof(AVB_INITFAULT_NAME_PREFIX) - sizeof(WCHAR));
+    AVB_INITFAULT_ARM arm;
+    ULONG idx = 0, steps, len;
+    NTSTATUS st = STATUS_SUCCESS;
+
+    *Deleted = 0;
+    *Inflight = IfReadArm(Key, &arm) ? arm.inflight : 0;
+    for (steps = 0; steps < 4096; steps++) {
+        UNICODE_STRING name;
+        st = ZwEnumerateValueKey(Key, idx, KeyValueBasicInformation, v, sizeof(buf), &len);
+        if (st == STATUS_NO_MORE_ENTRIES) {
+            return STATUS_SUCCESS;
+        }
+        if (st == STATUS_BUFFER_OVERFLOW || st == STATUS_BUFFER_TOO_SMALL) {   /* a longer name is not one of ours */
+            idx++;
+            continue;
+        }
+        if (!NT_SUCCESS(st)) {
+            return st;
+        }
+        if (v->NameLength >= plen && RtlCompareMemory(v->Name, AVB_INITFAULT_NAME_PREFIX, plen) == plen) {
+            name.Buffer = v->Name;
+            name.Length = name.MaximumLength = (USHORT)v->NameLength;
+            st = ZwDeleteValueKey(Key, &name);
+            if (!NT_SUCCESS(st)) {
+                return st;
+            }
+            (*Deleted)++;   /* the next value moved to idx: do not advance */
+        } else {
+            idx++;
+        }
+    }
+    return STATUS_UNSUCCESSFUL;   /* the bound was reached */
+}
+
+NTSTATUS AvbInitFaultControl(_Inout_ PVOID Buffer, _In_ ULONG InLen, _In_ ULONG OutLen, _Out_ ULONG *Info)
+{
+    AVB_INITFAULT_CONTROL *c = (AVB_INITFAULT_CONTROL *)Buffer;
+    OBJECT_ATTRIBUTES oa;
+    HANDLE key = NULL;
+    LARGE_INTEGER now;
+    ULONG deleted = 0, inflight = 0, i, disp = 0;
+    NTSTATUS st;
+
+    *Info = 0;
+    if (!g_IfReady) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+    if (Buffer == NULL || InLen < sizeof(*c) || OutLen < sizeof(*c) || c->version != AVB_INITFAULT_VERSION) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    if (c->op == AVB_INITFAULT_OP_ARM) {
+        KeQuerySystemTime(&now);
+        if (c->arm.version != AVB_INITFAULT_VERSION || c->arm.count > AVB_INITFAULT_MAX_ACTIONS || c->arm.session == 0 ||
+            c->arm.net_luid == 0 || c->arm.expiry_100ns <= (unsigned __int64)now.QuadPart) {
+            return STATUS_INVALID_PARAMETER;
+        }
+    } else if (c->op != AVB_INITFAULT_OP_DISARM && c->op != AVB_INITFAULT_OP_CLEAR_UNCONSUMED) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    c->inflight_at_op = c->values_deleted = c->actions_cleared = 0;
+
+    IfLock();   /* the admission lock: no attempt enters or publishes while this runs */
+    InitializeObjectAttributes(&oa, &g_IfPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    st = ZwCreateKey(&key, KEY_QUERY_VALUE | KEY_SET_VALUE, &oa, 0, NULL, REG_OPTION_NON_VOLATILE, &disp);
+    if (NT_SUCCESS(st)) {
+        if (c->op == AVB_INITFAULT_OP_CLEAR_UNCONSUMED) {
+            AVB_INITFAULT_ARM arm;
+            if (!IfReadArm(key, &arm) || arm.session != c->session) {
+                st = STATUS_NOT_FOUND;
+            } else {
+                for (i = 0; i < arm.count; i++) {
+                    if (arm.actions[i].consumed_by == 0) {
+                        arm.actions[i].consumed_by = AVB_INITFAULT_CLEARED;
+                        c->actions_cleared++;
+                    }
+                }
+                c->inflight_at_op = arm.inflight;
+                st = IfWriteArm(key, &arm);
+            }
+        } else {
+            st = IfDeleteAll(key, &deleted, &inflight);
+            c->values_deleted = deleted;
+            c->inflight_at_op = inflight;
+            if (NT_SUCCESS(st) && c->op == AVB_INITFAULT_OP_ARM) {
+                c->arm.next_seq = 0;
+                c->arm.inflight = 0;
+                for (i = 0; i < AVB_INITFAULT_MAX_ACTIONS; i++) {
+                    c->arm.actions[i].consumed_by = 0;
+                }
+                st = IfWriteArm(key, &c->arm);
+            }
+        }
+        ZwClose(key);
+    }
+    IfUnlock();
+
+    DEBUGP(DL_ERROR, "!!! [#412] init fault control op=%u session=0x%016llX status=0x%08X inflight=%u deleted=%u cleared=%u\n",
+           c->op, c->op == AVB_INITFAULT_OP_ARM ? c->arm.session : c->session, st, c->inflight_at_op, c->values_deleted,
+           c->actions_cleared);
+    if (NT_SUCCESS(st)) {
+        *Info = sizeof(*c);
+    }
+    return st;
 }
 
 VOID AvbInitFaultExit(_In_ PAVB_DEVICE_CONTEXT Ctx, _Inout_ PAVB_INITFAULT_CALL Call, _In_ int InitResult)

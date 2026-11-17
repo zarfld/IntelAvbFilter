@@ -13,16 +13,18 @@
  *
  * Transport: REG_BINARY values under the driver service key's Parameters subkey
  * (HKLM\SYSTEM\CurrentControlSet\Services\IntelAvbFilter\Parameters), next to DebugLevel (#95):
- *   AVB_INITFAULT_ARM_VALUE                      written by the test; the driver updates only next_seq, inflight and
- *                                                consumed_by, under its own lock
+ *   AVB_INITFAULT_ARM_VALUE                      written and deleted only by the driver, under its own lock: on the test's
+ *                                                ARM/DISARM/CLEAR_UNCONSUMED request (IOCTL_AVB_DBG_INITFAULT_CONTROL, SSOT avb_ioctl.h)
+ *                                                and per attempt (next_seq, inflight, consumed_by). The test only reads it
  *   AVB_INITFAULT_LOG_PREFIX <session>_<seq>     one record per attempt ("AvbInitFaultLog_%016llX_%02u")
  * Every name starts with AVB_INITFAULT_NAME_PREFIX, so residue is found by enumeration.
  *
  * Session isolation (PR #462 review): an attempt belongs to the session of the arm it entered under. Its record is published
  * only if, at its exit and under the same driver lock, the arm is still present with that session; otherwise the record is
  * discarded. A record's name carries its session, so an old attempt can never publish into a newer session's sequence
- * numbers. inflight counts the session's attempts between entry and exit; the test drains (waits for inflight 0), then
- * deletes the arm (disarm) and the session's values, then verifies by enumeration that nothing is left.
+ * numbers. inflight counts the session's attempts between entry and exit; the test drains (waits, bounded, for inflight 0),
+ * then asks the driver to disarm (the driver deletes the arm and every fault value under the admission lock), then
+ * verifies by enumeration that nothing is left.
  *
  * Bounds: at most AVB_INITFAULT_MAX_ACTIONS actions, at most AVB_INITFAULT_MAX_RECORDS records per session, an absolute
  * expiry after which the driver deletes the arm and does nothing, and HOLD at most AVB_INITFAULT_MAX_HOLD_MS. A consumed
@@ -107,5 +109,33 @@ typedef struct AVB_INITFAULT_RECORD {
     unsigned __int32 nonpassive_skipped;  /* attempts skipped because they were not at PASSIVE_LEVEL, since load */
     unsigned __int32 reserved;
 } AVB_INITFAULT_RECORD;                                                                                  /* 96 */
+
+/*
+ * Control (PR #462 review round 3): the test never writes or deletes a fault value itself. Arming, disarming and clearing
+ * go through this Debug-only IOCTL, which the driver performs under the same lock that admits an attempt (entry) and
+ * publishes its record (exit). Admission and disarm/rearm therefore share one driver-owned synchronization boundary: after
+ * DISARM returns, no attempt can write the arm or a record until the next ARM, because both writes require the arm to be
+ * present under that lock. The registry stays readable by the test (arm, records, residue enumeration). The control handler does no
+ * waiting for in-flight attempts; the executable performs that bounded drain by reading inflight before it disarms
+ * (the lock itself is taken with KeWaitForSingleObject at PASSIVE_LEVEL, outside any spin lock or hardware access).
+ * The IOCTL code is defined in the SSOT header include/avb_ioctl.h (IOCTL_AVB_DBG_INITFAULT_CONTROL, 0x0017A3C0): a Debug
+ * (DBG) driver implements it; a Release driver does not and rejects it with STATUS_INVALID_DEVICE_REQUEST.
+ */
+
+#define AVB_INITFAULT_OP_ARM               1u   /* delete every fault value, then write this arm with next_seq, inflight, consumed_by 0 */
+#define AVB_INITFAULT_OP_DISARM            2u   /* delete the arm and every fault value */
+#define AVB_INITFAULT_OP_CLEAR_UNCONSUMED  3u   /* mark the session's unconsumed actions consumed_by = AVB_INITFAULT_CLEARED */
+#define AVB_INITFAULT_CLEARED              0xFFFFFFFFu
+
+typedef struct AVB_INITFAULT_CONTROL {
+    unsigned __int32 version;            /* AVB_INITFAULT_VERSION */
+    unsigned __int32 op;                 /* AVB_INITFAULT_OP_* */
+    unsigned __int64 session;            /* CLEAR_UNCONSUMED: the armed session it applies to */
+    AVB_INITFAULT_ARM arm;               /* ARM: the arm to write (session non-zero, target, actions, expiry in the future) */
+    unsigned __int32 inflight_at_op;     /* out: the armed session's inflight when the operation ran (0 if no arm) */
+    unsigned __int32 values_deleted;     /* out: fault values deleted (ARM, DISARM) */
+    unsigned __int32 actions_cleared;    /* out: CLEAR_UNCONSUMED */
+    unsigned __int32 reserved;
+} AVB_INITFAULT_CONTROL;                                                                                 /* 200 */
 
 #endif /* AVB_INIT_FAULT_DBG_H */
