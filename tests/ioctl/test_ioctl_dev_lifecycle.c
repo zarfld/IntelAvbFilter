@@ -14,6 +14,27 @@
  * 
  * @see https://github.com/zarfld/IntelAvbFilter/issues/313
  * @see https://github.com/zarfld/IntelAvbFilter/issues/12
+ *
+ * --init-contract: only the targeted #313 cases of the 2026-11-12 amendment of #12/#313 (INIT_DEVICE separates adapter
+ * initialization from open-instance initialization; implementation owned by #404). Without the option the 20 cases above run
+ * unchanged. On every adapter the driver enumerates (GET_ADAPTER_IDENTITY, validated; no model or family selection):
+ *   PRESTATE       an observer handle bound by NET_LUID (OPEN_ADAPTER_BY_LUID binds only) sees AVB_HW_PTP_READY, readable
+ *                  PTP state and an advancing PHC. Otherwise the READY scenarios do not apply here: BLOCKED.
+ *   UT-DEV-INIT-001          first INIT_DEVICE on a new instance (own handle, bound by NET_LUID): exactly STATUS_SUCCESS.
+ *   UT-DEV-INIT-002          the same instance again after its success: exactly STATUS_INVALID_DEVICE_STATE, no output.
+ *   UT-DEV-INIT-SECOND (provisional ID, #313 amendment "second open instance on a READY adapter"): STATUS_SUCCESS.
+ *   UT-DEV-OPEN-READY  (provisional ID, #313 amendment "OPEN_ADAPTER without hardware change"): IOCTL 32 selects the adapter
+ *                  (the binding is verified through QUERY_HW_SNAPSHOT's NET_LUID), STATUS_SUCCESS.
+ * After each request, from the observer handle (GET_CLOCK_CONFIG and, independently, QUERY_HW_SNAPSHOT), two lines:
+ *   <case>-PHC     a healthy PTP clock is not reset. A backward step of SYSTIM establishes a reset (FAIL). No PHC tolerance is
+ *                  approved, so no step back cannot prove continuity: INCONCLUSIVE, with the measured values.
+ *   <case>-TIMINCA the frequency is not rewritten: TIMINCA equal before and after in both reads (a rewrite with the same value
+ *                  is not detectable). TSAUXC and hw_state are printed as evidence.
+ * Not exercised (COVERAGE line): an adapter that is not READY, concurrent INIT_DEVICE (STATUS_DEVICE_BUSY), the order in which
+ * READY is published, retry after a failed initialization (#412, separately owned), GET_DEVICE_INFO before initialization.
+ * Mutations: INIT_DEVICE and OPEN_ADAPTER as the cases send them; on a driver that re-initializes a READY adapter they reset
+ * its PTP clock, which no test can undo (reported, never hidden). Safety class Unsafe. Exit: 0 all passed, 1 any nonpassing
+ * verdict, 2 no adapter ran, 3 only BLOCKED.
  */
 
 #include <windows.h>
@@ -23,6 +44,7 @@
 
 /* Single Source of Truth for IOCTL definitions */
 #include "../../include/avb_ioctl.h"
+#include "../common/avb_ntstatus.h"   /* --init-contract: exact NTSTATUS (Win32 errors are lossy) */
 
 /* Test result codes */
 #define TEST_PASS 0
@@ -766,9 +788,317 @@ void Test_PnPRemoveAndReAdd(TestContext *ctx) {
  * Main Test Harness
  *============================================================================*/
 
+/*==============================================================================
+ * --init-contract (#313 amendment 2026-11-12, #404)
+ *============================================================================*/
+
+typedef struct {
+    LONG clk_st;            /* raw NTSTATUS of GET_CLOCK_CONFIG */
+    BOOL clk_ok;
+    AVB_CLOCK_CONFIG clk;
+    BOOL snap_ok;
+    avb_u32 snap_timinca, snap_tsauxc;
+    avb_u64 bound_luid;
+    BOOL hw_ok;
+    avb_u32 hw_state;
+    LARGE_INTEGER qpc;
+} IC_OBS;
+
+static int g_ic_ran, g_ic_failed, g_ic_blocked;
+
+static void ic_verdict(const char *tag, const char *check, UINT32 index, avb_u16 did, const char *reason)
+{
+    printf("[%s] %s/adapter:%u did=0x%04X%s%s\n", tag, check, index, did, reason ? ": " : "", reason ? reason : "");
+    fflush(stdout);
+    if (strcmp(tag, "BLOCKED") == 0) {
+        g_ic_blocked++;
+    } else if (strcmp(tag, "PASS") != 0) {
+        g_ic_failed++;
+    }
+}
+
+static HANDLE ic_open(void)
+{
+    return CreateFileA(DEVICE_PATH_PRIMARY, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+}
+
+static BOOL ic_identity(HANDLE h, UINT32 index, AVB_ADAPTER_IDENTITY_REQUEST *id)
+{
+    DWORD br = 0;
+    ZeroMemory(id, sizeof(*id));
+    id->version = AVB_ADAPTER_IDENTITY_VERSION;
+    id->index = index;
+    return DeviceIoControl(h, IOCTL_AVB_GET_ADAPTER_IDENTITY, id, sizeof(*id), id, sizeof(*id), &br, NULL) &&
+           br == sizeof(*id) && id->version == AVB_ADAPTER_IDENTITY_VERSION && id->index == index && id->status == 0 &&
+           id->count > index;
+}
+
+/** OPEN_ADAPTER_BY_LUID binds the handle only (no PTP initialization, src/device.c) */
+static HANDLE ic_open_bound(avb_u64 luid)
+{
+    AVB_OPEN_BY_LUID_REQUEST b;
+    DWORD br = 0;
+    HANDLE h = ic_open();
+
+    if (h == INVALID_HANDLE_VALUE) {
+        return h;
+    }
+    ZeroMemory(&b, sizeof(b));
+    b.version = AVB_OPEN_BY_LUID_VERSION;
+    b.net_luid = luid;
+    if (!DeviceIoControl(h, IOCTL_AVB_OPEN_ADAPTER_BY_LUID, &b, sizeof(b), &b, sizeof(b), &br, NULL)) {
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
+}
+
+/** Read-only observation through the observer handle: hw_state, GET_CLOCK_CONFIG and, independently, QUERY_HW_SNAPSHOT */
+static void ic_observe(HANDLE h, IC_OBS *o)
+{
+    AVB_HW_STATE_QUERY hs;
+    AVB_HW_SNAPSHOT_REQUEST s;
+    DWORD br = 0;
+
+    ZeroMemory(o, sizeof(*o));
+    ZeroMemory(&hs, sizeof(hs));
+    o->hw_ok = DeviceIoControl(h, IOCTL_AVB_GET_HW_STATE, &hs, sizeof(hs), &hs, sizeof(hs), &br, NULL);
+    o->hw_state = hs.hw_state;
+    o->clk_st = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_CLOCK_CONFIG, &o->clk, sizeof(o->clk), &o->clk, sizeof(o->clk), &br);
+    QueryPerformanceCounter(&o->qpc);
+    o->clk_ok = o->clk_st == 0 && br == sizeof(o->clk) && o->clk.status == 0;
+    ZeroMemory(&s, sizeof(s));
+    s.version = AVB_HW_SNAPSHOT_VERSION;
+    if (DeviceIoControl(h, IOCTL_AVB_QUERY_HW_SNAPSHOT, &s, sizeof(s), &s, sizeof(s), &br, NULL) && br == sizeof(s) &&
+        s.count >= AVB_HWREG_TSAUXC && s.entries[AVB_HWREG_TIMINCA - 1].state == AVB_HWREG_STATE_VALID &&
+        s.entries[AVB_HWREG_TSAUXC - 1].state == AVB_HWREG_STATE_VALID) {
+        o->snap_ok = TRUE;
+        o->snap_timinca = s.entries[AVB_HWREG_TIMINCA - 1].value;
+        o->snap_tsauxc = s.entries[AVB_HWREG_TSAUXC - 1].value;
+        o->bound_luid = s.net_luid;
+    }
+    printf("    [EVIDENCE] observe: hw_state=%u%s clock ntstatus=0x%08lX systim=%llu timinca=0x%08X tsauxc=0x%08X; snapshot %s "
+           "timinca=0x%08X tsauxc=0x%08X\n", o->hw_state, o->hw_ok ? "" : "(unread)", (unsigned long)o->clk_st,
+           o->clk_ok ? o->clk.systim : 0ULL, o->clk.timinca, o->clk.tsauxc, o->snap_ok ? "valid" : "unavailable",
+           o->snap_timinca, o->snap_tsauxc);
+}
+
+static long long ic_wall_ns(const IC_OBS *a, const IC_OBS *b)
+{
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return (long long)((double)(b->qpc.QuadPart - a->qpc.QuadPart) * 1e9 / (double)f.QuadPart);
+}
+
+/** <case>-PHC and <case>-TIMINCA between two observations around one request */
+static void ic_ptp_lines(const char *cs, UINT32 index, avb_u16 did, const IC_OBS *b, const IC_OBS *a)
+{
+    char check[64], reason[320];
+
+    sprintf_s(check, sizeof(check), "%s-PHC", cs);
+    if (!b->clk_ok || !a->clk_ok) {
+        sprintf_s(reason, sizeof(reason), "PHC not read before or after (ntstatus 0x%08lX / 0x%08lX)", (unsigned long)b->clk_st,
+                  (unsigned long)a->clk_st);
+        ic_verdict("INCONCLUSIVE", check, index, did, reason);
+    } else if (a->clk.systim < b->clk.systim) {
+        sprintf_s(reason, sizeof(reason), "PTP clock reset: SYSTIM stepped back from %llu to %llu (wall %lld ns); the request "
+                  "re-initialized a healthy clock", b->clk.systim, a->clk.systim, ic_wall_ns(b, a));
+        ic_verdict("FAIL", check, index, did, reason);
+    } else {
+        sprintf_s(reason, sizeof(reason), "no step back (SYSTIM %llu -> %llu, wall %lld ns); continuity is not established without an "
+                  "approved PHC tolerance", b->clk.systim, a->clk.systim, ic_wall_ns(b, a));
+        ic_verdict("INCONCLUSIVE", check, index, did, reason);
+    }
+
+    sprintf_s(check, sizeof(check), "%s-TIMINCA", cs);
+    if (!b->clk_ok || !a->clk_ok || !b->snap_ok || !a->snap_ok) {
+        sprintf_s(reason, sizeof(reason), "TIMINCA not read in both paths before and after (clock %d/%d, snapshot %d/%d)",
+                  b->clk_ok, a->clk_ok, b->snap_ok, a->snap_ok);
+        ic_verdict("BLOCKED", check, index, did, reason);
+    } else if (a->clk.timinca != b->clk.timinca || a->snap_timinca != b->snap_timinca) {
+        sprintf_s(reason, sizeof(reason), "frequency rewritten: TIMINCA 0x%08X -> 0x%08X (clock), 0x%08X -> 0x%08X (snapshot)",
+                  b->clk.timinca, a->clk.timinca, b->snap_timinca, a->snap_timinca);
+        ic_verdict("FAIL", check, index, did, reason);
+    } else {
+        sprintf_s(reason, sizeof(reason), "TIMINCA 0x%08X unchanged in both reads (a rewrite with the same value is not detectable); "
+                  "TSAUXC 0x%08X -> 0x%08X, hw_state %u -> %u (evidence)", a->clk.timinca, b->snap_tsauxc, a->snap_tsauxc,
+                  b->hw_state, a->hw_state);
+        ic_verdict("PASS", check, index, did, reason);
+    }
+}
+
+/** INIT_DEVICE on h with its raw NTSTATUS and IoStatus.Information */
+static LONG ic_init(HANDLE h, DWORD *got)
+{
+    AVB_DEVICE_INFO_REQUEST r;
+    ZeroMemory(&r, sizeof(r));
+    return avb_ioctl_ntstatus(h, IOCTL_AVB_INIT_DEVICE, &r, sizeof(r), &r, sizeof(r), got);
+}
+
+/** <case>-STATUS against one exact expected NTSTATUS; an error with output is never a match */
+static void ic_status_line(const char *cs, UINT32 index, avb_u16 did, LONG st, DWORD got, LONG want, BOOL want_no_output)
+{
+    char check[64], reason[200];
+
+    sprintf_s(check, sizeof(check), "%s-STATUS", cs);
+    sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX information=%lu, expected exactly 0x%08lX%s", (unsigned long)st, got,
+              (unsigned long)want, want_no_output ? " with no output" : "");
+    if (st == AVB_NTSTATUS_UNAVAILABLE) {
+        ic_verdict("INCONCLUSIVE", check, index, did, "raw NTSTATUS not captured");
+    } else if (st == want && (!want_no_output || got == 0)) {
+        ic_verdict("PASS", check, index, did, reason);
+    } else {
+        ic_verdict("FAIL", check, index, did, reason);
+    }
+}
+
+static void ic_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_ADAPTER_IDENTITY_REQUEST *all, UINT32 n)
+{
+    const UINT32 index = id->index;
+    const avb_u16 did = id->device_id;
+    IC_OBS o0, o0b, o1, o2, o3, o4;
+    HANDLE hO, hA, hB, hC;
+    DWORD got = 0, br = 0;
+    LONG st;
+    UINT32 k, ordinal = 0;
+    char reason[320];
+
+    printf("\n=== adapter:%u did=0x%04X luid=0x%016llX ===\n", index, did, id->net_luid);
+    g_ic_ran++;
+    hO = ic_open_bound(id->net_luid);
+    if (hO == INVALID_HANDLE_VALUE) {
+        ic_verdict("BLOCKED", "PRESTATE", index, did, "cannot open an observer handle bound by NET_LUID");
+        return;
+    }
+    ic_observe(hO, &o0);
+    Sleep(10);
+    ic_observe(hO, &o0b);
+    if (!o0.hw_ok || o0.hw_state != AVB_HW_PTP_READY || !o0b.clk_ok || !o0.clk_ok || o0b.clk.systim <= o0.clk.systim) {
+        sprintf_s(reason, sizeof(reason), "not a READY adapter with a healthy PTP clock: hw_state %u (READY = %u), PHC read %d/%d, "
+                  "advancing %d; the READY scenarios do not apply here and are not tested", o0.hw_state, (unsigned)AVB_HW_PTP_READY,
+                  o0.clk_ok, o0b.clk_ok, o0.clk_ok && o0b.clk_ok && o0b.clk.systim > o0.clk.systim);
+        ic_verdict("BLOCKED", "PRESTATE", index, did, reason);
+        CloseHandle(hO);
+        return;
+    }
+    ic_verdict("PASS", "PRESTATE", index, did, "READY, PTP state readable, PHC advancing");
+
+    /* UT-DEV-INIT-001: first INIT_DEVICE on a new instance of a READY adapter */
+    hA = ic_open_bound(id->net_luid);
+    if (hA == INVALID_HANDLE_VALUE) {
+        ic_verdict("BLOCKED", "UT-DEV-INIT-001-STATUS", index, did, "cannot open the instance under test and bind it by NET_LUID");
+        CloseHandle(hO);
+        return;
+    }
+    st = ic_init(hA, &got);
+    ic_observe(hO, &o1);
+    ic_status_line("UT-DEV-INIT-001", index, did, st, got, (LONG)STATUS_SUCCESS, FALSE);
+    ic_ptp_lines("UT-DEV-INIT-001", index, did, &o0b, &o1);
+
+    /* UT-DEV-INIT-002: the same instance again after its success */
+    st = ic_init(hA, &got);
+    ic_observe(hO, &o2);
+    ic_status_line("UT-DEV-INIT-002", index, did, st, got, (LONG)STATUS_INVALID_DEVICE_STATE, TRUE);
+    ic_ptp_lines("UT-DEV-INIT-002", index, did, &o1, &o2);
+    CloseHandle(hA);
+
+    /* UT-DEV-INIT-SECOND (provisional ID): a second open instance on the READY adapter */
+    hB = ic_open_bound(id->net_luid);
+    if (hB == INVALID_HANDLE_VALUE) {
+        ic_verdict("BLOCKED", "UT-DEV-INIT-SECOND-STATUS", index, did, "cannot open a second instance and bind it by NET_LUID");
+        o3 = o2;
+    } else {
+        st = ic_init(hB, &got);
+        ic_observe(hO, &o3);
+        ic_status_line("UT-DEV-INIT-SECOND", index, did, st, got, (LONG)STATUS_SUCCESS, FALSE);
+        ic_ptp_lines("UT-DEV-INIT-SECOND", index, did, &o2, &o3);
+        CloseHandle(hB);
+    }
+
+    /* UT-DEV-OPEN-READY (provisional ID): IOCTL 32 selects the adapter by its ABI fields (vendor, device, instance ordinal) */
+    for (k = 0; k < n && all[k].index != index; k++) {
+        ordinal += all[k].vendor_id == id->vendor_id && all[k].device_id == id->device_id;
+    }
+    hC = ic_open();
+    if (hC == INVALID_HANDLE_VALUE) {
+        ic_verdict("BLOCKED", "UT-DEV-OPEN-READY-STATUS", index, did, "cannot open a handle for OPEN_ADAPTER");
+    } else {
+        AVB_OPEN_REQUEST o;
+        AVB_HW_SNAPSHOT_REQUEST s;
+
+        ZeroMemory(&o, sizeof(o));
+        o.vendor_id = id->vendor_id;
+        o.device_id = id->device_id;
+        o.index = ordinal;
+        st = avb_ioctl_ntstatus(hC, IOCTL_AVB_OPEN_ADAPTER, &o, sizeof(o), &o, sizeof(o), &got);
+        ic_observe(hO, &o4);
+        ZeroMemory(&s, sizeof(s));
+        s.version = AVB_HW_SNAPSHOT_VERSION;
+        if (!DeviceIoControl(hC, IOCTL_AVB_QUERY_HW_SNAPSHOT, &s, sizeof(s), &s, sizeof(s), &br, NULL) || s.net_luid != id->net_luid) {
+            sprintf_s(reason, sizeof(reason), "OPEN_ADAPTER ntstatus=0x%08lX (instance ordinal %u), but the bound adapter is not verified "
+                      "as this one (snapshot NET_LUID 0x%016llX)", (unsigned long)st, ordinal, s.net_luid);
+            ic_verdict("BLOCKED", "UT-DEV-OPEN-READY-STATUS", index, did, reason);
+        } else {
+            ic_status_line("UT-DEV-OPEN-READY", index, did, st, got, (LONG)STATUS_SUCCESS, FALSE);
+        }
+        ic_ptp_lines("UT-DEV-OPEN-READY", index, did, &o3, &o4);
+        CloseHandle(hC);
+    }
+    printf("    [COVERAGE] not exercised: an adapter that is not READY, concurrent INIT_DEVICE, the order in which READY is "
+           "published, retry after a failed initialization (#412), GET_DEVICE_INFO before initialization\n");
+    CloseHandle(hO);
+}
+
+static int run_init_contract(void)
+{
+    AVB_ADAPTER_IDENTITY_REQUEST first, *all = NULL;
+    UINT32 i, count = 0, nall = 0;
+    BOOL complete = FALSE;
+    HANDLE h;
+
+    printf("=== IntelAvbFilter - INIT_DEVICE / OPEN_ADAPTER contract (#313 amendment 2026-11-12, #404) ===\n");
+    h = ic_open();
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("[BLOCKED] DISCOVERY: cannot open %s (error %lu)\n", DEVICE_PATH_PRIMARY, GetLastError());
+        return 3;
+    }
+    if (ic_identity(h, 0, &first)) {
+        count = first.count;
+        all = (AVB_ADAPTER_IDENTITY_REQUEST *)calloc(count, sizeof(*all));
+        complete = all != NULL;
+        for (i = 0; complete && i < count; i++) {
+            if (!ic_identity(h, i, &all[i]) || all[i].count != count) {
+                complete = FALSE;
+                break;
+            }
+            printf("    [EVIDENCE] adapter:%u did=0x%04X luid=0x%016llX caps=0x%08X\n", i, all[i].device_id, all[i].net_luid,
+                   all[i].capabilities);
+            nall++;
+        }
+    }
+    CloseHandle(h);
+    if (!complete) {
+        printf("[BLOCKED] DISCOVERY: %u of %u identities validated; untested adapters are not passes\n", nall, count);
+        g_ic_blocked++;
+    }
+    for (i = 0; i < nall; i++) {
+        ic_run_adapter(&all[i], all, nall);
+    }
+    free(all);
+    printf("\nadapters run=%d nonpassing verdicts=%d blocked=%d\n", g_ic_ran, g_ic_failed, g_ic_blocked);
+    if (g_ic_ran == 0) { return 2; }
+    if (g_ic_failed != 0) { return 1; }
+    return g_ic_blocked != 0 ? 3 : 0;
+}
+
 int main(int argc, char **argv) {
     TestContext ctx = {0};
-    
+
+    if (argc == 2 && strcmp(argv[1], "--init-contract") == 0) {
+        return run_init_contract();
+    }
+
     printf("\n");
     printf("====================================================================\n");
     printf(" Device Lifecycle Management Test Suite\n");

@@ -425,6 +425,7 @@ $HardwareIntegrationAttendedOnly = [ordered]@{
 #   test_tas_query_clean --tiers-unbound -- unbound / non-TAS / tiers queries (#367), then its own NIC cycle.  Unsafe (#367).
 #   test_tas_query_clean --invalid -- invalid TAS_ACTIVATE requests (#368), then its own NIC cycle.  Unsafe (#368).
 #   test_tas_query_clean --restore -- TAS_ACTIVATE HOLD, NIC cycle, reported restoration and PHC (#377).  Unsafe (#377).
+#   test_dev_lifecycle --init-contract -- INIT_DEVICE / OPEN_ADAPTER on READY adapters, PHC and TIMINCA (#313, #404).  Unsafe.
 #   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
 #   entry, outside GitHub Actions, on an operator-attended machine.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
@@ -602,6 +603,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_tas_query_clean'          = 'Unsafe: TAS_QUERY_HW on every TAS adapter, TEST-TAS-API-001 #366, read-only checks, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
     'test_tas_query_clean --tiers-unbound' = 'Unsafe: TEST-TAS-API-002 #367, unbound handle refused with STATUS_INVALID_DEVICE_STATE, query on adapters without the TAS capability, support tiers per #351, then the test owned NIC cycle of each TAS adapter as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
     'test_tas_query_clean --invalid' = 'Unsafe: TEST-TAS-API-003 #368, invalid TAS_ACTIVATE requests on a clean TAS adapter, each refused with the TAS query, record, counters and TX on the wire unchanged against the test pre-test capture; the end-equals-cycle case (TAS-DR-06) is not refused by current validation and can commit a schedule; then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
+    'test_dev_lifecycle --init-contract' = 'Unsafe: TEST-DEV-LIFECYCLE-001 #313 amendment 2026-11-12 (#404), on every enumerated READY adapter: first INIT_DEVICE on a new instance, the duplicate on that instance, a second instance and OPEN_ADAPTER, each with the PTP clock and TIMINCA observed before and after; a driver that re-initializes a READY adapter resets its PTP clock, which cannot be undone'
     'test_tas_query_clean --restore' = 'Unsafe: TEST-TAS-API-012 #377, TAS_ACTIVATE HOLD on a clean TAS adapter, the reported restoration never COMPLETE while TSN is on, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire, the reported restoration against the test own register observation and the PHC across the cycle reported separately; requires an independent management link and the I210 wire observer'
     'test_tas_query_clean --hw-verified' = 'Unsafe: TEST-TAS-API-016 #381, HARDWARE_VERIFIED never returned on a clean adapter, after TAS_ACTIVATE HOLD with BaseT ahead and with the PHC past BaseT, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires an independent management link and the I210 wire observer'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; requires an independent management link and verified recovery before unattended execution, the NIC may carry the runner connection'
@@ -780,6 +782,7 @@ $HilTestSafety = @{
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
     'test_tas_query_clean --invalid' = 'Unsafe'       # invalid TAS_ACTIVATE requests (one can commit), owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#368)
     'test_tas_query_clean --restore' = 'Unsafe'       # TAS_ACTIVATE HOLD, owned CM_Disable_DevNode / CM_Enable_DevNode cycle, reported restoration (#377)
+    'test_dev_lifecycle --init-contract' = 'Unsafe'   # INIT_DEVICE / OPEN_ADAPTER on READY adapters; may reset a PTP clock (#313, #404)
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
     # --- ReadOnly (24-hour run; declared gap) ---
