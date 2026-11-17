@@ -306,7 +306,7 @@ foreach ($operation in @('create', 'release')) {
             if (Test-Path -LiteralPath $ready) { $readySeen = $true; break }
             Start-Sleep -Milliseconds 50
         }
-        if (-not $readySeen) { $mutexFailures += "$operation: mutex not acquired by child" }
+        if (-not $readySeen) { $mutexFailures += "${operation}: mutex not acquired by child" }
         else {
             $sw = [Diagnostics.Stopwatch]::StartNew()
             $result = if ($operation -eq 'create') {
@@ -316,7 +316,7 @@ foreach ($operation in @('create', 'release')) {
             }
             $sw.Stop()
             if (-not $result.Ok -or $sw.ElapsedMilliseconds -lt 1100) {
-                $mutexFailures += "$operation: result=$($result.Ok) elapsed=$($sw.ElapsedMilliseconds)ms; did not wait for mutex"
+                $mutexFailures += "${operation}: result=$($result.Ok) elapsed=$($sw.ElapsedMilliseconds)ms; did not wait for mutex"
             }
             if ($operation -eq 'create' -and $result.Ok) { $null = Exit-AvbHilLock -Owner $result.Owner -Path $mp }
         }
