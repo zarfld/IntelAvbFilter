@@ -65,6 +65,8 @@ static __inline int i226_tas_query_windows_baseline(const AVB_TAS_REGS *g)
  * no register and no PHC value is read. The register-lock reply of #365 12.10 (Amendment 1): hw_read PARTIAL (incomplete
  * observation, no MMIO implied), every read_failed bit set (not attempted), PHC_BEFORE_INVALID and PHC_AFTER_INVALID,
  * READ_FAILED clear, DTXMXPKTSZ NOT_READ; with op_in_progress the slots are UNKNOWN (S1) and restoration UNKNOWN.
+ * NOT_RUNNING and NO_MMIO also read nothing: both PHC values stay 0 with PHC_BEFORE_INVALID and PHC_AFTER_INVALID set,
+ * READ_FAILED clear. Both PHC bits are derived on the common path from phc_before_ok and phc_after_ok (#365 12.2).
  */
 static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio, avb_u32 record, int op_in_progress,
                                     int contended, AVB_TAS_QUERY_HW_REQUEST *q)
@@ -93,7 +95,6 @@ static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio
         failed = I226_TAS_QUERY_ALL_REGS;
     } else if (contended) {
         q->hw_read = AVB_TAS_HWREAD_PARTIAL;
-        snap |= AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID | AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID;
         failed = I226_TAS_QUERY_ALL_REGS;
     } else {
         read_done = 1;
@@ -141,14 +142,15 @@ static __inline void i226_tas_query(const I226_TAS_IO *io, int running, int mmio
             q->phc_after_ns = phc;
             phc_after_ok = 1;
         }
-        if (!phc_before_ok) { snap |= AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID; }
-        if (!phc_after_ok)  { snap |= AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID; }
         if (phc_before_ok && phc_after_ok && q->phc_after_ns < q->phc_before_ns) {
             snap |= AVB_TAS_SNAP_RSN_PHC_DISCONTINUITY;   /* a backward PHC move observed within this pass */
         }
         if (failed != 0)    { snap |= AVB_TAS_SNAP_RSN_READ_FAILED; }
         q->hw_read = (failed == 0 && phc_before_ok && phc_after_ok) ? AVB_TAS_HWREAD_READ : AVB_TAS_HWREAD_PARTIAL;
     }
+    /* Every path, including those that read nothing: a PHC value is valid iff its INVALID bit is clear (#365 12.2) */
+    if (!phc_before_ok) { snap |= AVB_TAS_SNAP_RSN_PHC_BEFORE_INVALID; }
+    if (!phc_after_ok)  { snap |= AVB_TAS_SNAP_RSN_PHC_AFTER_INVALID; }
     g->read_failed = failed;
     q->snapshot_reasons = snap;
 
