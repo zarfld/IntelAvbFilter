@@ -20,8 +20,8 @@
 #       workflow_dispatch on any ref                                    -> Dispatch (no manual HIL path);
 #       any other event (push, schedule, release, ...) on master and on a feature branch  -> Automatic (a direct
 #             push would bypass the CI + deploy-staging gate).
-#   - every self-hosted job needs explicit read-only permissions, an environment, serialized matrix legs
-#     (strategy.max-parallel 1), no cancelling concurrency group, no continue-on-error, and checkout without
+#   - every self-hosted job needs explicit read-only permissions, an environment, parallel-eligible matrix legs
+#     (no global serialization), no cancelling concurrency group, no continue-on-error, and checkout without
 #     persisted credentials (Governance); missing = violation.
 #   - REAL-011 simulates the job graph (GitHub needs/skip semantics); REAL-012 executes hil.yml's authorization
 #     script against a localhost fixture API and its acceptance script against fixture evidence, so a failed CI, a
@@ -373,11 +373,10 @@ function Get-EventContexts([string]$EventName, $Leg) {
     return ,$c
 }
 
-# Governance of a self-hosted job: explicit read-only token, an environment (deployment-branch policy), serialized
-# legs, failures never masked, no persisted git credentials.  Missing or non-map values fail closed.
-# Serialization: a job-level concurrency group would CANCEL pending matrix legs (GitHub keeps one pending entry
-# per group), so matrix legs must be serialized with strategy.max-parallel 1; a concurrency group, if present,
-# must not cancel.
+# Governance of a self-hosted job: explicit read-only token, an environment (deployment-branch policy),
+# independent parallel-eligible legs, failures never masked, no persisted git credentials.
+# A job-level concurrency group can CANCEL pending matrix legs; any concurrency group must not cancel.
+# Cross-host matrix parallelism is required by #441; same-host exclusivity is enforced in HilLock.ps1.
 function Get-GovernanceIssues($Wf, $Job) {
     $issues = @()
     $perm = if ($Job.Contains('permissions')) { $Job['permissions'] } elseif ($Wf.Contains('permissions')) { $Wf['permissions'] } else { $null }
@@ -390,7 +389,10 @@ function Get-GovernanceIssues($Wf, $Job) {
     $strat = if ($Job.Contains('strategy') -and $Job['strategy'] -is [System.Collections.IDictionary]) { $Job['strategy'] } else { $null }
     $legCount = 1
     if ($null -ne $strat -and $strat.Contains('matrix')) { $mLegs = Expand-Matrix $strat['matrix']; $legCount = @($mLegs).Count }   # Expand-Matrix returns ,$legs
-    if ($legCount -gt 1 -and -not ($null -ne $strat -and "$($strat['max-parallel'])" -eq '1')) { $issues += "matrix legs not serialized ($legCount legs; strategy.max-parallel must be 1)" }
+    if ($legCount -gt 1 -and $null -ne $strat -and $strat.Contains('max-parallel') -and
+        "$($strat['max-parallel'])" -notmatch '^[2-9][0-9]*$') {
+        $issues += "matrix legs globally serialized or concurrency limit unverifiable ($legCount legs; strategy.max-parallel must permit at least 2)"
+    }
     if ($Job.Contains('continue-on-error') -and "$($Job['continue-on-error'])" -ne 'false') { $issues += "job continue-on-error '$($Job['continue-on-error'])' masks HIL failures" }
     if ($Job.Contains('steps')) {
         foreach ($s in @($Job['steps'])) {
@@ -589,6 +591,7 @@ jobs:
     environment: hil
     continue-on-error: true
     strategy:
+      max-parallel: 1
       matrix:
         config: [Debug, Release]
     steps:
@@ -669,7 +672,7 @@ jobs:
     steps:
 $preflightStep
 "@
-$fx21 = New-Fx 'fx21_matrix_serialized.yml' @"
+$fx21 = New-Fx 'fx21_matrix_parallel_eligible.yml' @"
 on:
   workflow_run:
     workflows: [CI]
@@ -683,7 +686,6 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         config: [Debug, Release]
     steps:
@@ -978,12 +980,12 @@ tc_check 'TEST-HILTRUST-FX-019-write-permission-and-cancelling-concurrency-are-v
     (($g19.Count -eq 1) -and ($g19[0].Detail -match 'permission contents: write') -and ($g19[0].Detail -match 'cancel-in-progress')) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx20
 $g20 = Get-Kind $f 'Governance'
-tc_check 'TEST-HILTRUST-FX-020-unserialized-matrix-and-continue-on-error-are-violations' `
-    (($g20.Count -eq 1) -and ($g20[0].Detail -match 'max-parallel must be 1') -and ($g20[0].Detail -match 'job continue-on-error') -and
+tc_check 'TEST-HILTRUST-FX-020-serialized-matrix-and-continue-on-error-are-violations' `
+    (($g20.Count -eq 1) -and ($g20[0].Detail -match 'max-parallel must permit at least 2') -and ($g20[0].Detail -match 'job continue-on-error') -and
      ($g20[0].Detail -match 'step continue-on-error')) (Show-Findings $f)
 $f = Get-WorkflowFindings $Fx $fx21
 $a21 = Get-Kind $f 'Authorized'
-tc_check 'TEST-HILTRUST-FX-021-serialized-guarded-workflow-run-matrix-is-authorized-per-leg-without-violations' `
+tc_check 'TEST-HILTRUST-FX-021-parallel-eligible-guarded-workflow-run-matrix-is-authorized-per-leg-without-violations' `
     (((Get-Violations $f).Count -eq 0) -and ($a21.Count -eq 2) -and (@($a21 | Where-Object { $_.Event -ne 'workflow_run[upstream-master-push-success]' }).Count -eq 0)) (Show-Findings $f)
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1020,7 +1022,7 @@ tc_check 'TEST-HILTRUST-REAL-003-no-unverifiable-external-workflow-on-untrusted-
     ("{0} external reusable workflow reference(s)" -f $realExt.Count)
 tc_check 'TEST-HILTRUST-REAL-004-no-direct-push-schedule-or-other-automatic-event-reaches-the-hil-runner' ($realAuto.Count -eq 0) (Show-Findings $realAuto)
 tc_check 'TEST-HILTRUST-REAL-005-non-master-upstreams-and-foreign-repositories-cannot-reach-hil' ($realRef.Count -eq 0) (Show-Findings $realRef)
-tc_check 'TEST-HILTRUST-REAL-006-self-hosted-jobs-least-privilege-environment-serialized-never-masked' ($realGov.Count -eq 0) (Show-Findings $realGov)
+tc_check 'TEST-HILTRUST-REAL-006-self-hosted-jobs-least-privilege-environment-parallel-eligible-never-masked' ($realGov.Count -eq 0) (Show-Findings $realGov)
 tc_check 'TEST-HILTRUST-REAL-014-no-manual-dispatch-reaches-the-hil-runner' ($realDisp.Count -eq 0) (Show-Findings $realDisp)
 tc_check 'TEST-HILTRUST-REAL-015-failed-upstream-ci-cannot-reach-the-hil-runner' ($realUpFail.Count -eq 0) (Show-Findings $realUpFail)
 
@@ -1136,7 +1138,7 @@ foreach ($jid in $hilJobIds) {
     if ($null -eq $j) { $azIssues += "$jid missing"; continue }
     if ((@($j['needs']) -join ',') -ne $expectedNeeds[$jid]) { $azIssues += "$jid needs [$(@($j['needs']) -join ',')] (expected [$($expectedNeeds[$jid])]; physical matrix depends on authorization only)" }
     if ("$($j['if'])".Trim() -cne $expectedIf[$jid]) { $azIssues += "$jid if is not the expected guard: $($j['if'])" }
-    $strat = $j['strategy']; if (-not ($strat -is [System.Collections.IDictionary]) -or "$($strat['fail-fast'])" -ne 'false' -or "$($strat['max-parallel'])" -ne '1' -or -not ($strat['matrix'] -is [System.Collections.IDictionary]) -or (@($strat['matrix']['configuration']) -join ',') -cne 'Debug,Release' -or (@($strat['matrix'].Keys) -join ',') -ne 'configuration') { $azIssues += "${jid}: expected exact Debug/Release matrix with fail-fast=false and max-parallel=1" }
+    $strat = $j['strategy']; if (-not ($strat -is [System.Collections.IDictionary]) -or "$($strat['fail-fast'])" -ne 'false' -or $strat.Contains('max-parallel') -or -not ($strat['matrix'] -is [System.Collections.IDictionary]) -or (@($strat['matrix']['configuration']) -join ',') -cne 'Debug,Release' -or (@($strat['matrix'].Keys) -join ',') -ne 'configuration') { $azIssues += "${jid}: expected exact parallel-eligible Debug/Release matrix with fail-fast=false and no max-parallel cap" }
     $first = @($j['steps'])[0]
     $fr = "$($first['run'])"
     if ("$($first['id'])" -ne 'hil-trusted-preflight' -or $first.Contains('if') -or $first.Contains('continue-on-error')) { $azIssues += "${jid}: first step is not an unconditional hil-trusted-preflight" }
