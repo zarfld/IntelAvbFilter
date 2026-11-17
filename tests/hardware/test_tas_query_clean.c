@@ -69,17 +69,21 @@
  *   RESIDUE    after IOCTL_AVB_TAS_ACTIVATE HOLD committed the verified set: a readable query observing TSN on must not report
  *              restoration COMPLETE (#361 AC2). Only this TSN-on non-restored state is exercised.
  *   CLEANUP, RESTORE   the owned NIC cycle and the test's own restoration verdict, as below.
- *   REPORTED   a query after the cycle: a reported COMPLETE must agree with that reply's own valid observation of the
- *              restoration set (v1 set without DTXMXPKTSZ, BASET_L/H included; read_failed bits 0-16; hw_read READ or PARTIAL,
- *              since a DTXMXPKTSZ or PHC read failure is no restoration input), judged by the rule the advisory is defined by:
- *              TSN off and every register at its SSOT observed baseline, ENDQT 0 or _ALT (DES 12.5, 3.6). That observed state
- *              must report COMPLETE. Restoration set not observed: BLOCKED, unless COMPLETE is reported anyway (FAIL). Only the
- *              I226 family's SSOT baselines are applied. The exact pre/post comparison stays with RESTORE.
+ *   REPORTED   a query after the cycle, judged only by generic relations of the contract, never by model or family (testing
+ *              contract A). DES 12.5 makes the advisory a function of the restoration set (v1 set without DTXMXPKTSZ, BASET_L/H
+ *              included; read_failed bits 0-16; hw_read READ or PARTIAL, since a DTXMXPKTSZ or PHC read failure is no input):
+ *              (1) COMPLETE needs a valid restoration set with TSN off, otherwise FAIL; (2) TSN on and not COMPLETE is PASS;
+ *              (3) a restoration set identical to the test's own clean pre-test observation must report the pre-test value,
+ *              otherwise FAIL; (4) a valid set that differs from it (an ENDQT at the qualified _ALT, for example) cannot be
+ *              decided generically, because the query exposes neither the baseline values nor per-register agreement: that is
+ *              a contract gap, reported INCONCLUSIVE, never FAIL. Set not observed: BLOCKED. The test applies no baseline
+ *              constants; the exact pre/post comparison stays with RESTORE.
  *   PHC        the test's own GET_CLOCK_CONFIG reads just before and after the cycle, reported separately and never a
  *              restoration verdict. No PHC tolerance is defined, so only a backward step establishes a discontinuity;
  *              anything else, or a missing read, is INCONCLUSIVE. The cleanup's own PHC line is evidence only.
  * Not exercised, printed as COVERAGE: TSN-off residue (PARTIAL_RESIDUE), PARTIAL_OPEN_ALL, unreadable registers (UNKNOWN),
- * NO_SSOT_BASELINE, a cycle that leaves residue, PHC continuity, every other failure path. A pass on the first hardware run is
+ * NO_SSOT_BASELINE, a cycle that leaves residue, PHC continuity, every other failure path; and, not decidable through the generic
+ * query, a restoration set that differs from the pre-test observation (REPORTED rule 4). A pass on the first hardware run is
  * characterization of restoration reporting implemented under #350, never RED.
  *
  * Preconditions, checked before the first query (BLOCKED, nothing sent to the adapter, nothing to clean): the adapter's device
@@ -1634,32 +1638,6 @@ static BOOL restoration_set_valid(const QUERY_READ *r)
            (r->q.regs.read_failed & TAS_RESTORATION_SET_BITS) == 0;
 }
 
-/** The family whose SSOT observed baselines this test applies (intel-ethernet-regs gen/i226_regs.h) */
-static BOOL is_i226(avb_u16 did)
-{
-    return did == INTEL_DEV_I226_LM || did == INTEL_DEV_I226_V || did == INTEL_DEV_I226_IT;
-}
-
-/** Restoration-set registers off the SSOT observed baselines, as DES-C-TAS-010 12.5 and 3.6 state the rule: every register at its
- *  _BASELINE, except ENDQT, which may also be _ALT ("STQT = 0 with ENDQT at 0 or the 1 s default"). The test's oracle for the
- *  driver's advisory value (REPORTED); the test's own restoration verdict (RESTORE) stays the exact pre/post comparison */
-static unsigned restoration_set_off_baseline(const AVB_TAS_REGS *g)
-{
-    unsigned n = 0;
-    int i;
-
-    n += g->tqavctrl != I226_TQAVCTRL_BASELINE;
-    n += g->baset_l != I226_BASET_L_BASELINE;
-    n += g->baset_h != I226_BASET_H_BASELINE;
-    n += g->qbvcyclet != I226_QBVCYCLET_BASELINE;
-    n += g->qbvcyclet_s != I226_QBVCYCLET_S_BASELINE;
-    for (i = 0; i < 4; i++) {
-        n += g->stqt[i] != I226_STQT_BASELINE;
-        n += g->endqt[i] != I226_ENDQT_BASELINE && g->endqt[i] != I226_ENDQT_BASELINE_ALT;
-        n += g->txqctl[i] != I226_TXQCTL_BASELINE;
-    }
-    return n;
-}
 
 /** --restore, TC-TASAPI-012 (#377, Verifies #361): reported restoration against the test's own observations, PHC separately */
 static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst, IN_ADDR ipv4,
@@ -1810,8 +1788,8 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
         print_query("after the cycle, REPORTED", &qa);
     }
 
-    /* REPORTED: the advisory value against the same reply's own observation of the restoration set, judged by the rule the
-     * advisory is defined by (DES 12.5, 3.6: SSOT observed baselines, ENDQT 0 or _ALT), not by the pre-test capture (PR #454) */
+    /* REPORTED: the advisory value judged only by generic relations of the contract (DES 12.5: a function of the restoration
+     * set), never by model or family (testing contract A). No baseline constant is applied here (PR #454 thread 4599329980) */
     if (!committed) {
         sprintf_s(reason, sizeof(reason), "the #377 scenario did not run: %s", stop != NULL ? stop : "no committed activation");
         verdict("BLOCKED", "REPORTED", index, did, reason);
@@ -1819,38 +1797,42 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
         sprintf_s(reason, sizeof(reason), "no valid query after the cycle (handle %s, ntstatus=0x%08lX information=%lu)",
                   hn == INVALID_HANDLE_VALUE ? "not bound" : "bound", (unsigned long)qa.status, qa.got);
         verdict("BLOCKED", "REPORTED", index, did, reason);
-    } else if (!is_i226(did)) {
-        sprintf_s(reason, sizeof(reason), "no SSOT observed baselines in this test for device 0x%04X; reported %s (%u)", did,
-                  restoration_name(qa.q.restoration), qa.q.restoration);
-        verdict("BLOCKED", "REPORTED", index, did, reason);
     } else {
         BOOL valid = restoration_set_valid(&qa);
-        unsigned off = valid ? restoration_set_off_baseline(&qa.q.regs) : 0;
-        BOOL at_baseline = valid && qa.q.hw_mode == AVB_TAS_HWMODE_OFF && off == 0;
+        BOOL pre_valid = restoration_set_valid(&q0);   /* PRESTATE established it clean, readable and COMPLETE */
+        unsigned diff = (valid && pre_valid) ? restoration_set_differing(&q0.q.regs, &qa.q.regs) : 0;
+        BOOL same = valid && pre_valid && diff == 0;
 
-        printf("    [EVIDENCE] after the cycle: reported restoration=%s (%u); hw_read %u, read_failed 0x%X (restoration set valid %d), "
-               "hw_mode %u, restoration-set registers off the SSOT baselines %u; differing from the pre-test capture %u (RESTORE's "
-               "comparison, reported only here)\n", restoration_name(qa.q.restoration), qa.q.restoration, qa.q.hw_read,
-               qa.q.regs.read_failed, valid, qa.q.hw_mode, off, valid ? restoration_set_differing(&q0.q.regs, &qa.q.regs) : 0u);
-        if (qa.q.restoration == AVB_TAS_RESTORE_COMPLETE && at_baseline) {
-            verdict("PASS", "REPORTED", index, did, "COMPLETE agrees with the reply's own valid restoration-set observation: TSN off, "
-                    "every register at its SSOT observed baseline (ENDQT 0 or _ALT)");
-        } else if (qa.q.restoration == AVB_TAS_RESTORE_COMPLETE) {
-            sprintf_s(reason, sizeof(reason), "COMPLETE reported without that observation: restoration set valid %d, hw_mode %u, %u "
-                      "registers off the SSOT baselines", valid, qa.q.hw_mode, off);
+        printf("    [EVIDENCE] after the cycle: reported restoration=%s (%u), pre-test %s (%u); hw_read %u, read_failed 0x%X (restoration "
+               "set valid %d), hw_mode %u, restoration-set registers differing from the pre-test observation %u\n",
+               restoration_name(qa.q.restoration), qa.q.restoration, restoration_name(q0.q.restoration), q0.q.restoration,
+               qa.q.hw_read, qa.q.regs.read_failed, valid, qa.q.hw_mode, diff);
+        if (qa.q.restoration == AVB_TAS_RESTORE_COMPLETE && (!valid || qa.q.hw_mode != AVB_TAS_HWMODE_OFF)) {
+            sprintf_s(reason, sizeof(reason), "COMPLETE reported although the reply's restoration set is not valid (%d) or TSN is not off "
+                      "(hw_mode %u); COMPLETE needs both (DES 12.5)", valid, qa.q.hw_mode);
             verdict("FAIL", "REPORTED", index, did, reason);
-        } else if (at_baseline) {
-            sprintf_s(reason, sizeof(reason), "reported %s (%u) although the reply's valid observation shows TSN off and every "
-                      "restoration-set register at its SSOT baseline", restoration_name(qa.q.restoration), qa.q.restoration);
+        } else if (valid && qa.q.hw_mode == AVB_TAS_HWMODE_TSN) {
+            sprintf_s(reason, sizeof(reason), "TSN on after the cycle and not reported COMPLETE (%s); see RESTORE",
+                      restoration_name(qa.q.restoration));
+            verdict("PASS", "REPORTED", index, did, reason);
+        } else if (same && qa.q.restoration != q0.q.restoration) {
+            sprintf_s(reason, sizeof(reason), "the restoration set equals the test's own pre-test observation, yet reported %s (%u) where "
+                      "the pre-test reply reported %s (%u); the advisory is a function of that set (DES 12.5)",
+                      restoration_name(qa.q.restoration), qa.q.restoration, restoration_name(q0.q.restoration), q0.q.restoration);
             verdict("FAIL", "REPORTED", index, did, reason);
+        } else if (same) {
+            sprintf_s(reason, sizeof(reason), "reported %s, as for the identical clean pre-test observation; TSN off, restoration set "
+                      "valid", restoration_name(qa.q.restoration));
+            verdict("PASS", "REPORTED", index, did, reason);
         } else if (!valid) {
             sprintf_s(reason, sizeof(reason), "restoration set not observed after the cycle (hw_read %u, read_failed 0x%X): agreement "
                       "not measurable; reported %s", qa.q.hw_read, qa.q.regs.read_failed, restoration_name(qa.q.restoration));
             verdict("BLOCKED", "REPORTED", index, did, reason);
         } else {
-            sprintf_s(reason, sizeof(reason), "not at the SSOT baselines after the cycle (hw_mode %u, %u registers off) and not reported "
-                      "COMPLETE (%s); see RESTORE", qa.q.hw_mode, off, restoration_name(qa.q.restoration));
-            verdict("PASS", "REPORTED", index, did, reason);
+            sprintf_s(reason, sizeof(reason), "TSN off, but %u restoration-set registers differ from the clean pre-test observation; the "
+                      "query exposes neither the baseline values nor per-register agreement, so whether %s is right cannot be decided "
+                      "through the generic interface (contract gap)", diff, restoration_name(qa.q.restoration));
+            verdict("INCONCLUSIVE", "REPORTED", index, did, reason);
         }
     }
 
@@ -1883,7 +1865,8 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
         }
     }
     printf("    [COVERAGE] not exercised by this run: TSN-off residue (PARTIAL_RESIDUE), PARTIAL_OPEN_ALL, unreadable registers "
-           "(UNKNOWN), NO_SSOT_BASELINE, a NIC cycle that leaves residue, PHC continuity, and every other failure path\n");
+           "(UNKNOWN), NO_SSOT_BASELINE, a NIC cycle that leaves residue, PHC continuity, and every other failure path. Not "
+           "decidable through the generic query: a restoration set that differs from the pre-test observation (e.g. ENDQT at _ALT)\n");
 }
 
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
