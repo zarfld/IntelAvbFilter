@@ -272,6 +272,62 @@ foreach ($p in $procs) { $p.WaitForExit(60000) | Out-Null }
 $codes = @($procs | ForEach-Object { $_.ExitCode } | Sort-Object)
 tc_check 'TEST-CIDEPLOY-024-concurrent-processes-exactly-one-acquires' (($codes -join ',') -eq '0,7,7,7') "exit codes: $($codes -join ',')"
 
+
+# Every lock mutation (create, stale reclaim, release) must respect the same named mutex.
+# These tests use a separate real process holding that mutex, not a simulated boolean.
+$mutexWorker = Join-Path $Tmp 'hold-mutex.ps1'
+@'
+param([string]$Ready)
+$gate = [System.Threading.Mutex]::new($false, 'Global\IntelAvbFilter-HIL-Lock-Recovery')
+$held = $false
+try {
+    $held = $gate.WaitOne(10000)
+    if (-not $held) { exit 2 }
+    [IO.File]::WriteAllText($Ready, 'held')
+    Start-Sleep -Milliseconds 2200
+} finally {
+    if ($held) { $gate.ReleaseMutex() }
+    $gate.Dispose()
+}
+'@ | Set-Content -LiteralPath $mutexWorker -Encoding UTF8
+$mutexFailures = @()
+foreach ($operation in @('create', 'release')) {
+    $mp = Join-Path $Tmp "mutex-$operation.lock"
+    $ready = Join-Path $Tmp "mutex-$operation.ready"
+    $owned = $null
+    if ($operation -eq 'release') {
+        $owned = Enter-AvbHilLock -Kind 'local' -Label 'release target' -Path $mp -WaitSeconds 0
+        if (-not $owned.Ok) { $mutexFailures += 'could not establish release target' }
+    }
+    $child = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $mutexWorker, $ready -PassThru -WindowStyle Hidden
+    try {
+        $readySeen = $false
+        for ($i = 0; $i -lt 200; $i++) {
+            if (Test-Path -LiteralPath $ready) { $readySeen = $true; break }
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not $readySeen) { $mutexFailures += "$operation: mutex not acquired by child" }
+        else {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $result = if ($operation -eq 'create') {
+                Enter-AvbHilLock -Kind 'local' -Label 'create target' -Path $mp -WaitSeconds 0
+            } else {
+                Exit-AvbHilLock -Owner $owned.Owner -Path $mp
+            }
+            $sw.Stop()
+            if (-not $result.Ok -or $sw.ElapsedMilliseconds -lt 1100) {
+                $mutexFailures += "$operation: result=$($result.Ok) elapsed=$($sw.ElapsedMilliseconds)ms; did not wait for mutex"
+            }
+            if ($operation -eq 'create' -and $result.Ok) { $null = Exit-AvbHilLock -Owner $result.Owner -Path $mp }
+        }
+    } finally {
+        $null = $child.WaitForExit(20000)
+        if (-not $child.HasExited) { $child.Kill() }
+        $child.Dispose()
+        if (Test-Path -LiteralPath $mp) { Remove-Item -LiteralPath $mp -Force }
+    }
+}
+tc_check 'TEST-CIDEPLOY-024a-create-and-release-share-the-stale-recovery-mutex' ($mutexFailures.Count -eq 0) ($mutexFailures -join '; ')
 # Build exclusion: a build writes the artifacts a HIL run verifies and executes (LocalSuites_20261029_005219: a build
 # outside the run overwrote them mid-run - 12 SHA256 mismatches, a failed relink of a running test).
 $bl = Join-Path $Tmp 'build.lock'
@@ -421,11 +477,38 @@ $lostLock = Join-Path $Tmp 'lost.lock'
 [System.IO.File]::WriteAllText("$lostLock.inflight.json", ([ordered]@{ schema = 'avb-hil-deployment/1'; configuration = 'Debug'; verdict = 'IN_FLIGHT'; reason = 'installation started' } | ConvertTo-Json))
 $oLost = Invoke-Orch 'afterlost' $pOk -LockFile $lostLock
 $after = Get-Content -LiteralPath "$lostLock.inflight.json" -Raw | ConvertFrom-Json
-tc_check 'TEST-CIDEPLOY-044-lost-job-lock-and-in-flight-record-are-attributed-by-the-next-deployment' `
-    (($null -ne $oLost.Dep) -and ($oLost.Dep.previousDeployment.verdict -eq 'IN_FLIGHT') -and ($oLost.Dep.lock.previousOwner.owner.runId -eq '590') -and
-     ($oLost.Dep.lock.previousOwner.owner.runnerWorkerPid -eq 999999) -and
-     ($after.verdict -eq $oLost.Dep.verdict) -and ($after.verdict -ne 'IN_FLIGHT')) `
-    ("prev={0} prevOwner={1} inflight-now={2}" -f $(if ($oLost.Dep) { $oLost.Dep.previousDeployment.verdict }), $(if ($oLost.Dep) { $oLost.Dep.lock.previousOwner.owner.runId }), $after.verdict)
+tc_check 'TEST-CIDEPLOY-044-lost-job-in-flight-record-blocks-new-install-and-is-preserved' (
+    $null -ne $oLost.Dep -and $oLost.Exit -eq 3 -and $oLost.Dep.verdict -eq 'NEEDS_OPERATOR' -and
+    $oLost.Dep.previousDeployment.verdict -eq 'IN_FLIGHT' -and $oLost.Dep.lock.previousOwner.owner.runId -eq '590' -and
+    $oLost.Dep.lock.previousOwner.owner.runnerWorkerPid -eq 999999 -and $after.verdict -eq 'IN_FLIGHT' -and
+    $oLost.Calls.Count -eq 0 -and $oLost.Dep.machineOk -eq $false
+) ("exit={0} current={1} prev={2} persisted={3} calls={4}" -f $oLost.Exit, $oLost.Dep.verdict, $oLost.Dep.previousDeployment.verdict, $after.verdict, $oLost.Calls.Count)
+
+# A previous unsafe/unreadable record remains untouched and blocks deployment before package verification.
+$unsafePrevious = @(
+    @{ Name = 'prior_needs_operator'; Body = '{"schema":"avb-hil-deployment/1","configuration":"Debug","verdict":"NEEDS_OPERATOR","machineOk":false,"reason":"native installer still running"}' },
+    @{ Name = 'prior_unreadable'; Body = '{ invalid json' }
+)
+$unsafeFailures = @()
+foreach ($case in $unsafePrevious) {
+    $lpPrevious = Join-Path $Tmp "$($case.Name).lock"
+    [IO.File]::WriteAllText("$lpPrevious.inflight.json", $case.Body)
+    $o = Invoke-Orch $case.Name $pOk -LockFile $lpPrevious
+    $persisted = [IO.File]::ReadAllText("$lpPrevious.inflight.json")
+    if ($o.Exit -ne 3 -or $o.Dep.verdict -ne 'NEEDS_OPERATOR' -or $o.Calls.Count -ne 0 -or
+        $persisted -cne $case.Body -or $o.Dep.machineOk -ne $false) {
+        $unsafeFailures += "$($case.Name): exit=$($o.Exit) verdict=$($o.Dep.verdict) calls=$($o.Calls.Count) preserved=$($persisted -ceq $case.Body)"
+    }
+}
+tc_check 'TEST-CIDEPLOY-044a-needs-operator-and-unreadable-predecessors-block-without-erasing-evidence' ($unsafeFailures.Count -eq 0) ($unsafeFailures -join '; ')
+
+# Do not impose a permanent hold after a completed previous deployment with affirmative machineOk.
+$priorSafeLock = Join-Path $Tmp 'prior_safe.lock'
+[IO.File]::WriteAllText("$priorSafeLock.inflight.json", '{"schema":"avb-hil-deployment/1","configuration":"Debug","verdict":"DEPLOYED","machineOk":true,"reason":"verified"}')
+$oPriorSafe = Invoke-Orch 'prior_safe' $pOk -LockFile $priorSafeLock
+tc_check 'TEST-CIDEPLOY-044b-previous-verified-deployment-still-reaches-package-checks' (
+    $oPriorSafe.Dep.previousDeployment.verdict -eq 'DEPLOYED' -and $oPriorSafe.Dep.verdict -eq 'REJECTED_PACKAGE' -and $oPriorSafe.Exit -eq 1
+) ("previous={0} current={1} exit={2}" -f $oPriorSafe.Dep.previousDeployment.verdict, $oPriorSafe.Dep.verdict, $oPriorSafe.Exit)
 $hilSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot '.github\workflows\hil.yml'))
 # Each Debug/Release matrix leg reads the machine state of ITS OWN assigned runner.
 # One physical job definition expands into two legs; a remote leg's machine_ok must never govern this leg.
