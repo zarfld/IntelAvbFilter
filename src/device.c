@@ -533,8 +533,23 @@ IntelAvbFilterDispatch(
     switch (IrpStack->MajorFunction)
     {
         case IRP_MJ_CREATE:
-            DEBUGP(DL_ERROR, "!!! IRP_MJ_CREATE - Device opened by user-mode application\n");
+        {
+            /* #404 (P2 step 3): the per-open-instance context, one per file object, allocated here and freed at
+             * IRP_MJ_CLOSE only. Without it the open fails: no instance exists whose INIT_DEVICE state could be kept */
+            PAVB_OPEN_INSTANCE inst = (PAVB_OPEN_INSTANCE)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(AVB_OPEN_INSTANCE),
+                                                                          AVB_OPEN_INSTANCE_TAG);
+            if (IrpStack->FileObject == NULL || inst == NULL) {
+                if (inst != NULL) { ExFreePoolWithTag(inst, AVB_OPEN_INSTANCE_TAG); }
+                DEBUGP(DL_ERROR, "!!! IRP_MJ_CREATE: no open-instance context (FileObject=%p, allocation %s): "
+                       "STATUS_INSUFFICIENT_RESOURCES\n", IrpStack->FileObject, inst == NULL ? "failed" : "ok");
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            IrpStack->FileObject->FsContext2 = inst;   /* ExAllocatePool2 zeroes it: init_succeeded = 0 */
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CREATE - Device opened by user-mode application, FileObject=%p instance=%p\n",
+                   IrpStack->FileObject, inst);
             break;
+        }
 
         case IRP_MJ_CLEANUP:
         {
@@ -589,8 +604,18 @@ IntelAvbFilterDispatch(
         }
 
         case IRP_MJ_CLOSE:
-            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLOSE\n");
+        {
+            /* #404 (P2 step 3): the last reference to the file object is gone and no IRP of this instance is outstanding,
+             * so its per-open-instance context is freed here (never at IRP_MJ_CLEANUP) */
+            PFILE_OBJECT closeFo = IrpStack->FileObject;
+            PAVB_OPEN_INSTANCE inst = closeFo ? (PAVB_OPEN_INSTANCE)closeFo->FsContext2 : NULL;
+            DEBUGP(DL_ERROR, "!!! IRP_MJ_CLOSE FileObject=%p instance=%p\n", closeFo, inst);
+            if (inst != NULL) {
+                closeFo->FsContext2 = NULL;
+                ExFreePoolWithTag(inst, AVB_OPEN_INSTANCE_TAG);
+            }
             break;
+        }
 
         default:
             DEBUGP(DL_ERROR, "!!! Unknown MajorFunction=%u\n", IrpStack->MajorFunction);

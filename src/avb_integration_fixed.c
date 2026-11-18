@@ -277,9 +277,8 @@ static void AvbInitRelease(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
     InterlockedExchange(&Ctx->init_owner, 0);
 }
 
-/* Per-open-instance marker in FileObject->FsContext2 (#404 part 2): set by IOCTL_AVB_INIT_DEVICE only after this instance's
- * successful initialization; a new file object starts with NULL (zeroed by the I/O manager) */
-#define AVB_INSTANCE_INITIALIZED ((PVOID)(ULONG_PTR)1)
+/* The per-open-instance INIT_DEVICE success marker is AVB_OPEN_INSTANCE.init_succeeded (src/avb_integration.h; P2 step 3):
+ * the instance context in FileObject->FsContext2 is allocated at IRP_MJ_CREATE and freed at IRP_MJ_CLOSE */
 
 const struct platform_ops ndis_platform_ops = {
     PlatformInitWrapper,
@@ -2143,16 +2142,26 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
 
             /* #404 part 2, #12/#313 amendment 2026-11-12. Order:
              *   1. the same open instance after its own success: STATUS_INVALID_DEVICE_STATE, no hardware access
-             *      (UT-DEV-INIT-002). The per-instance marker FsContext2 (NULL for every new file object) is set only after a
-             *      successful initialization of this instance, so the same instance retries after its own failure;
+             *      (UT-DEV-INIT-002). The per-instance marker (init_succeeded of the open instance's context, 0 for every new
+             *      file object) is set only after a successful initialization of this instance, so the same instance retries
+             *      after its own failure;
              *   2. another initialization of this adapter running: STATUS_DEVICE_BUSY, no wait, no hardware access; once the
              *      ownership is obtained, 1. is checked again (overlapping requests on the same file object);
              *   3. adapter READY: STATUS_SUCCESS, no hardware access (also when an initialization completed in between);
              *   4. otherwise exactly one bring-up, under the ownership taken in 2, and its own status.
              * The former forced BAR0 path here is removed: AvbPerformBasicInitialization discovers and maps BAR0 whenever
              * no hardware context exists (with the alternative discovery for I219/I217 the forced path lacked), at the #412
-             * fault point, before the bring-up's own intel_init */
-            if (sp->FileObject->FsContext2 == AVB_INSTANCE_INITIALIZED) {
+             * fault point, before the bring-up's own intel_init.
+             * P2 step 3: the marker is this open instance's context (AVB_OPEN_INSTANCE in FileObject->FsContext2, allocated at
+             * IRP_MJ_CREATE, freed at IRP_MJ_CLOSE). A request without that context is a driver defect: reported, nothing done */
+            PAVB_OPEN_INSTANCE inst = (PAVB_OPEN_INSTANCE)sp->FileObject->FsContext2;
+            if (inst == NULL) {
+                DEBUGP(DL_ERROR, "!!! [#404] INIT_DEVICE: FileObject=%p has no open-instance context: STATUS_DRIVER_INTERNAL_ERROR\n",
+                       sp->FileObject);
+                status = STATUS_DRIVER_INTERNAL_ERROR;
+                break;
+            }
+            if (InterlockedCompareExchange(&inst->init_succeeded, 0, 0) != 0) {
                 DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected\n");
                 status = STATUS_INVALID_DEVICE_STATE;
                 break;
@@ -2167,7 +2176,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             /* PR #469 review: re-checked under the ownership. Two overlapping requests on the same (asynchronous) file
              * object can both pass the check above before either publishes the marker; the marker is published below
              * before the ownership is released, so the later one sees it here */
-            if (sp->FileObject->FsContext2 == AVB_INSTANCE_INITIALIZED) {
+            if (InterlockedCompareExchange(&inst->init_succeeded, 0, 0) != 0) {
                 AvbInitRelease(currentContext);
                 DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected (under ownership)\n");
                 status = STATUS_INVALID_DEVICE_STATE;
@@ -2200,7 +2209,7 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             if (NT_SUCCESS(status)) {
                 /* only after this instance's successful initialization, and before the ownership is released (the
                  * interlocked release orders it before any later owner's re-check) */
-                sp->FileObject->FsContext2 = AVB_INSTANCE_INITIALIZED;
+                InterlockedExchange(&inst->init_succeeded, 1);
             }
             AvbInitRelease(currentContext);
 
