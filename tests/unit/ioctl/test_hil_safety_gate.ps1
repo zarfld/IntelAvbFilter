@@ -411,7 +411,8 @@ tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count
 #      #366: test_tas_query_clean is the fourth per-adapter entry (per TAS adapter: 438.5 s of its own bounds, budget 560 s);
 #      #381: test_tas_query_clean --hw-verified the fifth (about 390 s, same budget and inventory);
 #      #367: test_tas_query_clean --tiers-unbound the sixth (at most 438.5 s, same budget and inventory).
-#      #368: test_tas_query_clean --invalid the seventh (about 455 s, same budget and inventory).
+#      #368: test_tas_query_clean --invalid the seventh (amendment 2026-11-18: about 745 s per adapter, budget 970 s). It has no
+#      inventory limit: the executable runs every TAS adapter, and its budget scales with the enumerated count, uncapped.
 #      #377: test_tas_query_clean --restore the eighth (about 440 s, same budget and inventory).
 #      #472: test_tas_query_clean --link-speed (about 330 s per adapter, budget 560 s). It has no inventory limit (#472 review
 #      r4619159471): the executable runs every TAS adapter, and its budget scales with the enumerated count, uncapped.
@@ -427,7 +428,7 @@ if (-not $tasMax.Success) { $paBad += 'adapter limit ids[N] not found in tests/h
 $qcSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\hardware\test_tas_query_clean.c'))
 $qcMax = [regex]::Match($qcSrc, '(?m)^#define\s+TAS_QUERY_CLEAN_MAX_ADAPTERS\s+(\d+)\s*$')
 if (-not $qcMax.Success) { $paBad += 'supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS not found in tests/hardware/test_tas_query_clean.c' }
-elseif ($qcSrc -notmatch 'if\s*\(\s*g_link_mode\s*\|\|\s*i\s*<\s*TAS_QUERY_CLEAN_MAX_ADAPTERS\s*\)\s*\{\s*run_adapter\(') { $paBad += 'test_tas_query_clean.c does not cap the TAS adapters of its other modes at TAS_QUERY_CLEAN_MAX_ADAPTERS while running every TAS adapter for --link-speed (#472)' }
+elseif ($qcSrc -notmatch 'if\s*\(\s*g_link_mode\s*\|\|\s*g_invalid_mode\s*\|\|\s*i\s*<\s*TAS_QUERY_CLEAN_MAX_ADAPTERS\s*\)\s*\{\s*run_adapter\(') { $paBad += 'test_tas_query_clean.c does not cap the TAS adapters of its other modes at TAS_QUERY_CLEAN_MAX_ADAPTERS while running every TAS adapter for --link-speed (#472) and --invalid (#368)' }
 $irfSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\ioctl\test_ioctl_dev_lifecycle.c'))
 if ($irfSrc -match '\bINIT_RETRY_FAULT_MAX_ADAPTERS\b') { $paBad += 'tests/ioctl/test_ioctl_dev_lifecycle.c still has a fixed --init-retry-fault inventory limit' }
 if ($irfSrc -notmatch 'for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*nall\s*;\s*i\+\+\s*\)\s*\{\s*irf_run_adapter\(') { $paBad += 'test_ioctl_dev_lifecycle.c --init-retry-fault does not run every validated identity' }
@@ -455,7 +456,11 @@ $o['lifecycle@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle' -Suite
 foreach ($n in -1, 0, 1, 2, 3, 8, 9, 20) { $o["ls@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --link-speed' -SuiteSeconds 60 -AdapterCount $n }
 $o['ls@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --link-speed' -SuiteSeconds 600 -AdapterCount 1
 $o['ls@hasLimit'] = $HilTestTimeoutPerAdapter['test_tas_query_clean --link-speed'].Contains('MaxAdapters')
-foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore') {
+foreach ($n in -1, 0, 1, 2, 3, 8, 9, 20) { $o["inv@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --invalid' -SuiteSeconds 60 -AdapterCount $n }
+$o['inv@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --invalid' -SuiteSeconds 600 -AdapterCount 1
+$o['inv@suite1000'] = Get-AvbTestTimeoutSeconds -Entry 'test_tas_query_clean --invalid' -SuiteSeconds 1000 -AdapterCount 1
+$o['inv@hasLimit'] = $HilTestTimeoutPerAdapter['test_tas_query_clean --invalid'].Contains('MaxAdapters')
+foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --restore') {
     foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
     $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
     $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
@@ -479,11 +484,18 @@ $o
     $qlim = [int]$qcMax.Groups[1].Value
     if ($pa.PlainQuery -ne 0) { $paBad += 'test_tas_query_clean has a fixed one-adapter timeout' }
     $qwant = [ordered]@{ '1' = 560; '2' = 1120; '3' = 1680; '8' = 560 * [Math]::Min(8, $qlim); '20' = 560 * $qlim; '0' = 560; '-1' = 560 * $qlim }
-    foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore') {   # #366, #381, #367, #368, #377: one process, one inventory
+    foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --restore') {   # #366, #381, #367, #377: one process, one inventory
         if ($pa["$e@limit"] -ne $qlim) { $paBad += "$e adapter limit $($pa["$e@limit"]), its supported inventory is $qlim" }
         foreach ($n in $qwant.Keys) { if ([int]$pa["$e@$n"] -ne [int]$qwant[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($qwant[$n]) s" } }
         if ([int]$pa["$e@suite600"] -ne 600) { $paBad += "$e lowers the 600 s suite timeout to $($pa["$e@suite600"]) s" }
     }
+    # #368 amendment: --invalid runs every TAS adapter (no TAS_QUERY_CLEAN_MAX_ADAPTERS cap in its dispatch), budget 970 s times the
+    # enumerated count, uncapped, above eight included; unknown (-1) and 0 are one adapter; the suite timeout is never lowered
+    if ($pa['inv@hasLimit']) { $paBad += 'test_tas_query_clean --invalid declares MaxAdapters; it has no inventory limit' }
+    $iwantq = [ordered]@{ '1' = 970; '2' = 1940; '3' = 2910; '8' = 7760; '9' = 8730; '20' = 19400; '0' = 970; '-1' = 970 }
+    foreach ($n in $iwantq.Keys) { if ([int]$pa["inv@$n"] -ne [int]$iwantq[$n]) { $paBad += "test_tas_query_clean --invalid with $n enumerated adapter(s): $($pa["inv@$n"]) s, expected $($iwantq[$n]) s" } }
+    if ([int]$pa['inv@suite600'] -ne 970) { $paBad += "test_tas_query_clean --invalid with one adapter under a 600 s suite: $($pa['inv@suite600']) s, expected Max(600, 970) = 970 s" }
+    if ([int]$pa['inv@suite1000'] -ne 1000) { $paBad += "test_tas_query_clean --invalid with one adapter under a 1000 s suite: $($pa['inv@suite1000']) s, expected Max(1000, 970) = 1000 s" }
     # #472: --link-speed runs every TAS adapter (no TAS_QUERY_CLEAN_MAX_ADAPTERS cap in its dispatch), so its budget is 560 s times
     # the enumerated count, uncapped, above eight included; unknown (-1) and 0 are one adapter, the runner's rule for uncapped entries
     if ($pa['ls@hasLimit']) { $paBad += 'test_tas_query_clean --link-speed declares MaxAdapters; it has no inventory limit' }

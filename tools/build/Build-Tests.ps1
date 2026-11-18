@@ -1948,7 +1948,7 @@ $AllTests = @(
         Libs = "cfgmgr32.lib iphlpapi.lib ws2_32.lib advapi32.lib psapi.lib bcrypt.lib"
         Enabled = $true
         Priority = "P1"
-        Description = "TAS_QUERY_HW: clean adapter (#366, TC-TASAPI-001); --hw-verified HARDWARE_VERIFIED never returned past BaseT (#381, TC-TASAPI-016); --tiers-unbound unbound/capability/tiers (#367, TC-TASAPI-002); --invalid invalid TAS_ACTIVATE requests refused, state and TX unchanged (#368, TC-TASAPI-003); --restore reported restoration and PHC across the NIC cycle (#377, TC-TASAPI-012); --link-speed driver link speed against the OS observation after the owned NIC cycle (#472, TC-TASAPI-021); owned NIC-cycle cleanup"
+        Description = "TAS_QUERY_HW: clean adapter (#366, TC-TASAPI-001); --hw-verified HARDWARE_VERIFIED never returned past BaseT (#381, TC-TASAPI-016); --tiers-unbound unbound/capability/tiers (#367, TC-TASAPI-002); --invalid invalid versioned TAS_ACTIVATE requests on 0x80C refused, state and TX unchanged, legacy function-71 phase (#368, TC-TASAPI-003); --restore reported restoration and PHC across the NIC cycle (#377, TC-TASAPI-012); --link-speed driver link speed against the OS observation after the owned NIC cycle (#472, TC-TASAPI-021); owned NIC-cycle cleanup"
         Issue = "#366, #381, #367, #368, #377, #472"
         TestCases = 6
     },
