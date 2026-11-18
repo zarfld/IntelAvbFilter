@@ -367,6 +367,22 @@ typedef struct _AVB_DEVICE_CONTEXT {
     struct tsn_tas_config last_tas_config;
 } AVB_DEVICE_CONTEXT, *PAVB_DEVICE_CONTEXT;
 
+/*
+ * Per-open-instance context (#404; P2 step 3, logs/issue352-20261117/DELIVERY-PLAN-r3-20261117.md, recorded decisions r5):
+ * one per open instance of the control device, i.e. per file object (duplicated or inherited handles share it). Allocated at
+ * IRP_MJ_CREATE (CREATE fails with STATUS_INSUFFICIENT_RESOURCES without it), held in FileObject->FsContext2, freed at
+ * IRP_MJ_CLOSE only (never at IRP_MJ_CLEANUP: cleanup and cancellation stay with #401). FileObject->FsContext keeps the
+ * adapter binding set by OPEN_ADAPTER. It holds this instance's INIT_DEVICE success marker (#404 part 2); #352's operation
+ * records are placed here later.
+ */
+#define AVB_OPEN_INSTANCE_TAG 'AvbO'
+
+typedef struct _AVB_OPEN_INSTANCE {
+    /* 1 after this open instance's successful IOCTL_AVB_INIT_DEVICE, else 0; set only under the adapter's initialization
+     * ownership (AVB_DEVICE_CONTEXT.init_owner) and before it is released. Interlocked access only */
+    volatile LONG init_succeeded;
+} AVB_OPEN_INSTANCE, *PAVB_OPEN_INSTANCE;
+
 /*========================================================================
  * Global context registry
  *
