@@ -51,7 +51,7 @@ The table above is the review as written. This is where each conflict stands now
 
 ## 2. Requirement issues, as filed
 
-All of these are filed and `status:backlog`. No requirement is accepted. Dependencies are copied from the issue bodies and those govern; the blockers proposed in this review before filing live on as the evidence gaps in DES-C-TAS-010 section 14.
+All of these are filed and `status:backlog`. No requirement is accepted. Dependencies are copied from the issue bodies and those govern; the blockers proposed in this review before filing live on as the evidence gaps in DES-C-TAS-010 section 15 (section 14 before the activation section 13 was mirrored, 2026-11-18).
 
 | Draft | Issue | ID | Scope | Traces to | Dependencies as filed |
 |---|---|---|---|---|---|
