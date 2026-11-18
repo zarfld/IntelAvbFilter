@@ -355,6 +355,13 @@ typedef struct _AVB_DEVICE_CONTEXT {
     EX_RUNDOWN_REF tas_query_rundown;
     volatile LONG tas_query_armed;   /* 1 between a successful bring-up in FilterRestart and the next FilterPause */
 
+    /* Initialization ownership (#404 part 2; #12 amendment 2026-11-12 row "Another initialization running"): one hardware
+     * initialization per adapter at a time, claimed at entry without waiting by AvbBringUpHardware, AvbEnsureDeviceReady's
+     * intel_init path and IOCTL_AVB_INIT_DEVICE (AvbInitClaim / AvbInitRelease). A competing caller gets STATUS_DEVICE_BUSY
+     * before any hardware access or context write; FilterRestart instead waits for it, bounded (AvbBringUpHardwareWaitOwner).
+     * 0 free, 1 held. Interlocked access only. */
+    volatile LONG init_owner;
+
     /* Last programmed TAS GCL parameters (valid when tas_armed==1).
      * Populated by IOCTL_AVB_SETUP_TAS on success; cleared by IOCTL_AVB_DISARM_TAS. */
     struct tsn_tas_config last_tas_config;
@@ -406,6 +413,18 @@ NTSTATUS AvbInitializeDevice(
  * @return NTSTATUS STATUS_SUCCESS or error.
  */
 NTSTATUS AvbBringUpHardware(
+    _Inout_ PAVB_DEVICE_CONTEXT Ctx,
+    _In_ ULONG InitOrigin
+);
+
+/**
+ * @brief AvbBringUpHardware for a lifecycle owner that must not skip its bring-up (#404 part 2, PR #469 review): while
+ *        another initialization owns the adapter it waits (PASSIVE_LEVEL only, bounded by AVB_INIT_OWNER_WAIT_MS), then runs
+ *        the bring-up under the ownership. Used by FilterRestart, whose bring-up is the S3/S4 resume re-initialization and
+ *        reopens the #350 TAS query gate; the "STATUS_DEVICE_BUSY, no wait" contract row applies to INIT_DEVICE clients.
+ * @return the bring-up's status, or STATUS_DEVICE_BUSY only when the bound expired (or not at PASSIVE_LEVEL).
+ */
+NTSTATUS AvbBringUpHardwareWaitOwner(
     _Inout_ PAVB_DEVICE_CONTEXT Ctx,
     _In_ ULONG InitOrigin
 );

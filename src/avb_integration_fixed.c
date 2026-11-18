@@ -150,6 +150,7 @@ static VOID AvbContextListRemove(_In_ PAVB_DEVICE_CONTEXT Ctx)
 
 /* Forward declarations */
 static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin);
+static NTSTATUS AvbBringUpHardwareOwned(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin);
 static VOID AvbCheckTargetTime(_In_ PAVB_DEVICE_CONTEXT AvbContext);
 /* Role-type forward declaration — carries _Function_class_(NDIS_TIMER_FUNCTION) so CodeQL
  * and SAL can verify this matches the PNDIS_TIMER_FUNCTION parameter of NdisInitializeTimer.
@@ -257,6 +258,28 @@ static void AvbMarkPtpReady(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
         DEBUGP(DL_TRACE, "HW state -> %s (device ready)\n", AvbHwStateName(Ctx->hw_state));
     }
 }
+
+/**
+ * @brief Initialization ownership of one adapter (#404 part 2; #12 amendment 2026-11-12 row "Another initialization
+ *        running": STATUS_DEVICE_BUSY, no wait, no hardware effect).
+ *
+ * Claimed at entry without waiting, at any IRQL; the owner releases it on every exit. A caller that does not obtain it
+ * returns STATUS_DEVICE_BUSY before any hardware access, context write or #412 fault point. Not a lock: nobody waits for it,
+ * so an owner may wait (including a #412 HOLD) while holding it.
+ */
+static BOOLEAN AvbInitClaim(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+{
+    return InterlockedCompareExchange(&Ctx->init_owner, 1, 0) == 0;
+}
+
+static void AvbInitRelease(_Inout_ PAVB_DEVICE_CONTEXT Ctx)
+{
+    InterlockedExchange(&Ctx->init_owner, 0);
+}
+
+/* Per-open-instance marker in FileObject->FsContext2 (#404 part 2): set by IOCTL_AVB_INIT_DEVICE only after this instance's
+ * successful initialization; a new file object starts with NULL (zeroed by the I/O manager) */
+#define AVB_INSTANCE_INITIALIZED ((PVOID)(ULONG_PTR)1)
 
 const struct platform_ops ndis_platform_ops = {
     PlatformInitWrapper,
@@ -544,11 +567,60 @@ skip_test_pools:
  *        restart a filter do not fail on it (FilterRestart uses it only to decide whether the TAS query register gate
  *        reopens, #350).  Success means initialization completed, NOT that the
  *        hardware clock has been shown to advance at the right rate.
+ *        Takes the adapter's initialization ownership (#404 part 2): while another initialization owns the adapter it
+ *        returns STATUS_DEVICE_BUSY without touching the context or the hardware.
  */
 NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
 {
+    NTSTATUS status;
+
     if (!Ctx) return STATUS_INVALID_PARAMETER;
-    
+    if (!AvbInitClaim(Ctx)) {
+        DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu VID=0x%04X DID=0x%04X: another initialization owns the adapter: "
+               "STATUS_DEVICE_BUSY, no hardware access\n", InitOrigin, Ctx->intel_device.pci_vendor_id, Ctx->intel_device.pci_device_id);
+        return STATUS_DEVICE_BUSY;
+    }
+    status = AvbBringUpHardwareOwned(Ctx, InitOrigin);
+    AvbInitRelease(Ctx);
+    return status;
+}
+
+/* AvbBringUpHardwareWaitOwner (PR #469 review): poll interval and bound of the wait for the initialization ownership. An
+ * owner holds it for at most one bring-up, in a Debug build after at most one #412 HOLD (AVB_INITFAULT_MAX_HOLD_MS); the same
+ * composition (one HOLD plus 5000 ms for intel_init) bounds an in-flight attempt in the #412 test. A bound, not a tolerance:
+ * when it expires the caller is told (STATUS_DEVICE_BUSY) and logs it */
+#define AVB_INIT_OWNER_POLL_MS  10u
+#define AVB_INIT_OWNER_WAIT_MS  (AVB_INITFAULT_MAX_HOLD_MS + 5000u)
+
+NTSTATUS AvbBringUpHardwareWaitOwner(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
+{
+    LARGE_INTEGER delay;
+    ULONG waited = 0;
+    NTSTATUS status;
+
+    if (!Ctx) return STATUS_INVALID_PARAMETER;
+    delay.QuadPart = -(LONGLONG)AVB_INIT_OWNER_POLL_MS * 10000;
+    while (!AvbInitClaim(Ctx)) {
+        if (waited >= AVB_INIT_OWNER_WAIT_MS || KeGetCurrentIrql() != PASSIVE_LEVEL) {
+            DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu VID=0x%04X DID=0x%04X: initialization ownership not obtained after "
+                   "%lu ms: STATUS_DEVICE_BUSY, bring-up not run\n", InitOrigin, Ctx->intel_device.pci_vendor_id,
+                   Ctx->intel_device.pci_device_id, waited);
+            return STATUS_DEVICE_BUSY;
+        }
+        (void)KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        waited += AVB_INIT_OWNER_POLL_MS;
+    }
+    if (waited != 0) {
+        DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu: waited %lu ms for the initialization ownership\n", InitOrigin, waited);
+    }
+    status = AvbBringUpHardwareOwned(Ctx, InitOrigin);
+    AvbInitRelease(Ctx);
+    return status;
+}
+
+/** The bring-up itself; the caller owns the adapter's initialization (AvbInitClaim) */
+static NTSTATUS AvbBringUpHardwareOwned(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
+{
     // Always set REALISTIC baseline capabilities based on device type and hardware specs
     ULONG baseline_caps = 0;
     switch (Ctx->intel_device.device_type) {
@@ -832,8 +904,11 @@ static NTSTATUS AvbPerformBasicInitialization(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _
     }
     AvbInitFaultExit(Ctx, &faultCall, basic_init_result);
     if (basic_init_result != 0) {
-        DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library)\n");
-        return STATUS_UNSUCCESSFUL;
+        /* #404 part 2: this step's own failure is the device library's hardware initialization (intel_init returned
+         * non-zero), reported as STATUS_DEVICE_HARDWARE_ERROR exactly as AvbBringUpHardware reports the same failure of its
+         * intel_init; the other steps keep their own statuses (BAR0 discovery and mapping, allocation, MMIO sanity) */
+        DEBUGP(DL_ERROR, "? STEP 3 FAILED: intel_init failed (library): STATUS_DEVICE_HARDWARE_ERROR\n");
+        return STATUS_DEVICE_HARDWARE_ERROR;
     }
     DEBUGP(DL_TRACE, "? STEP 3 SUCCESS: intel_init completed successfully\n");
 
@@ -922,6 +997,19 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
            context->intel_device.pci_vendor_id, context->intel_device.pci_device_id,
            context->intel_device.device_type);
     
+    /* #404 part 2: the initialization below needs the adapter's initialization ownership; while another initialization
+     * owns it, STATUS_DEVICE_BUSY without hardware access. READY is re-checked under ownership: an initialization that
+     * completed in between is not repeated */
+    if (!AvbInitClaim(context)) {
+        DEBUGP(DL_ERROR, "!!! [#404] AvbEnsureDeviceReady VID=0x%04X DID=0x%04X: another initialization owns the adapter: "
+               "STATUS_DEVICE_BUSY, no hardware access\n", context->intel_device.pci_vendor_id, context->intel_device.pci_device_id);
+        return STATUS_DEVICE_BUSY;
+    }
+    if (context->hw_state >= AVB_HW_PTP_READY) {
+        AvbInitRelease(context);
+        return STATUS_SUCCESS;
+    }
+
     // CLEAN ARCHITECTURE: Use Intel library device-specific initialization
     // No device-specific register access in generic integration layer
     AVB_INITFAULT_CALL faultCall;   /* #412 (Debug only): recorded, never armed; reached from OPEN_ADAPTER */
@@ -930,14 +1018,16 @@ NTSTATUS AvbEnsureDeviceReady(PAVB_DEVICE_CONTEXT context)
     AvbInitFaultExit(context, &faultCall, init_result);
     if (init_result != 0) {
         DEBUGP(DL_ERROR, "? AvbEnsureDeviceReady: intel_init failed: %d\n", init_result);
+        AvbInitRelease(context);
         return STATUS_DEVICE_HARDWARE_ERROR;
     }
-    
+
     DEBUGP(DL_TRACE, "? AvbEnsureDeviceReady: Device initialization successful\n");
-    
+
     // Establish readiness (single shared helper; only reached after intel_init succeeded)
     AvbMarkPtpReady(context);
-    
+    AvbInitRelease(context);
+
     return STATUS_SUCCESS;
 }
 
@@ -1976,9 +2066,9 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    // Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization)
-    // On-demand initialization: only initialize on first IOCTL, not at driver load
-    if (!currentContext->initialized && code == IOCTL_AVB_INIT_DEVICE) (void)AvbBringUpHardware(currentContext, AVB_INITFAULT_ORIGIN_INIT_PRE);
+    /* Implements #16 (REQ-F-LAZY-INIT-001: Lazy Initialization): an adapter not initialized at attach is initialized by
+     * IOCTL_AVB_INIT_DEVICE, in its handler only (#404 part 2). The former pre-dispatch bring-up here discarded its status,
+     * ran before the per-instance check and was followed by a second bring-up in the handler; it is removed */
     /* IOCTL_AVB_TAS_QUERY_HW is an observation like GET_HW_STATE: never initializes, never STATUS_DEVICE_NOT_READY; an
      * adapter it cannot read is reported in the reply (hw_read NOT_RUNNING / NO_MMIO, #365 12.1, 12.3) */
     if (!currentContext->initialized && code != IOCTL_AVB_ENUM_ADAPTERS && code != IOCTL_AVB_INIT_DEVICE && code != IOCTL_AVB_GET_HW_STATE && code != IOCTL_AVB_GET_VERSION && code != IOCTL_AVB_GET_STATISTICS && code != IOCTL_AVB_RESET_STATISTICS && code != IOCTL_AVB_ADJUST_FREQUENCY && code != IOCTL_AVB_OPEN_ADAPTER && code != IOCTL_AVB_TAS_QUERY_HW)
@@ -2050,20 +2140,40 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
     case IOCTL_AVB_INIT_DEVICE:
         {
             DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Starting hardware bring-up\n");
-            
-            // UT-DEV-INIT-002: Duplicate Initialization Prevention (per-handle).
-            // FsContext2 is NULL for every new file handle (zeroed by I/O Manager).
-            // Setting it to (PVOID)1 on the first INIT_DEVICE call lets us detect and
-            // reject a second call on the SAME handle — without polluting per-adapter
-            // state that would break subsequent test cases that open fresh handles.
-            // Implements #313 (TEST-DEV-LIFECYCLE-001 / UT-DEV-INIT-002)
-            if (sp->FileObject->FsContext2 != NULL) {
+
+            /* #404 part 2, #12/#313 amendment 2026-11-12. Order:
+             *   1. the same open instance after its own success: STATUS_INVALID_DEVICE_STATE, no hardware access
+             *      (UT-DEV-INIT-002). The per-instance marker FsContext2 (NULL for every new file object) is set only after a
+             *      successful initialization of this instance, so the same instance retries after its own failure;
+             *   2. another initialization of this adapter running: STATUS_DEVICE_BUSY, no wait, no hardware access; once the
+             *      ownership is obtained, 1. is checked again (overlapping requests on the same file object);
+             *   3. adapter READY: STATUS_SUCCESS, no hardware access (also when an initialization completed in between);
+             *   4. otherwise exactly one bring-up, under the ownership taken in 2, and its own status.
+             * The former forced BAR0 path here is removed: AvbPerformBasicInitialization discovers and maps BAR0 whenever
+             * no hardware context exists (with the alternative discovery for I219/I217 the forced path lacked), at the #412
+             * fault point, before the bring-up's own intel_init */
+            if (sp->FileObject->FsContext2 == AVB_INSTANCE_INITIALIZED) {
                 DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected\n");
                 status = STATUS_INVALID_DEVICE_STATE;
                 break;
             }
-            sp->FileObject->FsContext2 = (PVOID)(ULONG_PTR)1;
-            
+            if (!AvbInitClaim(currentContext)) {
+                DEBUGP(DL_ERROR, "!!! [#404] INIT_DEVICE: adapter VID=0x%04X DID=0x%04X: another initialization is running: "
+                       "STATUS_DEVICE_BUSY, no hardware access\n", currentContext->intel_device.pci_vendor_id,
+                       currentContext->intel_device.pci_device_id);
+                status = STATUS_DEVICE_BUSY;
+                break;
+            }
+            /* PR #469 review: re-checked under the ownership. Two overlapping requests on the same (asynchronous) file
+             * object can both pass the check above before either publishes the marker; the marker is published below
+             * before the ownership is released, so the later one sees it here */
+            if (sp->FileObject->FsContext2 == AVB_INSTANCE_INITIALIZED) {
+                AvbInitRelease(currentContext);
+                DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected (under ownership)\n");
+                status = STATUS_INVALID_DEVICE_STATE;
+                break;
+            }
+
             DEBUGP(DL_TRACE, "   - Using context: VID=0x%04X DID=0x%04X\n",
                    currentContext->intel_device.pci_vendor_id, currentContext->intel_device.pci_device_id);
             DEBUGP(DL_TRACE, "   - Current hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
@@ -2079,64 +2189,21 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
              * device PTP initialization, and on the I226 it reset a healthy clock (UT-DEV-INIT-001 and UT-DEV-INIT-SECOND RED,
              * logs/issue313/evidence-313-*). READY here is the adapter's own published state with its BAR mapped; an adapter
              * that reached PTP_READY without a hardware context (MDIO fallback) still takes the path below, as before. The
-             * other rows of the decided contract (busy, retry after failure, READY publication order) are not changed here */
+             * READY check now runs under the initialization ownership (row 3 above) */
             if (currentContext->hw_state == AVB_HW_PTP_READY && currentContext->hardware_context != NULL) {
                 status = STATUS_SUCCESS;
                 DEBUGP(DL_ERROR, "!!! [#404] INIT_DEVICE: adapter VID=0x%04X DID=0x%04X already READY: open instance initialized, no "
                        "hardware access\n", currentContext->intel_device.pci_vendor_id, currentContext->intel_device.pci_device_id);
-                break;
+            } else {
+                status = AvbBringUpHardwareOwned(currentContext, AVB_INITFAULT_ORIGIN_INIT_HANDLER);
             }
+            if (NT_SUCCESS(status)) {
+                /* only after this instance's successful initialization, and before the ownership is released (the
+                 * interlocked release orders it before any later owner's re-check) */
+                sp->FileObject->FsContext2 = AVB_INSTANCE_INITIALIZED;
+            }
+            AvbInitRelease(currentContext);
 
-            // Force immediate BAR0 discovery if hardware context is missing,
-            // regardless of hw_state.  OPEN_ADAPTER's MDIO-fallback may have
-            // promoted I219/I217 to PTP_READY without actually mapping BAR0.
-            if (currentContext->hardware_context == NULL) {
-                DEBUGP(DL_TRACE, "*** FORCED BAR0 DISCOVERY *** No hardware context, forcing immediate discovery...\n");
-                
-                PHYSICAL_ADDRESS bar0 = {0};
-                ULONG barLen = 0;
-                NTSTATUS ds = AvbDiscoverIntelControllerResources(currentContext->filter_instance, &bar0, &barLen);
-                if (NT_SUCCESS(ds)) {
-                    DEBUGP(DL_TRACE, "*** BAR0 DISCOVERY SUCCESS *** PA=0x%llx, Len=0x%x\n", bar0.QuadPart, barLen);
-                    NTSTATUS ms = AvbMapIntelControllerMemory(currentContext, bar0, barLen);
-                    if (NT_SUCCESS(ms)) {
-                        DEBUGP(DL_TRACE, "*** BAR0 MAPPING SUCCESS *** Hardware context now available\n");
-                        
-                        // Complete initialization sequence
-                        AVB_INITFAULT_CALL faultCall;   /* #412 (Debug only): recorded, never armed */
-                        int forced_init_result;
-                        (void)AvbInitFaultEnter(currentContext, AVB_INITFAULT_ORIGIN_INIT_HANDLER, AVB_INITFAULT_SITE_FORCED, &faultCall);
-                        forced_init_result = intel_init(&currentContext->intel_device);
-                        AvbInitFaultExit(currentContext, &faultCall, forced_init_result);
-                        if (forced_init_result == 0) {
-                            DEBUGP(DL_TRACE, "? MANUAL intel_init SUCCESS\n");
-                            
-                            // Test MMIO sanity using generic register access
-                            ULONG ctrl = INTEL_MASK_32BIT;
-                            if (intel_read_reg(&currentContext->intel_device, INTEL_GENERIC_CTRL_REG, &ctrl) == 0 && ctrl != INTEL_MASK_32BIT) {
-                                DEBUGP(DL_TRACE, "? MANUAL MMIO SANITY SUCCESS: CTRL=0x%08X\n", ctrl);
-                                AVB_SET_HW_STATE(currentContext, AVB_HW_BAR_MAPPED);
-                                currentContext->hw_access_enabled = TRUE;
-                                currentContext->initialized = TRUE;
-                                
-                                // Device-specific initialization handled by Intel library
-                                DEBUGP(DL_TRACE, "? Device-specific initialization complete\n");
-                            } else {
-                                DEBUGP(DL_ERROR, "? MANUAL MMIO SANITY FAILED: CTRL=0x%08X\n", ctrl);
-                            }
-                        } else {
-                            DEBUGP(DL_ERROR, "? MANUAL intel_init FAILED\n");
-                        }
-                    } else {
-                        DEBUGP(DL_ERROR, "*** BAR0 MAPPING FAILED *** Status=0x%08X\n", ms);
-                    }
-                } else {
-                    DEBUGP(DL_ERROR, "*** BAR0 DISCOVERY FAILED *** Status=0x%08X\n", ds);
-                }
-            }
-            
-            status = AvbBringUpHardware(currentContext, AVB_INITFAULT_ORIGIN_INIT_HANDLER);
-            
             DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
             DEBUGP(DL_TRACE, "   - Final hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);
             DEBUGP(DL_TRACE, "   - Final hardware access: %s\n", currentContext->hw_access_enabled ? "YES" : "NO");
