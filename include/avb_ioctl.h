@@ -200,6 +200,12 @@ typedef struct _IOCTL_VERSION {
  * RequiredAccess, Microsoft "Defining I/O Control Codes"). Existing codes keep FILE_ANY_ACCESS, since changing one changes its value */
 #define IOCTL_AVB_TAS_ACTIVATE          CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 71, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017811C (#357, #362) */
 
+/* The versioned activation code of #362 decision 1 (#365 13.1), request AVB_TAS_OP_REQUEST below. DECLARATION ONLY (#357,
+ * 2026-11-18): no handler is added for it, and its declaration states no driver behaviour. Transitional name: IOCTL_AVB_TAS_ACTIVATE
+ * keeps function 71 and its existing dispatch until the coordinated producer PR moves the canonical name to this code and
+ * withdraws function 71; the two protocols are never served together. FILE_WRITE_ACCESS: a mutating operation. */
+#define IOCTL_AVB_TAS_ACTIVATE_80C      CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* 0x0017A030 (#357, #362, #365 13.1) */
+
 /* Debug-only test control of the #412 initialization fault mechanism (UT-DEV-LIFECYCLE-002): ARM, DISARM and
  * CLEAR_UNCONSUMED, performed by a Debug (DBG) driver under the lock that admits an initialization attempt. Request layout,
  * operations and semantics: AVB_INITFAULT_CONTROL in include/avb_init_fault_dbg.h. A Release driver does not implement it
@@ -432,6 +438,51 @@ C_ASSERT(sizeof(AVB_TAS_COMMIT_INFO) == 24);
 C_ASSERT(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536);
 #elif defined(__cplusplus)
 static_assert(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536, "TAS query v1 size changed");
+#endif
+
+/* ---- IOCTL_AVB_TAS_ACTIVATE_80C request (#357; layout and values published in #365 13.1-13.3 and DES-C-TAS-010 3.5) ----
+ * DECLARATION ONLY: no handler serves this request yet, and nothing below states driver behaviour. PROVISIONAL: the layout
+ * stays provisional until #365 is accepted (#362); a semantic change raises AVB_TAS_OP_VERSION, never a silent re-layout.
+ * One 144-byte METHOD_BUFFERED structure (#365 13.1): bytes 0-135 are input, bytes 136-143 output, written only on
+ * STATUS_SUCCESS. There is no separate response layout; an operation's outcome detail is its AVB_TAS_OP_RECORD (#352).
+ * Not settled by this declaration (#365 13.6): the generation/epoch lifecycle (D.1, #352), link-speed acquisition (D.2, K8),
+ * the enforced lead (D.3), tier admission and AVB_TAS_F_ACCEPT_UNVERIFIED (D.4, #351), BASE_PASSED/COMMITTED_UNTIMED
+ * completion (D.5) and the semantic check order (D.7). The out_flags bit UNVERIFIED_CONFIG_ACTIVE (#365 13.4) has no published
+ * bit position, so no value is declared for it; that position is a contract decision required before the producer. */
+#define AVB_TAS_OP_VERSION 1u
+
+#define AVB_TAS_F_ACCEPT_UNVERIFIED 0x00000001u  /* flags bit 0 (#365 13.2, 13.6 D.4) */
+#define AVB_TAS_F_OPEN_ALL          0x00000002u  /* flags bit 1: REPLACE only (#359); not valid on activation (#365 13.3) */
+
+#define AVB_TAS_Q_STRICT_END   0x00000001u  /* AVB_TAS_QUEUE_WINDOW.flags (DES-C-TAS-010 3.5, #365 13.2) */
+#define AVB_TAS_Q_STRICT_CYCLE 0x00000002u
+
+/* debug_fault encoding as published (#365 13.3, #357 AC4): 0 for Release drivers; the reserved bits 0 for any driver */
+#define AVB_TAS_DEBUG_FAULT_WRITE_MASK 0x000000FFu  /* bits 0-7: write number N, 1 = first write, 0 = none (Debug only) */
+#define AVB_TAS_DEBUG_FAULT_RESTORE    0x00000100u  /* bit 8: also fail the first restore write (Debug only) */
+#define AVB_TAS_DEBUG_FAULT_RESERVED   0xFFFFFE00u  /* bits 9-31: 0 */
+
+typedef struct AVB_TAS_OP_REQUEST {
+    avb_u32 version;              /*   0 in  AVB_TAS_OP_VERSION */
+    avb_u32 size;                 /*   4 in  sizeof(AVB_TAS_OP_REQUEST) = 144 */
+    avb_u64 net_luid;             /*   8 in  the open instance's bound adapter */
+    avb_u64 client_op_id;         /*  16 in  non-zero; key of the #352 record */
+    avb_u64 expected_generation;  /*  24 in  generation from the caller's last TAS_QUERY_HW (#365 13.6 D.1) */
+    avb_u64 context_epoch;        /*  32 in  context_epoch from the same query (#365 13.6 D.1) */
+    avb_u32 flags;                /*  40 in  AVB_TAS_F_* */
+    avb_u32 pre_activation;       /*  44 in  AVB_TAS_PRE_HOLD or AVB_TAS_PRE_PASS; no default */
+    avb_u32 debug_fault;          /*  48 in  0; AVB_TAS_DEBUG_FAULT_* (Debug drivers only) */
+    avb_u32 reserved0;            /*  52 in  0 */
+    AVB_TAS_SCHEDULE schedule;    /*  56 in  80 bytes, shared with the query (DES-C-TAS-010 3.5, #365 12.2) */
+    avb_u32 out_flags;            /* 136 out success only; bit positions: see above */
+    avb_u32 reserved1;            /* 140 out success only, 0 */
+} AVB_TAS_OP_REQUEST, *PAVB_TAS_OP_REQUEST;                                   /* 144 */
+
+/* Compile-time size pin (offsets: TC-ABI-029 in tests/unit/abi/test_ioctl_abi.c) */
+#if defined(_KERNEL_MODE)
+C_ASSERT(sizeof(AVB_TAS_OP_REQUEST) == 144);
+#elif defined(__cplusplus)
+static_assert(sizeof(AVB_TAS_OP_REQUEST) == 144, "TAS activation request v1 size changed");
 #endif
 
 #define AVB_ADAPTER_IDENTITY_VERSION 1u
