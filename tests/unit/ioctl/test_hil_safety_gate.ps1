@@ -413,6 +413,7 @@ tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count
 #      #367: test_tas_query_clean --tiers-unbound the sixth (at most 438.5 s, same budget and inventory).
 #      #368: test_tas_query_clean --invalid the seventh (about 455 s, same budget and inventory).
 #      #377: test_tas_query_clean --restore the eighth (about 440 s, same budget and inventory).
+#      #472: test_tas_query_clean --link-speed (about 330 s, same budget and inventory).
 #      #412: test_dev_lifecycle --init-retry-fault the ninth (per adapter: 960 s of its own bounds, budget 1220 s). It has no
 #      inventory limit (PR #462 review): it runs every validated identity, and its budget scales with the enumerated count, uncapped.
 #      #313: test_dev_lifecycle --init-concurrent the tenth (per adapter: 887 s of its own bounds, budget 1130 s), likewise uncapped.
@@ -450,7 +451,7 @@ $o['irf@hasLimit'] = $HilTestTimeoutPerAdapter['test_dev_lifecycle --init-retry-
 foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["icc@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-concurrent' -SuiteSeconds 60 -AdapterCount $n }
 $o['icc@hasLimit'] = $HilTestTimeoutPerAdapter['test_dev_lifecycle --init-concurrent'].Contains('MaxAdapters')
 $o['lifecycle@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle' -SuiteSeconds 300 -AdapterCount 9
-foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore') {
+foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore', 'test_tas_query_clean --link-speed') {
     foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
     $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
     $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
@@ -461,7 +462,7 @@ $o['other@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_ptp_freq_complete' -Suite
 $o
 '@))
     $pa = & $paCheck
-    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_dev_lifecycle --init-retry-fault|test_dev_lifecycle --init-concurrent') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries, the five test_tas_query_clean entries, test_dev_lifecycle --init-retry-fault and test_dev_lifecycle --init-concurrent only" }
+    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_tas_query_clean --link-speed|test_dev_lifecycle --init-retry-fault|test_dev_lifecycle --init-concurrent') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries, the six test_tas_query_clean entries, test_dev_lifecycle --init-retry-fault and test_dev_lifecycle --init-concurrent only" }
     if ($pa['icc@hasLimit']) { $paBad += 'test_dev_lifecycle --init-concurrent declares MaxAdapters; it has no inventory limit' }
     $cwant = [ordered]@{ '1' = 1130; '2' = 2260; '3' = 3390; '8' = 9040; '20' = 22600; '0' = 1130; '-1' = 1130 }   # uncapped; unknown (-1) = one adapter
     foreach ($n in $cwant.Keys) { if ([int]$pa["icc@$n"] -ne [int]$cwant[$n]) { $paBad += "test_dev_lifecycle --init-concurrent with $n enumerated adapter(s): $($pa["icc@$n"]) s, expected $($cwant[$n]) s" } }
@@ -474,7 +475,7 @@ $o
     $qlim = [int]$qcMax.Groups[1].Value
     if ($pa.PlainQuery -ne 0) { $paBad += 'test_tas_query_clean has a fixed one-adapter timeout' }
     $qwant = [ordered]@{ '1' = 560; '2' = 1120; '3' = 1680; '8' = 560 * [Math]::Min(8, $qlim); '20' = 560 * $qlim; '0' = 560; '-1' = 560 * $qlim }
-    foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore') {   # #366, #381, #367, #368, #377: one process, one inventory
+    foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore', 'test_tas_query_clean --link-speed') {   # #366, #381, #367, #368, #377, #472: one process, one inventory
         if ($pa["$e@limit"] -ne $qlim) { $paBad += "$e adapter limit $($pa["$e@limit"]), its supported inventory is $qlim" }
         foreach ($n in $qwant.Keys) { if ([int]$pa["$e@$n"] -ne [int]$qwant[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($qwant[$n]) s" } }
         if ([int]$pa["$e@suite600"] -ne 600) { $paBad += "$e lowers the 600 s suite timeout to $($pa["$e@suite600"]) s" }

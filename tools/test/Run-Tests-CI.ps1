@@ -425,6 +425,7 @@ $HardwareIntegrationAttendedOnly = [ordered]@{
 #   test_tas_query_clean --tiers-unbound -- unbound / non-TAS / tiers queries (#367), then its own NIC cycle.  Unsafe (#367).
 #   test_tas_query_clean --invalid -- invalid TAS_ACTIVATE requests (#368), then its own NIC cycle.  Unsafe (#368).
 #   test_tas_query_clean --restore -- TAS_ACTIVATE HOLD, NIC cycle, reported restoration and PHC (#377).  Unsafe (#377).
+#   test_tas_query_clean --link-speed -- NIC cycle, query link_speed_mbps against GetIfEntry2 (#472, K8).  Unsafe (#472).
 #   Unsafe entries run only via an explicit -Tests list with AVB_HIL_AUTHORIZE_UNSAFE naming the exact
 #   entry, outside GitHub Actions, on an operator-attended machine.
 # Mutating and Mutating:Target entries are listed in $HardwareUnitCoverageGaps (automatic HIL coverage gaps).
@@ -609,6 +610,7 @@ $HardwareIntegrationCoverageGaps = [ordered]@{
     'test_tas_query_clean --tiers-unbound' = 'Unsafe: TEST-TAS-API-002 #367, unbound handle refused with STATUS_INVALID_DEVICE_STATE, query on adapters without the TAS capability, support tiers per #351, then the test owned NIC cycle of each TAS adapter as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
     'test_tas_query_clean --invalid' = 'Unsafe: TEST-TAS-API-003 #368, invalid TAS_ACTIVATE requests on a clean TAS adapter, each refused with the TAS query, record, counters and TX on the wire unchanged against the test pre-test capture; the end-equals-cycle case (TAS-DR-06) is not refused by current validation and can commit a schedule; then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
     'test_tas_query_clean --restore' = 'Unsafe: TEST-TAS-API-012 #377, TAS_ACTIVATE HOLD on a clean TAS adapter, the reported restoration never COMPLETE while TSN is on, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire, the reported restoration against the test own register observation and the PHC across the cycle reported separately; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
+    'test_tas_query_clean --link-speed' = 'Unsafe: TEST-TAS-API-021 #472, the test owned NIC cycle of every TAS adapter as its setup, then TAS_QUERY_HW link_speed_mbps compared with GetIfEntry2 of the same NET_LUID in OS-bracketed observations (ATTACH, STEADY) and the final state (bound, link as before, TAS clean); no TAS write, no traffic, no wire observer needed; the owned NIC cycle reseeds the PHC and may interrupt the host network, network topology is not a precondition, per #463'
     'test_tas_query_clean --hw-verified' = 'Unsafe: TEST-TAS-API-016 #381, HARDWARE_VERIFIED never returned on a clean adapter, after TAS_ACTIVATE HOLD with BaseT ahead and with the PHC past BaseT, then the test owned NIC cycle as cleanup with TAS query, PHC and TX on the wire; requires the I210 wire observer; the owned NIC cycle may interrupt the host network, network topology is not a precondition, per #463'
     'test_lifecycle_coverage'       = 'Unsafe: disables and re-enables the adapter device node through the configuration manager API; stays a coverage gap until bounded recovery and a final-state check of the testcase itself exist; the NIC may carry the host network connection, which is not a reason to withhold it, per #463'
     # Built test programs formerly in no list (TEST-COMPLETE-001, 2026-10-29): not runnable by this runner yet.
@@ -786,6 +788,7 @@ $HilTestSafety = @{
     'test_tas_query_clean --tiers-unbound' = 'Unsafe' # TAS_QUERY_HW unbound / non-TAS / tiers, owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#367)
     'test_tas_query_clean --invalid' = 'Unsafe'       # invalid TAS_ACTIVATE requests (one can commit), owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#368)
     'test_tas_query_clean --restore' = 'Unsafe'       # TAS_ACTIVATE HOLD, owned CM_Disable_DevNode / CM_Enable_DevNode cycle, reported restoration (#377)
+    'test_tas_query_clean --link-speed' = 'Unsafe'    # owned CM_Disable_DevNode / CM_Enable_DevNode cycle as setup, then TAS_QUERY_HW and GetIfEntry2 reads (#472)
     'test_dev_lifecycle --init-retry-fault' = 'Unsafe'  # Debug-only initialization fault, owned CM_Disable_DevNode / CM_Enable_DevNode cycles, INIT_DEVICE retry (#412)
     'test_dev_lifecycle --init-concurrent' = 'Unsafe'   # Debug-only HOLD (#412), owned CM_Disable_DevNode / CM_Enable_DevNode cycles, concurrent INIT_DEVICE (#313)
     'test_dev_lifecycle --init-contract' = 'Init'     # INIT_DEVICE / OPEN_ADAPTER on READY adapters (#313 amendment, #404); a defective driver re-initializes and resets a healthy PHC: reported RED
@@ -921,6 +924,9 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     # --restore (#377): per TAS adapter a 60 s socket bind and a 3.5 s baseline window, one activation and query, then the same
     # cleanup bounds (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind) and one query = about 440 s; the same budget.
     'test_tas_query_clean --restore' = @{ Seconds = 560; MaxAdapters = 8 }
+    # --link-speed (#472): per TAS adapter five OS-bracketed observations of at most 5 tries (about 3 s each), the owned cycle
+    # (120 + 3 + 60 + 60 s), a 60 s wait for the pre-test link and the 10 s STEADY interval = about 330 s; the same budget.
+    'test_tas_query_clean --link-speed' = @{ Seconds = 560; MaxAdapters = 8 }
     # test_dev_lifecycle --init-retry-fault (#412), from its own bounds per adapter: 60 s READY before + phase A (120 s disable +
     # 60 s enable + 60 s return + 60 s READY) + phase B (120 + 60 + 60 s) + 60 s READY after the retry + cleanup (60 s READY, a
     # 120 + 60 s cycle, 60 s READY) = 960 s; 1220 s = + 27 %. No MaxAdapters: the test runs every validated identity (no
