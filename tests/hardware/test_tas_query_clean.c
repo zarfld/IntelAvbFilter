@@ -86,6 +86,47 @@
  * query, a restoration set that differs from the pre-test observation (REPORTED rule 4). A pass on the first hardware run is
  * characterization of restoration reporting implemented under #350, never RED.
  *
+ * --link-speed: TEST-TAS-API-021 (#472, Verifies #351), case TC-TASAPI-021 (#365 12.2 link_speed_mbps "K8 (#351)", 13.6 D.2).
+ * The query's link_speed_mbps must be the driver's own current link speed from NDIS, equal to an independent operating-system
+ * observation of the same interface: GetIfEntry2 for the adapter's NET_LUID (MediaConnectState, TransmitLinkSpeed in bit/s), 0
+ * when the OS reports the interface disconnected. Every comparison is bracketed: OS reading, query, OS reading; a bracket whose
+ * OS state or rate differs is retried up to LINK_BRACKET_TRIES times, and an unresolved one is INCONCLUSIVE, never agreement.
+ * A query that fails by itself (nonpassing status verdict, malformed reply, reply for another NET_LUID) ends that observation
+ * with its raw NTSTATUS, length and validity: a retry for the OS bracket never replaces an established query failure.
+ * 64-bit arithmetic: query Mbit/s x 1,000,000 against TransmitLinkSpeed. A connected rate that is unknown (0 or all ones) or
+ * not representable in integer Mbit/s (not a whole Mbit/s, or above 2^32-1) has no specified conversion yet (#472): that
+ * comparison is INCONCLUSIVE, never a measured control. Every raw value is printed with its QPC time.
+ *   PRESTATE  the OS observation and a query before anything else, evidence only; the OS state is FINAL's link reference.
+ *   CYCLE     the test's own NIC cycle of the adapter (the attach ATTACH needs), bounded; the adapter must return with the same
+ *             NET_LUID, device ID and MAC. If not: CLEANUP_FAILED, and ATTACH, STEADY and FINAL are BLOCKED.
+ *   ATTACH    after the cycle: when the link was connected before the test, the OS reports it connected again within
+ *             LINK_BOUND_MS first; then one bracketed comparison.
+ *   STEADY    two bracketed comparisons LINK_STEADY_INTERVAL_MS apart; each must agree with its own bracket. An OS state or rate
+ *             that changed between them is printed as a measured link event, not failed for violating a constant speed.
+ *   EVENT     a link transition without a detach is not exercised: the test has no owned procedure that changes the link
+ *             without detaching the filter and restores it (a cable or link-partner change depends on topology the test cannot
+ *             establish, #463). INCONCLUSIVE with that reason; repeating ATTACH is not EVENT coverage, never PASS by omission.
+ *   FINAL     the adapter is bound, the OS link state and rate equal the pre-test observation, the TAS query reports a clean,
+ *             readable adapter and GET_TAS_STATE is CLEAN, and HardwareFaults did not change from ATTACH to FINAL. The test arms
+ *             no fault. The query requirement is judged field by field under #365 12.2/12.3 validity (reply and target
+ *             first; hw_mode from a valid TQAVCTRL; slot statuses and the advisory restoration as reported; every register
+ *             valid), so a valid TSN-on observation survives an unrelated register read failure and an invalid field's 0 is
+ *             never an observation. Each requirement is judged on its own valid measurement: any observed violation is CLEANUP_FAILED (with
+ *             every violation and every missing measurement listed), even when another read is unavailable; only with no
+ *             violation does a missing measurement give INCONCLUSIVE_RESTORATION; PASS needs every observation valid and
+ *             conforming. Reported apart from the functional checks.
+ *   CLOCK     cleanup-only evidence (runner convention [CLEANUP:FAILED] / [CLEANUP:NOT_VERIFIED] / [CLEANUP:SUCCESS], never a
+ *             functional verdict): TIMINCA and TSAUXC read through GET_CLOCK_CONFIG before the first NIC operation and after
+ *             cleanup, each with its raw NTSTATUS, size and reply status. A measured difference is [CLEANUP:FAILED]; a missing or
+ *             invalid read is [CLEANUP:NOT_VERIFIED]. Read-only: nothing is written back, because neither the incoming nor the
+ *             post-cycle values are an established restoration target. A clean TAS query does not prove clock restoration.
+ * The incoming TAS state is printed as found (origin unknown to the test); it is never assumed clean.
+ * Mutation: the owned NIC cycle only (it reseeds the PHC, E12; reported, not restored). No TAS write, no traffic. Agreement with
+ * the OS checks the acquisition path through the shared Windows/miniport reporting chain; it is not a wire measurement and does
+ * not verify TAS-DR-05's arithmetic (#368). Expected RED against a driver without K8: link_speed_mbps 0 while the OS reports a
+ * connected speed (a hypothesis until a hardware run shows it). Unlike the other modes, it needs no IPv4 address, no
+ * observer and no link: a disconnected adapter is a valid ATTACH case (0).
+ *
  * Preconditions, checked before the first query (BLOCKED, nothing sent to the adapter, nothing to clean): the adapter's device
  * node resolves from its NET_LUID, another adapter keeps the host reachable (the cleanup cycles this one), the adapter is up
  * with an IPv4 address, and the I210 observer exists (#366 "I210 observer alive").
@@ -116,7 +157,8 @@
  *
  * Adapters are chosen by INTEL_CAP_TSN_TAS; the observer is the I210, chosen by identity for targeting only. Discovery validates
  * every identity and has no fixed adapter limit; an incomplete inventory is BLOCKED (DISCOVERY), never a silent pass. At most
- * TAS_QUERY_CLEAN_MAX_ADAPTERS TAS adapters run per process (its runner time budget); any further one is BLOCKED. The SHA256
+ * TAS_QUERY_CLEAN_MAX_ADAPTERS TAS adapters run per process (its runner time budget); any further one is BLOCKED. --link-speed
+ * is exempt: it runs every TAS adapter, and its runner budget scales with the enumerated count, uncapped. The SHA256
  * of the on-disk file at the loaded driver module's path is printed as evidence, never used for selection; it is not a hash of
  * the image in memory, whose identity stays unverified (the file can be replaced while the old image remains loaded).
  *
@@ -126,7 +168,7 @@
  * that adapter, which resets its PHC. --hw-verified also sends IOCTL_AVB_TAS_ACTIVATE (a TAS schedule) on a clean adapter,
  * always followed by that NIC cycle. --invalid sends invalid IOCTL_AVB_TAS_ACTIVATE requests (END_EQ_CYCLE can be accepted
  * and commit a schedule), always followed by that NIC cycle. --restore commits the verified HOLD schedule, always followed by
- * that NIC cycle. Safety class Unsafe.
+ * that NIC cycle. --link-speed runs that NIC cycle as its setup and then sends only queries and reads. Safety class Unsafe.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
  *
@@ -135,6 +177,7 @@
  * (--hw-verified, TC-TASAPI-016: Verifies #350 per #381)
  * Verifies: #351 (--tiers-unbound, TC-TASAPI-002, per #367; --invalid, TC-TASAPI-003, per #368)
  * Verifies: #361 (--restore, TC-TASAPI-012, per #377)
+ * Verifies: #351 (--link-speed, TC-TASAPI-021, per #472)
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -149,6 +192,7 @@
 #include <bcrypt.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
@@ -158,7 +202,7 @@
 #include "../ioctl/tas_query_tx_eval.h"   /* send-window accounting and TX verdict, checked offline by TC-MOCK-057 */
 #include "../../intel-ethernet-regs/gen/i226_regs.h"   /* --invalid: the QBVCYCLET.QBV_CYCLE_TIME field width (SSOT) */
 
-#define CASE_ID            g_case                   /* TC-TASAPI-001 (#366), -016 (--hw-verified, #381), -002 (--tiers-unbound, #367), -003 (--invalid, #368), -012 (--restore, #377) */
+#define CASE_ID            g_case                   /* TC-TASAPI-001 (#366), -016 (--hw-verified, #381), -002 (--tiers-unbound, #367), -003 (--invalid, #368), -012 (--restore, #377), -021 (--link-speed, #472) */
 #define DEVICE_NAME        "\\\\.\\IntelAvbFilter"
 /* --hw-verified schedule: the verified set of tests/hardware/test_tas_activate.c (E6 characterisation, LOCAL_DIAGNOSTIC,
  * I226 0x125B REV_04, Debug), within the window rule of #357 */
@@ -185,9 +229,23 @@
 #define RETURN_BOUND_MS    60000
 #define SETTLE_MS          5000
 #define DRIVER_LIST_TRIES  3
+/* --link-speed (#472): the test's own choices, documented bounds, never tolerances on the compared values */
+#define LINK_BRACKET_TRIES        5        /* a bracket whose OS readings differ is retried at most this often */
+#define LINK_BRACKET_RETRY_MS     500
+#define LINK_BOUND_MS             60000    /* after the cycle: wait for the OS to report a pre-test connected link again */
+#define LINK_STEADY_INTERVAL_MS   10000    /* between the two STEADY observations */
+#define BITS_PER_MBIT             1000000ULL
+#define LINK_RF_TQAVCTRL          0x00000001u  /* regs.read_failed bit 0 = TQAVCTRL invalid (avb_ioctl.h AVB_TAS_REGS, #365 12.2/12.3) */
+/* FINAL verdict summaries (PR #477 r4619159432): fixed text plus counts; the items themselves are separate lines */
+#define FINAL_SUMMARY_VIOLATIONS "%u violation(s) observed and %u required measurement(s) missing; each is listed above as a " \
+                                 "FINAL violation or FINAL missing measurement line"
+#define FINAL_SUMMARY_MISSING    "no violation observed, but %u required measurement(s) missing; each is listed above as a " \
+                                 "FINAL missing measurement line"
+#define FINAL_SUMMARY_FIXED      136u   /* the longer summary's characters besides its %u conversions (violations: 136, missing: 117; C_ASSERT) */
 /* Supported inventory: TAS adapters this process runs. The runner budget is 560 s x min(enumerated adapters, this value)
  * ($HilTestTimeoutPerAdapter, checked by TEST-HILGATE-098), so every TAS adapter run fits it; discovery stays complete and a
- * TAS adapter beyond this value is reported BLOCKED, never left out silently. */
+ * TAS adapter beyond this value is reported BLOCKED, never left out silently. Not applied to --link-speed (#472): it runs every
+ * TAS adapter, with a runner budget of 560 s x the enumerated count, uncapped. */
 #define TAS_QUERY_CLEAN_MAX_ADAPTERS 8
 #define NET_CLASS_KEY      "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\"
 
@@ -202,6 +260,7 @@ static BOOL g_hw_verified_mode;   /* --hw-verified: TC-TASAPI-016 (#381) */
 static BOOL g_tiers_mode;         /* --tiers-unbound: TC-TASAPI-002 (#367) */
 static BOOL g_invalid_mode;       /* --invalid: TC-TASAPI-003 (#368) */
 static BOOL g_restore_mode;       /* --restore: TC-TASAPI-012 (#377) */
+static BOOL g_link_mode;          /* --link-speed: TC-TASAPI-021 (#472) */
 static int g_failed, g_blocked, g_ran;
 static avb_u64 g_capture_luid;
 static unsigned g_next_seq;
@@ -1869,6 +1928,434 @@ static void run_restore(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUE
            "decidable through the generic query: a restoration set that differs from the pre-test observation (e.g. ENDQT at _ALT)\n");
 }
 
+/* ---- --link-speed (TC-TASAPI-021, #472): the driver's link speed against the OS observation of the same interface ---- */
+
+/** One bracketed observation: OS reading, query, OS reading, retried while the two OS readings differ */
+typedef struct {
+    avb_u64 luid;            /* the validated target NET_LUID */
+    BOOL os_agreed;          /* both OS readings succeeded and report the same state and transmit rate */
+    BOOL query_failed;       /* a query failure established on its own (status, malformed reply, foreign NET_LUID): kept, never retried away */
+    DWORD err1, err2;        /* raw GetIfEntry2 return codes of the last try */
+    MIB_IF_ROW2 os;          /* the agreeing OS reading (valid only when os_agreed) */
+    QUERY_READ q;            /* the failed query if query_failed, otherwise the query of the last try */
+    unsigned tries;
+} LINK_OBS;
+
+/** A query result that fails by itself, independent of any OS reading: a nonpassing status verdict (avb_verdict.h), or a
+ *  valid reply that names another adapter */
+static BOOL link_query_failed(const QUERY_READ *q, avb_u64 luid)
+{
+    return avb_verdict_from_status((NTSTATUS)q->status, AVB_CAP_PRESENT, query_valid(q), TRUE) != AVB_VERDICT_PASS ||
+           q->q.net_luid != luid;
+}
+
+static double qpc_ms(void)
+{
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+
+static const char *media_name(NET_IF_MEDIA_CONNECT_STATE s)
+{
+    return s == MediaConnectStateConnected ? "connected" : s == MediaConnectStateDisconnected ? "disconnected" : "unknown";
+}
+
+static DWORD read_if_raw(avb_u64 luid, MIB_IF_ROW2 *row)
+{
+    ZeroMemory(row, sizeof(*row));
+    row->InterfaceLuid.Value = luid;   /* the validated target NET_LUID (#472) */
+    return GetIfEntry2(row);
+}
+
+static void link_observe(HANDLE h, avb_u64 luid, const char *label, LINK_OBS *o)
+{
+    MIB_IF_ROW2 a, b;
+    double t0, t1, t2;
+
+    ZeroMemory(o, sizeof(*o));
+    o->luid = luid;
+    while (o->tries < LINK_BRACKET_TRIES) {
+        o->tries++;
+        t0 = qpc_ms();
+        o->err1 = read_if_raw(luid, &a);
+        t1 = qpc_ms();
+        query(h, &o->q);
+        t2 = qpc_ms();
+        o->err2 = read_if_raw(luid, &b);
+        printf("    [EVIDENCE] %s try %u: os1 err=%lu state=%s tx=%llu rx=%llu bit/s @%.1f ms | query ntstatus=0x%08lX information=%lu "
+               "link_speed_mbps=", label, o->tries, o->err1, media_name(a.MediaConnectState), a.TransmitLinkSpeed, a.ReceiveLinkSpeed,
+               t0, (unsigned long)o->q.status, o->q.got);
+        if (query_valid(&o->q)) {
+            printf("%u", o->q.q.link_speed_mbps);
+        } else {
+            printf("(no v1 reply)");
+        }
+        printf(" @%.1f ms | os2 err=%lu state=%s tx=%llu rx=%llu bit/s @%.1f ms\n", t1, o->err2, media_name(b.MediaConnectState),
+               b.TransmitLinkSpeed, b.ReceiveLinkSpeed, t2);
+        /* A query that fails by itself ends the observation: a retry for the OS bracket must never replace it (r4619159368) */
+        if (link_query_failed(&o->q, luid)) {
+            o->query_failed = TRUE;
+            printf("    [EVIDENCE] %s: the query failed on try %u; the observation stops here and keeps that reply\n", label, o->tries);
+            return;
+        }
+        if (o->err1 == NO_ERROR && o->err2 == NO_ERROR && a.MediaConnectState == b.MediaConnectState &&
+            a.TransmitLinkSpeed == b.TransmitLinkSpeed) {
+            o->os_agreed = TRUE;
+            o->os = a;
+            return;
+        }
+        Sleep(LINK_BRACKET_RETRY_MS);
+    }
+}
+
+/** The verdict of one observation, with its reason. The query is judged first by its raw NTSTATUS (avb_verdict.h); the
+ *  comparison is made only on a valid reply inside an agreeing OS bracket */
+static AVB_VERDICT link_judge(const LINK_OBS *o, char *reason, size_t size)
+{
+    AVB_VERDICT v = avb_verdict_from_status((NTSTATUS)o->q.status, AVB_CAP_PRESENT, query_valid(&o->q), TRUE);
+    unsigned long long bps, expected;
+
+    if (v != AVB_VERDICT_PASS) {
+        sprintf_s(reason, size, "query on try %u: ntstatus=0x%08lX information=%lu reply %s", o->tries, (unsigned long)o->q.status,
+                  o->q.got, query_valid(&o->q) ? "valid" : "not a valid v1 reply");
+        return v;
+    }
+    if (o->q.q.net_luid != o->luid) {
+        sprintf_s(reason, size, "query on try %u: the reply names NET_LUID 0x%016llX, not the target 0x%016llX", o->tries,
+                  o->q.q.net_luid, o->luid);
+        return AVB_VERDICT_FAIL;
+    }
+    if (!o->os_agreed) {
+        sprintf_s(reason, size, "no agreeing OS bracket in %u tries (GetIfEntry2 %lu/%lu, or the state or rate changed across each "
+                  "bracket): not compared; a measurement gap, not agreement", o->tries, o->err1, o->err2);
+        return AVB_VERDICT_INCONCLUSIVE;
+    }
+    if (o->os.MediaConnectState == MediaConnectStateDisconnected) {
+        if (o->q.q.link_speed_mbps == 0) {
+            sprintf_s(reason, size, "OS disconnected and link_speed_mbps 0 (the disconnected case; a known positive rate is not "
+                      "verified by it)");
+            return AVB_VERDICT_PASS;
+        }
+        sprintf_s(reason, size, "OS disconnected, link_speed_mbps %u (expected 0)", o->q.q.link_speed_mbps);
+        return AVB_VERDICT_FAIL;
+    }
+    if (o->os.MediaConnectState != MediaConnectStateConnected) {
+        sprintf_s(reason, size, "OS connection state unknown (link_speed_mbps %u): no reference to compare with", o->q.q.link_speed_mbps);
+        return AVB_VERDICT_INCONCLUSIVE;
+    }
+    bps = o->os.TransmitLinkSpeed;
+    if (bps == 0 || bps == ~0ULL) {
+        sprintf_s(reason, size, "OS connected with an unknown rate (TransmitLinkSpeed %llu, link_speed_mbps %u): no measured "
+                  "connected-speed control", bps, o->q.q.link_speed_mbps);
+        return AVB_VERDICT_INCONCLUSIVE;
+    }
+    if (bps % BITS_PER_MBIT != 0 || bps / BITS_PER_MBIT > 0xFFFFFFFFULL) {
+        sprintf_s(reason, size, "OS rate %llu bit/s is not representable in integer Mbit/s and the conversion is not specified "
+                  "(#472); link_speed_mbps %u", bps, o->q.q.link_speed_mbps);
+        return AVB_VERDICT_INCONCLUSIVE;
+    }
+    expected = (unsigned long long)o->q.q.link_speed_mbps * BITS_PER_MBIT;
+    if (expected == bps) {
+        sprintf_s(reason, size, "connected: link_speed_mbps %u x 1,000,000 = TransmitLinkSpeed %llu", o->q.q.link_speed_mbps, bps);
+        return AVB_VERDICT_PASS;
+    }
+    sprintf_s(reason, size, "connected: link_speed_mbps %u (x 1,000,000 = %llu) differs from TransmitLinkSpeed %llu bit/s",
+              o->q.q.link_speed_mbps, expected, bps);
+    return AVB_VERDICT_FAIL;
+}
+
+/** One GET_CLOCK_CONFIG read with its raw status: values count only when the call, the size and the reply status are valid */
+typedef struct { BOOL ok; LONG status; DWORD got; AVB_CLOCK_CONFIG c; } CLOCK_READ;
+
+static void read_clock(HANDLE h, CLOCK_READ *r)
+{
+    ZeroMemory(r, sizeof(*r));
+    r->status = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_CLOCK_CONFIG, &r->c, sizeof(r->c), &r->c, sizeof(r->c), &r->got);
+    r->ok = r->status == 0 && r->got == sizeof(r->c) && r->c.status == 0;
+}
+
+static void print_clock(const char *label, const CLOCK_READ *r)
+{
+    printf("    [EVIDENCE] clock %s: ntstatus=0x%08lX information=%lu", label, (unsigned long)r->status, r->got);
+    if (r->ok) {
+        printf(" status=0x%08X valid TIMINCA=0x%08X TSAUXC=0x%08X\n", r->c.status, r->c.timinca, r->c.tsauxc);
+    } else {
+        printf(" status=0x%08X NOT VALID (values not reported)\n", r->c.status);
+    }
+}
+
+/** Cleanup-only report of the clock configuration across the test (runner convention [CLEANUP:...], Run-Tests-CI.ps1): read-only,
+ *  never a functional verdict, never a write-back. Neither the incoming nor the post-cycle values are an established
+ *  restoration target, so equality is reported as observed, not as a restored target */
+static void link_clock_cleanup(UINT32 index, avb_u16 did, const CLOCK_READ *before, const CLOCK_READ *after, BOOL after_taken)
+{
+    if (!before->ok || !after_taken || !after->ok) {
+        printf("  [CLEANUP:NOT_VERIFIED] %s-CLOCK/adapter:%u did=0x%04X: TIMINCA/TSAUXC not measured %s (before: ntstatus=0x%08lX "
+               "information=%lu status=0x%08X; after: %s ntstatus=0x%08lX information=%lu status=0x%08X); cleanup only, the functional "
+               "verdicts stand\n", CASE_ID, index, did, !before->ok ? "before the first NIC operation" : "after cleanup",
+               (unsigned long)before->status, before->got, before->c.status, after_taken ? "read" : "not taken",
+               (unsigned long)after->status, after->got, after->c.status);
+    } else if (before->c.timinca != after->c.timinca || before->c.tsauxc != after->c.tsauxc) {
+        printf("  [CLEANUP:FAILED] %s-CLOCK/adapter:%u did=0x%04X: clock configuration differs from the state found: TIMINCA 0x%08X -> "
+               "0x%08X, TSAUXC 0x%08X -> 0x%08X; read-only, no write-back (neither value is an established restoration target); "
+               "cleanup only, the functional verdicts stand\n", CASE_ID, index, did, before->c.timinca, after->c.timinca,
+               before->c.tsauxc, after->c.tsauxc);
+    } else {
+        printf("  [CLEANUP:SUCCESS] %s-CLOCK/adapter:%u did=0x%04X: TIMINCA 0x%08X and TSAUXC 0x%08X read equal before the first NIC "
+               "operation and after cleanup\n", CASE_ID, index, did, after->c.timinca, after->c.tsauxc);
+    }
+    fflush(stdout);
+}
+
+/** FINAL's findings (PR #477 review r4619159432, reporting capacity). Every finding is printed at once as its own complete line
+ *  through vprintf, which writes to stdout with no caller buffer, and is counted in an integer first. The FINAL outcome is
+ *  decided from the two counts only, never from whether a diagnostic text could be built, so no formatting limit can drop a
+ *  finding, turn a violation into PASS or abort the report. The verdict line carries only a bounded summary (run_link_speed). */
+typedef struct { unsigned violations, missing; } FINAL_FINDINGS;
+
+static void final_item(unsigned *count, const char *kind, const char *fmt, va_list ap)
+{
+    (*count)++;   /* counted first: the finding exists whatever the printing does */
+    printf("    [EVIDENCE] FINAL %s: ", kind);
+    vprintf(fmt, ap);
+    printf("\n");
+    fflush(stdout);
+}
+
+static void final_violation(FINAL_FINDINGS *f, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    final_item(&f->violations, "violation", fmt, ap);
+    va_end(ap);
+}
+
+static void final_missing(FINAL_FINDINGS *f, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    final_item(&f->missing, "missing measurement", fmt, ap);
+    va_end(ap);
+}
+
+/** FINAL's TAS-query requirement (clean and readable), judged field by field under #365 12.2/12.3 validity, after the reply
+ *  itself (status, size, version) and its target identity are valid (review r4619159432 follow-up). A field counts only when
+ *  its own validity rule holds, so an unrelated register read failure never hides an observed violation, and an invalid
+ *  field's 0 is never read as a hardware observation:
+ *    hw_mode   from TQAVCTRL; valid when read_failed bit 0 is clear and it is not 0 or UNREADABLE. TSN is a violation.
+ *    current_status, next_status   always reported (U1, never 0). NONE conforms; UNKNOWN establishes nothing (missing);
+ *              any other status is residual slot state (violation).
+ *    restoration   advisory (12.5), always reported. COMPLETE conforms; UNKNOWN or NO_SSOT_BASELINE establish nothing
+ *              (missing); NONE and the PARTIAL values report a residue (violation).
+ *    registers  every v1 register valid (hw_read READ, read_failed 0); otherwise listed as missing evidence. */
+static void link_final_query(const QUERY_READ *r, avb_u64 luid, FINAL_FINDINGS *f)
+{
+    const AVB_TAS_QUERY_HW_REQUEST *q = &r->q;
+
+    if (!query_valid(r) || q->net_luid != luid) {
+        final_missing(f, "TAS query: ntstatus=0x%08lX information=%lu, %s", (unsigned long)r->status, r->got,
+                      !query_valid(r) ? "no valid v1 reply" : "reply for another NET_LUID");
+        return;
+    }
+    if ((q->regs.read_failed & LINK_RF_TQAVCTRL) != 0 || q->hw_mode == 0 || q->hw_mode == AVB_TAS_HWMODE_UNREADABLE) {
+        final_missing(f, "TSN mode: TQAVCTRL invalid (hw_mode=%u, read_failed bit 0 %s)", q->hw_mode,
+                      (q->regs.read_failed & LINK_RF_TQAVCTRL) ? "set" : "clear");
+    } else if (q->hw_mode != AVB_TAS_HWMODE_OFF) {
+        final_violation(f, "TSN mode on: valid TQAVCTRL=0x%08X, hw_mode=%u", q->regs.tqavctrl, q->hw_mode);
+    }
+    if (q->current_status == 0 || q->current_status == AVB_TAS_ST_UNKNOWN) {
+        final_missing(f, "current slot: status %u, reasons 0x%X, not established", q->current_status, q->current_reasons);
+    } else if (q->current_status != AVB_TAS_ST_NONE) {
+        final_violation(f, "current slot status %u (reasons 0x%X), not NONE", q->current_status, q->current_reasons);
+    }
+    if (q->next_status == 0 || q->next_status == AVB_TAS_ST_UNKNOWN) {
+        final_missing(f, "next slot: status %u, reasons 0x%X, not established", q->next_status, q->next_reasons);
+    } else if (q->next_status != AVB_TAS_ST_NONE) {
+        final_violation(f, "next slot status %u (reasons 0x%X), not NONE", q->next_status, q->next_reasons);
+    }
+    if (q->restoration == 0 || q->restoration == AVB_TAS_RESTORE_UNKNOWN || q->restoration == AVB_TAS_RESTORE_NO_SSOT_BASELINE) {
+        final_missing(f, "advisory restoration %u, not established", q->restoration);
+    } else if (q->restoration != AVB_TAS_RESTORE_COMPLETE) {
+        final_violation(f, "advisory restoration %u reports a residue, not COMPLETE", q->restoration);
+    }
+    if (q->hw_read != AVB_TAS_HWREAD_READ || q->regs.read_failed != 0) {
+        final_missing(f, "registers not all valid: hw_read=%u read_failed=0x%05X", q->hw_read, q->regs.read_failed);
+    }
+}
+
+static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst)
+{
+    CLOCK_READ ck0, ck1;
+    LINK_OBS pre, att, s1, s2;
+    QUERY_READ finq;
+    STATS_READ st_att, st_fin;
+    STATE_READ tas;
+    MIB_IF_ROW2 pre_os, fin_os;
+    DWORD pre_err, fin_err, start;
+    HANDLE h;
+    BOOL cycled, returned, pre_connected;
+    AVB_VERDICT v1, v2;
+    FINAL_FINDINGS ff;
+    char reason[900], r2[400];
+
+    ZeroMemory(&st_att, sizeof(st_att));
+    ZeroMemory(&st_fin, sizeof(st_fin));
+    ZeroMemory(&tas, sizeof(tas));
+    ZeroMemory(&ck0, sizeof(ck0));
+    ZeroMemory(&ck1, sizeof(ck1));
+    ck0.status = ck1.status = (LONG)AVB_NTSTATUS_UNAVAILABLE;   /* "not read" until a read happens, never a fake success */
+
+    /* PRESTATE: evidence and FINAL's link reference; nothing is judged here */
+    pre_err = read_if_raw(id->net_luid, &pre_os);
+    pre_connected = pre_err == NO_ERROR && pre_os.MediaConnectState == MediaConnectStateConnected;
+    printf("    [EVIDENCE] PRESTATE OS: err=%lu state=%s tx=%llu rx=%llu bit/s oper=%d\n", pre_err, media_name(pre_os.MediaConnectState),
+           pre_os.TransmitLinkSpeed, pre_os.ReceiveLinkSpeed, (int)pre_os.OperStatus);
+    h = open_bound_read(id->net_luid);
+    if (h != INVALID_HANDLE_VALUE) {
+        link_observe(h, id->net_luid, "PRESTATE", &pre);
+        print_query("PRESTATE", &pre.q);
+        /* The incoming TAS state as found, origin not known to the test: recorded, never judged or assumed clean */
+        if (query_valid(&pre.q)) {
+            printf("    [EVIDENCE] incoming TAS state (origin unknown): %s; hw_mode=%u current=%u/0x%X next=%u/0x%X restoration=%u "
+                   "commit=%u/%u\n", query_clean(&pre.q) ? "clean" : "NOT clean", pre.q.q.hw_mode, pre.q.q.current_status,
+                   pre.q.q.current_reasons, pre.q.q.next_status, pre.q.q.next_reasons, pre.q.q.restoration,
+                   pre.q.q.current_commit.state, pre.q.q.next_commit.state);
+        }
+        read_clock(h, &ck0);   /* before the first NIC operation */
+        print_clock("before the first NIC operation", &ck0);
+        CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
+    } else {
+        printf("    [EVIDENCE] PRESTATE query: no read-only handle bound by NET_LUID\n");
+    }
+
+    /* CYCLE: the test's own NIC cycle, the attach that ATTACH needs */
+    printf("\n  --- Owned NIC cycle (#472 ATTACH setup) ---\n");
+    g_pending_did = id->device_id;
+    InterlockedExchange(&g_pending_adapter, (LONG)index);
+    cycled = cm_bounded(inst, FALSE, DISABLE_BOUND_MS);
+    if (cycled) {
+        Sleep(3000);
+        cycled = cm_bounded(inst, TRUE, ENABLE_BOUND_MS);
+    } else {
+        printf("    enable not attempted: the disable did not complete and may still be pending in Windows\n");
+    }
+    h = cycled ? wait_for_adapter(id) : INVALID_HANDLE_VALUE;
+    returned = h != INVALID_HANDLE_VALUE;
+    InterlockedExchange(&g_pending_adapter, -1);
+    if (!cycled || !returned) {
+        verdict("CLEANUP_FAILED", "CYCLE", index, id->device_id,
+                "the NIC cycle did not complete or the adapter did not return with the same NET_LUID, device ID and MAC; a timed-out "
+                "disable may still be pending in Windows. Operator: NIC cycle once it ends, then check it with the TAS query");
+        verdict("BLOCKED", "ATTACH", index, id->device_id, "requires the test's own NIC cycle and the adapter's return");
+        verdict("BLOCKED", "STEADY", index, id->device_id, "requires the test's own NIC cycle and the adapter's return");
+        verdict("INCONCLUSIVE", "EVENT", index, id->device_id, "not exercised: no owned link transition without a detach (see the header)");
+        verdict("BLOCKED", "FINAL", index, id->device_id, "the adapter did not return; its final state is not established");
+        link_clock_cleanup(index, id->device_id, &ck0, &ck1, FALSE);
+        return;
+    }
+    verdict("PASS", "CYCLE", index, id->device_id, "disabled, enabled, returned with the same NET_LUID, device ID and MAC");
+
+    /* ATTACH: a pre-test connected link must be reported connected again first; a disconnected one is compared as found */
+    if (pre_connected) {
+        MIB_IF_ROW2 row;
+        ZeroMemory(&row, sizeof(row));
+        start = GetTickCount();
+        while (GetTickCount() - start < LINK_BOUND_MS) {
+            if (read_if_raw(id->net_luid, &row) == NO_ERROR && row.MediaConnectState == MediaConnectStateConnected) {
+                break;
+            }
+            Sleep(500);
+        }
+        printf("    OS link after the cycle: %s after %lu ms (bound %d ms)\n", media_name(row.MediaConnectState), GetTickCount() - start,
+               LINK_BOUND_MS);
+    }
+    link_observe(h, id->net_luid, "ATTACH", &att);
+    print_query("ATTACH", &att.q);
+    read_stats(h, &st_att);
+    v1 = link_judge(&att, reason, sizeof(reason));
+    verdict(avb_verdict_tag(v1), "ATTACH", index, id->device_id, reason);
+
+    /* STEADY: two observations LINK_STEADY_INTERVAL_MS apart, each judged against its own bracket */
+    link_observe(h, id->net_luid, "STEADY-1", &s1);
+    Sleep(LINK_STEADY_INTERVAL_MS);
+    link_observe(h, id->net_luid, "STEADY-2", &s2);
+    if (s1.os_agreed && s2.os_agreed && (s1.os.MediaConnectState != s2.os.MediaConnectState ||
+                                         s1.os.TransmitLinkSpeed != s2.os.TransmitLinkSpeed)) {
+        printf("    [EVIDENCE] measured link event between the STEADY observations: %s %llu -> %s %llu bit/s\n",
+               media_name(s1.os.MediaConnectState), s1.os.TransmitLinkSpeed, media_name(s2.os.MediaConnectState), s2.os.TransmitLinkSpeed);
+    }
+    v1 = link_judge(&s1, reason, sizeof(reason));
+    v2 = link_judge(&s2, r2, sizeof(r2));
+    if (v1 == AVB_VERDICT_PASS && v2 == AVB_VERDICT_PASS) {
+        verdict("PASS", "STEADY", index, id->device_id, "both observations agree with their OS brackets");
+    } else {
+        char both[820];
+        AVB_VERDICT v = (v1 == AVB_VERDICT_FAIL || v2 == AVB_VERDICT_FAIL) ? AVB_VERDICT_FAIL :
+                        (v1 != AVB_VERDICT_PASS ? v1 : v2);
+        sprintf_s(both, sizeof(both), "first: %s %s; second: %s %s", avb_verdict_tag(v1), reason, avb_verdict_tag(v2), r2);
+        verdict(avb_verdict_tag(v), "STEADY", index, id->device_id, both);
+    }
+
+    /* EVENT: required by #472 but not exercised by this test; never a pass by omission */
+    verdict("INCONCLUSIVE", "EVENT", index, id->device_id,
+            "not exercised: the test has no owned procedure that changes the link without detaching the filter and restores it "
+            "(a cable or link-partner change depends on topology it cannot establish, #463); ATTACH is not EVENT coverage");
+
+    /* FINAL: bound, link as before the test, TAS clean, no fault; a difference is a cleanup defect, not a functional verdict.
+     * Each requirement is judged on its own valid measurement first (r4619159432): an observed violation stays a violation
+     * whatever else could not be read; only with no violation does a missing measurement make the outcome not verified. */
+    fin_err = read_if_raw(id->net_luid, &fin_os);
+    printf("    [EVIDENCE] FINAL OS: err=%lu state=%s tx=%llu rx=%llu bit/s\n", fin_err, media_name(fin_os.MediaConnectState),
+           fin_os.TransmitLinkSpeed, fin_os.ReceiveLinkSpeed);
+    query(h, &finq);
+    print_query("FINAL", &finq);
+    read_state(h, &tas);
+    read_stats(h, &st_fin);
+    read_clock(h, &ck1);   /* after cleanup: the test's last operation on the adapter */
+    print_clock("after cleanup", &ck1);
+    CloseHandle(h);
+    ZeroMemory(&ff, sizeof(ff));
+    /* bound: established, the handle was bound to this NET_LUID after the adapter returned with the same identity */
+    if (pre_err != NO_ERROR || fin_err != NO_ERROR) {           /* link state and rate as before the test */
+        final_missing(&ff, "link state: GetIfEntry2 before err=%lu, after err=%lu", pre_err, fin_err);
+    } else if (fin_os.MediaConnectState != pre_os.MediaConnectState || fin_os.TransmitLinkSpeed != pre_os.TransmitLinkSpeed) {
+        final_violation(&ff, "link %s %llu -> %s %llu bit/s", media_name(pre_os.MediaConnectState), pre_os.TransmitLinkSpeed,
+                        media_name(fin_os.MediaConnectState), fin_os.TransmitLinkSpeed);
+    }
+    link_final_query(&finq, id->net_luid, &ff);                 /* TAS query clean and readable, field by field */
+    if (!tas.ok) {                                              /* TAS record CLEAN */
+        final_missing(&ff, "TAS record: GET_TAS_STATE unavailable");
+    } else if (tas.s.armed != AVB_TAS_STATE_CLEAN) {
+        final_violation(&ff, "TAS record armed=%u, not CLEAN", tas.s.armed);
+    }
+    if (!st_att.ok || !st_fin.ok) {                             /* HardwareFaults unchanged from ATTACH to FINAL */
+        final_missing(&ff, "HardwareFaults: statistics at ATTACH %s, at FINAL %s", st_att.ok ? "read" : "unavailable",
+                      st_fin.ok ? "read" : "unavailable");
+    } else if (st_att.s.HardwareFaults != st_fin.s.HardwareFaults) {
+        final_violation(&ff, "HardwareFaults %llu -> %llu", st_att.s.HardwareFaults, st_fin.s.HardwareFaults);
+    }
+    /* The verdict line: a bounded summary; the outcome comes from the counts alone. Capacity: FINAL_SUMMARY_VIOLATIONS and
+     * FINAL_SUMMARY_MISSING have FINAL_SUMMARY_FIXED characters or fewer besides their %u conversions; each %u prints at most
+     * 10 digits (UINT_MAX 4294967295), so a summary needs at most FINAL_SUMMARY_FIXED + 2 * 10 + 1 bytes, which the
+     * compile-time check below holds against sizeof(reason). */
+    C_ASSERT(sizeof(FINAL_SUMMARY_VIOLATIONS) - 1 - 4 <= FINAL_SUMMARY_FIXED && sizeof(FINAL_SUMMARY_MISSING) - 1 - 2 <= FINAL_SUMMARY_FIXED &&
+             FINAL_SUMMARY_FIXED + 2 * 10 + 1 <= sizeof(reason));
+    if (ff.violations != 0) {
+        sprintf_s(reason, sizeof(reason), FINAL_SUMMARY_VIOLATIONS, ff.violations, ff.missing);
+        verdict("CLEANUP_FAILED", "FINAL", index, id->device_id, reason);
+    } else if (ff.missing != 0) {
+        sprintf_s(reason, sizeof(reason), FINAL_SUMMARY_MISSING, ff.missing);
+        verdict("INCONCLUSIVE_RESTORATION", "FINAL", index, id->device_id, reason);
+    } else {
+        verdict("PASS", "FINAL", index, id->device_id,
+                "bound, OS link state and rate as before the test, TAS query clean and readable, record CLEAN, no new hardware fault");
+    }
+    printf("    [EVIDENCE] PHC: the owned NIC cycle reseeds it (E12); reported, not restored\n");
+    link_clock_cleanup(index, id->device_id, &ck0, &ck1, TRUE);
+}
+
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 {
     QUERY_READ q1, q2;
@@ -1897,7 +2384,13 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 
     /* Preconditions of the owned cleanup and the wire checks: nothing is sent to the adapter before they hold */
     if (!find_devinst(id->net_luid, &inst)) {
-        verdict("BLOCKED", "QUERY", index, id->device_id, "cannot resolve the adapter device node required for the owned NIC-cycle cleanup");
+        verdict("BLOCKED", g_link_mode ? "CYCLE" : "QUERY", index, id->device_id,
+                g_link_mode ? "cannot resolve the adapter device node required for the owned NIC cycle"
+                            : "cannot resolve the adapter device node required for the owned NIC-cycle cleanup");
+        return;
+    }
+    if (g_link_mode) {   /* #472: no IPv4, observer or link precondition; a disconnected adapter is a valid ATTACH case */
+        run_link_speed(index, id, inst);
         return;
     }
     if (!read_if(id->net_luid, &row) || row.OperStatus != IfOperStatusUp || !find_addressing(id->net_luid, &ipv4, &other_link)) {
@@ -2049,15 +2542,19 @@ int main(int argc, char **argv)
     } else if (argc == 2 && strcmp(argv[1], "--restore") == 0) {
         g_restore_mode = TRUE;
         g_case = "TC-TASAPI-012";
+    } else if (argc == 2 && strcmp(argv[1], "--link-speed") == 0) {
+        g_link_mode = TRUE;
+        g_case = "TC-TASAPI-021";
     } else if (argc != 1) {
-        printf("[BLOCKED] %s: usage: test_tas_query_clean [--hw-verified | --tiers-unbound | --invalid | --restore]\n", CASE_ID);
+        printf("[BLOCKED] %s: usage: test_tas_query_clean [--hw-verified | --tiers-unbound | --invalid | --restore | --link-speed]\n", CASE_ID);
         return 3;
     }
     printf("=== IntelAvbFilter - IOCTL_AVB_TAS_QUERY_HW, %s (%s) ===\n", CASE_ID,
            g_hw_verified_mode ? "#381: HARDWARE_VERIFIED never returned, clean, BaseT ahead and PHC past BaseT" :
            g_tiers_mode ? "#367: unbound handle refused, capability, support tiers" :
            g_invalid_mode ? "#368: invalid TAS_ACTIVATE requests refused, query, record and TX unchanged" :
-           g_restore_mode ? "#377: reported restoration against the test's own observations, PHC separately" : "#366: clean adapter");
+           g_restore_mode ? "#377: reported restoration against the test's own observations, PHC separately" :
+           g_link_mode ? "#472: driver-owned link speed against the OS observation (K8)" : "#366: clean adapter");
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("[BLOCKED] %s: Winsock unavailable\n", CASE_ID);
         return 3;
@@ -2122,7 +2619,8 @@ int main(int argc, char **argv)
         }
     }
     for (i = 0; i < stored; i++) {
-        if (i < TAS_QUERY_CLEAN_MAX_ADAPTERS) {
+        /* --link-speed runs every TAS adapter: its runner budget scales with the enumerated count, uncapped (r4619159471) */
+        if (g_link_mode || i < TAS_QUERY_CLEAN_MAX_ADAPTERS) {
             run_adapter(ids[i].index, &ids[i]);
         } else {
             printf("[BLOCKED] %s-QUERY/adapter:%u did=0x%04X: beyond the supported inventory of %d TAS adapters per run (runner time "
