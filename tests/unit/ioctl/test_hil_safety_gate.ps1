@@ -439,6 +439,7 @@ $o = [ordered]@{ Keys = (@($HilTestTimeoutPerAdapter.Keys) -join '|'); Plain = (
 foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
     foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
     $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
+    $o["$e@suite1000"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 1000 -AdapterCount 1
     $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
 }
 $o['PlainQuery'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_query_clean').Count
@@ -483,7 +484,10 @@ $o
         if ($pa["$e@limit"] -ne $lim) { $paBad += "$e adapter limit $($pa["$e@limit"]), the test's own limit is $lim" }
         $want = [ordered]@{ '1' = 920; '2' = 1840; '3' = 2760; '8' = 920 * [Math]::Min(8, $lim); '20' = 920 * $lim; '0' = 920; '-1' = 920 * $lim }
         foreach ($n in $want.Keys) { if ([int]$pa["$e@$n"] -ne [int]$want[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($want[$n]) s" } }
-        if ([int]$pa["$e@suite600"] -ne 600) { $paBad += "$e lowers the 600 s suite timeout to $($pa["$e@suite600"]) s" }
+        # One adapter: the larger of the suite timeout and the 920 s budget, exactly. Below the budget the budget wins
+        # (Max(600, 920) = 920); above it the suite timeout wins (Max(1000, 920) = 1000) and is never lowered
+        if ([int]$pa["$e@suite600"] -ne 920) { $paBad += "$e with one adapter under a 600 s suite: $($pa["$e@suite600"]) s, expected Max(600, 920) = 920 s" }
+        if ([int]$pa["$e@suite1000"] -ne 1000) { $paBad += "$e with one adapter under a 1000 s suite: $($pa["$e@suite1000"]) s, expected Max(1000, 920) = 1000 s (the suite timeout is never lowered)" }
     }
     if ([int]$pa['atdecc@9'] -ne 420) { $paBad += "test_atdecc_aen_protocol depends on the adapter count ($($pa['atdecc@9']) s)" }
     if ([int]$pa['gate@9'] -ne 450) { $paBad += "test_hil_safety_gate.ps1 depends on the adapter count ($($pa['gate@9']) s)" }
