@@ -192,6 +192,7 @@
 #include <bcrypt.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include "../../include/avb_ioctl.h"
 #include "../../include/intel_pci_ids.h"
@@ -235,6 +236,12 @@
 #define LINK_STEADY_INTERVAL_MS   10000    /* between the two STEADY observations */
 #define BITS_PER_MBIT             1000000ULL
 #define LINK_RF_TQAVCTRL          0x00000001u  /* regs.read_failed bit 0 = TQAVCTRL invalid (avb_ioctl.h AVB_TAS_REGS, #365 12.2/12.3) */
+/* FINAL verdict summaries (PR #477 r4619159432): fixed text plus counts; the items themselves are separate lines */
+#define FINAL_SUMMARY_VIOLATIONS "%u violation(s) observed and %u required measurement(s) missing; each is listed above as a " \
+                                 "FINAL violation or FINAL missing measurement line"
+#define FINAL_SUMMARY_MISSING    "no violation observed, but %u required measurement(s) missing; each is listed above as a " \
+                                 "FINAL missing measurement line"
+#define FINAL_SUMMARY_FIXED      136u   /* the longer summary's characters besides its %u conversions (violations: 136, missing: 117; C_ASSERT) */
 /* Supported inventory: TAS adapters this process runs. The runner budget is 560 s x min(enumerated adapters, this value)
  * ($HilTestTimeoutPerAdapter, checked by TEST-HILGATE-098), so every TAS adapter run fits it; discovery stays complete and a
  * TAS adapter beyond this value is reported BLOCKED, never left out silently. Not applied to --link-speed (#472): it runs every
@@ -2102,6 +2109,37 @@ static void link_clock_cleanup(UINT32 index, avb_u16 did, const CLOCK_READ *befo
     fflush(stdout);
 }
 
+/** FINAL's findings (PR #477 review r4619159432, reporting capacity). Every finding is printed at once as its own complete line
+ *  through vprintf, which writes to stdout with no caller buffer, and is counted in an integer first. The FINAL outcome is
+ *  decided from the two counts only, never from whether a diagnostic text could be built, so no formatting limit can drop a
+ *  finding, turn a violation into PASS or abort the report. The verdict line carries only a bounded summary (run_link_speed). */
+typedef struct { unsigned violations, missing; } FINAL_FINDINGS;
+
+static void final_item(unsigned *count, const char *kind, const char *fmt, va_list ap)
+{
+    (*count)++;   /* counted first: the finding exists whatever the printing does */
+    printf("    [EVIDENCE] FINAL %s: ", kind);
+    vprintf(fmt, ap);
+    printf("\n");
+    fflush(stdout);
+}
+
+static void final_violation(FINAL_FINDINGS *f, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    final_item(&f->violations, "violation", fmt, ap);
+    va_end(ap);
+}
+
+static void final_missing(FINAL_FINDINGS *f, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    final_item(&f->missing, "missing measurement", fmt, ap);
+    va_end(ap);
+}
+
 /** FINAL's TAS-query requirement (clean and readable), judged field by field under #365 12.2/12.3 validity, after the reply
  *  itself (status, size, version) and its target identity are valid (review r4619159432 follow-up). A field counts only when
  *  its own validity rule holds, so an unrelated register read failure never hides an observed violation, and an invalid
@@ -2112,49 +2150,38 @@ static void link_clock_cleanup(UINT32 index, avb_u16 did, const CLOCK_READ *befo
  *    restoration   advisory (12.5), always reported. COMPLETE conforms; UNKNOWN or NO_SSOT_BASELINE establish nothing
  *              (missing); NONE and the PARTIAL values report a residue (violation).
  *    registers  every v1 register valid (hw_read READ, read_failed 0); otherwise listed as missing evidence. */
-static void link_final_query(const QUERY_READ *r, avb_u64 luid, char *viol, size_t vsize, char *miss, size_t msize)
+static void link_final_query(const QUERY_READ *r, avb_u64 luid, FINAL_FINDINGS *f)
 {
     const AVB_TAS_QUERY_HW_REQUEST *q = &r->q;
-    char part[200];
 
     if (!query_valid(r) || q->net_luid != luid) {
-        sprintf_s(part, sizeof(part), "TAS query (ntstatus=0x%08lX information=%lu, %s); ", (unsigned long)r->status, r->got,
-                  !query_valid(r) ? "no valid v1 reply" : "reply for another NET_LUID");
-        strcat_s(miss, msize, part);
+        final_missing(f, "TAS query: ntstatus=0x%08lX information=%lu, %s", (unsigned long)r->status, r->got,
+                      !query_valid(r) ? "no valid v1 reply" : "reply for another NET_LUID");
         return;
     }
     if ((q->regs.read_failed & LINK_RF_TQAVCTRL) != 0 || q->hw_mode == 0 || q->hw_mode == AVB_TAS_HWMODE_UNREADABLE) {
-        sprintf_s(part, sizeof(part), "TSN mode (TQAVCTRL invalid: hw_mode=%u read_failed bit 0 %s); ", q->hw_mode,
-                  (q->regs.read_failed & LINK_RF_TQAVCTRL) ? "set" : "clear");
-        strcat_s(miss, msize, part);
+        final_missing(f, "TSN mode: TQAVCTRL invalid (hw_mode=%u, read_failed bit 0 %s)", q->hw_mode,
+                      (q->regs.read_failed & LINK_RF_TQAVCTRL) ? "set" : "clear");
     } else if (q->hw_mode != AVB_TAS_HWMODE_OFF) {
-        sprintf_s(part, sizeof(part), "TSN mode on (valid TQAVCTRL=0x%08X, hw_mode=%u); ", q->regs.tqavctrl, q->hw_mode);
-        strcat_s(viol, vsize, part);
+        final_violation(f, "TSN mode on: valid TQAVCTRL=0x%08X, hw_mode=%u", q->regs.tqavctrl, q->hw_mode);
     }
     if (q->current_status == 0 || q->current_status == AVB_TAS_ST_UNKNOWN) {
-        sprintf_s(part, sizeof(part), "current slot (status %u, reasons 0x%X: not established); ", q->current_status, q->current_reasons);
-        strcat_s(miss, msize, part);
+        final_missing(f, "current slot: status %u, reasons 0x%X, not established", q->current_status, q->current_reasons);
     } else if (q->current_status != AVB_TAS_ST_NONE) {
-        sprintf_s(part, sizeof(part), "current slot status %u (reasons 0x%X), not NONE; ", q->current_status, q->current_reasons);
-        strcat_s(viol, vsize, part);
+        final_violation(f, "current slot status %u (reasons 0x%X), not NONE", q->current_status, q->current_reasons);
     }
     if (q->next_status == 0 || q->next_status == AVB_TAS_ST_UNKNOWN) {
-        sprintf_s(part, sizeof(part), "next slot (status %u, reasons 0x%X: not established); ", q->next_status, q->next_reasons);
-        strcat_s(miss, msize, part);
+        final_missing(f, "next slot: status %u, reasons 0x%X, not established", q->next_status, q->next_reasons);
     } else if (q->next_status != AVB_TAS_ST_NONE) {
-        sprintf_s(part, sizeof(part), "next slot status %u (reasons 0x%X), not NONE; ", q->next_status, q->next_reasons);
-        strcat_s(viol, vsize, part);
+        final_violation(f, "next slot status %u (reasons 0x%X), not NONE", q->next_status, q->next_reasons);
     }
     if (q->restoration == 0 || q->restoration == AVB_TAS_RESTORE_UNKNOWN || q->restoration == AVB_TAS_RESTORE_NO_SSOT_BASELINE) {
-        sprintf_s(part, sizeof(part), "advisory restoration (%u: not established); ", q->restoration);
-        strcat_s(miss, msize, part);
+        final_missing(f, "advisory restoration %u, not established", q->restoration);
     } else if (q->restoration != AVB_TAS_RESTORE_COMPLETE) {
-        sprintf_s(part, sizeof(part), "advisory restoration %u reports a residue, not COMPLETE; ", q->restoration);
-        strcat_s(viol, vsize, part);
+        final_violation(f, "advisory restoration %u reports a residue, not COMPLETE", q->restoration);
     }
     if (q->hw_read != AVB_TAS_HWREAD_READ || q->regs.read_failed != 0) {
-        sprintf_s(part, sizeof(part), "registers not all valid (hw_read=%u read_failed=0x%05X); ", q->hw_read, q->regs.read_failed);
-        strcat_s(miss, msize, part);
+        final_missing(f, "registers not all valid: hw_read=%u read_failed=0x%05X", q->hw_read, q->regs.read_failed);
     }
 }
 
@@ -2170,7 +2197,8 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
     HANDLE h;
     BOOL cycled, returned, pre_connected;
     AVB_VERDICT v1, v2;
-    char reason[900], r2[400], violations[400], missing[400], part[160];
+    FINAL_FINDINGS ff;
+    char reason[900], r2[400];
 
     ZeroMemory(&st_att, sizeof(st_att));
     ZeroMemory(&st_fin, sizeof(st_fin));
@@ -2288,36 +2316,37 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
     read_clock(h, &ck1);   /* after cleanup: the test's last operation on the adapter */
     print_clock("after cleanup", &ck1);
     CloseHandle(h);
-    violations[0] = missing[0] = '\0';
+    ZeroMemory(&ff, sizeof(ff));
     /* bound: established, the handle was bound to this NET_LUID after the adapter returned with the same identity */
     if (pre_err != NO_ERROR || fin_err != NO_ERROR) {           /* link state and rate as before the test */
-        sprintf_s(part, sizeof(part), "link state (GetIfEntry2 before err=%lu, after err=%lu); ", pre_err, fin_err);
-        strcat_s(missing, sizeof(missing), part);
+        final_missing(&ff, "link state: GetIfEntry2 before err=%lu, after err=%lu", pre_err, fin_err);
     } else if (fin_os.MediaConnectState != pre_os.MediaConnectState || fin_os.TransmitLinkSpeed != pre_os.TransmitLinkSpeed) {
-        sprintf_s(part, sizeof(part), "link %s %llu -> %s %llu bit/s; ", media_name(pre_os.MediaConnectState),
-                  pre_os.TransmitLinkSpeed, media_name(fin_os.MediaConnectState), fin_os.TransmitLinkSpeed);
-        strcat_s(violations, sizeof(violations), part);
+        final_violation(&ff, "link %s %llu -> %s %llu bit/s", media_name(pre_os.MediaConnectState), pre_os.TransmitLinkSpeed,
+                        media_name(fin_os.MediaConnectState), fin_os.TransmitLinkSpeed);
     }
-    link_final_query(&finq, id->net_luid, violations, sizeof(violations), missing, sizeof(missing));   /* TAS clean, readable */
+    link_final_query(&finq, id->net_luid, &ff);                 /* TAS query clean and readable, field by field */
     if (!tas.ok) {                                              /* TAS record CLEAN */
-        strcat_s(missing, sizeof(missing), "TAS record (GET_TAS_STATE unavailable); ");
+        final_missing(&ff, "TAS record: GET_TAS_STATE unavailable");
     } else if (tas.s.armed != AVB_TAS_STATE_CLEAN) {
-        sprintf_s(part, sizeof(part), "TAS record armed=%u, not CLEAN; ", tas.s.armed);
-        strcat_s(violations, sizeof(violations), part);
+        final_violation(&ff, "TAS record armed=%u, not CLEAN", tas.s.armed);
     }
     if (!st_att.ok || !st_fin.ok) {                             /* HardwareFaults unchanged from ATTACH to FINAL */
-        sprintf_s(part, sizeof(part), "HardwareFaults (statistics at ATTACH %s, at FINAL %s); ", st_att.ok ? "read" : "unavailable",
-                  st_fin.ok ? "read" : "unavailable");
-        strcat_s(missing, sizeof(missing), part);
+        final_missing(&ff, "HardwareFaults: statistics at ATTACH %s, at FINAL %s", st_att.ok ? "read" : "unavailable",
+                      st_fin.ok ? "read" : "unavailable");
     } else if (st_att.s.HardwareFaults != st_fin.s.HardwareFaults) {
-        sprintf_s(part, sizeof(part), "HardwareFaults %llu -> %llu; ", st_att.s.HardwareFaults, st_fin.s.HardwareFaults);
-        strcat_s(violations, sizeof(violations), part);
+        final_violation(&ff, "HardwareFaults %llu -> %llu", st_att.s.HardwareFaults, st_fin.s.HardwareFaults);
     }
-    if (violations[0] != '\0') {
-        sprintf_s(reason, sizeof(reason), "observed: %s%s%s", violations, missing[0] ? "not measured: " : "", missing);
+    /* The verdict line: a bounded summary; the outcome comes from the counts alone. Capacity: FINAL_SUMMARY_VIOLATIONS and
+     * FINAL_SUMMARY_MISSING have FINAL_SUMMARY_FIXED characters or fewer besides their %u conversions; each %u prints at most
+     * 10 digits (UINT_MAX 4294967295), so a summary needs at most FINAL_SUMMARY_FIXED + 2 * 10 + 1 bytes, which the
+     * compile-time check below holds against sizeof(reason). */
+    C_ASSERT(sizeof(FINAL_SUMMARY_VIOLATIONS) - 1 - 4 <= FINAL_SUMMARY_FIXED && sizeof(FINAL_SUMMARY_MISSING) - 1 - 2 <= FINAL_SUMMARY_FIXED &&
+             FINAL_SUMMARY_FIXED + 2 * 10 + 1 <= sizeof(reason));
+    if (ff.violations != 0) {
+        sprintf_s(reason, sizeof(reason), FINAL_SUMMARY_VIOLATIONS, ff.violations, ff.missing);
         verdict("CLEANUP_FAILED", "FINAL", index, id->device_id, reason);
-    } else if (missing[0] != '\0') {
-        sprintf_s(reason, sizeof(reason), "no violation observed, but not measured: %s", missing);
+    } else if (ff.missing != 0) {
+        sprintf_s(reason, sizeof(reason), FINAL_SUMMARY_MISSING, ff.missing);
         verdict("INCONCLUSIVE_RESTORATION", "FINAL", index, id->device_id, reason);
     } else {
         verdict("PASS", "FINAL", index, id->device_id,
