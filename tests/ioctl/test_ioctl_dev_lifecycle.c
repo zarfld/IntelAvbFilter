@@ -53,12 +53,12 @@
  * retry after the fault is cleared STATUS_SUCCESS, no lingering error state), executed with the Debug-only initialization fault
  * mechanism of #412 (include/avb_init_fault_dbg.h, src/avb_init_fault_dbg.c). On every enumerated adapter (no fixed limit;
  * per-adapter storage is sized from the validated inventory); identity, device node and arm target by NET_LUID, never by model:
- *   UT-DEV-LIFECYCLE-002-PRESTATE  setup before any mutation: device node, an independent management link (another adapter up
- *                  with a gateway), the driver Parameters key, stale fault values drained, removed and verified absent, the
- *                  target READY (the generic lifecycle state), the other adapters' state recorded. A precondition that is
- *                  checked and does not hold is FAILED_SETUP: setup failed, no initialization is attempted (without a
- *                  management link the NIC cycle is not run, it would cut the host's only path), the dependent lines stay
- *                  BLOCKED and a [COVERAGE] line keeps the adapter's gap visible.
+ *   UT-DEV-LIFECYCLE-002-PRESTATE  setup before any mutation: device node, the driver Parameters key, stale fault values
+ *                  drained, removed and verified absent, the target READY (the generic lifecycle state), the other adapters'
+ *                  state recorded. Network topology is not a precondition (#463): an adapter carrying the host's network
+ *                  connection is tested too; whether another adapter has a gateway is printed as diagnostic information. A
+ *                  precondition that is checked and does not hold is FAILED_SETUP: setup failed, no initialization is
+ *                  attempted, the dependent lines stay BLOCKED and a [COVERAGE] line keeps the adapter's gap visible.
  *   UT-DEV-LIFECYCLE-002-REACH     phase A: OBSERVE armed for origin ATTACH, owned NIC cycle (fresh attach of the target only).
  *                  PASS needs the driver record that consumed it: target, origin ATTACH, site BASIC (the fault point), IRQL 0,
  *                  and READY afterwards (its TIMINCA/TSAUXC are the normal-attach reference). Otherwise FAILED_SETUP: the
@@ -1556,7 +1556,8 @@ static BOOL irf_devinst(avb_u64 luid, DEVINST *inst)
     return CM_Locate_DevNodeA(inst, pnp, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
 }
 
-/** Another adapter, up with a gateway, keeps the host reachable while the target's owned NIC cycle runs */
+/** Whether another adapter is up with a gateway. Diagnostic information only (#463): it is never a precondition; the owned
+ *  NIC cycle may interrupt the host network, and the evidence is written locally */
 static BOOL irf_other_link(avb_u64 luid)
 {
     ULONG size = 32 * 1024;
@@ -1776,12 +1777,8 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         printf("    [COVERAGE] UT-DEV-LIFECYCLE-002 not covered on adapter:%u did=0x%04X (setup failed)\n", index, did);
         return;
     }
-    if (!irf_other_link(id->net_luid)) {
-        ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "setup failed: no independent management link (the owned NIC cycle would isolate the host, so it was not run); no initialization was attempted");
-        ic_blocked_cases(index, did, not_run, deps, (int)ARRAYSIZE(deps));
-        printf("    [COVERAGE] UT-DEV-LIFECYCLE-002 not covered on adapter:%u did=0x%04X (setup failed: this adapter carries the host's only management path)\n", index, did);
-        return;
-    }
+    printf("    [EVIDENCE] another adapter up with a gateway: %s (diagnostic only, not a precondition: the owned NIC cycle may "
+           "interrupt the host network; the evidence is written locally, #463)\n", irf_other_link(id->net_luid) ? "yes" : "no");
     k = irf_params_open(&created);
     if (k == NULL) {
         ic_verdict("FAILED_SETUP", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "setup failed: cannot open the driver Parameters key for the fault arm; no initialization was attempted");
@@ -1837,7 +1834,7 @@ static void irf_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         }
         printf("    [EVIDENCE] other adapter:%u did=0x%04X before: READY=%d\n", all[j].index, all[j].device_id, oth_ready[j]);
     }
-    ic_verdict("PASS", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "device node, independent management link, Parameters key without fault values, target READY");
+    ic_verdict("PASS", "UT-DEV-LIFECYCLE-002-PRESTATE", index, did, "device node, Parameters key without fault values, target READY");
     g_irf_established++;
 
     /* ---- Phase A, UT-DEV-LIFECYCLE-002-REACH: the fresh attach reaches the fault point (OBSERVE, no fault). The phase ends
