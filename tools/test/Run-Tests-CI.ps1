@@ -572,9 +572,11 @@ $HardwareIntegrationTests = @(
     "corrected_i226_tas",             # nmake: raw TAS register programming
     "avb_test_i210_device",           # device_specific/i210: register reads through the shared enumerator
     "avb_test_i350",                  # device_specific/i350: WRITE_REGISTER, SET_HW_TIMESTAMPING, INIT_DEVICE
-    "test_dev_lifecycle --init-retry-fault"   # #313 UT-DEV-LIFECYCLE-002 / #412: Debug-only initialization fault, owned NIC
+    "test_dev_lifecycle --init-retry-fault",  # #313 UT-DEV-LIFECYCLE-002 / #412: Debug-only initialization fault, owned NIC
                                               # cycles, testcase-owned setup, cleanup and final state. Unsafe in $HilTestSafety;
                                               # class-only dispatch policy is #458, not decided here
+    "test_dev_lifecycle --init-concurrent"    # #313 UT-DEV-INIT-CONCURRENT: overlap by the #412 HOLD, owned NIC cycles, bounded
+                                              # workers, testcase-owned setup, cleanup and final state. Unsafe in $HilTestSafety
 )
 
 # ===========================
@@ -785,6 +787,7 @@ $HilTestSafety = @{
     'test_tas_query_clean --invalid' = 'Unsafe'       # invalid TAS_ACTIVATE requests (one can commit), owned CM_Disable_DevNode / CM_Enable_DevNode cleanup (#368)
     'test_tas_query_clean --restore' = 'Unsafe'       # TAS_ACTIVATE HOLD, owned CM_Disable_DevNode / CM_Enable_DevNode cycle, reported restoration (#377)
     'test_dev_lifecycle --init-retry-fault' = 'Unsafe'  # Debug-only initialization fault, owned CM_Disable_DevNode / CM_Enable_DevNode cycles, INIT_DEVICE retry (#412)
+    'test_dev_lifecycle --init-concurrent' = 'Unsafe'   # Debug-only HOLD (#412), owned CM_Disable_DevNode / CM_Enable_DevNode cycles, concurrent INIT_DEVICE (#313)
     'test_dev_lifecycle --init-contract' = 'Init'     # INIT_DEVICE / OPEN_ADAPTER on READY adapters (#313 amendment, #404); a defective driver re-initializes and resets a healthy PHC: reported RED
     'test_ptp_phc_lifecycle'           = 'Unsafe'     # UT-CORR-009: ControlService STOP + Install-Driver-Elevated.ps1 Reinstall (split from test_ptp_phc_stability)
     'test_s3_sleep_wake'               = 'Unsafe'     # SetSuspendState (host S3); GET_CLOCK_CONFIG / GET_HW_STATE otherwise
@@ -922,6 +925,11 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     # fixed inventory limit, PR #462 review), so the budget is 1220 s times the adapters enumerated in the latest observed
     # state, uncapped; with no observed enumeration, one adapter's budget (a shorter budget ends in a recorded TIMEOUT).
     'test_dev_lifecycle --init-retry-fault' = @{ Seconds = 1220 }
+    # test_dev_lifecycle --init-concurrent (#313), from its own bounds per adapter: 25 s stale drain + 60 s READY before + one
+    # cycle (120 s disable + 60 s enable) + 60 s return + 2 s HOLD visibility + B and A workers (70 s + 5 s each) + 25 s history
+    # + 60 s READY after + cleanup (25 s drain, 60 s READY, a 120 + 60 s cycle, 60 s READY) = 887 s; 1130 s = + 27 %. No
+    # MaxAdapters: it runs every validated identity, so the budget scales with the enumerated adapters, uncapped.
+    'test_dev_lifecycle --init-concurrent' = @{ Seconds = 1130 }
 }
 
 # ===========================
