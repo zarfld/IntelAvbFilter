@@ -118,8 +118,10 @@
  *                  Anything else is ambiguous: INCONCLUSIVE, neither serialization nor its absence is claimed, the two B lines
  *                  are BLOCKED.
  *   UT-DEV-INIT-CONCURRENT-STATUS      B's raw NTSTATUS: exactly STATUS_DEVICE_BUSY. Each worker's deadline (one maximum HOLD
- *                  plus one bring-up) is measured from its own start; a request that misses it is FAIL even if it completes
- *                  during the following CancelIoEx grace period (completion is cleanup evidence only).
+ *                  plus one bring-up) runs from its own start and is judged on one monotonic timebase (QueryPerformanceCounter)
+ *                  against the worker's own completion timestamp, not against when the test joins it: a late completion is FAIL
+ *                  even if the worker is already finished at the join or completes during the CancelIoEx grace period; a
+ *                  timely completion stays timely even if the join is late. Completion and cancellation are cleanup evidence.
  *   UT-DEV-INIT-CONCURRENT-NO-ATTEMPT  no initialization attempt attributable to B: no record on B's thread, none on another
  *                  thread (A's excluded) started during B's request; a complete history is required for PASS.
  *   UT-DEV-INIT-CONCURRENT-FIRST-STATUS  A's raw NTSTATUS: exactly STATUS_SUCCESS (row "Adapter not initialized"); a missed
@@ -2178,19 +2180,32 @@ typedef struct {
     LONGLONG q0, q1;   /* QueryPerformanceCounter immediately before and after the request */
 } ICC_WORKER;
 
-/** Bounded completion of a worker, measured from its own start (start_tick, taken just before it was created). Expiry of the
- *  deadline is reported in *timed_out and is never erased by a later completion; the return value is whether the worker
- *  completed at all (after CancelIoEx and ICC_CANCEL_BOUND_MS more), which is cleanup evidence only */
-static BOOL icc_join(HANDLE thread, DWORD start_tick, HANDLE io, BOOL *timed_out, const char *who)
+/** Bounded completion of a worker against its own deadline, judged on one monotonic timebase (QueryPerformanceCounter):
+ *  deadline = start_qpc (taken just before the worker was created) + ICC_WORKER_BOUND_MS. A worker that completed is judged
+ *  by its own completion timestamp w->q1, never by when this thread got to join it: a late completion is a missed deadline
+ *  even if the thread is already signalled at the join, and a timely completion stays timely even if the join is late. A
+ *  worker still running at the deadline missed it. *timed_out is the functional outcome; the return value (completed at all,
+ *  possibly only after CancelIoEx and ICC_CANCEL_BOUND_MS more) is cleanup evidence only */
+static BOOL icc_join(HANDLE thread, LONGLONG start_qpc, LONGLONG freq, const ICC_WORKER *w, HANDLE io, BOOL *timed_out,
+                     const char *who)
 {
-    DWORD elapsed = GetTickCount() - start_tick;
-    DWORD remaining = elapsed < ICC_WORKER_BOUND_MS ? ICC_WORKER_BOUND_MS - elapsed : 0;
+    LONGLONG deadline = start_qpc + (LONGLONG)ICC_WORKER_BOUND_MS * freq / 1000;
+    LARGE_INTEGER now;
+    DWORD remaining = 0;
 
-    *timed_out = FALSE;
+    QueryPerformanceCounter(&now);
+    if (now.QuadPart < deadline) {
+        remaining = (DWORD)(((deadline - now.QuadPart) * 1000 + freq - 1) / freq);   /* rounded up: never ends before it */
+    }
     if (WaitForSingleObject(thread, remaining) == WAIT_OBJECT_0) {
+        *timed_out = w->q1 > deadline;
+        if (*timed_out) {
+            printf("    [EVIDENCE] instance %s completed %.1f ms after its start, past its %u ms deadline\n", who,
+                   (double)(w->q1 - start_qpc) * 1000.0 / (double)freq, ICC_WORKER_BOUND_MS);
+        }
         return TRUE;
     }
-    *timed_out = TRUE;
+    *timed_out = TRUE;   /* still running at the deadline */
     printf("    [EVIDENCE] instance %s did not complete within %u ms of its start: CancelIoEx, then %u ms more\n", who,
            ICC_WORKER_BOUND_MS, ICC_CANCEL_BOUND_MS);
     (void)CancelIoEx(io, NULL);
@@ -2278,7 +2293,8 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     BOOL a_timeout = FALSE, b_timeout = FALSE;   /* deadline expiry, kept apart from eventual completion (cleanup evidence) */
     HANDLE hO = INVALID_HANDLE_VALUE, hB = INVALID_HANDLE_VALUE, thread = NULL, thread_b = NULL;
     ICC_WORKER *w = NULL, *wb = NULL;
-    DWORD tid_a = 0, tid_b = 0, got_b = 0, a_start = 0, b_start = 0;
+    DWORD tid_a = 0, tid_b = 0, got_b = 0;
+    LONGLONG a_start = 0, b_start = 0;   /* QPC just before each worker was created: the start of its deadline */
     unsigned h = ICC_HOLD_PRE, holds_consumed = 0;   /* the HOLD action A's thread consumed */
     LONG st_b = AVB_NTSTATUS_UNAVAILABLE;
     LARGE_INTEGER freq, q;
@@ -2395,7 +2411,8 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     ic_verdict("PASS", "UT-DEV-INIT-CONCURRENT-BELOW-READY", index, did, reason);
 
     /* ---- Instance A on its own thread; B is sent only after the driver's arm shows a HOLD consumed with an attempt in flight ---- */
-    a_start = GetTickCount();
+    QueryPerformanceCounter(&q);
+    a_start = q.QuadPart;
     thread = CreateThread(NULL, 0, icc_worker, w, 0, &tid_a);
     if (thread == NULL) {
         ic_verdict("FAILED_SETUP", "UT-DEV-INIT-CONCURRENT-HOLD", index, did, "cannot start instance A's thread; no INIT_DEVICE was sent");
@@ -2422,14 +2439,15 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         if (wb != NULL) {
             wb->h = hB;
             wb->st = AVB_NTSTATUS_UNAVAILABLE;
-            b_start = GetTickCount();
+            QueryPerformanceCounter(&q);
+            b_start = q.QuadPart;
             thread_b = CreateThread(NULL, 0, icc_worker, wb, 0, &tid_b);
         }
         if (thread_b == NULL) {
             printf("    [EVIDENCE] cannot start instance B's thread: instance B not sent\n");
         } else {
             b_sent = TRUE;
-            b_done = icc_join(thread_b, b_start, hB, &b_timeout, "B");
+            b_done = icc_join(thread_b, b_start, freq.QuadPart, wb, hB, &b_timeout, "B");
             b0 = wb->q0;
             b1 = b_done ? wb->q1 : LLONG_MAX;   /* not completed: B's interval is open-ended */
             st_b = b_done ? wb->st : AVB_NTSTATUS_UNAVAILABLE;
@@ -2441,7 +2459,7 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     }
 
     /* ---- Bounded completion of A, against the deadline from A's own start (worker owned here on every path) ---- */
-    a_done = icc_join(thread, a_start, w->h, &a_timeout, "A");
+    a_done = icc_join(thread, a_start, freq.QuadPart, w, w->h, &a_timeout, "A");
 
     /* ---- The session's history: complete (every reserved sequence recorded, nothing in flight) within the drain bound ---- */
     {
@@ -2513,8 +2531,8 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     /* ---- B's published result and hardware effect. A request that exceeded its deadline is FAIL on its own (a later completion
      *      during cancellation never turns it into a result); otherwise both lines are judged only under established overlap ---- */
     if (b_sent && b_timeout) {
-        sprintf_s(reason, sizeof(reason), "B's INIT_DEVICE did not complete within %u ms of its start (completed during cancellation %d, "
-                  "ntstatus=0x%08lX); expected exactly 0x%08lX", ICC_WORKER_BOUND_MS, b_done, (unsigned long)st_b,
+        sprintf_s(reason, sizeof(reason), "B's INIT_DEVICE did not complete within %u ms of its start (completed at all, late or after "
+                  "CancelIoEx: %d, ntstatus=0x%08lX); expected exactly 0x%08lX", ICC_WORKER_BOUND_MS, b_done, (unsigned long)st_b,
                   (unsigned long)STATUS_DEVICE_BUSY);
         ic_verdict("FAIL", "UT-DEV-INIT-CONCURRENT-STATUS", index, did, reason);
         ic_verdict("BLOCKED", "UT-DEV-INIT-CONCURRENT-NO-ATTEMPT", index, did, "not judged: overlap with an initialization in progress was not established");
@@ -2543,8 +2561,8 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     if (!a_timeout) {
         ic_status_line("UT-DEV-INIT-CONCURRENT-FIRST", index, did, w->st, w->got, (LONG)STATUS_SUCCESS, FALSE);
     } else {
-        sprintf_s(reason, sizeof(reason), "instance A's INIT_DEVICE did not complete within %u ms of its start (completed during "
-                  "cancellation %d)", ICC_WORKER_BOUND_MS, a_done);
+        sprintf_s(reason, sizeof(reason), "instance A's INIT_DEVICE did not complete within %u ms of its start (completed at all, late "
+                  "or after CancelIoEx: %d)", ICC_WORKER_BOUND_MS, a_done);
         ic_verdict("FAIL", "UT-DEV-INIT-CONCURRENT-FIRST-STATUS", index, did, reason);
     }
     if (hO != INVALID_HANDLE_VALUE) { CloseHandle(hO); }
