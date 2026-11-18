@@ -132,7 +132,7 @@ ULONG AvbInitFaultEnter(_In_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG Origin, _In_ UL
                 rec->origin = Origin;
                 rec->site = Site;
                 rec->applied = AVB_INITFAULT_ACT_NONE;
-                rec->action_index = 0xFFFFFFFFu;
+                rec->action_index = AVB_INITFAULT_ACTION_INDEX_NONE;
                 rec->irql = (unsigned __int32)KeGetCurrentIrql();
                 rec->hw_state_before = (unsigned __int32)Ctx->hw_state;
                 rec->thread_id = (unsigned __int32)(ULONG_PTR)PsGetCurrentThreadId();
