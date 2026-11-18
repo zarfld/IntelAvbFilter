@@ -88,6 +88,9 @@ typedef struct AVB_INITFAULT_ARM {
     AVB_INITFAULT_ACTION actions[AVB_INITFAULT_MAX_ACTIONS];
 } AVB_INITFAULT_ARM;                                                                                     /* 168 */
 
+/* AVB_INITFAULT_RECORD.action_index of an attempt that consumed no armed action (no action index can have this value) */
+#define AVB_INITFAULT_ACTION_INDEX_NONE    0xFFFFFFFFu
+
 typedef struct AVB_INITFAULT_RECORD {
     unsigned __int32 version;      /* AVB_INITFAULT_VERSION */
     unsigned __int32 seq;
@@ -96,7 +99,7 @@ typedef struct AVB_INITFAULT_RECORD {
     unsigned __int32 origin;       /* AVB_INITFAULT_ORIGIN_* */
     unsigned __int32 site;         /* AVB_INITFAULT_SITE_* */
     unsigned __int32 applied;      /* AVB_INITFAULT_ACT_* actually applied */
-    unsigned __int32 action_index; /* index of the consumed action, 0xFFFFFFFF if none */
+    unsigned __int32 action_index; /* index of the consumed action, AVB_INITFAULT_ACTION_INDEX_NONE if none */
     unsigned __int32 irql;         /* IRQL at the site */
     unsigned __int32 hw_state_before;
     unsigned __int32 hw_state_after;
