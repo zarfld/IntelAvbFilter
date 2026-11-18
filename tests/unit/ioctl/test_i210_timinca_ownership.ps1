@@ -232,6 +232,14 @@ elseif ($wrap -notmatch 'AvbInitClaim\s*\(' -or $wrap -notmatch 'STATUS_DEVICE_B
         $wrap -notmatch 'AvbInitRelease\s*\(' -or $wrap -match 'intel_init\s*\(|AvbMarkPtpReady\s*\(|AVB_SET_HW_STATE') {
     $bad += 'AvbBringUpHardware: must only take the initialization ownership (STATUS_DEVICE_BUSY when held), delegate to AvbBringUpHardwareOwned and release it, with no bring-up of its own'
 }
+# PR #469 review: the waiting variant used by FilterRestart is the same kind of wrapper (bounded wait for the ownership)
+$wrapW = $fnBodies['AvbBringUpHardwareWaitOwner']
+if (-not $wrapW) { $bad += 'AvbBringUpHardwareWaitOwner not found' }
+elseif ($wrapW -notmatch 'AvbInitClaim\s*\(' -or $wrapW -notmatch 'STATUS_DEVICE_BUSY' -or $wrapW -notmatch 'AVB_INIT_OWNER_WAIT_MS' -or
+        $wrapW -notmatch 'AvbBringUpHardwareOwned\s*\(' -or $wrapW -notmatch 'AvbInitRelease\s*\(' -or
+        $wrapW -match 'intel_init\s*\(|AvbMarkPtpReady\s*\(|AVB_SET_HW_STATE') {
+    $bad += 'AvbBringUpHardwareWaitOwner: must only wait (bounded) for the initialization ownership, delegate to AvbBringUpHardwareOwned and release it, with no bring-up of its own'
+}
 if (-not $bring) { $bad += 'AvbBringUpHardwareOwned not found' }
 else {
     $okBlock = Get-Braced $bring 'if\s*\(\s*init_result\s*==\s*0\s*\)\s*\{'

@@ -585,6 +585,39 @@ NTSTATUS AvbBringUpHardware(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrig
     return status;
 }
 
+/* AvbBringUpHardwareWaitOwner (PR #469 review): poll interval and bound of the wait for the initialization ownership. An
+ * owner holds it for at most one bring-up, in a Debug build after at most one #412 HOLD (AVB_INITFAULT_MAX_HOLD_MS); the same
+ * composition (one HOLD plus 5000 ms for intel_init) bounds an in-flight attempt in the #412 test. A bound, not a tolerance:
+ * when it expires the caller is told (STATUS_DEVICE_BUSY) and logs it */
+#define AVB_INIT_OWNER_POLL_MS  10u
+#define AVB_INIT_OWNER_WAIT_MS  (AVB_INITFAULT_MAX_HOLD_MS + 5000u)
+
+NTSTATUS AvbBringUpHardwareWaitOwner(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
+{
+    LARGE_INTEGER delay;
+    ULONG waited = 0;
+    NTSTATUS status;
+
+    if (!Ctx) return STATUS_INVALID_PARAMETER;
+    delay.QuadPart = -(LONGLONG)AVB_INIT_OWNER_POLL_MS * 10000;
+    while (!AvbInitClaim(Ctx)) {
+        if (waited >= AVB_INIT_OWNER_WAIT_MS || KeGetCurrentIrql() != PASSIVE_LEVEL) {
+            DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu VID=0x%04X DID=0x%04X: initialization ownership not obtained after "
+                   "%lu ms: STATUS_DEVICE_BUSY, bring-up not run\n", InitOrigin, Ctx->intel_device.pci_vendor_id,
+                   Ctx->intel_device.pci_device_id, waited);
+            return STATUS_DEVICE_BUSY;
+        }
+        (void)KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        waited += AVB_INIT_OWNER_POLL_MS;
+    }
+    if (waited != 0) {
+        DEBUGP(DL_ERROR, "!!! [#404] bring-up origin=%lu: waited %lu ms for the initialization ownership\n", InitOrigin, waited);
+    }
+    status = AvbBringUpHardwareOwned(Ctx, InitOrigin);
+    AvbInitRelease(Ctx);
+    return status;
+}
+
 /** The bring-up itself; the caller owns the adapter's initialization (AvbInitClaim) */
 static NTSTATUS AvbBringUpHardwareOwned(_Inout_ PAVB_DEVICE_CONTEXT Ctx, _In_ ULONG InitOrigin)
 {
@@ -2112,7 +2145,8 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
              *   1. the same open instance after its own success: STATUS_INVALID_DEVICE_STATE, no hardware access
              *      (UT-DEV-INIT-002). The per-instance marker FsContext2 (NULL for every new file object) is set only after a
              *      successful initialization of this instance, so the same instance retries after its own failure;
-             *   2. another initialization of this adapter running: STATUS_DEVICE_BUSY, no wait, no hardware access;
+             *   2. another initialization of this adapter running: STATUS_DEVICE_BUSY, no wait, no hardware access; once the
+             *      ownership is obtained, 1. is checked again (overlapping requests on the same file object);
              *   3. adapter READY: STATUS_SUCCESS, no hardware access (also when an initialization completed in between);
              *   4. otherwise exactly one bring-up, under the ownership taken in 2, and its own status.
              * The former forced BAR0 path here is removed: AvbPerformBasicInitialization discovers and maps BAR0 whenever
@@ -2128,6 +2162,15 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
                        "STATUS_DEVICE_BUSY, no hardware access\n", currentContext->intel_device.pci_vendor_id,
                        currentContext->intel_device.pci_device_id);
                 status = STATUS_DEVICE_BUSY;
+                break;
+            }
+            /* PR #469 review: re-checked under the ownership. Two overlapping requests on the same (asynchronous) file
+             * object can both pass the check above before either publishes the marker; the marker is published below
+             * before the ownership is released, so the later one sees it here */
+            if (sp->FileObject->FsContext2 == AVB_INSTANCE_INITIALIZED) {
+                AvbInitRelease(currentContext);
+                DEBUGP(DL_WARN, "? IOCTL_AVB_INIT_DEVICE: Duplicate call on same handle rejected (under ownership)\n");
+                status = STATUS_INVALID_DEVICE_STATE;
                 break;
             }
 
@@ -2154,10 +2197,12 @@ NTSTATUS AvbHandleDeviceIoControl(_In_ PAVB_DEVICE_CONTEXT AvbContext, _In_ PIRP
             } else {
                 status = AvbBringUpHardwareOwned(currentContext, AVB_INITFAULT_ORIGIN_INIT_HANDLER);
             }
-            AvbInitRelease(currentContext);
             if (NT_SUCCESS(status)) {
-                sp->FileObject->FsContext2 = AVB_INSTANCE_INITIALIZED;   /* only after this instance's successful initialization */
+                /* only after this instance's successful initialization, and before the ownership is released (the
+                 * interlocked release orders it before any later owner's re-check) */
+                sp->FileObject->FsContext2 = AVB_INSTANCE_INITIALIZED;
             }
+            AvbInitRelease(currentContext);
 
             DEBUGP(DL_TRACE, "? IOCTL_AVB_INIT_DEVICE: Completed with status=0x%08X\n", status);
             DEBUGP(DL_TRACE, "   - Final hw_state: %s (%d)\n", AvbHwStateName(currentContext->hw_state), currentContext->hw_state);

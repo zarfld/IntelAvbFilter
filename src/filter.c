@@ -1061,10 +1061,12 @@ FilterRestart(
      * the PHC.  Must run before AvbRestartTimers so the DPC finds a running clock.
      * Verifies: TC-S3-004 (PHC non-zero post-wake). */
     /* The restart itself does not fail on a bring-up failure (the adapter stays enumerable); the status only decides
-     * whether the TAS query register gate reopens below (#350). */
+     * whether the TAS query register gate reopens below (#350). #404 part 2 (PR #469 review): the restart's bring-up must
+     * not be skipped because an INIT_DEVICE or OPEN_ADAPTER owns the adapter's initialization at this moment, so it waits
+     * (bounded) for that ownership instead of returning STATUS_DEVICE_BUSY at once. */
     if (pFilter->AvbContext != NULL) {
         AvbTraceTxState((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, "FilterRestart");
-        bringUpStatus = AvbBringUpHardware((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, AVB_INITFAULT_ORIGIN_RESTART);
+        bringUpStatus = AvbBringUpHardwareWaitOwner((PAVB_DEVICE_CONTEXT)pFilter->AvbContext, AVB_INITFAULT_ORIGIN_RESTART);
     }
 
     /* BUGFIX 0x9F: restart timers if subscriptions survived the Pause/Restart cycle. */
