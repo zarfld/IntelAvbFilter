@@ -512,6 +512,25 @@ static void test_struct_sizes(void)
     }
     TEST_ASSERT(sizeof(((AVB_TAS_OP_REQUEST *)0)->schedule) == sizeof(AVB_TAS_SCHEDULE) && sizeof(AVB_TAS_SCHEDULE) == 80,
                 "schedule is the shared 80-byte AVB_TAS_SCHEDULE");
+    /* The shared schedule's members as published in DES-C-TAS-010 3.5 (referenced by #365 13.2). The request carries them
+     * on the wire, so a reordered member (e.g. start_ns and end_ns swapped) is a layout change at an unchanged size. */
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TAS_SCHEDULE, reserved),              12, "AVB_TAS_SCHEDULE, reserved" },
+            { offsetof(AVB_TAS_SCHEDULE, queue[1]),              32, "AVB_TAS_SCHEDULE, queue[1]" },
+            { offsetof(AVB_TAS_SCHEDULE, queue[3]),              64, "AVB_TAS_SCHEDULE, queue[3]" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, start_ns),           0, "AVB_TAS_QUEUE_WINDOW, start_ns" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, end_ns),             4, "AVB_TAS_QUEUE_WINDOW, end_ns" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, max_frame_bytes),    8, "AVB_TAS_QUEUE_WINDOW, max_frame_bytes" },
+            { offsetof(AVB_TAS_QUEUE_WINDOW, flags),             12, "AVB_TAS_QUEUE_WINDOW, flags" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            sprintf_s(msg, sizeof(msg), "offsetof(%s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
 
     /* Verifies: #357, declaration only. The values #365 13.2/13.3 and DES-C-TAS-010 3.5 publish for the request. The
      * out_flags bit UNVERIFIED_CONFIG_ACTIVE (13.4) has no published bit position, so no value is declared or pinned for
