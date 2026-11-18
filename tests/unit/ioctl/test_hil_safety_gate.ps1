@@ -334,8 +334,8 @@ $nicRx  = 'CM_Disable_DevNode|CM_Enable_DevNode|CM_Reenumerate_DevNode|SetupDiCa
 # Documented exceptions (each states why the hit is not executed by the registered entry).
 $roExceptions  = @{ 'test_ioctl_abi' = 'sizeof/code checks only'; 'test_ptp_phc_stability' = 'no args runs UT-CORR-007/008 only; 005/006/009 need --case'
                     'test_ioctl_routing' = 'IOCTL_AVB_INIT_DEVICE only as a case label of GetIoctlName(); never passed to DeviceIoControl' }
-$nicExceptions = @{ 'test_dev_lifecycle' = 'devcon appears only in a SKIP message; CM_Disable_DevNode / CM_Enable_DevNode only in --init-retry-fault (Unsafe entry), which the default run does not execute'; 'test_statistics_counters' = 'devcon appears only in a SKIP message'
-                    'test_dev_lifecycle --init-contract' = 'devcon appears only in a SKIP message of the default run and CM_Disable_DevNode / CM_Enable_DevNode only in --init-retry-fault; --init-contract executes neither'
+$nicExceptions = @{ 'test_dev_lifecycle' = 'devcon appears only in a SKIP message; CM_Disable_DevNode / CM_Enable_DevNode only in --init-retry-fault and --init-concurrent (Unsafe entries), which the default run does not execute'; 'test_statistics_counters' = 'devcon appears only in a SKIP message'
+                    'test_dev_lifecycle --init-contract' = 'devcon appears only in a SKIP message of the default run and CM_Disable_DevNode / CM_Enable_DevNode only in --init-retry-fault and --init-concurrent; --init-contract executes neither'
                     'test_ptp_phc_stability' = 'ControlService/system only in UT-CORR-009 (--case UT-CORR-009 / --allow-lifecycle)'
                     'test_ptp_phc_stability --case UT-CORR-005' = 'UT-CORR-009 not selected'; 'test_ptp_phc_stability --case UT-CORR-006' = 'UT-CORR-009 not selected' }
 
@@ -415,6 +415,7 @@ tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count
 #      #377: test_tas_query_clean --restore the eighth (about 440 s, same budget and inventory).
 #      #412: test_dev_lifecycle --init-retry-fault the ninth (per adapter: 960 s of its own bounds, budget 1220 s). It has no
 #      inventory limit (PR #462 review): it runs every validated identity, and its budget scales with the enumerated count, uncapped.
+#      #313: test_dev_lifecycle --init-concurrent the tenth (per adapter: 887 s of its own bounds, budget 1130 s), likewise uncapped.
 #      Its limit is its supported inventory TAS_QUERY_CLEAN_MAX_ADAPTERS in tests/hardware/test_tas_query_clean.c, which also
 #      caps the TAS adapters that process runs, so the budget always covers them.
 $paBad = @()
@@ -428,6 +429,7 @@ elseif ($qcSrc -notmatch 'if\s*\(\s*i\s*<\s*TAS_QUERY_CLEAN_MAX_ADAPTERS\s*\)\s*
 $irfSrc = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'tests\ioctl\test_ioctl_dev_lifecycle.c'))
 if ($irfSrc -match '\bINIT_RETRY_FAULT_MAX_ADAPTERS\b') { $paBad += 'tests/ioctl/test_ioctl_dev_lifecycle.c still has a fixed --init-retry-fault inventory limit' }
 if ($irfSrc -notmatch 'for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*nall\s*;\s*i\+\+\s*\)\s*\{\s*irf_run_adapter\(') { $paBad += 'test_ioctl_dev_lifecycle.c --init-retry-fault does not run every validated identity' }
+if ($irfSrc -notmatch 'for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*nall\s*;\s*i\+\+\s*\)\s*\{\s*icc_run_adapter\(') { $paBad += 'test_ioctl_dev_lifecycle.c --init-concurrent does not run every validated identity' }
 if (-not $toAsg -or -not $toFn -or -not $paAsg) { $paBad += 'timeout table, per-adapter table or Get-AvbTestTimeoutSeconds missing' }
 if ($paBad.Count -eq 0) {
     $lim = [int]$tasMax.Groups[1].Value
@@ -444,6 +446,8 @@ $o['PlainRetry'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_dev_lifecycle')
 foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["irf@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-retry-fault' -SuiteSeconds 60 -AdapterCount $n }
 $o['irf@suite600'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-retry-fault' -SuiteSeconds 600 -AdapterCount 1
 $o['irf@hasLimit'] = $HilTestTimeoutPerAdapter['test_dev_lifecycle --init-retry-fault'].Contains('MaxAdapters')
+foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["icc@$n"] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle --init-concurrent' -SuiteSeconds 60 -AdapterCount $n }
+$o['icc@hasLimit'] = $HilTestTimeoutPerAdapter['test_dev_lifecycle --init-concurrent'].Contains('MaxAdapters')
 $o['lifecycle@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_dev_lifecycle' -SuiteSeconds 300 -AdapterCount 9
 foreach ($e in 'test_tas_query_clean', 'test_tas_query_clean --hw-verified', 'test_tas_query_clean --tiers-unbound', 'test_tas_query_clean --invalid', 'test_tas_query_clean --restore') {
     foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
@@ -456,7 +460,10 @@ $o['other@9'] = Get-AvbTestTimeoutSeconds -Entry 'test_ptp_freq_complete' -Suite
 $o
 '@))
     $pa = & $paCheck
-    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_dev_lifecycle --init-retry-fault') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries, the five test_tas_query_clean entries and test_dev_lifecycle --init-retry-fault only" }
+    if ($pa.Keys -ne 'test_tas_activate --hold|test_tas_activate --pass|test_tas_activate --fault|test_tas_query_clean|test_tas_query_clean --hw-verified|test_tas_query_clean --tiers-unbound|test_tas_query_clean --invalid|test_tas_query_clean --restore|test_dev_lifecycle --init-retry-fault|test_dev_lifecycle --init-concurrent') { $paBad += "per-adapter entries are '$($pa.Keys)', expected the three test_tas_activate entries, the five test_tas_query_clean entries, test_dev_lifecycle --init-retry-fault and test_dev_lifecycle --init-concurrent only" }
+    if ($pa['icc@hasLimit']) { $paBad += 'test_dev_lifecycle --init-concurrent declares MaxAdapters; it has no inventory limit' }
+    $cwant = [ordered]@{ '1' = 1130; '2' = 2260; '3' = 3390; '8' = 9040; '20' = 22600; '0' = 1130; '-1' = 1130 }   # uncapped; unknown (-1) = one adapter
+    foreach ($n in $cwant.Keys) { if ([int]$pa["icc@$n"] -ne [int]$cwant[$n]) { $paBad += "test_dev_lifecycle --init-concurrent with $n enumerated adapter(s): $($pa["icc@$n"]) s, expected $($cwant[$n]) s" } }
     if ($pa.PlainRetry -ne 0) { $paBad += 'a test_dev_lifecycle entry has a fixed timeout' }
     if ($pa['irf@hasLimit']) { $paBad += 'test_dev_lifecycle --init-retry-fault declares MaxAdapters; it has no inventory limit' }
     $iwant = [ordered]@{ '1' = 1220; '2' = 2440; '3' = 3660; '8' = 9760; '20' = 24400; '0' = 1220; '-1' = 1220 }   # uncapped; unknown (-1) = one adapter
