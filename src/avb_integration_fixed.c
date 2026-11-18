@@ -4332,8 +4332,9 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
          * refuses an unbound one with STATUS_INVALID_DEVICE_STATE before any fallback (12.1 row 1). Checks in the 12.1
          * order; on any error IoStatus.Information is 0 and nothing is written. The system buffer is used directly: no
          * ProbeForWrite. Never writes a register, never takes the TAS claim, never blocks: a held claim is reported as
-         * OP_IN_PROGRESS. Not reported in v1 (0 or their "not reported" value): origin, gate_policy, revision (K9), link
-         * speed (K8), context epoch and generation (#352), tiers other than PASS (#351), legacy conflicts (#355); the #352
+         * OP_IN_PROGRESS. link_speed_mbps is the driver's own NDIS link speed (K8, #351). Not reported in v1 (0 or their
+         * "not reported" value): origin, gate_policy, revision (K9), context epoch and generation (#352), tiers other than
+         * PASS (#351), legacy conflicts (#355); the #352
          * operation store does not exist, so a lookup is NOT_IMPLEMENTED, never NOT_FOUND. */
         if (buf == NULL || inLen < sizeof(AVB_TAS_QUERY_HW_REQUEST) || outLen < sizeof(AVB_TAS_QUERY_HW_REQUEST)) {
             status = STATUS_BUFFER_TOO_SMALL;
@@ -4397,6 +4398,11 @@ DEBUGP(DL_TRACE, "!!! SETTING target time %u: 0x%016llX (%llu ns), previous was 
                 q->size = (avb_u32)sizeof(*q);
                 q->lookup_client_op_id = lookup;
                 q->net_luid = (currentContext->filter_instance != NULL) ? currentContext->filter_instance->MiniportNetLuid.Value : 0u;
+                /* K8 (#351, #365 12.2): the adapter's current link speed as NDIS reported it at attach and in its last
+                 * NDIS_STATUS_LINK_STATE (filter.c), 0 = unknown. One interlocked read: never waits, writes nothing */
+                q->link_speed_mbps = (currentContext->filter_instance != NULL)
+                                         ? (avb_u32)(ULONG)InterlockedCompareExchange(&currentContext->filter_instance->LinkSpeedMbps, 0, 0)
+                                         : 0u;
                 q->vendor_id = (avb_u16)currentContext->intel_device.pci_vendor_id;
                 q->device_id = (avb_u16)currentContext->intel_device.pci_device_id;
                 q->flags = busy ? AVB_TAS_FLAG_OP_IN_PROGRESS : 0u;

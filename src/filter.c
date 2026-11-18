@@ -82,6 +82,22 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 static BOOLEAN UnicodeStringContainsInsensitive(PCUNICODE_STRING Str, PCWSTR Sub);
 static BOOLEAN IsUnsupportedTeamOrVirtualAdapter(PNDIS_FILTER_ATTACH_PARAMETERS AttachParameters);
 
+/* K8 (#351; #365 12.2 link_speed_mbps "0 = unknown", 13.6 D.2): NDIS link state to the query's integer Mbit/s.
+ * Conversion rule (#472 asked for it to be stated before implementation): the NDIS transmit rate in bit/s divided by
+ * 1,000,000 only when the link is connected and the rate is known, non-zero, a whole number of Mbit/s and at most
+ * 2^32 - 1 Mbit/s. Everything else is 0 (unknown): disconnected or unknown state, NDIS_LINK_SPEED_UNKNOWN, 0, a fractional
+ * Mbit/s rate (never truncated) or a rate beyond the field. Generic: no device, model or fixed-speed assumption */
+#define AVB_LINK_BITS_PER_MBIT 1000000ULL
+
+static LONG AvbLinkSpeedMbps(NDIS_MEDIA_CONNECT_STATE State, ULONG64 XmitBitsPerSecond)
+{
+    if (State != MediaConnectStateConnected || XmitBitsPerSecond == 0 || XmitBitsPerSecond == NDIS_LINK_SPEED_UNKNOWN ||
+        (XmitBitsPerSecond % AVB_LINK_BITS_PER_MBIT) != 0 || (XmitBitsPerSecond / AVB_LINK_BITS_PER_MBIT) > (ULONG64)MAXULONG) {
+        return 0;
+    }
+    return (LONG)(ULONG)(XmitBitsPerSecond / AVB_LINK_BITS_PER_MBIT);
+}
+
 
 // AvbIsSupportedIntelController is defined in avb_bar0_discovery.c
 extern BOOLEAN AvbIsSupportedIntelController(PMS_FILTER pFilter, PUSHORT pVendorId, PUSHORT pDeviceId);
@@ -567,6 +583,12 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
          * Required to correctly read DevicePropertyHardwareID for PCH-integrated
          * NICs (e.g. I219) where the NDIS binding device and PCI PDO differ. */
         pFilter->MiniportPhysicalDeviceObject = AttachParameters->MiniportPhysicalDeviceObject;
+        /* K8 (#351): the link state NDIS hands the filter at attach (NDIS_FILTER_ATTACH_PARAMETERS MediaConnectState and
+         * XmitLinkSpeed, present from revision 1); NDIS_STATUS_LINK_STATE in FilterStatus keeps it current afterwards */
+        InterlockedExchange(&pFilter->LinkSpeedMbps,
+                            AvbLinkSpeedMbps(AttachParameters->MediaConnectState, AttachParameters->XmitLinkSpeed));
+        DEBUGP(DL_INFO, "FilterAttach: link state=%d xmit=%I64u bit/s -> link_speed_mbps=%lu\n",
+               (int)AttachParameters->MediaConnectState, AttachParameters->XmitLinkSpeed, (ULONG)pFilter->LinkSpeedMbps);
         //
         // The filter should initialize TrackReceives and TrackSends properly. For this
         // driver, since its default characteristic has both a send and a receive handler,
@@ -1621,6 +1643,26 @@ NOTE: called at <= DISPATCH_LEVEL
     if (pFilter->AvbContext != NULL) {
         PAVB_DEVICE_CONTEXT avbCtx = (PAVB_DEVICE_CONTEXT)pFilter->AvbContext;
         InterlockedIncrement64(&avbCtx->stats_filter_status_count);
+    }
+
+    /* K8 (#351): every link state change NDIS indicates updates this adapter's link speed before the indication is passed
+     * up. Only a well-formed NDIS_LINK_STATE (buffer, size, header type, revision) is read; a malformed one leaves the speed
+     * unknown (0), never a stale value from before the change */
+    if (StatusIndication->StatusCode == NDIS_STATUS_LINK_STATE) {
+        const NDIS_LINK_STATE *linkState = (const NDIS_LINK_STATE *)StatusIndication->StatusBuffer;
+        LONG mbps = 0;
+
+        if (linkState != NULL && StatusIndication->StatusBufferSize >= NDIS_SIZEOF_LINK_STATE_REVISION_1 &&
+            linkState->Header.Type == NDIS_OBJECT_TYPE_DEFAULT && linkState->Header.Revision >= NDIS_LINK_STATE_REVISION_1 &&
+            linkState->Header.Size >= NDIS_SIZEOF_LINK_STATE_REVISION_1) {
+            mbps = AvbLinkSpeedMbps(linkState->MediaConnectState, linkState->XmitLinkSpeed);
+            DEBUGP(DL_INFO, "FilterStatus: NDIS_STATUS_LINK_STATE state=%d xmit=%I64u bit/s -> link_speed_mbps=%lu\n",
+                   (int)linkState->MediaConnectState, linkState->XmitLinkSpeed, (ULONG)mbps);
+        } else {
+            DEBUGP(DL_WARN, "FilterStatus: malformed NDIS_STATUS_LINK_STATE (buffer %p, size %lu): link speed unknown\n",
+                   StatusIndication->StatusBuffer, StatusIndication->StatusBufferSize);
+        }
+        InterlockedExchange(&pFilter->LinkSpeedMbps, mbps);
     }
 
 
