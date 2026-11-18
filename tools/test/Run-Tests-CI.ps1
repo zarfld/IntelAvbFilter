@@ -924,9 +924,11 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     # --restore (#377): per TAS adapter a 60 s socket bind and a 3.5 s baseline window, one activation and query, then the same
     # cleanup bounds (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind) and one query = about 440 s; the same budget.
     'test_tas_query_clean --restore' = @{ Seconds = 560; MaxAdapters = 8 }
-    # --link-speed (#472): per TAS adapter five OS-bracketed observations of at most 5 tries (about 3 s each), the owned cycle
-    # (120 + 3 + 60 + 60 s), a 60 s wait for the pre-test link and the 10 s STEADY interval = about 330 s; the same budget.
-    'test_tas_query_clean --link-speed' = @{ Seconds = 560; MaxAdapters = 8 }
+    # --link-speed (#472): per TAS adapter four OS-bracketed observations of at most 5 tries (about 3 s each) and the final reads,
+    # the owned cycle (120 + 3 + 60 + 60 s), a 60 s wait for the pre-test link and the 10 s STEADY interval = about 330 s; the
+    # same 560 s per adapter. No inventory limit (#472 review r4619159471): the executable runs every TAS adapter, so the budget
+    # scales with the enumerated count, uncapped.
+    'test_tas_query_clean --link-speed' = @{ Seconds = 560 }
     # test_dev_lifecycle --init-retry-fault (#412), from its own bounds per adapter: 60 s READY before + phase A (120 s disable +
     # 60 s enable + 60 s return + 60 s READY) + phase B (120 + 60 + 60 s) + 60 s READY after the retry + cleanup (60 s READY, a
     # 120 + 60 s cycle, 60 s READY) = 960 s; 1220 s = + 27 %. No MaxAdapters: the test runs every validated identity (no
