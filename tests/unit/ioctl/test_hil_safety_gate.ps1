@@ -403,8 +403,8 @@ else {
 $toDef = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq '$TestTimeoutSeconds -eq 0' }, $true)
 if (-not $toDef -or $toDef.Extent.Text -notmatch '"Unit"\s*\{\s*60\s*\}') { $toBad += 'global Unit default is no longer 60 s' }
 tc_check 'TEST-HILGATE-095-safety-gate-test-specific-timeout-only' ($toBad.Count -eq 0) ($toBad -join '; ')
-# 098: PR #397 R14.  test_tas_activate runs every adapter it enumerates in one process (per TAS adapter: 398 s of its own
-#      bounds, budget 520 s).  Its timeout is that budget times the adapters the driver enumerated at run time, at least 1,
+# 098: PR #397 R14.  test_tas_activate runs every adapter it enumerates in one process (per TAS adapter: 706 s of its own
+#      bounds with the #369 setup recovery, budget 920 s).  Its timeout is that budget times the adapters the driver enumerated at run time, at least 1,
 #      at most the test's own adapter limit (ARRAYSIZE(ids) in its source), that limit when nothing was observed; never a
 #      one-adapter value.  Other entries ignore the count.  Offline: the runner's tables and function from its syntax tree;
 #      the dispatch-site wiring is a static source check.
@@ -439,6 +439,7 @@ $o = [ordered]@{ Keys = (@($HilTestTimeoutPerAdapter.Keys) -join '|'); Plain = (
 foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
     foreach ($n in -1, 0, 1, 2, 3, 8, 20) { $o["$e@$n"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 60 -AdapterCount $n }
     $o["$e@suite600"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 600 -AdapterCount 1
+    $o["$e@suite1000"] = Get-AvbTestTimeoutSeconds -Entry $e -SuiteSeconds 1000 -AdapterCount 1
     $o["$e@limit"] = [int]$HilTestTimeoutPerAdapter[$e].MaxAdapters
 }
 $o['PlainQuery'] = (@($HilTestTimeoutSeconds.Keys) -match '^test_tas_query_clean').Count
@@ -481,9 +482,12 @@ $o
     if ($pa.Plain -ne 0) { $paBad += 'test_tas_activate still has a fixed one-adapter timeout' }
     foreach ($e in 'test_tas_activate --hold', 'test_tas_activate --pass', 'test_tas_activate --fault') {
         if ($pa["$e@limit"] -ne $lim) { $paBad += "$e adapter limit $($pa["$e@limit"]), the test's own limit is $lim" }
-        $want = [ordered]@{ '1' = 520; '2' = 1040; '3' = 1560; '8' = 520 * [Math]::Min(8, $lim); '20' = 520 * $lim; '0' = 520; '-1' = 520 * $lim }
+        $want = [ordered]@{ '1' = 920; '2' = 1840; '3' = 2760; '8' = 920 * [Math]::Min(8, $lim); '20' = 920 * $lim; '0' = 920; '-1' = 920 * $lim }
         foreach ($n in $want.Keys) { if ([int]$pa["$e@$n"] -ne [int]$want[$n]) { $paBad += "$e with $n enumerated adapter(s): $($pa["$e@$n"]) s, expected $($want[$n]) s" } }
-        if ([int]$pa["$e@suite600"] -ne 600) { $paBad += "$e lowers the 600 s suite timeout to $($pa["$e@suite600"]) s" }
+        # One adapter: the larger of the suite timeout and the 920 s budget, exactly. Below the budget the budget wins
+        # (Max(600, 920) = 920); above it the suite timeout wins (Max(1000, 920) = 1000) and is never lowered
+        if ([int]$pa["$e@suite600"] -ne 920) { $paBad += "$e with one adapter under a 600 s suite: $($pa["$e@suite600"]) s, expected Max(600, 920) = 920 s" }
+        if ([int]$pa["$e@suite1000"] -ne 1000) { $paBad += "$e with one adapter under a 1000 s suite: $($pa["$e@suite1000"]) s, expected Max(1000, 920) = 1000 s (the suite timeout is never lowered)" }
     }
     if ([int]$pa['atdecc@9'] -ne 420) { $paBad += "test_atdecc_aen_protocol depends on the adapter count ($($pa['atdecc@9']) s)" }
     if ([int]$pa['gate@9'] -ne 450) { $paBad += "test_hil_safety_gate.ps1 depends on the adapter count ($($pa['gate@9']) s)" }
