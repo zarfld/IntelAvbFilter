@@ -108,7 +108,10 @@
  *             establish, #463). INCONCLUSIVE with that reason; repeating ATTACH is not EVENT coverage, never PASS by omission.
  *   FINAL     the adapter is bound, the OS link state and rate equal the pre-test observation, the TAS query reports a clean,
  *             readable adapter and GET_TAS_STATE is CLEAN, and HardwareFaults did not change from ATTACH to FINAL. The test arms
- *             no fault. Each requirement is judged on its own valid measurement: any observed violation is CLEANUP_FAILED (with
+ *             no fault. The query requirement is judged field by field under #365 12.2/12.3 validity (reply and target
+ *             first; hw_mode from a valid TQAVCTRL; slot statuses and the advisory restoration as reported; every register
+ *             valid), so a valid TSN-on observation survives an unrelated register read failure and an invalid field's 0 is
+ *             never an observation. Each requirement is judged on its own valid measurement: any observed violation is CLEANUP_FAILED (with
  *             every violation and every missing measurement listed), even when another read is unavailable; only with no
  *             violation does a missing measurement give INCONCLUSIVE_RESTORATION; PASS needs every observation valid and
  *             conforming. Reported apart from the functional checks.
@@ -231,6 +234,7 @@
 #define LINK_BOUND_MS             60000    /* after the cycle: wait for the OS to report a pre-test connected link again */
 #define LINK_STEADY_INTERVAL_MS   10000    /* between the two STEADY observations */
 #define BITS_PER_MBIT             1000000ULL
+#define LINK_RF_TQAVCTRL          0x00000001u  /* regs.read_failed bit 0 = TQAVCTRL invalid (avb_ioctl.h AVB_TAS_REGS, #365 12.2/12.3) */
 /* Supported inventory: TAS adapters this process runs. The runner budget is 560 s x min(enumerated adapters, this value)
  * ($HilTestTimeoutPerAdapter, checked by TEST-HILGATE-098), so every TAS adapter run fits it; discovery stays complete and a
  * TAS adapter beyond this value is reported BLOCKED, never left out silently. Not applied to --link-speed (#472): it runs every
@@ -2098,6 +2102,62 @@ static void link_clock_cleanup(UINT32 index, avb_u16 did, const CLOCK_READ *befo
     fflush(stdout);
 }
 
+/** FINAL's TAS-query requirement (clean and readable), judged field by field under #365 12.2/12.3 validity, after the reply
+ *  itself (status, size, version) and its target identity are valid (review r4619159432 follow-up). A field counts only when
+ *  its own validity rule holds, so an unrelated register read failure never hides an observed violation, and an invalid
+ *  field's 0 is never read as a hardware observation:
+ *    hw_mode   from TQAVCTRL; valid when read_failed bit 0 is clear and it is not 0 or UNREADABLE. TSN is a violation.
+ *    current_status, next_status   always reported (U1, never 0). NONE conforms; UNKNOWN establishes nothing (missing);
+ *              any other status is residual slot state (violation).
+ *    restoration   advisory (12.5), always reported. COMPLETE conforms; UNKNOWN or NO_SSOT_BASELINE establish nothing
+ *              (missing); NONE and the PARTIAL values report a residue (violation).
+ *    registers  every v1 register valid (hw_read READ, read_failed 0); otherwise listed as missing evidence. */
+static void link_final_query(const QUERY_READ *r, avb_u64 luid, char *viol, size_t vsize, char *miss, size_t msize)
+{
+    const AVB_TAS_QUERY_HW_REQUEST *q = &r->q;
+    char part[200];
+
+    if (!query_valid(r) || q->net_luid != luid) {
+        sprintf_s(part, sizeof(part), "TAS query (ntstatus=0x%08lX information=%lu, %s); ", (unsigned long)r->status, r->got,
+                  !query_valid(r) ? "no valid v1 reply" : "reply for another NET_LUID");
+        strcat_s(miss, msize, part);
+        return;
+    }
+    if ((q->regs.read_failed & LINK_RF_TQAVCTRL) != 0 || q->hw_mode == 0 || q->hw_mode == AVB_TAS_HWMODE_UNREADABLE) {
+        sprintf_s(part, sizeof(part), "TSN mode (TQAVCTRL invalid: hw_mode=%u read_failed bit 0 %s); ", q->hw_mode,
+                  (q->regs.read_failed & LINK_RF_TQAVCTRL) ? "set" : "clear");
+        strcat_s(miss, msize, part);
+    } else if (q->hw_mode != AVB_TAS_HWMODE_OFF) {
+        sprintf_s(part, sizeof(part), "TSN mode on (valid TQAVCTRL=0x%08X, hw_mode=%u); ", q->regs.tqavctrl, q->hw_mode);
+        strcat_s(viol, vsize, part);
+    }
+    if (q->current_status == 0 || q->current_status == AVB_TAS_ST_UNKNOWN) {
+        sprintf_s(part, sizeof(part), "current slot (status %u, reasons 0x%X: not established); ", q->current_status, q->current_reasons);
+        strcat_s(miss, msize, part);
+    } else if (q->current_status != AVB_TAS_ST_NONE) {
+        sprintf_s(part, sizeof(part), "current slot status %u (reasons 0x%X), not NONE; ", q->current_status, q->current_reasons);
+        strcat_s(viol, vsize, part);
+    }
+    if (q->next_status == 0 || q->next_status == AVB_TAS_ST_UNKNOWN) {
+        sprintf_s(part, sizeof(part), "next slot (status %u, reasons 0x%X: not established); ", q->next_status, q->next_reasons);
+        strcat_s(miss, msize, part);
+    } else if (q->next_status != AVB_TAS_ST_NONE) {
+        sprintf_s(part, sizeof(part), "next slot status %u (reasons 0x%X), not NONE; ", q->next_status, q->next_reasons);
+        strcat_s(viol, vsize, part);
+    }
+    if (q->restoration == 0 || q->restoration == AVB_TAS_RESTORE_UNKNOWN || q->restoration == AVB_TAS_RESTORE_NO_SSOT_BASELINE) {
+        sprintf_s(part, sizeof(part), "advisory restoration (%u: not established); ", q->restoration);
+        strcat_s(miss, msize, part);
+    } else if (q->restoration != AVB_TAS_RESTORE_COMPLETE) {
+        sprintf_s(part, sizeof(part), "advisory restoration %u reports a residue, not COMPLETE; ", q->restoration);
+        strcat_s(viol, vsize, part);
+    }
+    if (q->hw_read != AVB_TAS_HWREAD_READ || q->regs.read_failed != 0) {
+        sprintf_s(part, sizeof(part), "registers not all valid (hw_read=%u read_failed=0x%05X); ", q->hw_read, q->regs.read_failed);
+        strcat_s(miss, msize, part);
+    }
+}
+
 static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst)
 {
     CLOCK_READ ck0, ck1;
@@ -2238,18 +2298,7 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
                   pre_os.TransmitLinkSpeed, media_name(fin_os.MediaConnectState), fin_os.TransmitLinkSpeed);
         strcat_s(violations, sizeof(violations), part);
     }
-    if (query_readable(&finq) && finq.q.net_luid == id->net_luid) {   /* TAS query: clean and readable */
-        if (!query_clean(&finq)) {
-            sprintf_s(part, sizeof(part), "TAS query reports residual state (hw_mode=%u current=%u next=%u restoration=%u); ",
-                      finq.q.hw_mode, finq.q.current_status, finq.q.next_status, finq.q.restoration);
-            strcat_s(violations, sizeof(violations), part);
-        }
-    } else {
-        sprintf_s(part, sizeof(part), "TAS query (ntstatus=0x%08lX information=%lu, %s); ", (unsigned long)finq.status, finq.got,
-                  !query_valid(&finq) ? "no valid v1 reply" : finq.q.net_luid != id->net_luid ? "reply for another NET_LUID"
-                                                                                               : "registers not all read");
-        strcat_s(missing, sizeof(missing), part);
-    }
+    link_final_query(&finq, id->net_luid, violations, sizeof(violations), missing, sizeof(missing));   /* TAS clean, readable */
     if (!tas.ok) {                                              /* TAS record CLEAN */
         strcat_s(missing, sizeof(missing), "TAS record (GET_TAS_STATE unavailable); ");
     } else if (tas.s.armed != AVB_TAS_STATE_CLEAN) {
