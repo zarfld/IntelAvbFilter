@@ -107,6 +107,12 @@
  *   FINAL     the adapter is bound, the OS link state and rate equal the pre-test observation, the TAS query reports a clean,
  *             readable adapter and GET_TAS_STATE is CLEAN, and HardwareFaults did not change from ATTACH to FINAL. The test arms
  *             no fault. A difference is CLEANUP_FAILED, reported apart from the functional checks.
+ *   CLOCK     cleanup-only evidence (runner convention [CLEANUP:FAILED] / [CLEANUP:NOT_VERIFIED] / [CLEANUP:SUCCESS], never a
+ *             functional verdict): TIMINCA and TSAUXC read through GET_CLOCK_CONFIG before the first NIC operation and after
+ *             cleanup, each with its raw NTSTATUS, size and reply status. A measured difference is [CLEANUP:FAILED]; a missing or
+ *             invalid read is [CLEANUP:NOT_VERIFIED]. Read-only: nothing is written back, because neither the incoming nor the
+ *             post-cycle values are an established restoration target. A clean TAS query does not prove clock restoration.
+ * The incoming TAS state is printed as found (origin unknown to the test); it is never assumed clean.
  * Mutation: the owned NIC cycle only (it reseeds the PHC, E12; reported, not restored). No TAS write, no traffic. Agreement with
  * the OS checks the acquisition path through the shared Windows/miniport reporting chain; it is not a wire measurement and does
  * not verify TAS-DR-05's arithmetic (#368). Expected RED against a driver without K8: link_speed_mbps 0 while the OS reports a
@@ -2024,8 +2030,52 @@ static AVB_VERDICT link_judge(const LINK_OBS *o, char *reason, size_t size)
     return AVB_VERDICT_FAIL;
 }
 
+/** One GET_CLOCK_CONFIG read with its raw status: values count only when the call, the size and the reply status are valid */
+typedef struct { BOOL ok; LONG status; DWORD got; AVB_CLOCK_CONFIG c; } CLOCK_READ;
+
+static void read_clock(HANDLE h, CLOCK_READ *r)
+{
+    ZeroMemory(r, sizeof(*r));
+    r->status = avb_ioctl_ntstatus(h, IOCTL_AVB_GET_CLOCK_CONFIG, &r->c, sizeof(r->c), &r->c, sizeof(r->c), &r->got);
+    r->ok = r->status == 0 && r->got == sizeof(r->c) && r->c.status == 0;
+}
+
+static void print_clock(const char *label, const CLOCK_READ *r)
+{
+    printf("    [EVIDENCE] clock %s: ntstatus=0x%08lX information=%lu", label, (unsigned long)r->status, r->got);
+    if (r->ok) {
+        printf(" status=0x%08X valid TIMINCA=0x%08X TSAUXC=0x%08X\n", r->c.status, r->c.timinca, r->c.tsauxc);
+    } else {
+        printf(" status=0x%08X NOT VALID (values not reported)\n", r->c.status);
+    }
+}
+
+/** Cleanup-only report of the clock configuration across the test (runner convention [CLEANUP:...], Run-Tests-CI.ps1): read-only,
+ *  never a functional verdict, never a write-back. Neither the incoming nor the post-cycle values are an established
+ *  restoration target, so equality is reported as observed, not as a restored target */
+static void link_clock_cleanup(UINT32 index, avb_u16 did, const CLOCK_READ *before, const CLOCK_READ *after, BOOL after_taken)
+{
+    if (!before->ok || !after_taken || !after->ok) {
+        printf("  [CLEANUP:NOT_VERIFIED] %s-CLOCK/adapter:%u did=0x%04X: TIMINCA/TSAUXC not measured %s (before: ntstatus=0x%08lX "
+               "information=%lu status=0x%08X; after: %s ntstatus=0x%08lX information=%lu status=0x%08X); cleanup only, the functional "
+               "verdicts stand\n", CASE_ID, index, did, !before->ok ? "before the first NIC operation" : "after cleanup",
+               (unsigned long)before->status, before->got, before->c.status, after_taken ? "read" : "not taken",
+               (unsigned long)after->status, after->got, after->c.status);
+    } else if (before->c.timinca != after->c.timinca || before->c.tsauxc != after->c.tsauxc) {
+        printf("  [CLEANUP:FAILED] %s-CLOCK/adapter:%u did=0x%04X: clock configuration differs from the state found: TIMINCA 0x%08X -> "
+               "0x%08X, TSAUXC 0x%08X -> 0x%08X; read-only, no write-back (neither value is an established restoration target); "
+               "cleanup only, the functional verdicts stand\n", CASE_ID, index, did, before->c.timinca, after->c.timinca,
+               before->c.tsauxc, after->c.tsauxc);
+    } else {
+        printf("  [CLEANUP:SUCCESS] %s-CLOCK/adapter:%u did=0x%04X: TIMINCA 0x%08X and TSAUXC 0x%08X read equal before the first NIC "
+               "operation and after cleanup\n", CASE_ID, index, did, after->c.timinca, after->c.tsauxc);
+    }
+    fflush(stdout);
+}
+
 static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst)
 {
+    CLOCK_READ ck0, ck1;
     LINK_OBS pre, att, s1, s2, fin;
     STATS_READ st_att, st_fin;
     STATE_READ tas;
@@ -2039,6 +2089,9 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
     ZeroMemory(&st_att, sizeof(st_att));
     ZeroMemory(&st_fin, sizeof(st_fin));
     ZeroMemory(&tas, sizeof(tas));
+    ZeroMemory(&ck0, sizeof(ck0));
+    ZeroMemory(&ck1, sizeof(ck1));
+    ck0.status = ck1.status = (LONG)AVB_NTSTATUS_UNAVAILABLE;   /* "not read" until a read happens, never a fake success */
 
     /* PRESTATE: evidence and FINAL's link reference; nothing is judged here */
     pre_err = read_if_raw(id->net_luid, &pre_os);
@@ -2049,6 +2102,15 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
     if (h != INVALID_HANDLE_VALUE) {
         link_observe(h, id->net_luid, "PRESTATE", &pre);
         print_query("PRESTATE", &pre.q);
+        /* The incoming TAS state as found, origin not known to the test: recorded, never judged or assumed clean */
+        if (query_valid(&pre.q)) {
+            printf("    [EVIDENCE] incoming TAS state (origin unknown): %s; hw_mode=%u current=%u/0x%X next=%u/0x%X restoration=%u "
+                   "commit=%u/%u\n", query_clean(&pre.q) ? "clean" : "NOT clean", pre.q.q.hw_mode, pre.q.q.current_status,
+                   pre.q.q.current_reasons, pre.q.q.next_status, pre.q.q.next_reasons, pre.q.q.restoration,
+                   pre.q.q.current_commit.state, pre.q.q.next_commit.state);
+        }
+        read_clock(h, &ck0);   /* before the first NIC operation */
+        print_clock("before the first NIC operation", &ck0);
         CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
     } else {
         printf("    [EVIDENCE] PRESTATE query: no read-only handle bound by NET_LUID\n");
@@ -2076,6 +2138,7 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
         verdict("BLOCKED", "STEADY", index, id->device_id, "requires the test's own NIC cycle and the adapter's return");
         verdict("INCONCLUSIVE", "EVENT", index, id->device_id, "not exercised: no owned link transition without a detach (see the header)");
         verdict("BLOCKED", "FINAL", index, id->device_id, "the adapter did not return; its final state is not established");
+        link_clock_cleanup(index, id->device_id, &ck0, &ck1, FALSE);
         return;
     }
     verdict("PASS", "CYCLE", index, id->device_id, "disabled, enabled, returned with the same NET_LUID, device ID and MAC");
@@ -2131,6 +2194,8 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
     print_query("FINAL", &fin.q);
     read_state(h, &tas);
     read_stats(h, &st_fin);
+    read_clock(h, &ck1);   /* after cleanup: the test's last operation on the adapter */
+    print_clock("after cleanup", &ck1);
     CloseHandle(h);
     if (pre_err != NO_ERROR || !fin.os_agreed || !query_valid(&fin.q) || !tas.ok || !st_att.ok || !st_fin.ok) {
         sprintf_s(reason, sizeof(reason), "not measured: pre-test OS err=%lu, final OS bracket %s, final query %s, TAS record %s, "
@@ -2149,6 +2214,7 @@ static void run_link_speed(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id,
                 "bound, OS link state and rate as before the test, TAS query clean and readable, record CLEAN, no new hardware fault");
     }
     printf("    [EVIDENCE] PHC: the owned NIC cycle reseeds it (E12); reported, not restored\n");
+    link_clock_cleanup(index, id->device_id, &ck0, &ck1, TRUE);
 }
 
 static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
