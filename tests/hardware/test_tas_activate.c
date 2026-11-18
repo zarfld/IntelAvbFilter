@@ -18,7 +18,9 @@
  * still not proved after that recovery is BLOCKED, with both observations printed. The proved reply is the restoration reference.
  * The recovery's own outcome is a separate SETUP line: CLEANUP_FAILED when the cycle did not complete or left observed residue
  * (record not CLEAN, or a readable query not clean), INCONCLUSIVE_RESTORATION when the state after it could not be measured. An
- * abort during the recovery cycle reports SETUP INCONCLUSIVE_RESTORATION with the operator action (report_abort).
+ * abort during the recovery cycle reports SETUP INCONCLUSIVE_RESTORATION with the operator action (report_abort): the recovery
+ * is tracked from before the first disable call until its final state is verified or its failure recorded. A blocked adapter
+ * does not stop the others; each runs its own setup and cleanup.
  *
  * Checks, each with its own verdict line <case>-<check>:
  *   ACCESS   a handle opened for reading only is refused TAS_ACTIVATE (FILE_WRITE_ACCESS, #362) and still serves GET_TAS_STATE.
@@ -35,11 +37,14 @@
  *            owned NIC cycle and compared register by register with the test's own pre-state reply, under the validity rule of
  *            test_tas_query_clean --restore (#377). Without a valid set before and after, the registers stay UNVERIFIED and
  *            restoration is at best INCONCLUSIVE_RESTORATION. It is never claimed from GET_TAS_STATE or from the driver's advisory
- *            restoration field. TX on the wire needs at least one tagged frame sent after the cycle; none sent leaves the wire
- *            unmeasured. PHC continuity across the cycle is a separate evidence line, never a restoration input (#361).
+ *            restoration field. TX on the wire is judged only from tagged frames sendto accepted after the cycle (seen ratio,
+ *            no long delay); unrelated captured traffic never decides it. Every attempt failing in sendto is an observed
+ *            transmission failure; nothing attempted leaves the wire unmeasured. PHC continuity across the cycle is a separate
+ *            evidence line, never a restoration input (#361).
  *   HOLD characterization  (--hold, evidence only, no verdict) the measurements a HOLD gate-window assertion needs: the raw
  *            tagged frames sent and seen by the capture after the activation (lost = sent - seen), the baseline's own sent/seen
- *            (the capture's loss before any mutation) and the restoration class; and, only when every such frame was mapped to
+ *            (the capture's loss before any mutation), sendto failures of both and the restoration class; and, only when every
+ *            such frame was mapped to
  *            PHC time, the early, released, inside, near-edge and outside counts (otherwise reported unavailable, never as zeros).
  *            Limits, printed with it:
  *            the test cannot observe the driver's register write order (#365 13.5 records the source order); the capture is a
@@ -308,14 +313,20 @@ static SOCKET open_tx_socket(IN_ADDR ipv4)
     return sock;
 }
 
-/** One tagged broadcast frame; its host send time is kept by sequence number */
-static BOOL send_tagged(SOCKET sock, unsigned nonce)
+#define SEND_OK        1    /* sendto accepted the frame: it has a sequence number and a send time */
+#define SEND_FAILED    0    /* sendto failed: an observed failure to transmit (g_last_send_error) */
+#define SEND_NO_SLOT   (-1) /* no capture slot left (WIRE_MAX_FRAMES): nothing was attempted, nothing measured */
+
+static int g_last_send_error;
+
+/** One tagged broadcast frame; its host send time is kept by sequence number. Returns SEND_OK, SEND_FAILED or SEND_NO_SLOT */
+static int send_tagged(SOCKET sock, unsigned nonce)
 {
     static unsigned char payload[PAYLOAD_BYTES];
     SOCKADDR_IN peer = {0};
 
     if (g_next_seq >= WIRE_MAX_FRAMES) {
-        return FALSE;
+        return SEND_NO_SLOT;
     }
     peer.sin_family = AF_INET;
     peer.sin_port = htons(TAS_WIRE_UDP_PORT);
@@ -323,21 +334,26 @@ static BOOL send_tagged(SOCKET sock, unsigned nonce)
     tas_wire_fill(payload, sizeof(payload), nonce, g_next_seq);
     g_send_us[g_next_seq] = host_us();
     if (sendto(sock, (const char *)payload, (int)sizeof(payload), 0, (SOCKADDR *)&peer, sizeof(peer)) == SOCKET_ERROR) {
-        return FALSE;
+        g_last_send_error = WSAGetLastError();
+        return SEND_FAILED;
     }
     g_next_seq++;
-    return TRUE;
+    return SEND_OK;
 }
 
-/** Sends for ms, drains, and returns how many of these frames the observer saw. delayed: seen later than UNGATED_DELAY_US */
-static unsigned send_window(SOCKET sock, unsigned nonce, DWORD ms, unsigned *sent, unsigned *delayed)
+/** Sends for ms, drains, and returns how many of these frames the observer saw. sent: frames sendto accepted; failed: sendto
+ *  failures; delayed: seen later than UNGATED_DELAY_US */
+static unsigned send_window(SOCKET sock, unsigned nonce, DWORD ms, unsigned *sent, unsigned *failed, unsigned *delayed)
 {
     unsigned first = g_next_seq, seq, seen = 0;
     DWORD start = GetTickCount();
 
     *delayed = 0;
+    *failed = 0;
     while (GetTickCount() - start < ms) {
-        (void)send_tagged(sock, nonce);
+        if (send_tagged(sock, nonce) == SEND_FAILED) {
+            (*failed)++;
+        }
         Sleep(SEND_PERIOD_MS);
     }
     Sleep(DRAIN_MS);
@@ -808,21 +824,28 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
             printf("    TX after the cycle: link did not come back within %d ms\n", RETURN_BOUND_MS);
         } else {
             SOCKET sock = open_tx_socket(ipv4);
-            unsigned nonce = GetTickCount() ^ (GetCurrentProcessId() << 8), sent = 0, delayed = 0, seen;
+            unsigned nonce = GetTickCount() ^ (GetCurrentProcessId() << 8), sent = 0, failed = 0, delayed = 0, seen;
             LONG captured = 0, from_target = 0;
 
             if (sock != INVALID_SOCKET && wire_start(id->net_luid, g_capture_luid, id->mac, nonce, ipv4) != 0) {
-                seen = send_window(sock, nonce, BASELINE_MS, &sent, &delayed);
+                seen = send_window(sock, nonce, BASELINE_MS, &sent, &failed, &delayed);
                 wire_counts(&captured, &from_target);
                 wire_stop();
-                e.tx_probed = captured != 0;
-                e.tx_on_wire = (unsigned long long)seen * 100 >= (unsigned long long)sent * TAS_ACT_SEEN_MIN_PERCENT && delayed == 0;
-                printf("    TX after the cycle: sent=%u seen=%u delayedOver%lldms=%u captured=%ld\n", sent, seen, UNGATED_DELAY_US / 1000,
-                       delayed, captured);
-                if (sent == 0) {   /* no tagged frame left the socket: the wire was not measured, whatever else was captured */
-                    e.tx_probed = FALSE;
+                printf("    TX after the cycle: sent=%u sendFailed=%u seen=%u delayedOver%lldms=%u captured=%ld\n", sent, failed, seen,
+                       UNGATED_DELAY_US / 1000, delayed, captured);
+                if (sent != 0) {
+                    /* The ratio means something only for frames this test sent; unrelated captured traffic never decides it */
+                    e.tx_probed = captured != 0;
+                    e.tx_on_wire = (unsigned long long)seen * 100 >= (unsigned long long)sent * TAS_ACT_SEEN_MIN_PERCENT && delayed == 0;
+                } else if (failed != 0) {
+                    e.tx_probed = TRUE;   /* every attempt failed in sendto: an observed failure to transmit, not a gap */
                     e.tx_on_wire = FALSE;
-                    printf("    TX after the cycle: not measured, no tagged frame was sent\n");
+                    printf("    TX after the cycle: every one of %u sends failed (last WSA error %d): observed transmission failure\n",
+                           failed, g_last_send_error);
+                } else {
+                    e.tx_probed = FALSE;  /* nothing was attempted (no capture slot left): the wire was not measured */
+                    e.tx_on_wire = FALSE;
+                    printf("    TX after the cycle: not measured, no tagged frame was attempted (capture capacity)\n");
                 }
             } else {
                 printf("    TX after the cycle: not probed, no socket or no observer\n");
@@ -917,11 +940,12 @@ static HANDLE recover_prestate(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
     }
     h = cycled ? wait_for_adapter(id) : INVALID_HANDLE_VALUE;
     if (h == INVALID_HANDLE_VALUE) {
-        InterlockedExchange(&g_pending_adapter, -1);
-        InterlockedExchange(&g_pending_setup, 0);
         verdict("CLEANUP_FAILED", "SETUP", index, id->device_id,
                 "the setup recovery's NIC cycle did not complete or the adapter did not return; a timed-out disable may still be "
                 "pending in Windows. Operator: NIC cycle once it ends, then TC-TSNREG-001");
+        /* Tracking ends only once the failure is recorded: an abort before this line still reports the setup phase */
+        InterlockedExchange(&g_pending_adapter, -1);
+        InterlockedExchange(&g_pending_setup, 0);
         *why = "the setup recovery's NIC cycle did not complete or the adapter did not return";
         return INVALID_HANDLE_VALUE;
     }
@@ -937,8 +961,6 @@ static HANDLE recover_prestate(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
         /* The test cycled the NIC and did not establish a clean state: observed residue is a cleanup failure of its setup,
          * an unmeasurable state is inconclusive. Either way the activation stays BLOCKED (the caller) */
         BOOL residue = (armed >= 0 && armed != AVB_TAS_STATE_CLEAN) || (query_readable(q) && !query_clean(q));
-        InterlockedExchange(&g_pending_adapter, -1);
-        InterlockedExchange(&g_pending_setup, 0);
         if (residue) {
             verdict("CLEANUP_FAILED", "SETUP", index, id->device_id,
                     "after the setup recovery NIC cycle the driver record is not CLEAN or the readable TAS query is not clean (TSN mode, "
@@ -948,14 +970,16 @@ static HANDLE recover_prestate(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
                     "after the setup recovery NIC cycle the state could not be measured (GET_TAS_STATE unreadable or the TAS query not "
                     "readable); see the observations above");
         }
+        InterlockedExchange(&g_pending_adapter, -1);   /* only after the outcome is recorded */
+        InterlockedExchange(&g_pending_setup, 0);
         *why = "the pre-state is still not proved clean after the test-owned setup recovery (GET_TAS_STATE CLEAN and a clean, "
                "readable TAS query); see both observations above";
         CloseHandle(h);
         return INVALID_HANDLE_VALUE;
     }
-    InterlockedExchange(&g_pending_adapter, -1);
-    InterlockedExchange(&g_pending_setup, 0);
     printf("    setup recovery: pre-state proved clean after the NIC cycle\n");
+    InterlockedExchange(&g_pending_adapter, -1);   /* only after the final state is verified */
+    InterlockedExchange(&g_pending_setup, 0);
     return h;
 }
 
@@ -971,7 +995,9 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     TAS_ACT_WIRE_CLASS wclass = TAS_ACT_WIRE_UNOBSERVED;
     TAS_ACT_RESTORE_CLASS restore;
     LONG armed_before;
-    unsigned raw_sent = 0, raw_seen = 0;   /* after the activation, from the capture itself, before cleanup reuses it */
+    unsigned raw_sent = 0, raw_seen = 0;   /* after the activation: frames sendto accepted, and of those the unique ones the
+                                              capture saw; read before cleanup reuses the capture */
+    unsigned raw_send_failed = 0;          /* after the activation: sendto failures (observed, not counted as sent) */
     BOOL mapped = FALSE;                   /* every such frame got a PHC time: the timing counts mean something */
     BOOL anchor_ok = FALSE;                /* the PHC anchor after the frames drained was read */
     MIB_IF_ROW2 row;
@@ -981,7 +1007,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     HANDLE h, h2;
     BOOL other_link = FALSE;
     long long phc = 0, base;
-    unsigned nonce, sent = 0, seen, delayed = 0, first_after = 0;
+    unsigned nonce, sent = 0, send_failed = 0, seen, delayed = 0, first_after = 0;
     avb_u32 mbps, frame;
     DEVINST inst;
     LONG captured = 0, from_target = 0;
@@ -1030,8 +1056,8 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         CloseHandle(h);
         return;
     }
-    seen = send_window(sock, nonce, BASELINE_MS, &sent, &delayed);
-    printf("    baseline: sent=%u seen=%u\n", sent, seen);
+    seen = send_window(sock, nonce, BASELINE_MS, &sent, &send_failed, &delayed);
+    printf("    baseline: sent=%u sendFailed=%u seen=%u\n", sent, send_failed, seen);
     if (sent == 0 || (unsigned long long)seen * 100 < (unsigned long long)sent * TAS_ACT_SEEN_MIN_PERCENT) {
         wire_stop();
         closesocket(sock);
@@ -1178,7 +1204,9 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
 
         printf("\n  --- Tagged frames across BaseT ---\n");
         while (GetTickCount() - start < SEND_BOUND_MS && (!read_phc(h, &now) || now < base + SEND_CYCLES_AFTER * CYCLE_NS + CYCLE_NS / 2)) {
-            (void)send_tagged(sock, nonce);
+            if (send_tagged(sock, nonce) == SEND_FAILED) {
+                raw_send_failed++;
+            }
             Sleep(SEND_PERIOD_MS);
         }
         Sleep(DRAIN_MS);
@@ -1212,8 +1240,9 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
          * itself: lost = tagged frames sent after the activation and not seen. The baseline pair is the capture's own loss before
          * any mutation. The timing counts need the PHC mapping; without it they are reported unavailable, never as zeros. Near-edge
          * arrivals are counted apart from inside and outside by the classifier; released is a subset of the first window */
-        printf("    [EVIDENCE] HOLD characterization: sent=%u seen=%u lost=%u captured=%ld fromTarget=%ld baselineSent=%u baselineSeen=%u "
-               "restoration=%s\n", raw_sent, raw_seen, raw_sent - raw_seen, captured, from_target, sent, seen,
+        printf("    [EVIDENCE] HOLD characterization: sent=%u sendFailed=%u seen=%u lost=%u captured=%ld fromTarget=%ld baselineSent=%u "
+               "baselineSendFailed=%u baselineSeen=%u restoration=%s\n", raw_sent, raw_send_failed, raw_seen, raw_sent - raw_seen,
+               captured, from_target, sent, send_failed, seen,
                restore == TAS_ACT_RESTORE_COMPLETE ? "COMPLETE" : (restore == TAS_ACT_RESTORE_UNVERIFIED ? "UNVERIFIED" : "INCOMPLETE"));
         if (mapped) {
             printf("    [EVIDENCE] HOLD characterization timing (PHC-mapped): wire=%s frames=%u seen=%u early=%u released=%u inside=%u "
