@@ -102,24 +102,28 @@
  * identity, device node and arm target by NET_LUID; topology printed as diagnostic information only, #463):
  *   UT-DEV-INIT-CONCURRENT-PRESTATE    as UT-DEV-LIFECYCLE-002-PRESTATE; the READY observation before the scenario is the
  *                  final-state reference.
- *   UT-DEV-INIT-CONCURRENT-BELOW-READY one session armed with ATTACH FAIL, RESTART FAIL and INIT_PRE HOLD (ICC_HOLD_MS), owned NIC
- *                  cycle. Before instance A starts: ATTACH and RESTART consumption attributed, the HOLD unconsumed, nothing in
- *                  flight after instances A and B were opened (binding alone starts no attempt), hw_state below PTP_READY.
- *                  Otherwise FAILED_SETUP and every later line BLOCKED.
+ *   UT-DEV-INIT-CONCURRENT-BELOW-READY one session armed with ATTACH FAIL, RESTART FAIL and a HOLD (ICC_HOLD_MS) for each
+ *                  INIT_DEVICE origin, INIT_PRE and INIT_HANDLER (which one A's initialization reaches is the driver's internal
+ *                  structure), owned NIC cycle. Before instance A starts: ATTACH and RESTART consumption attributed, both HOLDs
+ *                  unconsumed, nothing in flight after instances A and B were opened (binding alone starts no attempt), hw_state
+ *                  below PTP_READY. Otherwise FAILED_SETUP and every later line BLOCKED.
  *   UT-DEV-INIT-CONCURRENT-HOLD        instance A sends INIT_DEVICE on its own thread. B is sent only after the driver's arm shows
- *                  the HOLD consumed with an attempt in flight. PASS needs the consuming record: A's thread, target, session,
- *                  origin INIT_PRE, site BASIC, applied HOLD, IRQL 0, the armed hold waited, and its driver QPC enter/exit inside
- *                  A's own QueryPerformanceCounter request interval (the shared timebase checked per run). An armed action alone is
- *                  no evidence: otherwise FAILED_SETUP.
- *   UT-DEV-INIT-CONCURRENT-OVERLAP     B's request began after A's driver enter and before A's HOLD ended (A's attempt had not
- *                  touched the device). B's complete interval is printed relative to A's enter, HOLD end and exit. Not
- *                  established: INCONCLUSIVE, and neither serialization nor its absence is claimed; the two B lines are BLOCKED.
- *   UT-DEV-INIT-CONCURRENT-STATUS      B's raw NTSTATUS: exactly STATUS_DEVICE_BUSY. B runs on its own bounded worker, as A
- *                  does; a request not completed within the bound (then CancelIoEx) is FAIL.
+ *                  a HOLD consumed with an attempt in flight. PASS needs the consuming record of a HOLD on A's thread: target,
+ *                  session, site BASIC, applied HOLD, IRQL 0, the armed hold waited, and its driver QPC enter/exit inside A's own
+ *                  QueryPerformanceCounter request interval (the shared timebase checked per run). An armed action alone is no
+ *                  evidence: otherwise FAILED_SETUP.
+ *   UT-DEV-INIT-CONCURRENT-OVERLAP     B's whole request interval (sampled before its submission and after its completion, on its
+ *                  own worker within its deadline) lies inside A's HOLD: B was submitted and completed while A's initialization was
+ *                  in progress and had not touched the device. B's interval is printed relative to A's enter, HOLD end and exit.
+ *                  Anything else is ambiguous: INCONCLUSIVE, neither serialization nor its absence is claimed, the two B lines
+ *                  are BLOCKED.
+ *   UT-DEV-INIT-CONCURRENT-STATUS      B's raw NTSTATUS: exactly STATUS_DEVICE_BUSY. Each worker's deadline (one maximum HOLD
+ *                  plus one bring-up) is measured from its own start; a request that misses it is FAIL even if it completes
+ *                  during the following CancelIoEx grace period (completion is cleanup evidence only).
  *   UT-DEV-INIT-CONCURRENT-NO-ATTEMPT  no initialization attempt attributable to B: no record on B's thread, none on another
  *                  thread (A's excluded) started during B's request; a complete history is required for PASS.
- *   UT-DEV-INIT-CONCURRENT-FIRST-STATUS  A's raw NTSTATUS: exactly STATUS_SUCCESS (row "Adapter not initialized"). A runs on a
- *                  worker that is waited for with a bound (one maximum HOLD plus one bring-up), then CancelIoEx.
+ *   UT-DEV-INIT-CONCURRENT-FIRST-STATUS  A's raw NTSTATUS: exactly STATUS_SUCCESS (row "Adapter not initialized"); a missed
+ *                  deadline from A's own start is FAIL, as for B.
  *   UT-DEV-INIT-CONCURRENT-READY       READY after both requests (PHC and clock registers printed as evidence).
  *   UT-DEV-INIT-CONCURRENT-ATTRIBUTION complete history, every record on the target in this session at IRQL 0, every consumed
  *                  action attributed, every INIT_DEVICE attempt on A's or B's thread.
@@ -2159,16 +2163,39 @@ static int run_init_retry_fault(void)
 static int g_icc_established, g_icc_completed;   /* adapters whose PRESTATE passed; adapters whose run reached its end */
 #define ICC_HOLD_MS            4000u   /* instance A's HOLD at its first fault point, below AVB_INITFAULT_MAX_HOLD_MS */
 #define ICC_ENTRY_BOUND_MS     (ICC_HOLD_MS / 2)   /* A's HOLD consumption must be visible within half the HOLD, B needs the rest */
-#define ICC_WORKER_BOUND_MS    (AVB_INITFAULT_MAX_HOLD_MS + IRF_RETURN_BOUND_MS)   /* A: at most one HOLD plus one bring-up */
+#define ICC_WORKER_BOUND_MS    (AVB_INITFAULT_MAX_HOLD_MS + IRF_RETURN_BOUND_MS)   /* per request: at most one HOLD plus one bring-up,
+                                                                                     measured from that worker's own start */
 #define ICC_CANCEL_BOUND_MS    5000u   /* after CancelIoEx on a worker that exceeded its bound */
-#define ICC_HOLD_ACTION        2u      /* index of the INIT_PRE HOLD action in icc_acts */
+/* The HOLD is armed for both INIT_DEVICE origins: which one A's initialization reaches is the driver's internal structure
+ * (#404 part 2 removes the pre-dispatch bring-up), so the test judges the HOLD that A's thread consumed, whichever it is */
+#define ICC_HOLD_PRE           2u      /* index of the INIT_PRE HOLD action */
+#define ICC_HOLD_HANDLER       3u      /* index of the INIT_HANDLER HOLD action */
 
 typedef struct {
-    HANDLE h;          /* instance A, bound to the target */
-    LONG st;           /* raw NTSTATUS of A's INIT_DEVICE */
+    HANDLE h;          /* the instance, bound to the target */
+    LONG st;           /* raw NTSTATUS of its INIT_DEVICE */
     DWORD got;
-    LONGLONG q0, q1;   /* QueryPerformanceCounter immediately before and after A's request */
+    LONGLONG q0, q1;   /* QueryPerformanceCounter immediately before and after the request */
 } ICC_WORKER;
+
+/** Bounded completion of a worker, measured from its own start (start_tick, taken just before it was created). Expiry of the
+ *  deadline is reported in *timed_out and is never erased by a later completion; the return value is whether the worker
+ *  completed at all (after CancelIoEx and ICC_CANCEL_BOUND_MS more), which is cleanup evidence only */
+static BOOL icc_join(HANDLE thread, DWORD start_tick, HANDLE io, BOOL *timed_out, const char *who)
+{
+    DWORD elapsed = GetTickCount() - start_tick;
+    DWORD remaining = elapsed < ICC_WORKER_BOUND_MS ? ICC_WORKER_BOUND_MS - elapsed : 0;
+
+    *timed_out = FALSE;
+    if (WaitForSingleObject(thread, remaining) == WAIT_OBJECT_0) {
+        return TRUE;
+    }
+    *timed_out = TRUE;
+    printf("    [EVIDENCE] instance %s did not complete within %u ms of its start: CancelIoEx, then %u ms more\n", who,
+           ICC_WORKER_BOUND_MS, ICC_CANCEL_BOUND_MS);
+    (void)CancelIoEx(io, NULL);
+    return WaitForSingleObject(thread, ICC_CANCEL_BOUND_MS) == WAIT_OBJECT_0;
+}
 
 static DWORD WINAPI icc_worker(LPVOID arg)
 {
@@ -2182,12 +2209,14 @@ static DWORD WINAPI icc_worker(LPVOID arg)
     return 0;
 }
 
-/** Arms ATTACH FAIL, RESTART FAIL and INIT_PRE HOLD ICC_HOLD_MS for the one target adapter in a new session */
+/** Arms ATTACH FAIL, RESTART FAIL, INIT_PRE HOLD and INIT_HANDLER HOLD (ICC_HOLD_MS) for the one target adapter in a new
+ *  session */
 static BOOL icc_arm(avb_u64 luid, unsigned __int64 *session)
 {
     static const unsigned acts[][2] = { { AVB_INITFAULT_ORIGIN_ATTACH, AVB_INITFAULT_ACT_FAIL },
                                         { AVB_INITFAULT_ORIGIN_RESTART, AVB_INITFAULT_ACT_FAIL },
-                                        { AVB_INITFAULT_ORIGIN_INIT_PRE, AVB_INITFAULT_ACT_HOLD } };
+                                        { AVB_INITFAULT_ORIGIN_INIT_PRE, AVB_INITFAULT_ACT_HOLD },
+                                        { AVB_INITFAULT_ORIGIN_INIT_HANDLER, AVB_INITFAULT_ACT_HOLD } };
     AVB_INITFAULT_ARM a;
     AVB_INITFAULT_CONTROL c;
     FILETIME ft;
@@ -2246,9 +2275,11 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     HKEY k = NULL;
     BOOL created = FALSE, ref_valid = FALSE, mutated = FALSE, clear_ok = TRUE, a_done = FALSE, a_started = FALSE;
     BOOL hold_seen = FALSE, b_sent = FALSE, b_done = FALSE, hold_ok = FALSE, overlap = FALSE, complete = FALSE;
+    BOOL a_timeout = FALSE, b_timeout = FALSE;   /* deadline expiry, kept apart from eventual completion (cleanup evidence) */
     HANDLE hO = INVALID_HANDLE_VALUE, hB = INVALID_HANDLE_VALUE, thread = NULL, thread_b = NULL;
     ICC_WORKER *w = NULL, *wb = NULL;
-    DWORD tid_a = 0, tid_b = 0, got_b = 0;
+    DWORD tid_a = 0, tid_b = 0, got_b = 0, a_start = 0, b_start = 0;
+    unsigned h = ICC_HOLD_PRE, holds_consumed = 0;   /* the HOLD action A's thread consumed */
     LONG st_b = AVB_NTSTATUS_UNAVAILABLE;
     LARGE_INTEGER freq, q;
     LONGLONG b0 = 0, b1 = 0, q_seen = 0;
@@ -2346,23 +2377,25 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     (void)irf_read_arm(k, &arm);   /* after the instances were opened: binding alone must not have started an attempt */
     if (hO == INVALID_HANDLE_VALUE || hB == INVALID_HANDLE_VALUE || w == NULL || w->h == INVALID_HANDLE_VALUE || !irf_hw_state(hO, &hs) ||
         hs >= AVB_HW_PTP_READY || arm.session != session || !irf_attributed(&arm, 0, id->net_luid, rec, present) ||
-        !irf_attributed(&arm, 1, id->net_luid, rec, present) || arm.actions[ICC_HOLD_ACTION].consumed_by != 0 || arm.inflight != 0) {
-        sprintf_s(reason, sizeof(reason), "instances opened %d; ATTACH FAIL attributed %d, RESTART FAIL attributed %d, HOLD unconsumed %d, "
-                  "inflight %u, hw_state %u (must be below PTP_READY %u)", hO != INVALID_HANDLE_VALUE && hB != INVALID_HANDLE_VALUE &&
+        !irf_attributed(&arm, 1, id->net_luid, rec, present) || arm.actions[ICC_HOLD_PRE].consumed_by != 0 ||
+        arm.actions[ICC_HOLD_HANDLER].consumed_by != 0 || arm.inflight != 0) {
+        sprintf_s(reason, sizeof(reason), "instances opened %d; ATTACH FAIL attributed %d, RESTART FAIL attributed %d, HOLDs unconsumed "
+                  "%d/%d, inflight %u, hw_state %u (must be below PTP_READY %u)", hO != INVALID_HANDLE_VALUE && hB != INVALID_HANDLE_VALUE &&
                   w != NULL && w->h != INVALID_HANDLE_VALUE, irf_attributed(&arm, 0, id->net_luid, rec, present),
-                  irf_attributed(&arm, 1, id->net_luid, rec, present), arm.actions[ICC_HOLD_ACTION].consumed_by == 0, arm.inflight, hs,
-                  (unsigned)AVB_HW_PTP_READY);
+                  irf_attributed(&arm, 1, id->net_luid, rec, present), arm.actions[ICC_HOLD_PRE].consumed_by == 0,
+                  arm.actions[ICC_HOLD_HANDLER].consumed_by == 0, arm.inflight, hs, (unsigned)AVB_HW_PTP_READY);
         ic_verdict("FAILED_SETUP", "UT-DEV-INIT-CONCURRENT-BELOW-READY", index, did, reason);
         ic_blocked_cases(index, did, "no adapter below READY with an unconsumed HOLD was established; instance A was not started", deps + 1,
                          (int)ARRAYSIZE(deps) - 1);
         goto cleanup;
     }
     sprintf_s(reason, sizeof(reason), "ATTACH and RESTART failed by the armed fault (records seq=%u, seq=%u); hw_state %u; INIT_PRE "
-              "HOLD unconsumed; next_seq %u, inflight 0 after opening instances A and B", arm.actions[0].consumed_by - 1u,
+              "and INIT_HANDLER HOLD unconsumed; next_seq %u, inflight 0 after opening instances A and B", arm.actions[0].consumed_by - 1u,
               arm.actions[1].consumed_by - 1u, hs, arm.next_seq);
     ic_verdict("PASS", "UT-DEV-INIT-CONCURRENT-BELOW-READY", index, did, reason);
 
-    /* ---- Instance A on its own thread; B is sent only after the driver's arm shows A's HOLD consumed with A in flight ---- */
+    /* ---- Instance A on its own thread; B is sent only after the driver's arm shows a HOLD consumed with an attempt in flight ---- */
+    a_start = GetTickCount();
     thread = CreateThread(NULL, 0, icc_worker, w, 0, &tid_a);
     if (thread == NULL) {
         ic_verdict("FAILED_SETUP", "UT-DEV-INIT-CONCURRENT-HOLD", index, did, "cannot start instance A's thread; no INIT_DEVICE was sent");
@@ -2374,7 +2407,8 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         DWORD start = GetTickCount();
         AVB_INITFAULT_ARM a;
         while (GetTickCount() - start < ICC_ENTRY_BOUND_MS) {
-            if (irf_read_arm(k, &a) && a.session == session && a.actions[ICC_HOLD_ACTION].consumed_by != 0 && a.inflight != 0) {
+            if (irf_read_arm(k, &a) && a.session == session && a.inflight != 0 &&
+                (a.actions[ICC_HOLD_PRE].consumed_by != 0 || a.actions[ICC_HOLD_HANDLER].consumed_by != 0)) {
                 QueryPerformanceCounter(&q);
                 q_seen = q.QuadPart;
                 hold_seen = TRUE;
@@ -2388,37 +2422,26 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         if (wb != NULL) {
             wb->h = hB;
             wb->st = AVB_NTSTATUS_UNAVAILABLE;
+            b_start = GetTickCount();
             thread_b = CreateThread(NULL, 0, icc_worker, wb, 0, &tid_b);
         }
         if (thread_b == NULL) {
             printf("    [EVIDENCE] cannot start instance B's thread: instance B not sent\n");
         } else {
             b_sent = TRUE;
-            if (WaitForSingleObject(thread_b, ICC_WORKER_BOUND_MS) == WAIT_OBJECT_0) {
-                b_done = TRUE;
-            } else {
-                printf("    [EVIDENCE] instance B did not complete within %u ms: CancelIoEx, then %u ms more\n", ICC_WORKER_BOUND_MS,
-                       ICC_CANCEL_BOUND_MS);
-                (void)CancelIoEx(hB, NULL);
-                b_done = WaitForSingleObject(thread_b, ICC_CANCEL_BOUND_MS) == WAIT_OBJECT_0;
-            }
+            b_done = icc_join(thread_b, b_start, hB, &b_timeout, "B");
             b0 = wb->q0;
             b1 = b_done ? wb->q1 : LLONG_MAX;   /* not completed: B's interval is open-ended */
             st_b = b_done ? wb->st : AVB_NTSTATUS_UNAVAILABLE;
             got_b = b_done ? wb->got : 0;
         }
     } else {
-        printf("    [EVIDENCE] A's HOLD consumption with A in flight not visible in the arm within %u ms: instance B not sent\n", ICC_ENTRY_BOUND_MS);
+        printf("    [EVIDENCE] a HOLD consumption with an attempt in flight not visible in the arm within %u ms: instance B not sent\n",
+               ICC_ENTRY_BOUND_MS);
     }
 
-    /* ---- Bounded completion of A (worker owned here on every path) ---- */
-    if (WaitForSingleObject(thread, ICC_WORKER_BOUND_MS) == WAIT_OBJECT_0) {
-        a_done = TRUE;
-    } else {
-        printf("    [EVIDENCE] instance A did not complete within %u ms: CancelIoEx, then %u ms more\n", ICC_WORKER_BOUND_MS, ICC_CANCEL_BOUND_MS);
-        (void)CancelIoEx(w->h, NULL);
-        a_done = WaitForSingleObject(thread, ICC_CANCEL_BOUND_MS) == WAIT_OBJECT_0;
-    }
+    /* ---- Bounded completion of A, against the deadline from A's own start (worker owned here on every path) ---- */
+    a_done = icc_join(thread, a_start, w->h, &a_timeout, "A");
 
     /* ---- The session's history: complete (every reserved sequence recorded, nothing in flight) within the drain bound ---- */
     {
@@ -2432,40 +2455,50 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
     (void)irf_print_records(k, session, "after instances A and B", rec, present);
     printf("    [EVIDENCE] threads: A tid=%lu, B tid=%lu; history complete %d (%u missing)\n", tid_a, tid_b, complete, missing);
 
-    /* ---- UT-DEV-INIT-CONCURRENT-HOLD: A actually entered HOLD: the consuming record is A's (thread), target, session, origin
-     *      INIT_PRE, site BASIC, applied HOLD, waited ICC_HOLD_MS at IRQL 0, and its driver QPC lies inside A's own request
-     *      interval (same timebase) ---- */
-    if (arm.actions[ICC_HOLD_ACTION].consumed_by != 0 && arm.actions[ICC_HOLD_ACTION].consumed_by != IRF_CLEARED &&
-        arm.actions[ICC_HOLD_ACTION].consumed_by <= AVB_INITFAULT_MAX_RECORDS) {
-        s = arm.actions[ICC_HOLD_ACTION].consumed_by - 1u;
-    }
+    /* ---- UT-DEV-INIT-CONCURRENT-HOLD: A actually entered HOLD: of the two HOLD actions (INIT_PRE, INIT_HANDLER), the one whose
+     *      attributed record is on A's thread (target, session, its origin, site BASIC, applied HOLD, IRQL 0), waited ICC_HOLD_MS,
+     *      with its driver QPC inside A's own request interval (same timebase) ---- */
     {
-        BOOL attributed = irf_attributed(&arm, ICC_HOLD_ACTION, id->net_luid, rec, present);
-        BOOL by_a = attributed && rec[s].thread_id == (unsigned __int32)tid_a;
-        BOOL waited = attributed && rec[s].hold_ms == ICC_HOLD_MS && rec[s].qpc_hold_end > rec[s].qpc_enter;
-        BOOL timebase = attributed && a_done && w->q0 < rec[s].qpc_enter && rec[s].qpc_exit < w->q1;
+        BOOL attributed = FALSE, by_a = FALSE, waited, timebase;
+        unsigned cand[2] = { ICC_HOLD_PRE, ICC_HOLD_HANDLER }, c;
+        for (c = 0; c < 2; c++) {
+            unsigned cb = arm.actions[cand[c]].consumed_by;
+            if (cb == 0 || cb == IRF_CLEARED || cb > AVB_INITFAULT_MAX_RECORDS) { continue; }
+            holds_consumed++;
+            if (!attributed || (!by_a && rec[cb - 1u].thread_id == (unsigned __int32)tid_a)) {   /* prefer the one on A's thread */
+                h = cand[c];
+                s = cb - 1u;
+                attributed = irf_attributed(&arm, h, id->net_luid, rec, present);
+                by_a = attributed && rec[s].thread_id == (unsigned __int32)tid_a;
+            }
+        }
+        waited = attributed && rec[s].hold_ms == ICC_HOLD_MS && rec[s].qpc_hold_end > rec[s].qpc_enter;
+        timebase = attributed && a_done && w->q0 < rec[s].qpc_enter && rec[s].qpc_exit < w->q1;
         hold_ok = by_a && waited && timebase;
         if (attributed) {
-            sprintf_s(reason, sizeof(reason), "record seq=%u: session 0x%016llX, origin INIT_PRE, site BASIC, applied HOLD, tid %u (A %lu: %d), "
-                      "hold %u ms (armed %u), HOLD %.1f ms by driver QPC; A's request %.1f ms, driver enter/exit inside it %d",
-                      s, session, rec[s].thread_id, tid_a, by_a, rec[s].hold_ms, ICC_HOLD_MS,
-                      icc_ms(rec[s].qpc_hold_end, rec[s].qpc_enter, freq.QuadPart), a_done ? icc_ms(w->q1, w->q0, freq.QuadPart) : -1.0, timebase);
+            sprintf_s(reason, sizeof(reason), "record seq=%u: session 0x%016llX, origin %s, site BASIC, applied HOLD, tid %u (A %lu: %d), "
+                      "hold %u ms (armed %u), HOLD %.1f ms by driver QPC; A's request %.1f ms, driver enter/exit inside it %d; HOLD "
+                      "actions consumed %u of 2", s, session, irf_origin_name(rec[s].origin), rec[s].thread_id, tid_a, by_a, rec[s].hold_ms,
+                      ICC_HOLD_MS, icc_ms(rec[s].qpc_hold_end, rec[s].qpc_enter, freq.QuadPart),
+                      a_done ? icc_ms(w->q1, w->q0, freq.QuadPart) : -1.0, timebase, holds_consumed);
         } else {
-            sprintf_s(reason, sizeof(reason), "the INIT_PRE HOLD was not consumed by an attributed record (consumed_by %u, history complete %d, "
-                      "A completed %d): an armed action is no evidence of a HOLD", arm.actions[ICC_HOLD_ACTION].consumed_by, complete, a_done);
+            sprintf_s(reason, sizeof(reason), "no HOLD action was consumed by an attributed record (consumed_by INIT_PRE %u, INIT_HANDLER %u; "
+                      "history complete %d, A completed %d): an armed action is no evidence of a HOLD",
+                      arm.actions[ICC_HOLD_PRE].consumed_by, arm.actions[ICC_HOLD_HANDLER].consumed_by, complete, a_done);
         }
         ic_verdict(hold_ok ? "PASS" : "FAILED_SETUP", "UT-DEV-INIT-CONCURRENT-HOLD", index, did, reason);
     }
 
-    /* ---- UT-DEV-INIT-CONCURRENT-OVERLAP: B's request began after A entered its initialization attempt and before A's HOLD
-     *      ended (before A's attempt touched the device); B's complete interval is reported relative to A's attempt ---- */
+    /* ---- UT-DEV-INIT-CONCURRENT-OVERLAP: B's whole request interval, from before its submission to after its completion (its own
+     *      worker, within its deadline), lies inside A's HOLD: B was submitted and completed while A's initialization was in
+     *      progress and had not touched the device. Anything else is ambiguous: INCONCLUSIVE, nothing claimed ---- */
     if (b_sent && hold_ok) {
-        overlap = rec[s].qpc_enter < b0 && b0 < rec[s].qpc_hold_end;
-        sprintf_s(reason, sizeof(reason), "QPC ms relative to A's driver enter: B request %.1f .. %.1f (B completed %d); A HOLD end %.1f, "
-                  "A exit %.1f; B inside A's HOLD entirely %d; arm showed the HOLD consumed with A in flight at %.1f",
+        overlap = b_done && !b_timeout && rec[s].qpc_enter < b0 && b1 < rec[s].qpc_hold_end;
+        sprintf_s(reason, sizeof(reason), "QPC ms relative to A's driver enter: B request %.1f .. %.1f (B completed %d, deadline expired %d); "
+                  "A HOLD end %.1f, A exit %.1f; arm showed the HOLD consumed with A in flight at %.1f; B's whole request inside A's HOLD %d",
                   icc_ms(b0, rec[s].qpc_enter, freq.QuadPart), b_done ? icc_ms(b1, rec[s].qpc_enter, freq.QuadPart) : -1.0, b_done,
-                  icc_ms(rec[s].qpc_hold_end, rec[s].qpc_enter, freq.QuadPart), icc_ms(rec[s].qpc_exit, rec[s].qpc_enter, freq.QuadPart),
-                  b_done && rec[s].qpc_enter < b0 && b1 < rec[s].qpc_hold_end, icc_ms(q_seen, rec[s].qpc_enter, freq.QuadPart));
+                  b_timeout, icc_ms(rec[s].qpc_hold_end, rec[s].qpc_enter, freq.QuadPart),
+                  icc_ms(rec[s].qpc_exit, rec[s].qpc_enter, freq.QuadPart), icc_ms(q_seen, rec[s].qpc_enter, freq.QuadPart), overlap);
         ic_verdict(overlap ? "PASS" : "INCONCLUSIVE", "UT-DEV-INIT-CONCURRENT-OVERLAP", index, did, reason);
     } else {
         sprintf_s(reason, sizeof(reason), "overlap not established (B sent %d, A's HOLD established %d): neither serialization nor its "
@@ -2473,21 +2506,23 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         ic_verdict("INCONCLUSIVE", "UT-DEV-INIT-CONCURRENT-OVERLAP", index, did, reason);
     }
     if (b_sent) {
-        printf("    [EVIDENCE] instance B INIT_DEVICE: ntstatus=0x%08lX information=%lu\n", (unsigned long)st_b, got_b);
+        printf("    [EVIDENCE] instance B INIT_DEVICE: ntstatus=0x%08lX information=%lu; deadline expired %d, completed %d\n",
+               (unsigned long)st_b, got_b, b_timeout, b_done);
     }
 
-    /* ---- B's published result and hardware effect, judged only under established overlap ---- */
-    if (!overlap) {
+    /* ---- B's published result and hardware effect. A request that exceeded its deadline is FAIL on its own (a later completion
+     *      during cancellation never turns it into a result); otherwise both lines are judged only under established overlap ---- */
+    if (b_sent && b_timeout) {
+        sprintf_s(reason, sizeof(reason), "B's INIT_DEVICE did not complete within %u ms of its start (completed during cancellation %d, "
+                  "ntstatus=0x%08lX); expected exactly 0x%08lX", ICC_WORKER_BOUND_MS, b_done, (unsigned long)st_b,
+                  (unsigned long)STATUS_DEVICE_BUSY);
+        ic_verdict("FAIL", "UT-DEV-INIT-CONCURRENT-STATUS", index, did, reason);
+        ic_verdict("BLOCKED", "UT-DEV-INIT-CONCURRENT-NO-ATTEMPT", index, did, "not judged: overlap with an initialization in progress was not established");
+    } else if (!overlap) {
         ic_blocked_cases(index, did, "not judged: overlap with an initialization in progress was not established", bdeps, (int)ARRAYSIZE(bdeps));
     } else {
         unsigned by_tid = 0, in_window = 0;
-        if (b_done) {
-            ic_status_line("UT-DEV-INIT-CONCURRENT", index, did, st_b, got_b, (LONG)STATUS_DEVICE_BUSY, FALSE);
-        } else {
-            sprintf_s(reason, sizeof(reason), "B's INIT_DEVICE did not complete within %u ms (+%u ms after CancelIoEx); expected exactly "
-                      "0x%08lX", ICC_WORKER_BOUND_MS, ICC_CANCEL_BOUND_MS, (unsigned long)STATUS_DEVICE_BUSY);
-            ic_verdict("FAIL", "UT-DEV-INIT-CONCURRENT-STATUS", index, did, reason);
-        }
+        ic_status_line("UT-DEV-INIT-CONCURRENT", index, did, st_b, got_b, (LONG)STATUS_DEVICE_BUSY, FALSE);
         for (i = 0; i < AVB_INITFAULT_MAX_RECORDS; i++) {
             if (!present[i]) { continue; }
             if (rec[i].thread_id == (unsigned __int32)tid_b) { by_tid++; }
@@ -2499,13 +2534,17 @@ static void icc_run_adapter(const AVB_ADAPTER_IDENTITY_REQUEST *id, const AVB_AD
         ic_verdict(by_tid + in_window != 0 ? "FAIL" : complete ? "PASS" : "INCONCLUSIVE", "UT-DEV-INIT-CONCURRENT-NO-ATTEMPT", index, did, reason);
     }
 
-    /* ---- A's own result and the adapter state afterwards, recorded separately ---- */
+    /* ---- A's own result and the adapter state afterwards, recorded separately; a deadline expiry is FAIL even if A completed
+     *      during cancellation ---- */
     if (a_done) {
-        printf("    [EVIDENCE] instance A INIT_DEVICE: ntstatus=0x%08lX information=%lu\n", (unsigned long)w->st, w->got);
+        printf("    [EVIDENCE] instance A INIT_DEVICE: ntstatus=0x%08lX information=%lu; deadline expired %d\n", (unsigned long)w->st,
+               w->got, a_timeout);
+    }
+    if (!a_timeout) {
         ic_status_line("UT-DEV-INIT-CONCURRENT-FIRST", index, did, w->st, w->got, (LONG)STATUS_SUCCESS, FALSE);
     } else {
-        sprintf_s(reason, sizeof(reason), "instance A's INIT_DEVICE did not complete within %u ms (+%u ms after CancelIoEx)",
-                  ICC_WORKER_BOUND_MS, ICC_CANCEL_BOUND_MS);
+        sprintf_s(reason, sizeof(reason), "instance A's INIT_DEVICE did not complete within %u ms of its start (completed during "
+                  "cancellation %d)", ICC_WORKER_BOUND_MS, a_done);
         ic_verdict("FAIL", "UT-DEV-INIT-CONCURRENT-FIRST-STATUS", index, did, reason);
     }
     if (hO != INVALID_HANDLE_VALUE) { CloseHandle(hO); }
@@ -2562,7 +2601,9 @@ cleanup:
         CloseHandle(thread_b);
     }
     if (wb != NULL && (b_done || thread_b == NULL)) { free(wb); }
-    if (hB != INVALID_HANDLE_VALUE) { CloseHandle(hB); }
+    if (hB != INVALID_HANDLE_VALUE && (b_done || thread_b == NULL)) {   /* a still-running worker keeps its handle (leaked on purpose) */
+        CloseHandle(hB);
+    }
     if (hO != INVALID_HANDLE_VALUE) { CloseHandle(hO); }
     hO = INVALID_HANDLE_VALUE;
     clear_ok = irf_drain_clear(k, "cleanup");   /* drain, disarm, delete: nothing may act on the cleanup cycle */
