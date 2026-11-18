@@ -16,6 +16,9 @@
  * READ, no register invalid, TSN mode off, both slots NONE, restoration COMPLETE). A pre-state that is not clean is not a veto:
  * the test recovers it once through its own NIC cycle, the recovery its cleanup uses, and proves it again. Only a pre-state
  * still not proved after that recovery is BLOCKED, with both observations printed. The proved reply is the restoration reference.
+ * The recovery's own outcome is a separate SETUP line: CLEANUP_FAILED when the cycle did not complete or left observed residue
+ * (record not CLEAN, or a readable query not clean), INCONCLUSIVE_RESTORATION when the state after it could not be measured. An
+ * abort during the recovery cycle reports SETUP INCONCLUSIVE_RESTORATION with the operator action (report_abort).
  *
  * Checks, each with its own verdict line <case>-<check>:
  *   ACCESS   a handle opened for reading only is refused TAS_ACTIVATE (FILE_WRITE_ACCESS, #362) and still serves GET_TAS_STATE.
@@ -32,10 +35,13 @@
  *            owned NIC cycle and compared register by register with the test's own pre-state reply, under the validity rule of
  *            test_tas_query_clean --restore (#377). Without a valid set before and after, the registers stay UNVERIFIED and
  *            restoration is at best INCONCLUSIVE_RESTORATION. It is never claimed from GET_TAS_STATE or from the driver's advisory
- *            restoration field. PHC continuity across the cycle is a separate evidence line, never a restoration input (#361).
- *   HOLD characterization  (--hold, evidence only, no verdict) the measurements a HOLD gate-window assertion needs: frames sent
- *            and seen after the activation (lost = sent - seen), early, released, inside, near-edge and outside counts, the
- *            baseline's own sent/seen (the capture's loss before any mutation) and the restoration class. Limits, printed with it:
+ *            restoration field. TX on the wire needs at least one tagged frame sent after the cycle; none sent leaves the wire
+ *            unmeasured. PHC continuity across the cycle is a separate evidence line, never a restoration input (#361).
+ *   HOLD characterization  (--hold, evidence only, no verdict) the measurements a HOLD gate-window assertion needs: the raw
+ *            tagged frames sent and seen by the capture after the activation (lost = sent - seen), the baseline's own sent/seen
+ *            (the capture's loss before any mutation) and the restoration class; and, only when every such frame was mapped to
+ *            PHC time, the early, released, inside, near-edge and outside counts (otherwise reported unavailable, never as zeros).
+ *            Limits, printed with it:
  *            the test cannot observe the driver's register write order (#365 13.5 records the source order); the capture is a
  *            passive, software-timestamped Npcap capture on the host clock through a switch, mapped to PHC time by two bracketed
  *            anchors; arrivals within TAS_ACT_EDGE_MARGIN_NS of an edge decide nothing; low frame rate (SEND_PERIOD_MS). So 0
@@ -49,7 +55,8 @@
  *
  * Mutations: TAS_ACTIVATE, bounded broadcast UDP and ICMP on the adapter under test, and the NIC cycle of that adapter
  * (CM_Disable_DevNode / CM_Enable_DevNode), which resets its PHC. The cycle runs after every TAS_ACTIVATE issued, whatever
- * it returned, and once before it when the pre-state needs recovery. Dedicated IOCTLs only: no READ_REGISTER, no WRITE_REGISTER. Runs on Debug and Release drivers.
+ * it returned, and once before it when the pre-state needs recovery. Dedicated IOCTLs only: no READ_REGISTER, no
+ * WRITE_REGISTER. Runs on Debug and Release drivers.
  *
  * Exit: 0 all passed, 1 any nonpassing verdict, 2 no adapter ran, 3 only BLOCKED.
  *
@@ -111,14 +118,21 @@ static avb_u64 g_capture_luid;
 static unsigned g_next_seq;
 static LONGLONG g_send_us[WIRE_MAX_FRAMES];
 
-/* Non-negative while a TAS_ACTIVATE has been issued and the cleanup has not reported */
+/* Non-negative while the test owns an unreported state change of an adapter: from its setup recovery NIC cycle until that
+ * recovery is verified or its failure reported (g_pending_setup 1), and from TAS_ACTIVATE until the cleanup has reported */
 static volatile LONG g_pending_adapter = -1;
 static volatile LONG g_pending_did;
+static volatile LONG g_pending_setup;
 
 static void report_abort(void)
 {
     LONG adapter = InterlockedExchange(&g_pending_adapter, -1);
-    if (adapter >= 0) {
+    if (adapter >= 0 && InterlockedCompareExchange(&g_pending_setup, 0, 0) != 0) {
+        printf("[INCONCLUSIVE_RESTORATION] %s-SETUP/adapter:%ld did=0x%04lX: test aborted during its setup recovery NIC cycle, before any "
+               "TAS_ACTIVATE; the adapter may be left disabled; operator: NIC cycle of this adapter, then TC-TSNREG-001\n",
+               g_case, adapter, g_pending_did);
+        fflush(stdout);
+    } else if (adapter >= 0) {
         printf("[INCONCLUSIVE_RESTORATION] %s-RESTORE/adapter:%ld did=0x%04lX: test aborted after TAS_ACTIVATE, its cleanup did not run; "
                "operator: NIC cycle of this adapter, then TC-TSNREG-001\n", g_case, adapter, g_pending_did);
         fflush(stdout);
@@ -805,6 +819,11 @@ static TAS_ACT_RESTORE_CLASS cleanup_and_verify(HANDLE h, UINT32 index, const AV
                 e.tx_on_wire = (unsigned long long)seen * 100 >= (unsigned long long)sent * TAS_ACT_SEEN_MIN_PERCENT && delayed == 0;
                 printf("    TX after the cycle: sent=%u seen=%u delayedOver%lldms=%u captured=%ld\n", sent, seen, UNGATED_DELAY_US / 1000,
                        delayed, captured);
+                if (sent == 0) {   /* no tagged frame left the socket: the wire was not measured, whatever else was captured */
+                    e.tx_probed = FALSE;
+                    e.tx_on_wire = FALSE;
+                    printf("    TX after the cycle: not measured, no tagged frame was sent\n");
+                }
             } else {
                 printf("    TX after the cycle: not probed, no socket or no observer\n");
             }
@@ -852,12 +871,14 @@ static unsigned collect_frames(unsigned first, unsigned end, const TAS_ACT_ANCHO
     return n;
 }
 
-/** Pre-state proved by the test's own reads (#369): GET_TAS_STATE CLEAN and a clean, readable TAS query. Prints both */
-static BOOL prove_prestate(HANDLE h, const char *label, QUERY_READ *q)
+/** Pre-state proved by the test's own reads (#369): GET_TAS_STATE CLEAN and a clean, readable TAS query. Prints both.
+ *  *armed: the record's armed value, or -1 when GET_TAS_STATE could not be read */
+static BOOL prove_prestate(HANDLE h, const char *label, QUERY_READ *q, LONG *armed)
 {
     AVB_TAS_STATE s;
     BOOL record = read_state(h, &s);
 
+    *armed = record ? (LONG)s.armed : -1;
     if (record) {
         print_state(label, &s);
     } else {
@@ -879,8 +900,13 @@ static HANDLE recover_prestate(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
     MIB_IF_ROW2 row;
     DWORD start;
     BOOL cycled;
+    LONG armed;
 
     printf("\n  --- Setup: pre-state not proved clean, recovered through this test's own NIC cycle ---\n");
+    /* From here the test owns a state change: an abort reports it (report_abort) until it is verified or reported below */
+    g_pending_did = id->device_id;
+    InterlockedExchange(&g_pending_setup, 1);
+    InterlockedExchange(&g_pending_adapter, (LONG)index);
     CloseHandle(h);   /* an open bound handle must not hold the adapter context across the detach */
     cycled = cm_bounded(inst, FALSE, DISABLE_BOUND_MS);
     if (cycled) {
@@ -891,6 +917,8 @@ static HANDLE recover_prestate(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
     }
     h = cycled ? wait_for_adapter(id) : INVALID_HANDLE_VALUE;
     if (h == INVALID_HANDLE_VALUE) {
+        InterlockedExchange(&g_pending_adapter, -1);
+        InterlockedExchange(&g_pending_setup, 0);
         verdict("CLEANUP_FAILED", "SETUP", index, id->device_id,
                 "the setup recovery's NIC cycle did not complete or the adapter did not return; a timed-out disable may still be "
                 "pending in Windows. Operator: NIC cycle once it ends, then TC-TSNREG-001");
@@ -905,12 +933,28 @@ static HANDLE recover_prestate(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
         Sleep(1000);
     }
     Sleep(SETTLE_MS);
-    if (!prove_prestate(h, "after the setup recovery", q)) {
+    if (!prove_prestate(h, "after the setup recovery", q, &armed)) {
+        /* The test cycled the NIC and did not establish a clean state: observed residue is a cleanup failure of its setup,
+         * an unmeasurable state is inconclusive. Either way the activation stays BLOCKED (the caller) */
+        BOOL residue = (armed >= 0 && armed != AVB_TAS_STATE_CLEAN) || (query_readable(q) && !query_clean(q));
+        InterlockedExchange(&g_pending_adapter, -1);
+        InterlockedExchange(&g_pending_setup, 0);
+        if (residue) {
+            verdict("CLEANUP_FAILED", "SETUP", index, id->device_id,
+                    "after the setup recovery NIC cycle the driver record is not CLEAN or the readable TAS query is not clean (TSN mode, "
+                    "slots or restoration); see the observations above. Operator: NIC cycle, then TC-TSNREG-001");
+        } else {
+            verdict("INCONCLUSIVE_RESTORATION", "SETUP", index, id->device_id,
+                    "after the setup recovery NIC cycle the state could not be measured (GET_TAS_STATE unreadable or the TAS query not "
+                    "readable); see the observations above");
+        }
         *why = "the pre-state is still not proved clean after the test-owned setup recovery (GET_TAS_STATE CLEAN and a clean, "
                "readable TAS query); see both observations above";
         CloseHandle(h);
         return INVALID_HANDLE_VALUE;
     }
+    InterlockedExchange(&g_pending_adapter, -1);
+    InterlockedExchange(&g_pending_setup, 0);
     printf("    setup recovery: pre-state proved clean after the NIC cycle\n");
     return h;
 }
@@ -926,6 +970,10 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     TAS_ACT_WIRE_COUNTS wc = {0};
     TAS_ACT_WIRE_CLASS wclass = TAS_ACT_WIRE_UNOBSERVED;
     TAS_ACT_RESTORE_CLASS restore;
+    LONG armed_before;
+    unsigned raw_sent = 0, raw_seen = 0;   /* after the activation, from the capture itself, before cleanup reuses it */
+    BOOL mapped = FALSE;                   /* every such frame got a PHC time: the timing counts mean something */
+    BOOL anchor_ok = FALSE;                /* the PHC anchor after the frames drained was read */
     MIB_IF_ROW2 row;
     LARGE_INTEGER qpc;
     IN_ADDR ipv4;
@@ -953,7 +1001,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         return;
     }
     /* Pre-state proved by the TAS query, as #369 requires; also the restoration reference. Not proved: recovered, not vetoed */
-    if (!prove_prestate(h, "before", &qbefore)) {
+    if (!prove_prestate(h, "before", &qbefore, &armed_before)) {
         const char *why = NULL;
         h = recover_prestate(h, index, id, inst, &qbefore, &why);
         if (h == INVALID_HANDLE_VALUE) {
@@ -1125,7 +1173,7 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     {
         DWORD start = GetTickCount();
         long long now = 0;
-        unsigned n;
+        unsigned n, seq, end;
         char reason[256];
 
         printf("\n  --- Tagged frames across BaseT ---\n");
@@ -1135,10 +1183,17 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
         }
         Sleep(DRAIN_MS);
         wire_counts(&captured, &from_target);
-        (void)take_anchor(h, &after_anchor, "after");
+        anchor_ok = take_anchor(h, &after_anchor, "after");
         wire_stop();
         closesocket(sock);
         n = collect_frames(first_after, g_next_seq, &before_anchor, &after_anchor, frames);
+        /* Raw counts from the capture, independent of the PHC mapping; the cleanup's TX probe reuses the capture arrays */
+        end = g_next_seq < WIRE_MAX_FRAMES ? g_next_seq : WIRE_MAX_FRAMES;
+        for (seq = first_after; seq < end; seq++) {
+            raw_sent++;
+            raw_seen += g_wire_seen[seq] != 0;
+        }
+        mapped = anchor_ok && n == raw_sent;
         wclass = tas_act_wire(req.pre_activation, frames, n, captured != 0, base, CYCLE_NS, WINDOW_START_NS, WINDOW_END_NS, TAS_ACT_EDGE_MARGIN_NS, &wc);
         printf("    wire: %s frames=%u seen=%u early=%u heldBeforeBase=%u flowed=%u released=%u inside=%u nearEdge=%u outside=%u captured=%ld "
                "fromTarget=%ld\n", tas_act_wire_name(wclass), wc.frames, wc.seen, wc.early, wc.held_before_base, wc.flowed, wc.released, wc.inside,
@@ -1153,14 +1208,22 @@ static void run_adapter(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id)
     }
     restore = cleanup_and_verify(h, index, id, ipv4, &stats, phc, qpc, &qbefore);
     if (g_mode == MODE_HOLD) {
-        /* HOLD characterization: measurements only, no verdict, not EG-02 qualification. lost = frames sent after the activation
-         * and not seen by the capture; the baseline pair is the capture's own loss before any mutation. Near-edge arrivals are
-         * counted apart from inside and outside by the classifier and are reported, not folded into either */
-        printf("    [EVIDENCE] HOLD characterization: wire=%s frames=%u seen=%u lost=%u early=%u released=%u inside=%u nearEdge=%u "
-               "outside=%u captured=%ld fromTarget=%ld baselineSent=%u baselineSeen=%u restoration=%s\n", tas_act_wire_name(wclass),
-               wc.frames, wc.seen, wc.frames - wc.seen, wc.early, wc.released, wc.inside, wc.near_edge, wc.outside, captured, from_target,
-               sent, seen,
+        /* HOLD characterization: measurements only, no verdict, not EG-02 qualification. The raw counts come from the capture
+         * itself: lost = tagged frames sent after the activation and not seen. The baseline pair is the capture's own loss before
+         * any mutation. The timing counts need the PHC mapping; without it they are reported unavailable, never as zeros. Near-edge
+         * arrivals are counted apart from inside and outside by the classifier; released is a subset of the first window */
+        printf("    [EVIDENCE] HOLD characterization: sent=%u seen=%u lost=%u captured=%ld fromTarget=%ld baselineSent=%u baselineSeen=%u "
+               "restoration=%s\n", raw_sent, raw_seen, raw_sent - raw_seen, captured, from_target, sent, seen,
                restore == TAS_ACT_RESTORE_COMPLETE ? "COMPLETE" : (restore == TAS_ACT_RESTORE_UNVERIFIED ? "UNVERIFIED" : "INCOMPLETE"));
+        if (mapped) {
+            printf("    [EVIDENCE] HOLD characterization timing (PHC-mapped): wire=%s frames=%u seen=%u early=%u released=%u inside=%u "
+                   "nearEdge=%u outside=%u\n", tas_act_wire_name(wclass), wc.frames, wc.seen, wc.early, wc.released, wc.inside,
+                   wc.near_edge, wc.outside);
+        } else {
+            printf("    [EVIDENCE] HOLD characterization timing: unavailable, the PHC mapping failed (after anchor %s, %u of %u frames "
+                   "mapped); early, released, inside, nearEdge and outside are not reported. The WIRE verdict above is unchanged\n",
+                   anchor_ok ? "read" : "not read", wc.frames, raw_sent);
+        }
         printf("    [EVIDENCE] HOLD characterization limits: the driver's register write order is not observable by this test "
                "(#365 13.5 records the source order); capture = passive Npcap, software timestamps on the host clock, through a "
                "switch, mapped to PHC time through the two anchors above (see their bracketUs); arrivals within %lld ms of a window "
