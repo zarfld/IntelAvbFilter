@@ -37,7 +37,8 @@
  * (provisional). Each case is a one-field change of a baseline HOLD AVB_TAS_OP_REQUEST (144 bytes, version 1) on
  * IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030): the bound adapter's net_luid, a non-zero client_op_id distinct per request, the
  * expected_generation and context_epoch the test's own query reports (0 = not reported until D.1), the verified schedule set with
- * BaseT recomputed per case from a fresh PHC read. The baseline is not claimed valid while D.1 (metadata), D.2 (link speed for
+ * BaseT recomputed per case from a fresh PHC read and a lead of 1.5 s, or limits.min_margin_ns plus 500 ms headroom when the query
+ * establishes a larger margin (#365 13.3; a margin beyond the test's 60 s bound is LEAD BLOCKED). The baseline is not claimed valid while D.1 (metadata), D.2 (link speed for
  * TAS-DR-05), D.4 (tier admission) and D.7 (order among semantic checks) are unsettled. Per case, three separate lines, never merged:
  *   <case>-REFUSED     an error completion with no output whose status a #365 13.3 rule names. STATUS_SUCCESS is FAIL (the
  *                      operation may have written). STATUS_INVALID_DEVICE_REQUEST (0x80C not served) is FAIL, never SKIP: the code
@@ -50,8 +51,15 @@
  *                      FLAGS_UNKNOWN, QUEUE_FLAGS_UNKNOWN, FLAGS_OPEN_ALL, CLIENT_OP_ID_ZERO, DEBUG_FAULT_RESERVED,
  *                      DEBUG_FAULT_RELEASE, NET_LUID_MISMATCH) PASS on it. Semantic cases (PRE_ACTIVATION, CYCLE_ZERO, CYCLE_FIELD,
  *                      BASET_SECONDS, BASET_NEAR, FRAME_MIN, WINDOW_EMPTY, WINDOW_PAST_CYCLE, END_EQ_CYCLE): the required status,
- *                      or STATUS_INVALID_DEVICE_STATE the unsettled metadata rule can produce, is INCONCLUSIVE (isolation not
- *                      established: D.1, D.4, D.7), never PASS; any other status is FAIL. Passing COMPLETION does not establish K2.
+ *                      or STATUS_INVALID_DEVICE_STATE the unsettled metadata rule can produce, or STATUS_REQUEST_NOT_ACCEPTED (#365
+ *                      13.4 NOT_HARDWARE_VERIFIED, D.4), is INCONCLUSIVE (isolation not established: D.1, D.4, D.7), never PASS;
+ *                      any other status is FAIL. UNBOUND: STATUS_INVALID_DEVICE_STATE is INCONCLUSIVE too, because NOT_BOUND and
+ *                      ADAPTER_MISMATCH share it and a dispatcher fallback could produce the latter. Passing COMPLETION does not
+ *                      establish K2.
+ *   <case>-OTHERS      after UNBOUND and NET_LUID_MISMATCH, which name or may reach another adapter: every other TAS adapter's
+ *                      query against its own capture before the cases. A change is FAIL and is recovered by that adapter's owned
+ *                      NIC cycle (<case>-OTHERS-RECOVERY). Adapters without INTEL_CAP_TSN_TAS have no TAS state the query can
+ *                      observe: reported as not measured. NET_LUID_MISMATCH prefers another TAS adapter's NET_LUID for that reason.
  * Not submitted, three BLOCKED lines each, never PASS: STALE_GENERATION, STALE_EPOCH (D.1) and WINDOW_MIN (D.2 consumption).
  * DEBUG_FAULT_RELEASE runs on a Release driver only (Debug: not applicable, the fault path is #357's --fault case).
  * NET_LUID_MISMATCH names another enumerated adapter's NET_LUID when one exists, otherwise an identity no adapter has (the
@@ -63,8 +71,10 @@
  * the adapter under test sends. Without one, or without an IPv4 address, only the TX lines are BLOCKED; the cases still run.
  * TX: a window after the field cases, with queries interleaved against the pre-test registers; supplementary wire evidence, no
  * gate timing. END_EQ_CYCLE (TAS-DR-06) is the last field case, with its own TX-END_EQ_CYCLE window when refused and unchanged.
- * LEGACY_FUNCTION_71: a separate compatibility phase after the field sequence, from its own proven-clean baseline (recovered once
- * by the test's own NIC cycle when not proved clean: LEGACY_SETUP; never on a possibly armed adapter). The known-valid 80-byte
+ * LEGACY_FUNCTION_71: a separate compatibility phase after the field sequence, also when that sequence could not start, from its
+ * own proven-clean baseline (recovered once by the test's own NIC cycle when not proved clean: LEGACY_SETUP; never on a possibly
+ * armed adapter), with its own bound write handle and a fresh interface row (a connected link and a rate exactly representable
+ * in the legacy Mbit/s field, otherwise BLOCKED). The known-valid 80-byte
  * request on 0x0017811C must complete STATUS_INVALID_DEVICE_REQUEST (function 71 withdrawn, #365 13.1). Today's driver may commit
  * it: the owned cleanup follows. Then CLEANUP and RESTORE as below. Every TAS adapter runs (no TAS_QUERY_CLEAN_MAX_ADAPTERS cap).
  * Expected RED against a driver without the 0x80C producer: the versioned cases REFUSED and COMPLETION FAIL (not served), UNCHANGED
@@ -278,6 +288,7 @@ static avb_u64 g_capture_luid;
 static const AVB_ADAPTER_IDENTITY_REQUEST *g_all;   /* every validated identity (--invalid: observer and NET_LUID_MISMATCH) */
 static UINT32 g_nall;
 static int g_driver_build = -1;    /* GET_VERSION: 1 Debug, 0 Release, -1 not known */
+static BOOL g_cleanup_link_was_up = TRUE;   /* cleanup_and_verify: the link before the test (--invalid sets it; reset after) */
 static unsigned g_next_seq;
 
 /* Non-negative from an activation (--hw-verified) or the start of the owned NIC cycle until the cycle has reported */
@@ -866,7 +877,10 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
             wall_ns = (long long)((double)(phc_after.qpc.QuadPart - phc_before->qpc.QuadPart) * 1e9 / (double)freq.QuadPart);
             e.phc = tas_act_phc(TRUE, (long long)(phc_after.phc - phc_before->phc), wall_ns, PHC_TOLERANCE_NS);
         }
-        if (!link_up) {
+        if (!link_up && !g_cleanup_link_was_up) {   /* PR #479 r4621509075: no link before the test, none after: unmeasured */
+            e.tx_probed = FALSE;
+            printf("    TX after the cycle: not measured, the link was down before the test as well\n");
+        } else if (!link_up) {
             e.tx_probed = TRUE;   /* the link was up before the test: no link now is an observed failure, not a gap */
             e.tx_on_wire = FALSE;
             printf("    TX after the cycle: link did not come back within %d ms\n", RETURN_BOUND_MS);
@@ -878,7 +892,12 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
             LONG captured = 0, from_target = 0;
             TAS_TX_WINDOW w;
 
-            if (sock != INVALID_SOCKET && wire_start(id->net_luid, g_capture_luid, id->mac, nonce, ipv4) != 0) {
+            int observers = 0;
+            BOOL attempted = sock != INVALID_SOCKET && g_capture_luid != 0;   /* PR #479 r4621509174: no capture without an observer */
+            if (attempted) {
+                observers = wire_start(id->net_luid, g_capture_luid, id->mac, nonce, ipv4);
+            }
+            if (observers != 0) {
                 send_window(sock, nonce, fresh, NULL, &w);
                 wire_counts(&captured, &from_target);
                 wire_stop();
@@ -887,7 +906,10 @@ static void cleanup_and_verify(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTIT
                 print_window("after the cycle", &w);
                 printf("    TX after the cycle: captured=%ld\n", captured);
             } else {
-                printf("    TX after the cycle: not probed, no socket or no observer\n");
+                if (attempted) {
+                    wire_stop();   /* zero observers: wire_start may still have started its ICMP worker */
+                }
+                printf("    TX after the cycle: not probed, %s\n", sock == INVALID_SOCKET ? "no socket" : "no established observer");
             }
             if (sock != INVALID_SOCKET) { closesocket(sock); }
         }
@@ -1252,6 +1274,8 @@ static void run_tiers(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
 #define BASET_H_SECONDS_LIMIT     0x100000000ULL   /* BaseT seconds must fit the 32-bit BASET_H register (TAS-DR-07) */
 #define INV_BIT31                 (1u << 31)       /* an unknown flag bit: no flag is published above bit 1 (#365 13.2) */
 #define INV_OBSERVER_TRIES        8u               /* other adapters tried as the wire observer per adapter under test (time bound) */
+#define INV_LEAD_HEADROOM_NS      (500LL * NS_PER_MS)   /* processing between the PHC read and the driver's check, above min_margin_ns */
+#define INV_LEAD_MAX_NS           (60LL * NS_PER_SEC)   /* a reported margin needing more lead than this is not used (reported) */
 
 /* Dependencies of a case's oracle on rules #365 13.6 has not settled. Header cases (13.3 down to net_luid, in the order 13.5
  * defines) have none; the order among semantic checks is D.7, and the baseline request's generation and epoch (D.1) and tier
@@ -1341,8 +1365,12 @@ typedef struct {
     avb_u32 frame_bytes;
     const QUERY_READ *q0;
     const STATS_READ *s0;
+    long long lead_ns;               /* BaseT lead: BASE_LEAD_NS, or the reported min_margin_ns plus headroom (#365 13.3, D.3) */
     avb_u64 other_luid;
     char other_desc[160];
+    UINT32 nothers;                  /* other TAS adapters, observed around UNBOUND and NET_LUID_MISMATCH (PR #479 r4621508767) */
+    const AVB_ADAPTER_IDENTITY_REQUEST **others;
+    QUERY_READ *others_q0;
 } INV_CTX;
 
 static avb_u64 g_inv_op_id;   /* client_op_id of the next request: non-zero, distinct per request */
@@ -1402,7 +1430,7 @@ static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc)
     r->expected_generation = c->q0->q.generation;
     r->context_epoch = c->q0->q.context_epoch;
     r->pre_activation = AVB_TAS_PRE_HOLD;
-    r->schedule.base_time_ns = (avb_u64)((((long long)phc + BASE_LEAD_NS + CYCLE_NS - 1) / CYCLE_NS) * CYCLE_NS);
+    r->schedule.base_time_ns = (avb_u64)((((long long)phc + c->lead_ns + CYCLE_NS - 1) / CYCLE_NS) * CYCLE_NS);
     r->schedule.cycle_ns = (avb_u32)CYCLE_NS;
     for (q = 0; q < AVB_TAS_QUEUES; q++) {
         r->schedule.queue[q].start_ns = (avb_u32)WINDOW_START_NS;
@@ -1445,7 +1473,8 @@ static void inv_blocked3(const char *name, UINT32 index, avb_u16 did, const char
 static BOOL inv_refusal_status(LONG st)
 {
     return st == (LONG)STATUS_INVALID_PARAMETER || st == (LONG)STATUS_REVISION_MISMATCH || st == (LONG)STATUS_BUFFER_TOO_SMALL ||
-           st == (LONG)STATUS_INVALID_DEVICE_STATE || st == (LONG)STATUS_ACCESS_DENIED;
+           st == (LONG)STATUS_INVALID_DEVICE_STATE || st == (LONG)STATUS_ACCESS_DENIED ||
+           st == (LONG)STATUS_REQUEST_NOT_ACCEPTED;   /* #365 13.4 NOT_HARDWARE_VERIFIED: nothing written (PR #479 r4621508956) */
 }
 
 static void inv_deps_text(unsigned deps, char *buf, size_t size)
@@ -1454,6 +1483,101 @@ static void inv_deps_text(unsigned deps, char *buf, size_t size)
     if (deps & INV_DEP_META)  { strcat_s(buf, size, " D.1 (generation/epoch, the baseline carries the query's values)"); }
     if (deps & INV_DEP_TIER)  { strcat_s(buf, size, " D.4 (tier admission)"); }
     if (deps & INV_DEP_ORDER) { strcat_s(buf, size, " D.7 (order among the semantic checks)"); }
+}
+
+/** The owned NIC cycle of another adapter and its proof: the recovery for a change a misrouted probe made there */
+static BOOL inv_recover_other(const AVB_ADAPTER_IDENTITY_REQUEST *o)
+{
+    DEVINST inst = 0;
+    QUERY_READ q;
+    HANDLE h;
+    BOOL ok;
+
+    if (!find_devinst(o->net_luid, &inst)) {
+        return FALSE;
+    }
+    g_pending_did = o->device_id;
+    InterlockedExchange(&g_pending_adapter, (LONG)o->index);
+    ok = cm_bounded(inst, FALSE, DISABLE_BOUND_MS);
+    if (ok) {
+        Sleep(3000);
+        ok = cm_bounded(inst, TRUE, ENABLE_BOUND_MS);
+    }
+    h = ok ? wait_for_adapter(o) : INVALID_HANDLE_VALUE;
+    if (h == INVALID_HANDLE_VALUE) {
+        return FALSE;   /* g_pending stays set: the abort handler names the adapter */
+    }
+    Sleep(SETTLE_MS);
+    query(h, &q);
+    CloseHandle(h);
+    print_query("other adapter after its recovery cycle", &q);
+    return query_clean(&q);
+}
+
+/** <case>-OTHERS (PR #479 r4621508767): every other TAS adapter observed before the cases is queried again after a probe that
+ *  names or may reach another adapter (UNBOUND through a dispatcher fallback, NET_LUID_MISMATCH by its request). A change is
+ *  FAIL and is recovered by that adapter's own NIC cycle (<case>-OTHERS-RECOVERY). Adapters without INTEL_CAP_TSN_TAS have no TAS
+ *  state the query can observe (NOT_SUPPORTED): a change there is not measured, which is reported. TRUE when nothing changed */
+static BOOL inv_check_others(const INV_CTX *c, const char *name)
+{
+    const avb_u16 did = c->id->device_id;
+    UINT32 i, changed = 0, unmeasured = 0, recovered_failed = 0;
+    char check[64], reason[480], part[96];
+
+    sprintf_s(check, sizeof(check), "%s-OTHERS", name);
+    if (c->nothers == 0) {
+        printf("    [EVIDENCE] %s: no other TAS adapter is enumerated; adapters without INTEL_CAP_TSN_TAS have no TAS state the query "
+               "can observe (NOT_SUPPORTED), so a misrouted write there is not measured\n", check);
+        return TRUE;
+    }
+    reason[0] = '\0';
+    for (i = 0; i < c->nothers; i++) {
+        const AVB_ADAPTER_IDENTITY_REQUEST *o = c->others[i];
+        QUERY_READ qa;
+        HANDLE h = open_bound_read(o->net_luid);
+        BOOL before = query_readable(&c->others_q0[i]);
+
+        ZeroMemory(&qa, sizeof(qa));
+        if (h != INVALID_HANDLE_VALUE) {
+            query(h, &qa);
+            CloseHandle(h);
+        }
+        if (!before || !query_readable(&qa)) {
+            unmeasured++;
+            sprintf_s(part, sizeof(part), "adapter:%u not measured; ", o->index);
+        } else if (schedule_regs_differing(&c->others_q0[i].q.regs, &qa.q.regs) != 0 ||
+                   query_clean(&c->others_q0[i]) != query_clean(&qa)) {
+            changed++;
+            print_query("other adapter after the probe", &qa);
+            sprintf_s(part, sizeof(part), "adapter:%u did=0x%04X changed; ", o->index, o->device_id);
+            if (!inv_recover_other(o)) {
+                recovered_failed++;   /* the abort handler keeps naming that adapter */
+            } else {
+                g_pending_did = did;   /* recovered: the adapter under test is the pending one again */
+                InterlockedExchange(&g_pending_adapter, (LONG)c->index);
+            }
+        } else {
+            part[0] = '\0';
+        }
+        if (strlen(reason) + strlen(part) + 1 < sizeof(reason)) {   /* bounded: at most the evidence list is shortened */
+            strcat_s(reason, sizeof(reason), part);
+        }
+    }
+    if (changed != 0) {
+        verdict("FAIL", check, c->index, did, reason);
+        sprintf_s(check, sizeof(check), "%s-OTHERS-RECOVERY", name);
+        verdict(recovered_failed == 0 ? "PASS" : "CLEANUP_FAILED", check, c->index, did, recovered_failed == 0
+                ? "every changed adapter was cycled by the test and its query reports it clean"
+                : "a changed adapter did not return clean from its owned NIC cycle. Operator: NIC cycle it, then check it with the TAS query");
+        return FALSE;
+    }
+    if (unmeasured != 0) {
+        verdict("BLOCKED", check, c->index, did, reason);
+        return TRUE;
+    }
+    sprintf_s(reason, sizeof(reason), "%u other TAS adapter(s): schedule registers and clean state as before the cases", c->nothers);
+    verdict("PASS", check, c->index, did, reason);
+    return TRUE;
 }
 
 /** One case: REFUSED, UNCHANGED and COMPLETION lines. TRUE when the next case may follow: the request was refused, or the
@@ -1621,7 +1745,15 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
     } else if (st == t->required && got == 0 && t->deps == 0) {
         sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output, as %s requires", (unsigned long)st, t->required_src);
         verdict("PASS", check, c->index, did, reason);
-    } else if (t->deps != 0 && got == 0 && (st == t->required || st == (LONG)STATUS_INVALID_DEVICE_STATE)) {
+    } else if (k == INV_UNBOUND && st == t->required && got == 0) {
+        /* PR #479 r4621508729: NOT_BOUND and ADAPTER_MISMATCH complete with the same status and no output; on a dispatcher that
+         * falls back to an adapter for an unbound handle, the later net_luid check can produce it too. The status alone does not
+         * show that the unbound gate ran; the result value (#352 record, #379) or a deterministic fallback would */
+        verdict("INCONCLUSIVE", check, c->index, did, "STATUS_INVALID_DEVICE_STATE with no output, as #365 13.3 requires, but NOT_BOUND "
+                "and ADAPTER_MISMATCH share it and an error completion carries no result: that the unbound gate refused it is not "
+                "established (other TAS adapters are checked in UNBOUND-OTHERS)");
+    } else if (t->deps != 0 && got == 0 && (st == t->required || st == (LONG)STATUS_INVALID_DEVICE_STATE ||
+                                            ((t->deps & INV_DEP_TIER) && st == (LONG)STATUS_REQUEST_NOT_ACCEPTED))) {
         sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output (%s requires 0x%08lX); the field's isolation is not "
                   "established, unsettled:%s", (unsigned long)st, t->required_src, (unsigned long)t->required, deps);
         verdict("INCONCLUSIVE", check, c->index, did, reason);
@@ -1632,7 +1764,10 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         verdict("FAIL", check, c->index, did, reason);
     }
     /* A later request needs an established refusal (or a code that nothing served) and the measured clean pre-state (PR #451
-     * review; #368 amendment "code not served"); COMPLETION never stops */
+     * review; #368 amendment "code not served"); COMPLETION never stops. A changed other adapter stops it too */
+    if ((k == INV_UNBOUND || k == INV_NET_LUID_MISMATCH) && !inv_check_others(c, t->name)) {
+        return FALSE;
+    }
     return (refused || (not_served && got == 0)) && measured && unchanged && !wrote;
 }
 
@@ -1671,10 +1806,12 @@ static BOOL inv_state_clean(HANDLE h, QUERY_READ *q, STATE_READ *t)
  *  continues on a possibly armed adapter. The known-valid 80-byte request on 0x0017811C must complete STATUS_INVALID_DEVICE_REQUEST
  *  (function 71 withdrawn). Today's driver may commit it: the final owned cleanup follows. Returns the bound read handle to use
  *  for that cleanup (a new one after a recovery cycle, INVALID_HANDLE_VALUE if the adapter did not return) */
-static HANDLE inv_legacy_phase(HANDLE h, HANDLE *hw, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst,
-                               const MIB_IF_ROW2 *row)
+static HANDLE inv_legacy_phase(HANDLE h, HANDLE *hw, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DEVINST inst)
 {
     AVB_TAS_ACTIVATE_REQUEST req;
+    MIB_IF_ROW2 lrow;
+    DWORD ifrc;
+    unsigned long long bps;
     QUERY_READ ql;
     STATE_READ tl;
     PHC_READ p;
@@ -1717,13 +1854,24 @@ static HANDLE inv_legacy_phase(HANDLE h, HANDLE *hw, UINT32 index, const AVB_ADA
         }
         verdict("PASS", "LEGACY_SETUP", index, id->device_id, "recovered by the owned NIC cycle and proved clean again");
     }
+    if (*hw == INVALID_HANDLE_VALUE) {   /* its own bound write handle, also when the field sequence never opened one */
+        *hw = open_device(GENERIC_READ | GENERIC_WRITE);
+        if (*hw != INVALID_HANDLE_VALUE && !bind_luid(*hw, id->net_luid)) { CloseHandle(*hw); *hw = INVALID_HANDLE_VALUE; }
+    }
+    ZeroMemory(&lrow, sizeof(lrow));
+    lrow.InterfaceLuid.Value = id->net_luid;
+    ifrc = GetIfEntry2(&lrow);   /* fresh: a recovery cycle may have renegotiated the link (PR #479 r4621508996) */
+    bps = lrow.TransmitLinkSpeed;
     read_phc(h, &p);
-    if (!p.ok || *hw == INVALID_HANDLE_VALUE || row->TransmitLinkSpeed == 0) {
-        verdict("BLOCKED", "LEGACY_FUNCTION_71", index, id->device_id, !p.ok ? "PHC unavailable: no valid BaseT can be placed" :
-                *hw == INVALID_HANDLE_VALUE ? "no bound write handle" : "link speed unknown: the legacy request carries it");
+    if (!p.ok || *hw == INVALID_HANDLE_VALUE || ifrc != NO_ERROR || lrow.MediaConnectState != MediaConnectStateConnected ||
+        bps == 0 || bps == ~0ULL || bps % 1000000ULL != 0 || bps / 1000000ULL > 0xFFFFFFFFULL) {
+        sprintf_s(reason, sizeof(reason), "%s (GetIfEntry2 %lu, state %d, TransmitLinkSpeed %llu)", !p.ok ? "PHC unavailable: no valid "
+                  "BaseT can be placed" : *hw == INVALID_HANDLE_VALUE ? "no bound write handle" : "no connected link with a known rate "
+                  "exactly representable in the legacy request's Mbit/s field", ifrc, (int)lrow.MediaConnectState, bps);
+        verdict("BLOCKED", "LEGACY_FUNCTION_71", index, id->device_id, reason);
         return h;
     }
-    inv_request(&req, row, p.phc);
+    inv_request(&req, &lrow, p.phc);
     req.phc_at_commit_ns = 0;
     req.result = 0xFFFFFFFFu;   /* values the driver never writes: an unwritten reply cannot read as a result */
     req.status = 0xFFFFFFFFu;
@@ -1772,7 +1920,9 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
     ZeroMemory(&base, sizeof(base));
     ZeroMemory(&ipv4, sizeof(ipv4));
     c.hw = INVALID_HANDLE_VALUE;
+    c.lead_ns = BASE_LEAD_NS;
     g_capture_luid = 0;   /* this mode establishes its own observer below, never by adapter model */
+    g_next_seq = 0;       /* PR #479 r4621509027: per adapter run; no capture is active here, so the tag slots are free */
     if (!read_if(id->net_luid, &row)) {
         verdict("BLOCKED", "PRESTATE", index, id->device_id, "GetIfEntry2 failed for the adapter: no MTU for max_frame_bytes");
         return;   /* nothing sent to the adapter, nothing to clean */
@@ -1783,6 +1933,7 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
         return;
     }
     has_ip = row.OperStatus == IfOperStatusUp && find_addressing(id->net_luid, &ipv4, &other_link);
+    g_cleanup_link_was_up = row.OperStatus == IfOperStatusUp;   /* PR #479 r4621509075: the cleanup's link reference */
     read_phc(h, &p0);
     read_stats(h, &s0);
     read_state(h, &t0);
@@ -1808,6 +1959,21 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
     } else {
         verdict("PASS", "PRESTATE", index, id->device_id, "clean, readable query; TAS record CLEAN; statistics and PHC read");
     }
+    /* BaseT lead (#365 13.3, PR #479 r4621508892): the reported limits.min_margin_ns plus processing headroom when the query
+     * establishes it and it needs more than BASE_LEAD_NS; checked against INV_LEAD_MAX_NS before any arithmetic */
+    if (stop == NULL && q0.q.limits.min_margin_state == AVB_TAS_LIMIT_ESTABLISHED) {
+        if (q0.q.limits.min_margin_ns > (avb_u64)(INV_LEAD_MAX_NS - INV_LEAD_HEADROOM_NS)) {
+            sprintf_s(reason, sizeof(reason), "limits.min_margin_ns %llu needs a lead beyond the test's bound of %lld ns",
+                      q0.q.limits.min_margin_ns, (long long)INV_LEAD_MAX_NS);
+            verdict("BLOCKED", "LEAD", index, id->device_id, reason);
+            stop = "the reported minimum BaseT margin cannot be honoured";
+        } else if ((long long)q0.q.limits.min_margin_ns + INV_LEAD_HEADROOM_NS > c.lead_ns) {
+            c.lead_ns = (long long)q0.q.limits.min_margin_ns + INV_LEAD_HEADROOM_NS;
+        }
+    }
+    printf("    [EVIDENCE] BaseT lead %lld ns (limits.min_margin_ns %llu, state %u: %s)\n", c.lead_ns, q0.q.limits.min_margin_ns,
+           q0.q.limits.min_margin_state, q0.q.limits.min_margin_state == AVB_TAS_LIMIT_ESTABLISHED ? "established" :
+           "not established, D.3: the test's own 1.5 s lead");
     if (stop == NULL) {
         c.hw = open_device(GENERIC_READ | GENERIC_WRITE);   /* the activation is FILE_WRITE_ACCESS (#362, #365 13.1) */
         if (c.hw == INVALID_HANDLE_VALUE || !bind_luid(c.hw, id->net_luid)) {
@@ -1870,13 +2036,34 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
         c.frame_bytes = (avb_u32)row.Mtu + FRAME_OVERHEAD_BYTES;
         c.q0 = &q0;
         c.s0 = &s0;
-        /* NET_LUID_MISMATCH: another enumerated adapter's NET_LUID when one exists, otherwise an identity no adapter has */
+        /* Every other TAS adapter, observed before the cases (PR #479 r4621508767) */
+        c.others = (const AVB_ADAPTER_IDENTITY_REQUEST **)calloc(g_nall ? g_nall : 1, sizeof(*c.others));
+        c.others_q0 = (QUERY_READ *)calloc(g_nall ? g_nall : 1, sizeof(*c.others_q0));
+        for (o = 0; c.others != NULL && c.others_q0 != NULL && o < g_nall; o++) {
+            if (g_all[o].net_luid != id->net_luid && (g_all[o].capabilities & INTEL_CAP_TSN_TAS)) {
+                HANDLE ho = open_bound_read(g_all[o].net_luid);
+                c.others[c.nothers] = &g_all[o];
+                if (ho != INVALID_HANDLE_VALUE) {
+                    query(ho, &c.others_q0[c.nothers]);
+                    CloseHandle(ho);
+                }
+                c.nothers++;
+            }
+        }
+        printf("    [EVIDENCE] other TAS adapters observed around UNBOUND and NET_LUID_MISMATCH: %u\n", c.nothers);
+        /* NET_LUID_MISMATCH: another TAS adapter's NET_LUID first (its state is observable), then any other enumerated adapter's,
+         * otherwise an identity no adapter has */
         c.other_luid = 0;
-        for (o = 0; o < g_nall; o++) {
+        if (c.nothers != 0) {
+            c.other_luid = c.others[0]->net_luid;
+            sprintf_s(c.other_desc, sizeof(c.other_desc), "net_luid 0x%016llX identifies another enumerated TAS adapter (adapter:%u did=0x%04X)",
+                      c.other_luid, c.others[0]->index, c.others[0]->device_id);
+        }
+        for (o = 0; c.other_luid == 0 && o < g_nall; o++) {
             if (g_all[o].net_luid != id->net_luid && g_all[o].net_luid != 0) {
                 c.other_luid = g_all[o].net_luid;
-                sprintf_s(c.other_desc, sizeof(c.other_desc), "net_luid 0x%016llX identifies another enumerated adapter (adapter:%u did=0x%04X)",
-                          c.other_luid, g_all[o].index, g_all[o].device_id);
+                sprintf_s(c.other_desc, sizeof(c.other_desc), "net_luid 0x%016llX identifies another enumerated adapter (adapter:%u did=0x%04X) "
+                          "without INTEL_CAP_TSN_TAS, whose TAS state the query cannot observe", c.other_luid, g_all[o].index, g_all[o].device_id);
                 break;
             }
         }
@@ -1902,7 +2089,7 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
         } else {
             sprintf_s(reason, sizeof(reason), "not submitted: %s", stop);
         }
-        verdict("BLOCKED", g_inv[k].name, index, id->device_id, reason);
+        inv_blocked3(g_inv[k].name, index, id->device_id, reason);   /* PR #479 r4621509113: three lines, never merged */
     }
 
     /* TX after the field cases, before END_EQ_CYCLE, which the earlier protocol accepted */
@@ -1920,7 +2107,7 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
     /* END_EQ_CYCLE (TAS-DR-06) last of the invalid-field sequence */
     if (stop != NULL) {
         sprintf_s(reason, sizeof(reason), "not submitted: %s", stop);
-        verdict("BLOCKED", g_inv[INV_END_EQ_CYCLE].name, index, id->device_id, reason);
+        inv_blocked3(g_inv[INV_END_EQ_CYCLE].name, index, id->device_id, reason);
         verdict("BLOCKED", "TX-END_EQ_CYCLE", index, id->device_id, reason);
     } else if (!run_inv_case(&c, INV_END_EQ_CYCLE)) {
         verdict("BLOCKED", "TX-END_EQ_CYCLE", index, id->device_id, "case stopped: the request was not refused or the state changed or "
@@ -1935,20 +2122,20 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
     if (wire) { wire_stop(); }
     if (sock != INVALID_SOCKET) { closesocket(sock); }
 
-    /* LEGACY_FUNCTION_71: its own phase, outside the invalid-field sequence, from its own proven-clean baseline */
-    if (stop != NULL && c.h == NULL) {
-        sprintf_s(reason, sizeof(reason), "not submitted: %s", stop);
-        verdict("BLOCKED", "LEGACY_FUNCTION_71", index, id->device_id, reason);
-    } else {
-        h = inv_legacy_phase(h, &c.hw, index, id, inst, &row);
-    }
+    /* LEGACY_FUNCTION_71: its own phase, outside the invalid-field sequence, from its own proven-clean baseline, also when the
+     * field sequence could not start (PR #479 r4621509144): LEGACY_SETUP gets its recovery attempt in every case */
+    h = inv_legacy_phase(h, &c.hw, index, id, inst);
     if (c.hw != INVALID_HANDLE_VALUE) { CloseHandle(c.hw); }
+    free((void *)c.others);
+    free(c.others_q0);
     if (h == INVALID_HANDLE_VALUE) {
+        g_cleanup_link_was_up = TRUE;
         InterlockedExchange(&g_pending_adapter, -1);
         verdict("BLOCKED", "RESTORE", index, id->device_id, "the adapter did not return from the legacy recovery cycle; see LEGACY_SETUP");
         return;
     }
     cleanup_and_verify(h, index, id, inst, ipv4, &q0, &p0);
+    g_cleanup_link_was_up = TRUE;   /* the other modes keep their link-up precondition */
 }
 
 /* --restore, TC-TASAPI-012 (#377). The restoration set of DES-C-TAS-010 12.5: the v1 register set without DTXMXPKTSZ, BASET_L
@@ -2863,10 +3050,13 @@ int main(int argc, char **argv)
         WSACleanup();
         return 3;
     }
-    if (DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL)) {
+    if (DeviceIoControl(h, IOCTL_AVB_GET_VERSION, &version, sizeof(version), &version, sizeof(version), &br, NULL) &&
+        br >= sizeof(version)) {   /* PR #479 r4621508804: only a complete reply carries Flags; otherwise the build stays unknown */
         printf("    [EVIDENCE] driver version %u.%u flags=0x%04X (%s build)\n", version.Major, version.Minor, version.Flags,
                (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) ? "Debug" : "Release");
         g_driver_build = (version.Flags & AVB_VERSION_FLAG_DEBUG_BUILD) ? 1 : 0;
+    } else {
+        printf("    [EVIDENCE] GET_VERSION: no complete reply (%lu of %u bytes); driver build not classified\n", br, (unsigned)sizeof(version));
     }
     driver_provenance();
 
