@@ -90,6 +90,7 @@ static void test_ioctl_uniqueness(void)
         IOCTL_AVB_SET_TIMESTAMP,
         IOCTL_AVB_SETUP_TAS,
         IOCTL_AVB_TAS_ACTIVATE,
+        IOCTL_AVB_TAS_ACTIVATE_80C,
         IOCTL_AVB_TAS_QUERY_HW,
         IOCTL_AVB_SETUP_FP,
         IOCTL_AVB_SETUP_PTM,
@@ -465,6 +466,70 @@ static void test_struct_sizes(void)
                 AVB_TAS_SLOT_RSN_ACTIVATION_AMBIGUOUS == 0x0100u && AVB_TAS_SLOT_RSN_COMMIT_INFO_LOST == 0x0200u &&
                 AVB_TAS_SLOT_RSN_TRANSITION_DURING_SNAPSHOT == 0x0400u && AVB_TAS_SLOT_RSN_LINK_EVENTS_UNOBSERVED == 0x0800u &&
                 AVB_TAS_SLOT_RSN_SLOT_UNATTRIBUTED == 0x1000u, "slot reasons 0x0001 .. 0x1000");
+
+    /* Verifies: #357 (REQ-F-TAS-ACTIVATE-001), declaration only. The versioned activation code of #362 decision 1 and
+     * #365 13.1: CTL_CODE(FILE_DEVICE_PHYSICAL_NETCARD, 0x80C, METHOD_BUFFERED, FILE_WRITE_ACCESS) = 0x0017A030. It is
+     * declared under the transitional name IOCTL_AVB_TAS_ACTIVATE_80C: IOCTL_AVB_TAS_ACTIVATE keeps function 71 and its
+     * existing dispatch (TC-ABI-024) until the producer PR moves the canonical name and withdraws function 71 (#357,
+     * 2026-11-18). No handler serves 0x80C; this pins the code only. */
+    TEST_CASE("TC-ABI-028: IOCTL_AVB_TAS_ACTIVATE_80C function 0x80C, write access, buffered; function 71 kept (#357, #362, #365 13.1)");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE_80C == 0x0017A030u, "IOCTL_AVB_TAS_ACTIVATE_80C == 0x0017A030");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_80C >> 14) & 3u) == FILE_WRITE_ACCESS, "IOCTL_AVB_TAS_ACTIVATE_80C requires FILE_WRITE_ACCESS");
+    TEST_ASSERT((IOCTL_AVB_TAS_ACTIVATE_80C & 3u) == METHOD_BUFFERED, "IOCTL_AVB_TAS_ACTIVATE_80C is METHOD_BUFFERED");
+    TEST_ASSERT(((IOCTL_AVB_TAS_ACTIVATE_80C >> 2) & 0xFFFu) == 0x80Cu && (IOCTL_AVB_TAS_ACTIVATE_80C >> 16) == FILE_DEVICE_PHYSICAL_NETCARD,
+                "function 0x80C (vendor range), device type unchanged");
+    TEST_ASSERT(IOCTL_AVB_TAS_ACTIVATE == 0x0017811Cu && IOCTL_AVB_TAS_ACTIVATE != IOCTL_AVB_TAS_ACTIVATE_80C,
+                "IOCTL_AVB_TAS_ACTIVATE still names function 71 (0x0017811C), a different code: the existing handler is not redirected");
+
+    /* Verifies: #357, declaration only. The AVB_TAS_OP_REQUEST layout published in #365 13.2: one 144-byte METHOD_BUFFERED
+     * structure, inputs at 0-135, success-only outputs at 136-143, the 80-byte AVB_TAS_SCHEDULE shared with the query at 56.
+     * Provisional until #365 is accepted (#362): a change is a version change (AVB_TAS_OP_VERSION), never a silent
+     * re-layout. Static layout only: it establishes ABI compatibility, not handler or hardware behaviour. */
+    TEST_CASE("TC-ABI-029: AVB_TAS_OP_REQUEST layout, 144 bytes (#357, #365 13.2)");
+    TEST_ASSERT(sizeof(AVB_TAS_OP_REQUEST) == 144, "sizeof(AVB_TAS_OP_REQUEST) == 144");
+    {
+        static const struct { size_t actual, expected; const char *name; } off[] = {
+            { offsetof(AVB_TAS_OP_REQUEST, version),               0, "version" },
+            { offsetof(AVB_TAS_OP_REQUEST, size),                  4, "size" },
+            { offsetof(AVB_TAS_OP_REQUEST, net_luid),              8, "net_luid" },
+            { offsetof(AVB_TAS_OP_REQUEST, client_op_id),         16, "client_op_id" },
+            { offsetof(AVB_TAS_OP_REQUEST, expected_generation),  24, "expected_generation" },
+            { offsetof(AVB_TAS_OP_REQUEST, context_epoch),        32, "context_epoch" },
+            { offsetof(AVB_TAS_OP_REQUEST, flags),                40, "flags" },
+            { offsetof(AVB_TAS_OP_REQUEST, pre_activation),       44, "pre_activation" },
+            { offsetof(AVB_TAS_OP_REQUEST, debug_fault),          48, "debug_fault" },
+            { offsetof(AVB_TAS_OP_REQUEST, reserved0),            52, "reserved0" },
+            { offsetof(AVB_TAS_OP_REQUEST, schedule),             56, "schedule" },
+            { offsetof(AVB_TAS_OP_REQUEST, out_flags),           136, "out_flags" },
+            { offsetof(AVB_TAS_OP_REQUEST, reserved1),           140, "reserved1" },
+        };
+        char msg[96];
+        size_t i;
+        for (i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+            sprintf_s(msg, sizeof(msg), "offsetof(AVB_TAS_OP_REQUEST, %s) == %u", off[i].name, (unsigned)off[i].expected);
+            TEST_ASSERT(off[i].actual == off[i].expected, msg);
+        }
+    }
+    TEST_ASSERT(sizeof(((AVB_TAS_OP_REQUEST *)0)->schedule) == sizeof(AVB_TAS_SCHEDULE) && sizeof(AVB_TAS_SCHEDULE) == 80,
+                "schedule is the shared 80-byte AVB_TAS_SCHEDULE");
+
+    /* Verifies: #357, declaration only. The values #365 13.2/13.3 and DES-C-TAS-010 3.5 publish for the request. The
+     * out_flags bit UNVERIFIED_CONFIG_ACTIVE (13.4) has no published bit position, so no value is declared or pinned for
+     * it: its position is a contract decision required before the producer. */
+    TEST_CASE("TC-ABI-030: AVB_TAS_OP_REQUEST published values (#357, #365 13.2, 13.3)");
+    TEST_ASSERT(AVB_TAS_OP_VERSION == 1u, "AVB_TAS_OP_VERSION == 1");
+    TEST_ASSERT(AVB_TAS_F_ACCEPT_UNVERIFIED == 0x00000001u && AVB_TAS_F_OPEN_ALL == 0x00000002u,
+                "flags: bit 0 AVB_TAS_F_ACCEPT_UNVERIFIED, bit 1 AVB_TAS_F_OPEN_ALL");
+    TEST_ASSERT(AVB_TAS_PRE_HOLD == 1u && AVB_TAS_PRE_PASS == 2u, "pre_activation: AVB_TAS_PRE_HOLD 1, AVB_TAS_PRE_PASS 2");
+    TEST_ASSERT(AVB_TAS_DEBUG_FAULT_WRITE_MASK == 0x000000FFu && AVB_TAS_DEBUG_FAULT_RESTORE == 0x00000100u &&
+                AVB_TAS_DEBUG_FAULT_RESERVED == 0xFFFFFE00u,
+                "debug_fault: bits 0-7 write number N, bit 8 also fail the first restore write, bits 9-31 zero");
+    TEST_ASSERT((AVB_TAS_DEBUG_FAULT_WRITE_MASK | AVB_TAS_DEBUG_FAULT_RESTORE | AVB_TAS_DEBUG_FAULT_RESERVED) == 0xFFFFFFFFu &&
+                (AVB_TAS_DEBUG_FAULT_WRITE_MASK & AVB_TAS_DEBUG_FAULT_RESTORE) == 0u &&
+                (AVB_TAS_DEBUG_FAULT_RESERVED & (AVB_TAS_DEBUG_FAULT_WRITE_MASK | AVB_TAS_DEBUG_FAULT_RESTORE)) == 0u,
+                "debug_fault fields partition the 32 bits");
+    TEST_ASSERT(AVB_TAS_Q_STRICT_END == 0x00000001u && AVB_TAS_Q_STRICT_CYCLE == 0x00000002u,
+                "queue flags: AVB_TAS_Q_STRICT_END 0x1, AVB_TAS_Q_STRICT_CYCLE 0x2");
 }
 
 int main(void)
