@@ -53,15 +53,15 @@
 #define AVB_INITFAULT_ORIGIN_CREATE_IOCTL  3u   /* lazy context creation for a routed IOCTL (src/device.c) */
 #define AVB_INITFAULT_ORIGIN_CREATE_ENUM   4u   /* lazy context creation in ENUM_ADAPTERS (src/device.c) */
 #define AVB_INITFAULT_ORIGIN_CREATE_OPEN   5u   /* lazy context creation in OPEN_ADAPTER (src/device.c) */
-#define AVB_INITFAULT_ORIGIN_INIT_PRE      6u   /* INIT_DEVICE pre-dispatch bring-up, before the per-instance check */
-#define AVB_INITFAULT_ORIGIN_INIT_HANDLER  7u   /* INIT_DEVICE handler bring-up (and its forced BAR0 path) */
+#define AVB_INITFAULT_ORIGIN_INIT_PRE      6u   /* former INIT_DEVICE pre-dispatch bring-up; removed by #404 part 2, no longer produced (value kept) */
+#define AVB_INITFAULT_ORIGIN_INIT_HANDLER  7u   /* INIT_DEVICE handler bring-up, the only INIT_DEVICE initialization since #404 part 2 */
 #define AVB_INITFAULT_ORIGIN_OPEN_HANDLER  8u   /* OPEN_ADAPTER handler bring-up / AvbEnsureDeviceReady */
 
 /* Which intel_init call site the attempt is at. Only SITE_BASIC (the fault point) consumes actions */
 #define AVB_INITFAULT_SITE_BASIC     1u   /* AvbPerformBasicInitialization, before the first intel_init: the fault point */
 #define AVB_INITFAULT_SITE_BRINGUP   2u   /* AvbBringUpHardware, intel_init after a successful basic initialization */
 #define AVB_INITFAULT_SITE_ENSURE    3u   /* AvbEnsureDeviceReady, intel_init (OPEN_ADAPTER) */
-#define AVB_INITFAULT_SITE_FORCED    4u   /* INIT_DEVICE forced BAR0 path, intel_init when no hardware context existed */
+#define AVB_INITFAULT_SITE_FORCED    4u   /* former INIT_DEVICE forced BAR0 path; removed by #404 part 2, no longer produced (value kept) */
 
 /* Action requested (ARM) and applied (RECORD) */
 #define AVB_INITFAULT_ACT_NONE         0u   /* record only: no action matched */
