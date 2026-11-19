@@ -937,8 +937,8 @@ $HilTestTimeoutPerAdapter = [ordered]@{
     # --tiers-unbound (#367): a few read-only queries, then per TAS adapter the same cleanup bounds as above (at most 438.5 s
     # without the TX windows); the same 560 s budget and inventory.
     'test_tas_query_clean --tiers-unbound' = @{ Seconds = 560; MaxAdapters = 8 }
-    # --invalid (#368 amendment, PR #479 review): its own work per adapter under test, from its bounds: a 60 s socket bind; 26 cases
-    # of a few IOCTLs each, no waits (bounded at 30 s); 2 TX windows of 3.5 s = 7 s; the legacy phase with at most one recovery
+    # --invalid (#368 amendment, PR #479 review): its own work per adapter under test, from its bounds: a 60 s socket bind; 28 cases
+    # (26, plus META_ZERO and NO_ACCEPTANCE of the 2026-11-19 oracle amendment) of a few IOCTLs each, no waits (bounded at 30 s); 2 TX windows of 3.5 s = 7 s; the legacy phase with at most one recovery
     # cycle (120 + 3 + 60 + 60 + 5 s = 248 s); the owned cleanup (120 + 3 + 60 + 60 + 60 + 5 + 3.5 s and a 60 s socket bind =
     # 371.5 s) = 716.5 s; 935 s = 716.5 s + 30 % (931.5 s, rounded up). Plus, for EVERY other enumerated adapter (no count
     # limit): an observer trial (3.5 s baseline window), three queries if it is a TAS adapter (estimated 1 s each: open, bind and

@@ -33,13 +33,15 @@
  * adapter run, polling and the cleanup's query after the cycle included: FAIL on any HARDWARE_VERIFIED, INCONCLUSIVE if no
  * query was answered.
  *
- * --invalid: TEST-TAS-API-003 (#368, Verifies #351), case TC-TASAPI-003; #368 amendment 2026-11-18 (P2 step 5) against #365 13.1-13.6
- * (provisional). Each case is a one-field change of a baseline HOLD AVB_TAS_OP_REQUEST (144 bytes, version 1) on
- * IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030): the bound adapter's net_luid, a non-zero client_op_id distinct per request, the
- * expected_generation and context_epoch the test's own query reports (0 = not reported until D.1), the verified schedule set with
- * BaseT recomputed per case from a fresh PHC read and a lead of 1.5 s, or limits.min_margin_ns plus 500 ms headroom when the query
- * establishes a larger margin (#365 13.3; a margin beyond the test's 60 s bound is LEAD BLOCKED). The baseline is not claimed valid while D.1 (metadata), D.2 (link speed for
- * TAS-DR-05), D.4 (tier admission) and D.7 (order among semantic checks) are unsettled. Per case, three separate lines, never merged:
+ * --invalid: TEST-TAS-API-003 (#368, Verifies #351), case TC-TASAPI-003; #368 amendments 2026-11-18 (P2 step 5) and 2026-11-19
+ * (oracle: #352 R1, #365 R2/R4/R7, #351). Each case is a one-field change of a positive HOLD control AVB_TAS_OP_REQUEST (144
+ * bytes, version 1) on IOCTL_AVB_TAS_ACTIVATE_80C (0x0017A030): the bound adapter's net_luid, a non-zero client_op_id distinct per
+ * request, AVB_TAS_F_ACCEPT_UNVERIFIED (unqualified execution, #362 amendment), the expected_generation and context_epoch the
+ * test's own query reports (never invented), the verified schedule set with BaseT recomputed per case from a fresh PHC read and a
+ * lead of 1.5 s, or limits.min_margin_ns plus 500 ms headroom when the query establishes a larger margin (#365 13.3; a margin
+ * beyond the test's 60 s bound is LEAD BLOCKED). The control is valid only with the prerequisites it actually has: METADATA
+ * reports the query's pair (generation or epoch 0 is FAIL: R1 requires a non-zero pair, 0 is never a value), and the
+ * driver-owned link_speed_mbps (0 = unknown) is printed. Per case, three separate lines, never merged:
  *   <case>-REFUSED     an error completion with no output whose status a #365 13.3 rule names. STATUS_SUCCESS is FAIL (the
  *                      operation may have written). STATUS_INVALID_DEVICE_REQUEST (0x80C not served) is FAIL, never SKIP: the code
  *                      is allocated to the adapter's TAS function (#362, #357).
@@ -49,13 +51,22 @@
  *   <case>-COMPLETION  exactly the NTSTATUS #365 13.3 requires with no output. Header cases (13.3 down to net_luid, in 13.5's
  *                      defined order: UNBOUND, SHORT_BUFFER, SHORT_OUTPUT, VERSION, SIZE, RESERVED, SCHEDULE_RESERVED,
  *                      FLAGS_UNKNOWN, QUEUE_FLAGS_UNKNOWN, FLAGS_OPEN_ALL, CLIENT_OP_ID_ZERO, DEBUG_FAULT_RESERVED,
- *                      DEBUG_FAULT_RELEASE, NET_LUID_MISMATCH) PASS on it. Semantic cases (PRE_ACTIVATION, CYCLE_ZERO, CYCLE_FIELD,
- *                      BASET_SECONDS, BASET_NEAR, FRAME_MIN, WINDOW_EMPTY, WINDOW_PAST_CYCLE, END_EQ_CYCLE): the required status,
- *                      or STATUS_INVALID_DEVICE_STATE the unsettled metadata rule can produce, or STATUS_REQUEST_NOT_ACCEPTED (#365
- *                      13.4 NOT_HARDWARE_VERIFIED, D.4), is INCONCLUSIVE (isolation not established: D.1, D.4, D.7), never PASS;
- *                      any other status is FAIL. UNBOUND: STATUS_INVALID_DEVICE_STATE is INCONCLUSIVE too, because NOT_BOUND and
- *                      ADAPTER_MISMATCH share it and a dispatcher fallback could produce the latter. Passing COMPLETION does not
- *                      establish K2.
+ *                      DEBUG_FAULT_RELEASE, NET_LUID_MISMATCH) PASS on it. Semantic cases are judged under #365 R7 (after the
+ *                      header: 2 pre_activation, 3 claim, 4 generation/epoch, 5 driver-owned speed, 6 schedule TAS-DR-03..09, 7 PHC
+ *                      and BaseT margin, 8 tier/acceptance, 9 clean state; tas_inv_semantic, TC-MOCK-060): PASS only when the
+ *                      case's own step is reached for the actual request and it completes exactly as required. When the request
+ *                      must already be refused earlier (it carries the query's generation or epoch 0: STATE_CONFLICT at step 4;
+ *                      speed 0: NOT_READY at step 5), that earlier refusal is INCONCLUSIVE with the missing prerequisite named, and
+ *                      any other completion is FAIL. Success, output or 0x80C not served are FAIL whatever the prerequisites. BUSY
+ *                      after the claim step, a speed changed around the case, or a query reporting HOLD unsupported/not
+ *                      implemented: INCONCLUSIVE (not determined). Every case queries immediately before its request and sends
+ *                      that pair (PR #491 review); isolation needs that query and the one after (UNCHANGED's) valid: past step 4 an
+ *                      unchanged pair (unless the request carries a 0, refused whatever the current pair), past step 5 the same
+ *                      speed in both. A missing or changed measurement is INCONCLUSIVE, never PASS, and never turns a correct
+ *                      completion into FAIL; only WINDOW_MIN, whose invalidity depends on the speed, is not FAIL on a success
+ *                      without a stable speed. UNBOUND: STATUS_INVALID_DEVICE_STATE is INCONCLUSIVE, because
+ *                      NOT_BOUND and ADAPTER_MISMATCH share it and a dispatcher fallback could produce the latter. Passing
+ *                      COMPLETION does not establish K2.
  *   <case>-OTHERS      after UNBOUND and NET_LUID_MISMATCH, which name or may reach another adapter: every other TAS adapter's
  *                      query against its own capture before the cases. A change is FAIL and is recovered by that adapter's owned
  *                      NIC cycle (<case>-OTHERS-RECOVERY). Adapters without INTEL_CAP_TSN_TAS have no TAS state the query can
@@ -64,7 +75,14 @@
  *                      each operation is bounded, and the runner budget grows with the inventory). A changed adapter not recovered
  *                      stays in the test's unbounded OUTSTANDING list, reported after the adapter run and on an abort. If the
  *                      observation cannot be allocated (OTHERS-SETUP BLOCKED), UNBOUND and NET_LUID_MISMATCH are not submitted.
- * Not submitted, three BLOCKED lines each, never PASS: STALE_GENERATION, STALE_EPOCH (D.1) and WINDOW_MIN (D.2 consumption).
+ * Metadata cases (step 4): META_ZERO sends generation and epoch 0, refused STATE_CONFLICT on its own (R1). STALE_GENERATION and
+ * STALE_EPOCH send the case's freshly queried pair with one value deliberately changed (+1, or -1 at the maximum); PASS needs an
+ * established non-zero current pair, otherwise the observed refusal is reported INCONCLUSIVE (a stale value is not constructible).
+ * WINDOW_MIN: every queue's window is the largest one not greater than 1.1 x the transmit time of max(512 bytes, max_frame_bytes) at
+ * the driver-owned speed of the case's own query (TAS-DR-05, #351 R2; the unpublished overhead term only raises the bound, TC-MOCK-061); with
+ * speed 0 it carries a 1 ns window and NOT_READY must come first. NO_ACCEPTANCE (step 8): the control without
+ * AVB_TAS_F_ACCEPT_UNVERIFIED must complete STATUS_REQUEST_NOT_ACCEPTED, nothing written (#351, #365 R4); not submitted when the
+ * query reports HOLD IMPLEMENTED_VERIFIED, where that request is valid (evidence line, no verdict).
  * DEBUG_FAULT_RELEASE runs on a Release driver only (Debug: not applicable, the fault path is #357's --fault case).
  * NET_LUID_MISMATCH names another enumerated adapter's NET_LUID when one exists, otherwise an identity no adapter has (the
  * different-existing-adapter subcase is then reported not exercised). UNBOUND sends the valid request on an unbound write handle.
@@ -82,8 +100,9 @@
  * request on 0x0017811C must complete STATUS_INVALID_DEVICE_REQUEST (function 71 withdrawn, #365 13.1). Today's driver may commit
  * it: the owned cleanup follows. Then CLEANUP and RESTORE as below. Every TAS adapter runs (no TAS_QUERY_CLEAN_MAX_ADAPTERS cap).
  * Expected RED against a driver without the 0x80C producer: the versioned cases REFUSED and COMPLETION FAIL (not served), UNCHANGED
- * judged from the actual readings; LEGACY_FUNCTION_71 FAIL (still served). A hypothesis until a hardware run shows it.
- * Not tested: a duplicate client_op_id (#352 proposal); tier outcomes (#351 table); EG-06; REPLACE (#358).
+ * judged from the actual readings; METADATA FAIL while the query reports 0; LEGACY_FUNCTION_71 FAIL (still served). A hypothesis
+ * until a hardware run shows it.
+ * Not tested: a duplicate client_op_id (#352 proposal); qualification tiers (#351 table); EG-06; REPLACE (#358).
  *
  * --restore: TEST-TAS-API-012 (#377, Verifies #361), case TC-TASAPI-012 (DES-C-TAS-010 8, 12.5; #365 query contract). Two
  * restoration facts are kept apart: the driver's advisory `restoration`, computed from the SSOT observed baselines, and the
@@ -1321,85 +1340,90 @@ static void run_tiers(HANDLE h, UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST
 #define INV_LEAD_HEADROOM_NS      (500LL * NS_PER_MS)   /* processing between the PHC read and the driver's check, above min_margin_ns */
 #define INV_LEAD_MAX_NS           (60LL * NS_PER_SEC)   /* a reported margin needing more lead than this is not used (reported) */
 
-/* Dependencies of a case's oracle on rules #365 13.6 has not settled. Header cases (13.3 down to net_luid, in the order 13.5
- * defines) have none; the order among semantic checks is D.7, and the baseline request's generation and epoch (D.1) and tier
- * admission (D.4) are unsettled, so a semantic field's isolation is not established (amendment review constraints) */
-#define INV_DEP_ORDER 0x1u   /* D.7: order among the semantic checks */
-#define INV_DEP_META  0x2u   /* D.1: generation/epoch production; the baseline carries the query's values (0 = not reported) */
-#define INV_DEP_TIER  0x4u   /* D.4: tier admission of the HOLD baseline */
-#define INV_SEMANTIC  (INV_DEP_ORDER | INV_DEP_META | INV_DEP_TIER)
+/* Header cases (13.3 down to net_luid, in the order 13.5 defines) have step 0 and their own defined order. Semantic cases carry
+ * the #365 R7 step that checks their field (TAS_INV_STEP_*, tests/ioctl/tas_activate_eval.h); tas_inv_semantic judges them */
+#define INV_HEADER 0
 
 typedef enum {
     /* header checks (#365 13.3, defined order 13.5) */
     INV_UNBOUND, INV_SHORT_BUFFER, INV_SHORT_OUTPUT, INV_VERSION, INV_SIZE, INV_RESERVED, INV_SCHEDULE_RESERVED, INV_FLAGS_UNKNOWN,
     INV_QUEUE_FLAGS_UNKNOWN, INV_FLAGS_OPEN_ALL, INV_CLIENT_OP_ID_ZERO, INV_DEBUG_FAULT_RESERVED, INV_DEBUG_FAULT_RELEASE,
     INV_NET_LUID_MISMATCH,
-    /* semantic checks (order not decided, D.7) */
-    INV_PRE_ACTIVATION, INV_STALE_GENERATION, INV_STALE_EPOCH, INV_CYCLE_ZERO, INV_CYCLE_FIELD, INV_BASET_SECONDS, INV_BASET_NEAR,
-    INV_FRAME_MIN, INV_WINDOW_EMPTY, INV_WINDOW_PAST_CYCLE, INV_WINDOW_MIN,
+    /* semantic checks, in #365 R7 order */
+    INV_PRE_ACTIVATION, INV_META_ZERO, INV_STALE_GENERATION, INV_STALE_EPOCH, INV_CYCLE_ZERO, INV_CYCLE_FIELD, INV_BASET_SECONDS,
+    INV_BASET_NEAR, INV_FRAME_MIN, INV_WINDOW_EMPTY, INV_WINDOW_PAST_CYCLE, INV_WINDOW_MIN, INV_NO_ACCEPTANCE,
     INV_END_EQ_CYCLE,   /* last of the invalid-field sequence: the function-71 path did not refuse it and committed a schedule */
     INV_COUNT
 } INV_ID;
 
-/* One case: its rule, the completion #365 13.3 requires (no output), its unsettled dependencies, and why it is not submitted */
+/* One case: its rule, the completion #365 13.3/13.4 requires (no output), the R7 step of its field, and whether its claim needs
+ * an established current metadata pair (STALE_*) */
 typedef struct {
     const char *name;
     const char *rule;
     LONG required;
     const char *required_src;
-    unsigned deps;
-    const char *not_submitted;
+    int step;
+    BOOL stale;
 } INV_CASE;
 
 static const INV_CASE g_inv[INV_COUNT] = {
     { "UNBOUND", "#365 13.3: the open instance must be bound; the valid request on an unbound write handle sent",
-      (LONG)STATUS_INVALID_DEVICE_STATE, "#365 13.3 (NOT_BOUND)", 0, NULL },
-    { "SHORT_BUFFER", "#365 13.3: input length at least 144; 143 bytes sent", (LONG)STATUS_BUFFER_TOO_SMALL, "#365 13.3", 0, NULL },
-    { "SHORT_OUTPUT", "#365 13.3: output length at least 144; 143 bytes offered", (LONG)STATUS_BUFFER_TOO_SMALL, "#365 13.3", 0, NULL },
-    { "VERSION", "#365 13.3: version 1; 2 sent", (LONG)STATUS_REVISION_MISMATCH, "#365 13.3", 0, NULL },
-    { "SIZE", "#365 13.3: size 144; 80, the former request size, sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", 0, NULL },
-    { "RESERVED", "#365 13.3: reserved0 0; 0xFFFFFFFF sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", 0, NULL },
-    { "SCHEDULE_RESERVED", "#365 13.3: schedule.reserved 0; 1 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", 0, NULL },
-    { "FLAGS_UNKNOWN", "#365 13.3: unknown flags bits 0; bit 31 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", 0, NULL },
+      (LONG)STATUS_INVALID_DEVICE_STATE, "#365 13.3 (NOT_BOUND)", INV_HEADER, FALSE },
+    { "SHORT_BUFFER", "#365 13.3: input length at least 144; 143 bytes sent", (LONG)STATUS_BUFFER_TOO_SMALL, "#365 13.3", INV_HEADER,
+      FALSE },
+    { "SHORT_OUTPUT", "#365 13.3: output length at least 144; 143 bytes offered", (LONG)STATUS_BUFFER_TOO_SMALL, "#365 13.3", INV_HEADER,
+      FALSE },
+    { "VERSION", "#365 13.3: version 1; 2 sent", (LONG)STATUS_REVISION_MISMATCH, "#365 13.3", INV_HEADER, FALSE },
+    { "SIZE", "#365 13.3: size 144; 80, the former request size, sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", INV_HEADER, FALSE },
+    { "RESERVED", "#365 13.3: reserved0 0; 0xFFFFFFFF sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", INV_HEADER, FALSE },
+    { "SCHEDULE_RESERVED", "#365 13.3: schedule.reserved 0; 1 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", INV_HEADER, FALSE },
+    { "FLAGS_UNKNOWN", "#365 13.3: unknown flags bits 0; bit 31 sent with the control's acceptance bit", (LONG)STATUS_INVALID_PARAMETER,
+      "#365 13.3", INV_HEADER, FALSE },
     { "QUEUE_FLAGS_UNKNOWN", "#365 13.3: unknown queue[].flags bits 0; bit 31 on every queue sent", (LONG)STATUS_INVALID_PARAMETER,
-      "#365 13.3", 0, NULL },
-    { "FLAGS_OPEN_ALL", "#365 13.3, #359: flags.OPEN_ALL not on ACTIVATE; bit 1 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", 0, NULL },
-    { "CLIENT_OP_ID_ZERO", "#365 13.3, #352 AC1: client_op_id non-zero; 0 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", 0, NULL },
+      "#365 13.3", INV_HEADER, FALSE },
+    { "FLAGS_OPEN_ALL", "#365 13.3, #359: flags.OPEN_ALL not on ACTIVATE; bit 1 sent with the control's acceptance bit",
+      (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", INV_HEADER, FALSE },
+    { "CLIENT_OP_ID_ZERO", "#365 13.3, #352 AC1: client_op_id non-zero; 0 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", INV_HEADER,
+      FALSE },
     { "DEBUG_FAULT_RESERVED", "#365 13.3, #357 AC4: debug_fault bits 9-31 are 0 on any driver; bit 9 sent", (LONG)STATUS_INVALID_PARAMETER,
-      "#365 13.3", 0, NULL },
+      "#365 13.3", INV_HEADER, FALSE },
     { "DEBUG_FAULT_RELEASE", "#365 13.3, #357 AC4: debug_fault 0 on a Release driver; 1 sent (Release only)", (LONG)STATUS_INVALID_PARAMETER,
-      "#365 13.3", 0, NULL },
+      "#365 13.3", INV_HEADER, FALSE },
     { "NET_LUID_MISMATCH", "#365 13.3, #352 AC2: net_luid is the bound adapter; a different NET_LUID sent", (LONG)STATUS_INVALID_DEVICE_STATE,
-      "#365 13.3 (ADAPTER_MISMATCH)", 0, NULL },
-    { "PRE_ACTIVATION", "#365 13.3, TAS-DR-14: pre_activation 1 or 2; 0 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3", INV_SEMANTIC, NULL },
-    { "STALE_GENERATION", "#365 13.3, #352 AC4: expected_generation matches; a changed value", (LONG)STATUS_INVALID_DEVICE_STATE,
-      "#365 13.3 (STATE_CONFLICT)", INV_SEMANTIC,
-      "generation production before the #352 store is undecided (#365 13.6 D.1): a stale value cannot be constructed against a defined "
-      "current value; never PASS" },
-    { "STALE_EPOCH", "#365 13.3, #352 AC4: context_epoch matches; a changed value", (LONG)STATUS_INVALID_DEVICE_STATE,
-      "#365 13.3 (STATE_CONFLICT)", INV_SEMANTIC,
-      "context-epoch production before the #352 store is undecided (#365 13.6 D.1): a stale value cannot be constructed against a "
-      "defined current value; never PASS" },
-    { "CYCLE_ZERO", "TAS-DR-04: cycle within the hardware range; 0 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule)", INV_SEMANTIC, NULL },
-    { "CYCLE_FIELD", "TAS-DR-04: cycle within the hardware range; one above the QBVCYCLET.QBV_CYCLE_TIME field (SSOT) sent",
-      (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule)", INV_SEMANTIC, NULL },
-    { "BASET_SECONDS", "TAS-DR-07: BaseT seconds fit BASET_H; 2^32 s sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule)",
-      INV_SEMANTIC, NULL },
-    { "BASET_NEAR", "TAS-DR-08, #365 13.3 BaseT lead: at least limits.min_margin_ns after a PHC read; the cycle boundary at or before "
-      "the PHC sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (BaseT lead; enforced value D.3)", INV_SEMANTIC, NULL },
-    { "FRAME_MIN", "max_frame_bytes below the IEEE 802.3 minimum frame of 64 bytes on every queue; 63 sent", (LONG)STATUS_INVALID_PARAMETER,
-      "#365 13.3 (schedule)", INV_SEMANTIC, NULL },
-    { "WINDOW_EMPTY", "TAS-DR-05: start_ns < end_ns; every queue start equal to its end sent", (LONG)STATUS_INVALID_PARAMETER,
-      "#365 13.3 (schedule)", INV_SEMANTIC, NULL },
-    { "WINDOW_PAST_CYCLE", "TAS-DR-05: end_ns <= cycle_ns; every queue end one ns past the cycle sent", (LONG)STATUS_INVALID_PARAMETER,
-      "#365 13.3 (schedule)", INV_SEMANTIC, NULL },
-    { "WINDOW_MIN", "TAS-DR-05, #351 AC3: window above 1.1 x the transmit time of max(512 bytes, max_frame_bytes) at the current link speed",
-      (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule at the current link speed)", INV_SEMANTIC,
-      "the link speed TAS-DR-05 uses is not settled for validation (#365 13.6 D.2: K8 acquisition and its encoding exist, their "
-      "consumption by TAS-DR-05 is not decided): the window bound has no settled oracle; never PASS" },
-    { "END_EQ_CYCLE", "TAS-DR-06: end_ns < cycle_ns with a gap, except OPEN_ALL (a REPLACE schedule, #359, that ACTIVATE cannot express); "
-      "every queue end equal to the cycle sent (EG-06 stays UNVERIFIED)", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule)",
-      INV_SEMANTIC, NULL },
+      "#365 13.3 (ADAPTER_MISMATCH)", INV_HEADER, FALSE },
+    { "PRE_ACTIVATION", "#365 13.3, TAS-DR-14, R7 step 2: pre_activation 1 or 2; 0 sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3",
+      TAS_INV_STEP_PRE, FALSE },
+    { "META_ZERO", "#352 R1 (L2, L6), R7 step 4: 0 is never a valid generation or epoch; both 0 sent", (LONG)STATUS_INVALID_DEVICE_STATE,
+      "#352 R1, #365 13.4 (STATE_CONFLICT)", TAS_INV_STEP_META, FALSE },
+    { "STALE_GENERATION", "#365 13.3, #352 AC4 and R1, R7 step 4: expected_generation matches; the current value changed by one sent",
+      (LONG)STATUS_INVALID_DEVICE_STATE, "#352 R1, #365 13.4 (STATE_CONFLICT)", TAS_INV_STEP_META, TRUE },
+    { "STALE_EPOCH", "#365 13.3, #352 AC4 and R1, R7 step 4: context_epoch matches; the current value changed by one sent",
+      (LONG)STATUS_INVALID_DEVICE_STATE, "#352 R1, #365 13.4 (STATE_CONFLICT)", TAS_INV_STEP_META, TRUE },
+    { "CYCLE_ZERO", "TAS-DR-04, R7 step 6: cycle within the hardware range; 0 sent", (LONG)STATUS_INVALID_PARAMETER,
+      "#365 13.3 (schedule)", TAS_INV_STEP_SCHEDULE, FALSE },
+    { "CYCLE_FIELD", "TAS-DR-04, R7 step 6: cycle within the hardware range; one above the QBVCYCLET.QBV_CYCLE_TIME field (SSOT) sent",
+      (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule)", TAS_INV_STEP_SCHEDULE, FALSE },
+    { "BASET_SECONDS", "TAS-DR-07, R7 step 6: BaseT seconds fit BASET_H; 2^32 s sent", (LONG)STATUS_INVALID_PARAMETER,
+      "#365 13.3 (schedule)", TAS_INV_STEP_SCHEDULE, FALSE },
+    { "BASET_NEAR", "TAS-DR-08, #365 13.3 BaseT lead, R7 step 7: at least limits.min_margin_ns after a PHC read; the cycle boundary "
+      "at or before the PHC sent", (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (BaseT lead; enforced 100 ms, D.3)", TAS_INV_STEP_LEAD,
+      FALSE },
+    { "FRAME_MIN", "R7 step 6: max_frame_bytes below the IEEE 802.3 minimum frame of 64 bytes on every queue; 63 sent",
+      (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule)", TAS_INV_STEP_SCHEDULE, FALSE },
+    { "WINDOW_EMPTY", "TAS-DR-05, R7 step 6: start_ns < end_ns; every queue start equal to its end sent", (LONG)STATUS_INVALID_PARAMETER,
+      "#365 13.3 (schedule)", TAS_INV_STEP_SCHEDULE, FALSE },
+    { "WINDOW_PAST_CYCLE", "TAS-DR-05, R7 step 6: end_ns <= cycle_ns; every queue end one ns past the cycle sent",
+      (LONG)STATUS_INVALID_PARAMETER, "#365 13.3 (schedule)", TAS_INV_STEP_SCHEDULE, FALSE },
+    { "WINDOW_MIN", "TAS-DR-05, #351 AC3 and R2, R7 step 6: window above 1.1 x the transmit time of max(512 bytes, max_frame_bytes) "
+      "at the driver-owned speed; every queue window at that bound sent", (LONG)STATUS_INVALID_PARAMETER,
+      "#365 13.3 (schedule at the driver-owned link speed, #351 R2)", TAS_INV_STEP_SCHEDULE, FALSE },
+    { "NO_ACCEPTANCE", "#351 R4, #362 amendment, #365 R4, R7 step 8: an otherwise valid unqualified HOLD request without "
+      "AVB_TAS_F_ACCEPT_UNVERIFIED; the control with flags 0 sent", (LONG)STATUS_REQUEST_NOT_ACCEPTED,
+      "#365 13.4 (NOT_HARDWARE_VERIFIED)", TAS_INV_STEP_TIER, FALSE },
+    { "END_EQ_CYCLE", "TAS-DR-06, R7 step 6: end_ns < cycle_ns with a gap, except OPEN_ALL (a REPLACE schedule, #359, that ACTIVATE "
+      "cannot express); every queue end equal to the cycle sent (EG-06 stays UNVERIFIED)", (LONG)STATUS_INVALID_PARAMETER,
+      "#365 13.3 (schedule)", TAS_INV_STEP_SCHEDULE, FALSE },
 };
 
 typedef struct {
@@ -1460,10 +1484,11 @@ static BOOL stats_unchanged(const AVB_DRIVER_STATISTICS *a, const AVB_DRIVER_STA
            a->PauseRestartGeneration == b->PauseRestartGeneration;
 }
 
-/** The baseline HOLD request of #365 13.2 for the bound adapter: the verified schedule set of #381 and test_tas_activate.c,
- *  BaseT the first cycle boundary at least BASE_LEAD_NS past phc, expected_generation and context_epoch as the test's own query
- *  reports them (0 = not reported today, D.1: the baseline is therefore not established as valid, see INV_DEP_META) */
-static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc)
+/** The positive HOLD control of #365 13.2 for the bound adapter (#368 oracle amendment 2026-11-19): AVB_TAS_F_ACCEPT_UNVERIFIED
+ *  for unqualified execution (#362 amendment, #365 R4), the verified schedule set of #381 and test_tas_activate.c, BaseT the first
+ *  cycle boundary at least the lead past phc, expected_generation and context_epoch as the case's own query reports them (gen,
+ *  epoch: never invented, a reported 0 stays 0 and METADATA reports it as missing; PR #491 review r4634404991) */
+static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc, avb_u64 gen, avb_u64 epoch)
 {
     unsigned q;
 
@@ -1472,8 +1497,9 @@ static void inv_op_request(AVB_TAS_OP_REQUEST *r, const INV_CTX *c, avb_u64 phc)
     r->size = (avb_u32)sizeof(*r);
     r->net_luid = c->id->net_luid;
     r->client_op_id = inv_next_op_id();
-    r->expected_generation = c->q0->q.generation;
-    r->context_epoch = c->q0->q.context_epoch;
+    r->expected_generation = gen;
+    r->context_epoch = epoch;
+    r->flags = AVB_TAS_F_ACCEPT_UNVERIFIED;
     r->pre_activation = AVB_TAS_PRE_HOLD;
     r->schedule.base_time_ns = (avb_u64)((((long long)phc + c->lead_ns + CYCLE_NS - 1) / CYCLE_NS) * CYCLE_NS);
     r->schedule.cycle_ns = (avb_u32)CYCLE_NS;
@@ -1519,15 +1545,24 @@ static BOOL inv_refusal_status(LONG st)
 {
     return st == (LONG)STATUS_INVALID_PARAMETER || st == (LONG)STATUS_REVISION_MISMATCH || st == (LONG)STATUS_BUFFER_TOO_SMALL ||
            st == (LONG)STATUS_INVALID_DEVICE_STATE || st == (LONG)STATUS_ACCESS_DENIED ||
-           st == (LONG)STATUS_REQUEST_NOT_ACCEPTED;   /* #365 13.4 NOT_HARDWARE_VERIFIED: nothing written (PR #479 r4621508956) */
+           st == (LONG)STATUS_REQUEST_NOT_ACCEPTED ||   /* #365 13.4 NOT_HARDWARE_VERIFIED: nothing written (PR #479 r4621508956) */
+           st == (LONG)STATUS_DEVICE_NOT_READY ||       /* #351 R2 / #365 R2 NOT_READY: no output, no writes */
+           st == (LONG)STATUS_DEVICE_BUSY;              /* #365 R7 step 3 BUSY: no register or PHC access */
 }
 
-static void inv_deps_text(unsigned deps, char *buf, size_t size)
+static const char *inv_step_name(int step)
 {
-    buf[0] = '\0';
-    if (deps & INV_DEP_META)  { strcat_s(buf, size, " D.1 (generation/epoch, the baseline carries the query's values)"); }
-    if (deps & INV_DEP_TIER)  { strcat_s(buf, size, " D.4 (tier admission)"); }
-    if (deps & INV_DEP_ORDER) { strcat_s(buf, size, " D.7 (order among the semantic checks)"); }
+    switch (step) {
+    case TAS_INV_STEP_PRE:      return "step 2 (pre_activation)";
+    case TAS_INV_STEP_CLAIM:    return "step 3 (claim)";
+    case TAS_INV_STEP_META:     return "step 4 (generation/epoch)";
+    case TAS_INV_STEP_SPEED:    return "step 5 (driver-owned link speed)";
+    case TAS_INV_STEP_SCHEDULE: return "step 6 (schedule TAS-DR-03..09)";
+    case TAS_INV_STEP_LEAD:     return "step 7 (PHC, BaseT margin)";
+    case TAS_INV_STEP_TIER:     return "step 8 (tier, explicit acceptance)";
+    case TAS_INV_STEP_CLEAN:    return "step 9 (clean state)";
+    default:                    return "the header checks";
+    }
 }
 
 /** The owned NIC cycle of another adapter and its proof: the recovery for a change a misrouted probe made there */
@@ -1644,12 +1679,48 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
     LONG st;
     BOOL wrote = FALSE, refused = FALSE, not_served = FALSE, measured, unchanged;
     unsigned differing = 0, q;
-    char check[48], reason[480], deps[200];
+    char check[48], reason[600];
+    /* The case's own query immediately before the request (#368: actual observed values; PR #491 review r4634404917,
+     * r4634404991): the request carries its pair, WINDOW_MIN is built from its speed, and the case is judged against it. When it
+     * is not valid, the request carries the pre-test query's values (the last observed, never invented) and the case's metadata,
+     * speed and tier are reported as not measured. The pair is established only when valid and both values are non-zero (#352 R1) */
+    QUERY_READ qc;
+    BOOL before_ok, pair_est;
+    avb_u64 cur_gen, cur_epoch, wmin = 0, sent_gen = 0, sent_epoch = 0;
+    avb_u32 mbps, tier_hold;
 
     printf("\n  --- %s: %s ---\n", t->name, t->rule);
-    if (t->not_submitted != NULL) {
-        inv_blocked3(t->name, c->index, did, t->not_submitted);
-        return TRUE;   /* nothing sent: the clean pre-state is unchanged */
+    query(c->h, &qc);
+    before_ok = query_valid(&qc);
+    cur_gen = before_ok ? qc.q.generation : c->q0->q.generation;
+    cur_epoch = before_ok ? qc.q.context_epoch : c->q0->q.context_epoch;
+    mbps = before_ok ? qc.q.link_speed_mbps : c->q0->q.link_speed_mbps;
+    tier_hold = before_ok ? qc.q.limits.tier_hold : c->q0->q.limits.tier_hold;
+    pair_est = before_ok && cur_gen != 0 && cur_epoch != 0;
+    printf("    [EVIDENCE] %s query before the request: ntstatus=0x%08lX valid=%d generation=%llu context_epoch=%llu (%s) "
+           "link_speed_mbps=%u tier_hold=%u%s\n", t->name, (unsigned long)qc.status, before_ok, cur_gen, cur_epoch,
+           pair_est ? "established" : "NOT established, 0 is never a value (#352 R1)", mbps, tier_hold,
+           before_ok ? "" : "; NOT measured: the pre-test query's values are sent and reported, the case's isolation is not established");
+    if (k == INV_NO_ACCEPTANCE && tier_hold == AVB_TAS_TIER_IMPLEMENTED_VERIFIED) {
+        printf("    [EVIDENCE] %s: not applicable, the query reports HOLD IMPLEMENTED_VERIFIED, where a request without acceptance is "
+               "valid and would commit; not submitted, no verdict\n", t->name);
+        return TRUE;
+    }
+    if (k == INV_WINDOW_MIN) {
+        wmin = tas_inv_window_min_ns(c->frame_bytes, mbps);
+        if (mbps == 0) {
+            wmin = 1;   /* no bound at an unknown speed: R7 step 5 must refuse NOT_READY before the window is interpreted */
+        } else if (wmin == 0) {
+            printf("    [EVIDENCE] %s: at %u Mbit/s the bound for %u bytes is below 1 ns: no window under it exists\n", t->name, mbps,
+                   c->frame_bytes);
+            verdict("INCONCLUSIVE", "WINDOW_MIN-REFUSED", c->index, did, "not constructible at the reported speed, not submitted");
+            verdict("INCONCLUSIVE", "WINDOW_MIN-UNCHANGED", c->index, did, "not constructible at the reported speed, not submitted");
+            verdict("INCONCLUSIVE", "WINDOW_MIN-COMPLETION", c->index, did, "not constructible at the reported speed, not submitted");
+            return TRUE;   /* nothing sent */
+        }
+        printf("    [EVIDENCE] %s window: %llu ns per queue = the largest not greater than 1.1 x the transmit time of max(%u, %u) bytes "
+               "at link_speed_mbps %u%s\n", t->name, wmin, TAS_DR05_MIN_BYTES, c->frame_bytes, mbps,
+               mbps == 0 ? " (unknown: no bound; a 1 ns window, NOT_READY must come first)" : "");
     }
     if ((k == INV_UNBOUND || k == INV_NET_LUID_MISMATCH) && c->others_alloc_failed) {
         /* these probes name or may reach another adapter: without its observation they are not sent (#479 round 3) */
@@ -1671,7 +1742,7 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         inv_blocked3(t->name, c->index, did, "PHC unavailable: no valid BaseT can be placed, so the case cannot isolate its field");
         return FALSE;
     }
-    inv_op_request(&req, c, p.phc);
+    inv_op_request(&req, c, p.phc, cur_gen, cur_epoch);
     switch (k) {
     case INV_UNBOUND:
         unbound = open_device(GENERIC_READ | GENERIC_WRITE);
@@ -1683,9 +1754,9 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
     case INV_SIZE:              req.size = (avb_u32)sizeof(AVB_TAS_ACTIVATE_REQUEST); break;
     case INV_RESERVED:          req.reserved0 = 0xFFFFFFFFu; break;
     case INV_SCHEDULE_RESERVED: req.schedule.reserved = 1u; break;
-    case INV_FLAGS_UNKNOWN:     req.flags = INV_BIT31; break;
+    case INV_FLAGS_UNKNOWN:     req.flags |= INV_BIT31; break;   /* one bit added to the control's flags */
     case INV_QUEUE_FLAGS_UNKNOWN: for (q = 0; q < AVB_TAS_QUEUES; q++) { req.schedule.queue[q].flags = INV_BIT31; } break;
-    case INV_FLAGS_OPEN_ALL:    req.flags = AVB_TAS_F_OPEN_ALL; break;
+    case INV_FLAGS_OPEN_ALL:    req.flags |= AVB_TAS_F_OPEN_ALL; break;
     case INV_CLIENT_OP_ID_ZERO: req.client_op_id = 0; break;
     case INV_DEBUG_FAULT_RESERVED:
         req.debug_fault = AVB_TAS_DEBUG_FAULT_RESERVED & (~AVB_TAS_DEBUG_FAULT_RESERVED + 1u);   /* its lowest bit: bit 9 */
@@ -1693,7 +1764,20 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
     case INV_DEBUG_FAULT_RELEASE: req.debug_fault = 1u; break;
     case INV_NET_LUID_MISMATCH: req.net_luid = c->other_luid; break;
     case INV_PRE_ACTIVATION:    req.pre_activation = 0; break;
-    case INV_CYCLE_ZERO:        req.schedule.cycle_ns = 0; break;
+    case INV_META_ZERO:         req.expected_generation = 0; req.context_epoch = 0; break;
+    case INV_STALE_GENERATION:   /* the current pair with the generation deliberately different (never a redraw assumed unequal) */
+        req.expected_generation = cur_gen == ~(avb_u64)0 ? cur_gen - 1u : cur_gen + 1u;
+        req.context_epoch = cur_epoch;
+        break;
+    case INV_STALE_EPOCH:
+        req.expected_generation = cur_gen;
+        req.context_epoch = cur_epoch == ~(avb_u64)0 ? cur_epoch - 1u : cur_epoch + 1u;
+        break;
+    case INV_NO_ACCEPTANCE:     req.flags = 0; break;
+    case INV_WINDOW_MIN:
+        for (q = 0; q < AVB_TAS_QUEUES; q++) { req.schedule.queue[q].end_ns = req.schedule.queue[q].start_ns + (avb_u32)wmin; }
+        break;
+    case INV_CYCLE_ZERO:       req.schedule.cycle_ns = 0; break;
     case INV_CYCLE_FIELD:
         req.schedule.cycle_ns = (avb_u32)((I226_QBVCYCLET_QBV_CYCLE_TIME_MASK >> I226_QBVCYCLET_QBV_CYCLE_TIME_SHIFT) + 1ULL);
         break;
@@ -1729,6 +1813,8 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         inv_blocked3(t->name, c->index, did, "cannot open an unbound handle with write access");
         return TRUE;   /* nothing sent */
     }
+    sent_gen = req.expected_generation;   /* the buffer is in/out: keep what was sent */
+    sent_epoch = req.context_epoch;
     st = avb_ioctl_ntstatus(hreq, IOCTL_AVB_TAS_ACTIVATE_80C, &req, inlen, &req, outlen, &got);
     if (unbound != INVALID_HANDLE_VALUE) { CloseHandle(unbound); }
     not_served = st == (LONG)STATUS_INVALID_DEVICE_REQUEST;
@@ -1789,12 +1875,80 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         verdict("PASS", check, c->index, did, "registers, record and counters as captured before the cases");
     }
 
-    /* COMPLETION: the status #365 13.3 requires, kept apart from REFUSED and UNCHANGED. A header case's oracle is established by
-     * the defined order (13.5); a semantic case's required status is observable but its field's isolation is not (D.1, D.4, D.7),
-     * so a match is INCONCLUSIVE, never PASS, and a status the unsettled metadata rule can produce is INCONCLUSIVE too */
+    /* COMPLETION: the status #365 13.3/13.4 requires, kept apart from REFUSED and UNCHANGED. A header case's oracle is established
+     * by the defined order (13.5). A semantic case is judged under #365 R7 from the actual request and the measured facts
+     * (tas_inv_semantic, TC-MOCK-060): PASS only when its own step is reached; a missing prerequisite is named, never PASS */
     sprintf_s(check, sizeof(check), "%s-COMPLETION", t->name);
-    inv_deps_text(t->deps, deps, sizeof(deps));
-    if (st == AVB_NTSTATUS_UNAVAILABLE) {
+    if (t->step != INV_HEADER) {
+        TAS_INV_SEM_EVIDENCE e;
+        TAS_INV_SEM_CLASS cls;
+        LONG expected;
+        TAS_INV_STEP at;
+
+        ZeroMemory(&e, sizeof(e));
+        e.step = (TAS_INV_STEP)t->step;
+        e.required = t->required;
+        e.stale_case = t->stale;
+        e.captured = st != AVB_NTSTATUS_UNAVAILABLE;
+        e.status = st;
+        e.information = got;
+        e.pair_established = pair_est;
+        e.request_pair_zero = sent_gen == 0 || sent_epoch == 0;
+        e.request_pair_mismatch = pair_est && (sent_gen != cur_gen || sent_epoch != cur_epoch);
+        e.speed_before = mbps;
+        e.speed_after_read = query_valid(&qa);
+        e.speed_after = query_valid(&qa) ? qa.q.link_speed_mbps : 0;
+        e.tier_hold = tier_hold;
+        e.before_read = before_ok;
+        e.pair_after_read = query_valid(&qa);
+        e.pair_after_differs = before_ok && query_valid(&qa) && (qa.q.generation != cur_gen || qa.q.context_epoch != cur_epoch);
+        e.field_speed_dependent = k == INV_WINDOW_MIN;
+        cls = tas_inv_semantic(&e, &expected, &at);
+        printf("    [EVIDENCE] %s order facts: sent gen=%llu epoch=%llu; before: query %s, pair %s (gen=%llu epoch=%llu), link_speed_mbps "
+               "%u, tier_hold %u; after: query %s, gen=%llu epoch=%llu%s, link_speed_mbps %u; flags 0x%X\n", t->name, sent_gen,
+               sent_epoch, before_ok ? "valid" : "NOT valid", pair_est ? "established" : "NOT established", cur_gen, cur_epoch, mbps,
+               tier_hold, e.pair_after_read ? "valid" : "NOT valid", e.pair_after_read ? qa.q.generation : 0ULL,
+               e.pair_after_read ? qa.q.context_epoch : 0ULL, e.pair_after_differs ? " (CHANGED)" : "", e.speed_after, req.flags);
+        switch (cls) {
+        case TAS_INV_SEM_PASS:
+            sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output, as %s requires; %s reached for this request (#365 R7)",
+                      (unsigned long)st, t->required_src, inv_step_name(t->step));
+            verdict("PASS", check, c->index, did, reason);
+            break;
+        case TAS_INV_SEM_EARLIER_STEP:
+            sprintf_s(reason, sizeof(reason), "the request must already be refused at %s and was (ntstatus=0x%08lX, no output): %s; the "
+                      "field's own rule (%s, 0x%08lX) is not reached, nothing about it is established", inv_step_name(at),
+                      (unsigned long)st, at == TAS_INV_STEP_META ? "it carries generation or epoch 0, the query reports no non-zero pair "
+                      "(see METADATA, #352 R1)" : "the query reports link_speed_mbps 0, unknown (#351 R2: NOT_READY)",
+                      inv_step_name(t->step), (unsigned long)t->required);
+            verdict("INCONCLUSIVE", check, c->index, did, reason);
+            break;
+        case TAS_INV_SEM_STALE_UNESTABLISHED:
+            sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output, as %s requires, but no established non-zero current pair: "
+                      "the value sent is not shown to be stale (#352 R1); the request carried a 0, refused as published",
+                      (unsigned long)st, t->required_src);
+            verdict("INCONCLUSIVE", check, c->index, did, reason);
+            break;
+        case TAS_INV_SEM_UNDETERMINED:
+            sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX information=%lu: the published order does not determine this request's "
+                      "outcome for the measured facts (queries before/after %s/%s, pair %s, link speed %u then %u, tier_hold %u, "
+                      "BUSY = another operation's claim; see the order facts); reported, not judged", (unsigned long)st, got,
+                      before_ok ? "valid" : "NOT valid", e.pair_after_read ? "valid" : "NOT valid",
+                      e.pair_after_differs ? "CHANGED" : "unchanged", mbps, e.speed_after, tier_hold);
+            verdict("INCONCLUSIVE", check, c->index, did, reason);
+            break;
+        case TAS_INV_SEM_NOT_CAPTURED:
+            verdict("INCONCLUSIVE", check, c->index, did, "raw NTSTATUS not captured");
+            break;
+        default:
+            sprintf_s(reason, sizeof(reason), "%s requires ntstatus=0x%08lX with no output (judged at %s for this request); observed "
+                      "ntstatus=0x%08lX information=%lu%s", at == (TAS_INV_STEP)t->step ? t->required_src : "#365 R7",
+                      (unsigned long)expected, inv_step_name(at), (unsigned long)st, got,
+                      not_served ? " (IOCTL_AVB_TAS_ACTIVATE_80C not served)" : "");
+            verdict("FAIL", check, c->index, did, reason);
+            break;
+        }
+    } else if (st == AVB_NTSTATUS_UNAVAILABLE) {
         verdict("INCONCLUSIVE", check, c->index, did, "raw NTSTATUS not captured");
     } else if (k == INV_UNBOUND && st == t->required && got == 0) {   /* before the header PASS below (#479 round 2) */
         /* PR #479 r4621508729: NOT_BOUND and ADAPTER_MISMATCH complete with the same status and no output; on a dispatcher that
@@ -1803,14 +1957,9 @@ static BOOL run_inv_case(const INV_CTX *c, INV_ID k)
         verdict("INCONCLUSIVE", check, c->index, did, "STATUS_INVALID_DEVICE_STATE with no output, as #365 13.3 requires, but NOT_BOUND "
                 "and ADAPTER_MISMATCH share it and an error completion carries no result: that the unbound gate refused it is not "
                 "established (other TAS adapters are checked in UNBOUND-OTHERS)");
-    } else if (st == t->required && got == 0 && t->deps == 0) {
+    } else if (st == t->required && got == 0) {
         sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output, as %s requires", (unsigned long)st, t->required_src);
         verdict("PASS", check, c->index, did, reason);
-    } else if (t->deps != 0 && got == 0 && (st == t->required || st == (LONG)STATUS_INVALID_DEVICE_STATE ||
-                                            ((t->deps & INV_DEP_TIER) && st == (LONG)STATUS_REQUEST_NOT_ACCEPTED))) {
-        sprintf_s(reason, sizeof(reason), "ntstatus=0x%08lX with no output (%s requires 0x%08lX); the field's isolation is not "
-                  "established, unsettled:%s", (unsigned long)st, t->required_src, (unsigned long)t->required, deps);
-        verdict("INCONCLUSIVE", check, c->index, did, reason);
     } else {
         sprintf_s(reason, sizeof(reason), "%s requires ntstatus=0x%08lX with no output; observed ntstatus=0x%08lX information=%lu%s",
                   t->required_src, (unsigned long)t->required, (unsigned long)st, got,
@@ -1991,10 +2140,10 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
     read_state(h, &t0);
     query(h, &q0);
     print_query("pre-test", &q0);
-    printf("    [EVIDENCE] DTXMXPKTSZ raw=0x%08X decoded=%u bytes state=%u; limits.min_margin_ns=%llu state=%u (D.3); link_speed_mbps=%u; "
-           "generation=%llu context_epoch=%llu (0 = not reported, D.1)\n", q0.q.regs.dtxmxpktsz, q0.q.dtx_max_frame_bytes,
-           q0.q.dtx_max_frame_state, q0.q.limits.min_margin_ns, q0.q.limits.min_margin_state, q0.q.link_speed_mbps, q0.q.generation,
-           q0.q.context_epoch);
+    printf("    [EVIDENCE] DTXMXPKTSZ raw=0x%08X decoded=%u bytes state=%u; limits.min_margin_ns=%llu state=%u (D.3); link_speed_mbps=%u "
+           "(driver-owned K8, 0 = unknown, #351 R2); tier_hold=%u; generation=%llu context_epoch=%llu (0 = not reported, never a "
+           "value, #352 R1)\n", q0.q.regs.dtxmxpktsz, q0.q.dtx_max_frame_bytes, q0.q.dtx_max_frame_state, q0.q.limits.min_margin_ns,
+           q0.q.limits.min_margin_state, q0.q.link_speed_mbps, q0.q.limits.tier_hold, q0.q.generation, q0.q.context_epoch);
 
     /* PRESTATE: the test proves its own pre-state through the TAS query before it submits anything (#368) */
     v = avb_verdict_from_status((NTSTATUS)q0.status, AVB_CAP_PRESENT, query_valid(&q0), TRUE);
@@ -2010,6 +2159,21 @@ static void run_invalid(UINT32 index, const AVB_ADAPTER_IDENTITY_REQUEST *id, DE
         stop = "the clean pre-state was not established";
     } else {
         verdict("PASS", "PRESTATE", index, id->device_id, "clean, readable query; TAS record CLEAN; statistics and PHC read");
+    }
+    /* METADATA (#368 oracle amendment 2026-11-19, #352 R1 L13): once initialized the query reports the context's actual non-zero
+     * generation and epoch. A 0 exposes missing implementation (or an unavailable context), never a valid value. Its own line,
+     * independent of the cases, which still run with what the query reports */
+    if (!query_valid(&q0)) {
+        verdict("INCONCLUSIVE", "METADATA", index, id->device_id, "the pre-test query is not valid: generation and epoch not measured");
+    } else if (q0.q.generation == 0 || q0.q.context_epoch == 0) {
+        sprintf_s(reason, sizeof(reason), "the query reports generation=%llu context_epoch=%llu: #352 R1 requires the actual non-zero "
+                  "pair of the adapter context (0 = not reported, never a value); semantic cases past R7 step 4 cannot reach their own "
+                  "rule with it", q0.q.generation, q0.q.context_epoch);
+        verdict("FAIL", "METADATA", index, id->device_id, reason);
+    } else {
+        sprintf_s(reason, sizeof(reason), "generation=%llu context_epoch=%llu, both non-zero (#352 R1)", q0.q.generation,
+                  q0.q.context_epoch);
+        verdict("PASS", "METADATA", index, id->device_id, reason);
     }
     /* BaseT lead (#365 13.3, PR #479 r4621508892): the reported limits.min_margin_ns plus processing headroom when the query
      * establishes it and it needs more than BASE_LEAD_NS; checked against INV_LEAD_MAX_NS before any arithmetic */

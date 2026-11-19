@@ -1419,6 +1419,241 @@ static void test_59_fault_f2_refuse(void) {
     }
 }
 
+/* TC-MOCK-060: TEST-TAS-API-003 (#368) semantic COMPLETION under #365's published validation order R7 (oracle amendment
+ * 2026-11-19, #352 R1, #351 R2/R4). A case reaches its own rule only when every earlier step passes for the actual request:
+ * a request carrying generation or epoch 0 must be refused at step 4 (STATE_CONFLICT), an unknown driver-owned speed at step 5
+ * (NOT_READY). Missing prerequisites are named, never PASS; a completion the order excludes is FAIL. Test logic only. */
+static void fill_inv_sem(TAS_INV_SEM_EVIDENCE *e, TAS_INV_STEP step, LONG required, LONG status)
+{
+    ZeroMemory(e, sizeof(*e));
+    e->step = step;
+    e->required = required;
+    e->captured = TRUE;
+    e->status = status;
+    e->pair_established = TRUE;      /* the query reported a non-zero pair and the request carries it */
+    e->speed_before = 1000u;
+    e->speed_after_read = TRUE;
+    e->speed_after = 1000u;
+    e->before_read = TRUE;           /* the case's own query before the request was valid */
+    e->pair_after_read = TRUE;       /* and the one after, with the same pair */
+}
+
+static void test_60_invalid_semantic_order(void) {
+    TAS_INV_SEM_EVIDENCE e;
+    LONG exp;
+    TAS_INV_STEP at;
+    const LONG INVP = (LONG)STATUS_INVALID_PARAMETER, CONFLICT = (LONG)STATUS_INVALID_DEVICE_STATE;
+    const LONG NOTREADY = (LONG)STATUS_DEVICE_NOT_READY, NOTACC = (LONG)STATUS_REQUEST_NOT_ACCEPTED;
+
+    printf("\n[TC-MOCK-060] #368 semantic COMPLETION under #365 R7 (test logic only)\n");
+
+    /* the case's own rule reached: PASS on its exact completion */
+    fill_inv_sem(&e, TAS_INV_STEP_PRE, INVP, INVP);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("PRE_ACTIVATION 0: step 2 precedes metadata, INVALID_PARAMETER is PASS even with a zero pair",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    EXPECT_EQ("schedule case, established pair and speed: INVALID_PARAMETER is PASS", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_LEAD, INVP, INVP);
+    EXPECT_EQ("BASET_NEAR, established pair and speed: INVALID_PARAMETER is PASS", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("META_ZERO: a zero pair is refused STATE_CONFLICT on its own (R1), PASS without an established pair",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.stale_case = TRUE; e.request_pair_mismatch = TRUE;
+    EXPECT_EQ("STALE_GENERATION from an established pair, a deliberately different value: STATE_CONFLICT is PASS",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTACC);
+    EXPECT_EQ("NO_ACCEPTANCE, tier not reported (never verified): REQUEST_NOT_ACCEPTED is PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_PASS);
+
+    /* an earlier step must refuse the actual request: its refusal is reported, the field's own rule is not reached */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("schedule case carrying the query's 0/0: STATE_CONFLICT is the earlier step (INCONCLUSIVE)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_EARLIER_STEP);
+    EXPECT_TRUE("... judged against STATE_CONFLICT at step 4", exp == CONFLICT && at == TAS_INV_STEP_META);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("schedule case carrying 0/0 answered INVALID_PARAMETER: metadata must refuse first (FAIL)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, NOTREADY);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("speed unknown: NOT_READY is the earlier step (INCONCLUSIVE), not a window bound", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_EARLIER_STEP);
+    EXPECT_TRUE("... judged against NOT_READY at step 5", exp == NOTREADY && at == TAS_INV_STEP_SPEED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("speed unknown answered INVALID_PARAMETER: NOT_READY must come first (FAIL)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTREADY);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("NO_ACCEPTANCE with unknown speed: NOT_READY first (INCONCLUSIVE)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_EARLIER_STEP);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("zero pair and unknown speed: step 4 precedes step 5", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_EARLIER_STEP);
+    EXPECT_TRUE("... judged against STATE_CONFLICT", exp == CONFLICT && at == TAS_INV_STEP_META);
+
+    /* a stale claim without an established current pair is not constructible: reported, never PASS */
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.stale_case = TRUE; e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("STALE_* with the query's 0/0: STATE_CONFLICT observed, staleness not established (INCONCLUSIVE)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_STALE_UNESTABLISHED);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, INVP);
+    e.stale_case = TRUE; e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("STALE_* carrying a zero value answered INVALID_PARAMETER: R1 requires STATE_CONFLICT (FAIL)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+
+    /* the default refusal is no longer an undecided-tier excuse */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, NOTACC);
+    EXPECT_EQ("schedule case with acceptance refused NOT_HARDWARE_VERIFIED: step 6 precedes step 8 (FAIL)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, CONFLICT);
+    EXPECT_EQ("NO_ACCEPTANCE with an established pair answered STATE_CONFLICT (FAIL)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_FAIL);
+
+    /* not determined by the order for the measured facts */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, NOTREADY);
+    e.speed_after = 100u;
+    EXPECT_EQ("speed changed around the case: UNDETERMINED", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_DEVICE_BUSY);
+    EXPECT_EQ("BUSY after the claim step: another operation, UNDETERMINED", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_PRE, INVP, (LONG)STATUS_DEVICE_BUSY);
+    EXPECT_EQ("BUSY for PRE_ACTIVATION: step 2 precedes the claim (FAIL)", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTACC);
+    e.tier_hold = AVB_TAS_TIER_IMPLEMENTED_VERIFIED;
+    EXPECT_EQ("NO_ACCEPTANCE on a HOLD tier IMPLEMENTED_VERIFIED: not an invalid request (UNDETERMINED)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.tier_hold = AVB_TAS_TIER_NOT_IMPLEMENTED;
+    EXPECT_EQ("query reports HOLD NOT_IMPLEMENTED: no valid control, its outcome position is unpublished (UNDETERMINED)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+
+    /* violations whatever the prerequisites */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.tier_hold = AVB_TAS_TIER_NOT_IMPLEMENTED;
+    EXPECT_EQ("0x80C not served: FAIL even when the control is undetermined", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST); e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("STATUS_SUCCESS with output: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.information = 4;
+    EXPECT_EQ("the required status with output: FAIL (errors carry none)", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.captured = FALSE;
+    EXPECT_EQ("raw NTSTATUS not captured: NOT_CAPTURED", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_NOT_CAPTURED);
+
+    /* The completion a FAIL is judged against is the one R7 requires for the ACTUAL request, also on a violation path (finding on
+     * the 2026-11-19 20:20 hardware run: schedule cases carrying the query's 0/0 were reported as "requiring" their own rule) */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("not served, schedule case carrying 0/0: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against STATE_CONFLICT at step 4, not the case's own rule", exp == CONFLICT && at == TAS_INV_STEP_META);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("not served, NO_ACCEPTANCE carrying 0/0: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against STATE_CONFLICT at step 4", exp == CONFLICT && at == TAS_INV_STEP_META);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.speed_before = 0; e.speed_after = 0;
+    EXPECT_EQ("not served, schedule case at unknown speed: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against NOT_READY at step 5", exp == NOTREADY && at == TAS_INV_STEP_SPEED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("success with output, prerequisites established: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against the case's own rule at its own step", exp == INVP && at == TAS_INV_STEP_SCHEDULE);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE;
+    EXPECT_EQ("not served, META_ZERO: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    EXPECT_TRUE("... judged against its own STATE_CONFLICT at step 4", exp == CONFLICT && at == TAS_INV_STEP_META);
+
+    /* PR #491 review: isolation needs the measurements it rests on, taken around the case; missing or changed ones are not
+     * established (INCONCLUSIVE), never PASS, and never turn a correct completion into FAIL */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.speed_after_read = FALSE; e.speed_after = 0;
+    EXPECT_EQ("r4634405078: speed after the case not measured, schedule case: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_TIER, NOTACC, NOTACC);
+    e.speed_after_read = FALSE; e.speed_after = 0;
+    EXPECT_EQ("r4634405078: speed after not measured, NO_ACCEPTANCE: UNDETERMINED", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_after_differs = TRUE;
+    EXPECT_EQ("r4634404991: pair changed around the case, STATE_CONFLICT: UNDETERMINED, not FAIL", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.pair_after_read = FALSE;
+    EXPECT_EQ("r4634404991: pair after the case not measured: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.stale_case = TRUE; e.request_pair_mismatch = TRUE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("r4634404991: STALE_* with the pair changed around the case: UNDETERMINED, not PASS", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, INVP);
+    e.before_read = FALSE; e.pair_established = FALSE;
+    EXPECT_EQ("case's own query before the request not valid, non-zero pair sent: UNDETERMINED, not PASS",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.field_speed_dependent = TRUE; e.speed_after = 2500u; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("r4634404917: WINDOW_MIN committed while the speed changed: its invalidity is not established (UNDETERMINED)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_UNDETERMINED);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.field_speed_dependent = TRUE; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("WINDOW_MIN committed at a stable measured speed: FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+
+    /* kept: unconditional failures, metadata first, independent steps */
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, 0);
+    e.speed_after = 2500u; e.information = (DWORD)sizeof(AVB_TAS_OP_REQUEST);
+    EXPECT_EQ("CYCLE_ZERO committed while the speed changed: still FAIL (its invalidity does not depend on the speed)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, (LONG)STATUS_INVALID_DEVICE_REQUEST);
+    e.pair_after_read = FALSE; e.speed_after_read = FALSE;
+    EXPECT_EQ("not served with nothing measured after: still FAIL", tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_FAIL);
+    fill_inv_sem(&e, TAS_INV_STEP_META, CONFLICT, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("META_ZERO with the pair changed around it: still PASS (0 is refused whatever the current pair)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_PRE, INVP, INVP);
+    e.pair_after_read = FALSE; e.speed_after_read = FALSE; e.before_read = FALSE;
+    EXPECT_EQ("PRE_ACTIVATION with nothing measured around it: still PASS (step 2 needs neither)", tas_inv_semantic(&e, &exp, &at),
+              TAS_INV_SEM_PASS);
+    fill_inv_sem(&e, TAS_INV_STEP_SCHEDULE, INVP, CONFLICT);
+    e.pair_established = FALSE; e.request_pair_zero = TRUE; e.speed_after_read = FALSE; e.pair_after_differs = TRUE;
+    EXPECT_EQ("0/0 sent, nothing stable after: STATE_CONFLICT is still the earlier step (metadata first)",
+              tas_inv_semantic(&e, &exp, &at), TAS_INV_SEM_EARLIER_STEP);
+}
+
+/* TC-MOCK-061: WINDOW_MIN (#368, TAS-DR-05 as #351 R2 publishes it): a window not greater than 1.1 x the transmit time of
+ * max(512 bytes, max_frame_bytes) at the driver-owned speed. The unpublished "plus overhead" term only raises the bound, so the
+ * largest window under the bound without it is invalid under either reading. Speed 0 constructs no bound. Test logic only. */
+static void test_61_invalid_window_min(void) {
+    static const struct { avb_u32 frame, mbps; avb_u64 want; } c[] = {
+        { 1538u, 1000u, 13534u },    /* 1538 x 8.8 = 13534.4 */
+        { 1522u, 1000u, 13393u },
+        {  100u, 1000u,  4505u },    /* below 512 bytes: 512 x 8.8 = 4505.6 */
+        { 1538u, 10000u, 1353u },
+        { 1538u,  100u, 135344u },
+        { 1538u,    0u,      0u },   /* speed unknown: no bound */
+    };
+    unsigned i;
+    char label[200];
+
+    printf("\n[TC-MOCK-061] #368 WINDOW_MIN at the driver-owned speed, TAS-DR-05 (test logic only)\n");
+    for (i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
+        avb_u64 w = tas_inv_window_min_ns(c[i].frame, c[i].mbps);
+        sprintf_s(label, sizeof(label), "frame %u bytes at %u Mbit/s: window %llu ns (want %llu)", c[i].frame, c[i].mbps, w, c[i].want);
+        EXPECT_TRUE(label, w == c[i].want);
+        if (c[i].mbps != 0) {
+            avb_u64 bytes = c[i].frame > 512u ? c[i].frame : 512u;
+            sprintf_s(label, sizeof(label), "frame %u at %u: w x mbps <= bytes x 8800 < (w + 1) x mbps (largest window not greater "
+                      "than the bound)", c[i].frame, c[i].mbps);
+            EXPECT_TRUE(label, w * c[i].mbps <= bytes * 8800u && (w + 1u) * c[i].mbps > bytes * 8800u);
+        }
+    }
+}
+
 int main(void) {
     printf("=======================================================================\n");
     printf(" TAS State-Restoration Contract — Mock Unit Tests\n");
@@ -1462,6 +1697,8 @@ int main(void) {
     test_57_query_tx_accounting();
     test_58_fault_f2_state();
     test_59_fault_f2_refuse();
+    test_60_invalid_semantic_order();
+    test_61_invalid_window_min();
 
     printf("\n=======================================================================\n");
     printf(" Mock Test Summary\n");
