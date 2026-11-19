@@ -483,7 +483,7 @@ static void test_struct_sizes(void)
 
     /* Verifies: #357, declaration only. The AVB_TAS_OP_REQUEST layout published in #365 13.2: one 144-byte METHOD_BUFFERED
      * structure, inputs at 0-135, success-only outputs at 136-143, the 80-byte AVB_TAS_SCHEDULE shared with the query at 56.
-     * Provisional until #365 is accepted (#362): a change is a version change (AVB_TAS_OP_VERSION), never a silent
+     * Version 1 finalized by #365 R4 (2026-11-19): a later change is a version change (AVB_TAS_OP_VERSION), never a silent
      * re-layout. Static layout only: it establishes ABI compatibility, not handler or hardware behaviour. */
     TEST_CASE("TC-ABI-029: AVB_TAS_OP_REQUEST layout, 144 bytes (#357, #365 13.2)");
     TEST_ASSERT(sizeof(AVB_TAS_OP_REQUEST) == 144, "sizeof(AVB_TAS_OP_REQUEST) == 144");
@@ -533,8 +533,7 @@ static void test_struct_sizes(void)
     }
 
     /* Verifies: #357, declaration only. The values #365 13.2/13.3 and DES-C-TAS-010 3.5 publish for the request. The
-     * out_flags bit UNVERIFIED_CONFIG_ACTIVE (13.4) has no published bit position, so no value is declared or pinned for
-     * it: its position is a contract decision required before the producer. */
+     * out_flags bit UNVERIFIED_CONFIG_ACTIVE (13.4) is pinned separately in TC-ABI-031 (#365 R4, 2026-11-19). */
     TEST_CASE("TC-ABI-030: AVB_TAS_OP_REQUEST published values (#357, #365 13.2, 13.3)");
     TEST_ASSERT(AVB_TAS_OP_VERSION == 1u, "AVB_TAS_OP_VERSION == 1");
     TEST_ASSERT(AVB_TAS_F_ACCEPT_UNVERIFIED == 0x00000001u && AVB_TAS_F_OPEN_ALL == 0x00000002u,
@@ -549,6 +548,16 @@ static void test_struct_sizes(void)
                 "debug_fault fields partition the 32 bits");
     TEST_ASSERT(AVB_TAS_Q_STRICT_END == 0x00000001u && AVB_TAS_Q_STRICT_CYCLE == 0x00000002u,
                 "queue flags: AVB_TAS_Q_STRICT_END 0x1, AVB_TAS_Q_STRICT_CYCLE 0x2");
+
+    /* Verifies: #357, declaration only. #365's coordinated 2026-11-19 resolution R4 assigns the operation out_flags bit
+     * UNVERIFIED_CONFIG_ACTIVE to bit 0 (0x00000001) under its own symbol; all other out_flags bits stay 0. It is a different
+     * namespace from the query flag AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE (0x2, TC-ABI-027), whose published meaning is not
+     * reinterpreted. AVB_TAS_OP_VERSION and the 144-byte layout are unchanged (TC-ABI-029, TC-ABI-030). Static value only:
+     * when a driver sets the bit is producer behaviour, not established here. */
+    TEST_CASE("TC-ABI-031: AVB_TAS_OP_REQUEST out_flags UNVERIFIED_CONFIG_ACTIVE bit 0, separate from the query flag (#357, #365 R4)");
+    TEST_ASSERT(AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE == 0x00000001u, "out_flags: bit 0 AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE (0x1)");
+    TEST_ASSERT(AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE == 0x00000002u,
+                "query flags.UNVERIFIED_CONFIG_ACTIVE keeps 0x2: a separate namespace, not reinterpreted by the operation bit");
 }
 
 int main(void)

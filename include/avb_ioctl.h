@@ -441,18 +441,21 @@ static_assert(sizeof(AVB_TAS_QUERY_HW_REQUEST) == 536, "TAS query v1 size change
 #endif
 
 /* ---- IOCTL_AVB_TAS_ACTIVATE_80C request (#357; layout and values published in #365 13.1-13.3 and DES-C-TAS-010 3.5) ----
- * DECLARATION ONLY: no handler serves this request yet, and nothing below states driver behaviour. PROVISIONAL: the layout
- * stays provisional until #365 is accepted (#362); a semantic change raises AVB_TAS_OP_VERSION, never a silent re-layout.
- * One 144-byte METHOD_BUFFERED structure (#365 13.1): bytes 0-135 are input, bytes 136-143 output, written only on
+ * DECLARATION ONLY: no handler serves this request yet; the comments below cite the published contract, not observed driver
+ * behaviour. A later semantic change raises AVB_TAS_OP_VERSION, never a silent re-layout. One 144-byte METHOD_BUFFERED structure (#365 13.1): bytes 0-135 are input, bytes 136-143 output, written only on
  * STATUS_SUCCESS. There is no separate response layout; an operation's outcome detail is its AVB_TAS_OP_RECORD (#352).
- * Not settled by this declaration (#365 13.6): the generation/epoch lifecycle (D.1, #352), link-speed acquisition (D.2, K8),
- * the enforced lead (D.3), tier admission and AVB_TAS_F_ACCEPT_UNVERIFIED (D.4, #351), BASE_PASSED/COMMITTED_UNTIMED
- * completion (D.5) and the semantic check order (D.7). The out_flags bit UNVERIFIED_CONFIG_ACTIVE (#365 13.4) has no published
- * bit position, so no value is declared for it; that position is a contract decision required before the producer. */
+ * Behaviour is published, not declared here: #365's coordinated 2026-11-19 resolution (R1/R2/R4/R5/R7/R8) with #352 (metadata
+ * lifecycle), #351 (admission, link speed) and #362 (scoped acceptance). Its version decision (R4) finalizes this
+ * not-yet-served version-1 contract: AVB_TAS_OP_VERSION, the 144-byte layout and the query layout are unchanged, and the
+ * service version changes when the operation is served, not with a declaration. */
 #define AVB_TAS_OP_VERSION 1u
 
 #define AVB_TAS_F_ACCEPT_UNVERIFIED 0x00000001u  /* flags bit 0 (#365 13.2, 13.6 D.4) */
 #define AVB_TAS_F_OPEN_ALL          0x00000002u  /* flags bit 1: REPLACE only (#359); not valid on activation (#365 13.3) */
+
+/* out_flags (#365 13.4, R4 2026-11-19): set on COMMITTED only when unverified acceptance actually acted, otherwise 0; all other
+ * bits 0. A different namespace from the query's AVB_TAS_FLAG_UNVERIFIED_CONFIG_ACTIVE (0x2), whose meaning is unchanged */
+#define AVB_TAS_OUT_UNVERIFIED_CONFIG_ACTIVE 0x00000001u
 
 #define AVB_TAS_Q_STRICT_END   0x00000001u  /* AVB_TAS_QUEUE_WINDOW.flags (DES-C-TAS-010 3.5, #365 13.2) */
 #define AVB_TAS_Q_STRICT_CYCLE 0x00000002u
@@ -474,7 +477,7 @@ typedef struct AVB_TAS_OP_REQUEST {
     avb_u32 debug_fault;          /*  48 in  0; AVB_TAS_DEBUG_FAULT_* (Debug drivers only) */
     avb_u32 reserved0;            /*  52 in  0 */
     AVB_TAS_SCHEDULE schedule;    /*  56 in  80 bytes, shared with the query (DES-C-TAS-010 3.5, #365 12.2) */
-    avb_u32 out_flags;            /* 136 out success only; bit positions: see above */
+    avb_u32 out_flags;            /* 136 out success only; AVB_TAS_OUT_* */
     avb_u32 reserved1;            /* 140 out success only, 0 */
 } AVB_TAS_OP_REQUEST, *PAVB_TAS_OP_REQUEST;                                   /* 144 */
 
