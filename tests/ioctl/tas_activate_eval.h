@@ -20,6 +20,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include "../../include/avb_ioctl.h"
+#include "../common/avb_verdict.h"   /* the SDK NTSTATUS values (#368 semantic cases) */
 
 #define TAS_ACT_EDGE_MARGIN_NS     20000000LL
 #define TAS_ACT_SEEN_MIN_PERCENT   90u            /* the same share the baseline must reach before any mutation */
@@ -300,4 +301,112 @@ static __inline TAS_FV_REFUSE_CLASS tas_fv_f2_refuse(const TAS_FV_REFUSE_EVIDENC
         return TAS_FV_REFUSE_METADATA_ZERO;
     }
     return TAS_FV_REFUSE_PASS;
+}
+
+/* ---- #368 --invalid (TEST-TAS-API-003): a semantic case's COMPLETION under the validation order (TC-MOCK-060, 061) ----
+ * The R7 steps of #365 after the 13.3 header checks, numbered as published. */
+typedef enum {
+    TAS_INV_STEP_PRE = 2,     /* pre_activation */
+    TAS_INV_STEP_CLAIM,       /* the per-adapter claim: BUSY */
+    TAS_INV_STEP_META,        /* generation/epoch: STATE_CONFLICT */
+    TAS_INV_STEP_SPEED,       /* driver-owned link speed known: NOT_READY */
+    TAS_INV_STEP_SCHEDULE,    /* TAS-DR-03..09 */
+    TAS_INV_STEP_LEAD,        /* PHC and the minimum BaseT margin */
+    TAS_INV_STEP_TIER,        /* HOLD tier and explicit acceptance: NOT_HARDWARE_VERIFIED */
+    TAS_INV_STEP_CLEAN        /* clean state: NOT_CLEAN */
+} TAS_INV_STEP;
+
+typedef struct {
+    TAS_INV_STEP step;             /* the step that checks the case's own field */
+    LONG required;                 /* the completion the case's own rule requires, with Information 0 */
+    BOOL stale_case;               /* STALE_GENERATION / STALE_EPOCH: the claim needs an established current pair */
+    BOOL captured;                 /* the raw NTSTATUS was captured */
+    LONG status;
+    DWORD information;
+    BOOL pair_established;         /* the test's query reported a non-zero generation and epoch */
+    BOOL request_pair_zero;        /* the request carries generation 0 or epoch 0 */
+    BOOL request_pair_mismatch;    /* the request's pair differs from the established current pair */
+    avb_u32 speed_before;          /* query link_speed_mbps before the case, 0 = unknown */
+    BOOL speed_after_read;         /* the query after the case was read */
+    avb_u32 speed_after;
+    avb_u32 tier_hold;             /* query limits.tier_hold, AVB_TAS_TIER_*, 0 = not reported */
+} TAS_INV_SEM_EVIDENCE;
+
+typedef enum {
+    TAS_INV_SEM_PASS = 0,             /* PASS */
+    TAS_INV_SEM_FAIL,                 /* FAIL */
+    TAS_INV_SEM_EARLIER_STEP,         /* INCONCLUSIVE */
+    TAS_INV_SEM_STALE_UNESTABLISHED,  /* INCONCLUSIVE */
+    TAS_INV_SEM_UNDETERMINED,         /* INCONCLUSIVE */
+    TAS_INV_SEM_NOT_CAPTURED          /* INCONCLUSIVE */
+} TAS_INV_SEM_CLASS;
+
+/* The case's COMPLETION under #365 R7 (#368 oracle amendment 2026-11-19). The control carries AVB_TAS_F_ACCEPT_UNVERIFIED, a
+ * valid schedule and lead, so before the case's own step only the measured metadata (step 4, #352 R1: 0 is never a wildcard)
+ * and the driver-owned speed (step 5, #351 R2) can refuse it. expected/at: the completion and step the class was judged against.
+ * PASS: the case's own rule reached with its exact completion. EARLIER_STEP: the actual request must be refused at an earlier
+ * step and was, so the field's own rule is not reached. FAIL: a completion the order excludes. Never PASS on a missing
+ * prerequisite. */
+static __inline TAS_INV_SEM_CLASS tas_inv_semantic(const TAS_INV_SEM_EVIDENCE *e, LONG *expected, TAS_INV_STEP *at)
+{
+    BOOL earlier = FALSE;
+
+    /* What R7 requires for the ACTUAL request, resolved first so that every class, a violation included, is reported against it
+     * (finding on the 2026-11-19 20:20 hardware run) */
+    *expected = e->required;
+    *at = e->step;
+    if (e->step > TAS_INV_STEP_META && (e->request_pair_zero || (e->pair_established && e->request_pair_mismatch))) {
+        *expected = (LONG)STATUS_INVALID_DEVICE_STATE;
+        *at = TAS_INV_STEP_META;
+        earlier = TRUE;
+    } else if (e->step > TAS_INV_STEP_SPEED && e->speed_before == 0) {
+        *expected = (LONG)STATUS_DEVICE_NOT_READY;
+        *at = TAS_INV_STEP_SPEED;
+        earlier = TRUE;
+    }
+    if (!e->captured) {
+        return TAS_INV_SEM_NOT_CAPTURED;
+    }
+    /* violations whatever the prerequisites: no invalid request succeeds, the code is allocated (#362), errors carry no output */
+    if (e->status >= 0 || e->status == (LONG)STATUS_INVALID_DEVICE_REQUEST || e->information != 0) {
+        return TAS_INV_SEM_FAIL;
+    }
+    /* a query reporting HOLD unsupported or not implemented leaves no valid control; that outcome's position is unpublished */
+    if (e->tier_hold == AVB_TAS_TIER_HW_UNSUPPORTED || e->tier_hold == AVB_TAS_TIER_NOT_IMPLEMENTED) {
+        return TAS_INV_SEM_UNDETERMINED;
+    }
+    /* without acceptance a HOLD IMPLEMENTED_VERIFIED request is valid: NO_ACCEPTANCE is then no invalid request */
+    if (e->step == TAS_INV_STEP_TIER && e->tier_hold == AVB_TAS_TIER_IMPLEMENTED_VERIFIED) {
+        return TAS_INV_SEM_UNDETERMINED;
+    }
+    /* BUSY after the claim step: another operation holds the adapter, not attributable to the case */
+    if (e->step > TAS_INV_STEP_CLAIM && e->status == (LONG)STATUS_DEVICE_BUSY) {
+        return TAS_INV_SEM_UNDETERMINED;
+    }
+    /* past the metadata step without an earlier metadata refusal: the speed the driver sampled under its claim is not determined
+     * when the query's speed changed around the case */
+    if (e->step > TAS_INV_STEP_SPEED && *at != TAS_INV_STEP_META && e->speed_after_read && e->speed_after != e->speed_before) {
+        return TAS_INV_SEM_UNDETERMINED;
+    }
+    if (earlier) {
+        return e->status == *expected ? TAS_INV_SEM_EARLIER_STEP : TAS_INV_SEM_FAIL;
+    }
+    if (e->status != e->required) {
+        return TAS_INV_SEM_FAIL;
+    }
+    return e->stale_case && !e->pair_established ? TAS_INV_SEM_STALE_UNESTABLISHED : TAS_INV_SEM_PASS;
+}
+
+/* TAS-DR-05 (DES-C-TAS-010 5.2, #351 R2): a window greater than 1.1 x the transmit time of max(512 bytes, max_frame_bytes plus
+ * overhead) at the driver-owned speed. 1.1 x bits / Mbit/s in ns = bytes x 8 x 1000 x 1.1 / mbps = bytes x 8800 / mbps. */
+#define TAS_DR05_MIN_BYTES        512u
+#define TAS_DR05_NS_MBPS_PER_BYTE 8800u
+
+/* WINDOW_MIN's window in ns: the largest one not greater than the bound computed without the unpublished overhead term, which
+ * only raises the bound, so the window is invalid under either reading. 0: no window (speed unknown, or the bound is below 1 ns) */
+static __inline avb_u64 tas_inv_window_min_ns(avb_u32 max_frame_bytes, avb_u32 link_mbps)
+{
+    avb_u64 bytes = max_frame_bytes > TAS_DR05_MIN_BYTES ? max_frame_bytes : TAS_DR05_MIN_BYTES;
+
+    return link_mbps == 0 ? 0 : bytes * TAS_DR05_NS_MBPS_PER_BYTE / link_mbps;
 }
